@@ -35,22 +35,62 @@ if ($version.Major -lt 4) {
     exit 0
 }
 
-# Add policy to allow ROBOTIS devices without admin
+# Collect ROBOTIS PIDs to add policies for.
+# Start with known PIDs; also scan connected devices for any we haven't seen.
+$knownPIDs = @("0103")  # OpenRB-150
+$targetPairs = @()
+
+# Discover connected ROBOTIS devices and capture their PIDs
 try {
-    # Check if policy already exists
-    $existingPolicies = usbipd policy list 2>&1
-    if ($existingPolicies -match $ROBOTIS_VID) {
-        Write-Skip "Policy for VID $ROBOTIS_VID already exists"
-    } else {
-        usbipd policy add --hardware-id "${ROBOTIS_VID}:*" --effect Allow
-        if ($LASTEXITCODE -eq 0) {
-            Write-OK "Policy added: VID ${ROBOTIS_VID}:* -> Allow"
-            Write-Host "   ROBOTIS USB devices can now be attached to WSL2 without admin rights." -ForegroundColor Green
-        } else {
-            Write-Host "WARNING: Failed to add usbipd policy. USB attach may require admin." -ForegroundColor Yellow
+    $listOutput = usbipd list 2>&1 | Out-String
+    foreach ($line in $listOutput -split "`n") {
+        if ($line -match "($ROBOTIS_VID):([0-9a-fA-F]{4})") {
+            $discoveredPID = $Matches[2]
+            if ($knownPIDs -notcontains $discoveredPID) {
+                $knownPIDs += $discoveredPID
+            }
         }
     }
-} catch {
-    Write-Host "WARNING: Failed to configure usbipd policy: $_" -ForegroundColor Yellow
-    Write-Host "   USB attach may require running the GUI as Administrator." -ForegroundColor Yellow
+} catch { }
+
+foreach ($productId in $knownPIDs) {
+    $targetPairs += "${ROBOTIS_VID}:${productId}"
+}
+
+# Check existing policies
+$existingPolicies = ""
+try { $existingPolicies = usbipd policy list 2>&1 | Out-String } catch { }
+
+$addedCount = 0
+foreach ($hwid in $targetPairs) {
+    if ($existingPolicies -match $hwid) {
+        Write-Skip "Policy for $hwid already exists"
+        continue
+    }
+    try {
+        if ($version.Major -ge 5) {
+            # usbipd 5.x requires --operation
+            usbipd policy add --hardware-id $hwid --effect Allow --operation AutoBind
+        } else {
+            # usbipd 4.x does not have --operation
+            usbipd policy add --hardware-id $hwid --effect Allow
+        }
+        if ($LASTEXITCODE -eq 0) {
+            Write-OK "Policy added: $hwid -> Allow"
+            $addedCount++
+        } else {
+            Write-Host "WARNING: Failed to add policy for $hwid." -ForegroundColor Yellow
+        }
+    } catch {
+        Write-Host "WARNING: Failed to add policy for ${hwid}: $_" -ForegroundColor Yellow
+    }
+}
+
+if ($addedCount -gt 0) {
+    Write-Host "   ROBOTIS USB devices can now be attached to WSL2 without admin rights." -ForegroundColor Green
+} elseif ($addedCount -eq 0 -and $existingPolicies -match $ROBOTIS_VID) {
+    Write-Host "   All ROBOTIS policies already configured." -ForegroundColor Green
+} else {
+    Write-Host "WARNING: No policies were added. USB attach may require running as Administrator." -ForegroundColor Yellow
+    Write-Host "   Tip: plug in a ROBOTIS device and re-run this script to auto-detect its PID." -ForegroundColor Yellow
 }

@@ -1,0 +1,4 @@
+# Force LF line endings for all files that run inside Linux containers
+*.sh text eol=lf
+*.py text eol=lf
+docker/physical_ai_server/.s6-keep binary

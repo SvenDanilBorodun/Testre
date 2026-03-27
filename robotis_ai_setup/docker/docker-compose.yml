@@ -1,3 +1,7 @@
+networks:
+  ros_net:
+    driver: bridge
+
 services:
   open_manipulator:
     container_name: open_manipulator
@@ -10,9 +14,8 @@ services:
       rtprio: 99
       rttime: -1
       memlock: 8428281856
-    network_mode: host
-    ipc: host
-    pid: host
+    networks:
+      - ros_net
     environment:
       - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-30}
       - FOLLOWER_PORT=${FOLLOWER_PORT}
@@ -37,7 +40,11 @@ services:
       rtprio: 99
       rttime: -1
       memlock: 8428281856
-    network_mode: host
+    networks:
+      - ros_net
+    ports:
+      - "8080:8080"
+      - "9090:9090"
     environment:
       - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-30}
     volumes:
@@ -48,12 +55,16 @@ services:
       - ai_workspace:/workspace
       - huggingface_cache:/root/.cache/huggingface
       - /var/run/robotis/agent_sockets/physical_ai_server:/var/run/agent
+      - ./physical_ai_server/.s6-keep:/etc/s6-overlay/s6-rc.d/user/contents.d/physical_ai_server:ro
     privileged: true
 
   physical_ai_manager:
     container_name: physical_ai_manager
     image: ${REGISTRY:-nettername}/physical-ai-manager:latest
-    network_mode: host
+    networks:
+      - ros_net
+    ports:
+      - "80:80"
     restart: unless-stopped
 
 volumes:

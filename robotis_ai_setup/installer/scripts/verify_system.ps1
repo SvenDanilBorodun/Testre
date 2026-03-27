@@ -56,14 +56,21 @@ try {
     if ($LASTEXITCODE -eq 0) { Write-OK "NVIDIA GPU detected" } else { Write-WARN "No NVIDIA GPU (CPU mode)" }
 } catch { Write-WARN "No NVIDIA GPU (CPU mode will be used)" }
 
-# 6. Install directory
+# 6. Install directory and required files
 Write-Host "   Checking install directory..." -ForegroundColor White
 $installDir = "C:\Program Files\ROBOTIS AI"
-if (Test-Path "$installDir\docker\docker-compose.yml") {
-    Write-OK "Install directory"
-} else {
-    Write-FAIL "docker-compose.yml not found in $installDir\docker\"
-    $allOk = $false
+$requiredFiles = @(
+    @{ Path = "$installDir\docker\docker-compose.yml";                     Label = "docker-compose.yml" },
+    @{ Path = "$installDir\docker\docker-compose.gpu.yml";                 Label = "docker-compose.gpu.yml" },
+    @{ Path = "$installDir\docker\physical_ai_server\.s6-keep";            Label = "s6 autostart marker" }
+)
+foreach ($file in $requiredFiles) {
+    if (Test-Path $file.Path) {
+        Write-OK $file.Label
+    } else {
+        Write-FAIL "$($file.Label) not found at $($file.Path)"
+        $allOk = $false
+    }
 }
 
 # Summary

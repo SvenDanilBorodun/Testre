@@ -90,29 +90,46 @@ def images_exist() -> dict[str, bool]:
 def check_for_updates() -> bool:
     """Check if any images have newer versions on the registry.
 
-    Runs 'docker compose pull' in dry-run-like fashion by comparing local
-    and remote digests. Returns True if updates are available.
+    Compares local image digests against remote manifests without pulling.
+    Returns True if updates were found and pulled.
     """
+    updates_available = False
     for image in ALL_IMAGES:
         try:
+            # Get local digest
             local = subprocess.run(
                 ["docker", "inspect", "--format", "{{index .RepoDigests 0}}", image],
                 capture_output=True, text=True, timeout=10,
             )
+            if local.returncode != 0:
+                continue
+            local_digest = local.stdout.strip()
+
+            # Get remote digest via manifest inspect (no download)
             remote = subprocess.run(
-                ["docker", "pull", "--quiet", image],
-                capture_output=True, text=True, timeout=600,
+                ["docker", "manifest", "inspect", "--verbose", image],
+                capture_output=True, text=True, timeout=30,
             )
             if remote.returncode != 0:
                 continue
-            after = subprocess.run(
-                ["docker", "inspect", "--format", "{{index .RepoDigests 0}}", image],
-                capture_output=True, text=True, timeout=10,
-            )
-            if local.stdout.strip() != after.stdout.strip():
-                return True
+
+            # If local digest not found in remote manifest output, update available
+            if local_digest and local_digest.split("@")[-1] not in remote.stdout:
+                updates_available = True
         except (FileNotFoundError, subprocess.TimeoutExpired):
             continue
+
+    if updates_available:
+        # Pull only when updates are actually available
+        for image in ALL_IMAGES:
+            try:
+                subprocess.run(
+                    ["docker", "pull", "--quiet", image],
+                    capture_output=True, text=True, timeout=600,
+                )
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                continue
+        return True
     return False
 
 

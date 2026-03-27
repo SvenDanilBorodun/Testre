@@ -10,6 +10,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Copy entrypoint and identification script
 COPY entrypoint_omx.sh /entrypoint_omx.sh
 COPY identify_arm.py /usr/local/bin/identify_arm.py
-RUN chmod +x /entrypoint_omx.sh /usr/local/bin/identify_arm.py
+# Strip Windows CRLF line endings (Git on Windows may convert LF→CRLF)
+RUN sed -i 's/\r$//' /entrypoint_omx.sh /usr/local/bin/identify_arm.py \
+    && chmod +x /entrypoint_omx.sh /usr/local/bin/identify_arm.py
 
 ENTRYPOINT ["/entrypoint_omx.sh"]

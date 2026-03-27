@@ -22,6 +22,8 @@ LicenseFile=assets\license.txt
 Source: "..\docker\docker-compose.yml"; DestDir: "{app}\docker"; Flags: ignoreversion
 Source: "..\docker\docker-compose.gpu.yml"; DestDir: "{app}\docker"; Flags: ignoreversion
 Source: "..\docker\.env.template"; DestDir: "{app}\docker"; Flags: ignoreversion
+; s6-overlay marker to auto-start ROS2 services (mounted by docker-compose.yml)
+Source: "..\docker\physical_ai_server\.s6-keep"; DestDir: "{app}\docker\physical_ai_server"; Flags: ignoreversion
 
 ; GUI application (PyInstaller output)
 ; The dist folder is created by: cd gui && pyinstaller build.spec

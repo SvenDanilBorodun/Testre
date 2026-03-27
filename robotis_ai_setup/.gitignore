@@ -1,0 +1,23 @@
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+*.spec.bak
+
+# PyInstaller
+gui/dist/
+gui/build/
+
+# Installer output
+installer/output/
+
+# Environment files (contain device-specific paths)
+docker/.env
+!docker/.env.template
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store

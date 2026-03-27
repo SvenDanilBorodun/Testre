@@ -1,0 +1,61 @@
+services:
+  open_manipulator:
+    container_name: open_manipulator
+    image: ${REGISTRY:-nettername}/open-manipulator:latest
+    tty: true
+    restart: unless-stopped
+    cap_add:
+      - SYS_NICE
+    ulimits:
+      rtprio: 99
+      rttime: -1
+      memlock: 8428281856
+    network_mode: host
+    ipc: host
+    pid: host
+    environment:
+      - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-30}
+      - FOLLOWER_PORT=${FOLLOWER_PORT}
+      - LEADER_PORT=${LEADER_PORT}
+      - CAMERA_DEVICE=${CAMERA_DEVICE:-/dev/video0}
+      - CAMERA_NAME=${CAMERA_NAME:-camera1}
+    volumes:
+      - /dev:/dev
+      - /dev/shm:/dev/shm
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    privileged: true
+
+  physical_ai_server:
+    container_name: physical_ai_server
+    image: ${REGISTRY:-nettername}/physical-ai-server:latest
+    tty: true
+    restart: unless-stopped
+    cap_add:
+      - SYS_NICE
+    ulimits:
+      rtprio: 99
+      rttime: -1
+      memlock: 8428281856
+    network_mode: host
+    environment:
+      - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-30}
+    volumes:
+      - /dev:/dev
+      - /dev/shm:/dev/shm
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+      - ai_workspace:/workspace
+      - huggingface_cache:/root/.cache/huggingface
+      - /var/run/robotis/agent_sockets/physical_ai_server:/var/run/agent
+    privileged: true
+
+  physical_ai_manager:
+    container_name: physical_ai_manager
+    image: ${REGISTRY:-nettername}/physical-ai-manager:latest
+    network_mode: host
+    restart: unless-stopped
+
+volumes:
+  ai_workspace:
+  huggingface_cache:

@@ -1,0 +1,9 @@
+services:
+  physical_ai_server:
+    runtime: nvidia
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              capabilities: [gpu]

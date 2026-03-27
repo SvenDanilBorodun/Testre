@@ -1,0 +1,59 @@
+#!/usr/bin/env python3
+"""Patch server_inference.py to fix two bugs:
+
+1. CRITICAL: self._endpoints dict is never initialized in __init__,
+   causing AttributeError when register_endpoint() is called.
+   Fix: insert 'self._endpoints = {}' before the first register_endpoint call.
+
+2. MINOR: InferenceManager is constructed twice (the second overwrites the first).
+   Fix: remove the duplicate block.
+"""
+import re
+import sys
+
+
+def patch(filepath: str) -> None:
+    with open(filepath, "r") as f:
+        content = f.read()
+
+    original = content
+
+    # --- Fix 1: Add self._endpoints = {} before first register_endpoint call ---
+    if "self._endpoints = {}" not in content:
+        content = content.replace(
+            "        # Register the ping endpoint by default\n",
+            "        self._endpoints = {}\n"
+            "\n"
+            "        # Register the ping endpoint by default\n",
+        )
+
+    # --- Fix 2: Remove duplicate InferenceManager initialization ---
+    # The pattern is: zmq setup block, then a duplicate InferenceManager block.
+    # We remove the second InferenceManager(...) block that appears after socket.bind.
+    # Match: after socket.bind(...), a blank line, then duplicate InferenceManager block.
+    dup_pattern = re.compile(
+        r"(self\.socket\.bind\([^)]+\)\n)"       # socket.bind line
+        r"\n"                                      # blank line
+        r"        self\.inference_manager = InferenceManager\(\n"
+        r"            policy_type=policy_type,\n"
+        r"            policy_path=policy_path,\n"
+        r"            device=device\n"
+        r"        \)\n",
+    )
+    content = dup_pattern.sub(r"\1", content)
+
+    if content == original:
+        print(f"  No changes needed: {filepath}")
+        return
+
+    with open(filepath, "w") as f:
+        f.write(content)
+
+    print(f"  Patched successfully: {filepath}")
+
+
+if __name__ == "__main__":
+    if len(sys.argv) != 2:
+        print(f"Usage: {sys.argv[0]} <server_inference.py>", file=sys.stderr)
+        sys.exit(1)
+    patch(sys.argv[1])

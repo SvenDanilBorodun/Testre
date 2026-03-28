@@ -1,4 +1,4 @@
-// Copyright 2025 ROBOTIS CO., LTD.
+// Copyright 2025 EduBotics
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -30,13 +30,13 @@ import TaskPhase from '../constants/taskPhases';
 import FullTaskStatus from './FullTaskStatus';
 
 const phaseGuideMessages = {
-  [TaskPhase.READY]: '📍 Ready to start',
-  [TaskPhase.WARMING_UP]: '🔥 Warmup in progress',
-  [TaskPhase.RESETTING]: '🏠 Reset in progress',
-  [TaskPhase.RECORDING]: '🔴 Recording in progress',
-  [TaskPhase.SAVING]: '💾 Saving...',
-  [TaskPhase.STOPPED]: '◼️ Task Stopped',
-  [TaskPhase.INFERENCING]: '⏳ Inferencing',
+  [TaskPhase.READY]: '📍 Bereit zum Starten',
+  [TaskPhase.WARMING_UP]: '🔥 Aufwärmphase läuft',
+  [TaskPhase.RESETTING]: '🏠 Rücksetzung läuft',
+  [TaskPhase.RECORDING]: '🔴 Aufnahme läuft',
+  [TaskPhase.SAVING]: '💾 Wird gespeichert...',
+  [TaskPhase.STOPPED]: '◼️ Aufgabe gestoppt',
+  [TaskPhase.INFERENCING]: '⏳ Inferenz läuft',
 };
 
 const requiredFieldsForRecord = [
@@ -307,7 +307,7 @@ export default function ControlPanel() {
           // Validate info before starting
           const validation = validateTaskInfo();
           if (!validation.isValid) {
-            toast.error(`Missing required fields: ${validation.missingFields.join(', ')}`);
+            toast.error(`Fehlende Pflichtfelder: ${validation.missingFields.join(', ')}`);
             console.error('Validation failed. Missing fields:', validation.missingFields);
             return;
           }
@@ -340,10 +340,10 @@ export default function ControlPanel() {
 
         // Handle service response
         if (result && result.success === false) {
-          toast.error(`Command failed: ${result.message || 'Unknown error'}`);
+          toast.error(`Befehl fehlgeschlagen: ${result.message || 'Unknown error'}`);
           console.error(`Command '${cmd}' failed:`, result.message);
         } else if (result && result.success === true) {
-          toast.success(`Command [${cmd}] executed successfully`);
+          toast.success(`Command [${cmd}] erfolgreich ausgeführt`);
           console.log(`Command '${cmd}' executed successfully`);
 
           // Task status will be updated automatically from ROS
@@ -362,11 +362,11 @@ export default function ControlPanel() {
           errorMessage.includes('ROS connection timeout') ||
           errorMessage.includes('WebSocket')
         ) {
-          toast.error(`🔌 ROS connection failed: rosbridge server is not running (${rosHost})`);
+          toast.error(`🔌 ROS-Verbindung fehlgeschlagen: Rosbridge-Server läuft nicht (${rosHost})`);
         } else if (errorMessage.includes('timeout')) {
-          toast.error(`⏰ Command execution timeout [${cmd}]: Server did not respond`);
+          toast.error(`⏰ Befehlsausführung Zeitüberschreitung [${cmd}]: Server did not respond`);
         } else {
-          toast.error(`❌ Command execution failed [${cmd}]: ${errorMessage}`);
+          toast.error(`❌ Befehlsausführung fehlgeschlagen [${cmd}]: ${errorMessage}`);
         }
 
         // Continue execution even after error - don't block UI
@@ -636,7 +636,7 @@ export default function ControlPanel() {
           <div>
             {/* Spinner */}
             {taskStatus.running && (
-              <span className="font-mono text-blue-500 text-4xl">
+              <span className="font-mono text-teal-500 text-4xl">
                 {spinnerFrames[spinnerIndex]}
               </span>
             )}
@@ -660,7 +660,7 @@ export default function ControlPanel() {
                 {taskStatus.proceedTime}
               </div>
               <div className="w-full justify-center text-2xl text-gray-500 font-semibold whitespace-nowrap">
-                seconds passed
+                Sekunden vergangen
               </div>
             </div>
           </>

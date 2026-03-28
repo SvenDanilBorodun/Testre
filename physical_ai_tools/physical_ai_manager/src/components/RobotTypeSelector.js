@@ -1,4 +1,4 @@
-// Copyright 2025 ROBOTIS CO., LTD.
+// Copyright 2025 EduBotics
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -46,7 +46,7 @@ export default function RobotTypeSelector() {
 
       if (result && result.robot_types) {
         dispatch(setRobotTypeList(result.robot_types));
-        toast.success('Robot types loaded successfully');
+        toast.success('Robotertypen erfolgreich geladen');
       } else {
         toast.error('Failed to get robot types: Invalid response');
       }
@@ -83,7 +83,7 @@ export default function RobotTypeSelector() {
 
       if (result && result.success) {
         dispatch(selectRobotType(selectedRobotType));
-        toast.success(`Robot type set to: ${selectedRobotType}`);
+        toast.success(`Robotertyp gesetzt auf: ${selectedRobotType}`);
 
         dispatch(setIsFirstLoadTrue('record')); // to reset tags
         dispatch(removeAllTags());
@@ -131,7 +131,7 @@ export default function RobotTypeSelector() {
     'rounded-md',
     'focus:outline-none',
     'focus:ring-2',
-    'focus:ring-blue-500',
+    'focus:ring-teal-500',
     'focus:border-transparent',
     'mb-4'
   );
@@ -140,12 +140,12 @@ export default function RobotTypeSelector() {
     'w-full',
     'px-4',
     'py-2',
-    'bg-blue-500',
+    'bg-teal-500',
     'text-white',
     'rounded-md',
     'font-medium',
     'transition-colors',
-    'hover:bg-blue-600',
+    'hover:bg-teal-600',
     'disabled:bg-gray-400',
     'disabled:cursor-not-allowed',
     'mb-3'
@@ -178,11 +178,11 @@ export default function RobotTypeSelector() {
 
   return (
     <div className={classCard}>
-      <h1 className={classTitle}>Robot Type Selection</h1>
+      <h1 className={classTitle}>Robotertyp-Auswahl</h1>
 
       {robotType && (
         <div className={classCurrentType}>
-          <strong>Current Robot Type:</strong> {robotType}
+          <strong>Aktueller Robotertyp:</strong> {robotType}
           {taskStatus.robotType && (
             <div className="text-xs text-green-600 mt-1">
               ✓ Saved to Task Status: {taskStatus.robotType}
@@ -198,7 +198,7 @@ export default function RobotTypeSelector() {
         </div>
       )}
 
-      <label className={classLabel}>Select Robot Type:</label>
+      <label className={classLabel}>Robotertyp auswählen:</label>
 
       <select
         className={classSelect}
@@ -221,7 +221,7 @@ export default function RobotTypeSelector() {
         onClick={handleSetRobotType}
         disabled={loading || fetching || !selectedRobotType || taskStatus.phase > 0}
       >
-        {loading ? 'Setting...' : 'Set Robot Type'}
+        {loading ? 'Wird gesetzt...' : 'Robotertyp festlegen'}
       </button>
 
       <button
@@ -231,13 +231,13 @@ export default function RobotTypeSelector() {
       >
         <div className="flex items-center justify-center gap-2">
           <MdRefresh size={16} className={fetching ? 'animate-spin' : ''} />
-          {fetching ? 'Loading...' : 'Refresh Robot Type List'}
+          {fetching ? 'Laden...' : 'Robotertyp-Liste aktualisieren'}
         </div>
       </button>
 
       {robotTypeList.length === 0 && !fetching && (
         <div className="text-center text-gray-500 text-sm mt-4">
-          No robot types available. Please check ROS connection.
+          Keine Robotertypen verfügbar. Bitte ROS-Verbindung prüfen.
         </div>
       )}
     </div>

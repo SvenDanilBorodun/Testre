@@ -1,4 +1,4 @@
-// Copyright 2025 ROBOTIS CO., LTD.
+// Copyright 2025 EduBotics
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -79,7 +79,7 @@ const InferencePanel = () => {
 
   const handleTokenSubmit = async () => {
     if (!tokenInput.trim()) {
-      toast.error('Please enter a token');
+      toast.error('Bitte gib ein Token ein');
       return;
     }
 
@@ -92,7 +92,7 @@ const InferencePanel = () => {
         setUserIdList(result.user_id_list);
         setShowTokenPopup(false);
         setTokenInput('');
-        toast.success('User ID list updated successfully!');
+        toast.success('Benutzer-ID-Liste erfolgreich aktualisiert!');
       } else {
         toast.error('Failed to get user ID list from response');
       }
@@ -112,7 +112,7 @@ const InferencePanel = () => {
 
       if (result && result.user_id_list) {
         setUserIdList(result.user_id_list);
-        toast.success('User ID list loaded successfully!');
+        toast.success('Benutzer-ID-Liste erfolgreich geladen!');
         setShowUserIdDropdown(true);
       } else {
         toast.error('Failed to get user ID list from response');
@@ -204,7 +204,7 @@ const InferencePanel = () => {
     'rounded-md',
     'focus:outline-none',
     'focus:ring-2',
-    'focus:ring-blue-500',
+    'focus:ring-teal-500',
     'focus:border-transparent',
     {
       'bg-gray-100 cursor-not-allowed': !isEditable,
@@ -224,7 +224,7 @@ const InferencePanel = () => {
     'rounded-md',
     'focus:outline-none',
     'focus:ring-2',
-    'focus:ring-blue-500',
+    'focus:ring-teal-500',
     'focus:border-transparent',
     {
       'bg-gray-100 cursor-not-allowed': !isEditable,
@@ -244,7 +244,7 @@ const InferencePanel = () => {
     'rounded-md',
     'focus:outline-none',
     'focus:ring-2',
-    'focus:ring-blue-500',
+    'focus:ring-teal-500',
     'focus:border-transparent',
     {
       'bg-gray-100 cursor-not-allowed': !isEditable,
@@ -265,7 +265,7 @@ const InferencePanel = () => {
     'rounded-md',
     'focus:outline-none',
     'focus:ring-2',
-    'focus:ring-blue-500',
+    'focus:ring-teal-500',
     'focus:border-transparent',
     {
       'bg-gray-100 cursor-not-allowed': !isEditable || info.pushToHub,
@@ -283,7 +283,7 @@ const InferencePanel = () => {
     'rounded-md',
     'focus:outline-none',
     'focus:ring-2',
-    'focus:ring-blue-500',
+    'focus:ring-teal-500',
     'focus:border-transparent',
     {
       'bg-gray-100 cursor-not-allowed': !isEditable,
@@ -301,7 +301,7 @@ const InferencePanel = () => {
     'rounded-md',
     'focus:outline-none',
     'focus:ring-2',
-    'focus:ring-blue-500',
+    'focus:ring-teal-500',
     'focus:border-transparent',
     {
       'bg-gray-100 cursor-not-allowed': !isEditable,
@@ -312,11 +312,11 @@ const InferencePanel = () => {
   const classCheckbox = clsx(
     'w-4',
     'h-4',
-    'text-blue-600',
+    'text-teal-600',
     'bg-gray-100',
     'border-gray-300',
     'rounded',
-    'focus:ring-blue-500',
+    'focus:ring-teal-500',
     'focus:ring-2',
     {
       'cursor-not-allowed opacity-50': !isEditable,
@@ -338,7 +338,7 @@ const InferencePanel = () => {
   const getButtonVariant = (variant, isActive = true, isLoading = false) => {
     const variants = {
       blue: {
-        active: 'bg-blue-200 text-blue-800 hover:bg-blue-300',
+        active: 'bg-teal-200 text-teal-800 hover:bg-teal-300',
         disabled: 'bg-gray-200 text-gray-500 cursor-not-allowed',
       },
       red: {
@@ -358,7 +358,7 @@ const InferencePanel = () => {
   return (
     <div className={classInfoPanel}>
       <div className={clsx('text-lg', 'font-semibold', 'mb-3', 'text-gray-800')}>
-        Task Information
+        Aufgabeninformationen
       </div>
 
       {/* Edit mode indicator */}
@@ -369,11 +369,11 @@ const InferencePanel = () => {
         })}
       >
         {isEditable ? (
-          '✏️ Edit mode'
+          '✏️ Bearbeitungsmodus'
         ) : (
           <div className="leading-tight">
-            <div>🔒 Read only</div>
-            <div className="text-xs mt-1 opacity-80">task is running or robot is not connected</div>
+            <div>🔒 Nur lesen</div>
+            <div className="text-xs mt-1 opacity-80">Aufgabe läuft oder Roboter nicht verbunden</div>
           </div>
         )}
       </div>
@@ -389,14 +389,14 @@ const InferencePanel = () => {
             'pt-2'
           )}
         >
-          Task Instruction
+          Aufgabenanweisung
         </span>
         <textarea
           className={classTaskInstructionTextarea}
           value={info.taskInstruction || ''}
           onChange={(e) => handleChange('taskInstruction', [e.target.value])}
           disabled={!isEditable}
-          placeholder="Enter Task Instruction"
+          placeholder="Aufgabenanweisung eingeben"
         />
       </div>
 
@@ -411,7 +411,7 @@ const InferencePanel = () => {
             'pt-2'
           )}
         >
-          Policy Path
+          Modellpfad
         </span>
         <div className={clsx('flex', 'flex-col', 'flex-1', 'gap-2')}>
           {/* Browse Policy Path Button */}
@@ -425,12 +425,12 @@ const InferencePanel = () => {
               'px-3',
               'py-2',
               'text-sm',
-              'bg-blue-50',
-              'text-blue-700',
+              'bg-teal-50',
+              'text-teal-700',
               'border',
-              'border-blue-200',
+              'border-teal-200',
               'rounded-lg',
-              'hover:bg-blue-100',
+              'hover:bg-teal-100',
               'transition-colors',
               'disabled:bg-gray-100',
               'disabled:text-gray-400',
@@ -439,7 +439,7 @@ const InferencePanel = () => {
             )}
           >
             <MdFolderOpen size={16} />
-            Browse Policy Path
+            Modellpfad durchsuchen
           </button>
           {/* Download Policy Button */}
           <button
@@ -466,14 +466,14 @@ const InferencePanel = () => {
             )}
           >
             <MdDownload size={16} />
-            Download Policy
+            Modell herunterladen
           </button>
           <textarea
             className={classPolicyPathTextarea}
             value={info.policyPath || ''}
             onChange={(e) => handleChange('policyPath', e.target.value)}
             disabled={!isEditable}
-            placeholder="Enter Policy Path or Repo ID"
+            placeholder="Modellpfad oder Repo-ID eingeben"
           />
         </div>
       </div>
@@ -500,7 +500,7 @@ const InferencePanel = () => {
         <>
           <div className="h-3 w-full"></div>
           <div className={clsx('flex', 'items-center', 'mb-2')}>
-            <span className={classLabel}>Record</span>
+            <span className={classLabel}>Aufnahme</span>
             <div className={clsx('flex', 'items-center')}>
               <input
                 className={classCheckbox}
@@ -510,24 +510,24 @@ const InferencePanel = () => {
                 disabled={true}
               />
               <span className={clsx('ml-2', 'text-sm', 'text-gray-500')}>
-                {info.recordInferenceMode ? 'Enabled' : 'Disabled'}
+                {info.recordInferenceMode ? 'Aktiviert' : 'Deaktiviert'}
               </span>
             </div>
           </div>
 
           <div className={clsx('flex', 'items-center', 'mb-2.5')}>
-            <span className={classLabel}>Task Name</span>
+            <span className={classLabel}>Aufgabenname</span>
             <textarea
               className={classTaskNameTextarea}
               value={info.taskName || ''}
               onChange={(e) => handleChange('taskName', e.target.value)}
               disabled={!isEditable || !info.recordInferenceMode}
-              placeholder="Enter Task Name"
+              placeholder="Aufgabennamen eingeben"
             />
           </div>
 
           <div className={clsx('flex', 'items-center', 'mb-2')}>
-            <span className={classLabel}>Push to Hub</span>
+            <span className={classLabel}>Auf Hub hochladen</span>
             <div className={clsx('flex', 'items-center')}>
               <input
                 className={classCheckbox}
@@ -537,14 +537,14 @@ const InferencePanel = () => {
                 disabled={!isEditable || !info.recordInferenceMode}
               />
               <span className={clsx('ml-2', 'text-sm', 'text-gray-500')}>
-                {info.pushToHub ? 'Enabled' : 'Disabled'}
+                {info.pushToHub ? 'Aktiviert' : 'Deaktiviert'}
               </span>
             </div>
           </div>
 
           {info.pushToHub && (
             <div className={clsx('flex', 'items-center', 'mb-2')}>
-              <span className={classLabel}>Private Mode</span>
+              <span className={classLabel}>Privater Modus</span>
               <div className={clsx('flex', 'items-center')}>
                 <input
                   className={classCheckbox}
@@ -554,7 +554,7 @@ const InferencePanel = () => {
                   disabled={!isEditable || !info.recordInferenceMode}
                 />
                 <span className={clsx('ml-2', 'text-sm', 'text-gray-500')}>
-                  {info.privateMode ? 'Enabled' : 'Disabled'}
+                  {info.privateMode ? 'Aktiviert' : 'Deaktiviert'}
                 </span>
               </div>
             </div>
@@ -571,7 +571,7 @@ const InferencePanel = () => {
                 'pt-2'
               )}
             >
-              User ID
+              Benutzer-ID
             </span>
 
             <div className="flex-1 min-w-0">
@@ -589,7 +589,7 @@ const InferencePanel = () => {
                   }}
                   disabled={!isEditable || isLoading || !info.recordInferenceMode}
                 >
-                  {isLoading ? 'Loading...' : 'Load'}
+                  {isLoading ? 'Laden...' : 'Laden'}
                 </button>
                 {!info.pushToHub && showUserIdDropdown && (
                   <button
@@ -616,7 +616,7 @@ const InferencePanel = () => {
                     }}
                     disabled={!isEditable || isLoading || !info.recordInferenceMode}
                   >
-                    Change
+                    Ändern
                   </button>
                 )}
               </div>
@@ -630,7 +630,7 @@ const InferencePanel = () => {
                     onChange={(e) => handleChange('userId', e.target.value)}
                     disabled={!isEditable || !info.recordInferenceMode}
                   >
-                    <option value="">Select User ID</option>
+                    <option value="">Benutzer-ID auswählen</option>
                     {userIdList.map((userId) => (
                       <option key={userId} value={userId}>
                         {userId}
@@ -638,7 +638,7 @@ const InferencePanel = () => {
                     ))}
                   </select>
                   <div className="text-xs text-gray-500 mt-1 leading-relaxed">
-                    Select from registered User IDs (required for Hub upload)
+                    Aus registrierten Benutzer-IDs auswählen (für Hub-Upload erforderlich)
                   </div>
                 </>
               ) : (
@@ -651,10 +651,10 @@ const InferencePanel = () => {
                         value={info.userId || ''}
                         onChange={(e) => handleChange('userId', e.target.value)}
                         disabled={!isEditable || !info.recordInferenceMode}
-                        placeholder="Enter User ID or load from registered ID"
+                        placeholder="Benutzer-ID eingeben oder aus registrierten IDs laden"
                       />
                       <div className="text-xs text-gray-500 mt-1 leading-relaxed">
-                        Enter any User ID manually or load from registered IDs
+                        Benutzer-ID manuell eingeben oder aus registrierten IDs laden
                       </div>
                     </>
                   ) : (
@@ -669,7 +669,7 @@ const InferencePanel = () => {
                         }}
                         disabled={!isEditable || !info.recordInferenceMode}
                       >
-                        <option value="">Select from registered User IDs</option>
+                        <option value="">Aus registrierten Benutzer-IDs auswählen</option>
                         {userIdList.map((userId) => (
                           <option key={userId} value={userId}>
                             {userId}
@@ -677,7 +677,7 @@ const InferencePanel = () => {
                         ))}
                       </select>
                       <div className="text-xs text-gray-500 mt-1 leading-relaxed">
-                        Select a registered User ID or use Cancel button above
+                        Registrierte Benutzer-ID auswählen oder Abbrechen-Button oben verwenden
                       </div>
                     </>
                   )}
@@ -695,13 +695,13 @@ const InferencePanel = () => {
                 disabled={!isEditable || !info.recordInferenceMode}
               />
               <div className="text-xs text-gray-500 mt-1 leading-relaxed">
-                Press Enter or use comma to add tags
+                Enter oder Komma drücken, um Tags hinzuzufügen
               </div>
             </div>
           </div>
 
           <div className={clsx('flex', 'items-center', 'mb-2.5')}>
-            <span className={classLabel}>Warmup Time (s)</span>
+            <span className={classLabel}>Aufwärmzeit (s)</span>
             <input
               className={classTextInput}
               type="number"
@@ -715,7 +715,7 @@ const InferencePanel = () => {
           </div>
 
           <div className={clsx('flex', 'items-center', 'mb-2.5')}>
-            <span className={classLabel}>Episode Time (s)</span>
+            <span className={classLabel}>Episodenzeit (s)</span>
             <input
               className={classTextInput}
               type="number"
@@ -729,7 +729,7 @@ const InferencePanel = () => {
           </div>
 
           <div className={clsx('flex', 'items-center', 'mb-2.5')}>
-            <span className={classLabel}>Reset Time (s)</span>
+            <span className={classLabel}>Rücksetzzeit (s)</span>
             <input
               className={classTextInput}
               type="number"
@@ -743,7 +743,7 @@ const InferencePanel = () => {
           </div>
 
           <div className={clsx('flex', 'items-center', 'mb-2.5')}>
-            <span className={classLabel}>Num Episodes</span>
+            <span className={classLabel}>Anz. Episoden</span>
             <input
               className={classTextInput}
               type="number"
@@ -757,7 +757,7 @@ const InferencePanel = () => {
           </div>
 
           <div className={clsx('flex', 'items-center', 'mb-2')}>
-            <span className={classLabel}>Optimized Save</span>
+            <span className={classLabel}>Optimiertes Speichern</span>
             <div className={clsx('flex', 'items-center')}>
               <input
                 className={classCheckbox}
@@ -767,7 +767,7 @@ const InferencePanel = () => {
                 disabled={!isEditable || !info.recordInferenceMode}
               />
               <span className={clsx('ml-2', 'text-sm', 'text-gray-500')}>
-                {info.useOptimizedSave ? 'Enabled' : 'Disabled'}
+                {info.useOptimizedSave ? 'Aktiviert' : 'Deaktiviert'}
               </span>
             </div>
           </div>
@@ -778,7 +778,7 @@ const InferencePanel = () => {
       {showTokenPopup && (
         <div className="fixed inset-0 bg-black bg-opacity-40 flex items-center justify-center z-50">
           <div className="bg-white p-6 rounded-lg shadow-lg max-w-md w-full">
-            <div className="mb-4 font-bold text-lg">Enter Hugging Face Token</div>
+            <div className="mb-4 font-bold text-lg">Hugging Face Token eingeben</div>
             <div className="mb-4">
               <label className="block text-sm font-medium text-gray-700 mb-2">Token</label>
               <div className="relative">
@@ -793,12 +793,12 @@ const InferencePanel = () => {
                     'rounded-md',
                     'focus:outline-none',
                     'focus:ring-2',
-                    'focus:ring-blue-500',
+                    'focus:ring-teal-500',
                     'focus:border-transparent'
                   )}
                   value={tokenInput}
                   onChange={(e) => setTokenInput(e.target.value)}
-                  placeholder="Enter your Hugging Face token"
+                  placeholder="Dein Hugging Face Token eingeben"
                   disabled={isLoading}
                 />
                 <button
@@ -815,7 +815,7 @@ const InferencePanel = () => {
                 </button>
               </div>
               <div className="text-xs text-gray-500 mt-1">
-                This token will be used to fetch your available User IDs
+                Dieses Token wird verwendet, um deine verfügbaren Benutzer-IDs abzurufen
               </div>
             </div>
             <div className="flex gap-3">
@@ -828,14 +828,14 @@ const InferencePanel = () => {
                   'font-medium',
                   'transition-colors',
                   {
-                    'bg-blue-500 text-white hover:bg-blue-600': !isLoading,
+                    'bg-teal-500 text-white hover:bg-teal-600': !isLoading,
                     'bg-gray-400 text-gray-600 cursor-not-allowed': isLoading,
                   }
                 )}
                 onClick={handleTokenSubmit}
                 disabled={isLoading}
               >
-                {isLoading ? 'Loading...' : 'Submit'}
+                {isLoading ? 'Laden...' : 'Absenden'}
               </button>
               <button
                 className="flex-1 px-4 py-2 bg-gray-400 text-white rounded hover:bg-gray-500 transition-colors"
@@ -845,7 +845,7 @@ const InferencePanel = () => {
                 }}
                 disabled={isLoading}
               >
-                Cancel
+                Abbrechen
               </button>
             </div>
           </div>
@@ -856,7 +856,7 @@ const InferencePanel = () => {
         isOpen={showPolicyPathModal}
         onClose={() => setShowPolicyPathModal(false)}
         onFileSelect={handlePolicyPathSelect}
-        title="Select Policy Path"
+        title="Modellpfad auswählen"
         selectButtonText="Select"
         allowDirectorySelect={true}
         targetFileName={[TARGET_FILES.POLICY_MODEL]}

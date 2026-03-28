@@ -1,4 +1,4 @@
-// Copyright 2025 ROBOTIS CO., LTD.
+// Copyright 2025 EduBotics
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -68,7 +68,7 @@ const TrainingOptionInput = () => {
     'rounded-md',
     'focus:outline-none',
     'focus:ring-2',
-    'focus:ring-blue-500',
+    'focus:ring-teal-500',
     'focus:border-transparent',
     {
       'bg-gray-100 cursor-not-allowed': isTraining,

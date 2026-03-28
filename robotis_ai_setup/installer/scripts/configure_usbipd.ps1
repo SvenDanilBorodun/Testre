@@ -1,4 +1,4 @@
-# configure_usbipd.ps1 — Set up usbipd policy for ROBOTIS USB devices
+# configure_usbipd.ps1 — Set up usbipd policy for EduBotics USB-Geräte
 # Requires usbipd 4.x+ for policy support
 # Must run elevated (as Administrator)
 
@@ -10,7 +10,7 @@ function Write-Step { param([string]$msg) Write-Host "`n>> $msg" -ForegroundColo
 function Write-OK   { param([string]$msg) Write-Host "   OK: $msg" -ForegroundColor Green }
 function Write-Skip { param([string]$msg) Write-Host "   SKIP: $msg" -ForegroundColor Yellow }
 
-Write-Step "Configuring usbipd policy for ROBOTIS devices..."
+Write-Step "Configuring usbipd policy for EduBotics-Geräte..."
 
 # Check usbipd version
 try {
@@ -35,12 +35,12 @@ if ($version.Major -lt 4) {
     exit 0
 }
 
-# Collect ROBOTIS PIDs to add policies for.
+# Collect device PIDs to add policies for.
 # Start with known PIDs; also scan connected devices for any we haven't seen.
 $knownPIDs = @("0103")  # OpenRB-150
 $targetPairs = @()
 
-# Discover connected ROBOTIS devices and capture their PIDs
+# Discover connected EduBotics-Geräte and capture their PIDs
 try {
     $listOutput = usbipd list 2>&1 | Out-String
     foreach ($line in $listOutput -split "`n") {
@@ -87,10 +87,10 @@ foreach ($hwid in $targetPairs) {
 }
 
 if ($addedCount -gt 0) {
-    Write-Host "   ROBOTIS USB devices can now be attached to WSL2 without admin rights." -ForegroundColor Green
+    Write-Host "   EduBotics USB-Geräte can now be attached to WSL2 without admin rights." -ForegroundColor Green
 } elseif ($addedCount -eq 0 -and $existingPolicies -match $ROBOTIS_VID) {
-    Write-Host "   All ROBOTIS policies already configured." -ForegroundColor Green
+    Write-Host "   All EduBotics policies already configured." -ForegroundColor Green
 } else {
     Write-Host "WARNING: No policies were added. USB attach may require running as Administrator." -ForegroundColor Yellow
-    Write-Host "   Tip: plug in a ROBOTIS device and re-run this script to auto-detect its PID." -ForegroundColor Yellow
+    Write-Host "   Tip: plug in ein EduBotics-Gerät and re-run this script to auto-detect its PID." -ForegroundColor Yellow
 }

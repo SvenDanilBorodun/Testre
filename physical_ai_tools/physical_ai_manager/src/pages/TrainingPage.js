@@ -1,4 +1,4 @@
-// Copyright 2025 ROBOTIS CO., LTD.
+// Copyright 2025 EduBotics
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,7 +15,7 @@
 // Author: Kiwoong Park
 
 import React, { useEffect } from 'react';
-import { useSelector } from 'react-redux';
+import { useSelector, useDispatch } from 'react-redux';
 import clsx from 'clsx';
 import toast, { useToasterStore } from 'react-hot-toast';
 import HeartbeatStatus from '../components/HeartbeatStatus';
@@ -26,10 +26,46 @@ import TrainingControlPanel from '../components/TrainingControlPanel';
 import TrainingOptionInput from '../components/TrainingOptionInput';
 import TrainingProgressBar from '../components/TrainingProgressBar';
 import TrainingLossDisplay from '../components/TrainingLossDisplay';
-import ResumePolicySelector from '../components/ResumePolicySelector';
+import CloudTrainingHistory from '../components/CloudTrainingHistory';
+import LoginForm from '../components/LoginForm';
+import { supabase } from '../lib/supabaseClient';
+import { clearSession } from '../features/auth/authSlice';
+import { getQuota } from '../services/cloudTrainingApi';
+import { setQuota } from '../features/auth/authSlice';
 
 export default function TrainingPage() {
-  const trainingMode = useSelector((state) => state.training.trainingMode);
+  const dispatch = useDispatch();
+  const isAuthenticated = useSelector((state) => state.auth.isAuthenticated);
+  const isLoading = useSelector((state) => state.auth.isLoading);
+  const session = useSelector((state) => state.auth.session);
+  const trainingCredits = useSelector((state) => state.auth.trainingCredits);
+  const trainingsUsed = useSelector((state) => state.auth.trainingsUsed);
+
+  // Toast limit implementation using useToasterStore
+  const { toasts } = useToasterStore();
+  const TOAST_LIMIT = 3;
+
+  useEffect(() => {
+    toasts
+      .filter((t) => t.visible)
+      .filter((_, i) => i >= TOAST_LIMIT)
+      .forEach((t) => toast.dismiss(t.id));
+  }, [toasts]);
+
+  // Fetch quota when authenticated
+  useEffect(() => {
+    if (isAuthenticated && session?.access_token) {
+      getQuota(session.access_token)
+        .then((quota) => dispatch(setQuota(quota)))
+        .catch(() => {});
+    }
+  }, [isAuthenticated, session, dispatch]);
+
+  const handleLogout = async () => {
+    await supabase.auth.signOut();
+    dispatch(clearSession());
+    toast.success('Abgemeldet');
+  };
 
   const classContainer = clsx(
     'w-full',
@@ -52,41 +88,21 @@ export default function TrainingPage() {
     'justify-center'
   );
 
-  // Toast limit implementation using useToasterStore
-  const { toasts } = useToasterStore();
-  const TOAST_LIMIT = 3;
+  // Show loading spinner while checking auth
+  if (isLoading) {
+    return (
+      <div className="flex items-center justify-center h-full">
+        <div className="text-gray-500 text-lg">Laden...</div>
+      </div>
+    );
+  }
 
-  useEffect(() => {
-    toasts
-      .filter((t) => t.visible) // Only consider visible toasts
-      .filter((_, i) => i >= TOAST_LIMIT) // Is toast index over limit?
-      .forEach((t) => toast.dismiss(t.id)); // Dismiss – Use toast.remove(t.id) for no exit animation
-  }, [toasts]);
+  // Show login form if not authenticated
+  if (!isAuthenticated) {
+    return <LoginForm />;
+  }
 
-  const renderTrainingComponents = () => {
-    if (trainingMode === 'resume') {
-      return (
-        <div className={classComponentsContainer}>
-          <ResumePolicySelector />
-          <DatasetSelector />
-          <div className="flex flex-col items-start justify-center gap-5">
-            <PolicySelector readonly={true} />
-            <TrainingOutputFolderInput readonly={true} />
-          </div>
-          <TrainingOptionInput />
-        </div>
-      );
-    } else {
-      return (
-        <div className={classComponentsContainer}>
-          <DatasetSelector />
-          <PolicySelector />
-          <TrainingOutputFolderInput />
-          <TrainingOptionInput />
-        </div>
-      );
-    }
-  };
+  const remaining = trainingCredits - trainingsUsed;
 
   return (
     <div className={classContainer}>
@@ -94,15 +110,50 @@ export default function TrainingPage() {
         <HeartbeatStatus />
       </div>
 
-      {/* Components based on selected mode */}
+      {/* User info bar */}
+      <div className="absolute top-4 right-6 flex items-center gap-4 z-10">
+        <div className="flex items-center gap-2">
+          <span className="text-sm text-gray-600">{session?.user?.email}</span>
+          <span
+            className={clsx(
+              'text-xs font-semibold px-2 py-0.5 rounded-full',
+              remaining > 0
+                ? 'bg-green-100 text-green-700'
+                : 'bg-red-100 text-red-700'
+            )}
+          >
+            {remaining} / {trainingCredits} Trainingsguthaben
+          </span>
+        </div>
+        <button
+          onClick={handleLogout}
+          className="text-sm text-gray-500 hover:text-gray-700 underline"
+        >
+          Abmelden
+        </button>
+      </div>
+
+      {/* Training components */}
       <div className="overflow-scroll h-full w-full">
-        <div>{renderTrainingComponents()}</div>
+        <div className={classComponentsContainer}>
+          <DatasetSelector />
+          <PolicySelector />
+          <TrainingOutputFolderInput />
+          <TrainingOptionInput />
+        </div>
         <div className="flex justify-center items-center mt-5 mb-8">
           <div className="rounded-full bg-gray-200 w-32 h-3"></div>
         </div>
         <div className="flex justify-center items-center mb-10">
           <div className="w-full max-w-md">
             <TrainingLossDisplay />
+          </div>
+        </div>
+
+        {/* Cloud training history */}
+        <div className="flex justify-center items-center mb-10 px-10">
+          <div className="w-full max-w-5xl">
+            <CloudTrainingHistory />
           </div>
         </div>
       </div>
@@ -112,7 +163,6 @@ export default function TrainingPage() {
         <div className="flex-shrink-0">
           <TrainingControlPanel />
         </div>
-        {/* Training Progress and Loss Display */}
         <div className="flex-1 min-w-0 max-w-4xl flex gap-10 justify-center items-center">
           <div className="flex-1 max-w-md">
             <TrainingProgressBar />

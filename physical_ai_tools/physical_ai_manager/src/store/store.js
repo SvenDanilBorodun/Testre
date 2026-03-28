@@ -1,5 +1,5 @@
 /*
- * Copyright 2025 ROBOTIS CO., LTD.
+ * Copyright 2025 EduBotics
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,6 +22,7 @@ import uiSlice from '../features/ui/uiSlice';
 import rosSlice from '../features/ros/rosSlice';
 import trainingSlice from '../features/training/trainingSlice';
 import editDatasetSlice from '../features/editDataset/editDatasetSlice';
+import authSlice from '../features/auth/authSlice';
 
 export const store = configureStore({
   reducer: {
@@ -30,6 +31,7 @@ export const store = configureStore({
     ui: uiSlice,
     training: trainingSlice,
     editDataset: editDatasetSlice,
+    auth: authSlice,
   },
   middleware: (getDefaultMiddleware) =>
     getDefaultMiddleware({

@@ -1,4 +1,4 @@
-// Copyright 2025 ROBOTIS CO., LTD.
+// Copyright 2025 EduBotics
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -32,6 +32,8 @@ import { useDispatch, useSelector } from 'react-redux';
 import { setRosHost } from './features/ros/rosSlice';
 import { moveToPage } from './features/ui/uiSlice';
 import PageType from './constants/pageType';
+import { supabase } from './lib/supabaseClient';
+import { setSession, setIsLoading } from './features/auth/authSlice';
 
 function App() {
   const dispatch = useDispatch();
@@ -58,6 +60,22 @@ function App() {
       rosConnectionManager.disconnect();
     };
   }, []);
+
+  // Initialize Supabase auth listener
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      dispatch(setSession(session));
+      dispatch(setIsLoading(false));
+    });
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, session) => {
+      dispatch(setSession(session));
+    });
+
+    return () => subscription.unsubscribe();
+  }, [dispatch]);
 
   useEffect(() => {
     if (isFirstLoad.current && page === PageType.HOME && taskStatus.topicReceived) {
@@ -97,7 +115,7 @@ function App() {
 
     // Block navigation if robot type is not set
     if (!robotType || robotType.trim() === '') {
-      toast.error('Please select a robot type first in the Home page', {
+      toast.error('Bitte wähle zuerst einen Robotertyp auf der Startseite', {
         duration: 4000,
       });
       console.log('Robot type not set, blocking navigation to Record page');
@@ -127,7 +145,7 @@ function App() {
 
     // Block navigation if robot type is not set
     if (!robotType || robotType.trim() === '') {
-      toast.error('Please select a robot type first in the Home page', {
+      toast.error('Bitte wähle zuerst einen Robotertyp auf der Startseite', {
         duration: 4000,
       });
       console.log('Robot type not set, blocking navigation to Inference page');
@@ -140,32 +158,8 @@ function App() {
   };
 
   const handleTrainingPageNavigation = () => {
-    if (process.env.REACT_APP_DEBUG === 'true') {
-      console.log('handleTrainingPageNavigation');
-      isFirstLoad.current = false;
-      dispatch(moveToPage(PageType.TRAINING));
-      return;
-    }
-
-    // Allow navigation if task is in progress
-    if (taskStatus && taskStatus.robotType !== '') {
-      console.log('robot type:', taskStatus.robotType, '=> allowing navigation to Training page');
-      isFirstLoad.current = false;
-      dispatch(moveToPage(PageType.TRAINING));
-      return;
-    }
-
-    // Block navigation if robot type is not set
-    if (!robotType || robotType.trim() === '') {
-      toast.error('Please select a robot type first in the Home page', {
-        duration: 4000,
-      });
-      console.log('Robot type not set, blocking navigation to Training page');
-      return;
-    }
-
-    // Allow navigation if conditions are met
-    console.log('Robot type set, allowing navigation to Training page');
+    // Cloud training doesn't require robot hardware — always allow access
+    isFirstLoad.current = false;
     dispatch(moveToPage(PageType.TRAINING));
   };
 
@@ -191,7 +185,7 @@ function App() {
 
     // Block navigation if robot type is not set
     if (!robotType || robotType.trim() === '') {
-      toast.error('Please select a robot type first in the Home page', {
+      toast.error('Bitte wähle zuerst einen Robotertyp auf der Startseite', {
         duration: 4000,
       });
       return;
@@ -243,30 +237,30 @@ function App() {
           <button
             className={clsx(classPageButton, {
               'hover:bg-gray-200 active:bg-gray-400': page !== PageType.HOME,
-              'bg-gray-300': page === PageType.HOME,
+              'bg-teal-100': page === PageType.HOME,
             })}
             onClick={handleHomePageNavigation}
           >
             <MdHome size={32} className="mb-1.5" />
-            <span className="mt-1 text-sm">Home</span>
+            <span className="mt-1 text-sm">Start</span>
           </button>
 
           {/* Record page button */}
           <button
             className={clsx(classPageButton, {
               'hover:bg-gray-200 active:bg-gray-400': page !== PageType.RECORD,
-              'bg-gray-300': page === PageType.RECORD,
+              'bg-teal-100': page === PageType.RECORD,
             })}
             onClick={handleRecordPageNavigation}
           >
             <MdVideocam size={32} className="mb-1.5" />
-            <span className="mt-1 text-sm">Record</span>
+            <span className="mt-1 text-sm">Aufnahme</span>
           </button>
           {/* Training page button */}
           <button
             className={clsx(classPageButton, {
               'hover:bg-gray-200 active:bg-gray-400': page !== PageType.TRAINING,
-              'bg-gray-300': page === PageType.TRAINING,
+              'bg-teal-100': page === PageType.TRAINING,
             })}
             onClick={handleTrainingPageNavigation}
           >
@@ -277,12 +271,12 @@ function App() {
           <button
             className={clsx(classPageButton, {
               'hover:bg-gray-200 active:bg-gray-400': page !== PageType.INFERENCE,
-              'bg-gray-300': page === PageType.INFERENCE,
+              'bg-teal-100': page === PageType.INFERENCE,
             })}
             onClick={handleInferencePageNavigation}
           >
             <MdMemory size={32} className="mb-1.5" />
-            <span className="mt-1 text-sm">Inference</span>
+            <span className="mt-1 text-sm">Inferenz</span>
           </button>
 
           {/* Divider line */}
@@ -292,12 +286,12 @@ function App() {
           <button
             className={clsx(classPageButton, {
               'hover:bg-gray-200 active:bg-gray-400': page !== PageType.EDIT_DATASET,
-              'bg-gray-300': page === PageType.EDIT_DATASET,
+              'bg-teal-100': page === PageType.EDIT_DATASET,
             })}
             onClick={handleEditDatasetPageNavigation}
           >
             <MdWidgets size={28} className="mb-2" />
-            <span className="mt-1 text-sm whitespace-nowrap">Data Tools</span>
+            <span className="mt-1 text-sm whitespace-nowrap">Daten</span>
           </button>
         </div>
       </aside>

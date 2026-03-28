@@ -1,7 +1,7 @@
 """USB device scanning, attachment, and identification.
 
 Handles:
-  - Listing ROBOTIS USB devices via usbipd on Windows
+  - Listing USB devices via usbipd on Windows
   - Attaching USB devices to WSL2 via usbipd
   - Identifying leader/follower arms via identify_arm.py inside Docker
   - Camera discovery via v4l2-ctl inside WSL2
@@ -115,7 +115,7 @@ def detach_usb_from_wsl(busid: str) -> bool:
 
 
 def attach_all_robotis_devices() -> list[USBDevice]:
-    """Attach all ROBOTIS USB devices to WSL2. Returns list of attached devices."""
+    """Attach all EduBotics USB devices to WSL2. Returns list of attached devices."""
     devices = list_robotis_devices()
     attached = []
     for dev in devices:
@@ -130,7 +130,7 @@ def attach_all_robotis_devices() -> list[USBDevice]:
 
 
 def find_serial_paths_for_robotis() -> list[str]:
-    """Find /dev/serial/by-id/ paths for ROBOTIS devices inside WSL2."""
+    """Find /dev/serial/by-id/ paths for EduBotics devices inside WSL2."""
     all_serial = wsl_bridge.list_serial_devices()
     return [p for p in all_serial if "ROBOTIS" in p.upper() or "OPENRB" in p.upper()]
 
@@ -198,7 +198,7 @@ def scan_and_identify_arms(image: str) -> tuple[Optional[ArmDevice], Optional[Ar
     leader = None
     follower = None
 
-    # 1. Attach all ROBOTIS USB devices to WSL2
+    # 1. Attach all EduBotics USB devices to WSL2
     attached = attach_all_robotis_devices()
     if not attached:
         return None, None

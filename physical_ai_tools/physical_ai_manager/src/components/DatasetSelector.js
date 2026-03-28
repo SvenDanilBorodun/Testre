@@ -1,4 +1,4 @@
-// Copyright 2025 ROBOTIS CO., LTD.
+// Copyright 2025 EduBotics
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -138,7 +138,7 @@ export default function DatasetSelector() {
         displayPath = `${start}...${end}`;
       }
 
-      toast.success(`Dataset selected:\n${displayPath}`);
+      toast.success(`Datensatz ausgewählt:\n${displayPath}`);
     },
     [dispatch]
   );
@@ -227,11 +227,11 @@ export default function DatasetSelector() {
     'px-3',
     'py-2',
     'cursor-pointer',
-    'bg-blue-50',
+    'bg-teal-50',
     'border-b',
-    'border-blue-200',
+    'border-teal-200',
     'transition-colors',
-    'hover:bg-blue-100'
+    'hover:bg-teal-100'
   );
 
   const classDatasetItem = clsx(
@@ -240,14 +240,14 @@ export default function DatasetSelector() {
     'px-6',
     'py-2',
     'cursor-pointer',
-    'hover:bg-blue-50',
+    'hover:bg-teal-50',
     'border-b',
     'border-gray-100',
     'transition-colors',
     'text-sm'
   );
 
-  const classSelectedDataset = clsx('bg-blue-100', 'text-blue-800', 'font-medium');
+  const classSelectedDataset = clsx('bg-teal-100', 'text-teal-800', 'font-medium');
 
   const classRefreshIcon = clsx(
     'ml-auto',
@@ -259,17 +259,17 @@ export default function DatasetSelector() {
 
   return (
     <div className={classCard}>
-      <h1 className={classTitle}>Dataset Selection</h1>
+      <h1 className={classTitle}>Datensatzauswahl</h1>
 
       {/* Current Selection Display */}
       {selectedUser && selectedDataset && (
         <div className={classCurrentSelection}>
           <div className="truncate">
-            <strong>Selected: </strong>
-            <span className="text-blue-500" title={`${selectedUser}/${selectedDataset}`}>
+            <strong>Ausgewählt: </strong>
+            <span className="text-teal-500" title={`${selectedUser}/${selectedDataset}`}>
               {selectedUser.length > 15 ? `${selectedUser.substring(0, 12)}...` : selectedUser}/
             </span>
-            <span className="text-blue-500" title={`${selectedUser}/${selectedDataset}`}>
+            <span className="text-teal-500" title={`${selectedUser}/${selectedDataset}`}>
               {selectedDataset.length > 30
                 ? `${selectedDataset.substring(0, 25)}...${selectedDataset.substring(
                     selectedDataset.length - 10
@@ -287,14 +287,14 @@ export default function DatasetSelector() {
         disabled={loadingUsers || isTraining}
       >
         <MdRefresh className={loadingUsers ? 'animate-spin' : ''} />
-        {loadingUsers ? 'Loading...' : 'Refresh Users'}
+        {loadingUsers ? 'Laden...' : 'Benutzer aktualisieren'}
       </button>
 
       {/* Folder Tree View */}
       <div className={classTreeContainer}>
         {userList.length === 0 ? (
           <div className="text-center py-8 text-gray-500">
-            {loadingUsers ? 'Loading users...' : 'No users found'}
+            {loadingUsers ? 'Benutzer werden geladen...' : 'Keine Benutzer gefunden'}
           </div>
         ) : (
           userList.map((user) => {
@@ -320,17 +320,17 @@ export default function DatasetSelector() {
                   <div className="mr-2">
                     {expandedUsers[user] ? (
                       <MdFolderOpen
-                        className={isSelectedUser ? 'text-blue-700' : 'text-blue-600'}
+                        className={isSelectedUser ? 'text-teal-700' : 'text-teal-600'}
                       />
                     ) : (
-                      <MdFolder className={isSelectedUser ? 'text-blue-700' : 'text-blue-600'} />
+                      <MdFolder className={isSelectedUser ? 'text-teal-700' : 'text-teal-600'} />
                     )}
                   </div>
 
                   {/* User Name */}
                   <span
                     className={
-                      isSelectedUser ? 'font-bold text-blue-800' : 'font-medium text-gray-800'
+                      isSelectedUser ? 'font-bold text-teal-800' : 'font-medium text-gray-800'
                     }
                   >
                     {user}
@@ -338,8 +338,8 @@ export default function DatasetSelector() {
 
                   {/* Selection indicator */}
                   {isSelectedUser && (
-                    <div className="ml-2 px-2 py-1 bg-blue-200 text-blue-800 text-xs rounded-full">
-                      Selected
+                    <div className="ml-2 px-2 py-1 bg-teal-200 text-teal-800 text-xs rounded-full">
+                      Ausgewählt
                     </div>
                   )}
 
@@ -362,7 +362,7 @@ export default function DatasetSelector() {
                   <div>
                     {userDatasets[user] ? (
                       userDatasets[user].length === 0 ? (
-                        <div className="px-6 py-4 text-gray-500 text-sm">No datasets found</div>
+                        <div className="px-6 py-4 text-gray-500 text-sm">Keine Datensätze gefunden</div>
                       ) : (
                         userDatasets[user].map((dataset) => (
                           <div
@@ -384,7 +384,7 @@ export default function DatasetSelector() {
                       )
                     ) : (
                       <div className="px-6 py-4 text-gray-500 text-sm">
-                        {loadingDatasets[user] ? 'Loading datasets...' : 'Click to load datasets'}
+                        {loadingDatasets[user] ? 'Datensätze werden geladen...' : 'Klicken zum Laden der Datensätze'}
                       </div>
                     )}
                   </div>

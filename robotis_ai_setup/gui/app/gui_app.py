@@ -1,10 +1,10 @@
-"""Main tkinter GUI for ROBOTIS AI Setup.
+"""Haupt-GUI für EduBotics Setup.
 
-Provides a step-by-step interface for:
-  1. Scanning and identifying robot arms (leader/follower)
-  2. Selecting a camera
-  3. Starting/stopping the Docker environment
-  4. Opening the web browser to the Physical AI Web UI
+Bietet eine schrittweise Oberfläche für:
+  1. Erkennen und Identifizieren der Roboterarme (Leader/Follower)
+  2. Kamera auswählen
+  3. Docker-Umgebung starten/stoppen
+  4. Webbrowser mit der EduBotics Web-Oberfläche öffnen
 """
 
 import os
@@ -13,7 +13,7 @@ import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
 import webbrowser
 
-from . import device_manager, docker_manager, health_checker, config_generator
+from . import device_manager, docker_manager, health_checker, config_generator, wsl_bridge
 from .constants import (
     IMAGE_OPEN_MANIPULATOR,
     PORT_WEB_UI,
@@ -22,12 +22,12 @@ from .constants import (
 )
 
 
-class RobotisAIApp:
-    """Main application window."""
+class EduBoticsApp:
+    """Hauptfenster der Anwendung."""
 
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("ROBOTIS AI Setup")
+        self.root.title("EduBotics")
         self.root.geometry("700x800")
         self.root.resizable(True, True)
 
@@ -36,7 +36,7 @@ class RobotisAIApp:
         self.cameras: list[device_manager.CameraDevice] = []
         self.gpu_available = False
         self.running = False
-        self._scanning = False  # guard against concurrent scans
+        self._scanning = False
 
         self._build_ui()
         self._check_prerequisites()
@@ -44,16 +44,15 @@ class RobotisAIApp:
     # ── UI Construction ──────────────────────────────────────────────
 
     def _build_ui(self):
-        # Main container with padding
         main = ttk.Frame(self.root, padding=10)
         main.pack(fill=tk.BOTH, expand=True)
 
         # Title
-        title = ttk.Label(main, text="ROBOTIS AI Setup", font=("Segoe UI", 18, "bold"))
+        title = ttk.Label(main, text="EduBotics", font=("Segoe UI", 18, "bold"))
         title.pack(pady=(0, 5))
 
         # Status bar
-        self.status_var = tk.StringVar(value="Checking system...")
+        self.status_var = tk.StringVar(value="System wird geprüft...")
         status_label = ttk.Label(main, textvariable=self.status_var, font=("Segoe UI", 10))
         status_label.pack(pady=(0, 10))
 
@@ -61,73 +60,73 @@ class RobotisAIApp:
         self.progress = ttk.Progressbar(main, mode="indeterminate", length=400)
         self.progress.pack(pady=(0, 10))
 
-        # ── Step A: Leader Arm ──
-        leader_frame = ttk.LabelFrame(main, text="Step A: Leader Arm", padding=10)
+        # ── Schritt A: Leader-Arm ──
+        leader_frame = ttk.LabelFrame(main, text="Schritt A: Leader-Arm", padding=10)
         leader_frame.pack(fill=tk.X, pady=5)
 
-        ttk.Label(leader_frame, text="Plug in the LEADER arm via USB, then click Scan.").pack(anchor=tk.W)
+        ttk.Label(leader_frame, text="Leader-Arm per USB anschließen, dann auf Scannen klicken.").pack(anchor=tk.W)
         leader_row = ttk.Frame(leader_frame)
         leader_row.pack(fill=tk.X, pady=5)
 
-        self.btn_scan_leader = ttk.Button(leader_row, text="Scan Arms", command=self._scan_arms)
+        self.btn_scan_leader = ttk.Button(leader_row, text="Arme scannen", command=self._scan_arms)
         self.btn_scan_leader.pack(side=tk.LEFT)
 
-        self.leader_status_var = tk.StringVar(value="Not scanned")
+        self.leader_status_var = tk.StringVar(value="Nicht gescannt")
         ttk.Label(leader_row, textvariable=self.leader_status_var, foreground="gray").pack(side=tk.LEFT, padx=10)
 
-        # ── Step B: Follower Arm (same scan) ──
-        follower_frame = ttk.LabelFrame(main, text="Step B: Follower Arm", padding=10)
+        # ── Schritt B: Follower-Arm ──
+        follower_frame = ttk.LabelFrame(main, text="Schritt B: Follower-Arm", padding=10)
         follower_frame.pack(fill=tk.X, pady=5)
 
-        ttk.Label(follower_frame, text="Plug in the FOLLOWER arm via USB (scanned together with leader).").pack(anchor=tk.W)
+        ttk.Label(follower_frame, text="Follower-Arm per USB anschließen (wird zusammen mit Leader gescannt).").pack(anchor=tk.W)
         follower_row = ttk.Frame(follower_frame)
         follower_row.pack(fill=tk.X, pady=5)
 
-        self.follower_status_var = tk.StringVar(value="Not scanned")
+        self.follower_status_var = tk.StringVar(value="Nicht gescannt")
         ttk.Label(follower_row, textvariable=self.follower_status_var, foreground="gray").pack(side=tk.LEFT, padx=10)
 
-        # ── Step C: Camera ──
-        camera_frame = ttk.LabelFrame(main, text="Step C: Camera", padding=10)
+        # ── Schritt C: Kamera ──
+        camera_frame = ttk.LabelFrame(main, text="Schritt C: Kamera", padding=10)
         camera_frame.pack(fill=tk.X, pady=5)
 
-        ttk.Label(camera_frame, text="Select your camera from the dropdown.").pack(anchor=tk.W)
+        ttk.Label(camera_frame, text="Kamera aus dem Dropdown-Menü auswählen.").pack(anchor=tk.W)
         camera_row = ttk.Frame(camera_frame)
         camera_row.pack(fill=tk.X, pady=5)
 
-        self.btn_scan_camera = ttk.Button(camera_row, text="Scan Cameras", command=self._scan_cameras)
+        self.btn_scan_camera = ttk.Button(camera_row, text="Kameras scannen", command=self._scan_cameras)
         self.btn_scan_camera.pack(side=tk.LEFT)
 
         self.camera_combo = ttk.Combobox(camera_row, state="readonly", width=40)
         self.camera_combo.pack(side=tk.LEFT, padx=10)
         self.camera_combo.bind("<<ComboboxSelected>>", self._on_camera_selected)
 
-        # ── Launch Button ──
+        # ── Start-Button ──
         btn_frame = ttk.Frame(main)
         btn_frame.pack(fill=tk.X, pady=15)
 
         self.btn_start = ttk.Button(
-            btn_frame, text="Start AI Environment",
+            btn_frame, text="Umgebung starten",
             command=self._start_environment,
             state=tk.DISABLED,
         )
         self.btn_start.pack(side=tk.LEFT, padx=5)
 
         self.btn_stop = ttk.Button(
-            btn_frame, text="Stop",
+            btn_frame, text="Stoppen",
             command=self._stop_environment,
             state=tk.DISABLED,
         )
         self.btn_stop.pack(side=tk.LEFT, padx=5)
 
         self.btn_open_browser = ttk.Button(
-            btn_frame, text="Open Browser",
+            btn_frame, text="Browser öffnen",
             command=lambda: webbrowser.open(f"http://localhost:{PORT_WEB_UI}"),
             state=tk.DISABLED,
         )
         self.btn_open_browser.pack(side=tk.LEFT, padx=5)
 
-        # ── Log Output ──
-        log_frame = ttk.LabelFrame(main, text="Log Output", padding=5)
+        # ── Protokoll-Ausgabe ──
+        log_frame = ttk.LabelFrame(main, text="Protokoll", padding=5)
         log_frame.pack(fill=tk.BOTH, expand=True, pady=5)
 
         self.log_text = scrolledtext.ScrolledText(
@@ -139,7 +138,7 @@ class RobotisAIApp:
     # ── Logging ──────────────────────────────────────────────────────
 
     def _log(self, msg: str):
-        """Append message to the log output (thread-safe)."""
+        """Nachricht an die Protokoll-Ausgabe anhängen (thread-sicher)."""
         def _append():
             self.log_text.config(state=tk.NORMAL)
             self.log_text.insert(tk.END, msg + "\n")
@@ -148,11 +147,11 @@ class RobotisAIApp:
         self.root.after(0, _append)
 
     def _set_status(self, msg: str):
-        """Update status bar (thread-safe)."""
+        """Statusleiste aktualisieren (thread-sicher)."""
         self.root.after(0, lambda: self.status_var.set(msg))
 
     def _update_start_button(self):
-        """Enable Start button only when hardware config is complete."""
+        """Start-Button nur aktivieren, wenn Hardware-Konfiguration vollständig."""
         def _update():
             if self.hardware.is_complete and not self.running:
                 self.btn_start.config(state=tk.NORMAL)
@@ -163,94 +162,94 @@ class RobotisAIApp:
     # ── Prerequisites Check ──────────────────────────────────────────
 
     def _check_prerequisites(self):
-        """Check Docker, WSL2, usbipd on startup."""
+        """Docker, WSL2, usbipd beim Start prüfen."""
         def _check():
             self.root.after(0, lambda: self.progress.start(10))
-            self._log("Checking prerequisites...")
+            self._log("Voraussetzungen werden geprüft...")
 
             # Check Docker
-            self._set_status("Checking Docker Desktop...")
+            self._set_status("Docker Desktop wird geprüft...")
             if not docker_manager.is_docker_running():
-                self._log("Docker Desktop not running. Waiting up to 120s...")
+                self._log("Docker Desktop läuft nicht. Warte bis zu 120s...")
                 if not docker_manager.wait_for_docker(
-                    callback=lambda e, t: self._set_status(f"Waiting for Docker... {e}s/{t}s")
+                    callback=lambda e, t: self._set_status(f"Warte auf Docker... {e}s/{t}s")
                 ):
-                    self._log("ERROR: Docker Desktop is not running. Please start it and restart this app.")
-                    self._set_status("Docker Desktop not found")
+                    self._log("FEHLER: Docker Desktop läuft nicht. Bitte starten und App neu starten.")
+                    self._set_status("Docker Desktop nicht gefunden")
                     self.root.after(0, lambda: self.progress.stop())
                     return
             self._log("Docker Desktop: OK")
 
             # Check images
-            self._set_status("Checking Docker images...")
+            self._set_status("Docker-Images werden geprüft...")
             img_status = docker_manager.images_exist()
             missing = [img for img, exists in img_status.items() if not exists]
             if missing:
-                self._log(f"Missing images: {', '.join(missing)}")
-                self._log("Pulling images (this may take a while on first run)...")
-                self._set_status("Pulling Docker images...")
+                self._log(f"Fehlende Images: {', '.join(missing)}")
+                self._log("Images werden heruntergeladen (kann beim ersten Mal dauern)...")
+                self._set_status("Docker-Images werden heruntergeladen...")
                 if not docker_manager.pull_images(
-                    callback=lambda img, i, t: self._log(f"  Pulling {img} ({i+1}/{t})...")
+                    callback=lambda img, i, t: self._log(f"  Lade {img} ({i+1}/{t})...")
                 ):
-                    self._log("ERROR: Failed to pull Docker images. Check your internet connection.")
-                    self._set_status("Image pull failed")
+                    self._log("FEHLER: Docker-Images konnten nicht heruntergeladen werden. Internetverbindung prüfen.")
+                    self._set_status("Image-Download fehlgeschlagen")
                     self.root.after(0, lambda: self.progress.stop())
                     return
-                self._log("All images pulled successfully.")
+                self._log("Alle Images erfolgreich heruntergeladen.")
 
             # Check for image updates
-            self._set_status("Checking for updates...")
-            self._log("Checking for image updates...")
+            self._set_status("Auf Updates prüfen...")
+            self._log("Prüfe auf Image-Updates...")
             if docker_manager.check_for_updates():
-                self._log("Images updated to latest version.")
+                self._log("Images auf neueste Version aktualisiert.")
             else:
-                self._log("Images are up to date.")
+                self._log("Images sind aktuell.")
 
             # Check GPU
             self.gpu_available = docker_manager.has_gpu()
-            self._log(f"NVIDIA GPU: {'detected' if self.gpu_available else 'not detected (CPU mode)'}")
+            self._log(f"NVIDIA GPU: {'erkannt' if self.gpu_available else 'nicht erkannt (CPU-Modus)'}")
 
-            self._set_status("Ready — scan your hardware to begin")
+            self._set_status("Bereit — Hardware scannen, um zu beginnen")
             self.root.after(0, lambda: self.progress.stop())
-            self._log("System check complete. Plug in your arms and camera, then click Scan.")
+            self._log("Systemprüfung abgeschlossen. Arme und Kamera anschließen, dann auf Scannen klicken.")
 
         threading.Thread(target=_check, daemon=True).start()
 
     # ── Arm Scanning ─────────────────────────────────────────────────
 
     def _scan_arms(self):
-        """Scan for ROBOTIS arms — runs in background thread."""
+        """Nach Roboterarmen scannen — läuft im Hintergrund."""
         if self._scanning:
             return
         self._scanning = True
         self.btn_scan_leader.config(state=tk.DISABLED)
 
         def _do_scan():
-            self._set_status("Scanning for robot arms...")
+            self._set_status("Roboterarme werden gesucht...")
             self.root.after(0, lambda: self.progress.start(10))
-            self._log("Scanning USB devices for ROBOTIS arms...")
+            self._log("USB-Geräte werden nach Roboterarmen durchsucht...")
 
             leader, follower = device_manager.scan_and_identify_arms(IMAGE_OPEN_MANIPULATOR)
 
             if leader:
                 self.hardware.leader = leader
                 self.root.after(0, lambda: self.leader_status_var.set(
-                    f"Found: {leader.description} ({leader.serial_path})"
+                    f"Gefunden: {leader.description} ({leader.serial_path})"
                 ))
-                self._log(f"Leader found: {leader.serial_path}")
+                self._log(f"Leader gefunden: {leader.serial_path}")
             else:
-                self.root.after(0, lambda: self.leader_status_var.set("Not found"))
-                self._log("Leader arm not found.")
+                self.root.after(0, lambda: self.leader_status_var.set("Nicht gefunden"))
+                self._log("Leader-Arm nicht gefunden.")
 
             if follower:
                 self.hardware.follower = follower
                 self.root.after(0, lambda: self.follower_status_var.set(
-                    f"Found: {follower.description} ({follower.serial_path})"
+                    f"Gefunden: {follower.description} ({follower.serial_path})"
                 ))
-                self._log(f"Follower found: {follower.serial_path}")
+                self._log(f"Follower gefunden: {follower.serial_path}")
             else:
-                self.root.after(0, lambda: self.follower_status_var.set("Not found"))
-                self._log("Follower arm not found.")
+                self.root.after(0, lambda: self.follower_status_var.set("Nicht gefunden"))
+                self._log("Follower-Arm nicht gefunden.")
 
             self._scanning = False
             self._update_start_button()
@@ -258,24 +257,24 @@ class RobotisAIApp:
             self.root.after(0, lambda: self.btn_scan_leader.config(state=tk.NORMAL))
 
             if leader and follower:
-                self._set_status("Both arms found! Select camera and click Start.")
+                self._set_status("Beide Arme gefunden! Kamera auswählen und auf Start klicken.")
             else:
-                self._set_status("Some arms not found. Check connections and try again.")
+                self._set_status("Einige Arme nicht gefunden. Verbindungen prüfen und erneut versuchen.")
 
         threading.Thread(target=_do_scan, daemon=True).start()
 
     # ── Camera Scanning ──────────────────────────────────────────────
 
     def _scan_cameras(self):
-        """Scan for webcams — runs in background thread."""
+        """Nach Webcams scannen — läuft im Hintergrund."""
         if self._scanning:
             return
         self._scanning = True
         self.btn_scan_camera.config(state=tk.DISABLED)
 
         def _do_scan():
-            self._set_status("Scanning for cameras...")
-            self._log("Scanning video devices...")
+            self._set_status("Kameras werden gesucht...")
+            self._log("Video-Geräte werden gescannt...")
 
             self.cameras = device_manager.scan_cameras()
 
@@ -285,20 +284,20 @@ class RobotisAIApp:
                     self.camera_combo["values"] = values
                     self.camera_combo.current(0)
                     self._on_camera_selected(None)
-                    self._log(f"Found {len(self.cameras)} camera(s).")
+                    self._log(f"{len(self.cameras)} Kamera(s) gefunden.")
                 else:
-                    self.camera_combo["values"] = ["No cameras found"]
-                    self._log("No cameras found. Camera is optional — you can still start without one.")
+                    self.camera_combo["values"] = ["Keine Kameras gefunden"]
+                    self._log("Keine Kameras gefunden. Kamera ist optional — Start ohne Kamera möglich.")
                 self.btn_scan_camera.config(state=tk.NORMAL)
 
             self._scanning = False
             self.root.after(0, _update_combo)
-            self._set_status("Camera scan complete.")
+            self._set_status("Kamera-Scan abgeschlossen.")
 
         threading.Thread(target=_do_scan, daemon=True).start()
 
     def _on_camera_selected(self, event):
-        """Handle camera selection from dropdown."""
+        """Kameraauswahl aus dem Dropdown verarbeiten."""
         idx = self.camera_combo.current()
         if 0 <= idx < len(self.cameras):
             self.hardware.camera = self.cameras[idx]
@@ -306,9 +305,9 @@ class RobotisAIApp:
     # ── Start Environment ────────────────────────────────────────────
 
     def _start_environment(self):
-        """Start the Docker environment and open browser."""
+        """Docker-Umgebung starten und Browser öffnen."""
         if not self.hardware.is_complete:
-            messagebox.showwarning("Missing Hardware", "Please scan and identify both arms before starting.")
+            messagebox.showwarning("Fehlende Hardware", "Bitte beide Arme scannen und identifizieren, bevor du startest.")
             return
 
         self.btn_start.config(state=tk.DISABLED)
@@ -317,49 +316,66 @@ class RobotisAIApp:
         def _do_start():
             self.root.after(0, lambda: self.progress.start(10))
 
-            # 1. Generate .env
-            self._set_status("Generating configuration...")
-            self._log("Generating .env file...")
+            # 0. Serielle Ports erneut validieren
+            self._set_status("Hardware-Verbindungen werden geprüft...")
+            try:
+                serial_paths = wsl_bridge.list_serial_devices()
+                for arm_name, arm in [("Leader", self.hardware.leader), ("Follower", self.hardware.follower)]:
+                    if arm and arm.serial_path not in serial_paths:
+                        self._log(f"WARNUNG: {arm_name}-Arm ({arm.serial_path}) nicht mehr erkannt!")
+                        self._log("Bitte USB-Verbindung prüfen und erneut scannen.")
+                        self._set_status(f"{arm_name}-Arm getrennt")
+                        self.root.after(0, lambda: self.progress.stop())
+                        self.running = False
+                        self._update_start_button()
+                        return
+            except Exception as e:
+                self._log(f"WARNUNG: Serielle Ports konnten nicht validiert werden: {e}")
+                self._log("Fahre trotzdem fort — Container versuchen erneut auf Geräte zuzugreifen.")
+
+            # 1. .env generieren
+            self._set_status("Konfiguration wird erstellt...")
+            self._log(".env-Datei wird erstellt...")
             env_content = config_generator.generate_env_file(self.hardware, ENV_FILE)
-            self._log(f"Config written to {ENV_FILE}")
+            self._log(f"Konfiguration geschrieben: {ENV_FILE}")
             for line in env_content.strip().splitlines():
                 self._log(f"  {line}")
 
-            # 2. Start containers
+            # 2. Container starten
             use_gpu = self.gpu_available
-            self._set_status("Starting containers...")
-            self._log(f"Starting Docker Compose ({'GPU' if use_gpu else 'CPU'} mode)...")
+            self._set_status("Container werden gestartet...")
+            self._log(f"Docker Compose wird gestartet ({'GPU' if use_gpu else 'CPU'}-Modus)...")
 
             if not docker_manager.start_containers(gpu=use_gpu):
-                self._log("ERROR: Failed to start containers. Check Docker Desktop.")
-                self._set_status("Start failed")
+                self._log("FEHLER: Container konnten nicht gestartet werden. Docker Desktop prüfen.")
+                self._set_status("Start fehlgeschlagen")
                 self.root.after(0, lambda: self.progress.stop())
                 self.running = False
                 self._update_start_button()
                 return
 
-            self._log("Containers started. Waiting for services...")
+            self._log("Container gestartet. Warte auf Dienste...")
 
-            # 3. Wait for web UI
-            self._set_status("Waiting for web UI...")
+            # 3. Auf Web-Oberfläche warten
+            self._set_status("Warte auf Web-Oberfläche...")
             if not health_checker.wait_for_web_ui(
-                callback=lambda e, t: self._set_status(f"Waiting for web UI... {e}s/{t}s")
+                callback=lambda e, t: self._set_status(f"Warte auf Web-Oberfläche... {e}s/{t}s")
             ):
-                self._log("WARNING: Web UI not responding yet. Containers may still be starting.")
-                self._log("You can try opening http://localhost manually in a few seconds.")
+                self._log("WARNUNG: Web-Oberfläche antwortet noch nicht. Container starten möglicherweise noch.")
+                self._log("Du kannst http://localhost manuell im Browser öffnen.")
             else:
-                self._log("Web UI is ready!")
+                self._log("Web-Oberfläche ist bereit!")
 
-            # 4. Health check
+            # 4. Gesundheitsprüfung
             health = health_checker.full_health_check()
             for service, ok in health.items():
-                self._log(f"  {service}: {'OK' if ok else 'NOT READY'}")
+                self._log(f"  {service}: {'OK' if ok else 'NICHT BEREIT'}")
 
-            # 5. Open browser
-            self._log("Opening browser...")
+            # 5. Browser öffnen
+            self._log("Browser wird geöffnet...")
             webbrowser.open(f"http://localhost:{PORT_WEB_UI}")
 
-            self._set_status("Running — environment is active")
+            self._set_status("Aktiv — Umgebung läuft")
             self.root.after(0, lambda: self.progress.stop())
             self.root.after(0, lambda: self.btn_stop.config(state=tk.NORMAL))
             self.root.after(0, lambda: self.btn_open_browser.config(state=tk.NORMAL))
@@ -369,19 +385,19 @@ class RobotisAIApp:
     # ── Stop Environment ─────────────────────────────────────────────
 
     def _stop_environment(self):
-        """Stop all Docker containers."""
+        """Alle Docker-Container stoppen."""
         self.btn_stop.config(state=tk.DISABLED)
         self.btn_open_browser.config(state=tk.DISABLED)
 
         def _do_stop():
-            self._set_status("Stopping containers...")
-            self._log("Stopping Docker Compose...")
+            self._set_status("Container werden gestoppt...")
+            self._log("Docker Compose wird gestoppt...")
             self.root.after(0, lambda: self.progress.start(10))
 
             docker_manager.stop_containers(gpu=self.gpu_available)
 
-            self._log("All containers stopped.")
-            self._set_status("Stopped — scan hardware to start again")
+            self._log("Alle Container gestoppt.")
+            self._set_status("Gestoppt — Hardware scannen, um neu zu starten")
             self.running = False
             self._update_start_button()
             self.root.after(0, lambda: self.progress.stop())
@@ -390,7 +406,7 @@ class RobotisAIApp:
 
 
 def run():
-    """Launch the GUI application."""
+    """GUI-Anwendung starten."""
     root = tk.Tk()
-    app = RobotisAIApp(root)
+    app = EduBoticsApp(root)
     root.mainloop()

@@ -9,7 +9,7 @@ function Write-WARN  { param([string]$msg) Write-Host "   WARN: $msg" -Foregroun
 
 $allOk = $true
 
-Write-Step "Verifying ROBOTIS AI Setup installation..."
+Write-Step "Verifying EduBotics installation..."
 
 # 1. WSL2
 Write-Host "   Checking WSL2..." -ForegroundColor White
@@ -58,7 +58,7 @@ try {
 
 # 6. Install directory and required files
 Write-Host "   Checking install directory..." -ForegroundColor White
-$installDir = "C:\Program Files\ROBOTIS AI"
+$installDir = "C:\Program Files\EduBotics"
 $requiredFiles = @(
     @{ Path = "$installDir\docker\docker-compose.yml";                     Label = "docker-compose.yml" },
     @{ Path = "$installDir\docker\docker-compose.gpu.yml";                 Label = "docker-compose.gpu.yml" },

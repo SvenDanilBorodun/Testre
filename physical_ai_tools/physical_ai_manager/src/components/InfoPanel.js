@@ -1,4 +1,4 @@
-// Copyright 2025 ROBOTIS CO., LTD.
+// Copyright 2025 EduBotics
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -99,7 +99,7 @@ const InfoPanel = () => {
 
   const handleTokenSubmit = async (token) => {
     if (!token || !token.trim()) {
-      toast.error('Please enter a token');
+      toast.error('Bitte gib ein Token ein');
       return;
     }
 
@@ -111,7 +111,7 @@ const InfoPanel = () => {
       if (result && result.user_id_list) {
         setUserIdList(result.user_id_list);
         setShowTokenPopup(false);
-        toast.success('User ID list updated successfully!');
+        toast.success('Benutzer-ID-Liste erfolgreich aktualisiert!');
       } else {
         toast.error('Failed to get user ID list from response');
       }
@@ -132,7 +132,7 @@ const InfoPanel = () => {
       if (result && result.user_id_list) {
         if (result.success) {
           setUserIdList(result.user_id_list);
-          toast.success('User ID list loaded successfully!');
+          toast.success('Benutzer-ID-Liste erfolgreich geladen!');
           setShowUserIdDropdown(true);
         } else {
           toast.error('Failed to get user ID list:\n' + result.message);
@@ -243,7 +243,7 @@ const InfoPanel = () => {
     'rounded-md',
     'focus:outline-none',
     'focus:ring-2',
-    'focus:ring-blue-500',
+    'focus:ring-teal-500',
     'focus:border-transparent',
     {
       'bg-gray-100 cursor-not-allowed': !isEditable,
@@ -263,7 +263,7 @@ const InfoPanel = () => {
     'rounded-md',
     'focus:outline-none',
     'focus:ring-2',
-    'focus:ring-blue-500',
+    'focus:ring-teal-500',
     'focus:border-transparent',
     {
       'bg-gray-100 cursor-not-allowed': !isEditable,
@@ -278,7 +278,7 @@ const InfoPanel = () => {
     'rounded-xl',
     'font-medium',
     'transition-colors',
-    !useMultiTaskMode ? 'bg-blue-500 text-white' : 'bg-gray-200 text-gray-700',
+    !useMultiTaskMode ? 'bg-teal-500 text-white' : 'bg-gray-200 text-gray-700',
     !isEditable && 'cursor-not-allowed opacity-60'
   );
 
@@ -289,7 +289,7 @@ const InfoPanel = () => {
     'rounded-xl',
     'font-medium',
     'transition-colors',
-    useMultiTaskMode ? 'bg-blue-500 text-white' : 'bg-gray-200 text-gray-700',
+    useMultiTaskMode ? 'bg-teal-500 text-white' : 'bg-gray-200 text-gray-700',
     !isEditable && 'cursor-not-allowed opacity-60'
   );
 
@@ -306,7 +306,7 @@ const InfoPanel = () => {
     'rounded-md',
     'focus:outline-none',
     'focus:ring-2',
-    'focus:ring-blue-500',
+    'focus:ring-teal-500',
     'focus:border-transparent',
     {
       'bg-gray-100 cursor-not-allowed': !isEditable || info.pushToHub,
@@ -324,7 +324,7 @@ const InfoPanel = () => {
     'rounded-md',
     'focus:outline-none',
     'focus:ring-2',
-    'focus:ring-blue-500',
+    'focus:ring-teal-500',
     'focus:border-transparent',
     {
       'bg-gray-100 cursor-not-allowed': !isEditable,
@@ -342,7 +342,7 @@ const InfoPanel = () => {
     'rounded-md',
     'focus:outline-none',
     'focus:ring-2',
-    'focus:ring-blue-500',
+    'focus:ring-teal-500',
     'focus:border-transparent',
     {
       'bg-gray-100 cursor-not-allowed': !isEditable,
@@ -353,11 +353,11 @@ const InfoPanel = () => {
   const classCheckbox = clsx(
     'w-4',
     'h-4',
-    'text-blue-600',
+    'text-teal-600',
     'bg-gray-100',
     'border-gray-300',
     'rounded',
-    'focus:ring-blue-500',
+    'focus:ring-teal-500',
     'focus:ring-2',
     {
       'cursor-not-allowed opacity-50': !isEditable,
@@ -379,7 +379,7 @@ const InfoPanel = () => {
   const getButtonVariant = (variant, isActive = true, isLoading = false) => {
     const variants = {
       blue: {
-        active: 'bg-blue-200 text-blue-800 hover:bg-blue-300',
+        active: 'bg-teal-200 text-teal-800 hover:bg-teal-300',
         disabled: 'bg-gray-200 text-gray-500 cursor-not-allowed',
       },
       red: {
@@ -399,7 +399,7 @@ const InfoPanel = () => {
   return (
     <div className={classInfoPanel}>
       <div className={clsx('text-lg', 'font-semibold', 'mb-3', 'text-gray-800')}>
-        Task Information
+        Aufgabeninformationen
       </div>
 
       {/* Edit mode indicator */}
@@ -410,23 +410,23 @@ const InfoPanel = () => {
         })}
       >
         {isEditable ? (
-          '✏️ Edit mode'
+          '✏️ Bearbeitungsmodus'
         ) : (
           <div className="leading-tight">
-            <div>🔒 Read only</div>
-            <div className="text-xs mt-1 opacity-80">task is running or robot is not connected</div>
+            <div>🔒 Nur lesen</div>
+            <div className="text-xs mt-1 opacity-80">Aufgabe läuft oder Roboter nicht verbunden</div>
           </div>
         )}
       </div>
 
       <div className={clsx('flex', 'items-center', 'mb-2.5')}>
-        <span className={classLabel}>Task Name</span>
+        <span className={classLabel}>Aufgabenname</span>
         <textarea
           className={classTaskNameTextarea}
           value={info.taskName || ''}
           onChange={(e) => handleChange('taskName', e.target.value)}
           disabled={!isEditable}
-          placeholder="Enter Task Name"
+          placeholder="Aufgabennamen eingeben"
         />
       </div>
 
@@ -441,7 +441,7 @@ const InfoPanel = () => {
             'pt-2'
           )}
         >
-          Task Instruction
+          Aufgabenanweisung
         </span>
 
         <div>
@@ -453,7 +453,7 @@ const InfoPanel = () => {
               onClick={() => isEditable && dispatch(setUseMultiTaskMode(false))}
               disabled={!isEditable}
             >
-              Single Task
+              Einzelaufgabe
             </button>
             <button
               type="button"
@@ -461,7 +461,7 @@ const InfoPanel = () => {
               onClick={() => isEditable && dispatch(setUseMultiTaskMode(true))}
               disabled={!isEditable}
             >
-              Multi Task
+              Mehrfachaufgabe
             </button>
           </div>
 
@@ -480,14 +480,14 @@ const InfoPanel = () => {
               value={info.taskInstruction || ''}
               onChange={(e) => handleChange('taskInstruction', [e.target.value])}
               disabled={!isEditable}
-              placeholder="Enter Task Instruction"
+              placeholder="Aufgabenanweisung eingeben"
             />
           )}
         </div>
       </div>
 
       <div className={clsx('flex', 'items-center', 'mb-2')}>
-        <span className={classLabel}>Push to Hub</span>
+        <span className={classLabel}>Auf Hub hochladen</span>
         <div className={clsx('flex', 'items-center')}>
           <input
             className={classCheckbox}
@@ -497,14 +497,14 @@ const InfoPanel = () => {
             disabled={!isEditable}
           />
           <span className={clsx('ml-2', 'text-sm', 'text-gray-500')}>
-            {info.pushToHub ? 'Enabled' : 'Disabled'}
+            {info.pushToHub ? 'Aktiviert' : 'Deaktiviert'}
           </span>
         </div>
       </div>
 
       {info.pushToHub && (
         <div className={clsx('flex', 'items-center', 'mb-2')}>
-          <span className={classLabel}>Private Mode</span>
+          <span className={classLabel}>Privater Modus</span>
           <div className={clsx('flex', 'items-center')}>
             <input
               className={classCheckbox}
@@ -514,7 +514,7 @@ const InfoPanel = () => {
               disabled={!isEditable}
             />
             <span className={clsx('ml-2', 'text-sm', 'text-gray-500')}>
-              {info.privateMode ? 'Enabled' : 'Disabled'}
+              {info.privateMode ? 'Aktiviert' : 'Deaktiviert'}
             </span>
           </div>
         </div>
@@ -531,7 +531,7 @@ const InfoPanel = () => {
             'pt-2'
           )}
         >
-          User ID
+          Benutzer-ID
         </span>
 
         <div className="flex-1 min-w-0">
@@ -546,7 +546,7 @@ const InfoPanel = () => {
               }}
               disabled={!isEditable || isLoading}
             >
-              {isLoading ? 'Loading...' : 'Load'}
+              {isLoading ? 'Laden...' : 'Laden'}
             </button>
             {!info.pushToHub && showUserIdDropdown && (
               <button
@@ -567,7 +567,7 @@ const InfoPanel = () => {
                 }}
                 disabled={!isEditable || isLoading}
               >
-                Change
+                Ändern
               </button>
             )}
           </div>
@@ -581,7 +581,7 @@ const InfoPanel = () => {
                 onChange={(e) => handleChange('userId', e.target.value)}
                 disabled={!isEditable}
               >
-                <option value="">Select User ID</option>
+                <option value="">Benutzer-ID auswählen</option>
                 {userIdList.map((userId) => (
                   <option key={userId} value={userId}>
                     {userId}
@@ -589,7 +589,7 @@ const InfoPanel = () => {
                 ))}
               </select>
               <div className="text-xs text-gray-500 mt-1 leading-relaxed">
-                Select from registered User IDs (required for Hub upload)
+                Aus registrierten Benutzer-IDs auswählen (für Hub-Upload erforderlich)
               </div>
             </>
           ) : (
@@ -602,10 +602,10 @@ const InfoPanel = () => {
                     value={info.userId || ''}
                     onChange={(e) => handleChange('userId', e.target.value)}
                     disabled={!isEditable}
-                    placeholder="Enter User ID or load from registered ID"
+                    placeholder="Benutzer-ID eingeben oder aus registrierten IDs laden"
                   />
                   <div className="text-xs text-gray-500 mt-1 leading-relaxed">
-                    Enter any User ID manually or load from registered IDs
+                    Benutzer-ID manuell eingeben oder aus registrierten IDs laden
                   </div>
                 </>
               ) : (
@@ -620,7 +620,7 @@ const InfoPanel = () => {
                     }}
                     disabled={!isEditable}
                   >
-                    <option value="">Select from registered User IDs</option>
+                    <option value="">Aus registrierten Benutzer-IDs auswählen</option>
                     {userIdList.map((userId) => (
                       <option key={userId} value={userId}>
                         {userId}
@@ -628,7 +628,7 @@ const InfoPanel = () => {
                     ))}
                   </select>
                   <div className="text-xs text-gray-500 mt-1 leading-relaxed">
-                    Select a registered User ID or use Cancel button above
+                    Registrierte Benutzer-ID auswählen oder Abbrechen-Button oben verwenden
                   </div>
                 </>
               )}
@@ -638,8 +638,8 @@ const InfoPanel = () => {
       </div>
 
       <div className="flex flex-col items-center text-xs text-gray-500 mt-1 leading-relaxed bg-gray-100 p-2 rounded-md mb-2">
-        <div>Dataset will be saved with the following repo id</div>
-        <div className="text-blue-500 font-bold break-all">
+        <div>Datensatz wird mit folgender Repo-ID gespeichert</div>
+        <div className="text-teal-500 font-bold break-all">
           {info.userId}/{taskStatus?.robotType}_{info.taskName}
         </div>
       </div>
@@ -665,13 +665,13 @@ const InfoPanel = () => {
             disabled={!isEditable}
           />
           <div className="text-xs text-gray-500 mt-1 leading-relaxed">
-            Press Enter or use comma to add tags
+            Enter oder Komma drücken, um Tags hinzuzufügen
           </div>
         </div>
       </div>
 
       <div className={clsx('flex', 'items-center', 'mb-2.5')}>
-        <span className={classLabel}>Warmup Time (s)</span>
+        <span className={classLabel}>Aufwärmzeit (s)</span>
         <input
           className={classTextInput}
           type="number"
@@ -687,7 +687,7 @@ const InfoPanel = () => {
       {!useMultiTaskMode && (
         <>
           <div className={clsx('flex', 'items-center', 'mb-2.5')}>
-            <span className={classLabel}>Episode Time (s)</span>
+            <span className={classLabel}>Episodenzeit (s)</span>
             <input
               className={classTextInput}
               type="number"
@@ -701,7 +701,7 @@ const InfoPanel = () => {
           </div>
 
           <div className={clsx('flex', 'items-center', 'mb-2.5')}>
-            <span className={classLabel}>Reset Time (s)</span>
+            <span className={classLabel}>Rücksetzzeit (s)</span>
             <input
               className={classTextInput}
               type="number"
@@ -715,7 +715,7 @@ const InfoPanel = () => {
           </div>
 
           <div className={clsx('flex', 'items-center', 'mb-2.5')}>
-            <span className={classLabel}>Num Episodes</span>
+            <span className={classLabel}>Anz. Episoden</span>
             <input
               className={classTextInput}
               type="number"
@@ -731,7 +731,7 @@ const InfoPanel = () => {
       )}
 
       <div className={clsx('flex', 'items-center', 'mb-2')}>
-        <span className={classLabel}>Optimized Save</span>
+        <span className={classLabel}>Optimiertes Speichern</span>
         <div className="flex flex-col">
           <div className={clsx('flex', 'items-center')}>
             <input
@@ -744,17 +744,17 @@ const InfoPanel = () => {
               disabled={!isEditable || useMultiTaskMode}
             />
             <span className={clsx('ml-2', 'text-sm', 'text-gray-500')}>
-              {info.useOptimizedSave ? 'Enabled' : 'Disabled'}
+              {info.useOptimizedSave ? 'Aktiviert' : 'Deaktiviert'}
             </span>
           </div>
           {useMultiTaskMode && (
-            <span className="text-xs text-blue-600 ml-1">(Auto-enabled in Multi-Task mode)</span>
+            <span className="text-xs text-teal-600 ml-1">(Auto-enabled in Multi-Task mode)</span>
           )}
         </div>
       </div>
 
       <div className={clsx('flex', 'items-center', 'mb-2')}>
-        <span className={classLabel}>Record Rosbag2</span>
+        <span className={classLabel}>Rosbag2 aufzeichnen</span>
         <div className="flex flex-col">
           <div className={clsx('flex', 'items-center')}>
             <input
@@ -767,11 +767,11 @@ const InfoPanel = () => {
               disabled={!isEditable || useMultiTaskMode}
             />
             <span className={clsx('ml-2', 'text-sm', 'text-gray-500')}>
-              {info.recordRosBag2 ? 'Enabled' : 'Disabled'}
+              {info.recordRosBag2 ? 'Aktiviert' : 'Deaktiviert'}
             </span>
           </div>
           {useMultiTaskMode && (
-            <span className="text-xs text-blue-600 ml-1">(Auto-disabled in Multi-Task mode)</span>
+            <span className="text-xs text-teal-600 ml-1">(Auto-disabled in Multi-Task mode)</span>
           )}
         </div>
       </div>
@@ -787,7 +787,7 @@ const InfoPanel = () => {
             'font-medium',
             'transition-colors',
             {
-              'bg-blue-500 text-white hover:bg-blue-600': isEditable,
+              'bg-teal-500 text-white hover:bg-teal-600': isEditable,
               'bg-gray-400 text-gray-600 cursor-not-allowed': !isEditable,
             },
             'hidden'
@@ -807,7 +807,7 @@ const InfoPanel = () => {
               {taskInfoList.map((item, idx) => (
                 <div
                   key={idx}
-                  className="p-4 border rounded cursor-pointer hover:bg-blue-100"
+                  className="p-4 border rounded cursor-pointer hover:bg-teal-100"
                   onClick={() => handleSelect(item)}
                 >
                   <div className="font-semibold">{item.taskName}</div>
@@ -820,7 +820,7 @@ const InfoPanel = () => {
               className="mt-6 px-4 py-2 bg-gray-400 text-white rounded"
               onClick={() => setShowPopup(false)}
             >
-              Cancel
+              Abbrechen
             </button>
           </div>
         </div>

@@ -1,4 +1,4 @@
-// Copyright 2025 ROBOTIS CO., LTD.
+// Copyright 2025 EduBotics
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -95,7 +95,7 @@ export default function TaskSelector({ onTaskSelect, yamlContent }) {
           onClick={() => setIsOpen(!isOpen)}
           disabled={tasks.length === 0}
         >
-          {tasks.length === 0 ? 'No Tasks' : 'Select Task'}
+          {tasks.length === 0 ? 'Keine Aufgaben' : 'Aufgabe auswählen'}
         </button>
       </div>
 

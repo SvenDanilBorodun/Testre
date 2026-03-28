@@ -1,4 +1,4 @@
-// Copyright 2025 ROBOTIS CO., LTD.
+// Copyright 2025 EduBotics
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -414,9 +414,7 @@ export function useRosTopicSubscription() {
           setTrainingInfo({
             datasetRepoId: msg.training_info.dataset || '',
             policyType: msg.training_info.policy_type || '',
-            policyDevice: msg.training_info.policy_device || '',
             outputFolderName: msg.training_info.output_folder_name || '',
-            resume: msg.training_info.resume || false,
             seed: msg.training_info.seed || 0,
             numWorkers: msg.training_info.num_workers || 0,
             batchSize: msg.training_info.batch_size || 0,

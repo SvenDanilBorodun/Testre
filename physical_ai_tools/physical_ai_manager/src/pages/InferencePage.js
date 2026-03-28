@@ -1,4 +1,4 @@
-// Copyright 2025 ROBOTIS CO., LTD.
+// Copyright 2025 EduBotics
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -50,7 +50,7 @@ export default function InferencePage({ isActive = true }) {
   useEffect(() => {
     if (isFirstLoad && taskStatus.robotType !== '' && taskInfo.tags.length === 0) {
       dispatch(addTag(taskStatus.robotType));
-      dispatch(addTag('robotis'));
+      dispatch(addTag('edubotics'));
     }
     dispatch(setIsFirstLoadFalse('inference'));
   }, [taskInfo.tags, taskStatus.robotType, dispatch, isFirstLoad]);
@@ -150,7 +150,7 @@ export default function InferencePage({ isActive = true }) {
   );
   const classRobotType = clsx('ml-2 mr-1 my-2 text-gray-600 text-lg');
   const classRobotTypeValue = clsx(
-    'mx-1 my-2 px-2 text-lg text-blue-600 focus:outline-none bg-blue-100 rounded-full'
+    'mx-1 my-2 px-2 text-lg text-teal-600 focus:outline-none bg-teal-50 rounded-full'
   );
 
   const classHeartbeatStatus = clsx('absolute', 'top-20', 'left-5', 'z-10');
@@ -160,7 +160,7 @@ export default function InferencePage({ isActive = true }) {
       <div className={classContentsArea}>
         <div className="w-full h-full flex flex-col relative">
           <div className={classRobotTypeContainer}>
-            <div className={classRobotType}>Robot Type</div>
+            <div className={classRobotType}>Robotertyp</div>
             <div className={classRobotTypeValue}>{taskStatus?.robotType}</div>
           </div>
           <div className={classHeartbeatStatus}>

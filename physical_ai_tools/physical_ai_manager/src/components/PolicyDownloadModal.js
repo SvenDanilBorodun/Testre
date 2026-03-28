@@ -1,4 +1,4 @@
-// Copyright 2025 ROBOTIS CO., LTD.
+// Copyright 2025 EduBotics
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -81,7 +81,7 @@ const STYLES = {
     'rounded-md',
     'focus:outline-none',
     'focus:ring-2',
-    'focus:ring-blue-500',
+    'focus:ring-teal-500',
     'focus:border-transparent'
   ),
   selectUserID: clsx(
@@ -96,7 +96,7 @@ const STYLES = {
     'rounded-md',
     'focus:outline-none',
     'focus:ring-2',
-    'focus:ring-blue-500',
+    'focus:ring-teal-500',
     'focus:border-transparent'
   ),
   loadUserButton: clsx('px-3', 'py-1', 'text-md', 'font-medium', 'rounded-xl', 'transition-colors'),
@@ -138,7 +138,7 @@ const PolicyDownloadModal = ({ isOpen, onClose, onDownloadComplete }) => {
   const getButtonVariant = (variant, isActive = true, isLoading = false) => {
     const variants = {
       blue: {
-        active: 'bg-blue-200 text-blue-800 hover:bg-blue-300',
+        active: 'bg-teal-200 text-teal-800 hover:bg-teal-300',
         disabled: 'bg-gray-200 text-gray-500 cursor-not-allowed',
       },
       red: {
@@ -158,7 +158,7 @@ const PolicyDownloadModal = ({ isOpen, onClose, onDownloadComplete }) => {
   // Token related handlers
   const handleTokenSubmit = async (token) => {
     if (!token || !token.trim()) {
-      toast.error('Please enter a token');
+      toast.error('Bitte gib ein Token ein');
       return;
     }
 
@@ -170,7 +170,7 @@ const PolicyDownloadModal = ({ isOpen, onClose, onDownloadComplete }) => {
       if (result && result.user_id_list) {
         setUserIdList(result.user_id_list);
         setShowTokenPopup(false);
-        toast.success('User ID list updated successfully!');
+        toast.success('Benutzer-ID-Liste erfolgreich aktualisiert!');
       } else {
         toast.error('Failed to get user ID list from response');
       }
@@ -191,7 +191,7 @@ const PolicyDownloadModal = ({ isOpen, onClose, onDownloadComplete }) => {
       if (result && result.user_id_list) {
         if (result.success) {
           setUserIdList(result.user_id_list);
-          toast.success('User ID list loaded successfully!');
+          toast.success('Benutzer-ID-Liste erfolgreich geladen!');
         } else {
           toast.error('Failed to get user ID list:\n' + result.message);
         }
@@ -338,9 +338,9 @@ const PolicyDownloadModal = ({ isOpen, onClose, onDownloadComplete }) => {
             {/* Modal Header */}
             <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200">
               <div className="flex items-center gap-3">
-                <MdOutlineFileDownload className="text-2xl text-blue-600" />
+                <MdOutlineFileDownload className="text-2xl text-teal-600" />
                 <h2 className="text-xl font-semibold text-gray-900">
-                  Download Policy from Hugging Face
+                  Modell von Hugging Face herunterladen
                 </h2>
               </div>
               <button
@@ -357,12 +357,12 @@ const PolicyDownloadModal = ({ isOpen, onClose, onDownloadComplete }) => {
               {/* Download Policy Section Header */}
               <div className="w-full flex flex-col items-start justify-start gap-2 bg-gray-50 border border-gray-200 p-3 mb-2 rounded-md">
                 <div className="w-full flex items-center rounded-md font-medium gap-2">
-                  <MdOutlineFileDownload className="text-lg text-blue-600" />
-                  Download Policy
+                  <MdOutlineFileDownload className="text-lg text-teal-600" />
+                  Modell herunterladen
                 </div>
                 <div className="text-sm text-gray-600">
                   <div className="mb-1">
-                    Downloads policy model from Hugging Face hub to local directory
+                    Lädt Modell von Hugging Face Hub in lokales Verzeichnis herunter
                   </div>
                 </div>
               </div>
@@ -371,7 +371,7 @@ const PolicyDownloadModal = ({ isOpen, onClose, onDownloadComplete }) => {
                 {/* User ID Selection */}
                 <div className="bg-white p-4 rounded-md flex flex-col items-start justify-center gap-4 shadow-md">
                   <div className="w-full flex items-center justify-start">
-                    <span className="text-lg font-bold">User ID Configuration</span>
+                    <span className="text-lg font-bold">Benutzer-ID Konfiguration</span>
                   </div>
                   <div
                     className={clsx('w-full flex flex-row gap-3', {
@@ -384,7 +384,7 @@ const PolicyDownloadModal = ({ isOpen, onClose, onDownloadComplete }) => {
                       onChange={(e) => setUserId(e.target.value)}
                       disabled={isDownloading}
                     >
-                      <option value="">Select User ID</option>
+                      <option value="">Benutzer-ID auswählen</option>
                       {userIdList.map((id) => (
                         <option key={id} value={id}>
                           {id}
@@ -404,7 +404,7 @@ const PolicyDownloadModal = ({ isOpen, onClose, onDownloadComplete }) => {
                         }}
                         disabled={isLoading}
                       >
-                        {isLoading ? 'Loading...' : 'Load'}
+                        {isLoading ? 'Laden...' : 'Laden'}
                       </button>
                       <button
                         className={clsx(
@@ -418,7 +418,7 @@ const PolicyDownloadModal = ({ isOpen, onClose, onDownloadComplete }) => {
                         }}
                         disabled={isLoading}
                       >
-                        Change
+                        Ändern
                       </button>
                     </div>
                   </div>
@@ -434,7 +434,7 @@ const PolicyDownloadModal = ({ isOpen, onClose, onDownloadComplete }) => {
                           className={clsx(
                             'flex items-center border rounded-md overflow-hidden bg-white focus-within:ring-2',
                             {
-                              'border-gray-300 focus-within:ring-blue-500 focus-within:border-transparent':
+                              'border-gray-300 focus-within:ring-teal-500 focus-within:border-transparent':
                                 repoValidation.isValid || !hfRepoId,
                               'border-red-300 focus-within:ring-red-500 focus-within:border-transparent':
                                 !repoValidation.isValid && hfRepoId,
@@ -462,8 +462,8 @@ const PolicyDownloadModal = ({ isOpen, onClose, onDownloadComplete }) => {
                         </div>
                         <div className="mt-1 text-xs">
                           <div className="text-gray-500">
-                            Full repository path:{' '}
-                            <span className="font-mono text-blue-600">
+                            Vollständiger Repository-Pfad:{' '}
+                            <span className="font-mono text-teal-600">
                               {userId || ''}/{hfRepoId || ''}
                             </span>
                           </div>
@@ -477,9 +477,9 @@ const PolicyDownloadModal = ({ isOpen, onClose, onDownloadComplete }) => {
                     {/* Info message: Policy save path with folder icon */}
                     <div className="w-full flex flex-row items-center mt-1">
                       <span className="text-xs text-gray-600 flex items-center gap-1">
-                        <MdOutlineFileDownload className="inline-block w-4 h-4 text-blue-700 mr-1" />
-                        The policy will be saved in{' '}
-                        <span className="font-mono text-blue-700">
+                        <MdOutlineFileDownload className="inline-block w-4 h-4 text-teal-700 mr-1" />
+                        Das Modell wird gespeichert in{' '}
+                        <span className="font-mono text-teal-700">
                           {DEFAULT_PATHS.POLICY_MODEL_PATH}
                         </span>
                       </span>
@@ -496,7 +496,7 @@ const PolicyDownloadModal = ({ isOpen, onClose, onDownloadComplete }) => {
                           'rounded-lg',
                           'transition-colors',
                           {
-                            'bg-blue-500 text-white hover:bg-blue-600': downloadButtonEnabled,
+                            'bg-teal-500 text-white hover:bg-teal-600': downloadButtonEnabled,
                             'bg-gray-300 text-gray-500 cursor-not-allowed': !downloadButtonEnabled,
                           }
                         )}
@@ -505,7 +505,7 @@ const PolicyDownloadModal = ({ isOpen, onClose, onDownloadComplete }) => {
                       >
                         <div className="flex items-center justify-center gap-2">
                           <MdOutlineFileDownload className="w-6 h-6" />
-                          Download
+                          Herunterladen
                         </div>
                       </button>
 
@@ -518,18 +518,18 @@ const PolicyDownloadModal = ({ isOpen, onClose, onDownloadComplete }) => {
                         onClick={handleCancelDownload}
                         disabled={!isDownloading}
                       >
-                        Cancel
+                        Abbrechen
                       </button>
 
                       {/* Status */}
                       <div className="flex flex-row items-center justify-start gap-2">
                         <span className="text-sm text-gray-500">
-                          {isDownloading && '⏳ Downloading...'}
+                          {isDownloading && '⏳ Wird heruntergeladen...'}
                           {!isDownloading && hfStatus}{' '}
                         </span>
                         {/* Spinner for model downloads - right next to status text */}
                         {isDownloading && (
-                          <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-blue-600"></div>
+                          <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-teal-600"></div>
                         )}
                       </div>
                     </div>
@@ -550,14 +550,14 @@ const PolicyDownloadModal = ({ isOpen, onClose, onDownloadComplete }) => {
                 })}
                 disabled={!finalStatus}
               >
-                Finish
+                Beenden
               </button>
               <button
                 onClick={onClose}
                 className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 border border-gray-300 rounded-md hover:bg-gray-200 transition-colors"
                 disabled={!canCloseModal}
               >
-                {isDownloading ? 'Downloading...' : 'Cancel'}
+                {isDownloading ? 'Wird heruntergeladen...' : 'Abbrechen'}
               </button>
             </div>
           </div>

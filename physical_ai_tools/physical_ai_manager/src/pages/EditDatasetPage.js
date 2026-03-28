@@ -1,4 +1,4 @@
-// Copyright 2025 ROBOTIS CO., LTD.
+// Copyright 2025 EduBotics
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -39,19 +39,19 @@ const SECTION_TYPES = {
 
 const SECTION_CONFIG = {
   [SECTION_TYPES.HUGGINGFACE]: {
-    label: 'Upload & Download data',
+    label: 'Daten hoch- & herunterladen',
     icon: MdCloudUpload,
     description: 'Hugging Face',
   },
   [SECTION_TYPES.MERGE]: {
-    label: 'Merge Dataset',
+    label: 'Datens\u00e4tze zusammenf\u00fchren',
     icon: MdMerge,
-    description: 'Combine multiple datasets',
+    description: 'Mehrere Datens\u00e4tze kombinieren',
   },
   [SECTION_TYPES.DELETE]: {
-    label: 'Delete Episodes',
+    label: 'Episoden l\u00f6schen',
     icon: MdDeleteSweep,
-    description: 'Remove specific episodes from dataset',
+    description: 'Bestimmte Episoden aus dem Datensatz entfernen',
   },
 };
 
@@ -96,7 +96,7 @@ export default function EditDatasetPage() {
         <span className="mr-2">
           <MdOutlineTouchApp className="inline-block w-5 h-5 text-gray-400" />
         </span>
-        What would you like to do?
+        Was m\u00f6chtest du tun?
       </div>
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         {Object.entries(SECTION_CONFIG).map(([sectionType, config]) => {
@@ -109,22 +109,22 @@ export default function EditDatasetPage() {
               onClick={() => setActiveSection(sectionType)}
               className={clsx(
                 'flex flex-col items-center justify-center p-4 rounded-lg border transition-all duration-200',
-                'hover:shadow-sm focus:outline-none focus:ring-1 focus:ring-blue-400 focus:ring-opacity-30',
+                'hover:shadow-sm focus:outline-none focus:ring-1 focus:ring-teal-500 focus:ring-opacity-30',
                 {
-                  'border-blue-300 bg-blue-50/50 shadow-sm': isActive,
+                  'border-teal-300 bg-teal-50/50 shadow-sm': isActive,
                   'border-gray-200 bg-white hover:border-gray-300 hover:shadow-sm': !isActive,
                 }
               )}
             >
               <IconComponent
                 className={clsx('w-10 h-10 mb-2', {
-                  'text-blue-500': isActive,
+                  'text-teal-500': isActive,
                   'text-gray-400': !isActive,
                 })}
               />
               <h3
                 className={clsx('text-base font-medium mb-1', {
-                  'text-blue-700': isActive,
+                  'text-teal-700': isActive,
                   'text-gray-600': !isActive,
                 })}
               >
@@ -132,7 +132,7 @@ export default function EditDatasetPage() {
               </h3>
               <p
                 className={clsx('text-xs text-center', {
-                  'text-blue-600': isActive,
+                  'text-teal-600': isActive,
                   'text-gray-500': !isActive,
                 })}
               >
@@ -164,7 +164,7 @@ export default function EditDatasetPage() {
       <div className="w-full flex flex-col items-start justify-start p-10 gap-6">
         <h1 className="text-4xl font-bold flex flex-row items-center justify-start gap-2">
           <MdWidgets className="w-10 h-10" />
-          Data Tools
+          Datenwerkzeuge
         </h1>
 
         {renderSectionSelector()}

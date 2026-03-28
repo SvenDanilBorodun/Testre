@@ -1,4 +1,4 @@
-// Copyright 2025 ROBOTIS CO., LTD.
+// Copyright 2025 EduBotics
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -47,7 +47,7 @@ export default function HeartbeatStatus({
           color: 'text-green-500',
           bgColor: 'bg-green-100',
           borderColor: 'border-green-300',
-          label: 'Connected',
+          label: 'Verbunden',
           description: `Last heartbeat: ${
             lastHeartbeatTime ? new Date(lastHeartbeatTime).toLocaleTimeString() : 'Never'
           }`,
@@ -68,7 +68,7 @@ export default function HeartbeatStatus({
           color: 'text-red-500',
           bgColor: 'bg-red-100',
           borderColor: 'border-red-300',
-          label: 'Disconnected',
+          label: 'Getrennt',
           description: 'ROS connection not available',
         };
     }

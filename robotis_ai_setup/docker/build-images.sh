@@ -51,7 +51,22 @@ done
 # ── Image 1: physical_ai_manager (React + nginx) ──
 echo ""
 echo ">> Building physical_ai_manager..."
+# Cloud training env vars are baked into the React build
+SUPABASE_URL=${SUPABASE_URL:-}
+SUPABASE_ANON_KEY=${SUPABASE_ANON_KEY:-}
+CLOUD_API_URL=${CLOUD_API_URL:-}
+BUILD_ARGS=""
+if [ -n "$SUPABASE_URL" ]; then
+    BUILD_ARGS="$BUILD_ARGS --build-arg REACT_APP_SUPABASE_URL=${SUPABASE_URL}"
+fi
+if [ -n "$SUPABASE_ANON_KEY" ]; then
+    BUILD_ARGS="$BUILD_ARGS --build-arg REACT_APP_SUPABASE_ANON_KEY=${SUPABASE_ANON_KEY}"
+fi
+if [ -n "$CLOUD_API_URL" ]; then
+    BUILD_ARGS="$BUILD_ARGS --build-arg REACT_APP_CLOUD_API_URL=${CLOUD_API_URL}"
+fi
 docker build \
+    $BUILD_ARGS \
     -t "${REGISTRY}/physical-ai-manager:latest" \
     -f "${PHYSICAL_AI_TOOLS_DIR}/physical_ai_manager/Dockerfile" \
     "${PHYSICAL_AI_TOOLS_DIR}/physical_ai_manager/"

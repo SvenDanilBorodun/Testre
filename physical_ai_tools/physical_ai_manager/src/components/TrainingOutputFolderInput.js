@@ -1,4 +1,4 @@
-// Copyright 2025 ROBOTIS CO., LTD.
+// Copyright 2025 EduBotics
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -54,7 +54,7 @@ export default function TrainingOutputFolderInput({ readonly = false }) {
     'rounded-md',
     'focus:outline-none',
     'focus:ring-2',
-    'focus:ring-blue-500',
+    'focus:ring-teal-500',
     'focus:border-transparent'
   );
 
@@ -117,12 +117,12 @@ export default function TrainingOutputFolderInput({ readonly = false }) {
 
   return (
     <div className={classCard}>
-      <h1 className={classTitle}>Output folder name</h1>
+      <h1 className={classTitle}>Ausgabeordnername</h1>
       <div className="flex flex-row gap-2 items-center justify-center">
-        {!duplicateChecked && !readonly && <p className="text-gray-500">Please check duplicate</p>}
+        {!duplicateChecked && !readonly && <p className="text-gray-500">Bitte auf Duplikat prüfen</p>}
         {duplicateChecked &&
           (isOutputFolderAvailable ? (
-            <p className="text-blue-500 break-all">{tempOutputFolderName} is available</p>
+            <p className="text-teal-500 break-all">{tempOutputFolderName} is available</p>
           ) : (
             <p className="text-red-500 break-all">{tempOutputFolderName} already exists</p>
           ))}
@@ -131,7 +131,7 @@ export default function TrainingOutputFolderInput({ readonly = false }) {
         type="text"
         className={classInput}
         disabled={checkingDuplicate || readonly}
-        placeholder="Enter your text here..."
+        placeholder="Text hier eingeben..."
         value={tempOutputFolderName}
         onChange={(e) => {
           setTempOutputFolderName(e.target.value);
@@ -149,7 +149,7 @@ export default function TrainingOutputFolderInput({ readonly = false }) {
               checkingDuplicate || duplicateChecked || tempOutputFolderName === '' || readonly
             }
           >
-            Check duplicate
+            Duplikat prüfen
           </button>
         </>
       )}

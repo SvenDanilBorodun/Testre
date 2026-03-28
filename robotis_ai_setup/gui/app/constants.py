@@ -1,9 +1,9 @@
-"""Shared constants for the ROBOTIS AI Setup GUI."""
+"""Gemeinsame Konstanten für das EduBotics Setup."""
 
 import os
 
-# Docker image registry — override with ROBOTIS_REGISTRY env var
-REGISTRY = os.environ.get("ROBOTIS_REGISTRY", "nettername")
+# Docker image registry — override with EDUBOTICS_REGISTRY env var
+REGISTRY = os.environ.get("EDUBOTICS_REGISTRY", "nettername")
 
 # Docker image names
 IMAGE_OPEN_MANIPULATOR = f"{REGISTRY}/open-manipulator:latest"
@@ -30,7 +30,7 @@ ROS_DOMAIN_ID = 30
 # Paths — auto-detect dev environment vs installed
 def _resolve_install_dir() -> str:
     """Return the install dir: env override > dev tree > default installed path."""
-    env_dir = os.environ.get("ROBOTIS_INSTALL_DIR")
+    env_dir = os.environ.get("EDUBOTICS_INSTALL_DIR")
     if env_dir:
         return env_dir
     # Check if we're running from the source tree (gui/app/constants.py)
@@ -39,7 +39,7 @@ def _resolve_install_dir() -> str:
     dev_compose = os.path.join(project_root, "docker", "docker-compose.yml")
     if os.path.isfile(dev_compose):
         return project_root
-    return r"C:\Program Files\ROBOTIS AI"
+    return r"C:\Program Files\EduBotics"
 
 INSTALL_DIR = _resolve_install_dir()
 DOCKER_DIR = os.path.join(INSTALL_DIR, "docker")

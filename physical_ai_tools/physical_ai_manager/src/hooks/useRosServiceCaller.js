@@ -1,4 +1,4 @@
-// Copyright 2025 ROBOTIS CO., LTD.
+// Copyright 2025 EduBotics
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -27,7 +27,6 @@ import { DEFAULT_PATHS } from '../constants/paths';
 export function useRosServiceCaller() {
   const taskInfo = useSelector((state) => state.tasks.taskInfo);
   const trainingInfo = useSelector((state) => state.training.trainingInfo);
-  const trainingResumePolicyPath = useSelector((state) => state.training.resumePolicyPath);
   const editDatasetInfo = useSelector((state) => state.editDataset);
   const page = useSelector((state) => state.ui.currentPage);
   const rosbridgeUrl = useSelector((state) => state.ros.rosbridgeUrl);
@@ -344,9 +343,6 @@ export function useRosServiceCaller() {
           case 'start':
             command_enum = TrainingCommand.START;
             break;
-          case 'resume':
-            command_enum = TrainingCommand.START;
-            break;
           case 'finish':
             command_enum = TrainingCommand.FINISH;
             break;
@@ -354,23 +350,12 @@ export function useRosServiceCaller() {
             throw new Error(`Unknown command: ${command}`);
         }
 
-        // Get relative path after base path
-        const getRelativePath = (fullPath) => {
-          const REQUIRED_BASE_PATH = DEFAULT_PATHS.POLICY_MODEL_PATH;
-
-          if (!fullPath) return '';
-          if (fullPath.startsWith(REQUIRED_BASE_PATH)) {
-            return fullPath.substring(REQUIRED_BASE_PATH.length);
-          }
-          return fullPath;
-        };
-
         const request = {
           command: command_enum,
           training_info: {
             dataset: trainingInfo.datasetRepoId,
             policy_type: trainingInfo.policyType,
-            policy_device: trainingInfo.policyDevice,
+            policy_device: 'cuda',
             output_folder_name: trainingInfo.outputFolderName,
             seed: trainingInfo.seed,
             num_workers: trainingInfo.numWorkers,
@@ -380,8 +365,8 @@ export function useRosServiceCaller() {
             log_freq: trainingInfo.logFreq,
             save_freq: trainingInfo.saveFreq,
           },
-          resume: command === 'resume',
-          resume_model_path: command === 'resume' ? getRelativePath(trainingResumePolicyPath) : '',
+          resume: false,
+          resume_model_path: '',
         };
 
         console.log('Calling service /training/send_training_command with request:', request);
@@ -399,7 +384,7 @@ export function useRosServiceCaller() {
         throw new Error(`${error.message || error}`);
       }
     },
-    [callService, trainingInfo, trainingResumePolicyPath]
+    [callService, trainingInfo]
   );
 
   const browseFile = useCallback(

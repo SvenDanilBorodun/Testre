@@ -1,4 +1,4 @@
-// Copyright 2025 ROBOTIS CO., LTD.
+// Copyright 2025 EduBotics
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -163,10 +163,10 @@ export default function FileBrowserModal({
   const classConfirmButton = clsx(
     'px-4',
     'py-2',
-    'bg-blue-600',
+    'bg-teal-600',
     'text-white',
     'rounded-lg',
-    'hover:bg-blue-700',
+    'hover:bg-teal-700',
     'disabled:bg-gray-300',
     'disabled:cursor-not-allowed',
     'transition-colors'
@@ -235,7 +235,7 @@ export default function FileBrowserModal({
 
             <div className={classButtonContainer}>
               <button onClick={handleCancel} className={classCancelButton}>
-                Cancel
+                Abbrechen
               </button>
               <button
                 onClick={handleConfirm}

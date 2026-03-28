@@ -1,4 +1,4 @@
-// Copyright 2025 ROBOTIS CO., LTD.
+// Copyright 2025 EduBotics
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -87,8 +87,8 @@ const FileBrowserHeader = ({
   const classButton = clsx(
     'p-2',
     'text-gray-600',
-    'hover:text-blue-600',
-    'hover:bg-blue-50',
+    'hover:text-teal-600',
+    'hover:bg-teal-50',
     'rounded-lg',
     'transition-colors'
   );
@@ -208,16 +208,16 @@ const FileItem = ({
     'py-3',
     'cursor-pointer',
     'transition-colors',
-    hasTarget ? 'hover:bg-green-50 bg-green-25' : 'hover:bg-blue-50',
+    hasTarget ? 'hover:bg-green-50 bg-green-25' : 'hover:bg-teal-50',
     isSelected &&
       (hasTarget
         ? 'bg-green-100 border-l-4 border-green-500'
-        : 'bg-blue-100 border-l-4 border-blue-500')
+        : 'bg-teal-100 border-l-4 border-teal-500')
   );
 
   const classIconContainer = clsx('flex-shrink-0', 'mr-3', 'relative');
 
-  const classFolderIcon = clsx('w-5', 'h-5', hasTarget ? 'text-green-500' : 'text-blue-500');
+  const classFolderIcon = clsx('w-5', 'h-5', hasTarget ? 'text-green-500' : 'text-teal-500');
 
   const classStarIcon = clsx('w-3', 'h-3', 'text-yellow-500', 'absolute', '-top-1', '-right-1');
 
@@ -246,7 +246,7 @@ const FileItem = ({
     'rounded-full'
   );
 
-  const classCheckIcon = clsx('w-4', 'h-4', 'ml-2', hasTarget ? 'text-green-600' : 'text-blue-600');
+  const classCheckIcon = clsx('w-4', 'h-4', 'ml-2', hasTarget ? 'text-green-600' : 'text-teal-600');
 
   const classMetaRow = clsx('flex', 'items-center', 'mt-1', 'text-xs', 'text-gray-500');
 
@@ -267,8 +267,8 @@ const FileItem = ({
     'border',
     'transition-colors',
     isSelected
-      ? 'bg-blue-600 text-white border-blue-600'
-      : 'bg-white text-blue-600 border-blue-300 hover:bg-blue-50'
+      ? 'bg-teal-600 text-white border-teal-600'
+      : 'bg-white text-teal-600 border-teal-300 hover:bg-teal-50'
   );
 
   const handleItemClick = (e) => {
@@ -316,7 +316,7 @@ const FileItem = ({
                 className={`${classSelectButton} select-button`}
                 title={`Select this ${item.is_directory ? 'folder' : 'file'}`}
               >
-                {isSelected ? 'Selected' : 'Select'}
+                {isSelected ? 'Ausgewählt' : 'Auswählen'}
               </button>
             )}
             {isSelected && <MdCheck className={classCheckIcon} />}
@@ -329,7 +329,7 @@ const FileItem = ({
           {canSelectDirectory && (
             <>
               <span className="mx-2">•</span>
-              <span className="text-blue-600 font-medium">Selectable folder</span>
+              <span className="text-teal-600 font-medium">Selectable folder</span>
             </>
           )}
           {item.is_directory && !allowDirectorySelect && (
@@ -363,7 +363,7 @@ const LoadingState = () => {
     'h-6',
     'w-6',
     'border-b-2',
-    'border-blue-600'
+    'border-teal-600'
   );
 
   const classText = clsx('ml-2', 'text-gray-600');
@@ -371,7 +371,7 @@ const LoadingState = () => {
   return (
     <div className={classContainer}>
       <div className={classSpinner}></div>
-      <span className={classText}>Loading...</span>
+      <span className={classText}>Laden...</span>
     </div>
   );
 };
@@ -414,25 +414,25 @@ const SelectedItemInfo = ({
     'px-4',
     'py-3',
     'border-t',
-    isTargetDirectory ? 'bg-green-50 border-green-200' : 'bg-blue-50 border-blue-200'
+    isTargetDirectory ? 'bg-green-50 border-green-200' : 'bg-teal-50 border-teal-200'
   );
 
   const classContent = clsx('text-sm');
 
-  const classLabel = clsx('font-medium', isTargetDirectory ? 'text-green-900' : 'text-blue-900');
+  const classLabel = clsx('font-medium', isTargetDirectory ? 'text-green-900' : 'text-teal-900');
 
   const classPath = clsx(
     'font-mono',
     'break-all',
     'mt-1',
-    isTargetDirectory ? 'text-green-700' : 'text-blue-700'
+    isTargetDirectory ? 'text-green-700' : 'text-teal-700'
   );
 
   const classTargetInfo = clsx('text-green-600', 'text-xs', 'mt-2', 'flex', 'items-center');
 
-  const classFileLabel = clsx('font-medium', 'text-blue-900');
+  const classFileLabel = clsx('font-medium', 'text-teal-900');
 
-  const classFilePath = clsx('text-blue-700', 'font-mono', 'break-all', 'mt-1');
+  const classFilePath = clsx('text-teal-700', 'font-mono', 'break-all', 'mt-1');
 
   const classStarIcon = clsx('w-3', 'h-3', 'mr-1');
 

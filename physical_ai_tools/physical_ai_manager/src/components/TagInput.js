@@ -1,4 +1,4 @@
-// Copyright 2025 ROBOTIS CO., LTD.
+// Copyright 2025 EduBotics
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -75,7 +75,7 @@ const TagInput = ({ tags, onChange, disabled, className }) => {
         'w-full',
         'text-sm',
         'focus-within:ring-2',
-        'focus-within:ring-blue-500',
+        'focus-within:ring-teal-500',
         'focus-within:border-transparent',
         'max-h-24',
         'overflow-y-auto',
@@ -100,8 +100,8 @@ const TagInput = ({ tags, onChange, disabled, className }) => {
             'items-center',
             'px-2',
             'py-1',
-            'bg-blue-100',
-            'text-blue-800',
+            'bg-teal-100',
+            'text-teal-800',
             'text-xs',
             'font-medium',
             'rounded-full',
@@ -118,7 +118,7 @@ const TagInput = ({ tags, onChange, disabled, className }) => {
             <button
               type="button"
               onClick={() => removeTag(index)}
-              className={clsx('ml-1', 'text-blue-600', 'hover:text-blue-800', 'focus:outline-none')}
+              className={clsx('ml-1', 'text-teal-600', 'hover:text-teal-800', 'focus:outline-none')}
             >
               ×
             </button>

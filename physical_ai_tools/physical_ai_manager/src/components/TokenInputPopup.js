@@ -1,4 +1,4 @@
-// Copyright 2025 ROBOTIS CO., LTD.
+// Copyright 2025 EduBotics
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -23,7 +23,7 @@ const TokenInputPopup = ({
   onClose,
   onSubmit,
   isLoading = false,
-  title = 'Enter Hugging Face Token',
+  title = 'Hugging Face Token eingeben',
 }) => {
   const [tokenInput, setTokenInput] = useState('');
   const [showPassword, setShowPassword] = useState(false);
@@ -86,13 +86,13 @@ const TokenInputPopup = ({
                 'rounded-md',
                 'focus:outline-none',
                 'focus:ring-2',
-                'focus:ring-blue-500',
+                'focus:ring-teal-500',
                 'focus:border-transparent'
               )}
               value={tokenInput}
               onChange={(e) => setTokenInput(e.target.value)}
               onKeyPress={handleKeyPress}
-              placeholder="Enter your Hugging Face token"
+              placeholder="Dein Hugging Face Token eingeben"
               disabled={isLoading}
               autoFocus
               autoComplete="off"
@@ -113,7 +113,7 @@ const TokenInputPopup = ({
             </button>
           </div>
           <div className="text-xs text-gray-500 mt-1">
-            This token will be used to fetch your available User IDs
+            Dieses Token wird verwendet, um deine verfügbaren Benutzer-IDs abzurufen
           </div>
         </div>
         <div className="flex gap-3">
@@ -126,21 +126,21 @@ const TokenInputPopup = ({
               'font-medium',
               'transition-colors',
               {
-                'bg-blue-500 text-white hover:bg-blue-600': !isLoading,
+                'bg-teal-500 text-white hover:bg-teal-600': !isLoading,
                 'bg-gray-400 text-gray-600 cursor-not-allowed': isLoading,
               }
             )}
             onClick={handleSubmit}
             disabled={isLoading}
           >
-            {isLoading ? 'Loading...' : 'Submit'}
+            {isLoading ? 'Laden...' : 'Absenden'}
           </button>
           <button
             className="flex-1 px-4 py-2 bg-gray-400 text-white rounded hover:bg-gray-500 transition-colors"
             onClick={handleClose}
             disabled={isLoading}
           >
-            Cancel
+            Abbrechen
           </button>
         </div>
       </div>

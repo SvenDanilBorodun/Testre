@@ -13,9 +13,11 @@ gui/build/
 # Installer output
 installer/output/
 
-# Environment files (contain device-specific paths)
+# Environment files (contain secrets)
 docker/.env
 !docker/.env.template
+cloud_training_api/.env
+!cloud_training_api/.env.example
 
 # OS
 Thumbs.db

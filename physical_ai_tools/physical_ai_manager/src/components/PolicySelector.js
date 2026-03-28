@@ -1,4 +1,4 @@
-// Copyright 2025 ROBOTIS CO., LTD.
+// Copyright 2025 EduBotics
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -20,9 +20,7 @@ import { MdRefresh } from 'react-icons/md';
 import { useSelector, useDispatch } from 'react-redux';
 import {
   selectPolicyType,
-  selectPolicyDevice,
   setPolicyList,
-  setDeviceList,
 } from '../features/training/trainingSlice';
 import { useRosServiceCaller } from '../hooks/useRosServiceCaller';
 import toast from 'react-hot-toast';
@@ -31,12 +29,10 @@ export default function PolicySelector({ readonly = false }) {
   const dispatch = useDispatch();
 
   const selectedPolicy = useSelector((state) => state.training.trainingInfo.policyType);
-  const selectedDevice = useSelector((state) => state.training.trainingInfo.policyDevice);
   const policyList = useSelector((state) => state.training.policyList);
-  const deviceList = useSelector((state) => state.training.deviceList);
   const isTraining = useSelector((state) => state.training.isTraining);
 
-  const title = 'Policy Selection';
+  const title = 'Modellauswahl';
 
   const [loading] = useState(false);
   const [fetching, setFetching] = useState(false);
@@ -50,8 +46,7 @@ export default function PolicySelector({ readonly = false }) {
       console.log('Policies received:', result);
       if (result && result.policy_list) {
         dispatch(setPolicyList(result.policy_list));
-        dispatch(setDeviceList(result.device_list));
-        toast.success('Policy list loaded successfully');
+        toast.success('Modellliste erfolgreich geladen');
       } else {
         toast.error('Failed to get policy list: Invalid response');
       }
@@ -83,7 +78,7 @@ export default function PolicySelector({ readonly = false }) {
     'rounded-md',
     'focus:outline-none',
     'focus:ring-2',
-    'focus:ring-blue-500',
+    'focus:ring-teal-500',
     'focus:border-transparent',
     'disabled:bg-gray-100',
     'disabled:cursor-not-allowed',
@@ -118,7 +113,7 @@ export default function PolicySelector({ readonly = false }) {
   return (
     <div className={classCard}>
       <h1 className={classTitle}>{title}</h1>
-      <label className={classLabel}>{!readonly ? 'Select Policy:' : 'Selected Policy:'}</label>
+      <label className={classLabel}>{!readonly ? 'Modell auswählen:' : 'Ausgewähltes Modell:'}</label>
 
       <select
         className={classSelect}
@@ -136,24 +131,12 @@ export default function PolicySelector({ readonly = false }) {
         ))}
       </select>
 
-      <div className="mb-4" />
+      <div className="mb-2" />
 
-      <label className={classLabel}>{!readonly ? 'Select Device:' : 'Selected Device:'}</label>
-      <select
-        className={classSelect}
-        value={selectedDevice || ''}
-        onChange={(e) => dispatch(selectPolicyDevice(e.target.value))}
-        disabled={fetching || loading || readonly}
-      >
-        <option value="" disabled={readonly}>
-          Choose device...
-        </option>
-        {deviceList.map((item) => (
-          <option key={item} value={item}>
-            {item}
-          </option>
-        ))}
-      </select>
+      <p className="text-xs text-gray-400">
+        Training läuft auf Cloud-GPU (CUDA)
+      </p>
+
       {!readonly && (
         <>
           <div className="mb-4" />
@@ -164,7 +147,7 @@ export default function PolicySelector({ readonly = false }) {
           >
             <div className="flex items-center justify-center gap-2">
               <MdRefresh size={16} className={fetching ? 'animate-spin' : ''} />
-              {fetching ? 'Loading...' : `Refresh`}
+              {fetching ? 'Laden...' : `Aktualisieren`}
             </div>
           </button>
         </>

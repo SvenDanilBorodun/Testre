@@ -1,0 +1,7 @@
+fastapi==0.115.12
+uvicorn[standard]==0.34.2
+supabase==2.15.1
+runpod==1.7.9
+httpx==0.28.1
+python-dotenv==1.1.0
+pydantic==2.11.3

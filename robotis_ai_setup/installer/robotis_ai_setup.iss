@@ -1,13 +1,13 @@
-; ROBOTIS AI Setup — Inno Setup Script
-; Builds Robotis_AI_Setup.exe installer
+; EduBotics Setup — Inno Setup Script
+; Builds EduBotics_Setup.exe installer
 
 [Setup]
-AppName=ROBOTIS AI
+AppName=EduBotics
 AppVersion=1.0.0
-AppPublisher=ROBOTIS CO., LTD.
-DefaultDirName={autopf}\ROBOTIS AI
-DefaultGroupName=ROBOTIS AI
-OutputBaseFilename=Robotis_AI_Setup
+AppPublisher=EduBotics
+DefaultDirName={autopf}\EduBotics
+DefaultGroupName=EduBotics
+OutputBaseFilename=EduBotics_Setup
 OutputDir=output
 Compression=lzma2
 SolidCompression=yes
@@ -27,59 +27,59 @@ Source: "..\docker\physical_ai_server\.s6-keep"; DestDir: "{app}\docker\physical
 
 ; GUI application (PyInstaller output)
 ; The dist folder is created by: cd gui && pyinstaller build.spec
-Source: "..\gui\dist\RobotisAI\*"; DestDir: "{app}\gui"; Flags: ignoreversion recursesubdirs
+Source: "..\gui\dist\EduBotics\*"; DestDir: "{app}\gui"; Flags: ignoreversion recursesubdirs
 
 ; Installer scripts (kept for manual troubleshooting)
 Source: "scripts\*"; DestDir: "{app}\scripts"; Flags: ignoreversion
 
 [Icons]
-Name: "{autodesktop}\Launch ROBOTIS AI"; Filename: "{app}\gui\RobotisAI.exe"; WorkingDir: "{app}"
-Name: "{group}\Launch ROBOTIS AI"; Filename: "{app}\gui\RobotisAI.exe"; WorkingDir: "{app}"
-Name: "{group}\Verify Installation"; Filename: "powershell.exe"; Parameters: "-ExecutionPolicy Bypass -File ""{app}\scripts\verify_system.ps1"""; WorkingDir: "{app}"
+Name: "{autodesktop}\EduBotics starten"; Filename: "{app}\gui\EduBotics.exe"; WorkingDir: "{app}"
+Name: "{group}\EduBotics starten"; Filename: "{app}\gui\EduBotics.exe"; WorkingDir: "{app}"
+Name: "{group}\Installation prüfen"; Filename: "powershell.exe"; Parameters: "-ExecutionPolicy Bypass -File ""{app}\scripts\verify_system.ps1"""; WorkingDir: "{app}"
 
 [Run]
 ; Post-install steps — run in order
 
-; Step 1: Install prerequisites (WSL2, Docker Desktop, usbipd)
+; Step 1: Voraussetzungen installieren (WSL2, Docker Desktop, usbipd)
 Filename: "powershell.exe"; \
-  Parameters: "-ExecutionPolicy Bypass -File ""{app}\scripts\install_prerequisites.ps1"""; \
-  StatusMsg: "Installing prerequisites (WSL2, Docker, usbipd)..."; \
-  Flags: runhidden waituntilterminated
+  Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\scripts\install_prerequisites.ps1"""; \
+  StatusMsg: "Voraussetzungen werden installiert (WSL2, Docker, usbipd)..."; \
+  Flags: shellexec waituntilterminated
 
-; Step 2: Configure .wslconfig
+; Step 2: .wslconfig konfigurieren
 Filename: "powershell.exe"; \
-  Parameters: "-ExecutionPolicy Bypass -File ""{app}\scripts\configure_wsl.ps1"""; \
-  StatusMsg: "Configuring WSL2 settings..."; \
-  Flags: runhidden waituntilterminated
+  Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\scripts\configure_wsl.ps1"""; \
+  StatusMsg: "WSL2-Einstellungen werden konfiguriert..."; \
+  Flags: shellexec waituntilterminated
 
-; Step 3: Configure usbipd policy
+; Step 3: usbipd-Richtlinie konfigurieren
 Filename: "powershell.exe"; \
-  Parameters: "-ExecutionPolicy Bypass -File ""{app}\scripts\configure_usbipd.ps1"""; \
-  StatusMsg: "Configuring USB device policy..."; \
-  Flags: runhidden waituntilterminated
+  Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\scripts\configure_usbipd.ps1"""; \
+  StatusMsg: "USB-Geräterichtlinie wird konfiguriert..."; \
+  Flags: shellexec waituntilterminated
 
-; Step 4: Pull Docker images (optional, can be slow)
+; Step 4: Docker-Images herunterladen (optional, kann dauern)
 Filename: "powershell.exe"; \
-  Parameters: "-ExecutionPolicy Bypass -File ""{app}\scripts\pull_images.ps1"""; \
-  StatusMsg: "Pulling Docker images (this may take a while)..."; \
-  Flags: runhidden waituntilterminated; \
-  Description: "Pull Docker images now (recommended)"; \
+  Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\scripts\pull_images.ps1"""; \
+  StatusMsg: "Docker-Images werden heruntergeladen (kann etwas dauern)..."; \
+  Flags: shellexec waituntilterminated; \
+  Description: "Docker-Images jetzt herunterladen (empfohlen)"; \
   Check: IsDockerRunning
 
-; Step 5: Verify installation
+; Step 5: Installation überprüfen
 Filename: "powershell.exe"; \
-  Parameters: "-ExecutionPolicy Bypass -File ""{app}\scripts\verify_system.ps1"""; \
-  StatusMsg: "Verifying installation..."; \
-  Flags: runhidden waituntilterminated postinstall; \
-  Description: "Verify installation"
+  Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\scripts\verify_system.ps1"""; \
+  StatusMsg: "Installation wird überprüft..."; \
+  Flags: shellexec waituntilterminated postinstall; \
+  Description: "Installation überprüfen"
 
-; Step 6: Launch the app (optional, post-install)
-Filename: "{app}\gui\RobotisAI.exe"; \
-  Description: "Launch ROBOTIS AI now"; \
+; Step 6: App starten (optional, nach der Installation)
+Filename: "{app}\gui\EduBotics.exe"; \
+  Description: "EduBotics jetzt starten"; \
   Flags: nowait postinstall skipifsilent
 
 [UninstallRun]
-; Stop containers on uninstall
+; Container beim Deinstallieren stoppen
 Filename: "docker"; \
   Parameters: "compose -f ""{app}\docker\docker-compose.yml"" down"; \
   Flags: runhidden; \

@@ -1,4 +1,4 @@
-// Copyright 2025 ROBOTIS CO., LTD.
+// Copyright 2025 EduBotics
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -78,7 +78,7 @@ export default function FileBrowserDemo() {
                   <div className="space-y-2">
                     <div className="flex items-center">
                       {selectedFile.is_directory ? (
-                        <MdFolderOpen className="w-4 h-4 text-blue-500 mr-2" />
+                        <MdFolderOpen className="w-4 h-4 text-teal-500 mr-2" />
                       ) : (
                         <MdInsertDriveFile className="w-4 h-4 text-gray-400 mr-2" />
                       )}
@@ -115,7 +115,7 @@ export default function FileBrowserDemo() {
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
             <button
               onClick={() => setShowModal('basic')}
-              className="p-4 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+              className="p-4 bg-teal-600 text-white rounded-lg hover:bg-teal-700 transition-colors"
             >
               Basic File Selection
             </button>
@@ -168,17 +168,17 @@ export default function FileBrowserDemo() {
           </div>
 
           {modalSelectedFile && (
-            <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
-              <h3 className="font-medium text-blue-900 mb-2">Last Selected from Modal</h3>
+            <div className="bg-teal-50 border border-teal-200 rounded-lg p-4">
+              <h3 className="font-medium text-teal-900 mb-2">Last Selected from Modal</h3>
               <div className="flex items-center">
                 {modalSelectedFile.is_directory ? (
-                  <MdFolderOpen className="w-4 h-4 text-blue-500 mr-2" />
+                  <MdFolderOpen className="w-4 h-4 text-teal-500 mr-2" />
                 ) : (
                   <MdInsertDriveFile className="w-4 h-4 text-gray-400 mr-2" />
                 )}
-                <span className="text-sm font-medium text-blue-800">{modalSelectedFile.name}</span>
+                <span className="text-sm font-medium text-teal-800">{modalSelectedFile.name}</span>
               </div>
-              <p className="text-xs text-blue-600 mt-1 font-mono">{modalSelectedFile.full_path}</p>
+              <p className="text-xs text-teal-600 mt-1 font-mono">{modalSelectedFile.full_path}</p>
             </div>
           )}
         </div>

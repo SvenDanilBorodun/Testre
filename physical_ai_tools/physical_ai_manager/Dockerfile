@@ -1,6 +1,12 @@
 # Build stage
 FROM node:22 AS build
 WORKDIR /app
+
+# Cloud training env vars (baked into React build)
+ARG REACT_APP_SUPABASE_URL
+ARG REACT_APP_SUPABASE_ANON_KEY
+ARG REACT_APP_CLOUD_API_URL
+
 COPY package*.json ./
 RUN npm install
 COPY . .

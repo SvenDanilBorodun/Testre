@@ -1,5 +1,5 @@
 /*
- * Copyright 2025 ROBOTIS CO., LTD.
+ * Copyright 2025 EduBotics
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,30 +24,21 @@ const initialState = {
   selectedUser: undefined,
   selectedDataset: undefined,
   policyList: [],
-  deviceList: [],
   modelWeightList: [],
   selectedModelWeight: undefined,
-  resumePolicyPath: undefined,
-  hasTrainConfig: null,
-  isTrainingInfoLoaded: false, // Track if Load button was pressed
-  trainingMode: 'new', // 'new' or 'resume'
   isTraining: false,
   topicReceived: false,
   lastUpdate: Date.now(),
 
-  // Training progress
+  // Training progress (from ROS topic, kept for compatibility)
   currentStep: 0,
   updateCounter: 0,
-
-  // Training loss (to be implemented)
   currentLoss: undefined,
 
   trainingInfo: {
     datasetRepoId: undefined,
     policyType: undefined,
-    policyDevice: undefined,
     outputFolderName: undefined,
-    resume: false,
     seed: 1000,
     numWorkers: 4,
     batchSize: 8,
@@ -86,14 +77,8 @@ const trainingSlice = createSlice({
     setPolicyList: (state, action) => {
       state.policyList = action.payload;
     },
-    setDeviceList: (state, action) => {
-      state.deviceList = action.payload;
-    },
     selectPolicyType: (state, action) => {
       state.trainingInfo.policyType = action.payload;
-    },
-    selectPolicyDevice: (state, action) => {
-      state.trainingInfo.policyDevice = action.payload;
     },
     setOutputFolderName: (state, action) => {
       state.trainingInfo.outputFolderName = action.payload;
@@ -104,23 +89,7 @@ const trainingSlice = createSlice({
     setSelectedModelWeight: (state, action) => {
       state.selectedModelWeight = action.payload;
     },
-    setResumePolicyPath: (state, action) => {
-      state.resumePolicyPath = action.payload;
-      // When policy path changes, mark training info as not loaded
-      state.isTrainingInfoLoaded = false;
-    },
-    setIsTrainingInfoLoaded: (state, action) => {
-      state.isTrainingInfoLoaded = action.payload;
-    },
-    setHasTrainConfig: (state, action) => {
-      state.hasTrainConfig = action.payload;
-    },
-    setTrainingMode: (state, action) => {
-      state.trainingMode = action.payload;
-      state.trainingInfo.resume = action.payload === 'resume';
-    },
     setIsTraining: (state, action) => {
-      console.log('setIsTraining', action.payload);
       state.isTraining = action.payload;
     },
     setSeed: (state, action) => {
@@ -144,7 +113,6 @@ const trainingSlice = createSlice({
     setSaveFreq: (state, action) => {
       state.trainingInfo.saveFreq = action.payload;
     },
-
     setDefaultTrainingInfo: (state) => {
       state.trainingInfo = {
         ...state.trainingInfo,
@@ -187,16 +155,10 @@ export const {
   setSelectedDataset,
   setDatasetRepoId,
   setPolicyList,
-  setDeviceList,
   selectPolicyType,
-  selectPolicyDevice,
   setOutputFolderName,
   setModelWeightList,
   setSelectedModelWeight,
-  setResumePolicyPath,
-  setHasTrainConfig,
-  setIsTrainingInfoLoaded,
-  setTrainingMode,
   setIsTraining,
   setSeed,
   setNumWorkers,

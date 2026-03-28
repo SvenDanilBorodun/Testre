@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""ROBOTIS AI Setup — Windows GUI entry point."""
+"""EduBotics — Windows GUI entry point."""
 
 import sys
 import os

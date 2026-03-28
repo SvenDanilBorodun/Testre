@@ -1,4 +1,4 @@
-// Copyright 2025 ROBOTIS CO., LTD.
+// Copyright 2025 EduBotics
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -78,7 +78,7 @@ const TaskInstructionInput = ({ instructions = [''], onChange, disabled, classNa
                   'min-h-8',
                   'h-14',
                   'focus:ring-2',
-                  'focus:ring-blue-500',
+                  'focus:ring-teal-500',
                   'focus:border-transparent',
                   {
                     'bg-gray-100 cursor-not-allowed': disabled,
@@ -128,13 +128,13 @@ const TaskInstructionInput = ({ instructions = [''], onChange, disabled, classNa
             className={clsx(
               'px-3',
               'py-1',
-              'bg-blue-500',
+              'bg-teal-500',
               'text-white',
               'rounded',
-              'hover:bg-blue-600',
+              'hover:bg-teal-600',
               'focus:outline-none',
               'focus:ring-2',
-              'focus:ring-blue-500',
+              'focus:ring-teal-500',
               'flex',
               'items-center',
               'gap-2',

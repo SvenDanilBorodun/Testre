@@ -20,8 +20,10 @@ services:
       - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-30}
       - FOLLOWER_PORT=${FOLLOWER_PORT}
       - LEADER_PORT=${LEADER_PORT}
-      - CAMERA_DEVICE=${CAMERA_DEVICE:-/dev/video0}
-      - CAMERA_NAME=${CAMERA_NAME:-camera1}
+      - CAMERA_DEVICE_1=${CAMERA_DEVICE_1:-}
+      - CAMERA_NAME_1=${CAMERA_NAME_1:-camera1}
+      - CAMERA_DEVICE_2=${CAMERA_DEVICE_2:-}
+      - CAMERA_NAME_2=${CAMERA_NAME_2:-camera2}
     volumes:
       - /dev:/dev
       - /dev/shm:/dev/shm
@@ -32,6 +34,8 @@ services:
   physical_ai_server:
     container_name: physical_ai_server
     image: ${REGISTRY:-nettername}/physical-ai-server:latest
+    depends_on:
+      - open_manipulator
     tty: true
     restart: unless-stopped
     cap_add:
@@ -61,6 +65,8 @@ services:
   physical_ai_manager:
     container_name: physical_ai_manager
     image: ${REGISTRY:-nettername}/physical-ai-manager:latest
+    depends_on:
+      - physical_ai_server
     networks:
       - ros_net
     ports:

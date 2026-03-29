@@ -37,6 +37,7 @@ class EduBoticsApp:
         self.gpu_available = False
         self.running = False
         self._scanning = False
+        self._prerequisites_done = False
 
         self._build_ui()
         self._check_prerequisites()
@@ -85,20 +86,20 @@ class EduBoticsApp:
         self.follower_status_var = tk.StringVar(value="Nicht gescannt")
         ttk.Label(follower_row, textvariable=self.follower_status_var, foreground="gray").pack(side=tk.LEFT, padx=10)
 
-        # ── Schritt C: Kamera ──
-        camera_frame = ttk.LabelFrame(main, text="Schritt C: Kamera", padding=10)
+        # ── Schritt C: Kameras ──
+        camera_frame = ttk.LabelFrame(main, text="Schritt C: Kameras (bis zu 2)", padding=10)
         camera_frame.pack(fill=tk.X, pady=5)
 
-        ttk.Label(camera_frame, text="Kamera aus dem Dropdown-Menü auswählen.").pack(anchor=tk.W)
+        ttk.Label(camera_frame, text="Kameras anschließen, scannen, und per Checkbox auswählen.").pack(anchor=tk.W)
         camera_row = ttk.Frame(camera_frame)
         camera_row.pack(fill=tk.X, pady=5)
 
         self.btn_scan_camera = ttk.Button(camera_row, text="Kameras scannen", command=self._scan_cameras)
         self.btn_scan_camera.pack(side=tk.LEFT)
 
-        self.camera_combo = ttk.Combobox(camera_row, state="readonly", width=40)
-        self.camera_combo.pack(side=tk.LEFT, padx=10)
-        self.camera_combo.bind("<<ComboboxSelected>>", self._on_camera_selected)
+        self.camera_checks_frame = ttk.Frame(camera_frame)
+        self.camera_checks_frame.pack(fill=tk.X, pady=5)
+        self.camera_check_vars: list[tk.BooleanVar] = []
 
         # ── Start-Button ──
         btn_frame = ttk.Frame(main)
@@ -151,9 +152,9 @@ class EduBoticsApp:
         self.root.after(0, lambda: self.status_var.set(msg))
 
     def _update_start_button(self):
-        """Start-Button nur aktivieren, wenn Hardware-Konfiguration vollständig."""
+        """Start-Button nur aktivieren, wenn Voraussetzungen geprüft und Hardware vollständig."""
         def _update():
-            if self.hardware.is_complete and not self.running:
+            if self._prerequisites_done and self.hardware.is_complete and not self.running:
                 self.btn_start.config(state=tk.NORMAL)
             else:
                 self.btn_start.config(state=tk.DISABLED)
@@ -200,7 +201,7 @@ class EduBoticsApp:
             # Check for image updates
             self._set_status("Auf Updates prüfen...")
             self._log("Prüfe auf Image-Updates...")
-            if docker_manager.check_for_updates():
+            if docker_manager.check_for_updates(log=self._log):
                 self._log("Images auf neueste Version aktualisiert.")
             else:
                 self._log("Images sind aktuell.")
@@ -209,6 +210,8 @@ class EduBoticsApp:
             self.gpu_available = docker_manager.has_gpu()
             self._log(f"NVIDIA GPU: {'erkannt' if self.gpu_available else 'nicht erkannt (CPU-Modus)'}")
 
+            self._prerequisites_done = True
+            self._update_start_button()
             self._set_status("Bereit — Hardware scannen, um zu beginnen")
             self.root.after(0, lambda: self.progress.stop())
             self._log("Systemprüfung abgeschlossen. Arme und Kamera anschließen, dann auf Scannen klicken.")
@@ -278,29 +281,43 @@ class EduBoticsApp:
 
             self.cameras = device_manager.scan_cameras()
 
-            def _update_combo():
+            def _update_checkbuttons():
+                # Clear old checkbuttons
+                for w in self.camera_checks_frame.winfo_children():
+                    w.destroy()
+                self.camera_check_vars.clear()
+
                 if self.cameras:
-                    values = [f"{c.name} ({c.path})" for c in self.cameras]
-                    self.camera_combo["values"] = values
-                    self.camera_combo.current(0)
-                    self._on_camera_selected(None)
+                    for cam in self.cameras:
+                        var = tk.BooleanVar(value=True)
+                        cb = ttk.Checkbutton(
+                            self.camera_checks_frame,
+                            text=f"{cam.name} ({cam.path})",
+                            variable=var,
+                            command=self._on_cameras_changed,
+                        )
+                        cb.pack(anchor=tk.W)
+                        self.camera_check_vars.append(var)
+                    self._on_cameras_changed()
                     self._log(f"{len(self.cameras)} Kamera(s) gefunden.")
                 else:
-                    self.camera_combo["values"] = ["Keine Kameras gefunden"]
-                    self._log("Keine Kameras gefunden. Kamera ist optional — Start ohne Kamera möglich.")
+                    ttk.Label(self.camera_checks_frame, text="Keine Kameras gefunden (optional)", foreground="gray").pack(anchor=tk.W)
+                    self._log("Keine Kameras gefunden. Kameras sind optional — Start ohne Kamera möglich.")
                 self.btn_scan_camera.config(state=tk.NORMAL)
 
             self._scanning = False
-            self.root.after(0, _update_combo)
+            self.root.after(0, _update_checkbuttons)
             self._set_status("Kamera-Scan abgeschlossen.")
 
         threading.Thread(target=_do_scan, daemon=True).start()
 
-    def _on_camera_selected(self, event):
-        """Kameraauswahl aus dem Dropdown verarbeiten."""
-        idx = self.camera_combo.current()
-        if 0 <= idx < len(self.cameras):
-            self.hardware.camera = self.cameras[idx]
+    def _on_cameras_changed(self):
+        """Ausgewählte Kameras in HardwareConfig speichern."""
+        selected = []
+        for i, var in enumerate(self.camera_check_vars):
+            if var.get() and i < len(self.cameras):
+                selected.append(self.cameras[i])
+        self.hardware.cameras = selected[:2]  # Max 2 cameras
 
     # ── Start Environment ────────────────────────────────────────────
 
@@ -314,21 +331,38 @@ class EduBoticsApp:
         self.running = True
 
         def _do_start():
+          try:
             self.root.after(0, lambda: self.progress.start(10))
 
-            # 0. Serielle Ports erneut validieren
+            # 0. Serielle Ports validieren — bei Bedarf USB neu verbinden
             self._set_status("Hardware-Verbindungen werden geprüft...")
             try:
                 serial_paths = wsl_bridge.list_serial_devices()
+                missing_arms = []
                 for arm_name, arm in [("Leader", self.hardware.leader), ("Follower", self.hardware.follower)]:
                     if arm and arm.serial_path not in serial_paths:
-                        self._log(f"WARNUNG: {arm_name}-Arm ({arm.serial_path}) nicht mehr erkannt!")
-                        self._log("Bitte USB-Verbindung prüfen und erneut scannen.")
-                        self._set_status(f"{arm_name}-Arm getrennt")
-                        self.root.after(0, lambda: self.progress.stop())
-                        self.running = False
-                        self._update_start_button()
-                        return
+                        missing_arms.append((arm_name, arm))
+
+                if missing_arms:
+                    self._log("USB-Geräte werden erneut verbunden...")
+                    device_manager.attach_all_robotis_devices()
+                    import time
+                    for _ in range(5):
+                        serial_paths = wsl_bridge.list_serial_devices()
+                        if all(arm.serial_path in serial_paths for _, arm in missing_arms):
+                            break
+                        time.sleep(1)
+
+                    for arm_name, arm in missing_arms:
+                        if arm.serial_path not in serial_paths:
+                            self._log(f"FEHLER: {arm_name}-Arm ({arm.serial_path}) nicht erreichbar!")
+                            self._log("USB-Verbindung prüfen und erneut scannen.")
+                            self._set_status(f"{arm_name}-Arm getrennt")
+                            self.root.after(0, lambda: self.progress.stop())
+                            self.running = False
+                            self._update_start_button()
+                            return
+                    self._log("USB-Geräte erfolgreich neu verbunden.")
             except Exception as e:
                 self._log(f"WARNUNG: Serielle Ports konnten nicht validiert werden: {e}")
                 self._log("Fahre trotzdem fort — Container versuchen erneut auf Geräte zuzugreifen.")
@@ -346,7 +380,7 @@ class EduBoticsApp:
             self._set_status("Container werden gestartet...")
             self._log(f"Docker Compose wird gestartet ({'GPU' if use_gpu else 'CPU'}-Modus)...")
 
-            if not docker_manager.start_containers(gpu=use_gpu):
+            if not docker_manager.start_containers(gpu=use_gpu, log=self._log):
                 self._log("FEHLER: Container konnten nicht gestartet werden. Docker Desktop prüfen.")
                 self._set_status("Start fehlgeschlagen")
                 self.root.after(0, lambda: self.progress.stop())
@@ -379,6 +413,14 @@ class EduBoticsApp:
             self.root.after(0, lambda: self.progress.stop())
             self.root.after(0, lambda: self.btn_stop.config(state=tk.NORMAL))
             self.root.after(0, lambda: self.btn_open_browser.config(state=tk.NORMAL))
+
+          except Exception as e:
+            self._log(f"FEHLER: Unerwarteter Fehler beim Starten: {e}")
+            import traceback
+            self._log(traceback.format_exc())
+            self.running = False
+            self._update_start_button()
+            self.root.after(0, lambda: self.progress.stop())
 
         threading.Thread(target=_do_start, daemon=True).start()
 

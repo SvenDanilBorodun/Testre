@@ -13,6 +13,7 @@ from app.services.runpod_client import (
     start_training_job,
 )
 from app.services.supabase_client import get_supabase
+from huggingface_hub import HfApi
 
 router = APIRouter(prefix="/trainings", tags=["training"])
 
@@ -67,10 +68,38 @@ RUNPOD_TO_DB_STATUS = {
 }
 
 
+def _sanitize_name(name: str) -> str:
+    """Keep only HF-safe characters: alphanumeric, hyphens, underscores, dots."""
+    import re
+    return re.sub(r"[^a-zA-Z0-9._-]", "-", name).strip("-") or "unnamed"
+
+
 def _generate_model_name(model_type: str, dataset_name: str) -> str:
     dataset_base = dataset_name.split("/")[-1] if "/" in dataset_name else dataset_name
+    dataset_base = _sanitize_name(dataset_base)
+    model_type = _sanitize_name(model_type)
     suffix = "".join(random.choices(string.ascii_lowercase + string.digits, k=10))
     return f"edubotics/{model_type}-{dataset_base}-{suffix}"
+
+
+def _get_remaining_credits(user_id: str) -> dict:
+    """Get remaining credits derived from actual trainings data.
+
+    Credits are "used" by trainings with status NOT IN ('failed', 'canceled').
+    No counter — self-healing, no race conditions, no double-refund risk.
+    """
+    supabase = get_supabase()
+    result = supabase.rpc(
+        "get_remaining_credits", {"p_user_id": user_id}
+    ).execute()
+    if not result.data:
+        raise HTTPException(status_code=404, detail="User profile not found")
+    row = result.data[0]
+    return {
+        "training_credits": row["training_credits"],
+        "trainings_used": row["trainings_used"],
+        "remaining": row["remaining"],
+    }
 
 
 def _sync_runpod_status(training: dict) -> dict:
@@ -99,6 +128,10 @@ def _sync_runpod_status(training: dict) -> dict:
         update_data["error_message"] = f"RunPod status: {runpod_status}"
 
     supabase.table("trainings").update(update_data).eq("id", training["id"]).execute()
+
+    # No refund needed — setting status to "failed" automatically frees the credit
+    # because get_remaining_credits counts only non-failed/canceled trainings.
+
     training["status"] = db_status
     if "terminated_at" in update_data:
         training["terminated_at"] = update_data["terminated_at"]
@@ -112,53 +145,42 @@ def _sync_runpod_status(training: dict) -> dict:
 
 @router.get("/quota", response_model=UserQuota)
 async def get_quota(user=Depends(get_current_user)):
-    supabase = get_supabase()
-    result = (
-        supabase.table("users")
-        .select("training_credits, trainings_used")
-        .eq("id", str(user.id))
-        .execute()
-    )
-    if not result.data:
-        raise HTTPException(status_code=404, detail="User profile not found")
-
-    row = result.data[0]
-    credits = row["training_credits"]
-    used = row["trainings_used"]
-    return UserQuota(training_credits=credits, trainings_used=used, remaining=credits - used)
+    quota = _get_remaining_credits(str(user.id))
+    return UserQuota(**quota)
 
 
 @router.post("/start", response_model=StartTrainingResponse)
 async def start_training(req: StartTrainingRequest, user=Depends(get_current_user)):
     supabase = get_supabase()
+    user_id = str(user.id)
 
-    # Check quota
-    user_row = (
-        supabase.table("users")
-        .select("training_credits, trainings_used")
-        .eq("id", str(user.id))
-        .execute()
-    )
-    if not user_row.data:
-        raise HTTPException(status_code=404, detail="User profile not found")
-
-    credits = user_row.data[0]["training_credits"]
-    used = user_row.data[0]["trainings_used"]
-    if used >= credits:
+    # 0. Validate dataset exists on HuggingFace Hub
+    try:
+        hf_api = HfApi(token=os.environ.get("HF_TOKEN", ""))
+        hf_api.dataset_info(req.dataset_name)
+    except Exception:
         raise HTTPException(
-            status_code=403,
-            detail=f"No training credits remaining. Used {used}/{credits}.",
+            status_code=400,
+            detail=f"Dataset '{req.dataset_name}' not found on HuggingFace Hub.",
         )
 
-    # Generate model name
+    # 1. Check remaining credits (derived from trainings table)
+    quota = _get_remaining_credits(user_id)
+    if quota["remaining"] <= 0:
+        raise HTTPException(
+            status_code=403, detail="No training credits remaining."
+        )
+
+    # 2. Generate model name and insert training row
+    #    The INSERT itself "consumes" the credit — get_remaining_credits
+    #    counts non-failed/canceled trainings against the limit.
     model_name = _generate_model_name(req.model_type, req.dataset_name)
 
-    # Insert training row
     insert_result = (
         supabase.table("trainings")
         .insert(
             {
-                "user_id": str(user.id),
+                "user_id": user_id,
                 "status": "queued",
                 "dataset_name": req.dataset_name,
                 "model_name": model_name,
@@ -170,7 +192,7 @@ async def start_training(req: StartTrainingRequest, user=Depends(get_current_use
     )
     training_id = insert_result.data[0]["id"]
 
-    # Dispatch to RunPod
+    # 3. Dispatch to RunPod
     try:
         job_id = start_training_job(
             dataset_name=req.dataset_name,
@@ -183,7 +205,7 @@ async def start_training(req: StartTrainingRequest, user=Depends(get_current_use
             hf_token=os.environ.get("HF_TOKEN", ""),
         )
     except Exception as e:
-        # Mark as failed if dispatch fails
+        # Dispatch failed — mark training as failed (auto-frees the credit)
         supabase.table("trainings").update(
             {
                 "status": "failed",
@@ -193,14 +215,10 @@ async def start_training(req: StartTrainingRequest, user=Depends(get_current_use
         ).eq("id", training_id).execute()
         raise HTTPException(status_code=500, detail=f"Failed to start training: {e}")
 
-    # Update with RunPod job ID and increment usage
+    # 4. Update with RunPod job ID
     supabase.table("trainings").update(
         {"status": "running", "runpod_job_id": job_id}
     ).eq("id", training_id).execute()
-
-    supabase.table("users").update({"trainings_used": used + 1}).eq(
-        "id", str(user.id)
-    ).execute()
 
     return StartTrainingResponse(
         training_id=training_id, model_name=model_name, status="running"
@@ -230,7 +248,7 @@ async def cancel_training(req: CancelTrainingRequest, user=Depends(get_current_u
     if training.get("runpod_job_id"):
         cancel_training_job(training["runpod_job_id"])
 
-    # Update DB
+    # Mark as canceled (auto-frees the credit)
     supabase.table("trainings").update(
         {
             "status": "canceled",

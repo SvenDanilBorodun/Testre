@@ -37,13 +37,13 @@ class TestHardwareConfig(unittest.TestCase):
         cfg.follower = ArmDevice("1-4", "/dev/ttyACM1", "follower", "test")
         self.assertTrue(cfg.is_complete)
 
-    def test_camera_is_optional(self):
+    def test_cameras_are_optional(self):
         cfg = HardwareConfig(
             leader=ArmDevice("1-3", "/dev/ttyACM0", "leader", "test"),
             follower=ArmDevice("1-4", "/dev/ttyACM1", "follower", "test"),
         )
         self.assertTrue(cfg.is_complete)
-        self.assertIsNone(cfg.camera)
+        self.assertEqual(cfg.cameras, [])
 
 
 class TestListRobotisDevices(unittest.TestCase):

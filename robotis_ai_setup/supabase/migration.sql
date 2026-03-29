@@ -1,4 +1,4 @@
--- ROBOTIS AI Cloud Training - Supabase Schema
+-- EduBotics Cloud Training - Supabase Schema
 -- Run this in the Supabase SQL Editor (Dashboard > SQL Editor > New Query)
 
 -- 1. Users table (linked to Supabase Auth)
@@ -6,7 +6,6 @@ CREATE TABLE public.users (
   id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
   email TEXT NOT NULL,
   training_credits INTEGER NOT NULL DEFAULT 0,
-  trainings_used INTEGER NOT NULL DEFAULT 0,
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
@@ -53,7 +52,25 @@ CREATE POLICY "Users read own trainings"
   ON public.trainings FOR SELECT
   USING (auth.uid() = user_id);
 
--- 5. Indexes for performance
+-- 5. Derive remaining credits from actual trainings data
+--    Credits are "used" by trainings with status NOT IN ('failed', 'canceled').
+--    No counter to maintain — self-healing, no race conditions, no double-refund risk.
+CREATE OR REPLACE FUNCTION public.get_remaining_credits(p_user_id UUID)
+RETURNS TABLE(training_credits INTEGER, trainings_used BIGINT, remaining BIGINT) AS $$
+BEGIN
+  RETURN QUERY
+  SELECT
+    u.training_credits,
+    COUNT(t.id) FILTER (WHERE t.status NOT IN ('failed', 'canceled')) AS trainings_used,
+    u.training_credits::BIGINT - COUNT(t.id) FILTER (WHERE t.status NOT IN ('failed', 'canceled')) AS remaining
+  FROM public.users u
+  LEFT JOIN public.trainings t ON t.user_id = u.id
+  WHERE u.id = p_user_id
+  GROUP BY u.id, u.training_credits;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- 6. Indexes for performance
 CREATE INDEX idx_trainings_user_id ON public.trainings(user_id);
 CREATE INDEX idx_trainings_status ON public.trainings(status);
 CREATE INDEX idx_trainings_requested_at ON public.trainings(requested_at DESC);

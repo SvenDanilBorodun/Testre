@@ -11,7 +11,7 @@ load_dotenv()
 
 app = FastAPI(title="EduBotics Cloud Training API")
 
-allowed_origins = os.environ.get("ALLOWED_ORIGINS", "http://localhost").split(",")
+allowed_origins = [o.strip() for o in os.environ.get("ALLOWED_ORIGINS", "http://localhost").split(",")]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,

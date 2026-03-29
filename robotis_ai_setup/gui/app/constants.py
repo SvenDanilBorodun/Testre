@@ -17,7 +17,7 @@ PORT_VIDEO_SERVER = 8080
 PORT_ROSBRIDGE = 9090
 
 # USB identifiers
-ROBOTIS_VID = "2F5D"  # ROBOTIS USB Vendor ID (OpenRB-150 boards)
+ROBOTIS_VID = "2F5D"  # ROBOTIS USB Vendor ID (OpenRB-150 boards, PIDs: 0103, 2202)
 
 # Dynamixel servo config
 BAUDRATE = 1_000_000
@@ -30,15 +30,28 @@ ROS_DOMAIN_ID = 30
 # Paths — auto-detect dev environment vs installed
 def _resolve_install_dir() -> str:
     """Return the install dir: env override > dev tree > default installed path."""
+    import sys
     env_dir = os.environ.get("EDUBOTICS_INSTALL_DIR")
     if env_dir:
         return env_dir
-    # Check if we're running from the source tree (gui/app/constants.py)
-    this_file = os.path.abspath(__file__)
-    project_root = os.path.dirname(os.path.dirname(os.path.dirname(this_file)))
-    dev_compose = os.path.join(project_root, "docker", "docker-compose.yml")
-    if os.path.isfile(dev_compose):
-        return project_root
+
+    # Walk up from both the exe location and the source file location
+    # looking for a parent directory that contains docker/docker-compose.yml
+    anchors = [
+        os.path.dirname(os.path.abspath(sys.executable)),  # PyInstaller exe dir
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),  # gui/app -> gui
+    ]
+    for start in anchors:
+        d = start
+        for _ in range(6):  # Walk up at most 6 levels
+            compose = os.path.join(d, "docker", "docker-compose.yml")
+            if os.path.isfile(compose):
+                return d
+            parent = os.path.dirname(d)
+            if parent == d:
+                break
+            d = parent
+
     return r"C:\Program Files\EduBotics"
 
 INSTALL_DIR = _resolve_install_dir()

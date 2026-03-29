@@ -26,6 +26,10 @@ class RosConnectionManager {
     this.url = '';
     this.connectionPromise = null;
     this.onConnected = null;
+    this.reconnectAttempts = 0;
+    this.maxReconnectAttempts = 10;
+    this.reconnectTimer = null;
+    this.intentionalDisconnect = false;
   }
 
   /**
@@ -83,6 +87,8 @@ class RosConnectionManager {
         this.ros = ros;
         this.connecting = false;
         this.connectionPromise = null;
+        this.reconnectAttempts = 0;
+        this.intentionalDisconnect = false;
         resolve(ros);
 
         if (this.onConnected && typeof this.onConnected === 'function') {
@@ -100,6 +106,7 @@ class RosConnectionManager {
         this.connecting = false;
         this.connectionPromise = null;
         this.ros = null;
+        try { ros.close(); } catch {}
         reject(new Error(`ROS connection failed: ${error.message || error}`));
       });
 
@@ -108,8 +115,7 @@ class RosConnectionManager {
         this.ros = null;
         this.connecting = false;
         this.connectionPromise = null;
-        // Reset connection attempts on close to allow reconnection
-        this.connectionAttempts = 0;
+        this._scheduleReconnect();
       });
     });
 
@@ -117,9 +123,38 @@ class RosConnectionManager {
   }
 
   /**
+   * Schedule a reconnection attempt with exponential backoff.
+   */
+  _scheduleReconnect() {
+    if (this.intentionalDisconnect || !this.url) return;
+    if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+      console.log(`Max reconnect attempts (${this.maxReconnectAttempts}) reached, giving up`);
+      return;
+    }
+
+    const delay = Math.min(2000 * Math.pow(2, this.reconnectAttempts), 30000);
+    this.reconnectAttempts++;
+    console.log(`Scheduling reconnect attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts} in ${delay}ms`);
+
+    this.reconnectTimer = setTimeout(async () => {
+      if (this.intentionalDisconnect) return;
+      try {
+        await this.getConnection(this.url);
+      } catch (error) {
+        console.warn('Reconnect attempt failed:', error.message);
+      }
+    }, delay);
+  }
+
+  /**
    * Disconnect ROS connection
    */
   disconnect() {
+    this.intentionalDisconnect = true;
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
     if (this.ros) {
       console.log('Disconnecting global ROS connection');
       this.ros.close();
@@ -128,6 +163,7 @@ class RosConnectionManager {
     this.connecting = false;
     this.connectionPromise = null;
     this.url = '';
+    this.reconnectAttempts = 0;
   }
 
   /**

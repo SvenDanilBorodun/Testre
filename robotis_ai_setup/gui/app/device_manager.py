@@ -46,7 +46,7 @@ class HardwareConfig:
     """Complete hardware configuration ready for .env generation."""
     leader: Optional[ArmDevice] = None
     follower: Optional[ArmDevice] = None
-    camera: Optional[CameraDevice] = None
+    cameras: list = field(default_factory=list)  # list[CameraDevice], supports 0-N cameras
 
     @property
     def is_complete(self) -> bool:
@@ -87,19 +87,27 @@ def list_robotis_devices() -> list[USBDevice]:
     return [d for d in list_usb_devices() if d.vid_pid.upper().startswith(ROBOTIS_VID)]
 
 
-def attach_usb_to_wsl(busid: str) -> bool:
-    """Attach a USB device to WSL2 via usbipd.
+def attach_usb_to_wsl(busid: str, retries: int = 3) -> bool:
+    """Attach a USB device to WSL2 via usbipd, with retry.
 
     With usbipd 4.x+ policy configured, this does not require admin.
+    Retries on failure because usbipd can be busy if multiple attaches
+    happen in quick succession.
     """
-    try:
-        result = subprocess.run(
-            ["usbipd", "attach", "--wsl", "--busid", busid],
-            capture_output=True, text=True, timeout=15,
-        )
-        return result.returncode == 0
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return False
+    import time
+    for attempt in range(retries):
+        try:
+            result = subprocess.run(
+                ["usbipd", "attach", "--wsl", "--busid", busid],
+                capture_output=True, text=True, timeout=15,
+            )
+            if result.returncode == 0:
+                return True
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            return False  # usbipd not installed — no point retrying
+        if attempt < retries - 1:
+            time.sleep(1)
+    return False
 
 
 def detach_usb_from_wsl(busid: str) -> bool:
@@ -195,6 +203,8 @@ def scan_and_identify_arms(image: str) -> tuple[Optional[ArmDevice], Optional[Ar
 
     Returns (leader, follower) — either may be None if not found.
     """
+    import time
+
     leader = None
     follower = None
 
@@ -203,27 +213,32 @@ def scan_and_identify_arms(image: str) -> tuple[Optional[ArmDevice], Optional[Ar
     if not attached:
         return None, None
 
-    # 2. Wait a moment for udev to create /dev/serial/by-id/ entries
-    import time
-    time.sleep(2)
-
-    # 3. Find serial paths
-    serial_paths = find_serial_paths_for_robotis()
+    # 2. Poll for serial paths (udev can take 1-10s depending on machine)
+    serial_paths = []
+    for _ in range(10):
+        serial_paths = find_serial_paths_for_robotis()
+        if serial_paths:
+            break
+        time.sleep(1)
     if not serial_paths:
         return None, None
 
-    # 4. Start temporary container for identification
+    # 3. Start temporary container for identification
     if not start_scanner_container(image):
         return None, None
 
     try:
-        # Give container a moment to start
         time.sleep(1)
 
-        # 5. Identify each serial device
-        for path in serial_paths:
+        # 4. Identify each serial device (retry once on error/unknown)
+        for i, path in enumerate(serial_paths):
+            if i > 0:
+                time.sleep(1)  # Let USB bus settle between devices
             role = identify_arm_via_docker(path)
-            # Find the matching USB device for description
+            if role.startswith("error:") or role == "unknown":
+                time.sleep(2)
+                role = identify_arm_via_docker(path)
+
             desc = path.split("/")[-1]
             busid = ""
             for dev in attached:

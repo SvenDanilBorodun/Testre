@@ -37,7 +37,7 @@ if ($version.Major -lt 4) {
 
 # Collect device PIDs to add policies for.
 # Start with known PIDs; also scan connected devices for any we haven't seen.
-$knownPIDs = @("0103")  # OpenRB-150
+$knownPIDs = @("0103", "2202")  # OpenRB-150 (0103), OpenRB-150 alternate firmware (2202)
 $targetPairs = @()
 
 # Discover connected EduBotics-Geräte and capture their PIDs

@@ -5,3 +5,4 @@ runpod==1.7.9
 httpx==0.28.1
 python-dotenv==1.1.0
 pydantic==2.11.3
+huggingface_hub>=0.25.0

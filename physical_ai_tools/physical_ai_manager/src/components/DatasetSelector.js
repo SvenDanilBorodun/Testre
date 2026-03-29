@@ -25,6 +25,7 @@ import {
   MdDataset,
   MdKeyboardArrowRight,
   MdKeyboardArrowDown,
+  MdEdit,
 } from 'react-icons/md';
 import { useRosServiceCaller } from '../hooks/useRosServiceCaller';
 import { setUserList, setDatasetRepoId } from '../features/training/trainingSlice';
@@ -40,10 +41,14 @@ export default function DatasetSelector() {
 
   const { getUserList, getDatasetList } = useRosServiceCaller();
 
+  const heartbeatStatus = useSelector((state) => state.tasks.heartbeatStatus);
+  const rosConnected = heartbeatStatus === 'connected';
   const [loadingUsers, setLoadingUsers] = useState(false);
   const [loadingDatasets, setLoadingDatasets] = useState({});
   const [expandedUsers, setExpandedUsers] = useState({});
   const [userDatasets, setUserDatasets] = useState({});
+  const [manualMode, setManualMode] = useState(false);
+  const [manualRepoId, setManualRepoId] = useState('');
 
   // Fetch user list
   const fetchUsers = useCallback(async () => {
@@ -152,10 +157,38 @@ export default function DatasetSelector() {
     [fetchDatasets]
   );
 
-  // Fetch users when component mounts
+  // Handle manual repo ID submission
+  const handleManualSubmit = useCallback(() => {
+    const trimmed = manualRepoId.trim();
+    if (!trimmed) {
+      toast.error('Bitte gib eine HuggingFace Repo-ID ein');
+      return;
+    }
+    if (!trimmed.includes('/')) {
+      toast.error('Format: benutzername/datensatzname');
+      return;
+    }
+    const [user, ...rest] = trimmed.split('/');
+    const dataset = rest.join('/');
+    dispatch(setSelectedUser(user));
+    dispatch(setSelectedDataset(dataset));
+    dispatch(setDatasetRepoId(trimmed));
+    toast.success(`Datensatz ausgewählt:\n${trimmed}`);
+  }, [manualRepoId, dispatch]);
+
+  // Auto-switch to manual mode if ROS is not connected
   useEffect(() => {
-    fetchUsers();
-  }, [fetchUsers]);
+    if (!rosConnected && !manualMode) {
+      setManualMode(true);
+    }
+  }, [rosConnected, manualMode]);
+
+  // Fetch users when component mounts (only in browse mode)
+  useEffect(() => {
+    if (!manualMode) {
+      fetchUsers();
+    }
+  }, [fetchUsers, manualMode]);
 
   const classCard = clsx(
     'bg-white',
@@ -259,7 +292,22 @@ export default function DatasetSelector() {
 
   return (
     <div className={classCard}>
-      <h1 className={classTitle}>Datensatzauswahl</h1>
+      <div className="flex items-center justify-between mb-6">
+        <h1 className="text-xl font-bold text-gray-800">Datensatzauswahl</h1>
+        <button
+          onClick={() => setManualMode(!manualMode)}
+          className={clsx(
+            'flex items-center gap-1 px-3 py-1 text-xs font-medium rounded-full transition-colors',
+            manualMode
+              ? 'bg-teal-100 text-teal-700 hover:bg-teal-200'
+              : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+          )}
+          disabled={isTraining}
+        >
+          <MdEdit size={14} />
+          {manualMode ? 'Durchsuchen' : 'Manuell'}
+        </button>
+      </div>
 
       {/* Current Selection Display */}
       {selectedUser && selectedDataset && (
@@ -279,6 +327,46 @@ export default function DatasetSelector() {
           </div>
         </div>
       )}
+
+      {/* Manual HuggingFace Repo ID Input */}
+      {manualMode ? (
+        <div className="space-y-3">
+          <p className="text-sm text-gray-500">
+            HuggingFace Datensatz-ID direkt eingeben (z.B. <span className="font-mono text-teal-600">benutzername/datensatzname</span>)
+          </p>
+          <input
+            type="text"
+            className={clsx(
+              'w-full px-3 py-2 border rounded-md text-sm',
+              'focus:outline-none focus:ring-2 focus:ring-teal-500 focus:border-transparent',
+              'border-gray-300'
+            )}
+            placeholder="benutzername/datensatzname"
+            value={manualRepoId}
+            onChange={(e) => setManualRepoId(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && handleManualSubmit()}
+            disabled={isTraining}
+          />
+          <button
+            className={clsx(
+              'w-full px-4 py-2 rounded-md font-medium transition-colors text-sm',
+              manualRepoId.trim()
+                ? 'bg-teal-600 text-white hover:bg-teal-700'
+                : 'bg-gray-300 text-gray-500 cursor-not-allowed'
+            )}
+            onClick={handleManualSubmit}
+            disabled={!manualRepoId.trim() || isTraining}
+          >
+            Datensatz auswählen
+          </button>
+          {!rosConnected && (
+            <p className="text-xs text-amber-600 bg-amber-50 rounded-md p-2">
+              Roboter-Umgebung nicht verbunden. Verwende die manuelle Eingabe oder starte die Umgebung, um lokale Datensätze zu durchsuchen.
+            </p>
+          )}
+        </div>
+      ) : (
+        <>
 
       {/* Refresh Button */}
       <button
@@ -394,6 +482,8 @@ export default function DatasetSelector() {
           })
         )}
       </div>
+        </>
+      )}
     </div>
   );
 }

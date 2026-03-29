@@ -2,8 +2,9 @@
 ; Builds EduBotics_Setup.exe installer
 
 [Setup]
+AppId={{B7E3F2A1-8C4D-4E5F-9A6B-1D2E3F4A5B6C}
 AppName=EduBotics
-AppVersion=1.0.0
+AppVersion=2.0.0
 AppPublisher=EduBotics
 DefaultDirName={autopf}\EduBotics
 DefaultGroupName=EduBotics
@@ -16,6 +17,13 @@ WizardStyle=modern
 LicenseFile=assets\license.txt
 ; Uncomment when icon is available:
 ; SetupIconFile=assets\icon.ico
+
+[InstallDelete]
+; Clean old PyInstaller artifacts to prevent DLL conflicts on upgrade
+Type: filesandordirs; Name: "{app}\gui\_internal"
+Type: filesandordirs; Name: "{app}\gui\__pycache__"
+; Remove old .env so GUI regenerates it with new camera schema
+Type: files; Name: "{app}\docker\.env"
 
 [Files]
 ; Docker compose files
@@ -38,39 +46,39 @@ Name: "{group}\EduBotics starten"; Filename: "{app}\gui\EduBotics.exe"; WorkingD
 Name: "{group}\Installation prüfen"; Filename: "powershell.exe"; Parameters: "-ExecutionPolicy Bypass -File ""{app}\scripts\verify_system.ps1"""; WorkingDir: "{app}"
 
 [Run]
-; Post-install steps — run in order
+; Post-install steps — run in order (hidden, students only see Inno Setup progress)
 
 ; Step 1: Voraussetzungen installieren (WSL2, Docker Desktop, usbipd)
 Filename: "powershell.exe"; \
-  Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\scripts\install_prerequisites.ps1"""; \
+  Parameters: "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File ""{app}\scripts\install_prerequisites.ps1"""; \
   StatusMsg: "Voraussetzungen werden installiert (WSL2, Docker, usbipd)..."; \
-  Flags: shellexec waituntilterminated
+  Flags: runhidden waituntilterminated
 
 ; Step 2: .wslconfig konfigurieren
 Filename: "powershell.exe"; \
-  Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\scripts\configure_wsl.ps1"""; \
+  Parameters: "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File ""{app}\scripts\configure_wsl.ps1"""; \
   StatusMsg: "WSL2-Einstellungen werden konfiguriert..."; \
-  Flags: shellexec waituntilterminated
+  Flags: runhidden waituntilterminated
 
 ; Step 3: usbipd-Richtlinie konfigurieren
 Filename: "powershell.exe"; \
-  Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\scripts\configure_usbipd.ps1"""; \
+  Parameters: "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File ""{app}\scripts\configure_usbipd.ps1"""; \
   StatusMsg: "USB-Geräterichtlinie wird konfiguriert..."; \
-  Flags: shellexec waituntilterminated
+  Flags: runhidden waituntilterminated
 
 ; Step 4: Docker-Images herunterladen (optional, kann dauern)
 Filename: "powershell.exe"; \
-  Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\scripts\pull_images.ps1"""; \
+  Parameters: "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File ""{app}\scripts\pull_images.ps1"""; \
   StatusMsg: "Docker-Images werden heruntergeladen (kann etwas dauern)..."; \
-  Flags: shellexec waituntilterminated; \
+  Flags: runhidden waituntilterminated; \
   Description: "Docker-Images jetzt herunterladen (empfohlen)"; \
   Check: IsDockerRunning
 
 ; Step 5: Installation überprüfen
 Filename: "powershell.exe"; \
-  Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\scripts\verify_system.ps1"""; \
+  Parameters: "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File ""{app}\scripts\verify_system.ps1"""; \
   StatusMsg: "Installation wird überprüft..."; \
-  Flags: shellexec waituntilterminated postinstall; \
+  Flags: runhidden waituntilterminated postinstall; \
   Description: "Installation überprüfen"
 
 ; Step 6: App starten (optional, nach der Installation)

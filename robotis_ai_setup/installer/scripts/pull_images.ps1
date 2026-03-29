@@ -43,4 +43,8 @@ foreach ($image in $images) {
     Write-OK "$image pulled"
 }
 
+Write-Step "Cleaning up old images..."
+docker image prune -f *>$null
+Write-OK "Old images removed"
+
 Write-Step "All $total images pulled successfully!"

@@ -13,6 +13,8 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+import json
+
 import runpod
 from huggingface_hub import HfApi, login
 from supabase import create_client
@@ -60,15 +62,16 @@ def _build_training_command(
         f"--dataset.repo_id={dataset_name}",
         f"--output_dir={output_dir}",
         "--policy.push_to_hub=false",
+        # Disable eval — no simulation env available on cloud worker
+        "--eval_freq=0",
     ]
 
-    # Map training params to CLI args
+    # Map training params to CLI args (eval_freq excluded — forced to 0 above)
     param_mapping = {
         "seed": "--seed",
         "num_workers": "--num_workers",
         "batch_size": "--batch_size",
         "steps": "--steps",
-        "eval_freq": "--eval_freq",
         "log_freq": "--log_freq",
         "save_freq": "--save_freq",
     }
@@ -111,12 +114,35 @@ def _upload_model_to_hf(
             f"No pretrained_model directory found in {output_path}"
         )
 
+    # Write camera/observation metadata from config.json
+    config_path = checkpoint_dir / "config.json"
+    if config_path.exists():
+        try:
+            with open(config_path) as f:
+                model_config = json.load(f)
+            image_keys = [k for k in model_config.get("input_features", {})
+                          if k.startswith("observation.images.")]
+            camera_meta = {
+                "cameras": [k.replace("observation.images.", "") for k in image_keys],
+                "observation_image_keys": image_keys,
+            }
+            meta_path = checkpoint_dir / "camera_config.json"
+            with open(meta_path, "w") as f:
+                json.dump(camera_meta, f, indent=2)
+        except Exception as e:
+            print(f"Warning: Could not write camera metadata: {e}")
+
     # Upload all files from the checkpoint directory
     hf_api.upload_folder(
         repo_id=model_name,
         folder_path=str(checkpoint_dir),
         repo_type="model",
     )
+
+    # Verify upload succeeded
+    info = hf_api.repo_info(repo_id=model_name, repo_type="model")
+    if not info:
+        raise RuntimeError(f"Upload verification failed: repo {model_name} not found after upload")
 
     return f"https://huggingface.co/{model_name}"
 

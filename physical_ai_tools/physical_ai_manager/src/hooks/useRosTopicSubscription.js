@@ -56,6 +56,7 @@ export function useRosTopicSubscription() {
   const previousPhaseRef = useRef(null);
   const audioContextRef = useRef(null);
   const hfStatusTopicRef = useRef(null);
+  const lastTrainingUpdateRef = useRef(0);
 
   const dispatch = useDispatch();
   const rosbridgeUrl = useSelector((state) => state.ros.rosbridgeUrl);
@@ -263,27 +264,31 @@ export function useRosTopicSubscription() {
 
         // Extract TaskInfo from TaskStatus message
         if (msg.task_info) {
-          // update task info only when task is not stopped
-          dispatch(
-            setTaskInfo({
-              taskName: msg.task_info.task_name || '',
-              taskType: msg.task_info.task_type || '',
-              taskInstruction: msg.task_info.task_instruction || [],
-              policyPath: msg.task_info.policy_path || '',
-              recordInferenceMode: msg.task_info.record_inference_mode || false,
-              userId: msg.task_info.user_id || '',
-              fps: msg.task_info.fps || 0,
-              tags: msg.task_info.tags || [],
-              warmupTime: msg.task_info.warmup_time_s || 0,
-              episodeTime: msg.task_info.episode_time_s || 0,
-              resetTime: msg.task_info.reset_time_s || 0,
-              numEpisodes: msg.task_info.num_episodes || 0,
-              pushToHub: msg.task_info.push_to_hub || false,
-              privateMode: msg.task_info.private_mode || false,
-              useOptimizedSave: msg.task_info.use_optimized_save_mode || false,
-              recordRosBag2: msg.task_info.record_rosbag2 || false,
-            })
-          );
+          const infoUpdate = {
+            taskName: msg.task_info.task_name || '',
+            taskType: msg.task_info.task_type || '',
+            taskInstruction: msg.task_info.task_instruction || [],
+            policyPath: msg.task_info.policy_path || '',
+            recordInferenceMode: msg.task_info.record_inference_mode || false,
+            userId: msg.task_info.user_id || '',
+            fps: msg.task_info.fps || 0,
+            episodeTime: msg.task_info.episode_time_s || 0,
+            resetTime: msg.task_info.reset_time_s || 0,
+            numEpisodes: msg.task_info.num_episodes || 0,
+            pushToHub: msg.task_info.push_to_hub || false,
+            privateMode: msg.task_info.private_mode || false,
+            useOptimizedSave: msg.task_info.use_optimized_save_mode || false,
+            recordRosBag2: msg.task_info.record_rosbag2 || false,
+          };
+
+          // Only overwrite user-editable fields (tags, warmupTime) when a task is actively running,
+          // so the server's values don't erase what the student typed in the UI.
+          if (isRunning) {
+            infoUpdate.tags = msg.task_info.tags || [];
+            infoUpdate.warmupTime = msg.task_info.warmup_time_s || 0;
+          }
+
+          dispatch(setTaskInfo(infoUpdate));
         }
 
         // Set multi-task index safely with null checks and optimized search
@@ -401,13 +406,19 @@ export function useRosTopicSubscription() {
       });
 
       trainingStatusTopicRef.current.subscribe((msg) => {
-        console.log('Received training status:', msg);
-
+        // Errors always pass through immediately
         if (msg.error !== '') {
           console.log('error:', msg.error);
           toast.error(msg.error);
           return;
         }
+
+        // Throttle progress updates to max 1/sec to avoid excessive re-renders
+        const now = Date.now();
+        if (now - lastTrainingUpdateRef.current < 1000) return;
+        lastTrainingUpdateRef.current = now;
+
+        console.log('Received training status:', msg);
 
         // ROS message to React state
         dispatch(
@@ -432,7 +443,7 @@ export function useRosTopicSubscription() {
         dispatch(setCurrentStep(msg.current_step || 0));
         dispatch(setCurrentLoss(msg.current_loss));
         dispatch(setTopicReceived(true));
-        dispatch(setLastUpdate(Date.now()));
+        dispatch(setLastUpdate(now));
       });
     } catch (error) {
       console.error('Failed to subscribe to training status topic:', error);
@@ -556,16 +567,6 @@ export function useRosTopicSubscription() {
     subscribeToTrainingStatus,
     subscribeHFStatus,
   ]);
-
-  // Auto-start connection and subscription (can be disabled by not calling useRosTopicSubscription)
-  useEffect(() => {
-    if (!rosbridgeUrl) return;
-
-    initializeSubscriptions();
-
-    return cleanup;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rosbridgeUrl]); // Only rosbridgeUrl as dependency to prevent unnecessary re-subscriptions
 
   return {
     connected,

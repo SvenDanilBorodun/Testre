@@ -19,6 +19,11 @@
 import { createSlice } from '@reduxjs/toolkit';
 import TaskPhase from '../../constants/taskPhases';
 
+const savedRobotType = (() => {
+  try { return localStorage.getItem('edubotics_robotType') || ''; }
+  catch { return ''; }
+})();
+
 const initialState = {
   taskInfo: {
     taskName: '',
@@ -40,7 +45,7 @@ const initialState = {
     recordRosBag2: false,
   },
   taskStatus: {
-    robotType: '',
+    robotType: savedRobotType,
     taskName: 'idle',
     running: false,
     phase: TaskPhase.READY,
@@ -81,9 +86,13 @@ const taskSlice = createSlice({
     },
     setTaskStatus: (state, action) => {
       state.taskStatus = { ...state.taskStatus, ...action.payload };
+      if (action.payload.robotType) {
+        try { localStorage.setItem('edubotics_robotType', action.payload.robotType); } catch {}
+      }
     },
     selectRobotType: (state, action) => {
       state.taskStatus.robotType = action.payload;
+      try { localStorage.setItem('edubotics_robotType', action.payload); } catch {}
     },
     resetTaskStatus: (state) => {
       state.taskStatus = initialState.taskStatus;

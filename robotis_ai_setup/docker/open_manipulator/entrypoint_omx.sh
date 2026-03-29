@@ -21,7 +21,8 @@ echo "========================================"
 echo "ROBOTIS Open Manipulator - AI Mode"
 echo "Follower: ${FOLLOWER_PORT}"
 echo "Leader:   ${LEADER_PORT}"
-echo "Camera:   ${CAMERA_DEVICE} as ${CAMERA_NAME}"
+echo "Camera 1: ${CAMERA_DEVICE_1:-<none>} as ${CAMERA_NAME_1:-camera1}"
+echo "Camera 2: ${CAMERA_DEVICE_2:-<none>} as ${CAMERA_NAME_2:-camera2}"
 echo "========================================"
 
 # --- Validate hardware (with retry for USB attach timing) ---
@@ -75,16 +76,23 @@ ros2 launch open_manipulator_bringup omx_l_leader_ai.launch.py \
     port_name:=${LEADER_PORT} &
 PIDS="$PIDS $!"
 
-# --- Phase 4: Launch Camera ---
-if [ -n "${CAMERA_DEVICE}" ] && [ -e "${CAMERA_DEVICE}" ]; then
-    echo "[LAUNCH] Starting camera (${CAMERA_DEVICE})..."
-    ros2 launch open_manipulator_bringup camera_usb_cam.launch.py \
-        name:=${CAMERA_NAME} \
-        video_device:=${CAMERA_DEVICE} &
-    PIDS="$PIDS $!"
-else
-    echo "[WARN] Camera ${CAMERA_DEVICE:-<not set>} not found, skipping camera launch."
-fi
+# --- Phase 4: Launch Cameras (up to 2) ---
+for i in 1 2; do
+    device_var="CAMERA_DEVICE_$i"
+    name_var="CAMERA_NAME_$i"
+    device="${!device_var}"
+    name="${!name_var:-camera$i}"
+
+    if [ -n "$device" ] && [ -e "$device" ]; then
+        echo "[LAUNCH] Starting camera $i ($name on $device)..."
+        ros2 launch open_manipulator_bringup camera_usb_cam.launch.py \
+            name:="$name" \
+            video_device:="$device" &
+        PIDS="$PIDS $!"
+    elif [ -n "$device" ]; then
+        echo "[WARN] Camera $i device $device not found, skipping."
+    fi
+done
 
 echo "========================================"
 echo "All services running!"

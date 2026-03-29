@@ -37,6 +37,8 @@ export default function HeartbeatStatus({
   const lastHeartbeatTime = useSelector((state) => state.tasks.lastHeartbeatTime);
 
   const intervalRef = useRef(null);
+  const lastHeartbeatTimeRef = useRef(lastHeartbeatTime);
+  lastHeartbeatTimeRef.current = lastHeartbeatTime;
 
   // Heartbeat status: 'connected', 'timeout', 'disconnected'
   const getStatusInfo = () => {
@@ -84,8 +86,9 @@ export default function HeartbeatStatus({
     // Check status every 1 second
     intervalRef.current = setInterval(() => {
       const now = Date.now();
+      const lastHb = lastHeartbeatTimeRef.current;
 
-      if (!lastHeartbeatTime) {
+      if (!lastHb) {
         // If heartbeat has not been received yet
         if (heartbeatStatus !== 'disconnected') {
           dispatch(setHeartbeatStatus('disconnected'));
@@ -93,7 +96,7 @@ export default function HeartbeatStatus({
         return;
       }
 
-      const timeSinceLastHeartbeat = now - lastHeartbeatTime;
+      const timeSinceLastHeartbeat = now - lastHb;
 
       if (timeSinceLastHeartbeat >= disconnectTimeoutMs) {
         // If 10 seconds have passed - disconnected
@@ -119,7 +122,7 @@ export default function HeartbeatStatus({
         clearInterval(intervalRef.current);
       }
     };
-  }, [lastHeartbeatTime, timeoutMs, disconnectTimeoutMs, heartbeatStatus, dispatch]);
+  }, [timeoutMs, disconnectTimeoutMs, dispatch]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const statusInfo = getStatusInfo();
 

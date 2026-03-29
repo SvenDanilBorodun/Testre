@@ -61,6 +61,18 @@ function App() {
     };
   }, []);
 
+  // Warn user before closing/refreshing during active recording
+  useEffect(() => {
+    const handleBeforeUnload = (e) => {
+      if (taskStatus.running) {
+        e.preventDefault();
+        e.returnValue = '';
+      }
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, [taskStatus.running]);
+
   // Initialize Supabase auth listener
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {

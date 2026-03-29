@@ -26,7 +26,7 @@ import TrainingControlPanel from '../components/TrainingControlPanel';
 import TrainingOptionInput from '../components/TrainingOptionInput';
 import TrainingProgressBar from '../components/TrainingProgressBar';
 import TrainingLossDisplay from '../components/TrainingLossDisplay';
-import CloudTrainingHistory from '../components/CloudTrainingHistory';
+import MyModels from '../components/MyModels';
 import LoginForm from '../components/LoginForm';
 import { supabase } from '../lib/supabaseClient';
 import { clearSession } from '../features/auth/authSlice';
@@ -150,10 +150,10 @@ export default function TrainingPage() {
           </div>
         </div>
 
-        {/* Cloud training history */}
+        {/* My Models */}
         <div className="flex justify-center items-center mb-10 px-10">
           <div className="w-full max-w-5xl">
-            <CloudTrainingHistory />
+            <MyModels />
           </div>
         </div>
       </div>

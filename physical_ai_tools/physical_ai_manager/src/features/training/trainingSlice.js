@@ -18,6 +18,30 @@
 
 import { createSlice } from '@reduxjs/toolkit';
 
+const savedTrainingInfo = (() => {
+  try {
+    const raw = localStorage.getItem('edubotics_trainingInfo');
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    // Validate shape — if old localStorage has missing keys, discard it
+    if (typeof parsed !== 'object' || !('seed' in parsed) || !('steps' in parsed)) return null;
+    return parsed;
+  } catch { return null; }
+})();
+
+const defaultTrainingInfo = {
+  datasetRepoId: undefined,
+  policyType: undefined,
+  outputFolderName: undefined,
+  seed: 1000,
+  numWorkers: 4,
+  batchSize: 8,
+  steps: 100000,
+  evalFreq: 20000,
+  logFreq: 200,
+  saveFreq: 20000,
+};
+
 const initialState = {
   userList: [],
   datasetList: [],
@@ -35,18 +59,7 @@ const initialState = {
   updateCounter: 0,
   currentLoss: undefined,
 
-  trainingInfo: {
-    datasetRepoId: undefined,
-    policyType: undefined,
-    outputFolderName: undefined,
-    seed: 1000,
-    numWorkers: 4,
-    batchSize: 8,
-    steps: 100000,
-    evalFreq: 20000,
-    logFreq: 200,
-    saveFreq: 20000,
-  },
+  trainingInfo: savedTrainingInfo || defaultTrainingInfo,
 };
 
 const trainingSlice = createSlice({
@@ -55,6 +68,7 @@ const trainingSlice = createSlice({
   reducers: {
     setTrainingInfo: (state, action) => {
       state.trainingInfo = action.payload;
+      try { localStorage.setItem('edubotics_trainingInfo', JSON.stringify(action.payload)); } catch {}
     },
     setTopicReceived: (state, action) => {
       state.topicReceived = action.payload;

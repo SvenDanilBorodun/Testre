@@ -9,9 +9,11 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
-# Install LeRobot and dependencies
+# Install LeRobot from the SAME commit used by physical_ai_server (v0.2.0)
+# This ensures dataset format, model format, and policy names match exactly.
+# Commit: 989f3d05 from https://github.com/huggingface/lerobot
 RUN pip3 install --no-cache-dir --break-system-packages \
-    "lerobot[pi0]" \
+    "lerobot[pi0] @ git+https://github.com/huggingface/lerobot.git@989f3d05ba47f872d75c587e76838e9cc574857a" \
     runpod \
     huggingface_hub \
     supabase

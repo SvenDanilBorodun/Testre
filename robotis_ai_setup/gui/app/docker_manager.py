@@ -87,13 +87,18 @@ def images_exist() -> dict[str, bool]:
     return status
 
 
-def check_for_updates() -> bool:
+def check_for_updates(log=None) -> bool:
     """Check if any images have newer versions on the registry.
 
     Compares local image digests against remote manifests without pulling.
     Returns True if updates were found and pulled.
+
+    Args:
+        log: Optional callable for status messages (e.g. gui._log).
     """
     updates_available = False
+    registry_reachable = False
+
     for image in ALL_IMAGES:
         try:
             # Get local digest
@@ -113,14 +118,22 @@ def check_for_updates() -> bool:
             if remote.returncode != 0:
                 continue
 
+            registry_reachable = True
+
             # If local digest not found in remote manifest output, update available
             if local_digest and local_digest.split("@")[-1] not in remote.stdout:
                 updates_available = True
         except (FileNotFoundError, subprocess.TimeoutExpired):
             continue
 
+    if not registry_reachable:
+        if log:
+            log("WARNUNG: Docker Hub nicht erreichbar — Update-Prüfung übersprungen.")
+        return False
+
     if updates_available:
-        # Pull only when updates are actually available
+        if log:
+            log("Updates gefunden — Images werden aktualisiert...")
         for image in ALL_IMAGES:
             try:
                 subprocess.run(
@@ -129,32 +142,16 @@ def check_for_updates() -> bool:
                 )
             except (FileNotFoundError, subprocess.TimeoutExpired):
                 continue
+        # Remove dangling images to free disk space
+        try:
+            subprocess.run(
+                ["docker", "image", "prune", "-f"],
+                capture_output=True, text=True, timeout=30,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
         return True
     return False
-
-
-def pull_latest(callback=None) -> bool:
-    """Pull latest versions of all images.
-
-    Args:
-        callback: Optional function called with (image_name, index, total) for progress.
-
-    Returns:
-        True if all images pulled successfully.
-    """
-    for i, image in enumerate(ALL_IMAGES):
-        if callback:
-            callback(image, i, len(ALL_IMAGES))
-        try:
-            result = subprocess.run(
-                ["docker", "pull", image],
-                capture_output=True, text=True, timeout=600,
-            )
-            if result.returncode != 0:
-                return False
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            return False
-    return True
 
 
 def pull_images(callback=None) -> bool:
@@ -189,24 +186,31 @@ def _compose_cmd(gpu: bool = False) -> list[str]:
     return cmd
 
 
-def start_containers(gpu: bool = False) -> bool:
+def start_containers(gpu: bool = False, log=None) -> bool:
     """Start all containers via docker compose up -d.
+
+    Uses --force-recreate to handle stale containers cleanly.
 
     Args:
         gpu: If True, include the GPU override compose file.
+        log: Optional callable for status messages.
 
     Returns:
         True if containers started successfully.
     """
-    cmd = _compose_cmd(gpu) + ["up", "-d"]
+    cmd = _compose_cmd(gpu) + ["up", "-d", "--force-recreate"]
     try:
         result = subprocess.run(
             cmd,
-            capture_output=True, text=True, timeout=120,
+            capture_output=True, text=True, timeout=180,
             cwd=DOCKER_DIR,
         )
+        if result.returncode != 0 and log:
+            log(f"Docker Compose Fehler: {result.stderr.strip()}")
         return result.returncode == 0
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+        if log:
+            log(f"Docker Compose Fehler: {e}")
         return False
 
 

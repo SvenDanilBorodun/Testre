@@ -21,8 +21,8 @@ echo "========================================"
 echo "ROBOTIS Open Manipulator - AI Mode"
 echo "Follower: ${FOLLOWER_PORT}"
 echo "Leader:   ${LEADER_PORT}"
-echo "Camera 1: ${CAMERA_DEVICE_1:-<none>} as ${CAMERA_NAME_1:-camera1}"
-echo "Camera 2: ${CAMERA_DEVICE_2:-<none>} as ${CAMERA_NAME_2:-camera2}"
+echo "Camera 1: ${CAMERA_DEVICE_1:-<none>} as ${CAMERA_NAME_1:-gripper}"
+echo "Camera 2: ${CAMERA_DEVICE_2:-<none>} as ${CAMERA_NAME_2:-scene}"
 echo "========================================"
 
 # --- Validate hardware (with retry for USB attach timing) ---
@@ -81,7 +81,8 @@ for i in 1 2; do
     device_var="CAMERA_DEVICE_$i"
     name_var="CAMERA_NAME_$i"
     device="${!device_var}"
-    name="${!name_var:-camera$i}"
+    default_names=("gripper" "scene")
+    name="${!name_var:-${default_names[$((i-1))]}}"
 
     if [ -n "$device" ] && [ -e "$device" ]; then
         echo "[LAUNCH] Starting camera $i ($name on $device)..."

@@ -101,3 +101,19 @@ var
 begin
   Result := Exec('docker', 'info', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) and (ResultCode = 0);
 end;
+
+// Stop running containers before installing new files (upgrade safety)
+procedure CurStepChanged(CurStep: TSetupStep);
+var
+  ResultCode: Integer;
+  ComposeFile: String;
+begin
+  if CurStep = ssInstall then
+  begin
+    ComposeFile := ExpandConstant('{app}\docker\docker-compose.yml');
+    if FileExists(ComposeFile) and IsDockerRunning() then
+    begin
+      Exec('docker', 'compose -f "' + ComposeFile + '" down', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    end;
+  end;
+end;

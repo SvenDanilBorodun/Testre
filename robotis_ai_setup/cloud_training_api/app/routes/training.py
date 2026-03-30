@@ -38,6 +38,9 @@ class TrainingJob(BaseModel):
     model_name: str
     model_type: str
     training_params: dict | None
+    current_step: int | None = 0
+    total_steps: int | None = 0
+    current_loss: float | None = None
     requested_at: str
     terminated_at: str | None
     error_message: str | None
@@ -186,6 +189,7 @@ async def start_training(req: StartTrainingRequest, user=Depends(get_current_use
                 "model_name": model_name,
                 "model_type": req.model_type,
                 "training_params": req.training_params,
+                "total_steps": req.training_params.get("steps", 100000),
             }
         )
         .execute()
@@ -246,7 +250,10 @@ async def cancel_training(req: CancelTrainingRequest, user=Depends(get_current_u
 
     # Cancel on RunPod
     if training.get("runpod_job_id"):
-        cancel_training_job(training["runpod_job_id"])
+        try:
+            cancel_training_job(training["runpod_job_id"])
+        except Exception:
+            pass  # Still mark as canceled locally even if RunPod fails
 
     # Mark as canceled (auto-frees the credit)
     supabase.table("trainings").update(

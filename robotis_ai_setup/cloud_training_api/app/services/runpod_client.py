@@ -43,8 +43,9 @@ def cancel_training_job(job_id: str) -> bool:
     try:
         endpoint.cancel(job_id)
         return True
-    except Exception:
-        return False
+    except Exception as e:
+        print(f"RunPod cancel failed for job {job_id}: {e}")
+        raise
 
 
 def get_job_status(job_id: str) -> str:

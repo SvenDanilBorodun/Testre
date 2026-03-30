@@ -24,7 +24,7 @@ def generate_env_file(config: HardwareConfig, output_path: str = ENV_FILE) -> st
     if config.cameras:
         for i, cam in enumerate(config.cameras, 1):
             lines.append(f"CAMERA_DEVICE_{i}={cam.path}")
-            lines.append(f"CAMERA_NAME_{i}=camera{i}")
+            lines.append(f"CAMERA_NAME_{i}={cam.role or f'camera{i}'}")
 
     lines.append(f"ROS_DOMAIN_ID={ROS_DOMAIN_ID}")
     lines.append(f"REGISTRY={REGISTRY}")

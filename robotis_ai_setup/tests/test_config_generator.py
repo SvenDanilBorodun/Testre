@@ -25,8 +25,8 @@ class TestConfigGenerator(unittest.TestCase):
                 description="OpenRB-150",
             ),
             cameras=[
-                CameraDevice(path="/dev/video0", name="Gripper Cam"),
-                CameraDevice(path="/dev/video2", name="Scene Cam"),
+                CameraDevice(path="/dev/video0", name="Gripper Cam", role="gripper"),
+                CameraDevice(path="/dev/video2", name="Scene Cam", role="scene"),
             ],
         )
 
@@ -38,9 +38,9 @@ class TestConfigGenerator(unittest.TestCase):
             self.assertIn("FOLLOWER_PORT=/dev/serial/by-id/usb-ROBOTIS_OpenRB-150_Follower456", content)
             self.assertIn("LEADER_PORT=/dev/serial/by-id/usb-ROBOTIS_OpenRB-150_Leader123", content)
             self.assertIn("CAMERA_DEVICE_1=/dev/video0", content)
-            self.assertIn("CAMERA_NAME_1=camera1", content)
+            self.assertIn("CAMERA_NAME_1=gripper", content)
             self.assertIn("CAMERA_DEVICE_2=/dev/video2", content)
-            self.assertIn("CAMERA_NAME_2=camera2", content)
+            self.assertIn("CAMERA_NAME_2=scene", content)
             self.assertIn("ROS_DOMAIN_ID=30", content)
 
             with open(tmp_path) as f:

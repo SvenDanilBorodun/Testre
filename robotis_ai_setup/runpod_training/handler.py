@@ -8,8 +8,10 @@ Reference: phosphobot modal/lerobot_modal/app.py
 """
 
 import os
+import re
 import subprocess
 import sys
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -23,6 +25,21 @@ from supabase import create_client
 OUTPUT_DIR = Path("/tmp/training_output")
 
 
+def _parse_abbreviated_number(s: str) -> int:
+    """Parse LeRobot's abbreviated numbers: '50K' → 50000, '1.5M' → 1500000."""
+    multipliers = {"K": 1_000, "M": 1_000_000, "B": 1_000_000_000}
+    s = s.strip()
+    for suffix, mult in multipliers.items():
+        if s.upper().endswith(suffix):
+            return int(float(s[:-1]) * mult)
+    return int(float(s))
+
+
+def _get_supabase_client(supabase_url: str, supabase_key: str):
+    """Create a Supabase client (cached per handler invocation)."""
+    return create_client(supabase_url, supabase_key)
+
+
 def _update_supabase_status(
     supabase_url: str,
     supabase_key: str,
@@ -31,12 +48,28 @@ def _update_supabase_status(
     error_message: str | None = None,
 ):
     """Update training status in Supabase."""
-    client = create_client(supabase_url, supabase_key)
+    client = _get_supabase_client(supabase_url, supabase_key)
     update_data = {"status": status}
     if status in ("succeeded", "failed", "canceled"):
         update_data["terminated_at"] = datetime.now(timezone.utc).isoformat()
     if error_message:
         update_data["error_message"] = error_message
+    client.table("trainings").update(update_data).eq("id", training_id).execute()
+
+
+def _update_supabase_progress(
+    supabase_url: str,
+    supabase_key: str,
+    training_id: int,
+    current_step: int,
+    total_steps: int,
+    current_loss: float | None = None,
+):
+    """Update training progress in Supabase."""
+    client = _get_supabase_client(supabase_url, supabase_key)
+    update_data = {"current_step": current_step, "total_steps": total_steps}
+    if current_loss is not None:
+        update_data["current_loss"] = current_loss
     client.table("trainings").update(update_data).eq("id", training_id).execute()
 
 
@@ -167,20 +200,69 @@ def handler(job):
     # Update status to running
     _update_supabase_status(supabase_url, supabase_key, training_id, "running")
 
+    total_steps = training_params.get("steps", 100000)
+
     try:
         # Build and run training command
         cmd = _build_training_command(dataset_name, model_type, model_name, training_params)
         print(f"Running training command: {' '.join(cmd)}")
 
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=3 * 3600,  # 3 hour timeout
+        # Use Popen with both stdout and stderr streamed in threads
+        # so that proc.wait(timeout) actually works for timeout protection.
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         )
 
-        if result.returncode != 0:
-            error_msg = result.stderr[-2000:] if result.stderr else "Unknown error"
+        stdout_lines = []
+        stderr_lines = []
+        last_progress_step = -1
+        # LeRobot logs abbreviated numbers: "step:50K smpl:1.6M loss:0.1234"
+        step_pattern = re.compile(r"step[:\s]+(\d+\.?\d*[KMBkmb]?)")
+        loss_pattern = re.compile(r"loss[:\s]+([\d.]+(?:e[+-]?\d+)?)")
+
+        def _read_stdout():
+            nonlocal last_progress_step
+            for line in proc.stdout:
+                print(line, end="")
+                stdout_lines.append(line)
+                step_match = step_pattern.search(line)
+                if step_match:
+                    try:
+                        step = _parse_abbreviated_number(step_match.group(1))
+                    except (ValueError, TypeError):
+                        continue
+                    loss_match = loss_pattern.search(line)
+                    loss = float(loss_match.group(1)) if loss_match else None
+                    if step > last_progress_step:
+                        last_progress_step = step
+                        try:
+                            _update_supabase_progress(
+                                supabase_url, supabase_key, training_id,
+                                step, total_steps, loss,
+                            )
+                        except Exception:
+                            pass
+
+        def _read_stderr():
+            for line in proc.stderr:
+                stderr_lines.append(line)
+
+        stdout_thread = threading.Thread(target=_read_stdout, daemon=True)
+        stderr_thread = threading.Thread(target=_read_stderr, daemon=True)
+        stdout_thread.start()
+        stderr_thread.start()
+
+        # Wait for process with actual timeout protection
+        proc.wait(timeout=3 * 3600)
+        stdout_thread.join(timeout=10)
+        stderr_thread.join(timeout=10)
+        stderr_text = "".join(stderr_lines)
+
+        if proc.returncode != 0:
+            if len(stderr_text) > 2000:
+                error_msg = stderr_text[:1000] + "\n...[truncated]...\n" + stderr_text[-1000:]
+            else:
+                error_msg = stderr_text or "Unknown error"
             _update_supabase_status(
                 supabase_url, supabase_key, training_id, "failed", error_msg
             )
@@ -189,19 +271,24 @@ def handler(job):
         # Upload model to HuggingFace
         model_url = _upload_model_to_hf(model_name, hf_token)
 
-        # Update status to succeeded
+        # Update final progress + status
+        _update_supabase_progress(
+            supabase_url, supabase_key, training_id, total_steps, total_steps, None
+        )
         _update_supabase_status(supabase_url, supabase_key, training_id, "succeeded")
 
         return {"status": "succeeded", "model_url": model_url}
 
     except subprocess.TimeoutExpired:
+        proc.kill()
         _update_supabase_status(
             supabase_url, supabase_key, training_id, "failed", "Training timed out (3h limit)"
         )
         return {"status": "failed", "error": "Training timed out"}
 
     except Exception as e:
-        error_msg = str(e)[-2000:]
+        err = str(e)
+        error_msg = err[:1000] + "\n...[truncated]...\n" + err[-1000:] if len(err) > 2000 else err
         _update_supabase_status(
             supabase_url, supabase_key, training_id, "failed", error_msg
         )

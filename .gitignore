@@ -1,0 +1,16 @@
+# Environment files with secrets
+robotis_ai_setup/cloud_training_api/.env
+physical_ai_tools/physical_ai_manager/.env
+
+# Build artifacts
+robotis_ai_setup/gui/dist/
+robotis_ai_setup/gui/build/
+robotis_ai_setup/installer/output/
+robotis_ai_setup/docker/physical_ai_server/overlays/
+
+# Python
+__pycache__/
+*.pyc
+
+# Node
+node_modules/

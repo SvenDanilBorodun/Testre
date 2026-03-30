@@ -101,6 +101,12 @@ class EduBoticsApp:
         self.camera_checks_frame.pack(fill=tk.X, pady=5)
         self.camera_check_vars: list[tk.BooleanVar] = []
 
+        # Camera role assignment (visible after 2 cameras selected)
+        self.camera_role_frame = ttk.Frame(camera_frame)
+        self.camera_role_frame.pack(fill=tk.X, pady=5)
+        self.gripper_cam_var = tk.StringVar()
+        self.scene_cam_var = tk.StringVar()
+
         # ── Start-Button ──
         btn_frame = ttk.Frame(main)
         btn_frame.pack(fill=tk.X, pady=15)
@@ -168,14 +174,18 @@ class EduBoticsApp:
             self.root.after(0, lambda: self.progress.start(10))
             self._log("Voraussetzungen werden geprüft...")
 
-            # Check Docker
+            # Check Docker — auto-start if not running
             self._set_status("Docker Desktop wird geprüft...")
             if not docker_manager.is_docker_running():
-                self._log("Docker Desktop läuft nicht. Warte bis zu 120s...")
+                self._log("Docker Desktop läuft nicht. Versuche automatisch zu starten...")
+                if docker_manager.start_docker_desktop():
+                    self._log("Docker Desktop wird gestartet...")
+                else:
+                    self._log("Docker Desktop konnte nicht automatisch gestartet werden.")
                 if not docker_manager.wait_for_docker(
                     callback=lambda e, t: self._set_status(f"Warte auf Docker... {e}s/{t}s")
                 ):
-                    self._log("FEHLER: Docker Desktop läuft nicht. Bitte starten und App neu starten.")
+                    self._log("FEHLER: Docker Desktop läuft nicht. Bitte manuell starten und App neu starten.")
                     self._set_status("Docker Desktop nicht gefunden")
                     self.root.after(0, lambda: self.progress.stop())
                     return
@@ -312,12 +322,68 @@ class EduBoticsApp:
         threading.Thread(target=_do_scan, daemon=True).start()
 
     def _on_cameras_changed(self):
-        """Ausgewählte Kameras in HardwareConfig speichern."""
+        """Ausgewählte Kameras in HardwareConfig speichern und Rollenzuweisung anzeigen."""
         selected = []
         for i, var in enumerate(self.camera_check_vars):
             if var.get() and i < len(self.cameras):
                 selected.append(self.cameras[i])
-        self.hardware.cameras = selected[:2]  # Max 2 cameras
+        selected = selected[:2]  # Max 2 cameras
+
+        # Clear role assignment UI
+        for w in self.camera_role_frame.winfo_children():
+            w.destroy()
+
+        if len(selected) == 1:
+            # Single camera — auto-assign as gripper
+            selected[0].role = "gripper"
+            self.hardware.cameras = selected
+            ttk.Label(self.camera_role_frame,
+                      text=f"Greifer-Kamera: {selected[0].name}",
+                      foreground="green").pack(anchor=tk.W)
+        elif len(selected) == 2:
+            # Two cameras — let student assign roles
+            cam_names = [f"{c.name} ({c.path})" for c in selected]
+
+            ttk.Label(self.camera_role_frame,
+                      text="Kamera-Rollen zuweisen:",
+                      font=("", 9, "bold")).pack(anchor=tk.W, pady=(5, 2))
+
+            gripper_row = ttk.Frame(self.camera_role_frame)
+            gripper_row.pack(fill=tk.X, pady=2)
+            ttk.Label(gripper_row, text="Greifer-Kamera:").pack(side=tk.LEFT)
+            self.gripper_cam_var.set(cam_names[0])
+            gripper_combo = ttk.Combobox(gripper_row, textvariable=self.gripper_cam_var,
+                                         values=cam_names, state="readonly", width=40)
+            gripper_combo.pack(side=tk.LEFT, padx=5)
+            gripper_combo.bind("<<ComboboxSelected>>", lambda e: self._assign_camera_roles(selected, cam_names))
+
+            scene_row = ttk.Frame(self.camera_role_frame)
+            scene_row.pack(fill=tk.X, pady=2)
+            ttk.Label(scene_row, text="Szenen-Kamera: ").pack(side=tk.LEFT)
+            self.scene_cam_var.set(cam_names[1])
+            scene_combo = ttk.Combobox(scene_row, textvariable=self.scene_cam_var,
+                                       values=cam_names, state="readonly", width=40)
+            scene_combo.pack(side=tk.LEFT, padx=5)
+            scene_combo.bind("<<ComboboxSelected>>", lambda e: self._assign_camera_roles(selected, cam_names))
+
+            self._assign_camera_roles(selected, cam_names)
+        else:
+            self.hardware.cameras = selected
+
+    def _assign_camera_roles(self, cameras, cam_names):
+        """Assign gripper/scene roles based on combo selection and auto-swap."""
+        gripper_selection = self.gripper_cam_var.get()
+        gripper_idx = cam_names.index(gripper_selection) if gripper_selection in cam_names else 0
+        scene_idx = 1 - gripper_idx  # the other one
+
+        # Auto-sync the other combo
+        self.scene_cam_var.set(cam_names[scene_idx])
+
+        cameras[gripper_idx].role = "gripper"
+        cameras[scene_idx].role = "scene"
+
+        # Order: gripper first, scene second
+        self.hardware.cameras = [cameras[gripper_idx], cameras[scene_idx]]
 
     # ── Start Environment ────────────────────────────────────────────
 

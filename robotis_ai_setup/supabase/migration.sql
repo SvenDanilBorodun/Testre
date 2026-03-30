@@ -33,6 +33,9 @@ CREATE TABLE public.trainings (
   model_type TEXT NOT NULL,
   training_params JSONB,
   runpod_job_id TEXT,
+  current_step INTEGER DEFAULT 0,
+  total_steps INTEGER DEFAULT 0,
+  current_loss REAL,
   requested_at TIMESTAMPTZ DEFAULT NOW(),
   terminated_at TIMESTAMPTZ,
   error_message TEXT

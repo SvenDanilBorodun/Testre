@@ -21,9 +21,9 @@ services:
       - FOLLOWER_PORT=${FOLLOWER_PORT}
       - LEADER_PORT=${LEADER_PORT}
       - CAMERA_DEVICE_1=${CAMERA_DEVICE_1:-}
-      - CAMERA_NAME_1=${CAMERA_NAME_1:-camera1}
+      - CAMERA_NAME_1=${CAMERA_NAME_1:-gripper}
       - CAMERA_DEVICE_2=${CAMERA_DEVICE_2:-}
-      - CAMERA_NAME_2=${CAMERA_NAME_2:-camera2}
+      - CAMERA_NAME_2=${CAMERA_NAME_2:-scene}
     volumes:
       - /dev:/dev
       - /dev/shm:/dev/shm

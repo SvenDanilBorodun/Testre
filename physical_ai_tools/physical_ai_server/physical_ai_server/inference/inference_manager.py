@@ -103,6 +103,16 @@ class InferenceManager:
         if self._expected_image_keys:
             provided = {f'observation.images.{k}' for k in images}
             missing = set(self._expected_image_keys) - provided
+
+            if missing and len(images) == len(self._expected_image_keys):
+                # Camera count matches but names differ (e.g. model has camera1/camera2,
+                # robot now sends gripper/scene). Remap by position order.
+                expected_names = [k.replace('observation.images.', '') for k in sorted(self._expected_image_keys)]
+                provided_names = sorted(images.keys())
+                print(f'Camera name mismatch — remapping: {dict(zip(provided_names, expected_names))}')
+                images = {expected_names[i]: images[provided_names[i]] for i in range(len(provided_names))}
+                missing = None
+
             if missing:
                 cam_names = [k.replace('observation.images.', '') for k in missing]
                 connected_names = list(images.keys())

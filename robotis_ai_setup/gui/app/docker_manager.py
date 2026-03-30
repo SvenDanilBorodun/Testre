@@ -7,9 +7,15 @@ Handles:
   - GPU detection
 """
 
+import os
 import subprocess
+import sys
 import time
 from typing import Optional
+
+# On Windows, hide console windows spawned by subprocess
+_CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
+_SUBPROCESS_KWARGS = {"creationflags": _CREATE_NO_WINDOW} if sys.platform == "win32" else {}
 
 from .constants import (
     ALL_IMAGES,
@@ -30,10 +36,28 @@ def is_docker_running() -> bool:
         result = subprocess.run(
             ["docker", "info"],
             capture_output=True, text=True, timeout=10,
+            **_SUBPROCESS_KWARGS,
         )
         return result.returncode == 0
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return False
+
+
+def start_docker_desktop() -> bool:
+    """Try to launch Docker Desktop if it's installed but not running."""
+    paths = [
+        os.path.join(os.environ.get("ProgramFiles", ""), "Docker", "Docker", "Docker Desktop.exe"),
+        os.path.join(os.environ.get("ProgramFiles(x86)", ""), "Docker", "Docker", "Docker Desktop.exe"),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "Docker", "Docker Desktop.exe"),
+    ]
+    for path in paths:
+        if os.path.isfile(path):
+            try:
+                subprocess.Popen([path], **_SUBPROCESS_KWARGS)
+                return True
+            except OSError:
+                continue
+    return False
 
 
 def wait_for_docker(timeout: int = DOCKER_STARTUP_TIMEOUT, callback=None) -> bool:
@@ -63,6 +87,7 @@ def has_gpu() -> bool:
         result = subprocess.run(
             ["nvidia-smi"],
             capture_output=True, text=True, timeout=10,
+            **_SUBPROCESS_KWARGS,
         )
         return result.returncode == 0
     except (FileNotFoundError, subprocess.TimeoutExpired):
@@ -80,6 +105,7 @@ def images_exist() -> dict[str, bool]:
             result = subprocess.run(
                 ["docker", "image", "inspect", image],
                 capture_output=True, text=True, timeout=10,
+                **_SUBPROCESS_KWARGS,
             )
             status[image] = result.returncode == 0
         except (FileNotFoundError, subprocess.TimeoutExpired):
@@ -105,6 +131,7 @@ def check_for_updates(log=None) -> bool:
             local = subprocess.run(
                 ["docker", "inspect", "--format", "{{index .RepoDigests 0}}", image],
                 capture_output=True, text=True, timeout=10,
+                **_SUBPROCESS_KWARGS,
             )
             if local.returncode != 0:
                 continue
@@ -114,6 +141,7 @@ def check_for_updates(log=None) -> bool:
             remote = subprocess.run(
                 ["docker", "manifest", "inspect", "--verbose", image],
                 capture_output=True, text=True, timeout=30,
+                **_SUBPROCESS_KWARGS,
             )
             if remote.returncode != 0:
                 continue
@@ -139,6 +167,7 @@ def check_for_updates(log=None) -> bool:
                 subprocess.run(
                     ["docker", "pull", "--quiet", image],
                     capture_output=True, text=True, timeout=600,
+                    **_SUBPROCESS_KWARGS,
                 )
             except (FileNotFoundError, subprocess.TimeoutExpired):
                 continue
@@ -147,6 +176,7 @@ def check_for_updates(log=None) -> bool:
             subprocess.run(
                 ["docker", "image", "prune", "-f"],
                 capture_output=True, text=True, timeout=30,
+                **_SUBPROCESS_KWARGS,
             )
         except (FileNotFoundError, subprocess.TimeoutExpired):
             pass
@@ -170,6 +200,7 @@ def pull_images(callback=None) -> bool:
             result = subprocess.run(
                 ["docker", "pull", image],
                 capture_output=True, text=True, timeout=600,
+                **_SUBPROCESS_KWARGS,
             )
             if result.returncode != 0:
                 return False
@@ -204,6 +235,7 @@ def start_containers(gpu: bool = False, log=None) -> bool:
             cmd,
             capture_output=True, text=True, timeout=180,
             cwd=DOCKER_DIR,
+            **_SUBPROCESS_KWARGS,
         )
         if result.returncode != 0 and log:
             log(f"Docker Compose Fehler: {result.stderr.strip()}")
@@ -222,6 +254,7 @@ def stop_containers(gpu: bool = False) -> bool:
             cmd,
             capture_output=True, text=True, timeout=60,
             cwd=DOCKER_DIR,
+            **_SUBPROCESS_KWARGS,
         )
         return result.returncode == 0
     except (FileNotFoundError, subprocess.TimeoutExpired):
@@ -240,6 +273,7 @@ def get_container_status() -> dict[str, str]:
             result = subprocess.run(
                 ["docker", "inspect", "-f", "{{.State.Status}}", name],
                 capture_output=True, text=True, timeout=10,
+                **_SUBPROCESS_KWARGS,
             )
             status[name] = result.stdout.strip() if result.returncode == 0 else "not found"
         except (FileNotFoundError, subprocess.TimeoutExpired):
@@ -259,6 +293,7 @@ def get_container_logs(container_name: str, lines: int = 50) -> str:
         result = subprocess.run(
             ["docker", "logs", "--tail", str(lines), container_name],
             capture_output=True, text=True, timeout=10,
+            **_SUBPROCESS_KWARGS,
         )
         return result.stdout + result.stderr
     except (FileNotFoundError, subprocess.TimeoutExpired):

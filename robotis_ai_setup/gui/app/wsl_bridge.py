@@ -5,7 +5,11 @@ All Linux-side commands are executed via:
 """
 
 import subprocess
+import sys
 from typing import Optional
+
+_CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
+_SUBPROCESS_KWARGS = {"creationflags": _CREATE_NO_WINDOW} if sys.platform == "win32" else {}
 
 
 class WSLError(Exception):
@@ -29,6 +33,7 @@ def run(cmd: str, timeout: int = 30, check: bool = True) -> subprocess.Completed
             capture_output=True,
             text=True,
             timeout=timeout,
+            **_SUBPROCESS_KWARGS,
         )
     except FileNotFoundError:
         raise WSLError("WSL is not installed or not in PATH.")
@@ -52,6 +57,7 @@ def is_wsl_available() -> bool:
             capture_output=True,
             text=True,
             timeout=10,
+            **_SUBPROCESS_KWARGS,
         )
         return result.returncode == 0
     except (FileNotFoundError, subprocess.TimeoutExpired):
@@ -111,6 +117,7 @@ def get_docker_wsl_distro() -> Optional[str]:
             capture_output=True,
             text=True,
             timeout=10,
+            **_SUBPROCESS_KWARGS,
         )
         for line in result.stdout.splitlines():
             name = line.strip().replace("\x00", "")

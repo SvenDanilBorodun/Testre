@@ -9,8 +9,12 @@ Handles:
 
 import re
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from typing import Optional
+
+_CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
+_SUBPROCESS_KWARGS = {"creationflags": _CREATE_NO_WINDOW} if sys.platform == "win32" else {}
 
 from . import wsl_bridge
 from .constants import ROBOTIS_VID
@@ -39,6 +43,7 @@ class CameraDevice:
     """A video capture device."""
     path: str  # /dev/video0
     name: str  # Human-readable name like "Logitech C920"
+    role: str = ""  # "gripper" or "scene" — assigned by student in GUI
 
 
 @dataclass
@@ -59,6 +64,7 @@ def list_usb_devices() -> list[USBDevice]:
         result = subprocess.run(
             ["usbipd", "list"],
             capture_output=True, text=True, timeout=10,
+            **_SUBPROCESS_KWARGS,
         )
         if result.returncode != 0:
             return []
@@ -100,6 +106,7 @@ def attach_usb_to_wsl(busid: str, retries: int = 3) -> bool:
             result = subprocess.run(
                 ["usbipd", "attach", "--wsl", "--busid", busid],
                 capture_output=True, text=True, timeout=15,
+                **_SUBPROCESS_KWARGS,
             )
             if result.returncode == 0:
                 return True
@@ -116,6 +123,7 @@ def detach_usb_from_wsl(busid: str) -> bool:
         result = subprocess.run(
             ["usbipd", "detach", "--busid", busid],
             capture_output=True, text=True, timeout=10,
+            **_SUBPROCESS_KWARGS,
         )
         return result.returncode == 0
     except (FileNotFoundError, subprocess.TimeoutExpired):
@@ -155,6 +163,7 @@ def identify_arm_via_docker(serial_path: str) -> str:
                 "python3", "/usr/local/bin/identify_arm.py", serial_path,
             ],
             capture_output=True, text=True, timeout=15,
+            **_SUBPROCESS_KWARGS,
         )
         return result.stdout.strip() if result.returncode == 0 else f"error:{result.stderr.strip()}"
     except (FileNotFoundError, subprocess.TimeoutExpired) as e:
@@ -171,6 +180,7 @@ def start_scanner_container(image: str) -> bool:
     subprocess.run(
         ["docker", "rm", "-f", "robotis_arm_scanner"],
         capture_output=True, timeout=10,
+        **_SUBPROCESS_KWARGS,
     )
     try:
         result = subprocess.run(
@@ -184,6 +194,7 @@ def start_scanner_container(image: str) -> bool:
                 "120",
             ],
             capture_output=True, text=True, timeout=30,
+            **_SUBPROCESS_KWARGS,
         )
         return result.returncode == 0
     except (FileNotFoundError, subprocess.TimeoutExpired):
@@ -195,6 +206,7 @@ def stop_scanner_container():
     subprocess.run(
         ["docker", "rm", "-f", "robotis_arm_scanner"],
         capture_output=True, timeout=10,
+        **_SUBPROCESS_KWARGS,
     )
 
 

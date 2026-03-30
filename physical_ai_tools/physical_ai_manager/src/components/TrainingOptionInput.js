@@ -22,7 +22,6 @@ import {
   setNumWorkers,
   setBatchSize,
   setSteps,
-  setEvalFreq,
   setLogFreq,
   setSaveFreq,
   setDefaultTrainingInfo,
@@ -35,7 +34,6 @@ const TrainingOptionInput = () => {
   const numWorkers = useSelector((state) => state.training.trainingInfo.numWorkers);
   const batchSize = useSelector((state) => state.training.trainingInfo.batchSize);
   const steps = useSelector((state) => state.training.trainingInfo.steps);
-  const evalFreq = useSelector((state) => state.training.trainingInfo.evalFreq);
   const logFreq = useSelector((state) => state.training.trainingInfo.logFreq);
   const saveFreq = useSelector((state) => state.training.trainingInfo.saveFreq);
 
@@ -153,21 +151,6 @@ const TrainingOptionInput = () => {
           onChange={(e) => dispatch(setSteps(Number(e.target.value) || 0))}
           disabled={isTraining}
           placeholder="Enter Steps"
-        />
-      </div>
-
-      <div className={clsx('flex', 'items-center', 'mb-2.5')}>
-        <span className={classLabel}>Eval Frequency</span>
-        <input
-          className={classTextInput}
-          type="number"
-          step="1"
-          min={0}
-          max={65535}
-          value={evalFreq || ''}
-          onChange={(e) => dispatch(setEvalFreq(Number(e.target.value) || 0))}
-          disabled={isTraining}
-          placeholder="Enter Eval Frequency"
         />
       </div>
 

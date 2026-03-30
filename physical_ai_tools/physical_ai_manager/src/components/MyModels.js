@@ -75,6 +75,34 @@ function ModelCard({ job, rosConnected, onDownload, downloadingModel, onCancel }
         <span className="font-medium text-gray-600">{job.dataset_name}</span>
       </div>
 
+      {/* Training Progress (for active jobs) */}
+      {isActive && job.total_steps > 0 && (
+        <div className="mb-3">
+          <div className="flex justify-between text-xs text-gray-500 mb-1">
+            <span>Schritt {job.current_step?.toLocaleString('de-DE') || 0} / {job.total_steps?.toLocaleString('de-DE')}</span>
+            {job.current_loss != null && (
+              <span>Loss: {job.current_loss.toFixed(4)}</span>
+            )}
+          </div>
+          <div className="w-full bg-gray-200 rounded-full h-2">
+            <div
+              className="bg-teal-500 h-2 rounded-full transition-all duration-500"
+              style={{ width: `${Math.min(100, ((job.current_step || 0) / job.total_steps) * 100)}%` }}
+            />
+          </div>
+          <div className="text-xs text-gray-400 mt-1 text-right">
+            {Math.round(((job.current_step || 0) / job.total_steps) * 100)}%
+          </div>
+        </div>
+      )}
+
+      {/* Waiting indicator (queued, no progress yet) */}
+      {isActive && (!job.total_steps || job.total_steps === 0) && (
+        <div className="text-xs text-gray-400 mb-3 italic">
+          Warte auf GPU-Worker...
+        </div>
+      )}
+
       {/* Date */}
       <div className="text-xs text-gray-400 mb-3">
         {formatDate(job.requested_at)}

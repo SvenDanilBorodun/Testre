@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -243,13 +244,18 @@ def handler(job):
                     loss = float(loss_match.group(1)) if loss_match else None
                     if step > last_progress_step:
                         last_progress_step = step
-                        try:
-                            _update_supabase_progress(
-                                supabase_url, supabase_key, training_id,
-                                step, total_steps, loss,
-                            )
-                        except Exception:
-                            pass
+                        for _attempt in range(3):
+                            try:
+                                _update_supabase_progress(
+                                    supabase_url, supabase_key, training_id,
+                                    step, total_steps, loss,
+                                )
+                                break
+                            except Exception as _e:
+                                print(f"Warnung: Supabase Update fehlgeschlagen "
+                                      f"(Versuch {_attempt+1}/3): {_e}")
+                                if _attempt < 2:
+                                    time.sleep(1)
             except UnicodeDecodeError as e:
                 print(f"Warning: Error decoding subprocess output: {e}")
 
@@ -262,8 +268,9 @@ def handler(job):
         stdout_thread.start()
         stderr_thread.start()
 
-        # Wait for process with actual timeout protection
-        proc.wait(timeout=3 * 3600)
+        # Wait for process with timeout protection (default 5h, configurable)
+        timeout_hours = training_params.get("timeout_hours", 5)
+        proc.wait(timeout=timeout_hours * 3600)
         stdout_thread.join(timeout=10)
         stderr_thread.join(timeout=10)
         stderr_text = "".join(stderr_lines)
@@ -292,9 +299,10 @@ def handler(job):
     except subprocess.TimeoutExpired:
         proc.kill()
         _update_supabase_status(
-            supabase_url, supabase_key, training_id, "failed", "Training timed out (3h limit)"
+            supabase_url, supabase_key, training_id, "failed",
+            f"Training Zeitlimit ueberschritten ({timeout_hours}h Limit)"
         )
-        return {"status": "failed", "error": "Training timed out"}
+        return {"status": "failed", "error": f"Training timed out ({timeout_hours}h limit)"}
 
     except Exception as e:
         err = str(e)

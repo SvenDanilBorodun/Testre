@@ -112,22 +112,13 @@ class InferenceManager:
             provided = {f'observation.images.{k}' for k in images}
             missing = set(self._expected_image_keys) - provided
 
-            if missing and len(images) == len(self._expected_image_keys):
-                # Camera count matches but names differ (e.g. model has camera1/camera2,
-                # robot now sends gripper/scene). Remap by position order.
-                expected_names = [k.replace('observation.images.', '') for k in sorted(self._expected_image_keys)]
-                provided_names = sorted(images.keys())
-                print(f'Camera name mismatch — remapping: {dict(zip(provided_names, expected_names))}')
-                images = {expected_names[i]: images[provided_names[i]] for i in range(len(provided_names))}
-                missing = None
-
             if missing:
-                cam_names = [k.replace('observation.images.', '') for k in missing]
+                expected_names = [k.replace('observation.images.', '') for k in self._expected_image_keys]
                 connected_names = list(images.keys())
                 raise RuntimeError(
-                    f'Inferenz fehlgeschlagen: Das Modell erwartet die Kameras {cam_names}, '
-                    f'aber nur {connected_names} ist/sind verbunden. '
-                    f'Bitte alle benoetigten Kameras anschliessen und erneut versuchen.'
+                    f'Inferenz fehlgeschlagen: Das Modell erwartet die Kameras {expected_names}, '
+                    f'aber verbunden sind nur {connected_names}. '
+                    f'Bitte die Kamera-Namen in der Robot-Config an das Modell anpassen.'
                 )
 
         observation = self._preprocess(images, state, task_instruction)

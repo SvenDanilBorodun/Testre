@@ -125,10 +125,17 @@ echo "   OK: open-manipulator built"
 # ── Image 5: robotis-ai-training (RunPod serverless worker) ──
 echo ""
 echo ">> Building robotis-ai-training (RunPod serverless worker)..."
+# Copy LeRobot fork into build context so RunPod uses the same version as the robot
+echo "   Copying LeRobot fork into runpod_training build context..."
+rm -rf "${PROJECT_ROOT}/runpod_training/lerobot"
+cp -r "${PHYSICAL_AI_TOOLS_DIR}/lerobot" "${PROJECT_ROOT}/runpod_training/lerobot"
+# Ensure cleanup happens even if docker build fails (set -e would exit before rm)
 docker build \
     -t "${REGISTRY}/robotis-ai-training:latest" \
     -f "${PROJECT_ROOT}/runpod_training/Dockerfile" \
-    "${PROJECT_ROOT}/runpod_training/"
+    "${PROJECT_ROOT}/runpod_training/" \
+    || { rm -rf "${PROJECT_ROOT}/runpod_training/lerobot"; echo "FAILED: robotis-ai-training build"; exit 1; }
+rm -rf "${PROJECT_ROOT}/runpod_training/lerobot"
 echo "   OK: robotis-ai-training built"
 
 # ── Push all images ──

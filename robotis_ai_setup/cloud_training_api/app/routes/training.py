@@ -174,6 +174,13 @@ async def start_training(req: StartTrainingRequest, user=Depends(get_current_use
             status_code=403, detail="No training credits remaining."
         )
 
+    # 1b. Validate that steps is provided (required for progress tracking)
+    if not req.training_params or not req.training_params.get("steps"):
+        raise HTTPException(
+            status_code=400,
+            detail="training_params muss 'steps' enthalten.",
+        )
+
     # 2. Generate model name and insert training row
     #    The INSERT itself "consumes" the credit — get_remaining_credits
     #    counts non-failed/canceled trainings against the limit.

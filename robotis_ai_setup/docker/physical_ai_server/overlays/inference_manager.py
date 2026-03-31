@@ -67,11 +67,19 @@ class InferenceManager:
         try:
             policy_cls = self._get_policy_class(self.policy_type)
             self.policy = policy_cls.from_pretrained(self.policy_path)
+            self.policy.to(self.device)
+            self.policy.eval()
+            self.reset_policy()
             self._expected_image_keys = self._read_expected_image_keys()
             return True
         except Exception as e:
             print(f'Failed to load policy from {self.policy_path}: {e}')
             return False
+
+    def reset_policy(self):
+        """Reset policy state (action queue, temporal ensemble) between episodes."""
+        if self.policy is not None and hasattr(self.policy, 'reset'):
+            self.policy.reset()
 
     def _read_expected_image_keys(self) -> list[str]:
         """Read expected observation.images.* keys from the policy config."""

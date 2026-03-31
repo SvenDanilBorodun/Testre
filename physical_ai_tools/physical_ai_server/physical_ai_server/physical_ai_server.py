@@ -804,6 +804,7 @@ class PhysicalAIServer(Node):
                 if task_info.record_inference_mode:
                     self.on_recording = True
                 self.on_inference = True
+                self.inference_manager.reset_policy()
                 self.start_recording_time = time.perf_counter()
                 response.success = True
                 response.message = 'Inference started'

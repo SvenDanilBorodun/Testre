@@ -9,6 +9,7 @@ Reference: phosphobot modal/lerobot_modal/app.py
 
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -85,6 +86,11 @@ def _build_training_command(
     Mirrors the arg pattern from physical_ai_server/training/training_manager.py.
     """
     output_dir = str(OUTPUT_DIR / model_name.replace("/", "_"))
+
+    # Clean output directory if it exists from a previous attempt (retry safety)
+    # LeRobot raises FileExistsError if output_dir exists and resume=False
+    if os.path.isdir(output_dir):
+        shutil.rmtree(output_dir)
 
     cmd = [
         sys.executable,

@@ -1,4 +1,4 @@
-FROM nvidia/cuda:12.8.0-devel-ubuntu24.04
+FROM nvidia/cuda:12.1.1-devel-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -7,16 +7,25 @@ RUN apt-get update && apt-get install -y \
     python3 python3-pip python3-venv git ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
+# Upgrade pip to fix metadata parsing for LeRobot
+RUN pip3 install --no-cache-dir --upgrade pip
+
 WORKDIR /app
 
-# Install LeRobot from the SAME commit used by physical_ai_server (v0.2.0)
-# This ensures dataset format, model format, and policy names match exactly.
-# Commit: 989f3d05 from https://github.com/huggingface/lerobot
-RUN pip3 install --no-cache-dir --break-system-packages \
+# Install LeRobot with all dependencies (torch will be pulled from PyPI as cu130)
+RUN pip3 install --no-cache-dir \
     "lerobot[pi0] @ git+https://github.com/huggingface/lerobot.git@989f3d05ba47f872d75c587e76838e9cc574857a" \
     runpod \
     huggingface_hub \
     supabase
+
+# Override PyTorch with CUDA 12.1 build (must come AFTER lerobot install)
+# lerobot pulls torch+cu130 from PyPI which needs CUDA 13 libs not in base image
+RUN pip3 install --no-cache-dir --force-reinstall \
+    torch torchvision --index-url https://download.pytorch.org/whl/cu121
+
+# Remove torchcodec (compiled for cu130, broken with cu121 torch) — pyav fallback used
+RUN pip3 uninstall -y torchcodec || true
 
 COPY handler.py .
 

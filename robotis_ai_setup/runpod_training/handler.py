@@ -193,9 +193,10 @@ def handler(job):
     supabase_key = job_input["supabase_key"]
     hf_token = job_input.get("hf_token", "")
 
-    # Login to HuggingFace
+    # Login to HuggingFace (both file-based and env var for subprocess)
     if hf_token:
         login(token=hf_token)
+        os.environ["HF_TOKEN"] = hf_token
 
     # Update status to running
     _update_supabase_status(supabase_url, supabase_key, training_id, "running")
@@ -222,7 +223,8 @@ def handler(job):
 
         def _read_stdout():
             nonlocal last_progress_step
-            for line in proc.stdout:
+            try:
+              for line in proc.stdout:
                 print(line, end="")
                 stdout_lines.append(line)
                 step_match = step_pattern.search(line)
@@ -242,6 +244,8 @@ def handler(job):
                             )
                         except Exception:
                             pass
+            except UnicodeDecodeError as e:
+                print(f"Warning: Error decoding subprocess output: {e}")
 
         def _read_stderr():
             for line in proc.stderr:

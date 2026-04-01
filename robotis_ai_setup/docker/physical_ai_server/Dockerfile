@@ -24,14 +24,17 @@ RUN TARGETS=$(find /root/ros2_ws -name "server_inference.py" -path "*/inference/
     done && \
     rm /tmp/fix_server_inference.py
 
-# Overlay modified source files (inference validation, data sanitization, dual camera config)
+# Overlay modified source files (inference validation, data sanitization, joint safety, dual camera config)
 COPY overlays/inference_manager.py /tmp/overlays/inference_manager.py
 COPY overlays/data_manager.py /tmp/overlays/data_manager.py
+COPY overlays/data_converter.py /tmp/overlays/data_converter.py
 COPY overlays/omx_f_config.yaml /tmp/overlays/omx_f_config.yaml
 RUN TARGETS=$(find /root/ros2_ws -name "inference_manager.py" -path "*/inference/*" 2>/dev/null) && \
     for f in $TARGETS; do cp /tmp/overlays/inference_manager.py "$f" && echo "Overlaid: $f"; done && \
     TARGETS=$(find /root/ros2_ws -name "data_manager.py" -path "*/data_processing/*" 2>/dev/null) && \
     for f in $TARGETS; do cp /tmp/overlays/data_manager.py "$f" && echo "Overlaid: $f"; done && \
+    TARGETS=$(find /root/ros2_ws -name "data_converter.py" -path "*/data_processing/*" 2>/dev/null) && \
+    for f in $TARGETS; do cp /tmp/overlays/data_converter.py "$f" && echo "Overlaid: $f"; done && \
     TARGETS=$(find /root/ros2_ws -name "omx_f_config.yaml" 2>/dev/null) && \
     for f in $TARGETS; do cp /tmp/overlays/omx_f_config.yaml "$f" && echo "Overlaid: $f"; done && \
     rm -rf /tmp/overlays

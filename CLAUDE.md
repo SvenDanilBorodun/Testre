@@ -1,153 +1,186 @@
-# ROBOTIS AI One-Click Windows Setup
+# ROBOTIS AI Educational Platform
 
-## Project Goal
+## Permissions
 
-Convert a multi-page Linux tutorial for Open Manipulator teleoperation + Physical AI Tools into a one-click Windows installer for students: **install `.exe` → plug in hardware → click "Start" → browser opens at `http://localhost`**.
+All tools are pre-approved. Act autonomously without asking for confirmation.
 
-Students have Windows 11 PCs only (some with NVIDIA GPUs, some without).
+## Project
 
-## Workspace Layout
+Educational Physical AI platform where students record robot datasets, train ML models on cloud GPUs, and run inference on ROBOTIS OpenMANIPULATOR arms. Students use Windows 11 PCs with no GPUs — training runs on RunPod Serverless.
 
-```
-23/                              ← workspace root (this directory)
-├── open_manipulator/            ← upstream ROBOTIS repo (read-only reference, has its own .git)
-├── physical_ai_tools/           ← upstream ROBOTIS repo (read-only reference, has its own .git)
-├── robotis_ai_setup/            ← OUR repo — all implementation lives here
-└── tidy-bouncing-phoenix.md     ← full plan document with architecture, port map, data flow, etc.
-```
-
-## Architecture (3 Docker Containers in Docker Desktop WSL2)
+## Monorepo Layout
 
 ```
-Windows 11
-├── Desktop GUI (PyInstaller .exe, tkinter) — scans USB, identifies arms, starts Docker
-├── Docker Desktop (WSL2)
-│   ├── open_manipulator      — ROS2 Jazzy, follower+leader arm control, USB camera
-│   │   Custom entrypoint_omx.sh: follower → wait → trajectory → leader → camera
-│   ├── physical_ai_server    — ROS2 + PyTorch + s6-overlay, rosbridge:9090, video:8080
-│   └── physical_ai_manager   — nginx:80 serving React SPA (connects to ws://localhost:9090)
-└── Browser at http://localhost — the student's interface
+Testre/                              <- single git repo (github.com/SvenDanilBorodun/Testre, private)
+├── open_manipulator/                <- ROBOTIS robot control (ROS2 Jazzy, Dynamixel hardware)
+├── physical_ai_tools/               <- Recording, inference, React frontend, embedded LeRobot fork
+│   ├── physical_ai_server/          <- ROS2 node: data recording + inference
+│   ├── physical_ai_manager/         <- React SPA (nginx:80, connects via rosbridge:9090)
+│   ├── physical_ai_interfaces/      <- Custom ROS msg/srv definitions
+│   ├── physical_ai_bt/              <- Behavior trees
+│   └── lerobot/                     <- Embedded LeRobot v0.2.0 fork (NOT a submodule, custom ROBOTIS patches)
+└── robotis_ai_setup/                <- Infrastructure: cloud API, RunPod, Docker, installer, Supabase
+    ├── cloud_training_api/          <- FastAPI on Railway (training job management)
+    ├── runpod_training/             <- RunPod serverless handler + Dockerfile
+    ├── docker/                      <- Docker Compose, build-images.sh, overlays, patches
+    ├── supabase/                    <- Database schema (migration.sql)
+    ├── gui/                         <- Windows tkinter GUI (PyInstaller .exe)
+    ├── installer/                   <- Inno Setup + PowerShell scripts
+    └── tests/                       <- Unit tests
 ```
 
-All containers use `network_mode: host` with `ROS_DOMAIN_ID=30`.
+## Architecture
 
-## Key Technical Details
-
-| Item | Value |
-|------|-------|
-| Leader servo IDs | 1-6 (baudrate 1M, protocol 2.0) |
-| Follower servo IDs | 11-16 (baudrate 1M, protocol 2.0) |
-| ROBOTIS USB VID | 2F5D |
-| Ports | 80 (web UI), 8080 (video), 9090 (rosbridge), 5555 (ZMQ inference internal) |
-| ROS_DOMAIN_ID | 30 |
-| Docker registry | nettername |
-| Base images | `robotis/open-manipulator:latest`, `robotis/ros:jazzy-ros-base-torch2.7.0-cuda12.8.0` |
-
-## robotis_ai_setup/ Structure (our code)
-
+### Student Machine (3 Docker containers on Windows 11 + Docker Desktop WSL2)
 ```
-robotis_ai_setup/
-├── installer/
-│   ├── robotis_ai_setup.iss              # Inno Setup script
-│   ├── assets/license.txt
-│   └── scripts/                          # PowerShell: install_prerequisites, configure_wsl,
-│                                         #   configure_usbipd, verify_system, pull_images
-├── gui/
-│   ├── main.py                           # Entry point
-│   ├── build.spec                        # PyInstaller config
-│   ├── dist/RobotisAI/RobotisAI.exe     # Built executable
-│   └── app/
-│       ├── gui_app.py                    # Main tkinter window (380 lines)
-│       ├── device_manager.py             # USB scan, usbipd attach, arm identification
-│       ├── docker_manager.py             # docker compose lifecycle, GPU detection
-│       ├── config_generator.py           # .env file generation
-│       ├── health_checker.py             # HTTP/socket health checks
-│       ├── wsl_bridge.py                 # WSL2 command wrapper
-│       └── constants.py                  # Registry, ports, IDs, paths, timeouts
-├── docker/
-│   ├── docker-compose.yml                # 3 services (host network, privileged)
-│   ├── docker-compose.gpu.yml            # nvidia runtime override
-│   ├── .env.template
-│   ├── build-images.sh                   # Maintainer-only image builder
-│   ├── open_manipulator/                 # Thin layer: entrypoint_omx.sh + identify_arm.py
-│   └── physical_ai_server/              # Thin layer: patches upstream server_inference.py bug
-│       ├── Dockerfile
-│       └── patches/fix_server_inference.py
-└── tests/                                # 14 unit tests (all pass)
+Browser (http://localhost) ← physical_ai_manager (nginx:80, React SPA)
+                           ← rosbridge WebSocket (:9090)
+physical_ai_server         <- ROS2 + PyTorch + LeRobot + s6-overlay
+                              Records datasets, runs inference, publishes video (:8080)
+open_manipulator           <- ROS2 Jazzy, Dynamixel hardware interface
+                              Controls follower arm (IDs 11-16) + leader arm (IDs 1-6)
+```
+All containers: `network_mode: host`, `ROS_DOMAIN_ID=30`, privileged for USB access.
+
+### Cloud Training
+```
+React frontend → POST /trainings/start → Railway FastAPI → RunPod Serverless → LeRobot training
+                                                         → Progress → Supabase → Frontend polls every 5s
+                                                         → Model uploaded to HuggingFace
 ```
 
-## Known Upstream Bug (Patched)
+## Key Infrastructure
 
-`physical_ai_tools/physical_ai_server/physical_ai_server/inference/server_inference.py`:
-- `self._endpoints` dict never initialized → AttributeError on server start
-- Duplicate `InferenceManager` construction (lines 60-64 repeated at 71-75)
-- **Fixed** via thin Docker layer in `robotis_ai_setup/docker/physical_ai_server/`
+| Service | Location | Details |
+|---------|----------|---------|
+| Docker Hub | `nettername/*` | 5 images: physical-ai-manager, physical-ai-server-base, physical-ai-server, open-manipulator, robotis-ai-training |
+| Railway API | `scintillating-empathy-production-9efd.up.railway.app` | FastAPI cloud training API, auto-deploys from git push |
+| RunPod | Endpoint `wu45u3xmbuwbqr` | Serverless GPU training, workers min=0 max=1 |
+| Supabase | Project ref `fnnbysrjkfugsqzwcksd` | Auth + trainings table + credits system |
+| HuggingFace | Models pushed to `edubotics/*` | Datasets + trained model checkpoints |
 
-## Verification Status (as of 2026-03-27)
+## Docker Image Build Chain
 
-**Verified on this Windows 11 machine (no hardware):**
-- All 14 unit tests pass
-- All Python files parse cleanly (AST check)
-- All PowerShell scripts parse cleanly
-- docker-compose.yml + GPU override validate with `docker compose config`
-- GUI creates window, all widgets initialize correctly
-- PyInstaller .exe launches and exits cleanly
-- WSL2, Docker CLI, usbipd 5.3 all present and functional
-- `.wslconfig` merge is idempotent
-- Health checker correctly handles offline services (no crashes)
-- USB device listing works (usbipd list parsing)
-- WSL bridge commands execute correctly
-- Patch script fixes upstream bug correctly
+**CRITICAL**: The base image (`physical-ai-server-base`) clones from **upstream ROBOTIS-GIT**, NOT from this repo. All source code fixes must be applied as **overlays** in the thin layer Dockerfile.
 
-**Cannot verify without hardware:**
-- USB passthrough (usbipd attach)
-- Arm identification (needs Dynamixel servos)
-- ROS2 container communication
-- Full end-to-end recording/training/inference
+```
+robotis/ros:jazzy-ros-base-torch2.7.0-cuda12.8.0  (ROBOTIS base with PyTorch + CUDA)
+  └─ nettername/physical-ai-server-base             (+ git clone ROBOTIS-GIT/physical_ai_tools + LeRobot + ROS deps)
+       └─ nettername/physical-ai-server              (+ overlays: lerobot fork, inference_manager, data_manager, data_converter, omx_f_config + patches)
+
+robotis/open-manipulator:latest                     (ROBOTIS base with ROS2 + Dynamixel)
+  └─ nettername/open-manipulator                     (+ entrypoint_omx.sh + identify_arm.py)
+
+nvidia/cuda:12.1.1-devel-ubuntu22.04                (CUDA base for RunPod)
+  └─ nettername/robotis-ai-training                  (+ LeRobot fork + handler.py)
+```
+
+Build order: `cd robotis_ai_setup/docker && REGISTRY=nettername ./build-images.sh`
+The build script automatically copies the LeRobot fork into both build contexts and cleans up after.
+
+## Overlay System (robotis_ai_setup/docker/physical_ai_server/)
+
+Since the base image clones upstream code, we patch it with overlays:
+
+| Overlay | Purpose |
+|---------|---------|
+| `overlays/lerobot/` | Entire LeRobot fork source (replaces upstream, keeps version aligned with RunPod) |
+| `overlays/inference_manager.py` | Camera exact-match enforcement (no silent alphabetical remap) |
+| `overlays/data_manager.py` | dtype=float32 on state/action arrays |
+| `overlays/data_converter.py` | Empty trajectory guard + fail-loud on missing joints |
+| `overlays/omx_f_config.yaml` | Dual camera config (gripper + scene) |
+| `patches/fix_server_inference.py` | Fixes upstream bug: uninitialized `_endpoints` dict |
+
+## LeRobot Version Alignment
+
+Both the robot and RunPod MUST use identical LeRobot code. The embedded fork at `physical_ai_tools/lerobot/` (v0.2.0) is the single source of truth:
+- **Robot**: Overlaid into physical-ai-server at build time (replaces upstream clone)
+- **RunPod**: Copied into build context and pip installed locally
+- **Never** install from `huggingface/lerobot` upstream — the fork has ROBOTIS-specific patches
+
+## Complete Pipeline (Recording → Training → Inference)
+
+### Recording
+1. Camera topics (`CompressedImage`) → cv_bridge BGR → cv2.cvtColor RGB → uint8 HWC → video H.264 (CRF 28)
+2. Follower joints (`JointState`) → reordered by config `joint_order` → `np.array(dtype=float32)` → parquet
+3. Leader joints (`JointTrajectory`) → `points[0].positions` → reordered → action array (float32) → parquet
+4. Episode metadata → `info.json` (codebase_version v2.1, fps, features)
+5. Optional HuggingFace upload via `upload_large_folder()`
+
+### Training (Cloud)
+1. Frontend POSTs to Railway API with dataset_name, model_type, steps
+2. API validates credits, creates Supabase row, dispatches to RunPod
+3. RunPod handler runs `python -m lerobot.scripts.train` with CUDA
+4. Progress parsed from stdout (`step:1K loss:0.123`) → Supabase (3x retry)
+5. Model uploaded to HuggingFace → `camera_config.json` written alongside checkpoint
+6. Status updated to succeeded/failed
+
+### Inference
+1. Camera images + follower state collected (waits for ALL topics)
+2. Policy loaded via `PreTrainedPolicy.from_pretrained()`
+3. Camera names must **exactly match** model's `input_features` (no remapping)
+4. Images: uint8 → float32/255 → CHW permute → batch
+5. State: float32 tensor → batch
+6. `policy.select_action(observation)` → action tensor → JointTrajectory message → robot
+
+## Robot Configuration
+
+### OMX-F Follower (Servo IDs 11-16, /dev/ttyACM1, 1Mbps)
+- Joints: joint1-5 (arm) + gripper_joint_1
+- Controller: `arm_controller` (JointTrajectoryController) + `gripper_controller` (GripperActionController)
+- Update rate: 100 Hz
+
+### OMX-L Leader (Servo IDs 1-6, /dev/ttyACM2, 1Mbps)  
+- Joints 1-5: passive (read-only), gripper_joint_1: active (current control)
+- Namespace: `/leader/`
+- Publishes: `/leader/joint_trajectory` (JointTrajectory)
+
+### Topics Used by Recording
+- Cameras: `/gripper/image_raw/compressed`, `/scene/image_raw/compressed`
+- Follower: `/joint_states` (JointState)
+- Leader: `/leader/joint_trajectory` (JointTrajectory)
+
+## Supabase Schema
+
+```sql
+users(id UUID PK, email TEXT, training_credits INTEGER DEFAULT 0, created_at TIMESTAMPTZ)
+trainings(id SERIAL PK, user_id UUID FK, status TEXT, dataset_name TEXT, model_name TEXT,
+          model_type TEXT, training_params JSONB, runpod_job_id TEXT,
+          current_step INTEGER, total_steps INTEGER, current_loss REAL,
+          requested_at TIMESTAMPTZ, terminated_at TIMESTAMPTZ, error_message TEXT)
+```
+RLS enabled. Credits derived via `get_remaining_credits()` function (self-healing, no counters).
 
 ## Commands
 
 ```bash
-# Run tests
-cd robotis_ai_setup && python -m unittest discover -s tests -v
-
-# Validate compose
-cd robotis_ai_setup/docker && docker compose config
-
-# Build GUI exe
-cd robotis_ai_setup/gui && pyinstaller build.spec
-
-# Build Docker images (maintainer, Linux)
+# Build all Docker images (Linux/WSL2 with Docker)
 cd robotis_ai_setup/docker && REGISTRY=nettername ./build-images.sh
 
-# Verify installation
-powershell -ExecutionPolicy Bypass -File installer/scripts/verify_system.ps1
+# Run unit tests
+cd robotis_ai_setup && python -m unittest discover -s tests -v
+
+# Validate Docker Compose
+cd robotis_ai_setup/docker && docker compose config
+
+# Build Windows GUI
+cd robotis_ai_setup/gui && pyinstaller build.spec
+
+# Deploy cloud API (Railway CLI, must be linked first)
+cd robotis_ai_setup/cloud_training_api && railway up --detach
+
+# Check RunPod endpoint
+python3 -c "import runpod; runpod.api_key='KEY'; print(runpod.Endpoint('wu45u3xmbuwbqr'))"
 ```
 
-## Important File References
-
-| What | Where |
-|------|-------|
-| Full plan + architecture | `tidy-bouncing-phoenix.md` (root of workspace) |
-| Entrypoint logic | `robotis_ai_setup/docker/open_manipulator/entrypoint_omx.sh` |
-| Arm identification | `robotis_ai_setup/docker/open_manipulator/identify_arm.py` |
-| omx_ai.launch.py (does NOT forward port_name) | `open_manipulator/open_manipulator_bringup/launch/omx_ai.launch.py` |
-| Follower launch (accepts port_name) | `open_manipulator/open_manipulator_bringup/launch/omx_f_follower_ai.launch.py` |
-| Leader launch (accepts port_name) | `open_manipulator/open_manipulator_bringup/launch/omx_l_leader_ai.launch.py` |
-| Camera launch | `open_manipulator/open_manipulator_bringup/launch/camera_usb_cam.launch.py` |
-| Servo IDs / baudrate | `open_manipulator/open_manipulator_description/ros2_control/omx_f.ros2_control.xacro` (follower) |
-| | `open_manipulator/open_manipulator_description/ros2_control/omx_l.ros2_control.xacro` (leader) |
-| AI server launch (4 nodes) | `physical_ai_tools/physical_ai_server/launch/physical_ai_server_bringup.launch.py` |
-| Robot config (topics) | `physical_ai_tools/physical_ai_server/config/omx_f_config.yaml` |
-| Web UI rosbridge connection | `physical_ai_tools/physical_ai_manager/src/features/ros/rosSlice.js` (hardcodes :9090) |
-| s6 service setup | `physical_ai_tools/docker/s6-services/common/ros2_service_run.sh` |
-| Upstream bug location | `physical_ai_tools/physical_ai_server/physical_ai_server/inference/server_inference.py` |
-
-## Dev Environment
+## Environment
 
 - Windows 11 Pro build 26200
-- Python 3.14 (system)
-- Docker Desktop 29.2.1 + Compose v5.1.0
-- WSL2 with Ubuntu-24.04 + docker-desktop distros
-- usbipd-win 5.3.0 (supports policy)
-- No NVIDIA GPU on this machine (CPU mode)
+- Python 3.14 (system), Docker Desktop 29.2.1, WSL2 Ubuntu-24.04
+- Railway CLI installed, logged in as lastthedayey@gmail.com
+- Docker Hub logged in as nettername
+- RunPod API key in `robotis_ai_setup/cloud_training_api/.env` (NOT committed, in .gitignore)
+
+## Language
+
+GUI and user-facing error messages are in **German** (target audience: German students). Backend code and comments in English. German strings will be localized later.

@@ -24,12 +24,9 @@ RUN TARGETS=$(find /root/ros2_ws -name "server_inference.py" -path "*/inference/
     done && \
     rm /tmp/fix_server_inference.py
 
-# Replace upstream LeRobot with our fork (same version used by RunPod training)
-# LeRobot is installed as editable (pip install -e .), so replacing src/ takes effect immediately.
-# Build script must copy physical_ai_tools/lerobot/src/lerobot/ into overlays/lerobot/ before build.
-COPY overlays/lerobot/ /root/ros2_ws/src/physical_ai_tools/lerobot/src/lerobot/
-
 # Overlay modified source files (inference validation, data sanitization, joint safety, dual camera config)
+# Note: LeRobot itself is NOT overlaid — the base image clones the same version (989f3d05)
+# that RunPod training pins. Only physical_ai_server files are patched here.
 COPY overlays/inference_manager.py /tmp/overlays/inference_manager.py
 COPY overlays/data_manager.py /tmp/overlays/data_manager.py
 COPY overlays/data_converter.py /tmp/overlays/data_converter.py

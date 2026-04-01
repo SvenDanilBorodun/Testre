@@ -12,16 +12,10 @@ RUN pip3 install --no-cache-dir --upgrade pip
 
 WORKDIR /app
 
-# Copy the same LeRobot fork used by physical_ai_server (v0.2.0 with ROBOTIS patches)
-# Build script must copy physical_ai_tools/lerobot/ into runpod_training/lerobot/ before build
-COPY lerobot/ /tmp/lerobot/
-
-# Remove torch/torchvision from LeRobot deps (overridden below with CUDA 12.1 builds)
-RUN sed -i '/"torch[^"]*",/d' /tmp/lerobot/pyproject.toml && \
-    sed -i '/"torchvision[^"]*",/d' /tmp/lerobot/pyproject.toml
-
-# Install LeRobot from local source + runtime deps
-RUN pip3 install --no-cache-dir "/tmp/lerobot[pi0]" \
+# Install LeRobot at the same commit used by the ROBOTIS base image
+# (ROBOTIS-GIT/physical_ai_tools jazzy branch pins this as a submodule)
+RUN pip3 install --no-cache-dir \
+    "lerobot[pi0] @ git+https://github.com/huggingface/lerobot.git@989f3d05ba47f872d75c587e76838e9cc574857a" \
     runpod \
     huggingface_hub \
     supabase

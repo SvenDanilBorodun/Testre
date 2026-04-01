@@ -61,18 +61,18 @@ React frontend → POST /trainings/start → Railway FastAPI → RunPod Serverle
 
 ## Docker Image Build Chain
 
-**CRITICAL**: The base image (`physical-ai-server-base`) clones from **upstream ROBOTIS-GIT**, NOT from this repo. All source code fixes must be applied as **overlays** in the thin layer Dockerfile.
+**CRITICAL**: The base image (`physical-ai-server-base`) clones from **upstream ROBOTIS-GIT**, NOT from this repo. All physical_ai_server source fixes must be applied as **overlays** in the thin layer Dockerfile. LeRobot itself is NOT overlaid — it's identical to upstream.
 
 ```
 robotis/ros:jazzy-ros-base-torch2.7.0-cuda12.8.0  (ROBOTIS base with PyTorch + CUDA)
-  └─ nettername/physical-ai-server-base             (+ git clone ROBOTIS-GIT/physical_ai_tools + LeRobot + ROS deps)
-       └─ nettername/physical-ai-server              (+ overlays: lerobot fork, inference_manager, data_manager, data_converter, omx_f_config + patches)
+  └─ nettername/physical-ai-server-base             (+ git clone ROBOTIS-GIT/physical_ai_tools + LeRobot@989f3d05 + ROS deps)
+       └─ nettername/physical-ai-server              (+ overlays: inference_manager, data_manager, data_converter, omx_f_config + patches)
 
 robotis/open-manipulator:latest                     (ROBOTIS base with ROS2 + Dynamixel)
   └─ nettername/open-manipulator                     (+ entrypoint_omx.sh + identify_arm.py)
 
 nvidia/cuda:12.1.1-devel-ubuntu22.04                (CUDA base for RunPod)
-  └─ nettername/robotis-ai-training                  (+ LeRobot fork + handler.py)
+  └─ nettername/robotis-ai-training                  (+ LeRobot@989f3d05 via pip + handler.py)
 ```
 
 Build order: `cd robotis_ai_setup/docker && REGISTRY=nettername ./build-images.sh`
@@ -84,7 +84,6 @@ Since the base image clones upstream code, we patch it with overlays:
 
 | Overlay | Purpose |
 |---------|---------|
-| `overlays/lerobot/` | Entire LeRobot fork source (replaces upstream, keeps version aligned with RunPod) |
 | `overlays/inference_manager.py` | Camera exact-match enforcement (no silent alphabetical remap) |
 | `overlays/data_manager.py` | dtype=float32 on state/action arrays |
 | `overlays/data_converter.py` | Empty trajectory guard + fail-loud on missing joints |
@@ -93,10 +92,11 @@ Since the base image clones upstream code, we patch it with overlays:
 
 ## LeRobot Version Alignment
 
-Both the robot and RunPod MUST use identical LeRobot code. The embedded fork at `physical_ai_tools/lerobot/` (v0.2.0) is the single source of truth:
-- **Robot**: Overlaid into physical-ai-server at build time (replaces upstream clone)
-- **RunPod**: Copied into build context and pip installed locally
-- **Never** install from `huggingface/lerobot` upstream — the fork has ROBOTIS-specific patches
+All components use the same LeRobot v0.2.0 at commit `989f3d05ba47` from `huggingface/lerobot`:
+- **Robot** (physical-ai-server-base): Cloned via ROBOTIS-GIT/physical_ai_tools `jazzy` branch (includes lerobot as submodule at `989f3d05`)
+- **RunPod** (robotis-ai-training): Pip installed directly from `huggingface/lerobot@989f3d05`
+- **Local copy** (`physical_ai_tools/lerobot/`): Byte-for-byte identical to upstream (197/197 Python files match)
+- The local copy is a static snapshot, NOT a modified fork — no ROBOTIS-specific patches to LeRobot itself
 
 ## Complete Pipeline (Recording → Training → Inference)
 

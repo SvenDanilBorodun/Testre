@@ -85,18 +85,12 @@ echo "   OK: physical-ai-server-base built"
 # ── Image 2b: physical_ai_server thin layer (patches upstream bugs) ──
 echo ""
 echo ">> Building physical_ai_server thin layer (patches)..."
-# Copy LeRobot fork source into overlay so robot uses same version as RunPod training
-echo "   Copying LeRobot fork into physical_ai_server overlays..."
-rm -rf "${SCRIPT_DIR}/physical_ai_server/overlays/lerobot"
-cp -r "${PHYSICAL_AI_TOOLS_DIR}/lerobot/src/lerobot" "${SCRIPT_DIR}/physical_ai_server/overlays/lerobot"
 docker build \
     --build-arg "BASE_IMAGE=${REGISTRY}/physical-ai-server-base:latest" \
     -t "${REGISTRY}/physical-ai-server:latest" \
     -f "${SCRIPT_DIR}/physical_ai_server/Dockerfile" \
-    "${SCRIPT_DIR}/physical_ai_server/" \
-    || { rm -rf "${SCRIPT_DIR}/physical_ai_server/overlays/lerobot"; echo "FAILED: physical-ai-server build"; exit 1; }
-rm -rf "${SCRIPT_DIR}/physical_ai_server/overlays/lerobot"
-echo "   OK: physical-ai-server built (with patches + LeRobot fork)"
+    "${SCRIPT_DIR}/physical_ai_server/"
+echo "   OK: physical-ai-server built (with patches)"
 
 # ── Image 3: open_manipulator base (optional — slow, needs 16 GB RAM) ──
 if [ "$BUILD_BASE" = "1" ]; then
@@ -131,17 +125,10 @@ echo "   OK: open-manipulator built"
 # ── Image 5: robotis-ai-training (RunPod serverless worker) ──
 echo ""
 echo ">> Building robotis-ai-training (RunPod serverless worker)..."
-# Copy LeRobot fork into build context so RunPod uses the same version as the robot
-echo "   Copying LeRobot fork into runpod_training build context..."
-rm -rf "${PROJECT_ROOT}/runpod_training/lerobot"
-cp -r "${PHYSICAL_AI_TOOLS_DIR}/lerobot" "${PROJECT_ROOT}/runpod_training/lerobot"
-# Ensure cleanup happens even if docker build fails (set -e would exit before rm)
 docker build \
     -t "${REGISTRY}/robotis-ai-training:latest" \
     -f "${PROJECT_ROOT}/runpod_training/Dockerfile" \
-    "${PROJECT_ROOT}/runpod_training/" \
-    || { rm -rf "${PROJECT_ROOT}/runpod_training/lerobot"; echo "FAILED: robotis-ai-training build"; exit 1; }
-rm -rf "${PROJECT_ROOT}/runpod_training/lerobot"
+    "${PROJECT_ROOT}/runpod_training/"
 echo "   OK: robotis-ai-training built"
 
 # ── Push all images ──

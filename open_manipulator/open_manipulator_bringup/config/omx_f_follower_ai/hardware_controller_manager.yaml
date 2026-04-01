@@ -1,7 +1,9 @@
 /**:
   controller_manager:
     ros__parameters:
-      update_rate: 100  # Hz
+      update_rate: 200  # Hz (increased from 100 for real-time teleop)
+      thread_priority: 40
+      cpu_affinity: [1, 2, 3]
 
       joint_state_broadcaster:
         type: joint_state_broadcaster/JointStateBroadcaster

@@ -84,8 +84,8 @@
         <param name="Position P Gain">1000</param>
         <param name="Position I Gain">0</param>
         <param name="Position D Gain">1000</param>
-        <param name="Profile Velocity">50</param>
-        <param name="Profile Acceleration">25</param>
+        <param name="Profile Velocity">0</param>
+        <param name="Profile Acceleration">0</param>
       </gpio>
       <gpio name="dxl12">
         <param name="type">dxl</param>
@@ -101,8 +101,8 @@
         <param name="Position P Gain">1000</param>
         <param name="Position I Gain">0</param>
         <param name="Position D Gain">1000</param>
-        <param name="Profile Velocity">50</param>
-        <param name="Profile Acceleration">25</param>
+        <param name="Profile Velocity">0</param>
+        <param name="Profile Acceleration">0</param>
       </gpio>
       <gpio name="dxl13">
         <param name="type">dxl</param>
@@ -118,8 +118,8 @@
         <param name="Position P Gain">1000</param>
         <param name="Position I Gain">0</param>
         <param name="Position D Gain">1000</param>
-        <param name="Profile Velocity">50</param>
-        <param name="Profile Acceleration">25</param>
+        <param name="Profile Velocity">0</param>
+        <param name="Profile Acceleration">0</param>
       </gpio>
       <gpio name="dxl14">
         <param name="type">dxl</param>
@@ -135,8 +135,8 @@
         <param name="Position P Gain">1000</param>
         <param name="Position I Gain">0</param>
         <param name="Position D Gain">1000</param>
-        <param name="Profile Velocity">50</param>
-        <param name="Profile Acceleration">25</param>
+        <param name="Profile Velocity">0</param>
+        <param name="Profile Acceleration">0</param>
       </gpio>
       <gpio name="dxl15">
         <param name="type">dxl</param>
@@ -152,8 +152,8 @@
         <param name="Position P Gain">1000</param>
         <param name="Position I Gain">0</param>
         <param name="Position D Gain">1000</param>
-        <param name="Profile Velocity">50</param>
-        <param name="Profile Acceleration">25</param>
+        <param name="Profile Velocity">0</param>
+        <param name="Profile Acceleration">0</param>
       </gpio>
       <gpio name="dxl16">
         <param name="type">dxl</param>
@@ -167,8 +167,8 @@
         <param name="Position P Gain">1000</param>
         <param name="Position I Gain">0</param>
         <param name="Position D Gain">1000</param>
-        <param name="Profile Velocity">50</param>
-        <param name="Profile Acceleration">25</param>
+        <param name="Profile Velocity">0</param>
+        <param name="Profile Acceleration">0</param>
         <param name="Current Limit">600</param>
         <param name="Goal Current">600</param>
         <param name="Shutdown">21</param>

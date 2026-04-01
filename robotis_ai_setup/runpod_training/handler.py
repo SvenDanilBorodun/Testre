@@ -285,13 +285,15 @@ def handler(job):
             )
             return {"status": "failed", "error": error_msg}
 
-        # Upload model to HuggingFace
-        model_url = _upload_model_to_hf(model_name, hf_token)
-
-        # Update final progress + status
+        # Training completed — update progress to 100% BEFORE upload attempt
         _update_supabase_progress(
             supabase_url, supabase_key, training_id, total_steps, total_steps, None
         )
+
+        # Upload model to HuggingFace
+        model_url = _upload_model_to_hf(model_name, hf_token)
+
+        # Mark as succeeded
         _update_supabase_status(supabase_url, supabase_key, training_id, "succeeded")
 
         return {"status": "succeeded", "model_url": model_url}

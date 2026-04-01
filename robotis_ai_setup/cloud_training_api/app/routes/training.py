@@ -82,7 +82,7 @@ def _generate_model_name(model_type: str, dataset_name: str) -> str:
     dataset_base = _sanitize_name(dataset_base)
     model_type = _sanitize_name(model_type)
     suffix = "".join(random.choices(string.ascii_lowercase + string.digits, k=10))
-    return f"edubotics/{model_type}-{dataset_base}-{suffix}"
+    return f"EduBotics-Solutions/{model_type}-{dataset_base}-{suffix}"
 
 
 def _get_remaining_credits(user_id: str) -> dict:

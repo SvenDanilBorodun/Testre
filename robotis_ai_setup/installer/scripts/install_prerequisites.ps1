@@ -92,9 +92,43 @@ if (-not $usbipdInstalled) {
     Write-Skip "usbipd-win already installed"
 }
 
+# ── Ensure Docker Desktop starts on login ──
+Write-Step "Configuring Docker Desktop auto-start..."
+$dockerExe = (Get-Command "Docker Desktop" -ErrorAction SilentlyContinue).Source
+if (-not $dockerExe) {
+    # Try common install locations
+    $candidates = @(
+        "$env:ProgramFiles\Docker\Docker\Docker Desktop.exe",
+        "${env:ProgramFiles(x86)}\Docker\Docker\Docker Desktop.exe",
+        "$env:LOCALAPPDATA\Docker\Docker Desktop.exe"
+    )
+    foreach ($c in $candidates) {
+        if (Test-Path $c) { $dockerExe = $c; break }
+    }
+}
+
+if ($dockerExe) {
+    $regPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+    $existing = Get-ItemProperty -Path $regPath -Name "Docker Desktop" -ErrorAction SilentlyContinue
+    if (-not $existing) {
+        New-ItemProperty -Path $regPath -Name "Docker Desktop" -Value "`"$dockerExe`"" -PropertyType String -Force | Out-Null
+        Write-OK "Docker Desktop will start on login"
+    } else {
+        Write-Skip "Docker Desktop auto-start already configured"
+    }
+} else {
+    Write-Skip "Docker Desktop executable not found — auto-start not configured"
+}
+
 # ── Summary ──
 Write-Step "Prerequisites installation complete!"
 if ($needsReboot) {
+    # Write flag file so Inno Setup knows a reboot is required
+    $flagPath = Join-Path $PSScriptRoot ".reboot_required"
+    Set-Content -Path $flagPath -Value "1"
     Write-Host "`nA REBOOT IS REQUIRED to complete WSL2/Docker installation." -ForegroundColor Yellow
-    Write-Host "After rebooting, run the installer again to continue setup." -ForegroundColor Yellow
+} else {
+    # Remove flag if no reboot needed (re-run after reboot)
+    $flagPath = Join-Path $PSScriptRoot ".reboot_required"
+    if (Test-Path $flagPath) { Remove-Item $flagPath -Force }
 }

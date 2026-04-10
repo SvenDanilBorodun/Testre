@@ -1,5 +1,4 @@
-ARG BASE_IMAGE=nettername/physical-ai-server-base:latest
-FROM ${BASE_IMAGE}
+FROM robotis/physical-ai-server:latest
 
 # Patch upstream bug: ServerInference.__init__ never initializes self._endpoints,
 # causing AttributeError on first register_endpoint() call.

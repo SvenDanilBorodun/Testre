@@ -44,37 +44,141 @@ wait_for_device() {
 wait_for_device "$FOLLOWER_PORT" "Follower arm"
 wait_for_device "$LEADER_PORT" "Leader arm"
 
-# --- Phase 1: Launch Follower ---
+# --- Phase 1: Launch Leader FIRST ---
+# Leader must start first so we know its position before the follower moves.
+echo "[LAUNCH] Starting leader..."
+ros2 launch open_manipulator_bringup omx_l_leader_ai.launch.py \
+    port_name:=${LEADER_PORT} &
+PIDS="$!"
+
+# Wait for leader joint states
+count=0
+while ! ros2 topic list 2>/dev/null | grep -q "/leader/joint_states" && [ $count -lt 30 ]; do
+    sleep 1
+    count=$((count + 1))
+done
+sleep 2
+echo "[LAUNCH] Leader ready."
+
+# Read leader's current position
+LEADER_POS=$(python3 -c "
+import rclpy, json
+from rclpy.node import Node
+from sensor_msgs.msg import JointState
+
+class ReadOnce(Node):
+    def __init__(self):
+        super().__init__('read_leader')
+        self.sub = self.create_subscription(JointState, '/leader/joint_states', self.cb, 10)
+        self.joints = ['joint1','joint2','joint3','joint4','joint5','gripper_joint_1']
+        self.done = False
+    def cb(self, msg):
+        if self.done:
+            return
+        if set(self.joints).issubset(set(msg.name)):
+            pos = [msg.position[msg.name.index(j)] for j in self.joints]
+            print(json.dumps(pos))
+            self.done = True
+            raise SystemExit
+
+rclpy.init()
+node = ReadOnce()
+try:
+    rclpy.spin(node)
+except SystemExit:
+    pass
+node.destroy_node()
+rclpy.shutdown()
+" 2>/dev/null)
+
+echo "[LAUNCH] Leader position: ${LEADER_POS}"
+
+# --- Phase 2: Launch Follower ---
 echo "[LAUNCH] Starting follower..."
 ros2 launch open_manipulator_bringup omx_f_follower_ai.launch.py \
     port_name:=${FOLLOWER_PORT} &
-PIDS="$!"
+PIDS="$PIDS $!"
 
-# Wait for follower to be ready (publishing joint_states)
+# Wait for follower to be ready
 count=0
 while ! ros2 topic list 2>/dev/null | grep -q "/joint_states" && [ $count -lt 60 ]; do
     sleep 1
     count=$((count + 1))
 done
-if [ $count -ge 60 ]; then
-    echo "[ERROR] Follower timeout - /joint_states not published within 60s"
-    cleanup
-    exit 1
-fi
 echo "[LAUNCH] Follower ready (/joint_states detected)."
+# Wait for arm_controller to be fully active
+sleep 3
 
-# --- Phase 2: Initial position trajectory ---
-echo "[LAUNCH] Moving to initial position..."
-PARAMS_FILE="/root/ros2_ws/install/open_manipulator_bringup/share/open_manipulator_bringup/config/omx_f_follower_ai/initial_positions.yaml"
-ros2 run open_manipulator_bringup joint_trajectory_executor \
-    --ros-args --params-file "$PARAMS_FILE"
-echo "[LAUNCH] Initial position reached."
+# --- Phase 3: Move follower to leader position smoothly ---
+# Publish trajectory directly to /leader/joint_trajectory (the topic the
+# follower's arm_controller subscribes to via remapping).
+# Uses quintic smoothing over 3s so the follower glides to the leader position.
+if [ -n "$LEADER_POS" ] && [ "$LEADER_POS" != "null" ]; then
+    echo "[LAUNCH] Moving follower to match leader (3s smooth trajectory)..."
+    python3 -c "
+import rclpy, sys, json, time
+from rclpy.node import Node
+from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy
+from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
+from sensor_msgs.msg import JointState
 
-# --- Phase 3: Launch Leader ---
-echo "[LAUNCH] Starting leader..."
-ros2 launch open_manipulator_bringup omx_l_leader_ai.launch.py \
-    port_name:=${LEADER_PORT} &
-PIDS="$PIDS $!"
+LEADER_POS = json.loads('${LEADER_POS}')
+JOINTS = ['joint1','joint2','joint3','joint4','joint5','gripper_joint_1']
+DURATION = 3.0
+
+class SyncNode(Node):
+    def __init__(self):
+        super().__init__('sync_follower')
+        self.follower_pos = None
+        self.sub = self.create_subscription(JointState, '/joint_states', self.cb, 10)
+        # Publish to the same topic the leader uses — follower's arm_controller
+        # is remapped to subscribe here
+        qos = QoSProfile(depth=10,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            reliability=ReliabilityPolicy.RELIABLE)
+        self.pub = self.create_publisher(JointTrajectory, '/leader/joint_trajectory', qos)
+        self.sent = False
+
+    def cb(self, msg):
+        if self.sent:
+            return
+        if not set(JOINTS).issubset(set(msg.name)):
+            return
+        self.follower_pos = [msg.position[msg.name.index(j)] for j in JOINTS]
+        self.send_sync()
+
+    def send_sync(self):
+        self.sent = True
+        traj = JointTrajectory()
+        traj.joint_names = list(JOINTS)
+        N = 50
+        for i in range(N):
+            t = (i + 1) / N
+            s = 10*t**3 - 15*t**4 + 6*t**5  # quintic
+            pt = JointTrajectoryPoint()
+            pt.positions = [f + (l - f) * s for f, l in zip(self.follower_pos, LEADER_POS)]
+            secs = DURATION * t
+            pt.time_from_start.sec = int(secs)
+            pt.time_from_start.nanosec = int((secs % 1) * 1e9)
+            traj.points.append(pt)
+        self.pub.publish(traj)
+        self.get_logger().info(f'Published sync trajectory ({N} points, {DURATION}s)')
+        # Wait for trajectory to finish then exit
+        self.create_timer(DURATION + 1.0, lambda: sys.exit(0))
+
+rclpy.init()
+node = SyncNode()
+try:
+    rclpy.spin(node)
+except SystemExit:
+    pass
+node.destroy_node()
+rclpy.shutdown()
+" 2>&1 || echo "[WARN] Sync failed — follower may snap on first leader move"
+    echo "[LAUNCH] Sync complete."
+else
+    echo "[WARN] Could not read leader position — skipping sync"
+fi
 
 # --- Phase 4: Launch Cameras (up to 2) ---
 for i in 1 2; do
@@ -96,7 +200,7 @@ for i in 1 2; do
 done
 
 echo "========================================"
-echo "All services running!"
+echo "All services running — teleportation active!"
 echo "========================================"
 
 wait

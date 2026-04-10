@@ -197,10 +197,11 @@ class EduBoticsApp:
             missing = [img for img, exists in img_status.items() if not exists]
             if missing:
                 self._log(f"Fehlende Images: {', '.join(missing)}")
-                self._log("Images werden heruntergeladen (kann beim ersten Mal dauern)...")
+                self._log("Images werden heruntergeladen (kann beim ersten Mal 15-30 Min. dauern)...")
                 self._set_status("Docker-Images werden heruntergeladen...")
                 if not docker_manager.pull_images(
-                    callback=lambda img, i, t: self._log(f"  Lade {img} ({i+1}/{t})...")
+                    callback=lambda img, i, t: self._set_status(f"Lade Image {i+1}/{t}: {img.split('/')[-1]}"),
+                    log=self._log,
                 ):
                     self._log("FEHLER: Docker-Images konnten nicht heruntergeladen werden. Internetverbindung prüfen.")
                     self._set_status("Image-Download fehlgeschlagen")

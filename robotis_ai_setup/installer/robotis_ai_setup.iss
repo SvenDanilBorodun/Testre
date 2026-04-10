@@ -66,13 +66,13 @@ Filename: "powershell.exe"; \
   StatusMsg: "USB-Geräterichtlinie wird konfiguriert..."; \
   Flags: runhidden waituntilterminated
 
-; Step 4: Docker-Images herunterladen (optional, kann dauern)
+; Step 4: Docker-Images herunterladen (skipped if reboot pending)
 Filename: "powershell.exe"; \
   Parameters: "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File ""{app}\scripts\pull_images.ps1"""; \
   StatusMsg: "Docker-Images werden heruntergeladen (kann etwas dauern)..."; \
   Flags: runhidden waituntilterminated; \
   Description: "Docker-Images jetzt herunterladen (empfohlen)"; \
-  Check: IsDockerRunning
+  Check: ShouldPullImages
 
 ; Step 5: Installation überprüfen
 Filename: "powershell.exe"; \
@@ -100,6 +100,24 @@ var
   ResultCode: Integer;
 begin
   Result := Exec('docker', 'info', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) and (ResultCode = 0);
+end;
+
+// Check if a reboot is required (flag written by install_prerequisites.ps1)
+function IsRebootRequired(): Boolean;
+begin
+  Result := FileExists(ExpandConstant('{app}\scripts\.reboot_required'));
+end;
+
+// Skip image pull if reboot is pending (Docker won't be running yet)
+function ShouldPullImages(): Boolean;
+begin
+  Result := IsDockerRunning() and (not IsRebootRequired());
+end;
+
+// Tell Inno Setup a reboot is needed after install
+function NeedRestart(): Boolean;
+begin
+  Result := IsRebootRequired();
 end;
 
 // Stop running containers before installing new files (upgrade safety)

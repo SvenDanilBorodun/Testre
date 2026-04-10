@@ -1,11 +1,11 @@
-FROM robotis/open-manipulator:latest
+FROM robotis/open-manipulator:amd64-4.1.4
 
 # Install Python dynamixel-sdk for identify_arm.py
 # Install v4l-utils for camera device discovery (v4l2-ctl --info)
 RUN apt-get update && apt-get install -y --no-install-recommends \
         v4l-utils python3-pip \
     && rm -rf /var/lib/apt/lists/* \
-    && pip3 install --no-cache-dir --break-system-packages dynamixel-sdk
+    && pip3 install --no-cache-dir --break-system-packages dynamixel-sdk==4.0.3
 
 # Copy entrypoint and identification script
 COPY entrypoint_omx.sh /entrypoint_omx.sh

@@ -15,16 +15,16 @@
 #   # or just:
 #   ./build-images.sh   (uses default REGISTRY=nettername)
 #
-# The open_manipulator base image (robotis/open-manipulator:latest) is built
-# from open_manipulator/docker/Dockerfile and takes ~40 min + 16 GB RAM.
-# By default this script skips the base build and assumes it already exists
-# (either pulled or built separately). To force a base rebuild:
+# The open_manipulator base image is the official ROBOTIS image from Docker Hub:
+#   robotis/open-manipulator:amd64-4.1.4
+# By default this script pulls it. To force a local rebuild from source instead:
 #   BUILD_BASE=1 ./build-images.sh
 
 set -euo pipefail
 
 REGISTRY=${REGISTRY:-nettername}
 BUILD_BASE=${BUILD_BASE:-0}
+OMX_BASE_IMAGE="robotis/open-manipulator:amd64-4.1.4"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 
@@ -72,45 +72,39 @@ docker build \
     "${PHYSICAL_AI_TOOLS_DIR}/physical_ai_manager/"
 echo "   OK: physical-ai-manager built"
 
-# ── Image 2a: physical_ai_server base (ROS2 + AI + s6-overlay) ──
+# ── Image 2a: physical_ai_server base (pull official ROBOTIS image) ──
 echo ""
-echo ">> Building physical_ai_server base..."
-# Build context must be physical_ai_tools root (Dockerfile references docker/s6-agent etc.)
-docker build \
-    -t "${REGISTRY}/physical-ai-server-base:latest" \
-    -f "${PHYSICAL_AI_TOOLS_DIR}/physical_ai_server/Dockerfile.amd64" \
-    "${PHYSICAL_AI_TOOLS_DIR}/"
-echo "   OK: physical-ai-server-base built"
+echo ">> Pulling physical_ai_server base from Docker Hub..."
+if ! docker image inspect "robotis/physical-ai-server:latest" >/dev/null 2>&1; then
+    docker pull "robotis/physical-ai-server:latest"
+fi
+echo "   OK: robotis/physical-ai-server:latest exists"
 
 # ── Image 2b: physical_ai_server thin layer (patches upstream bugs) ──
 echo ""
 echo ">> Building physical_ai_server thin layer (patches)..."
 docker build \
-    --build-arg "BASE_IMAGE=${REGISTRY}/physical-ai-server-base:latest" \
     -t "${REGISTRY}/physical-ai-server:latest" \
     -f "${SCRIPT_DIR}/physical_ai_server/Dockerfile" \
     "${SCRIPT_DIR}/physical_ai_server/"
 echo "   OK: physical-ai-server built (with patches)"
 
-# ── Image 3: open_manipulator base (optional — slow, needs 16 GB RAM) ──
+# ── Image 3: open_manipulator base ──
 if [ "$BUILD_BASE" = "1" ]; then
     echo ""
-    echo ">> Building open_manipulator base (this takes ~40 min)..."
+    echo ">> Building open_manipulator base from source (this takes ~40 min)..."
     docker build \
-        -t "robotis/open-manipulator:latest" \
+        -t "${OMX_BASE_IMAGE}" \
         -f "${OPEN_MANIPULATOR_DIR}/docker/Dockerfile" \
         "${OPEN_MANIPULATOR_DIR}/docker/"
-    echo "   OK: open-manipulator base built"
+    echo "   OK: open-manipulator base built from source"
 else
     echo ""
-    echo ">> Skipping open_manipulator base build (set BUILD_BASE=1 to rebuild)"
-    # Verify base image exists
-    if ! docker image inspect "robotis/open-manipulator:latest" >/dev/null 2>&1; then
-        echo "ERROR: Base image robotis/open-manipulator:latest not found."
-        echo "Either pull it or rebuild with: BUILD_BASE=1 $0"
-        exit 1
+    echo ">> Pulling open_manipulator base from Docker Hub..."
+    if ! docker image inspect "${OMX_BASE_IMAGE}" >/dev/null 2>&1; then
+        docker pull "${OMX_BASE_IMAGE}"
     fi
-    echo "   OK: robotis/open-manipulator:latest exists"
+    echo "   OK: ${OMX_BASE_IMAGE} exists"
 fi
 
 # ── Image 4: open_manipulator thin layer (entrypoint + identify_arm) ──

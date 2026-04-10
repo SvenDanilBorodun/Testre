@@ -53,7 +53,7 @@ React frontend → POST /trainings/start → Railway FastAPI → RunPod Serverle
 
 | Service | Location | Details |
 |---------|----------|---------|
-| Docker Hub | `nettername/*` | 5 images: physical-ai-manager, physical-ai-server-base, physical-ai-server, open-manipulator, robotis-ai-training |
+| Docker Hub | `nettername/*` | 4 images: physical-ai-manager, physical-ai-server, open-manipulator, robotis-ai-training. Base images from `robotis/*` (official ROBOTIS) |
 | Railway API | `scintillating-empathy-production-9efd.up.railway.app` | FastAPI cloud training API, auto-deploys from git push |
 | RunPod | Endpoint `wu45u3xmbuwbqr` | Serverless GPU training, workers min=0 max=1 |
 | Supabase | Project ref `fnnbysrjkfugsqzwcksd` | Auth + trainings table + credits system |
@@ -64,11 +64,10 @@ React frontend → POST /trainings/start → Railway FastAPI → RunPod Serverle
 **CRITICAL**: The base image (`physical-ai-server-base`) clones from **upstream ROBOTIS-GIT**, NOT from this repo. All physical_ai_server source fixes must be applied as **overlays** in the thin layer Dockerfile. LeRobot itself is NOT overlaid — it's identical to upstream.
 
 ```
-robotis/ros:jazzy-ros-base-torch2.7.0-cuda12.8.0  (ROBOTIS base with PyTorch + CUDA)
-  └─ nettername/physical-ai-server-base             (+ git clone ROBOTIS-GIT/physical_ai_tools + LeRobot@989f3d05 + ROS deps)
-       └─ nettername/physical-ai-server              (+ overlays: inference_manager, data_manager, data_converter, omx_f_config + patches)
+robotis/physical-ai-server:latest                  (ROBOTIS official from Docker Hub — ROS2 + PyTorch + LeRobot + s6)
+  └─ nettername/physical-ai-server                   (+ overlays: inference_manager, data_manager, data_converter, omx_f_config + patches)
 
-robotis/open-manipulator:latest                     (ROBOTIS base with ROS2 + Dynamixel)
+robotis/open-manipulator:amd64-4.1.4                (ROBOTIS official from Docker Hub — ROS2 + Dynamixel)
   └─ nettername/open-manipulator                     (+ entrypoint_omx.sh + identify_arm.py)
 
 nvidia/cuda:12.1.1-devel-ubuntu22.04                (CUDA base for RunPod)

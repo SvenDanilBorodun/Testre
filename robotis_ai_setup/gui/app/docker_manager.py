@@ -114,63 +114,61 @@ def images_exist() -> dict[str, bool]:
 
 
 def check_for_updates(log=None) -> bool:
-    """Check if any images have newer versions on the registry.
+    """Pull all images to ensure we have the latest version.
 
-    Compares local image digests against remote manifests without pulling.
-    Returns True if updates were found and pulled.
+    Uses 'docker pull' which only downloads layers that changed.
+    Returns True if any image was updated.
 
     Args:
         log: Optional callable for status messages (e.g. gui._log).
     """
-    updates_available = False
-    registry_reachable = False
+    any_updated = False
 
-    for image in ALL_IMAGES:
+    for i, image in enumerate(ALL_IMAGES):
+        short = image.split("/")[-1]
         try:
-            # Get local digest
-            local = subprocess.run(
-                ["docker", "inspect", "--format", "{{index .RepoDigests 0}}", image],
+            # Get local image ID before pull
+            local_before = subprocess.run(
+                ["docker", "images", "-q", image],
                 capture_output=True, text=True, timeout=10,
                 **_SUBPROCESS_KWARGS,
             )
-            if local.returncode != 0:
-                continue
-            local_digest = local.stdout.strip()
+            old_id = local_before.stdout.strip()
 
-            # Get remote digest via manifest inspect (no download)
-            remote = subprocess.run(
-                ["docker", "manifest", "inspect", "--verbose", image],
-                capture_output=True, text=True, timeout=30,
+            if log:
+                log(f"  Prüfe {i+1}/{len(ALL_IMAGES)}: {short}")
+            proc = subprocess.Popen(
+                ["docker", "pull", image],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True,
                 **_SUBPROCESS_KWARGS,
             )
-            if remote.returncode != 0:
-                continue
+            last_line = ""
+            for line in proc.stdout:
+                stripped = line.strip()
+                if stripped and stripped != last_line and log:
+                    log(f"    {stripped}")
+                    last_line = stripped
+            proc.wait(timeout=600)
 
-            registry_reachable = True
+            # Check if image ID changed
+            local_after = subprocess.run(
+                ["docker", "images", "-q", image],
+                capture_output=True, text=True, timeout=10,
+                **_SUBPROCESS_KWARGS,
+            )
+            new_id = local_after.stdout.strip()
+            if old_id and new_id and old_id != new_id:
+                if log:
+                    log(f"  Aktualisiert: {short}")
+                any_updated = True
 
-            # If local digest not found in remote manifest output, update available
-            if local_digest and local_digest.split("@")[-1] not in remote.stdout:
-                updates_available = True
-        except (FileNotFoundError, subprocess.TimeoutExpired):
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            if log:
+                log(f"  WARNUNG: {short} konnte nicht geprüft werden.")
             continue
 
-    if not registry_reachable:
-        if log:
-            log("WARNUNG: Docker Hub nicht erreichbar — Update-Prüfung übersprungen.")
-        return False
-
-    if updates_available:
-        if log:
-            log("Updates gefunden — Images werden aktualisiert...")
-        for image in ALL_IMAGES:
-            try:
-                subprocess.run(
-                    ["docker", "pull", "--quiet", image],
-                    capture_output=True, text=True, timeout=600,
-                    **_SUBPROCESS_KWARGS,
-                )
-            except (FileNotFoundError, subprocess.TimeoutExpired):
-                continue
+    if any_updated:
         # Remove dangling images to free disk space
         try:
             subprocess.run(
@@ -180,15 +178,16 @@ def check_for_updates(log=None) -> bool:
             )
         except (FileNotFoundError, subprocess.TimeoutExpired):
             pass
-        return True
-    return False
+
+    return any_updated
 
 
-def pull_images(callback=None) -> bool:
-    """Pull all required Docker images.
+def pull_images(callback=None, log=None) -> bool:
+    """Pull all required Docker images with streaming progress.
 
     Args:
         callback: Optional function called with (image_name, index, total) for progress.
+        log: Optional callable for streaming pull output lines.
 
     Returns:
         True if all images pulled successfully.
@@ -197,14 +196,23 @@ def pull_images(callback=None) -> bool:
         if callback:
             callback(image, i, len(ALL_IMAGES))
         try:
-            result = subprocess.run(
+            proc = subprocess.Popen(
                 ["docker", "pull", image],
-                capture_output=True, text=True, timeout=600,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True,
                 **_SUBPROCESS_KWARGS,
             )
-            if result.returncode != 0:
+            last_line = ""
+            for line in proc.stdout:
+                stripped = line.strip()
+                if stripped and stripped != last_line:
+                    if log:
+                        log(f"  [{i+1}/{len(ALL_IMAGES)}] {stripped}")
+                    last_line = stripped
+            proc.wait(timeout=600)
+            if proc.returncode != 0:
                 return False
-        except (FileNotFoundError, subprocess.TimeoutExpired):
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
             return False
     return True
 

@@ -25,13 +25,20 @@ RUN apt-get update && apt-get install -y \
 ENV COLCON_WS=/root/ros2_ws
 WORKDIR ${COLCON_WS}
 
+# Pin all repos to specific commits for reproducible builds
+# Last updated: 2026-04-10 from jazzy branches
 RUN mkdir -p ${COLCON_WS}/src && \
     cd ${COLCON_WS}/src && \
     git clone -b jazzy https://github.com/ROBOTIS-GIT/dynamixel_hardware_interface.git && \
+    cd dynamixel_hardware_interface && git checkout 3375b3d0c99c5bcdab11b2dc15c89a2923e2bca2 && cd .. && \
     git clone -b jazzy https://github.com/ROBOTIS-GIT/dynamixel_interfaces.git && \
+    cd dynamixel_interfaces && git checkout 3392e1214c62c7ee9e05ccc811e3e829c063bae8 && cd .. && \
     git clone -b jazzy https://github.com/ROBOTIS-GIT/DynamixelSDK.git && \
+    cd DynamixelSDK && git checkout f5a089cc9782c88b6bcbc5952a393bf9b6a550ed && cd .. && \
     git clone -b jazzy https://github.com/ROBOTIS-GIT/open_manipulator.git && \
+    cd open_manipulator && git checkout 5adfd9cc91240c7cb6bedad6d5ebbd29188aa59d && cd .. && \
     git clone -b jazzy https://github.com/ros2/rmw_zenoh.git && \
+    cd rmw_zenoh && git checkout afcd981a8193dde29bfe82a6062c5d0a58730256 && cd .. && \
     git clone -b r/4.56.4 https://github.com/IntelRealSense/realsense-ros.git && \
     cd realsense-ros && git checkout cbd8b8487d4c0126bb590822db9469414496e62a
 

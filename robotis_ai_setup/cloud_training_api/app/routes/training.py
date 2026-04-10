@@ -1,10 +1,12 @@
+import logging
 import os
 import random
 import string
-from datetime import datetime, timezone
+import uuid
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 
 from app.auth import get_current_user
 from app.services.runpod_client import (
@@ -15,16 +17,69 @@ from app.services.runpod_client import (
 from app.services.supabase_client import get_supabase
 from huggingface_hub import HfApi
 
+logger = logging.getLogger(__name__)
+
+# A worker that hasn't called update_training_progress() in this long is
+# considered wedged. Configurable via env var for ops flexibility.
+STALLED_WORKER_THRESHOLD = timedelta(
+    minutes=int(os.environ.get("STALLED_WORKER_MINUTES", "30"))
+)
+
+# Idempotency window: a duplicate /start with the same (user, dataset, model)
+# arriving inside this window returns the existing training_id instead of
+# creating a new row. Catches both client retries on network timeout and
+# accidental double-clicks in the UI.
+DEDUPE_WINDOW = timedelta(seconds=60)
+
+# Hard upper bounds on training_params. Steps especially is a cost-bomb risk:
+# a malicious or buggy client could request 1B steps and burn the GPU budget.
+MAX_STEPS = 500_000
+MAX_BATCH_SIZE = 256
+MAX_TIMEOUT_HOURS = 12.0
+
 router = APIRouter(prefix="/trainings", tags=["training"])
 
 
 # ---------- Request / Response models ----------
 
 
+class TrainingParams(BaseModel):
+    """Validated training hyperparameters. Bounded so a malicious or buggy
+    client cannot request a training that would burn the entire GPU budget.
+
+    Field set must match what physical_ai_manager/src/components/TrainingControlPanel.js
+    sends — fields not declared here are silently dropped by Pydantic and
+    never reach the RunPod handler. (Frontend sends: seed, num_workers,
+    batch_size, steps, eval_freq, log_freq, save_freq, output_folder_name.)
+    """
+    steps: int = Field(..., ge=1, le=MAX_STEPS, description="Total training steps")
+    batch_size: int | None = Field(default=None, ge=1, le=MAX_BATCH_SIZE)
+    num_workers: int | None = Field(default=None, ge=0, le=16)
+    log_freq: int | None = Field(default=None, ge=1, le=100_000)
+    save_freq: int | None = Field(default=None, ge=1, le=100_000)
+    # eval_freq=0 is the LeRobot convention for "no eval" — must allow ge=0.
+    # The handler also forces --eval_freq=0 because the cloud worker has no
+    # simulation env, but we still accept the field for forward compatibility.
+    eval_freq: int | None = Field(default=None, ge=0, le=100_000)
+    seed: int | None = Field(default=None, ge=0, le=2**31 - 1)
+    timeout_hours: float | None = Field(default=None, gt=0, le=MAX_TIMEOUT_HOURS)
+    # Cosmetic: lets the student name the HF model folder. Sanitized server-side
+    # before being baked into model_name.
+    output_folder_name: str | None = Field(default=None, max_length=128)
+
+
 class StartTrainingRequest(BaseModel):
-    dataset_name: str
-    model_type: str
-    training_params: dict
+    dataset_name: str = Field(..., min_length=1, max_length=200)
+    model_type: str = Field(..., min_length=1, max_length=64)
+    training_params: TrainingParams
+
+    @field_validator("dataset_name")
+    @classmethod
+    def _dataset_name_shape(cls, v: str) -> str:
+        # HuggingFace dataset id is "user/repo" — reject obvious garbage early.
+        if "/" not in v or v.startswith("/") or v.endswith("/"):
+            raise ValueError("dataset_name must be in 'owner/repo' form")
+        return v
 
 
 class CancelTrainingRequest(BaseModel):
@@ -44,6 +99,7 @@ class TrainingJob(BaseModel):
     requested_at: str
     terminated_at: str | None
     error_message: str | None
+    last_progress_at: str | None = None
 
 
 class StartTrainingResponse(BaseModel):
@@ -77,12 +133,25 @@ def _sanitize_name(name: str) -> str:
     return re.sub(r"[^a-zA-Z0-9._-]", "-", name).strip("-") or "unnamed"
 
 
-def _generate_model_name(model_type: str, dataset_name: str) -> str:
+def _generate_model_name(
+    model_type: str, dataset_name: str, output_folder_name: str | None = None
+) -> str:
+    """Compose the HuggingFace repo id for the trained model.
+
+    Format: EduBotics-Solutions/<output_folder>-<model_type>-<dataset>-<suffix>
+    Where <output_folder>- is omitted if the user did not pick one. The
+    random suffix prevents collisions when the same student starts the same
+    training twice.
+    """
     dataset_base = dataset_name.split("/")[-1] if "/" in dataset_name else dataset_name
     dataset_base = _sanitize_name(dataset_base)
-    model_type = _sanitize_name(model_type)
+    model_type_safe = _sanitize_name(model_type)
     suffix = "".join(random.choices(string.ascii_lowercase + string.digits, k=10))
-    return f"EduBotics-Solutions/{model_type}-{dataset_base}-{suffix}"
+    parts: list[str] = []
+    if output_folder_name:
+        parts.append(_sanitize_name(output_folder_name))
+    parts.extend([model_type_safe, dataset_base, suffix])
+    return "EduBotics-Solutions/" + "-".join(parts)
 
 
 def _get_remaining_credits(user_id: str) -> dict:
@@ -105,8 +174,26 @@ def _get_remaining_credits(user_id: str) -> dict:
     }
 
 
+def _parse_iso(s: str | None) -> datetime | None:
+    """Parse a Postgres TIMESTAMPTZ ISO string from supabase-py output."""
+    if not s:
+        return None
+    try:
+        return datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+
+
 def _sync_runpod_status(training: dict) -> dict:
-    """Check RunPod for the latest status and sync to Supabase if changed."""
+    """Reconcile a training row against RunPod's view of the job.
+
+    Three cases get the row marked failed:
+      1. RunPod reports a terminal state (FAILED/CANCELLED/COMPLETED/TIMED_OUT)
+      2. RunPod can't find the job at all (404 / unknown status)
+      3. The worker is wedged: RunPod still says IN_PROGRESS but no progress
+         reported in STALLED_WORKER_THRESHOLD. We cancel the RunPod job to
+         stop burning GPU money and mark the row failed.
+    """
     if training["status"] not in ("queued", "running"):
         return training
 
@@ -116,10 +203,29 @@ def _sync_runpod_status(training: dict) -> dict:
 
     try:
         runpod_status = get_job_status(job_id)
-    except Exception:
+    except Exception as e:
+        logger.warning("RunPod status check failed for job %s: %s", job_id, e)
         return training
 
     db_status = RUNPOD_TO_DB_STATUS.get(runpod_status, training["status"])
+
+    # Case 3: stalled worker — RunPod says IN_PROGRESS but no progress in N minutes.
+    stalled = False
+    if db_status == "running":
+        last_progress = _parse_iso(training.get("last_progress_at"))
+        now = datetime.now(timezone.utc)
+        if last_progress and (now - last_progress) > STALLED_WORKER_THRESHOLD:
+            logger.warning(
+                "Stalled worker detected: training %s, no progress for %s",
+                training["id"], now - last_progress,
+            )
+            try:
+                cancel_training_job(job_id)
+            except Exception as e:
+                logger.warning("Failed to cancel stalled job %s: %s", job_id, e)
+            db_status = "failed"
+            stalled = True
+
     if db_status == training["status"]:
         return training
 
@@ -128,7 +234,13 @@ def _sync_runpod_status(training: dict) -> dict:
     if db_status in ("succeeded", "failed", "canceled"):
         update_data["terminated_at"] = datetime.now(timezone.utc).isoformat()
     if db_status == "failed":
-        update_data["error_message"] = f"RunPod status: {runpod_status}"
+        if stalled:
+            update_data["error_message"] = (
+                "Worker hat ueber 30 Minuten keine Updates gesendet "
+                "(vermutlich haengt der Trainings-Prozess). Job wurde abgebrochen."
+            )
+        else:
+            update_data["error_message"] = f"RunPod status: {runpod_status}"
 
     supabase.table("trainings").update(update_data).eq("id", training["id"]).execute()
 
@@ -141,6 +253,52 @@ def _sync_runpod_status(training: dict) -> dict:
     if "error_message" in update_data:
         training["error_message"] = update_data["error_message"]
     return training
+
+
+def _find_recent_duplicate(
+    user_id: str, dataset_name: str, model_type: str
+) -> dict | None:
+    """Idempotency check. Returns an existing matching training if one was
+    started within DEDUPE_WINDOW, otherwise None.
+
+    Excludes failed/canceled rows so a user can immediately retry after a
+    failure without being blocked by their own previous attempt.
+    """
+    supabase = get_supabase()
+    window_start = (datetime.now(timezone.utc) - DEDUPE_WINDOW).isoformat()
+    result = (
+        supabase.table("trainings")
+        .select("*")
+        .eq("user_id", user_id)
+        .eq("dataset_name", dataset_name)
+        .eq("model_type", model_type)
+        .gte("requested_at", window_start)
+        .not_.in_("status", ["failed", "canceled"])
+        .order("requested_at", desc=True)
+        .limit(1)
+        .execute()
+    )
+    rows = result.data or []
+    return rows[0] if rows else None
+
+
+def _sweep_user_running_jobs(user_id: str) -> None:
+    """Sync every running/queued row this user owns. Used at top of /start so a
+    stuck row from a previous session can't block a fresh credit check.
+    """
+    supabase = get_supabase()
+    result = (
+        supabase.table("trainings")
+        .select("*")
+        .eq("user_id", user_id)
+        .in_("status", ["queued", "running"])
+        .execute()
+    )
+    for row in (result.data or []):
+        try:
+            _sync_runpod_status(row)
+        except Exception as e:
+            logger.warning("Sweep sync failed for training %s: %s", row.get("id"), e)
 
 
 # ---------- Endpoints ----------
@@ -156,67 +314,103 @@ async def get_quota(user=Depends(get_current_user)):
 async def start_training(req: StartTrainingRequest, user=Depends(get_current_user)):
     supabase = get_supabase()
     user_id = str(user.id)
+    logger.info(
+        "POST /trainings/start user=%s dataset=%s model_type=%s steps=%s",
+        user_id, req.dataset_name, req.model_type, req.training_params.steps,
+    )
 
-    # 0. Validate dataset exists on HuggingFace Hub
+    # 0a. Sweep this user's stuck rows BEFORE counting credits. If a previous
+    #     job died hard (no SIGTERM, no exception), the row is still 'running'
+    #     and would block the credit check. The sweep flips it to failed first.
+    _sweep_user_running_jobs(user_id)
+
+    # 0b. Idempotency: a duplicate /start within DEDUPE_WINDOW returns the
+    #     existing training instead of creating a new one. Catches network
+    #     retries and accidental double-clicks. Zero schema/client cost.
+    duplicate = _find_recent_duplicate(user_id, req.dataset_name, req.model_type)
+    if duplicate:
+        logger.info(
+            "Dedupe hit: returning existing training %s for user=%s",
+            duplicate["id"], user_id,
+        )
+        return StartTrainingResponse(
+            training_id=duplicate["id"],
+            model_name=duplicate["model_name"],
+            status=duplicate["status"],
+        )
+
+    # 1. Validate dataset exists on HuggingFace Hub.
     try:
         hf_api = HfApi(token=os.environ.get("HF_TOKEN", ""))
         hf_api.dataset_info(req.dataset_name)
     except Exception:
+        logger.warning("Dataset not found on HF: %s", req.dataset_name)
         raise HTTPException(
             status_code=400,
             detail=f"Dataset '{req.dataset_name}' not found on HuggingFace Hub.",
         )
 
-    # 1. Check remaining credits (derived from trainings table)
-    quota = _get_remaining_credits(user_id)
-    if quota["remaining"] <= 0:
-        raise HTTPException(
-            status_code=403, detail="No training credits remaining."
-        )
-
-    # 1b. Validate that steps is provided (required for progress tracking)
-    if not req.training_params or not req.training_params.get("steps"):
-        raise HTTPException(
-            status_code=400,
-            detail="training_params muss 'steps' enthalten.",
-        )
-
-    # 2. Generate model name and insert training row
-    #    The INSERT itself "consumes" the credit — get_remaining_credits
-    #    counts non-failed/canceled trainings against the limit.
-    model_name = _generate_model_name(req.model_type, req.dataset_name)
-
-    insert_result = (
-        supabase.table("trainings")
-        .insert(
-            {
-                "user_id": user_id,
-                "status": "queued",
-                "dataset_name": req.dataset_name,
-                "model_name": model_name,
-                "model_type": req.model_type,
-                "training_params": req.training_params,
-                "total_steps": req.training_params.get("steps", 100000),
-            }
-        )
-        .execute()
+    # 2. Atomic credit-check + training row insert via start_training_safe RPC.
+    #    The function locks the user row, counts active trainings, and inserts
+    #    in one transaction — concurrent /start calls cannot both pass the check.
+    #    worker_token is the only DB credential the RunPod worker receives.
+    model_name = _generate_model_name(
+        req.model_type,
+        req.dataset_name,
+        output_folder_name=req.training_params.output_folder_name,
     )
-    training_id = insert_result.data[0]["id"]
+    worker_token = str(uuid.uuid4())
+    # Pydantic model → plain dict for JSON serialization to RPC + RunPod.
+    training_params_dict = req.training_params.model_dump(exclude_none=True)
 
-    # 3. Dispatch to RunPod
+    try:
+        rpc_result = supabase.rpc(
+            "start_training_safe",
+            {
+                "p_user_id": user_id,
+                "p_dataset_name": req.dataset_name,
+                "p_model_name": model_name,
+                "p_model_type": req.model_type,
+                "p_training_params": training_params_dict,
+                "p_total_steps": req.training_params.steps,
+                "p_worker_token": worker_token,
+            },
+        ).execute()
+    except Exception as e:
+        # Map Postgres error codes raised by start_training_safe back to HTTP.
+        msg = str(e)
+        if "P0003" in msg or "credits remaining" in msg:
+            logger.info("Credit-exhausted /start for user=%s", user_id)
+            raise HTTPException(status_code=403, detail="No training credits remaining.")
+        if "P0002" in msg or "User profile not found" in msg:
+            logger.warning("User profile not found: %s", user_id)
+            raise HTTPException(status_code=404, detail="User profile not found")
+        logger.error("start_training_safe RPC failed for user=%s: %s", user_id, e)
+        raise
+
+    if not rpc_result.data:
+        logger.error("start_training_safe returned no rows for user=%s", user_id)
+        raise HTTPException(status_code=500, detail="start_training_safe returned no row")
+    training_id = rpc_result.data[0]["training_id"]
+    logger.info("Created training %s for user=%s model=%s", training_id, user_id, model_name)
+
+    # 3. Dispatch to RunPod with the public anon key + the scoped token.
+    #    The worker can ONLY call update_training_progress() on this row.
     try:
         job_id = start_training_job(
             dataset_name=req.dataset_name,
             model_name=model_name,
             model_type=req.model_type,
-            training_params=req.training_params,
+            training_params=training_params_dict,
             training_id=training_id,
             supabase_url=os.environ["SUPABASE_URL"],
-            supabase_key=os.environ["SUPABASE_SERVICE_ROLE_KEY"],
+            supabase_anon_key=os.environ["SUPABASE_ANON_KEY"],
+            worker_token=worker_token,
             hf_token=os.environ.get("HF_TOKEN", ""),
         )
     except Exception as e:
         # Dispatch failed — mark training as failed (auto-frees the credit)
+        logger.error("RunPod dispatch failed for training %s: %s", training_id, e)
         supabase.table("trainings").update(
             {
                 "status": "failed",
@@ -230,6 +424,7 @@ async def start_training(req: StartTrainingRequest, user=Depends(get_current_use
     supabase.table("trainings").update(
         {"status": "running", "runpod_job_id": job_id}
     ).eq("id", training_id).execute()
+    logger.info("Dispatched training %s as RunPod job %s", training_id, job_id)
 
     return StartTrainingResponse(
         training_id=training_id, model_name=model_name, status="running"
@@ -239,13 +434,15 @@ async def start_training(req: StartTrainingRequest, user=Depends(get_current_use
 @router.post("/cancel")
 async def cancel_training(req: CancelTrainingRequest, user=Depends(get_current_user)):
     supabase = get_supabase()
+    user_id = str(user.id)
+    logger.info("POST /trainings/cancel user=%s training_id=%s", user_id, req.training_id)
 
     # Verify ownership
     result = (
         supabase.table("trainings")
         .select("*")
         .eq("id", req.training_id)
-        .eq("user_id", str(user.id))
+        .eq("user_id", user_id)
         .execute()
     )
     if not result.data:
@@ -259,8 +456,13 @@ async def cancel_training(req: CancelTrainingRequest, user=Depends(get_current_u
     if training.get("runpod_job_id"):
         try:
             cancel_training_job(training["runpod_job_id"])
-        except Exception:
-            pass  # Still mark as canceled locally even if RunPod fails
+        except Exception as e:
+            # Still mark as canceled locally even if RunPod fails — but log it
+            # so a stuck-on-RunPod job is at least visible in Railway logs.
+            logger.warning(
+                "RunPod cancel failed for training %s job %s: %s",
+                req.training_id, training["runpod_job_id"], e,
+            )
 
     # Mark as canceled (auto-frees the credit)
     supabase.table("trainings").update(
@@ -269,6 +471,7 @@ async def cancel_training(req: CancelTrainingRequest, user=Depends(get_current_u
             "terminated_at": datetime.now(timezone.utc).isoformat(),
         }
     ).eq("id", req.training_id).execute()
+    logger.info("Canceled training %s for user=%s", req.training_id, user_id)
 
     return {"status": "canceled", "training_id": req.training_id}
 

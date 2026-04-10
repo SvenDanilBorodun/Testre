@@ -16,7 +16,8 @@ def start_training_job(
     training_params: dict,
     training_id: int,
     supabase_url: str,
-    supabase_key: str,
+    supabase_anon_key: str,
+    worker_token: str,
     hf_token: str,
 ) -> str:
     """Dispatch a training job to RunPod Serverless. Returns the job ID."""
@@ -29,7 +30,8 @@ def start_training_job(
         "training_params": training_params,
         "training_id": training_id,
         "supabase_url": supabase_url,
-        "supabase_key": supabase_key,
+        "supabase_anon_key": supabase_anon_key,
+        "worker_token": worker_token,
         "hf_token": hf_token,
     }
 

@@ -1,3 +1,4 @@
+import logging
 import os
 
 from dotenv import load_dotenv
@@ -8,6 +9,8 @@ from app.routes.health import router as health_router
 from app.routes.training import router as training_router
 
 load_dotenv()
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
 app = FastAPI(title="EduBotics Cloud Training API")
 

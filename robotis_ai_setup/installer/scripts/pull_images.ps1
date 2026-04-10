@@ -9,10 +9,25 @@ $ErrorActionPreference = "Stop"
 function Write-Step { param([string]$msg) Write-Host "`n>> $msg" -ForegroundColor Cyan }
 function Write-OK   { param([string]$msg) Write-Host "   OK: $msg" -ForegroundColor Green }
 
+# Read IMAGE_TAG from docker/versions.env so we pull the SAME bytes that
+# docker-compose.yml will run later. Falls back to :latest if the file is
+# missing (e.g. dev install before any maintainer build has shipped).
+$ImageTag = "latest"
+$VersionsEnv = Join-Path $PSScriptRoot "..\..\docker\versions.env"
+if (Test-Path $VersionsEnv) {
+    Get-Content $VersionsEnv | ForEach-Object {
+        if ($_ -match '^\s*IMAGE_TAG\s*=\s*(.+?)\s*$') { $ImageTag = $Matches[1] }
+        if ($_ -match '^\s*REGISTRY\s*=\s*(.+?)\s*$' -and -not $PSBoundParameters.ContainsKey('Registry')) {
+            $Registry = $Matches[1]
+        }
+    }
+}
+Write-Host "Using image tag: $ImageTag (registry: $Registry)" -ForegroundColor Cyan
+
 $images = @(
-    "$Registry/open-manipulator:latest",
-    "$Registry/physical-ai-server:latest",
-    "$Registry/physical-ai-manager:latest"
+    "${Registry}/open-manipulator:${ImageTag}",
+    "${Registry}/physical-ai-server:${ImageTag}",
+    "${Registry}/physical-ai-manager:${ImageTag}"
 )
 
 Write-Step "Pulling Docker images..."

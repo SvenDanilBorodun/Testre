@@ -33,12 +33,23 @@ try {
 } catch { Write-FAIL "usbipd not found"; $allOk = $false }
 
 # 4. Docker images
+# Read REGISTRY + IMAGE_TAG from docker/versions.env so this script checks
+# the SAME bytes that docker-compose will run later. Falls back to :latest if
+# the file is missing (older installs that predate versions.env).
 Write-Host "   Checking Docker images..." -ForegroundColor White
 $registry = "nettername"
+$imageTag = "latest"
+$VersionsEnv = Join-Path $PSScriptRoot "..\..\docker\versions.env"
+if (Test-Path $VersionsEnv) {
+    Get-Content $VersionsEnv | ForEach-Object {
+        if ($_ -match '^\s*IMAGE_TAG\s*=\s*(.+?)\s*$') { $imageTag = $Matches[1] }
+        if ($_ -match '^\s*REGISTRY\s*=\s*(.+?)\s*$')  { $registry  = $Matches[1] }
+    }
+}
 $images = @(
-    "$registry/open-manipulator:latest",
-    "$registry/physical-ai-server:latest",
-    "$registry/physical-ai-manager:latest"
+    "${registry}/open-manipulator:${imageTag}",
+    "${registry}/physical-ai-server:${imageTag}",
+    "${registry}/physical-ai-manager:${imageTag}"
 )
 foreach ($image in $images) {
     docker image inspect $image *>$null

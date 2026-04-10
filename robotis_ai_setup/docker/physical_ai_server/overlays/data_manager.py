@@ -23,6 +23,7 @@ from pathlib import Path
 import queue
 import shutil
 import subprocess
+import sys
 import threading
 import time
 
@@ -92,6 +93,9 @@ class DataManager:
         self._current_task = 0
         self._init_task_limits()
         self._current_scenario_number = 0
+        # Frame-drop detection (Option B): set when RAM pressure forces an
+        # early save, so the validator can warn about a truncated episode.
+        self._early_saved_due_to_ram = False
 
     def get_status(self):
         return self._status
@@ -123,6 +127,16 @@ class DataManager:
         elif self._status == 'run':
             if not self._check_time(self._task_info.episode_time_s, 'save'):
                 if RAMChecker.get_free_ram_gb() < self.RAM_LIMIT_GB:
+                    # Mark this episode as RAM-truncated so _validate_episode_buffer()
+                    # can warn the operator about silent data loss.
+                    self._early_saved_due_to_ram = True
+                    print(
+                        f'[WARNUNG] Episode {self._record_episode_count + 1} '
+                        f'wird wegen niedrigem Arbeitsspeicher '
+                        f'(<{self.RAM_LIMIT_GB} GB frei) frueh beendet. '
+                        f'Die Aufnahme ist kuerzer als geplant.',
+                        file=sys.stderr, flush=True,
+                    )
                     if not self._single_task:
                         self._status = 'finish'
                     else:
@@ -226,6 +240,15 @@ class DataManager:
     def save(self):
         if self._lerobot_dataset.episode_buffer is None:
             return
+        # Validate the buffer BEFORE save() consumes it. Logs to stderr only —
+        # validation never blocks the actual save.
+        try:
+            self._validate_episode_buffer()
+        except Exception as e:
+            print(
+                f'[WARNUNG] Episode-Pruefung fehlgeschlagen (nicht kritisch): {e}',
+                file=sys.stderr, flush=True,
+            )
         if self._task_info.use_optimized_save_mode:
             if not self._single_task:
                 self._lerobot_dataset.save_episode_without_video_encoding()
@@ -234,6 +257,76 @@ class DataManager:
         else:
             if self._lerobot_dataset.episode_buffer['size'] > 0:
                 self._lerobot_dataset.save_episode()
+
+    def _validate_episode_buffer(self):
+        """Inspect the in-memory episode buffer for silent data loss.
+
+        Two checks:
+          1. RAM-truncated episode (flag set by record() when memory ran out).
+          2. Frame timestamp gaps larger than 2x the expected frame interval —
+             usually a camera publisher hiccup or callback starvation.
+
+        Both findings are logged in German for the student-facing operator UI;
+        neither blocks the save.
+        """
+        buf = self._lerobot_dataset.episode_buffer
+        if buf is None:
+            return
+
+        episode_no = self._record_episode_count + 1
+        size = buf.get('size', 0) or 0
+        fps = getattr(self._task_info, 'fps', None)
+        expected_dt = (1.0 / fps) if fps and fps > 0 else None
+
+        # Check 1: was this episode cut short by the RAM limit?
+        if self._early_saved_due_to_ram:
+            expected_frames = None
+            if fps and getattr(self._task_info, 'episode_time_s', None):
+                expected_frames = int(self._task_info.episode_time_s * fps)
+            if expected_frames:
+                print(
+                    f'[WARNUNG] Episode {episode_no}: nur {size} von '
+                    f'~{expected_frames} Frames aufgenommen '
+                    f'(Aufnahme wegen RAM-Mangel frueh beendet).',
+                    file=sys.stderr, flush=True,
+                )
+            else:
+                print(
+                    f'[WARNUNG] Episode {episode_no}: {size} Frames '
+                    f'(Aufnahme wegen RAM-Mangel frueh beendet).',
+                    file=sys.stderr, flush=True,
+                )
+
+        # Check 2: timestamp gaps inside the buffer.
+        timestamps = buf.get('timestamp')
+        if (
+            expected_dt is not None
+            and isinstance(timestamps, list)
+            and len(timestamps) >= 2
+        ):
+            threshold = 2.0 * expected_dt
+            gaps = []
+            for i in range(1, len(timestamps)):
+                try:
+                    dt = float(timestamps[i]) - float(timestamps[i - 1])
+                except (TypeError, ValueError):
+                    continue
+                if dt > threshold:
+                    gaps.append((i, dt))
+            if gaps:
+                # Limit the report to the worst few so we don't spam stderr.
+                gaps.sort(key=lambda g: g[1], reverse=True)
+                worst = gaps[:3]
+                summary = ', '.join(
+                    f'Frame {idx}: {dt * 1000:.0f} ms' for idx, dt in worst
+                )
+                print(
+                    f'[WARNUNG] Episode {episode_no}: {len(gaps)} '
+                    f'Zeitluecken erkannt (erwartet ~{expected_dt * 1000:.0f} ms '
+                    f'pro Frame). Groesste Luecken: {summary}. '
+                    f'Moegliche Ursache: Kamera oder Sensor hat Frames verloren.',
+                    file=sys.stderr, flush=True,
+                )
 
     def create_frame(
             self,
@@ -414,6 +507,8 @@ class DataManager:
                 self._lerobot_dataset.episode_buffer.clear()
             self._lerobot_dataset.episode_buffer = None
         self._start_time_s = 0
+        # Reset the RAM-truncation flag so the next episode starts clean.
+        self._early_saved_due_to_ram = False
         gc.collect()
 
     def _check_time(self, limit_time, next_status):

@@ -37,25 +37,33 @@ export default function RobotTypeSelector() {
   const [fetching, setFetching] = useState(false);
   const [selectedRobotType, setSelectedRobotType] = useState('');
 
-  // Fetch robot type list
-  const fetchRobotTypes = useCallback(async () => {
+  // Fetch robot type list with retry for startup race condition
+  const fetchRobotTypes = useCallback(async (retries = 5, isManual = false) => {
     setFetching(true);
-    try {
-      const result = await getRobotTypeList();
-      console.log('Robot types received:', result);
+    for (let attempt = 1; attempt <= retries; attempt++) {
+      try {
+        const result = await getRobotTypeList();
+        console.log('Robot types received:', result);
 
-      if (result && result.robot_types) {
-        dispatch(setRobotTypeList(result.robot_types));
-        toast.success('Robotertypen erfolgreich geladen');
-      } else {
-        toast.error('Failed to get robot types: Invalid response');
+        if (result && result.robot_types) {
+          dispatch(setRobotTypeList(result.robot_types));
+          if (isManual) {
+            toast.success('Robotertypen erfolgreich geladen');
+          }
+          setFetching(false);
+          return;
+        }
+      } catch (error) {
+        console.warn(`Robot type fetch attempt ${attempt}/${retries} failed:`, error.message);
+        if (attempt < retries) {
+          await new Promise((r) => setTimeout(r, 2000));
+          continue;
+        }
+        // Only show error toast after all retries exhausted
+        toast.error(`Robotertypen konnten nicht geladen werden: ${error.message}`);
       }
-    } catch (error) {
-      console.error('Error fetching robot types:', error);
-      toast.error(`Failed to get robot types: ${error.message}`);
-    } finally {
-      setFetching(false);
     }
+    setFetching(false);
   }, [getRobotTypeList, dispatch]);
 
   const handleSetRobotType = async () => {
@@ -226,7 +234,7 @@ export default function RobotTypeSelector() {
 
       <button
         className={classRefreshButton}
-        onClick={fetchRobotTypes}
+        onClick={() => fetchRobotTypes(1, true)}
         disabled={fetching || loading || taskStatus.phase > 0}
       >
         <div className="flex items-center justify-center gap-2">

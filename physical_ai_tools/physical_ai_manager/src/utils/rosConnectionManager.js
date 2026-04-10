@@ -27,7 +27,7 @@ class RosConnectionManager {
     this.connectionPromise = null;
     this.onConnected = null;
     this.reconnectAttempts = 0;
-    this.maxReconnectAttempts = 10;
+    this.maxReconnectAttempts = 30;
     this.reconnectTimer = null;
     this.intentionalDisconnect = false;
   }
@@ -132,7 +132,7 @@ class RosConnectionManager {
       return;
     }
 
-    const delay = Math.min(2000 * Math.pow(2, this.reconnectAttempts), 30000);
+    const delay = Math.min(1000 * Math.pow(2, this.reconnectAttempts), 30000);
     this.reconnectAttempts++;
     console.log(`Scheduling reconnect attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts} in ${delay}ms`);
 
@@ -164,6 +164,14 @@ class RosConnectionManager {
     this.connectionPromise = null;
     this.url = '';
     this.reconnectAttempts = 0;
+  }
+
+  /**
+   * Reset reconnect counter (used by StartupGate retry)
+   */
+  resetReconnectCounter() {
+    this.reconnectAttempts = 0;
+    this.intentionalDisconnect = false;
   }
 
   /**

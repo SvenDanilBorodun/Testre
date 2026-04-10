@@ -2,13 +2,63 @@
 
 import os
 
-# Docker image registry — override with EDUBOTICS_REGISTRY env var
+
+# Docker image registry — override with EDUBOTICS_REGISTRY env var.
 REGISTRY = os.environ.get("EDUBOTICS_REGISTRY", "nettername")
 
-# Docker image names
-IMAGE_OPEN_MANIPULATOR = f"{REGISTRY}/open-manipulator:latest"
-IMAGE_PHYSICAL_AI_SERVER = f"{REGISTRY}/physical-ai-server:latest"
-IMAGE_PHYSICAL_AI_MANAGER = f"{REGISTRY}/physical-ai-manager:latest"
+
+def _read_image_tag_from_versions_env() -> str:
+    """Read IMAGE_TAG from docker/versions.env so the GUI references the
+    SAME image build that docker-compose pulls.
+
+    Resolution order:
+      1. EDUBOTICS_IMAGE_TAG environment variable (escape hatch for ops)
+      2. docker/versions.env next to the compose file
+      3. Fallback to :latest (matches docker-compose.yml's ${IMAGE_TAG:-latest})
+
+    Without this, the GUI's pull/health-check paths used :latest while compose
+    pulled :GIT_SHA — same bytes today (build script tags both in lockstep)
+    but a latent bug if a SHA build ever ships without :latest.
+    """
+    env_override = os.environ.get("EDUBOTICS_IMAGE_TAG")
+    if env_override:
+        return env_override
+
+    # Resolve docker/versions.env via the same install-dir walk as below.
+    # We import lazily to avoid a circular reference at module load time.
+    from pathlib import Path
+    import sys
+    candidates = [
+        Path(os.path.dirname(os.path.abspath(sys.executable))),
+        Path(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    ]
+    for start in candidates:
+        d = start
+        for _ in range(6):
+            versions_env = d / "docker" / "versions.env"
+            if versions_env.is_file():
+                try:
+                    for line in versions_env.read_text().splitlines():
+                        line = line.strip()
+                        if line.startswith("IMAGE_TAG="):
+                            return line.split("=", 1)[1].strip()
+                except OSError:
+                    pass
+                break  # found the file, no IMAGE_TAG line — bail
+            parent = d.parent
+            if parent == d:
+                break
+            d = parent
+    return "latest"
+
+
+IMAGE_TAG = _read_image_tag_from_versions_env()
+
+# Docker image names — use the SAME tag docker-compose resolves so the GUI
+# never accidentally pulls a newer/older image than what compose runs.
+IMAGE_OPEN_MANIPULATOR = f"{REGISTRY}/open-manipulator:{IMAGE_TAG}"
+IMAGE_PHYSICAL_AI_SERVER = f"{REGISTRY}/physical-ai-server:{IMAGE_TAG}"
+IMAGE_PHYSICAL_AI_MANAGER = f"{REGISTRY}/physical-ai-manager:{IMAGE_TAG}"
 ALL_IMAGES = [IMAGE_OPEN_MANIPULATOR, IMAGE_PHYSICAL_AI_SERVER, IMAGE_PHYSICAL_AI_MANAGER]
 
 # Network ports

@@ -26,6 +26,7 @@ import RecordPage from './pages/RecordPage';
 import InferencePage from './pages/InferencePage';
 import TrainingPage from './pages/TrainingPage';
 import EditDatasetPage from './pages/EditDatasetPage';
+import StartupGate from './components/StartupGate';
 import { useRosTopicSubscription } from './hooks/useRosTopicSubscription';
 import rosConnectionManager from './utils/rosConnectionManager';
 import { useDispatch, useSelector } from 'react-redux';
@@ -241,6 +242,7 @@ function App() {
   );
 
   return (
+    <StartupGate>
     <div className="flex min-h-screen w-screen">
       <aside className="w-30 min-w-28 bg-gray-100 min-h-screen flex flex-col items-center gap-4 shadow-[inset_0_0_2px_rgba(0,0,0,0.1)]">
         <div className="w-full h-screen flex flex-col gap-2 items-center overflow-y-auto scrollbar-thin">
@@ -358,6 +360,7 @@ function App() {
         }}
       />
     </div>
+    </StartupGate>
   );
 }
 

@@ -17,6 +17,7 @@
 # Author: Dongyun Kim
 
 import os
+import time
 
 from lerobot.policies.pretrained import PreTrainedPolicy
 import numpy as np
@@ -35,6 +36,13 @@ class InferenceManager:
         self.policy_path = None
         self.policy = None
         self._expected_image_keys = []
+        self._expected_image_shapes = {}
+        # Stale camera detection: track last-seen image hash per camera
+        self._last_image_hashes: dict[str, int] = {}
+        self._last_image_change_time: dict[str, float] = {}
+        self._stale_warn_interval = 5.0  # warn every N seconds per camera
+        self._stale_threshold = 2.0  # seconds before an image is considered stale
+        self._last_stale_warn_time: dict[str, float] = {}
 
     def validate_policy(self, policy_path: str) -> bool:
         result_message = ''
@@ -71,6 +79,7 @@ class InferenceManager:
             self.policy.eval()
             self.reset_policy()
             self._expected_image_keys = self._read_expected_image_keys()
+            self._expected_image_shapes = self._read_expected_image_shapes()
             return True
         except Exception as e:
             print(f'Failed to load policy from {self.policy_path}: {e}')
@@ -91,6 +100,52 @@ class InferenceManager:
         except Exception:
             pass
         return []
+
+    def _read_expected_image_shapes(self) -> dict[str, list[int]]:
+        """Read expected image shapes from the policy config.
+
+        Returns dict like {'observation.images.gripper': [3, 480, 640]}.
+        """
+        try:
+            config_path = os.path.join(self.policy_path, 'config.json')
+            config = read_json_file(config_path)
+            if config and 'input_features' in config:
+                return {
+                    k: v.get('shape', [])
+                    for k, v in config['input_features'].items()
+                    if k.startswith('observation.images.') and isinstance(v, dict)
+                }
+        except Exception:
+            pass
+        return {}
+
+    def _check_stale_cameras(self, images: dict[str, np.ndarray]) -> None:
+        """Detect cameras that stopped publishing by comparing image hashes.
+
+        If the same image bytes are received for longer than _stale_threshold
+        seconds, print a warning. Does not block inference — the operator
+        sees the warning and can investigate.
+        """
+        now = time.monotonic()
+        for name, img in images.items():
+            h = hash(img.data.tobytes()[:1024])  # hash first 1KB for speed
+            prev = self._last_image_hashes.get(name)
+            if prev != h:
+                self._last_image_hashes[name] = h
+                self._last_image_change_time[name] = now
+            else:
+                last_change = self._last_image_change_time.get(name, now)
+                stale_duration = now - last_change
+                if stale_duration > self._stale_threshold:
+                    last_warn = self._last_stale_warn_time.get(name, 0)
+                    if now - last_warn > self._stale_warn_interval:
+                        print(
+                            f'[WARNUNG] Kamera "{name}" liefert seit '
+                            f'{stale_duration:.1f}s dasselbe Bild — '
+                            f'Verbindung pruefen!',
+                            flush=True,
+                        )
+                        self._last_stale_warn_time[name] = now
 
     def clear_policy(self):
         if hasattr(self, 'policy'):
@@ -121,7 +176,25 @@ class InferenceManager:
                     f'Bitte die Kamera-Namen in der Robot-Config an das Modell anpassen.'
                 )
 
+        self._check_stale_cameras(images)
+
         observation = self._preprocess(images, state, task_instruction)
+
+        # Validate image shapes match what the model was trained on.
+        # A resolution mismatch (e.g. camera swapped, setting changed) would
+        # crash the model's convolutional layers with an opaque shape error.
+        if self._expected_image_shapes:
+            for key, expected_shape in self._expected_image_shapes.items():
+                if key in observation:
+                    actual_shape = list(observation[key].shape[1:])  # drop batch dim
+                    if expected_shape and actual_shape != expected_shape:
+                        raise RuntimeError(
+                            f'Bildaufloesung stimmt nicht ueberein: '
+                            f'{key} hat Form {actual_shape}, '
+                            f'Modell erwartet {expected_shape}. '
+                            f'Bitte Kamera-Aufloesung pruefen.'
+                        )
+
         with torch.inference_mode():
             action = self.policy.select_action(observation)
             action = action.squeeze(0).to('cpu').numpy()

@@ -496,8 +496,8 @@ class DataManager:
     def _episode_reset(self):
         if (
             self._lerobot_dataset
-            and hasattr(self._lerobot_dataset, 'episode_buffer')
-            or self._current_task == 0
+            and (hasattr(self._lerobot_dataset, 'episode_buffer')
+                 or self._current_task == 0)
         ):
             if self._lerobot_dataset.episode_buffer is not None:
                 for key, value in self._lerobot_dataset.episode_buffer.items():

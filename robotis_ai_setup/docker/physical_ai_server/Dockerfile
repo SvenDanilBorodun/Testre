@@ -1,4 +1,4 @@
-FROM robotis/physical-ai-server:latest
+FROM robotis/physical-ai-server:amd64-0.8.2
 
 # Patch upstream bug: ServerInference.__init__ never initializes self._endpoints,
 # causing AttributeError on first register_endpoint() call.
@@ -31,11 +31,15 @@ COPY overlays/data_manager.py /tmp/overlays/data_manager.py
 COPY overlays/data_converter.py /tmp/overlays/data_converter.py
 COPY overlays/omx_f_config.yaml /tmp/overlays/omx_f_config.yaml
 RUN TARGETS=$(find /root/ros2_ws -name "inference_manager.py" -path "*/inference/*" 2>/dev/null) && \
+    [ -n "$TARGETS" ] || { echo "ERROR: inference_manager.py not found in base image — overlay cannot be applied"; exit 1; } && \
     for f in $TARGETS; do cp /tmp/overlays/inference_manager.py "$f" && echo "Overlaid: $f"; done && \
     TARGETS=$(find /root/ros2_ws -name "data_manager.py" -path "*/data_processing/*" 2>/dev/null) && \
+    [ -n "$TARGETS" ] || { echo "ERROR: data_manager.py not found in base image — overlay cannot be applied"; exit 1; } && \
     for f in $TARGETS; do cp /tmp/overlays/data_manager.py "$f" && echo "Overlaid: $f"; done && \
     TARGETS=$(find /root/ros2_ws -name "data_converter.py" -path "*/data_processing/*" 2>/dev/null) && \
+    [ -n "$TARGETS" ] || { echo "ERROR: data_converter.py not found in base image — overlay cannot be applied"; exit 1; } && \
     for f in $TARGETS; do cp /tmp/overlays/data_converter.py "$f" && echo "Overlaid: $f"; done && \
     TARGETS=$(find /root/ros2_ws -name "omx_f_config.yaml" 2>/dev/null) && \
+    [ -n "$TARGETS" ] || { echo "ERROR: omx_f_config.yaml not found in base image — overlay cannot be applied"; exit 1; } && \
     for f in $TARGETS; do cp /tmp/overlays/omx_f_config.yaml "$f" && echo "Overlaid: $f"; done && \
     rm -rf /tmp/overlays

@@ -69,7 +69,8 @@ try {
 
 # 6. Install directory and required files
 Write-Host "   Checking install directory..." -ForegroundColor White
-$installDir = "C:\Program Files\EduBotics"
+# Derive install dir from script location — scripts/ is one level below {app}
+$installDir = Split-Path -Parent $PSScriptRoot
 $requiredFiles = @(
     @{ Path = "$installDir\docker\docker-compose.yml";                     Label = "docker-compose.yml" },
     @{ Path = "$installDir\docker\docker-compose.gpu.yml";                 Label = "docker-compose.gpu.yml" },

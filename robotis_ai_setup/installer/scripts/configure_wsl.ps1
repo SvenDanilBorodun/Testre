@@ -3,7 +3,20 @@
 
 $ErrorActionPreference = "Stop"
 
-$wslConfigPath = "$env:USERPROFILE\.wslconfig"
+# When running elevated (as admin), $env:USERPROFILE points to the admin's
+# home, not the logged-in student's. Find the actual user via explorer.exe.
+try {
+    $explorerProc = Get-CimInstance Win32_Process -Filter "Name='explorer.exe'" -ErrorAction Stop | Select-Object -First 1
+    $ownerInfo = Invoke-CimMethod -InputObject $explorerProc -MethodName GetOwner -ErrorAction Stop
+    $loggedInUser = $ownerInfo.User
+    $loggedInDomain = $ownerInfo.Domain
+    $sid = (New-Object System.Security.Principal.NTAccount("$loggedInDomain\$loggedInUser")).Translate([System.Security.Principal.SecurityIdentifier]).Value
+    $realProfile = (Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$sid").ProfileImagePath
+} catch {
+    # Fallback to current USERPROFILE if detection fails
+    $realProfile = $env:USERPROFILE
+}
+$wslConfigPath = "$realProfile\.wslconfig"
 
 $recommendedSettings = @{
     "memory" = "8GB"

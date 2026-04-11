@@ -212,7 +212,9 @@ def _sync_runpod_status(training: dict) -> dict:
     # Case 3: stalled worker — RunPod says IN_PROGRESS but no progress in N minutes.
     stalled = False
     if db_status == "running":
-        last_progress = _parse_iso(training.get("last_progress_at"))
+        last_progress = _parse_iso(
+            training.get("last_progress_at") or training.get("requested_at")
+        )
         now = datetime.now(timezone.utc)
         if last_progress and (now - last_progress) > STALLED_WORKER_THRESHOLD:
             logger.warning(
@@ -235,9 +237,10 @@ def _sync_runpod_status(training: dict) -> dict:
         update_data["terminated_at"] = datetime.now(timezone.utc).isoformat()
     if db_status == "failed":
         if stalled:
+            stalled_minutes = int(STALLED_WORKER_THRESHOLD.total_seconds() / 60)
             update_data["error_message"] = (
-                "Worker hat ueber 30 Minuten keine Updates gesendet "
-                "(vermutlich haengt der Trainings-Prozess). Job wurde abgebrochen."
+                f"Worker hat ueber {stalled_minutes} Minuten keine Updates gesendet "
+                f"(vermutlich haengt der Trainings-Prozess). Job wurde abgebrochen."
             )
         else:
             update_data["error_message"] = f"RunPod status: {runpod_status}"

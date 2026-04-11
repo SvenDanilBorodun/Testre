@@ -320,7 +320,7 @@ def _build_training_command(
     }
     for param_key, cli_flag in param_mapping.items():
         value = training_params.get(param_key)
-        if value is not None and value != 0:
+        if value is not None:
             cmd.append(f"{cli_flag}={value}")
 
     return cmd

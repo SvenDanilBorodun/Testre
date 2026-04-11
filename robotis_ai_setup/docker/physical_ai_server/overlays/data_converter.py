@@ -18,6 +18,7 @@
 
 from typing import Any, Dict, List
 
+from builtin_interfaces.msg import Duration
 import cv2
 from cv_bridge import CvBridge
 from geometry_msgs.msg import Twist
@@ -186,7 +187,8 @@ class DataConverter:
                 joint_pub_msgs[key] = JointTrajectory(
                     joint_names=value,
                     points=[JointTrajectoryPoint(
-                        positions=action_slice
+                        positions=action_slice.astype(float).tolist(),
+                        time_from_start=Duration(sec=0, nanosec=50_000_000),
                     )])
             elif leader_topic_types[key] == Twist:
                 tmp_twist = Twist()

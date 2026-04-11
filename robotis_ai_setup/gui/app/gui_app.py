@@ -40,6 +40,7 @@ class EduBoticsApp:
         self._prerequisites_done = False
 
         self._build_ui()
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self._check_prerequisites()
 
     # ── UI Construction ──────────────────────────────────────────────
@@ -216,6 +217,15 @@ class EduBoticsApp:
                 self._log("Images auf neueste Version aktualisiert.")
             else:
                 self._log("Images sind aktuell.")
+
+            # Check if containers are already running from a previous session
+            if docker_manager.all_containers_running():
+                self._log("Container laufen bereits von einer vorherigen Sitzung.")
+                self._log("Umgebung ist aktiv — Browser kann geöffnet werden.")
+                self.running = True
+                self.root.after(0, lambda: self.btn_stop.config(state=tk.NORMAL))
+                self.root.after(0, lambda: self.btn_open_browser.config(state=tk.NORMAL))
+                self._set_status("Aktiv — Umgebung läuft (fortgesetzt)")
 
             # Check GPU
             self.gpu_available = docker_manager.has_gpu()
@@ -512,6 +522,21 @@ class EduBoticsApp:
             self.root.after(0, lambda: self.progress.stop())
 
         threading.Thread(target=_do_stop, daemon=True).start()
+
+
+    def _on_close(self):
+        """Fenster-Schließen abfangen — Container stoppen, wenn nötig."""
+        if self.running:
+            if messagebox.askyesno(
+                "EduBotics beenden",
+                "Die Umgebung läuft noch.\nContainer stoppen und beenden?",
+            ):
+                self._log("Beende — Container werden gestoppt...")
+                docker_manager.stop_containers(gpu=self.gpu_available)
+                self.root.destroy()
+            # else: user clicked No, don't close
+        else:
+            self.root.destroy()
 
 
 def run():

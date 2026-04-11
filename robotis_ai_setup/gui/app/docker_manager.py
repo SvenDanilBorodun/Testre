@@ -151,6 +151,11 @@ def check_for_updates(log=None) -> bool:
                     last_line = stripped
             proc.wait(timeout=600)
 
+            if proc.returncode != 0:
+                if log:
+                    log(f"  FEHLER: {short} konnte nicht aktualisiert werden (Pull fehlgeschlagen).")
+                continue
+
             # Check if image ID changed
             local_after = subprocess.run(
                 ["docker", "images", "-q", image],

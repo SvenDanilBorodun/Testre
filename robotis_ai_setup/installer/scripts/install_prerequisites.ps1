@@ -94,24 +94,34 @@ if (-not $usbipdInstalled) {
 
 # ── Ensure Docker Desktop starts on login ──
 Write-Step "Configuring Docker Desktop auto-start..."
-$dockerExe = (Get-Command "Docker Desktop" -ErrorAction SilentlyContinue).Source
-if (-not $dockerExe) {
-    # Try common install locations
-    $candidates = @(
-        "$env:ProgramFiles\Docker\Docker\Docker Desktop.exe",
-        "${env:ProgramFiles(x86)}\Docker\Docker\Docker Desktop.exe",
-        "$env:LOCALAPPDATA\Docker\Docker Desktop.exe"
-    )
-    foreach ($c in $candidates) {
-        if (Test-Path $c) { $dockerExe = $c; break }
-    }
+$dockerExe = $null
+$candidates = @(
+    "$env:ProgramFiles\Docker\Docker\Docker Desktop.exe",
+    "${env:ProgramFiles(x86)}\Docker\Docker\Docker Desktop.exe",
+    "$env:LOCALAPPDATA\Docker\Docker Desktop.exe"
+)
+foreach ($c in $candidates) {
+    if (Test-Path $c) { $dockerExe = $c; break }
 }
 
 if ($dockerExe) {
-    $regPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
-    $existing = Get-ItemProperty -Path $regPath -Name "Docker Desktop" -ErrorAction SilentlyContinue
+    # When running elevated, HKCU points to the admin's hive, not the student's.
+    # Find the logged-in user's SID via explorer.exe and write to their hive.
+    $targetRegPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+    try {
+        $explorerProc = Get-CimInstance Win32_Process -Filter "Name='explorer.exe'" -ErrorAction Stop | Select-Object -First 1
+        $ownerInfo = Invoke-CimMethod -InputObject $explorerProc -MethodName GetOwner -ErrorAction Stop
+        $loggedInUser = $ownerInfo.User
+        $loggedInDomain = $ownerInfo.Domain
+        $userSid = (New-Object System.Security.Principal.NTAccount("$loggedInDomain\$loggedInUser")).Translate([System.Security.Principal.SecurityIdentifier]).Value
+        $targetRegPath = "Registry::HKEY_USERS\$userSid\Software\Microsoft\Windows\CurrentVersion\Run"
+    } catch {
+        Write-Host "   WARNUNG: Konnte eingeloggten Benutzer nicht ermitteln — nutze HKCU" -ForegroundColor Yellow
+    }
+
+    $existing = Get-ItemProperty -Path $targetRegPath -Name "Docker Desktop" -ErrorAction SilentlyContinue
     if (-not $existing) {
-        New-ItemProperty -Path $regPath -Name "Docker Desktop" -Value "`"$dockerExe`"" -PropertyType String -Force | Out-Null
+        New-ItemProperty -Path $targetRegPath -Name "Docker Desktop" -Value "`"$dockerExe`"" -PropertyType String -Force | Out-Null
         Write-OK "Docker Desktop will start on login"
     } else {
         Write-Skip "Docker Desktop auto-start already configured"

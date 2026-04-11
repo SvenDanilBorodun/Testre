@@ -488,31 +488,41 @@ def handler(job):
 
         # Pass HF_TOKEN only to the subprocess env, not the handler's global env.
         # Limits exposure of the secret in /proc/<handler-pid>/environ.
-        subprocess_env = {**os.environ}
+        # PYTHONUNBUFFERED forces LeRobot to flush stdout/stderr immediately so
+        # we can parse progress lines in real time instead of getting a single
+        # flush at process exit.
+        subprocess_env = {**os.environ, "PYTHONUNBUFFERED": "1"}
         if hf_token:
             subprocess_env["HF_TOKEN"] = hf_token
 
+        # Merge stderr into stdout. LeRobot uses Python `logging` which writes
+        # to stderr by default — if we kept them separate, `_read_stdout()`
+        # would never see any progress lines and Supabase would only get the
+        # final "100%" update from after the subprocess exits.
         proc = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
             text=True,
+            bufsize=1,  # line-buffered on the reader side
             env=subprocess_env,
         )
         _current_job["proc"] = proc
 
         # Bounded ring buffer — long failures previously OOM'd the worker.
+        # Now shared between stdout display and error-report-on-failure.
         # 4000 lines @ ~80B = ~320 KB max.
-        stderr_lines: deque[str] = deque(maxlen=4000)
+        output_lines: deque[str] = deque(maxlen=4000)
         last_progress_step = -1
         step_pattern = re.compile(r"step[:\s]+(\d+\.?\d*[KMBkmb]?)")
         loss_pattern = re.compile(r"loss[:\s]+([\d.]+(?:e[+-]?\d+)?)")
 
-        def _read_stdout():
+        def _read_output():
             nonlocal last_progress_step
             try:
                 for line in proc.stdout:
-                    print(line, end="")
+                    print(line, end="", flush=True)
+                    output_lines.append(line)
                     step_match = step_pattern.search(line)
                     if not step_match:
                         continue
@@ -541,17 +551,8 @@ def handler(job):
             except UnicodeDecodeError as e:
                 print(f"Warning: Error decoding subprocess output: {e}")
 
-        def _read_stderr():
-            try:
-                for line in proc.stderr:
-                    stderr_lines.append(line)
-            except Exception as e:
-                print(f"Warning: stderr reader crashed: {e}")
-
-        stdout_thread = threading.Thread(target=_read_stdout, daemon=True)
-        stderr_thread = threading.Thread(target=_read_stderr, daemon=True)
-        stdout_thread.start()
-        stderr_thread.start()
+        reader_thread = threading.Thread(target=_read_output, daemon=True)
+        reader_thread.start()
 
         # Wait for process with timeout protection (default 5h, configurable).
         timeout_hours = training_params.get("timeout_hours", 5)
@@ -569,15 +570,14 @@ def handler(job):
             )
             return {"status": "failed", "error": f"Training timed out ({timeout_hours}h limit)"}
 
-        stdout_thread.join(timeout=10)
-        stderr_thread.join(timeout=10)
-        stderr_text = "".join(stderr_lines)
+        reader_thread.join(timeout=10)
+        output_text = "".join(output_lines)
 
         if proc.returncode != 0:
-            if len(stderr_text) > 2000:
-                error_msg = stderr_text[:1000] + "\n...[truncated]...\n" + stderr_text[-1000:]
+            if len(output_text) > 2000:
+                error_msg = output_text[:1000] + "\n...[truncated]...\n" + output_text[-1000:]
             else:
-                error_msg = stderr_text or "Unknown error"
+                error_msg = output_text or "Unknown error"
             _update_supabase_status(
                 supabase_url, supabase_anon_key, worker_token, training_id,
                 "failed", error_msg,

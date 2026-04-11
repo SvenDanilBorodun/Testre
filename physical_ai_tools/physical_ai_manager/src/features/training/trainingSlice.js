@@ -59,6 +59,10 @@ const initialState = {
   updateCounter: 0,
   currentLoss: undefined,
 
+  // Counter incremented every time a new cloud training is started — MyModels
+  // listens for changes and refetches the list immediately (no 5s wait).
+  cloudJobsRefreshCounter: 0,
+
   trainingInfo: savedTrainingInfo || defaultTrainingInfo,
 };
 
@@ -157,6 +161,9 @@ const trainingSlice = createSlice({
       state.currentLoss = null;
       state.updateCounter = 0;
     },
+    triggerCloudJobsRefresh: (state) => {
+      state.cloudJobsRefreshCounter += 1;
+    },
   },
 });
 
@@ -187,6 +194,7 @@ export const {
   setUpdateCounter,
   setCurrentLoss,
   resetTrainingProgress,
+  triggerCloudJobsRefresh,
 } = trainingSlice.actions;
 
 export default trainingSlice.reducer;

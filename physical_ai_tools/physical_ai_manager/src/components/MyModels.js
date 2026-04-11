@@ -177,6 +177,7 @@ export default function MyModels() {
   const session = useSelector((state) => state.auth.session);
   const heartbeatStatus = useSelector((state) => state.tasks.heartbeatStatus);
   const rosConnected = heartbeatStatus === 'connected';
+  const refreshCounter = useSelector((state) => state.training.cloudJobsRefreshCounter);
   const [jobs, setJobs] = useState([]);
   const [loading, setLoading] = useState(false);
   const [downloadingModel, setDownloadingModel] = useState(null);
@@ -196,10 +197,11 @@ export default function MyModels() {
     }
   }, [session]);
 
-  // Initial fetch
+  // Initial fetch + refetch whenever TrainingControlPanel starts a new job
+  // (refreshCounter increments → this effect runs → new row visible instantly).
   useEffect(() => {
     fetchJobs();
-  }, [fetchJobs]);
+  }, [fetchJobs, refreshCounter]);
 
   // Auto-refresh while active jobs exist
   const hasActiveJobs = jobs.some((j) => j.status === 'queued' || j.status === 'running');

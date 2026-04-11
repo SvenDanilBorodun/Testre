@@ -18,7 +18,7 @@ import React from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import clsx from 'clsx';
 import toast from 'react-hot-toast';
-import { setIsTraining } from '../features/training/trainingSlice';
+import { setIsTraining, triggerCloudJobsRefresh } from '../features/training/trainingSlice';
 import { setQuota } from '../features/auth/authSlice';
 import { startCloudTraining, getQuota } from '../services/cloudTrainingApi';
 
@@ -103,6 +103,10 @@ export default function TrainingControlPanel() {
         `Training an Cloud gesendet! Modell: ${result.model_name}`,
         { duration: 5000 }
       );
+
+      // Signal MyModels to refetch immediately so the new training appears
+      // without waiting for the 5s poll cycle or a manual refresh.
+      dispatch(triggerCloudJobsRefresh());
 
       // Refresh quota
       const quota = await getQuota(session.access_token);

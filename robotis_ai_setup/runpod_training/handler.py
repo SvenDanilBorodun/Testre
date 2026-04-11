@@ -36,11 +36,14 @@ OUTPUT_DIR = Path("/tmp/training_output")
 # missing camera, or wrong codebase version is a real recording bug, not
 # a false-positive — we fail-fast at preflight before spinning up the GPU.
 
-EXPECTED_OMX_JOINTS = {
-    "joint1", "joint2", "joint3", "joint4", "joint5", "gripper_joint_1",
-}
 EXPECTED_CODEBASE_VERSION = "v2.1"
-KNOWN_OMX_CAMERAS = {"gripper", "scene"}  # informational, not strictly enforced
+# Consistency bounds — accept any joint set that's plausibly a robot arm.
+# Too strict a check rejects valid ROBOTIS sample datasets (which use
+# "main_shoulder_pan" etc.) and datasets from OMX-X hardware (5 joints
+# total). The real invariant is that state/action are paired with the
+# same joint set, not that the joints have specific names.
+MIN_JOINTS = 4
+MAX_JOINTS = 20
 
 # Module-level reference to the in-flight job. Used by the SIGTERM handler to
 # mark the training as failed and clean up before the worker is killed. Only
@@ -156,19 +159,23 @@ def _update_supabase_progress(
 
 
 def _preflight_dataset(dataset_name: str, hf_token: str) -> None:
-    """Download just meta/info.json and validate the OMX schema contract.
+    """Download just meta/info.json and validate the dataset is trainable.
 
     Catches the following failure modes BEFORE we waste 10+ GPU minutes:
       - Dataset doesn't exist or worker token can't see it
       - Malformed meta/info.json (missing fields, bad JSON)
       - codebase_version mismatch (recording software is too old/new)
       - fps missing or zero (LeRobot data loader would explode)
-      - Joint set in observation.state doesn't match the OMX hardware
-      - Joint set in action doesn't match the OMX hardware
-      - No camera features at all (OMX always records at least one)
+      - observation.state or action missing entirely
+      - Joint count out of reasonable bounds (< MIN_JOINTS or > MAX_JOINTS)
+      - observation.state and action use different joint names (paired bug)
+      - No camera features at all
 
-    All deviations are real recording bugs (single hardware target = one
-    valid schema), so we fail loud rather than warn.
+    Accepts both ROBOTIS physical_ai_server recording conventions
+    (joint1..joint5 + gripper_joint_1) and LeRobot/ROBOTIS sample dataset
+    conventions (main_shoulder_pan, etc.) — joint name matching is intentionally
+    NOT enforced because the preflight's job is to catch broken datasets, not
+    to enforce a single naming scheme.
 
     Raises ValueError with a German operator-facing message on failure.
     """
@@ -221,7 +228,7 @@ def _preflight_dataset(dataset_name: str, hf_token: str) -> None:
     # ---- 3+4. Joint set on observation.state and action ----
     features = info.get("features") or {}
 
-    def _check_joints(feature_key: str, label: str):
+    def _get_joint_names(feature_key: str, label: str) -> list:
         feat = features.get(feature_key)
         if not feat:
             raise ValueError(
@@ -234,23 +241,26 @@ def _preflight_dataset(dataset_name: str, hf_token: str) -> None:
                 f"Dataset '{dataset_name}' hat keine '{feature_key}.names' "
                 f"Liste. Bitte neu aufnehmen."
             )
-        actual = set(names)
-        if actual != EXPECTED_OMX_JOINTS:
-            missing = EXPECTED_OMX_JOINTS - actual
-            extra = actual - EXPECTED_OMX_JOINTS
-            details = []
-            if missing:
-                details.append(f"fehlend: {sorted(missing)}")
-            if extra:
-                details.append(f"unerwartet: {sorted(extra)}")
+        if not (MIN_JOINTS <= len(names) <= MAX_JOINTS):
             raise ValueError(
-                f"Dataset '{dataset_name}' hat falsche {label}-Gelenke "
-                f"({', '.join(details)}). Erwartet werden die OMX-Gelenke: "
-                f"{sorted(EXPECTED_OMX_JOINTS)}."
+                f"Dataset '{dataset_name}' hat {len(names)} {label}-Gelenke — "
+                f"erwartet werden {MIN_JOINTS}-{MAX_JOINTS}. Aufnahme pruefen."
             )
+        return names
 
-    _check_joints("observation.state", "Follower")
-    _check_joints("action", "Action")
+    state_names = _get_joint_names("observation.state", "Follower")
+    action_names = _get_joint_names("action", "Action")
+
+    # observation.state and action MUST use the same joint set.
+    # A mismatch is a real recording bug — the policy learns a mapping from
+    # state to action, so they must describe the same joints in the same order.
+    if state_names != action_names:
+        raise ValueError(
+            f"Dataset '{dataset_name}' hat unterschiedliche Gelenk-Namen "
+            f"fuer observation.state und action. "
+            f"state: {state_names}, action: {action_names}. "
+            f"Aufnahme ist beschaedigt — bitte neu aufnehmen."
+        )
 
     # ---- 5. At least one camera feature ----
     image_keys = [k for k in features if k.startswith("observation.images.")]
@@ -260,17 +270,10 @@ def _preflight_dataset(dataset_name: str, hf_token: str) -> None:
             f"Mindestens eine Kamera ist erforderlich."
         )
     cameras = [k.replace("observation.images.", "") for k in image_keys]
-    unknown = [c for c in cameras if c not in KNOWN_OMX_CAMERAS]
-    if unknown:
-        # Informational only — students may have custom camera names.
-        print(
-            f"Warning: dataset has cameras not on the standard OMX list: "
-            f"{unknown} (known: {sorted(KNOWN_OMX_CAMERAS)})"
-        )
 
     print(
         f"Preflight OK: dataset='{dataset_name}' codebase_version={version} "
-        f"fps={fps} joints=OMX cameras={cameras}"
+        f"fps={fps} joints={state_names} cameras={cameras}"
     )
 
 

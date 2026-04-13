@@ -13,8 +13,10 @@ import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
 import webbrowser
 
-from . import device_manager, docker_manager, health_checker, config_generator, wsl_bridge
+from . import device_manager, docker_manager, health_checker, config_generator, wsl_bridge, update_checker
 from .constants import (
+    APP_VERSION,
+    UPDATE_API_URL,
     IMAGE_OPEN_MANIPULATOR,
     PORT_WEB_UI,
     DOCKER_DIR,
@@ -170,74 +172,208 @@ class EduBoticsApp:
     # ── Prerequisites Check ──────────────────────────────────────────
 
     def _check_prerequisites(self):
-        """Docker, WSL2, usbipd beim Start prüfen."""
+        """Auf GUI-Update prüfen, dann Docker, WSL2, usbipd beim Start prüfen."""
         def _check():
             self.root.after(0, lambda: self.progress.start(10))
-            self._log("Voraussetzungen werden geprüft...")
 
-            # Check Docker — auto-start if not running
-            self._set_status("Docker Desktop wird geprüft...")
-            if not docker_manager.is_docker_running():
-                self._log("Docker Desktop läuft nicht. Versuche automatisch zu starten...")
-                if docker_manager.start_docker_desktop():
-                    self._log("Docker Desktop wird gestartet...")
-                else:
-                    self._log("Docker Desktop konnte nicht automatisch gestartet werden.")
-                if not docker_manager.wait_for_docker(
-                    callback=lambda e, t: self._set_status(f"Warte auf Docker... {e}s/{t}s")
-                ):
-                    self._log("FEHLER: Docker Desktop läuft nicht. Bitte manuell starten und App neu starten.")
-                    self._set_status("Docker Desktop nicht gefunden")
-                    self.root.after(0, lambda: self.progress.stop())
-                    return
-            self._log("Docker Desktop: OK")
+            # ── GUI update check (runs before everything else) ──
+            self._set_status("Auf GUI-Update prüfen...")
+            self._log("Prüfe auf GUI-Updates...")
+            update_info = update_checker.check_for_update(APP_VERSION, UPDATE_API_URL)
+            if update_info:
+                self._log(f"Neue Version verfügbar: {update_info['version']} (aktuell: {APP_VERSION})")
+                self.root.after(0, lambda: self.progress.stop())
+                self.root.after(0, lambda: self._show_update_dialog(update_info))
+                return  # Block all further startup until update is applied
+            self._log(f"GUI ist aktuell (Version {APP_VERSION}).")
 
-            # Check images
-            self._set_status("Docker-Images werden geprüft...")
-            img_status = docker_manager.images_exist()
-            missing = [img for img, exists in img_status.items() if not exists]
-            if missing:
-                self._log(f"Fehlende Images: {', '.join(missing)}")
-                self._log("Images werden heruntergeladen (kann beim ersten Mal 15-30 Min. dauern)...")
-                self._set_status("Docker-Images werden heruntergeladen...")
-                if not docker_manager.pull_images(
-                    callback=lambda img, i, t: self._set_status(f"Lade Image {i+1}/{t}: {img.split('/')[-1]}"),
-                    log=self._log,
-                ):
-                    self._log("FEHLER: Docker-Images konnten nicht heruntergeladen werden. Internetverbindung prüfen.")
-                    self._set_status("Image-Download fehlgeschlagen")
-                    self.root.after(0, lambda: self.progress.stop())
-                    return
-                self._log("Alle Images erfolgreich heruntergeladen.")
-
-            # Check for image updates
-            self._set_status("Auf Updates prüfen...")
-            self._log("Prüfe auf Image-Updates...")
-            if docker_manager.check_for_updates(log=self._log):
-                self._log("Images auf neueste Version aktualisiert.")
-            else:
-                self._log("Images sind aktuell.")
-
-            # Check if containers are already running from a previous session
-            if docker_manager.all_containers_running():
-                self._log("Container laufen bereits von einer vorherigen Sitzung.")
-                self._log("Umgebung ist aktiv — Browser kann geöffnet werden.")
-                self.running = True
-                self.root.after(0, lambda: self.btn_stop.config(state=tk.NORMAL))
-                self.root.after(0, lambda: self.btn_open_browser.config(state=tk.NORMAL))
-                self._set_status("Aktiv — Umgebung läuft (fortgesetzt)")
-
-            # Check GPU
-            self.gpu_available = docker_manager.has_gpu()
-            self._log(f"NVIDIA GPU: {'erkannt' if self.gpu_available else 'nicht erkannt (CPU-Modus)'}")
-
-            self._prerequisites_done = True
-            self._update_start_button()
-            self._set_status("Bereit — Hardware scannen, um zu beginnen")
-            self.root.after(0, lambda: self.progress.stop())
-            self._log("Systemprüfung abgeschlossen. Arme und Kamera anschließen, dann auf Scannen klicken.")
+            # Continue with Docker/system checks
+            self._run_prerequisite_checks()
 
         threading.Thread(target=_check, daemon=True).start()
+
+    def _run_prerequisite_checks(self):
+        """Docker, Images, GPU prüfen (called after update check passes)."""
+        self.root.after(0, lambda: self.progress.start(10))
+        self._log("Voraussetzungen werden geprüft...")
+
+        # Check Docker — auto-start if not running
+        self._set_status("Docker Desktop wird geprüft...")
+        if not docker_manager.is_docker_running():
+            self._log("Docker Desktop läuft nicht. Versuche automatisch zu starten...")
+            if docker_manager.start_docker_desktop():
+                self._log("Docker Desktop wird gestartet...")
+            else:
+                self._log("Docker Desktop konnte nicht automatisch gestartet werden.")
+            if not docker_manager.wait_for_docker(
+                callback=lambda e, t: self._set_status(f"Warte auf Docker... {e}s/{t}s")
+            ):
+                self._log("FEHLER: Docker Desktop läuft nicht. Bitte manuell starten und App neu starten.")
+                self._set_status("Docker Desktop nicht gefunden")
+                self.root.after(0, lambda: self.progress.stop())
+                return
+        self._log("Docker Desktop: OK")
+
+        # Check images
+        self._set_status("Docker-Images werden geprüft...")
+        img_status = docker_manager.images_exist()
+        missing = [img for img, exists in img_status.items() if not exists]
+        if missing:
+            self._log(f"Fehlende Images: {', '.join(missing)}")
+            self._log("Images werden heruntergeladen (kann beim ersten Mal 15-30 Min. dauern)...")
+            self._set_status("Docker-Images werden heruntergeladen...")
+            if not docker_manager.pull_images(
+                callback=lambda img, i, t: self._set_status(f"Lade Image {i+1}/{t}: {img.split('/')[-1]}"),
+                log=self._log,
+            ):
+                self._log("FEHLER: Docker-Images konnten nicht heruntergeladen werden. Internetverbindung prüfen.")
+                self._set_status("Image-Download fehlgeschlagen")
+                self.root.after(0, lambda: self.progress.stop())
+                return
+            self._log("Alle Images erfolgreich heruntergeladen.")
+
+        # Check for image updates
+        self._set_status("Auf Updates prüfen...")
+        self._log("Prüfe auf Image-Updates...")
+        if docker_manager.check_for_updates(log=self._log):
+            self._log("Images auf neueste Version aktualisiert.")
+        else:
+            self._log("Images sind aktuell.")
+
+        # Check if containers are already running from a previous session
+        if docker_manager.all_containers_running():
+            self._log("Container laufen bereits von einer vorherigen Sitzung.")
+            self._log("Umgebung ist aktiv — Browser kann geöffnet werden.")
+            self.running = True
+            self.root.after(0, lambda: self.btn_stop.config(state=tk.NORMAL))
+            self.root.after(0, lambda: self.btn_open_browser.config(state=tk.NORMAL))
+            self._set_status("Aktiv — Umgebung läuft (fortgesetzt)")
+
+        # Check GPU
+        self.gpu_available = docker_manager.has_gpu()
+        self._log(f"NVIDIA GPU: {'erkannt' if self.gpu_available else 'nicht erkannt (CPU-Modus)'}")
+
+        self._prerequisites_done = True
+        self._update_start_button()
+        self._set_status("Bereit — Hardware scannen, um zu beginnen")
+        self.root.after(0, lambda: self.progress.stop())
+        self._log("Systemprüfung abgeschlossen. Arme und Kamera anschließen, dann auf Scannen klicken.")
+
+    # ── Update Dialog ───────────────────────────────────────────────
+
+    def _show_update_dialog(self, update_info: dict):
+        """Show a blocking modal that forces the student to update."""
+        self._update_fail_count = 0
+
+        dialog = tk.Toplevel(self.root)
+        dialog.title("EduBotics Update")
+        dialog.geometry("480x260")
+        dialog.resizable(False, False)
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.protocol("WM_DELETE_WINDOW", lambda: None)  # Non-closable
+
+        # Center over main window
+        dialog.update_idletasks()
+        x = self.root.winfo_x() + (self.root.winfo_width() - 480) // 2
+        y = self.root.winfo_y() + (self.root.winfo_height() - 260) // 2
+        dialog.geometry(f"+{x}+{y}")
+
+        frame = ttk.Frame(dialog, padding=20)
+        frame.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(
+            frame,
+            text="Ein Update ist verfügbar!",
+            font=("Segoe UI", 14, "bold"),
+        ).pack(pady=(0, 5))
+
+        ttk.Label(
+            frame,
+            text=f"Neue Version: {update_info['version']}  (aktuell: {APP_VERSION})",
+            font=("Segoe UI", 10),
+        ).pack(pady=(0, 5))
+
+        ttk.Label(
+            frame,
+            text="Bitte aktualisiere EduBotics, bevor du fortfährst.",
+            font=("Segoe UI", 9),
+            foreground="gray",
+        ).pack(pady=(0, 10))
+
+        progress_var = tk.DoubleVar(value=0)
+        progress_bar = ttk.Progressbar(frame, variable=progress_var, maximum=100, length=400)
+        progress_bar.pack(pady=(0, 5))
+
+        status_var = tk.StringVar(value="")
+        status_label = ttk.Label(frame, textvariable=status_var, font=("Segoe UI", 8))
+        status_label.pack(pady=(0, 10))
+
+        btn_frame = ttk.Frame(frame)
+        btn_frame.pack()
+
+        btn_update = ttk.Button(btn_frame, text="Jetzt aktualisieren")
+        btn_update.pack(side=tk.LEFT, padx=5)
+
+        btn_skip = ttk.Button(btn_frame, text="Ohne Update fortfahren", state=tk.DISABLED)
+        btn_skip.pack(side=tk.LEFT, padx=5)
+
+        def _do_download():
+            def _progress(downloaded, total):
+                if total > 0:
+                    pct = (downloaded / total) * 100
+                    mb_down = downloaded / (1024 * 1024)
+                    mb_total = total / (1024 * 1024)
+                    self.root.after(0, lambda: progress_var.set(pct))
+                    self.root.after(0, lambda: status_var.set(
+                        f"{mb_down:.1f} / {mb_total:.1f} MB"
+                    ))
+
+            path = update_checker.download_installer(
+                update_info["download_url"],
+                progress_callback=_progress,
+            )
+
+            if path:
+                self.root.after(0, lambda: status_var.set("Download abgeschlossen. Installer wird gestartet..."))
+                self.root.after(500, lambda: self._launch_installer_and_exit(path))
+            else:
+                self._update_fail_count += 1
+                self.root.after(0, lambda: progress_var.set(0))
+                self.root.after(0, lambda: status_var.set(
+                    "Download fehlgeschlagen. Bitte Internetverbindung prüfen."
+                ))
+                self.root.after(0, lambda: btn_update.config(
+                    state=tk.NORMAL, text="Erneut versuchen"
+                ))
+                if self._update_fail_count >= 3:
+                    self.root.after(0, lambda: btn_skip.config(state=tk.NORMAL))
+
+        def _on_update_click():
+            btn_update.config(state=tk.DISABLED)
+            status_var.set("Download läuft...")
+            progress_var.set(0)
+            threading.Thread(target=_do_download, daemon=True).start()
+
+        def _on_skip_click():
+            dialog.destroy()
+            self._log("WARNUNG: Update übersprungen. Einige Funktionen funktionieren möglicherweise nicht korrekt.")
+            self._set_status("System wird geprüft...")
+            threading.Thread(target=self._run_prerequisite_checks, daemon=True).start()
+
+        btn_update.config(command=_on_update_click)
+        btn_skip.config(command=_on_skip_click)
+
+    def _launch_installer_and_exit(self, installer_path: str):
+        """Launch the downloaded installer and exit the GUI."""
+        self._log("Installer wird gestartet...")
+        try:
+            os.startfile(installer_path)
+        except Exception as e:
+            self._log(f"FEHLER: Installer konnte nicht gestartet werden: {e}")
+            return
+        import sys
+        sys.exit(0)
 
     # ── Arm Scanning ─────────────────────────────────────────────────
 

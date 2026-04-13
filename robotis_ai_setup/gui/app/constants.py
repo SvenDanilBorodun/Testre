@@ -2,6 +2,14 @@
 
 import os
 
+# GUI version — single source of truth. Bump this for each release.
+APP_VERSION = "2.1.0"
+
+# Cloud API URL for update checks.
+UPDATE_API_URL = os.environ.get(
+    "EDUBOTICS_UPDATE_API_URL",
+    "https://scintillating-empathy-production-9efd.up.railway.app",
+)
 
 # Docker image registry — override with EDUBOTICS_REGISTRY env var.
 REGISTRY = os.environ.get("EDUBOTICS_REGISTRY", "nettername")

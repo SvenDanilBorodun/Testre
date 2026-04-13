@@ -38,6 +38,7 @@ class EduBoticsApp:
         self.running = False
         self._scanning = False
         self._prerequisites_done = False
+        self.offline_mode = tk.BooleanVar(value=False)
 
         self._build_ui()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -61,6 +62,24 @@ class EduBoticsApp:
         # Progress bar
         self.progress = ttk.Progressbar(main, mode="indeterminate", length=400)
         self.progress.pack(pady=(0, 10))
+
+        # ── Offline-Testmodus ──
+        offline_frame = ttk.LabelFrame(main, text="Testmodus", padding=10)
+        offline_frame.pack(fill=tk.X, pady=5)
+
+        self.offline_check = ttk.Checkbutton(
+            offline_frame,
+            text="Offline-Testmodus (ohne Hardware)",
+            variable=self.offline_mode,
+            command=self._on_offline_toggled,
+        )
+        self.offline_check.pack(anchor=tk.W)
+        ttk.Label(
+            offline_frame,
+            text="Dashboard ohne Roboter und Kameras starten. Nur für Tests.",
+            foreground="gray",
+            font=("Segoe UI", 8),
+        ).pack(anchor=tk.W, padx=20)
 
         # ── Schritt A: Leader-Arm ──
         leader_frame = ttk.LabelFrame(main, text="Schritt A: Leader-Arm", padding=10)
@@ -159,13 +178,34 @@ class EduBoticsApp:
         self.root.after(0, lambda: self.status_var.set(msg))
 
     def _update_start_button(self):
-        """Start-Button nur aktivieren, wenn Voraussetzungen geprüft und Hardware vollständig."""
+        """Start-Button nur aktivieren, wenn Voraussetzungen geprüft und Hardware vollständig (oder Offline-Modus)."""
         def _update():
-            if self._prerequisites_done and self.hardware.is_complete and not self.running:
+            hw_ready = self.hardware.is_complete or self.offline_mode.get()
+            if self._prerequisites_done and hw_ready and not self.running:
                 self.btn_start.config(state=tk.NORMAL)
             else:
                 self.btn_start.config(state=tk.DISABLED)
         self.root.after(0, _update)
+
+    # ── Offline Mode Toggle ────────────────────────────────────────────
+
+    def _on_offline_toggled(self):
+        """Offline-Testmodus ein-/ausschalten."""
+        if self.offline_mode.get():
+            self.btn_scan_leader.config(state=tk.DISABLED)
+            self.btn_scan_camera.config(state=tk.DISABLED)
+            self.leader_status_var.set("Übersprungen (Offline-Modus)")
+            self.follower_status_var.set("Übersprungen (Offline-Modus)")
+            self._log("Offline-Testmodus aktiviert — Hardware-Scans werden übersprungen.")
+            self._set_status("Offline-Testmodus — Auf 'Umgebung starten' klicken")
+        else:
+            self.btn_scan_leader.config(state=tk.NORMAL)
+            self.btn_scan_camera.config(state=tk.NORMAL)
+            self.leader_status_var.set("Nicht gescannt")
+            self.follower_status_var.set("Nicht gescannt")
+            self._log("Offline-Testmodus deaktiviert.")
+            self._set_status("Bereit — Hardware scannen, um zu beginnen")
+        self._update_start_button()
 
     # ── Prerequisites Check ──────────────────────────────────────────
 
@@ -400,7 +440,8 @@ class EduBoticsApp:
 
     def _start_environment(self):
         """Docker-Umgebung starten und Browser öffnen."""
-        if not self.hardware.is_complete:
+        is_offline = self.offline_mode.get()
+        if not is_offline and not self.hardware.is_complete:
             messagebox.showwarning("Fehlende Hardware", "Bitte beide Arme scannen und identifizieren, bevor du startest.")
             return
 
@@ -411,43 +452,46 @@ class EduBoticsApp:
           try:
             self.root.after(0, lambda: self.progress.start(10))
 
-            # 0. Serielle Ports validieren — bei Bedarf USB neu verbinden
-            self._set_status("Hardware-Verbindungen werden geprüft...")
-            try:
-                serial_paths = wsl_bridge.list_serial_devices()
-                missing_arms = []
-                for arm_name, arm in [("Leader", self.hardware.leader), ("Follower", self.hardware.follower)]:
-                    if arm and arm.serial_path not in serial_paths:
-                        missing_arms.append((arm_name, arm))
+            if is_offline:
+                self._log("Offline-Testmodus: Hardware-Prüfung wird übersprungen.")
+            else:
+                # 0. Serielle Ports validieren — bei Bedarf USB neu verbinden
+                self._set_status("Hardware-Verbindungen werden geprüft...")
+                try:
+                    serial_paths = wsl_bridge.list_serial_devices()
+                    missing_arms = []
+                    for arm_name, arm in [("Leader", self.hardware.leader), ("Follower", self.hardware.follower)]:
+                        if arm and arm.serial_path not in serial_paths:
+                            missing_arms.append((arm_name, arm))
 
-                if missing_arms:
-                    self._log("USB-Geräte werden erneut verbunden...")
-                    device_manager.attach_all_robotis_devices()
-                    import time
-                    for _ in range(5):
-                        serial_paths = wsl_bridge.list_serial_devices()
-                        if all(arm.serial_path in serial_paths for _, arm in missing_arms):
-                            break
-                        time.sleep(1)
+                    if missing_arms:
+                        self._log("USB-Geräte werden erneut verbunden...")
+                        device_manager.attach_all_robotis_devices()
+                        import time
+                        for _ in range(5):
+                            serial_paths = wsl_bridge.list_serial_devices()
+                            if all(arm.serial_path in serial_paths for _, arm in missing_arms):
+                                break
+                            time.sleep(1)
 
-                    for arm_name, arm in missing_arms:
-                        if arm.serial_path not in serial_paths:
-                            self._log(f"FEHLER: {arm_name}-Arm ({arm.serial_path}) nicht erreichbar!")
-                            self._log("USB-Verbindung prüfen und erneut scannen.")
-                            self._set_status(f"{arm_name}-Arm getrennt")
-                            self.root.after(0, lambda: self.progress.stop())
-                            self.running = False
-                            self._update_start_button()
-                            return
-                    self._log("USB-Geräte erfolgreich neu verbunden.")
-            except Exception as e:
-                self._log(f"WARNUNG: Serielle Ports konnten nicht validiert werden: {e}")
-                self._log("Fahre trotzdem fort — Container versuchen erneut auf Geräte zuzugreifen.")
+                        for arm_name, arm in missing_arms:
+                            if arm.serial_path not in serial_paths:
+                                self._log(f"FEHLER: {arm_name}-Arm ({arm.serial_path}) nicht erreichbar!")
+                                self._log("USB-Verbindung prüfen und erneut scannen.")
+                                self._set_status(f"{arm_name}-Arm getrennt")
+                                self.root.after(0, lambda: self.progress.stop())
+                                self.running = False
+                                self._update_start_button()
+                                return
+                        self._log("USB-Geräte erfolgreich neu verbunden.")
+                except Exception as e:
+                    self._log(f"WARNUNG: Serielle Ports konnten nicht validiert werden: {e}")
+                    self._log("Fahre trotzdem fort — Container versuchen erneut auf Geräte zuzugreifen.")
 
             # 1. .env generieren
             self._set_status("Konfiguration wird erstellt...")
             self._log(".env-Datei wird erstellt...")
-            env_content = config_generator.generate_env_file(self.hardware, ENV_FILE)
+            env_content = config_generator.generate_env_file(self.hardware, ENV_FILE, offline_mode=is_offline)
             self._log(f"Konfiguration geschrieben: {ENV_FILE}")
             for line in env_content.strip().splitlines():
                 self._log(f"  {line}")
@@ -455,7 +499,8 @@ class EduBoticsApp:
             # 2. Container starten
             use_gpu = self.gpu_available
             self._set_status("Container werden gestartet...")
-            self._log(f"Docker Compose wird gestartet ({'GPU' if use_gpu else 'CPU'}-Modus)...")
+            mode_label = "Offline" if is_offline else ("GPU" if use_gpu else "CPU")
+            self._log(f"Docker Compose wird gestartet ({mode_label}-Modus)...")
 
             if not docker_manager.start_containers(gpu=use_gpu, log=self._log):
                 self._log("FEHLER: Container konnten nicht gestartet werden. Docker Desktop prüfen.")

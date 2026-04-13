@@ -17,13 +17,81 @@ source /opt/ros/jazzy/setup.bash
 source /root/ros2_ws/install/setup.bash
 export ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-30}
 
+OFFLINE_MODE=${OFFLINE_MODE:-false}
+
 echo "========================================"
 echo "ROBOTIS Open Manipulator - AI Mode"
 echo "Follower: ${FOLLOWER_PORT}"
 echo "Leader:   ${LEADER_PORT}"
 echo "Camera 1: ${CAMERA_DEVICE_1:-<none>} as ${CAMERA_NAME_1:-gripper}"
 echo "Camera 2: ${CAMERA_DEVICE_2:-<none>} as ${CAMERA_NAME_2:-scene}"
+echo "Offline:  ${OFFLINE_MODE}"
 echo "========================================"
+
+# --- Offline test mode: mock publishers instead of real hardware ---
+if [ "$OFFLINE_MODE" = "true" ]; then
+    echo "[OFFLINE] Running in offline test mode — no hardware required"
+    echo "[OFFLINE] Starting mock ROS2 publishers..."
+
+    python3 - << 'MOCK_SCRIPT' &
+#!/usr/bin/env python3
+"""Mock ROS2 publishers for offline testing.
+
+Publishes fake joint states on /leader/joint_states and /joint_states
+so the dashboard and physical_ai_server can operate without real hardware.
+"""
+import rclpy
+from rclpy.node import Node
+from sensor_msgs.msg import JointState
+
+
+JOINTS = ['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'gripper_joint_1']
+HOME_POSITION = [0.0, -1.0, 0.3, 0.7, 0.0, 0.01]
+
+
+class MockHardware(Node):
+    def __init__(self):
+        super().__init__('mock_hardware')
+        self.leader_pub = self.create_publisher(JointState, '/leader/joint_states', 10)
+        self.follower_pub = self.create_publisher(JointState, '/joint_states', 10)
+        self.timer = self.create_timer(0.1, self._publish)  # 10 Hz
+        self.get_logger().info('Mock hardware publishers started (10 Hz)')
+
+    def _publish(self):
+        msg = JointState()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.name = list(JOINTS)
+        msg.position = list(HOME_POSITION)
+        msg.velocity = [0.0] * 6
+        msg.effort = [0.0] * 6
+        self.leader_pub.publish(msg)
+        self.follower_pub.publish(msg)
+
+
+def main():
+    rclpy.init()
+    node = MockHardware()
+    try:
+        rclpy.spin(node)
+    except (KeyboardInterrupt, SystemExit):
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+if __name__ == '__main__':
+    main()
+MOCK_SCRIPT
+    PIDS="$!"
+
+    echo "[OFFLINE] Mock publishers running (PID $PIDS)"
+    echo "========================================"
+    echo "Offline mode active — mock services running"
+    echo "========================================"
+
+    wait
+    exit 0
+fi
 
 # --- Validate hardware (with retry for USB attach timing) ---
 wait_for_device() {

@@ -24,6 +24,7 @@ services:
       - CAMERA_NAME_1=${CAMERA_NAME_1:-gripper}
       - CAMERA_DEVICE_2=${CAMERA_DEVICE_2:-}
       - CAMERA_NAME_2=${CAMERA_NAME_2:-scene}
+      - OFFLINE_MODE=${OFFLINE_MODE:-false}
     volumes:
       - /dev:/dev
       - /dev/shm:/dev/shm

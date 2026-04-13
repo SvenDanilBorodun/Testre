@@ -75,6 +75,35 @@ class TestConfigGenerator(unittest.TestCase):
         finally:
             os.unlink(tmp_path)
 
+    def test_generate_env_offline_mode(self):
+        """Offline mode generates .env without real hardware paths."""
+        config = HardwareConfig()  # No arms, no cameras
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".env", delete=False) as f:
+            tmp_path = f.name
+
+        try:
+            content = generate_env_file(config, output_path=tmp_path, offline_mode=True)
+            self.assertIn("OFFLINE_MODE=true", content)
+            self.assertIn("FOLLOWER_PORT=/dev/null", content)
+            self.assertIn("LEADER_PORT=/dev/null", content)
+            self.assertIn("ROS_DOMAIN_ID=30", content)
+            # No camera vars
+            self.assertNotIn("CAMERA_DEVICE", content)
+        finally:
+            os.unlink(tmp_path)
+
+    def test_generate_env_offline_mode_raises_without_flag(self):
+        """Without offline_mode, missing arms should still raise ValueError."""
+        config = HardwareConfig()
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".env", delete=False) as f:
+            tmp_path = f.name
+        try:
+            with self.assertRaises(ValueError):
+                generate_env_file(config, output_path=tmp_path)
+        finally:
+            os.unlink(tmp_path)
+
     def test_hardware_config_is_complete(self):
         config = HardwareConfig()
         self.assertFalse(config.is_complete)

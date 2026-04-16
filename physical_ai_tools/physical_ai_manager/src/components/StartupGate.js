@@ -76,7 +76,32 @@ function ProgressStep({ label, done }) {
   );
 }
 
+// Cloud-only mode: app was opened with ?cloud=1 in the URL.
+// The GUI sets this flag when the student picked "Nur Cloud-Training" (no
+// robot hardware). We skip the ROS-waiting overlay entirely in that case —
+// there's no physical_ai_server container to connect to, and the Cloud tab
+// doesn't need rosbridge.
+function isCloudOnlyMode() {
+  if (typeof window === 'undefined') return false;
+  try {
+    const params = new URLSearchParams(window.location.search);
+    return params.get('cloud') === '1';
+  } catch {
+    return false;
+  }
+}
+
 export default function StartupGate({ children }) {
+  // If we're in cloud-only mode, render children directly without any gate.
+  // Early-return before calling any hooks — cloud mode doesn't change
+  // between renders so the hook-order rule is satisfied.
+  if (isCloudOnlyMode()) {
+    return <>{children}</>;
+  }
+  return <StartupGateImpl>{children}</StartupGateImpl>;
+}
+
+function StartupGateImpl({ children }) {
   const [rosbridgeConnected, setRosbridgeConnected] = useState(false);
   const [settled, setSettled] = useState(false);
   const [dismissed, setDismissed] = useState(false);

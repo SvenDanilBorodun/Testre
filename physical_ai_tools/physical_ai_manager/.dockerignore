@@ -1,0 +1,21 @@
+node_modules
+build
+.env
+.env.local
+.env.*.local
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.DS_Store
+.idea
+.vscode
+*.log
+.git
+coverage
+
+# Override any accidental `lib/` ignore in parent .gitignore — React source
+# has src/lib/ which must be included in the build context.
+!lib/
+!lib/**
+!src/lib/
+!src/lib/**

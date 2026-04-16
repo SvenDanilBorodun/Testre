@@ -1,0 +1,511 @@
+import logging
+
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field
+
+from app.auth import get_current_teacher, get_user_profile
+from app.services.supabase_client import get_supabase
+from app.services.usernames import synthetic_email, validate_username
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/teacher", tags=["teacher"])
+
+
+# ---------- Models ----------
+
+
+class ClassroomCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=100)
+
+
+class ClassroomRename(BaseModel):
+    name: str = Field(..., min_length=1, max_length=100)
+
+
+class StudentCreate(BaseModel):
+    username: str = Field(..., min_length=3, max_length=32)
+    password: str = Field(..., min_length=6, max_length=128)
+    full_name: str = Field(..., min_length=1, max_length=100)
+    initial_credits: int = Field(default=0, ge=0, le=1000)
+
+
+class StudentPatch(BaseModel):
+    full_name: str | None = Field(default=None, min_length=1, max_length=100)
+    classroom_id: str | None = None
+
+
+class PasswordReset(BaseModel):
+    new_password: str = Field(..., min_length=6, max_length=128)
+
+
+class CreditsDelta(BaseModel):
+    delta: int = Field(..., ge=-1000, le=1000)
+
+
+class ClassroomSummary(BaseModel):
+    id: str
+    name: str
+    created_at: str
+    student_count: int
+
+
+class StudentSummary(BaseModel):
+    id: str
+    username: str | None
+    full_name: str | None
+    training_credits: int
+    trainings_used: int
+    remaining: int
+    classroom_id: str | None
+
+
+class TrainingSummary(BaseModel):
+    id: int
+    status: str
+    dataset_name: str
+    model_name: str
+    model_type: str
+    current_step: int | None
+    total_steps: int | None
+    current_loss: float | None
+    requested_at: str
+    terminated_at: str | None
+    error_message: str | None
+
+
+class ClassroomDetail(BaseModel):
+    id: str
+    name: str
+    created_at: str
+    students: list[StudentSummary]
+
+
+class CreditsResponse(BaseModel):
+    new_amount: int
+    pool_available: int
+
+
+# ---------- Helpers ----------
+
+
+def _assert_classroom_owned(teacher_id: str, classroom_id: str) -> dict:
+    supabase = get_supabase()
+    result = (
+        supabase.table("classrooms")
+        .select("*")
+        .eq("id", classroom_id)
+        .eq("teacher_id", teacher_id)
+        .execute()
+    )
+    if not result.data:
+        raise HTTPException(status_code=404, detail="Klassenzimmer nicht gefunden")
+    return result.data[0]
+
+
+def _assert_student_owned(teacher_id: str, student_id: str) -> dict:
+    supabase = get_supabase()
+    result = (
+        supabase.table("users")
+        .select("id, username, full_name, training_credits, classroom_id, role")
+        .eq("id", student_id)
+        .eq("role", "student")
+        .execute()
+    )
+    if not result.data:
+        raise HTTPException(status_code=404, detail="Schueler nicht gefunden")
+    student = result.data[0]
+    if not student.get("classroom_id"):
+        raise HTTPException(status_code=404, detail="Schueler gehoert zu keinem Klassenzimmer")
+    _assert_classroom_owned(teacher_id, student["classroom_id"])
+    return student
+
+
+def _student_usage(student_id: str) -> int:
+    supabase = get_supabase()
+    result = (
+        supabase.table("trainings")
+        .select("id", count="exact")
+        .eq("user_id", student_id)
+        .not_.in_("status", ["failed", "canceled"])
+        .execute()
+    )
+    return int(result.count or 0)
+
+
+def _student_summary(row: dict) -> StudentSummary:
+    credits = int(row.get("training_credits") or 0)
+    used = _student_usage(row["id"])
+    return StudentSummary(
+        id=row["id"],
+        username=row.get("username"),
+        full_name=row.get("full_name"),
+        training_credits=credits,
+        trainings_used=used,
+        remaining=credits - used,
+        classroom_id=row.get("classroom_id"),
+    )
+
+
+# ---------- Classrooms ----------
+
+
+@router.get("/classrooms", response_model=list[ClassroomSummary])
+async def list_classrooms(teacher=Depends(get_current_teacher)):
+    supabase = get_supabase()
+    classrooms = (
+        supabase.table("classrooms")
+        .select("*")
+        .eq("teacher_id", teacher["id"])
+        .order("created_at", desc=False)
+        .execute()
+    ).data or []
+
+    out: list[ClassroomSummary] = []
+    for c in classrooms:
+        count_res = (
+            supabase.table("users")
+            .select("id", count="exact")
+            .eq("classroom_id", c["id"])
+            .eq("role", "student")
+            .execute()
+        )
+        out.append(
+            ClassroomSummary(
+                id=c["id"],
+                name=c["name"],
+                created_at=c["created_at"],
+                student_count=int(count_res.count or 0),
+            )
+        )
+    return out
+
+
+@router.post("/classrooms", response_model=ClassroomSummary)
+async def create_classroom(req: ClassroomCreate, teacher=Depends(get_current_teacher)):
+    supabase = get_supabase()
+    try:
+        result = (
+            supabase.table("classrooms")
+            .insert({"teacher_id": teacher["id"], "name": req.name.strip()})
+            .execute()
+        )
+    except Exception as e:
+        msg = str(e)
+        if "duplicate" in msg.lower() or "unique" in msg.lower():
+            raise HTTPException(status_code=409, detail="Klassenzimmer mit diesem Namen existiert bereits")
+        logger.error("create_classroom failed: %s", e)
+        raise HTTPException(status_code=500, detail="Klassenzimmer konnte nicht erstellt werden")
+
+    c = result.data[0]
+    return ClassroomSummary(
+        id=c["id"], name=c["name"], created_at=c["created_at"], student_count=0
+    )
+
+
+@router.get("/classrooms/{classroom_id}", response_model=ClassroomDetail)
+async def get_classroom(classroom_id: str, teacher=Depends(get_current_teacher)):
+    c = _assert_classroom_owned(teacher["id"], classroom_id)
+    supabase = get_supabase()
+    students_raw = (
+        supabase.table("users")
+        .select("id, username, full_name, training_credits, classroom_id")
+        .eq("classroom_id", classroom_id)
+        .eq("role", "student")
+        .order("full_name", desc=False)
+        .execute()
+    ).data or []
+    return ClassroomDetail(
+        id=c["id"],
+        name=c["name"],
+        created_at=c["created_at"],
+        students=[_student_summary(s) for s in students_raw],
+    )
+
+
+@router.patch("/classrooms/{classroom_id}", response_model=ClassroomSummary)
+async def rename_classroom(
+    classroom_id: str,
+    req: ClassroomRename,
+    teacher=Depends(get_current_teacher),
+):
+    _assert_classroom_owned(teacher["id"], classroom_id)
+    supabase = get_supabase()
+    try:
+        result = (
+            supabase.table("classrooms")
+            .update({"name": req.name.strip()})
+            .eq("id", classroom_id)
+            .execute()
+        )
+    except Exception as e:
+        if "duplicate" in str(e).lower() or "unique" in str(e).lower():
+            raise HTTPException(status_code=409, detail="Klassenzimmer mit diesem Namen existiert bereits")
+        logger.error("rename_classroom failed: %s", e)
+        raise HTTPException(status_code=500, detail="Klassenzimmer konnte nicht umbenannt werden")
+    c = result.data[0]
+    count_res = (
+        supabase.table("users")
+        .select("id", count="exact")
+        .eq("classroom_id", c["id"])
+        .eq("role", "student")
+        .execute()
+    )
+    return ClassroomSummary(
+        id=c["id"],
+        name=c["name"],
+        created_at=c["created_at"],
+        student_count=int(count_res.count or 0),
+    )
+
+
+@router.delete("/classrooms/{classroom_id}")
+async def delete_classroom(classroom_id: str, teacher=Depends(get_current_teacher)):
+    _assert_classroom_owned(teacher["id"], classroom_id)
+    supabase = get_supabase()
+    count_res = (
+        supabase.table("users")
+        .select("id", count="exact")
+        .eq("classroom_id", classroom_id)
+        .eq("role", "student")
+        .execute()
+    )
+    if (count_res.count or 0) > 0:
+        raise HTTPException(
+            status_code=409,
+            detail="Klassenzimmer ist nicht leer - erst alle Schueler entfernen",
+        )
+    supabase.table("classrooms").delete().eq("id", classroom_id).execute()
+    return {"ok": True}
+
+
+# ---------- Students ----------
+
+
+@router.post("/classrooms/{classroom_id}/students", response_model=StudentSummary)
+async def create_student(
+    classroom_id: str,
+    req: StudentCreate,
+    teacher=Depends(get_current_teacher),
+):
+    _assert_classroom_owned(teacher["id"], classroom_id)
+    supabase = get_supabase()
+
+    try:
+        username = validate_username(req.username)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    existing = (
+        supabase.table("users").select("id").eq("username", username).execute()
+    )
+    if existing.data:
+        raise HTTPException(status_code=409, detail="Benutzername bereits vergeben")
+
+    email = synthetic_email(username)
+    try:
+        created = supabase.auth.admin.create_user(
+            {
+                "email": email,
+                "password": req.password,
+                "email_confirm": True,
+            }
+        )
+    except Exception as e:
+        msg = str(e).lower()
+        if "already" in msg or "exists" in msg or "duplicate" in msg:
+            raise HTTPException(status_code=409, detail="Benutzername bereits vergeben")
+        logger.error("auth.admin.create_user failed: %s", e)
+        raise HTTPException(status_code=500, detail="Konto konnte nicht erstellt werden")
+
+    auth_user = getattr(created, "user", None)
+    if auth_user is None:
+        raise HTTPException(status_code=500, detail="Konto konnte nicht erstellt werden")
+    student_id = auth_user.id
+
+    # handle_new_user trigger has created a public.users row with role='student', credits=0.
+    # Set the student's metadata now; credits stay 0 here and get allocated below.
+    try:
+        supabase.table("users").update(
+            {
+                "role": "student",
+                "username": username,
+                "full_name": req.full_name.strip(),
+                "classroom_id": classroom_id,
+                "created_by": teacher["id"],
+            }
+        ).eq("id", student_id).execute()
+    except Exception as e:
+        # Rollback the auth user on metadata failure so the account isn't orphaned.
+        logger.error("Failed to set student metadata, rolling back: %s", e)
+        try:
+            supabase.auth.admin.delete_user(student_id)
+        except Exception as del_err:
+            logger.error("Rollback delete_user failed: %s", del_err)
+        msg = str(e).lower()
+        if "p0010" in msg or "kapazitaet" in msg:
+            raise HTTPException(status_code=409, detail="Klassenzimmer voll (30 Schueler)")
+        raise HTTPException(status_code=500, detail="Schueler-Profil konnte nicht gesetzt werden")
+
+    # Allocate initial credits via the RPC (enforces teacher-pool limits).
+    if req.initial_credits > 0:
+        try:
+            supabase.rpc(
+                "adjust_student_credits",
+                {
+                    "p_teacher_id": teacher["id"],
+                    "p_student_id": student_id,
+                    "p_delta": req.initial_credits,
+                },
+            ).execute()
+        except Exception as e:
+            msg = str(e)
+            if "P0014" in msg:
+                # Pool exhausted — student is still created with 0 credits.
+                logger.warning("Insufficient pool when creating %s: %s", username, e)
+                raise HTTPException(
+                    status_code=409,
+                    detail="Schueler erstellt, aber Lehrer-Pool reicht nicht fuer die Startguthaben",
+                )
+            logger.error("Initial credit allocation failed: %s", e)
+            # Student still exists with 0 credits — return instead of failing.
+
+    row = (
+        supabase.table("users")
+        .select("id, username, full_name, training_credits, classroom_id")
+        .eq("id", student_id)
+        .single()
+        .execute()
+    ).data
+    return _student_summary(row)
+
+
+@router.patch("/students/{student_id}", response_model=StudentSummary)
+async def patch_student(
+    student_id: str,
+    req: StudentPatch,
+    teacher=Depends(get_current_teacher),
+):
+    _assert_student_owned(teacher["id"], student_id)
+    supabase = get_supabase()
+
+    updates: dict = {}
+    if req.full_name is not None:
+        updates["full_name"] = req.full_name.strip()
+    if req.classroom_id is not None:
+        # Moving to another classroom — must also be owned by teacher.
+        _assert_classroom_owned(teacher["id"], req.classroom_id)
+        updates["classroom_id"] = req.classroom_id
+    if not updates:
+        raise HTTPException(status_code=400, detail="Keine Aenderungen")
+
+    try:
+        supabase.table("users").update(updates).eq("id", student_id).execute()
+    except Exception as e:
+        msg = str(e).lower()
+        if "p0010" in msg or "kapazitaet" in msg:
+            raise HTTPException(status_code=409, detail="Ziel-Klassenzimmer voll (30 Schueler)")
+        logger.error("patch_student failed: %s", e)
+        raise HTTPException(status_code=500, detail="Aktualisierung fehlgeschlagen")
+
+    row = (
+        supabase.table("users")
+        .select("id, username, full_name, training_credits, classroom_id")
+        .eq("id", student_id)
+        .single()
+        .execute()
+    ).data
+    return _student_summary(row)
+
+
+@router.delete("/students/{student_id}")
+async def delete_student(student_id: str, teacher=Depends(get_current_teacher)):
+    _assert_student_owned(teacher["id"], student_id)
+    supabase = get_supabase()
+    try:
+        supabase.auth.admin.delete_user(student_id)
+    except Exception as e:
+        logger.error("delete_user failed: %s", e)
+        raise HTTPException(status_code=500, detail="Konto konnte nicht geloescht werden")
+    return {"ok": True}
+
+
+@router.post("/students/{student_id}/password")
+async def reset_student_password(
+    student_id: str,
+    req: PasswordReset,
+    teacher=Depends(get_current_teacher),
+):
+    _assert_student_owned(teacher["id"], student_id)
+    supabase = get_supabase()
+    try:
+        supabase.auth.admin.update_user_by_id(
+            student_id, {"password": req.new_password}
+        )
+    except Exception as e:
+        logger.error("reset_student_password failed: %s", e)
+        raise HTTPException(status_code=500, detail="Passwort konnte nicht gesetzt werden")
+    return {"ok": True}
+
+
+@router.post("/students/{student_id}/credits", response_model=CreditsResponse)
+async def adjust_credits(
+    student_id: str,
+    req: CreditsDelta,
+    teacher=Depends(get_current_teacher),
+):
+    _assert_student_owned(teacher["id"], student_id)
+    if req.delta == 0:
+        raise HTTPException(status_code=400, detail="Delta darf nicht 0 sein")
+    supabase = get_supabase()
+    try:
+        result = supabase.rpc(
+            "adjust_student_credits",
+            {
+                "p_teacher_id": teacher["id"],
+                "p_student_id": student_id,
+                "p_delta": req.delta,
+            },
+        ).execute()
+    except Exception as e:
+        msg = str(e)
+        if "P0011" in msg:
+            raise HTTPException(status_code=403, detail="Schueler gehoert nicht zu diesem Lehrer")
+        if "P0012" in msg:
+            raise HTTPException(
+                status_code=409,
+                detail="Neuer Betrag waere kleiner als bereits verbrauchte Credits",
+            )
+        if "P0013" in msg:
+            raise HTTPException(status_code=409, detail="Credits duerfen nicht negativ werden")
+        if "P0014" in msg:
+            raise HTTPException(status_code=409, detail="Lehrer hat nicht genug Credits im Pool")
+        logger.error("adjust_student_credits failed: %s", e)
+        raise HTTPException(status_code=500, detail="Credit-Anpassung fehlgeschlagen")
+    row = (result.data or [{}])[0]
+    return CreditsResponse(
+        new_amount=int(row.get("new_amount", 0)),
+        pool_available=int(row.get("pool_available", 0)),
+    )
+
+
+@router.get("/students/{student_id}/trainings", response_model=list[TrainingSummary])
+async def list_student_trainings(
+    student_id: str,
+    teacher=Depends(get_current_teacher),
+):
+    _assert_student_owned(teacher["id"], student_id)
+    supabase = get_supabase()
+    result = (
+        supabase.table("trainings")
+        .select(
+            "id, status, dataset_name, model_name, model_type, "
+            "current_step, total_steps, current_loss, "
+            "requested_at, terminated_at, error_message"
+        )
+        .eq("user_id", student_id)
+        .order("requested_at", desc=True)
+        .limit(100)
+        .execute()
+    )
+    return [TrainingSummary(**t) for t in (result.data or [])]

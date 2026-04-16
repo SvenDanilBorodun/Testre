@@ -1,0 +1,17 @@
+# Override parent python-style `lib/` ignore rule that wrongly catches
+# the React source folder src/lib/ (which contains supabaseClient.js).
+!lib/
+!lib/**
+
+# Standard React / Node ignores
+node_modules/
+/build
+/coverage
+.DS_Store
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*

@@ -23,6 +23,8 @@ import rosSlice from '../features/ros/rosSlice';
 import trainingSlice from '../features/training/trainingSlice';
 import editDatasetSlice from '../features/editDataset/editDatasetSlice';
 import authSlice from '../features/auth/authSlice';
+import teacherSlice from '../features/teacher/teacherSlice';
+import adminSlice from '../features/admin/adminSlice';
 
 export const store = configureStore({
   reducer: {
@@ -32,6 +34,8 @@ export const store = configureStore({
     training: trainingSlice,
     editDataset: editDatasetSlice,
     auth: authSlice,
+    teacher: teacherSlice,
+    admin: adminSlice,
   },
   middleware: (getDefaultMiddleware) => getDefaultMiddleware(),
 });

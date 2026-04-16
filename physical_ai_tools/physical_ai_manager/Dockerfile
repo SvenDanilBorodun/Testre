@@ -6,6 +6,9 @@ WORKDIR /app
 ARG REACT_APP_SUPABASE_URL
 ARG REACT_APP_SUPABASE_ANON_KEY
 ARG REACT_APP_CLOUD_API_URL
+# App mode: 'student' (Docker student build) or 'web' (public teacher/admin deployment)
+ARG REACT_APP_MODE=student
+ENV REACT_APP_MODE=${REACT_APP_MODE}
 
 COPY package*.json ./
 RUN npm install

@@ -11,6 +11,8 @@ import os
 import subprocess
 import sys
 import time
+import tempfile
+import glob
 from typing import Optional
 
 # On Windows, hide console windows spawned by subprocess
@@ -23,6 +25,7 @@ from .constants import (
     COMPOSE_GPU_FILE,
     DOCKER_DIR,
     DOCKER_STARTUP_TIMEOUT,
+    ENV_FILE,
 )
 
 
@@ -223,8 +226,17 @@ def pull_images(callback=None, log=None) -> bool:
 
 
 def _compose_cmd(gpu: bool = False) -> list[str]:
-    """Build the docker compose command with appropriate files."""
-    cmd = ["docker", "compose", "-f", COMPOSE_FILE]
+    """Build the docker compose command with appropriate files.
+
+    Uses --env-file to point to the user-writable .env in %LOCALAPPDATA% so
+    the GUI doesn't need admin rights to regenerate it. Only passes the flag
+    when the file exists, otherwise compose would error out with "env file
+    not found" before we've even had a chance to create it.
+    """
+    cmd = ["docker", "compose"]
+    if os.path.isfile(ENV_FILE):
+        cmd.extend(["--env-file", ENV_FILE])
+    cmd.extend(["-f", COMPOSE_FILE])
     if gpu:
         cmd.extend(["-f", COMPOSE_GPU_FILE])
     return cmd
@@ -256,6 +268,74 @@ def start_containers(gpu: bool = False, log=None) -> bool:
     except (FileNotFoundError, subprocess.TimeoutExpired) as e:
         if log:
             log(f"Docker Compose Fehler: {e}")
+        return False
+
+
+def start_cloud_only(log=None) -> bool:
+    """Start ONLY the physical_ai_manager container (cloud-only mode).
+
+    Used when no robot hardware is connected — students or teachers can still
+    log in to the Cloud tab to manage cloud trainings without any USB devices.
+
+    Skips open_manipulator and physical_ai_server entirely (no ROS, no rosbridge,
+    no hardware required). The Record / Inference / EditDataset pages won't
+    function in this mode (they need rosbridge), but the Cloud tab works fully.
+
+    Uses --no-deps so docker-compose doesn't transitively pull in physical_ai_server
+    via the depends_on relationship.
+    """
+    cmd = _compose_cmd(gpu=False) + [
+        "up", "-d", "--force-recreate", "--no-deps", "physical_ai_manager"
+    ]
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True, text=True, timeout=120,
+            cwd=DOCKER_DIR,
+            **_SUBPROCESS_KWARGS,
+        )
+        if result.returncode != 0 and log:
+            log(f"Docker Compose Fehler: {result.stderr.strip()}")
+        return result.returncode == 0
+    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+        if log:
+            log(f"Docker Compose Fehler: {e}")
+        return False
+
+
+def stop_cloud_only(log=None) -> bool:
+    """Stop the physical_ai_manager container (cloud-only mode counterpart).
+
+    Uses 'stop' + 'rm' instead of 'down' so it doesn't tear down the network
+    or volumes that the full-stack mode might rely on.
+    """
+    try:
+        base = _compose_cmd(gpu=False)
+        for action in (["stop", "physical_ai_manager"], ["rm", "-f", "physical_ai_manager"]):
+            subprocess.run(
+                base + action, capture_output=True, text=True, timeout=60,
+                cwd=DOCKER_DIR, **_SUBPROCESS_KWARGS,
+            )
+        return True
+    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+        if log:
+            log(f"Docker Compose Fehler: {e}")
+        return False
+
+
+def manager_container_running() -> bool:
+    """Return True iff only the physical_ai_manager container is up.
+
+    Useful for resuming a cloud-only session after the GUI was closed.
+    """
+    try:
+        result = subprocess.run(
+            ["docker", "inspect", "-f", "{{.State.Status}}", "physical_ai_manager"],
+            capture_output=True, text=True, timeout=10,
+            **_SUBPROCESS_KWARGS,
+        )
+        return result.returncode == 0 and result.stdout.strip() == "running"
+    except (FileNotFoundError, subprocess.TimeoutExpired):
         return False
 
 

@@ -3,7 +3,7 @@
 import os
 
 # GUI version — single source of truth. Bump this for each release.
-APP_VERSION = "2.1.0"
+APP_VERSION = "2.2.2"
 
 # Cloud API URL for update checks.
 UPDATE_API_URL = os.environ.get(
@@ -116,7 +116,19 @@ INSTALL_DIR = _resolve_install_dir()
 DOCKER_DIR = os.path.join(INSTALL_DIR, "docker")
 COMPOSE_FILE = os.path.join(DOCKER_DIR, "docker-compose.yml")
 COMPOSE_GPU_FILE = os.path.join(DOCKER_DIR, "docker-compose.gpu.yml")
-ENV_FILE = os.path.join(DOCKER_DIR, ".env")
+
+# User-writable .env location. We cannot write under Program Files without
+# admin rights, so the .env lives in %LOCALAPPDATA%\EduBotics\.env and is
+# passed to docker compose via --env-file. This avoids PermissionError when
+# the GUI runs without elevation (the normal case).
+def _resolve_env_file() -> str:
+    override = os.environ.get("EDUBOTICS_ENV_FILE")
+    if override:
+        return override
+    base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+    return os.path.join(base, "EduBotics", ".env")
+
+ENV_FILE = _resolve_env_file()
 
 # Timeouts (seconds)
 DOCKER_STARTUP_TIMEOUT = 120

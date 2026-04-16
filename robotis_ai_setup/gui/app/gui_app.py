@@ -30,7 +30,7 @@ class EduBoticsApp:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title("EduBotics")
-        self.root.geometry("700x800")
+        self.root.geometry("700x830")
         self.root.resizable(True, True)
 
         # State
@@ -40,6 +40,9 @@ class EduBoticsApp:
         self.running = False
         self._scanning = False
         self._prerequisites_done = False
+        # Cloud-only mode: skip arm/camera scan, only start physical_ai_manager
+        # so the user can open the Cloud tab without any robot hardware.
+        self.cloud_only = tk.BooleanVar(value=False)
 
         self._build_ui()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -64,9 +67,33 @@ class EduBoticsApp:
         self.progress = ttk.Progressbar(main, mode="indeterminate", length=400)
         self.progress.pack(pady=(0, 10))
 
+        # ── Modus-Auswahl ──
+        mode_frame = ttk.LabelFrame(main, text="Modus", padding=10)
+        mode_frame.pack(fill=tk.X, pady=5)
+
+        self.cloud_only_check = ttk.Checkbutton(
+            mode_frame,
+            text="Nur Cloud-Training (kein Roboter angeschlossen)",
+            variable=self.cloud_only,
+            command=self._on_mode_changed,
+        )
+        self.cloud_only_check.pack(anchor=tk.W)
+        ttk.Label(
+            mode_frame,
+            text=(
+                "Aktivieren, um nur die Cloud-Lehrer/Schueler-Anmeldung zu starten — "
+                "Aufnahme und Inferenz benoetigen weiterhin Roboter-Hardware."
+            ),
+            foreground="gray",
+            font=("Segoe UI", 8),
+            wraplength=620,
+            justify=tk.LEFT,
+        ).pack(anchor=tk.W, pady=(2, 0))
+
         # ── Schritt A: Leader-Arm ──
         leader_frame = ttk.LabelFrame(main, text="Schritt A: Leader-Arm", padding=10)
         leader_frame.pack(fill=tk.X, pady=5)
+        self.leader_frame = leader_frame
 
         ttk.Label(leader_frame, text="Leader-Arm per USB anschließen, dann auf Scannen klicken.").pack(anchor=tk.W)
         leader_row = ttk.Frame(leader_frame)
@@ -81,6 +108,7 @@ class EduBoticsApp:
         # ── Schritt B: Follower-Arm ──
         follower_frame = ttk.LabelFrame(main, text="Schritt B: Follower-Arm", padding=10)
         follower_frame.pack(fill=tk.X, pady=5)
+        self.follower_frame = follower_frame
 
         ttk.Label(follower_frame, text="Follower-Arm per USB anschließen (wird zusammen mit Leader gescannt).").pack(anchor=tk.W)
         follower_row = ttk.Frame(follower_frame)
@@ -92,6 +120,7 @@ class EduBoticsApp:
         # ── Schritt C: Kameras ──
         camera_frame = ttk.LabelFrame(main, text="Schritt C: Kameras (bis zu 2)", padding=10)
         camera_frame.pack(fill=tk.X, pady=5)
+        self.camera_frame = camera_frame
 
         ttk.Label(camera_frame, text="Kameras anschließen, scannen, und per Checkbox auswählen.").pack(anchor=tk.W)
         camera_row = ttk.Frame(camera_frame)
@@ -130,7 +159,7 @@ class EduBoticsApp:
 
         self.btn_open_browser = ttk.Button(
             btn_frame, text="Browser öffnen",
-            command=lambda: webbrowser.open(f"http://localhost:{PORT_WEB_UI}"),
+            command=self._open_browser,
             state=tk.DISABLED,
         )
         self.btn_open_browser.pack(side=tk.LEFT, padx=5)
@@ -161,13 +190,55 @@ class EduBoticsApp:
         self.root.after(0, lambda: self.status_var.set(msg))
 
     def _update_start_button(self):
-        """Start-Button nur aktivieren, wenn Voraussetzungen geprüft und Hardware vollständig."""
+        """Start-Button aktivieren wenn:
+        - Cloud-only mode: prereqs ok, nicht laufend
+        - Voller Modus: prereqs ok, beide Arme gefunden, nicht laufend
+        """
         def _update():
-            if self._prerequisites_done and self.hardware.is_complete and not self.running:
+            if not self._prerequisites_done or self.running:
+                self.btn_start.config(state=tk.DISABLED)
+                return
+            if self.cloud_only.get():
+                self.btn_start.config(state=tk.NORMAL)
+            elif self.hardware.is_complete:
                 self.btn_start.config(state=tk.NORMAL)
             else:
                 self.btn_start.config(state=tk.DISABLED)
         self.root.after(0, _update)
+
+    def _on_mode_changed(self):
+        """Cloud-only checkbox toggled — show/hide hardware sections."""
+        is_cloud_only = self.cloud_only.get()
+        # Disable the hardware frames in cloud-only mode (visually grayed out).
+        new_state = tk.DISABLED if is_cloud_only else tk.NORMAL
+        for frame in (self.leader_frame, self.follower_frame, self.camera_frame):
+            self._set_frame_state(frame, new_state)
+        if is_cloud_only:
+            self._set_status("Cloud-Modus — Start klicken, um die Web-Oberflaeche zu starten.")
+        else:
+            if self.hardware.is_complete:
+                self._set_status("Bereit — Start klicken.")
+            else:
+                self._set_status("Bereit — Hardware scannen, um zu beginnen")
+        self._update_start_button()
+
+    def _set_frame_state(self, frame, state):
+        """Recursively enable/disable widgets in a LabelFrame."""
+        for child in frame.winfo_children():
+            cls = child.winfo_class()
+            try:
+                # ttk widgets use state(['disabled']) or state(['!disabled'])
+                if hasattr(child, "state") and cls in (
+                    "TButton", "TCheckbutton", "TCombobox", "TEntry",
+                ):
+                    child.state(["disabled"] if state == tk.DISABLED else ["!disabled"])
+                elif "state" in child.config():
+                    child.config(state=state)
+            except (tk.TclError, KeyError):
+                pass
+            # Recurse into nested frames
+            if child.winfo_children():
+                self._set_frame_state(child, state)
 
     # ── Prerequisites Check ──────────────────────────────────────────
 
@@ -175,6 +246,15 @@ class EduBoticsApp:
         """Auf GUI-Update prüfen, dann Docker, WSL2, usbipd beim Start prüfen."""
         def _check():
             self.root.after(0, lambda: self.progress.start(10))
+
+            # Clean up leftover installer .exe from any previous update
+            # (can't be deleted while it was running — sweep on next launch).
+            try:
+                removed = update_checker.cleanup_stale_installers()
+                if removed > 0:
+                    self._log(f"Aufraeumen: {removed} alte Installer-Dateien geloescht.")
+            except Exception:
+                pass
 
             # ── GUI update check (runs before everything else) ──
             self._set_status("Auf GUI-Update prüfen...")
@@ -248,6 +328,15 @@ class EduBoticsApp:
             self.root.after(0, lambda: self.btn_stop.config(state=tk.NORMAL))
             self.root.after(0, lambda: self.btn_open_browser.config(state=tk.NORMAL))
             self._set_status("Aktiv — Umgebung läuft (fortgesetzt)")
+        elif docker_manager.manager_container_running():
+            self._log("Cloud-Container laeuft bereits von einer vorherigen Sitzung.")
+            self.running = True
+            # Auto-tick the cloud-only checkbox so Stop / Browser buttons act on the right thing.
+            self.root.after(0, lambda: self.cloud_only.set(True))
+            self.root.after(0, self._on_mode_changed)
+            self.root.after(0, lambda: self.btn_stop.config(state=tk.NORMAL))
+            self.root.after(0, lambda: self.btn_open_browser.config(state=tk.NORMAL))
+            self._set_status("Aktiv — Cloud-Modus laeuft (fortgesetzt)")
 
         # Check GPU
         self.gpu_available = docker_manager.has_gpu()
@@ -536,7 +625,9 @@ class EduBoticsApp:
 
     def _start_environment(self):
         """Docker-Umgebung starten und Browser öffnen."""
-        if not self.hardware.is_complete:
+        is_cloud_only = self.cloud_only.get()
+
+        if not is_cloud_only and not self.hardware.is_complete:
             messagebox.showwarning("Fehlende Hardware", "Bitte beide Arme scannen und identifizieren, bevor du startest.")
             return
 
@@ -547,53 +638,64 @@ class EduBoticsApp:
           try:
             self.root.after(0, lambda: self.progress.start(10))
 
-            # 0. Serielle Ports validieren — bei Bedarf USB neu verbinden
-            self._set_status("Hardware-Verbindungen werden geprüft...")
-            try:
-                serial_paths = wsl_bridge.list_serial_devices()
-                missing_arms = []
-                for arm_name, arm in [("Leader", self.hardware.leader), ("Follower", self.hardware.follower)]:
-                    if arm and arm.serial_path not in serial_paths:
-                        missing_arms.append((arm_name, arm))
+            if is_cloud_only:
+                self._log("Cloud-Modus: nur die Web-Oberflaeche wird gestartet (kein Roboter).")
+            else:
+                # 0. Serielle Ports validieren — bei Bedarf USB neu verbinden
+                self._set_status("Hardware-Verbindungen werden geprüft...")
+                try:
+                    serial_paths = wsl_bridge.list_serial_devices()
+                    missing_arms = []
+                    for arm_name, arm in [("Leader", self.hardware.leader), ("Follower", self.hardware.follower)]:
+                        if arm and arm.serial_path not in serial_paths:
+                            missing_arms.append((arm_name, arm))
 
-                if missing_arms:
-                    self._log("USB-Geräte werden erneut verbunden...")
-                    device_manager.attach_all_robotis_devices()
-                    import time
-                    for _ in range(5):
-                        serial_paths = wsl_bridge.list_serial_devices()
-                        if all(arm.serial_path in serial_paths for _, arm in missing_arms):
-                            break
-                        time.sleep(1)
+                    if missing_arms:
+                        self._log("USB-Geräte werden erneut verbunden...")
+                        device_manager.attach_all_robotis_devices()
+                        import time
+                        for _ in range(5):
+                            serial_paths = wsl_bridge.list_serial_devices()
+                            if all(arm.serial_path in serial_paths for _, arm in missing_arms):
+                                break
+                            time.sleep(1)
 
-                    for arm_name, arm in missing_arms:
-                        if arm.serial_path not in serial_paths:
-                            self._log(f"FEHLER: {arm_name}-Arm ({arm.serial_path}) nicht erreichbar!")
-                            self._log("USB-Verbindung prüfen und erneut scannen.")
-                            self._set_status(f"{arm_name}-Arm getrennt")
-                            self.root.after(0, lambda: self.progress.stop())
-                            self.running = False
-                            self._update_start_button()
-                            return
-                    self._log("USB-Geräte erfolgreich neu verbunden.")
-            except Exception as e:
-                self._log(f"WARNUNG: Serielle Ports konnten nicht validiert werden: {e}")
-                self._log("Fahre trotzdem fort — Container versuchen erneut auf Geräte zuzugreifen.")
+                        for arm_name, arm in missing_arms:
+                            if arm.serial_path not in serial_paths:
+                                self._log(f"FEHLER: {arm_name}-Arm ({arm.serial_path}) nicht erreichbar!")
+                                self._log("USB-Verbindung prüfen und erneut scannen.")
+                                self._set_status(f"{arm_name}-Arm getrennt")
+                                self.root.after(0, lambda: self.progress.stop())
+                                self.running = False
+                                self._update_start_button()
+                                return
+                        self._log("USB-Geräte erfolgreich neu verbunden.")
+                except Exception as e:
+                    self._log(f"WARNUNG: Serielle Ports konnten nicht validiert werden: {e}")
+                    self._log("Fahre trotzdem fort — Container versuchen erneut auf Geräte zuzugreifen.")
 
             # 1. .env generieren
             self._set_status("Konfiguration wird erstellt...")
             self._log(".env-Datei wird erstellt...")
-            env_content = config_generator.generate_env_file(self.hardware, ENV_FILE)
+            if is_cloud_only:
+                env_content = config_generator.generate_cloud_only_env(ENV_FILE)
+            else:
+                env_content = config_generator.generate_env_file(self.hardware, ENV_FILE)
             self._log(f"Konfiguration geschrieben: {ENV_FILE}")
             for line in env_content.strip().splitlines():
                 self._log(f"  {line}")
 
             # 2. Container starten
-            use_gpu = self.gpu_available
+            use_gpu = self.gpu_available and not is_cloud_only
             self._set_status("Container werden gestartet...")
-            self._log(f"Docker Compose wird gestartet ({'GPU' if use_gpu else 'CPU'}-Modus)...")
+            if is_cloud_only:
+                self._log("Docker Compose wird gestartet (nur physical_ai_manager, ohne Roboter)...")
+                ok = docker_manager.start_cloud_only(log=self._log)
+            else:
+                self._log(f"Docker Compose wird gestartet ({'GPU' if use_gpu else 'CPU'}-Modus)...")
+                ok = docker_manager.start_containers(gpu=use_gpu, log=self._log)
 
-            if not docker_manager.start_containers(gpu=use_gpu, log=self._log):
+            if not ok:
                 self._log("FEHLER: Container konnten nicht gestartet werden. Docker Desktop prüfen.")
                 self._set_status("Start fehlgeschlagen")
                 self.root.after(0, lambda: self.progress.stop())
@@ -620,7 +722,7 @@ class EduBoticsApp:
 
             # 5. Browser öffnen
             self._log("Browser wird geöffnet...")
-            webbrowser.open(f"http://localhost:{PORT_WEB_UI}")
+            self._open_browser()
 
             self._set_status("Aktiv — Umgebung läuft")
             self.root.after(0, lambda: self.progress.stop())
@@ -639,6 +741,12 @@ class EduBoticsApp:
 
     # ── Stop Environment ─────────────────────────────────────────────
 
+    def _open_browser(self):
+        """Open the web UI. In cloud-only mode, pass ?cloud=1 so the React app
+        skips the ROS startup gate (no rosbridge is running)."""
+        suffix = "/?cloud=1" if self.cloud_only.get() else "/"
+        webbrowser.open(f"http://localhost:{PORT_WEB_UI}{suffix}")
+
     def _stop_environment(self):
         """Alle Docker-Container stoppen."""
         self.btn_stop.config(state=tk.DISABLED)
@@ -649,10 +757,13 @@ class EduBoticsApp:
             self._log("Docker Compose wird gestoppt...")
             self.root.after(0, lambda: self.progress.start(10))
 
-            docker_manager.stop_containers(gpu=self.gpu_available)
+            if self.cloud_only.get():
+                docker_manager.stop_cloud_only(log=self._log)
+            else:
+                docker_manager.stop_containers(gpu=self.gpu_available)
 
             self._log("Alle Container gestoppt.")
-            self._set_status("Gestoppt — Hardware scannen, um neu zu starten")
+            self._set_status("Gestoppt")
             self.running = False
             self._update_start_button()
             self.root.after(0, lambda: self.progress.stop())
@@ -668,7 +779,10 @@ class EduBoticsApp:
                 "Die Umgebung läuft noch.\nContainer stoppen und beenden?",
             ):
                 self._log("Beende — Container werden gestoppt...")
-                docker_manager.stop_containers(gpu=self.gpu_available)
+                if self.cloud_only.get():
+                    docker_manager.stop_cloud_only()
+                else:
+                    docker_manager.stop_containers(gpu=self.gpu_available)
                 self.root.destroy()
             # else: user clicked No, don't close
         else:

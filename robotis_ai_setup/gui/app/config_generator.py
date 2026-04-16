@@ -40,3 +40,33 @@ def generate_env_file(config: HardwareConfig, output_path: str = ENV_FILE) -> st
         f.write(content)
 
     return content
+
+
+def generate_cloud_only_env(output_path: str = ENV_FILE) -> str:
+    """Write a minimal .env for cloud-only mode (no robot hardware).
+
+    Docker Compose still reads .env when starting any service, so we provide
+    empty placeholders for the variables referenced by the open_manipulator
+    service (which we don't start in this mode anyway). Without this, compose
+    would emit warnings about unset variables.
+    """
+    lines = [
+        "# Cloud-only mode — no robot hardware connected.",
+        "FOLLOWER_PORT=",
+        "LEADER_PORT=",
+        "CAMERA_DEVICE_1=",
+        "CAMERA_NAME_1=gripper",
+        "CAMERA_DEVICE_2=",
+        "CAMERA_NAME_2=scene",
+        f"ROS_DOMAIN_ID={ROS_DOMAIN_ID}",
+        f"REGISTRY={REGISTRY}",
+        "",
+    ]
+    content = "\n".join(lines)
+
+    import os
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    with open(output_path, "w", newline="\n") as f:
+        f.write(content)
+
+    return content

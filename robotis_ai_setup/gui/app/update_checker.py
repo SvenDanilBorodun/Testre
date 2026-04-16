@@ -5,9 +5,11 @@ if an update is available.  Uses only stdlib to avoid adding PyInstaller
 dependencies.
 """
 
+import glob
 import json
 import os
 import tempfile
+import time
 import urllib.request
 import urllib.error
 
@@ -37,6 +39,39 @@ def check_for_update(current_version: str, api_url: str) -> dict | None:
     except Exception:
         return None
     return None
+
+
+def cleanup_stale_installers(max_age_hours: int = 24) -> int:
+    """Delete leftover EduBotics_Setup.exe files from past updates.
+
+    The installer is downloaded into %TEMP% before being launched, then the
+    GUI exits. The installer itself can't delete its own file (it's running),
+    so we sweep on the NEXT GUI launch. Anything older than max_age_hours gets
+    removed so stale installers don't pile up in %TEMP%.
+
+    Returns the number of files removed.
+    """
+    patterns = [
+        os.path.join(tempfile.gettempdir(), "EduBotics_Setup.exe"),
+        os.path.join(tempfile.gettempdir(), "EduBotics_Setup*.exe"),
+    ]
+    now = time.time()
+    cutoff = now - (max_age_hours * 3600)
+    removed = 0
+    seen = set()
+    for pattern in patterns:
+        for path in glob.glob(pattern):
+            if path in seen:
+                continue
+            seen.add(path)
+            try:
+                # Only remove if older than cutoff — avoid deleting a running installer
+                if os.path.isfile(path) and os.path.getmtime(path) < cutoff:
+                    os.remove(path)
+                    removed += 1
+            except OSError:
+                pass
+    return removed
 
 
 def download_installer(url: str, dest_dir: str = None,

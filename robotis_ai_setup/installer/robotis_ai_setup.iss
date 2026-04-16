@@ -4,7 +4,7 @@
 [Setup]
 AppId={{B7E3F2A1-8C4D-4E5F-9A6B-1D2E3F4A5B6C}
 AppName=EduBotics
-AppVersion=2.1.0
+AppVersion=2.2.2
 AppPublisher=EduBotics
 DefaultDirName={autopf}\EduBotics
 DefaultGroupName=EduBotics
@@ -19,10 +19,14 @@ LicenseFile=assets\license.txt
 ; SetupIconFile=assets\icon.ico
 
 [InstallDelete]
-; Clean old PyInstaller artifacts to prevent DLL conflicts on upgrade
-Type: filesandordirs; Name: "{app}\gui\_internal"
-Type: filesandordirs; Name: "{app}\gui\__pycache__"
-; Remove old .env so GUI regenerates it with new camera schema
+; Wipe the entire gui/ folder before upgrade — guarantees no stale files
+; from older versions (renamed modules, removed DLLs, etc.) stick around.
+; PyInstaller's full output goes here anyway, so nothing user-modified.
+Type: filesandordirs; Name: "{app}\gui"
+; Wipe scripts/ for same reason — we sometimes rename/remove .ps1 helpers.
+Type: filesandordirs; Name: "{app}\scripts"
+; Old v2.1.0 / v2.2.0 layout wrote .env into Program Files. v2.2.1+ moved
+; it to %LOCALAPPDATA%\EduBotics\.env, so clean up the legacy file.
 Type: files; Name: "{app}\docker\.env"
 
 [Files]
@@ -120,7 +124,29 @@ begin
   Result := IsRebootRequired();
 end;
 
-// Stop running containers before installing new files (upgrade safety)
+// Delete the installer file from %TEMP% / %LOCALAPPDATA%\Temp after Setup
+// finishes so stale copies from auto-update downloads don't pile up.
+// Only runs when Setup was launched from a temp-ish path — we don't want
+// to delete an installer the user manually placed on their Desktop.
+procedure CleanupSourceInstaller();
+var
+  SrcExe: String;
+  LowerSrc: String;
+  LowerLocal: String;
+begin
+  SrcExe := ExpandConstant('{srcexe}');
+  LowerSrc := LowerCase(SrcExe);
+  LowerLocal := LowerCase(ExpandConstant('{localappdata}'));
+  if (Pos(LowerLocal, LowerSrc) > 0)
+     or (Pos('\temp\', LowerSrc) > 0)
+     or (Pos('\tmp\', LowerSrc) > 0) then
+  begin
+    DeleteFile(SrcExe);
+  end;
+end;
+
+// Stop running containers before installing new files (upgrade safety),
+// and cleanup the downloaded installer from %TEMP% when setup is done.
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   ResultCode: Integer;
@@ -133,5 +159,9 @@ begin
     begin
       Exec('docker', 'compose -f "' + ComposeFile + '" down', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
     end;
+  end;
+  if CurStep = ssDone then
+  begin
+    CleanupSourceInstaller();
   end;
 end;

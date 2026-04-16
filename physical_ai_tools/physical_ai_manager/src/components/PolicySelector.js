@@ -25,6 +25,13 @@ import {
 import { useRosServiceCaller } from '../hooks/useRosServiceCaller';
 import toast from 'react-hot-toast';
 
+// Env-gated allowlist — students only see ACT, admin/dev builds override via
+// REACT_APP_ALLOWED_POLICIES=tdmpc,diffusion,act,vqbet,pi0,pi0fast,smolvla.
+const ALLOWED_POLICIES = (process.env.REACT_APP_ALLOWED_POLICIES || 'act')
+  .split(',')
+  .map((s) => s.trim().toLowerCase())
+  .filter(Boolean);
+
 export default function PolicySelector({ readonly = false }) {
   const dispatch = useDispatch();
 
@@ -45,7 +52,10 @@ export default function PolicySelector({ readonly = false }) {
       const result = await getPolicyList();
       console.log('Policies received:', result);
       if (result && result.policy_list) {
-        dispatch(setPolicyList(result.policy_list));
+        const filtered = result.policy_list.filter((p) =>
+          ALLOWED_POLICIES.includes(String(p).toLowerCase())
+        );
+        dispatch(setPolicyList(filtered));
         toast.success('Modellliste erfolgreich geladen');
       } else {
         toast.error('Failed to get policy list: Invalid response');
@@ -56,6 +66,14 @@ export default function PolicySelector({ readonly = false }) {
       setFetching(false);
     }
   }, [getPolicyList, dispatch]);
+
+  // When exactly one policy is allowed (the student case), auto-select it so
+  // the dropdown isn't a no-op interaction.
+  useEffect(() => {
+    if (policyList.length === 1 && !selectedPolicy) {
+      dispatch(selectPolicyType(policyList[0]));
+    }
+  }, [policyList, selectedPolicy, dispatch]);
 
   const classCard = clsx(
     'bg-white',

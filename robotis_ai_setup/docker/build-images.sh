@@ -55,6 +55,10 @@ echo ">> Building physical_ai_manager..."
 SUPABASE_URL=${SUPABASE_URL:-}
 SUPABASE_ANON_KEY=${SUPABASE_ANON_KEY:-}
 CLOUD_API_URL=${CLOUD_API_URL:-}
+# Student-facing policy allowlist. Defaults to 'act' so the student Docker
+# build hides every other policy in the dropdown. Set ALLOWED_POLICIES in
+# the environment (comma list) to override for an admin/dev build.
+ALLOWED_POLICIES=${ALLOWED_POLICIES:-act}
 BUILD_ARGS=""
 if [ -n "$SUPABASE_URL" ]; then
     BUILD_ARGS="$BUILD_ARGS --build-arg REACT_APP_SUPABASE_URL=${SUPABASE_URL}"
@@ -65,6 +69,7 @@ fi
 if [ -n "$CLOUD_API_URL" ]; then
     BUILD_ARGS="$BUILD_ARGS --build-arg REACT_APP_CLOUD_API_URL=${CLOUD_API_URL}"
 fi
+BUILD_ARGS="$BUILD_ARGS --build-arg REACT_APP_ALLOWED_POLICIES=${ALLOWED_POLICIES}"
 docker build \
     $BUILD_ARGS \
     -t "${REGISTRY}/physical-ai-manager:latest" \

@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 # A worker that hasn't called update_training_progress() in this long is
 # considered wedged. Configurable via env var for ops flexibility.
 STALLED_WORKER_THRESHOLD = timedelta(
-    minutes=int(os.environ.get("STALLED_WORKER_MINUTES", "30"))
+    minutes=int(os.environ.get("STALLED_WORKER_MINUTES", "15"))
 )
 
 # Idempotency window: a duplicate /start with the same (user, dataset, model)
@@ -33,9 +33,35 @@ DEDUPE_WINDOW = timedelta(seconds=60)
 
 # Hard upper bounds on training_params. Steps especially is a cost-bomb risk:
 # a malicious or buggy client could request 1B steps and burn the GPU budget.
-MAX_STEPS = 500_000
+MAX_STEPS = int(os.environ.get("MAX_TRAINING_STEPS", "500000"))
 MAX_BATCH_SIZE = 256
 MAX_TIMEOUT_HOURS = 12.0
+
+# Env-driven policy allowlist. Students get ALLOWED_POLICIES=act on Railway so
+# only ACT training reaches the GPU. Admin/dev deployments leave this unset or
+# set it to a comma list → the allowlist expands accordingly. The full training
+# code path stays intact for every policy; this is a routing gate, not a delete.
+ALLOWED_POLICIES = {
+    p.strip().lower()
+    for p in os.environ.get(
+        "ALLOWED_POLICIES",
+        "tdmpc,diffusion,act,vqbet,pi0,pi0fast,smolvla",
+    ).split(",")
+    if p.strip()
+}
+
+# Per-policy max timeout. Prevents a wedged ACT job from burning the 5h handler
+# default when ACT really needs <90 min. Applied after validation and before
+# RunPod dispatch so it's always enforced regardless of what the client sends.
+POLICY_MAX_TIMEOUT_HOURS = {
+    "act": 1.5,
+    "vqbet": 2.0,
+    "tdmpc": 2.0,
+    "diffusion": 4.0,
+    "pi0fast": 4.0,
+    "pi0": 6.0,
+    "smolvla": 6.0,
+}
 
 router = APIRouter(prefix="/trainings", tags=["training"])
 
@@ -79,6 +105,17 @@ class StartTrainingRequest(BaseModel):
         # HuggingFace dataset id is "user/repo" — reject obvious garbage early.
         if "/" not in v or v.startswith("/") or v.endswith("/"):
             raise ValueError("dataset_name must be in 'owner/repo' form")
+        return v
+
+    @field_validator("model_type")
+    @classmethod
+    def _model_type_allowed(cls, v: str) -> str:
+        # Enforce the env-driven allowlist so a direct API call can't bypass the
+        # frontend policy filter. German message because the operator UI surfaces it.
+        if v.lower() not in ALLOWED_POLICIES:
+            raise ValueError(
+                f"Modelltyp '{v}' ist für dieses Konto nicht freigeschaltet."
+            )
         return v
 
 
@@ -365,6 +402,13 @@ async def start_training(req: StartTrainingRequest, user=Depends(get_current_use
     worker_token = str(uuid.uuid4())
     # Pydantic model → plain dict for JSON serialization to RPC + RunPod.
     training_params_dict = req.training_params.model_dump(exclude_none=True)
+
+    # Cap timeout_hours per-policy. Protects against a wedged ACT job burning
+    # the handler's 5h default when ACT converges in <90 min.
+    policy_cap = POLICY_MAX_TIMEOUT_HOURS.get(req.model_type.lower())
+    if policy_cap is not None:
+        requested = training_params_dict.get("timeout_hours", policy_cap)
+        training_params_dict["timeout_hours"] = min(requested, policy_cap)
 
     try:
         rpc_result = supabase.rpc(

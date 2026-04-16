@@ -9,6 +9,10 @@ ARG REACT_APP_CLOUD_API_URL
 # App mode: 'student' (Docker student build) or 'web' (public teacher/admin deployment)
 ARG REACT_APP_MODE=student
 ENV REACT_APP_MODE=${REACT_APP_MODE}
+# Policy allowlist — student build bakes 'act' only. Admin/web build overrides
+# with the full comma-list to expose every policy. Enforced again server-side.
+ARG REACT_APP_ALLOWED_POLICIES=act
+ENV REACT_APP_ALLOWED_POLICIES=${REACT_APP_ALLOWED_POLICIES}
 
 COPY package*.json ./
 RUN npm install

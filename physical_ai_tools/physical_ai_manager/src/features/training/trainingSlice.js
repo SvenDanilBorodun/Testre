@@ -34,12 +34,12 @@ const defaultTrainingInfo = {
   policyType: undefined,
   outputFolderName: undefined,
   seed: 1000,
-  numWorkers: 4,
+  numWorkers: 2,
   batchSize: 8,
-  steps: 100000,
-  evalFreq: 20000,
+  steps: 50000,
+  evalFreq: 0,
   logFreq: 200,
-  saveFreq: 20000,
+  saveFreq: 10000,
 };
 
 const initialState = {

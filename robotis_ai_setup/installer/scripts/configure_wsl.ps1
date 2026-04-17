@@ -1,4 +1,4 @@
-# configure_wsl.ps1 — Merge recommended settings into .wslconfig
+﻿# configure_wsl.ps1 — Merge recommended settings into .wslconfig
 # Does NOT overwrite existing settings — only adds missing ones.
 
 $ErrorActionPreference = "Stop"

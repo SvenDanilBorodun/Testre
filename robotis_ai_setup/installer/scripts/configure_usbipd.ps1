@@ -1,4 +1,4 @@
-# configure_usbipd.ps1 — Set up usbipd policy for EduBotics USB-Geräte
+﻿# configure_usbipd.ps1 — Set up usbipd policy for EduBotics USB-Geräte
 # Requires usbipd 4.x+ for policy support
 # Must run elevated (as Administrator)
 
@@ -87,7 +87,8 @@ foreach ($hwid in $targetPairs) {
 }
 
 if ($addedCount -gt 0) {
-    Write-Host "   EduBotics USB-Geräte can now be attached to WSL2 without admin rights." -ForegroundColor Green
+    Write-Host "   EduBotics USB-Geräte can now be attached to the EduBotics WSL2 distro without admin rights." -ForegroundColor Green
+    Write-Host "   (usage: usbipd attach --wsl --distribution EduBotics --busid <BUSID>)" -ForegroundColor Gray
 } elseif ($addedCount -eq 0 -and $existingPolicies -match $ROBOTIS_VID) {
     Write-Host "   All EduBotics policies already configured." -ForegroundColor Green
 } else {

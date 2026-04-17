@@ -8,6 +8,11 @@ robotis_ai_setup/gui/dist/
 robotis_ai_setup/gui/build/
 robotis_ai_setup/installer/output/
 
+# Bundled WSL2 rootfs tarball — produced by wsl_rootfs/build_rootfs.sh,
+# ~200 MB compressed (exceeds GitHub 100 MB limit). Rebuild locally via:
+#   cd robotis_ai_setup/wsl_rootfs && ./build_rootfs.sh
+robotis_ai_setup/installer/assets/*.tar.gz
+
 # Supabase CLI local state
 robotis_ai_setup/supabase/.temp/
 

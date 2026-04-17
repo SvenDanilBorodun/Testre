@@ -28,6 +28,7 @@ Testre/
     ├── supabase/                    <- migration.sql + 002_accounts.sql
     ├── gui/                         <- Windows tkinter GUI (PyInstaller .exe)
     ├── installer/                   <- Inno Setup + PowerShell scripts
+    ├── wsl_rootfs/                  <- Ubuntu 22.04 + Docker Engine rootfs builder
     ├── scripts/                     <- bootstrap_admin.py
     ├── tests/                       <- Unit tests
     ├── CHANGES_SESSION_2026-04-06.md   <- Historical session log (reference only)
@@ -37,17 +38,28 @@ Testre/
 
 ## Architecture
 
-### Student Machine (3 Docker containers on Windows 11 + Docker Desktop WSL2)
+### Student Machine (3 Docker containers inside a bundled WSL2 distro, Windows 11)
 ```
-Browser (http://localhost) ← physical_ai_manager (nginx:80, React SPA, REACT_APP_MODE=student)
-                           ← rosbridge WebSocket (:9090, published by server)
-physical_ai_server         <- ROS2 + PyTorch + LeRobot + s6-overlay
-                              Records datasets, runs inference, publishes video (:8080)
-open_manipulator           <- ROS2 Jazzy, Dynamixel hardware interface
-                              Follower arm (IDs 11-16) + leader arm (IDs 1-6) + 2 cameras
+Windows host (no Docker Desktop)
+├── EduBotics.exe                    ← tkinter GUI (PyInstaller, student user)
+└── WSL2 kernel
+    └── EduBotics distro             ← custom Ubuntu 22.04 rootfs shipped in installer
+        ├── systemd + dockerd        ← headless Docker Engine (see wsl_rootfs/)
+        └── 3 containers on ros_net bridge:
+            Browser (http://localhost)  ← physical_ai_manager (nginx:80, React SPA)
+                                        ← rosbridge WebSocket (:9090)
+            physical_ai_server          <- ROS2 + PyTorch + LeRobot + s6-overlay
+                                           Records datasets, runs inference, video (:8080)
+            open_manipulator            <- ROS2 Jazzy, Dynamixel hardware interface
+                                           Follower (IDs 11-16) + leader (IDs 1-6) + 2 cameras
 ```
-Containers share a Docker bridge network (`ros_net`). `ROS_DOMAIN_ID=30`, privileged for USB.
-Ports published to host: `80` (React), `9090` (rosbridge), `8080` (web_video_server).
+Containers share a Docker bridge network (`ros_net`) inside the distro. `ROS_DOMAIN_ID=30`, privileged for USB.
+Ports are forwarded from the distro to the Windows host by WSL2: `80` (React), `9090` (rosbridge), `8080` (web_video_server).
+
+**No Docker Desktop**: Docker Engine runs inside the `EduBotics` WSL2 distro. The
+GUI addresses it via `wsl -d EduBotics -- docker ...` (wrapped by `_docker_cmd()`
+in [gui/app/docker_manager.py](robotis_ai_setup/gui/app/docker_manager.py)).
+USB devices reach the distro via `usbipd attach --wsl --distribution EduBotics`.
 
 ### Cloud Training
 ```
@@ -207,11 +219,15 @@ cd robotis_ai_setup/docker && REGISTRY=nettername \
   SUPABASE_URL=... SUPABASE_ANON_KEY=... CLOUD_API_URL=... \
   ./build-images.sh
 
+# Build the bundled WSL2 rootfs shipped in the Windows installer
+# (outputs installer/assets/edubotics-rootfs.tar.gz, ~350-450 MB)
+cd robotis_ai_setup/wsl_rootfs && ./build_rootfs.sh
+
 # Run unit tests
 cd robotis_ai_setup && python -m unittest discover -s tests -v
 
-# Validate Docker Compose
-cd robotis_ai_setup/docker && docker compose config
+# Validate Docker Compose (from inside the EduBotics distro)
+wsl -d EduBotics --cd /mnt/c/Program\ Files/EduBotics/docker -- docker compose config
 
 # Build Windows GUI
 cd robotis_ai_setup/gui && pyinstaller build.spec
@@ -226,7 +242,7 @@ cd robotis_ai_setup && python scripts/bootstrap_admin.py --username admin --full
 ## Environment
 
 - Windows 11 Pro build 26200
-- Python 3.14 (system), Docker Desktop, WSL2 Ubuntu-24.04
+- Python 3.14 (system), WSL2 Ubuntu-24.04 (dev work only; shipped product uses the EduBotics WSL2 distro)
 - Railway CLI linked, logged in as lastthedayey@gmail.com
 - Docker Hub logged in as nettername
 - Secrets in `robotis_ai_setup/cloud_training_api/.env` and `robotis_ai_setup/docker/.env` (both gitignored)

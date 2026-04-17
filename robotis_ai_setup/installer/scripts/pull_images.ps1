@@ -1,7 +1,12 @@
-# pull_images.ps1 — Pull Docker images with progress reporting
+﻿# pull_images.ps1 — Pull Docker images into the EduBotics WSL2 distro
+#
+# Routes every docker command through `wsl -d EduBotics -- docker ...` so we
+# never depend on the host having Docker Desktop. The distro ships its own
+# headless Docker Engine, imported by import_edubotics_wsl.ps1.
 
 param(
-    [string]$Registry = "nettername"
+    [string]$Registry   = "nettername",
+    [string]$DistroName = "EduBotics"
 )
 
 $ErrorActionPreference = "Stop"
@@ -22,7 +27,7 @@ if (Test-Path $VersionsEnv) {
         }
     }
 }
-Write-Host "Using image tag: $ImageTag (registry: $Registry)" -ForegroundColor Cyan
+Write-Host "Using image tag: $ImageTag (registry: $Registry, distro: $DistroName)" -ForegroundColor Cyan
 
 $images = @(
     "${Registry}/open-manipulator:${ImageTag}",
@@ -30,27 +35,33 @@ $images = @(
     "${Registry}/physical-ai-manager:${ImageTag}"
 )
 
-Write-Step "Pulling Docker images..."
+Write-Step "Pulling Docker images into $DistroName..."
 
-# Check Docker is running
-$dockerRunning = $false
+# Check the distro exists and docker runs inside it
+$listed = $false
 try {
-    docker info *>$null
-    $dockerRunning = $true
+    $out = wsl --list --quiet 2>&1
+    foreach ($line in $out) {
+        if (($line -replace "`0", "").Trim() -eq $DistroName) { $listed = $true; break }
+    }
 } catch { }
+if (-not $listed) {
+    Write-Host "ERROR: WSL2 distro '$DistroName' not found. Run import_edubotics_wsl.ps1 first." -ForegroundColor Red
+    exit 1
+}
 
-if (-not $dockerRunning) {
-    Write-Host "ERROR: Docker Desktop is not running. Start it and try again." -ForegroundColor Red
+wsl -d $DistroName -- docker info *>$null 2>&1
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "ERROR: Docker engine not running inside $DistroName. Check: wsl -d $DistroName -- systemctl status docker" -ForegroundColor Red
     exit 1
 }
 
 $total = $images.Count
 $current = 0
-
 foreach ($image in $images) {
     $current++
     Write-Host "`n   [$current/$total] Pulling $image ..." -ForegroundColor White
-    docker pull $image
+    wsl -d $DistroName -- docker pull $image
     if ($LASTEXITCODE -ne 0) {
         Write-Host "ERROR: Failed to pull $image" -ForegroundColor Red
         exit 1
@@ -59,7 +70,7 @@ foreach ($image in $images) {
 }
 
 Write-Step "Cleaning up old images..."
-docker image prune -f *>$null
+wsl -d $DistroName -- docker image prune -f *>$null
 Write-OK "Old images removed"
 
 Write-Step "All $total images pulled successfully!"

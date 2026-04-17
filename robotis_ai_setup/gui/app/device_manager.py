@@ -17,7 +17,7 @@ _CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 _SUBPROCESS_KWARGS = {"creationflags": _CREATE_NO_WINDOW} if sys.platform == "win32" else {}
 
 from . import wsl_bridge
-from .constants import ROBOTIS_VID
+from .constants import ROBOTIS_VID, WSL_DISTRO_NAME
 
 
 @dataclass
@@ -94,17 +94,20 @@ def list_robotis_devices() -> list[USBDevice]:
 
 
 def attach_usb_to_wsl(busid: str, retries: int = 3) -> bool:
-    """Attach a USB device to WSL2 via usbipd, with retry.
+    """Attach a USB device to the EduBotics WSL2 distro via usbipd, with retry.
 
     With usbipd 4.x+ policy configured, this does not require admin.
     Retries on failure because usbipd can be busy if multiple attaches
     happen in quick succession.
+
+    Pins the target distro so multi-distro dev machines attach deterministically.
     """
     import time
     for attempt in range(retries):
         try:
             result = subprocess.run(
-                ["usbipd", "attach", "--wsl", "--busid", busid],
+                ["usbipd", "attach", "--wsl", "--distribution", WSL_DISTRO_NAME,
+                 "--busid", busid],
                 capture_output=True, text=True, timeout=15,
                 **_SUBPROCESS_KWARGS,
             )
@@ -151,6 +154,11 @@ def find_serial_paths_for_robotis() -> list[str]:
     return [p for p in all_serial if "ROBOTIS" in p.upper() or "OPENRB" in p.upper()]
 
 
+def _docker(*args: str) -> list[str]:
+    """Build a `wsl -d EduBotics -- docker ...` command."""
+    return ["wsl", "-d", WSL_DISTRO_NAME, "--", "docker", *args]
+
+
 def identify_arm_via_docker(serial_path: str) -> str:
     """Run identify_arm.py inside the open_manipulator container.
 
@@ -158,10 +166,8 @@ def identify_arm_via_docker(serial_path: str) -> str:
     """
     try:
         result = subprocess.run(
-            [
-                "docker", "exec", "robotis_arm_scanner",
-                "python3", "/usr/local/bin/identify_arm.py", serial_path,
-            ],
+            _docker("exec", "robotis_arm_scanner",
+                    "python3", "/usr/local/bin/identify_arm.py", serial_path),
             capture_output=True, text=True, timeout=15,
             **_SUBPROCESS_KWARGS,
         )
@@ -171,28 +177,22 @@ def identify_arm_via_docker(serial_path: str) -> str:
 
 
 def start_scanner_container(image: str) -> bool:
-    """Start a temporary container for arm identification.
-
-    Uses the open_manipulator image with a sleep command so we can
-    docker exec identify_arm.py into it.
-    """
+    """Start a temporary container (inside the EduBotics distro) for arm identification."""
     # Stop any existing scanner
     subprocess.run(
-        ["docker", "rm", "-f", "robotis_arm_scanner"],
+        _docker("rm", "-f", "robotis_arm_scanner"),
         capture_output=True, timeout=10,
         **_SUBPROCESS_KWARGS,
     )
     try:
         result = subprocess.run(
-            [
-                "docker", "run", "-d",
-                "--name", "robotis_arm_scanner",
-                "--privileged",
-                "-v", "/dev:/dev",
-                "--entrypoint", "sleep",
-                image,
-                "120",
-            ],
+            _docker("run", "-d",
+                    "--name", "robotis_arm_scanner",
+                    "--privileged",
+                    "-v", "/dev:/dev",
+                    "--entrypoint", "sleep",
+                    image,
+                    "120"),
             capture_output=True, text=True, timeout=30,
             **_SUBPROCESS_KWARGS,
         )
@@ -204,7 +204,7 @@ def start_scanner_container(image: str) -> bool:
 def stop_scanner_container():
     """Remove the temporary scanner container."""
     subprocess.run(
-        ["docker", "rm", "-f", "robotis_arm_scanner"],
+        _docker("rm", "-f", "robotis_arm_scanner"),
         capture_output=True, timeout=10,
         **_SUBPROCESS_KWARGS,
     )

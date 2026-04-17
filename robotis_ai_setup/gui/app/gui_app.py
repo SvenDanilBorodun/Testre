@@ -3,15 +3,88 @@
 Bietet eine schrittweise Oberfläche für:
   1. Erkennen und Identifizieren der Roboterarme (Leader/Follower)
   2. Kamera auswählen
-  3. Docker-Umgebung starten/stoppen
+  3. EduBotics-Umgebung starten/stoppen (Container in der EduBotics WSL2-Distro)
   4. Webbrowser mit der EduBotics Web-Oberfläche öffnen
 """
 
 import os
+import subprocess
+import sys
 import threading
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
 import webbrowser
+
+
+def _elevate_and_wait(exe: str, args: str, show: int = 1):
+    """Run `exe args` elevated via UAC and wait for exit.
+
+    Uses ShellExecuteExW (Win32) directly instead of PowerShell's
+    `Start-Process -Verb RunAs -Wait`, which has known parameter-set
+    conflicts and unreliable wait semantics.
+
+    Returns (exit_code, cancelled, error_message). On non-Windows, returns
+    (None, False, 'not supported').
+    """
+    if sys.platform != "win32":
+        return None, False, "not supported"
+
+    import ctypes
+    from ctypes import wintypes
+
+    SEE_MASK_NOCLOSEPROCESS = 0x00000040
+    SEE_MASK_NOASYNC        = 0x00000100
+    SEE_MASK_FLAG_NO_UI     = 0x00000400
+    ERROR_CANCELLED         = 1223
+    INFINITE                = 0xFFFFFFFF
+
+    class SHELLEXECUTEINFOW(ctypes.Structure):
+        _fields_ = [
+            ("cbSize",       wintypes.DWORD),
+            ("fMask",        wintypes.ULONG),
+            ("hwnd",         wintypes.HWND),
+            ("lpVerb",       wintypes.LPCWSTR),
+            ("lpFile",       wintypes.LPCWSTR),
+            ("lpParameters", wintypes.LPCWSTR),
+            ("lpDirectory",  wintypes.LPCWSTR),
+            ("nShow",        ctypes.c_int),
+            ("hInstApp",     wintypes.HINSTANCE),
+            ("lpIDList",     ctypes.c_void_p),
+            ("lpClass",      wintypes.LPCWSTR),
+            ("hkeyClass",    wintypes.HANDLE),
+            ("dwHotKey",     wintypes.DWORD),
+            ("hIconOrMonitor", wintypes.HANDLE),
+            ("hProcess",     wintypes.HANDLE),
+        ]
+
+    info = SHELLEXECUTEINFOW()
+    info.cbSize = ctypes.sizeof(info)
+    info.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC
+    info.lpVerb = "runas"
+    info.lpFile = exe
+    info.lpParameters = args
+    info.nShow = show
+
+    shell32 = ctypes.windll.shell32
+    kernel32 = ctypes.windll.kernel32
+    shell32.ShellExecuteExW.restype = wintypes.BOOL
+    shell32.ShellExecuteExW.argtypes = [ctypes.POINTER(SHELLEXECUTEINFOW)]
+
+    ok = shell32.ShellExecuteExW(ctypes.byref(info))
+    if not ok:
+        err = ctypes.get_last_error()
+        if err == ERROR_CANCELLED:
+            return None, True, "UAC abgebrochen"
+        return None, False, f"ShellExecuteEx Fehler {err}"
+
+    if not info.hProcess:
+        return None, False, "Kein Prozess-Handle erhalten"
+
+    kernel32.WaitForSingleObject(info.hProcess, INFINITE)
+    exit_code = wintypes.DWORD(0)
+    kernel32.GetExitCodeProcess(info.hProcess, ctypes.byref(exit_code))
+    kernel32.CloseHandle(info.hProcess)
+    return int(exit_code.value), False, None
 
 from . import device_manager, docker_manager, health_checker, config_generator, wsl_bridge, update_checker
 from .constants import (
@@ -243,7 +316,7 @@ class EduBoticsApp:
     # ── Prerequisites Check ──────────────────────────────────────────
 
     def _check_prerequisites(self):
-        """Auf GUI-Update prüfen, dann Docker, WSL2, usbipd beim Start prüfen."""
+        """Auf GUI-Update prüfen, dann EduBotics-Umgebung, WSL2, usbipd beim Start prüfen."""
         def _check():
             self.root.after(0, lambda: self.progress.start(10))
 
@@ -267,46 +340,49 @@ class EduBoticsApp:
                 return  # Block all further startup until update is applied
             self._log(f"GUI ist aktuell (Version {APP_VERSION}).")
 
-            # Continue with Docker/system checks
+            # Continue with EduBotics-Umgebung / system checks
             self._run_prerequisite_checks()
 
         threading.Thread(target=_check, daemon=True).start()
 
     def _run_prerequisite_checks(self):
-        """Docker, Images, GPU prüfen (called after update check passes)."""
+        """EduBotics-Umgebung, Images, GPU prüfen (called after update check passes)."""
         self.root.after(0, lambda: self.progress.start(10))
         self._log("Voraussetzungen werden geprüft...")
 
-        # Check Docker — auto-start if not running
-        self._set_status("Docker Desktop wird geprüft...")
+        # Check the EduBotics WSL2 distro is installed and docker engine is up
+        self._set_status("EduBotics-Umgebung wird geprüft...")
+        if not docker_manager.is_distro_registered():
+            self._log("EduBotics-Umgebung ist noch nicht eingerichtet.")
+            self.root.after(0, lambda: self.progress.stop())
+            # Offer one-click finalize (UAC prompt, runs finalize_install.ps1).
+            self.root.after(0, self._prompt_finalize_install)
+            return
         if not docker_manager.is_docker_running():
-            self._log("Docker Desktop läuft nicht. Versuche automatisch zu starten...")
-            if docker_manager.start_docker_desktop():
-                self._log("Docker Desktop wird gestartet...")
-            else:
-                self._log("Docker Desktop konnte nicht automatisch gestartet werden.")
+            self._log("EduBotics-Umgebung startet...")
+            docker_manager.start_edubotics_distro()
             if not docker_manager.wait_for_docker(
-                callback=lambda e, t: self._set_status(f"Warte auf Docker... {e}s/{t}s")
+                callback=lambda e, t: self._set_status(f"Warte auf EduBotics-Umgebung... {e}s/{t}s")
             ):
-                self._log("FEHLER: Docker Desktop läuft nicht. Bitte manuell starten und App neu starten.")
-                self._set_status("Docker Desktop nicht gefunden")
+                self._log("FEHLER: EduBotics-Umgebung konnte nicht gestartet werden.")
+                self._set_status("EduBotics-Umgebung nicht bereit")
                 self.root.after(0, lambda: self.progress.stop())
                 return
-        self._log("Docker Desktop: OK")
+        self._log("EduBotics-Umgebung: OK")
 
         # Check images
-        self._set_status("Docker-Images werden geprüft...")
+        self._set_status("Images werden geprüft...")
         img_status = docker_manager.images_exist()
         missing = [img for img, exists in img_status.items() if not exists]
         if missing:
             self._log(f"Fehlende Images: {', '.join(missing)}")
             self._log("Images werden heruntergeladen (kann beim ersten Mal 15-30 Min. dauern)...")
-            self._set_status("Docker-Images werden heruntergeladen...")
+            self._set_status("Images werden heruntergeladen...")
             if not docker_manager.pull_images(
                 callback=lambda img, i, t: self._set_status(f"Lade Image {i+1}/{t}: {img.split('/')[-1]}"),
                 log=self._log,
             ):
-                self._log("FEHLER: Docker-Images konnten nicht heruntergeladen werden. Internetverbindung prüfen.")
+                self._log("FEHLER: Images konnten nicht heruntergeladen werden. Internetverbindung prüfen.")
                 self._set_status("Image-Download fehlgeschlagen")
                 self.root.after(0, lambda: self.progress.stop())
                 return
@@ -347,6 +423,122 @@ class EduBoticsApp:
         self._set_status("Bereit — Hardware scannen, um zu beginnen")
         self.root.after(0, lambda: self.progress.stop())
         self._log("Systemprüfung abgeschlossen. Arme und Kamera anschließen, dann auf Scannen klicken.")
+
+    # ── Finalize Install (post-reboot continuation) ─────────────────
+
+    # ── ShellExecuteEx helper is defined at module scope below. ──────
+
+    def _resolve_finalize_script(self):
+        """Find finalize_install.ps1. Supports both production and dev layouts."""
+        from .constants import INSTALL_DIR
+        candidates = [
+            os.path.join(INSTALL_DIR, "scripts", "finalize_install.ps1"),            # production install
+            os.path.join(INSTALL_DIR, "installer", "scripts", "finalize_install.ps1"),  # dev tree
+        ]
+        for p in candidates:
+            if os.path.isfile(p):
+                return p
+        return None
+
+    def _prompt_finalize_install(self):
+        """Prompt the student to finalize setup after a post-reboot continuation.
+
+        When WSL2 was installed fresh, the installer defers rootfs import until
+        after reboot. On first GUI launch the distro is missing; we ask the
+        student for admin consent and run finalize_install.ps1 with UAC.
+        """
+        script = self._resolve_finalize_script()
+        if script is None:
+            messagebox.showerror(
+                "EduBotics-Umgebung fehlt",
+                "Die EduBotics-Umgebung ist nicht eingerichtet und das "
+                "Einrichtungsskript wurde nicht gefunden. Bitte den Installer "
+                "erneut ausführen.",
+            )
+            self._set_status("EduBotics-Umgebung fehlt")
+            return
+
+        self._log(f"Setup-Skript: {script}")
+
+        wants_run = messagebox.askyesno(
+            "Einrichtung abschließen",
+            "Die EduBotics-Umgebung muss noch eingerichtet werden.\n\n"
+            "Dies erfordert einmalig Administrator-Rechte und dauert "
+            "3–10 Minuten (Rootfs-Import + Docker-Images).\n\n"
+            "Jetzt einrichten?",
+        )
+        if not wants_run:
+            self._set_status("EduBotics-Umgebung nicht eingerichtet")
+            self._log("Einrichtung vom Benutzer verschoben.")
+            return
+
+        self._set_status("Einrichtung läuft (UAC-Zustimmung erforderlich)...")
+        self._log("Einrichtung wird mit Administrator-Rechten gestartet...")
+
+        def _run_elevated():
+            import tempfile
+            # The elevated finalize_install.ps1 writes:
+            #   - a marker file on startup (proves it launched)
+            #   - a transcript file with full stdout/stderr (Start-Transcript)
+            # Using ShellExecuteEx directly (not nested Start-Process) so we
+            # get a reliable process handle + deterministic wait.
+            temp = tempfile.gettempdir()
+            log_file = os.path.join(temp, "edubotics_finalize.log")
+            marker_file = os.path.join(temp, "edubotics_finalize.marker")
+            for f in (log_file, marker_file):
+                try:
+                    if os.path.isfile(f):
+                        os.remove(f)
+                except OSError:
+                    pass
+
+            exit_code, cancelled, err = _elevate_and_wait(
+                exe="powershell.exe",
+                args=(
+                    f'-NoProfile -ExecutionPolicy Bypass -File "{script}" '
+                    f'-LogPath "{log_file}" -MarkerPath "{marker_file}"'
+                ),
+            )
+            if err:
+                self._log(f"UAC-Fehler: {err}")
+
+            # Did the elevated script start at all?
+            marker_seen = os.path.isfile(marker_file)
+            if not marker_seen:
+                self._log(
+                    "Das Setup-Skript wurde nicht gestartet "
+                    "(Marker-Datei fehlt)."
+                )
+
+            # Surface the elevated script's transcript (last ~30 lines).
+            try:
+                if os.path.isfile(log_file) and os.path.getsize(log_file) > 0:
+                    with open(log_file, "r", encoding="utf-8", errors="replace") as fh:
+                        lines = [ln for ln in fh.read().splitlines() if ln.strip()]
+                    tail = lines[-30:]
+                    if tail:
+                        self._log("── Setup-Protokoll ──")
+                        for line in tail:
+                            self._log(f"  {line}")
+            except OSError:
+                pass
+
+            # Re-check.
+            if docker_manager.is_distro_registered():
+                self._log("Einrichtung abgeschlossen. Systemprüfung wird fortgesetzt...")
+                self.root.after(0, lambda: self._run_prerequisite_checks())
+            else:
+                if cancelled:
+                    self._log("Einrichtung abgebrochen (UAC-Zustimmung verweigert).")
+                    self._set_status("Einrichtung abgebrochen — erneut versuchen")
+                else:
+                    self._log(
+                        f"Einrichtung fehlgeschlagen (exit {exit_code}). "
+                        "Siehe Protokoll oben."
+                    )
+                    self._set_status("Einrichtung fehlgeschlagen")
+
+        threading.Thread(target=_run_elevated, daemon=True).start()
 
     # ── Update Dialog ───────────────────────────────────────────────
 
@@ -624,7 +816,7 @@ class EduBoticsApp:
     # ── Start Environment ────────────────────────────────────────────
 
     def _start_environment(self):
-        """Docker-Umgebung starten und Browser öffnen."""
+        """EduBotics-Umgebung starten und Browser öffnen."""
         is_cloud_only = self.cloud_only.get()
 
         if not is_cloud_only and not self.hardware.is_complete:
@@ -689,14 +881,14 @@ class EduBoticsApp:
             use_gpu = self.gpu_available and not is_cloud_only
             self._set_status("Container werden gestartet...")
             if is_cloud_only:
-                self._log("Docker Compose wird gestartet (nur physical_ai_manager, ohne Roboter)...")
+                self._log("Container werden gestartet (nur physical_ai_manager, ohne Roboter)...")
                 ok = docker_manager.start_cloud_only(log=self._log)
             else:
-                self._log(f"Docker Compose wird gestartet ({'GPU' if use_gpu else 'CPU'}-Modus)...")
+                self._log(f"Container werden gestartet ({'GPU' if use_gpu else 'CPU'}-Modus)...")
                 ok = docker_manager.start_containers(gpu=use_gpu, log=self._log)
 
             if not ok:
-                self._log("FEHLER: Container konnten nicht gestartet werden. Docker Desktop prüfen.")
+                self._log("FEHLER: Container konnten nicht gestartet werden. EduBotics-Umgebung prüfen.")
                 self._set_status("Start fehlgeschlagen")
                 self.root.after(0, lambda: self.progress.stop())
                 self.running = False
@@ -748,13 +940,13 @@ class EduBoticsApp:
         webbrowser.open(f"http://localhost:{PORT_WEB_UI}{suffix}")
 
     def _stop_environment(self):
-        """Alle Docker-Container stoppen."""
+        """Alle Container in der EduBotics-Umgebung stoppen."""
         self.btn_stop.config(state=tk.DISABLED)
         self.btn_open_browser.config(state=tk.DISABLED)
 
         def _do_stop():
             self._set_status("Container werden gestoppt...")
-            self._log("Docker Compose wird gestoppt...")
+            self._log("Container werden gestoppt...")
             self.root.after(0, lambda: self.progress.start(10))
 
             if self.cloud_only.get():

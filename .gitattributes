@@ -1,0 +1,24 @@
+# Default: let git handle line endings normally
+* text=auto
+
+# Files that MUST stay LF-only. Shell scripts get COPY'd into Linux Docker
+# images and must not be corrupted by Windows CRLF conversion — PowerShell
+# would happily accept CRLF, but /bin/sh refuses shebang lines with ^M.
+*.sh                  text eol=lf
+Dockerfile            text eol=lf
+wsl.conf              text eol=lf
+daemon.json           text eol=lf
+docker-compose*.yml   text eol=lf
+.s6-keep              text eol=lf
+
+# PowerShell scripts on Windows should stay CRLF or UTF-8+BOM (the scripts
+# are explicitly saved with BOM to survive Windows PowerShell 5.1 parsing).
+*.ps1                 text eol=crlf working-tree-encoding=UTF-8
+
+# Binary — never convert
+*.tar.gz              binary
+*.vhdx                binary
+*.png                 binary
+*.jpg                 binary
+*.ico                 binary
+*.exe                 binary

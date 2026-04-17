@@ -117,6 +117,31 @@ DOCKER_DIR = os.path.join(INSTALL_DIR, "docker")
 COMPOSE_FILE = os.path.join(DOCKER_DIR, "docker-compose.yml")
 COMPOSE_GPU_FILE = os.path.join(DOCKER_DIR, "docker-compose.gpu.yml")
 
+# WSL2 distro that hosts the headless Docker Engine. Students never see the
+# word "Docker" — this is the single knob the GUI uses to address the runtime.
+# Override with EDUBOTICS_WSL_DISTRO for dev/testing against a different distro.
+WSL_DISTRO_NAME = os.environ.get("EDUBOTICS_WSL_DISTRO", "EduBotics")
+
+
+def _to_wsl_path(win_path: str) -> str:
+    r"""Convert a Windows absolute path to its /mnt/<drive>/... WSL form.
+
+    Examples:
+        C:\Program Files\EduBotics\docker  →  /mnt/c/Program Files/EduBotics/docker
+        C:/Users/x/.env                    →  /mnt/c/Users/x/.env
+    """
+    if not win_path:
+        return win_path
+    normalized = win_path.replace("\\", "/")
+    if len(normalized) >= 2 and normalized[1] == ":":
+        drive = normalized[0].lower()
+        rest = normalized[2:].lstrip("/")
+        return f"/mnt/{drive}/{rest}"
+    return normalized
+
+
+DOCKER_DIR_WSL = _to_wsl_path(DOCKER_DIR)
+
 # User-writable .env location. We cannot write under Program Files without
 # admin rights, so the .env lives in %LOCALAPPDATA%\EduBotics\.env and is
 # passed to docker compose via --env-file. This avoids PermissionError when

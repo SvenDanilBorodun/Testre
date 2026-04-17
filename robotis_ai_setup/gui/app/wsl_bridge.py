@@ -1,12 +1,14 @@
-"""WSL2 command execution bridge.
+"""WSL2 command execution bridge — pinned to the EduBotics distro.
 
-All Linux-side commands are executed via:
-    subprocess.run(["wsl", "--", "bash", "-c", cmd])
+Every `wsl` invocation targets the EduBotics distro explicitly so the GUI
+behaves the same way regardless of what other distros the user has installed.
 """
 
 import subprocess
 import sys
 from typing import Optional
+
+from .constants import WSL_DISTRO_NAME
 
 _CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 _SUBPROCESS_KWARGS = {"creationflags": _CREATE_NO_WINDOW} if sys.platform == "win32" else {}
@@ -16,20 +18,22 @@ class WSLError(Exception):
     """Raised when a WSL command fails."""
 
 
-def run(cmd: str, timeout: int = 30, check: bool = True) -> subprocess.CompletedProcess:
-    """Execute a command inside the default WSL2 distribution.
+def run(cmd: str, timeout: int = 30, check: bool = True, distro: Optional[str] = None) -> subprocess.CompletedProcess:
+    """Execute a command inside the EduBotics WSL2 distribution.
 
     Args:
-        cmd: Bash command string to execute inside WSL2.
+        cmd: Bash command string to execute.
         timeout: Seconds before the command is killed.
         check: If True, raise WSLError on non-zero exit code.
+        distro: Override the distro name (defaults to EduBotics).
 
     Returns:
         CompletedProcess with stdout/stderr as decoded strings.
     """
+    target = distro or WSL_DISTRO_NAME
     try:
         result = subprocess.run(
-            ["wsl", "--", "bash", "-c", cmd],
+            ["wsl", "-d", target, "--", "bash", "-c", cmd],
             capture_output=True,
             text=True,
             timeout=timeout,
@@ -42,7 +46,7 @@ def run(cmd: str, timeout: int = 30, check: bool = True) -> subprocess.Completed
 
     if check and result.returncode != 0:
         raise WSLError(
-            f"WSL command failed (exit {result.returncode}):\n"
+            f"WSL command failed in distro {target!r} (exit {result.returncode}):\n"
             f"  cmd: {cmd}\n"
             f"  stderr: {result.stderr.strip()}"
         )
@@ -50,7 +54,7 @@ def run(cmd: str, timeout: int = 30, check: bool = True) -> subprocess.Completed
 
 
 def is_wsl_available() -> bool:
-    """Check whether WSL2 is installed and a distribution is running."""
+    """Check whether WSL2 is installed on the host."""
     try:
         result = subprocess.run(
             ["wsl", "--status"],
@@ -64,8 +68,26 @@ def is_wsl_available() -> bool:
         return False
 
 
+def is_edubotics_distro_registered() -> bool:
+    """Return True iff the EduBotics WSL2 distro is registered."""
+    try:
+        result = subprocess.run(
+            ["wsl", "--list", "--quiet"],
+            capture_output=True, text=True, timeout=10,
+            **_SUBPROCESS_KWARGS,
+        )
+        if result.returncode != 0:
+            return False
+        for line in result.stdout.splitlines():
+            if line.replace("\x00", "").strip() == WSL_DISTRO_NAME:
+                return True
+        return False
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+
+
 def list_serial_devices() -> list[str]:
-    """List /dev/serial/by-id/ paths visible inside WSL2."""
+    """List /dev/serial/by-id/ paths visible inside the EduBotics distro."""
     try:
         result = run("ls /dev/serial/by-id/ 2>/dev/null", check=False)
         if result.returncode != 0 or not result.stdout.strip():
@@ -107,22 +129,3 @@ done
         return devices
     except WSLError:
         return []
-
-
-def get_docker_wsl_distro() -> Optional[str]:
-    """Return the name of Docker Desktop's WSL2 distro, if found."""
-    try:
-        result = subprocess.run(
-            ["wsl", "-l", "-q"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            **_SUBPROCESS_KWARGS,
-        )
-        for line in result.stdout.splitlines():
-            name = line.strip().replace("\x00", "")
-            if "docker-desktop" in name.lower():
-                return name
-        return None
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return None

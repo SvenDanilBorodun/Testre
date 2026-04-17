@@ -1,6 +1,0 @@
-[submodule "open_manipulator"]
-	path = open_manipulator
-	url = https://github.com/ROBOTIS-GIT/open_manipulator
-[submodule "physical_ai_tools"]
-	path = physical_ai_tools
-	url = https://github.com/ROBOTIS-GIT/physical_ai_tools.git

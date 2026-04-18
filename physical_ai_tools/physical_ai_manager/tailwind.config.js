@@ -3,9 +3,39 @@ module.exports = {
   content: ['./src/**/*.{js,jsx,ts,tsx}'],
   theme: {
     extend: {
+      fontFamily: {
+        sans: ['"Inter Tight"', '-apple-system', 'BlinkMacSystemFont', '"Segoe UI"', 'sans-serif'],
+        mono: ['"JetBrains Mono"', 'monospace'],
+      },
+      colors: {
+        ebg: 'var(--bg)',
+        ebgSunk: 'var(--bg-sunk)',
+        eink: 'var(--ink)',
+        eink2: 'var(--ink-2)',
+        eink3: 'var(--ink-3)',
+        eink4: 'var(--ink-4)',
+        eline: 'var(--line)',
+        eaccent: 'var(--accent)',
+        eaccentInk: 'var(--accent-ink)',
+        eaccentWash: 'var(--accent-wash)',
+        edanger: 'var(--danger)',
+        edangerWash: 'var(--danger-wash)',
+        esuccess: 'var(--success)',
+        esuccessWash: 'var(--success-wash)',
+        eamber: 'var(--amber)',
+        eamberWash: 'var(--amber-wash)',
+        ebgDark: 'var(--dark-bg)',
+        eraisedDark: 'var(--dark-raised)',
+      },
+      borderRadius: {
+        eb: 'var(--radius)',
+        ebLg: 'var(--radius-lg)',
+        ebSm: 'var(--radius-sm)',
+      },
       spacing: {
         4: '1rem',
         8: '2rem',
+        22: '5.5rem',
         25: '6.25rem',
         30: '7.5rem',
         35: '8.75rem',
@@ -32,6 +62,7 @@ module.exports = {
         65: '16.25rem',
       },
       width: {
+        22: '5.5rem',
         35: '8.75rem',
         80: '20rem',
       },

@@ -193,15 +193,12 @@ export default function DatasetSelector() {
   const classCard = clsx(
     'bg-white',
     'border',
-    'border-gray-200',
-    'rounded-2xl',
-    'shadow-lg',
-    'p-6',
-    'w-full',
-    'max-w-lg'
+    'border-[var(--line)]',
+    'rounded-[var(--radius-lg)]',
+    'shadow-soft',
+    'p-5',
+    'w-full'
   );
-
-  const classTitle = clsx('text-xl', 'font-bold', 'text-gray-800', 'mb-6', 'text-left');
 
   const classRefreshButton = clsx(
     'w-full',

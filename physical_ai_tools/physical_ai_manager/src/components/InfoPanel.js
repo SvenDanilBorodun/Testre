@@ -214,20 +214,20 @@ const InfoPanel = () => {
     return () => clearInterval(timer);
   }, [lastTaskStatusUpdate, isTaskStatusPaused]);
 
-  const classLabel = clsx('text-sm', 'text-gray-600', 'w-28', 'flex-shrink-0', 'font-medium');
+  const classLabel = clsx('text-xs', 'text-gray-600', 'w-[120px]', 'flex-shrink-0', 'font-medium', 'leading-snug', 'break-words');
 
   const classInfoPanel = clsx(
     'bg-white',
     'border',
-    'border-gray-200',
-    'rounded-2xl',
-    'shadow-md',
+    'border-[var(--line)]',
+    'rounded-[var(--radius-lg)]',
+    'shadow-soft',
     'p-4',
     'w-full',
-    'max-w-[350px]',
     'relative',
     'overflow-y-auto',
-    'scrollbar-thin'
+    'scrollbar-thin',
+    'max-h-[calc(100vh-220px)]'
   );
 
   const classTaskNameTextarea = clsx(
@@ -433,11 +433,13 @@ const InfoPanel = () => {
       <div className={clsx('flex', 'items-start', 'mb-2.5')}>
         <span
           className={clsx(
-            'text-sm',
+            'text-xs',
             'text-gray-600',
-            'w-28',
+            'w-[120px]',
             'flex-shrink-0',
             'font-medium',
+            'leading-snug',
+            'break-words',
             'pt-2'
           )}
         >
@@ -523,11 +525,13 @@ const InfoPanel = () => {
       <div className={clsx('flex', 'items-start', 'mb-2.5')}>
         <span
           className={clsx(
-            'text-sm',
+            'text-xs',
             'text-gray-600',
-            'w-28',
+            'w-[120px]',
             'flex-shrink-0',
             'font-medium',
+            'leading-snug',
+            'break-words',
             'pt-2'
           )}
         >

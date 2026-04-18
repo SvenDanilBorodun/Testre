@@ -18,7 +18,7 @@ import React, { useEffect } from 'react';
 import { useSelector, useDispatch } from 'react-redux';
 import clsx from 'clsx';
 import toast, { useToasterStore } from 'react-hot-toast';
-import HeartbeatStatus from '../components/HeartbeatStatus';
+import { MdLogout } from 'react-icons/md';
 import DatasetSelector from '../components/DatasetSelector';
 import PolicySelector from '../components/PolicySelector';
 import TrainingOutputFolderInput from '../components/TrainingOutputFolderInput';
@@ -28,6 +28,8 @@ import TrainingProgressBar from '../components/TrainingProgressBar';
 import TrainingLossDisplay from '../components/TrainingLossDisplay';
 import MyModels from '../components/MyModels';
 import LoginForm from '../components/LoginForm';
+import HeartbeatStatus from '../components/HeartbeatStatus';
+import { Card, Pill, Btn, SectionHeader } from '../components/EbUI';
 import { supabase } from '../lib/supabaseClient';
 import { clearSession } from '../features/auth/authSlice';
 import { getQuota } from '../services/cloudTrainingApi';
@@ -40,8 +42,8 @@ export default function TrainingPage() {
   const session = useSelector((state) => state.auth.session);
   const trainingCredits = useSelector((state) => state.auth.trainingCredits);
   const trainingsUsed = useSelector((state) => state.auth.trainingsUsed);
+  const isTraining = useSelector((state) => state.training.isTraining);
 
-  // Toast limit implementation using useToasterStore
   const { toasts } = useToasterStore();
   const TOAST_LIMIT = 3;
 
@@ -52,7 +54,6 @@ export default function TrainingPage() {
       .forEach((t) => toast.dismiss(t.id));
   }, [toasts]);
 
-  // Fetch quota when authenticated
   useEffect(() => {
     if (isAuthenticated && session?.access_token) {
       getQuota(session.access_token)
@@ -67,108 +68,165 @@ export default function TrainingPage() {
     toast.success('Abgemeldet');
   };
 
-  const classContainer = clsx(
-    'w-full',
-    'h-full',
-    'flex',
-    'flex-col',
-    'items-start',
-    'justify-start',
-    'pt-10'
-  );
-
-  const classHeartbeatStatus = clsx('absolute', 'top-5', 'left-35', 'z-10');
-
-  const classComponentsContainer = clsx(
-    'w-full',
-    'flex',
-    'p-10',
-    'gap-8',
-    'items-start',
-    'justify-center'
-  );
-
-  // Show loading spinner while checking auth
   if (isLoading) {
     return (
       <div className="flex items-center justify-center h-full">
-        <div className="text-gray-500 text-lg">Laden...</div>
+        <div className="text-[var(--ink-3)] text-lg">Laden…</div>
       </div>
     );
   }
 
-  // Show login form if not authenticated
   if (!isAuthenticated) {
     return <LoginForm />;
   }
 
   const remaining = trainingCredits - trainingsUsed;
+  const creditTone = remaining <= 0 ? 'danger' : remaining <= 2 ? 'amber' : 'success';
 
   return (
-    <div className={classContainer}>
-      <div className={classHeartbeatStatus}>
-        <HeartbeatStatus />
-      </div>
+    <div className="h-full w-full overflow-y-auto" style={{ background: 'var(--bg)' }}>
+      <div className="max-w-[1280px] mx-auto px-10 py-8 flex flex-col gap-6">
+        {/* Header rail */}
+        <SectionHeader
+          eyebrow="Training"
+          title="Modell trainieren"
+          description="Wähle Datensatz und Policy, dann starte das Training in der Cloud."
+          right={
+            <div className="flex items-center gap-3">
+              <HeartbeatStatus />
+              <div className="text-right">
+                <div className="text-xs text-[var(--ink-3)]">{session?.user?.email}</div>
+                <Pill tone={creditTone} dot>
+                  <span className="font-mono">
+                    {remaining} / {trainingCredits}
+                  </span>{' '}
+                  Trainingsguthaben
+                </Pill>
+              </div>
+              <Btn variant="ghost" size="sm" onClick={handleLogout}>
+                <MdLogout /> Abmelden
+              </Btn>
+            </div>
+          }
+        />
 
-      {/* User info bar */}
-      <div className="absolute top-4 right-6 flex items-center gap-4 z-10">
-        <div className="flex items-center gap-2">
-          <span className="text-sm text-gray-600">{session?.user?.email}</span>
-          <span
-            className={clsx(
-              'text-xs font-semibold px-2 py-0.5 rounded-full',
-              remaining > 0
-                ? 'bg-green-100 text-green-700'
-                : 'bg-red-100 text-red-700'
-            )}
-          >
-            {remaining} / {trainingCredits} Trainingsguthaben
-          </span>
-        </div>
-        <button
-          onClick={handleLogout}
-          className="text-sm text-gray-500 hover:text-gray-700 underline"
-        >
-          Abmelden
-        </button>
-      </div>
-
-      {/* Training components */}
-      <div className="overflow-scroll h-full w-full">
-        <div className={classComponentsContainer}>
-          <DatasetSelector />
-          <PolicySelector />
-          <TrainingOutputFolderInput />
-          <TrainingOptionInput />
-        </div>
-        <div className="flex justify-center items-center mt-5 mb-8">
-          <div className="rounded-full bg-gray-200 w-32 h-3"></div>
-        </div>
-        <div className="flex justify-center items-center mb-10">
-          <div className="w-full max-w-md">
-            <TrainingLossDisplay />
+        {/* Setup rail */}
+        <div>
+          <div className="flex items-center gap-3 mb-3">
+            <h2 className="text-[15px] font-semibold tracking-tight text-[var(--ink)]">
+              Setup
+            </h2>
+            <span className="text-xs text-[var(--ink-3)]">
+              Datensatz · Policy · Ausgabe · Optionen
+            </span>
           </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4 items-start">
+            <div className="min-w-0">
+              <StepLabel n={1} title="Datensatz" />
+              <DatasetSelector />
+            </div>
+            <div className="min-w-0">
+              <StepLabel n={2} title="Policy" />
+              <PolicySelector />
+            </div>
+            <div className="min-w-0">
+              <StepLabel n={3} title="Ausgabeordner" />
+              <TrainingOutputFolderInput />
+            </div>
+            <div className="min-w-0">
+              <StepLabel n={4} title="Optionen" />
+              <TrainingOptionInput />
+            </div>
+          </div>
+        </div>
+
+        {/* Monitor + Credits rail */}
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+          <Card
+            className="lg:col-span-8"
+            title="Trainingsverlauf"
+            subtitle={isTraining ? 'Live · aktualisiert laufend' : 'Bereit'}
+            right={
+              <div className="flex gap-2 items-center">
+                <Pill tone={isTraining ? 'danger' : 'accent'} dot>
+                  {isTraining ? 'aktiv' : 'idle'}
+                </Pill>
+                <TrainingControlPanel />
+              </div>
+            }
+          >
+            <div className="rounded-[var(--radius)] chart-grid overflow-hidden">
+              <TrainingLossDisplay />
+            </div>
+            <div className="mt-4">
+              <TrainingProgressBar />
+            </div>
+          </Card>
+
+          <Card
+            className="lg:col-span-4"
+            title="Guthaben & GPU"
+            subtitle="RunPod Serverless"
+          >
+            <div
+              className="rounded-[var(--radius)] text-white p-5"
+              style={{
+                background:
+                  'linear-gradient(135deg, var(--accent) 0%, var(--accent-ink) 100%)',
+              }}
+            >
+              <div className="text-[11px] opacity-80 font-mono uppercase tracking-wider">
+                Guthaben
+              </div>
+              <div className="text-4xl font-semibold mt-1 font-mono">
+                {remaining}
+                <span className="opacity-60"> / {trainingCredits}</span>
+              </div>
+              <div className="text-xs opacity-80 mt-0.5">Trainings übrig</div>
+              <div className="h-px bg-white/20 my-4" />
+              <div className="flex items-center justify-between text-xs">
+                <span className="opacity-80">Verbraucht</span>
+                <span className="font-mono">{trainingsUsed}</span>
+              </div>
+            </div>
+
+            {remaining <= 0 && (
+              <div className="mt-4 text-xs text-[color:var(--danger)] bg-[var(--danger-wash)] px-3 py-2 rounded-[var(--radius-sm)] leading-snug">
+                Kein Guthaben mehr. Kontaktiere deinen Lehrer für mehr Credits.
+              </div>
+            )}
+          </Card>
         </div>
 
         {/* My Models */}
-        <div className="flex justify-center items-center mb-10 px-10">
-          <div className="w-full max-w-5xl">
+        <Card
+          title="Meine Modelle"
+          subtitle="Lokal + in der Cloud"
+          padded={false}
+        >
+          <div className="p-2">
             <MyModels />
           </div>
-        </div>
+        </Card>
       </div>
+    </div>
+  );
+}
 
-      {/* Training Control Buttons */}
-      <div className="w-full flex items-center justify-around gap-2 bg-gray-100 p-2">
-        <div className="flex-shrink-0">
-          <TrainingControlPanel />
-        </div>
-        <div className="flex-1 min-w-0 max-w-4xl flex gap-10 justify-center items-center">
-          <div className="flex-1 max-w-md">
-            <TrainingProgressBar />
-          </div>
-        </div>
-      </div>
+function StepLabel({ n, title }) {
+  return (
+    <div className="flex items-center gap-2 mb-3">
+      <span
+        className={clsx(
+          'w-6 h-6 rounded-full flex items-center justify-center font-mono text-xs font-semibold',
+          'bg-[var(--accent-wash)] text-[var(--accent-ink)]'
+        )}
+      >
+        {n}
+      </span>
+      <span className="text-xs font-semibold uppercase tracking-wide text-[var(--ink-3)]">
+        {title}
+      </span>
     </div>
   );
 }

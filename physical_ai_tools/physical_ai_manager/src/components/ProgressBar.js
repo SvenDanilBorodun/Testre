@@ -17,9 +17,12 @@
 import React from 'react';
 import clsx from 'clsx';
 
-export default function ProgressBar({ percent = 0 }) {
-  // If over 50%, white, otherwise dark color
-  const textColor = percent > 50 ? 'text-white' : 'text-gray-800';
+/**
+ * ProgressBar used inside the dark glass control dock and elsewhere.
+ * Uses CSS variables so the accent color follows the theme.
+ */
+export default function ProgressBar({ percent = 0, dark = true }) {
+  const textColor = 'text-white';
 
   const classProgressBarText = clsx(
     'absolute',
@@ -30,20 +33,26 @@ export default function ProgressBar({ percent = 0 }) {
     'flex',
     'items-center',
     'justify-center',
-    'font-bold',
-    'text-lg',
+    'font-mono',
+    'text-[13px]',
     'pointer-events-none',
     'z-10',
-    'transition-colors',
-    'duration-300',
     textColor
   );
 
   return (
-    <div className="w-full h-9 bg-gray-400 rounded-full relative overflow-hidden">
+    <div
+      className={clsx(
+        'w-full h-6 rounded-full relative overflow-hidden',
+        dark ? 'bg-white/10' : 'bg-[var(--bg-sunk)]'
+      )}
+    >
       <div
-        className="h-full bg-gray-700 rounded-full transition-all duration-300"
-        style={{ width: `${percent}%` }}
+        className="h-full rounded-full transition-all duration-300"
+        style={{
+          width: `${Math.max(0, Math.min(100, percent))}%`,
+          background: 'linear-gradient(90deg, var(--accent), var(--success))',
+        }}
       ></div>
       <span className={classProgressBarText}>{percent}%</span>
     </div>

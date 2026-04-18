@@ -17,18 +17,12 @@
 import React, { useEffect, useState } from 'react';
 import clsx from 'clsx';
 import toast, { useToasterStore } from 'react-hot-toast';
-import {
-  MdWidgets,
-  MdCloudUpload,
-  MdMerge,
-  MdDeleteSweep,
-  MdOutlineTouchApp,
-} from 'react-icons/md';
+import { MdCloudUpload, MdMerge, MdDeleteSweep } from 'react-icons/md';
 import HuggingfaceSection from '../features/editDataset/components/DatasetHuggingfaceSection';
 import MergeSection from '../features/editDataset/components/DatasetMergeSection';
 import DeleteSection from '../features/editDataset/components/DatasetDeleteSection';
+import { SectionHeader } from '../components/EbUI';
 
-// Constants
 const TOAST_LIMIT = 3;
 
 const SECTION_TYPES = {
@@ -39,113 +33,38 @@ const SECTION_TYPES = {
 
 const SECTION_CONFIG = {
   [SECTION_TYPES.HUGGINGFACE]: {
-    label: 'Daten hoch- & herunterladen',
+    label: 'Hoch- & herunterladen',
     icon: MdCloudUpload,
     description: 'Hugging Face',
   },
   [SECTION_TYPES.MERGE]: {
-    label: 'Datens\u00e4tze zusammenf\u00fchren',
+    label: 'Zusammenführen',
     icon: MdMerge,
-    description: 'Mehrere Datens\u00e4tze kombinieren',
+    description: 'Mehrere Datensätze kombinieren',
   },
   [SECTION_TYPES.DELETE]: {
-    label: 'Episoden l\u00f6schen',
+    label: 'Episoden löschen',
     icon: MdDeleteSweep,
-    description: 'Bestimmte Episoden aus dem Datensatz entfernen',
+    description: 'Einzelne Episoden entfernen',
   },
 };
 
-// Style Classes
-const STYLES = {
-  container: clsx(
-    'w-full',
-    'h-full',
-    'flex',
-    'flex-col',
-    'items-start',
-    'justify-start',
-    'overflow-scroll'
-  ),
-};
-
-// Utility Functions
 const manageTostLimit = (toasts) => {
   toasts
-    .filter((t) => t.visible) // Only consider visible toasts
-    .filter((_, i) => i >= TOAST_LIMIT) // Is toast index over limit?
-    .forEach((t) => toast.dismiss(t.id)); // Dismiss
+    .filter((t) => t.visible)
+    .filter((_, i) => i >= TOAST_LIMIT)
+    .forEach((t) => toast.dismiss(t.id));
 };
 
 export default function EditDatasetPage() {
-  // Hooks and state management
   const { toasts } = useToasterStore();
-
-  // Local state
   const [isEditable] = useState(true);
   const [activeSection, setActiveSection] = useState(SECTION_TYPES.HUGGINGFACE);
 
-  // Effects
   useEffect(() => {
     manageTostLimit(toasts);
   }, [toasts]);
 
-  // Section selector component
-  const renderSectionSelector = () => (
-    <div className="w-full bg-white rounded-xl shadow-sm border border-gray-200 p-3 mb-2">
-      <div className="flex items-center text-sm text-gray-500 mb-2">
-        <span className="mr-2">
-          <MdOutlineTouchApp className="inline-block w-5 h-5 text-gray-400" />
-        </span>
-        Was m\u00f6chtest du tun?
-      </div>
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        {Object.entries(SECTION_CONFIG).map(([sectionType, config]) => {
-          const IconComponent = config.icon;
-          const isActive = activeSection === sectionType;
-
-          return (
-            <button
-              key={sectionType}
-              onClick={() => setActiveSection(sectionType)}
-              className={clsx(
-                'flex flex-col items-center justify-center p-4 rounded-lg border transition-all duration-200',
-                'hover:shadow-sm focus:outline-none focus:ring-1 focus:ring-teal-500 focus:ring-opacity-30',
-                {
-                  'border-teal-300 bg-teal-50/50 shadow-sm': isActive,
-                  'border-gray-200 bg-white hover:border-gray-300 hover:shadow-sm': !isActive,
-                }
-              )}
-            >
-              <IconComponent
-                className={clsx('w-10 h-10 mb-2', {
-                  'text-teal-500': isActive,
-                  'text-gray-400': !isActive,
-                })}
-              />
-              <h3
-                className={clsx('text-base font-medium mb-1', {
-                  'text-teal-700': isActive,
-                  'text-gray-600': !isActive,
-                })}
-              >
-                {config.label}
-              </h3>
-              <p
-                className={clsx('text-xs text-center', {
-                  'text-teal-600': isActive,
-                  'text-gray-500': !isActive,
-                })}
-              >
-                {config.description}
-              </p>
-            </button>
-          );
-        })}
-      </div>
-    </div>
-  );
-
-  // Render active section
   const renderActiveSection = () => {
     switch (activeSection) {
       case SECTION_TYPES.HUGGINGFACE:
@@ -160,15 +79,58 @@ export default function EditDatasetPage() {
   };
 
   return (
-    <div className={STYLES.container}>
-      <div className="w-full flex flex-col items-start justify-start p-10 gap-6">
-        <h1 className="text-4xl font-bold flex flex-row items-center justify-start gap-2">
-          <MdWidgets className="w-10 h-10" />
-          Datenwerkzeuge
-        </h1>
+    <div className="h-full w-full overflow-y-auto" style={{ background: 'var(--bg)' }}>
+      <div className="max-w-[1200px] mx-auto px-10 py-8 flex flex-col gap-6">
+        <SectionHeader
+          eyebrow="Daten"
+          title="Datenwerkzeuge"
+          description="Datensätze verwalten, zusammenführen, hochladen."
+        />
 
-        {renderSectionSelector()}
-        {renderActiveSection()}
+        {/* Tool switcher (segmented) */}
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+          {Object.entries(SECTION_CONFIG).map(([sectionType, config]) => {
+            const IconComponent = config.icon;
+            const isActive = activeSection === sectionType;
+            return (
+              <button
+                key={sectionType}
+                onClick={() => setActiveSection(sectionType)}
+                className={clsx(
+                  'p-5 text-left rounded-[var(--radius-lg)] border transition',
+                  isActive
+                    ? 'bg-[var(--accent-wash)] border-[var(--accent)] ring-1 ring-[color:var(--accent-wash)]'
+                    : 'bg-white border-[var(--line)] hover:border-[var(--ink-4)]'
+                )}
+              >
+                <div
+                  className={clsx(
+                    'w-10 h-10 rounded-[10px] flex items-center justify-center mb-3',
+                    isActive
+                      ? 'bg-white text-[var(--accent)]'
+                      : 'bg-[var(--bg-sunk)] text-[var(--ink-3)]'
+                  )}
+                >
+                  <IconComponent size={22} />
+                </div>
+                <div
+                  className={clsx(
+                    'font-semibold text-[15px]',
+                    isActive ? 'text-[var(--accent-ink)]' : 'text-[var(--ink)]'
+                  )}
+                >
+                  {config.label}
+                </div>
+                <div className="text-[12px] text-[var(--ink-3)] mt-0.5">
+                  {config.description}
+                </div>
+              </button>
+            );
+          })}
+        </div>
+
+        {/* Selected tool gets full width */}
+        <div>{renderActiveSection()}</div>
       </div>
     </div>
   );

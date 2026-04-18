@@ -477,45 +477,54 @@ export default function ControlPanel() {
   ]);
 
   const classControlPanelBody = clsx(
-    'h-56',
-    'bg-gray-300',
-    'rounded-3xl',
-    'mx-8',
-    'mt-2',
-    'mb-4',
-    'p-4',
+    'min-h-[168px]',
+    'rounded-[20px]',
+    'mx-3',
+    'mt-1',
+    'mb-3',
+    'p-3',
     'flex',
     'flex-row',
-    'items-center',
-    'gap-2',
-    'shadow-lg'
+    'flex-wrap',
+    'items-stretch',
+    'gap-3',
+    'border',
+    'border-white/10',
+    'backdrop-blur'
   );
+
+  const controlPanelBodyStyle = {
+    background:
+      'linear-gradient(180deg, rgba(22,27,29,0.96) 0%, rgba(10,14,15,0.96) 100%)',
+  };
 
   const classControlPanelButtons = (label, isDisabled) =>
     clsx(
       'text-4xl',
-      'font-extrabold',
+      'font-semibold',
       'w-full',
       'h-full',
       'min-w-0',
-      'rounded-2xl',
-      'border-none',
+      'rounded-[var(--radius-lg)]',
       'cursor-pointer',
       'px-2',
       'flex',
       'items-center',
       'justify-center',
       'flex-col',
-      'bg-gray-100',
+      'border',
       'transition-all',
       'duration-200',
       'overflow-hidden',
+      'text-white',
       {
-        'bg-gray-300': pressed === label && !isDisabled,
-        'bg-gray-200': hovered === label && pressed !== label && !isDisabled,
+        'bg-white/[0.04] border-white/10 hover:bg-white/[0.08]':
+          !isDisabled && pressed !== label && hovered !== label,
+        'bg-white/[0.08] border-white/15': hovered === label && pressed !== label && !isDisabled,
+        'bg-white/[0.14] border-white/20': pressed === label && !isDisabled,
         'opacity-30': isDisabled,
         'cursor-not-allowed': isDisabled,
-        'bg-gray-50': isDisabled,
+        'bg-white/[0.02] border-white/5': isDisabled,
       }
     );
 
@@ -566,8 +575,8 @@ export default function ControlPanel() {
   };
 
   return (
-    <div className={classControlPanelBody}>
-      <div className="flex flex-[2] w-full h-full gap-4">
+    <div className={classControlPanelBody} style={controlPanelBodyStyle}>
+      <div className="flex flex-[2_2_320px] min-w-[280px] w-full h-[104px] gap-2 md:gap-3">
         {buttons.map(({ label, icon: Icon, color, description, shortcut }) => {
           const isDisabled = !isButtonEnabled(label);
 
@@ -597,8 +606,7 @@ export default function ControlPanel() {
               <button
                 className={classControlPanelButtons(label, isDisabled)}
                 style={{
-                  fontFamily: 'Pretendard Variable',
-                  fontSize: 'clamp(1rem, 1.5vw, 2.2rem)',
+                  fontSize: 'clamp(0.9rem, 1.4vw, 1.6rem)',
                 }}
                 tabIndex={isDisabled ? -1 : 0}
                 onClick={() => !isDisabled && handleCommand(label)}
@@ -613,8 +621,8 @@ export default function ControlPanel() {
                 <span className="h-[30%] w-full flex items-center justify-center"></span>
                 <span className={classControlPanelButtonIcon}>
                   <Icon
-                    style={{ fontSize: 'clamp(1rem, 4vw, 4rem)' }}
-                    color={isDisabled ? '#9ca3af' : color}
+                    style={{ fontSize: 'clamp(1rem, 3vw, 2.8rem)' }}
+                    color={isDisabled ? 'rgba(255,255,255,0.35)' : color}
                   />
                 </span>
                 <span className="text-center whitespace-pre-line leading-tight text-ellipsis overflow-hidden block w-full h-full flex items-center justify-center">
@@ -625,18 +633,20 @@ export default function ControlPanel() {
           );
         })}
       </div>
-      <div className="w-full h-full rounded-2xl flex flex-1 flex-col justify-center items-center gap-2">
-        <div className="flex items-center justify-center gap-5">
+      <div className="rounded-[var(--radius-lg)] flex flex-[1_1_260px] min-w-[220px] flex-col justify-center items-center gap-2 text-white px-2">
+        <div className="flex items-center justify-center gap-3">
           <div
-            className="flex min-w-0 text-center items-center gap-2"
-            style={{ fontSize: 'clamp(1rem, 2vw, 2.5rem)' }}
+            className="flex min-w-0 text-center items-center gap-2 font-semibold"
+            style={{ fontSize: 'clamp(0.9rem, 1.6vw, 1.6rem)' }}
           >
             {phaseGuideMessages[taskStatus.phase]}
           </div>
           <div>
-            {/* Spinner */}
             {taskStatus.running && (
-              <span className="font-mono text-teal-500 text-4xl">
+              <span
+                className="font-mono text-3xl"
+                style={{ color: 'var(--accent)' }}
+              >
                 {spinnerFrames[spinnerIndex]}
               </span>
             )}
@@ -645,7 +655,7 @@ export default function ControlPanel() {
         {!useMultiTaskMode && (
           <div className="w-full flex flex-col items-center gap-1">
             <div className="w-full max-w-xl flex flex-col items-center gap-1">
-              <div className="flex px-3 w-full justify-end text-xl text-gray-500 font-bold whitespace-nowrap ">
+              <div className="flex px-3 w-full justify-end text-sm font-mono text-white/60 whitespace-nowrap">
                 {taskStatus.proceedTime} / {taskStatus.totalTime} (s)
               </div>
               <ProgressBar percent={taskStatus.progress} />
@@ -656,19 +666,19 @@ export default function ControlPanel() {
           <>
             <div className="h-3"></div>
             <div className="flex items-center justify-center gap-2">
-              <div className="flex w-full justify-center text-2xl text-gray-900 font-semibold whitespace-nowrap">
+              <div className="flex w-full justify-center text-2xl text-white font-semibold whitespace-nowrap">
                 {taskStatus.proceedTime}
               </div>
-              <div className="w-full justify-center text-2xl text-gray-500 font-semibold whitespace-nowrap">
+              <div className="w-full justify-center text-2xl text-white/60 font-semibold whitespace-nowrap">
                 Sekunden vergangen
               </div>
             </div>
           </>
         )}
       </div>
-      <div className="flex justify-end flex-[0.4] min-w-30 h-full p-1 gap-2">
+      <div className="flex justify-end flex-[0_1_auto] min-w-[120px] max-w-[160px] p-1 gap-2">
         {useMultiTaskMode ? (
-          <div className="flex flex-col gap-2">
+          <div className="flex flex-col gap-2 w-full">
             <FullTaskStatus />
             <EpisodeStatus />
           </div>
@@ -676,7 +686,7 @@ export default function ControlPanel() {
           <EpisodeStatus />
         )}
       </div>
-      <div className="flex flex-col gap-2">
+      <div className="hidden lg:flex flex-col gap-1.5 flex-[0_0_auto] w-[200px]">
         {expandedSystemIndex !== null ? (
           /* Expanded System View */
           <div onClick={() => setExpandedSystemIndex(null)} className="cursor-pointer">

@@ -22,14 +22,15 @@ import { setHeartbeatStatus } from '../features/tasks/taskSlice';
 /**
  * HeartbeatStatus Component
  *
- * Component that displays connection status by receiving heartbeat signals through ROS topics
- * Monitors system connection status by periodically receiving std_msgs/Empty messages
+ * Displays ROS connection status as a compact pill with a live blinking dot.
+ * Matches the EduBotics design: small rounded chip, mono latency badge.
  */
 export default function HeartbeatStatus({
   timeoutMs = 3000,
   disconnectTimeoutMs = 10000,
   className = '',
   showLabel = true,
+  dark = false,
   size = 'medium',
 }) {
   const dispatch = useDispatch();
@@ -40,56 +41,40 @@ export default function HeartbeatStatus({
   const lastHeartbeatTimeRef = useRef(lastHeartbeatTime);
   lastHeartbeatTimeRef.current = lastHeartbeatTime;
 
-  // Heartbeat status: 'connected', 'timeout', 'disconnected'
   const getStatusInfo = () => {
     switch (heartbeatStatus) {
       case 'connected':
         return {
-          dotColor: 'bg-green-500',
-          color: 'text-green-500',
-          bgColor: 'bg-green-100',
-          borderColor: 'border-green-300',
+          color: 'var(--success)',
           label: 'Verbunden',
-          description: `Last heartbeat: ${
-            lastHeartbeatTime ? new Date(lastHeartbeatTime).toLocaleTimeString() : 'Never'
-          }`,
+          tone: 'success',
         };
       case 'timeout':
         return {
-          dotColor: 'bg-yellow-500',
-          color: 'text-yellow-500',
-          bgColor: 'bg-yellow-100',
-          borderColor: 'border-yellow-300',
+          color: 'var(--amber)',
           label: 'Timeout',
-          description: `No heartbeat for ${timeoutMs}ms`,
+          tone: 'amber',
         };
       case 'disconnected':
       default:
         return {
-          dotColor: 'bg-red-500',
-          color: 'text-red-500',
-          bgColor: 'bg-red-100',
-          borderColor: 'border-red-300',
+          color: 'var(--danger)',
           label: 'Getrennt',
-          description: 'ROS connection not available',
+          tone: 'danger',
         };
     }
   };
 
-  // Set up interval for status checking
   useEffect(() => {
-    // Clear existing interval
     if (intervalRef.current) {
       clearInterval(intervalRef.current);
     }
 
-    // Check status every 1 second
     intervalRef.current = setInterval(() => {
       const now = Date.now();
       const lastHb = lastHeartbeatTimeRef.current;
 
       if (!lastHb) {
-        // If heartbeat has not been received yet
         if (heartbeatStatus !== 'disconnected') {
           dispatch(setHeartbeatStatus('disconnected'));
         }
@@ -99,24 +84,20 @@ export default function HeartbeatStatus({
       const timeSinceLastHeartbeat = now - lastHb;
 
       if (timeSinceLastHeartbeat >= disconnectTimeoutMs) {
-        // If 10 seconds have passed - disconnected
         if (heartbeatStatus !== 'disconnected') {
           dispatch(setHeartbeatStatus('disconnected'));
         }
       } else if (timeSinceLastHeartbeat >= timeoutMs) {
-        // If 3 seconds have passed - timeout
         if (heartbeatStatus !== 'timeout') {
           dispatch(setHeartbeatStatus('timeout'));
         }
       } else {
-        // If 3 seconds have passed - connected
         if (heartbeatStatus !== 'connected') {
           dispatch(setHeartbeatStatus('connected'));
         }
       }
-    }, 1000); // Check every 1 second
+    }, 1000);
 
-    // Cleanup function
     return () => {
       if (intervalRef.current) {
         clearInterval(intervalRef.current);
@@ -126,57 +107,52 @@ export default function HeartbeatStatus({
 
   const statusInfo = getStatusInfo();
 
-  // Size-based styles
-  const sizeClasses = {
-    small: {
-      container: 'px-2 py-1',
-      dot: 'w-2 h-2',
-      text: 'text-xs',
-    },
-    medium: {
-      container: 'px-3 py-2',
-      dot: 'w-3 h-3',
-      text: 'text-sm',
-    },
-    large: {
-      container: 'px-4 py-3',
-      dot: 'w-4 h-4',
-      text: 'text-base',
-    },
-  };
+  // Compute latency ms (approx — interval between now and last heartbeat time)
+  const latencyMs = lastHeartbeatTime ? Math.max(0, Date.now() - lastHeartbeatTime) : null;
+  const shownLatency =
+    heartbeatStatus === 'connected' && latencyMs != null && latencyMs < 2000
+      ? `${Math.min(999, latencyMs)}ms`
+      : '—';
 
-  const currentSize = sizeClasses[size] || sizeClasses.medium;
+  const sizeClass =
+    size === 'small' ? 'h-7 px-2.5 text-[10px]' : size === 'large' ? 'h-9 px-3.5 text-xs' : 'h-8 px-3 text-[11px]';
 
   const containerClasses = clsx(
-    'inline-flex',
-    'items-center',
-    'gap-2',
-    'rounded-full',
-    'border',
-    'transition-all',
-    'duration-200',
-    'select-none',
-    'shadow-md',
-    currentSize.container,
-    statusInfo.bgColor,
-    statusInfo.borderColor,
+    'inline-flex items-center gap-2 rounded-full font-mono',
+    sizeClass,
+    dark
+      ? 'bg-white/[0.08] border border-white/15 text-white/80'
+      : 'bg-white border border-[var(--line)] text-[var(--ink-2)]',
     className
   );
 
-  const dotClasses = clsx(
-    'rounded-full',
-    'transition-colors',
-    'duration-200',
-    currentSize.dot,
-    statusInfo.dotColor
+  const dotWrap = (
+    <span className="relative inline-flex">
+      <span
+        className="w-2 h-2 rounded-full block"
+        style={{ background: statusInfo.color }}
+      />
+      {heartbeatStatus === 'connected' && (
+        <span
+          className="absolute inset-0 w-2 h-2 rounded-full eb-blink"
+          style={{ background: statusInfo.color }}
+        />
+      )}
+    </span>
   );
-
-  const textClasses = clsx('font-medium', 'whitespace-nowrap', currentSize.text, statusInfo.color);
 
   return (
     <div className={containerClasses}>
-      <div className={dotClasses} />
-      {showLabel && <span className={textClasses}>{statusInfo.label}</span>}
+      {dotWrap}
+      {showLabel && <span className="whitespace-nowrap">{statusInfo.label}</span>}
+      <span
+        className={clsx(
+          'px-1.5 py-0.5 rounded text-[10px]',
+          dark ? 'bg-white/10' : 'bg-[var(--bg-sunk)]'
+        )}
+      >
+        {shownLatency}
+      </span>
     </div>
   );
 }

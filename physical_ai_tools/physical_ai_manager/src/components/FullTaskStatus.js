@@ -6,12 +6,6 @@
 //
 //     http://www.apache.org/licenses/LICENSE-2.0
 //
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-//
 // Author: Kiwoong Park
 
 import React from 'react';
@@ -29,25 +23,24 @@ const classBody = clsx(
   'items-center',
   'justify-around',
   'gap-1',
-  'rounded-2xl',
+  'rounded-[var(--radius-lg)]',
   'border',
-  'border-gray-200',
+  'border-white/15',
   'py-2',
   'px-3',
   'box-border',
-  'shadow-md',
-  'bg-white'
+  'bg-white/[0.06]',
+  'text-white'
 );
 
-const MultiTaskFontSizeTitle = 'clamp(1rem, 1.2vw, 1.4rem)';
-const MultiTaskFontSizeNumber = 'clamp(1rem, 1.2vw, 1.4rem)';
+const MultiTaskFontSizeTitle = 'clamp(0.8rem, 1vw, 1.1rem)';
+const MultiTaskFontSizeNumber = 'clamp(0.9rem, 1.1vw, 1.3rem)';
 
-const SingleTaskFontSizeTitle = 'clamp(1.5rem, 1.5vw, 2rem)';
-const SingleTaskFontSizeNumber = 'clamp(1.5rem, 1.5vw, 2rem)';
+const SingleTaskFontSizeTitle = 'clamp(0.9rem, 1.1vw, 1.2rem)';
+const SingleTaskFontSizeNumber = 'clamp(1.2rem, 1.3vw, 1.6rem)';
 
 export default function FullTaskStatus() {
   const useMultiTaskMode = useSelector((state) => state.tasks.useMultiTaskMode);
-
   const currentScenarioNumber = useSelector(
     (state) => state.tasks.taskStatus.currentScenarioNumber
   );
@@ -55,18 +48,18 @@ export default function FullTaskStatus() {
   return (
     <div className={classBody}>
       <div
-        className="w-full h-full flex justify-center items-center"
+        className="w-full flex justify-center items-center text-[10px] font-mono uppercase tracking-wider text-white/60"
         style={{ fontSize: useMultiTaskMode ? MultiTaskFontSizeTitle : SingleTaskFontSizeTitle }}
       >
-        Scenario
+        Szenario
       </div>
       <div
-        className="w-full h-full flex justify-center items-center bg-gray-200 rounded-lg px-3 font-bold whitespace-nowrap"
+        className="w-full h-full flex justify-center items-center bg-white/10 rounded-[var(--radius-sm)] px-3 font-mono font-semibold whitespace-nowrap"
         style={{
           fontSize: useMultiTaskMode ? MultiTaskFontSizeNumber : SingleTaskFontSizeNumber,
         }}
       >
-        <span className="font-bold">{currentScenarioNumber}</span>
+        <span className="font-semibold">{currentScenarioNumber}</span>
       </div>
     </div>
   );

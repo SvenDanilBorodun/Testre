@@ -2,17 +2,6 @@
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-//
-// Author: Kiwoong Park
 
 import React, { useState, useEffect } from 'react';
 import { useSelector, useDispatch } from 'react-redux';
@@ -33,20 +22,32 @@ export default function RecordPage({ isActive = true }) {
   const taskStatus = useSelector((state) => state.tasks.taskStatus);
   const useMultiTaskMode = useSelector((state) => state.tasks.useMultiTaskMode);
   const multiTaskIndex = useSelector((state) => state.tasks.multiTaskIndex);
+  const imageTopicList = useSelector((state) => state.ros.imageTopicList);
 
-  // Toast limit implementation using useToasterStore
   const { toasts } = useToasterStore();
   const TOAST_LIMIT = 3;
 
-  const [isRightPanelCollapsed, setIsRightPanelCollapsed] = useState(false);
+  // Auto-collapse the side panel on narrow viewports.
+  const getInitialCollapsed = () =>
+    typeof window !== 'undefined' && window.innerWidth < 900;
+  const [isRightPanelCollapsed, setIsRightPanelCollapsed] = useState(getInitialCollapsed);
+
+  useEffect(() => {
+    const onResize = () => {
+      // Only auto-collapse when crossing to small; keep user's open choice on wide.
+      if (window.innerWidth < 900) setIsRightPanelCollapsed(true);
+    };
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
 
   const isFirstLoad = useSelector((state) => state.ui.isFirstLoad.record);
 
   useEffect(() => {
     toasts
-      .filter((t) => t.visible) // Only consider visible toasts
-      .filter((_, i) => i >= TOAST_LIMIT) // Is toast index over limit?
-      .forEach((t) => toast.dismiss(t.id)); // Dismiss – Use toast.remove(t.id) for no exit animation
+      .filter((t) => t.visible)
+      .filter((_, i) => i >= TOAST_LIMIT)
+      .forEach((t) => toast.dismiss(t.id));
   }, [toasts]);
 
   useEffect(() => {
@@ -57,203 +58,97 @@ export default function RecordPage({ isActive = true }) {
     dispatch(setIsFirstLoadFalse('record'));
   }, [taskInfo.tags, taskStatus.robotType, dispatch, isFirstLoad]);
 
-  const classMainContainer = 'h-full flex flex-col overflow-hidden';
-  const classContentsArea = 'flex-1 flex min-h-0 pt-0 px-0 justify-center items-start';
-  const classImageGridContainer = clsx(
-    'transition-all',
-    'duration-300',
-    'ease-in-out',
-    'flex',
-    'items-center',
-    'justify-center',
-    'min-h-0',
-    'h-full',
-    'overflow-hidden',
-    'm-2',
-    {
-      'flex-[12]': isRightPanelCollapsed,
-      'flex-[10]': !isRightPanelCollapsed,
-    }
-  );
-
-  const classRightPanelArea = clsx(
-    'h-full',
-    'w-full',
-    'transition-all',
-    'duration-300',
-    'ease-in-out',
-    'relative',
-    'overflow-y-auto',
-    {
-      'flex-[0_0_40px]': isRightPanelCollapsed,
-      'flex-[1]': !isRightPanelCollapsed,
-      'min-w-[60px]': isRightPanelCollapsed,
-      'min-w-[400px]': !isRightPanelCollapsed,
-      'max-w-[60px]': isRightPanelCollapsed,
-      'max-w-[400px]': !isRightPanelCollapsed,
-    }
-  );
-
-  const classHideButton = clsx(
-    'absolute',
-    'top-3',
-    'bg-white',
-    'border',
-    'border-gray-300',
-    'rounded-full',
-    'w-12',
-    'h-12',
-    'flex',
-    'items-center',
-    'justify-center',
-    'shadow-md',
-    'hover:bg-gray-50',
-    'transition-all',
-    'duration-200',
-    'z-10',
-    {
-      'left-2': isRightPanelCollapsed,
-      'left-[10px]': !isRightPanelCollapsed,
-    }
-  );
-
-  const classRightPanel = clsx(
-    'h-full',
-    'flex',
-    'flex-col',
-    'items-center',
-    'overflow-hidden',
-    'transition-opacity',
-    'duration-300',
-    {
-      'opacity-0': isRightPanelCollapsed,
-      'opacity-100': !isRightPanelCollapsed,
-      'pointer-events-none': isRightPanelCollapsed,
-      'pointer-events-auto': !isRightPanelCollapsed,
-    }
-  );
-
-  const classRobotTypeContainer = clsx(
-    'absolute',
-    'top-4',
-    'left-4',
-    'z-20',
-    'flex',
-    'flex-row',
-    'items-center',
-    'bg-white/90',
-    'backdrop-blur-sm',
-    'rounded-full',
-    'px-3',
-    'py-1',
-    'shadow-md',
-    'border',
-    'border-gray-100'
-  );
-  const classRobotType = clsx('ml-2 mr-1 my-2 text-gray-600 text-lg');
-  const classRobotTypeValue = clsx(
-    'mx-1 my-2 px-2 text-lg text-teal-600 focus:outline-none bg-teal-50 rounded-full'
-  );
-
-  const classHeartbeatStatus = clsx('absolute', 'top-20', 'left-5', 'z-10');
-
-  const classTaskInstructionContainer = clsx(
-    'absolute',
-    'bottom-1',
-    'left-10',
-    'w-[40%]',
-    'z-30',
-    'flex',
-    'flex-row',
-    'items-center',
-    'bg-gradient-to-r',
-    'from-green-50/70',
-    'to-emerald-50/70',
-    'backdrop-blur-xs',
-    'rounded-xl',
-    'px-4',
-    'py-3',
-    'shadow-lg',
-    'border',
-    'border-green-100/50',
-    'hover:shadow-xl',
-    'hover:from-green-50/80',
-    'hover:to-emerald-50/80',
-    'transition-all',
-    'duration-300'
-  );
-
-  const classTaskIcon = clsx('text-green-600', 'text-2xl', 'mr-3', 'flex-shrink-0');
-
-  const classTaskLabel = clsx(
-    'text-green-700',
-    'font-semibold',
-    'text-lg',
-    'mr-3',
-    'flex-shrink-0'
-  );
-
-  const classTaskValue = clsx(
-    'text-green-800',
-    'text-lg',
-    'font-medium',
-    'flex-1',
-    'min-w-0',
-    'whitespace-normal'
-  );
+  const camCount = imageTopicList?.length || 0;
 
   return (
-    <div className={classMainContainer}>
-      <div className={classContentsArea}>
-        <div className="w-full h-full flex flex-col relative">
-          <div className={classRobotTypeContainer}>
-            <div className={classRobotType}>Robotertyp</div>
-            <div className={classRobotTypeValue}>{taskStatus?.robotType}</div>
+    <div
+      className="relative h-full w-full flex flex-col overflow-hidden"
+      style={{ background: 'var(--dark-bg)', color: 'var(--dark-ink)' }}
+    >
+      {/* Top glass chrome */}
+      <div className="absolute top-3 left-3 right-3 z-30 flex items-center gap-2 flex-wrap">
+        <div className="h-8 px-3 rounded-full bg-white/[0.08] border border-white/15 backdrop-blur-md flex items-center gap-2 text-[11px] text-white/80">
+          <span className="font-mono uppercase tracking-wider opacity-70">Roboter</span>
+          <span className="font-mono px-1.5 py-0.5 rounded bg-white/10 max-w-[160px] truncate">
+            {taskStatus?.robotType || '—'}
+          </span>
+        </div>
+        <HeartbeatStatus dark />
+        {camCount > 0 && (
+          <div className="h-8 px-3 rounded-full bg-white/[0.08] border border-white/15 backdrop-blur-md flex items-center gap-2 text-[11px] text-white/80 font-mono whitespace-nowrap">
+            <span
+              className="w-1.5 h-1.5 rounded-full"
+              style={{ background: 'var(--accent)' }}
+            />
+            {camCount} {camCount === 1 ? 'Kamera' : 'Kameras'} aktiv
           </div>
-          <div className={classHeartbeatStatus}>
-            <HeartbeatStatus />
-          </div>
-          <div className={classImageGridContainer}>
-            <ImageGrid isActive={isActive} />
-            {useMultiTaskMode && (
-              <div className={classTaskInstructionContainer}>
-                <div className="flex flex-col">
-                  <div className="flex flex-row">
-                    <MdTask className={classTaskIcon} />
-                    <span className={classTaskLabel}>Aktuelle Aufgabe</span>
-                    {multiTaskIndex !== undefined && (
-                      <span className={classTaskLabel}>
-                        {`[${multiTaskIndex + 1} / ${taskInfo.taskInstruction.length}]`}
-                      </span>
-                    )}
-                  </div>
-                  <span className={classTaskValue}>{taskStatus.currentTaskInstruction}</span>
+        )}
+        <div className="flex-1" />
+        {isRightPanelCollapsed && (
+          <button
+            onClick={() => setIsRightPanelCollapsed(false)}
+            className="w-10 h-10 bg-white/[0.08] border border-white/15 rounded-full flex items-center justify-center text-white/80 backdrop-blur-md hover:bg-white/15"
+            title="Panel öffnen"
+          >
+            <MdKeyboardDoubleArrowLeft size={22} />
+          </button>
+        )}
+      </div>
+
+      {/* Content area */}
+      <div className="flex-1 flex items-start min-h-0 pt-[56px] pb-2 px-3 gap-3">
+        <div className="flex-1 self-stretch min-w-0 relative rounded-[var(--radius-lg)] overflow-hidden">
+          <ImageGrid isActive={isActive} />
+
+          {useMultiTaskMode && taskStatus?.currentTaskInstruction && (
+            <div className="absolute bottom-3 left-3 right-3 max-w-[560px] pointer-events-none z-20">
+              <div className="bg-black/60 backdrop-blur-md border border-white/15 rounded-[var(--radius-lg)] px-4 py-2.5 text-white shadow-pop">
+                <div
+                  className="flex items-center gap-2 text-[10px] font-mono uppercase tracking-wider mb-0.5"
+                  style={{ color: 'var(--accent)' }}
+                >
+                  <MdTask />
+                  Aktuelle Aufgabe
+                  {multiTaskIndex !== undefined && (
+                    <span className="opacity-80">
+                      · {multiTaskIndex + 1} / {taskInfo.taskInstruction.length}
+                    </span>
+                  )}
+                </div>
+                <div className="text-[14px] font-semibold leading-snug">
+                  {taskStatus.currentTaskInstruction}
                 </div>
               </div>
-            )}
-          </div>
+            </div>
+          )}
         </div>
-        <div className={classRightPanelArea}>
+
+        {/* Responsive side panel. Sizes to its content (no forced h-full) with
+            a viewport-bounded max-height that enables internal scroll. */}
+        <div
+          className={clsx(
+            'relative transition-all duration-300 ease-in-out',
+            isRightPanelCollapsed
+              ? 'w-0 opacity-0 pointer-events-none overflow-hidden'
+              : 'w-[min(400px,40vw)] min-w-[300px] max-w-[400px] md:min-w-[320px] lg:min-w-[360px] opacity-100'
+          )}
+          style={{ maxHeight: 'calc(100vh - 220px)' }}
+        >
           <button
             onClick={() => setIsRightPanelCollapsed(!isRightPanelCollapsed)}
-            className={classHideButton}
-            title="Hide"
+            className="absolute -left-4 top-2 w-9 h-9 bg-white/95 border border-[var(--line)] rounded-full flex items-center justify-center shadow-pop text-[var(--ink-2)] hover:text-[var(--ink)] z-30 backdrop-blur"
+            title="Einklappen"
           >
-            <span className="text-gray-600 text-3xl transition-transform duration-200">
-              {isRightPanelCollapsed ? (
-                <MdKeyboardDoubleArrowLeft />
-              ) : (
-                <MdKeyboardDoubleArrowRight />
-              )}
-            </span>
+            <MdKeyboardDoubleArrowRight size={20} />
           </button>
-          <div className={classRightPanel}>
-            <div className="w-full min-h-10"></div>
-            <InfoPanel />
-          </div>
+          <InfoPanel />
         </div>
       </div>
-      <ControlPanel />
+
+      {/* Bottom control dock */}
+      <div className="shrink-0">
+        <ControlPanel />
+      </div>
     </div>
   );
 }

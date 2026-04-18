@@ -23,6 +23,7 @@ import { useRosServiceCaller } from '../hooks/useRosServiceCaller';
 import TaskPhase from '../constants/taskPhases';
 import { selectRobotType, removeAllTags } from '../features/tasks/taskSlice';
 import { setRobotTypeList, setIsFirstLoadTrue } from '../features/ui/uiSlice';
+import { Btn, Card, Pill, Stat } from './EbUI';
 
 export default function RobotTypeSelector() {
   const dispatch = useDispatch();
@@ -37,76 +38,64 @@ export default function RobotTypeSelector() {
   const [fetching, setFetching] = useState(false);
   const [selectedRobotType, setSelectedRobotType] = useState('');
 
-  // Fetch robot type list with retry for startup race condition
-  const fetchRobotTypes = useCallback(async (retries = 5, isManual = false) => {
-    setFetching(true);
-    for (let attempt = 1; attempt <= retries; attempt++) {
-      try {
-        const result = await getRobotTypeList();
-        console.log('Robot types received:', result);
-
-        if (result && result.robot_types) {
-          dispatch(setRobotTypeList(result.robot_types));
-          if (isManual) {
-            toast.success('Robotertypen erfolgreich geladen');
+  const fetchRobotTypes = useCallback(
+    async (retries = 5, isManual = false) => {
+      setFetching(true);
+      for (let attempt = 1; attempt <= retries; attempt++) {
+        try {
+          const result = await getRobotTypeList();
+          if (result && result.robot_types) {
+            dispatch(setRobotTypeList(result.robot_types));
+            if (isManual) {
+              toast.success('Robotertypen erfolgreich geladen');
+            }
+            setFetching(false);
+            return;
           }
-          setFetching(false);
-          return;
+        } catch (error) {
+          if (attempt < retries) {
+            await new Promise((r) => setTimeout(r, 2000));
+            continue;
+          }
+          toast.error(`Robotertypen konnten nicht geladen werden: ${error.message}`);
         }
-      } catch (error) {
-        console.warn(`Robot type fetch attempt ${attempt}/${retries} failed:`, error.message);
-        if (attempt < retries) {
-          await new Promise((r) => setTimeout(r, 2000));
-          continue;
-        }
-        // Only show error toast after all retries exhausted
-        toast.error(`Robotertypen konnten nicht geladen werden: ${error.message}`);
       }
-    }
-    setFetching(false);
-  }, [getRobotTypeList, dispatch]);
+      setFetching(false);
+    },
+    [getRobotTypeList, dispatch]
+  );
 
   const handleSetRobotType = async () => {
-    console.log('handleSetRobotType called');
-    console.log('selectedRobotType:', selectedRobotType);
-
     if (!selectedRobotType) {
-      toast.error('Please select a robot type');
+      toast.error('Bitte wähle einen Robotertyp');
       return;
     }
 
-    // Prevent changing robot type while task is in progress
     if (taskStatus.phase > TaskPhase.READY) {
-      toast.error('Cannot change robot type while task is in progress', {
+      toast.error('Robotertyp kann während einer laufenden Aufgabe nicht geändert werden', {
         duration: 4000,
       });
       return;
     }
 
-    console.log('Attempting to set robot type to:', selectedRobotType);
     setLoading(true);
     try {
       const result = await setRobotType(selectedRobotType);
-      console.log('Set robot type result:', result);
-
       if (result && result.success) {
         dispatch(selectRobotType(selectedRobotType));
         toast.success(`Robotertyp gesetzt auf: ${selectedRobotType}`);
-
-        dispatch(setIsFirstLoadTrue('record')); // to reset tags
+        dispatch(setIsFirstLoadTrue('record'));
         dispatch(removeAllTags());
       } else {
-        toast.error(`Failed to set robot type: ${result.message || 'Unknown error'}`);
+        toast.error(`Robotertyp konnte nicht gesetzt werden: ${result?.message || 'Unbekannter Fehler'}`);
       }
     } catch (error) {
-      console.error('Error setting robot type:', error);
-      toast.error(`Failed to set robot type: ${error.message}`);
+      toast.error(`Robotertyp konnte nicht gesetzt werden: ${error.message}`);
     } finally {
       setLoading(false);
     }
   };
 
-  // Fetch robot types when component mounts
   useEffect(() => {
     fetchRobotTypes();
   }, [fetchRobotTypes]);
@@ -117,137 +106,83 @@ export default function RobotTypeSelector() {
     }
   }, [robotType, selectedRobotType]);
 
-  const classCard = clsx(
-    'bg-white',
-    'border',
-    'border-gray-200',
-    'rounded-2xl',
-    'shadow-lg',
-    'p-8',
-    'w-full',
-    'max-w-md'
-  );
-
-  const classTitle = clsx('text-2xl', 'font-bold', 'text-gray-800', 'mb-6', 'text-center');
-  const classLabel = clsx('text-sm', 'font-medium', 'text-gray-700', 'mb-2', 'block');
-  const classSelect = clsx(
-    'w-full',
-    'px-3',
-    'py-2',
-    'border',
-    'border-gray-300',
-    'rounded-md',
-    'focus:outline-none',
-    'focus:ring-2',
-    'focus:ring-teal-500',
-    'focus:border-transparent',
-    'mb-4'
-  );
-
-  const classButton = clsx(
-    'w-full',
-    'px-4',
-    'py-2',
-    'bg-teal-500',
-    'text-white',
-    'rounded-md',
-    'font-medium',
-    'transition-colors',
-    'hover:bg-teal-600',
-    'disabled:bg-gray-400',
-    'disabled:cursor-not-allowed',
-    'mb-3'
-  );
-
-  const classRefreshButton = clsx(
-    'w-full',
-    'px-4',
-    'py-2',
-    'bg-gray-500',
-    'text-white',
-    'rounded-md',
-    'font-medium',
-    'transition-colors',
-    'hover:bg-gray-600',
-    'disabled:bg-gray-400',
-    'disabled:cursor-not-allowed'
-  );
-
-  const classCurrentType = clsx(
-    'text-sm',
-    'text-gray-600',
-    'bg-gray-100',
-    'px-3',
-    'py-2',
-    'rounded-md',
-    'text-center',
-    'mb-4'
-  );
+  const disabled = fetching || loading || taskStatus.phase > 0;
 
   return (
-    <div className={classCard}>
-      <h1 className={classTitle}>Robotertyp-Auswahl</h1>
-
-      {robotType && (
-        <div className={classCurrentType}>
-          <strong>Aktueller Robotertyp:</strong> {robotType}
-          {taskStatus.robotType && (
-            <div className="text-xs text-green-600 mt-1">
-              ✓ Saved to Task Status: {taskStatus.robotType}
-            </div>
-          )}
+    <Card
+      title="Robotertyp auswählen"
+      subtitle="Wird an ROS-Bridge übermittelt"
+      right={
+        <Btn
+          variant="ghost"
+          size="sm"
+          onClick={() => fetchRobotTypes(1, true)}
+          disabled={disabled}
+        >
+          <MdRefresh className={clsx(fetching && 'animate-spin')} /> Aktualisieren
+        </Btn>
+      }
+    >
+      <div>
+        <span className="text-xs font-medium text-[var(--ink-2)] block mb-1.5">
+          Aktueller Typ
+        </span>
+        <div className="h-10 px-3 flex items-center justify-between bg-[var(--bg-sunk)] rounded-[var(--radius-sm)] border border-[var(--line)]">
+          <span className="font-mono text-sm text-[var(--ink)]">
+            {robotType || '—'}
+          </span>
+          {robotType && <Pill tone="success">✓ aktiv</Pill>}
         </div>
-      )}
+      </div>
 
       {taskStatus.phase > 0 && (
-        <div className="text-sm text-orange-600 bg-orange-100 px-3 py-2 rounded-md text-center mb-4">
-          <strong>⚠️ Task in progress (Phase {taskStatus.phase})</strong>
-          <div className="text-xs mt-1">Robot type cannot be changed during task execution</div>
+        <div className="mt-3 text-xs text-[color:var(--amber)] bg-[var(--amber-wash)] px-3 py-2 rounded-[var(--radius-sm)] leading-snug">
+          <strong>Aufgabe läuft (Phase {taskStatus.phase})</strong>
+          <div className="opacity-80 mt-0.5">
+            Robotertyp kann während der Ausführung nicht geändert werden.
+          </div>
         </div>
       )}
 
-      <label className={classLabel}>Robotertyp auswählen:</label>
-
-      <select
-        className={classSelect}
-        value={selectedRobotType}
-        onChange={(e) => setSelectedRobotType(e.target.value)}
-        disabled={fetching || loading || taskStatus.phase > 0}
-      >
-        <option value="" disabled>
-          Choose a robot type...
-        </option>
-        {robotTypeList.map((type) => (
-          <option key={type} value={type}>
-            {type}
+      <div className="mt-4">
+        <span className="text-xs font-medium text-[var(--ink-2)] block mb-1.5">Ändern</span>
+        <select
+          className="eb w-full h-10 pl-3 bg-white border border-[var(--line)] rounded-[var(--radius-sm)] text-sm text-[var(--ink)] focus:outline-none focus:border-[var(--accent)] focus:ring-2 focus:ring-[color:var(--accent-wash)] transition"
+          value={selectedRobotType}
+          onChange={(e) => setSelectedRobotType(e.target.value)}
+          disabled={disabled}
+        >
+          <option value="" disabled>
+            Robotertyp wählen…
           </option>
-        ))}
-      </select>
+          {robotTypeList.map((type) => (
+            <option key={type} value={type}>
+              {type}
+            </option>
+          ))}
+        </select>
+      </div>
 
-      <button
-        className={classButton}
+      <Btn
+        variant="primary"
+        className="w-full justify-center mt-4"
         onClick={handleSetRobotType}
-        disabled={loading || fetching || !selectedRobotType || taskStatus.phase > 0}
+        disabled={disabled || !selectedRobotType}
       >
-        {loading ? 'Wird gesetzt...' : 'Robotertyp festlegen'}
-      </button>
-
-      <button
-        className={classRefreshButton}
-        onClick={() => fetchRobotTypes(1, true)}
-        disabled={fetching || loading || taskStatus.phase > 0}
-      >
-        <div className="flex items-center justify-center gap-2">
-          <MdRefresh size={16} className={fetching ? 'animate-spin' : ''} />
-          {fetching ? 'Laden...' : 'Robotertyp-Liste aktualisieren'}
-        </div>
-      </button>
+        {loading ? 'Wird gesetzt…' : 'Robotertyp festlegen'}
+      </Btn>
 
       {robotTypeList.length === 0 && !fetching && (
-        <div className="text-center text-gray-500 text-sm mt-4">
+        <div className="text-center text-[var(--ink-3)] text-xs mt-4">
           Keine Robotertypen verfügbar. Bitte ROS-Verbindung prüfen.
         </div>
       )}
-    </div>
+
+      <div className="mt-5 pt-4 border-t border-[var(--line)] grid grid-cols-3 gap-3">
+        <Stat label="Status" value={robotType ? 'OK' : '—'} tone={robotType ? 'accent' : undefined} />
+        <Stat label="Typen" value={String(robotTypeList.length)} />
+        <Stat label="Phase" value={String(taskStatus.phase ?? 0)} />
+      </div>
+    </Card>
   );
 }

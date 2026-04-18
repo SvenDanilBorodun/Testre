@@ -72,9 +72,10 @@ const CompactSystemStatus = ({
   };
 
   const containerClass = clsx(
-    'flex items-center space-x-3 p-2 bg-white rounded-xl border border-gray-200',
-    'hover:bg-gray-50 hover:border-gray-300 hover:shadow-md transition-all duration-200',
-    'cursor-pointer transform hover:scale-105',
+    'flex items-center space-x-3 p-2 rounded-[var(--radius-sm)] border',
+    'bg-white/[0.06] border-white/15 text-white',
+    'hover:bg-white/[0.10] hover:border-white/20 transition-all duration-200',
+    'cursor-pointer',
     className
   );
 
@@ -113,7 +114,7 @@ const CompactSystemStatus = ({
             stroke="currentColor"
             strokeWidth="3"
             fill="transparent"
-            className="text-gray-200"
+            className="text-white/15"
           />
           {/* Progress circle */}
           <circle
@@ -131,7 +132,7 @@ const CompactSystemStatus = ({
         </svg>
         {/* Percentage text */}
         <div className="absolute inset-0 flex items-center justify-center">
-          <span className="text-xs font-medium text-gray-700" style={{ minWidth: '3ch' }}>
+          <span className="text-[10px] font-mono text-white/80" style={{ minWidth: '3ch' }}>
             {Math.round(usagePercentage)}%
           </span>
         </div>
@@ -140,7 +141,7 @@ const CompactSystemStatus = ({
       {/* System Info */}
       <div className="flex-1 min-w-0">
         <div className="flex items-center justify-between mb-1">
-          <span className="text-sm font-medium text-gray-700">{label}</span>
+          <span className="text-xs font-semibold text-white/85 uppercase tracking-wider font-mono">{label}</span>
           {usagePercentage >= 90 && (
             <svg className="w-4 h-4 text-red-500" fill="currentColor" viewBox="0 0 20 20">
               <path
@@ -155,10 +156,10 @@ const CompactSystemStatus = ({
         {showDetails ? (
           <div className="space-y-1">
             {type === 'cpu' ? (
-              <div className="flex justify-between text-xs">
-                <span className="text-gray-500">Usage:</span>
+              <div className="flex justify-between text-[10px] font-mono text-white/80">
+                <span className="text-white/50">Usage:</span>
                 <span
-                  className="font-medium"
+                  className=""
                   style={type === 'cpu' ? { minWidth: '3ch' } : undefined}
                 >
                   {Math.round(usagePercentage)}%
@@ -166,27 +167,27 @@ const CompactSystemStatus = ({
               </div>
             ) : (
               <>
-                <div className="flex justify-between text-xs">
-                  <span className="text-gray-500">Used:</span>
-                  <span className="font-medium">{formatBytes(usedCapacity)}</span>
+                <div className="flex justify-between text-[10px] font-mono text-white/80">
+                  <span className="text-white/50">Used:</span>
+                  <span>{formatBytes(usedCapacity)}</span>
                 </div>
-                <div className="flex justify-between text-xs">
-                  <span className="text-gray-500">Total:</span>
-                  <span className="font-medium">{formatBytes(totalCapacity)}</span>
+                <div className="flex justify-between text-[10px] font-mono text-white/80">
+                  <span className="text-white/50">Total:</span>
+                  <span>{formatBytes(totalCapacity)}</span>
                 </div>
               </>
             )}
           </div>
         ) : (
           <div className="flex items-center justify-between">
-            <div className="w-full bg-gray-200 rounded-full h-2 mr-2">
+            <div className="w-full bg-white/10 rounded-full h-1.5 mr-2">
               <div
                 className={progressBarClass}
                 style={{ width: `${Math.min(usagePercentage, 100)}%` }}
               ></div>
             </div>
             <span
-              className="text-xs text-gray-500 whitespace-nowrap"
+              className="text-[10px] text-white/60 whitespace-nowrap font-mono"
               style={type === 'cpu' ? { minWidth: '3ch' } : undefined}
             >
               {getUsageText()}
@@ -199,7 +200,7 @@ const CompactSystemStatus = ({
       <div className="flex-shrink-0 ml-2">
         <MdOpenInFull
           size={16}
-          className="text-gray-400 hover:text-gray-600 transition-colors duration-200"
+          className="text-white/40 hover:text-white/70 transition-colors duration-200"
         />
       </div>
     </div>

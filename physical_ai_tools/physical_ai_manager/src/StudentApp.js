@@ -26,6 +26,8 @@ import InferencePage from './pages/InferencePage';
 import TrainingPage from './pages/TrainingPage';
 import EditDatasetPage from './pages/EditDatasetPage';
 import StartupGate from './components/StartupGate';
+import { LogoMark } from './components/EbUI';
+import packageJson from '../package.json';
 import { useRosTopicSubscription } from './hooks/useRosTopicSubscription';
 import rosConnectionManager from './utils/rosConnectionManager';
 import { useDispatch, useSelector } from 'react-redux';
@@ -74,15 +76,11 @@ function StudentApp() {
 
   const isFirstLoad = useRef(true);
 
-  // Subscribe to task status from ROS topic (always active in full-stack mode).
-  // In cloud-only mode we call the hook but don't register the reconnect
-  // handler, so the subscriptions don't fire (robot pages won't be used anyway).
   const rosSubscriptionControls = useRosTopicSubscription();
   if (!cloudOnly) {
     rosConnectionManager.setOnConnected(rosSubscriptionControls.initializeSubscriptions);
   }
 
-  // Disconnect ROS connection when app unmounts
   useEffect(() => {
     return () => {
       if (!cloudOnly) {
@@ -92,7 +90,6 @@ function StudentApp() {
     };
   }, [cloudOnly]);
 
-  // Warn user before closing/refreshing during active recording
   useEffect(() => {
     const handleBeforeUnload = (e) => {
       if (taskStatus.running) {
@@ -104,7 +101,6 @@ function StudentApp() {
     return () => window.removeEventListener('beforeunload', handleBeforeUnload);
   }, [taskStatus.running]);
 
-  // Initialize Supabase auth listener
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
       dispatch(setSession(session));
@@ -120,7 +116,6 @@ function StudentApp() {
     return () => subscription.unsubscribe();
   }, [dispatch]);
 
-  // Fetch /me profile after session is established, to learn the role.
   useEffect(() => {
     if (!session?.access_token) return;
     let alive = true;
@@ -128,10 +123,9 @@ function StudentApp() {
       .then((me) => {
         if (!alive) return;
         dispatch(setProfile(me));
-        // Teacher/admin logging in on Docker build → reject
         if (me.role !== 'student') {
           toast.error(
-            'Dieses Konto ist fuer die Web-App. Bitte nutze die Lehrer-URL.',
+            'Dieses Konto ist für die Web-App. Bitte nutze die Lehrer-URL.',
             { duration: 6000 }
           );
           supabase.auth.signOut();
@@ -160,77 +154,40 @@ function StudentApp() {
     }
   }, [page, taskInfo?.taskType, taskStatus.topicReceived, trainingTopicReceived, dispatch]);
 
+  const requireRobotOrRedirect = (targetPage) => {
+    if (process.env.REACT_APP_DEBUG === 'true') {
+      isFirstLoad.current = false;
+      dispatch(moveToPage(targetPage));
+      return;
+    }
+    if (taskStatus && taskStatus.robotType !== '') {
+      isFirstLoad.current = false;
+      dispatch(moveToPage(targetPage));
+      return;
+    }
+    if (!robotType || robotType.trim() === '') {
+      toast.error('Bitte wähle zuerst einen Robotertyp auf der Startseite', {
+        duration: 4000,
+      });
+      return;
+    }
+    dispatch(moveToPage(targetPage));
+  };
+
   const handleHomePageNavigation = () => {
     isFirstLoad.current = false;
     dispatch(moveToPage(PageType.HOME));
   };
 
-  const handleRecordPageNavigation = () => {
-    if (process.env.REACT_APP_DEBUG === 'true') {
-      isFirstLoad.current = false;
-      dispatch(moveToPage(PageType.RECORD));
-      return;
-    }
-    if (taskStatus && taskStatus.robotType !== '') {
-      isFirstLoad.current = false;
-      dispatch(moveToPage(PageType.RECORD));
-      return;
-    }
-    if (!robotType || robotType.trim() === '') {
-      toast.error('Bitte waehle zuerst einen Robotertyp auf der Startseite', {
-        duration: 4000,
-      });
-      return;
-    }
-    dispatch(moveToPage(PageType.RECORD));
-  };
-
-  const handleInferencePageNavigation = () => {
-    if (process.env.REACT_APP_DEBUG === 'true') {
-      isFirstLoad.current = false;
-      dispatch(moveToPage(PageType.INFERENCE));
-      return;
-    }
-    if (taskStatus && taskStatus.robotType !== '') {
-      isFirstLoad.current = false;
-      dispatch(moveToPage(PageType.INFERENCE));
-      return;
-    }
-    if (!robotType || robotType.trim() === '') {
-      toast.error('Bitte waehle zuerst einen Robotertyp auf der Startseite', {
-        duration: 4000,
-      });
-      return;
-    }
-    dispatch(moveToPage(PageType.INFERENCE));
-  };
+  const handleRecordPageNavigation = () => requireRobotOrRedirect(PageType.RECORD);
+  const handleInferencePageNavigation = () => requireRobotOrRedirect(PageType.INFERENCE);
+  const handleEditDatasetPageNavigation = () => requireRobotOrRedirect(PageType.EDIT_DATASET);
 
   const handleTrainingPageNavigation = () => {
     isFirstLoad.current = false;
     dispatch(moveToPage(PageType.TRAINING));
   };
 
-  const handleEditDatasetPageNavigation = () => {
-    if (process.env.REACT_APP_DEBUG === 'true') {
-      isFirstLoad.current = false;
-      dispatch(moveToPage(PageType.EDIT_DATASET));
-      return;
-    }
-    if (taskStatus && taskStatus.robotType !== '') {
-      isFirstLoad.current = false;
-      dispatch(moveToPage(PageType.EDIT_DATASET));
-      return;
-    }
-    if (!robotType || robotType.trim() === '') {
-      toast.error('Bitte waehle zuerst einen Robotertyp auf der Startseite', {
-        duration: 4000,
-      });
-      return;
-    }
-    dispatch(moveToPage(PageType.EDIT_DATASET));
-  };
-
-  // Force cleanup of all image streams when page changes
   useEffect(() => {
     return () => {
       const allStreamImgs = document.querySelectorAll('img[src*="/stream"]');
@@ -243,94 +200,91 @@ function StudentApp() {
     };
   }, [page]);
 
-  const classPageButton = clsx(
-    'flex',
-    'flex-col',
-    'items-center',
-    'rounded-2xl',
-    'border-none',
-    'py-5',
-    'px-4',
-    'text-base',
-    'text-gray-800',
-    'cursor-pointer',
-    'transition-colors',
-    'duration-150',
-    'outline-none',
-    'w-24'
-  );
+  const navItems = [
+    { key: PageType.HOME, label: 'Start', Icon: MdHome, onClick: handleHomePageNavigation },
+    { key: PageType.RECORD, label: 'Aufnahme', Icon: MdVideocam, onClick: handleRecordPageNavigation },
+    { key: PageType.TRAINING, label: 'Training', Icon: GoGraph, onClick: handleTrainingPageNavigation },
+    { key: PageType.INFERENCE, label: 'Inferenz', Icon: MdMemory, onClick: handleInferencePageNavigation },
+    { key: PageType.EDIT_DATASET, label: 'Daten', Icon: MdWidgets, onClick: handleEditDatasetPageNavigation, sep: true },
+  ];
 
-  // If a non-student account logged in, don't render the robot UI.
+  const isDarkPage = page === PageType.RECORD || page === PageType.INFERENCE;
+
   const blockRoleMismatch = profileLoaded && role && role !== 'student';
 
   return (
     <StartupGate>
-      <div className="flex min-h-screen w-screen">
-        <aside className="w-30 min-w-28 bg-gray-100 min-h-screen flex flex-col items-center gap-4 shadow-[inset_0_0_2px_rgba(0,0,0,0.1)]">
-          <div className="w-full h-screen flex flex-col gap-2 items-center overflow-y-auto scrollbar-thin">
-            <div className="w-full h-8"></div>
-            <button
-              className={clsx(classPageButton, {
-                'hover:bg-gray-200 active:bg-gray-400': page !== PageType.HOME,
-                'bg-teal-100': page === PageType.HOME,
-              })}
-              onClick={handleHomePageNavigation}
-            >
-              <MdHome size={32} className="mb-1.5" />
-              <span className="mt-1 text-sm">Start</span>
-            </button>
-            <button
-              className={clsx(classPageButton, {
-                'hover:bg-gray-200 active:bg-gray-400': page !== PageType.RECORD,
-                'bg-teal-100': page === PageType.RECORD,
-              })}
-              onClick={handleRecordPageNavigation}
-            >
-              <MdVideocam size={32} className="mb-1.5" />
-              <span className="mt-1 text-sm">Aufnahme</span>
-            </button>
-            <button
-              className={clsx(classPageButton, {
-                'hover:bg-gray-200 active:bg-gray-400': page !== PageType.TRAINING,
-                'bg-teal-100': page === PageType.TRAINING,
-              })}
-              onClick={handleTrainingPageNavigation}
-            >
-              <GoGraph size={28} className="mb-1.5" />
-              <span className="mt-1 text-sm">Training</span>
-            </button>
-            <button
-              className={clsx(classPageButton, {
-                'hover:bg-gray-200 active:bg-gray-400': page !== PageType.INFERENCE,
-                'bg-teal-100': page === PageType.INFERENCE,
-              })}
-              onClick={handleInferencePageNavigation}
-            >
-              <MdMemory size={32} className="mb-1.5" />
-              <span className="mt-1 text-sm">Inferenz</span>
-            </button>
-            <div className="w-24 h-1 border-t-2 rounded-full border-gray-200 mt-3"></div>
-            <button
-              className={clsx(classPageButton, {
-                'hover:bg-gray-200 active:bg-gray-400': page !== PageType.EDIT_DATASET,
-                'bg-teal-100': page === PageType.EDIT_DATASET,
-              })}
-              onClick={handleEditDatasetPageNavigation}
-            >
-              <MdWidgets size={28} className="mb-2" />
-              <span className="mt-1 text-sm whitespace-nowrap">Daten</span>
-            </button>
+      <div
+        className={clsx('flex min-h-screen w-screen', isDarkPage && 'dark-surface')}
+        style={isDarkPage ? { background: 'var(--dark-bg)' } : {}}
+      >
+        <aside
+          className={clsx(
+            'w-[88px] shrink-0 flex flex-col items-center py-5 gap-1',
+            isDarkPage
+              ? 'border-r border-[color:var(--dark-line)]'
+              : 'bg-white border-r border-[var(--line)]'
+          )}
+        >
+          <div className="mb-4">
+            <LogoMark size={22} />
+          </div>
+          {navItems.map((n) => {
+            const Icon = n.Icon;
+            const active = page === n.key;
+            return (
+              <React.Fragment key={n.key}>
+                {n.sep && (
+                  <div
+                    className={clsx(
+                      'w-8 h-px my-2',
+                      isDarkPage ? 'bg-[color:var(--dark-line)]' : 'bg-[var(--line)]'
+                    )}
+                  />
+                )}
+                <button
+                  onClick={n.onClick}
+                  className={clsx(
+                    'group w-[68px] py-3 rounded-[var(--radius)] flex flex-col items-center gap-1.5 transition',
+                    active
+                      ? isDarkPage
+                        ? 'bg-white/[0.08] text-white'
+                        : 'bg-[var(--accent-wash)] text-[var(--accent-ink)]'
+                      : isDarkPage
+                      ? 'text-white/60 hover:bg-white/[0.05]'
+                      : 'text-[var(--ink-3)] hover:bg-[var(--bg-sunk)]'
+                  )}
+                >
+                  <span
+                    className={clsx(
+                      'w-10 h-10 flex items-center justify-center rounded-[10px]',
+                      active && (isDarkPage ? 'bg-white/10' : 'bg-white/60')
+                    )}
+                  >
+                    <Icon size={22} />
+                  </span>
+                  <span className="text-[11px] font-medium">{n.label}</span>
+                </button>
+              </React.Fragment>
+            );
+          })}
+          <div className="flex-1" />
+          <div
+            className={clsx(
+              'text-[10px] font-mono',
+              isDarkPage ? 'text-white/40' : 'text-[var(--ink-4)]'
+            )}
+          >
+            v{packageJson.version}
           </div>
         </aside>
-        <main className="flex-1 flex flex-col h-screen">
+        <main className="flex-1 flex flex-col h-screen min-w-0 relative overflow-hidden">
           {blockRoleMismatch ? (
             <div className="flex flex-col items-center justify-center h-full p-10 text-center">
-              <h2 className="text-xl font-bold text-gray-800 mb-2">
-                Falsches Konto
-              </h2>
-              <p className="text-gray-600 max-w-md">
-                Dieses Konto ist fuer die Web-App gedacht. Bitte melde dich mit
-                einem Schueler-Konto auf diesem Gerat an.
+              <h2 className="text-xl font-bold text-[var(--ink)] mb-2">Falsches Konto</h2>
+              <p className="text-[var(--ink-3)] max-w-md">
+                Dieses Konto ist für die Web-App gedacht. Bitte melde dich mit einem
+                Schüler-Konto auf diesem Gerät an.
               </p>
             </div>
           ) : page === PageType.HOME ? (

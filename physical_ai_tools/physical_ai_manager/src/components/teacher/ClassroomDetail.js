@@ -1,7 +1,6 @@
 import React, { useEffect, useState } from 'react';
-import clsx from 'clsx';
 import toast from 'react-hot-toast';
-import { MdAdd, MdDelete, MdEdit, MdGroups, MdMenuBook } from 'react-icons/md';
+import { MdAdd, MdDelete, MdEdit, MdEventNote } from 'react-icons/md';
 import { useDispatch, useSelector } from 'react-redux';
 import {
   createStudent,
@@ -20,7 +19,7 @@ import { updateTeacherPool } from '../../features/auth/authSlice';
 import CreateStudentModal from './CreateStudentModal';
 import StudentRow from './StudentRow';
 import StudentTrainingHistoryDrawer from './StudentTrainingHistoryDrawer';
-import LessonsPanel from './LessonsPanel';
+import DailyProgressDrawer from './DailyProgressDrawer';
 import { Btn, Card } from '../EbUI';
 
 export default function ClassroomDetail({ classroomId, onClassroomsChanged }) {
@@ -35,7 +34,8 @@ export default function ClassroomDetail({ classroomId, onClassroomsChanged }) {
   const [renaming, setRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState('');
   const [historyStudent, setHistoryStudent] = useState(null);
-  const [tab, setTab] = useState('students');
+  const [showClassProgress, setShowClassProgress] = useState(false);
+  const [progressStudent, setProgressStudent] = useState(null);
 
   useEffect(() => {
     if (!token || !classroomId) return;
@@ -113,7 +113,7 @@ export default function ClassroomDetail({ classroomId, onClassroomsChanged }) {
 
   return (
     <div className="flex-1 flex flex-col min-h-0">
-      <div className="px-8 py-5 border-b border-[var(--line)] bg-white">
+      <div className="eb-rail border-b border-[var(--line)] bg-white">
         <div className="flex items-center justify-between gap-4 flex-wrap">
           <div className="flex items-center gap-3 min-w-0">
             {renaming ? (
@@ -158,15 +158,20 @@ export default function ClassroomDetail({ classroomId, onClassroomsChanged }) {
             )}
           </div>
           <div className="flex items-center gap-2">
-            {tab === 'students' && (
-              <Btn
-                variant="primary"
-                onClick={() => setShowCreateStudent(true)}
-                disabled={full}
-              >
-                <MdAdd /> Schüler hinzufügen
-              </Btn>
-            )}
+            <Btn
+              variant="secondary"
+              onClick={() => setShowClassProgress(true)}
+              title="Klassen-Fortschritt · tägliche Notizen für die ganze Klasse"
+            >
+              <MdEventNote /> Klassen-Fortschritt
+            </Btn>
+            <Btn
+              variant="primary"
+              onClick={() => setShowCreateStudent(true)}
+              disabled={full}
+            >
+              <MdAdd /> Schüler hinzufügen
+            </Btn>
             <button
               onClick={handleDeleteClassroom}
               className="w-9 h-9 rounded-[var(--radius-sm)] text-[var(--ink-3)] hover:bg-[var(--danger-wash)] hover:text-[color:var(--danger)] flex items-center justify-center transition"
@@ -176,63 +181,44 @@ export default function ClassroomDetail({ classroomId, onClassroomsChanged }) {
             </button>
           </div>
         </div>
-        <div className="mt-4 flex items-center gap-1">
-          {[
-            { key: 'students', label: 'Schüler', Icon: MdGroups },
-            { key: 'lessons', label: 'Lektionen', Icon: MdMenuBook },
-          ].map(({ key, label, Icon }) => {
-            const active = tab === key;
-            return (
-              <button
-                key={key}
-                onClick={() => setTab(key)}
-                className={clsx(
-                  'inline-flex items-center gap-1.5 h-9 px-3 rounded-[var(--radius-sm)] text-sm transition',
-                  active
-                    ? 'bg-[var(--accent-wash)] text-[var(--accent-ink)] font-semibold'
-                    : 'text-[var(--ink-3)] hover:bg-[var(--bg-sunk)] hover:text-[var(--ink-2)]'
-                )}
-              >
-                <Icon size={18} /> {label}
-              </button>
-            );
-          })}
-        </div>
       </div>
 
-      <div className="flex-1 overflow-y-auto p-8">
-        {tab === 'lessons' ? (
-          <LessonsPanel classroomId={classroomId} students={students} />
-        ) : students.length === 0 ? (
-          <div className="flex flex-col items-center justify-center h-full text-[var(--ink-3)] p-10 text-center">
-            <p className="mb-4">Noch keine Schüler in dieser Klasse.</p>
-            <Btn variant="primary" onClick={() => setShowCreateStudent(true)}>
-              <MdAdd /> Ersten Schüler hinzufügen
-            </Btn>
-          </div>
-        ) : (
-          <Card padded={false}>
-            <table className="w-full text-sm">
-              <thead className="bg-[var(--bg-sunk)] border-b border-[var(--line)]">
-                <tr className="text-[11px] font-semibold uppercase tracking-wider text-[var(--ink-3)]">
-                  <th className="text-left py-3 px-5">Schüler</th>
-                  <th className="text-left py-3 px-3">Credits</th>
-                  <th className="text-right py-3 px-5">Aktionen</th>
-                </tr>
-              </thead>
-              <tbody>
-                {students.map((s) => (
-                  <StudentRow
-                    key={s.id}
-                    student={s}
-                    classrooms={classrooms}
-                    onShowHistory={setHistoryStudent}
-                  />
-                ))}
-              </tbody>
-            </table>
-          </Card>
-        )}
+      <div className="flex-1 overflow-y-auto">
+        <div className="eb-shell">
+          {students.length === 0 ? (
+            <div className="flex flex-col items-center justify-center h-full text-[var(--ink-3)] p-8 md:p-10 text-center">
+              <p className="mb-4">Noch keine Schüler in dieser Klasse.</p>
+              <Btn variant="primary" onClick={() => setShowCreateStudent(true)}>
+                <MdAdd /> Ersten Schüler hinzufügen
+              </Btn>
+            </div>
+          ) : (
+            <Card padded={false}>
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm min-w-[560px]">
+                  <thead className="bg-[var(--bg-sunk)] border-b border-[var(--line)]">
+                    <tr className="text-[11px] font-semibold uppercase tracking-wider text-[var(--ink-3)]">
+                      <th className="text-left py-3 px-5">Schüler</th>
+                      <th className="text-left py-3 px-3">Credits</th>
+                      <th className="text-right py-3 px-5">Aktionen</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {students.map((s) => (
+                      <StudentRow
+                        key={s.id}
+                        student={s}
+                        classrooms={classrooms}
+                        onShowHistory={setHistoryStudent}
+                        onShowProgress={setProgressStudent}
+                      />
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </Card>
+          )}
+        </div>
       </div>
 
       {showCreateStudent && (
@@ -246,6 +232,19 @@ export default function ClassroomDetail({ classroomId, onClassroomsChanged }) {
         <StudentTrainingHistoryDrawer
           student={historyStudent}
           onClose={() => setHistoryStudent(null)}
+        />
+      )}
+      {showClassProgress && (
+        <DailyProgressDrawer
+          classroomId={classroomId}
+          onClose={() => setShowClassProgress(false)}
+        />
+      )}
+      {progressStudent && (
+        <DailyProgressDrawer
+          classroomId={classroomId}
+          student={progressStudent}
+          onClose={() => setProgressStudent(null)}
         />
       )}
     </div>

@@ -33,7 +33,6 @@ class StudentCreate(BaseModel):
 class StudentPatch(BaseModel):
     full_name: str | None = Field(default=None, min_length=1, max_length=100)
     classroom_id: str | None = None
-    progress_note: str | None = Field(default=None, max_length=4000)
 
 
 class PasswordReset(BaseModel):
@@ -59,7 +58,6 @@ class StudentSummary(BaseModel):
     trainings_used: int
     remaining: int
     classroom_id: str | None
-    progress_note: str | None = None
 
 
 class TrainingSummary(BaseModel):
@@ -146,7 +144,6 @@ def _student_summary(row: dict) -> StudentSummary:
         trainings_used=used,
         remaining=credits - used,
         classroom_id=row.get("classroom_id"),
-        progress_note=row.get("progress_note"),
     )
 
 
@@ -212,7 +209,7 @@ async def get_classroom(classroom_id: str, teacher=Depends(get_current_teacher))
     supabase = get_supabase()
     students_raw = (
         supabase.table("users")
-        .select("id, username, full_name, training_credits, classroom_id, progress_note")
+        .select("id, username, full_name, training_credits, classroom_id")
         .eq("classroom_id", classroom_id)
         .eq("role", "student")
         .order("full_name", desc=False)
@@ -375,7 +372,7 @@ async def create_student(
 
     row = (
         supabase.table("users")
-        .select("id, username, full_name, training_credits, classroom_id, progress_note")
+        .select("id, username, full_name, training_credits, classroom_id")
         .eq("id", student_id)
         .single()
         .execute()
@@ -399,10 +396,6 @@ async def patch_student(
         # Moving to another classroom — must also be owned by teacher.
         _assert_classroom_owned(teacher["id"], req.classroom_id)
         updates["classroom_id"] = req.classroom_id
-    if req.progress_note is not None:
-        # Empty string clears the note; non-empty strings are stored as-is.
-        stripped = req.progress_note.strip()
-        updates["progress_note"] = stripped or None
     if not updates:
         raise HTTPException(status_code=400, detail="Keine Aenderungen")
 
@@ -417,7 +410,7 @@ async def patch_student(
 
     row = (
         supabase.table("users")
-        .select("id, username, full_name, training_credits, classroom_id, progress_note")
+        .select("id, username, full_name, training_credits, classroom_id")
         .eq("id", student_id)
         .single()
         .execute()
@@ -518,236 +511,164 @@ async def list_student_trainings(
     return [TrainingSummary(**t) for t in (result.data or [])]
 
 
-# ---------- Lessons + progress ----------
+# ---------- Daily progress entries ----------
+#
+# Each entry is scoped to a single day (entry_date) under a classroom.
+# - student_id present  -> per-student daily note
+# - student_id absent   -> class-wide daily note
+# UNIQUE (classroom_id, student_id, entry_date) is enforced in Postgres
+# via two partial indexes (migration 004).
 
 
-class LessonCreate(BaseModel):
-    title: str = Field(..., min_length=1, max_length=200)
-    description: str | None = Field(default=None, max_length=4000)
-    order_index: int = Field(default=0, ge=0, le=10000)
+class ProgressEntryCreate(BaseModel):
+    note: str = Field(..., min_length=1, max_length=4000)
+    # ISO date string YYYY-MM-DD. Defaults to server "today" (UTC) when omitted.
+    entry_date: str | None = None
+    # Null / omitted -> class-wide entry. Otherwise a student in the classroom.
+    student_id: str | None = None
 
 
-class LessonPatch(BaseModel):
-    title: str | None = Field(default=None, min_length=1, max_length=200)
-    description: str | None = Field(default=None, max_length=4000)
-    order_index: int | None = Field(default=None, ge=0, le=10000)
+class ProgressEntryPatch(BaseModel):
+    note: str = Field(..., min_length=1, max_length=4000)
 
 
-class LessonSummary(BaseModel):
+class ProgressEntrySummary(BaseModel):
     id: str
     classroom_id: str
-    title: str
-    description: str | None = None
-    order_index: int
+    student_id: str | None = None
+    entry_date: str
+    note: str
     created_at: str
     updated_at: str
-    progress_counts: dict = Field(default_factory=dict)
 
 
-class LessonProgressPatch(BaseModel):
-    status: str | None = Field(
-        default=None, pattern="^(not_started|in_progress|completed)$"
-    )
-    note: str | None = Field(default=None, max_length=4000)
-
-
-class LessonProgressRow(BaseModel):
-    lesson_id: str
-    student_id: str
-    status: str
-    note: str | None = None
-    updated_at: str | None = None
-
-
-def _assert_lesson_owned(teacher_id: str, lesson_id: str) -> dict:
-    supabase = get_supabase()
-    result = (
-        supabase.table("lessons")
-        .select("*")
-        .eq("id", lesson_id)
-        .execute()
-    )
-    if not result.data:
-        raise HTTPException(status_code=404, detail="Lektion nicht gefunden")
-    lesson = result.data[0]
-    _assert_classroom_owned(teacher_id, lesson["classroom_id"])
-    return lesson
-
-
-def _lesson_progress_counts(lesson_id: str) -> dict:
-    """Return per-status counts for a lesson as a plain dict."""
-    supabase = get_supabase()
-    rows = (
-        supabase.table("lesson_progress")
-        .select("status")
-        .eq("lesson_id", lesson_id)
-        .execute()
-    ).data or []
-    counts = {"not_started": 0, "in_progress": 0, "completed": 0}
-    for r in rows:
-        s = r.get("status") or "not_started"
-        if s in counts:
-            counts[s] += 1
-    return counts
-
-
-def _serialize_lesson(row: dict) -> LessonSummary:
-    return LessonSummary(
+def _serialize_progress_entry(row: dict) -> ProgressEntrySummary:
+    return ProgressEntrySummary(
         id=row["id"],
         classroom_id=row["classroom_id"],
-        title=row["title"],
-        description=row.get("description"),
-        order_index=int(row.get("order_index") or 0),
+        student_id=row.get("student_id"),
+        entry_date=str(row["entry_date"]),
+        note=row["note"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
-        progress_counts=_lesson_progress_counts(row["id"]),
     )
+
+
+def _assert_entry_owned(teacher_id: str, entry_id: str) -> dict:
+    supabase = get_supabase()
+    result = (
+        supabase.table("progress_entries").select("*").eq("id", entry_id).execute()
+    )
+    if not result.data:
+        raise HTTPException(status_code=404, detail="Eintrag nicht gefunden")
+    entry = result.data[0]
+    _assert_classroom_owned(teacher_id, entry["classroom_id"])
+    return entry
 
 
 @router.get(
-    "/classrooms/{classroom_id}/lessons", response_model=list[LessonSummary]
+    "/classrooms/{classroom_id}/progress-entries",
+    response_model=list[ProgressEntrySummary],
 )
-async def list_lessons(classroom_id: str, teacher=Depends(get_current_teacher)):
+async def list_progress_entries(
+    classroom_id: str,
+    student_id: str | None = None,
+    scope: str | None = None,  # "student" | "classroom" — filters to one or the other when set
+    teacher=Depends(get_current_teacher),
+):
+    """List entries for a classroom.
+
+    - no filter                  -> all entries (both classroom + student)
+    - student_id=<uuid>          -> only that student's entries
+    - scope=classroom            -> only class-wide entries (student_id IS NULL)
+    - scope=student (no id)      -> only student-scoped entries (student_id IS NOT NULL)
+    """
     _assert_classroom_owned(teacher["id"], classroom_id)
     supabase = get_supabase()
-    rows = (
-        supabase.table("lessons")
-        .select("*")
-        .eq("classroom_id", classroom_id)
-        .order("order_index", desc=False)
-        .order("created_at", desc=False)
-        .execute()
-    ).data or []
-    return [_serialize_lesson(r) for r in rows]
+    q = supabase.table("progress_entries").select("*").eq("classroom_id", classroom_id)
+    if student_id is not None:
+        _assert_student_owned(teacher["id"], student_id)
+        q = q.eq("student_id", student_id)
+    elif scope == "classroom":
+        q = q.is_("student_id", "null")
+    elif scope == "student":
+        q = q.not_.is_("student_id", "null")
+    rows = q.order("entry_date", desc=True).order("updated_at", desc=True).execute().data or []
+    return [_serialize_progress_entry(r) for r in rows]
 
 
-@router.post("/classrooms/{classroom_id}/lessons", response_model=LessonSummary)
-async def create_lesson(
+@router.post(
+    "/classrooms/{classroom_id}/progress-entries",
+    response_model=ProgressEntrySummary,
+)
+async def create_progress_entry(
     classroom_id: str,
-    req: LessonCreate,
+    req: ProgressEntryCreate,
     teacher=Depends(get_current_teacher),
 ):
     _assert_classroom_owned(teacher["id"], classroom_id)
-    supabase = get_supabase()
-    try:
-        result = (
-            supabase.table("lessons")
-            .insert(
-                {
-                    "classroom_id": classroom_id,
-                    "title": req.title.strip(),
-                    "description": (req.description or "").strip() or None,
-                    "order_index": req.order_index,
-                }
+    if req.student_id:
+        student = _assert_student_owned(teacher["id"], req.student_id)
+        if student.get("classroom_id") != classroom_id:
+            raise HTTPException(
+                status_code=400,
+                detail="Schueler gehoert nicht zu dieser Klasse",
             )
-            .execute()
-        )
+
+    payload: dict = {
+        "classroom_id": classroom_id,
+        "student_id": req.student_id,
+        "note": req.note.strip(),
+    }
+    if req.entry_date:
+        payload["entry_date"] = req.entry_date
+
+    supabase = get_supabase()
+    try:
+        result = supabase.table("progress_entries").insert(payload).execute()
     except Exception as e:
-        logger.error("create_lesson failed: %s", e)
-        raise HTTPException(status_code=500, detail="Lektion konnte nicht erstellt werden")
-    return _serialize_lesson(result.data[0])
+        msg = str(e).lower()
+        if "duplicate" in msg or "unique" in msg:
+            raise HTTPException(
+                status_code=409,
+                detail="Fuer diesen Tag existiert bereits ein Eintrag - bearbeite ihn stattdessen",
+            )
+        logger.error("create_progress_entry failed: %s", e)
+        raise HTTPException(status_code=500, detail="Eintrag konnte nicht erstellt werden")
+    return _serialize_progress_entry(result.data[0])
 
 
-@router.patch("/lessons/{lesson_id}", response_model=LessonSummary)
-async def patch_lesson(
-    lesson_id: str, req: LessonPatch, teacher=Depends(get_current_teacher)
+@router.patch(
+    "/progress-entries/{entry_id}", response_model=ProgressEntrySummary
+)
+async def patch_progress_entry(
+    entry_id: str,
+    req: ProgressEntryPatch,
+    teacher=Depends(get_current_teacher),
 ):
-    _assert_lesson_owned(teacher["id"], lesson_id)
-    updates: dict = {}
-    if req.title is not None:
-        updates["title"] = req.title.strip()
-    if req.description is not None:
-        updates["description"] = (req.description or "").strip() or None
-    if req.order_index is not None:
-        updates["order_index"] = req.order_index
-    if not updates:
-        raise HTTPException(status_code=400, detail="Keine Aenderungen")
+    _assert_entry_owned(teacher["id"], entry_id)
     supabase = get_supabase()
     try:
         result = (
-            supabase.table("lessons")
-            .update(updates)
-            .eq("id", lesson_id)
+            supabase.table("progress_entries")
+            .update({"note": req.note.strip()})
+            .eq("id", entry_id)
             .execute()
         )
     except Exception as e:
-        logger.error("patch_lesson failed: %s", e)
-        raise HTTPException(status_code=500, detail="Lektion konnte nicht aktualisiert werden")
-    return _serialize_lesson(result.data[0])
+        logger.error("patch_progress_entry failed: %s", e)
+        raise HTTPException(status_code=500, detail="Eintrag konnte nicht aktualisiert werden")
+    return _serialize_progress_entry(result.data[0])
 
 
-@router.delete("/lessons/{lesson_id}")
-async def delete_lesson(lesson_id: str, teacher=Depends(get_current_teacher)):
-    _assert_lesson_owned(teacher["id"], lesson_id)
+@router.delete("/progress-entries/{entry_id}")
+async def delete_progress_entry(
+    entry_id: str, teacher=Depends(get_current_teacher)
+):
+    _assert_entry_owned(teacher["id"], entry_id)
     supabase = get_supabase()
-    supabase.table("lessons").delete().eq("id", lesson_id).execute()
+    supabase.table("progress_entries").delete().eq("id", entry_id).execute()
     return {"ok": True}
 
 
-@router.get(
-    "/lessons/{lesson_id}/progress", response_model=list[LessonProgressRow]
-)
-async def list_lesson_progress(
-    lesson_id: str, teacher=Depends(get_current_teacher)
-):
-    _assert_lesson_owned(teacher["id"], lesson_id)
-    supabase = get_supabase()
-    rows = (
-        supabase.table("lesson_progress")
-        .select("lesson_id, student_id, status, note, updated_at")
-        .eq("lesson_id", lesson_id)
-        .execute()
-    ).data or []
-    return [LessonProgressRow(**r) for r in rows]
 
-
-@router.put(
-    "/lessons/{lesson_id}/students/{student_id}/progress",
-    response_model=LessonProgressRow,
-)
-async def upsert_lesson_progress(
-    lesson_id: str,
-    student_id: str,
-    req: LessonProgressPatch,
-    teacher=Depends(get_current_teacher),
-):
-    lesson = _assert_lesson_owned(teacher["id"], lesson_id)
-    student = _assert_student_owned(teacher["id"], student_id)
-    # Student must actually be in this lesson's classroom.
-    if student.get("classroom_id") != lesson["classroom_id"]:
-        raise HTTPException(
-            status_code=400,
-            detail="Schueler gehoert nicht zur Klasse dieser Lektion",
-        )
-
-    supabase = get_supabase()
-    payload: dict = {
-        "lesson_id": lesson_id,
-        "student_id": student_id,
-    }
-    if req.status is not None:
-        payload["status"] = req.status
-    if req.note is not None:
-        payload["note"] = (req.note or "").strip() or None
-    if len(payload) == 2:
-        raise HTTPException(status_code=400, detail="Keine Aenderungen")
-
-    try:
-        result = (
-            supabase.table("lesson_progress")
-            .upsert(payload, on_conflict="lesson_id,student_id")
-            .execute()
-        )
-    except Exception as e:
-        logger.error("upsert_lesson_progress failed: %s", e)
-        raise HTTPException(
-            status_code=500, detail="Fortschritt konnte nicht gespeichert werden"
-        )
-    row = result.data[0]
-    return LessonProgressRow(
-        lesson_id=row["lesson_id"],
-        student_id=row["student_id"],
-        status=row["status"],
-        note=row.get("note"),
-        updated_at=row.get("updated_at"),
-    )

@@ -10,9 +10,7 @@ import {
   MdAdd,
   MdRemove,
   MdTune,
-  MdNote,
-  MdNoteAdd,
-  MdClose,
+  MdEventNote,
 } from 'react-icons/md';
 import { useDispatch, useSelector } from 'react-redux';
 import {
@@ -174,7 +172,7 @@ function MoveInline({ student, classrooms, onSave, onCancel }) {
   );
 }
 
-export default function StudentRow({ student, classrooms, onShowHistory }) {
+export default function StudentRow({ student, classrooms, onShowHistory, onShowProgress }) {
   const dispatch = useDispatch();
   const token = useSelector((s) => s.auth.session?.access_token);
   const [busy, setBusy] = useState(false);
@@ -182,9 +180,6 @@ export default function StudentRow({ student, classrooms, onShowHistory }) {
   const [renaming, setRenaming] = useState(false);
   const [moving, setMoving] = useState(false);
   const [customOpen, setCustomOpen] = useState(false);
-  const [noteOpen, setNoteOpen] = useState(false);
-  const [noteDraft, setNoteDraft] = useState(student.progress_note || '');
-  const [noteSaving, setNoteSaving] = useState(false);
   const otherClassrooms = classrooms.filter((c) => c.id !== student.classroom_id);
 
   const refreshTeacherPool = async () => {
@@ -260,26 +255,6 @@ export default function StudentRow({ student, classrooms, onShowHistory }) {
     }
   };
 
-  const handleSaveNote = async () => {
-    setNoteSaving(true);
-    try {
-      const updated = await patchStudent(token, student.id, {
-        progress_note: noteDraft,
-      });
-      dispatch(
-        upsertStudentInSelected({
-          ...student,
-          progress_note: updated.progress_note,
-        })
-      );
-      toast.success('Notiz gespeichert');
-    } catch (err) {
-      toast.error(err.message || 'Fehler');
-    } finally {
-      setNoteSaving(false);
-    }
-  };
-
   const handleMove = async (classroomId) => {
     setBusy(true);
     try {
@@ -300,11 +275,8 @@ export default function StudentRow({ student, classrooms, onShowHistory }) {
   const pct = total > 0 ? (used / total) * 100 : 0;
   const progressTone = remaining === 0 ? 'danger' : 'accent';
 
-  const hasNote = !!(student.progress_note && student.progress_note.trim());
-
   return (
-    <>
-    <tr className="border-b border-[var(--line)] hover:bg-[var(--bg-sunk)] group transition-colors">
+    <tr className="border-b last:border-0 border-[var(--line)] hover:bg-[var(--bg-sunk)] group transition-colors">
       <td className="py-3 px-5">
         {renaming ? (
           <RenameInline
@@ -415,18 +387,10 @@ export default function StudentRow({ student, classrooms, onShowHistory }) {
             <Btn
               variant="ghost"
               size="sm"
-              onClick={() => {
-                setNoteDraft(student.progress_note || '');
-                setNoteOpen((v) => !v);
-              }}
-              title={hasNote ? 'Notiz bearbeiten' : 'Notiz hinzufügen'}
-              className={clsx(
-                hasNote &&
-                  !noteOpen &&
-                  'text-[var(--accent-ink)] bg-[var(--accent-wash)]'
-              )}
+              onClick={() => onShowProgress?.(student)}
+              title="Fortschritt · tägliche Notizen"
             >
-              {hasNote ? <MdNote size={18} /> : <MdNoteAdd size={18} />}
+              <MdEventNote size={18} />
             </Btn>
             <Btn
               variant="ghost"
@@ -477,65 +441,5 @@ export default function StudentRow({ student, classrooms, onShowHistory }) {
         />
       )}
     </tr>
-    {noteOpen && (
-      <tr className="border-b border-[var(--line)] bg-[var(--bg-sunk)]">
-        <td colSpan={3} className="px-5 py-4">
-          <div className="flex items-start gap-3">
-            <div className="flex-1 min-w-0">
-              <div className="flex items-center justify-between gap-2 mb-2">
-                <div className="text-[11px] font-semibold uppercase tracking-wider text-[var(--ink-3)] flex items-center gap-1.5">
-                  <MdNote size={14} />
-                  Fortschrittsnotiz für {student.full_name || student.username}
-                </div>
-                <button
-                  onClick={() => setNoteOpen(false)}
-                  className="text-[var(--ink-3)] hover:text-[var(--ink)] transition"
-                  title="Schließen"
-                >
-                  <MdClose size={16} />
-                </button>
-              </div>
-              <textarea
-                className="w-full min-h-[90px] p-3 bg-white border border-[var(--line)] rounded-[var(--radius-sm)] text-sm text-[var(--ink)] placeholder:text-[var(--ink-4)] focus:outline-none focus:border-[var(--accent)] focus:ring-2 focus:ring-[color:var(--accent-wash)] transition resize-y"
-                value={noteDraft}
-                onChange={(e) => setNoteDraft(e.target.value)}
-                placeholder="Wie geht es diesem Schüler voran? Stärken, Schwächen, Beobachtungen…"
-                maxLength={4000}
-                disabled={noteSaving}
-              />
-              <div className="mt-2 flex items-center justify-between gap-2">
-                <span className="text-[11px] text-[var(--ink-3)] font-mono">
-                  {noteDraft.length} / 4000
-                </span>
-                <div className="flex items-center gap-2">
-                  <Btn
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => {
-                      setNoteDraft(student.progress_note || '');
-                      setNoteOpen(false);
-                    }}
-                    disabled={noteSaving}
-                  >
-                    Abbrechen
-                  </Btn>
-                  <Btn
-                    variant="primary"
-                    size="sm"
-                    onClick={handleSaveNote}
-                    disabled={
-                      noteSaving || noteDraft === (student.progress_note || '')
-                    }
-                  >
-                    {noteSaving ? 'Speichern…' : 'Speichern'}
-                  </Btn>
-                </div>
-              </div>
-            </div>
-          </div>
-        </td>
-      </tr>
-    )}
-    </>
   );
 }

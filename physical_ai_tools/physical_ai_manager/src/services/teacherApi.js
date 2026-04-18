@@ -35,32 +35,31 @@ export const adjustStudentCredits = (token, studentId, delta) =>
 export const listStudentTrainings = (token, studentId) =>
   apiRequest(`/teacher/students/${studentId}/trainings`, 'GET', token);
 
-// ---------- Lessons ----------
+// ---------- Daily progress entries ----------
 
-export const listLessons = (token, classroomId) =>
-  apiRequest(`/teacher/classrooms/${classroomId}/lessons`, 'GET', token);
+export const listProgressEntries = (token, classroomId, { studentId, scope } = {}) => {
+  const params = new URLSearchParams();
+  if (studentId) params.set('student_id', studentId);
+  if (scope) params.set('scope', scope);
+  const qs = params.toString();
+  const suffix = qs ? `?${qs}` : '';
+  return apiRequest(
+    `/teacher/classrooms/${classroomId}/progress-entries${suffix}`,
+    'GET',
+    token
+  );
+};
 
-export const createLesson = (token, classroomId, body) =>
+export const createProgressEntry = (token, classroomId, body) =>
   apiRequest(
-    `/teacher/classrooms/${classroomId}/lessons`,
+    `/teacher/classrooms/${classroomId}/progress-entries`,
     'POST',
     token,
     body
   );
 
-export const patchLesson = (token, lessonId, body) =>
-  apiRequest(`/teacher/lessons/${lessonId}`, 'PATCH', token, body);
+export const patchProgressEntry = (token, entryId, note) =>
+  apiRequest(`/teacher/progress-entries/${entryId}`, 'PATCH', token, { note });
 
-export const deleteLesson = (token, lessonId) =>
-  apiRequest(`/teacher/lessons/${lessonId}`, 'DELETE', token);
-
-export const listLessonProgress = (token, lessonId) =>
-  apiRequest(`/teacher/lessons/${lessonId}/progress`, 'GET', token);
-
-export const upsertLessonProgress = (token, lessonId, studentId, body) =>
-  apiRequest(
-    `/teacher/lessons/${lessonId}/students/${studentId}/progress`,
-    'PUT',
-    token,
-    body
-  );
+export const deleteProgressEntry = (token, entryId) =>
+  apiRequest(`/teacher/progress-entries/${entryId}`, 'DELETE', token);

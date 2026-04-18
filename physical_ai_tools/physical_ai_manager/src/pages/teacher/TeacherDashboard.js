@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import clsx from 'clsx';
 import toast from 'react-hot-toast';
-import { MdAdd, MdLogout, MdSchool } from 'react-icons/md';
+import { MdAdd } from 'react-icons/md';
 import { useDispatch, useSelector } from 'react-redux';
 import {
   createClassroom,
@@ -14,6 +14,14 @@ import {
 } from '../../features/teacher/teacherSlice';
 import CreateClassroomModal from '../../components/teacher/CreateClassroomModal';
 import ClassroomDetail from '../../components/teacher/ClassroomDetail';
+import {
+  Btn,
+  Divider,
+  Pill,
+  Progress,
+  StatBig,
+  TopBar,
+} from '../../components/EbUI';
 
 export default function TeacherDashboard({ onLogout }) {
   const dispatch = useDispatch();
@@ -54,95 +62,125 @@ export default function TeacherDashboard({ onLogout }) {
     dispatch(selectClassroom(created.id));
   };
 
-  return (
-    <div className="h-screen w-screen flex flex-col bg-gray-50">
-      {/* Top bar */}
-      <header className="bg-white border-b border-gray-200 px-8 py-3 flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <MdSchool size={26} className="text-teal-600" />
-          <h1 className="text-lg font-bold text-gray-800">EduBotics - Lehrer-Dashboard</h1>
-        </div>
-        <div className="flex items-center gap-4">
-          <div className="text-right">
-            <div className="text-sm font-medium text-gray-800">{fullName || username}</div>
-            <div className="text-xs text-gray-500 font-mono">{username}</div>
-          </div>
-          <button
-            onClick={onLogout}
-            className="flex items-center gap-1.5 text-sm text-gray-500 hover:text-gray-800 px-3 py-2 rounded-lg hover:bg-gray-100"
-          >
-            <MdLogout size={18} />
-            Abmelden
-          </button>
-        </div>
-      </header>
+  const poolAvailableTone =
+    poolAvailable === null || poolAvailable === undefined
+      ? undefined
+      : poolAvailable > 0
+      ? 'success'
+      : 'danger';
 
-      {/* Credit summary */}
-      <div className="bg-white border-b border-gray-200 px-8 py-4 flex items-center gap-6 overflow-x-auto">
-        <Stat label="Pool" value={poolTotal ?? '-'} />
-        <Stat label="Verteilt" value={allocatedTotal ?? '-'} />
-        <Stat
-          label="Verfuegbar"
-          value={poolAvailable ?? '-'}
-          highlight={poolAvailable > 0 ? 'green' : 'red'}
+  return (
+    <div
+      className="h-screen w-screen flex flex-col"
+      style={{ background: 'var(--bg)' }}
+    >
+      <TopBar
+        title="EduBotics"
+        subtitle="Lehrer-Dashboard"
+        roleBadge={
+          <Pill tone="accent" dot>
+            Lehrer
+          </Pill>
+        }
+        user={fullName || username || '—'}
+        userSub={username}
+        userName={fullName || username}
+        onLogout={onLogout}
+      />
+
+      {/* Stat rail */}
+      <div className="bg-white border-b border-[var(--line)] px-8 py-5 flex items-center gap-10 overflow-x-auto">
+        <StatBig label="Pool" value={poolTotal ?? '—'} sub="Credits insgesamt" />
+        <Divider />
+        <StatBig label="Verteilt" value={allocatedTotal ?? '—'} sub="an Schüler" />
+        <Divider />
+        <StatBig
+          label="Verfügbar"
+          value={poolAvailable ?? '—'}
+          sub="im Pool"
+          tone={poolAvailableTone}
         />
-        <Stat label="Schueler" value={studentCount ?? '-'} />
-        <div className="ml-auto text-xs text-gray-500 max-w-md">
-          Pool und Gesamt-Credits werden vom Admin vergeben. Du verteilst sie an
-          Schueler mit den +/- Buttons.
+        <Divider />
+        <StatBig
+          label="Schüler"
+          value={studentCount ?? '—'}
+          sub={`über ${classrooms.length} ${
+            classrooms.length === 1 ? 'Klasse' : 'Klassen'
+          }`}
+        />
+        <div className="ml-auto max-w-sm p-3 rounded-[var(--radius)] bg-[var(--bg-sunk)] text-xs text-[var(--ink-3)] leading-snug shrink-0">
+          Pool und Credits werden vom Admin vergeben. Du verteilst sie an
+          Schüler mit den +/− Buttons.
         </div>
       </div>
 
-      {/* Body: sidebar + detail */}
       <div className="flex-1 flex min-h-0">
-        <aside className="w-72 bg-white border-r border-gray-200 flex flex-col">
-          <div className="px-4 py-3 border-b border-gray-200 flex items-center justify-between">
-            <h2 className="text-sm font-semibold text-gray-700 uppercase tracking-wide">
+        {/* Classroom sidebar */}
+        <aside className="w-[280px] shrink-0 bg-white border-r border-[var(--line)] flex flex-col">
+          <div className="px-4 py-3 border-b border-[var(--line)] flex items-center justify-between">
+            <span className="text-[10px] font-semibold uppercase tracking-wider text-[var(--ink-3)]">
               Klassen
-            </h2>
-            <button
-              onClick={() => setShowCreate(true)}
-              className="flex items-center gap-1 px-2 py-1 text-xs font-medium rounded bg-teal-600 text-white hover:bg-teal-700"
-            >
-              <MdAdd size={14} />
-              Neu
-            </button>
+            </span>
+            <Btn variant="primary" size="sm" onClick={() => setShowCreate(true)}>
+              <MdAdd /> Neu
+            </Btn>
           </div>
           <div className="flex-1 overflow-y-auto">
             {classroomsLoading ? (
-              <div className="p-4 text-sm text-gray-500">Laden...</div>
+              <div className="p-4 text-sm text-[var(--ink-3)]">Laden…</div>
             ) : classrooms.length === 0 ? (
-              <div className="p-4 text-sm text-gray-500">
+              <div className="p-4 text-sm text-[var(--ink-3)]">
                 Noch keine Klassen. Erstelle deine erste Klasse oben.
               </div>
             ) : (
               <ul>
-                {classrooms.map((c) => (
-                  <li key={c.id}>
-                    <button
-                      onClick={() => dispatch(selectClassroom(c.id))}
-                      className={clsx(
-                        'w-full text-left px-4 py-3 border-b border-gray-100 transition-colors',
-                        selectedClassroomId === c.id
-                          ? 'bg-teal-50 border-l-4 border-l-teal-500'
-                          : 'hover:bg-gray-50'
-                      )}
-                    >
-                      <div className="font-medium text-gray-800 truncate">
-                        {c.name}
-                      </div>
-                      <div className="text-xs text-gray-500 mt-0.5">
-                        {c.student_count} / 30 Schueler
-                      </div>
-                    </button>
-                  </li>
-                ))}
+                {classrooms.map((c) => {
+                  const active = selectedClassroomId === c.id;
+                  const count = c.student_count ?? 0;
+                  return (
+                    <li key={c.id}>
+                      <button
+                        onClick={() => dispatch(selectClassroom(c.id))}
+                        className={clsx(
+                          'w-full text-left px-4 py-3.5 border-b border-[var(--line)] transition relative',
+                          active
+                            ? 'bg-[var(--accent-wash)]'
+                            : 'hover:bg-[var(--bg-sunk)]'
+                        )}
+                      >
+                        {active && (
+                          <span
+                            className="absolute left-0 top-0 bottom-0 w-[3px]"
+                            style={{ background: 'var(--accent)' }}
+                          />
+                        )}
+                        <div className="flex items-center justify-between">
+                          <span
+                            className={clsx(
+                              'font-medium truncate',
+                              active ? 'text-[var(--accent-ink)]' : 'text-[var(--ink)]'
+                            )}
+                          >
+                            {c.name}
+                          </span>
+                          <span className="font-mono text-[11px] text-[var(--ink-3)] shrink-0 ml-2">
+                            {count}/30
+                          </span>
+                        </div>
+                        <Progress pct={(count / 30) * 100} className="mt-2" />
+                      </button>
+                    </li>
+                  );
+                })}
               </ul>
             )}
           </div>
         </aside>
 
-        <main className="flex-1 flex flex-col bg-gray-50 min-w-0">
+        <main
+          className="flex-1 flex flex-col min-w-0"
+          style={{ background: 'var(--bg)' }}
+        >
           {selectedClassroomId ? (
             <ClassroomDetail
               key={selectedClassroomId}
@@ -150,10 +188,15 @@ export default function TeacherDashboard({ onLogout }) {
               onClassroomsChanged={fetchClassrooms}
             />
           ) : (
-            <div className="flex-1 flex items-center justify-center text-gray-500 p-10 text-center">
-              <div>
-                <p className="mb-2">Waehle eine Klasse aus der Seitenleiste,</p>
-                <p>oder erstelle eine neue Klasse.</p>
+            <div className="flex-1 flex items-center justify-center p-10 text-center grid-dot">
+              <div className="max-w-sm">
+                <p className="text-[var(--ink-2)] mb-2 font-semibold">
+                  Keine Klasse ausgewählt
+                </p>
+                <p className="text-sm text-[var(--ink-3)]">
+                  Wähle eine Klasse aus der Seitenleiste oder erstelle eine neue
+                  Klasse.
+                </p>
               </div>
             </div>
           )}
@@ -166,23 +209,6 @@ export default function TeacherDashboard({ onLogout }) {
           onSubmit={handleCreate}
         />
       )}
-    </div>
-  );
-}
-
-function Stat({ label, value, highlight }) {
-  const colorClass =
-    highlight === 'green'
-      ? 'text-green-700'
-      : highlight === 'red'
-      ? 'text-red-700'
-      : 'text-gray-800';
-  return (
-    <div className="flex flex-col">
-      <span className="text-xs font-medium text-gray-500 uppercase tracking-wide">
-        {label}
-      </span>
-      <span className={`text-2xl font-bold ${colorClass}`}>{value}</span>
     </div>
   );
 }

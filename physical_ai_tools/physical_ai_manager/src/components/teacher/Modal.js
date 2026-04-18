@@ -9,22 +9,24 @@ export default function Modal({ title, onClose, children, footer, widthClass = '
       onClick={onClose}
     >
       <div
-        className={`bg-white rounded-2xl shadow-2xl w-full ${widthClass} mx-4 max-h-[90vh] flex flex-col`}
+        className={`bg-white rounded-[var(--radius-lg)] shadow-pop w-full ${widthClass} mx-4 max-h-[90vh] flex flex-col border border-[var(--line)]`}
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200">
-          <h3 className="text-lg font-semibold text-gray-800">{title}</h3>
+        <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--line)]">
+          <h3 className="text-[15px] font-semibold tracking-tight text-[var(--ink)]">
+            {title}
+          </h3>
           <button
-            className="text-gray-500 hover:text-gray-800 transition-colors"
+            className="w-8 h-8 rounded-[var(--radius-sm)] text-[var(--ink-3)] hover:bg-[var(--bg-sunk)] hover:text-[var(--ink)] flex items-center justify-center transition"
             onClick={onClose}
-            aria-label="Schliessen"
+            aria-label="Schließen"
           >
-            <MdClose size={22} />
+            <MdClose size={20} />
           </button>
         </div>
         <div className="px-6 py-5 overflow-y-auto flex-1">{children}</div>
         {footer && (
-          <div className="px-6 py-4 border-t border-gray-200 flex justify-end gap-2">
+          <div className="px-6 py-4 border-t border-[var(--line)] flex justify-end gap-2">
             {footer}
           </div>
         )}

@@ -70,24 +70,33 @@ function WebApp() {
 
   if (isLoading) {
     return (
-      <div className="flex items-center justify-center min-h-screen bg-gray-50">
-        <div className="text-gray-500 text-lg">Laden...</div>
+      <div
+        className="flex items-center justify-center min-h-screen"
+        style={{ background: 'var(--bg)' }}
+      >
+        <div className="text-[var(--ink-3)] text-lg">Laden…</div>
       </div>
     );
   }
 
   if (!isAuthenticated) {
     return (
-      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
-        <LoginForm subtitle="Anmelden fuer Lehrer / Admin" />
+      <div
+        className="min-h-screen flex items-center justify-center"
+        style={{ background: 'var(--bg)' }}
+      >
+        <LoginForm subtitle="Anmelden für Lehrer / Admin" />
       </div>
     );
   }
 
   if (!profileLoaded) {
     return (
-      <div className="flex items-center justify-center min-h-screen bg-gray-50">
-        <div className="text-gray-500 text-lg">Profil wird geladen...</div>
+      <div
+        className="flex items-center justify-center min-h-screen"
+        style={{ background: 'var(--bg)' }}
+      >
+        <div className="text-[var(--ink-3)] text-lg">Profil wird geladen…</div>
       </div>
     );
   }
@@ -99,17 +108,21 @@ function WebApp() {
     return <TeacherDashboard onLogout={handleLogout} />;
   }
 
-  // Fallback — profile loaded but role wasn't teacher/admin (and wasn't student, which we caught above)
   return (
-    <div className="min-h-screen bg-gray-50 flex items-center justify-center">
-      <div className="bg-white rounded-2xl shadow-lg p-8 max-w-md text-center">
-        <h2 className="text-xl font-bold text-gray-800 mb-2">Keine Berechtigung</h2>
-        <p className="text-gray-600 mb-4">
+    <div
+      className="min-h-screen flex items-center justify-center"
+      style={{ background: 'var(--bg)' }}
+    >
+      <div className="bg-white rounded-[var(--radius-lg)] shadow-pop border border-[var(--line)] p-8 max-w-md text-center">
+        <h2 className="text-xl font-semibold tracking-tight text-[var(--ink)] mb-2">
+          Keine Berechtigung
+        </h2>
+        <p className="text-[var(--ink-3)] mb-4">
           Dieses Konto hat keine Rolle zugewiesen. Bitte wende dich an den Admin.
         </p>
         <button
           onClick={handleLogout}
-          className="px-4 py-2 bg-teal-600 text-white rounded-lg hover:bg-teal-700"
+          className="h-10 px-4 bg-[var(--accent)] text-white rounded-[var(--radius-sm)] hover:brightness-110 transition"
         >
           Abmelden
         </button>

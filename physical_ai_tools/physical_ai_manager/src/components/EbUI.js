@@ -163,3 +163,117 @@ export const Progress = ({ pct = 0, tone = 'accent', className }) => (
     />
   </div>
 );
+
+export const StatBig = ({ label, value, sub, tone, className }) => (
+  <div className={clsx('flex flex-col shrink-0', className)}>
+    <div className="text-[10px] font-semibold uppercase tracking-wider text-[var(--ink-3)]">
+      {label}
+    </div>
+    <div
+      className={clsx(
+        'font-mono text-[28px] font-semibold leading-none mt-1.5',
+        tone === 'success' && 'text-[color:var(--success)]',
+        tone === 'danger' && 'text-[color:var(--danger)]',
+        tone === 'amber' && 'text-[color:var(--amber)]'
+      )}
+    >
+      {value}
+    </div>
+    {sub && <div className="text-[11px] text-[var(--ink-3)] mt-1">{sub}</div>}
+  </div>
+);
+
+export const Divider = ({ className }) => (
+  <div className={clsx('w-px h-12 bg-[var(--line)] shrink-0', className)} />
+);
+
+export const Avatar = ({ name, size = 36, className }) => {
+  const initials = (name || '?')
+    .split(' ')
+    .map((s) => s[0])
+    .filter(Boolean)
+    .slice(0, 2)
+    .join('')
+    .toUpperCase();
+  const hues = ['#0A7F7A', '#2461C7', '#6A46C7', '#C74660', '#D08A1E', '#2F9E63'];
+  const hash =
+    (name || '').split('').reduce((a, c) => a + c.charCodeAt(0), 0) % hues.length;
+  return (
+    <span
+      className={clsx(
+        'inline-flex items-center justify-center rounded-full text-white font-semibold shrink-0',
+        className
+      )}
+      style={{
+        width: size,
+        height: size,
+        background: hues[hash],
+        fontSize: Math.round(size * 0.35),
+      }}
+    >
+      {initials}
+    </span>
+  );
+};
+
+export const TopBar = ({
+  title,
+  subtitle,
+  roleBadge,
+  user,
+  userSub,
+  userName,
+  onLogout,
+  icon,
+}) => (
+  <header className="bg-white border-b border-[var(--line)] px-8 h-[64px] shrink-0 flex items-center justify-between">
+    <div className="flex items-center gap-3 min-w-0">
+      {icon || <LogoMark />}
+      <div className="min-w-0">
+        <div className="text-sm font-semibold tracking-tight text-[var(--ink)] truncate">
+          {title || 'EduBotics'}
+        </div>
+        {subtitle && (
+          <div className="text-[11px] font-mono text-[var(--ink-3)] -mt-0.5 truncate">
+            {subtitle}
+          </div>
+        )}
+      </div>
+    </div>
+    <div className="flex items-center gap-4 shrink-0">
+      {roleBadge}
+      {user && (
+        <div className="text-right hidden sm:block">
+          <div className="text-sm font-medium text-[var(--ink)]">{user}</div>
+          {userSub && (
+            <div className="font-mono text-[11px] text-[var(--ink-3)]">{userSub}</div>
+          )}
+        </div>
+      )}
+      {userName && <Avatar name={userName} />}
+      {onLogout && (
+        <button
+          onClick={onLogout}
+          className="flex items-center gap-1.5 h-9 px-3 rounded-[var(--radius-sm)] text-[var(--ink-2)] hover:bg-[var(--bg-sunk)] text-sm transition"
+          title="Abmelden"
+        >
+          <svg
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.8"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          >
+            <path d="M14 8V6a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h7a2 2 0 0 0 2-2v-2" />
+            <polyline points="17 16 21 12 17 8" />
+            <line x1="21" y1="12" x2="9" y2="12" />
+          </svg>
+          Abmelden
+        </button>
+      )}
+    </div>
+  </header>
+);

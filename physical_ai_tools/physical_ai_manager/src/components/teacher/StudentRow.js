@@ -1,7 +1,15 @@
 import React, { useState } from 'react';
 import clsx from 'clsx';
 import toast from 'react-hot-toast';
-import { MdDelete, MdKey, MdHistory, MdEdit, MdMoveDown, MdAdd, MdRemove } from 'react-icons/md';
+import {
+  MdDelete,
+  MdKey,
+  MdHistory,
+  MdEdit,
+  MdMoveDown,
+  MdAdd,
+  MdRemove,
+} from 'react-icons/md';
 import { useDispatch, useSelector } from 'react-redux';
 import {
   adjustStudentCredits,
@@ -16,6 +24,7 @@ import {
 } from '../../features/teacher/teacherSlice';
 import { updateTeacherPool } from '../../features/auth/authSlice';
 import PasswordResetModal from './PasswordResetModal';
+import { Avatar, Btn, Progress } from '../EbUI';
 
 function RenameInline({ student, onSave, onCancel }) {
   const [value, setValue] = useState(student.full_name || '');
@@ -23,25 +32,18 @@ function RenameInline({ student, onSave, onCancel }) {
     <div className="flex items-center gap-2">
       <input
         type="text"
-        className="px-2 py-1 border border-gray-300 rounded text-sm flex-1"
+        className="h-8 px-2 bg-white border border-[var(--line)] rounded-[var(--radius-sm)] text-sm flex-1 focus:outline-none focus:border-[var(--accent)] focus:ring-2 focus:ring-[color:var(--accent-wash)]"
         value={value}
         onChange={(e) => setValue(e.target.value)}
         maxLength={100}
         autoFocus
       />
-      <button
-        onClick={() => onSave(value)}
-        className="text-xs px-2 py-1 bg-teal-600 text-white rounded hover:bg-teal-700"
-        disabled={!value.trim()}
-      >
+      <Btn variant="primary" size="sm" onClick={() => onSave(value)} disabled={!value.trim()}>
         Speichern
-      </button>
-      <button
-        onClick={onCancel}
-        className="text-xs px-2 py-1 text-gray-600 hover:bg-gray-100 rounded"
-      >
+      </Btn>
+      <Btn variant="ghost" size="sm" onClick={onCancel}>
         Abbrechen
-      </button>
+      </Btn>
     </div>
   );
 }
@@ -53,7 +55,7 @@ function MoveInline({ student, classrooms, onSave, onCancel }) {
       <select
         value={target}
         onChange={(e) => setTarget(e.target.value)}
-        className="px-2 py-1 border border-gray-300 rounded text-sm"
+        className="eb h-8 pl-2 pr-8 bg-white border border-[var(--line)] rounded-[var(--radius-sm)] text-sm focus:outline-none focus:border-[var(--accent)]"
       >
         {classrooms.map((c) => (
           <option key={c.id} value={c.id}>
@@ -61,19 +63,12 @@ function MoveInline({ student, classrooms, onSave, onCancel }) {
           </option>
         ))}
       </select>
-      <button
-        onClick={() => onSave(target)}
-        className="text-xs px-2 py-1 bg-teal-600 text-white rounded hover:bg-teal-700"
-        disabled={target === student.classroom_id}
-      >
+      <Btn variant="primary" size="sm" onClick={() => onSave(target)} disabled={target === student.classroom_id}>
         Verschieben
-      </button>
-      <button
-        onClick={onCancel}
-        className="text-xs px-2 py-1 text-gray-600 hover:bg-gray-100 rounded"
-      >
+      </Btn>
+      <Btn variant="ghost" size="sm" onClick={onCancel}>
         Abbrechen
-      </button>
+      </Btn>
     </div>
   );
 }
@@ -123,13 +118,13 @@ export default function StudentRow({ student, classrooms, onShowHistory }) {
   };
 
   const handleDelete = async () => {
-    if (!window.confirm(`Schueler ${student.full_name} wirklich loeschen?`)) return;
+    if (!window.confirm(`Schüler ${student.full_name} wirklich löschen?`)) return;
     setBusy(true);
     try {
       await apiDeleteStudent(token, student.id);
       dispatch(removeStudentFromSelected(student.id));
       await refreshTeacherPool();
-      toast.success('Schueler geloescht');
+      toast.success('Schüler gelöscht');
     } catch (err) {
       toast.error(err.message || 'Fehler');
     } finally {
@@ -152,7 +147,7 @@ export default function StudentRow({ student, classrooms, onShowHistory }) {
         })
       );
       setRenaming(false);
-      toast.success('Name geaendert');
+      toast.success('Name geändert');
     } catch (err) {
       toast.error(err.message || 'Fehler');
     } finally {
@@ -164,9 +159,8 @@ export default function StudentRow({ student, classrooms, onShowHistory }) {
     setBusy(true);
     try {
       await patchStudent(token, student.id, { classroom_id: classroomId });
-      // Student moved out of current classroom view; remove from list.
       dispatch(removeStudentFromSelected(student.id));
-      toast.success('Schueler verschoben');
+      toast.success('Schüler verschoben');
     } catch (err) {
       toast.error(err.message || 'Fehler');
     } finally {
@@ -175,15 +169,15 @@ export default function StudentRow({ student, classrooms, onShowHistory }) {
     }
   };
 
-  const remaining = (student.training_credits || 0) - (student.trainings_used || 0);
-  const remainingClass = clsx(
-    'text-xs font-semibold px-2 py-0.5 rounded-full',
-    remaining > 0 ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'
-  );
+  const used = student.trainings_used || 0;
+  const total = student.training_credits || 0;
+  const remaining = total - used;
+  const pct = total > 0 ? (used / total) * 100 : 0;
+  const progressTone = remaining === 0 ? 'danger' : 'accent';
 
   return (
-    <tr className="border-b border-gray-100 hover:bg-gray-50 transition-colors">
-      <td className="px-4 py-3">
+    <tr className="border-b last:border-0 border-[var(--line)] hover:bg-[var(--bg-sunk)] group transition-colors">
+      <td className="py-3 px-5">
         {renaming ? (
           <RenameInline
             student={student}
@@ -191,51 +185,71 @@ export default function StudentRow({ student, classrooms, onShowHistory }) {
             onCancel={() => setRenaming(false)}
           />
         ) : (
-          <div className="flex items-center gap-2">
-            <div>
-              <div className="font-medium text-gray-800">{student.full_name}</div>
-              <div className="text-xs text-gray-500 font-mono">{student.username}</div>
+          <div className="flex items-center gap-3">
+            <Avatar name={student.full_name || student.username} />
+            <div className="min-w-0">
+              <div className="flex items-center gap-1.5">
+                <div className="font-medium text-[var(--ink)] truncate">
+                  {student.full_name || student.username}
+                </div>
+                <button
+                  onClick={() => setRenaming(true)}
+                  className="text-[var(--ink-4)] hover:text-[var(--ink)] transition"
+                  title="Namen ändern"
+                >
+                  <MdEdit size={14} />
+                </button>
+              </div>
+              <div className="font-mono text-[11px] text-[var(--ink-3)] truncate">
+                {student.username}
+              </div>
             </div>
-            <button
-              onClick={() => setRenaming(true)}
-              className="text-gray-400 hover:text-gray-700"
-              title="Namen aendern"
-            >
-              <MdEdit size={14} />
-            </button>
           </div>
         )}
       </td>
-      <td className="px-4 py-3 whitespace-nowrap">
+      <td className="py-3 px-3 whitespace-nowrap">
         <div className="flex items-center gap-2">
-          <button
-            onClick={() => handleDelta(-1)}
-            disabled={busy || student.training_credits <= student.trainings_used}
-            className="w-7 h-7 rounded-full bg-gray-100 hover:bg-red-100 hover:text-red-700 disabled:bg-gray-50 disabled:text-gray-300 flex items-center justify-center"
-            title="Credit entziehen"
-          >
-            <MdRemove size={16} />
-          </button>
-          <div className="flex flex-col items-center min-w-[72px]">
-            <span className="text-sm font-semibold text-gray-800">
-              {student.trainings_used || 0} / {student.training_credits || 0}
-            </span>
-            <span className={remainingClass}>{remaining} frei</span>
+          <div className="w-28 shrink-0">
+            <div className="flex justify-between font-mono text-[11px] text-[var(--ink-3)]">
+              <span className="text-[var(--ink)] font-semibold">{used}</span>
+              <span>/ {total}</span>
+            </div>
+            <Progress pct={pct} tone={progressTone} />
+            <div
+              className={clsx(
+                'mt-1 text-[10px] font-mono font-semibold',
+                remaining === 0
+                  ? 'text-[color:var(--danger)]'
+                  : 'text-[color:var(--success)]'
+              )}
+            >
+              {remaining} frei
+            </div>
           </div>
-          <button
-            onClick={() => handleDelta(1)}
-            disabled={busy}
-            className="w-7 h-7 rounded-full bg-gray-100 hover:bg-teal-100 hover:text-teal-700 disabled:bg-gray-50 disabled:text-gray-300 flex items-center justify-center"
-            title="Credit hinzufuegen"
-          >
-            <MdAdd size={16} />
-          </button>
+          <div className="flex gap-1">
+            <button
+              onClick={() => handleDelta(-1)}
+              disabled={busy || student.training_credits <= student.trainings_used}
+              className="w-7 h-7 rounded-[var(--radius-sm)] bg-[var(--bg-sunk)] hover:bg-[var(--danger-wash)] hover:text-[color:var(--danger)] text-[var(--ink-2)] disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center transition"
+              title="Credit entziehen"
+            >
+              <MdRemove size={16} />
+            </button>
+            <button
+              onClick={() => handleDelta(1)}
+              disabled={busy}
+              className="w-7 h-7 rounded-[var(--radius-sm)] bg-[var(--accent-wash)] hover:brightness-95 text-[var(--accent-ink)] disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center transition"
+              title="Credit hinzufügen"
+            >
+              <MdAdd size={16} />
+            </button>
+          </div>
         </div>
       </td>
-      <td className="px-4 py-3">
+      <td className="py-3 px-5 text-right">
         {moving ? (
           otherClassrooms.length === 0 ? (
-            <span className="text-xs text-gray-500">Keine andere Klasse</span>
+            <span className="text-xs text-[var(--ink-3)]">Keine andere Klasse</span>
           ) : (
             <MoveInline
               student={student}
@@ -245,41 +259,45 @@ export default function StudentRow({ student, classrooms, onShowHistory }) {
             />
           )
         ) : (
-          <div className="flex items-center gap-1">
-            <button
+          <div className="inline-flex gap-0.5 opacity-60 group-hover:opacity-100 transition">
+            <Btn
+              variant="ghost"
+              size="sm"
               onClick={() => onShowHistory(student)}
-              className="p-1.5 rounded hover:bg-gray-100 text-gray-500 hover:text-gray-800"
               title="Trainings-Historie"
             >
               <MdHistory size={18} />
-            </button>
-            <button
+            </Btn>
+            <Btn
+              variant="ghost"
+              size="sm"
               onClick={() => setShowPwModal(true)}
-              className="p-1.5 rounded hover:bg-gray-100 text-gray-500 hover:text-gray-800"
-              title="Passwort zuruecksetzen"
+              title="Passwort zurücksetzen"
             >
               <MdKey size={18} />
-            </button>
-            <button
+            </Btn>
+            <Btn
+              variant="ghost"
+              size="sm"
               onClick={() => setMoving(true)}
-              className="p-1.5 rounded hover:bg-gray-100 text-gray-500 hover:text-gray-800 disabled:opacity-40"
               disabled={otherClassrooms.length === 0}
               title={
                 otherClassrooms.length === 0
-                  ? 'Keine andere Klasse verfuegbar'
+                  ? 'Keine andere Klasse verfügbar'
                   : 'In andere Klasse verschieben'
               }
             >
               <MdMoveDown size={18} />
-            </button>
-            <button
+            </Btn>
+            <Btn
+              variant="ghost"
+              size="sm"
               onClick={handleDelete}
               disabled={busy}
-              className="p-1.5 rounded hover:bg-red-50 text-gray-500 hover:text-red-700"
-              title="Schueler loeschen"
+              title="Schüler löschen"
             >
               <MdDelete size={18} />
-            </button>
+            </Btn>
           </div>
         )}
       </td>

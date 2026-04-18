@@ -4,25 +4,26 @@ import toast from 'react-hot-toast';
 import { MdClose } from 'react-icons/md';
 import { useSelector } from 'react-redux';
 import { listStudentTrainings } from '../../services/teacherApi';
+import { Avatar, Pill } from '../EbUI';
 
-const STATUS_STYLES = {
-  queued: 'bg-gray-100 text-gray-700',
-  running: 'bg-blue-100 text-blue-700',
-  succeeded: 'bg-green-100 text-green-700',
-  failed: 'bg-red-100 text-red-700',
-  canceled: 'bg-yellow-100 text-yellow-800',
+const STATUS_TONE = {
+  queued: 'neutral',
+  running: 'accent',
+  succeeded: 'success',
+  failed: 'danger',
+  canceled: 'amber',
 };
 
 const STATUS_LABELS = {
   queued: 'In Warteschlange',
-  running: 'Laeuft',
+  running: 'Läuft',
   succeeded: 'Erfolgreich',
   failed: 'Fehlgeschlagen',
   canceled: 'Abgebrochen',
 };
 
 function formatDate(iso) {
-  if (!iso) return '-';
+  if (!iso) return '—';
   try {
     return new Date(iso).toLocaleString('de-DE');
   } catch {
@@ -47,87 +48,91 @@ export default function StudentTrainingHistoryDrawer({ student, onClose }) {
   if (!student) return null;
 
   return (
-    <div className="fixed inset-0 z-40 flex" onClick={onClose}>
-      <div className="flex-1 bg-black/40" />
+    <div
+      className="fixed inset-0 z-40 flex justify-end"
+      onClick={onClose}
+    >
+      <div className="absolute inset-0 bg-black/30 backdrop-blur-sm" />
       <aside
-        className="w-full max-w-2xl bg-white shadow-2xl flex flex-col h-screen"
+        className="relative w-[460px] max-w-full h-full bg-white border-l border-[var(--line)] shadow-pop flex flex-col"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200">
-          <div>
-            <h3 className="text-lg font-semibold text-gray-800">
-              Trainings-Historie
-            </h3>
-            <p className="text-sm text-gray-500">
-              {student.full_name} (<span className="font-mono">{student.username}</span>)
-            </p>
+        <div className="px-6 py-5 border-b border-[var(--line)] flex items-center justify-between gap-4">
+          <div className="flex items-center gap-3 min-w-0">
+            <Avatar name={student.full_name || student.username} />
+            <div className="min-w-0">
+              <h3 className="font-semibold text-[var(--ink)] truncate">
+                {student.full_name || student.username}
+              </h3>
+              <div className="font-mono text-[11px] text-[var(--ink-3)] truncate">
+                Trainings-Historie · {student.username}
+              </div>
+            </div>
           </div>
           <button
-            className="text-gray-500 hover:text-gray-800"
+            className="w-9 h-9 rounded-[var(--radius-sm)] text-[var(--ink-3)] hover:bg-[var(--bg-sunk)] hover:text-[var(--ink)] flex items-center justify-center transition shrink-0"
             onClick={onClose}
-            aria-label="Schliessen"
+            aria-label="Schließen"
           >
-            <MdClose size={22} />
+            <MdClose size={20} />
           </button>
         </div>
-        <div className="flex-1 overflow-y-auto px-6 py-5">
+        <div className="flex-1 overflow-y-auto px-6 py-5 space-y-3">
           {loading ? (
-            <div className="text-gray-500">Laden...</div>
+            <div className="text-[var(--ink-3)] text-sm">Laden…</div>
           ) : trainings.length === 0 ? (
-            <div className="text-gray-500 text-sm">
-              Dieser Schueler hat noch kein Training gestartet.
+            <div className="text-[var(--ink-3)] text-sm">
+              Dieser Schüler hat noch kein Training gestartet.
             </div>
           ) : (
-            <ul className="flex flex-col gap-3">
-              {trainings.map((t) => (
-                <li
-                  key={t.id}
-                  className="border border-gray-200 rounded-xl p-4 bg-gray-50"
-                >
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="min-w-0 flex-1">
-                      <div className="font-medium text-gray-800 truncate">
-                        {t.model_name}
-                      </div>
-                      <div className="text-xs text-gray-500 mt-0.5">
-                        {t.model_type} · {t.dataset_name}
-                      </div>
+            trainings.map((t) => (
+              <div
+                key={t.id}
+                className="p-4 border border-[var(--line)] rounded-[var(--radius)] bg-white"
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0 flex-1">
+                    <div className="font-mono text-sm font-semibold text-[var(--ink)] truncate">
+                      {t.model_name}
                     </div>
-                    <span
-                      className={clsx(
-                        'text-xs font-semibold px-2 py-1 rounded-full whitespace-nowrap',
-                        STATUS_STYLES[t.status] || 'bg-gray-100 text-gray-700'
-                      )}
-                    >
-                      {STATUS_LABELS[t.status] || t.status}
-                    </span>
-                  </div>
-                  <div className="mt-3 grid grid-cols-2 gap-x-4 gap-y-1 text-xs text-gray-600">
-                    <div>
-                      <span className="text-gray-400">Gestartet:</span>{' '}
-                      {formatDate(t.requested_at)}
-                    </div>
-                    <div>
-                      <span className="text-gray-400">Beendet:</span>{' '}
-                      {formatDate(t.terminated_at)}
-                    </div>
-                    <div>
-                      <span className="text-gray-400">Schritt:</span>{' '}
-                      {t.current_step ?? 0} / {t.total_steps ?? 0}
-                    </div>
-                    <div>
-                      <span className="text-gray-400">Loss:</span>{' '}
-                      {t.current_loss != null ? t.current_loss.toFixed(4) : '-'}
+                    <div className="text-[11px] text-[var(--ink-3)] mt-0.5 font-mono truncate">
+                      {t.model_type} · {t.dataset_name}
                     </div>
                   </div>
-                  {t.error_message && (
-                    <div className="mt-2 text-xs text-red-700 bg-red-50 border border-red-100 rounded px-2 py-1">
-                      {t.error_message}
-                    </div>
-                  )}
-                </li>
-              ))}
-            </ul>
+                  <Pill tone={STATUS_TONE[t.status] || 'neutral'}>
+                    {STATUS_LABELS[t.status] || t.status}
+                  </Pill>
+                </div>
+                <div className="mt-3 grid grid-cols-2 gap-x-4 gap-y-1 text-[11px] text-[var(--ink-2)] font-mono">
+                  <div>
+                    <span className="text-[var(--ink-4)]">Start:</span>{' '}
+                    {formatDate(t.requested_at)}
+                  </div>
+                  <div>
+                    <span className="text-[var(--ink-4)]">Ende:</span>{' '}
+                    {formatDate(t.terminated_at)}
+                  </div>
+                  <div>
+                    <span className="text-[var(--ink-4)]">Schritt:</span>{' '}
+                    {t.current_step ?? 0} / {t.total_steps ?? 0}
+                  </div>
+                  <div>
+                    <span className="text-[var(--ink-4)]">Loss:</span>{' '}
+                    {t.current_loss != null ? t.current_loss.toFixed(4) : '—'}
+                  </div>
+                </div>
+                {t.error_message && (
+                  <div
+                    className={clsx(
+                      'mt-2 text-[11px] rounded-[var(--radius-sm)] px-2 py-1',
+                      'text-[color:var(--danger)] bg-[var(--danger-wash)] border border-[var(--line)]'
+                    )}
+                  >
+                    {t.error_message}
+                  </div>
+                )}
+              </div>
+            ))
           )}
         </div>
       </aside>

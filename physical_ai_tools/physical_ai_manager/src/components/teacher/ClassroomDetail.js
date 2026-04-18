@@ -19,6 +19,7 @@ import { updateTeacherPool } from '../../features/auth/authSlice';
 import CreateStudentModal from './CreateStudentModal';
 import StudentRow from './StudentRow';
 import StudentTrainingHistoryDrawer from './StudentTrainingHistoryDrawer';
+import { Btn, Card } from '../EbUI';
 
 export default function ClassroomDetail({ classroomId, onClassroomsChanged }) {
   const dispatch = useDispatch();
@@ -82,14 +83,14 @@ export default function ClassroomDetail({ classroomId, onClassroomsChanged }) {
 
   const handleDeleteClassroom = async () => {
     if ((selected?.students || []).length > 0) {
-      toast.error('Klasse ist nicht leer - erst alle Schueler entfernen');
+      toast.error('Klasse ist nicht leer — erst alle Schüler entfernen');
       return;
     }
-    if (!window.confirm(`Klasse "${selected.name}" wirklich loeschen?`)) return;
+    if (!window.confirm(`Klasse "${selected.name}" wirklich löschen?`)) return;
     try {
       await apiDeleteClassroom(token, classroomId);
       dispatch(selectClassroom(null));
-      toast.success('Klasse geloescht');
+      toast.success('Klasse gelöscht');
       onClassroomsChanged?.();
     } catch (err) {
       toast.error(err.message || 'Fehler');
@@ -98,8 +99,8 @@ export default function ClassroomDetail({ classroomId, onClassroomsChanged }) {
 
   if (loading || !selected) {
     return (
-      <div className="flex items-center justify-center h-full text-gray-500">
-        Laden...
+      <div className="flex items-center justify-center h-full text-[var(--ink-3)]">
+        Laden…
       </div>
     );
   }
@@ -109,14 +110,14 @@ export default function ClassroomDetail({ classroomId, onClassroomsChanged }) {
 
   return (
     <div className="flex-1 flex flex-col min-h-0">
-      <div className="px-8 py-6 border-b border-gray-200 bg-white">
-        <div className="flex items-center justify-between gap-4">
+      <div className="px-8 py-5 border-b border-[var(--line)] bg-white">
+        <div className="flex items-center justify-between gap-4 flex-wrap">
           <div className="flex items-center gap-3 min-w-0">
             {renaming ? (
               <div className="flex items-center gap-2">
                 <input
                   type="text"
-                  className="px-3 py-1 border border-gray-300 rounded text-lg font-semibold"
+                  className="h-9 px-3 bg-white border border-[var(--line)] rounded-[var(--radius-sm)] text-lg font-semibold text-[var(--ink)] focus:outline-none focus:border-[var(--accent)] focus:ring-2 focus:ring-[color:var(--accent-wash)]"
                   value={renameValue}
                   onChange={(e) => setRenameValue(e.target.value)}
                   onKeyDown={(e) => {
@@ -125,22 +126,16 @@ export default function ClassroomDetail({ classroomId, onClassroomsChanged }) {
                   }}
                   autoFocus
                 />
-                <button
-                  onClick={handleRename}
-                  className="px-3 py-1 bg-teal-600 text-white rounded hover:bg-teal-700 text-sm"
-                >
+                <Btn variant="primary" size="sm" onClick={handleRename}>
                   Speichern
-                </button>
-                <button
-                  onClick={() => setRenaming(false)}
-                  className="px-3 py-1 text-gray-600 hover:bg-gray-100 rounded text-sm"
-                >
+                </Btn>
+                <Btn variant="ghost" size="sm" onClick={() => setRenaming(false)}>
                   Abbrechen
-                </button>
+                </Btn>
               </div>
             ) : (
               <>
-                <h2 className="text-xl font-bold text-gray-800 truncate">
+                <h2 className="text-xl font-semibold tracking-tight text-[var(--ink)] truncate">
                   {selected.name}
                 </h2>
                 <button
@@ -148,30 +143,29 @@ export default function ClassroomDetail({ classroomId, onClassroomsChanged }) {
                     setRenameValue(selected.name);
                     setRenaming(true);
                   }}
-                  className="text-gray-400 hover:text-gray-700"
+                  className="text-[var(--ink-4)] hover:text-[var(--ink)] transition"
                   title="Klasse umbenennen"
                 >
                   <MdEdit size={16} />
                 </button>
-                <span className="text-sm text-gray-500">
-                  {students.length} / 30 Schueler
+                <span className="text-sm text-[var(--ink-3)] font-mono">
+                  {students.length} / 30 Schüler
                 </span>
               </>
             )}
           </div>
           <div className="flex items-center gap-2">
-            <button
+            <Btn
+              variant="primary"
               onClick={() => setShowCreateStudent(true)}
               disabled={full}
-              className="flex items-center gap-1.5 px-4 py-2 rounded-lg bg-teal-600 text-white hover:bg-teal-700 disabled:bg-gray-300 text-sm font-medium"
             >
-              <MdAdd size={18} />
-              Schueler hinzufuegen
-            </button>
+              <MdAdd /> Schüler hinzufügen
+            </Btn>
             <button
               onClick={handleDeleteClassroom}
-              className="p-2 rounded-lg text-gray-500 hover:bg-red-50 hover:text-red-700"
-              title="Klasse loeschen"
+              className="w-9 h-9 rounded-[var(--radius-sm)] text-[var(--ink-3)] hover:bg-[var(--danger-wash)] hover:text-[color:var(--danger)] flex items-center justify-center transition"
+              title="Klasse löschen"
             >
               <MdDelete size={20} />
             </button>
@@ -179,44 +173,36 @@ export default function ClassroomDetail({ classroomId, onClassroomsChanged }) {
         </div>
       </div>
 
-      <div className="flex-1 overflow-y-auto">
+      <div className="flex-1 overflow-y-auto p-8">
         {students.length === 0 ? (
-          <div className="flex flex-col items-center justify-center h-full text-gray-500 p-10 text-center">
-            <p className="mb-4">Noch keine Schueler in dieser Klasse.</p>
-            <button
-              onClick={() => setShowCreateStudent(true)}
-              className="flex items-center gap-1.5 px-4 py-2 rounded-lg bg-teal-600 text-white hover:bg-teal-700 text-sm font-medium"
-            >
-              <MdAdd size={18} />
-              Ersten Schueler hinzufuegen
-            </button>
+          <div className="flex flex-col items-center justify-center h-full text-[var(--ink-3)] p-10 text-center">
+            <p className="mb-4">Noch keine Schüler in dieser Klasse.</p>
+            <Btn variant="primary" onClick={() => setShowCreateStudent(true)}>
+              <MdAdd /> Ersten Schüler hinzufügen
+            </Btn>
           </div>
         ) : (
-          <table className="w-full">
-            <thead className="bg-gray-50 border-b border-gray-200 sticky top-0 z-10">
-              <tr>
-                <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600 uppercase">
-                  Schueler
-                </th>
-                <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600 uppercase">
-                  Credits
-                </th>
-                <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600 uppercase">
-                  Aktionen
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {students.map((s) => (
-                <StudentRow
-                  key={s.id}
-                  student={s}
-                  classrooms={classrooms}
-                  onShowHistory={setHistoryStudent}
-                />
-              ))}
-            </tbody>
-          </table>
+          <Card padded={false}>
+            <table className="w-full text-sm">
+              <thead className="bg-[var(--bg-sunk)] border-b border-[var(--line)]">
+                <tr className="text-[11px] font-semibold uppercase tracking-wider text-[var(--ink-3)]">
+                  <th className="text-left py-3 px-5">Schüler</th>
+                  <th className="text-left py-3 px-3">Credits</th>
+                  <th className="text-right py-3 px-5">Aktionen</th>
+                </tr>
+              </thead>
+              <tbody>
+                {students.map((s) => (
+                  <StudentRow
+                    key={s.id}
+                    student={s}
+                    classrooms={classrooms}
+                    onShowHistory={setHistoryStudent}
+                  />
+                ))}
+              </tbody>
+            </table>
+          </Card>
         )}
       </div>
 

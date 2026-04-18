@@ -1,0 +1,10 @@
+# EduBotics GUI runtime dependencies
+#
+# pywebview embeds the React UI in a native Edge WebView2 window.
+# pythonnet is required by pywebview's `edgechromium` backend on Windows.
+#
+# Pins below are the lowest versions we know to support Python 3.14.
+# pythonnet 3.1.0rc0 is a pre-release (only one that supports 3.14 today),
+# so `pip install -r requirements.txt --pre` is required.
+pywebview>=6.2.1
+pythonnet>=3.1.0rc0

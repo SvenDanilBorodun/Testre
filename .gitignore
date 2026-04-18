@@ -22,3 +22,6 @@ __pycache__/
 
 # Node
 node_modules/
+
+# Claude Code agent metadata (per-checkout, not project code)
+.claude/

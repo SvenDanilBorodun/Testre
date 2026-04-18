@@ -4,7 +4,7 @@ Bietet eine schrittweise Oberfläche für:
   1. Erkennen und Identifizieren der Roboterarme (Leader/Follower)
   2. Kamera auswählen
   3. EduBotics-Umgebung starten/stoppen (Container in der EduBotics WSL2-Distro)
-  4. Webbrowser mit der EduBotics Web-Oberfläche öffnen
+  4. EduBotics Web-Oberfläche in eingebettetem Fenster öffnen
 """
 
 import os
@@ -111,7 +111,7 @@ def _apply_window_icon(root: tk.Tk) -> None:
             pass
 
 
-from . import device_manager, docker_manager, health_checker, config_generator, wsl_bridge, update_checker
+from . import device_manager, docker_manager, health_checker, config_generator, wsl_bridge, update_checker, webview_window
 from .constants import (
     APP_VERSION,
     UPDATE_API_URL,
@@ -257,8 +257,8 @@ class EduBoticsApp:
         self.btn_stop.pack(side=tk.LEFT, padx=5)
 
         self.btn_open_browser = ttk.Button(
-            btn_frame, text="Browser öffnen",
-            command=self._open_browser,
+            btn_frame, text="Web-Oberfläche öffnen",
+            command=self._open_webview,
             state=tk.DISABLED,
         )
         self.btn_open_browser.pack(side=tk.LEFT, padx=5)
@@ -843,7 +843,7 @@ class EduBoticsApp:
     # ── Start Environment ────────────────────────────────────────────
 
     def _start_environment(self):
-        """EduBotics-Umgebung starten und Browser öffnen."""
+        """EduBotics-Umgebung starten und Web-Oberfläche öffnen."""
         is_cloud_only = self.cloud_only.get()
 
         if not is_cloud_only and not self.hardware.is_complete:
@@ -930,7 +930,7 @@ class EduBoticsApp:
                 callback=lambda e, t: self._set_status(f"Warte auf Web-Oberfläche... {e}s/{t}s")
             ):
                 self._log("WARNUNG: Web-Oberfläche antwortet noch nicht. Container starten möglicherweise noch.")
-                self._log("Du kannst http://localhost manuell im Browser öffnen.")
+                self._log("Du kannst die Web-Oberfläche manuell über die Schaltfläche öffnen.")
             else:
                 self._log("Web-Oberfläche ist bereit!")
 
@@ -939,9 +939,9 @@ class EduBoticsApp:
             for service, ok in health.items():
                 self._log(f"  {service}: {'OK' if ok else 'NICHT BEREIT'}")
 
-            # 5. Browser öffnen
-            self._log("Browser wird geöffnet...")
-            self._open_browser()
+            # 5. Web-Oberfläche öffnen
+            self._log("Web-Oberfläche wird geöffnet...")
+            self._open_webview()
 
             self._set_status("Aktiv — Umgebung läuft")
             self.root.after(0, lambda: self.progress.stop())
@@ -960,11 +960,45 @@ class EduBoticsApp:
 
     # ── Stop Environment ─────────────────────────────────────────────
 
-    def _open_browser(self):
-        """Open the web UI. In cloud-only mode, pass ?cloud=1 so the React app
-        skips the ROS startup gate (no rosbridge is running)."""
+    def _open_webview(self):
+        """Open the web UI in an embedded WebView2 window.
+
+        In cloud-only mode, pass ?cloud=1 so the React app skips the ROS
+        startup gate (no rosbridge is running). Falls back to the system
+        browser with a German warning if WebView2 is unavailable.
+        """
         suffix = "/?cloud=1" if self.cloud_only.get() else "/"
-        webbrowser.open(f"http://localhost:{PORT_WEB_UI}{suffix}")
+        url = f"http://localhost:{PORT_WEB_UI}{suffix}"
+
+        icon = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "assets", "icon.ico",
+        )
+        icon_path = icon if os.path.isfile(icon) else None
+
+        if webview_window.open_student_window(url, icon_path=icon_path):
+            self._log("Web-Oberfläche wird im EduBotics-Fenster geöffnet.")
+            # Give the worker thread a moment to fail fast if WebView2
+            # runtime is missing, then fall back gracefully.
+            self.root.after(2000, self._check_webview_fallback, url)
+            return
+
+        self._webview_fallback(url)
+
+    def _check_webview_fallback(self, url: str):
+        """If the webview worker reported a missing runtime, fall back."""
+        if webview_window.runtime_missing():
+            self._webview_fallback(url)
+
+    def _webview_fallback(self, url: str):
+        """Open the system browser as a last-resort fallback."""
+        self._log("WARNUNG: WebView2 nicht verfügbar – System-Browser wird geöffnet.")
+        messagebox.showwarning(
+            "WebView2 nicht verfügbar",
+            "Das Microsoft Edge WebView2-Runtime wurde nicht gefunden.\n"
+            "Die Web-Oberfläche wird stattdessen im Standard-Browser geöffnet.",
+        )
+        webbrowser.open(url)
 
     def _stop_environment(self):
         """Alle Container in der EduBotics-Umgebung stoppen."""
@@ -998,6 +1032,7 @@ class EduBoticsApp:
                 "Die Umgebung läuft noch.\nContainer stoppen und beenden?",
             ):
                 self._log("Beende — Container werden gestoppt...")
+                webview_window.destroy_all()
                 if self.cloud_only.get():
                     docker_manager.stop_cloud_only()
                 else:
@@ -1005,6 +1040,7 @@ class EduBoticsApp:
                 self.root.destroy()
             # else: user clicked No, don't close
         else:
+            webview_window.destroy_all()
             self.root.destroy()
 
 

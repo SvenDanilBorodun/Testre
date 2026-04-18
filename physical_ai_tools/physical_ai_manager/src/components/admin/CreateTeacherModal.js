@@ -1,6 +1,10 @@
 import React, { useState } from 'react';
 import toast from 'react-hot-toast';
 import Modal from '../teacher/Modal';
+import { Btn } from '../EbUI';
+
+const inputClass =
+  'w-full h-10 px-3 bg-white border border-[var(--line)] rounded-[var(--radius-sm)] text-sm text-[var(--ink)] placeholder:text-[var(--ink-4)] focus:outline-none focus:border-[var(--accent)] focus:ring-2 focus:ring-[color:var(--accent-wash)] transition';
 
 export default function CreateTeacherModal({ onClose, onSubmit }) {
   const [username, setUsername] = useState('');
@@ -14,7 +18,7 @@ export default function CreateTeacherModal({ onClose, onSubmit }) {
   const handleSubmit = async (e) => {
     e.preventDefault();
     if (!usernameValid) {
-      toast.error('Benutzername: 3-32 Zeichen, Kleinbuchstaben, Ziffern, . _ -');
+      toast.error('Benutzername: 3–32 Zeichen, Kleinbuchstaben, Ziffern, . _ -');
       return;
     }
     if (password.length < 6) {
@@ -44,83 +48,81 @@ export default function CreateTeacherModal({ onClose, onSubmit }) {
       onClose={onClose}
       footer={
         <>
-          <button
-            type="button"
-            onClick={onClose}
-            className="px-4 py-2 rounded-lg text-gray-700 hover:bg-gray-100"
-            disabled={loading}
-          >
+          <Btn variant="ghost" onClick={onClose} disabled={loading}>
             Abbrechen
-          </button>
-          <button
+          </Btn>
+          <Btn
+            variant="primary"
             type="submit"
             form="create-teacher-form"
-            className="px-4 py-2 rounded-lg bg-teal-600 text-white hover:bg-teal-700 disabled:bg-gray-300"
             disabled={loading || !usernameValid || !fullName || password.length < 6}
           >
-            {loading ? 'Erstellen...' : 'Erstellen'}
-          </button>
+            {loading ? 'Erstellen…' : 'Erstellen'}
+          </Btn>
         </>
       }
     >
       <form id="create-teacher-form" onSubmit={handleSubmit} className="flex flex-col gap-4">
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">
-            Vollstaendiger Name
-          </label>
+        <label className="block">
+          <span className="text-xs font-medium text-[var(--ink-2)] mb-1.5 block">
+            Vollständiger Name
+          </span>
           <input
             type="text"
-            className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500"
+            className={inputClass}
             value={fullName}
             onChange={(e) => setFullName(e.target.value)}
             maxLength={100}
             autoFocus
             required
           />
-        </div>
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">
-            Benutzername (fuer Login)
-          </label>
+        </label>
+        <label className="block">
+          <span className="text-xs font-medium text-[var(--ink-2)] mb-1.5 block">
+            Benutzername (für Login)
+          </span>
           <input
             type="text"
-            className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500"
+            className={inputClass}
             value={username}
             onChange={(e) => setUsername(e.target.value.toLowerCase())}
             placeholder="frau.mustermann"
             maxLength={32}
             required
           />
-        </div>
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">
+          <p className="text-[11px] text-[var(--ink-3)] mt-1.5 leading-snug">
+            3–32 Zeichen: Kleinbuchstaben, Ziffern, . _ -
+          </p>
+        </label>
+        <label className="block">
+          <span className="text-xs font-medium text-[var(--ink-2)] mb-1.5 block">
             Start-Passwort
-          </label>
+          </span>
           <input
             type="text"
-            className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500 font-mono"
+            className={`${inputClass} font-mono`}
             value={password}
             onChange={(e) => setPassword(e.target.value)}
             minLength={6}
             required
           />
-        </div>
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">
+        </label>
+        <label className="block">
+          <span className="text-xs font-medium text-[var(--ink-2)] mb-1.5 block">
             Start-Credits (Pool)
-          </label>
+          </span>
           <input
             type="number"
-            className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500"
+            className={inputClass}
             value={credits}
             onChange={(e) => setCredits(e.target.value)}
             min={0}
             max={10000}
           />
-          <p className="text-xs text-gray-500 mt-1">
-            Credits die der Lehrer an Schueler verteilen kann.
+          <p className="text-[11px] text-[var(--ink-3)] mt-1.5 leading-snug">
+            Credits die der Lehrer an Schüler verteilen kann.
           </p>
-        </div>
+        </label>
       </form>
     </Modal>
   );

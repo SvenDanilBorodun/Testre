@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import clsx from 'clsx';
 import toast from 'react-hot-toast';
 import { MdCheck, MdClose, MdDelete, MdEdit, MdKey } from 'react-icons/md';
 import { useDispatch, useSelector } from 'react-redux';
@@ -9,6 +10,7 @@ import {
 } from '../../services/adminApi';
 import { removeTeacher, upsertTeacher } from '../../features/admin/adminSlice';
 import PasswordResetModal from '../teacher/PasswordResetModal';
+import { Avatar, Btn } from '../EbUI';
 
 export default function TeacherRow({ teacher }) {
   const dispatch = useDispatch();
@@ -21,7 +23,7 @@ export default function TeacherRow({ teacher }) {
   const handleSaveCredits = async () => {
     const parsed = Number(creditsValue);
     if (!Number.isFinite(parsed) || parsed < 0) {
-      toast.error('Ungueltige Zahl');
+      toast.error('Ungültige Zahl');
       return;
     }
     setBusy(true);
@@ -39,15 +41,15 @@ export default function TeacherRow({ teacher }) {
 
   const handleDelete = async () => {
     if (teacher.classroom_count > 0) {
-      toast.error('Lehrer hat noch Klassen - zuerst loeschen');
+      toast.error('Lehrer hat noch Klassen — zuerst löschen');
       return;
     }
-    if (!window.confirm(`Lehrer ${teacher.full_name} wirklich loeschen?`)) return;
+    if (!window.confirm(`Lehrer ${teacher.full_name} wirklich löschen?`)) return;
     setBusy(true);
     try {
       await deleteTeacher(token, teacher.id);
       dispatch(removeTeacher(teacher.id));
-      toast.success('Lehrer geloescht');
+      toast.success('Lehrer gelöscht');
     } catch (err) {
       toast.error(err.message || 'Fehler');
     } finally {
@@ -59,20 +61,34 @@ export default function TeacherRow({ teacher }) {
     await resetTeacherPassword(token, teacher.id, newPassword);
   };
 
+  const availTone =
+    teacher.pool_available > 0
+      ? 'text-[color:var(--success)]'
+      : 'text-[color:var(--danger)]';
+
   return (
-    <tr className="border-b border-gray-100 hover:bg-gray-50">
-      <td className="px-4 py-3">
-        <div className="font-medium text-gray-800">{teacher.full_name}</div>
-        <div className="text-xs text-gray-500 font-mono">{teacher.username}</div>
+    <tr className="border-b last:border-0 border-[var(--line)] hover:bg-[var(--bg-sunk)] group transition-colors">
+      <td className="py-3 px-5">
+        <div className="flex items-center gap-3">
+          <Avatar name={teacher.full_name || teacher.username} />
+          <div className="min-w-0">
+            <div className="font-medium text-[var(--ink)] truncate">
+              {teacher.full_name}
+            </div>
+            <div className="font-mono text-[11px] text-[var(--ink-3)] truncate">
+              {teacher.username}
+            </div>
+          </div>
+        </div>
       </td>
-      <td className="px-4 py-3 text-center">
+      <td className="text-center py-3 px-3">
         {editingCredits ? (
           <div className="flex items-center gap-1 justify-center">
             <input
               type="number"
               min={0}
               max={10000}
-              className="w-24 px-2 py-1 border border-gray-300 rounded text-sm"
+              className="w-24 h-8 px-2 bg-white border border-[var(--line)] rounded-[var(--radius-sm)] text-sm text-[var(--ink)] focus:outline-none focus:border-[var(--accent)] focus:ring-2 focus:ring-[color:var(--accent-wash)] transition font-mono"
               value={creditsValue}
               onChange={(e) => setCreditsValue(e.target.value)}
               autoFocus
@@ -84,7 +100,7 @@ export default function TeacherRow({ teacher }) {
             <button
               onClick={handleSaveCredits}
               disabled={busy}
-              className="p-1 text-teal-700 hover:bg-teal-50 rounded"
+              className="w-7 h-7 rounded-[var(--radius-sm)] text-[var(--accent-ink)] hover:bg-[var(--accent-wash)] flex items-center justify-center transition"
               title="Speichern"
             >
               <MdCheck size={16} />
@@ -94,18 +110,20 @@ export default function TeacherRow({ teacher }) {
                 setCreditsValue(String(teacher.pool_total));
                 setEditingCredits(false);
               }}
-              className="p-1 text-gray-500 hover:bg-gray-100 rounded"
+              className="w-7 h-7 rounded-[var(--radius-sm)] text-[var(--ink-3)] hover:bg-[var(--bg-sunk)] flex items-center justify-center transition"
               title="Abbrechen"
             >
               <MdClose size={16} />
             </button>
           </div>
         ) : (
-          <div className="flex items-center gap-2 justify-center">
-            <span className="font-semibold text-gray-800">{teacher.pool_total}</span>
+          <div className="inline-flex items-center gap-1.5">
+            <span className="font-mono font-semibold text-[var(--ink)]">
+              {teacher.pool_total}
+            </span>
             <button
               onClick={() => setEditingCredits(true)}
-              className="text-gray-400 hover:text-gray-700"
+              className="text-[var(--ink-4)] hover:text-[var(--ink)] transition"
               title="Credits anpassen"
             >
               <MdEdit size={14} />
@@ -113,41 +131,39 @@ export default function TeacherRow({ teacher }) {
           </div>
         )}
       </td>
-      <td className="px-4 py-3 text-center text-sm text-gray-700">
+      <td className="text-center py-3 px-3 font-mono text-[var(--ink-2)]">
         {teacher.allocated_total}
       </td>
-      <td className="px-4 py-3 text-center">
-        <span
-          className={`text-sm font-semibold ${
-            teacher.pool_available > 0 ? 'text-green-700' : 'text-red-700'
-          }`}
-        >
+      <td className="text-center py-3 px-3">
+        <span className={clsx('font-mono font-semibold', availTone)}>
           {teacher.pool_available}
         </span>
       </td>
-      <td className="px-4 py-3 text-center text-sm text-gray-700">
+      <td className="text-center py-3 px-3 font-mono text-[var(--ink-2)]">
         {teacher.classroom_count}
       </td>
-      <td className="px-4 py-3 text-center text-sm text-gray-700">
+      <td className="text-center py-3 px-3 font-mono text-[var(--ink-2)]">
         {teacher.student_count}
       </td>
-      <td className="px-4 py-3">
-        <div className="flex items-center justify-center gap-1">
-          <button
+      <td className="py-3 px-5 text-right">
+        <div className="inline-flex gap-0.5 opacity-60 group-hover:opacity-100 transition">
+          <Btn
+            variant="ghost"
+            size="sm"
             onClick={() => setShowPwModal(true)}
-            className="p-1.5 rounded hover:bg-gray-100 text-gray-500 hover:text-gray-800"
-            title="Passwort zuruecksetzen"
+            title="Passwort zurücksetzen"
           >
             <MdKey size={18} />
-          </button>
-          <button
+          </Btn>
+          <Btn
+            variant="ghost"
+            size="sm"
             onClick={handleDelete}
             disabled={busy}
-            className="p-1.5 rounded hover:bg-red-50 text-gray-500 hover:text-red-700"
-            title="Lehrer loeschen"
+            title="Lehrer löschen"
           >
             <MdDelete size={18} />
-          </button>
+          </Btn>
         </div>
       </td>
       {showPwModal && (

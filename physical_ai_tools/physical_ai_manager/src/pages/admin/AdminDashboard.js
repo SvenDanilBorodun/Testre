@@ -1,6 +1,6 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import toast from 'react-hot-toast';
-import { MdAdd, MdLogout, MdShield } from 'react-icons/md';
+import { MdAdd } from 'react-icons/md';
 import { useDispatch, useSelector } from 'react-redux';
 import { createTeacher, listTeachers } from '../../services/adminApi';
 import {
@@ -10,6 +10,15 @@ import {
 } from '../../features/admin/adminSlice';
 import CreateTeacherModal from '../../components/admin/CreateTeacherModal';
 import TeacherRow from '../../components/admin/TeacherRow';
+import {
+  Btn,
+  Card,
+  Divider,
+  Pill,
+  Progress,
+  StatBig,
+  TopBar,
+} from '../../components/EbUI';
 
 export default function AdminDashboard({ onLogout }) {
   const dispatch = useDispatch();
@@ -43,96 +52,134 @@ export default function AdminDashboard({ onLogout }) {
     dispatch(upsertTeacher(created));
   };
 
-  const totalPool = teachers.reduce((sum, t) => sum + (t.pool_total || 0), 0);
-  const totalAllocated = teachers.reduce(
-    (sum, t) => sum + (t.allocated_total || 0),
-    0
-  );
+  const totals = useMemo(() => {
+    const pool = teachers.reduce((s, t) => s + (t.pool_total || 0), 0);
+    const alloc = teachers.reduce((s, t) => s + (t.allocated_total || 0), 0);
+    const avail = teachers.reduce(
+      (s, t) => s + (t.pool_available ?? (t.pool_total || 0) - (t.allocated_total || 0)),
+      0
+    );
+    const students = teachers.reduce((s, t) => s + (t.student_count || 0), 0);
+    const classrooms = teachers.reduce((s, t) => s + (t.classroom_count || 0), 0);
+    return { pool, alloc, avail, students, classrooms };
+  }, [teachers]);
 
   return (
-    <div className="h-screen w-screen flex flex-col bg-gray-50">
-      <header className="bg-white border-b border-gray-200 px-8 py-3 flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <MdShield size={26} className="text-purple-600" />
-          <h1 className="text-lg font-bold text-gray-800">EduBotics - Admin-Dashboard</h1>
-        </div>
-        <div className="flex items-center gap-4">
-          <div className="text-right">
-            <div className="text-sm font-medium text-gray-800">{fullName || username}</div>
-            <div className="text-xs text-gray-500 font-mono">{username}</div>
-          </div>
-          <button
-            onClick={onLogout}
-            className="flex items-center gap-1.5 text-sm text-gray-500 hover:text-gray-800 px-3 py-2 rounded-lg hover:bg-gray-100"
-          >
-            <MdLogout size={18} />
-            Abmelden
-          </button>
-        </div>
-      </header>
+    <div
+      className="h-screen w-screen flex flex-col"
+      style={{ background: 'var(--bg)' }}
+    >
+      <TopBar
+        title="EduBotics"
+        subtitle="Admin-Dashboard"
+        roleBadge={
+          <Pill tone="amber" dot>
+            Admin
+          </Pill>
+        }
+        user={fullName || username || '—'}
+        userSub={username}
+        userName={fullName || username}
+        onLogout={onLogout}
+      />
 
-      <div className="bg-white border-b border-gray-200 px-8 py-4 flex items-center gap-6">
-        <div className="flex flex-col">
-          <span className="text-xs font-medium text-gray-500 uppercase">Lehrer</span>
-          <span className="text-2xl font-bold text-gray-800">{teachers.length}</span>
+      {/* Stat rail */}
+      <div className="bg-white border-b border-[var(--line)] px-8 py-5 flex items-center gap-10 overflow-x-auto">
+        <StatBig label="Lehrer" value={teachers.length} sub="insgesamt" />
+        <Divider />
+        <StatBig
+          label="Pool Gesamt"
+          value={totals.pool}
+          sub="Credits zugewiesen"
+        />
+        <Divider />
+        <StatBig
+          label="Verteilt"
+          value={totals.alloc}
+          sub="an Schüler weitergegeben"
+        />
+        <Divider />
+        <StatBig
+          label="Verfügbar"
+          value={totals.avail}
+          sub="im Lehrer-Pool"
+          tone={totals.avail > 0 ? 'success' : undefined}
+        />
+        <div className="ml-auto shrink-0">
+          <Btn variant="primary" onClick={() => setShowCreate(true)}>
+            <MdAdd /> Neuer Lehrer
+          </Btn>
         </div>
-        <div className="flex flex-col">
-          <span className="text-xs font-medium text-gray-500 uppercase">Pool Gesamt</span>
-          <span className="text-2xl font-bold text-gray-800">{totalPool}</span>
-        </div>
-        <div className="flex flex-col">
-          <span className="text-xs font-medium text-gray-500 uppercase">Verteilt</span>
-          <span className="text-2xl font-bold text-gray-800">{totalAllocated}</span>
-        </div>
-        <button
-          onClick={() => setShowCreate(true)}
-          className="ml-auto flex items-center gap-1.5 px-4 py-2 rounded-lg bg-teal-600 text-white hover:bg-teal-700 text-sm font-medium"
-        >
-          <MdAdd size={18} />
-          Neuer Lehrer
-        </button>
       </div>
 
-      <div className="flex-1 overflow-y-auto p-8">
-        <div className="bg-white rounded-xl shadow-sm border border-gray-200">
+      <div className="flex-1 overflow-y-auto p-8 space-y-6">
+        {teachers.length > 0 && (
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            <Card
+              title="Credit-Verteilung"
+              subtitle="Pool vs. Verteilt je Lehrer"
+              className="lg:col-span-2"
+            >
+              <StackedBars teachers={teachers} />
+            </Card>
+            <Card title="Übersicht" subtitle="Aktueller Stand">
+              <div className="space-y-3 text-sm">
+                <Row k="Lehrer" v={teachers.length} />
+                <Row k="Klassen" v={totals.classrooms} />
+                <Row k="Schüler" v={totals.students} />
+                <Row
+                  k="Credits verbraucht"
+                  v={
+                    <span className="font-mono">
+                      {totals.alloc} / {totals.pool}
+                    </span>
+                  }
+                />
+              </div>
+              <div className="mt-5">
+                <Progress
+                  pct={totals.pool > 0 ? (totals.alloc / totals.pool) * 100 : 0}
+                  tone="accent"
+                />
+                <div className="text-[11px] text-[var(--ink-3)] mt-2 font-mono">
+                  {totals.pool > 0
+                    ? `${Math.round((totals.alloc / totals.pool) * 100)}% ausgelastet`
+                    : 'Keine Credits zugewiesen'}
+                </div>
+              </div>
+            </Card>
+          </div>
+        )}
+
+        <Card
+          title="Lehrer"
+          subtitle={`${teachers.length} ${teachers.length === 1 ? 'Eintrag' : 'Einträge'}`}
+          padded={false}
+        >
           {loading ? (
-            <div className="p-8 text-center text-gray-500">Laden...</div>
+            <div className="p-12 text-center text-[var(--ink-3)]">Laden…</div>
           ) : teachers.length === 0 ? (
-            <div className="p-12 text-center text-gray-500">
+            <div className="p-12 text-center text-[var(--ink-3)]">
               <p className="mb-4">Noch keine Lehrer.</p>
-              <button
+              <Btn
+                variant="primary"
                 onClick={() => setShowCreate(true)}
-                className="flex items-center gap-1.5 mx-auto px-4 py-2 rounded-lg bg-teal-600 text-white hover:bg-teal-700 text-sm font-medium"
+                className="mx-auto"
               >
-                <MdAdd size={18} />
-                Ersten Lehrer erstellen
-              </button>
+                <MdAdd /> Ersten Lehrer erstellen
+              </Btn>
             </div>
           ) : (
-            <table className="w-full">
-              <thead className="bg-gray-50 border-b border-gray-200">
-                <tr>
-                  <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600 uppercase">
-                    Lehrer
-                  </th>
-                  <th className="px-4 py-3 text-center text-xs font-semibold text-gray-600 uppercase">
-                    Pool
-                  </th>
-                  <th className="px-4 py-3 text-center text-xs font-semibold text-gray-600 uppercase">
-                    Verteilt
-                  </th>
-                  <th className="px-4 py-3 text-center text-xs font-semibold text-gray-600 uppercase">
-                    Verfuegbar
-                  </th>
-                  <th className="px-4 py-3 text-center text-xs font-semibold text-gray-600 uppercase">
-                    Klassen
-                  </th>
-                  <th className="px-4 py-3 text-center text-xs font-semibold text-gray-600 uppercase">
-                    Schueler
-                  </th>
-                  <th className="px-4 py-3 text-center text-xs font-semibold text-gray-600 uppercase">
-                    Aktionen
-                  </th>
+            <table className="w-full text-sm">
+              <thead className="bg-[var(--bg-sunk)] border-b border-[var(--line)]">
+                <tr className="text-[11px] font-semibold uppercase tracking-wider text-[var(--ink-3)]">
+                  <th className="text-left py-3 px-5">Lehrer</th>
+                  <th className="text-center py-3 px-3">Pool</th>
+                  <th className="text-center py-3 px-3">Verteilt</th>
+                  <th className="text-center py-3 px-3">Verfügbar</th>
+                  <th className="text-center py-3 px-3">Klassen</th>
+                  <th className="text-center py-3 px-3">Schüler</th>
+                  <th className="text-right py-3 px-5">Aktionen</th>
                 </tr>
               </thead>
               <tbody>
@@ -142,7 +189,7 @@ export default function AdminDashboard({ onLogout }) {
               </tbody>
             </table>
           )}
-        </div>
+        </Card>
       </div>
 
       {showCreate && (
@@ -153,4 +200,80 @@ export default function AdminDashboard({ onLogout }) {
       )}
     </div>
   );
+}
+
+function Row({ k, v }) {
+  return (
+    <div className="flex items-center justify-between">
+      <span className="text-[var(--ink-3)]">{k}</span>
+      <span className="font-mono text-[var(--ink)] font-semibold">{v}</span>
+    </div>
+  );
+}
+
+function StackedBars({ teachers }) {
+  const data = teachers.map((t) => {
+    const pool = t.pool_total || 0;
+    const alloc = t.allocated_total || 0;
+    const avail = t.pool_available ?? Math.max(0, pool - alloc);
+    const shortName = shortenName(t.full_name || t.username || '—');
+    return { name: shortName, alloc, avail };
+  });
+  const max = Math.max(80, ...data.map((d) => d.alloc + d.avail));
+  return (
+    <div>
+      <div className="flex items-end gap-3 h-[180px]">
+        {data.map((d, i) => {
+          const allocPct = (d.alloc / max) * 100;
+          const availPct = (d.avail / max) * 100;
+          return (
+            <div key={i} className="flex-1 flex flex-col items-center gap-2 min-w-0">
+              <div className="w-full flex flex-col justify-end gap-[2px] flex-1">
+                <div
+                  className="w-full rounded-t-[4px] bg-[var(--bg-sunk)]"
+                  style={{
+                    height: `${availPct}%`,
+                    minHeight: d.avail ? 4 : 0,
+                  }}
+                />
+                <div
+                  className="w-full rounded-b-[4px]"
+                  style={{
+                    background: 'var(--accent)',
+                    height: `${allocPct}%`,
+                    minHeight: d.alloc ? 4 : 0,
+                  }}
+                />
+              </div>
+              <span
+                className="text-[10px] font-mono text-[var(--ink-3)] truncate max-w-full"
+                title={d.name}
+              >
+                {d.name}
+              </span>
+            </div>
+          );
+        })}
+        <div className="flex flex-col items-start gap-2 text-[11px] text-[var(--ink-3)] pl-3 border-l border-[var(--line)] shrink-0">
+          <span className="flex items-center gap-1.5">
+            <span
+              className="w-2.5 h-2.5 rounded-sm"
+              style={{ background: 'var(--accent)' }}
+            />{' '}
+            verteilt
+          </span>
+          <span className="flex items-center gap-1.5">
+            <span className="w-2.5 h-2.5 rounded-sm bg-[var(--bg-sunk)] border border-[var(--line)]" />{' '}
+            verfügbar
+          </span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function shortenName(name) {
+  const parts = name.trim().split(/\s+/);
+  if (parts.length < 2) return name.slice(0, 10);
+  return `${parts[0][0]}. ${parts[parts.length - 1]}`;
 }

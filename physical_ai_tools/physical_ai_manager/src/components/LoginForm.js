@@ -43,15 +43,15 @@ export default function LoginForm({ subtitle = 'Anmelden für Cloud-GPU-Training
     'w-full h-11 px-3 bg-white border border-[var(--line)] rounded-[var(--radius-sm)] text-sm text-[var(--ink)] placeholder:text-[var(--ink-4)] focus:outline-none focus:border-[var(--accent)] focus:ring-2 focus:ring-[color:var(--accent-wash)] transition';
 
   return (
-    <div className="h-full w-full flex items-center justify-center grid-dot">
-      <div className="flex flex-col items-center gap-6">
+    <div className="h-full w-full flex items-center justify-center grid-dot px-4 py-6">
+      <div className="w-full max-w-[420px] flex flex-col items-center gap-5 md:gap-6">
         <div className="flex items-center gap-2">
           <LogoMark />
           <span className="font-semibold text-[15px] tracking-tight text-[var(--ink)]">
             EduBotics
           </span>
         </div>
-        <div className="w-[380px] bg-white border border-[var(--line)] rounded-[var(--radius-lg)] shadow-pop p-7">
+        <div className="w-full bg-white border border-[var(--line)] rounded-[var(--radius-lg)] shadow-pop p-5 sm:p-6 md:p-7">
           <h1 className="text-[22px] font-semibold tracking-tight text-[var(--ink)]">
             Willkommen zurück
           </h1>

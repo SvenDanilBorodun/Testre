@@ -90,7 +90,7 @@ export default function InferencePage({ isActive = true }) {
         )}
       </div>
 
-      <div className="flex-1 flex items-start min-h-0 pt-[56px] pb-2 px-3 gap-3">
+      <div className="flex-1 flex items-start min-h-0 pt-[56px] pb-2 px-2 sm:px-3 lg:px-4 gap-2 sm:gap-3 lg:gap-4">
         <div className="flex-1 self-stretch min-w-0 relative rounded-[var(--radius-lg)] overflow-hidden">
           <ImageGrid isActive={isActive} />
         </div>
@@ -99,7 +99,7 @@ export default function InferencePage({ isActive = true }) {
             'relative transition-all duration-300 ease-in-out',
             isRightPanelCollapsed
               ? 'w-0 opacity-0 pointer-events-none overflow-hidden'
-              : 'w-[min(400px,40vw)] min-w-[300px] max-w-[400px] md:min-w-[320px] lg:min-w-[360px] opacity-100'
+              : 'w-[min(420px,38vw)] min-w-[300px] max-w-[480px] md:min-w-[320px] lg:min-w-[360px] 2xl:max-w-[520px] opacity-100'
           )}
           style={{ maxHeight: 'calc(100vh - 220px)' }}
         >

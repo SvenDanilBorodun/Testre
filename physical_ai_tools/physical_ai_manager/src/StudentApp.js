@@ -215,18 +215,24 @@ function StudentApp() {
   return (
     <StartupGate>
       <div
-        className={clsx('flex min-h-screen w-screen', isDarkPage && 'dark-surface')}
+        className={clsx(
+          'flex h-screen w-screen overflow-hidden',
+          'flex-col sm:flex-row',
+          isDarkPage && 'dark-surface'
+        )}
         style={isDarkPage ? { background: 'var(--dark-bg)' } : {}}
       >
+        {/* Desktop / tablet rail */}
         <aside
           className={clsx(
-            'w-[88px] shrink-0 flex flex-col items-center py-5 gap-1',
+            'hidden sm:flex shrink-0 flex-col items-center py-4 md:py-5 gap-1',
+            'w-[64px] md:w-[88px]',
             isDarkPage
               ? 'border-r border-[color:var(--dark-line)]'
               : 'bg-white border-r border-[var(--line)]'
           )}
         >
-          <div className="mb-4">
+          <div className="mb-3 md:mb-4">
             <LogoMark size={22} />
           </div>
           {navItems.map((n) => {
@@ -244,8 +250,9 @@ function StudentApp() {
                 )}
                 <button
                   onClick={n.onClick}
+                  title={n.label}
                   className={clsx(
-                    'group w-[68px] py-3 rounded-[var(--radius)] flex flex-col items-center gap-1.5 transition',
+                    'group w-12 md:w-[68px] py-2.5 md:py-3 rounded-[var(--radius)] flex flex-col items-center gap-1 md:gap-1.5 transition',
                     active
                       ? isDarkPage
                         ? 'bg-white/[0.08] text-white'
@@ -257,13 +264,13 @@ function StudentApp() {
                 >
                   <span
                     className={clsx(
-                      'w-10 h-10 flex items-center justify-center rounded-[10px]',
+                      'w-9 h-9 md:w-10 md:h-10 flex items-center justify-center rounded-[10px]',
                       active && (isDarkPage ? 'bg-white/10' : 'bg-white/60')
                     )}
                   >
-                    <Icon size={22} />
+                    <Icon size={20} />
                   </span>
-                  <span className="text-[11px] font-medium">{n.label}</span>
+                  <span className="hidden md:block text-[11px] font-medium">{n.label}</span>
                 </button>
               </React.Fragment>
             );
@@ -278,7 +285,38 @@ function StudentApp() {
             v{packageJson.version}
           </div>
         </aside>
-        <main className="flex-1 flex flex-col h-screen min-w-0 relative overflow-hidden">
+
+        {/* Mobile top bar */}
+        <header
+          className={clsx(
+            'sm:hidden shrink-0 h-12 px-3 flex items-center justify-between border-b',
+            isDarkPage
+              ? 'border-[color:var(--dark-line)] bg-black/30 backdrop-blur'
+              : 'bg-white border-[var(--line)]'
+          )}
+        >
+          <div className="flex items-center gap-2">
+            <LogoMark size={20} />
+            <span
+              className={clsx(
+                'text-sm font-semibold tracking-tight',
+                isDarkPage ? 'text-white' : 'text-[var(--ink)]'
+              )}
+            >
+              EduBotics
+            </span>
+          </div>
+          <div
+            className={clsx(
+              'text-[10px] font-mono',
+              isDarkPage ? 'text-white/40' : 'text-[var(--ink-4)]'
+            )}
+          >
+            v{packageJson.version}
+          </div>
+        </header>
+
+        <main className="flex-1 flex flex-col min-h-0 min-w-0 relative overflow-hidden">
           {blockRoleMismatch ? (
             <div className="flex flex-col items-center justify-center h-full p-10 text-center">
               <h2 className="text-xl font-bold text-[var(--ink)] mb-2">Falsches Konto</h2>
@@ -301,6 +339,40 @@ function StudentApp() {
             <HomePage />
           )}
         </main>
+
+        {/* Mobile bottom nav */}
+        <nav
+          className={clsx(
+            'sm:hidden shrink-0 h-14 border-t flex items-stretch',
+            isDarkPage
+              ? 'bg-black/60 backdrop-blur border-[color:var(--dark-line)]'
+              : 'bg-white border-[var(--line)]'
+          )}
+        >
+          {navItems.map((n) => {
+            const Icon = n.Icon;
+            const active = page === n.key;
+            return (
+              <button
+                key={n.key}
+                onClick={n.onClick}
+                className={clsx(
+                  'flex-1 min-w-0 flex flex-col items-center justify-center gap-0.5 transition',
+                  active
+                    ? isDarkPage
+                      ? 'text-white'
+                      : 'text-[var(--accent-ink)]'
+                    : isDarkPage
+                    ? 'text-white/60'
+                    : 'text-[var(--ink-3)]'
+                )}
+              >
+                <Icon size={20} />
+                <span className="text-[10px] font-medium truncate px-1">{n.label}</span>
+              </button>
+            );
+          })}
+        </nav>
       </div>
     </StartupGate>
   );

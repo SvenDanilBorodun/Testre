@@ -85,14 +85,14 @@ export default function TrainingPage() {
 
   return (
     <div className="h-full w-full overflow-y-auto" style={{ background: 'var(--bg)' }}>
-      <div className="max-w-[1280px] mx-auto px-10 py-8 flex flex-col gap-6">
+      <div className="eb-shell flex flex-col gap-5 md:gap-6">
         {/* Header rail */}
         <SectionHeader
           eyebrow="Training"
           title="Modell trainieren"
           description="Wähle Datensatz und Policy, dann starte das Training in der Cloud."
           right={
-            <div className="flex items-center gap-3">
+            <div className="flex items-center gap-3 flex-wrap justify-end">
               <HeartbeatStatus />
               <div className="text-right">
                 <div className="text-xs text-[var(--ink-3)]">{session?.user?.email}</div>
@@ -100,7 +100,7 @@ export default function TrainingPage() {
                   <span className="font-mono">
                     {remaining} / {trainingCredits}
                   </span>{' '}
-                  Trainingsguthaben
+                  Trainingsguthaben{trainingsUsed > 0 ? ` · ${trainingsUsed} verbraucht` : ''}
                 </Pill>
               </div>
               <Btn variant="ghost" size="sm" onClick={handleLogout}>
@@ -120,7 +120,7 @@ export default function TrainingPage() {
               Datensatz · Policy · Ausgabe · Optionen
             </span>
           </div>
-          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4 items-start">
+          <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4 items-start">
             <div className="min-w-0">
               <StepLabel n={1} title="Datensatz" />
               <DatasetSelector />
@@ -140,63 +140,31 @@ export default function TrainingPage() {
           </div>
         </div>
 
-        {/* Monitor + Credits rail */}
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-          <Card
-            className="lg:col-span-8"
-            title="Trainingsverlauf"
-            subtitle={isTraining ? 'Live · aktualisiert laufend' : 'Bereit'}
-            right={
-              <div className="flex gap-2 items-center">
-                <Pill tone={isTraining ? 'danger' : 'accent'} dot>
-                  {isTraining ? 'aktiv' : 'idle'}
-                </Pill>
-                <TrainingControlPanel />
-              </div>
-            }
-          >
-            <div className="rounded-[var(--radius)] chart-grid overflow-hidden">
-              <TrainingLossDisplay />
+        {/* Monitor rail (full width) */}
+        <Card
+          title="Trainingsverlauf"
+          subtitle={isTraining ? 'Live · aktualisiert laufend · RunPod Serverless' : 'Bereit · RunPod Serverless'}
+          right={
+            <div className="flex gap-2 items-center flex-wrap justify-end">
+              <Pill tone={isTraining ? 'danger' : 'accent'} dot>
+                {isTraining ? 'aktiv' : 'idle'}
+              </Pill>
+              <TrainingControlPanel />
             </div>
-            <div className="mt-4">
-              <TrainingProgressBar />
+          }
+        >
+          <div className="rounded-[var(--radius)] chart-grid overflow-hidden">
+            <TrainingLossDisplay />
+          </div>
+          <div className="mt-4">
+            <TrainingProgressBar />
+          </div>
+          {remaining <= 0 && (
+            <div className="mt-4 text-xs text-[color:var(--danger)] bg-[var(--danger-wash)] px-3 py-2 rounded-[var(--radius-sm)] leading-snug">
+              Kein Guthaben mehr. Kontaktiere deinen Lehrer für mehr Credits.
             </div>
-          </Card>
-
-          <Card
-            className="lg:col-span-4"
-            title="Guthaben & GPU"
-            subtitle="RunPod Serverless"
-          >
-            <div
-              className="rounded-[var(--radius)] text-white p-5"
-              style={{
-                background:
-                  'linear-gradient(135deg, var(--accent) 0%, var(--accent-ink) 100%)',
-              }}
-            >
-              <div className="text-[11px] opacity-80 font-mono uppercase tracking-wider">
-                Guthaben
-              </div>
-              <div className="text-4xl font-semibold mt-1 font-mono">
-                {remaining}
-                <span className="opacity-60"> / {trainingCredits}</span>
-              </div>
-              <div className="text-xs opacity-80 mt-0.5">Trainings übrig</div>
-              <div className="h-px bg-white/20 my-4" />
-              <div className="flex items-center justify-between text-xs">
-                <span className="opacity-80">Verbraucht</span>
-                <span className="font-mono">{trainingsUsed}</span>
-              </div>
-            </div>
-
-            {remaining <= 0 && (
-              <div className="mt-4 text-xs text-[color:var(--danger)] bg-[var(--danger-wash)] px-3 py-2 rounded-[var(--radius-sm)] leading-snug">
-                Kein Guthaben mehr. Kontaktiere deinen Lehrer für mehr Credits.
-              </div>
-            )}
-          </Card>
-        </div>
+          )}
+        </Card>
 
         {/* My Models */}
         <Card

@@ -84,21 +84,21 @@ export default function AdminDashboard({ onLogout }) {
       />
 
       {/* Stat rail */}
-      <div className="bg-white border-b border-[var(--line)] px-8 py-5 flex items-center gap-10 overflow-x-auto">
+      <div className="bg-white border-b border-[var(--line)] eb-rail flex items-center gap-4 md:gap-6 lg:gap-10 flex-wrap">
         <StatBig label="Lehrer" value={teachers.length} sub="insgesamt" />
-        <Divider />
+        <Divider className="hidden md:block" />
         <StatBig
           label="Pool Gesamt"
           value={totals.pool}
           sub="Credits zugewiesen"
         />
-        <Divider />
+        <Divider className="hidden md:block" />
         <StatBig
           label="Verteilt"
           value={totals.alloc}
           sub="an Schüler weitergegeben"
         />
-        <Divider />
+        <Divider className="hidden md:block" />
         <StatBig
           label="Verfügbar"
           value={totals.avail}
@@ -112,9 +112,10 @@ export default function AdminDashboard({ onLogout }) {
         </div>
       </div>
 
-      <div className="flex-1 overflow-y-auto p-8 space-y-6">
+      <div className="flex-1 overflow-y-auto">
+        <div className="eb-shell space-y-5 md:space-y-6">
         {teachers.length > 0 && (
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 md:gap-5 lg:gap-6">
             <Card
               title="Credit-Verteilung"
               subtitle="Pool vs. Verteilt je Lehrer"
@@ -170,26 +171,29 @@ export default function AdminDashboard({ onLogout }) {
               </Btn>
             </div>
           ) : (
-            <table className="w-full text-sm">
-              <thead className="bg-[var(--bg-sunk)] border-b border-[var(--line)]">
-                <tr className="text-[11px] font-semibold uppercase tracking-wider text-[var(--ink-3)]">
-                  <th className="text-left py-3 px-5">Lehrer</th>
-                  <th className="text-center py-3 px-3">Pool</th>
-                  <th className="text-center py-3 px-3">Verteilt</th>
-                  <th className="text-center py-3 px-3">Verfügbar</th>
-                  <th className="text-center py-3 px-3">Klassen</th>
-                  <th className="text-center py-3 px-3">Schüler</th>
-                  <th className="text-right py-3 px-5">Aktionen</th>
-                </tr>
-              </thead>
-              <tbody>
-                {teachers.map((t) => (
-                  <TeacherRow key={t.id} teacher={t} />
-                ))}
-              </tbody>
-            </table>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm min-w-[720px]">
+                <thead className="bg-[var(--bg-sunk)] border-b border-[var(--line)]">
+                  <tr className="text-[11px] font-semibold uppercase tracking-wider text-[var(--ink-3)]">
+                    <th className="text-left py-3 px-5">Lehrer</th>
+                    <th className="text-center py-3 px-3">Pool</th>
+                    <th className="text-center py-3 px-3">Verteilt</th>
+                    <th className="text-center py-3 px-3">Verfügbar</th>
+                    <th className="text-center py-3 px-3">Klassen</th>
+                    <th className="text-center py-3 px-3">Schüler</th>
+                    <th className="text-right py-3 px-5">Aktionen</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {teachers.map((t) => (
+                    <TeacherRow key={t.id} teacher={t} />
+                  ))}
+                </tbody>
+              </table>
+            </div>
           )}
         </Card>
+        </div>
       </div>
 
       {showCreate && (

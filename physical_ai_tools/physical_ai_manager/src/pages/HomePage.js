@@ -50,7 +50,7 @@ export default function HomePage() {
 
   return (
     <div className="h-full w-full overflow-y-auto">
-      <div className="w-full max-w-[1400px] 2xl:max-w-[1700px] mx-auto px-4 sm:px-6 lg:px-8 xl:px-10 py-6 md:py-8 lg:py-10">
+      <div className="eb-shell">
         <SectionHeader
           eyebrow="Startseite"
           title={`${getGreeting()}, ${firstName}.`}

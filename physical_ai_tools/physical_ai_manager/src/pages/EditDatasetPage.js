@@ -80,7 +80,7 @@ export default function EditDatasetPage() {
 
   return (
     <div className="h-full w-full overflow-y-auto" style={{ background: 'var(--bg)' }}>
-      <div className="max-w-[1200px] mx-auto px-10 py-8 flex flex-col gap-6">
+      <div className="eb-shell flex flex-col gap-5 md:gap-6">
         <SectionHeader
           eyebrow="Daten"
           title="Datenwerkzeuge"

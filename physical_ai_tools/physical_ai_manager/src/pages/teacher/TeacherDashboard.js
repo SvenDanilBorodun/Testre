@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import clsx from 'clsx';
 import toast from 'react-hot-toast';
-import { MdAdd } from 'react-icons/md';
+import { MdAdd, MdMenu, MdClose } from 'react-icons/md';
 import { useDispatch, useSelector } from 'react-redux';
 import {
   createClassroom,
@@ -37,6 +37,24 @@ export default function TeacherDashboard({ onLogout }) {
   const selectedClassroomId = useSelector((s) => s.teacher.selectedClassroomId);
 
   const [showCreate, setShowCreate] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(
+    typeof window !== 'undefined' ? window.innerWidth >= 1024 : true
+  );
+
+  useEffect(() => {
+    const onResize = () => {
+      if (window.innerWidth < 1024) setSidebarOpen(false);
+      else setSidebarOpen(true);
+    };
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+
+  useEffect(() => {
+    if (selectedClassroomId && typeof window !== 'undefined' && window.innerWidth < 1024) {
+      setSidebarOpen(false);
+    }
+  }, [selectedClassroomId]);
 
   const fetchClassrooms = useCallback(async () => {
     if (!token) return;
@@ -83,18 +101,25 @@ export default function TeacherDashboard({ onLogout }) {
       />
 
       {/* Stat rail */}
-      <div className="bg-white border-b border-[var(--line)] px-8 py-5 flex items-center gap-10 overflow-x-auto">
+      <div className="bg-white border-b border-[var(--line)] eb-rail flex items-center gap-4 md:gap-6 lg:gap-10 flex-wrap">
+        <button
+          onClick={() => setSidebarOpen((v) => !v)}
+          className="lg:hidden w-9 h-9 rounded-[var(--radius-sm)] text-[var(--ink-2)] hover:bg-[var(--bg-sunk)] flex items-center justify-center transition"
+          title={sidebarOpen ? 'Klassenliste schließen' : 'Klassenliste öffnen'}
+        >
+          {sidebarOpen ? <MdClose size={20} /> : <MdMenu size={20} />}
+        </button>
         <StatBig label="Pool" value={poolTotal ?? '—'} sub="Credits insgesamt" />
-        <Divider />
+        <Divider className="hidden md:block" />
         <StatBig label="Verteilt" value={allocatedTotal ?? '—'} sub="an Schüler" />
-        <Divider />
+        <Divider className="hidden md:block" />
         <StatBig
           label="Verfügbar"
           value={poolAvailable ?? '—'}
           sub="im Pool"
           tone={poolAvailableTone}
         />
-        <Divider />
+        <Divider className="hidden md:block" />
         <StatBig
           label="Schüler"
           value={studentCount ?? '—'}
@@ -102,15 +127,33 @@ export default function TeacherDashboard({ onLogout }) {
             classrooms.length === 1 ? 'Klasse' : 'Klassen'
           }`}
         />
-        <div className="ml-auto max-w-sm p-3 rounded-[var(--radius)] bg-[var(--bg-sunk)] text-xs text-[var(--ink-3)] leading-snug shrink-0">
+        <div className="w-full xl:w-auto xl:ml-auto xl:max-w-sm p-3 rounded-[var(--radius)] bg-[var(--bg-sunk)] text-xs text-[var(--ink-3)] leading-snug">
           Pool und Credits werden vom Admin vergeben. Du verteilst sie an
           Schüler mit den +/− Buttons.
         </div>
       </div>
 
-      <div className="flex-1 flex min-h-0">
+      <div className="flex-1 flex min-h-0 relative">
+        {/* Mobile backdrop */}
+        {sidebarOpen && (
+          <div
+            className="lg:hidden absolute inset-0 z-10 bg-black/30"
+            onClick={() => setSidebarOpen(false)}
+          />
+        )}
+
         {/* Classroom sidebar */}
-        <aside className="w-[280px] shrink-0 bg-white border-r border-[var(--line)] flex flex-col">
+        <aside
+          className={clsx(
+            'bg-white border-r border-[var(--line)] flex flex-col transition-transform duration-200 ease-out',
+            'z-20',
+            'absolute inset-y-0 left-0 lg:static',
+            'w-[280px] max-w-[85vw] shrink-0 lg:translate-x-0',
+            sidebarOpen
+              ? 'translate-x-0 shadow-pop lg:shadow-none'
+              : '-translate-x-full'
+          )}
+        >
           <div className="px-4 py-3 border-b border-[var(--line)] flex items-center justify-between">
             <span className="text-[10px] font-semibold uppercase tracking-wider text-[var(--ink-3)]">
               Klassen

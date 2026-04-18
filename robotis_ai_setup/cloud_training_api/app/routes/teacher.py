@@ -33,6 +33,7 @@ class StudentCreate(BaseModel):
 class StudentPatch(BaseModel):
     full_name: str | None = Field(default=None, min_length=1, max_length=100)
     classroom_id: str | None = None
+    progress_note: str | None = Field(default=None, max_length=4000)
 
 
 class PasswordReset(BaseModel):
@@ -58,6 +59,7 @@ class StudentSummary(BaseModel):
     trainings_used: int
     remaining: int
     classroom_id: str | None
+    progress_note: str | None = None
 
 
 class TrainingSummary(BaseModel):
@@ -144,6 +146,7 @@ def _student_summary(row: dict) -> StudentSummary:
         trainings_used=used,
         remaining=credits - used,
         classroom_id=row.get("classroom_id"),
+        progress_note=row.get("progress_note"),
     )
 
 
@@ -209,7 +212,7 @@ async def get_classroom(classroom_id: str, teacher=Depends(get_current_teacher))
     supabase = get_supabase()
     students_raw = (
         supabase.table("users")
-        .select("id, username, full_name, training_credits, classroom_id")
+        .select("id, username, full_name, training_credits, classroom_id, progress_note")
         .eq("classroom_id", classroom_id)
         .eq("role", "student")
         .order("full_name", desc=False)
@@ -372,7 +375,7 @@ async def create_student(
 
     row = (
         supabase.table("users")
-        .select("id, username, full_name, training_credits, classroom_id")
+        .select("id, username, full_name, training_credits, classroom_id, progress_note")
         .eq("id", student_id)
         .single()
         .execute()
@@ -396,6 +399,10 @@ async def patch_student(
         # Moving to another classroom — must also be owned by teacher.
         _assert_classroom_owned(teacher["id"], req.classroom_id)
         updates["classroom_id"] = req.classroom_id
+    if req.progress_note is not None:
+        # Empty string clears the note; non-empty strings are stored as-is.
+        stripped = req.progress_note.strip()
+        updates["progress_note"] = stripped or None
     if not updates:
         raise HTTPException(status_code=400, detail="Keine Aenderungen")
 
@@ -410,7 +417,7 @@ async def patch_student(
 
     row = (
         supabase.table("users")
-        .select("id, username, full_name, training_credits, classroom_id")
+        .select("id, username, full_name, training_credits, classroom_id, progress_note")
         .eq("id", student_id)
         .single()
         .execute()
@@ -509,3 +516,238 @@ async def list_student_trainings(
         .execute()
     )
     return [TrainingSummary(**t) for t in (result.data or [])]
+
+
+# ---------- Lessons + progress ----------
+
+
+class LessonCreate(BaseModel):
+    title: str = Field(..., min_length=1, max_length=200)
+    description: str | None = Field(default=None, max_length=4000)
+    order_index: int = Field(default=0, ge=0, le=10000)
+
+
+class LessonPatch(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=200)
+    description: str | None = Field(default=None, max_length=4000)
+    order_index: int | None = Field(default=None, ge=0, le=10000)
+
+
+class LessonSummary(BaseModel):
+    id: str
+    classroom_id: str
+    title: str
+    description: str | None = None
+    order_index: int
+    created_at: str
+    updated_at: str
+    progress_counts: dict = Field(default_factory=dict)
+
+
+class LessonProgressPatch(BaseModel):
+    status: str | None = Field(
+        default=None, pattern="^(not_started|in_progress|completed)$"
+    )
+    note: str | None = Field(default=None, max_length=4000)
+
+
+class LessonProgressRow(BaseModel):
+    lesson_id: str
+    student_id: str
+    status: str
+    note: str | None = None
+    updated_at: str | None = None
+
+
+def _assert_lesson_owned(teacher_id: str, lesson_id: str) -> dict:
+    supabase = get_supabase()
+    result = (
+        supabase.table("lessons")
+        .select("*")
+        .eq("id", lesson_id)
+        .execute()
+    )
+    if not result.data:
+        raise HTTPException(status_code=404, detail="Lektion nicht gefunden")
+    lesson = result.data[0]
+    _assert_classroom_owned(teacher_id, lesson["classroom_id"])
+    return lesson
+
+
+def _lesson_progress_counts(lesson_id: str) -> dict:
+    """Return per-status counts for a lesson as a plain dict."""
+    supabase = get_supabase()
+    rows = (
+        supabase.table("lesson_progress")
+        .select("status")
+        .eq("lesson_id", lesson_id)
+        .execute()
+    ).data or []
+    counts = {"not_started": 0, "in_progress": 0, "completed": 0}
+    for r in rows:
+        s = r.get("status") or "not_started"
+        if s in counts:
+            counts[s] += 1
+    return counts
+
+
+def _serialize_lesson(row: dict) -> LessonSummary:
+    return LessonSummary(
+        id=row["id"],
+        classroom_id=row["classroom_id"],
+        title=row["title"],
+        description=row.get("description"),
+        order_index=int(row.get("order_index") or 0),
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+        progress_counts=_lesson_progress_counts(row["id"]),
+    )
+
+
+@router.get(
+    "/classrooms/{classroom_id}/lessons", response_model=list[LessonSummary]
+)
+async def list_lessons(classroom_id: str, teacher=Depends(get_current_teacher)):
+    _assert_classroom_owned(teacher["id"], classroom_id)
+    supabase = get_supabase()
+    rows = (
+        supabase.table("lessons")
+        .select("*")
+        .eq("classroom_id", classroom_id)
+        .order("order_index", desc=False)
+        .order("created_at", desc=False)
+        .execute()
+    ).data or []
+    return [_serialize_lesson(r) for r in rows]
+
+
+@router.post("/classrooms/{classroom_id}/lessons", response_model=LessonSummary)
+async def create_lesson(
+    classroom_id: str,
+    req: LessonCreate,
+    teacher=Depends(get_current_teacher),
+):
+    _assert_classroom_owned(teacher["id"], classroom_id)
+    supabase = get_supabase()
+    try:
+        result = (
+            supabase.table("lessons")
+            .insert(
+                {
+                    "classroom_id": classroom_id,
+                    "title": req.title.strip(),
+                    "description": (req.description or "").strip() or None,
+                    "order_index": req.order_index,
+                }
+            )
+            .execute()
+        )
+    except Exception as e:
+        logger.error("create_lesson failed: %s", e)
+        raise HTTPException(status_code=500, detail="Lektion konnte nicht erstellt werden")
+    return _serialize_lesson(result.data[0])
+
+
+@router.patch("/lessons/{lesson_id}", response_model=LessonSummary)
+async def patch_lesson(
+    lesson_id: str, req: LessonPatch, teacher=Depends(get_current_teacher)
+):
+    _assert_lesson_owned(teacher["id"], lesson_id)
+    updates: dict = {}
+    if req.title is not None:
+        updates["title"] = req.title.strip()
+    if req.description is not None:
+        updates["description"] = (req.description or "").strip() or None
+    if req.order_index is not None:
+        updates["order_index"] = req.order_index
+    if not updates:
+        raise HTTPException(status_code=400, detail="Keine Aenderungen")
+    supabase = get_supabase()
+    try:
+        result = (
+            supabase.table("lessons")
+            .update(updates)
+            .eq("id", lesson_id)
+            .execute()
+        )
+    except Exception as e:
+        logger.error("patch_lesson failed: %s", e)
+        raise HTTPException(status_code=500, detail="Lektion konnte nicht aktualisiert werden")
+    return _serialize_lesson(result.data[0])
+
+
+@router.delete("/lessons/{lesson_id}")
+async def delete_lesson(lesson_id: str, teacher=Depends(get_current_teacher)):
+    _assert_lesson_owned(teacher["id"], lesson_id)
+    supabase = get_supabase()
+    supabase.table("lessons").delete().eq("id", lesson_id).execute()
+    return {"ok": True}
+
+
+@router.get(
+    "/lessons/{lesson_id}/progress", response_model=list[LessonProgressRow]
+)
+async def list_lesson_progress(
+    lesson_id: str, teacher=Depends(get_current_teacher)
+):
+    _assert_lesson_owned(teacher["id"], lesson_id)
+    supabase = get_supabase()
+    rows = (
+        supabase.table("lesson_progress")
+        .select("lesson_id, student_id, status, note, updated_at")
+        .eq("lesson_id", lesson_id)
+        .execute()
+    ).data or []
+    return [LessonProgressRow(**r) for r in rows]
+
+
+@router.put(
+    "/lessons/{lesson_id}/students/{student_id}/progress",
+    response_model=LessonProgressRow,
+)
+async def upsert_lesson_progress(
+    lesson_id: str,
+    student_id: str,
+    req: LessonProgressPatch,
+    teacher=Depends(get_current_teacher),
+):
+    lesson = _assert_lesson_owned(teacher["id"], lesson_id)
+    student = _assert_student_owned(teacher["id"], student_id)
+    # Student must actually be in this lesson's classroom.
+    if student.get("classroom_id") != lesson["classroom_id"]:
+        raise HTTPException(
+            status_code=400,
+            detail="Schueler gehoert nicht zur Klasse dieser Lektion",
+        )
+
+    supabase = get_supabase()
+    payload: dict = {
+        "lesson_id": lesson_id,
+        "student_id": student_id,
+    }
+    if req.status is not None:
+        payload["status"] = req.status
+    if req.note is not None:
+        payload["note"] = (req.note or "").strip() or None
+    if len(payload) == 2:
+        raise HTTPException(status_code=400, detail="Keine Aenderungen")
+
+    try:
+        result = (
+            supabase.table("lesson_progress")
+            .upsert(payload, on_conflict="lesson_id,student_id")
+            .execute()
+        )
+    except Exception as e:
+        logger.error("upsert_lesson_progress failed: %s", e)
+        raise HTTPException(
+            status_code=500, detail="Fortschritt konnte nicht gespeichert werden"
+        )
+    row = result.data[0]
+    return LessonProgressRow(
+        lesson_id=row["lesson_id"],
+        student_id=row["student_id"],
+        status=row["status"],
+        note=row.get("note"),
+        updated_at=row.get("updated_at"),
+    )

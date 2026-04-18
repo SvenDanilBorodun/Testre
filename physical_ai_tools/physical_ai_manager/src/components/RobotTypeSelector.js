@@ -23,7 +23,7 @@ import { useRosServiceCaller } from '../hooks/useRosServiceCaller';
 import TaskPhase from '../constants/taskPhases';
 import { selectRobotType, removeAllTags } from '../features/tasks/taskSlice';
 import { setRobotTypeList, setIsFirstLoadTrue } from '../features/ui/uiSlice';
-import { Btn, Card, Pill, Stat } from './EbUI';
+import { Btn, Card, Pill } from './EbUI';
 
 export default function RobotTypeSelector() {
   const dispatch = useDispatch();
@@ -177,12 +177,6 @@ export default function RobotTypeSelector() {
           Keine Robotertypen verfügbar. Bitte ROS-Verbindung prüfen.
         </div>
       )}
-
-      <div className="mt-5 pt-4 border-t border-[var(--line)] grid grid-cols-3 gap-3">
-        <Stat label="Status" value={robotType ? 'OK' : '—'} tone={robotType ? 'accent' : undefined} />
-        <Stat label="Typen" value={String(robotTypeList.length)} />
-        <Stat label="Phase" value={String(taskStatus.phase ?? 0)} />
-      </div>
     </Card>
   );
 }

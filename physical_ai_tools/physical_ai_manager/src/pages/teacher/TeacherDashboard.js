@@ -17,7 +17,6 @@ import ClassroomDetail from '../../components/teacher/ClassroomDetail';
 import {
   Btn,
   Divider,
-  Pill,
   Progress,
   StatBig,
   TopBar,
@@ -77,11 +76,6 @@ export default function TeacherDashboard({ onLogout }) {
       <TopBar
         title="EduBotics"
         subtitle="Lehrer-Dashboard"
-        roleBadge={
-          <Pill tone="accent" dot>
-            Lehrer
-          </Pill>
-        }
         user={fullName || username || '—'}
         userSub={username}
         userName={fullName || username}

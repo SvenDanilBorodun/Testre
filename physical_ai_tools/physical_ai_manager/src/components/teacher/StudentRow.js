@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import clsx from 'clsx';
 import toast from 'react-hot-toast';
 import {
@@ -9,6 +9,10 @@ import {
   MdMoveDown,
   MdAdd,
   MdRemove,
+  MdTune,
+  MdNote,
+  MdNoteAdd,
+  MdClose,
 } from 'react-icons/md';
 import { useDispatch, useSelector } from 'react-redux';
 import {
@@ -48,6 +52,103 @@ function RenameInline({ student, onSave, onCancel }) {
   );
 }
 
+function CreditDeltaPopover({ student, onApply, onClose, busy }) {
+  const [amount, setAmount] = useState('');
+  const ref = useRef(null);
+  const inputRef = useRef(null);
+
+  useEffect(() => {
+    inputRef.current?.focus();
+  }, []);
+
+  useEffect(() => {
+    const onDown = (e) => {
+      if (ref.current && !ref.current.contains(e.target)) onClose();
+    };
+    const onEsc = (e) => {
+      if (e.key === 'Escape') onClose();
+    };
+    document.addEventListener('mousedown', onDown);
+    document.addEventListener('keydown', onEsc);
+    return () => {
+      document.removeEventListener('mousedown', onDown);
+      document.removeEventListener('keydown', onEsc);
+    };
+  }, [onClose]);
+
+  const used = student.trainings_used || 0;
+  const total = student.training_credits || 0;
+  const parsed = Number(amount);
+  const canGive =
+    Number.isFinite(parsed) && parsed !== 0 && parsed >= -total + used && parsed <= 1000;
+
+  const submit = (delta) => {
+    if (!Number.isFinite(delta) || delta === 0) return;
+    onApply(delta);
+  };
+
+  return (
+    <div
+      ref={ref}
+      className="absolute z-30 top-full mt-2 right-0 w-[240px] bg-white border border-[var(--line)] rounded-[var(--radius-lg)] shadow-pop p-3"
+    >
+      <div className="text-[10px] font-mono uppercase tracking-wider text-[var(--ink-3)] mb-2">
+        Credits anpassen
+      </div>
+      <div className="flex items-center gap-1.5">
+        <button
+          onClick={() => amount && submit(-Math.abs(parsed))}
+          disabled={busy || !canGive}
+          className="w-8 h-9 rounded-[var(--radius-sm)] bg-[var(--bg-sunk)] hover:bg-[var(--danger-wash)] hover:text-[color:var(--danger)] text-[var(--ink-2)] disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center transition"
+          title="Abziehen"
+        >
+          <MdRemove size={16} />
+        </button>
+        <input
+          ref={inputRef}
+          type="number"
+          min={1}
+          max={1000}
+          inputMode="numeric"
+          placeholder="Betrag"
+          value={amount}
+          onChange={(e) => setAmount(e.target.value.replace(/[^0-9]/g, ''))}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              e.preventDefault();
+              submit(Math.abs(parsed));
+            }
+          }}
+          className="flex-1 h-9 px-2 bg-white border border-[var(--line)] rounded-[var(--radius-sm)] text-sm font-mono text-[var(--ink)] focus:outline-none focus:border-[var(--accent)] focus:ring-2 focus:ring-[color:var(--accent-wash)] transition"
+        />
+        <button
+          onClick={() => amount && submit(Math.abs(parsed))}
+          disabled={busy || !canGive}
+          className="w-8 h-9 rounded-[var(--radius-sm)] bg-[var(--accent-wash)] hover:brightness-95 text-[var(--accent-ink)] disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center transition"
+          title="Hinzufügen"
+        >
+          <MdAdd size={16} />
+        </button>
+      </div>
+      <div className="flex items-center gap-1 mt-2">
+        {[5, 10, 25].map((v) => (
+          <button
+            key={v}
+            type="button"
+            onClick={() => setAmount(String(v))}
+            className="h-7 flex-1 rounded-[var(--radius-sm)] bg-[var(--bg-sunk)] hover:bg-[var(--line)] text-[11px] font-mono text-[var(--ink-2)] transition"
+          >
+            {v}
+          </button>
+        ))}
+      </div>
+      <div className="text-[10px] text-[var(--ink-3)] mt-2 leading-snug font-mono">
+        Aktuell <span className="text-[var(--ink)]">{total}</span> · verbraucht {used} · max. ±1000
+      </div>
+    </div>
+  );
+}
+
 function MoveInline({ student, classrooms, onSave, onCancel }) {
   const [target, setTarget] = useState(student.classroom_id);
   return (
@@ -80,6 +181,10 @@ export default function StudentRow({ student, classrooms, onShowHistory }) {
   const [showPwModal, setShowPwModal] = useState(false);
   const [renaming, setRenaming] = useState(false);
   const [moving, setMoving] = useState(false);
+  const [customOpen, setCustomOpen] = useState(false);
+  const [noteOpen, setNoteOpen] = useState(false);
+  const [noteDraft, setNoteDraft] = useState(student.progress_note || '');
+  const [noteSaving, setNoteSaving] = useState(false);
   const otherClassrooms = classrooms.filter((c) => c.id !== student.classroom_id);
 
   const refreshTeacherPool = async () => {
@@ -155,6 +260,26 @@ export default function StudentRow({ student, classrooms, onShowHistory }) {
     }
   };
 
+  const handleSaveNote = async () => {
+    setNoteSaving(true);
+    try {
+      const updated = await patchStudent(token, student.id, {
+        progress_note: noteDraft,
+      });
+      dispatch(
+        upsertStudentInSelected({
+          ...student,
+          progress_note: updated.progress_note,
+        })
+      );
+      toast.success('Notiz gespeichert');
+    } catch (err) {
+      toast.error(err.message || 'Fehler');
+    } finally {
+      setNoteSaving(false);
+    }
+  };
+
   const handleMove = async (classroomId) => {
     setBusy(true);
     try {
@@ -175,8 +300,11 @@ export default function StudentRow({ student, classrooms, onShowHistory }) {
   const pct = total > 0 ? (used / total) * 100 : 0;
   const progressTone = remaining === 0 ? 'danger' : 'accent';
 
+  const hasNote = !!(student.progress_note && student.progress_note.trim());
+
   return (
-    <tr className="border-b last:border-0 border-[var(--line)] hover:bg-[var(--bg-sunk)] group transition-colors">
+    <>
+    <tr className="border-b border-[var(--line)] hover:bg-[var(--bg-sunk)] group transition-colors">
       <td className="py-3 px-5">
         {renaming ? (
           <RenameInline
@@ -226,7 +354,7 @@ export default function StudentRow({ student, classrooms, onShowHistory }) {
               {remaining} frei
             </div>
           </div>
-          <div className="flex gap-1">
+          <div className="flex gap-1 relative">
             <button
               onClick={() => handleDelta(-1)}
               disabled={busy || student.training_credits <= student.trainings_used}
@@ -243,6 +371,30 @@ export default function StudentRow({ student, classrooms, onShowHistory }) {
             >
               <MdAdd size={16} />
             </button>
+            <button
+              onClick={() => setCustomOpen((v) => !v)}
+              disabled={busy}
+              className={clsx(
+                'w-7 h-7 rounded-[var(--radius-sm)] flex items-center justify-center transition',
+                customOpen
+                  ? 'bg-[var(--accent-wash)] text-[var(--accent-ink)]'
+                  : 'bg-[var(--bg-sunk)] hover:bg-[var(--line)] text-[var(--ink-2)]'
+              )}
+              title="Beliebigen Betrag anpassen"
+            >
+              <MdTune size={14} />
+            </button>
+            {customOpen && (
+              <CreditDeltaPopover
+                student={student}
+                busy={busy}
+                onClose={() => setCustomOpen(false)}
+                onApply={async (delta) => {
+                  await handleDelta(delta);
+                  setCustomOpen(false);
+                }}
+              />
+            )}
           </div>
         </div>
       </td>
@@ -260,6 +412,22 @@ export default function StudentRow({ student, classrooms, onShowHistory }) {
           )
         ) : (
           <div className="inline-flex gap-0.5 opacity-60 group-hover:opacity-100 transition">
+            <Btn
+              variant="ghost"
+              size="sm"
+              onClick={() => {
+                setNoteDraft(student.progress_note || '');
+                setNoteOpen((v) => !v);
+              }}
+              title={hasNote ? 'Notiz bearbeiten' : 'Notiz hinzufügen'}
+              className={clsx(
+                hasNote &&
+                  !noteOpen &&
+                  'text-[var(--accent-ink)] bg-[var(--accent-wash)]'
+              )}
+            >
+              {hasNote ? <MdNote size={18} /> : <MdNoteAdd size={18} />}
+            </Btn>
             <Btn
               variant="ghost"
               size="sm"
@@ -309,5 +477,65 @@ export default function StudentRow({ student, classrooms, onShowHistory }) {
         />
       )}
     </tr>
+    {noteOpen && (
+      <tr className="border-b border-[var(--line)] bg-[var(--bg-sunk)]">
+        <td colSpan={3} className="px-5 py-4">
+          <div className="flex items-start gap-3">
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center justify-between gap-2 mb-2">
+                <div className="text-[11px] font-semibold uppercase tracking-wider text-[var(--ink-3)] flex items-center gap-1.5">
+                  <MdNote size={14} />
+                  Fortschrittsnotiz für {student.full_name || student.username}
+                </div>
+                <button
+                  onClick={() => setNoteOpen(false)}
+                  className="text-[var(--ink-3)] hover:text-[var(--ink)] transition"
+                  title="Schließen"
+                >
+                  <MdClose size={16} />
+                </button>
+              </div>
+              <textarea
+                className="w-full min-h-[90px] p-3 bg-white border border-[var(--line)] rounded-[var(--radius-sm)] text-sm text-[var(--ink)] placeholder:text-[var(--ink-4)] focus:outline-none focus:border-[var(--accent)] focus:ring-2 focus:ring-[color:var(--accent-wash)] transition resize-y"
+                value={noteDraft}
+                onChange={(e) => setNoteDraft(e.target.value)}
+                placeholder="Wie geht es diesem Schüler voran? Stärken, Schwächen, Beobachtungen…"
+                maxLength={4000}
+                disabled={noteSaving}
+              />
+              <div className="mt-2 flex items-center justify-between gap-2">
+                <span className="text-[11px] text-[var(--ink-3)] font-mono">
+                  {noteDraft.length} / 4000
+                </span>
+                <div className="flex items-center gap-2">
+                  <Btn
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => {
+                      setNoteDraft(student.progress_note || '');
+                      setNoteOpen(false);
+                    }}
+                    disabled={noteSaving}
+                  >
+                    Abbrechen
+                  </Btn>
+                  <Btn
+                    variant="primary"
+                    size="sm"
+                    onClick={handleSaveNote}
+                    disabled={
+                      noteSaving || noteDraft === (student.progress_note || '')
+                    }
+                  >
+                    {noteSaving ? 'Speichern…' : 'Speichern'}
+                  </Btn>
+                </div>
+              </div>
+            </div>
+          </div>
+        </td>
+      </tr>
+    )}
+    </>
   );
 }

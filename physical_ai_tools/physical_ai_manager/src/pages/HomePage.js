@@ -50,20 +50,20 @@ export default function HomePage() {
 
   return (
     <div className="h-full w-full overflow-y-auto">
-      <div className="max-w-[1100px] mx-auto px-10 py-10">
+      <div className="w-full max-w-[1400px] 2xl:max-w-[1700px] mx-auto px-4 sm:px-6 lg:px-8 xl:px-10 py-6 md:py-8 lg:py-10">
         <SectionHeader
           eyebrow="Startseite"
           title={`${getGreeting()}, ${firstName}.`}
           description="Wähle deinen Roboter und leg los."
           right={<HeartbeatStatus />}
-          className="mb-8"
+          className="mb-6 md:mb-8"
         />
 
-        <div className="grid grid-cols-12 gap-6">
+        <div className="grid grid-cols-12 gap-4 md:gap-6">
           {/* Hero robot card */}
-          <div className="col-span-12 lg:col-span-7">
+          <div className="col-span-12 lg:col-span-7 xl:col-span-8">
             <Card padded={false}>
-              <div className="relative h-[360px] camera-noise rounded-t-[var(--radius-lg)] overflow-hidden">
+              <div className="relative h-[280px] sm:h-[340px] md:h-[380px] xl:h-[440px] camera-noise rounded-t-[var(--radius-lg)] overflow-hidden">
                 <svg
                   viewBox="0 0 600 400"
                   className="absolute inset-0 w-full h-full opacity-80"
@@ -130,12 +130,12 @@ export default function HomePage() {
           </div>
 
           {/* Robot type selector */}
-          <div className="col-span-12 lg:col-span-5">
+          <div className="col-span-12 lg:col-span-5 xl:col-span-4">
             <RobotTypeSelector />
           </div>
         </div>
 
-        <div className="mt-8 text-[11px] font-mono text-[var(--ink-4)]">
+        <div className="mt-6 md:mt-8 text-[11px] font-mono text-[var(--ink-4)]">
           {packageJson.description} · v{packageJson.version}
         </div>
       </div>

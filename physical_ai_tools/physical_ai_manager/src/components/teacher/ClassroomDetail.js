@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
+import clsx from 'clsx';
 import toast from 'react-hot-toast';
-import { MdAdd, MdDelete, MdEdit } from 'react-icons/md';
+import { MdAdd, MdDelete, MdEdit, MdGroups, MdMenuBook } from 'react-icons/md';
 import { useDispatch, useSelector } from 'react-redux';
 import {
   createStudent,
@@ -19,6 +20,7 @@ import { updateTeacherPool } from '../../features/auth/authSlice';
 import CreateStudentModal from './CreateStudentModal';
 import StudentRow from './StudentRow';
 import StudentTrainingHistoryDrawer from './StudentTrainingHistoryDrawer';
+import LessonsPanel from './LessonsPanel';
 import { Btn, Card } from '../EbUI';
 
 export default function ClassroomDetail({ classroomId, onClassroomsChanged }) {
@@ -33,6 +35,7 @@ export default function ClassroomDetail({ classroomId, onClassroomsChanged }) {
   const [renaming, setRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState('');
   const [historyStudent, setHistoryStudent] = useState(null);
+  const [tab, setTab] = useState('students');
 
   useEffect(() => {
     if (!token || !classroomId) return;
@@ -155,13 +158,15 @@ export default function ClassroomDetail({ classroomId, onClassroomsChanged }) {
             )}
           </div>
           <div className="flex items-center gap-2">
-            <Btn
-              variant="primary"
-              onClick={() => setShowCreateStudent(true)}
-              disabled={full}
-            >
-              <MdAdd /> Schüler hinzufügen
-            </Btn>
+            {tab === 'students' && (
+              <Btn
+                variant="primary"
+                onClick={() => setShowCreateStudent(true)}
+                disabled={full}
+              >
+                <MdAdd /> Schüler hinzufügen
+              </Btn>
+            )}
             <button
               onClick={handleDeleteClassroom}
               className="w-9 h-9 rounded-[var(--radius-sm)] text-[var(--ink-3)] hover:bg-[var(--danger-wash)] hover:text-[color:var(--danger)] flex items-center justify-center transition"
@@ -171,10 +176,34 @@ export default function ClassroomDetail({ classroomId, onClassroomsChanged }) {
             </button>
           </div>
         </div>
+        <div className="mt-4 flex items-center gap-1">
+          {[
+            { key: 'students', label: 'Schüler', Icon: MdGroups },
+            { key: 'lessons', label: 'Lektionen', Icon: MdMenuBook },
+          ].map(({ key, label, Icon }) => {
+            const active = tab === key;
+            return (
+              <button
+                key={key}
+                onClick={() => setTab(key)}
+                className={clsx(
+                  'inline-flex items-center gap-1.5 h-9 px-3 rounded-[var(--radius-sm)] text-sm transition',
+                  active
+                    ? 'bg-[var(--accent-wash)] text-[var(--accent-ink)] font-semibold'
+                    : 'text-[var(--ink-3)] hover:bg-[var(--bg-sunk)] hover:text-[var(--ink-2)]'
+                )}
+              >
+                <Icon size={18} /> {label}
+              </button>
+            );
+          })}
+        </div>
       </div>
 
       <div className="flex-1 overflow-y-auto p-8">
-        {students.length === 0 ? (
+        {tab === 'lessons' ? (
+          <LessonsPanel classroomId={classroomId} students={students} />
+        ) : students.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-full text-[var(--ink-3)] p-10 text-center">
             <p className="mb-4">Noch keine Schüler in dieser Klasse.</p>
             <Btn variant="primary" onClick={() => setShowCreateStudent(true)}>

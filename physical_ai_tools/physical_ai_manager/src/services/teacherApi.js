@@ -34,3 +34,33 @@ export const adjustStudentCredits = (token, studentId, delta) =>
 
 export const listStudentTrainings = (token, studentId) =>
   apiRequest(`/teacher/students/${studentId}/trainings`, 'GET', token);
+
+// ---------- Lessons ----------
+
+export const listLessons = (token, classroomId) =>
+  apiRequest(`/teacher/classrooms/${classroomId}/lessons`, 'GET', token);
+
+export const createLesson = (token, classroomId, body) =>
+  apiRequest(
+    `/teacher/classrooms/${classroomId}/lessons`,
+    'POST',
+    token,
+    body
+  );
+
+export const patchLesson = (token, lessonId, body) =>
+  apiRequest(`/teacher/lessons/${lessonId}`, 'PATCH', token, body);
+
+export const deleteLesson = (token, lessonId) =>
+  apiRequest(`/teacher/lessons/${lessonId}`, 'DELETE', token);
+
+export const listLessonProgress = (token, lessonId) =>
+  apiRequest(`/teacher/lessons/${lessonId}/progress`, 'GET', token);
+
+export const upsertLessonProgress = (token, lessonId, studentId, body) =>
+  apiRequest(
+    `/teacher/lessons/${lessonId}/students/${studentId}/progress`,
+    'PUT',
+    token,
+    body
+  );

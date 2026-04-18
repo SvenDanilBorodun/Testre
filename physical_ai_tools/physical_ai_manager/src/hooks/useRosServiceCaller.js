@@ -22,7 +22,6 @@ import TaskCommand from '../constants/taskCommand';
 import TrainingCommand from '../constants/trainingCommand';
 import EditDatasetCommand from '../constants/commands';
 import rosConnectionManager from '../utils/rosConnectionManager';
-import { DEFAULT_PATHS } from '../constants/paths';
 
 export function useRosServiceCaller() {
   const taskInfo = useSelector((state) => state.tasks.taskInfo);

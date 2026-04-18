@@ -18,8 +18,8 @@ SolidCompression=yes
 PrivilegesRequired=admin
 WizardStyle=modern
 LicenseFile=assets\license.txt
-; Uncomment when icon is available:
-; SetupIconFile=assets\icon.ico
+SetupIconFile=assets\icon.ico
+UninstallDisplayIcon={app}\gui\EduBotics.exe
 
 [InstallDelete]
 ; Wipe the entire gui/ folder before upgrade — guarantees no stale files
@@ -53,9 +53,13 @@ Source: "..\gui\dist\EduBotics\*"; DestDir: "{app}\gui"; Flags: ignoreversion re
 ; Installer scripts (kept for manual troubleshooting)
 Source: "scripts\*"; DestDir: "{app}\scripts"; Flags: ignoreversion
 
+; Brand icon — also copied into {app} so shortcuts keep a stable IconFilename
+; independent of PyInstaller's dist layout.
+Source: "assets\icon.ico"; DestDir: "{app}"; Flags: ignoreversion
+
 [Icons]
-Name: "{autodesktop}\EduBotics starten"; Filename: "{app}\gui\EduBotics.exe"; WorkingDir: "{app}"
-Name: "{group}\EduBotics starten"; Filename: "{app}\gui\EduBotics.exe"; WorkingDir: "{app}"
+Name: "{autodesktop}\EduBotics starten"; Filename: "{app}\gui\EduBotics.exe"; WorkingDir: "{app}"; IconFilename: "{app}\icon.ico"
+Name: "{group}\EduBotics starten"; Filename: "{app}\gui\EduBotics.exe"; WorkingDir: "{app}"; IconFilename: "{app}\icon.ico"
 Name: "{group}\Installation prüfen"; Filename: "powershell.exe"; Parameters: "-ExecutionPolicy Bypass -File ""{app}\scripts\verify_system.ps1"""; WorkingDir: "{app}"
 
 [Run]

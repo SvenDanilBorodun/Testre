@@ -86,6 +86,31 @@ def _elevate_and_wait(exe: str, args: str, show: int = 1):
     kernel32.CloseHandle(info.hProcess)
     return int(exit_code.value), False, None
 
+def _asset_path(name: str) -> str:
+    """Return absolute path to an asset file; works in dev + PyInstaller frozen builds."""
+    base = getattr(sys, "_MEIPASS", None) or os.path.dirname(
+        os.path.dirname(os.path.abspath(__file__))
+    )
+    return os.path.join(base, "assets", name)
+
+
+def _apply_window_icon(root: tk.Tk) -> None:
+    """Set the EduBotics icon on a Tk window. Silent on failure."""
+    ico = _asset_path("icon.ico")
+    png = _asset_path("icon.png")
+    if sys.platform == "win32" and os.path.isfile(ico):
+        try:
+            root.iconbitmap(default=ico)
+            return
+        except tk.TclError:
+            pass
+    if os.path.isfile(png):
+        try:
+            root.iconphoto(True, tk.PhotoImage(file=png))
+        except tk.TclError:
+            pass
+
+
 from . import device_manager, docker_manager, health_checker, config_generator, wsl_bridge, update_checker
 from .constants import (
     APP_VERSION,
@@ -105,6 +130,7 @@ class EduBoticsApp:
         self.root.title("EduBotics")
         self.root.geometry("700x830")
         self.root.resizable(True, True)
+        _apply_window_icon(self.root)
 
         # State
         self.hardware = device_manager.HardwareConfig()
@@ -552,6 +578,7 @@ class EduBoticsApp:
         dialog.resizable(False, False)
         dialog.transient(self.root)
         dialog.grab_set()
+        _apply_window_icon(dialog)
         dialog.protocol("WM_DELETE_WINDOW", lambda: None)  # Non-closable
 
         # Center over main window

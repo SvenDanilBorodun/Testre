@@ -1,7 +1,13 @@
 {
-  "short_name": "Physical AI Manager",
-  "name": "Physical AI Manager",
+  "short_name": "EduBotics",
+  "name": "EduBotics",
   "icons": [
+    {
+      "src": "icon.svg",
+      "type": "image/svg+xml",
+      "sizes": "any",
+      "purpose": "any"
+    },
     {
       "src": "favicon.ico",
       "sizes": "64x64 32x32 24x24 16x16",
@@ -20,6 +26,6 @@
   ],
   "start_url": ".",
   "display": "standalone",
-  "theme_color": "#000000",
-  "background_color": "#ffffff"
+  "theme_color": "#0E1415",
+  "background_color": "#FAFAF7"
 }

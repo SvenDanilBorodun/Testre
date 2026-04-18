@@ -44,8 +44,7 @@ exe = EXE(
     upx=True,
     console=False,  # No console window — GUI only
     disable_windowed_traceback=False,
-    # Uncomment when icon is available:
-    # icon='assets/icon.ico',
+    icon='assets/icon.ico',
 )
 
 coll = COLLECT(

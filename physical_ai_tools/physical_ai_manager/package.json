@@ -1,9 +1,10 @@
 {
-  "name": "physical_ai_manager",
+  "name": "edubotics-manager",
   "version": "0.8.2",
-  "description": "Web UI for Physical AI Platform",
-  "author": "Kiwoong Park <pkw@robotis.com>",
+  "description": "EduBotics — Physical AI Plattform für den Unterricht",
+  "author": "EduBotics",
   "contributors": [
+    "EduBotics",
     "Kiwoong Park <pkw@robotis.com>"
   ],
   "license": "Apache-2.0",

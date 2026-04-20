@@ -5,6 +5,20 @@ server {
     root /usr/share/nginx/html;
     index index.html;
 
+    # HTML shell must never be cached — new deploys need to reach the browser
+    # immediately so footer/logo/text changes show up without a hard refresh.
+    location = /index.html {
+        add_header Cache-Control "no-store, no-cache, must-revalidate, max-age=0" always;
+        add_header Pragma "no-cache" always;
+        expires -1;
+    }
+
+    # Hashed JS/CSS bundles from CRA are content-addressed and safe to cache.
+    location /static/ {
+        expires 1y;
+        add_header Cache-Control "public, immutable" always;
+    }
+
     # SPA routing — all paths fall through to index.html
     location / {
         try_files $uri /index.html;

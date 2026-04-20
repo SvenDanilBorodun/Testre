@@ -102,13 +102,9 @@ export default function LoginForm({ subtitle = 'Anmelden für Cloud-GPU-Training
             </Btn>
           </form>
 
-          <div className="mt-5 pt-4 border-t border-[var(--line)] flex items-center justify-between text-xs text-[var(--ink-3)]">
-            <span>Konto vergessen? Frage deinen Lehrer.</span>
+          <div className="mt-5 pt-4 border-t border-[var(--line)] flex items-center justify-end text-xs text-[var(--ink-3)]">
             <span className="font-mono">v{packageJson.version}</span>
           </div>
-        </div>
-        <div className="text-[11px] text-[var(--ink-3)] font-mono">
-          edubotics.local · gesicherte Verbindung
         </div>
       </div>
     </div>

@@ -14,7 +14,7 @@
 //
 // Author: Kiwoong Park
 
-import React, { useEffect } from 'react';
+import React, { useCallback, useEffect, useMemo } from 'react';
 import { useSelector, useDispatch } from 'react-redux';
 import clsx from 'clsx';
 import toast, { useToasterStore } from 'react-hot-toast';
@@ -24,16 +24,50 @@ import PolicySelector from '../components/PolicySelector';
 import TrainingOutputFolderInput from '../components/TrainingOutputFolderInput';
 import TrainingControlPanel from '../components/TrainingControlPanel';
 import TrainingOptionInput from '../components/TrainingOptionInput';
-import TrainingProgressBar from '../components/TrainingProgressBar';
-import TrainingLossDisplay from '../components/TrainingLossDisplay';
+import TrainingLiveChart, { pickSelectedJob } from '../components/TrainingLiveChart';
 import MyModels from '../components/MyModels';
 import LoginForm from '../components/LoginForm';
 import HeartbeatStatus from '../components/HeartbeatStatus';
 import { Card, Pill, Btn, SectionHeader } from '../components/EbUI';
 import { supabase } from '../lib/supabaseClient';
-import { clearSession } from '../features/auth/authSlice';
+import { clearSession, setQuota } from '../features/auth/authSlice';
 import { getQuota } from '../services/cloudTrainingApi';
-import { setQuota } from '../features/auth/authSlice';
+import useSupabaseTrainings from '../hooks/useSupabaseTrainings';
+import useRefetchOnFocus from '../hooks/useRefetchOnFocus';
+
+function statusSubtitle(status) {
+  switch (status) {
+    case 'queued':
+      return 'Wird eingereiht · Modal';
+    case 'running':
+      return 'Live · aktualisiert laufend · Modal';
+    case 'succeeded':
+      return 'Erfolgreich · Modal';
+    case 'failed':
+      return 'Fehlgeschlagen · Modal';
+    case 'canceled':
+      return 'Abgebrochen · Modal';
+    default:
+      return 'Bereit · Modal';
+  }
+}
+
+function statusPill(status) {
+  switch (status) {
+    case 'queued':
+      return { tone: 'amber', label: 'wartet' };
+    case 'running':
+      return { tone: 'danger', label: 'aktiv' };
+    case 'succeeded':
+      return { tone: 'success', label: 'fertig' };
+    case 'failed':
+      return { tone: 'danger', label: 'Fehler' };
+    case 'canceled':
+      return { tone: 'neutral', label: 'abgebrochen' };
+    default:
+      return { tone: 'accent', label: 'idle' };
+  }
+}
 
 export default function TrainingPage() {
   const dispatch = useDispatch();
@@ -42,7 +76,9 @@ export default function TrainingPage() {
   const session = useSelector((state) => state.auth.session);
   const trainingCredits = useSelector((state) => state.auth.trainingCredits);
   const trainingsUsed = useSelector((state) => state.auth.trainingsUsed);
-  const isTraining = useSelector((state) => state.training.isTraining);
+  const selectedTrainingId = useSelector((state) => state.training.selectedTrainingId);
+
+  const { jobs, loading, refetch, isRealtime } = useSupabaseTrainings();
 
   const { toasts } = useToasterStore();
   const TOAST_LIMIT = 3;
@@ -54,19 +90,29 @@ export default function TrainingPage() {
       .forEach((t) => toast.dismiss(t.id));
   }, [toasts]);
 
-  useEffect(() => {
-    if (isAuthenticated && session?.access_token) {
-      getQuota(session.access_token)
-        .then((quota) => dispatch(setQuota(quota)))
-        .catch(() => {});
-    }
+  const refetchQuota = useCallback(() => {
+    if (!isAuthenticated || !session?.access_token) return;
+    getQuota(session.access_token)
+      .then((quota) => dispatch(setQuota(quota)))
+      .catch(() => {});
   }, [isAuthenticated, session, dispatch]);
+
+  useEffect(() => {
+    refetchQuota();
+  }, [refetchQuota]);
+
+  useRefetchOnFocus(refetchQuota);
 
   const handleLogout = async () => {
     await supabase.auth.signOut();
     dispatch(clearSession());
     toast.success('Abgemeldet');
   };
+
+  const selectedJob = useMemo(
+    () => pickSelectedJob(jobs, selectedTrainingId),
+    [jobs, selectedTrainingId],
+  );
 
   if (isLoading) {
     return (
@@ -82,6 +128,10 @@ export default function TrainingPage() {
 
   const remaining = trainingCredits - trainingsUsed;
   const creditTone = remaining <= 0 ? 'danger' : remaining <= 2 ? 'amber' : 'success';
+
+  const status = selectedJob?.status;
+  const subtitle = statusSubtitle(status);
+  const pill = statusPill(status);
 
   return (
     <div className="h-full w-full overflow-y-auto" style={{ background: 'var(--bg)' }}>
@@ -143,22 +193,17 @@ export default function TrainingPage() {
         {/* Monitor rail (full width) */}
         <Card
           title="Trainingsverlauf"
-          subtitle={isTraining ? 'Live · aktualisiert laufend · Modal' : 'Bereit · Modal'}
+          subtitle={subtitle}
           right={
             <div className="flex gap-2 items-center flex-wrap justify-end">
-              <Pill tone={isTraining ? 'danger' : 'accent'} dot>
-                {isTraining ? 'aktiv' : 'idle'}
+              <Pill tone={pill.tone} dot>
+                {pill.label}
               </Pill>
               <TrainingControlPanel />
             </div>
           }
         >
-          <div className="rounded-[var(--radius)] chart-grid overflow-hidden">
-            <TrainingLossDisplay />
-          </div>
-          <div className="mt-4">
-            <TrainingProgressBar />
-          </div>
+          <TrainingLiveChart jobs={jobs} isRealtime={isRealtime} />
           {remaining <= 0 && (
             <div className="mt-4 text-xs text-[color:var(--danger)] bg-[var(--danger-wash)] px-3 py-2 rounded-[var(--radius-sm)] leading-snug">
               Kein Guthaben mehr. Kontaktiere deinen Lehrer für mehr Credits.
@@ -173,7 +218,12 @@ export default function TrainingPage() {
           padded={false}
         >
           <div className="p-2">
-            <MyModels />
+            <MyModels
+              jobs={jobs}
+              loading={loading}
+              refetch={refetch}
+              isRealtime={isRealtime}
+            />
           </div>
         </Card>
       </div>

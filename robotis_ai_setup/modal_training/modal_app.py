@@ -37,10 +37,10 @@ image = (
     .pip_install(
         "torch",
         "torchvision",
-        # `index_url` (not extra_index_url) matches the RunPod Dockerfile's
-        # --index-url flag. extra_index_url leaves the default mirror in play,
-        # so pip picks torch+cu130 from Modal's mirror instead of cu121 from
-        # pytorch.org. Use the single index to force cu121.
+        # Use `index_url` (not `extra_index_url`) so pip cannot fall back to
+        # Modal's default mirror — without this, pip picks torch+cu130 and the
+        # cu121 CUDA base image crashes at runtime. The single index forces
+        # cu121 wheels from pytorch.org.
         index_url="https://download.pytorch.org/whl/cu121",
         extra_options="--force-reinstall",
     )
@@ -54,7 +54,7 @@ secrets = [modal.Secret.from_name("edubotics-training-secrets")]
 
 @app.function(
     image=image,
-    gpu="A100-80GB",
+    gpu="L4",
     timeout=7 * 3600,
     secrets=secrets,
     min_containers=0,

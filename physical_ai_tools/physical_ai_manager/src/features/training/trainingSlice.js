@@ -63,6 +63,12 @@ const initialState = {
   // listens for changes and refetches the list immediately (no 5s wait).
   cloudJobsRefreshCounter: 0,
 
+  // Which training job the live chart is focused on. `null` means
+  // "auto-select": the chart picks the newest active job, falling back to the
+  // most recently terminated job. Clicking a card in MyModels pins a
+  // specific id here.
+  selectedTrainingId: null,
+
   trainingInfo: savedTrainingInfo || defaultTrainingInfo,
 };
 
@@ -164,6 +170,9 @@ const trainingSlice = createSlice({
     triggerCloudJobsRefresh: (state) => {
       state.cloudJobsRefreshCounter += 1;
     },
+    setSelectedTrainingId: (state, action) => {
+      state.selectedTrainingId = action.payload;
+    },
   },
 });
 
@@ -195,6 +204,7 @@ export const {
   setCurrentLoss,
   resetTrainingProgress,
   triggerCloudJobsRefresh,
+  setSelectedTrainingId,
 } = trainingSlice.actions;
 
 export default trainingSlice.reducer;

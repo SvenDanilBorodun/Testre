@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import toast from 'react-hot-toast';
 import { MdAdd, MdDelete, MdEdit, MdEventNote } from 'react-icons/md';
 import { useDispatch, useSelector } from 'react-redux';
@@ -16,6 +16,7 @@ import {
   selectClassroom,
 } from '../../features/teacher/teacherSlice';
 import { updateTeacherPool } from '../../features/auth/authSlice';
+import useRefetchOnFocus from '../../hooks/useRefetchOnFocus';
 import CreateStudentModal from './CreateStudentModal';
 import StudentRow from './StudentRow';
 import StudentTrainingHistoryDrawer from './StudentTrainingHistoryDrawer';
@@ -37,7 +38,7 @@ export default function ClassroomDetail({ classroomId, onClassroomsChanged }) {
   const [showClassProgress, setShowClassProgress] = useState(false);
   const [progressStudent, setProgressStudent] = useState(null);
 
-  useEffect(() => {
+  const fetchClassroom = useCallback(() => {
     if (!token || !classroomId) return;
     dispatch(setClassroomLoading(true));
     getClassroom(token, classroomId)
@@ -45,6 +46,12 @@ export default function ClassroomDetail({ classroomId, onClassroomsChanged }) {
       .catch((err) => toast.error(err.message || 'Fehler beim Laden'))
       .finally(() => dispatch(setClassroomLoading(false)));
   }, [classroomId, token, dispatch]);
+
+  useEffect(() => {
+    fetchClassroom();
+  }, [fetchClassroom]);
+
+  useRefetchOnFocus(fetchClassroom);
 
   const refreshTeacherPool = async () => {
     try {

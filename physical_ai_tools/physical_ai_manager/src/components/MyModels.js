@@ -1,5 +1,5 @@
-import React, { useState, useEffect, useCallback } from 'react';
-import { useSelector } from 'react-redux';
+import React, { useState } from 'react';
+import { useDispatch, useSelector } from 'react-redux';
 import clsx from 'clsx';
 import toast from 'react-hot-toast';
 import {
@@ -11,9 +11,11 @@ import {
   MdOutlineFileDownload,
   MdContentCopy,
   MdOpenInNew,
+  MdBolt,
 } from 'react-icons/md';
-import { getTrainingJobs, cancelCloudTraining } from '../services/cloudTrainingApi';
+import { cancelCloudTraining } from '../services/cloudTrainingApi';
 import { useRosServiceCaller } from '../hooks/useRosServiceCaller';
+import { setSelectedTrainingId } from '../features/training/trainingSlice';
 
 const STATUS_CONFIG = {
   queued: { icon: MdHourglassEmpty, color: 'text-gray-500', bg: 'bg-gray-100', label: 'In Warteschlange' },
@@ -23,7 +25,7 @@ const STATUS_CONFIG = {
   canceled: { icon: MdCancel, color: 'text-gray-400', bg: 'bg-gray-50', label: 'Abgebrochen' },
 };
 
-function ModelCard({ job, rosConnected, onDownload, downloadingModel, onCancel }) {
+function ModelCard({ job, rosConnected, onDownload, downloadingModel, onCancel, selected, onSelect }) {
   const config = STATUS_CONFIG[job.status] || STATUS_CONFIG.queued;
   const Icon = config.icon;
   const isActive = job.status === 'queued' || job.status === 'running';
@@ -37,19 +39,34 @@ function ModelCard({ job, rosConnected, onDownload, downloadingModel, onCancel }
   };
 
   return (
-    <div className={clsx(
-      'border rounded-xl p-4 transition-all',
-      isActive ? 'border-teal-300 bg-teal-50/30 shadow-md' : 'border-gray-200 bg-white shadow-sm hover:shadow-md'
-    )}>
+    <div
+      className={clsx(
+        'border rounded-xl p-4 transition-all cursor-pointer',
+        selected
+          ? 'border-[color:var(--accent)] ring-2 ring-[color:var(--accent)] ring-offset-1 shadow-md bg-white'
+          : isActive
+            ? 'border-teal-300 bg-teal-50/30 shadow-md hover:shadow-lg'
+            : 'border-gray-200 bg-white shadow-sm hover:shadow-md',
+      )}
+      onClick={() => onSelect(job.id)}
+      title="Als Live-Ansicht oben auswählen"
+    >
       {/* Header: Status + Model Type */}
       <div className="flex items-center justify-between mb-3">
         <span className={clsx('inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold', config.bg, config.color)}>
           <Icon size={14} className={config.spin ? 'animate-spin' : ''} />
           {config.label}
         </span>
-        <span className="text-xs text-gray-400 bg-gray-100 px-2 py-0.5 rounded-full font-mono">
-          {job.model_type}
-        </span>
+        <div className="flex items-center gap-2">
+          {selected && (
+            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-[var(--accent-wash)] text-[var(--accent-ink)]">
+              <MdBolt size={10} /> Live-Ansicht
+            </span>
+          )}
+          <span className="text-xs text-gray-400 bg-gray-100 px-2 py-0.5 rounded-full font-mono">
+            {job.model_type}
+          </span>
+        </div>
       </div>
 
       {/* Model Name */}
@@ -59,6 +76,7 @@ function ModelCard({ job, rosConnected, onDownload, downloadingModel, onCancel }
             href={`https://huggingface.co/${job.model_name}`}
             target="_blank"
             rel="noopener noreferrer"
+            onClick={(e) => e.stopPropagation()}
             className="text-sm font-semibold text-teal-700 hover:text-teal-900 hover:underline flex items-center gap-1"
           >
             {job.model_name}
@@ -121,7 +139,7 @@ function ModelCard({ job, rosConnected, onDownload, downloadingModel, onCancel }
       )}
 
       {/* Actions */}
-      <div className="flex items-center gap-2 pt-2 border-t border-gray-100">
+      <div className="flex items-center gap-2 pt-2 border-t border-gray-100" onClick={(e) => e.stopPropagation()}>
         {isSucceeded && (
           <>
             <button
@@ -173,49 +191,21 @@ function ModelCard({ job, rosConnected, onDownload, downloadingModel, onCancel }
   );
 }
 
-export default function MyModels() {
+export default function MyModels({ jobs = [], loading = false, refetch, isRealtime = false }) {
+  const dispatch = useDispatch();
   const session = useSelector((state) => state.auth.session);
   const heartbeatStatus = useSelector((state) => state.tasks.heartbeatStatus);
   const rosConnected = heartbeatStatus === 'connected';
-  const refreshCounter = useSelector((state) => state.training.cloudJobsRefreshCounter);
-  const [jobs, setJobs] = useState([]);
-  const [loading, setLoading] = useState(false);
+  const selectedTrainingId = useSelector((state) => state.training.selectedTrainingId);
   const [downloadingModel, setDownloadingModel] = useState(null);
-  const [filter, setFilter] = useState('all'); // all, succeeded, active, failed
+  const [filter, setFilter] = useState('all');
   const { controlHfServer } = useRosServiceCaller();
-
-  const fetchJobs = useCallback(async () => {
-    if (!session?.access_token) return;
-    setLoading(true);
-    try {
-      const data = await getTrainingJobs(session.access_token);
-      setJobs(data);
-    } catch (error) {
-      console.error('Failed to fetch training jobs:', error);
-    } finally {
-      setLoading(false);
-    }
-  }, [session]);
-
-  // Initial fetch + refetch whenever TrainingControlPanel starts a new job
-  // (refreshCounter increments → this effect runs → new row visible instantly).
-  useEffect(() => {
-    fetchJobs();
-  }, [fetchJobs, refreshCounter]);
-
-  // Auto-refresh while active jobs exist
-  const hasActiveJobs = jobs.some((j) => j.status === 'queued' || j.status === 'running');
-  useEffect(() => {
-    if (!hasActiveJobs) return;
-    const interval = setInterval(fetchJobs, 5000);
-    return () => clearInterval(interval);
-  }, [hasActiveJobs, fetchJobs]);
 
   const handleCancel = async (trainingId) => {
     try {
       await cancelCloudTraining(session.access_token, trainingId);
       toast.success('Training abgebrochen');
-      fetchJobs();
+      refetch?.();
     } catch (error) {
       toast.error(`Abbrechen fehlgeschlagen: ${error.message}`);
     }
@@ -237,7 +227,10 @@ export default function MyModels() {
     }
   };
 
-  // Filter jobs
+  const handleSelect = (trainingId) => {
+    dispatch(setSelectedTrainingId(trainingId));
+  };
+
   const filteredJobs = jobs.filter((job) => {
     if (filter === 'all') return true;
     if (filter === 'succeeded') return job.status === 'succeeded';
@@ -246,7 +239,6 @@ export default function MyModels() {
     return true;
   });
 
-  // Stats
   const succeededCount = jobs.filter((j) => j.status === 'succeeded').length;
   const activeCount = jobs.filter((j) => j.status === 'queued' || j.status === 'running').length;
   const failedCount = jobs.filter((j) => j.status === 'failed' || j.status === 'canceled').length;
@@ -255,7 +247,7 @@ export default function MyModels() {
     'bg-white', 'border', 'border-gray-200', 'rounded-2xl', 'shadow-lg', 'p-6', 'w-full'
   );
 
-  const filterButton = (key, label, count, activeColor) =>
+  const filterButton = (key, activeColor) =>
     clsx(
       'px-3 py-1 rounded-full text-xs font-medium transition-colors',
       filter === key
@@ -267,11 +259,20 @@ export default function MyModels() {
     <div className={classCard}>
       {/* Header */}
       <div className="flex items-center justify-between mb-4">
-        <h2 className="text-xl font-bold text-gray-800">Meine Modelle</h2>
+        <div className="flex items-center gap-3">
+          <h2 className="text-xl font-bold text-gray-800">Meine Modelle</h2>
+          {isRealtime && (
+            <span className="inline-flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wider text-[var(--accent-ink)] bg-[var(--accent-wash)] px-2 py-0.5 rounded-full">
+              <span className="w-1.5 h-1.5 rounded-full bg-[var(--accent)] animate-pulse" />
+              Live
+            </span>
+          )}
+        </div>
         <button
-          onClick={fetchJobs}
+          onClick={() => refetch?.()}
           className="text-gray-500 hover:text-gray-700 p-1 rounded-lg hover:bg-gray-100 transition-colors"
           disabled={loading}
+          title="Aktualisieren"
         >
           <MdRefresh size={20} className={loading ? 'animate-spin' : ''} />
         </button>
@@ -294,19 +295,19 @@ export default function MyModels() {
       {/* Filter tabs */}
       {jobs.length > 0 && (
         <div className="flex items-center gap-2 mb-4 pb-3 border-b border-gray-100">
-          <button className={filterButton('all', 'Alle', jobs.length, 'bg-gray-200 text-gray-800')} onClick={() => setFilter('all')}>
+          <button className={filterButton('all', 'bg-gray-200 text-gray-800')} onClick={() => setFilter('all')}>
             Alle ({jobs.length})
           </button>
-          <button className={filterButton('succeeded', 'Erfolgreich', succeededCount, 'bg-green-100 text-green-700')} onClick={() => setFilter('succeeded')}>
+          <button className={filterButton('succeeded', 'bg-green-100 text-green-700')} onClick={() => setFilter('succeeded')}>
             Erfolgreich ({succeededCount})
           </button>
           {activeCount > 0 && (
-            <button className={filterButton('active', 'Aktiv', activeCount, 'bg-teal-100 text-teal-700')} onClick={() => setFilter('active')}>
+            <button className={filterButton('active', 'bg-teal-100 text-teal-700')} onClick={() => setFilter('active')}>
               Aktiv ({activeCount})
             </button>
           )}
           {failedCount > 0 && (
-            <button className={filterButton('failed', 'Fehlgeschlagen', failedCount, 'bg-red-100 text-red-600')} onClick={() => setFilter('failed')}>
+            <button className={filterButton('failed', 'bg-red-100 text-red-600')} onClick={() => setFilter('failed')}>
               Fehlgeschlagen ({failedCount})
             </button>
           )}
@@ -338,6 +339,8 @@ export default function MyModels() {
               onDownload={handleDownload}
               downloadingModel={downloadingModel}
               onCancel={handleCancel}
+              selected={selectedTrainingId === job.id}
+              onSelect={handleSelect}
             />
           ))}
         </div>

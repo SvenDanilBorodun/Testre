@@ -1,6 +1,6 @@
 """EduBotics cloud training handler (Modal worker body).
 
-Ported from the RunPod handler. Invoked by `modal_app.train`.
+Invoked by `modal_app.train`.
 
 Responsibilities:
   - Preflight the HuggingFace dataset (schema, codebase_version, joints, cameras).

@@ -10,6 +10,7 @@ import {
 } from '../../features/admin/adminSlice';
 import CreateTeacherModal from '../../components/admin/CreateTeacherModal';
 import TeacherRow from '../../components/admin/TeacherRow';
+import useRefetchOnFocus from '../../hooks/useRefetchOnFocus';
 import {
   Btn,
   Card,
@@ -46,6 +47,8 @@ export default function AdminDashboard({ onLogout }) {
   useEffect(() => {
     fetchTeachers();
   }, [fetchTeachers]);
+
+  useRefetchOnFocus(fetchTeachers);
 
   const handleCreate = async (data) => {
     const created = await createTeacher(token, data);

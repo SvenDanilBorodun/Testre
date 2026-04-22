@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 import random
@@ -16,6 +17,7 @@ from app.services.modal_client import (
 )
 from app.services.supabase_client import get_supabase
 from huggingface_hub import HfApi
+from huggingface_hub.utils import RepositoryNotFoundError
 
 logger = logging.getLogger(__name__)
 
@@ -133,6 +135,9 @@ class TrainingJob(BaseModel):
     current_step: int | None = 0
     total_steps: int | None = 0
     current_loss: float | None = None
+    # Downsampled loss curve: [{"s": step, "l": loss, "t": ms_since_epoch}, ...].
+    # Capped at 300 points by the update_training_progress RPC.
+    loss_history: list[dict] | None = None
     requested_at: str
     terminated_at: str | None
     error_message: str | None
@@ -221,7 +226,7 @@ def _parse_iso(s: str | None) -> datetime | None:
         return None
 
 
-def _sync_modal_status(training: dict) -> dict:
+async def _sync_modal_status(training: dict) -> dict:
     """Reconcile a training row against Modal's view of the job.
 
     Three cases get the row marked failed:
@@ -230,6 +235,9 @@ def _sync_modal_status(training: dict) -> dict:
       3. The worker is wedged: Modal still says IN_PROGRESS but no progress
          reported in STALLED_WORKER_THRESHOLD. We cancel the Modal call to
          stop burning GPU money and mark the row failed.
+
+    Async: uses Modal's async SDK via .aio() to avoid blocking the FastAPI
+    event loop. Safe to call from sync context only via asyncio.run().
     """
     if training["status"] not in ("queued", "running"):
         return training
@@ -239,8 +247,11 @@ def _sync_modal_status(training: dict) -> dict:
         return training
 
     try:
-        modal_status = get_job_status(job_id)
+        modal_status = await get_job_status(job_id)
     except Exception as e:
+        # get_job_status is supposed to swallow all Modal errors and return a
+        # sentinel string. Reaching here means something unusual (e.g. an
+        # asyncio.CancelledError). Don't touch the row — fall through safely.
         logger.warning("Modal status check failed for call %s: %s", job_id, e)
         return training
 
@@ -259,7 +270,7 @@ def _sync_modal_status(training: dict) -> dict:
                 training["id"], now - last_progress,
             )
             try:
-                cancel_training_job(job_id)
+                await cancel_training_job(job_id)
             except Exception as e:
                 logger.warning("Failed to cancel stalled job %s: %s", job_id, e)
             db_status = "failed"
@@ -322,9 +333,12 @@ def _find_recent_duplicate(
     return rows[0] if rows else None
 
 
-def _sweep_user_running_jobs(user_id: str) -> None:
+async def _sweep_user_running_jobs(user_id: str) -> None:
     """Sync every running/queued row this user owns. Used at top of /start so a
     stuck row from a previous session can't block a fresh credit check.
+
+    Async + parallel: all rows are synced concurrently via asyncio.gather,
+    which scales better than serial sync calls when a user has many active rows.
     """
     supabase = get_supabase()
     result = (
@@ -334,11 +348,16 @@ def _sweep_user_running_jobs(user_id: str) -> None:
         .in_("status", ["queued", "running"])
         .execute()
     )
-    for row in (result.data or []):
+
+    async def _sync_one(row):
         try:
-            _sync_modal_status(row)
+            await _sync_modal_status(row)
         except Exception as e:
             logger.warning("Sweep sync failed for training %s: %s", row.get("id"), e)
+
+    rows = result.data or []
+    if rows:
+        await asyncio.gather(*[_sync_one(row) for row in rows])
 
 
 # ---------- Endpoints ----------
@@ -362,7 +381,7 @@ async def start_training(req: StartTrainingRequest, user=Depends(get_current_use
     # 0a. Sweep this user's stuck rows BEFORE counting credits. If a previous
     #     job died hard (no SIGTERM, no exception), the row is still 'running'
     #     and would block the credit check. The sweep flips it to failed first.
-    _sweep_user_running_jobs(user_id)
+    await _sweep_user_running_jobs(user_id)
 
     # 0b. Idempotency: a duplicate /start within DEDUPE_WINDOW returns the
     #     existing training instead of creating a new one. Catches network
@@ -379,15 +398,25 @@ async def start_training(req: StartTrainingRequest, user=Depends(get_current_use
             status=duplicate["status"],
         )
 
-    # 1. Validate dataset exists on HuggingFace Hub.
+    # 1. Validate dataset exists on HuggingFace Hub. Distinguish real 404 from
+    #    transient errors — the student sees different messages so they know
+    #    whether to fix the name or retry.
     try:
         hf_api = HfApi(token=os.environ.get("HF_TOKEN", ""))
         hf_api.dataset_info(req.dataset_name)
-    except Exception:
+    except RepositoryNotFoundError:
         logger.warning("Dataset not found on HF: %s", req.dataset_name)
         raise HTTPException(
             status_code=400,
             detail=f"Dataset '{req.dataset_name}' not found on HuggingFace Hub.",
+        )
+    except Exception as e:
+        # Rate limit, DNS blip, 5xx — tell the student to retry, don't send
+        # them chasing a typo that isn't there.
+        logger.warning("HF dataset check transient error for %s: %s", req.dataset_name, e)
+        raise HTTPException(
+            status_code=502,
+            detail="HuggingFace Hub is temporarily unavailable. Please retry in a moment.",
         )
 
     # 2. Atomic credit-check + training row insert via start_training_safe RPC.
@@ -447,7 +476,7 @@ async def start_training(req: StartTrainingRequest, user=Depends(get_current_use
     #    With the token + anon key it can ONLY call update_training_progress()
     #    on this one row.
     try:
-        job_id = start_training_job(
+        job_id = await start_training_job(
             dataset_name=req.dataset_name,
             model_name=model_name,
             model_type=req.model_type,
@@ -502,7 +531,7 @@ async def cancel_training(req: CancelTrainingRequest, user=Depends(get_current_u
     # Cancel on Modal
     if training.get("cloud_job_id"):
         try:
-            cancel_training_job(training["cloud_job_id"])
+            await cancel_training_job(training["cloud_job_id"])
         except Exception as e:
             # Still mark as canceled locally even if Modal fails — but log it
             # so a stuck-on-Modal job is at least visible in Railway logs.
@@ -535,8 +564,10 @@ async def list_trainings(user=Depends(get_current_user)):
         .execute()
     )
 
-    # Sync status for any active jobs
-    trainings = [_sync_modal_status(t) for t in (result.data or [])]
+    # Sync status for any active jobs — parallel so N running rows don't
+    # serialize into N× Modal roundtrip latency.
+    rows = result.data or []
+    trainings = list(await asyncio.gather(*[_sync_modal_status(t) for t in rows])) if rows else []
     return trainings
 
 
@@ -553,5 +584,5 @@ async def get_training(training_id: int, user=Depends(get_current_user)):
     if not result.data:
         raise HTTPException(status_code=404, detail="Training not found")
 
-    training = _sync_modal_status(result.data[0])
+    training = await _sync_modal_status(result.data[0])
     return training

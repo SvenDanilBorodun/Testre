@@ -81,7 +81,7 @@ Student machines can launch the web dashboard from the Windows GUI. As of commit
 | Docker Hub | `nettername/*` | 3 images: physical-ai-manager, physical-ai-server, open-manipulator |
 | Base images | `robotis/*` | `robotis/open-manipulator:amd64-4.1.4`, `robotis/physical-ai-server:amd64-0.8.2` |
 | Railway API | `scintillating-empathy-production-9efd.up.railway.app` | FastAPI cloud training API |
-| Modal | Workspace `svendanilborodun`, app `edubotics-training`, fn `train` | A100-80GB, timeout 7h, min_containers=0 |
+| Modal | Workspace `svendanilborodun`, app `edubotics-training`, fn `train` | NVIDIA L4 (24 GB), timeout 7h, min_containers=0 |
 | Supabase | Project ref `fnnbysrjkfugsqzwcksd` | Auth + trainings + classrooms + credits |
 | HuggingFace | Models pushed to `edubotics/*` | Datasets + trained model checkpoints |
 

@@ -9,6 +9,7 @@ import {
   listProgressEntries,
   patchProgressEntry,
 } from '../../services/teacherApi';
+import useRefetchOnFocus from '../../hooks/useRefetchOnFocus';
 import { Avatar, Btn, Pill } from '../EbUI';
 
 function formatDateLong(iso) {
@@ -74,6 +75,8 @@ export default function DailyProgressDrawer({ classroomId, student, onClose }) {
   useEffect(() => {
     fetchEntries();
   }, [fetchEntries]);
+
+  useRefetchOnFocus(fetchEntries);
 
   const handleCreate = async () => {
     if (!draftNote.trim()) {

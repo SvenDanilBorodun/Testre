@@ -14,6 +14,7 @@ import {
 } from '../../features/teacher/teacherSlice';
 import CreateClassroomModal from '../../components/teacher/CreateClassroomModal';
 import ClassroomDetail from '../../components/teacher/ClassroomDetail';
+import useRefetchOnFocus from '../../hooks/useRefetchOnFocus';
 import {
   Btn,
   Divider,
@@ -72,6 +73,8 @@ export default function TeacherDashboard({ onLogout }) {
   useEffect(() => {
     fetchClassrooms();
   }, [fetchClassrooms]);
+
+  useRefetchOnFocus(fetchClassrooms);
 
   const handleCreate = async (name) => {
     const created = await createClassroom(token, name);

@@ -143,7 +143,7 @@ export default function TrainingPage() {
         {/* Monitor rail (full width) */}
         <Card
           title="Trainingsverlauf"
-          subtitle={isTraining ? 'Live · aktualisiert laufend · RunPod Serverless' : 'Bereit · RunPod Serverless'}
+          subtitle={isTraining ? 'Live · aktualisiert laufend · Modal' : 'Bereit · Modal'}
           right={
             <div className="flex gap-2 items-center flex-wrap justify-end">
               <Pill tone={isTraining ? 'danger' : 'accent'} dot>

@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, field_validator
 
 from app.auth import get_current_user
-from app.services.runpod_client import (
+from app.services.modal_client import (
     cancel_training_job,
     get_job_status,
     start_training_job,
@@ -52,7 +52,7 @@ ALLOWED_POLICIES = {
 
 # Per-policy max timeout. Prevents a wedged ACT job from burning the 5h handler
 # default when ACT really needs <90 min. Applied after validation and before
-# RunPod dispatch so it's always enforced regardless of what the client sends.
+# Modal dispatch so it's always enforced regardless of what the client sends.
 POLICY_MAX_TIMEOUT_HOURS = {
     "act": 1.5,
     "vqbet": 2.0,
@@ -75,7 +75,7 @@ class TrainingParams(BaseModel):
 
     Field set must match what physical_ai_manager/src/components/TrainingControlPanel.js
     sends — fields not declared here are silently dropped by Pydantic and
-    never reach the RunPod handler. (Frontend sends: seed, num_workers,
+    never reach the Modal handler. (Frontend sends: seed, num_workers,
     batch_size, steps, eval_freq, log_freq, save_freq, output_folder_name.)
     """
     steps: int = Field(..., ge=1, le=MAX_STEPS, description="Total training steps")
@@ -153,7 +153,7 @@ class UserQuota(BaseModel):
 
 # ---------- Helpers ----------
 
-RUNPOD_TO_DB_STATUS = {
+MODAL_TO_DB_STATUS = {
     "QUEUED": "queued",
     "IN_QUEUE": "queued",
     "IN_PROGRESS": "running",
@@ -221,32 +221,32 @@ def _parse_iso(s: str | None) -> datetime | None:
         return None
 
 
-def _sync_runpod_status(training: dict) -> dict:
-    """Reconcile a training row against RunPod's view of the job.
+def _sync_modal_status(training: dict) -> dict:
+    """Reconcile a training row against Modal's view of the job.
 
     Three cases get the row marked failed:
-      1. RunPod reports a terminal state (FAILED/CANCELLED/COMPLETED/TIMED_OUT)
-      2. RunPod can't find the job at all (404 / unknown status)
-      3. The worker is wedged: RunPod still says IN_PROGRESS but no progress
-         reported in STALLED_WORKER_THRESHOLD. We cancel the RunPod job to
+      1. Modal reports a terminal state (COMPLETED/FAILED/CANCELLED/TIMED_OUT)
+      2. Modal can't find the job at all (unknown status)
+      3. The worker is wedged: Modal still says IN_PROGRESS but no progress
+         reported in STALLED_WORKER_THRESHOLD. We cancel the Modal call to
          stop burning GPU money and mark the row failed.
     """
     if training["status"] not in ("queued", "running"):
         return training
 
-    job_id = training.get("runpod_job_id")
+    job_id = training.get("cloud_job_id")
     if not job_id:
         return training
 
     try:
-        runpod_status = get_job_status(job_id)
+        modal_status = get_job_status(job_id)
     except Exception as e:
-        logger.warning("RunPod status check failed for job %s: %s", job_id, e)
+        logger.warning("Modal status check failed for call %s: %s", job_id, e)
         return training
 
-    db_status = RUNPOD_TO_DB_STATUS.get(runpod_status, training["status"])
+    db_status = MODAL_TO_DB_STATUS.get(modal_status, training["status"])
 
-    # Case 3: stalled worker — RunPod says IN_PROGRESS but no progress in N minutes.
+    # Case 3: stalled worker — Modal says IN_PROGRESS but no progress in N minutes.
     stalled = False
     if db_status == "running":
         last_progress = _parse_iso(
@@ -280,7 +280,7 @@ def _sync_runpod_status(training: dict) -> dict:
                 f"(vermutlich haengt der Trainings-Prozess). Job wurde abgebrochen."
             )
         else:
-            update_data["error_message"] = f"RunPod status: {runpod_status}"
+            update_data["error_message"] = f"Modal status: {modal_status}"
 
     supabase.table("trainings").update(update_data).eq("id", training["id"]).execute()
 
@@ -336,7 +336,7 @@ def _sweep_user_running_jobs(user_id: str) -> None:
     )
     for row in (result.data or []):
         try:
-            _sync_runpod_status(row)
+            _sync_modal_status(row)
         except Exception as e:
             logger.warning("Sweep sync failed for training %s: %s", row.get("id"), e)
 
@@ -393,14 +393,14 @@ async def start_training(req: StartTrainingRequest, user=Depends(get_current_use
     # 2. Atomic credit-check + training row insert via start_training_safe RPC.
     #    The function locks the user row, counts active trainings, and inserts
     #    in one transaction — concurrent /start calls cannot both pass the check.
-    #    worker_token is the only DB credential the RunPod worker receives.
+    #    worker_token is the only DB credential the Modal worker receives.
     model_name = _generate_model_name(
         req.model_type,
         req.dataset_name,
         output_folder_name=req.training_params.output_folder_name,
     )
     worker_token = str(uuid.uuid4())
-    # Pydantic model → plain dict for JSON serialization to RPC + RunPod.
+    # Pydantic model → plain dict for JSON serialization to RPC + Modal.
     training_params_dict = req.training_params.model_dump(exclude_none=True)
 
     # Cap timeout_hours per-policy. Protects against a wedged ACT job burning
@@ -441,8 +441,11 @@ async def start_training(req: StartTrainingRequest, user=Depends(get_current_use
     training_id = rpc_result.data[0]["training_id"]
     logger.info("Created training %s for user=%s model=%s", training_id, user_id, model_name)
 
-    # 3. Dispatch to RunPod with the public anon key + the scoped token.
-    #    The worker can ONLY call update_training_progress() on this row.
+    # 3. Dispatch to Modal. The worker receives the training_id + worker_token
+    #    and reads SUPABASE_URL / SUPABASE_ANON_KEY / HF_TOKEN from its own
+    #    Modal Secret — we don't leak them through the function payload.
+    #    With the token + anon key it can ONLY call update_training_progress()
+    #    on this one row.
     try:
         job_id = start_training_job(
             dataset_name=req.dataset_name,
@@ -450,14 +453,11 @@ async def start_training(req: StartTrainingRequest, user=Depends(get_current_use
             model_type=req.model_type,
             training_params=training_params_dict,
             training_id=training_id,
-            supabase_url=os.environ["SUPABASE_URL"],
-            supabase_anon_key=os.environ["SUPABASE_ANON_KEY"],
             worker_token=worker_token,
-            hf_token=os.environ.get("HF_TOKEN", ""),
         )
     except Exception as e:
         # Dispatch failed — mark training as failed (auto-frees the credit)
-        logger.error("RunPod dispatch failed for training %s: %s", training_id, e)
+        logger.error("Modal dispatch failed for training %s: %s", training_id, e)
         supabase.table("trainings").update(
             {
                 "status": "failed",
@@ -467,11 +467,11 @@ async def start_training(req: StartTrainingRequest, user=Depends(get_current_use
         ).eq("id", training_id).execute()
         raise HTTPException(status_code=500, detail=f"Failed to start training: {e}")
 
-    # 4. Update with RunPod job ID
+    # 4. Update with the Modal FunctionCall id.
     supabase.table("trainings").update(
-        {"status": "running", "runpod_job_id": job_id}
+        {"status": "running", "cloud_job_id": job_id}
     ).eq("id", training_id).execute()
-    logger.info("Dispatched training %s as RunPod job %s", training_id, job_id)
+    logger.info("Dispatched training %s as Modal call %s", training_id, job_id)
 
     return StartTrainingResponse(
         training_id=training_id, model_name=model_name, status="running"
@@ -499,16 +499,16 @@ async def cancel_training(req: CancelTrainingRequest, user=Depends(get_current_u
     if training["status"] not in ("queued", "running"):
         raise HTTPException(status_code=400, detail="Training is not active")
 
-    # Cancel on RunPod
-    if training.get("runpod_job_id"):
+    # Cancel on Modal
+    if training.get("cloud_job_id"):
         try:
-            cancel_training_job(training["runpod_job_id"])
+            cancel_training_job(training["cloud_job_id"])
         except Exception as e:
-            # Still mark as canceled locally even if RunPod fails — but log it
-            # so a stuck-on-RunPod job is at least visible in Railway logs.
+            # Still mark as canceled locally even if Modal fails — but log it
+            # so a stuck-on-Modal job is at least visible in Railway logs.
             logger.warning(
-                "RunPod cancel failed for training %s job %s: %s",
-                req.training_id, training["runpod_job_id"], e,
+                "Modal cancel failed for training %s call %s: %s",
+                req.training_id, training["cloud_job_id"], e,
             )
 
     # Mark as canceled (auto-frees the credit)
@@ -536,7 +536,7 @@ async def list_trainings(user=Depends(get_current_user)):
     )
 
     # Sync status for any active jobs
-    trainings = [_sync_runpod_status(t) for t in (result.data or [])]
+    trainings = [_sync_modal_status(t) for t in (result.data or [])]
     return trainings
 
 
@@ -553,5 +553,5 @@ async def get_training(training_id: int, user=Depends(get_current_user)):
     if not result.data:
         raise HTTPException(status_code=404, detail="Training not found")
 
-    training = _sync_runpod_status(result.data[0])
+    training = _sync_modal_status(result.data[0])
     return training

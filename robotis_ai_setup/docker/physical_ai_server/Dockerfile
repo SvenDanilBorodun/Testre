@@ -25,7 +25,7 @@ RUN TARGETS=$(find /root/ros2_ws -name "server_inference.py" -path "*/inference/
 
 # Overlay modified source files (inference validation, data sanitization, joint safety, dual camera config)
 # Note: LeRobot itself is NOT overlaid — the base image clones the same version (989f3d05)
-# that RunPod training pins. Only physical_ai_server files are patched here.
+# that the Modal training image pins. Only physical_ai_server files are patched here.
 COPY overlays/inference_manager.py /tmp/overlays/inference_manager.py
 COPY overlays/data_manager.py /tmp/overlays/data_manager.py
 COPY overlays/data_converter.py /tmp/overlays/data_converter.py

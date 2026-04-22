@@ -2,10 +2,14 @@
 # bump-upstream-digests.sh — Refresh digest pins for upstream base images.
 #
 # Why this exists:
-#   open_manipulator/Dockerfile and runpod_training/Dockerfile pin upstream
-#   base images by sha256 digest, not :latest, so our build is reproducible
-#   and a surprise upstream retag cannot inject changes into student installs.
-#   The trade-off is that we don't pick up upstream improvements automatically.
+#   open_manipulator/Dockerfile pins its upstream base image by sha256 digest,
+#   not :latest, so our build is reproducible and a surprise upstream retag
+#   cannot inject changes into student installs. The trade-off is that we
+#   don't pick up upstream improvements automatically.
+#
+#   The CUDA base for cloud training now lives in modal_training/modal_app.py
+#   (not a Dockerfile). Modal builds and caches that image server-side; the
+#   tag pin there can be bumped manually without any digest lookup here.
 #
 # What this script does:
 #   Looks up the current top-level digest for each upstream image and prints
@@ -37,24 +41,15 @@ ROBOTIS_DIGEST=$(lookup robotis/open-manipulator:latest)
 echo "    current pin: $(grep -oE 'sha256:[a-f0-9]+' "${SCRIPT_DIR}/open_manipulator/Dockerfile" || echo 'NONE')"
 echo "    new digest:  ${ROBOTIS_DIGEST}"
 
-echo ""
-echo "==> nvidia/cuda:12.1.1-devel-ubuntu22.04"
-CUDA_DIGEST=$(lookup nvidia/cuda:12.1.1-devel-ubuntu22.04)
-echo "    current pin: $(grep -oE 'sha256:[a-f0-9]+' "${PROJECT_ROOT}/runpod_training/Dockerfile" || echo 'NONE')"
-echo "    new digest:  ${CUDA_DIGEST}"
-
 cat <<EOF
 
-To apply the bumps (review first!):
+To apply the bump (review first!):
 
     sed -i 's|sha256:[a-f0-9]\\+|${ROBOTIS_DIGEST}|' \\
         "${SCRIPT_DIR}/open_manipulator/Dockerfile"
 
-    sed -i 's|sha256:[a-f0-9]\\+|${CUDA_DIGEST}|' \\
-        "${PROJECT_ROOT}/runpod_training/Dockerfile"
-
 After applying:
   1. Run a full test build:  REGISTRY=nettername ${SCRIPT_DIR}/build-images.sh
   2. Smoke-test the GUI flow + a training job
-  3. Commit the digest bumps in their own commit
+  3. Commit the digest bump in its own commit
 EOF

@@ -121,14 +121,9 @@ docker build \
     "${SCRIPT_DIR}/open_manipulator/"
 echo "   OK: open-manipulator built"
 
-# ── Image 5: robotis-ai-training (RunPod serverless worker) ──
-echo ""
-echo ">> Building robotis-ai-training (RunPod serverless worker)..."
-docker build \
-    -t "${REGISTRY}/robotis-ai-training:latest" \
-    -f "${PROJECT_ROOT}/runpod_training/Dockerfile" \
-    "${PROJECT_ROOT}/runpod_training/"
-echo "   OK: robotis-ai-training built"
+# Cloud training image (formerly robotis-ai-training on Docker Hub) is now
+# owned by Modal — see robotis_ai_setup/modal_training/. Deploy with:
+#     modal deploy robotis_ai_setup/modal_training/modal_app.py
 
 # ── Push all images ──
 echo ""
@@ -142,9 +137,6 @@ echo "   Pushed: physical-ai-server"
 docker push "${REGISTRY}/open-manipulator:latest"
 echo "   Pushed: open-manipulator"
 
-docker push "${REGISTRY}/robotis-ai-training:latest"
-echo "   Pushed: robotis-ai-training"
-
 echo ""
 echo "========================================"
 echo "All images built and pushed!"
@@ -153,5 +145,6 @@ echo "Images:"
 echo "  ${REGISTRY}/open-manipulator:latest"
 echo "  ${REGISTRY}/physical-ai-server:latest"
 echo "  ${REGISTRY}/physical-ai-manager:latest"
-echo "  ${REGISTRY}/robotis-ai-training:latest   (RunPod serverless — not pulled by students)"
+echo ""
+echo "Cloud training image is managed by Modal (no Docker Hub push)."
 echo "========================================"

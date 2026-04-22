@@ -33,19 +33,19 @@ CREATE TABLE public.trainings (
   model_name TEXT NOT NULL,
   model_type TEXT NOT NULL,
   training_params JSONB,
-  runpod_job_id TEXT,
+  cloud_job_id TEXT,
   current_step INTEGER DEFAULT 0,
   total_steps INTEGER DEFAULT 0,
   current_loss REAL,
   requested_at TIMESTAMPTZ DEFAULT NOW(),
   terminated_at TIMESTAMPTZ,
   error_message TEXT,
-  -- Per-training secret. Only the API and the assigned RunPod worker know it.
+  -- Per-training secret. Only the API and the assigned cloud worker know it.
   -- Used by update_training_progress() to scope worker DB access to this row.
   worker_token UUID,
   -- Liveness marker, bumped on every update_training_progress() call.
-  -- The reconciler uses it to spot wedged workers (RunPod still says
-  -- IN_PROGRESS but no progress for >30 minutes).
+  -- The reconciler uses it to spot wedged workers (dispatcher still says
+  -- IN_PROGRESS but no progress for >N minutes).
   last_progress_at TIMESTAMPTZ
 );
 
@@ -111,7 +111,7 @@ BEGIN
 END;
 $$;
 
--- 6. Scoped progress-update RPC for RunPod workers
+-- 6. Scoped progress-update RPC for cloud GPU workers
 --    SECURITY DEFINER so it can write through RLS, but the WHERE clause requires
 --    BOTH a valid id AND a matching worker_token. A leaked token only allows
 --    progress updates on one specific row — never reads, never other rows,

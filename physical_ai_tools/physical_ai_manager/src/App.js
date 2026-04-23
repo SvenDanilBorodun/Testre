@@ -17,8 +17,10 @@ import { Toaster } from 'react-hot-toast';
 import StudentApp from './StudentApp';
 import WebApp from './WebApp';
 import { APP_MODE } from './constants/appMode';
+import useVersionCheck from './hooks/useVersionCheck';
 
 function App() {
+  useVersionCheck();
   const inner = APP_MODE === 'web' ? <WebApp /> : <StudentApp />;
   return (
     <>

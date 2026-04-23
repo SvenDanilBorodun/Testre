@@ -13,6 +13,14 @@ server {
         expires -1;
     }
 
+    # Build-id manifest polled by the React app to detect new deployments.
+    # Must never be cached — the whole point is to read the current value.
+    location = /version.json {
+        add_header Cache-Control "no-store, no-cache, must-revalidate, max-age=0" always;
+        add_header Pragma "no-cache" always;
+        expires -1;
+    }
+
     # Hashed JS/CSS bundles from CRA are content-addressed and safe to cache.
     location /static/ {
         expires 1y;

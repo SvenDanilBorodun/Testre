@@ -59,6 +59,15 @@ CLOUD_API_URL=${CLOUD_API_URL:-}
 # build hides every other policy in the dropdown. Set ALLOWED_POLICIES in
 # the environment (comma list) to override for an admin/dev build.
 ALLOWED_POLICIES=${ALLOWED_POLICIES:-act}
+# Build identifier — baked into the React bundle and written to
+# build/version.json so the running app can detect a new image and self-reload.
+# Format: <UTC timestamp>-<short git sha or "nogit">. Timestamp first guarantees
+# every rebuild has a unique id even when the working tree is dirty or HEAD
+# hasn't moved, which is exactly what the client-side version check needs.
+_BUILD_TS=$(date -u +%Y%m%d-%H%M%S)
+_BUILD_SHA=$(git -C "$(dirname "$PROJECT_ROOT")" rev-parse --short HEAD 2>/dev/null || echo nogit)
+BUILD_ID=${BUILD_ID:-${_BUILD_TS}-${_BUILD_SHA}}
+echo "   BUILD_ID: ${BUILD_ID}"
 BUILD_ARGS=""
 if [ -n "$SUPABASE_URL" ]; then
     BUILD_ARGS="$BUILD_ARGS --build-arg REACT_APP_SUPABASE_URL=${SUPABASE_URL}"
@@ -70,6 +79,7 @@ if [ -n "$CLOUD_API_URL" ]; then
     BUILD_ARGS="$BUILD_ARGS --build-arg REACT_APP_CLOUD_API_URL=${CLOUD_API_URL}"
 fi
 BUILD_ARGS="$BUILD_ARGS --build-arg REACT_APP_ALLOWED_POLICIES=${ALLOWED_POLICIES}"
+BUILD_ARGS="$BUILD_ARGS --build-arg REACT_APP_BUILD_ID=${BUILD_ID}"
 docker build \
     $BUILD_ARGS \
     -t "${REGISTRY}/physical-ai-manager:latest" \

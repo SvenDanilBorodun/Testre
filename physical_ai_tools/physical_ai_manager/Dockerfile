@@ -13,11 +13,16 @@ ENV REACT_APP_MODE=${REACT_APP_MODE}
 # with the full comma-list to expose every policy. Enforced again server-side.
 ARG REACT_APP_ALLOWED_POLICIES=act
 ENV REACT_APP_ALLOWED_POLICIES=${REACT_APP_ALLOWED_POLICIES}
+# Build identifier (e.g. short git sha). Baked into the bundle and written to
+# build/version.json so the running app can detect a new image and self-reload.
+ARG REACT_APP_BUILD_ID=dev
+ENV REACT_APP_BUILD_ID=${REACT_APP_BUILD_ID}
 
 COPY package*.json ./
 RUN npm install
 COPY . .
 RUN npm run build
+RUN printf '{"buildId":"%s","builtAt":"%s"}\n' "${REACT_APP_BUILD_ID}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > build/version.json
 
 # Production stage
 FROM nginx:1.27.5-alpine

@@ -13,18 +13,23 @@ ARG REACT_APP_MODE=web
 # Teacher/admin web deployment: expose every policy by default. Override via
 # Railway variable REACT_APP_ALLOWED_POLICIES if you want to narrow it.
 ARG REACT_APP_ALLOWED_POLICIES=tdmpc,diffusion,act,vqbet,pi0,pi0fast,smolvla
+# Build identifier (e.g. Railway commit SHA). Baked into the bundle and written
+# to build/version.json so the running app can detect a new deploy and self-reload.
+ARG REACT_APP_BUILD_ID=dev
 
 # Promote to ENV so `npm run build` sees them via process.env.*
 ENV REACT_APP_SUPABASE_URL=${REACT_APP_SUPABASE_URL} \
     REACT_APP_SUPABASE_ANON_KEY=${REACT_APP_SUPABASE_ANON_KEY} \
     REACT_APP_CLOUD_API_URL=${REACT_APP_CLOUD_API_URL} \
     REACT_APP_MODE=${REACT_APP_MODE} \
-    REACT_APP_ALLOWED_POLICIES=${REACT_APP_ALLOWED_POLICIES}
+    REACT_APP_ALLOWED_POLICIES=${REACT_APP_ALLOWED_POLICIES} \
+    REACT_APP_BUILD_ID=${REACT_APP_BUILD_ID}
 
 COPY package*.json ./
 RUN npm install
 COPY . .
 RUN npm run build
+RUN printf '{"buildId":"%s","builtAt":"%s"}\n' "${REACT_APP_BUILD_ID}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > build/version.json
 
 FROM nginx:1.27.5-alpine
 COPY --from=build /app/build /usr/share/nginx/html

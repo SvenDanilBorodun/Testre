@@ -45,6 +45,10 @@ Source: "..\docker\physical_ai_server\.s6-keep"; DestDir: "{app}\docker\physical
 ; Bundled WSL2 rootfs — contains Ubuntu 22.04 + headless Docker Engine + nvidia-container-toolkit.
 ; Built by wsl_rootfs/build_rootfs.sh before running iscc.
 Source: "assets\edubotics-rootfs.tar.gz"; DestDir: "{app}\wsl_rootfs"; Flags: ignoreversion
+; SHA256 sidecar — import_edubotics_wsl.ps1 verifies the tarball against
+; this hash before `wsl --import`, so a corrupted download / swapped tar
+; fails fast with a clear error instead of wedging WSL2.
+Source: "assets\edubotics-rootfs.tar.gz.sha256"; DestDir: "{app}\wsl_rootfs"; Flags: ignoreversion
 
 ; GUI application (PyInstaller output)
 ; The dist folder is created by: cd gui && pyinstaller build.spec

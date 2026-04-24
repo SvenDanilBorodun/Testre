@@ -169,21 +169,50 @@ def _preflight_dataset(dataset_name: str, hf_token: str) -> None:
 
     Raises ValueError with a German operator-facing message on failure.
     """
-    try:
-        info_path = hf_hub_download(
-            repo_id=dataset_name,
-            filename="meta/info.json",
-            repo_type="dataset",
-            token=hf_token,
+    # Run the HF download in a background thread and bail after 60s. Without
+    # this, a stalled HF Hub (known to go slow / 503 under load) can block the
+    # worker for the full 7-hour Modal function timeout, burning GPU credits.
+    download_result: dict = {}
+
+    def _download_worker():
+        try:
+            download_result["path"] = hf_hub_download(
+                repo_id=dataset_name,
+                filename="meta/info.json",
+                repo_type="dataset",
+                token=hf_token,
+            )
+        except BaseException as exc:  # propagate to main thread
+            download_result["error"] = exc
+
+    thread = threading.Thread(target=_download_worker, daemon=True)
+    thread.start()
+    thread.join(timeout=60)
+
+    if thread.is_alive():
+        raise ValueError(
+            f"Dataset '{dataset_name}' Preflight hat das Zeitlimit (60s) "
+            f"ueberschritten — HuggingFace Hub erreichbar? Bitte spaeter "
+            f"erneut starten."
         )
-    except RepositoryNotFoundError:
+    err = download_result.get("error")
+    if isinstance(err, RepositoryNotFoundError):
         raise ValueError(
             f"Dataset '{dataset_name}' wurde auf HuggingFace nicht gefunden "
             f"oder ist privat (Worker hat keinen Zugriff)."
         )
-    except HfHubHTTPError as e:
+    if isinstance(err, HfHubHTTPError):
         raise ValueError(
-            f"Dataset '{dataset_name}' konnte nicht geladen werden: {e}"
+            f"Dataset '{dataset_name}' konnte nicht geladen werden: {err}"
+        )
+    if err is not None:
+        raise ValueError(
+            f"Dataset '{dataset_name}' Preflight fehlgeschlagen: {err}"
+        )
+    info_path = download_result.get("path")
+    if info_path is None:
+        raise ValueError(
+            f"Dataset '{dataset_name}' Preflight lieferte keinen Pfad zurueck."
         )
 
     try:
@@ -394,18 +423,30 @@ def _on_shutdown(signum, frame):
         except Exception:
             pass
 
-    try:
-        _update_supabase_status(
-            job["supabase_url"],
-            job["supabase_anon_key"],
-            job["worker_token"],
-            job["training_id"],
-            "failed",
-            "Worker wurde vom Cloud-Anbieter beendet. "
-            "Bitte Training neu starten.",
-        )
-    except Exception as e:
-        print(f"[shutdown] supabase update failed: {e}", flush=True)
+    # Retry the status update 3x with backoff. A single failure on the
+    # terminal "failed" update used to leave the row stuck as "running"
+    # forever; with retries + the API-side stalled-worker sweep we
+    # shouldn't see zombie rows.
+    for attempt in range(3):
+        try:
+            _update_supabase_status(
+                job["supabase_url"],
+                job["supabase_anon_key"],
+                job["worker_token"],
+                job["training_id"],
+                "failed",
+                "Worker wurde vom Cloud-Anbieter beendet. "
+                "Bitte Training neu starten.",
+            )
+            break
+        except Exception as e:
+            print(
+                f"[shutdown] supabase update attempt {attempt + 1}/3 "
+                f"failed: {e}",
+                flush=True,
+            )
+            if attempt < 2:
+                time.sleep(2 ** attempt)
 
     _cleanup_output(job.get("model_name", ""))
     sys.exit(0)
@@ -579,7 +620,23 @@ def run_training(
         )
 
         # ----- 5. Upload to HuggingFace (with built-in chunked retry) -----
-        model_url = _upload_model_to_hf(model_name, hf_token)
+        # Only mark 'succeeded' AFTER the upload actually lands. Previously
+        # a failing upload still flipped status to 'succeeded' while the
+        # model was missing on HF — the student then couldn't use it for
+        # inference and the row lied about its state.
+        try:
+            model_url = _upload_model_to_hf(model_name, hf_token)
+        except Exception as upload_err:
+            err_msg = (
+                f"Training erfolgreich, aber Model-Upload zu HuggingFace "
+                f"fehlgeschlagen: {upload_err}. Checkpoint liegt im Worker-"
+                f"Output; bitte HF_TOKEN pruefen und Training neu starten."
+            )
+            _update_supabase_status(
+                supabase_url, supabase_anon_key, worker_token, training_id,
+                "failed", err_msg,
+            )
+            return {"status": "failed", "error": err_msg}
 
         _update_supabase_status(
             supabase_url, supabase_anon_key, worker_token, training_id, "succeeded"

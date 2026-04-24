@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import os
 import random
@@ -307,10 +308,17 @@ async def _sync_modal_status(training: dict) -> dict:
 
 
 def _find_recent_duplicate(
-    user_id: str, dataset_name: str, model_type: str
+    user_id: str, dataset_name: str, model_type: str,
+    training_params: dict | None = None,
 ) -> dict | None:
     """Idempotency check. Returns an existing matching training if one was
     started within DEDUPE_WINDOW, otherwise None.
+
+    Dedup key was historically only (user, dataset, model_type), so a
+    student could tweak `steps=5000 -> 5001` to bypass dedup and burn a
+    second credit. We now also compare training_params — if a pending/
+    running row has the same params, it's a duplicate; different params
+    are treated as a fresh request.
 
     Excludes failed/canceled rows so a user can immediately retry after a
     failure without being blocked by their own previous attempt.
@@ -326,11 +334,33 @@ def _find_recent_duplicate(
         .gte("requested_at", window_start)
         .not_.in_("status", ["failed", "canceled"])
         .order("requested_at", desc=True)
-        .limit(1)
+        .limit(5)
         .execute()
     )
     rows = result.data or []
-    return rows[0] if rows else None
+    if not rows:
+        return None
+
+    if training_params is None:
+        return rows[0]
+
+    # Canonicalize params so key ordering + JSON-vs-dict representation
+    # don't give false-negatives. Any row with matching params is a dup.
+    def _canonical(params):
+        try:
+            if isinstance(params, str):
+                params = json.loads(params)
+        except (ValueError, TypeError):
+            return None
+        if not isinstance(params, dict):
+            return None
+        return json.dumps(params, sort_keys=True, default=str)
+
+    want = _canonical(training_params)
+    for row in rows:
+        if _canonical(row.get("training_params")) == want:
+            return row
+    return None
 
 
 async def _sweep_user_running_jobs(user_id: str) -> None:
@@ -386,7 +416,13 @@ async def start_training(req: StartTrainingRequest, user=Depends(get_current_use
     # 0b. Idempotency: a duplicate /start within DEDUPE_WINDOW returns the
     #     existing training instead of creating a new one. Catches network
     #     retries and accidental double-clicks. Zero schema/client cost.
-    duplicate = _find_recent_duplicate(user_id, req.dataset_name, req.model_type)
+    #     Params are part of the dedup key so changing `steps` actually
+    #     creates a new training (legitimate retry with different config)
+    #     instead of being silently collapsed.
+    duplicate = _find_recent_duplicate(
+        user_id, req.dataset_name, req.model_type,
+        training_params=req.training_params.model_dump(exclude_none=True),
+    )
     if duplicate:
         logger.info(
             "Dedupe hit: returning existing training %s for user=%s",

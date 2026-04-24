@@ -11,6 +11,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
 import webbrowser
@@ -854,107 +855,109 @@ class EduBoticsApp:
         self.running = True
 
         def _do_start():
-          try:
-            self.root.after(0, lambda: self.progress.start(10))
+            # Guarantee that progress spinner / button state / running flag
+            # are always reset on exit, regardless of which early-return path
+            # the body takes. Previously, the exception-handler at the
+            # bottom was the only place that ran on error paths and the
+            # early `return` branches above left the UI locked.
+            startup_ok = False
+            try:
+                self.root.after(0, lambda: self.progress.start(10))
 
-            if is_cloud_only:
-                self._log("Cloud-Modus: nur die Web-Oberflaeche wird gestartet (kein Roboter).")
-            else:
-                # 0. Serielle Ports validieren — bei Bedarf USB neu verbinden
-                self._set_status("Hardware-Verbindungen werden geprüft...")
-                try:
-                    serial_paths = wsl_bridge.list_serial_devices()
-                    missing_arms = []
-                    for arm_name, arm in [("Leader", self.hardware.leader), ("Follower", self.hardware.follower)]:
-                        if arm and arm.serial_path not in serial_paths:
-                            missing_arms.append((arm_name, arm))
+                if is_cloud_only:
+                    self._log("Cloud-Modus: nur die Web-Oberflaeche wird gestartet (kein Roboter).")
+                else:
+                    # 0. Serielle Ports validieren — bei Bedarf USB neu verbinden
+                    self._set_status("Hardware-Verbindungen werden geprüft...")
+                    try:
+                        serial_paths = wsl_bridge.list_serial_devices()
+                        missing_arms = []
+                        for arm_name, arm in [("Leader", self.hardware.leader), ("Follower", self.hardware.follower)]:
+                            if arm and arm.serial_path not in serial_paths:
+                                missing_arms.append((arm_name, arm))
 
-                    if missing_arms:
-                        self._log("USB-Geräte werden erneut verbunden...")
-                        device_manager.attach_all_robotis_devices()
-                        import time
-                        for _ in range(5):
-                            serial_paths = wsl_bridge.list_serial_devices()
-                            if all(arm.serial_path in serial_paths for _, arm in missing_arms):
-                                break
-                            time.sleep(1)
+                        if missing_arms:
+                            self._log("USB-Geräte werden erneut verbunden...")
+                            device_manager.attach_all_robotis_devices()
+                            import time
+                            for _ in range(5):
+                                serial_paths = wsl_bridge.list_serial_devices()
+                                if all(arm.serial_path in serial_paths for _, arm in missing_arms):
+                                    break
+                                time.sleep(1)
 
-                        for arm_name, arm in missing_arms:
-                            if arm.serial_path not in serial_paths:
-                                self._log(f"FEHLER: {arm_name}-Arm ({arm.serial_path}) nicht erreichbar!")
-                                self._log("USB-Verbindung prüfen und erneut scannen.")
-                                self._set_status(f"{arm_name}-Arm getrennt")
-                                self.root.after(0, lambda: self.progress.stop())
-                                self.running = False
-                                self._update_start_button()
-                                return
-                        self._log("USB-Geräte erfolgreich neu verbunden.")
-                except Exception as e:
-                    self._log(f"WARNUNG: Serielle Ports konnten nicht validiert werden: {e}")
-                    self._log("Fahre trotzdem fort — Container versuchen erneut auf Geräte zuzugreifen.")
+                            for arm_name, arm in missing_arms:
+                                if arm.serial_path not in serial_paths:
+                                    self._log(f"FEHLER: {arm_name}-Arm ({arm.serial_path}) nicht erreichbar!")
+                                    self._log("USB-Verbindung prüfen und erneut scannen.")
+                                    self._set_status(f"{arm_name}-Arm getrennt")
+                                    return
+                            self._log("USB-Geräte erfolgreich neu verbunden.")
+                    except Exception as e:
+                        self._log(f"WARNUNG: Serielle Ports konnten nicht validiert werden: {e}")
+                        self._log("Fahre trotzdem fort — Container versuchen erneut auf Geräte zuzugreifen.")
 
-            # 1. .env generieren
-            self._set_status("Konfiguration wird erstellt...")
-            self._log(".env-Datei wird erstellt...")
-            if is_cloud_only:
-                env_content = config_generator.generate_cloud_only_env(ENV_FILE)
-            else:
-                env_content = config_generator.generate_env_file(self.hardware, ENV_FILE)
-            self._log(f"Konfiguration geschrieben: {ENV_FILE}")
-            for line in env_content.strip().splitlines():
-                self._log(f"  {line}")
+                # 1. .env generieren
+                self._set_status("Konfiguration wird erstellt...")
+                self._log(".env-Datei wird erstellt...")
+                if is_cloud_only:
+                    env_content = config_generator.generate_cloud_only_env(ENV_FILE)
+                else:
+                    env_content = config_generator.generate_env_file(self.hardware, ENV_FILE)
+                self._log(f"Konfiguration geschrieben: {ENV_FILE}")
+                for line in env_content.strip().splitlines():
+                    self._log(f"  {line}")
 
-            # 2. Container starten
-            use_gpu = self.gpu_available and not is_cloud_only
-            self._set_status("Container werden gestartet...")
-            if is_cloud_only:
-                self._log("Container werden gestartet (nur physical_ai_manager, ohne Roboter)...")
-                ok = docker_manager.start_cloud_only(log=self._log)
-            else:
-                self._log(f"Container werden gestartet ({'GPU' if use_gpu else 'CPU'}-Modus)...")
-                ok = docker_manager.start_containers(gpu=use_gpu, log=self._log)
+                # 2. Container starten
+                use_gpu = self.gpu_available and not is_cloud_only
+                self._set_status("Container werden gestartet...")
+                if is_cloud_only:
+                    self._log("Container werden gestartet (nur physical_ai_manager, ohne Roboter)...")
+                    ok = docker_manager.start_cloud_only(log=self._log)
+                else:
+                    self._log(f"Container werden gestartet ({'GPU' if use_gpu else 'CPU'}-Modus)...")
+                    ok = docker_manager.start_containers(gpu=use_gpu, log=self._log)
 
-            if not ok:
-                self._log("FEHLER: Container konnten nicht gestartet werden. EduBotics-Umgebung prüfen.")
-                self._set_status("Start fehlgeschlagen")
+                if not ok:
+                    self._log("FEHLER: Container konnten nicht gestartet werden. EduBotics-Umgebung prüfen.")
+                    self._set_status("Start fehlgeschlagen")
+                    return
+
+                self._log("Container gestartet. Warte auf Dienste...")
+
+                # 3. Auf Web-Oberfläche warten
+                self._set_status("Warte auf Web-Oberfläche...")
+                if not health_checker.wait_for_web_ui(
+                    callback=lambda e, t: self._set_status(f"Warte auf Web-Oberfläche... {e}s/{t}s")
+                ):
+                    self._log("WARNUNG: Web-Oberfläche antwortet noch nicht. Container starten möglicherweise noch.")
+                    self._log("Du kannst die Web-Oberfläche manuell über die Schaltfläche öffnen.")
+                else:
+                    self._log("Web-Oberfläche ist bereit!")
+
+                # 4. Gesundheitsprüfung
+                health = health_checker.full_health_check()
+                for service, ok in health.items():
+                    self._log(f"  {service}: {'OK' if ok else 'NICHT BEREIT'}")
+
+                # 5. Web-Oberfläche öffnen
+                self._log("Web-Oberfläche wird geöffnet...")
+                self._open_webview()
+
+                self._set_status("Aktiv — Umgebung läuft")
+                self.root.after(0, lambda: self.btn_stop.config(state=tk.NORMAL))
+                self.root.after(0, lambda: self.btn_open_browser.config(state=tk.NORMAL))
+                startup_ok = True
+
+            except Exception as e:
+                self._log(f"FEHLER: Unerwarteter Fehler beim Starten: {e}")
+                import traceback
+                self._log(traceback.format_exc())
+            finally:
                 self.root.after(0, lambda: self.progress.stop())
-                self.running = False
-                self._update_start_button()
-                return
-
-            self._log("Container gestartet. Warte auf Dienste...")
-
-            # 3. Auf Web-Oberfläche warten
-            self._set_status("Warte auf Web-Oberfläche...")
-            if not health_checker.wait_for_web_ui(
-                callback=lambda e, t: self._set_status(f"Warte auf Web-Oberfläche... {e}s/{t}s")
-            ):
-                self._log("WARNUNG: Web-Oberfläche antwortet noch nicht. Container starten möglicherweise noch.")
-                self._log("Du kannst die Web-Oberfläche manuell über die Schaltfläche öffnen.")
-            else:
-                self._log("Web-Oberfläche ist bereit!")
-
-            # 4. Gesundheitsprüfung
-            health = health_checker.full_health_check()
-            for service, ok in health.items():
-                self._log(f"  {service}: {'OK' if ok else 'NICHT BEREIT'}")
-
-            # 5. Web-Oberfläche öffnen
-            self._log("Web-Oberfläche wird geöffnet...")
-            self._open_webview()
-
-            self._set_status("Aktiv — Umgebung läuft")
-            self.root.after(0, lambda: self.progress.stop())
-            self.root.after(0, lambda: self.btn_stop.config(state=tk.NORMAL))
-            self.root.after(0, lambda: self.btn_open_browser.config(state=tk.NORMAL))
-
-          except Exception as e:
-            self._log(f"FEHLER: Unerwarteter Fehler beim Starten: {e}")
-            import traceback
-            self._log(traceback.format_exc())
-            self.running = False
-            self._update_start_button()
-            self.root.after(0, lambda: self.progress.stop())
+                if not startup_ok:
+                    self.running = False
+                    self._update_start_button()
 
         threading.Thread(target=_do_start, daemon=True).start()
 
@@ -967,6 +970,14 @@ class EduBoticsApp:
         startup gate (no rosbridge is running). Falls back to the system
         browser with a German warning if WebView2 is unavailable.
         """
+        # Debounce rapid double-clicks. Each click previously could spawn
+        # a separate pywebview subprocess (~150 MB RSS each).
+        now_ms = int(time.monotonic() * 1000)
+        last_ms = getattr(self, "_last_webview_click_ms", 0)
+        if now_ms - last_ms < 800:
+            return
+        self._last_webview_click_ms = now_ms
+
         suffix = "/?cloud=1" if self.cloud_only.get() else "/"
         url = f"http://localhost:{PORT_WEB_UI}{suffix}"
 

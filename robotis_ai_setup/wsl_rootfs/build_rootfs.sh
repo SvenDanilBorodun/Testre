@@ -24,3 +24,12 @@ docker export "${CID}" | gzip -9 > "${OUT_FILE}"
 SIZE_MB=$(( $(stat -c%s "${OUT_FILE}") / 1024 / 1024 ))
 echo ">> Done. Rootfs size: ${SIZE_MB} MB"
 echo "   -> ${OUT_FILE}"
+
+# Publish a matching SHA256 so the installer (and any out-of-band
+# distribution channel) can verify the tar before importing it. Without
+# this, a corrupted download or swapped tar would only fail at
+# `wsl --import` time with a cryptic error.
+SHA256=$(sha256sum "${OUT_FILE}" | awk '{print $1}')
+printf '%s  %s\n' "${SHA256}" "$(basename "${OUT_FILE}")" > "${OUT_FILE}.sha256"
+echo ">> SHA256: ${SHA256}"
+echo "   -> ${OUT_FILE}.sha256"

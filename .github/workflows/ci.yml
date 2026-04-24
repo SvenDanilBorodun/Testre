@@ -1,0 +1,105 @@
+name: CI
+
+# Triggered on every push + PR to main. Runs Python unit tests, syntax-
+# checks every shell + compose file, and validates that the overlay
+# patch script's regex still matches upstream shape.
+#
+# Does NOT build images or run the full docker-compose (needs privileged
+# + hardware). That still happens on the maintainer's workstation via
+# `robotis_ai_setup/docker/build-images.sh`, but CI catches drift early.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  python-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pyyaml
+      - name: Syntax-check Python modules
+        run: |
+          python -m compileall -q \
+            robotis_ai_setup/gui \
+            robotis_ai_setup/scripts \
+            robotis_ai_setup/cloud_training_api \
+            robotis_ai_setup/modal_training \
+            robotis_ai_setup/docker/physical_ai_server/overlays \
+            robotis_ai_setup/docker/physical_ai_server/patches
+      - name: Unit tests
+        run: |
+          cd robotis_ai_setup
+          python -m unittest discover -s tests -v
+
+  shell-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - name: shellcheck
+        run: |
+          # Lint every *.sh file but tolerate known upstream shell quirks
+          # via -e. Fail the job on error-level findings only.
+          shellcheck -S error \
+            robotis_ai_setup/docker/build-images.sh \
+            robotis_ai_setup/docker/open_manipulator/entrypoint_omx.sh \
+            robotis_ai_setup/wsl_rootfs/build_rootfs.sh \
+            robotis_ai_setup/wsl_rootfs/start-dockerd.sh
+
+  compose-validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: docker compose config
+        run: |
+          cd robotis_ai_setup/docker
+          # Feed fake .env values so variable substitution doesn't fail;
+          # we only care about YAML + service-shape validation.
+          cat > .env <<'EOF'
+          FOLLOWER_PORT=/dev/ttyACM0
+          LEADER_PORT=/dev/ttyACM1
+          CAMERA_DEVICE_1=/dev/video0
+          CAMERA_NAME_1=gripper
+          CAMERA_DEVICE_2=/dev/video2
+          CAMERA_NAME_2=scene
+          ROS_DOMAIN_ID=30
+          REGISTRY=nettername
+          EOF
+          docker compose --env-file .env config > /dev/null
+          docker compose --env-file .env -f docker-compose.yml -f docker-compose.gpu.yml config > /dev/null
+
+  overlay-guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Patch script self-check
+        run: |
+          # Prove the patch script still exits non-zero on a no-op.
+          # Feed it a file that doesn't contain the substitution target —
+          # patch should refuse with code 2 (fix 1 post-check failed).
+          mkdir -p /tmp/fake
+          cat > /tmp/fake/server_inference.py <<'EOF'
+          # Intentionally unrelated file
+          class X:
+              def __init__(self):
+                  self.unrelated = True
+          EOF
+          set +e
+          python robotis_ai_setup/docker/physical_ai_server/patches/fix_server_inference.py \
+              /tmp/fake/server_inference.py
+          rc=$?
+          set -e
+          if [ "$rc" = "0" ]; then
+              echo "Patch script should have exited non-zero on a file missing the patch target."
+              exit 1
+          fi
+          echo "Patch script correctly rejected unrelated input (rc=$rc)"

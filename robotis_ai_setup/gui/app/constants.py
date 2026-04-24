@@ -1,9 +1,30 @@
 """Gemeinsame Konstanten für das EduBotics Setup."""
 
 import os
+from pathlib import Path
 
-# GUI version — single source of truth. Bump this for each release.
-APP_VERSION = "2.2.2"
+
+def _read_version_file() -> str:
+    """Load the project version from the repo root `VERSION` file.
+
+    Falls back to the baked-in default if the file is missing (e.g. when the
+    GUI is running from a PyInstaller dist without the source tree beside
+    it). This keeps the installer .iss, docker/versions.env, and GUI in
+    sync without three manual bumps per release.
+    """
+    for candidate in (
+        Path(__file__).resolve().parents[3] / "VERSION",  # monorepo layout
+        Path(__file__).resolve().parents[2] / "VERSION",  # in-tree builds
+    ):
+        try:
+            return candidate.read_text(encoding="utf-8").strip()
+        except (OSError, UnicodeDecodeError):
+            continue
+    return "2.2.2"
+
+
+# GUI version — read from repo-root VERSION file (single source of truth).
+APP_VERSION = _read_version_file()
 
 # Cloud API URL for update checks.
 UPDATE_API_URL = os.environ.get(

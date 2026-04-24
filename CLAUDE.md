@@ -70,7 +70,7 @@ React frontend → POST /trainings/start → Railway FastAPI → Modal (app edub
 ```
 
 ### Teacher / Admin Web Dashboard
-Same `physical_ai_manager` React app built with `REACT_APP_MODE=web`, hosted on Vercel. Teachers and admins log in with username+password (Supabase Auth via synthetic `@edubotics.local` emails). Admins manage teachers; teachers manage classrooms (max 30 students each), allocate credits from their pool, and write daily progress entries (class-wide or per-student).
+Same `physical_ai_manager` React app built with `REACT_APP_MODE=web`, deployed as a separate Railway service via `physical_ai_manager/Dockerfile.web` + `railway.json` (nginx serving the built CRA bundle on Railway's `$PORT`). Teachers and admins log in with username+password (Supabase Auth via synthetic `@edubotics.local` emails). Admins manage teachers; teachers manage classrooms (max 30 students each), allocate credits from their pool, and write daily progress entries (class-wide or per-student).
 
 Student machines can launch the web dashboard from the Windows GUI. As of commit `318d5c2` this opens in a **native WebView2 window** (Edge WebView2, preinstalled on Windows 11) via `pywebview` instead of the system browser. pywebview runs in a **subprocess** (`gui/app/webview_window.py`) because its mainloop must own the main thread — which already belongs to tkinter. `gui/main.py` dispatches on the `--webview` sentinel flag.
 
@@ -224,9 +224,9 @@ Bootstrap admin once: `python scripts/bootstrap_admin.py --username admin --full
 
 The React app has two build modes baked at build time (`REACT_APP_MODE`):
 - `student` (default for the Docker image) — rosbridge UI for recording/training/inference
-- `web` (Vercel deployment) — admin + teacher dashboard, no rosbridge
+- `web` (Railway deployment via `Dockerfile.web`) — admin + teacher dashboard, no rosbridge
 
-A `vercel.json` lives in `physical_ai_manager/`. The Cloud API's `ALLOWED_ORIGINS` must include the Vercel URL.
+A `vercel.json` lives in `physical_ai_manager/` as a **stale marker only** (kept for local `vercel dev`); the real web deploy is Railway (`Dockerfile.web` + `nginx.web.conf.template` + `railway.json`). The Cloud API's `ALLOWED_ORIGINS` must include the Railway web service URL (e.g. `https://edubotics-web.up.railway.app`), not a Vercel URL.
 
 ## Commands
 

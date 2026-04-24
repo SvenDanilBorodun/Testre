@@ -477,7 +477,16 @@ class PhysicalAIServer(Node):
         if not self.data_manager.check_lerobot_dataset(
                 camera_data,
                 self.total_joint_order):
-            error_msg = 'Invalid repository name, Please change the repository name'
+            # Prefer data_manager's German warning if present (e.g. camera
+            # mismatch on resumed dataset) over the generic English
+            # fallback — mirrors the overlay copy at
+            # docker/physical_ai_server/overlays/physical_ai_server.py.
+            specific = getattr(self.data_manager, '_last_warning_message', '')
+            if specific:
+                error_msg = specific
+                self.data_manager._last_warning_message = ''
+            else:
+                error_msg = 'Invalid repository name, Please change the repository name'
             self.get_logger().info(error_msg)
 
         if error_msg:

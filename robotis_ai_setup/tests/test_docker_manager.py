@@ -1,6 +1,16 @@
-"""Tests for docker_manager module (unit tests — mocked subprocess)."""
+"""Tests for docker_manager module (unit tests — mocked subprocess).
 
+Windows-only: the module wraps every docker call with `wsl -d EduBotics`.
+Asserting on those wrappers requires the Windows-assuming code path
+(constants.WSL_DISTRO_NAME etc.). Skip on non-Windows CI.
+"""
+
+import sys
 import unittest
+
+if sys.platform != "win32":
+    raise unittest.SkipTest("Windows-only tests; skipped on non-Windows CI.")
+
 from unittest.mock import patch, MagicMock
 import subprocess
 

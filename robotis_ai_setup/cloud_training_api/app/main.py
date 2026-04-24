@@ -68,15 +68,6 @@ def _parse_and_validate_origins() -> list[str]:
 allowed_origins = _parse_and_validate_origins()
 logger.info("CORS allowed origins: %s", allowed_origins)
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=allowed_origins,
-    allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["Content-Type", "Authorization"],
-)
-
-
 # ─── Simple in-process rate limiter ────────────────────────────────────
 # Stops a student script from hammering /trainings/start or the auth
 # endpoints. Keyed by client IP; trades cross-instance accuracy for
@@ -125,7 +116,19 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         return await call_next(request)
 
 
+# Middleware ordering: Starlette wraps in reverse of add_middleware calls
+# (last-added becomes outermost). We want CORS to be the OUTERMOST layer so
+# a 429 from RateLimitMiddleware still carries Access-Control-* headers —
+# otherwise the browser sees the response as a generic CORS failure instead
+# of a structured 429. Therefore: add RateLimit first, then CORS.
 app.add_middleware(RateLimitMiddleware)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=allowed_origins,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization"],
+)
 
 app.include_router(health_router)
 app.include_router(version_router)

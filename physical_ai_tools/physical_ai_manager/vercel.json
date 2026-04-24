@@ -1,12 +1,4 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "_comment": "NOT the production deploy target. The web dashboard runs on Railway via Dockerfile.web + nginx.web.conf.template. Kept as a minimal config only for local `vercel dev` convenience; security headers, cache rules, and rewrites all live in nginx.web.conf.template.",
-  "framework": "create-react-app",
-  "buildCommand": "REACT_APP_MODE=web npm run build",
-  "outputDirectory": "build",
-  "installCommand": "npm install",
-  "rewrites": [{ "source": "/(.*)", "destination": "/index.html" }],
-  "env": {
-    "REACT_APP_MODE": "web"
-  }
+  "_comment": "Intentionally empty. The web dashboard is deployed on Railway via Dockerfile.web + nginx.web.conf.template + railway.json. This file is a kill-switch: if a Vercel project is still linked to this repo, the lack of buildCommand/outputDirectory/framework prevents Vercel from shipping a shadow deployment that would bypass the nginx security headers. Do not restore build fields."
 }

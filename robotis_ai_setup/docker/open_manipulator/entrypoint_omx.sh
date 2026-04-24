@@ -217,14 +217,19 @@ class SyncNode(Node):
 
 rclpy.init()
 node = SyncNode()
+_exit_code = 0
 try:
     rclpy.spin(node)
-except SystemExit:
-    pass
+except SystemExit as _se:
+    # Capture the code so we can re-raise AFTER clean shutdown. A bare
+    # 'pass' here silently ate sys.exit(2) and the shell saw rc=0, making
+    # the whole verification-hard-exit path dead code.
+    _exit_code = _se.code if isinstance(_se.code, int) else 0
 node.destroy_node()
 rclpy.shutdown()
-"
-    sync_rc=$?
+sys.exit(_exit_code)
+" || sync_rc=$?
+    sync_rc=${sync_rc:-0}
     if [ $sync_rc -eq 2 ]; then
         echo "[FATAL] Sync verification failed — arm misaligned or blocked."
         echo "[FATAL] Refusing to continue. Check hardware, then restart the container."

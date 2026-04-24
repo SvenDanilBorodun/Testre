@@ -483,9 +483,13 @@ class DataManager:
         # Propagate the last non-fatal warning (e.g. RAM truncation) into
         # TaskStatus.error with a [WARNUNG] prefix so the React UI can
         # render it distinctly from hard errors. Without this, truncation
-        # was invisible to the student.
+        # was invisible to the student. Clear-on-read so a persistent
+        # warning surfaces exactly once per occurrence: if a new
+        # truncation/mismatch happens, the warning is re-set by record()
+        # and re-surfaced on the next status tick.
         if self._last_warning_message:
             current_status.error = f'[WARNUNG] {self._last_warning_message}'
+            self._last_warning_message = ''
 
         total_storage, used_storage = StorageChecker.get_storage_gb('/')
         current_status.used_storage_size = float(used_storage)
@@ -590,10 +594,15 @@ class DataManager:
         self._start_time_s = 0
         # Reset the RAM-truncation flag so the next episode starts clean.
         self._early_saved_due_to_ram = False
-        # Clear the UI-surfaced warning once the episode that caused it has
-        # been saved; leaving it set would make subsequent episodes look
-        # broken too.
-        self._last_warning_message = ''
+        # NOTE: _last_warning_message is deliberately NOT cleared here.
+        # _episode_reset() runs inside the same record() tick that set the
+        # warning (RAM truncation -> record_early_save -> save -> encoding
+        # complete -> _episode_reset), so clearing here would wipe the
+        # warning before get_current_record_status() — called from the
+        # outer ROS timer — ever surfaces it to the UI. Instead, the
+        # warning is cleared in get_current_record_status() after it has
+        # been copied onto TaskStatus.error, which guarantees the student
+        # sees it at least once.
         gc.collect()
 
     def _check_time(self, limit_time, next_status):
@@ -738,6 +747,13 @@ class DataManager:
         warning via TaskStatus so the student actually learns the upload
         didn't work (previously the exception was swallowed to stderr).
         """
+        # Student recordings may contain faces, classroom audio, or other
+        # identifying data. Force private=True regardless of the GUI
+        # private_mode toggle (which defaults to False and is frequently
+        # left unchanged by students). Teachers who genuinely want to
+        # publish a dataset can flip it public from the HF dashboard
+        # after the upload completes. GDPR / school DPA.
+        private = True
         timeout_s = 3600  # 1 hour — plenty for a multi-GB episode set
         result_queue = queue.Queue()
 

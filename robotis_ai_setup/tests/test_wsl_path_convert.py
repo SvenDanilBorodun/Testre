@@ -1,6 +1,14 @@
-"""Tests for the Windows-to-WSL path conversion helper."""
+"""Tests for the Windows-to-WSL path conversion helper.
 
+Windows-only: constants.py reads the repo-root VERSION file with a
+Windows-style fallback path resolution. Skip on non-Windows CI.
+"""
+
+import sys
 import unittest
+
+if sys.platform != "win32":
+    raise unittest.SkipTest("Windows-only tests; skipped on non-Windows CI.")
 
 from gui.app.constants import _to_wsl_path
 

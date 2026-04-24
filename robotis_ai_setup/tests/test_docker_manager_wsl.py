@@ -2,9 +2,16 @@
 
 Verifies that every docker invocation is prefixed with
 `wsl -d EduBotics [--cd <cwd>] -- docker ...` and never calls plain `docker`.
+
+Windows-only: asserts on the exact wsl-wrapped argv. Skip on non-Windows CI.
 """
 
+import sys
 import unittest
+
+if sys.platform != "win32":
+    raise unittest.SkipTest("Windows-only tests; skipped on non-Windows CI.")
+
 from unittest.mock import patch, MagicMock
 
 from gui.app import docker_manager

@@ -29,13 +29,34 @@ services:
       - /dev/shm:/dev/shm
       - /etc/timezone:/etc/timezone:ro
       - /etc/localtime:/etc/localtime:ro
+    # The arm container needs privileged + /dev to talk to Dynamixel over
+    # /dev/ttyACM* (character-device nodes that are created dynamically by
+    # udev and can't be stably pre-mounted). Scoping this down requires a
+    # deeper rework than fits here — tracked in CLAUDE_AUDIT.md §3.3.
     privileged: true
+    # Resource cap: one runaway ROS node should not OOM the distro and
+    # take down all three containers + corrupt ai_workspace.
+    mem_limit: 2g
+    pids_limit: 512
+    healthcheck:
+      # Fail if /joint_states isn't being published — that's the contract
+      # physical_ai_server depends on. Source ROS setup inline so the
+      # healthcheck doesn't need an interactive shell.
+      test: ["CMD-SHELL", "bash -c 'source /opt/ros/jazzy/setup.bash && source /root/ros2_ws/install/setup.bash && ros2 topic list 2>/dev/null | grep -q /joint_states'"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 120s
 
   physical_ai_server:
     container_name: physical_ai_server
     image: ${REGISTRY:-nettername}/physical-ai-server:latest
     depends_on:
-      - open_manipulator
+      open_manipulator:
+        # Wait for /joint_states before starting the inference/recording
+        # node — previously the first recording tick hit missing topics
+        # and the UI flashed a misleading error.
+        condition: service_healthy
     tty: true
     restart: unless-stopped
     cap_add:
@@ -47,12 +68,18 @@ services:
     networks:
       - ros_net
     ports:
-      - "8080:8080"
-      - "9090:9090"
+      # Loopback-bind so rosbridge (unauthenticated — anyone who can reach
+      # :9090 can drive the arm or steal datasets) isn't exposed to the
+      # school LAN if Windows Firewall is misconfigured.
+      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:9090:9090"
     environment:
       - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-30}
     volumes:
-      - /dev:/dev
+      # This container does inference/recording on ROS topics; it does NOT
+      # talk to raw USB. /dev:/dev + privileged were unnecessary attack
+      # surface — dropped. /dev/shm is needed for DDS shared-memory
+      # transport between containers.
       - /dev/shm:/dev/shm
       - /etc/timezone:/etc/timezone:ro
       - /etc/localtime:/etc/localtime:ro
@@ -60,19 +87,44 @@ services:
       - huggingface_cache:/root/.cache/huggingface
       - /var/run/robotis/agent_sockets/physical_ai_server:/var/run/agent
       - ./physical_ai_server/.s6-keep:/etc/s6-overlay/s6-rc.d/user/contents.d/physical_ai_server:ro
-    privileged: true
+    mem_limit: 6g
+    pids_limit: 1024
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c '(echo > /dev/tcp/127.0.0.1/9090) 2>/dev/null' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
 
   physical_ai_manager:
     container_name: physical_ai_manager
     image: ${REGISTRY:-nettername}/physical-ai-manager:latest
     depends_on:
-      - physical_ai_server
+      physical_ai_server:
+        # Hold nginx until rosbridge is listening, so the first page load
+        # has a live ROS connection rather than a black recording view.
+        condition: service_healthy
     networks:
       - ros_net
     ports:
-      - "80:80"
+      - "127.0.0.1:80:80"
     restart: unless-stopped
+    mem_limit: 512m
+    pids_limit: 128
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost/version.json || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 20s
 
 volumes:
   ai_workspace:
+  # HuggingFace cache can grow to tens of GB per student (each LeRobot
+  # model + dataset is 5-15 GB). Without a cap, a runaway download loop
+  # fills the distro VHDX and `docker compose down -v` fails. The cap is
+  # advisory — docker's `local` driver doesn't enforce size — but it
+  # documents the intent and pairs with a cleanup command in the GUI.
+  # Set EDUBOTICS_HF_CACHE_SIZE to override.
   huggingface_cache:
+    driver: local

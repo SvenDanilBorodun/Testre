@@ -25,6 +25,10 @@ set -euo pipefail
 REGISTRY=${REGISTRY:-nettername}
 BUILD_BASE=${BUILD_BASE:-0}
 OMX_BASE_IMAGE="robotis/open-manipulator:amd64-4.1.4"
+# Must match the FROM tag in physical_ai_server/Dockerfile. Previously this
+# script pulled ":latest" independently, so the Dockerfile build and the
+# pre-pull could reference different content.
+PAS_BASE_IMAGE="robotis/physical-ai-server:amd64-0.8.2"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 
@@ -65,7 +69,17 @@ ALLOWED_POLICIES=${ALLOWED_POLICIES:-act}
 # every rebuild has a unique id even when the working tree is dirty or HEAD
 # hasn't moved, which is exactly what the client-side version check needs.
 _BUILD_TS=$(date -u +%Y%m%d-%H%M%S)
-_BUILD_SHA=$(git -C "$(dirname "$PROJECT_ROOT")" rev-parse --short HEAD 2>/dev/null || echo nogit)
+_BUILD_SHA=$(git -C "$(dirname "$PROJECT_ROOT")" rev-parse --short HEAD 2>/dev/null || true)
+if [ -z "$_BUILD_SHA" ]; then
+    # Fall back to an 8-byte random hex so two CI-without-git builds get
+    # distinct BUILD_IDs — the old literal "nogit" fallback made every
+    # non-git build collide on the same version id, so the React
+    # self-reload check couldn't tell them apart.
+    _BUILD_SHA=$(od -An -N4 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n' | head -c 8)
+    if [ -z "$_BUILD_SHA" ]; then
+        _BUILD_SHA=$(date +%s | tail -c 8)
+    fi
+fi
 BUILD_ID=${BUILD_ID:-${_BUILD_TS}-${_BUILD_SHA}}
 echo "   BUILD_ID: ${BUILD_ID}"
 BUILD_ARGS=""
@@ -89,11 +103,11 @@ echo "   OK: physical-ai-manager built"
 
 # ── Image 2a: physical_ai_server base (pull official ROBOTIS image) ──
 echo ""
-echo ">> Pulling physical_ai_server base from Docker Hub..."
-if ! docker image inspect "robotis/physical-ai-server:latest" >/dev/null 2>&1; then
-    docker pull "robotis/physical-ai-server:latest"
+echo ">> Pulling physical_ai_server base ${PAS_BASE_IMAGE}..."
+if ! docker image inspect "${PAS_BASE_IMAGE}" >/dev/null 2>&1; then
+    docker pull "${PAS_BASE_IMAGE}"
 fi
-echo "   OK: robotis/physical-ai-server:latest exists"
+echo "   OK: ${PAS_BASE_IMAGE} exists"
 
 # ── Image 2b: physical_ai_server thin layer (patches upstream bugs) ──
 echo ""
@@ -136,16 +150,26 @@ echo "   OK: open-manipulator built"
 #     modal deploy robotis_ai_setup/modal_training/modal_app.py
 
 # ── Push all images ──
+# `set -e` at the top already makes any single failed push abort the script,
+# but we log per-image and emit a clear summary to avoid students pulling a
+# half-updated image set (where e.g. the React bundle is new but the server
+# still has last week's overlays).
 echo ""
 echo ">> Pushing images to ${REGISTRY}..."
-docker push "${REGISTRY}/physical-ai-manager:latest"
-echo "   Pushed: physical-ai-manager"
-
-docker push "${REGISTRY}/physical-ai-server:latest"
-echo "   Pushed: physical-ai-server"
-
-docker push "${REGISTRY}/open-manipulator:latest"
-echo "   Pushed: open-manipulator"
+pushed=()
+for img in physical-ai-manager physical-ai-server open-manipulator; do
+    if docker push "${REGISTRY}/${img}:latest"; then
+        pushed+=("$img")
+        echo "   Pushed: $img"
+    else
+        echo ""
+        echo "ERROR: push of ${REGISTRY}/${img}:latest failed."
+        echo "Pushed so far: ${pushed[*]:-none}"
+        echo "You now have a mismatched image set in the registry."
+        echo "Fix the registry/auth issue and re-run this script."
+        exit 1
+    fi
+done
 
 echo ""
 echo "========================================"

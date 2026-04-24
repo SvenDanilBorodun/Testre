@@ -12,7 +12,7 @@ import re
 import sys
 
 
-def patch(filepath: str) -> None:
+def patch(filepath: str) -> int:
     with open(filepath, "r") as f:
         content = f.read()
 
@@ -42,18 +42,47 @@ def patch(filepath: str) -> None:
     )
     content = dup_pattern.sub(r"\1", content)
 
-    if content == original:
+    if content != original:
+        with open(filepath, "w") as f:
+            f.write(content)
+        print(f"  Patched successfully: {filepath}")
+    else:
         print(f"  No changes needed: {filepath}")
-        return
 
-    with open(filepath, "w") as f:
-        f.write(content)
+    # Post-condition: verify Fix 1 is definitely in effect. If it isn't,
+    # the upstream file was reformatted enough that our replace() slid off
+    # and we'd ship an image that crashes on first register_endpoint()
+    # call. Better to fail the build.
+    if "self._endpoints = {}" not in content:
+        print(
+            f"ERROR: post-patch verification failed for {filepath}: "
+            f"'self._endpoints = {{}}' is not present. "
+            f"Upstream server_inference.py may have been reformatted — "
+            f"update fix_server_inference.py to match.",
+            file=sys.stderr,
+        )
+        return 2
 
-    print(f"  Patched successfully: {filepath}")
+    # Post-condition: Fix 2 (no duplicate InferenceManager). Count occurrences.
+    duplicate_check = re.compile(
+        r"self\.inference_manager = InferenceManager\(",
+    )
+    matches = duplicate_check.findall(content)
+    if len(matches) > 1:
+        print(
+            f"ERROR: post-patch verification failed for {filepath}: "
+            f"{len(matches)} InferenceManager constructions still present "
+            f"(expected 1). Duplicate-removal regex did not match — "
+            f"update fix_server_inference.py.",
+            file=sys.stderr,
+        )
+        return 3
+
+    return 0
 
 
 if __name__ == "__main__":
     if len(sys.argv) != 2:
         print(f"Usage: {sys.argv[0]} <server_inference.py>", file=sys.stderr)
         sys.exit(1)
-    patch(sys.argv[1])
+    sys.exit(patch(sys.argv[1]))

@@ -5,12 +5,41 @@ server {
     root /usr/share/nginx/html;
     index index.html;
 
+    # Security headers applied to every response served by this vhost.
+    # These previously lived in vercel.json, which is not the actual deploy
+    # target — the web dashboard runs on Railway via Dockerfile.web + nginx,
+    # so headers have to be set here to actually reach browsers.
+    # HSTS: Railway terminates TLS and proxies plain HTTP to this container,
+    # so the header is still honored by the browser. Two years + subdomains
+    # matches typical hosted-app practice.
+    add_header Strict-Transport-Security "max-age=63072000; includeSubDomains" always;
+    # Block framing: teacher/admin dashboard has never needed to be embedded
+    # anywhere, and this is the cheapest clickjacking mitigation.
+    add_header X-Frame-Options "DENY" always;
+    # Stops browsers from MIME-sniffing responses into executable types.
+    add_header X-Content-Type-Options "nosniff" always;
+    # Keep referrer private when navigating away.
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    # Block access to powerful web APIs the dashboard never uses. Blocks
+    # malicious scripts (if any got injected) from quietly requesting
+    # camera/mic/geo permission.
+    add_header Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()" always;
+
     # HTML shell must never be cached — new deploys need to reach the browser
     # immediately so footer/logo/text changes show up without a hard refresh.
     location = /index.html {
         add_header Cache-Control "no-store, no-cache, must-revalidate, max-age=0" always;
         add_header Pragma "no-cache" always;
         expires -1;
+        # Re-declare security headers inside nested location blocks because
+        # nginx's `add_header` only inherits when the inner block has *no*
+        # add_header of its own. Without these repeats the server-level
+        # headers would vanish on /index.html and /version.json responses.
+        add_header Strict-Transport-Security "max-age=63072000; includeSubDomains" always;
+        add_header X-Frame-Options "DENY" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+        add_header Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()" always;
     }
 
     # Build-id manifest polled by the React app to detect new deployments.
@@ -19,12 +48,19 @@ server {
         add_header Cache-Control "no-store, no-cache, must-revalidate, max-age=0" always;
         add_header Pragma "no-cache" always;
         expires -1;
+        add_header Strict-Transport-Security "max-age=63072000; includeSubDomains" always;
+        add_header X-Frame-Options "DENY" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+        add_header Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()" always;
     }
 
     # Hashed JS/CSS bundles from CRA are content-addressed and safe to cache.
     location /static/ {
         expires 1y;
         add_header Cache-Control "public, immutable" always;
+        add_header Strict-Transport-Security "max-age=63072000; includeSubDomains" always;
+        add_header X-Content-Type-Options "nosniff" always;
     }
 
     # SPA routing — all paths fall through to index.html

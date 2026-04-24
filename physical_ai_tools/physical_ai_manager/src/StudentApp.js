@@ -133,7 +133,22 @@ function StudentApp() {
         }
       })
       .catch((err) => {
+        if (!alive) return;
         console.error('getMe failed', err);
+        // A 401 means the session token is dead (expired, revoked, user
+        // deleted server-side). Previously the error was swallowed and the
+        // app ended up with a session object but no profile — a blank
+        // state with no actionable UI. Sign out so the login form shows.
+        const status = err?.status ?? err?.response?.status;
+        if (status === 401 || status === 403) {
+          toast.error('Sitzung abgelaufen — bitte erneut anmelden.');
+          supabase.auth.signOut();
+          dispatch(clearSession());
+        } else {
+          // Network / 5xx — don't sign out (session may still be valid);
+          // just surface it so the user knows why nothing is loading.
+          toast.error('Server nicht erreichbar — bitte Verbindung prüfen.');
+        }
       });
     return () => {
       alive = false;

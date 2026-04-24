@@ -1,5 +1,6 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
+  "_comment": "NOT the production deploy target. The web dashboard runs on Railway via Dockerfile.web + nginx.web.conf.template. Kept as a minimal config only for local `vercel dev` convenience; security headers, cache rules, and rewrites all live in nginx.web.conf.template.",
   "framework": "create-react-app",
   "buildCommand": "REACT_APP_MODE=web npm run build",
   "outputDirectory": "build",

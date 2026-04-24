@@ -54,8 +54,18 @@ function WebApp() {
         }
       })
       .catch((err) => {
+        if (!alive) return;
         console.error('getMe failed', err);
-        toast.error('Profil konnte nicht geladen werden');
+        // 401/403 => token dead; sign out so the login form returns.
+        // Network/5xx => keep the session, just surface the problem.
+        const status = err?.status ?? err?.response?.status;
+        if (status === 401 || status === 403) {
+          toast.error('Sitzung abgelaufen — bitte erneut anmelden.');
+          supabase.auth.signOut();
+          dispatch(clearSession());
+        } else {
+          toast.error('Profil konnte nicht geladen werden — Server erreichbar?');
+        }
       });
     return () => {
       alive = false;

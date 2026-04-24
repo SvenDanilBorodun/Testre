@@ -15,10 +15,21 @@ export default function LoginForm({ subtitle = 'Anmelden für Cloud-GPU-Training
 
   const handleSubmit = async (e) => {
     e.preventDefault();
+
+    // Username must be safe to plug into `{username}@edubotics.local`.
+    // An '@' or whitespace in the input produces a malformed synthetic
+    // email that Supabase rejects with a confusing message.
+    const cleaned = username.trim();
+    if (!/^[a-zA-Z0-9._-]+$/.test(cleaned)) {
+      toast.error(
+        'Ungültiger Benutzername — nur Buchstaben, Ziffern, . _ - erlaubt.'
+      );
+      return;
+    }
     setLoading(true);
 
     try {
-      const email = usernameToEmail(username);
+      const email = usernameToEmail(cleaned);
       const { data, error } = await supabase.auth.signInWithPassword({
         email,
         password,

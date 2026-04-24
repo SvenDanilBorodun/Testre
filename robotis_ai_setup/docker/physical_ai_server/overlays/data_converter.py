@@ -34,6 +34,28 @@ class DataConverter:
     def __init__(self):
         self._image_converter = CvBridge()  # Image converter using CVBridge
         self._joint_converter = None  # Joint data converter
+        # Action-message time_from_start. Historically hardcoded to 50 ms,
+        # which is ~1.5x the period at 30 Hz and breaks at any other fps.
+        # The ROS node should call `set_action_duration_from_fps(fps)` after
+        # reading task_info so the JointTrajectoryController paces
+        # correctly. Default 50 ms preserves the original behavior.
+        self._action_duration_ns: int = 50_000_000
+        # Tracks which "extra joints in trajectory" warnings have already
+        # fired so we don't log at 30 Hz.
+        self._warned_extra_joints: set = set()
+
+    def set_action_duration_from_fps(self, fps: float) -> None:
+        """Configure time_from_start on published action messages.
+
+        Setting this to ~1.5 / fps gives the controller room to finish the
+        previous tick's command before the next arrives, which keeps motion
+        smooth at any recording rate.
+        """
+        if fps and fps > 0:
+            self._action_duration_ns = max(
+                int(1.5 * 1e9 / fps),
+                1_000_000,  # 1 ms floor
+            )
 
     def compressed_image2cvmat(
             self,
@@ -72,6 +94,24 @@ class DataConverter:
                 msg.joint_names,
                 msg.points[0].positions
             ))
+
+            # Surface joints that the incoming message has but we're about
+            # to drop — a reconfigured robot (7th actuator) would silently
+            # lose that joint from every recorded action without this.
+            extras = set(msg.joint_names) - set(joint_order)
+            if extras:
+                key = tuple(sorted(extras))
+                if key not in self._warned_extra_joints:
+                    self._warned_extra_joints.add(key)
+                    import sys
+                    print(
+                        f'[WARNUNG] JointTrajectory enthaelt zusaetzliche '
+                        f'Gelenke {sorted(extras)}, die nicht in joint_order '
+                        f'{joint_order} stehen. Diese werden verworfen. '
+                        f'Bitte robot-config pruefen, falls der Roboter '
+                        f'umgebaut wurde.',
+                        file=sys.stderr, flush=True,
+                    )
 
             ordered_positions = [
                 joint_pos_map[name]
@@ -184,11 +224,18 @@ class DataConverter:
             if key.startswith('joint_order.'):
                 key = key.replace('joint_order.', '')
             if leader_topic_types[key] == JointTrajectory:
+                # Duration is set from task_info.fps via
+                # set_action_duration_from_fps(). Defaults to 50 ms for
+                # backward compatibility at 30 Hz recordings.
+                dur_ns = self._action_duration_ns
                 joint_pub_msgs[key] = JointTrajectory(
                     joint_names=value,
                     points=[JointTrajectoryPoint(
                         positions=action_slice.astype(float).tolist(),
-                        time_from_start=Duration(sec=0, nanosec=50_000_000),
+                        time_from_start=Duration(
+                            sec=dur_ns // 1_000_000_000,
+                            nanosec=dur_ns % 1_000_000_000,
+                        ),
                     )])
             elif leader_topic_types[key] == Twist:
                 tmp_twist = Twist()

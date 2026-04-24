@@ -3,8 +3,20 @@ set -e
 
 # Set up signal handling early — before any background processes are launched
 PIDS=""
+disable_torque() {
+    # Best-effort: tell the Dynamixel hardware interface to drop torque so
+    # the arm doesn't fall under gravity when our ROS nodes die. Both arms
+    # expose set_dxl_torque services; try follower first, then leader.
+    # 2s timeout each so we never block shutdown.
+    echo "[SHUTDOWN] Disabling servo torque..."
+    timeout 2 ros2 service call /dynamixel_hardware_interface/set_dxl_torque \
+        std_srvs/srv/SetBool "{data: false}" >/dev/null 2>&1 || true
+    timeout 2 ros2 service call /leader/dynamixel_hardware_interface/set_dxl_torque \
+        std_srvs/srv/SetBool "{data: false}" >/dev/null 2>&1 || true
+}
 cleanup() {
     echo "[SHUTDOWN] Stopping all processes..."
+    disable_torque
     for pid in $PIDS; do
         kill "$pid" 2>/dev/null
     done
@@ -26,15 +38,18 @@ echo "Camera 2: ${CAMERA_DEVICE_2:-<none>} as ${CAMERA_NAME_2:-scene}"
 echo "========================================"
 
 # --- Validate hardware (with retry for USB attach timing) ---
+# 60s is generous enough for slow USB hubs and in-flight `usbipd attach` from
+# the Windows host; below that we were occasionally racing the enumeration.
 wait_for_device() {
-    local device=$1 label=$2 max_wait=30 count=0
+    local device=$1 label=$2 max_wait=60 count=0
     while [ ! -e "$device" ] && [ $count -lt $max_wait ]; do
         echo "[INIT] Waiting for $label ($device)... ${count}s"
         sleep 1
         count=$((count + 1))
     done
     if [ ! -e "$device" ]; then
-        echo "[ERROR] $label not found: $device"
+        echo "[ERROR] $label not found after ${max_wait}s: $device"
+        echo "[ERROR] Check usbipd attach on the Windows host, then restart."
         exit 1
     fi
     chmod 666 "$device" 2>/dev/null || true
@@ -130,6 +145,8 @@ class SyncNode(Node):
     def __init__(self):
         super().__init__('sync_follower')
         self.follower_pos = None
+        # Subscription stays live throughout — verify step reads the latest
+        # follower pose from here, not a stale snapshot.
         self.sub = self.create_subscription(JointState, '/joint_states', self.cb, 10)
         # Publish to the same topic the leader uses — follower's arm_controller
         # is remapped to subscribe here
@@ -140,31 +157,63 @@ class SyncNode(Node):
         self.sent = False
 
     def cb(self, msg):
-        if self.sent:
-            return
         if not set(JOINTS).issubset(set(msg.name)):
             return
         self.follower_pos = [msg.position[msg.name.index(j)] for j in JOINTS]
-        self.send_sync()
+        if not self.sent:
+            self.send_sync()
 
     def send_sync(self):
         self.sent = True
         traj = JointTrajectory()
         traj.joint_names = list(JOINTS)
         N = 50
+        # Quintic smoothing with explicit velocities + accelerations. Zero
+        # at both endpoints, no snap. Without these the controller has to
+        # numerically interpolate and can overshoot.
+        deltas = [l - f for f, l in zip(self.follower_pos, LEADER_POS)]
         for i in range(N):
             t = (i + 1) / N
-            s = 10*t**3 - 15*t**4 + 6*t**5  # quintic
+            s = 10*t**3 - 15*t**4 + 6*t**5
+            s_dot = (30*t**2 - 60*t**3 + 30*t**4) / DURATION
+            s_ddot = (60*t - 180*t**2 + 120*t**3) / (DURATION * DURATION)
             pt = JointTrajectoryPoint()
-            pt.positions = [f + (l - f) * s for f, l in zip(self.follower_pos, LEADER_POS)]
+            pt.positions = [f + d * s for f, d in zip(self.follower_pos, deltas)]
+            pt.velocities = [d * s_dot for d in deltas]
+            pt.accelerations = [d * s_ddot for d in deltas]
             secs = DURATION * t
             pt.time_from_start.sec = int(secs)
             pt.time_from_start.nanosec = int((secs % 1) * 1e9)
             traj.points.append(pt)
         self.pub.publish(traj)
         self.get_logger().info(f'Published sync trajectory ({N} points, {DURATION}s)')
-        # Wait for trajectory to finish then exit
-        self.create_timer(DURATION + 1.0, lambda: sys.exit(0))
+        # After the motion should be done, verify the follower actually
+        # reached the target. If it didn't, that signals a servo dropout or
+        # a blocked arm — fail loud so the first real inference command
+        # doesn't come in on top of a mispositioned robot.
+        self._verify_t = None
+        self.create_timer(
+            DURATION + 0.5, lambda: self._start_verify())
+
+    def _start_verify(self):
+        self._verify_deadline = time.monotonic() + 2.0
+        self._verify_timer = self.create_timer(0.1, self._verify_tick)
+
+    def _verify_tick(self):
+        if self.follower_pos is None:
+            return
+        err = [abs(a - b) for a, b in zip(self.follower_pos, LEADER_POS)]
+        tol = 0.08  # rad — generous for gripper-joint backlash
+        if all(e < tol for e in err):
+            self.get_logger().info(f'Sync verified (max err {max(err):.3f} rad)')
+            sys.exit(0)
+        if time.monotonic() > self._verify_deadline:
+            self.get_logger().error(
+                f'Sync verification FAILED: follower not at leader. '
+                f'Per-joint err (rad): {[round(e, 3) for e in err]}. '
+                f'Refusing to proceed — check for mechanical block or servo dropout.'
+            )
+            sys.exit(2)
 
 rclpy.init()
 node = SyncNode()
@@ -174,8 +223,17 @@ except SystemExit:
     pass
 node.destroy_node()
 rclpy.shutdown()
-" 2>&1 || echo "[WARN] Sync failed — follower may snap on first leader move"
-    echo "[LAUNCH] Sync complete."
+"
+    sync_rc=$?
+    if [ $sync_rc -eq 2 ]; then
+        echo "[FATAL] Sync verification failed — arm misaligned or blocked."
+        echo "[FATAL] Refusing to continue. Check hardware, then restart the container."
+        exit 2
+    elif [ $sync_rc -ne 0 ]; then
+        echo "[WARN] Sync script exited with status $sync_rc — follower may snap on first leader move"
+    else
+        echo "[LAUNCH] Sync complete."
+    fi
 else
     echo "[WARN] Could not read leader position — skipping sync"
 fi
@@ -200,7 +258,7 @@ for i in 1 2; do
 done
 
 echo "========================================"
-echo "All services running — teleportation active!"
+echo "All services running — ready for teleoperation and inference."
 echo "========================================"
 
 wait

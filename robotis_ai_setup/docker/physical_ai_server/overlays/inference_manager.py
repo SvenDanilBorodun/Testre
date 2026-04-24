@@ -31,6 +31,15 @@ class InferenceManager:
             self,
             device: str = 'cuda'):
 
+        # If the caller asked for CUDA but it's unavailable, fail loud instead of
+        # letting PyTorch silently no-op `.to('cuda')` and run inference on CPU
+        # (which drops 30 Hz to <5 Hz and makes the arm lag its tick tolerance).
+        if device == 'cuda' and not torch.cuda.is_available():
+            raise RuntimeError(
+                'Inferenz benoetigt eine CUDA-faehige GPU, aber keine wurde '
+                'gefunden. Bitte pruefen: NVIDIA-Treiber auf dem Windows-Host, '
+                '`nvidia-smi` in der WSL2-Distro, docker-compose.gpu.yml aktiv.'
+            )
         self.device = device
         self.policy_type = None
         self.policy_path = None
@@ -42,7 +51,33 @@ class InferenceManager:
         self._last_image_change_time: dict[str, float] = {}
         self._stale_warn_interval = 5.0  # warn every N seconds per camera
         self._stale_threshold = 2.0  # seconds before an image is considered stale
+        # After this many seconds of frozen frames we halt inference entirely —
+        # otherwise the policy keeps commanding motion based on a dead camera.
+        self._stale_halt_threshold = 5.0
         self._last_stale_warn_time: dict[str, float] = {}
+        # Per-joint safety envelope for the predicted action. Overridden by
+        # `set_action_limits()` once the policy's joint_order is known.
+        self._action_min: np.ndarray | None = None
+        self._action_max: np.ndarray | None = None
+        self._action_max_delta: np.ndarray | None = None  # max change per tick
+        self._last_action: np.ndarray | None = None
+
+    def set_action_limits(
+            self,
+            joint_min: list[float] | None = None,
+            joint_max: list[float] | None = None,
+            max_delta_per_tick: list[float] | None = None) -> None:
+        """Configure the safety envelope applied to every predicted action.
+
+        All values are per-joint in the same order the policy produces. None for
+        a given array skips that check. Called by the ROS node once it knows
+        the robot's joint_order.
+        """
+        self._action_min = np.asarray(joint_min, dtype=np.float32) if joint_min else None
+        self._action_max = np.asarray(joint_max, dtype=np.float32) if joint_max else None
+        self._action_max_delta = (
+            np.asarray(max_delta_per_tick, dtype=np.float32) if max_delta_per_tick else None
+        )
 
     def validate_policy(self, policy_path: str) -> bool:
         result_message = ''
@@ -119,33 +154,38 @@ class InferenceManager:
             pass
         return {}
 
-    def _check_stale_cameras(self, images: dict[str, np.ndarray]) -> None:
+    def _check_stale_cameras(self, images: dict[str, np.ndarray]) -> str | None:
         """Detect cameras that stopped publishing by comparing image hashes.
 
-        If the same image bytes are received for longer than _stale_threshold
-        seconds, print a warning. Does not block inference — the operator
-        sees the warning and can investigate.
+        Returns the name of the first camera that's been frozen past
+        `_stale_halt_threshold` so the caller can halt inference; returns None
+        otherwise. Warnings are still printed at the lower `_stale_threshold`
+        so the operator gets an early signal before the halt fires.
         """
         now = time.monotonic()
+        halt_on: str | None = None
         for name, img in images.items():
             h = hash(img.data.tobytes()[:1024])  # hash first 1KB for speed
             prev = self._last_image_hashes.get(name)
             if prev != h:
                 self._last_image_hashes[name] = h
                 self._last_image_change_time[name] = now
-            else:
-                last_change = self._last_image_change_time.get(name, now)
-                stale_duration = now - last_change
-                if stale_duration > self._stale_threshold:
-                    last_warn = self._last_stale_warn_time.get(name, 0)
-                    if now - last_warn > self._stale_warn_interval:
-                        print(
-                            f'[WARNUNG] Kamera "{name}" liefert seit '
-                            f'{stale_duration:.1f}s dasselbe Bild — '
-                            f'Verbindung pruefen!',
-                            flush=True,
-                        )
-                        self._last_stale_warn_time[name] = now
+                continue
+            last_change = self._last_image_change_time.get(name, now)
+            stale_duration = now - last_change
+            if stale_duration > self._stale_halt_threshold and halt_on is None:
+                halt_on = name
+            elif stale_duration > self._stale_threshold:
+                last_warn = self._last_stale_warn_time.get(name, 0)
+                if now - last_warn > self._stale_warn_interval:
+                    print(
+                        f'[WARNUNG] Kamera "{name}" liefert seit '
+                        f'{stale_duration:.1f}s dasselbe Bild — '
+                        f'Verbindung pruefen!',
+                        flush=True,
+                    )
+                    self._last_stale_warn_time[name] = now
+        return halt_on
 
     def clear_policy(self):
         if hasattr(self, 'policy'):
@@ -168,15 +208,30 @@ class InferenceManager:
             missing = set(self._expected_image_keys) - provided
 
             if missing:
+                # Previously raised — but raising from a ROS timer callback
+                # may tear down the executor. Log, skip this tick, return None
+                # so the caller doesn't publish stale actions to the arm.
                 expected_names = [k.replace('observation.images.', '') for k in self._expected_image_keys]
                 connected_names = list(images.keys())
-                raise RuntimeError(
-                    f'Inferenz fehlgeschlagen: Das Modell erwartet die Kameras {expected_names}, '
-                    f'aber verbunden sind nur {connected_names}. '
-                    f'Bitte die Kamera-Namen in der Robot-Config an das Modell anpassen.'
+                print(
+                    f'[FEHLER] Kamera-Namen passen nicht: Modell erwartet '
+                    f'{expected_names}, verbunden {connected_names}. '
+                    f'Inferenz-Tick uebersprungen.',
+                    flush=True,
                 )
+                return None
 
-        self._check_stale_cameras(images)
+        stale_camera = self._check_stale_cameras(images)
+        if stale_camera is not None:
+            # Frozen camera = policy is acting on a dead scene. Refuse to
+            # publish a command rather than drive the arm blind.
+            print(
+                f'[STOPP] Kamera "{stale_camera}" ist seit >'
+                f'{self._stale_halt_threshold:.0f}s eingefroren. '
+                f'Inferenz angehalten — Kamera pruefen, dann neu starten.',
+                flush=True,
+            )
+            return None
 
         observation = self._preprocess(images, state, task_instruction)
 
@@ -188,17 +243,74 @@ class InferenceManager:
                 if key in observation:
                     actual_shape = list(observation[key].shape[1:])  # drop batch dim
                     if expected_shape and actual_shape != expected_shape:
-                        raise RuntimeError(
-                            f'Bildaufloesung stimmt nicht ueberein: '
+                        print(
+                            f'[FEHLER] Bildaufloesung stimmt nicht ueberein: '
                             f'{key} hat Form {actual_shape}, '
-                            f'Modell erwartet {expected_shape}. '
-                            f'Bitte Kamera-Aufloesung pruefen.'
+                            f'Modell erwartet {expected_shape}. Tick uebersprungen.',
+                            flush=True,
                         )
+                        return None
 
         with torch.inference_mode():
             action = self.policy.select_action(observation)
             action = action.squeeze(0).to('cpu').numpy()
 
+        # Safety envelope: NaN/inf guard + joint-limit clamp + per-tick delta
+        # cap. A diverging policy (bad checkpoint, OOD observation) can emit
+        # huge or NaN values; publishing those to /arm_controller causes a
+        # violent hardware motion.
+        action = self._apply_safety_envelope(action)
+        if action is None:
+            return None
+
+        return action
+
+    def _apply_safety_envelope(self, action: np.ndarray) -> np.ndarray | None:
+        """Validate + clamp the predicted action before it reaches the arm.
+
+        Returns the (possibly clamped) action, or None to skip publishing.
+        """
+        if not np.all(np.isfinite(action)):
+            print(
+                '[STOPP] Modell hat NaN/Inf-Werte ausgegeben. Tick verworfen.',
+                flush=True,
+            )
+            return None
+
+        if self._action_min is not None and self._action_max is not None:
+            if len(action) == len(self._action_min):
+                clipped = np.clip(action, self._action_min, self._action_max)
+                if not np.allclose(clipped, action, atol=1e-6):
+                    # Announce once per distinct offending pattern to avoid
+                    # spamming at 30 Hz.
+                    diff = np.where(~np.isclose(clipped, action, atol=1e-6))[0]
+                    print(
+                        f'[WARNUNG] Vorhergesagte Aktion verletzt Gelenklimits '
+                        f'an Indizes {diff.tolist()} — wird begrenzt.',
+                        flush=True,
+                    )
+                action = clipped
+
+        if self._action_max_delta is not None and self._last_action is not None:
+            if len(action) == len(self._last_action):
+                delta = action - self._last_action
+                abs_delta = np.abs(delta)
+                mask = abs_delta > self._action_max_delta
+                if np.any(mask):
+                    # Cap magnitude while preserving sign.
+                    delta = np.where(
+                        mask,
+                        np.sign(delta) * self._action_max_delta,
+                        delta,
+                    )
+                    action = self._last_action + delta
+                    print(
+                        f'[WARNUNG] Aktions-Schrittweite begrenzt an Indizes '
+                        f'{np.where(mask)[0].tolist()}.',
+                        flush=True,
+                    )
+
+        self._last_action = action.copy()
         return action
 
     def _preprocess(
@@ -333,8 +445,10 @@ class InferenceManager:
                                 elif 'model_type' in config:
                                     saved_policy_path.append(pretrained_model_path)
                                     saved_policy_type.append(config['model_type'])
-                        except (json.JSONDecodeError, IOError):
-                            # If config.json cannot be read, store path only
-                            print('File IO Errors : ', IOError)
+                        except (json.JSONDecodeError, IOError) as e:
+                            # If config.json cannot be read, log the actual
+                            # exception so the operator has a debugging trail.
+                            print(f'[WARNUNG] config.json lesbar nicht in '
+                                  f'{pretrained_model_path}: {e}', flush=True)
 
         return saved_policy_path, saved_policy_type

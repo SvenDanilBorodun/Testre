@@ -87,6 +87,12 @@ class DataManager:
         self._status = 'warmup'
         self._cpu_checker = CPUChecker()
         self.data_converter = DataConverter()
+        # Propagate the task fps into the action-duration setter so
+        # published action messages use the right time_from_start at
+        # non-30 Hz recordings. Safe no-op if fps is missing/zero.
+        self.data_converter.set_action_duration_from_fps(
+            getattr(task_info, 'fps', 0) or 0
+        )
         self.force_save_for_safety = False
         self._stop_save_completed = False
         self.current_instruction = ''
@@ -96,6 +102,14 @@ class DataManager:
         # Frame-drop detection (Option B): set when RAM pressure forces an
         # early save, so the validator can warn about a truncated episode.
         self._early_saved_due_to_ram = False
+        # Surfaced to TaskStatus.error as a [WARNUNG] prefix so the React UI
+        # renders a banner after the truncated episode saves. Cleared on the
+        # next episode reset.
+        self._last_warning_message: str = ''
+        # Filled by save() with the mp4 paths we expect each episode to
+        # produce. Verified after video_encoding_completed goes True so
+        # the episode isn't marked saved with a missing / zero-byte mp4.
+        self._expected_video_paths: list = []
 
     def get_status(self):
         return self._status
@@ -130,13 +144,15 @@ class DataManager:
                     # Mark this episode as RAM-truncated so _validate_episode_buffer()
                     # can warn the operator about silent data loss.
                     self._early_saved_due_to_ram = True
-                    print(
-                        f'[WARNUNG] Episode {self._record_episode_count + 1} '
-                        f'wird wegen niedrigem Arbeitsspeicher '
-                        f'(<{self.RAM_LIMIT_GB} GB frei) frueh beendet. '
-                        f'Die Aufnahme ist kuerzer als geplant.',
-                        file=sys.stderr, flush=True,
+                    warning = (
+                        f'Episode {self._record_episode_count + 1} wegen '
+                        f'niedrigem Arbeitsspeicher (<{self.RAM_LIMIT_GB} GB '
+                        f'frei) frueh beendet. Die Aufnahme ist kuerzer als '
+                        f'geplant — bitte Browser/andere Anwendungen '
+                        f'schliessen und ggf. neu aufnehmen.'
                     )
+                    self._last_warning_message = warning
+                    print(f'[WARNUNG] {warning}', file=sys.stderr, flush=True)
                     if not self._single_task:
                         self._status = 'finish'
                     else:
@@ -161,6 +177,7 @@ class DataManager:
                         and self._lerobot_dataset.check_append_buffer_completed()
                     )
                 ):
+                    self._verify_saved_video_files()
                     self._episode_reset()
                     self._record_episode_count += 1
                     self._get_current_scenario_number()
@@ -249,6 +266,17 @@ class DataManager:
                 f'[WARNUNG] Episode-Pruefung fehlgeschlagen (nicht kritisch): {e}',
                 file=sys.stderr, flush=True,
             )
+        # Snapshot which video files we expect for this episode so we can
+        # verify they actually land on disk after async encoding completes.
+        self._expected_video_paths = []
+        try:
+            encoders = getattr(self._lerobot_dataset, 'encoders', None) or {}
+            for save_path, enc in encoders.items():
+                out = getattr(enc, 'output_path', None) or save_path
+                if out:
+                    self._expected_video_paths.append(out)
+        except Exception:
+            pass
         if self._task_info.use_optimized_save_mode:
             if not self._single_task:
                 self._lerobot_dataset.save_episode_without_video_encoding()
@@ -257,6 +285,52 @@ class DataManager:
         else:
             if self._lerobot_dataset.episode_buffer['size'] > 0:
                 self._lerobot_dataset.save_episode()
+
+    def _verify_saved_video_files(self):
+        """After async video encoding reports complete, verify each mp4
+        actually landed on disk and is non-zero.
+
+        The upstream check_video_encoding_completed() trusts the encoder's
+        own `encoding_completed` flag — which can go true even if
+        GStreamer silently dropped the file mid-stream. Without this
+        check the episode is marked saved with a ghost mp4, the dataset
+        lists the episode as complete, and training later fails with an
+        opaque "video file not found" error. Surface the problem here,
+        at record time, where the student can re-record.
+        """
+        paths = getattr(self, '_expected_video_paths', None) or []
+        if not paths:
+            return
+        missing: list = []
+        zero_byte: list = []
+        for p in paths:
+            try:
+                sp = Path(str(p))
+            except Exception:
+                continue
+            if not sp.exists():
+                missing.append(str(sp))
+            else:
+                try:
+                    if sp.stat().st_size == 0:
+                        zero_byte.append(str(sp))
+                except OSError:
+                    pass
+        self._expected_video_paths = []
+        if missing or zero_byte:
+            problems = []
+            if missing:
+                problems.append(f'fehlt: {missing}')
+            if zero_byte:
+                problems.append(f'leer (0 Bytes): {zero_byte}')
+            warning = (
+                f'Episode {self._record_episode_count + 1}: Video-Datei(en) '
+                f'nicht korrekt gespeichert ({"; ".join(problems)}). '
+                f'Diese Episode muss neu aufgenommen werden, sonst ist das '
+                f'Training unbrauchbar.'
+            )
+            self._last_warning_message = warning
+            print(f'[FEHLER] {warning}', file=sys.stderr, flush=True)
 
     def _validate_episode_buffer(self):
         """Inspect the in-memory episode buffer for silent data loss.
@@ -406,6 +480,13 @@ class DataManager:
         current_status.proceed_time = int(getattr(self, '_proceed_time', 0))
         current_status.current_episode_number = int(self._record_episode_count)
 
+        # Propagate the last non-fatal warning (e.g. RAM truncation) into
+        # TaskStatus.error with a [WARNUNG] prefix so the React UI can
+        # render it distinctly from hard errors. Without this, truncation
+        # was invisible to the student.
+        if self._last_warning_message:
+            current_status.error = f'[WARNUNG] {self._last_warning_message}'
+
         total_storage, used_storage = StorageChecker.get_storage_gb('/')
         current_status.used_storage_size = float(used_storage)
         current_status.total_storage_size = float(total_storage)
@@ -509,6 +590,10 @@ class DataManager:
         self._start_time_s = 0
         # Reset the RAM-truncation flag so the next episode starts clean.
         self._early_saved_due_to_ram = False
+        # Clear the UI-surfaced warning once the episode that caused it has
+        # been saved; leaving it set would make subsequent episodes look
+        # broken too.
+        self._last_warning_message = ''
         gc.collect()
 
     def _check_time(self, limit_time, next_status):
@@ -551,6 +636,7 @@ class DataManager:
 
     def check_lerobot_dataset(self, images, joint_list):
         try:
+            is_resumed = False
             if self._lerobot_dataset is None:
                 if self._check_dataset_exists(
                         self._save_repo_name,
@@ -559,6 +645,7 @@ class DataManager:
                         self._save_repo_name,
                         self._save_path
                     )
+                    is_resumed = True
                 else:
                     self._lerobot_dataset = self._create_dataset(
                         self._save_repo_name,
@@ -570,6 +657,40 @@ class DataManager:
                             num_threads=1
                         )
             self._lerobot_dataset.set_robot_type(self._robot_type)
+
+            # When resuming an existing dataset, the camera keys we're
+            # about to record must match what the first episode used —
+            # otherwise the trained model can't use the dataset at all.
+            # Previously this only surfaced at inference time (overlay of
+            # inference_manager.py lines 166-177), *after* hours of
+            # recording + training had already been wasted.
+            if is_resumed:
+                try:
+                    info_path = Path(self._save_path) / 'meta' / 'info.json'
+                    with open(info_path, encoding='utf-8') as f:
+                        existing = json.load(f)
+                    existing_cams = sorted(
+                        k.replace('observation.images.', '')
+                        for k in existing.get('features', {})
+                        if k.startswith('observation.images.')
+                    )
+                    current_cams = sorted(images.keys())
+                    if existing_cams != current_cams:
+                        warning = (
+                            f'Kamera-Namen passen nicht zur bestehenden '
+                            f'Aufnahme "{self._save_repo_name}". '
+                            f'Vorhanden: {existing_cams}, aktuell: '
+                            f'{current_cams}. Bitte entweder die Kameras '
+                            f'in der Robot-Config umbenennen oder eine '
+                            f'neue Aufnahme starten.'
+                        )
+                        self._last_warning_message = warning
+                        print(f'[FEHLER] {warning}', file=sys.stderr, flush=True)
+                        return False
+                except (OSError, ValueError, KeyError) as _e:
+                    # If we can't read the existing info.json that's a
+                    # separate problem — let the normal flow handle it.
+                    pass
 
             return True
         except Exception as e:
@@ -609,13 +730,52 @@ class DataManager:
             )
 
     def _upload_dataset(self, tags, private=False):
+        """Push the dataset to HuggingFace with a hard timeout.
+
+        The upstream helper has no timeout, so a stalled classroom network
+        can hang the UI forever. We run the push in a daemon thread and
+        bail after 1 hour; on timeout or error, we surface a German
+        warning via TaskStatus so the student actually learns the upload
+        didn't work (previously the exception was swallowed to stderr).
+        """
+        timeout_s = 3600  # 1 hour — plenty for a multi-GB episode set
+        result_queue = queue.Queue()
+
+        def worker():
+            try:
+                self._lerobot_dataset.push_to_hub(
+                    tags=tags,
+                    private=private,
+                    upload_large_folder=True)
+                result_queue.put(('ok', None))
+            except Exception as exc:  # noqa: BLE001
+                result_queue.put(('err', exc))
+
+        thread = threading.Thread(target=worker, daemon=True)
+        thread.start()
         try:
-            self._lerobot_dataset.push_to_hub(
-                tags=tags,
-                private=private,
-                upload_large_folder=True)
-        except Exception as e:
-            print(f'Error uploading dataset: {e}')
+            status, payload = result_queue.get(timeout=timeout_s)
+        except queue.Empty:
+            warning = (
+                'HuggingFace-Upload hat das Zeitlimit (1 Stunde) ueberschritten. '
+                'Die Aufnahme ist lokal gespeichert; Upload bitte manuell '
+                'neu starten, sobald das Netzwerk stabil ist.'
+            )
+            self._last_warning_message = warning
+            print(f'[FEHLER] {warning}', file=sys.stderr, flush=True)
+            return
+
+        if status == 'err':
+            warning = (
+                f'HuggingFace-Upload fehlgeschlagen: {payload}. '
+                f'Die Aufnahme ist lokal gespeichert; bitte HF-Token und '
+                f'Netzwerkverbindung pruefen.'
+            )
+            self._last_warning_message = warning
+            print(f'[FEHLER] {warning}', file=sys.stderr, flush=True)
+            return
+
+        print('[INFO] HuggingFace upload complete.', flush=True)
 
     def _download_dataset(self, repo_id):
         snapshot_download(
@@ -965,12 +1125,16 @@ class DataManager:
                 print('Please make sure you are authenticated with HuggingFace')
                 return False
 
-            # Create repository
+            # Create repository. Default to PRIVATE: student recordings
+            # may contain faces, classroom audio, or other data that must
+            # not leak to the public HF index (GDPR / school DPA).
+            # Teachers can flip individual repos to public later from the
+            # HF dashboard if they genuinely want to share.
             print(f'Creating HuggingFace repository: {repo_id}')
             url = api.create_repo(
                 repo_id,
                 repo_type=repo_type,
-                private=False,
+                private=True,
                 exist_ok=True,
             )
             print(f'Repository created/verified: {url}')

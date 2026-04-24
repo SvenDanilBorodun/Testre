@@ -51,9 +51,13 @@ COPY overlays/omx_f_config.yaml /tmp/overlays/omx_f_config.yaml
 COPY overlays/physical_ai_server.py /tmp/overlays/physical_ai_server.py
 RUN set -e && \
     apply_overlay() { \
-        local name="$1" find_args="$2" src="/tmp/overlays/$1"; \
+        local name="$1" path_filter="$2" src="/tmp/overlays/$1"; \
         local targets; \
-        targets=$(eval "find /root/ros2_ws -name '$name' $find_args 2>/dev/null") || true; \
+        if [ -n "$path_filter" ]; then \
+            targets=$(find /root/ros2_ws -name "$name" -path "$path_filter" 2>/dev/null); \
+        else \
+            targets=$(find /root/ros2_ws -name "$name" 2>/dev/null); \
+        fi; \
         if [ -z "$targets" ]; then \
             echo "ERROR: $name not found in base image — overlay cannot be applied"; \
             return 1; \
@@ -74,9 +78,9 @@ RUN set -e && \
             echo "Overlaid: $f ($before -> $after)"; \
         done; \
     } && \
-    apply_overlay inference_manager.py "-path */inference/*" && \
-    apply_overlay data_manager.py "-path */data_processing/*" && \
-    apply_overlay data_converter.py "-path */data_processing/*" && \
+    apply_overlay inference_manager.py "*/inference/*" && \
+    apply_overlay data_manager.py "*/data_processing/*" && \
+    apply_overlay data_converter.py "*/data_processing/*" && \
     apply_overlay omx_f_config.yaml "" && \
-    apply_overlay physical_ai_server.py "-path */physical_ai_server/*" && \
+    apply_overlay physical_ai_server.py "*/physical_ai_server/physical_ai_server.py" && \
     rm -rf /tmp/overlays

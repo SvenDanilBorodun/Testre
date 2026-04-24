@@ -23,9 +23,13 @@ COPY overlays/omx_f.ros2_control.xacro /tmp/overlays/omx_f.ros2_control.xacro
 COPY overlays/omx_f_hardware_controller_manager.yaml /tmp/overlays/omx_f_hardware_controller_manager.yaml
 RUN set -e && \
     apply_overlay() { \
-        local name="$1" find_args="$2" src="$3" dest_name="$4"; \
+        local name="$1" path_filter="$2" src="$3"; \
         local targets; \
-        targets=$(eval "find /root/ros2_ws -name '$name' $find_args 2>/dev/null") || true; \
+        if [ -n "$path_filter" ]; then \
+            targets=$(find /root/ros2_ws -name "$name" -path "$path_filter" 2>/dev/null); \
+        else \
+            targets=$(find /root/ros2_ws -name "$name" 2>/dev/null); \
+        fi; \
         if [ -z "$targets" ]; then \
             echo "ERROR: $name not found in base image — overlay cannot be applied"; \
             return 1; \
@@ -40,8 +44,8 @@ RUN set -e && \
             echo "Overlaid: $f ($before -> $after)"; \
         done; \
     } && \
-    apply_overlay omx_f.ros2_control.xacro "-path */ros2_control/*" /tmp/overlays/omx_f.ros2_control.xacro && \
-    apply_overlay hardware_controller_manager.yaml "-path */omx_f_follower_ai/*" /tmp/overlays/omx_f_hardware_controller_manager.yaml && \
+    apply_overlay omx_f.ros2_control.xacro "*/ros2_control/*" /tmp/overlays/omx_f.ros2_control.xacro && \
+    apply_overlay hardware_controller_manager.yaml "*/omx_f_follower_ai/*" /tmp/overlays/omx_f_hardware_controller_manager.yaml && \
     rm -rf /tmp/overlays
 
 ENTRYPOINT ["/entrypoint_omx.sh"]

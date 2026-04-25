@@ -5,12 +5,19 @@
 # (imported by import_edubotics_wsl.ps1) ships its own headless Docker Engine.
 
 param(
-    [string]$UsbipdMsiUrl = "https://github.com/dorssel/usbipd-win/releases/latest/download/usbipd-win_x64.msi",
+    # Production runs of this script are invoked from robotis_ai_setup.iss
+    # which passes a versioned URL + SHA256 (see UsbipdVersion / UsbipdSha256
+    # at the top of the .iss). The default below is only the fallback for
+    # a maintainer running this script by hand — kept pointing at v5.3.0
+    # because usbipd-win 5.x renamed assets to include the architecture
+    # (`_x64` suffix), breaking the older `latest/download/usbipd-win_x64.msi`
+    # alias.
+    [string]$UsbipdMsiUrl = "https://github.com/dorssel/usbipd-win/releases/download/v5.3.0/usbipd-win_5.3.0_x64.msi",
     # Optional SHA256 of the MSI. If set, the download is verified before
     # msiexec runs — protects elevated PowerShell against a MITM / compromised
     # mirror serving a malicious MSI. Pin via `EDUBOTICS_USBIPD_SHA256` env
-    # var for reproducible offline installs; the installer releases should
-    # bake a known-good value in the .iss rather than leaving it empty.
+    # var for reproducible offline installs; production builds always pass
+    # the known-good value via the .iss [Run] section.
     [string]$UsbipdMsiSha256 = $env:EDUBOTICS_USBIPD_SHA256
 )
 

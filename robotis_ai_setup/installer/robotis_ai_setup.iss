@@ -10,16 +10,26 @@
 ; verify the MSI before msiexec runs — defends against MITM/mirror
 ; tampering and against an upstream `latest` shipping a breaking change.
 ;
+; Asset naming: usbipd-win 5.x ships per-architecture MSIs named
+;   usbipd-win_<VERSION>_x64.msi
+; (the older 4.x suffix-less naming is gone, so the GitHub
+; "latest/download/usbipd-win_x64.msi" alias also no longer resolves).
+;
 ; Release procedure when bumping usbipd-win:
 ;   1. Update UsbipdVersion below.
-;   2. Download the new MSI from the GitHub releases page.
-;   3. Get-FileHash <path> -Algorithm SHA256 — paste the hex into UsbipdSha256.
-;   4. Smoke-test the installer end-to-end on a clean Windows VM.
-#define UsbipdVersion "5.0.0"
-; UsbipdSha256: leave as the placeholder ONLY if you intentionally want
-; the unsigned-download fallback (install_prerequisites.ps1 then logs a
-; yellow "SHA256 pin not set" warning). Real releases must fill this.
-#define UsbipdSha256 "RELEASE_PIN_NEEDED"
+;   2. PowerShell:
+;        $url = "https://github.com/dorssel/usbipd-win/releases/download/v<NEW>/usbipd-win_<NEW>_x64.msi"
+;        Invoke-WebRequest -Uri $url -OutFile "$env:TEMP\u.msi" -UseBasicParsing
+;        (Get-FileHash "$env:TEMP\u.msi" -Algorithm SHA256).Hash
+;      Paste the 64-char hex output into UsbipdSha256.
+;   3. Smoke-test the installer end-to-end on a clean Windows VM.
+#define UsbipdVersion "5.3.0"
+; SHA256 of usbipd-win_5.3.0_x64.msi (downloaded + verified 2026-04-25).
+; Source: https://github.com/dorssel/usbipd-win/releases/tag/v5.3.0
+; UsbipdSha256: leave as the literal "RELEASE_PIN_NEEDED" sentinel ONLY if
+; you intentionally want the unsigned-download fallback for a dev build —
+; install_prerequisites.ps1 hard-fails on that sentinel for production.
+#define UsbipdSha256 "1C984914AEC944DE19B64EFF232421439629699F8138E3DDC29301175BC6D938"
 
 [Setup]
 AppId={{B7E3F2A1-8C4D-4E5F-9A6B-1D2E3F4A5B6C}
@@ -96,7 +106,7 @@ Filename: "powershell.exe"; \
 ; Pin usbipd-win to the version + SHA256 declared at the top of this
 ; .iss. install_prerequisites.ps1 verifies the SHA before msiexec runs.
 Filename: "powershell.exe"; \
-  Parameters: "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File ""{app}\scripts\install_prerequisites.ps1"" -UsbipdMsiUrl ""https://github.com/dorssel/usbipd-win/releases/download/v{#UsbipdVersion}/usbipd-win_{#UsbipdVersion}.msi"" -UsbipdMsiSha256 ""{#UsbipdSha256}"""; \
+  Parameters: "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File ""{app}\scripts\install_prerequisites.ps1"" -UsbipdMsiUrl ""https://github.com/dorssel/usbipd-win/releases/download/v{#UsbipdVersion}/usbipd-win_{#UsbipdVersion}_x64.msi"" -UsbipdMsiSha256 ""{#UsbipdSha256}"""; \
   StatusMsg: "Voraussetzungen werden installiert (WSL2, usbipd)..."; \
   Flags: runhidden waituntilterminated
 

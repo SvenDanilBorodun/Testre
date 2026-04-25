@@ -7,6 +7,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from app.auth import get_current_profile
+from app.services.modal_client import cancel_training_job
 from app.services.supabase_client import get_supabase
 
 logger = logging.getLogger(__name__)
@@ -93,6 +94,29 @@ async def export_my_data(profile=Depends(get_current_profile)):
             .execute()
         )
         bundle["progress_entries"] = entries.data or []
+    elif profile["role"] == "student":
+        # GDPR Art. 15: a student has the right to receive every piece of
+        # personal data we hold about them — including the per-student
+        # notes their teacher writes (student_id == uid) AND the
+        # class-wide notes that apply to them by virtue of belonging to
+        # the classroom (student_id IS NULL, classroom_id = theirs).
+        student_entries = (
+            supabase.table("progress_entries")
+            .select("*")
+            .eq("student_id", uid)
+            .execute()
+        )
+        bundle["progress_entries"] = student_entries.data or []
+
+        if profile.get("classroom_id"):
+            class_entries = (
+                supabase.table("progress_entries")
+                .select("*")
+                .eq("classroom_id", profile["classroom_id"])
+                .is_("student_id", "null")
+                .execute()
+            )
+            bundle["classroom_progress_entries"] = class_entries.data or []
 
     filename = f"edubotics-export-{uid}.json"
     return JSONResponse(
@@ -112,6 +136,13 @@ async def delete_my_account(profile=Depends(get_current_profile)):
     lock out the platform). Current behavior is *request tracking* only
     — actual deletion is an admin responsibility per the runbook, because
     it spans Supabase Auth, HF repos, and container-local caches.
+
+    Side effects:
+      1. Cancels any running/queued training the user owns so credits and
+         GPU stop burning while the request sits in the admin queue.
+      2. Records deletion_requested_at on the users row. If that write
+         fails the endpoint returns 500 — silently returning success
+         used to mean an admin would never see the request.
     """
     if profile["role"] == "admin":
         return JSONResponse(
@@ -123,18 +154,77 @@ async def delete_my_account(profile=Depends(get_current_profile)):
                 )
             },
         )
-    # Best-effort record the request. No dedicated table yet; flag it on
-    # the user row so admins see pending deletions in the dashboard.
+
     supabase = get_supabase()
+    uid = profile["id"]
+
+    # 1. Cancel any in-flight trainings. Best-effort: a Modal cancel
+    #    failure shouldn't block the user's deletion request, but the row
+    #    is still marked canceled locally so credits free up.
+    active = (
+        supabase.table("trainings")
+        .select("id, cloud_job_id")
+        .eq("user_id", uid)
+        .in_("status", ["queued", "running"])
+        .execute()
+    )
+    cancelled_ids: list = []
+    for row in active.data or []:
+        if row.get("cloud_job_id"):
+            try:
+                await cancel_training_job(row["cloud_job_id"])
+            except Exception as exc:
+                logger.warning(
+                    "Modal cancel failed in /me/delete for training %s: %s",
+                    row["id"], exc,
+                )
+        try:
+            supabase.table("trainings").update(
+                {
+                    "status": "canceled",
+                    "terminated_at": datetime.now(timezone.utc).isoformat(),
+                    "error_message": "Auto-canceled: account deletion requested",
+                }
+            ).eq("id", row["id"]).execute()
+            cancelled_ids.append(row["id"])
+        except Exception as exc:
+            logger.warning(
+                "Could not mark training %s canceled in /me/delete: %s",
+                row["id"], exc,
+            )
+
+    # 2. Record the deletion request. Migration 007 guarantees the
+    #    column exists; a failure here is a real DB / network error and
+    #    must be surfaced — silently returning success used to mean an
+    #    admin would never see the request.
     try:
-        supabase.table("users").update(
-            {"deletion_requested_at": datetime.now(timezone.utc).isoformat()}
-        ).eq("id", profile["id"]).execute()
+        result = (
+            supabase.table("users")
+            .update({"deletion_requested_at": datetime.now(timezone.utc).isoformat()})
+            .eq("id", uid)
+            .execute()
+        )
+        if not result.data:
+            raise RuntimeError("update returned no rows")
     except Exception as exc:
-        logger.warning("delete_my_account write failed (column may not exist): %s", exc)
-    logger.info("Deletion request from user=%s role=%s", profile["id"], profile["role"])
+        logger.error("delete_my_account write failed for %s: %s", uid, exc)
+        return JSONResponse(
+            status_code=500,
+            content={
+                "detail": (
+                    "Loeschanfrage konnte nicht gespeichert werden — bitte "
+                    "erneut versuchen oder den Administrator informieren."
+                )
+            },
+        )
+
+    logger.info(
+        "Deletion request from user=%s role=%s (canceled %d active trainings)",
+        uid, profile["role"], len(cancelled_ids),
+    )
     return {
         "status": "requested",
+        "canceled_trainings": cancelled_ids,
         "message": (
             "Your deletion request was recorded. An administrator will "
             "process it within 30 days per GDPR Art. 17. Your data will "

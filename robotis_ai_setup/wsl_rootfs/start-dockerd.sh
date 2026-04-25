@@ -20,15 +20,20 @@ if ! pgrep -x dockerd >/dev/null 2>&1; then
     spawn_dockerd
 fi
 
-# Background watchdog. Fire-and-forget via nohup so killing the boot-command
-# shell doesn't take the watchdog with it.
-(
+# Background watchdog. The boot-command shell exits as soon as this
+# script returns; without `nohup` here, a SIGHUP to the boot shell
+# (e.g. on a non-default huponexit, or some shells) would also tear
+# down the bare `( ... ) &` subshell — leaving a single dockerd with
+# no respawn on the next crash, exactly the failure mode this watchdog
+# was meant to fix. `nohup sh -c '...'` ignores SIGHUP unconditionally,
+# matching how `spawn_dockerd` already protects dockerd itself.
+nohup sh -c '
     while true; do
         sleep 5
         if ! pgrep -x dockerd >/dev/null 2>&1; then
             echo "[$(date -u +%FT%TZ)] dockerd not running — respawning" \
                 >> /var/log/dockerd.log
-            spawn_dockerd
+            nohup /usr/bin/dockerd >> /var/log/dockerd.log 2>&1 &
         fi
     done
-) </dev/null >/dev/null 2>&1 &
+' </dev/null >/dev/null 2>&1 &

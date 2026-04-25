@@ -76,6 +76,15 @@ if ($addedCount -gt 0) {
     Write-OK "All recommended settings already present"
 }
 
-# IMPORTANT: Do NOT set networkingMode=mirrored
-# Docker Desktop manages its own port forwarding from WSL2 to Windows
-Write-Host "   Note: networkingMode left at default (Docker Desktop manages port forwarding)" -ForegroundColor Gray
+# networkingMode left at default (NAT). WSL2's built-in localhost
+# forwarder proxies Windows localhost:PORT to the distro's loopback,
+# which is what the GUI's "Browser oeffnen" relies on. Mirrored mode
+# would also work but has known incompatibilities with some VPNs and
+# AV products in school IT environments.
+#
+# (Historical note: an older revision of this comment said
+# "Docker Desktop manages its own port forwarding from WSL2 to Windows".
+# That was true when EduBotics shipped with Docker Desktop. We removed
+# Docker Desktop in favor of a bundled headless dockerd inside the
+# EduBotics WSL distro, so DD is no longer in the picture.)
+Write-Host "   Note: networkingMode left at default (WSL2 localhost forwarder)" -ForegroundColor Gray

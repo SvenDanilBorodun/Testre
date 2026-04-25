@@ -3,6 +3,23 @@
 ;
 ; Ships a bundled WSL2 distro (assets\edubotics-rootfs.tar.gz) containing
 ; headless Docker Engine. Docker Desktop is uninstalled during setup if present.
+;
+; ─── Pinned third-party dependencies ──────────────────────────────────
+; usbipd-win is downloaded + executed elevated during install. We pin
+; the exact version + SHA256 here so install_prerequisites.ps1 can
+; verify the MSI before msiexec runs — defends against MITM/mirror
+; tampering and against an upstream `latest` shipping a breaking change.
+;
+; Release procedure when bumping usbipd-win:
+;   1. Update UsbipdVersion below.
+;   2. Download the new MSI from the GitHub releases page.
+;   3. Get-FileHash <path> -Algorithm SHA256 — paste the hex into UsbipdSha256.
+;   4. Smoke-test the installer end-to-end on a clean Windows VM.
+#define UsbipdVersion "5.0.0"
+; UsbipdSha256: leave as the placeholder ONLY if you intentionally want
+; the unsigned-download fallback (install_prerequisites.ps1 then logs a
+; yellow "SHA256 pin not set" warning). Real releases must fill this.
+#define UsbipdSha256 "RELEASE_PIN_NEEDED"
 
 [Setup]
 AppId={{B7E3F2A1-8C4D-4E5F-9A6B-1D2E3F4A5B6C}
@@ -76,8 +93,10 @@ Filename: "powershell.exe"; \
   Flags: runhidden waituntilterminated
 
 ; Step 1: Voraussetzungen installieren (WSL2, usbipd)
+; Pin usbipd-win to the version + SHA256 declared at the top of this
+; .iss. install_prerequisites.ps1 verifies the SHA before msiexec runs.
 Filename: "powershell.exe"; \
-  Parameters: "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File ""{app}\scripts\install_prerequisites.ps1"""; \
+  Parameters: "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File ""{app}\scripts\install_prerequisites.ps1"" -UsbipdMsiUrl ""https://github.com/dorssel/usbipd-win/releases/download/v{#UsbipdVersion}/usbipd-win_{#UsbipdVersion}.msi"" -UsbipdMsiSha256 ""{#UsbipdSha256}"""; \
   StatusMsg: "Voraussetzungen werden installiert (WSL2, usbipd)..."; \
   Flags: runhidden waituntilterminated
 

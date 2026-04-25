@@ -185,7 +185,36 @@ Track completion in `admin_deletion_log` (planned — not yet implemented).
 
 ---
 
-## 8. First-install bootstrap
+## 8. Cloud API rate limiter — operating constraints
+
+`cloud_training_api/app/main.py` ships an in-process `RateLimiter`
+(10/min on `/trainings/start`, 20/min on `/trainings/cancel`) keyed by
+the leftmost `X-Forwarded-For` entry — Railway's edge always sets it,
+so we get one bucket per real client IP rather than one shared bucket
+behind the proxy.
+
+State lives **in the uvicorn process**. Two consequences:
+
+1. **Stay at one worker.** `cloud_training_api/Dockerfile` runs
+   `uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}` with no
+   `--workers` flag — uvicorn's default is 1. If you ever add
+   `--workers N` to that CMD, the effective limit becomes `N × <configured>`
+   per IP.
+2. **No state across instances.** If we ever horizontally scale the
+   Railway service (multiple replicas), each replica gets its own
+   buckets. At that point, replace the in-process limiter with a
+   Redis-backed implementation (e.g. `slowapi` with a Redis storage
+   backend). The CORS validator and rule list at the top of `main.py`
+   stay the same.
+
+A 429 returned from the limiter carries CORS headers because
+`RateLimitMiddleware` is added BEFORE `CORSMiddleware` (Starlette wraps
+in reverse, so CORS becomes the outermost layer). Do not swap that
+order — the middleware comment in `main.py` calls it out.
+
+---
+
+## 9. First-install bootstrap
 
 ```bash
 cd robotis_ai_setup

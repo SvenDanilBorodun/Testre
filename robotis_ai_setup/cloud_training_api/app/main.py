@@ -6,8 +6,9 @@ from threading import Lock
 from urllib.parse import urlparse
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.routes.admin import router as admin_router
@@ -70,9 +71,12 @@ logger.info("CORS allowed origins: %s", allowed_origins)
 
 # ─── Simple in-process rate limiter ────────────────────────────────────
 # Stops a student script from hammering /trainings/start or the auth
-# endpoints. Keyed by client IP; trades cross-instance accuracy for
-# zero-dependency. For a multi-instance Railway deploy this is per-pod,
-# which is still a large reduction vs unbounded.
+# endpoints. Keyed by client IP from X-Forwarded-For (Railway proxies
+# everything; request.client.host alone would be the proxy IP and every
+# student would share one bucket). Trades cross-instance accuracy for
+# zero-dependency: state lives in-process, so this only behaves correctly
+# at uvicorn --workers 1 (Railway default). If we ever scale out, swap
+# to Redis-backed slowapi.
 class RateLimiter:
     def __init__(self) -> None:
         # { bucket_name: { key: deque[timestamps] } }
@@ -100,17 +104,38 @@ _RATE_LIMIT_RULES: list[tuple[str, int, float]] = [
 ]
 
 
+def _client_ip(request: Request) -> str:
+    """Resolve the real client IP behind Railway's proxy.
+
+    request.client.host is the proxy address — every student's request
+    would carry the same value, so a per-IP limiter would behave as one
+    global bucket. Railway always sets X-Forwarded-For; the leftmost
+    entry is the original client.
+    """
+    xff = request.headers.get("x-forwarded-for", "")
+    if xff:
+        first = xff.split(",")[0].strip()
+        if first:
+            return first
+    return request.client.host if request.client else "unknown"
+
+
 class RateLimitMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         path = request.url.path
         for prefix, limit, window in _RATE_LIMIT_RULES:
             if path.startswith(prefix):
-                client_ip = request.client.host if request.client else "unknown"
+                client_ip = _client_ip(request)
                 if not _rate_limiter.check(prefix, client_ip, limit, window):
                     logger.warning("Rate limit hit on %s from %s", prefix, client_ip)
-                    raise HTTPException(
+                    # Return a Response directly. Raising HTTPException
+                    # inside BaseHTTPMiddleware.dispatch is a footgun:
+                    # Starlette doesn't route middleware exceptions
+                    # through FastAPI's exception handlers, so the
+                    # client would see a 500 instead of a clean 429.
+                    return JSONResponse(
                         status_code=429,
-                        detail="Too many requests — please wait a moment.",
+                        content={"detail": "Too many requests — please wait a moment."},
                     )
                 break
         return await call_next(request)

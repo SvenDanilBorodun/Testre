@@ -508,15 +508,21 @@ const InfoPanel = () => {
         <div className={clsx('flex', 'items-center', 'mb-2')}>
           <span className={classLabel}>Privater Modus</span>
           <div className={clsx('flex', 'items-center')}>
+            {/* Locked on by policy. The server-side data_manager overlay
+                forces private=True regardless of what the UI sends, to
+                keep classroom recordings (faces, voices) off the public
+                HF index. Lehrer können einzelne Repos später öffentlich
+                machen. */}
             <input
               className={classCheckbox}
               type="checkbox"
-              checked={!!info.privateMode}
-              onChange={(e) => handleChange('privateMode', e.target.checked)}
-              disabled={!isEditable}
+              checked={true}
+              readOnly
+              disabled
+              title="Aufnahmen sind aus Datenschutzgründen immer privat. Lehrer können einzelne Repos später öffentlich machen."
             />
             <span className={clsx('ml-2', 'text-sm', 'text-gray-500')}>
-              {info.privateMode ? 'Aktiviert' : 'Deaktiviert'}
+              Immer aktiviert (Datenschutz)
             </span>
           </div>
         </div>

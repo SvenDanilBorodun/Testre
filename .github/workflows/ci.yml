@@ -103,3 +103,35 @@ jobs:
               exit 1
           fi
           echo "Patch script correctly rejected unrelated input (rc=$rc)"
+
+  nginx-validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install nginx + envsubst
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y nginx-light gettext-base
+      - name: nginx -t on web template
+        run: |
+          # Render the template with a concrete $PORT (the only var the
+          # template references). Drop our config into sites-enabled and
+          # let nginx validate it the way it would at container start.
+          # Catches bad add_header syntax, missing semicolons, malformed
+          # location blocks etc. before they break the Railway web deploy.
+          export PORT=8080
+          envsubst '$PORT' \
+            < physical_ai_tools/physical_ai_manager/nginx.web.conf.template \
+            > /tmp/nginx.web.conf
+          sudo rm -f /etc/nginx/sites-enabled/default
+          sudo cp /tmp/nginx.web.conf /etc/nginx/sites-enabled/edubotics-web.conf
+          sudo nginx -t
+      - name: nginx -t on student template
+        run: |
+          # The student-mode nginx.conf is plain (no PORT envsubst), so
+          # we drop it in directly. Same goal: catch syntax drift before
+          # it hits the Docker image.
+          sudo rm -f /etc/nginx/sites-enabled/edubotics-web.conf
+          sudo cp physical_ai_tools/physical_ai_manager/nginx.conf \
+            /etc/nginx/sites-enabled/edubotics-student.conf
+          sudo nginx -t

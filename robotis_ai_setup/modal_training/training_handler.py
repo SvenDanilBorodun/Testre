@@ -423,10 +423,12 @@ def _on_shutdown(signum, frame):
         except Exception:
             pass
 
-    # Retry the status update 3x with backoff. A single failure on the
-    # terminal "failed" update used to leave the row stuck as "running"
-    # forever; with retries + the API-side stalled-worker sweep we
-    # shouldn't see zombie rows.
+    # Retry the status update 3x with short backoff. We're inside Modal's
+    # 30s SIGINT grace; the previous backoff (1+2+4 = 7s sleeps + RPC
+    # latency + a 5s proc.wait above) could exceed it under a slow
+    # Supabase, leaving the row stuck. Total sleep budget here is now
+    # ~1.5s (0.5 + 1.0); the API-side stalled-worker sweep catches any
+    # remaining zombie rows.
     for attempt in range(3):
         try:
             _update_supabase_status(
@@ -446,7 +448,7 @@ def _on_shutdown(signum, frame):
                 flush=True,
             )
             if attempt < 2:
-                time.sleep(2 ** attempt)
+                time.sleep(0.5 * (attempt + 1))
 
     _cleanup_output(job.get("model_name", ""))
     sys.exit(0)

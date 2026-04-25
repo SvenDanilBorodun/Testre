@@ -40,7 +40,11 @@ const initialState = {
     numEpisodes: 5,
     token: '',
     pushToHub: true,
-    privateMode: false,
+    // Forced true: the server-side data_manager overlay overrides this
+    // unconditionally for student/DPA reasons. Keeping the default true
+    // here so the value sent on the wire matches what gets uploaded —
+    // and the UI renders the toggle locked + checked (see InfoPanel.js).
+    privateMode: true,
     useOptimizedSave: true,
     recordRosBag2: false,
   },

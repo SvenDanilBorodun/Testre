@@ -31,15 +31,11 @@ class InferenceManager:
             self,
             device: str = 'cuda'):
 
-        # If the caller asked for CUDA but it's unavailable, fail loud instead of
-        # letting PyTorch silently no-op `.to('cuda')` and run inference on CPU
-        # (which drops 30 Hz to <5 Hz and makes the arm lag its tick tolerance).
-        if device == 'cuda' and not torch.cuda.is_available():
-            raise RuntimeError(
-                'Inferenz benoetigt eine CUDA-faehige GPU, aber keine wurde '
-                'gefunden. Bitte pruefen: NVIDIA-Treiber auf dem Windows-Host, '
-                '`nvidia-smi` in der WSL2-Distro, docker-compose.gpu.yml aktiv.'
-            )
+        # NOTE: CUDA availability is checked in load_policy(), NOT here.
+        # InferenceManager is constructed unconditionally in
+        # PhysicalAIServer.init_ros_params() — including when the user is
+        # only recording. Failing the constructor on a CPU-only/dev box
+        # would also break recording mode, which doesn't need a GPU.
         self.device = device
         self.policy_type = None
         self.policy_path = None
@@ -78,6 +74,10 @@ class InferenceManager:
         self._action_max_delta = (
             np.asarray(max_delta_per_tick, dtype=np.float32) if max_delta_per_tick else None
         )
+        # Reset the shape-mismatch warning so a reconfigured robot gets
+        # a fresh notification if the new limits still don't match the
+        # action vector length.
+        self._warned_action_shape = False
 
     def validate_policy(self, policy_path: str) -> bool:
         result_message = ''
@@ -107,6 +107,19 @@ class InferenceManager:
         return True, f'Policy {policy_type} is valid.'
 
     def load_policy(self):
+        # CUDA check moved here from __init__: failing the constructor
+        # would also break recording-mode init (see __init__ comment).
+        # Returning False keeps the ROS node alive so the operator can
+        # see the German error in TaskStatus instead of a hard crash.
+        if self.device == 'cuda' and not torch.cuda.is_available():
+            print(
+                '[FEHLER] Inferenz benoetigt eine CUDA-faehige GPU, aber '
+                'keine wurde gefunden. Bitte pruefen: NVIDIA-Treiber auf '
+                'dem Windows-Host, `nvidia-smi` in der WSL2-Distro, '
+                'docker-compose.gpu.yml aktiv.',
+                flush=True,
+            )
+            return False
         try:
             policy_cls = self._get_policy_class(self.policy_type)
             self.policy = policy_cls.from_pretrained(self.policy_path)
@@ -124,6 +137,19 @@ class InferenceManager:
         """Reset policy state (action queue, temporal ensemble) between episodes."""
         if self.policy is not None and hasattr(self.policy, 'reset'):
             self.policy.reset()
+        # Drop the per-tick delta-cap memory so the first action of a new
+        # episode isn't clamped against the LAST action of the previous
+        # one — which can be far away if the operator repositioned the
+        # arm between episodes, freezing the arm at the cap until it
+        # walks across the gap.
+        self._last_action = None
+        # Drop the per-camera stale-frame dedupe + last-seen state so a
+        # new episode's first frame is always treated as "fresh" and a
+        # camera that re-froze gets a fresh warning instead of being
+        # silently masked by the prior episode's hashes.
+        self._last_image_hashes.clear()
+        self._last_image_change_time.clear()
+        self._last_stale_warn_time.clear()
 
     def _read_expected_image_keys(self) -> list[str]:
         """Read expected observation.images.* keys from the policy config."""
@@ -165,7 +191,18 @@ class InferenceManager:
         now = time.monotonic()
         halt_on: str | None = None
         for name, img in images.items():
-            h = hash(img.data.tobytes()[:1024])  # hash first 1KB for speed
+            # Sample 4 sparse 256-byte slices (start, ¼, ½, ¾) instead of
+            # the first 1 KB. A static row 0 with motion below would have
+            # falsely tested as stale under the contiguous-prefix scheme.
+            buf = img.data.tobytes()
+            n = len(buf)
+            if n <= 1024:
+                sample = buf
+            else:
+                slice_size = 256
+                offsets = (0, n // 4, n // 2, (3 * n) // 4)
+                sample = b''.join(buf[o:o + slice_size] for o in offsets)
+            h = hash(sample)
             prev = self._last_image_hashes.get(name)
             if prev != h:
                 self._last_image_hashes[name] = h
@@ -290,6 +327,22 @@ class InferenceManager:
                         flush=True,
                     )
                 action = clipped
+            else:
+                # Length mismatch (e.g. a custom robot with a different
+                # joint count) means the clamp would be wrong, so we
+                # silently skip it. Fail loud once so the operator knows
+                # the safety net is OFF for this configuration. NaN/inf
+                # guard above still runs.
+                if not getattr(self, '_warned_action_shape', False):
+                    print(
+                        f'[WARNUNG] Aktion hat {len(action)} Werte, '
+                        f'Gelenklimits sind fuer {len(self._action_min)} '
+                        f'konfiguriert — Limits werden NICHT erzwungen. '
+                        f'Bitte set_action_limits() in physical_ai_server.py '
+                        f'auf den aktiven Roboter abstimmen.',
+                        flush=True,
+                    )
+                    self._warned_action_shape = True
 
         if self._action_max_delta is not None and self._last_action is not None:
             if len(action) == len(self._last_action):

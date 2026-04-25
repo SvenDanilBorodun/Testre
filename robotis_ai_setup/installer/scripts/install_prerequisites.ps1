@@ -100,7 +100,17 @@ try {
 } catch { }
 
 if (-not $usbipdInstalled) {
+    # Fail loud if the .iss was published without bumping the SHA pin.
+    # The literal sentinel comes from robotis_ai_setup.iss UsbipdSha256.
+    if ($UsbipdMsiSha256 -eq "RELEASE_PIN_NEEDED") {
+        Write-Host "ERROR: usbipd-win SHA256 pin was not filled in for this release." -ForegroundColor Red
+        Write-Host "       Update UsbipdSha256 in robotis_ai_setup.iss before shipping." -ForegroundColor Red
+        Write-Host "       (Get-FileHash <downloaded.msi> -Algorithm SHA256)" -ForegroundColor Red
+        exit 1
+    }
+
     Write-Host "   Downloading usbipd-win..." -ForegroundColor White
+    Write-Host "   URL: $UsbipdMsiUrl" -ForegroundColor Gray
     $msiPath = "$env:TEMP\usbipd-win.msi"
     Invoke-WebRequest -Uri $UsbipdMsiUrl -OutFile $msiPath -UseBasicParsing
 

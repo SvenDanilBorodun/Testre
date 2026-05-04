@@ -1,7 +1,8 @@
-# Rollout: Teacher / Classroom / Student Account System
+# 23 — Rollout: Teacher / Classroom / Student Account System
 
-This document covers the post-merge steps needed to ship the new account system
-to production. The code is done; these are the manual ops actions.
+> **What this file is:** post-merge ops checklist for the 3-tier account system (admin → teacher → student). Cross-references to [`12-supabase.md`](12-supabase.md) (migration 002), [`10-cloud-api.md`](10-cloud-api.md) (teacher/admin routes), [`13-frontend-react.md`](13-frontend-react.md) (web mode dashboards).
+>
+> The code is done; these are the manual ops actions.
 
 ## Status summary
 

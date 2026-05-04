@@ -1,7 +1,7 @@
 -- 007_deletion_requested_at.sql
 -- Add users.deletion_requested_at so /me/delete (GDPR Art. 17) can
 -- record a deletion request without log warnings. Actual deletion
--- remains manual per OPERATIONS_RUNBOOK.md §7.
+-- remains manual per context/20-operations.md §7.
 --
 -- Applied to production via Supabase MCP apply_migration on 2026-04-24.
 

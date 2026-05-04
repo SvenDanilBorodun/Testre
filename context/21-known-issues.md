@@ -1,7 +1,10 @@
-# EduBotics Deep Audit
+# 21 — Known Issues (Audit Findings)
 
-Companion to `CLAUDE.md` (map) and `CLAUDE_PIPELINE.md` (how it works).
-This document is **what's wrong, what's risky, what to fix**. Nine parallel audits (eight per pipeline stage + one cross-cutting ops/security pass) produced ~200 raw findings; this file is the deduped, ranked, verified consolidation.
+> **What this file is:** the static-review punch-list. ~200 raw findings → triage list of top-20, cross-cutting themes, and stage-by-stage detail.
+> Companion to [`01-architecture.md`](01-architecture.md) (the map) and [`02-pipeline.md`](02-pipeline.md) (how it works).
+> **This document is what's wrong, what's risky, what to fix.**
+>
+> **Future Claude must check this file before touching safety-critical paths** (arm control, recording, training dispatch, auth) so it doesn't reintroduce a known bug. Severity tagged on every finding.
 
 Structure:
 - §0 methodology + corrections
@@ -31,7 +34,7 @@ Nine `Explore` agents were dispatched in parallel, one per stage plus a cross-cu
 
 ### What I didn't audit
 - **LeRobot itself** (`physical_ai_tools/lerobot/` @ `989f3d05`). It's a byte-for-byte upstream snapshot; auditing it would be an LeRobot upstream review, not an EduBotics review.
-- **The React source code in depth** beyond what's in `FRONTEND_UX_FOLLOWUPS.md`. The agent confirmed the known issues exist and added more; the full React audit is a separate scope.
+- **The React source code in depth** beyond what's in `22-frontend-followups.md`. The agent confirmed the known issues exist and added more; the full React audit is a separate scope.
 - **Runtime behavior** — this is a static code review. Anything marked "can hang indefinitely" or "can race" should be reproduced empirically before investing in a fix.
 
 ---
@@ -296,7 +299,7 @@ German students, data crossing US-hosted Supabase (`fnnbysrjkfugsqzwcksd.supabas
 
 ### 3.6 React SPA `physical_ai_manager`
 
-Many of these duplicate `FRONTEND_UX_FOLLOWUPS.md`; only the net-new issues listed here.
+Many of these duplicate `22-frontend-followups.md`; only the net-new issues listed here.
 
 **Critical**
 - **401 on `/me` leaves app in limbo.** `StudentApp.js:122–141`, `WebApp.js:40–63`. Exception swallowed; role check never runs; Redux has session but no profile → blank UI forever. On 401, call `signOut()` + redirect to login.
@@ -467,7 +470,7 @@ Security and operational risk.
 
 Worth noting for future audits:
 - **LeRobot upstream audit** (v0.2.0 @989f3d05). Byte-identical snapshot; if upstream has a bug, so do we.
-- **Full React source walk.** `FRONTEND_UX_FOLLOWUPS.md` + the agent pass touched the surface; a component-by-component review is its own scope.
+- **Full React source walk.** `22-frontend-followups.md` + the agent pass touched the surface; a component-by-component review is its own scope.
 - **Runtime / dynamic testing.** Everything here is static. Claims like "can hang forever" or "race can occur" need empirical reproduction before weighing investment.
 - **Penetration testing.** Nothing here simulates a motivated attacker (e.g. Supabase JWT forgery, Modal RCE via crafted checkpoints, rosbridge injection from another LAN host).
 - **Load testing.** Dedupe behavior, realtime subscription scaling, Modal dispatch under burst, HF rate limits — all untested.
@@ -476,3 +479,16 @@ Worth noting for future audits:
 ---
 
 **Document status:** draft. Findings are from a static code review conducted 2026-04-24. Re-run after any material change to `physical_ai_server/` overlays, `training_handler.py`, or migrations 007+.
+
+---
+
+## How to use this file
+
+1. **Before touching any code path**, search this file for the file path or function name.
+2. If found: read the finding before editing. Either fix the underlying issue or be careful not to make it worse.
+3. Reference findings by section number when discussing tradeoffs (e.g., "this would conflict with §3.7 #14 — HF download has no timeout").
+4. Items shipped/fixed should be **deleted** from this file with a note in `git log`.
+
+---
+
+**Last verified:** 2026-05-04 (against the deep dives that produced this index).

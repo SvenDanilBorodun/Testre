@@ -1,8 +1,8 @@
-# Frontend UX follow-ups
+# 22 — Frontend UX Follow-ups
 
-This is a punch-list of UX issues identified in the audit of
-`physical_ai_tools/physical_ai_manager/` (the React SPA students use to
-record, train, and run inference).
+> **What this file is:** a punch-list of UX issues in `physical_ai_tools/physical_ai_manager/` (the React SPA). Companion to [`13-frontend-react.md`](13-frontend-react.md) (how the frontend works) and [`21-known-issues.md`](21-known-issues.md) §3.6 (severity-ranked).
+>
+> These are upstream code issues we've identified but not patched. See "How to address these later" at the bottom.
 
 **Why is this only a list and not a fix?** The React app is upstream ROBOTIS
 code. We don't ship overlay patches against built JavaScript because every fix

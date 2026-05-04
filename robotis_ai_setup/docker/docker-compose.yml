@@ -32,7 +32,7 @@ services:
     # The arm container needs privileged + /dev to talk to Dynamixel over
     # /dev/ttyACM* (character-device nodes that are created dynamically by
     # udev and can't be stably pre-mounted). Scoping this down requires a
-    # deeper rework than fits here — tracked in CLAUDE_AUDIT.md §3.3.
+    # deeper rework than fits here — tracked in context/21-known-issues.md §3.3.
     privileged: true
     # Resource cap: one runaway ROS node should not OOM the distro and
     # take down all three containers + corrupt ai_workspace.

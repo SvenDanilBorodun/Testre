@@ -1,0 +1,14 @@
+# Project a pixel click on the named camera back to a base-frame point on
+# the table plane (z = z_table from scene calibration). Used by the
+# Roboter Studio editor to let students "pin" a destination by clicking
+# on the live camera feed.
+string camera
+uint16 pixel_x
+uint16 pixel_y
+string label
+---
+bool success
+float32 world_x
+float32 world_y
+float32 world_z
+string message

@@ -1,0 +1,170 @@
+#!/usr/bin/env python3
+#
+# Copyright 2025 EduBotics
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+"""Motion primitives for the Roboter Studio workflow runtime.
+
+Each handler takes the ``WorkflowContext`` plus the block's args dict.
+Args are pre-evaluated by the interpreter — value-block inputs come in
+fully resolved (a destination value is already a ``{x, y, z}`` dict, a
+detection is the ``Detection`` instance, etc.). Handlers raise
+``WorkflowError`` with a German user-facing message on any failure.
+"""
+
+from __future__ import annotations
+
+import math
+import time
+from typing import Any
+
+from physical_ai_server.workflow.trajectory_builder import build_segment, chunked_publish
+
+
+HOME_JOINTS_RAD = [0.0, -math.pi / 4, math.pi / 4, 0.0, 0.0]
+DEFAULT_APPROACH_HEIGHT_M = 0.06
+GRIPPER_OPEN_RAD = 0.8
+GRIPPER_CLOSED_RAD = -0.5
+
+DEFAULT_HOME_DURATION_S = 3.0
+DEFAULT_MOVE_DURATION_S = 2.5
+DEFAULT_GRIPPER_DURATION_S = 0.5
+DEFAULT_APPROACH_DURATION_S = 1.5
+DEFAULT_GRASP_DURATION_S = 1.0
+
+
+class WorkflowError(Exception):
+    """Raised by handlers with a German message ready for the editor's
+    log strip and toast."""
+
+
+def _publish_motion(ctx, q_start: list[float], q_end: list[float], duration_s: float) -> None:
+    waypoints = build_segment(q_start, q_end, duration_s)
+    ok = chunked_publish(
+        publisher=ctx.publisher,
+        points=waypoints,
+        safety_apply=ctx.safety.apply if ctx.safety else None,
+        should_stop=ctx.should_stop,
+    )
+    if not ok:
+        raise WorkflowError('Workflow wurde gestoppt.')
+
+
+def _solve_or_raise(ctx, target_xyz: tuple[float, float, float], free_yaw: bool = True) -> list[float]:
+    if ctx.ik is None:
+        raise WorkflowError(
+            'Kein IK-Solver verfügbar. Bitte zuerst die Kalibrierung abschließen.'
+        )
+    seed = ctx.last_arm_joints or HOME_JOINTS_RAD
+    solution = ctx.ik.solve(target_xyz=target_xyz, seed=seed, free_yaw=free_yaw)
+    if solution is None:
+        raise WorkflowError('Position außerhalb des Arbeitsbereichs.')
+    return list(solution)
+
+
+def _resolve_target(value: Any, ctx) -> tuple[float, float, float]:
+    """Turn an evaluated input value into a base-frame (x, y, z) point.
+
+    Accepts: a destination name (str → looked up in ``ctx.destinations``),
+    a destination dict, a Detection instance, or an ``(x, y, z)`` tuple.
+    """
+    if value is None:
+        raise WorkflowError('Block hat kein Ziel erhalten.')
+    if isinstance(value, str):
+        if value not in ctx.destinations:
+            raise WorkflowError(f'Unbekanntes Ziel: {value}')
+        d = ctx.destinations[value]
+        return float(d['x']), float(d['y']), float(d['z'])
+    if isinstance(value, dict):
+        if 'world_xyz_m' in value and value['world_xyz_m'] is not None:
+            x, y, z = value['world_xyz_m']
+            return float(x), float(y), float(z)
+        if all(k in value for k in ('x', 'y', 'z')):
+            return float(value['x']), float(value['y']), float(value['z'])
+    if hasattr(value, 'world_xyz_m') and value.world_xyz_m is not None:
+        x, y, z = value.world_xyz_m
+        return float(x), float(y), float(z)
+    if isinstance(value, (list, tuple)) and len(value) == 3:
+        return float(value[0]), float(value[1]), float(value[2])
+    raise WorkflowError('Ziel-Wert konnte nicht ausgewertet werden.')
+
+
+def home(ctx, args: dict[str, Any]) -> None:
+    q_start = ctx.last_full_joints
+    q_end = list(HOME_JOINTS_RAD) + [GRIPPER_OPEN_RAD]
+    _publish_motion(ctx, q_start, q_end, DEFAULT_HOME_DURATION_S)
+    ctx.last_arm_joints = list(HOME_JOINTS_RAD)
+    ctx.last_full_joints = q_end
+
+
+def open_gripper(ctx, args: dict[str, Any]) -> None:
+    q_start = ctx.last_full_joints
+    q_end = q_start[:5] + [GRIPPER_OPEN_RAD]
+    _publish_motion(ctx, q_start, q_end, DEFAULT_GRIPPER_DURATION_S)
+    ctx.last_full_joints = q_end
+
+
+def close_gripper(ctx, args: dict[str, Any]) -> None:
+    q_start = ctx.last_full_joints
+    q_end = q_start[:5] + [GRIPPER_CLOSED_RAD]
+    _publish_motion(ctx, q_start, q_end, DEFAULT_GRIPPER_DURATION_S)
+    ctx.last_full_joints = q_end
+
+
+def move_to(ctx, args: dict[str, Any]) -> None:
+    target = _resolve_target(args.get('destination'), ctx)
+    arm_q = _solve_or_raise(ctx, target)
+    q_end = arm_q + [ctx.last_full_joints[5]]
+    _publish_motion(ctx, ctx.last_full_joints, q_end, DEFAULT_MOVE_DURATION_S)
+    ctx.last_arm_joints = arm_q
+    ctx.last_full_joints = q_end
+
+
+def pickup(ctx, args: dict[str, Any]) -> None:
+    target = _resolve_target(args.get('target'), ctx)
+    above = (target[0], target[1], target[2] + DEFAULT_APPROACH_HEIGHT_M)
+
+    above_arm_q = _solve_or_raise(ctx, above)
+    grasp_arm_q = _solve_or_raise(ctx, target)
+    lift_arm_q = above_arm_q
+
+    open_q = ctx.last_full_joints[:5] + [GRIPPER_OPEN_RAD]
+    above_q = above_arm_q + [GRIPPER_OPEN_RAD]
+    grasp_q = grasp_arm_q + [GRIPPER_OPEN_RAD]
+    closed_q = grasp_arm_q + [GRIPPER_CLOSED_RAD]
+    lift_q = lift_arm_q + [GRIPPER_CLOSED_RAD]
+
+    _publish_motion(ctx, ctx.last_full_joints, open_q, DEFAULT_GRIPPER_DURATION_S)
+    _publish_motion(ctx, open_q, above_q, DEFAULT_MOVE_DURATION_S)
+    _publish_motion(ctx, above_q, grasp_q, DEFAULT_GRASP_DURATION_S)
+    _publish_motion(ctx, grasp_q, closed_q, DEFAULT_GRIPPER_DURATION_S)
+    _publish_motion(ctx, closed_q, lift_q, DEFAULT_APPROACH_DURATION_S)
+
+    ctx.last_arm_joints = lift_arm_q
+    ctx.last_full_joints = lift_q
+
+
+def drop_at(ctx, args: dict[str, Any]) -> None:
+    target = _resolve_target(args.get('destination'), ctx)
+    arm_q = _solve_or_raise(ctx, target)
+    q_lifted_closed = arm_q + [GRIPPER_CLOSED_RAD]
+    q_lifted_open = arm_q + [GRIPPER_OPEN_RAD]
+
+    _publish_motion(ctx, ctx.last_full_joints, q_lifted_closed, DEFAULT_MOVE_DURATION_S)
+    _publish_motion(ctx, q_lifted_closed, q_lifted_open, DEFAULT_GRIPPER_DURATION_S)
+
+    ctx.last_arm_joints = arm_q
+    ctx.last_full_joints = q_lifted_open
+
+
+def wait_seconds(ctx, args: dict[str, Any]) -> None:
+    duration = float(args.get('seconds', 1.0))
+    deadline = time.monotonic() + duration
+    while time.monotonic() < deadline:
+        if ctx.should_stop():
+            raise WorkflowError('Workflow wurde gestoppt.')
+        time.sleep(min(0.05, deadline - time.monotonic()))

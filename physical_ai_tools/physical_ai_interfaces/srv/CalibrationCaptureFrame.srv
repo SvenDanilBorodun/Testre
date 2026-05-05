@@ -1,0 +1,10 @@
+# Capture a single calibration frame for the current step. For intrinsic
+# steps the frame is added to the running set; for hand-eye steps the
+# current robot pose is also recorded alongside the frame.
+string camera
+---
+bool success
+uint16 frames_captured
+uint16 frames_required
+float32 last_view_rms
+string message

@@ -1,0 +1,10 @@
+# Start a calibration step. The CalibrationManager initialises the
+# requested step's state machine and waits for capture/solve calls.
+#
+# camera: 'gripper' or 'scene'
+# step:   'intrinsic' | 'handeye' | 'color_profile'
+string camera
+string step
+---
+bool success
+string message

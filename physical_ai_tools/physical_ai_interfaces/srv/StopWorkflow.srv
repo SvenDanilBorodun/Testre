@@ -1,0 +1,6 @@
+# Stop the currently running workflow. Command-side stop latency target
+# is <100 ms; the arm finishes the in-flight trajectory chunk (<=1 s)
+# before holding position, opening the gripper, and returning home.
+---
+bool success
+string message

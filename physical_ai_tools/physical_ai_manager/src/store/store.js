@@ -25,6 +25,7 @@ import editDatasetSlice from '../features/editDataset/editDatasetSlice';
 import authSlice from '../features/auth/authSlice';
 import teacherSlice from '../features/teacher/teacherSlice';
 import adminSlice from '../features/admin/adminSlice';
+import workshopSlice from '../features/workshop/workshopSlice';
 
 export const store = configureStore({
   reducer: {
@@ -36,6 +37,7 @@ export const store = configureStore({
     auth: authSlice,
     teacher: teacherSlice,
     admin: adminSlice,
+    workshop: workshopSlice,
   },
   middleware: (getDefaultMiddleware) => getDefaultMiddleware(),
 });

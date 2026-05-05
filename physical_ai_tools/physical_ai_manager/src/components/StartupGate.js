@@ -15,6 +15,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import clsx from 'clsx';
 import rosConnectionManager from '../utils/rosConnectionManager';
+import { isCloudOnlyMode } from '../utils/cloudMode';
 
 const STARTUP_TIMEOUT_MS = 90000;
 const SETTLE_DELAY_MS = 3000;
@@ -74,21 +75,6 @@ function ProgressStep({ label, done }) {
       </span>
     </div>
   );
-}
-
-// Cloud-only mode: app was opened with ?cloud=1 in the URL.
-// The GUI sets this flag when the student picked "Nur Cloud-Training" (no
-// robot hardware). We skip the ROS-waiting overlay entirely in that case —
-// there's no physical_ai_server container to connect to, and the Cloud tab
-// doesn't need rosbridge.
-function isCloudOnlyMode() {
-  if (typeof window === 'undefined') return false;
-  try {
-    const params = new URLSearchParams(window.location.search);
-    return params.get('cloud') === '1';
-  } catch {
-    return false;
-  }
 }
 
 export default function StartupGate({ children }) {

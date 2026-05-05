@@ -85,6 +85,7 @@ services:
       - /etc/localtime:/etc/localtime:ro
       - ai_workspace:/workspace
       - huggingface_cache:/root/.cache/huggingface
+      - edubotics_calib:/root/.cache/edubotics
       - /var/run/robotis/agent_sockets/physical_ai_server:/var/run/agent
       - ./physical_ai_server/.s6-keep:/etc/s6-overlay/s6-rc.d/user/contents.d/physical_ai_server:ro
     mem_limit: 6g
@@ -127,4 +128,11 @@ volumes:
   # documents the intent and pairs with a cleanup command in the GUI.
   # Set EDUBOTICS_HF_CACHE_SIZE to override.
   huggingface_cache:
+    driver: local
+  # Per-machine Roboter Studio calibration data: ChArUco intrinsics for the
+  # gripper + scene cameras, dual-method (PARK/TSAI) hand-eye transforms,
+  # and the HSV color profile. Survives `docker compose down`; only an
+  # explicit `docker volume rm edubotics_calib` (or factory reset) wipes it
+  # — desired, since re-calibration is a 15-minute teacher activity.
+  edubotics_calib:
     driver: local

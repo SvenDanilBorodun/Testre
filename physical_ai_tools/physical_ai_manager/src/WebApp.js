@@ -25,10 +25,18 @@ function WebApp() {
   const profileLoaded = useSelector((s) => s.auth.profileLoaded);
 
   useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      dispatch(setSession(session));
-      dispatch(setIsLoading(false));
-    });
+    supabase.auth
+      .getSession()
+      .then(({ data: { session } }) => {
+        dispatch(setSession(session));
+      })
+      .catch((err) => {
+        console.error('supabase.getSession failed', err);
+        toast.error('Anmeldedienst nicht erreichbar — bitte Seite neu laden.');
+      })
+      .finally(() => {
+        dispatch(setIsLoading(false));
+      });
     const {
       data: { subscription },
     } = supabase.auth.onAuthStateChange((_event, session) => {

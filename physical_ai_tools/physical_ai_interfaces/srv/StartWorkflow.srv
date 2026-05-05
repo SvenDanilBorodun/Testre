@@ -1,0 +1,9 @@
+# Start a Blockly-defined workflow. workflow_json is the serialised
+# workspace produced by Blockly.serialization.workspaces.save(). The
+# server validates it against the allowed-block-type allowlist before
+# executing.
+string workflow_json
+string workflow_id
+---
+bool success
+string message

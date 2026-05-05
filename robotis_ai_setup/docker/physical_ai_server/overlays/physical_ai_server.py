@@ -30,9 +30,14 @@ from physical_ai_interfaces.msg import (
     HFOperationStatus,
     TaskStatus,
     TrainingStatus,
+    WorkflowStatus,
 )
 from physical_ai_interfaces.srv import (
+    AutoPoseSuggest,
+    CalibrationCaptureFrame,
+    CalibrationSolve,
     ControlHfServer,
+    ExecuteCalibrationPose,
     GetDatasetList,
     GetHFUser,
     GetModelWeightList,
@@ -41,10 +46,14 @@ from physical_ai_interfaces.srv import (
     GetSavedPolicyList,
     GetTrainingInfo,
     GetUserList,
+    MarkDestination,
     SendCommand,
     SendTrainingCommand,
     SetHFUser,
     SetRobotType,
+    StartCalibration,
+    StartWorkflow,
+    StopWorkflow,
 )
 
 from physical_ai_server.communication.communicator import Communicator
@@ -84,6 +93,8 @@ class PhysicalAIServer(Node):
         self.total_joint_order = None
         self.on_recording = False
         self.on_inference = False
+        self.on_calibration = False
+        self.on_workflow = False
 
         self.hf_cancel_on_progress = False
 
@@ -113,6 +124,12 @@ class PhysicalAIServer(Node):
         self.training_timer: Optional[TimerManager] = None
         self.inference_manager: Optional[InferenceManager] = None
         self.training_manager: Optional[TrainingManager] = None
+        # Calibration manager is constructed lazily on first calibration call
+        # — same pattern as TrainingManager — so a server that never enters
+        # Roboter Studio doesn't pay the OpenCV-aruco import cost.
+        self.calibration_manager = None
+        # Workflow runtime is also lazily constructed.
+        self.workflow_manager = None
 
         # Initialize HF API Worker
         self.hf_api_worker: Optional[HfApiWorker] = None
@@ -126,6 +143,14 @@ class PhysicalAIServer(Node):
             TrainingStatus,
             '/training/status',
             pub_qos_size
+        )
+        # Roboter Studio publishes per-block phase + log strip on this
+        # topic. Depth 50 is a generous buffer for the log messages a
+        # student workflow produces while still bounded.
+        self.workflow_status_publisher = self.create_publisher(
+            WorkflowStatus,
+            '/workflow/status',
+            50,
         )
 
     def _init_ros_service(self):
@@ -149,6 +174,22 @@ class PhysicalAIServer(Node):
             ),
             ('/huggingface/control', ControlHfServer, self.control_hf_server_callback),
             ('/training/get_training_info', GetTrainingInfo, self.get_training_info_callback),
+            ('/calibration/start', StartCalibration, self.calibration_start_callback),
+            (
+                '/calibration/capture_frame',
+                CalibrationCaptureFrame,
+                self.calibration_capture_callback,
+            ),
+            ('/calibration/solve', CalibrationSolve, self.calibration_solve_callback),
+            ('/calibration/auto_pose', AutoPoseSuggest, self.calibration_auto_pose_callback),
+            (
+                '/calibration/execute_pose',
+                ExecuteCalibrationPose,
+                self.calibration_execute_pose_callback,
+            ),
+            ('/workshop/mark_destination', MarkDestination, self.mark_destination_callback),
+            ('/workflow/start', StartWorkflow, self.workflow_start_callback),
+            ('/workflow/stop', StopWorkflow, self.workflow_stop_callback),
         ]
 
         for service_name, service_type, callback in service_definitions:
@@ -619,6 +660,12 @@ class PhysicalAIServer(Node):
         """
         try:
             if request.command == SendTrainingCommand.Request.START:
+                ok, msg = self._assert_no_other_active('training')
+                if not ok:
+                    response.success = False
+                    response.message = msg
+                    return response
+
                 # Initialize training components
                 self.training_manager = TrainingManager()
                 self.training_timer = TimerManager(node=self)
@@ -791,6 +838,12 @@ class PhysicalAIServer(Node):
                     response.message = 'Restarting the recording.'
                     return response
 
+                ok, msg = self._assert_no_other_active('recording')
+                if not ok:
+                    response.success = False
+                    response.message = msg
+                    return response
+
                 self.get_logger().info('Start recording')
                 self.operation_mode = 'collection'
                 task_info = request.task_info
@@ -804,6 +857,12 @@ class PhysicalAIServer(Node):
                 response.message = 'Recording started'
 
             elif request.command == SendCommand.Request.START_INFERENCE:
+                ok, msg = self._assert_no_other_active('inference')
+                if not ok:
+                    response.success = False
+                    response.message = msg
+                    return response
+
                 self.joint_topic_types = self.communicator.get_publisher_msg_types()
                 self.operation_mode = 'inference'
                 task_info = request.task_info
@@ -823,24 +882,17 @@ class PhysicalAIServer(Node):
                 )
                 if task_info.record_inference_mode:
                     self.on_recording = True
-                # Wire the safety envelope BEFORE enabling inference so the
-                # first predicted action is already bounded. OMX-F joint
-                # limits match the Dynamixel register caps; max_delta is a
-                # generous tick-cap that stops a diverging policy from
-                # ordering a 0.5 rad jump per tick (violent motion) while
-                # allowing normal imitation-learning commands.
+                # Wire the safety envelope BEFORE enabling inference so
+                # the first predicted action is already bounded. The
+                # values come from the same loader the workflow runtime
+                # uses, so both code paths share one source of truth.
                 try:
-                    import math as _math
-                    _pi = _math.pi
-                    # joint1-5 + gripper_joint_1 in the follower's native
-                    # order. Conservative for safety — if a specific arm
-                    # needs wider limits they can be loosened per-robot.
-                    joint_min = [-_pi, -_pi / 2, -_pi / 2, -_pi, -_pi, -1.0]
-                    joint_max = [_pi, _pi / 2, _pi / 2, _pi, _pi, 1.0]
-                    # Max change per 1/fps tick, per joint. ~0.3 rad is
-                    # well under a healthy teleoperator's peak speed.
+                    joint_min, joint_max, base_delta = self._load_safety_clamps()
                     fps = float(getattr(task_info, 'fps', 30) or 30)
-                    max_delta = [0.3 / fps * 30.0] * 6
+                    # `base_delta` is calibrated against 30 Hz; rescale
+                    # for the actual policy fps so a 60 Hz policy gets
+                    # half the per-tick delta budget.
+                    max_delta = [d * 30.0 / fps for d in base_delta]
                     if hasattr(self.inference_manager, 'set_action_limits'):
                         self.inference_manager.set_action_limits(
                             joint_min=joint_min,
@@ -848,9 +900,6 @@ class PhysicalAIServer(Node):
                             max_delta_per_tick=max_delta,
                         )
                 except Exception as _e:
-                    # Never block starting inference on a safety-config
-                    # error — the NaN/inf guard and camera checks still
-                    # run even without limits.
                     self.get_logger().warning(
                         f'Safety envelope not configured: {_e}')
                 self.on_inference = True
@@ -1258,6 +1307,465 @@ class PhysicalAIServer(Node):
             response.success = False
             response.message = f'Error in HF server callback: {str(e)}'
             return response
+
+    # ------------------------------------------------------------------
+    # Roboter Studio — calibration services
+    # ------------------------------------------------------------------
+    def _assert_no_other_active(self, requested_mode: str) -> tuple[bool, str]:
+        """Reject a Roboter Studio request when another mode owns the arm.
+
+        Returns (ok, german_message). `requested_mode` is one of
+        'calibration', 'workflow', 'recording', 'inference', 'training' —
+        used only for error message clarity.
+        """
+        if self.on_recording:
+            return False, 'Aufnahme läuft gerade — bitte zuerst stoppen.'
+        if self.on_inference:
+            return False, 'Inferenz läuft gerade — bitte zuerst stoppen.'
+        if self.is_training:
+            return False, 'Training läuft gerade — bitte abwarten oder abbrechen.'
+        if requested_mode != 'calibration' and self.on_calibration:
+            return False, 'Kalibrierung läuft gerade — bitte zuerst beenden.'
+        if requested_mode != 'workflow' and self.on_workflow:
+            return False, 'Ein Workflow läuft gerade — bitte zuerst stoppen.'
+        return True, ''
+
+    def _get_or_create_calibration_manager(self):
+        if self.calibration_manager is not None:
+            return self.calibration_manager
+        try:
+            from physical_ai_server.workflow.calibration_manager import CalibrationManager
+        except ImportError as e:
+            self.get_logger().error(f'Cannot import CalibrationManager: {e}')
+            return None
+        self.calibration_manager = CalibrationManager(
+            get_frame=self._get_latest_camera_frame,
+            get_gripper_pose=self._get_current_gripper_pose,
+        )
+        return self.calibration_manager
+
+    def _get_latest_camera_frame(self, camera: str):
+        """Provider hook for the calibration manager. Returns the most recent
+        BGR frame for the named camera, or None if unavailable. Hardware
+        wiring lives in a follow-up — until then this returns None and the
+        manager produces a German user-facing error message."""
+        try:
+            if self.communicator is None:
+                return None
+            getter = getattr(self.communicator, 'get_latest_bgr_frame', None)
+            if callable(getter):
+                return getter(camera)
+        except Exception as e:
+            self.get_logger().warning(f'Camera frame provider error: {e}')
+        return None
+
+    def _get_current_gripper_pose(self):
+        """Provider hook for hand-eye calibration. Returns (R 3x3, t 3,) of
+        gripper-in-base, or None when unavailable."""
+        try:
+            if self.communicator is None:
+                return None
+            getter = getattr(self.communicator, 'get_current_gripper_pose', None)
+            if callable(getter):
+                return getter()
+        except Exception as e:
+            self.get_logger().warning(f'Gripper pose provider error: {e}')
+        return None
+
+    def calibration_start_callback(self, request, response):
+        ok, msg = self._assert_no_other_active('calibration')
+        if not ok:
+            response.success = False
+            response.message = msg
+            return response
+        manager = self._get_or_create_calibration_manager()
+        if manager is None:
+            response.success = False
+            response.message = 'Kalibrierung kann nicht initialisiert werden.'
+            return response
+        success, message = manager.start_step(request.camera, request.step)
+        if success:
+            self.on_calibration = True
+        response.success = success
+        response.message = message
+        return response
+
+    def calibration_capture_callback(self, request, response):
+        manager = self.calibration_manager
+        if manager is None:
+            response.success = False
+            response.message = 'Kalibrierung wurde nicht gestartet.'
+            return response
+        success, captured, required, last_rms, message = manager.capture_frame(request.camera)
+        response.success = success
+        response.frames_captured = captured
+        response.frames_required = required
+        response.last_view_rms = last_rms
+        response.message = message
+        return response
+
+    def calibration_solve_callback(self, request, response):
+        manager = self.calibration_manager
+        if manager is None:
+            response.success = False
+            response.message = 'Kalibrierung wurde nicht gestartet.'
+            return response
+        success, reproj, disagreement, message = manager.solve(request.camera, request.step)
+        response.success = success
+        response.reprojection_error = reproj
+        response.method_disagreement = disagreement
+        response.message = message
+        if success and request.step == 'handeye':
+            # Releasing the calibration mutex on the final solve lets the
+            # student return to the editor; intermediate solves leave the
+            # flag set so they can keep capturing more frames.
+            self.on_calibration = False
+        return response
+
+    def calibration_auto_pose_callback(self, request, response):
+        try:
+            from physical_ai_server.workflow.auto_pose import suggest_pose
+        except ImportError as e:
+            response.success = False
+            response.message = f'Auto-Pose-Modul fehlt: {e}'
+            return response
+        manager = self._get_or_create_calibration_manager()
+        if manager is None:
+            response.success = False
+            response.message = 'Kalibrierung kann nicht initialisiert werden.'
+            return response
+        # Captured quaternions diversity check intentionally weak in v1 (no
+        # IK reachability yet); PR3 will swap the stub for the real IK.
+        candidate = suggest_pose([])
+        if candidate is None:
+            response.success = False
+            response.message = 'Konnte keine erreichbare Pose finden — bitte Tafel umpositionieren.'
+            return response
+        response.success = True
+        response.target_x, response.target_y, response.target_z = (
+            float(candidate.target_xyz[0]),
+            float(candidate.target_xyz[1]),
+            float(candidate.target_xyz[2]),
+        )
+        response.target_qx, response.target_qy, response.target_qz, response.target_qw = (
+            float(candidate.target_quat[0]),
+            float(candidate.target_quat[1]),
+            float(candidate.target_quat[2]),
+            float(candidate.target_quat[3]),
+        )
+        response.message = 'Pose vorgeschlagen.'
+        return response
+
+    def mark_destination_callback(self, request, response):
+        """Project a pixel click on a calibrated camera to a base-frame
+        point on the table plane."""
+        manager = self._get_or_create_calibration_manager()
+        if manager is None or not manager.has_intrinsics(request.camera):
+            response.success = False
+            response.message = (
+                f'Kamera {request.camera} ist nicht kalibriert.'
+            )
+            return response
+        try:
+            import cv2
+            from physical_ai_server.workflow.projection import project_pixel_to_table
+            handeye_path = manager._handeye_path(request.camera)
+            if not handeye_path.exists():
+                response.success = False
+                response.message = (
+                    f'Hand-Auge-Kalibrierung der {request.camera}-Kamera fehlt.'
+                )
+                return response
+            fs = cv2.FileStorage(str(handeye_path), cv2.FILE_STORAGE_READ)
+            T = fs.getNode('transform').mat()
+            z_table_node = fs.getNode('z_table')
+            z_table = float(z_table_node.real()) if not z_table_node.empty() else 0.0
+            fs.release()
+            K = manager._intrinsics[request.camera]['K']
+            dist = manager._intrinsics[request.camera]['dist']
+            point = project_pixel_to_table(
+                float(request.pixel_x), float(request.pixel_y), K, dist, T, z_table,
+            )
+            if point is None:
+                response.success = False
+                response.message = (
+                    'Klick konnte nicht auf den Tisch projiziert werden.'
+                )
+                return response
+            response.success = True
+            response.world_x = float(point[0])
+            response.world_y = float(point[1])
+            response.world_z = float(point[2])
+            response.message = f'Ziel "{request.label}" gespeichert.'
+            # Persist into the WorkflowManager so the next workflow run
+            # can resolve "ablegen bei <label>" without a second click.
+            try:
+                wfm = self._get_or_create_workflow_manager()
+                if wfm is not None and request.label:
+                    wfm.set_destination(
+                        request.label,
+                        float(point[0]), float(point[1]), float(point[2]),
+                    )
+            except Exception:
+                pass
+            return response
+        except Exception as e:
+            response.success = False
+            response.message = f'Projektionsfehler: {e}'
+            return response
+
+    def calibration_execute_pose_callback(self, request, response):
+        # Real motion is wired in PR3 via SafetyEnvelope + IKSolver +
+        # chunked_publish. PR1 leaves this as a stub returning a German
+        # message so the wizard surfaces the dependency clearly.
+        response.success = False
+        response.message = (
+            'Auto-Anfahren ist noch nicht aktiv — bitte den Roboter manuell zur '
+            'vorgeschlagenen Pose bewegen oder auf das nächste Update warten.'
+        )
+        return response
+
+    # ------------------------------------------------------------------
+    # Roboter Studio — workflow runtime services
+    # ------------------------------------------------------------------
+    def _emit_workflow_status(self, payload: dict) -> None:
+        try:
+            msg = WorkflowStatus()
+            msg.workflow_id = str(payload.get('workflow_id', ''))
+            msg.current_block_id = str(payload.get('current_block_id', ''))
+            msg.phase = str(payload.get('phase', ''))
+            msg.log_message = str(payload.get('log_message', ''))
+            msg.progress = float(payload.get('progress', 0.0))
+            msg.error = str(payload.get('error', ''))
+            self.workflow_status_publisher.publish(msg)
+        except Exception as e:
+            self.get_logger().warning(f'workflow status publish error: {e}')
+
+    def _trajectory_publisher(self, points):
+        """Publish a chunk of (q, t_from_start_s) tuples as one
+        JointTrajectory message on /leader/joint_trajectory. Bridges the
+        chunked_publish API to the existing topic the controller listens
+        on."""
+        try:
+            from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
+        except ImportError:
+            self.get_logger().error('trajectory_msgs not available')
+            return
+        if not hasattr(self, '_workflow_traj_publisher') or self._workflow_traj_publisher is None:
+            self._workflow_traj_publisher = self.create_publisher(
+                JointTrajectory, '/leader/joint_trajectory', 10,
+            )
+        joint_names = (
+            self.total_joint_order
+            if self.total_joint_order
+            else ['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'gripper_joint_1']
+        )
+        msg = JointTrajectory()
+        msg.joint_names = list(joint_names)
+        for q, t in points:
+            point = JointTrajectoryPoint()
+            point.positions = [float(v) for v in q]
+            point.time_from_start.sec = int(t)
+            point.time_from_start.nanosec = int((t - int(t)) * 1e9)
+            msg.points.append(point)
+        self._workflow_traj_publisher.publish(msg)
+
+    def _get_or_create_workflow_manager(self):
+        if self.workflow_manager is not None:
+            return self.workflow_manager
+        try:
+            from physical_ai_server.workflow.workflow_manager import WorkflowManager
+        except ImportError as e:
+            self.get_logger().error(f'Cannot import WorkflowManager: {e}')
+            return None
+        self.workflow_manager = WorkflowManager(
+            publisher=self._trajectory_publisher,
+            ik_factory=self._build_ik_solver,
+            perception_factory=self._build_perception,
+            load_destinations=lambda: {},
+            load_calibration=self._load_workflow_calibration,
+            emit_status=self._emit_workflow_status,
+            get_scene_frame=lambda: self._get_latest_camera_frame('scene'),
+            get_gripper_frame=lambda: self._get_latest_camera_frame('gripper'),
+            get_current_pose_xyz=self._get_current_gripper_xyz,
+        )
+        joint_min, joint_max, max_delta = self._load_safety_clamps()
+        try:
+            self.workflow_manager.configure_safety(
+                joint_min=joint_min,
+                joint_max=joint_max,
+                max_delta_per_tick=max_delta,
+            )
+        except Exception as e:
+            self.get_logger().warning(f'Workflow safety envelope not configured: {e}')
+        return self.workflow_manager
+
+    def _load_safety_clamps(self):
+        """Single source of truth for the per-joint clamp + per-tick
+        delta cap. Reads ``safety_envelope`` from omx_f_config.yaml when
+        the keys are present; falls back to the same hardcoded defaults
+        the inference path uses if the config is missing or malformed."""
+        import math as _math
+        _pi = _math.pi
+        defaults_min = [-_pi, -_pi / 2, -_pi / 2, -_pi, -_pi, -1.0]
+        defaults_max = [_pi, _pi / 2, _pi / 2, _pi, _pi, 1.0]
+        defaults_delta = [0.3] * 6
+
+        try:
+            robot_type = getattr(self, 'robot_type', None) or 'omx_f'
+            param_names = [
+                'safety_envelope.joint_min',
+                'safety_envelope.joint_max',
+                'safety_envelope.max_delta_per_tick_at_30hz',
+            ]
+            declare_parameters(
+                node=self,
+                robot_type=robot_type,
+                param_names=param_names,
+                default_value=[0.0],
+            )
+            values = load_parameters(
+                node=self,
+                robot_type=robot_type,
+                param_names=param_names,
+            )
+            j_min = list(values.get('safety_envelope.joint_min') or [])
+            j_max = list(values.get('safety_envelope.joint_max') or [])
+            d_max = list(values.get('safety_envelope.max_delta_per_tick_at_30hz') or [])
+            if len(j_min) == 6 and len(j_max) == 6 and len(d_max) == 6:
+                return j_min, j_max, d_max
+        except Exception as e:
+            self.get_logger().info(f'safety_envelope config not available, using defaults: {e}')
+        return defaults_min, defaults_max, defaults_delta
+
+    def _build_ik_solver(self):
+        """Construct an IKSolver instance from the URDF in
+        ``/robot_description``. Returns None if the param isn't
+        available (the motion handler will then surface a German error)."""
+        try:
+            from rcl_interfaces.srv import GetParameters
+            urdf_string = None
+            if self.has_parameter('robot_description'):
+                urdf_string = self.get_parameter('robot_description').value
+            if not urdf_string:
+                # Try cross-node parameter lookup. /robot_state_publisher
+                # canonically owns robot_description on a typical bringup.
+                client = self.create_client(GetParameters, '/robot_state_publisher/get_parameters')
+                if client.wait_for_service(timeout_sec=1.0):
+                    request = GetParameters.Request()
+                    request.names = ['robot_description']
+                    future = client.call_async(request)
+                    rclpy.spin_until_future_complete(self, future, timeout_sec=2.0)
+                    if future.done() and future.result() is not None:
+                        params = future.result().values
+                        if params and params[0].string_value:
+                            urdf_string = params[0].string_value
+                self.destroy_client(client)
+            if not urdf_string:
+                self.get_logger().warning('robot_description not available; IK disabled.')
+                return None
+            from physical_ai_server.workflow.ik_solver import IKSolver
+            return IKSolver(urdf_string=urdf_string)
+        except Exception as e:
+            self.get_logger().error(f'IKSolver init failed: {e}')
+            return None
+
+    def _build_perception(self):
+        try:
+            from physical_ai_server.workflow.perception import Perception
+            from physical_ai_server.workflow.color_profile import ColorProfileManager
+            perc = Perception()
+            color_mgr = ColorProfileManager()
+            profile = {}
+            for color in ('rot', 'gruen', 'blau', 'gelb'):
+                rng = color_mgr.hsv_range(color)
+                if rng is not None:
+                    profile[color] = rng
+            perc.set_color_profile(profile)
+            return perc
+        except Exception as e:
+            self.get_logger().error(f'Perception init failed: {e}')
+            return None
+
+    def _get_current_gripper_xyz(self):
+        """Convenience wrapper that returns just the (x, y, z) of the
+        current gripper pose for the destination_current handler. Falls
+        back to None if the communicator doesn't expose forward
+        kinematics."""
+        try:
+            if self.communicator is None:
+                return None
+            getter = getattr(self.communicator, 'get_current_gripper_xyz', None)
+            if callable(getter):
+                return getter()
+        except Exception:
+            return None
+        return None
+
+    def _load_workflow_calibration(self):
+        """Load scene intrinsics + extrinsics + z_table for projection
+        of perception detections to base-frame XYZ. Returns a dict
+        consumed by ``WorkflowContext`` — empty when calibration files
+        are missing (perception still runs but world_xyz_m won't be
+        populated)."""
+        try:
+            from pathlib import Path
+            import os
+            import cv2
+            calib_dir = Path(os.environ.get('EDUBOTICS_CALIB_DIR', '/root/.cache/edubotics/calibration'))
+            scene_intrinsic_path = calib_dir / 'scene_intrinsics.yaml'
+            scene_handeye_path = calib_dir / 'scene_handeye.yaml'
+            if not scene_intrinsic_path.exists() or not scene_handeye_path.exists():
+                return {}
+            fs = cv2.FileStorage(str(scene_intrinsic_path), cv2.FILE_STORAGE_READ)
+            K = fs.getNode('camera_matrix').mat()
+            dist = fs.getNode('distortion_coefficients').mat()
+            fs.release()
+            fs = cv2.FileStorage(str(scene_handeye_path), cv2.FILE_STORAGE_READ)
+            T = fs.getNode('transform').mat()
+            z_node = fs.getNode('z_table')
+            z_table = float(z_node.real()) if not z_node.empty() else 0.0
+            fs.release()
+            return {
+                'scene_intrinsics': {'K': K, 'dist': dist},
+                'scene_extrinsics': T,
+                'z_table': z_table,
+            }
+        except Exception as e:
+            self.get_logger().warning(f'Calibration load failed: {e}')
+            return {}
+
+    def workflow_start_callback(self, request, response):
+        ok, msg = self._assert_no_other_active('workflow')
+        if not ok:
+            response.success = False
+            response.message = msg
+            return response
+        manager = self._get_or_create_workflow_manager()
+        if manager is None:
+            response.success = False
+            response.message = 'Workflow-Runtime kann nicht initialisiert werden.'
+            return response
+        success, message = manager.start(request.workflow_json, request.workflow_id)
+        if success:
+            self.on_workflow = True
+            # Reset on completion via the daemon thread; we don't have a
+            # neat callback so a wakeup-style poll happens in the timer.
+        response.success = success
+        response.message = message
+        return response
+
+    def workflow_stop_callback(self, request, response):
+        manager = self.workflow_manager
+        if manager is None:
+            response.success = True
+            response.message = 'Es läuft kein Workflow.'
+            return response
+        success, message = manager.stop()
+        self.on_workflow = manager.is_running
+        response.success = success
+        response.message = message
+        return response
 
     def handle_joystick_trigger(self, joystick_mode: str):
         self.get_logger().info(

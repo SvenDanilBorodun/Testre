@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import toast from 'react-hot-toast';
-import { MdAdd, MdDelete, MdEdit, MdEventNote } from 'react-icons/md';
+import { MdAdd, MdDelete, MdEdit, MdEventNote, MdConstruction } from 'react-icons/md';
 import { useDispatch, useSelector } from 'react-redux';
 import {
   createStudent,
@@ -21,6 +21,7 @@ import CreateStudentModal from './CreateStudentModal';
 import StudentRow from './StudentRow';
 import StudentTrainingHistoryDrawer from './StudentTrainingHistoryDrawer';
 import DailyProgressDrawer from './DailyProgressDrawer';
+import WorkflowTemplatesPage from '../../pages/teacher/WorkflowTemplatesPage';
 import { Btn, Card } from '../EbUI';
 
 export default function ClassroomDetail({ classroomId, onClassroomsChanged }) {
@@ -37,6 +38,7 @@ export default function ClassroomDetail({ classroomId, onClassroomsChanged }) {
   const [historyStudent, setHistoryStudent] = useState(null);
   const [showClassProgress, setShowClassProgress] = useState(false);
   const [progressStudent, setProgressStudent] = useState(null);
+  const [showWorkflowTemplates, setShowWorkflowTemplates] = useState(false);
 
   const fetchClassroom = useCallback(() => {
     if (!token || !classroomId) return;
@@ -173,6 +175,13 @@ export default function ClassroomDetail({ classroomId, onClassroomsChanged }) {
               <MdEventNote /> Klassen-Fortschritt
             </Btn>
             <Btn
+              variant="secondary"
+              onClick={() => setShowWorkflowTemplates((v) => !v)}
+              title="Roboter-Studio-Vorlagen für diese Klasse veröffentlichen"
+            >
+              <MdConstruction /> {showWorkflowTemplates ? 'Vorlagen ausblenden' : 'Workflow-Vorlagen'}
+            </Btn>
+            <Btn
               variant="primary"
               onClick={() => setShowCreateStudent(true)}
               disabled={full}
@@ -192,6 +201,11 @@ export default function ClassroomDetail({ classroomId, onClassroomsChanged }) {
 
       <div className="flex-1 overflow-y-auto">
         <div className="eb-shell">
+          {showWorkflowTemplates && (
+            <Card padded={true} className="mb-4">
+              <WorkflowTemplatesPage classroomId={classroomId} />
+            </Card>
+          )}
           {students.length === 0 ? (
             <div className="flex flex-col items-center justify-center h-full text-[var(--ink-3)] p-8 md:p-10 text-center">
               <p className="mb-4">Noch keine Schüler in dieser Klasse.</p>

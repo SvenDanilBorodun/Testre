@@ -45,6 +45,11 @@ import {
   setHFRepoIdDownload,
   setUploadStatus,
 } from '../features/editDataset/editDatasetSlice';
+import {
+  setRunState,
+  setWorkflowStatus,
+  setDetections,
+} from '../features/workshop/workshopSlice';
 import HFStatus from '../constants/HFStatus';
 import store from '../store/store';
 import rosConnectionManager from '../utils/rosConnectionManager';
@@ -53,6 +58,7 @@ export function useRosTopicSubscription() {
   const taskStatusTopicRef = useRef(null);
   const heartbeatTopicRef = useRef(null);
   const trainingStatusTopicRef = useRef(null);
+  const workflowStatusTopicRef = useRef(null);
   const previousPhaseRef = useRef(null);
   const audioContextRef = useRef(null);
   const hfStatusTopicRef = useRef(null);
@@ -568,6 +574,43 @@ export function useRosTopicSubscription() {
     subscribeHFStatus,
   ]);
 
+  const subscribeToWorkflowStatus = useCallback(async () => {
+    if (workflowStatusTopicRef.current) return;
+    if (!rosbridgeUrl) return;
+    try {
+      const ros = await rosConnectionManager.getConnection(rosbridgeUrl);
+      if (!ros || !ros.isConnected) return;
+      const topic = new ROSLIB.Topic({
+        ros,
+        name: '/workflow/status',
+        messageType: 'physical_ai_interfaces/msg/WorkflowStatus',
+      });
+      topic.subscribe((msg) => {
+        dispatch(setWorkflowStatus({
+          current_block_id: msg.current_block_id,
+          phase: msg.phase,
+          progress: msg.progress,
+          error: msg.error || '',
+          log_message: msg.log_message,
+        }));
+        if (msg.phase === 'finished' || msg.phase === 'stopped' || msg.phase === 'error') {
+          dispatch(setRunState(msg.phase));
+        } else if (msg.phase === 'running') {
+          dispatch(setRunState('running'));
+        }
+        if (msg.active_detections && msg.active_detections.length > 0) {
+          dispatch(setDetections({
+            detections: msg.active_detections,
+            labels: msg.active_detection_labels || [],
+          }));
+        }
+      });
+      workflowStatusTopicRef.current = topic;
+    } catch (e) {
+      console.error('subscribeToWorkflowStatus failed:', e);
+    }
+  }, [dispatch, rosbridgeUrl]);
+
   return {
     connected,
     subscribeToTaskStatus,
@@ -576,6 +619,7 @@ export function useRosTopicSubscription() {
     resetTaskToIdle,
     subscribeToTrainingStatus,
     subscribeHFStatus,
+    subscribeToWorkflowStatus,
     initializeSubscriptions, // Manual initialization function
   };
 }

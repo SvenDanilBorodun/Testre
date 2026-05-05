@@ -555,6 +555,87 @@ export function useRosServiceCaller() {
     [callService]
   );
 
+  // Roboter Studio — calibration services
+  const startCalibration = useCallback(
+    async (camera, step) =>
+      callService(
+        '/calibration/start',
+        'physical_ai_interfaces/srv/StartCalibration',
+        { camera, step }
+      ),
+    [callService]
+  );
+
+  const calibrationCaptureFrame = useCallback(
+    async (camera) =>
+      callService(
+        '/calibration/capture_frame',
+        'physical_ai_interfaces/srv/CalibrationCaptureFrame',
+        { camera }
+      ),
+    [callService]
+  );
+
+  const calibrationSolve = useCallback(
+    async (camera, step) =>
+      callService(
+        '/calibration/solve',
+        'physical_ai_interfaces/srv/CalibrationSolve',
+        { camera, step }
+      ),
+    [callService]
+  );
+
+  const autoPoseSuggest = useCallback(
+    async (camera) =>
+      callService(
+        '/calibration/auto_pose',
+        'physical_ai_interfaces/srv/AutoPoseSuggest',
+        { camera }
+      ),
+    [callService]
+  );
+
+  const executeCalibrationPose = useCallback(
+    async (target) =>
+      callService(
+        '/calibration/execute_pose',
+        'physical_ai_interfaces/srv/ExecuteCalibrationPose',
+        target
+      ),
+    [callService]
+  );
+
+  const startWorkflow = useCallback(
+    async (workflowJson, workflowId) =>
+      callService(
+        '/workflow/start',
+        'physical_ai_interfaces/srv/StartWorkflow',
+        { workflow_json: workflowJson, workflow_id: workflowId }
+      ),
+    [callService]
+  );
+
+  const stopWorkflow = useCallback(
+    async () =>
+      callService(
+        '/workflow/stop',
+        'physical_ai_interfaces/srv/StopWorkflow',
+        {}
+      ),
+    [callService]
+  );
+
+  const markDestination = useCallback(
+    async (camera, pixelX, pixelY, label) =>
+      callService(
+        '/workshop/mark_destination',
+        'physical_ai_interfaces/srv/MarkDestination',
+        { camera, pixel_x: pixelX, pixel_y: pixelY, label }
+      ),
+    [callService]
+  );
+
   return {
     callService,
     sendRecordCommand,
@@ -573,5 +654,13 @@ export function useRosServiceCaller() {
     getDatasetInfo,
     controlHfServer,
     getTrainingInfo,
+    startCalibration,
+    calibrationCaptureFrame,
+    calibrationSolve,
+    autoPoseSuggest,
+    executeCalibrationPose,
+    startWorkflow,
+    stopWorkflow,
+    markDestination,
   };
 }

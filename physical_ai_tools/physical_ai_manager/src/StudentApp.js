@@ -16,7 +16,7 @@
 
 import React, { useEffect, useRef } from 'react';
 import clsx from 'clsx';
-import { MdHome, MdVideocam, MdMemory, MdWidgets } from 'react-icons/md';
+import { MdHome, MdVideocam, MdMemory, MdWidgets, MdConstruction } from 'react-icons/md';
 import { GoGraph } from 'react-icons/go';
 import toast from 'react-hot-toast';
 import './App.css';
@@ -25,6 +25,7 @@ import RecordPage from './pages/RecordPage';
 import InferencePage from './pages/InferencePage';
 import TrainingPage from './pages/TrainingPage';
 import EditDatasetPage from './pages/EditDatasetPage';
+import WorkshopPage from './pages/WorkshopPage';
 import StartupGate from './components/StartupGate';
 import { LogoMark } from './components/EbUI';
 import packageJson from '../package.json';
@@ -42,19 +43,7 @@ import {
   clearSession,
 } from './features/auth/authSlice';
 import { getMe } from './services/meApi';
-
-// Cloud-only mode: app was opened with ?cloud=1. Skip ROS setup entirely so
-// the roslibjs client doesn't spam the console with connection-refused errors
-// trying to reach a rosbridge container that wasn't started.
-function isCloudOnlyMode() {
-  if (typeof window === 'undefined') return false;
-  try {
-    const params = new URLSearchParams(window.location.search);
-    return params.get('cloud') === '1';
-  } catch {
-    return false;
-  }
-}
+import { isCloudOnlyMode } from './utils/cloudMode';
 
 function StudentApp() {
   const dispatch = useDispatch();
@@ -203,6 +192,8 @@ function StudentApp() {
     dispatch(moveToPage(PageType.TRAINING));
   };
 
+  const handleWorkshopPageNavigation = () => requireRobotOrRedirect(PageType.WORKSHOP);
+
   useEffect(() => {
     return () => {
       const allStreamImgs = document.querySelectorAll('img[src*="/stream"]');
@@ -217,11 +208,12 @@ function StudentApp() {
 
   const navItems = [
     { key: PageType.HOME, label: 'Start', Icon: MdHome, onClick: handleHomePageNavigation },
-    { key: PageType.RECORD, label: 'Aufnahme', Icon: MdVideocam, onClick: handleRecordPageNavigation },
+    { key: PageType.RECORD, label: 'Aufnahme', Icon: MdVideocam, onClick: handleRecordPageNavigation, hardwareOnly: true },
     { key: PageType.TRAINING, label: 'Training', Icon: GoGraph, onClick: handleTrainingPageNavigation },
-    { key: PageType.INFERENCE, label: 'Inferenz', Icon: MdMemory, onClick: handleInferencePageNavigation },
+    { key: PageType.INFERENCE, label: 'Inferenz', Icon: MdMemory, onClick: handleInferencePageNavigation, hardwareOnly: true },
     { key: PageType.EDIT_DATASET, label: 'Daten', Icon: MdWidgets, onClick: handleEditDatasetPageNavigation, sep: true },
-  ];
+    { key: PageType.WORKSHOP, label: 'Roboter Studio', Icon: MdConstruction, onClick: handleWorkshopPageNavigation, hardwareOnly: true },
+  ].filter((n) => !cloudOnly || !n.hardwareOnly);
 
   const isDarkPage = page === PageType.RECORD || page === PageType.INFERENCE;
 
@@ -350,6 +342,8 @@ function StudentApp() {
             <TrainingPage isActive={page === PageType.TRAINING} />
           ) : page === PageType.EDIT_DATASET ? (
             <EditDatasetPage isActive={page === PageType.EDIT_DATASET} />
+          ) : page === PageType.WORKSHOP ? (
+            <WorkshopPage isActive={page === PageType.WORKSHOP} />
           ) : (
             <HomePage />
           )}

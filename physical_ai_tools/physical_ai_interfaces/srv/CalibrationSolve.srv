@@ -1,0 +1,12 @@
+# Solve the current calibration step using the captured frames. For
+# intrinsic steps reprojection_error is populated. For hand-eye steps the
+# disagreement (in degrees) between the PARK and TSAI methods is reported
+# in method_disagreement; values above ~2 deg or 5 mm of translation
+# disagreement should warn the operator.
+string camera
+string step
+---
+bool success
+float32 reprojection_error
+float32 method_disagreement
+string message

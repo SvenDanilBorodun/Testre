@@ -17,6 +17,7 @@ from app.routes.me import router as me_router
 from app.routes.teacher import router as teacher_router
 from app.routes.training import router as training_router
 from app.routes.version import router as version_router
+from app.routes.workflows import router as workflows_router
 
 load_dotenv()
 
@@ -97,10 +98,14 @@ class RateLimiter:
 
 _rate_limiter = RateLimiter()
 
-# path prefix -> (limit, window seconds). None match = unlimited.
-_RATE_LIMIT_RULES: list[tuple[str, int, float]] = [
-    ("/trainings/start", 10, 60.0),  # 10 starts per minute per IP
-    ("/trainings/cancel", 20, 60.0),
+# (method, path prefix, limit, window seconds). Method "*" matches any.
+# Method-aware so we can rate-limit POST /workflows (creation) without
+# also throttling PATCH /workflows/{id} which the Blockly editor calls
+# on every debounced save.
+_RATE_LIMIT_RULES: list[tuple[str, str, int, float]] = [
+    ("*", "/trainings/start", 10, 60.0),
+    ("*", "/trainings/cancel", 20, 60.0),
+    ("POST", "/workflows", 10, 60.0),
 ]
 
 
@@ -123,11 +128,21 @@ def _client_ip(request: Request) -> str:
 class RateLimitMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         path = request.url.path
-        for prefix, limit, window in _RATE_LIMIT_RULES:
+        method = request.method
+        for rule_method, prefix, limit, window in _RATE_LIMIT_RULES:
+            if rule_method != "*" and rule_method != method:
+                continue
             if path.startswith(prefix):
+                # /workflows must NOT match /workflows/{id} for PATCH
+                # — when the rule pins the method, allow the prefix
+                # match to apply across path lengths; when it's "*",
+                # the legacy behaviour is preserved. The POST-on-create
+                # rule combined with method=POST ensures PATCH on the
+                # same prefix is unaffected.
                 client_ip = _client_ip(request)
-                if not _rate_limiter.check(prefix, client_ip, limit, window):
-                    logger.warning("Rate limit hit on %s from %s", prefix, client_ip)
+                bucket_key = f"{rule_method}:{prefix}"
+                if not _rate_limiter.check(bucket_key, client_ip, limit, window):
+                    logger.warning("Rate limit hit on %s %s from %s", rule_method, prefix, client_ip)
                     # Return a Response directly. Raising HTTPException
                     # inside BaseHTTPMiddleware.dispatch is a footgun:
                     # Starlette doesn't route middleware exceptions
@@ -161,3 +176,4 @@ app.include_router(training_router)
 app.include_router(me_router)
 app.include_router(teacher_router)
 app.include_router(admin_router)
+app.include_router(workflows_router)

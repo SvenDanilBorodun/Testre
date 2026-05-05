@@ -86,6 +86,22 @@ class CreditsResponse(BaseModel):
     pool_available: int
 
 
+class WorkflowTemplateCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=100)
+    description: str = Field(default="", max_length=2000)
+    blockly_json: dict
+
+
+class WorkflowTemplateSummary(BaseModel):
+    id: str
+    name: str
+    description: str
+    classroom_id: str
+    blockly_json: dict
+    created_at: str
+    updated_at: str
+
+
 # ---------- Helpers ----------
 
 
@@ -221,6 +237,67 @@ async def get_classroom(classroom_id: str, teacher=Depends(get_current_teacher))
         created_at=c["created_at"],
         students=[_student_summary(s) for s in students_raw],
     )
+
+
+@router.get("/classrooms/{classroom_id}/workflow-templates", response_model=list[WorkflowTemplateSummary])
+async def list_workflow_templates(
+    classroom_id: str,
+    teacher=Depends(get_current_teacher),
+):
+    _assert_classroom_owned(teacher["id"], classroom_id)
+    supabase = get_supabase()
+    rows = (
+        supabase.table("workflows")
+        .select("id, name, description, classroom_id, blockly_json, created_at, updated_at")
+        .eq("classroom_id", classroom_id)
+        .eq("is_template", True)
+        .order("updated_at", desc=True)
+        .execute()
+    ).data or []
+    return [WorkflowTemplateSummary(**r) for r in rows]
+
+
+@router.post("/classrooms/{classroom_id}/workflow-templates", response_model=WorkflowTemplateSummary)
+async def create_workflow_template(
+    classroom_id: str,
+    payload: WorkflowTemplateCreate,
+    teacher=Depends(get_current_teacher),
+):
+    _assert_classroom_owned(teacher["id"], classroom_id)
+    supabase = get_supabase()
+    insert_payload = {
+        "owner_user_id": teacher["id"],
+        "classroom_id": classroom_id,
+        "name": payload.name,
+        "description": payload.description,
+        "blockly_json": payload.blockly_json,
+        "is_template": True,
+    }
+    result = supabase.table("workflows").insert(insert_payload).execute()
+    if not result.data:
+        raise HTTPException(status_code=500, detail="Vorlage konnte nicht gespeichert werden")
+    row = result.data[0]
+    return WorkflowTemplateSummary(
+        id=row["id"],
+        name=row["name"],
+        description=row.get("description", ""),
+        classroom_id=row["classroom_id"],
+        blockly_json=row["blockly_json"],
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
+
+
+@router.delete("/classrooms/{classroom_id}/workflow-templates/{template_id}")
+async def delete_workflow_template(
+    classroom_id: str,
+    template_id: str,
+    teacher=Depends(get_current_teacher),
+):
+    _assert_classroom_owned(teacher["id"], classroom_id)
+    supabase = get_supabase()
+    supabase.table("workflows").delete().eq("id", template_id).eq("classroom_id", classroom_id).eq("is_template", True).execute()
+    return {"ok": True}
 
 
 @router.patch("/classrooms/{classroom_id}", response_model=ClassroomSummary)

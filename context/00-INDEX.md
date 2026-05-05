@@ -44,6 +44,7 @@ EduBotics is a German-language educational platform for ROBOTIS OpenMANIPULATOR 
 | Windows installer + WSL2 rootfs | [`16-installer-wsl.md`](16-installer-wsl.md) | Editing `.iss`, `.ps1` scripts, rootfs Dockerfile, `start-dockerd.sh`, `wsl.conf` |
 | ROS2 robot stack | [`17-ros2-stack.md`](17-ros2-stack.md) | Editing `open_manipulator/`, `physical_ai_server/`, launch files, xacros, controllers, behavior trees |
 | Modal MCP server (autonomous gateway) | [`18-modal-mcp.md`](18-modal-mcp.md) | Editing `modal_mcp/mcp_server_stateless.py`, exposed tools, bearer auth |
+| Roboter Studio (Block-based authoring + CV) | [`19-roboter-studio.md`](19-roboter-studio.md) | Editing calibration / Blockly editor / workflow runtime / classical-CV perception in `physical_ai_server/workflow/` and `physical_ai_manager/src/components/Workshop/` |
 
 ---
 

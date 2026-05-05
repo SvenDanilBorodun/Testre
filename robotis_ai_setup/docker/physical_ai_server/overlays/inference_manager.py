@@ -22,6 +22,7 @@ import time
 from lerobot.policies.pretrained import PreTrainedPolicy
 import numpy as np
 from physical_ai_server.utils.file_utils import read_json_file
+from physical_ai_server.workflow.safety_envelope import SafetyEnvelope
 import torch
 
 
@@ -51,12 +52,11 @@ class InferenceManager:
         # otherwise the policy keeps commanding motion based on a dead camera.
         self._stale_halt_threshold = 5.0
         self._last_stale_warn_time: dict[str, float] = {}
-        # Per-joint safety envelope for the predicted action. Overridden by
-        # `set_action_limits()` once the policy's joint_order is known.
-        self._action_min: np.ndarray | None = None
-        self._action_max: np.ndarray | None = None
-        self._action_max_delta: np.ndarray | None = None  # max change per tick
-        self._last_action: np.ndarray | None = None
+        # Per-joint safety envelope for the predicted action. The shared
+        # SafetyEnvelope class is also used by the Roboter Studio workflow
+        # runtime; both call sites configure their own instance via
+        # set_action_limits and apply it per-tick.
+        self._safety = SafetyEnvelope()
 
     def set_action_limits(
             self,
@@ -65,19 +65,15 @@ class InferenceManager:
             max_delta_per_tick: list[float] | None = None) -> None:
         """Configure the safety envelope applied to every predicted action.
 
-        All values are per-joint in the same order the policy produces. None for
-        a given array skips that check. Called by the ROS node once it knows
-        the robot's joint_order.
+        Thin wrapper kept for back-compat with callers in
+        physical_ai_server.py. Forwards to the shared SafetyEnvelope
+        instance.
         """
-        self._action_min = np.asarray(joint_min, dtype=np.float32) if joint_min else None
-        self._action_max = np.asarray(joint_max, dtype=np.float32) if joint_max else None
-        self._action_max_delta = (
-            np.asarray(max_delta_per_tick, dtype=np.float32) if max_delta_per_tick else None
+        self._safety.set_action_limits(
+            joint_min=joint_min,
+            joint_max=joint_max,
+            max_delta_per_tick=max_delta_per_tick,
         )
-        # Reset the shape-mismatch warning so a reconfigured robot gets
-        # a fresh notification if the new limits still don't match the
-        # action vector length.
-        self._warned_action_shape = False
 
     def validate_policy(self, policy_path: str) -> bool:
         result_message = ''
@@ -303,68 +299,9 @@ class InferenceManager:
         return action
 
     def _apply_safety_envelope(self, action: np.ndarray) -> np.ndarray | None:
-        """Validate + clamp the predicted action before it reaches the arm.
-
-        Returns the (possibly clamped) action, or None to skip publishing.
-        """
-        if not np.all(np.isfinite(action)):
-            print(
-                '[STOPP] Modell hat NaN/Inf-Werte ausgegeben. Tick verworfen.',
-                flush=True,
-            )
-            return None
-
-        if self._action_min is not None and self._action_max is not None:
-            if len(action) == len(self._action_min):
-                clipped = np.clip(action, self._action_min, self._action_max)
-                if not np.allclose(clipped, action, atol=1e-6):
-                    # Announce once per distinct offending pattern to avoid
-                    # spamming at 30 Hz.
-                    diff = np.where(~np.isclose(clipped, action, atol=1e-6))[0]
-                    print(
-                        f'[WARNUNG] Vorhergesagte Aktion verletzt Gelenklimits '
-                        f'an Indizes {diff.tolist()} — wird begrenzt.',
-                        flush=True,
-                    )
-                action = clipped
-            else:
-                # Length mismatch (e.g. a custom robot with a different
-                # joint count) means the clamp would be wrong, so we
-                # silently skip it. Fail loud once so the operator knows
-                # the safety net is OFF for this configuration. NaN/inf
-                # guard above still runs.
-                if not getattr(self, '_warned_action_shape', False):
-                    print(
-                        f'[WARNUNG] Aktion hat {len(action)} Werte, '
-                        f'Gelenklimits sind fuer {len(self._action_min)} '
-                        f'konfiguriert — Limits werden NICHT erzwungen. '
-                        f'Bitte set_action_limits() in physical_ai_server.py '
-                        f'auf den aktiven Roboter abstimmen.',
-                        flush=True,
-                    )
-                    self._warned_action_shape = True
-
-        if self._action_max_delta is not None and self._last_action is not None:
-            if len(action) == len(self._last_action):
-                delta = action - self._last_action
-                abs_delta = np.abs(delta)
-                mask = abs_delta > self._action_max_delta
-                if np.any(mask):
-                    # Cap magnitude while preserving sign.
-                    delta = np.where(
-                        mask,
-                        np.sign(delta) * self._action_max_delta,
-                        delta,
-                    )
-                    action = self._last_action + delta
-                    print(
-                        f'[WARNUNG] Aktions-Schrittweite begrenzt an Indizes '
-                        f'{np.where(mask)[0].tolist()}.',
-                        flush=True,
-                    )
-
-        self._last_action = action.copy()
-        return action
+        """Thin wrapper preserved for callers; delegates to the shared
+        SafetyEnvelope instance."""
+        return self._safety.apply(action)
 
     def _preprocess(
             self,

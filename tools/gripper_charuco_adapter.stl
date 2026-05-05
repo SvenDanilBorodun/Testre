@@ -1,0 +1,170 @@
+solid gripper_charuco_adapter
+  facet normal 0.000000 0.000000 -1.000000
+    outer loop
+      vertex 0.000000 0.000000 0.000000
+      vertex 40.000000 35.000000 0.000000
+      vertex 40.000000 0.000000 0.000000
+    endloop
+  endfacet
+  facet normal 0.000000 0.000000 -1.000000
+    outer loop
+      vertex 0.000000 0.000000 0.000000
+      vertex 0.000000 35.000000 0.000000
+      vertex 40.000000 35.000000 0.000000
+    endloop
+  endfacet
+  facet normal 0.000000 0.000000 1.000000
+    outer loop
+      vertex 0.000000 0.000000 3.000000
+      vertex 40.000000 0.000000 3.000000
+      vertex 40.000000 35.000000 3.000000
+    endloop
+  endfacet
+  facet normal 0.000000 0.000000 1.000000
+    outer loop
+      vertex 0.000000 0.000000 3.000000
+      vertex 40.000000 35.000000 3.000000
+      vertex 0.000000 35.000000 3.000000
+    endloop
+  endfacet
+  facet normal 0.000000 -1.000000 0.000000
+    outer loop
+      vertex 0.000000 0.000000 0.000000
+      vertex 40.000000 0.000000 0.000000
+      vertex 40.000000 0.000000 3.000000
+    endloop
+  endfacet
+  facet normal 0.000000 -1.000000 0.000000
+    outer loop
+      vertex 0.000000 0.000000 0.000000
+      vertex 40.000000 0.000000 3.000000
+      vertex 0.000000 0.000000 3.000000
+    endloop
+  endfacet
+  facet normal 0.000000 1.000000 0.000000
+    outer loop
+      vertex 0.000000 35.000000 0.000000
+      vertex 0.000000 35.000000 3.000000
+      vertex 40.000000 35.000000 3.000000
+    endloop
+  endfacet
+  facet normal 0.000000 1.000000 0.000000
+    outer loop
+      vertex 0.000000 35.000000 0.000000
+      vertex 40.000000 35.000000 3.000000
+      vertex 40.000000 35.000000 0.000000
+    endloop
+  endfacet
+  facet normal -1.000000 0.000000 0.000000
+    outer loop
+      vertex 0.000000 0.000000 0.000000
+      vertex 0.000000 0.000000 3.000000
+      vertex 0.000000 35.000000 3.000000
+    endloop
+  endfacet
+  facet normal -1.000000 0.000000 0.000000
+    outer loop
+      vertex 0.000000 0.000000 0.000000
+      vertex 0.000000 35.000000 3.000000
+      vertex 0.000000 35.000000 0.000000
+    endloop
+  endfacet
+  facet normal 1.000000 0.000000 0.000000
+    outer loop
+      vertex 40.000000 0.000000 0.000000
+      vertex 40.000000 35.000000 0.000000
+      vertex 40.000000 35.000000 3.000000
+    endloop
+  endfacet
+  facet normal 1.000000 0.000000 0.000000
+    outer loop
+      vertex 40.000000 0.000000 0.000000
+      vertex 40.000000 35.000000 3.000000
+      vertex 40.000000 0.000000 3.000000
+    endloop
+  endfacet
+  facet normal 0.000000 0.000000 -1.000000
+    outer loop
+      vertex 37.000000 0.000000 3.000000
+      vertex 40.000000 35.000000 3.000000
+      vertex 40.000000 0.000000 3.000000
+    endloop
+  endfacet
+  facet normal 0.000000 0.000000 -1.000000
+    outer loop
+      vertex 37.000000 0.000000 3.000000
+      vertex 37.000000 35.000000 3.000000
+      vertex 40.000000 35.000000 3.000000
+    endloop
+  endfacet
+  facet normal 0.000000 0.000000 1.000000
+    outer loop
+      vertex 37.000000 0.000000 38.000000
+      vertex 40.000000 0.000000 38.000000
+      vertex 40.000000 35.000000 38.000000
+    endloop
+  endfacet
+  facet normal 0.000000 0.000000 1.000000
+    outer loop
+      vertex 37.000000 0.000000 38.000000
+      vertex 40.000000 35.000000 38.000000
+      vertex 37.000000 35.000000 38.000000
+    endloop
+  endfacet
+  facet normal 0.000000 -1.000000 0.000000
+    outer loop
+      vertex 37.000000 0.000000 3.000000
+      vertex 40.000000 0.000000 3.000000
+      vertex 40.000000 0.000000 38.000000
+    endloop
+  endfacet
+  facet normal 0.000000 -1.000000 0.000000
+    outer loop
+      vertex 37.000000 0.000000 3.000000
+      vertex 40.000000 0.000000 38.000000
+      vertex 37.000000 0.000000 38.000000
+    endloop
+  endfacet
+  facet normal 0.000000 1.000000 0.000000
+    outer loop
+      vertex 37.000000 35.000000 3.000000
+      vertex 37.000000 35.000000 38.000000
+      vertex 40.000000 35.000000 38.000000
+    endloop
+  endfacet
+  facet normal 0.000000 1.000000 0.000000
+    outer loop
+      vertex 37.000000 35.000000 3.000000
+      vertex 40.000000 35.000000 38.000000
+      vertex 40.000000 35.000000 3.000000
+    endloop
+  endfacet
+  facet normal -1.000000 0.000000 0.000000
+    outer loop
+      vertex 37.000000 0.000000 3.000000
+      vertex 37.000000 0.000000 38.000000
+      vertex 37.000000 35.000000 38.000000
+    endloop
+  endfacet
+  facet normal -1.000000 0.000000 0.000000
+    outer loop
+      vertex 37.000000 0.000000 3.000000
+      vertex 37.000000 35.000000 38.000000
+      vertex 37.000000 35.000000 3.000000
+    endloop
+  endfacet
+  facet normal 1.000000 0.000000 0.000000
+    outer loop
+      vertex 40.000000 0.000000 3.000000
+      vertex 40.000000 35.000000 3.000000
+      vertex 40.000000 35.000000 38.000000
+    endloop
+  endfacet
+  facet normal 1.000000 0.000000 0.000000
+    outer loop
+      vertex 40.000000 0.000000 3.000000
+      vertex 40.000000 35.000000 38.000000
+      vertex 40.000000 0.000000 38.000000
+    endloop
+  endfacet
+endsolid gripper_charuco_adapter

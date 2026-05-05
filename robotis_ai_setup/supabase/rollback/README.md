@@ -13,22 +13,28 @@ before 004_progress_entries_rollback would fail because progress_entries
 has FKs to classrooms (which 002 drops via CASCADE) and the trigger
 function `touch_updated_at()` is shared.
 
-1. `008_workflows_rollback.sql` — drops the `workflows` table + indexes
+1. `009_workflows_rls_writes_rollback.sql` — drops the three write-side
+   RLS policies (Owner inserts/updates/deletes) and the
+   `chk_template_has_classroom` CHECK. Rolling back leaves Postgres in
+   the v1 state (SELECT-only RLS, FastAPI is the sole write guard).
+   The orphan-template cleanup from the forward migration is NOT
+   reverted — those rows stay as `is_template = FALSE`.
+2. `008_workflows_rollback.sql` — drops the `workflows` table + indexes
    + RLS policies + trigger, removes realtime publication entry.
    **Warning: deletes every saved Roboter Studio workflow + classroom
    template.** Run BEFORE 002 because workflows has FKs to users +
    classrooms.
-2. `007_deletion_requested_at_rollback.sql` — drops the GDPR
+3. `007_deletion_requested_at_rollback.sql` — drops the GDPR
    `deletion_requested_at` column + partial index. Pending deletion
    requests are LOST — export them first if that matters.
-3. `006_loss_history_rollback.sql` — drops `loss_history`, reverts the
+4. `006_loss_history_rollback.sql` — drops `loss_history`, reverts the
    progress RPC to its 005 signature, removes realtime publication entry.
-4. `005_cloud_job_id_rollback.sql` — renames `cloud_job_id` back to
+5. `005_cloud_job_id_rollback.sql` — renames `cloud_job_id` back to
    `runpod_job_id`.
-5. `004_progress_entries_rollback.sql` — drops the `progress_entries`
+6. `004_progress_entries_rollback.sql` — drops the `progress_entries`
    table + trigger. **Warning: deletes all daily notes.** Must run
    BEFORE 002 because progress_entries.classroom_id references classrooms.
-6. `002_accounts_rollback.sql` — drops classroom + role machinery.
+7. `002_accounts_rollback.sql` — drops classroom + role machinery.
    **Warning: deletes every teacher/admin/student profile row.**
 
 ## What's NOT in here

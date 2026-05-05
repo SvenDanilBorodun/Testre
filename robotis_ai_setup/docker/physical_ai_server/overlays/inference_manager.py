@@ -137,8 +137,11 @@ class InferenceManager:
         # episode isn't clamped against the LAST action of the previous
         # one — which can be far away if the operator repositioned the
         # arm between episodes, freezing the arm at the cap until it
-        # walks across the gap.
-        self._last_action = None
+        # walks across the gap. The state lives on the SafetyEnvelope
+        # instance after the d408378 extraction; resetting the dead
+        # InferenceManager-local _last_action attribute (as the v1 ship
+        # of this file did) was a no-op.
+        self._safety.reset()
         # Drop the per-camera stale-frame dedupe + last-seen state so a
         # new episode's first frame is always treated as "fresh" and a
         # camera that re-froze gets a fresh warning instead of being

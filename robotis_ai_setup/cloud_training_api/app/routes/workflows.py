@@ -10,23 +10,26 @@ that bypass the API.
 
 from __future__ import annotations
 
-import json
 import logging
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from app.auth import get_current_user
 from app.services.supabase_client import get_supabase
+from app.validators.workflow import (
+    MAX_NAME_LENGTH,
+    validate_blockly_json,
+)
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/workflows", tags=["workflows"])
 
-MAX_BLOCKLY_JSON_BYTES = 256 * 1024
-MAX_BLOCKLY_DEPTH = 64
-MAX_NAME_LENGTH = 100
+# Pagination defaults match the rest of the API surface.
+DEFAULT_LIST_LIMIT = 100
+MAX_LIST_LIMIT = 500
 
 
 # ---------- Models ----------
@@ -58,33 +61,6 @@ class WorkflowResponse(BaseModel):
 
 
 # ---------- Helpers ----------
-
-
-def _validate_blockly_json(payload: dict) -> None:
-    """Defang malicious payloads before they hit Postgres. Two cheap
-    checks: total serialised size and nested depth. Real semantic
-    validation runs on the ROS server when StartWorkflow is called."""
-    try:
-        encoded = json.dumps(payload)
-    except (TypeError, ValueError) as e:
-        raise HTTPException(status_code=400, detail=f"Workflow-JSON ist ungültig: {e}")
-    if len(encoded.encode("utf-8")) > MAX_BLOCKLY_JSON_BYTES:
-        raise HTTPException(
-            status_code=413,
-            detail=f"Workflow ist zu groß (>{MAX_BLOCKLY_JSON_BYTES // 1024} KB).",
-        )
-
-    def _depth(node: Any, current: int) -> int:
-        if current > MAX_BLOCKLY_DEPTH:
-            return current
-        if isinstance(node, dict):
-            return max((_depth(v, current + 1) for v in node.values()), default=current)
-        if isinstance(node, list):
-            return max((_depth(v, current + 1) for v in node), default=current)
-        return current
-
-    if _depth(payload, 0) > MAX_BLOCKLY_DEPTH:
-        raise HTTPException(status_code=400, detail="Workflow ist zu tief verschachtelt.")
 
 
 def _assert_workflow_owned(user_id: str, workflow_id: str) -> dict:
@@ -119,8 +95,18 @@ def _get_user_classroom_id(user_id: str) -> str | None:
 
 
 @router.get("", response_model=list[WorkflowResponse])
-def list_workflows(user=Depends(get_current_user)) -> list[WorkflowResponse]:
-    """List the caller's own workflows + their classroom's templates."""
+def list_workflows(
+    user=Depends(get_current_user),
+    limit: int = Query(DEFAULT_LIST_LIMIT, ge=1, le=MAX_LIST_LIMIT),
+    offset: int = Query(0, ge=0),
+) -> list[WorkflowResponse]:
+    """List the caller's own workflows + their classroom's templates.
+
+    Paginated since audit §2.4 — a classroom with thousands of saves
+    would otherwise serialise the whole table on every Realtime
+    refresh. The total result is capped at ``limit`` rows after the
+    own + templates merge.
+    """
     supabase = get_supabase()
     user_id = user.id
     classroom_id = _get_user_classroom_id(user_id)
@@ -130,10 +116,15 @@ def list_workflows(user=Depends(get_current_user)) -> list[WorkflowResponse]:
         .select("*")
         .eq("owner_user_id", user_id)
         .order("updated_at", desc=True)
+        .range(offset, offset + limit - 1)
         .execute()
     )
     rows = list(own.data or [])
 
+    # Templates are fetched in addition (not paginated together) so a
+    # student who hasn't saved any of their own workflows still sees
+    # the classroom set. A teacher with > MAX_LIST_LIMIT templates is
+    # an unusual case; fall back to the same range.
     if classroom_id:
         templates = (
             supabase.table("workflows")
@@ -141,6 +132,7 @@ def list_workflows(user=Depends(get_current_user)) -> list[WorkflowResponse]:
             .eq("classroom_id", classroom_id)
             .eq("is_template", True)
             .order("updated_at", desc=True)
+            .range(0, MAX_LIST_LIMIT - 1)
             .execute()
         )
         seen_ids = {r["id"] for r in rows}
@@ -148,7 +140,7 @@ def list_workflows(user=Depends(get_current_user)) -> list[WorkflowResponse]:
             if r["id"] not in seen_ids:
                 rows.append(r)
 
-    return [WorkflowResponse(**r) for r in rows]
+    return [WorkflowResponse(**r) for r in rows[: limit + MAX_LIST_LIMIT]]
 
 
 @router.get("/{workflow_id}", response_model=WorkflowResponse)
@@ -172,7 +164,7 @@ def create_workflow(
     payload: WorkflowCreate,
     user=Depends(get_current_user),
 ) -> WorkflowResponse:
-    _validate_blockly_json(payload.blockly_json)
+    validate_blockly_json(payload.blockly_json)
     supabase = get_supabase()
     insert_payload = {
         "owner_user_id": user.id,
@@ -201,7 +193,7 @@ def update_workflow(
     if payload.description is not None:
         update_payload["description"] = payload.description
     if payload.blockly_json is not None:
-        _validate_blockly_json(payload.blockly_json)
+        validate_blockly_json(payload.blockly_json)
         update_payload["blockly_json"] = payload.blockly_json
     if not update_payload:
         raise HTTPException(status_code=400, detail="Keine Änderungen angegeben.")

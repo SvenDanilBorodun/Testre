@@ -636,6 +636,16 @@ export function useRosServiceCaller() {
     [callService]
   );
 
+  const captureColor = useCallback(
+    async (color) =>
+      callService(
+        '/calibration/capture_color',
+        'physical_ai_interfaces/srv/CalibrationCaptureColor',
+        { color }
+      ),
+    [callService]
+  );
+
   return {
     callService,
     sendRecordCommand,
@@ -662,5 +672,6 @@ export function useRosServiceCaller() {
     startWorkflow,
     stopWorkflow,
     markDestination,
+    captureColor,
   };
 }

@@ -1,0 +1,21 @@
+# Capture a single colour sample for the per-classroom colour profile.
+#
+# The student places one coloured cube (rot/grün/blau/gelb) in the
+# scene camera's field of view and presses "Erfassen". The server
+# segments the cube via Otsu (auto-polarity) and records its LAB-space
+# cluster centroid + per-channel std into ``color_profile.yaml`` under
+# the canonical colour name.
+#
+# Replaces the percentile-HSV math in v1 which silently broke for
+# red (HSV hue wraps at 180 — the percentiles spanned the whole
+# wheel and the resulting range matched everything). See audit
+# §1.7a / §3.x.
+string color
+---
+bool success
+string message
+# Diagnostic round-trip: the captured LAB centroid and per-channel
+# std so the editor can render a colour swatch and warn the teacher
+# if the std is suspiciously high (= mixed pixels in the blob).
+float32[] lab_center
+float32[] lab_std

@@ -110,6 +110,23 @@ class IKSolver:
         ])
 
     @staticmethod
+    def _quat_to_rotation(quat: tuple[float, float, float, float]) -> np.ndarray:
+        """Convert (qx, qy, qz, qw) to a 3x3 rotation matrix."""
+        qx, qy, qz, qw = quat
+        norm = math.sqrt(qx * qx + qy * qy + qz * qz + qw * qw)
+        if norm < 1e-9:
+            return np.eye(3)
+        qx /= norm
+        qy /= norm
+        qz /= norm
+        qw /= norm
+        return np.array([
+            [1 - 2 * (qy * qy + qz * qz), 2 * (qx * qy - qz * qw),     2 * (qx * qz + qy * qw)],
+            [2 * (qx * qy + qz * qw),     1 - 2 * (qx * qx + qz * qz), 2 * (qy * qz - qx * qw)],
+            [2 * (qx * qz - qy * qw),     2 * (qy * qz + qx * qw),     1 - 2 * (qx * qx + qy * qy)],
+        ])
+
+    @staticmethod
     def _rotation_to_quaternion(R: np.ndarray) -> tuple[float, float, float, float]:
         trace = R[0, 0] + R[1, 1] + R[2, 2]
         if trace > 0.0:
@@ -151,6 +168,27 @@ class IKSolver:
 
         if self._tracik is not None:
             return self._solve_tracik(target_xyz, (qx, qy, qz, qw), seed, free_yaw)
+        return self._solve_kdl(target_xyz, R, seed)
+
+    def solve_quat(
+        self,
+        target_xyz: tuple[float, float, float] | np.ndarray,
+        target_quat: tuple[float, float, float, float],
+        seed: Optional[list[float]] = None,
+        free_yaw: bool = False,
+    ) -> Optional[list[float]]:
+        """Quaternion-input variant for the calibration auto-pose flow.
+
+        ``target_quat`` is (qx, qy, qz, qw) in the same convention as
+        ``geometry_msgs/Quaternion``. ``free_yaw`` defaults to ``False``
+        because calibration captures need the board to face the camera
+        from a specific orientation; relaxing yaw would let the gripper
+        swing past the board.
+        """
+        target_xyz = np.asarray(target_xyz, dtype=np.float64).reshape(3)
+        R = self._quat_to_rotation(target_quat)
+        if self._tracik is not None:
+            return self._solve_tracik(target_xyz, target_quat, seed, free_yaw)
         return self._solve_kdl(target_xyz, R, seed)
 
     def _solve_tracik(

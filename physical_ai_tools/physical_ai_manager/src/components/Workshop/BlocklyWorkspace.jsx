@@ -29,7 +29,7 @@ function registerAllBlocksOnce() {
   blocksRegistered = true;
 }
 
-function BlocklyWorkspace({ initialJson, onChange, readOnly = false }) {
+function BlocklyWorkspace({ initialJson, onChange, onWorkspaceReady, readOnly = false }) {
   const containerRef = useRef(null);
   const workspaceRef = useRef(null);
 
@@ -46,18 +46,31 @@ function BlocklyWorkspace({ initialJson, onChange, readOnly = false }) {
       move: { scrollbars: true, drag: true, wheel: false },
     });
     workspaceRef.current = workspace;
+    if (typeof onWorkspaceReady === 'function') {
+      // Hand the workspace ref up so the parent can update field
+      // values on click (used by destination_pin pinning — audit §1.4).
+      onWorkspaceReady(workspace);
+    }
 
+    // Suppress the synthetic change event Blockly fires while loading
+    // the initial JSON; otherwise the parent's onChange handler
+    // dispatches setUnsavedBlocklyJson(null) on first mount and
+    // clobbers Redux state (audit §1.5).
+    let loadingInitial = false;
     if (initialJson) {
       try {
+        loadingInitial = true;
         Blockly.serialization.workspaces.load(initialJson, workspace);
       } catch (e) {
         console.error('BlocklyWorkspace: failed to load initial JSON', e);
+      } finally {
+        loadingInitial = false;
       }
     }
 
     let disposed = false;
     const handleChange = () => {
-      if (disposed || !onChange) return;
+      if (disposed || loadingInitial || !onChange) return;
       try {
         const json = Blockly.serialization.workspaces.save(workspace);
         onChange(json);
@@ -76,8 +89,11 @@ function BlocklyWorkspace({ initialJson, onChange, readOnly = false }) {
       workspace.removeChangeListener(handleChange);
       workspace.dispose();
       workspaceRef.current = null;
+      if (typeof onWorkspaceReady === 'function') {
+        onWorkspaceReady(null);
+      }
     };
-  }, [initialJson, onChange, readOnly]);
+  }, [initialJson, onChange, onWorkspaceReady, readOnly]);
 
   return <div ref={containerRef} className="w-full h-full" />;
 }

@@ -93,14 +93,15 @@ intrinsics.
 | 2 | Szenen-Kamera intrinsisch | 12 board views, board hand-held in front of fixed scene cam | same as 1 |
 | 3 | Greifer-Kamera Hand-Auge (eye-in-hand) | 14 (gripper-pose, board-pose) pairs sampled by `auto_pose.py` | `cv2.calibrateHandEye` × {PARK, TSAI} |
 | 4 | Szenen-Kamera Hand-Auge (eye-to-base) | 14 pairs with ChArUco mounted on the gripper | same as 3, gripper poses inverted |
-| 5 | Farbprofil | 1 frame per canonical colour (rot/grün/blau/gelb), Otsu + HSV 5/95 percentiles | `color_profile.py` |
+| 5 | Farbprofil | 1 frame per canonical colour (rot/grün/blau/gelb), Otsu (auto-polarity) + LAB cluster mean/std | `color_profile.py` (via `/calibration/capture_color`, finalised by `/calibration/solve` with step `color_profile`) |
 
 ### Dual-solve disagreement check
 
 PARK and TSAI minimise different cost functions. If their results diverge
-by **>2°** rotation or **>5 mm** translation, the wizard warns the teacher
-to repeat. Numbers come from `cv2.calibrateHandEye` returns; see
-`calibration_manager._solve_handeye`.
+by **>2°** rotation or **>5 mm** translation, `_solve_handeye` **refuses
+to persist the YAML** and returns a German "Hand-Auge-Solve abgewiesen"
+message — the v1 ship only warned and saved anyway. Re-capturing from
+the existing 14 poses is free. See `calibration_manager._solve_handeye`.
 
 ### `z_table` derivation
 
@@ -142,14 +143,18 @@ a new block.
 
 - **Command-side latency target:** < 100 ms. The next trajectory chunk's
   `publish()` is suppressed within 100 ms of `_should_stop = True`.
+  Pinned by `test_chunked_publish_stop_latency.py`.
 - **Physical overshoot:** up to one chunk (≤ 1 s of motion). The
   controller still finishes the in-flight `JointTrajectory`.
-- **Recovery sequence:** publish hold-current-q for 1 s → open gripper →
-  return to home pose over 3 s.
+- **Recovery sequence (implemented in `WorkflowManager._run_recovery`):**
+  publish hold-current-q for 1 s → open gripper over 0.5 s → return
+  to home pose over 3 s. Triggered on `'stopped'` and `'error'`
+  terminal phases, not on a clean `'finished'` run.
 
 This is documented because the brief originally over-promised "<100 ms
 physical halt"; the realistic guarantee is command-side suppression with a
-bounded physical overshoot.
+bounded physical overshoot, followed by an auto-home that always
+completes.
 
 ---
 
@@ -202,7 +207,8 @@ physical_ai_tools/physical_ai_server/physical_ai_server/workflow/
 robotis_ai_setup/docker/
 ├─ docker-compose.yml                                 (named volume edubotics_calib)
 ├─ physical_ai_server/Dockerfile                      (OpenCV-contrib, pupil-apriltags, onnxruntime CPU,
-│                                                      pip-licenses gate, YOLOX-tiny ONNX bake-in)
+│                                                      manual-license-audit, YOLOX-tiny ONNX bake-in
+│                                                      via curl-with-sha256-pin to /opt/edubotics/)
 └─ physical_ai_server/overlays/safety_envelope.py     (PR3)
 ```
 

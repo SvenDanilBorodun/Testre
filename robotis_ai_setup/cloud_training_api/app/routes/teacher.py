@@ -1,11 +1,15 @@
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from app.auth import get_current_teacher, get_user_profile
 from app.services.supabase_client import get_supabase
 from app.services.usernames import synthetic_email, validate_username
+from app.validators.workflow import validate_blockly_json
+
+DEFAULT_LIST_LIMIT = 100
+MAX_LIST_LIMIT = 500
 
 logger = logging.getLogger(__name__)
 
@@ -243,6 +247,8 @@ async def get_classroom(classroom_id: str, teacher=Depends(get_current_teacher))
 async def list_workflow_templates(
     classroom_id: str,
     teacher=Depends(get_current_teacher),
+    limit: int = Query(DEFAULT_LIST_LIMIT, ge=1, le=MAX_LIST_LIMIT),
+    offset: int = Query(0, ge=0),
 ):
     _assert_classroom_owned(teacher["id"], classroom_id)
     supabase = get_supabase()
@@ -252,6 +258,7 @@ async def list_workflow_templates(
         .eq("classroom_id", classroom_id)
         .eq("is_template", True)
         .order("updated_at", desc=True)
+        .range(offset, offset + limit - 1)
         .execute()
     ).data or []
     return [WorkflowTemplateSummary(**r) for r in rows]
@@ -264,6 +271,10 @@ async def create_workflow_template(
     teacher=Depends(get_current_teacher),
 ):
     _assert_classroom_owned(teacher["id"], classroom_id)
+    # Audit §2.1: this endpoint used to insert without size/depth
+    # validation, leaving the teacher path as a DOS hole. Use the same
+    # validator the student /workflows router uses.
+    validate_blockly_json(payload.blockly_json)
     supabase = get_supabase()
     insert_payload = {
         "owner_user_id": teacher["id"],

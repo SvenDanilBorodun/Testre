@@ -342,6 +342,26 @@ class CalibrationManager:
         angle_deg = float(np.degrees(np.arccos(cos_theta)))
         translation_diff_m = float(np.linalg.norm(t_park - t_tsai))
 
+        # Audit §3.3 — refuse to persist a hand-eye solve where PARK and
+        # TSAI disagree by more than the warn thresholds. The v1 code
+        # only emitted an "Achtung:" string but always wrote the
+        # transform; that meant a noisy capture set silently calibrated
+        # the arm to drift several centimetres. Re-solving from the
+        # already-captured 14 poses is free, so promote warn → block.
+        if (
+            angle_deg > ANGLE_DISAGREEMENT_WARN_DEG
+            or translation_diff_m > TRANSLATION_DISAGREEMENT_WARN_M
+        ):
+            msg = (
+                f'Hand-Auge-Solve abgewiesen: PARK ↔ TSAI weichen um '
+                f'{angle_deg:.2f}° / {translation_diff_m * 1000:.1f} mm '
+                f'ab (Limits: {ANGLE_DISAGREEMENT_WARN_DEG:.1f}° / '
+                f'{TRANSLATION_DISAGREEMENT_WARN_M * 1000:.1f} mm). '
+                'Bitte Posen erneut erfassen — am häufigsten hilft '
+                'gleichmäßigere Beleuchtung und eine plane Tafel.'
+            )
+            return False, 0.0, angle_deg, msg
+
         T = np.eye(4)
         T[:3, :3] = R_park
         T[:3, 3] = t_park.reshape(3)
@@ -359,13 +379,7 @@ class CalibrationManager:
         fs.write('captured_at', time.strftime('%Y-%m-%dT%H:%M:%S'))
         fs.release()
 
-        warn = ''
-        if angle_deg > ANGLE_DISAGREEMENT_WARN_DEG or translation_diff_m > TRANSLATION_DISAGREEMENT_WARN_M:
-            warn = (
-                f' Achtung: PARK ↔ TSAI weichen um {angle_deg:.2f}° / '
-                f'{translation_diff_m * 1000:.1f} mm ab — Kalibrierung evtl. wiederholen.'
-            )
-        return True, 0.0, angle_deg, f'Hand-Auge-Kalibrierung gespeichert.{warn}'
+        return True, 0.0, angle_deg, 'Hand-Auge-Kalibrierung gespeichert.'
 
     def _derive_z_table(self, camera: str, T_cam_to_base: np.ndarray) -> float | None:
         """Median z-coordinate of the board origin across the captured poses,

@@ -22,8 +22,12 @@ Mode selection is per-block in the workflow interpreter:
 - ``apriltag``: ``pupil_apriltags`` (BSD), tag36h11 family, with the
   optional ``aruco_id`` filter.
 
-The ONNX session and AprilTag detector are constructed once on first
-use; subsequent calls are stateless.
+Both the ONNX session and the AprilTag detector are constructed eagerly
+in ``__init__`` and any failure raises ``RuntimeError`` with a German
+message. Earlier versions returned ``False`` from internal ``_ensure_*``
+helpers which caused detection blocks to silently return ``[]`` when
+the YOLOX ONNX wasn't baked into the image — see commit history for
+the audit that removed that fallback.
 """
 
 from __future__ import annotations
@@ -43,7 +47,7 @@ YOLOX_INPUT_SIZE = (640, 640)
 YOLOX_CONFIDENCE_THRESHOLD = 0.30
 YOLOX_NMS_IOU_THRESHOLD = 0.45
 
-HSV_MIN_BLOB_AREA_PX = 100
+LAB_MIN_BLOB_AREA_PX = 100
 COLOR_PATCH_SIZE_PX = 10
 
 
@@ -59,16 +63,27 @@ class Detection:
 
 
 class Perception:
-    """Lazy-initialised wrapper over HSV, YOLOX, and AprilTag backends."""
+    """Eager-initialised wrapper over HSV, YOLOX, and AprilTag backends.
+
+    Construction raises ``RuntimeError`` (German message) if either
+    backend isn't available. The Workshop UX is built around the
+    promise that perception either works or fails-loud, never silently
+    drops detections.
+    """
 
     def __init__(self) -> None:
         self._yolox_session = None
         self._yolox_input_name: str | None = None
         self._apriltag_detector = None
-        self._color_profile: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+        # LAB-space colour clusters keyed by colour name. Each value is
+        # ``{'center': np.ndarray(3), 'std': np.ndarray(3), 'threshold': float}``
+        # — see ``ColorProfileManager.lab_profile``.
+        self._color_profile: dict[str, dict] = {}
+        self._init_yolox()
+        self._init_apriltag()
 
-    def set_color_profile(self, profile: dict[str, tuple[np.ndarray, np.ndarray]]) -> None:
-        """Inject HSV ranges from ``ColorProfileManager.hsv_range`` outputs."""
+    def set_color_profile(self, profile: dict[str, dict]) -> None:
+        """Inject LAB clusters from ``ColorProfileManager.lab_profile`` outputs."""
         self._color_profile = profile
 
     def detect(
@@ -89,14 +104,23 @@ class Perception:
         return []
 
     # ------------------------------------------------------------------
-    # HSV
+    # LAB colour matching
     # ------------------------------------------------------------------
     def _detect_color(self, bgr: np.ndarray, color: str | None) -> list[Detection]:
         if color is None or color not in self._color_profile:
             return []
-        lower, upper = self._color_profile[color]
-        hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
-        mask = cv2.inRange(hsv, lower, upper)
+        profile = self._color_profile[color]
+        center = profile['center']      # np.ndarray shape (3,)
+        std = profile['std']            # np.ndarray shape (3,)
+        threshold = float(profile.get('threshold', 3.0))
+
+        lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB).astype(np.float32)
+        # Per-channel |x - μ| / σ; pixel matches when ALL three channels
+        # are within the threshold. The std was floored to 1.0 in the
+        # capture step so this never divides by zero.
+        diff = np.abs(lab - center.reshape(1, 1, 3)) / std.reshape(1, 1, 3)
+        match = np.all(diff <= threshold, axis=2)
+        mask = (match.astype(np.uint8)) * 255
         kernel = np.ones((3, 3), np.uint8)
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=1)
@@ -105,7 +129,7 @@ class Perception:
         detections: list[Detection] = []
         for contour in contours:
             area = cv2.contourArea(contour)
-            if area < HSV_MIN_BLOB_AREA_PX:
+            if area < LAB_MIN_BLOB_AREA_PX:
                 continue
             x, y, w, h = cv2.boundingRect(contour)
             cx, cy = x + w // 2, y + h // 2
@@ -120,20 +144,31 @@ class Perception:
     # ------------------------------------------------------------------
     # YOLOX
     # ------------------------------------------------------------------
-    def _ensure_yolox(self) -> bool:
-        if self._yolox_session is not None:
-            return True
+    def _init_yolox(self) -> None:
+        """Load the baked-in YOLOX-tiny ONNX. Fails loudly if the file
+        is missing or the runtime can't open it — there is no fallback
+        path."""
         if not YOLOX_ONNX_PATH.exists():
-            return False
+            raise RuntimeError(
+                f'YOLOX-tiny-Modell fehlt unter {YOLOX_ONNX_PATH} — '
+                'Image neu bauen.'
+            )
         try:
             import onnxruntime as ort
+        except ImportError as e:
+            raise RuntimeError(
+                'onnxruntime ist nicht installiert — Image neu bauen.'
+            ) from e
+        try:
             providers = ['CPUExecutionProvider']
-            self._yolox_session = ort.InferenceSession(str(YOLOX_ONNX_PATH), providers=providers)
+            self._yolox_session = ort.InferenceSession(
+                str(YOLOX_ONNX_PATH), providers=providers,
+            )
             self._yolox_input_name = self._yolox_session.get_inputs()[0].name
-            return True
-        except Exception:
-            self._yolox_session = None
-            return False
+        except Exception as e:
+            raise RuntimeError(
+                f'YOLOX-Modell konnte nicht geladen werden: {e}'
+            ) from e
 
     @staticmethod
     def _letterbox(bgr: np.ndarray, target_size: tuple[int, int]) -> tuple[np.ndarray, float, tuple[int, int]]:
@@ -154,9 +189,7 @@ class Perception:
         coco_class: str | None,
         color_filter: str | None,
     ) -> list[Detection]:
-        if not self._ensure_yolox():
-            return []
-
+        # Session is loaded in __init__; if we got here it's ready.
         padded, ratio, (pad_x, pad_y) = self._letterbox(bgr, YOLOX_INPUT_SIZE)
         # YOLOX expects BGR uint8 -> CHW float32 (no normalisation).
         tensor = padded.transpose(2, 0, 1).astype(np.float32)
@@ -269,7 +302,10 @@ class Perception:
     def _patch_matches_color(self, bgr: np.ndarray, cx: int, cy: int, color: str) -> bool:
         if color not in self._color_profile:
             return False
-        lower, upper = self._color_profile[color]
+        profile = self._color_profile[color]
+        center = profile['center']
+        std = profile['std']
+        threshold = float(profile.get('threshold', 3.0))
         half = COLOR_PATCH_SIZE_PX // 2
         x0 = max(0, cx - half)
         y0 = max(0, cy - half)
@@ -278,18 +314,25 @@ class Perception:
         patch = bgr[y0:y1, x0:x1]
         if patch.size == 0:
             return False
-        hsv = cv2.cvtColor(patch, cv2.COLOR_BGR2HSV)
-        mask = cv2.inRange(hsv, lower, upper)
-        return float(mask.mean()) > 64.0   # >= 25% of patch matches the colour
+        lab = cv2.cvtColor(patch, cv2.COLOR_BGR2LAB).astype(np.float32)
+        diff = np.abs(lab - center.reshape(1, 1, 3)) / std.reshape(1, 1, 3)
+        match = np.all(diff <= threshold, axis=2)
+        # >= 25% of the patch matches the colour cluster.
+        return float(match.mean()) > 0.25
 
     # ------------------------------------------------------------------
     # AprilTag
     # ------------------------------------------------------------------
-    def _ensure_apriltag(self) -> bool:
-        if self._apriltag_detector is not None:
-            return True
+    def _init_apriltag(self) -> None:
+        """Construct the pupil_apriltags detector. Fails loudly on
+        missing dependency — no fallback."""
         try:
             from pupil_apriltags import Detector
+        except ImportError as e:
+            raise RuntimeError(
+                'pupil_apriltags ist nicht installiert — Image neu bauen.'
+            ) from e
+        try:
             self._apriltag_detector = Detector(
                 families='tag36h11',
                 nthreads=2,
@@ -299,14 +342,13 @@ class Perception:
                 decode_sharpening=0.25,
                 debug=False,
             )
-            return True
-        except Exception:
-            self._apriltag_detector = None
-            return False
+        except Exception as e:
+            raise RuntimeError(
+                f'AprilTag-Detektor konnte nicht initialisiert werden: {e}'
+            ) from e
 
     def _detect_apriltag(self, bgr: np.ndarray, aruco_id: int | None) -> list[Detection]:
-        if not self._ensure_apriltag():
-            return []
+        # Detector is constructed in __init__; if we got here it's ready.
         gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
         results = self._apriltag_detector.detect(gray)
         detections: list[Detection] = []

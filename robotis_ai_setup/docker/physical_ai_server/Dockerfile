@@ -18,6 +18,38 @@ RUN find /etc/s6-overlay/s6-rc.d -type f \
     find /usr/local/lib/s6-services -type f -name "*.sh" -exec sed -i 's/\r$//' {} + && \
     echo "Fixed CRLF in s6 service files"
 
+# Re-build physical_ai_interfaces with the v1 + audit additions.
+#
+# Why this exists: the upstream base image (robotis/physical-ai-server:amd64-0.8.2)
+# was built BEFORE commit d408378 added the Roboter Studio service /
+# message types (StartCalibration, CalibrationCaptureFrame, CalibrationSolve,
+# AutoPoseSuggest, ExecuteCalibrationPose, MarkDestination, StartWorkflow,
+# StopWorkflow, WorkflowStatus). The audit also adds Detection.msg and
+# CalibrationCaptureColor.srv, plus changes WorkflowStatus.msg from a
+# parallel-array shape to a typed Detection[] field.
+#
+# Without this step physical_ai_server.py crashes at import time with
+# "ImportError: cannot import name 'StartCalibration'" — meaning the
+# v1 ship was actually broken at runtime even though docker push
+# succeeded. ros2_service_run.sh sources ${COLCON_WS}/install/setup.bash,
+# so re-building the package here is enough — no entrypoint change.
+COPY interfaces /tmp/interfaces_src
+RUN set -e && \
+    target_pkg=$(find /root/ros2_ws/src -type d -name physical_ai_interfaces | head -n1) && \
+    [ -n "$target_pkg" ] || { echo "ERROR: physical_ai_interfaces source not found"; exit 1; } && \
+    cp -f /tmp/interfaces_src/msg/*.msg "$target_pkg/msg/" && \
+    cp -f /tmp/interfaces_src/srv/*.srv "$target_pkg/srv/" && \
+    cp -f /tmp/interfaces_src/CMakeLists.txt "$target_pkg/CMakeLists.txt" && \
+    cp -f /tmp/interfaces_src/package.xml "$target_pkg/package.xml" && \
+    cd /root/ros2_ws && \
+    bash -c "source /opt/ros/jazzy/setup.bash && colcon build --packages-select physical_ai_interfaces --cmake-args -DCMAKE_BUILD_TYPE=Release" && \
+    test -f /root/ros2_ws/install/physical_ai_interfaces/lib/python3.12/site-packages/physical_ai_interfaces/srv/_start_calibration.py && \
+    test -f /root/ros2_ws/install/physical_ai_interfaces/lib/python3.12/site-packages/physical_ai_interfaces/srv/_calibration_capture_color.py && \
+    test -f /root/ros2_ws/install/physical_ai_interfaces/lib/python3.12/site-packages/physical_ai_interfaces/msg/_detection.py && \
+    test -f /root/ros2_ws/install/physical_ai_interfaces/lib/python3.12/site-packages/physical_ai_interfaces/msg/_workflow_status.py && \
+    rm -rf /tmp/interfaces_src && \
+    echo "physical_ai_interfaces re-built with audit additions"
+
 # Patch upstream bug: ServerInference.__init__ never initializes self._endpoints,
 # causing AttributeError on first register_endpoint() call.
 # Also removes duplicate InferenceManager initialization (lines 71-75 repeat 60-64).
@@ -97,13 +129,40 @@ RUN set -e && \
 # (GPU EP would add ~200 MB of CUDA libs we don't need; YOLOX-tiny at
 # 640x640 runs in ~80 ms on CPU which fits the workflow's 100 ms tick
 # budget).
-RUN pip install --no-cache-dir \
+# pupil-apriltags 1.0.4 ships an upstream CMakeLists with
+# `cmake_minimum_required(VERSION 3.0)`, which CMake 4 (the version
+# bundled in the wheel build env) refuses to accept. The
+# CMAKE_POLICY_VERSION_MINIMUM env var asks CMake to behave as if 3.5
+# were the floor — this is the upstream-recommended workaround until
+# pupil-apriltags ships an updated cmake_minimum_required.
+#
+# Without this the v1 build silently fell back to the cache from an
+# earlier state that never actually had the package — symptom: at
+# runtime, `import pupil_apriltags` raised ModuleNotFoundError and
+# the AprilTag perception path was permanently disabled.
+ENV CMAKE_POLICY_VERSION_MINIMUM=3.5
+RUN python3 -m pip uninstall -y opencv-python opencv-python-headless 2>/dev/null || true && \
+    python3 -m pip install --no-cache-dir \
         opencv-contrib-python==4.10.0.84 \
         pupil-apriltags==1.0.4 \
         onnxruntime==1.20.1 \
         pip-licenses==5.0.0 \
         urdf-parser-py==0.0.4 && \
-    pip uninstall -y opencv-python || true
+    python3 -c "import cv2, onnxruntime, pupil_apriltags; print('runtime deps OK:', cv2.__version__, onnxruntime.__version__)"
+
+# YOLOX-tiny ONNX (Megvii, Apache-2.0). Pinned release URL + SHA-256
+# so the binary is stable across builds and a future GitHub release
+# re-upload can't silently swap weights past us. If you ever bump the
+# YOLOX version, recompute the digest with:
+#     sha256sum /opt/edubotics/yolox_tiny.onnx
+#
+# Image-size impact: ~19.3 MiB (well under the 100 MiB plan budget).
+RUN set -e && \
+    mkdir -p /opt/edubotics && \
+    curl -fL --retry 3 --retry-delay 5 -o /opt/edubotics/yolox_tiny.onnx \
+        https://github.com/Megvii-BaseDetection/YOLOX/releases/download/0.1.1rc0/yolox_tiny.onnx && \
+    echo '427cc366d34e27ff7a03e2899b5e3671425c262ea2291f88bb942bc1cc70b0f7  /opt/edubotics/yolox_tiny.onnx' \
+        | sha256sum -c -
 
 # IK solvers: TRAC-IK preferred, PyKDL fallback.
 # Neither ros-jazzy-trac-ik-python nor ros-jazzy-kdl-parser-py is yet

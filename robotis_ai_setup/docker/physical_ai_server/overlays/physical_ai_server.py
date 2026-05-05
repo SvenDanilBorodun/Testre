@@ -27,6 +27,7 @@ from typing import Optional
 
 from ament_index_python.packages import get_package_share_directory
 from physical_ai_interfaces.msg import (
+    Detection,
     HFOperationStatus,
     TaskStatus,
     TrainingStatus,
@@ -34,6 +35,7 @@ from physical_ai_interfaces.msg import (
 )
 from physical_ai_interfaces.srv import (
     AutoPoseSuggest,
+    CalibrationCaptureColor,
     CalibrationCaptureFrame,
     CalibrationSolve,
     ControlHfServer,
@@ -187,6 +189,11 @@ class PhysicalAIServer(Node):
                 ExecuteCalibrationPose,
                 self.calibration_execute_pose_callback,
             ),
+            (
+                '/calibration/capture_color',
+                CalibrationCaptureColor,
+                self.calibration_capture_color_callback,
+            ),
             ('/workshop/mark_destination', MarkDestination, self.mark_destination_callback),
             ('/workflow/start', StartWorkflow, self.workflow_start_callback),
             ('/workflow/stop', StopWorkflow, self.workflow_stop_callback),
@@ -333,6 +340,21 @@ class PhysicalAIServer(Node):
             self.training_timer.stop(timer_name='training_status')
             self.training_timer = None
 
+        # Audit §3.15 — robot-type switch needs to discard the
+        # workflow + calibration managers too, otherwise the next
+        # workflow run uses the previous robot's joint topology / IK
+        # chain / camera-keyed calibration files.
+        if self.workflow_manager is not None:
+            try:
+                self.workflow_manager.stop()
+            except Exception:
+                pass
+            self.workflow_manager = None
+            self.on_workflow = False
+        if self.calibration_manager is not None:
+            self.calibration_manager = None
+            self.on_calibration = False
+
         self.params = None
         self.total_joint_order = None
         self.joint_order = None
@@ -354,7 +376,10 @@ class PhysicalAIServer(Node):
             self.get_logger().error(f'Error in set_hf_user_callback: {str(e)}')
             response.user_id_list = []
             response.success = False
-            response.message = f'Error in set_hf_user_callback:\n{str(e)}'
+            # Audit §3.21 — don't leak the raw exception text to the
+            # client (paths / stack-trace fragments would land in the
+            # React toast). Log it server-side, return generic German.
+            response.message = 'Hugging-Face-Token konnte nicht registriert werden.'
 
         return response
 
@@ -375,7 +400,8 @@ class PhysicalAIServer(Node):
             self.get_logger().error(f'Error in get_hf_user_callback: {str(e)}')
             response.user_id_list = []
             response.success = False
-            response.message = f'Failed to retrieve Hugging Face user ID:\n{str(e)}'
+            # Audit §3.21 — sanitize exception text.
+            response.message = 'Hugging-Face-Benutzer konnte nicht gelesen werden.'
 
         return response
 
@@ -474,28 +500,40 @@ class PhysicalAIServer(Node):
         error_msg = ''
         current_status = TaskStatus()
         camera_msgs, follower_msgs, leader_msgs = self.communicator.get_latest_data()
+        # Throttle the "waiting for X data" info logs to once per second
+        # per source. At 30Hz timer firing this used to print 90
+        # lines/sec while a topic was lagging (audit §3.20).
+        now = time.perf_counter()
+        if not hasattr(self, '_last_waiting_log'):
+            self._last_waiting_log = {}
+        def _log_waiting(source: str, msg: str) -> None:
+            last = self._last_waiting_log.get(source, 0.0)
+            if now - last > 1.0:
+                self.get_logger().info(msg)
+                self._last_waiting_log[source] = now
+
         if camera_msgs is None:
-            if time.perf_counter() - self.start_recording_time > self.DEFAULT_TOPIC_TIMEOUT:
+            if now - self.start_recording_time > self.DEFAULT_TOPIC_TIMEOUT:
                 error_msg = 'Camera data not received within timeout period'
                 self.get_logger().error(error_msg)
             else:
-                self.get_logger().info('Waiting for camera data...')
+                _log_waiting('camera', 'Waiting for camera data...')
                 return
 
         elif follower_msgs is None:
-            if time.perf_counter() - self.start_recording_time > self.DEFAULT_TOPIC_TIMEOUT:
+            if now - self.start_recording_time > self.DEFAULT_TOPIC_TIMEOUT:
                 error_msg = 'Follower data not received within timeout period'
                 self.get_logger().error(error_msg)
             else:
-                self.get_logger().info('Waiting for follower data...')
+                _log_waiting('follower', 'Waiting for follower data...')
                 return
 
         elif leader_msgs is None:
-            if time.perf_counter() - self.start_recording_time > self.DEFAULT_TOPIC_TIMEOUT:
+            if now - self.start_recording_time > self.DEFAULT_TOPIC_TIMEOUT:
                 error_msg = 'Leader data not received within timeout period'
                 self.get_logger().error(error_msg)
             else:
-                self.get_logger().info('Waiting for leader data...')
+                _log_waiting('leader', 'Waiting for leader data...')
                 return
 
         try:
@@ -1032,9 +1070,11 @@ class PhysicalAIServer(Node):
             response.message = f"Found {len(dataset_names)} dataset(s) for user '{user_id}'."
 
         except Exception as e:
+            self.get_logger().error(f'get_dataset_list failed: {e}')
             response.dataset_list = []
             response.success = False
-            response.message = f'Error: {str(e)}'
+            # Audit §3.21 — sanitize.
+            response.message = 'Datensatz-Liste konnte nicht gelesen werden.'
 
         return response
 
@@ -1172,7 +1212,8 @@ class PhysicalAIServer(Node):
         except Exception as e:
             self.get_logger().error(f'Failed to set robot type: {str(e)}')
             response.success = False
-            response.message = f'Failed to set robot type: {str(e)}'
+            # Audit §3.21 — sanitize.
+            response.message = 'Roboter-Typ konnte nicht gesetzt werden.'
             return response
 
     def _init_hf_api_worker(self):
@@ -1410,20 +1451,52 @@ class PhysicalAIServer(Node):
             response.success = False
             response.message = 'Kalibrierung wurde nicht gestartet.'
             return response
+        # The 'color_profile' step has no per-step solve (each
+        # capture_color call persists its own YAML). Treat a solve
+        # request for it as a "finish" signal: release the mutex if all
+        # four canonical colours are present.
+        if request.step == 'color_profile':
+            try:
+                from physical_ai_server.workflow.color_profile import ColorProfileManager
+                cm = ColorProfileManager()
+                if not cm.has_all_colors():
+                    response.success = False
+                    response.reprojection_error = 0.0
+                    response.method_disagreement = 0.0
+                    response.message = (
+                        'Farbprofil unvollständig — bitte alle vier '
+                        'Farben (rot/grün/blau/gelb) erfassen.'
+                    )
+                    return response
+                response.success = True
+                response.reprojection_error = 0.0
+                response.method_disagreement = 0.0
+                response.message = 'Farbprofil abgeschlossen.'
+                self.on_calibration = False
+                return response
+            except Exception as e:
+                response.success = False
+                response.reprojection_error = 0.0
+                response.method_disagreement = 0.0
+                response.message = f'Farbprofil-Status konnte nicht gelesen werden: {e}'
+                return response
+
         success, reproj, disagreement, message = manager.solve(request.camera, request.step)
         response.success = success
         response.reprojection_error = reproj
         response.method_disagreement = disagreement
         response.message = message
-        if success and request.step == 'handeye':
-            # Releasing the calibration mutex on the final solve lets the
-            # student return to the editor; intermediate solves leave the
-            # flag set so they can keep capturing more frames.
+        # Release the mutex on every successful solve, not just handeye.
+        # Intrinsic-only or handeye-only sessions are valid student flows
+        # and leaving on_calibration stuck blocks recording / inference /
+        # training when they navigate away (audit §1.3).
+        if success:
             self.on_calibration = False
         return response
 
     def calibration_auto_pose_callback(self, request, response):
         try:
+            import numpy as _np
             from physical_ai_server.workflow.auto_pose import suggest_pose
         except ImportError as e:
             response.success = False
@@ -1434,9 +1507,39 @@ class PhysicalAIServer(Node):
             response.success = False
             response.message = 'Kalibrierung kann nicht initialisiert werden.'
             return response
-        # Captured quaternions diversity check intentionally weak in v1 (no
-        # IK reachability yet); PR3 will swap the stub for the real IK.
-        candidate = suggest_pose([])
+        # The hemisphere sampler in suggest_pose generates candidates
+        # AROUND ``board_centre_base``. The v1 ship called it with the
+        # default origin (0, 0, 0), which is the BASE of the arm — every
+        # candidate landed inside the robot's own footprint and IK
+        # rejected them all (audit §1.6b).
+        #
+        # 0.25 m in front of the base on the table plane is the typical
+        # OMX-F + classroom-kit setup (see tools/classroom_kit_README.md).
+        # If a previous scene handeye solve has been persisted, prefer
+        # the z_table written there over the 0.0 default so the
+        # candidate elevations track the real table.
+        board_xyz = _np.array([0.25, 0.0, 0.0])
+        try:
+            calib = self._load_workflow_calibration()
+            z_table = calib.get('z_table')
+            if z_table is not None:
+                board_xyz = _np.array([0.25, 0.0, float(z_table)])
+        except Exception:
+            pass
+
+        # Captured quaternions: feed in any handeye captures the manager
+        # already has so the diversity score tracks real progress.
+        captured_quats: list = []
+        try:
+            buf = manager._handeye_buffers.get(request.camera)
+            if buf is not None:
+                from physical_ai_server.workflow.auto_pose import _rotation_matrix_to_quaternion
+                for R in buf.R_target2cam:
+                    captured_quats.append(_rotation_matrix_to_quaternion(R))
+        except Exception:
+            captured_quats = []
+
+        candidate = suggest_pose(captured_quats, board_centre_base=board_xyz)
         if candidate is None:
             response.success = False
             response.message = 'Konnte keine erreichbare Pose finden — bitte Tafel umpositionieren.'
@@ -1455,6 +1558,45 @@ class PhysicalAIServer(Node):
         )
         response.message = 'Pose vorgeschlagen.'
         return response
+
+    def calibration_capture_color_callback(self, request, response):
+        """Capture one cube colour for the per-classroom LAB profile.
+
+        Bound to /calibration/capture_color. The student places a cube
+        of the requested colour ('rot' | 'gruen' | 'blau' | 'gelb')
+        centrally in the scene camera frame and the server segments +
+        records its LAB cluster. See audit §1.7a.
+        """
+        try:
+            from physical_ai_server.workflow.color_profile import ColorProfileManager
+        except Exception as e:
+            response.success = False
+            response.message = f'Farbprofil-Modul fehlt: {e}'
+            response.lab_center = []
+            response.lab_std = []
+            return response
+        bgr = self._get_latest_camera_frame('scene')
+        if bgr is None:
+            response.success = False
+            response.message = 'Kein Kamerabild der Szenen-Kamera verfügbar.'
+            response.lab_center = []
+            response.lab_std = []
+            return response
+        try:
+            mgr = ColorProfileManager()
+            ok, message, center, std = mgr.capture(request.color, bgr)
+            response.success = bool(ok)
+            response.message = message
+            response.lab_center = [float(v) for v in center]
+            response.lab_std = [float(v) for v in std]
+            return response
+        except Exception as e:
+            self.get_logger().error(f'capture_color failed: {e}')
+            response.success = False
+            response.message = 'Farbprofil konnte nicht gespeichert werden.'
+            response.lab_center = []
+            response.lab_std = []
+            return response
 
     def mark_destination_callback(self, request, response):
         """Project a pixel click on a calibrated camera to a base-frame
@@ -1510,19 +1652,94 @@ class PhysicalAIServer(Node):
                 pass
             return response
         except Exception as e:
+            self.get_logger().error(f'mark_destination failed: {e}')
             response.success = False
-            response.message = f'Projektionsfehler: {e}'
+            # Audit §3.21 — generic German, log details server-side.
+            response.message = 'Projektion fehlgeschlagen — bitte Kalibrierung prüfen.'
             return response
 
     def calibration_execute_pose_callback(self, request, response):
-        # Real motion is wired in PR3 via SafetyEnvelope + IKSolver +
-        # chunked_publish. PR1 leaves this as a stub returning a German
-        # message so the wizard surfaces the dependency clearly.
-        response.success = False
-        response.message = (
-            'Auto-Anfahren ist noch nicht aktiv — bitte den Roboter manuell zur '
-            'vorgeschlagenen Pose bewegen oder auf das nächste Update warten.'
+        """Drive the arm to the auto-pose target via IK + chunked_publish.
+
+        Plugs into the same trajectory publisher + safety envelope the
+        Roboter Studio workflow runtime uses. Audit §1.7b — replaces
+        the v1 stub that returned "Auto-Anfahren ist noch nicht aktiv".
+        """
+        import math as _math
+        manager = self._get_or_create_workflow_manager()
+        if manager is None:
+            response.success = False
+            response.message = (
+                'Workflow-Runtime kann nicht initialisiert werden — '
+                'IK + Sicherheits-Envelope sind nicht verfügbar.'
+            )
+            return response
+        # Need a fresh IK solver: build one or reuse the lazily-built
+        # one on the workflow_manager via its factory.
+        ik = None
+        try:
+            ik = self._build_ik_solver()
+        except Exception as e:
+            self.get_logger().error(f'IK build failed: {e}')
+        if ik is None:
+            response.success = False
+            response.message = 'IK-Solver konnte nicht initialisiert werden.'
+            return response
+
+        target_xyz = (
+            float(request.target_x),
+            float(request.target_y),
+            float(request.target_z),
         )
+        target_quat = (
+            float(request.target_qx),
+            float(request.target_qy),
+            float(request.target_qz),
+            float(request.target_qw),
+        )
+        # Locked yaw — we want the gripper to face the board the way
+        # auto_pose suggested, not free-spin to a different approach.
+        seed = getattr(self, '_last_published_joints', None)
+        seed_arm = list(seed[:5]) if seed and len(seed) >= 5 else None
+        try:
+            arm_q = ik.solve_quat(target_xyz, target_quat, seed=seed_arm, free_yaw=False)
+        except Exception as e:
+            response.success = False
+            response.message = f'IK-Aufruf fehlgeschlagen: {e}'
+            return response
+        if arm_q is None:
+            response.success = False
+            response.message = 'Pose außerhalb des Arbeitsbereichs.'
+            return response
+
+        # Build a 4-second segment from the cached last-published
+        # joints (or home) to the target. The gripper joint stays put.
+        from physical_ai_server.workflow.trajectory_builder import (
+            build_segment, chunked_publish,
+        )
+        HOME = [0.0, -_math.pi / 4, _math.pi / 4, 0.0, 0.0]
+        last = getattr(self, '_last_published_joints', None) or list(HOME) + [0.8]
+        if len(last) < 6:
+            last = list(HOME) + [0.8]
+        full_target = list(arm_q) + [last[5]]
+        waypoints = build_segment(last, full_target, duration_s=4.0)
+        try:
+            ok = chunked_publish(
+                publisher=self._trajectory_publisher,
+                points=waypoints,
+                safety_apply=manager._safety.apply if hasattr(manager, '_safety') else None,
+                should_stop=lambda: False,
+            )
+        except Exception as e:
+            response.success = False
+            response.message = f'Bewegung fehlgeschlagen: {e}'
+            return response
+        if not ok:
+            response.success = False
+            response.message = 'Bewegung wurde abgebrochen.'
+            return response
+        response.success = True
+        response.message = 'Pose erreicht.'
         return response
 
     # ------------------------------------------------------------------
@@ -1537,6 +1754,28 @@ class PhysicalAIServer(Node):
             msg.log_message = str(payload.get('log_message', ''))
             msg.progress = float(payload.get('progress', 0.0))
             msg.error = str(payload.get('error', ''))
+            # Pack Detection list — each item is a perception.Detection
+            # dataclass instance pushed by handlers via ctx.emit_detections.
+            detections = payload.get('detections') or []
+            packed = []
+            for d in detections:
+                try:
+                    cx, cy = d.centroid_px
+                    bx, by, bw, bh = d.bbox_px
+                    det = Detection()
+                    det.cx = int(cx)
+                    det.cy = int(cy)
+                    det.w = int(bw)
+                    det.h = int(bh)
+                    det.label = str(getattr(d, 'label', '') or '')
+                    det.confidence = float(getattr(d, 'confidence', 0.0) or 0.0)
+                    packed.append(det)
+                except Exception:
+                    # One malformed detection shouldn't kill the
+                    # status publish for the others — skip it but
+                    # continue.
+                    continue
+            msg.active_detections = packed
             self.workflow_status_publisher.publish(msg)
         except Exception as e:
             self.get_logger().warning(f'workflow status publish error: {e}')
@@ -1545,7 +1784,9 @@ class PhysicalAIServer(Node):
         """Publish a chunk of (q, t_from_start_s) tuples as one
         JointTrajectory message on /leader/joint_trajectory. Bridges the
         chunked_publish API to the existing topic the controller listens
-        on."""
+        on. Side-effect: caches the LAST published joint vector so the
+        calibration_execute_pose handler can chain segments without
+        depending on a /joint_states subscription."""
         try:
             from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
         except ImportError:
@@ -1562,13 +1803,17 @@ class PhysicalAIServer(Node):
         )
         msg = JointTrajectory()
         msg.joint_names = list(joint_names)
+        last_q = None
         for q, t in points:
             point = JointTrajectoryPoint()
             point.positions = [float(v) for v in q]
             point.time_from_start.sec = int(t)
             point.time_from_start.nanosec = int((t - int(t)) * 1e9)
             msg.points.append(point)
+            last_q = list(point.positions)
         self._workflow_traj_publisher.publish(msg)
+        if last_q is not None:
+            self._last_published_joints = last_q
 
     def _get_or_create_workflow_manager(self):
         if self.workflow_manager is not None:
@@ -1585,6 +1830,7 @@ class PhysicalAIServer(Node):
             load_destinations=lambda: {},
             load_calibration=self._load_workflow_calibration,
             emit_status=self._emit_workflow_status,
+            on_finished=self._on_workflow_finished,
             get_scene_frame=lambda: self._get_latest_camera_frame('scene'),
             get_gripper_frame=lambda: self._get_latest_camera_frame('gripper'),
             get_current_pose_xyz=self._get_current_gripper_xyz,
@@ -1671,21 +1917,22 @@ class PhysicalAIServer(Node):
             return None
 
     def _build_perception(self):
-        try:
-            from physical_ai_server.workflow.perception import Perception
-            from physical_ai_server.workflow.color_profile import ColorProfileManager
-            perc = Perception()
-            color_mgr = ColorProfileManager()
-            profile = {}
-            for color in ('rot', 'gruen', 'blau', 'gelb'):
-                rng = color_mgr.hsv_range(color)
-                if rng is not None:
-                    profile[color] = rng
-            perc.set_color_profile(profile)
-            return perc
-        except Exception as e:
-            self.get_logger().error(f'Perception init failed: {e}')
-            return None
+        # No silent fallback: any failure here is a build/config bug
+        # that should surface as a German error in the workflow editor
+        # instead of a workflow that "runs" with disabled perception.
+        # WorkflowManager.start wraps this call in its own try/except
+        # and reports the message back to the student.
+        from physical_ai_server.workflow.perception import Perception
+        from physical_ai_server.workflow.color_profile import ColorProfileManager
+        perc = Perception()
+        color_mgr = ColorProfileManager()
+        profile = {}
+        for color in ('rot', 'gruen', 'blau', 'gelb'):
+            entry = color_mgr.lab_profile(color)
+            if entry is not None:
+                profile[color] = entry
+        perc.set_color_profile(profile)
+        return perc
 
     def _get_current_gripper_xyz(self):
         """Convenience wrapper that returns just the (x, y, z) of the
@@ -1749,11 +1996,31 @@ class PhysicalAIServer(Node):
         success, message = manager.start(request.workflow_json, request.workflow_id)
         if success:
             self.on_workflow = True
-            # Reset on completion via the daemon thread; we don't have a
-            # neat callback so a wakeup-style poll happens in the timer.
+            # The on_finished callback (passed into WorkflowManager via
+            # _get_or_create_workflow_manager) flips this back to False
+            # when the daemon thread exits, regardless of how it exited.
         response.success = success
         response.message = message
         return response
+
+    def _on_workflow_finished(self, terminal_phase: str) -> None:
+        """Fired by WorkflowManager._run on every exit path. Releases
+        the on_workflow mutex so the next mode (Aufnahme / Inferenz /
+        Training / Kalibrierung) can claim the arm without the student
+        having to press Stop on a workflow that's already done.
+
+        Runs on the daemon thread, not the ROS executor thread — keep
+        it tiny and side-effect-only. Phase is one of 'finished',
+        'stopped', 'error'.
+        """
+        try:
+            self.get_logger().info(
+                f'Workflow daemon exited (phase={terminal_phase}); '
+                f'releasing on_workflow.'
+            )
+        except Exception:
+            pass
+        self.on_workflow = False
 
     def workflow_stop_callback(self, request, response):
         manager = self.workflow_manager

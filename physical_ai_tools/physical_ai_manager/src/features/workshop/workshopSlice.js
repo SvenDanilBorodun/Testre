@@ -31,8 +31,11 @@ const initialState = {
   phase: '',
   progress: 0,
   log: [],
+  // Each detection: {cx, cy, w, h, label, confidence}. The pre-audit
+  // shape used parallel detections[] + detectionLabels[] arrays driven
+  // by a geometry_msgs/Point that didn't carry width/height; the
+  // Detection.msg switch (audit §1.6) collapsed them.
   detections: [],
-  detectionLabels: [],
   workflowError: null,
 
   // Editor state
@@ -92,7 +95,6 @@ const workshopSlice = createSlice({
     },
     setDetections: (state, action) => {
       state.detections = action.payload.detections || [];
-      state.detectionLabels = action.payload.labels || [];
     },
     clearWorkflowLog: (state) => {
       state.log = [];

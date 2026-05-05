@@ -8,6 +8,7 @@ find_package(geometry_msgs REQUIRED)
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/BrowserItem.msg"
   "msg/DatasetInfo.msg"
+  "msg/Detection.msg"
   "msg/HFOperationStatus.msg"
   "msg/TaskInfo.msg"
   "msg/TaskStatus.msg"
@@ -16,6 +17,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/WorkflowStatus.msg"
   "srv/AutoPoseSuggest.srv"
   "srv/BrowseFile.srv"
+  "srv/CalibrationCaptureColor.srv"
   "srv/CalibrationCaptureFrame.srv"
   "srv/CalibrationSolve.srv"
   "srv/ControlHfServer.srv"

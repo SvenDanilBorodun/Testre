@@ -13,13 +13,11 @@ def treeFromFile(filename):
     with open(filename) as urdf_file:
         return treeFromUrdfModel(urdf.URDF.from_xml_string(urdf_file.read()))
 
-def treeFromParam(param):
-    """
-    Construct a PyKDL.Tree from an URDF in a ROS parameter.
-    :param param: Parameter name, ``str``
-    """
-
-    return treeFromUrdfModel(urdf.URDF.from_parameter_server())
+# treeFromParam was removed during the audit §3.22 cleanup. Upstream's
+# version called urdf.URDF.from_parameter_server() which is a ROS 1
+# helper that does not work in ROS 2; nobody in this codebase calls
+# it. ik_solver._try_init_kdl uses treeFromUrdfModel directly. Re-add
+# only when a ROS 2-compatible parameter-server fetch is wired.
 
 def treeFromString(xml):
     """

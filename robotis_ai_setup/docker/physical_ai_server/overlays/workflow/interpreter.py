@@ -351,9 +351,15 @@ class Interpreter:
         if not hasattr(items, '__iter__'):
             raise InterpreterError('Für-jedes-Block hat keinen iterierbaren Wert.')
         do_block = self._get_input_block(block, 'DO')
+        iterations = 0
         for item in items:
             if ctx.should_stop():
                 raise WorkflowError('Workflow wurde gestoppt.')
+            iterations += 1
+            if iterations > MAX_LOOP_ITERATIONS:
+                raise InterpreterError(
+                    f'Für-jedes-Limit von {MAX_LOOP_ITERATIONS} überschritten.'
+                )
             ctx.variables[var_name] = item
             self._exec_chain(do_block, ctx, on_block_change)
 

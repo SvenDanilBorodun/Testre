@@ -33,11 +33,23 @@ def _ensure_perception(ctx):
 
 def _attach_world_xyz(ctx, detections: list) -> list:
     """Project pixel centroids of detections to base-frame XYZ on the
-    table plane. The motion handlers' resolver expects ``world_xyz_m``
-    to be populated."""
+    table plane and push the bounding-box list to the WorkflowStatus
+    publisher (so the editor can render an overlay).
+
+    Failures are surfaced as ``WorkflowError`` rather than swallowed —
+    the motion handlers' ``_resolve_target`` would otherwise read
+    ``d.world_xyz_m == None`` and raise the generic "Ziel-Wert konnte
+    nicht ausgewertet werden" message instead of pointing the student
+    at the missing calibration step (audit §3.1).
+    """
     if not detections:
+        ctx.emit_detections([])
         return detections
     if ctx.scene_intrinsics is None or ctx.scene_extrinsics is None or ctx.z_table is None:
+        # Push the detections so the bbox overlay still renders, but
+        # leave world_xyz_m unset; downstream motion handlers will
+        # raise a clear German error if they try to act on these.
+        ctx.emit_detections(detections)
         return detections
     try:
         from physical_ai_server.workflow.projection import project_pixel_to_table
@@ -50,10 +62,11 @@ def _attach_world_xyz(ctx, detections: list) -> list:
             point = project_pixel_to_table(cx, cy, K, dist, T, z)
             if point is not None:
                 d.world_xyz_m = (float(point[0]), float(point[1]), float(point[2]))
-    except Exception:
-        # Non-fatal — handlers downstream will raise a specific message
-        # if they actually need the world coordinates.
-        pass
+    except Exception as e:
+        raise WorkflowError(
+            f'Projektion fehlgeschlagen — bitte Kalibrierung prüfen: {e}'
+        )
+    ctx.emit_detections(detections)
     return detections
 
 
@@ -104,7 +117,15 @@ def count_objects_class(ctx, args: dict[str, Any]) -> int:
     return len(detect_object(ctx, args))
 
 
-def _poll_until(ctx, predicate, timeout_s: float, label: str) -> bool:
+def _poll_until(ctx, predicate, timeout_s: float, label: str, on_timeout: str) -> bool:
+    """Poll ``predicate`` until it returns truthy or ``timeout_s`` elapses.
+
+    ``on_timeout`` is one of ``'error'`` (default — raise WorkflowError
+    so the workflow halts with a German message) or ``'continue'``
+    (log + return False so the surrounding ``if`` block can branch).
+    Audit §3.2 — the v1 ship always returned False silently, so a
+    timeout looked indistinguishable from "found 0" to the next block.
+    """
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
         if ctx.should_stop():
@@ -112,8 +133,16 @@ def _poll_until(ctx, predicate, timeout_s: float, label: str) -> bool:
         if predicate():
             return True
         time.sleep(0.2)
-    ctx.log(f'Timeout: {label} nicht erkannt.')
-    return False
+    msg = f'Timeout: {label} nicht erkannt.'
+    if on_timeout == 'continue':
+        ctx.log(msg)
+        return False
+    raise WorkflowError(msg)
+
+
+def _on_timeout(args: dict[str, Any]) -> str:
+    raw = args.get('on_timeout') or args.get('behavior') or 'error'
+    return 'continue' if raw == 'continue' else 'error'
 
 
 def wait_until_color(ctx, args: dict[str, Any]) -> bool:
@@ -124,6 +153,7 @@ def wait_until_color(ctx, args: dict[str, Any]) -> bool:
         lambda: bool(detect_color(ctx, {'color': color})),
         timeout_s,
         f'Farbe {color}',
+        _on_timeout(args),
     )
 
 
@@ -135,6 +165,7 @@ def wait_until_object(ctx, args: dict[str, Any]) -> bool:
         lambda: bool(detect_object(ctx, {'class': coco_class})),
         timeout_s,
         f'Objekt {coco_class}',
+        _on_timeout(args),
     )
 
 
@@ -146,4 +177,5 @@ def wait_until_marker(ctx, args: dict[str, Any]) -> bool:
         lambda: bool(detect_marker(ctx, {'marker_id': marker_id})),
         timeout_s,
         f'Marker {marker_id}',
+        _on_timeout(args),
     )

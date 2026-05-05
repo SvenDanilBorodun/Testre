@@ -80,13 +80,18 @@ zuschauen.
 
 - **„Pose der Tafel konnte nicht bestimmt werden"**: ChArUco-Tafel ist
   nicht vollständig sichtbar oder gewölbt. Foam-Board prüfen.
-- **„Aktion verletzt Gelenklimits"** beim Auto-Anfahren: TRAC-IK hat keine
-  erreichbare Lösung gefunden. Tafel weiter weg vom Roboter platzieren.
+- **„Pose außerhalb des Arbeitsbereichs"** beim Auto-Anfahren: IK hat
+  keine erreichbare Lösung gefunden. Tafel weiter weg vom Roboter
+  platzieren oder einfach erneut "Nächste Pose" drücken — der Sampler
+  wählt eine andere Position.
 - **Würfel werden nicht erkannt** trotz Farbprofil: das Licht hat sich
   geändert — Farbprofil-Schritt erneut durchlaufen.
 - **„Workflow wurde gestoppt"** mitten in einer Aufgabe: Stopp-Knopf
-  wurde gedrückt; Roboter fährt automatisch zurück zur Heimposition.
+  wurde gedrückt; Roboter fährt automatisch zurück zur Heimposition
+  (Greifer wird vorher geöffnet, falls noch geschlossen).
+- **„Hand-Auge-Solve abgewiesen: PARK ↔ TSAI weichen ab"**: die 14
+  Posen waren zu ähnlich oder die Tafel hat sich zwischen den
+  Aufnahmen leicht bewegt. Aufnahmen verwerfen, Tafel fest fixieren
+  und erneut starten.
 
-Tracking-Issues über GitHub melden:
-<https://github.com/anthropics/claude-code/issues> (für allgemeine
-Claude-Code-Themen) bzw. das EduBotics-Repository.
+Issues über das EduBotics-Repository melden.

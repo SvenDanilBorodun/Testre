@@ -102,7 +102,16 @@ class SafetyEnvelope:
                     self._warned_action_shape = True
 
         if self._action_max_delta is not None and self._last_action is not None:
-            if len(action) == len(self._last_action):
+            # Pre-existing audit fix: previously this branch only
+            # guarded ``len(action) == len(self._last_action)``, which
+            # let the broadcast against ``_action_max_delta`` blow up
+            # when those two shapes differed. Skip the delta cap if
+            # ANY of the three shapes mismatch — same reasoning as
+            # the joint-limit branch above.
+            if (
+                len(action) == len(self._last_action)
+                and len(action) == len(self._action_max_delta)
+            ):
                 delta = action - self._last_action
                 abs_delta = np.abs(delta)
                 mask = abs_delta > self._action_max_delta

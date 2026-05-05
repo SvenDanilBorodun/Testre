@@ -23,14 +23,34 @@ from typing import Any
 from physical_ai_server.workflow.handlers.motion import WorkflowError
 
 
+UNPINNED_SENTINEL = '—'
+
+
 def destination_pin(ctx, args: dict[str, Any]) -> None:
     name = (args.get('name') or '').strip()
     if not name:
         raise WorkflowError('Ziel-Name fehlt.')
+    raw_x = args.get('x')
+    raw_y = args.get('y')
+    raw_z = args.get('z')
+    # An un-pinned block carries the sentinel '—' from the Blockly
+    # field. Fail loudly so the student gets pointed at the missing
+    # click-to-pin step instead of the runtime silently mapping the
+    # block to (0, 0, z_table) — the audit-§1.4 bug.
+    if (
+        raw_x is None or raw_y is None or raw_z is None
+        or raw_x == UNPINNED_SENTINEL
+        or raw_y == UNPINNED_SENTINEL
+        or raw_z == UNPINNED_SENTINEL
+    ):
+        raise WorkflowError(
+            f'Ziel "{name}" wurde nicht gepinnt — bitte den Block '
+            'auswählen und in die Szenen-Kamera klicken.'
+        )
     try:
-        x = float(args.get('x', 0.0))
-        y = float(args.get('y', 0.0))
-        z = float(args.get('z', ctx.z_table or 0.0))
+        x = float(raw_x)
+        y = float(raw_y)
+        z = float(raw_z)
     except (TypeError, ValueError):
         raise WorkflowError(f'Ziel "{name}" hat ungültige Koordinaten.')
     ctx.destinations[name] = {'x': x, 'y': y, 'z': z, 'label': name}

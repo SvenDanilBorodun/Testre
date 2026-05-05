@@ -575,8 +575,20 @@ export function useRosTopicSubscription() {
   ]);
 
   const subscribeToWorkflowStatus = useCallback(async () => {
-    if (workflowStatusTopicRef.current) return;
     if (!rosbridgeUrl) return;
+    // Re-entrant: if a previous topic is bound to a now-dead ros
+    // connection (after a rosbridge reconnect), drop it and re-subscribe.
+    // Audit §3.8 — the v1 ship returned early on the first subscribe
+    // attempt and never re-subscribed after a reconnect, so the
+    // workflow status feed silently went dark.
+    if (workflowStatusTopicRef.current) {
+      const existingRos = workflowStatusTopicRef.current.ros;
+      if (existingRos && existingRos.isConnected) return;
+      try {
+        workflowStatusTopicRef.current.unsubscribe();
+      } catch (_) { /* topic already torn down */ }
+      workflowStatusTopicRef.current = null;
+    }
     try {
       const ros = await rosConnectionManager.getConnection(rosbridgeUrl);
       if (!ros || !ros.isConnected) return;
@@ -598,10 +610,21 @@ export function useRosTopicSubscription() {
         } else if (msg.phase === 'running') {
           dispatch(setRunState('running'));
         }
-        if (msg.active_detections && msg.active_detections.length > 0) {
+        // Always dispatch detections — including an empty list — so
+        // the editor clears stale bbox overlays once the workflow
+        // moves past a perception block. Detection[] now carries
+        // (cx, cy, w, h, label, confidence) directly; the v1 parallel
+        // arrays (Point[] + string[]) were replaced after audit §1.6.
+        if (Array.isArray(msg.active_detections)) {
           dispatch(setDetections({
-            detections: msg.active_detections,
-            labels: msg.active_detection_labels || [],
+            detections: msg.active_detections.map((d) => ({
+              cx: d.cx,
+              cy: d.cy,
+              w: d.w,
+              h: d.h,
+              label: d.label,
+              confidence: d.confidence,
+            })),
           }));
         }
       });

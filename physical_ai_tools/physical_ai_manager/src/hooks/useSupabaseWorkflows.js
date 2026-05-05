@@ -30,6 +30,7 @@ export default function useSupabaseWorkflows() {
 
   const isMountedRef = useRef(true);
   const fetchRef = useRef(null);
+  const inFlightTokenRef = useRef(null);
 
   useEffect(() => {
     isMountedRef.current = true;
@@ -38,16 +39,25 @@ export default function useSupabaseWorkflows() {
     };
   }, []);
 
+  // Audit §3.11 — guard against the realtime polling fallback racing a
+  // slow listWorkflows fetch when the accessToken changes mid-flight.
+  // Each fetch records the token it was started with; the result is
+  // dropped if the token has rotated by the time it resolves.
   const refetch = useCallback(async () => {
     if (!accessToken) return;
+    inFlightTokenRef.current = accessToken;
     setLoading(true);
     try {
       const data = await listWorkflows(accessToken);
-      if (isMountedRef.current) setWorkflows(data);
+      if (!isMountedRef.current) return;
+      if (inFlightTokenRef.current !== accessToken) return;
+      setWorkflows(data);
     } catch (e) {
       console.warn('[useSupabaseWorkflows] refetch failed:', e?.message || e);
     } finally {
-      if (isMountedRef.current) setLoading(false);
+      if (isMountedRef.current && inFlightTokenRef.current === accessToken) {
+        setLoading(false);
+      }
     }
   }, [accessToken]);
 

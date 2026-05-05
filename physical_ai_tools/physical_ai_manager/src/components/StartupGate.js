@@ -180,8 +180,8 @@ function StartupGateImpl({ children }) {
           {timedOut && !settled && (
             <div className="flex flex-col items-center gap-3 max-w-sm text-center">
               <p className="text-sm text-orange-600">
-                Das System braucht ungewohnlich lange. Bitte prufe ob Docker Desktop lauft und alle
-                Container gestartet sind.
+                Das System braucht ungewöhnlich lange. Bitte prüfe ob Docker Desktop läuft und
+                alle Container gestartet sind.
               </p>
               <button
                 onClick={handleRetry}

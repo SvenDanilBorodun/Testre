@@ -13,14 +13,36 @@ import { DE } from './messages_de';
 
 const DEST_COLOR = '#f59e0b';
 
+// Sentinel value shown in the X/Y/Z labels of a fresh destination_pin
+// block. Updated to the world coordinates returned by /workshop/mark_destination
+// when the student clicks the scene camera while this block is selected.
+// The runtime handler (workflow/handlers/destinations.py) parses these
+// fields directly — see audit §1.4 for why a ctx.z_table fallback is
+// dangerous (silently maps a never-pinned block to z = z_table on the
+// table plane and the gripper crashes into the table).
+const UNPINNED = '—';
+
 export const DESTINATION_BLOCKS = [
   {
     type: 'edubotics_destination_pin',
+    // Two-line layout: name on top, "x= y= z=" read-only labels below
+    // so the teacher and student can see whether the block has been
+    // pinned yet. message1 + args1 is Blockly's idiom for a second
+    // row in the same block.
     message0: DE.DESTINATION_PIN,
     args0: [{ type: 'field_input', name: 'NAME', text: 'A' }],
+    message1: 'x %1  y %2  z %3',
+    args1: [
+      { type: 'field_label_serializable', name: 'X', text: UNPINNED },
+      { type: 'field_label_serializable', name: 'Y', text: UNPINNED },
+      { type: 'field_label_serializable', name: 'Z', text: UNPINNED },
+    ],
     previousStatement: null,
     nextStatement: null,
     colour: DEST_COLOR,
+    tooltip:
+      'Wähle diesen Block aus und klicke dann in die Szenen-Kamera, um '
+      + 'das Ziel zu setzen.',
   },
   {
     type: 'edubotics_destination_current',
@@ -31,6 +53,22 @@ export const DESTINATION_BLOCKS = [
     colour: DEST_COLOR,
   },
 ];
+
+/**
+ * Update the X/Y/Z labels of a destination_pin block in-place. Called
+ * from WorkshopPage's onMark handler after /workshop/mark_destination
+ * resolves. Returns true if the block was a destination_pin and the
+ * fields were updated, false otherwise (so the caller can warn that
+ * the click had no target).
+ */
+export function applyPinnedCoordinates(block, world_x, world_y, world_z) {
+  if (!block || block.type !== 'edubotics_destination_pin') return false;
+  const fmt = (v) => Number(v).toFixed(3);
+  block.setFieldValue(fmt(world_x), 'X');
+  block.setFieldValue(fmt(world_y), 'Y');
+  block.setFieldValue(fmt(world_z), 'Z');
+  return true;
+}
 
 export function registerDestinationBlocks() {
   Blockly.defineBlocksWithJsonArray(DESTINATION_BLOCKS);

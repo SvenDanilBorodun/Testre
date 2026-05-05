@@ -54,7 +54,7 @@ function WebApp() {
         dispatch(setProfile(me));
         if (me.role === 'student') {
           toast.error(
-            'Schueler-Konten koennen die Web-App nicht nutzen. Bitte oeffne die Desktop-App.',
+            'Schüler-Konten können die Web-App nicht nutzen. Bitte öffne die Desktop-App.',
             { duration: 6000 }
           );
           supabase.auth.signOut();

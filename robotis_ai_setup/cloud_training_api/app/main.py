@@ -106,6 +106,14 @@ _RATE_LIMIT_RULES: list[tuple[str, str, int, float]] = [
     ("*", "/trainings/start", 10, 60.0),
     ("*", "/trainings/cancel", 20, 60.0),
     ("POST", "/workflows", 10, 60.0),
+    # Teacher classroom + template creation. Audit §2.1: the v1 ship
+    # left teacher template POST unrate-limited, leaving a DOS hole
+    # next to the student-side guarded path. The prefix covers both
+    # "POST /teacher/classrooms" (new classroom) and
+    # "POST /teacher/classrooms/{id}/workflow-templates" — both are
+    # legitimately bursty when a teacher is setting up a classroom but
+    # 10/min is plenty.
+    ("POST", "/teacher/classrooms", 10, 60.0),
 ]
 
 

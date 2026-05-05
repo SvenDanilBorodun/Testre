@@ -94,6 +94,17 @@ if [ -n "$CLOUD_API_URL" ]; then
 fi
 BUILD_ARGS="$BUILD_ARGS --build-arg REACT_APP_ALLOWED_POLICIES=${ALLOWED_POLICIES}"
 BUILD_ARGS="$BUILD_ARGS --build-arg REACT_APP_BUILD_ID=${BUILD_ID}"
+
+# Stage server-side coco_classes.py into the manager build context so
+# the prebuild Jest hook (objectClasses.sync.test.js) can validate
+# that the React dropdown matches the server allowlist. Without this
+# the test would fail on ENOENT because physical_ai_server/ is a
+# sibling repo, not part of physical_ai_manager/.
+COCO_SNAPSHOT="${PHYSICAL_AI_TOOLS_DIR}/physical_ai_manager/_coco_classes.py"
+cp "${PHYSICAL_AI_TOOLS_DIR}/physical_ai_server/physical_ai_server/workflow/coco_classes.py" \
+   "${COCO_SNAPSHOT}"
+trap 'rm -f "'"${COCO_SNAPSHOT}"'"; rm -rf "'"${INTERFACES_STAGING:-/dev/null}"'"' EXIT
+
 docker build \
     $BUILD_ARGS \
     -t "${REGISTRY}/physical-ai-manager:latest" \
@@ -110,8 +121,29 @@ fi
 echo "   OK: ${PAS_BASE_IMAGE} exists"
 
 # ── Image 2b: physical_ai_server thin layer (patches upstream bugs) ──
+#
+# Stage physical_ai_interfaces source into the build context so the
+# Dockerfile can re-build it inside the image. The base image lacks
+# the Roboter Studio service / message types that landed in
+# d408378, so without this rebuild physical_ai_server.py would crash
+# on import. We copy the whole package directory (msg/, srv/,
+# CMakeLists.txt, package.xml) as `interfaces/` and clean up after.
+INTERFACES_STAGING="${SCRIPT_DIR}/physical_ai_server/interfaces"
 echo ""
-echo ">> Building physical_ai_server thin layer (patches)..."
+echo ">> Staging physical_ai_interfaces source for in-image rebuild..."
+rm -rf "${INTERFACES_STAGING}"
+mkdir -p "${INTERFACES_STAGING}/msg" "${INTERFACES_STAGING}/srv"
+cp "${PHYSICAL_AI_TOOLS_DIR}/physical_ai_interfaces/CMakeLists.txt" "${INTERFACES_STAGING}/"
+cp "${PHYSICAL_AI_TOOLS_DIR}/physical_ai_interfaces/package.xml"    "${INTERFACES_STAGING}/"
+cp "${PHYSICAL_AI_TOOLS_DIR}/physical_ai_interfaces/msg/"*.msg      "${INTERFACES_STAGING}/msg/"
+cp "${PHYSICAL_AI_TOOLS_DIR}/physical_ai_interfaces/srv/"*.srv      "${INTERFACES_STAGING}/srv/"
+
+# Clean up the staging dir on script exit (success or failure) so a
+# stale copy doesn't leak into the next build.
+trap 'rm -rf "'"${INTERFACES_STAGING}"'"' EXIT
+
+echo ""
+echo ">> Building physical_ai_server thin layer (patches + interface rebuild)..."
 docker build \
     -t "${REGISTRY}/physical-ai-server:latest" \
     -f "${SCRIPT_DIR}/physical_ai_server/Dockerfile" \

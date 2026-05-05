@@ -105,14 +105,19 @@ RUN pip install --no-cache-dir \
         urdf-parser-py==0.0.4 && \
     pip uninstall -y opencv-python || true
 
-# TRAC-IK is a faster IK solver than the KDL fallback. The Roboter Studio
-# motion primitives prefer it; if the package isn't available on
-# ros-jazzy at build time, the IKSolver class transparently falls back to
-# PyKDL. Install both either way so we have the fallback ready.
+# TRAC-IK is the preferred IK solver; PyKDL is a runtime fallback.
+# ros-jazzy-kdl-parser-py is not yet packaged for jazzy noble in apt
+# (https://repo.ros2.org); without it the PyKDL fallback path can't parse
+# URDF, but ik_solver._try_init_kdl already wraps every import in
+# try/except and degrades gracefully — TRAC-IK alone is enough in
+# practice. Each package install below is best-effort so a missing optional
+# one (kdl-parser-py, trac-ik) doesn't fail the whole image build.
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        ros-jazzy-python-orocos-kdl-vendor \
-        ros-jazzy-kdl-parser-py && \
+        ros-jazzy-python-orocos-kdl-vendor && \
+    (DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        ros-jazzy-kdl-parser-py || \
+     echo 'WARNING: ros-jazzy-kdl-parser-py not available — PyKDL fallback disabled') && \
     (DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         ros-jazzy-trac-ik-python || \
      echo 'WARNING: ros-jazzy-trac-ik-python not available — falling back to PyKDL only') && \

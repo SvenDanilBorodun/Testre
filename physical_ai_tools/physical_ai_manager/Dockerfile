@@ -18,8 +18,12 @@ ENV REACT_APP_ALLOWED_POLICIES=${REACT_APP_ALLOWED_POLICIES}
 ARG REACT_APP_BUILD_ID=dev
 ENV REACT_APP_BUILD_ID=${REACT_APP_BUILD_ID}
 
-COPY package*.json ./
-RUN npm install
+COPY package*.json .npmrc* ./
+# --legacy-peer-deps because react-blockly@9 declares a peer of react@^16-18
+# but we run React 19 (works fine in practice; react-blockly only uses the
+# stable hooks API). The .npmrc copied above sets the same default for any
+# follow-up npm calls inside this layer.
+RUN npm install --legacy-peer-deps
 COPY . .
 RUN npm run build
 RUN printf '{"buildId":"%s","builtAt":"%s"}\n' "${REACT_APP_BUILD_ID}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > build/version.json

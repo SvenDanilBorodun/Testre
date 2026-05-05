@@ -25,8 +25,9 @@ ENV REACT_APP_SUPABASE_URL=${REACT_APP_SUPABASE_URL} \
     REACT_APP_ALLOWED_POLICIES=${REACT_APP_ALLOWED_POLICIES} \
     REACT_APP_BUILD_ID=${REACT_APP_BUILD_ID}
 
-COPY package*.json ./
-RUN npm install
+COPY package*.json .npmrc* ./
+# See note in Dockerfile: react-blockly@9 peer-dep is too narrow for React 19.
+RUN npm install --legacy-peer-deps
 COPY . .
 RUN npm run build
 RUN printf '{"buildId":"%s","builtAt":"%s"}\n' "${REACT_APP_BUILD_ID}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > build/version.json

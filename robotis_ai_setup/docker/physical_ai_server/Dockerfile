@@ -84,6 +84,13 @@ COPY overlays/omx_f_config.yaml /tmp/overlays/omx_f_config.yaml
 # safety envelope in inference_manager.predict(). Without this overlay the
 # caller would pass None into tensor_array2joint_msgs and crash the node.
 COPY overlays/physical_ai_server.py /tmp/overlays/physical_ai_server.py
+# communicator.py adds get_latest_bgr_frame + get_latest_follower_joints
+# (decode CompressedImage + return JointState position) so the
+# Roboter Studio calibration manager can actually collect frames + EEF
+# poses on real hardware. Without this overlay the v1.2 provider hooks
+# in physical_ai_server.py find no methods to call and the wizard
+# returns "Kein Kamerabild verfügbar." on every capture press.
+COPY overlays/communicator.py /tmp/overlays/communicator.py
 RUN set -e && \
     apply_overlay() { \
         local name="$1" path_filter="$2" src="/tmp/overlays/$1"; \
@@ -118,6 +125,7 @@ RUN set -e && \
     apply_overlay data_converter.py "*/data_processing/*" && \
     apply_overlay omx_f_config.yaml "" && \
     apply_overlay physical_ai_server.py "*/physical_ai_server/physical_ai_server.py" && \
+    apply_overlay communicator.py "*/communication/communicator.py" && \
     rm -rf /tmp/overlays
 
 # Roboter Studio runtime dependencies. opencv-contrib-python is required

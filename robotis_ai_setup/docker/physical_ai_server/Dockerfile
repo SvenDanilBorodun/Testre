@@ -105,23 +105,47 @@ RUN pip install --no-cache-dir \
         urdf-parser-py==0.0.4 && \
     pip uninstall -y opencv-python || true
 
-# TRAC-IK is the preferred IK solver; PyKDL is a runtime fallback.
-# ros-jazzy-kdl-parser-py is not yet packaged for jazzy noble in apt
-# (https://repo.ros2.org); without it the PyKDL fallback path can't parse
-# URDF, but ik_solver._try_init_kdl already wraps every import in
-# try/except and degrades gracefully — TRAC-IK alone is enough in
-# practice. Each package install below is best-effort so a missing optional
-# one (kdl-parser-py, trac-ik) doesn't fail the whole image build.
+# IK solvers: TRAC-IK preferred, PyKDL fallback.
+# Neither ros-jazzy-trac-ik-python nor ros-jazzy-kdl-parser-py is yet
+# packaged for ROS Jazzy on Ubuntu noble in the apt repo. We work around
+# this in two layers:
+#   1. Install python-orocos-kdl-vendor (provides the PyKDL bindings — IS
+#      packaged) and best-effort install of trac-ik-python (will skip).
+#   2. Vendor kdl_parser_py from the upstream ROS repo into site-packages
+#      directly — it's pure Python (126 lines), depends only on PyKDL
+#      and urdf_parser_py (both already installed). This re-enables the
+#      `from kdl_parser_py.urdf import treeFromUrdfModel` import in
+#      ik_solver._try_init_kdl, so motion handlers (Pickup/MoveTo/DropAt)
+#      get a working PyKDL IK solver instead of None.
+# Once the apt packages land for Jazzy, this whole block can be replaced
+# with a normal apt install — the pip-vendoring is a transition shim.
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         ros-jazzy-python-orocos-kdl-vendor && \
     (DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        ros-jazzy-kdl-parser-py || \
-     echo 'WARNING: ros-jazzy-kdl-parser-py not available — PyKDL fallback disabled') && \
-    (DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         ros-jazzy-trac-ik-python || \
-     echo 'WARNING: ros-jazzy-trac-ik-python not available — falling back to PyKDL only') && \
+     echo 'INFO: ros-jazzy-trac-ik-python not in apt yet — IK uses PyKDL fallback (kdl_parser_py vendored below)') && \
     rm -rf /var/lib/apt/lists/*
+
+# Vendor kdl_parser_py (pure Python) into site-packages so PyKDL fallback
+# can parse URDF strings. Files come from ros/kdl_parser@humble; same
+# tree on the ros2 / foxy / galactic / iron / jazzy branches.
+COPY patches/kdl_parser_py /tmp/kdl_parser_py_src
+# Two-step strategy: (1) reinstall urdf-parser-py via the SAME python3
+# that will run at runtime (`python3 -m pip` ensures interpreter/site
+# alignment regardless of how the upstream `pip` is configured); then
+# (2) drop kdl_parser_py into that same python's site-packages and
+# verify the chained import works end-to-end.
+RUN set -e && \
+    python3 -m pip install --no-cache-dir urdf-parser-py==0.0.4 && \
+    site=$(python3 -c 'import urdf_parser_py, os; print(os.path.dirname(os.path.dirname(urdf_parser_py.__file__)))') && \
+    [ -n "$site" ] || { echo "ERROR: urdf_parser_py site lookup failed"; exit 1; } && \
+    echo "kdl_parser_py vendor target site=$site" && \
+    mkdir -p "$site/kdl_parser_py" && \
+    cp /tmp/kdl_parser_py_src/__init__.py "$site/kdl_parser_py/__init__.py" && \
+    cp /tmp/kdl_parser_py_src/urdf.py "$site/kdl_parser_py/urdf.py" && \
+    rm -rf /tmp/kdl_parser_py_src && \
+    python3 -c "from kdl_parser_py.urdf import treeFromUrdfModel; print('kdl_parser_py vendored OK')"
 
 # AGPL audit: every package we explicitly pip-install above (opencv-contrib-
 # python 4.10 / pupil-apriltags / onnxruntime 1.20 / urdf-parser-py / pip-

@@ -149,16 +149,30 @@ def pickup(ctx, args: dict[str, Any]) -> None:
 
 
 def drop_at(ctx, args: dict[str, Any]) -> None:
+    """Place the held object at ``destination``. Symmetric with ``pickup``:
+    approach +DEFAULT_APPROACH_HEIGHT_M above the target with the gripper
+    closed, descend to the target, open, then retreat back above. The v1
+    ship moved straight to the target XYZ in joint space, which produced
+    a swept-arc carry path — adjacent obstacles could be clipped on the
+    way in. The bounded-quintic approach is consistent with pickup."""
     target = _resolve_target(args.get('destination'), ctx)
-    arm_q = _solve_or_raise(ctx, target)
-    q_lifted_closed = arm_q + [GRIPPER_CLOSED_RAD]
-    q_lifted_open = arm_q + [GRIPPER_OPEN_RAD]
+    above = (target[0], target[1], target[2] + DEFAULT_APPROACH_HEIGHT_M)
 
-    _publish_motion(ctx, ctx.last_full_joints, q_lifted_closed, DEFAULT_MOVE_DURATION_S)
-    _publish_motion(ctx, q_lifted_closed, q_lifted_open, DEFAULT_GRIPPER_DURATION_S)
+    above_arm_q = _solve_or_raise(ctx, above)
+    drop_arm_q = _solve_or_raise(ctx, target)
 
-    ctx.last_arm_joints = arm_q
-    ctx.last_full_joints = q_lifted_open
+    above_closed_q = above_arm_q + [GRIPPER_CLOSED_RAD]
+    drop_closed_q = drop_arm_q + [GRIPPER_CLOSED_RAD]
+    drop_open_q = drop_arm_q + [GRIPPER_OPEN_RAD]
+    retreat_open_q = above_arm_q + [GRIPPER_OPEN_RAD]
+
+    _publish_motion(ctx, ctx.last_full_joints, above_closed_q, DEFAULT_MOVE_DURATION_S)
+    _publish_motion(ctx, above_closed_q, drop_closed_q, DEFAULT_APPROACH_DURATION_S)
+    _publish_motion(ctx, drop_closed_q, drop_open_q, DEFAULT_GRIPPER_DURATION_S)
+    _publish_motion(ctx, drop_open_q, retreat_open_q, DEFAULT_APPROACH_DURATION_S)
+
+    ctx.last_arm_joints = above_arm_q
+    ctx.last_full_joints = retreat_open_q
 
 
 def wait_seconds(ctx, args: dict[str, Any]) -> None:

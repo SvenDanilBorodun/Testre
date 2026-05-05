@@ -1,0 +1,16 @@
+# Read which calibration artefacts already exist on disk so the
+# Roboter Studio wizard can hydrate per-step badges after a page reload.
+# No request fields — this is a simple status read.
+#
+# Reads the persisted YAMLs (gripper_intrinsics.yaml, scene_intrinsics.yaml,
+# gripper_handeye.yaml, scene_handeye.yaml, color_profile.yaml) via the
+# CalibrationManager / ColorProfileManager has_* helpers. Cheap; safe to
+# call on every wizard mount.
+---
+bool success
+string message
+bool has_gripper_intrinsics
+bool has_scene_intrinsics
+bool has_gripper_handeye
+bool has_scene_handeye
+bool has_color_profile

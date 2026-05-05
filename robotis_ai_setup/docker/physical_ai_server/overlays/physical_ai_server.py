@@ -38,6 +38,8 @@ from physical_ai_interfaces.srv import (
     CalibrationCaptureColor,
     CalibrationCaptureFrame,
     CalibrationSolve,
+    CalibrationStatus,
+    CancelCalibration,
     ControlHfServer,
     ExecuteCalibrationPose,
     GetDatasetList,
@@ -97,6 +99,10 @@ class PhysicalAIServer(Node):
         self.on_inference = False
         self.on_calibration = False
         self.on_workflow = False
+        # Cleared by /calibration/start, set by /calibration/cancel.
+        # /calibration/execute_pose's chunked_publish polls this so a
+        # mis-planned 4-second motion can be aborted mid-flight.
+        self._calibration_stop_event = threading.Event()
 
         self.hf_cancel_on_progress = False
 
@@ -157,6 +163,17 @@ class PhysicalAIServer(Node):
 
     def _init_ros_service(self):
         self.get_logger().info('Initializing ROS services...')
+        # Reentrant group for the two services that MUST preempt an
+        # in-flight long motion: /calibration/cancel and /calibration/
+        # status. /calibration/execute_pose's chunked_publish blocks
+        # its callback for ~4 seconds; without a reentrant group on
+        # cancel/status they would queue behind it and the stop-event
+        # polling at 50ms cadence would be unreachable. Read-only
+        # services (status) and preemption services (cancel) are safe
+        # to dispatch concurrently because they only set/clear flags
+        # and read disk state.
+        from rclpy.callback_groups import ReentrantCallbackGroup
+        self._preempt_cb_group = ReentrantCallbackGroup()
         service_definitions = [
             ('/task/command', SendCommand, self.user_interaction_callback),
             ('/get_robot_types', GetRobotTypeList, self.get_robot_types_callback),
@@ -194,13 +211,35 @@ class PhysicalAIServer(Node):
                 CalibrationCaptureColor,
                 self.calibration_capture_color_callback,
             ),
+            (
+                '/calibration/cancel',
+                CancelCalibration,
+                self.calibration_cancel_callback,
+                self._preempt_cb_group,
+            ),
+            (
+                '/calibration/status',
+                CalibrationStatus,
+                self.calibration_status_callback,
+                self._preempt_cb_group,
+            ),
             ('/workshop/mark_destination', MarkDestination, self.mark_destination_callback),
             ('/workflow/start', StartWorkflow, self.workflow_start_callback),
             ('/workflow/stop', StopWorkflow, self.workflow_stop_callback),
         ]
 
-        for service_name, service_type, callback in service_definitions:
-            self.create_service(service_type, service_name, callback)
+        for entry in service_definitions:
+            # 4-tuple (name, type, callback, callback_group) for the
+            # reentrant-preempt services; 3-tuple for everything else.
+            if len(entry) == 4:
+                service_name, service_type, callback, cb_group = entry
+                self.create_service(
+                    service_type, service_name, callback,
+                    callback_group=cb_group,
+                )
+            else:
+                service_name, service_type, callback = entry
+                self.create_service(service_type, service_name, callback)
 
         self.get_logger().info('ROS services initialized successfully')
 
@@ -1386,32 +1425,72 @@ class PhysicalAIServer(Node):
         return self.calibration_manager
 
     def _get_latest_camera_frame(self, camera: str):
-        """Provider hook for the calibration manager. Returns the most recent
-        BGR frame for the named camera, or None if unavailable. Hardware
-        wiring lives in a follow-up — until then this returns None and the
-        manager produces a German user-facing error message."""
+        """Provider hook for the calibration manager + colour profile
+        capture. Returns the most recent BGR frame for the named camera,
+        or None when no frame has arrived yet / decode fails. Delegates to
+        ``Communicator.get_latest_bgr_frame``, which decodes the cached
+        ``CompressedImage`` JPEG via cv2.imdecode."""
+        if self.communicator is None:
+            return None
+        getter = getattr(self.communicator, 'get_latest_bgr_frame', None)
+        if not callable(getter):
+            self.get_logger().warning(
+                'Communicator has no get_latest_bgr_frame; calibration capture disabled. '
+                'Update communicator.py to the post-v1.1 build.'
+            )
+            return None
         try:
-            if self.communicator is None:
-                return None
-            getter = getattr(self.communicator, 'get_latest_bgr_frame', None)
-            if callable(getter):
-                return getter(camera)
+            return getter(camera)
         except Exception as e:
             self.get_logger().warning(f'Camera frame provider error: {e}')
-        return None
+            return None
+
+    # Soft TTL on a failed IK build so a missing /robot_description
+    # doesn't trigger a full URDF parameter lookup (with 1+2s wait
+    # timeouts) on every FK call. Re-tries every _IK_BUILD_RETRY_S
+    # seconds and logs at most once per window.
+    _IK_BUILD_RETRY_S = 5.0
 
     def _get_current_gripper_pose(self):
-        """Provider hook for hand-eye calibration. Returns (R 3x3, t 3,) of
-        gripper-in-base, or None when unavailable."""
+        """Provider hook for hand-eye calibration. Returns ``(R 3x3, t 3,)``
+        of gripper-in-base, or None when joint state hasn't arrived yet or
+        FK is unavailable. Computes FK via the same IKSolver instance used
+        for /calibration/execute_pose so the URDF is loaded exactly once
+        per server lifetime."""
+        if self.communicator is None:
+            return None
+        joints_getter = getattr(self.communicator, 'get_latest_follower_joints', None)
+        if not callable(joints_getter):
+            return None
         try:
-            if self.communicator is None:
-                return None
-            getter = getattr(self.communicator, 'get_current_gripper_pose', None)
-            if callable(getter):
-                return getter()
+            joints = joints_getter()
         except Exception as e:
-            self.get_logger().warning(f'Gripper pose provider error: {e}')
-        return None
+            self.get_logger().warning(f'Follower-joints provider error: {e}')
+            return None
+        if joints is None:
+            return None
+        ik = getattr(self, '_cached_ik_solver', None)
+        if ik is None:
+            # Honour the failed-build TTL so we don't retry per-tick.
+            import time as _time
+            last_attempt = getattr(self, '_ik_build_last_attempt_ts', 0.0)
+            now = _time.monotonic()
+            if now - last_attempt < self._IK_BUILD_RETRY_S:
+                return None
+            self._ik_build_last_attempt_ts = now
+            try:
+                ik = self._build_ik_solver()
+            except Exception as e:
+                self.get_logger().warning(f'IK build for FK failed: {e}')
+                return None
+            if ik is None:
+                return None
+            self._cached_ik_solver = ik
+        try:
+            return ik.fk(joints)
+        except Exception as e:
+            self.get_logger().warning(f'FK call failed: {e}')
+            return None
 
     def calibration_start_callback(self, request, response):
         ok, msg = self._assert_no_other_active('calibration')
@@ -1424,6 +1503,10 @@ class PhysicalAIServer(Node):
             response.success = False
             response.message = 'Kalibrierung kann nicht initialisiert werden.'
             return response
+        # Clear any leftover stop flag from a previous cancel so the
+        # newly-started step's execute_pose call isn't aborted on its
+        # very first tick.
+        self._calibration_stop_event.clear()
         success, message = manager.start_step(request.camera, request.step)
         if success:
             self.on_calibration = True
@@ -1437,7 +1520,22 @@ class PhysicalAIServer(Node):
             response.success = False
             response.message = 'Kalibrierung wurde nicht gestartet.'
             return response
-        success, captured, required, last_rms, message = manager.capture_frame(request.camera)
+        # Wrap the manager call so an unhandled solver/cv2 exception
+        # surfaces as a German message instead of a Python traceback,
+        # and the on_calibration mutex isn't poisoned by an exception
+        # path that bypassed every release branch.
+        try:
+            success, captured, required, last_rms, message = manager.capture_frame(request.camera)
+        except Exception as e:
+            self.get_logger().error(f'capture_frame raised: {e}')
+            response.success = False
+            response.frames_captured = 0
+            response.frames_required = 0
+            response.last_view_rms = 0.0
+            response.message = (
+                'Kalibrier-Aufnahme fehlgeschlagen. Bitte erneut versuchen.'
+            )
+            return response
         response.success = success
         response.frames_captured = captured
         response.frames_required = required
@@ -1478,10 +1576,26 @@ class PhysicalAIServer(Node):
                 response.success = False
                 response.reprojection_error = 0.0
                 response.method_disagreement = 0.0
-                response.message = f'Farbprofil-Status konnte nicht gelesen werden: {e}'
+                self.get_logger().error(f'color_profile finish-check raised: {e}')
+                response.message = 'Farbprofil-Status konnte nicht gelesen werden.'
                 return response
 
-        success, reproj, disagreement, message = manager.solve(request.camera, request.step)
+        # Same guard as capture_frame: an unhandled solver/numpy/cv2
+        # exception used to leave on_calibration stuck True forever.
+        # Force-release on the exception path so the student can retry
+        # from a clean state.
+        try:
+            success, reproj, disagreement, message = manager.solve(request.camera, request.step)
+        except Exception as e:
+            self.get_logger().error(f'solve raised: {e}')
+            self.on_calibration = False
+            response.success = False
+            response.reprojection_error = 0.0
+            response.method_disagreement = 0.0
+            response.message = (
+                'Kalibrier-Lösung fehlgeschlagen. Bitte erneut starten und neu erfassen.'
+            )
+            return response
         response.success = success
         response.reprojection_error = reproj
         response.method_disagreement = disagreement
@@ -1494,13 +1608,72 @@ class PhysicalAIServer(Node):
             self.on_calibration = False
         return response
 
+    def calibration_cancel_callback(self, request, response):
+        """Drop in-flight calibration buffers and release the mutex.
+        Called by the frontend wizard's cleanup useEffect when the
+        student navigates away mid-step. Idempotent — returns success
+        even if no step was active. Camera '' (empty) cancels every
+        camera; otherwise narrows to the named camera. Also signals
+        ``_calibration_stop_event`` so an in-flight execute_pose motion
+        halts within ≤50 ms instead of running to its 4-second end."""
+        camera = request.camera if request.camera else None
+        # Set BEFORE dropping buffers so a mid-flight chunked_publish
+        # observes the stop on its next poll without racing the manager.
+        self._calibration_stop_event.set()
+        manager = self.calibration_manager
+        if manager is not None:
+            try:
+                _ok, _msg = manager.cancel_step(camera)
+            except Exception as e:
+                self.get_logger().warning(f'cancel_step raised: {e}')
+        self.on_calibration = False
+        response.success = True
+        response.message = (
+            'Kalibrierung abgebrochen.' if camera is None
+            else f'Kalibrierung für {camera} abgebrochen.'
+        )
+        return response
+
+    def calibration_status_callback(self, request, response):
+        """Report which calibration artefacts already exist on disk so
+        the wizard can show the right per-step badges after a page
+        reload. Reads the persisted YAMLs via has_intrinsics /
+        has_handeye / has_color_profile — no manager state required, so
+        works even when the server hasn't seen any /calibration/start
+        call yet in its lifetime."""
+        try:
+            from physical_ai_server.workflow.calibration_manager import (
+                CalibrationManager,
+            )
+            from physical_ai_server.workflow.color_profile import ColorProfileManager
+            mgr = CalibrationManager()
+            color_mgr = ColorProfileManager()
+            response.has_gripper_intrinsics = bool(mgr.has_intrinsics('gripper'))
+            response.has_scene_intrinsics = bool(mgr.has_intrinsics('scene'))
+            response.has_gripper_handeye = bool(mgr.has_handeye('gripper'))
+            response.has_scene_handeye = bool(mgr.has_handeye('scene'))
+            response.has_color_profile = bool(color_mgr.has_all_colors())
+            response.success = True
+            response.message = 'Kalibrier-Status geladen.'
+        except Exception as e:
+            self.get_logger().warning(f'status read failed: {e}')
+            response.has_gripper_intrinsics = False
+            response.has_scene_intrinsics = False
+            response.has_gripper_handeye = False
+            response.has_scene_handeye = False
+            response.has_color_profile = False
+            response.success = False
+            response.message = 'Status konnte nicht gelesen werden.'
+        return response
+
     def calibration_auto_pose_callback(self, request, response):
         try:
             import numpy as _np
             from physical_ai_server.workflow.auto_pose import suggest_pose
         except ImportError as e:
+            self.get_logger().error(f'auto_pose import failed: {e}')
             response.success = False
-            response.message = f'Auto-Pose-Modul fehlt: {e}'
+            response.message = 'Auto-Pose-Modul fehlt.'
             return response
         manager = self._get_or_create_calibration_manager()
         if manager is None:
@@ -1566,15 +1739,40 @@ class PhysicalAIServer(Node):
         of the requested colour ('rot' | 'gruen' | 'blau' | 'gelb')
         centrally in the scene camera frame and the server segments +
         records its LAB cluster. See audit §1.7a.
+
+        Enforces the scene-calibration prerequisite at the service
+        boundary instead of relying on the frontend wizard ordering —
+        without intrinsic + hand-eye for the scene camera the LAB
+        cluster cannot be projected to base frame at runtime, so
+        capturing without those is meaningless. (Replaces the dead
+        start_step('color_profile') branch in calibration_manager.)
         """
         try:
             from physical_ai_server.workflow.color_profile import ColorProfileManager
+            from physical_ai_server.workflow.calibration_manager import (
+                CalibrationManager,
+            )
         except Exception as e:
+            self.get_logger().error(f'capture_color import failed: {e}')
             response.success = False
-            response.message = f'Farbprofil-Modul fehlt: {e}'
+            response.message = 'Farbprofil-Modul fehlt.'
             response.lab_center = []
             response.lab_std = []
             return response
+        # Prerequisite check: scene must be fully calibrated.
+        try:
+            cal = CalibrationManager()
+            if not (cal.has_intrinsics('scene') and cal.has_handeye('scene')):
+                response.success = False
+                response.message = (
+                    'Farbprofil benötigt eine kalibrierte Szenen-Kamera. '
+                    'Bitte zuerst die Schritte 2 und 4 abschließen.'
+                )
+                response.lab_center = []
+                response.lab_std = []
+                return response
+        except Exception as e:
+            self.get_logger().warning(f'capture_color prereq check failed: {e}')
         bgr = self._get_latest_camera_frame('scene')
         if bgr is None:
             response.success = False
@@ -1666,6 +1864,9 @@ class PhysicalAIServer(Node):
         the v1 stub that returned "Auto-Anfahren ist noch nicht aktiv".
         """
         import math as _math
+        # Clear any leftover stop flag from the previous cancel/start so
+        # this newly-requested motion isn't aborted on its first poll.
+        self._calibration_stop_event.clear()
         manager = self._get_or_create_workflow_manager()
         if manager is None:
             response.success = False
@@ -1704,8 +1905,9 @@ class PhysicalAIServer(Node):
         try:
             arm_q = ik.solve_quat(target_xyz, target_quat, seed=seed_arm, free_yaw=False)
         except Exception as e:
+            self.get_logger().error(f'IK solve_quat raised: {e}')
             response.success = False
-            response.message = f'IK-Aufruf fehlgeschlagen: {e}'
+            response.message = 'IK-Aufruf fehlgeschlagen.'
             return response
         if arm_q is None:
             response.success = False
@@ -1723,16 +1925,21 @@ class PhysicalAIServer(Node):
             last = list(HOME) + [0.8]
         full_target = list(arm_q) + [last[5]]
         waypoints = build_segment(last, full_target, duration_s=4.0)
+        # Bind the cancel event so /calibration/cancel can interrupt a
+        # mis-planned 4-second motion. chunked_publish polls this between
+        # chunks (≤50 ms latency), so the worst-case time from cancel to
+        # arm-stationary is one chunk_duration_s plus a poll tick.
         try:
             ok = chunked_publish(
                 publisher=self._trajectory_publisher,
                 points=waypoints,
                 safety_apply=manager._safety.apply if hasattr(manager, '_safety') else None,
-                should_stop=lambda: False,
+                should_stop=self._calibration_stop_event.is_set,
             )
         except Exception as e:
+            self.get_logger().error(f'execute_pose chunked_publish raised: {e}')
             response.success = False
-            response.message = f'Bewegung fehlgeschlagen: {e}'
+            response.message = 'Bewegung fehlgeschlagen.'
             return response
         if not ok:
             response.success = False
@@ -1936,51 +2143,67 @@ class PhysicalAIServer(Node):
 
     def _get_current_gripper_xyz(self):
         """Convenience wrapper that returns just the (x, y, z) of the
-        current gripper pose for the destination_current handler. Falls
-        back to None if the communicator doesn't expose forward
-        kinematics."""
-        try:
-            if self.communicator is None:
-                return None
-            getter = getattr(self.communicator, 'get_current_gripper_xyz', None)
-            if callable(getter):
-                return getter()
-        except Exception:
+        current gripper pose for the destination_current handler. Reuses
+        the FK path from ``_get_current_gripper_pose`` so the URDF is
+        loaded once per server lifetime."""
+        pose = self._get_current_gripper_pose()
+        if pose is None:
             return None
-        return None
+        _R, t = pose
+        return (float(t[0]), float(t[1]), float(t[2]))
 
     def _load_workflow_calibration(self):
         """Load scene intrinsics + extrinsics + z_table for projection
         of perception detections to base-frame XYZ. Returns a dict
-        consumed by ``WorkflowContext`` — empty when calibration files
-        are missing (perception still runs but world_xyz_m won't be
-        populated)."""
-        try:
-            from pathlib import Path
-            import os
-            import cv2
-            calib_dir = Path(os.environ.get('EDUBOTICS_CALIB_DIR', '/root/.cache/edubotics/calibration'))
-            scene_intrinsic_path = calib_dir / 'scene_intrinsics.yaml'
-            scene_handeye_path = calib_dir / 'scene_handeye.yaml'
-            if not scene_intrinsic_path.exists() or not scene_handeye_path.exists():
-                return {}
-            fs = cv2.FileStorage(str(scene_intrinsic_path), cv2.FILE_STORAGE_READ)
-            K = fs.getNode('camera_matrix').mat()
-            dist = fs.getNode('distortion_coefficients').mat()
-            fs.release()
-            fs = cv2.FileStorage(str(scene_handeye_path), cv2.FILE_STORAGE_READ)
-            T = fs.getNode('transform').mat()
-            z_node = fs.getNode('z_table')
-            z_table = float(z_node.real()) if not z_node.empty() else 0.0
-            fs.release()
-            return {
-                'scene_intrinsics': {'K': K, 'dist': dist},
-                'scene_extrinsics': T,
-                'z_table': z_table,
-            }
-        except Exception as e:
-            self.get_logger().warning(f'Calibration load failed: {e}')
-            return {}
+        consumed by ``WorkflowContext``.
+
+        Audit fix: the v1 ship returned ``{}`` unless BOTH
+        scene_intrinsics.yaml AND scene_handeye.yaml existed — even
+        scene_intrinsics alone (which Auto-Pose already needs to derive
+        ``z_table`` for the gripper-handeye pose suggestions) was thrown
+        away. Now we load whatever is available and fill the rest with
+        sensible defaults. ``z_table`` falls back to 0.0 only when the
+        scene-handeye YAML is genuinely missing; once that exists, even
+        if the intrinsics are stale, the table-plane projection still
+        works."""
+        from pathlib import Path
+        import os
+        import cv2
+
+        calib_dir = Path(os.environ.get(
+            'EDUBOTICS_CALIB_DIR', '/root/.cache/edubotics/calibration'
+        ))
+        scene_intrinsic_path = calib_dir / 'scene_intrinsics.yaml'
+        scene_handeye_path = calib_dir / 'scene_handeye.yaml'
+
+        result: dict = {}
+        if scene_intrinsic_path.exists():
+            try:
+                fs = cv2.FileStorage(str(scene_intrinsic_path), cv2.FILE_STORAGE_READ)
+                K = fs.getNode('camera_matrix').mat()
+                dist = fs.getNode('distortion_coefficients').mat()
+                fs.release()
+                if K is not None and dist is not None:
+                    result['scene_intrinsics'] = {'K': K, 'dist': dist}
+            except Exception as e:
+                self.get_logger().warning(
+                    f'scene_intrinsics.yaml load failed: {e}'
+                )
+        if scene_handeye_path.exists():
+            try:
+                fs = cv2.FileStorage(str(scene_handeye_path), cv2.FILE_STORAGE_READ)
+                T = fs.getNode('transform').mat()
+                z_node = fs.getNode('z_table')
+                z_table = float(z_node.real()) if not z_node.empty() else 0.0
+                fs.release()
+                if T is not None:
+                    result['scene_extrinsics'] = T
+                result['z_table'] = z_table
+            except Exception as e:
+                self.get_logger().warning(
+                    f'scene_handeye.yaml load failed: {e}'
+                )
+        return result
 
     def workflow_start_callback(self, request, response):
         ok, msg = self._assert_no_other_active('workflow')
@@ -2150,13 +2373,24 @@ class PhysicalAIServer(Node):
 def main(args=None):
     rclpy.init(args=args)
     node = PhysicalAIServer()
+    # Multi-threaded executor so /calibration/cancel can dispatch while
+    # /calibration/execute_pose is blocked inside chunked_publish's
+    # 4-second sleep loop. Without this the stop-event polling at
+    # ~50ms cadence is unreachable — a single-threaded spin would
+    # serialise both callbacks and the cancel signal would never
+    # arrive in time. Three threads is enough for the typical wizard
+    # (one execute_pose in flight + concurrent cancel + status).
+    from rclpy.executors import MultiThreadedExecutor
+    executor = MultiThreadedExecutor(num_threads=3)
+    executor.add_node(node)
     try:
-        rclpy.spin(node)
+        executor.spin()
     except KeyboardInterrupt:
         pass
     finally:
         # Cleanup HF API Worker before destroying node
         node._cleanup_hf_api_worker()
+        executor.shutdown()
         node.destroy_node()
         rclpy.shutdown()
 

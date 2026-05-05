@@ -38,3 +38,22 @@ def test_default_origin_still_works_for_unit_tests():
     rng = np.random.default_rng(seed=11)
     candidate = suggest_pose([], rng=rng)
     assert candidate is not None
+
+
+def test_default_reachability_uses_board_centre_not_origin():
+    """Audit follow-up: the geometric pre-filter used to compare
+    ``np.linalg.norm(target_xyz)`` (distance from base origin) instead
+    of distance from the board centre. With a board at [0.25, 0, 0.05],
+    a candidate at [0.49, 0, 0.05] is exactly on the +0.24 m shell
+    around the board (legal) but 0.49 m from origin (out of the old
+    shell). The fix makes both of these accept correctly."""
+    from physical_ai_server.workflow.auto_pose import _default_reachability
+    board = np.array([0.25, 0.0, 0.05])
+    on_shell = np.array([0.49, 0.0, 0.05])  # +0.24 m from board, in [0.20, 0.30]
+    assert _default_reachability(on_shell, np.array([0, 0, 0, 1]), board_centre_base=board)
+    inner_shell = np.array([0.46, 0.0, 0.05])  # +0.21 m from board
+    assert _default_reachability(inner_shell, np.array([0, 0, 0, 1]), board_centre_base=board)
+    too_close = np.array([0.40, 0.0, 0.05])  # +0.15 m from board, below 0.20
+    assert not _default_reachability(too_close, np.array([0, 0, 0, 1]), board_centre_base=board)
+    way_too_far = np.array([0.60, 0.0, 0.05])  # +0.35 m from board, above 0.30
+    assert not _default_reachability(way_too_far, np.array([0, 0, 0, 1]), board_centre_base=board)

@@ -1,0 +1,12 @@
+# Cancel an in-flight calibration step. The CalibrationManager drops
+# the active capture buffers (intrinsic and/or handeye for the named
+# camera, or for every camera if `camera` is left empty) and the
+# physical_ai_server releases the on_calibration mutex so the student
+# can resume recording / inference / training without waiting for a
+# robot-type switch. Idempotent: safe to call when no step is active.
+#
+# camera: 'gripper' | 'scene' | '' (empty = cancel every camera)
+string camera
+---
+bool success
+string message

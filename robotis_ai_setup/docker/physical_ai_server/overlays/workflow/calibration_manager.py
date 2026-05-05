@@ -149,6 +149,10 @@ class CalibrationManager:
     def start_step(self, camera: str, step: str) -> tuple[bool, str]:
         with self._lock:
             if step == 'intrinsic':
+                # Drop any in-flight hand-eye buffer for this camera so
+                # capture_frame doesn't route to the wrong solver after the
+                # student switches steps.
+                self._handeye_buffers.pop(camera, None)
                 self._intrinsic_buffers[camera] = IntrinsicCaptureBuffer()
                 return True, f'Intrinsische Kalibrierung für {camera} gestartet.'
             if step == 'handeye':
@@ -157,15 +161,35 @@ class CalibrationManager:
                         f'Bitte erst die intrinsische Kalibrierung der '
                         f'{camera}-Kamera abschließen.'
                     )
+                # Drop any leftover intrinsic buffer for this camera —
+                # without this, capture_frame's "if camera in
+                # _intrinsic_buffers" precedence routes hand-eye captures
+                # into the intrinsic buffer and the student never collects
+                # a single hand-eye sample.
+                self._intrinsic_buffers.pop(camera, None)
                 self._handeye_buffers[camera] = HandEyeCaptureBuffer()
                 return True, f'Hand-Auge-Kalibrierung für {camera} gestartet.'
-            if step == 'color_profile':
-                if not (self.has_intrinsics('scene') and self.has_handeye('scene')):
-                    return False, (
-                        'Farbprofil benötigt eine kalibrierte Szenen-Kamera.'
-                    )
-                return True, 'Farbprofil-Erfassung gestartet.'
+            # The 'color_profile' step has no per-step start; capture is
+            # gated by the prerequisite check inside
+            # calibration_capture_color_callback. Anything other than
+            # 'intrinsic' / 'handeye' is rejected as unknown so a typo'd
+            # frontend call surfaces clearly.
             return False, f'Unbekannter Kalibrier-Schritt: {step}'
+
+    def cancel_step(self, camera: str | None = None) -> tuple[bool, str]:
+        """Drop all in-flight capture buffers and forget the active step.
+        When ``camera`` is None, cancels every camera; otherwise narrows
+        to the one camera. Idempotent — safe to call when no step is
+        active. Used by /calibration/cancel so a closed wizard doesn't
+        leave the on_calibration mutex stuck."""
+        with self._lock:
+            if camera is None:
+                self._intrinsic_buffers.clear()
+                self._handeye_buffers.clear()
+                return True, 'Alle Kalibrier-Schritte abgebrochen.'
+            self._intrinsic_buffers.pop(camera, None)
+            self._handeye_buffers.pop(camera, None)
+            return True, f'Kalibrier-Schritt für {camera} abgebrochen.'
 
     # ------------------------------------------------------------------
     # Frame capture
@@ -210,9 +234,21 @@ class CalibrationManager:
 
             if camera in self._intrinsic_buffers:
                 buf = self._intrinsic_buffers[camera]
+                # Image-size guard: cv2.calibrateCameraCharucoExtended takes
+                # a single image_size, so a mixed-resolution capture set
+                # produces nonsense intrinsics with no error. Reject any
+                # frame whose dimensions disagree with the first stored
+                # frame; the student gets a clear German message and the
+                # buffer stays clean for a retry.
+                this_size = gray.shape[::-1]  # (W, H)
+                if buf.image_size is not None and buf.image_size != this_size:
+                    return False, len(buf.all_corners), INTRINSIC_FRAMES_REQUIRED, float(buf.last_view_rms or 0.0), (
+                        'Kamera-Auflösung hat sich geändert. Bitte Aufnahme '
+                        'neu starten und mit einer einzigen Auflösung erfassen.'
+                    )
                 buf.all_corners.append(corners)
                 buf.all_ids.append(ids)
-                buf.image_size = gray.shape[::-1]
+                buf.image_size = this_size
                 rms = self._estimate_view_rms(buf)
                 buf.last_view_rms = rms
                 return True, len(buf.all_corners), INTRINSIC_FRAMES_REQUIRED, float(rms or 0.0), (

@@ -30,6 +30,10 @@ function IntrinsicCalibStep({ camera }) {
 
   const [busy, setBusy] = useState(false);
   const [started, setStarted] = useState(false);
+  // Final reprojection error from the most recent successful solve.
+  // Different from lastViewRms (which is the per-capture estimate); this
+  // is the consolidated 12-frame RMS the solver actually persisted.
+  const [solvedRms, setSolvedRms] = useState(null);
 
   const cameraLabel = camera === 'gripper' ? 'Greifer-Kamera' : 'Szenen-Kamera';
 
@@ -76,6 +80,9 @@ function IntrinsicCalibStep({ camera }) {
 
   const handleSolve = useCallback(async () => {
     setBusy(true);
+    // Clear any prior "Gespeichert" badge so a re-solve that fails
+    // doesn't leave a stale green line lingering above a new error.
+    setSolvedRms(null);
     try {
       const r = await calibrationSolve(camera, 'intrinsic');
       if (!r.success) {
@@ -84,6 +91,11 @@ function IntrinsicCalibStep({ camera }) {
       } else {
         dispatch(markStepComplete(`${camera}_intrinsic`));
         dispatch(setCalibError(null));
+        // Render the final consolidated reprojection error so the
+        // student gets feedback beyond a flash toast.
+        if (typeof r.reprojection_error === 'number' && r.reprojection_error > 0) {
+          setSolvedRms(r.reprojection_error);
+        }
         toast.success(r.message);
       }
     } catch (e) {
@@ -95,6 +107,7 @@ function IntrinsicCalibStep({ camera }) {
 
   useEffect(() => {
     setStarted(false);
+    setSolvedRms(null);
     dispatch(resetCalibProgress());
   }, [camera, dispatch]);
 
@@ -126,6 +139,11 @@ function IntrinsicCalibStep({ camera }) {
         {lastViewRms !== null && lastViewRms !== undefined && lastViewRms > 0 && (
           <p className="text-xs text-[var(--ink-4)] mt-2">
             Aktueller Reprojektionsfehler: {Number(lastViewRms).toFixed(2)} px
+          </p>
+        )}
+        {solvedRms !== null && solvedRms !== undefined && solvedRms > 0 && (
+          <p className="text-xs text-emerald-700 mt-1 font-medium">
+            Gespeichert — Gesamt-Reprojektionsfehler: {Number(solvedRms).toFixed(2)} px
           </p>
         )}
       </div>

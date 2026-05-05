@@ -104,8 +104,12 @@ def list_workflows(
 
     Paginated since audit §2.4 — a classroom with thousands of saves
     would otherwise serialise the whole table on every Realtime
-    refresh. The total result is capped at ``limit`` rows after the
-    own + templates merge.
+    refresh. The total result is capped at ``limit + MAX_LIST_LIMIT``
+    rows: up to ``limit`` of the caller's own (paginated by the offset
+    arg) plus up to ``MAX_LIST_LIMIT`` classroom templates concatenated
+    after deduplication. Teachers with very many templates therefore
+    still see the full template set without forcing students to re-
+    paginate just to find a template the teacher pinned.
     """
     supabase = get_supabase()
     user_id = user.id

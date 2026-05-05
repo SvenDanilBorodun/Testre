@@ -74,6 +74,23 @@ const workshopSlice = createSlice({
       else if (step === 'scene_handeye') state.hasHandeyeScene = true;
       else if (step === 'color_profile') state.hasColorProfile = true;
     },
+    setCalibrationStatus: (state, action) => {
+      // Hydrate per-step badges from /calibration/status so the wizard
+      // doesn't make the student redo intrinsic captures after every page
+      // reload. Payload mirrors the CalibrationStatus.srv response.
+      const {
+        has_gripper_intrinsics,
+        has_scene_intrinsics,
+        has_gripper_handeye,
+        has_scene_handeye,
+        has_color_profile,
+      } = action.payload || {};
+      if (has_gripper_intrinsics !== undefined) state.hasIntrinsicGripper = !!has_gripper_intrinsics;
+      if (has_scene_intrinsics !== undefined) state.hasIntrinsicScene = !!has_scene_intrinsics;
+      if (has_gripper_handeye !== undefined) state.hasHandeyeGripper = !!has_gripper_handeye;
+      if (has_scene_handeye !== undefined) state.hasHandeyeScene = !!has_scene_handeye;
+      if (has_color_profile !== undefined) state.hasColorProfile = !!has_color_profile;
+    },
     resetCalibProgress: (state) => {
       state.framesCaptured = 0;
       state.lastViewRms = null;
@@ -120,6 +137,7 @@ export const {
   setMethodDisagreement,
   setCalibError,
   markStepComplete,
+  setCalibrationStatus,
   resetCalibProgress,
   setRunState,
   setWorkflowStatus,

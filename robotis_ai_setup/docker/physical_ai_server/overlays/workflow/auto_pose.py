@@ -14,10 +14,11 @@ The sampler scores candidates by:
    current intrinsic estimate plus the candidate camera->board transform).
 2. Angular diversity vs already-captured poses (>=30 deg of axis-angle
    change is preferred).
-3. IK reachability — until PR3 ships the real IKSolver, the stub returns
-   True for any candidate within the geometric workspace cone (radius
-   0.20-0.30 m, polar 30-75 deg). Replace ``_default_reachability`` with
-   the real IK call once available.
+3. Geometric pre-filter ``_default_reachability``: rejects candidates
+   outside the hemisphere shell (radius 0.20-0.30 m measured from the
+   board centre). Real IK reachability is enforced when the wizard calls
+   /calibration/execute_pose, so this filter is intentionally permissive
+   — its job is only to drop obviously-wrong samples cheaply.
 """
 
 from __future__ import annotations
@@ -43,11 +44,21 @@ class PoseCandidate:
     score: float
 
 
-def _default_reachability(target_xyz: np.ndarray, target_quat: np.ndarray) -> bool:
-    """Stub used until PR3 wires the real IK solver in. Accepts any pose
-    inside the hemisphere shell — the geometric workspace of the OMX-F is
-    a superset of this region, so PR1 calibration captures stay safe."""
-    radius = float(np.linalg.norm(target_xyz))
+def _default_reachability(
+    target_xyz: np.ndarray,
+    target_quat: np.ndarray,
+    board_centre_base: np.ndarray = np.array([0.0, 0.0, 0.0]),
+) -> bool:
+    """Geometric pre-filter on candidates around the board centre.
+
+    Bug fix (audit §6): the original implementation measured radius from
+    the base origin, but candidates are sampled around board_centre_base
+    (typically [0.25, 0, z_table]). With the wrong reference, most
+    candidates fell outside [0.20, 0.30] from origin and were rejected.
+    The filter now compares distance from the board centre, which is the
+    same frame in which candidates are constructed."""
+    delta = np.asarray(target_xyz) - np.asarray(board_centre_base)
+    radius = float(np.linalg.norm(delta))
     return HEMISPHERE_RADIUS_MIN_M <= radius <= HEMISPHERE_RADIUS_MAX_M
 
 
@@ -114,14 +125,32 @@ def _quat_angular_diff_deg(q1: np.ndarray, q2: np.ndarray) -> float:
 def suggest_pose(
     captured_quats: list[np.ndarray],
     board_centre_base: np.ndarray = np.array([0.0, 0.0, 0.0]),
-    is_reachable: Callable[[np.ndarray, np.ndarray], bool] = _default_reachability,
+    is_reachable: Callable[..., bool] = _default_reachability,
     num_candidates: int = DEFAULT_NUM_CANDIDATES,
     rng: np.random.Generator | None = None,
 ) -> PoseCandidate | None:
     """Return the highest-scoring reachable candidate, or None if none of the
-    sampled candidates is reachable + diverse enough."""
+    sampled candidates is reachable + diverse enough.
+
+    ``is_reachable`` is called with ``(target_xyz, target_quat)`` and may
+    optionally accept a ``board_centre_base`` keyword. Custom IK-backed
+    callers that ignore the board centre keep working because the kw is
+    only passed when the callable accepts it."""
     if rng is None:
         rng = np.random.default_rng()
+
+    # Detect whether the reachability callable accepts board_centre_base
+    # so we can forward it to the geometric default without breaking
+    # custom IK-backed implementations that take only (xyz, quat).
+    import inspect
+    try:
+        _params = inspect.signature(is_reachable).parameters
+        _accepts_board = (
+            'board_centre_base' in _params
+            or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in _params.values())
+        )
+    except (TypeError, ValueError):
+        _accepts_board = False
 
     best: PoseCandidate | None = None
     for _ in range(num_candidates):
@@ -133,7 +162,12 @@ def suggest_pose(
         target_xyz = board_centre_base + offset
         target_quat = _look_at_quat(target_xyz, board_centre_base)
 
-        if not is_reachable(target_xyz, target_quat):
+        reachable = (
+            is_reachable(target_xyz, target_quat, board_centre_base=board_centre_base)
+            if _accepts_board
+            else is_reachable(target_xyz, target_quat)
+        )
+        if not reachable:
             continue
 
         diversity = _diversity_score(target_quat, captured_quats)

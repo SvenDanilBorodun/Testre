@@ -97,6 +97,45 @@ class IKSolver:
         except Exception:
             return None
 
+    def num_joints(self) -> int:
+        """Return the number of joints in the IK chain (excludes any extra
+        passive/gripper joints)."""
+        if self._tracik is not None:
+            return int(self._tracik.number_of_joints)
+        if self._kdl is not None:
+            return int(self._kdl['num_joints'])
+        return 0
+
+    def fk(self, joints) -> Optional[tuple[np.ndarray, np.ndarray]]:
+        """Forward kinematics: returns ``(R 3x3, t 3,)`` of the end-effector
+        in base frame for the given joint vector, or ``None`` when FK is
+        unavailable (no PyKDL backend) or the input shape doesn't match
+        the IK chain. Always uses the PyKDL FK chain; lazily builds one
+        if only TRAC-IK was initialised."""
+        if self._kdl is None:
+            self._kdl = self._try_init_kdl()
+        if self._kdl is None:
+            return None
+        n = self._kdl['num_joints']
+        joints = list(joints)
+        if len(joints) < n:
+            return None
+        PyKDL = self._kdl['PyKDL']
+        q = PyKDL.JntArray(n)
+        for i in range(n):
+            q[i] = float(joints[i])
+        frame = PyKDL.Frame()
+        rc = self._kdl['fk_solver'].JntToCart(q, frame)
+        if rc != 0:
+            return None
+        R = np.array([
+            [frame.M[0, 0], frame.M[0, 1], frame.M[0, 2]],
+            [frame.M[1, 0], frame.M[1, 1], frame.M[1, 2]],
+            [frame.M[2, 0], frame.M[2, 1], frame.M[2, 2]],
+        ], dtype=np.float64)
+        t = np.array([frame.p.x(), frame.p.y(), frame.p.z()], dtype=np.float64)
+        return R, t
+
     @staticmethod
     def _rpy_to_rotation(rpy: tuple[float, float, float]) -> np.ndarray:
         roll, pitch, yaw = rpy

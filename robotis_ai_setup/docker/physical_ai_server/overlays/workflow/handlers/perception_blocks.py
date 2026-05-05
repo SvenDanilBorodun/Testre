@@ -117,15 +117,16 @@ def count_objects_class(ctx, args: dict[str, Any]) -> int:
     return len(detect_object(ctx, args))
 
 
-def _poll_until(ctx, predicate, timeout_s: float, label: str, on_timeout: str) -> bool:
+def _poll_until(ctx, predicate, timeout_s: float, label: str) -> bool:
     """Poll ``predicate`` until it returns truthy or ``timeout_s`` elapses.
 
-    ``on_timeout`` is one of ``'error'`` (default — raise WorkflowError
-    so the workflow halts with a German message) or ``'continue'``
-    (log + return False so the surrounding ``if`` block can branch).
-    Audit §3.2 — the v1 ship always returned False silently, so a
-    timeout looked indistinguishable from "found 0" to the next block.
-    """
+    On timeout, raises ``WorkflowError`` so the workflow halts with a
+    German message — this is symmetric with the rest of the perception
+    handlers and matches what students expect when a "Warte bis …"
+    block sees nothing. The previous implementation had a dead
+    ``on_timeout='continue'`` branch reading from a block field that
+    never existed; if that affordance is wanted later, expose a
+    dropdown on the wait_until_* blocks first."""
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
         if ctx.should_stop():
@@ -133,16 +134,7 @@ def _poll_until(ctx, predicate, timeout_s: float, label: str, on_timeout: str) -
         if predicate():
             return True
         time.sleep(0.2)
-    msg = f'Timeout: {label} nicht erkannt.'
-    if on_timeout == 'continue':
-        ctx.log(msg)
-        return False
-    raise WorkflowError(msg)
-
-
-def _on_timeout(args: dict[str, Any]) -> str:
-    raw = args.get('on_timeout') or args.get('behavior') or 'error'
-    return 'continue' if raw == 'continue' else 'error'
+    raise WorkflowError(f'Timeout: {label} nicht erkannt.')
 
 
 def wait_until_color(ctx, args: dict[str, Any]) -> bool:
@@ -153,7 +145,6 @@ def wait_until_color(ctx, args: dict[str, Any]) -> bool:
         lambda: bool(detect_color(ctx, {'color': color})),
         timeout_s,
         f'Farbe {color}',
-        _on_timeout(args),
     )
 
 
@@ -165,7 +156,6 @@ def wait_until_object(ctx, args: dict[str, Any]) -> bool:
         lambda: bool(detect_object(ctx, {'class': coco_class})),
         timeout_s,
         f'Objekt {coco_class}',
-        _on_timeout(args),
     )
 
 
@@ -177,5 +167,4 @@ def wait_until_marker(ctx, args: dict[str, Any]) -> bool:
         lambda: bool(detect_marker(ctx, {'marker_id': marker_id})),
         timeout_s,
         f'Marker {marker_id}',
-        _on_timeout(args),
     )

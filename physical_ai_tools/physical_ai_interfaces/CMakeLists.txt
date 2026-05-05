@@ -3,7 +3,6 @@ project(physical_ai_interfaces)
 
 find_package(ament_cmake REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
-find_package(geometry_msgs REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/BrowserItem.msg"
@@ -20,6 +19,8 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/CalibrationCaptureColor.srv"
   "srv/CalibrationCaptureFrame.srv"
   "srv/CalibrationSolve.srv"
+  "srv/CalibrationStatus.srv"
+  "srv/CancelCalibration.srv"
   "srv/ControlHfServer.srv"
   "srv/EditDataset.srv"
   "srv/ExecuteCalibrationPose.srv"
@@ -41,7 +42,6 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/StartCalibration.srv"
   "srv/StartWorkflow.srv"
   "srv/StopWorkflow.srv"
-  DEPENDENCIES geometry_msgs
 )
 
 install(

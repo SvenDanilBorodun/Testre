@@ -598,12 +598,21 @@ export function useRosTopicSubscription() {
         messageType: 'physical_ai_interfaces/msg/WorkflowStatus',
       });
       topic.subscribe((msg) => {
+        // edubotics_play_sound block: backend emits the literal token
+        // "[SOUND]" via ctx.log so the frontend can play an audible beep
+        // (the server has no speakers). Suppress the token from
+        // log_message so students hear the beep without seeing literal
+        // "[SOUND]" pollution in the log strip.
+        const isSoundToken = msg.log_message === '[SOUND]';
+        if (isSoundToken) {
+          playBeep(880, 250);
+        }
         dispatch(setWorkflowStatus({
           current_block_id: msg.current_block_id,
           phase: msg.phase,
           progress: msg.progress,
           error: msg.error || '',
-          log_message: msg.log_message,
+          log_message: isSoundToken ? '' : msg.log_message,
         }));
         if (msg.phase === 'finished' || msg.phase === 'stopped' || msg.phase === 'error') {
           dispatch(setRunState(msg.phase));
@@ -632,7 +641,7 @@ export function useRosTopicSubscription() {
     } catch (e) {
       console.error('subscribeToWorkflowStatus failed:', e);
     }
-  }, [dispatch, rosbridgeUrl]);
+  }, [dispatch, rosbridgeUrl, playBeep]);
 
   return {
     connected,

@@ -646,6 +646,26 @@ export function useRosServiceCaller() {
     [callService]
   );
 
+  const cancelCalibration = useCallback(
+    async (camera = '') =>
+      callService(
+        '/calibration/cancel',
+        'physical_ai_interfaces/srv/CancelCalibration',
+        { camera }
+      ),
+    [callService]
+  );
+
+  const getCalibrationStatus = useCallback(
+    async () =>
+      callService(
+        '/calibration/status',
+        'physical_ai_interfaces/srv/CalibrationStatus',
+        {}
+      ),
+    [callService]
+  );
+
   return {
     callService,
     sendRecordCommand,
@@ -673,5 +693,7 @@ export function useRosServiceCaller() {
     stopWorkflow,
     markDestination,
     captureColor,
+    cancelCalibration,
+    getCalibrationStatus,
   };
 }

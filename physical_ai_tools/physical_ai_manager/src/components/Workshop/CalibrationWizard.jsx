@@ -8,9 +8,10 @@
  *     http://www.apache.org/licenses/LICENSE-2.0
  */
 
-import React from 'react';
+import React, { useEffect } from 'react';
 import { useSelector, useDispatch } from 'react-redux';
-import { setCurrentStep } from '../../features/workshop/workshopSlice';
+import { setCurrentStep, setCalibrationStatus } from '../../features/workshop/workshopSlice';
+import { useRosServiceCaller } from '../../hooks/useRosServiceCaller';
 import IntrinsicCalibStep from './IntrinsicCalibStep';
 import HandEyeCalibStep from './HandEyeCalibStep';
 import ColorProfileStep from './ColorProfileStep';
@@ -25,12 +26,36 @@ const STEPS = [
 
 function CalibrationWizard() {
   const dispatch = useDispatch();
+  const { getCalibrationStatus, cancelCalibration } = useRosServiceCaller();
   const currentStep = useSelector((s) => s.workshop.currentStep);
   const hasIntrinsicGripper = useSelector((s) => s.workshop.hasIntrinsicGripper);
   const hasIntrinsicScene = useSelector((s) => s.workshop.hasIntrinsicScene);
   const hasHandeyeGripper = useSelector((s) => s.workshop.hasHandeyeGripper);
   const hasHandeyeScene = useSelector((s) => s.workshop.hasHandeyeScene);
   const hasColorProfile = useSelector((s) => s.workshop.hasColorProfile);
+
+  // Hydrate per-step badges from disk so reloading the page doesn't make
+  // students redo intrinsic captures. Run once on mount; the underlying
+  // /calibration/status read is cheap (just a few file-existence checks).
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await getCalibrationStatus();
+        if (!cancelled && r && r.success) {
+          dispatch(setCalibrationStatus(r));
+        }
+      } catch (_) { /* ignore — wizard works without hydration */ }
+    })();
+    // On unmount: tell the server to drop in-flight buffers and clear
+    // on_calibration so closing the wizard doesn't leave the global mutex
+    // stuck (recording/inference/training would otherwise be blocked
+    // until a robot-type switch).
+    return () => {
+      cancelled = true;
+      cancelCalibration('').catch(() => {});
+    };
+  }, [dispatch, getCalibrationStatus, cancelCalibration]);
 
   const stepStatus = {
     gripper_intrinsic: hasIntrinsicGripper,

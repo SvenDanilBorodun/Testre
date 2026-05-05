@@ -103,7 +103,16 @@ BUILD_ARGS="$BUILD_ARGS --build-arg REACT_APP_BUILD_ID=${BUILD_ID}"
 COCO_SNAPSHOT="${PHYSICAL_AI_TOOLS_DIR}/physical_ai_manager/_coco_classes.py"
 cp "${PHYSICAL_AI_TOOLS_DIR}/physical_ai_server/physical_ai_server/workflow/coco_classes.py" \
    "${COCO_SNAPSHOT}"
-trap 'rm -f "'"${COCO_SNAPSHOT}"'"; rm -rf "'"${INTERFACES_STAGING:-/dev/null}"'"' EXIT
+# Single combined cleanup. A previous version trapped the COCO_SNAPSHOT
+# cleanup here and then trapped INTERFACES_STAGING again later — bash's
+# trap is set-not-stack, so the second trap silently REPLACED this one
+# and _coco_classes.py leaked into the source tree on every build. We
+# now register both cleanups in one trap so neither path can be lost.
+_build_cleanup() {
+    rm -f "${COCO_SNAPSHOT}"
+    rm -rf "${INTERFACES_STAGING:-/dev/null}"
+}
+trap _build_cleanup EXIT
 
 docker build \
     $BUILD_ARGS \
@@ -138,9 +147,9 @@ cp "${PHYSICAL_AI_TOOLS_DIR}/physical_ai_interfaces/package.xml"    "${INTERFACE
 cp "${PHYSICAL_AI_TOOLS_DIR}/physical_ai_interfaces/msg/"*.msg      "${INTERFACES_STAGING}/msg/"
 cp "${PHYSICAL_AI_TOOLS_DIR}/physical_ai_interfaces/srv/"*.srv      "${INTERFACES_STAGING}/srv/"
 
-# Clean up the staging dir on script exit (success or failure) so a
-# stale copy doesn't leak into the next build.
-trap 'rm -rf "'"${INTERFACES_STAGING}"'"' EXIT
+# Cleanup is already registered above via _build_cleanup, which removes
+# both ${COCO_SNAPSHOT} and ${INTERFACES_STAGING} on exit. We must NOT
+# overwrite the trap here — that's the v1 bug — so this is a no-op.
 
 echo ""
 echo ">> Building physical_ai_server thin layer (patches + interface rebuild)..."

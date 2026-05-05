@@ -332,6 +332,56 @@ class Communicator:
     def _leader_callback(self, name: str, msg: JointTrajectory) -> None:
         self.leader_topic_msgs[name] = msg
 
+    def get_latest_bgr_frame(self, camera: str):
+        """Decode the most recent CompressedImage for the named camera into
+        a BGR ndarray. Returns None when no frame has arrived yet, when the
+        camera is not subscribed, or when the JPEG payload fails to decode.
+        Used by the Roboter Studio calibration manager and color-profile
+        capture path. Importing OpenCV/numpy is deferred so the import-time
+        cost only lands when the calibration wizard is opened."""
+        msg = self.camera_topic_msgs.get(camera)
+        if msg is None:
+            return None
+        try:
+            import cv2
+            import numpy as np
+            buf = np.frombuffer(msg.data, dtype=np.uint8)
+            if buf.size == 0:
+                return None
+            frame = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+            return frame
+        except Exception as e:
+            self.node.get_logger().warning(
+                f'get_latest_bgr_frame({camera}) decode failed: {e}'
+            )
+            return None
+
+    def get_latest_follower_joints(self) -> Optional[List[float]]:
+        """Return the most recent follower-arm joint vector in the canonical
+        order (joint1..joint5 + gripper_joint_1) or None when no joint
+        state has arrived. Used by the hand-eye calibration to obtain
+        gripper-in-base pose via FK."""
+        # The follower topic in omx_f_config.yaml is keyed simply 'follower'
+        # but other configs may name it 'follower_arm'. Pick the first non-
+        # mobile (JointState) follower message available.
+        for name, msg in self.follower_topic_msgs.items():
+            if msg is None:
+                continue
+            if 'mobile' in name.lower():
+                continue
+            positions = getattr(msg, 'position', None)
+            if positions is None or len(positions) == 0:
+                continue
+            return list(positions)
+        return None
+
+    # ``get_current_gripper_pose`` lives on the Node-level wrapper
+    # ``physical_ai_server._get_current_gripper_pose`` because the FK
+    # path needs the URDF and IK solver, which the Communicator does
+    # not own. Communicator only exposes the raw joint-state read
+    # (``get_latest_follower_joints``) that the wrapper composes with
+    # ``IKSolver.fk()``.
+
     def get_latest_data(self) -> Optional[Tuple[Dict, Dict, Dict]]:
         if any(msg is None for msg in self.camera_topic_msgs.values()):
             return None, None, None

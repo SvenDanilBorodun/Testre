@@ -63,8 +63,8 @@ remappings=[('/arm_controller/joint_trajectory', '/leader/joint_trajectory')]
 ### `omx_l_leader_ai.launch.py` — the leader
 
 `GroupAction + PushRosNamespace('leader')` wraps everything. Nodes:
-- `ros2_control_node` (leader IDs 1-6, joints 1-5 have NO command interfaces — passive)
-- `controller_manager/spawner` for `joint_state_broadcaster`, `trigger_position_controller`, `joint_trajectory_command_broadcaster` (publishes leader's observed positions to `/leader/joint_trajectory`)
+- `ros2_control_node` (leader IDs 1-6, joints 1-5 use effort/Goal Current command interface for gravity compensation)
+- `controller_manager/spawner` for `gravity_compensation_controller` (spawned first), `joint_state_broadcaster`, `trigger_position_controller`, `joint_trajectory_command_broadcaster` (publishes leader's observed positions to `/leader/joint_trajectory`)
 - `robot_state_publisher` (TF prefix `leader_`)
 - `position_command_process` (50 Hz × 50 iterations, sends initial trigger to gripper)
 
@@ -102,7 +102,7 @@ arm_controller:
 
 ### Leader: `omx_l_leader_ai/hardware_controller_manager.yaml`
 
-- `gravity_compensation_controller` for joints 1-5 (passive read-only on hardware, controller applies torque compensation):
+- `gravity_compensation_controller` for joints 1-5 (effort command interface → Dynamixel Goal Current via `dynamixel_hardware_interface` plugin, KDL RNE computes per-joint torques):
   - kinetic friction scalars: `[0.0005, 0.15, 0.15, 0.15, 0.15]`
   - torque scaling: `[200, 350, 300, 300, 300]`
 - `trigger_position_controller` for gripper_joint_1 only
@@ -124,7 +124,7 @@ arm_controller:
 
 ### `omx_l.ros2_control.xacro` — leader
 
-Same plugin chain. Joints 1-5: NO command interfaces (commented out, passive observation only). Gripper (ID 6): Op Mode 5, **Current Limit 300 mA** (lower than follower for safety), P=1000, D=1500 (higher D for smoother manual operation).
+Same plugin chain. Joints 1-5: `effort` command interface; dxl1-5 GPIOs declare `Goal Current`, Operating Mode 0 (Current Control). Gripper (ID 6): Op Mode 5, **Current Limit 300 mA** (lower than follower for safety), P=1000, D=1500 (higher D for smoother manual operation). Leader file shipped via overlay (`docker/open_manipulator/overlays/omx_l.ros2_control.xacro`).
 
 ---
 
@@ -485,9 +485,12 @@ joint_order:
   leader: [joint1, joint2, joint3, joint4, joint5, gripper_joint_1]
 ```
 
-Plus 2 overlays in `docker/open_manipulator/overlays/`:
+Plus 5 overlays in `docker/open_manipulator/overlays/`:
 - `omx_f.ros2_control.xacro` — adds `is_async="true"` and tuned safety params
-- `hardware_controller_manager.yaml` — joint trajectory tolerances + gripper current limits
+- `omx_f_hardware_controller_manager.yaml` — joint trajectory tolerances + gripper current limits
+- `omx_l.ros2_control.xacro` — enables effort/Goal Current on joints 1-5 for gravity comp
+- `omx_l_leader_ai.launch.py` — spawns `gravity_compensation_controller` first
+- `omx_l_leader_ai_hardware_controller_manager.yaml` — gravity comp params (5-joint friction thresholds)
 
 For source-level diffs, see the agent dive in commit history or `git diff` against `_upstream/`.
 
@@ -560,4 +563,4 @@ ros2 node list
 
 ---
 
-**Last verified:** 2026-05-04.
+**Last verified:** 2026-05-06.

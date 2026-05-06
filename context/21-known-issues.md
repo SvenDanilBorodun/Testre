@@ -207,7 +207,6 @@ German students, data crossing US-hosted Supabase (`fnnbysrjkfugsqzwcksd.supabas
 - **Stale-camera watchdog warns but doesn't halt.** `overlays/inference_manager.py:122–148`. See top-20 #3.
 
 **High**
-- **Gravity compensation controller commented out in `omx_l_leader_ai.launch.py:128`** → all the tuned friction scalars in `hardware_controller_manager.yaml:32–62` are dead code. Leader joints 1–5 sag. Friction-tuning work wasted. Uncomment.
 - **Follower gripper current limit 600 mA; leader gripper 300 mA** — asymmetric safety. Leader demos are recorded at 300 mA gentle grip; follower at inference can apply double the force → crushed objects. Align both to ~350 mA in `omx_f.ros2_control.xacro:172` and `omx_l.ros2_control.xacro:144`.
 - **No velocity / acceleration limits in JointTrajectoryController config.** `omx_f_follower_ai/hardware_controller_manager.yaml`. Dynamixel register caps exist but ros2_control doesn't know about them → inference can command 60 rad/s and the servo stalls + overheats. Add `max_velocity` / `max_acceleration` per joint.
 - **Hardware-plugin crash not recovered** — entrypoint is a bash script, not s6-managed. Dynamixel segfault → `/joint_states` stops publishing, everything downstream hangs silently. Wrap launches in retry loop.
@@ -227,7 +226,6 @@ German students, data crossing US-hosted Supabase (`fnnbysrjkfugsqzwcksd.supabas
 **Low / Nit**
 - Log string `"teleportation active"` in entrypoint line 203 — confusing jargon; rename to "teleoperation ready".
 - Leader-position read failure in lines 64–92 logs no stderr context.
-- Orphaned gravity-comp params in yaml (if the controller stays disabled).
 - `identify_arm.py` pings sequentially — 10 s latency on flaky bus; parallelize.
 
 ---
@@ -491,4 +489,4 @@ Worth noting for future audits:
 
 ---
 
-**Last verified:** 2026-05-04 (against the deep dives that produced this index).
+**Last verified:** 2026-05-06 (against the deep dives that produced this index).

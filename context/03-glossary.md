@@ -88,7 +88,7 @@
 
 ## Training pipeline
 
-- **LeRobot** — HuggingFace's robotics ML library. Pinned to v0.2.0 commit `989f3d05ba47…`. Lives byte-identical in 3 places: `physical_ai_tools/lerobot/` (snapshot), Modal image (`lerobot[pi0] @ git+...@989f3d05`), base `physical-ai-server` image (cloned from ROBOTIS-GIT jazzy branch which pins this commit).
+- **LeRobot** — HuggingFace's robotics ML library. Pinned to v0.2.0 commit `989f3d05ba47f872d75c587e76838e9cc574857a` (full SHA, "[Async Inference] Merge Protos & refactoring (#1480)", 2025-07-23). Lives byte-identical in 3 places: `physical_ai_tools/lerobot/` (snapshot), Modal image (`lerobot[pi0] @ git+https://github.com/huggingface/lerobot.git@989f3d05ba47f872…`), and the base `physical-ai-server:amd64-0.8.2` image (built from `ROBOTIS-GIT/physical_ai_tools` whose `lerobot` git submodule is pinned to upstream `huggingface/lerobot.git` at this SHA — there is no "jazzy" branch; the submodule resolves by frozen SHA).
 - **`codebase_version: "v2.1"`** — String written into `meta/info.json` at recording time. Modal preflight enforces match. Bumping requires a migration script for existing datasets.
 - **`start_training_safe`** — Atomic Postgres RPC. `SELECT ... FOR UPDATE` user row → count active trainings → check credits → insert. Raises P0003 on insufficient credits or P0002 on user not found.
 - **`update_training_progress`** — RPC the Modal worker calls every progress tick. Validates worker_token. On terminal status, nulls token + sets `terminated_at`. Postgres-side downsampling (006) keeps `loss_history` array ≤ 300 points.

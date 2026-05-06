@@ -208,11 +208,16 @@ ROBOTIS upstream files are `find`'d and replaced by overlays in `docker/physical
 LeRobot itself is **not** overlaid — it's byte-identical to upstream `989f3d05`.
 
 ### 5.4 Single LeRobot commit across all surfaces
-`LEROBOT_COMMIT = "989f3d05ba47…"` is pinned in:
-- `physical_ai_tools/lerobot/` (static snapshot)
-- `modal_training/modal_app.py` (Modal image pip install)
-- ROBOTIS-GIT `jazzy` branch (cloned by base `physical-ai-server` image)
-- Recording's `meta/info.json` writes `codebase_version: "v2.1"`
+The full SHA is `989f3d05ba47f872d75c587e76838e9cc574857a` (huggingface/lerobot, "[Async Inference] Merge Protos & refactoring (#1480)", 2025-07-23, version 0.2.0). Three real installations must agree:
+- `physical_ai_tools/lerobot/` (static snapshot — verified byte-identical to upstream HF at this SHA)
+- `modal_training/modal_app.py` (Modal image pip install — pinned via `LEROBOT_COMMIT` constant)
+- Base `physical-ai-server:amd64-0.8.2` image — built from `ROBOTIS-GIT/physical_ai_tools` whose `lerobot` git submodule is pinned to **`huggingface/lerobot.git`** (upstream, NOT the ROBOTIS fork) at the same SHA. The `.gitmodules` `branch = feature-robotis` line is misleading: that branch only exists on `ROBOTIS-GIT/lerobot`, not on HF upstream — the submodule resolves by frozen SHA, the branch hint is dead.
+
+Derived consequences (not independent pins):
+- Recording's `meta/info.json` writes `codebase_version: "v2.1"` because `lerobot.datasets.lerobot_dataset.CODEBASE_VERSION = "v2.1"` at that commit.
+- Modal preflight enforces the same `"v2.1"` string against `meta/info.json`.
+
+Drift risk: when ROBOTIS publishes a newer `physical-ai-server` tag (e.g. `0.8.4`) and bumps their submodule pin, our base image's lerobot will silently diverge from `modal_app.py`'s pinned commit unless we also bump there. **No build-time check guards this.**
 
 Modal also force-reinstalls `torch torchvision` from `https://download.pytorch.org/whl/cu121` and uninstalls `torchcodec` (pyav fallback) — without this, defaults pull `cu130` wheels which crash on the CUDA 12.1 base image.
 

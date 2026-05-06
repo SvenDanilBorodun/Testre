@@ -45,7 +45,7 @@ image = (
 ```
 
 **Critical pinning:**
-- `LEROBOT_COMMIT = "989f3d05ba47d872d75c587e76838e9cc574857a"` (line 19) — must match the snapshot in `physical_ai_tools/lerobot/` and the base `physical-ai-server` image
+- `LEROBOT_COMMIT = "989f3d05ba47f872d75c587e76838e9cc574857a"` (line 19) — must match the snapshot in `physical_ai_tools/lerobot/` and the base `physical-ai-server` image. Verified against `huggingface/lerobot` upstream: this is "[Async Inference] Merge Protos & refactoring (#1480)" from 2025-07-23.
 - `index_url="https://download.pytorch.org/whl/cu121"` + `--force-reinstall` — without this, default pip pulls `cu130` wheels which are incompatible with the cu121 base image runtime
 - `pip uninstall torchcodec` — LeRobot pulls torchcodec but it binds to libs that fail on this image; pyav fallback works
 

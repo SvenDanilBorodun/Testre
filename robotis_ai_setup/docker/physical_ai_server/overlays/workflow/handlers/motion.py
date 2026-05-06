@@ -22,7 +22,11 @@ import math
 import time
 from typing import Any
 
-from physical_ai_server.workflow.trajectory_builder import build_segment, chunked_publish
+from physical_ai_server.workflow.trajectory_builder import (
+    TrajectoryRejectedError,
+    build_segment,
+    chunked_publish,
+)
 
 
 HOME_JOINTS_RAD = [0.0, -math.pi / 4, math.pi / 4, 0.0, 0.0]
@@ -44,12 +48,17 @@ class WorkflowError(Exception):
 
 def _publish_motion(ctx, q_start: list[float], q_end: list[float], duration_s: float) -> None:
     waypoints = build_segment(q_start, q_end, duration_s)
-    ok = chunked_publish(
-        publisher=ctx.publisher,
-        points=waypoints,
-        safety_apply=ctx.safety.apply if ctx.safety else None,
-        should_stop=ctx.should_stop,
-    )
+    try:
+        ok = chunked_publish(
+            publisher=ctx.publisher,
+            points=waypoints,
+            safety_apply=ctx.safety.apply if ctx.safety else None,
+            should_stop=ctx.should_stop,
+        )
+    except TrajectoryRejectedError as e:
+        # Re-wrap as the German user-facing WorkflowError the editor
+        # already knows how to render.
+        raise WorkflowError(str(e)) from e
     if not ok:
         raise WorkflowError('Workflow wurde gestoppt.')
 

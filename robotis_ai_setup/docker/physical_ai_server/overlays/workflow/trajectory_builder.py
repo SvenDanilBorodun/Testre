@@ -31,6 +31,13 @@ from typing import Callable, Iterable
 
 import numpy as np
 
+
+class TrajectoryRejectedError(RuntimeError):
+    """Raised by ``chunked_publish`` when the safety envelope rejects a
+    waypoint. Caught by the workflow handler and surfaced as a German
+    ``WorkflowError`` so the operator sees an actionable message rather
+    than a silently truncated motion."""
+
 DEFAULT_FPS = 30
 DEFAULT_CHUNK_DURATION_S = 1.0
 
@@ -99,7 +106,19 @@ def chunked_publish(
         if safety_apply is not None:
             clamped = safety_apply(np.asarray(q, dtype=np.float32))
             if clamped is None:
-                continue
+                # Previously this `continue`d, silently dropping the point
+                # AND leaving chunk_start_t pinned to the last accepted
+                # waypoint — so subsequent points received wrong
+                # time_from_start values and the controller logged
+                # tolerance violations. The trajectory is generated
+                # deterministically (quintic blend), so a None here means
+                # NaN in the input or a shape mismatch — both are
+                # programmer/configuration bugs that the operator must see.
+                raise TrajectoryRejectedError(
+                    'Safety envelope hat einen Trajektorien-Punkt verworfen '
+                    '(NaN/Inf oder unerwartete Aktionsgroesse). Bewegung '
+                    'abgebrochen.'
+                )
             q = clamped.tolist()
         chunk.append((q, t - chunk_start_t))
         if len(chunk) >= chunk_size:

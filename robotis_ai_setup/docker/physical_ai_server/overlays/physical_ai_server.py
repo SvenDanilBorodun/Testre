@@ -551,29 +551,42 @@ class PhysicalAIServer(Node):
                 self.get_logger().info(msg)
                 self._last_waiting_log[source] = now
 
+        # Topic-availability gates: when a stream is missing we either
+        # wait (still inside DEFAULT_TOPIC_TIMEOUT) or hard-fail. Falling
+        # through with a None message used to call convert_msgs_to_raw_datas
+        # with image_msgs=None — convert is None-safe, but check_lerobot_dataset
+        # would then create the dataset object with NO observation.images.*
+        # features at all, permanently corrupting `self._lerobot_dataset`
+        # for the rest of the session. Always halt the tick once we set
+        # error_msg, then surface it via TaskStatus below.
+        def _missing_or_wait(source: str, label: str) -> str | None:
+            if now - self.start_recording_time > self.DEFAULT_TOPIC_TIMEOUT:
+                msg = f'{label} data not received within timeout period'
+                self.get_logger().error(msg)
+                return msg
+            _log_waiting(source, f'Waiting for {source} data...')
+            return ''  # signal "still waiting, skip this tick"
+
         if camera_msgs is None:
-            if now - self.start_recording_time > self.DEFAULT_TOPIC_TIMEOUT:
-                error_msg = 'Camera data not received within timeout period'
-                self.get_logger().error(error_msg)
-            else:
-                _log_waiting('camera', 'Waiting for camera data...')
+            error_msg = _missing_or_wait('camera', 'Camera')
+            if not error_msg:
                 return
-
         elif follower_msgs is None:
-            if now - self.start_recording_time > self.DEFAULT_TOPIC_TIMEOUT:
-                error_msg = 'Follower data not received within timeout period'
-                self.get_logger().error(error_msg)
-            else:
-                _log_waiting('follower', 'Waiting for follower data...')
+            error_msg = _missing_or_wait('follower', 'Follower')
+            if not error_msg:
+                return
+        elif leader_msgs is None:
+            error_msg = _missing_or_wait('leader', 'Leader')
+            if not error_msg:
                 return
 
-        elif leader_msgs is None:
-            if now - self.start_recording_time > self.DEFAULT_TOPIC_TIMEOUT:
-                error_msg = 'Leader data not received within timeout period'
-                self.get_logger().error(error_msg)
-            else:
-                _log_waiting('leader', 'Waiting for leader data...')
-                return
+        if error_msg:
+            self.on_recording = False
+            current_status.phase = TaskStatus.READY
+            current_status.error = error_msg
+            self.communicator.publish_status(status=current_status)
+            self.timer_manager.stop(timer_name=self.operation_mode)
+            return
 
         try:
             camera_data, follower_data, leader_data = self.data_manager.convert_msgs_to_raw_datas(
@@ -2060,8 +2073,10 @@ class PhysicalAIServer(Node):
         the inference path uses if the config is missing or malformed."""
         import math as _math
         _pi = _math.pi
-        defaults_min = [-_pi, -_pi / 2, -_pi / 2, -_pi, -_pi, -1.0]
-        defaults_max = [_pi, _pi / 2, _pi / 2, _pi, _pi, 1.0]
+        # Mirror the safety_envelope block in omx_f_config.yaml — see the
+        # comment there for the joint1/4/5 tightening rationale.
+        defaults_min = [-_pi / 2, -_pi / 2, -_pi / 2, -0.85 * _pi, -0.85 * _pi, -1.0]
+        defaults_max = [_pi / 2, _pi / 2, _pi / 2, 0.85 * _pi, 0.85 * _pi, 1.0]
         defaults_delta = [0.3] * 6
 
         try:

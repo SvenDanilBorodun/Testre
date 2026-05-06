@@ -110,6 +110,16 @@ class DataManager:
         # produce. Verified after video_encoding_completed goes True so
         # the episode isn't marked saved with a missing / zero-byte mp4.
         self._expected_video_paths: list = []
+        # Stale-camera detection at recording time (mirrors the inference
+        # path's overlay/inference_manager.py:_check_stale_cameras). Without
+        # this a frozen USB camera silently writes the same frame to every
+        # tick of the dataset — the trained model then learns from a static
+        # observation. Hashing 4 sparse 256-byte slices is cheap (~µs per
+        # frame) and detects any decoded-pixel change.
+        self._last_image_hashes: dict[str, int] = {}
+        self._last_image_change_time: dict[str, float] = {}
+        self._stale_threshold_s = 2.0
+        self._stale_halt_threshold_s = 5.0
 
     def get_status(self):
         return self._status
@@ -528,6 +538,35 @@ class DataManager:
 
         return is_saving, float(min_encoding_percentage)
 
+    def _check_stale_cameras(self, camera_data: dict) -> str | None:
+        """Hash sparse byte slices of each decoded camera frame to detect
+        a frozen feed. Mirrors overlays/inference_manager.py logic so
+        recording and inference treat dead cameras the same way. Returns
+        the camera name once it has been frozen >_stale_halt_threshold_s,
+        or None when fresh.
+        """
+        now = time.monotonic()
+        halt_on: str | None = None
+        for name, img in camera_data.items():
+            buf = img.data.tobytes()
+            n = len(buf)
+            if n <= 1024:
+                sample = buf
+            else:
+                slice_size = 256
+                offsets = (0, n // 4, n // 2, (3 * n) // 4)
+                sample = b''.join(buf[o:o + slice_size] for o in offsets)
+            h = hash(sample)
+            prev = self._last_image_hashes.get(name)
+            if prev != h:
+                self._last_image_hashes[name] = h
+                self._last_image_change_time[name] = now
+                continue
+            last_change = self._last_image_change_time.get(name, now)
+            if now - last_change > self._stale_halt_threshold_s and halt_on is None:
+                halt_on = name
+        return halt_on
+
     def convert_msgs_to_raw_datas(
             self,
             image_msgs,
@@ -545,6 +584,18 @@ class DataManager:
                 camera_data[key] = cv2.cvtColor(
                     self.data_converter.compressed_image2cvmat(value),
                     cv2.COLOR_BGR2RGB)
+            stale = self._check_stale_cameras(camera_data)
+            if stale is not None:
+                # Refuse to record on a dead camera — the alternative is
+                # that LeRobotDataset gets the same frame for every tick
+                # until the operator notices visually, by which point an
+                # entire episode of useless data has been written.
+                raise RuntimeError(
+                    f'Kamera "{stale}" liefert seit ueber '
+                    f'{self._stale_halt_threshold_s:.0f}s dasselbe Bild — '
+                    f'Aufnahme abgebrochen. Bitte Kabel und USB-Anschluss '
+                    f'pruefen, dann neu starten.'
+                )
         if follower_msgs is not None:
             for key, value in follower_msgs.items():
                 if value is not None:
@@ -594,6 +645,12 @@ class DataManager:
         self._start_time_s = 0
         # Reset the RAM-truncation flag so the next episode starts clean.
         self._early_saved_due_to_ram = False
+        # Drop the stale-camera hashes so a re-recorded episode starts
+        # fresh — otherwise the very first frame of the new episode would
+        # always be flagged "same as last frame of previous episode" and
+        # immediately advance the stale clock.
+        self._last_image_hashes.clear()
+        self._last_image_change_time.clear()
         # NOTE: _last_warning_message is deliberately NOT cleared here.
         # _episode_reset() runs inside the same record() tick that set the
         # warning (RAM truncation -> record_early_save -> save -> encoding

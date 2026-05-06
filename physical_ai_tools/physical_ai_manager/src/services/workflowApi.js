@@ -8,7 +8,7 @@
  *     http://www.apache.org/licenses/LICENSE-2.0
  */
 
-const API_URL = process.env.REACT_APP_CLOUD_API_URL;
+import { CLOUD_API_URL, assertCloudApiConfigured } from './cloudConfig';
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 
@@ -40,6 +40,9 @@ async function apiRequest(endpoint, method, accessToken, body = null) {
   if (!accessToken) {
     throw new WorkflowApiError('Nicht angemeldet — bitte erneut einloggen.', 401);
   }
+  // Audit §build-validate — fail with a German error if CLOUD_API_URL
+  // wasn't baked into the build, instead of issuing fetch("undefined/...").
+  assertCloudApiConfigured();
   const headers = {
     'Content-Type': 'application/json',
     Authorization: `Bearer ${accessToken}`,
@@ -52,7 +55,7 @@ async function apiRequest(endpoint, method, accessToken, body = null) {
   if (body) options.body = JSON.stringify(body);
   let response;
   try {
-    response = await fetch(`${API_URL}${endpoint}`, options);
+    response = await fetch(`${CLOUD_API_URL}${endpoint}`, options);
   } catch (err) {
     clearTimeout(timer);
     if (err.name === 'AbortError') {

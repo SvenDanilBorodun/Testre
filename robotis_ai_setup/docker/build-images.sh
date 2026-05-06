@@ -55,10 +55,17 @@ done
 # ── Image 1: physical_ai_manager (React + nginx) ──
 echo ""
 echo ">> Building physical_ai_manager..."
-# Cloud training env vars are baked into the React build
-SUPABASE_URL=${SUPABASE_URL:-}
-SUPABASE_ANON_KEY=${SUPABASE_ANON_KEY:-}
-CLOUD_API_URL=${CLOUD_API_URL:-}
+# Cloud training env vars are baked into the React build. These MUST be set —
+# without them the React bundle ships with `process.env.REACT_APP_SUPABASE_URL
+# === undefined`, supabaseClient.js calls createClient(undefined, undefined),
+# the supabase library throws "supabaseUrl is required" at module load (before
+# React mounts), and every student gets a hard white screen with the error
+# only visible in DevTools. This silently broke 4 published image tags
+# (latest, rs-v1.1, roboter-studio-v1, 20260423-…) before we caught it.
+# `${VAR:?msg}` aborts the script with the message if VAR is unset OR empty.
+: "${SUPABASE_URL:?ERROR: export SUPABASE_URL before running this script (the Supabase project URL — e.g. https://xxx.supabase.co)}"
+: "${SUPABASE_ANON_KEY:?ERROR: export SUPABASE_ANON_KEY before running this script (the project anon/publishable key)}"
+: "${CLOUD_API_URL:?ERROR: export CLOUD_API_URL before running this script (the Railway-deployed FastAPI URL — e.g. https://xxx.up.railway.app)}"
 # Student-facing policy allowlist. Defaults to 'act' so the student Docker
 # build hides every other policy in the dropdown. Set ALLOWED_POLICIES in
 # the environment (comma list) to override for an admin/dev build.
@@ -82,16 +89,14 @@ if [ -z "$_BUILD_SHA" ]; then
 fi
 BUILD_ID=${BUILD_ID:-${_BUILD_TS}-${_BUILD_SHA}}
 echo "   BUILD_ID: ${BUILD_ID}"
-BUILD_ARGS=""
-if [ -n "$SUPABASE_URL" ]; then
-    BUILD_ARGS="$BUILD_ARGS --build-arg REACT_APP_SUPABASE_URL=${SUPABASE_URL}"
-fi
-if [ -n "$SUPABASE_ANON_KEY" ]; then
-    BUILD_ARGS="$BUILD_ARGS --build-arg REACT_APP_SUPABASE_ANON_KEY=${SUPABASE_ANON_KEY}"
-fi
-if [ -n "$CLOUD_API_URL" ]; then
-    BUILD_ARGS="$BUILD_ARGS --build-arg REACT_APP_CLOUD_API_URL=${CLOUD_API_URL}"
-fi
+# All three secret vars are required (verified above), so the conditional
+# gate is gone — pass them unconditionally. The previous "if -n" gate is
+# precisely how the white-screen bug shipped: a missing var caused the
+# --build-arg to be omitted, the React bundle inlined undefined, and
+# createClient threw at module load. Never gate these silently again.
+BUILD_ARGS="--build-arg REACT_APP_SUPABASE_URL=${SUPABASE_URL}"
+BUILD_ARGS="$BUILD_ARGS --build-arg REACT_APP_SUPABASE_ANON_KEY=${SUPABASE_ANON_KEY}"
+BUILD_ARGS="$BUILD_ARGS --build-arg REACT_APP_CLOUD_API_URL=${CLOUD_API_URL}"
 BUILD_ARGS="$BUILD_ARGS --build-arg REACT_APP_ALLOWED_POLICIES=${ALLOWED_POLICIES}"
 BUILD_ARGS="$BUILD_ARGS --build-arg REACT_APP_BUILD_ID=${BUILD_ID}"
 
@@ -119,7 +124,37 @@ docker build \
     -t "${REGISTRY}/physical-ai-manager:latest" \
     -f "${PHYSICAL_AI_TOOLS_DIR}/physical_ai_manager/Dockerfile" \
     "${PHYSICAL_AI_TOOLS_DIR}/physical_ai_manager/"
-echo "   OK: physical-ai-manager built"
+
+# Post-build smoke test: inspect the built React bundle and prove the
+# Supabase + Cloud API URLs were actually inlined by Webpack. Without
+# this check, an upstream regression in CRA env handling (or an
+# accidentally-deleted ENV-promote line in the Dockerfile, etc.) would
+# silently produce a broken image again — exactly how the white-screen
+# bug went unnoticed across 4 previously-published tags.
+#
+# We grep for the literal URL string we passed in. If Webpack inlined
+# `process.env.REACT_APP_SUPABASE_URL`, the URL is a string literal in
+# main.*.js. If it wasn't inlined, the only thing in the bundle is the
+# library's defensive throw "supabaseUrl is required" — which is what
+# the broken images showed.
+echo "   Verifying secrets reached the bundle..."
+_smoke_image="${REGISTRY}/physical-ai-manager:latest"
+if ! docker run --rm --entrypoint sh "$_smoke_image" -c \
+        "grep -q -F '${SUPABASE_URL}' /usr/share/nginx/html/static/js/main.*.js"; then
+    echo ""
+    echo "ERROR: SUPABASE_URL not found in the built bundle."
+    echo "       The React build did NOT inline process.env.REACT_APP_SUPABASE_URL."
+    echo "       Pushing this image would white-screen every student."
+    echo "       Aborting before docker push."
+    exit 1
+fi
+if ! docker run --rm --entrypoint sh "$_smoke_image" -c \
+        "grep -q -F '${CLOUD_API_URL}' /usr/share/nginx/html/static/js/main.*.js"; then
+    echo ""
+    echo "ERROR: CLOUD_API_URL not found in the built bundle. Aborting."
+    exit 1
+fi
+echo "   OK: physical-ai-manager built (smoke-tested)"
 
 # ── Image 2a: physical_ai_server base (pull official ROBOTIS image) ──
 echo ""

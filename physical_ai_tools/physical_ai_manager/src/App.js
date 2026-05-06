@@ -16,6 +16,7 @@ import React from 'react';
 import { Toaster } from 'react-hot-toast';
 import StudentApp from './StudentApp';
 import WebApp from './WebApp';
+import BuildConfigBanner from './components/BuildConfigBanner';
 import { APP_MODE } from './constants/appMode';
 import useVersionCheck from './hooks/useVersionCheck';
 
@@ -24,6 +25,9 @@ function App() {
   const inner = APP_MODE === 'web' ? <WebApp /> : <StudentApp />;
   return (
     <>
+      {/* Visible red banner if the Docker build was missing required
+          REACT_APP_* vars. Renders nothing in healthy builds. */}
+      <BuildConfigBanner />
       {inner}
       <Toaster
         position="top-center"

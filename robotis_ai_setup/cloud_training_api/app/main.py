@@ -27,6 +27,38 @@ logger = logging.getLogger(__name__)
 app = FastAPI(title="EduBotics Cloud Training API")
 
 
+def _validate_required_secrets() -> None:
+    """Fail-fast at startup if any required env var is missing or empty.
+
+    Without this check, the FastAPI app boots fine and `/health` returns
+    200, so Railway marks the deploy as healthy. The first authenticated
+    student request then hits a KeyError inside get_supabase() (or the
+    Modal SDK rejects our token) → bare 500 with no hint that the deploy
+    is missing a secret. This raises at import time so Railway aborts the
+    deploy instead — exactly what already happens for ALLOWED_ORIGINS.
+
+    SUPABASE_SERVICE_ROLE_KEY is the privileged key used server-side to
+    bypass RLS for admin/teacher operations; SUPABASE_URL is the project
+    URL; MODAL_TOKEN_ID + MODAL_TOKEN_SECRET let the Modal SDK dispatch
+    training jobs (Modal picks them up automatically via os.environ).
+    """
+    required = (
+        "SUPABASE_URL",
+        "SUPABASE_SERVICE_ROLE_KEY",
+        "MODAL_TOKEN_ID",
+        "MODAL_TOKEN_SECRET",
+    )
+    missing = [k for k in required if not os.environ.get(k)]
+    if missing:
+        raise RuntimeError(
+            "Cloud API cannot start — required Railway service variables "
+            f"missing or empty: {', '.join(missing)}."
+        )
+
+
+_validate_required_secrets()
+
+
 def _parse_and_validate_origins() -> list[str]:
     """Parse ALLOWED_ORIGINS and refuse to start with dangerous values.
 

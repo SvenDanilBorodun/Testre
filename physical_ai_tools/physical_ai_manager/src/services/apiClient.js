@@ -1,6 +1,7 @@
-const API_URL = process.env.REACT_APP_CLOUD_API_URL;
+import { CLOUD_API_URL, assertCloudApiConfigured } from './cloudConfig';
 
 export async function apiRequest(endpoint, method, accessToken, body = null) {
+  assertCloudApiConfigured();
   const headers = {
     'Content-Type': 'application/json',
     Authorization: `Bearer ${accessToken}`,
@@ -11,7 +12,7 @@ export async function apiRequest(endpoint, method, accessToken, body = null) {
     options.body = JSON.stringify(body);
   }
 
-  const response = await fetch(`${API_URL}${endpoint}`, options);
+  const response = await fetch(`${CLOUD_API_URL}${endpoint}`, options);
 
   if (!response.ok) {
     const error = await response

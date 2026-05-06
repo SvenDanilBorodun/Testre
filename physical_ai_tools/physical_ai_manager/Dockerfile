@@ -25,6 +25,16 @@ COPY package*.json .npmrc* ./
 # follow-up npm calls inside this layer.
 RUN npm install --legacy-peer-deps
 COPY . .
+# Belt-and-suspenders guard: even though build-images.sh already validates
+# these via `${VAR:?}`, a direct `docker build` that forgets --build-arg
+# would proceed with empty values and ship the white-screen bug. Fail at
+# build time with a named cause so a maintainer never has to bisect a
+# blank page again. CI's manager-build-validate job ALSO runs this
+# Dockerfile with placeholders, so this guard must accept non-empty
+# values without further validation (no URL-shape check etc.).
+RUN test -n "$REACT_APP_SUPABASE_URL"      || (echo "ERROR: --build-arg REACT_APP_SUPABASE_URL is required (was empty)"      && exit 1) && \
+    test -n "$REACT_APP_SUPABASE_ANON_KEY" || (echo "ERROR: --build-arg REACT_APP_SUPABASE_ANON_KEY is required (was empty)" && exit 1) && \
+    test -n "$REACT_APP_CLOUD_API_URL"     || (echo "ERROR: --build-arg REACT_APP_CLOUD_API_URL is required (was empty)"     && exit 1)
 RUN npm run build
 RUN printf '{"buildId":"%s","builtAt":"%s"}\n' "${REACT_APP_BUILD_ID}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > build/version.json
 

@@ -104,6 +104,59 @@ jobs:
           fi
           echo "Patch script correctly rejected unrelated input (rc=$rc)"
 
+  manager-build-validate:
+    # Catches the white-screen regression that shipped on 4 published
+    # tags before we noticed: a build where REACT_APP_SUPABASE_URL etc.
+    # weren't passed as build-args, so the React bundle inlined undefined,
+    # supabaseClient.js threw at module load, and every student saw a
+    # blank page. Build the manager image with placeholder secrets and
+    # assert those exact strings made it into main.*.js — if they didn't,
+    # Webpack didn't see the env vars and the image is broken.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build physical_ai_manager with placeholder secrets
+        run: |
+          # Stage the same coco_classes.py snapshot that build-images.sh
+          # stages, so the prebuild Jest hook
+          # (src/components/Workshop/blocks/__tests__/objectClasses.sync.test.js)
+          # can run inside the build context.
+          cp physical_ai_tools/physical_ai_server/physical_ai_server/workflow/coco_classes.py \
+             physical_ai_tools/physical_ai_manager/_coco_classes.py
+          docker build \
+            --build-arg REACT_APP_SUPABASE_URL=https://CI_VALIDATE.supabase.co \
+            --build-arg REACT_APP_SUPABASE_ANON_KEY=CI_VALIDATE_ANON_KEY \
+            --build-arg REACT_APP_CLOUD_API_URL=https://CI_VALIDATE.api.example \
+            --build-arg REACT_APP_BUILD_ID=ci-validate \
+            -t edubotics-manager-validate \
+            -f physical_ai_tools/physical_ai_manager/Dockerfile \
+            physical_ai_tools/physical_ai_manager/
+          rm -f physical_ai_tools/physical_ai_manager/_coco_classes.py
+      - name: Assert placeholder secrets reached the React bundle
+        run: |
+          # Each placeholder must appear as a string literal in main.*.js.
+          # If Webpack didn't inline process.env.REACT_APP_SUPABASE_URL,
+          # the URL is absent and only the library's defensive throw
+          # ("supabaseUrl is required") is in the bundle — exactly the
+          # bug we're guarding against.
+          for needle in \
+            'CI_VALIDATE.supabase.co' \
+            'CI_VALIDATE_ANON_KEY' \
+            'CI_VALIDATE.api.example' ; do
+              if ! docker run --rm --entrypoint sh edubotics-manager-validate -c \
+                   "grep -q -F '$needle' /usr/share/nginx/html/static/js/main.*.js" ; then
+                  echo "FAIL: '$needle' not found in built bundle — Webpack did not inline its env var."
+                  echo "      Likely the Dockerfile dropped the ARG, or the React app stopped importing the var."
+                  exit 1
+              fi
+              echo "OK: '$needle' found in bundle."
+          done
+      - name: Assert version.json is present + well-formed
+        run: |
+          docker run --rm --entrypoint sh edubotics-manager-validate -c \
+            'cat /usr/share/nginx/html/version.json' | python3 -c \
+            'import json,sys; d=json.load(sys.stdin); assert d["buildId"]=="ci-validate", d; print("version.json OK:", d)'
+
   nginx-validate:
     runs-on: ubuntu-latest
     steps:

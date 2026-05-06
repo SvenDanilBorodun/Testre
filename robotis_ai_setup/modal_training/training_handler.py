@@ -482,6 +482,23 @@ def run_training(
     """
     global _current_job
 
+    # Validate the Modal Secret `edubotics-training-secrets` actually
+    # injected the values we need. With bare os.environ[K] a missing
+    # secret raised KeyError mid-run, Modal marked the call FAILED, and
+    # the student's UI showed "Training fehlgeschlagen" with no actionable
+    # cause. Naming the missing var lets the on-call engineer fix the
+    # Modal Secret in 30 seconds instead of bisecting the traceback.
+    _missing = [
+        k for k in ("SUPABASE_URL", "SUPABASE_ANON_KEY")
+        if not os.environ.get(k)
+    ]
+    if _missing:
+        raise RuntimeError(
+            "Modal Secret 'edubotics-training-secrets' is missing or has "
+            f"empty values for: {', '.join(_missing)}. "
+            "Re-sync via `modal secret create edubotics-training-secrets` "
+            "with all of SUPABASE_URL, SUPABASE_ANON_KEY, HF_TOKEN."
+        )
     supabase_url = os.environ["SUPABASE_URL"]
     supabase_anon_key = os.environ["SUPABASE_ANON_KEY"]
     hf_token = os.environ.get("HF_TOKEN", "")

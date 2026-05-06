@@ -29,6 +29,13 @@ COPY package*.json .npmrc* ./
 # See note in Dockerfile: react-blockly@9 peer-dep is too narrow for React 19.
 RUN npm install --legacy-peer-deps
 COPY . .
+# Same guard as the student Dockerfile — abort with a named cause if any
+# Railway service variable wasn't passed through as a build-arg. Without
+# this, an empty Railway secret produces a build that white-screens at
+# runtime and the cause is buried in DevTools. See audit notes.
+RUN test -n "$REACT_APP_SUPABASE_URL"      || (echo "ERROR: --build-arg REACT_APP_SUPABASE_URL is required (was empty)"      && exit 1) && \
+    test -n "$REACT_APP_SUPABASE_ANON_KEY" || (echo "ERROR: --build-arg REACT_APP_SUPABASE_ANON_KEY is required (was empty)" && exit 1) && \
+    test -n "$REACT_APP_CLOUD_API_URL"     || (echo "ERROR: --build-arg REACT_APP_CLOUD_API_URL is required (was empty)"     && exit 1)
 RUN npm run build
 RUN printf '{"buildId":"%s","builtAt":"%s"}\n' "${REACT_APP_BUILD_ID}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > build/version.json
 

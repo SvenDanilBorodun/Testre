@@ -28,6 +28,16 @@ STALLED_WORKER_THRESHOLD = timedelta(
     minutes=int(os.environ.get("STALLED_WORKER_MINUTES", "15"))
 )
 
+# A row that's still queued with no cloud_job_id beyond this threshold
+# means the API crashed (or the network dropped) between Modal dispatch
+# and the row UPDATE that records the FunctionCall id. The row blocks
+# the credit and cannot be canceled because we don't know the Modal
+# call id. Conservative default — Modal cold-start + queue normally
+# fits inside 5 minutes; 10 minutes leaves comfortable margin.
+DISPATCH_LOST_THRESHOLD = timedelta(
+    minutes=int(os.environ.get("DISPATCH_LOST_MINUTES", "10"))
+)
+
 # Idempotency window: a duplicate /start with the same (user, dataset, model)
 # arriving inside this window returns the existing training_id instead of
 # creating a new row. Catches both client retries on network timeout and
@@ -245,6 +255,40 @@ async def _sync_modal_status(training: dict) -> dict:
 
     job_id = training.get("cloud_job_id")
     if not job_id:
+        # Row was inserted by start_training_safe but the API crashed (or
+        # network dropped) before it could record the Modal FunctionCall id
+        # via the UPDATE on /trainings/start step 4. The worker may or may
+        # not be alive on Modal — we can't tell because we don't have its
+        # id. Once the dispatch-lost threshold elapses, fail the row so the
+        # credit isn't blocked forever. The Modal worker (if any) will
+        # eventually be evicted by Modal's own timeout; if it tries to write
+        # progress meanwhile, the worker_token still validates and the row
+        # transitions back to running — self-healing.
+        if training["status"] == "queued":
+            requested = _parse_iso(training.get("requested_at"))
+            now = datetime.now(timezone.utc)
+            if requested and (now - requested) > DISPATCH_LOST_THRESHOLD:
+                logger.warning(
+                    "Dispatch lost: training %s queued %s with no cloud_job_id",
+                    training["id"], now - requested,
+                )
+                supabase = get_supabase()
+                update_data = {
+                    "status": "failed",
+                    "terminated_at": now.isoformat(),
+                    "worker_token": None,
+                    "error_message": (
+                        "Dispatch an Cloud-Worker fehlgeschlagen "
+                        "(keine Job-ID erhalten). Bitte Training neu "
+                        "starten — der Credit wurde freigegeben."
+                    ),
+                }
+                supabase.table("trainings").update(update_data).eq(
+                    "id", training["id"]
+                ).execute()
+                training["status"] = "failed"
+                training["terminated_at"] = update_data["terminated_at"]
+                training["error_message"] = update_data["error_message"]
         return training
 
     try:
@@ -576,11 +620,16 @@ async def cancel_training(req: CancelTrainingRequest, user=Depends(get_current_u
                 req.training_id, training["cloud_job_id"], e,
             )
 
-    # Mark as canceled (auto-frees the credit)
+    # Mark as canceled (auto-frees the credit). Null worker_token so a
+    # still-running Modal worker (Modal cancel can fail silently) cannot
+    # call update_training_progress and overwrite this status with
+    # succeeded/failed. Defense in depth — migration 010's RPC also
+    # refuses writes against terminal-state rows.
     supabase.table("trainings").update(
         {
             "status": "canceled",
             "terminated_at": datetime.now(timezone.utc).isoformat(),
+            "worker_token": None,
         }
     ).eq("id", req.training_id).execute()
     logger.info("Canceled training %s for user=%s", req.training_id, user_id)

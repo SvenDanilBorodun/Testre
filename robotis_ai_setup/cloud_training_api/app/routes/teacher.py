@@ -1,6 +1,9 @@
 import logging
+import os
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from huggingface_hub import HfApi
+from huggingface_hub.utils import RepositoryNotFoundError
 from pydantic import BaseModel, Field
 
 from app.auth import get_current_teacher, get_user_profile
@@ -363,6 +366,21 @@ async def delete_classroom(classroom_id: str, teacher=Depends(get_current_teache
             status_code=409,
             detail="Klassenzimmer ist nicht leer - erst alle Schueler entfernen",
         )
+    # Workflow templates and student workflows tied to this classroom would
+    # otherwise be left with classroom_id=NULL (FK is ON DELETE SET NULL),
+    # which makes them unreachable through every read path (RLS + API both
+    # filter by classroom_id) but they still occupy storage and contain
+    # teacher-authored content. Delete them explicitly so the GDPR /
+    # cleanup story is "deleting a classroom removes its content".
+    try:
+        supabase.table("workflows").delete().eq("classroom_id", classroom_id).execute()
+    except Exception as e:
+        # Don't block classroom deletion on a workflow cleanup failure —
+        # the orphan rows can be cleaned up later. Surface the issue
+        # in the logs so an operator can follow up.
+        logger.warning(
+            "Workflow cleanup failed for classroom %s: %s", classroom_id, e
+        )
     supabase.table("classrooms").delete().eq("id", classroom_id).execute()
     return {"ok": True}
 
@@ -506,9 +524,64 @@ async def patch_student(
     return _student_summary(row)
 
 
+def _delete_student_hf_artifacts(student_id: str) -> None:
+    """Best-effort deletion of HuggingFace repos owned by the student.
+
+    GDPR Art. 17: when a student account is deleted, the personal data
+    they generated must be erased. The Modal worker uploads trained
+    models to ``EduBotics-Solutions/<...>`` and the recording stack
+    pushes datasets to ``<student_username>/<robot_type>_<task>`` (or
+    EduBotics-Solutions/, depending on the recording config) — both
+    contain robot demonstrations that may include faces, classroom
+    audio, or other identifying detail.
+
+    Errors are logged but do not block the auth deletion; an HF Hub
+    outage during a deletion request would otherwise leave the auth
+    user dangling. A cron-style cleanup pass can reconcile later.
+    """
+    hf_token = os.environ.get("HF_TOKEN", "")
+    if not hf_token:
+        logger.warning(
+            "HF_TOKEN not set; skipping HF artifact cleanup for %s", student_id
+        )
+        return
+    supabase = get_supabase()
+    rows = (
+        supabase.table("trainings")
+        .select("dataset_name, model_name")
+        .eq("user_id", student_id)
+        .execute()
+    ).data or []
+    if not rows:
+        return
+    api = HfApi(token=hf_token)
+    seen: set[tuple[str, str]] = set()
+    for row in rows:
+        for repo_id, repo_type in (
+            (row.get("model_name"), "model"),
+            (row.get("dataset_name"), "dataset"),
+        ):
+            if not repo_id or (repo_id, repo_type) in seen:
+                continue
+            seen.add((repo_id, repo_type))
+            try:
+                api.delete_repo(repo_id=repo_id, repo_type=repo_type, missing_ok=True)
+                logger.info("Deleted HF %s repo %s", repo_type, repo_id)
+            except RepositoryNotFoundError:
+                continue
+            except Exception as e:
+                logger.warning(
+                    "HF delete %s %s failed: %s", repo_type, repo_id, e
+                )
+
+
 @router.delete("/students/{student_id}")
 async def delete_student(student_id: str, teacher=Depends(get_current_teacher)):
     _assert_student_owned(teacher["id"], student_id)
+    # Erase HF datasets/models BEFORE the auth user is deleted — once
+    # the student row is gone we'd have to keep a separate record of
+    # what to clean up, which becomes a GDPR liability of its own.
+    _delete_student_hf_artifacts(student_id)
     supabase = get_supabase()
     try:
         supabase.auth.admin.delete_user(student_id)

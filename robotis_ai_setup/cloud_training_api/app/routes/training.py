@@ -23,9 +23,11 @@ from huggingface_hub.utils import RepositoryNotFoundError
 logger = logging.getLogger(__name__)
 
 # A worker that hasn't called update_training_progress() in this long is
-# considered wedged. Configurable via env var for ops flexibility.
+# considered wedged. Default 25 min (was 15) to leave headroom for slow
+# pi0 / smolvla checkpoint saves which can take 20+ min on disk-slow
+# Modal workers. Override via env var for tighter ops control.
 STALLED_WORKER_THRESHOLD = timedelta(
-    minutes=int(os.environ.get("STALLED_WORKER_MINUTES", "15"))
+    minutes=int(os.environ.get("STALLED_WORKER_MINUTES", "25"))
 )
 
 # A row that's still queued with no cloud_job_id beyond this threshold
@@ -46,9 +48,11 @@ DEDUPE_WINDOW = timedelta(seconds=60)
 
 # Hard upper bounds on training_params. Steps especially is a cost-bomb risk:
 # a malicious or buggy client could request 1B steps and burn the GPU budget.
+# All three are env-configurable so a deployment with bigger GPUs (A100/H100)
+# can raise them without a code change.
 MAX_STEPS = int(os.environ.get("MAX_TRAINING_STEPS", "500000"))
-MAX_BATCH_SIZE = 256
-MAX_TIMEOUT_HOURS = 12.0
+MAX_BATCH_SIZE = int(os.environ.get("MAX_TRAINING_BATCH_SIZE", "256"))
+MAX_TIMEOUT_HOURS = float(os.environ.get("MAX_TRAINING_TIMEOUT_HOURS", "12.0"))
 
 # Env-driven policy allowlist. Students get ALLOWED_POLICIES=act on Railway so
 # only ACT training reaches the GPU. Admin/dev deployments leave this unset or
@@ -63,18 +67,32 @@ ALLOWED_POLICIES = {
     if p.strip()
 }
 
-# Per-policy max timeout. Prevents a wedged ACT job from burning the 5h handler
-# default when ACT really needs <90 min. Applied after validation and before
-# Modal dispatch so it's always enforced regardless of what the client sends.
+# Per-policy max timeout. Caps a wedged job from burning the full handler
+# timeout. Bumped for serious training: ACT routinely needs 3-4h on real
+# datasets; pi0/smolvla fine-tunes can run 8h+. Applied after validation
+# and before Modal dispatch so it's always enforced regardless of what the
+# client sends. Override via POLICY_TIMEOUT_OVERRIDES_JSON env var if a
+# deployment needs different caps.
 POLICY_MAX_TIMEOUT_HOURS = {
-    "act": 1.5,
-    "vqbet": 2.0,
-    "tdmpc": 2.0,
-    "diffusion": 4.0,
-    "pi0fast": 4.0,
-    "pi0": 6.0,
-    "smolvla": 6.0,
+    "act": 4.0,
+    "vqbet": 4.0,
+    "tdmpc": 4.0,
+    "diffusion": 6.0,
+    "pi0fast": 6.0,
+    "pi0": 10.0,
+    "smolvla": 10.0,
 }
+_policy_overrides_raw = os.environ.get("POLICY_TIMEOUT_OVERRIDES_JSON", "").strip()
+if _policy_overrides_raw:
+    try:
+        _overrides = json.loads(_policy_overrides_raw)
+        if isinstance(_overrides, dict):
+            for _k, _v in _overrides.items():
+                POLICY_MAX_TIMEOUT_HOURS[str(_k).lower()] = float(_v)
+    except (ValueError, TypeError) as _e:
+        logger.warning(
+            "POLICY_TIMEOUT_OVERRIDES_JSON ignored (bad JSON): %s", _e
+        )
 
 router = APIRouter(prefix="/trainings", tags=["training"])
 

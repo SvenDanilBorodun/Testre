@@ -59,7 +59,11 @@ from trajectory_msgs.msg import JointTrajectory
 class DataManager:
     RECORDING = False
     RECORD_COMPLETED = True
-    RAM_LIMIT_GB = 2  # GB
+    # RAM cushion: trigger early-save when free RAM drops below this.
+    # Default 0.8 GB (was hardcoded 2 GB) — 2 GB triggered far too easily
+    # on 32 GB machines running Chrome + IDE during a transient GC dip.
+    # Override via env var per deployment / classroom.
+    RAM_LIMIT_GB = float(os.environ.get('EDUBOTICS_RAM_LIMIT_GB', '0.8'))
     SKIP_TIME = 0.1  # Seconds
 
     # Progress queue for multiprocessing communication
@@ -586,16 +590,23 @@ class DataManager:
                     cv2.COLOR_BGR2RGB)
             stale = self._check_stale_cameras(camera_data)
             if stale is not None:
-                # Refuse to record on a dead camera — the alternative is
-                # that LeRobotDataset gets the same frame for every tick
-                # until the operator notices visually, by which point an
-                # entire episode of useless data has been written.
-                raise RuntimeError(
+                # Warn (don't halt) — slow precision demos legitimately
+                # produce static scenes for >5 s (insertion, alignment,
+                # waiting for a human to place an object). Aborting the
+                # episode here was the single most-frequent false
+                # positive against real workflows. The inference path
+                # still halts on stale cameras (inference_manager.py)
+                # because there it's load-bearing; at recording time
+                # the worst case is a degraded frame, not a hardware
+                # event.
+                warning = (
                     f'Kamera "{stale}" liefert seit ueber '
-                    f'{self._stale_halt_threshold_s:.0f}s dasselbe Bild — '
-                    f'Aufnahme abgebrochen. Bitte Kabel und USB-Anschluss '
-                    f'pruefen, dann neu starten.'
+                    f'{self._stale_halt_threshold_s:.0f}s dasselbe Bild. '
+                    f'Aufnahme laeuft weiter — bitte pruefen, ob die '
+                    f'Szene wirklich statisch ist oder die Kamera haengt.'
                 )
+                self._last_warning_message = warning
+                print(f'[WARNUNG] {warning}', file=sys.stderr, flush=True)
         if follower_msgs is not None:
             for key, value in follower_msgs.items():
                 if value is not None:
@@ -803,14 +814,14 @@ class DataManager:
         bail after 1 hour; on timeout or error, we surface a German
         warning via TaskStatus so the student actually learns the upload
         didn't work (previously the exception was swallowed to stderr).
+
+        ``private`` is honoured as passed in by the caller — the GUI
+        defaults the toggle to True, but professional users / paired
+        student work / teacher-published reference datasets can opt out.
+        Recordings with face data should still be marked private at
+        deployment-policy level (HF org "Default repo visibility")
+        rather than overridden here.
         """
-        # Student recordings may contain faces, classroom audio, or other
-        # identifying data. Force private=True regardless of the GUI
-        # private_mode toggle (which defaults to False and is frequently
-        # left unchanged by students). Teachers who genuinely want to
-        # publish a dataset can flip it public from the HF dashboard
-        # after the upload completes. GDPR / school DPA.
-        private = True
         timeout_s = 3600  # 1 hour — plenty for a multi-GB episode set
         result_queue = queue.Queue()
 

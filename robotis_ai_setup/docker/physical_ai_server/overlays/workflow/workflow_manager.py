@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import math
 import threading
+import time
 import traceback
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
@@ -34,6 +35,12 @@ _HOME_FULL_JOINTS = [0.0, -math.pi / 4, math.pi / 4, 0.0, 0.0, 0.8]
 _RECOVERY_HOLD_S = 1.0
 _RECOVERY_GRIPPER_S = 0.5
 _RECOVERY_HOME_S = 3.0
+# Absolute ceiling on the entire recovery routine. Designed total is
+# 4.5 s; 15 s caps a stuck recovery (IK fail mid-segment, controller
+# wedged) so the daemon can exit. The hold + gripper-open segments
+# remain uninterruptible (controller settle + release any held object);
+# only the long return-home segment honours the deadline.
+_RECOVERY_DEADLINE_S = 15.0
 
 
 @dataclass
@@ -208,15 +215,22 @@ class WorkflowManager:
 
     def _run_recovery(self, ctx: WorkflowContext) -> None:
         """Hold-current → open gripper → return home, after a stopped
-        or errored workflow. should_stop is hardcoded to False — we're
-        already past the stop signal; recovery must complete or the
-        arm stays in a potentially unsafe state.
+        or errored workflow.
+
+        Hold + gripper-open run uninterruptibly: the controller must
+        settle the in-flight trajectory and any held object must be
+        released before we move toward home (otherwise we go home
+        carrying it). The home segment honours an absolute deadline
+        (_RECOVERY_DEADLINE_S) so a wedged recovery can't hang the
+        daemon thread indefinitely.
         """
+        deadline = time.monotonic() + _RECOVERY_DEADLINE_S
+        deadline_exceeded = lambda: time.monotonic() > deadline
         try:
             current = list(ctx.last_full_joints) if ctx.last_full_joints else list(_HOME_FULL_JOINTS)
             # Hold-current segment so the controller has time to settle
             # the in-flight trajectory without immediately commanding
-            # new motion.
+            # new motion. Uninterruptible — settling can't be skipped.
             hold = build_segment(current, current, _RECOVERY_HOLD_S)
             chunked_publish(
                 publisher=ctx.publisher,
@@ -224,7 +238,9 @@ class WorkflowManager:
                 safety_apply=ctx.safety.apply if ctx.safety else None,
                 should_stop=lambda: False,
             )
-            # Open gripper.
+            # Open gripper. Uninterruptible — releasing a held object
+            # before the home traversal is what prevents "go home with
+            # the part still gripped → drag it across the bench".
             opened = list(current[:5]) + [_HOME_FULL_JOINTS[5]]
             open_seg = build_segment(current, opened, _RECOVERY_GRIPPER_S)
             chunked_publish(
@@ -233,13 +249,14 @@ class WorkflowManager:
                 safety_apply=ctx.safety.apply if ctx.safety else None,
                 should_stop=lambda: False,
             )
-            # Return to home pose over 3 seconds.
+            # Return to home pose over 3 seconds. Honours the absolute
+            # recovery deadline so a stuck home traversal aborts.
             home_seg = build_segment(opened, list(_HOME_FULL_JOINTS), _RECOVERY_HOME_S)
             chunked_publish(
                 publisher=ctx.publisher,
                 points=home_seg,
                 safety_apply=ctx.safety.apply if ctx.safety else None,
-                should_stop=lambda: False,
+                should_stop=deadline_exceeded,
             )
             ctx.last_full_joints = list(_HOME_FULL_JOINTS)
         except Exception:

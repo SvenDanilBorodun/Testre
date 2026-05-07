@@ -43,7 +43,7 @@ class SafetyEnvelope:
         self._action_max: np.ndarray | None = None
         self._action_max_delta: np.ndarray | None = None
         self._last_action: np.ndarray | None = None
-        self._warned_action_shape: bool = False
+        self._action_shape_warn_counter: int = 0
 
     def set_action_limits(
         self,
@@ -62,7 +62,7 @@ class SafetyEnvelope:
         self._action_max_delta = (
             np.asarray(max_delta_per_tick, dtype=np.float32) if max_delta_per_tick else None
         )
-        self._warned_action_shape = False
+        self._action_shape_warn_counter = 0
 
     def reset(self) -> None:
         """Drop the last-action memory (e.g. when starting a new run)."""
@@ -90,7 +90,12 @@ class SafetyEnvelope:
                     )
                 action = clipped
             else:
-                if not self._warned_action_shape:
+                # Warn periodically (every 30 ticks ≈ 1 s at 30 Hz) instead
+                # of one-shot-then-silent. A misconfigured envelope must
+                # remain audible — silently dropping the limit check after
+                # a single boot warning was the worst-of-both: visible at
+                # startup, deaf for the rest of the session.
+                if self._action_shape_warn_counter % 30 == 0:
                     print(
                         f'[WARNUNG] Aktion hat {len(action)} Werte, '
                         f'Gelenklimits sind fuer {len(self._action_min)} '
@@ -99,7 +104,7 @@ class SafetyEnvelope:
                         f'auf den aktiven Roboter abstimmen.',
                         flush=True,
                     )
-                    self._warned_action_shape = True
+                self._action_shape_warn_counter += 1
 
         if self._action_max_delta is not None and self._last_action is not None:
             # Pre-existing audit fix: previously this branch only

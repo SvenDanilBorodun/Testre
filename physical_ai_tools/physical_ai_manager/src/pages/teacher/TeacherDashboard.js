@@ -32,6 +32,8 @@ export default function TeacherDashboard({ onLogout }) {
   const allocatedTotal = useSelector((s) => s.auth.allocatedTotal);
   const poolAvailable = useSelector((s) => s.auth.poolAvailable);
   const studentCount = useSelector((s) => s.auth.studentCount);
+  const groupCount = useSelector((s) => s.auth.groupCount);
+  const groupCreditsTotal = useSelector((s) => s.auth.groupCreditsTotal);
 
   const classrooms = useSelector((s) => s.teacher.classrooms);
   const classroomsLoading = useSelector((s) => s.teacher.classroomsLoading);
@@ -130,9 +132,19 @@ export default function TeacherDashboard({ onLogout }) {
             classrooms.length === 1 ? 'Klasse' : 'Klassen'
           }`}
         />
+        {(groupCount ?? 0) > 0 && (
+          <>
+            <Divider className="hidden md:block" />
+            <StatBig
+              label="Gruppen"
+              value={groupCount}
+              sub={`${groupCreditsTotal ?? 0} geteilte Credits`}
+            />
+          </>
+        )}
         <div className="w-full xl:w-auto xl:ml-auto xl:max-w-sm p-3 rounded-[var(--radius)] bg-[var(--bg-sunk)] text-xs text-[var(--ink-3)] leading-snug">
           Pool und Credits werden vom Admin vergeben. Du verteilst sie an
-          Schüler mit den +/− Buttons.
+          Schüler oder bündelst sie in Arbeitsgruppen.
         </div>
       </div>
 

@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, field_validator
 
-from app.auth import get_current_user
+from app.auth import get_current_user, get_user_profile
 from app.services.modal_client import (
     cancel_training_job,
     get_job_status,
@@ -372,6 +372,7 @@ async def _sync_modal_status(training: dict) -> dict:
 def _find_recent_duplicate(
     user_id: str, dataset_name: str, model_type: str,
     training_params: dict | None = None,
+    workgroup_id: str | None = None,
 ) -> dict | None:
     """Idempotency check. Returns an existing matching training if one was
     started within DEDUPE_WINDOW, otherwise None.
@@ -382,23 +383,31 @@ def _find_recent_duplicate(
     running row has the same params, it's a duplicate; different params
     are treated as a fresh request.
 
+    Group-aware: when ``workgroup_id`` is set the search includes group
+    siblings — otherwise three students racing the same dataset/model
+    inside the same group would each pop a credit before the dedupe could
+    fire on any one of them.
+
     Excludes failed/canceled rows so a user can immediately retry after a
     failure without being blocked by their own previous attempt.
     """
     supabase = get_supabase()
     window_start = (datetime.now(timezone.utc) - DEDUPE_WINDOW).isoformat()
-    result = (
+    q = (
         supabase.table("trainings")
         .select("*")
-        .eq("user_id", user_id)
         .eq("dataset_name", dataset_name)
         .eq("model_type", model_type)
         .gte("requested_at", window_start)
         .not_.in_("status", ["failed", "canceled"])
         .order("requested_at", desc=True)
-        .limit(5)
-        .execute()
+        .limit(10)
     )
+    if workgroup_id:
+        q = q.eq("workgroup_id", workgroup_id)
+    else:
+        q = q.eq("user_id", user_id)
+    result = q.execute()
     rows = result.data or []
     if not rows:
         return None
@@ -425,21 +434,28 @@ def _find_recent_duplicate(
     return None
 
 
-async def _sweep_user_running_jobs(user_id: str) -> None:
-    """Sync every running/queued row this user owns. Used at top of /start so a
-    stuck row from a previous session can't block a fresh credit check.
+async def _sweep_user_running_jobs(user_id: str, workgroup_id: str | None = None) -> None:
+    """Sync every running/queued row this user (or their group) owns.
+
+    Used at top of /start so a stuck row from a previous session can't
+    block a fresh credit check. When the caller is in a group we also
+    sweep group siblings' rows because the credit check now runs against
+    the group pool — a wedged sibling would otherwise eat a slot.
 
     Async + parallel: all rows are synced concurrently via asyncio.gather,
     which scales better than serial sync calls when a user has many active rows.
     """
     supabase = get_supabase()
-    result = (
+    q = (
         supabase.table("trainings")
         .select("*")
-        .eq("user_id", user_id)
         .in_("status", ["queued", "running"])
-        .execute()
     )
+    if workgroup_id:
+        q = q.eq("workgroup_id", workgroup_id)
+    else:
+        q = q.eq("user_id", user_id)
+    result = q.execute()
 
     async def _sync_one(row):
         try:
@@ -465,25 +481,34 @@ async def get_quota(user=Depends(get_current_user)):
 async def start_training(req: StartTrainingRequest, user=Depends(get_current_user)):
     supabase = get_supabase()
     user_id = str(user.id)
+
+    # Look up the caller's workgroup once — it controls credit pool, dedupe
+    # scope, and the failure-sweep scope. start_training_safe internally
+    # handles the group routing, but we still need it here for dedupe.
+    profile = get_user_profile(user_id)
+    workgroup_id = profile.get("workgroup_id")
+
     logger.info(
-        "POST /trainings/start user=%s dataset=%s model_type=%s steps=%s",
-        user_id, req.dataset_name, req.model_type, req.training_params.steps,
+        "POST /trainings/start user=%s group=%s dataset=%s model_type=%s steps=%s",
+        user_id, workgroup_id, req.dataset_name, req.model_type, req.training_params.steps,
     )
 
-    # 0a. Sweep this user's stuck rows BEFORE counting credits. If a previous
-    #     job died hard (no SIGTERM, no exception), the row is still 'running'
-    #     and would block the credit check. The sweep flips it to failed first.
-    await _sweep_user_running_jobs(user_id)
+    # 0a. Sweep stuck rows BEFORE counting credits. If a previous job died
+    #     hard (no SIGTERM, no exception), the row is still 'running' and
+    #     would block the credit check. Group-aware sweep so a wedged
+    #     sibling can't trap the entire group.
+    await _sweep_user_running_jobs(user_id, workgroup_id=workgroup_id)
 
     # 0b. Idempotency: a duplicate /start within DEDUPE_WINDOW returns the
     #     existing training instead of creating a new one. Catches network
     #     retries and accidental double-clicks. Zero schema/client cost.
     #     Params are part of the dedup key so changing `steps` actually
     #     creates a new training (legitimate retry with different config)
-    #     instead of being silently collapsed.
+    #     instead of being silently collapsed. Group-scoped when grouped.
     duplicate = _find_recent_duplicate(
         user_id, req.dataset_name, req.model_type,
         training_params=req.training_params.model_dump(exclude_none=True),
+        workgroup_id=workgroup_id,
     )
     if duplicate:
         logger.info(
@@ -611,7 +636,8 @@ async def cancel_training(req: CancelTrainingRequest, user=Depends(get_current_u
     user_id = str(user.id)
     logger.info("POST /trainings/cancel user=%s training_id=%s", user_id, req.training_id)
 
-    # Verify ownership
+    # Verify ownership — only the trainer can cancel, even when in a group.
+    # Group siblings can SEE the training but cannot stop someone else's run.
     result = (
         supabase.table("trainings")
         .select("*")
@@ -655,17 +681,51 @@ async def cancel_training(req: CancelTrainingRequest, user=Depends(get_current_u
     return {"status": "canceled", "training_id": req.training_id}
 
 
+def _resolve_visible_workgroup_ids(user_id: str) -> list[str]:
+    """Every workgroup the caller is or was a member of (per audit table).
+
+    Falls back to the user's currently-set workgroup_id when the audit
+    table has no rows yet (transition from a pre-011 state).
+    """
+    supabase = get_supabase()
+    rows = (
+        supabase.table("workgroup_memberships")
+        .select("workgroup_id")
+        .eq("user_id", user_id)
+        .execute()
+    ).data or []
+    if rows:
+        return [r["workgroup_id"] for r in rows if r.get("workgroup_id")]
+    profile = get_user_profile(user_id)
+    wg = profile.get("workgroup_id")
+    return [wg] if wg else []
+
+
 @router.get("/list", response_model=list[TrainingJob])
 async def list_trainings(user=Depends(get_current_user)):
     supabase = get_supabase()
-    result = (
-        supabase.table("trainings")
-        .select("*")
-        .eq("user_id", str(user.id))
-        .order("requested_at", desc=True)
-        .limit(50)
-        .execute()
-    )
+    user_id = str(user.id)
+    group_ids = _resolve_visible_workgroup_ids(user_id)
+
+    if group_ids:
+        # PostgREST OR clause covers (own user_id) OR (in any visible group).
+        ids_csv = ",".join(group_ids)
+        q = (
+            supabase.table("trainings")
+            .select("*")
+            .or_(f"user_id.eq.{user_id},workgroup_id.in.({ids_csv})")
+            .order("requested_at", desc=True)
+            .limit(100)
+        )
+    else:
+        q = (
+            supabase.table("trainings")
+            .select("*")
+            .eq("user_id", user_id)
+            .order("requested_at", desc=True)
+            .limit(50)
+        )
+    result = q.execute()
 
     # Sync status for any active jobs — parallel so N running rows don't
     # serialize into N× Modal roundtrip latency.
@@ -677,15 +737,21 @@ async def list_trainings(user=Depends(get_current_user)):
 @router.get("/{training_id}", response_model=TrainingJob)
 async def get_training(training_id: int, user=Depends(get_current_user)):
     supabase = get_supabase()
+    user_id = str(user.id)
     result = (
         supabase.table("trainings")
         .select("*")
         .eq("id", training_id)
-        .eq("user_id", str(user.id))
         .execute()
     )
     if not result.data:
         raise HTTPException(status_code=404, detail="Training not found")
+    row = result.data[0]
+    if row["user_id"] != user_id:
+        # Allow group siblings (current and former) to read.
+        wg = row.get("workgroup_id")
+        if not wg or wg not in _resolve_visible_workgroup_ids(user_id):
+            raise HTTPException(status_code=404, detail="Training not found")
 
-    training = await _sync_modal_status(result.data[0])
+    training = await _sync_modal_status(row)
     return training

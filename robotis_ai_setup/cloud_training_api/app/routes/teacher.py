@@ -65,6 +65,11 @@ class StudentSummary(BaseModel):
     trainings_used: int
     remaining: int
     classroom_id: str | None
+    # When the student is in a workgroup, surface the group so the
+    # teacher dashboard can route credit edits to the group endpoint
+    # instead of poking adjust_student_credits (which would now reject).
+    workgroup_id: str | None = None
+    workgroup_name: str | None = None
 
 
 class TrainingSummary(BaseModel):
@@ -156,9 +161,27 @@ def _student_usage(student_id: str) -> int:
     return int(result.count or 0)
 
 
-def _student_summary(row: dict) -> StudentSummary:
+def _student_summary(row: dict, *, group_name_lookup: dict | None = None) -> StudentSummary:
     credits = int(row.get("training_credits") or 0)
     used = _student_usage(row["id"])
+    workgroup_id = row.get("workgroup_id")
+    workgroup_name = None
+    if workgroup_id and group_name_lookup is not None:
+        workgroup_name = group_name_lookup.get(workgroup_id)
+    elif workgroup_id:
+        try:
+            g = (
+                get_supabase()
+                .table("workgroups")
+                .select("name")
+                .eq("id", workgroup_id)
+                .single()
+                .execute()
+            )
+            if g.data:
+                workgroup_name = g.data.get("name")
+        except Exception as e:
+            logger.warning("workgroup name lookup failed: %s", e)
     return StudentSummary(
         id=row["id"],
         username=row.get("username"),
@@ -167,6 +190,8 @@ def _student_summary(row: dict) -> StudentSummary:
         trainings_used=used,
         remaining=credits - used,
         classroom_id=row.get("classroom_id"),
+        workgroup_id=workgroup_id,
+        workgroup_name=workgroup_name,
     )
 
 
@@ -232,17 +257,28 @@ async def get_classroom(classroom_id: str, teacher=Depends(get_current_teacher))
     supabase = get_supabase()
     students_raw = (
         supabase.table("users")
-        .select("id, username, full_name, training_credits, classroom_id")
+        .select("id, username, full_name, training_credits, classroom_id, workgroup_id")
         .eq("classroom_id", classroom_id)
         .eq("role", "student")
         .order("full_name", desc=False)
         .execute()
     ).data or []
+    # Single roundtrip for group names instead of N+1.
+    group_ids = list({s["workgroup_id"] for s in students_raw if s.get("workgroup_id")})
+    group_lookup: dict = {}
+    if group_ids:
+        groups_raw = (
+            supabase.table("workgroups")
+            .select("id, name")
+            .in_("id", group_ids)
+            .execute()
+        ).data or []
+        group_lookup = {g["id"]: g["name"] for g in groups_raw}
     return ClassroomDetail(
         id=c["id"],
         name=c["name"],
         created_at=c["created_at"],
-        students=[_student_summary(s) for s in students_raw],
+        students=[_student_summary(s, group_name_lookup=group_lookup) for s in students_raw],
     )
 
 
@@ -478,7 +514,7 @@ async def create_student(
 
     row = (
         supabase.table("users")
-        .select("id, username, full_name, training_credits, classroom_id")
+        .select("id, username, full_name, training_credits, classroom_id, workgroup_id")
         .eq("id", student_id)
         .single()
         .execute()
@@ -516,7 +552,7 @@ async def patch_student(
 
     row = (
         supabase.table("users")
-        .select("id, username, full_name, training_credits, classroom_id")
+        .select("id, username, full_name, training_credits, classroom_id, workgroup_id")
         .eq("id", student_id)
         .single()
         .execute()
@@ -535,6 +571,12 @@ def _delete_student_hf_artifacts(student_id: str) -> None:
     contain robot demonstrations that may include faces, classroom
     audio, or other identifying detail.
 
+    Group-aware (migration 011): if a dataset row in the registry has
+    a workgroup_id, deleting it would wipe content other group members
+    still depend on. We skip those repos so the data remains available
+    to surviving group members. The teacher can manually delete them
+    from HF Hub if cleanup is needed.
+
     Errors are logged but do not block the auth deletion; an HF Hub
     outage during a deletion request would otherwise leave the auth
     user dangling. A cron-style cleanup pass can reconcile later.
@@ -548,15 +590,35 @@ def _delete_student_hf_artifacts(student_id: str) -> None:
     supabase = get_supabase()
     rows = (
         supabase.table("trainings")
-        .select("dataset_name, model_name")
+        .select("dataset_name, model_name, workgroup_id")
         .eq("user_id", student_id)
         .execute()
     ).data or []
     if not rows:
         return
+
+    # Build the set of HF repos that are shared with a group. We must
+    # NOT delete these because group siblings still need them.
+    shared_dataset_repos: set[str] = set()
+    try:
+        ds_rows = (
+            supabase.table("datasets")
+            .select("hf_repo_id, owner_user_id, workgroup_id")
+            .eq("owner_user_id", student_id)
+            .execute()
+        ).data or []
+        for d in ds_rows:
+            if d.get("workgroup_id") and d.get("hf_repo_id"):
+                shared_dataset_repos.add(d["hf_repo_id"])
+    except Exception as e:
+        logger.warning("Dataset registry query failed during HF cleanup: %s", e)
+
     api = HfApi(token=hf_token)
     seen: set[tuple[str, str]] = set()
     for row in rows:
+        # Skip trainings that are part of a shared workgroup pool.
+        if row.get("workgroup_id"):
+            continue
         for repo_id, repo_type in (
             (row.get("model_name"), "model"),
             (row.get("dataset_name"), "dataset"),
@@ -564,6 +626,12 @@ def _delete_student_hf_artifacts(student_id: str) -> None:
             if not repo_id or (repo_id, repo_type) in seen:
                 continue
             seen.add((repo_id, repo_type))
+            if repo_type == "dataset" and repo_id in shared_dataset_repos:
+                logger.info(
+                    "Skipping HF dataset %s — still shared with workgroup",
+                    repo_id,
+                )
+                continue
             try:
                 api.delete_repo(repo_id=repo_id, repo_type=repo_type, missing_ok=True)
                 logger.info("Deleted HF %s repo %s", repo_type, repo_id)
@@ -641,6 +709,11 @@ async def adjust_credits(
             raise HTTPException(status_code=409, detail="Credits duerfen nicht negativ werden")
         if "P0014" in msg:
             raise HTTPException(status_code=409, detail="Lehrer hat nicht genug Credits im Pool")
+        if "P0023" in msg:
+            raise HTTPException(
+                status_code=409,
+                detail="Schueler ist in einer Arbeitsgruppe — bitte Credits ueber die Gruppe anpassen",
+            )
         logger.error("adjust_student_credits failed: %s", e)
         raise HTTPException(status_code=500, detail="Credit-Anpassung fehlgeschlagen")
     row = (result.data or [{}])[0]
@@ -662,14 +735,16 @@ async def list_student_trainings(
         .select(
             "id, status, dataset_name, model_name, model_type, "
             "current_step, total_steps, current_loss, "
-            "requested_at, terminated_at, error_message"
+            "requested_at, terminated_at, error_message, workgroup_id"
         )
         .eq("user_id", student_id)
         .order("requested_at", desc=True)
         .limit(100)
         .execute()
     )
-    return [TrainingSummary(**t) for t in (result.data or [])]
+    rows = result.data or []
+    # Strip workgroup_id from the response model — internal only.
+    return [TrainingSummary(**{k: v for k, v in t.items() if k != "workgroup_id"}) for t in rows]
 
 
 # ---------- Daily progress entries ----------
@@ -685,8 +760,13 @@ class ProgressEntryCreate(BaseModel):
     note: str = Field(..., min_length=1, max_length=4000)
     # ISO date string YYYY-MM-DD. Defaults to server "today" (UTC) when omitted.
     entry_date: str | None = None
-    # Null / omitted -> class-wide entry. Otherwise a student in the classroom.
+    # Three mutually-exclusive scopes (CHECK constraint enforces no two
+    # set simultaneously):
+    #   student_id NULL, workgroup_id NULL  -> class-wide
+    #   student_id set                       -> per-student
+    #   workgroup_id set                     -> per-group
     student_id: str | None = None
+    workgroup_id: str | None = None
 
 
 class ProgressEntryPatch(BaseModel):
@@ -697,6 +777,7 @@ class ProgressEntrySummary(BaseModel):
     id: str
     classroom_id: str
     student_id: str | None = None
+    workgroup_id: str | None = None
     entry_date: str
     note: str
     created_at: str
@@ -708,6 +789,7 @@ def _serialize_progress_entry(row: dict) -> ProgressEntrySummary:
         id=row["id"],
         classroom_id=row["classroom_id"],
         student_id=row.get("student_id"),
+        workgroup_id=row.get("workgroup_id"),
         entry_date=str(row["entry_date"]),
         note=row["note"],
         created_at=row["created_at"],
@@ -727,6 +809,26 @@ def _assert_entry_owned(teacher_id: str, entry_id: str) -> dict:
     return entry
 
 
+def _assert_workgroup_in_classroom(
+    teacher_id: str, classroom_id: str, workgroup_id: str
+) -> None:
+    """Workgroup must exist, belong to the teacher, and live in this classroom."""
+    supabase = get_supabase()
+    g = (
+        supabase.table("workgroups")
+        .select("classroom_id")
+        .eq("id", workgroup_id)
+        .execute()
+    )
+    if not g.data:
+        raise HTTPException(status_code=404, detail="Arbeitsgruppe nicht gefunden")
+    if g.data[0].get("classroom_id") != classroom_id:
+        raise HTTPException(
+            status_code=400, detail="Arbeitsgruppe gehoert nicht zu dieser Klasse"
+        )
+    _assert_classroom_owned(teacher_id, classroom_id)
+
+
 @router.get(
     "/classrooms/{classroom_id}/progress-entries",
     response_model=list[ProgressEntrySummary],
@@ -734,15 +836,18 @@ def _assert_entry_owned(teacher_id: str, entry_id: str) -> dict:
 async def list_progress_entries(
     classroom_id: str,
     student_id: str | None = None,
-    scope: str | None = None,  # "student" | "classroom" — filters to one or the other when set
+    workgroup_id: str | None = None,
+    scope: str | None = None,  # "student" | "classroom" | "group"
     teacher=Depends(get_current_teacher),
 ):
     """List entries for a classroom.
 
-    - no filter                  -> all entries (both classroom + student)
-    - student_id=<uuid>          -> only that student's entries
-    - scope=classroom            -> only class-wide entries (student_id IS NULL)
-    - scope=student (no id)      -> only student-scoped entries (student_id IS NOT NULL)
+    - no filter              -> all entries (student + group + class-wide)
+    - student_id=<uuid>      -> only that student's entries
+    - workgroup_id=<uuid>    -> only that group's entries
+    - scope=classroom        -> only class-wide entries (both scope cols NULL)
+    - scope=student          -> only student-scoped entries
+    - scope=group            -> only group-scoped entries
     """
     _assert_classroom_owned(teacher["id"], classroom_id)
     supabase = get_supabase()
@@ -750,10 +855,15 @@ async def list_progress_entries(
     if student_id is not None:
         _assert_student_owned(teacher["id"], student_id)
         q = q.eq("student_id", student_id)
+    elif workgroup_id is not None:
+        _assert_workgroup_in_classroom(teacher["id"], classroom_id, workgroup_id)
+        q = q.eq("workgroup_id", workgroup_id)
     elif scope == "classroom":
-        q = q.is_("student_id", "null")
+        q = q.is_("student_id", "null").is_("workgroup_id", "null")
     elif scope == "student":
         q = q.not_.is_("student_id", "null")
+    elif scope == "group":
+        q = q.not_.is_("workgroup_id", "null")
     rows = q.order("entry_date", desc=True).order("updated_at", desc=True).execute().data or []
     return [_serialize_progress_entry(r) for r in rows]
 
@@ -768,6 +878,14 @@ async def create_progress_entry(
     teacher=Depends(get_current_teacher),
 ):
     _assert_classroom_owned(teacher["id"], classroom_id)
+    if req.student_id and req.workgroup_id:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Eintrag kann entweder einem Schueler oder einer Gruppe "
+                "zugewiesen werden, aber nicht beidem."
+            ),
+        )
     if req.student_id:
         student = _assert_student_owned(teacher["id"], req.student_id)
         if student.get("classroom_id") != classroom_id:
@@ -775,10 +893,13 @@ async def create_progress_entry(
                 status_code=400,
                 detail="Schueler gehoert nicht zu dieser Klasse",
             )
+    if req.workgroup_id:
+        _assert_workgroup_in_classroom(teacher["id"], classroom_id, req.workgroup_id)
 
     payload: dict = {
         "classroom_id": classroom_id,
         "student_id": req.student_id,
+        "workgroup_id": req.workgroup_id,
         "note": req.note.strip(),
     }
     if req.entry_date:

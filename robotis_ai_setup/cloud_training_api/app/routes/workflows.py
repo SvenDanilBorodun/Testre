@@ -16,7 +16,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from app.auth import get_current_user
+from app.auth import get_current_user, get_user_profile
 from app.services.supabase_client import get_supabase
 from app.validators.workflow import (
     MAX_NAME_LENGTH,
@@ -40,18 +40,24 @@ class WorkflowCreate(BaseModel):
     description: str = Field(default="", max_length=2000)
     blockly_json: dict
     classroom_id: str | None = None
+    # When the caller is in a workgroup, default to sharing the workflow
+    # with the group. Set False to keep it private to the author.
+    share_with_group: bool = True
 
 
 class WorkflowUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=MAX_NAME_LENGTH)
     description: str | None = Field(default=None, max_length=2000)
     blockly_json: dict | None = None
+    # Re-share / un-share an already-saved workflow.
+    share_with_group: bool | None = None
 
 
 class WorkflowResponse(BaseModel):
     id: str
     owner_user_id: str
     classroom_id: str | None
+    workgroup_id: str | None = None
     name: str
     description: str
     blockly_json: dict
@@ -91,6 +97,27 @@ def _get_user_classroom_id(user_id: str) -> str | None:
     return result.data[0].get("classroom_id")
 
 
+def _resolve_visible_workgroup_ids(user_id: str) -> list[str]:
+    """Every workgroup the caller is or was a member of (per audit table).
+
+    Mirrors the helper in routes/training.py — duplicated here rather than
+    cross-imported to keep router boundaries clean. Falls back to the
+    user's currently-set workgroup_id when the audit table is empty.
+    """
+    supabase = get_supabase()
+    rows = (
+        supabase.table("workgroup_memberships")
+        .select("workgroup_id")
+        .eq("user_id", user_id)
+        .execute()
+    ).data or []
+    if rows:
+        return [r["workgroup_id"] for r in rows if r.get("workgroup_id")]
+    profile = get_user_profile(user_id)
+    wg = profile.get("workgroup_id")
+    return [wg] if wg else []
+
+
 # ---------- Endpoints ----------
 
 
@@ -114,6 +141,7 @@ def list_workflows(
     supabase = get_supabase()
     user_id = user.id
     classroom_id = _get_user_classroom_id(user_id)
+    group_ids = _resolve_visible_workgroup_ids(user_id)
 
     own = (
         supabase.table("workflows")
@@ -144,6 +172,22 @@ def list_workflows(
             if r["id"] not in seen_ids:
                 rows.append(r)
 
+    # Group-shared workflows from peers (covers former group members too
+    # via workgroup_memberships).
+    if group_ids:
+        group_rows = (
+            supabase.table("workflows")
+            .select("*")
+            .in_("workgroup_id", group_ids)
+            .order("updated_at", desc=True)
+            .range(0, MAX_LIST_LIMIT - 1)
+            .execute()
+        )
+        seen_ids = {r["id"] for r in rows}
+        for r in group_rows.data or []:
+            if r["id"] not in seen_ids:
+                rows.append(r)
+
     return [WorkflowResponse(**r) for r in rows[: limit + MAX_LIST_LIMIT]]
 
 
@@ -155,6 +199,9 @@ def get_workflow(workflow_id: str, user=Depends(get_current_user)) -> WorkflowRe
         raise HTTPException(status_code=404, detail="Workflow nicht gefunden")
     row = result.data[0]
     if row["owner_user_id"] == user.id:
+        return WorkflowResponse(**row)
+    # Group-shared visibility (covers former members via the audit table).
+    if row.get("workgroup_id") and row["workgroup_id"] in _resolve_visible_workgroup_ids(user.id):
         return WorkflowResponse(**row)
     if row.get("is_template"):
         classroom_id = _get_user_classroom_id(user.id)
@@ -170,9 +217,16 @@ def create_workflow(
 ) -> WorkflowResponse:
     validate_blockly_json(payload.blockly_json)
     supabase = get_supabase()
+    profile = get_user_profile(str(user.id))
+    workgroup_id = (
+        profile.get("workgroup_id")
+        if payload.share_with_group and profile.get("workgroup_id")
+        else None
+    )
     insert_payload = {
         "owner_user_id": user.id,
         "classroom_id": payload.classroom_id or _get_user_classroom_id(user.id),
+        "workgroup_id": workgroup_id,
         "name": payload.name,
         "description": payload.description,
         "blockly_json": payload.blockly_json,
@@ -199,6 +253,14 @@ def update_workflow(
     if payload.blockly_json is not None:
         validate_blockly_json(payload.blockly_json)
         update_payload["blockly_json"] = payload.blockly_json
+    if payload.share_with_group is not None:
+        # Re-share or un-share. Sharing requires the caller currently be in
+        # a group; un-sharing always allowed.
+        if payload.share_with_group:
+            profile = get_user_profile(str(user.id))
+            update_payload["workgroup_id"] = profile.get("workgroup_id")
+        else:
+            update_payload["workgroup_id"] = None
     if not update_payload:
         raise HTTPException(status_code=400, detail="Keine Änderungen angegeben.")
 
@@ -233,17 +295,27 @@ def clone_workflow(workflow_id: str, user=Depends(get_current_user)) -> Workflow
         raise HTTPException(status_code=404, detail="Workflow nicht gefunden")
     src = result.data[0]
 
-    # Visibility: owner can clone own, classmate can clone classroom template.
+    # Visibility: owner clone own, classmate clones classroom template,
+    # group sibling clones a group-shared workflow.
     if src["owner_user_id"] != user.id:
-        if not src.get("is_template"):
-            raise HTTPException(status_code=404, detail="Workflow nicht gefunden")
-        classroom_id = _get_user_classroom_id(user.id)
-        if not classroom_id or src.get("classroom_id") != classroom_id:
+        is_template_in_classroom = False
+        if src.get("is_template"):
+            classroom_id = _get_user_classroom_id(user.id)
+            if classroom_id and src.get("classroom_id") == classroom_id:
+                is_template_in_classroom = True
+        is_group_shared = (
+            src.get("workgroup_id")
+            and src["workgroup_id"] in _resolve_visible_workgroup_ids(user.id)
+        )
+        if not is_template_in_classroom and not is_group_shared:
             raise HTTPException(status_code=404, detail="Workflow nicht gefunden")
 
+    profile = get_user_profile(str(user.id))
     insert_payload = {
         "owner_user_id": user.id,
         "classroom_id": _get_user_classroom_id(user.id),
+        # New copies belong to the cloner's *current* group (not the source's).
+        "workgroup_id": profile.get("workgroup_id"),
         "name": f"{src['name']} (Kopie)",
         "description": src.get("description", ""),
         "blockly_json": src["blockly_json"],

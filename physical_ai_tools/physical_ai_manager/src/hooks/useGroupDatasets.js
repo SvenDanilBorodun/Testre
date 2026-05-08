@@ -1,55 +1,39 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useSelector } from 'react-redux';
 import { supabase } from '../lib/supabaseClient';
-import { getTrainingJobs } from '../services/cloudTrainingApi';
+import { listDatasets } from '../services/datasetsApi';
 
 const POLL_FALLBACK_MS = 30000;
 
-function stripSecrets(row) {
-  if (!row) return row;
-  // worker_token is a per-row secret, cloud_job_id and user_id are internal.
-  const { worker_token: _wt, user_id: _uid, cloud_job_id: _cj, ...safe } = row;
-  return safe;
-}
-
-function mergeJob(prev, incoming) {
-  const map = new Map(prev.map((j) => [j.id, j]));
+function mergeRow(prev, incoming) {
+  const map = new Map(prev.map((d) => [d.id, d]));
   map.set(incoming.id, { ...(map.get(incoming.id) || {}), ...incoming });
   return Array.from(map.values()).sort(
-    (a, b) => new Date(b.requested_at) - new Date(a.requested_at),
+    (a, b) => new Date(b.updated_at) - new Date(a.updated_at),
   );
 }
 
 /**
- * Returns the user's training jobs and keeps the list live.
+ * Returns the registered datasets visible to the current user (own +
+ * group-shared) and keeps the list live.
  *
- * Primary channel: Supabase Realtime on `public.trainings` with filter
- * `user_id=eq.<uid>`. New rows appear <500ms after insert; progress updates
- * stream in as the Modal worker bumps `current_step` / `loss_history`.
+ * Bootstraps from `/datasets` (REST). Then opens up to two Supabase
+ * Realtime channels on `public.datasets` (filter by owner_user_id and by
+ * workgroup_id when set) — the same pattern as useSupabaseTrainings.
  *
- * When the user is in a workgroup we open a *second* channel filtered on
- * `workgroup_id=eq.<gid>` so siblings' trainings stream in too. Supabase
- * Realtime filters are single-column, so OR is implemented as two channels.
- *
- * Bootstrap: one call to the Railway `/trainings/list` endpoint so we benefit
- * from its Modal-reconciliation layer (wedged workers, stale `running` rows).
- *
- * Fallback: if the realtime channel is not SUBSCRIBED, a 30s interval re-hits
- * the Railway list endpoint. This self-heals after network blips / server
- * disconnects.
+ * Falls back to a 30s poll if neither channel is SUBSCRIBED.
  */
-export default function useSupabaseTrainings() {
+export default function useGroupDatasets() {
   const session = useSelector((s) => s.auth.session);
   const workgroupId = useSelector((s) => s.auth.workgroupId);
   const accessToken = session?.access_token;
   const userId = session?.user?.id;
 
-  const [jobs, setJobs] = useState([]);
+  const [datasets, setDatasets] = useState([]);
   const [loading, setLoading] = useState(false);
-  const [isUserRealtime, setIsUserRealtime] = useState(false);
+  const [isOwnRealtime, setIsOwnRealtime] = useState(false);
   const [isGroupRealtime, setIsGroupRealtime] = useState(false);
-  // We treat the hook as "realtime" when at least one channel is subscribed.
-  const isRealtime = isUserRealtime || (workgroupId ? isGroupRealtime : false);
+  const isRealtime = isOwnRealtime || (workgroupId ? isGroupRealtime : false);
 
   const isMountedRef = useRef(true);
   const fetchRef = useRef(null);
@@ -65,10 +49,10 @@ export default function useSupabaseTrainings() {
     if (!accessToken) return;
     setLoading(true);
     try {
-      const data = await getTrainingJobs(accessToken);
-      if (isMountedRef.current) setJobs(data);
+      const data = await listDatasets(accessToken);
+      if (isMountedRef.current) setDatasets(data);
     } catch (e) {
-      console.warn('[useSupabaseTrainings] refetch failed:', e?.message || e);
+      console.warn('[useGroupDatasets] refetch failed:', e?.message || e);
     } finally {
       if (isMountedRef.current) setLoading(false);
     }
@@ -78,78 +62,72 @@ export default function useSupabaseTrainings() {
 
   useEffect(() => {
     if (!accessToken) {
-      setJobs([]);
+      setDatasets([]);
       return;
     }
     refetch();
   }, [accessToken, refetch]);
 
-  // Channel A: own trainings (user_id=eq.<uid>)
   useEffect(() => {
     if (!userId) {
-      setIsUserRealtime(false);
+      setIsOwnRealtime(false);
       return undefined;
     }
-
     const channel = supabase
-      .channel(`trainings:user:${userId}`)
+      .channel(`datasets:user:${userId}`)
       .on(
         'postgres_changes',
         {
           event: '*',
           schema: 'public',
-          table: 'trainings',
-          filter: `user_id=eq.${userId}`,
+          table: 'datasets',
+          filter: `owner_user_id=eq.${userId}`,
         },
         (payload) => {
           if (!isMountedRef.current) return;
           const { eventType, new: newRow, old: oldRow } = payload;
           if (eventType === 'DELETE') {
-            setJobs((prev) => prev.filter((j) => j.id !== oldRow?.id));
+            setDatasets((prev) => prev.filter((d) => d.id !== oldRow?.id));
             return;
           }
           if (newRow) {
-            setJobs((prev) => mergeJob(prev, stripSecrets(newRow)));
+            setDatasets((prev) => mergeRow(prev, newRow));
           }
         },
       )
       .subscribe((status) => {
         if (!isMountedRef.current) return;
-        setIsUserRealtime(status === 'SUBSCRIBED');
+        setIsOwnRealtime(status === 'SUBSCRIBED');
       });
-
     return () => {
       supabase.removeChannel(channel);
     };
   }, [userId]);
 
-  // Channel B: group siblings' trainings (workgroup_id=eq.<gid>). Only
-  // active when the user is in a group; tears down on group change/leave.
   useEffect(() => {
     if (!workgroupId) {
       setIsGroupRealtime(false);
       return undefined;
     }
-
     const channel = supabase
-      .channel(`trainings:group:${workgroupId}`)
+      .channel(`datasets:group:${workgroupId}`)
       .on(
         'postgres_changes',
         {
           event: '*',
           schema: 'public',
-          table: 'trainings',
+          table: 'datasets',
           filter: `workgroup_id=eq.${workgroupId}`,
         },
         (payload) => {
           if (!isMountedRef.current) return;
           const { eventType, new: newRow, old: oldRow } = payload;
           if (eventType === 'DELETE') {
-            setJobs((prev) => prev.filter((j) => j.id !== oldRow?.id));
+            setDatasets((prev) => prev.filter((d) => d.id !== oldRow?.id));
             return;
           }
           if (newRow) {
-            setJobs((prev) => mergeJob(prev, stripSecrets(newRow)));
+            setDatasets((prev) => mergeRow(prev, newRow));
           }
         },
       )
@@ -157,7 +135,6 @@ export default function useSupabaseTrainings() {
         if (!isMountedRef.current) return;
         setIsGroupRealtime(status === 'SUBSCRIBED');
       });
-
     return () => {
       supabase.removeChannel(channel);
     };
@@ -169,5 +146,5 @@ export default function useSupabaseTrainings() {
     return () => clearInterval(id);
   }, [isRealtime, accessToken]);
 
-  return { jobs, loading, refetch, isRealtime };
+  return { datasets, loading, refetch, isRealtime };
 }

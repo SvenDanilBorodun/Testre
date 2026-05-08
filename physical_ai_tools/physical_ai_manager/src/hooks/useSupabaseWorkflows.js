@@ -16,17 +16,25 @@ function mergeWorkflow(prev, incoming) {
 /**
  * Returns the user's workflows + classroom templates and keeps the list live.
  * Mirrors useSupabaseTrainings: bootstrap from /workflows REST endpoint,
- * subscribe to public.workflows postgres_changes filtered by owner_user_id,
- * fall back to a 30s polling refetch when realtime isn't subscribed.
+ * subscribe to public.workflows postgres_changes filtered by owner_user_id.
+ *
+ * When the user is in a workgroup, also subscribes to a second channel on
+ * `workgroup_id=eq.<gid>` so peers' shared workflows stream in. Supabase
+ * Realtime filters are single-column, so OR is implemented as two channels.
+ *
+ * Falls back to a 30s polling refetch when no realtime channel is subscribed.
  */
 export default function useSupabaseWorkflows() {
   const session = useSelector((s) => s.auth.session);
+  const workgroupId = useSelector((s) => s.auth.workgroupId);
   const accessToken = session?.access_token;
   const userId = session?.user?.id;
 
   const [workflows, setWorkflows] = useState([]);
   const [loading, setLoading] = useState(false);
-  const [isRealtime, setIsRealtime] = useState(false);
+  const [isUserRealtime, setIsUserRealtime] = useState(false);
+  const [isGroupRealtime, setIsGroupRealtime] = useState(false);
+  const isRealtime = isUserRealtime || (workgroupId ? isGroupRealtime : false);
 
   const isMountedRef = useRef(true);
   const fetchRef = useRef(null);
@@ -71,14 +79,15 @@ export default function useSupabaseWorkflows() {
     refetch();
   }, [accessToken, refetch]);
 
+  // Channel A: own workflows.
   useEffect(() => {
     if (!userId) {
-      setIsRealtime(false);
+      setIsUserRealtime(false);
       return undefined;
     }
 
     const channel = supabase
-      .channel(`workflows:${userId}`)
+      .channel(`workflows:user:${userId}`)
       .on(
         'postgres_changes',
         {
@@ -101,13 +110,51 @@ export default function useSupabaseWorkflows() {
       )
       .subscribe((status) => {
         if (!isMountedRef.current) return;
-        setIsRealtime(status === 'SUBSCRIBED');
+        setIsUserRealtime(status === 'SUBSCRIBED');
       });
 
     return () => {
       supabase.removeChannel(channel);
     };
   }, [userId]);
+
+  // Channel B: group-shared workflows.
+  useEffect(() => {
+    if (!workgroupId) {
+      setIsGroupRealtime(false);
+      return undefined;
+    }
+    const channel = supabase
+      .channel(`workflows:group:${workgroupId}`)
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'workflows',
+          filter: `workgroup_id=eq.${workgroupId}`,
+        },
+        (payload) => {
+          if (!isMountedRef.current) return;
+          const { eventType, new: newRow, old: oldRow } = payload;
+          if (eventType === 'DELETE') {
+            setWorkflows((prev) => prev.filter((w) => w.id !== oldRow?.id));
+            return;
+          }
+          if (newRow) {
+            setWorkflows((prev) => mergeWorkflow(prev, newRow));
+          }
+        },
+      )
+      .subscribe((status) => {
+        if (!isMountedRef.current) return;
+        setIsGroupRealtime(status === 'SUBSCRIBED');
+      });
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [workgroupId]);
 
   useEffect(() => {
     if (isRealtime || !accessToken) return undefined;

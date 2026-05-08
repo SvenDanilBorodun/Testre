@@ -44,11 +44,19 @@ async def get_current_user(authorization: str | None = Header(default=None, alia
 
 
 def get_user_profile(user_id: str) -> dict:
-    """Return the public.users row for a given auth user id."""
+    """Return the public.users row for a given auth user id.
+
+    Includes workgroup_id so callers can route credit/visibility decisions
+    without a second roundtrip. Migration 011 adds the column; pre-011
+    deployments will simply receive NULL.
+    """
     supabase = get_supabase()
     result = (
         supabase.table("users")
-        .select("id, email, role, username, full_name, classroom_id, training_credits, created_by")
+        .select(
+            "id, email, role, username, full_name, classroom_id, "
+            "workgroup_id, training_credits, created_by"
+        )
         .eq("id", user_id)
         .single()
         .execute()

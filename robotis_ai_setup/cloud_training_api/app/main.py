@@ -12,12 +12,14 @@ from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.routes.admin import router as admin_router
+from app.routes.datasets import router as datasets_router
 from app.routes.health import router as health_router
 from app.routes.me import router as me_router
 from app.routes.teacher import router as teacher_router
 from app.routes.training import router as training_router
 from app.routes.version import router as version_router
 from app.routes.workflows import router as workflows_router
+from app.routes.workgroups import router as workgroups_router
 
 load_dotenv()
 
@@ -144,8 +146,17 @@ _RATE_LIMIT_RULES: list[tuple[str, str, int, float]] = [
     # "POST /teacher/classrooms" (new classroom) and
     # "POST /teacher/classrooms/{id}/workflow-templates" — both are
     # legitimately bursty when a teacher is setting up a classroom but
-    # 10/min is plenty.
+    # 10/min is plenty. Also covers
+    # "POST /teacher/classrooms/{id}/workgroups" (new workgroup).
     ("POST", "/teacher/classrooms", 10, 60.0),
+    # Workgroup detail-level POSTs: members + credit adjustments. A
+    # teacher legitimately bursts a few member-adds back-to-back when
+    # setting up a group but 20/min is comfortable.
+    ("POST", "/teacher/workgroups", 20, 60.0),
+    # Datasets registry: students POST after every recording upload —
+    # 20/min is more than enough for any classroom while stopping a
+    # broken recording loop from spamming.
+    ("POST", "/datasets", 20, 60.0),
 ]
 
 
@@ -215,5 +226,7 @@ app.include_router(version_router)
 app.include_router(training_router)
 app.include_router(me_router)
 app.include_router(teacher_router)
+app.include_router(workgroups_router)
+app.include_router(datasets_router)
 app.include_router(admin_router)
 app.include_router(workflows_router)

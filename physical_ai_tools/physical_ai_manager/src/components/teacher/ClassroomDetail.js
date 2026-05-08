@@ -1,6 +1,13 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import toast from 'react-hot-toast';
-import { MdAdd, MdDelete, MdEdit, MdEventNote, MdConstruction } from 'react-icons/md';
+import {
+  MdAdd,
+  MdDelete,
+  MdEdit,
+  MdEventNote,
+  MdConstruction,
+  MdGroups,
+} from 'react-icons/md';
 import { useDispatch, useSelector } from 'react-redux';
 import {
   createStudent,
@@ -21,6 +28,7 @@ import CreateStudentModal from './CreateStudentModal';
 import StudentRow from './StudentRow';
 import StudentTrainingHistoryDrawer from './StudentTrainingHistoryDrawer';
 import DailyProgressDrawer from './DailyProgressDrawer';
+import WorkgroupsPanel from './WorkgroupsPanel';
 import WorkflowTemplatesPage from '../../pages/teacher/WorkflowTemplatesPage';
 import { Btn, Card } from '../EbUI';
 
@@ -39,6 +47,8 @@ export default function ClassroomDetail({ classroomId, onClassroomsChanged }) {
   const [showClassProgress, setShowClassProgress] = useState(false);
   const [progressStudent, setProgressStudent] = useState(null);
   const [showWorkflowTemplates, setShowWorkflowTemplates] = useState(false);
+  const [showWorkgroups, setShowWorkgroups] = useState(false);
+  const [groupProgressTarget, setGroupProgressTarget] = useState(null);
 
   const fetchClassroom = useCallback(() => {
     if (!token || !classroomId) return;
@@ -176,6 +186,13 @@ export default function ClassroomDetail({ classroomId, onClassroomsChanged }) {
             </Btn>
             <Btn
               variant="secondary"
+              onClick={() => setShowWorkgroups((v) => !v)}
+              title="Arbeitsgruppen verwalten"
+            >
+              <MdGroups /> {showWorkgroups ? 'Gruppen ausblenden' : 'Arbeitsgruppen'}
+            </Btn>
+            <Btn
+              variant="secondary"
               onClick={() => setShowWorkflowTemplates((v) => !v)}
               title="Roboter-Studio-Vorlagen für diese Klasse veröffentlichen"
             >
@@ -201,6 +218,13 @@ export default function ClassroomDetail({ classroomId, onClassroomsChanged }) {
 
       <div className="flex-1 overflow-y-auto">
         <div className="eb-shell">
+          {showWorkgroups && (
+            <WorkgroupsPanel
+              classroomId={classroomId}
+              classroomStudents={students}
+              onShowGroupProgress={setGroupProgressTarget}
+            />
+          )}
           {showWorkflowTemplates && (
             <Card padded={true} className="mb-4">
               <WorkflowTemplatesPage classroomId={classroomId} />
@@ -266,6 +290,13 @@ export default function ClassroomDetail({ classroomId, onClassroomsChanged }) {
           classroomId={classroomId}
           student={progressStudent}
           onClose={() => setProgressStudent(null)}
+        />
+      )}
+      {groupProgressTarget && (
+        <DailyProgressDrawer
+          classroomId={classroomId}
+          workgroup={groupProgressTarget}
+          onClose={() => setGroupProgressTarget(null)}
         />
       )}
     </div>

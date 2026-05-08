@@ -21,12 +21,16 @@ class MyProfile(BaseModel):
     username: str | None
     full_name: str | None
     classroom_id: str | None
+    workgroup_id: str | None = None
+    workgroup_name: str | None = None
     training_credits: int
     # Only populated for teachers. None for students/admin.
     pool_total: int | None = None
     allocated_total: int | None = None
     pool_available: int | None = None
     student_count: int | None = None
+    group_count: int | None = None
+    group_credits_total: int | None = None
 
 
 @router.get("", response_model=MyProfile)
@@ -37,10 +41,33 @@ async def read_me(profile=Depends(get_current_profile)):
         "username": profile.get("username"),
         "full_name": profile.get("full_name"),
         "classroom_id": profile.get("classroom_id"),
+        "workgroup_id": profile.get("workgroup_id"),
         "training_credits": profile["training_credits"],
     }
+    supabase = get_supabase()
+
+    # Look up the group name for any user that's in one (students
+    # primarily; teachers query groups via the dedicated routes).
+    if profile.get("workgroup_id"):
+        try:
+            g = (
+                supabase.table("workgroups")
+                .select("name")
+                .eq("id", profile["workgroup_id"])
+                .single()
+                .execute()
+            )
+            if g.data:
+                data["workgroup_name"] = g.data.get("name")
+        except Exception as exc:
+            logger.warning(
+                "workgroup lookup failed for user=%s group=%s: %s",
+                profile["id"],
+                profile["workgroup_id"],
+                exc,
+            )
+
     if profile["role"] == "teacher":
-        supabase = get_supabase()
         summary = supabase.rpc(
             "get_teacher_credit_summary", {"p_teacher_id": profile["id"]}
         ).execute()
@@ -53,6 +80,8 @@ async def read_me(profile=Depends(get_current_profile)):
                     "pool_available", profile["training_credits"]
                 ),
                 "student_count": row.get("student_count", 0),
+                "group_count": row.get("group_count", 0),
+                "group_credits_total": row.get("group_credits_total", 0),
             }
         )
     return MyProfile(**data)

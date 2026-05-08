@@ -30,6 +30,8 @@ import {
 import { useRosServiceCaller } from '../hooks/useRosServiceCaller';
 import { setUserList, setDatasetRepoId } from '../features/training/trainingSlice';
 import { setSelectedUser, setSelectedDataset } from '../features/training/trainingSlice';
+import useGroupDatasets from '../hooks/useGroupDatasets';
+import { Pill } from './EbUI';
 
 export default function DatasetSelector() {
   const dispatch = useDispatch();
@@ -38,6 +40,12 @@ export default function DatasetSelector() {
   const selectedUser = useSelector((state) => state.training.selectedUser);
   const selectedDataset = useSelector((state) => state.training.selectedDataset);
   const isTraining = useSelector((state) => state.training.isTraining);
+
+  // Cloud-registered datasets (own + group-shared). Lives alongside the
+  // ROS-backed local browse list — the two never overlap because the ROS
+  // service only sees datasets cached locally on the kit, while the cloud
+  // registry covers everything any group sibling has uploaded to HF Hub.
+  const { datasets: cloudDatasets } = useGroupDatasets();
 
   const { getUserList, getDatasetList } = useRosServiceCaller();
 
@@ -321,6 +329,56 @@ export default function DatasetSelector() {
                   )}`
                 : selectedDataset}
             </span>
+          </div>
+        </div>
+      )}
+
+      {/* Group-shared datasets (cloud registry) */}
+      {cloudDatasets && cloudDatasets.length > 0 && (
+        <div className="mb-4">
+          <div className="flex items-center justify-between mb-2">
+            <h3 className="text-sm font-semibold text-gray-700">
+              Eigene & geteilte Datensätze
+            </h3>
+            <span className="text-[11px] text-gray-500 font-mono">
+              {cloudDatasets.length}
+            </span>
+          </div>
+          <div className="border border-gray-300 rounded-md max-h-60 overflow-y-auto bg-gray-50 divide-y divide-gray-200">
+            {cloudDatasets.map((d) => {
+              const [user, ...rest] = (d.hf_repo_id || '/').split('/');
+              const dataset = rest.join('/');
+              const isSelected =
+                selectedUser === user && selectedDataset === dataset;
+              return (
+                <button
+                  key={d.id}
+                  type="button"
+                  onClick={() => !isTraining && handleDatasetSelection(user, dataset)}
+                  className={clsx(
+                    'w-full flex items-center gap-3 px-3 py-2 text-left transition-colors text-sm',
+                    isSelected
+                      ? 'bg-teal-100 text-teal-800'
+                      : 'hover:bg-teal-50'
+                  )}
+                  disabled={isTraining}
+                >
+                  <MdDataset className="text-green-600 shrink-0" />
+                  <div className="min-w-0 flex-1">
+                    <div className="font-medium truncate">{d.name || dataset}</div>
+                    <div className="text-[11px] text-gray-500 font-mono truncate">
+                      {d.hf_repo_id}
+                    </div>
+                  </div>
+                  {d.is_group_shared && !d.is_owned && (
+                    <Pill tone="success">Gruppe</Pill>
+                  )}
+                  {d.is_owned && d.is_group_shared && (
+                    <Pill tone="accent">Eigene · geteilt</Pill>
+                  )}
+                </button>
+              );
+            })}
           </div>
         </div>
       )}

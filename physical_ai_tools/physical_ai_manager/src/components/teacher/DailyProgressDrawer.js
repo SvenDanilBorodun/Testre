@@ -35,13 +35,21 @@ function todayISO() {
 }
 
 /**
- * Drawer used for both scopes:
- *  - student: pass { classroomId, student } to log daily notes for one student
- *  - class:   pass { classroomId } (no student) to log daily notes for the whole class
+ * Drawer used for three scopes:
+ *  - student: pass { classroomId, student } -> daily notes for one student
+ *  - group:   pass { classroomId, workgroup } -> daily notes for one group
+ *  - class:   pass { classroomId } only -> class-wide daily notes
  */
-export default function DailyProgressDrawer({ classroomId, student, onClose }) {
+export default function DailyProgressDrawer({
+  classroomId,
+  student,
+  workgroup,
+  onClose,
+}) {
   const token = useSelector((s) => s.auth.session?.access_token);
-  const isClassScope = !student;
+  const isStudentScope = !!student;
+  const isGroupScope = !!workgroup && !student;
+  const isClassScope = !isStudentScope && !isGroupScope;
 
   const [entries, setEntries] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -62,7 +70,8 @@ export default function DailyProgressDrawer({ classroomId, student, onClose }) {
     try {
       const list = await listProgressEntries(token, classroomId, {
         studentId: student?.id,
-        scope: isClassScope ? 'classroom' : undefined,
+        workgroupId: workgroup?.id,
+        scope: isClassScope ? 'classroom' : isGroupScope ? 'group' : undefined,
       });
       setEntries(list);
     } catch (err) {
@@ -70,7 +79,7 @@ export default function DailyProgressDrawer({ classroomId, student, onClose }) {
     } finally {
       setLoading(false);
     }
-  }, [token, classroomId, student?.id, isClassScope]);
+  }, [token, classroomId, student?.id, workgroup?.id, isClassScope, isGroupScope]);
 
   useEffect(() => {
     fetchEntries();
@@ -89,6 +98,7 @@ export default function DailyProgressDrawer({ classroomId, student, onClose }) {
         note: draftNote.trim(),
         entry_date: draftDate,
         student_id: student?.id || null,
+        workgroup_id: workgroup?.id || null,
       });
       setEntries((prev) =>
         [created, ...prev].sort((a, b) => b.entry_date.localeCompare(a.entry_date))
@@ -142,9 +152,13 @@ export default function DailyProgressDrawer({ classroomId, student, onClose }) {
 
   const headerTitle = isClassScope
     ? 'Klassen-Fortschritt'
+    : isGroupScope
+    ? 'Gruppen-Fortschritt'
     : 'Fortschritt · Täglich';
   const headerSubtitle = isClassScope
     ? 'Notizen für die gesamte Klasse'
+    : isGroupScope
+    ? `Arbeitsgruppe ${workgroup.name}`
     : `${student.full_name || student.username}`;
 
   return (
@@ -170,6 +184,18 @@ export default function DailyProgressDrawer({ classroomId, student, onClose }) {
                 }}
               >
                 ★
+              </span>
+            ) : isGroupScope ? (
+              <span
+                className="inline-flex items-center justify-center rounded-full text-white font-semibold shrink-0"
+                style={{
+                  width: 36,
+                  height: 36,
+                  background: 'var(--success)',
+                }}
+                title="Arbeitsgruppe"
+              >
+                ⌒
               </span>
             ) : (
               <Avatar name={student.full_name || student.username} />
@@ -221,6 +247,8 @@ export default function DailyProgressDrawer({ classroomId, student, onClose }) {
             placeholder={
               isClassScope
                 ? 'Was wurde heute in der Klasse gemacht? Thema, Beobachtungen…'
+                : isGroupScope
+                ? `Wie ist es heute für die Arbeitsgruppe "${workgroup.name}" gelaufen?`
                 : `Wie ist es heute für ${student.full_name || student.username} gelaufen?`
             }
             className="w-full min-h-[90px] p-3 bg-white border border-[var(--line)] rounded-[var(--radius-sm)] text-sm text-[var(--ink)] placeholder:text-[var(--ink-4)] focus:outline-none focus:border-[var(--accent)] focus:ring-2 focus:ring-[color:var(--accent-wash)] transition resize-y"
@@ -265,10 +293,13 @@ export default function DailyProgressDrawer({ classroomId, student, onClose }) {
                       <Pill tone="accent">
                         {formatDateLong(entry.entry_date)}
                       </Pill>
-                      {isClassScope && entry.student_id && (
+                      {entry.workgroup_id && (
+                        <Pill tone="success">Gruppen-Eintrag</Pill>
+                      )}
+                      {entry.student_id && !entry.workgroup_id && !isStudentScope && (
                         <Pill tone="neutral">Schüler-Eintrag</Pill>
                       )}
-                      {!isClassScope && !entry.student_id && (
+                      {!entry.student_id && !entry.workgroup_id && !isClassScope && (
                         <Pill tone="amber">Klassen-Eintrag</Pill>
                       )}
                     </div>

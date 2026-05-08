@@ -53,6 +53,7 @@ import {
 import HFStatus from '../constants/HFStatus';
 import store from '../store/store';
 import rosConnectionManager from '../utils/rosConnectionManager';
+import { registerDataset } from '../services/datasetsApi';
 
 export function useRosTopicSubscription() {
   const taskStatusTopicRef = useRef(null);
@@ -489,6 +490,39 @@ export function useRosTopicSubscription() {
           toast.error(message);
         } else if (status === 'Success') {
           toast.success(message);
+          // Register the freshly-uploaded HF dataset in the cloud
+          // registry so group siblings can discover it. Best-effort:
+          // failure here doesn't break recording — the student can
+          // still pass the repo_id manually.
+          if (operation === 'upload' && repoId && repoId.includes('/')) {
+            try {
+              const accessToken =
+                store.getState().auth.session?.access_token;
+              if (accessToken) {
+                const taskInfo = store.getState().tasks?.taskInfo || {};
+                const repoLeaf = repoId.split('/').slice(1).join('/') || repoId;
+                registerDataset(accessToken, {
+                  hf_repo_id: repoId,
+                  name: taskInfo.taskName || repoLeaf,
+                  description: '',
+                  fps: taskInfo.fps || undefined,
+                  robot_type:
+                    store.getState().tasks?.taskStatus?.robotType ||
+                    undefined,
+                }).catch((err) => {
+                  console.warn(
+                    '[datasets] register failed (non-fatal):',
+                    err?.message || err
+                  );
+                });
+              }
+            } catch (err) {
+              console.warn(
+                '[datasets] register pre-call error (non-fatal):',
+                err
+              );
+            }
+          }
         }
 
         console.log('status:', status);

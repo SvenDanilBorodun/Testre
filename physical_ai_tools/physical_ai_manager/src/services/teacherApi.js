@@ -37,9 +37,14 @@ export const listStudentTrainings = (token, studentId) =>
 
 // ---------- Daily progress entries ----------
 
-export const listProgressEntries = (token, classroomId, { studentId, scope } = {}) => {
+export const listProgressEntries = (
+  token,
+  classroomId,
+  { studentId, workgroupId, scope } = {}
+) => {
   const params = new URLSearchParams();
   if (studentId) params.set('student_id', studentId);
+  if (workgroupId) params.set('workgroup_id', workgroupId);
   if (scope) params.set('scope', scope);
   const qs = params.toString();
   const suffix = qs ? `?${qs}` : '';

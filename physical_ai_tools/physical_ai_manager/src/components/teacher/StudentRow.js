@@ -11,6 +11,7 @@ import {
   MdRemove,
   MdTune,
   MdEventNote,
+  MdGroups,
 } from 'react-icons/md';
 import { useDispatch, useSelector } from 'react-redux';
 import {
@@ -26,7 +27,7 @@ import {
 } from '../../features/teacher/teacherSlice';
 import { updateTeacherPool } from '../../features/auth/authSlice';
 import PasswordResetModal from './PasswordResetModal';
-import { Avatar, Btn, Progress } from '../EbUI';
+import { Avatar, Btn, Pill, Progress } from '../EbUI';
 
 function RenameInline({ student, onSave, onCancel }) {
   const [value, setValue] = useState(student.full_name || '');
@@ -288,7 +289,7 @@ export default function StudentRow({ student, classrooms, onShowHistory, onShowP
           <div className="flex items-center gap-3">
             <Avatar name={student.full_name || student.username} />
             <div className="min-w-0">
-              <div className="flex items-center gap-1.5">
+              <div className="flex items-center gap-1.5 flex-wrap">
                 <div className="font-medium text-[var(--ink)] truncate">
                   {student.full_name || student.username}
                 </div>
@@ -299,6 +300,14 @@ export default function StudentRow({ student, classrooms, onShowHistory, onShowP
                 >
                   <MdEdit size={14} />
                 </button>
+                {student.workgroup_id && student.workgroup_name && (
+                  <Pill tone="success" title="In Arbeitsgruppe">
+                    <span className="inline-flex items-center gap-1">
+                      <MdGroups size={12} />
+                      {student.workgroup_name}
+                    </span>
+                  </Pill>
+                )}
               </div>
               <div className="font-mono text-[11px] text-[var(--ink-3)] truncate">
                 {student.username}
@@ -308,67 +317,78 @@ export default function StudentRow({ student, classrooms, onShowHistory, onShowP
         )}
       </td>
       <td className="py-3 px-3 whitespace-nowrap">
-        <div className="flex items-center gap-2">
-          <div className="w-28 shrink-0">
-            <div className="flex justify-between font-mono text-[11px] text-[var(--ink-3)]">
-              <span className="text-[var(--ink)] font-semibold">{used}</span>
-              <span>/ {total}</span>
+        {student.workgroup_id ? (
+          <div className="text-xs text-[var(--ink-3)] leading-snug max-w-[220px]">
+            <div className="font-mono text-[11px] mb-0.5">
+              In Gruppe <span className="text-[var(--ink)]">{student.workgroup_name || '—'}</span>
             </div>
-            <Progress pct={pct} tone={progressTone} />
-            <div
-              className={clsx(
-                'mt-1 text-[10px] font-mono font-semibold',
-                remaining === 0
-                  ? 'text-[color:var(--danger)]'
-                  : 'text-[color:var(--success)]'
-              )}
-            >
-              {remaining} frei
+            <div className="text-[10px]">
+              Credits werden über die Gruppe geteilt
             </div>
           </div>
-          <div className="flex gap-1 relative">
-            <button
-              onClick={() => handleDelta(-1)}
-              disabled={busy || student.training_credits <= student.trainings_used}
-              className="w-7 h-7 rounded-[var(--radius-sm)] bg-[var(--bg-sunk)] hover:bg-[var(--danger-wash)] hover:text-[color:var(--danger)] text-[var(--ink-2)] disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center transition"
-              title="Credit entziehen"
-            >
-              <MdRemove size={16} />
-            </button>
-            <button
-              onClick={() => handleDelta(1)}
-              disabled={busy}
-              className="w-7 h-7 rounded-[var(--radius-sm)] bg-[var(--accent-wash)] hover:brightness-95 text-[var(--accent-ink)] disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center transition"
-              title="Credit hinzufügen"
-            >
-              <MdAdd size={16} />
-            </button>
-            <button
-              onClick={() => setCustomOpen((v) => !v)}
-              disabled={busy}
-              className={clsx(
-                'w-7 h-7 rounded-[var(--radius-sm)] flex items-center justify-center transition',
-                customOpen
-                  ? 'bg-[var(--accent-wash)] text-[var(--accent-ink)]'
-                  : 'bg-[var(--bg-sunk)] hover:bg-[var(--line)] text-[var(--ink-2)]'
+        ) : (
+          <div className="flex items-center gap-2">
+            <div className="w-28 shrink-0">
+              <div className="flex justify-between font-mono text-[11px] text-[var(--ink-3)]">
+                <span className="text-[var(--ink)] font-semibold">{used}</span>
+                <span>/ {total}</span>
+              </div>
+              <Progress pct={pct} tone={progressTone} />
+              <div
+                className={clsx(
+                  'mt-1 text-[10px] font-mono font-semibold',
+                  remaining === 0
+                    ? 'text-[color:var(--danger)]'
+                    : 'text-[color:var(--success)]'
+                )}
+              >
+                {remaining} frei
+              </div>
+            </div>
+            <div className="flex gap-1 relative">
+              <button
+                onClick={() => handleDelta(-1)}
+                disabled={busy || student.training_credits <= student.trainings_used}
+                className="w-7 h-7 rounded-[var(--radius-sm)] bg-[var(--bg-sunk)] hover:bg-[var(--danger-wash)] hover:text-[color:var(--danger)] text-[var(--ink-2)] disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center transition"
+                title="Credit entziehen"
+              >
+                <MdRemove size={16} />
+              </button>
+              <button
+                onClick={() => handleDelta(1)}
+                disabled={busy}
+                className="w-7 h-7 rounded-[var(--radius-sm)] bg-[var(--accent-wash)] hover:brightness-95 text-[var(--accent-ink)] disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center transition"
+                title="Credit hinzufügen"
+              >
+                <MdAdd size={16} />
+              </button>
+              <button
+                onClick={() => setCustomOpen((v) => !v)}
+                disabled={busy}
+                className={clsx(
+                  'w-7 h-7 rounded-[var(--radius-sm)] flex items-center justify-center transition',
+                  customOpen
+                    ? 'bg-[var(--accent-wash)] text-[var(--accent-ink)]'
+                    : 'bg-[var(--bg-sunk)] hover:bg-[var(--line)] text-[var(--ink-2)]'
+                )}
+                title="Beliebigen Betrag anpassen"
+              >
+                <MdTune size={14} />
+              </button>
+              {customOpen && (
+                <CreditDeltaPopover
+                  student={student}
+                  busy={busy}
+                  onClose={() => setCustomOpen(false)}
+                  onApply={async (delta) => {
+                    await handleDelta(delta);
+                    setCustomOpen(false);
+                  }}
+                />
               )}
-              title="Beliebigen Betrag anpassen"
-            >
-              <MdTune size={14} />
-            </button>
-            {customOpen && (
-              <CreditDeltaPopover
-                student={student}
-                busy={busy}
-                onClose={() => setCustomOpen(false)}
-                onApply={async (delta) => {
-                  await handleDelta(delta);
-                  setCustomOpen(false);
-                }}
-              />
-            )}
+            </div>
           </div>
-        </div>
+        )}
       </td>
       <td className="py-3 px-5 text-right">
         {moving ? (

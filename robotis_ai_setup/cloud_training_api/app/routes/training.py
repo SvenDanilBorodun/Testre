@@ -17,6 +17,7 @@ from app.services.modal_client import (
     start_training_job,
 )
 from app.services.supabase_client import get_supabase
+from app.services.workgroups import resolve_visible_workgroup_ids
 from huggingface_hub import HfApi
 from huggingface_hub.utils import RepositoryNotFoundError
 
@@ -681,31 +682,11 @@ async def cancel_training(req: CancelTrainingRequest, user=Depends(get_current_u
     return {"status": "canceled", "training_id": req.training_id}
 
 
-def _resolve_visible_workgroup_ids(user_id: str) -> list[str]:
-    """Every workgroup the caller is or was a member of (per audit table).
-
-    Falls back to the user's currently-set workgroup_id when the audit
-    table has no rows yet (transition from a pre-011 state).
-    """
-    supabase = get_supabase()
-    rows = (
-        supabase.table("workgroup_memberships")
-        .select("workgroup_id")
-        .eq("user_id", user_id)
-        .execute()
-    ).data or []
-    if rows:
-        return [r["workgroup_id"] for r in rows if r.get("workgroup_id")]
-    profile = get_user_profile(user_id)
-    wg = profile.get("workgroup_id")
-    return [wg] if wg else []
-
-
 @router.get("/list", response_model=list[TrainingJob])
 async def list_trainings(user=Depends(get_current_user)):
     supabase = get_supabase()
     user_id = str(user.id)
-    group_ids = _resolve_visible_workgroup_ids(user_id)
+    group_ids = resolve_visible_workgroup_ids(user_id)
 
     if group_ids:
         # PostgREST OR clause covers (own user_id) OR (in any visible group).
@@ -750,7 +731,7 @@ async def get_training(training_id: int, user=Depends(get_current_user)):
     if row["user_id"] != user_id:
         # Allow group siblings (current and former) to read.
         wg = row.get("workgroup_id")
-        if not wg or wg not in _resolve_visible_workgroup_ids(user_id):
+        if not wg or wg not in resolve_visible_workgroup_ids(user_id):
             raise HTTPException(status_code=404, detail="Training not found")
 
     training = await _sync_modal_status(row)

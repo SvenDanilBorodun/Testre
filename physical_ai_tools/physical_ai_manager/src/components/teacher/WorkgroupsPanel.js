@@ -15,6 +15,7 @@ import {
   createWorkgroup,
   deleteWorkgroup,
   getWorkgroup,
+  listWorkgroupTrainings,
   listWorkgroups,
   renameWorkgroup,
 } from '../../services/workgroupsApi';
@@ -54,6 +55,11 @@ export default function WorkgroupsPanel({
   const [showCredits, setShowCredits] = useState(false);
   const [renaming, setRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState('');
+  // Right-rail tab selector. "Übersicht" is the existing members + stats
+  // view; "Trainings" polls /teacher/workgroups/{id}/trainings every 30s.
+  const [detailTab, setDetailTab] = useState('overview');
+  const [trainings, setTrainings] = useState([]);
+  const [trainingsLoading, setTrainingsLoading] = useState(false);
 
   const refreshTeacherPool = useCallback(async () => {
     try {
@@ -128,6 +134,39 @@ export default function WorkgroupsPanel({
   useEffect(() => {
     fetchDetail();
   }, [fetchDetail]);
+
+  // Reset to overview when the user switches groups so a stale Trainings
+  // tab from group A doesn't render against group B for one frame.
+  useEffect(() => {
+    setDetailTab('overview');
+    setTrainings([]);
+  }, [selectedId]);
+
+  // Poll trainings while the Trainings tab is active. 30s is gentle on
+  // Railway (one teacher × N groups × 2 calls/min) and matches the
+  // /trainings/list refresh cadence on the student side.
+  useEffect(() => {
+    if (!token || !selectedId || detailTab !== 'trainings') return undefined;
+    let cancelled = false;
+    const load = async () => {
+      setTrainingsLoading(true);
+      try {
+        const list = await listWorkgroupTrainings(token, selectedId);
+        if (!cancelled) setTrainings(list);
+      } catch (err) {
+        if (!cancelled)
+          toast.error(err.message || 'Trainings konnten nicht geladen werden');
+      } finally {
+        if (!cancelled) setTrainingsLoading(false);
+      }
+    };
+    load();
+    const id = setInterval(load, 30000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [token, selectedId, detailTab]);
 
   const handleCreate = async (name) => {
     const created = await createWorkgroup(token, classroomId, name);
@@ -355,54 +394,80 @@ export default function WorkgroupsPanel({
                 </div>
               </div>
 
-              <div className="grid grid-cols-3 gap-3 text-center">
-                <div className="bg-[var(--bg-sunk)] rounded-[var(--radius-sm)] py-3">
-                  <div className="text-[10px] uppercase font-mono tracking-wider text-[var(--ink-3)] mb-1">
-                    Mitglieder
-                  </div>
-                  <div className="text-2xl font-semibold text-[var(--ink)]">
-                    {detail.member_count}
-                  </div>
-                </div>
-                <div className="bg-[var(--bg-sunk)] rounded-[var(--radius-sm)] py-3">
-                  <div className="text-[10px] uppercase font-mono tracking-wider text-[var(--ink-3)] mb-1">
-                    Geteilte Credits
-                  </div>
-                  <div className="text-2xl font-semibold text-[var(--ink)]">
-                    {detail.shared_credits}
-                  </div>
-                </div>
-                <div className="bg-[var(--accent-wash)] rounded-[var(--radius-sm)] py-3">
-                  <div className="text-[10px] uppercase font-mono tracking-wider text-[var(--accent-ink)] mb-1">
-                    Frei
-                  </div>
-                  <div className="text-2xl font-semibold text-[var(--accent-ink)]">
-                    {detail.remaining}
-                  </div>
-                </div>
+              <div className="flex items-center gap-1 border-b border-[var(--line)] -mb-1">
+                <TabButton
+                  active={detailTab === 'overview'}
+                  onClick={() => setDetailTab('overview')}
+                >
+                  Übersicht
+                </TabButton>
+                <TabButton
+                  active={detailTab === 'trainings'}
+                  onClick={() => setDetailTab('trainings')}
+                >
+                  Trainings
+                </TabButton>
               </div>
 
-              <div>
-                <div className="text-[11px] font-semibold uppercase tracking-wider text-[var(--ink-3)] mb-2">
-                  Mitglieder
-                </div>
-                {(detail.members || []).length === 0 ? (
-                  <p className="text-sm text-[var(--ink-3)]">
-                    Noch keine Mitglieder. Verwende "Mitglieder" oben rechts.
-                  </p>
-                ) : (
-                  <ul className="flex flex-wrap gap-1.5">
-                    {detail.members.map((m) => (
-                      <li
-                        key={m.id}
-                        className="px-2.5 py-1 rounded-[var(--radius-sm)] bg-white border border-[var(--line)] text-xs text-[var(--ink)]"
-                      >
-                        {m.full_name || m.username}
-                      </li>
-                    ))}
-                  </ul>
-                )}
-              </div>
+              {detailTab === 'overview' && (
+                <>
+                  <div className="grid grid-cols-3 gap-3 text-center">
+                    <div className="bg-[var(--bg-sunk)] rounded-[var(--radius-sm)] py-3">
+                      <div className="text-[10px] uppercase font-mono tracking-wider text-[var(--ink-3)] mb-1">
+                        Mitglieder
+                      </div>
+                      <div className="text-2xl font-semibold text-[var(--ink)]">
+                        {detail.member_count}
+                      </div>
+                    </div>
+                    <div className="bg-[var(--bg-sunk)] rounded-[var(--radius-sm)] py-3">
+                      <div className="text-[10px] uppercase font-mono tracking-wider text-[var(--ink-3)] mb-1">
+                        Geteilte Credits
+                      </div>
+                      <div className="text-2xl font-semibold text-[var(--ink)]">
+                        {detail.shared_credits}
+                      </div>
+                    </div>
+                    <div className="bg-[var(--accent-wash)] rounded-[var(--radius-sm)] py-3">
+                      <div className="text-[10px] uppercase font-mono tracking-wider text-[var(--accent-ink)] mb-1">
+                        Frei
+                      </div>
+                      <div className="text-2xl font-semibold text-[var(--accent-ink)]">
+                        {detail.remaining}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div>
+                    <div className="text-[11px] font-semibold uppercase tracking-wider text-[var(--ink-3)] mb-2">
+                      Mitglieder
+                    </div>
+                    {(detail.members || []).length === 0 ? (
+                      <p className="text-sm text-[var(--ink-3)]">
+                        Noch keine Mitglieder. Verwende "Mitglieder" oben rechts.
+                      </p>
+                    ) : (
+                      <ul className="flex flex-wrap gap-1.5">
+                        {detail.members.map((m) => (
+                          <li
+                            key={m.id}
+                            className="px-2.5 py-1 rounded-[var(--radius-sm)] bg-white border border-[var(--line)] text-xs text-[var(--ink)]"
+                          >
+                            {m.full_name || m.username}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                </>
+              )}
+
+              {detailTab === 'trainings' && (
+                <TrainingsList
+                  trainings={trainings}
+                  loading={trainingsLoading}
+                />
+              )}
             </div>
           )}
         </div>
@@ -433,5 +498,135 @@ export default function WorkgroupsPanel({
         />
       )}
     </Card>
+  );
+}
+
+function TabButton({ active, onClick, children }) {
+  return (
+    <button
+      onClick={onClick}
+      className={`px-3 py-2 text-sm font-medium transition border-b-2 -mb-px ${
+        active
+          ? 'border-[var(--accent)] text-[var(--ink)]'
+          : 'border-transparent text-[var(--ink-3)] hover:text-[var(--ink)]'
+      }`}
+    >
+      {children}
+    </button>
+  );
+}
+
+const STATUS_TONE = {
+  succeeded: 'accent',
+  running: 'accent',
+  queued: 'neutral',
+  failed: 'danger',
+  canceled: 'neutral',
+};
+
+const STATUS_LABEL = {
+  queued: 'Wartet',
+  running: 'Läuft',
+  succeeded: 'Fertig',
+  failed: 'Fehler',
+  canceled: 'Abgebrochen',
+};
+
+function formatProgress(t) {
+  const cur = t.current_step || 0;
+  const tot = t.total_steps || 0;
+  if (!tot) return cur ? `${cur}` : '—';
+  return `${cur} / ${tot}`;
+}
+
+function formatStartedBy(t) {
+  return t.started_by_full_name || t.started_by_username || '—';
+}
+
+function formatRequested(iso) {
+  if (!iso) return '—';
+  try {
+    return new Date(iso).toLocaleString('de-DE', {
+      day: '2-digit',
+      month: '2-digit',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+  } catch {
+    return iso;
+  }
+}
+
+function TrainingsList({ trainings, loading }) {
+  if (loading && trainings.length === 0) {
+    return (
+      <p className="text-xs text-[var(--ink-3)] py-3">Trainings werden geladen…</p>
+    );
+  }
+  if (!loading && trainings.length === 0) {
+    return (
+      <p className="text-sm text-[var(--ink-3)] py-3 leading-snug">
+        Diese Gruppe hat noch keine Trainings gestartet.
+      </p>
+    );
+  }
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full text-sm">
+        <thead>
+          <tr className="text-left text-[10px] uppercase font-mono tracking-wider text-[var(--ink-3)] border-b border-[var(--line)]">
+            <th className="py-2 pr-3">Status</th>
+            <th className="py-2 pr-3">Modell</th>
+            <th className="py-2 pr-3">Datensatz</th>
+            <th className="py-2 pr-3">Gestartet von</th>
+            <th className="py-2 pr-3">Gestartet am</th>
+            <th className="py-2 pr-3">Fortschritt</th>
+          </tr>
+        </thead>
+        <tbody>
+          {trainings.map((t) => (
+            <tr
+              key={t.id}
+              className="border-b border-[var(--line)] last:border-b-0"
+            >
+              <td className="py-2 pr-3">
+                <Pill tone={STATUS_TONE[t.status] || 'neutral'}>
+                  {STATUS_LABEL[t.status] || t.status}
+                </Pill>
+              </td>
+              <td className="py-2 pr-3 text-[var(--ink)]">
+                {t.model_type || '—'}
+                {t.model_name ? (
+                  <div className="text-[10px] font-mono text-[var(--ink-3)] truncate max-w-[24ch]">
+                    {t.model_name}
+                  </div>
+                ) : null}
+              </td>
+              <td className="py-2 pr-3 text-[var(--ink)] truncate max-w-[24ch]">
+                {t.dataset_name || '—'}
+              </td>
+              <td className="py-2 pr-3 text-[var(--ink)]">
+                {formatStartedBy(t)}
+              </td>
+              <td className="py-2 pr-3 text-[var(--ink-3)] font-mono text-xs">
+                {formatRequested(t.requested_at)}
+              </td>
+              <td className="py-2 pr-3 text-[var(--ink)] font-mono text-xs">
+                {formatProgress(t)}
+                {t.error_message ? (
+                  <div
+                    className="text-[10px] text-[color:var(--danger)] truncate max-w-[28ch]"
+                    title={t.error_message}
+                  >
+                    {t.error_message}
+                  </div>
+                ) : null}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   );
 }

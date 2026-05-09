@@ -9,6 +9,7 @@ from pydantic import BaseModel
 from app.auth import get_current_profile
 from app.services.modal_client import cancel_training_job
 from app.services.supabase_client import get_supabase
+from app.services.workgroups import resolve_visible_workgroup_ids
 
 logger = logging.getLogger(__name__)
 
@@ -91,10 +92,17 @@ async def read_me(profile=Depends(get_current_profile)):
 async def export_my_data(profile=Depends(get_current_profile)):
     """GDPR/DSGVO Art. 15 — download everything we have on this user.
 
-    Returns the user's profile, every training row, and (for teachers)
-    the classrooms + progress entries they've authored. Does NOT include
-    HuggingFace dataset/model contents — those live on HF and the user
-    already has direct access to them under their HF account.
+    Returns the user's profile, every training row, the audit trail of
+    workgroup memberships, every workflow they authored, every dataset
+    they registered, and the progress entries that apply to them. Does
+    NOT include HuggingFace dataset/model contents — those live on HF
+    and the user already has direct access to them under their HF
+    account.
+
+    Workgroup-aware (migration 011): the audit table workgroup_memberships
+    is itself personal data and must be exportable. Group-scoped progress
+    entries are personal data the moment a teacher writes one against a
+    group the student is/was in.
     """
     supabase = get_supabase()
     uid = profile["id"]
@@ -107,6 +115,36 @@ async def export_my_data(profile=Depends(get_current_profile)):
         supabase.table("trainings").select("*").eq("user_id", uid).execute()
     )
     bundle["trainings"] = trainings.data or []
+
+    # Workgroup memberships audit — current + past, per GDPR Art. 15.
+    memberships = (
+        supabase.table("workgroup_memberships")
+        .select("*")
+        .eq("user_id", uid)
+        .execute()
+    )
+    bundle["workgroup_memberships"] = memberships.data or []
+
+    # Workflows the user authored. Stored in our DB even when the
+    # Blockly JSON references upstream blocks; the JSON itself is the
+    # personal-data part (a student's classroom assignment solution).
+    workflows = (
+        supabase.table("workflows")
+        .select("*")
+        .eq("owner_user_id", uid)
+        .execute()
+    )
+    bundle["workflows"] = workflows.data or []
+
+    # Dataset registry rows the user owns. We do NOT pull HF Hub
+    # contents — the user has direct access via their HF account.
+    datasets = (
+        supabase.table("datasets")
+        .select("*")
+        .eq("owner_user_id", uid)
+        .execute()
+    )
+    bundle["datasets"] = datasets.data or []
 
     if profile["role"] == "teacher":
         classrooms = (
@@ -143,9 +181,21 @@ async def export_my_data(profile=Depends(get_current_profile)):
                 .select("*")
                 .eq("classroom_id", profile["classroom_id"])
                 .is_("student_id", "null")
+                .is_("workgroup_id", "null")
                 .execute()
             )
             bundle["classroom_progress_entries"] = class_entries.data or []
+
+        # Group-scoped entries for any group the student is or was in.
+        visible_groups = resolve_visible_workgroup_ids(uid)
+        if visible_groups:
+            group_entries = (
+                supabase.table("progress_entries")
+                .select("*")
+                .in_("workgroup_id", visible_groups)
+                .execute()
+            )
+            bundle["workgroup_progress_entries"] = group_entries.data or []
 
     filename = f"edubotics-export-{uid}.json"
     return JSONResponse(
@@ -222,7 +272,34 @@ async def delete_my_account(profile=Depends(get_current_profile)):
                 row["id"], exc,
             )
 
-    # 2. Record the deletion request. Migration 007 guarantees the
+    # 2. Disengage from any current workgroup so the slot frees during
+    #    the up-to-30-day admin processing window — otherwise a phantom
+    #    member would block the teacher from filling the slot. The audit
+    #    row is left in place with left_at = NOW() so siblings keep
+    #    historical visibility on this user's group-shared content (the
+    #    RLS policies query workgroup_memberships, not users.workgroup_id).
+    if profile.get("workgroup_id"):
+        wg_id = profile["workgroup_id"]
+        try:
+            supabase.table("users").update({"workgroup_id": None}).eq(
+                "id", uid
+            ).execute()
+            supabase.table("workgroup_memberships").update(
+                {"left_at": datetime.now(timezone.utc).isoformat()}
+            ).eq("workgroup_id", wg_id).eq("user_id", uid).is_(
+                "left_at", "null"
+            ).execute()
+            logger.info(
+                "Workgroup disengagement on /me/delete: user=%s group=%s",
+                uid, wg_id,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Workgroup disengagement failed in /me/delete for %s: %s",
+                uid, exc,
+            )
+
+    # 3. Record the deletion request. Migration 007 guarantees the
     #    column exists; a failure here is a real DB / network error and
     #    must be surfaced — silently returning success used to mean an
     #    admin would never see the request.

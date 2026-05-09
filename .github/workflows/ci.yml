@@ -39,6 +39,24 @@ jobs:
           cd robotis_ai_setup
           python -m unittest discover -s tests -v
 
+      - name: Cloud API unit tests (workgroups + dataset sweep)
+        # Tests stub fastapi/supabase/huggingface_hub via sys.modules so
+        # they run without the heavy deps. They cover the workgroup
+        # helper, dataset-sweep parsers, and the audit-table fallback
+        # logic. Integration tests against a real Supabase branch are a
+        # follow-up when test infrastructure is in place — see plan
+        # Part 5 §3 (concurrency check).
+        run: |
+          cd robotis_ai_setup/cloud_training_api
+          # Inject env required by app/main.py's startup validators
+          # (validates these are set, but the test target doesn't import
+          # main.py so this is just defensive consistency).
+          export SUPABASE_URL=http://ci.test
+          export SUPABASE_SERVICE_ROLE_KEY=ci_test
+          export MODAL_TOKEN_ID=ci_test
+          export MODAL_TOKEN_SECRET=ci_test
+          python -m unittest discover -s app/tests -v
+
   shell-lint:
     runs-on: ubuntu-latest
     steps:

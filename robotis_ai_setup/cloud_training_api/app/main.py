@@ -20,6 +20,7 @@ from app.routes.training import router as training_router
 from app.routes.version import router as version_router
 from app.routes.workflows import router as workflows_router
 from app.routes.workgroups import router as workgroups_router
+from app.services.dataset_sweep import sweep_loop as _dataset_sweep_loop
 
 load_dotenv()
 
@@ -230,3 +231,25 @@ app.include_router(workgroups_router)
 app.include_router(datasets_router)
 app.include_router(admin_router)
 app.include_router(workflows_router)
+
+
+# ─── Background tasks ───────────────────────────────────────────────────
+# The dataset reconciliation sweep is the safety net for the rare case
+# where a successful HF upload is followed by a failed POST /datasets
+# from the React app — without it, group siblings would never see the
+# upload. Single-tenant on purpose: Cloud API runs uvicorn --workers 1,
+# so spawning the loop once at startup is correct. Disable by setting
+# DATASET_SWEEP_DISABLED=1 (e.g. for unit tests).
+@app.on_event("startup")
+async def _start_dataset_sweep() -> None:
+    import asyncio as _asyncio  # local import keeps the module-load graph clean
+
+    if os.environ.get("DATASET_SWEEP_DISABLED") == "1":
+        logger.info("dataset_sweep: disabled via env")
+        return
+    if not os.environ.get("HF_TOKEN"):
+        # Sweep is a no-op without HF_TOKEN; don't even start the loop
+        # so the Railway log doesn't show "skipping tick" forever.
+        logger.info("dataset_sweep: HF_TOKEN not set, loop not started")
+        return
+    _asyncio.create_task(_dataset_sweep_loop())

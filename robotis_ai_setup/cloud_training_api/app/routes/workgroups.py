@@ -82,6 +82,22 @@ class WorkgroupCreditsResponse(BaseModel):
     pool_available: int
 
 
+class WorkgroupTrainingSummary(BaseModel):
+    id: int
+    status: str
+    dataset_name: str | None
+    model_name: str | None
+    model_type: str | None
+    current_step: int | None = None
+    total_steps: int | None = None
+    requested_at: str
+    terminated_at: str | None = None
+    error_message: str | None = None
+    user_id: str
+    started_by_username: str | None = None
+    started_by_full_name: str | None = None
+
+
 # ---------- Helpers ----------
 
 
@@ -386,6 +402,75 @@ async def remove_workgroup_member(
             "Failed to mark left_at for %s/%s: %s", workgroup_id, student_id, e
         )
     return {"ok": True}
+
+
+@router.get(
+    "/workgroups/{workgroup_id}/trainings",
+    response_model=list[WorkgroupTrainingSummary],
+)
+async def list_workgroup_trainings(
+    workgroup_id: str, teacher=Depends(get_current_teacher)
+):
+    """All trainings spawned within this workgroup, latest first.
+
+    Returns up to 100 rows. Uses workgroup_id (not user_id) so even
+    trainings spawned by an ex-member are still listed — matches the
+    audit-table visibility students get on their own list view.
+    """
+    _assert_workgroup_owned(teacher["id"], workgroup_id)
+    supabase = get_supabase()
+    rows = (
+        supabase.table("trainings")
+        .select(
+            "id, status, dataset_name, model_name, model_type, "
+            "current_step, total_steps, requested_at, terminated_at, "
+            "error_message, user_id"
+        )
+        .eq("workgroup_id", workgroup_id)
+        .order("requested_at", desc=True)
+        .limit(100)
+        .execute()
+    ).data or []
+
+    # Single users-table lookup for "Started by" attribution rather
+    # than N+1 round-trips.
+    uids = list({r["user_id"] for r in rows if r.get("user_id")})
+    name_lookup: dict[str, dict] = {}
+    if uids:
+        try:
+            users = (
+                supabase.table("users")
+                .select("id, username, full_name")
+                .in_("id", uids)
+                .execute()
+            ).data or []
+            name_lookup = {u["id"]: u for u in users}
+        except Exception as exc:
+            logger.warning(
+                "list_workgroup_trainings: user lookup failed: %s", exc
+            )
+
+    out: list[WorkgroupTrainingSummary] = []
+    for r in rows:
+        u = name_lookup.get(r.get("user_id") or "", {})
+        out.append(
+            WorkgroupTrainingSummary(
+                id=r["id"],
+                status=r["status"],
+                dataset_name=r.get("dataset_name"),
+                model_name=r.get("model_name"),
+                model_type=r.get("model_type"),
+                current_step=r.get("current_step"),
+                total_steps=r.get("total_steps"),
+                requested_at=r["requested_at"],
+                terminated_at=r.get("terminated_at"),
+                error_message=r.get("error_message"),
+                user_id=r["user_id"],
+                started_by_username=u.get("username"),
+                started_by_full_name=u.get("full_name"),
+            )
+        )
+    return out
 
 
 @router.post(

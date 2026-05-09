@@ -36,3 +36,9 @@ export const adjustWorkgroupCredits = (token, workgroupId, delta) =>
   apiRequest(`/teacher/workgroups/${workgroupId}/credits`, 'POST', token, {
     delta,
   });
+
+// Last 100 trainings spawned by any (current or former) member of the
+// group, latest first. Includes started_by_* attribution so the panel
+// can show "Gestartet von <name>".
+export const listWorkgroupTrainings = (token, workgroupId) =>
+  apiRequest(`/teacher/workgroups/${workgroupId}/trainings`, 'GET', token);

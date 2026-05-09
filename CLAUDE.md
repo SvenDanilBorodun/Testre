@@ -101,7 +101,7 @@ Testre/
 ├── robotis_ai_setup/                      ← OUR custom code (everything we wrote)
 │   ├── cloud_training_api/                ← FastAPI on Railway (training jobs + teacher/admin/me/workflows API)
 │   │   ├── Dockerfile  requirements.txt  .env.example
-│   │   └── app/{main.py, auth.py, services/, routes/, validators/}
+│   │   └── app/{main.py, auth.py, services/, routes/, validators/, tests/}
 │   ├── modal_training/                    ← Modal app + handler for cloud GPU training
 │   │   ├── modal_app.py                   ← Image build, function `train`, secrets, GPU=L4, timeout=7h
 │   │   └── training_handler.py            ← run_training() flow with German preflight + RPC + HF upload
@@ -109,7 +109,7 @@ Testre/
 │   │   ├── docker-compose.yml  docker-compose.gpu.yml  .env.template  build-images.sh  bump-upstream-digests.sh  BASE_IMAGE_PINNING.md
 │   │   ├── physical_ai_server/{Dockerfile, overlays/, patches/}
 │   │   └── open_manipulator/{Dockerfile, entrypoint_omx.sh, identify_arm.py, overlays/}
-│   ├── supabase/                          ← migration.sql + 002-010 + rollback/
+│   ├── supabase/                          ← migration.sql + 002-012 + rollback/
 │   ├── gui/                               ← Windows tkinter GUI (PyInstaller .exe)
 │   │   ├── main.py  build.spec  requirements.txt
 │   │   └── app/{constants.py, gui_app.py, config_generator.py, device_manager.py, docker_manager.py,
@@ -537,8 +537,8 @@ Returns `JSONResponse(429, {"detail": "Too many requests — please wait a momen
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/me` | profile + (for teachers) `get_teacher_credit_summary` |
-| GET | `/me/export` | GDPR Art. 15 — JSON bundle (profile, trainings, classrooms, progress_entries) |
-| POST | `/me/delete` | GDPR Art. 17 — refuse for admins (400), cancel active trainings, set `users.deletion_requested_at=now()` |
+| GET | `/me/export` | GDPR Art. 15 — JSON bundle (profile, trainings, `workgroup_memberships` audit, `workflows`, `datasets`, classrooms (teachers), `progress_entries` + `classroom_progress_entries` (students) + `workgroup_progress_entries` for groups the student is/was in) |
+| POST | `/me/delete` | GDPR Art. 17 — refuse for admins (400), cancel active trainings, **disengage from current workgroup** (sets `users.workgroup_id=NULL` + `workgroup_memberships.left_at=NOW()` so the slot frees during the 30-day admin window while audit visibility persists), set `users.deletion_requested_at=now()` |
 
 **`/trainings`** routes (require any auth):
 | Method | Path | Purpose |
@@ -566,6 +566,7 @@ Returns `JSONResponse(429, {"detail": "Too many requests — please wait a momen
 | POST | `/teacher/workgroups/{id}/members` | add a student to the group (asserts classroom match + capacity ≤10; bumps `workgroup_memberships`) |
 | DELETE | `/teacher/workgroups/{id}/members/{studentId}` | remove a member (clears `users.workgroup_id`, sets `workgroup_memberships.left_at`) |
 | POST | `/teacher/workgroups/{id}/credits` | RPC `adjust_workgroup_credits` (P0022 → 403, P0012-P0014 → 409) |
+| GET | `/teacher/workgroups/{id}/trainings` | last 100 trainings spawned in this group (from any current or former member); includes `started_by_username` / `started_by_full_name` attribution |
 | GET/POST | `/teacher/classrooms/{id}/progress-entries` | list (filter by `student_id`, `workgroup_id`, or `scope=classroom\|student\|group`) / create (mutual-exclusion CHECK enforced) |
 | PATCH/DELETE | `/teacher/progress-entries/{id}` | update / delete |
 
@@ -718,7 +719,13 @@ Returns `JSONResponse(429, {"detail": "Too many requests — please wait a momen
 - Realtime publication adds `public.workgroups` and `public.datasets` (`trainings` and `workflows` were already there).
 - Lifecycle (per spec): trainings/datasets/workflows stay visible to former group members via the audit table; deleting a group is refused while members exist; on group delete, allocated `shared_credits` returns to the teacher pool naturally (the summary RPC sums shared_credits and the row is gone).
 
+### 9.12 012_dataset_sweep.sql — adds `datasets.discovered_via_sweep BOOLEAN NOT NULL DEFAULT FALSE`. Marks rows registered by the periodic Railway sweep (see §10.5) versus rows registered live by the React app right after upload. Informational only — sweep does not skip rows on subsequent ticks.
+
 All migrations have rollbacks under `supabase/rollback/` (BEGIN/COMMIT-wrapped). 010 rollback restores the 006-version body.
+
+### Dataset reconciliation sweep (services/dataset_sweep.py)
+
+The React app POSTs `/datasets` immediately after a successful HF upload so group siblings can see it within seconds (`physical_ai_manager/src/hooks/useRosTopicSubscription.js:497-525`). When that POST fails (WSL has no internet at upload time, brief Cloud API outage), without the sweep the dataset would be uploaded to HF but never registered — **siblings would never see it**. The sweep is the safety net: every `DATASET_SWEEP_INTERVAL_S` (default 600s) it scans HF for known authors derived from `trainings.dataset_name` / `trainings.model_name` / `datasets.hf_repo_id`, lists each author's HF datasets, and inserts any missing rows with `discovered_via_sweep=TRUE`. Group attribution at sweep time uses the author's *current* `users.workgroup_id` (matches a manual late-registration). The loop is started from `app/main.py:_start_dataset_sweep` only when `HF_TOKEN` is set; disable explicitly via `DATASET_SWEEP_DISABLED=1`. Single-tenant by design: Cloud API runs `uvicorn --workers 1`, so spawning the loop once at startup is correct. If workers are ever raised, switch to a Postgres advisory lock.
 
 ### 9.11 Bootstrap admin (run once)
 ```bash
@@ -999,7 +1006,7 @@ Five sources of truth currently drift:
 ## 15. CI workflow (`.github/workflows/ci.yml`) — what fails the build
 
 6 jobs run on every push/PR to `main`:
-1. **python-tests** — `compileall` of `gui`, `scripts`, `cloud_training_api`, `modal_training`, overlays, patches; `unittest discover -s tests`.
+1. **python-tests** — `compileall` of `gui`, `scripts`, `cloud_training_api`, `modal_training`, overlays, patches; `unittest discover -s tests` (5 GUI/installer tests); plus `unittest discover -s app/tests` from `cloud_training_api/` (workgroup helper, dataset sweep parsers — tests stub fastapi/supabase/huggingface_hub via `sys.modules` so they run without those deps).
 2. **shell-lint** — shellcheck `-S error` on `build-images.sh`, `entrypoint_omx.sh`, `build_rootfs.sh`, `start-dockerd.sh`.
 3. **compose-validate** — `docker compose config` on both base + GPU compose with fake `.env`.
 4. **overlay-guard** — runs `fix_server_inference.py` on a fake `server_inference.py` that lacks the patch target; asserts non-zero exit (catches a regress where the patch silently fails).

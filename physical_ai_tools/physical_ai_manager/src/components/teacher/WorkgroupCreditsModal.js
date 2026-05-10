@@ -42,8 +42,9 @@ export default function WorkgroupCreditsModal({
   };
 
   const parsed = Number(amount);
-  const canApply =
-    Number.isFinite(parsed) && parsed > 0 && parsed <= 1000;
+  const canAdd = Number.isFinite(parsed) && parsed > 0 && parsed <= 1000;
+  const canSubtract = Number.isFinite(parsed) && parsed > 0 && parsed <= remaining;
+  const canApply = canAdd; // legacy alias for the input keydown
 
   return (
     <Modal
@@ -90,9 +91,15 @@ export default function WorkgroupCreditsModal({
           <div className="flex items-center gap-2">
             <button
               onClick={() => submit(-Math.abs(parsed))}
-              disabled={busy || !canApply || parsed > used + remaining}
+              disabled={busy || !canSubtract}
               className="w-9 h-10 rounded-[var(--radius-sm)] bg-[var(--bg-sunk)] hover:bg-[var(--danger-wash)] hover:text-[color:var(--danger)] text-[var(--ink-2)] disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center transition"
-              title="Abziehen"
+              title={
+                canSubtract
+                  ? 'Abziehen'
+                  : remaining === 0
+                  ? 'Keine freien Credits zum Abziehen'
+                  : `Max. ${remaining} abziehbar`
+              }
             >
               <MdRemove size={18} />
             </button>
@@ -104,11 +111,17 @@ export default function WorkgroupCreditsModal({
               placeholder="Betrag"
               value={amount}
               onChange={(e) => setAmount(e.target.value.replace(/[^0-9]/g, ''))}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && canApply && !busy) {
+                  e.preventDefault();
+                  submit(Math.abs(parsed));
+                }
+              }}
               className={inputClass}
             />
             <button
               onClick={() => submit(Math.abs(parsed))}
-              disabled={busy || !canApply}
+              disabled={busy || !canAdd}
               className="w-9 h-10 rounded-[var(--radius-sm)] bg-[var(--accent-wash)] hover:brightness-95 text-[var(--accent-ink)] disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center transition"
               title="Hinzufügen"
             >
@@ -120,15 +133,17 @@ export default function WorkgroupCreditsModal({
               <button
                 key={v}
                 type="button"
-                onClick={() => setAmount(String(v))}
-                className="h-7 flex-1 rounded-[var(--radius-sm)] bg-[var(--bg-sunk)] hover:bg-[var(--line)] text-[11px] font-mono text-[var(--ink-2)] transition"
+                disabled={busy}
+                onClick={() => submit(v)}
+                className="h-7 flex-1 rounded-[var(--radius-sm)] bg-[var(--bg-sunk)] hover:bg-[var(--accent-wash)] hover:text-[var(--accent-ink)] text-[11px] font-mono text-[var(--ink-2)] disabled:opacity-40 transition"
+                title={`+${v} Credits sofort hinzufügen`}
               >
-                {v}
+                +{v}
               </button>
             ))}
           </div>
           <p className="text-[11px] text-[var(--ink-3)] mt-2 leading-snug">
-            Beim Reduzieren darf der neue Wert nicht unter die bereits verbrauchten Credits fallen.
+            <span className="font-mono">↩ Enter</span> fügt Credits hinzu · Schnellbuttons fügen sofort hinzu · Beim Reduzieren darf der neue Wert nicht unter die bereits verbrauchten Credits fallen.
           </p>
         </label>
       </div>

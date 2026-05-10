@@ -77,9 +77,10 @@ function CreditDeltaPopover({ student, onApply, onClose, busy }) {
 
   const used = student.trainings_used || 0;
   const total = student.training_credits || 0;
+  const remaining = Math.max(total - used, 0);
   const parsed = Number(amount);
-  const canGive =
-    Number.isFinite(parsed) && parsed !== 0 && parsed >= -total + used && parsed <= 1000;
+  const canAdd = Number.isFinite(parsed) && parsed > 0 && parsed <= 1000;
+  const canSubtract = Number.isFinite(parsed) && parsed > 0 && parsed <= remaining;
 
   const submit = (delta) => {
     if (!Number.isFinite(delta) || delta === 0) return;
@@ -96,10 +97,16 @@ function CreditDeltaPopover({ student, onApply, onClose, busy }) {
       </div>
       <div className="flex items-center gap-1.5">
         <button
-          onClick={() => amount && submit(-Math.abs(parsed))}
-          disabled={busy || !canGive}
+          onClick={() => submit(-Math.abs(parsed))}
+          disabled={busy || !canSubtract}
           className="w-8 h-9 rounded-[var(--radius-sm)] bg-[var(--bg-sunk)] hover:bg-[var(--danger-wash)] hover:text-[color:var(--danger)] text-[var(--ink-2)] disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center transition"
-          title="Abziehen"
+          title={
+            canSubtract
+              ? 'Abziehen'
+              : remaining === 0
+              ? 'Keine freien Credits zum Abziehen'
+              : `Max. ${remaining} abziehbar`
+          }
         >
           <MdRemove size={16} />
         </button>
@@ -113,7 +120,7 @@ function CreditDeltaPopover({ student, onApply, onClose, busy }) {
           value={amount}
           onChange={(e) => setAmount(e.target.value.replace(/[^0-9]/g, ''))}
           onKeyDown={(e) => {
-            if (e.key === 'Enter') {
+            if (e.key === 'Enter' && canAdd && !busy) {
               e.preventDefault();
               submit(Math.abs(parsed));
             }
@@ -121,8 +128,8 @@ function CreditDeltaPopover({ student, onApply, onClose, busy }) {
           className="flex-1 h-9 px-2 bg-white border border-[var(--line)] rounded-[var(--radius-sm)] text-sm font-mono text-[var(--ink)] focus:outline-none focus:border-[var(--accent)] focus:ring-2 focus:ring-[color:var(--accent-wash)] transition"
         />
         <button
-          onClick={() => amount && submit(Math.abs(parsed))}
-          disabled={busy || !canGive}
+          onClick={() => submit(Math.abs(parsed))}
+          disabled={busy || !canAdd}
           className="w-8 h-9 rounded-[var(--radius-sm)] bg-[var(--accent-wash)] hover:brightness-95 text-[var(--accent-ink)] disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center transition"
           title="Hinzufügen"
         >
@@ -134,15 +141,17 @@ function CreditDeltaPopover({ student, onApply, onClose, busy }) {
           <button
             key={v}
             type="button"
-            onClick={() => setAmount(String(v))}
-            className="h-7 flex-1 rounded-[var(--radius-sm)] bg-[var(--bg-sunk)] hover:bg-[var(--line)] text-[11px] font-mono text-[var(--ink-2)] transition"
+            disabled={busy}
+            onClick={() => submit(v)}
+            className="h-7 flex-1 rounded-[var(--radius-sm)] bg-[var(--bg-sunk)] hover:bg-[var(--accent-wash)] hover:text-[var(--accent-ink)] text-[11px] font-mono text-[var(--ink-2)] disabled:opacity-40 transition"
+            title={`+${v} Credits sofort hinzufügen`}
           >
-            {v}
+            +{v}
           </button>
         ))}
       </div>
       <div className="text-[10px] text-[var(--ink-3)] mt-2 leading-snug font-mono">
-        Aktuell <span className="text-[var(--ink)]">{total}</span> · verbraucht {used} · max. ±1000
+        <span className="text-[var(--ink-2)]">↩ Enter</span> = hinzufügen · Aktuell <span className="text-[var(--ink)]">{total}</span> · verbraucht {used} · max. ±1000
       </div>
     </div>
   );

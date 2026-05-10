@@ -150,6 +150,10 @@ def _assert_student_owned(teacher_id: str, student_id: str) -> dict:
 
 
 def _student_usage(student_id: str) -> int:
+    """Single-student active-training count. Used by callers that touch
+    one student at a time (create, patch). For list views, prefer
+    ``_batch_student_usage`` to avoid N+1.
+    """
     supabase = get_supabase()
     result = (
         supabase.table("trainings")
@@ -161,9 +165,43 @@ def _student_usage(student_id: str) -> int:
     return int(result.count or 0)
 
 
-def _student_summary(row: dict, *, group_name_lookup: dict | None = None) -> StudentSummary:
+def _batch_student_usage(student_ids: list[str]) -> dict[str, int]:
+    """One round-trip to count active trainings for many students.
+
+    Replaces N separate ``count="exact"`` queries when rendering a
+    classroom roster — the dashboard's dominant cost.
+    """
+    if not student_ids:
+        return {}
+    supabase = get_supabase()
+    rows = (
+        supabase.table("trainings")
+        .select("user_id")
+        .in_("user_id", student_ids)
+        .not_.in_("status", ["failed", "canceled"])
+        .execute()
+    ).data or []
+    usage: dict[str, int] = {}
+    for r in rows:
+        uid = r.get("user_id")
+        if uid:
+            usage[uid] = usage.get(uid, 0) + 1
+    return usage
+
+
+def _student_summary(
+    row: dict,
+    *,
+    usage: int | None = None,
+    group_name_lookup: dict | None = None,
+) -> StudentSummary:
+    """Build a StudentSummary.
+
+    Pass ``usage`` from a batched lookup when rendering many students;
+    otherwise this function falls back to a per-student count query.
+    """
     credits = int(row.get("training_credits") or 0)
-    used = _student_usage(row["id"])
+    used = usage if usage is not None else _student_usage(row["id"])
     workgroup_id = row.get("workgroup_id")
     workgroup_name = None
     if workgroup_id and group_name_lookup is not None:
@@ -208,25 +246,34 @@ async def list_classrooms(teacher=Depends(get_current_teacher)):
         .order("created_at", desc=False)
         .execute()
     ).data or []
+    if not classrooms:
+        return []
 
-    out: list[ClassroomSummary] = []
-    for c in classrooms:
-        count_res = (
-            supabase.table("users")
-            .select("id", count="exact")
-            .eq("classroom_id", c["id"])
-            .eq("role", "student")
-            .execute()
+    # Single batched roster query → group in Python. Replaces an N+1
+    # `count="exact"` per classroom that dominated dashboard load time.
+    classroom_ids = [c["id"] for c in classrooms]
+    students = (
+        supabase.table("users")
+        .select("classroom_id")
+        .in_("classroom_id", classroom_ids)
+        .eq("role", "student")
+        .execute()
+    ).data or []
+    counts: dict[str, int] = {}
+    for u in students:
+        cid = u.get("classroom_id")
+        if cid:
+            counts[cid] = counts.get(cid, 0) + 1
+
+    return [
+        ClassroomSummary(
+            id=c["id"],
+            name=c["name"],
+            created_at=c["created_at"],
+            student_count=counts.get(c["id"], 0),
         )
-        out.append(
-            ClassroomSummary(
-                id=c["id"],
-                name=c["name"],
-                created_at=c["created_at"],
-                student_count=int(count_res.count or 0),
-            )
-        )
-    return out
+        for c in classrooms
+    ]
 
 
 @router.post("/classrooms", response_model=ClassroomSummary)
@@ -274,11 +321,22 @@ async def get_classroom(classroom_id: str, teacher=Depends(get_current_teacher))
             .execute()
         ).data or []
         group_lookup = {g["id"]: g["name"] for g in groups_raw}
+    # Single roundtrip for active-training counts instead of one count
+    # per student. With 30 students this drops the endpoint from 31+
+    # serial Supabase calls to 3 — the biggest dashboard speedup.
+    usage_lookup = _batch_student_usage([s["id"] for s in students_raw])
     return ClassroomDetail(
         id=c["id"],
         name=c["name"],
         created_at=c["created_at"],
-        students=[_student_summary(s, group_name_lookup=group_lookup) for s in students_raw],
+        students=[
+            _student_summary(
+                s,
+                usage=usage_lookup.get(s["id"], 0),
+                group_name_lookup=group_lookup,
+            )
+            for s in students_raw
+        ],
     )
 
 

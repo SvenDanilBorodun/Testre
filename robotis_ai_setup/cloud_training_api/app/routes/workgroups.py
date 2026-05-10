@@ -151,15 +151,65 @@ def _group_member_count(workgroup_id: str) -> int:
     return int(result.count or 0)
 
 
-def _group_summary(row: dict) -> WorkgroupSummary:
+def _batch_group_usage_and_members(group_ids: list[str]) -> tuple[dict[str, int], dict[str, int]]:
+    """Two batched queries → (usage_map, member_count_map).
+
+    Replaces N pairs of count("exact") queries when listing all groups
+    in a classroom — was the second-biggest dashboard hot path after
+    get_classroom.
+    """
+    if not group_ids:
+        return {}, {}
+    supabase = get_supabase()
+    trainings = (
+        supabase.table("trainings")
+        .select("workgroup_id")
+        .in_("workgroup_id", group_ids)
+        .not_.in_("status", ["failed", "canceled"])
+        .execute()
+    ).data or []
+    usage: dict[str, int] = {}
+    for t in trainings:
+        gid = t.get("workgroup_id")
+        if gid:
+            usage[gid] = usage.get(gid, 0) + 1
+    members = (
+        supabase.table("users")
+        .select("workgroup_id")
+        .in_("workgroup_id", group_ids)
+        .execute()
+    ).data or []
+    member_counts: dict[str, int] = {}
+    for u in members:
+        gid = u.get("workgroup_id")
+        if gid:
+            member_counts[gid] = member_counts.get(gid, 0) + 1
+    return usage, member_counts
+
+
+def _group_summary(
+    row: dict,
+    *,
+    usage: int | None = None,
+    member_count: int | None = None,
+) -> WorkgroupSummary:
+    """Build a WorkgroupSummary.
+
+    Pass ``usage`` and ``member_count`` from a batched lookup when
+    rendering many groups; otherwise this falls back to per-group count
+    queries (for single-group endpoints like get_workgroup).
+    """
     credits = int(row.get("shared_credits") or 0)
-    used = _group_usage(row["id"])
+    used = usage if usage is not None else _group_usage(row["id"])
+    members = (
+        member_count if member_count is not None else _group_member_count(row["id"])
+    )
     return WorkgroupSummary(
         id=row["id"],
         classroom_id=row["classroom_id"],
         name=row["name"],
         shared_credits=credits,
-        member_count=_group_member_count(row["id"]),
+        member_count=members,
         trainings_used=used,
         remaining=max(credits - used, 0),
         created_at=row["created_at"],
@@ -168,7 +218,9 @@ def _group_summary(row: dict) -> WorkgroupSummary:
 
 
 def _group_detail(row: dict) -> WorkgroupDetail:
-    summary = _group_summary(row)
+    """Single-group detail. Pulls members in one query, then derives the
+    summary's member_count from len(members) — one fewer round-trip.
+    """
     supabase = get_supabase()
     members_raw = (
         supabase.table("users")
@@ -177,6 +229,7 @@ def _group_detail(row: dict) -> WorkgroupDetail:
         .order("full_name", desc=False)
         .execute()
     ).data or []
+    summary = _group_summary(row, member_count=len(members_raw))
     return WorkgroupDetail(
         **summary.model_dump(),
         members=[WorkgroupMember(**m) for m in members_raw],
@@ -200,7 +253,15 @@ async def list_workgroups(classroom_id: str, teacher=Depends(get_current_teacher
         .order("created_at", desc=False)
         .execute()
     ).data or []
-    return [_group_summary(r) for r in rows]
+    usage, members = _batch_group_usage_and_members([r["id"] for r in rows])
+    return [
+        _group_summary(
+            r,
+            usage=usage.get(r["id"], 0),
+            member_count=members.get(r["id"], 0),
+        )
+        for r in rows
+    ]
 
 
 @router.post(

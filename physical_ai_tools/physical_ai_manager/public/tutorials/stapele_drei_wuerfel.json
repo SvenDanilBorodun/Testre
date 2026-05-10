@@ -1,0 +1,47 @@
+{
+  "id": "stapele_drei_wuerfel",
+  "title_de": "Stapele drei Würfel",
+  "level": 3,
+  "summary": "Klassische Pick-and-Place: drei Würfel übereinander stapeln.",
+  "steps": [
+    {
+      "title": "Drei Ziele festlegen",
+      "body": "Pinne drei Ziele: A (wo der erste Würfel hingehört), B und C. Verwende dazu drei \"setze … = Pin\"-Blöcke.",
+      "allowed_blocks": ["edubotics_destination_pin"]
+    },
+    {
+      "title": "Würfel aufnehmen und ablegen",
+      "body": "Erkenne mit \"erkenne Farbe rot\" alle Würfel, nimm den ersten auf und lege ihn auf A ab. Wiederhole für B und C.",
+      "allowed_blocks": [
+        "edubotics_destination_pin",
+        "edubotics_detect_color",
+        "edubotics_pickup",
+        "edubotics_drop_at",
+        "edubotics_home",
+        "variables_set",
+        "variables_get",
+        "lists_getIndex",
+        "controls_repeat_ext",
+        "math_number"
+      ]
+    },
+    {
+      "title": "Mit Schleife refaktorisieren",
+      "body": "Packe die Aufnehm-Ablege-Sequenz in eine Funktion \"stapeln\" mit dem Ziel als Parameter — und rufe sie dreimal auf.",
+      "allowed_blocks": [
+        "edubotics_destination_pin",
+        "edubotics_detect_color",
+        "edubotics_pickup",
+        "edubotics_drop_at",
+        "edubotics_home",
+        "variables_set",
+        "variables_get",
+        "lists_getIndex",
+        "controls_repeat_ext",
+        "math_number",
+        "procedures_defnoreturn",
+        "procedures_callnoreturn"
+      ]
+    }
+  ]
+}

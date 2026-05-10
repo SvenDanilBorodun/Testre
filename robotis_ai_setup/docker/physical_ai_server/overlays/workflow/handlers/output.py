@@ -14,11 +14,26 @@ React UI subscribes to. ``edubotics_play_sound`` is a one-shot
 notification beep (the actual sound is played by the React layer when
 it sees a ``[SOUND]`` log token — keeps the audio decisions out of the
 ROS node).
+
+Phase-2 additions:
+- ``edubotics_speak_de`` emits ``[SPEAK:text]`` so the React layer can
+  read the text out via window.speechSynthesis (de-DE voice).
+- ``edubotics_play_tone`` emits ``[TONE:freq:seconds]`` for a
+  parameterized beep.
 """
 
 from __future__ import annotations
 
 from typing import Any
+
+
+# Cap speak text so the React side doesn't queue minutes of audio if a
+# loop fires the speak block thousands of times.
+MAX_SPEAK_CHARS = 240
+TONE_FREQ_MIN = 100
+TONE_FREQ_MAX = 4000
+TONE_SECONDS_MIN = 0.05
+TONE_SECONDS_MAX = 5.0
 
 
 def log(ctx, args: dict[str, Any]) -> None:
@@ -30,3 +45,37 @@ def log(ctx, args: dict[str, Any]) -> None:
 
 def play_sound(ctx, args: dict[str, Any]) -> None:
     ctx.log('[SOUND]')
+
+
+def speak_de(ctx, args: dict[str, Any]) -> None:
+    text = args.get('text')
+    if text is None:
+        text = ''
+    text = str(text)
+    # Strip newlines (the [SPEAK:..] sentinel uses dotall regex on the
+    # React side, but other consumers parse line-by-line). Replace with
+    # spaces so the spoken sentence still flows naturally.
+    text = text.replace('\r', ' ').replace('\n', ' ').strip()
+    if not text:
+        return
+    if len(text) > MAX_SPEAK_CHARS:
+        text = text[:MAX_SPEAK_CHARS]
+    # Forbid both brackets so a malicious or innocent string can't
+    # inject another sentinel (e.g., a student typing "[SOUND]" inside
+    # their speak text would otherwise trigger a beep). Audit §B6.
+    text = text.replace('[', ' ').replace(']', ' ')
+    ctx.log(f'[SPEAK:{text}]')
+
+
+def play_tone(ctx, args: dict[str, Any]) -> None:
+    try:
+        freq = float(args.get('freq', 880))
+    except (TypeError, ValueError):
+        freq = 880.0
+    try:
+        seconds = float(args.get('seconds', 0.25))
+    except (TypeError, ValueError):
+        seconds = 0.25
+    freq = max(TONE_FREQ_MIN, min(TONE_FREQ_MAX, freq))
+    seconds = max(TONE_SECONDS_MIN, min(TONE_SECONDS_MAX, seconds))
+    ctx.log(f'[TONE:{freq:.1f}:{seconds:.3f}]')

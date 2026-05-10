@@ -24,8 +24,20 @@ const initialState = {
   hasHandeyeGripper: false,
   hasHandeyeScene: false,
   hasColorProfile: false,
+  // Phase-2 calibration UX additions
+  // 16-cell coverage map: array of length 16, each cell is the count
+  // of captured frames whose board centroid landed in that cell.
+  coverageMosaic: Array(16).fill(0),
+  // Per-frame quality history: ['good' | 'ok' | 'poor'] in capture order.
+  qualityHistory: [],
+  // ChArUco corner preview (live overlay during capture)
+  charucoPreview: { detected: false, corners: [] },
+  // "Jetzt prüfen" reprojection result, set after /calibration/verify.
+  verifyResult: null,
+  // Calibration history — most recent N saved calibrations per camera.
+  calibHistory: [],
 
-  // Workflow runtime state (used in PR4)
+  // Workflow runtime state
   runState: 'idle',
   currentBlockId: null,
   phase: '',
@@ -37,12 +49,44 @@ const initialState = {
   // Detection.msg switch (audit §1.6) collapsed them.
   detections: [],
   workflowError: null,
+  // Phase-2 debugger state
+  paused: false,
+  breakpoints: [],     // array of block IDs
+  debuggerVisible: false,
+  debuggerWarnings: [], // per-block IK pre-check warnings: [{block_id, message}]
+  // SensorSnapshot.msg payload, refreshed @ 5 Hz
+  sensorSnapshot: {
+    follower_joints: [],
+    gripper_opening: 0,
+    visible_apriltag_ids: [],
+    color_counts: [0, 0, 0, 0],
+    visible_object_classes: [],
+    ts: 0,
+  },
+  // Variable inspector — Map-like {name: {value, ts}}
+  variables: {},
 
   // Editor state
   selectedWorkflowId: null,
   unsavedBlocklyJson: null,
   lastSavedAt: null,
+  // Phase-3 tutorial / skillmap state
+  activeTutorialId: null,
+  activeTutorialStep: 0,
+  // restrictedBlocks: array of block type strings, or null for unrestricted
+  restrictedBlocks: null,
+  // Phase-3 cloud-vision toggle. When true, open-vocab detect blocks
+  // can burst to OWLv2 on Modal for German prompts not in the local
+  // synonym dict. False keeps the workflow offline-only.
+  cloudVisionEnabled: false,
 };
+
+function classifyQuality(score) {
+  if (score === undefined || score === null) return 'ok';
+  if (score >= 3) return 'good';
+  if (score >= 2) return 'ok';
+  return 'poor';
+}
 
 const workshopSlice = createSlice({
   name: 'workshop',
@@ -96,10 +140,39 @@ const workshopSlice = createSlice({
       state.lastViewRms = null;
       state.methodDisagreement = null;
       state.calibError = null;
+      state.coverageMosaic = Array(16).fill(0);
+      state.qualityHistory = [];
+      state.verifyResult = null;
+    },
+    addCoverageCell: (state, action) => {
+      const { cell, quality } = action.payload || {};
+      if (typeof cell === 'number' && cell >= 0 && cell < 16) {
+        state.coverageMosaic[cell] = (state.coverageMosaic[cell] || 0) + 1;
+      }
+      if (quality !== undefined && quality !== null) {
+        state.qualityHistory.push(classifyQuality(quality));
+      }
+    },
+    setCharucoPreview: (state, action) => {
+      const { detected, corners } = action.payload || {};
+      state.charucoPreview = {
+        detected: !!detected,
+        corners: Array.isArray(corners) ? corners : [],
+      };
+    },
+    setVerifyResult: (state, action) => {
+      state.verifyResult = action.payload || null;
+    },
+    setCalibHistory: (state, action) => {
+      state.calibHistory = Array.isArray(action.payload) ? action.payload : [];
     },
 
     setRunState: (state, action) => {
       state.runState = action.payload;
+      if (action.payload === 'running') state.paused = false;
+    },
+    setPaused: (state, action) => {
+      state.paused = !!action.payload;
     },
     setWorkflowStatus: (state, action) => {
       const { current_block_id, phase, progress, error, log_message } = action.payload;
@@ -117,6 +190,40 @@ const workshopSlice = createSlice({
       state.log = [];
     },
 
+    // Phase-2 debugger reducers
+    toggleDebugger: (state) => {
+      state.debuggerVisible = !state.debuggerVisible;
+    },
+    setDebuggerVisible: (state, action) => {
+      state.debuggerVisible = !!action.payload;
+    },
+    setSensorSnapshot: (state, action) => {
+      state.sensorSnapshot = { ...action.payload, ts: Date.now() };
+    },
+    setVariable: (state, action) => {
+      const { name, value } = action.payload;
+      if (typeof name !== 'string' || !name) return;
+      state.variables[name] = { value, ts: Date.now() };
+    },
+    clearVariables: (state) => {
+      state.variables = {};
+    },
+    addBreakpoint: (state, action) => {
+      const id = action.payload;
+      if (!id || state.breakpoints.includes(id)) return;
+      state.breakpoints.push(id);
+    },
+    removeBreakpoint: (state, action) => {
+      const id = action.payload;
+      state.breakpoints = state.breakpoints.filter((b) => b !== id);
+    },
+    clearBreakpoints: (state) => {
+      state.breakpoints = [];
+    },
+    setDebuggerWarnings: (state, action) => {
+      state.debuggerWarnings = Array.isArray(action.payload) ? action.payload : [];
+    },
+
     setSelectedWorkflowId: (state, action) => {
       state.selectedWorkflowId = action.payload;
     },
@@ -126,6 +233,24 @@ const workshopSlice = createSlice({
     markWorkflowSaved: (state) => {
       state.lastSavedAt = Date.now();
       state.unsavedBlocklyJson = null;
+    },
+
+    // Phase-3 tutorial reducers
+    setActiveTutorial: (state, action) => {
+      const { id, step } = action.payload || {};
+      state.activeTutorialId = id || null;
+      state.activeTutorialStep = typeof step === 'number' ? step : 0;
+    },
+    advanceTutorialStep: (state) => {
+      state.activeTutorialStep += 1;
+    },
+    setRestrictedBlocks: (state, action) => {
+      state.restrictedBlocks = Array.isArray(action.payload)
+        ? action.payload
+        : null;
+    },
+    setCloudVisionEnabled: (state, action) => {
+      state.cloudVisionEnabled = !!action.payload;
     },
   },
 });
@@ -139,13 +264,31 @@ export const {
   markStepComplete,
   setCalibrationStatus,
   resetCalibProgress,
+  addCoverageCell,
+  setCharucoPreview,
+  setVerifyResult,
+  setCalibHistory,
   setRunState,
+  setPaused,
   setWorkflowStatus,
   setDetections,
   clearWorkflowLog,
+  toggleDebugger,
+  setDebuggerVisible,
+  setSensorSnapshot,
+  setVariable,
+  clearVariables,
+  addBreakpoint,
+  removeBreakpoint,
+  clearBreakpoints,
+  setDebuggerWarnings,
   setSelectedWorkflowId,
   setUnsavedBlocklyJson,
   markWorkflowSaved,
+  setActiveTutorial,
+  advanceTutorialStep,
+  setRestrictedBlocks,
+  setCloudVisionEnabled,
 } = workshopSlice.actions;
 
 export default workshopSlice.reducer;

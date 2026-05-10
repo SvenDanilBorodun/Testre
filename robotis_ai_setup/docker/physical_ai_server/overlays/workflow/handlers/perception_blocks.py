@@ -168,3 +168,49 @@ def wait_until_marker(ctx, args: dict[str, Any]) -> bool:
         timeout_s,
         f'Marker {marker_id}',
     )
+
+
+# Phase-3: open-vocabulary detection. Routes German prompts through a
+# small synonym dict to YOLOX/D-FINE-N closed-vocab when possible
+# (cheap + offline). Falls back to OWLv2 on Modal via the cloud bridge.
+#
+# The cloud_vision dict on ctx supplies:
+#   {
+#     'enabled': bool,           # default False
+#     'cloud_burst': callable,   # (image_bgr, prompt) -> list[Detection]
+#     'translate': dict[str,str] # German prompt -> COCO class label
+#   }
+# The handler asks ctx.cloud_vision['translate'] first; on miss, if
+# cloud_burst is callable, posts the latest scene frame to it.
+def detect_open_vocab(ctx, args: dict[str, Any]) -> list:
+    _ensure_perception(ctx)
+    prompt = args.get('prompt')
+    if not prompt:
+        raise WorkflowError('Kein Suchbegriff angegeben.')
+    prompt = str(prompt).strip()
+    cv = getattr(ctx, 'cloud_vision', None) or {}
+    translate = (cv.get('translate') or {}) if isinstance(cv, dict) else {}
+    coco = translate.get(prompt.lower())
+    if coco:
+        # Local closed-vocab path. Re-uses the existing object handler
+        # so both the bbox overlay and world_xyz attachment go through
+        # the same code path.
+        return detect_object(ctx, {'class': coco})
+    # Cloud path. If the workflow context wasn't given a cloud_burst
+    # callable, raise a German error so students see why the prompt
+    # didn't match locally.
+    burst = cv.get('cloud_burst') if isinstance(cv, dict) else None
+    if not callable(burst):
+        raise WorkflowError(
+            f'Begriff "{prompt}" ist lokal nicht bekannt und Cloud-Erkennung '
+            'ist deaktiviert. Bitte aktivieren oder einen bekannten Begriff '
+            'verwenden.'
+        )
+    bgr = ctx.get_scene_frame() if ctx.get_scene_frame else None
+    if bgr is None:
+        raise WorkflowError('Kein Szenenbild verfügbar.')
+    try:
+        detections = burst(bgr, prompt)
+    except Exception as e:
+        raise WorkflowError(f'Cloud-Erkennung fehlgeschlagen: {e}')
+    return _attach_world_xyz(ctx, detections or [])

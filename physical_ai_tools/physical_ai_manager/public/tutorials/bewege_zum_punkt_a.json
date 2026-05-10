@@ -1,0 +1,30 @@
+{
+  "id": "bewege_zum_punkt_a",
+  "title_de": "Bewege zum Punkt A",
+  "level": 1,
+  "summary": "Pinne einen Punkt auf dem Tisch und lass den Roboter dorthin fahren.",
+  "steps": [
+    {
+      "title": "Punkt A festlegen",
+      "body": "Ziehe einen \"setze A = Pin\"-Block aus der Kategorie Ziele in den Editor. Klicke ihn an, dann tippe in die Szenen-Kamera, um die Koordinaten festzulegen.",
+      "allowed_blocks": ["edubotics_destination_pin"],
+      "hints": [
+        "Wähle einen Punkt mit etwas Abstand zur Tischkante.",
+        "Wenn die x/y/z-Werte noch \"—\" sind, ist der Punkt noch nicht gepinnt."
+      ]
+    },
+    {
+      "title": "Bewege zu A",
+      "body": "Setze einen \"bewege zu\"-Block ein und verbinde A als Ziel. Drücke Start.",
+      "allowed_blocks": ["edubotics_destination_pin", "edubotics_move_to", "edubotics_home"],
+      "hints": [
+        "Vergiss nicht, am Ende mit \"Heimposition\" zurück zu fahren."
+      ]
+    },
+    {
+      "title": "Mit Heimposition abschließen",
+      "body": "Hänge \"Heimposition\" ans Ende, damit der Arm in Sicherheit zurückkehrt.",
+      "allowed_blocks": ["edubotics_destination_pin", "edubotics_move_to", "edubotics_home"]
+    }
+  ]
+}

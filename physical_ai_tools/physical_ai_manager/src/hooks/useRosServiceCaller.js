@@ -666,6 +666,82 @@ export function useRosServiceCaller() {
     [callService]
   );
 
+  // Phase-2: live ChArUco corner preview (1 Hz polled by the wizard).
+  const calibrationPreview = useCallback(
+    async (camera) =>
+      callService(
+        '/calibration/preview',
+        'physical_ai_interfaces/srv/CalibrationPreview',
+        { camera },
+        3000,
+      ),
+    [callService]
+  );
+
+  // Phase-2: post-solve "Jetzt prüfen" reprojection test.
+  const verifyCalibration = useCallback(
+    async (camera, worldX, worldY) =>
+      callService(
+        '/calibration/verify',
+        'physical_ai_interfaces/srv/VerifyCalibration',
+        { camera, world_x: worldX, world_y: worldY },
+      ),
+    [callService]
+  );
+
+  // Phase-2: calibration history listing (last 5 saved calibrations
+  // per camera).
+  const getCalibrationHistory = useCallback(
+    async (camera) =>
+      callService(
+        '/calibration/history',
+        'physical_ai_interfaces/srv/CalibrationHistory',
+        { camera },
+      ),
+    [callService]
+  );
+
+  // Phase-2: workflow debugger services.
+  const pauseWorkflow = useCallback(
+    async () =>
+      callService(
+        '/workflow/pause',
+        'physical_ai_interfaces/srv/WorkflowPause',
+        {}
+      ),
+    [callService]
+  );
+
+  const stepWorkflow = useCallback(
+    async () =>
+      callService(
+        '/workflow/step',
+        'physical_ai_interfaces/srv/WorkflowStep',
+        {}
+      ),
+    [callService]
+  );
+
+  const continueWorkflow = useCallback(
+    async () =>
+      callService(
+        '/workflow/continue',
+        'physical_ai_interfaces/srv/WorkflowContinue',
+        {}
+      ),
+    [callService]
+  );
+
+  const setWorkflowBreakpoints = useCallback(
+    async (blockIds) =>
+      callService(
+        '/workflow/set_breakpoints',
+        'physical_ai_interfaces/srv/WorkflowSetBreakpoints',
+        { block_ids: Array.isArray(blockIds) ? blockIds : [] },
+      ),
+    [callService]
+  );
+
   return {
     callService,
     sendRecordCommand,
@@ -695,5 +771,12 @@ export function useRosServiceCaller() {
     captureColor,
     cancelCalibration,
     getCalibrationStatus,
+    calibrationPreview,
+    verifyCalibration,
+    getCalibrationHistory,
+    pauseWorkflow,
+    stepWorkflow,
+    continueWorkflow,
+    setWorkflowBreakpoints,
   };
 }

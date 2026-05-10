@@ -112,6 +112,22 @@ export async function cloneWorkflow(accessToken, workflowId) {
   return apiRequest(`/workflows/${workflowId}/clone`, 'POST', accessToken);
 }
 
+export async function listWorkflowVersions(accessToken, workflowId, limit = 20) {
+  return apiRequest(
+    `/workflows/${workflowId}/versions?limit=${encodeURIComponent(limit)}`,
+    'GET',
+    accessToken,
+  );
+}
+
+export async function restoreWorkflowVersion(accessToken, workflowId, versionId) {
+  return apiRequest(
+    `/workflows/${workflowId}/versions/${versionId}/restore`,
+    'POST',
+    accessToken,
+  );
+}
+
 export async function listClassroomTemplates(accessToken, classroomId) {
   return apiRequest(`/teacher/classrooms/${classroomId}/workflow-templates`, 'GET', accessToken);
 }

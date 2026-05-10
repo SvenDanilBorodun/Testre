@@ -1,0 +1,7 @@
+# Replace the active breakpoint set on the running workflow runtime.
+# `block_ids` are Blockly block ids; the runtime checks each block
+# before dispatch. Setting an empty list clears all breakpoints.
+string[] block_ids
+---
+bool success
+string message

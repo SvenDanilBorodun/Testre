@@ -49,6 +49,9 @@ import {
   setRunState,
   setWorkflowStatus,
   setDetections,
+  setSensorSnapshot,
+  setPaused,
+  setVariable,
 } from '../features/workshop/workshopSlice';
 import HFStatus from '../constants/HFStatus';
 import store from '../store/store';
@@ -60,6 +63,7 @@ export function useRosTopicSubscription() {
   const heartbeatTopicRef = useRef(null);
   const trainingStatusTopicRef = useRef(null);
   const workflowStatusTopicRef = useRef(null);
+  const workflowSensorsTopicRef = useRef(null);
   const previousPhaseRef = useRef(null);
   const audioContextRef = useRef(null);
   const hfStatusTopicRef = useRef(null);
@@ -608,6 +612,94 @@ export function useRosTopicSubscription() {
     subscribeHFStatus,
   ]);
 
+  // Intercept inline output tokens emitted by the workflow runtime via
+  // ctx.log. We use a single text channel for all auxiliary outputs:
+  //   "[SOUND]"         — play the default 880 Hz beep
+  //   "[TONE:F:S]"      — play a tone of F Hz for S seconds
+  //   "[SPEAK:text]"    — speak `text` via window.speechSynthesis (de-DE)
+  //   "[VAR:name=json]" — variable inspector update
+  // None of the tokens leak into the user-visible log strip.
+  const interceptToken = useCallback((message) => {
+    if (typeof message !== 'string') return { intercepted: false };
+    if (message === '[SOUND]') {
+      playBeep(880, 250);
+      return { intercepted: true };
+    }
+    let m = /^\[TONE:([\d.]+):([\d.]+)\]$/.exec(message);
+    if (m) {
+      const freq = Math.max(50, Math.min(8000, Number(m[1])));
+      const seconds = Math.max(0.05, Math.min(5, Number(m[2])));
+      playBeep(freq, Math.round(seconds * 1000));
+      return { intercepted: true };
+    }
+    m = /^\[SPEAK:(.*)\]$/s.exec(message);
+    if (m) {
+      try {
+        if (window.speechSynthesis && window.SpeechSynthesisUtterance) {
+          const u = new window.SpeechSynthesisUtterance(m[1]);
+          u.lang = 'de-DE';
+          // Cancel any in-flight utterance so a tight loop of speak
+          // blocks doesn't queue dozens of seconds of audio.
+          window.speechSynthesis.cancel();
+          window.speechSynthesis.speak(u);
+        }
+      } catch (e) {
+        console.warn('SpeechSynthesis failed', e);
+      }
+      return { intercepted: true };
+    }
+    m = /^\[VAR:([^=]+)=(.*)\]$/s.exec(message);
+    if (m) {
+      try {
+        const name = m[1];
+        let value = null;
+        try {
+          value = JSON.parse(m[2]);
+        } catch (e) {
+          value = m[2];
+        }
+        store.dispatch(setVariable({ name, value }));
+      } catch (e) {
+        console.warn('VAR token parse failed', e);
+      }
+      return { intercepted: true };
+    }
+    return { intercepted: false };
+  }, [playBeep]);
+
+  const subscribeToWorkflowSensors = useCallback(async () => {
+    if (!rosbridgeUrl) return;
+    if (workflowSensorsTopicRef.current) {
+      const existingRos = workflowSensorsTopicRef.current.ros;
+      if (existingRos && existingRos.isConnected) return;
+      try {
+        workflowSensorsTopicRef.current.unsubscribe();
+      } catch (_) { /* topic already torn down */ }
+      workflowSensorsTopicRef.current = null;
+    }
+    try {
+      const ros = await rosConnectionManager.getConnection(rosbridgeUrl);
+      if (!ros || !ros.isConnected) return;
+      const topic = new ROSLIB.Topic({
+        ros,
+        name: '/workflow/sensors',
+        messageType: 'physical_ai_interfaces/msg/SensorSnapshot',
+      });
+      topic.subscribe((msg) => {
+        dispatch(setSensorSnapshot({
+          follower_joints: Array.from(msg.follower_joints || []),
+          gripper_opening: Number(msg.gripper_opening || 0),
+          visible_apriltag_ids: Array.from(msg.visible_apriltag_ids || []),
+          color_counts: Array.from(msg.color_counts || [0, 0, 0, 0]),
+          visible_object_classes: Array.from(msg.visible_object_classes || []),
+        }));
+      });
+      workflowSensorsTopicRef.current = topic;
+    } catch (e) {
+      console.error('subscribeToWorkflowSensors failed:', e);
+    }
+  }, [dispatch, rosbridgeUrl]);
+
   const subscribeToWorkflowStatus = useCallback(async () => {
     if (!rosbridgeUrl) return;
     // Re-entrant: if a previous topic is bound to a now-dead ros
@@ -632,26 +724,26 @@ export function useRosTopicSubscription() {
         messageType: 'physical_ai_interfaces/msg/WorkflowStatus',
       });
       topic.subscribe((msg) => {
-        // edubotics_play_sound block: backend emits the literal token
-        // "[SOUND]" via ctx.log so the frontend can play an audible beep
-        // (the server has no speakers). Suppress the token from
-        // log_message so students hear the beep without seeing literal
-        // "[SOUND]" pollution in the log strip.
-        const isSoundToken = msg.log_message === '[SOUND]';
-        if (isSoundToken) {
-          playBeep(880, 250);
-        }
+        // Inline token interception for [SOUND], [TONE:..], [SPEAK:..],
+        // [VAR:..]. None of these should appear in the user-visible
+        // log strip — they are control channels for browser-side audio
+        // and the variable inspector.
+        const tokenResult = interceptToken(msg.log_message);
         dispatch(setWorkflowStatus({
           current_block_id: msg.current_block_id,
           phase: msg.phase,
           progress: msg.progress,
           error: msg.error || '',
-          log_message: isSoundToken ? '' : msg.log_message,
+          log_message: tokenResult.intercepted ? '' : msg.log_message,
         }));
         if (msg.phase === 'finished' || msg.phase === 'stopped' || msg.phase === 'error') {
           dispatch(setRunState(msg.phase));
+          dispatch(setPaused(false));
         } else if (msg.phase === 'running') {
           dispatch(setRunState('running'));
+          dispatch(setPaused(false));
+        } else if (msg.phase === 'paused') {
+          dispatch(setPaused(true));
         }
         // Always dispatch detections — including an empty list — so
         // the editor clears stale bbox overlays once the workflow
@@ -675,7 +767,7 @@ export function useRosTopicSubscription() {
     } catch (e) {
       console.error('subscribeToWorkflowStatus failed:', e);
     }
-  }, [dispatch, rosbridgeUrl, playBeep]);
+  }, [dispatch, rosbridgeUrl, interceptToken]);
 
   return {
     connected,
@@ -686,6 +778,7 @@ export function useRosTopicSubscription() {
     subscribeToTrainingStatus,
     subscribeHFStatus,
     subscribeToWorkflowStatus,
+    subscribeToWorkflowSensors,
     initializeSubscriptions, // Manual initialization function
   };
 }

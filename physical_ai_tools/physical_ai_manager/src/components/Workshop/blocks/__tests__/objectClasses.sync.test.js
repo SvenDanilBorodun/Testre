@@ -16,12 +16,23 @@ import { OBJECT_CLASSES } from '../messages_de';
 //      (build-images.sh copies the file there before `docker build` so
 //      the prebuild Jest hook can run inside the manager image even
 //      though that build context only includes physical_ai_manager).
-const DEV_PATH = path.resolve(
+// Two dev candidates: the React app may be inside `physical_ai_manager/`
+// (a sibling of `physical_ai_server/` under `physical_ai_tools/`), or
+// the build context may stage the file at the Docker-only `/app`
+// location. Try both — fall back to `DOCKER_PATH` only when running
+// inside the manager Docker build.
+const DEV_PATH_5_UPS = path.resolve(
   __dirname,
   '../../../../../physical_ai_server/physical_ai_server/workflow/coco_classes.py'
 );
+const DEV_PATH_6_UPS = path.resolve(
+  __dirname,
+  '../../../../../../physical_ai_server/physical_ai_server/workflow/coco_classes.py'
+);
 const DOCKER_PATH = '/app/_coco_classes.py';
-const COCO_CLASSES_PATH = fs.existsSync(DOCKER_PATH) ? DOCKER_PATH : DEV_PATH;
+const COCO_CLASSES_PATH = fs.existsSync(DOCKER_PATH)
+  ? DOCKER_PATH
+  : (fs.existsSync(DEV_PATH_6_UPS) ? DEV_PATH_6_UPS : DEV_PATH_5_UPS);
 
 function parseCocoClasses(source) {
   // Match the dict literal we emit in coco_classes.py:

@@ -1,0 +1,13 @@
+# Post-solve "Jetzt prüfen" reprojection test. The student places a
+# marker at a known XY world position; the server reprojects that XY
+# back into image pixels using the freshly-solved calibration and
+# reports the residual.
+string camera
+float32 world_x
+float32 world_y
+---
+bool success
+float32 predicted_pixel_x
+float32 predicted_pixel_y
+float32 residual_mm
+string message

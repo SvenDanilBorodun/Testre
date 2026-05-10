@@ -1,0 +1,42 @@
+{
+  "id": "roten_wuerfel_aufnehmen",
+  "title_de": "Hebe einen roten Würfel auf",
+  "level": 2,
+  "summary": "Lass den Roboter einen roten Würfel finden und aufnehmen.",
+  "steps": [
+    {
+      "title": "Roten Würfel finden",
+      "body": "Lege einen roten Würfel auf den Tisch. Setze einen \"erkenne Farbe rot\"-Block ein und verbinde ihn mit einer Variablen (\"setze ziel = …\").",
+      "allowed_blocks": [
+        "edubotics_detect_color",
+        "variables_set",
+        "variables_get"
+      ],
+      "hints": [
+        "Wenn nichts erkannt wird, prüfe das Farbprofil in der Kalibrierung."
+      ]
+    },
+    {
+      "title": "Erstes Element auswählen",
+      "body": "Hole das erste Element der Liste mit \"Element 1 von ziel\". Speichere es in einer neuen Variable \"erstes\".",
+      "allowed_blocks": [
+        "edubotics_detect_color",
+        "variables_set",
+        "variables_get",
+        "lists_getIndex"
+      ]
+    },
+    {
+      "title": "Aufnehmen",
+      "body": "Setze \"aufnehmen erstes\" ein, danach \"Heimposition\". Drücke Start.",
+      "allowed_blocks": [
+        "edubotics_detect_color",
+        "variables_set",
+        "variables_get",
+        "lists_getIndex",
+        "edubotics_pickup",
+        "edubotics_home"
+      ]
+    }
+  ]
+}

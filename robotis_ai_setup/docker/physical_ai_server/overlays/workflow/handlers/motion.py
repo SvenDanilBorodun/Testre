@@ -48,6 +48,29 @@ class WorkflowError(Exception):
 
 def _publish_motion(ctx, q_start: list[float], q_end: list[float], duration_s: float) -> None:
     waypoints = build_segment(q_start, q_end, duration_s)
+    # Serialize motion across the main stack and any concurrent hat
+    # handler. The hat scheduler holds ctx.motion_lock for its whole
+    # body; the main stack acquires it for the publish window so
+    # cooperative perception value-blocks (which don't move the arm)
+    # are not stalled.
+    #
+    # We use threading.RLock so a hat handler holding the lock can
+    # re-enter via its own motion blocks without deadlocking on the
+    # outer body lock. The 10s timeout is the safety upper bound on
+    # waiting for the *other* thread to finish a publish chunk.
+    # Audit §A2 — previously we proceeded without the lock on
+    # timeout, silently re-introducing the race the lock was added to
+    # prevent. Now we raise so the student sees a clear German error
+    # and the runtime stays correct.
+    lock = getattr(ctx, 'motion_lock', None)
+    acquired = False
+    if lock is not None:
+        acquired = lock.acquire(timeout=10.0)
+        if not acquired:
+            raise WorkflowError(
+                'Bewegung blockiert — ein anderer Workflow-Teil hält '
+                'die Sperre zu lange. Bitte Workflow neu starten.'
+            )
     try:
         ok = chunked_publish(
             publisher=ctx.publisher,
@@ -57,8 +80,15 @@ def _publish_motion(ctx, q_start: list[float], q_end: list[float], duration_s: f
         )
     except TrajectoryRejectedError as e:
         # Re-wrap as the German user-facing WorkflowError the editor
-        # already knows how to render.
+        # already knows how to render. The finally below releases the
+        # lock before this exception propagates.
         raise WorkflowError(str(e)) from e
+    finally:
+        if acquired and lock is not None:
+            try:
+                lock.release()
+            except RuntimeError:
+                pass
     if not ok:
         raise WorkflowError('Workflow wurde gestoppt.')
 
@@ -184,10 +214,29 @@ def drop_at(ctx, args: dict[str, Any]) -> None:
     ctx.last_full_joints = retreat_open_q
 
 
+WAIT_SECONDS_MAX = 300.0  # 5 minutes — anything longer is almost certainly a mistake
+
+
 def wait_seconds(ctx, args: dict[str, Any]) -> None:
-    duration = float(args.get('seconds', 1.0))
+    try:
+        duration = float(args.get('seconds', 1.0))
+    except (TypeError, ValueError):
+        duration = 1.0
+    if duration < 0:
+        duration = 0.0
+    if duration > WAIT_SECONDS_MAX:
+        # Hard cap so a student typing 99999 doesn't wedge the
+        # workflow for 27 hours. Audit §G4.
+        ctx.log(
+            f'[WARNUNG] Warte-Dauer auf {WAIT_SECONDS_MAX:.0f} s begrenzt '
+            f'(angefordert: {duration:.0f} s).'
+        )
+        duration = WAIT_SECONDS_MAX
     deadline = time.monotonic() + duration
     while time.monotonic() < deadline:
         if ctx.should_stop():
             raise WorkflowError('Workflow wurde gestoppt.')
-        time.sleep(min(0.05, deadline - time.monotonic()))
+        # max(0.0, ...) guards against negative sleep arg in the
+        # final iteration where deadline can be < monotonic() by a few
+        # microseconds (audit §F10).
+        time.sleep(max(0.0, min(0.05, deadline - time.monotonic())))

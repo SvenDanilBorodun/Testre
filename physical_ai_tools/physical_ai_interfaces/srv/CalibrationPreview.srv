@@ -1,0 +1,11 @@
+# Live ChArUco corner overlay during calibration. The wizard polls
+# this at ~5 Hz to render detected corners on top of the camera feed.
+# `corners_x` and `corners_y` are parallel arrays in pixel coordinates;
+# `detected` is false when no board is currently visible.
+string camera
+---
+bool detected
+float32[] corners_x
+float32[] corners_y
+uint16 board_area_pct
+string message

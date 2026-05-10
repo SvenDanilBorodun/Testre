@@ -338,3 +338,92 @@ async def delete_my_account(profile=Depends(get_current_profile)):
             "a copy before deletion completes."
         ),
     }
+
+
+# ---------- Phase-3: skillmap tutorial progress ----------
+
+
+class TutorialProgress(BaseModel):
+    tutorial_id: str
+    current_step: int = 0
+    completed_at: str | None = None
+    updated_at: str | None = None
+
+
+class TutorialProgressUpdate(BaseModel):
+    current_step: int | None = None
+    completed: bool | None = None
+
+
+# Conservative ID validator. Tutorial IDs in the bundled set are short
+# lowercase strings with underscores; reject anything that could let a
+# crafted ID corrupt a JSON path or SQL value.
+_TUTORIAL_ID_MAX = 64
+
+
+def _valid_tutorial_id(tid: str) -> bool:
+    if not isinstance(tid, str):
+        return False
+    if not tid or len(tid) > _TUTORIAL_ID_MAX:
+        return False
+    return all(c.isalnum() or c in "._-" for c in tid)
+
+
+@router.get("/tutorial-progress", response_model=list[TutorialProgress])
+async def list_tutorial_progress(profile=Depends(get_current_profile)):
+    """Return every tutorial progress row for the calling user."""
+    sb = get_supabase()
+    rows = (
+        sb.table("tutorial_progress")
+        .select("tutorial_id, current_step, completed_at, updated_at")
+        .eq("user_id", profile["id"])
+        .execute()
+    )
+    return [TutorialProgress(**r) for r in (rows.data or [])]
+
+
+@router.patch("/tutorial-progress/{tutorial_id}", response_model=TutorialProgress)
+async def update_tutorial_progress_endpoint(
+    tutorial_id: str,
+    body: TutorialProgressUpdate,
+    profile=Depends(get_current_profile),
+):
+    """Upsert progress for a single tutorial. The completed flag, when
+    true, sets ``completed_at`` to NOW(); when explicitly false it
+    clears the timestamp (lets a teacher reset a student's progress).
+    """
+    from datetime import datetime, timezone
+    from fastapi import HTTPException
+    if not _valid_tutorial_id(tutorial_id):
+        raise HTTPException(status_code=400, detail="Tutorial-ID ist ungültig.")
+    sb = get_supabase()
+    payload: dict = {
+        "user_id": profile["id"],
+        "tutorial_id": tutorial_id,
+    }
+    if body.current_step is not None:
+        if body.current_step < 0:
+            raise HTTPException(status_code=400, detail="Schritt-Nummer muss >= 0 sein.")
+        payload["current_step"] = int(body.current_step)
+    if body.completed is True:
+        payload["completed_at"] = datetime.now(timezone.utc).isoformat()
+    elif body.completed is False:
+        payload["completed_at"] = None
+    try:
+        result = (
+            sb.table("tutorial_progress")
+            .upsert(payload, on_conflict="user_id,tutorial_id")
+            .execute()
+        )
+    except Exception as exc:
+        logger.exception("tutorial-progress upsert failed for user=%s id=%s", profile["id"], tutorial_id)
+        raise HTTPException(status_code=500, detail="Fortschritt konnte nicht gespeichert werden.") from exc
+    if not result.data:
+        raise HTTPException(status_code=500, detail="Fortschritt konnte nicht gespeichert werden.")
+    row = result.data[0]
+    return TutorialProgress(
+        tutorial_id=row.get("tutorial_id", tutorial_id),
+        current_step=row.get("current_step", 0) or 0,
+        completed_at=row.get("completed_at"),
+        updated_at=row.get("updated_at"),
+    )

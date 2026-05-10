@@ -1,0 +1,4 @@
+# Resume a paused workflow at full speed.
+---
+bool success
+string message

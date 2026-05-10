@@ -1,0 +1,42 @@
+{
+  "id": "sortiere_nach_klasse",
+  "title_de": "Sortiere nach Klasse",
+  "level": 4,
+  "summary": "Open-Vocabulary: lass den Roboter Bananen, Tassen und Würfel automatisch sortieren.",
+  "steps": [
+    {
+      "title": "Cloud-Erkennung aktivieren",
+      "body": "Schalte unter Einstellungen die \"Cloud-Erkennung verwenden\"-Option ein. Damit kannst du beliebige deutsche Begriffe wie \"gelbe Banane\" suchen.",
+      "allowed_blocks": ["edubotics_detect_open_vocab", "text"]
+    },
+    {
+      "title": "Beispiel finden",
+      "body": "Nutze \"finde Objekt mit Beschreibung\" mit dem Text \"gelbe Banane\" und speichere das Ergebnis. Setze einen Pin als Ablage-Ziel.",
+      "allowed_blocks": [
+        "edubotics_detect_open_vocab",
+        "edubotics_destination_pin",
+        "variables_set",
+        "variables_get",
+        "lists_getIndex",
+        "text"
+      ]
+    },
+    {
+      "title": "Liste durchsortieren",
+      "body": "Schreibe eine Schleife: für jedes Element in der Beschreibungsliste {Banane, Tasse, Würfel} fahre dorthin und lege es auf den passenden Pin ab.",
+      "allowed_blocks": [
+        "edubotics_detect_open_vocab",
+        "edubotics_destination_pin",
+        "edubotics_pickup",
+        "edubotics_drop_at",
+        "edubotics_home",
+        "variables_set",
+        "variables_get",
+        "lists_create_with",
+        "lists_getIndex",
+        "controls_forEach",
+        "text"
+      ]
+    }
+  ]
+}

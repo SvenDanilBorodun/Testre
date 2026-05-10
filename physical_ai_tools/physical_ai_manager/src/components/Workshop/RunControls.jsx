@@ -8,22 +8,61 @@
  *     http://www.apache.org/licenses/LICENSE-2.0
  */
 
-import React, { useCallback, useState } from 'react';
+import React, { useCallback, useState, useEffect } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import toast from 'react-hot-toast';
-import { setRunState, clearWorkflowLog } from '../../features/workshop/workshopSlice';
+import {
+  setRunState,
+  setPaused,
+  clearWorkflowLog,
+  toggleDebugger,
+  clearVariables,
+  setDebuggerWarnings,
+  setCloudVisionEnabled,
+} from '../../features/workshop/workshopSlice';
 import { useRosServiceCaller } from '../../hooks/useRosServiceCaller';
+import { DE } from './blocks/messages_de';
 
-function RunControls({ workflowId, blocklyJson }) {
+const BUTTON_BASE =
+  'inline-flex items-center justify-center min-h-[36px] '
+  + 'px-4 py-2 rounded-md text-sm font-medium '
+  + 'focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-1 '
+  + 'disabled:opacity-50 disabled:cursor-not-allowed';
+
+function RunControls({ workflowId, blocklyJson, workspace = null }) {
   const dispatch = useDispatch();
-  const { callService } = useRosServiceCaller();
+  const { callService, pauseWorkflow, stepWorkflow, continueWorkflow } =
+    useRosServiceCaller();
   const runState = useSelector((s) => s.workshop.runState);
   const phase = useSelector((s) => s.workshop.phase);
+  const paused = useSelector((s) => s.workshop.paused);
   const log = useSelector((s) => s.workshop.log);
   const error = useSelector((s) => s.workshop.workflowError);
+  const debuggerVisible = useSelector((s) => s.workshop.debuggerVisible);
+  const debuggerWarnings = useSelector((s) => s.workshop.debuggerWarnings);
+  const cloudVisionEnabled = useSelector((s) => s.workshop.cloudVisionEnabled);
   const [busy, setBusy] = useState(false);
 
-  const isRunning = runState === 'running' || phase === 'running';
+  const isRunning = runState === 'running' || phase === 'running' || paused;
+
+  // Re-attach IK pre-check warnings to blocks whenever the warnings list
+  // changes. Each warning is {block_id, message}. The workspace ref
+  // comes in as a prop from WorkshopPage so we don't depend on a
+  // global Blockly singleton (audit §12 found that path silently
+  // dropped every warning).
+  useEffect(() => {
+    if (!workspace || typeof workspace.getBlockById !== 'function') return;
+    if (!Array.isArray(debuggerWarnings) || debuggerWarnings.length === 0) {
+      return;
+    }
+    debuggerWarnings.forEach((warn) => {
+      if (!warn || !warn.block_id) return;
+      const block = workspace.getBlockById(warn.block_id);
+      if (block && typeof block.setWarningText === 'function') {
+        block.setWarningText(warn.message || null);
+      }
+    });
+  }, [debuggerWarnings, workspace]);
 
   const handleStart = useCallback(async () => {
     if (!blocklyJson) {
@@ -33,20 +72,39 @@ function RunControls({ workflowId, blocklyJson }) {
     setBusy(true);
     try {
       dispatch(clearWorkflowLog());
+      dispatch(clearVariables());
       const r = await callService(
         '/workflow/start',
         'physical_ai_interfaces/srv/StartWorkflow',
         {
           workflow_json: JSON.stringify(blocklyJson),
           workflow_id: workflowId || `local-${Date.now()}`,
+          cloud_vision_enabled: !!cloudVisionEnabled,
         }
       );
       if (!r.success) {
         toast.error(r.message || 'Workflow konnte nicht gestartet werden.');
         return;
       }
+      // The runtime returns unreachable_block_ids[] + unreachable_messages[]
+      // (parallel arrays in the StartWorkflow.srv response) when the IK
+      // pre-check finds destinations the arm can't reach. Pair them up
+      // and surface as setWarningText on the affected blocks (the
+      // useEffect above).
+      const ids = Array.isArray(r.unreachable_block_ids) ? r.unreachable_block_ids : [];
+      const msgs = Array.isArray(r.unreachable_messages) ? r.unreachable_messages : [];
+      const warnings = ids.map((bid, i) => ({
+        block_id: bid,
+        message: msgs[i] || 'Diese Position ist außerhalb des Arbeitsbereichs.',
+      }));
+      dispatch(setDebuggerWarnings(warnings));
       dispatch(setRunState('running'));
-      toast.success(r.message);
+      dispatch(setPaused(false));
+      if (warnings.length > 0) {
+        toast(`${warnings.length} Block(s) markiert: außerhalb des Arbeitsbereichs.`, { icon: '⚠️' });
+      } else {
+        toast.success(r.message);
+      }
     } catch (e) {
       toast.error(`Service-Aufruf fehlgeschlagen: ${e.message || e}`);
     } finally {
@@ -63,6 +121,7 @@ function RunControls({ workflowId, blocklyJson }) {
         {}
       );
       dispatch(setRunState('stopped'));
+      dispatch(setPaused(false));
       if (!r.success) {
         toast.error(r.message || 'Stopp fehlgeschlagen.');
       } else {
@@ -75,45 +134,198 @@ function RunControls({ workflowId, blocklyJson }) {
     }
   }, [callService, dispatch]);
 
+  const handlePause = useCallback(async () => {
+    setBusy(true);
+    try {
+      const r = await pauseWorkflow();
+      if (r && r.success) {
+        dispatch(setPaused(true));
+      } else {
+        toast.error((r && r.message) || 'Pause fehlgeschlagen.');
+      }
+    } catch (e) {
+      toast.error(`Service-Aufruf fehlgeschlagen: ${e.message || e}`);
+    } finally {
+      setBusy(false);
+    }
+  }, [pauseWorkflow, dispatch]);
+
+  const handleStep = useCallback(async () => {
+    setBusy(true);
+    try {
+      const r = await stepWorkflow();
+      if (!r || !r.success) {
+        toast.error((r && r.message) || 'Schritt fehlgeschlagen.');
+      }
+    } catch (e) {
+      toast.error(`Service-Aufruf fehlgeschlagen: ${e.message || e}`);
+    } finally {
+      setBusy(false);
+    }
+  }, [stepWorkflow]);
+
+  const handleContinue = useCallback(async () => {
+    setBusy(true);
+    try {
+      const r = await continueWorkflow();
+      if (r && r.success) {
+        dispatch(setPaused(false));
+      } else {
+        toast.error((r && r.message) || 'Weiterführen fehlgeschlagen.');
+      }
+    } catch (e) {
+      toast.error(`Service-Aufruf fehlgeschlagen: ${e.message || e}`);
+    } finally {
+      setBusy(false);
+    }
+  }, [continueWorkflow, dispatch]);
+
+  const handleToggleDebugger = useCallback(() => {
+    dispatch(toggleDebugger());
+  }, [dispatch]);
+
+  const phaseLabel = paused
+    ? DE.RUN_PAUSED
+    : (phase || DE.RUN_READY);
+
   return (
-    <div className="border-t border-[var(--line)] bg-white p-4">
-      <div className="flex items-center gap-3 mb-3">
-        <button
-          type="button"
-          onClick={handleStart}
-          disabled={busy || isRunning}
-          className="px-4 py-2 rounded-md bg-[var(--accent)] text-white text-sm font-medium hover:opacity-90 disabled:opacity-50"
-        >
-          ▶ Start
-        </button>
+    <div className="border-t border-[var(--line)] bg-white p-3 sm:p-4">
+      <div className="flex flex-wrap items-center gap-2 mb-3">
+        {!isRunning ? (
+          <button
+            type="button"
+            onClick={handleStart}
+            disabled={busy}
+            className={
+              BUTTON_BASE
+              + ' bg-[var(--accent)] text-white hover:opacity-90 '
+              + 'focus-visible:ring-blue-500'
+            }
+            aria-label={DE.RUN_START}
+          >
+            ▶ {DE.RUN_START}
+          </button>
+        ) : !paused ? (
+          <button
+            type="button"
+            onClick={handlePause}
+            disabled={busy}
+            className={
+              BUTTON_BASE
+              + ' bg-amber-500 text-white hover:bg-amber-600 '
+              + 'focus-visible:ring-amber-500'
+            }
+            aria-label={DE.RUN_PAUSE}
+          >
+            ⏸ {DE.RUN_PAUSE}
+          </button>
+        ) : (
+          <>
+            <button
+              type="button"
+              onClick={handleStep}
+              disabled={busy}
+              className={
+                BUTTON_BASE
+                + ' bg-blue-500 text-white hover:bg-blue-600 '
+                + 'focus-visible:ring-blue-500'
+              }
+              aria-label={DE.RUN_STEP}
+            >
+              ↪ {DE.RUN_STEP}
+            </button>
+            <button
+              type="button"
+              onClick={handleContinue}
+              disabled={busy}
+              className={
+                BUTTON_BASE
+                + ' bg-[var(--accent)] text-white hover:opacity-90 '
+                + 'focus-visible:ring-blue-500'
+              }
+              aria-label={DE.RUN_CONTINUE}
+            >
+              ▶ {DE.RUN_CONTINUE}
+            </button>
+          </>
+        )}
         <button
           type="button"
           onClick={handleStop}
           disabled={busy || !isRunning}
-          className="px-4 py-2 rounded-md bg-red-500 text-white text-sm font-medium hover:bg-red-600 disabled:opacity-50"
+          className={
+            BUTTON_BASE
+            + ' bg-red-500 text-white hover:bg-red-600 '
+            + 'focus-visible:ring-red-500'
+          }
+          aria-label={DE.RUN_STOP}
         >
-          ■ Stopp
+          ■ {DE.RUN_STOP}
         </button>
-        <span className={
-          'inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium ' +
-          (isRunning
-            ? 'bg-green-100 text-green-700'
-            : phase === 'error'
-            ? 'bg-red-100 text-red-700'
-            : 'bg-gray-100 text-gray-600')
-        }>
-          <span className={'w-1.5 h-1.5 rounded-full ' + (isRunning ? 'bg-green-500 animate-pulse' : 'bg-gray-400')} />
-          {phase || 'Bereit'}
+        <span
+          className={
+            'inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium '
+            + (paused
+              ? 'bg-amber-100 text-amber-700'
+              : isRunning
+              ? 'bg-green-100 text-green-700'
+              : phase === 'error'
+              ? 'bg-red-100 text-red-700'
+              : 'bg-gray-100 text-gray-600')
+          }
+          aria-live="polite"
+        >
+          <span
+            className={
+              'w-1.5 h-1.5 rounded-full '
+              + (isRunning && !paused ? 'bg-green-500 motion-safe:animate-pulse' : 'bg-gray-400')
+            }
+            aria-hidden="true"
+          />
+          {phaseLabel}
         </span>
+
+        <label
+          className="inline-flex items-center gap-1.5 text-xs text-[var(--ink-3)] cursor-pointer select-none"
+          title="Wenn aktiv, dürfen 'finde Objekt mit Beschreibung'-Blöcke unbekannte Begriffe an die Cloud-Erkennung schicken."
+        >
+          <input
+            type="checkbox"
+            checked={!!cloudVisionEnabled}
+            onChange={(e) => dispatch(setCloudVisionEnabled(e.target.checked))}
+            className="w-4 h-4"
+            aria-label={DE.CLOUD_VISION_TOGGLE}
+          />
+          {DE.CLOUD_VISION_TOGGLE}
+        </label>
+
+        <button
+          type="button"
+          onClick={handleToggleDebugger}
+          aria-pressed={debuggerVisible}
+          className={
+            BUTTON_BASE
+            + ' ml-auto border border-[var(--line)] bg-white text-[var(--ink)] '
+            + 'hover:bg-[var(--bg-sunk)] focus-visible:ring-blue-500'
+          }
+        >
+          🔍 Debug
+        </button>
       </div>
 
       {error && (
-        <div className="bg-red-50 border border-red-200 text-red-700 text-sm rounded-md p-2 mb-2">
+        <div
+          role="alert"
+          className="bg-red-50 border border-red-200 text-red-800 text-sm rounded-md p-2 mb-2"
+        >
           {error}
         </div>
       )}
 
-      <div className="bg-[var(--bg-sunk)] rounded-md p-3 max-h-48 overflow-y-auto font-mono text-xs">
+      <div
+        className="bg-[var(--bg-sunk)] rounded-md p-3 max-h-48 overflow-y-auto font-mono text-xs"
+        aria-label="Workflow-Log"
+      >
         {log.length === 0 ? (
           <p className="text-[var(--ink-4)]">Keine Meldungen.</p>
         ) : (

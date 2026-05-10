@@ -1,0 +1,6 @@
+# Pause a running workflow. The runtime checks an event flag before
+# every block dispatch; once set, the workflow blocks until either
+# WorkflowContinue or WorkflowStep is invoked.
+---
+bool success
+string message

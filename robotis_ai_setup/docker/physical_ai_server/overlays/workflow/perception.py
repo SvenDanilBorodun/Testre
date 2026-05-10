@@ -42,7 +42,20 @@ import numpy as np
 
 from physical_ai_server.workflow.coco_classes import COCO_CLASSES, ID_TO_LABEL
 
+# Detector dispatch — Phase-3 (2026-05). The default is the
+# Apache-2.0 YOLOX-tiny ONNX baked into the image. Setting
+# ``EDUBOTICS_DETECTOR=dfine-n`` swaps to the D-FINE-N ONNX path so
+# operators can A/B test without rebuilding the image. The
+# ``EDUBOTICS_DFINE_ONNX`` env var overrides the file path. See
+# ``tools/dfine_finetune.md`` for the export/host recipe. The
+# postprocessing branches in ``_detect_yolo`` honour both shapes.
+DETECTOR_KIND = os.environ.get('EDUBOTICS_DETECTOR', 'yolox-tiny').strip().lower()
 YOLOX_ONNX_PATH = Path(os.environ.get('EDUBOTICS_YOLOX_ONNX', '/opt/edubotics/yolox_tiny.onnx'))
+DFINE_ONNX_PATH = Path(os.environ.get('EDUBOTICS_DFINE_ONNX', '/opt/edubotics/dfine_n.onnx'))
+
+# Which ONNX file we actually load — chosen at module import.
+_ACTIVE_ONNX_PATH = DFINE_ONNX_PATH if DETECTOR_KIND in ('dfine', 'dfine-n', 'dfinen') else YOLOX_ONNX_PATH
+
 YOLOX_INPUT_SIZE = (640, 640)
 YOLOX_CONFIDENCE_THRESHOLD = 0.30
 YOLOX_NMS_IOU_THRESHOLD = 0.45
@@ -145,13 +158,19 @@ class Perception:
     # YOLOX
     # ------------------------------------------------------------------
     def _init_yolox(self) -> None:
-        """Load the baked-in YOLOX-tiny ONNX. Fails loudly if the file
-        is missing or the runtime can't open it — there is no fallback
-        path."""
-        if not YOLOX_ONNX_PATH.exists():
+        """Load the active detector ONNX (YOLOX-tiny by default;
+        D-FINE-N when ``EDUBOTICS_DETECTOR=dfine-n``). Fails loudly if
+        the file is missing — the perception module promises
+        fail-loud and audited callers (Workshop) depend on that.
+        D-FINE-N postprocessing is NMS-free; the dispatch in
+        ``_detect_yolo`` honours both head shapes.
+        """
+        path = _ACTIVE_ONNX_PATH
+        if not path.exists():
             raise RuntimeError(
-                f'YOLOX-tiny-Modell fehlt unter {YOLOX_ONNX_PATH} — '
-                'Image neu bauen.'
+                f'Erkennungs-Modell fehlt unter {path} — Image neu '
+                f'bauen oder EDUBOTICS_DETECTOR auf einen vorhandenen '
+                f'Pfad zeigen.'
             )
         try:
             import onnxruntime as ort
@@ -162,12 +181,12 @@ class Perception:
         try:
             providers = ['CPUExecutionProvider']
             self._yolox_session = ort.InferenceSession(
-                str(YOLOX_ONNX_PATH), providers=providers,
+                str(path), providers=providers,
             )
             self._yolox_input_name = self._yolox_session.get_inputs()[0].name
         except Exception as e:
             raise RuntimeError(
-                f'YOLOX-Modell konnte nicht geladen werden: {e}'
+                f'Erkennungs-Modell konnte nicht geladen werden: {e}'
             ) from e
 
     @staticmethod

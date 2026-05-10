@@ -22,6 +22,18 @@ const DEST_COLOR = '#f59e0b';
 // table plane and the gripper crashes into the table).
 const UNPINNED = '—';
 
+// Validator for the destination's NAME input. Names appear in
+// log lines and as keys in the runtime destinations dict; keep them
+// short and printable. We strip leading/trailing whitespace and reject
+// the sentinel string so a student can't name a block "—".
+const NAME_MAX_LEN = 24;
+function nameValidator(newValue) {
+  if (typeof newValue !== 'string') return null;
+  const trimmed = newValue.trim();
+  if (trimmed === '' || trimmed === UNPINNED) return null;
+  return trimmed.slice(0, NAME_MAX_LEN);
+}
+
 export const DESTINATION_BLOCKS = [
   {
     type: 'edubotics_destination_pin',
@@ -43,6 +55,7 @@ export const DESTINATION_BLOCKS = [
     tooltip:
       'Wähle diesen Block aus und klicke dann in die Szenen-Kamera, um '
       + 'das Ziel zu setzen.',
+    extensions: ['edubotics_validate_destination_name'],
   },
   {
     type: 'edubotics_destination_current',
@@ -51,6 +64,7 @@ export const DESTINATION_BLOCKS = [
     previousStatement: null,
     nextStatement: null,
     colour: DEST_COLOR,
+    extensions: ['edubotics_validate_destination_name'],
   },
 ];
 
@@ -70,6 +84,18 @@ export function applyPinnedCoordinates(block, world_x, world_y, world_z) {
   return true;
 }
 
+function registerExtensionOnce(name, fn) {
+  if (!Blockly.Extensions.isRegistered(name)) {
+    Blockly.Extensions.register(name, fn);
+  }
+}
+
 export function registerDestinationBlocks() {
+  registerExtensionOnce('edubotics_validate_destination_name', function () {
+    const field = this.getField('NAME');
+    if (field && typeof field.setValidator === 'function') {
+      field.setValidator(nameValidator);
+    }
+  });
   Blockly.defineBlocksWithJsonArray(DESTINATION_BLOCKS);
 }

@@ -4,6 +4,18 @@
 # executing.
 string workflow_json
 string workflow_id
+# Phase-3 cloud-vision toggle — when true, perception blocks with an
+# unknown German prompt may burst to the Modal OWLv2 endpoint via the
+# cloud_training_api proxy. When false, the open-vocab block raises
+# a German error if it can't resolve the prompt locally.
+bool cloud_vision_enabled
 ---
 bool success
 string message
+# Phase-2 IK pre-check warnings: each entry is a Blockly block id whose
+# concrete X/Y/Z target failed a quick IK solve. Non-fatal — the safety
+# envelope still gates motion at runtime — but the React side renders
+# a setWarningText() on each block so the student sees the issue
+# before the arm refuses to move.
+string[] unreachable_block_ids
+string[] unreachable_messages

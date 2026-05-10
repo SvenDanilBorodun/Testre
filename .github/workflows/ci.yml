@@ -175,6 +175,96 @@ jobs:
             'cat /usr/share/nginx/html/version.json' | python3 -c \
             'import json,sys; d=json.load(sys.stdin); assert d["buildId"]=="ci-validate", d; print("version.json OK:", d)'
 
+  tutorials-validate:
+    # Walks every public/tutorials/*.json and asserts schema:
+    # id/title_de/level/steps present, each step has title/body/
+    # allowed_blocks. Cross-checks every allowed_blocks entry against
+    # the cloud_training_api validator's ALLOWED_BLOCK_TYPES so a
+    # tutorial can't reference a block the server would reject.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Validate tutorial JSON files
+        run: |
+          python3 - <<'PY'
+          import glob, json, re, sys
+          # Pull the allowlist from the validator's source so a single
+          # change in validators/workflow.py covers both the runtime
+          # gate and this CI check.
+          src = open('robotis_ai_setup/cloud_training_api/app/validators/workflow.py').read()
+          m = re.search(r'ALLOWED_BLOCK_TYPES[^=]*=\s*frozenset\(\{([^}]+)\}\)', src, re.S)
+          assert m, 'could not locate ALLOWED_BLOCK_TYPES'
+          allowed = set(re.findall(r'"([^"]+)"', m.group(1)))
+          errs = []
+          for path in sorted(glob.glob('physical_ai_tools/physical_ai_manager/public/tutorials/*.json')):
+              try:
+                  doc = json.load(open(path, encoding='utf-8'))
+              except Exception as e:
+                  errs.append(f'{path}: invalid JSON ({e})')
+                  continue
+              for field in ('id', 'title_de', 'level', 'steps'):
+                  if field not in doc:
+                      errs.append(f'{path}: missing field {field}')
+              steps = doc.get('steps') or []
+              if not isinstance(steps, list) or not steps:
+                  errs.append(f'{path}: empty steps')
+                  continue
+              for i, step in enumerate(steps):
+                  for field in ('title', 'body', 'allowed_blocks'):
+                      if field not in step:
+                          errs.append(f'{path} step {i+1}: missing {field}')
+                  for blk in step.get('allowed_blocks') or []:
+                      if blk not in allowed:
+                          errs.append(f'{path} step {i+1}: block {blk!r} not in ALLOWED_BLOCK_TYPES')
+          if errs:
+              print('\n'.join(errs))
+              sys.exit(1)
+          print('Tutorials validate OK')
+          PY
+
+  interfaces-validate:
+    # Sanity-checks every srv/msg file in physical_ai_interfaces:
+    # exactly one --- separator per srv, every file listed in
+    # CMakeLists.txt. No actual rosidl run (requires the full ROS
+    # toolchain) but the file-level invariants catch typos.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Lint srv/msg files
+        run: |
+          python3 - <<'PY'
+          import glob, os, re, sys
+          errs = []
+          srv_dir = 'physical_ai_tools/physical_ai_interfaces/srv'
+          msg_dir = 'physical_ai_tools/physical_ai_interfaces/msg'
+          cmake = open('physical_ai_tools/physical_ai_interfaces/CMakeLists.txt').read()
+          for path in sorted(glob.glob(f'{srv_dir}/*.srv')):
+              body = open(path, encoding='utf-8').read()
+              # rosidl srv format: one line that is exactly '---'
+              # separates request from response. Count those lines
+              # (ignore '---' that appears inside comments or string
+              # defaults).
+              sep_lines = [
+                  ln for ln in body.splitlines() if ln.strip() == '---'
+              ]
+              if len(sep_lines) != 1:
+                  errs.append(f'{path}: expected exactly one ---, found {len(sep_lines)}')
+              base = os.path.basename(path)
+              if f'srv/{base}' not in cmake:
+                  errs.append(f'{path}: not listed in CMakeLists.txt')
+          for path in sorted(glob.glob(f'{msg_dir}/*.msg')):
+              base = os.path.basename(path)
+              if f'msg/{base}' not in cmake:
+                  errs.append(f'{path}: not listed in CMakeLists.txt')
+          if errs:
+              print('\n'.join(errs))
+              sys.exit(1)
+          print('Interfaces validate OK')
+          PY
+
   nginx-validate:
     runs-on: ubuntu-latest
     steps:

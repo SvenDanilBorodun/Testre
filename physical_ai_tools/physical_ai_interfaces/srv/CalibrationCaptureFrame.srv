@@ -7,4 +7,10 @@ bool success
 uint16 frames_captured
 uint16 frames_required
 float32 last_view_rms
+# Phase-2 additions for the live wizard UI:
+#   quality:       1=POOR, 2=OK, 3=GOOD (red/yellow/green badge)
+#   coverage_cell: 0..15 — which 4x4 mosaic cell the board centroid
+#                  landed in, so the wizard can show coverage gaps.
+uint8 quality
+uint8 coverage_cell
 string message

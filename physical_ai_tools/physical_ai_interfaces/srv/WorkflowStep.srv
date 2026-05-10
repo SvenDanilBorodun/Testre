@@ -1,0 +1,5 @@
+# Single-step a paused workflow: execute exactly one more block, then
+# re-enter the paused state.
+---
+bool success
+string message

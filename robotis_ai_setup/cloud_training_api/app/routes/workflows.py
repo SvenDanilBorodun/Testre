@@ -325,3 +325,75 @@ def clone_workflow(workflow_id: str, user=Depends(get_current_user)) -> Workflow
     if not inserted.data:
         raise HTTPException(status_code=500, detail="Klon konnte nicht erstellt werden.")
     return WorkflowResponse(**inserted.data[0])
+
+
+# ---------- Phase-2: server-side version history ----------
+
+
+class WorkflowVersion(BaseModel):
+    id: str
+    workflow_id: str
+    blockly_json: dict
+    note: str = ""
+    created_at: str
+
+
+@router.get("/{workflow_id}/versions", response_model=list[WorkflowVersion])
+def list_workflow_versions(
+    workflow_id: str,
+    user=Depends(get_current_user),
+    limit: int = Query(default=20, ge=1, le=100),
+) -> list[WorkflowVersion]:
+    """List up to ``limit`` snapshots of this workflow's blockly_json,
+    newest first. The trigger in migration 013 caps history at 20 per
+    workflow; the limit query parameter only narrows that further.
+    """
+    _assert_workflow_owned(user.id, workflow_id)
+    supabase = get_supabase()
+    result = (
+        supabase.table("workflow_versions")
+        .select("id, workflow_id, blockly_json, note, created_at")
+        .eq("workflow_id", workflow_id)
+        .order("created_at", desc=True)
+        .limit(limit)
+        .execute()
+    )
+    return [WorkflowVersion(**row) for row in (result.data or [])]
+
+
+@router.post("/{workflow_id}/versions/{version_id}/restore", response_model=WorkflowResponse)
+def restore_workflow_version(
+    workflow_id: str,
+    version_id: str,
+    user=Depends(get_current_user),
+) -> WorkflowResponse:
+    """Replace the workflow's current blockly_json with the snapshot
+    pointed to by ``version_id``. The current state is automatically
+    snapshotted by the BEFORE-UPDATE trigger so this restore is itself
+    reversible (until the 20-cap rotates the older snapshot out).
+    """
+    _assert_workflow_owned(user.id, workflow_id)
+    supabase = get_supabase()
+    version_row = (
+        supabase.table("workflow_versions")
+        .select("blockly_json")
+        .eq("id", version_id)
+        .eq("workflow_id", workflow_id)
+        .execute()
+    )
+    if not version_row.data:
+        raise HTTPException(status_code=404, detail="Version nicht gefunden")
+    snapshot = version_row.data[0].get("blockly_json")
+    if not isinstance(snapshot, dict):
+        raise HTTPException(status_code=500, detail="Snapshot ist beschädigt.")
+    validate_blockly_json(snapshot)
+    updated = (
+        supabase.table("workflows")
+        .update({"blockly_json": snapshot})
+        .eq("id", workflow_id)
+        .eq("owner_user_id", user.id)
+        .execute()
+    )
+    if not updated.data:
+        raise HTTPException(status_code=500, detail="Wiederherstellen fehlgeschlagen.")
+    return WorkflowResponse(**updated.data[0])

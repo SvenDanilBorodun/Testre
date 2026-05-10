@@ -18,6 +18,7 @@ from app.routes.me import router as me_router
 from app.routes.teacher import router as teacher_router
 from app.routes.training import router as training_router
 from app.routes.version import router as version_router
+from app.routes.vision import router as vision_router
 from app.routes.workflows import router as workflows_router
 from app.routes.workgroups import router as workgroups_router
 from app.services.dataset_sweep import sweep_loop as _dataset_sweep_loop
@@ -158,6 +159,11 @@ _RATE_LIMIT_RULES: list[tuple[str, str, int, float]] = [
     # 20/min is more than enough for any classroom while stopping a
     # broken recording loop from spamming.
     ("POST", "/datasets", 20, 60.0),
+    # Cloud-burst perception (Phase 3 OWLv2 on Modal). Each call costs
+    # ~$0.0001 in compute but a runaway loop in a workflow could rack
+    # up dollars per classroom, so cap at 5/60s/user — well above any
+    # legitimate manual editing cadence.
+    ("POST", "/vision/detect", 5, 60.0),
 ]
 
 
@@ -231,6 +237,7 @@ app.include_router(workgroups_router)
 app.include_router(datasets_router)
 app.include_router(admin_router)
 app.include_router(workflows_router)
+app.include_router(vision_router)
 
 
 # ─── Background tasks ───────────────────────────────────────────────────

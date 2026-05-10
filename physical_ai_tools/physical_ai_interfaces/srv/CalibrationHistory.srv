@@ -1,0 +1,12 @@
+# Latest N saved calibrations per camera. The server keeps a small
+# history directory (last 5) so a teacher can roll back to a prior
+# good calibration.
+string camera
+---
+bool success
+# Parallel arrays — one entry per saved calibration, newest first.
+string[] timestamps         # ISO 8601 UTC, e.g. 2026-05-08T14:33:11Z
+string[] step_names         # 'gripper_intrinsic', 'scene_handeye', ...
+float32[] reprojection_errors_px
+float32[] agreement_deg     # PARK ↔ TSAI rotation disagreement
+string message

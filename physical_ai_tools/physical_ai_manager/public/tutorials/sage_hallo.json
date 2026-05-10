@@ -1,0 +1,30 @@
+{
+  "id": "sage_hallo",
+  "title_de": "Sage Hallo",
+  "level": 1,
+  "summary": "Dein erster Workflow: lass den Roboter \"Hallo!\" sagen.",
+  "steps": [
+    {
+      "title": "Bausteine ausprobieren",
+      "body": "Ziehe einen \"sage\"-Block aus der Kategorie Ausgabe in den Arbeitsbereich. Schreibe \"Hallo Klasse\" hinein.",
+      "allowed_blocks": ["edubotics_speak_de", "text"],
+      "hints": [
+        "Der \"sage\"-Block findet sich in der lila Kategorie \"Ausgabe\".",
+        "Klicke das graue Eingabefeld an, um den Text zu ändern."
+      ]
+    },
+    {
+      "title": "Workflow starten",
+      "body": "Drücke ▶ Start unter dem Editor. Wenn alles geklappt hat, hörst du den Roboter den Text vorlesen.",
+      "allowed_blocks": ["edubotics_speak_de", "text"],
+      "hints": [
+        "Falls du nichts hörst, prüfe die Lautstärke des Computers."
+      ]
+    },
+    {
+      "title": "Sound hinzufügen",
+      "body": "Setze einen \"Ton spielen\"-Block davor, damit der Roboter erst piept und dann spricht.",
+      "allowed_blocks": ["edubotics_speak_de", "edubotics_play_sound", "text"]
+    }
+  ]
+}

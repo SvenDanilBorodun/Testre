@@ -2,7 +2,7 @@
 
 > **Read this entire file at the start of every session.** It replaces the former `context/` folder and is the single source of truth for what the project is, how it fits together, and how to make changes safely. Source code is the ultimate authority — when this file disagrees with the code, the code wins (and you should update this file in the same change).
 >
-> Last verified by reading every load-bearing file directly: 2026-05-08.
+> Last verified by reading every load-bearing file directly: 2026-05-10 (Roboter Studio end-to-end upgrade — see §6.7, §7.6, §8.3 below).
 
 ---
 
@@ -429,12 +429,29 @@ Per-tick (single-threaded on ROS executor, no worker thread):
 - Persisted under `/root/.cache/edubotics/calibration/` (named volume `edubotics_calib`, **survives `docker compose down`**) as `{camera}_intrinsics.yaml`, `{camera}_handeye.yaml`, `color_profile.yaml`.
 - Provider methods come from the `communicator.py` overlay: `get_latest_bgr_frame()`, `get_latest_follower_joints()`. Without the overlay, the wizard returns `[FEHLER] Kein Kamerabild verfügbar.`
 
-**Authoring** — React `Workshop/` editor (Blockly 12.5.0 + react-blockly 9.0.0). Block allowlist (~23 types) defined in `overlays/workflow/interpreter.py:ALLOWED_BLOCK_TYPES`:
-- Motion/output (statement): `edubotics_home`, `edubotics_open_gripper`, `edubotics_close_gripper`, `edubotics_move_to`, `edubotics_pickup`, `edubotics_drop_at`, `edubotics_wait_seconds`, `edubotics_destination_pin`, `edubotics_destination_current`, `edubotics_log`, `edubotics_play_sound`.
-- Perception (value): `edubotics_detect_color`, `edubotics_detect_object`, `edubotics_detect_marker`, `edubotics_count_color`, `edubotics_count_objects_class`, `edubotics_wait_until_color`, `edubotics_wait_until_object`, `edubotics_wait_until_marker`.
-- Built-ins: `controls_if`, `controls_repeat_ext`, `controls_whileUntil`, `controls_for`, `controls_forEach`, `logic_compare/operation/negate/boolean`, `math_number/arithmetic`, `variables_get/set`, `text`.
+**Authoring** — React `Workshop/` editor (Blockly 12.5.0 + react-blockly 9.0.0). The 2026-05 upgrade widened the block allowlist (defined in `overlays/workflow/interpreter.py:ALLOWED_BLOCK_TYPES` and mirrored in `cloud_training_api/app/validators/workflow.py:ALLOWED_BLOCK_TYPES`):
+- **Motion / output (statement)**: `edubotics_home`, `edubotics_open_gripper`, `edubotics_close_gripper`, `edubotics_move_to`, `edubotics_pickup`, `edubotics_drop_at`, `edubotics_wait_seconds`, `edubotics_destination_pin`, `edubotics_destination_current`, `edubotics_log`, `edubotics_play_sound`, `edubotics_speak_de`, `edubotics_play_tone`.
+- **Events / hat blocks (top-only)**: `edubotics_broadcast`, `edubotics_when_broadcast`, `edubotics_when_marker_seen`, `edubotics_when_color_seen`. Each hat handler runs as a separate daemon thread; a single `ctx.motion_lock` keeps motion serialized between handlers.
+- **Perception (value)**: `edubotics_detect_color`, `edubotics_detect_object`, `edubotics_detect_marker`, `edubotics_count_color`, `edubotics_count_objects_class`, `edubotics_wait_until_color`, `edubotics_wait_until_object`, `edubotics_wait_until_marker`, **`edubotics_detect_open_vocab`** (cloud-burst to OWLv2 on Modal — §8.3).
+- **Lists / procedures / math (Blockly built-ins)**: `lists_create_with`, `lists_repeat`, `lists_length`, `lists_isEmpty`, `lists_indexOf`, `lists_getIndex`, `lists_setIndex`, `lists_getSublist`, `procedures_defnoreturn/defreturn/callnoreturn/callreturn/ifreturn`, `math_random_int`, `math_constrain`, `math_modulo`, `math_round`, plus everything from the previous shipped set.
 - Allowed colors: `rot, gruen, blau, gelb` (German); validation rejects other strings.
 - `MAX_LOOP_ITERATIONS = 10000`.
+
+**Editor UX upgrades** (2026-05):
+- Blockly plugins wired in `BlocklyWorkspace.jsx` via best-effort dynamic imports: `@blockly/plugin-workspace-search`, `@blockly/workspace-backpack`, `@blockly/plugin-zoom-to-fit`, `@blockly/workspace-minimap`, `@blockly/block-plus-minus`, `@blockly/suggested-blocks`, `@mit-app-inventor/blockly-plugin-workspace-multiselect`, color-blind themes (`@blockly/theme-tritanopia`, `@blockly/theme-deuteranopia`, `@blockly/theme-highcontrast`), `@blockly/field-grid-dropdown`, `@blockly/field-multilineinput`. The plugins are **best-effort** — a missing module logs a warning but the editor still renders.
+- Autosave to IndexedDB via `useAutosave.js` (debounced 750 ms, periodic 15 s flush, restored on mount; quota-exceeded → German toast).
+- New `ToolbarButtons.jsx` component above the editor: undo/redo (`workspace.undo(false/true)`), zoom-to-fit, save (Ctrl+S), export to `.json`, import, theme switcher, autosave-age chip.
+- Shadow-block defaults on every numeric/text input in `blocks/toolbox.js` so beginners don't have to drag a `math_number` into every value slot.
+- Field validators on motion / perception / destinations / output blocks (clamp wait_seconds, marker IDs, tones; reject unknown colors / object classes).
+- Mobile-responsive layout: `flex flex-col` below md breakpoint, `md:grid` above. Editor + camera + controls stack on phones/tablets.
+
+**Block-level debugger** (2026-05): `DebugPanel.jsx` with three tabs (Sensoren / Variablen / Haltepunkte), pause/step/continue buttons in `RunControls.jsx`, breakpoints persisted in Redux + sent to the server via `WorkflowSetBreakpoints.srv`. The runtime checks each block id against `ctx.breakpoints` before dispatch; on hit, it sets `ctx.set_paused(True)` and waits on `ctx.wait_for_resume()`. The `[VAR:name=json]` log sentinel feeds the variable inspector. Sensor live-readout (`/workflow/sensors` topic, `SensorSnapshot.msg`, 5 Hz) shows follower joints, gripper opening, visible AprilTag IDs, color-pixel counts per color, and visible YOLO classes.
+
+**Workflow versioning**: every PATCH /workflows/{id} that changes `blockly_json` triggers `snapshot_workflow_version` (Supabase migration 013) which inserts the prior payload into `public.workflow_versions`. Capped at 20 per workflow via the `prune_workflow_versions` AFTER-INSERT trigger. Listed via `GET /workflows/{id}/versions`; restore via `POST /workflows/{id}/versions/{version_id}/restore`.
+
+**Tutorials / skillmap**: 6 starter tutorials at `physical_ai_manager/public/tutorials/*.json` (sage_hallo, bewege_zum_punkt_a, roten_wuerfel_aufnehmen, zaehle_blaue_objekte, stapele_drei_wuerfel, sortiere_nach_klasse). The `SkillmapPlayer.jsx` sidebar steps the student through each, applying per-step `allowed_blocks` as a toolbox restriction (the `restrictedBlocks` prop on `BlocklyWorkspace`). Progress synced via `GET/PATCH /me/tutorial-progress` and the `tutorial_progress` table (migration 014).
+
+**Classroom gallery** (`GalleryTab.jsx`): renders all `is_template=TRUE` workflows for the student's classroom + group-shared workflows from peers; each card has a Klonen button that calls `/workflows/{id}/clone`.
 
 **Validation** — `cloud_training_api/app/validators/workflow.py:validate_blockly_json()` enforces:
 - `MAX_BLOCKLY_JSON_BYTES = 256 * 1024` (256 KB) → 413 `Workflow ist zu groß (>256 KB).`
@@ -593,6 +610,19 @@ Returns `JSONResponse(429, {"detail": "Too many requests — please wait a momen
 | GET/PATCH/DELETE | `/workflows/{id}` | detail / update (calls `validate_blockly_json`) / delete |
 | POST | `/workflows` | create (calls `validate_blockly_json`) |
 | POST | `/workflows/{id}/clone` | non-template copy (owner can clone own; classmate can clone templates) |
+| GET | `/workflows/{id}/versions` | last 20 snapshots (newest first) — Roboter Studio Verlauf dropdown |
+| POST | `/workflows/{id}/versions/{version_id}/restore` | replace current `blockly_json` with the snapshot |
+
+**`/me/tutorial-progress`** routes (require any auth):
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/me/tutorial-progress` | every tutorial progress row for the caller |
+| PATCH | `/me/tutorial-progress/{tutorial_id}` | upsert current_step / completed flag |
+
+**`/vision`** routes (require any auth, rate-limited 5/60s):
+| Method | Path | Purpose |
+|---|---|---|
+| POST | `/vision/detect` | proxy to the OWLv2 Modal app for German open-vocabulary detection (§8.3) |
 
 ### 7.7 Helper functions (the IDOR firewall)
 - `_assert_classroom_owned(teacher_id, classroom_id)` → German `Klassenzimmer nicht gefunden`
@@ -624,6 +654,17 @@ Returns `JSONResponse(429, {"detail": "Too many requests — please wait a momen
 - `secrets = [modal.Secret.from_name("edubotics-training-secrets")]` — must inject `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `HF_TOKEN`.
 - `@app.function(image=image, gpu="L4", timeout=7*3600, secrets=secrets, min_containers=0)` def `train(dataset_name, model_name, model_type, training_params, training_id, worker_token) -> dict`.
 - `@app.function(...)` def `smoke_test()` checks torch/CUDA + required secrets.
+
+### 8.3 vision_app.py — Roboter Studio open-vocabulary detection (Phase-3)
+
+`robotis_ai_setup/modal_training/vision_app.py` — Modal app `edubotics-vision`, T4 GPU, `min_containers=0`, `scaledown_window=180`, `enable_memory_snapshot=True`.
+- Model: `google/owlv2-base-patch16-ensemble` (Apache-2.0, 200M params). CLIP text encoder handles German prompts natively (`rote Tasse`, `gelbe Banane`, …).
+- Image: `nvidia/cuda:12.1.1-devel-ubuntu22.04`-equivalent via `modal.Image.debian_slim()` + `transformers==4.46.0`, `torch==2.4.0`, `pillow`, `huggingface_hub`. HuggingFace cache on a persistent `modal.Volume` (`edubotics-vision-cache`).
+- The `OWLv2Detector.detect(image_bytes, prompts, score_threshold)` method runs `Owlv2Processor` + `Owlv2ForObjectDetection` and returns `{detections: [{label, score, bbox}], cold_start: bool}`.
+- Cost model (see `dive-extreame-deep-eventual-backus-agent-ab1f60cfec7ac255a.md`): T4 = $0.59/hr per the 2026 Modal pricing page. With scale-to-zero + memory snapshots, ~$0.0001/call typical, ~$0.50 / classroom / term.
+- Cloud bridge: `cloud_training_api/app/routes/vision.py` exposes `POST /vision/detect` (rate-limited 5/60s/user). Per-user term quota via optional `users.vision_quota_per_term` column.
+- React block `edubotics_detect_open_vocab` (see §6.7) routes German prompts through a small synonym dict first; cloud burst is the fallback. The block is opt-in via `cloud_vision_enabled` on `StartWorkflow.srv`.
+- Deploy: `modal deploy modal_training/vision_app.py`. Smoke: `modal run -m vision_app::smoke_test`.
 
 ### 8.2 training_handler.py (~700 lines)
 **Constants**: `OUTPUT_DIR = Path("/tmp/training_output")`, `EXPECTED_CODEBASE_VERSION = "v2.1"`, `MIN_JOINTS = 4`, `MAX_JOINTS = 20`. Module-level `_current_job: dict | None` for signal handler.
@@ -720,6 +761,20 @@ Returns `JSONResponse(429, {"detail": "Too many requests — please wait a momen
 - Lifecycle (per spec): trainings/datasets/workflows stay visible to former group members via the audit table; deleting a group is refused while members exist; on group delete, allocated `shared_credits` returns to the teacher pool naturally (the summary RPC sums shared_credits and the row is gone).
 
 ### 9.12 012_dataset_sweep.sql — adds `datasets.discovered_via_sweep BOOLEAN NOT NULL DEFAULT FALSE`. Marks rows registered by the periodic Railway sweep (see §10.5) versus rows registered live by the React app right after upload. Informational only — sweep does not skip rows on subsequent ticks.
+
+### 9.13 013_workflow_versions.sql (Roboter Studio Phase-2 history)
+- New table `public.workflow_versions` (id, workflow_id FK CASCADE, blockly_json JSONB, note TEXT, created_at TIMESTAMPTZ, saved_by UUID FK SET NULL).
+- Index `idx_workflow_versions_workflow` on `(workflow_id, created_at DESC)`.
+- BEFORE-UPDATE trigger `trg_workflows_snapshot` on `public.workflows`: if `blockly_json` changes, insert the OLD payload into `workflow_versions`. Function is `SECURITY DEFINER` with explicit `SET search_path = public`.
+- AFTER-INSERT trigger `trg_workflow_versions_prune` on `public.workflow_versions`: deletes rows beyond the newest 20 per `workflow_id`. SECURITY DEFINER as well.
+- RLS read policies: owner of the parent workflow can read; admin can read all. No public INSERT (the trigger is the only writer).
+- Realtime publication added (idempotent DO block).
+
+### 9.14 014_tutorial_progress.sql (Roboter Studio Phase-3 skillmap)
+- New table `public.tutorial_progress` (composite PK `(user_id, tutorial_id)`, current_step INT default 0, completed_at TIMESTAMPTZ NULL, updated_at TIMESTAMPTZ).
+- Trigger `trg_tutorial_progress_touch` updates `updated_at` on every UPDATE.
+- RLS: owner reads/writes own; admin reads all; teacher reads own students' progress (joined via `users.classroom_id`).
+- Endpoints in `cloud_training_api/app/routes/me.py`: `GET /me/tutorial-progress`, `PATCH /me/tutorial-progress/{tutorial_id}`.
 
 All migrations have rollbacks under `supabase/rollback/` (BEGIN/COMMIT-wrapped). 010 rollback restores the 006-version body.
 

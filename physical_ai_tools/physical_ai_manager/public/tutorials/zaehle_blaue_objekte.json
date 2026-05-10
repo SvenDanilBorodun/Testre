@@ -1,0 +1,45 @@
+{
+  "id": "zaehle_blaue_objekte",
+  "title_de": "Zähle blaue Objekte und sage die Anzahl",
+  "level": 2,
+  "summary": "Verbinde Wahrnehmung mit Sprache: zähle und sage die Anzahl an.",
+  "steps": [
+    {
+      "title": "Blaue Objekte zählen",
+      "body": "Setze einen \"Anzahl Farbe blau\"-Block ein und speichere das Ergebnis in einer Variablen \"anzahl\".",
+      "allowed_blocks": [
+        "edubotics_count_color",
+        "variables_set",
+        "variables_get"
+      ]
+    },
+    {
+      "title": "Anzahl ansagen",
+      "body": "Verwende \"sage\" mit dem Wert der Variablen \"anzahl\".",
+      "allowed_blocks": [
+        "edubotics_count_color",
+        "variables_set",
+        "variables_get",
+        "edubotics_speak_de",
+        "text"
+      ],
+      "hints": [
+        "Du kannst eine Variable in einen Text einfügen, indem du \"sage\" mit \"verbinde\" kombinierst."
+      ]
+    },
+    {
+      "title": "Mehrmals wiederholen",
+      "body": "Verpacke alles in einen \"wiederhole 3 mal\"-Block, sodass der Roboter alle 5 Sekunden zählt.",
+      "allowed_blocks": [
+        "edubotics_count_color",
+        "variables_set",
+        "variables_get",
+        "edubotics_speak_de",
+        "text",
+        "controls_repeat_ext",
+        "edubotics_wait_seconds",
+        "math_number"
+      ]
+    }
+  ]
+}

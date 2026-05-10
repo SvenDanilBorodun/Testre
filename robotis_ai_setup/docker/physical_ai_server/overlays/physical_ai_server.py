@@ -1900,10 +1900,33 @@ class PhysicalAIServer(Node):
             response.message = 'IK-Solver konnte nicht initialisiert werden.'
             return response
 
+        raw_target_z = float(request.target_z)
+        target_z = raw_target_z
+        # Floor-clamp target_z against z_table from the scene-cam
+        # hand-eye calibration so a caller bypassing auto_pose (or
+        # auto_pose with a stale hemisphere) cannot drive the gripper
+        # below the table plane. The 5 mm headroom keeps the tip from
+        # scraping. When no scene handeye is solved yet, z_table is
+        # absent and the clamp is skipped — auto_pose's hemisphere
+        # already keeps suggested poses safe in that branch.
+        try:
+            calib = self._load_workflow_calibration()
+            z_table = calib.get('z_table')
+            if z_table is not None:
+                floor = float(z_table) - 0.005
+                if target_z < floor:
+                    self.get_logger().warning(
+                        f'execute_pose: target_z={raw_target_z:.4f} below '
+                        f'z_table-5mm={floor:.4f}; clamping.'
+                    )
+                    target_z = floor
+        except Exception as e:
+            self.get_logger().warning(f'execute_pose: z_table clamp skipped: {e}')
+
         target_xyz = (
             float(request.target_x),
             float(request.target_y),
-            float(request.target_z),
+            target_z,
         )
         target_quat = (
             float(request.target_qx),
@@ -1927,15 +1950,42 @@ class PhysicalAIServer(Node):
             response.message = 'Pose außerhalb des Arbeitsbereichs.'
             return response
 
-        # Build a 4-second segment from the cached last-published
-        # joints (or home) to the target. The gripper joint stays put.
+        # Build a 4-second segment from the cached last-published joints
+        # to the target. The gripper joint stays put. On cold start
+        # (server just rebuilt, no trajectory published yet), the cache
+        # is empty — seed from /joint_states via the communicator so the
+        # segment starts from where the arm ACTUALLY is, not a hardcoded
+        # HOME it may not be at. The HOME fallback only fires when the
+        # joint-state subscription is also empty (very early startup),
+        # logged loudly because the first commanded waypoint then
+        # bypasses the per-tick delta cap.
         from physical_ai_server.workflow.trajectory_builder import (
             build_segment, chunked_publish,
         )
         HOME = [0.0, -_math.pi / 4, _math.pi / 4, 0.0, 0.0]
-        last = getattr(self, '_last_published_joints', None) or list(HOME) + [0.8]
-        if len(last) < 6:
-            last = list(HOME) + [0.8]
+        last = getattr(self, '_last_published_joints', None)
+        if not last or len(last) < 6:
+            live = None
+            if self.communicator is not None:
+                joints_getter = getattr(
+                    self.communicator, 'get_latest_follower_joints', None
+                )
+                if callable(joints_getter):
+                    try:
+                        live = joints_getter()
+                    except Exception as e:
+                        self.get_logger().warning(
+                            f'execute_pose: live joint seed failed: {e}'
+                        )
+            if live and len(live) >= 6:
+                last = list(live)
+            else:
+                self.get_logger().warning(
+                    'execute_pose: no cached or live joints — falling back '
+                    'to HOME. First-tick teleport possible if the arm is '
+                    'not actually at HOME.'
+                )
+                last = list(HOME) + [0.8]
         full_target = list(arm_q) + [last[5]]
         waypoints = build_segment(last, full_target, duration_s=4.0)
         # Bind the cancel event so /calibration/cancel can interrupt a

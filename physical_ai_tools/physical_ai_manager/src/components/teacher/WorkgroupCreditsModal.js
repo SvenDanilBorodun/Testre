@@ -23,7 +23,7 @@ export default function WorkgroupCreditsModal({
   const remaining = Math.max(total - used, 0);
 
   const submit = async (delta) => {
-    if (!Number.isFinite(delta) || delta === 0) return;
+    if (!Number.isFinite(delta) || delta === 0) return false;
     setBusy(true);
     try {
       const res = await adjustWorkgroupCredits(token, workgroup.id, delta);
@@ -34,8 +34,10 @@ export default function WorkgroupCreditsModal({
       });
       toast.success(`Geteilte Credits: ${res.new_amount}`);
       setAmount('');
+      return true;
     } catch (err) {
       toast.error(err.message || 'Fehler');
+      return false;
     } finally {
       setBusy(false);
     }
@@ -46,14 +48,33 @@ export default function WorkgroupCreditsModal({
   const canSubtract = Number.isFinite(parsed) && parsed > 0 && parsed <= remaining;
   const canApply = canAdd; // legacy alias for the input keydown
 
+  // "Fertig" should commit any pending value (positive add) and then
+  // close — that's the natural mental model when the modal contains a
+  // typed-but-not-yet-applied amount. Plain close lost the user's input.
+  // On API failure the toast surfaces the error and the modal stays
+  // open so the user can fix the value instead of being thrown out.
+  const handleDone = async () => {
+    if (busy) return;
+    if (canAdd) {
+      const ok = await submit(Math.abs(parsed));
+      if (!ok) return;
+    }
+    onClose();
+  };
+
   return (
     <Modal
       title={`Credits · ${workgroup.name}`}
       onClose={onClose}
       footer={
-        <Btn variant="primary" onClick={onClose}>
-          Fertig
-        </Btn>
+        <>
+          <Btn variant="ghost" onClick={onClose} disabled={busy}>
+            Schließen
+          </Btn>
+          <Btn variant="primary" onClick={handleDone} disabled={busy}>
+            {canAdd ? `+${parsed} hinzufügen & schließen` : 'Fertig'}
+          </Btn>
+        </>
       }
     >
       <div className="flex flex-col gap-5">

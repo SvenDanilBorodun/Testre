@@ -112,44 +112,44 @@ def _validate_required_schema() -> None:
                 missing_tables.append(table)
             else:
                 raise
-    # 2) RPCs the code calls directly. Probe with a dummy UUID; any "user
-    #    not found" / "no rows" response proves the RPC exists. We fail
-    #    only on PGRST202 (function not found) or the bare PG "function
-    #    X does not exist" message.
+    # 2) RPCs the code calls directly. Probe with the actual argument
+    #    shape; any "user not found" / "no rows" response proves the
+    #    RPC exists. We fail only on PostgREST's PGRST202 (function
+    #    not found in the schema cache).
+    #
+    #    Probes are scoped to RPCs that take a single p_*_id UUID arg
+    #    so the probe shape is uniform. RPCs with complex required
+    #    args (start_training_safe, adjust_student_credits, etc.) are
+    #    NOT probed because PostgREST resolves functions by argument
+    #    signature: `rpc('start_training_safe', {})` legitimately
+    #    returns "function does not exist" for the zero-arg overload,
+    #    which is indistinguishable from the function being absent.
+    #    Those RPCs are covered by table-existence: if the migration
+    #    that added them ran, the tables they touch exist.
     dummy = "00000000-0000-0000-0000-000000000000"
     required_rpcs = (
         ("consume_vision_quota", {"p_user_id": dummy}),       # 017
-        ("refund_vision_quota", {"p_user_id": dummy}),        # 017 round-3
-        ("snapshot_workflow_version", None),                  # 015 (trigger fn — existence only)
-        ("get_remaining_credits", {"p_user_id": dummy}),
-        ("start_training_safe", None),                        # check existence via wrong-arg call
-        ("update_training_progress", None),
-        ("adjust_student_credits", None),
-        ("adjust_workgroup_credits", None),
-        ("get_teacher_credit_summary", {"p_teacher_id": dummy}),
+        ("refund_vision_quota", {"p_user_id": dummy}),        # 017 round-3 — the c56c012 incident hot spot
+        ("get_remaining_credits", {"p_user_id": dummy}),      # base
+        ("get_teacher_credit_summary", {"p_teacher_id": dummy}),  # 002
     )
     missing_rpcs: list[str] = []
     for name, args in required_rpcs:
         try:
-            if args is None:
-                # Call with no args; if the RPC exists it'll fail with a
-                # signature mismatch (PGRST203) which we accept as proof
-                # of existence.
-                sb.rpc(name, {}).execute()
-            else:
-                sb.rpc(name, args).execute()
+            sb.rpc(name, args).execute()
         except Exception as exc:
             msg = str(exc)
-            # The only error we treat as "missing": PostgREST's
-            # PGRST202 (function not found in the schema cache) and
-            # the Postgres "function … does not exist" message.
+            # PostgREST PGRST202: function not found in the schema
+            # cache. The "function X does not exist" string is also
+            # what Postgres raises for a missing overload, but since
+            # we probe with the correct signature here, that response
+            # only happens when the function is truly absent.
             if "PGRST202" in msg or (
                 "function" in msg.lower() and "does not exist" in msg.lower()
             ):
                 missing_rpcs.append(name)
-            # Everything else (PGRST203 wrong signature, P0001 token
-            # mismatch, P0002 user not found, etc.) proves the RPC
-            # exists, so swallow.
+            # Everything else (P0001 token mismatch, P0002 user not
+            # found, P0003 no credits, etc.) proves the RPC exists.
     if missing_tables or missing_rpcs:
         details = []
         if missing_tables:

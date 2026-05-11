@@ -78,8 +78,21 @@ const initialState = {
   // Phase-3 cloud-vision toggle. When true, open-vocab detect blocks
   // can burst to OWLv2 on Modal for German prompts not in the local
   // synonym dict. False keeps the workflow offline-only.
-  cloudVisionEnabled: false,
+  // Audit F29: persist across page reloads so the student doesn't
+  // re-enable on every refresh.
+  cloudVisionEnabled: _readCloudVisionPersisted(),
 };
+
+function _readCloudVisionPersisted() {
+  try {
+    if (typeof localStorage !== 'undefined') {
+      return localStorage.getItem('edubotics_cloud_vision') === 'true';
+    }
+  } catch (_) {
+    /* private mode / disabled storage */
+  }
+  return false;
+}
 
 function classifyQuality(score) {
   if (score === undefined || score === null) return 'ok';
@@ -286,7 +299,20 @@ const workshopSlice = createSlice({
         : null;
     },
     setCloudVisionEnabled: (state, action) => {
-      state.cloudVisionEnabled = !!action.payload;
+      const next = !!action.payload;
+      state.cloudVisionEnabled = next;
+      // Audit F29: mirror to localStorage so page reloads keep the
+      // toggle in sync. Inside the reducer rather than a thunk
+      // because the toggle is only flipped from one place
+      // (RunControls.jsx) and the persistence is the user's
+      // expectation, not optional.
+      try {
+        if (typeof localStorage !== 'undefined') {
+          localStorage.setItem('edubotics_cloud_vision', String(next));
+        }
+      } catch (_) {
+        /* private mode / disabled storage */
+      }
     },
   },
 });

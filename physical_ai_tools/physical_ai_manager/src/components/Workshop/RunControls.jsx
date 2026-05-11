@@ -41,6 +41,10 @@ function RunControls({ workflowId, blocklyJson, workspace = null }) {
   const debuggerVisible = useSelector((s) => s.workshop.debuggerVisible);
   const debuggerWarnings = useSelector((s) => s.workshop.debuggerWarnings);
   const cloudVisionEnabled = useSelector((s) => s.workshop.cloudVisionEnabled);
+  // Forwarded to the on-host server via StartWorkflow.srv so the
+  // _cloud_vision_burst can authorise its POST to /vision/detect.
+  // Empty string when the user isn't logged in (e.g. cloud-only mode).
+  const accessToken = useSelector((s) => s.auth?.session?.access_token);
   const [busy, setBusy] = useState(false);
 
   const isRunning = runState === 'running' || phase === 'running' || paused;
@@ -102,6 +106,9 @@ function RunControls({ workflowId, blocklyJson, workspace = null }) {
           workflow_json: JSON.stringify(blocklyJson),
           workflow_id: workflowId || `local-${Date.now()}`,
           cloud_vision_enabled: !!cloudVisionEnabled,
+          auth_token: cloudVisionEnabled && typeof accessToken === 'string'
+            ? accessToken
+            : '',
         }
       );
       if (!r.success) {
@@ -137,7 +144,9 @@ function RunControls({ workflowId, blocklyJson, workspace = null }) {
   // cloudVisionEnabled must be in the deps array — otherwise the
   // useCallback retains the value captured at the first render and
   // toggling the checkbox doesn't take effect. Audit round-3 §J / §W.
-  }, [blocklyJson, callService, cloudVisionEnabled, dispatch, workflowId]);
+  // accessToken is in the deps so a token refresh during a session
+  // is picked up at the next Start press.
+  }, [blocklyJson, callService, cloudVisionEnabled, accessToken, dispatch, workflowId]);
 
   const handleStop = useCallback(async () => {
     setBusy(true);
@@ -325,6 +334,7 @@ function RunControls({ workflowId, blocklyJson, workspace = null }) {
           />
           {DE.CLOUD_VISION_TOGGLE}
         </label>
+        <VisionQuotaChip />
 
         <button
           type="button"
@@ -367,6 +377,49 @@ function RunControls({ workflowId, blocklyJson, workspace = null }) {
         )}
       </div>
     </div>
+  );
+}
+
+// Audit F30: per-term cloud-vision quota chip rendered next to the
+// toggle. Reads vision_quota_per_term + vision_used_per_term from
+// /me; renders nothing when the API does not return them
+// (e.g. migration 017 not deployed, or unbounded NULL quota).
+function VisionQuotaChip() {
+  const accessToken = useSelector((s) => s.auth?.session?.access_token);
+  const [usage, setUsage] = useState(null);
+  useEffect(() => {
+    if (!accessToken) {
+      setUsage(null);
+      return undefined;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const mod = await import('../../services/meApi');
+        const me = await mod.getMe(accessToken);
+        if (cancelled) return;
+        const quota = me?.vision_quota_per_term;
+        const used = me?.vision_used_per_term;
+        if (typeof quota === 'number' && typeof used === 'number') {
+          setUsage({ quota, used });
+        } else {
+          setUsage(null);
+        }
+      } catch (_) {
+        if (!cancelled) setUsage(null);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [accessToken]);
+  if (!usage) return null;
+  const remaining = Math.max(0, usage.quota - usage.used);
+  return (
+    <span
+      className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs bg-blue-50 text-blue-700"
+      title="Cloud-Erkennung — verbleibende Aufrufe in diesem Halbjahr"
+    >
+      ☁ {remaining}/{usage.quota}
+    </span>
   );
 }
 

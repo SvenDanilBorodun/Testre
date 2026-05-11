@@ -107,6 +107,15 @@ class PhysicalAIServer(Node):
         self.on_inference = False
         self.on_calibration = False
         self.on_workflow = False
+        # Audit F9: consecutive `convert_msgs_to_raw_datas` failures.
+        # A single bad frame (malformed JPEG, cv_bridge transient)
+        # used to nuke the whole inference run. Now we skip the tick
+        # and only abort after N consecutive failures.
+        self._inference_convert_fail_count: int = 0
+        # Cached Supabase JWT forwarded from the React app's
+        # StartWorkflow request — consumed by _cloud_vision_burst.
+        # None until the next workflow start.
+        self._cloud_vision_auth_token: str | None = None
         # Cleared by /calibration/start, set by /calibration/cancel.
         # /calibration/execute_pose's chunked_publish polls this so a
         # mis-planned 4-second motion can be aborted mid-flight.
@@ -603,6 +612,40 @@ class PhysicalAIServer(Node):
         now = time.perf_counter()
         if not hasattr(self, '_last_waiting_log'):
             self._last_waiting_log = {}
+        # Audit F17: one-shot camera-fps sanity check ~1.5 s after
+        # start_recording_time. If an enabled camera publishes below
+        # 0.8x of task_info.fps, surface a German [WARNUNG] so the
+        # operator knows the dataset will repeat frames (which trains
+        # strobing behavior into the policy).
+        if (
+            self.start_recording_time > 0
+            and not getattr(self, '_camera_fps_checked', False)
+            and (time.perf_counter() - self.start_recording_time) > 1.5
+        ):
+            self._camera_fps_checked = True
+            try:
+                target_fps = float(getattr(self.task_info, 'fps', 0) or 0)
+                if target_fps > 0 and hasattr(self.communicator, 'get_camera_observed_hz'):
+                    for cam_name in self.communicator.camera_topic_msgs.keys():
+                        observed = self.communicator.get_camera_observed_hz(cam_name, 1.0)
+                        if observed is not None and observed < target_fps * 0.8:
+                            warning = (
+                                f'Kamera "{cam_name}" liefert nur '
+                                f'{observed:.1f} Hz, Aufnahme erwartet '
+                                f'{target_fps:.0f} Hz. Datensatz enthaelt '
+                                f'wiederholte Frames — bitte Aufloesung '
+                                f'reduzieren oder Kabel pruefen.'
+                            )
+                            self.get_logger().warning(warning)
+                            try:
+                                # Stash on data_manager so the status
+                                # publisher surfaces it as a banner.
+                                if self.data_manager is not None:
+                                    self.data_manager._last_warning_message = warning
+                            except Exception:
+                                pass
+            except Exception as e:
+                self.get_logger().warning(f'camera fps check failed: {e}')
         def _log_waiting(source: str, msg: str) -> None:
             last = self._last_waiting_log.get(source, 0.0)
             if now - last > 1.0:
@@ -734,14 +777,32 @@ class PhysicalAIServer(Node):
                 follower_msgs,
                 self.total_joint_order)
         except Exception as e:
-            error_msg = f'Failed to convert messages: {str(e)}, please check the robot type again!'
+            # Audit F9: one bad frame used to nuke the run. Skip the
+            # tick and only abort after 30 consecutive failures
+            # (~1 s @ 30 Hz). Resets on the first successful tick below.
+            self._inference_convert_fail_count += 1
+            if self._inference_convert_fail_count < 30:
+                if self._inference_convert_fail_count % 10 == 1:
+                    self.get_logger().warning(
+                        f'convert_msgs_to_raw_datas failed (tick skipped, '
+                        f'count={self._inference_convert_fail_count}/30): {e}'
+                    )
+                return
+            error_msg = (
+                f'Failed to convert messages for >1s ({str(e)}). '
+                f'Please check the robot type again!'
+            )
             self.on_inference = False
+            self._inference_convert_fail_count = 0
             current_status.phase = TaskStatus.READY
             current_status.error = error_msg
             self.communicator.publish_status(status=current_status)
             self.inference_manager.clear_policy()
             self.timer_manager.stop(timer_name=self.operation_mode)
             return
+        # Reset counter on the first successful tick — sporadic
+        # failures don't snowball into a forced abort.
+        self._inference_convert_fail_count = 0
 
         if self.inference_manager.policy is None:
             if not self.inference_manager.load_policy():
@@ -1000,6 +1061,10 @@ class PhysicalAIServer(Node):
                 )
 
                 self.start_recording_time = time.perf_counter()
+                # Audit F17: re-arm the one-shot camera-fps check at
+                # every START_RECORD so a slow-Hz warning fires once
+                # per session, not once per process.
+                self._camera_fps_checked = False
                 self.on_recording = True
                 response.success = True
                 response.message = 'Recording started'
@@ -1495,14 +1560,30 @@ class PhysicalAIServer(Node):
         )
         return self.calibration_manager
 
-    def _get_latest_camera_frame(self, camera: str):
+    def _get_latest_camera_frame(self, camera: str, max_age_s: float | None = None):
         """Provider hook for the calibration manager + colour profile
         capture. Returns the most recent BGR frame for the named camera,
         or None when no frame has arrived yet / decode fails. Delegates to
         ``Communicator.get_latest_bgr_frame``, which decodes the cached
-        ``CompressedImage`` JPEG via cv2.imdecode."""
+        ``CompressedImage`` JPEG via cv2.imdecode.
+
+        Audit F58: when ``max_age_s`` is set, returns None for frames
+        older than the threshold so cloud-vision bursts don't fire on
+        30-s-stale frames and waste Modal time. Calibration / colour
+        capture callers pass None (no age limit) since they're
+        student-driven, not autonomous.
+        """
         if self.communicator is None:
             return None
+        if max_age_s is not None:
+            age_getter = getattr(self.communicator, 'get_camera_msg_age_s', None)
+            if callable(age_getter):
+                try:
+                    age = age_getter(camera)
+                except Exception:
+                    age = None
+                if age is None or age > max_age_s:
+                    return None
         getter = getattr(self.communicator, 'get_latest_bgr_frame', None)
         if not callable(getter):
             self.get_logger().warning(
@@ -2348,10 +2429,16 @@ class PhysicalAIServer(Node):
         # and ctx.cloud_vision['cloud_burst'] (callable) to decide whether
         # to bypass to Modal OWLv2. When disabled, the open-vocab block
         # raises the German "Cloud-Erkennung deaktiviert" error.
+        # The auth_token (Supabase JWT) is cached on the node so
+        # _cloud_vision_burst can attach it as a Bearer header. Lives
+        # only in memory for the lifetime of the run.
+        auth_token = str(getattr(request, 'auth_token', '') or '')
+        self._cloud_vision_auth_token = auth_token if auth_token else None
+        cloud_burst = self._cloud_vision_burst if auth_token else None
         cloud_vision = {
             'enabled': bool(getattr(request, 'cloud_vision_enabled', False)),
             'translate': self._cloud_vision_synonyms(),
-            'cloud_burst': self._cloud_vision_burst,
+            'cloud_burst': cloud_burst,
         }
         success, message, unreachable = manager.start(
             request.workflow_json,
@@ -2505,25 +2592,71 @@ class PhysicalAIServer(Node):
         local-detection fast-path that skips the cloud roundtrip.
 
         Format per entry:
-          {'mode': 'object'|'color', 'class': '<coco_label>',
+          {'mode': 'object'|'color', 'class': '<german_label>',
            'color': '<rot|gruen|blau|gelb>'}
+
+        German class labels MUST match keys in COCO_CLASSES (e.g.
+        ``Tasse``, ``Banane``, ``Apfel``) so the downstream YOLO filter
+        (``coco_class in COCO_CLASSES``) matches; English labels here
+        would silently return every detected object unfiltered (audit F1).
+
+        Audit F55: also consults
+        ``/root/.cache/edubotics/cloud_vision_synonyms.yaml`` if present
+        (the calibration volume survives ``docker compose down``).
+        This lets a classroom add "Stift", "Lineal", "Maus" without a
+        Hub rebuild + image pull. Hardcoded fallback below stays as
+        the source of truth so the system still works without the
+        YAML file.
 
         The perception_blocks.detect_open_vocab handler resolves a prompt
         against this dict first; on miss it calls ctx.cloud_vision[
         'cloud_burst'] (the bound _cloud_vision_burst method) to reach
         Modal via the cloud_training_api proxy.
         """
+        hardcoded = self._cloud_vision_synonyms_hardcoded()
+        try:
+            from pathlib import Path as _Path
+            yaml_path = _Path('/root/.cache/edubotics/cloud_vision_synonyms.yaml')
+            if not yaml_path.exists():
+                return hardcoded
+            try:
+                import yaml as _yaml
+            except ImportError:
+                self.get_logger().warning(
+                    'cloud_vision_synonyms.yaml present but PyYAML missing — '
+                    'falling back to hardcoded dict.'
+                )
+                return hardcoded
+            with yaml_path.open('r', encoding='utf-8') as fh:
+                custom = _yaml.safe_load(fh) or {}
+            if not isinstance(custom, dict):
+                self.get_logger().warning(
+                    'cloud_vision_synonyms.yaml is not a mapping — ignored.'
+                )
+                return hardcoded
+            merged: dict[str, dict] = dict(hardcoded)
+            for k, v in custom.items():
+                if isinstance(k, str) and isinstance(v, dict):
+                    merged[k.lower()] = v
+            return merged
+        except Exception as e:
+            self.get_logger().warning(
+                f'cloud_vision_synonyms.yaml load failed, using hardcoded: {e}'
+            )
+            return hardcoded
+
+    def _cloud_vision_synonyms_hardcoded(self) -> dict[str, dict]:
         return {
-            'rote tasse': {'mode': 'object', 'class': 'cup', 'color': 'rot'},
-            'tasse': {'mode': 'object', 'class': 'cup'},
-            'banane': {'mode': 'object', 'class': 'banana'},
-            'gelbe banane': {'mode': 'object', 'class': 'banana', 'color': 'gelb'},
-            'flasche': {'mode': 'object', 'class': 'bottle'},
-            'apfel': {'mode': 'object', 'class': 'apple'},
-            'roter apfel': {'mode': 'object', 'class': 'apple', 'color': 'rot'},
-            'orange': {'mode': 'object', 'class': 'orange'},
-            'buch': {'mode': 'object', 'class': 'book'},
-            'schere': {'mode': 'object', 'class': 'scissors'},
+            'rote tasse': {'mode': 'object', 'class': 'Tasse', 'color': 'rot'},
+            'tasse': {'mode': 'object', 'class': 'Tasse'},
+            'banane': {'mode': 'object', 'class': 'Banane'},
+            'gelbe banane': {'mode': 'object', 'class': 'Banane', 'color': 'gelb'},
+            'flasche': {'mode': 'object', 'class': 'Flasche'},
+            'apfel': {'mode': 'object', 'class': 'Apfel'},
+            'roter apfel': {'mode': 'object', 'class': 'Apfel', 'color': 'rot'},
+            'orange': {'mode': 'object', 'class': 'Orange'},
+            'buch': {'mode': 'object', 'class': 'Buch'},
+            'schere': {'mode': 'object', 'class': 'Schere'},
             'roter wuerfel': {'mode': 'color', 'color': 'rot'},
             'roter würfel': {'mode': 'color', 'color': 'rot'},
             'blauer wuerfel': {'mode': 'color', 'color': 'blau'},
@@ -2540,17 +2673,139 @@ class PhysicalAIServer(Node):
         edubotics-vision app (OWLv2). Returns a list of perception.Detection
         objects (possibly empty).
 
-        Currently a stub that raises — the JWT-propagation path from
-        the on-host server to the cloud API is tracked in
-        ROBOTER_STUDIO_DEFERRED.md §1.4. Once a per-classroom service
-        token mints, this method will POST JPEG bytes + prompts and
-        translate the response into Detection objects. Until then the
-        open-vocab block falls back to the German "Cloud-Erkennung
-        deaktiviert" error when the synonym dict misses.
+        Requires:
+          - ``EDUBOTICS_CLOUD_API_URL`` env var (set by GUI / compose .env)
+          - A valid student JWT cached on ``self._cloud_vision_auth_token``
+            by ``workflow_start_callback`` (forwarded from the React app's
+            StartWorkflow.srv ``auth_token`` field).
+
+        Raises ``WorkflowError`` (German) on any failure so the workflow
+        runtime surfaces a clean message to the student.
         """
-        raise NotImplementedError(
-            'Cloud-Erkennung ist auf dieser Installation noch nicht aktiviert.'
+        import base64
+        import os
+
+        import cv2
+        from physical_ai_server.workflow.handlers.motion import WorkflowError
+        from physical_ai_server.workflow.perception import Detection
+
+        cloud_api_url = os.environ.get('EDUBOTICS_CLOUD_API_URL', '').rstrip('/')
+        if not cloud_api_url:
+            raise WorkflowError(
+                'Cloud-Erkennung ist auf diesem Server nicht konfiguriert '
+                '(EDUBOTICS_CLOUD_API_URL fehlt).'
+            )
+        # Audit F58: refuse to burst on a >2 s-stale scene frame so we
+        # don't pay Modal to detect objects in a dead view. The caller
+        # passes the frame they already grabbed; we just confirm the
+        # underlying communicator received it recently.
+        if self.communicator is not None:
+            age_getter = getattr(self.communicator, 'get_camera_msg_age_s', None)
+            if callable(age_getter):
+                try:
+                    age = age_getter('scene')
+                except Exception:
+                    age = None
+                if age is not None and age > 2.0:
+                    from physical_ai_server.workflow.handlers.motion import WorkflowError as _WE
+                    raise _WE(
+                        'Szenenbild ist veraltet (kein neues Bild seit '
+                        f'{age:.1f}s). Cloud-Erkennung abgebrochen.'
+                    )
+        token = getattr(self, '_cloud_vision_auth_token', None)
+        if not token:
+            raise WorkflowError(
+                'Anmeldung fehlt für Cloud-Erkennung — bitte erneut einloggen '
+                'und Workflow neu starten.'
+            )
+        try:
+            import requests  # type: ignore
+        except ImportError:
+            raise WorkflowError(
+                'HTTP-Client (requests) ist nicht installiert — bitte Image '
+                'neu bauen.'
+            )
+
+        ok, jpg = cv2.imencode(
+            '.jpg', bgr_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80],
         )
+        if not ok:
+            raise WorkflowError('JPEG-Kompression des Szenenbildes fehlgeschlagen.')
+        b64 = base64.b64encode(jpg.tobytes()).decode('ascii')
+
+        try:
+            response = requests.post(
+                f'{cloud_api_url}/vision/detect',
+                json={
+                    'image_b64': b64,
+                    'prompts': [prompt],
+                    'score_threshold': 0.25,
+                },
+                headers={'Authorization': f'Bearer {token}'},
+                timeout=15,
+            )
+        except requests.exceptions.Timeout:
+            raise WorkflowError(
+                'Cloud-Erkennung antwortet nicht — bitte erneut versuchen.'
+            )
+        except requests.exceptions.RequestException as e:
+            raise WorkflowError(
+                f'Cloud-Erkennung nicht erreichbar: {type(e).__name__}.'
+            )
+
+        if response.status_code == 401 or response.status_code == 403:
+            raise WorkflowError(
+                'Anmeldung für Cloud-Erkennung abgelaufen — bitte neu einloggen.'
+            )
+        if response.status_code == 429:
+            raise WorkflowError(
+                'Cloud-Erkennungs-Kontingent für dieses Halbjahr erreicht.'
+            )
+        if response.status_code == 503:
+            raise WorkflowError(
+                'Cloud-Erkennung ist gerade nicht erreichbar.'
+            )
+        if response.status_code == 504:
+            raise WorkflowError(
+                'Cloud-Erkennung lädt noch — bitte gleich erneut versuchen.'
+            )
+        if response.status_code >= 400:
+            raise WorkflowError(
+                'Cloud-Erkennung ist fehlgeschlagen. Bitte erneut versuchen.'
+            )
+
+        try:
+            data = response.json()
+        except ValueError:
+            raise WorkflowError(
+                'Cloud-Erkennung lieferte ungültige Antwort.'
+            )
+
+        raw_detections = data.get('detections', []) or []
+        h, w = bgr_frame.shape[:2]
+        out: list = []
+        for d in raw_detections:
+            try:
+                bbox = d.get('bbox') or [0, 0, 0, 0]
+                x1, y1, x2, y2 = (float(bbox[0]), float(bbox[1]),
+                                  float(bbox[2]), float(bbox[3]))
+                x1 = max(0, min(w - 1, int(round(x1))))
+                y1 = max(0, min(h - 1, int(round(y1))))
+                x2 = max(0, min(w - 1, int(round(x2))))
+                y2 = max(0, min(h - 1, int(round(y2))))
+                bw = max(1, x2 - x1)
+                bh = max(1, y2 - y1)
+                cx = x1 + bw // 2
+                cy = y1 + bh // 2
+                out.append(Detection(
+                    centroid_px=(cx, cy),
+                    bbox_px=(x1, y1, bw, bh),
+                    confidence=float(d.get('score', 0.0)),
+                    label=str(d.get('label', prompt)),
+                ))
+            except (TypeError, ValueError, KeyError):
+                continue
+        return out
 
     # ------------------------------------------------------------------
     # Phase-2 sensor snapshot publisher (~5 Hz while a workflow runs)

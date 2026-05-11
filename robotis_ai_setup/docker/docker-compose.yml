@@ -39,10 +39,14 @@ services:
     mem_limit: 2g
     pids_limit: 512
     healthcheck:
-      # Fail if /joint_states isn't being published — that's the contract
-      # physical_ai_server depends on. Source ROS setup inline so the
-      # healthcheck doesn't need an interactive shell.
-      test: ["CMD-SHELL", "bash -c 'source /opt/ros/jazzy/setup.bash && source /root/ros2_ws/install/setup.bash && ros2 topic list 2>/dev/null | grep -q /joint_states'"]
+      # Audit F7: previously only checked /joint_states, leaving a
+      # dead usb_cam container reported "healthy" → physical_ai_server
+      # starts → recording proceeds with black frames → failure
+      # surfaced only at first record-press via 5s topic-wait.
+      # Now also assert each configured camera's compressed image
+      # topic is being published. The ${CAMERA_DEVICE_*} env-var
+      # checks let single-camera setups stay healthy.
+      test: ["CMD-SHELL", "bash -c 'source /opt/ros/jazzy/setup.bash && source /root/ros2_ws/install/setup.bash && ros2 topic list 2>/dev/null | grep -q /joint_states && ([ -z \"$$CAMERA_DEVICE_1\" ] || ros2 topic list | grep -q /$${CAMERA_NAME_1:-gripper}/image_raw/compressed) && ([ -z \"$$CAMERA_DEVICE_2\" ] || ros2 topic list | grep -q /$${CAMERA_NAME_2:-scene}/image_raw/compressed)'"]
       interval: 10s
       timeout: 5s
       retries: 3
@@ -75,6 +79,11 @@ services:
       - "127.0.0.1:9090:9090"
     environment:
       - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-30}
+      # Phase-3 cloud-vision: the on-host server POSTs base64 JPEGs +
+      # German prompts to ${EDUBOTICS_CLOUD_API_URL}/vision/detect when
+      # the student enables the open-vocab block. Defaults to the
+      # Railway production endpoint; override in .env for staging.
+      - EDUBOTICS_CLOUD_API_URL=${EDUBOTICS_CLOUD_API_URL:-https://scintillating-empathy-production-9efd.up.railway.app}
     volumes:
       # This container does inference/recording on ROS topics; it does NOT
       # talk to raw USB. /dev:/dev + privileged were unnecessary attack

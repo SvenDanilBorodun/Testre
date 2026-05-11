@@ -190,27 +190,50 @@ def detect_open_vocab(ctx, args: dict[str, Any]) -> list:
     prompt = str(prompt).strip()
     cv = getattr(ctx, 'cloud_vision', None) or {}
     translate = (cv.get('translate') or {}) if isinstance(cv, dict) else {}
-    coco = translate.get(prompt.lower())
-    if coco:
-        # Local closed-vocab path. Re-uses the existing object handler
-        # so both the bbox overlay and world_xyz attachment go through
-        # the same code path.
-        return detect_object(ctx, {'class': coco})
-    # Cloud path. If the workflow context wasn't given a cloud_burst
-    # callable, raise a German error so students see why the prompt
-    # didn't match locally.
+    # Audit F1: each entry is a dispatch dict
+    # ``{'mode':'object'|'color', 'class':<german>, 'color':<rot|...>}``,
+    # NOT a bare class string. Forwarding the whole dict to detect_object
+    # crashed at ``coco_class in COCO_CLASSES`` with TypeError.
+    entry = translate.get(prompt.lower())
+    if isinstance(entry, dict):
+        mode = entry.get('mode')
+        if mode == 'object':
+            return detect_object(ctx, {
+                'class': entry.get('class'),
+                'color': entry.get('color'),
+            })
+        if mode == 'color':
+            return detect_color(ctx, {'color': entry.get('color')})
+        # Unknown mode falls through to the cloud path — defensive only.
+    elif isinstance(entry, str):
+        # Legacy single-string format (older synonym dicts) — treat as
+        # an object class. Kept for forward-compat if the dict moves
+        # to a YAML loader.
+        return detect_object(ctx, {'class': entry})
+    # Cloud path. Audit F54: respect the explicit `enabled` flag —
+    # decoupling "cloud_burst is bound" from "student has opted in"
+    # prevents quota/cost leak once the burst is wired.
     burst = cv.get('cloud_burst') if isinstance(cv, dict) else None
-    if not callable(burst):
+    if not cv.get('enabled') or not callable(burst):
         raise WorkflowError(
             f'Begriff "{prompt}" ist lokal nicht bekannt und Cloud-Erkennung '
             'ist deaktiviert. Bitte aktivieren oder einen bekannten Begriff '
             'verwenden.'
         )
+    if ctx.should_stop():
+        raise WorkflowError('Workflow wurde gestoppt.')
     bgr = ctx.get_scene_frame() if ctx.get_scene_frame else None
     if bgr is None:
         raise WorkflowError('Kein Szenenbild verfügbar.')
     try:
         detections = burst(bgr, prompt)
+    except WorkflowError:
+        raise
+    except NotImplementedError as e:
+        # Audit F56: the stub used to re-wrap its own message into
+        # "Cloud-Erkennung fehlgeschlagen: Cloud-Erkennung ist…". Pass
+        # the original German message through.
+        raise WorkflowError(str(e))
     except Exception as e:
         raise WorkflowError(f'Cloud-Erkennung fehlgeschlagen: {e}')
     return _attach_world_xyz(ctx, detections or [])

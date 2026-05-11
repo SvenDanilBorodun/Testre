@@ -172,6 +172,18 @@ class DataManager:
                     else:
                         self.record_early_save()
                     return self.RECORDING
+                # Audit F6: validate per-tick that camera frames match
+                # the shape locked in by frame 0. A USB renegotiation
+                # mid-record that drops 720p→480p would otherwise
+                # write torn parquet/mp4. Early-save the episode with
+                # a German warning so the student sees the loss.
+                shape_ok = self._check_image_shape_against_lock(images)
+                if not shape_ok:
+                    if self._single_task:
+                        self.record_early_save()
+                    else:
+                        self._status = 'finish'
+                    return self.RECORDING
                 frame = self.create_frame(images, state, action)
                 if self._task_info.use_optimized_save_mode:
                     self._lerobot_dataset.add_frame_without_write_image(
@@ -291,6 +303,39 @@ class DataManager:
                     self._expected_video_paths.append(out)
         except Exception:
             pass
+        # Audit F23: when the snapshot is empty (single-task path —
+        # encoders dict is populated by the async writer thread AFTER
+        # save_episode_without_write_image, NOT before), derive the
+        # expected paths from the canonical LeRobot v2.1 layout so
+        # _verify_saved_video_files isn't a no-op. The verifier still
+        # silently passes if these paths happen to be wrong; this is
+        # the documented v2.1 mp4 layout (root/videos/chunk-NNN/
+        # observation.images.{cam}/episode_{idx:06d}.mp4).
+        if not self._expected_video_paths:
+            try:
+                root = Path(str(getattr(self._lerobot_dataset, 'root', '') or ''))
+                if root:
+                    idx_attr = getattr(self._lerobot_dataset, 'get_episode_index', None)
+                    idx = idx_attr() if callable(idx_attr) else None
+                    if not isinstance(idx, int):
+                        idx = self._record_episode_count
+                    chunk = idx // 1000
+                    features = getattr(self._lerobot_dataset, 'features', {}) or {}
+                    for key in features:
+                        if not key.startswith('observation.images.'):
+                            continue
+                        self._expected_video_paths.append(
+                            str(
+                                root / 'videos' / f'chunk-{chunk:03d}'
+                                / key / f'episode_{idx:06d}.mp4'
+                            )
+                        )
+            except Exception as e:
+                # Defensive — verification is best-effort; don't crash save().
+                print(
+                    f'[WARNUNG] Konnte erwartete Video-Pfade nicht ableiten: {e}',
+                    file=sys.stderr, flush=True,
+                )
         if self._task_info.use_optimized_save_mode:
             if not self._single_task:
                 self._lerobot_dataset.save_episode_without_video_encoding()
@@ -431,6 +476,48 @@ class DataManager:
             self._current_task % len(self._task_info.task_instruction)
         ]
         return frame
+
+    def _check_image_shape_against_lock(self, images: dict) -> bool:
+        """Audit F6: per-tick assertion that camera frames still match
+        the shape recorded in ``features['observation.images.{name}']``
+        at episode 0. A mid-record USB renegotiation that drops
+        720p→480p would silently write torn parquet/mp4 otherwise.
+
+        Returns False (and sets ``_last_warning_message``) when any
+        camera's frame shape disagrees with the locked feature shape.
+        Returns True on the first call before features are populated
+        (the LeRobot wrapper sets them up after the first save).
+        """
+        try:
+            ds = self._lerobot_dataset
+            if ds is None or not hasattr(ds, 'features'):
+                return True
+            for camera_name, image in images.items():
+                key = f'observation.images.{camera_name}'
+                feature = ds.features.get(key) if isinstance(ds.features, dict) else None
+                if feature is None:
+                    continue
+                expected = tuple(feature.get('shape') or ())
+                if not expected:
+                    continue
+                if tuple(image.shape) != expected:
+                    warning = (
+                        f'Bildform geaendert: Kamera "{camera_name}" liefert '
+                        f'{image.shape}, Datensatz erwartet {expected}. '
+                        f'Episode {self._record_episode_count + 1} wird '
+                        f'frueh gespeichert — bitte Kamera neu verbinden '
+                        f'und Aufnahme neu starten.'
+                    )
+                    self._last_warning_message = warning
+                    print(f'[FEHLER] {warning}', file=sys.stderr, flush=True)
+                    return False
+        except Exception as e:
+            # The shape check itself must never crash the recording loop.
+            print(
+                f'[WARNUNG] Bildform-Check fehlgeschlagen: {e}',
+                file=sys.stderr, flush=True,
+            )
+        return True
 
     def record_early_save(self):
         if self._lerobot_dataset.episode_buffer is not None:

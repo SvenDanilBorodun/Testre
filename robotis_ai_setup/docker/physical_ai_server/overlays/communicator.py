@@ -16,6 +16,8 @@
 #
 # Author: Dongyun Kim, Seongwoo Kim, Kiwoong Park
 
+import time
+from collections import deque
 from functools import partial
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -103,6 +105,13 @@ class Communicator:
         node.get_logger().info(f'Parsed rosbag extra topics: {self.rosbag_extra_topics}')
 
         self.camera_topic_msgs = {}
+        # Audit F17/F18: per-camera wall-clock arrival deque (length 30
+        # → ~1 s window at 30 Hz) for liveness + observed-Hz queries.
+        # Header.stamp is also tracked so a driver re-emitting the same
+        # buffer with incrementing stamps doesn't defeat the
+        # stale-camera halt (which uses byte hashes).
+        self._camera_msg_arrival: Dict[str, deque] = {}
+        self._camera_msg_stamp_ns: Dict[str, int] = {}
         self.follower_topic_msgs = {}
         self.leader_topic_msgs = {}
 
@@ -325,6 +334,51 @@ class Communicator:
 
     def _camera_callback(self, name: str, msg: CompressedImage) -> None:
         self.camera_topic_msgs[name] = msg
+        # Audit F18: track receive monotonic time + header stamp so
+        # workflow / recording can detect a stale or low-fps stream
+        # even when the driver re-emits identical buffers.
+        now = time.monotonic()
+        dq = self._camera_msg_arrival.get(name)
+        if dq is None:
+            dq = deque(maxlen=64)
+            self._camera_msg_arrival[name] = dq
+        dq.append(now)
+        try:
+            stamp = msg.header.stamp
+            self._camera_msg_stamp_ns[name] = int(stamp.sec) * 1_000_000_000 + int(stamp.nanosec)
+        except Exception:
+            self._camera_msg_stamp_ns[name] = 0
+
+    def get_camera_msg_age_s(self, name: str) -> Optional[float]:
+        """Seconds since the last CompressedImage arrived for ``name``.
+        Returns None when no message has arrived yet.
+        Used by Roboter Studio / inference to reject stale-frame bursts.
+        """
+        dq = self._camera_msg_arrival.get(name)
+        if not dq:
+            return None
+        return time.monotonic() - dq[-1]
+
+    def get_camera_observed_hz(self, name: str, window_s: float = 1.0) -> Optional[float]:
+        """Audit F17: observed Hz over the last ``window_s`` seconds.
+        Returns None when fewer than 2 messages in the window.
+        Used at recording start to warn the operator when the camera
+        is running slower than ``task_info.fps`` (which causes the
+        cached CompressedImage to repeat → trained model learns from
+        strobing data).
+        """
+        dq = self._camera_msg_arrival.get(name)
+        if not dq or len(dq) < 2:
+            return None
+        now = time.monotonic()
+        cutoff = now - max(0.1, window_s)
+        in_window = [t for t in dq if t >= cutoff]
+        if len(in_window) < 2:
+            return None
+        span = in_window[-1] - in_window[0]
+        if span <= 0:
+            return None
+        return (len(in_window) - 1) / span
 
     def _follower_callback(self, name: str, msg: JointState) -> None:
         self.follower_topic_msgs[name] = msg

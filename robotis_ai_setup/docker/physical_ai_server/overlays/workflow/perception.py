@@ -7,12 +7,15 @@
 # You may obtain a copy of the License at
 #
 #     http://www.apache.org/licenses/LICENSE-2.0
-"""Three-mode perception: HSV color blobs, YOLOX-tiny COCO objects, AprilTags.
+"""Three-mode perception: LAB color blobs, YOLOX-tiny COCO objects, AprilTags.
 
 Mode selection is per-block in the workflow interpreter:
 
-- ``color``: HSV ``inRange`` from the per-classroom color profile, contours,
-  centroid + bbox, label = the German colour name.
+- ``color``: LAB-space distance from the per-classroom color profile
+  (per-channel |x-μ|/σ within a threshold), contours, centroid + bbox,
+  label = the German colour name. Audit F59 fixed the misleading "HSV"
+  reference in this docstring — the implementation has been LAB-space
+  since the color-profile rewrite.
 - ``yolo+color``: YOLOX-tiny ONNX inference at 640x640 letterbox; if a
   ``coco_class`` filter is supplied, only that class is returned; if a
   ``color`` filter is also supplied, a 10x10 px HSV patch around the bbox
@@ -214,6 +217,39 @@ class Perception:
         padded[pad_y:pad_y + new_h, pad_x:pad_x + new_w] = resized
         return padded, ratio, (pad_x, pad_y)
 
+    @staticmethod
+    def _yolox_demo_postprocess(
+        outputs: np.ndarray,
+        img_size: tuple[int, int],
+        strides: tuple[int, ...] = (8, 16, 32),
+    ) -> np.ndarray:
+        """Apply YOLOX grid + stride decoding.
+
+        Megvii's ``yolox_tiny.onnx`` (pinned by SHA in the Dockerfile)
+        emits ``(N, 85)`` predictions where the ``(cx, cy, w, h)`` are
+        **grid-relative offsets per feature level** at strides
+        ``{8, 16, 32}`` (audit F2). Without this decode, predictions
+        live in [0..80) px and NMS keeps nothing → silent empty.
+
+        Mirrors the upstream ``demo_postprocess`` in
+        ``YOLOX/yolox/utils/demo_utils.py``.
+        """
+        grids = []
+        expanded_strides = []
+        hsizes = [img_size[0] // s for s in strides]
+        wsizes = [img_size[1] // s for s in strides]
+        for hsize, wsize, stride in zip(hsizes, wsizes, strides):
+            xv, yv = np.meshgrid(np.arange(wsize), np.arange(hsize))
+            grid = np.stack((xv, yv), 2).reshape(1, -1, 2)
+            grids.append(grid)
+            shape = grid.shape[:2]
+            expanded_strides.append(np.full((*shape, 1), stride))
+        grids = np.concatenate(grids, 1)
+        expanded_strides = np.concatenate(expanded_strides, 1)
+        outputs[..., :2] = (outputs[..., :2] + grids) * expanded_strides
+        outputs[..., 2:4] = np.exp(outputs[..., 2:4]) * expanded_strides
+        return outputs
+
     def _detect_yolo(
         self,
         bgr: np.ndarray,
@@ -227,7 +263,14 @@ class Perception:
         tensor = np.expand_dims(tensor, 0)
 
         outputs = self._yolox_session.run(None, {self._yolox_input_name: tensor})
-        predictions = outputs[0][0]   # (N, 85): [cx, cy, w, h, obj, cls0..79]
+        # Audit F2: outputs[0] is grid-relative offsets per feature
+        # level. Decode through demo_postprocess before slicing.
+        # img_size is (H, W); YOLOX_INPUT_SIZE here is (W, H) but they
+        # match so the order is irrelevant.
+        predictions = self._yolox_demo_postprocess(
+            outputs[0].copy(),
+            img_size=(YOLOX_INPUT_SIZE[1], YOLOX_INPUT_SIZE[0]),
+        )[0]
         if predictions.size == 0:
             return []
 
@@ -246,8 +289,8 @@ class Perception:
         class_ids = class_ids[keep]
         confidences = max_scores[keep]
 
-        # YOLOX outputs grid-anchor offsets that are already at 640x640 stride.
-        # Convert to xyxy in padded image coordinates.
+        # Boxes are now at full 640×640 stride in padded image
+        # coordinates. Convert to xyxy for NMS / cropping.
         cx = boxes_xywh[:, 0]
         cy = boxes_xywh[:, 1]
         w = boxes_xywh[:, 2]
@@ -309,7 +352,13 @@ class Perception:
         class_ids: np.ndarray,
     ) -> list[int]:
         """Per-class non-maximum suppression. Returns indices into the
-        original arrays."""
+        original arrays.
+
+        Audit F3: ``cv2.dnn.NMSBoxes`` expects ``[x, y, w, h]`` boxes;
+        we receive ``[x1, y1, x2, y2]`` from the YOLOX decode. Convert
+        before passing or IoU collapses (near-origin boxes look tiny,
+        near-bottom-right boxes look huge → wrong dedupe).
+        """
         keep_total: list[int] = []
         for cid in np.unique(class_ids):
             mask = class_ids == cid
@@ -317,8 +366,14 @@ class Perception:
             sub_scores = scores[mask]
             if sub_boxes.size == 0:
                 continue
+            # xyxy -> xywh for NMSBoxes
+            x1 = sub_boxes[:, 0]
+            y1 = sub_boxes[:, 1]
+            x2 = sub_boxes[:, 2]
+            y2 = sub_boxes[:, 3]
+            sub_boxes_xywh = np.stack([x1, y1, x2 - x1, y2 - y1], axis=1)
             indices = cv2.dnn.NMSBoxes(
-                bboxes=sub_boxes.tolist(),
+                bboxes=sub_boxes_xywh.tolist(),
                 scores=sub_scores.tolist(),
                 score_threshold=YOLOX_CONFIDENCE_THRESHOLD,
                 nms_threshold=YOLOX_NMS_IOU_THRESHOLD,
@@ -326,6 +381,8 @@ class Perception:
             if indices is None:
                 continue
             indices = np.array(indices).reshape(-1)
+            if indices.size == 0:
+                continue
             original_indices = np.where(mask)[0]
             keep_total.extend(original_indices[indices].tolist())
         return keep_total

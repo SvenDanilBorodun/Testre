@@ -169,8 +169,9 @@ RUN python3 -m pip uninstall -y opencv-python opencv-python-headless 2>/dev/null
         pupil-apriltags==1.0.4 \
         onnxruntime==1.20.1 \
         pip-licenses==5.0.0 \
-        urdf-parser-py==0.0.4 && \
-    python3 -c "import cv2, onnxruntime, pupil_apriltags; print('runtime deps OK:', cv2.__version__, onnxruntime.__version__)"
+        urdf-parser-py==0.0.4 \
+        requests==2.32.3 && \
+    python3 -c "import cv2, onnxruntime, pupil_apriltags, requests; print('runtime deps OK:', cv2.__version__, onnxruntime.__version__)"
 
 # YOLOX-tiny ONNX (Megvii, Apache-2.0). Pinned release URL + SHA-256
 # so the binary is stable across builds and a future GitHub release

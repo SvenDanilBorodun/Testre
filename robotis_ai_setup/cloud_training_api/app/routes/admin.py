@@ -22,6 +22,13 @@ class TeacherCreate(BaseModel):
     credits: int = Field(default=0, ge=0, le=10000)
 
 
+class VisionQuotaSet(BaseModel):
+    # Audit F49: NULL = unbounded (matches DB column semantics); a
+    # negative quota is meaningless. Accept None explicitly so the
+    # admin can clear a quota.
+    quota: int | None = Field(..., ge=0)
+
+
 class TeacherCreditsSet(BaseModel):
     credits: int = Field(..., ge=0, le=10000)
 
@@ -203,6 +210,29 @@ async def set_teacher_credits(
         student_count=int(new_row.get("student_count", 0)),
         classroom_count=int(classroom_count_res.count or 0),
     )
+
+
+@router.patch("/teachers/{teacher_id}/vision-quota")
+async def set_teacher_vision_quota(
+    teacher_id: str,
+    req: VisionQuotaSet,
+    admin=Depends(get_current_admin),
+):
+    """Audit F49: admin path to set a teacher's per-term cloud-vision
+    quota. The on-host bridge consumes ``users.vision_quota_per_term``
+    via the ``consume_vision_quota`` RPC; this endpoint is the only
+    server-side surface that can change that column.
+    """
+    supabase = get_supabase()
+    existing = (
+        supabase.table("users").select("role").eq("id", teacher_id).execute()
+    )
+    if not existing.data or existing.data[0]["role"] != "teacher":
+        raise HTTPException(status_code=404, detail="Lehrer nicht gefunden")
+    supabase.table("users").update(
+        {"vision_quota_per_term": req.quota}
+    ).eq("id", teacher_id).execute()
+    return {"id": teacher_id, "vision_quota_per_term": req.quota}
 
 
 @router.post("/teachers/{teacher_id}/password")

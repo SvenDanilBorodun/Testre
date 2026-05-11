@@ -57,6 +57,16 @@ class InferenceManager:
         # runtime; both call sites configure their own instance via
         # set_action_limits and apply it per-tick.
         self._safety = SafetyEnvelope()
+        # Audit F13: consecutive image-shape mismatch counter. After
+        # ~3 s of returning None we escalate to a hard halt so the
+        # student sees a clear UI signal instead of a silently frozen
+        # arm + log spam.
+        self._image_shape_skip_count: int = 0
+        # Audit F11: a Roboter Studio / Inferenz episode starts with
+        # ``_last_action=None`` after reset_policy(); _need_seed flips
+        # to True so the first predict() call can ask the caller for
+        # the current joint state before applying the delta cap.
+        self._need_seed: bool = True
 
     def set_action_limits(
             self,
@@ -142,6 +152,13 @@ class InferenceManager:
         # InferenceManager-local _last_action attribute (as the v1 ship
         # of this file did) was a no-op.
         self._safety.reset()
+        # Audit F11: re-arm the first-tick seed so the next predict()
+        # call seeds the safety envelope from the current follower joints
+        # before applying the delta cap.
+        self._need_seed = True
+        # Audit F13: clear consecutive-skip counter so a previous run's
+        # mismatch doesn't blow up the next run's first tick.
+        self._image_shape_skip_count = 0
         # Drop the per-camera stale-frame dedupe + last-seen state so a
         # new episode's first frame is always treated as "fresh" and a
         # camera that re-froze gets a fresh warning instead of being
@@ -242,6 +259,7 @@ class InferenceManager:
         if self._expected_image_keys:
             provided = {f'observation.images.{k}' for k in images}
             missing = set(self._expected_image_keys) - provided
+            unexpected = provided - set(self._expected_image_keys)
 
             if missing:
                 # Previously raised — but raising from a ROS timer callback
@@ -256,6 +274,29 @@ class InferenceManager:
                     flush=True,
                 )
                 return None
+
+            # Audit F10: also reject EXTRA cameras. A 1-camera-trained
+            # policy with 2 connected cameras was being injected with
+            # an extra ``observation.images.scene`` tensor → policy
+            # crashed on unknown key → broad except aborted the run.
+            # Drop the extra keys here (or refuse, depending on the
+            # caller's preference). Dropping is friendlier to the
+            # student than aborting the run for a transient mis-config.
+            if unexpected:
+                expected_names = [k.replace('observation.images.', '') for k in self._expected_image_keys]
+                unexpected_names = [k.replace('observation.images.', '') for k in unexpected]
+                print(
+                    f'[WARNUNG] Zusaetzliche Kameras werden ignoriert: '
+                    f'{unexpected_names}, Modell erwartet nur {expected_names}.',
+                    flush=True,
+                )
+                # Drop the extras from the images dict so _preprocess
+                # doesn't build a tensor the policy can't accept.
+                filtered = {
+                    k: v for k, v in images.items()
+                    if f'observation.images.{k}' in self._expected_image_keys
+                }
+                images = filtered
 
         stale_camera = self._check_stale_cameras(images)
         if stale_camera is not None:
@@ -279,17 +320,43 @@ class InferenceManager:
                 if key in observation:
                     actual_shape = list(observation[key].shape[1:])  # drop batch dim
                     if expected_shape and actual_shape != expected_shape:
-                        print(
-                            f'[FEHLER] Bildaufloesung stimmt nicht ueberein: '
-                            f'{key} hat Form {actual_shape}, '
-                            f'Modell erwartet {expected_shape}. Tick uebersprungen.',
-                            flush=True,
-                        )
+                        self._image_shape_skip_count += 1
+                        # Audit F13: throttle the log to 1/30 ticks so a
+                        # permanent mismatch doesn't spam the log; after
+                        # ~3 s of consecutive skips (90 ticks @ 30 Hz),
+                        # raise so the caller can publish TaskStatus.error
+                        # and stop the timer instead of leaving the
+                        # student with a silently frozen arm.
+                        if self._image_shape_skip_count % 30 == 1:
+                            print(
+                                f'[FEHLER] Bildaufloesung stimmt nicht ueberein: '
+                                f'{key} hat Form {actual_shape}, '
+                                f'Modell erwartet {expected_shape}. Tick uebersprungen.',
+                                flush=True,
+                            )
+                        if self._image_shape_skip_count >= 90:
+                            raise RuntimeError(
+                                f'Bildaufloesung stimmt seit >3s nicht ueberein '
+                                f'({key} hat {actual_shape}, erwartet '
+                                f'{expected_shape}). Inferenz angehalten.'
+                            )
                         return None
+            # Successful shape check resets the consecutive-skip counter.
+            self._image_shape_skip_count = 0
 
         with torch.inference_mode():
             action = self.policy.select_action(observation)
             action = action.squeeze(0).to('cpu').numpy()
+
+        # Audit F11: seed the velocity-cap memory on the FIRST tick of
+        # a new episode so the first action IS subject to the delta
+        # cap. Without this, ``_last_action is None`` skips the cap
+        # entirely and a policy that emits a 1.5 rad jump from the
+        # current pose hits the JointTrajectoryController as a ~30 rad/s
+        # snap.
+        if self._need_seed:
+            self._safety.seed_last_action(state)
+            self._need_seed = False
 
         # Safety envelope: NaN/inf guard + joint-limit clamp + per-tick delta
         # cap. A diverging policy (bad checkpoint, OOD observation) can emit

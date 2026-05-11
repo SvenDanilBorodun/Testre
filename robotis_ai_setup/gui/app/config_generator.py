@@ -78,8 +78,17 @@ def generate_env_file(config: HardwareConfig, output_path: str = ENV_FILE) -> st
 
     if config.cameras:
         for i, cam in enumerate(config.cameras, 1):
+            # Audit F8: refuse to write a camera without a valid role
+            # (gripper / scene). omx_f_config.yaml hard-codes those
+            # topic names, so a `camera1`/`camera2` fallback would
+            # make the subscriber wait forever. The GUI wizard always
+            # sets a role; this guard catches programmatic misuse.
+            if cam.role not in ('gripper', 'scene'):
+                raise ValueError(
+                    f"Kamera ohne gueltige Rolle (gripper/scene): {cam.path}"
+                )
             lines.append(f"CAMERA_DEVICE_{i}={_quote(cam.path)}")
-            lines.append(f"CAMERA_NAME_{i}={_quote(cam.role or f'camera{i}')}")
+            lines.append(f"CAMERA_NAME_{i}={_quote(cam.role)}")
 
     lines.append(f"ROS_DOMAIN_ID={domain_id}")
     lines.append(f"REGISTRY={REGISTRY}")

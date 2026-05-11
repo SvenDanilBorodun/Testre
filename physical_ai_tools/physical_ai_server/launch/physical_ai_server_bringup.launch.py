@@ -52,10 +52,15 @@ def generate_launch_description():
     )
 
     # web_video_server node
+    # Audit F36: bind to loopback so a misconfigured Windows Firewall
+    # can't expose the unauthenticated MJPEG stream to the school
+    # LAN. The compose port mapping (`127.0.0.1:8080:8080`) already
+    # restricts this, but binding here is defence-in-depth.
     web_video_server_node = Node(
         package='web_video_server',
         executable='web_video_server',
         name='web_video_server',
+        parameters=[{'address': '127.0.0.1', 'port': 8080}],
         output='screen'
     )
 

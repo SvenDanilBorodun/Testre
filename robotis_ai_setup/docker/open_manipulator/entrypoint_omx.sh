@@ -244,6 +244,25 @@ else
 fi
 
 # --- Phase 4: Launch Cameras (up to 2) ---
+#
+# Audit F21: a single `[ -e $device ]` check at the top would race
+# usbipd's WSL forwarding on cold boot — the test fails, [WARN] is
+# logged, and the container proceeds WITHOUT cameras. Mirror the
+# arm-side wait_for_device by polling for the camera node briefly
+# before giving up. 30 s matches the existing arm waits.
+wait_for_camera() {
+    local dev="$1" name="$2" timeout="${3:-30}" t=0
+    while [ ! -e "$dev" ] && [ "$t" -lt "$timeout" ]; do
+        sleep 1
+        t=$((t + 1))
+    done
+    if [ -e "$dev" ]; then
+        return 0
+    fi
+    echo "[WARN] Camera $name ($dev) not present after ${timeout}s"
+    return 1
+}
+
 for i in 1 2; do
     device_var="CAMERA_DEVICE_$i"
     name_var="CAMERA_NAME_$i"
@@ -251,15 +270,31 @@ for i in 1 2; do
     default_names=("gripper" "scene")
     name="${!name_var:-${default_names[$((i-1))]}}"
 
-    if [ -n "$device" ] && [ -e "$device" ]; then
-        echo "[LAUNCH] Starting camera $i ($name on $device)..."
-        ros2 launch open_manipulator_bringup camera_usb_cam.launch.py \
-            name:="$name" \
-            video_device:="$device" &
-        PIDS="$PIDS $!"
-    elif [ -n "$device" ]; then
-        echo "[WARN] Camera $i device $device not found, skipping."
+    if [ -z "$device" ]; then
+        continue
     fi
+    if ! wait_for_camera "$device" "$name" 30; then
+        # Camera path never appeared (usbipd not forwarding, driver
+        # crash, replug mid-boot). Skip — the new compose healthcheck
+        # (audit F7) will report the container unhealthy if a
+        # configured camera is missing.
+        continue
+    fi
+    echo "[LAUNCH] Starting camera $i ($name on $device)..."
+    # Audit F22: declare an explicit resolution + format here instead
+    # of relying on whatever upstream `params_1.yaml` defaults to. Two
+    # webcams with different native modes used to share params_1.yaml,
+    # producing `VIDIOC_S_FMT: Invalid argument` on the second camera
+    # (silenced into stderr, healthcheck used to miss it). 640×480
+    # YUYV @ 30 fps is the documented EduBotics baseline.
+    ros2 launch open_manipulator_bringup camera_usb_cam.launch.py \
+        name:="$name" \
+        video_device:="$device" \
+        image_width:="${EDUBOTICS_CAMERA_WIDTH:-640}" \
+        image_height:="${EDUBOTICS_CAMERA_HEIGHT:-480}" \
+        framerate:="${EDUBOTICS_CAMERA_FRAMERATE:-30.0}" \
+        pixel_format:="${EDUBOTICS_CAMERA_PIXEL_FORMAT:-yuyv}" &
+    PIDS="$PIDS $!"
 done
 
 echo "========================================"

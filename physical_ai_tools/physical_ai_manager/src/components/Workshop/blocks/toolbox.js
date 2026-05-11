@@ -41,7 +41,7 @@ function filterContents(contents, restricted) {
  * only block entries whose `type` is in the set are kept (used by
  * tutorial scaffolding).
  */
-export function buildToolbox(restrictedBlocks = null) {
+export function buildToolbox(restrictedBlocks = null, cloudVisionEnabled = false) {
   const restricted = restrictedBlocks instanceof Set
     ? restrictedBlocks
     : (restrictedBlocks ? new Set(restrictedBlocks) : null);
@@ -60,7 +60,11 @@ export function buildToolbox(restrictedBlocks = null) {
     },
   ], restricted);
 
-  const perception = filterContents([
+  // Audit F28: only surface the open-vocab block when cloud vision is
+  // enabled. The block was previously visible unconditionally and a
+  // student who dragged it with the toggle OFF got a runtime "lokal
+  // nicht bekannt + Cloud deaktiviert" error with no UI hint why.
+  const perceptionBase = [
     { kind: 'block', type: 'edubotics_detect_color' },
     { kind: 'block', type: 'edubotics_wait_until_color' },
     { kind: 'block', type: 'edubotics_count_color' },
@@ -69,8 +73,11 @@ export function buildToolbox(restrictedBlocks = null) {
     { kind: 'block', type: 'edubotics_detect_object' },
     { kind: 'block', type: 'edubotics_wait_until_object' },
     { kind: 'block', type: 'edubotics_count_objects_class' },
-    { kind: 'block', type: 'edubotics_detect_open_vocab' },
-  ], restricted);
+  ];
+  if (cloudVisionEnabled) {
+    perceptionBase.push({ kind: 'block', type: 'edubotics_detect_open_vocab' });
+  }
+  const perception = filterContents(perceptionBase, restricted);
 
   const events = filterContents([
     { kind: 'block', type: 'edubotics_broadcast' },

@@ -62,11 +62,11 @@ BEGIN
     RETURN;
   END IF;
   IF v_quota IS NULL THEN
-    -- Unbounded; still count usage for telemetry.
-    UPDATE public.users
-    SET vision_used_per_term = vision_used_per_term + 1
-    WHERE id = p_user_id
-    RETURNING vision_used_per_term INTO v_new_used;
+    -- Audit F48: skip the UPDATE for NULL-quota users so the counter
+    -- doesn't grow unbounded. If an admin later flips them to a
+    -- bounded quota, the student would otherwise be INSTANTLY
+    -- locked out (used > new_quota from N years of telemetry). The
+    -- "still count usage for telemetry" intent was a footgun.
     RETURN QUERY SELECT TRUE, NULL::INTEGER;
     RETURN;
   END IF;

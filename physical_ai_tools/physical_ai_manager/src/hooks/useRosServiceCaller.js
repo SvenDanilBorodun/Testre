@@ -614,7 +614,7 @@ export function useRosServiceCaller() {
   // is here for any future caller that prefers the named wrapper.
   // Audit round-3 §AB / §O.
   const startWorkflow = useCallback(
-    async (workflowJson, workflowId, cloudVisionEnabled = false) =>
+    async (workflowJson, workflowId, cloudVisionEnabled = false, authToken = '') =>
       callService(
         '/workflow/start',
         'physical_ai_interfaces/srv/StartWorkflow',
@@ -622,6 +622,7 @@ export function useRosServiceCaller() {
           workflow_json: workflowJson,
           workflow_id: workflowId,
           cloud_vision_enabled: !!cloudVisionEnabled,
+          auth_token: typeof authToken === 'string' ? authToken : '',
         }
       ),
     [callService]

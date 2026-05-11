@@ -68,6 +68,31 @@ class SafetyEnvelope:
         """Drop the last-action memory (e.g. when starting a new run)."""
         self._last_action = None
 
+    def seed_last_action(self, joints) -> None:
+        """Audit F11 fix: seed ``_last_action`` from the current follower
+        joint state so the first action of a new episode IS subject to
+        the per-tick delta cap. Without this seed, ``apply()`` skips the
+        delta check on the first call (``_last_action is None``), so a
+        policy that emits a 1.5 rad jump from the current pose
+        produces a ~30 rad/s ≈ 1700°/s snap through the
+        ``JointTrajectoryController`` interpolation window.
+
+        Tolerates length mismatches silently — if the caller hands a
+        shorter or longer joint vector the next ``apply()`` will fall
+        into the shape-mismatch path and skip the cap anyway. The seed
+        is best-effort: the safer outcome is to seed with what we have
+        rather than refuse to seed.
+        """
+        if joints is None:
+            return
+        try:
+            seed = np.asarray(joints, dtype=np.float32).reshape(-1)
+        except (TypeError, ValueError):
+            return
+        if seed.size == 0:
+            return
+        self._last_action = seed.copy()
+
     def apply(self, action: np.ndarray) -> np.ndarray | None:
         """Validate + clamp ``action``. Returns the (possibly clamped)
         action, or ``None`` to skip publishing this tick."""
@@ -90,21 +115,24 @@ class SafetyEnvelope:
                     )
                 action = clipped
             else:
-                # Warn periodically (every 30 ticks ≈ 1 s at 30 Hz) instead
-                # of one-shot-then-silent. A misconfigured envelope must
-                # remain audible — silently dropping the limit check after
-                # a single boot warning was the worst-of-both: visible at
-                # startup, deaf for the rest of the session.
+                # Audit F12: a shape mismatch used to print a warning and
+                # **pass the action through unclamped** — meaning a 5-joint
+                # policy on 6-joint hardware shipped raw policy output to
+                # the arm. Hard refuse the tick instead: return None so
+                # the caller skips publishing. Warning still throttles
+                # at 30 ticks so the operator sees the misconfiguration
+                # without spamming logs.
                 if self._action_shape_warn_counter % 30 == 0:
                     print(
-                        f'[WARNUNG] Aktion hat {len(action)} Werte, '
+                        f'[STOPP] Aktion hat {len(action)} Werte, '
                         f'Gelenklimits sind fuer {len(self._action_min)} '
-                        f'konfiguriert — Limits werden NICHT erzwungen. '
-                        f'Bitte set_action_limits() in physical_ai_server.py '
+                        f'konfiguriert. Tick verworfen — bitte '
+                        f'set_action_limits() in physical_ai_server.py '
                         f'auf den aktiven Roboter abstimmen.',
                         flush=True,
                     )
                 self._action_shape_warn_counter += 1
+                return None
 
         if self._action_max_delta is not None and self._last_action is not None:
             # Pre-existing audit fix: previously this branch only

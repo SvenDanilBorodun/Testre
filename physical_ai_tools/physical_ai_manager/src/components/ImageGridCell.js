@@ -18,6 +18,7 @@ import React, { useCallback, useEffect, useRef } from 'react';
 import clsx from 'clsx';
 import { MdClose } from 'react-icons/md';
 import { useSelector } from 'react-redux';
+import { STREAM_QUALITY } from '../constants/streamConfig';
 
 const classImageGridCell = (topic) =>
   clsx(
@@ -65,7 +66,6 @@ export default function ImageGridCell({
   const rosHost = useSelector((state) => state.ros.rosHost);
   const containerRef = useRef(null);
   const currentImgRef = useRef(null);
-  const isCreatingRef = useRef(false); // Track if createImage is in progress
 
   // Completely remove img element from DOM
   const destroyImage = useCallback(() => {
@@ -81,90 +81,57 @@ export default function ImageGridCell({
     }
   }, [idx]);
 
-  // Create new img element and add to DOM with staggered delay
-  const createImage = useCallback(async () => {
-    if (!topic || !topic.trim() || !isActive || !containerRef.current) {
-      return;
+  // Audit F26: the prior implementation used a non-atomic
+  // `isCreatingRef` boolean combined with a 300 ms `await` — two
+  // effect re-runs could both pass the guard, append two <img>
+  // tags, and only one ref tracked the second one → cleanup leaked
+  // the first stream (5-8 Mbps each). Replace with an
+  // effect-scoped cancel token: each effect run owns its own
+  // `cancelled` flag and its cleanup function flips it before
+  // tearing down.
+  useEffect(() => {
+    if (!topic || !topic.trim() || !isActive) {
+      destroyImage();
+      return undefined;
     }
-
-    // Prevent multiple createImage calls from running simultaneously
-    if (isCreatingRef.current) {
-      console.log(`CreateImage already in progress for idx ${idx}, skipping`);
-      return;
-    }
-
-    isCreatingRef.current = true;
-    destroyImage(); // Remove any existing image first
-
-    try {
-      // Staggered delay - center first, then left and right
+    let cancelled = false;
+    const run = async () => {
+      // Tear down any leftover <img> from a previous run before
+      // committing to this effect's stream.
+      destroyImage();
       let staggeredDelay = 0;
-      if (idx === 1) {
-        // Center cell connects immediately
-        staggeredDelay = 0;
-      } else if (idx === 0 || idx === 2) {
-        // Left and right cells connect after 300ms
+      if (idx === 0 || idx === 2) {
+        // Left and right cells connect after 300ms (center first).
         staggeredDelay = 300;
       }
-
       if (staggeredDelay > 0) {
-        console.log(
-          `Staggered delay ${staggeredDelay}ms for image stream idx ${idx}, topic: ${topic}`
-        );
         await new Promise((resolve) => setTimeout(resolve, staggeredDelay));
-      } else {
-        console.log(`Immediate connection for center cell idx ${idx}, topic: ${topic}`);
       }
-
-      // Check again if conditions are still valid after delay and if we should still proceed
-      if (!topic || !topic.trim() || !isActive || !containerRef.current || !isCreatingRef.current) {
-        console.log(
-          `Conditions changed during delay or cancelled, aborting image stream for idx ${idx}`
-        );
-        return;
-      }
-
-      console.log(`Creating new image stream for idx ${idx}, topic: ${topic}`);
+      if (cancelled || !containerRef.current) return;
 
       const img = document.createElement('img');
       const timestamp = Date.now();
-      img.src = `http://${rosHost}:8080/stream?quality=50&type=ros_compressed&default_transport=compressed&topic=${topic}&t=${timestamp}`;
+      // Audit F35: STREAM_QUALITY constant shared with CameraFeedOverlay.
+      img.src = `http://${rosHost}:8080/stream?quality=${STREAM_QUALITY}&type=ros_compressed&default_transport=compressed&topic=${topic}&t=${timestamp}`;
       img.alt = topic;
       img.className = 'w-full h-full object-cover rounded-3xl bg-gray-100';
       img.onclick = (e) => e.stopPropagation();
-
-      // Error and load handlers
       img.onerror = () => {
+        if (cancelled) return;
         console.error(`Image stream error for idx ${idx}, topic: ${topic}`);
       };
-
-      if (containerRef.current && isCreatingRef.current) {
-        containerRef.current.appendChild(img);
-        currentImgRef.current = img;
-      }
-    } finally {
-      isCreatingRef.current = false;
-    }
-  }, [topic, isActive, rosHost, idx, destroyImage]);
-
-  // Create/recreate image when topic, isActive, or rosHost changes
-  useEffect(() => {
-    if (topic && topic.trim() !== '' && isActive) {
-      // Call async createImage function with error handling
-      createImage().catch((error) => {
-        console.error(`Error creating image stream for idx ${idx}:`, error);
-        isCreatingRef.current = false; // Reset flag on error
-      });
-    } else {
-      destroyImage();
-    }
-
+      if (cancelled || !containerRef.current) return;
+      containerRef.current.appendChild(img);
+      currentImgRef.current = img;
+    };
+    run().catch((error) => {
+      console.error(`Error creating image stream for idx ${idx}:`, error);
+    });
     return () => {
-      // Cancel any ongoing createImage operation
-      isCreatingRef.current = false;
+      cancelled = true;
       destroyImage();
     };
-  }, [topic, isActive, rosHost, idx, createImage, destroyImage]);
+  }, [topic, isActive, rosHost, idx, destroyImage]);
 
   // Force cleanup on unmount
   useEffect(() => {

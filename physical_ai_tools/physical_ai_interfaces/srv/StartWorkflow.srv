@@ -9,6 +9,13 @@ string workflow_id
 # cloud_training_api proxy. When false, the open-vocab block raises
 # a German error if it can't resolve the prompt locally.
 bool cloud_vision_enabled
+# Phase-3 cloud-vision auth — when cloud_vision_enabled is true, this
+# Supabase JWT (access_token) authorises the on-host server to call
+# the cloud_training_api /vision/detect endpoint on the student's
+# behalf. Empty string disables the cloud path even when the toggle
+# is on. The token is held in process memory only for the lifetime
+# of the workflow run.
+string auth_token
 ---
 bool success
 string message

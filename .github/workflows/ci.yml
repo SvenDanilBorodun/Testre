@@ -153,14 +153,19 @@ jobs:
       - name: Import every Modal app
         # Import each *.py under modal_training/ that defines a
         # modal.App. Failures during Image / function decoration
-        # surface as ImportError/TypeError here and fail the build.
-        # Also imports training_handler.py for parity even though it
-        # isn't a Modal app — it's invoked from inside `train` and
-        # would crash deploy at first invocation if syntax broke.
+        # surface as ImportError/TypeError here and fail the build —
+        # exactly the c56c012 vision_app.py near-miss with the bad
+        # force_reinstall= kwarg.
+        #
+        # training_handler.py is intentionally NOT in this sweep —
+        # it imports server-side runtime deps (supabase,
+        # huggingface_hub.utils.HfHubHTTPError) that only exist inside
+        # the Modal container's image. It's already syntax-checked by
+        # python-tests via compileall.
         working-directory: robotis_ai_setup/modal_training
         run: |
           set -e
-          for f in modal_app.py vision_app.py training_handler.py; do
+          for f in modal_app.py vision_app.py; do
             echo "== importing $f =="
             python -c "import importlib.util, sys; spec = importlib.util.spec_from_file_location('m', '$f'); mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod); print('  OK: import succeeded')"
           done

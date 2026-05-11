@@ -105,15 +105,29 @@ def list_video_devices() -> list[dict]:
     """List /dev/video* capture devices with friendly names.
 
     Returns list of dicts: [{"path": "/dev/video0", "name": "Logitech C920"}, ...]
+
+    Audit F20: `/dev/videoN` is NOT stable across hotplug — the kernel
+    may reassign on replug (`/dev/video0` → `/dev/video2`). Resolve to
+    the udev `/dev/v4l/by-id/...` symlink when available so the env
+    file survives a replug. Mirrors the existing `/dev/serial/by-id/`
+    pattern used for the arms.
     """
     try:
-        # Find devices that support Video Capture and extract their names
+        # Find devices that support Video Capture, extract their friendly
+        # names, then resolve to a stable /dev/v4l/by-id/... symlink so
+        # the .env file survives a USB replug.
         cmd = r"""
 for d in /dev/video*; do
     info=$(v4l2-ctl --device="$d" --info 2>/dev/null)
     if echo "$info" | grep -q "Video Capture"; then
         name=$(echo "$info" | grep "Card type" | sed 's/.*: //')
-        echo "$d|$name"
+        stable=$(udevadm info -q symlink -n "$d" 2>/dev/null | tr ' ' '\n' | grep -m1 'v4l/by-id' || true)
+        if [ -n "$stable" ]; then
+            path="/dev/$stable"
+        else
+            path="$d"
+        fi
+        echo "$path|$name"
     fi
 done
 """

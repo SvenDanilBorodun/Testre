@@ -112,18 +112,27 @@ export const PERCEPTION_BLOCKS = [
   // (POST /vision/detect → OWLv2 on Modal). Frontend exposes a German
   // text input; backend translates known prompts via a synonym dict
   // before falling back to OWLv2.
+  // Audit F32: distinct hue + cloud emoji so the open-vocab block is
+  // visually recognisable as "uses the internet" — students should
+  // know which actions touch the cloud.
+  // Audit F33: edubotics_validate_open_vocab_prompt rejects empty
+  // input and caps length so a runaway typer can't blow the proxy's
+  // MAX_PROMPT_CHARS=200 cap with a meaningless string.
   {
     type: 'edubotics_detect_open_vocab',
-    message0: DE.DETECT_OPEN_VOCAB,
+    message0: '☁ ' + DE.DETECT_OPEN_VOCAB,
     args0: [{ type: 'field_input', name: 'PROMPT', text: 'rote Tasse' }],
     output: 'Array',
-    colour: PERCEPTION_COLOR,
+    colour: 230,
+    extensions: ['edubotics_validate_open_vocab_prompt'],
     tooltip:
       'Beschreibt das gesuchte Objekt in deutschen Worten. Bekannte '
       + 'Begriffe werden lokal erkannt; sonst wird die Cloud-Erkennung '
       + 'genutzt.',
   },
 ];
+
+const OPEN_VOCAB_PROMPT_MAX = 80;
 
 const OBJECT_CLASS_SET = new Set(OBJECT_CLASSES);
 
@@ -173,6 +182,23 @@ export function registerPerceptionBlocks() {
         if (n < MARKER_ID_MIN) return MARKER_ID_MIN;
         if (n > MARKER_ID_MAX) return MARKER_ID_MAX;
         return Math.round(n);
+      });
+    }
+  });
+  // Audit F33: open-vocab prompt validator. Trim, reject empty, cap
+  // length tight (80 chars) to give a clean UX before the server's
+  // 200-char enforcement kicks in.
+  registerExtensionOnce('edubotics_validate_open_vocab_prompt', function () {
+    const field = this.getField('PROMPT');
+    if (field && typeof field.setValidator === 'function') {
+      field.setValidator((newValue) => {
+        if (typeof newValue !== 'string') return null;
+        const trimmed = newValue.trim();
+        if (!trimmed) return null;
+        if (trimmed.length > OPEN_VOCAB_PROMPT_MAX) {
+          return trimmed.slice(0, OPEN_VOCAB_PROMPT_MAX);
+        }
+        return trimmed;
       });
     }
   });

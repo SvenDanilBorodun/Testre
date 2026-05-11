@@ -46,6 +46,11 @@ class PasswordReset(BaseModel):
     new_password: str = Field(..., min_length=6, max_length=128)
 
 
+class VisionQuotaSet(BaseModel):
+    # Audit F49: NULL = unbounded. Negative quotas are nonsensical.
+    quota: int | None = Field(..., ge=0)
+
+
 class CreditsDelta(BaseModel):
     delta: int = Field(..., ge=-1000, le=1000)
 
@@ -733,6 +738,23 @@ async def reset_student_password(
         logger.error("reset_student_password failed: %s", e)
         raise HTTPException(status_code=500, detail="Passwort konnte nicht gesetzt werden")
     return {"ok": True}
+
+
+@router.patch("/students/{student_id}/vision-quota")
+async def set_student_vision_quota(
+    student_id: str,
+    req: VisionQuotaSet,
+    teacher=Depends(get_current_teacher),
+):
+    """Audit F49: teacher path to set a student's per-term cloud-vision
+    quota. Ownership check via _assert_student_owned. NULL clears
+    the cap (unbounded)."""
+    _assert_student_owned(teacher["id"], student_id)
+    supabase = get_supabase()
+    supabase.table("users").update(
+        {"vision_quota_per_term": req.quota}
+    ).eq("id", student_id).execute()
+    return {"id": student_id, "vision_quota_per_term": req.quota}
 
 
 @router.post("/students/{student_id}/credits", response_model=CreditsResponse)

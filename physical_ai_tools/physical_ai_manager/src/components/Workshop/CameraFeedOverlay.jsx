@@ -11,13 +11,25 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { useSelector } from 'react-redux';
 import toast from 'react-hot-toast';
+import ROSLIB from 'roslib';
 import { useRosServiceCaller } from '../../hooks/useRosServiceCaller';
 import { isCloudOnlyMode } from '../../utils/cloudMode';
+import rosConnectionManager from '../../utils/rosConnectionManager';
+import { STREAM_QUALITY } from '../../constants/streamConfig';
 
 const CAMERA_TOPICS = {
   scene: '/scene/image_raw/compressed',
   gripper: '/gripper/image_raw/compressed',
 };
+
+// Audit F24: a frozen MJPEG keeps the TCP socket open with
+// multipart/x-mixed-replace, so `img.onerror` never fires — the
+// browser shows a "loaded" image with stale content. Use a rosbridge
+// throttled subscription (~1 Hz) as a side-channel liveness ping;
+// when no message arrives within FROZEN_THRESHOLD_MS, overlay a
+// "Kamera eingefroren" badge so the student doesn't record / calibrate
+// against a dead frame.
+const FROZEN_THRESHOLD_MS = 2000;
 
 function CameraFeedOverlay({ camera = 'scene', clickable = false, onMark, ...rest }) {
   // Hooks first, no conditional returns above them — react-hooks/rules
@@ -31,6 +43,11 @@ function CameraFeedOverlay({ camera = 'scene', clickable = false, onMark, ...res
   const { callService } = useRosServiceCaller();
   const [naturalSize, setNaturalSize] = useState({ w: 0, h: 0 });
   const [streamError, setStreamError] = useState(false);
+  const [isFrozen, setIsFrozen] = useState(false);
+  // Bumped to force a stream re-mount when we detect a stale stream
+  // (audit F25 — naturalSize sticking after a mid-session resolution
+  // change is fixed by re-creating the <img>).
+  const [reloadKey, setReloadKey] = useState(0);
 
   useEffect(() => {
     if (cloudOnly) return undefined;
@@ -41,15 +58,18 @@ function CameraFeedOverlay({ camera = 'scene', clickable = false, onMark, ...res
     const topic = CAMERA_TOPICS[camera];
     if (!topic) return undefined;
 
+    let cancelled = false;
     const timestamp = Date.now();
-    img.src = `http://${rosHost}:8080/stream?quality=70&type=ros_compressed&default_transport=compressed&topic=${topic}&t=${timestamp}`;
+    img.src = `http://${rosHost}:8080/stream?quality=${STREAM_QUALITY}&type=ros_compressed&default_transport=compressed&topic=${topic}&t=${timestamp}`;
     img.alt = topic;
     img.className = 'block w-full h-full object-contain rounded-lg bg-black';
     img.onload = () => {
+      if (cancelled) return;
       setNaturalSize({ w: img.naturalWidth, h: img.naturalHeight });
       setStreamError(false);
     };
     img.onerror = () => {
+      if (cancelled) return;
       console.error(`CameraFeedOverlay: stream error for ${topic}`);
       setStreamError(true);
     };
@@ -58,11 +78,59 @@ function CameraFeedOverlay({ camera = 'scene', clickable = false, onMark, ...res
     imgRef.current = img;
 
     return () => {
+      cancelled = true;
       img.src = '';
       if (img.parentNode) img.parentNode.removeChild(img);
       imgRef.current = null;
     };
-  }, [camera, rosHost]);
+  }, [camera, rosHost, cloudOnly, reloadKey]);
+
+  // Audit F24: ROS-side liveness ping. Subscribe to the same compressed
+  // image topic at 1 Hz throttle so a frozen MJPEG doesn't fool us. If
+  // no message arrives for FROZEN_THRESHOLD_MS, flip the badge.
+  useEffect(() => {
+    if (cloudOnly) return undefined;
+    const topic = CAMERA_TOPICS[camera];
+    if (!topic) return undefined;
+    const ros = rosConnectionManager?.ros;
+    if (!ros || !ros.isConnected) return undefined;
+    let lastSeenMs = Date.now();
+    const subscription = new ROSLIB.Topic({
+      ros,
+      name: topic,
+      messageType: 'sensor_msgs/CompressedImage',
+      throttle_rate: 1000,
+      queue_size: 1,
+    });
+    const onMsg = () => {
+      lastSeenMs = Date.now();
+      setIsFrozen(false);
+    };
+    subscription.subscribe(onMsg);
+    const intervalId = setInterval(() => {
+      const ageMs = Date.now() - lastSeenMs;
+      setIsFrozen(ageMs > FROZEN_THRESHOLD_MS);
+    }, 1000);
+    return () => {
+      clearInterval(intervalId);
+      try {
+        subscription.unsubscribe();
+      } catch (e) {
+        /* roslib throws if already torn down */
+      }
+    };
+  }, [camera, cloudOnly]);
+
+  // Audit F25: when a sustained freeze is detected, force a re-mount
+  // of the <img> so the next reconnect grabs a fresh naturalSize.
+  // Without this, MJPEG `onload` only fires on the first frame — a
+  // mid-session resolution change leaves click-to-mark scaled by the
+  // stale natural size and the arm misses.
+  useEffect(() => {
+    if (!isFrozen) return undefined;
+    const t = setTimeout(() => setReloadKey((k) => k + 1), 5000);
+    return () => clearTimeout(t);
+  }, [isFrozen]);
 
   const handleClick = useCallback(
     async (e) => {
@@ -128,6 +196,11 @@ function CameraFeedOverlay({ camera = 'scene', clickable = false, onMark, ...res
           und neu laden.
         </div>
       )}
+      {!streamError && isFrozen && (
+        <div className="absolute top-2 right-2 px-2 py-1 rounded-md bg-amber-500/90 text-xs font-semibold text-white shadow pointer-events-none">
+          Kamera eingefroren
+        </div>
+      )}
     </div>
   );
 }
@@ -147,6 +220,14 @@ function DetectionOverlay({ detections, naturalSize }) {
         if (!d || d.cx === undefined || d.w === undefined) return null;
         const x = d.cx - d.w / 2;
         const y = d.cy - d.h / 2;
+        // Audit F31: render confidence next to the label so OWLv2's
+        // low-score boxes (default threshold 0.10) are visibly
+        // distinguishable from high-confidence locks. Confidence is a
+        // 0..1 fraction on the Detection msg.
+        const conf =
+          typeof d.confidence === 'number'
+            ? ` ${Math.round(d.confidence * 100)}%`
+            : '';
         return (
           <g key={`${d.label || ''}-${idx}`}>
             <rect
@@ -166,7 +247,7 @@ function DetectionOverlay({ detections, naturalSize }) {
                 fontSize="14"
                 fontWeight="bold"
               >
-                {d.label}
+                {d.label}{conf}
               </text>
             )}
           </g>

@@ -60,7 +60,13 @@ class DataConverter:
     def compressed_image2cvmat(
             self,
             msg: CompressedImage,
-            desired_encoding: str = 'passthrough') -> np.ndarray:
+            desired_encoding: str = 'bgr8') -> np.ndarray:
+        # Audit F5: 'passthrough' returned whatever cv_bridge decoded,
+        # then callers (data_manager.convert_msgs_to_raw_datas) ran an
+        # unconditional BGR2RGB swap on the result. usb_cam MJPEG
+        # happens to decode BGR today so it works — but any future
+        # driver/kernel returning a non-BGR decode would silently
+        # mis-train. 'bgr8' makes cv_bridge raise on a mismatch.
         try:
             cv_image = self._image_converter.compressed_imgmsg_to_cv2(
                     msg,

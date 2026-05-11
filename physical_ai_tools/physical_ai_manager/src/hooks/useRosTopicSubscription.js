@@ -762,6 +762,17 @@ export function useRosTopicSubscription() {
         if (msg.phase === 'finished' || msg.phase === 'stopped' || msg.phase === 'error') {
           dispatch(setRunState(msg.phase));
           dispatch(setPaused(false));
+          // Audit F34: surface workflow errors as a toast in addition
+          // to the inline WorkflowStatus banner. Previously a cloud-
+          // burst error wrote `error` into Redux but only appeared in
+          // the run-controls strip, easy to miss.
+          if (msg.phase === 'error' && msg.error) {
+            try {
+              toast.error(msg.error);
+            } catch (_) {
+              /* toast unavailable in non-DOM test env */
+            }
+          }
         } else if (msg.phase === 'running') {
           dispatch(setRunState('running'));
           dispatch(setPaused(false));

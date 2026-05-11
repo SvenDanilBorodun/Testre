@@ -37,11 +37,39 @@ def generate_launch_description():
             default_value='/dev/video0',
             description='Video device path to open (e.g., /dev/video2)',
         ),
+        # Audit F22: per-camera resolution/format overrides so two
+        # webcams with different native modes don't both inherit
+        # the upstream `params_1.yaml` defaults and trip
+        # `VIDIOC_S_FMT: Invalid argument` on the second camera.
+        DeclareLaunchArgument(
+            'image_width',
+            default_value='640',
+            description='Capture width in pixels.',
+        ),
+        DeclareLaunchArgument(
+            'image_height',
+            default_value='480',
+            description='Capture height in pixels.',
+        ),
+        DeclareLaunchArgument(
+            'framerate',
+            default_value='30.0',
+            description='Capture framerate (Hz).',
+        ),
+        DeclareLaunchArgument(
+            'pixel_format',
+            default_value='yuyv',
+            description='V4L2 pixel format (yuyv / mjpeg).',
+        ),
     ]
 
     # Launch configurations
     name = LaunchConfiguration('name')
     video_device = LaunchConfiguration('video_device')
+    image_width = LaunchConfiguration('image_width')
+    image_height = LaunchConfiguration('image_height')
+    framerate = LaunchConfiguration('framerate')
+    pixel_format = LaunchConfiguration('pixel_format')
 
     camera_config = PathJoinSubstitution([
         FindPackageShare('usb_cam'),
@@ -57,6 +85,10 @@ def generate_launch_description():
                 camera_config,
                 {
                     'video_device': video_device,
+                    'image_width': image_width,
+                    'image_height': image_height,
+                    'framerate': framerate,
+                    'pixel_format': pixel_format,
                 },
             ],
             output='both',

@@ -194,17 +194,13 @@ function StudentApp() {
 
   const handleWorkshopPageNavigation = () => requireRobotOrRedirect(PageType.WORKSHOP);
 
-  useEffect(() => {
-    return () => {
-      const allStreamImgs = document.querySelectorAll('img[src*="/stream"]');
-      allStreamImgs.forEach((img) => {
-        img.src = '';
-        if (img.parentNode) {
-          img.parentNode.removeChild(img);
-        }
-      });
-    };
-  }, [page]);
+  // Audit F27: the previous blunt-force teardown
+  // (document.querySelectorAll('img[src*="/stream"]')) was a safety
+  // net for ImageGridCell.js's effect race. F26 fixes that race
+  // with effect-scoped cancel tokens, so the per-component cleanup
+  // now reliably tears down each stream. Keeping the global sweep
+  // here would tear down freshly-mounted stream components in
+  // sibling subtrees (the bug §F27 calls out).
 
   const navItems = [
     { key: PageType.HOME, label: 'Start', Icon: MdHome, onClick: handleHomePageNavigation },

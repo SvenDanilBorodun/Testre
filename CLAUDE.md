@@ -847,7 +847,7 @@ REACT_APP_ALLOWED_POLICIES, REACT_APP_BUILD_ID
 
 Push loop verifies success per image; aborts on failure (no half-updated student set).
 
-Coco classes file is staged from `physical_ai_tools/physical_ai_server/physical_ai_server/workflow/coco_classes.py` to `physical_ai_manager/_coco_classes.py` so the `prebuild` Jest hook (`src/components/Workshop/blocks/__tests__/objectClasses.sync.test.js`) can run inside the Docker build context.
+Coco classes file is staged from `physical_ai_tools/physical_ai_server/physical_ai_server/workflow/coco_classes.py` to `physical_ai_manager/_coco_classes.py` so the `prebuild` Jest hook (`src/components/Workshop/blocks/__tests__/objectClasses.sync.test.js`) can run inside the Docker build context. **The same staging is required for Railway teacher-web deploys** — use `physical_ai_manager/scripts/railway-deploy.sh` instead of bare `railway up`; it stages, deploys with `--path-as-root .`, and cleans up. The Jest test itself now gracefully skips (with a `console.warn`) when neither candidate path resolves, so a build context without staging won't fail in a confusing way — but it also won't enforce dropdown↔server sync, so always run a build path that DOES stage for production images.
 
 ### 10.4 `bump-upstream-digests.sh`
 Helper that runs `docker buildx imagetools inspect robotis/open-manipulator:latest` (and others) to print SHA256 digests + sed commands for upgrading pins in `BASE_IMAGE_PINNING.md`. Manual review required.
@@ -1072,15 +1072,21 @@ Five sources of truth currently drift:
 
 ## 15. CI workflow (`.github/workflows/ci.yml`) — what fails the build
 
-8 jobs run on every push/PR to `main`:
+10 jobs run on every push/PR to `main`:
 1. **python-tests** — `compileall` of `gui`, `scripts`, `cloud_training_api`, `modal_training`, overlays, patches; `unittest discover -s tests` (5 GUI/installer tests); plus `unittest discover -s app/tests` from `cloud_training_api/` (workgroup helper, dataset sweep parsers — tests stub fastapi/supabase/huggingface_hub via `sys.modules` so they run without those deps).
-2. **shell-lint** — shellcheck `-S error` on `build-images.sh`, `entrypoint_omx.sh`, `build_rootfs.sh`, `start-dockerd.sh`.
+2. **shell-lint** — shellcheck `-S error` on `build-images.sh`, `entrypoint_omx.sh`, `build_rootfs.sh`, `start-dockerd.sh`, `physical_ai_manager/scripts/railway-deploy.sh`.
 3. **compose-validate** — `docker compose config` on both base + GPU compose with fake `.env`.
 4. **overlay-guard** — runs `fix_server_inference.py` on a fake `server_inference.py` that lacks the patch target; asserts non-zero exit (catches a regress where the patch silently fails).
-5. **manager-build-validate** — builds `physical_ai_manager` with placeholder secrets (`CI_VALIDATE.supabase.co`, `CI_VALIDATE_ANON_KEY`, `CI_VALIDATE.api.example`); asserts each placeholder string appears in the built `main.*.js` bundle. Catches the white-screen regression.
-6. **nginx-validate** — `envsubst $PORT` on `nginx.web.conf.template` then `nginx -t` on both web + student configs.
-7. **tutorials-validate** — JSON-parses every `physical_ai_manager/public/tutorials/*.json`, asserts the required schema (`id`, `title_de`, `level`, `steps[].title`, `steps[].body`, `steps[].allowed_blocks`), and cross-checks each `allowed_blocks` entry against `cloud_training_api/app/validators/workflow.py:ALLOWED_BLOCK_TYPES`. A tutorial referencing a block that doesn't exist server-side fails the build.
-8. **interfaces-validate** — verifies every `.srv` has exactly one `---` separator and every `.srv`/`.msg` filename listed in `CMakeLists.txt` is present on disk; runs on all of `physical_ai_interfaces/srv/*.srv` and `physical_ai_interfaces/msg/*.msg`.
+5. **modal-import-validate** — pip-installs the Modal SDK, then imports `modal_app.py`, `vision_app.py`, `training_handler.py`. Image specs are evaluated at module load, so an SDK API mismatch (e.g. `Image.pip_install(force_reinstall=True)` against an SDK that wants `extra_options="--force-reinstall"`) raises `TypeError` here instead of at `modal deploy` time. Added after the `c56c012` vision_app.py near-miss.
+6. **teacher-web-build-validate** — builds `Dockerfile.web` with **only `physical_ai_manager/`** as the build context (exactly what `railway up --path-as-root .` does), with placeholder secrets, then asserts each secret reached the bundle. Catches build-context regressions that wouldn't surface in `manager-build-validate` (which builds the student Dockerfile with `build-images.sh`-style staging).
+7. **manager-build-validate** — builds `physical_ai_manager` (student `Dockerfile`) with placeholder secrets (`CI_VALIDATE.supabase.co`, `CI_VALIDATE_ANON_KEY`, `CI_VALIDATE.api.example`); asserts each placeholder string appears in the built `main.*.js` bundle. Catches the white-screen regression. Stages `_coco_classes.py` so the prebuild Jest hook enforces dropdown↔server sync.
+8. **nginx-validate** — `envsubst $PORT` on `nginx.web.conf.template` then `nginx -t` on both web + student configs.
+9. **tutorials-validate** — JSON-parses every `physical_ai_manager/public/tutorials/*.json`, asserts the required schema (`id`, `title_de`, `level`, `steps[].title`, `steps[].body`, `steps[].allowed_blocks`), and cross-checks each `allowed_blocks` entry against `cloud_training_api/app/validators/workflow.py:ALLOWED_BLOCK_TYPES`. A tutorial referencing a block that doesn't exist server-side fails the build.
+10. **interfaces-validate** — verifies every `.srv` has exactly one `---` separator and every `.srv`/`.msg` filename listed in `CMakeLists.txt` is present on disk; runs on all of `physical_ai_interfaces/srv/*.srv` and `physical_ai_interfaces/msg/*.msg`.
+
+### Boot-time schema fingerprint (Cloud API)
+
+`cloud_training_api/app/main.py:_validate_required_schema()` runs at module load and probes every table + RPC the routes touch (workflow_versions, tutorial_progress, vision quota columns + RPCs, etc.). If the live Supabase schema is behind the on-disk migrations, Railway aborts the deploy with a named cause instead of returning 200 from `/health` and crashing on first student request. Override with `EDUBOTICS_SKIP_SCHEMA_CHECK=1` for unit-test contexts only. This is the systemic fix for the c56c012 round-3 incident where 017's `refund_vision_quota` RPC was missing from the live DB even though the migration file on disk defined it.
 
 ---
 

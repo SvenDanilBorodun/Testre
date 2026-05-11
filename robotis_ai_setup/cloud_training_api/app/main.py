@@ -63,6 +63,111 @@ def _validate_required_secrets() -> None:
 _validate_required_secrets()
 
 
+def _validate_required_schema() -> None:
+    """Fail-fast at startup if any required Supabase schema object is missing.
+
+    Catches a class of regression that bit us once already: a migration
+    file lands in `robotis_ai_setup/supabase/` but the live database is
+    behind (migration applied via SQL Editor with an earlier file
+    content, or never applied at all). The Cloud API then boots, /health
+    returns 200, and the first student to hit /vision/detect — or the
+    first workflow PATCH that triggers the snapshot_workflow_version
+    trigger — gets a bare 500 with no signal that the DB is the cause.
+    By probing every schema object the code depends on at startup, the
+    Railway deploy aborts with a named cause instead.
+    Skip via EDUBOTICS_SKIP_SCHEMA_CHECK=1 (unit-test escape hatch).
+    """
+    if os.environ.get("EDUBOTICS_SKIP_SCHEMA_CHECK") == "1":
+        return
+    from app.services.supabase_client import get_supabase
+
+    sb = get_supabase()
+    # 1) Tables referenced from Python (.table('X').select/insert).
+    #    `select('id').limit(0)` proves the table is reachable without
+    #    actually reading rows.
+    required_tables = (
+        "users",
+        "trainings",
+        "classrooms",
+        "workgroups",
+        "workgroup_memberships",
+        "workflows",
+        "workflow_versions",  # 015
+        "tutorial_progress",  # 016
+        "datasets",
+        "progress_entries",
+    )
+    missing_tables: list[str] = []
+    for table in required_tables:
+        try:
+            sb.table(table).select("*").limit(0).execute()
+        except Exception as exc:  # supabase-py wraps PostgREST errors as APIError
+            # PostgREST returns code PGRST205 ("Could not find the table")
+            # when the relation is absent. Other failures (network, RLS)
+            # are not what we're guarding against here, so re-raise.
+            msg = str(exc)
+            if "PGRST205" in msg or "Could not find the table" in msg or (
+                "does not exist" in msg.lower() and table in msg
+            ):
+                missing_tables.append(table)
+            else:
+                raise
+    # 2) RPCs the code calls directly. Probe with a dummy UUID; any "user
+    #    not found" / "no rows" response proves the RPC exists. We fail
+    #    only on PGRST202 (function not found) or the bare PG "function
+    #    X does not exist" message.
+    dummy = "00000000-0000-0000-0000-000000000000"
+    required_rpcs = (
+        ("consume_vision_quota", {"p_user_id": dummy}),       # 017
+        ("refund_vision_quota", {"p_user_id": dummy}),        # 017 round-3
+        ("snapshot_workflow_version", None),                  # 015 (trigger fn — existence only)
+        ("get_remaining_credits", {"p_user_id": dummy}),
+        ("start_training_safe", None),                        # check existence via wrong-arg call
+        ("update_training_progress", None),
+        ("adjust_student_credits", None),
+        ("adjust_workgroup_credits", None),
+        ("get_teacher_credit_summary", {"p_teacher_id": dummy}),
+    )
+    missing_rpcs: list[str] = []
+    for name, args in required_rpcs:
+        try:
+            if args is None:
+                # Call with no args; if the RPC exists it'll fail with a
+                # signature mismatch (PGRST203) which we accept as proof
+                # of existence.
+                sb.rpc(name, {}).execute()
+            else:
+                sb.rpc(name, args).execute()
+        except Exception as exc:
+            msg = str(exc)
+            # The only error we treat as "missing": PostgREST's
+            # PGRST202 (function not found in the schema cache) and
+            # the Postgres "function … does not exist" message.
+            if "PGRST202" in msg or (
+                "function" in msg.lower() and "does not exist" in msg.lower()
+            ):
+                missing_rpcs.append(name)
+            # Everything else (PGRST203 wrong signature, P0001 token
+            # mismatch, P0002 user not found, etc.) proves the RPC
+            # exists, so swallow.
+    if missing_tables or missing_rpcs:
+        details = []
+        if missing_tables:
+            details.append(f"tables: {', '.join(missing_tables)}")
+        if missing_rpcs:
+            details.append(f"RPCs: {', '.join(missing_rpcs)}")
+        raise RuntimeError(
+            "Cloud API cannot start — Supabase schema is behind the deployed "
+            f"code. Missing {' and '.join(details)}. Apply the on-disk "
+            "migrations under robotis_ai_setup/supabase/ to the live "
+            "database and redeploy. Override with "
+            "EDUBOTICS_SKIP_SCHEMA_CHECK=1 only for local unit-test runs."
+        )
+
+
+_validate_required_schema()
+
+
 def _parse_and_validate_origins() -> list[str]:
     """Parse ALLOWED_ORIGINS and refuse to start with dangerous values.
 

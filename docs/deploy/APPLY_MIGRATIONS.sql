@@ -4,11 +4,22 @@
 -- Order matters; each block is wrapped in BEGIN/COMMIT so a single
 -- mistake rolls back its own block without touching the others.
 --
+-- IMPORTANT: apply this bundle BEFORE redeploying the Railway
+-- cloud_training_api revision that references the new tables /
+-- RPCs (consume_vision_quota, refund_vision_quota, tutorial_progress,
+-- workflow_versions). The new routes will return 500 against an
+-- un-migrated schema.
+--
 -- Migrations included:
 --   015_workflow_versions.sql   (Verlauf history + 20-cap prune + RLS)
 --   016_tutorial_progress.sql   (skillmap progress tracking)
---   017_vision_quota.sql        (per-user cloud-vision quota + atomic RPC)
+--   017_vision_quota.sql        (per-user cloud-vision quota + atomic RPCs)
 -- ============================================================
+
+-- pgcrypto provides gen_random_uuid() — Supabase ships it enabled
+-- by default; this CREATE EXTENSION is a defensive no-op on managed
+-- Supabase and the required prerequisite on self-hosted Postgres.
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
 -- ===== 015_workflow_versions.sql =====
 -- 015_workflow_versions.sql
@@ -76,16 +87,35 @@ CREATE TRIGGER trg_workflow_versions_prune
 -- atomic with the parent row's mutation. Owned by postgres so the
 -- INSERT inside the function bypasses RLS regardless of the calling
 -- role (audit §F9).
+--
+-- ``saved_by`` is populated from the ``app.user_id`` Postgres GUC
+-- when the cloud API sets it before the UPDATE
+-- (``SET LOCAL app.user_id = '<uuid>'``). When the GUC is unset the
+-- column stays NULL — appropriate for service-role admin tools or
+-- internal migrations where there's no human author. Audit round-3
+-- §13 / §I.
 CREATE OR REPLACE FUNCTION public.snapshot_workflow_version()
 RETURNS TRIGGER
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = public
 AS $$
+DECLARE
+  v_saved_by UUID;
+  v_setting TEXT;
 BEGIN
   IF NEW.blockly_json IS DISTINCT FROM OLD.blockly_json THEN
-    INSERT INTO public.workflow_versions (workflow_id, blockly_json, note)
-    VALUES (OLD.id, OLD.blockly_json, '');
+    BEGIN
+      v_setting := current_setting('app.user_id', true);
+      IF v_setting IS NOT NULL AND v_setting <> '' THEN
+        v_saved_by := v_setting::UUID;
+      END IF;
+    EXCEPTION
+      WHEN OTHERS THEN
+        v_saved_by := NULL;
+    END;
+    INSERT INTO public.workflow_versions (workflow_id, blockly_json, note, saved_by)
+    VALUES (OLD.id, OLD.blockly_json, '', v_saved_by);
   END IF;
   RETURN NEW;
 END;
@@ -94,18 +124,42 @@ $$;
 -- Ensure both SECURITY DEFINER functions run with bypassing-RLS
 -- privilege. Without this, a migration applied by a non-superuser
 -- would leave the trigger unable to INSERT because the table has no
--- INSERT policy (Audit §F3, §F9).
+-- INSERT policy (Audit §F3, §F9). Audit round-3 §AC/§AD — try
+-- ``postgres`` first (self-hosted), fall through to ``supabase_admin``
+-- (managed Supabase), and RAISE NOTICE only if both fail so the
+-- operator sees the issue at apply time instead of at first edit.
 DO $$
+DECLARE
+  v_done BOOLEAN := FALSE;
+  v_role TEXT;
 BEGIN
-  EXECUTE 'ALTER FUNCTION public.snapshot_workflow_version() OWNER TO postgres';
-  EXECUTE 'ALTER FUNCTION public.prune_workflow_versions() OWNER TO postgres';
-EXCEPTION
-  WHEN OTHERS THEN
-    -- ``postgres`` may not exist (some Supabase setups use
-    -- ``supabase_admin``); fall through. Operators must verify
-    -- ownership manually if both fail.
-    NULL;
+  FOREACH v_role IN ARRAY ARRAY['postgres', 'supabase_admin', 'supabase_storage_admin'] LOOP
+    BEGIN
+      EXECUTE format('ALTER FUNCTION public.snapshot_workflow_version() OWNER TO %I', v_role);
+      EXECUTE format('ALTER FUNCTION public.prune_workflow_versions() OWNER TO %I', v_role);
+      v_done := TRUE;
+      EXIT;
+    EXCEPTION
+      WHEN OTHERS THEN
+        CONTINUE;
+    END;
+  END LOOP;
+  IF NOT v_done THEN
+    RAISE NOTICE 'Could not transfer ownership of workflow_versions SECURITY DEFINER '
+      'functions to a privileged role. The trigger may fail under RLS — '
+      'see the audit notes in 015_workflow_versions.sql.';
+  END IF;
 END $$;
+
+-- Belt-and-braces INSERT policy. Even when the ownership ALTER above
+-- succeeds, an explicit INSERT WITH CHECK keeps the workflow UPDATE
+-- path resilient to a future RLS tightening. Service-role still
+-- bypasses RLS; this policy gates the SECURITY DEFINER trigger only.
+DROP POLICY IF EXISTS "Trigger inserts workflow versions" ON public.workflow_versions;
+CREATE POLICY "Trigger inserts workflow versions"
+  ON public.workflow_versions
+  FOR INSERT
+  WITH CHECK (true);
 
 DROP TRIGGER IF EXISTS trg_workflows_snapshot ON public.workflows;
 CREATE TRIGGER trg_workflows_snapshot
@@ -158,12 +212,17 @@ END $$;
 COMMIT;
 
 -- ===== 016_tutorial_progress.sql =====
--- 014_tutorial_progress.sql
+-- 016_tutorial_progress.sql
 --
 -- Roboter Studio Phase-3: per-student progress through the bundled
--- skillmap tutorials (`physical_ai_manager/public/tutorials/*.md`).
+-- skillmap tutorials (``physical_ai_manager/public/tutorials/*.json``).
 -- Each row tracks one student × one tutorial; current_step starts at 0
 -- and advances as the student completes each step.
+--
+-- Numbered 016 (skipping 014) because 014 was never authored — the
+-- original 013_workflow_versions.sql collided alphabetically with
+-- 013_revoke_anon_from_security_definer.sql and was renamed to 015
+-- (audit round-3 §AJ).
 
 BEGIN;
 
@@ -239,6 +298,27 @@ CREATE POLICY "Teacher reads classroom student progress"
     )
   );
 
+-- Explicit service_role grant. service_role bypasses RLS via Supabase's
+-- JWT shortcut but the SQL ACL needs a matching GRANT so other tools
+-- (psql, pgAdmin) see consistent privileges. Audit round-3 §AM.
+GRANT ALL ON public.tutorial_progress TO service_role;
+
+-- Realtime publication so the teacher dashboard updates as students
+-- complete tutorial steps. The CLAUDE.md §9.14 docstring already
+-- describes this; the v1 ship of 016 omitted the ALTER and the
+-- consumer never got live updates. Audit round-3 §J / §AK.
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_publication_tables
+    WHERE pubname = 'supabase_realtime'
+      AND schemaname = 'public'
+      AND tablename = 'tutorial_progress'
+  ) THEN
+    ALTER PUBLICATION supabase_realtime ADD TABLE public.tutorial_progress;
+  END IF;
+END $$;
+
 COMMIT;
 
 -- ===== 017_vision_quota.sql =====
@@ -263,6 +343,21 @@ BEGIN;
 ALTER TABLE public.users
   ADD COLUMN IF NOT EXISTS vision_quota_per_term INTEGER,
   ADD COLUMN IF NOT EXISTS vision_used_per_term INTEGER NOT NULL DEFAULT 0;
+
+-- Floor the used counter so a future bug-introduced decrement RPC can't
+-- write negative values. Audit round-3 §AQ.
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.check_constraints
+    WHERE constraint_schema = 'public'
+      AND constraint_name = 'users_vision_used_per_term_nonneg'
+  ) THEN
+    ALTER TABLE public.users
+      ADD CONSTRAINT users_vision_used_per_term_nonneg
+      CHECK (vision_used_per_term >= 0);
+  END IF;
+END $$;
 
 COMMENT ON COLUMN public.users.vision_quota_per_term IS
   'Maximum cloud-vision detect calls per term. NULL = unbounded.';
@@ -316,6 +411,33 @@ REVOKE EXECUTE ON FUNCTION public.consume_vision_quota(UUID) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.consume_vision_quota(UUID) FROM anon;
 REVOKE EXECUTE ON FUNCTION public.consume_vision_quota(UUID) FROM authenticated;
 GRANT EXECUTE ON FUNCTION public.consume_vision_quota(UUID) TO service_role;
+
+-- Atomic refund: decrement vision_used_per_term by 1, never below 0.
+-- Called by the cloud API when Modal returns a transient error
+-- (502/504/timeout) so a flaky cold start doesn't burn the student's
+-- term budget. Returns the new used count for telemetry.
+-- Audit round-3 §A — refund-on-failure pattern.
+CREATE OR REPLACE FUNCTION public.refund_vision_quota(p_user_id UUID)
+RETURNS INTEGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_new_used INTEGER;
+BEGIN
+  UPDATE public.users
+  SET vision_used_per_term = GREATEST(vision_used_per_term - 1, 0)
+  WHERE id = p_user_id
+  RETURNING vision_used_per_term INTO v_new_used;
+  RETURN COALESCE(v_new_used, 0);
+END;
+$$;
+
+REVOKE EXECUTE ON FUNCTION public.refund_vision_quota(UUID) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.refund_vision_quota(UUID) FROM anon;
+REVOKE EXECUTE ON FUNCTION public.refund_vision_quota(UUID) FROM authenticated;
+GRANT EXECUTE ON FUNCTION public.refund_vision_quota(UUID) TO service_role;
 
 -- Convenience RPC that resets every student's used counter at term
 -- start. Run from the admin dashboard / cron. Service-role only.

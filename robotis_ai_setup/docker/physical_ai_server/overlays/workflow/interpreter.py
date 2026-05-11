@@ -516,15 +516,18 @@ class Interpreter:
             n = int(times_val) if times_val is not None else 0
         except (TypeError, ValueError):
             raise InterpreterError('Wiederhole-Block hat keine gültige Zahl.')
-        do_block = self._get_input_block(block, 'DO')
-        for i in range(min(n, MAX_LOOP_ITERATIONS)):
-            if ctx.should_stop():
-                raise WorkflowError('Workflow wurde gestoppt.')
-            self._exec_chain(do_block, ctx, on_block_change)
+        # Audit round-3 §18: raise BEFORE the loop so a student requesting
+        # repeat=1_000_000 doesn't get 10000 motions executed before the
+        # cap error fires. Mirrors _exec_while_until's pre-loop check.
         if n > MAX_LOOP_ITERATIONS:
             raise InterpreterError(
                 f'Wiederhole {n} mal: Limit von {MAX_LOOP_ITERATIONS} überschritten.'
             )
+        do_block = self._get_input_block(block, 'DO')
+        for i in range(n):
+            if ctx.should_stop():
+                raise WorkflowError('Workflow wurde gestoppt.')
+            self._exec_chain(do_block, ctx, on_block_change)
 
     def _exec_while_until(
         self,

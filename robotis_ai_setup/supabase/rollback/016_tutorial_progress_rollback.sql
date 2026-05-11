@@ -1,8 +1,22 @@
--- 014_tutorial_progress_rollback.sql
+-- 016_tutorial_progress_rollback.sql
 --
--- Reverse of 014.
+-- Reverse of 016.
 
 BEGIN;
+
+-- Drop the realtime publication entry first so the publication isn't
+-- left pointing at a table we're about to delete.
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM pg_publication_tables
+    WHERE pubname = 'supabase_realtime'
+      AND schemaname = 'public'
+      AND tablename = 'tutorial_progress'
+  ) THEN
+    ALTER PUBLICATION supabase_realtime DROP TABLE public.tutorial_progress;
+  END IF;
+END $$;
 
 DROP POLICY IF EXISTS "Teacher reads classroom student progress" ON public.tutorial_progress;
 DROP POLICY IF EXISTS "Admin reads all progress" ON public.tutorial_progress;

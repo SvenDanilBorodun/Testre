@@ -195,6 +195,12 @@ async def detect(
     # two concurrent requests both seeing `used=199` against quota=200
     # (audit §D2). The UPDATE only fires when there's room left; the
     # caller short-circuits on zero rows returned.
+    #
+    # Audit round-3 §C: the previous silent-fallback path (read-modify-
+    # write on the users row) was non-atomic and let concurrent calls
+    # exceed the quota. We now hard-fail with 503 if the RPC is missing
+    # so the operator knows migration 017 needs to land — silent
+    # downgrade to a broken path was worse than a clear deploy error.
     def _atomic_quota_consume() -> tuple[bool, int | None]:
         try:
             res = (
@@ -204,44 +210,36 @@ async def detect(
                 )
                 .execute()
             )
-            row = res.data
-            if isinstance(row, list) and row:
-                row = row[0]
-            if not isinstance(row, dict):
-                return True, None
-            allowed = bool(row.get("allowed", True))
-            remaining = row.get("remaining")
-            return allowed, remaining if isinstance(remaining, int) else None
-        except Exception:
-            # RPC not present (migration 017 pending) — fall through to
-            # the per-row read-then-write path so the endpoint still
-            # works in older deployments.
-            logger.info("consume_vision_quota RPC unavailable; falling back")
-        try:
-            row = (
-                sb.table("users")
-                .select("vision_quota_per_term, vision_used_per_term")
-                .eq("id", user_id)
-                .single()
-                .execute()
-            )
-            data = row.data or {}
-        except Exception:
-            logger.warning("vision quota lookup failed for user=%s", user_id, exc_info=True)
+        except Exception as e:
+            logger.error("consume_vision_quota RPC unavailable: %s", e)
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Cloud-Erkennung ist auf diesem Server noch nicht "
+                    "fertig konfiguriert. Bitte den Lehrer fragen."
+                ),
+            ) from e
+        row = res.data
+        if isinstance(row, list) and row:
+            row = row[0]
+        if not isinstance(row, dict):
             return True, None
-        quota_v = data.get("vision_quota_per_term")
-        used_v = data.get("vision_used_per_term") or 0
-        if quota_v is not None and used_v >= quota_v:
-            return False, 0
-        if quota_v is not None:
-            try:
-                sb.table("users").update(
-                    {"vision_used_per_term": used_v + 1}
-                ).eq("id", user_id).execute()
-            except Exception:
-                logger.warning("vision quota increment failed", exc_info=True)
-        remaining = (quota_v - used_v - 1) if quota_v is not None else None
-        return True, remaining
+        allowed = bool(row.get("allowed", True))
+        remaining = row.get("remaining")
+        return allowed, remaining if isinstance(remaining, int) else None
+
+    def _refund_quota() -> None:
+        """Best-effort decrement of vision_used_per_term after a Modal
+        failure so a flaky cold-start storm doesn't burn a student's
+        whole term budget. Audit round-3 §A. Race-safe via the
+        ``refund_vision_quota`` RPC; falls back to a quiet no-op if
+        the RPC isn't deployed yet (the cap is still atomic so the
+        worst case is a small unrefunded over-charge).
+        """
+        try:
+            sb.rpc("refund_vision_quota", {"p_user_id": user_id}).execute()
+        except Exception:
+            logger.info("refund_vision_quota RPC unavailable; quota not refunded", exc_info=True)
 
     # Offload the supabase call to a worker thread so the event loop
     # doesn't block during the round trip (uvicorn --workers 1 makes
@@ -254,7 +252,14 @@ async def detect(
         )
 
     started = time.monotonic()
-    response = await _invoke_modal(image_bytes, body.prompts, body.score_threshold)
+    try:
+        response = await _invoke_modal(image_bytes, body.prompts, body.score_threshold)
+    except HTTPException:
+        # Modal call failed (502/504/etc) — give the student their
+        # quota back so a flaky network doesn't cost them a call.
+        # Audit round-3 §A.
+        await asyncio.to_thread(_refund_quota)
+        raise
     elapsed_ms = response["elapsed_ms"]
     raw = response["result"] or {}
     raw_dets = raw.get("detections") if isinstance(raw, dict) else raw

@@ -43,18 +43,30 @@ import numpy as np
 from physical_ai_server.workflow.coco_classes import COCO_CLASSES, ID_TO_LABEL
 
 # Detector dispatch — Phase-3 (2026-05). The default is the
-# Apache-2.0 YOLOX-tiny ONNX baked into the image. Setting
-# ``EDUBOTICS_DETECTOR=dfine-n`` swaps to the D-FINE-N ONNX path so
-# operators can A/B test without rebuilding the image. The
-# ``EDUBOTICS_DFINE_ONNX`` env var overrides the file path. See
-# ``tools/dfine_finetune.md`` for the export/host recipe. The
-# postprocessing branches in ``_detect_yolo`` honour both shapes.
+# Apache-2.0 YOLOX-tiny ONNX baked into the image. ``EDUBOTICS_DETECTOR``
+# is reserved for the future D-FINE-N swap; the postprocessing branches
+# below currently assume the YOLOX head shape, so setting
+# ``EDUBOTICS_DETECTOR=dfine-n`` today would index out-of-bounds on the
+# D-FINE-N output tensor. Until the decode head is wired (tracked in
+# ``docs/ROBOTER_STUDIO_DEFERRED.md`` §7.2 and ``tools/dfine_finetune.md``)
+# we treat any non-default value as a configuration error and raise at
+# import time so the operator sees the issue immediately rather than at
+# the first inference tick.
+# Audit round-3 §J/§K.
 DETECTOR_KIND = os.environ.get('EDUBOTICS_DETECTOR', 'yolox-tiny').strip().lower()
 YOLOX_ONNX_PATH = Path(os.environ.get('EDUBOTICS_YOLOX_ONNX', '/opt/edubotics/yolox_tiny.onnx'))
 DFINE_ONNX_PATH = Path(os.environ.get('EDUBOTICS_DFINE_ONNX', '/opt/edubotics/dfine_n.onnx'))
 
-# Which ONNX file we actually load — chosen at module import.
-_ACTIVE_ONNX_PATH = DFINE_ONNX_PATH if DETECTOR_KIND in ('dfine', 'dfine-n', 'dfinen') else YOLOX_ONNX_PATH
+if DETECTOR_KIND not in ('yolox-tiny', 'yolox'):
+    raise RuntimeError(
+        'EDUBOTICS_DETECTOR='
+        f'{DETECTOR_KIND!r} ist in dieser Version nicht unterstützt. '
+        'Nur "yolox-tiny" funktioniert; die D-FINE-N-Integration ist '
+        'noch in Arbeit (siehe ROBOTER_STUDIO_DEFERRED.md §7.2).'
+    )
+
+# Which ONNX file we actually load — currently always YOLOX-tiny.
+_ACTIVE_ONNX_PATH = YOLOX_ONNX_PATH
 
 YOLOX_INPUT_SIZE = (640, 640)
 YOLOX_CONFIDENCE_THRESHOLD = 0.30

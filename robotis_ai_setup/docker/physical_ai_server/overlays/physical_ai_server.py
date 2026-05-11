@@ -29,6 +29,7 @@ from ament_index_python.packages import get_package_share_directory
 from physical_ai_interfaces.msg import (
     Detection,
     HFOperationStatus,
+    SensorSnapshot,
     TaskStatus,
     TrainingStatus,
     WorkflowStatus,
@@ -37,6 +38,8 @@ from physical_ai_interfaces.srv import (
     AutoPoseSuggest,
     CalibrationCaptureColor,
     CalibrationCaptureFrame,
+    CalibrationHistory,
+    CalibrationPreview,
     CalibrationSolve,
     CalibrationStatus,
     CancelCalibration,
@@ -58,6 +61,11 @@ from physical_ai_interfaces.srv import (
     StartCalibration,
     StartWorkflow,
     StopWorkflow,
+    VerifyCalibration,
+    WorkflowContinue,
+    WorkflowPause,
+    WorkflowSetBreakpoints,
+    WorkflowStep,
 )
 
 from physical_ai_server.communication.communicator import Communicator
@@ -160,6 +168,22 @@ class PhysicalAIServer(Node):
             '/workflow/status',
             50,
         )
+        # Phase-2 sensor snapshot — ~5 Hz heartbeat for the React debug
+        # panel. Shallow depth (5) because each sample is independent
+        # and a 0.2 s staleness threshold means we'd rather drop than
+        # buffer.
+        self.sensor_snapshot_publisher = self.create_publisher(
+            SensorSnapshot,
+            '/workflow/sensors',
+            5,
+        )
+        # 5 Hz timer that publishes a SensorSnapshot whenever a workflow
+        # is active. The callback short-circuits to a no-op when
+        # ``on_workflow`` is False so we don't pay perception cost during
+        # inference / recording.
+        self._sensor_snapshot_timer = self.create_timer(
+            0.2, self._sensor_snapshot_timer_callback,
+        )
 
     def _init_ros_service(self):
         self.get_logger().info('Initializing ROS services...')
@@ -226,6 +250,40 @@ class PhysicalAIServer(Node):
             ('/workshop/mark_destination', MarkDestination, self.mark_destination_callback),
             ('/workflow/start', StartWorkflow, self.workflow_start_callback),
             ('/workflow/stop', StopWorkflow, self.workflow_stop_callback),
+            # Phase-2 debugger plumbing. Pause/Step/Continue must dispatch
+            # while the main workflow callback is in-flight (an editing
+            # student presses Pause while a chunked motion is running),
+            # so they go on the reentrant preempt group like
+            # /calibration/cancel — otherwise they queue behind the long
+            # motion service callback and the UI looks unresponsive.
+            (
+                '/workflow/pause',
+                WorkflowPause,
+                self.workflow_pause_callback,
+                self._preempt_cb_group,
+            ),
+            (
+                '/workflow/step',
+                WorkflowStep,
+                self.workflow_step_callback,
+                self._preempt_cb_group,
+            ),
+            (
+                '/workflow/continue',
+                WorkflowContinue,
+                self.workflow_continue_callback,
+                self._preempt_cb_group,
+            ),
+            (
+                '/workflow/set_breakpoints',
+                WorkflowSetBreakpoints,
+                self.workflow_set_breakpoints_callback,
+                self._preempt_cb_group,
+            ),
+            # Phase-2 calibration helpers (see CalibrationManager).
+            ('/calibration/preview', CalibrationPreview, self.calibration_preview_callback),
+            ('/calibration/verify', VerifyCalibration, self.calibration_verify_callback),
+            ('/calibration/history', CalibrationHistory, self.calibration_history_callback),
         ]
 
         for entry in service_definitions:
@@ -2275,13 +2333,31 @@ class PhysicalAIServer(Node):
         if not ok:
             response.success = False
             response.message = msg
+            response.unreachable_block_ids = []
+            response.unreachable_messages = []
             return response
         manager = self._get_or_create_workflow_manager()
         if manager is None:
             response.success = False
             response.message = 'Workflow-Runtime kann nicht initialisiert werden.'
+            response.unreachable_block_ids = []
+            response.unreachable_messages = []
             return response
-        success, message = manager.start(request.workflow_json, request.workflow_id)
+        # Phase-3: forward cloud_vision_enabled and resolve the burst
+        # callable here. The runtime block reads ctx.cloud_vision['enabled']
+        # and ctx.cloud_vision['cloud_burst'] (callable) to decide whether
+        # to bypass to Modal OWLv2. When disabled, the open-vocab block
+        # raises the German "Cloud-Erkennung deaktiviert" error.
+        cloud_vision = {
+            'enabled': bool(getattr(request, 'cloud_vision_enabled', False)),
+            'translate': self._cloud_vision_synonyms(),
+            'cloud_burst': self._cloud_vision_burst,
+        }
+        success, message, unreachable = manager.start(
+            request.workflow_json,
+            request.workflow_id,
+            cloud_vision=cloud_vision,
+        )
         if success:
             self.on_workflow = True
             # The on_finished callback (passed into WorkflowManager via
@@ -2289,6 +2365,15 @@ class PhysicalAIServer(Node):
             # when the daemon thread exits, regardless of how it exited.
         response.success = success
         response.message = message
+        # IK pre-check warnings — the React side renders setWarningText()
+        # on each block id; the safety envelope still gates motion at
+        # runtime so these are advisory.
+        response.unreachable_block_ids = [
+            str(u.get('block_id', '')) for u in (unreachable or [])
+        ]
+        response.unreachable_messages = [
+            str(u.get('message', '')) for u in (unreachable or [])
+        ]
         return response
 
     def _on_workflow_finished(self, terminal_phase: str) -> None:
@@ -2321,6 +2406,198 @@ class PhysicalAIServer(Node):
         response.success = success
         response.message = message
         return response
+
+    # ------------------------------------------------------------------
+    # Phase-2 debugger plumbing — pause / step / continue / breakpoints
+    # ------------------------------------------------------------------
+    def workflow_pause_callback(self, request, response):
+        manager = self.workflow_manager
+        if manager is None or not manager.is_running:
+            response.success = False
+            response.message = 'Es läuft kein Workflow.'
+            return response
+        success, message = manager.pause()
+        response.success = success
+        response.message = message
+        return response
+
+    def workflow_step_callback(self, request, response):
+        manager = self.workflow_manager
+        if manager is None or not manager.is_running:
+            response.success = False
+            response.message = 'Es läuft kein Workflow.'
+            return response
+        success, message = manager.step()
+        response.success = success
+        response.message = message
+        return response
+
+    def workflow_continue_callback(self, request, response):
+        manager = self.workflow_manager
+        if manager is None or not manager.is_running:
+            response.success = False
+            response.message = 'Es läuft kein Workflow.'
+            return response
+        success, message = manager.resume()
+        response.success = success
+        response.message = message
+        return response
+
+    def workflow_set_breakpoints_callback(self, request, response):
+        # Cap the incoming list size — the React side bounds at ~50
+        # but a buggy editor or hand-crafted rosbridge call could
+        # flood the runtime.
+        block_ids = list(request.block_ids or [])
+        if len(block_ids) > 256:
+            response.success = False
+            response.message = (
+                'Zu viele Haltepunkte (max 256). Bitte einige entfernen.'
+            )
+            return response
+        manager = self._get_or_create_workflow_manager()
+        if manager is None:
+            response.success = False
+            response.message = 'Workflow-Runtime kann nicht initialisiert werden.'
+            return response
+        manager.set_breakpoints(block_ids)
+        response.success = True
+        response.message = f'{len(block_ids)} Haltepunkt(e) gesetzt.'
+        return response
+
+    # ------------------------------------------------------------------
+    # Phase-2 calibration helpers — preview / verify / history
+    # ------------------------------------------------------------------
+    # These are presently lightweight stubs that report not-implemented
+    # so the React UI can render a clear "noch nicht verfügbar" message
+    # rather than failing with rosbridge "service not advertised". Full
+    # implementations live behind ROBOTER_STUDIO_DEFERRED.md §1.2.
+    def calibration_preview_callback(self, request, response):
+        response.detected = False
+        response.corners_x = []
+        response.corners_y = []
+        response.board_area_pct = 0
+        response.message = 'Live-Vorschau wird in einer späteren Version aktiviert.'
+        return response
+
+    def calibration_verify_callback(self, request, response):
+        response.success = False
+        response.predicted_pixel_x = 0.0
+        response.predicted_pixel_y = 0.0
+        response.residual_mm = 0.0
+        response.message = 'Kalibrierungsprüfung wird in einer späteren Version aktiviert.'
+        return response
+
+    def calibration_history_callback(self, request, response):
+        response.success = True
+        response.timestamps = []
+        response.step_names = []
+        response.reprojection_errors_px = []
+        response.agreement_deg = []
+        response.message = 'Kalibrierungsverlauf wird in einer späteren Version aktiviert.'
+        return response
+
+    # ------------------------------------------------------------------
+    # Phase-3 cloud-vision plumbing
+    # ------------------------------------------------------------------
+    def _cloud_vision_synonyms(self) -> dict[str, dict]:
+        """Local German→COCO synonym dict consulted BEFORE bursting to
+        the Modal OWLv2 endpoint. Each entry maps a German prompt to a
+        local-detection fast-path that skips the cloud roundtrip.
+
+        Format per entry:
+          {'mode': 'object'|'color', 'class': '<coco_label>',
+           'color': '<rot|gruen|blau|gelb>'}
+
+        The perception_blocks.detect_open_vocab handler resolves a prompt
+        against this dict first; on miss it calls ctx.cloud_vision[
+        'cloud_burst'] (the bound _cloud_vision_burst method) to reach
+        Modal via the cloud_training_api proxy.
+        """
+        return {
+            'rote tasse': {'mode': 'object', 'class': 'cup', 'color': 'rot'},
+            'tasse': {'mode': 'object', 'class': 'cup'},
+            'banane': {'mode': 'object', 'class': 'banana'},
+            'gelbe banane': {'mode': 'object', 'class': 'banana', 'color': 'gelb'},
+            'flasche': {'mode': 'object', 'class': 'bottle'},
+            'apfel': {'mode': 'object', 'class': 'apple'},
+            'roter apfel': {'mode': 'object', 'class': 'apple', 'color': 'rot'},
+            'orange': {'mode': 'object', 'class': 'orange'},
+            'buch': {'mode': 'object', 'class': 'book'},
+            'schere': {'mode': 'object', 'class': 'scissors'},
+            'roter wuerfel': {'mode': 'color', 'color': 'rot'},
+            'roter würfel': {'mode': 'color', 'color': 'rot'},
+            'blauer wuerfel': {'mode': 'color', 'color': 'blau'},
+            'blauer würfel': {'mode': 'color', 'color': 'blau'},
+            'gruener wuerfel': {'mode': 'color', 'color': 'gruen'},
+            'grüner würfel': {'mode': 'color', 'color': 'gruen'},
+            'gelber wuerfel': {'mode': 'color', 'color': 'gelb'},
+            'gelber würfel': {'mode': 'color', 'color': 'gelb'},
+        }
+
+    def _cloud_vision_burst(self, bgr_frame, prompt: str):
+        """Forward a BGR frame and a German prompt to the cloud_training_api
+        /vision/detect endpoint. The endpoint proxies to the Modal
+        edubotics-vision app (OWLv2). Returns a list of perception.Detection
+        objects (possibly empty).
+
+        Currently a stub that raises — the JWT-propagation path from
+        the on-host server to the cloud API is tracked in
+        ROBOTER_STUDIO_DEFERRED.md §1.4. Once a per-classroom service
+        token mints, this method will POST JPEG bytes + prompts and
+        translate the response into Detection objects. Until then the
+        open-vocab block falls back to the German "Cloud-Erkennung
+        deaktiviert" error when the synonym dict misses.
+        """
+        raise NotImplementedError(
+            'Cloud-Erkennung ist auf dieser Installation noch nicht aktiviert.'
+        )
+
+    # ------------------------------------------------------------------
+    # Phase-2 sensor snapshot publisher (~5 Hz while a workflow runs)
+    # ------------------------------------------------------------------
+    def _sensor_snapshot_timer_callback(self):
+        """Emit a SensorSnapshot on /workflow/sensors. The React debugger
+        panel subscribes; payload is intentionally lightweight (latest
+        joints, gripper opening, visible markers / colors / objects).
+
+        Quiet when no workflow is running so we don't pay the
+        marker/color detection cost during inference or recording.
+        """
+        if not self.on_workflow:
+            return
+        try:
+            msg = SensorSnapshot()
+            msg.header.stamp = self.get_clock().now().to_msg()
+            msg.header.frame_id = 'workflow'
+            # Latest follower joints from the inference manager / data
+            # manager — both keep a rolling buffer.
+            joints = []
+            try:
+                if (
+                    self.communicator is not None
+                    and hasattr(self.communicator, 'get_latest_follower_joints')
+                ):
+                    js = self.communicator.get_latest_follower_joints()
+                    if js is not None:
+                        joints = [float(v) for v in list(js)[:6]]
+            except Exception:
+                joints = []
+            if not joints:
+                joints = [0.0] * 6
+            msg.follower_joints = joints[:5]
+            msg.gripper_opening = float(joints[5]) if len(joints) >= 6 else 0.0
+            # Perception is best-effort. The workflow runtime holds the
+            # detector instance so we can't safely poll it from this
+            # timer; ship empty placeholders that the React side
+            # gracefully renders as "—". A future iteration can wire a
+            # ctx.last_detections cache.
+            msg.visible_apriltag_ids = []
+            msg.color_counts = [0, 0, 0, 0]
+            msg.visible_object_classes = []
+            self.sensor_snapshot_publisher.publish(msg)
+        except Exception:
+            # Snapshot publish must never crash the timer thread.
+            pass
 
     def handle_joystick_trigger(self, joystick_mode: str):
         self.get_logger().info(

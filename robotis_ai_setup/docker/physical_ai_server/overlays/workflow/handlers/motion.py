@@ -177,14 +177,37 @@ def pickup(ctx, args: dict[str, Any]) -> None:
     closed_q = grasp_arm_q + [GRIPPER_CLOSED_RAD]
     lift_q = lift_arm_q + [GRIPPER_CLOSED_RAD]
 
-    _publish_motion(ctx, ctx.last_full_joints, open_q, DEFAULT_GRIPPER_DURATION_S)
-    _publish_motion(ctx, open_q, above_q, DEFAULT_MOVE_DURATION_S)
-    _publish_motion(ctx, above_q, grasp_q, DEFAULT_GRASP_DURATION_S)
-    _publish_motion(ctx, grasp_q, closed_q, DEFAULT_GRIPPER_DURATION_S)
-    _publish_motion(ctx, closed_q, lift_q, DEFAULT_APPROACH_DURATION_S)
-
-    ctx.last_arm_joints = lift_arm_q
-    ctx.last_full_joints = lift_q
+    # Audit round-3 §22+§23: hold motion_lock for the whole pickup
+    # sequence so a hat handler cannot interleave between the descend,
+    # grasp, and lift sub-motions. Without this, a hat thread that
+    # acquires the lock between two _publish_motion calls can move the
+    # arm somewhere else mid-grasp. RLock allows _publish_motion's
+    # inner acquire to re-enter without deadlock. Also update
+    # last_full_joints after EACH successful sub-motion so a mid-
+    # sequence failure leaves an accurate record for recovery.
+    lock = getattr(ctx, 'motion_lock', None)
+    if lock is not None:
+        lock.acquire()
+    try:
+        _publish_motion(ctx, ctx.last_full_joints, open_q, DEFAULT_GRIPPER_DURATION_S)
+        ctx.last_full_joints = open_q
+        _publish_motion(ctx, open_q, above_q, DEFAULT_MOVE_DURATION_S)
+        ctx.last_full_joints = above_q
+        ctx.last_arm_joints = above_arm_q
+        _publish_motion(ctx, above_q, grasp_q, DEFAULT_GRASP_DURATION_S)
+        ctx.last_full_joints = grasp_q
+        ctx.last_arm_joints = grasp_arm_q
+        _publish_motion(ctx, grasp_q, closed_q, DEFAULT_GRIPPER_DURATION_S)
+        ctx.last_full_joints = closed_q
+        _publish_motion(ctx, closed_q, lift_q, DEFAULT_APPROACH_DURATION_S)
+        ctx.last_arm_joints = lift_arm_q
+        ctx.last_full_joints = lift_q
+    finally:
+        if lock is not None:
+            try:
+                lock.release()
+            except RuntimeError:
+                pass
 
 
 def drop_at(ctx, args: dict[str, Any]) -> None:
@@ -205,13 +228,28 @@ def drop_at(ctx, args: dict[str, Any]) -> None:
     drop_open_q = drop_arm_q + [GRIPPER_OPEN_RAD]
     retreat_open_q = above_arm_q + [GRIPPER_OPEN_RAD]
 
-    _publish_motion(ctx, ctx.last_full_joints, above_closed_q, DEFAULT_MOVE_DURATION_S)
-    _publish_motion(ctx, above_closed_q, drop_closed_q, DEFAULT_APPROACH_DURATION_S)
-    _publish_motion(ctx, drop_closed_q, drop_open_q, DEFAULT_GRIPPER_DURATION_S)
-    _publish_motion(ctx, drop_open_q, retreat_open_q, DEFAULT_APPROACH_DURATION_S)
-
-    ctx.last_arm_joints = above_arm_q
-    ctx.last_full_joints = retreat_open_q
+    # Audit round-3 §22+§23 — same atomicity argument as pickup.
+    lock = getattr(ctx, 'motion_lock', None)
+    if lock is not None:
+        lock.acquire()
+    try:
+        _publish_motion(ctx, ctx.last_full_joints, above_closed_q, DEFAULT_MOVE_DURATION_S)
+        ctx.last_full_joints = above_closed_q
+        ctx.last_arm_joints = above_arm_q
+        _publish_motion(ctx, above_closed_q, drop_closed_q, DEFAULT_APPROACH_DURATION_S)
+        ctx.last_full_joints = drop_closed_q
+        ctx.last_arm_joints = drop_arm_q
+        _publish_motion(ctx, drop_closed_q, drop_open_q, DEFAULT_GRIPPER_DURATION_S)
+        ctx.last_full_joints = drop_open_q
+        _publish_motion(ctx, drop_open_q, retreat_open_q, DEFAULT_APPROACH_DURATION_S)
+        ctx.last_arm_joints = above_arm_q
+        ctx.last_full_joints = retreat_open_q
+    finally:
+        if lock is not None:
+            try:
+                lock.release()
+            except RuntimeError:
+                pass
 
 
 WAIT_SECONDS_MAX = 300.0  # 5 minutes — anything longer is almost certainly a mistake

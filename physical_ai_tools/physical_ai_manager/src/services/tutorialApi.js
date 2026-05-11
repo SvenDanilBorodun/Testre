@@ -12,6 +12,23 @@ import { CLOUD_API_URL, assertCloudApiConfigured } from './cloudConfig';
 
 const DEFAULT_TIMEOUT_MS = 15_000;
 
+// Same shape as `workflowApi.js` STATUS_MESSAGES_DE — translates the
+// API's English fallback strings to German for student-facing toasts.
+// Audit round-3 §AO — tutorialApi previously surfaced the raw English
+// "Too many requests" message on 429.
+const STATUS_MESSAGES_DE = {
+  400: 'Anfrage ungültig.',
+  401: 'Sitzung abgelaufen — bitte erneut anmelden.',
+  403: 'Aktion nicht erlaubt.',
+  404: 'Tutorial-Eintrag nicht gefunden.',
+  413: 'Anfrage zu groß.',
+  429: 'Zu viele Anfragen — bitte kurz warten.',
+  500: 'Server-Fehler — bitte später erneut versuchen.',
+  502: 'Server nicht erreichbar.',
+  503: 'Server überlastet — bitte später erneut versuchen.',
+  504: 'Server hat zu lange gebraucht.',
+};
+
 class TutorialApiError extends Error {
   constructor(message, status) {
     super(message);
@@ -48,8 +65,14 @@ async function apiRequest(endpoint, method, accessToken, body = null) {
   clearTimeout(timer);
   if (!response.ok) {
     const error = await response.json().catch(() => ({}));
+    // Prefer the API's own German detail (FastAPI returns German for
+    // 4xx in this project). On English fallbacks (rate-limit
+    // middleware, opaque 5xx), substitute the German status table.
+    const detail = typeof error.detail === 'string' ? error.detail : '';
+    const looksLocalized = /[äöüß]/i.test(detail) || /Workflow|Tutorial|nicht|ist/.test(detail);
+    const fallback = STATUS_MESSAGES_DE[response.status] || `Server-Fehler (${response.status}).`;
     throw new TutorialApiError(
-      error.detail || `Server-Fehler (${response.status}).`,
+      looksLocalized && detail ? detail : fallback,
       response.status,
     );
   }

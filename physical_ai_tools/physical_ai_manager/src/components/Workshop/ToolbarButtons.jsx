@@ -76,20 +76,6 @@ function ToolbarButtons({
     return () => clearInterval(id);
   }, []);
 
-  // Keyboard shortcuts: Ctrl+S → save, Ctrl+Shift+E → export.
-  useEffect(() => {
-    const handler = (e) => {
-      const ctrlOrMeta = e.ctrlKey || e.metaKey;
-      if (!ctrlOrMeta) return;
-      if (e.key === 's' || e.key === 'S') {
-        e.preventDefault();
-        if (typeof onSave === 'function') onSave();
-      }
-    };
-    window.addEventListener('keydown', handler);
-    return () => window.removeEventListener('keydown', handler);
-  }, [onSave]);
-
   const handleUndo = useCallback(() => {
     if (workspace) workspace.undo(false);
   }, [workspace]);
@@ -97,6 +83,43 @@ function ToolbarButtons({
   const handleRedo = useCallback(() => {
     if (workspace) workspace.undo(true);
   }, [workspace]);
+
+  // Keyboard shortcuts: Ctrl+S → save, Ctrl+Y / Ctrl+Shift+Z → redo.
+  // Audit round-3 §U / §V — the toolbar's redo tooltip used to claim
+  // Ctrl+Y but no handler was wired, and the save shortcut fired even
+  // while the student was typing inside a text block field. Now we
+  // skip the global shortcut when focus is inside a form/contentEditable
+  // element so Blockly's own field input remains untouched.
+  useEffect(() => {
+    const handler = (e) => {
+      const ctrlOrMeta = e.ctrlKey || e.metaKey;
+      if (!ctrlOrMeta) return;
+      // Don't fire global shortcuts while the user is editing a field.
+      const t = e.target;
+      if (t && typeof t.matches === 'function' && t.matches('input, textarea, [contenteditable=""], [contenteditable="true"]')) {
+        return;
+      }
+      if (e.key === 's' || e.key === 'S') {
+        e.preventDefault();
+        if (typeof onSave === 'function') onSave();
+        return;
+      }
+      // Ctrl+Y → redo (Windows/Linux convention)
+      if (e.key === 'y' || e.key === 'Y') {
+        e.preventDefault();
+        handleRedo();
+        return;
+      }
+      // Ctrl+Shift+Z → redo (Mac convention)
+      if (e.shiftKey && (e.key === 'z' || e.key === 'Z')) {
+        e.preventDefault();
+        handleRedo();
+        return;
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [onSave, handleRedo]);
 
   const handleZoomFit = useCallback(() => {
     if (!workspace) return;

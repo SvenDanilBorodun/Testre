@@ -144,6 +144,12 @@ export function useRosTopicSubscription() {
     unsubscribeFromTopic(heartbeatTopicRef, 'Heartbeat');
     unsubscribeFromTopic(trainingStatusTopicRef, 'Training status');
     unsubscribeFromTopic(hfStatusTopicRef, 'HF status');
+    // Workshop subscribers added in Phase-2/3 — without these the
+    // /workflow/status and /workflow/sensors subscriptions leak onto
+    // the dying ros connection and the next reconnect runs with two
+    // parallel listeners. Audit round-3 §A / §NF-1.
+    unsubscribeFromTopic(workflowStatusTopicRef, 'Workflow status');
+    unsubscribeFromTopic(workflowSensorsTopicRef, 'Workflow sensors');
 
     // Reset previous phase tracking
     previousPhaseRef.current = null;
@@ -636,7 +642,10 @@ export function useRosTopicSubscription() {
     if (m) {
       try {
         if (window.speechSynthesis && window.SpeechSynthesisUtterance) {
-          const u = new window.SpeechSynthesisUtterance(m[1]);
+          // Cap the spoken text — a workflow that logs a 50 kB
+          // sentinel shouldn't queue an audio book.
+          const spokenText = String(m[1] ?? '').slice(0, 500);
+          const u = new window.SpeechSynthesisUtterance(spokenText);
           u.lang = 'de-DE';
           // Cancel any in-flight utterance so a tight loop of speak
           // blocks doesn't queue dozens of seconds of audio.
@@ -651,14 +660,28 @@ export function useRosTopicSubscription() {
     m = /^\[VAR:([^=]+)=(.*)\]$/s.exec(message);
     if (m) {
       try {
-        const name = m[1];
+        // Harden against prototype-pollution and unbounded growth.
+        // Audit round-3 §B / §38 — variable name must match the
+        // Blockly identifier shape and the JSON payload is capped so
+        // a runaway workflow can't balloon Redux state.
+        const rawName = String(m[1] ?? '');
+        const rawValue = String(m[2] ?? '');
+        if (rawName.length > 64 || rawValue.length > 4096) {
+          return { intercepted: true };
+        }
+        if (!/^[A-Za-zÄÖÜäöüß_][A-Za-zÄÖÜäöüß0-9_]*$/.test(rawName)) {
+          return { intercepted: true };
+        }
+        if (rawName === '__proto__' || rawName === 'constructor' || rawName === 'prototype') {
+          return { intercepted: true };
+        }
         let value = null;
         try {
-          value = JSON.parse(m[2]);
+          value = JSON.parse(rawValue);
         } catch (e) {
-          value = m[2];
+          value = rawValue;
         }
-        store.dispatch(setVariable({ name, value }));
+        store.dispatch(setVariable({ name: rawName, value }));
       } catch (e) {
         console.warn('VAR token parse failed', e);
       }

@@ -210,10 +210,20 @@ class WorkflowManager:
     def set_breakpoints(self, block_ids: list[str]) -> None:
         """Replace the active breakpoint set. Safe to call before, during,
         or after a workflow run; the runtime checks the live set on every
-        block dispatch."""
+        block dispatch.
+
+        Audit fix (round-3): MUST mutate in-place rather than rebind the
+        attribute. WorkflowContext.breakpoints is captured by reference at
+        ``start()`` (see line ~314 ``breakpoints=self._breakpoints``);
+        rebinding the manager attribute leaves ctx pointing at the OLD
+        set object and mid-run breakpoint updates would never reach the
+        runtime.
+        """
         if not isinstance(block_ids, (list, tuple, set)):
             block_ids = []
-        self._breakpoints = {str(b) for b in block_ids if b}
+        new_set = {str(b) for b in block_ids if b}
+        self._breakpoints.clear()
+        self._breakpoints.update(new_set)
 
     def pause(self) -> tuple[bool, str]:
         if not self.is_running:
@@ -451,7 +461,17 @@ class WorkflowManager:
         if not targets:
             return []
         unreachable: list[dict[str, Any]] = []
-        budget_end = time.monotonic() + _IKPRECHECK_TOTAL_BUDGET_S
+        # Scale the total budget proportionally so a 50-target workflow
+        # doesn't silently truncate after the first 20 (audit round-3
+        # §24). Hard floor 1 s, ceiling 5 s.
+        scaled_budget = max(_IKPRECHECK_TOTAL_BUDGET_S,
+                            min(5.0, len(targets) * _IKPRECHECK_PER_TARGET_TIMEOUT_S * 2))
+        budget_end = time.monotonic() + scaled_budget
+        # Seed from HOME (matches the runtime's first-call seed when
+        # last_arm_joints is unset). Audit round-3 §23 — pre-check
+        # passing seed=None when runtime seeds from HOME produced
+        # false unreachable warnings on reachable destinations.
+        precheck_seed = list(_HOME_FULL_JOINTS[:5])
         for target in targets:
             if time.monotonic() > budget_end:
                 break
@@ -459,7 +479,7 @@ class WorkflowManager:
             try:
                 solution = ik.solve(
                     target_xyz=xyz,
-                    seed=None,
+                    seed=precheck_seed,
                     free_yaw=True,
                 )
             except Exception:
@@ -494,13 +514,24 @@ class WorkflowManager:
         """
         deadline = time.monotonic() + _RECOVERY_DEADLINE_S
         deadline_exceeded = lambda: time.monotonic() > deadline
-        # Acquire motion_lock for the whole recovery sequence. Use
-        # blocking acquire — recovery happens on the main thread which
-        # has already signaled stop, so any hat handler is in the
-        # process of exiting and will release the lock shortly.
+        # Acquire motion_lock for the recovery sequence. Use a bounded
+        # acquire so a hat thread wedged inside a C-extension (cv2 /
+        # onnxruntime — uninterruptible from Python) can't permanently
+        # hang the daemon. If acquire fails we proceed without the lock;
+        # the worst case is a competing hat publish, but the daemon
+        # exits cleanly. Audit round-3 §20.
         lock = ctx.motion_lock
+        acquired = False
         if lock is not None:
-            lock.acquire()
+            acquired = lock.acquire(timeout=2.0)
+            if not acquired:
+                self._emit_status({
+                    'workflow_id': self._workflow_id or '',
+                    'log_message': (
+                        'Recovery konnte motion_lock nicht erhalten — '
+                        'Bewegung übersprungen.'
+                    ),
+                })
         try:
             current = list(ctx.last_full_joints) if ctx.last_full_joints else list(_HOME_FULL_JOINTS)
             # Hold-current segment so the controller has time to settle
@@ -543,7 +574,7 @@ class WorkflowManager:
                 'log_message': 'Recovery-Bewegung fehlgeschlagen.',
             })
         finally:
-            if lock is not None:
+            if lock is not None and acquired:
                 try:
                     lock.release()
                 except RuntimeError:
@@ -643,8 +674,13 @@ class WorkflowManager:
                 if frame is None:
                     time.sleep(0.2)
                     return False
+                # Mode name must match Perception.detect() dispatch:
+                # 'apriltag' (not 'marker'). Audit round-3 §AI — the
+                # earlier `'marker'` literal silently fell through the
+                # if/elif and returned `[]`, so the hat block never
+                # fired even when a tag was visible.
                 detections = ctx.perception.detect(
-                    frame, camera='scene', mode='marker', aruco_id=target_id,
+                    frame, camera='scene', mode='apriltag', aruco_id=target_id,
                 )
                 if detections:
                     return True

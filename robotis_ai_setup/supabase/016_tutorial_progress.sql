@@ -1,9 +1,14 @@
--- 014_tutorial_progress.sql
+-- 016_tutorial_progress.sql
 --
 -- Roboter Studio Phase-3: per-student progress through the bundled
--- skillmap tutorials (`physical_ai_manager/public/tutorials/*.md`).
+-- skillmap tutorials (``physical_ai_manager/public/tutorials/*.json``).
 -- Each row tracks one student × one tutorial; current_step starts at 0
 -- and advances as the student completes each step.
+--
+-- Numbered 016 (skipping 014) because 014 was never authored — the
+-- original 013_workflow_versions.sql collided alphabetically with
+-- 013_revoke_anon_from_security_definer.sql and was renamed to 015
+-- (audit round-3 §AJ).
 
 BEGIN;
 
@@ -78,5 +83,26 @@ CREATE POLICY "Teacher reads classroom student progress"
         AND c.teacher_id = auth.uid()
     )
   );
+
+-- Explicit service_role grant. service_role bypasses RLS via Supabase's
+-- JWT shortcut but the SQL ACL needs a matching GRANT so other tools
+-- (psql, pgAdmin) see consistent privileges. Audit round-3 §AM.
+GRANT ALL ON public.tutorial_progress TO service_role;
+
+-- Realtime publication so the teacher dashboard updates as students
+-- complete tutorial steps. The CLAUDE.md §9.14 docstring already
+-- describes this; the v1 ship of 016 omitted the ALTER and the
+-- consumer never got live updates. Audit round-3 §J / §AK.
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_publication_tables
+    WHERE pubname = 'supabase_realtime'
+      AND schemaname = 'public'
+      AND tablename = 'tutorial_progress'
+  ) THEN
+    ALTER PUBLICATION supabase_realtime ADD TABLE public.tutorial_progress;
+  END IF;
+END $$;
 
 COMMIT;

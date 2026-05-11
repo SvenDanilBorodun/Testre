@@ -183,6 +183,45 @@ def _client_ip(request: Request) -> str:
     return request.client.host if request.client else "unknown"
 
 
+def _user_key_from_jwt(request: Request) -> str | None:
+    """Extract a stable per-user key from the Authorization Bearer JWT
+    without verifying the signature. Middleware runs before the FastAPI
+    dependency that fully validates the token; we trust the route's
+    ``Depends(get_current_user)`` to authenticate, and use this only as
+    a rate-limit bucket key.
+
+    Returns the JWT's ``sub`` (user id) when present, otherwise None so
+    the caller can fall back to IP keying. Audit round-3 §BD — keying
+    /vision/detect by IP causes 30 NAT'd students in a classroom to
+    share a 5/60s bucket; per-user keying fixes that without needing a
+    second auth path inside the middleware.
+    """
+    auth = request.headers.get("authorization") or request.headers.get("Authorization")
+    if not auth or not auth.lower().startswith("bearer "):
+        return None
+    token = auth[7:].strip()
+    parts = token.split(".")
+    if len(parts) < 2:
+        return None
+    import base64
+    import json
+    try:
+        # JWT payload base64url, no padding — pad to multiple of 4.
+        payload = parts[1] + "=" * ((4 - len(parts[1]) % 4) % 4)
+        data = json.loads(base64.urlsafe_b64decode(payload.encode("ascii")))
+    except Exception:
+        return None
+    sub = data.get("sub")
+    if isinstance(sub, str) and sub:
+        return sub
+    return None
+
+
+# Routes that should rate-limit per AUTHENTICATED USER rather than per
+# IP. Anything missing here keeps the IP-keyed legacy behavior.
+_PER_USER_RATE_LIMIT_PREFIXES = ("/vision/detect",)
+
+
 class RateLimitMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         path = request.url.path
@@ -197,10 +236,17 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                 # the legacy behaviour is preserved. The POST-on-create
                 # rule combined with method=POST ensures PATCH on the
                 # same prefix is unaffected.
-                client_ip = _client_ip(request)
+                use_user_key = any(
+                    path.startswith(p) for p in _PER_USER_RATE_LIMIT_PREFIXES
+                )
+                key = None
+                if use_user_key:
+                    key = _user_key_from_jwt(request)
+                if not key:
+                    key = _client_ip(request)
                 bucket_key = f"{rule_method}:{prefix}"
-                if not _rate_limiter.check(bucket_key, client_ip, limit, window):
-                    logger.warning("Rate limit hit on %s %s from %s", rule_method, prefix, client_ip)
+                if not _rate_limiter.check(bucket_key, key, limit, window):
+                    logger.warning("Rate limit hit on %s %s from %s", rule_method, prefix, key)
                     # Return a Response directly. Raising HTTPException
                     # inside BaseHTTPMiddleware.dispatch is a footgun:
                     # Starlette doesn't route middleware exceptions

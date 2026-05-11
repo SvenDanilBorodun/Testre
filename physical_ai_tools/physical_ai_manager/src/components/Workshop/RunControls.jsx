@@ -8,7 +8,7 @@
  *     http://www.apache.org/licenses/LICENSE-2.0
  */
 
-import React, { useCallback, useState, useEffect } from 'react';
+import React, { useCallback, useState, useEffect, useRef } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import toast from 'react-hot-toast';
 import {
@@ -45,23 +45,41 @@ function RunControls({ workflowId, blocklyJson, workspace = null }) {
 
   const isRunning = runState === 'running' || phase === 'running' || paused;
 
-  // Re-attach IK pre-check warnings to blocks whenever the warnings list
-  // changes. Each warning is {block_id, message}. The workspace ref
-  // comes in as a prop from WorkshopPage so we don't depend on a
-  // global Blockly singleton (audit §12 found that path silently
-  // dropped every warning).
+  // Track the block ids we last warned on so a rerun without warnings
+  // clears the previous bubbles. Audit round-3 §K — the prior version
+  // skipped the effect when `debuggerWarnings` became empty, leaving
+  // stale yellow markers on the workspace.
+  const previouslyWarnedIdsRef = useRef([]);
+
+  // Re-attach (or clear) IK pre-check warnings on blocks whenever the
+  // warnings list changes. Each warning is {block_id, message}. The
+  // workspace ref comes in as a prop from WorkshopPage so we don't
+  // depend on a global Blockly singleton (audit §12 found that path
+  // silently dropped every warning).
   useEffect(() => {
     if (!workspace || typeof workspace.getBlockById !== 'function') return;
-    if (!Array.isArray(debuggerWarnings) || debuggerWarnings.length === 0) {
-      return;
-    }
-    debuggerWarnings.forEach((warn) => {
+    const list = Array.isArray(debuggerWarnings) ? debuggerWarnings : [];
+    const nextIds = list
+      .filter((w) => w && w.block_id)
+      .map((w) => w.block_id);
+    // Clear any previously warned block that isn't in the new list.
+    const nextSet = new Set(nextIds);
+    previouslyWarnedIdsRef.current.forEach((bid) => {
+      if (!nextSet.has(bid)) {
+        const block = workspace.getBlockById(bid);
+        if (block && typeof block.setWarningText === 'function') {
+          block.setWarningText(null);
+        }
+      }
+    });
+    list.forEach((warn) => {
       if (!warn || !warn.block_id) return;
       const block = workspace.getBlockById(warn.block_id);
       if (block && typeof block.setWarningText === 'function') {
         block.setWarningText(warn.message || null);
       }
     });
+    previouslyWarnedIdsRef.current = nextIds;
   }, [debuggerWarnings, workspace]);
 
   const handleStart = useCallback(async () => {
@@ -73,6 +91,10 @@ function RunControls({ workflowId, blocklyJson, workspace = null }) {
     try {
       dispatch(clearWorkflowLog());
       dispatch(clearVariables());
+      // Clear stale unreachable warnings from a previous run before
+      // dispatching the new ones; the effect above handles the actual
+      // block-level setWarningText(null) calls.
+      dispatch(setDebuggerWarnings([]));
       const r = await callService(
         '/workflow/start',
         'physical_ai_interfaces/srv/StartWorkflow',
@@ -101,7 +123,9 @@ function RunControls({ workflowId, blocklyJson, workspace = null }) {
       dispatch(setRunState('running'));
       dispatch(setPaused(false));
       if (warnings.length > 0) {
-        toast(`${warnings.length} Block(s) markiert: außerhalb des Arbeitsbereichs.`, { icon: '⚠️' });
+        // German plural — `Block` (singular) vs `Blöcke` (plural).
+        const noun = warnings.length === 1 ? 'Block' : 'Blöcke';
+        toast(`${warnings.length} ${noun} markiert: außerhalb des Arbeitsbereichs.`, { icon: '⚠️' });
       } else {
         toast.success(r.message);
       }
@@ -110,7 +134,10 @@ function RunControls({ workflowId, blocklyJson, workspace = null }) {
     } finally {
       setBusy(false);
     }
-  }, [blocklyJson, callService, dispatch, workflowId]);
+  // cloudVisionEnabled must be in the deps array — otherwise the
+  // useCallback retains the value captured at the first render and
+  // toggling the checkbox doesn't take effect. Audit round-3 §J / §W.
+  }, [blocklyJson, callService, cloudVisionEnabled, dispatch, workflowId]);
 
   const handleStop = useCallback(async () => {
     setBusy(true);

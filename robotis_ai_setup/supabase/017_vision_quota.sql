@@ -20,6 +20,21 @@ ALTER TABLE public.users
   ADD COLUMN IF NOT EXISTS vision_quota_per_term INTEGER,
   ADD COLUMN IF NOT EXISTS vision_used_per_term INTEGER NOT NULL DEFAULT 0;
 
+-- Floor the used counter so a future bug-introduced decrement RPC can't
+-- write negative values. Audit round-3 §AQ.
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.check_constraints
+    WHERE constraint_schema = 'public'
+      AND constraint_name = 'users_vision_used_per_term_nonneg'
+  ) THEN
+    ALTER TABLE public.users
+      ADD CONSTRAINT users_vision_used_per_term_nonneg
+      CHECK (vision_used_per_term >= 0);
+  END IF;
+END $$;
+
 COMMENT ON COLUMN public.users.vision_quota_per_term IS
   'Maximum cloud-vision detect calls per term. NULL = unbounded.';
 COMMENT ON COLUMN public.users.vision_used_per_term IS
@@ -72,6 +87,33 @@ REVOKE EXECUTE ON FUNCTION public.consume_vision_quota(UUID) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.consume_vision_quota(UUID) FROM anon;
 REVOKE EXECUTE ON FUNCTION public.consume_vision_quota(UUID) FROM authenticated;
 GRANT EXECUTE ON FUNCTION public.consume_vision_quota(UUID) TO service_role;
+
+-- Atomic refund: decrement vision_used_per_term by 1, never below 0.
+-- Called by the cloud API when Modal returns a transient error
+-- (502/504/timeout) so a flaky cold start doesn't burn the student's
+-- term budget. Returns the new used count for telemetry.
+-- Audit round-3 §A — refund-on-failure pattern.
+CREATE OR REPLACE FUNCTION public.refund_vision_quota(p_user_id UUID)
+RETURNS INTEGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_new_used INTEGER;
+BEGIN
+  UPDATE public.users
+  SET vision_used_per_term = GREATEST(vision_used_per_term - 1, 0)
+  WHERE id = p_user_id
+  RETURNING vision_used_per_term INTO v_new_used;
+  RETURN COALESCE(v_new_used, 0);
+END;
+$$;
+
+REVOKE EXECUTE ON FUNCTION public.refund_vision_quota(UUID) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.refund_vision_quota(UUID) FROM anon;
+REVOKE EXECUTE ON FUNCTION public.refund_vision_quota(UUID) FROM authenticated;
+GRANT EXECUTE ON FUNCTION public.refund_vision_quota(UUID) TO service_role;
 
 -- Convenience RPC that resets every student's used counter at term
 -- start. Run from the admin dashboard / cron. Service-role only.

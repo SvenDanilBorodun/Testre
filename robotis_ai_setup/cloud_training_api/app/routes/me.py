@@ -146,6 +146,54 @@ async def export_my_data(profile=Depends(get_current_profile)):
     )
     bundle["datasets"] = datasets.data or []
 
+    # Roboter Studio Phase-2/3 personal data added in migrations 015/016.
+    # Both tables are personal data under GDPR Art. 15 the moment a
+    # student authors a workflow or completes a tutorial step. Audit
+    # round-3 §L — without these the export is incomplete.
+    workflow_ids = [w.get("id") for w in (bundle["workflows"] or []) if w.get("id")]
+    if workflow_ids:
+        try:
+            versions = (
+                supabase.table("workflow_versions")
+                .select("*")
+                .in_("workflow_id", workflow_ids)
+                .execute()
+            )
+            bundle["workflow_versions"] = versions.data or []
+        except Exception:
+            # Migration 015 not deployed yet on this stack — keep the
+            # export usable.
+            bundle["workflow_versions"] = []
+    else:
+        bundle["workflow_versions"] = []
+
+    try:
+        tutorial_progress = (
+            supabase.table("tutorial_progress")
+            .select("*")
+            .eq("user_id", uid)
+            .execute()
+        )
+        bundle["tutorial_progress"] = tutorial_progress.data or []
+    except Exception:
+        bundle["tutorial_progress"] = []
+
+    # Best-effort: include the vision-quota counters so the student can
+    # see how much of their cloud budget has been used. NULL quota means
+    # "unbounded" and is also informative.
+    try:
+        vq = (
+            supabase.table("users")
+            .select("vision_quota_per_term, vision_used_per_term")
+            .eq("id", uid)
+            .single()
+            .execute()
+        )
+        if vq.data:
+            bundle["vision_quota"] = vq.data
+    except Exception:
+        pass
+
     if profile["role"] == "teacher":
         classrooms = (
             supabase.table("classrooms").select("*").eq("teacher_id", uid).execute()

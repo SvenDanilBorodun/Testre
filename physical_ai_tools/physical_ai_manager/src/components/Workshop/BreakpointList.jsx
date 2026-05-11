@@ -40,15 +40,22 @@ function BreakpointList({ workspace }) {
   const { callService } = useRosServiceCaller();
 
   // Push current breakpoint set to the workflow runtime whenever it
-  // changes. Service is best-effort — if the workflow isn't running
-  // yet the call will return false success.
+  // changes. Audit round-3 §M — only call the service when a workflow
+  // is running or paused, so a student toggling 30 breakpoints before
+  // pressing Start doesn't fire 30 best-effort RPCs that all return
+  // "Es läuft kein Workflow." and burn a 10 s timeout each through the
+  // useRosServiceCaller queue.
+  const runState = useSelector((s) => s.workshop.runState);
+  const paused = useSelector((s) => s.workshop.paused);
   useEffect(() => {
+    const isLive = runState === 'running' || paused;
+    if (!isLive) return;
     callService(
       '/workflow/set_breakpoints',
       'physical_ai_interfaces/srv/WorkflowSetBreakpoints',
       { block_ids: breakpoints },
-    ).catch(() => { /* swallow — server may not be running yet */ });
-  }, [breakpoints, callService]);
+    ).catch(() => { /* swallow — server may have just exited */ });
+  }, [breakpoints, callService, runState, paused]);
 
   // Wire a workspace right-click handler that toggles breakpoints.
   // We use a documented Blockly hook (registry contextMenu) when
@@ -62,20 +69,15 @@ function BreakpointList({ workspace }) {
       // works.
       if (!event.altKey) return;
       const target = event.target;
-      if (!target) return;
-      // Walk up to a Blockly block group via dataset attribute.
-      let id = null;
-      let el = target;
-      for (let i = 0; i < 8 && el; i += 1) {
-        if (el.getAttribute) {
-          const candidate = el.getAttribute('data-id') || el.getAttribute('data-block-id');
-          if (candidate) {
-            id = candidate;
-            break;
-          }
-        }
-        el = el.parentElement;
-      }
+      if (!target || typeof target.closest !== 'function') return;
+      // Walk up to a Blockly block group. Audit round-3 §O —
+      // depth-bounded loops missed deeply nested block elements; use
+      // element.closest with an attribute selector instead so the walk
+      // is unbounded but still cheap.
+      const node = target.closest('[data-id], [data-block-id]');
+      const id = node
+        ? node.getAttribute('data-id') || node.getAttribute('data-block-id')
+        : null;
       if (!id) return;
       event.preventDefault();
       event.stopPropagation();

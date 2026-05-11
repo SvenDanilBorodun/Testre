@@ -45,6 +45,11 @@ export const TUTORIAL_INDEX = Object.freeze([
     title_de: 'Sortiere nach Klasse',
     level: 4,
   },
+  {
+    id: 'ereignis_marker_gefunden',
+    title_de: 'Ereignis: AprilTag entdeckt',
+    level: 3,
+  },
 ]);
 
 const cache = new Map();

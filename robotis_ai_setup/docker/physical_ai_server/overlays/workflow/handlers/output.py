@@ -30,6 +30,9 @@ from typing import Any
 # Cap speak text so the React side doesn't queue minutes of audio if a
 # loop fires the speak block thousands of times.
 MAX_SPEAK_CHARS = 240
+# Cap a single log message so a student emitting `str(huge_list)` can't
+# DoS the WorkflowStatus realtime channel. Audit round-3 §AG.
+MAX_LOG_CHARS = 2000
 TONE_FREQ_MIN = 100
 TONE_FREQ_MAX = 4000
 TONE_SECONDS_MIN = 0.05
@@ -40,7 +43,14 @@ def log(ctx, args: dict[str, Any]) -> None:
     message = args.get('message')
     if message is None:
         message = ''
-    ctx.log(str(message))
+    text = str(message)
+    if len(text) > MAX_LOG_CHARS:
+        text = text[:MAX_LOG_CHARS] + ' …'
+    # Strip ALL bracket-sentinel chars so a student's log payload can't
+    # spoof [VAR:...] / [SPEAK:...] / [TONE:...] / [SOUND] tokens into
+    # the React-side debug panel.
+    text = text.replace('[', '(').replace(']', ')')
+    ctx.log(text)
 
 
 def play_sound(ctx, args: dict[str, Any]) -> None:
@@ -52,14 +62,24 @@ def speak_de(ctx, args: dict[str, Any]) -> None:
     if text is None:
         text = ''
     text = str(text)
-    # Strip newlines (the [SPEAK:..] sentinel uses dotall regex on the
-    # React side, but other consumers parse line-by-line). Replace with
-    # spaces so the spoken sentence still flows naturally.
-    text = text.replace('\r', ' ').replace('\n', ' ').strip()
-    if not text:
-        return
+    # Truncate FIRST so a multi-MB input doesn't go through the full
+    # replace/strip chain. Audit round-3 §AF.
     if len(text) > MAX_SPEAK_CHARS:
         text = text[:MAX_SPEAK_CHARS]
+    # Strip newlines AND Unicode line/paragraph separators (the
+    # [SPEAK:..] sentinel uses dotall regex on the React side, but
+    # other consumers parse line-by-line). Replace with spaces so the
+    # spoken sentence still flows naturally.
+    text = (
+        text.replace('\r', ' ')
+            .replace('\n', ' ')
+            .replace(' ', ' ')
+            .replace(' ', ' ')
+    )
+    # Collapse runs of whitespace introduced by the replaces.
+    text = ' '.join(text.split())
+    if not text:
+        return
     # Forbid both brackets so a malicious or innocent string can't
     # inject another sentinel (e.g., a student typing "[SOUND]" inside
     # their speak text would otherwise trigger a beep). Audit §B6.

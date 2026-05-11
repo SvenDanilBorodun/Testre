@@ -73,7 +73,7 @@ Testre/
 ├── VERSION                                ← "2.2.2" (consumed by gui/app/constants.py)
 ├── .gitattributes                         ← LF-forced for *.sh, Dockerfile, daemon.json, .s6-keep, docker-compose*.yml
 ├── .gitignore                             ← gitignored: *.env, gui/dist/, installer/output/, *.tar.gz, .claude/
-├── .github/workflows/ci.yml               ← 6 jobs: python-tests, shell-lint, compose-validate, overlay-guard, manager-build-validate, nginx-validate
+├── .github/workflows/ci.yml               ← 8 jobs: python-tests, shell-lint, compose-validate, overlay-guard, manager-build-validate, nginx-validate, tutorials-validate, interfaces-validate
 │
 ├── open_manipulator/                      ← ROBOTIS upstream (absorbed, ROS2 Jazzy + Dynamixel)
 │   ├── open_manipulator_bringup/          ← launch/omx_f_follower_ai.launch.py (the magic remap is on line ~144)
@@ -90,7 +90,7 @@ Testre/
 │   ├── physical_ai_manager/               ← React 19 SPA (nginx, ports 80/9090, dual-mode build)
 │   │   ├── src/{App.js, StudentApp.js, WebApp.js, components/, features/, hooks/, services/, utils/, store/, lib/, pages/, constants/}
 │   │   ├── Dockerfile (student)  Dockerfile.web (Railway)  nginx.conf  nginx.web.conf.template
-│   │   ├── package.json (v0.8.2)  railway.json  vercel.json (kill-switch)
+│   │   ├── package.json (v0.9.0)  railway.json  vercel.json (kill-switch)
 │   ├── physical_ai_interfaces/            ← custom msg/srv (TaskInfo/Status, TrainingInfo/Status,
 │   │                                        SendCommand, GetSavedPolicyList, Detection, WorkflowStatus,
 │   │                                        StartCalibration, CalibrationCaptureColor, ...)
@@ -447,9 +447,9 @@ Per-tick (single-threaded on ROS executor, no worker thread):
 
 **Block-level debugger** (2026-05): `DebugPanel.jsx` with three tabs (Sensoren / Variablen / Haltepunkte), pause/step/continue buttons in `RunControls.jsx`, breakpoints persisted in Redux + sent to the server via `WorkflowSetBreakpoints.srv`. The runtime checks each block id against `ctx.breakpoints` before dispatch; on hit, it sets `ctx.set_paused(True)` and waits on `ctx.wait_for_resume()`. The `[VAR:name=json]` log sentinel feeds the variable inspector. Sensor live-readout (`/workflow/sensors` topic, `SensorSnapshot.msg`, 5 Hz) shows follower joints, gripper opening, visible AprilTag IDs, color-pixel counts per color, and visible YOLO classes.
 
-**Workflow versioning**: every PATCH /workflows/{id} that changes `blockly_json` triggers `snapshot_workflow_version` (Supabase migration 013) which inserts the prior payload into `public.workflow_versions`. Capped at 20 per workflow via the `prune_workflow_versions` AFTER-INSERT trigger. Listed via `GET /workflows/{id}/versions`; restore via `POST /workflows/{id}/versions/{version_id}/restore`.
+**Workflow versioning**: every PATCH /workflows/{id} that changes `blockly_json` triggers `snapshot_workflow_version` (Supabase migration 015) which inserts the prior payload into `public.workflow_versions`. Capped at 20 per workflow via the `prune_workflow_versions` AFTER-INSERT trigger. Listed via `GET /workflows/{id}/versions`; restore via `POST /workflows/{id}/versions/{version_id}/restore`. The trigger reads the `app.user_id` Postgres GUC so callers that `SET LOCAL app.user_id = '<uuid>'` before the UPDATE land the right `saved_by`; service-role admin tools leave it NULL.
 
-**Tutorials / skillmap**: 6 starter tutorials at `physical_ai_manager/public/tutorials/*.json` (sage_hallo, bewege_zum_punkt_a, roten_wuerfel_aufnehmen, zaehle_blaue_objekte, stapele_drei_wuerfel, sortiere_nach_klasse). The `SkillmapPlayer.jsx` sidebar steps the student through each, applying per-step `allowed_blocks` as a toolbox restriction (the `restrictedBlocks` prop on `BlocklyWorkspace`). Progress synced via `GET/PATCH /me/tutorial-progress` and the `tutorial_progress` table (migration 014).
+**Tutorials / skillmap**: 7 starter tutorials at `physical_ai_manager/public/tutorials/*.json` (sage_hallo, bewege_zum_punkt_a, roten_wuerfel_aufnehmen, zaehle_blaue_objekte, stapele_drei_wuerfel, sortiere_nach_klasse, ereignis_marker_gefunden — covers hat blocks + broadcast). The `SkillmapPlayer.jsx` sidebar steps the student through each, applying per-step `allowed_blocks` as a toolbox restriction (the `restrictedBlocks` prop on `BlocklyWorkspace`). Progress synced via `GET/PATCH /me/tutorial-progress` and the `tutorial_progress` table (migration 016, with realtime publication so teacher dashboards live-update).
 
 **Classroom gallery** (`GalleryTab.jsx`): renders all `is_template=TRUE` workflows for the student's classroom + group-shared workflows from peers; each card has a Klonen button that calls `/workflows/{id}/clone`.
 
@@ -661,7 +661,7 @@ Returns `JSONResponse(429, {"detail": "Too many requests — please wait a momen
 - Model: `google/owlv2-base-patch16-ensemble` (Apache-2.0, 200M params). CLIP text encoder handles German prompts natively (`rote Tasse`, `gelbe Banane`, …).
 - Image: `nvidia/cuda:12.1.1-devel-ubuntu22.04`-equivalent via `modal.Image.debian_slim()` + `transformers==4.46.0`, `torch==2.4.0`, `pillow`, `huggingface_hub`. HuggingFace cache on a persistent `modal.Volume` (`edubotics-vision-cache`).
 - The `OWLv2Detector.detect(image_bytes, prompts, score_threshold)` method runs `Owlv2Processor` + `Owlv2ForObjectDetection` and returns `{detections: [{label, score, bbox}], cold_start: bool}`.
-- Cost model (see `dive-extreame-deep-eventual-backus-agent-ab1f60cfec7ac255a.md`): T4 = $0.59/hr per the 2026 Modal pricing page. With scale-to-zero + memory snapshots, ~$0.0001/call typical, ~$0.50 / classroom / term.
+- Cost model: T4 = $0.59/hr per the 2026 Modal pricing page (https://modal.com/pricing). With `min_containers=0`, `scaledown_window=180`, and `enable_memory_snapshot=True`, an idle classroom pays nothing and a warm-path call runs in 200-400 ms (~$0.00007 per call). Cold-start storms add to the bill — each fresh-after-scale-down container costs the 2-5 s of T4 burn before snapshot-restore finishes — so per-classroom term cost is realistically $1-$2 in compute, NOT the $0.50 a pure warm-only model would predict. Budget accordingly.
 - Cloud bridge: `cloud_training_api/app/routes/vision.py` exposes `POST /vision/detect` (rate-limited 5/60s/user). Per-user term quota via optional `users.vision_quota_per_term` column.
 - React block `edubotics_detect_open_vocab` (see §6.7) routes German prompts through a small synonym dict first; cloud burst is the fallback. The block is opt-in via `cloud_vision_enabled` on `StartWorkflow.srv`.
 - Deploy: `modal deploy modal_training/vision_app.py`. Smoke: `modal run -m vision_app::smoke_test`.
@@ -762,7 +762,9 @@ Returns `JSONResponse(429, {"detail": "Too many requests — please wait a momen
 
 ### 9.12 012_dataset_sweep.sql — adds `datasets.discovered_via_sweep BOOLEAN NOT NULL DEFAULT FALSE`. Marks rows registered by the periodic Railway sweep (see §10.5) versus rows registered live by the React app right after upload. Informational only — sweep does not skip rows on subsequent ticks.
 
-### 9.13 013_workflow_versions.sql (Roboter Studio Phase-2 history)
+> §9.13 and §9.14 were retired during the Roboter Studio Phase-2/3 rollout — the original filenames collided with `013_revoke_anon_from_security_definer.sql` and the migrations were renumbered to `015_workflow_versions.sql` and `016_tutorial_progress.sql`. The section numbers below match the migration filenames so prose and disk stay in sync.
+
+### 9.15 015_workflow_versions.sql (Roboter Studio Phase-2 history)
 - New table `public.workflow_versions` (id, workflow_id FK CASCADE, blockly_json JSONB, note TEXT, created_at TIMESTAMPTZ, saved_by UUID FK SET NULL).
 - Index `idx_workflow_versions_workflow` on `(workflow_id, created_at DESC)`.
 - BEFORE-UPDATE trigger `trg_workflows_snapshot` on `public.workflows`: if `blockly_json` changes, insert the OLD payload into `workflow_versions`. Function is `SECURITY DEFINER` with explicit `SET search_path = public`.
@@ -770,19 +772,29 @@ Returns `JSONResponse(429, {"detail": "Too many requests — please wait a momen
 - RLS read policies: owner of the parent workflow can read; admin can read all. No public INSERT (the trigger is the only writer).
 - Realtime publication added (idempotent DO block).
 
-### 9.14 014_tutorial_progress.sql (Roboter Studio Phase-3 skillmap)
+### 9.16 016_tutorial_progress.sql (Roboter Studio Phase-3 skillmap)
 - New table `public.tutorial_progress` (composite PK `(user_id, tutorial_id)`, current_step INT default 0, completed_at TIMESTAMPTZ NULL, updated_at TIMESTAMPTZ).
 - Trigger `trg_tutorial_progress_touch` updates `updated_at` on every UPDATE.
 - RLS: owner reads/writes own; admin reads all; teacher reads own students' progress (joined via `users.classroom_id`).
 - Endpoints in `cloud_training_api/app/routes/me.py`: `GET /me/tutorial-progress`, `PATCH /me/tutorial-progress/{tutorial_id}`.
+- Realtime publication added (`ALTER PUBLICATION supabase_realtime ADD TABLE public.tutorial_progress`) so teacher-dashboard subscribers see live progress updates.
+- Explicit `GRANT ALL TO service_role` so the cloud API's service-role connection has consistent ACL alongside its RLS bypass.
 
-All migrations have rollbacks under `supabase/rollback/` (BEGIN/COMMIT-wrapped). 010 rollback restores the 006-version body.
+### 9.17 017_vision_quota.sql (Roboter Studio Phase-3 cloud-vision)
+- Adds `users.vision_quota_per_term INTEGER` (NULL = unbounded) and `users.vision_used_per_term INTEGER NOT NULL DEFAULT 0`, plus a CHECK constraint that floors the counter at 0.
+- `consume_vision_quota(p_user_id UUID)` — atomic test-and-increment, `SECURITY DEFINER`. Returns `(allowed, remaining)`. The UPDATE only fires when the counter is below the quota so two concurrent requests can't both pass at `used = quota - 1`.
+- `refund_vision_quota(p_user_id UUID)` — atomic decrement, floored at 0. The cloud API calls this when Modal returns a transient error (502/504) so a flaky cold start doesn't burn the student's term budget.
+- `reset_vision_quota_used()` — convenience RPC for term-end resets (service-role only).
+- All three RPCs revoke EXECUTE from PUBLIC/anon/authenticated and grant only to `service_role`.
+- The cloud API endpoint `POST /vision/detect` (rate-limited 5/60s per user — see §7.4) hard-fails with 503 if the `consume_vision_quota` RPC isn't deployed yet, so the operator notices instead of silently downgrading to a non-atomic path.
+
+All migrations have rollbacks under `supabase/rollback/` (BEGIN/COMMIT-wrapped). 010 rollback restores the 006-version body. The Roboter Studio bundle has matching `docs/deploy/APPLY_MIGRATIONS.sql` (forward) and `docs/deploy/ROLLBACK_MIGRATIONS.sql` (reverse-order rollback of 015/016/017).
 
 ### Dataset reconciliation sweep (services/dataset_sweep.py)
 
 The React app POSTs `/datasets` immediately after a successful HF upload so group siblings can see it within seconds (`physical_ai_manager/src/hooks/useRosTopicSubscription.js:497-525`). When that POST fails (WSL has no internet at upload time, brief Cloud API outage), without the sweep the dataset would be uploaded to HF but never registered — **siblings would never see it**. The sweep is the safety net: every `DATASET_SWEEP_INTERVAL_S` (default 600s) it scans HF for known authors derived from `trainings.dataset_name` / `trainings.model_name` / `datasets.hf_repo_id`, lists each author's HF datasets, and inserts any missing rows with `discovered_via_sweep=TRUE`. Group attribution at sweep time uses the author's *current* `users.workgroup_id` (matches a manual late-registration). The loop is started from `app/main.py:_start_dataset_sweep` only when `HF_TOKEN` is set; disable explicitly via `DATASET_SWEEP_DISABLED=1`. Single-tenant by design: Cloud API runs `uvicorn --workers 1`, so spawning the loop once at startup is correct. If workers are ever raised, switch to a Postgres advisory lock.
 
-### 9.11 Bootstrap admin (run once)
+### 9.18 Bootstrap admin (run once)
 ```bash
 cd robotis_ai_setup
 python scripts/bootstrap_admin.py --username admin --full-name "Sven"
@@ -899,7 +911,7 @@ All Windows-only (skip on non-Windows CI). 5 unittest files:
 ## 12. Frontend reference (`physical_ai_tools/physical_ai_manager/`)
 
 ### 12.1 Build artifacts
-- `package.json` v0.8.2; key deps: React 19.1.0, Redux Toolkit 2.8.2, `@supabase/supabase-js` 2.49.8, Blockly 12.5.0, react-blockly 9.0.0, ROSLIB 1.4.1, Recharts 2.13.0, react-hot-toast 2.5.2, Tailwind 3.4.17.
+- `package.json` v0.9.0; key deps: React 19.1.0, Redux Toolkit 2.8.2, `@supabase/supabase-js` 2.49.8, Blockly 12.5.0, react-blockly 9.0.0, ROSLIB 1.4.1, Recharts 2.13.0, react-hot-toast 2.5.2, Tailwind 3.4.17.
 - `prebuild` script: runs Jest tests under `src/components/Workshop/blocks/__tests__/` (Workshop blocks consistency).
 - `start:debug`: `REACT_APP_DEBUG=true react-scripts start` (skips robot-type gate on home page).
 
@@ -1050,7 +1062,7 @@ You can act autonomously on:
 Five sources of truth currently drift:
 - `Testre/VERSION` → **`2.2.2`** (read by `gui/app/constants.py:APP_VERSION`)
 - `installer/robotis_ai_setup.iss AppVersion` → **`2.2.3`**
-- `physical_ai_tools/physical_ai_manager/package.json version` → **`0.8.2`**
+- `physical_ai_tools/physical_ai_manager/package.json version` → **`0.9.0`**
 - `docker/versions.env IMAGE_TAG` → file does NOT exist in the repo (gitignored or never created); GUI/installer fall back to `:latest`
 - HTTP `/version.json buildId` (UTC timestamp + git SHA, computed at build time)
 
@@ -1060,13 +1072,15 @@ Five sources of truth currently drift:
 
 ## 15. CI workflow (`.github/workflows/ci.yml`) — what fails the build
 
-6 jobs run on every push/PR to `main`:
+8 jobs run on every push/PR to `main`:
 1. **python-tests** — `compileall` of `gui`, `scripts`, `cloud_training_api`, `modal_training`, overlays, patches; `unittest discover -s tests` (5 GUI/installer tests); plus `unittest discover -s app/tests` from `cloud_training_api/` (workgroup helper, dataset sweep parsers — tests stub fastapi/supabase/huggingface_hub via `sys.modules` so they run without those deps).
 2. **shell-lint** — shellcheck `-S error` on `build-images.sh`, `entrypoint_omx.sh`, `build_rootfs.sh`, `start-dockerd.sh`.
 3. **compose-validate** — `docker compose config` on both base + GPU compose with fake `.env`.
 4. **overlay-guard** — runs `fix_server_inference.py` on a fake `server_inference.py` that lacks the patch target; asserts non-zero exit (catches a regress where the patch silently fails).
 5. **manager-build-validate** — builds `physical_ai_manager` with placeholder secrets (`CI_VALIDATE.supabase.co`, `CI_VALIDATE_ANON_KEY`, `CI_VALIDATE.api.example`); asserts each placeholder string appears in the built `main.*.js` bundle. Catches the white-screen regression.
 6. **nginx-validate** — `envsubst $PORT` on `nginx.web.conf.template` then `nginx -t` on both web + student configs.
+7. **tutorials-validate** — JSON-parses every `physical_ai_manager/public/tutorials/*.json`, asserts the required schema (`id`, `title_de`, `level`, `steps[].title`, `steps[].body`, `steps[].allowed_blocks`), and cross-checks each `allowed_blocks` entry against `cloud_training_api/app/validators/workflow.py:ALLOWED_BLOCK_TYPES`. A tutorial referencing a block that doesn't exist server-side fails the build.
+8. **interfaces-validate** — verifies every `.srv` has exactly one `---` separator and every `.srv`/`.msg` filename listed in `CMakeLists.txt` is present on disk; runs on all of `physical_ai_interfaces/srv/*.srv` and `physical_ai_interfaces/msg/*.msg`.
 
 ---
 

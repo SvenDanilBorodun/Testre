@@ -198,12 +198,48 @@ const workshopSlice = createSlice({
       state.debuggerVisible = !!action.payload;
     },
     setSensorSnapshot: (state, action) => {
-      state.sensorSnapshot = { ...action.payload, ts: Date.now() };
+      // Shallow-merge over the previous snapshot so sparse messages
+      // (or future field additions) don't erase fields like
+      // `gripper_opening` that this tick happens not to populate.
+      // Audit round-3 §AV.
+      const incoming = action.payload || {};
+      state.sensorSnapshot = {
+        ...(state.sensorSnapshot || {}),
+        ...incoming,
+        ts: Date.now(),
+      };
     },
     setVariable: (state, action) => {
-      const { name, value } = action.payload;
+      // Audit round-3 §BJ — cap the number of distinct variable names
+      // a workflow can pin into Redux state. A loop emitting 10 k
+      // unique [VAR:i=N] sentinels would otherwise grow this slice
+      // unboundedly. FIFO-evict the oldest by ts when the cap is hit.
+      const VAR_LIMIT = 256;
+      const NAME_RE = /^[A-Za-zÄÖÜäöüß_][A-Za-zÄÖÜäöüß0-9_]{0,63}$/;
+      const { name, value } = action.payload || {};
       if (typeof name !== 'string' || !name) return;
-      state.variables[name] = { value, ts: Date.now() };
+      if (name === '__proto__' || name === 'constructor' || name === 'prototype') return;
+      if (!NAME_RE.test(name)) return;
+      const ts = Date.now();
+      // If we're at the cap and adding a NEW name, evict the oldest
+      // entry. Existing-name overwrites are free.
+      const isNew = !(name in state.variables);
+      if (isNew) {
+        const keys = Object.keys(state.variables);
+        if (keys.length >= VAR_LIMIT) {
+          let oldestKey = null;
+          let oldestTs = Infinity;
+          for (const k of keys) {
+            const t = state.variables[k]?.ts ?? 0;
+            if (t < oldestTs) {
+              oldestTs = t;
+              oldestKey = k;
+            }
+          }
+          if (oldestKey) delete state.variables[oldestKey];
+        }
+      }
+      state.variables[name] = { value, ts };
     },
     clearVariables: (state) => {
       state.variables = {};

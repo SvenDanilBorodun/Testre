@@ -1,6 +1,6 @@
--- 013_workflow_versions_rollback.sql
+-- 015_workflow_versions_rollback.sql
 --
--- Reverse of 013. Drops the snapshot trigger first so an UPDATE on
+-- Reverse of 015. Drops the snapshot trigger first so an UPDATE on
 -- workflows during the rollback doesn't try to insert into a table
 -- we're about to delete.
 

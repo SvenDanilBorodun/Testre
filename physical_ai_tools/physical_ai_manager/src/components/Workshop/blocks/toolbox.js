@@ -147,6 +147,13 @@ export function buildToolbox(restrictedBlocks = null) {
     },
     { kind: 'block', type: 'math_modulo' },
     { kind: 'block', type: 'math_round' },
+  ], restricted);
+
+  // Text category — `text` is a string literal, not a math operation;
+  // surfacing it under Mathe was a taxonomy bug (audit round-3 §Z/§AA).
+  // Now it lives in its own category alongside the inline shadows used
+  // by `edubotics_log` / `edubotics_speak_de`.
+  const textCat = filterContents([
     { kind: 'block', type: 'text', fields: { TEXT: '' } },
   ], restricted);
 
@@ -228,6 +235,12 @@ export function buildToolbox(restrictedBlocks = null) {
       name: DE.CATEGORY_MATHE,
       colour: '#0284c7',
       contents: math,
+    },
+    {
+      kind: 'category',
+      name: DE.CATEGORY_TEXT,
+      colour: '#0d9488',
+      contents: textCat,
     },
     {
       kind: 'category',

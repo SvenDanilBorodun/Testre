@@ -43,10 +43,24 @@ RUN set -e && \
     cp -f /tmp/interfaces_src/package.xml "$target_pkg/package.xml" && \
     cd /root/ros2_ws && \
     bash -c "source /opt/ros/jazzy/setup.bash && colcon build --packages-select physical_ai_interfaces --cmake-args -DCMAKE_BUILD_TYPE=Release" && \
-    test -f /root/ros2_ws/install/physical_ai_interfaces/lib/python3.12/site-packages/physical_ai_interfaces/srv/_start_calibration.py && \
-    test -f /root/ros2_ws/install/physical_ai_interfaces/lib/python3.12/site-packages/physical_ai_interfaces/srv/_calibration_capture_color.py && \
-    test -f /root/ros2_ws/install/physical_ai_interfaces/lib/python3.12/site-packages/physical_ai_interfaces/msg/_detection.py && \
-    test -f /root/ros2_ws/install/physical_ai_interfaces/lib/python3.12/site-packages/physical_ai_interfaces/msg/_workflow_status.py && \
+    install_root=/root/ros2_ws/install/physical_ai_interfaces/lib/python3.12/site-packages/physical_ai_interfaces && \
+    test -f "$install_root/srv/_start_calibration.py" && \
+    test -f "$install_root/srv/_calibration_capture_color.py" && \
+    test -f "$install_root/msg/_detection.py" && \
+    test -f "$install_root/msg/_workflow_status.py" && \
+    # Phase-2/3 (audit round-3 §F/§Y): assert every new generated
+    # srv/msg so a future colcon regression that silently skips one
+    # surfaces here at build time instead of as an ImportError on
+    # first /workflow/pause call in a student's classroom.
+    test -f "$install_root/srv/_calibration_capture_frame.py" && \
+    test -f "$install_root/srv/_calibration_history.py" && \
+    test -f "$install_root/srv/_calibration_preview.py" && \
+    test -f "$install_root/srv/_verify_calibration.py" && \
+    test -f "$install_root/srv/_workflow_continue.py" && \
+    test -f "$install_root/srv/_workflow_pause.py" && \
+    test -f "$install_root/srv/_workflow_set_breakpoints.py" && \
+    test -f "$install_root/srv/_workflow_step.py" && \
+    test -f "$install_root/msg/_sensor_snapshot.py" && \
     rm -rf /tmp/interfaces_src && \
     echo "physical_ai_interfaces re-built with audit additions"
 

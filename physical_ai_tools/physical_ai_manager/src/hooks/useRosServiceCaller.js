@@ -606,12 +606,23 @@ export function useRosServiceCaller() {
     [callService]
   );
 
+  // StartWorkflow.srv carries `cloud_vision_enabled` as of Phase-3.
+  // Earlier the wrapper omitted it, so any caller using the helper
+  // (rather than dispatching to `callService` directly) silently
+  // disabled the Phase-3 open-vocab block. The Workshop RunControls
+  // calls `callService` directly with the full payload — this helper
+  // is here for any future caller that prefers the named wrapper.
+  // Audit round-3 §AB / §O.
   const startWorkflow = useCallback(
-    async (workflowJson, workflowId) =>
+    async (workflowJson, workflowId, cloudVisionEnabled = false) =>
       callService(
         '/workflow/start',
         'physical_ai_interfaces/srv/StartWorkflow',
-        { workflow_json: workflowJson, workflow_id: workflowId }
+        {
+          workflow_json: workflowJson,
+          workflow_id: workflowId,
+          cloud_vision_enabled: !!cloudVisionEnabled,
+        }
       ),
     [callService]
   );

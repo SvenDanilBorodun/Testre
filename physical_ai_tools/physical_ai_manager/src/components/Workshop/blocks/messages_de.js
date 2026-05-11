@@ -62,6 +62,7 @@ export const DE = {
   CATEGORY_VARIABLEN: 'Variablen',
   CATEGORY_FUNKTIONEN: 'Funktionen',
   CATEGORY_MATHE: 'Mathe',
+  CATEGORY_TEXT: 'Text',
   CATEGORY_AUSGABE: 'Ausgabe',
   CATEGORY_VORSCHLAEGE: 'Vorschläge',
 

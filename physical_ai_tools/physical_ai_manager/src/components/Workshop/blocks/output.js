@@ -110,5 +110,11 @@ export function registerOutputBlocks() {
       });
     }
   });
-  Blockly.defineBlocksWithJsonArray(OUTPUT_BLOCKS);
+  // Skip re-definition on HMR / Jest re-import. Audit round-3 §A.
+  const toDefine = OUTPUT_BLOCKS.filter(
+    (def) => !(def && def.type && Blockly.Blocks[def.type])
+  );
+  if (toDefine.length > 0) {
+    Blockly.defineBlocksWithJsonArray(toDefine);
+  }
 }

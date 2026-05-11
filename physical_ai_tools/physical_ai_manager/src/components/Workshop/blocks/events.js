@@ -142,5 +142,14 @@ export function registerEventBlocks() {
       });
     }
   });
-  Blockly.defineBlocksWithJsonArray(EVENT_BLOCKS);
+  // Audit round-3 §A — guard against re-definition on hot-reload or
+  // Jest re-import. Blockly.defineBlocksWithJsonArray throws "Block
+  // type X is already defined" the second time a definition lands.
+  // Skip entries whose type is already registered so HMR doesn't crash.
+  const toDefine = EVENT_BLOCKS.filter(
+    (def) => !(def && def.type && Blockly.Blocks[def.type])
+  );
+  if (toDefine.length > 0) {
+    Blockly.defineBlocksWithJsonArray(toDefine);
+  }
 }

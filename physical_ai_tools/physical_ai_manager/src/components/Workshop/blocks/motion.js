@@ -131,7 +131,13 @@ export const MOTION_VALIDATORS = {
 };
 
 export function registerMotionBlocks() {
-  Blockly.defineBlocksWithJsonArray(MOTION_BLOCKS);
+  // Skip re-definition on HMR / Jest re-import. Audit round-3 §A.
+  const toDefine = MOTION_BLOCKS.filter(
+    (def) => !(def && def.type && Blockly.Blocks[def.type])
+  );
+  if (toDefine.length > 0) {
+    Blockly.defineBlocksWithJsonArray(toDefine);
+  }
   // Attach a workspace-wide listener that clamps numeric inputs on
   // wait_seconds when a math_number is connected directly. Done as
   // a Blockly extension so it survives copy/paste of blocks.

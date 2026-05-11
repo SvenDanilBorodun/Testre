@@ -1,0 +1,47 @@
+{
+  "id": "ereignis_marker_gefunden",
+  "title_de": "Ereignis: AprilTag entdeckt",
+  "level": 3,
+  "summary": "Lerne Hut-Blöcke und Ereignisse: der Roboter reagiert, sobald ein AprilTag in der Szenenkamera auftaucht.",
+  "steps": [
+    {
+      "title": "Hut-Block einsetzen",
+      "body": "Ziehe einen \"Wenn AprilTag-Marker sichtbar\"-Block (Kategorie Ereignisse) in den Arbeitsbereich. Stelle die Marker-ID auf 0.",
+      "allowed_blocks": ["edubotics_when_marker_seen"],
+      "hints": [
+        "Hut-Blöcke haben oben keine Verbindung — sie starten einen eigenen Stack.",
+        "Drucke den passenden Marker aus tools/generate_apriltags.py auf Papier aus."
+      ]
+    },
+    {
+      "title": "Reaktion definieren",
+      "body": "Hänge an den Hut-Block einen \"sage\"-Block, der \"Marker gefunden\" ausgibt, und einen \"Ton\"-Block mit 880 Hz für 0,2 Sekunden.",
+      "allowed_blocks": [
+        "edubotics_when_marker_seen",
+        "edubotics_speak_de",
+        "edubotics_play_tone",
+        "text"
+      ],
+      "hints": [
+        "Der Ton-Block liegt unter Ausgabe.",
+        "Halte den Marker so, dass er von der Szenenkamera sicher gesehen wird."
+      ]
+    },
+    {
+      "title": "Broadcast und Hauptstack",
+      "body": "Setze in den Hut-Block einen \"Sende Ereignis\"-Block mit dem Namen \"marker_ok\". Lege im Hauptstack einen \"Wenn Ereignis empfangen\"-Block mit demselben Namen an, der den Greifer öffnet.",
+      "allowed_blocks": [
+        "edubotics_when_marker_seen",
+        "edubotics_broadcast",
+        "edubotics_when_broadcast",
+        "edubotics_open_gripper",
+        "edubotics_speak_de",
+        "text"
+      ],
+      "hints": [
+        "Broadcast-Namen müssen exakt übereinstimmen — Großbuchstaben werden nicht angepasst.",
+        "Wenn beide Stacks gleichzeitig den Arm bewegen wollen, sorgt der eingebaute Bewegungs-Lock dafür, dass nur eine Aktion gleichzeitig läuft."
+      ]
+    }
+  ]
+}

@@ -2,7 +2,7 @@
 
 > **Read this entire file at the start of every session.** It replaces the former `context/` folder and is the single source of truth for what the project is, how it fits together, and how to make changes safely. Source code is the ultimate authority — when this file disagrees with the code, the code wins (and you should update this file in the same change).
 >
-> Last verified by reading every load-bearing file directly: 2026-05-10 (Roboter Studio end-to-end upgrade — see §6.7, §7.6, §8.3 below).
+> Last verified by reading every load-bearing file directly: **2026-05-11** (camera-pipeline deep-audit fix bundle F1-F61 from commit `1b68372` — see §8.3, §6.6 point 9, §12.12 below; plus §7.3 timeout-cap reflow, §7.4 rate-limit additions for `/teacher/workgroups`, `/datasets`, `/vision/detect`, §9.13 new subsection for the anon-revoke migration, §10 healthcheck widening, §18 deferred-work index).
 
 ---
 
@@ -71,9 +71,14 @@ Bumping LeRobot is a **5-place change in one PR** ([§13.2 replace-or-upgrade wo
 Testre/
 ├── CLAUDE.md                              ← THIS FILE (single source of truth)
 ├── VERSION                                ← "2.2.2" (consumed by gui/app/constants.py)
+├── CAMERA_PIPELINE_FIXES.md               ← 2026-05 deep-audit, fixes F1-F61 (read this BEFORE touching camera, perception, safety envelope, or vision_app code)
 ├── .gitattributes                         ← LF-forced for *.sh, Dockerfile, daemon.json, .s6-keep, docker-compose*.yml
 ├── .gitignore                             ← gitignored: *.env, gui/dist/, installer/output/, *.tar.gz, .claude/
-├── .github/workflows/ci.yml               ← 8 jobs: python-tests, shell-lint, compose-validate, overlay-guard, manager-build-validate, nginx-validate, tutorials-validate, interfaces-validate
+├── .mcp.json                              ← optional MCP server config (gitignored / unversioned in practice)
+├── .github/workflows/ci.yml               ← 10 jobs: python-tests, shell-lint, compose-validate, overlay-guard, modal-import-validate, teacher-web-build-validate, manager-build-validate, tutorials-validate, interfaces-validate, nginx-validate
+├── docs/                                  ← Deployment runbooks + deferred-work catalogues (see §18)
+│   ├── ROBOTER_STUDIO_DEFERRED.md         ← 31-item deferred-work catalogue (Phase-2/3 leftovers, ordered by priority)
+│   └── deploy/{APPLY_MIGRATIONS.sql, ROLLBACK_MIGRATIONS.sql, NEXT_STEPS.md, DEPLOYMENT_RUNBOOK.md}
 │
 ├── open_manipulator/                      ← ROBOTIS upstream (absorbed, ROS2 Jazzy + Dynamixel)
 │   ├── open_manipulator_bringup/          ← launch/omx_f_follower_ai.launch.py (the magic remap is on line ~144)
@@ -89,27 +94,33 @@ Testre/
 │   │   ├── launch/  config/  test/        Dockerfile.amd64  Dockerfile.arm64
 │   ├── physical_ai_manager/               ← React 19 SPA (nginx, ports 80/9090, dual-mode build)
 │   │   ├── src/{App.js, StudentApp.js, WebApp.js, components/, features/, hooks/, services/, utils/, store/, lib/, pages/, constants/}
+│   │   ├── public/tutorials/*.json        ← Roboter Studio skillmap (CI's tutorials-validate enforces schema + allowed_blocks)
+│   │   ├── scripts/railway-deploy.sh      ← stage _coco_classes.py + `railway up --path-as-root .`
 │   │   ├── Dockerfile (student)  Dockerfile.web (Railway)  nginx.conf  nginx.web.conf.template
 │   │   ├── package.json (v0.9.0)  railway.json  vercel.json (kill-switch)
 │   ├── physical_ai_interfaces/            ← custom msg/srv (TaskInfo/Status, TrainingInfo/Status,
 │   │                                        SendCommand, GetSavedPolicyList, Detection, WorkflowStatus,
-│   │                                        StartCalibration, CalibrationCaptureColor, ...)
+│   │                                        StartCalibration, CalibrationCaptureColor, WorkflowSetBreakpoints,
+│   │                                        SensorSnapshot, ...)
 │   ├── physical_ai_bt/                    ← Behavior trees (XML), ffw_sg2_rev1.xml
 │   ├── lerobot/                           ← LeRobot v0.2.0 snapshot @ 989f3d05 (static, byte-identical, NOT modified)
 │   └── rosbag_recorder/                   ← C++ bag recorder service (PREPARE/START/STOP/STOP_AND_DELETE/FINISH)
 │
 ├── robotis_ai_setup/                      ← OUR custom code (everything we wrote)
-│   ├── cloud_training_api/                ← FastAPI on Railway (training jobs + teacher/admin/me/workflows API)
+│   ├── CHANGES_SESSION_2026-04-06.md      ← (historical) ROS startup + healthcheck wiring — incorporated; keep for "why"
+│   ├── CHANGES_SESSION_2026-04-17.md      ← (historical) Docker Desktop → bundled WSL2 distro — incorporated; keep for "why"
+│   ├── cloud_training_api/                ← FastAPI on Railway (training jobs + teacher/admin/me/workflows API + vision proxy)
 │   │   ├── Dockerfile  requirements.txt  .env.example
 │   │   └── app/{main.py, auth.py, services/, routes/, validators/, tests/}
-│   ├── modal_training/                    ← Modal app + handler for cloud GPU training
+│   ├── modal_training/                    ← Modal apps + handler for cloud GPU training AND cloud vision
 │   │   ├── modal_app.py                   ← Image build, function `train`, secrets, GPU=L4, timeout=7h
-│   │   └── training_handler.py            ← run_training() flow with German preflight + RPC + HF upload
+│   │   ├── training_handler.py            ← run_training() flow with German preflight + RPC + HF upload
+│   │   └── vision_app.py                  ← OWLv2 cloud-burst, T4, snapshot-aware lifecycle (§8.3)
 │   ├── docker/                            ← Compose, build-images.sh, overlays, patches
 │   │   ├── docker-compose.yml  docker-compose.gpu.yml  .env.template  build-images.sh  bump-upstream-digests.sh  BASE_IMAGE_PINNING.md
-│   │   ├── physical_ai_server/{Dockerfile, overlays/, patches/}
+│   │   ├── physical_ai_server/{Dockerfile, overlays/{workflow/{handlers/}}, patches/}
 │   │   └── open_manipulator/{Dockerfile, entrypoint_omx.sh, identify_arm.py, overlays/}
-│   ├── supabase/                          ← migration.sql + 002-012 + rollback/
+│   ├── supabase/                          ← migration.sql + 002-013, 015-017 numbered files + rollback/  (NO 014_*.sql — see §9.13)
 │   ├── gui/                               ← Windows tkinter GUI (PyInstaller .exe)
 │   │   ├── main.py  build.spec  requirements.txt
 │   │   └── app/{constants.py, gui_app.py, config_generator.py, device_manager.py, docker_manager.py,
@@ -122,17 +133,19 @@ Testre/
 │   ├── wsl_rootfs/                        ← Ubuntu 22.04 + Docker 27.5.1 rootfs builder
 │   │   ├── Dockerfile  build_rootfs.sh  daemon.json  start-dockerd.sh  wsl.conf  README.md
 │   ├── scripts/bootstrap_admin.py         ← Run once to create the first admin
-│   └── tests/                             ← 5 unittest files (Windows-only, all mocked)
+│   └── tests/                             ← 5 unittest files (Windows-only, all mocked) + cloud_training_api/app/tests/ (server-side, deps stubbed)
 │
 └── tools/                                 ← Classroom helpers
     ├── classroom_kit_README.md
     ├── generate_apriltags.py              ← Generates printable AprilTag PDFs
     ├── generate_charuco.py                ← Generates printable ChArUco boards (7x5, 30/22 mm, DICT_5X5_250)
     ├── generate_gripper_adapter.py        ← Parametric gripper-to-board STL
-    └── gripper_charuco_adapter.stl
+    ├── gripper_charuco_adapter.stl
+    ├── dfine_finetune.md                  ← Notes on fine-tuning the on-device detector (deferred — not yet wired)
+    └── perception_eval.md                 ← Hand-rolled eval harness for the perception block (deferred)
 ```
 
-There is **no** `_upstream/`, **no** `.gitmodules`, **no** `modal_mcp/` in this repo (older context docs referenced these — they were never present here).
+There is **no** `_upstream/`, **no** `.gitmodules`, **no** `modal_mcp/` in this repo (older context docs referenced these — they were never present here). The two `CHANGES_SESSION_*.md` files in `robotis_ai_setup/` and `CAMERA_PIPELINE_FIXES.md` at the repo root are **historical context** — the fixes they describe are in current images, but the `// Audit F##` markers in source point back to them for *why*. The `docs/` folder is **deployment-time material** (apply-in-order SQL, runbooks, deferred-work catalogue); the rest of CLAUDE.md is the runtime contract.
 
 ---
 
@@ -214,7 +227,7 @@ There is **no** `_upstream/`, **no** `.gitmodules`, **no** `modal_mcp/` in this 
 | Railway | API service `scintillating-empathy-production-9efd` | FastAPI cloud_training_api (`uvicorn --workers 1`) | Hobby plan |
 | Railway | Web service | React app in `web` mode (admin/teacher dashboard) via `Dockerfile.web` + `nginx.web.conf.template`, listens on `${PORT}` (Railway-injected) | Hobby plan |
 | Modal | Workspace `svendanilborodun`, app `edubotics-training`, fn `train` | NVIDIA L4 (24 GB), `timeout=7*3600`, `min_containers=0` | Per GPU-hour |
-| Supabase | Postgres + Auth + Realtime | 7 tables + ~5 RPCs + Realtime publications for `trainings` and `workflows` | Free tier |
+| Supabase | Postgres + Auth + Realtime | 10 user-facing tables (`users`, `trainings`, `classrooms`, `progress_entries`, `workflows`, `workgroups`, `workgroup_memberships`, `datasets`, `workflow_versions`, `tutorial_progress`) + ~10 RPCs + Realtime publications for `trainings`, `workflows`, `workgroups`, `datasets`, `tutorial_progress`, `workflow_versions` | Free tier |
 | HuggingFace | `EduBotics-Solutions/*` org | Datasets + trained model checkpoints | Free (public by default — privacy concern) |
 | GitHub | `SvenDanilBorodun/Testre` (private) | Source | Free |
 
@@ -413,7 +426,7 @@ Per-tick (single-threaded on ROS executor, no worker thread):
 6. Image shape validation against `_read_expected_image_shapes()`. Mismatch → German `[FEHLER] Bildaufloesung stimmt nicht ueberein: {key} hat Form {actual}, Modell erwartet {expected}. Tick uebersprungen.`
 7. `_preprocess(images, state)`: per image `torch.from_numpy / 255 → permute(2,0,1) → unsqueeze(0)` keyed `observation.images.{name}`. State → `float32` tensor → batch.
 8. `policy.select_action(observation)` under `torch.inference_mode()`.
-9. Safety envelope: NaN/Inf reject → joint clamp → per-tick velocity cap. State `_last_action` cleared on `reset_policy()` so first action of a new episode isn't clamped against the previous episode's final action.
+9. Safety envelope: NaN/Inf reject → joint clamp → per-tick velocity cap. State `_last_action` is cleared on `reset_policy()` so the first action of a new episode isn't clamped against the previous episode's final action; on that first tick it is **seeded from the current follower joint state** via `seed_last_action(state)` (audit F11 — `inference_manager.py`), so the very first delta is clamped against where the arm actually is rather than silently passing through unclamped. Shape mismatches between predicted action and the joint state (audit F12) return `None` from the safety envelope instead of leaking through.
 10. `data_converter.tensor_array2joint_msgs(action, ...)` builds `JointTrajectory` with **fps-aware `time_from_start`** (overlay computes `_action_duration_ns = max(int(1.5e9/fps), 1_000_000)`).
 11. `communicator.publish_action(msg)` → `/arm_controller/follow_joint_trajectory` (which, after the magic remap, is `/leader/joint_trajectory` → drives the follower).
 
@@ -432,7 +445,7 @@ Per-tick (single-threaded on ROS executor, no worker thread):
 **Authoring** — React `Workshop/` editor (Blockly 12.5.0 + react-blockly 9.0.0). The 2026-05 upgrade widened the block allowlist (defined in `overlays/workflow/interpreter.py:ALLOWED_BLOCK_TYPES` and mirrored in `cloud_training_api/app/validators/workflow.py:ALLOWED_BLOCK_TYPES`):
 - **Motion / output (statement)**: `edubotics_home`, `edubotics_open_gripper`, `edubotics_close_gripper`, `edubotics_move_to`, `edubotics_pickup`, `edubotics_drop_at`, `edubotics_wait_seconds`, `edubotics_destination_pin`, `edubotics_destination_current`, `edubotics_log`, `edubotics_play_sound`, `edubotics_speak_de`, `edubotics_play_tone`.
 - **Events / hat blocks (top-only)**: `edubotics_broadcast`, `edubotics_when_broadcast`, `edubotics_when_marker_seen`, `edubotics_when_color_seen`. Each hat handler runs as a separate daemon thread; a single `ctx.motion_lock` keeps motion serialized between handlers.
-- **Perception (value)**: `edubotics_detect_color`, `edubotics_detect_object`, `edubotics_detect_marker`, `edubotics_count_color`, `edubotics_count_objects_class`, `edubotics_wait_until_color`, `edubotics_wait_until_object`, `edubotics_wait_until_marker`, **`edubotics_detect_open_vocab`** (cloud-burst to OWLv2 on Modal — §8.3).
+- **Perception (value)**: `edubotics_detect_color`, `edubotics_detect_object`, `edubotics_detect_marker`, `edubotics_count_color`, `edubotics_count_objects_class`, `edubotics_wait_until_color`, `edubotics_wait_until_object`, `edubotics_wait_until_marker`, **`edubotics_detect_open_vocab`** (cloud-burst to OWLv2 on Modal — §8.3). The `_cloud_vision_burst` handler in `physical_ai_server.py` honors the `enabled` flag from `StartWorkflow.srv` (audit F54 — `perception_blocks.py:216-218` checks `ctx.cloud_vision.get('enabled')` before calling out) so that a workflow saved before the student enabled cloud vision in the React toolbox doesn't silently start burning Modal credits.
 - **Lists / procedures / math (Blockly built-ins)**: `lists_create_with`, `lists_repeat`, `lists_length`, `lists_isEmpty`, `lists_indexOf`, `lists_getIndex`, `lists_setIndex`, `lists_getSublist`, `procedures_defnoreturn/defreturn/callnoreturn/callreturn/ifreturn`, `math_random_int`, `math_constrain`, `math_modulo`, `math_round`, plus everything from the previous shipped set.
 - Allowed colors: `rot, gruen, blau, gelb` (German); validation rejects other strings.
 - `MAX_LOOP_ITERATIONS = 10000`.
@@ -500,30 +513,39 @@ Tolerance: ±1 mm position, ±0.57° planar rotation; z-axis rotation free when 
 | `MAX_TRAINING_TIMEOUT_HOURS` | `12.0` | absolute upper bound (per-policy caps applied next) |
 | `MODAL_TRAINING_APP_NAME` | `edubotics-training` | for staging |
 | `MODAL_TRAINING_FUNCTION_NAME` | `train` | for staging |
-| `HF_TOKEN` | `""` | dataset preflight + GDPR Art. 17 student artifact cleanup |
+| `MODAL_VISION_APP_NAME` | `edubotics-vision` | for staging the OWLv2 cloud-burst app (`routes/vision.py`) |
+| `MODAL_VISION_FUNCTION_NAME` | `OWLv2Detector.detect` | fully-qualified Modal class.method name |
+| `VISION_MODAL_TIMEOUT_S` | `30.0` | per-call deadline for `/vision/detect` proxy (separate from the worker's own `@app.cls(timeout=120)`) |
+| `HF_TOKEN` | `""` | dataset preflight + GDPR Art. 17 student artifact cleanup + dataset reconciliation sweep |
 | `GUI_VERSION` | unset → 503 | `/version` |
 | `GUI_DOWNLOAD_URL` | unset → 503 | `/version` |
 | `POLICY_TIMEOUT_OVERRIDES_JSON` | unset | per-policy timeout overrides |
+| `DATASET_SWEEP_INTERVAL_S` | `600` | period of the HF→Postgres reconciliation loop (`services/dataset_sweep.py`) |
+| `DATASET_SWEEP_DISABLED` | unset | set to `1` to opt out (e.g. in unit-test contexts) |
+| `EDUBOTICS_SKIP_SCHEMA_CHECK` | unset | set to `1` to skip the boot-time `_validate_required_schema()` probe (unit-test only — never set on Railway) |
 
 ### 7.3 Per-policy timeout caps (`routes/training.py:POLICY_MAX_TIMEOUT_HOURS`)
 ```
-act:      1.5h
-vqbet:    2.0h
-tdmpc:    2.0h
-diffusion:4.0h
-pi0fast:  4.0h
-pi0:      6.0h
-smolvla:  6.0h
+act:       4.0h
+vqbet:     4.0h
+tdmpc:     4.0h
+diffusion: 6.0h
+pi0fast:   6.0h
+pi0:      10.0h
+smolvla:  10.0h
 ```
-Cap applied AFTER request validation but BEFORE Modal dispatch — DB row stores capped value.
+Cap applied AFTER request validation but BEFORE Modal dispatch — DB row stores capped value. Values were raised from the v1 `1.5/2/2/4/4/6/6` profile in 2026-05 after ACT/VQBET runs on large datasets were truncating before convergence; the outer `MAX_TRAINING_TIMEOUT_HOURS=12` envelope still applies and the Modal `@app.function(timeout=7*3600)` ceiling clamps anything above 7h in practice.
 
-### 7.4 Rate limit rules (in-process, keyed by leftmost X-Forwarded-For)
+### 7.4 Rate limit rules (in-process, keyed by leftmost X-Forwarded-For — except `/vision/detect`, which is keyed by JWT `sub`)
 | Method | Path prefix | Limit |
 |---|---|---|
 | `*` | `/trainings/start` | 10 / 60s |
 | `*` | `/trainings/cancel` | 20 / 60s |
 | `POST` | `/workflows` | 10 / 60s |
-| `POST` | `/teacher/classrooms` | 10 / 60s (covers classroom + template creation) |
+| `POST` | `/teacher/classrooms` | 10 / 60s (covers classroom + template creation + workgroup creation under the same prefix) |
+| `POST` | `/teacher/workgroups` | 20 / 60s (member add/remove + credit adjustment bursts) |
+| `POST` | `/datasets` | 20 / 60s (one row per upload; protects against runaway recording loops) |
+| `POST` | `/vision/detect` | 5 / 60s **per user** (cloud-burst OWLv2; `_PER_USER_RATE_LIMIT_PREFIXES` reads JWT `sub` so 30 NAT'd students don't share one bucket) |
 
 Returns `JSONResponse(429, {"detail": "Too many requests — please wait a moment."})` directly (raising `HTTPException` in `BaseHTTPMiddleware.dispatch` is a Starlette footgun → would yield 500). CORS is the **outermost** middleware so the 429 still gets `Access-Control-*` headers.
 
@@ -577,6 +599,7 @@ Returns `JSONResponse(429, {"detail": "Too many requests — please wait a momen
 | PATCH/DELETE | `/teacher/students/{id}` | update / delete (with best-effort HF artifact cleanup via `_delete_student_hf_artifacts`; skips group-shared dataset repos) |
 | POST | `/teacher/students/{id}/password` | reset via `auth.admin.update_user_by_id` |
 | POST | `/teacher/students/{id}/credits` | RPC `adjust_student_credits` (P0011-P0014 mapped to 403/409; P0023 → 409 when student is in a group) |
+| PATCH | `/teacher/students/{id}/vision-quota` | set `users.vision_quota_per_term` for one of the teacher's own students (int ≥0 or `null`); teacher cannot exceed their own ceiling if it's set |
 | GET | `/teacher/students/{id}/trainings` | last 100 |
 | GET/POST | `/teacher/classrooms/{id}/workgroups` | list / create work groups (rate-limited 20/60s on POST via `/teacher/workgroups` prefix) |
 | GET/PATCH/DELETE | `/teacher/workgroups/{id}` | detail (members + usage) / rename / delete (409 if non-empty) |
@@ -600,6 +623,7 @@ Returns `JSONResponse(429, {"detail": "Too many requests — please wait a momen
 |---|---|---|
 | GET/POST | `/admin/teachers` | list (per-teacher `get_teacher_credit_summary` RPC — O(N) calls) / create |
 | PATCH | `/admin/teachers/{id}/credits` | set pool_total (rejects if < allocated_total) |
+| PATCH | `/admin/teachers/{id}/vision-quota` | set `users.vision_quota_per_term` (int ≥0 or `null` = unbounded); only the admin can lift a teacher's ceiling |
 | POST | `/admin/teachers/{id}/password` | reset |
 | DELETE | `/admin/teachers/{id}` | refuse if classroom_count > 0 |
 
@@ -625,10 +649,14 @@ Returns `JSONResponse(429, {"detail": "Too many requests — please wait a momen
 | POST | `/vision/detect` | proxy to the OWLv2 Modal app for German open-vocabulary detection (§8.3) |
 
 ### 7.7 Helper functions (the IDOR firewall)
-- `_assert_classroom_owned(teacher_id, classroom_id)` → German `Klassenzimmer nicht gefunden`
-- `_assert_student_owned(teacher_id, student_id)` → German `Schueler nicht gefunden` / `Schueler gehoert zu keinem Klassenzimmer`
-- `_assert_entry_owned(teacher_id, entry_id)` → German `Eintrag nicht gefunden`
-- `_assert_workflow_owned(user_id, workflow_id)` → German `Workflow nicht gefunden`
+- `_assert_classroom_owned(teacher_id, classroom_id)` → German `Klassenzimmer nicht gefunden` (`routes/teacher.py`)
+- `_assert_student_owned(teacher_id, student_id)` → German `Schueler nicht gefunden` / `Schueler gehoert zu keinem Klassenzimmer` (`routes/teacher.py`)
+- `_assert_entry_owned(teacher_id, entry_id)` → German `Eintrag nicht gefunden` (`routes/teacher.py`)
+- `_assert_workflow_owned(user_id, workflow_id)` → German `Workflow nicht gefunden` (`routes/workflows.py`)
+- `_assert_workgroup_owned(teacher_id, workgroup_id)` → German `Arbeitsgruppe nicht gefunden` (`routes/workgroups.py`) — the membership-write equivalent of `_assert_classroom_owned` for the workgroups feature added in migration 011
+- `_assert_workgroup_in_classroom(workgroup_id, classroom_id)` → 409 when a member-add or progress-entry crosses classrooms (`routes/teacher.py`)
+
+**Any new endpoint that touches another user's row MUST call one of these.** A single missed assertion is a silent IDOR — RLS is dormant under service-role.
 
 ### 7.8 Selected helper details
 - `_sanitize_name`: keep `[a-zA-Z0-9._-]`, replace others with `-`, strip trailing `-` (HF-safe).
@@ -657,13 +685,18 @@ Returns `JSONResponse(429, {"detail": "Too many requests — please wait a momen
 
 ### 8.3 vision_app.py — Roboter Studio open-vocabulary detection (Phase-3)
 
-`robotis_ai_setup/modal_training/vision_app.py` — Modal app `edubotics-vision`, T4 GPU, `min_containers=0`, `scaledown_window=180`, `enable_memory_snapshot=True`.
+`robotis_ai_setup/modal_training/vision_app.py` — Modal app `edubotics-vision`, T4 GPU, `min_containers=0`, `scaledown_window=180`, `enable_memory_snapshot=True`, `@app.cls(timeout=120)` (raised from 30s in audit F37 — fresh containers that miss the snapshot cache need 30-60s to download weights on a slow HF mirror).
 - Model: `google/owlv2-base-patch16-ensemble` (Apache-2.0, 200M params). CLIP text encoder handles German prompts natively (`rote Tasse`, `gelbe Banane`, …).
-- Image: `nvidia/cuda:12.1.1-devel-ubuntu22.04`-equivalent via `modal.Image.debian_slim()` + `transformers==4.46.0`, `torch==2.4.0`, `pillow`, `huggingface_hub`. HuggingFace cache on a persistent `modal.Volume` (`edubotics-vision-cache`).
-- The `OWLv2Detector.detect(image_bytes, prompts, score_threshold)` method runs `Owlv2Processor` + `Owlv2ForObjectDetection` and returns `{detections: [{label, score, bbox}], cold_start: bool}`.
+- Image: `modal.Image.debian_slim(python_version="3.11")` + `transformers==4.46.0`, `pillow`, **`huggingface_hub==0.26.2`** (pinned in audit F44 — `>=0.25.0` left us drifting whenever HF cut a release; `0.26.2` matches the `transformers 4.46.0` contract), `numpy`. **Torch is then force-reinstalled from `cu121`** (`torch==2.4.0`, `torchvision==0.19.0`, `index_url=https://download.pytorch.org/whl/cu121`, `extra_options="--force-reinstall"`) — without that, pip resolves CPU wheels from PyPI and the T4 GPU sits idle (audit round-3 §H). HuggingFace cache on a persistent `modal.Volume` (`edubotics-vision-cache`).
+- **Secret split**: uses `modal.Secret.from_name("edubotics-vision-secrets")`, NOT `edubotics-training-secrets`. The training bundle contains `SUPABASE_SERVICE_ROLE_KEY` + the write-scoped HF token; the vision worker needs neither and leaking either into a less-audited inference path is exactly the misconfiguration to avoid (audit round-3 §I). Deploy fails loudly if the operator hasn't created the vision bundle.
+- **Snapshot-aware lifecycle** (audit round-3 §B/§C):
+  - `@modal.enter(snap=True) load_weights` runs **before** the snapshot is taken on a CPU-only builder. `Owlv2ForObjectDetection.from_pretrained(..., torch_dtype=torch.float32, device_map=None)` then `.to("cpu")` (audit F40 — explicit `device_map=None` overrides the accelerate-default `"auto"` that would bind to CUDA at snapshot-build time and crash the build).
+  - `@modal.enter(snap=False) bind_device` runs **after** snapshot restore on the live GPU. `.to("cuda").half()` (audit F41 — FP16 on T4 gives ~1.6× throughput with no accuracy regression at the IoU we use; falls back to FP32 on CPU containers).
+- `OWLv2Detector.detect(image_bytes, prompts, score_threshold=0.25)` returns `{detections: [{label, score, bbox: [x1,y1,x2,y2]}], cold_start: bool}`. Threshold raised from 0.10 → **0.25** in audit F37 to cut spurious German-prompt false positives.
+- **EXIF-before-RGB ordering** (audit F39): `Image.open(BytesIO(image_bytes))` → `ImageOps.exif_transpose(img)` → `.convert("RGB")`. The pre-F39 ordering called `convert("RGB")` first, which discards EXIF metadata, leaving the subsequent `exif_transpose` as a silent no-op on phone-camera images.
 - Cost model: T4 = $0.59/hr per the 2026 Modal pricing page (https://modal.com/pricing). With `min_containers=0`, `scaledown_window=180`, and `enable_memory_snapshot=True`, an idle classroom pays nothing and a warm-path call runs in 200-400 ms (~$0.00007 per call). Cold-start storms add to the bill — each fresh-after-scale-down container costs the 2-5 s of T4 burn before snapshot-restore finishes — so per-classroom term cost is realistically $1-$2 in compute, NOT the $0.50 a pure warm-only model would predict. Budget accordingly.
-- Cloud bridge: `cloud_training_api/app/routes/vision.py` exposes `POST /vision/detect` (rate-limited 5/60s/user). Per-user term quota via optional `users.vision_quota_per_term` column.
-- React block `edubotics_detect_open_vocab` (see §6.7) routes German prompts through a small synonym dict first; cloud burst is the fallback. The block is opt-in via `cloud_vision_enabled` on `StartWorkflow.srv`.
+- Cloud bridge: `cloud_training_api/app/routes/vision.py` exposes `POST /vision/detect` (rate-limited 5/60s **per-user via JWT `sub`**, not per-IP — protects 30 NAT'd students from sharing one bucket; audit round-3 §BD). Per-user term quota via optional `users.vision_quota_per_term` column, atomic test-and-increment via `consume_vision_quota` RPC, refund on transient 502/504 errors via `refund_vision_quota` RPC.
+- React block `edubotics_detect_open_vocab` (see §6.7) routes German prompts through a small synonym dict first; cloud burst is the fallback. The block is opt-in via `cloud_vision_enabled` on `StartWorkflow.srv`, persisted in `workshopSlice.js` (audit F29) and gated in `toolbox.js` (F28). Prompt validator enforces `OPEN_VOCAB_PROMPT_MAX = 80` chars and ≤8 prompts (F33).
 - Deploy: `modal deploy modal_training/vision_app.py`. Smoke: `modal run -m vision_app::smoke_test`.
 
 ### 8.2 training_handler.py (~700 lines)
@@ -689,7 +722,9 @@ Returns `JSONResponse(429, {"detail": "Too many requests — please wait a momen
 
 ---
 
-## 9. Supabase schema (10 migrations)
+## 9. Supabase schema (base + 14 numbered migrations)
+
+> **File map:** `migration.sql` (base) + `002_accounts.sql` + `003_lessons_and_notes.sql` (immediately superseded by 004) + `004_progress_entries.sql` + `005_cloud_job_id.sql` + `006_loss_history.sql` + `007_deletion_requested_at.sql` + `008_workflows.sql` + `009_workflows_rls_writes.sql` + `010_progress_terminal_guard.sql` + `011_workgroups.sql` + `012_dataset_sweep.sql` + `013_revoke_anon_from_security_definer.sql` + `015_workflow_versions.sql` + `016_tutorial_progress.sql` + `017_vision_quota.sql`. **There is no `014_*.sql`** — the Phase-2 bundle skipped 014 to avoid a filename collision discovered mid-rollout (see note before §9.15). Every numbered migration has a matching file in `supabase/rollback/`; `migration.sql` and the superseded `003_*.sql` do not.
 
 ### 9.1 migration.sql (base)
 - **`public.users`** (UUID PK → `auth.users.id ON DELETE CASCADE`, `email TEXT NOT NULL`, `training_credits INT DEFAULT 0`, `created_at TIMESTAMPTZ DEFAULT NOW()`)
@@ -762,7 +797,11 @@ Returns `JSONResponse(429, {"detail": "Too many requests — please wait a momen
 
 ### 9.12 012_dataset_sweep.sql — adds `datasets.discovered_via_sweep BOOLEAN NOT NULL DEFAULT FALSE`. Marks rows registered by the periodic Railway sweep (see §10.5) versus rows registered live by the React app right after upload. Informational only — sweep does not skip rows on subsequent ticks.
 
-> §9.13 and §9.14 were retired during the Roboter Studio Phase-2/3 rollout — the original filenames collided with `013_revoke_anon_from_security_definer.sql` and the migrations were renumbered to `015_workflow_versions.sql` and `016_tutorial_progress.sql`. The section numbers below match the migration filenames so prose and disk stay in sync.
+### 9.13 013_revoke_anon_from_security_definer.sql (audit-23032cb hardening)
+
+Strips the `EXECUTE` grant from `PUBLIC`, `anon`, and `authenticated` on every `SECURITY DEFINER` RPC the cloud API uses: `start_training_safe`, `update_training_progress`, `adjust_student_credits`, `adjust_workgroup_credits`, `get_remaining_credits`, `get_teacher_credit_summary`. Postgres' default ACL silently re-grants `EXECUTE` to `PUBLIC` whenever a function is created without `REVOKE FROM PUBLIC`, and Supabase's `anon`/`authenticated` roles inherit it; a missed REVOKE means a logged-in student could call `adjust_student_credits` directly with someone else's `p_teacher_id` and bypass `_assert_student_owned`. The migration is idempotent — it loops over a fixed list of `(name, signature)` pairs and `REVOKE EXECUTE ... FROM ...` each one. **Service-role is unaffected** (it's `BYPASSRLS` and runs as a Postgres superuser-equivalent on Supabase). Rollback re-grants `EXECUTE` to `authenticated` only.
+
+> **Note on the missing 014:** A Phase-2 branch initially landed `013_workflow_versions.sql` and `014_tutorial_progress.sql`. When the anon-revoke hotfix needed `013`, the Phase-2 pair was renumbered up to `015` / `016` — leaving `014` permanently unused. Don't reintroduce a `014_*.sql` file; either renumber upward or hand-pick the next free integer.
 
 ### 9.15 015_workflow_versions.sql (Roboter Studio Phase-2 history)
 - New table `public.workflow_versions` (id, workflow_id FK CASCADE, blockly_json JSONB, note TEXT, created_at TIMESTAMPTZ, saved_by UUID FK SET NULL).
@@ -812,7 +851,7 @@ Reads `cloud_training_api/.env` for `SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY`
 - volumes `/dev:/dev`, `/dev/shm:/dev/shm`, `/etc/timezone:ro`, `/etc/localtime:ro`
 - env: `ROS_DOMAIN_ID`, `FOLLOWER_PORT`, `LEADER_PORT`, `CAMERA_DEVICE_1/2`, `CAMERA_NAME_1/2`
 - `mem_limit: 2g`, `pids_limit: 512`
-- Healthcheck: `ros2 topic list | grep -q /joint_states` (interval 10s, timeout 5s, retries 3, start_period 120s)
+- Healthcheck: asserts `/joint_states` is being published AND each configured camera's `/{name}/image_raw/compressed` topic exists (`bash -c '... | grep -q /joint_states && ([ -z $$CAMERA_DEVICE_1 ] || ... grep -q /{name}/image_raw/compressed) && (same for camera 2)'`). The `[ -z ]` guards let single-camera setups stay healthy. Audit F7 widened this — pre-F7 the healthcheck only checked `/joint_states`, so a dead `usb_cam` container reported healthy, `physical_ai_server` started, recording proceeded with black frames, and the failure surfaced only on the first record-press via the 5s topic-wait timeout. Interval 10s, timeout 5s, retries 3, start_period 120s.
 
 **`physical_ai_server`** (image `${REGISTRY:-nettername}/physical-ai-server:latest`):
 - `depends_on: open_manipulator: service_healthy`
@@ -954,8 +993,16 @@ Singleton. `roslib` 1.4.1, URL `ws://${window.location.hostname}:9090`. Connecti
 - `useRefetchOnFocus(refetch, minIntervalMs=2000)` — debounced focus/visibility refetch.
 
 ### 12.8 ROS service caller (`hooks/useRosServiceCaller.js`)
-10s default timeout. ~20 services bound (full list — service file in `physical_ai_interfaces`):
-`/task/command` (SendCommand), `/training/command` (SendTrainingCommand), `/image/get_available_list`, `/get_robot_types`, `/set_robot_type`, `/register_hf_user`, `/get_registered_hf_user` (3s timeout), `/training/get_user_list`, `/training/get_dataset_list`, `/training/get_available_policy`, `/training/get_model_weight_list`, `/browse_file`, `/dataset/edit`, `/dataset/get_info`, `/huggingface/control`, `/training/get_training_info`, `/calibration/start` `/calibration/capture` `/calibration/solve` `/calibration/cancel` `/calibration/capture_color`, `/workflow/start`, `/workflow/stop`, `/workshop/mark_destination`.
+10s default timeout (`/get_registered_hf_user`, `/calibration/preview` are 3s). 31 services bound across recording, training, Hugging Face control, calibration, workshop authoring, and the Phase-2/3 debugger:
+- **Recording / task control**: `/task/command` (SendCommand), `/training/command` (SendTrainingCommand), `/image/get_available_list`, `/get_robot_types`, `/set_robot_type`.
+- **Hugging Face account**: `/register_hf_user`, `/get_registered_hf_user` (3s).
+- **Training metadata**: `/training/get_user_list`, `/training/get_dataset_list`, `/training/get_available_policy`, `/training/get_model_weight_list`, `/training/get_training_info`.
+- **Dataset editing**: `/browse_file`, `/dataset/edit`, `/dataset/get_info`, `/huggingface/control`.
+- **Calibration wizard** (Roboter Studio Phase-2): `/calibration/start`, `/calibration/capture_frame`, `/calibration/capture_color`, `/calibration/solve`, `/calibration/cancel`, `/calibration/status`, `/calibration/auto_pose`, `/calibration/execute_pose`, `/calibration/preview` (3s), `/calibration/verify`, `/calibration/history`.
+- **Workshop runtime**: `/workflow/start` (`StartWorkflow.srv` — carries `cloud_vision_enabled` and `auth_token` for JWT propagation, audit F4), `/workflow/stop`, `/workshop/mark_destination` (one-shot AprilTag/colour destination pin).
+- **Block-level debugger** (Phase-2): `/workflow/pause`, `/workflow/step`, `/workflow/continue`, `/workflow/set_breakpoints` (`WorkflowSetBreakpoints.srv`, takes a list of Blockly block IDs — used by `DebugPanel.jsx`).
+
+`.srv` definitions live in `physical_ai_interfaces/srv/`. CI's `interfaces-validate` job enforces one `---` per `.srv` and that every name in `CMakeLists.txt` actually exists on disk.
 
 ### 12.9 Sidebar tabs (StudentApp)
 Labels (German): **Start, Aufnahme, Training, Inferenz, Daten, Roboter Studio**. Internal page enum (`constants/pageType.js`): `HOME, RECORD, INFERENCE, TRAINING, EDIT_DATASET, WORKSHOP`.
@@ -967,7 +1014,20 @@ Labels (German): **Start, Aufnahme, Training, Inferenz, Daten, Roboter Studio**.
 - Web (`nginx.web.conf.template`): same caching + 5 strict security headers on **every** location (HSTS 2y, X-Frame-Options DENY, X-Content-Type-Options nosniff, Referrer-Policy strict-origin-when-cross-origin, Permissions-Policy denying camera/mic/geo/payment). Listens on `${PORT}` (Railway).
 
 ### 12.11 Constants files
-- `pageType.js`, `taskPhases.js` (READY=0, WARMING_UP=1, RESETTING=2, RECORDING=3, SAVING=4, STOPPED=5, INFERENCING=6), `trainingCommand.js` (NONE=0, START=1, FINISH=2), `taskCommand.js` (NONE=0, START_RECORD=1, START_INFERENCE=2, STOP=3, NEXT=4, RERECORD=5, FINISH=6, SKIP_TASK=7), `commands.js` (EditDatasetCommand: MERGE=0, DELETE=1), `HFStatus.js` (Idle/Uploading/Downloading/Deleting/Fetching/Processing/Success/Failed), `paths.js` (workspace + dataset + policy paths), `appMode.js`.
+`src/constants/` contains: `pageType.js`, `taskPhases.js` (READY=0, WARMING_UP=1, RESETTING=2, RECORDING=3, SAVING=4, STOPPED=5, INFERENCING=6), `trainingCommand.js` (NONE=0, START=1, FINISH=2), `taskCommand.js` (NONE=0, START_RECORD=1, START_INFERENCE=2, STOP=3, NEXT=4, RERECORD=5, FINISH=6, SKIP_TASK=7), `commands.js` (EditDatasetCommand: MERGE=0, DELETE=1), `HFStatus.js` (Idle/Uploading/Downloading/Deleting/Fetching/Processing/Success/Failed), `paths.js` (workspace + dataset + policy paths), `appMode.js`, **`streamConfig.js`** (`STREAM_QUALITY = 70` — single source of truth for the MJPEG `?quality=` parameter; pre-F35, `CameraFeedOverlay` used 70 and `ImageGridCell` used 50 and the difference manifested as wildly different bitrates on the two recording previews; the constant lets a teacher tune for school Wi-Fi).
+
+### 12.12 F1-F61 audit-comment convention
+
+The 2026-05 camera-pipeline audit (`CAMERA_PIPELINE_FIXES.md`) landed dozens of frontend fixes as inline edits with `// Audit F##` markers rather than new files. The markers are load-bearing — they explain *why* a piece of code looks the way it does:
+- `CameraFeedOverlay.jsx` — F24 (rosbridge liveness ping + frozen badge, `FROZEN_THRESHOLD_MS = 2000`), F25 (`reloadKey` re-mount on freeze).
+- `ImageGridCell.js` — F26 (cancel-token race fix replacing the prior `isCreatingRef` bug — explained in the comment).
+- `StudentApp.js` — F27 (`signOut()` no longer tears down the rosbridge connection on the way out — leaks were stranding the next student's session in a "connecting…" state).
+- `Workshop/blocks/toolbox.js` — F28 (toolbox gates `edubotics_detect_open_vocab` on `cloudVisionEnabled` so the block is invisible until the teacher opts in).
+- `store/workshopSlice.js` — F29 (`cloudVisionEnabled` and the open-vocab quota chip data persist to localStorage so a reload doesn't drop the opt-in).
+- `Workshop/RunControls.jsx` — F30 (`VisionQuotaChip` reads `vision_quota_per_term` / `vision_used_per_term` from `/me`; F31 confidence-on-bbox label; cloud-burst success/error toasts via `react-hot-toast`).
+- `Workshop/blocks/perception.js` — F33 (`OPEN_VOCAB_PROMPT_MAX = 80` chars / ≤8 prompts validator).
+
+When editing any of these files, **preserve the audit markers** — they are the project's record of why the code resists obvious-looking simplifications.
 
 ---
 
@@ -1072,17 +1132,17 @@ Five sources of truth currently drift:
 
 ## 15. CI workflow (`.github/workflows/ci.yml`) — what fails the build
 
-10 jobs run on every push/PR to `main`:
+10 jobs run on every push/PR to `main` (in the order they appear in `ci.yml`):
 1. **python-tests** — `compileall` of `gui`, `scripts`, `cloud_training_api`, `modal_training`, overlays, patches; `unittest discover -s tests` (5 GUI/installer tests); plus `unittest discover -s app/tests` from `cloud_training_api/` (workgroup helper, dataset sweep parsers — tests stub fastapi/supabase/huggingface_hub via `sys.modules` so they run without those deps).
 2. **shell-lint** — shellcheck `-S error` on `build-images.sh`, `entrypoint_omx.sh`, `build_rootfs.sh`, `start-dockerd.sh`, `physical_ai_manager/scripts/railway-deploy.sh`.
 3. **compose-validate** — `docker compose config` on both base + GPU compose with fake `.env`.
 4. **overlay-guard** — runs `fix_server_inference.py` on a fake `server_inference.py` that lacks the patch target; asserts non-zero exit (catches a regress where the patch silently fails).
-5. **modal-import-validate** — pip-installs the Modal SDK, then imports `modal_app.py`, `vision_app.py`, `training_handler.py`. Image specs are evaluated at module load, so an SDK API mismatch (e.g. `Image.pip_install(force_reinstall=True)` against an SDK that wants `extra_options="--force-reinstall"`) raises `TypeError` here instead of at `modal deploy` time. Added after the `c56c012` vision_app.py near-miss.
+5. **modal-import-validate** — pip-installs the Modal SDK, then imports `modal_app.py` and `vision_app.py`. (`training_handler.py` was dropped from this sweep in commit `1b68372` because it imports container-only deps like `lerobot`, and the sweep was failing on import-time symbols rather than the Modal-SDK contract it actually exists to validate.) Image specs are evaluated at module load, so an SDK API mismatch (e.g. `Image.pip_install(force_reinstall=True)` against an SDK that wants `extra_options="--force-reinstall"`) raises `TypeError` here instead of at `modal deploy` time. Added after the `c56c012` vision_app.py near-miss.
 6. **teacher-web-build-validate** — builds `Dockerfile.web` with **only `physical_ai_manager/`** as the build context (exactly what `railway up --path-as-root .` does), with placeholder secrets, then asserts each secret reached the bundle. Catches build-context regressions that wouldn't surface in `manager-build-validate` (which builds the student Dockerfile with `build-images.sh`-style staging).
 7. **manager-build-validate** — builds `physical_ai_manager` (student `Dockerfile`) with placeholder secrets (`CI_VALIDATE.supabase.co`, `CI_VALIDATE_ANON_KEY`, `CI_VALIDATE.api.example`); asserts each placeholder string appears in the built `main.*.js` bundle. Catches the white-screen regression. Stages `_coco_classes.py` so the prebuild Jest hook enforces dropdown↔server sync.
-8. **nginx-validate** — `envsubst $PORT` on `nginx.web.conf.template` then `nginx -t` on both web + student configs.
-9. **tutorials-validate** — JSON-parses every `physical_ai_manager/public/tutorials/*.json`, asserts the required schema (`id`, `title_de`, `level`, `steps[].title`, `steps[].body`, `steps[].allowed_blocks`), and cross-checks each `allowed_blocks` entry against `cloud_training_api/app/validators/workflow.py:ALLOWED_BLOCK_TYPES`. A tutorial referencing a block that doesn't exist server-side fails the build.
-10. **interfaces-validate** — verifies every `.srv` has exactly one `---` separator and every `.srv`/`.msg` filename listed in `CMakeLists.txt` is present on disk; runs on all of `physical_ai_interfaces/srv/*.srv` and `physical_ai_interfaces/msg/*.msg`.
+8. **tutorials-validate** — JSON-parses every `physical_ai_manager/public/tutorials/*.json`, asserts the required schema (`id`, `title_de`, `level`, `steps[].title`, `steps[].body`, `steps[].allowed_blocks`), and cross-checks each `allowed_blocks` entry against `cloud_training_api/app/validators/workflow.py:ALLOWED_BLOCK_TYPES`. A tutorial referencing a block that doesn't exist server-side fails the build.
+9. **interfaces-validate** — verifies every `.srv` has exactly one `---` separator and every `.srv`/`.msg` filename listed in `CMakeLists.txt` is present on disk; runs on all of `physical_ai_interfaces/srv/*.srv` and `physical_ai_interfaces/msg/*.msg`.
+10. **nginx-validate** — `envsubst $PORT` on `nginx.web.conf.template` then `nginx -t` on both web + student configs.
 
 ### Boot-time schema fingerprint (Cloud API)
 
@@ -1115,7 +1175,7 @@ Five sources of truth currently drift:
 - **Stalled-worker sweep** — `_sync_modal_status` cancels Modal job + marks failed if `last_progress_at` older than `STALLED_WORKER_MINUTES` (default 25).
 - **Dispatch-lost detection** — if Modal can't find the FunctionCall after `DISPATCH_LOST_MINUTES` (default 10), mark failed with German `Dispatch an Cloud-Worker fehlgeschlagen...`.
 - **Dedupe window** — `DEDUPE_WINDOW=60s`. `_find_recent_duplicate` keys on `(user_id, dataset_name, model_type, training_params)`. Excludes failed/canceled rows so retry works immediately.
-- **`POLICY_MAX_TIMEOUT_HOURS`** — per-policy timeout caps applied after request validation but before Modal dispatch (ACT 1.5h, VQBET/TDMPC 2h, Diffusion/Pi0Fast 4h, Pi0/SmolVLA 6h).
+- **`POLICY_MAX_TIMEOUT_HOURS`** — per-policy timeout caps applied after request validation but before Modal dispatch (ACT/VQBET/TDMPC 4h, Diffusion/Pi0Fast 6h, Pi0/SmolVLA 10h; outer `MAX_TRAINING_TIMEOUT_HOURS=12` envelope and the Modal `7h` function timeout still apply).
 - **Camera exact-match** — overlay rejects mismatched camera names. German `[FEHLER] Kamera-Namen passen nicht: Modell erwartet {expected_names}, verbunden {connected_names}...`
 - **Stale-camera halt** — overlay watchdog hashes 4 sparse 256-byte slices per image; warn @ 2s, halt @ 5s. Returns None → tick skipped.
 - **Safety envelope** — overlay-added: NaN/Inf reject + per-joint clamp + per-tick velocity cap. Configured in `omx_f_config.yaml`.
@@ -1126,6 +1186,11 @@ Five sources of truth currently drift:
 - **ChArUco constants** — 7×5 squares, 30 mm square / 22 mm marker, `DICT_5X5_250`. 12 frames for intrinsic, 14 for hand-eye, PARK + TSAI dual-solve.
 - **HOME pose** — `[0.0, -π/4, π/4, 0.0, 0.0]` rad + `gripper_joint_1 = 0.8` rad (open).
 - **Workflow recovery** — auto-home on stop/error: 1.0s hold + 0.5s gripper open + 3.0s home, 15.0s absolute deadline.
+- **F1-F61** — the 2026-05 deep-audit fix bundle (`CAMERA_PIPELINE_FIXES.md`). Inline `// Audit F##` markers in source code refer to specific findings; preserve them when editing. F1-F4 were the 4 CRITICALs; F11-F12 are inference-time safety fixes (velocity-cap seeding, shape-mismatch reject); F37-F45 are the vision_app.py reliability bundle (FP16 on T4, EXIF-before-RGB, score threshold 0.25, `huggingface_hub` pin, etc.).
+- **Cloud-burst** — the open-vocabulary-detection path that POSTs a camera frame from the on-robot perception pipeline to Modal's OWLv2 (`POST /vision/detect`). Always opt-in (`StartWorkflow.srv.cloud_vision_enabled`). Local synonym dict is consulted first; the burst is the fallback. Falsey on cost (~$0.00007/call warm).
+- **VisionQuotaChip / vision_quota_per_term / vision_used_per_term** — per-user term budget for cloud-burst calls. `consume_vision_quota` RPC is atomic test-and-increment; `refund_vision_quota` is the atomic decrement triggered on transient Modal 502/504s so a flaky cold start doesn't burn a student's term.
+- **Frozen badge** — the React indicator (`CameraFeedOverlay.jsx`, audit F24) shown when the rosbridge liveness ping hasn't seen a topic update in `FROZEN_THRESHOLD_MS = 2000` ms. The image element is re-mounted (`reloadKey`) on freeze so a stuck `<img>` reconnects automatically.
+- **STREAM_QUALITY** — `physical_ai_manager/src/constants/streamConfig.js` constant (default `70`) — single source of truth for the MJPEG `?quality=` parameter; pre-F35, `CameraFeedOverlay` and `ImageGridCell` disagreed (70 vs 50).
 
 ---
 
@@ -1136,3 +1201,49 @@ The single source of truth is always **the code**. This file describes what's tr
 **You are an autonomous coding partner.** Do the work, fix the failures at the root cause (never `--no-verify`, never `@pytest.skip`, never bypass an `apply_overlay` assertion that's telling you upstream renamed something). When you change anything that this file describes, update this file. The whole point of this file is that it stays in sync.
 
 When the user says something destructive or you're about to take a destructive action, **stop and ask** — no one's training schedule is so urgent that an unwanted `wsl --unregister` is acceptable.
+
+---
+
+## 18. Deferred work & audit references
+
+This section is the index of work that is **documented but not yet done**, so future sessions don't reopen settled tradeoffs and don't claim "complete" something the team has already flagged as deferred. The companion files are:
+
+### 18.1 `CAMERA_PIPELINE_FIXES.md` — the F1-F61 deep audit
+
+The 2026-05 camera-pipeline audit listed 61 findings (F1-F61) ranked CRITICAL/HIGH/MEDIUM/LOW. Commit `1b68372` ("Camera pipeline: deep-audit fix bundle (F1-F61)") landed all 4 CRITICALs and the bulk of the HIGH/MEDIUM tier; only **F16, F19, F42, F43** are intentionally deferred (documented low-priority items — see the file's status table). When you see a `// Audit F##` marker in source, that line of code exists *because* of the corresponding finding; preserve the marker and read the rationale in `CAMERA_PIPELINE_FIXES.md` before simplifying.
+
+The fix bundle introduced these load-bearing behaviors (already in code, recapped here so future sessions don't accidentally roll them back):
+- **Inference safety**: first-tick velocity-cap seeding from current joints (F11), shape-mismatch tick rejection (F12), single-frame fault tolerance, consecutive-skip escalation (F13).
+- **Camera pipeline**: `bgr8` cv_bridge encoding (F5), per-tick frame-shape lock validation (F6), camera-topic healthcheck assertion (F7), camera-role enforcement in config_generator (F8), `/dev/v4l/by-id` stable paths (F20), entrypoint `wait_for_camera` (F21), per-camera launch params (F22).
+- **Recording integrity**: camera msg arrival + observed-Hz check at recording start (F17/F18); canonical LeRobot v2.1 video path derivation when encoders dict empty (F23).
+- **Browser UX**: rosbridge liveness ping + frozen badge (F24), img re-mount on freeze (F25), ImageGridCell race fix (F26), no-blunt-teardown on `signOut()` (F27), toolbox cloud-vision gating (F28), persistence (F29), VisionQuotaChip (F30), bbox confidence label (F31), open-vocab prompt validator (F33), cloud-burst toasts, `STREAM_QUALITY` constant (F35), web_video_server loopback bind.
+- **Modal vision worker**: error-field logging, `@app.cls(timeout=120)` widened from 30s (F37), EXIF-before-RGB (F39), `device_map=None` (F40), FP16 on T4 (F41), `huggingface_hub==0.26.2` pin (F44), `score_threshold=0.25` (F45).
+- **Cloud API + Supabase**: clean German exception messages, RPC error-code classification, NULL-quota skip (F48), `/admin` + `/teacher` vision-quota PATCH endpoints (F49), bbox length validation, fail-closed on unknown RPC shape, refund logging level bump.
+- **On-host bridge**: `enabled` flag honoured (F54), YAML synonym overlay loader, `NotImplementedError` clean re-raise, `should_stop` before burst (F57), 2s scene-frame freshness guard (F58).
+
+### 18.2 `docs/ROBOTER_STUDIO_DEFERRED.md` — Phase-2/3 unfinished work
+
+A 31-item catalogue from the round-3 Roboter Studio audit, organized as:
+- §1.1-§1.7 **Backend wiring** — ROS service stubs for the block-level debugger and parts of the calibration UX. **Items 1.1-1.3 are still stubs**, so the entire Phase-2 debugger UI is dead without them; the React side renders, the buttons call services that haven't been implemented yet. If a student says "the debugger doesn't pause," this is why.
+- §2.1-§2.14 **Frontend subscriptions** — small leaks + audio polish.
+- §3-§7 Tutorial polish, cloud hardening, A11y, code hygiene, tooling gaps.
+- §8 **Recommended order**: 1.1-1.3 (ROS handlers) → 1.4 (cloud_vision wiring — partially landed by F4) → 2.1-2.2 (audio + memory leaks). Anything else is polish.
+
+Treat this file as the next-sprint backlog. Do not promise "Phase-2 debugger" features without checking which items in §1 are still open.
+
+### 18.3 `docs/deploy/` — deployment ordering (load-bearing)
+
+**`APPLY_MIGRATIONS.sql`** + **`ROLLBACK_MIGRATIONS.sql`** are the forward and reverse bundles for the Phase-2/3 trio (`015_workflow_versions.sql`, `016_tutorial_progress.sql`, `017_vision_quota.sql`). The boot-time `_validate_required_schema()` in `cloud_training_api/app/main.py` probes every table + RPC the routes touch, so Railway will abort the deploy if the migrations haven't landed first (this is the systemic fix for the c56c012 round-3 incident where `refund_vision_quota` was missing from the live DB even though the file on disk defined it).
+
+**`NEXT_STEPS.md`** + **`DEPLOYMENT_RUNBOOK.md`** prescribe the only safe deploy order for the round-3 bundle:
+1. **Supabase migrations first** (`APPLY_MIGRATIONS.sql` via Studio SQL editor) — new RPCs and tables must exist before the cloud API references them.
+2. **Modal redeploy** of `vision_app.py` — must be done before any student opens the open-vocab block.
+3. **Railway redeploy** of the cloud API — picks up new env vars + schema fingerprint.
+4. **Docker images rebuild + push** via `build-images.sh`.
+5. **Git push** of any pending source changes.
+
+Skipping or reordering any of these has been the cause of every "the new feature is live in code but broken in production" report so far. When in doubt, read `DEPLOYMENT_RUNBOOK.md`.
+
+### 18.4 `robotis_ai_setup/CHANGES_SESSION_*.md` — historical context
+
+`CHANGES_SESSION_2026-04-06.md` and `CHANGES_SESSION_2026-04-17.md` are **history, not procedure** — they explain *why* the project has its current shape (the WSL2 + bundled-distro decision, the `is_async=true` xacro overlay pattern, the healthcheck-driven container-ordering choice). The fixes they describe are in the current images; the files are kept so a future architect can audit the reasoning before reverting a load-bearing decision. Don't act on their procedural sections — those have been superseded by the current CLAUDE.md.

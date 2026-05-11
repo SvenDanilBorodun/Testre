@@ -151,28 +151,19 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install 'modal>=1.4,<2'
       - name: Import every Modal app
+        # Import each *.py under modal_training/ that defines a
+        # modal.App. Failures during Image / function decoration
+        # surface as ImportError/TypeError here and fail the build.
+        # Also imports training_handler.py for parity even though it
+        # isn't a Modal app — it's invoked from inside `train` and
+        # would crash deploy at first invocation if syntax broke.
+        working-directory: robotis_ai_setup/modal_training
         run: |
-          # Import each *.py under modal_training/ that defines a
-          # modal.App. Failures during Image / function decoration
-          # surface as ImportError/TypeError here and fail the build.
-          cd robotis_ai_setup/modal_training
-          for f in modal_app.py vision_app.py; do
+          set -e
+          for f in modal_app.py vision_app.py training_handler.py; do
             echo "== importing $f =="
-            python -c "import importlib.util, sys; \
-spec = importlib.util.spec_from_file_location('m_${f%.py}', '$f'); \
-mod = importlib.util.module_from_spec(spec); \
-spec.loader.exec_module(mod); \
-print('  OK: import succeeded')"
+            python -c "import importlib.util, sys; spec = importlib.util.spec_from_file_location('m', '$f'); mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod); print('  OK: import succeeded')"
           done
-          # Also import training_handler.py for parity even though it
-          # isn't a Modal app — it's invoked from inside `train` and
-          # would crash deploy at first invocation if syntax broke.
-          echo "== importing training_handler.py =="
-          python -c "import importlib.util; \
-spec = importlib.util.spec_from_file_location('m_th', 'training_handler.py'); \
-mod = importlib.util.module_from_spec(spec); \
-spec.loader.exec_module(mod); \
-print('  OK: import succeeded')"
 
   teacher-web-build-validate:
     # Builds Dockerfile.web exactly the way Railway's `railway up

@@ -15,6 +15,7 @@ from app.routes.admin import router as admin_router
 from app.routes.datasets import router as datasets_router
 from app.routes.health import router as health_router
 from app.routes.me import router as me_router
+from app.routes.policies import router as policies_router
 from app.routes.teacher import router as teacher_router
 from app.routes.training import router as training_router
 from app.routes.version import router as version_router
@@ -386,6 +387,7 @@ app.include_router(me_router)
 app.include_router(teacher_router)
 app.include_router(workgroups_router)
 app.include_router(datasets_router)
+app.include_router(policies_router)
 app.include_router(admin_router)
 app.include_router(workflows_router)
 app.include_router(vision_router)

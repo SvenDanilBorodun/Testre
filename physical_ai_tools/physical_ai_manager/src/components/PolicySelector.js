@@ -23,6 +23,7 @@ import {
   setPolicyList,
 } from '../features/training/trainingSlice';
 import { useRosServiceCaller } from '../hooks/useRosServiceCaller';
+import { getPolicies } from '../services/cloudTrainingApi';
 import toast from 'react-hot-toast';
 
 // Env-gated allowlist — students only see ACT, admin/dev builds override via
@@ -38,6 +39,12 @@ export default function PolicySelector({ readonly = false }) {
   const selectedPolicy = useSelector((state) => state.training.trainingInfo.policyType);
   const policyList = useSelector((state) => state.training.policyList);
   const isTraining = useSelector((state) => state.training.isTraining);
+  // Cloud-only mode has no rosbridge, so the ROS service call hangs and the
+  // dropdown stays empty. Falling back to the cloud /policies endpoint keeps
+  // training startable without a robot connected.
+  const heartbeatStatus = useSelector((state) => state.tasks.heartbeatStatus);
+  const rosConnected = heartbeatStatus === 'connected';
+  const accessToken = useSelector((state) => state.auth.session?.access_token);
 
   const title = 'Modellauswahl';
 
@@ -46,9 +53,31 @@ export default function PolicySelector({ readonly = false }) {
 
   const { getPolicyList } = useRosServiceCaller();
 
+  const fetchFromCloud = useCallback(async () => {
+    if (!accessToken) {
+      toast.error('Nicht angemeldet — Modellliste nicht abrufbar.');
+      return;
+    }
+    const result = await getPolicies(accessToken);
+    const names = (result?.policies || []).map((p) => String(p.name).toLowerCase());
+    const filtered = names.filter((p) => ALLOWED_POLICIES.includes(p));
+    dispatch(setPolicyList(filtered));
+    if (filtered.length === 0) {
+      toast.error('Keine Modelle für dieses Konto freigeschaltet.');
+    } else {
+      toast.success('Modellliste aus Cloud geladen');
+    }
+  }, [accessToken, dispatch]);
+
   const fetchItemList = useCallback(async () => {
     setFetching(true);
     try {
+      // Cloud-only: skip the ROS call entirely — it would block on a missing
+      // service and end with an empty list.
+      if (!rosConnected) {
+        await fetchFromCloud();
+        return;
+      }
       const result = await getPolicyList();
       console.log('Policies received:', result);
       if (result && result.policy_list) {
@@ -58,14 +87,20 @@ export default function PolicySelector({ readonly = false }) {
         dispatch(setPolicyList(filtered));
         toast.success('Modellliste erfolgreich geladen');
       } else {
-        toast.error('Failed to get policy list: Invalid response');
+        // ROS responded but with garbage — try cloud rather than show empty.
+        await fetchFromCloud();
       }
     } catch (error) {
-      console.error('Error fetching policy list:', error);
+      console.error('Error fetching policy list from ROS, falling back to cloud:', error);
+      try {
+        await fetchFromCloud();
+      } catch (e2) {
+        toast.error(`Modellliste konnte nicht geladen werden: ${e2.message}`);
+      }
     } finally {
       setFetching(false);
     }
-  }, [getPolicyList, dispatch]);
+  }, [getPolicyList, dispatch, rosConnected, fetchFromCloud]);
 
   // When exactly one policy is allowed (the student case), auto-select it so
   // the dropdown isn't a no-op interaction.

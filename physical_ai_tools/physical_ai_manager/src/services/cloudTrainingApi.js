@@ -47,3 +47,7 @@ export async function getTrainingJobs(accessToken) {
 export async function getTrainingStatus(accessToken, trainingId) {
   return apiRequest(`/trainings/${trainingId}`, 'GET', accessToken);
 }
+
+export async function getPolicies(accessToken) {
+  return apiRequest('/policies', 'GET', accessToken);
+}

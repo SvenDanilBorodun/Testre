@@ -12,6 +12,7 @@ Handles:
     is shared from the host, so host visibility == distro visibility)
 """
 
+import atexit
 import os
 import subprocess
 import sys
@@ -21,6 +22,14 @@ from typing import Optional
 # On Windows, hide console windows spawned by subprocess
 _CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 _SUBPROCESS_KWARGS = {"creationflags": _CREATE_NO_WINDOW} if sys.platform == "win32" else {}
+
+# Long-lived `wsl.exe` child that keeps the EduBotics distro from idling out.
+# WSL2's default vmIdleTimeout (~60s) shuts the distro down once no wsl.exe
+# client is attached, taking dockerd and the manager container with it — at
+# which point http://localhost:80/ returns "connection refused" inside the
+# embedded WebView. Holding one `wsl -d EduBotics -- sleep ...` open as long
+# as the GUI is alive keeps the distro warm.
+_keepalive_proc: Optional[subprocess.Popen] = None
 
 from .constants import (
     ALL_IMAGES,
@@ -104,6 +113,58 @@ def start_edubotics_distro() -> bool:
         return result.returncode == 0
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return False
+
+
+def start_keepalive() -> bool:
+    """Spawn a long-lived `wsl.exe` child to pin the EduBotics distro awake.
+
+    Idempotent: if a live keep-alive process already exists, this is a no-op.
+    Returns True if a keep-alive is running afterwards (newly spawned or
+    pre-existing), False if spawning failed.
+    """
+    global _keepalive_proc
+    if _keepalive_proc is not None and _keepalive_proc.poll() is None:
+        return True
+    if not is_distro_registered():
+        return False
+    # POSIX `sleep infinity` works on the bundled Ubuntu rootfs (GNU coreutils),
+    # but a `while sleep 3600` loop is portable across BusyBox too. Either
+    # holds the WSL plan9 pipe open, which is what defeats vmIdleTimeout.
+    try:
+        _keepalive_proc = subprocess.Popen(
+            ["wsl", "-d", WSL_DISTRO_NAME, "--",
+             "sh", "-c", "while sleep 3600; do :; done"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            **_SUBPROCESS_KWARGS,
+        )
+    except (FileNotFoundError, OSError):
+        _keepalive_proc = None
+        return False
+    return True
+
+
+def stop_keepalive() -> None:
+    """Terminate the keep-alive child if running. Safe to call repeatedly."""
+    global _keepalive_proc
+    proc = _keepalive_proc
+    _keepalive_proc = None
+    if proc is None or proc.poll() is not None:
+        return
+    try:
+        proc.terminate()
+        try:
+            proc.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+    except Exception:
+        pass
+
+
+# Backstop: if the GUI process exits without explicitly calling stop_keepalive
+# (crash, SIGTERM, etc.), reap the child so we don't leak `wsl.exe` workers.
+atexit.register(stop_keepalive)
 
 
 def wait_for_docker(timeout: int = DOCKER_STARTUP_TIMEOUT, callback=None) -> bool:

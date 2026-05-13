@@ -395,6 +395,11 @@ class EduBoticsApp:
                 self._set_status("EduBotics-Umgebung nicht bereit")
                 self.root.after(0, lambda: self.progress.stop())
                 return
+        # Pin the distro awake for the lifetime of this GUI session. Without
+        # this, WSL2's vmIdleTimeout shuts the distro down ~60s after the
+        # last wsl.exe call, killing dockerd and the manager container — the
+        # embedded WebView then loads http://localhost:80/ into a dead port.
+        docker_manager.start_keepalive()
         self._log("EduBotics-Umgebung: OK")
 
         # Check images
@@ -1025,6 +1030,7 @@ class EduBoticsApp:
                 docker_manager.stop_cloud_only(log=self._log)
             else:
                 docker_manager.stop_containers(gpu=self.gpu_available)
+            docker_manager.stop_keepalive()
 
             self._log("Alle Container gestoppt.")
             self._set_status("Gestoppt")
@@ -1048,10 +1054,12 @@ class EduBoticsApp:
                     docker_manager.stop_cloud_only()
                 else:
                     docker_manager.stop_containers(gpu=self.gpu_available)
+                docker_manager.stop_keepalive()
                 self.root.destroy()
             # else: user clicked No, don't close
         else:
             webview_window.destroy_all()
+            docker_manager.stop_keepalive()
             self.root.destroy()
 
 

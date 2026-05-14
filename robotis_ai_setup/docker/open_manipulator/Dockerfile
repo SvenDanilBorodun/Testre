@@ -41,6 +41,10 @@ RUN set -e && \
             echo "ERROR: $name not found in base image — overlay cannot be applied"; \
             return 1; \
         fi; \
+        # Audit E4: defensive CRLF strip so Windows checkouts with stale
+        # core.autocrlf settings still produce byte-identical overlays.
+        # See physical_ai_server/Dockerfile for the full rationale.
+        sed -i 's/\r$//' "$src"; \
         local expected; expected=$(sha256sum "$src" | cut -d' ' -f1); \
         for f in $targets; do \
             before=$(sha256sum "$f" | cut -d' ' -f1); \

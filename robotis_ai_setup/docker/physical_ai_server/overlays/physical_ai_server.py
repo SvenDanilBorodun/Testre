@@ -2243,6 +2243,14 @@ class PhysicalAIServer(Node):
             get_scene_frame=lambda: self._get_latest_camera_frame('scene'),
             get_gripper_frame=lambda: self._get_latest_camera_frame('gripper'),
             get_current_pose_xyz=self._get_current_gripper_xyz,
+            # Audit S2: lambda so the call is deferred to workflow start
+            # time (communicator may not yet be wired at WorkflowManager
+            # construction). Returns None on absent comm or stale joints.
+            get_follower_joints=lambda: (
+                self.communicator.get_latest_follower_joints()
+                if self.communicator is not None
+                else None
+            ),
         )
         joint_min, joint_max, max_delta = self._load_safety_clamps()
         try:

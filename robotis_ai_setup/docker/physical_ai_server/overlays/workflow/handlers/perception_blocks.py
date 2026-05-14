@@ -126,15 +126,46 @@ def _poll_until(ctx, predicate, timeout_s: float, label: str) -> bool:
     block sees nothing. The previous implementation had a dead
     ``on_timeout='continue'`` branch reading from a block field that
     never existed; if that affordance is wanted later, expose a
-    dropdown on the wait_until_* blocks first."""
+    dropdown on the wait_until_* blocks first.
+
+    Audit S1: this poll is pure perception (no motion). When called from
+    inside a hat-block handler, the surrounding ``with ctx.motion_lock``
+    pinned the lock for up to ``timeout_s``, blocking every other
+    motion thread including the recovery routine's 2s acquire. Recovery
+    then proceeded **without** the lock, allowing a recovered home
+    trajectory to race the still-running hat handler's body. Release
+    the motion lock around the wait so it acts as a "wait barrier" only,
+    not a "block-everyone-else barrier"; reacquire on exit so the hat
+    handler resumes with the same locking invariants it had before.
+    """
     deadline = time.monotonic() + timeout_s
-    while time.monotonic() < deadline:
-        if ctx.should_stop():
-            raise WorkflowError('Workflow wurde gestoppt.')
-        if predicate():
-            return True
-        time.sleep(0.2)
-    raise WorkflowError(f'Timeout: {label} nicht erkannt.')
+    motion_lock = getattr(ctx, 'motion_lock', None)
+    released = False
+    if motion_lock is not None:
+        try:
+            motion_lock.release()
+            released = True
+        except RuntimeError:
+            # Lock wasn't held by this thread — fine, just don't try to
+            # reacquire in finally. This happens when _poll_until is
+            # called from a non-hat path (e.g. test harness).
+            released = False
+    try:
+        while time.monotonic() < deadline:
+            if ctx.should_stop():
+                raise WorkflowError('Workflow wurde gestoppt.')
+            if predicate():
+                return True
+            time.sleep(0.2)
+        raise WorkflowError(f'Timeout: {label} nicht erkannt.')
+    finally:
+        if released and motion_lock is not None:
+            # Reacquire before we exit so the caller's
+            # ``with ctx.motion_lock`` block sees a held lock and the
+            # context-manager __exit__ release matches. Acquire blocks
+            # until the lock is free — recovery / main-stack motion
+            # ahead of us finishes first, which is the right ordering.
+            motion_lock.acquire()
 
 
 def wait_until_color(ctx, args: dict[str, Any]) -> bool:

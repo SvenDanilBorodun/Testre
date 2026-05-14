@@ -94,8 +94,8 @@ class DataConverter:
         try:
             if not msg.points:
                 raise RuntimeError(
-                    'JointTrajectory hat keine Punkte — '
-                    'Leader-Arm sendet moeglicherweise nicht.')
+                    '[FEHLER] JointTrajectory hat keine Punkte — '
+                    'Leader-Arm sendet möglicherweise nicht.')
             joint_pos_map = dict(zip(
                 msg.joint_names,
                 msg.points[0].positions
@@ -150,8 +150,8 @@ class DataConverter:
             except KeyError as e:
                 available = list(joint_pos_map.keys())
                 raise RuntimeError(
-                    f'Gelenk {e} fehlt in der Nachricht. '
-                    f'Verfuegbar: {available}, Erwartet: {joint_order}'
+                    f'[FEHLER] Gelenk {e} fehlt in der Nachricht. '
+                    f'Verfügbar: {available}, Erwartet: {joint_order}'
                 )
             if target_format == 'numpy':
                 return np.array(ordered_positions, dtype=np.float32)

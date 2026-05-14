@@ -10,6 +10,12 @@ wsl.conf              text eol=lf
 daemon.json           text eol=lf
 docker-compose*.yml   text eol=lf
 .s6-keep              text eol=lf
+# Overlay targets — the apply_overlay() sha256 post-check matches the on-disk
+# overlay byte-for-byte against the in-image file. CRLF drift on Windows hosts
+# with core.autocrlf=true silently degrades that check to content-equivalence.
+*.xacro               text eol=lf
+*.yaml                text eol=lf
+*.yml                 text eol=lf
 
 # PowerShell scripts on Windows should stay CRLF or UTF-8+BOM (the scripts
 # are explicitly saved with BOM to survive Windows PowerShell 5.1 parsing).

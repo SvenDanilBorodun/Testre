@@ -130,6 +130,7 @@ class WorkflowManager:
         get_scene_frame: Callable[[], Any] | None = None,
         get_gripper_frame: Callable[[], Any] | None = None,
         get_current_pose_xyz: Callable[[], tuple[float, float, float] | None] | None = None,
+        get_follower_joints: Callable[[], list[float] | None] | None = None,
     ) -> None:
         self._publisher = publisher
         self._ik_factory = ik_factory
@@ -144,6 +145,11 @@ class WorkflowManager:
         self._get_scene_frame = get_scene_frame
         self._get_gripper_frame = get_gripper_frame
         self._get_current_pose_xyz = get_current_pose_xyz
+        # Audit S2: source of the current follower joint state, used at
+        # workflow start to seed the safety envelope's per-tick delta cap
+        # AND ctx.last_full_joints (so recovery's hold segment starts at
+        # the real arm pose, not the [0]*6 dataclass default).
+        self._get_follower_joints = get_follower_joints
         self._safety = SafetyEnvelope()
         self._thread: Optional[threading.Thread] = None
         self._hat_threads: list[threading.Thread] = []
@@ -720,6 +726,35 @@ class WorkflowManager:
 
     def _run(self, interpreter: Interpreter, ctx: WorkflowContext) -> None:
         terminal_phase = 'error'
+        # Audit S2: seed the safety envelope's last-action AND
+        # ctx.last_full_joints with the current follower pose, so:
+        #   (a) the per-tick velocity cap on the very first motion compares
+        #       against where the arm actually is, not the dataclass
+        #       default of [0]*6 (which would skip the delta check
+        #       silently because _last_action stays None).
+        #   (b) recovery's hold-current segment publishes the real pose
+        #       instead of a synthetic [0]*6 hold trajectory that would
+        #       command the arm to fold across its body.
+        # Failing to read the joint state is non-fatal: motion handlers
+        # will populate last_full_joints on first use, and safety_envelope
+        # falls back to None → no delta cap on the first action (same
+        # behaviour as before this seed; we strictly improve the path).
+        if self._get_follower_joints is not None:
+            try:
+                joints = self._get_follower_joints()
+                if joints and len(joints) >= 6:
+                    j6 = [float(x) for x in joints[:6]]
+                    ctx.last_full_joints = j6
+                    if self._safety is not None:
+                        self._safety.seed_last_action(j6[:5])
+            except Exception as _exc:  # noqa: BLE001 — best-effort seed
+                self._emit_status({
+                    'workflow_id': self._workflow_id or '',
+                    'log_message': (
+                        f'[WARNUNG] Aktueller Gelenkzustand nicht lesbar — '
+                        f'Sicherheits-Hüllkurve startet ohne Seed ({_exc}).'
+                    ),
+                })
         try:
             self._emit_status({
                 'workflow_id': self._workflow_id or '',

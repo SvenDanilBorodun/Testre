@@ -9,12 +9,32 @@ disable_torque() {
     # expose set_dxl_torque services; try follower first, then leader.
     # 2s timeout each so we never block shutdown.
     echo "[SHUTDOWN] Disabling servo torque..."
-    timeout 2 ros2 service call /dynamixel_hardware_interface/set_dxl_torque \
-        std_srvs/srv/SetBool "{data: false}" >/dev/null 2>&1 || true
-    timeout 2 ros2 service call /leader/dynamixel_hardware_interface/set_dxl_torque \
-        std_srvs/srv/SetBool "{data: false}" >/dev/null 2>&1 || true
+    # Audit H1: log failures explicitly so a maintainer can distinguish
+    # "service unreachable / 404" (catastrophic — arm stays torqued, will
+    # slump under gravity once power loss removes holding torque) from
+    # "torque actually dropped". Bare `|| true` swallowed every failure.
+    if ! timeout 2 ros2 service call /dynamixel_hardware_interface/set_dxl_torque \
+        std_srvs/srv/SetBool "{data: false}" >/dev/null 2>&1; then
+        echo "[WARNUNG] Follower-Torque-Abschaltung fehlgeschlagen — Arm bleibt unter Strom"
+    fi
+    # Leader namespace pushes `leader/` and the xacro's `set_dxl_torque_srv_name`
+    # parameter is `omx_l/set_dxl_torque` — resolved leader path is
+    # `/leader/omx_l/set_dxl_torque`. Previously called the follower-style path
+    # under `/leader/...`, which silently 404'd and left the leader torqued.
+    if ! timeout 2 ros2 service call /leader/omx_l/set_dxl_torque \
+        std_srvs/srv/SetBool "{data: false}" >/dev/null 2>&1; then
+        echo "[WARNUNG] Leader-Torque-Abschaltung fehlgeschlagen — Arm bleibt unter Strom"
+    fi
 }
+CLEANUP_DONE=0
 cleanup() {
+    # Idempotent — `trap ... EXIT` plus a SIGTERM both want to run this,
+    # but disable_torque calling a ROS service after rclpy has been torn
+    # down emits noisy errors. Sentinel guards against the double-run.
+    if [ "$CLEANUP_DONE" = "1" ]; then
+        return
+    fi
+    CLEANUP_DONE=1
     echo "[SHUTDOWN] Stopping all processes..."
     disable_torque
     for pid in $PIDS; do
@@ -23,7 +43,12 @@ cleanup() {
     wait
     echo "[SHUTDOWN] Done."
 }
-trap cleanup SIGTERM SIGINT
+# Audit E2: EXIT is mandatory — `set -e` aborts (wait_for_device 60s
+# miss, sync-verifier exit 2, any other set-e fallthrough) take the
+# script down via `exit`, NOT via a signal, so SIGTERM/SIGINT alone
+# would have left both arms torqued while the container teardown
+# proceeded. EXIT runs after every shell exit path.
+trap cleanup SIGTERM SIGINT EXIT
 
 source /opt/ros/jazzy/setup.bash
 source /root/ros2_ws/install/setup.bash
@@ -165,6 +190,12 @@ class SyncNode(Node):
 
     def send_sync(self):
         self.sent = True
+        # Audit E3: capture the pose at sync-publish time so the verifier
+        # can prove the arm actually moved. Before this snapshot, a stale
+        # follower_pos (callback stopped publishing mid-sync) could match
+        # LEADER_POS vacuously and the 0.08 rad tolerance would pass even
+        # though the arm never moved at all.
+        self._sync_start_pos = list(self.follower_pos)
         traj = JointTrajectory()
         traj.joint_names = list(JOINTS)
         N = 50
@@ -172,6 +203,7 @@ class SyncNode(Node):
         # at both endpoints, no snap. Without these the controller has to
         # numerically interpolate and can overshoot.
         deltas = [l - f for f, l in zip(self.follower_pos, LEADER_POS)]
+        self._sync_initial_deltas = list(deltas)
         for i in range(N):
             t = (i + 1) / N
             s = 10*t**3 - 15*t**4 + 6*t**5
@@ -204,13 +236,39 @@ class SyncNode(Node):
             return
         err = [abs(a - b) for a, b in zip(self.follower_pos, LEADER_POS)]
         tol = 0.08  # rad — generous for gripper-joint backlash
-        if all(e < tol for e in err):
-            self.get_logger().info(f'Sync verified (max err {max(err):.3f} rad)')
+        # Audit E3: also require the arm to have actually moved for any
+        # joint whose initial delta was meaningful. The pre-E3 check passed
+        # vacuously when /joint_states stopped publishing mid-sync: a stale
+        # follower_pos snapshot can match LEADER_POS without the arm ever
+        # leaving its start pose. We require >=50% of the commanded delta to
+        # have been traversed on every joint that had a meaningful initial
+        # offset (|delta| > tol).
+        motion = [abs(a - b) for a, b in zip(self.follower_pos, self._sync_start_pos)]
+        motion_ok = True
+        for i, d in enumerate(self._sync_initial_deltas):
+            if abs(d) > tol and motion[i] < 0.5 * abs(d):
+                motion_ok = False
+                break
+        if all(e < tol for e in err) and motion_ok:
+            self.get_logger().info(
+                f'Sync verified (max err {max(err):.3f} rad, '
+                f'max motion {max(motion):.3f} rad).'
+            )
             sys.exit(0)
         if time.monotonic() > self._verify_deadline:
+            stale_joints = [
+                JOINTS[i] for i, d in enumerate(self._sync_initial_deltas)
+                if abs(d) > tol and motion[i] < 0.5 * abs(d)
+            ]
+            reason = (
+                f'follower stale (no motion on: {stale_joints})'
+                if stale_joints
+                else 'follower not at leader'
+            )
             self.get_logger().error(
-                f'Sync verification FAILED: follower not at leader. '
+                f'Sync verification FAILED: {reason}. '
                 f'Per-joint err (rad): {[round(e, 3) for e in err]}. '
+                f'Per-joint motion (rad): {[round(m, 3) for m in motion]}. '
                 f'Refusing to proceed — check for mechanical block or servo dropout.'
             )
             sys.exit(2)

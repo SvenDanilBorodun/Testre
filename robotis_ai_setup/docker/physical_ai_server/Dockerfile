@@ -118,6 +118,16 @@ RUN set -e && \
             echo "ERROR: $name not found in base image — overlay cannot be applied"; \
             return 1; \
         fi; \
+        # Audit E4: scrub CR characters from the staged overlay BEFORE
+        # the sha256 so a Windows checkout with core.autocrlf=true (which
+        # rewrote our LF files to CRLF) still produces a byte-identical
+        # copy. Without this, the sha256 post-check would still pass IF
+        # both the staged file AND the in-image file ended up CRLF (silent
+        # content-equivalence), but xacro/yaml parsers in the base image
+        # would then fail with confusing line-ending errors at runtime.
+        # The .gitattributes LF rule landed at the same time defends new
+        # clones; this is the build-side belt for stale working trees.
+        sed -i 's/\r$//' "$src"; \
         local expected; expected=$(sha256sum "$src" | cut -d' ' -f1); \
         for f in $targets; do \
             before=$(sha256sum "$f" | cut -d' ' -f1); \

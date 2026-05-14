@@ -106,21 +106,44 @@ try {
 # SHA256 integrity check on the rootfs tar. If a matching .sha256 file
 # ships alongside, verify it before wasting 1-3 minutes on `wsl --import`
 # of a corrupted/swapped tarball.
+#
+# Audit H22: the sidecar verify used to be fail-SOFT — a yellow warning
+# on read error and the import proceeded. That defeats the entire
+# point of shipping a sidecar (tamper detection). The sidecar IS
+# shipped by build_rootfs.sh, so its absence is suspicious, not a
+# routine state. Hard-fail on read or parse error.
 $sha256File = "$RootfsPath.sha256"
 if (Test-Path $sha256File) {
+    $expectedLine = $null
     try {
         $expectedLine = (Get-Content $sha256File -First 1).Trim()
-        $expected = ($expectedLine -split '\s+')[0].ToUpper()
-        $actual = (Get-FileHash -Path $RootfsPath -Algorithm SHA256).Hash.ToUpper()
-        if ($expected -ne $actual) {
-            Write-FAIL "Rootfs SHA256 passt nicht: expected=$expected actual=$actual"
-            Write-Host "   Die Installer-Datei könnte beschädigt oder manipuliert sein." -ForegroundColor Red
-            exit 1
-        }
-        Write-OK "Rootfs SHA256 verified"
     } catch {
-        Write-Host "   (SHA256-Prüfung fehlgeschlagen: $_)" -ForegroundColor Yellow
+        Write-FAIL "SHA256-Sidecar konnte nicht gelesen werden: $_"
+        Write-Host "   Die Datei $sha256File ist beschädigt oder gesperrt." -ForegroundColor Red
+        exit 1
     }
+    if (-not $expectedLine) {
+        Write-FAIL "SHA256-Sidecar ist leer: $sha256File"
+        exit 1
+    }
+    $expected = ($expectedLine -split '\s+')[0].ToUpper()
+    if (-not $expected -or $expected.Length -ne 64) {
+        Write-FAIL "SHA256-Sidecar enthält keinen gültigen 64-stelligen Hash."
+        exit 1
+    }
+    $actual = (Get-FileHash -Path $RootfsPath -Algorithm SHA256).Hash.ToUpper()
+    if ($expected -ne $actual) {
+        Write-FAIL "Rootfs SHA256 passt nicht: expected=$expected actual=$actual"
+        Write-Host "   Die Installer-Datei könnte beschädigt oder manipuliert sein." -ForegroundColor Red
+        exit 1
+    }
+    Write-OK "Rootfs SHA256 verified"
+} else {
+    # No sidecar at all — log a warning but allow (older installers
+    # may legitimately ship without one). build_rootfs.sh always
+    # generates the sidecar, so a missing one in a fresh build is
+    # the suspicious case; an old release shipped to upgrade is fine.
+    Write-Host "   (kein SHA256-Sidecar gefunden: $sha256File)" -ForegroundColor Yellow
 }
 
 wsl --import $DistroName $InstallRoot $RootfsPath --version 2

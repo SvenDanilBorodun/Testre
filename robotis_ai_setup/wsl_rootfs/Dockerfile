@@ -60,7 +60,23 @@ RUN curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \
 ARG DOCKER_VERSION=5:27.5.1-1~ubuntu.22.04~jammy
 ARG CONTAINERD_VERSION=1.7.27-1
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# Audit H17: explicit fail-loud guard if Docker's apt repo has
+# deprecated the pinned version string. Docker periodically deletes
+# old package versions from download.docker.com; without this guard,
+# the apt-get install line would fail with a confusing
+# "Version '5:27.5.1-1~ubuntu.22.04~jammy' for 'docker-ce' was not
+# found" error and the build maintainer would have to debug it from
+# scratch. The version check + install run in one RUN so the
+# `apt-get update` indices are still hot when install fires.
+RUN apt-get update && \
+    if ! apt-cache madison docker-ce | awk '{print $3}' | grep -qF "${DOCKER_VERSION}"; then \
+        echo "ERROR: pinned DOCKER_VERSION=${DOCKER_VERSION} is no longer in download.docker.com." ; \
+        echo "Visible versions:" ; \
+        apt-cache madison docker-ce | head -10 ; \
+        echo "Pick a new pin, update DOCKER_VERSION here AND BASE_IMAGE_PINNING.md, rebuild." ; \
+        exit 1 ; \
+    fi && \
+    apt-get install -y --no-install-recommends \
         docker-ce=${DOCKER_VERSION} \
         docker-ce-cli=${DOCKER_VERSION} \
         containerd.io=${CONTAINERD_VERSION} \

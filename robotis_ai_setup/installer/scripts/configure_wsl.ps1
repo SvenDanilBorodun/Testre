@@ -5,15 +5,50 @@ $ErrorActionPreference = "Stop"
 
 # When running elevated (as admin), $env:USERPROFILE points to the admin's
 # home, not the logged-in student's. Find the actual user via explorer.exe.
+#
+# Audit H21: explorer.exe is the primary signal but it isn't always
+# running (services-only installs, OOBE-finished-but-not-yet-shell,
+# SCCM-deployed kiosks). Fall back to enumerating interactive logon
+# sessions (LogonType=2) before falling back to USERPROFILE — that
+# fallback can be the admin home and clobber the wrong .wslconfig.
+$realProfile = $null
 try {
     $explorerProc = Get-CimInstance Win32_Process -Filter "Name='explorer.exe'" -ErrorAction Stop | Select-Object -First 1
-    $ownerInfo = Invoke-CimMethod -InputObject $explorerProc -MethodName GetOwner -ErrorAction Stop
-    $loggedInUser = $ownerInfo.User
-    $loggedInDomain = $ownerInfo.Domain
-    $sid = (New-Object System.Security.Principal.NTAccount("$loggedInDomain\$loggedInUser")).Translate([System.Security.Principal.SecurityIdentifier]).Value
-    $realProfile = (Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$sid").ProfileImagePath
+    if ($explorerProc) {
+        $ownerInfo = Invoke-CimMethod -InputObject $explorerProc -MethodName GetOwner -ErrorAction Stop
+        $loggedInUser = $ownerInfo.User
+        $loggedInDomain = $ownerInfo.Domain
+        $sid = (New-Object System.Security.Principal.NTAccount("$loggedInDomain\$loggedInUser")).Translate([System.Security.Principal.SecurityIdentifier]).Value
+        $realProfile = (Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$sid").ProfileImagePath
+    }
 } catch {
-    # Fallback to current USERPROFILE if detection fails
+    $realProfile = $null
+}
+if (-not $realProfile) {
+    # Audit H21 fallback: interactive logon session lookup. LogonType=2
+    # is "Interactive" (the actual user sitting at the keyboard).
+    try {
+        $session = Get-CimInstance Win32_LogonSession -Filter "LogonType=2" -ErrorAction Stop |
+            Sort-Object StartTime -Descending |
+            Select-Object -First 1
+        if ($session) {
+            $logon = Get-CimAssociatedInstance -InputObject $session `
+                -Association Win32_LoggedOnUser -ErrorAction Stop |
+                Select-Object -First 1
+            if ($logon) {
+                $sid = (New-Object System.Security.Principal.NTAccount("$($logon.Domain)\$($logon.Name)")).Translate([System.Security.Principal.SecurityIdentifier]).Value
+                $realProfile = (Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$sid").ProfileImagePath
+            }
+        }
+    } catch {
+        $realProfile = $null
+    }
+}
+if (-not $realProfile) {
+    # Last-resort fallback. Likely wrong on elevated installer runs,
+    # but better than crashing — log loudly so the operator can spot
+    # a misplaced .wslconfig.
+    Write-Host "   (Warnung: weder explorer.exe noch interaktive Logon-Sitzung erkannt; nutze USERPROFILE-Fallback)" -ForegroundColor Yellow
     $realProfile = $env:USERPROFILE
 }
 $wslConfigPath = "$realProfile\.wslconfig"

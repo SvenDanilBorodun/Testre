@@ -83,18 +83,42 @@ if ($dockerDesktopInstaller) {
         Write-Warn "Uninstaller invocation failed: $_"
     }
 } else {
-    # Fall back to Win32_Product WMI uninstall (slower but works when installer is gone)
+    # Audit M14: prefer Get-Package (HKLM Uninstall registry — instant)
+    # over Get-CimInstance Win32_Product (triggers a full MSI consistency
+    # check across every installed package — 90+ s on a 100-app machine,
+    # the single slowest WMI query in Windows). Fall back to Win32_Product
+    # only if Get-Package is unavailable (very old PowerShell builds).
     try {
-        $pkg = Get-CimInstance -ClassName Win32_Product -Filter "Name LIKE '%Docker Desktop%'" -ErrorAction SilentlyContinue
-        if ($pkg) {
-            Write-Host "   Using WMI uninstall (this takes 1-2 minutes)..." -ForegroundColor White
-            Invoke-CimMethod -InputObject $pkg -MethodName Uninstall | Out-Null
-            Write-OK "Docker Desktop uninstalled via WMI"
+        $pkgs = $null
+        if (Get-Command Get-Package -ErrorAction SilentlyContinue) {
+            $pkgs = Get-Package -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -like '*Docker Desktop*' }
+        }
+        if ($pkgs) {
+            Write-Host "   Using Get-Package uninstall..." -ForegroundColor White
+            foreach ($p in $pkgs) {
+                try {
+                    $p | Uninstall-Package -Force -ErrorAction Stop | Out-Null
+                } catch {
+                    Write-Warn "Uninstall-Package failed for $($p.Name): $_"
+                }
+            }
+            Write-OK "Docker Desktop uninstalled via Get-Package"
         } else {
-            Write-Skip "No Docker Desktop package found via WMI"
+            # Last-resort fallback. Slow but works on stripped-down
+            # PowerShell installs that lack PackageManagement.
+            $pkg = Get-CimInstance -ClassName Win32_Product `
+                -Filter "Name LIKE '%Docker Desktop%'" -ErrorAction SilentlyContinue
+            if ($pkg) {
+                Write-Host "   Using Win32_Product WMI uninstall (this takes 1-2 minutes)..." -ForegroundColor White
+                Invoke-CimMethod -InputObject $pkg -MethodName Uninstall | Out-Null
+                Write-OK "Docker Desktop uninstalled via WMI"
+            } else {
+                Write-Skip "No Docker Desktop package found"
+            }
         }
     } catch {
-        Write-Warn "WMI uninstall failed: $_"
+        Write-Warn "Fallback uninstall failed: $_"
     }
 }
 

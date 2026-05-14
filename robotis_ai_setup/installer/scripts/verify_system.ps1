@@ -123,6 +123,14 @@ foreach ($file in $requiredFiles) {
 Write-Step "Verification complete!"
 if ($allOk) {
     Write-Host "   All checks passed. You're ready to go!" -ForegroundColor Green
+    exit 0
 } else {
+    # Audit H23: previously this branch logged a yellow warning and
+    # exited 0, so Inno Setup's [Run] step considered the verify
+    # successful and the installer reported a green checkmark on a
+    # half-broken install. Propagating the failure exits the .iss
+    # step non-zero so the installer can surface a German error /
+    # offer to re-run prerequisites.
     Write-Host "   Some checks failed. Review the output above." -ForegroundColor Yellow
+    exit 1
 }

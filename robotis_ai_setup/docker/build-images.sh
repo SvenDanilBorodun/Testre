@@ -108,6 +108,15 @@ BUILD_ARGS="$BUILD_ARGS --build-arg REACT_APP_BUILD_ID=${BUILD_ID}"
 COCO_SNAPSHOT="${PHYSICAL_AI_TOOLS_DIR}/physical_ai_manager/_coco_classes.py"
 cp "${PHYSICAL_AI_TOOLS_DIR}/physical_ai_server/physical_ai_server/workflow/coco_classes.py" \
    "${COCO_SNAPSHOT}"
+# Audit H25: initialise INTERFACES_STAGING explicitly to empty BEFORE
+# trap registration. The previous default `${INTERFACES_STAGING:-/dev/null}`
+# fallback would `rm -rf /dev/null` on early failure (harmless on Linux
+# but on macOS dev hosts it can remove the /dev/null character device,
+# breaking every shell on the system until next reboot). Now: empty
+# string disables the rm safely; only after the variable is assigned
+# a real path further down does cleanup actually fire.
+INTERFACES_STAGING=""
+
 # Single combined cleanup. A previous version trapped the COCO_SNAPSHOT
 # cleanup here and then trapped INTERFACES_STAGING again later — bash's
 # trap is set-not-stack, so the second trap silently REPLACED this one
@@ -115,7 +124,9 @@ cp "${PHYSICAL_AI_TOOLS_DIR}/physical_ai_server/physical_ai_server/workflow/coco
 # now register both cleanups in one trap so neither path can be lost.
 _build_cleanup() {
     rm -f "${COCO_SNAPSHOT}"
-    rm -rf "${INTERFACES_STAGING:-/dev/null}"
+    if [ -n "${INTERFACES_STAGING:-}" ]; then
+        rm -rf "${INTERFACES_STAGING}"
+    fi
 }
 trap _build_cleanup EXIT
 

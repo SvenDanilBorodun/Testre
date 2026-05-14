@@ -388,3 +388,39 @@ jobs:
           sudo cp physical_ai_tools/physical_ai_manager/nginx.conf \
             /etc/nginx/sites-enabled/edubotics-student.conf
           sudo nginx -t
+
+  german-strings-lint:
+    # Audit Tier-6: catch ae/oe/ue/ss transliterations inside any
+    # [FEHLER] / [WARNUNG] / [STOPP] line in student-facing source.
+    # CLAUDE.md §1.1 mandates literal ä/ö/ü/ß for every German string
+    # the user reads; the drift accumulated silently across the
+    # overlays + GUI + installer. This job is the regression fence.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Scan student-facing German strings for transliterations
+        run: |
+          set -e
+          # Restrict to surfaces the student/teacher actually reads:
+          #   - overlay layer (logs the user sees in TaskStatus / browser)
+          #   - GUI tkinter strings
+          #   - installer PowerShell strings
+          # Skip code comments and docs (English/maintainer surfaces) by
+          # only checking lines that contain a German marker prefix.
+          # 'ss' false-positives on words like 'class' / 'pass' / 'less'
+          # so we exclude common false-positives and only match obvious
+          # German transliterations.
+          OFFENDERS=$(grep -rnE \
+            "(\[FEHLER\]|\[WARNUNG\]|\[STOPP\]).*\b(frueh|kuerzer|schliessen|Zeitluecken|Groesste|Luecken|Moegliche|ueber[a-z]|laeuft|haengt|pruefen|Pruefung|ueberschritten|Schueler|benoetigen|Oberflaeche|uebersprungen|enthaelt|zusaetzliche|Verfuegbar|geaendert|beschaedigt|koennte|faehige|Bildaufloesung)\b" \
+            robotis_ai_setup/docker/physical_ai_server/overlays/ \
+            robotis_ai_setup/gui/ \
+            robotis_ai_setup/installer/ \
+            2>/dev/null || true)
+          if [ -n "$OFFENDERS" ]; then
+            echo "::error::German transliterations found in student-facing strings."
+            echo "Use literal ä/ö/ü/ß instead of ae/oe/ue/ss (CLAUDE.md §1.1)."
+            echo ""
+            echo "$OFFENDERS"
+            exit 1
+          fi
+          echo "German strings clean."

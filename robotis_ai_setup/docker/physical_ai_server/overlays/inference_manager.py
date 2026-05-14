@@ -119,8 +119,8 @@ class InferenceManager:
         # see the German error in TaskStatus instead of a hard crash.
         if self.device == 'cuda' and not torch.cuda.is_available():
             print(
-                '[FEHLER] Inferenz benoetigt eine CUDA-faehige GPU, aber '
-                'keine wurde gefunden. Bitte pruefen: NVIDIA-Treiber auf '
+                '[FEHLER] Inferenz benötigt eine CUDA-fähige GPU, aber '
+                'keine wurde gefunden. Bitte prüfen: NVIDIA-Treiber auf '
                 'dem Windows-Host, `nvidia-smi` in der WSL2-Distro, '
                 'docker-compose.gpu.yml aktiv.',
                 flush=True,
@@ -286,7 +286,7 @@ class InferenceManager:
                 expected_names = [k.replace('observation.images.', '') for k in self._expected_image_keys]
                 unexpected_names = [k.replace('observation.images.', '') for k in unexpected]
                 print(
-                    f'[WARNUNG] Zusaetzliche Kameras werden ignoriert: '
+                    f'[WARNUNG] Zusätzliche Kameras werden ignoriert: '
                     f'{unexpected_names}, Modell erwartet nur {expected_names}.',
                     flush=True,
                 )
@@ -305,7 +305,7 @@ class InferenceManager:
             print(
                 f'[STOPP] Kamera "{stale_camera}" ist seit >'
                 f'{self._stale_halt_threshold:.0f}s eingefroren. '
-                f'Inferenz angehalten — Kamera pruefen, dann neu starten.',
+                f'Inferenz angehalten — Kamera prüfen, dann neu starten.',
                 flush=True,
             )
             return None
@@ -329,14 +329,14 @@ class InferenceManager:
                         # student with a silently frozen arm.
                         if self._image_shape_skip_count % 30 == 1:
                             print(
-                                f'[FEHLER] Bildaufloesung stimmt nicht ueberein: '
+                                f'[FEHLER] Bildauflösung stimmt nicht überein: '
                                 f'{key} hat Form {actual_shape}, '
-                                f'Modell erwartet {expected_shape}. Tick uebersprungen.',
+                                f'Modell erwartet {expected_shape}. Tick übersprungen.',
                                 flush=True,
                             )
                         if self._image_shape_skip_count >= 90:
                             raise RuntimeError(
-                                f'Bildaufloesung stimmt seit >3s nicht ueberein '
+                                f'Bildauflösung stimmt seit >3s nicht überein '
                                 f'({key} hat {actual_shape}, erwartet '
                                 f'{expected_shape}). Inferenz angehalten.'
                             )

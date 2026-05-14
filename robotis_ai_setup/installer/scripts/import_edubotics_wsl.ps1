@@ -100,7 +100,7 @@ try {
         exit 1
     }
 } catch {
-    Write-Host "   (Speicherplatz-Pruefung uebersprungen: $_)" -ForegroundColor Yellow
+    Write-Host "   (Speicherplatz-Prüfung übersprungen: $_)" -ForegroundColor Yellow
 }
 
 # SHA256 integrity check on the rootfs tar. If a matching .sha256 file
@@ -114,12 +114,12 @@ if (Test-Path $sha256File) {
         $actual = (Get-FileHash -Path $RootfsPath -Algorithm SHA256).Hash.ToUpper()
         if ($expected -ne $actual) {
             Write-FAIL "Rootfs SHA256 passt nicht: expected=$expected actual=$actual"
-            Write-Host "   Die Installer-Datei koennte beschaedigt oder manipuliert sein." -ForegroundColor Red
+            Write-Host "   Die Installer-Datei könnte beschädigt oder manipuliert sein." -ForegroundColor Red
             exit 1
         }
         Write-OK "Rootfs SHA256 verified"
     } catch {
-        Write-Host "   (SHA256-Pruefung fehlgeschlagen: $_)" -ForegroundColor Yellow
+        Write-Host "   (SHA256-Prüfung fehlgeschlagen: $_)" -ForegroundColor Yellow
     }
 }
 

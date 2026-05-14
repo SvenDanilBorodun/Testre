@@ -181,8 +181,8 @@ class EduBoticsApp:
         ttk.Label(
             mode_frame,
             text=(
-                "Aktivieren, um nur die Cloud-Lehrer/Schueler-Anmeldung zu starten — "
-                "Aufnahme und Inferenz benoetigen weiterhin Roboter-Hardware."
+                "Aktivieren, um nur die Cloud-Lehrer/Schüler-Anmeldung zu starten — "
+                "Aufnahme und Inferenz benötigen weiterhin Roboter-Hardware."
             ),
             foreground="gray",
             font=("Segoe UI", 8),
@@ -314,7 +314,7 @@ class EduBoticsApp:
         for frame in (self.leader_frame, self.follower_frame, self.camera_frame):
             self._set_frame_state(frame, new_state)
         if is_cloud_only:
-            self._set_status("Cloud-Modus — Start klicken, um die Web-Oberflaeche zu starten.")
+            self._set_status("Cloud-Modus — Start klicken, um die Web-Oberfläche zu starten.")
         else:
             if self.hardware.is_complete:
                 self._set_status("Bereit — Start klicken.")
@@ -437,14 +437,14 @@ class EduBoticsApp:
             self.root.after(0, lambda: self.btn_open_browser.config(state=tk.NORMAL))
             self._set_status("Aktiv — Umgebung läuft (fortgesetzt)")
         elif docker_manager.manager_container_running():
-            self._log("Cloud-Container laeuft bereits von einer vorherigen Sitzung.")
+            self._log("Cloud-Container läuft bereits von einer vorherigen Sitzung.")
             self.running = True
             # Auto-tick the cloud-only checkbox so Stop / Browser buttons act on the right thing.
             self.root.after(0, lambda: self.cloud_only.set(True))
             self.root.after(0, self._on_mode_changed)
             self.root.after(0, lambda: self.btn_stop.config(state=tk.NORMAL))
             self.root.after(0, lambda: self.btn_open_browser.config(state=tk.NORMAL))
-            self._set_status("Aktiv — Cloud-Modus laeuft (fortgesetzt)")
+            self._set_status("Aktiv — Cloud-Modus läuft (fortgesetzt)")
 
         # Check GPU
         self.gpu_available = docker_manager.has_gpu()
@@ -870,7 +870,7 @@ class EduBoticsApp:
                 self.root.after(0, lambda: self.progress.start(10))
 
                 if is_cloud_only:
-                    self._log("Cloud-Modus: nur die Web-Oberflaeche wird gestartet (kein Roboter).")
+                    self._log("Cloud-Modus: nur die Web-Oberfläche wird gestartet (kein Roboter).")
                 else:
                     # 0. Serielle Ports validieren — bei Bedarf USB neu verbinden
                     self._set_status("Hardware-Verbindungen werden geprüft...")

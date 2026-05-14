@@ -138,7 +138,7 @@ class CalibrationManager:
                 # appears uninitialised.
                 import sys
                 print(
-                    f'[WARNUNG] {camera}-Kalibrierdatei beschaedigt '
+                    f'[WARNUNG] {camera}-Kalibrierdatei beschädigt '
                     f'({path}): {e}. Bitte Kalibrierung neu starten.',
                     file=sys.stderr, flush=True,
                 )

@@ -111,10 +111,10 @@ class DataConverter:
                     self._warned_extra_joints.add(key)
                     import sys
                     print(
-                        f'[WARNUNG] JointTrajectory enthaelt zusaetzliche '
+                        f'[WARNUNG] JointTrajectory enthält zusätzliche '
                         f'Gelenke {sorted(extras)}, die nicht in joint_order '
                         f'{joint_order} stehen. Diese werden verworfen. '
-                        f'Bitte robot-config pruefen, falls der Roboter '
+                        f'Bitte robot-config prüfen, falls der Roboter '
                         f'umgebaut wurde.',
                         file=sys.stderr, flush=True,
                     )

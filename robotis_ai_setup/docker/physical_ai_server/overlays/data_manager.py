@@ -161,9 +161,9 @@ class DataManager:
                     warning = (
                         f'Episode {self._record_episode_count + 1} wegen '
                         f'niedrigem Arbeitsspeicher (<{self.RAM_LIMIT_GB} GB '
-                        f'frei) frueh beendet. Die Aufnahme ist kuerzer als '
+                        f'frei) früh beendet. Die Aufnahme ist kürzer als '
                         f'geplant — bitte Browser/andere Anwendungen '
-                        f'schliessen und ggf. neu aufnehmen.'
+                        f'schließen und ggf. neu aufnehmen.'
                     )
                     self._last_warning_message = warning
                     print(f'[WARNUNG] {warning}', file=sys.stderr, flush=True)
@@ -289,7 +289,7 @@ class DataManager:
             self._validate_episode_buffer()
         except Exception as e:
             print(
-                f'[WARNUNG] Episode-Pruefung fehlgeschlagen (nicht kritisch): {e}',
+                f'[WARNUNG] Episode-Prüfung fehlgeschlagen (nicht kritisch): {e}',
                 file=sys.stderr, flush=True,
             )
         # Snapshot which video files we expect for this episode so we can
@@ -420,13 +420,13 @@ class DataManager:
                 print(
                     f'[WARNUNG] Episode {episode_no}: nur {size} von '
                     f'~{expected_frames} Frames aufgenommen '
-                    f'(Aufnahme wegen RAM-Mangel frueh beendet).',
+                    f'(Aufnahme wegen RAM-Mangel früh beendet).',
                     file=sys.stderr, flush=True,
                 )
             else:
                 print(
                     f'[WARNUNG] Episode {episode_no}: {size} Frames '
-                    f'(Aufnahme wegen RAM-Mangel frueh beendet).',
+                    f'(Aufnahme wegen RAM-Mangel früh beendet).',
                     file=sys.stderr, flush=True,
                 )
 
@@ -455,9 +455,9 @@ class DataManager:
                 )
                 print(
                     f'[WARNUNG] Episode {episode_no}: {len(gaps)} '
-                    f'Zeitluecken erkannt (erwartet ~{expected_dt * 1000:.0f} ms '
-                    f'pro Frame). Groesste Luecken: {summary}. '
-                    f'Moegliche Ursache: Kamera oder Sensor hat Frames verloren.',
+                    f'Zeitlücken erkannt (erwartet ~{expected_dt * 1000:.0f} ms '
+                    f'pro Frame). Größte Lücken: {summary}. '
+                    f'Mögliche Ursache: Kamera oder Sensor hat Frames verloren.',
                     file=sys.stderr, flush=True,
                 )
 
@@ -502,10 +502,10 @@ class DataManager:
                     continue
                 if tuple(image.shape) != expected:
                     warning = (
-                        f'Bildform geaendert: Kamera "{camera_name}" liefert '
+                        f'Bildform geändert: Kamera "{camera_name}" liefert '
                         f'{image.shape}, Datensatz erwartet {expected}. '
                         f'Episode {self._record_episode_count + 1} wird '
-                        f'frueh gespeichert — bitte Kamera neu verbinden '
+                        f'früh gespeichert — bitte Kamera neu verbinden '
                         f'und Aufnahme neu starten.'
                     )
                     self._last_warning_message = warning
@@ -687,10 +687,10 @@ class DataManager:
                 # the worst case is a degraded frame, not a hardware
                 # event.
                 warning = (
-                    f'Kamera "{stale}" liefert seit ueber '
+                    f'Kamera "{stale}" liefert seit über '
                     f'{self._stale_halt_threshold_s:.0f}s dasselbe Bild. '
-                    f'Aufnahme laeuft weiter — bitte pruefen, ob die '
-                    f'Szene wirklich statisch ist oder die Kamera haengt.'
+                    f'Aufnahme läuft weiter — bitte prüfen, ob die '
+                    f'Szene wirklich statisch ist oder die Kamera hängt.'
                 )
                 self._last_warning_message = warning
                 print(f'[WARNUNG] {warning}', file=sys.stderr, flush=True)
@@ -928,7 +928,7 @@ class DataManager:
             status, payload = result_queue.get(timeout=timeout_s)
         except queue.Empty:
             warning = (
-                'HuggingFace-Upload hat das Zeitlimit (1 Stunde) ueberschritten. '
+                'HuggingFace-Upload hat das Zeitlimit (1 Stunde) überschritten. '
                 'Die Aufnahme ist lokal gespeichert; Upload bitte manuell '
                 'neu starten, sobald das Netzwerk stabil ist.'
             )
@@ -940,7 +940,7 @@ class DataManager:
             warning = (
                 f'HuggingFace-Upload fehlgeschlagen: {payload}. '
                 f'Die Aufnahme ist lokal gespeichert; bitte HF-Token und '
-                f'Netzwerkverbindung pruefen.'
+                f'Netzwerkverbindung prüfen.'
             )
             self._last_warning_message = warning
             print(f'[FEHLER] {warning}', file=sys.stderr, flush=True)

@@ -207,12 +207,14 @@ def wait_until_marker(ctx, args: dict[str, Any]) -> bool:
 #
 # The cloud_vision dict on ctx supplies:
 #   {
-#     'enabled': bool,           # default False
-#     'cloud_burst': callable,   # (image_bgr, prompt) -> list[Detection]
-#     'translate': dict[str,str] # German prompt -> COCO class label
+#     'enabled': bool,                          # default False
+#     'cloud_burst': callable,                  # (image_bgr, prompt, should_stop=None) -> list[Detection]
+#     'translate': dict[str,str]                # German prompt -> COCO class label
 #   }
 # The handler asks ctx.cloud_vision['translate'] first; on miss, if
-# cloud_burst is callable, posts the latest scene frame to it.
+# cloud_burst is callable, posts the latest scene frame to it. The
+# burst receives ctx.should_stop (audit O3) so it can abort between
+# JPEG encode and the 15 s HTTP wait when /workflow/stop fires.
 def detect_open_vocab(ctx, args: dict[str, Any]) -> list:
     _ensure_perception(ctx)
     prompt = args.get('prompt')
@@ -257,7 +259,14 @@ def detect_open_vocab(ctx, args: dict[str, Any]) -> list:
     if bgr is None:
         raise WorkflowError('Kein Szenenbild verfügbar.')
     try:
-        detections = burst(bgr, prompt)
+        # Audit O3: forward ctx.should_stop so the burst can short-
+        # circuit on stop between encode and the HTTP send.
+        try:
+            detections = burst(bgr, prompt, ctx.should_stop)
+        except TypeError:
+            # Backwards compat: an older burst signature without the
+            # should_stop kwarg. Fall back to the 2-arg call.
+            detections = burst(bgr, prompt)
     except WorkflowError:
         raise
     except NotImplementedError as e:
@@ -265,6 +274,15 @@ def detect_open_vocab(ctx, args: dict[str, Any]) -> list:
         # "Cloud-Erkennung fehlgeschlagen: Cloud-Erkennung ist…". Pass
         # the original German message through.
         raise WorkflowError(str(e))
-    except Exception as e:
-        raise WorkflowError(f'Cloud-Erkennung fehlgeschlagen: {e}')
+    except Exception:
+        # Audit M6: don't f-string the raw Exception into the student-
+        # facing message — it leaks Python tracebacks / requests-lib
+        # internals into German UI text. Log server-side, surface a
+        # fixed German message to the student.
+        import traceback
+        try:
+            ctx.log(f'[FEHLER] Cloud-Erkennung fehlgeschlagen: {traceback.format_exc()}')
+        except Exception:
+            pass
+        raise WorkflowError('Cloud-Erkennung fehlgeschlagen — bitte erneut versuchen.')
     return _attach_world_xyz(ctx, detections or [])

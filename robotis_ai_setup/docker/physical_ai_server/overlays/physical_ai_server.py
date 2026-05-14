@@ -18,12 +18,51 @@
 
 import glob
 import json
+import logging
 import os
 from pathlib import Path
+import re
 import threading
 import time
 import traceback
 from typing import Optional
+
+
+# Audit N3: scrub `Authorization: Bearer <jwt>` headers out of every
+# log record emitted by urllib3 / requests at DEBUG level. A bare
+# `logging.basicConfig(level=DEBUG)` anywhere in the process — or a
+# Modal cold-debug session — would otherwise print the cached student
+# JWT into the container log. Filter is installed once on import; the
+# match cost is negligible vs the alternative of dropping debug logging
+# entirely.
+class _BearerTokenScrubber(logging.Filter):
+    _PATTERN = re.compile(r'(?i)Bearer\s+[A-Za-z0-9._\-]+')
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            if isinstance(record.msg, str):
+                record.msg = self._PATTERN.sub('Bearer ***', record.msg)
+            if record.args:
+                if isinstance(record.args, dict):
+                    record.args = {
+                        k: (self._PATTERN.sub('Bearer ***', v) if isinstance(v, str) else v)
+                        for k, v in record.args.items()
+                    }
+                elif isinstance(record.args, tuple):
+                    record.args = tuple(
+                        self._PATTERN.sub('Bearer ***', a) if isinstance(a, str) else a
+                        for a in record.args
+                    )
+        except Exception:
+            # Filter must never raise — drop the scrub on malformed
+            # records and let the original message through.
+            pass
+        return True
+
+
+_BEARER_SCRUBBER = _BearerTokenScrubber()
+for _log_name in ('urllib3', 'urllib3.connectionpool', 'requests', 'http.client'):
+    logging.getLogger(_log_name).addFilter(_BEARER_SCRUBBER)
 
 from ament_index_python.packages import get_package_share_directory
 from physical_ai_interfaces.msg import (
@@ -116,6 +155,15 @@ class PhysicalAIServer(Node):
         # StartWorkflow request — consumed by _cloud_vision_burst.
         # None until the next workflow start.
         self._cloud_vision_auth_token: str | None = None
+        # Audit O1: last detection list emitted by the workflow runtime,
+        # consumed by _sensor_snapshot_timer_callback to populate the
+        # React Sensoren tab. The list is whatever the most recent
+        # perception block (detect_color / detect_object /
+        # detect_marker / detect_open_vocab) produced — labels follow
+        # the perception.py conventions (color literal / COCO class /
+        # 'tag{id}'). Cleared by TTL in the timer when it goes stale.
+        self._workflow_last_detections: list = []
+        self._workflow_last_detections_ts: float = 0.0
         # Cleared by /calibration/start, set by /calibration/cancel.
         # /calibration/execute_pose's chunked_publish polls this so a
         # mis-planned 4-second motion can be aborted mid-flight.
@@ -2186,6 +2234,18 @@ class PhysicalAIServer(Node):
                     continue
             msg.active_detections = packed
             self.workflow_status_publisher.publish(msg)
+            # Audit O1: cache the latest detection set so the 5 Hz
+            # SensorSnapshot timer can populate the React Sensoren tab's
+            # visible_apriltag_ids / color_counts / visible_object_classes
+            # fields (which were hardcoded empty before this cache).
+            # Each detection block in the workflow runtime emits a new
+            # list (color/object/apriltag); the cache holds whichever
+            # ran most recently. TTL is enforced in the timer callback
+            # so a stale list from a finished workflow doesn't keep
+            # showing up.
+            if detections:
+                self._workflow_last_detections = list(detections)
+                self._workflow_last_detections_ts = time.monotonic()
         except Exception as e:
             self.get_logger().warning(f'workflow status publish error: {e}')
 
@@ -2675,7 +2735,7 @@ class PhysicalAIServer(Node):
             'gelber würfel': {'mode': 'color', 'color': 'gelb'},
         }
 
-    def _cloud_vision_burst(self, bgr_frame, prompt: str):
+    def _cloud_vision_burst(self, bgr_frame, prompt: str, should_stop=None):
         """Forward a BGR frame and a German prompt to the cloud_training_api
         /vision/detect endpoint. The endpoint proxies to the Modal
         edubotics-vision app (OWLv2). Returns a list of perception.Detection
@@ -2689,6 +2749,13 @@ class PhysicalAIServer(Node):
 
         Raises ``WorkflowError`` (German) on any failure so the workflow
         runtime surfaces a clean message to the student.
+
+        Audit O3: ``should_stop`` is a callable from the workflow ctx so
+        we can abort between JPEG encode and the requests.post — without
+        it, a 15s cold-start HTTP wait can't be cancelled by /workflow/stop
+        and the student is billed for a burst they cancelled. Passed
+        through perception_blocks.detect_open_vocab so it tracks the
+        active context's stop event.
         """
         import base64
         import os
@@ -2740,6 +2807,12 @@ class PhysicalAIServer(Node):
         if not ok:
             raise WorkflowError('JPEG-Kompression des Szenenbildes fehlgeschlagen.')
         b64 = base64.b64encode(jpg.tobytes()).decode('ascii')
+
+        # Audit O3: re-check should_stop after the encode but BEFORE
+        # the HTTP send — encode can take a few ms on slower hosts, and
+        # the student may have hit Stop in between.
+        if callable(should_stop) and should_stop():
+            raise WorkflowError('Workflow wurde gestoppt.')
 
         try:
             response = requests.post(
@@ -2849,14 +2922,43 @@ class PhysicalAIServer(Node):
                 joints = [0.0] * 6
             msg.follower_joints = joints[:5]
             msg.gripper_opening = float(joints[5]) if len(joints) >= 6 else 0.0
-            # Perception is best-effort. The workflow runtime holds the
-            # detector instance so we can't safely poll it from this
-            # timer; ship empty placeholders that the React side
-            # gracefully renders as "—". A future iteration can wire a
-            # ctx.last_detections cache.
-            msg.visible_apriltag_ids = []
-            msg.color_counts = [0, 0, 0, 0]
-            msg.visible_object_classes = []
+            # Audit O1: derive the perception fields from the last
+            # detection list that the workflow runtime pushed via
+            # _emit_workflow_status. TTL is 2.0s so a finished detect
+            # block's results don't keep showing up forever — after
+            # TTL the fields go back to empty (matches the React
+            # side's "—" rendering for stale data).
+            apriltag_ids: list[int] = []
+            color_counts = [0, 0, 0, 0]  # [rot, gruen, blau, gelb]
+            object_classes: list[str] = []
+            last = self._workflow_last_detections or []
+            last_ts = self._workflow_last_detections_ts
+            if last and (time.monotonic() - last_ts) < 2.0:
+                color_index = {'rot': 0, 'gruen': 1, 'blau': 2, 'gelb': 3}
+                for d in last:
+                    label = str(getattr(d, 'label', '') or '')
+                    if (
+                        label.startswith('tag')
+                        and len(label) > 3
+                        and label[3:].isdigit()
+                    ):
+                        try:
+                            apriltag_ids.append(int(label[3:]))
+                        except ValueError:
+                            pass
+                        continue
+                    idx = color_index.get(label)
+                    if idx is not None:
+                        color_counts[idx] += 1
+                        continue
+                    # Anything else is treated as an object class
+                    # (COCO names + open-vocab prompts). De-dupe to
+                    # keep the chip count compact for the UI.
+                    if label and label not in object_classes:
+                        object_classes.append(label)
+            msg.visible_apriltag_ids = apriltag_ids
+            msg.color_counts = color_counts
+            msg.visible_object_classes = object_classes
             self.sensor_snapshot_publisher.publish(msg)
         except Exception:
             # Snapshot publish must never crash the timer thread.

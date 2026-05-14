@@ -386,6 +386,16 @@ function RunControls({ workflowId, blocklyJson, workspace = null }) {
 // (e.g. migration 017 not deployed, or unbounded NULL quota).
 function VisionQuotaChip() {
   const accessToken = useSelector((s) => s.auth?.session?.access_token);
+  // Audit U6: poll /me while a workflow is running and cloud-vision is
+  // enabled so the chip's "remaining" count actually decrements after a
+  // burst, instead of showing the mount-time value until page reload.
+  // Visible quota counts are read by the cloud API at every /me call,
+  // so a fresh GET is the cheapest correctness path (no need for a
+  // per-burst signal channel — the cloud API increments atomically and
+  // /me reads from the same row).
+  const runState = useSelector((s) => s.workshop.runState);
+  const paused = useSelector((s) => s.workshop.paused);
+  const cloudVisionEnabled = useSelector((s) => s.workshop.cloudVisionEnabled);
   const [usage, setUsage] = useState(null);
   useEffect(() => {
     if (!accessToken) {
@@ -393,7 +403,7 @@ function VisionQuotaChip() {
       return undefined;
     }
     let cancelled = false;
-    (async () => {
+    const fetchMe = async () => {
       try {
         const mod = await import('../../services/meApi');
         const me = await mod.getMe(accessToken);
@@ -408,9 +418,23 @@ function VisionQuotaChip() {
       } catch (_) {
         if (!cancelled) setUsage(null);
       }
-    })();
-    return () => { cancelled = true; };
-  }, [accessToken]);
+    };
+    fetchMe();
+    // Poll every 5 s while the workflow is live AND cloud-vision is
+    // enabled. 5 s is a compromise: a burst takes ~300 ms warm /
+    // 2-3 s cold, so the chip catches a burst within ~5 s — fast
+    // enough that a student watching the chip sees it move; slow
+    // enough that 30 students don't hammer /me at 1 Hz.
+    const isLive = (runState === 'running' || paused) && cloudVisionEnabled;
+    let intervalId = null;
+    if (isLive) {
+      intervalId = setInterval(fetchMe, 5000);
+    }
+    return () => {
+      cancelled = true;
+      if (intervalId) clearInterval(intervalId);
+    };
+  }, [accessToken, runState, paused, cloudVisionEnabled]);
   if (!usage) return null;
   const remaining = Math.max(0, usage.quota - usage.used);
   return (

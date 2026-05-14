@@ -37,7 +37,12 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/vision", tags=["vision"])
 
-MAX_PROMPT_CHARS = 200
+# Audit R3 / F33: tightened from 200 to 80 so the cloud cap matches the
+# frontend slicer (perception.js:OPEN_VOCAB_PROMPT_MAX) and CLAUDE.md
+# §6.7. The 200-vs-80 drift let non-React clients (curl, alt SDK)
+# submit 200-char prompts that burned Modal time + student quota for
+# what the OWLv2 text encoder treats as near-noise anyway.
+MAX_PROMPT_CHARS = 80
 MAX_PROMPTS = 8
 MAX_IMAGE_BYTES = 1_500_000  # ~1.5 MB JPEG/PNG
 DEFAULT_SCORE_THRESHOLD = 0.25
@@ -237,7 +242,14 @@ async def detect(
             # specifically signal "function not found".
             code = getattr(e, "code", "") or ""
             message = str(e)
-            rpc_missing = code in ("PGRST202", "42883") or "function" in message.lower() and "does not exist" in message.lower()
+            # Audit H4: parenthesise explicitly so a transient error
+            # whose message happens to contain "function" (e.g. "internal
+            # function timeout") doesn't false-positive into the
+            # "RPC absent" branch and surface a misleading 503.
+            rpc_missing = code in ("PGRST202", "42883") or (
+                "function" in message.lower()
+                and "does not exist" in message.lower()
+            )
             if rpc_missing:
                 logger.error("consume_vision_quota RPC missing: %s", e)
                 raise HTTPException(

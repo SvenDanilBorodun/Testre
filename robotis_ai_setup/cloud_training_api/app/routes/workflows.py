@@ -265,6 +265,42 @@ def update_workflow(
         raise HTTPException(status_code=400, detail="Keine Änderungen angegeben.")
 
     supabase = get_supabase()
+    # Audit A1: when blockly_json changes, route through the SECURITY
+    # DEFINER RPC update_workflow_blockly so the BEFORE-UPDATE snapshot
+    # trigger sees `current_setting('app.user_id', true)` = the caller's
+    # UUID and writes workflow_versions.saved_by correctly. The plain
+    # .table().update() path cannot SET LOCAL across PostgREST calls.
+    # Non-blockly-only patches (name/description/share toggle) still go
+    # through .table().update() because no snapshot fires for them.
+    if "blockly_json" in update_payload:
+        try:
+            rpc = supabase.rpc(
+                "update_workflow_blockly",
+                {
+                    "p_workflow_id": workflow_id,
+                    "p_user_id": str(user.id),
+                    "p_blockly_json": update_payload["blockly_json"],
+                    "p_name": update_payload.get("name"),
+                    "p_description": update_payload.get("description"),
+                },
+            ).execute()
+        except Exception as exc:
+            msg = str(exc)
+            if "P0002" in msg or "nicht gefunden" in msg:
+                raise HTTPException(status_code=404, detail="Workflow nicht gefunden")
+            raise
+        if not rpc.data:
+            raise HTTPException(status_code=404, detail="Workflow nicht gefunden")
+        row = rpc.data if isinstance(rpc.data, dict) else rpc.data[0]
+        # If the caller also flipped share_with_group, apply that in a
+        # second statement (no snapshot, just a column flip).
+        if "workgroup_id" in update_payload:
+            supabase.table("workflows").update(
+                {"workgroup_id": update_payload["workgroup_id"]}
+            ).eq("id", workflow_id).eq("owner_user_id", user.id).execute()
+            row["workgroup_id"] = update_payload["workgroup_id"]
+        return WorkflowResponse(**row)
+
     result = (
         supabase.table("workflows")
         .update(update_payload)
@@ -374,6 +410,9 @@ def restore_workflow_version(
     """
     _assert_workflow_owned(user.id, workflow_id)
     supabase = get_supabase()
+    # Validate the snapshot before restoring — the cap of 20 versions
+    # means an old snapshot could still hold a now-disallowed block type
+    # if the validator's allowlist tightened between save and restore.
     version_row = (
         supabase.table("workflow_versions")
         .select("blockly_json")
@@ -387,13 +426,24 @@ def restore_workflow_version(
     if not isinstance(snapshot, dict):
         raise HTTPException(status_code=500, detail="Snapshot ist beschädigt.")
     validate_blockly_json(snapshot)
-    updated = (
-        supabase.table("workflows")
-        .update({"blockly_json": snapshot})
-        .eq("id", workflow_id)
-        .eq("owner_user_id", user.id)
-        .execute()
-    )
-    if not updated.data:
+    # Audit A1: restore via the SECURITY DEFINER RPC so the
+    # BEFORE-UPDATE trigger's snapshot of the pre-restore state ALSO
+    # records saved_by = the user who clicked restore.
+    try:
+        rpc = supabase.rpc(
+            "restore_workflow_version",
+            {
+                "p_workflow_id": workflow_id,
+                "p_version_id": version_id,
+                "p_user_id": str(user.id),
+            },
+        ).execute()
+    except Exception as exc:
+        msg = str(exc)
+        if "P0002" in msg or "nicht gefunden" in msg:
+            raise HTTPException(status_code=404, detail="Version nicht gefunden")
+        raise
+    if not rpc.data:
         raise HTTPException(status_code=500, detail="Wiederherstellen fehlgeschlagen.")
-    return WorkflowResponse(**updated.data[0])
+    row = rpc.data if isinstance(rpc.data, dict) else rpc.data[0]
+    return WorkflowResponse(**row)

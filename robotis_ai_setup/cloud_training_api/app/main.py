@@ -113,6 +113,26 @@ def _validate_required_schema() -> None:
                 missing_tables.append(table)
             else:
                 raise
+    # Audit A3: probe specific columns the routes read/write that a
+    # partial migration could leave absent even when the table exists.
+    # 017 added the vision-quota columns; the RPCs are probed below, but
+    # a copy-paste-mistake apply order (RPCs first, ALTER TABLE skipped)
+    # would slip past the RPC probe because the function body resolves
+    # the column at call time, not at function-create time.
+    required_columns: tuple[tuple[str, str], ...] = (
+        ("users", "vision_quota_per_term, vision_used_per_term"),
+    )
+    for table, cols in required_columns:
+        try:
+            sb.table(table).select(cols).limit(0).execute()
+        except Exception as exc:
+            msg = str(exc)
+            if "PGRST204" in msg or (
+                "column" in msg.lower() and "does not exist" in msg.lower()
+            ):
+                missing_tables.append(f"{table}.{cols}")
+            else:
+                raise
     # 2) RPCs the code calls directly. Probe with the actual argument
     #    shape; any "user not found" / "no rows" response proves the
     #    RPC exists. We fail only on PostgREST's PGRST202 (function
@@ -133,6 +153,28 @@ def _validate_required_schema() -> None:
         ("refund_vision_quota", {"p_user_id": dummy}),        # 017 round-3 — the c56c012 incident hot spot
         ("get_remaining_credits", {"p_user_id": dummy}),      # base
         ("get_teacher_credit_summary", {"p_teacher_id": dummy}),  # 002
+        # Audit A3: previously skipped on the theory that "if 011 ran
+        # the workgroup tables exist". That's true today but doesn't
+        # cover the case where 011 was applied partially via SQL Editor
+        # copy-paste and the function body was missed. The probes below
+        # pass concrete UUIDs to bypass the zero-arg/overload ambiguity
+        # — PostgREST resolves on (name, arg-name set), so passing
+        # p_teacher_id/p_workgroup_id/p_delta together picks exactly
+        # one overload. A P0011/P0022 (ownership) or P0002 (not found)
+        # response proves the RPC exists; PGRST202 means it doesn't.
+        ("adjust_student_credits",
+            {"p_teacher_id": dummy, "p_student_id": dummy, "p_delta": 0}),
+        ("adjust_workgroup_credits",
+            {"p_teacher_id": dummy, "p_workgroup_id": dummy, "p_delta": 0}),
+        ("start_training_safe", {
+            "p_user_id": dummy,
+            "p_dataset_name": "_probe",
+            "p_model_name": "_probe",
+            "p_model_type": "act",
+            "p_training_params": {},
+            "p_total_steps": 0,
+            "p_worker_token": dummy,
+        }),
     )
     missing_rpcs: list[str] = []
     for name, args in required_rpcs:
@@ -150,7 +192,8 @@ def _validate_required_schema() -> None:
             ):
                 missing_rpcs.append(name)
             # Everything else (P0001 token mismatch, P0002 user not
-            # found, P0003 no credits, etc.) proves the RPC exists.
+            # found, P0003 no credits, P0011/P0022 ownership, etc.)
+            # proves the RPC exists.
     if missing_tables or missing_rpcs:
         details = []
         if missing_tables:
@@ -328,6 +371,51 @@ def _user_key_from_jwt(request: Request) -> str | None:
 _PER_USER_RATE_LIMIT_PREFIXES = ("/vision/detect",)
 
 
+# Audit A2: hard upper bound on workflow-write request bodies.
+# validate_blockly_json's 256 KB cap fires AFTER json.dumps has already
+# materialised the entire payload — useless as a DoS guard. Reject at the
+# Content-Length header level for the affected paths so an attacker can't
+# force a multi-MB allocation. Give 50% headroom over the validator cap
+# so an oversized-but-legitimate payload still gets the German 413 from
+# the validator (which includes the limit in the message) rather than
+# the generic middleware 413.
+_MAX_WRITE_BODY_BYTES = 384 * 1024
+_BODY_SIZE_LIMITED_PREFIXES: tuple[tuple[str, str], ...] = (
+    ("POST", "/workflows"),
+    ("PATCH", "/workflows"),
+    ("POST", "/teacher/classrooms"),  # covers workflow-templates path too
+)
+
+
+class BodySizeLimitMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        if request.method in {"POST", "PATCH", "PUT"}:
+            for m, prefix in _BODY_SIZE_LIMITED_PREFIXES:
+                if m == request.method and request.url.path.startswith(prefix):
+                    cl = request.headers.get("content-length")
+                    if cl:
+                        try:
+                            size = int(cl)
+                        except ValueError:
+                            size = -1
+                        if size > _MAX_WRITE_BODY_BYTES:
+                            logger.warning(
+                                "Rejecting oversized %s %s body: %s bytes",
+                                request.method, request.url.path, cl,
+                            )
+                            return JSONResponse(
+                                status_code=413,
+                                content={
+                                    "detail": (
+                                        "Anfrage zu groß "
+                                        f"(>{_MAX_WRITE_BODY_BYTES // 1024} KB)."
+                                    )
+                                },
+                            )
+                    break
+        return await call_next(request)
+
+
 class RateLimitMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         path = request.url.path
@@ -372,6 +460,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 # otherwise the browser sees the response as a generic CORS failure instead
 # of a structured 429. Therefore: add RateLimit first, then CORS.
 app.add_middleware(RateLimitMiddleware)
+app.add_middleware(BodySizeLimitMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,

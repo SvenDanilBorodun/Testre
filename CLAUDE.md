@@ -2,7 +2,7 @@
 
 > **Read this entire file at the start of every session.** It replaces the former `context/` folder and is the single source of truth for what the project is, how it fits together, and how to make changes safely. Source code is the ultimate authority — when this file disagrees with the code, the code wins (and you should update this file in the same change).
 >
-> Last verified by reading every load-bearing file directly: **2026-05-11** (camera-pipeline deep-audit fix bundle F1-F61 from commit `1b68372` — see §8.3, §6.6 point 9, §12.12 below; plus §7.3 timeout-cap reflow, §7.4 rate-limit additions for `/teacher/workgroups`, `/datasets`, `/vision/detect`, §9.13 new subsection for the anon-revoke migration, §10 healthcheck widening, §18 deferred-work index).
+> Last verified by reading every load-bearing file directly: **2026-05-14** (Tier-1–9 audit-driven fix bundle: hardware safety [E1-E4, S1-S2, H1] · cloud API hardening [A1-A3, R3, N1 via migration 018, H4] · sensor + cloud-vision wiring [O1, O3, U6, N3] + M6 · calibration + tutorial UX [U1 via new `useSupabaseTutorialProgress` hook, U2, U3 via `requestRecalibration` action, U4] · real Modal vision smoke test [O2, N4] + N2 breakpoint-sync toast · German transliteration sweep + CI `german-strings-lint` job · CI hardening [H27 overlay-guard success case, H28 routes/training+vision SDK probe, H29 .s6-keep assertion] · installer + build hardening [H17, H21, H22, H23, H25, M14]). Earlier baseline: 2026-05-11 camera-pipeline F1-F61 bundle from commit `1b68372`.
 
 ---
 
@@ -458,9 +458,9 @@ Per-tick (single-threaded on ROS executor, no worker thread):
 - Field validators on motion / perception / destinations / output blocks (clamp wait_seconds, marker IDs, tones; reject unknown colors / object classes).
 - Mobile-responsive layout: `flex flex-col` below md breakpoint, `md:grid` above. Editor + camera + controls stack on phones/tablets.
 
-**Block-level debugger** (2026-05): `DebugPanel.jsx` with three tabs (Sensoren / Variablen / Haltepunkte), pause/step/continue buttons in `RunControls.jsx`, breakpoints persisted in Redux + sent to the server via `WorkflowSetBreakpoints.srv`. The runtime checks each block id against `ctx.breakpoints` before dispatch; on hit, it sets `ctx.set_paused(True)` and waits on `ctx.wait_for_resume()`. The `[VAR:name=json]` log sentinel feeds the variable inspector. Sensor live-readout (`/workflow/sensors` topic, `SensorSnapshot.msg`, 5 Hz) shows follower joints, gripper opening, visible AprilTag IDs, color-pixel counts per color, and visible YOLO classes.
+**Block-level debugger** (2026-05): `DebugPanel.jsx` with three tabs (Sensoren / Variablen / Haltepunkte), pause/step/continue buttons in `RunControls.jsx`, breakpoints persisted in Redux + sent to the server via `WorkflowSetBreakpoints.srv`. The runtime checks each block id against `ctx.breakpoints` before dispatch; on hit, it sets `ctx.set_paused(True)` and waits on `ctx.wait_for_resume()`. The `[VAR:name=json]` log sentinel feeds the variable inspector. Sensor live-readout (`/workflow/sensors` topic, `SensorSnapshot.msg`, 5 Hz) shows follower joints, gripper opening, visible AprilTag IDs, color-pixel counts per color, and visible YOLO classes — the perception fields are derived from `_workflow_last_detections`, a cache `_emit_workflow_status` populates from every `ctx.emit_detections(...)` call (audit O1). The cache has a 2 s TTL so stale results from a finished detect block don't keep showing up.
 
-**Workflow versioning**: every PATCH /workflows/{id} that changes `blockly_json` triggers `snapshot_workflow_version` (Supabase migration 015) which inserts the prior payload into `public.workflow_versions`. Capped at 20 per workflow via the `prune_workflow_versions` AFTER-INSERT trigger. Listed via `GET /workflows/{id}/versions`; restore via `POST /workflows/{id}/versions/{version_id}/restore`. The trigger reads the `app.user_id` Postgres GUC so callers that `SET LOCAL app.user_id = '<uuid>'` before the UPDATE land the right `saved_by`; service-role admin tools leave it NULL.
+**Workflow versioning**: every PATCH /workflows/{id} that changes `blockly_json` triggers `snapshot_workflow_version` (Supabase migration 015) which inserts the prior payload into `public.workflow_versions`. Capped at 20 per workflow via the `prune_workflow_versions` AFTER-INSERT trigger. Listed via `GET /workflows/{id}/versions`; restore via `POST /workflows/{id}/versions/{version_id}/restore`. The trigger reads the `app.user_id` Postgres GUC; the cloud API calls a SECURITY DEFINER RPC `update_workflow_blockly(p_workflow_id, p_user_id, p_blockly_json, p_name, p_description)` (migration **018**) which wraps `set_config('app.user_id', p_user_id::text, true)` and the UPDATE in one transaction so the trigger sees the right UUID and writes `saved_by` correctly. Restore is its own RPC `restore_workflow_version(p_workflow_id, p_version_id, p_user_id)`. Service-role admin tools that don't route through these RPCs still leave `saved_by` NULL — by design. Migration 018 also adds the `Group members read group workflow versions` RLS policy so siblings see the full Verlauf history of any group-shared workflow (mirrors the parent workflows policy).
 
 **Tutorials / skillmap**: 7 starter tutorials at `physical_ai_manager/public/tutorials/*.json` (sage_hallo, bewege_zum_punkt_a, roten_wuerfel_aufnehmen, zaehle_blaue_objekte, stapele_drei_wuerfel, sortiere_nach_klasse, ereignis_marker_gefunden — covers hat blocks + broadcast). The `SkillmapPlayer.jsx` sidebar steps the student through each, applying per-step `allowed_blocks` as a toolbox restriction (the `restrictedBlocks` prop on `BlocklyWorkspace`). Progress synced via `GET/PATCH /me/tutorial-progress` and the `tutorial_progress` table (migration 016, with realtime publication so teacher dashboards live-update).
 
@@ -724,7 +724,7 @@ Returns `JSONResponse(429, {"detail": "Too many requests — please wait a momen
 
 ## 9. Supabase schema (base + 14 numbered migrations)
 
-> **File map:** `migration.sql` (base) + `002_accounts.sql` + `003_lessons_and_notes.sql` (immediately superseded by 004) + `004_progress_entries.sql` + `005_cloud_job_id.sql` + `006_loss_history.sql` + `007_deletion_requested_at.sql` + `008_workflows.sql` + `009_workflows_rls_writes.sql` + `010_progress_terminal_guard.sql` + `011_workgroups.sql` + `012_dataset_sweep.sql` + `013_revoke_anon_from_security_definer.sql` + `015_workflow_versions.sql` + `016_tutorial_progress.sql` + `017_vision_quota.sql`. **There is no `014_*.sql`** — the Phase-2 bundle skipped 014 to avoid a filename collision discovered mid-rollout (see note before §9.15). Every numbered migration has a matching file in `supabase/rollback/`; `migration.sql` and the superseded `003_*.sql` do not.
+> **File map:** `migration.sql` (base) + `002_accounts.sql` + `003_lessons_and_notes.sql` (immediately superseded by 004) + `004_progress_entries.sql` + `005_cloud_job_id.sql` + `006_loss_history.sql` + `007_deletion_requested_at.sql` + `008_workflows.sql` + `009_workflows_rls_writes.sql` + `010_progress_terminal_guard.sql` + `011_workgroups.sql` + `012_dataset_sweep.sql` + `013_revoke_anon_from_security_definer.sql` + `015_workflow_versions.sql` + `016_tutorial_progress.sql` + `017_vision_quota.sql` + `018_workflow_versions_author_and_group_rls.sql`. **There is no `014_*.sql`** — the Phase-2 bundle skipped 014 to avoid a filename collision discovered mid-rollout (see note before §9.15). Every numbered migration has a matching file in `supabase/rollback/`; `migration.sql`, the superseded `003_*.sql`, and `018_*.sql` do not (018 is idempotent: `CREATE OR REPLACE` + `DROP POLICY IF EXISTS` + `CREATE POLICY`).
 
 ### 9.1 migration.sql (base)
 - **`public.users`** (UUID PK → `auth.users.id ON DELETE CASCADE`, `email TEXT NOT NULL`, `training_credits INT DEFAULT 0`, `created_at TIMESTAMPTZ DEFAULT NOW()`)
@@ -1119,14 +1119,14 @@ You can act autonomously on:
 
 ## 14. Versioning + drift map
 
-Five sources of truth currently drift:
-- `Testre/VERSION` → **`2.2.2`** (read by `gui/app/constants.py:APP_VERSION`)
+Five sources of truth (verified in sync at 2026-05-14):
+- `Testre/VERSION` → **`2.2.3`** (read by `gui/app/constants.py:APP_VERSION`)
 - `installer/robotis_ai_setup.iss AppVersion` → **`2.2.3`**
-- `physical_ai_tools/physical_ai_manager/package.json version` → **`0.9.0`**
+- `physical_ai_tools/physical_ai_manager/package.json version` → **`0.9.0`** (informational React package version, NOT the product version)
 - `docker/versions.env IMAGE_TAG` → file does NOT exist in the repo (gitignored or never created); GUI/installer fall back to `:latest`
 - HTTP `/version.json buildId` (UTC timestamp + git SHA, computed at build time)
 
-**Rule**: When bumping product version, hit all four (VERSION, .iss, package.json, recreate `versions.env` from a template) in the same change. The drift between 2.2.2 (VERSION) and 2.2.3 (.iss) is a known issue.
+**Rule**: When bumping product version, hit VERSION, .iss, and the GUI fallback constant (`gui/app/constants.py`) in the same change. The 2.2.2 → 2.2.3 drift was closed by commit `e7f3fcb`.
 
 ---
 
@@ -1224,7 +1224,7 @@ The fix bundle introduced these load-bearing behaviors (already in code, recappe
 ### 18.2 `docs/ROBOTER_STUDIO_DEFERRED.md` — Phase-2/3 unfinished work
 
 A 31-item catalogue from the round-3 Roboter Studio audit, organized as:
-- §1.1-§1.7 **Backend wiring** — ROS service stubs for the block-level debugger and parts of the calibration UX. **Items 1.1-1.3 are still stubs**, so the entire Phase-2 debugger UI is dead without them; the React side renders, the buttons call services that haven't been implemented yet. If a student says "the debugger doesn't pause," this is why.
+- §1.1-§1.7 **Backend wiring** — ROS service stubs for the block-level debugger and parts of the calibration UX. **Items §1.1, §1.3, §1.4 are now wired** (the debugger pause/step/continue/set_breakpoints services are real, SensorSnapshot's perception fields populate from `_workflow_last_detections`, and cloud_vision_enabled propagation is hooked). **§1.2 (CalibrationPreview / Verify / History) are still stubs** — those services return German "wird in einer späteren Version aktiviert" so the React UI shows a polite message instead of a service-not-found error. **§1.5 (frame quality scoring on capture)** and **§1.6 (calibration history dir + pruning)** remain open.
 - §2.1-§2.14 **Frontend subscriptions** — small leaks + audio polish.
 - §3-§7 Tutorial polish, cloud hardening, A11y, code hygiene, tooling gaps.
 - §8 **Recommended order**: 1.1-1.3 (ROS handlers) → 1.4 (cloud_vision wiring — partially landed by F4) → 2.1-2.2 (audio + memory leaks). Anything else is polish.

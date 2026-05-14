@@ -16,7 +16,8 @@ import {
   advanceTutorialStep,
   setRestrictedBlocks,
 } from '../../features/workshop/workshopSlice';
-import { listTutorialProgress, updateTutorialProgress } from '../../services/tutorialApi';
+import { updateTutorialProgress } from '../../services/tutorialApi';
+import useSupabaseTutorialProgress from '../../hooks/useSupabaseTutorialProgress';
 import { DE } from './blocks/messages_de';
 import { TUTORIAL_INDEX, loadTutorial } from './tutorialIndex';
 
@@ -32,24 +33,12 @@ function SkillmapPlayer() {
   const activeTutorialId = useSelector((s) => s.workshop.activeTutorialId);
   const activeStep = useSelector((s) => s.workshop.activeTutorialStep);
 
-  const [progress, setProgress] = useState({});
+  // Audit U1: use the realtime hook so progress is live (teacher
+  // dashboard, parallel browser tab, etc. all stay in sync) and the
+  // hook handles the token-rotation race correctly. The fallback poll
+  // keeps the screen accurate even when Supabase Realtime is offline.
+  const { progress, refetch: refetchProgress } = useSupabaseTutorialProgress();
   const [tutorial, setTutorial] = useState(null);
-
-  // Hydrate completion progress on mount.
-  useEffect(() => {
-    if (!accessToken) return;
-    listTutorialProgress(accessToken)
-      .then((rows) => {
-        const map = {};
-        for (const row of rows || []) {
-          if (row && row.tutorial_id) {
-            map[row.tutorial_id] = row;
-          }
-        }
-        setProgress(map);
-      })
-      .catch(() => { /* non-essential */ });
-  }, [accessToken]);
 
   // Load active tutorial body when the id changes.
   useEffect(() => {
@@ -92,10 +81,19 @@ function SkillmapPlayer() {
             current_step: tutorial.steps.length,
             completed: true,
           });
+          // Audit U2: trigger an immediate refetch so the sidebar
+          // tick appears without waiting for the realtime channel
+          // (which may take up to a second on a slow link, or never
+          // arrive if the publication is misconfigured). The realtime
+          // path is best-effort; this is the authoritative reconcile.
+          refetchProgress?.();
         }
         toast.success(DE.TUTORIAL_DONE);
       } catch (e) {
-        // Local progress is fine even if cloud sync fails.
+        // Cloud sync failed — surface a German hint so the student knows
+        // their completion may not be visible to the teacher dashboard
+        // until they retry. Local Redux state is untouched.
+        toast.error('Fortschritt konnte nicht gespeichert werden — bitte erneut starten.');
       }
       return;
     }
@@ -105,11 +103,12 @@ function SkillmapPlayer() {
         await updateTutorialProgress(accessToken, tutorial.id, {
           current_step: nextStep,
         });
+        refetchProgress?.();
       } catch (e) {
-        /* swallow */
+        toast.error('Fortschritt konnte nicht gespeichert werden.');
       }
     }
-  }, [accessToken, activeStep, dispatch, tutorial]);
+  }, [accessToken, activeStep, dispatch, refetchProgress, tutorial]);
 
   const handlePrev = useCallback(() => {
     if (activeStep > 0) {

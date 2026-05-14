@@ -27,6 +27,7 @@ import {
   setUnsavedBlocklyJson,
   setSelectedWorkflowId,
   markWorkflowSaved,
+  requestRecalibration,
 } from '../features/workshop/workshopSlice';
 import { useRosTopicSubscription } from '../hooks/useRosTopicSubscription';
 import {
@@ -268,6 +269,24 @@ function WorkshopPage({ isActive }) {
               <div className="flex-1 min-w-0">
                 <TemplatePicker onPicked={handlePickWorkflow} />
               </div>
+              {/* Audit U3: a calibrated student can re-enter the wizard
+                  (e.g. cameras moved between sessions) without having
+                  to wipe the named volume from a terminal. Resets
+                  per-step badges; on-disk YAMLs survive and are
+                  overwritten as the student re-runs each step. */}
+              <button
+                type="button"
+                onClick={() => {
+                  if (typeof window !== 'undefined'
+                      && window.confirm('Kalibrierung neu starten? Die bisherigen Werte werden beim nächsten Schritt überschrieben.')) {
+                    dispatch(requestRecalibration());
+                  }
+                }}
+                className="text-xs px-2 py-1 rounded-md border border-[var(--line)] text-[var(--ink-3)] hover:bg-[var(--bg-sunk)]"
+                title="Kalibrierung erneut durchlaufen — Schritt-Marker werden zurückgesetzt"
+              >
+                Kalibrierung neu starten
+              </button>
             </div>
             {view === 'gallery' ? (
               <div className="flex-1 p-3 sm:p-4 overflow-auto">

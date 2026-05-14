@@ -8,7 +8,7 @@
  *     http://www.apache.org/licenses/LICENSE-2.0
  */
 
-import React, { useEffect } from 'react';
+import React, { useEffect, useRef } from 'react';
 import { useSelector, useDispatch } from 'react-redux';
 import { setCurrentStep, setCalibrationStatus } from '../../features/workshop/workshopSlice';
 import { useRosServiceCaller } from '../../hooks/useRosServiceCaller';
@@ -37,25 +37,37 @@ function CalibrationWizard() {
   // Hydrate per-step badges from disk so reloading the page doesn't make
   // students redo intrinsic captures. Run once on mount; the underlying
   // /calibration/status read is cheap (just a few file-existence checks).
+  // Audit U4: dependencies narrowed to []. The previous deps
+  // [dispatch, getCalibrationStatus, cancelCalibration] re-fired the
+  // effect — and its cleanup — every time useRosServiceCaller rebound
+  // its callbacks (e.g. on a transient rosbridge reconnect), which
+  // sent cancelCalibration('') to the server mid-capture and wiped
+  // the per-step buffer. dispatch and the service callbacks are
+  // stable for the wizard's lifetime; pin to mount/unmount.
+  // Stable refs avoid the React-hooks/exhaustive-deps lint complaint
+  // without re-introducing the spurious re-fire.
+  const dispatchRef = useRef(dispatch);
+  const getStatusRef = useRef(getCalibrationStatus);
+  const cancelRef = useRef(cancelCalibration);
+  useEffect(() => { dispatchRef.current = dispatch; }, [dispatch]);
+  useEffect(() => { getStatusRef.current = getCalibrationStatus; }, [getCalibrationStatus]);
+  useEffect(() => { cancelRef.current = cancelCalibration; }, [cancelCalibration]);
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const r = await getCalibrationStatus();
+        const r = await getStatusRef.current();
         if (!cancelled && r && r.success) {
-          dispatch(setCalibrationStatus(r));
+          dispatchRef.current(setCalibrationStatus(r));
         }
       } catch (_) { /* ignore — wizard works without hydration */ }
     })();
-    // On unmount: tell the server to drop in-flight buffers and clear
-    // on_calibration so closing the wizard doesn't leave the global mutex
-    // stuck (recording/inference/training would otherwise be blocked
-    // until a robot-type switch).
     return () => {
       cancelled = true;
-      cancelCalibration('').catch(() => {});
+      cancelRef.current('').catch(() => {});
     };
-  }, [dispatch, getCalibrationStatus, cancelCalibration]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const stepStatus = {
     gripper_intrinsic: hasIntrinsicGripper,

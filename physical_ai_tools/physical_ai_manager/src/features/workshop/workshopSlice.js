@@ -157,6 +157,27 @@ const workshopSlice = createSlice({
       state.qualityHistory = [];
       state.verifyResult = null;
     },
+    requestRecalibration: (state) => {
+      // Audit U3: drop every per-step "done" flag so the WorkshopPage's
+      // `calibrated` selector flips false and the wizard re-mounts.
+      // The on-host YAMLs under /root/.cache/edubotics/calibration/
+      // are untouched — re-running step 1 just overwrites them. To
+      // wipe them entirely the student would need `docker volume rm
+      // edubotics_calib` (separate operator path; intentional, since
+      // we never want to delete calibration without explicit intent).
+      state.hasIntrinsicGripper = false;
+      state.hasIntrinsicScene = false;
+      state.hasHandeyeGripper = false;
+      state.hasHandeyeScene = false;
+      state.hasColorProfile = false;
+      state.currentStep = 'gripper_intrinsic';
+      state.framesCaptured = 0;
+      state.methodDisagreement = null;
+      state.calibError = null;
+      state.coverageMosaic = Array(16).fill(0);
+      state.qualityHistory = [];
+      state.verifyResult = null;
+    },
     addCoverageCell: (state, action) => {
       const { cell, quality } = action.payload || {};
       if (typeof cell === 'number' && cell >= 0 && cell < 16) {
@@ -326,6 +347,7 @@ export const {
   markStepComplete,
   setCalibrationStatus,
   resetCalibProgress,
+  requestRecalibration,
   addCoverageCell,
   setCharucoPreview,
   setVerifyResult,

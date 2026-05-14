@@ -78,6 +78,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Assert .s6-keep mount target exists
+        # Audit H29: compose mounts physical_ai_server/.s6-keep as an
+        # RO bind. The file enables the s6 longrun service inside the
+        # base image; deleting it accidentally would silently mean the
+        # ROS node never starts (container reports healthy via the TCP
+        # 9090 check but rosbridge is dead). docker compose config
+        # validates structure, not bind-mount targets — so we assert it
+        # exists explicitly here.
+        run: |
+          test -f robotis_ai_setup/docker/physical_ai_server/.s6-keep \
+            || { echo "::error::.s6-keep missing — removing it disables the ROS node inside the container"; exit 1; }
       - name: docker compose config
         run: |
           cd robotis_ai_setup/docker
@@ -122,6 +133,64 @@ jobs:
               exit 1
           fi
           echo "Patch script correctly rejected unrelated input (rc=$rc)"
+      - name: Patch script success case
+        # Audit H27: the no-op test above proves the patch fails loudly
+        # on a missing target, but doesn't prove it actually applies on
+        # a real target. Construct a synthetic upstream-shape file that
+        # has both fixes to apply, run the patch, assert it succeeds
+        # AND that the post-conditions hold. A future upstream rename
+        # that slides the regex off the patch target will fail here
+        # instead of silently shipping a broken overlay.
+        run: |
+          set -e
+          mkdir -p /tmp/real
+          # Reconstruct the upstream shape the patch targets: a class
+          # body that assigns self._endpoints elsewhere AND contains a
+          # duplicate InferenceManager construction block. The exact
+          # regex is in patches/fix_server_inference.py.
+          cat > /tmp/real/server_inference.py <<'EOF'
+          # Synthetic file shaped like the upstream patch target.
+          class ServerInference:
+              def __init__(self, policy_type, policy_path, device):
+                  self.policy_type = policy_type
+                  self.policy_path = policy_path
+                  self.device = device
+                  self.inference = InferenceManager(
+                      policy_type=policy_type,
+                      policy_path=policy_path,
+                      device=device,
+                  )
+
+              def _setup_endpoints(self):
+                  self.inference = InferenceManager(
+                      policy_type=self.policy_type,
+                      policy_path=self.policy_path,
+                      device=self.device,
+                  )
+          EOF
+          set +e
+          python robotis_ai_setup/docker/physical_ai_server/patches/fix_server_inference.py \
+              /tmp/real/server_inference.py
+          rc=$?
+          set -e
+          if [ "$rc" != "0" ]; then
+              echo "::error::Patch script failed on a known-good target (rc=$rc)."
+              echo "Either upstream renamed something or the patch regex needs an update."
+              cat /tmp/real/server_inference.py
+              exit 1
+          fi
+          # Post-condition: self._endpoints should now be initialised
+          # and the duplicate InferenceManager block should be gone.
+          if ! grep -q 'self._endpoints = {}' /tmp/real/server_inference.py; then
+              echo "::error::Patch did not initialise self._endpoints."
+              exit 1
+          fi
+          DUP=$(grep -c 'InferenceManager(' /tmp/real/server_inference.py || true)
+          if [ "$DUP" -gt 1 ]; then
+              echo "::error::Patch failed to remove duplicate InferenceManager construction (count=$DUP)."
+              exit 1
+          fi
+          echo "Patch script applied correctly to a known-good target."
 
   modal-import-validate:
     # Imports both Modal apps to catch SDK API misuse at module load —
@@ -169,6 +238,29 @@ jobs:
             echo "== importing $f =="
             python -c "import importlib.util, sys; spec = importlib.util.spec_from_file_location('m', '$f'); mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod); print('  OK: import succeeded')"
           done
+      - name: Smoke-import cloud_training_api routes that touch Modal SDK
+        # Audit H28: routes/training.py and routes/vision.py both call
+        # `modal.Function.from_name(...)` and `.remote.aio(...)`. An SDK
+        # rename of either symbol would slip past the modal_app /
+        # vision_app import sweep (those are decoration-time only). Pull
+        # in just enough cloud_training_api deps to materialise the
+        # route modules and prove the Modal SDK call sites still parse.
+        run: |
+          python -m pip install --quiet \
+            'fastapi==0.115.12' 'pydantic==2.11.3' 'supabase==2.15.1' \
+            'httpx==0.28.1' 'python-dotenv==1.1.0' 'huggingface_hub>=0.25.0'
+          export SUPABASE_URL=http://ci.test
+          export SUPABASE_SERVICE_ROLE_KEY=ci-fake
+          export MODAL_TOKEN_ID=ci-fake
+          export MODAL_TOKEN_SECRET=ci-fake
+          export ALLOWED_ORIGINS=http://localhost
+          export EDUBOTICS_SKIP_SCHEMA_CHECK=1
+          cd robotis_ai_setup/cloud_training_api
+          # Importing the route module triggers the module-scope `import
+          # modal` and any function-decoration call paths. We do NOT
+          # call main.app at FastAPI level — just import the modules so
+          # an SDK contract regression surfaces here.
+          python -c "from app.routes import training, vision; print('OK')"
 
   teacher-web-build-validate:
     # Builds Dockerfile.web exactly the way Railway's `railway up

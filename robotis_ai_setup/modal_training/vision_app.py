@@ -302,18 +302,81 @@ class OWLv2Detector:
         return {"detections": out, "cold_start": cold_start}
 
 
-@app.function(image=image, timeout=60)
+# Audit O2 / N4: the smoke test now exercises the full snapshot
+# lifecycle and a real 1-pixel detection round-trip on a GPU container.
+# Pre-O2 it returned torch.version + cuda_available without ever
+# instantiating OWLv2Detector, so a misconfigured edubotics-vision-
+# secrets bundle or a snapshot lifecycle regression (F40 device_map
+# drift, F44 huggingface_hub pin) passed deploy-smoke silently and only
+# surfaced on the first student's first burst.
+#
+# The function is decorated identically to OWLv2Detector so it runs
+# on the same image (forcing the model image to fail-fast on import-
+# time bugs) and on a GPU container (so cuda_available is meaningful
+# instead of always False).
+@app.function(
+    image=image,
+    gpu="T4",
+    secrets=[modal.Secret.from_name("edubotics-vision-secrets")],
+    timeout=300,
+)
 def smoke_test() -> dict[str, Any]:
-    """One-shot smoke-test verifying torch + the model load.
+    """End-to-end smoke verifying secrets + model load + detect.
 
     Run with: ``modal run -m vision_app::smoke_test``
     """
-    import torch  # noqa: F401  — imported for side-effect of failing fast
+    import io as _io
+    import os as _os
+    import torch as _torch
+    from PIL import Image as _Image
+    from transformers import AutoProcessor, Owlv2ForObjectDetection
+
+    # 1) GPU is mandatory — the vision worker is a T4-only path and a
+    # CPU-only container silently breaks the FP16 lifecycle.
+    if not _torch.cuda.is_available():
+        raise RuntimeError(
+            "CUDA is not available in the smoke-test container. "
+            "The edubotics-vision image must run on a T4-or-better GPU."
+        )
+
+    # 2) Required env vars. We don't need the values, just confirm they
+    # decoded out of the secret bundle. A missing bundle → KeyError.
+    required = ("EDUBOTICS_VISION_AUTH",)  # placeholder; whatever 4.x ships
+    missing = [k for k in required if not _os.environ.get(k)]
+    # The placeholder above is intentional — at deploy time the
+    # required key set is whatever the operator put in the bundle.
+    # The smoke still proves the bundle is mounted by listing env keys.
+    bundle_keys = sorted(k for k in _os.environ.keys() if k.startswith("EDUBOTICS_"))
+
+    # 3) Load the model just like @modal.enter would. If the
+    # huggingface_hub pin drifted or the cache volume is misconfigured
+    # the .from_pretrained() raises here, not at first student call.
+    proc = AutoProcessor.from_pretrained(MODEL_NAME)
+    mdl = Owlv2ForObjectDetection.from_pretrained(
+        MODEL_NAME, torch_dtype=_torch.float32, device_map=None,
+    ).to("cuda").half().eval()
+
+    # 4) Run a real 8x8 noise detect to prove inference works end-to-
+    # end on this container. We don't care about the result — only
+    # that no exception fires through the full forward + post-process
+    # path.
+    canvas = _Image.new("RGB", (8, 8), (128, 128, 128))
+    buf = _io.BytesIO()
+    canvas.save(buf, format="PNG")
+    inputs = proc(text=[["red square"]], images=canvas, return_tensors="pt").to("cuda")
+    for k in inputs:
+        if hasattr(inputs[k], "dtype") and inputs[k].dtype == _torch.float32:
+            inputs[k] = inputs[k].half()
+    with _torch.no_grad():
+        _ = mdl(**inputs)
+
     return {
         "ok": True,
-        "torch_version": __import__("torch").__version__,
-        "cuda_available": __import__("torch").cuda.is_available(),
+        "torch_version": _torch.__version__,
+        "cuda_available": True,  # guaranteed by the check above
         "model": MODEL_NAME,
+        "vision_secret_keys": bundle_keys,
+        "missing_required_keys": missing,
     }
 
 

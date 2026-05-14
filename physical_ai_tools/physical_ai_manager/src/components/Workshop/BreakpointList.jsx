@@ -8,8 +8,9 @@
  *     http://www.apache.org/licenses/LICENSE-2.0
  */
 
-import React, { useEffect, useCallback } from 'react';
+import React, { useEffect, useCallback, useRef } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
+import toast from 'react-hot-toast';
 import {
   addBreakpoint,
   removeBreakpoint,
@@ -47,6 +48,17 @@ function BreakpointList({ workspace }) {
   // useRosServiceCaller queue.
   const runState = useSelector((s) => s.workshop.runState);
   const paused = useSelector((s) => s.workshop.paused);
+  // Audit N2: a per-session "we've already complained" sentinel so a
+  // wedged /workflow/set_breakpoints (rosbridge disconnect, server
+  // crash, "not implemented") surfaces ONE German toast instead of
+  // silently swallowing every retry. Reset when runState transitions
+  // back to idle so a recovered session gets a fresh complaint budget.
+  const breakpointFailToldRef = useRef(false);
+  useEffect(() => {
+    if (runState !== 'running' && !paused) {
+      breakpointFailToldRef.current = false;
+    }
+  }, [runState, paused]);
   useEffect(() => {
     const isLive = runState === 'running' || paused;
     if (!isLive) return;
@@ -54,7 +66,14 @@ function BreakpointList({ workspace }) {
       '/workflow/set_breakpoints',
       'physical_ai_interfaces/srv/WorkflowSetBreakpoints',
       { block_ids: breakpoints },
-    ).catch(() => { /* swallow — server may have just exited */ });
+    ).catch(() => {
+      if (!breakpointFailToldRef.current) {
+        breakpointFailToldRef.current = true;
+        toast.error(
+          'Haltepunkte konnten nicht an den Roboter gesendet werden — bitte Verbindung prüfen.',
+        );
+      }
+    });
   }, [breakpoints, callService, runState, paused]);
 
   // Wire a workspace right-click handler that toggles breakpoints.

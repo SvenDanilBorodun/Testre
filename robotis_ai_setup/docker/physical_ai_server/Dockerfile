@@ -103,6 +103,14 @@ COPY overlays/physical_ai_server.py /tmp/overlays/physical_ai_server.py
 # in physical_ai_server.py find no methods to call and the wizard
 # returns "Kein Kamerabild verfügbar." on every capture press.
 COPY overlays/communicator.py /tmp/overlays/communicator.py
+# Audit F62: lerobot_dataset_wrapper.py was previously NOT overlaid, so
+# every prior build shipped the upstream baseline's `preset='ultrafast',
+# crf=28` mp4 encoder defaults — the F62 source change in
+# physical_ai_tools/... never reached student installs. Adding it here
+# as an overlay (path filter `*/data_processing/*` matches the same
+# directory as data_manager.py / data_converter.py) so the cleaner
+# `preset='fast', crf=23` defaults actually ship.
+COPY overlays/lerobot_dataset_wrapper.py /tmp/overlays/lerobot_dataset_wrapper.py
 RUN set -e && \
     apply_overlay() { \
         local name="$1" path_filter="$2" src="/tmp/overlays/$1"; \
@@ -148,6 +156,7 @@ RUN set -e && \
     apply_overlay omx_f_config.yaml "" && \
     apply_overlay physical_ai_server.py "*/physical_ai_server/physical_ai_server.py" && \
     apply_overlay communicator.py "*/communication/communicator.py" && \
+    apply_overlay lerobot_dataset_wrapper.py "*/data_processing/*" && \
     rm -rf /tmp/overlays
 
 # Roboter Studio runtime dependencies. opencv-contrib-python is required

@@ -324,11 +324,15 @@ class LeRobotDatasetWrapper(LeRobotDataset):
         if not hasattr(self, 'encoders') or self.encoders is None:
             self.encoders = {}
 
+        # Audit F62: bumped to preset='fast'/crf=23 for cleaner ACT training
+        # inputs. The previous ultrafast/28 combo introduced visible chrominance
+        # noise that the policy then has to memorize. Encoding stays async on a
+        # background thread so the 30 Hz recording tick is not affected.
         self.encoders[save_path] = FFmpegEncoder(
                 fps=self.fps,
                 chunk_size=50,
-                preset='ultrafast',
-                crf=28,
+                preset='fast',
+                crf=23,
                 pix_fmt='yuv420p',
                 vcodec='libx264'
             )

@@ -67,6 +67,17 @@ class Communicator:
 
     PUB_QOS_SIZE = 100
 
+    # Audit F65: paired-camera capture tolerance + ring depth.
+    # 15 ms is the slop budget — at 30 fps the inter-frame interval is
+    # 33 ms, so two msgs within 15 ms of each other are reliably from the
+    # "same" world instant. Larger slop trades tighter pairing for fewer
+    # fallback hits; smaller slop is academic since USB jitter alone is
+    # ~5-10 ms. History of 8 covers ~0.27 s back at 30 Hz which is more
+    # than enough to catch the freshest matched pair even when one camera
+    # is one frame behind.
+    _CAMERA_SYNC_SLOP_NS = 15_000_000
+    _CAMERA_SYNC_HISTORY = 8
+
     def __init__(
         self,
         node: Node,
@@ -112,6 +123,12 @@ class Communicator:
         # stale-camera halt (which uses byte hashes).
         self._camera_msg_arrival: Dict[str, deque] = {}
         self._camera_msg_stamp_ns: Dict[str, int] = {}
+        # Audit F65: short ring of (stamp_ns, msg) per camera used by
+        # ``_pick_synced_camera_msgs`` to pair multi-camera frames within
+        # ``_CAMERA_SYNC_SLOP_S``. Falls back to ``camera_topic_msgs``
+        # (latest-per-camera) when no matched pair exists, so all
+        # single-camera / out-of-sync paths keep working unchanged.
+        self._camera_recent_msgs: Dict[str, deque] = {}
         self.follower_topic_msgs = {}
         self.leader_topic_msgs = {}
 
@@ -345,9 +362,19 @@ class Communicator:
         dq.append(now)
         try:
             stamp = msg.header.stamp
-            self._camera_msg_stamp_ns[name] = int(stamp.sec) * 1_000_000_000 + int(stamp.nanosec)
+            stamp_ns = int(stamp.sec) * 1_000_000_000 + int(stamp.nanosec)
+            self._camera_msg_stamp_ns[name] = stamp_ns
         except Exception:
+            stamp_ns = 0
             self._camera_msg_stamp_ns[name] = 0
+        # Audit F65: feed the sync ring. We tolerate stamp_ns == 0
+        # (bad/missing header.stamp) by still appending — the picker
+        # treats 0 as "no useful stamp" and falls through to latest.
+        ring = self._camera_recent_msgs.get(name)
+        if ring is None:
+            ring = deque(maxlen=self._CAMERA_SYNC_HISTORY)
+            self._camera_recent_msgs[name] = ring
+        ring.append((stamp_ns, msg))
 
     def get_camera_msg_age_s(self, name: str) -> Optional[float]:
         """Seconds since the last CompressedImage arrived for ``name``.
@@ -436,19 +463,93 @@ class Communicator:
     # (``get_latest_follower_joints``) that the wrapper composes with
     # ``IKSolver.fk()``.
 
+    def _pick_synced_camera_msgs(self) -> Dict[str, Any]:
+        """Audit F65: return a per-camera msg dict where the picked msgs come
+        from the same world instant (within ``_CAMERA_SYNC_SLOP_NS``), or
+        fall back to ``camera_topic_msgs`` when no matched tuple exists
+        (single camera, fresh start, one camera dropped a frame, or any
+        msg with ``stamp_ns == 0``).
+
+        For two cameras this is O(history²) ≤ 64 comparisons — cheap at
+        30 Hz. Generalised loop handles 1..N cameras; never blocks.
+        """
+        names = list(self.camera_topic_msgs.keys())
+        if len(names) <= 1:
+            return self.camera_topic_msgs
+
+        # Audit F66: snapshot each ring safely. `physical_ai_server.py`
+        # uses `MultiThreadedExecutor(num_threads=3)`, so two camera
+        # callbacks plus the recording timer can run concurrently.
+        # CPython's deque iterator raises ``RuntimeError: deque mutated
+        # during iteration`` if ``_camera_callback`` ``append()``s while
+        # the picker is iterating — and an unhandled RuntimeError here
+        # would silently kill the recording tick (no try/except up the
+        # call stack). We tolerate the race by retrying the snapshot a
+        # couple of times then falling back to ``camera_topic_msgs`` if
+        # the deque is genuinely contested. At 30 Hz × 2 cams × 1 timer
+        # = ~90 reads/s, real races are rare and a fallback tick is
+        # benign (matches pre-F65 behaviour for that tick).
+        rings: List[List[Tuple[int, Any]]] = []
+        for name in names:
+            ring = self._camera_recent_msgs.get(name)
+            if not ring:
+                return self.camera_topic_msgs
+            entries: Optional[List[Tuple[int, Any]]] = None
+            for _attempt in range(3):
+                try:
+                    entries = [
+                        (s, m) for (s, m) in ring
+                        if s > 0 and m is not None
+                    ]
+                    break
+                except RuntimeError:
+                    # Deque mutated during iteration — let the executor
+                    # finish the in-flight append and try again. Three
+                    # attempts is overkill but cheap.
+                    entries = None
+                    continue
+            if not entries:
+                return self.camera_topic_msgs
+            rings.append(entries)
+
+        # Walk the Cartesian product newest-first. For each candidate
+        # tuple, accept the first one whose max-min stamp ≤ slop.
+        # Newest-first ordering means the first acceptable tuple is also
+        # the freshest acceptable tuple — exactly what we want.
+        def _walk(idx: int, picked: List[Tuple[int, Any]]):
+            if idx == len(rings):
+                stamps = [s for (s, _) in picked]
+                if max(stamps) - min(stamps) <= self._CAMERA_SYNC_SLOP_NS:
+                    yield picked
+                return
+            for entry in reversed(rings[idx]):
+                yield from _walk(idx + 1, picked + [entry])
+
+        best = next(_walk(0, []), None)
+        if best is None:
+            return self.camera_topic_msgs
+        return {name: entry[1] for name, entry in zip(names, best)}
+
     def get_latest_data(self) -> Optional[Tuple[Dict, Dict, Dict]]:
-        if any(msg is None for msg in self.camera_topic_msgs.values()):
+        # Audit F65: try to pair multi-camera msgs by header.stamp within
+        # ``_CAMERA_SYNC_SLOP_NS`` (default 15 ms). When pairing fails or
+        # only one camera is configured, falls back to the original
+        # latest-per-camera behaviour — so single-camera, single-frame
+        # warmup, and out-of-sync edge cases keep working unchanged.
+        synced_cameras = self._pick_synced_camera_msgs()
+
+        if any(msg is None for msg in synced_cameras.values()):
             return None, None, None
 
         if any(msg is None for msg in self.follower_topic_msgs.values()):
-            return self.camera_topic_msgs, None, None
+            return synced_cameras, None, None
 
         if self.operation_mode == self.MODE_COLLECTION:
             if any(msg is None for msg in self.leader_topic_msgs.values()):
-                return self.camera_topic_msgs, self.follower_topic_msgs, None
-            return self.camera_topic_msgs, self.follower_topic_msgs, self.leader_topic_msgs
+                return synced_cameras, self.follower_topic_msgs, None
+            return synced_cameras, self.follower_topic_msgs, self.leader_topic_msgs
         elif self.operation_mode == self.MODE_INFERENCE:
-            return self.camera_topic_msgs, self.follower_topic_msgs, None
+            return synced_cameras, self.follower_topic_msgs, None
         else:
             raise NotImplementedError(
                 f'Operation mode {self.operation_mode} is not supported')
@@ -460,6 +561,13 @@ class Communicator:
             self.follower_topic_msgs[key] = None
         for key in self.leader_topic_msgs.keys():
             self.leader_topic_msgs[key] = None
+        # Audit F66: also drop the F65 sync rings. Without this, the first
+        # tick of a re-recorded episode could pair a fresh msg with a
+        # stale msg whose stamp_ns was carried over from the prior
+        # episode — exactly the silent misalignment F65 set out to
+        # prevent. clear() is atomic under the GIL.
+        for ring in self._camera_recent_msgs.values():
+            ring.clear()
         self.node.get_logger().info('Cleared latest data from communicator')
 
     def publish_action(self, joint_msg_datas: Dict[str, Any]):
@@ -683,6 +791,7 @@ class Communicator:
 
         # Clear message containers
         self.camera_topic_msgs.clear()
+        self._camera_recent_msgs.clear()
         self.follower_topic_msgs.clear()
         self.leader_topic_msgs.clear()
 

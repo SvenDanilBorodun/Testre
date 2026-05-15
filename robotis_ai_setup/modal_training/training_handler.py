@@ -321,7 +321,40 @@ def _build_training_command(
         "--policy.push_to_hub=false",
         # Disable eval — no simulation env available on cloud worker.
         "--eval_freq=0",
+        # Audit F63: enable LeRobot's built-in image augmentations
+        # (brightness/contrast/saturation/hue/sharpness jitter, max 3 per frame,
+        # weighted random subset). Closes a real distribution-shift gap between
+        # morning- and afternoon-lit classroom sessions for small student
+        # datasets. Defaults live in lerobot.datasets.transforms.ImageTransformsConfig.
+        "--dataset.image_transforms.enable=true",
     ]
+
+    # Audit F64: ACT-specific inference-quality default. With chunk_size=100 at
+    # 30 fps the policy commits to 3.3 s of open-loop action between queries —
+    # any small prediction error compounds. Setting n_action_steps=15 makes the
+    # policy re-query the world every 0.5 s while still predicting the full
+    # 100-step chunk during training (the smoothness benefit of chunking is
+    # preserved). User can override by passing `n_action_steps` in
+    # training_params. NOTE: only safe for `act`; other policies have their own
+    # chunk-vs-step semantics.
+    # Audit F66: only apply the F64 ACT default *and* only forward an override
+    # when model_type == "act". A diffusion/vqbet/smolvla/pi0 job that happens
+    # to carry n_action_steps in training_params would otherwise emit
+    # --policy.n_action_steps=N for a policy whose ACTConfig-style validator
+    # doesn't exist — flagged by the F64 verifier as a real cross-policy leak.
+    # The None / 0 / negative guard is the same hardening — those would
+    # otherwise produce the literal string "None" on the CLI or crash inside
+    # ACTConfig.__post_init__ with an opaque error.
+    n_action_steps_override = training_params.get("n_action_steps")
+    if model_type == "act":
+        if n_action_steps_override is None:
+            cmd.append("--policy.n_action_steps=15")
+        elif isinstance(n_action_steps_override, int) and n_action_steps_override > 0:
+            cmd.append(f"--policy.n_action_steps={n_action_steps_override}")
+        else:
+            # Invalid override (None already handled, plus 0/negative/non-int)
+            # → fall back to the F64 default rather than emit a broken CLI arg.
+            cmd.append("--policy.n_action_steps=15")
 
     param_mapping = {
         "seed": "--seed",

@@ -363,8 +363,15 @@ jobs:
     # Walks every public/tutorials/*.json and asserts schema:
     # id/title_de/level/steps present, each step has title/body/
     # allowed_blocks. Cross-checks every allowed_blocks entry against
-    # the cloud_training_api validator's ALLOWED_BLOCK_TYPES so a
-    # tutorial can't reference a block the server would reject.
+    # the workflow runtime's dispatch tables so a tutorial can't
+    # reference a block the server would reject.
+    #
+    # The 2026-05 stripdown removed the static ALLOWED_BLOCK_TYPES
+    # frozenset from both the cloud validator and the interpreter
+    # overlay — handler dispatch is now the gate. This job re-derives
+    # the allowlist from STATEMENT_HANDLERS + VALUE_EVALUATORS keys
+    # (handlers/__init__.py), HAT_BLOCK_TYPES (interpreter.py), and
+    # the static set of Blockly built-ins the interpreter dispatches.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -375,13 +382,49 @@ jobs:
         run: |
           python3 - <<'PY'
           import glob, json, re, sys
-          # Pull the allowlist from the validator's source so a single
-          # change in validators/workflow.py covers both the runtime
-          # gate and this CI check.
-          src = open('robotis_ai_setup/cloud_training_api/app/validators/workflow.py').read()
-          m = re.search(r'ALLOWED_BLOCK_TYPES[^=]*=\s*frozenset\(\{([^}]+)\}\)', src, re.S)
-          assert m, 'could not locate ALLOWED_BLOCK_TYPES'
-          allowed = set(re.findall(r'"([^"]+)"', m.group(1)))
+          # Source of truth = the runtime dispatch tables. Extract the
+          # dict keys from the handlers __init__ and the HAT_BLOCK_TYPES
+          # frozenset from interpreter.py. Built-in Blockly types
+          # dispatched in interpreter.py are listed explicitly here
+          # since they're hardcoded in the interpreter's btype ladder.
+          allowed: set[str] = set()
+          handlers_src = open(
+              'robotis_ai_setup/docker/physical_ai_server/overlays/workflow/handlers/__init__.py'
+          ).read()
+          for table in ('STATEMENT_HANDLERS', 'VALUE_EVALUATORS'):
+              m = re.search(
+                  rf"{table}\s*:\s*dict\[[^\]]+\]\s*=\s*\{{(.*?)^\}}",
+                  handlers_src, re.S | re.M,
+              )
+              assert m, f'could not locate {table} in handlers/__init__.py'
+              allowed |= set(re.findall(r"'([^']+)'\s*:", m.group(1)))
+          interp_src = open(
+              'robotis_ai_setup/docker/physical_ai_server/overlays/workflow/interpreter.py'
+          ).read()
+          m = re.search(
+              r"HAT_BLOCK_TYPES[^=]*=\s*frozenset\(\{([^}]+)\}\)",
+              interp_src, re.S,
+          )
+          assert m, 'could not locate HAT_BLOCK_TYPES in interpreter.py'
+          allowed |= set(re.findall(r"'([^']+)'", m.group(1)))
+          # Blockly built-ins the interpreter dispatches on btype.
+          # Keep in sync with the btype ladder in interpreter.py.
+          allowed |= {
+              'controls_if', 'controls_repeat_ext', 'controls_whileUntil',
+              'controls_for', 'controls_forEach',
+              'logic_boolean', 'logic_compare', 'logic_negate', 'logic_operation',
+              'math_number', 'math_arithmetic', 'math_random_int',
+              'math_constrain', 'math_modulo', 'math_round',
+              'text',
+              'lists_create_with', 'lists_repeat', 'lists_length',
+              'lists_isEmpty', 'lists_indexOf', 'lists_getIndex',
+              'lists_setIndex', 'lists_getSublist',
+              'variables_get', 'variables_set',
+              'procedures_defnoreturn', 'procedures_defreturn',
+              'procedures_callnoreturn', 'procedures_callreturn',
+              'procedures_ifreturn',
+              'edubotics_broadcast',
+          }
           errs = []
           for path in sorted(glob.glob('physical_ai_tools/physical_ai_manager/public/tutorials/*.json')):
               try:
@@ -402,7 +445,7 @@ jobs:
                           errs.append(f'{path} step {i+1}: missing {field}')
                   for blk in step.get('allowed_blocks') or []:
                       if blk not in allowed:
-                          errs.append(f'{path} step {i+1}: block {blk!r} not in ALLOWED_BLOCK_TYPES')
+                          errs.append(f'{path} step {i+1}: block {blk!r} not in runtime dispatch tables')
           if errs:
               print('\n'.join(errs))
               sys.exit(1)

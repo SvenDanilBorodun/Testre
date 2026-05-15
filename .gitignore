@@ -2,6 +2,18 @@
 robotis_ai_setup/cloud_training_api/.env
 physical_ai_tools/physical_ai_manager/.env
 robotis_ai_setup/docker/.env
+robotis_ai_setup/docker/.env.build
+
+# macOS
+.DS_Store
+
+# MCP server config (optional, per-checkout)
+.mcp.json
+
+# Staged build artifact — copied in by build-images.sh / railway-deploy.sh,
+# cleaned up by their EXIT traps. Listed here so a Ctrl-C'd build that
+# skipped the trap doesn't leak it into a commit.
+physical_ai_tools/physical_ai_manager/_coco_classes.py
 
 # Build artifacts
 robotis_ai_setup/gui/dist/

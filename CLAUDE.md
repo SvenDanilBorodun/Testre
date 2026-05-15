@@ -1262,14 +1262,14 @@ Treat this file as the next-sprint backlog. Do not promise "Phase-2 debugger" fe
 
 **`APPLY_MIGRATIONS.sql`** + **`ROLLBACK_MIGRATIONS.sql`** are the forward and reverse bundles for the Phase-2/3 trio (`015_workflow_versions.sql`, `016_tutorial_progress.sql`, `017_vision_quota.sql`). The boot-time `_validate_required_schema()` in `cloud_training_api/app/main.py` probes every table + RPC the routes touch, so Railway will abort the deploy if the migrations haven't landed first (this is the systemic fix for the c56c012 round-3 incident where `refund_vision_quota` was missing from the live DB even though the file on disk defined it).
 
-**`NEXT_STEPS.md`** + **`DEPLOYMENT_RUNBOOK.md`** prescribe the only safe deploy order for the round-3 bundle:
+**`DEPLOY.md`** is the single one-page reference covering Supabase, Modal, Railway, Docker Hub, and git push. The golden order is:
 1. **Supabase migrations first** (`APPLY_MIGRATIONS.sql` via Studio SQL editor) — new RPCs and tables must exist before the cloud API references them.
-2. **Modal redeploy** of `vision_app.py` — must be done before any student opens the open-vocab block.
+2. **Modal redeploy** of `vision_app.py` / `modal_app.py` — must be done before any student opens the open-vocab block.
 3. **Railway redeploy** of the cloud API — picks up new env vars + schema fingerprint.
 4. **Docker images rebuild + push** via `build-images.sh`.
-5. **Git push** of any pending source changes.
+5. **Git push** of any pending source changes (CI runs guardrails).
 
-Skipping or reordering any of these has been the cause of every "the new feature is live in code but broken in production" report so far. When in doubt, read `DEPLOYMENT_RUNBOOK.md`.
+Skipping or reordering any of these has been the cause of every "the new feature is live in code but broken in production" report so far. When in doubt, read `DEPLOY.md`.
 
 ### 18.4 `robotis_ai_setup/CHANGES_SESSION_*.md` — historical context
 

@@ -175,6 +175,27 @@ def _validate_required_schema() -> None:
             "p_total_steps": 0,
             "p_worker_token": dummy,
         }),
+        # Migration 018 — the SECURITY DEFINER wrappers that set
+        # app.user_id GUC inside the transaction so the
+        # workflow_versions trigger writes `saved_by` correctly.
+        # routes/workflows.py:277 calls update_workflow_blockly on
+        # every PATCH that changes blockly_json; :433 calls
+        # restore_workflow_version on POST .../versions/{id}/restore.
+        # Without these probes, a Railway deploy of the workflows
+        # routes against a DB missing migration 018 passes /health
+        # and 500s on first student save (c56c012 class).
+        ("update_workflow_blockly", {
+            "p_workflow_id": dummy,
+            "p_user_id": dummy,
+            "p_blockly_json": {},
+            "p_name": None,
+            "p_description": None,
+        }),
+        ("restore_workflow_version", {
+            "p_workflow_id": dummy,
+            "p_version_id": dummy,
+            "p_user_id": dummy,
+        }),
     )
     missing_rpcs: list[str] = []
     for name, args in required_rpcs:

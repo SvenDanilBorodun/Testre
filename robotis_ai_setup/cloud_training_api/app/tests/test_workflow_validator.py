@@ -1,11 +1,8 @@
 """Tests for the Blockly JSON validator.
 
-Verifies the size/depth/allowlist gates and asserts that the
-``ALLOWED_BLOCK_TYPES`` set stays in sync with the ROS-server-side
-allowlist in ``physical_ai_server/workflow/interpreter.py``. A drift
-check catches the case where one side adds a block type and the
-other doesn't — the runtime would otherwise reject every workflow
-that uses the new block.
+Covers the size + depth gates that remain after the safety stripdown.
+The block-type allowlist was removed so any block the editor produces
+is accepted at the cloud gate; the ROS server interprets it.
 
 Stubs FastAPI's HTTPException without pulling the full FastAPI
 dependency at test time, mirroring the rest of the suite's pattern.
@@ -39,7 +36,6 @@ if APP_PARENT not in sys.path:
     sys.path.insert(0, APP_PARENT)
 
 from app.validators.workflow import (  # noqa: E402
-    ALLOWED_BLOCK_TYPES,
     MAX_BLOCKLY_DEPTH,
     MAX_BLOCKLY_JSON_BYTES,
     validate_blockly_json,
@@ -89,7 +85,6 @@ class TestValidator(unittest.TestCase):
     def test_too_deep_rejected(self) -> None:
         # Build a nest of depth > MAX_BLOCKLY_DEPTH.
         node: dict = {"type": "edubotics_log"}
-        root = node
         for _ in range(MAX_BLOCKLY_DEPTH + 5):
             new = {"type": "edubotics_log", "child": node}
             node = new
@@ -98,33 +93,11 @@ class TestValidator(unittest.TestCase):
             validate_blockly_json({"root": node})
         self.assertEqual(cm.exception.status_code, 400)
 
-    def test_unknown_block_rejected(self) -> None:
-        bad = {"blocks": {"blocks": [{"type": "evil_block_type"}]}}
-        from fastapi import HTTPException
-        with self.assertRaises(HTTPException) as cm:
-            validate_blockly_json(bad)
-        self.assertEqual(cm.exception.status_code, 400)
-        self.assertIn("evil_block_type", cm.exception.detail)
-
-    def test_allowlist_contains_phase2_blocks(self) -> None:
-        for required in (
-            "edubotics_speak_de",
-            "edubotics_play_tone",
-            "edubotics_broadcast",
-            "edubotics_when_broadcast",
-            "edubotics_when_marker_seen",
-            "edubotics_when_color_seen",
-            "lists_create_with",
-            "lists_getIndex",
-            "procedures_defnoreturn",
-            "procedures_callreturn",
-            "math_random_int",
-            "math_constrain",
-        ):
-            self.assertIn(required, ALLOWED_BLOCK_TYPES)
-
-    def test_allowlist_contains_phase3_open_vocab(self) -> None:
-        self.assertIn("edubotics_detect_open_vocab", ALLOWED_BLOCK_TYPES)
+    def test_unknown_block_accepted(self) -> None:
+        """After the stripdown, unknown block types are accepted at the
+        cloud gate — the ROS server is the only judge of block types."""
+        novel = {"blocks": {"blocks": [{"type": "novel_block_type"}]}}
+        validate_blockly_json(novel)
 
 
 if __name__ == "__main__":

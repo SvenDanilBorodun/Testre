@@ -34,32 +34,17 @@ import traceback
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
-import numpy as np
-
 from physical_ai_server.workflow.handlers.motion import WorkflowError
 from physical_ai_server.workflow.interpreter import (
     Interpreter,
     InterpreterError,
 )
-from physical_ai_server.workflow.safety_envelope import SafetyEnvelope
-from physical_ai_server.workflow.trajectory_builder import build_segment, chunked_publish
 
 
-# Recovery pose for the auto-home routine in _run's finally block. Must
-# match handlers.motion.HOME_JOINTS_RAD + GRIPPER_OPEN_RAD; duplicated
-# here to avoid a circular import. Audit §3.16 — a stopped/errored
-# workflow used to leave the arm wherever it stopped (potentially
-# mid-grasp with the gripper closed on an object).
+# Reference pose used to seed the IK pre-check at workflow start. Matches
+# handlers.motion.HOME_JOINTS_RAD + GRIPPER_OPEN_RAD; duplicated here to
+# avoid a circular import.
 _HOME_FULL_JOINTS = [0.0, -math.pi / 4, math.pi / 4, 0.0, 0.0, 0.8]
-_RECOVERY_HOLD_S = 1.0
-_RECOVERY_GRIPPER_S = 0.5
-_RECOVERY_HOME_S = 3.0
-# Absolute ceiling on the entire recovery routine. Designed total is
-# 4.5 s; 15 s caps a stuck recovery (IK fail mid-segment, controller
-# wedged) so the daemon can exit. The hold + gripper-open segments
-# remain uninterruptible (controller settle + release any held object);
-# only the long return-home segment honours the deadline.
-_RECOVERY_DEADLINE_S = 15.0
 
 # IK pre-check budget. Each concrete destination gets one solver
 # attempt; an overall cap so a 100-block workflow doesn't stall start.
@@ -72,7 +57,6 @@ class WorkflowContext:
     """Runtime state shared between the manager and individual handlers."""
 
     publisher: Callable[[list[tuple[list[float], float]]], None]
-    safety: SafetyEnvelope
     ik: Any | None = None
     perception: Any | None = None
     destinations: dict[str, dict[str, float]] = field(default_factory=dict)
@@ -146,11 +130,9 @@ class WorkflowManager:
         self._get_gripper_frame = get_gripper_frame
         self._get_current_pose_xyz = get_current_pose_xyz
         # Audit S2: source of the current follower joint state, used at
-        # workflow start to seed the safety envelope's per-tick delta cap
-        # AND ctx.last_full_joints (so recovery's hold segment starts at
-        # the real arm pose, not the [0]*6 dataclass default).
+        # workflow start to seed ctx.last_full_joints with the real arm pose
+        # instead of the [0]*6 dataclass default.
         self._get_follower_joints = get_follower_joints
-        self._safety = SafetyEnvelope()
         self._thread: Optional[threading.Thread] = None
         self._hat_threads: list[threading.Thread] = []
         self._stop_event = threading.Event()
@@ -188,18 +170,6 @@ class WorkflowManager:
     @property
     def is_paused(self) -> bool:
         return self._pause_event.is_set()
-
-    def configure_safety(
-        self,
-        joint_min: list[float],
-        joint_max: list[float],
-        max_delta_per_tick: list[float],
-    ) -> None:
-        self._safety.set_action_limits(
-            joint_min=joint_min,
-            joint_max=joint_max,
-            max_delta_per_tick=max_delta_per_tick,
-        )
 
     def set_destination(self, name: str, x: float, y: float, z: float) -> None:
         """Persist a teacher-pinned destination so the next workflow run
@@ -281,7 +251,6 @@ class WorkflowManager:
             self._resume_event.set()
             self._step_event.clear()
             self._broadcast_events.clear()
-            self._safety.reset()
             self._workflow_id = workflow_id
 
             calib = self._load_calibration() or {}
@@ -312,7 +281,6 @@ class WorkflowManager:
 
             ctx = WorkflowContext(
                 publisher=self._publisher,
-                safety=self._safety,
                 ik=ik_instance,
                 perception=perception_instance,
                 destinations=destinations,
@@ -498,94 +466,8 @@ class WorkflowManager:
         return unreachable
 
     # ------------------------------------------------------------------
-    # Recovery + main loop
+    # Main loop
     # ------------------------------------------------------------------
-    def _run_recovery(self, ctx: WorkflowContext) -> None:
-        """Hold-current → open gripper → return home, after a stopped
-        or errored workflow.
-
-        Hold + gripper-open run uninterruptibly: the controller must
-        settle the in-flight trajectory and any held object must be
-        released before we move toward home (otherwise we go home
-        carrying it). The home segment honours an absolute deadline
-        (_RECOVERY_DEADLINE_S) so a wedged recovery can't hang the
-        daemon thread indefinitely.
-
-        Verifier finding (audit §10): recovery must hold ``motion_lock``
-        for the duration so a still-running hat handler can't publish
-        a competing trajectory while we're going home. Hat handlers
-        themselves should observe ``should_stop`` between blocks and
-        exit, but a long ``chunked_publish`` segment is uninterrupted
-        — the lock is the failsafe.
-        """
-        deadline = time.monotonic() + _RECOVERY_DEADLINE_S
-        deadline_exceeded = lambda: time.monotonic() > deadline
-        # Acquire motion_lock for the recovery sequence. Use a bounded
-        # acquire so a hat thread wedged inside a C-extension (cv2 /
-        # onnxruntime — uninterruptible from Python) can't permanently
-        # hang the daemon. If acquire fails we proceed without the lock;
-        # the worst case is a competing hat publish, but the daemon
-        # exits cleanly. Audit round-3 §20.
-        lock = ctx.motion_lock
-        acquired = False
-        if lock is not None:
-            acquired = lock.acquire(timeout=2.0)
-            if not acquired:
-                self._emit_status({
-                    'workflow_id': self._workflow_id or '',
-                    'log_message': (
-                        'Recovery konnte motion_lock nicht erhalten — '
-                        'Bewegung übersprungen.'
-                    ),
-                })
-        try:
-            current = list(ctx.last_full_joints) if ctx.last_full_joints else list(_HOME_FULL_JOINTS)
-            # Hold-current segment so the controller has time to settle
-            # the in-flight trajectory without immediately commanding
-            # new motion. Uninterruptible — settling can't be skipped.
-            hold = build_segment(current, current, _RECOVERY_HOLD_S)
-            chunked_publish(
-                publisher=ctx.publisher,
-                points=hold,
-                safety_apply=ctx.safety.apply if ctx.safety else None,
-                should_stop=lambda: False,
-            )
-            # Open gripper. Uninterruptible — releasing a held object
-            # before the home traversal is what prevents "go home with
-            # the part still gripped → drag it across the bench".
-            opened = list(current[:5]) + [_HOME_FULL_JOINTS[5]]
-            open_seg = build_segment(current, opened, _RECOVERY_GRIPPER_S)
-            chunked_publish(
-                publisher=ctx.publisher,
-                points=open_seg,
-                safety_apply=ctx.safety.apply if ctx.safety else None,
-                should_stop=lambda: False,
-            )
-            # Return to home pose over 3 seconds. Honours the absolute
-            # recovery deadline so a stuck home traversal aborts.
-            home_seg = build_segment(opened, list(_HOME_FULL_JOINTS), _RECOVERY_HOME_S)
-            chunked_publish(
-                publisher=ctx.publisher,
-                points=home_seg,
-                safety_apply=ctx.safety.apply if ctx.safety else None,
-                should_stop=deadline_exceeded,
-            )
-            ctx.last_full_joints = list(_HOME_FULL_JOINTS)
-        except Exception:
-            # Recovery itself failing must not raise — we're in the
-            # finally block of the daemon thread. Just log via the
-            # status emitter and let the on_finished callback run.
-            self._emit_status({
-                'workflow_id': self._workflow_id or '',
-                'log_message': 'Recovery-Bewegung fehlgeschlagen.',
-            })
-        finally:
-            if lock is not None and acquired:
-                try:
-                    lock.release()
-                except RuntimeError:
-                    pass
-
     def _run_hat_handler(
         self,
         hat: dict[str, Any],
@@ -726,35 +608,17 @@ class WorkflowManager:
 
     def _run(self, interpreter: Interpreter, ctx: WorkflowContext) -> None:
         terminal_phase = 'error'
-        # Audit S2: seed the safety envelope's last-action AND
-        # ctx.last_full_joints with the current follower pose, so:
-        #   (a) the per-tick velocity cap on the very first motion compares
-        #       against where the arm actually is, not the dataclass
-        #       default of [0]*6 (which would skip the delta check
-        #       silently because _last_action stays None).
-        #   (b) recovery's hold-current segment publishes the real pose
-        #       instead of a synthetic [0]*6 hold trajectory that would
-        #       command the arm to fold across its body.
-        # Failing to read the joint state is non-fatal: motion handlers
-        # will populate last_full_joints on first use, and safety_envelope
-        # falls back to None → no delta cap on the first action (same
-        # behaviour as before this seed; we strictly improve the path).
+        # Seed ctx.last_full_joints with the current follower pose so motion
+        # handlers and IK seeding start from the real arm pose instead of
+        # the [0]*6 dataclass default. Best-effort — handlers will populate
+        # this on first motion if the read fails.
         if self._get_follower_joints is not None:
             try:
                 joints = self._get_follower_joints()
                 if joints and len(joints) >= 6:
-                    j6 = [float(x) for x in joints[:6]]
-                    ctx.last_full_joints = j6
-                    if self._safety is not None:
-                        self._safety.seed_last_action(j6[:5])
-            except Exception as _exc:  # noqa: BLE001 — best-effort seed
-                self._emit_status({
-                    'workflow_id': self._workflow_id or '',
-                    'log_message': (
-                        f'[WARNUNG] Aktueller Gelenkzustand nicht lesbar — '
-                        f'Sicherheits-Hüllkurve startet ohne Seed ({_exc}).'
-                    ),
-                })
+                    ctx.last_full_joints = [float(x) for x in joints[:6]]
+            except Exception:  # noqa: BLE001 — best-effort seed
+                pass
         try:
             self._emit_status({
                 'workflow_id': self._workflow_id or '',
@@ -823,22 +687,11 @@ class WorkflowManager:
                 'log_message': traceback.format_exc(),
             })
         finally:
-            # Tell hat handlers to wind down BEFORE running recovery so
-            # they don't fire a new broadcast handler that grabs the
-            # motion lock during recovery.
+            # Tell hat handlers to wind down so they can observe the
+            # stop flag and exit cleanly.
             self._stop_event.set()
             self._resume_event.set()
             self._wake_all_broadcasts()
-
-            # Audit §3.16 — auto-home on stopped/errored exits (not on
-            # a clean 'finished' run, which already left the arm where
-            # the workflow intended). The recovery sequence matches
-            # context/19-roboter-studio.md §5: hold-current → open
-            # gripper → return home over 3s. Must run before
-            # on_finished fires so the server's on_workflow flag flips
-            # only AFTER the recovery motion completes.
-            if terminal_phase in ('stopped', 'error'):
-                self._run_recovery(ctx)
 
             # Reap hat threads with a short timeout.
             for t in self._hat_threads:

@@ -91,12 +91,10 @@ COPY overlays/inference_manager.py /tmp/overlays/inference_manager.py
 COPY overlays/data_manager.py /tmp/overlays/data_manager.py
 COPY overlays/data_converter.py /tmp/overlays/data_converter.py
 COPY overlays/omx_f_config.yaml /tmp/overlays/omx_f_config.yaml
-# Inference path now imports physical_ai_server.workflow.safety_envelope —
-# the workflow module must be installed before the inference_manager
-# overlay is applied or the import will fail.
-# physical_ai_server.py caller needs to handle None returns from the new
-# safety envelope in inference_manager.predict(). Without this overlay the
-# caller would pass None into tensor_array2joint_msgs and crash the node.
+# physical_ai_server.py overlay keeps the bearer-token log scrubber,
+# the workflow-detection cache that feeds the React debugger, and all
+# Roboter Studio service handlers. The inference-time safety envelope
+# was removed in the safety stripdown.
 COPY overlays/physical_ai_server.py /tmp/overlays/physical_ai_server.py
 # communicator.py adds get_latest_bgr_frame + get_latest_follower_joints
 # (decode CompressedImage + return JointState position) so the

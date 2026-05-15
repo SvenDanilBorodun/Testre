@@ -23,7 +23,6 @@ import time
 from typing import Any
 
 from physical_ai_server.workflow.trajectory_builder import (
-    TrajectoryRejectedError,
     build_segment,
     chunked_publish,
 )
@@ -75,14 +74,8 @@ def _publish_motion(ctx, q_start: list[float], q_end: list[float], duration_s: f
         ok = chunked_publish(
             publisher=ctx.publisher,
             points=waypoints,
-            safety_apply=ctx.safety.apply if ctx.safety else None,
             should_stop=ctx.should_stop,
         )
-    except TrajectoryRejectedError as e:
-        # Re-wrap as the German user-facing WorkflowError the editor
-        # already knows how to render. The finally below releases the
-        # lock before this exception propagates.
-        raise WorkflowError(str(e)) from e
     finally:
         if acquired and lock is not None:
             try:

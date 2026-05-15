@@ -31,16 +31,19 @@ Repo: `github.com/SvenDanilBorodun/Testre.git` (private). Single git repo, no su
 - When you write a new error, ask: "will a student/teacher read this?" → German. Otherwise English.
 
 ### 1.2 The arm is real hardware. Safety is non-negotiable.
-- Never disable any of the **5 inference-time safety envelopes** in `robotis_ai_setup/docker/physical_ai_server/overlays/inference_manager.py`:
-  1. **NaN/Inf guard** (drops tick) — German: `[STOPP] Modell hat NaN/Inf-Werte ausgegeben. Tick verworfen.`
-  2. **Joint clamp** (`np.clip` to `omx_f_config.yaml.safety_envelope.joint_min/joint_max`)
-  3. **Per-tick velocity cap** (`max_delta_per_tick_at_30hz` = `[0.3, 0.3, 0.3, 0.3, 0.3, 0.3]`)
-  4. **Stale-camera halt** (4 sparse 256-byte hashes, warn @ 2s, **halt @ 5s**)
-  5. **Image shape & camera-name exact-match validation** (rejects silent alphabetical remap)
-- Never remove the SIGTERM/SIGINT torque-disable in `docker/open_manipulator/entrypoint_omx.sh` (`disable_torque()` calls `/dynamixel_hardware_interface/set_dxl_torque` SetBool service on both arms).
+- **Hardware safety lives in xacro + entrypoint, not in software overlays.** The software-side inference safety envelopes (NaN/Inf guard, joint clamp, per-tick velocity cap, stale-camera halt, image shape / camera-name validation) were removed in the 2026-05 safety stripdown. Inference now runs upstream `predict()` raw — preprocess → `policy.select_action` → publish — plus the F10 extra-camera filter as a correctness fix.
+- The protections that remain are hardware-enforced or warning-only:
+  - **Xacro Dynamixel limits** (`omx_f.ros2_control.xacro`, `omx_l.ros2_control.xacro`): joint Min/Max Position Limits + gripper current limits (follower 350 mA, leader 300 mA, Op Mode 5).
+  - **ros2_control YAML** (`omx_f_hardware_controller_manager.yaml`, `omx_l_leader_ai_hardware_controller_manager.yaml`): 100 Hz update rate, JointTrajectoryController constraints (0.15 rad trajectory tolerance, 0.05 rad goal tolerance, 1.0 s goal_time).
+  - **SIGTERM/SIGINT torque-disable** in `docker/open_manipulator/entrypoint_omx.sh` (`disable_torque()` calls `/dynamixel_hardware_interface/set_dxl_torque` SetBool service on both arms; 2 s timeout per arm).
+  - **Phase 4 post-sync verification** in `entrypoint_omx.sh` (0.08 rad tolerance per joint after the 3-second quintic ramp; hard-exit 2 on mismatch refuses to continue).
+- Recording-side guards are now warning-only (`[WARNUNG]` lines, `TaskStatus.error` banners) — episodes always complete:
+  - Stale-camera detector at recording (4 sparse 256-byte hashes, > 5 s identical → warn only)
+  - Timestamp-gap detector (post-save, > 2× expected_dt → warn)
+  - Video-file verifier (post-save mp4 existence + non-zero size → warn)
+  - usb_cam camera-fps warning (observed Hz < 0.8 × target → warn)
 - Never bypass `_assert_classroom_owned()` / `_assert_student_owned()` / `_assert_entry_owned()` / `_assert_workflow_owned()` ownership checks in the cloud API.
-- Never weaken the post-sync verification in `entrypoint_omx.sh` Phase 4 (0.08 rad tolerance per joint after the 3-second quintic ramp; hard-exit 2 on mismatch refuses to continue).
-- If you genuinely need to relax a safety check, **stop and ask the user**.
+- If you genuinely need to reintroduce a software safety guard that modifies the pipeline (clamps, halts, truncates), **stop and ask the user** — the stripdown removed those deliberately to fix recording↔inference asymmetry.
 
 ### 1.3 Overlays must fail loudly on no-op.
 - The `apply_overlay()` shell function in both `docker/physical_ai_server/Dockerfile` and `docker/open_manipulator/Dockerfile` does sha256 pre-/post-copy verification: if the upstream file is missing or already byte-identical to the overlay, build aborts with `ERROR: $name not found in base image — overlay cannot be applied`.
@@ -246,12 +249,12 @@ ROBOTIS upstream files are `find`'d and replaced by overlays in the Dockerfiles.
 
 | Overlay | Path filter | Replaces / Adds |
 |---|---|---|
-| `inference_manager.py` | `*/inference/*` | NaN/Inf guard, joint clamp, velocity cap, stale-camera halt, image shape + camera exact-name validation |
-| `data_manager.py` | `*/data_processing/*` | RAM truncation early-save (`EDUBOTICS_RAM_LIMIT_GB`, default **0.8 GB**), video file verification, episode validation, HF upload 1h timeout |
-| `data_converter.py` | `*/data_processing/*` | Empty-trajectory guard (German `[FEHLER] JointTrajectory hat keine Punkte...`), missing-joint error, fps-aware action timing |
-| `omx_f_config.yaml` | (no filter) | Dual-camera config + tightened safety_envelope (joint1-3 ±π/2, joint4-5 ±0.85π, gripper ±1.0, max_delta_per_tick_at_30hz [0.3]×6) |
-| `physical_ai_server.py` | `*/physical_ai_server/physical_ai_server.py` | Handles None returns from new safety envelope |
-| `communicator.py` | `*/communication/communicator.py` | Adds `get_latest_bgr_frame()` + `get_latest_follower_joints()` for Roboter Studio calibration provider |
+| `inference_manager.py` | `*/inference/*` | F10 extra-camera silent filter + warning, CUDA-not-available German error in `load_policy()`. No clamps, no halts. |
+| `data_manager.py` | `*/data_processing/*` | Post-save warnings only: timestamp-gap detection, mp4 file verification, stale-camera warn (no halt). Plus `set_action_duration_from_fps()` (non-30 Hz correctness) and canonical LeRobot v2.1 video-path derivation (Audit F23). |
+| `data_converter.py` | `*/data_processing/*` | `desired_encoding='bgr8'` defensive encoding, extra-joints throttled warning, fps-aware action timing |
+| `omx_f_config.yaml` | (no filter) | Dual-camera config only — `safety_envelope` block removed in the stripdown |
+| `physical_ai_server.py` | `*/physical_ai_server/physical_ai_server.py` | `_BearerTokenScrubber` log filter, usb_cam-fps warning, `_workflow_last_detections` cache for the debugger, all Roboter Studio service handlers |
+| `communicator.py` | `*/communication/communicator.py` | Adds `get_latest_bgr_frame()` + `get_latest_follower_joints()` for Roboter Studio calibration provider, plus per-camera arrival deque feeding the usb_cam-fps warning |
 
 Open-manipulator overlays (in `docker/open_manipulator/Dockerfile`):
 - `omx_f.ros2_control.xacro` (path filter `*/ros2_control/*`) — follower joint limits, gripper Op Mode 5, **350 mA** current limit on dxl16
@@ -273,7 +276,7 @@ The `physical_ai_server/Dockerfile` does **three** Roboter-Studio-specific thing
 2. **Installs runtime deps**: `opencv-contrib-python==4.10.0.84` (cv2.aruco — main `opencv-python` does not include contrib), `pupil-apriltags==1.0.4` (BSD AprilTag), `onnxruntime==1.20.1` (CPU-only YOLOX-tiny), `pip-licenses==5.0.0` (AGPL audit), `urdf-parser-py==0.0.4`. `ENV CMAKE_POLICY_VERSION_MINIMUM=3.5` is required because pupil-apriltags's CMakeLists doesn't accept CMake 4.
 3. **Downloads YOLOX-tiny ONNX** from a pinned GitHub release URL (`https://github.com/Megvii-BaseDetection/YOLOX/releases/download/0.1.1rc0/yolox_tiny.onnx`) and verifies SHA-256 `427cc366d34e27ff7a03e2899b5e3671425c262ea2291f88bb942bc1cc70b0f7`. Stored at `/opt/edubotics/yolox_tiny.onnx`. Defends against a future GitHub re-upload silently swapping weights.
 
-Then it **copies in the entire workflow module** (`overlays/workflow/`) as an addition to `physical_ai_server.workflow` (not as an overlay, since there is no upstream file to compare). 12 files: `__init__.py`, `auto_pose.py`, `calibration_manager.py`, `coco_classes.py`, `color_profile.py`, `ik_solver.py`, `interpreter.py`, `perception.py`, `projection.py`, `safety_envelope.py`, `trajectory_builder.py`, `workflow_manager.py` (+ `handlers/{__init__.py, motion.py, output.py, destinations.py, perception_blocks.py}`).
+Then it **copies in the entire workflow module** (`overlays/workflow/`) as an addition to `physical_ai_server.workflow` (not as an overlay, since there is no upstream file to compare). 11 files: `__init__.py`, `auto_pose.py`, `calibration_manager.py`, `coco_classes.py`, `color_profile.py`, `ik_solver.py`, `interpreter.py`, `perception.py`, `projection.py`, `trajectory_builder.py`, `workflow_manager.py` (+ `handlers/{__init__.py, motion.py, output.py, destinations.py, perception_blocks.py}`). The previous `safety_envelope.py` was removed in the 2026-05 stripdown along with the matching inference clamps.
 
 ### 5.5 ROS2 `/leader/joint_trajectory` is the action rail
 The follower's `arm_controller` default action topic is **remapped** in `open_manipulator/open_manipulator_bringup/launch/omx_f_follower_ai.launch.py` (line ~144):
@@ -361,9 +364,9 @@ React triggers `/task/command` (`SendCommand.srv`, command code `START_RECORD=1`
 Per-tick (typically 30 Hz):
 1. `communicator.get_latest_data()` blocks ≤5s/topic.
 2. `data_converter`:
-   - Images: `cv_bridge.compressed_imgmsg_to_cv2()` → BGR → `cvtColor(..., BGR2RGB)` → `uint8` HWC.
-   - Follower: `JointState → joint_state2tensor_array()` reorders per `joint_order` (default `[joint1, joint2, joint3, joint4, joint5, gripper_joint_1]`) → `float32 [6]`.
-   - Leader action: `joint_trajectory2tensor_array()` reads `points[0].positions`, reorders. **Overlay raises German `[FEHLER] JointTrajectory hat keine Punkte — Leader-Arm sendet möglicherweise nicht.`** if empty (upstream silently accepts).
+   - Images: `cv_bridge.compressed_imgmsg_to_cv2()` (overlay enforces `desired_encoding='bgr8'` as defensive only — usb_cam returns BGR anyway) → `cvtColor(..., BGR2RGB)` → `uint8` HWC.
+   - Follower: `JointState → joint_state2tensor_array()` reorders per `joint_order` (default `[joint1, joint2, joint3, joint4, joint5, gripper_joint_1]`) → `float32 [6]`. KeyError on missing joint propagates as upstream behavior.
+   - Leader action: `joint_trajectory2tensor_array()` reads `points[0].positions`, reorders. Empty `msg.points` raises `IndexError` (upstream behavior; the German wrapper was removed in the stripdown). Extra joints in the message log a one-time `[WARNUNG]` and are dropped (kept — warning only).
 3. `create_frame()` → `{'observation.images.gripper': ..., 'observation.images.scene': ..., 'observation.state': ..., 'action': ...}`, all `float32`.
 4. `add_frame_without_write_image()` validates vs schema, appends to episode buffer, auto-timestamps as `frame_index / fps` (wall-clock NOT used).
 5. Video encoding: raw RGB piped to `ffmpeg libx264 -crf 28 -pix_fmt yuv420p`, **async**.
@@ -371,13 +374,13 @@ Per-tick (typically 30 Hz):
 
 Dataset path inside container: `~/.cache/huggingface/lerobot/{user_id}/{robot_type}_{task_name}/`. Optional rosbag2: `/workspace/rosbag2/{repo_name}/{episode_index}/`.
 
-Error behavior (fail-loud, German):
-- Missing topic (5s timeout) → `TaskStatus.error` + halt.
-- Empty JointTrajectory → German `[FEHLER]` (overlay).
-- Missing joint in `joint_order` → German `[FEHLER] Gelenk {e} fehlt in der Nachricht...` (overlay).
-- Free RAM < `EDUBOTICS_RAM_LIMIT_GB` (default 0.8 GB) → force early save (overlay), German `[WARNUNG] Episode {num} wegen niedrigem Arbeitsspeicher (<{GB} GB frei) frueh beendet...`.
-- Video file missing or zero-byte → German `[FEHLER] Episode {num}: Video-Datei(en) nicht korrekt gespeichert ({problems})...`
-- HF upload runs in daemon thread, **1-hour timeout** (overlay). German `[FEHLER] HuggingFace-Upload hat das Zeitlimit (1 Stunde) ueberschritten...` on timeout.
+Post-save warnings the student sees in `TaskStatus.error` (all warning-only — episodes always complete):
+- Video file missing or zero-byte → `[FEHLER] Episode {num}: Video-Datei(en) nicht korrekt gespeichert ({problems})...`
+- Timestamp gaps > 2× expected_dt → `[WARNUNG] Episode {num}: {n} Zeitlücken erkannt (erwartet ~{ms} ms pro Frame)...`
+- Stale camera (no decoded-pixel change for 5 s during recording) → `[WARNUNG] Kamera "{name}" liefert seit über 5s dasselbe Bild. Aufnahme läuft weiter — bitte prüfen, ob die Szene wirklich statisch ist oder die Kamera hängt.`
+- Camera observed-Hz < 0.8 × target_fps at recording start → `[WARNUNG] Kamera "{cam_name}" liefert nur {observed:.1f} Hz, Aufnahme erwartet {target_fps:.0f} Hz...`
+
+HF upload calls `push_to_hub` directly (no timeout wrapper). On network failure the exception propagates and the recording session ends; the local dataset on disk is intact and can be re-uploaded manually.
 
 ### 6.5 Cloud training
 
@@ -420,15 +423,14 @@ React → `/task/command START_INFERENCE=2` + `task_info.policy_path` (local FS 
 Per-tick (single-threaded on ROS executor, no worker thread):
 1. `communicator.get_latest_data()` (5s timeout per topic).
 2. `data_converter` → RGB `uint8` HWC images + `float32` state `[6]`.
-3. Lazy `load_policy()` on first tick (downloads from HF via `HF_HOME=/root/.cache/huggingface` if missing; moves weights to GPU).
-4. Overlay reads expected camera names from `policy_config.input_features` keys matching `observation.images.*` → exact-match. Mismatch raises German `[FEHLER] Kamera-Namen passen nicht: Modell erwartet {expected_names}, verbunden {connected_names}. Inferenz-Tick uebersprungen.`
-5. **Stale-camera halt** — hash 4 sparse 256-byte slices per image (offsets 0, n/4, n/2, 3n/4); per-camera last-change time. Warn @ 2s with German `[WARNUNG] Kamera "{name}" liefert seit {duration:.1f}s dasselbe Bild...`. Halt @ 5s with German `[STOPP] Kamera "{name}" ist seit >{threshold:.0f}s eingefroren. Inferenz angehalten...`. Returns None → tick skipped.
-6. Image shape validation against `_read_expected_image_shapes()`. Mismatch → German `[FEHLER] Bildaufloesung stimmt nicht ueberein: {key} hat Form {actual}, Modell erwartet {expected}. Tick uebersprungen.`
-7. `_preprocess(images, state)`: per image `torch.from_numpy / 255 → permute(2,0,1) → unsqueeze(0)` keyed `observation.images.{name}`. State → `float32` tensor → batch.
-8. `policy.select_action(observation)` under `torch.inference_mode()`.
-9. Safety envelope: NaN/Inf reject → joint clamp → per-tick velocity cap. State `_last_action` is cleared on `reset_policy()` so the first action of a new episode isn't clamped against the previous episode's final action; on that first tick it is **seeded from the current follower joint state** via `seed_last_action(state)` (audit F11 — `inference_manager.py`), so the very first delta is clamped against where the arm actually is rather than silently passing through unclamped. Shape mismatches between predicted action and the joint state (audit F12) return `None` from the safety envelope instead of leaking through.
-10. `data_converter.tensor_array2joint_msgs(action, ...)` builds `JointTrajectory` with **fps-aware `time_from_start`** (overlay computes `_action_duration_ns = max(int(1.5e9/fps), 1_000_000)`).
-11. `communicator.publish_action(msg)` → `/arm_controller/follow_joint_trajectory` (which, after the magic remap, is `/leader/joint_trajectory` → drives the follower).
+3. Lazy `load_policy()` on first tick (downloads from HF via `HF_HOME=/root/.cache/huggingface` if missing; moves weights to GPU). German `[FEHLER]` if CUDA is unavailable; otherwise upstream load behavior.
+4. **Audit F10 extra-camera filter**: overlay reads expected camera names from `policy_config.input_features` keys matching `observation.images.*`. Connected cameras NOT in the expected set are silently dropped with a one-time `[WARNUNG] Zusätzliche Kameras werden ignoriert: …` so the policy doesn't see an unknown observation key. **MISSING** expected cameras are no longer rejected — the upstream `policy.select_action` raises a `KeyError`/`RuntimeError` and the broad `except` in `physical_ai_server.py` ends the inference session cleanly. No more silent tick-skipping.
+5. `_preprocess(images, state)`: per image `torch.from_numpy / 255 → permute(2,0,1) → unsqueeze(0)` keyed `observation.images.{name}`. State → `float32` tensor → batch.
+6. `policy.select_action(observation)` under `torch.inference_mode()`.
+7. `data_converter.tensor_array2joint_msgs(action, ...)` builds `JointTrajectory` with **fps-aware `time_from_start`** (overlay computes `_action_duration_ns = max(int(1.5e9/fps), 1_000_000)`).
+8. `communicator.publish_action(msg)` → `/arm_controller/follow_joint_trajectory` (which, after the magic remap, is `/leader/joint_trajectory` → drives the follower).
+
+The software safety envelope that previously sat between steps 6 and 7 (NaN/Inf reject, joint clamp, per-tick velocity cap, first-tick seeding, action-shape reject, stale-camera halt, image-shape mismatch escalation) was removed in the 2026-05 stripdown. Hardware safety — Dynamixel firmware position limits, gripper current limits, JointTrajectoryController constraints, post-sync verification, torque-disable on shutdown — is the remaining defense.
 
 `gripper_joint_1` is the 6th element of the same action array, on the same `JointTrajectory`. There is no separate gripper service.
 
@@ -474,11 +476,11 @@ Per-tick (single-threaded on ROS executor, no worker thread):
 
 Both `routes/workflows.py` (student) AND teacher template route call this validator (audit fix).
 
-**Execution** — `WorkflowManager` daemon thread, `WorkflowContext` (publisher, safety envelope, IK, perception, destinations, z_table, intrinsics, last_arm_joints). Recovery routine in `finally`: hold (1.0s) → open gripper (0.5s) → return-home over 3.0s (`HOME_JOINTS_RAD = [0.0, -π/4, π/4, 0.0, 0.0]` + `GRIPPER_OPEN_RAD = 0.8`); absolute deadline **15.0s**. Auto-home on stop/error prevents arm left mid-grasp.
+**Execution** — `WorkflowManager` daemon thread, `WorkflowContext` (publisher, IK, perception, destinations, z_table, intrinsics, last_arm_joints, motion_lock, var_lock, breakpoints, cloud_vision). On workflow stop/error the daemon thread exits and the arm holds wherever it was — the auto-home recovery routine was removed in the 2026-05 stripdown. The student manually resets the arm before the next run.
 
-**Perception** — eager initialization (any failure raises RuntimeError, no silent fallback):
+**Perception** — eager initialization with **silent fallback to empty detections** on missing ONNX or missing `pupil_apriltags` (the Workshop UX continues; the affected detector returns `[]`). The hard-raise behavior was dropped in the 2026-05 stripdown — a missing detector is no longer a motion-safety event:
 - **YOLOX-tiny ONNX** at 640×640 letterbox via `onnxruntime`, COCO classes filter (~80 classes, `coco_classes.py`).
-- **LAB color matching** with per-channel σ threshold (default 3.0; std floored to 1.0 to prevent divide-by-zero); `MORPH_OPEN` then `MORPH_CLOSE` (3×3 kernel); contour area ≥ `LAB_MIN_BLOB_AREA_PX = 100`.
+- **LAB color matching** with per-channel σ threshold (default 3.0; std floored to 1.0 to prevent divide-by-zero); `MORPH_OPEN` then `MORPH_CLOSE` (3×3 kernel). No minimum-blob-area filter — every detected contour produces a `Detection` (the prior `LAB_MIN_BLOB_AREA_PX = 100` filter was dropped in the stripdown).
 - **AprilTag** via `pupil_apriltags` (BSD), `tag36h11` family.
 
 **IK fallback chain** (`overlays/workflow/ik_solver.py`):
@@ -1081,8 +1083,8 @@ When editing any of these files, **preserve the audit markers** — they are the
 | `s6 service silently disabled` (server starts but no ROS) | `.s6-keep` mount missing in compose |
 | `s6 rejects longrun\r` | CRLF in service file; Dockerfile sed strip ran? |
 | `Modal worker uses wrong torch (cu130)` | re-deploy with `index_url=...whl/cu121` and `--force-reinstall` |
-| `Inference silently swaps cameras` | Overlay enforces exact-name match — error in German `[FEHLER] Kamera-Namen passen nicht...` |
-| `Empty JointTrajectory crashes recording` | Overlay raises German `[FEHLER] JointTrajectory hat keine Punkte...` |
+| `Inference fails with KeyError on observation.images.X` | Camera connected with name not in policy config — F10 extra-camera filter only drops EXTRAS; missing cameras propagate as upstream `KeyError` and end the session |
+| `Empty JointTrajectory crashes recording with IndexError` | Leader-arm not publishing; upstream behavior after the German wrapper was dropped in the 2026-05 stripdown |
 | `dockerd hangs after install` | `start-dockerd.sh` watchdog should respawn; check `/var/log/dockerd.log` |
 | `Stuck "running" training` | `STALLED_WORKER_MINUTES=25` sweep should fail it; check Modal logs (`modal app logs edubotics-training`); check Supabase `last_progress_at` |
 | `Recording crashes on RAM warning` | `EDUBOTICS_RAM_LIMIT_GB` (default 0.8 GB) too aggressive on tight machine? |

@@ -146,11 +146,6 @@ class PhysicalAIServer(Node):
         self.on_inference = False
         self.on_calibration = False
         self.on_workflow = False
-        # Audit F9: consecutive `convert_msgs_to_raw_datas` failures.
-        # A single bad frame (malformed JPEG, cv_bridge transient)
-        # used to nuke the whole inference run. Now we skip the tick
-        # and only abort after N consecutive failures.
-        self._inference_convert_fail_count: int = 0
         # Cached Supabase JWT forwarded from the React app's
         # StartWorkflow request — consumed by _cloud_vision_burst.
         # None until the next workflow start.
@@ -825,32 +820,17 @@ class PhysicalAIServer(Node):
                 follower_msgs,
                 self.total_joint_order)
         except Exception as e:
-            # Audit F9: one bad frame used to nuke the run. Skip the
-            # tick and only abort after 30 consecutive failures
-            # (~1 s @ 30 Hz). Resets on the first successful tick below.
-            self._inference_convert_fail_count += 1
-            if self._inference_convert_fail_count < 30:
-                if self._inference_convert_fail_count % 10 == 1:
-                    self.get_logger().warning(
-                        f'convert_msgs_to_raw_datas failed (tick skipped, '
-                        f'count={self._inference_convert_fail_count}/30): {e}'
-                    )
-                return
             error_msg = (
-                f'Failed to convert messages for >1s ({str(e)}). '
+                f'Failed to convert messages ({str(e)}). '
                 f'Please check the robot type again!'
             )
             self.on_inference = False
-            self._inference_convert_fail_count = 0
             current_status.phase = TaskStatus.READY
             current_status.error = error_msg
             self.communicator.publish_status(status=current_status)
             self.inference_manager.clear_policy()
             self.timer_manager.stop(timer_name=self.operation_mode)
             return
-        # Reset counter on the first successful tick — sporadic
-        # failures don't snowball into a forced abort.
-        self._inference_convert_fail_count = 0
 
         if self.inference_manager.policy is None:
             if not self.inference_manager.load_policy():
@@ -872,13 +852,6 @@ class PhysicalAIServer(Node):
                 state=follower_data,
                 task_instruction=self.task_instruction[0]
             )
-
-            # predict() returns None when the safety envelope rejects the tick
-            # (NaN/inf in action, frozen camera, shape mismatch, camera-name
-            # mismatch). In that case skip publishing so we don't drive the
-            # arm with a bad or stale command.
-            if action is None:
-                return
 
             self.get_logger().info(
                 f'Action data: {action}')
@@ -1143,26 +1116,6 @@ class PhysicalAIServer(Node):
                 )
                 if task_info.record_inference_mode:
                     self.on_recording = True
-                # Wire the safety envelope BEFORE enabling inference so
-                # the first predicted action is already bounded. The
-                # values come from the same loader the workflow runtime
-                # uses, so both code paths share one source of truth.
-                try:
-                    joint_min, joint_max, base_delta = self._load_safety_clamps()
-                    fps = float(getattr(task_info, 'fps', 30) or 30)
-                    # `base_delta` is calibrated against 30 Hz; rescale
-                    # for the actual policy fps so a 60 Hz policy gets
-                    # half the per-tick delta budget.
-                    max_delta = [d * 30.0 / fps for d in base_delta]
-                    if hasattr(self.inference_manager, 'set_action_limits'):
-                        self.inference_manager.set_action_limits(
-                            joint_min=joint_min,
-                            joint_max=joint_max,
-                            max_delta_per_tick=max_delta,
-                        )
-                except Exception as _e:
-                    self.get_logger().warning(
-                        f'Safety envelope not configured: {_e}')
                 self.on_inference = True
                 self.inference_manager.reset_policy()
                 self.start_recording_time = time.perf_counter()
@@ -1608,30 +1561,15 @@ class PhysicalAIServer(Node):
         )
         return self.calibration_manager
 
-    def _get_latest_camera_frame(self, camera: str, max_age_s: float | None = None):
+    def _get_latest_camera_frame(self, camera: str):
         """Provider hook for the calibration manager + colour profile
         capture. Returns the most recent BGR frame for the named camera,
         or None when no frame has arrived yet / decode fails. Delegates to
         ``Communicator.get_latest_bgr_frame``, which decodes the cached
         ``CompressedImage`` JPEG via cv2.imdecode.
-
-        Audit F58: when ``max_age_s`` is set, returns None for frames
-        older than the threshold so cloud-vision bursts don't fire on
-        30-s-stale frames and waste Modal time. Calibration / colour
-        capture callers pass None (no age limit) since they're
-        student-driven, not autonomous.
         """
         if self.communicator is None:
             return None
-        if max_age_s is not None:
-            age_getter = getattr(self.communicator, 'get_camera_msg_age_s', None)
-            if callable(age_getter):
-                try:
-                    age = age_getter(camera)
-                except Exception:
-                    age = None
-                if age is None or age > max_age_s:
-                    return None
         getter = getattr(self.communicator, 'get_latest_bgr_frame', None)
         if not callable(getter):
             self.get_logger().warning(
@@ -2183,7 +2121,6 @@ class PhysicalAIServer(Node):
             ok = chunked_publish(
                 publisher=self._trajectory_publisher,
                 points=waypoints,
-                safety_apply=manager._safety.apply if hasattr(manager, '_safety') else None,
                 should_stop=self._calibration_stop_event.is_set,
             )
         except Exception as e:
@@ -2312,56 +2249,7 @@ class PhysicalAIServer(Node):
                 else None
             ),
         )
-        joint_min, joint_max, max_delta = self._load_safety_clamps()
-        try:
-            self.workflow_manager.configure_safety(
-                joint_min=joint_min,
-                joint_max=joint_max,
-                max_delta_per_tick=max_delta,
-            )
-        except Exception as e:
-            self.get_logger().warning(f'Workflow safety envelope not configured: {e}')
         return self.workflow_manager
-
-    def _load_safety_clamps(self):
-        """Single source of truth for the per-joint clamp + per-tick
-        delta cap. Reads ``safety_envelope`` from omx_f_config.yaml when
-        the keys are present; falls back to the same hardcoded defaults
-        the inference path uses if the config is missing or malformed."""
-        import math as _math
-        _pi = _math.pi
-        # Mirror the safety_envelope block in omx_f_config.yaml — see the
-        # comment there for the joint1/4/5 tightening rationale.
-        defaults_min = [-_pi / 2, -_pi / 2, -_pi / 2, -0.85 * _pi, -0.85 * _pi, -1.0]
-        defaults_max = [_pi / 2, _pi / 2, _pi / 2, 0.85 * _pi, 0.85 * _pi, 1.0]
-        defaults_delta = [0.3] * 6
-
-        try:
-            robot_type = getattr(self, 'robot_type', None) or 'omx_f'
-            param_names = [
-                'safety_envelope.joint_min',
-                'safety_envelope.joint_max',
-                'safety_envelope.max_delta_per_tick_at_30hz',
-            ]
-            declare_parameters(
-                node=self,
-                robot_type=robot_type,
-                param_names=param_names,
-                default_value=[0.0],
-            )
-            values = load_parameters(
-                node=self,
-                robot_type=robot_type,
-                param_names=param_names,
-            )
-            j_min = list(values.get('safety_envelope.joint_min') or [])
-            j_max = list(values.get('safety_envelope.joint_max') or [])
-            d_max = list(values.get('safety_envelope.max_delta_per_tick_at_30hz') or [])
-            if len(j_min) == 6 and len(j_max) == 6 and len(d_max) == 6:
-                return j_min, j_max, d_max
-        except Exception as e:
-            self.get_logger().info(f'safety_envelope config not available, using defaults: {e}')
-        return defaults_min, defaults_max, defaults_delta
 
     def _build_ik_solver(self):
         """Construct an IKSolver instance from the URDF in
@@ -2770,23 +2658,6 @@ class PhysicalAIServer(Node):
                 'Cloud-Erkennung ist auf diesem Server nicht konfiguriert '
                 '(EDUBOTICS_CLOUD_API_URL fehlt).'
             )
-        # Audit F58: refuse to burst on a >2 s-stale scene frame so we
-        # don't pay Modal to detect objects in a dead view. The caller
-        # passes the frame they already grabbed; we just confirm the
-        # underlying communicator received it recently.
-        if self.communicator is not None:
-            age_getter = getattr(self.communicator, 'get_camera_msg_age_s', None)
-            if callable(age_getter):
-                try:
-                    age = age_getter('scene')
-                except Exception:
-                    age = None
-                if age is not None and age > 2.0:
-                    from physical_ai_server.workflow.handlers.motion import WorkflowError as _WE
-                    raise _WE(
-                        'Szenenbild ist veraltet (kein neues Bild seit '
-                        f'{age:.1f}s). Cloud-Erkennung abgebrochen.'
-                    )
         token = getattr(self, '_cloud_vision_auth_token', None)
         if not token:
             raise WorkflowError(

@@ -26,9 +26,9 @@ condition is observed. A single ``motion_lock`` in WorkflowContext
 keeps motion serialized between event handlers and the main stack.
 
 The interpreter dispatches each block to the statement handler table OR
-the value evaluator table based on context. The allowlist
-(``ALLOWED_BLOCK_TYPES``) is the security boundary: any unknown ``type``
-field aborts the run with the German error before any handler runs.
+the value evaluator table based on context. Unknown block types raise a
+KeyError out of the handler tables — the upstream behavior after the
+2026-05 stripdown removed the cloud-side and runtime allowlists.
 """
 
 from __future__ import annotations
@@ -40,7 +40,6 @@ from typing import Any, Callable, Iterable
 
 from physical_ai_server.workflow.handlers import STATEMENT_HANDLERS, VALUE_EVALUATORS
 from physical_ai_server.workflow.handlers.motion import WorkflowError
-from physical_ai_server.workflow.coco_classes import ALLOWED_CLASS_LABELS
 
 
 # Hat block types — collected by Interpreter.split_roots() and run as
@@ -50,81 +49,6 @@ HAT_BLOCK_TYPES: frozenset[str] = frozenset({
     'edubotics_when_marker_seen',
     'edubotics_when_color_seen',
 })
-
-
-ALLOWED_BLOCK_TYPES: frozenset[str] = frozenset({
-    # Motion / output / destinations — statement handlers
-    'edubotics_home',
-    'edubotics_open_gripper',
-    'edubotics_close_gripper',
-    'edubotics_move_to',
-    'edubotics_pickup',
-    'edubotics_drop_at',
-    'edubotics_wait_seconds',
-    'edubotics_destination_pin',
-    'edubotics_destination_current',
-    'edubotics_log',
-    'edubotics_play_sound',
-    'edubotics_speak_de',
-    'edubotics_play_tone',
-    # Events — statement (broadcast) + hat (when_*)
-    'edubotics_broadcast',
-    'edubotics_when_broadcast',
-    'edubotics_when_marker_seen',
-    'edubotics_when_color_seen',
-    # Perception — value evaluators
-    'edubotics_detect_color',
-    'edubotics_wait_until_color',
-    'edubotics_count_color',
-    'edubotics_detect_marker',
-    'edubotics_wait_until_marker',
-    'edubotics_detect_object',
-    'edubotics_wait_until_object',
-    'edubotics_count_objects_class',
-    'edubotics_detect_open_vocab',
-    # Logic + variables (Blockly built-ins)
-    'controls_if',
-    'controls_repeat_ext',
-    'controls_whileUntil',
-    'controls_for',
-    'controls_forEach',
-    'logic_compare',
-    'logic_operation',
-    'logic_negate',
-    'logic_boolean',
-    'math_number',
-    'math_arithmetic',
-    'math_random_int',
-    'math_constrain',
-    'math_modulo',
-    'math_round',
-    'variables_get',
-    'variables_set',
-    'text',
-    # Lists — Blockly built-ins, value + statement
-    'lists_create_with',
-    'lists_repeat',
-    'lists_length',
-    'lists_isEmpty',
-    'lists_indexOf',
-    'lists_getIndex',
-    'lists_setIndex',
-    'lists_getSublist',
-    # Procedures — Blockly built-ins
-    'procedures_defnoreturn',
-    'procedures_defreturn',
-    'procedures_callnoreturn',
-    'procedures_callreturn',
-    'procedures_ifreturn',
-})
-
-
-ALLOWED_COLORS: frozenset[str] = frozenset({'rot', 'gruen', 'blau', 'gelb'})
-
-# Loop-iteration safety: prevent runaway controls_repeat_ext or while
-# from hanging the daemon. 10000 ticks of motion-handler work would
-# already be 5+ hours of wall time at the chunk pacing.
-MAX_LOOP_ITERATIONS = 10_000
 
 
 class _ProcedureReturn(Exception):
@@ -171,47 +95,7 @@ class Interpreter:
         if not isinstance(blocks, list):
             raise InterpreterError('Workflow-JSON hat kein gültiges "blocks"-Array.')
 
-        for block in blocks:
-            cls._validate_block(block)
-
         return cls(blocks)
-
-    @classmethod
-    def _validate_block(cls, block: Any) -> None:
-        if not isinstance(block, dict):
-            raise InterpreterError('Ungültiger Block-Eintrag im Workflow.')
-        btype = block.get('type')
-        if btype not in ALLOWED_BLOCK_TYPES:
-            raise InterpreterError(f'Unbekannter Block-Typ: {btype}')
-
-        # Validate fields against allowlists where applicable.
-        fields = block.get('fields') or {}
-        if isinstance(fields, dict):
-            for name, value in fields.items():
-                lname = name.lower()
-                if lname == 'color' and value not in ALLOWED_COLORS:
-                    raise InterpreterError(f'Unbekannte Farbe: {value}')
-                if lname == 'class' and value not in ALLOWED_CLASS_LABELS:
-                    raise InterpreterError(f'Unbekannte Objektklasse: {value}')
-
-        # Recurse through inputs and next.
-        inputs = block.get('inputs') or {}
-        if isinstance(inputs, dict):
-            for slot in inputs.values():
-                if not isinstance(slot, dict):
-                    continue
-                child = slot.get('block')
-                if isinstance(child, dict):
-                    cls._validate_block(child)
-                shadow = slot.get('shadow')
-                if isinstance(shadow, dict):
-                    cls._validate_block(shadow)
-
-        nxt = block.get('next')
-        if isinstance(nxt, dict):
-            child = nxt.get('block')
-            if isinstance(child, dict):
-                cls._validate_block(child)
 
     # ------------------------------------------------------------------
     # Public introspection used by WorkflowManager
@@ -516,13 +400,6 @@ class Interpreter:
             n = int(times_val) if times_val is not None else 0
         except (TypeError, ValueError):
             raise InterpreterError('Wiederhole-Block hat keine gültige Zahl.')
-        # Audit round-3 §18: raise BEFORE the loop so a student requesting
-        # repeat=1_000_000 doesn't get 10000 motions executed before the
-        # cap error fires. Mirrors _exec_while_until's pre-loop check.
-        if n > MAX_LOOP_ITERATIONS:
-            raise InterpreterError(
-                f'Wiederhole {n} mal: Limit von {MAX_LOOP_ITERATIONS} überschritten.'
-            )
         do_block = self._get_input_block(block, 'DO')
         for i in range(n):
             if ctx.should_stop():
@@ -538,20 +415,14 @@ class Interpreter:
         mode = block.get('fields', {}).get('MODE', 'WHILE')
         bool_block = self._get_input_block(block, 'BOOL')
         do_block = self._get_input_block(block, 'DO')
-        iterations = 0
         while True:
             if ctx.should_stop():
                 raise WorkflowError('Workflow wurde gestoppt.')
-            if iterations > MAX_LOOP_ITERATIONS:
-                raise InterpreterError(
-                    f'Schleifen-Limit von {MAX_LOOP_ITERATIONS} überschritten.'
-                )
             cond = self._eval_value(bool_block, ctx) if bool_block else False
             stay = self._truthy(cond) if mode == 'WHILE' else not self._truthy(cond)
             if not stay:
                 break
             self._exec_chain(do_block, ctx, on_block_change)
-            iterations += 1
 
     def _exec_for(
         self,
@@ -566,19 +437,13 @@ class Interpreter:
         if step == 0:
             raise InterpreterError('Schrittweite 0 ist ungültig.')
         do_block = self._get_input_block(block, 'DO')
-        iterations = 0
         i = start
         while (step > 0 and i <= end) or (step < 0 and i >= end):
             if ctx.should_stop():
                 raise WorkflowError('Workflow wurde gestoppt.')
-            if iterations > MAX_LOOP_ITERATIONS:
-                raise InterpreterError(
-                    f'Zähl-Schleifen-Limit von {MAX_LOOP_ITERATIONS} überschritten.'
-                )
             self._set_variable(ctx, var_name, i)
             self._exec_chain(do_block, ctx, on_block_change)
             i += step
-            iterations += 1
 
     def _exec_for_each(
         self,
@@ -594,15 +459,9 @@ class Interpreter:
         if not hasattr(items, '__iter__'):
             raise InterpreterError('Für-jedes-Block hat keinen iterierbaren Wert.')
         do_block = self._get_input_block(block, 'DO')
-        iterations = 0
         for item in items:
             if ctx.should_stop():
                 raise WorkflowError('Workflow wurde gestoppt.')
-            iterations += 1
-            if iterations > MAX_LOOP_ITERATIONS:
-                raise InterpreterError(
-                    f'Für-jedes-Limit von {MAX_LOOP_ITERATIONS} überschritten.'
-                )
             self._set_variable(ctx, var_name, item)
             self._exec_chain(do_block, ctx, on_block_change)
 
@@ -923,7 +782,7 @@ class Interpreter:
         if btype == 'lists_repeat':
             v = self._eval_value(self._get_input_block(block, 'ITEM'), ctx)
             n = int(self._eval_value(self._get_input_block(block, 'NUM'), ctx) or 0)
-            n = max(0, min(n, MAX_LOOP_ITERATIONS))
+            n = max(0, n)
             return [v] * n
         if btype == 'lists_length':
             target = self._eval_value(self._get_input_block(block, 'VALUE'), ctx)

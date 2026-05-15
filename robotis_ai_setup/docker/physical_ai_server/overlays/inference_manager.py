@@ -17,12 +17,10 @@
 # Author: Dongyun Kim
 
 import os
-import time
 
 from lerobot.policies.pretrained import PreTrainedPolicy
 import numpy as np
 from physical_ai_server.utils.file_utils import read_json_file
-from physical_ai_server.workflow.safety_envelope import SafetyEnvelope
 import torch
 
 
@@ -42,48 +40,6 @@ class InferenceManager:
         self.policy_path = None
         self.policy = None
         self._expected_image_keys = []
-        self._expected_image_shapes = {}
-        # Stale camera detection: track last-seen image hash per camera
-        self._last_image_hashes: dict[str, int] = {}
-        self._last_image_change_time: dict[str, float] = {}
-        self._stale_warn_interval = 5.0  # warn every N seconds per camera
-        self._stale_threshold = 2.0  # seconds before an image is considered stale
-        # After this many seconds of frozen frames we halt inference entirely —
-        # otherwise the policy keeps commanding motion based on a dead camera.
-        self._stale_halt_threshold = 5.0
-        self._last_stale_warn_time: dict[str, float] = {}
-        # Per-joint safety envelope for the predicted action. The shared
-        # SafetyEnvelope class is also used by the Roboter Studio workflow
-        # runtime; both call sites configure their own instance via
-        # set_action_limits and apply it per-tick.
-        self._safety = SafetyEnvelope()
-        # Audit F13: consecutive image-shape mismatch counter. After
-        # ~3 s of returning None we escalate to a hard halt so the
-        # student sees a clear UI signal instead of a silently frozen
-        # arm + log spam.
-        self._image_shape_skip_count: int = 0
-        # Audit F11: a Roboter Studio / Inferenz episode starts with
-        # ``_last_action=None`` after reset_policy(); _need_seed flips
-        # to True so the first predict() call can ask the caller for
-        # the current joint state before applying the delta cap.
-        self._need_seed: bool = True
-
-    def set_action_limits(
-            self,
-            joint_min: list[float] | None = None,
-            joint_max: list[float] | None = None,
-            max_delta_per_tick: list[float] | None = None) -> None:
-        """Configure the safety envelope applied to every predicted action.
-
-        Thin wrapper kept for back-compat with callers in
-        physical_ai_server.py. Forwards to the shared SafetyEnvelope
-        instance.
-        """
-        self._safety.set_action_limits(
-            joint_min=joint_min,
-            joint_max=joint_max,
-            max_delta_per_tick=max_delta_per_tick,
-        )
 
     def validate_policy(self, policy_path: str) -> bool:
         result_message = ''
@@ -133,7 +89,6 @@ class InferenceManager:
             self.policy.eval()
             self.reset_policy()
             self._expected_image_keys = self._read_expected_image_keys()
-            self._expected_image_shapes = self._read_expected_image_shapes()
             return True
         except Exception as e:
             print(f'Failed to load policy from {self.policy_path}: {e}')
@@ -143,29 +98,6 @@ class InferenceManager:
         """Reset policy state (action queue, temporal ensemble) between episodes."""
         if self.policy is not None and hasattr(self.policy, 'reset'):
             self.policy.reset()
-        # Drop the per-tick delta-cap memory so the first action of a new
-        # episode isn't clamped against the LAST action of the previous
-        # one — which can be far away if the operator repositioned the
-        # arm between episodes, freezing the arm at the cap until it
-        # walks across the gap. The state lives on the SafetyEnvelope
-        # instance after the d408378 extraction; resetting the dead
-        # InferenceManager-local _last_action attribute (as the v1 ship
-        # of this file did) was a no-op.
-        self._safety.reset()
-        # Audit F11: re-arm the first-tick seed so the next predict()
-        # call seeds the safety envelope from the current follower joints
-        # before applying the delta cap.
-        self._need_seed = True
-        # Audit F13: clear consecutive-skip counter so a previous run's
-        # mismatch doesn't blow up the next run's first tick.
-        self._image_shape_skip_count = 0
-        # Drop the per-camera stale-frame dedupe + last-seen state so a
-        # new episode's first frame is always treated as "fresh" and a
-        # camera that re-froze gets a fresh warning instead of being
-        # silently masked by the prior episode's hashes.
-        self._last_image_hashes.clear()
-        self._last_image_change_time.clear()
-        self._last_stale_warn_time.clear()
 
     def _read_expected_image_keys(self) -> list[str]:
         """Read expected observation.images.* keys from the policy config."""
@@ -177,68 +109,6 @@ class InferenceManager:
         except Exception:
             pass
         return []
-
-    def _read_expected_image_shapes(self) -> dict[str, list[int]]:
-        """Read expected image shapes from the policy config.
-
-        Returns dict like {'observation.images.gripper': [3, 480, 640]}.
-        """
-        try:
-            config_path = os.path.join(self.policy_path, 'config.json')
-            config = read_json_file(config_path)
-            if config and 'input_features' in config:
-                return {
-                    k: v.get('shape', [])
-                    for k, v in config['input_features'].items()
-                    if k.startswith('observation.images.') and isinstance(v, dict)
-                }
-        except Exception:
-            pass
-        return {}
-
-    def _check_stale_cameras(self, images: dict[str, np.ndarray]) -> str | None:
-        """Detect cameras that stopped publishing by comparing image hashes.
-
-        Returns the name of the first camera that's been frozen past
-        `_stale_halt_threshold` so the caller can halt inference; returns None
-        otherwise. Warnings are still printed at the lower `_stale_threshold`
-        so the operator gets an early signal before the halt fires.
-        """
-        now = time.monotonic()
-        halt_on: str | None = None
-        for name, img in images.items():
-            # Sample 4 sparse 256-byte slices (start, ¼, ½, ¾) instead of
-            # the first 1 KB. A static row 0 with motion below would have
-            # falsely tested as stale under the contiguous-prefix scheme.
-            buf = img.data.tobytes()
-            n = len(buf)
-            if n <= 1024:
-                sample = buf
-            else:
-                slice_size = 256
-                offsets = (0, n // 4, n // 2, (3 * n) // 4)
-                sample = b''.join(buf[o:o + slice_size] for o in offsets)
-            h = hash(sample)
-            prev = self._last_image_hashes.get(name)
-            if prev != h:
-                self._last_image_hashes[name] = h
-                self._last_image_change_time[name] = now
-                continue
-            last_change = self._last_image_change_time.get(name, now)
-            stale_duration = now - last_change
-            if stale_duration > self._stale_halt_threshold and halt_on is None:
-                halt_on = name
-            elif stale_duration > self._stale_threshold:
-                last_warn = self._last_stale_warn_time.get(name, 0)
-                if now - last_warn > self._stale_warn_interval:
-                    print(
-                        f'[WARNUNG] Kamera "{name}" liefert seit '
-                        f'{stale_duration:.1f}s dasselbe Bild — '
-                        f'Verbindung pruefen!',
-                        flush=True,
-                    )
-                    self._last_stale_warn_time[name] = now
-        return halt_on
 
     def clear_policy(self):
         if hasattr(self, 'policy'):
@@ -256,32 +126,13 @@ class InferenceManager:
             state: list[float],
             task_instruction: str = None) -> list:
 
+        # Audit F10: drop EXTRA cameras the policy wasn't trained on so a
+        # 1-camera-trained policy with 2 connected cameras doesn't crash
+        # the policy on an unknown observation key. Pure correctness fix
+        # — the policy still runs with the cameras it expects.
         if self._expected_image_keys:
             provided = {f'observation.images.{k}' for k in images}
-            missing = set(self._expected_image_keys) - provided
             unexpected = provided - set(self._expected_image_keys)
-
-            if missing:
-                # Previously raised — but raising from a ROS timer callback
-                # may tear down the executor. Log, skip this tick, return None
-                # so the caller doesn't publish stale actions to the arm.
-                expected_names = [k.replace('observation.images.', '') for k in self._expected_image_keys]
-                connected_names = list(images.keys())
-                print(
-                    f'[FEHLER] Kamera-Namen passen nicht: Modell erwartet '
-                    f'{expected_names}, verbunden {connected_names}. '
-                    f'Inferenz-Tick uebersprungen.',
-                    flush=True,
-                )
-                return None
-
-            # Audit F10: also reject EXTRA cameras. A 1-camera-trained
-            # policy with 2 connected cameras was being injected with
-            # an extra ``observation.images.scene`` tensor → policy
-            # crashed on unknown key → broad except aborted the run.
-            # Drop the extra keys here (or refuse, depending on the
-            # caller's preference). Dropping is friendlier to the
-            # student than aborting the run for a transient mis-config.
             if unexpected:
                 expected_names = [k.replace('observation.images.', '') for k in self._expected_image_keys]
                 unexpected_names = [k.replace('observation.images.', '') for k in unexpected]
@@ -290,88 +141,18 @@ class InferenceManager:
                     f'{unexpected_names}, Modell erwartet nur {expected_names}.',
                     flush=True,
                 )
-                # Drop the extras from the images dict so _preprocess
-                # doesn't build a tensor the policy can't accept.
-                filtered = {
+                images = {
                     k: v for k, v in images.items()
                     if f'observation.images.{k}' in self._expected_image_keys
                 }
-                images = filtered
-
-        stale_camera = self._check_stale_cameras(images)
-        if stale_camera is not None:
-            # Frozen camera = policy is acting on a dead scene. Refuse to
-            # publish a command rather than drive the arm blind.
-            print(
-                f'[STOPP] Kamera "{stale_camera}" ist seit >'
-                f'{self._stale_halt_threshold:.0f}s eingefroren. '
-                f'Inferenz angehalten — Kamera prüfen, dann neu starten.',
-                flush=True,
-            )
-            return None
 
         observation = self._preprocess(images, state, task_instruction)
-
-        # Validate image shapes match what the model was trained on.
-        # A resolution mismatch (e.g. camera swapped, setting changed) would
-        # crash the model's convolutional layers with an opaque shape error.
-        if self._expected_image_shapes:
-            for key, expected_shape in self._expected_image_shapes.items():
-                if key in observation:
-                    actual_shape = list(observation[key].shape[1:])  # drop batch dim
-                    if expected_shape and actual_shape != expected_shape:
-                        self._image_shape_skip_count += 1
-                        # Audit F13: throttle the log to 1/30 ticks so a
-                        # permanent mismatch doesn't spam the log; after
-                        # ~3 s of consecutive skips (90 ticks @ 30 Hz),
-                        # raise so the caller can publish TaskStatus.error
-                        # and stop the timer instead of leaving the
-                        # student with a silently frozen arm.
-                        if self._image_shape_skip_count % 30 == 1:
-                            print(
-                                f'[FEHLER] Bildauflösung stimmt nicht überein: '
-                                f'{key} hat Form {actual_shape}, '
-                                f'Modell erwartet {expected_shape}. Tick übersprungen.',
-                                flush=True,
-                            )
-                        if self._image_shape_skip_count >= 90:
-                            raise RuntimeError(
-                                f'Bildauflösung stimmt seit >3s nicht überein '
-                                f'({key} hat {actual_shape}, erwartet '
-                                f'{expected_shape}). Inferenz angehalten.'
-                            )
-                        return None
-            # Successful shape check resets the consecutive-skip counter.
-            self._image_shape_skip_count = 0
 
         with torch.inference_mode():
             action = self.policy.select_action(observation)
             action = action.squeeze(0).to('cpu').numpy()
 
-        # Audit F11: seed the velocity-cap memory on the FIRST tick of
-        # a new episode so the first action IS subject to the delta
-        # cap. Without this, ``_last_action is None`` skips the cap
-        # entirely and a policy that emits a 1.5 rad jump from the
-        # current pose hits the JointTrajectoryController as a ~30 rad/s
-        # snap.
-        if self._need_seed:
-            self._safety.seed_last_action(state)
-            self._need_seed = False
-
-        # Safety envelope: NaN/inf guard + joint-limit clamp + per-tick delta
-        # cap. A diverging policy (bad checkpoint, OOD observation) can emit
-        # huge or NaN values; publishing those to /arm_controller causes a
-        # violent hardware motion.
-        action = self._apply_safety_envelope(action)
-        if action is None:
-            return None
-
         return action
-
-    def _apply_safety_envelope(self, action: np.ndarray) -> np.ndarray | None:
-        """Thin wrapper preserved for callers; delegates to the shared
-        SafetyEnvelope instance."""
-        return self._safety.apply(action)
 
     def _preprocess(
             self,

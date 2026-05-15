@@ -253,8 +253,6 @@ def detect_open_vocab(ctx, args: dict[str, Any]) -> list:
             'ist deaktiviert. Bitte aktivieren oder einen bekannten Begriff '
             'verwenden.'
         )
-    if ctx.should_stop():
-        raise WorkflowError('Workflow wurde gestoppt.')
     bgr = ctx.get_scene_frame() if ctx.get_scene_frame else None
     if bgr is None:
         raise WorkflowError('Kein Szenenbild verfügbar.')

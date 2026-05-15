@@ -26,11 +26,13 @@ Mode selection is per-block in the workflow interpreter:
   optional ``aruco_id`` filter.
 
 Both the ONNX session and the AprilTag detector are constructed eagerly
-in ``__init__`` and any failure raises ``RuntimeError`` with a German
-message. Earlier versions returned ``False`` from internal ``_ensure_*``
-helpers which caused detection blocks to silently return ``[]`` when
-the YOLOX ONNX wasn't baked into the image — see commit history for
-the audit that removed that fallback.
+in ``__init__``. On any failure (missing file, missing dependency,
+malformed model) the underlying handle stays ``None`` and the matching
+``_detect_*`` method returns ``[]`` silently. The hard-raise variant
+that existed earlier was dropped in the 2026-05 safety stripdown — a
+missing detector is a configuration issue, not a motion-safety event,
+and the Workshop UX continues with empty detections so the student can
+still use the rest of the workflow.
 """
 
 from __future__ import annotations
@@ -52,21 +54,12 @@ from physical_ai_server.workflow.coco_classes import COCO_CLASSES, ID_TO_LABEL
 # ``EDUBOTICS_DETECTOR=dfine-n`` today would index out-of-bounds on the
 # D-FINE-N output tensor. Until the decode head is wired (tracked in
 # ``docs/ROBOTER_STUDIO_DEFERRED.md`` §7.2 and ``tools/dfine_finetune.md``)
-# we treat any non-default value as a configuration error and raise at
-# import time so the operator sees the issue immediately rather than at
-# the first inference tick.
-# Audit round-3 §J/§K.
+# any non-default value is ignored and YOLOX-tiny is loaded anyway —
+# the env var stays here so the future bring-up can flip ``_ACTIVE_ONNX_PATH``
+# without rewriting the call sites.
 DETECTOR_KIND = os.environ.get('EDUBOTICS_DETECTOR', 'yolox-tiny').strip().lower()
 YOLOX_ONNX_PATH = Path(os.environ.get('EDUBOTICS_YOLOX_ONNX', '/opt/edubotics/yolox_tiny.onnx'))
 DFINE_ONNX_PATH = Path(os.environ.get('EDUBOTICS_DFINE_ONNX', '/opt/edubotics/dfine_n.onnx'))
-
-if DETECTOR_KIND not in ('yolox-tiny', 'yolox'):
-    raise RuntimeError(
-        'EDUBOTICS_DETECTOR='
-        f'{DETECTOR_KIND!r} ist in dieser Version nicht unterstützt. '
-        'Nur "yolox-tiny" funktioniert; die D-FINE-N-Integration ist '
-        'noch in Arbeit (siehe ROBOTER_STUDIO_DEFERRED.md §7.2).'
-    )
 
 # Which ONNX file we actually load — currently always YOLOX-tiny.
 _ACTIVE_ONNX_PATH = YOLOX_ONNX_PATH
@@ -75,7 +68,6 @@ YOLOX_INPUT_SIZE = (640, 640)
 YOLOX_CONFIDENCE_THRESHOLD = 0.30
 YOLOX_NMS_IOU_THRESHOLD = 0.45
 
-LAB_MIN_BLOB_AREA_PX = 100
 COLOR_PATCH_SIZE_PX = 10
 
 
@@ -93,10 +85,11 @@ class Detection:
 class Perception:
     """Eager-initialised wrapper over HSV, YOLOX, and AprilTag backends.
 
-    Construction raises ``RuntimeError`` (German message) if either
-    backend isn't available. The Workshop UX is built around the
-    promise that perception either works or fails-loud, never silently
-    drops detections.
+    If a backend can't be constructed (missing ONNX, missing
+    ``pupil_apriltags``), the corresponding handle stays ``None`` and
+    the matching ``_detect_*`` method returns an empty list. The
+    workflow keeps running so the student can use the remaining blocks;
+    a "no detections" outcome surfaces naturally to the editor.
     """
 
     def __init__(self) -> None:
@@ -157,8 +150,6 @@ class Perception:
         detections: list[Detection] = []
         for contour in contours:
             area = cv2.contourArea(contour)
-            if area < LAB_MIN_BLOB_AREA_PX:
-                continue
             x, y, w, h = cv2.boundingRect(contour)
             cx, cy = x + w // 2, y + h // 2
             detections.append(Detection(
@@ -173,36 +164,22 @@ class Perception:
     # YOLOX
     # ------------------------------------------------------------------
     def _init_yolox(self) -> None:
-        """Load the active detector ONNX (YOLOX-tiny by default;
-        D-FINE-N when ``EDUBOTICS_DETECTOR=dfine-n``). Fails loudly if
-        the file is missing — the perception module promises
-        fail-loud and audited callers (Workshop) depend on that.
-        D-FINE-N postprocessing is NMS-free; the dispatch in
-        ``_detect_yolo`` honours both head shapes.
-        """
+        """Load the active detector ONNX (YOLOX-tiny by default). On any
+        failure (missing file, missing onnxruntime, malformed model) the
+        session stays None and detect_yolo silently returns []."""
         path = _ACTIVE_ONNX_PATH
-        if not path.exists():
-            raise RuntimeError(
-                f'Erkennungs-Modell fehlt unter {path} — Image neu '
-                f'bauen oder EDUBOTICS_DETECTOR auf einen vorhandenen '
-                f'Pfad zeigen.'
-            )
         try:
+            if not path.exists():
+                return
             import onnxruntime as ort
-        except ImportError as e:
-            raise RuntimeError(
-                'onnxruntime ist nicht installiert — Image neu bauen.'
-            ) from e
-        try:
             providers = ['CPUExecutionProvider']
             self._yolox_session = ort.InferenceSession(
                 str(path), providers=providers,
             )
             self._yolox_input_name = self._yolox_session.get_inputs()[0].name
-        except Exception as e:
-            raise RuntimeError(
-                f'Erkennungs-Modell konnte nicht geladen werden: {e}'
-            ) from e
+        except Exception:
+            self._yolox_session = None
+            self._yolox_input_name = None
 
     @staticmethod
     def _letterbox(bgr: np.ndarray, target_size: tuple[int, int]) -> tuple[np.ndarray, float, tuple[int, int]]:
@@ -256,7 +233,8 @@ class Perception:
         coco_class: str | None,
         color_filter: str | None,
     ) -> list[Detection]:
-        # Session is loaded in __init__; if we got here it's ready.
+        if self._yolox_session is None or self._yolox_input_name is None:
+            return []
         padded, ratio, (pad_x, pad_y) = self._letterbox(bgr, YOLOX_INPUT_SIZE)
         # YOLOX expects BGR uint8 -> CHW float32 (no normalisation).
         tensor = padded.transpose(2, 0, 1).astype(np.float32)
@@ -412,15 +390,11 @@ class Perception:
     # AprilTag
     # ------------------------------------------------------------------
     def _init_apriltag(self) -> None:
-        """Construct the pupil_apriltags detector. Fails loudly on
-        missing dependency — no fallback."""
+        """Construct the pupil_apriltags detector. On failure (missing
+        dependency, init error) the detector stays None and
+        detect_apriltag silently returns []."""
         try:
             from pupil_apriltags import Detector
-        except ImportError as e:
-            raise RuntimeError(
-                'pupil_apriltags ist nicht installiert — Image neu bauen.'
-            ) from e
-        try:
             self._apriltag_detector = Detector(
                 families='tag36h11',
                 nthreads=2,
@@ -430,13 +404,12 @@ class Perception:
                 decode_sharpening=0.25,
                 debug=False,
             )
-        except Exception as e:
-            raise RuntimeError(
-                f'AprilTag-Detektor konnte nicht initialisiert werden: {e}'
-            ) from e
+        except Exception:
+            self._apriltag_detector = None
 
     def _detect_apriltag(self, bgr: np.ndarray, aruco_id: int | None) -> list[Detection]:
-        # Detector is constructed in __init__; if we got here it's ready.
+        if self._apriltag_detector is None:
+            return []
         gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
         results = self._apriltag_detector.detect(gray)
         detections: list[Detection] = []

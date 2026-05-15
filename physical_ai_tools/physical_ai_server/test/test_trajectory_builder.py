@@ -6,9 +6,6 @@ publisher is not called for the next chunk."""
 
 from __future__ import annotations
 
-import math
-import time
-
 from physical_ai_server.workflow.trajectory_builder import (
     build_segment,
     chunked_publish,
@@ -53,7 +50,6 @@ def test_chunked_publish_calls_publisher_per_chunk():
     ok = chunked_publish(
         publisher=publisher,
         points=waypoints,
-        safety_apply=None,
         should_stop=lambda: False,
         chunk_duration_s=1.0,
         fps=30,
@@ -78,37 +74,9 @@ def test_chunked_publish_halts_on_stop():
     ok = chunked_publish(
         publisher=publisher,
         points=waypoints,
-        safety_apply=None,
         should_stop=lambda: state['stop'],
         chunk_duration_s=1.0,
         fps=30,
     )
     assert ok is False
     assert len(calls) == 1
-
-
-def test_chunked_publish_passes_each_point_through_safety():
-    """If safety_apply returns None, that point is dropped; otherwise the
-    clamped value is what gets published."""
-    waypoints = build_segment([0.0] * 6, [1.0] * 6, duration_s=1.0, fps=30)
-    received: list[list[float]] = []
-
-    def publisher(chunk):
-        received.extend([q for q, _ in chunk])
-
-    def safety_apply(action):
-        # Cap any action's first element to 0.5.
-        import numpy as np
-        a = action.copy()
-        a[0] = min(a[0], 0.5)
-        return a
-
-    chunked_publish(
-        publisher=publisher,
-        points=waypoints,
-        safety_apply=safety_apply,
-        should_stop=lambda: False,
-        chunk_duration_s=2.0,   # one big chunk
-        fps=30,
-    )
-    assert all(q[0] <= 0.5 + 1e-6 for q in received)

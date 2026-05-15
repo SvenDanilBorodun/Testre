@@ -59,11 +59,6 @@ from trajectory_msgs.msg import JointTrajectory
 class DataManager:
     RECORDING = False
     RECORD_COMPLETED = True
-    # RAM cushion: trigger early-save when free RAM drops below this.
-    # Default 0.8 GB (was hardcoded 2 GB) — 2 GB triggered far too easily
-    # on 32 GB machines running Chrome + IDE during a transient GC dip.
-    # Override via env var per deployment / classroom.
-    RAM_LIMIT_GB = float(os.environ.get('EDUBOTICS_RAM_LIMIT_GB', '0.8'))
     SKIP_TIME = 0.1  # Seconds
 
     # Progress queue for multiprocessing communication
@@ -103,9 +98,6 @@ class DataManager:
         self._current_task = 0
         self._init_task_limits()
         self._current_scenario_number = 0
-        # Frame-drop detection (Option B): set when RAM pressure forces an
-        # early save, so the validator can warn about a truncated episode.
-        self._early_saved_due_to_ram = False
         # Surfaced to TaskStatus.error as a [WARNUNG] prefix so the React UI
         # renders a banner after the truncated episode saves. Cleared on the
         # next episode reset.
@@ -154,36 +146,6 @@ class DataManager:
 
         elif self._status == 'run':
             if not self._check_time(self._task_info.episode_time_s, 'save'):
-                if RAMChecker.get_free_ram_gb() < self.RAM_LIMIT_GB:
-                    # Mark this episode as RAM-truncated so _validate_episode_buffer()
-                    # can warn the operator about silent data loss.
-                    self._early_saved_due_to_ram = True
-                    warning = (
-                        f'Episode {self._record_episode_count + 1} wegen '
-                        f'niedrigem Arbeitsspeicher (<{self.RAM_LIMIT_GB} GB '
-                        f'frei) früh beendet. Die Aufnahme ist kürzer als '
-                        f'geplant — bitte Browser/andere Anwendungen '
-                        f'schließen und ggf. neu aufnehmen.'
-                    )
-                    self._last_warning_message = warning
-                    print(f'[WARNUNG] {warning}', file=sys.stderr, flush=True)
-                    if not self._single_task:
-                        self._status = 'finish'
-                    else:
-                        self.record_early_save()
-                    return self.RECORDING
-                # Audit F6: validate per-tick that camera frames match
-                # the shape locked in by frame 0. A USB renegotiation
-                # mid-record that drops 720p→480p would otherwise
-                # write torn parquet/mp4. Early-save the episode with
-                # a German warning so the student sees the loss.
-                shape_ok = self._check_image_shape_against_lock(images)
-                if not shape_ok:
-                    if self._single_task:
-                        self.record_early_save()
-                    else:
-                        self._status = 'finish'
-                    return self.RECORDING
                 frame = self.create_frame(images, state, action)
                 if self._task_info.use_optimized_save_mode:
                     self._lerobot_dataset.add_frame_without_write_image(
@@ -394,43 +356,21 @@ class DataManager:
     def _validate_episode_buffer(self):
         """Inspect the in-memory episode buffer for silent data loss.
 
-        Two checks:
-          1. RAM-truncated episode (flag set by record() when memory ran out).
-          2. Frame timestamp gaps larger than 2x the expected frame interval —
-             usually a camera publisher hiccup or callback starvation.
+        Checks frame timestamp gaps larger than 2x the expected frame interval —
+        usually a camera publisher hiccup or callback starvation.
 
-        Both findings are logged in German for the student-facing operator UI;
-        neither blocks the save.
+        Findings are logged in German for the student-facing operator UI;
+        they never block the save.
         """
         buf = self._lerobot_dataset.episode_buffer
         if buf is None:
             return
 
         episode_no = self._record_episode_count + 1
-        size = buf.get('size', 0) or 0
         fps = getattr(self._task_info, 'fps', None)
         expected_dt = (1.0 / fps) if fps and fps > 0 else None
 
-        # Check 1: was this episode cut short by the RAM limit?
-        if self._early_saved_due_to_ram:
-            expected_frames = None
-            if fps and getattr(self._task_info, 'episode_time_s', None):
-                expected_frames = int(self._task_info.episode_time_s * fps)
-            if expected_frames:
-                print(
-                    f'[WARNUNG] Episode {episode_no}: nur {size} von '
-                    f'~{expected_frames} Frames aufgenommen '
-                    f'(Aufnahme wegen RAM-Mangel früh beendet).',
-                    file=sys.stderr, flush=True,
-                )
-            else:
-                print(
-                    f'[WARNUNG] Episode {episode_no}: {size} Frames '
-                    f'(Aufnahme wegen RAM-Mangel früh beendet).',
-                    file=sys.stderr, flush=True,
-                )
-
-        # Check 2: timestamp gaps inside the buffer.
+        # Timestamp gaps inside the buffer.
         timestamps = buf.get('timestamp')
         if (
             expected_dt is not None
@@ -476,48 +416,6 @@ class DataManager:
             self._current_task % len(self._task_info.task_instruction)
         ]
         return frame
-
-    def _check_image_shape_against_lock(self, images: dict) -> bool:
-        """Audit F6: per-tick assertion that camera frames still match
-        the shape recorded in ``features['observation.images.{name}']``
-        at episode 0. A mid-record USB renegotiation that drops
-        720p→480p would silently write torn parquet/mp4 otherwise.
-
-        Returns False (and sets ``_last_warning_message``) when any
-        camera's frame shape disagrees with the locked feature shape.
-        Returns True on the first call before features are populated
-        (the LeRobot wrapper sets them up after the first save).
-        """
-        try:
-            ds = self._lerobot_dataset
-            if ds is None or not hasattr(ds, 'features'):
-                return True
-            for camera_name, image in images.items():
-                key = f'observation.images.{camera_name}'
-                feature = ds.features.get(key) if isinstance(ds.features, dict) else None
-                if feature is None:
-                    continue
-                expected = tuple(feature.get('shape') or ())
-                if not expected:
-                    continue
-                if tuple(image.shape) != expected:
-                    warning = (
-                        f'Bildform geändert: Kamera "{camera_name}" liefert '
-                        f'{image.shape}, Datensatz erwartet {expected}. '
-                        f'Episode {self._record_episode_count + 1} wird '
-                        f'früh gespeichert — bitte Kamera neu verbinden '
-                        f'und Aufnahme neu starten.'
-                    )
-                    self._last_warning_message = warning
-                    print(f'[FEHLER] {warning}', file=sys.stderr, flush=True)
-                    return False
-        except Exception as e:
-            # The shape check itself must never crash the recording loop.
-            print(
-                f'[WARNUNG] Bildform-Check fehlgeschlagen: {e}',
-                file=sys.stderr, flush=True,
-            )
-        return True
 
     def record_early_save(self):
         if self._lerobot_dataset.episode_buffer is not None:
@@ -741,8 +639,6 @@ class DataManager:
                 self._lerobot_dataset.episode_buffer.clear()
             self._lerobot_dataset.episode_buffer = None
         self._start_time_s = 0
-        # Reset the RAM-truncation flag so the next episode starts clean.
-        self._early_saved_due_to_ram = False
         # Drop the stale-camera hashes so a re-recorded episode starts
         # fresh — otherwise the very first frame of the new episode would
         # always be flagged "same as last frame of previous episode" and
@@ -800,7 +696,6 @@ class DataManager:
 
     def check_lerobot_dataset(self, images, joint_list):
         try:
-            is_resumed = False
             if self._lerobot_dataset is None:
                 if self._check_dataset_exists(
                         self._save_repo_name,
@@ -809,7 +704,6 @@ class DataManager:
                         self._save_repo_name,
                         self._save_path
                     )
-                    is_resumed = True
                 else:
                     self._lerobot_dataset = self._create_dataset(
                         self._save_repo_name,
@@ -821,41 +715,6 @@ class DataManager:
                             num_threads=1
                         )
             self._lerobot_dataset.set_robot_type(self._robot_type)
-
-            # When resuming an existing dataset, the camera keys we're
-            # about to record must match what the first episode used —
-            # otherwise the trained model can't use the dataset at all.
-            # Previously this only surfaced at inference time (overlay of
-            # inference_manager.py lines 166-177), *after* hours of
-            # recording + training had already been wasted.
-            if is_resumed:
-                try:
-                    info_path = Path(self._save_path) / 'meta' / 'info.json'
-                    with open(info_path, encoding='utf-8') as f:
-                        existing = json.load(f)
-                    existing_cams = sorted(
-                        k.replace('observation.images.', '')
-                        for k in existing.get('features', {})
-                        if k.startswith('observation.images.')
-                    )
-                    current_cams = sorted(images.keys())
-                    if existing_cams != current_cams:
-                        warning = (
-                            f'Kamera-Namen passen nicht zur bestehenden '
-                            f'Aufnahme "{self._save_repo_name}". '
-                            f'Vorhanden: {existing_cams}, aktuell: '
-                            f'{current_cams}. Bitte entweder die Kameras '
-                            f'in der Robot-Config umbenennen oder eine '
-                            f'neue Aufnahme starten.'
-                        )
-                        self._last_warning_message = warning
-                        print(f'[FEHLER] {warning}', file=sys.stderr, flush=True)
-                        return False
-                except (OSError, ValueError, KeyError) as _e:
-                    # If we can't read the existing info.json that's a
-                    # separate problem — let the normal flow handle it.
-                    pass
-
             return True
         except Exception as e:
             print(f'Error checking lerobot dataset: {e}')
@@ -894,59 +753,16 @@ class DataManager:
             )
 
     def _upload_dataset(self, tags, private=False):
-        """Push the dataset to HuggingFace with a hard timeout.
-
-        The upstream helper has no timeout, so a stalled classroom network
-        can hang the UI forever. We run the push in a daemon thread and
-        bail after 1 hour; on timeout or error, we surface a German
-        warning via TaskStatus so the student actually learns the upload
-        didn't work (previously the exception was swallowed to stderr).
+        """Push the dataset to HuggingFace.
 
         ``private`` is honoured as passed in by the caller — the GUI
         defaults the toggle to True, but professional users / paired
         student work / teacher-published reference datasets can opt out.
-        Recordings with face data should still be marked private at
-        deployment-policy level (HF org "Default repo visibility")
-        rather than overridden here.
         """
-        timeout_s = 3600  # 1 hour — plenty for a multi-GB episode set
-        result_queue = queue.Queue()
-
-        def worker():
-            try:
-                self._lerobot_dataset.push_to_hub(
-                    tags=tags,
-                    private=private,
-                    upload_large_folder=True)
-                result_queue.put(('ok', None))
-            except Exception as exc:  # noqa: BLE001
-                result_queue.put(('err', exc))
-
-        thread = threading.Thread(target=worker, daemon=True)
-        thread.start()
-        try:
-            status, payload = result_queue.get(timeout=timeout_s)
-        except queue.Empty:
-            warning = (
-                'HuggingFace-Upload hat das Zeitlimit (1 Stunde) überschritten. '
-                'Die Aufnahme ist lokal gespeichert; Upload bitte manuell '
-                'neu starten, sobald das Netzwerk stabil ist.'
-            )
-            self._last_warning_message = warning
-            print(f'[FEHLER] {warning}', file=sys.stderr, flush=True)
-            return
-
-        if status == 'err':
-            warning = (
-                f'HuggingFace-Upload fehlgeschlagen: {payload}. '
-                f'Die Aufnahme ist lokal gespeichert; bitte HF-Token und '
-                f'Netzwerkverbindung prüfen.'
-            )
-            self._last_warning_message = warning
-            print(f'[FEHLER] {warning}', file=sys.stderr, flush=True)
-            return
-
-        print('[INFO] HuggingFace upload complete.', flush=True)
+        self._lerobot_dataset.push_to_hub(
+            tags=tags,
+            private=private,
+            upload_large_folder=True)
 
     def _download_dataset(self, repo_id):
         snapshot_download(

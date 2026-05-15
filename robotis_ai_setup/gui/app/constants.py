@@ -20,7 +20,7 @@ def _read_version_file() -> str:
             return candidate.read_text(encoding="utf-8").strip()
         except (OSError, UnicodeDecodeError):
             continue
-    return "2.2.3"
+    return "2.2.4"
 
 
 # GUI version — read from repo-root VERSION file (single source of truth).
@@ -181,3 +181,33 @@ DOCKER_STARTUP_TIMEOUT = 120
 DEVICE_WAIT_TIMEOUT = 30
 WEB_UI_POLL_TIMEOUT = 120
 WEB_UI_POLL_INTERVAL = 2
+
+# Auto-pull / image-update behaviour. The GUI ALREADY pulls every start via
+# docker_manager.check_for_updates (added in ec82916). 2.2.4 hardens that
+# path with offline detection (skip the 12-min retry storm), a manifest-
+# digest pre-check (skip layer pulls when local == remote), and persistent
+# last-update visibility so teachers can spot stale classroom PCs.
+#
+# Override with EDUBOTICS_SKIP_AUTO_PULL=1 to opt out (offline classrooms
+# that explicitly manage their own image cadence). Default: enabled.
+NETWORK_PROBE_TIMEOUT = 5       # seconds — Docker Hub reachability check
+MANIFEST_INSPECT_TIMEOUT = 10   # seconds — single remote manifest probe
+IMAGE_FRESHNESS_WARN_DAYS = 14  # red banner when last successful pull is older
+SKIP_AUTO_PULL = os.environ.get("EDUBOTICS_SKIP_AUTO_PULL", "").strip() in ("1", "true", "yes")
+
+
+def _resolve_last_pull_file() -> str:
+    """Persisted state for auto-pull: timestamp + per-image digests.
+
+    Lives next to ENV_FILE in %LOCALAPPDATA%\\EduBotics so the GUI can write
+    it without admin rights. Format: JSON {"timestamp": <unix>, "digests":
+    {<image>: <sha256:abcdef...>}}.
+    """
+    override = os.environ.get("EDUBOTICS_LAST_PULL_FILE")
+    if override:
+        return override
+    base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+    return os.path.join(base, "EduBotics", ".last_image_pull.json")
+
+
+LAST_PULL_FILE = _resolve_last_pull_file()

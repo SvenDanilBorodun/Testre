@@ -420,13 +420,52 @@ class EduBoticsApp:
                 return
             self._log("Alle Images erfolgreich heruntergeladen.")
 
-        # Check for image updates
+        # Check for image updates. The function pre-checks network reachability
+        # and per-image manifest digests so an offline classroom returns in ~5s
+        # and an up-to-date one returns in ~3s — only stale or missing images
+        # trigger a real layer pull.
         self._set_status("Auf Updates prüfen...")
         self._log("Prüfe auf Image-Updates...")
         if docker_manager.check_for_updates(log=self._log):
             self._log("Images auf neueste Version aktualisiert.")
         else:
             self._log("Images sind aktuell.")
+
+        # Surface the persisted last-pull state so a teacher can see at a
+        # glance which classroom PCs have been offline too long to refresh.
+        # Red status banner only fires past IMAGE_FRESHNESS_WARN_DAYS (14 d
+        # by default) — short enough to catch real drift, long enough to
+        # avoid spurious banners after a one-week vacation week.
+        try:
+            pull_status = docker_manager.get_last_pull_status()
+            age = pull_status.get("age_days")
+            if age is None:
+                self._log(
+                    "  Image-Frische: kein vorheriger Update-Zeitstempel "
+                    "vorhanden — heutiger Stand wird ab jetzt verfolgt."
+                )
+            else:
+                age_int = int(age)
+                if pull_status.get("is_stale"):
+                    self._log(
+                        f"  ⚠️ Image-Frische: letzter erfolgreicher Update vor "
+                        f"{age_int} Tagen — bitte Internetverbindung prüfen."
+                    )
+                else:
+                    self._log(
+                        f"  Image-Frische: letzter Update vor "
+                        f"{age_int} Tag{'en' if age_int != 1 else ''}."
+                    )
+            # Always log the per-image digest so support can compare
+            # classroom PCs and confirm they match.
+            for img, digest in (pull_status.get("digests") or {}).items():
+                short = img.split("/")[-1]
+                short_digest = (digest or "")[7:19] if digest else "—"
+                self._log(f"    {short}: {short_digest}")
+        except Exception as exc:
+            # Don't let a freshness-banner glitch block GUI startup. Log
+            # and continue with the existing (working) flow.
+            self._log(f"  (Frische-Status konnte nicht gelesen werden: {exc})")
 
         # Check if containers are already running from a previous session
         if docker_manager.all_containers_running():

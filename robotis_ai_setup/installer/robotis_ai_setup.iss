@@ -34,7 +34,7 @@
 [Setup]
 AppId={{B7E3F2A1-8C4D-4E5F-9A6B-1D2E3F4A5B6C}
 AppName=EduBotics
-AppVersion=2.2.3
+AppVersion=2.2.4
 AppPublisher=EduBotics
 DefaultDirName={autopf}\EduBotics
 DefaultGroupName=EduBotics

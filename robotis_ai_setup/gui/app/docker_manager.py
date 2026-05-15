@@ -13,7 +13,9 @@ Handles:
 """
 
 import atexit
+import json
 import os
+import socket
 import subprocess
 import sys
 import time
@@ -39,6 +41,11 @@ from .constants import (
     DOCKER_DIR_WSL,
     DOCKER_STARTUP_TIMEOUT,
     ENV_FILE,
+    IMAGE_FRESHNESS_WARN_DAYS,
+    LAST_PULL_FILE,
+    MANIFEST_INSPECT_TIMEOUT,
+    NETWORK_PROBE_TIMEOUT,
+    SKIP_AUTO_PULL,
     WSL_DISTRO_NAME,
     _to_wsl_path,
 )
@@ -235,21 +242,264 @@ def images_exist() -> dict[str, bool]:
     return status
 
 
-def check_for_updates(log=None) -> bool:
-    """Pull all images to ensure we have the latest version.
+# ── Auto-pull on GUI start: helpers ───────────────────────────────────────
 
-    Uses the same stall-detection + retry machinery as pull_images(), but is
-    non-fatal: a failed update for one image just means the student continues
-    to use the currently-cached version. Used on GUI startup.
 
-    Returns True if any image was updated.
+def is_dockerhub_reachable(timeout: int = NETWORK_PROBE_TIMEOUT) -> bool:
+    """Fast pre-check whether Docker Hub is reachable BEFORE we burn ~12 min
+    on retry storms when offline. Plain TCP probe to `registry-1.docker.io:443`
+    — doesn't authenticate, doesn't pull, just confirms the network can route
+    to the registry.
+
+    Used by check_for_updates() to short-circuit the per-image loop on a
+    disconnected classroom network. Returns False on any DNS / connection /
+    timeout error.
     """
+    try:
+        with socket.create_connection(
+            ("registry-1.docker.io", 443),
+            timeout=timeout,
+        ):
+            return True
+    except (OSError, socket.timeout):
+        return False
+
+
+def _get_local_repo_digest(image: str) -> Optional[str]:
+    """Return the locally-cached image's RepoDigest (the registry-side
+    content digest), or None if the image isn't present locally or has no
+    digest attached (e.g. images built locally and never pulled).
+
+    Format example: ``sha256:1171c7e0063a54dd7c547b8b245755d44e496234060e8056765220359cb88023``.
+    We only return the bare digest, not the ``image@sha256:...`` form.
+    """
+    try:
+        result = subprocess.run(
+            _docker_cmd(
+                "image", "inspect", image,
+                "--format", "{{range .RepoDigests}}{{.}}|{{end}}",
+            ),
+            capture_output=True, text=True, timeout=10,
+            **_SUBPROCESS_KWARGS,
+        )
+        if result.returncode != 0:
+            return None
+        # RepoDigests format: ``nettername/foo@sha256:abc...|other/foo@sha256:def...|``
+        for entry in result.stdout.strip().rstrip("|").split("|"):
+            if "@sha256:" in entry:
+                return entry.split("@", 1)[1]
+        return None
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+
+
+def _get_remote_manifest_digest(
+    image: str,
+    timeout: int = MANIFEST_INSPECT_TIMEOUT,
+) -> Optional[str]:
+    """Return the registry-side platform manifest digest for the linux/amd64
+    variant of ``image``, or None on any error.
+
+    ``docker manifest inspect`` makes a single HEAD/GET to the registry's
+    manifest endpoint — no layer download, fast even on slow links. The output
+    is the manifest LIST (for multi-platform images), and we pick the digest
+    of the linux/amd64 manifest because that's what students actually pull.
+
+    Compared against ``_get_local_repo_digest`` to decide whether a real pull
+    is necessary. Mismatch (or "no local digest") → pull. Match → skip.
+    """
+    try:
+        # `docker manifest inspect` is an experimental-flag-free command in
+        # Docker 20.10+ and works against an unauthenticated daemon for
+        # public images. We still wrap it through the EduBotics distro so
+        # the network path goes through the same dockerd the pull would use.
+        result = subprocess.run(
+            _docker_cmd("manifest", "inspect", image),
+            capture_output=True, text=True, timeout=timeout,
+            **_SUBPROCESS_KWARGS,
+        )
+        if result.returncode != 0:
+            return None
+        data = json.loads(result.stdout)
+    except (FileNotFoundError, subprocess.TimeoutExpired, ValueError):
+        return None
+
+    # Two output shapes are possible:
+    # 1. Multi-platform manifest list (OCI index or Docker manifest list)
+    #    → pick the linux/amd64 entry's digest.
+    # 2. Single-platform manifest (rare for our nettername/* images, but
+    #    `docker manifest inspect` returns it unwrapped for some registries)
+    #    → fall back to its own config.digest if present.
+    manifests = data.get("manifests")
+    if isinstance(manifests, list):
+        for entry in manifests:
+            platform = entry.get("platform", {})
+            if (
+                platform.get("architecture") == "amd64"
+                and platform.get("os") == "linux"
+            ):
+                digest = entry.get("digest")
+                if isinstance(digest, str) and digest.startswith("sha256:"):
+                    return digest
+        return None
+    # Single-platform manifest — return its top-level digest if present.
+    digest = data.get("digest")
+    if isinstance(digest, str) and digest.startswith("sha256:"):
+        return digest
+    return None
+
+
+def _load_last_pull_info() -> Optional[dict]:
+    """Read the persisted last-pull state. Returns ``None`` if no file exists
+    or the file is unreadable (treat as 'never pulled')."""
+    try:
+        with open(LAST_PULL_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict) and "timestamp" in data:
+            return data
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def _save_last_pull_info(per_image_digests: dict[str, Optional[str]]) -> None:
+    """Persist the current pull's per-image digests + timestamp. Best-effort —
+    if the directory can't be created (locked-down student machine), we just
+    skip silently rather than failing the whole startup.
+    """
+    payload = {
+        "timestamp": int(time.time()),
+        "digests": {
+            img: digest
+            for img, digest in per_image_digests.items()
+            if digest is not None
+        },
+    }
+    try:
+        os.makedirs(os.path.dirname(LAST_PULL_FILE), exist_ok=True)
+        with open(LAST_PULL_FILE, "w", encoding="utf-8") as f:
+            json.dump(payload, f)
+    except OSError:
+        pass
+
+
+def get_last_pull_status() -> dict:
+    """Return a summary the GUI can show: age + per-image digests.
+
+    Shape:
+        {
+          "age_days": float | None,    # None = never pulled
+          "is_stale": bool,            # True if older than IMAGE_FRESHNESS_WARN_DAYS
+          "digests": {<image>: <short_digest>},
+          "timestamp": <unix> | None,
+        }
+    """
+    info = _load_last_pull_info()
+    if not info:
+        return {
+            "age_days": None,
+            "is_stale": True,
+            "digests": {},
+            "timestamp": None,
+        }
+    ts = info.get("timestamp")
+    age_seconds = max(0, time.time() - ts) if isinstance(ts, (int, float)) else None
+    age_days = (age_seconds / 86400.0) if age_seconds is not None else None
+    is_stale = age_days is None or age_days > IMAGE_FRESHNESS_WARN_DAYS
+    return {
+        "age_days": age_days,
+        "is_stale": is_stale,
+        "digests": info.get("digests", {}),
+        "timestamp": ts,
+    }
+
+
+def check_for_updates(log=None) -> bool:
+    """Auto-pull on GUI start: keep student images in lockstep with
+    nettername/<image>:latest on Docker Hub.
+
+    Hardened in 2.2.4 with three layers of defence so the existing-installs
+    case (.exe rolled out months ago, F62-F66 just pushed) actually picks up
+    the new bits next launch instead of silently keeping the cached version
+    forever:
+
+      1. **Offline short-circuit** (``is_dockerhub_reachable``): a 5 s TCP
+         probe to registry-1.docker.io:443. If unreachable, we don't even
+         try to pull — the existing per-image 2-retry × 120 s stall storm
+         would otherwise burn ~12 min before giving up on a classroom
+         without internet. Logged in German so the operator sees we
+         intentionally skipped, not silently failed.
+      2. **Manifest-digest pre-check** (``_get_remote_manifest_digest`` vs
+         ``_get_local_repo_digest``): for each image, fetch the registry's
+         linux/amd64 manifest digest (single HEAD request, no layers) and
+         compare to the locally-cached RepoDigest. Match → skip the pull
+         entirely (logs "bereits aktuell"). Mismatch / unknown → fall
+         through to a real pull. Cuts the "all-images-up-to-date" path
+         from ~30 s of docker-pull round-trips to ~3 s of HEAD requests.
+      3. **Last-pull persistence** (``_save_last_pull_info``): on a
+         successful check (any combination of pulls + skips that ended
+         without a hard failure), record the per-image digests and a
+         timestamp to ``LAST_PULL_FILE``. The GUI surfaces this as
+         "Letzter Image-Update: vor X Tagen" so teachers can spot
+         classroom PCs that have been offline too long to refresh.
+
+    Per-image failures remain non-fatal — students keep using the cached
+    image rather than blocking GUI startup. Returns ``True`` iff at least
+    one image's local digest changed during this run.
+
+    Set ``EDUBOTICS_SKIP_AUTO_PULL=1`` to disable entirely (offline
+    classrooms that explicitly manage their own image cadence).
+    """
+    if SKIP_AUTO_PULL:
+        if log:
+            log("  Auto-Pull deaktiviert (EDUBOTICS_SKIP_AUTO_PULL=1).")
+        return False
+
+    if not is_dockerhub_reachable():
+        if log:
+            log(
+                "  Docker Hub nicht erreichbar — vorhandene Images werden verwendet. "
+                "Bitte Internetverbindung prüfen, falls aktuelle Versionen benötigt werden."
+            )
+        return False
+
     any_updated = False
+    pulled_digests: dict[str, Optional[str]] = {}
     total = len(ALL_IMAGES)
 
     for i, image in enumerate(ALL_IMAGES):
         short = image.split("/")[-1]
-        # Capture image ID before so we can detect whether pull actually changed it
+
+        local_digest = _get_local_repo_digest(image)
+        remote_digest = _get_remote_manifest_digest(image)
+
+        # Layer 2: digest pre-check. Saves the per-image docker-pull
+        # round-trip when local already matches remote.
+        if (
+            local_digest is not None
+            and remote_digest is not None
+            and local_digest == remote_digest
+        ):
+            if log:
+                log(f"  [{i+1}/{total}] {short}: bereits aktuell ({local_digest[7:19]}).")
+            pulled_digests[image] = local_digest
+            continue
+
+        # Need a real pull. Either remote differs, manifest probe failed
+        # (treat as 'unknown — try to pull'), or the image isn't cached
+        # locally with a RepoDigest yet (built locally and never pulled).
+        if log:
+            reason = (
+                "lokal nicht vorhanden" if local_digest is None
+                else "Update verfügbar" if remote_digest is not None
+                else "Manifest-Probe fehlgeschlagen"
+            )
+            log(f"  [{i+1}/{total}] {short}: {reason}, ziehe...")
+
+        # Capture old image ID so we can detect whether the pull actually
+        # changed bytes — the manifest pre-check above means we should only
+        # reach here when a real update OR a missing image is present, but
+        # the bytes-changed check belt-and-suspenders against a flaky probe.
         try:
             local_before = subprocess.run(
                 _docker_cmd("images", "-q", image),
@@ -260,18 +510,19 @@ def check_for_updates(log=None) -> bool:
         except (FileNotFoundError, subprocess.TimeoutExpired):
             old_id = ""
 
-        if log:
-            log(f"  Prüfe {i+1}/{total}: {short}")
-
-        # Shorter retries — this is an update check, not a first-run pull.
-        # If the network is flaky, just move on and keep using the old image.
         ok = _pull_one_image(image, i, total, log=log, stall_timeout=120, max_retries=2)
         if not ok:
             if log:
                 log(f"  Übersprungen: {short} (aktuelle Version wird weiter verwendet).")
+            # Persist whatever we know (the local digest, if any) so the
+            # next-run age check still works.
+            pulled_digests[image] = local_digest
             continue
 
-        # Did the image ID change?
+        # Pull succeeded — record the new digest for last-pull state.
+        new_digest = _get_local_repo_digest(image) or remote_digest
+        pulled_digests[image] = new_digest
+
         try:
             local_after = subprocess.run(
                 _docker_cmd("images", "-q", image),
@@ -281,7 +532,7 @@ def check_for_updates(log=None) -> bool:
             new_id = local_after.stdout.strip()
             if old_id and new_id and old_id != new_id:
                 if log:
-                    log(f"  Aktualisiert: {short}")
+                    log(f"  Aktualisiert: {short} → {(new_digest or '')[7:19]}")
                 any_updated = True
         except (FileNotFoundError, subprocess.TimeoutExpired):
             pass
@@ -296,6 +547,9 @@ def check_for_updates(log=None) -> bool:
             )
         except (FileNotFoundError, subprocess.TimeoutExpired):
             pass
+
+    # Layer 3: persist state for the freshness banner on the next GUI start.
+    _save_last_pull_info(pulled_digests)
 
     return any_updated
 

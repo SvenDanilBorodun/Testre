@@ -1,0 +1,145 @@
+# Classroom Jetson Orin Nano — inference-only stack.
+#
+# (No top-level ``version:`` field — Compose v2 ignores it and warns.)
+#
+# Two services (NO physical_ai_manager — the React app stays on the
+# student PC and reaches this stack via the rosbridge JWT proxy on the
+# Jetson agent's :9091).
+#
+# Scope: ONLY the Inference tab in EduBotics connects here. Recording,
+# Roboter Studio (Workshop), and Calibration all stay on the student PC.
+
+services:
+  open_manipulator:
+    image: ${REGISTRY:-nettername}/open-manipulator:arm64-latest
+    container_name: edubotics_open_manipulator
+    privileged: true
+    cap_add: [SYS_NICE]
+    # Orin Nano integrated GPU is exposed to the container via NVIDIA
+    # Container Toolkit. JetPack 6 ships this by default; if absent,
+    # setup.sh aborts before reaching this stage.
+    runtime: nvidia
+    ulimits:
+      rtprio: 99
+      rttime: -1
+      memlock: 8428281856
+    environment:
+      - ROS_DOMAIN_ID
+      # Phase 5: skip leader port wait + leader launch + quintic sync.
+      # Only the follower is physically connected on the classroom
+      # Jetson; the leader stays at the student's desk for recording.
+      - EDUBOTICS_FOLLOWER_ONLY=1
+      # Stable USB symlinks set up by setup.sh via /etc/udev/rules.d.
+      - FOLLOWER_PORT=/dev/edubotics-follower
+      - CAMERA_DEVICE_1=/dev/edubotics-gripper-cam
+      - CAMERA_NAME_1=gripper
+      - CAMERA_DEVICE_2=/dev/edubotics-scene-cam
+      - CAMERA_NAME_2=scene
+    volumes:
+      - /dev:/dev
+      - /dev/shm:/dev/shm
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    mem_limit: 3g
+    pids_limit: 512
+    healthcheck:
+      # Same shape as the student-PC compose healthcheck (CLAUDE.md
+      # §10.1): assert /joint_states is published AND each configured
+      # camera's compressed image topic exists. The [ -z $$VAR ] guards
+      # let single-camera setups stay healthy.
+      #
+      # ALL variable references use $$ to escape compose-parse-time
+      # substitution and resolve inside the container at runtime —
+      # otherwise compose would substitute CAMERA_NAME_1 from the HOST
+      # environment (which doesn't have it) at parse time and bake the
+      # default `gripper` into the healthcheck script forever, ignoring
+      # whatever name the container env actually sets.
+      test:
+        - "CMD"
+        - "bash"
+        - "-c"
+        - >
+          ros2 topic list 2>/dev/null | grep -q /joint_states &&
+          ([ -z "$$CAMERA_DEVICE_1" ] || ros2 topic list 2>/dev/null | grep -q "/$${CAMERA_NAME_1:-gripper}/image_raw/compressed") &&
+          ([ -z "$$CAMERA_DEVICE_2" ] || ros2 topic list 2>/dev/null | grep -q "/$${CAMERA_NAME_2:-scene}/image_raw/compressed")
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 120s
+    tty: true
+    restart: unless-stopped
+    networks: [ros_net]
+
+  physical_ai_server:
+    image: ${REGISTRY:-nettername}/physical-ai-server:arm64-latest
+    container_name: edubotics_physical_ai_server
+    depends_on:
+      open_manipulator:
+        condition: service_healthy
+    runtime: nvidia
+    # rosbridge and web_video_server are bound to LOOPBACK ONLY. The
+    # rosbridge_proxy.py on the host (PID 1 of edubotics-jetson.service)
+    # reaches them via 127.0.0.1 and JWT-gates anything from the LAN.
+    # NEVER bind 9090 or 8080 to 0.0.0.0 here — that would expose
+    # unauthenticated rosbridge to the classroom Wi-Fi.
+    ports:
+      - "127.0.0.1:9090:9090"
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - /dev/shm:/dev/shm
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+      # Session-scoped Docker volumes — wiped on disconnect by the
+      # agent's _wipe_session_volumes(). Each new student starts with
+      # an empty HF cache so they re-download their policy fresh.
+      - jetson_workspace:/workspace
+      - jetson_huggingface_cache:/root/.cache/huggingface
+      # Agent socket dir — present on the student-PC compose; kept
+      # for parity in case anything inside the image checks for it.
+      - /var/run/agent:/var/run/agent
+      # .s6-keep is the s6-rc service-enable marker (see CLAUDE.md §13.5).
+      # Without this mount, the longrun ROS service inside the base
+      # image never starts.
+      - ./.s6-keep:/etc/s6-overlay/s6-rc.d/user/contents.d/physical_ai_server:ro
+    environment:
+      - ROS_DOMAIN_ID
+      # Read-only HF token (EduBotics-Solutions/* org scope only) so the
+      # Jetson can download trained policies on demand. Provisioned at
+      # setup.sh time from the Cloud API's EDUBOTICS_JETSON_HF_TOKEN.
+      - HF_TOKEN=${EDUBOTICS_HF_TOKEN}
+      # No safety envelope, no Roboter Studio invocation paths used here.
+    mem_limit: 6g
+    pids_limit: 1024
+    healthcheck:
+      # TCP probe on rosbridge :9090. CMD-SHELL runs /bin/sh which on
+      # Debian/Ubuntu is dash, and dash does NOT support /dev/tcp — use
+      # CMD with explicit bash so the redirect actually works.
+      test:
+        - "CMD"
+        - "bash"
+        - "-c"
+        - "exec 3<>/dev/tcp/127.0.0.1/9090 || exit 1"
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    tty: true
+    restart: unless-stopped
+    networks: [ros_net]
+
+volumes:
+  # The explicit ``name:`` attribute prevents Compose from project-
+  # prefixing the volume names. Without it Compose would create
+  # ``edubotics_jetson_workspace`` (using the compose directory name
+  # as the project), and agent.py's ``docker volume rm jetson_workspace``
+  # would fail to find the volume — silently breaking the wipe-on-
+  # disconnect lifecycle. With ``name:`` Compose creates the volumes
+  # under exactly the bare names the agent uses.
+  jetson_workspace:
+    name: jetson_workspace
+  jetson_huggingface_cache:
+    name: jetson_huggingface_cache
+
+networks:
+  ros_net:
+    driver: bridge

@@ -53,12 +53,29 @@ function StudentApp() {
   const session = useSelector((state) => state.auth.session);
   const role = useSelector((state) => state.auth.role);
   const profileLoaded = useSelector((state) => state.auth.profileLoaded);
+  // True iff the student currently holds the lock on the classroom Jetson
+  // (state.jetson.status === 'connected'). When set, Aufnahme + Roboter
+  // Studio are filtered out of the sidebar (see navItems below) because
+  // those tabs need the LOCAL rosbridge — which the Jetson connection has
+  // overridden.
+  const jetsonConnected = useSelector((state) => state.jetson.status === 'connected');
   const cloudOnly = isCloudOnlyMode();
+  const currentRosHost = useSelector((state) => state.ros.rosHost);
 
+  // Initialise the local rosbridge host ONCE, not on every render. The
+  // previous body-level `dispatch(setRosHost(...))` ran every render and
+  // setRosHost overwrites both rosHost AND rosbridgeUrl (rosSlice:31-34),
+  // which clobbered the Jetson URL back to localhost the instant any
+  // Redux state changed. Net result: Jetson connection couldn't survive
+  // a single re-render. Now we only seed the local host when it isn't
+  // yet set and the student isn't currently routing to a Jetson.
   const defaultRosHost = window.location.hostname;
-  if (!cloudOnly) {
+  useEffect(() => {
+    if (cloudOnly) return;
+    if (jetsonConnected) return;
+    if (currentRosHost === defaultRosHost) return;
     dispatch(setRosHost(defaultRosHost));
-  }
+  }, [cloudOnly, jetsonConnected, currentRosHost, defaultRosHost, dispatch]);
 
   const page = useSelector((state) => state.ui.currentPage);
   const robotType = useSelector((state) => state.tasks.taskStatus.robotType);
@@ -202,14 +219,23 @@ function StudentApp() {
   // here would tear down freshly-mounted stream components in
   // sibling subtrees (the bug §F27 calls out).
 
+  // When the student is connected to a classroom Jetson, the rosbridge
+  // URL points at the Jetson — so Aufnahme (needs leader-arm teleop) and
+  // Roboter Studio (needs Workshop services not present on Jetson) would
+  // both fail. We hide them with the same mechanism cloud-only mode uses:
+  // mark them as `jetsonIncompatible` and filter out when the Jetson lock
+  // is held. Mirrors §6.7 of the plan (CLAUDE.md §5.x will be updated
+  // to document this).
   const navItems = [
     { key: PageType.HOME, label: 'Start', Icon: MdHome, onClick: handleHomePageNavigation },
-    { key: PageType.RECORD, label: 'Aufnahme', Icon: MdVideocam, onClick: handleRecordPageNavigation, hardwareOnly: true },
+    { key: PageType.RECORD, label: 'Aufnahme', Icon: MdVideocam, onClick: handleRecordPageNavigation, hardwareOnly: true, jetsonIncompatible: true },
     { key: PageType.TRAINING, label: 'Training', Icon: GoGraph, onClick: handleTrainingPageNavigation },
     { key: PageType.INFERENCE, label: 'Inferenz', Icon: MdMemory, onClick: handleInferencePageNavigation, hardwareOnly: true },
-    { key: PageType.EDIT_DATASET, label: 'Daten', Icon: MdWidgets, onClick: handleEditDatasetPageNavigation, sep: true },
-    { key: PageType.WORKSHOP, label: 'Roboter Studio', Icon: MdConstruction, onClick: handleWorkshopPageNavigation, hardwareOnly: true },
-  ].filter((n) => !cloudOnly || !n.hardwareOnly);
+    { key: PageType.EDIT_DATASET, label: 'Daten', Icon: MdWidgets, onClick: handleEditDatasetPageNavigation, sep: true, jetsonIncompatible: true },
+    { key: PageType.WORKSHOP, label: 'Roboter Studio', Icon: MdConstruction, onClick: handleWorkshopPageNavigation, hardwareOnly: true, jetsonIncompatible: true },
+  ]
+    .filter((n) => !cloudOnly || !n.hardwareOnly)
+    .filter((n) => !jetsonConnected || !n.jetsonIncompatible);
 
   const isDarkPage = page === PageType.RECORD || page === PageType.INFERENCE;
 

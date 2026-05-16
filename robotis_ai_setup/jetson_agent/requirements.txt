@@ -1,0 +1,11 @@
+# Jetson agent runtime dependencies.
+# Pinned: this list ships through ``pip install`` in setup.sh on Ubuntu
+# 22.04 / JetPack 6 (Python 3.10). arm64 wheels exist for all four on
+# piwheels / PyPI as of 2026-05; if a future bump breaks the wheel
+# availability story, fall back to `pip install --no-binary :all:`.
+websockets==12.0
+python-jose[cryptography]==3.3.0
+# httpx is not used directly — urllib.request covers all current call
+# sites — but the test suite mocks it via sys.modules so the import
+# attribute exists. Kept here only if/when the agent grows async HTTP.
+# httpx==0.27.0

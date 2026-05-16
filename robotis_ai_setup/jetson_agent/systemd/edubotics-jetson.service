@@ -1,0 +1,28 @@
+[Unit]
+Description=EduBotics Jetson agent (heartbeat + container lifecycle + JWT proxy)
+After=network-online.target docker.service
+Wants=network-online.target docker.service
+# Restart if docker goes away — the agent will sit at "container down"
+# until docker comes back, then restart the stack on next heartbeat.
+PartOf=docker.service
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/edubotics/jetson.env
+ExecStart=/usr/bin/python3 /opt/edubotics/agent.py
+Restart=always
+RestartSec=5
+# Long-running; the agent's own state machine handles teardown.
+TimeoutStopSec=60
+# Run as root: needs docker socket + udev + systemd interaction. The
+# ROS containers run unprivileged inside (the open_manipulator
+# container needs privileged: true but that's set in compose, not here).
+User=root
+Group=root
+
+# Journal logging — keeps `journalctl -u edubotics-jetson` clean.
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

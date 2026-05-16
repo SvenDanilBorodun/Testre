@@ -24,11 +24,43 @@ set -euo pipefail
 
 REGISTRY=${REGISTRY:-nettername}
 BUILD_BASE=${BUILD_BASE:-0}
-OMX_BASE_IMAGE="robotis/open-manipulator:amd64-4.1.4"
-# Must match the FROM tag in physical_ai_server/Dockerfile. Previously this
-# script pulled ":latest" independently, so the Dockerfile build and the
-# pre-pull could reference different content.
-PAS_BASE_IMAGE="robotis/physical-ai-server:amd64-0.8.2"
+# Platform selector: amd64 (default, current behaviour) or arm64 (classroom
+# Jetson). Multi-arch (PLATFORM=both) deliberately not in v1 — invoke the
+# script twice if you need both. See docs/arm64_base/README.md for the
+# one-time arm64 base-image build steps.
+PLATFORM=${PLATFORM:-amd64}
+# When PLATFORM=arm64, pull our self-built arm64 bases instead of building
+# them locally. Set BUILD_BASE_ARM64=1 to (re)build them — takes ~30-40 min
+# each via QEMU on a Mac, much faster on a real arm64 host.
+BUILD_BASE_ARM64=${BUILD_BASE_ARM64:-0}
+
+case "$PLATFORM" in
+    amd64)
+        OMX_BASE_IMAGE="robotis/open-manipulator:amd64-4.1.4"
+        # Must match the FROM tag in physical_ai_server/Dockerfile. Previously
+        # this script pulled ":latest" independently, so the Dockerfile build
+        # and the pre-pull could reference different content.
+        PAS_BASE_IMAGE="robotis/physical-ai-server:amd64-0.8.2"
+        IMAGE_TAG_SUFFIX="latest"
+        DOCKER_BUILDX_ARGS=""
+        ;;
+    arm64)
+        # ROBOTIS does not publish arm64 variants; we build our own base
+        # images once and host them under our own registry namespace.
+        OMX_BASE_IMAGE="${REGISTRY}/open-manipulator-base:arm64-4.1.4"
+        PAS_BASE_IMAGE="${REGISTRY}/physical-ai-server-base:arm64-0.8.2"
+        IMAGE_TAG_SUFFIX="arm64-latest"
+        # buildx with --push bypasses Docker Desktop's dual-image-store gotcha
+        # (CLAUDE.md §13.4.bis). On a Linux maintainer host with native arm64
+        # this is also the only sane way to push the right manifest digests.
+        DOCKER_BUILDX_ARGS="--platform linux/arm64 --push"
+        ;;
+    *)
+        echo "ERROR: PLATFORM='${PLATFORM}' — expected 'amd64' or 'arm64'." >&2
+        exit 1
+        ;;
+esac
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 
@@ -38,7 +70,9 @@ PHYSICAL_AI_TOOLS_DIR="${PHYSICAL_AI_TOOLS_DIR:-$(dirname "$PROJECT_ROOT")/physi
 
 echo "========================================"
 echo "ROBOTIS AI — Docker Image Builder"
+echo "Platform: ${PLATFORM}"
 echo "Registry: ${REGISTRY}"
+echo "Image tag suffix: ${IMAGE_TAG_SUFFIX}"
 echo "open_manipulator: ${OPEN_MANIPULATOR_DIR}"
 echo "physical_ai_tools: ${PHYSICAL_AI_TOOLS_DIR}"
 echo "========================================"
@@ -52,7 +86,35 @@ for dir in "$OPEN_MANIPULATOR_DIR" "$PHYSICAL_AI_TOOLS_DIR"; do
     fi
 done
 
+# ── Cleanup trap (registered BEFORE either platform branch) ──
+# Both PLATFORM=amd64 (manager build + interfaces staging) and
+# PLATFORM=arm64 (interfaces staging only) write transient files into
+# the working tree. The trap MUST run on EITHER path — registering it
+# inside the amd64 conditional, like the previous revision did, leaked
+# physical_ai_server/interfaces/ into the source tree on every arm64
+# build. Each cleanup branch is no-op when its variable is empty.
+COCO_SNAPSHOT=""
+INTERFACES_STAGING=""
+_build_cleanup() {
+    if [ -n "${COCO_SNAPSHOT:-}" ]; then
+        rm -f "${COCO_SNAPSHOT}"
+    fi
+    if [ -n "${INTERFACES_STAGING:-}" ]; then
+        rm -rf "${INTERFACES_STAGING}"
+    fi
+}
+trap _build_cleanup EXIT
+
 # ── Image 1: physical_ai_manager (React + nginx) ──
+# The React app is amd64-only by design: the student PC is always amd64
+# Windows, and the Jetson does NOT run the manager (React stays on the
+# student PC and connects to the Jetson rosbridge via the proxy). So
+# arm64 builds skip this image entirely.
+if [ "$PLATFORM" = "arm64" ]; then
+    echo ""
+    echo ">> PLATFORM=arm64 — skipping physical-ai-manager build (manager stays on amd64 student PCs)"
+fi
+if [ "$PLATFORM" = "amd64" ]; then
 echo ""
 echo ">> Building physical_ai_manager..."
 # Cloud training env vars are baked into the React build. These MUST be set —
@@ -104,31 +166,12 @@ BUILD_ARGS="$BUILD_ARGS --build-arg REACT_APP_BUILD_ID=${BUILD_ID}"
 # the prebuild Jest hook (objectClasses.sync.test.js) can validate
 # that the React dropdown matches the server allowlist. Without this
 # the test would fail on ENOENT because physical_ai_server/ is a
-# sibling repo, not part of physical_ai_manager/.
+# sibling repo, not part of physical_ai_manager/. The trap registered
+# above the platform conditional ensures this file gets cleaned up on
+# every exit path.
 COCO_SNAPSHOT="${PHYSICAL_AI_TOOLS_DIR}/physical_ai_manager/_coco_classes.py"
 cp "${PHYSICAL_AI_TOOLS_DIR}/physical_ai_server/physical_ai_server/workflow/coco_classes.py" \
    "${COCO_SNAPSHOT}"
-# Audit H25: initialise INTERFACES_STAGING explicitly to empty BEFORE
-# trap registration. The previous default `${INTERFACES_STAGING:-/dev/null}`
-# fallback would `rm -rf /dev/null` on early failure (harmless on Linux
-# but on macOS dev hosts it can remove the /dev/null character device,
-# breaking every shell on the system until next reboot). Now: empty
-# string disables the rm safely; only after the variable is assigned
-# a real path further down does cleanup actually fire.
-INTERFACES_STAGING=""
-
-# Single combined cleanup. A previous version trapped the COCO_SNAPSHOT
-# cleanup here and then trapped INTERFACES_STAGING again later — bash's
-# trap is set-not-stack, so the second trap silently REPLACED this one
-# and _coco_classes.py leaked into the source tree on every build. We
-# now register both cleanups in one trap so neither path can be lost.
-_build_cleanup() {
-    rm -f "${COCO_SNAPSHOT}"
-    if [ -n "${INTERFACES_STAGING:-}" ]; then
-        rm -rf "${INTERFACES_STAGING}"
-    fi
-}
-trap _build_cleanup EXIT
 
 docker build \
     $BUILD_ARGS \
@@ -166,14 +209,43 @@ if ! docker run --rm --entrypoint sh "$_smoke_image" -c \
     exit 1
 fi
 echo "   OK: physical-ai-manager built (smoke-tested)"
+fi  # end PLATFORM=amd64 manager block
 
-# ── Image 2a: physical_ai_server base (pull official ROBOTIS image) ──
-echo ""
-echo ">> Pulling physical_ai_server base ${PAS_BASE_IMAGE}..."
-if ! docker image inspect "${PAS_BASE_IMAGE}" >/dev/null 2>&1; then
-    docker pull "${PAS_BASE_IMAGE}"
+# ── Image 2a: physical_ai_server base ──
+# amd64: ROBOTIS publishes the base on Docker Hub → just pull.
+# arm64: ROBOTIS does NOT publish an arm64 variant. Either pull our own
+#        previously-built nettername/physical-ai-server-base:arm64-0.8.2,
+#        or build it now from physical_ai_tools/physical_ai_server/
+#        Dockerfile.arm64 (~30-40 min on QEMU, faster on native arm64).
+if [ "$PLATFORM" = "arm64" ] && [ "$BUILD_BASE_ARM64" = "1" ]; then
+    echo ""
+    echo ">> Building physical_ai_server arm64 base ${PAS_BASE_IMAGE} from upstream sources..."
+    # CONTEXT MUST be physical_ai_tools/ (NOT physical_ai_server/).
+    # The Dockerfile.arm64 COPYs from `docker/s6-agent/` and
+    # `docker/s6-services/` which live one directory UP from the
+    # Dockerfile itself. A context of physical_ai_server/ produces
+    # "/docker/s6-services/common/ros2_service_finish.sh: not found".
+    docker buildx build $DOCKER_BUILDX_ARGS \
+        -t "${PAS_BASE_IMAGE}" \
+        -f "${PHYSICAL_AI_TOOLS_DIR}/physical_ai_server/Dockerfile.arm64" \
+        "${PHYSICAL_AI_TOOLS_DIR}/"
+    echo "   OK: ${PAS_BASE_IMAGE} built + pushed"
+else
+    echo ""
+    echo ">> Resolving physical_ai_server base ${PAS_BASE_IMAGE}..."
+    # docker manifest inspect queries the registry directly — works for
+    # both amd64 (ROBOTIS Docker Hub) and arm64 (our registry) even when
+    # the local daemon has no matching manifest cached.
+    if ! docker manifest inspect "${PAS_BASE_IMAGE}" >/dev/null 2>&1; then
+        echo "ERROR: ${PAS_BASE_IMAGE} not found in registry."
+        if [ "$PLATFORM" = "arm64" ]; then
+            echo "       Run BUILD_BASE_ARM64=1 PLATFORM=arm64 ${0##*/} to build + push it."
+            echo "       See docs/arm64_base/README.md for the one-time setup."
+        fi
+        exit 1
+    fi
+    echo "   OK: ${PAS_BASE_IMAGE} resolves in registry"
 fi
-echo "   OK: ${PAS_BASE_IMAGE} exists"
 
 # ── Image 2b: physical_ai_server thin layer (patches upstream bugs) ──
 #
@@ -199,16 +271,42 @@ cp "${PHYSICAL_AI_TOOLS_DIR}/physical_ai_interfaces/srv/"*.srv      "${INTERFACE
 
 echo ""
 echo ">> Building physical_ai_server thin layer (patches + interface rebuild)..."
-docker build \
-    -t "${REGISTRY}/physical-ai-server:latest" \
-    -f "${SCRIPT_DIR}/physical_ai_server/Dockerfile" \
-    "${SCRIPT_DIR}/physical_ai_server/"
+# Pass BASE_IMAGE so the parameterised FROM resolves to the right
+# architecture (arm64 uses our self-built base; amd64 uses the ROBOTIS
+# base via the Dockerfile default). For arm64, the buildx --push flag
+# bypasses the Docker Desktop dual-store gotcha (CLAUDE.md §13.4.bis).
+if [ "$PLATFORM" = "arm64" ]; then
+    docker buildx build $DOCKER_BUILDX_ARGS \
+        --build-arg BASE_IMAGE="${PAS_BASE_IMAGE}" \
+        -t "${REGISTRY}/physical-ai-server:${IMAGE_TAG_SUFFIX}" \
+        -f "${SCRIPT_DIR}/physical_ai_server/Dockerfile" \
+        "${SCRIPT_DIR}/physical_ai_server/"
+else
+    docker build \
+        --build-arg BASE_IMAGE="${PAS_BASE_IMAGE}" \
+        -t "${REGISTRY}/physical-ai-server:${IMAGE_TAG_SUFFIX}" \
+        -f "${SCRIPT_DIR}/physical_ai_server/Dockerfile" \
+        "${SCRIPT_DIR}/physical_ai_server/"
+fi
 echo "   OK: physical-ai-server built (with patches)"
 
 # ── Image 3: open_manipulator base ──
-if [ "$BUILD_BASE" = "1" ]; then
+# amd64: ROBOTIS publishes amd64-4.1.4; pull from Docker Hub by default,
+#        or set BUILD_BASE=1 to rebuild from upstream source (~40 min).
+# arm64: ROBOTIS does NOT publish arm64. Either pull our previously-
+#        built nettername/open-manipulator-base:arm64-4.1.4, or set
+#        BUILD_BASE_ARM64=1 to build it now from upstream sources.
+if [ "$PLATFORM" = "arm64" ] && [ "$BUILD_BASE_ARM64" = "1" ]; then
     echo ""
-    echo ">> Building open_manipulator base from source (this takes ~40 min)..."
+    echo ">> Building open_manipulator arm64 base ${OMX_BASE_IMAGE} from upstream sources..."
+    docker buildx build $DOCKER_BUILDX_ARGS \
+        -t "${OMX_BASE_IMAGE}" \
+        -f "${OPEN_MANIPULATOR_DIR}/docker/Dockerfile" \
+        "${OPEN_MANIPULATOR_DIR}/docker/"
+    echo "   OK: ${OMX_BASE_IMAGE} built + pushed"
+elif [ "$PLATFORM" = "amd64" ] && [ "$BUILD_BASE" = "1" ]; then
+    echo ""
+    echo ">> Building open_manipulator amd64 base from source (this takes ~40 min)..."
     docker build \
         -t "${OMX_BASE_IMAGE}" \
         -f "${OPEN_MANIPULATOR_DIR}/docker/Dockerfile" \
@@ -216,20 +314,34 @@ if [ "$BUILD_BASE" = "1" ]; then
     echo "   OK: open-manipulator base built from source"
 else
     echo ""
-    echo ">> Pulling open_manipulator base from Docker Hub..."
-    if ! docker image inspect "${OMX_BASE_IMAGE}" >/dev/null 2>&1; then
-        docker pull "${OMX_BASE_IMAGE}"
+    echo ">> Resolving open_manipulator base ${OMX_BASE_IMAGE}..."
+    if ! docker manifest inspect "${OMX_BASE_IMAGE}" >/dev/null 2>&1; then
+        echo "ERROR: ${OMX_BASE_IMAGE} not found in registry."
+        if [ "$PLATFORM" = "arm64" ]; then
+            echo "       Run BUILD_BASE_ARM64=1 PLATFORM=arm64 ${0##*/} to build + push it."
+            echo "       See docs/arm64_base/README.md for the one-time setup."
+        fi
+        exit 1
     fi
-    echo "   OK: ${OMX_BASE_IMAGE} exists"
+    echo "   OK: ${OMX_BASE_IMAGE} resolves in registry"
 fi
 
 # ── Image 4: open_manipulator thin layer (entrypoint + identify_arm) ──
 echo ""
 echo ">> Building open_manipulator thin layer..."
-docker build \
-    -t "${REGISTRY}/open-manipulator:latest" \
-    -f "${SCRIPT_DIR}/open_manipulator/Dockerfile" \
-    "${SCRIPT_DIR}/open_manipulator/"
+if [ "$PLATFORM" = "arm64" ]; then
+    docker buildx build $DOCKER_BUILDX_ARGS \
+        --build-arg BASE_IMAGE="${OMX_BASE_IMAGE}" \
+        -t "${REGISTRY}/open-manipulator:${IMAGE_TAG_SUFFIX}" \
+        -f "${SCRIPT_DIR}/open_manipulator/Dockerfile" \
+        "${SCRIPT_DIR}/open_manipulator/"
+else
+    docker build \
+        --build-arg BASE_IMAGE="${OMX_BASE_IMAGE}" \
+        -t "${REGISTRY}/open-manipulator:${IMAGE_TAG_SUFFIX}" \
+        -f "${SCRIPT_DIR}/open_manipulator/Dockerfile" \
+        "${SCRIPT_DIR}/open_manipulator/"
+fi
 echo "   OK: open-manipulator built"
 
 # Cloud training image (formerly robotis-ai-training on Docker Hub) is now
@@ -241,31 +353,42 @@ echo "   OK: open-manipulator built"
 # but we log per-image and emit a clear summary to avoid students pulling a
 # half-updated image set (where e.g. the React bundle is new but the server
 # still has last week's overlays).
-echo ""
-echo ">> Pushing images to ${REGISTRY}..."
-pushed=()
-for img in physical-ai-manager physical-ai-server open-manipulator; do
-    if docker push "${REGISTRY}/${img}:latest"; then
-        pushed+=("$img")
-        echo "   Pushed: $img"
-    else
-        echo ""
-        echo "ERROR: push of ${REGISTRY}/${img}:latest failed."
-        echo "Pushed so far: ${pushed[*]:-none}"
-        echo "You now have a mismatched image set in the registry."
-        echo "Fix the registry/auth issue and re-run this script."
-        exit 1
-    fi
-done
+#
+# For PLATFORM=arm64, buildx --push already pushed each image as part of
+# the build step, so this loop is a no-op. We still emit the summary.
+if [ "$PLATFORM" = "amd64" ]; then
+    echo ""
+    echo ">> Pushing images to ${REGISTRY}..."
+    pushed=()
+    for img in physical-ai-manager physical-ai-server open-manipulator; do
+        if docker push "${REGISTRY}/${img}:${IMAGE_TAG_SUFFIX}"; then
+            pushed+=("$img")
+            echo "   Pushed: $img"
+        else
+            echo ""
+            echo "ERROR: push of ${REGISTRY}/${img}:${IMAGE_TAG_SUFFIX} failed."
+            echo "Pushed so far: ${pushed[*]:-none}"
+            echo "You now have a mismatched image set in the registry."
+            echo "Fix the registry/auth issue and re-run this script."
+            exit 1
+        fi
+    done
+else
+    echo ""
+    echo ">> PLATFORM=arm64 — buildx --push already pushed all images."
+fi
 
 echo ""
 echo "========================================"
 echo "All images built and pushed!"
 echo ""
 echo "Images:"
-echo "  ${REGISTRY}/open-manipulator:latest"
-echo "  ${REGISTRY}/physical-ai-server:latest"
-echo "  ${REGISTRY}/physical-ai-manager:latest"
+echo "  ${REGISTRY}/open-manipulator:${IMAGE_TAG_SUFFIX}"
+echo "  ${REGISTRY}/physical-ai-server:${IMAGE_TAG_SUFFIX}"
+if [ "$PLATFORM" = "amd64" ]; then
+    echo "  ${REGISTRY}/physical-ai-manager:${IMAGE_TAG_SUFFIX}"
+fi
 echo ""
+echo "Platform: ${PLATFORM}"
 echo "Cloud training image is managed by Modal (no Docker Hub push)."
 echo "========================================"

@@ -1,4 +1,10 @@
-FROM robotis/open-manipulator:amd64-4.1.4
+# Base image is parameterised so a single Dockerfile builds for both
+# architectures. amd64 uses the ROBOTIS-published base; arm64 uses our
+# own base built once from the upstream open_manipulator/docker/
+# Dockerfile sources (see docs/arm64_base/README.md). The build-images.sh
+# script passes the right base via --build-arg BASE_IMAGE=... per platform.
+ARG BASE_IMAGE=robotis/open-manipulator:amd64-4.1.4
+FROM ${BASE_IMAGE}
 
 # Install Python dynamixel-sdk for identify_arm.py
 # Install v4l-utils for camera device discovery (v4l2-ctl --info)

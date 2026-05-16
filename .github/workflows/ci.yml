@@ -39,11 +39,12 @@ jobs:
           cd robotis_ai_setup
           python -m unittest discover -s tests -v
 
-      - name: Cloud API unit tests (workgroups + dataset sweep)
+      - name: Cloud API unit tests (workgroups + dataset sweep + jetson)
         # Tests stub fastapi/supabase/huggingface_hub via sys.modules so
         # they run without the heavy deps. They cover the workgroup
-        # helper, dataset-sweep parsers, and the audit-table fallback
-        # logic. Integration tests against a real Supabase branch are a
+        # helper, dataset-sweep parsers, audit-table fallback logic,
+        # and (migration 019) the jetson route helpers + lock sweeper.
+        # Integration tests against a real Supabase branch are a
         # follow-up when test infrastructure is in place — see plan
         # Part 5 §3 (concurrency check).
         run: |
@@ -56,6 +57,15 @@ jobs:
           export MODAL_TOKEN_ID=ci_test
           export MODAL_TOKEN_SECRET=ci_test
           python -m unittest discover -s app/tests -v
+
+      - name: Jetson agent unit tests (migration 019 client side)
+        # Cross-platform — every subprocess/socket/Cloud-API call is
+        # mocked, so this runs on the same ubuntu-latest runner as the
+        # rest. Catches regressions in the F67/F68/F69 auto-pull port,
+        # the docker manifest parsing, and the compose image discovery.
+        run: |
+          cd robotis_ai_setup/jetson_agent
+          python -m unittest discover -s tests -v
 
   shell-lint:
     runs-on: ubuntu-latest
@@ -72,6 +82,7 @@ jobs:
             robotis_ai_setup/docker/open_manipulator/entrypoint_omx.sh \
             robotis_ai_setup/wsl_rootfs/build_rootfs.sh \
             robotis_ai_setup/wsl_rootfs/start-dockerd.sh \
+            robotis_ai_setup/jetson_agent/setup.sh \
             physical_ai_tools/physical_ai_manager/scripts/railway-deploy.sh
 
   compose-validate:
@@ -106,6 +117,20 @@ jobs:
           EOF
           docker compose --env-file .env config > /dev/null
           docker compose --env-file .env -f docker-compose.yml -f docker-compose.gpu.yml config > /dev/null
+      - name: docker compose config (Jetson)
+        # Migration 019: the Jetson agent ships its own compose file.
+        # Same kind of validation — parses YAML, expands env, asserts
+        # service-shape. The Jetson compose has no GPU layer because
+        # the Orin Nano's integrated GPU goes through `runtime: nvidia`
+        # which the YAML declares directly.
+        run: |
+          cd robotis_ai_setup/jetson_agent
+          cat > .env <<'EOF'
+          REGISTRY=nettername
+          EDUBOTICS_HF_TOKEN=ci_test
+          ROS_DOMAIN_ID=42
+          EOF
+          docker compose --env-file .env -f docker-compose.jetson.yml config > /dev/null
 
   overlay-guard:
     runs-on: ubuntu-latest

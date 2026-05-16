@@ -1,4 +1,11 @@
-FROM robotis/physical-ai-server:amd64-0.8.2
+# Base image is parameterised so a single Dockerfile builds for both
+# architectures. amd64 uses the ROBOTIS-published base; arm64 uses our
+# own base built once from the upstream physical_ai_tools/physical_ai_server/
+# Dockerfile.arm64 sources (see docs/arm64_base/README.md). The
+# build-images.sh script passes the right base via --build-arg
+# BASE_IMAGE=... per platform.
+ARG BASE_IMAGE=robotis/physical-ai-server:amd64-0.8.2
+FROM ${BASE_IMAGE}
 
 # Patch upstream bug: ServerInference.__init__ never initializes self._endpoints,
 # causing AttributeError on first register_endpoint() call.

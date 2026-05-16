@@ -12,8 +12,13 @@ import ControlPanel from '../components/ControlPanel';
 import HeartbeatStatus from '../components/HeartbeatStatus';
 import ImageGrid from '../components/ImageGrid';
 import InferencePanel from '../components/InferencePanel';
+import JetsonAvailabilityChip from '../components/JetsonAvailabilityChip';
 import { addTag } from '../features/tasks/taskSlice';
 import { setIsFirstLoadFalse } from '../features/ui/uiSlice';
+// Mounting the hook here (alongside the chip) initialises the Jetson
+// state machine when the student enters the Inference tab — single
+// classroom lookup + claim/disconnect lifecycle. Hidden until paired.
+import { useJetsonConnection } from '../hooks/useJetsonConnection';
 
 export default function InferencePage({ isActive = true }) {
   const dispatch = useDispatch();
@@ -56,6 +61,12 @@ export default function InferencePage({ isActive = true }) {
 
   const camCount = imageTopicList?.length || 0;
 
+  // Bind the Jetson hook so its connect/disconnect/heartbeat lifecycle
+  // runs while the user is on this tab. The hook's discovery branch is
+  // idempotent — exiting + re-entering the tab won't re-claim if the
+  // user is already connected (status is preserved in Redux).
+  useJetsonConnection();
+
   return (
     <div
       className="relative h-full w-full flex flex-col overflow-hidden"
@@ -78,6 +89,7 @@ export default function InferencePage({ isActive = true }) {
             {camCount} {camCount === 1 ? 'Kamera' : 'Kameras'} aktiv
           </div>
         )}
+        <JetsonAvailabilityChip />
         <div className="flex-1" />
         {isRightPanelCollapsed && (
           <button

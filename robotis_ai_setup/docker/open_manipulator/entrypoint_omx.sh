@@ -1,6 +1,15 @@
 #!/bin/bash
 set -e
 
+# Classroom-Jetson short-circuit: when this container runs on the shared
+# classroom Jetson, only the follower arm is physically connected (the
+# leader stays at the student's desk for recording). Setting
+# EDUBOTICS_FOLLOWER_ONLY=1 skips the leader port wait, the leader
+# launch, the leader-pose read, and the quintic sync — the Jetson agent
+# moves the follower to a safe home pose itself once the container is
+# healthy.
+FOLLOWER_ONLY="${EDUBOTICS_FOLLOWER_ONLY:-0}"
+
 # Set up signal handling early — before any background processes are launched
 PIDS=""
 disable_torque() {
@@ -21,7 +30,9 @@ disable_torque() {
     # parameter is `omx_l/set_dxl_torque` — resolved leader path is
     # `/leader/omx_l/set_dxl_torque`. Previously called the follower-style path
     # under `/leader/...`, which silently 404'd and left the leader torqued.
-    if ! timeout 2 ros2 service call /leader/omx_l/set_dxl_torque \
+    if [ "$FOLLOWER_ONLY" = "1" ]; then
+        echo "[SHUTDOWN] FOLLOWER_ONLY=1 — leader torque-disable skipped (no leader connected)."
+    elif ! timeout 2 ros2 service call /leader/omx_l/set_dxl_torque \
         std_srvs/srv/SetBool "{data: false}" >/dev/null 2>&1; then
         echo "[WARNUNG] Leader-Torque-Abschaltung fehlgeschlagen — Arm bleibt unter Strom"
     fi
@@ -57,7 +68,11 @@ export ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-30}
 echo "========================================"
 echo "ROBOTIS Open Manipulator - AI Mode"
 echo "Follower: ${FOLLOWER_PORT}"
-echo "Leader:   ${LEADER_PORT}"
+if [ "$FOLLOWER_ONLY" = "1" ]; then
+    echo "Leader:   <skipped — EDUBOTICS_FOLLOWER_ONLY=1>"
+else
+    echo "Leader:   ${LEADER_PORT}"
+fi
 echo "Camera 1: ${CAMERA_DEVICE_1:-<none>} as ${CAMERA_NAME_1:-gripper}"
 echo "Camera 2: ${CAMERA_DEVICE_2:-<none>} as ${CAMERA_NAME_2:-scene}"
 echo "========================================"
@@ -82,26 +97,31 @@ wait_for_device() {
 }
 
 wait_for_device "$FOLLOWER_PORT" "Follower arm"
-wait_for_device "$LEADER_PORT" "Leader arm"
 
-# --- Phase 1: Launch Leader FIRST ---
-# Leader must start first so we know its position before the follower moves.
-echo "[LAUNCH] Starting leader..."
-ros2 launch open_manipulator_bringup omx_l_leader_ai.launch.py \
-    port_name:=${LEADER_PORT} &
-PIDS="$!"
+if [ "$FOLLOWER_ONLY" = "1" ]; then
+    echo "[LAUNCH] FOLLOWER_ONLY=1 — skipping leader port wait, leader launch, and quintic sync."
+    LEADER_POS=""
+else
+    wait_for_device "$LEADER_PORT" "Leader arm"
 
-# Wait for leader joint states
-count=0
-while ! ros2 topic list 2>/dev/null | grep -q "/leader/joint_states" && [ $count -lt 30 ]; do
-    sleep 1
-    count=$((count + 1))
-done
-sleep 2
-echo "[LAUNCH] Leader ready."
+    # --- Phase 1: Launch Leader FIRST ---
+    # Leader must start first so we know its position before the follower moves.
+    echo "[LAUNCH] Starting leader..."
+    ros2 launch open_manipulator_bringup omx_l_leader_ai.launch.py \
+        port_name:=${LEADER_PORT} &
+    PIDS="$!"
 
-# Read leader's current position
-LEADER_POS=$(python3 -c "
+    # Wait for leader joint states
+    count=0
+    while ! ros2 topic list 2>/dev/null | grep -q "/leader/joint_states" && [ $count -lt 30 ]; do
+        sleep 1
+        count=$((count + 1))
+    done
+    sleep 2
+    echo "[LAUNCH] Leader ready."
+
+    # Read leader's current position
+    LEADER_POS=$(python3 -c "
 import rclpy, json
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
@@ -131,7 +151,8 @@ node.destroy_node()
 rclpy.shutdown()
 " 2>/dev/null)
 
-echo "[LAUNCH] Leader position: ${LEADER_POS}"
+    echo "[LAUNCH] Leader position: ${LEADER_POS}"
+fi
 
 # --- Phase 2: Launch Follower ---
 echo "[LAUNCH] Starting follower..."
@@ -297,6 +318,8 @@ sys.exit(_exit_code)
     else
         echo "[LAUNCH] Sync complete."
     fi
+elif [ "$FOLLOWER_ONLY" = "1" ]; then
+    echo "[LAUNCH] FOLLOWER_ONLY=1 — sync skipped. Jetson agent will move follower to safe home after the container is healthy."
 else
     echo "[WARN] Could not read leader position — skipping sync"
 fi

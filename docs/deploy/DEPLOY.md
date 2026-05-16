@@ -92,7 +92,7 @@ git push
 
 **Required env vars** (Railway dashboard): `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET`.
 
-**Production-relevant optional:** `ALLOWED_ORIGINS`, `GUI_VERSION` + `GUI_DOWNLOAD_URL` (drives student `.exe` auto-update — bump these to force re-install), `HF_TOKEN` (GDPR + dataset sweep), `MAX_TRAINING_TIMEOUT_HOURS`, `STALLED_WORKER_MINUTES`, `MODAL_VISION_*`, `VISION_MODAL_TIMEOUT_S`.
+**Production-relevant optional:** `ALLOWED_ORIGINS`, `GUI_VERSION` + `GUI_DOWNLOAD_URL` (drives student `.exe` auto-update — bump these to force re-install), `HF_TOKEN` (GDPR + dataset sweep), `MAX_TRAINING_TIMEOUT_HOURS`, `STALLED_WORKER_MINUTES`, `MODAL_VISION_*`, `VISION_MODAL_TIMEOUT_S`, `EDUBOTICS_JETSON_HF_TOKEN` (read-only HF token returned to Jetson agents at `/jetson/register` — REQUIRED if any classroom has a paired Jetson; otherwise `/jetson/register` returns 503).
 
 **Never** set `EDUBOTICS_SKIP_SCHEMA_CHECK=1` on Railway.
 
@@ -218,9 +218,50 @@ GUI 2.2.4 auto-pulls on every launch: TCP probe to Docker Hub (5 s offline-skip)
 
 ---
 
+## 4b. Classroom Jetson (v2.3.0+) — arm64 image set + agent install
+
+Separate ship path because the audience is different (per-classroom teachers) and the scope is narrow (Inference tab only). See [`docs/JETSON_DEPLOY.md`](../JETSON_DEPLOY.md) for the full runbook.
+
+### Maintainer side — push arm64 images once per release
+
+```bash
+# From a maintainer host with buildx + Docker Hub login.
+docker run --privileged --rm tonistiigi/binfmt --install arm64   # one-time, Mac only
+docker buildx create --name edubotics-arm64 --use --bootstrap
+
+# First time: build the arm64 bases (~30-40 min QEMU, ~10 min native arm64).
+BUILD_BASE_ARM64=1 PLATFORM=arm64 ./robotis_ai_setup/docker/build-images.sh
+
+# Subsequent releases: pulls existing bases, rebuilds the thin overlays.
+PLATFORM=arm64 ./robotis_ai_setup/docker/build-images.sh
+```
+
+Pushed tags (separate from amd64 `:latest`):
+- `nettername/open-manipulator:arm64-latest`
+- `nettername/physical-ai-server:arm64-latest`
+- `nettername/open-manipulator-base:arm64-4.1.4` (one-time base)
+- `nettername/physical-ai-server-base:arm64-0.8.2` (one-time base)
+
+`physical-ai-manager` is NOT built for arm64 — the React app stays on the student PC.
+
+### Teacher side — install the agent + pair
+
+```bash
+# On the Jetson with JetPack 6:
+sudo bash /path/to/robotis_ai_setup/jetson_agent/setup.sh
+```
+
+Script registers with the Cloud API, prints a 6-digit pairing code. Teacher enters the code in the admin dashboard → classroom gets bound. See [`docs/JETSON_DEPLOY.md`](../JETSON_DEPLOY.md) for the full walkthrough.
+
+### Required Railway env var
+
+- `EDUBOTICS_JETSON_HF_TOKEN` — read-only HF token, EduBotics-Solutions/* scope. Returned to agents at `/jetson/register`. Without it, `POST /jetson/register` returns 503 and the setup script aborts.
+
+---
+
 ## 5. git push
 
-CI runs 10 jobs: `python-tests`, `shell-lint`, `compose-validate`, `overlay-guard`, `modal-import-validate`, `teacher-web-build-validate`, `manager-build-validate`, `tutorials-validate`, `interfaces-validate`, `nginx-validate`. Most catch a class of regression you'd otherwise discover in production.
+CI runs 11 jobs: `python-tests` (now includes jetson agent + jetson route tests), `shell-lint` (now includes `setup.sh`), `compose-validate` (now also validates `docker-compose.jetson.yml`), `overlay-guard`, `modal-import-validate`, `teacher-web-build-validate`, `manager-build-validate`, `tutorials-validate`, `interfaces-validate`, `nginx-validate`, `german-strings-lint`. Most catch a class of regression you'd otherwise discover in production.
 
 ---
 

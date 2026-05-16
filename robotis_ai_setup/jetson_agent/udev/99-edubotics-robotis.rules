@@ -1,0 +1,18 @@
+# EduBotics — stable name for the ROBOTIS OpenRB-150 follower arm.
+#
+# VID 2F5D = ROBOTIS. PIDs 0103 (default firmware) and 2202 (alt firmware)
+# are both shipped with OpenMANIPULATOR-X. Symlinking to a stable name
+# means docker-compose.jetson.yml can declare a fixed FOLLOWER_PORT
+# (/dev/edubotics-follower) regardless of which /dev/ttyACM* the kernel
+# happened to assign at boot.
+#
+# The camera USB serials are filled in dynamically by setup.sh (written
+# to /etc/udev/rules.d/98-edubotics-cameras.rules) since they vary per
+# physical device. THIS file is static.
+#
+# Reload after editing:
+#   sudo udevadm control --reload-rules
+#   sudo udevadm trigger
+
+SUBSYSTEM=="tty", ATTRS{idVendor}=="2f5d", ATTRS{idProduct}=="0103", SYMLINK+="edubotics-follower"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="2f5d", ATTRS{idProduct}=="2202", SYMLINK+="edubotics-follower"

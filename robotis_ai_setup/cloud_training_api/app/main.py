@@ -14,6 +14,8 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from app.routes.admin import router as admin_router
 from app.routes.datasets import router as datasets_router
 from app.routes.health import router as health_router
+from app.routes.jetson import router as jetson_router
+from app.routes.jetson import teacher_router as jetson_teacher_router
 from app.routes.me import router as me_router
 from app.routes.policies import router as policies_router
 from app.routes.teacher import router as teacher_router
@@ -23,6 +25,7 @@ from app.routes.vision import router as vision_router
 from app.routes.workflows import router as workflows_router
 from app.routes.workgroups import router as workgroups_router
 from app.services.dataset_sweep import sweep_loop as _dataset_sweep_loop
+from app.services.jetson_sweep import sweep_loop as _jetson_sweep_loop
 
 load_dotenv()
 
@@ -64,6 +67,34 @@ def _validate_required_secrets() -> None:
 _validate_required_secrets()
 
 
+def _warn_optional_secrets() -> None:
+    """Log WARNING at boot for env vars that aren't strictly required but
+    silently disable specific routes when missing. Migration 019 added
+    EDUBOTICS_JETSON_HF_TOKEN — without it /jetson/register returns 503
+    and no Jetson can be set up. Operators deploying a classroom-Jetson
+    feature flag should see a clear log line during Railway boot rather
+    than discover the misconfiguration when a teacher tries to pair a
+    Jetson.
+    """
+    optional_warns = (
+        (
+            "EDUBOTICS_JETSON_HF_TOKEN",
+            "/jetson/register will return 503 — classrooms cannot pair Jetsons. "
+            "Set the read-only HF org token on Railway to enable.",
+        ),
+        (
+            "HF_TOKEN",
+            "dataset reconciliation sweep + GDPR Art. 17 cleanup disabled.",
+        ),
+    )
+    for key, msg in optional_warns:
+        if not os.environ.get(key):
+            logger.warning("env var %s not set — %s", key, msg)
+
+
+_warn_optional_secrets()
+
+
 def _validate_required_schema() -> None:
     """Fail-fast at startup if any required Supabase schema object is missing.
 
@@ -97,6 +128,7 @@ def _validate_required_schema() -> None:
         "tutorial_progress",  # 016
         "datasets",
         "progress_entries",
+        "jetsons",  # 019 — classroom Jetson Orin Nano support
     )
     missing_tables: list[str] = []
     for table in required_tables:
@@ -196,6 +228,27 @@ def _validate_required_schema() -> None:
             "p_version_id": dummy,
             "p_user_id": dummy,
         }),
+        # Migration 019 — classroom Jetson lifecycle RPCs. Each probe
+        # passes the signature the routes use; an existence-check P0002
+        # ("nicht gefunden") response proves the RPC is callable, while
+        # PGRST202 means the migration hasn't been applied yet.
+        ("claim_jetson", {"p_jetson_id": dummy, "p_user_id": dummy}),
+        ("release_jetson", {"p_jetson_id": dummy, "p_user_id": dummy}),
+        ("heartbeat_jetson", {"p_jetson_id": dummy, "p_user_id": dummy}),
+        ("agent_heartbeat_jetson", {
+            "p_jetson_id": dummy,
+            "p_agent_token": dummy,
+            "p_lan_ip": "",
+            "p_agent_version": "",
+        }),
+        ("pair_jetson", {
+            "p_classroom_id": dummy,
+            "p_pairing_code": "_probe",
+            "p_teacher_id": dummy,
+            "p_mdns_name": "_probe",
+        }),
+        ("force_release_jetson", {"p_jetson_id": dummy, "p_teacher_id": dummy}),
+        ("sweep_jetson_locks", {}),
     )
     missing_rpcs: list[str] = []
     for name, args in required_rpcs:
@@ -334,6 +387,24 @@ _RATE_LIMIT_RULES: list[tuple[str, str, int, float]] = [
     # up dollars per classroom, so cap at 5/60s/user — well above any
     # legitimate manual editing cadence.
     ("POST", "/vision/detect", 5, 60.0),
+    # Jetson agent bootstrap (no auth). IP-keyed because the agent has
+    # no JWT yet. Five registrations per minute per public IP is fine
+    # for a teacher physically setting up a Jetson; a rogue actor on
+    # the LAN would burn through the pool without getting credentials
+    # bound to any classroom.
+    #
+    # MUST come BEFORE the broader "/jetson/" rule below — the
+    # middleware's first-match-wins (break-on-match) ordering means a
+    # less-specific prefix listed first shadows a more-specific one.
+    # The original "/jetson/" rule was listed first and turned this
+    # 5/60s into dead code.
+    ("POST", "/jetson/register", 5, 60.0),
+    # Classroom Jetson claim — per-user (JWT sub keyed). Students may
+    # double-click the Verbinde button or retry after a transient 429
+    # from the Cloud API; 10/60s is plenty of headroom for legitimate
+    # use and stops a tight-loop bug from spamming claim_jetson and
+    # racing the lock state.
+    ("POST", "/jetson/", 10, 60.0),
 ]
 
 
@@ -388,8 +459,12 @@ def _user_key_from_jwt(request: Request) -> str | None:
 
 
 # Routes that should rate-limit per AUTHENTICATED USER rather than per
-# IP. Anything missing here keeps the IP-keyed legacy behavior.
-_PER_USER_RATE_LIMIT_PREFIXES = ("/vision/detect",)
+# IP. Anything missing here keeps the IP-keyed legacy behavior. The
+# /jetson/ prefix uses per-JWT-sub keying for claim/heartbeat/release
+# so a NAT'd classroom of 30 students doesn't share one bucket. The
+# /jetson/register sub-prefix has no JWT and falls back to IP keying
+# (the _user_key_from_jwt helper returns None → IP path).
+_PER_USER_RATE_LIMIT_PREFIXES = ("/vision/detect", "/jetson/")
 
 
 # Audit A2: hard upper bound on workflow-write request bodies.
@@ -501,6 +576,8 @@ app.include_router(policies_router)
 app.include_router(admin_router)
 app.include_router(workflows_router)
 app.include_router(vision_router)
+app.include_router(jetson_router)
+app.include_router(jetson_teacher_router)
 
 
 # ─── Background tasks ───────────────────────────────────────────────────
@@ -523,3 +600,16 @@ async def _start_dataset_sweep() -> None:
         logger.info("dataset_sweep: HF_TOKEN not set, loop not started")
         return
     _asyncio.create_task(_dataset_sweep_loop())
+
+
+@app.on_event("startup")
+async def _start_jetson_sweep() -> None:
+    """Migration 019: auto-release classroom-Jetson locks whose student
+    heartbeat is older than 5 minutes. Pairs with the agent's transition
+    watcher to recover from browser crashes / abandoned sessions."""
+    import asyncio as _asyncio
+
+    if os.environ.get("JETSON_SWEEPER_DISABLED") == "1":
+        logger.info("jetson_sweep: disabled via env")
+        return
+    _asyncio.create_task(_jetson_sweep_loop())

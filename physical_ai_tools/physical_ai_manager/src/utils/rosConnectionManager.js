@@ -30,6 +30,24 @@ class RosConnectionManager {
     this.maxReconnectAttempts = 30;
     this.reconnectTimer = null;
     this.intentionalDisconnect = false;
+    // Jetson auth: when the URL points at a Jetson rosbridge proxy
+    // (port 9091), the proxy expects the first WS frame to be
+    // {op: "auth", token: "<JWT>"}. We send that on the 'connection'
+    // event BEFORE any user-facing subscribe/advertise. The JWT is
+    // refreshed by useJetsonConnection on every reconnect via
+    // setAuthToken so a Supabase token rotation mid-session doesn't
+    // strand the WS.
+    this.authToken = null;
+  }
+
+  /**
+   * Set / clear the JWT to send as the first frame on connection.
+   * Called by useJetsonConnection on connect (with the current Supabase
+   * access token) and on disconnect (with null).
+   * @param {string|null} token
+   */
+  setAuthToken(token) {
+    this.authToken = token || null;
   }
 
   /**
@@ -89,6 +107,24 @@ class RosConnectionManager {
         this.connectionPromise = null;
         this.reconnectAttempts = 0;
         this.intentionalDisconnect = false;
+
+        // Jetson auth-op: if a token is set, send it as the FIRST frame
+        // before any subscribe/advertise the user-side `onConnected`
+        // callback might queue. ROSLIB.Ros exposes the raw .socket; we
+        // use it directly because ROSLIB doesn't have an 'auth' op of
+        // its own. The Jetson proxy holds back upstream traffic until
+        // this frame arrives and verifies.
+        if (this.authToken && ros.socket && ros.socket.readyState === 1) {
+          try {
+            ros.socket.send(JSON.stringify({
+              op: 'auth',
+              token: this.authToken,
+            }));
+          } catch (error) {
+            console.warn('Failed to send JWT auth frame:', error);
+          }
+        }
+
         resolve(ros);
 
         if (this.onConnected && typeof this.onConnected === 'function') {

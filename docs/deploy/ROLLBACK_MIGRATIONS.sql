@@ -1,12 +1,68 @@
 -- ============================================================
--- Roboter Studio upgrade — combined ROLLBACK
--- Apply in this exact order: 017 → 016 → 015 (reverse of forward).
+-- EduBotics combined ROLLBACK bundle (v2.3.0 follow-up)
+-- Apply in this exact order: 020 → 019 → 017 → 016 → 015
+-- (reverse of forward — newer migrations rolled back first so an
+--  older migration's table isn't yanked out from under a newer
+--  migration's reference).
 -- Each block is wrapped in BEGIN/COMMIT — safe to copy/paste into
 -- Supabase SQL Editor in one go.
 --
 -- IMPORTANT: roll back the Railway revision that depends on these
 -- tables BEFORE running this bundle, otherwise live traffic 500s.
 -- ============================================================
+
+-- ===== 020_jetson_v2_rollback.sql =====
+-- Drops only the 3 RPCs the v2.3.0 follow-up added. Does NOT touch
+-- migration 019's tables/RPCs/policies — those go in the next block.
+
+BEGIN;
+
+DROP FUNCTION IF EXISTS public.agent_release_jetson(UUID, UUID);
+DROP FUNCTION IF EXISTS public.regenerate_pairing_code(UUID, UUID, TEXT, TIMESTAMPTZ);
+DROP FUNCTION IF EXISTS public.unpair_jetson(UUID, UUID);
+
+COMMIT;
+
+-- ===== 019_classroom_jetsons_rollback.sql =====
+-- Drops the entire Classroom Jetson surface (table + 7 RPCs + RLS +
+-- realtime publication + trigger). 020 MUST be rolled back first so
+-- no FK/dependency from 020 RPCs remains pointing at this table.
+
+BEGIN;
+
+-- Realtime publication first (idempotent — only drop if present).
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM pg_publication_tables
+     WHERE pubname = 'supabase_realtime'
+       AND schemaname = 'public'
+       AND tablename = 'jetsons'
+  ) THEN
+    ALTER PUBLICATION supabase_realtime DROP TABLE public.jetsons;
+  END IF;
+END
+$$;
+
+DROP TRIGGER IF EXISTS trg_jetsons_touch ON public.jetsons;
+
+DROP POLICY IF EXISTS "Admins manage jetsons" ON public.jetsons;
+DROP POLICY IF EXISTS "Teachers manage own classroom jetson" ON public.jetsons;
+DROP POLICY IF EXISTS "Classroom members read classroom jetson" ON public.jetsons;
+
+DROP FUNCTION IF EXISTS public.sweep_jetson_locks();
+DROP FUNCTION IF EXISTS public.force_release_jetson(UUID, UUID);
+DROP FUNCTION IF EXISTS public.pair_jetson(UUID, TEXT, UUID, TEXT);
+DROP FUNCTION IF EXISTS public.agent_heartbeat_jetson(UUID, UUID, TEXT, TEXT);
+DROP FUNCTION IF EXISTS public.heartbeat_jetson(UUID, UUID);
+DROP FUNCTION IF EXISTS public.release_jetson(UUID, UUID);
+DROP FUNCTION IF EXISTS public.claim_jetson(UUID, UUID);
+
+DROP TABLE IF EXISTS public.jetsons;
+
+-- touch_updated_at is shared across migrations — do NOT drop it here.
+
+COMMIT;
 
 -- ===== 017_vision_quota_rollback.sql =====
 -- 017_vision_quota_rollback.sql

@@ -181,7 +181,13 @@ def _is_online(last_seen_at: str | None, threshold_s: int = 60) -> bool:
         dt = datetime.fromisoformat(last_seen_at.replace("Z", "+00:00"))
     except (ValueError, TypeError):
         return False
-    return (datetime.now(timezone.utc) - dt).total_seconds() < threshold_s
+    now = datetime.now(timezone.utc)
+    # Reject future timestamps (corrupted clock, manual DB edit). Without
+    # this guard a row with `last_seen_at = NOW() + 1 year` reports
+    # online=true even though the agent hasn't actually checked in.
+    if dt > now:
+        return False
+    return (now - dt).total_seconds() < threshold_s
 
 
 def _serialise(row: dict, owner_info: dict | None = None) -> JetsonInfo:

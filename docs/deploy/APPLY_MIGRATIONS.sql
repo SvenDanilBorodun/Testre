@@ -1,5 +1,5 @@
 -- ============================================================
--- Roboter Studio upgrade — combined Supabase migrations
+-- EduBotics combined Supabase migrations (Roboter Studio bundle).
 -- Apply ALL of these in one go via Supabase Dashboard → SQL Editor.
 -- Order matters; each block is wrapped in BEGIN/COMMIT so a single
 -- mistake rolls back its own block without touching the others.
@@ -10,10 +10,18 @@
 -- workflow_versions). The new routes will return 500 against an
 -- un-migrated schema.
 --
--- Migrations included:
+-- Migrations included in THIS file:
 --   015_workflow_versions.sql   (Verlauf history + 20-cap prune + RLS)
 --   016_tutorial_progress.sql   (skillmap progress tracking)
 --   017_vision_quota.sql        (per-user cloud-vision quota + atomic RPCs)
+--
+-- Migrations applied SEPARATELY (in robotis_ai_setup/supabase/, run via
+-- supabase CLI or apply individually in the SQL editor):
+--   018_workflow_versions_author_and_group_rls.sql
+--   019_classroom_jetsons.sql   (Classroom Jetson table + 7 RPCs + RLS)
+--   020_jetson_v2.sql           (3 follow-up RPCs: agent_release,
+--                                regenerate_pairing_code, unpair_jetson)
+-- Rollbacks for 019/020 are in docs/deploy/ROLLBACK_MIGRATIONS.sql (top).
 -- ============================================================
 
 -- pgcrypto provides gen_random_uuid() — Supabase ships it enabled

@@ -34,6 +34,7 @@ import { clearSession, setQuota } from '../features/auth/authSlice';
 import { getQuota } from '../services/cloudTrainingApi';
 import useSupabaseTrainings from '../hooks/useSupabaseTrainings';
 import useRefetchOnFocus from '../hooks/useRefetchOnFocus';
+import { resetJetsonOnLogout } from '../hooks/useJetsonConnection';
 
 function statusSubtitle(status) {
   switch (status) {
@@ -104,6 +105,12 @@ export default function TrainingPage() {
   useRefetchOnFocus(refetchQuota);
 
   const handleLogout = async () => {
+    // Release any held Jetson lock BEFORE invalidating the session so the
+    // beacon path still authenticates. Without this, logging out from the
+    // Training tab while connected leaks the lock for the full 5-min
+    // sweeper window. Mirrors the wiring in StudentApp + WebApp.
+    const jetsonId = window.__edubotics_jetson_id__ || null;
+    resetJetsonOnLogout(dispatch, session?.access_token, jetsonId);
     await supabase.auth.signOut();
     dispatch(clearSession());
     toast.success('Abgemeldet');

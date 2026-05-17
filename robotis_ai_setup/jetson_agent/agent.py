@@ -261,7 +261,13 @@ def _pull_one_image_with_retries(image: str) -> Optional[str]:
                 "  retry %d/%d for %s after %d s",
                 attempt, _PULL_MAX_ATTEMPTS - 1, image, backoff[attempt],
             )
-            time.sleep(backoff[attempt])
+            # Interruptible sleep: a plain time.sleep blocks SIGTERM
+            # for the full backoff window, which can push graceful
+            # shutdown past systemd's TimeoutStopSec. _shutdown.wait
+            # returns True early if the main thread sets the event.
+            if _shutdown.wait(backoff[attempt]):
+                logger.info("  shutdown requested mid-retry — aborting pull for %s", image)
+                return last_local
         try:
             logger.info(
                 "  attempt %d/%d: docker pull %s (timeout %d s)",
@@ -767,7 +773,15 @@ def _transition_to_claimed(owner_id: str) -> None:
 def _release_lock_via_cloud_api(owner_id: str) -> None:
     """Best-effort: ask the Cloud API to release the lock. Used when a
     claim transition fails locally and we need to free the server-side
-    state so the React app doesn't stay stuck."""
+    state so the React app doesn't stay stuck.
+
+    v2.3.0 follow-up: the Cloud API now exposes POST /jetson/{id}/agent-
+    release (agent_token-authenticated) which wraps the agent_release_jetson
+    RPC from migration 020. Before that landed, this function only logged
+    a warning — leaving the lock held until the 5-minute sweeper fired.
+    Now we actually POST, with a fall-back to the sweeper if the call
+    fails (network blip / Cloud API down).
+    """
     try:
         env = _load_env()
     except SystemExit:
@@ -776,16 +790,20 @@ def _release_lock_via_cloud_api(owner_id: str) -> None:
         env["EDUBOTICS_CLOUD_API_URL"].rstrip("/")
         + f"/jetson/{env['EDUBOTICS_JETSON_ID']}/agent-release"
     )
-    # NOTE: this endpoint does not exist in v1 of the Cloud API. The
-    # agent currently has no authenticated way to release a student's
-    # lock — the agent_token is for heartbeats only. The Cloud API's
-    # 5-minute sweeper will eventually free the lock when the student's
-    # React heartbeats stop arriving (since we tore down the proxy
-    # above, no student heartbeats will succeed). Logged as a known
-    # gap; v1.1 should add an agent-initiated release endpoint.
-    logger.warning(
-        "Claim failed for owner %s — relying on 5-min server-side sweep "
-        "to free the lock (no agent-release endpoint in v1).",
+    payload = {"agent_token": env["EDUBOTICS_AGENT_TOKEN"]}
+    resp = _post_json(url, payload, timeout=10)
+    if resp is None:
+        # _post_json already logged the WARNING. Fall back to the
+        # 5-min sweeper.
+        logger.warning(
+            "Claim failed for owner %s; agent-release call failed too — "
+            "lock will be freed by the 5-min server-side sweeper.",
+            owner_id,
+        )
+        return
+    logger.info(
+        "Claim failed for owner %s — released server-side lock via "
+        "/jetson/{id}/agent-release. Student can retry immediately.",
         owner_id,
     )
 

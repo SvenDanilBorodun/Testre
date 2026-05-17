@@ -13,7 +13,12 @@ ExecStart=/usr/bin/python3 /opt/edubotics/agent.py
 Restart=always
 RestartSec=5
 # Long-running; the agent's own state machine handles teardown.
-TimeoutStopSec=60
+# 240s is sized to the worst-case graceful shutdown: _stop_proxy() (<=10s)
+# + _bring_down_stack() (`docker compose down` 120s + fallback kill 30s +
+# rm 30s) + _wipe_session_volumes() (3 attempts × ~1s + 30s/volume) ≈ 200s.
+# 60s would SIGKILL mid-teardown and orphan containers / leave server-side
+# ownership stale.
+TimeoutStopSec=240
 # Run as root: needs docker socket + udev + systemd interaction. The
 # ROS containers run unprivileged inside (the open_manipulator
 # container needs privileged: true but that's set in compose, not here).

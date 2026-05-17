@@ -48,7 +48,14 @@ UPSTREAM_URL = os.environ.get("EDUBOTICS_UPSTREAM_WS", "ws://127.0.0.1:9090")
 FRONT_PORT = int(os.environ.get("EDUBOTICS_PROXY_FRONT_PORT", "9091"))
 OWNER_URL = os.environ.get("EDUBOTICS_OWNER_URL", "http://127.0.0.1:5180/owner")
 AUTH_FRAME_TIMEOUT_S = 5.0
-OWNER_CACHE_TTL_S = 1.0
+# 0.2s owner cache TTL. The previous 1.0s value created a handoff race
+# window: after Student A releases and Student B claims (Cloud API
+# atomic), the cached owner=A could survive for up to 1s, letting any
+# stragglers from Student A's old WS authenticate against the stale
+# cache. 0.2s shrinks that to a window so small the next student
+# physically cannot reach a browser tab in time. Loopback HTTP is
+# ~5ms; per-connect overhead is negligible.
+OWNER_CACHE_TTL_S = 0.2
 
 ENV_PATH = os.environ.get("EDUBOTICS_JETSON_ENV", "/etc/edubotics/jetson.env")
 

@@ -119,7 +119,7 @@ cd /Users/svenborodun/Documents/EduBotics/Testre/robotis_ai_setup/docker
 
 export SUPABASE_URL='https://<project-ref>.supabase.co'
 export SUPABASE_ANON_KEY='<anon key — NOT service-role>'
-export CLOUD_API_URL='https://scintillating-empathy-production-9efd.up.railway.app'
+export CLOUD_API_URL='https://scintillating-empathy-production-1068.up.railway.app'
 export REGISTRY='nettername'
 export ALLOWED_POLICIES='act'
 export BUILD_ID="$(date -u +%Y%m%d-%H%M%S)-$(git -C .. rev-parse --short HEAD)"
@@ -299,7 +299,7 @@ CI runs 11 jobs: `python-tests` (now includes jetson agent + jetson route tests)
 
 ```bash
 TOKEN=…  # student JWT
-URL=https://scintillating-empathy-production-9efd.up.railway.app
+URL=https://scintillating-empathy-production-1068.up.railway.app
 
 curl "$URL/health"                                     # {"status":"ok"}
 curl -H "Authorization: Bearer $TOKEN" "$URL/me"       # 200 + profile

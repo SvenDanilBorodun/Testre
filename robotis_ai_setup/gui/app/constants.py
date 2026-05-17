@@ -29,7 +29,7 @@ APP_VERSION = _read_version_file()
 # Cloud API URL for update checks.
 UPDATE_API_URL = os.environ.get(
     "EDUBOTICS_UPDATE_API_URL",
-    "https://scintillating-empathy-production-9efd.up.railway.app",
+    "https://scintillating-empathy-production-1068.up.railway.app",
 )
 
 # Docker image registry — override with EDUBOTICS_REGISTRY env var.

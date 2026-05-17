@@ -22,7 +22,7 @@
 set -euo pipefail
 
 # ─── Config (override via env) ────────────────────────────────────────────
-EDUBOTICS_CLOUD_API_URL="${EDUBOTICS_CLOUD_API_URL:-https://scintillating-empathy-production-9efd.up.railway.app}"
+EDUBOTICS_CLOUD_API_URL="${EDUBOTICS_CLOUD_API_URL:-https://scintillating-empathy-production-1068.up.railway.app}"
 INSTALL_DIR="${EDUBOTICS_INSTALL_DIR:-/opt/edubotics}"
 ENV_DIR="${EDUBOTICS_ENV_DIR:-/etc/edubotics}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

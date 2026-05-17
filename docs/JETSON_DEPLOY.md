@@ -70,7 +70,7 @@ On the Jetson, with the follower arm + 2 cameras plugged in:
 
 ```bash
 # 1. Set the Cloud API URL (skip if using the default production deploy).
-export EDUBOTICS_CLOUD_API_URL="https://scintillating-empathy-production-9efd.up.railway.app"
+export EDUBOTICS_CLOUD_API_URL="https://scintillating-empathy-production-1068.up.railway.app"
 
 # 2. Run the setup script as root.
 sudo bash /path/to/robotis_ai_setup/jetson_agent/setup.sh

@@ -187,7 +187,7 @@ There is **no** `_upstream/`, **no** `.gitmodules`, **no** `modal_mcp/` in this 
              ▼                                    ▼
    ┌────────────────────────────────────────────────┐
    │  Railway FastAPI (cloud_training_api)          │
-   │  scintillating-empathy-production-9efd         │
+   │  scintillating-empathy-production-1068         │
    │  uvicorn --workers 1                           │
    └────┬──────────────────────────┬────────────────┘
         │ Modal SDK .spawn(...)    │ supabase-py (service-role key)
@@ -227,7 +227,7 @@ There is **no** `_upstream/`, **no** `.gitmodules`, **no** `modal_mcp/` in this 
 |---|---|---|---|
 | Docker Hub | `nettername/*` | 3 student images: `physical-ai-manager`, `physical-ai-server`, `open-manipulator` | Free (public) |
 | Docker Hub (base) | `robotis/*` | `robotis/open-manipulator:amd64-4.1.4`, `robotis/physical-ai-server:amd64-0.8.2` | Free (public) |
-| Railway | API service `scintillating-empathy-production-9efd` | FastAPI cloud_training_api (`uvicorn --workers 1`) | Hobby plan |
+| Railway | API service `scintillating-empathy-production-1068` | FastAPI cloud_training_api (`uvicorn --workers 1`) | Hobby plan |
 | Railway | Web service | React app in `web` mode (admin/teacher dashboard) via `Dockerfile.web` + `nginx.web.conf.template`, listens on `${PORT}` (Railway-injected) | Hobby plan |
 | Modal | Workspace `svendanilborodun`, app `edubotics-training`, fn `train` | NVIDIA L4 (24 GB), `timeout=7*3600`, `min_containers=0` | Per GPU-hour |
 | Supabase | Postgres + Auth + Realtime | 10 user-facing tables (`users`, `trainings`, `classrooms`, `progress_entries`, `workflows`, `workgroups`, `workgroup_memberships`, `datasets`, `workflow_versions`, `tutorial_progress`) + ~10 RPCs + Realtime publications for `trainings`, `workflows`, `workgroups`, `datasets`, `tutorial_progress`, `workflow_versions` | Free tier |
@@ -942,7 +942,7 @@ Output: ~350-450 MB compressed. Both file + sidecar are gitignored (≥100 MB ex
 
 ### 11.3 GUI constants (`gui/app/constants.py`)
 - `APP_VERSION = _read_version_file()` — reads repo-root `VERSION` (`2.3.0`); fallback `"2.3.0"`
-- `UPDATE_API_URL = $EDUBOTICS_UPDATE_API_URL or "https://scintillating-empathy-production-9efd.up.railway.app"`
+- `UPDATE_API_URL = $EDUBOTICS_UPDATE_API_URL or "https://scintillating-empathy-production-1068.up.railway.app"`
 - `REGISTRY = $EDUBOTICS_REGISTRY or "nettername"`
 - `IMAGE_TAG`: `$EDUBOTICS_IMAGE_TAG` → `docker/versions.env IMAGE_TAG=...` line → `"latest"`
 - `IMAGE_OPEN_MANIPULATOR/SERVER/MANAGER`, `ALL_IMAGES`

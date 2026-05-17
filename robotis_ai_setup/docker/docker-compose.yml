@@ -83,7 +83,7 @@ services:
       # German prompts to ${EDUBOTICS_CLOUD_API_URL}/vision/detect when
       # the student enables the open-vocab block. Defaults to the
       # Railway production endpoint; override in .env for staging.
-      - EDUBOTICS_CLOUD_API_URL=${EDUBOTICS_CLOUD_API_URL:-https://scintillating-empathy-production-9efd.up.railway.app}
+      - EDUBOTICS_CLOUD_API_URL=${EDUBOTICS_CLOUD_API_URL:-https://scintillating-empathy-production-1068.up.railway.app}
     volumes:
       # This container does inference/recording on ROS topics; it does NOT
       # talk to raw USB. /dev:/dev + privileged were unnecessary attack

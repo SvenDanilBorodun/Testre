@@ -190,7 +190,12 @@ COCO_SNAPSHOT="${PHYSICAL_AI_TOOLS_DIR}/physical_ai_manager/_coco_classes.py"
 cp "${PHYSICAL_AI_TOOLS_DIR}/physical_ai_server/physical_ai_server/workflow/coco_classes.py" \
    "${COCO_SNAPSHOT}"
 
-docker build --platform linux/amd64 \
+# CLAUDE.md §13.4.bis: build to local daemon first with buildx --load so
+# the post-build smoke grep can `docker run` against the image. A separate
+# `docker push` follows once the smoke check passes. buildx --load writes
+# into the daemon store (vs containerd-snapshotter) so the subsequent
+# push reads the same content we just smoke-tested.
+docker buildx build --platform linux/amd64 --load \
     $BUILD_ARGS \
     -t "${REGISTRY}/physical-ai-manager:latest" \
     -f "${PHYSICAL_AI_TOOLS_DIR}/physical_ai_manager/Dockerfile" \
@@ -299,11 +304,16 @@ if [ "$PLATFORM" = "arm64" ]; then
         -f "${SCRIPT_DIR}/physical_ai_server/Dockerfile" \
         "${SCRIPT_DIR}/physical_ai_server/"
 else
-    # --platform linux/amd64 is needed on Apple Silicon Macs where
-    # `docker build` defaults to the host's linux/arm64 — the ROBOTIS
-    # base is amd64-only and Docker won't auto-fall-back. Harmless on
-    # actual Linux/amd64 hosts (no-op).
-    docker build --platform linux/amd64 \
+    # CLAUDE.md §13.4.bis: build to local daemon first (--load), then push
+    # in the per-image loop below. This bypasses Docker Desktop's dual-
+    # image-store gotcha where `docker build` writes to containerd-
+    # snapshotter and a subsequent `docker push` reads from the classic
+    # daemon store (potentially uploading a stale `:latest`). With
+    # --load, both the build output and the push source are the daemon
+    # store. --platform linux/amd64 is still needed on Apple Silicon
+    # hosts where the default builder would target arm64; harmless on
+    # native Linux/amd64.
+    docker buildx build --platform linux/amd64 --load \
         --build-arg BASE_IMAGE="${PAS_BASE_IMAGE}" \
         -t "${PAS_OUT_REPO}:${IMAGE_TAG_SUFFIX}" \
         -f "${SCRIPT_DIR}/physical_ai_server/Dockerfile" \
@@ -328,7 +338,9 @@ if [ "$PLATFORM" = "arm64" ] && [ "$BUILD_BASE_ARM64" = "1" ]; then
 elif [ "$PLATFORM" = "amd64" ] && [ "$BUILD_BASE" = "1" ]; then
     echo ""
     echo ">> Building open_manipulator amd64 base from source (this takes ~40 min)..."
-    docker build --platform linux/amd64 \
+    # CLAUDE.md §13.4.bis: --load so subsequent `docker push` (if any)
+    # reads from the daemon store rather than the containerd snapshotter.
+    docker buildx build --platform linux/amd64 --load \
         -t "${OMX_BASE_IMAGE}" \
         -f "${OPEN_MANIPULATOR_DIR}/docker/Dockerfile" \
         "${OPEN_MANIPULATOR_DIR}/docker/"
@@ -357,8 +369,12 @@ if [ "$PLATFORM" = "arm64" ]; then
         -f "${SCRIPT_DIR}/open_manipulator/Dockerfile" \
         "${SCRIPT_DIR}/open_manipulator/"
 else
-    # See note above re: --platform linux/amd64 on Apple Silicon hosts.
-    docker build --platform linux/amd64 \
+    # CLAUDE.md §13.4.bis: --load builds into the local daemon store so
+    # the subsequent `docker push` below uploads the exact bits we just
+    # built (avoiding the Docker Desktop dual-store gotcha where
+    # `docker build` writes containerd and `docker push` reads daemon).
+    # --platform linux/amd64 is still needed on Apple Silicon hosts.
+    docker buildx build --platform linux/amd64 --load \
         --build-arg BASE_IMAGE="${OMX_BASE_IMAGE}" \
         -t "${OMX_OUT_REPO}:${IMAGE_TAG_SUFFIX}" \
         -f "${SCRIPT_DIR}/open_manipulator/Dockerfile" \

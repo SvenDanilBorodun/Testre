@@ -748,8 +748,28 @@ async def set_student_vision_quota(
 ):
     """Audit F49: teacher path to set a student's per-term cloud-vision
     quota. Ownership check via _assert_student_owned. NULL clears
-    the cap (unbounded)."""
+    the cap (unbounded).
+
+    Ceiling enforcement: a teacher with their own
+    ``vision_quota_per_term`` set cannot grant a student a quota
+    larger than the teacher's own — only the admin can lift the
+    ceiling. NULL (unbounded) on the teacher means no ceiling
+    applies; NULL on the request still clears the student's cap.
+    """
     _assert_student_owned(teacher["id"], student_id)
+    teacher_quota = teacher.get("vision_quota_per_term")
+    if (
+        req.quota is not None
+        and isinstance(teacher_quota, int)
+        and req.quota > teacher_quota
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Schüler-Kontingent darf das eigene Lehrer-Kontingent "
+                f"({teacher_quota}) nicht überschreiten."
+            ),
+        )
     supabase = get_supabase()
     supabase.table("users").update(
         {"vision_quota_per_term": req.quota}

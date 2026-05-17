@@ -8,7 +8,7 @@
  *     http://www.apache.org/licenses/LICENSE-2.0
  */
 
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useSelector } from 'react-redux';
 import toast from 'react-hot-toast';
 import {
@@ -43,8 +43,24 @@ function VersionHistoryDropdown({ workflowId, onRestore }) {
   const [versions, setVersions] = useState([]);
   const [loading, setLoading] = useState(false);
   const [restoringId, setRestoringId] = useState(null);
+  // Audit §verhist-r1: ref-based click-outside handler. Without it the
+  // popover hangs around after the student clicks the workspace, an
+  // accidental discovery that comes up in every QA run.
+  const containerRef = useRef(null);
 
   const disabled = !workflowId || !accessToken;
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const handler = (event) => {
+      const root = containerRef.current;
+      if (!root) return;
+      if (event.target instanceof Node && root.contains(event.target)) return;
+      setOpen(false);
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [open]);
 
   const refresh = useCallback(async () => {
     if (!workflowId || !accessToken) return;
@@ -88,7 +104,7 @@ function VersionHistoryDropdown({ workflowId, onRestore }) {
   );
 
   return (
-    <div className="relative inline-block">
+    <div className="relative inline-block" ref={containerRef}>
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
@@ -121,6 +137,7 @@ function VersionHistoryDropdown({ workflowId, onRestore }) {
               {versions.map((v) => (
                 <li
                   key={v.id}
+                  role="menuitem"
                   className="flex items-center justify-between gap-2 px-3 py-2 hover:bg-[var(--bg-sunk)]"
                 >
                   <span className="text-xs text-[var(--ink)] font-mono">

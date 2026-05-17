@@ -39,14 +39,22 @@ function SkillmapPlayer() {
   // keeps the screen accurate even when Supabase Realtime is offline.
   const { progress, refetch: refetchProgress } = useSupabaseTutorialProgress();
   const [tutorial, setTutorial] = useState(null);
+  // Audit §skillmap-r1: track load failure so we can show an
+  // "Abbrechen" button instead of leaving the player stuck on
+  // "Lernpfad lädt …" forever. Also clear the toolbox restriction
+  // whenever the active tutorial transitions to null (closes the race
+  // documented in deferred §2.8).
+  const [loadError, setLoadError] = useState(false);
 
   // Load active tutorial body when the id changes.
   useEffect(() => {
     if (!activeTutorialId) {
       setTutorial(null);
+      setLoadError(false);
       dispatch(setRestrictedBlocks(null));
       return;
     }
+    setLoadError(false);
     let cancelled = false;
     loadTutorial(activeTutorialId)
       .then((doc) => {
@@ -57,6 +65,7 @@ function SkillmapPlayer() {
       })
       .catch((e) => {
         if (cancelled) return;
+        setLoadError(true);
         toast.error(`Lernpfad konnte nicht geladen werden: ${e.message || e}`);
       });
     return () => { cancelled = true; };
@@ -120,7 +129,13 @@ function SkillmapPlayer() {
   }, [activeStep, activeTutorialId, dispatch]);
 
   const handleStop = useCallback(() => {
+    // Audit §skillmap-r1: also dispatch setRestrictedBlocks(null) so the
+    // toolbox restriction lifts immediately even if the load-effect's
+    // own cleanup hasn't fired yet (race with the user mashing the
+    // beenden button before tutorial finished loading).
     dispatch(setActiveTutorial({ id: null, step: 0 }));
+    dispatch(setRestrictedBlocks(null));
+    setLoadError(false);
   }, [dispatch]);
 
   if (!activeTutorialId) {
@@ -170,9 +185,26 @@ function SkillmapPlayer() {
   }
 
   if (!tutorial) {
+    // Audit §skillmap-r1: when load failed, show an Abbrechen button so
+    // the student can recover instead of being stuck on the spinner.
     return (
       <aside className="bg-white rounded-lg border border-[var(--line)] p-3 sm:p-4">
-        <p className="text-sm text-[var(--ink-3)]">Lernpfad lädt …</p>
+        {loadError ? (
+          <>
+            <p className="text-sm text-red-700 mb-3">
+              Lernpfad konnte nicht geladen werden.
+            </p>
+            <button
+              type="button"
+              onClick={handleStop}
+              className="px-3 py-1.5 text-sm rounded-md border border-[var(--line)] hover:bg-[var(--bg-sunk)]"
+            >
+              Abbrechen
+            </button>
+          </>
+        ) : (
+          <p className="text-sm text-[var(--ink-3)]">Lernpfad lädt …</p>
+        )}
       </aside>
     );
   }

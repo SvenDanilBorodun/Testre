@@ -97,18 +97,14 @@ class DetectRequest(BaseModel):
         # browser canvas sometimes has line wraps that inflate the
         # length without representing extra bytes.
         cleaned = "".join(value.split())
+        # Cheap size-only check. The handler body decodes once and
+        # then re-checks the decoded length against MAX_IMAGE_BYTES.
+        # We previously decoded HERE and decoded a second time at
+        # the call site, which doubled the CPU cost on every request
+        # — see audit §B1/B2. Use the conservative ceiling
+        # (encoded_len ≤ 4*MAX/3 + 32) so an oversized payload is
+        # rejected before any allocation.
         if len(cleaned) > MAX_IMAGE_BYTES * 4 // 3 + 32:
-            raise ValueError("Bild zu groß.")
-        # validate=True rejects non-base64 chars cheaply; combined with
-        # the encoded-length cap above, this short-circuits before any
-        # large allocation. The endpoint decodes a SECOND time from the
-        # cleaned string; we accept the duplicate decode in exchange
-        # for clean separation between validation and use (audit §B1/B2).
-        try:
-            decoded = base64.b64decode(cleaned, validate=True)
-        except binascii.Error as e:
-            raise ValueError(f"Ungültiges Base64-Bild: {e}")
-        if len(decoded) > MAX_IMAGE_BYTES:
             raise ValueError("Bild zu groß.")
         return cleaned
 
@@ -167,19 +163,21 @@ async def _invoke_modal(image_bytes: bytes, prompts: list[str], score_threshold:
             ),
         ) from e
     started = time.monotonic()
+    # Refuse to silently fall back to a synchronous .remote() call: with
+    # uvicorn --workers 1 (our deploy shape) that would stall every
+    # other request for the duration of OWLv2 inference. If the SDK is
+    # too old to expose `.remote.aio`, surface a clear 503 so the
+    # operator pins a newer Modal SDK version.
+    if not (hasattr(fn, "remote") and hasattr(fn.remote, "aio")):
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Cloud-Erkennung benötigt eine neuere Modal-SDK-Version."
+            ),
+        )
     try:
-        if hasattr(fn, "remote") and hasattr(fn.remote, "aio"):
-            coro = fn.remote.aio(image_bytes, prompts, score_threshold)
-            result = await asyncio.wait_for(coro, timeout=MODAL_INVOKE_TIMEOUT_S)
-        else:
-            # Older Modal SDK fallback — drop into a worker thread so
-            # the event loop isn't blocked.
-            result = await asyncio.wait_for(
-                asyncio.to_thread(
-                    fn.remote, image_bytes, prompts, score_threshold,
-                ),
-                timeout=MODAL_INVOKE_TIMEOUT_S,
-            )
+        coro = fn.remote.aio(image_bytes, prompts, score_threshold)
+        result = await asyncio.wait_for(coro, timeout=MODAL_INVOKE_TIMEOUT_S)
     except asyncio.TimeoutError as e:
         raise HTTPException(
             status_code=504,
@@ -206,7 +204,18 @@ async def detect(
     body: DetectRequest,
     user=Depends(get_current_user),
 ):
-    image_bytes = base64.b64decode(body.image_b64, validate=True)
+    # Single decode point. The validator only checked the encoded
+    # length (audit §B1/B2); validate the decoded bytes here AND
+    # return a clean 400 if base64 / size limits fail.
+    try:
+        image_bytes = base64.b64decode(body.image_b64, validate=True)
+    except binascii.Error as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Ungültiges Base64-Bild: {e}",
+        ) from e
+    if len(image_bytes) > MAX_IMAGE_BYTES:
+        raise HTTPException(status_code=413, detail="Bild zu groß.")
     # `get_current_user` returns the gotrue ``User`` object, not a
     # dict; use attribute access (audit §A1).
     user_id = str(getattr(user, "id", "") or "")

@@ -14,8 +14,12 @@ The pipeline is a 4-step state machine driven by the React wizard:
     -> hand-eye (scene, eye-to-base) -> colour profile
 
 ChArUco board: 7x5 squares, 30 mm square, 22 mm marker, DICT_5X5_250. Hand-eye
-is dual-solved with PARK + TSAI; the manager warns if the two methods
-disagree by more than the configured thresholds (~2 deg / 5 mm).
+is dual-solved with PARK + TSAI; the manager refuses to persist when the two
+methods disagree by more than the configured thresholds
+(``ANGLE_DISAGREEMENT_WARN_DEG`` = 4.0 deg and
+``TRANSLATION_DISAGREEMENT_WARN_M`` = 0.010 m / 10 mm). Audit fix #19 — the
+earlier docstring said "~2 deg / 5 mm" which never matched the constants
+below.
 
 Calibration state is persisted to per-camera YAML files under
 CALIB_DIR (a docker named volume mount inside the physical_ai_server
@@ -24,6 +28,7 @@ container). Re-running a step overwrites the corresponding YAML.
 
 from __future__ import annotations
 
+import math
 import os
 import threading
 import time
@@ -346,6 +351,18 @@ class CalibrationManager:
             )
         except cv2.error as e:
             return False, 0.0, 0.0, f'OpenCV-Solver-Fehler: {e}'
+
+        # Audit fix #18: refuse to persist a degenerate solve. NaN/Inf
+        # comes out of calibrateCameraCharucoExtended when the captured
+        # set is collinear or otherwise degenerate; > 5 px reprojection
+        # error is a noisy/blurry set. Either way the resulting K/dist
+        # would calibrate the perception pipeline against garbage and
+        # silently mis-project every pixel click. Force a re-capture.
+        if not math.isfinite(ret) or ret > 5.0:
+            return False, float(ret) if math.isfinite(ret) else 0.0, 0.0, (
+                'Reprojektionsfehler zu hoch — bitte mit unterschiedlichen '
+                'Posen neu kalibrieren.'
+            )
 
         self._intrinsics[camera] = {'K': K, 'dist': dist}
         path = self._intrinsic_path(camera)

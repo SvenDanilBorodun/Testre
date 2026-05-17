@@ -14,6 +14,19 @@ import { COLORS, DE } from './blocks/messages_de';
 
 const COLOR_LABELS = COLORS.map(([label]) => label);
 
+// Audit §sensor-r1: stable empty snapshot the selector falls back to
+// when Redux state hasn't been populated yet (cold mount before the
+// first /workflow/sensors message arrives). Same shape as the slice's
+// initialState.sensorSnapshot — keeping the two in sync is on the
+// editor who touches either.
+const EMPTY_SNAPSHOT = {
+  follower_joints: [],
+  gripper_opening: 0,
+  visible_apriltag_ids: [],
+  color_counts: [0, 0, 0, 0],
+  visible_object_classes: [],
+};
+
 function fmtRad(value) {
   if (value === null || value === undefined || Number.isNaN(value)) return '–';
   const n = Number(value);
@@ -21,7 +34,7 @@ function fmtRad(value) {
 }
 
 function SensorPanel() {
-  const snap = useSelector((s) => s.workshop.sensorSnapshot);
+  const snap = useSelector((s) => s.workshop.sensorSnapshot) ?? EMPTY_SNAPSHOT;
   const ageMs = snap && snap.ts ? Date.now() - snap.ts : null;
   const stale = ageMs !== null && ageMs > 4000;
 

@@ -59,21 +59,28 @@ function BreakpointList({ workspace }) {
       breakpointFailToldRef.current = false;
     }
   }, [runState, paused]);
+  // Audit §bp-r1: debounce the /workflow/set_breakpoints sync so toggling
+  // 10 breakpoints in rapid succession fires ONE RPC, not 10 (the prior
+  // version saturated rosbridge with 10 sequential service calls, each
+  // contending for the 10 s timeout in useRosServiceCaller).
   useEffect(() => {
     const isLive = runState === 'running' || paused;
-    if (!isLive) return;
-    callService(
-      '/workflow/set_breakpoints',
-      'physical_ai_interfaces/srv/WorkflowSetBreakpoints',
-      { block_ids: breakpoints },
-    ).catch(() => {
-      if (!breakpointFailToldRef.current) {
-        breakpointFailToldRef.current = true;
-        toast.error(
-          'Haltepunkte konnten nicht an den Roboter gesendet werden — bitte Verbindung prüfen.',
-        );
-      }
-    });
+    if (!isLive) return undefined;
+    const timer = setTimeout(() => {
+      callService(
+        '/workflow/set_breakpoints',
+        'physical_ai_interfaces/srv/WorkflowSetBreakpoints',
+        { block_ids: breakpoints },
+      ).catch(() => {
+        if (!breakpointFailToldRef.current) {
+          breakpointFailToldRef.current = true;
+          toast.error(
+            'Haltepunkte konnten nicht an den Roboter gesendet werden — bitte Verbindung prüfen.',
+          );
+        }
+      });
+    }, 250);
+    return () => clearTimeout(timer);
   }, [breakpoints, callService, runState, paused]);
 
   // Wire a workspace right-click handler that toggles breakpoints.
@@ -122,7 +129,6 @@ function BreakpointList({ workspace }) {
     <div className="text-sm">
       <p className="text-xs text-[var(--ink-3)] mb-2">
         {DE.DEBUG_BP_TOGGLE_HINT}
-        {' '}Alt+Klick auf einen Block setzt einen Haltepunkt.
       </p>
       {breakpoints.length === 0 ? (
         <p className="text-[var(--ink-4)]">{DE.DEBUG_NO_BREAKPOINTS}</p>

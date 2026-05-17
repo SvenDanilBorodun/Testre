@@ -18,10 +18,15 @@ async def get_current_user(authorization: str | None = Header(default=None, alia
     if not authorization:
         raise HTTPException(status_code=401, detail="Missing authorization header")
 
-    if not authorization.startswith("Bearer "):
+    # RFC 7235 §2.1: auth-scheme is case-insensitive. Some HTTP clients
+    # send "bearer <token>" instead of "Bearer <token>"; rejecting those
+    # at the gate produced surprising 401s for otherwise-valid tokens.
+    # Case-fold the prefix check only, preserving the token's original
+    # casing (the JWT body itself is case-sensitive base64url).
+    if not authorization.lower().startswith("bearer "):
         raise HTTPException(status_code=401, detail="Invalid authorization header")
 
-    token = authorization.removeprefix("Bearer ").strip()
+    token = authorization[len("Bearer "):].strip()
 
     # Cheap structural check: a JWT is three base64url segments separated by dots.
     # Saves a network round-trip when someone sends "Bearer foo".
@@ -55,7 +60,13 @@ def get_user_profile(user_id: str) -> dict:
         supabase.table("users")
         .select(
             "id, email, role, username, full_name, classroom_id, "
-            "workgroup_id, training_credits, created_by"
+            "workgroup_id, training_credits, created_by, "
+            # Audit: cloud-vision quota columns surfaced so teacher
+            # ceiling-enforcement (routes/teacher.py:set_student_vision_quota)
+            # can read the caller's own cap without a second query.
+            # Migration 017 adds these; pre-017 deployments still
+            # receive NULL via the .select() rather than an error.
+            "vision_quota_per_term, vision_used_per_term"
         )
         .eq("id", user_id)
         .single()

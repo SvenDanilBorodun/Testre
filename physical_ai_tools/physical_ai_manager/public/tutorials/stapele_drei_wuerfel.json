@@ -27,7 +27,7 @@
     },
     {
       "title": "Mit Schleife refaktorisieren",
-      "body": "Packe die Aufnehm-Ablege-Sequenz in eine Funktion \"stapeln\" mit dem Ziel als Parameter — und rufe sie dreimal auf.",
+      "body": "Packe die Aufnehm-Ablege-Sequenz in eine Funktion \"stapeln\" mit dem Ziel als Parameter — und rufe sie dreimal auf. Klicke auf das `+`-Symbol am Funktionsblock, um den Parameter `ziel` hinzuzufügen.",
       "allowed_blocks": [
         "edubotics_destination_pin",
         "edubotics_detect_color",

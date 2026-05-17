@@ -273,8 +273,19 @@ def update_workflow(
     # Non-blockly-only patches (name/description/share toggle) still go
     # through .table().update() because no snapshot fires for them.
     if "blockly_json" in update_payload:
+        # Apply the share-with-group toggle FIRST (separate, no
+        # snapshot fires for the workgroup_id column). Then call the
+        # snapshot RPC for the blockly_json change. Finally re-SELECT
+        # the row so the response reflects the merged state from both
+        # writes — a previous version of this code returned the RPC's
+        # return value and then patched workgroup_id into the dict
+        # in-memory, which left stale `updated_at` on the response.
+        if "workgroup_id" in update_payload:
+            supabase.table("workflows").update(
+                {"workgroup_id": update_payload["workgroup_id"]}
+            ).eq("id", workflow_id).eq("owner_user_id", user.id).execute()
         try:
-            rpc = supabase.rpc(
+            supabase.rpc(
                 "update_workflow_blockly",
                 {
                     "p_workflow_id": workflow_id,
@@ -289,17 +300,15 @@ def update_workflow(
             if "P0002" in msg or "nicht gefunden" in msg:
                 raise HTTPException(status_code=404, detail="Workflow nicht gefunden")
             raise
-        if not rpc.data:
+        final = (
+            supabase.table("workflows")
+            .select("*")
+            .eq("id", workflow_id)
+            .execute()
+        )
+        if not final.data:
             raise HTTPException(status_code=404, detail="Workflow nicht gefunden")
-        row = rpc.data if isinstance(rpc.data, dict) else rpc.data[0]
-        # If the caller also flipped share_with_group, apply that in a
-        # second statement (no snapshot, just a column flip).
-        if "workgroup_id" in update_payload:
-            supabase.table("workflows").update(
-                {"workgroup_id": update_payload["workgroup_id"]}
-            ).eq("id", workflow_id).eq("owner_user_id", user.id).execute()
-            row["workgroup_id"] = update_payload["workgroup_id"]
-        return WorkflowResponse(**row)
+        return WorkflowResponse(**final.data[0])
 
     result = (
         supabase.table("workflows")
@@ -381,11 +390,39 @@ def list_workflow_versions(
     limit: int = Query(default=20, ge=1, le=100),
 ) -> list[WorkflowVersion]:
     """List up to ``limit`` snapshots of this workflow's blockly_json,
-    newest first. The trigger in migration 013 caps history at 20 per
+    newest first. The trigger in migration 015 caps history at 20 per
     workflow; the limit query parameter only narrows that further.
+
+    Visibility mirrors ``get_workflow``: owner OR group sibling
+    (via ``workgroup_memberships`` audit table) OR classroom member
+    reading a template's history. Previously this endpoint was
+    owner-only, which broke the Verlauf history dropdown for group
+    siblings collaborating on a shared workflow.
     """
-    _assert_workflow_owned(user.id, workflow_id)
     supabase = get_supabase()
+    workflow_row = (
+        supabase.table("workflows")
+        .select("owner_user_id, workgroup_id, is_template, classroom_id")
+        .eq("id", workflow_id)
+        .execute()
+    )
+    if not workflow_row.data:
+        raise HTTPException(status_code=404, detail="Workflow nicht gefunden")
+    row = workflow_row.data[0]
+    visible = False
+    if row.get("owner_user_id") == user.id:
+        visible = True
+    elif (
+        row.get("workgroup_id")
+        and row["workgroup_id"] in _resolve_visible_workgroup_ids(user.id)
+    ):
+        visible = True
+    elif row.get("is_template"):
+        classroom_id = _get_user_classroom_id(user.id)
+        if classroom_id and row.get("classroom_id") == classroom_id:
+            visible = True
+    if not visible:
+        raise HTTPException(status_code=404, detail="Workflow nicht gefunden")
     result = (
         supabase.table("workflow_versions")
         .select("id, workflow_id, blockly_json, note, created_at")
@@ -410,9 +447,9 @@ def restore_workflow_version(
     """
     _assert_workflow_owned(user.id, workflow_id)
     supabase = get_supabase()
-    # Validate the snapshot before restoring — the cap of 20 versions
-    # means an old snapshot could still hold a now-disallowed block type
-    # if the validator's allowlist tightened between save and restore.
+    # Re-run the size/depth validator against the snapshot in case an
+    # older save predates today's caps (the block-type allowlist no
+    # longer exists; size and depth are the only invariants).
     version_row = (
         supabase.table("workflow_versions")
         .select("blockly_json")

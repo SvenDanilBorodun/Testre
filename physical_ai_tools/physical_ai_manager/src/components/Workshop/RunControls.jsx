@@ -31,8 +31,13 @@ const BUTTON_BASE =
 
 function RunControls({ workflowId, blocklyJson, workspace = null }) {
   const dispatch = useDispatch();
-  const { callService, pauseWorkflow, stepWorkflow, continueWorkflow } =
-    useRosServiceCaller();
+  const {
+    callService,
+    pauseWorkflow,
+    stepWorkflow,
+    continueWorkflow,
+    setWorkflowBreakpoints,
+  } = useRosServiceCaller();
   const runState = useSelector((s) => s.workshop.runState);
   const phase = useSelector((s) => s.workshop.phase);
   const paused = useSelector((s) => s.workshop.paused);
@@ -41,6 +46,7 @@ function RunControls({ workflowId, blocklyJson, workspace = null }) {
   const debuggerVisible = useSelector((s) => s.workshop.debuggerVisible);
   const debuggerWarnings = useSelector((s) => s.workshop.debuggerWarnings);
   const cloudVisionEnabled = useSelector((s) => s.workshop.cloudVisionEnabled);
+  const breakpoints = useSelector((s) => s.workshop.breakpoints);
   // Forwarded to the on-host server via StartWorkflow.srv so the
   // _cloud_vision_burst can authorise its POST to /vision/detect.
   // Empty string when the user isn't logged in (e.g. cloud-only mode).
@@ -99,6 +105,21 @@ function RunControls({ workflowId, blocklyJson, workspace = null }) {
       // dispatching the new ones; the effect above handles the actual
       // block-level setWarningText(null) calls.
       dispatch(setDebuggerWarnings([]));
+      // Audit BP-r1: push breakpoints to the runtime BEFORE /workflow/start
+      // returns. Otherwise BreakpointList's debounce + post-start sync
+      // races with the runtime's first tick and breakpoints on the very
+      // first blocks get skipped. The .srv has no breakpoints field
+      // (Agent D owns contracts) so this is an explicit pre-call.
+      if (Array.isArray(breakpoints) && breakpoints.length > 0) {
+        try {
+          await setWorkflowBreakpoints(breakpoints);
+        } catch (e) {
+          // Non-fatal — log and continue; the late BreakpointList sync
+          // path will retry once `runState === 'running'`. The student
+          // sees a missing-breakpoint UX but not a failed start.
+          console.warn('Pre-start setWorkflowBreakpoints failed:', e);
+        }
+      }
       const r = await callService(
         '/workflow/start',
         'physical_ai_interfaces/srv/StartWorkflow',
@@ -146,7 +167,16 @@ function RunControls({ workflowId, blocklyJson, workspace = null }) {
   // toggling the checkbox doesn't take effect. Audit round-3 §J / §W.
   // accessToken is in the deps so a token refresh during a session
   // is picked up at the next Start press.
-  }, [blocklyJson, callService, cloudVisionEnabled, accessToken, dispatch, workflowId]);
+  }, [
+    blocklyJson,
+    callService,
+    cloudVisionEnabled,
+    accessToken,
+    dispatch,
+    workflowId,
+    breakpoints,
+    setWorkflowBreakpoints,
+  ]);
 
   const handleStop = useCallback(async () => {
     setBusy(true);

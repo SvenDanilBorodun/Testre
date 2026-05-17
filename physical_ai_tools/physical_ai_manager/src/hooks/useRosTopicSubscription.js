@@ -14,7 +14,7 @@
 //
 // Author: Kiwoong Park
 
-import { useRef, useEffect, useState, useCallback } from 'react';
+import { useRef, useEffect, useState, useCallback, useMemo } from 'react';
 import toast from 'react-hot-toast';
 import { useDispatch, useSelector } from 'react-redux';
 import ROSLIB from 'roslib';
@@ -68,6 +68,11 @@ export function useRosTopicSubscription() {
   const audioContextRef = useRef(null);
   const hfStatusTopicRef = useRef(null);
   const lastTrainingUpdateRef = useRef(0);
+  // Track the per-ros-instance reconnect listener so we don't double-bind
+  // when the caller re-invokes the subscribe function. The refs are hoisted
+  // here so `cleanup` (defined below) can detach the listeners on unmount.
+  const workflowSensorsRebindRef = useRef(null);
+  const workflowStatusRebindRef = useRef(null);
 
   const dispatch = useDispatch();
   const rosbridgeUrl = useSelector((state) => state.ros.rosbridgeUrl);
@@ -150,6 +155,22 @@ export function useRosTopicSubscription() {
     // parallel listeners. Audit round-3 §A / §NF-1.
     unsubscribeFromTopic(workflowStatusTopicRef, 'Workflow status');
     unsubscribeFromTopic(workflowSensorsTopicRef, 'Workflow sensors');
+    // Detach the on('connection', rebind) listeners we wired in the
+    // subscribe paths so they don't double-bind on the next mount.
+    // Best-effort — `rosConnectionManager.ros` may be torn down already.
+    try {
+      const ros = rosConnectionManager.ros;
+      if (ros && typeof ros.off === 'function') {
+        if (workflowStatusRebindRef.current) {
+          ros.off('connection', workflowStatusRebindRef.current);
+        }
+        if (workflowSensorsRebindRef.current) {
+          ros.off('connection', workflowSensorsRebindRef.current);
+        }
+      }
+    } catch (_) { /* ignored */ }
+    workflowStatusRebindRef.current = null;
+    workflowSensorsRebindRef.current = null;
 
     // Reset previous phase tracking
     previousPhaseRef.current = null;
@@ -703,6 +724,10 @@ export function useRosTopicSubscription() {
     try {
       const ros = await rosConnectionManager.getConnection(rosbridgeUrl);
       if (!ros || !ros.isConnected) return;
+      // Audit §A.r3: flip `connected` truthiness here too so callers that
+      // only mount /workflow/sensors (e.g. WorkshopPage entering the
+      // editor view before /task/status fires) get an accurate flag.
+      setConnected(true);
       const topic = new ROSLIB.Topic({
         ros,
         name: '/workflow/sensors',
@@ -718,6 +743,26 @@ export function useRosTopicSubscription() {
         }));
       });
       workflowSensorsTopicRef.current = topic;
+      // Auto-rebind on rosbridge reconnect. ROSLIB.Ros emits 'connection'
+      // every time the socket reattaches; without a rebind, a Wi-Fi blip
+      // silently kills the SensorPanel forever. Drop the old listener
+      // first so multiple re-subscribes don't pile up.
+      if (workflowSensorsRebindRef.current && typeof ros.off === 'function') {
+        try {
+          ros.off('connection', workflowSensorsRebindRef.current);
+        } catch (_) { /* listener already gone */ }
+      }
+      const rebind = () => {
+        // Clear the topic ref so the re-entrant subscribe path doesn't
+        // short-circuit on a stale Topic bound to the dead socket.
+        if (workflowSensorsTopicRef.current) {
+          try { workflowSensorsTopicRef.current.unsubscribe(); } catch (_) { /* ignored */ }
+          workflowSensorsTopicRef.current = null;
+        }
+        subscribeToWorkflowSensors();
+      };
+      workflowSensorsRebindRef.current = rebind;
+      if (typeof ros.on === 'function') ros.on('connection', rebind);
     } catch (e) {
       console.error('subscribeToWorkflowSensors failed:', e);
     }
@@ -741,6 +786,9 @@ export function useRosTopicSubscription() {
     try {
       const ros = await rosConnectionManager.getConnection(rosbridgeUrl);
       if (!ros || !ros.isConnected) return;
+      // Audit §A.r3: flip `connected` truthiness on every subscribe path
+      // (was only set in /task/status before).
+      setConnected(true);
       const topic = new ROSLIB.Topic({
         ros,
         name: '/workflow/status',
@@ -798,21 +846,59 @@ export function useRosTopicSubscription() {
         }
       });
       workflowStatusTopicRef.current = topic;
+      // Auto-rebind on rosbridge reconnect (audit §A.r3) — the v1 ship
+      // returned early on the first subscribe attempt's `if existingRos
+      // && existingRos.isConnected` guard, but never re-subscribed after
+      // a brief socket drop, so the WorkflowStatus feed silently went
+      // dark. Drop any previous listener first to avoid double-binding.
+      if (workflowStatusRebindRef.current && typeof ros.off === 'function') {
+        try {
+          ros.off('connection', workflowStatusRebindRef.current);
+        } catch (_) { /* listener already gone */ }
+      }
+      const rebind = () => {
+        if (workflowStatusTopicRef.current) {
+          try { workflowStatusTopicRef.current.unsubscribe(); } catch (_) { /* ignored */ }
+          workflowStatusTopicRef.current = null;
+        }
+        subscribeToWorkflowStatus();
+      };
+      workflowStatusRebindRef.current = rebind;
+      if (typeof ros.on === 'function') ros.on('connection', rebind);
     } catch (e) {
       console.error('subscribeToWorkflowStatus failed:', e);
     }
   }, [dispatch, rosbridgeUrl, interceptToken]);
 
-  return {
-    connected,
-    subscribeToTaskStatus,
-    cleanup,
-    getPhaseName,
-    resetTaskToIdle,
-    subscribeToTrainingStatus,
-    subscribeHFStatus,
-    subscribeToWorkflowStatus,
-    subscribeToWorkflowSensors,
-    initializeSubscriptions, // Manual initialization function
-  };
+  // Memoize the returned object so callers' useEffect(..., [subscriptions])
+  // doesn't fire every render. Every callback above is already wrapped in
+  // useCallback with stable deps; this wrapper is the final piece — without
+  // it, the new object reference each render would invalidate downstream
+  // effects (e.g. WorkshopPage.js's re-subscribe useEffect at line ~80).
+  return useMemo(
+    () => ({
+      connected,
+      subscribeToTaskStatus,
+      cleanup,
+      getPhaseName,
+      resetTaskToIdle,
+      subscribeToTrainingStatus,
+      subscribeHFStatus,
+      subscribeToWorkflowStatus,
+      subscribeToWorkflowSensors,
+      initializeSubscriptions, // Manual initialization function
+    }),
+    [
+      connected,
+      subscribeToTaskStatus,
+      cleanup,
+      getPhaseName,
+      resetTaskToIdle,
+      subscribeToTrainingStatus,
+      subscribeHFStatus,
+      subscribeToWorkflowStatus,
+      subscribeToWorkflowSensors,
+      initializeSubscriptions,
+    ]
+  );
 }

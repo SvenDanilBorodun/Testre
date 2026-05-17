@@ -9,7 +9,7 @@
  */
 
 import * as Blockly from 'blockly/core';
-import { COLORS, DE } from './messages_de';
+import { COLORS, ALLOWED_COLOR_VALUES, DE } from './messages_de';
 
 const EVENT_COLOR = '#ec4899';
 
@@ -139,6 +139,20 @@ export function registerEventBlocks() {
         if (n < COLOR_PIXEL_MIN) return COLOR_PIXEL_MIN;
         if (n > COLOR_PIXEL_MAX) return COLOR_PIXEL_MAX;
         return Math.round(n);
+      });
+    }
+    // Audit §events-r1: also validate COLOR against the shared
+    // ALLOWED_COLOR_VALUES set (rot/gruen/blau/gelb). Without this, a
+    // user could programmatically inject a non-allowed value via a
+    // hand-edited workspace JSON and the on-host runtime would reject
+    // the workflow at start time instead of at block-edit time. Source
+    // of truth lives in messages_de.js so this validator stays in sync
+    // with perception.js's edubotics_validate_color extension.
+    const colorField = this.getField('COLOR');
+    if (colorField && typeof colorField.setValidator === 'function') {
+      colorField.setValidator((newValue) => {
+        if (!ALLOWED_COLOR_VALUES.has(newValue)) return null;
+        return newValue;
       });
     }
   });

@@ -140,6 +140,14 @@ function CameraFeedOverlay({ camera = 'scene', clickable = false, onMark, ...res
       const x = ((e.clientX - rect.left) / rect.width) * naturalSize.w;
       const y = ((e.clientY - rect.top) / rect.height) * naturalSize.h;
       const label = window.prompt('Wie soll dieses Ziel heißen?', 'Ziel') || 'Ziel';
+      // Sanitize: 1-40 chars, German letters / digits / space / _ / - only.
+      // Stops a stray paste or pathological prompt input from reaching the
+      // ROS service with content the server would reject anyway. Full
+      // inline-modal replacement is deferred (see ROBOTER_STUDIO_DEFERRED).
+      if (!/^[A-Za-zÄÖÜäöüß0-9 _-]{1,40}$/.test(label)) {
+        toast.error('Ungültiger Ziel-Name.');
+        return;
+      }
       try {
         const r = await callService(
           '/workshop/mark_destination',

@@ -24,7 +24,13 @@
     {
       "title": "Sound hinzufügen",
       "body": "Setze einen \"Ton spielen\"-Block davor, damit der Roboter erst piept und dann spricht.",
-      "allowed_blocks": ["edubotics_speak_de", "edubotics_play_sound", "text"]
+      "allowed_blocks": [
+        "edubotics_speak_de",
+        "edubotics_play_sound",
+        "edubotics_play_tone",
+        "text",
+        "math_number"
+      ]
     }
   ]
 }

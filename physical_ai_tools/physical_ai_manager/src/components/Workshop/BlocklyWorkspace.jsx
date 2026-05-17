@@ -14,7 +14,7 @@ import * as Blockly from 'blockly/core';
 import 'blockly/blocks';
 import * as De from 'blockly/msg/de';
 import { TOOLBOX, buildToolbox } from './blocks/toolbox';
-import { registerMotionBlocks } from './blocks/motion';
+import { registerMotionBlocks, attachMotionWorkspaceValidators } from './blocks/motion';
 import { registerPerceptionBlocks } from './blocks/perception';
 import { registerDestinationBlocks } from './blocks/destinations';
 import { registerOutputBlocks } from './blocks/output';
@@ -174,6 +174,11 @@ function BlocklyWorkspace({
     workspaceRef.current = workspace;
     setReadyTick((n) => n + 1);
 
+    // Audit §motion-r1: wire the wait_seconds numericClamp validator at
+    // the workspace level. Returns a disposer we call in the cleanup
+    // path below so the listener doesn't outlive the workspace.
+    const disposeMotionValidators = attachMotionWorkspaceValidators(workspace);
+
     // Plugins are async-imported; pass an isDisposed callback so
     // post-dispose resolutions don't init() against a dead workspace.
     let disposed = false;
@@ -222,6 +227,11 @@ function BlocklyWorkspace({
     return () => {
       disposed = true;
       workspace.removeChangeListener(handleChange);
+      // Detach the motion-validator listener before disposing the
+      // workspace so we don't fire one last clamp on a torn-down host.
+      try {
+        disposeMotionValidators();
+      } catch (_) { /* already disposed */ }
       workspace.dispose();
       workspaceRef.current = null;
       const readyFn = onWorkspaceReadyRef.current;

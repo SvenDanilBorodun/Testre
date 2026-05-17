@@ -83,7 +83,14 @@ class WorkflowContext:
     # without this, mutation from a `for` loop in main while a hat
     # reads via `variables_get` tears the dict.
     var_lock: threading.RLock | None = None
-    breakpoints: set[str] = field(default_factory=set)
+    # Audit fix #4 — breakpoints used to be a plain set captured by
+    # reference; updates from set_breakpoints() were therefore not
+    # visible to the interpreter thread which iterates the set on every
+    # block dispatch. The new shape is an immutable frozenset bound at
+    # start time PLUS an optional get_breakpoints() callable the
+    # interpreter prefers (returns the manager's freshest snapshot).
+    breakpoints: frozenset[str] = frozenset()
+    get_breakpoints: Callable[[], frozenset[str]] | None = None
     fire_broadcast: Callable[[str], None] = field(default_factory=lambda: (lambda _: None))
     wait_if_paused: Callable[[], None] = field(default_factory=lambda: (lambda: None))
     wait_for_resume: Callable[[], None] = field(default_factory=lambda: (lambda: None))
@@ -97,6 +104,13 @@ class WorkflowContext:
 
 
 MAX_WORKFLOW_JSON_BYTES = 256 * 1024  # 256 KiB; see plan §2.5
+
+# Audit fix #16: cap the number of hat-block handlers a single workflow
+# can spawn. Each hat handler is its own daemon thread + broadcast
+# Condition; a malicious or buggy workspace with hundreds of when_*
+# blocks would otherwise saturate the server. 16 is generous for the
+# classroom — the largest pre-existing tutorial uses 3.
+MAX_HAT_HANDLERS = 16
 
 
 class WorkflowManager:
@@ -156,7 +170,12 @@ class WorkflowManager:
         # call can read/write inside an outer variables_set.
         self._var_lock = threading.RLock()
         self._lock = threading.Lock()
-        self._breakpoints: set[str] = set()
+        # Audit fix #4: store breakpoints as an immutable frozenset that
+        # set_breakpoints() rebinds atomically. The interpreter reads via
+        # ctx.get_breakpoints() so the reader always sees a stable
+        # snapshot for the duration of one block dispatch, and the
+        # writer never tears state.
+        self._breakpoints: frozenset[str] = frozenset()
         self._workflow_id: str | None = None
         # Persistent destinations across runs — set by mark_destination
         # callbacks in physical_ai_server.py and read into WorkflowContext
@@ -165,6 +184,13 @@ class WorkflowManager:
 
     @property
     def is_running(self) -> bool:
+        # Audit fix #5: report False once the stop event has been
+        # signalled, even if the daemon thread is still in its finally
+        # block. Callers (pause/resume/step + the server's mode-mutex)
+        # then refuse to interact with a workflow that's already winding
+        # down instead of racing the teardown.
+        if self._stop_event.is_set():
+            return False
         return self._thread is not None and self._thread.is_alive()
 
     @property
@@ -185,44 +211,57 @@ class WorkflowManager:
 
     def set_breakpoints(self, block_ids: list[str]) -> None:
         """Replace the active breakpoint set. Safe to call before, during,
-        or after a workflow run; the runtime checks the live set on every
-        block dispatch.
+        or after a workflow run; the runtime reads through
+        ``ctx.get_breakpoints()`` on every block dispatch.
 
-        Audit fix (round-3): MUST mutate in-place rather than rebind the
-        attribute. WorkflowContext.breakpoints is captured by reference at
-        ``start()`` (see line ~314 ``breakpoints=self._breakpoints``);
-        rebinding the manager attribute leaves ctx pointing at the OLD
-        set object and mid-run breakpoint updates would never reach the
-        runtime.
+        Audit fix #4: atomic frozenset rebinding under ``self._lock`` so
+        the interpreter's membership test can never observe a torn set.
+        ``ctx.get_breakpoints`` returns the manager's latest frozenset, so
+        rebinding here propagates to the running workflow without sharing
+        a mutable object between threads.
         """
         if not isinstance(block_ids, (list, tuple, set)):
             block_ids = []
-        new_set = {str(b) for b in block_ids if b}
-        self._breakpoints.clear()
-        self._breakpoints.update(new_set)
+        new_set = frozenset(str(b) for b in block_ids if b)
+        with self._lock:
+            self._breakpoints = new_set
 
     def pause(self) -> tuple[bool, str]:
-        if not self.is_running:
-            return False, 'Es läuft kein Workflow.'
-        self._pause_event.set()
-        self._resume_event.clear()
+        # Audit fix #13: read is_running + mutate the events under the
+        # manager lock so concurrent pause/resume/step calls don't
+        # interleave their state changes.
+        with self._lock:
+            if not self.is_running:
+                return False, 'Es läuft kein Workflow.'
+            self._pause_event.set()
+            self._resume_event.clear()
         return True, 'Workflow pausiert.'
 
     def resume(self) -> tuple[bool, str]:
-        if not self.is_running:
-            return False, 'Es läuft kein Workflow.'
-        self._pause_event.clear()
-        self._resume_event.set()
+        # Audit fix #13: see pause().
+        with self._lock:
+            if not self.is_running:
+                return False, 'Es läuft kein Workflow.'
+            self._pause_event.clear()
+            self._resume_event.set()
         return True, 'Workflow fortgesetzt.'
 
     def step(self) -> tuple[bool, str]:
         """Allow exactly one block to execute, then re-pause. The
         runtime calls _wait_if_paused after each block; we set
-        step_event to signal one-block bypass."""
-        if not self.is_running:
-            return False, 'Es läuft kein Workflow.'
-        self._step_event.set()
-        self._resume_event.set()
+        step_event to signal one-block bypass.
+
+        Audit fix #13: refuse if the workflow isn't paused — stepping a
+        running workflow has no defined semantics and previously
+        silently set step_event for the next pause to consume.
+        """
+        with self._lock:
+            if not self.is_running:
+                return False, 'Es läuft kein Workflow.'
+            if not self._pause_event.is_set():
+                return False, 'Workflow ist nicht pausiert.'
+            self._step_event.set()
+            self._resume_event.set()
         return True, 'Schritt ausgeführt.'
 
     def start(
@@ -279,6 +318,23 @@ class WorkflowManager:
             # safety envelope is still the authoritative runtime gate.
             unreachable = self._ik_precheck(interpreter, ik_instance)
 
+            # Audit fix #6: seed ctx.last_full_joints synchronously HERE,
+            # before hat threads (or the main daemon) ever spawn. The
+            # previous design seeded inside _run on the daemon thread,
+            # which meant a hat-block trigger could fire and begin motion
+            # before _run had a chance to overwrite the [0,0,0,0,0,0]
+            # dataclass default. Best-effort: an unavailable joint source
+            # leaves the safe default in place and the first motion call
+            # will populate it.
+            seeded_joints: list[float] | None = None
+            if self._get_follower_joints is not None:
+                try:
+                    joints = self._get_follower_joints()
+                    if joints and len(joints) >= 6:
+                        seeded_joints = [float(x) for x in joints[:6]]
+                except Exception:  # noqa: BLE001 — best-effort seed
+                    seeded_joints = None
+
             ctx = WorkflowContext(
                 publisher=self._publisher,
                 ik=ik_instance,
@@ -296,6 +352,10 @@ class WorkflowManager:
                 motion_lock=self._motion_lock,
                 var_lock=self._var_lock,
                 breakpoints=self._breakpoints,
+                # Audit fix #4: getter so the interpreter sees the
+                # manager's freshest frozenset on every block dispatch,
+                # without sharing a mutable object across threads.
+                get_breakpoints=lambda: self._breakpoints,
                 fire_broadcast=self._fire_broadcast,
                 wait_if_paused=self._wait_if_paused,
                 wait_for_resume=self._wait_for_resume,
@@ -303,9 +363,28 @@ class WorkflowManager:
                 cloud_vision=dict(cloud_vision or {}),
             )
 
+            # Apply the synchronous seed so hat threads start with a
+            # realistic last_full_joints rather than [0]*6.
+            if seeded_joints is not None:
+                ctx.last_full_joints = seeded_joints
+
             # Spawn hat-block handler threads. Each grabs a per-handler
             # event and runs its body whenever the event fires.
             _, hats = interpreter.split_roots()
+            # Audit fix #7: refuse to start if a previous run's hat
+            # threads haven't fully reaped yet. Re-using a workflow_id
+            # while old daemons are still alive leaks broadcast state
+            # and can re-fire stale triggers against the new run's ctx.
+            if any(t.is_alive() for t in self._hat_threads):
+                return False, (
+                    'Vorheriger Workflow läuft noch — bitte kurz warten.'
+                ), []
+            # Audit fix #16: cap hat handler count so a buggy or
+            # adversarial workspace can't spawn hundreds of daemons.
+            if len(hats) > MAX_HAT_HANDLERS:
+                return False, (
+                    'Zu viele Ereignis-Blöcke (Maximum 16).'
+                ), []
             self._hat_threads = []
             for hat in hats:
                 t = threading.Thread(
@@ -341,17 +420,38 @@ class WorkflowManager:
             self._thread.join(timeout=5.0)
         for t in self._hat_threads:
             t.join(timeout=2.0)
+            # Audit fix #7: surface zombie hat handlers so the operator
+            # sees them in logs instead of having them silently leak into
+            # the next workflow run. The is_alive() check at next start()
+            # will then refuse to spawn a new run until the zombie reaps.
+            if t.is_alive():
+                self._emit_status({
+                    'workflow_id': self._workflow_id or '',
+                    'log_message': (
+                        f'[WARNUNG] Ereignis-Handler '
+                        f'"{t.name}" ist noch aktiv nach Stopp.'
+                    ),
+                })
         return True, 'Stopp angefordert.'
 
     def _wake_all_broadcasts(self) -> None:
+        # Audit fix #8: per-name Conditions now have their own per-name
+        # Lock, so we must acquire each Condition's own lock around the
+        # notify_all. Snapshot the values under _broadcast_lock first
+        # so a concurrent _broadcast_state() insert doesn't break the
+        # iteration, then release the dict lock before touching the
+        # individual Conditions (avoids nested-lock dead-lock risk).
         with self._broadcast_lock:
-            for state in self._broadcast_events.values():
-                cond = state.get('cond') if isinstance(state, dict) else None
-                if cond is not None:
-                    # We already hold _broadcast_lock which is the same
-                    # primitive as the Condition's lock — notify_all is
-                    # safe here without a separate `with`.
+            states = list(self._broadcast_events.values())
+        for state in states:
+            cond = state.get('cond') if isinstance(state, dict) else None
+            if cond is None:
+                continue
+            try:
+                with cond:
                     cond.notify_all()
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------
     # Phase-2 plumbing (broadcast / pause / step)
@@ -361,13 +461,25 @@ class WorkflowManager:
     # count exceeds it. This avoids the set/clear race the previous
     # implementation had (verifier flagged: a handler that hadn't yet
     # entered wait() would miss a fast set→clear pair).
+    #
+    # Audit fix #8: each broadcast NAME now owns its own Lock and its
+    # own Condition. The previous implementation used a single shared
+    # _broadcast_lock under every Condition, which serialised every
+    # handler on a different broadcast through one mutex (a notify on
+    # "obstacle_seen" would block a waiter for "task_done" because
+    # they were both holding cond.lock which == _broadcast_lock). The
+    # outer _broadcast_lock now only guards the _broadcast_events dict
+    # itself — name discovery / insertion — and is released before
+    # touching any individual broadcast's Condition.
     def _broadcast_state(self, name: str) -> dict:
         with self._broadcast_lock:
             state = self._broadcast_events.get(name)
             if state is None:
+                per_name_lock = threading.Lock()
                 state = {
                     'count': 0,
-                    'cond': threading.Condition(self._broadcast_lock),
+                    'lock': per_name_lock,
+                    'cond': threading.Condition(per_name_lock),
                     # Per-handler thread tracking: each waiter records
                     # the count it last consumed under its own key in
                     # this dict (keyed by id(threading.current_thread)).
@@ -476,15 +588,42 @@ class WorkflowManager:
     ) -> None:
         """Loop forever (until stop) waiting for a hat trigger, then run
         the body once. Motion blocks inside the body acquire ctx.motion_lock
-        so they don't race the main stack."""
+        so they don't race the main stack.
+
+        Audit fix #14: marker / color hat handlers use EDGE-triggered
+        semantics — once they fire, they must observe the condition
+        going false (marker leaves frame / color disappears) before
+        re-arming. The previous level-triggered design re-ran the body
+        every poll while the trigger stayed true, which means a marker
+        held in front of the camera would fire the handler hundreds of
+        times. Broadcasts are inherently edge-triggered (count > last)
+        so they're unaffected.
+        """
         btype = hat.get('type')
+        # Edge-trigger arming state for marker / color hats. None means
+        # 'first wait, treat as armed'; True means armed (allowed to fire
+        # on next true), False means waiting for the condition to clear.
+        edge_armed = True
         try:
             while not ctx.should_stop():
                 triggered = self._wait_for_hat_trigger(hat, ctx)
                 if not triggered:
+                    # For perception hats, an un-triggered poll cycle
+                    # means the condition is currently false; re-arm.
+                    if btype in {'edubotics_when_marker_seen',
+                                 'edubotics_when_color_seen'}:
+                        edge_armed = True
                     continue
                 if ctx.should_stop():
                     return
+                # Edge-trigger gate. Skip body execution while we wait
+                # for the condition to clear and re-arm.
+                if btype in {'edubotics_when_marker_seen',
+                             'edubotics_when_color_seen'}:
+                    if not edge_armed:
+                        time.sleep(0.1)
+                        continue
+                    edge_armed = False
                 # Acquire the motion lock for the entire handler body.
                 # This is conservative — even a perception-only handler
                 # holds the lock — but it keeps the safety story simple.
@@ -608,17 +747,9 @@ class WorkflowManager:
 
     def _run(self, interpreter: Interpreter, ctx: WorkflowContext) -> None:
         terminal_phase = 'error'
-        # Seed ctx.last_full_joints with the current follower pose so motion
-        # handlers and IK seeding start from the real arm pose instead of
-        # the [0]*6 dataclass default. Best-effort — handlers will populate
-        # this on first motion if the read fails.
-        if self._get_follower_joints is not None:
-            try:
-                joints = self._get_follower_joints()
-                if joints and len(joints) >= 6:
-                    ctx.last_full_joints = [float(x) for x in joints[:6]]
-            except Exception:  # noqa: BLE001 — best-effort seed
-                pass
+        # Audit fix #6: ctx.last_full_joints is seeded synchronously in
+        # start() before any handler thread spawns, so this block no
+        # longer needs to redo the work here.
         try:
             self._emit_status({
                 'workflow_id': self._workflow_id or '',
@@ -698,16 +829,21 @@ class WorkflowManager:
                 if t.is_alive():
                     t.join(timeout=1.0)
 
-            # Always release server-side mutex + clear thread reference,
-            # even if the on_finished callback raises. on_finished is
-            # the contract that lets the server lift on_workflow without
-            # a polling timer (audit §1.2 / §3.5). Wrap in try so a
-            # buggy callback can't leak the thread.
+            # Audit fix #5: clear self._thread BEFORE calling
+            # _on_finished. If the callback queries is_running on its
+            # way out (or the caller starts a new workflow synchronously
+            # from inside on_finished), it must observe "not running".
+            # Mutate under self._lock so start() can't observe a stale
+            # alive() thread between this clear and the daemon's exit.
+            try:
+                with self._lock:
+                    self._thread = None
+            except Exception:
+                self._thread = None
             try:
                 self._on_finished(terminal_phase)
             except Exception:
                 pass
-            self._thread = None
 
     def _on_block_change(self, block_id: str, phase: str, progress: float) -> None:
         self._emit_status({

@@ -2,7 +2,7 @@ import json
 import logging
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
@@ -450,13 +450,25 @@ def _valid_tutorial_id(tid: str) -> bool:
 
 
 @router.get("/tutorial-progress", response_model=list[TutorialProgress])
-async def list_tutorial_progress(profile=Depends(get_current_profile)):
-    """Return every tutorial progress row for the calling user."""
+async def list_tutorial_progress(
+    profile=Depends(get_current_profile),
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+):
+    """Return tutorial progress rows for the calling user.
+
+    Paginated: a student with hundreds of distinct tutorial rows
+    (long-tail bug or replay churn) would otherwise serialise the
+    whole table on every page load. supabase-py uses an inclusive
+    0-indexed range, so the slice for (offset, limit) is
+    [offset, offset+limit-1].
+    """
     sb = get_supabase()
     rows = (
         sb.table("tutorial_progress")
         .select("tutorial_id, current_step, completed_at, updated_at")
         .eq("user_id", profile["id"])
+        .range(offset, offset + limit - 1)
         .execute()
     )
     return [TutorialProgress(**r) for r in (rows.data or [])]
@@ -469,11 +481,12 @@ async def update_tutorial_progress_endpoint(
     profile=Depends(get_current_profile),
 ):
     """Upsert progress for a single tutorial. The completed flag, when
-    true, sets ``completed_at`` to NOW(); when explicitly false it
-    clears the timestamp (lets a teacher reset a student's progress).
+    true, sets ``completed_at`` to NOW(); explicit ``false`` is a NO-OP
+    (server-side override) so a buggy frontend that sends
+    ``{completed: false}`` on every keystroke can't accidentally reset
+    a completed tutorial's timestamp. To intentionally clear, an
+    admin/teacher must DELETE the row.
     """
-    from datetime import datetime, timezone
-    from fastapi import HTTPException
     if not _valid_tutorial_id(tutorial_id):
         raise HTTPException(status_code=400, detail="Tutorial-ID ist ungültig.")
     sb = get_supabase()
@@ -485,10 +498,11 @@ async def update_tutorial_progress_endpoint(
         if body.current_step < 0:
             raise HTTPException(status_code=400, detail="Schritt-Nummer muss >= 0 sein.")
         payload["current_step"] = int(body.current_step)
+    # Server-side override: only `completed=True` sets the timestamp.
+    # `completed=False` is treated as a no-op rather than clearing
+    # `completed_at` (prevents accidental regression from a buggy UI).
     if body.completed is True:
         payload["completed_at"] = datetime.now(timezone.utc).isoformat()
-    elif body.completed is False:
-        payload["completed_at"] = None
     try:
         result = (
             sb.table("tutorial_progress")

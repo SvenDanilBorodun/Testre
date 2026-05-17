@@ -24,6 +24,32 @@ from typing import Any
 from physical_ai_server.workflow.handlers.motion import WorkflowError
 
 
+# Audit fix #12: classroom palette accepted by the German UI. Defined
+# here (rather than imported from color_profile.py) so a perception
+# handler isn't coupled to the calibration manager's import surface.
+# Keep in sync with overlays/workflow/color_profile.py:DEFAULT_COLORS.
+_ALLOWED_COLORS: frozenset[str] = frozenset({'rot', 'gruen', 'blau', 'gelb'})
+
+
+def _validate_color(color: Any) -> str:
+    """Validate a color string against the allowed set, raising a
+    German WorkflowError on miss. Returns the normalized lower-case
+    color. The Perception backend silently returns [] when the colour
+    profile isn't loaded for an unknown color — that's a UX trap the
+    student can't debug, so we fail loudly here instead.
+    """
+    if color is None:
+        raise WorkflowError('Keine Farbe angegeben.')
+    if not isinstance(color, str):
+        raise WorkflowError(f'Ungültige Farbe: {color}.')
+    normalized = color.strip().lower()
+    if normalized not in _ALLOWED_COLORS:
+        raise WorkflowError(
+            f'Unbekannte Farbe: {color}. Erlaubt: rot, gruen, blau, gelb.'
+        )
+    return normalized
+
+
 def _ensure_perception(ctx):
     if ctx.perception is None:
         raise WorkflowError(
@@ -72,10 +98,14 @@ def _attach_world_xyz(ctx, detections: list) -> list:
 
 def detect_color(ctx, args: dict[str, Any]) -> list:
     _ensure_perception(ctx)
+    # Audit fix #12: validate before reaching Perception so an unknown
+    # German color string surfaces an actionable error instead of an
+    # empty-detections result that looks like "no color visible".
+    color = _validate_color(args.get('color'))
     bgr = ctx.get_scene_frame() if ctx.get_scene_frame else None
     if bgr is None:
         raise WorkflowError('Kein Szenenbild verfügbar.')
-    detections = ctx.perception.detect(bgr, camera='scene', mode='color', color=args.get('color'))
+    detections = ctx.perception.detect(bgr, camera='scene', mode='color', color=color)
     return _attach_world_xyz(ctx, detections)
 
 
@@ -84,10 +114,17 @@ def detect_object(ctx, args: dict[str, Any]) -> list:
     bgr = ctx.get_scene_frame() if ctx.get_scene_frame else None
     if bgr is None:
         raise WorkflowError('Kein Szenenbild verfügbar.')
+    # Audit fix #12: color is optional on detect_object (the block lets
+    # the student narrow a class to a specific color). When provided,
+    # validate to fail loudly on unknown values instead of silently
+    # producing empty detections.
+    color = args.get('color')
+    if color is not None and str(color).strip():
+        color = _validate_color(color)
     detections = ctx.perception.detect(
         bgr, camera='scene', mode='yolo+color',
         coco_class=args.get('class'),
-        color=args.get('color'),
+        color=color,
     )
     return _attach_world_xyz(ctx, detections)
 
@@ -160,17 +197,26 @@ def _poll_until(ctx, predicate, timeout_s: float, label: str) -> bool:
         raise WorkflowError(f'Timeout: {label} nicht erkannt.')
     finally:
         if released and motion_lock is not None:
-            # Reacquire before we exit so the caller's
-            # ``with ctx.motion_lock`` block sees a held lock and the
-            # context-manager __exit__ release matches. Acquire blocks
-            # until the lock is free — recovery / main-stack motion
-            # ahead of us finishes first, which is the right ordering.
-            motion_lock.acquire()
+            # Audit fix #9: bounded reacquire. The previous unbounded
+            # acquire() could hang forever if another thread held the
+            # lock and never released it (e.g. a runaway motion handler
+            # in another hat). 10 s is generous for a single motion
+            # chunk to finish; past that we'd rather raise a clear
+            # German error so the caller's `with motion_lock` __exit__
+            # has SOMETHING to release. The exception propagates out
+            # through whatever wrapped the _poll_until call.
+            if not motion_lock.acquire(timeout=10.0):
+                raise WorkflowError(
+                    'Bewegung-Sperre konnte nicht zurückgewonnen werden.'
+                )
 
 
 def wait_until_color(ctx, args: dict[str, Any]) -> bool:
     timeout_s = float(args.get('timeout', 10))
-    color = args.get('color')
+    # Audit fix #12: validate up-front so a bad color name fails the
+    # block immediately rather than polling for `timeout_s` and then
+    # raising a misleading "Farbe nicht erkannt" timeout.
+    color = _validate_color(args.get('color'))
     return _poll_until(
         ctx,
         lambda: bool(detect_color(ctx, {'color': color})),

@@ -121,7 +121,9 @@ export const DE = {
   AUTOSAVE_SECONDS_AGO: 'vor %1 s',
   AUTOSAVE_MINUTES_AGO: 'vor %1 min',
   AUTOSAVE_QUOTA_FULL:
-    'Lokaler Speicher voll — bitte einen Workflow exportieren und löschen.',
+    'Browser-Speicher voll. Bitte einige gespeicherte Workflows löschen oder Cache leeren.',
+  AUTOSAVE_TOO_BIG:
+    'Dieser Workflow ist zu groß zum Speichern (Limit 256 KB). Bitte einige Blöcke entfernen.',
   AUTOSAVE_RESTORED: 'Letzte Sitzung wiederhergestellt.',
 
   // Themes
@@ -152,7 +154,7 @@ export const DE = {
   DEBUG_NO_VARIABLES: 'Noch keine Variablen.',
   DEBUG_NO_BREAKPOINTS: 'Noch keine Haltepunkte gesetzt.',
   DEBUG_BP_TOGGLE_HINT:
-    'Rechtsklick auf einen Block, um einen Haltepunkt zu setzen.',
+    'Alt+Klick auf einen Block, um einen Haltepunkt zu setzen.',
   DEBUG_FOLLOWER_JOINTS: 'Folge-Gelenke (rad)',
   DEBUG_GRIPPER_OPENING: 'Greifer geöffnet (rad)',
   DEBUG_VISIBLE_MARKERS: 'Sichtbare Marker',
@@ -166,7 +168,9 @@ export const DE = {
   CALIB_STEP_4: 'Schritt 4 von 5',
   CALIB_STEP_5: 'Schritt 5 von 5',
   CALIB_DIVERSITY_HINT:
-    '20 Bilder aus verschiedenen Winkeln sind besser als 50 ähnliche Bilder. '
+    'Mindestens 12 Bilder für die Kamerakalibrierung und 14 für die '
+    + 'Hand-Auge-Kalibrierung aus verschiedenen Winkeln aufnehmen — '
+    + 'wenige diverse Bilder sind besser als viele ähnliche. '
     + 'Mindestens die Hälfte sollte den Würfel schräg zeigen.',
   CALIB_COVERAGE_GAP:
     'Noch Aufnahmen in den schraffierten Bereichen aufnehmen.',

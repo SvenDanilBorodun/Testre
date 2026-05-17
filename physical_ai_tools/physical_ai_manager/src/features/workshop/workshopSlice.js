@@ -202,8 +202,21 @@ const workshopSlice = createSlice({
     },
 
     setRunState: (state, action) => {
-      state.runState = action.payload;
-      if (action.payload === 'running') state.paused = false;
+      const next = action.payload;
+      // Terminal phases ('finished', 'stopped', 'error') need to clear
+      // both `runState` AND `phase` so the RunControls `isRunning`
+      // selector (state.workshop.phase === 'running') flips false even
+      // when the server's last WorkflowStatus message stamped `phase`
+      // before the terminal dispatch arrived. Without this the Start
+      // button stayed disabled until the next page-load. Reset both
+      // to 'idle' / '' synchronously so the UI snaps back.
+      if (next === 'finished' || next === 'stopped' || next === 'error') {
+        state.runState = 'idle';
+        state.phase = '';
+      } else {
+        state.runState = next;
+      }
+      if (next === 'running') state.paused = false;
     },
     setPaused: (state, action) => {
       state.paused = !!action.payload;

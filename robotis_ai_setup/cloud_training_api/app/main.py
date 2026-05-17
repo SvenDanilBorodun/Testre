@@ -450,7 +450,22 @@ _RATE_LIMIT_RULES: list[tuple[str, str, int, float]] = [
     # per-user-keying means 30/min/user is still very generous (claim
     # is 1x/session, heartbeat is 2/min, release is 1x/session).
     ("POST", "/jetson/", 30, 60.0),
+    # Tutorial progress upsert — a Blockly editor that auto-saves on
+    # every step transition can burst a few requests per minute per
+    # student; 30/60s easily absorbs that while stopping a runaway
+    # loop from spamming the row's history.
+    ("PATCH", "/me/tutorial-progress", 30, 60.0),
+    # GDPR export — large response (full per-user JSON bundle), no
+    # reason to allow more than a couple per hour.
+    ("GET", "/me/export", 3, 3600.0),
 ]
+
+# Sort rules longest-prefix-first so a more-specific rule (e.g.
+# /jetson/register) always wins over a broader one (/jetson/). Without
+# this, a newly-added narrow rule listed AFTER a broad rule in the
+# literal becomes dead code on the first-match-wins middleware path.
+# Done in code so future additions can't regress by accidental ordering.
+_RATE_LIMIT_RULES.sort(key=lambda rule: len(rule[1]), reverse=True)
 
 
 def _client_ip(request: Request) -> str:
@@ -470,37 +485,37 @@ def _client_ip(request: Request) -> str:
 
 
 def _user_key_from_jwt(request: Request) -> str | None:
-    """Extract a stable per-user key from the Authorization Bearer JWT
-    without verifying the signature. Middleware runs before the FastAPI
-    dependency that fully validates the token; we trust the route's
-    ``Depends(get_current_user)`` to authenticate, and use this only as
-    a rate-limit bucket key.
+    """Derive a stable per-token rate-limit bucket key.
 
-    Returns the JWT's ``sub`` (user id) when present, otherwise None so
-    the caller can fall back to IP keying. Audit round-3 §BD — keying
-    /vision/detect by IP causes 30 NAT'd students in a classroom to
-    share a 5/60s bucket; per-user keying fixes that without needing a
-    second auth path inside the middleware.
+    NOTE on the trade-off — the middleware runs BEFORE
+    ``Depends(get_current_user)`` so the JWT signature is unverified at
+    this point. We deliberately do NOT trust the JWT payload (a forged
+    token can claim any ``sub``). Instead, we hash the full token bytes
+    and use the truncated hex digest as the bucket key. Two
+    consequences:
+
+      1. Per-user bucketing still holds for legitimate users — every
+         valid session reuses the same JWT until it expires, so the
+         hash is stable.
+      2. A forged-token attacker gets one bucket per distinct forged
+         token rather than colliding into one bucket per claimed
+         ``sub`` — slightly less aggressive limiting than trusting
+         ``sub`` would be, but no attacker can starve a real user's
+         bucket by spamming forgeries that claim the victim's id.
+
+    The route's ``Depends(get_current_user)`` still authenticates the
+    forged tokens away with a clean 401; the rate limiter only matters
+    for the (legitimate or near-legitimate) traffic that reaches the
+    inner handler.
     """
     auth = request.headers.get("authorization") or request.headers.get("Authorization")
     if not auth or not auth.lower().startswith("bearer "):
         return None
-    token = auth[7:].strip()
-    parts = token.split(".")
-    if len(parts) < 2:
+    token = auth[len("Bearer "):].strip()
+    if not token:
         return None
-    import base64
-    import json
-    try:
-        # JWT payload base64url, no padding — pad to multiple of 4.
-        payload = parts[1] + "=" * ((4 - len(parts[1]) % 4) % 4)
-        data = json.loads(base64.urlsafe_b64decode(payload.encode("ascii")))
-    except Exception:
-        return None
-    sub = data.get("sub")
-    if isinstance(sub, str) and sub:
-        return sub
-    return None
+    import hashlib
+    return "jwt:" + hashlib.sha256(token.encode("utf-8")).hexdigest()[:16]
 
 
 # Routes that should rate-limit per AUTHENTICATED USER rather than per
@@ -533,6 +548,26 @@ class BodySizeLimitMiddleware(BaseHTTPMiddleware):
         if request.method in {"POST", "PATCH", "PUT"}:
             for m, prefix in _BODY_SIZE_LIMITED_PREFIXES:
                 if m == request.method and request.url.path.startswith(prefix):
+                    # Reject Transfer-Encoding: chunked on these
+                    # protected paths — without a Content-Length the
+                    # size check below is useless and an attacker
+                    # could stream multi-MB bodies past the guard.
+                    # 411 Length Required is the standards-correct
+                    # response when the server demands Content-Length.
+                    if request.headers.get("transfer-encoding", "").lower() == "chunked":
+                        logger.warning(
+                            "Rejecting chunked %s %s — Content-Length required.",
+                            request.method, request.url.path,
+                        )
+                        return JSONResponse(
+                            status_code=411,
+                            content={
+                                "detail": (
+                                    "Chunked-Übertragung wird auf diesem "
+                                    "Endpunkt nicht unterstützt."
+                                )
+                            },
+                        )
                     cl = request.headers.get("content-length")
                     if cl:
                         try:
@@ -564,7 +599,18 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         for rule_method, prefix, limit, window in _RATE_LIMIT_RULES:
             if rule_method != "*" and rule_method != method:
                 continue
-            if path.startswith(prefix):
+            # Anchored prefix match: a rule for "/vision/detect" must
+            # NOT match "/vision/detectors". Either the path is exactly
+            # the prefix or the prefix must be followed by "/" so the
+            # next segment is fully delimited. Path prefixes that end
+            # in "/" (e.g. "/jetson/") still match all sub-resources
+            # because path == "/jetson/" or path startswith "/jetson/"
+            # via the second branch.
+            if prefix.endswith("/"):
+                matched = path.startswith(prefix)
+            else:
+                matched = path == prefix or path.startswith(prefix + "/")
+            if matched:
                 # /workflows must NOT match /workflows/{id} for PATCH
                 # — when the rule pins the method, allow the prefix
                 # match to apply across path lengths; when it's "*",

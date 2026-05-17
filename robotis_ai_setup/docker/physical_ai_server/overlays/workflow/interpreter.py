@@ -50,6 +50,13 @@ HAT_BLOCK_TYPES: frozenset[str] = frozenset({
     'edubotics_when_color_seen',
 })
 
+# Hard cap on iterations for any single loop construct
+# (repeat / while / until / for / for-each). Documented in CLAUDE.md §6.7.
+# Reaching this raises InterpreterError with a German message rather than
+# silently truncating — a student who actually needed 11k iterations is
+# almost certainly looking at an infinite-loop bug.
+MAX_LOOP_ITERATIONS = 10000
+
 
 class _ProcedureReturn(Exception):
     """Internal control-flow exception for procedures_ifreturn."""
@@ -268,67 +275,92 @@ class Interpreter:
         # in ctx.breakpoints, set the pause event and emit a 'paused'
         # phase. The manager waits for ctx.resume_event to be set
         # before this method returns control.
-        if getattr(ctx, 'breakpoints', None) and block_id in ctx.breakpoints:
+        # Audit fix #4: prefer ctx.get_breakpoints() (returns the
+        # manager's freshest frozenset) over the captured-at-start
+        # snapshot so set_breakpoints() updates are honored mid-run.
+        bp_getter = getattr(ctx, 'get_breakpoints', None)
+        if callable(bp_getter):
+            try:
+                bp_snapshot = bp_getter() or frozenset()
+            except Exception:
+                bp_snapshot = getattr(ctx, 'breakpoints', None) or frozenset()
+        else:
+            bp_snapshot = getattr(ctx, 'breakpoints', None) or frozenset()
+        if bp_snapshot and block_id in bp_snapshot:
             self._pause_for_breakpoint(ctx, block_id, on_block_change)
         elif callable(getattr(ctx, 'wait_if_paused', None)):
             ctx.wait_if_paused()
 
         on_block_change(block_id, 'running', 0.0)
 
-        # Control-flow first — they manage their own input/statement eval.
-        if btype == 'controls_if':
-            self._exec_if(block, ctx, on_block_change)
-            return
-        if btype == 'controls_repeat_ext':
-            self._exec_repeat(block, ctx, on_block_change)
-            return
-        if btype == 'controls_whileUntil':
-            self._exec_while_until(block, ctx, on_block_change)
-            return
-        if btype == 'controls_for':
-            self._exec_for(block, ctx, on_block_change)
-            return
-        if btype == 'controls_forEach':
-            self._exec_for_each(block, ctx, on_block_change)
-            return
-        if btype == 'variables_set':
-            self._exec_variables_set(block, ctx)
-            return
-        if btype == 'lists_setIndex':
-            self._exec_lists_set_index(block, ctx)
-            return
-
-        # Procedure definitions are registered up-front but contribute
-        # nothing as runtime statements; skip silently.
-        if btype in {'procedures_defnoreturn', 'procedures_defreturn'}:
-            return
-        if btype == 'procedures_callnoreturn':
-            self._exec_procedure_call(block, ctx, on_block_change, expect_return=False)
-            return
-        if btype == 'procedures_ifreturn':
-            self._exec_procedure_if_return(block, ctx, on_block_change)
-            return
-
-        # Broadcasts: fire the named event so any matching when_broadcast
-        # hat handler in another thread wakes up. The manager owns the
-        # event registry on ctx.broadcast_events.
-        if btype == 'edubotics_broadcast':
-            self._exec_broadcast(block, ctx)
-            return
-
-        handler = STATEMENT_HANDLERS.get(btype)
-        if handler is None:
-            raise InterpreterError(f'Unbekannter Block-Typ: {btype}')
-
-        args = self._build_args(block, ctx)
+        # Audit fix #20: emit a 'done' phase after the block body completes
+        # (control-flow OR statement handler) so the React debugger panel's
+        # block-state machine can transition off 'running' even when nothing
+        # follows in the chain. Try/finally so 'done' fires on exception
+        # paths too — the surrounding _exec_chain still re-raises so the
+        # workflow status remains correct overall.
         try:
-            handler(ctx, args)
-        except WorkflowError:
-            raise
-        except InterpreterError:
-            raise
-        except Exception as e:
-            raise InterpreterError(f'Fehler beim Ausführen von "{btype}": {e}')
+            # Control-flow first — they manage their own input/statement eval.
+            if btype == 'controls_if':
+                self._exec_if(block, ctx, on_block_change)
+                return
+            if btype == 'controls_repeat_ext':
+                self._exec_repeat(block, ctx, on_block_change)
+                return
+            if btype == 'controls_whileUntil':
+                self._exec_while_until(block, ctx, on_block_change)
+                return
+            if btype == 'controls_for':
+                self._exec_for(block, ctx, on_block_change)
+                return
+            if btype == 'controls_forEach':
+                self._exec_for_each(block, ctx, on_block_change)
+                return
+            if btype == 'variables_set':
+                self._exec_variables_set(block, ctx)
+                return
+            if btype == 'lists_setIndex':
+                self._exec_lists_set_index(block, ctx)
+                return
+
+            # Procedure definitions are registered up-front but contribute
+            # nothing as runtime statements; skip silently.
+            if btype in {'procedures_defnoreturn', 'procedures_defreturn'}:
+                return
+            if btype == 'procedures_callnoreturn':
+                self._exec_procedure_call(block, ctx, on_block_change, expect_return=False)
+                return
+            if btype == 'procedures_ifreturn':
+                self._exec_procedure_if_return(block, ctx, on_block_change)
+                return
+
+            # Broadcasts: fire the named event so any matching when_broadcast
+            # hat handler in another thread wakes up. The manager owns the
+            # event registry on ctx.broadcast_events.
+            if btype == 'edubotics_broadcast':
+                self._exec_broadcast(block, ctx)
+                return
+
+            handler = STATEMENT_HANDLERS.get(btype)
+            if handler is None:
+                raise InterpreterError(f'Unbekannter Block-Typ: {btype}')
+
+            args = self._build_args(block, ctx)
+            try:
+                handler(ctx, args)
+            except WorkflowError:
+                raise
+            except InterpreterError:
+                raise
+            except Exception as e:
+                raise InterpreterError(f'Fehler beim Ausführen von "{btype}": {e}')
+        finally:
+            try:
+                on_block_change(block_id, 'done', 0.0)
+            except Exception:
+                # Status callback failures must not mask the original
+                # block-execution exception (or success).
+                pass
 
     def _pause_for_breakpoint(
         self,
@@ -400,6 +432,21 @@ class Interpreter:
             n = int(times_val) if times_val is not None else 0
         except (TypeError, ValueError):
             raise InterpreterError('Wiederhole-Block hat keine gültige Zahl.')
+        # Negative count → silent empty loop (matches Python's range());
+        # warn so the student notices the wrong sign instead of a silently
+        # skipped block.
+        if n < 0:
+            try:
+                ctx.log('[WARNUNG] Negative Wiederholung wird ignoriert.')
+            except Exception:
+                pass
+            n = 0
+        # MAX_LOOP_ITERATIONS cap: raise rather than silently truncate so
+        # the student sees an actionable German error.
+        if n > MAX_LOOP_ITERATIONS:
+            raise InterpreterError(
+                'Schleife abgebrochen — Maximum von 10000 Wiederholungen erreicht.'
+            )
         do_block = self._get_input_block(block, 'DO')
         for i in range(n):
             if ctx.should_stop():
@@ -415,6 +462,7 @@ class Interpreter:
         mode = block.get('fields', {}).get('MODE', 'WHILE')
         bool_block = self._get_input_block(block, 'BOOL')
         do_block = self._get_input_block(block, 'DO')
+        iter_count = 0
         while True:
             if ctx.should_stop():
                 raise WorkflowError('Workflow wurde gestoppt.')
@@ -422,6 +470,11 @@ class Interpreter:
             stay = self._truthy(cond) if mode == 'WHILE' else not self._truthy(cond)
             if not stay:
                 break
+            iter_count += 1
+            if iter_count > MAX_LOOP_ITERATIONS:
+                raise InterpreterError(
+                    'Schleife abgebrochen — Maximum von 10000 Wiederholungen erreicht.'
+                )
             self._exec_chain(do_block, ctx, on_block_change)
 
     def _exec_for(
@@ -438,9 +491,15 @@ class Interpreter:
             raise InterpreterError('Schrittweite 0 ist ungültig.')
         do_block = self._get_input_block(block, 'DO')
         i = start
+        iter_count = 0
         while (step > 0 and i <= end) or (step < 0 and i >= end):
             if ctx.should_stop():
                 raise WorkflowError('Workflow wurde gestoppt.')
+            iter_count += 1
+            if iter_count > MAX_LOOP_ITERATIONS:
+                raise InterpreterError(
+                    'Schleife abgebrochen — Maximum von 10000 Wiederholungen erreicht.'
+                )
             self._set_variable(ctx, var_name, i)
             self._exec_chain(do_block, ctx, on_block_change)
             i += step
@@ -459,9 +518,15 @@ class Interpreter:
         if not hasattr(items, '__iter__'):
             raise InterpreterError('Für-jedes-Block hat keinen iterierbaren Wert.')
         do_block = self._get_input_block(block, 'DO')
+        iter_count = 0
         for item in items:
             if ctx.should_stop():
                 raise WorkflowError('Workflow wurde gestoppt.')
+            iter_count += 1
+            if iter_count > MAX_LOOP_ITERATIONS:
+                raise InterpreterError(
+                    'Schleife abgebrochen — Maximum von 10000 Wiederholungen erreicht.'
+                )
             self._set_variable(ctx, var_name, item)
             self._exec_chain(do_block, ctx, on_block_change)
 
@@ -687,8 +752,31 @@ class Interpreter:
     # Value evaluation
     # ------------------------------------------------------------------
     def _eval_value(self, block: dict[str, Any] | None, ctx) -> Any:
+        """Public wrapper that mirrors _exec_block's error-classification
+        contract. WorkflowError / InterpreterError / _ProcedureReturn pass
+        through unchanged; any other exception coming out of a value
+        evaluator (a perception handler called inside `controls_if`,
+        Blockly-arithmetic on bad input, etc.) is re-raised as a German
+        InterpreterError so the student sees an actionable message
+        instead of a raw Python traceback in the WorkflowStatus log strip.
+        """
         if block is None:
             return None
+        try:
+            return self._eval_value_impl(block, ctx)
+        except WorkflowError:
+            raise
+        except InterpreterError:
+            raise
+        except _ProcedureReturn:
+            raise
+        except Exception as e:
+            btype = block.get('type', '?')
+            raise InterpreterError(
+                f'Fehler beim Auswerten von "{btype}": {e}'
+            )
+
+    def _eval_value_impl(self, block: dict[str, Any], ctx) -> Any:
         btype = block.get('type')
 
         if btype == 'math_number':
@@ -763,22 +851,34 @@ class Interpreter:
 
         # Lists value evaluators.
         if btype == 'lists_create_with':
-            items: list[Any] = []
-            idx = 0
-            while True:
-                item_block = self._get_input_block(block, f'ADD{idx}')
-                if item_block is None:
-                    if idx == 0 and not block.get('inputs'):
-                        break
-                    if not (block.get('inputs') or {}).get(f'ADD{idx}'):
-                        break
-                    items.append(None)
-                else:
-                    items.append(self._eval_value(item_block, ctx))
-                idx += 1
-                if idx > 20:
-                    break
-            return items
+            # Audit fix: previously broke on the first missing ADDk and also
+            # silently truncated past index 20. New behaviour: scan every
+            # ADDk key present, sort by integer suffix, fill gaps with
+            # None, and RAISE on overflow rather than silently dropping
+            # items the student authored.
+            inputs = block.get('inputs') or {}
+            add_indices: list[int] = []
+            for k in inputs.keys():
+                if isinstance(k, str) and k.startswith('ADD'):
+                    suffix = k[3:]
+                    if suffix.isdigit():
+                        add_indices.append(int(suffix))
+            if add_indices:
+                if len(add_indices) > 20 or max(add_indices) >= 20:
+                    raise InterpreterError(
+                        'Listen-Erstellen-Block ist auf 20 Elemente begrenzt.'
+                    )
+                add_indices.sort()
+                items: list[Any] = []
+                # Fill from 0 to max(add_indices) so gaps become None.
+                for i in range(max(add_indices) + 1):
+                    inner = self._get_input_block(block, f'ADD{i}')
+                    if inner is None:
+                        items.append(None)
+                    else:
+                        items.append(self._eval_value(inner, ctx))
+                return items
+            return []
         if btype == 'lists_repeat':
             v = self._eval_value(self._get_input_block(block, 'ITEM'), ctx)
             n = int(self._eval_value(self._get_input_block(block, 'NUM'), ctx) or 0)

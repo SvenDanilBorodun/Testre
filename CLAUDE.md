@@ -45,8 +45,8 @@ Repo: `github.com/SvenDanilBorodun/Testre.git` (private). Single git repo, no su
 - Never bypass `_assert_classroom_owned()` / `_assert_student_owned()` / `_assert_entry_owned()` / `_assert_workflow_owned()` ownership checks in the cloud API.
 - If you genuinely need to reintroduce a software safety guard that modifies the pipeline (clamps, halts, truncates), **stop and ask the user** — the stripdown removed those deliberately to fix recording↔inference asymmetry.
 
-### 1.3 Overlays must fail loudly on no-op.
-- The `apply_overlay()` shell function in both `docker/physical_ai_server/Dockerfile` and `docker/open_manipulator/Dockerfile` does sha256 pre-/post-copy verification: if the upstream file is missing or already byte-identical to the overlay, build aborts with `ERROR: $name not found in base image — overlay cannot be applied`.
+### 1.3 Overlays must fail loudly on missing target, no-op when already applied.
+- The `apply_overlay()` shell function in both `docker/physical_ai_server/Dockerfile` and `docker/open_manipulator/Dockerfile` does sha256 pre-/post-copy verification: if the upstream file is missing, build aborts with `ERROR: $name not found in base image — overlay cannot be applied`. If the target file is already byte-identical to the overlay (e.g. a re-run on an already-patched image), the function logs `Overlay already in place: <path>` and continues — idempotent, not a failure.
 - The `patches/fix_server_inference.py` patch self-verifies and exits **2 or 3** on no-op (CI's `overlay-guard` job tests this with a fake input).
 - If you add an overlay you **must** add it to the `apply_overlay` chain with a unique path filter, AND add an upstream sha256 assertion. See [§13 Workflow: overlay change](#13-workflows-for-claude).
 
@@ -455,7 +455,7 @@ The software safety envelope that previously sat between steps 6 and 7 (NaN/Inf 
 - **Motion / output (statement)**: `edubotics_home`, `edubotics_open_gripper`, `edubotics_close_gripper`, `edubotics_move_to`, `edubotics_pickup`, `edubotics_drop_at`, `edubotics_wait_seconds`, `edubotics_destination_pin`, `edubotics_destination_current`, `edubotics_log`, `edubotics_play_sound`, `edubotics_speak_de`, `edubotics_play_tone`.
 - **Events / hat blocks (top-only)**: `edubotics_broadcast`, `edubotics_when_broadcast`, `edubotics_when_marker_seen`, `edubotics_when_color_seen`. Each hat handler runs as a separate daemon thread; a single `ctx.motion_lock` keeps motion serialized between handlers.
 - **Perception (value)**: `edubotics_detect_color`, `edubotics_detect_object`, `edubotics_detect_marker`, `edubotics_count_color`, `edubotics_count_objects_class`, `edubotics_wait_until_color`, `edubotics_wait_until_object`, `edubotics_wait_until_marker`, **`edubotics_detect_open_vocab`** (cloud-burst to OWLv2 on Modal — §8.3). The `_cloud_vision_burst` handler in `physical_ai_server.py` honors the `enabled` flag from `StartWorkflow.srv` (audit F54 — `perception_blocks.py:216-218` checks `ctx.cloud_vision.get('enabled')` before calling out) so that a workflow saved before the student enabled cloud vision in the React toolbox doesn't silently start burning Modal credits.
-- **Lists / procedures / math (Blockly built-ins)**: `lists_create_with`, `lists_repeat`, `lists_length`, `lists_isEmpty`, `lists_indexOf`, `lists_getIndex`, `lists_setIndex`, `lists_getSublist`, `procedures_defnoreturn/defreturn/callnoreturn/callreturn/ifreturn`, `math_random_int`, `math_constrain`, `math_modulo`, `math_round`, plus everything from the previous shipped set.
+- **Lists / procedures / math / variables (Blockly built-ins)**: `lists_create_with`, `lists_repeat`, `lists_length`, `lists_isEmpty`, `lists_indexOf`, `lists_getIndex`, `lists_setIndex`, `lists_getSublist`, `procedures_defnoreturn/defreturn/callnoreturn/callreturn/ifreturn`, `variables_get`, `variables_set`, `math_random_int`, `math_constrain`, `math_modulo`, `math_round`, plus everything from the previous shipped set (controls_*, logic_*, math_number/arithmetic, text).
 - Allowed colors: `rot, gruen, blau, gelb` (German); validation rejects other strings.
 - `MAX_LOOP_ITERATIONS = 10000`.
 
@@ -1030,7 +1030,7 @@ Singleton. `roslib` 1.4.1, URL `ws://${window.location.hostname}:9090`. Connecti
 - `useRefetchOnFocus(refetch, minIntervalMs=2000)` — debounced focus/visibility refetch.
 
 ### 12.8 ROS service caller (`hooks/useRosServiceCaller.js`)
-10s default timeout (`/get_registered_hf_user`, `/calibration/preview` are 3s). 31 services bound across recording, training, Hugging Face control, calibration, workshop authoring, and the Phase-2/3 debugger:
+10s default timeout (`/get_registered_hf_user`, `/calibration/preview` are 3s). 33 services bound across recording, training, Hugging Face control, calibration, workshop authoring, and the Phase-2/3 debugger:
 - **Recording / task control**: `/task/command` (SendCommand), `/training/command` (SendTrainingCommand), `/image/get_available_list`, `/get_robot_types`, `/set_robot_type`.
 - **Hugging Face account**: `/register_hf_user`, `/get_registered_hf_user` (3s).
 - **Training metadata**: `/training/get_user_list`, `/training/get_dataset_list`, `/training/get_available_policy`, `/training/get_model_weight_list`, `/training/get_training_info`.

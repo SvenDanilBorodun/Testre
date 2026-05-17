@@ -29,7 +29,7 @@
     },
     {
       "title": "Mehrmals wiederholen",
-      "body": "Verpacke alles in einen \"wiederhole 3 mal\"-Block, sodass der Roboter alle 5 Sekunden zählt.",
+      "body": "Verpacke alles in einen \"wiederhole 3 mal\"-Block, sodass der Roboter alle 5 Sekunden zählt. Tippe in die voreingestellte 10 hinein und ersetze sie durch 3.",
       "allowed_blocks": [
         "edubotics_count_color",
         "variables_set",

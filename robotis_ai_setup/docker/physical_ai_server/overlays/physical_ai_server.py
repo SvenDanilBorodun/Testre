@@ -157,6 +157,13 @@ class PhysicalAIServer(Node):
         # detect_marker / detect_open_vocab) produced — labels follow
         # the perception.py conventions (color literal / COCO class /
         # 'tag{id}'). Cleared by TTL in the timer when it goes stale.
+        # Audit fix #15: pack (ts, detections) into a single tuple that
+        # writers rebind atomically and readers snapshot in one read.
+        # Avoids the dual-attribute race where the sensor timer could
+        # observe a fresh ts paired with the previous detections list
+        # (or vice-versa). Kept the legacy attribute names too so any
+        # other reader (tests, debug introspection) keeps working.
+        self._workflow_detections_state: tuple[float, list] = (0.0, [])
         self._workflow_last_detections: list = []
         self._workflow_last_detections_ts: float = 0.0
         # Cleared by /calibration/start, set by /calibration/cancel.
@@ -2181,8 +2188,19 @@ class PhysicalAIServer(Node):
             # so a stale list from a finished workflow doesn't keep
             # showing up.
             if detections:
-                self._workflow_last_detections = list(detections)
-                self._workflow_last_detections_ts = time.monotonic()
+                # Audit fix #15: pack ts + list into one tuple that
+                # writers rebind atomically. Reader (sensor timer)
+                # snapshots the tuple reference in one read and
+                # destructures locally, so a half-updated state can
+                # never be observed.
+                snapshot = list(detections)
+                now = time.monotonic()
+                self._workflow_detections_state = (now, snapshot)
+                # Keep the legacy attributes in sync for any other
+                # introspection — assignment order doesn't matter
+                # because the canonical reader uses the tuple.
+                self._workflow_last_detections = snapshot
+                self._workflow_last_detections_ts = now
         except Exception as e:
             self.get_logger().warning(f'workflow status publish error: {e}')
 
@@ -2685,8 +2703,18 @@ class PhysicalAIServer(Node):
         if callable(should_stop) and should_stop():
             raise WorkflowError('Workflow wurde gestoppt.')
 
+        # Audit fix #10: stream the response so a long Modal cold-start
+        # (15 s+) is cancellable mid-read. Without this, /workflow/stop
+        # from the React UI couldn't take effect until the underlying
+        # socket recv() returned. Tuple timeout: 5 s to establish the
+        # connection, 2 s per read chunk (keeps the cancel-check cadence
+        # tight). Total upper bound is still bounded by the chunk-read
+        # cap of WALL_CLOCK_BUDGET so a network-stalled connection
+        # doesn't hang forever.
+        WALL_CLOCK_BUDGET = 30.0
+        session = requests.Session()
         try:
-            response = requests.post(
+            response = session.post(
                 f'{cloud_api_url}/vision/detect',
                 json={
                     'image_b64': b64,
@@ -2694,70 +2722,115 @@ class PhysicalAIServer(Node):
                     'score_threshold': 0.25,
                 },
                 headers={'Authorization': f'Bearer {token}'},
-                timeout=15,
+                timeout=(5.0, 2.0),
+                stream=True,
             )
         except requests.exceptions.Timeout:
+            try:
+                session.close()
+            except Exception:
+                pass
             raise WorkflowError(
                 'Cloud-Erkennung antwortet nicht — bitte erneut versuchen.'
             )
         except requests.exceptions.RequestException as e:
+            try:
+                session.close()
+            except Exception:
+                pass
             raise WorkflowError(
                 f'Cloud-Erkennung nicht erreichbar: {type(e).__name__}.'
             )
 
-        if response.status_code == 401 or response.status_code == 403:
-            raise WorkflowError(
-                'Anmeldung für Cloud-Erkennung abgelaufen — bitte neu einloggen.'
-            )
-        if response.status_code == 429:
-            raise WorkflowError(
-                'Cloud-Erkennungs-Kontingent für dieses Halbjahr erreicht.'
-            )
-        if response.status_code == 503:
-            raise WorkflowError(
-                'Cloud-Erkennung ist gerade nicht erreichbar.'
-            )
-        if response.status_code == 504:
-            raise WorkflowError(
-                'Cloud-Erkennung lädt noch — bitte gleich erneut versuchen.'
-            )
-        if response.status_code >= 400:
-            raise WorkflowError(
-                'Cloud-Erkennung ist fehlgeschlagen. Bitte erneut versuchen.'
-            )
-
         try:
-            data = response.json()
-        except ValueError:
-            raise WorkflowError(
-                'Cloud-Erkennung lieferte ungültige Antwort.'
-            )
+            if response.status_code == 401 or response.status_code == 403:
+                raise WorkflowError(
+                    'Anmeldung für Cloud-Erkennung abgelaufen — bitte neu einloggen.'
+                )
+            if response.status_code == 429:
+                raise WorkflowError(
+                    'Cloud-Erkennungs-Kontingent für dieses Halbjahr erreicht.'
+                )
+            if response.status_code == 503:
+                raise WorkflowError(
+                    'Cloud-Erkennung ist gerade nicht erreichbar.'
+                )
+            if response.status_code == 504:
+                raise WorkflowError(
+                    'Cloud-Erkennung lädt noch — bitte gleich erneut versuchen.'
+                )
+            if response.status_code >= 400:
+                raise WorkflowError(
+                    'Cloud-Erkennung ist fehlgeschlagen. Bitte erneut versuchen.'
+                )
 
-        raw_detections = data.get('detections', []) or []
-        h, w = bgr_frame.shape[:2]
-        out: list = []
-        for d in raw_detections:
+            # Audit fix #10: chunk-read the response body so the student
+            # can hit /workflow/stop during a slow download (Modal cold
+            # path returns >100 KiB of detection JSON on a busy scene).
+            # session.close() in the finally aborts the underlying
+            # socket immediately on stop.
+            collected = bytearray()
+            deadline = time.monotonic() + WALL_CLOCK_BUDGET
             try:
-                bbox = d.get('bbox') or [0, 0, 0, 0]
-                x1, y1, x2, y2 = (float(bbox[0]), float(bbox[1]),
-                                  float(bbox[2]), float(bbox[3]))
-                x1 = max(0, min(w - 1, int(round(x1))))
-                y1 = max(0, min(h - 1, int(round(y1))))
-                x2 = max(0, min(w - 1, int(round(x2))))
-                y2 = max(0, min(h - 1, int(round(y2))))
-                bw = max(1, x2 - x1)
-                bh = max(1, y2 - y1)
-                cx = x1 + bw // 2
-                cy = y1 + bh // 2
-                out.append(Detection(
-                    centroid_px=(cx, cy),
-                    bbox_px=(x1, y1, bw, bh),
-                    confidence=float(d.get('score', 0.0)),
-                    label=str(d.get('label', prompt)),
-                ))
-            except (TypeError, ValueError, KeyError):
-                continue
-        return out
+                for chunk in response.iter_content(chunk_size=8192):
+                    if callable(should_stop) and should_stop():
+                        raise WorkflowError('Workflow wurde gestoppt.')
+                    if time.monotonic() > deadline:
+                        raise WorkflowError(
+                            'Cloud-Erkennung antwortet nicht — bitte erneut versuchen.'
+                        )
+                    if chunk:
+                        collected.extend(chunk)
+            except requests.exceptions.RequestException as e:
+                raise WorkflowError(
+                    f'Cloud-Erkennung Verbindung verloren: {type(e).__name__}.'
+                )
+
+            try:
+                import json as _json
+                data = _json.loads(collected.decode('utf-8'))
+            except (ValueError, UnicodeDecodeError):
+                raise WorkflowError(
+                    'Cloud-Erkennung lieferte ungültige Antwort.'
+                )
+
+            raw_detections = data.get('detections', []) or []
+            h, w = bgr_frame.shape[:2]
+            out: list = []
+            for d in raw_detections:
+                try:
+                    bbox = d.get('bbox') or [0, 0, 0, 0]
+                    x1, y1, x2, y2 = (float(bbox[0]), float(bbox[1]),
+                                      float(bbox[2]), float(bbox[3]))
+                    x1 = max(0, min(w - 1, int(round(x1))))
+                    y1 = max(0, min(h - 1, int(round(y1))))
+                    x2 = max(0, min(w - 1, int(round(x2))))
+                    y2 = max(0, min(h - 1, int(round(y2))))
+                    bw = max(1, x2 - x1)
+                    bh = max(1, y2 - y1)
+                    cx = x1 + bw // 2
+                    cy = y1 + bh // 2
+                    out.append(Detection(
+                        centroid_px=(cx, cy),
+                        bbox_px=(x1, y1, bw, bh),
+                        confidence=float(d.get('score', 0.0)),
+                        label=str(d.get('label', prompt)),
+                    ))
+                except (TypeError, ValueError, KeyError):
+                    continue
+            return out
+        finally:
+            # Always close the streamed response + session so a cancel
+            # while iter_content was mid-flight releases the socket
+            # rather than holding it open until GC.
+            try:
+                response.close()
+            except Exception:
+                pass
+            try:
+                session.close()
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------
     # Phase-2 sensor snapshot publisher (~5 Hz while a workflow runs)
@@ -2802,8 +2875,15 @@ class PhysicalAIServer(Node):
             apriltag_ids: list[int] = []
             color_counts = [0, 0, 0, 0]  # [rot, gruen, blau, gelb]
             object_classes: list[str] = []
-            last = self._workflow_last_detections or []
-            last_ts = self._workflow_last_detections_ts
+            # Audit fix #15: snapshot the tuple in one read so the ts
+            # and list are guaranteed to belong together. Rebinding
+            # _workflow_detections_state is atomic in CPython (single
+            # STORE_ATTR bytecode), so this read can't tear.
+            state = self._workflow_detections_state
+            try:
+                last_ts, last = state
+            except (TypeError, ValueError):
+                last_ts, last = 0.0, []
             if last and (time.monotonic() - last_ts) < 2.0:
                 color_index = {'rot': 0, 'gruen': 1, 'blau': 2, 'gelb': 3}
                 for d in last:

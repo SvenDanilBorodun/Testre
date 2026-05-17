@@ -71,8 +71,16 @@ function ToolbarButtons({
   }, [workspace, theme]);
 
   // Re-render every 5 s so the autosave-age label stays current.
+  // Audit §toolbar-r1: gate on visibility — when the tab is hidden, we
+  // don't need to keep ticking React renders against a label nobody
+  // is reading. Saves 12 wasted re-renders per minute on backgrounded
+  // classroom kiosks left open overnight.
   useEffect(() => {
-    const id = setInterval(() => setTick((n) => n + 1), 5_000);
+    const id = setInterval(() => {
+      if (typeof document === 'undefined' || document.visibilityState === 'visible') {
+        setTick((n) => n + 1);
+      }
+    }, 5_000);
     return () => clearInterval(id);
   }, []);
 

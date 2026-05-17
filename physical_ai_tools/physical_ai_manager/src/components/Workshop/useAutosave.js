@@ -122,7 +122,12 @@ export function useAutosave({
         ? new TextEncoder().encode(serialized).length
         : serialized.length;
     if (utf8Bytes > MAX_JSON_BYTES) {
-      toast.error(DE.AUTOSAVE_QUOTA_FULL, { id: 'autosave-too-big' });
+      // Audit §autosave-r1: distinguish "workflow exceeds the 256 KB
+      // server cap" from "IndexedDB quota exceeded". They are two
+      // different failure modes with two different remedies — telling
+      // a student their browser is full when the actual issue is a
+      // bloated workflow sends them down the wrong recovery path.
+      toast.error(DE.AUTOSAVE_TOO_BIG, { id: 'autosave-too-big' });
       return;
     }
     try {

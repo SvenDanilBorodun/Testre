@@ -42,6 +42,13 @@ def validate_blockly_json(payload: dict) -> None:
             detail=f"Workflow ist zu groß (>{MAX_BLOCKLY_JSON_BYTES // 1024} KB).",
         )
 
+    # Off-by-one fix: a tree of EXACTLY MAX_BLOCKLY_DEPTH levels must be
+    # accepted; one level deeper must be rejected. The depth count is the
+    # number of nested container hops (dict/list); a scalar at the root
+    # has depth 0, one nested dict has depth 1, etc. We early-bail as
+    # soon as we observe depth > MAX_BLOCKLY_DEPTH so the recursion stays
+    # bounded even on adversarial input that uses non-container values
+    # to skip the predicate.
     def _depth(node: Any, current: int) -> int:
         if current > MAX_BLOCKLY_DEPTH:
             return current
@@ -51,5 +58,5 @@ def validate_blockly_json(payload: dict) -> None:
             return max((_depth(v, current + 1) for v in node), default=current)
         return current
 
-    if _depth(payload, 0) > MAX_BLOCKLY_DEPTH:
+    if _depth(payload, 0) >= MAX_BLOCKLY_DEPTH + 1:
         raise HTTPException(status_code=400, detail="Workflow ist zu tief verschachtelt.")

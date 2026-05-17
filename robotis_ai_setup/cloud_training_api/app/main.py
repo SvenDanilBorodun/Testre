@@ -91,6 +91,24 @@ def _warn_optional_secrets() -> None:
         if not os.environ.get(key):
             logger.warning("env var %s not set — %s", key, msg)
 
+    # Conditional: when SUPABASE_JWT_ALGORITHM=HS256 (legacy Supabase
+    # auth), the Jetson rosbridge proxy needs the shared HMAC secret to
+    # verify student JWTs. Without it, every WebSocket connection
+    # closes 4401 and no inference works — but the agent + Cloud API
+    # still appear healthy. v2.3.0 adds /jetson/register hard-fail when
+    # this combo is wrong, but the warn here also surfaces the issue at
+    # boot so the operator sees it in the very first Railway log line
+    # rather than only when a teacher tries to register a Jetson.
+    if os.environ.get("SUPABASE_JWT_ALGORITHM") == "HS256" and not os.environ.get(
+        "SUPABASE_JWT_SECRET"
+    ):
+        logger.warning(
+            "env var SUPABASE_JWT_SECRET not set but SUPABASE_JWT_ALGORITHM=HS256 — "
+            "/jetson/register will return 503 because Jetson agents cannot verify "
+            "student JWTs without the shared HMAC secret. "
+            "Set SUPABASE_JWT_SECRET on Railway (Supabase Dashboard → Settings → API → JWT Secret)."
+        )
+
 
 _warn_optional_secrets()
 
@@ -249,6 +267,20 @@ def _validate_required_schema() -> None:
         }),
         ("force_release_jetson", {"p_jetson_id": dummy, "p_teacher_id": dummy}),
         ("sweep_jetson_locks", {}),
+        # Migration 020 — v2.3.0 follow-up RPCs (agent-side claim-fail
+        # release, teacher pairing-code regeneration, teacher unpair).
+        # Same fingerprint pattern: PGRST202 means the migration hasn't
+        # been applied yet to the live DB and Railway should abort the
+        # deploy instead of returning 200 from /health and 500'ing the
+        # first teacher who tries to rotate a code.
+        ("agent_release_jetson", {"p_jetson_id": dummy, "p_agent_token": dummy}),
+        ("regenerate_pairing_code", {
+            "p_jetson_id": dummy,
+            "p_teacher_id": dummy,
+            "p_new_code": "_probe",
+            "p_expires_at": "1970-01-01T00:00:00+00:00",
+        }),
+        ("unpair_jetson", {"p_jetson_id": dummy, "p_teacher_id": dummy}),
     )
     missing_rpcs: list[str] = []
     for name, args in required_rpcs:
@@ -399,12 +431,24 @@ _RATE_LIMIT_RULES: list[tuple[str, str, int, float]] = [
     # The original "/jetson/" rule was listed first and turned this
     # 5/60s into dead code.
     ("POST", "/jetson/register", 5, 60.0),
-    # Classroom Jetson claim — per-user (JWT sub keyed). Students may
-    # double-click the Verbinde button or retry after a transient 429
-    # from the Cloud API; 10/60s is plenty of headroom for legitimate
-    # use and stops a tight-loop bug from spamming claim_jetson and
-    # racing the lock state.
-    ("POST", "/jetson/", 10, 60.0),
+    # Classroom Jetson claim/heartbeat/release/agent-heartbeat/
+    # agent-release/release-beacon — single prefix rule for everything
+    # under /jetson/{id}/. Per-user (JWT sub keyed) when an
+    # Authorization header is present; falls back to IP keying when
+    # absent (agent endpoints + release-beacon body-token path).
+    #
+    # Why 30/60s and not 10/60s: a classroom of 30 students all closing
+    # their browser tab at the end of a lesson would each fire one
+    # navigator.sendBeacon('release-beacon') call. The beacon path has
+    # no JWT header (sendBeacon can't set headers) so it falls back to
+    # IP keying; 30 students from one NAT IP would exceed 10/60s and
+    # some beacons would get 429'd, sending their locks back to the
+    # 5-min sweeper — exactly what v2.3.0 fixed. 30/60s comfortably
+    # absorbs that storm and still catches a tight-loop bug. For the
+    # JWT-authenticated paths (claim, heartbeat, release) the
+    # per-user-keying means 30/min/user is still very generous (claim
+    # is 1x/session, heartbeat is 2/min, release is 1x/session).
+    ("POST", "/jetson/", 30, 60.0),
 ]
 
 

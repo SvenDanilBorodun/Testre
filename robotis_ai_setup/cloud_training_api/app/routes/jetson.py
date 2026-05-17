@@ -76,6 +76,14 @@ class JetsonRegisterResponse(BaseModel):
                                             # to "HS256" only if the project
                                             # is on the legacy auth path; the
                                             # agent picks it up at first boot.
+    # HS256 path only: the shared symmetric secret that signed every
+    # Supabase JWT in this project. Sent to the agent so its rosbridge
+    # proxy can verify student WebSocket auth frames without needing a
+    # JWKS endpoint. Empty string for RS256 projects (proxy uses JWKS).
+    # CRITICAL: this is sensitive — written to /etc/edubotics/jetson.env
+    # mode 600, root-only. Never exposed to students. Setup.sh handles
+    # the write atomically before starting the agent.
+    supabase_jwt_secret: str | None = None
 
 
 class JetsonAgentHeartbeat(BaseModel):
@@ -117,6 +125,31 @@ class JetsonPairRequest(BaseModel):
 class JetsonPairResponse(BaseModel):
     jetson_id: str
     mdns_name: str
+
+
+class JetsonAgentReleaseRequest(BaseModel):
+    # Agent-authenticated release for local claim-transition failures.
+    # No JWT — the agent has no student session; it proves identity via
+    # its own per-Jetson agent_token (same shape as agent_heartbeat).
+    agent_token: str
+
+
+class JetsonReleaseBeaconRequest(BaseModel):
+    # sendBeacon body for the tab-close release path. The browser's
+    # navigator.sendBeacon API cannot set the Authorization header, so
+    # the student JWT travels in the body instead. This endpoint is the
+    # ONLY one that accepts a token-in-body — do NOT generalise the
+    # pattern. The token is the same Supabase JWT the student's other
+    # requests use; we revalidate it with supabase.auth.get_user before
+    # touching the lock so a forged body can't release someone else's
+    # session.
+    access_token: str
+
+
+class JetsonRegenerateCodeResponse(BaseModel):
+    jetson_id: str
+    pairing_code: str
+    pairing_code_expires_at: str
 
 
 # ---------------------------------------------------------------------------
@@ -343,12 +376,41 @@ async def jetson_register(req: JetsonRegisterRequest):
             logger.error("jetson_register failed: %s", exc)
             raise HTTPException(status_code=500, detail="Registrierung fehlgeschlagen")
 
+    if not result.data:
+        # Extremely defensive — supabase-py wraps the PostgREST response,
+        # and a happy path always returns the inserted row. If we ever
+        # see an empty result.data here it's a server-side bug, not user
+        # error; raise a clear 500 so the operator notices in logs.
+        logger.error("jetson_register: insert returned no row")
+        raise HTTPException(status_code=500, detail="Registrierung fehlgeschlagen")
     row = result.data[0]
     # Default RS256 — Supabase's modern auth path. If the project is on
     # legacy HS256, the operator can set SUPABASE_JWT_ALGORITHM=HS256
     # on Railway. The agent reads this value at first boot to pick the
     # right JWT verification path.
     algorithm = os.environ.get("SUPABASE_JWT_ALGORITHM", "RS256")
+    # HS256 path only: forward the symmetric secret so the agent's
+    # rosbridge proxy can verify student JWTs. For RS256 projects the
+    # proxy fetches a JWKS from SUPABASE_URL and this field stays empty.
+    # If HS256 is configured but the secret env var is missing, refuse
+    # the registration upfront — without the secret the agent will
+    # accept the registration but every student WS connection will close
+    # 4401 with no clear signal to the operator. Better to fail loudly
+    # at register time. _warn_optional_secrets() in main.py also logs
+    # this at boot, so the operator sees it twice.
+    jwt_secret: str | None = None
+    if algorithm == "HS256":
+        jwt_secret = os.environ.get("SUPABASE_JWT_SECRET", "") or None
+        if not jwt_secret:
+            logger.error(
+                "jetson_register: SUPABASE_JWT_ALGORITHM=HS256 but "
+                "SUPABASE_JWT_SECRET unset — refusing to register a Jetson "
+                "that would reject every student JWT"
+            )
+            raise HTTPException(
+                status_code=503,
+                detail="Jetson-Registrierung nicht verfügbar — Server nicht konfiguriert (JWT-Secret fehlt)",
+            )
     return JetsonRegisterResponse(
         jetson_id=row["id"],
         agent_token=row["agent_token"],
@@ -356,6 +418,7 @@ async def jetson_register(req: JetsonRegisterRequest):
         hf_token=hf_token,
         supabase_url=supabase_url,
         supabase_jwt_algorithm=algorithm,
+        supabase_jwt_secret=jwt_secret,
     )
 
 
@@ -391,6 +454,36 @@ async def jetson_agent_heartbeat(
     # PostgREST returns the scalar result directly via .data.
     owner_id = result.data if isinstance(result.data, str) else None
     return JetsonAgentHeartbeatResponse(current_owner_user_id=owner_id)
+
+
+@router.post("/jetson/{jetson_id}/agent-release")
+async def jetson_agent_release(
+    jetson_id: str = Path(..., description="UUID returned by /jetson/register"),
+    req: JetsonAgentReleaseRequest = Body(...),
+):
+    """Agent-authenticated lock release for local claim-transition failures.
+
+    When the agent's docker-compose up / healthcheck flow fails mid-claim
+    (docker daemon hiccup, OOM, image-pull timeout), the agent calls
+    this endpoint to release the server-side lock proactively rather
+    than waiting 5 min for the sweeper. Without this, a student whose
+    claim triggered a local failure would see "Jetson belegt von <ihrer
+    Name>" for the full sweeper window with no way to retry — a real
+    classroom friction point between consecutive lessons.
+
+    Auth: agent_token in body (same model as agent_heartbeat). A student
+    JWT cannot reach this — only the physical Jetson holding the matching
+    agent_token.
+    """
+    supabase = get_supabase()
+    try:
+        supabase.rpc(
+            "agent_release_jetson",
+            {"p_jetson_id": jetson_id, "p_agent_token": req.agent_token},
+        ).execute()
+    except Exception as exc:
+        raise _map_pg_error(exc)
+    return {"ok": True}
 
 
 # ---------------------------------------------------------------------------
@@ -515,6 +608,60 @@ async def release_jetson_endpoint(
     return {"ok": True}
 
 
+@router.post("/jetson/{jetson_id}/release-beacon")
+async def release_jetson_beacon(
+    jetson_id: str = Path(...),
+    req: JetsonReleaseBeaconRequest = Body(...),
+):
+    """sendBeacon-friendly release path.
+
+    The browser's navigator.sendBeacon API has two limits that the main
+    /jetson/{id}/release endpoint can't satisfy:
+
+      1. It cannot set Authorization headers, so the JWT must travel in
+         the body.
+      2. The body Content-Type is restricted to a small set
+         (text/plain, application/x-www-form-urlencoded, multipart/form-
+         data, or application/json via a Blob). The browser silently
+         drops the request if the server rejects the content type.
+
+    This endpoint takes the Supabase JWT in the JSON body, revalidates
+    it via supabase.auth.get_user (so a forged body can't release
+    someone else's lock), and then calls the same release_jetson RPC.
+    The endpoint is intentionally narrow: no other route accepts a
+    token-in-body. Future maintainers should NOT generalise this
+    pattern — Bearer-in-header is the only auth path for everything
+    else.
+
+    Idempotent like /release: if the caller no longer owns the lock
+    (e.g. sweeper fired first, or teacher force-released), the RPC's
+    `WHERE current_owner_user_id = p_user_id` predicate matches zero
+    rows and the call quietly succeeds.
+    """
+    supabase = get_supabase()
+    # Validate the token. supabase.auth.get_user does the full signature
+    # + exp check; we just frame the result and convert auth failures
+    # to a 401 with a German message so the browser's beforeunload
+    # logger has a clear cause.
+    try:
+        user_response = supabase.auth.get_user(req.access_token)
+    except Exception as exc:
+        logger.warning("release-beacon: supabase.auth.get_user failed: %s", exc)
+        raise HTTPException(status_code=401, detail="Token ungültig")
+    user = getattr(user_response, "user", None)
+    if user is None:
+        raise HTTPException(status_code=401, detail="Token ungültig")
+
+    try:
+        supabase.rpc(
+            "release_jetson",
+            {"p_jetson_id": jetson_id, "p_user_id": str(user.id)},
+        ).execute()
+    except Exception as exc:
+        raise _map_pg_error(exc)
+    return {"ok": True}
+
+
 # ---------------------------------------------------------------------------
 # Teacher-side endpoints
 # ---------------------------------------------------------------------------
@@ -595,6 +742,116 @@ async def force_release_jetson_endpoint(
     try:
         supabase.rpc(
             "force_release_jetson",
+            {"p_jetson_id": row["id"], "p_teacher_id": teacher["id"]},
+        ).execute()
+    except Exception as exc:
+        raise _map_pg_error(exc)
+    return {"ok": True}
+
+
+@teacher_router.post(
+    "/classrooms/{classroom_id}/jetson/regenerate-code",
+    response_model=JetsonRegenerateCodeResponse,
+)
+async def regenerate_jetson_pairing_code(
+    classroom_id: str = Path(...),
+    teacher=Depends(get_current_teacher),
+):
+    """Generate a fresh 6-digit pairing code for the classroom's Jetson.
+
+    Used when the prior code expired (30-min lifetime) or the teacher
+    wants to rotate it. Avoids the SSH-back-to-Jetson workflow that
+    would otherwise be required to re-run setup.sh. Cryptographic
+    randomness comes from Python's `secrets.randbelow` (same helper
+    used at first registration); the migration 020 RPC just refreshes
+    the row atomically with a new 30-min expiry.
+
+    Returns the new code so the React UI can display it in a modal /
+    toast. The teacher then enters it in their other browser tab (or
+    on the Jetson if re-pairing a previously unpaired device).
+    """
+    row = _fetch_classroom_jetson(classroom_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Kein Klassen-Jetson in diesem Raum")
+
+    new_code = _generate_pairing_code()
+    from datetime import datetime, timedelta, timezone
+
+    expires_at = (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat()
+
+    supabase = get_supabase()
+    try:
+        supabase.rpc(
+            "regenerate_pairing_code",
+            {
+                "p_jetson_id": row["id"],
+                "p_teacher_id": teacher["id"],
+                "p_new_code": new_code,
+                "p_expires_at": expires_at,
+            },
+        ).execute()
+    except Exception as exc:
+        # The UNIQUE constraint on pairing_code could theoretically
+        # collide here (1-in-a-million). Retry once with a new code
+        # — same retry pattern as /jetson/register.
+        msg = str(exc)
+        if "duplicate" in msg.lower() or "23505" in msg:
+            new_code = _generate_pairing_code()
+            try:
+                supabase.rpc(
+                    "regenerate_pairing_code",
+                    {
+                        "p_jetson_id": row["id"],
+                        "p_teacher_id": teacher["id"],
+                        "p_new_code": new_code,
+                        "p_expires_at": expires_at,
+                    },
+                ).execute()
+            except Exception as exc2:
+                logger.error("regenerate_pairing_code retry failed: %s", exc2)
+                raise _map_pg_error(exc2)
+        else:
+            raise _map_pg_error(exc)
+
+    return JetsonRegenerateCodeResponse(
+        jetson_id=row["id"],
+        pairing_code=new_code,
+        pairing_code_expires_at=expires_at,
+    )
+
+
+@teacher_router.post("/classrooms/{classroom_id}/jetson/unpair")
+async def unpair_jetson_endpoint(
+    classroom_id: str = Path(...),
+    teacher=Depends(get_current_teacher),
+):
+    """Unbind the Jetson from this classroom.
+
+    Side effects in one transaction (see migration 020):
+      * classroom_id              → NULL
+      * current_owner_user_id     → NULL  (force-releases any active session)
+      * current_owner_heartbeat_at → NULL
+      * claimed_at                → NULL
+      * mdns_name                 → NULL  (the next pair will set a fresh one)
+
+    The agent_token is preserved so the Jetson hardware can be paired
+    to another classroom without re-running setup.sh. After unpair the
+    operator can either:
+      * pair the same device to a different classroom (the next
+        teacher needs the device's pairing_code, which they can
+        regenerate via /regenerate-code only AFTER they pair — chicken
+        and egg, so in practice the operator re-runs setup.sh and the
+        agent generates a fresh code via /jetson/register), OR
+      * decommission the device (just leave it unpaired; the orphan
+        row will be cleaned up by an admin).
+    """
+    row = _fetch_classroom_jetson(classroom_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Kein Klassen-Jetson in diesem Raum")
+    supabase = get_supabase()
+    try:
+        supabase.rpc(
+            "unpair_jetson",
             {"p_jetson_id": row["id"], "p_teacher_id": teacher["id"]},
         ).execute()
     except Exception as exc:

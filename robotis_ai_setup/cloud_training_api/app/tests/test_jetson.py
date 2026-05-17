@@ -270,5 +270,77 @@ class TestSweep(unittest.TestCase):
         self.assertEqual(n, 0)
 
 
+class TestNewModelsV2(unittest.TestCase):
+    """Migration 020 + Cloud API v2.3.0 new Pydantic models. Confirms
+    each new request/response model accepts the fields the routes
+    populate so a typo in a Pydantic field name would fail here rather
+    than as a silent body-validation error in production."""
+
+    def test_register_response_carries_jwt_secret(self):
+        # HS256 path: secret must round-trip through the response model.
+        resp = jetson_routes.JetsonRegisterResponse(
+            jetson_id="j1",
+            agent_token="t",
+            pairing_code="123456",
+            supabase_jwt_algorithm="HS256",
+            supabase_jwt_secret="my-secret",
+        )
+        self.assertEqual(resp.supabase_jwt_secret, "my-secret")
+        self.assertEqual(resp.supabase_jwt_algorithm, "HS256")
+
+    def test_register_response_jwt_secret_optional(self):
+        # RS256 path: secret stays None.
+        resp = jetson_routes.JetsonRegisterResponse(
+            jetson_id="j1",
+            agent_token="t",
+            pairing_code="123456",
+            supabase_jwt_algorithm="RS256",
+        )
+        # Pydantic stub leaves unset fields absent; real Pydantic uses default
+        # None. Both behaviors are acceptable for this test — either way the
+        # field is not populated.
+        self.assertIsNone(getattr(resp, "supabase_jwt_secret", None))
+
+    def test_agent_release_request_model(self):
+        req = jetson_routes.JetsonAgentReleaseRequest(agent_token="abc")
+        self.assertEqual(req.agent_token, "abc")
+
+    def test_release_beacon_request_model(self):
+        req = jetson_routes.JetsonReleaseBeaconRequest(access_token="jwt-blob")
+        self.assertEqual(req.access_token, "jwt-blob")
+
+    def test_regenerate_code_response_model(self):
+        resp = jetson_routes.JetsonRegenerateCodeResponse(
+            jetson_id="j1",
+            pairing_code="999000",
+            pairing_code_expires_at="2026-05-17T12:00:00+00:00",
+        )
+        self.assertEqual(resp.pairing_code, "999000")
+        self.assertTrue(resp.pairing_code_expires_at.startswith("2026"))
+
+
+class TestNewRouteSurfaces(unittest.TestCase):
+    """Confirms the new endpoint functions are attributes on the
+    module. Catches a regression where a copy-paste edit dropped a
+    function name; the FastAPI route binding would then 404 in
+    production with no test signal."""
+
+    def test_agent_release_endpoint_exists(self):
+        self.assertTrue(hasattr(jetson_routes, "jetson_agent_release"))
+        self.assertTrue(callable(jetson_routes.jetson_agent_release))
+
+    def test_release_beacon_endpoint_exists(self):
+        self.assertTrue(hasattr(jetson_routes, "release_jetson_beacon"))
+        self.assertTrue(callable(jetson_routes.release_jetson_beacon))
+
+    def test_regenerate_code_endpoint_exists(self):
+        self.assertTrue(hasattr(jetson_routes, "regenerate_jetson_pairing_code"))
+        self.assertTrue(callable(jetson_routes.regenerate_jetson_pairing_code))
+
+    def test_unpair_endpoint_exists(self):
+        self.assertTrue(hasattr(jetson_routes, "unpair_jetson_endpoint"))
+        self.assertTrue(callable(jetson_routes.unpair_jetson_endpoint))
+
+
 if __name__ == "__main__":
     unittest.main()

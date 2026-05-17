@@ -29,6 +29,7 @@ import StudentRow from './StudentRow';
 import StudentTrainingHistoryDrawer from './StudentTrainingHistoryDrawer';
 import DailyProgressDrawer from './DailyProgressDrawer';
 import WorkgroupsPanel from './WorkgroupsPanel';
+import JetsonSection from './JetsonSection';
 import WorkflowTemplatesPage from '../../pages/teacher/WorkflowTemplatesPage';
 import { Btn, Card } from '../EbUI';
 
@@ -218,6 +219,11 @@ export default function ClassroomDetail({ classroomId, onClassroomsChanged }) {
 
       <div className="flex-1 overflow-y-auto">
         <div className="eb-shell">
+          {/* v2.3.0: classroom Jetson card. Mounted before workgroups
+              and templates because the Jetson is a classroom-wide
+              resource the teacher needs at-a-glance visibility into
+              during a lesson. */}
+          <JetsonSection classroomId={classroomId} />
           {showWorkgroups && (
             <WorkgroupsPanel
               classroomId={classroomId}

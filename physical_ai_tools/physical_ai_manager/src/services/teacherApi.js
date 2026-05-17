@@ -68,3 +68,13 @@ export const patchProgressEntry = (token, entryId, note) =>
 
 export const deleteProgressEntry = (token, entryId) =>
   apiRequest(`/teacher/progress-entries/${entryId}`, 'DELETE', token);
+
+// ---------- Classroom Jetson (v2.3.0) ----------
+// Teacher wrappers for the classroom-Jetson lifecycle. The read endpoint
+// is at /classrooms/{id}/jetson (works for any classroom member; teachers
+// are members of their own classrooms). The write endpoints are at
+// /teacher/classrooms/{id}/jetson/* and require role=teacher + classroom
+// ownership (enforced server-side via _assert_classroom_owned).
+
+export const getClassroomJetson = (token, classroomId) =>
+  apiRequest(`/classrooms/${classroomId}/jetson`, 'GET', token);

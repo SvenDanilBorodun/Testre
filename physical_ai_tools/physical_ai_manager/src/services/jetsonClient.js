@@ -8,9 +8,10 @@
 
 import { CLOUD_API_URL, assertCloudApiConfigured } from './cloudConfig';
 
-// Lightweight wrapper around the /jetson + /classrooms/{id}/jetson
-// endpoints. Mirrors the cloudTrainingApi.js style: bearer-token auth,
-// JSON in/out, error.detail bubbled up as the Error message.
+// Lightweight wrapper around the /jetson + /classrooms/{id}/jetson +
+// /teacher/classrooms/{id}/jetson/* endpoints. Mirrors the
+// cloudTrainingApi.js style: bearer-token auth, JSON in/out,
+// error.detail bubbled up as the Error message.
 
 async function _request(endpoint, method, accessToken, body = null) {
   assertCloudApiConfigured();
@@ -72,36 +73,111 @@ export async function heartbeatJetson(accessToken, jetsonId) {
 }
 
 /**
- * Explicit "Trennen" — idempotent. Also called via navigator.sendBeacon
- * on tab unload (see useJetsonConnection).
+ * Explicit "Trennen" — idempotent. The Bearer-token authenticated path
+ * for normal disconnects.
  */
 export async function releaseJetson(accessToken, jetsonId) {
   return _request(`/jetson/${jetsonId}/release`, 'POST', accessToken);
 }
 
 /**
- * navigator.sendBeacon is more reliable than fetch() during page unload
- * (it's spec'd to deliver even after the document is gone). Browser
- * support: all modern. We don't need a response — fire and forget.
+ * sendBeacon-friendly release. Called from beforeunload to release the
+ * lock when the student closes their tab. v2.3.0 added a dedicated
+ * /jetson/{id}/release-beacon endpoint on the Cloud API that accepts
+ * the JWT in the body (sendBeacon CAN'T set Authorization headers).
+ *
+ * Without this, every tab-close in a 15-student classroom would orphan
+ * the Jetson lock for the full 5-min sweeper window — chronic
+ * mid-lesson lockouts. With it, the lock releases within milliseconds
+ * of the tab closing.
+ *
+ * Fire-and-forget — sendBeacon is spec'd to deliver even after the
+ * document is gone, but doesn't return a response. The Cloud API
+ * revalidates the JWT and returns 200 / 401 / 410; we never see it.
  */
 export function releaseJetsonBeacon(accessToken, jetsonId) {
   if (typeof navigator === 'undefined' || !navigator.sendBeacon) {
     return;
   }
-  // sendBeacon doesn't accept custom headers — we encode the bearer
-  // token as a query parameter ONLY for this fallback path. The Cloud
-  // API's _request layer doesn't read tokens from query params today,
-  // so the beacon path will fail authentication. Acceptable trade: the
-  // 5-min sweeper will reap the lock anyway. Keeping the beacon call
-  // for completeness so future Cloud API auth-via-query support
-  // "just works" without a frontend change.
+  // sendBeacon requires the body to be a Blob/ArrayBuffer/FormData/
+  // URLSearchParams/string. To get Content-Type: application/json on
+  // the server side we wrap the JSON in a Blob with an explicit type.
+  // The Cloud API's release-beacon endpoint reads the access_token
+  // from the JSON body, revalidates it via supabase.auth.get_user,
+  // and then calls release_jetson — same logic as /jetson/{id}/release
+  // but token comes from body instead of header.
   try {
+    const body = new Blob(
+      [JSON.stringify({ access_token: accessToken })],
+      { type: 'application/json' }
+    );
     navigator.sendBeacon(
-      `${CLOUD_API_URL}/jetson/${jetsonId}/release`,
-      JSON.stringify({ access_token: accessToken }),
+      `${CLOUD_API_URL}/jetson/${jetsonId}/release-beacon`,
+      body
     );
   } catch (_err) {
     // sendBeacon throws synchronously only when quota / payload-size
-    // exceeds the browser limit (64 KB). Our payload is tiny; ignore.
+    // exceeds the browser limit (64 KB). Our payload is < 100 bytes;
+    // ignore.
   }
+}
+
+// ---------- Teacher-only endpoints (v2.3.0) ----------
+
+/**
+ * Teacher pairs an unbound Jetson to one of their classrooms via the
+ * 6-digit pairing code from setup.sh stdout. 404 if the code is
+ * invalid or expired; 403 if the classroom doesn't belong to the
+ * caller; 409 if the Jetson is already bound to a classroom.
+ */
+export async function pairJetson(accessToken, classroomId, pairingCode, mdnsName = null) {
+  const body = { pairing_code: pairingCode };
+  if (mdnsName) body.mdns_name = mdnsName;
+  return _request(
+    `/teacher/classrooms/${classroomId}/jetson/pair`,
+    'POST',
+    accessToken,
+    body
+  );
+}
+
+/**
+ * Teacher emergency unlock — releases the current student's lock
+ * without waiting for the 5-min sweeper. Used between consecutive
+ * class periods when a student walked out without clicking Trennen.
+ */
+export async function forceReleaseJetson(accessToken, classroomId) {
+  return _request(
+    `/teacher/classrooms/${classroomId}/jetson/force-release`,
+    'POST',
+    accessToken
+  );
+}
+
+/**
+ * Generate a fresh 6-digit pairing code without SSHing back to the
+ * Jetson. Returns {jetson_id, pairing_code, pairing_code_expires_at}.
+ * The teacher then enters the new code in their other browser tab
+ * (the classroom dashboard) to complete the re-pair.
+ */
+export async function regeneratePairingCode(accessToken, classroomId) {
+  return _request(
+    `/teacher/classrooms/${classroomId}/jetson/regenerate-code`,
+    'POST',
+    accessToken
+  );
+}
+
+/**
+ * Teacher unbinds the Jetson from the classroom. Sets classroom_id
+ * back to NULL and force-releases any active session. The Jetson's
+ * agent_token is preserved so the same physical device can be
+ * re-paired to another classroom without SSH access.
+ */
+export async function unpairJetson(accessToken, classroomId) {
+  return _request(
+    `/teacher/classrooms/${classroomId}/jetson/unpair`,
+    'POST',
+    accessToken
+  );
 }

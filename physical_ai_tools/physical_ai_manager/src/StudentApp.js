@@ -43,6 +43,7 @@ import {
   clearSession,
 } from './features/auth/authSlice';
 import { getMe } from './services/meApi';
+import { resetJetsonOnLogout } from './hooks/useJetsonConnection';
 import { isCloudOnlyMode } from './utils/cloudMode';
 
 function StudentApp() {
@@ -59,6 +60,9 @@ function StudentApp() {
   // those tabs need the LOCAL rosbridge — which the Jetson connection has
   // overridden.
   const jetsonConnected = useSelector((state) => state.jetson.status === 'connected');
+  // v2.3.0: needed so the signOut handlers below can fire a beacon
+  // release with the still-valid JWT before the session goes away.
+  const jetsonId = useSelector((state) => state.jetson.jetsonId);
   const cloudOnly = isCloudOnlyMode();
   const currentRosHost = useSelector((state) => state.ros.rosHost);
 
@@ -134,6 +138,11 @@ function StudentApp() {
             'Dieses Konto ist für die Web-App. Bitte nutze die Lehrer-URL.',
             { duration: 6000 }
           );
+          // v2.3.0: release the Jetson lock BEFORE signOut so the
+          // JWT is still valid for the beacon-style release call.
+          // Without this, the lock leaks for the full 5-min sweeper
+          // window every time a wrong-role account hits the student app.
+          resetJetsonOnLogout(dispatch, session.access_token, jetsonId);
           supabase.auth.signOut();
           dispatch(clearSession());
         }
@@ -148,6 +157,11 @@ function StudentApp() {
         const status = err?.status ?? err?.response?.status;
         if (status === 401 || status === 403) {
           toast.error('Sitzung abgelaufen — bitte erneut anmelden.');
+          // v2.3.0: 401/403 means the JWT is already dead, so the
+          // beacon release will fail server-side anyway. Still clear
+          // local Redux + rosbridge auth so the next session starts
+          // clean. The lock will be reaped by the 5-min sweeper.
+          resetJetsonOnLogout(dispatch);
           supabase.auth.signOut();
           dispatch(clearSession());
         } else {

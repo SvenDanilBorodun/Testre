@@ -33,6 +33,13 @@ const initialState = {
   ownerFullName: null,
   online: false,
   error: null,
+  // v2.3.0: transient heartbeat failure indicator. True after 2
+  // consecutive non-410 heartbeat errors (network blip); the chip
+  // shows "Verbindung wird wiederhergestellt…" so the student knows
+  // the connection is being checked rather than silently dead. Reset
+  // to false on a successful heartbeat. Distinct from `status === 'error'`
+  // which is a terminal state requiring user re-action.
+  heartbeatTransient: false,
 };
 
 const jetsonSlice = createSlice({
@@ -65,6 +72,9 @@ const jetsonSlice = createSlice({
       state.error = action.payload || null;
       state.status = 'error';
     },
+    setHeartbeatTransient: (state, action) => {
+      state.heartbeatTransient = !!action.payload;
+    },
     clearJetson: (state) => {
       Object.assign(state, initialState);
     },
@@ -76,6 +86,7 @@ export const {
   setJetsonInfo,
   setJetsonStatus,
   setJetsonError,
+  setHeartbeatTransient,
   clearJetson,
 } = jetsonSlice.actions;
 

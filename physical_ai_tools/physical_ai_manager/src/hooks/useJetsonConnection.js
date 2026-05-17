@@ -15,6 +15,7 @@ import {
   setJetsonInfo,
   setJetsonStatus,
   setJetsonError,
+  setHeartbeatTransient,
   clearJetson,
 } from '../store/jetsonSlice';
 import { setRosbridgeUrl, setRosHost } from '../features/ros/rosSlice';
@@ -146,18 +147,37 @@ export function useJetsonConnection() {
     if (status !== 'connected' || !accessToken || !jetsonId) {
       return undefined;
     }
+    // Consecutive non-410 failure counter. After 2 failures (60s of
+    // silence assuming 30s interval) we flip the transient flag so the
+    // chip shows "Verbindung wird wiederhergestellt…". On the next
+    // success, the counter resets and the flag clears. 410 is handled
+    // separately as a terminal auto-disconnect.
+    let consecutiveFailures = 0;
     const beat = async () => {
       try {
         await heartbeatJetson(tokenRef.current, jetsonIdRef.current);
+        if (consecutiveFailures > 0) {
+          // Recovered — clear the warning chip variant.
+          consecutiveFailures = 0;
+          dispatch(setHeartbeatTransient(false));
+        }
       } catch (err) {
         if (err.status === 410) {
           // Lock was released server-side (sweeper or teacher force).
           console.warn('Heartbeat 410 — auto-disconnect');
           _swapRosbridgeBackToLocal(localRosHost, dispatch);
           dispatch(setJetsonStatus('available'));
+          dispatch(setHeartbeatTransient(false));
           toast.error('Verbindung zum Jetson verloren — bitte erneut verbinden');
         } else {
-          console.warn('Heartbeat failed (transient):', err);
+          consecutiveFailures += 1;
+          console.warn(
+            `Heartbeat failed (transient ${consecutiveFailures}):`,
+            err
+          );
+          if (consecutiveFailures >= 2) {
+            dispatch(setHeartbeatTransient(true));
+          }
         }
       }
     };
@@ -165,7 +185,13 @@ export function useJetsonConnection() {
     // first probe.
     beat();
     const interval = setInterval(beat, HEARTBEAT_INTERVAL_MS);
-    return () => clearInterval(interval);
+    return () => {
+      clearInterval(interval);
+      // Clear the warning chip when the effect tears down (disconnect /
+      // status change / unmount); avoids the chip staying "wird wieder-
+      // hergestellt…" on the next available-state render.
+      dispatch(setHeartbeatTransient(false));
+    };
   }, [status, accessToken, jetsonId, localRosHost, dispatch]);
 
   // 4. Best-effort release on tab unload.
@@ -214,8 +240,28 @@ function _swapRosbridgeBackToLocal(localRosHost, dispatch) {
   rosConnectionManager.resetReconnectCounter();
 }
 
-// Reset everything on logout — exported for App.js's signOut handler.
-export function resetJetsonOnLogout(dispatch) {
+/**
+ * Reset everything on logout. MUST be called from every signOut path
+ * BEFORE supabase.auth.signOut() invalidates the JWT, otherwise the
+ * release call cannot authenticate and the lock leaks for the full
+ * 5-min sweeper window.
+ *
+ * Optional jetsonId + accessToken let us do a best-effort beacon
+ * release on the way out (matches the tab-close path). Callers that
+ * don't have those handy can omit them — the slice clear still happens.
+ *
+ * Always called from React event handlers, not from the heartbeat
+ * loop, so we can read state lazily via the closure rather than
+ * needing refs.
+ */
+export function resetJetsonOnLogout(dispatch, accessToken = null, jetsonId = null) {
+  // Best-effort beacon release so the lock frees immediately on
+  // explicit logout instead of waiting 5 min for the sweeper. The
+  // beacon path revalidates the JWT server-side, so a slightly-stale
+  // token still works as long as it hasn't expired.
+  if (accessToken && jetsonId) {
+    try { releaseJetsonBeacon(accessToken, jetsonId); } catch (_) { /* swallow */ }
+  }
   rosConnectionManager.setAuthToken(null);
   dispatch(clearJetson());
 }

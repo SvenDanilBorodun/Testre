@@ -23,6 +23,10 @@ function JetsonAvailabilityChip() {
   const ownerFullName = useSelector((s) => s.jetson.ownerFullName);
   const online = useSelector((s) => s.jetson.online);
   const error = useSelector((s) => s.jetson.error);
+  // v2.3.0: when consecutive heartbeats fail (non-410, e.g. transient
+  // network blip), show a "reconnecting" variant while connected so
+  // the student knows the connection isn't silently dead.
+  const heartbeatTransient = useSelector((s) => s.jetson.heartbeatTransient);
   const { connect, disconnect } = useJetsonConnection();
 
   // status-driven rendering. Keep the styling minimal — the consuming
@@ -74,6 +78,24 @@ function JetsonAvailabilityChip() {
       );
 
     case 'connected':
+      if (heartbeatTransient) {
+        // Heartbeat hasn't come back in 60s+ — likely Wi-Fi blip on the
+        // student side. Surface it so they don't try to inference into
+        // a silently-dead pipe.
+        return (
+          <div className="flex items-center gap-3 px-3 py-1.5 rounded-md bg-amber-50 text-amber-800 text-sm">
+            <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
+            <span>Verbindung wird wiederhergestellt…</span>
+            <button
+              type="button"
+              onClick={disconnect}
+              className="ml-2 px-3 py-1 rounded bg-red-600 text-white text-xs hover:bg-red-700"
+            >
+              Trennen
+            </button>
+          </div>
+        );
+      }
       return (
         <div className="flex items-center gap-3 px-3 py-1.5 rounded-md bg-green-100 text-green-800 text-sm">
           <span className="w-2 h-2 rounded-full bg-green-500" />

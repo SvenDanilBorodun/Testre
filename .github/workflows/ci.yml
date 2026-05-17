@@ -166,32 +166,54 @@ jobs:
         # AND that the post-conditions hold. A future upstream rename
         # that slides the regex off the patch target will fail here
         # instead of silently shipping a broken overlay.
+        #
+        # The synthetic input must include the EXACT anchors that
+        # patches/fix_server_inference.py looks for:
+        #   - Fix 1 anchor: '        # Register the ping endpoint by default\n'
+        #     (8-space indent; the patch inserts 'self._endpoints = {}'
+        #     immediately before this comment).
+        #   - Fix 2 anchor: 'self.socket.bind(...)' followed by '\n\n'
+        #     followed by 8-space-indented
+        #     'self.inference_manager = InferenceManager(\n
+        #             policy_type=policy_type,\n
+        #             policy_path=policy_path,\n
+        #             device=device\n
+        #         )\n' (the duplicate that gets removed).
+        # Prior to the v2.3.0 audit fix this test used
+        # 'self.inference = InferenceManager(...)' which the regex
+        # never matched — overlay-guard had been red-shielded for
+        # 10+ commits as a result.
         run: |
           set -e
           mkdir -p /tmp/real
-          # Reconstruct the upstream shape the patch targets: a class
-          # body that assigns self._endpoints elsewhere AND contains a
-          # duplicate InferenceManager construction block. The exact
-          # regex is in patches/fix_server_inference.py.
           cat > /tmp/real/server_inference.py <<'EOF'
-          # Synthetic file shaped like the upstream patch target.
+          import zmq
+
+
+          class InferenceManager:
+              def __init__(self, policy_type, policy_path, device):
+                  pass
+
+
           class ServerInference:
               def __init__(self, policy_type, policy_path, device):
-                  self.policy_type = policy_type
-                  self.policy_path = policy_path
-                  self.device = device
-                  self.inference = InferenceManager(
+                  self.inference_manager = InferenceManager(
                       policy_type=policy_type,
                       policy_path=policy_path,
                       device=device,
                   )
+                  self.context = zmq.Context()
+                  self.socket = self.context.socket(zmq.REP)
+                  self.socket.bind("tcp://*:5555")
 
-              def _setup_endpoints(self):
-                  self.inference = InferenceManager(
-                      policy_type=self.policy_type,
-                      policy_path=self.policy_path,
-                      device=self.device,
+                  self.inference_manager = InferenceManager(
+                      policy_type=policy_type,
+                      policy_path=policy_path,
+                      device=device
                   )
+
+                  # Register the ping endpoint by default
+                  self.register_endpoint("ping", self._ping)
           EOF
           set +e
           python robotis_ai_setup/docker/physical_ai_server/patches/fix_server_inference.py \
@@ -208,11 +230,13 @@ jobs:
           # and the duplicate InferenceManager block should be gone.
           if ! grep -q 'self._endpoints = {}' /tmp/real/server_inference.py; then
               echo "::error::Patch did not initialise self._endpoints."
+              cat /tmp/real/server_inference.py
               exit 1
           fi
-          DUP=$(grep -c 'InferenceManager(' /tmp/real/server_inference.py || true)
+          DUP=$(grep -c 'self\.inference_manager = InferenceManager(' /tmp/real/server_inference.py || true)
           if [ "$DUP" -gt 1 ]; then
               echo "::error::Patch failed to remove duplicate InferenceManager construction (count=$DUP)."
+              cat /tmp/real/server_inference.py
               exit 1
           fi
           echo "Patch script applied correctly to a known-good target."

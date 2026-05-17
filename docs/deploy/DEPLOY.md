@@ -96,6 +96,14 @@ git push
 
 **Never** set `EDUBOTICS_SKIP_SCHEMA_CHECK=1` on Railway.
 
+### Known gotcha — RAILPACK fallback on git push
+
+Railway sometimes ignores the `cloud_training_api/Dockerfile` and falls back to its RAILPACK auto-builder, which fails almost immediately (Cloud API has Python deps + custom port handling that RAILPACK can't infer). Symptoms in the deploy log: `Failed to create code snapshot` or `Using RAILPACK builder`. This has bitten us repeatedly: commits `d3e6e2c`, `51010c7`, `94f1b5d` in the v2.3.0 follow-up were all just "re-trigger Railway deploy" no-op commits to force a fresh snapshot attempt.
+
+**Workaround:** push a trivial edit to anything under `robotis_ai_setup/cloud_training_api/` (e.g., add a blank line to `Dockerfile`) and Railway picks up the DOCKERFILE builder correctly. Watch the deploy log for `Using DOCKERFILE` not `Using RAILPACK`.
+
+**Systemic fix (deferred):** set `rootDirectory: robotis_ai_setup/cloud_training_api` on the Railway service dashboard. This bypasses the snapshot-context bug but needs dashboard access and risks breaking the teacher-web sibling service.
+
 **Teacher-web React build** (separate Railway service):
 ```bash
 cd physical_ai_tools/physical_ai_manager
@@ -257,8 +265,8 @@ Script registers with the Cloud API, prints a 6-digit pairing code. Teacher ente
 ### Required Railway env vars
 
 - `EDUBOTICS_JETSON_HF_TOKEN` — read-only HF token, EduBotics-Solutions/* scope. Returned to agents at `/jetson/register`. Without it, `POST /jetson/register` returns 503 and the setup script aborts.
-- `SUPABASE_JWT_ALGORITHM` — `RS256` (modern, default) or `HS256` (legacy). v2.3.0 the Cloud API forwards this to the agent at register time so the rosbridge proxy picks the right JWT verification path.
-- `SUPABASE_JWT_SECRET` — **required only when `SUPABASE_JWT_ALGORITHM=HS256`**. The symmetric secret from Supabase Dashboard → Settings → API → JWT Secret. Forwarded to the agent at register time and written to `/etc/edubotics/jetson.env` mode 600. Without it, `POST /jetson/register` returns 503.
+- `SUPABASE_JWT_ALGORITHM` — `ES256` (modern Supabase default, JWKS-based EC P-256) / `RS256` (older asymmetric, also JWKS-based) / `HS256` (legacy symmetric, requires `SUPABASE_JWT_SECRET`). Verify your project's signing alg at `https://<project>.supabase.co/auth/v1/.well-known/jwks.json` — look at `keys[0].alg`. Post-2024 Supabase projects publish `ES256`. v2.3.0 the Cloud API forwards this to the agent at register time so the rosbridge proxy picks the right JWT verification path.
+- `SUPABASE_JWT_SECRET` — **required only when `SUPABASE_JWT_ALGORITHM=HS256`**. The symmetric secret from Supabase Dashboard → Settings → API → JWT Secret. Forwarded to the agent at register time and written to `/etc/edubotics/jetson.env` mode 600. Without it, `POST /jetson/register` returns 503. For ES256/RS256 projects, leave unset — verification uses JWKS automatically.
 
 ---
 
@@ -334,3 +342,17 @@ The schema fingerprint prevents Railway booting against a half-rolled-back DB �
 ## The one rule
 
 **Never ship a Cloud API route before its Supabase migration is applied.** The fingerprint will reject the deploy, but sequencing avoids the noisy 2-minute fail loop.
+
+---
+
+## Final pre-ship checklist (run through these before declaring done)
+
+- [ ] **Migrations** applied to live Supabase? (`mcp__claude_ai_Supabase__list_migrations` shows the new file; or Supabase Studio → Database → Migrations)
+- [ ] **Modal** functions redeployed if any `modal_training/*.py` changed? (`modal deploy modal_training/<app>.py` returned a fresh URL)
+- [ ] **Railway Cloud API** deploy status SUCCESS on the commit you just pushed? (`mcp__railway__list-deployments` or dashboard)
+- [ ] **Railway env vars** matched against the new code paths? (every new env var the route reads is set; no required env left at default)
+- [ ] **Docker Hub** images pushed with the new content? (latest manifest digest matches the build you just ran; verify with `docker buildx imagetools inspect`)
+- [ ] **GitHub release** matches `VERSION` file? (if VERSION was bumped this PR, `gh release create v<version> --title "..." ./installer/output/EduBotics_Setup.exe` was run AND Railway `GUI_VERSION` + `GUI_DOWNLOAD_URL` were bumped — without these the auto-update gate is invisible to existing student installs)
+- [ ] **Smoke test** golden path: a real student logs in via the v<version>.exe → connects to a Jetson if paired → records or runs inference → no console errors. The image-build CI's `manager-build-validate` smoke is necessary but not sufficient.
+- [ ] **Teacher smoke**: a real teacher logs in via Railway teacher-web → opens a classroom → pairs a Jetson via the new modal → forces release → unpairs → no console errors.
+- [ ] **CLAUDE.md** §0 last-verified line bumped + the load-bearing section that changed has a fresh entry (§3 if architecture, §7 if Cloud API endpoint, §9 if migration, §11 if GUI, §12 if React, §13 if workflow, §16 if glossary).

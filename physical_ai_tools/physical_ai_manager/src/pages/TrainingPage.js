@@ -78,6 +78,7 @@ export default function TrainingPage() {
   const trainingCredits = useSelector((state) => state.auth.trainingCredits);
   const trainingsUsed = useSelector((state) => state.auth.trainingsUsed);
   const selectedTrainingId = useSelector((state) => state.training.selectedTrainingId);
+  const jetsonId = useSelector((state) => state.jetson.jetsonId);
 
   const { jobs, loading, refetch, isRealtime } = useSupabaseTrainings();
 
@@ -109,7 +110,6 @@ export default function TrainingPage() {
     // beacon path still authenticates. Without this, logging out from the
     // Training tab while connected leaks the lock for the full 5-min
     // sweeper window. Mirrors the wiring in StudentApp + WebApp.
-    const jetsonId = window.__edubotics_jetson_id__ || null;
     resetJetsonOnLogout(dispatch, session?.access_token, jetsonId);
     await supabase.auth.signOut();
     dispatch(clearSession());

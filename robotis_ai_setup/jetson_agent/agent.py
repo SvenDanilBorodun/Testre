@@ -512,7 +512,19 @@ def _bring_down_stack() -> None:
 
 def _wipe_session_volumes() -> None:
     """Remove the per-session Docker volumes so the next student starts
-    pristine. The compose file recreates them empty on next `up`."""
+    pristine. The compose file recreates them empty on next `up`.
+
+    Prune dangling stopped containers first — `compose down` removes the
+    services it manages but a stale healthcheck-flapping container can
+    sometimes survive with the volume still attached, which makes the
+    subsequent `volume rm -f` fail with "volume in use" no matter how
+    long we wait. Pruning evicts those orphans so the next student
+    really does get pristine state.
+    """
+    subprocess.run(
+        ["docker", "container", "prune", "-f"],
+        capture_output=True, text=True, timeout=30, check=False,
+    )
     for vol in SESSION_VOLUMES:
         for attempt in range(3):
             result = subprocess.run(

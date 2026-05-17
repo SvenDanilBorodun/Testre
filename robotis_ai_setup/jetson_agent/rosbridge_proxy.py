@@ -98,7 +98,9 @@ def _fetch_jwks() -> dict:
         return _jwks_cache
     if not SUPABASE_URL:
         return {}
-    url = SUPABASE_URL.rstrip("/") + "/auth/v1/keys"
+    # Supabase publishes JWKS at the standard well-known path.
+    # The legacy /auth/v1/keys path returns 401 on modern projects.
+    url = SUPABASE_URL.rstrip("/") + "/auth/v1/.well-known/jwks.json"
     try:
         with urllib.request.urlopen(url, timeout=10) as resp:
             _jwks_cache = json.loads(resp.read().decode("utf-8"))
@@ -189,6 +191,10 @@ def _verify_jwt(token: str) -> Optional[dict]:
         # the older asymmetric option. python-jose handles both via the
         # same _find_jwks_key lookup; the algorithm parameter passed to
         # construct + decode enforces alg-pinning.
+        # Pin issuer to this Supabase project so a token leaked from a
+        # different Supabase project (sharing a JWKS kid by chance) can't
+        # authenticate against this agent.
+        expected_iss = SUPABASE_URL.rstrip("/") + "/auth/v1" if SUPABASE_URL else None
         if alg.startswith("RS") or alg.startswith("ES"):
             key_dict = _find_jwks_key(header.get("kid", ""))
             if not key_dict:
@@ -196,7 +202,11 @@ def _verify_jwt(token: str) -> Optional[dict]:
                 return None
             key = jose_jwk.construct(key_dict, alg)
             claims = jose_jwt.decode(
-                token, key, algorithms=[alg], audience="authenticated"
+                token,
+                key,
+                algorithms=[alg],
+                audience="authenticated",
+                issuer=expected_iss,
             )
         elif alg.startswith("HS"):
             if not SUPABASE_JWT_SECRET:
@@ -211,6 +221,7 @@ def _verify_jwt(token: str) -> Optional[dict]:
                 SUPABASE_JWT_SECRET,
                 algorithms=[alg],
                 audience="authenticated",
+                issuer=expected_iss,
             )
         else:
             logger.info("unsupported JWT algorithm in config: %s", alg)

@@ -44,6 +44,26 @@ sudo systemctl status docker | head -3
 If any of these fail, fix the JetPack install first — the agent setup
 script will refuse to continue otherwise.
 
+### Cloud API prerequisites (operator-side, once per project)
+
+Before any Jetson can complete `setup.sh`, the operator must have set
+these Railway env vars on the `scintillating-empathy` Cloud API service
+(see [`docs/deploy/DEPLOY.md` §4b](deploy/DEPLOY.md)):
+
+- `EDUBOTICS_JETSON_HF_TOKEN` — read-only HF token, `EduBotics-Solutions/*`
+  scope. The Cloud API returns this to the agent at `/jetson/register`
+  so it can pull policies from HF. **Without this, `setup.sh` aborts on
+  the first registration call with HTTP 503.**
+- `SUPABASE_JWT_ALGORITHM` — `ES256` for post-2024 Supabase projects
+  (modern default), `RS256` for older asymmetric setups, `HS256` for
+  legacy symmetric setups.
+- `SUPABASE_JWT_SECRET` — **only required when alg=HS256**. Symmetric
+  secret from Supabase Dashboard → Settings → API → JWT Secret. If
+  alg=HS256 and the secret is missing, `/jetson/register` returns 503
+  and `setup.sh` aborts with a German error pointing back at this env
+  var. For ES256/RS256 projects, leave unset — the proxy fetches
+  JWKS automatically.
+
 ## One-time arm64 image build (maintainer only — students don't do this)
 
 Before any teacher can pair their Jetson, the maintainer must push the

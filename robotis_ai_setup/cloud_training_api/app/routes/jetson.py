@@ -384,20 +384,21 @@ async def jetson_register(req: JetsonRegisterRequest):
         logger.error("jetson_register: insert returned no row")
         raise HTTPException(status_code=500, detail="Registrierung fehlgeschlagen")
     row = result.data[0]
-    # Default RS256 — Supabase's modern auth path. If the project is on
-    # legacy HS256, the operator can set SUPABASE_JWT_ALGORITHM=HS256
-    # on Railway. The agent reads this value at first boot to pick the
-    # right JWT verification path.
-    algorithm = os.environ.get("SUPABASE_JWT_ALGORITHM", "RS256")
+    # JWT verification algorithm for the agent's rosbridge proxy.
+    # Three supported options:
+    #   - ES256: modern Supabase default (asymmetric, public key via JWKS)
+    #   - RS256: older asymmetric option (also JWKS-based)
+    #   - HS256: legacy symmetric (requires SUPABASE_JWT_SECRET to be set)
+    # The proxy uses the same JWKS code path for ES256 and RS256;
+    # only HS256 needs the shared-secret plumbing below.
+    algorithm = os.environ.get("SUPABASE_JWT_ALGORITHM", "ES256")
     # HS256 path only: forward the symmetric secret so the agent's
-    # rosbridge proxy can verify student JWTs. For RS256 projects the
+    # rosbridge proxy can verify student JWTs. For ES256/RS256 the
     # proxy fetches a JWKS from SUPABASE_URL and this field stays empty.
     # If HS256 is configured but the secret env var is missing, refuse
-    # the registration upfront — without the secret the agent will
-    # accept the registration but every student WS connection will close
-    # 4401 with no clear signal to the operator. Better to fail loudly
-    # at register time. _warn_optional_secrets() in main.py also logs
-    # this at boot, so the operator sees it twice.
+    # the registration upfront — without the secret the agent would
+    # accept the registration but every student WS connection would close
+    # 4401 with no clear signal to the operator.
     jwt_secret: str | None = None
     if algorithm == "HS256":
         jwt_secret = os.environ.get("SUPABASE_JWT_SECRET", "") or None

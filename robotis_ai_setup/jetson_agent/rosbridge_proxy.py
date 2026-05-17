@@ -147,12 +147,17 @@ def _verify_jwt(token: str) -> Optional[dict]:
     why connections are being refused).
 
     SECURITY: the verification algorithm is locked to the operator-
-    configured ``SUPABASE_JWT_ALGORITHM`` (RS256 or HS256). We do NOT
-    let the JWT header pick the algorithm — that's the textbook
+    configured ``SUPABASE_JWT_ALGORITHM`` (RS256, ES256, or HS256). We
+    do NOT let the JWT header pick the algorithm — that's the textbook
     "alg confusion" attack (CVE-2016-10555, CVE-2018-1000531). An
-    attacker who knows the project's RSA public key would otherwise
-    send `alg: HS256` with the public key used as the HMAC secret and
+    attacker who knows the project's public key would otherwise send
+    `alg: HS256` with the public key used as the HMAC secret and
     bypass verification entirely.
+
+    Modern Supabase projects (post-2024) default to ES256 with the
+    public key exposed via JWKS at /auth/v1/.well-known/jwks.json.
+    Legacy projects use HS256 with a shared symmetric secret. Both
+    use the same _find_jwks_key path for asymmetric algs (ES* / RS*).
     """
     # Strip 'Bearer ' if the client sent it.
     if token.lower().startswith("bearer "):
@@ -171,7 +176,13 @@ def _verify_jwt(token: str) -> Optional[dict]:
         return None
 
     try:
-        if alg.startswith("RS"):
+        # Both RS* and ES* are asymmetric — public key from JWKS, same
+        # construct + decode path. ES256 is what modern Supabase projects
+        # default to since the 2024 asymmetric-keys migration; RS256 is
+        # the older asymmetric option. python-jose handles both via the
+        # same _find_jwks_key lookup; the algorithm parameter passed to
+        # construct + decode enforces alg-pinning.
+        if alg.startswith("RS") or alg.startswith("ES"):
             key_dict = _find_jwks_key(header.get("kid", ""))
             if not key_dict:
                 logger.info("no JWKS key for kid=%s", header.get("kid"))

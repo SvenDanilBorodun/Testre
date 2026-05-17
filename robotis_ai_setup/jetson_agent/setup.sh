@@ -145,13 +145,14 @@ AGENT_TOKEN=$(echo "$REGISTER_RESP" | jq -r '.agent_token')
 PAIRING_CODE=$(echo "$REGISTER_RESP" | jq -r '.pairing_code')
 HF_TOKEN=$(echo "$REGISTER_RESP" | jq -r '.hf_token')
 SUPABASE_URL=$(echo "$REGISTER_RESP" | jq -r '.supabase_url // empty')
-JWT_ALG=$(echo "$REGISTER_RESP" | jq -r '.supabase_jwt_algorithm // "RS256"')
+JWT_ALG=$(echo "$REGISTER_RESP" | jq -r '.supabase_jwt_algorithm // "ES256"')
 # v2.3.0: HS256 path — Cloud API forwards the symmetric JWT secret so
 # the agent's rosbridge_proxy can verify student JWTs locally without
-# needing a JWKS endpoint. RS256 projects leave this empty (proxy
-# uses JWKS). The Cloud API hard-fails /jetson/register with 503 if
-# HS256 is configured on Railway but the secret env var is missing,
-# so reaching this line guarantees the secret is present when needed.
+# needing a JWKS endpoint. ES256/RS256 projects leave this empty
+# (proxy uses JWKS at SUPABASE_URL/auth/v1/.well-known/jwks.json).
+# The Cloud API hard-fails /jetson/register with 503 if HS256 is
+# configured on Railway but the secret env var is missing, so reaching
+# this line guarantees the secret is present when needed.
 JWT_SECRET=$(echo "$REGISTER_RESP" | jq -r '.supabase_jwt_secret // empty')
 
 [ "$JETSON_ID" != "null" ] || die "Cloud API gab keine jetson_id zurück."

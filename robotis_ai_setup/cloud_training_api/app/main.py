@@ -92,13 +92,13 @@ def _warn_optional_secrets() -> None:
             logger.warning("env var %s not set — %s", key, msg)
 
     # Conditional: when SUPABASE_JWT_ALGORITHM=HS256 (legacy Supabase
-    # auth), the Jetson rosbridge proxy needs the shared HMAC secret to
-    # verify student JWTs. Without it, every WebSocket connection
-    # closes 4401 and no inference works — but the agent + Cloud API
-    # still appear healthy. v2.3.0 adds /jetson/register hard-fail when
-    # this combo is wrong, but the warn here also surfaces the issue at
-    # boot so the operator sees it in the very first Railway log line
-    # rather than only when a teacher tries to register a Jetson.
+    # auth, pre-2024), the Jetson rosbridge proxy needs the shared HMAC
+    # secret to verify student JWTs. Without it, every WebSocket
+    # connection closes 4401 and no inference works.
+    # Modern Supabase projects (post-2024) default to ES256 with a
+    # JWKS endpoint, which needs NO shared secret — only SUPABASE_URL
+    # for the JWKS lookup. Default left as ES256 to match Supabase's
+    # current default; legacy projects need to set the env var.
     if os.environ.get("SUPABASE_JWT_ALGORITHM") == "HS256" and not os.environ.get(
         "SUPABASE_JWT_SECRET"
     ):
@@ -106,7 +106,8 @@ def _warn_optional_secrets() -> None:
             "env var SUPABASE_JWT_SECRET not set but SUPABASE_JWT_ALGORITHM=HS256 — "
             "/jetson/register will return 503 because Jetson agents cannot verify "
             "student JWTs without the shared HMAC secret. "
-            "Set SUPABASE_JWT_SECRET on Railway (Supabase Dashboard → Settings → API → JWT Secret)."
+            "Set SUPABASE_JWT_SECRET on Railway (Supabase Dashboard → Settings → API → JWT Secret) "
+            "OR switch to ES256/RS256 (the default for modern Supabase projects)."
         )
 
 

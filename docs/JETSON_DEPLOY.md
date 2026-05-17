@@ -104,14 +104,36 @@ The script will:
 
 ## Teacher walkthrough — pair to a classroom
 
-1. Log in to the EduBotics admin web app (Railway URL) as a **teacher**.
+1. Log in to the EduBotics teacher web app at
+   `https://teacher-web-production.up.railway.app` as a **teacher**.
 2. Open the classroom you want to bind this Jetson to.
-3. Click **Jetson hinzufügen** → enter the 6-digit code.
-4. The dashboard confirms the pair + displays the Jetson's last-seen
-   timestamp + LAN IP.
+3. The new **Klassen-Jetson** card at the top of the classroom detail
+   shows "Kein Jetson gepaart" plus a **Jetson hinzufügen** button.
+4. Click **Jetson hinzufügen** → enter the 6-digit code from the
+   Jetson's setup.sh stdout → submit.
+5. The card now shows the Jetson's `mdns_name`, `lan_ip`,
+   `agent_version`, last heartbeat age, and a green **Bereit** pill.
+   When a student claims it, the pill turns blue with **Belegt von:
+   {ihrer Name} · seit X min**, and a **Lock freigeben** button
+   appears for emergency unlock.
 
 Once paired, the **Verbinde mit Klassen-Jetson** button appears on
 every classroom student's **Inferenz** tab.
+
+### Other teacher actions on the card
+
+- **Pairing-Code erneuern** — generate a fresh 6-digit code without
+  SSHing back to the Jetson. Useful when the prior code expired (30-min
+  lifetime) or you want to re-pair the device to a different classroom.
+- **Lock freigeben** (only visible when the Jetson is busy) — emergency
+  force-release of the current student's session. Used between
+  consecutive class periods when 5 minutes (the sweeper window) is too
+  long to wait. The student's browser receives the auto-disconnect
+  toast within 30 s of the next heartbeat.
+- **Vom Klassenzimmer trennen** — unbind the Jetson from this
+  classroom. Also force-releases any active owner. The `agent_token`
+  on the Jetson is preserved so the same physical device can be
+  paired to another classroom without re-running setup.sh.
 
 ## Daily classroom flow
 
@@ -146,12 +168,13 @@ every classroom student's **Inferenz** tab.
 
 | Symptom | Where to look |
 |---|---|
-| `Pairing-Code ungültig oder abgelaufen` | Codes expire after 30 min. Re-run `sudo bash setup.sh` to generate a fresh one. |
+| `Pairing-Code ungültig oder abgelaufen` | Codes expire after 30 min. Either re-run `sudo bash setup.sh` on the Jetson, or (for an already-paired device) click **Pairing-Code erneuern** in the teacher dashboard. |
 | Chip stuck on `Jetson offline` | `systemctl status edubotics-jetson` on the Jetson. Check `journalctl -u edubotics-jetson -f` for heartbeat errors. Network down? Cloud API reachable? |
 | Chip stuck on `Jetson belegt von …` and the named user left the room | 5-min sweeper will free it. Teacher can force-release immediately via admin UI. |
 | `Verbindung fehlgeschlagen: Lock verloren` mid-inference | The lock changed hands server-side (sweep or teacher force). Click **Verbinde** again. |
 | Pull error in agent log | `EDUBOTICS_SKIP_AUTO_PULL=1 systemctl restart edubotics-jetson` falls back to whatever images are cached locally. |
-| arm64 base image not found | The maintainer hasn't pushed yet — see [docs/arm64_base/README.md](arm64_base/README.md). |
+| arm64 base image not found | The maintainer hasn't pushed yet — see [docs/arm64_base/README.md](arm64_base/README.md). Images are at `nettername/{open-manipulator,physical-ai-server}-jetson{,-base}` (v2.3.0 renamed off the `arm64-*` tag suffix). |
+| Setup aborts with "Cloud API meldet HS256, hat aber kein supabase_jwt_secret" | The Cloud API on Railway is configured for HS256 auth but `SUPABASE_JWT_SECRET` isn't set on Railway. Operator must add it (Supabase Dashboard → Settings → API → JWT Secret) and restart the Cloud API. Without it the rosbridge proxy cannot verify student JWTs and every WS connection would close with code 4401. |
 
 ## Logs + status
 

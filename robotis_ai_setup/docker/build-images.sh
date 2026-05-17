@@ -190,7 +190,7 @@ COCO_SNAPSHOT="${PHYSICAL_AI_TOOLS_DIR}/physical_ai_manager/_coco_classes.py"
 cp "${PHYSICAL_AI_TOOLS_DIR}/physical_ai_server/physical_ai_server/workflow/coco_classes.py" \
    "${COCO_SNAPSHOT}"
 
-docker build \
+docker build --platform linux/amd64 \
     $BUILD_ARGS \
     -t "${REGISTRY}/physical-ai-manager:latest" \
     -f "${PHYSICAL_AI_TOOLS_DIR}/physical_ai_manager/Dockerfile" \
@@ -210,7 +210,7 @@ docker build \
 # the broken images showed.
 echo "   Verifying secrets reached the bundle..."
 _smoke_image="${REGISTRY}/physical-ai-manager:latest"
-if ! docker run --rm --entrypoint sh "$_smoke_image" -c \
+if ! docker run --rm --platform linux/amd64 --entrypoint sh "$_smoke_image" -c \
         "grep -q -F '${SUPABASE_URL}' /usr/share/nginx/html/static/js/main.*.js"; then
     echo ""
     echo "ERROR: SUPABASE_URL not found in the built bundle."
@@ -219,7 +219,7 @@ if ! docker run --rm --entrypoint sh "$_smoke_image" -c \
     echo "       Aborting before docker push."
     exit 1
 fi
-if ! docker run --rm --entrypoint sh "$_smoke_image" -c \
+if ! docker run --rm --platform linux/amd64 --entrypoint sh "$_smoke_image" -c \
         "grep -q -F '${CLOUD_API_URL}' /usr/share/nginx/html/static/js/main.*.js"; then
     echo ""
     echo "ERROR: CLOUD_API_URL not found in the built bundle. Aborting."
@@ -299,7 +299,11 @@ if [ "$PLATFORM" = "arm64" ]; then
         -f "${SCRIPT_DIR}/physical_ai_server/Dockerfile" \
         "${SCRIPT_DIR}/physical_ai_server/"
 else
-    docker build \
+    # --platform linux/amd64 is needed on Apple Silicon Macs where
+    # `docker build` defaults to the host's linux/arm64 — the ROBOTIS
+    # base is amd64-only and Docker won't auto-fall-back. Harmless on
+    # actual Linux/amd64 hosts (no-op).
+    docker build --platform linux/amd64 \
         --build-arg BASE_IMAGE="${PAS_BASE_IMAGE}" \
         -t "${PAS_OUT_REPO}:${IMAGE_TAG_SUFFIX}" \
         -f "${SCRIPT_DIR}/physical_ai_server/Dockerfile" \
@@ -324,7 +328,7 @@ if [ "$PLATFORM" = "arm64" ] && [ "$BUILD_BASE_ARM64" = "1" ]; then
 elif [ "$PLATFORM" = "amd64" ] && [ "$BUILD_BASE" = "1" ]; then
     echo ""
     echo ">> Building open_manipulator amd64 base from source (this takes ~40 min)..."
-    docker build \
+    docker build --platform linux/amd64 \
         -t "${OMX_BASE_IMAGE}" \
         -f "${OPEN_MANIPULATOR_DIR}/docker/Dockerfile" \
         "${OPEN_MANIPULATOR_DIR}/docker/"
@@ -353,7 +357,8 @@ if [ "$PLATFORM" = "arm64" ]; then
         -f "${SCRIPT_DIR}/open_manipulator/Dockerfile" \
         "${SCRIPT_DIR}/open_manipulator/"
 else
-    docker build \
+    # See note above re: --platform linux/amd64 on Apple Silicon hosts.
+    docker build --platform linux/amd64 \
         --build-arg BASE_IMAGE="${OMX_BASE_IMAGE}" \
         -t "${OMX_OUT_REPO}:${IMAGE_TAG_SUFFIX}" \
         -f "${SCRIPT_DIR}/open_manipulator/Dockerfile" \

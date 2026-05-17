@@ -237,12 +237,67 @@ def _images_from_compose() -> list[str]:
     return images
 
 
+_PULL_ATTEMPT_TIMEOUT_S = 180  # per-attempt; was a monolithic 600 in v2.3.0
+_PULL_MAX_ATTEMPTS = 3
+
+
+def _pull_one_image_with_retries(image: str) -> Optional[str]:
+    """Pull a single image with exponential backoff. Returns the new
+    local RepoDigest on success, None on persistent failure.
+
+    Per-attempt timeout is ``_PULL_ATTEMPT_TIMEOUT_S`` (180 s by default,
+    overridable via EDUBOTICS_PULL_ATTEMPT_TIMEOUT_S). Three attempts
+    with 5 / 15 / 45 second sleeps in between. Total worst case ~10 min
+    of wall time, but progress is logged between attempts so a slow
+    classroom Wi-Fi pull is visible in journalctl instead of looking
+    like the agent hung.
+    """
+    timeout_s = int(os.environ.get("EDUBOTICS_PULL_ATTEMPT_TIMEOUT_S", _PULL_ATTEMPT_TIMEOUT_S))
+    backoff = [0, 5, 15]  # before attempt 1, before retry 1, before retry 2
+    last_local: Optional[str] = _get_local_repo_digest(image)
+    for attempt in range(_PULL_MAX_ATTEMPTS):
+        if backoff[attempt] > 0:
+            logger.info(
+                "  retry %d/%d for %s after %d s",
+                attempt, _PULL_MAX_ATTEMPTS - 1, image, backoff[attempt],
+            )
+            time.sleep(backoff[attempt])
+        try:
+            logger.info(
+                "  attempt %d/%d: docker pull %s (timeout %d s)",
+                attempt + 1, _PULL_MAX_ATTEMPTS, image, timeout_s,
+            )
+            result = subprocess.run(
+                ["docker", "pull", image],
+                capture_output=True, text=True, timeout=timeout_s,
+            )
+            if result.returncode == 0:
+                new_local = _get_local_repo_digest(image)
+                logger.info("  pulled (%s)", (new_local or "no-digest")[:19])
+                return new_local
+            logger.warning("  attempt %d failed: %s", attempt + 1, result.stderr.strip())
+        except subprocess.TimeoutExpired:
+            logger.warning("  attempt %d timed out after %d s", attempt + 1, timeout_s)
+        except Exception as exc:  # noqa: BLE001 — defensive sweep
+            logger.warning("  attempt %d raised: %s", attempt + 1, exc)
+    logger.warning(
+        "  giving up on %s after %d attempts — keeping cached digest %s",
+        image, _PULL_MAX_ATTEMPTS, (last_local or "none")[:19],
+    )
+    return last_local
+
+
 def _auto_pull_images() -> None:
     """Pull arm64 images on agent start. Mirrors F67/F68/F69 from the GUI:
     offline short-circuit, manifest-digest pre-check, last-pull persistence.
 
-    Set EDUBOTICS_SKIP_AUTO_PULL=1 to disable (offline classrooms managing
-    their own image cadence).
+    v2.3.0 follow-up: replaced the monolithic 600 s timeout with per-attempt
+    retries (see ``_pull_one_image_with_retries``) so slow classroom
+    Wi-Fi shows progress between attempts in journalctl, and so a single
+    transient failure doesn't burn the whole 10-minute budget.
+
+    Set EDUBOTICS_SKIP_AUTO_PULL=1 to disable entirely (offline classrooms
+    managing their own image cadence).
     """
     if os.environ.get("EDUBOTICS_SKIP_AUTO_PULL") == "1":
         logger.info("EDUBOTICS_SKIP_AUTO_PULL=1, skipping auto-pull")
@@ -267,22 +322,7 @@ def _auto_pull_images() -> None:
             logger.info("  already up to date (%s)", remote[:19])
             per_image_digests[image] = local
             continue
-        try:
-            logger.info("  pulling latest manifest...")
-            result = subprocess.run(
-                ["docker", "pull", image],
-                capture_output=True, text=True, timeout=600,
-            )
-            if result.returncode != 0:
-                logger.warning("  pull failed: %s", result.stderr.strip())
-                per_image_digests[image] = local  # keep whatever we have
-                continue
-            new_local = _get_local_repo_digest(image)
-            per_image_digests[image] = new_local
-            logger.info("  pulled (%s)", (new_local or "no-digest")[:19])
-        except subprocess.TimeoutExpired:
-            logger.warning("  pull timed out after 10 min")
-            per_image_digests[image] = local
+        per_image_digests[image] = _pull_one_image_with_retries(image)
 
     _save_last_pull_info(per_image_digests)
 

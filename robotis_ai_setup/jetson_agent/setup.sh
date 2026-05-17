@@ -146,9 +146,23 @@ PAIRING_CODE=$(echo "$REGISTER_RESP" | jq -r '.pairing_code')
 HF_TOKEN=$(echo "$REGISTER_RESP" | jq -r '.hf_token')
 SUPABASE_URL=$(echo "$REGISTER_RESP" | jq -r '.supabase_url // empty')
 JWT_ALG=$(echo "$REGISTER_RESP" | jq -r '.supabase_jwt_algorithm // "RS256"')
+# v2.3.0: HS256 path — Cloud API forwards the symmetric JWT secret so
+# the agent's rosbridge_proxy can verify student JWTs locally without
+# needing a JWKS endpoint. RS256 projects leave this empty (proxy
+# uses JWKS). The Cloud API hard-fails /jetson/register with 503 if
+# HS256 is configured on Railway but the secret env var is missing,
+# so reaching this line guarantees the secret is present when needed.
+JWT_SECRET=$(echo "$REGISTER_RESP" | jq -r '.supabase_jwt_secret // empty')
 
 [ "$JETSON_ID" != "null" ] || die "Cloud API gab keine jetson_id zurück."
 [ "$AGENT_TOKEN" != "null" ] || die "Cloud API gab kein agent_token zurück."
+# Defensive: refuse to write the env file if the algorithm advertised
+# is HS256 but the secret is empty. This shouldn't happen (Cloud API
+# refuses to register in that case) but a future Cloud API regression
+# would silently produce broken Jetsons; better to fail loudly here.
+if [ "$JWT_ALG" = "HS256" ] && [ -z "$JWT_SECRET" ]; then
+    die "Cloud API meldet HS256, hat aber kein supabase_jwt_secret gesendet. Bitte SUPABASE_JWT_SECRET auf Railway setzen und Setup wiederholen."
+fi
 
 # ─── Step 5: Write /etc/edubotics/jetson.env ──────────────────────────────
 log "Schreibe Konfiguration nach ${ENV_DIR}/jetson.env ..."
@@ -170,6 +184,7 @@ EDUBOTICS_CLOUD_API_URL="$EDUBOTICS_CLOUD_API_URL"
 EDUBOTICS_HF_TOKEN="$HF_TOKEN"
 EDUBOTICS_SUPABASE_URL="$SUPABASE_URL"
 EDUBOTICS_SUPABASE_JWT_ALGORITHM="$JWT_ALG"
+EDUBOTICS_SUPABASE_JWT_SECRET="$JWT_SECRET"
 EDUBOTICS_AGENT_VERSION="v1.0.0"
 ROS_DOMAIN_ID="$ROS_DOMAIN_ID"
 REGISTRY="${REGISTRY:-nettername}"

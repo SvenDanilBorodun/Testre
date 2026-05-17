@@ -1,0 +1,144 @@
+name: release-installer
+
+# Builds EduBotics_Setup.exe and publishes it as a GitHub Release asset.
+# Triggered when a maintainer pushes a tag matching v*.*.* (e.g., v2.3.0).
+#
+# Two-job flow:
+#   1. build-rootfs (ubuntu-latest)   — runs wsl_rootfs/build_rootfs.sh,
+#      which uses Docker to produce installer/assets/edubotics-rootfs.tar.gz
+#      + .sha256 sidecar (~192 MB). Artifact uploaded to next job.
+#   2. build-installer (windows-latest) — pulls Python deps, runs
+#      PyInstaller against gui/build.spec, installs Inno Setup via Chocolatey,
+#      runs iscc against installer/robotis_ai_setup.iss, uploads the resulting
+#      installer/output/EduBotics_Setup.exe to the tagged GitHub Release.
+#
+# After the workflow finishes, the release page will have the .exe
+# attached. Operator then bumps Railway env vars GUI_VERSION + GUI_DOWNLOAD_URL
+# to arm the auto-update gate for existing student installs.
+#
+# Manual trigger via workflow_dispatch is supported for testing without
+# tagging (artifact is uploaded as a CI artifact, not as a Release asset).
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      version_tag:
+        description: "Tag-style version (e.g., v2.3.0) for the test build"
+        required: true
+        default: "v0.0.0-test"
+
+permissions:
+  contents: write  # required to upload assets to the Release
+
+jobs:
+  build-rootfs:
+    name: Build WSL2 rootfs (Ubuntu host)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build rootfs tarball via Docker
+        run: |
+          cd robotis_ai_setup/wsl_rootfs
+          bash build_rootfs.sh
+          ls -la ../../robotis_ai_setup/installer/assets/edubotics-rootfs.tar.gz*
+
+      - name: Upload rootfs artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: edubotics-rootfs
+          path: |
+            robotis_ai_setup/installer/assets/edubotics-rootfs.tar.gz
+            robotis_ai_setup/installer/assets/edubotics-rootfs.tar.gz.sha256
+          retention-days: 1
+          if-no-files-found: error
+
+  build-installer:
+    name: Build EduBotics_Setup.exe (Windows host)
+    needs: build-rootfs
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Download rootfs artifact from previous job
+        uses: actions/download-artifact@v4
+        with:
+          name: edubotics-rootfs
+          path: robotis_ai_setup/installer/assets/
+
+      - name: Verify rootfs artifact
+        shell: pwsh
+        run: |
+          $tgz = "robotis_ai_setup/installer/assets/edubotics-rootfs.tar.gz"
+          $sha = "robotis_ai_setup/installer/assets/edubotics-rootfs.tar.gz.sha256"
+          if (-not (Test-Path $tgz)) { throw "rootfs missing: $tgz" }
+          if (-not (Test-Path $sha)) { throw "sha sidecar missing: $sha" }
+          $size = (Get-Item $tgz).Length
+          Write-Host "rootfs: $size bytes"
+          if ($size -lt 100000000) { throw "rootfs too small ($size bytes) — build_rootfs.sh probably failed" }
+
+      - name: Install GUI build deps
+        shell: pwsh
+        run: |
+          cd robotis_ai_setup/gui
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install pyinstaller
+
+      - name: Build GUI with PyInstaller
+        shell: pwsh
+        run: |
+          cd robotis_ai_setup/gui
+          pyinstaller build.spec --clean --noconfirm
+          if (-not (Test-Path "dist/EduBotics/EduBotics.exe")) {
+            throw "PyInstaller did not produce dist/EduBotics/EduBotics.exe"
+          }
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          choco install innosetup -y --no-progress
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { throw "Inno Setup ISCC.exe not at expected path" }
+          echo "ISCC=$iscc" >> $env:GITHUB_ENV
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          cd robotis_ai_setup/installer
+          & $env:ISCC robotis_ai_setup.iss
+          if (-not (Test-Path "output/EduBotics_Setup.exe")) {
+            throw "Inno Setup did not produce output/EduBotics_Setup.exe"
+          }
+          $size = (Get-Item "output/EduBotics_Setup.exe").Length
+          Write-Host "installer: $size bytes"
+          if ($size -lt 100000000) { throw "installer suspiciously small ($size bytes)" }
+
+      - name: Upload installer as CI artifact (always)
+        uses: actions/upload-artifact@v4
+        with:
+          name: EduBotics_Setup
+          path: robotis_ai_setup/installer/output/EduBotics_Setup.exe
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: Attach installer to GitHub Release (tag pushes only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: robotis_ai_setup/installer/output/EduBotics_Setup.exe
+          fail_on_unmatched_files: true
+          # Don't auto-generate notes — operator writes them in the dashboard.
+          # Don't mark as latest until the operator has bumped Railway env vars
+          # (see CLAUDE.md §14): bumping GUI_VERSION before this release is
+          # marked latest would push students to a 404 if the upload races.
+          draft: false
+          prerelease: false

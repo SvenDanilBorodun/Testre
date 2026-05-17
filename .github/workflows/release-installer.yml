@@ -90,7 +90,12 @@ jobs:
         run: |
           cd robotis_ai_setup/gui
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt
+          # `--pre` because pythonnet>=3.1.0rc0 is a pre-release pin
+          # (see comments in requirements.txt). Without --pre, pip would
+          # downgrade to 3.0.x which won't install on Python 3.14 (when
+          # we eventually bump) and can produce subtly different WinForms
+          # interop behavior on 3.11.
+          python -m pip install --pre -r requirements.txt
           python -m pip install pyinstaller
 
       - name: Build GUI with PyInstaller

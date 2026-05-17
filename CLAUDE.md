@@ -1300,4 +1300,6 @@ Skipping or reordering any of these has been the cause of every "the new feature
 
 `CHANGES_SESSION_2026-04-06.md` and `CHANGES_SESSION_2026-04-17.md` are **history, not procedure** — they explain *why* the project has its current shape (the WSL2 + bundled-distro decision, the `is_async=true` xacro overlay pattern, the healthcheck-driven container-ordering choice). The fixes they describe are in the current images; the files are kept so a future architect can audit the reasoning before reverting a load-bearing decision. Don't act on their procedural sections — those have been superseded by the current CLAUDE.md.
 
+<!-- 2026-05-17 push retry: Railway again fell back to RAILPACK on a2048a6 (Cloud API v2.3.0 follow-up commit), same snapshot-failed cause as 62f8e4f. This second nudge forces a fresh fetch. Systemic fix is a Railway dashboard rootDirectory config — deferred. -->
+
 <!-- 2026-05-16 push retry: Railway snapshot failed on 62f8e4f, this nudges the integration to re-fetch -->

@@ -238,13 +238,20 @@ function StudentApp() {
   // Roboter Studio (needs Workshop services not present on Jetson) would
   // both fail. We hide them with the same mechanism cloud-only mode uses:
   // mark them as `jetsonIncompatible` and filter out when the Jetson lock
-  // is held. Mirrors §6.7 of the plan (CLAUDE.md §5.x will be updated
-  // to document this).
+  // is held.
+  //
+  // Inferenz is intentionally NOT `hardwareOnly` — v2.3.0 added the
+  // classroom Jetson as a remote inference target, so a cloud-only
+  // student (no local follower) still has a viable Inferenz path via
+  // claim → Jetson runs the policy. The JetsonAvailabilityChip on the
+  // page gracefully renders the "Kein Klassen-Jetson in diesem Raum"
+  // state when no Jetson is paired, so it's safe to leave the tab
+  // visible even in environments with no robot at all.
   const navItems = [
     { key: PageType.HOME, label: 'Start', Icon: MdHome, onClick: handleHomePageNavigation },
     { key: PageType.RECORD, label: 'Aufnahme', Icon: MdVideocam, onClick: handleRecordPageNavigation, hardwareOnly: true, jetsonIncompatible: true },
     { key: PageType.TRAINING, label: 'Training', Icon: GoGraph, onClick: handleTrainingPageNavigation },
-    { key: PageType.INFERENCE, label: 'Inferenz', Icon: MdMemory, onClick: handleInferencePageNavigation, hardwareOnly: true },
+    { key: PageType.INFERENCE, label: 'Inferenz', Icon: MdMemory, onClick: handleInferencePageNavigation },
     { key: PageType.EDIT_DATASET, label: 'Daten', Icon: MdWidgets, onClick: handleEditDatasetPageNavigation, sep: true, jetsonIncompatible: true },
     { key: PageType.WORKSHOP, label: 'Roboter Studio', Icon: MdConstruction, onClick: handleWorkshopPageNavigation, hardwareOnly: true, jetsonIncompatible: true },
   ]

@@ -7,8 +7,8 @@ own:
 
 | Our tag | Upstream Dockerfile | One-time build cost |
 |---|---|---|
-| `nettername/physical-ai-server-base:arm64-0.8.2` | `physical_ai_tools/physical_ai_server/Dockerfile.arm64` | ~30-40 min on QEMU, ~10 min on native arm64 |
-| `nettername/open-manipulator-base:arm64-4.1.4` | `open_manipulator/docker/Dockerfile` | ~30-40 min on QEMU, ~10 min on native arm64 |
+| `nettername/physical-ai-server-jetson-base:0.8.2` | `physical_ai_tools/physical_ai_server/Dockerfile.arm64` | ~30-40 min on QEMU, ~10 min on native arm64 |
+| `nettername/open-manipulator-jetson-base:4.1.4` | `open_manipulator/docker/Dockerfile` | ~30-40 min on QEMU, ~10 min on native arm64 |
 
 Both upstream Dockerfiles' base layers (`robotis/ros:jazzy-ros-base-torch2.7.0-cuda12.8.0`,
 `ros:jazzy-ros-base`, `robotis/ros:jazzy-ros-base-librealsense`) are multi-arch,
@@ -51,7 +51,7 @@ Run these from the repo root:
 docker buildx build \
     --platform linux/arm64 \
     --push \
-    -t nettername/physical-ai-server-base:arm64-0.8.2 \
+    -t nettername/physical-ai-server-jetson-base:0.8.2 \
     -f physical_ai_tools/physical_ai_server/Dockerfile.arm64 \
     physical_ai_tools/
 
@@ -59,7 +59,7 @@ docker buildx build \
 docker buildx build \
     --platform linux/arm64 \
     --push \
-    -t nettername/open-manipulator-base:arm64-4.1.4 \
+    -t nettername/open-manipulator-jetson-base:4.1.4 \
     -f open_manipulator/docker/Dockerfile \
     open_manipulator/docker/
 ```
@@ -84,8 +84,8 @@ After build:
 
 ```bash
 # Confirm the manifest is linux/arm64
-docker buildx imagetools inspect nettername/physical-ai-server-base:arm64-0.8.2
-docker buildx imagetools inspect nettername/open-manipulator-base:arm64-4.1.4
+docker buildx imagetools inspect nettername/physical-ai-server-jetson-base:0.8.2
+docker buildx imagetools inspect nettername/open-manipulator-jetson-base:4.1.4
 
 # Both outputs should show a single `Platform: linux/arm64` entry (plus
 # the standard `unknown/unknown` attestation manifest from buildx).
@@ -100,15 +100,34 @@ docker buildx imagetools inspect nettername/open-manipulator-base:arm64-4.1.4
 - Modal training/vision images. Those are managed by `modal deploy` and live
   outside Docker Hub.
 
-## Why not multi-arch single tags?
+## Why separate repos for the Jetson images?
 
-We tag separately (`:latest` for amd64, `:arm64-latest` for arm64) instead
-of producing a single multi-arch manifest because:
-- Multi-arch single tags require BOTH archs to be pushed in lockstep — a
-  forgot-to-rebuild-arm64 ship would silently keep the old arm64 manifest.
-- The Jetson agent docker-compose pulls explicit `:arm64-latest`, so confusion
-  about "which arch did I just pull?" is eliminated.
-- Existing student PCs continue to pull `:latest` unmodified.
+v2.3.0 split the arm64 / Jetson image set into its own dedicated
+Docker Hub repos (the `-jetson` suffix). The Jetson thin-layer images
+publish to:
+
+| Repo | Used by |
+|---|---|
+| `nettername/open-manipulator-jetson:latest` | Jetson docker-compose.jetson.yml |
+| `nettername/physical-ai-server-jetson:latest` | Jetson docker-compose.jetson.yml |
+
+…while the amd64 student stack keeps publishing to its existing repos
+unchanged:
+
+| Repo | Used by |
+|---|---|
+| `nettername/open-manipulator:latest` | Student PC docker-compose.yml |
+| `nettername/physical-ai-server:latest` | Student PC docker-compose.yml |
+| `nettername/physical-ai-manager:latest` | Student PC docker-compose.yml |
+
+Reasons for the separate-repos approach:
+- A `docker push` to the Jetson image set CAN'T collide with the amd64
+  student set (different repo, different ACL, different audit trail).
+- A Jetson rollout bug never regresses student PCs that happen to
+  auto-pull at the wrong time.
+- The Jetson agent's docker-compose pulls explicit repo names with no
+  arch suffix in the tag, so there's zero ambiguity about "which arch
+  did I just pull?" — the repo name itself says it.
 
 If we ever need multi-arch single tags in the future, the right tool is
 `docker manifest create + push` or buildx with `--platform linux/amd64,linux/arm64`.

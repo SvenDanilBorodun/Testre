@@ -236,11 +236,12 @@ BUILD_BASE_ARM64=1 PLATFORM=arm64 ./robotis_ai_setup/docker/build-images.sh
 PLATFORM=arm64 ./robotis_ai_setup/docker/build-images.sh
 ```
 
-Pushed tags (separate from amd64 `:latest`):
-- `nettername/open-manipulator:arm64-latest`
-- `nettername/physical-ai-server:arm64-latest`
-- `nettername/open-manipulator-base:arm64-4.1.4` (one-time base)
-- `nettername/physical-ai-server-base:arm64-0.8.2` (one-time base)
+Pushed tags (separate repos from amd64 — see `docs/arm64_base/README.md`
+for why):
+- `nettername/open-manipulator-jetson:latest`
+- `nettername/physical-ai-server-jetson:latest`
+- `nettername/open-manipulator-jetson-base:4.1.4` (one-time base)
+- `nettername/physical-ai-server-jetson-base:0.8.2` (one-time base)
 
 `physical-ai-manager` is NOT built for arm64 — the React app stays on the student PC.
 
@@ -253,9 +254,11 @@ sudo bash /path/to/robotis_ai_setup/jetson_agent/setup.sh
 
 Script registers with the Cloud API, prints a 6-digit pairing code. Teacher enters the code in the admin dashboard → classroom gets bound. See [`docs/JETSON_DEPLOY.md`](../JETSON_DEPLOY.md) for the full walkthrough.
 
-### Required Railway env var
+### Required Railway env vars
 
 - `EDUBOTICS_JETSON_HF_TOKEN` — read-only HF token, EduBotics-Solutions/* scope. Returned to agents at `/jetson/register`. Without it, `POST /jetson/register` returns 503 and the setup script aborts.
+- `SUPABASE_JWT_ALGORITHM` — `RS256` (modern, default) or `HS256` (legacy). v2.3.0 the Cloud API forwards this to the agent at register time so the rosbridge proxy picks the right JWT verification path.
+- `SUPABASE_JWT_SECRET` — **required only when `SUPABASE_JWT_ALGORITHM=HS256`**. The symmetric secret from Supabase Dashboard → Settings → API → JWT Secret. Forwarded to the agent at register time and written to `/etc/edubotics/jetson.env` mode 600. Without it, `POST /jetson/register` returns 503.
 
 ---
 

@@ -41,15 +41,32 @@ case "$PLATFORM" in
         # this script pulled ":latest" independently, so the Dockerfile build
         # and the pre-pull could reference different content.
         PAS_BASE_IMAGE="robotis/physical-ai-server:amd64-0.8.2"
+        # amd64 target tag suffix on the existing repos
+        # (nettername/open-manipulator, nettername/physical-ai-server,
+        # nettername/physical-ai-manager).
         IMAGE_TAG_SUFFIX="latest"
+        # Output repo names for THIN-LAYER images (the things this script
+        # publishes — bases above are immutable inputs). amd64 keeps the
+        # legacy names so students' auto-pull keeps working.
+        OMX_OUT_REPO="${REGISTRY}/open-manipulator"
+        PAS_OUT_REPO="${REGISTRY}/physical-ai-server"
         DOCKER_BUILDX_ARGS=""
         ;;
     arm64)
-        # ROBOTIS does not publish arm64 variants; we build our own base
-        # images once and host them under our own registry namespace.
-        OMX_BASE_IMAGE="${REGISTRY}/open-manipulator-base:arm64-4.1.4"
-        PAS_BASE_IMAGE="${REGISTRY}/physical-ai-server-base:arm64-0.8.2"
-        IMAGE_TAG_SUFFIX="arm64-latest"
+        # v2.3.0 follow-up: separate repos for the Jetson arm64 images
+        # so the "dont touch our EduBotics images" rule is honoured —
+        # the classroom Jetson stack publishes to ${REGISTRY}/*-jetson*
+        # while the student amd64 stack keeps publishing to
+        # ${REGISTRY}/* (no -jetson suffix). Bumping the Jetson image
+        # set can no longer regress amd64 students, and a docker push
+        # to one set can never collide with the other.
+        OMX_BASE_IMAGE="${REGISTRY}/open-manipulator-jetson-base:4.1.4"
+        PAS_BASE_IMAGE="${REGISTRY}/physical-ai-server-jetson-base:0.8.2"
+        # Single canonical tag — the repo name already indicates arm64/Jetson.
+        IMAGE_TAG_SUFFIX="latest"
+        # Output repo names for the thin layer Jetson images.
+        OMX_OUT_REPO="${REGISTRY}/open-manipulator-jetson"
+        PAS_OUT_REPO="${REGISTRY}/physical-ai-server-jetson"
         # buildx with --push bypasses Docker Desktop's dual-image-store gotcha
         # (CLAUDE.md §13.4.bis). On a Linux maintainer host with native arm64
         # this is also the only sane way to push the right manifest digests.
@@ -278,13 +295,13 @@ echo ">> Building physical_ai_server thin layer (patches + interface rebuild)...
 if [ "$PLATFORM" = "arm64" ]; then
     docker buildx build $DOCKER_BUILDX_ARGS \
         --build-arg BASE_IMAGE="${PAS_BASE_IMAGE}" \
-        -t "${REGISTRY}/physical-ai-server:${IMAGE_TAG_SUFFIX}" \
+        -t "${PAS_OUT_REPO}:${IMAGE_TAG_SUFFIX}" \
         -f "${SCRIPT_DIR}/physical_ai_server/Dockerfile" \
         "${SCRIPT_DIR}/physical_ai_server/"
 else
     docker build \
         --build-arg BASE_IMAGE="${PAS_BASE_IMAGE}" \
-        -t "${REGISTRY}/physical-ai-server:${IMAGE_TAG_SUFFIX}" \
+        -t "${PAS_OUT_REPO}:${IMAGE_TAG_SUFFIX}" \
         -f "${SCRIPT_DIR}/physical_ai_server/Dockerfile" \
         "${SCRIPT_DIR}/physical_ai_server/"
 fi
@@ -332,13 +349,13 @@ echo ">> Building open_manipulator thin layer..."
 if [ "$PLATFORM" = "arm64" ]; then
     docker buildx build $DOCKER_BUILDX_ARGS \
         --build-arg BASE_IMAGE="${OMX_BASE_IMAGE}" \
-        -t "${REGISTRY}/open-manipulator:${IMAGE_TAG_SUFFIX}" \
+        -t "${OMX_OUT_REPO}:${IMAGE_TAG_SUFFIX}" \
         -f "${SCRIPT_DIR}/open_manipulator/Dockerfile" \
         "${SCRIPT_DIR}/open_manipulator/"
 else
     docker build \
         --build-arg BASE_IMAGE="${OMX_BASE_IMAGE}" \
-        -t "${REGISTRY}/open-manipulator:${IMAGE_TAG_SUFFIX}" \
+        -t "${OMX_OUT_REPO}:${IMAGE_TAG_SUFFIX}" \
         -f "${SCRIPT_DIR}/open_manipulator/Dockerfile" \
         "${SCRIPT_DIR}/open_manipulator/"
 fi
@@ -360,6 +377,7 @@ if [ "$PLATFORM" = "amd64" ]; then
     echo ""
     echo ">> Pushing images to ${REGISTRY}..."
     pushed=()
+    # amd64 keeps the legacy ${REGISTRY}/${img} naming.
     for img in physical-ai-manager physical-ai-server open-manipulator; do
         if docker push "${REGISTRY}/${img}:${IMAGE_TAG_SUFFIX}"; then
             pushed+=("$img")
@@ -383,8 +401,8 @@ echo "========================================"
 echo "All images built and pushed!"
 echo ""
 echo "Images:"
-echo "  ${REGISTRY}/open-manipulator:${IMAGE_TAG_SUFFIX}"
-echo "  ${REGISTRY}/physical-ai-server:${IMAGE_TAG_SUFFIX}"
+echo "  ${OMX_OUT_REPO}:${IMAGE_TAG_SUFFIX}"
+echo "  ${PAS_OUT_REPO}:${IMAGE_TAG_SUFFIX}"
 if [ "$PLATFORM" = "amd64" ]; then
     echo "  ${REGISTRY}/physical-ai-manager:${IMAGE_TAG_SUFFIX}"
 fi

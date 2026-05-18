@@ -281,6 +281,7 @@ modprobe ftdi_sio 2>/dev/null
 modprobe cp210x 2>/dev/null
 modprobe ch341 2>/dev/null
 modprobe pl2303 2>/dev/null
+modprobe uvcvideo 2>/dev/null   # webcams (Logitech C920 etc.) — same race as USB-Serial
 if [ -x /lib/systemd/systemd-udevd ] && ! pgrep -x systemd-udevd >/dev/null 2>&1; then
     /lib/systemd/systemd-udevd --daemon 2>/dev/null
     sleep 1
@@ -487,8 +488,113 @@ def scan_and_identify_arms(image: str) -> tuple[Optional[ArmDevice], Optional[Ar
     return leader, follower
 
 
+def _list_usb_camera_vid_pids() -> list[tuple[str, str]]:
+    """Query Windows PnP for currently-connected USB cameras.
+
+    Returns [(vid_pid, friendly_name), ...] where vid_pid is "vvvv:pppp"
+    (lower-case hex). Used by scan_cameras() to figure out which usbipd
+    BUSIDs to attach to WSL — without this, a student plugs in a webcam
+    and the GUI's `Kameras scannen` button silently finds nothing
+    (the camera sits in usbipd's `Not shared` state and never reaches
+    /dev/video* inside the distro).
+    """
+    if sys.platform != "win32":
+        return []
+    try:
+        result = subprocess.run(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-Command",
+                # `Class Camera` covers Win10/11 modern UVC drivers; some
+                # older webcams still register under `Image`. Both filters
+                # are cheap so we run them together.
+                "Get-PnpDevice -Class Camera, Image -PresentOnly | "
+                "Where-Object Status -eq 'OK' | "
+                "ForEach-Object { "
+                "  if ($_.InstanceId -match 'USB\\\\VID_([0-9A-F]{4})&PID_([0-9A-F]{4})') { "
+                "    '{0}:{1}|{2}' -f $matches[1].ToLower(), $matches[2].ToLower(), $_.FriendlyName "
+                "  } "
+                "}",
+            ],
+            capture_output=True, text=True, timeout=10,
+            **_SUBPROCESS_KWARGS,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return []
+    if result.returncode != 0:
+        return []
+    cameras = []
+    seen = set()
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if "|" not in line:
+            continue
+        vid_pid, name = line.split("|", 1)
+        if vid_pid in seen:
+            continue
+        seen.add(vid_pid)
+        cameras.append((vid_pid, name.strip()))
+    return cameras
+
+
+def attach_cameras_to_wsl() -> list[USBDevice]:
+    """Attach all USB cameras that Windows can see, via usbipd.
+
+    Mirrors `attach_all_robotis_devices()` for cameras. Without this the
+    GUI's camera scan would only find devices a student had manually
+    `usbipd attach`ed beforehand — impossible UX. Only attaches devices
+    that already have a usbipd policy (state `Shared` / `Allowed`);
+    devices in `Not shared` state need admin bind first (added by
+    configure_usbipd.ps1 at install time for currently-connected
+    cameras, then policy=AutoBind takes over for future replugs).
+
+    A `Not shared` camera is silently skipped — the diagnostic log
+    captures it so support can see "this student plugged in a new
+    webcam after install and we never bound its VID:PID".
+    """
+    camera_vid_pids = {vp for vp, _ in _list_usb_camera_vid_pids()}
+    if not camera_vid_pids:
+        return []
+    attached: list[USBDevice] = []
+    skipped_not_shared: list[USBDevice] = []
+    for dev in list_usb_devices():
+        if dev.vid_pid.lower() not in camera_vid_pids:
+            continue
+        if dev.state == "Attached":
+            attached.append(dev)
+            continue
+        if dev.state == "Not shared":
+            skipped_not_shared.append(dev)
+            continue
+        # State is Shared / Allowed / Persisted — attach is non-admin.
+        if attach_usb_to_wsl(dev.busid):
+            dev.state = "Attached"
+            attached.append(dev)
+    if skipped_not_shared:
+        details = ", ".join(
+            f"{d.busid} ({d.vid_pid}) {d.description}"
+            for d in skipped_not_shared
+        )
+        _append_diag(
+            "attach_cameras_to_wsl",
+            f"skipped (need admin bind): {details}",
+        )
+    return attached
+
+
 def scan_cameras() -> list[CameraDevice]:
-    """Scan for video capture devices available in WSL2."""
+    """Scan for video capture devices available in WSL2.
+
+    Three-step auto-recovery:
+      1. self_heal_wsl_serial() loads uvcvideo (+ udev + USB-Serial mods)
+      2. attach_cameras_to_wsl() auto-attaches Windows-visible webcams
+         that have a usbipd policy (set up by configure_usbipd.ps1 for
+         devices plugged in at install time)
+      3. wsl_bridge.list_video_devices() lists /dev/video* + by-id
+    """
+    self_heal_wsl_serial()
+    attach_cameras_to_wsl()
     raw = wsl_bridge.list_video_devices()
     return [CameraDevice(path=d["path"], name=d["name"]) for d in raw]
 

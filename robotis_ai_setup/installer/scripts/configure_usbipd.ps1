@@ -143,6 +143,95 @@ foreach ($productId in $knownPIDs) {
     }
 }
 
+# ── Camera policy (USB Video Class devices) ───────────────────────────────
+# Mirror the ROBOTIS policy add for every USB webcam currently visible to
+# Windows. Without this, a student's webcam sits in usbipd's `Not shared`
+# state and the GUI's "Kameras scannen" finds nothing — usbipd attach
+# requires either admin or an AutoBind policy, and we can't prompt for
+# UAC every time the student replugs the camera.
+#
+# We don't ship a static VID list because webcam vendors are unpredictable
+# (Logitech / Microsoft / Sunplus / Chicony / Realtek / Bison / Quanta /
+# Lenovo OEM / etc.) and the same vendor IDs ship non-camera devices we
+# DON'T want auto-attached (Logitech mice + keyboards, especially). So we
+# do it dynamically: ask Get-PnpDevice for class=Camera/Image at install
+# time, extract the VID:PID from each, and add a per-device policy. Future
+# replugs of those exact cameras auto-attach without admin.
+#
+# Trade-off: a brand-new camera plugged in AFTER install needs the student
+# to re-run this script (or wait for a future installer that re-detects on
+# launch). Better than auto-trusting an entire vendor namespace.
+try {
+    $camPnp = Get-PnpDevice -Class Camera, Image -PresentOnly -Status OK -ErrorAction SilentlyContinue
+    if ($camPnp) {
+        Write-Step "Scanning Windows for USB webcams (UVC class)..."
+        $cameraIds = @()
+        foreach ($cam in $camPnp) {
+            if ($cam.InstanceId -match 'USB\\VID_([0-9A-F]{4})&PID_([0-9A-F]{4})') {
+                $vid = $matches[1].ToLower()
+                $pidHex = $matches[2].ToLower()
+                $hwid = "${vid}:${pidHex}"
+                if ($cameraIds -notcontains $hwid) {
+                    $cameraIds += $hwid
+                    Write-Host "   Found camera: $($cam.FriendlyName) ($hwid)" -ForegroundColor White
+                }
+            }
+        }
+        Write-Diag "cameras_detected" ($cameraIds -join "`n")
+        foreach ($hwid in $cameraIds) {
+            if ($existingPolicies -match $hwid) {
+                Write-Skip "Policy for $hwid already exists"
+                continue
+            }
+            $added = $false
+            $attempts = @()
+            if ($version.Major -ge 5) {
+                $attempts += @{
+                    label = "5.x --operation AutoBind"
+                    args  = @("policy", "add", "--hardware-id", $hwid, "--effect", "Allow", "--operation", "AutoBind")
+                }
+                $attempts += @{
+                    label = "5.x --operation Connected"
+                    args  = @("policy", "add", "--hardware-id", $hwid, "--effect", "Allow", "--operation", "Connected")
+                }
+            }
+            $attempts += @{
+                label = "no --operation"
+                args  = @("policy", "add", "--hardware-id", $hwid, "--effect", "Allow")
+            }
+            foreach ($attempt in $attempts) {
+                $splat = $attempt.args
+                $output = & usbipd @splat 2>&1 | Out-String
+                Write-Diag "policy_add_camera_${hwid}_$($attempt.label)" "rc=$LASTEXITCODE`n$output"
+                if ($LASTEXITCODE -eq 0) {
+                    Write-OK "Camera policy added ($($attempt.label)): $hwid -> Allow"
+                    $added = $true
+                    $addedCount++
+                    break
+                }
+            }
+            # Even with a policy, the FIRST usbipd attach after install needs the
+            # device to be `bind`'d. AutoBind handles future replugs but the
+            # currently-plugged camera is still `Not shared` until we explicitly
+            # bind it here (we ARE elevated — this is the only chance). Without
+            # this the student would have to unplug+replug after install just to
+            # get the camera into a shareable state.
+            if ($added) {
+                $bindOut = usbipd bind --hardware-id $hwid 2>&1 | Out-String
+                Write-Diag "camera_bind_$hwid" "rc=$LASTEXITCODE`n$bindOut"
+                if ($LASTEXITCODE -eq 0) {
+                    Write-OK "Camera $hwid bound (immediately attachable without replug)"
+                }
+            }
+        }
+    } else {
+        Write-Skip "No USB webcams plugged in at install time — student can re-run this script after plugging one in"
+        Write-Diag "cameras_detected" "Get-PnpDevice -Class Camera,Image returned no PresentOnly devices"
+    }
+} catch {
+    Write-Diag "cameras_detected" "Get-PnpDevice raised: $_"
+}
+
 # Refresh the policy snapshot for the log so post-install support has
 # the after-state cached.
 try {

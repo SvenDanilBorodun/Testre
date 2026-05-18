@@ -41,6 +41,7 @@ modprobe ftdi_sio 2>/dev/null || true      # FTDI FT232, FT2232
 modprobe cp210x 2>/dev/null || true        # Silicon Labs CP210x (very common ESP32 / Sparkfun)
 modprobe ch341 2>/dev/null || true         # WCH CH340/CH341 (Aliexpress-Arduino-Clones)
 modprobe pl2303 2>/dev/null || true        # Prolific PL2303 (old USB-Serial cables)
+modprobe uvcvideo 2>/dev/null || true      # USB Video Class — Webcams (Logitech C920, etc.)
 
 if [ -x /lib/systemd/systemd-udevd ]; then
     if ! pgrep -x systemd-udevd >/dev/null 2>&1; then

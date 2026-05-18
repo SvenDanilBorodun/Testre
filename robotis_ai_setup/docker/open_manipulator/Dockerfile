@@ -30,6 +30,7 @@ RUN sed -i 's/\r$//' /entrypoint_omx.sh /usr/local/bin/identify_arm.py \
 # actually changed the target file so an upstream rename doesn't leave the
 # image with stock (unsafe) configs.
 COPY overlays/omx_f.ros2_control.xacro /tmp/overlays/omx_f.ros2_control.xacro
+COPY overlays/omx_f_follower_ai.launch.py /tmp/overlays/omx_f_follower_ai.launch.py
 COPY overlays/omx_f_hardware_controller_manager.yaml /tmp/overlays/omx_f_hardware_controller_manager.yaml
 COPY overlays/omx_l.ros2_control.xacro /tmp/overlays/omx_l.ros2_control.xacro
 COPY overlays/omx_l_leader_ai.launch.py /tmp/overlays/omx_l_leader_ai.launch.py
@@ -62,6 +63,7 @@ RUN set -e && \
         done; \
     } && \
     apply_overlay omx_f.ros2_control.xacro "*/ros2_control/*" /tmp/overlays/omx_f.ros2_control.xacro && \
+    apply_overlay omx_f_follower_ai.launch.py "*/launch/*" /tmp/overlays/omx_f_follower_ai.launch.py && \
     apply_overlay hardware_controller_manager.yaml "*/omx_f_follower_ai/*" /tmp/overlays/omx_f_hardware_controller_manager.yaml && \
     apply_overlay omx_l.ros2_control.xacro "*/ros2_control/*" /tmp/overlays/omx_l.ros2_control.xacro && \
     apply_overlay omx_l_leader_ai.launch.py "*/launch/*" /tmp/overlays/omx_l_leader_ai.launch.py && \

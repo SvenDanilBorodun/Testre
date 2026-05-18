@@ -24,9 +24,28 @@ param(
 $ErrorActionPreference = "Stop"
 $needsReboot = $false
 
+# ── Diagnostics sink ───────────────────────────────────────────────────────
+# Every prerequisite step appends to a single log in %LOCALAPPDATA% so that
+# when a student hits a problem later, support has the raw evidence of what
+# the installer saw.
+$DiagDir = Join-Path $env:LOCALAPPDATA "EduBotics"
+if (-not (Test-Path $DiagDir)) {
+    New-Item -ItemType Directory -Path $DiagDir -Force | Out-Null
+}
+$DiagLog = Join-Path $DiagDir "install_diagnostics.log"
+
+function Write-Diag {
+    param([string]$section, [string]$body)
+    $ts = (Get-Date).ToString("o")
+    Add-Content -Path $DiagLog -Value "`n=== $ts install_prerequisites::$section ==="
+    Add-Content -Path $DiagLog -Value $body
+}
+
 function Write-Step { param([string]$msg) Write-Host "`n>> $msg" -ForegroundColor Cyan }
 function Write-OK   { param([string]$msg) Write-Host "   OK: $msg" -ForegroundColor Green }
 function Write-Skip { param([string]$msg) Write-Host "   SKIP: $msg" -ForegroundColor Yellow }
+
+Write-Diag "begin" "PSVersion=$($PSVersionTable.PSVersion); OS=$([System.Environment]::OSVersion.VersionString)"
 
 # ── Check Windows version ──
 Write-Step "Checking Windows version..."
@@ -98,6 +117,26 @@ if (-not $wslInstalled) {
     Write-Skip "WSL2 already installed"
 }
 
+# `wsl --install` installs the feature but defers the Linux kernel update
+# until first distro launch. Force it now (idempotent) so `wsl --import`
+# in import_edubotics_wsl.ps1 doesn't fight an outdated kernel. Failure
+# here is non-fatal — older Windows builds without `wsl --update` will
+# self-update on first distro boot anyway.
+if (-not $needsReboot) {
+    Write-Step "Ensuring WSL2 kernel is current..."
+    try {
+        $updateOut = wsl --update 2>&1 | Out-String
+        Write-Diag "wsl_update" "rc=$LASTEXITCODE`n$updateOut"
+        if ($LASTEXITCODE -eq 0) {
+            Write-OK "WSL2 kernel is current"
+        } else {
+            Write-Host "   (wsl --update returned $LASTEXITCODE — will retry on first boot)" -ForegroundColor Yellow
+        }
+    } catch {
+        Write-Diag "wsl_update" "wsl --update raised: $_"
+    }
+}
+
 # ── Install usbipd-win ──
 Write-Step "Checking usbipd-win..."
 $usbipdInstalled = $false
@@ -139,8 +178,61 @@ if (-not $usbipdInstalled) {
     Write-Host "   Installing usbipd-win..." -ForegroundColor White
     Start-Process msiexec.exe -ArgumentList "/i", $msiPath, "/quiet", "/norestart" -Wait
     Write-OK "usbipd-win installed"
+
+    # PATH refresh — msiexec updates the system PATH, but the current
+    # PowerShell session inherited its env from Inno Setup at launch and
+    # won't see the new entry. configure_usbipd.ps1 runs as a child of
+    # this script in the same Inno [Run] sequence and would silently
+    # fail to find `usbipd.exe`. Recompose PATH from the registry so the
+    # remaining install steps work without requiring a reboot.
+    try {
+        $machinePath = [System.Environment]::GetEnvironmentVariable("Path", "Machine")
+        $userPath    = [System.Environment]::GetEnvironmentVariable("Path", "User")
+        $env:Path = ($machinePath, $userPath) -join ";"
+        Write-Diag "path_refresh_after_usbipd" "PATH recomposed from registry"
+    } catch {
+        Write-Diag "path_refresh_after_usbipd" "PATH refresh raised: $_"
+    }
 } else {
     Write-Skip "usbipd-win already installed"
+}
+
+# ── Post-install verification: did Windows already enumerate any ROBOTIS-Geräte? ──
+# This is the key install-time signal for the "Arme scannen findet
+# nichts" failure mode. If a board is plugged in and Windows sees it,
+# this log line will say so — and configure_usbipd.ps1's smoke test
+# will then validate the full attach chain. If the student plugged
+# nothing in yet, we just note it; the GUI will diagnose at scan time.
+Write-Step "Checking whether Windows already sees ROBOTIS-Geräte (VID 2F5D)..."
+try {
+    $pnp = Get-PnpDevice -PresentOnly -ErrorAction Stop |
+           Where-Object { $_.InstanceId -like '*VID_2F5D*' }
+    if ($pnp) {
+        $count = ($pnp | Measure-Object).Count
+        Write-OK "$count ROBOTIS device(s) enumerated by Windows"
+        $pnpDump = ($pnp | Select-Object Status, Class, FriendlyName, InstanceId | Out-String)
+        Write-Diag "pnp_vid_2f5d" $pnpDump
+        Write-Host $pnpDump -ForegroundColor Gray
+    } else {
+        Write-Host "   No ROBOTIS-Gerät plugged in (or driver missing) at install time." -ForegroundColor Yellow
+        Write-Host "   This is OK — the GUI will diagnose at 'Arme scannen' time." -ForegroundColor Gray
+        Write-Diag "pnp_vid_2f5d" "Get-PnpDevice returned no VID_2F5D entries"
+    }
+} catch {
+    Write-Diag "pnp_vid_2f5d" "Get-PnpDevice raised: $_"
+}
+
+# Probe usbipd from THIS shell — if PATH didn't propagate, the rest of the
+# install would silently skip the policy step. Fail loud here instead.
+try {
+    $usbipdProbe = & usbipd --version 2>&1 | Out-String
+    Write-Diag "usbipd_postinstall_probe" "rc=$LASTEXITCODE`n$usbipdProbe"
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "WARN: usbipd installed but not reachable from this shell." -ForegroundColor Yellow
+        Write-Host "      configure_usbipd.ps1 may fail — a reboot will fix this." -ForegroundColor Yellow
+    }
+} catch {
+    Write-Diag "usbipd_postinstall_probe" "usbipd raised: $_"
 }
 
 # ── Summary ──

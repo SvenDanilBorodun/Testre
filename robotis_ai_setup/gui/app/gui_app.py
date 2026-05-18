@@ -771,8 +771,30 @@ class EduBoticsApp:
 
             if leader and follower:
                 self._set_status("Beide Arme gefunden! Kamera auswählen und auf Start klicken.")
-            else:
+                return
+
+            # Nothing (or only one) found — run the host→WSL→docker chain
+            # diagnosis so the student sees *why*, not just "Nicht gefunden".
+            self._log("Diagnose wird ausgeführt — bitte einen Moment...")
+            try:
+                diag = device_manager.diagnose_usb_environment(image=IMAGE_OPEN_MANIPULATOR)
+            except Exception as exc:
+                self._log(f"Diagnose fehlgeschlagen: {exc}")
                 self._set_status("Einige Arme nicht gefunden. Verbindungen prüfen und erneut versuchen.")
+                return
+
+            # Log the German message line-by-line so the GUI log pane shows the
+            # full bullet list, then a single short status-bar message.
+            for line in diag.message_de.splitlines():
+                self._log(line)
+            if diag.details:
+                self._log(f"(Technisch: {diag.details})")
+            self._log(f"Vollständiges Diagnose-Log: {device_manager.get_diagnostics_log_path()}")
+
+            short_status = diag.message_de.splitlines()[0] if diag.message_de else (
+                "Einige Arme nicht gefunden. Verbindungen prüfen und erneut versuchen."
+            )
+            self._set_status(short_status)
 
         threading.Thread(target=_do_scan, daemon=True).start()
 

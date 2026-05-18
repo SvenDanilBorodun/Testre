@@ -5,12 +5,17 @@ Handles:
   - Attaching USB devices to WSL2 via usbipd
   - Identifying leader/follower arms via identify_arm.py inside Docker
   - Camera discovery via v4l2-ctl inside WSL2
+  - Diagnostics that produce actionable German error messages instead of a
+    silent "Nicht gefunden" when something between Windows and the arm fails.
 """
 
+import os
 import re
 import subprocess
 import sys
 from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 _CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
@@ -18,6 +23,24 @@ _SUBPROCESS_KWARGS = {"creationflags": _CREATE_NO_WINDOW} if sys.platform == "wi
 
 from . import wsl_bridge
 from .constants import ROBOTIS_VID, WSL_DISTRO_NAME
+
+
+def _diagnostics_log_path() -> str:
+    """Where install/runtime diagnostics get appended."""
+    base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+    return os.path.join(base, "EduBotics", "install_diagnostics.log")
+
+
+def _append_diag(section: str, body: str) -> None:
+    """Append a timestamped block to the diagnostics log. Best-effort."""
+    try:
+        path = Path(_diagnostics_log_path())
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8", errors="replace") as fh:
+            fh.write(f"\n=== {datetime.now().isoformat(timespec='seconds')} {section} ===\n")
+            fh.write(body.rstrip() + "\n")
+    except OSError:
+        pass
 
 
 @dataclass
@@ -58,33 +81,114 @@ class HardwareConfig:
         return self.leader is not None and self.follower is not None
 
 
-def list_usb_devices() -> list[USBDevice]:
-    """List all USB devices visible to usbipd."""
+# usbipd 5.x splits output into "Connected:" and "Persisted:" sections; older
+# 4.x prints a flat table. We parse strict first, then fall back to a VID:PID-
+# only relaxed parse so a tiny column-format change in a future usbipd doesn't
+# silently turn into "Nicht gefunden" for the student.
+_USBIPD_STRICT_RE = re.compile(
+    r"\s*(\d+-\d+)\s+([0-9a-fA-F]{4}:[0-9a-fA-F]{4})\s+(.+?)\s+"
+    r"(Not shared|Shared|Attached|Forced|Shared \(forced\))\s*$"
+)
+_USBIPD_RELAXED_RE = re.compile(
+    r"\s*(\d+-\d+)\s+([0-9a-fA-F]{4}:[0-9a-fA-F]{4})\s+(.+?)\s*$"
+)
+
+
+class UsbipdMissingError(RuntimeError):
+    """`usbipd` is not on PATH (installer did not run, or PATH not refreshed yet)."""
+
+
+def _run_usbipd_list() -> Optional[str]:
+    """Run `usbipd list` and return raw stdout (combined with stderr).
+
+    Returns None if the binary is missing or the call times out. Logs raw
+    output to the diagnostics file regardless of outcome so a maintainer
+    can read what Windows actually said when the student hit "Nicht
+    gefunden".
+    """
     try:
         result = subprocess.run(
             ["usbipd", "list"],
             capture_output=True, text=True, timeout=10,
             **_SUBPROCESS_KWARGS,
         )
-        if result.returncode != 0:
-            return []
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+    except FileNotFoundError:
+        _append_diag("usbipd_list", "FileNotFoundError: usbipd not on PATH")
+        raise UsbipdMissingError("usbipd is not installed or not on PATH")
+    except subprocess.TimeoutExpired:
+        _append_diag("usbipd_list", "TimeoutExpired after 10s")
+        return None
+
+    raw = (result.stdout or "") + ("\n" + result.stderr if result.stderr else "")
+    _append_diag(
+        "usbipd_list",
+        f"rc={result.returncode}\n{raw}",
+    )
+    if result.returncode != 0:
+        return raw  # parse what we can — usbipd sometimes prints valid rows
+                    # before a non-fatal stderr line
+    return raw
+
+
+def list_usb_devices() -> list[USBDevice]:
+    """List all USB devices visible to usbipd.
+
+    Returns empty list on missing/failing usbipd. Use `_run_usbipd_list()`
+    + a UsbipdMissingError catch when you need to distinguish "binary
+    missing" from "no devices visible".
+    """
+    try:
+        raw = _run_usbipd_list()
+    except UsbipdMissingError:
+        return []
+    if raw is None:
         return []
 
-    devices = []
-    for line in result.stdout.splitlines():
-        # Parse usbipd list output: "1-3    2f5d:0103  OpenRB-150    Not shared"
-        match = re.match(
-            r"\s*(\d+-\d+)\s+([0-9a-fA-F]{4}:[0-9a-fA-F]{4})\s+(.+?)\s+(Not shared|Shared|Attached)\s*$",
-            line,
-        )
-        if match:
+    devices: list[USBDevice] = []
+    skip_section = False
+    for line in raw.splitlines():
+        stripped = line.strip()
+        # usbipd 5.x section headers — table follows on subsequent lines.
+        if stripped == "Connected:":
+            skip_section = False
+            continue
+        if stripped == "Persisted:":
+            # Persisted entries have no BUSID and cannot be attached. Skip.
+            skip_section = True
+            continue
+        if skip_section:
+            continue
+        if not stripped or stripped.startswith("BUSID"):
+            continue
+
+        m = _USBIPD_STRICT_RE.match(line)
+        if m:
             devices.append(USBDevice(
-                busid=match.group(1),
-                vid_pid=match.group(2),
-                description=match.group(3).strip(),
-                state=match.group(4),
+                busid=m.group(1),
+                vid_pid=m.group(2),
+                description=m.group(3).strip(),
+                state=m.group(4),
             ))
+            continue
+
+        # Relaxed fallback — preserves the BUSID + VID:PID even when the
+        # state column drifts. State stays "Unknown" so callers can still
+        # decide to try attach.
+        m2 = _USBIPD_RELAXED_RE.match(line)
+        if m2:
+            devices.append(USBDevice(
+                busid=m2.group(1),
+                vid_pid=m2.group(2),
+                description=m2.group(3).strip(),
+                state="Unknown",
+            ))
+
+    if not devices:
+        _append_diag(
+            "usbipd_list_parse",
+            "No devices parsed. If usbipd output above is non-empty the "
+            "regex needs an update."
+        )
     return devices
 
 
@@ -273,3 +377,215 @@ def scan_cameras() -> list[CameraDevice]:
     """Scan for video capture devices available in WSL2."""
     raw = wsl_bridge.list_video_devices()
     return [CameraDevice(path=d["path"], name=d["name"]) for d in raw]
+
+
+# ── Diagnostics ─────────────────────────────────────────────────────────────
+# When the GUI's arm scan returns (None, None), we want to tell the student
+# *why* — not just "Nicht gefunden". The diagnosis below walks the same chain
+# the scan walks and reports the FIRST link that broke.
+
+
+def _windows_sees_robotis_vid() -> Optional[bool]:
+    """Ask Windows itself (not usbipd) whether VID_2F5D is enumerated.
+
+    PowerShell's Get-PnpDevice covers devices that exist on the USB bus
+    even if usbipd doesn't recognize them yet. Returns True/False, or
+    None if PowerShell isn't reachable.
+    """
+    if sys.platform != "win32":
+        return None
+    try:
+        result = subprocess.run(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-Command",
+                "Get-PnpDevice -PresentOnly | "
+                "Where-Object { $_.InstanceId -like '*VID_2F5D*' } | "
+                "Select-Object -ExpandProperty InstanceId",
+            ],
+            capture_output=True, text=True, timeout=15,
+            **_SUBPROCESS_KWARGS,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+    _append_diag("pnp_vid_2f5d", f"rc={result.returncode}\n{result.stdout}\n{result.stderr}")
+    if result.returncode != 0:
+        return None
+    return bool(result.stdout.strip())
+
+
+@dataclass
+class UsbDiagnosis:
+    """Why arm scanning failed — populated by `diagnose_usb_environment`.
+
+    Exactly one of the boolean reasons should be True. `message_de` is the
+    student-facing German error; `details` is a short technical addendum
+    safe to show in a log pane.
+    """
+    usbipd_missing: bool = False
+    wsl_distro_missing: bool = False
+    windows_sees_no_robotis: bool = False
+    usbipd_sees_no_robotis: bool = False
+    attach_failed: bool = False
+    no_serial_after_attach: bool = False
+    docker_image_missing: bool = False
+    ok: bool = False
+    message_de: str = ""
+    details: str = ""
+
+
+def diagnose_usb_environment(image: Optional[str] = None) -> UsbDiagnosis:
+    """Walk the host → WSL → docker chain and return the first failure.
+
+    Args:
+        image: Open-manipulator image used by the scanner container. If
+            None, the docker-image check is skipped (caller doesn't care).
+    """
+    diag = UsbDiagnosis()
+
+    # 1. usbipd reachable?
+    try:
+        raw = _run_usbipd_list()
+    except UsbipdMissingError:
+        diag.usbipd_missing = True
+        diag.message_de = (
+            "usbipd ist nicht installiert oder nicht im Suchpfad. "
+            "Bitte den EduBotics-Installer erneut ausführen und Windows neu starten."
+        )
+        diag.details = "usbipd.exe not on PATH"
+        return diag
+
+    if raw is None:
+        diag.usbipd_missing = True
+        diag.message_de = (
+            "usbipd hat nicht geantwortet (Zeitüberschreitung). "
+            "Bitte den PC neu starten und erneut versuchen."
+        )
+        diag.details = "usbipd list timed out"
+        return diag
+
+    # 2. WSL distro registered?
+    if not wsl_bridge.is_edubotics_distro_registered():
+        diag.wsl_distro_missing = True
+        diag.message_de = (
+            "Die EduBotics-WSL-Umgebung ist nicht registriert. "
+            "Bitte den Installer erneut ausführen."
+        )
+        diag.details = f"wsl --list --quiet does not contain {WSL_DISTRO_NAME!r}"
+        return diag
+
+    # 3. Does Windows itself see a VID_2F5D device?
+    windows_sees = _windows_sees_robotis_vid()
+    robotis = list_robotis_devices()
+
+    if not robotis:
+        if windows_sees is False:
+            diag.windows_sees_no_robotis = True
+            diag.message_de = (
+                "Windows erkennt kein ROBOTIS-Gerät (VID 2F5D). "
+                "Bitte folgendes prüfen:\n"
+                "  • USB-Kabel ist eingesteckt UND ein Datenkabel (kein Ladekabel)\n"
+                "  • OpenRB-150 ist mit Strom versorgt (Netzteil eingesteckt)\n"
+                "  • Anderen USB-Port am PC versuchen (direkt am Mainboard, keinen Hub)\n"
+                "  • Im Geräte-Manager nach 'OpenRB' oder gelben Warndreiecken suchen"
+            )
+            diag.details = "Get-PnpDevice found no InstanceId matching VID_2F5D"
+            return diag
+
+        # Windows might be unavailable (Get-PnpDevice failed) OR Windows sees
+        # the device but usbipd doesn't yet — both end up here.
+        diag.usbipd_sees_no_robotis = True
+        diag.message_de = (
+            "usbipd hat keine ROBOTIS-Geräte gefunden. "
+            "Bitte USB-Kabel und Stromversorgung der Arme prüfen "
+            "und es erneut versuchen."
+            + (
+                "\n(Hinweis: Windows erkennt das Gerät — vermutlich ein Treiber-Problem. "
+                "Im Geräte-Manager nach gelben Warndreiecken suchen.)"
+                if windows_sees is True else ""
+            )
+        )
+        diag.details = (
+            f"usbipd list returned no VID 2F5D rows; "
+            f"Windows Get-PnpDevice saw VID_2F5D = {windows_sees}"
+        )
+        return diag
+
+    # 4. Try to attach every visible ROBOTIS device.
+    attached = []
+    attach_errors = []
+    for dev in robotis:
+        if dev.state == "Attached":
+            attached.append(dev)
+            continue
+        if attach_usb_to_wsl(dev.busid):
+            attached.append(dev)
+        else:
+            attach_errors.append(f"{dev.busid} ({dev.vid_pid})")
+
+    if not attached:
+        diag.attach_failed = True
+        diag.message_de = (
+            "Geräte gefunden, aber das Anhängen an die EduBotics-Umgebung "
+            "ist fehlgeschlagen. Bitte den Installer erneut ausführen, "
+            "damit die USB-Richtlinie eingerichtet wird."
+        )
+        diag.details = f"usbipd attach failed for: {', '.join(attach_errors)}"
+        return diag
+
+    # 5. Did /dev/serial/by-id/ populate inside the distro?
+    import time as _time
+    serial_paths: list[str] = []
+    for _ in range(10):
+        serial_paths = find_serial_paths_for_robotis()
+        if serial_paths:
+            break
+        _time.sleep(1)
+    if not serial_paths:
+        diag.no_serial_after_attach = True
+        diag.message_de = (
+            "Geräte sind angehängt, aber Linux sieht keinen seriellen Anschluss. "
+            "Bitte USB-Kabel auswechseln (manche Kabel übertragen keine Daten) "
+            "oder anderen USB-Port verwenden."
+        )
+        diag.details = (
+            f"Attached {[d.busid for d in attached]} but "
+            f"`ls /dev/serial/by-id/` empty after 10s poll"
+        )
+        return diag
+
+    # 6. Docker image present?
+    if image is not None:
+        try:
+            result = subprocess.run(
+                ["wsl", "-d", WSL_DISTRO_NAME, "--", "docker", "image", "inspect", image],
+                capture_output=True, text=True, timeout=15,
+                **_SUBPROCESS_KWARGS,
+            )
+            if result.returncode != 0:
+                diag.docker_image_missing = True
+                diag.message_de = (
+                    f"Docker-Image '{image}' ist noch nicht heruntergeladen. "
+                    "Bitte Internetverbindung prüfen und es erneut versuchen — "
+                    "EduBotics lädt das Image automatisch beim ersten Start."
+                )
+                diag.details = f"docker image inspect rc={result.returncode}"
+                return diag
+        except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+            diag.details = f"docker image inspect raised: {e}"
+
+    diag.ok = True
+    diag.message_de = (
+        "Alle Systeme einsatzbereit, aber identify_arm.py konnte die Arme nicht zuordnen. "
+        "Bitte Servo-IDs prüfen (Leader: 1-6, Follower: 11-16) und erneut versuchen."
+    )
+    diag.details = (
+        f"attached={[d.busid for d in attached]} serial_paths={serial_paths}"
+    )
+    return diag
+
+
+def get_diagnostics_log_path() -> str:
+    """Public accessor — GUI uses this to tell the student where to find the log."""
+    return _diagnostics_log_path()

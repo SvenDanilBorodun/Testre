@@ -9,6 +9,21 @@ param(
 
 $ErrorActionPreference = "Continue"
 
+# Mirror the diagnostics sink used by install_prerequisites.ps1 + configure_usbipd.ps1
+# so the verify step also leaves evidence behind for support.
+$DiagDir = Join-Path $env:LOCALAPPDATA "EduBotics"
+if (-not (Test-Path $DiagDir)) {
+    New-Item -ItemType Directory -Path $DiagDir -Force | Out-Null
+}
+$DiagLog = Join-Path $DiagDir "install_diagnostics.log"
+
+function Write-Diag {
+    param([string]$section, [string]$body)
+    $ts = (Get-Date).ToString("o")
+    Add-Content -Path $DiagLog -Value "`n=== $ts verify_system::$section ==="
+    Add-Content -Path $DiagLog -Value $body
+}
+
 function Write-Step  { param([string]$msg) Write-Host "`n>> $msg" -ForegroundColor Cyan }
 function Write-OK    { param([string]$msg) Write-Host "   OK: $msg" -ForegroundColor Green }
 function Write-FAIL  { param([string]$msg) Write-Host "   FAIL: $msg" -ForegroundColor Red }
@@ -17,6 +32,7 @@ function Write-WARN  { param([string]$msg) Write-Host "   WARN: $msg" -Foregroun
 $allOk = $true
 
 Write-Step "Verifying EduBotics installation..."
+Write-Host "   Diagnostics log: $DiagLog" -ForegroundColor Gray
 
 # 1. WSL2
 Write-Host "   Checking WSL2..." -ForegroundColor White
@@ -55,12 +71,65 @@ if ($distroListed) {
     Write-WARN "Skipped (distro missing)"
 }
 
-# 4. usbipd
+# 4. usbipd reachable + policy contains VID 2F5D
 Write-Host "   Checking usbipd..." -ForegroundColor White
+$usbipdOk = $false
 try {
     $ver = usbipd --version 2>&1
-    Write-OK "usbipd ($ver)"
-} catch { Write-FAIL "usbipd not found"; $allOk = $false }
+    if ($LASTEXITCODE -eq 0) {
+        Write-OK "usbipd ($ver)"
+        $usbipdOk = $true
+        Write-Diag "usbipd_version" $ver
+    } else {
+        Write-FAIL "usbipd not reachable (exit $LASTEXITCODE)"
+        $allOk = $false
+    }
+} catch {
+    Write-FAIL "usbipd not found"
+    $allOk = $false
+}
+
+if ($usbipdOk) {
+    try {
+        $policyOut = usbipd policy list 2>&1 | Out-String
+        Write-Diag "usbipd_policy_list" $policyOut
+        if ($policyOut -match "2F5D|2f5d") {
+            Write-OK "usbipd policy contains VID 2F5D rule"
+        } else {
+            Write-WARN "usbipd policy has no VID 2F5D rule — students may need admin rights to attach"
+            Write-Host "   (Re-run scripts\configure_usbipd.ps1 as Administrator to fix.)" -ForegroundColor Yellow
+        }
+    } catch {
+        Write-Diag "usbipd_policy_list" "raised: $_"
+    }
+
+    # USB bus reachability — does Windows itself see VID 2F5D right now?
+    # This is the ground truth: if Windows can't enumerate the device,
+    # nothing usbipd/WSL/Docker does will help.
+    Write-Host "   Checking whether Windows currently sees ROBOTIS-Geräte..." -ForegroundColor White
+    try {
+        $pnp = Get-PnpDevice -PresentOnly -ErrorAction Stop |
+               Where-Object { $_.InstanceId -like '*VID_2F5D*' }
+        if ($pnp) {
+            $names = ($pnp | ForEach-Object { $_.FriendlyName }) -join ", "
+            Write-OK "Windows sees ROBOTIS-Gerät(e): $names"
+            Write-Diag "pnp_at_verify" ($pnp | Select-Object Status, Class, FriendlyName, InstanceId | Out-String)
+        } else {
+            Write-WARN "Windows currently sees no ROBOTIS-Gerät (VID 2F5D)"
+            Write-Host "   This is normal if the arms are not plugged in yet." -ForegroundColor Gray
+            Write-Host "   Plug them in and re-run this script to verify the full chain." -ForegroundColor Gray
+            Write-Diag "pnp_at_verify" "no VID_2F5D devices present"
+        }
+    } catch {
+        Write-Diag "pnp_at_verify" "Get-PnpDevice raised: $_"
+    }
+
+    # Also capture usbipd list at verify time so support has the snapshot.
+    try {
+        $listOut = usbipd list 2>&1 | Out-String
+        Write-Diag "usbipd_list_at_verify" $listOut
+    } catch { }
+}
 
 # 5. Docker images
 # Read REGISTRY + IMAGE_TAG from docker/versions.env so this script checks
@@ -123,6 +192,7 @@ foreach ($file in $requiredFiles) {
 Write-Step "Verification complete!"
 if ($allOk) {
     Write-Host "   All checks passed. You're ready to go!" -ForegroundColor Green
+    Write-Diag "verify_summary" "PASS"
     exit 0
 } else {
     # Audit H23: previously this branch logged a yellow warning and
@@ -132,5 +202,7 @@ if ($allOk) {
     # step non-zero so the installer can surface a German error /
     # offer to re-run prerequisites.
     Write-Host "   Some checks failed. Review the output above." -ForegroundColor Yellow
+    Write-Host "   Full diagnostics: $DiagLog" -ForegroundColor Yellow
+    Write-Diag "verify_summary" "FAIL"
     exit 1
 }

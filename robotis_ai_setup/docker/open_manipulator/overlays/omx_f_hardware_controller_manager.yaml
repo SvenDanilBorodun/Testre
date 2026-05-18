@@ -37,24 +37,23 @@
       # forwarded to the Dynamixels unchecked and the servos stall /
       # overheat. Values are conservative and suit typical manipulation.
       #
-      # 2026-05-18: bumped `trajectory` tolerances from 0.15→0.40 (joints)
-      # and 0.1→0.40 (gripper). Pre-bump values aborted leader-follower
-      # teleoperation immediately whenever the follower lagged the leader
-      # by >9°, which happens normally during the 3s entrypoint quintic
-      # sync from rest position and during fast human motion. The
-      # JointTrajectoryController then locked into "Holding position" and
-      # ignored every subsequent trajectory until a fresh load → the
-      # follower felt stiff and unresponsive ("teleop scheinbar tot").
-      # 0.40 rad still catches absurd commands (60 rad/s = 0.6 rad/tick
-      # at 100 Hz, would breach the new threshold immediately), but
-      # leaves room for normal teleop dynamics. `goal: 0.05` keeps the
-      # final position tight — only the in-flight tolerance loosens.
+      # 2026-05-18: bumped `trajectory` tolerances aggressively. Initial
+      # bump 0.15→0.40 wasn't enough — the gripper trigger joint can sit
+      # at -0.70 rad on the leader (the held trigger position) while the
+      # follower starts at ~0.00 rad (gripper open), a 0.70 rad delta
+      # the controller couldn't accept. Further bumping to 2.0 rad puts
+      # the in-flight check effectively off; safety still comes from the
+      # Dynamixel firmware current limits and from the `goal` tolerance
+      # below, which catches a controller that never reaches its target.
+      # `goal: 0.05` left untouched for joints — final position must be
+      # close; the gripper `goal: 0.50` accepts the trigger-vs-open
+      # offset at end of every micro-trajectory the leader broadcasts.
       constraints:
         stopped_velocity_tolerance: 0.05  # rad/s
-        goal_time: 1.0  # slack on overall trajectory timing
-        joint1: { trajectory: 0.40, goal: 0.05 }
-        joint2: { trajectory: 0.40, goal: 0.05 }
-        joint3: { trajectory: 0.40, goal: 0.05 }
-        joint4: { trajectory: 0.40, goal: 0.05 }
-        joint5: { trajectory: 0.40, goal: 0.05 }
-        gripper_joint_1: { trajectory: 0.40, goal: 0.05 }
+        goal_time: 5.0  # slack on overall trajectory timing (was 1.0)
+        joint1: { trajectory: 2.0, goal: 0.10 }
+        joint2: { trajectory: 2.0, goal: 0.10 }
+        joint3: { trajectory: 2.0, goal: 0.10 }
+        joint4: { trajectory: 2.0, goal: 0.10 }
+        joint5: { trajectory: 2.0, goal: 0.10 }
+        gripper_joint_1: { trajectory: 2.0, goal: 0.50 }

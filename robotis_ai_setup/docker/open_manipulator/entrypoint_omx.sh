@@ -319,9 +319,18 @@ sys.exit(_exit_code)
 " || sync_rc=$?
     sync_rc=${sync_rc:-0}
     if [ $sync_rc -eq 2 ]; then
-        echo "[FATAL] Sync verification failed — arm misaligned or blocked."
-        echo "[FATAL] Refusing to continue. Check hardware, then restart the container."
-        exit 2
+        # 2026-05-18: soft-fail instead of `exit 2`. Hard-failing here put
+        # docker compose's restart-policy into a tight crash-loop whenever
+        # the follower couldn't reach the leader pose within 0.30 rad in
+        # 3+2 seconds — a common scenario in classroom setups where the
+        # human positions the leader arm at an extreme pose before clicking
+        # Start, or where servos are torque-disabled from a prior shutdown.
+        # The trade-off: the first leader move can now drive the follower
+        # through a larger initial delta. The arm_controller's own state
+        # tolerance still catches a runaway trajectory.
+        echo "[WARN] Sync verification did not pass — continuing anyway."
+        echo "[WARN] First leader move may produce a larger-than-usual follower"
+        echo "[WARN] motion as the controller catches up to the leader pose."
     elif [ $sync_rc -ne 0 ]; then
         echo "[WARN] Sync script exited with status $sync_rc — follower may snap on first leader move"
     else

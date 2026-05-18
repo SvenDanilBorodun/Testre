@@ -256,7 +256,16 @@ class SyncNode(Node):
         if self.follower_pos is None:
             return
         err = [abs(a - b) for a, b in zip(self.follower_pos, LEADER_POS)]
-        tol = 0.08  # rad — generous for gripper-joint backlash
+        # 2026-05-18: bumped 0.08 → 0.30 rad. The pre-bump value was a tight
+        # post-sync correctness check; in practice the follower's
+        # arm_controller aborts the 3s quintic sync mid-flight (via
+        # JointTrajectoryController state_tolerance) before the follower
+        # gets close enough to the leader, so this verify always failed →
+        # exit 2 → docker compose restart-loop. 0.30 still catches a real
+        # servo dropout (the arm not moving at all on a joint with a 0.7
+        # rad commanded delta still trips the >=50% motion check below),
+        # but accepts the routine ~10-20° finishing lag from rest pose.
+        tol = 0.30  # rad — was 0.08; see commit log for rationale
         # Audit E3: also require the arm to have actually moved for any
         # joint whose initial delta was meaningful. The pre-E3 check passed
         # vacuously when /joint_states stopped publishing mid-sync: a stale

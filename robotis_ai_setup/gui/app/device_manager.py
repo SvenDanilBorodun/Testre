@@ -267,6 +267,92 @@ def attach_all_robotis_devices() -> list[USBDevice]:
     return attached
 
 
+_SELF_HEAL_SCRIPT = r"""#!/bin/bash
+# EduBotics scan-time self-heal. Idempotent. Runs in two cases:
+#   1. start-dockerd.sh already loaded modules + started udev — we re-trigger
+#      udev to catch any device usbipd attached since the last trigger
+#      (no-op cost is ~50ms).
+#   2. The user is on a pre-2.3.1 rootfs where start-dockerd.sh did NOT
+#      load the modules. Loading them here unblocks the scan that's about
+#      to happen.
+set +e
+modprobe cdc_acm 2>/dev/null
+modprobe ftdi_sio 2>/dev/null
+modprobe cp210x 2>/dev/null
+modprobe ch341 2>/dev/null
+modprobe pl2303 2>/dev/null
+if [ -x /lib/systemd/systemd-udevd ] && ! pgrep -x systemd-udevd >/dev/null 2>&1; then
+    /lib/systemd/systemd-udevd --daemon 2>/dev/null
+    sleep 1
+fi
+udevadm trigger --action=add --subsystem-match=tty 2>/dev/null
+udevadm settle --timeout=3 2>/dev/null
+# Fallback: if /dev/serial/by-id/ still missing, build the symlinks
+# manually from sysfs. This handles pre-2.3.1 setups where systemd-udevd
+# is missing from the rootfs entirely.
+mkdir -p /dev/serial/by-id 2>/dev/null
+for tty in /dev/ttyACM* /dev/ttyUSB*; do
+    [ -e "$tty" ] || continue
+    name=$(basename "$tty")
+    if ls /dev/serial/by-id/ 2>/dev/null | grep -q "$name"; then
+        continue  # udev already linked this one
+    fi
+    syspath=$(readlink -f "/sys/class/tty/$name/device" 2>/dev/null) || continue
+    cur=$syspath
+    serial=""
+    manufacturer=""
+    product=""
+    while [ -n "$cur" ] && [ "$cur" != "/" ]; do
+        if [ -f "$cur/serial" ]; then
+            serial=$(cat "$cur/serial" 2>/dev/null)
+            manufacturer=$(cat "$cur/manufacturer" 2>/dev/null | tr ' ' '_')
+            product=$(cat "$cur/product" 2>/dev/null | tr ' ' '_')
+            break
+        fi
+        cur=$(dirname "$cur")
+    done
+    [ -n "$serial" ] || continue
+    link="/dev/serial/by-id/usb-${manufacturer}_${product}_${serial}-if00"
+    ln -sf "../../$name" "$link" 2>/dev/null
+done
+"""
+
+
+def self_heal_wsl_serial() -> dict:
+    """Heal the EduBotics distro's USB-Serial state.
+
+    Audit: this is the GUI-side counterpart to start-dockerd.sh's USB-
+    serial bring-up. New installs (v2.3.1+) get the same logic on every
+    distro boot, but classrooms running older bundles never picked up the
+    fix and would silently fail with "/dev/ttyACM* missing" the moment
+    `wsl --shutdown` ran (kernel modules unload, udev never started,
+    by-id/ symlinks gone). This helper runs the same heal sequence from
+    the GUI's scan path so an upgrade to the .exe alone is enough to
+    rescue students on stale rootfs.
+
+    Returns a small diagnostic dict for the install_diagnostics.log so
+    a teacher can see *which* layer needed repair on each scan.
+    """
+    diag = {"ran": False, "stdout": "", "stderr": "", "rc": None}
+    try:
+        result = subprocess.run(
+            ["wsl", "-d", WSL_DISTRO_NAME, "--", "bash", "-c", _SELF_HEAL_SCRIPT],
+            capture_output=True, text=True, timeout=15,
+            **_SUBPROCESS_KWARGS,
+        )
+        diag["ran"] = True
+        diag["rc"] = result.returncode
+        diag["stdout"] = (result.stdout or "")[-500:]
+        diag["stderr"] = (result.stderr or "")[-500:]
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        diag["stderr"] = f"{type(exc).__name__}: {exc}"
+    _append_diag(
+        "self_heal_wsl_serial",
+        f"rc={diag['rc']} stdout={diag['stdout']!r} stderr={diag['stderr']!r}",
+    )
+    return diag
+
+
 def find_serial_paths_for_robotis() -> list[str]:
     """Find /dev/serial/by-id/ paths for EduBotics devices inside WSL2."""
     all_serial = wsl_bridge.list_serial_devices()
@@ -339,6 +425,13 @@ def scan_and_identify_arms(image: str) -> tuple[Optional[ArmDevice], Optional[Ar
     leader = None
     follower = None
 
+    # 0. Self-heal the distro before we even look. On older rootfs (pre-2.3.1)
+    # the kernel modules for USB-Serial don't auto-load and systemd-udevd
+    # never starts. Without this call, the scan would race through attach +
+    # by-id poll and time out on a distro that just needed `modprobe cdc_acm`.
+    # No-op cost on healthy 2.3.1+ rootfs is ~50ms.
+    self_heal_wsl_serial()
+
     # 1. Attach all EduBotics USB devices to WSL2
     attached = attach_all_robotis_devices()
     if not attached:
@@ -351,6 +444,12 @@ def scan_and_identify_arms(image: str) -> tuple[Optional[ArmDevice], Optional[Ar
         if serial_paths:
             break
         time.sleep(1)
+    if not serial_paths:
+        # Last-ditch: maybe udev silently dropped the events. Run self-heal
+        # again now that the USB devices ARE attached — this guarantees
+        # symlinks get rebuilt from sysfs as the fallback path.
+        self_heal_wsl_serial()
+        serial_paths = find_serial_paths_for_robotis()
     if not serial_paths:
         return None, None
 
@@ -489,6 +588,13 @@ def diagnose_usb_environment(image: Optional[str] = None) -> UsbDiagnosis:
         )
         diag.details = f"wsl --list --quiet does not contain {WSL_DISTRO_NAME!r}"
         return diag
+
+    # 2b. Self-heal: load USB-Serial kernel modules + start udev. If the
+    # rootfs is older than v2.3.1 (no auto-load in start-dockerd.sh) the
+    # scan failed because /dev/ttyACM* was never created — this diagnose
+    # call should fix that BEFORE we report a misleading "kein Gerät"
+    # error to the student.
+    self_heal_wsl_serial()
 
     # 3. Does Windows itself see a VID_2F5D device?
     windows_sees = _windows_sees_robotis_vid()

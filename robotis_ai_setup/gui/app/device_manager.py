@@ -200,27 +200,42 @@ def list_robotis_devices() -> list[USBDevice]:
 def attach_usb_to_wsl(busid: str, retries: int = 3) -> bool:
     """Attach a USB device to the EduBotics WSL2 distro via usbipd, with retry.
 
-    With usbipd 4.x+ policy configured, this does not require admin.
+    With usbipd 5.x AutoBind policy configured, this does not require admin.
     Retries on failure because usbipd can be busy if multiple attaches
     happen in quick succession.
 
     Pins the target distro so multi-distro dev machines attach deterministically.
+    usbipd 5.x takes the distro as the value of --wsl (positional). The older
+    `--wsl --distribution <name>` form is rejected by 5.x with
+    "Unrecognized command or argument '<name>'" — keep --wsl <distro> adjacent.
     """
     import time
+    last_stderr = ""
     for attempt in range(retries):
         try:
             result = subprocess.run(
-                ["usbipd", "attach", "--wsl", "--distribution", WSL_DISTRO_NAME,
-                 "--busid", busid],
+                ["usbipd", "attach", "--wsl", WSL_DISTRO_NAME, "--busid", busid],
                 capture_output=True, text=True, timeout=15,
                 **_SUBPROCESS_KWARGS,
             )
             if result.returncode == 0:
                 return True
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            return False  # usbipd not installed — no point retrying
+            last_stderr = (result.stderr or result.stdout or "").strip()
+        except FileNotFoundError:
+            _append_diag(
+                "attach_usb_to_wsl",
+                f"busid={busid}: usbipd.exe not on PATH",
+            )
+            return False
+        except subprocess.TimeoutExpired:
+            last_stderr = "subprocess timeout after 15s"
         if attempt < retries - 1:
             time.sleep(1)
+    _append_diag(
+        "attach_usb_to_wsl",
+        f"busid={busid} distro={WSL_DISTRO_NAME} failed after {retries} attempts\n"
+        f"stderr: {last_stderr}",
+    )
     return False
 
 

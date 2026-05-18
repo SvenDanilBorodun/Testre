@@ -152,7 +152,7 @@ try {
 
 if ($addedCount -gt 0) {
     Write-Host "   EduBotics USB-Geräte can now be attached to the EduBotics WSL2 distro without admin rights." -ForegroundColor Green
-    Write-Host "   (usage: usbipd attach --wsl --distribution EduBotics --busid <BUSID>)" -ForegroundColor Gray
+    Write-Host "   (usage: usbipd attach --wsl EduBotics --busid <BUSID>)" -ForegroundColor Gray
 } elseif ($addedCount -eq 0 -and $existingPolicies -match $ROBOTIS_VID) {
     Write-Host "   All EduBotics policies already configured." -ForegroundColor Green
 } else {
@@ -206,7 +206,7 @@ if (-not $smokeBusid) {
 }
 
 Write-Step "Attach smoke test on busid=$smokeBusid"
-$attachOut = usbipd attach --wsl --distribution $DistroName --busid $smokeBusid 2>&1 | Out-String
+$attachOut = usbipd attach --wsl $DistroName --busid $smokeBusid 2>&1 | Out-String
 Write-Diag "attach_smoke" "attach rc=$LASTEXITCODE`n$attachOut"
 
 if ($LASTEXITCODE -eq 0) {

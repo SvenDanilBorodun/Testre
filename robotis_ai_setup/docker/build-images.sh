@@ -19,6 +19,16 @@
 #   robotis/open-manipulator:amd64-4.1.4
 # By default this script pulls it. To force a local rebuild from source instead:
 #   BUILD_BASE=1 ./build-images.sh
+#
+# ── --no-cache --pull on every buildx invocation ──
+# Every `docker buildx build` below carries `--no-cache --pull`. This enforces
+# the CLAUDE.md "Release & Deployment Pipeline" mandate: images must always
+# contain EVERYTHING from the current working tree, never reuse a stale
+# BuildKit cache layer, and always re-fetch the base image from the registry
+# (so a locally-stale ROBOTIS base can't slip into the published image).
+# The cost is ~3-5 extra minutes per build; the win is that every push is
+# bit-for-bit reproducible from the current source state + the current
+# registry-side base, with zero risk of cache-poisoned layers.
 
 set -euo pipefail
 
@@ -195,7 +205,7 @@ cp "${PHYSICAL_AI_TOOLS_DIR}/physical_ai_server/physical_ai_server/workflow/coco
 # `docker push` follows once the smoke check passes. buildx --load writes
 # into the daemon store (vs containerd-snapshotter) so the subsequent
 # push reads the same content we just smoke-tested.
-docker buildx build --platform linux/amd64 --load \
+docker buildx build --platform linux/amd64 --load --no-cache --pull \
     $BUILD_ARGS \
     -t "${REGISTRY}/physical-ai-manager:latest" \
     -f "${PHYSICAL_AI_TOOLS_DIR}/physical_ai_manager/Dockerfile" \
@@ -247,7 +257,7 @@ if [ "$PLATFORM" = "arm64" ] && [ "$BUILD_BASE_ARM64" = "1" ]; then
     # `docker/s6-services/` which live one directory UP from the
     # Dockerfile itself. A context of physical_ai_server/ produces
     # "/docker/s6-services/common/ros2_service_finish.sh: not found".
-    docker buildx build $DOCKER_BUILDX_ARGS \
+    docker buildx build $DOCKER_BUILDX_ARGS --no-cache --pull \
         -t "${PAS_BASE_IMAGE}" \
         -f "${PHYSICAL_AI_TOOLS_DIR}/physical_ai_server/Dockerfile.arm64" \
         "${PHYSICAL_AI_TOOLS_DIR}/"
@@ -298,7 +308,7 @@ echo ">> Building physical_ai_server thin layer (patches + interface rebuild)...
 # base via the Dockerfile default). For arm64, the buildx --push flag
 # bypasses the Docker Desktop dual-store gotcha (CLAUDE.md §13.4.bis).
 if [ "$PLATFORM" = "arm64" ]; then
-    docker buildx build $DOCKER_BUILDX_ARGS \
+    docker buildx build $DOCKER_BUILDX_ARGS --no-cache --pull \
         --build-arg BASE_IMAGE="${PAS_BASE_IMAGE}" \
         -t "${PAS_OUT_REPO}:${IMAGE_TAG_SUFFIX}" \
         -f "${SCRIPT_DIR}/physical_ai_server/Dockerfile" \
@@ -313,7 +323,7 @@ else
     # store. --platform linux/amd64 is still needed on Apple Silicon
     # hosts where the default builder would target arm64; harmless on
     # native Linux/amd64.
-    docker buildx build --platform linux/amd64 --load \
+    docker buildx build --platform linux/amd64 --load --no-cache --pull \
         --build-arg BASE_IMAGE="${PAS_BASE_IMAGE}" \
         -t "${PAS_OUT_REPO}:${IMAGE_TAG_SUFFIX}" \
         -f "${SCRIPT_DIR}/physical_ai_server/Dockerfile" \
@@ -330,7 +340,7 @@ echo "   OK: physical-ai-server built (with patches)"
 if [ "$PLATFORM" = "arm64" ] && [ "$BUILD_BASE_ARM64" = "1" ]; then
     echo ""
     echo ">> Building open_manipulator arm64 base ${OMX_BASE_IMAGE} from upstream sources..."
-    docker buildx build $DOCKER_BUILDX_ARGS \
+    docker buildx build $DOCKER_BUILDX_ARGS --no-cache --pull \
         -t "${OMX_BASE_IMAGE}" \
         -f "${OPEN_MANIPULATOR_DIR}/docker/Dockerfile" \
         "${OPEN_MANIPULATOR_DIR}/docker/"
@@ -340,7 +350,7 @@ elif [ "$PLATFORM" = "amd64" ] && [ "$BUILD_BASE" = "1" ]; then
     echo ">> Building open_manipulator amd64 base from source (this takes ~40 min)..."
     # CLAUDE.md §13.4.bis: --load so subsequent `docker push` (if any)
     # reads from the daemon store rather than the containerd snapshotter.
-    docker buildx build --platform linux/amd64 --load \
+    docker buildx build --platform linux/amd64 --load --no-cache --pull \
         -t "${OMX_BASE_IMAGE}" \
         -f "${OPEN_MANIPULATOR_DIR}/docker/Dockerfile" \
         "${OPEN_MANIPULATOR_DIR}/docker/"
@@ -363,7 +373,7 @@ fi
 echo ""
 echo ">> Building open_manipulator thin layer..."
 if [ "$PLATFORM" = "arm64" ]; then
-    docker buildx build $DOCKER_BUILDX_ARGS \
+    docker buildx build $DOCKER_BUILDX_ARGS --no-cache --pull \
         --build-arg BASE_IMAGE="${OMX_BASE_IMAGE}" \
         -t "${OMX_OUT_REPO}:${IMAGE_TAG_SUFFIX}" \
         -f "${SCRIPT_DIR}/open_manipulator/Dockerfile" \
@@ -374,7 +384,7 @@ else
     # built (avoiding the Docker Desktop dual-store gotcha where
     # `docker build` writes containerd and `docker push` reads daemon).
     # --platform linux/amd64 is still needed on Apple Silicon hosts.
-    docker buildx build --platform linux/amd64 --load \
+    docker buildx build --platform linux/amd64 --load --no-cache --pull \
         --build-arg BASE_IMAGE="${OMX_BASE_IMAGE}" \
         -t "${OMX_OUT_REPO}:${IMAGE_TAG_SUFFIX}" \
         -f "${SCRIPT_DIR}/open_manipulator/Dockerfile" \

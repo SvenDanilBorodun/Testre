@@ -16,7 +16,9 @@ Mode selection is per-block in the workflow interpreter:
   label = the German colour name. Audit F59 fixed the misleading "HSV"
   reference in this docstring — the implementation has been LAB-space
   since the color-profile rewrite.
-- ``yolo+color``: YOLOX-tiny ONNX inference at 640x640 letterbox; if a
+- ``yolo+color``: YOLOX-tiny ONNX inference at 416x416 letterbox (matches the
+  pinned yolox_tiny.onnx input shape — earlier prose said 640x640 but the
+  released ONNX is 416-input; B1 audit fix 2026-05-18); if a
   ``coco_class`` filter is supplied, only that class is returned; if a
   ``color`` filter is also supplied, a 10x10 px HSV patch around the bbox
   centre is sampled and the detection is kept only when the patch falls
@@ -64,7 +66,7 @@ DFINE_ONNX_PATH = Path(os.environ.get('EDUBOTICS_DFINE_ONNX', '/opt/edubotics/df
 # Which ONNX file we actually load — currently always YOLOX-tiny.
 _ACTIVE_ONNX_PATH = YOLOX_ONNX_PATH
 
-YOLOX_INPUT_SIZE = (640, 640)
+YOLOX_INPUT_SIZE = (416, 416)
 YOLOX_CONFIDENCE_THRESHOLD = 0.30
 YOLOX_NMS_IOU_THRESHOLD = 0.45
 
@@ -267,8 +269,8 @@ class Perception:
         class_ids = class_ids[keep]
         confidences = max_scores[keep]
 
-        # Boxes are now at full 640×640 stride in padded image
-        # coordinates. Convert to xyxy for NMS / cropping.
+        # Boxes are now at full YOLOX_INPUT_SIZE (currently 416×416) stride in
+        # padded image coordinates. Convert to xyxy for NMS / cropping.
         cx = boxes_xywh[:, 0]
         cy = boxes_xywh[:, 1]
         w = boxes_xywh[:, 2]

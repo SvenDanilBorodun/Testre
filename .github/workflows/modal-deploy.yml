@@ -145,11 +145,30 @@ jobs:
       - name: Install Modal SDK
         run: python -m pip install --upgrade pip && python -m pip install 'modal>=1.4,<2'
       - name: Authenticate Modal CLI
-        # Explicit `modal token set` writes ~/.modal.toml with the
-        # default profile, which is more reliable than env-var auto
-        # detection (which can fail on edge cases like an empty
-        # MODAL_PROFILE var being set to "" instead of unset).
-        run: modal token set --token-id "$MODAL_TOKEN_ID" --token-secret "$MODAL_TOKEN_SECRET"
+        # Strip whitespace from secrets in case they were pasted with
+        # trailing newlines (a common GH secrets UI gotcha). Diagnose
+        # the lengths so we can spot if a secret is malformed without
+        # leaking its value.
+        run: |
+          set -e
+          MODAL_TOKEN_ID_CLEAN=$(printf '%s' "$MODAL_TOKEN_ID" | tr -d '[:space:]')
+          MODAL_TOKEN_SECRET_CLEAN=$(printf '%s' "$MODAL_TOKEN_SECRET" | tr -d '[:space:]')
+          echo "  raw ID length:     $(printf '%s' "$MODAL_TOKEN_ID" | wc -c)"
+          echo "  clean ID length:   ${#MODAL_TOKEN_ID_CLEAN}  (expect ~25, starts with ak-: ${MODAL_TOKEN_ID_CLEAN:0:3})"
+          echo "  raw sec length:    $(printf '%s' "$MODAL_TOKEN_SECRET" | wc -c)"
+          echo "  clean sec length:  ${#MODAL_TOKEN_SECRET_CLEAN}  (expect ~25, starts with as-: ${MODAL_TOKEN_SECRET_CLEAN:0:3})"
+          if [ "${MODAL_TOKEN_ID_CLEAN:0:3}" != "ak-" ]; then
+            echo "::error::MODAL_TOKEN_ID secret doesn't start with 'ak-' (got '${MODAL_TOKEN_ID_CLEAN:0:3}')"
+            exit 1
+          fi
+          if [ "${MODAL_TOKEN_SECRET_CLEAN:0:3}" != "as-" ]; then
+            echo "::error::MODAL_TOKEN_SECRET secret doesn't start with 'as-' (got '${MODAL_TOKEN_SECRET_CLEAN:0:3}')"
+            exit 1
+          fi
+          modal token set \
+            --token-id "$MODAL_TOKEN_ID_CLEAN" \
+            --token-secret "$MODAL_TOKEN_SECRET_CLEAN" \
+            --no-verify
       - name: Verify Modal CLI auth
         run: |
           set -e
@@ -197,7 +216,14 @@ jobs:
       - name: Install Modal SDK
         run: python -m pip install --upgrade pip && python -m pip install 'modal>=1.4,<2'
       - name: Authenticate Modal CLI
-        run: modal token set --token-id "$MODAL_TOKEN_ID" --token-secret "$MODAL_TOKEN_SECRET"
+        run: |
+          set -e
+          MODAL_TOKEN_ID_CLEAN=$(printf '%s' "$MODAL_TOKEN_ID" | tr -d '[:space:]')
+          MODAL_TOKEN_SECRET_CLEAN=$(printf '%s' "$MODAL_TOKEN_SECRET" | tr -d '[:space:]')
+          modal token set \
+            --token-id "$MODAL_TOKEN_ID_CLEAN" \
+            --token-secret "$MODAL_TOKEN_SECRET_CLEAN" \
+            --no-verify
       - name: Verify Modal CLI auth
         run: |
           set -e

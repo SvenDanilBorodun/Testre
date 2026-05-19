@@ -132,6 +132,24 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0  # build-images.sh greps git log for BUILD_SHA
+      - name: Free up runner disk
+        # ubuntu-latest ships with ~14 GB free on /, but physical-ai-server
+        # builds to ~15.5 GB. Without freeing pre-installed Android SDK +
+        # dotnet + Haskell + boost (~30 GB total), the amd64 build OOM-disks
+        # at ~70% through. arm64 is 7.4 GB so it fits — only run the clean
+        # on amd64 to keep the arm64 build fast.
+        if: matrix.platform == 'amd64'
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be  # v1.3.1
+        with:
+          tool-cache: false        # keep node/python — used elsewhere
+          android: true            # reclaims ~17 GB
+          dotnet: true             # reclaims ~2 GB
+          haskell: true            # reclaims ~5 GB
+          large-packages: true     # reclaims ~3 GB (mongodb, etc.)
+          docker-images: false     # we need fresh space; nothing to keep
+          swap-storage: true       # reclaims ~4 GB swap file
+      - name: Show available disk
+        run: df -h /
       - name: Compute SOURCE_DATE_EPOCH from commit
         # SOURCE_DATE_EPOCH makes image timestamps deterministic for a
         # given commit. Two CI runs on the same SHA produce literally

@@ -24,11 +24,13 @@ on:
     paths:
       - "robotis_ai_setup/supabase/migrations/**"
       - "robotis_ai_setup/supabase/config.toml"
+      - ".github/workflows/supabase-migrate.yml"
   pull_request:
     types: [opened, synchronize, reopened, closed]
     paths:
       - "robotis_ai_setup/supabase/migrations/**"
       - "robotis_ai_setup/supabase/config.toml"
+      - ".github/workflows/supabase-migrate.yml"
   workflow_call:
     # Allows release.yml to invoke this as a reusable workflow.
     inputs:

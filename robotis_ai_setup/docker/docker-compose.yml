@@ -1,3 +1,7 @@
+# Compose stack run inside the EduBotics WSL distro on student PCs (amd64)
+# and on the classroom Jetson (arm64; via the -jetson images per service).
+# Image tags are resolved from ${IMAGE_TAG:-latest}; the GUI updates the
+# tag via versions.env. See docs/deploy/PIPELINE.md for the build pipeline.
 networks:
   ros_net:
     driver: bridge

@@ -304,6 +304,36 @@ want them still available.
 
 ---
 
+## Known issue: supabase-migrate CI
+
+**Status:** `apply-production` job consistently fails at step 5 "Apply pending migrations" since 2026-05-19. Tried `--db-url`, `--linked --password`, all variants — without admin GH-Actions log access we can't see the exact CLI error. Production is unaffected (failure is at the CLI call, no partial DDL).
+
+**Workaround for applying new migrations:**
+
+```bash
+# Option A: from your terminal (the path CI was meant to automate)
+cd robotis_ai_setup/supabase
+supabase link --project-ref fnnbysrjkfugsqzwcksd
+# When prompted for password, paste the postgres user password from
+# https://supabase.com/dashboard/project/fnnbysrjkfugsqzwcksd/settings/database
+supabase db push --linked --include-all
+```
+
+```bash
+# Option B: paste the migration into a Claude conversation and ask
+# Claude to apply via the Supabase MCP. Records to schema_migrations
+# table just like supabase db push would.
+```
+
+**To fix next session:**
+
+1. Generate a fine-grained GitHub PAT at https://github.com/settings/personal-access-tokens/new
+   - Repository access: only this repo
+   - Permissions: `Actions: Read`
+2. `gh auth login --with-token < /path/to/pat`
+3. `gh run view <failed-run-id> --log-failed | grep -A20 "Apply pending"` — surfaces the actual error
+4. Push the targeted fix
+
 ## Troubleshooting
 
 ### CI failure — "workflow_call not defined"

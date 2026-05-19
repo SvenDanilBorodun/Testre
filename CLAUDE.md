@@ -96,11 +96,17 @@ The LeRobot 5-site contract is now trust-on-PR-review (the `lerobot-sha-check` j
 
 Five workflows in `.github/workflows/` are the canonical path for four surfaces:
 
-- `supabase-migrate.yml` — Supabase migrations (`supabase db push` against project `fnnbysrjkfugsqzwcksd`)
+- `supabase-migrate.yml` — Supabase migrations (`supabase db push` against project `fnnbysrjkfugsqzwcksd`). **CI currently broken** — see "Supabase migration CI: known issue" below.
 - `railway-deploy-cloud-api.yml` — FastAPI to `scintillating-empathy` service
 - `railway-deploy-teacher-web.yml` — React SPA to `teacher-web` service
 - `docker-publish.yml` — three production images to `nettername/*` Docker Hub
 - `release.yml` — top-level dispatcher that fires all four in the golden order on tag pushes
+
+**Supabase migration CI: known issue.** The `supabase db push` step in `apply-production` consistently fails on first runs (CLI auth, `--db-url` parsing, or `--linked --password` quirk — couldn't pin without admin GH-Actions log access). Until fixed:
+
+- **Apply new migrations via either** (a) `supabase db push --linked --password "$DB_PASSWORD"` from your terminal after `supabase link --project-ref fnnbysrjkfugsqzwcksd`, OR (b) Claude's Supabase MCP `apply_migration` tool from chat. Both update `supabase_migrations.schema_migrations` correctly.
+- Production schema state after CI failure is unchanged (the failure is at step 5 before any SQL is sent).
+- Investigation next session: get a fine-grained GH PAT with `Actions: Read`, install `gh auth login --with-token`, read the actual error log on the failed step.
 
 **Modal apps (`edubotics-training` + `edubotics-vision`) deploy MANUALLY.** The Modal image build happens in Modal's infrastructure (not on GH runners), and the CI auth + image-build feedback loop is slow to debug remotely. Until we have a strong reason to move Modal into CI, the operator owns it:
 

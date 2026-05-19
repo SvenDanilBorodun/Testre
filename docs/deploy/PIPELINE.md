@@ -240,12 +240,25 @@ Refuses if the file doesn't exist.
 
 ### Modal rollback
 
+Modal is deployed manually (not via CI). Rollback procedure:
+
 ```bash
-# Redeploy a known-good SHA:
-gh workflow run modal-deploy.yml -f app=both -f ref=<old-good-sha> -f reason="rollback"
+# Check out the known-good code in the modal_training/ directory only,
+# leaving the rest of your working tree alone:
+git checkout <old-good-sha> -- robotis_ai_setup/modal_training/
+
+# Redeploy
+cd robotis_ai_setup/modal_training
+modal deploy modal_app.py
+modal deploy vision_app.py
+cd -
+
+# Restore your working tree
+git checkout HEAD -- robotis_ai_setup/modal_training/
 ```
 
-Modal keeps no version history; rollback is a re-deploy.
+Modal keeps no version history; rollback is a re-deploy from the
+older source.
 
 ### Railway rollback (cloud-api or teacher-web)
 
@@ -342,7 +355,7 @@ Railway dashboard, then re-run W1, then re-run W3.
 | Event | Workflows fired |
 |---|---|
 | `push` to main, paths match `supabase/migrations/**` | `supabase-migrate.yml::apply-production` |
-| `push` to main, paths match `modal_training/**` | `modal-deploy.yml` |
+| `push` to main, paths match `modal_training/**` | _(none — operator deploys Modal manually)_ |
 | `push` to main, paths match `cloud_training_api/**` | `railway-deploy-cloud-api.yml` |
 | `push` to main, paths match `physical_ai_manager/**` | `railway-deploy-teacher-web.yml` |
 | `push` to main, paths match docker / open_manipulator / physical_ai_tools | `docker-publish.yml` |

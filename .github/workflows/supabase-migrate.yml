@@ -13,9 +13,10 @@ name: supabase-migrate
 #
 # This is W1 in docs/deploy/PIPELINE.md (or CLAUDE.md §pipeline). It is
 # the first link in the golden order:
-#     W1 supabase-migrate ──► W2 modal-deploy ──► W3 railway-deploy-cloud-api
-#                                              ──► W4 railway-deploy-teacher-web
-#                                              ──► W5 docker-publish
+#     W1 supabase-migrate ──► W2 railway-deploy-cloud-api
+#                          ──► W3 railway-deploy-teacher-web
+#                          ──► W4 docker-publish
+# Modal apps deploy manually — see CLAUDE.md Rule §6.
 
 on:
   push:

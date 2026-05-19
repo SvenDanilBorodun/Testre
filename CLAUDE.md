@@ -90,7 +90,7 @@ The SHA `989f3d05ba47f872d75c587e76838e9cc574857a` must agree across:
 
 Bumping LeRobot is a **5-place change in one PR**. Modal also force-reinstalls torch+torchvision from `https://download.pytorch.org/whl/cu121` and uninstalls `torchcodec` — without that, pip picks `cu130` wheels that crash the cu121 base.
 
-The `lerobot-sha-check` job in `.github/workflows/modal-deploy.yml` enforces three of these (modal_app.py, CLAUDE.md, physical_ai_server/Dockerfile short-prefix). The other two (`lerobot/` snapshot + `meta/info.json`) are still trust-on-PR-review.
+The LeRobot 5-site contract is now trust-on-PR-review (the `lerobot-sha-check` job was removed alongside `modal-deploy.yml` when Modal moved to manual deploys). Any bump must touch all 5 sites in one PR.
 
 ### 6. CI/CD deploys
 
@@ -191,7 +191,7 @@ python -m compileall -q robotis_ai_setup/gui robotis_ai_setup/scripts \
 **Always via GitHub Actions** (per non-negotiable rule §6). The golden order is encoded as `needs:` edges in `.github/workflows/release.yml`:
 
 ```
-W1 supabase-migrate ──► W2 modal-deploy ──► W3 railway-deploy-cloud-api ──► W4 railway-deploy-teacher-web ──► W5 docker-publish
+W1 supabase-migrate ──► W2 railway-deploy-cloud-api ──► W3 railway-deploy-teacher-web ──► W4 docker-publish
 ```
 
 For partial changes, push to `main` with changes scoped to one surface and that surface's path-filtered workflow fires by itself. For coordinated whole-stack releases, `git tag vX.Y.Z && git push --tags` runs the full chain via `release.yml`.

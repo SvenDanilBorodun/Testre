@@ -1,0 +1,263 @@
+name: supabase-migrate
+
+# Applies Supabase migrations from robotis_ai_setup/supabase/migrations/
+# to the production project (fnnbysrjkfugsqzwcksd, "edubotics").
+#
+# Three triggers:
+#   - push to main + path-filter           → apply to production
+#   - PR opened/synchronize + path-filter  → apply to an ephemeral
+#                                            Supabase Branch and probe
+#                                            the schema fingerprint
+#   - PR closed                            → tear down the ephemeral branch
+#   - workflow_dispatch                    → manual apply OR rollback
+#
+# This is W1 in docs/deploy/PIPELINE.md (or CLAUDE.md §pipeline). It is
+# the first link in the golden order:
+#     W1 supabase-migrate ──► W2 modal-deploy ──► W3 railway-deploy-cloud-api
+#                                              ──► W4 railway-deploy-teacher-web
+#                                              ──► W5 docker-publish
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "robotis_ai_setup/supabase/migrations/**"
+      - "robotis_ai_setup/supabase/config.toml"
+  pull_request:
+    types: [opened, synchronize, reopened, closed]
+    paths:
+      - "robotis_ai_setup/supabase/migrations/**"
+      - "robotis_ai_setup/supabase/config.toml"
+  workflow_call:
+    # Allows release.yml to invoke this as a reusable workflow.
+    inputs:
+      target:
+        description: "production | branch (defaults to production)"
+        required: false
+        default: "production"
+        type: string
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Where to apply"
+        required: true
+        default: "production"
+        type: choice
+        options:
+          - production
+          - branch
+      rollback_to:
+        description: "Optional: filename stem from rollback/ to apply in reverse (e.g. '021_workgroup_memberships_realtime_and_owner_check'). Leave empty to apply forward migrations."
+        required: false
+        type: string
+      reason:
+        description: "Audit reason — shown in the workflow run name"
+        required: true
+        type: string
+
+concurrency:
+  # Project-scoped (NOT ref-scoped) so parallel calls from main pushes
+  # and release.yml invocations against the same DB serialise. Never
+  # abort an in-flight migration.
+  group: supabase-migrate-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  pull-requests: write  # for the apply-branch job to comment on the PR
+
+jobs:
+  validate:
+    name: Lint + parse migrations
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+      - name: List migrations to be applied
+        working-directory: robotis_ai_setup/supabase
+        run: |
+          echo ">> Migrations in repo:"
+          find migrations -maxdepth 1 -name '*.sql' -type f -printf '%f\n' | sort
+      - name: Syntax-check every SQL file
+        working-directory: robotis_ai_setup/supabase/migrations
+        run: |
+          # The Supabase CLI's `db lint` requires a linked project. For a
+          # bare syntax pass we use pglast (PostgreSQL grammar via libpg_query).
+          python -m pip install --quiet 'pglast==6.*'
+          set -e
+          for f in *.sql; do
+            echo ">> Parsing $f"
+            python -c "import pglast, sys; pglast.parse_sql(open('$f').read())" \
+              || { echo "::error::Syntax error in $f"; exit 1; }
+          done
+          echo "All migrations parse cleanly."
+
+  apply-branch:
+    name: Apply to ephemeral Supabase Branch (PR)
+    if: github.event_name == 'pull_request' && (github.event.action == 'opened' || github.event.action == 'synchronize' || github.event.action == 'reopened')
+    needs: [validate]
+    runs-on: ubuntu-latest
+    env:
+      SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+      - name: Link to the production project (creates branches under it)
+        working-directory: robotis_ai_setup/supabase
+        run: supabase link --project-ref ${{ secrets.SUPABASE_PROJECT_REF }}
+      - name: Create / reuse PR branch and capture its DB URL
+        id: branch
+        working-directory: robotis_ai_setup/supabase
+        run: |
+          set -e
+          BRANCH_NAME="pr-${{ github.event.pull_request.number }}"
+          # Idempotent: reuse if it exists (PR re-pushed); else create.
+          if ! supabase branches list -o json | python3 -c "import sys,json; print(any(b.get('name')=='${BRANCH_NAME}' for b in json.load(sys.stdin)))" | grep -q True; then
+            supabase branches create "${BRANCH_NAME}" --region eu-west-1
+          fi
+          # Capture the branch's Postgres connection string from JSON output.
+          BRANCH_JSON=$(supabase branches get "${BRANCH_NAME}" -o json)
+          BRANCH_DB_URL=$(echo "$BRANCH_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('postgres_connection_string') or d.get('db_url') or '')")
+          BRANCH_API_URL=$(echo "$BRANCH_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('api_url') or d.get('url') or '')")
+          if [ -z "$BRANCH_DB_URL" ]; then
+            echo "::error::Could not extract branch DB URL from supabase branches get output"
+            echo "$BRANCH_JSON" | head -c 500
+            exit 1
+          fi
+          echo "::add-mask::$BRANCH_DB_URL"
+          # Pass to subsequent steps without leaking into the step log.
+          {
+            echo "branch_db_url=${BRANCH_DB_URL}"
+            echo "branch_api_url=${BRANCH_API_URL}"
+            echo "branch_name=${BRANCH_NAME}"
+          } >> "$GITHUB_OUTPUT"
+      - name: Push migrations to PR branch (targets branch DB, not prod)
+        working-directory: robotis_ai_setup/supabase
+        run: supabase db push --db-url "${{ steps.branch.outputs.branch_db_url }}"
+      - name: Comment on PR with branch URL + status
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const branchUrl = "${{ steps.branch.outputs.branch_api_url }}";
+            const branchName = "${{ steps.branch.outputs.branch_name }}";
+            const body = [
+              "## Supabase PR-Branch Migration applied ✅",
+              "",
+              `**Branch:** \`${branchName}\``,
+              `**URL:** ${branchUrl}`,
+              "",
+              "Migrations were applied to an ephemeral Supabase Branch. The",
+              "branch will be torn down automatically when this PR closes.",
+              "",
+              "If you need to inspect the schema, the Supabase dashboard's",
+              "branch selector exposes this branch directly.",
+            ].join("\n");
+            github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body,
+            });
+
+  teardown-branch:
+    name: Tear down PR branch on close
+    if: github.event_name == 'pull_request' && github.event.action == 'closed'
+    runs-on: ubuntu-latest
+    env:
+      SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+      - name: Link
+        working-directory: robotis_ai_setup/supabase
+        run: supabase link --project-ref ${{ secrets.SUPABASE_PROJECT_REF }}
+      - name: Delete PR branch
+        working-directory: robotis_ai_setup/supabase
+        run: |
+          BRANCH_NAME="pr-${{ github.event.pull_request.number }}"
+          # Tolerate "not found" (someone may have deleted manually).
+          supabase branches delete "${BRANCH_NAME}" --yes || true
+
+  apply-production:
+    name: Apply to production
+    if: |
+      github.event_name == 'push' ||
+      github.event_name == 'workflow_call' ||
+      (github.event_name == 'workflow_dispatch' && inputs.target == 'production' && (inputs.rollback_to == '' || inputs.rollback_to == null))
+    needs: [validate]
+    runs-on: ubuntu-latest
+    env:
+      SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+      - name: Link to production
+        working-directory: robotis_ai_setup/supabase
+        run: supabase link --project-ref ${{ secrets.SUPABASE_PROJECT_REF }}
+      - name: Apply pending migrations
+        working-directory: robotis_ai_setup/supabase
+        run: |
+          # supabase db push diffs the local migrations/ against the live
+          # schema_migrations ledger and applies only the delta. The
+          # baseline (00000000000000_baseline.sql) is marked as already
+          # applied via the one-time `supabase migration repair` step
+          # documented in supabase/_archive/README.md.
+          supabase db push --include-all
+      - name: Probe production fingerprint via Railway /health
+        # The Railway FastAPI runs _validate_required_schema() at every
+        # boot. If our migration broke a contract, /health will be 503.
+        run: |
+          set -e
+          API="https://scintillating-empathy-production-1068.up.railway.app/health"
+          for attempt in $(seq 1 30); do
+            CODE=$(curl -s -o /dev/null -w "%{http_code}" "$API" || echo "000")
+            if [ "$CODE" = "200" ]; then
+              echo "Production /health = 200 after migration."
+              exit 0
+            fi
+            echo "Attempt $attempt: /health = $CODE — retrying in 2s"
+            sleep 2
+          done
+          echo "::error::Production /health never returned 200 within 60s post-migration."
+          exit 1
+
+  rollback:
+    name: Rollback (manual dispatch)
+    if: github.event_name == 'workflow_dispatch' && inputs.rollback_to != ''
+    runs-on: ubuntu-latest
+    env:
+      PGPASSWORD: dummy  # psql reads from SUPABASE_DB_URL; this just silences a warning
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install psql
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client
+      - name: Apply rollback SQL
+        working-directory: robotis_ai_setup/supabase/rollback
+        env:
+          ROLLBACK_NAME: ${{ inputs.rollback_to }}
+          DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: |
+          set -e
+          # Locate the rollback file by stem match — e.g. input
+          # "021_workgroup_memberships_realtime_and_owner_check" →
+          # rollback/021_workgroup_memberships_realtime_and_owner_check.sql
+          FILE="${ROLLBACK_NAME}.sql"
+          if [ ! -f "$FILE" ]; then
+            echo "::error::No rollback file: ${FILE}"
+            ls -1
+            exit 1
+          fi
+          echo ">> Applying rollback: $FILE"
+          psql "$DB_URL" -v ON_ERROR_STOP=1 -f "$FILE"
+          echo "Rollback applied."

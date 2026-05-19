@@ -1,0 +1,105 @@
+name: railway-deploy-teacher-web
+
+# Deploys physical_ai_tools/physical_ai_manager/ (the React 19 SPA) to
+# the Railway service `teacher-web` (URL teacher-web-production.up.railway.app).
+#
+# This is W4 in the golden order. The build is gated on the existing
+# `teacher-web-build-validate` job in ci.yml, which already produces an
+# identical image with placeholder secrets and asserts the bundle
+# contains the inlined env vars.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "physical_ai_tools/physical_ai_manager/**"
+      - "physical_ai_tools/physical_ai_server/physical_ai_server/workflow/coco_classes.py"
+      - ".github/workflows/railway-deploy-teacher-web.yml"
+  workflow_call:
+    # Allows release.yml to invoke this as a reusable workflow.
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Audit reason for manual redeploy"
+        required: true
+        type: string
+
+concurrency:
+  group: railway-teacher-web-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  prebuild-validate:
+    # Reuses the validate job from ci.yml — same Dockerfile.web build with
+    # placeholder secrets + grep assertion. If this passes, the real build
+    # below will too (Webpack treats secrets as opaque strings).
+    name: Validate Dockerfile.web build path
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build with placeholders (matches the Railway path)
+        run: |
+          docker build \
+            --build-arg REACT_APP_SUPABASE_URL=https://CI_VALIDATE.supabase.co \
+            --build-arg REACT_APP_SUPABASE_ANON_KEY=CI_VALIDATE_ANON_KEY \
+            --build-arg REACT_APP_CLOUD_API_URL=https://CI_VALIDATE.api.example \
+            --build-arg REACT_APP_BUILD_ID=ci-railway-validate-${{ github.sha }} \
+            -t edubotics-teacher-web-validate \
+            -f physical_ai_tools/physical_ai_manager/Dockerfile.web \
+            physical_ai_tools/physical_ai_manager/
+      - name: Assert placeholders reached the bundle
+        run: |
+          for needle in CI_VALIDATE.supabase.co CI_VALIDATE_ANON_KEY CI_VALIDATE.api.example; do
+            if ! docker run --rm --entrypoint sh edubotics-teacher-web-validate \
+                 -c "grep -q -F '$needle' /usr/share/nginx/html/static/js/main.*.js"; then
+              echo "::error::Placeholder '$needle' missing — Webpack did not inline."
+              exit 1
+            fi
+            echo "OK: $needle present in bundle"
+          done
+
+  deploy:
+    name: Railway up (teacher-web)
+    needs: [prebuild-validate]
+    runs-on: ubuntu-latest
+    env:
+      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+      # The script reads PHYSICAL_AI_TOOLS_DIR for the coco_classes.py path.
+      # Default in the script is `<repo>/physical_ai_tools` which matches our
+      # monorepo layout — no override needed.
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Railway CLI
+        run: |
+          curl -fsSL https://railway.com/install.sh | sh
+          railway --version
+      - name: Deploy via the existing script
+        # The script handles _coco_classes.py staging (trap cleanup EXIT),
+        # --path-as-root, and --service teacher-web. We just invoke it.
+        # It uses `exec railway up` so its exit code IS the deploy result.
+        run: bash physical_ai_tools/physical_ai_manager/scripts/railway-deploy.sh
+
+  health-gate:
+    name: Health probe
+    needs: [deploy]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Poll /version.json until 200
+        run: |
+          set -e
+          URL=https://teacher-web-production.up.railway.app/version.json
+          for attempt in $(seq 1 30); do
+            CODE=$(curl -s -o /dev/null -w "%{http_code}" "$URL" || echo 000)
+            if [ "$CODE" = "200" ]; then
+              CONTENT=$(curl -s "$URL")
+              echo "teacher-web /version.json = 200: $CONTENT"
+              exit 0
+            fi
+            echo "Attempt $attempt: $URL → $CODE"
+            sleep 2
+          done
+          echo "::error::teacher-web did not return 200 within 60s."
+          exit 1

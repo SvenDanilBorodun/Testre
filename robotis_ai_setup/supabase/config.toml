@@ -1,0 +1,16 @@
+# Supabase CLI configuration for the EduBotics project.
+# Used by `.github/workflows/supabase-migrate.yml` to link CI to the
+# production project (fnnbysrjkfugsqzwcksd) and apply migrations.
+#
+# The project ref is hard-coded so a fresh checkout can run
+# `supabase link --project-ref fnnbysrjkfugsqzwcksd` without operator
+# input. The CLI auth comes from SUPABASE_ACCESS_TOKEN env (set by GHA).
+#
+# Auth settings (incl. leaked-password protection) are configured via
+# the Supabase Auth dashboard, not this file — they are not synced
+# from config.toml to remote projects by `supabase db push`.
+project_id = "fnnbysrjkfugsqzwcksd"
+
+[db]
+# Major version pin — production runs Postgres 17.6.1.
+major_version = 17

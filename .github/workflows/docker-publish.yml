@@ -1,0 +1,313 @@
+name: docker-publish
+
+# Builds and publishes the three production Docker images:
+#   - nettername/open-manipulator          (amd64)
+#   - nettername/physical-ai-server        (amd64)
+#   - nettername/physical-ai-manager       (amd64)
+#   - nettername/open-manipulator-jetson   (arm64)
+#   - nettername/physical-ai-server-jetson (arm64)
+#
+# nettername/physical-ai-manager-jetson does NOT exist (manager only
+# runs on student PCs, not on Jetson).
+# nettername/robotis-ai-training is NOT built here — it's owned by
+# Modal now (see build-images.sh:395-397). The stale Docker Hub copy
+# is on the cleanup list in tools/docker-hub-cleanup.sh.
+#
+# This is W5 in the golden order — runs LAST because the FastAPI
+# bundle has to be live for the student GUI to talk to it.
+#
+# Cache policy: --no-cache --pull on every build, per user decision.
+# Build time tradeoff (~20 min) is accepted for correctness.
+
+on:
+  push:
+    # YAML mappings forbid duplicate keys, so branch+path filters and tag
+    # triggers must share a single `push:` block. Note: when `paths` is
+    # set, `paths` is ignored for tag pushes (GHA-specific behavior) so
+    # tag pushes still fire on this same block.
+    branches: [main]
+    tags: ["v*.*.*"]
+    paths:
+      - "robotis_ai_setup/docker/**"
+      - "open_manipulator/**"
+      - "physical_ai_tools/**"
+      - "tools/**"
+      - ".github/workflows/docker-publish.yml"
+  workflow_call:
+    # Allows release.yml to invoke this as a reusable workflow.
+  workflow_dispatch:
+    inputs:
+      cleanup_dirty_tags:
+        description: "Also delete *-dirty tags from Docker Hub"
+        required: false
+        default: false
+        type: boolean
+      reason:
+        description: "Audit reason"
+        required: true
+        type: string
+
+concurrency:
+  # Avoid two builds racing to push :latest. cancel-in-progress=false
+  # because docker push is non-atomic and a half-finished push leaves
+  # the registry in a worse state than waiting for the prior to finish.
+  group: docker-publish-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  dirty-tree-guard:
+    # CI checkouts are always clean, but this guard prevents a
+    # workflow_dispatch from a maintainer-side branch where someone
+    # forgot to commit. Mirrors the "no *-dirty tags" promise.
+    name: Refuse on dirty tree
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check tree is clean
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "::error::Working tree is dirty. Refusing to build."
+            git status --short
+            exit 1
+          fi
+          echo "Working tree is clean."
+
+  base-digest-check:
+    # bump-upstream-digests.sh is read-only — it warns when the upstream
+    # robotis/* tags we pin have been re-pushed. This job runs it and
+    # opens a tracking issue if drift is detected. Does NOT block deploy.
+    name: Base image digest drift check
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up buildx (for `buildx imagetools inspect`)
+        uses: docker/setup-buildx-action@v3
+      - name: Run digest check
+        working-directory: robotis_ai_setup/docker
+        run: |
+          bash bump-upstream-digests.sh || \
+            echo "::warning::Upstream base image digests may have drifted. Review pin in physical_ai_server/Dockerfile + open_manipulator/Dockerfile."
+
+  build:
+    name: Build (${{ matrix.platform }})
+    needs: [dirty-tree-guard]
+    # NOTE: `matrix` context is NOT available in job-level `if:` per GHA
+    # docs (only github / inputs / needs / vars are). Per-arch gating
+    # would need step-level if's, which adds complexity for no real win
+    # — we always build both arches. Operators wanting to rebuild only
+    # one arch can re-run the failed matrix entry from the Actions UI.
+    if: |
+      always() &&
+      needs.dirty-tree-guard.result == 'success'
+    # Each platform builds on its own NATIVE runner — no QEMU emulation.
+    # amd64 → ubuntu-latest (x86_64, GH-managed, free for public repos)
+    # arm64 → ubuntu-24.04-arm (aarch64-native, GA since 2025-01)
+    # Native arm64 is ~3-4× faster than QEMU cross-build (~10 min vs ~30 min)
+    # AND eliminates the class of subtle bugs where aarch64 binaries under
+    # qemu-user produce different bytes than on real silicon (FP edge cases,
+    # some C/C++ compile-time behavior, glibc string ops). Same Docker
+    # buildx invocations work without change — buildx just no longer needs
+    # to thunk through QEMU because the runner kernel is already arm64.
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false  # arm64 should still build if amd64 fails (or vice versa)
+      matrix:
+        include:
+          - platform: amd64
+            runner: ubuntu-latest
+          - platform: arm64
+            runner: ubuntu-24.04-arm
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+      CLOUD_API_URL: ${{ secrets.REACT_APP_CLOUD_API_URL }}
+      REGISTRY: nettername
+      PLATFORM: ${{ matrix.platform }}
+      BUILD_ID: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # build-images.sh greps git log for BUILD_SHA
+      - name: Compute SOURCE_DATE_EPOCH from commit
+        # SOURCE_DATE_EPOCH makes image timestamps deterministic for a
+        # given commit. Two CI runs on the same SHA produce literally
+        # identical image bytes. Industry-standard for reproducible
+        # Docker builds (docs.docker.com/build/ci/github-actions/reproducible-builds).
+        # Subsequent steps inherit this via $GITHUB_ENV.
+        run: echo "SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct)" >> "$GITHUB_ENV"
+      # No QEMU step — each matrix entry runs on its native architecture.
+      # Removing setup-qemu-action shaves ~30 sec from each build and
+      # eliminates emulation-specific failure modes.
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Docker Hub login
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Run build-images.sh
+        working-directory: robotis_ai_setup/docker
+        # The existing script already does --no-cache --pull on every
+        # buildx call and pushes amd64 directly / arm64 via --push.
+        # We pass env it expects via the env: block above; no Bash flags
+        # are added. The script's `${VAR:?}` enforcement still applies.
+        run: bash build-images.sh
+
+  retag:
+    # Apply the canonical tag set to whatever build-images.sh just pushed.
+    # build-images.sh tags as :<YYYYMMDD>-<HHMMSS>-<sha> + :latest;
+    # this job re-tags via `buildx imagetools create` (no rebuild).
+    #
+    # We derive the tags inline (sha, full-sha, semver on tag pushes)
+    # rather than via docker/metadata-action because the action's output
+    # bundles tags with a repo prefix and we need to apply the same tag
+    # set across 5 separate repos.
+    name: Apply canonical tag set
+    needs: [build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Docker Hub login
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Re-tag each image with the canonical set
+        run: |
+          set -e
+          SHORT=$(echo "${{ github.sha }}" | cut -c1-7)
+          SRC_TAG="latest"   # build-images.sh pushed :latest as the source
+
+          # Derive the semver tag if this is a tag push.
+          REF="${GITHUB_REF#refs/tags/}"
+          case "$REF" in
+            v*.*.*) SEMVER="${REF#v}" ;;
+            *)      SEMVER="" ;;
+          esac
+
+          AMD64_REPOS="open-manipulator physical-ai-server physical-ai-manager"
+          ARM64_REPOS="open-manipulator-jetson physical-ai-server-jetson"
+
+          # Retry helper — `imagetools create` can 429 on Docker Hub during
+          # busy periods. Each repo gets up to 3 attempts with backoff.
+          _retag() {
+            local target="$1" source="$2"
+            for attempt in 1 2 3; do
+              if docker buildx imagetools create -t "$target" "$source"; then
+                return 0
+              fi
+              echo "WARN: retag $target attempt $attempt failed; sleeping $((attempt*5))s"
+              sleep $((attempt*5))
+            done
+            echo "::error::Failed to retag $target after 3 attempts"
+            return 1
+          }
+
+          for REPO in $AMD64_REPOS $ARM64_REPOS; do
+            SRC="nettername/${REPO}:${SRC_TAG}"
+            # Always: sha-short tag (immutable)
+            _retag "nettername/${REPO}:${SHORT}" "$SRC"
+            # Always: full-sha tag (immutable)
+            _retag "nettername/${REPO}:${{ github.sha }}" "$SRC"
+            # On tag pushes: semver tags
+            if [ -n "$SEMVER" ]; then
+              MAJ_MIN="${SEMVER%.*}"
+              _retag "nettername/${REPO}:${SEMVER}" "$SRC"
+              _retag "nettername/${REPO}:${MAJ_MIN}" "$SRC"
+            fi
+            # :latest is already what build-images.sh pushed; no action needed.
+          done
+
+  smoke-test:
+    name: Smoke-test (${{ matrix.platform }})
+    needs: [retag]
+    # Native per-arch runners so each image is exercised on real silicon —
+    # we now actually test arm64 images instead of trusting "build succeeded".
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: amd64
+            runner: ubuntu-latest
+            server_repo: physical-ai-server
+            arm_repo: open-manipulator
+            manager_repo: physical-ai-manager
+          - platform: arm64
+            runner: ubuntu-24.04-arm
+            server_repo: physical-ai-server-jetson
+            arm_repo: open-manipulator-jetson
+            # No manager-jetson repo (manager only ships on student PCs).
+            manager_repo: ""
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pull + grep manager bundle for inlined env (amd64 only)
+        if: matrix.manager_repo != ''
+        # Lifts the assertion build-images.sh already does at lines 226-243.
+        # If the React build skipped a build-arg, the placeholder won't be
+        # in main.*.js and this fails. This is the white-screen catcher.
+        run: |
+          set -e
+          docker pull nettername/${{ matrix.manager_repo }}:latest
+          for needle in "${{ secrets.SUPABASE_URL }}" "${{ secrets.REACT_APP_CLOUD_API_URL }}"; do
+            HASH=$(echo "$needle" | sha256sum | cut -c1-8)
+            if ! docker run --rm --entrypoint sh nettername/${{ matrix.manager_repo }}:latest \
+                 -c "grep -q -F '$needle' /usr/share/nginx/html/static/js/main.*.js"; then
+              echo "::error::Bundle does not contain expected env (hash=$HASH)."
+              exit 1
+            fi
+            echo "OK: bundle contains expected env (hash=$HASH)"
+          done
+      - name: Pull + assert server image has ROS 2 Jazzy
+        run: |
+          docker pull nettername/${{ matrix.server_repo }}:latest
+          ROS_DISTRO=$(docker run --rm --entrypoint sh nettername/${{ matrix.server_repo }}:latest \
+                       -c 'echo "$ROS_DISTRO"')
+          if [ "$ROS_DISTRO" != "jazzy" ]; then
+            echo "::error::${{ matrix.server_repo }} ROS_DISTRO=$ROS_DISTRO, expected jazzy"
+            exit 1
+          fi
+          echo "OK: ${{ matrix.server_repo }} has ROS_DISTRO=jazzy"
+      - name: Pull + assert open-manipulator has Dynamixel SDK
+        run: |
+          docker pull nettername/${{ matrix.arm_repo }}:latest
+          if ! docker run --rm --entrypoint sh nettername/${{ matrix.arm_repo }}:latest \
+               -c 'python3 -c "import dynamixel_sdk"'; then
+            echo "::error::${{ matrix.arm_repo }} missing dynamixel_sdk"
+            exit 1
+          fi
+          echo "OK: ${{ matrix.arm_repo }} has dynamixel_sdk"
+      - name: Architecture sanity (assert running on native arch)
+        # Belt-and-suspenders: if a runner is mis-provisioned we want to
+        # catch it here. uname should match the matrix arch.
+        run: |
+          UNAME_M=$(uname -m)
+          case "${{ matrix.platform }}" in
+            amd64) EXPECTED="x86_64" ;;
+            arm64) EXPECTED="aarch64" ;;
+          esac
+          if [ "$UNAME_M" != "$EXPECTED" ]; then
+            echo "::error::Runner arch mismatch: uname -m = $UNAME_M, expected $EXPECTED"
+            exit 1
+          fi
+          echo "OK: native ${{ matrix.platform }} runner ($UNAME_M)"
+
+  cleanup-dirty-tags:
+    # Manual-dispatch only — sweeps any *-dirty tags from Docker Hub.
+    # Calls the tools/docker-hub-cleanup.sh script with --execute.
+    name: Sweep *-dirty tags
+    if: github.event_name == 'workflow_dispatch' && inputs.cleanup_dirty_tags == 'true'
+    needs: [smoke-test]
+    runs-on: ubuntu-latest
+    env:
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash tools/docker-hub-cleanup.sh --execute --only-dirty

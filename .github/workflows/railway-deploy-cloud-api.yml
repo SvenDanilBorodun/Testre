@@ -1,0 +1,130 @@
+name: railway-deploy-cloud-api
+
+# Deploys robotis_ai_setup/cloud_training_api/ (the FastAPI service) to
+# the Railway project `scintillating-empathy`, service
+# `scintillating-empathy` (URL scintillating-empathy-production-1068.up.railway.app).
+#
+# This is W3 in the golden order — runs AFTER W1 supabase-migrate
+# completes, because the FastAPI's startup hook
+# _validate_required_schema() probes every table + RPC the routes need
+# and refuses to boot if Supabase is behind.
+#
+# This workflow REPLACES the maintainer's "nudge the Dockerfile to
+# re-trigger Railway" ritual that was documented at
+# cloud_training_api/Dockerfile lines 3-7. That nudge comment is
+# removed in the same PR that adds this workflow.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "robotis_ai_setup/cloud_training_api/**"
+      - ".github/workflows/railway-deploy-cloud-api.yml"
+  workflow_call:
+    # Allows release.yml to invoke this as a reusable workflow.
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Audit reason for manual redeploy"
+        required: true
+        type: string
+
+concurrency:
+  group: railway-cloud-api-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  schema-probe:
+    # Read-only probe of the live Supabase fingerprint BEFORE we deploy.
+    # If migrations are behind (W1 didn't run, or W1's apply-production
+    # failed silently), the new FastAPI code would crash at boot —
+    # better to refuse the deploy here than to ship a broken service.
+    name: Pre-deploy schema fingerprint probe
+    runs-on: ubuntu-latest
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      MODAL_TOKEN_ID: ci-probe
+      MODAL_TOKEN_SECRET: ci-probe
+      ALLOWED_ORIGINS: http://localhost
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install full deps for the probe
+        run: |
+          # Use the same requirements as the production image — importing
+          # app.main triggers loading of every router module, and any
+          # missing transitive dep would silently break the probe with a
+          # confusing ImportError instead of a real schema check.
+          python -m pip install --upgrade pip
+          python -m pip install --quiet -r robotis_ai_setup/cloud_training_api/requirements.txt
+      - name: Import + probe
+        working-directory: robotis_ai_setup/cloud_training_api
+        run: |
+          # Importing app.main triggers the three startup validators
+          # (line 67 _validate_required_secrets, line 114 _warn_optional,
+          # line 319 _validate_required_schema). The schema probe hits
+          # the live DB read-only via the service-role key.
+          python -c "from app import main; print('schema probe passed')"
+
+  deploy:
+    name: Railway up
+    needs: [schema-probe]
+    runs-on: ubuntu-latest
+    env:
+      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Railway CLI
+        run: |
+          # Official one-liner from docs.railway.com.
+          # Pinning to a tag would be safer; the CLI auto-updates but
+          # the action surface (railway up --service --environment --ci
+          # --path-as-root .) is stable since v3.20.
+          curl -fsSL https://railway.com/install.sh | sh
+          railway --version
+      - name: Deploy
+        working-directory: robotis_ai_setup/cloud_training_api
+        run: |
+          # --path-as-root .  → tells Railway the build context is THIS dir,
+          #                    not the monorepo .git root. Without it Railway
+          #                    uploads the whole repo and the Dockerfile path
+          #                    becomes ambiguous (Railpack fallback).
+          # --service / --environment  → explicit so a wrong RAILWAY_TOKEN
+          #                              scope fails loudly instead of
+          #                              deploying to the wrong place.
+          # --ci  → non-interactive, exits non-zero on failure, no spinner.
+          railway up . \
+            --service scintillating-empathy \
+            --environment production \
+            --path-as-root \
+            --ci
+
+  health-gate:
+    name: Health probe
+    needs: [deploy]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Poll /health until 200
+        run: |
+          set -e
+          # The FastAPI's /health endpoint is registered last in main.py
+          # so a 200 means startup validators all passed + routers loaded.
+          # Up to 60s budget; deploy itself typically completes inside 20s.
+          URL=https://scintillating-empathy-production-1068.up.railway.app/health
+          for attempt in $(seq 1 30); do
+            CODE=$(curl -s -o /dev/null -w "%{http_code}" "$URL" || echo 000)
+            if [ "$CODE" = "200" ]; then
+              echo "Cloud API healthy."
+              exit 0
+            fi
+            echo "Attempt $attempt: $URL → $CODE"
+            sleep 2
+          done
+          echo "::error::Cloud API did not return 200 within 60s after Railway deploy."
+          exit 1

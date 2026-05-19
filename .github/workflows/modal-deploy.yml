@@ -1,0 +1,186 @@
+name: modal-deploy
+
+# Deploys both Modal apps (edubotics-training, edubotics-vision) on
+# push to main when modal_training/ changes, or on manual dispatch.
+#
+# This is W2 in the golden order. It runs AFTER supabase-migrate has
+# completed (training_handler.py calls update_training_progress RPC,
+# so the RPC must exist in the live DB before we ship a new worker).
+# Sequencing is enforced by the release.yml dispatcher; standalone
+# main pushes that touch only modal_training/ trust the operator to
+# not break that contract.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "robotis_ai_setup/modal_training/**"
+      - ".github/workflows/modal-deploy.yml"
+  workflow_call:
+    # Allows release.yml to invoke this as a reusable workflow.
+    inputs:
+      app:
+        description: "training | vision | both (defaults to both)"
+        required: false
+        default: "both"
+        type: string
+      ref:
+        description: "git ref (defaults to event SHA)"
+        required: false
+        type: string
+  workflow_dispatch:
+    inputs:
+      app:
+        description: "Which app to deploy"
+        required: true
+        default: "both"
+        type: choice
+        options:
+          - training
+          - vision
+          - both
+      ref:
+        description: "Optional: git ref to deploy (defaults to current HEAD). Use for rollback to a known-good SHA."
+        required: false
+        type: string
+      reason:
+        description: "Audit reason"
+        required: true
+        type: string
+
+concurrency:
+  group: modal-deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  import-validate:
+    # Reuses the import-validate logic from ci.yml — Modal Image specs
+    # are evaluated at module load, so importing each app's Python file
+    # is what catches SDK contract breaks (e.g., the vision_app
+    # force_reinstall=True regression caught at c56c012).
+    name: Import-validate Modal apps
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install Modal SDK
+        run: |
+          python -m pip install --upgrade pip
+          # Same pin as ci.yml:270 — keep deploy SDK == validate SDK.
+          python -m pip install 'modal>=1.4,<2'
+      - name: Import-validate every Modal app
+        working-directory: robotis_ai_setup/modal_training
+        run: |
+          set -e
+          for f in modal_app.py vision_app.py; do
+            echo "== importing $f =="
+            python -c "import importlib.util, sys; spec = importlib.util.spec_from_file_location('m', '$f'); mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod); print('  OK: import succeeded')"
+          done
+
+  lerobot-sha-check:
+    # Hard contract: the LeRobot SHA in modal_app.py must equal the SHA
+    # documented in CLAUDE.md and referenced in physical_ai_server/Dockerfile.
+    # The old CLAUDE.md invariant ("Don't introduce drift between the
+    # LeRobot pinning sites") was prose-only; this is the enforcer.
+    name: LeRobot SHA contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+      - name: Cross-check the SHA across pin sites
+        run: |
+          set -e
+          MODAL_SHA=$(grep -oE 'LEROBOT_COMMIT *= *"[a-f0-9]{40}"' \
+                      robotis_ai_setup/modal_training/modal_app.py \
+                      | grep -oE '[a-f0-9]{40}')
+          if [ -z "$MODAL_SHA" ]; then
+            echo "::error::Could not extract LEROBOT_COMMIT from modal_app.py"
+            exit 1
+          fi
+          echo "Modal pin: $MODAL_SHA"
+
+          # CLAUDE.md mentions the SHA in prose; require the same 40-char
+          # SHA appears somewhere in the doc.
+          if ! grep -q "$MODAL_SHA" CLAUDE.md; then
+            echo "::error::CLAUDE.md does not reference the same SHA ($MODAL_SHA)"
+            exit 1
+          fi
+
+          # The server Dockerfile only carries the 8-char prefix in a comment.
+          SHORT=${MODAL_SHA:0:8}
+          if ! grep -q "$SHORT" robotis_ai_setup/docker/physical_ai_server/Dockerfile; then
+            echo "::error::physical_ai_server/Dockerfile does not reference the short SHA ($SHORT)"
+            exit 1
+          fi
+
+          echo "All three LeRobot pin sites agree on $MODAL_SHA."
+
+  deploy-training:
+    name: Deploy edubotics-training
+    if: |
+      always() &&
+      needs.import-validate.result == 'success' &&
+      needs.lerobot-sha-check.result == 'success' &&
+      (github.event_name != 'workflow_dispatch' || inputs.app == 'training' || inputs.app == 'both')
+    needs: [import-validate, lerobot-sha-check]
+    runs-on: ubuntu-latest
+    env:
+      MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install Modal SDK
+        run: python -m pip install --upgrade pip && python -m pip install 'modal>=1.4,<2'
+      - name: Deploy training app
+        working-directory: robotis_ai_setup/modal_training
+        # cwd matters: modal_app.py:49 calls add_local_python_source("training_handler"),
+        # which resolves training_handler.py relative to the cwd at deploy time.
+        run: modal deploy modal_app.py
+      - name: Smoke test
+        working-directory: robotis_ai_setup/modal_training
+        # Smoke test runs synchronously and exits non-zero on failure.
+        # The function exists in the deployed app's registry; this verifies
+        # the deploy actually landed AND the Image spec is buildable
+        # on Modal's side (not just importable on our side).
+        run: modal run modal_app.py::smoke_test
+
+  deploy-vision:
+    name: Deploy edubotics-vision
+    if: |
+      always() &&
+      needs.import-validate.result == 'success' &&
+      needs.lerobot-sha-check.result == 'success' &&
+      (github.event_name != 'workflow_dispatch' || inputs.app == 'vision' || inputs.app == 'both')
+    needs: [import-validate, lerobot-sha-check]
+    runs-on: ubuntu-latest
+    env:
+      MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install Modal SDK
+        run: python -m pip install --upgrade pip && python -m pip install 'modal>=1.4,<2'
+      - name: Deploy vision app
+        working-directory: robotis_ai_setup/modal_training
+        run: modal deploy vision_app.py
+      - name: Smoke test
+        working-directory: robotis_ai_setup/modal_training
+        run: modal run vision_app.py::smoke_test

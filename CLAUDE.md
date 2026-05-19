@@ -37,7 +37,7 @@ Windows GUI ─wsl→ EduBotics distro (Docker)
    └─ supabase-py (service-role) ─→ Supabase (Auth/Postgres/Realtime)
 ```
 
-## Five non-negotiable rules
+## Six non-negotiable rules
 
 These exist because we paid for the lesson. Don't undo without explicit user agreement.
 
@@ -90,6 +90,21 @@ The SHA `989f3d05ba47f872d75c587e76838e9cc574857a` must agree across:
 
 Bumping LeRobot is a **5-place change in one PR**. Modal also force-reinstalls torch+torchvision from `https://download.pytorch.org/whl/cu121` and uninstalls `torchcodec` — without that, pip picks `cu130` wheels that crash the cu121 base.
 
+The `lerobot-sha-check` job in `.github/workflows/modal-deploy.yml` enforces three of these (modal_app.py, CLAUDE.md, physical_ai_server/Dockerfile short-prefix). The other two (`lerobot/` snapshot + `meta/info.json`) are still trust-on-PR-review.
+
+### 6. All deploys go through GitHub Actions
+
+Six workflows in `.github/workflows/` are the canonical path for every surface; manual `railway up`, `modal deploy`, `psql -f migration.sql`, and `build-images.sh` from a developer terminal are EMERGENCY-only.
+
+- `supabase-migrate.yml` — Supabase migrations (`supabase db push` against project `fnnbysrjkfugsqzwcksd`)
+- `modal-deploy.yml` — Modal apps (`edubotics-training` + `edubotics-vision`)
+- `railway-deploy-cloud-api.yml` — FastAPI to `scintillating-empathy` service
+- `railway-deploy-teacher-web.yml` — React SPA to `teacher-web` service
+- `docker-publish.yml` — three production images to `nettername/*` Docker Hub
+- `release.yml` — top-level dispatcher that fires all five in the golden order on tag pushes
+
+`build-images.sh` still exists but is now invoked **only by the CI runner**, never by a maintainer. The script's `--no-cache --pull` policy is preserved. CI refuses to build from a dirty tree, so `*-dirty` tags can never reappear in the registry.
+
 ## Critical architectural choices (don't undo silently)
 
 - **No Docker Desktop.** Docker Engine runs inside a bundled WSL2 distro called `EduBotics`. GUI invokes Docker via `wsl -d EduBotics -- docker …` (wrapped by `_docker_cmd()` in `gui/app/docker_manager.py`). USB reaches the distro via `usbipd attach --wsl EduBotics --busid X` (usbipd 5.x positional form; the 4.x `--distribution` form is rejected). Docker pinned `5:27.5.1-1~ubuntu.22.04~jammy` + containerd `1.7.27-1` via `apt-mark hold` — Docker 29.x `containerd-snapshotter` corrupts multi-layer pulls on WSL2 custom rootfs.
@@ -111,13 +126,16 @@ Bumping LeRobot is a **5-place change in one PR**. Modal also force-reinstalls t
 ## Common commands
 
 ### Build images
+
+**Default path: GitHub Actions.** Push to `main` with changes under `robotis_ai_setup/docker/**` or `physical_ai_tools/**`, and `.github/workflows/docker-publish.yml` builds + pushes both arches. Tag a release with `vX.Y.Z` and `release.yml` runs the full golden order.
+
+For local development only (do not push from a workstation):
 ```bash
 cd robotis_ai_setup/docker
 SUPABASE_URL=... SUPABASE_ANON_KEY=... CLOUD_API_URL=... ./build-images.sh
-# arm64 (Jetson):
 PLATFORM=arm64 ./build-images.sh
 ```
-Mandatory env vars are enforced via `${VAR:?…}`. Smoke test post-build greps `main.*.js` for literal `SUPABASE_URL` and `CLOUD_API_URL` (CI duplicates this in `manager-build-validate`). **On Docker Desktop (macOS/Windows), prefer `docker buildx build --push` directly** — Docker Desktop's classic-daemon vs containerd-snapshotter dual image store will silently push a stale `:latest` after a `docker build` + `docker push` cycle. `build-images.sh` is designed for Linux build hosts.
+Mandatory env vars are enforced via `${VAR:?…}`. Smoke test post-build greps `main.*.js` for the inlined env vars (CI duplicates this in `manager-build-validate` + `docker-publish.yml::smoke-test`). On Docker Desktop (macOS/Windows), the classic-daemon vs containerd-snapshotter dual store can silently push a stale `:latest`; pushing from CI on Linux runners avoids this.
 
 ### Run tests
 ```bash
@@ -159,17 +177,33 @@ python -m compileall -q robotis_ai_setup/gui robotis_ai_setup/scripts \
 
 ### Deploy
 
-**Golden order** (skipping any step has been the cause of every "live in code, broken in prod" report):
+**Always via GitHub Actions** (per non-negotiable rule §6). The golden order is encoded as `needs:` edges in `.github/workflows/release.yml`:
 
-1. **Supabase migrations first** — `supabase/migration.sql` then numbered files in order (note: there is **no `014_*.sql`** — the Phase-2 bundle skipped it to avoid a filename collision; don't reintroduce 014). Use `docs/deploy/APPLY_MIGRATIONS.sql` / `ROLLBACK_MIGRATIONS.sql` for the Phase-2/3 trio (015/016/017).
-2. **Modal redeploy** — `modal deploy modal_training/modal_app.py` and `modal deploy modal_training/vision_app.py`. Vision uses `modal.Secret.from_name("edubotics-vision-secrets")` (separate from `edubotics-training-secrets`) — deploy fails loudly if the operator hasn't created the vision bundle.
-3. **Railway redeploy** — picks up new env vars + runs `_validate_required_schema()`.
-4. **Docker images** — `build-images.sh`, then verify with `docker pull --platform linux/amd64 nettername/<image>:latest && docker run --rm --entrypoint bash … -c "grep -c '<marker>' /root/ros2_ws/.../<file>"`.
-5. **Git push** — CI runs guardrails.
+```
+W1 supabase-migrate ──► W2 modal-deploy ──► W3 railway-deploy-cloud-api ──► W4 railway-deploy-teacher-web ──► W5 docker-publish
+```
 
-**Bumping product VERSION** is a four-place change: `VERSION` file, `installer/robotis_ai_setup.iss AppVersion`, `gui/app/constants.py` fallback constant, AND the Railway `GUI_VERSION` + `GUI_DOWNLOAD_URL` env vars on the `scintillating-empathy` Cloud API service AFTER the matching `gh release create v<version>` with the `EduBotics_Setup.exe` asset. Without the Railway+GitHub side, the in-tree bump is invisible to existing student installs — the `/version`-poll update gate never fires.
+For partial changes, push to `main` with changes scoped to one surface and that surface's path-filtered workflow fires by itself. For coordinated whole-stack releases, `git tag vX.Y.Z && git push --tags` runs the full chain via `release.yml`.
+
+**One-time operator setup** (after merging this PR):
+
+1. Mint these 12 GHA secrets (Settings → Secrets and variables → Actions): `DOCKERHUB_USERNAME`, `DOCKERHUB_TOKEN`, `RAILWAY_TOKEN`, `MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET`, `SUPABASE_ACCESS_TOKEN`, `SUPABASE_DB_URL`, `SUPABASE_PROJECT_REF`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_ANON_KEY`, `REACT_APP_CLOUD_API_URL`.
+2. Tell the Supabase CLI the baseline is already applied to production:
+   ```
+   supabase link --project-ref fnnbysrjkfugsqzwcksd
+   supabase migration repair --status applied 00000000000000
+   ```
+3. Enable leaked-password protection in the Supabase Auth dashboard (the security-fixes migration applies the other 10 advisor warnings).
+
+**Bumping product VERSION** is still a four-place change: `VERSION` file, `installer/robotis_ai_setup.iss AppVersion`, `gui/app/constants.py` fallback constant, AND the Railway `GUI_VERSION` + `GUI_DOWNLOAD_URL` env vars on the `scintillating-empathy` Cloud API service AFTER the matching `gh release create v<version>` with the `EduBotics_Setup.exe` asset. Without the Railway+GitHub side, the in-tree bump is invisible to existing student installs — the `/version`-poll update gate never fires.
 
 Cloud API URL: `https://scintillating-empathy-production-1068.up.railway.app` (the older `production-9efd` slug is dead; do not reintroduce).
+
+**Manual emergency deploy** (off-pipeline, document in a PR before merging):
+- Supabase: `supabase db push` (CLI auth) against the project, OR `psql $DB_URL -f rollback/NNN_*.sql` for rollbacks.
+- Modal: `cd robotis_ai_setup/modal_training && modal deploy modal_app.py vision_app.py`.
+- Railway: `railway up --service scintillating-empathy --environment production --path-as-root . --ci` from `cloud_training_api/`.
+- Docker: `build-images.sh` from a clean Linux build host.
 
 ### Bootstrap (run once)
 ```bash
@@ -177,9 +211,11 @@ cd robotis_ai_setup
 python scripts/bootstrap_admin.py --username admin --full-name "Sven"
 ```
 
-## CI guardrails (`.github/workflows/ci.yml`)
+## CI guardrails
 
-10 jobs on every push/PR to `main`. Read these names before claiming a change "passes CI":
+Two layers — `ci.yml` (validators) and the five deploy workflows.
+
+### `.github/workflows/ci.yml` — 10 validator jobs on every push/PR to `main`
 
 - **python-tests** — `compileall` of all Python dirs, plus unittest discover in `tests/` and `cloud_training_api/app/tests/`
 - **shell-lint** — shellcheck `-S error` on all shipped shell scripts
@@ -191,6 +227,15 @@ python scripts/bootstrap_admin.py --username admin --full-name "Sven"
 - **tutorials-validate** — JSON-parses `physical_ai_manager/public/tutorials/*.json`, cross-checks `allowed_blocks` against runtime dispatch (`STATEMENT_HANDLERS` + `VALUE_EVALUATORS` keys in `overlays/workflow/handlers/__init__.py`, `HAT_BLOCK_TYPES` in `overlays/workflow/interpreter.py`, plus Blockly built-ins)
 - **interfaces-validate** — verifies every `.srv` has exactly one `---`; cross-checks `CMakeLists.txt` against on-disk files
 - **nginx-validate** — `envsubst $PORT` on `nginx.web.conf.template` then `nginx -t` on both configs
+
+### Deploy workflows (path-scoped + tag-triggered)
+
+- **`supabase-migrate.yml`** — applies `robotis_ai_setup/supabase/migrations/*.sql` to production via `supabase db push`. PRs that touch this path get an ephemeral Supabase Branch with a fingerprint probe; merge to `main` applies to production and probes the Railway `/health` endpoint as a post-apply gate.
+- **`modal-deploy.yml`** — deploys `edubotics-training` + `edubotics-vision`, runs `smoke_test` on each, enforces the LeRobot SHA contract across `modal_app.py`, CLAUDE.md, and `physical_ai_server/Dockerfile`.
+- **`railway-deploy-cloud-api.yml`** — runs the import-time schema-probe (read-only) against production Supabase, then `railway up`, then polls `/health` to 200.
+- **`railway-deploy-teacher-web.yml`** — same Dockerfile.web build CI validates, then `scripts/railway-deploy.sh` (`--service teacher-web`), then polls `/version.json` to 200.
+- **`docker-publish.yml`** — refuses on dirty tree; checks upstream base digests via `bump-upstream-digests.sh`; builds amd64 + arm64 in a matrix via `build-images.sh` (`--no-cache --pull`); applies the canonical tag set (`<sha>`, `<sha>-short`, `:latest` on main, `:vX.Y.Z` + `:vX.Y` on tags); pulls + greps each published image to verify build-args reached the bundle.
+- **`release.yml`** — top-level dispatcher; on tag push fires W1→W5 in the golden order via `needs:` edges.
 
 ## When to ask the user
 

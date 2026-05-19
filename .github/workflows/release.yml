@@ -1,0 +1,92 @@
+name: release
+
+# Top-level release dispatcher. Triggers the five surface workflows in
+# the golden order documented in CLAUDE.md:
+#
+#   W1 supabase-migrate
+#       │
+#       ▼
+#   W2 modal-deploy ──┐
+#                     ▼
+#   W3 railway-deploy-cloud-api
+#                     │
+#                     ▼
+#   W4 railway-deploy-teacher-web
+#                     │
+#                     ▼
+#   W5 docker-publish
+#
+# Fires on tag pushes (v*.*.*) for full coordinated releases. For
+# everyday merges to main, each surface workflow fires INDEPENDENTLY
+# via its own path-filter (only what changed redeploys). This file is
+# the coordinator for whole-stack releases.
+
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Audit reason for full release"
+        required: true
+        type: string
+      skip_supabase:
+        description: "Skip the supabase-migrate step (use only if no schema change)"
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  # Only one release dispatch at a time. cancel-in-progress: true on
+  # purpose — if you push v2.3.3 to fix a v2.3.2 CHANGELOG typo, the
+  # newer tag should win. Each individual surface workflow has its own
+  # serialised concurrency group so partial progress on the cancelled
+  # run won't corrupt anything.
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ── W1: Supabase ──────────────────────────────────────────────────
+  supabase:
+    name: W1. Apply migrations
+    # On tag pushes inputs.skip_supabase is undefined (null); fromJSON
+    # of null is null, and !null evaluates true → run by default. On
+    # workflow_dispatch the boolean reaches us as 'true'/'false' string.
+    if: ${{ !fromJSON(inputs.skip_supabase || 'false') }}
+    uses: ./.github/workflows/supabase-migrate.yml
+    secrets: inherit
+
+  # ── W2: Modal (after Supabase, because training_handler RPC depends on it) ──
+  modal:
+    name: W2. Deploy Modal apps
+    needs: [supabase]
+    if: always() && (needs.supabase.result == 'success' || needs.supabase.result == 'skipped')
+    uses: ./.github/workflows/modal-deploy.yml
+    secrets: inherit
+
+  # ── W3: Cloud API (after Modal, so the FastAPI sees the new RPC + worker app) ──
+  cloud-api:
+    name: W3. Deploy cloud_training_api
+    needs: [modal]
+    if: always() && needs.modal.result == 'success'
+    uses: ./.github/workflows/railway-deploy-cloud-api.yml
+    secrets: inherit
+
+  # ── W4: Teacher web (after cloud-api so it can reach the new endpoints) ──
+  teacher-web:
+    name: W4. Deploy teacher-web
+    needs: [cloud-api]
+    if: always() && needs.cloud-api.result == 'success'
+    uses: ./.github/workflows/railway-deploy-teacher-web.yml
+    secrets: inherit
+
+  # ── W5: Docker images (last — student installs pull these) ──
+  docker:
+    name: W5. Build + publish Docker images
+    needs: [teacher-web]
+    if: always() && needs.teacher-web.result == 'success'
+    uses: ./.github/workflows/docker-publish.yml
+    secrets: inherit

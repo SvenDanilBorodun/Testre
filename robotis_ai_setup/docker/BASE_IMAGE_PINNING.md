@@ -1,43 +1,40 @@
 # Base Image Pinning & Overlay Safety
 
-## M13: Base image pinned to version tag
+## Current pins
 
-### What changed
-`physical_ai_server/Dockerfile` now uses:
-```dockerfile
-FROM robotis/physical-ai-server:amd64-0.8.2
-```
-instead of the previous:
-```dockerfile
-FROM robotis/physical-ai-server:latest
-```
+| Image | Pinned to | Last upstream version we tested |
+|-------|-----------|----------------------------------|
+| `physical_ai_server/Dockerfile` | `robotis/physical-ai-server:amd64-0.8.2` | upstream now publishes `0.8.3` (2026-04-30) — bump on next test cycle |
+| `open_manipulator/Dockerfile` | `robotis/open-manipulator:amd64-4.1.4` | latest amd64 tag as of 2026-03-18 |
+| Modal training worker | `nvidia/cuda:12.1.1-devel-ubuntu22.04` (in `modal_app.py`) | Modal owns this image now; previously was `nettername/robotis-ai-training` |
 
-### Why
+## Why pinning matters
+
 `:latest` is a mutable tag. ROBOTIS can retag it at any time to point to a
-newer image with a different ROS2 distro, different LeRobot version, different
+newer image with a different ROS 2 distro, different LeRobot version, different
 Python version, or different file paths. If that happens, our build would
 silently pick up incompatible code without any warning.
 
-`:amd64-0.8.2` is an immutable version tag. ROBOTIS will not retag an old
-version number. When they release 0.9.0, `:latest` moves but `:amd64-0.8.2`
-stays put.
+`:amd64-X.Y.Z` is an immutable version tag. ROBOTIS will not retag an old
+version number. When they release a new version, `:latest` moves but
+`:amd64-X.Y.Z` stays put.
 
-### How to upgrade
+## How to upgrade
+
 When you intentionally want to use a newer ROBOTIS base image:
 
-1. Check what's available: `docker search robotis/physical-ai-server`
-2. Pull and test: `docker pull robotis/physical-ai-server:amd64-X.Y.Z`
+1. Check what's available on Docker Hub: `robotis/physical-ai-server`
+2. Pull and test locally: `docker pull robotis/physical-ai-server:amd64-X.Y.Z`
 3. Update the Dockerfile: `FROM robotis/physical-ai-server:amd64-X.Y.Z`
-4. Rebuild: `./build-images.sh`
-5. Test: run the full pipeline (recording, training, inference)
-6. If everything works, commit the Dockerfile change
+4. Push to a branch — `.github/workflows/docker-publish.yml`'s
+   `base-digest-check` job will surface the drift; CI builds the new image.
+5. Test the full pipeline (recording → training → inference) against the
+   PR-build image before merging.
+6. If everything works, merge and let CI publish.
 
-The `bump-upstream-digests.sh` script can also help by showing the current
-digests of upstream images.
-
-### Other base images (for reference)
-- `open-manipulator`: already pinned to `robotis/open-manipulator:amd64-4.1.4`
-- `robotis-ai-training`: already pinned to `nvidia/cuda:12.1.1-devel-ubuntu22.04`
+The `bump-upstream-digests.sh` script (already in this directory) is wired
+into `.github/workflows/docker-publish.yml` as a read-only diagnostic that
+warns when upstream digests have moved since the last main build.
 
 ---
 

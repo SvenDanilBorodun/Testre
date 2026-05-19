@@ -92,16 +92,27 @@ Bumping LeRobot is a **5-place change in one PR**. Modal also force-reinstalls t
 
 The `lerobot-sha-check` job in `.github/workflows/modal-deploy.yml` enforces three of these (modal_app.py, CLAUDE.md, physical_ai_server/Dockerfile short-prefix). The other two (`lerobot/` snapshot + `meta/info.json`) are still trust-on-PR-review.
 
-### 6. All deploys go through GitHub Actions
+### 6. CI/CD deploys
 
-Six workflows in `.github/workflows/` are the canonical path for every surface; manual `railway up`, `modal deploy`, `psql -f migration.sql`, and `build-images.sh` from a developer terminal are EMERGENCY-only.
+Five workflows in `.github/workflows/` are the canonical path for four surfaces:
 
 - `supabase-migrate.yml` — Supabase migrations (`supabase db push` against project `fnnbysrjkfugsqzwcksd`)
-- `modal-deploy.yml` — Modal apps (`edubotics-training` + `edubotics-vision`)
 - `railway-deploy-cloud-api.yml` — FastAPI to `scintillating-empathy` service
 - `railway-deploy-teacher-web.yml` — React SPA to `teacher-web` service
 - `docker-publish.yml` — three production images to `nettername/*` Docker Hub
-- `release.yml` — top-level dispatcher that fires all five in the golden order on tag pushes
+- `release.yml` — top-level dispatcher that fires all four in the golden order on tag pushes
+
+**Modal apps (`edubotics-training` + `edubotics-vision`) deploy MANUALLY.** The Modal image build happens in Modal's infrastructure (not on GH runners), and the CI auth + image-build feedback loop is slow to debug remotely. Until we have a strong reason to move Modal into CI, the operator owns it:
+
+```bash
+cd robotis_ai_setup/modal_training
+modal deploy modal_app.py
+modal deploy vision_app.py
+modal run modal_app.py::smoke_test    # optional verification
+modal run vision_app.py::smoke_test
+```
+
+Manual `railway up`, `psql -f migration.sql`, and `build-images.sh` from a developer terminal are EMERGENCY-only for the other four surfaces.
 
 `build-images.sh` still exists but is now invoked **only by the CI runner**, never by a maintainer. The script's `--no-cache --pull` policy is preserved. CI refuses to build from a dirty tree, so `*-dirty` tags can never reappear in the registry.
 
@@ -231,11 +242,12 @@ Two layers — `ci.yml` (validators) and the five deploy workflows.
 ### Deploy workflows (path-scoped + tag-triggered)
 
 - **`supabase-migrate.yml`** — applies `robotis_ai_setup/supabase/migrations/*.sql` to production via `supabase db push`. PRs that touch this path get an ephemeral Supabase Branch with a fingerprint probe; merge to `main` applies to production and probes the Railway `/health` endpoint as a post-apply gate.
-- **`modal-deploy.yml`** — deploys `edubotics-training` + `edubotics-vision`, runs `smoke_test` on each, enforces the LeRobot SHA contract across `modal_app.py`, CLAUDE.md, and `physical_ai_server/Dockerfile`.
 - **`railway-deploy-cloud-api.yml`** — runs the import-time schema-probe (read-only) against production Supabase, then `railway up`, then polls `/health` to 200.
 - **`railway-deploy-teacher-web.yml`** — same Dockerfile.web build CI validates, then `scripts/railway-deploy.sh` (`--service teacher-web`), then polls `/version.json` to 200.
 - **`docker-publish.yml`** — refuses on dirty tree; checks upstream base digests via `bump-upstream-digests.sh`; builds amd64 + arm64 in a matrix via `build-images.sh` (`--no-cache --pull`); applies the canonical tag set (`<sha>`, `<sha>-short`, `:latest` on main, `:vX.Y.Z` + `:vX.Y` on tags); pulls + greps each published image to verify build-args reached the bundle.
-- **`release.yml`** — top-level dispatcher; on tag push fires W1→W5 in the golden order via `needs:` edges.
+- **`release.yml`** — top-level dispatcher; on tag push fires W1→W4 in the golden order via `needs:` edges.
+
+**Modal is manual** — see Rule §6 above. Run `modal deploy modal_app.py vision_app.py` from your terminal BEFORE pushing a tag if the release touches Modal.
 
 ## When to ask the user
 

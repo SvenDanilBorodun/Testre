@@ -1,20 +1,24 @@
 name: release
 
-# Top-level release dispatcher. Triggers the five surface workflows in
-# the golden order documented in CLAUDE.md:
+# Top-level release dispatcher. Chains the four CI-driven surface
+# workflows in the golden order:
 #
 #   W1 supabase-migrate
 #       │
 #       ▼
-#   W2 modal-deploy ──┐
-#                     ▼
-#   W3 railway-deploy-cloud-api
-#                     │
-#                     ▼
-#   W4 railway-deploy-teacher-web
-#                     │
-#                     ▼
-#   W5 docker-publish
+#   W2 railway-deploy-cloud-api
+#       │
+#       ▼
+#   W3 railway-deploy-teacher-web
+#       │
+#       ▼
+#   W4 docker-publish
+#
+# Modal deploys are MANUAL (operator runs `modal deploy modal_app.py`
+# and `modal deploy vision_app.py` from their workstation). Modal's
+# image build occurs in Modal's infrastructure, not on GH runners, and
+# the auth / image-build feedback loop is slow to debug in CI. Until
+# we have a strong reason to move Modal into CI, the operator owns it.
 #
 # Fires on tag pushes (v*.*.*) for full coordinated releases. For
 # everyday merges to main, each surface workflow fires INDEPENDENTLY
@@ -59,33 +63,28 @@ jobs:
     uses: ./.github/workflows/supabase-migrate.yml
     secrets: inherit
 
-  # ── W2: Modal (after Supabase, because training_handler RPC depends on it) ──
-  modal:
-    name: W2. Deploy Modal apps
+  # ── W2: Cloud API (after Supabase so the FastAPI sees the new schema) ──
+  # Note: if you bumped a Modal-side dependency in this release, run
+  # `modal deploy modal_app.py vision_app.py` MANUALLY BEFORE pushing
+  # the tag so the worker is ready before the FastAPI tries to call it.
+  cloud-api:
+    name: W2. Deploy cloud_training_api
     needs: [supabase]
     if: always() && (needs.supabase.result == 'success' || needs.supabase.result == 'skipped')
-    uses: ./.github/workflows/modal-deploy.yml
-    secrets: inherit
-
-  # ── W3: Cloud API (after Modal, so the FastAPI sees the new RPC + worker app) ──
-  cloud-api:
-    name: W3. Deploy cloud_training_api
-    needs: [modal]
-    if: always() && needs.modal.result == 'success'
     uses: ./.github/workflows/railway-deploy-cloud-api.yml
     secrets: inherit
 
-  # ── W4: Teacher web (after cloud-api so it can reach the new endpoints) ──
+  # ── W3: Teacher web (after cloud-api so it can reach the new endpoints) ──
   teacher-web:
-    name: W4. Deploy teacher-web
+    name: W3. Deploy teacher-web
     needs: [cloud-api]
     if: always() && needs.cloud-api.result == 'success'
     uses: ./.github/workflows/railway-deploy-teacher-web.yml
     secrets: inherit
 
-  # ── W5: Docker images (last — student installs pull these) ──
+  # ── W4: Docker images (last — student installs pull these) ──
   docker:
-    name: W5. Build + publish Docker images
+    name: W4. Build + publish Docker images
     needs: [teacher-web]
     if: always() && needs.teacher-web.result == 'success'
     uses: ./.github/workflows/docker-publish.yml

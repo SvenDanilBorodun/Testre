@@ -16,17 +16,18 @@ Edit code → git push to main →  CI runs the right workflow → done.
 Edit code → git tag vX.Y.Z   →  release.yml chains all 5 workflows.
 ```
 
-The five workflows in `.github/workflows/`:
+The four CI-driven workflows in `.github/workflows/`:
 
 | Workflow | Triggers on changes to | What it does |
 |----------|------------------------|--------------|
 | `supabase-migrate.yml` | `supabase/migrations/**` | Applies migrations to production (or PR-branch for PRs) |
-| `modal-deploy.yml` | `modal_training/**` | Deploys `edubotics-training` + `edubotics-vision` |
 | `railway-deploy-cloud-api.yml` | `cloud_training_api/**` | Schema-probe → `railway up` → `/health` gate |
 | `railway-deploy-teacher-web.yml` | `physical_ai_manager/**` | Validate → `railway up` teacher-web → `/version.json` gate |
 | `docker-publish.yml` | `docker/**`, `open_manipulator/**`, `physical_ai_tools/**` | Native amd64 + arm64 builds → push → smoke-test |
 
-Plus `release.yml` which chains all five on `v*.*.*` tag pushes.
+Plus `release.yml` which chains all four on `v*.*.*` tag pushes.
+
+**Modal is deployed manually** — see "Manual Modal deploys" section below.
 
 ---
 
@@ -146,19 +147,56 @@ For coordinated multi-surface releases, prefer the tag path (next).
 
 ```bash
 # Bump VERSION file + installer .iss + gui/constants.py if needed
+
+# If the release touches Modal (modal_training/**), deploy it FIRST:
+cd robotis_ai_setup/modal_training
+modal deploy modal_app.py
+modal deploy vision_app.py
+cd -
+
+# Then tag and push
 git tag v2.3.2 -m "release: v2.3.2"
 git push --tags
 # release.yml fires:
 #   W1 supabase-migrate     →
-#   W2 modal-deploy         →
-#   W3 railway-deploy-cloud-api →
-#   W4 railway-deploy-teacher-web →
-#   W5 docker-publish
+#   W2 railway-deploy-cloud-api →
+#   W3 railway-deploy-teacher-web →
+#   W4 docker-publish
 # AND release-installer.yml fires in parallel (builds EduBotics_Setup.exe)
 ```
 
-Total ~25 minutes. Watch the Actions tab. The chain stops on first
-failure; subsequent surfaces don't deploy.
+Total ~20 minutes (CI chain only — Modal deploy adds 2-3 min if needed).
+Watch the Actions tab. The chain stops on first failure; subsequent
+surfaces don't deploy.
+
+### Manual Modal deploys
+
+Modal deploys are intentionally NOT in CI. Run from your terminal when
+`modal_training/**` changes:
+
+```bash
+cd robotis_ai_setup/modal_training
+modal deploy modal_app.py       # ~30 sec — registers new app version
+modal deploy vision_app.py      # ~30 sec
+modal run modal_app.py::smoke_test     # optional: verify training app spawns
+modal run vision_app.py::smoke_test    # optional: verify vision app spawns
+```
+
+**Important:** running training jobs that were spawned before the deploy
+continue to use the old image. New `start_training_safe` RPC calls (from
+students via the GUI) use the new image. Always run smoke tests after
+deploy — they're the only post-deploy verification.
+
+**Rollback:** Modal has no version history. Roll back by checking out a
+known-good SHA and re-running `modal deploy`:
+
+```bash
+git checkout <good-sha> -- robotis_ai_setup/modal_training/
+cd robotis_ai_setup/modal_training
+modal deploy modal_app.py
+modal deploy vision_app.py
+git checkout HEAD -- robotis_ai_setup/modal_training/
+```
 
 ---
 

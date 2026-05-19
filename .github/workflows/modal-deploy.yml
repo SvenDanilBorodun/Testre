@@ -144,11 +144,13 @@ jobs:
           python-version: "3.11"
       - name: Install Modal SDK
         run: python -m pip install --upgrade pip && python -m pip install 'modal>=1.4,<2'
+      - name: Authenticate Modal CLI
+        # Explicit `modal token set` writes ~/.modal.toml with the
+        # default profile, which is more reliable than env-var auto
+        # detection (which can fail on edge cases like an empty
+        # MODAL_PROFILE var being set to "" instead of unset).
+        run: modal token set --token-id "$MODAL_TOKEN_ID" --token-secret "$MODAL_TOKEN_SECRET"
       - name: Verify Modal CLI auth
-        # Diagnostic: confirm the env vars reached the Modal CLI before
-        # we attempt deploy. `modal profile current` exits non-zero if
-        # auth fails, so this step fails loudly with a clear error
-        # instead of a cryptic deploy-time auth error.
         run: |
           set -e
           echo ">> modal version:"
@@ -194,6 +196,8 @@ jobs:
           python-version: "3.11"
       - name: Install Modal SDK
         run: python -m pip install --upgrade pip && python -m pip install 'modal>=1.4,<2'
+      - name: Authenticate Modal CLI
+        run: modal token set --token-id "$MODAL_TOKEN_ID" --token-secret "$MODAL_TOKEN_SECRET"
       - name: Verify Modal CLI auth
         run: |
           set -e

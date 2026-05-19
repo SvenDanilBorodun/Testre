@@ -72,15 +72,12 @@ jobs:
       # monorepo layout — no override needed.
     steps:
       - uses: actions/checkout@v4
-      - name: Install Railway CLI
+      - name: Install Railway CLI via npm
+        # GH runners come with Node.js + npm pre-installed; npm
+        # install is more stable than the curl install script which
+        # uses sudo -v and assumes interactive auth.
         run: |
-          # Note: railway.com/install.sh returns an HTML meta-refresh
-          # (not a 30x redirect), so `curl -fsSL` downloads HTML and
-          # pipes it to sh which errors. Use the canonical raw URL.
-          curl -fsSL https://raw.githubusercontent.com/railwayapp/cli/master/install.sh | sh
-          export PATH="$HOME/.railway/bin:/usr/local/bin:$PATH"
-          echo "$HOME/.railway/bin" >> "$GITHUB_PATH"
-          echo "/usr/local/bin" >> "$GITHUB_PATH"
+          npm install -g @railway/cli
           railway --version
       - name: Deploy via the existing script
         # The script handles _coco_classes.py staging (trap cleanup EXIT),

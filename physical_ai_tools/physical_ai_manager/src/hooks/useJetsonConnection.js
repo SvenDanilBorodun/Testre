@@ -18,7 +18,7 @@ import {
   setHeartbeatTransient,
   clearJetson,
 } from '../store/jetsonSlice';
-import { setRosbridgeUrl, setRosHost } from '../features/ros/rosSlice';
+import { setRosbridgeUrl, setRosHost, setImageTopicList } from '../features/ros/rosSlice';
 import { moveToPage } from '../features/ui/uiSlice';
 import PageType from '../constants/pageType';
 import {
@@ -218,6 +218,12 @@ function _swapRosbridgeToJetson(info, dispatch, accessToken) {
   const url = `ws://${host}:${PROXY_PORT}`;
   rosConnectionManager.setAuthToken(accessToken);
   dispatch(setRosbridgeUrl(url));
+  // Drop any cached camera-topic list from the previous (local) session
+  // so the top-bar "N Kameras aktiv" chip + ImageGrid don't render
+  // pre-Jetson topic names against the new rosbridge. ImageGrid's mount
+  // effect re-fetches /image/get_available_list against the Jetson and
+  // the liveness hook re-subscribes against the new socket.
+  dispatch(setImageTopicList([]));
   // Force a reconnect against the new URL. The singleton handles URL
   // changes automatically via getConnection(newUrl), but we need to
   // disconnect first so the existing local-rosbridge socket goes away
@@ -236,6 +242,9 @@ function _swapRosbridgeBackToLocal(localRosHost, dispatch) {
     // No local rosbridge configured (cloud-only mode?) — just clear.
     dispatch(setRosbridgeUrl(''));
   }
+  // Same reasoning as in _swapRosbridgeToJetson — drop the cached list
+  // so the Jetson's topic names don't render against a local rosbridge.
+  dispatch(setImageTopicList([]));
   rosConnectionManager.disconnect();
   rosConnectionManager.resetReconnectCounter();
 }

@@ -140,7 +140,13 @@ jobs:
           } >> "$GITHUB_OUTPUT"
       - name: Push migrations to PR branch (targets branch DB, not prod)
         working-directory: robotis_ai_setup/supabase
-        run: supabase db push --db-url "${{ steps.branch.outputs.branch_db_url }}"
+        run: |
+          # Same pattern as apply-production: extract password and use
+          # --linked --password since --db-url is unreliable on v2.x.
+          DB_URL='${{ steps.branch.outputs.branch_db_url }}'
+          DB_PASSWORD=$(printf '%s' "$DB_URL" | sed -E 's|^postgresql://[^:]+:([^@]+)@.*|\1|')
+          echo "::add-mask::$DB_PASSWORD"
+          supabase db push --linked --password "$DB_PASSWORD"
       - name: Comment on PR with branch URL + status
         uses: actions/github-script@v7
         with:
@@ -215,14 +221,25 @@ jobs:
         env:
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
         run: |
+          # The CLI v2.x is finicky about --db-url; it accepts the
+          # connection string but db push internally re-derives the
+          # pooler URL from the linked project ref + the password.
+          # Extracting the password from SUPABASE_DB_URL and using
+          # --linked --password is the path that reliably works.
+          # Pattern: postgresql://USER:PASSWORD@HOST:PORT/DB
+          DB_PASSWORD=$(printf '%s' "$SUPABASE_DB_URL" | sed -E 's|^postgresql://[^:]+:([^@]+)@.*|\1|')
+          if [ -z "$DB_PASSWORD" ] || [ "$DB_PASSWORD" = "$SUPABASE_DB_URL" ]; then
+            echo "::error::Could not extract password from SUPABASE_DB_URL. Format: postgresql://USER:PASS@HOST:PORT/DB"
+            echo "::error::URL length: ${#SUPABASE_DB_URL} (should be ~110)"
+            exit 1
+          fi
+          echo "::add-mask::$DB_PASSWORD"
           # supabase db push diffs the local migrations/ against the live
           # schema_migrations ledger and applies only the delta. The
           # baseline (00000000000000_baseline.sql) is marked as already
           # applied via the one-time `supabase migration repair` step
           # documented in supabase/_archive/README.md.
-          # --db-url provides the connection string + svc-role password;
-          # without it the CLI prompts interactively which fails in CI.
-          supabase db push --db-url "$SUPABASE_DB_URL" --include-all
+          supabase db push --linked --password "$DB_PASSWORD" --include-all
       - name: Probe production fingerprint via Railway /health
         # The Railway FastAPI runs _validate_required_schema() at every
         # boot. If our migration broke a contract, /health will be 503.

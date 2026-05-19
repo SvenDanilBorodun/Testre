@@ -108,7 +108,7 @@ jobs:
           version: latest
       - name: Link to the production project (creates branches under it)
         working-directory: robotis_ai_setup/supabase
-        run: supabase link --project-ref ${{ secrets.SUPABASE_PROJECT_REF }}
+        run: supabase link --project-ref ${{ secrets.SUPABASE_PROJECT_REF }} --password ""
       - name: Create / reuse PR branch and capture its DB URL
         id: branch
         working-directory: robotis_ai_setup/supabase
@@ -177,7 +177,7 @@ jobs:
           version: latest
       - name: Link
         working-directory: robotis_ai_setup/supabase
-        run: supabase link --project-ref ${{ secrets.SUPABASE_PROJECT_REF }}
+        run: supabase link --project-ref ${{ secrets.SUPABASE_PROJECT_REF }} --password ""
       - name: Delete PR branch
         working-directory: robotis_ai_setup/supabase
         run: |
@@ -201,17 +201,25 @@ jobs:
         with:
           version: latest
       - name: Link to production
+        # `link` writes .supabase/temp/project-ref locally. Pass --password ""
+        # to skip the interactive DB-password prompt — the actual db push
+        # below uses --db-url which carries auth in the connection string,
+        # so link doesn't need separate password validation.
         working-directory: robotis_ai_setup/supabase
-        run: supabase link --project-ref ${{ secrets.SUPABASE_PROJECT_REF }}
+        run: supabase link --project-ref ${{ secrets.SUPABASE_PROJECT_REF }} --password ""
       - name: Apply pending migrations
         working-directory: robotis_ai_setup/supabase
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
         run: |
           # supabase db push diffs the local migrations/ against the live
           # schema_migrations ledger and applies only the delta. The
           # baseline (00000000000000_baseline.sql) is marked as already
           # applied via the one-time `supabase migration repair` step
           # documented in supabase/_archive/README.md.
-          supabase db push --include-all
+          # --db-url provides the connection string + svc-role password;
+          # without it the CLI prompts interactively which fails in CI.
+          supabase db push --db-url "$SUPABASE_DB_URL" --include-all
       - name: Probe production fingerprint via Railway /health
         # The Railway FastAPI runs _validate_required_schema() at every
         # boot. If our migration broke a contract, /health will be 503.

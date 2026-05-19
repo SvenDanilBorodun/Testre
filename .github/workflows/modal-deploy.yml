@@ -144,6 +144,22 @@ jobs:
           python-version: "3.11"
       - name: Install Modal SDK
         run: python -m pip install --upgrade pip && python -m pip install 'modal>=1.4,<2'
+      - name: Verify Modal CLI auth
+        # Diagnostic: confirm the env vars reached the Modal CLI before
+        # we attempt deploy. `modal profile current` exits non-zero if
+        # auth fails, so this step fails loudly with a clear error
+        # instead of a cryptic deploy-time auth error.
+        run: |
+          set -e
+          echo ">> modal version:"
+          modal --version
+          echo ">> modal profile current:"
+          modal profile current
+          echo ">> secret list (verify edubotics-training-secrets exists):"
+          modal secret list | grep edubotics-training-secrets || {
+            echo "::error::Secret 'edubotics-training-secrets' not found in workspace"
+            exit 1
+          }
       - name: Deploy training app
         working-directory: robotis_ai_setup/modal_training
         # cwd matters: modal_app.py:49 calls add_local_python_source("training_handler"),
@@ -178,6 +194,15 @@ jobs:
           python-version: "3.11"
       - name: Install Modal SDK
         run: python -m pip install --upgrade pip && python -m pip install 'modal>=1.4,<2'
+      - name: Verify Modal CLI auth
+        run: |
+          set -e
+          modal --version
+          modal profile current
+          modal secret list | grep edubotics-vision-secrets || {
+            echo "::error::Secret 'edubotics-vision-secrets' not found in workspace"
+            exit 1
+          }
       - name: Deploy vision app
         working-directory: robotis_ai_setup/modal_training
         run: modal deploy vision_app.py

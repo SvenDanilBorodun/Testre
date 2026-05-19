@@ -82,11 +82,17 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install Railway CLI
         run: |
-          # Official one-liner from docs.railway.com.
-          # Pinning to a tag would be safer; the CLI auto-updates but
-          # the action surface (railway up --service --environment --ci
-          # --path-as-root .) is stable since v3.20.
-          curl -fsSL https://railway.com/install.sh | sh
+          # Note: https://railway.com/install.sh and railway.app/install.sh
+          # both return an HTML meta-refresh (not a 30x redirect), so
+          # `curl -fsSL` downloads HTML and pipes it to sh which errors.
+          # Use the canonical raw URL on GitHub directly, which is what
+          # the meta-refresh points to anyway.
+          curl -fsSL https://raw.githubusercontent.com/railwayapp/cli/master/install.sh | sh
+          # The installer writes to /usr/local/bin or ~/.railway/bin
+          # depending on perms — make sure both are on PATH.
+          export PATH="$HOME/.railway/bin:/usr/local/bin:$PATH"
+          echo "$HOME/.railway/bin" >> "$GITHUB_PATH"
+          echo "/usr/local/bin" >> "$GITHUB_PATH"
           railway --version
       - name: Deploy
         working-directory: robotis_ai_setup/cloud_training_api

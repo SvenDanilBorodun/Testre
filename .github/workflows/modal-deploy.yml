@@ -182,10 +182,17 @@ jobs:
           echo ">> modal profile current:"
           modal profile current
           echo ">> secret list (verify edubotics-training-secrets exists):"
-          modal secret list | grep edubotics-training-secrets || {
-            echo "::error::Secret 'edubotics-training-secrets' not found in workspace"
-            exit 1
-          }
+          # Use --json: the default table truncates long names with "…"
+          # so a plain grep for 'edubotics-training-secrets' never matches
+          # the truncated 'edubotics-traini…' row.
+          modal secret list --json | python3 -c "
+          import sys, json
+          names = [s.get('Name','') for s in json.load(sys.stdin)]
+          if 'edubotics-training-secrets' not in names:
+              print(f'::error::Secret not found. Workspace has: {names}')
+              sys.exit(1)
+          print('OK: edubotics-training-secrets present')
+          "
       - name: Deploy training app
         working-directory: robotis_ai_setup/modal_training
         # cwd matters: modal_app.py:49 calls add_local_python_source("training_handler"),
@@ -239,10 +246,15 @@ jobs:
           set -e
           modal --version
           modal profile current
-          modal secret list | grep edubotics-vision-secrets || {
-            echo "::error::Secret 'edubotics-vision-secrets' not found in workspace"
-            exit 1
-          }
+          # See deploy-training step for why we use --json instead of grep.
+          modal secret list --json | python3 -c "
+          import sys, json
+          names = [s.get('Name','') for s in json.load(sys.stdin)]
+          if 'edubotics-vision-secrets' not in names:
+              print(f'::error::Secret not found. Workspace has: {names}')
+              sys.exit(1)
+          print('OK: edubotics-vision-secrets present')
+          "
       - name: Deploy vision app
         working-directory: robotis_ai_setup/modal_training
         run: modal deploy vision_app.py

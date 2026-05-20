@@ -3,10 +3,7 @@
   "build": {
     "builder": "DOCKERFILE",
     "dockerfilePath": "Dockerfile",
-    "_comment_buildArgs": "BUILD_COMMIT is surfaced via /health.commit so the CI health-gate can assert commit == github.sha. Railway interpolates $RAILWAY_GIT_COMMIT_SHA at build time. RAILWAY_GIT_COMMIT_SHA is ALSO injected as a runtime env var, so health.py reads it directly; this buildArg makes the OCI label correct + caches a copy in BUILD_COMMIT ENV for diagnostic dumps.",
-    "buildArgs": {
-      "BUILD_COMMIT": "$RAILWAY_GIT_COMMIT_SHA"
-    }
+    "_comment_buildArgs_removed": "Previously had buildArgs: {BUILD_COMMIT: $RAILWAY_GIT_COMMIT_SHA}. Same trap as teacher-web's railway.json: $RAILWAY_GIT_COMMIT_SHA only populates on Railway's native git-push integration; `railway up --ci` source uploads have no git context, so the substitution resolves to empty and is then explicitly passed as --build-arg, OVERRIDING the service variable Railway would auto-pass. Fix lives in .github/workflows/railway-deploy-cloud-api.yml: stamp BUILD_COMMIT as a service variable to ${{ github.sha }} BEFORE `railway up`. Dockerfile's ARG BUILD_COMMIT=dev declaration then auto-picks up the service variable via Railway's auto-build-arg passthrough."
   },
   "deploy": {
     "restartPolicyType": "ON_FAILURE",

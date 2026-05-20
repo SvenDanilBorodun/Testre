@@ -99,22 +99,71 @@ jobs:
         run: |
           cp "${GITHUB_WORKSPACE}/VERSION" VERSION
           test -s VERSION || { echo "::error::VERSION file empty or missing"; exit 1; }
+      - name: Stamp BUILD_COMMIT as service variable
+        env:
+          GITHUB_SHA_FULL: ${{ github.sha }}
+        run: |
+          # Set BUILD_COMMIT as a Railway service variable BEFORE `railway up`
+          # so health.py::_resolve_commit() returns the actual SHA (not 'dev'
+          # from the Dockerfile ARG default). $RAILWAY_GIT_COMMIT_SHA only
+          # populates on Railway's native git-push integration; `railway up
+          # --ci` source uploads (this code path) have no git context.
+          #
+          # --skip-deploys prevents the variable change from triggering its
+          # own deploy; the `railway up` two steps later picks up the new
+          # value atomically.
+          railway variable set "BUILD_COMMIT=${GITHUB_SHA_FULL}" \
+              --service scintillating-empathy --environment production \
+              --skip-deploys >/dev/null && \
+              echo "  stamped BUILD_COMMIT=${GITHUB_SHA_FULL}"
       - name: Deploy
         working-directory: robotis_ai_setup/cloud_training_api
         run: |
-          # --path-as-root .  → tells Railway the build context is THIS dir,
-          #                    not the monorepo .git root. Without it Railway
-          #                    uploads the whole repo and the Dockerfile path
-          #                    becomes ambiguous (Railpack fallback).
-          # --service / --environment  → explicit so a wrong RAILWAY_TOKEN
-          #                              scope fails loudly instead of
-          #                              deploying to the wrong place.
-          # --ci  → non-interactive, exits non-zero on failure, no spinner.
-          railway up . \
-            --service scintillating-empathy \
-            --environment production \
-            --path-as-root \
-            --ci
+          # railway up --ci has a known bug: it exits non-zero on "Failed to
+          # stream build logs" even when the deploy itself proceeds fine on
+          # Railway's side. We capture the deployment ID from the upload
+          # output, then poll the deployment until it reaches a terminal
+          # state — that way we don't depend on the log-stream working.
+          #
+          # --path-as-root . scopes the build context to THIS dir so the
+          # Dockerfile path resolves correctly.
+          set +e
+          OUTPUT=$(railway up . \
+              --service scintillating-empathy \
+              --environment production \
+              --path-as-root \
+              --ci 2>&1)
+          UP_EXIT=$?
+          set -e
+          echo "$OUTPUT"
+
+          # Extract deployment ID from the "Build Logs:" URL line
+          DEPLOY_ID=$(echo "$OUTPUT" | grep -oE 'id=[a-f0-9-]{36}' | head -1 | sed 's/^id=//')
+          if [ -z "$DEPLOY_ID" ]; then
+              echo "::error::Could not extract deployment ID — upload likely failed before reaching Railway"
+              exit ${UP_EXIT:-1}
+          fi
+          echo "Tracking deployment ${DEPLOY_ID} (railway up exit=${UP_EXIT})"
+
+          # Poll deployment until SUCCESS or FAILED — Railway's healthcheck
+          # has its own 5-min budget; cap our wait at 18 min so the whole
+          # job stays under timeout-minutes: 20.
+          for i in $(seq 1 108); do
+              STATUS=$(railway deployment list \
+                  --service scintillating-empathy --environment production \
+                  --json 2>/dev/null | \
+                  python3 -c "import json,sys; print(next((x['status'] for x in json.load(sys.stdin) if x['id'].startswith('${DEPLOY_ID%%-*}')), 'UNKNOWN'))")
+              echo "[${i}] deployment ${DEPLOY_ID:0:8}... status=${STATUS}"
+              case "${STATUS}" in
+                  SUCCESS) echo "Deployment ${DEPLOY_ID} succeeded"; exit 0 ;;
+                  FAILED|CRASHED|REMOVED|SKIPPED)
+                      echo "::error::Deployment ${DEPLOY_ID} terminal=${STATUS}"
+                      exit 1 ;;
+              esac
+              sleep 10
+          done
+          echo "::error::Deployment ${DEPLOY_ID} did not reach terminal state within 18 min"
+          exit 1
 
   health-gate:
     name: Health probe

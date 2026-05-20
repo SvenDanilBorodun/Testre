@@ -58,13 +58,28 @@ def _resolve_version() -> str:
     signal.
     """
     # The cloud_training_api directory layout is .../cloud_training_api/app/routes/health.py;
-    # the VERSION file lives at repo root, which is 5 levels up.
+    # the VERSION file lives at repo root, which is 5 levels up in dev.
+    # In production the file resolves to /app/app/routes/health.py whose
+    # .parents has only 4 entries — parents[4] would raise IndexError on
+    # every /health call, which is exactly what killed the b28d5a1
+    # deploy (1/1 replicas never became healthy → Railway gave up after
+    # 5 min retry loop). Build candidates LAZILY via _safe_parent so
+    # absent indices simply drop out of the list.
     here = pathlib.Path(__file__).resolve()
-    candidates = [
-        here.parents[4] / "VERSION",  # repo root in dev
-        here.parents[3] / "VERSION",  # if VERSION was COPY'd into cloud_training_api
-        pathlib.Path("/app/VERSION"),  # if COPY'd to image root
+
+    def _safe_parent(p: pathlib.Path, n: int) -> pathlib.Path | None:
+        try:
+            return p.parents[n]
+        except IndexError:
+            return None
+
+    candidates: list[pathlib.Path] = [
+        pathlib.Path("/app/VERSION"),  # image root — first in production
     ]
+    for n in (4, 3):  # 4=repo root in dev, 3=cloud_training_api dir
+        parent = _safe_parent(here, n)
+        if parent is not None:
+            candidates.append(parent / "VERSION")
     for path in candidates:
         try:
             if path.is_file():

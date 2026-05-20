@@ -66,7 +66,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       - name: Check tree is clean
         run: |
           if [ -n "$(git status --porcelain)" ]; then
@@ -85,9 +85,9 @@ jobs:
     timeout-minutes: 10
     continue-on-error: true
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       - name: Set up buildx (for `buildx imagetools inspect`)
-        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd  # v4.0.0
       - name: Run digest check
         working-directory: robotis_ai_setup/docker
         run: |
@@ -136,7 +136,7 @@ jobs:
       PLATFORM: ${{ matrix.platform }}
       BUILD_ID: ${{ github.sha }}
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           fetch-depth: 0  # build-images.sh greps git log for BUILD_SHA
       - name: Free up runner disk
@@ -168,9 +168,9 @@ jobs:
       # Removing setup-qemu-action shaves ~30 sec from each build and
       # eliminates emulation-specific failure modes.
       - name: Set up Buildx
-        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd  # v4.0.0
       - name: Docker Hub login
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9  # v3
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121  # v4.1.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
@@ -196,14 +196,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       - name: Docker Hub login
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9  # v3
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121  # v4.1.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
       - name: Set up Buildx
-        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd  # v4.0.0
       - name: Re-tag each image with the canonical set
         run: |
           set -e
@@ -294,7 +294,7 @@ jobs:
           EOF
           cat out/versions.env
       - name: Upload versions.env artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: versions-env
           path: out/versions.env
@@ -324,7 +324,7 @@ jobs:
             # No manager-jetson repo (manager only ships on student PCs).
             manager_repo: ""
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       - name: Pull + grep manager bundle for inlined env (amd64 only)
         if: matrix.manager_repo != ''
         # Lifts the assertion build-images.sh already does at lines 226-243.
@@ -395,5 +395,5 @@ jobs:
       DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
       DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       - run: bash tools/docker-hub-cleanup.sh --execute --only-dirty

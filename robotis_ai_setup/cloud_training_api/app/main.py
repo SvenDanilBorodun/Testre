@@ -446,9 +446,6 @@ def _validate_required_schema() -> None:
         )
 
 
-_validate_required_schema()
-
-
 def _parse_and_validate_origins() -> list[str]:
     """Parse ALLOWED_ORIGINS and refuse to start with dangerous values.
 
@@ -801,18 +798,6 @@ app.include_router(jetson_router)
 app.include_router(jetson_teacher_router)
 
 
-# Flip the readiness flag AFTER every import-time validator + router
-# registration succeeds. /health returns 503 until this point, which lets
-# Railway hold traffic at the load balancer instead of routing it to a
-# pod whose schema probe hasn't completed. Order matters here: this MUST
-# come after include_router so a route registration crash also keeps the
-# flag False.
-from app.routes import health as _health_route  # noqa: E402
-
-_health_route.STARTUP_SCHEMA_OK = True
-logger.info("Cloud API boot complete — /health will report status=ok")
-
-
 # ─── Background tasks ───────────────────────────────────────────────────
 # The dataset reconciliation sweep is the safety net for the rare case
 # where a successful HF upload is followed by a failed POST /datasets
@@ -862,3 +847,36 @@ async def _start_training_cancel_sweep() -> None:
         logger.info("training_cancel_sweep: disabled via env")
         return
     _asyncio.create_task(_training_cancel_sweep_loop())
+
+
+# Schema probe lives in a BACKGROUND task scheduled here, NOT at module
+# import. Without this split, _validate_required_schema() (32+ sequential
+# Supabase round-trips) blocks the FastAPI lifespan startup phase, which
+# in turn blocks uvicorn from binding the socket — Railway's healthcheck
+# then polls connection-refused for 5-15s and times out the deploy. By
+# scheduling the probe as a fire-and-forget asyncio task, uvicorn binds
+# immediately; /health serves 503 with status="starting" via the
+# STARTUP_SCHEMA_OK gate until the probe flips it. Failure raises SIGTERM
+# so Railway sees the process exit and marks the deploy failed (instead
+# of "Healthcheck failed" masking a real schema-drift cause).
+@app.on_event("startup")
+async def _start_schema_probe() -> None:
+    import asyncio as _asyncio
+
+    async def _run_and_flip() -> None:
+        try:
+            loop = _asyncio.get_event_loop()
+            await loop.run_in_executor(None, _validate_required_schema)
+        except Exception:
+            logger.exception(
+                "Schema probe failed at startup — Cloud API exiting so Railway "
+                "marks the deploy failed."
+            )
+            import signal
+            os.kill(os.getpid(), signal.SIGTERM)
+            return
+        from app.routes import health as _health_route
+        _health_route.STARTUP_SCHEMA_OK = True
+        logger.info("Cloud API boot complete — /health will report status=ok")
+
+    _asyncio.create_task(_run_and_flip())

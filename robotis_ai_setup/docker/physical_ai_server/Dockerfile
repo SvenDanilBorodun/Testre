@@ -342,3 +342,25 @@ RUN set -e && \
     rm -rf /opt/talos_system_manager && \
     sed -i '\|/opt/talos_system_manager|d' /root/.bashrc /etc/bash.bashrc 2>/dev/null || true && \
     echo "Stripped upstream bloat: ~6.75 GB removed from image layer"
+
+# Scrub upstream-base ENV leaks that the sed of /root/.bashrc above can't
+# touch (image-config ENV directives are independent of interactive-shell
+# rc files). Two classes:
+#
+# 1) PYTHONPATH=/opt/talos_system_manager:… set by upstream — the dir is
+#    rm -rf'd above so this entry is dangling. Bare ENV PYTHONPATH=
+#    empties the var on both amd64 and arm64.
+#
+# 2) Jetson AI Lab base ships TWINE_*/SCP_UPLOAD_* env vars containing
+#    NVIDIA devpi upload credentials (TWINE_PASSWORD=Nvid…14chars,
+#    SCP_UPLOAD_PASS=nvidia). Leaking real creds into a public Docker
+#    image is the failure mode this closes. Empty on amd64 too — the
+#    arm64 base sets them, amd64 base doesn't, blanket-scrub is harmless.
+ENV PYTHONPATH= \
+    TWINE_PASSWORD= \
+    TWINE_USERNAME= \
+    TWINE_REPOSITORY_URL= \
+    TWINE_NON_INTERACTIVE= \
+    SCP_UPLOAD_PASS= \
+    SCP_UPLOAD_USER= \
+    SCP_UPLOAD_URL=

@@ -64,8 +64,9 @@ jobs:
     # forgot to commit. Mirrors the "no *-dirty tags" promise.
     name: Refuse on dirty tree
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
       - name: Check tree is clean
         run: |
           if [ -n "$(git status --porcelain)" ]; then
@@ -81,11 +82,12 @@ jobs:
     # opens a tracking issue if drift is detected. Does NOT block deploy.
     name: Base image digest drift check
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
       - name: Set up buildx (for `buildx imagetools inspect`)
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
       - name: Run digest check
         working-directory: robotis_ai_setup/docker
         run: |
@@ -113,6 +115,11 @@ jobs:
     # buildx invocations work without change — buildx just no longer needs
     # to thunk through QEMU because the runner kernel is already arm64.
     runs-on: ${{ matrix.runner }}
+    # 60-min budget per matrix entry — physical-ai-server is ~15 GB and
+    # the `--no-cache --pull` policy means every build replays from
+    # scratch. Typical amd64 build is 25-35 min, arm64 is 15-20 min on
+    # native silicon. 60 min absorbs Docker Hub rate-limit retries.
+    timeout-minutes: 60
     strategy:
       fail-fast: false  # arm64 should still build if amd64 fails (or vice versa)
       matrix:
@@ -129,7 +136,7 @@ jobs:
       PLATFORM: ${{ matrix.platform }}
       BUILD_ID: ${{ github.sha }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
           fetch-depth: 0  # build-images.sh greps git log for BUILD_SHA
       - name: Free up runner disk
@@ -161,9 +168,9 @@ jobs:
       # Removing setup-qemu-action shaves ~30 sec from each build and
       # eliminates emulation-specific failure modes.
       - name: Set up Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
       - name: Docker Hub login
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9  # v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
@@ -187,15 +194,16 @@ jobs:
     name: Apply canonical tag set
     needs: [build]
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
       - name: Docker Hub login
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9  # v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
       - name: Set up Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
       - name: Re-tag each image with the canonical set
         run: |
           set -e
@@ -248,6 +256,7 @@ jobs:
     # Native per-arch runners so each image is exercised on real silicon —
     # we now actually test arm64 images instead of trusting "build succeeded".
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -264,7 +273,7 @@ jobs:
             # No manager-jetson repo (manager only ships on student PCs).
             manager_repo: ""
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
       - name: Pull + grep manager bundle for inlined env (amd64 only)
         if: matrix.manager_repo != ''
         # Lifts the assertion build-images.sh already does at lines 226-243.
@@ -320,12 +329,20 @@ jobs:
     # Manual-dispatch only — sweeps any *-dirty tags from Docker Hub.
     # Calls the tools/docker-hub-cleanup.sh script with --execute.
     name: Sweep *-dirty tags
-    if: github.event_name == 'workflow_dispatch' && inputs.cleanup_dirty_tags == 'true'
+    # NB: `inputs.cleanup_dirty_tags` is typed `boolean`, which GHA
+    # materialises as a real boolean (NOT the string 'true'). The prior
+    # condition `inputs.cleanup_dirty_tags == 'true'` was the classic
+    # bool-vs-string mismatch — it was ALWAYS false, so this job has
+    # never actually run from workflow_dispatch. Documented in the
+    # 2026-05 audit. fromJSON forces the comparison to align: GHA's
+    # workflow_call also passes inputs as JSON which fromJSON normalises.
+    if: github.event_name == 'workflow_dispatch' && fromJSON(inputs.cleanup_dirty_tags || 'false')
     needs: [smoke-test]
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     env:
       DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
       DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
       - run: bash tools/docker-hub-cleanup.sh --execute --only-dirty

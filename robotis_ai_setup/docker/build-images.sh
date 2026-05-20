@@ -91,6 +91,22 @@ esac
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 
+# OCI provenance — every buildx invocation below carries these labels so a
+# live container can be traced back to a git commit without consulting the
+# registry tag (which Railway / docker-publish re-tag on every deploy).
+# BUILD_ID picks up the GHA SHA when running in CI; falls back to git HEAD.
+_PROV_REV="${BUILD_ID:-$(git -C "$PROJECT_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)}"
+_PROV_CREATED="$(date -u +%FT%TZ)"
+_PROV_SOURCE="https://github.com/SvenDanilBorodun/Testre"
+OCI_LABELS=(
+    --label "org.opencontainers.image.revision=${_PROV_REV}"
+    --label "org.opencontainers.image.created=${_PROV_CREATED}"
+    --label "org.opencontainers.image.source=${_PROV_SOURCE}"
+)
+# SOURCE_DATE_EPOCH backs the reproducible-builds claim set in docker-publish.yml.
+# Honour an upstream value if set, else derive from the most recent commit time.
+export SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-$(git -C "$PROJECT_ROOT" log -1 --pretty=%ct 2>/dev/null || echo 0)}"
+
 # Expect repos to be siblings of robotis_ai_setup
 OPEN_MANIPULATOR_DIR="${OPEN_MANIPULATOR_DIR:-$(dirname "$PROJECT_ROOT")/open_manipulator}"
 PHYSICAL_AI_TOOLS_DIR="${PHYSICAL_AI_TOOLS_DIR:-$(dirname "$PROJECT_ROOT")/physical_ai_tools}"
@@ -206,6 +222,7 @@ cp "${PHYSICAL_AI_TOOLS_DIR}/physical_ai_server/physical_ai_server/workflow/coco
 # into the daemon store (vs containerd-snapshotter) so the subsequent
 # push reads the same content we just smoke-tested.
 docker buildx build --platform linux/amd64 --load --no-cache --pull \
+    "${OCI_LABELS[@]}" \
     $BUILD_ARGS \
     -t "${REGISTRY}/physical-ai-manager:latest" \
     -f "${PHYSICAL_AI_TOOLS_DIR}/physical_ai_manager/Dockerfile" \
@@ -258,6 +275,7 @@ if [ "$PLATFORM" = "arm64" ] && [ "$BUILD_BASE_ARM64" = "1" ]; then
     # Dockerfile itself. A context of physical_ai_server/ produces
     # "/docker/s6-services/common/ros2_service_finish.sh: not found".
     docker buildx build $DOCKER_BUILDX_ARGS --no-cache --pull \
+        "${OCI_LABELS[@]}" \
         -t "${PAS_BASE_IMAGE}" \
         -f "${PHYSICAL_AI_TOOLS_DIR}/physical_ai_server/Dockerfile.arm64" \
         "${PHYSICAL_AI_TOOLS_DIR}/"
@@ -309,6 +327,7 @@ echo ">> Building physical_ai_server thin layer (patches + interface rebuild)...
 # bypasses the Docker Desktop dual-store gotcha (CLAUDE.md §13.4.bis).
 if [ "$PLATFORM" = "arm64" ]; then
     docker buildx build $DOCKER_BUILDX_ARGS --no-cache --pull \
+        "${OCI_LABELS[@]}" \
         --build-arg BASE_IMAGE="${PAS_BASE_IMAGE}" \
         -t "${PAS_OUT_REPO}:${IMAGE_TAG_SUFFIX}" \
         -f "${SCRIPT_DIR}/physical_ai_server/Dockerfile" \
@@ -324,6 +343,7 @@ else
     # hosts where the default builder would target arm64; harmless on
     # native Linux/amd64.
     docker buildx build --platform linux/amd64 --load --no-cache --pull \
+        "${OCI_LABELS[@]}" \
         --build-arg BASE_IMAGE="${PAS_BASE_IMAGE}" \
         -t "${PAS_OUT_REPO}:${IMAGE_TAG_SUFFIX}" \
         -f "${SCRIPT_DIR}/physical_ai_server/Dockerfile" \
@@ -341,6 +361,7 @@ if [ "$PLATFORM" = "arm64" ] && [ "$BUILD_BASE_ARM64" = "1" ]; then
     echo ""
     echo ">> Building open_manipulator arm64 base ${OMX_BASE_IMAGE} from upstream sources..."
     docker buildx build $DOCKER_BUILDX_ARGS --no-cache --pull \
+        "${OCI_LABELS[@]}" \
         -t "${OMX_BASE_IMAGE}" \
         -f "${OPEN_MANIPULATOR_DIR}/docker/Dockerfile" \
         "${OPEN_MANIPULATOR_DIR}/docker/"
@@ -351,6 +372,7 @@ elif [ "$PLATFORM" = "amd64" ] && [ "$BUILD_BASE" = "1" ]; then
     # CLAUDE.md §13.4.bis: --load so subsequent `docker push` (if any)
     # reads from the daemon store rather than the containerd snapshotter.
     docker buildx build --platform linux/amd64 --load --no-cache --pull \
+        "${OCI_LABELS[@]}" \
         -t "${OMX_BASE_IMAGE}" \
         -f "${OPEN_MANIPULATOR_DIR}/docker/Dockerfile" \
         "${OPEN_MANIPULATOR_DIR}/docker/"
@@ -374,6 +396,7 @@ echo ""
 echo ">> Building open_manipulator thin layer..."
 if [ "$PLATFORM" = "arm64" ]; then
     docker buildx build $DOCKER_BUILDX_ARGS --no-cache --pull \
+        "${OCI_LABELS[@]}" \
         --build-arg BASE_IMAGE="${OMX_BASE_IMAGE}" \
         -t "${OMX_OUT_REPO}:${IMAGE_TAG_SUFFIX}" \
         -f "${SCRIPT_DIR}/open_manipulator/Dockerfile" \
@@ -385,6 +408,7 @@ else
     # `docker build` writes containerd and `docker push` reads daemon).
     # --platform linux/amd64 is still needed on Apple Silicon hosts.
     docker buildx build --platform linux/amd64 --load --no-cache --pull \
+        "${OCI_LABELS[@]}" \
         --build-arg BASE_IMAGE="${OMX_BASE_IMAGE}" \
         -t "${OMX_OUT_REPO}:${IMAGE_TAG_SUFFIX}" \
         -f "${SCRIPT_DIR}/open_manipulator/Dockerfile" \

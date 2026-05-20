@@ -38,8 +38,9 @@ jobs:
     # below will too (Webpack treats secrets as opaque strings).
     name: Validate Dockerfile.web build path
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
       - name: Build with placeholders (matches the Railway path)
         run: |
           docker build \
@@ -65,13 +66,14 @@ jobs:
     name: Railway up (teacher-web)
     needs: [prebuild-validate]
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     env:
       RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
       # The script reads PHYSICAL_AI_TOOLS_DIR for the coco_classes.py path.
       # Default in the script is `<repo>/physical_ai_tools` which matches our
       # monorepo layout — no override needed.
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
       - name: Install Railway CLI via npm
         # GH runners come with Node.js + npm pre-installed; npm
         # install is more stable than the curl install script which
@@ -89,20 +91,50 @@ jobs:
     name: Health probe
     needs: [deploy]
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - name: Poll /version.json until 200
+      - name: Poll /version.json until buildId matches this SHA
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
         run: |
           set -e
+          # Polling for a bare 200 was a false-positive trap: Railway's
+          # blue-green pattern keeps the OLD container serving while the
+          # new one boots, and a failed deploy can leave the old
+          # container indefinitely serving 200. We need to confirm the
+          # NEW build actually took traffic.
+          #
+          # The Webpack build inlines REACT_APP_BUILD_ID into
+          # /version.json; CI builds pass ${{ github.sha }} as the build
+          # arg (see prebuild-validate and the smoke-test path), so the
+          # served file should contain the full SHA. We accept either
+          # full SHA or short-SHA (7-char prefix) so a future build that
+          # only stamps short SHAs still passes.
+          #
+          # 5-min budget because Railway's cold-pull + nginx warmup
+          # routinely exceeds 60s for the manager image.
           URL=https://teacher-web-production.up.railway.app/version.json
-          for attempt in $(seq 1 30); do
-            CODE=$(curl -s -o /dev/null -w "%{http_code}" "$URL" || echo 000)
-            if [ "$CODE" = "200" ]; then
-              CONTENT=$(curl -s "$URL")
-              echo "teacher-web /version.json = 200: $CONTENT"
-              exit 0
+          SHORT_SHA=$(echo "$EXPECTED_SHA" | cut -c1-7)
+          for attempt in $(seq 1 150); do
+            BODY=$(curl -fsS --max-time 5 "$URL" 2>/dev/null || true)
+            if [ -n "$BODY" ]; then
+              BUILD_ID=$(echo "$BODY" | python3 -c "import json, sys; print(json.loads(sys.stdin.read()).get('buildId', ''))" 2>/dev/null || true)
+              # Accept exact match (full SHA), prefix (short SHA), or
+              # containment in either direction (build-id may be
+              # ${SHA}-${TIMESTAMP} on tag builds).
+              case "$BUILD_ID" in
+                *"$EXPECTED_SHA"*|*"$SHORT_SHA"*)
+                  echo "teacher-web /version.json buildId matches: $BUILD_ID"
+                  echo "  body: $BODY"
+                  exit 0
+                  ;;
+              esac
+              echo "Attempt $attempt: serving buildId=$BUILD_ID, expected ${SHORT_SHA}*"
+            else
+              echo "Attempt $attempt: $URL → curl failed or empty body"
             fi
-            echo "Attempt $attempt: $URL → $CODE"
             sleep 2
           done
-          echo "::error::teacher-web did not return 200 within 60s."
+          echo "::error::teacher-web did not serve buildId matching ${SHORT_SHA} within 5 minutes."
+          echo "::error::Most likely the new build never took traffic — check Railway logs for the teacher-web service."
           exit 1

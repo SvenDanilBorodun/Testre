@@ -1,5 +1,7 @@
 import logging
 import os
+import pathlib
+import re
 import time
 from collections import defaultdict, deque
 from threading import Lock
@@ -26,6 +28,7 @@ from app.routes.workflows import router as workflows_router
 from app.routes.workgroups import router as workgroups_router
 from app.services.dataset_sweep import sweep_loop as _dataset_sweep_loop
 from app.services.jetson_sweep import sweep_loop as _jetson_sweep_loop
+from app.services.training_sweep import sweep_loop as _training_cancel_sweep_loop
 
 load_dotenv()
 
@@ -86,10 +89,58 @@ def _warn_optional_secrets() -> None:
             "HF_TOKEN",
             "dataset reconciliation sweep + GDPR Art. 17 cleanup disabled.",
         ),
+        # GUI_VERSION / GUI_DOWNLOAD_URL feed /version which the student
+        # installer polls on every launch. When missing, the update gate
+        # silently disables — existing installs never learn about new
+        # releases. Per Rule §6 ("Bumping product VERSION"), these are
+        # one of four places the version string must agree.
+        (
+            "GUI_VERSION",
+            "/version returns version=null — student installs cannot detect updates. "
+            "Set to match the in-tree VERSION file after `gh release create`.",
+        ),
+        (
+            "GUI_DOWNLOAD_URL",
+            "/version returns download_url=null — even if GUI_VERSION is set, "
+            "the installer has nowhere to fetch the .exe from.",
+        ),
     )
     for key, msg in optional_warns:
         if not os.environ.get(key):
             logger.warning("env var %s not set — %s", key, msg)
+
+    # Drift guard: GUI_VERSION (Railway env) vs VERSION file (in-tree).
+    # Rule §6 calls out the 4-place agreement (VERSION file, installer
+    # .iss, gui constants, Railway env). The first three are caught by
+    # `git grep` at PR time; the Railway env can only be checked at
+    # boot. A mismatch means existing student installs poll /version,
+    # see a stale version string, and either never update or update to
+    # an installer URL that 404s. Log at WARNING — don't refuse boot;
+    # a maintainer rolling out a hotfix may legitimately update Railway
+    # before pushing the file change.
+    gui_version_env = os.environ.get("GUI_VERSION")
+    if gui_version_env:
+        here = pathlib.Path(__file__).resolve()
+        version_candidates = [
+            here.parents[3] / "VERSION",       # repo root in dev
+            here.parents[2] / "VERSION",       # cloud_training_api/VERSION
+            pathlib.Path("/app/VERSION"),       # image root
+        ]
+        in_tree_version: str | None = None
+        for path in version_candidates:
+            try:
+                if path.is_file():
+                    in_tree_version = path.read_text(encoding="utf-8").strip()
+                    break
+            except OSError:
+                continue
+        if in_tree_version and in_tree_version != gui_version_env:
+            logger.warning(
+                "version drift: GUI_VERSION=%r on Railway but in-tree VERSION=%r. "
+                "Update the Railway env var (and gh release asset) to match.",
+                gui_version_env,
+                in_tree_version,
+            )
 
     # Conditional: when SUPABASE_JWT_ALGORITHM=HS256 (legacy Supabase
     # auth, pre-2024), the Jetson rosbridge proxy needs the shared HMAC
@@ -112,6 +163,47 @@ def _warn_optional_secrets() -> None:
 
 
 _warn_optional_secrets()
+
+
+def _sanitize_probe_error(target: str, exc: Exception) -> RuntimeError:
+    """Wrap a schema-probe failure without leaking the service-role key.
+
+    Why this exists: supabase-py builds on httpx/postgrest-py. When a
+    request fails, those libraries can chain the original Request /
+    Response objects into the exception (`exc.__cause__`,
+    `exc.response.request.headers`, or str(exc) embedding the request).
+    The `Authorization: Bearer <SUPABASE_SERVICE_ROLE_KEY>` header we
+    set in services/supabase_client.py would then surface in the
+    Railway/Actions stderr log when boot fails — a service-role key in
+    public CI logs is an immediate-rotation incident.
+
+    Two protections:
+      1. We construct a NEW RuntimeError WITHOUT `raise ... from exc`,
+         so the original exception chain (which may hold the request
+         object and its headers) is dropped before Python prints the
+         traceback.
+      2. We log the original str(exc) at ERROR level with a regex scrub
+         that replaces any `Bearer <token>` substring — so a maintainer
+         debugging a real PGRST/network error still gets the cause,
+         minus the secret.
+    """
+    exc_class = type(exc).__name__
+    scrubbed = re.sub(r"Bearer\s+[A-Za-z0-9._\-]+", "Bearer <REDACTED>", str(exc))
+    # Also scrub `apikey: ...` headers if the SDK ever echoes them.
+    scrubbed = re.sub(
+        r"(apikey|api[-_]key)\s*[:=]\s*[A-Za-z0-9._\-]+",
+        r"\1=<REDACTED>",
+        scrubbed,
+        flags=re.IGNORECASE,
+    )
+    logger.error(
+        "Schema probe failure for %s — %s: %s",
+        target, exc_class, scrubbed,
+    )
+    return RuntimeError(
+        f"Schema probe failed for {target}: {exc_class} "
+        "(details suppressed for secret safety — see ERROR log above)"
+    )
 
 
 def _validate_required_schema() -> None:
@@ -163,7 +255,7 @@ def _validate_required_schema() -> None:
             ):
                 missing_tables.append(table)
             else:
-                raise
+                raise _sanitize_probe_error(f"table {table}", exc) from None
     # Audit A3: probe specific columns the routes read/write that a
     # partial migration could leave absent even when the table exists.
     # 017 added the vision-quota columns; the RPCs are probed below, but
@@ -172,6 +264,13 @@ def _validate_required_schema() -> None:
     # the column at call time, not at function-create time.
     required_columns: tuple[tuple[str, str], ...] = (
         ("users", "vision_quota_per_term, vision_used_per_term"),
+        # Migration 022 — jetsons pair-intent columns (Fix #1 of the
+        # 2026-05 audit). Without these the new two-step pair flow 500s.
+        ("jetsons", "intent_token, intent_teacher_id"),
+        # Migration 023 — trainings cancel-sweep columns (Fix #3 of the
+        # 2026-05 audit). The status CHECK constraint expansion can't be
+        # probed via PostgREST, but the new columns can.
+        ("trainings", "cancel_attempted_at, cancel_attempts"),
     )
     for table, cols in required_columns:
         try:
@@ -183,7 +282,9 @@ def _validate_required_schema() -> None:
             ):
                 missing_tables.append(f"{table}.{cols}")
             else:
-                raise
+                raise _sanitize_probe_error(
+                    f"columns {table}.{cols}", exc
+                ) from None
     # 2) RPCs the code calls directly. Probe with the actual argument
     #    shape; any "user not found" / "no rows" response proves the
     #    RPC exists. We fail only on PostgREST's PGRST202 (function
@@ -260,11 +361,21 @@ def _validate_required_schema() -> None:
             "p_lan_ip": "",
             "p_agent_version": "",
         }),
+        # Migration 022 — pair_jetson now requires p_intent_token. The
+        # 4-arg overload is DROP'd by 022 so the probe MUST send the
+        # 5-arg shape, otherwise PostgREST reports the function as
+        # missing and the deploy aborts. claim_pair_intent is the new
+        # /pair-intent RPC.
         ("pair_jetson", {
             "p_classroom_id": dummy,
             "p_pairing_code": "_probe",
             "p_teacher_id": dummy,
             "p_mdns_name": "_probe",
+            "p_intent_token": dummy,
+        }),
+        ("claim_pair_intent", {
+            "p_pairing_code": "_probe",
+            "p_teacher_id": dummy,
         }),
         ("force_release_jetson", {"p_jetson_id": dummy, "p_teacher_id": dummy}),
         ("sweep_jetson_locks", {}),
@@ -671,6 +782,18 @@ app.include_router(jetson_router)
 app.include_router(jetson_teacher_router)
 
 
+# Flip the readiness flag AFTER every import-time validator + router
+# registration succeeds. /health returns 503 until this point, which lets
+# Railway hold traffic at the load balancer instead of routing it to a
+# pod whose schema probe hasn't completed. Order matters here: this MUST
+# come after include_router so a route registration crash also keeps the
+# flag False.
+from app.routes import health as _health_route  # noqa: E402
+
+_health_route.STARTUP_SCHEMA_OK = True
+logger.info("Cloud API boot complete — /health will report status=ok")
+
+
 # ─── Background tasks ───────────────────────────────────────────────────
 # The dataset reconciliation sweep is the safety net for the rare case
 # where a successful HF upload is followed by a failed POST /datasets
@@ -704,3 +827,19 @@ async def _start_jetson_sweep() -> None:
         logger.info("jetson_sweep: disabled via env")
         return
     _asyncio.create_task(_jetson_sweep_loop())
+
+
+@app.on_event("startup")
+async def _start_training_cancel_sweep() -> None:
+    """Migration 023: retry Modal cancel for rows stuck in
+    `cancel_requested`. /trainings/cancel only flips to `canceled` on a
+    successful Modal cancel — otherwise the row sits in cancel_requested
+    and this sweep retries every 30 s until success or MAX_CANCEL_ATTEMPTS.
+
+    Disable via TRAINING_CANCEL_SWEEPER_DISABLED=1 for unit tests."""
+    import asyncio as _asyncio
+
+    if os.environ.get("TRAINING_CANCEL_SWEEPER_DISABLED") == "1":
+        logger.info("training_cancel_sweep: disabled via env")
+        return
+    _asyncio.create_task(_training_cancel_sweep_loop())

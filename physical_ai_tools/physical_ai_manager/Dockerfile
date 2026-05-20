@@ -35,6 +35,10 @@ COPY . .
 RUN test -n "$REACT_APP_SUPABASE_URL"      || (echo "ERROR: --build-arg REACT_APP_SUPABASE_URL is required (was empty)"      && exit 1) && \
     test -n "$REACT_APP_SUPABASE_ANON_KEY" || (echo "ERROR: --build-arg REACT_APP_SUPABASE_ANON_KEY is required (was empty)" && exit 1) && \
     test -n "$REACT_APP_CLOUD_API_URL"     || (echo "ERROR: --build-arg REACT_APP_CLOUD_API_URL is required (was empty)"     && exit 1)
+# Disable source maps — they expose React source via DevTools and add ~15 MB
+# to the shipped bundle. CRA reads this env at build time; the build/static/js/
+# directory should contain zero *.map files after this.
+ENV GENERATE_SOURCEMAP=false
 RUN npm run build
 RUN printf '{"buildId":"%s","builtAt":"%s"}\n' "${REACT_APP_BUILD_ID}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > build/version.json
 

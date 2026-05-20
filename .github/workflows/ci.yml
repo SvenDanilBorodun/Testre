@@ -13,12 +13,24 @@ on:
   pull_request:
     branches: [main]
 
+concurrency:
+  # PR force-pushes should cancel the in-flight run for that PR; main
+  # pushes can't be cancelled because there's no PR number in the key
+  # (each main push gets its own unique group via github.ref), and we
+  # need every main push's CI result for the merge ledger.
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
 jobs:
   python-tests:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5
         with:
           python-version: "3.11"
       - name: Install test dependencies
@@ -69,8 +81,9 @@ jobs:
 
   shell-lint:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
       - name: Install shellcheck
         run: sudo apt-get update && sudo apt-get install -y shellcheck
       - name: shellcheck
@@ -87,8 +100,9 @@ jobs:
 
   compose-validate:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
       - name: Assert .s6-keep mount target exists
         # Audit H29: compose mounts physical_ai_server/.s6-keep as an
         # RO bind. The file enables the s6 longrun service inside the
@@ -134,8 +148,9 @@ jobs:
 
   overlay-guard:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
       - name: Patch script self-check
         run: |
           # Prove the patch script still exits non-zero on a no-op.
@@ -256,9 +271,10 @@ jobs:
     # the Modal API until deploy time. We install the SDK from PyPI
     # and verify the modules import cleanly.
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5
         with:
           python-version: "3.11"
       - name: Install Modal SDK
@@ -329,8 +345,9 @@ jobs:
     # student Dockerfile WITH staging, so dropdown↔server drift is
     # still enforced.
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
       - name: Build physical_ai_manager via Dockerfile.web (Railway path)
         run: |
           docker build \
@@ -364,8 +381,9 @@ jobs:
     # assert those exact strings made it into main.*.js — if they didn't,
     # Webpack didn't see the env vars and the image is broken.
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
       - name: Build physical_ai_manager with placeholder secrets
         run: |
           # Stage the same coco_classes.py snapshot that build-images.sh
@@ -422,9 +440,10 @@ jobs:
     # (handlers/__init__.py), HAT_BLOCK_TYPES (interpreter.py), and
     # the static set of Blockly built-ins the interpreter dispatches.
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5
         with:
           python-version: "3.11"
       - name: Validate tutorial JSON files
@@ -507,8 +526,9 @@ jobs:
     # CMakeLists.txt. No actual rosidl run (requires the full ROS
     # toolchain) but the file-level invariants catch typos.
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
       - name: Lint srv/msg files
         run: |
           python3 - <<'PY'
@@ -543,8 +563,9 @@ jobs:
 
   nginx-validate:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
       - name: Install nginx + envsubst
         run: |
           sudo apt-get update
@@ -580,8 +601,9 @@ jobs:
     # the user reads; the drift accumulated silently across the
     # overlays + GUI + installer. This job is the regression fence.
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
       - name: Scan student-facing German strings for transliterations
         run: |
           set -e

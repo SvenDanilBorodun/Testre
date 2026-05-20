@@ -28,6 +28,30 @@ RUN apt-get update && apt-get install -y \
 ENV COLCON_WS=/root/ros2_ws
 WORKDIR ${COLCON_WS}
 
+# ┌─────────────────────────────────────────────────────────────────────┐
+# │ FIXME (Rule §5, 5-site contract): SHA-pin physical_ai_tools.        │
+# │                                                                     │
+# │ The `git clone -b jazzy --recursive` below tracks the MOVING jazzy  │
+# │ branch tip, so next rebuild can silently pick up a new LeRobot      │
+# │ submodule SHA. The amd64 base image (robotis/physical-ai-server:    │
+# │ amd64-0.8.2, registry-pinned) freezes a known-good state; this      │
+# │ arm64 base does NOT.                                                │
+# │                                                                     │
+# │ The Modal worker enforces LeRobot @ 989f3d05ba47f872d75c587e76838e9 │
+# │ cc574857a (modal_app.py::LEROBOT_COMMIT). The arm64 base must pin   │
+# │ the parent physical_ai_tools commit that records the matching       │
+# │ submodule SHA. To find it:                                          │
+# │   git ls-remote https://github.com/ROBOTIS-GIT/physical_ai_tools.git jazzy │
+# │   git clone ... && cd physical_ai_tools                             │
+# │   git log --oneline | head -30                                      │
+# │   git -C lerobot rev-parse HEAD   # must == 989f3d05ba...           │
+# │                                                                     │
+# │ Then convert the clone below to:                                    │
+# │   ARG PHYSICAL_AI_TOOLS_REF=<sha>                                   │
+# │   git clone https://github.com/ROBOTIS-GIT/physical_ai_tools.git && \│
+# │     cd physical_ai_tools && git checkout ${PHYSICAL_AI_TOOLS_REF}   │
+# │     && git submodule update --init --recursive                      │
+# └─────────────────────────────────────────────────────────────────────┘
 RUN mkdir -p ${COLCON_WS}/src && \
     cd ${COLCON_WS}/src && \
     git clone -b jazzy https://github.com/ROBOTIS-GIT/physical_ai_tools.git --recursive
@@ -69,6 +93,11 @@ RUN echo "source /opt/ros/${ROS_DISTRO}/setup.bash" >> ~/.bashrc  && \
 RUN mkdir -p /var/run/agent && \
     chmod 777 /var/run/agent
 
+# talos_system_manager — kept here ONLY because its requirements.txt installs
+# shared pip deps into site-packages that other packages reuse. The directory
+# itself + the PYTHONPATH entry are stripped from the production image by the
+# thin-overlay Dockerfile in robotis_ai_setup/docker/physical_ai_server/, so
+# nothing depends on /opt/talos_system_manager existing at runtime.
 RUN git clone -b main https://github.com/ROBOTIS-GIT/talos_system_manager.git /opt/talos_system_manager
 
 ENV PYTHONPATH=/opt/talos_system_manager:${PYTHONPATH}

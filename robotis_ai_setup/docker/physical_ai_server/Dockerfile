@@ -275,3 +275,29 @@ RUN set -e && \
     test -f "$target_dir/workflow/calibration_manager.py" && \
     echo "Roboter Studio workflow module installed at $target_dir/workflow" && \
     rm -rf /tmp/workflow
+
+# Strip ~6.75 GB of upstream bloat — see CLAUDE.md image-level audit (2026-05).
+# This MUST come AFTER all apply_overlay chains + the YOLOX download + the
+# colcon rebuild + the Roboter Studio workflow copy. Any earlier and we
+# either delete sources the build still needs, or invalidate the sha256
+# pre/post checks the overlays rely on.
+#
+# Breakdown (verified via `du -sh` inside :latest):
+#   /root/.cache       ~5.0 GB  (pip wheel cache + puccinialin 962 MB, inherited from upstream base)
+#   /root/.rustup      ~1.2 GB  (Rust toolchain — never invoked at runtime)
+#   /root/.cargo       ~0.1 GB  (cargo registry cache)
+#   .git dirs          ~331 MB  (inherited from `git clone --recursive` in upstream Dockerfile)
+#   /opt/talos_system_manager ~216 MB  (Robotis VNC dashboard, dev-only — see comment below)
+#
+# EduBotics does NOT import from talos_system_manager. Verify nothing else references it:
+#   grep -rn 'talos' /root/ros2_ws/   ->  zero hits in EduBotics overlays.
+# The upstream Dockerfile installs talos's pip requirements into site-packages
+# (those stay — they're real deps shared with other packages), AND sets
+# PYTHONPATH=/opt/talos_system_manager. That PYTHONPATH entry will now point
+# at a missing directory; Python silently ignores missing sys.path entries.
+RUN set -e && \
+    rm -rf /root/.cache /root/.rustup /root/.cargo && \
+    find /root/ros2_ws -type d -name ".git" -exec rm -rf {} + 2>/dev/null || true && \
+    rm -rf /opt/talos_system_manager && \
+    sed -i '\|/opt/talos_system_manager|d' /root/.bashrc /etc/bash.bashrc 2>/dev/null || true && \
+    echo "Stripped upstream bloat: ~6.75 GB removed from image layer"

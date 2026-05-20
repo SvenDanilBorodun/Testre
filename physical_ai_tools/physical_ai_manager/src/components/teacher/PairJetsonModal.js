@@ -20,14 +20,37 @@ const codeInputClass =
 
 /**
  * Teacher enters the 6-digit pairing code from the Jetson's setup.sh
- * output. Calls POST /teacher/classrooms/{id}/jetson/pair on success.
+ * output. The parent's `onPaired` callback performs the new
+ * two-step pair-intent → pair flow (2026-05 IDOR fix in
+ * jetsonClient.pairJetsonIntent + jetsonClient.pairJetson). The
+ * loading spinner here stays active across both calls because
+ * `onPaired` only resolves after both succeed.
  *
- * Maps the common error codes to specific German messages:
- *   404 → "Pairing-Code ungültig oder abgelaufen" (the most likely cause)
- *   403 → "Klasse gehört nicht zu diesem Lehrer" (defense-in-depth; the
- *         UI shouldn't surface this unless the teacher's session is stale)
+ * Error mapping by step + status (errors thrown by the client are
+ * tagged with `err.step ∈ {'intent','pair'}`):
+ *   intent 404 → "Pairing-Code ungültig oder abgelaufen"
+ *   intent 409 → German message already set by pairJetsonIntent
+ *                ("…bereits von einem anderen Lehrer beansprucht…")
+ *   pair   403 → German message already set by pairJetson
+ *                ("Pairing-Intent abgelaufen oder ungültig…")
+ *                Edge case: the intent_token is consumed once the
+ *                pair-intent succeeds. If the subsequent pair fails
+ *                we have no client-side release endpoint — the
+ *                teacher must ask the classroom agent to rotate its
+ *                pairing_code (either by restarting the agent or
+ *                via the regenerate_pairing_code RPC). The toast
+ *                below surfaces that hint.
+ *   pair   404 → "Pairing-Code ungültig oder abgelaufen"
+ *   pair   409 → "Jetson ist bereits gepaart"
  */
 export default function PairJetsonModal({ onClose, classroomId, onPaired }) {
+  // classroomId is currently consumed by the parent through the
+  // onPaired closure, but we keep the prop on the signature so future
+  // refactors that move the fetch into this component don't need to
+  // re-thread it through JetsonSection. Avoid an unused-var lint by
+  // referencing it through Boolean coercion.
+  void classroomId;
+
   const [code, setCode] = useState('');
   const [loading, setLoading] = useState(false);
 
@@ -43,21 +66,35 @@ export default function PairJetsonModal({ onClose, classroomId, onPaired }) {
     }
     setLoading(true);
     try {
-      // The token comes via prop or via parent dispatch. The simplest
-      // wiring: the parent passes a callback that handles auth.
+      // onPaired runs the two-step pair-intent → pair flow inside
+      // JetsonSection (it has the access_token from Redux). It only
+      // resolves after BOTH calls succeed, so this single setLoading
+      // gate covers the whole flow.
       const result = await onPaired(code);
-      // onPaired must throw on failure so we keep the modal open with
-      // the error toast. Success → close.
       toast.success(`Jetson gepaart: ${result?.mdns_name || 'Erfolg'}`);
       onClose();
     } catch (err) {
       const status = err?.status;
-      if (status === 404) {
+      const step = err?.step;
+      if (step === 'pair' && status !== 404 && status !== 409) {
+        // The intent_token was consumed but the pair step failed
+        // (403 mismatch, 5xx, network). The teacher cannot retry
+        // until the agent rotates its pairing_code — surface the
+        // German hint regardless of the underlying status code.
+        toast.error(
+          'Pairing fehlgeschlagen. Bitte beim Klassen-Agenten den Code neu generieren.'
+        );
+      } else if (status === 404) {
         toast.error('Pairing-Code ungültig oder abgelaufen');
-      } else if (status === 403) {
-        toast.error('Keine Berechtigung — Klasse gehört nicht zu diesem Lehrer');
       } else if (status === 409) {
-        toast.error('Jetson ist bereits gepaart');
+        // Step 'intent' 409 → wrapped German message about another
+        // teacher already claiming the code. Step 'pair' 409 →
+        // Jetson already bound. Show the wrapped message when one
+        // is present, otherwise the generic German.
+        toast.error(err?.message || 'Jetson ist bereits gepaart');
+      } else if (status === 403) {
+        // Catch-all for any 403 not already handled above.
+        toast.error(err?.message || 'Keine Berechtigung');
       } else {
         toast.error(err?.message || 'Pairing fehlgeschlagen');
       }

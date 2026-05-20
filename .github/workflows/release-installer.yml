@@ -20,15 +20,37 @@ name: release-installer
 # tagging (artifact is uploaded as a CI artifact, not as a Release asset).
 
 on:
-  push:
-    tags:
-      - "v*.*.*"
+  # Tag-push trigger removed in favor of being chained from release.yml
+  # AFTER docker-publish completes. Race fix: previously both this file
+  # and release.yml fired on `v*.*.*` with no `needs:` linkage, so the
+  # .exe could attach to the GH Release before docker-publish had pushed
+  # the matching `:vX.Y.Z` image tags — students hit first-boot pull 404
+  # because the GUI's `/version` poll said "update available" but the
+  # image tags weren't there yet. release.yml's `installer:` job now
+  # invokes this workflow as a workflow_call, gated on `docker.result ==
+  # 'success'`.
+  workflow_call:
+    inputs:
+      version_tag:
+        description: "Tag-style version (e.g., v2.3.0) — defaults to the calling ref"
+        required: false
+        default: ""
+        type: string
   workflow_dispatch:
     inputs:
       version_tag:
         description: "Tag-style version (e.g., v2.3.0) for the test build"
         required: true
         default: "v0.0.0-test"
+        type: string
+
+concurrency:
+  # Serialise releases for the same ref. cancel-in-progress: false so a
+  # half-uploaded GH Release asset doesn't get aborted partway through
+  # (softprops/action-gh-release can leave a partial upload visible to
+  # the auto-updater poll).
+  group: release-installer-${{ github.ref }}
+  cancel-in-progress: false
 
 permissions:
   contents: write  # required to upload assets to the Release
@@ -37,8 +59,9 @@ jobs:
   build-rootfs:
     name: Build WSL2 rootfs (Ubuntu host)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
 
       - name: Build rootfs tarball via Docker
         run: |
@@ -47,7 +70,7 @@ jobs:
           ls -la ../../robotis_ai_setup/installer/assets/edubotics-rootfs.tar.gz*
 
       - name: Upload rootfs artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
           name: edubotics-rootfs
           path: |
@@ -60,16 +83,21 @@ jobs:
     name: Build EduBotics_Setup.exe (Windows host)
     needs: build-rootfs
     runs-on: windows-latest
+    # 90-min budget: Windows runner is slow, PyInstaller + Inno Setup
+    # together are typically ~25 min; pad for `choco install innosetup`
+    # network jitter and pip wheel-building when pythonnet 3.1.0rc lacks
+    # a wheel for the runner's Python patch level.
+    timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
 
       - name: Set up Python 3.11
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5
         with:
           python-version: "3.11"
 
       - name: Download rootfs artifact from previous job
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
         with:
           name: edubotics-rootfs
           path: robotis_ai_setup/installer/assets/
@@ -128,7 +156,7 @@ jobs:
           if ($size -lt 100000000) { throw "installer suspiciously small ($size bytes)" }
 
       - name: Upload installer as CI artifact (always)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
           name: EduBotics_Setup
           path: robotis_ai_setup/installer/output/EduBotics_Setup.exe
@@ -137,7 +165,7 @@ jobs:
 
       - name: Attach installer to GitHub Release (tag pushes only)
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2
         with:
           files: robotis_ai_setup/installer/output/EduBotics_Setup.exe
           fail_on_unmatched_files: true

@@ -1,0 +1,41 @@
+# Cloud Training API .dockerignore — keep app/ but drop everything else that
+# would otherwise bloat the Railway build context or risk leaking secrets.
+
+# Python caches + bytecode
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Local secrets — NEVER upload these to the Railway builder
+.env
+.env.*
+!.env.example
+
+# VCS + editor
+.git
+.gitignore
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Tests are not needed in the production image (app/tests/ contains stubs
+# that import fastapi/supabase from sys.modules — uvicorn never executes them)
+app/tests/
+
+# Docs / markdown — readable in the repo, useless in the image
+*.md
+docs/
+
+# Keep VERSION (re-staged from repo root by railway-deploy-cloud-api.yml).
+# Negative pattern in case a future .dockerignore line over-broadly excludes it.
+!VERSION

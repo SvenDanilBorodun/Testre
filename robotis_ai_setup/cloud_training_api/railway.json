@@ -2,10 +2,16 @@
   "$schema": "https://railway.com/railway.schema.json",
   "build": {
     "builder": "DOCKERFILE",
-    "dockerfilePath": "Dockerfile"
+    "dockerfilePath": "Dockerfile",
+    "_comment_buildArgs": "BUILD_COMMIT is surfaced via /health.commit so the CI health-gate can assert commit == github.sha. Railway interpolates $RAILWAY_GIT_COMMIT_SHA at build time. RAILWAY_GIT_COMMIT_SHA is ALSO injected as a runtime env var, so health.py reads it directly; this buildArg makes the OCI label correct + caches a copy in BUILD_COMMIT ENV for diagnostic dumps.",
+    "buildArgs": {
+      "BUILD_COMMIT": "$RAILWAY_GIT_COMMIT_SHA"
+    }
   },
   "deploy": {
     "restartPolicyType": "ON_FAILURE",
-    "restartPolicyMaxRetries": 10
+    "restartPolicyMaxRetries": 10,
+    "healthcheckPath": "/health",
+    "healthcheckTimeout": 30
   }
 }

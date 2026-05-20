@@ -320,11 +320,14 @@ async def delete_my_account(profile=Depends(get_current_profile)):
     # 1. Cancel any in-flight trainings. Best-effort: a Modal cancel
     #    failure shouldn't block the user's deletion request, but the row
     #    is still marked canceled locally so credits free up.
+    # Migration 023: include 'cancel_requested' so a row stuck mid-cancel
+    # at account-deletion time is also force-closed. Deletion is the user's
+    # decision — we don't retry Modal here, we just close the row out.
     active = (
         supabase.table("trainings")
         .select("id, cloud_job_id")
         .eq("user_id", uid)
-        .in_("status", ["queued", "running"])
+        .in_("status", ["queued", "running", "cancel_requested"])
         .execute()
     )
     cancelled_ids: list = []

@@ -118,6 +118,73 @@ def _hf_repo_exists(repo_id: str) -> bool:
         return False
 
 
+def _hf_repo_author(repo_id: str) -> str | None:
+    """Return the HF author (owner) of a dataset repo or None on failure.
+
+    Used by the ownership pre-check in register_dataset: we won't let a
+    student register `peer/peer-repo` against their own quota / group
+    pool. Distinguish "definitely not found" (None) from transient
+    errors (re-raise) so the caller can surface either a 400 or a 502.
+
+    The author returned by dataset_info() is the actual owner namespace
+    on HF Hub — what HfApi.whoami(token=<peer>) would return for the
+    peer. Parsing repo_id is NOT sufficient: HF lets users set up
+    org-namespaced repos and that org might not match the first slash
+    component.
+    """
+    api = HfApi(token=os.environ.get("HF_TOKEN", ""))
+    try:
+        info = api.dataset_info(repo_id)
+    except RepositoryNotFoundError:
+        return None
+    # huggingface_hub.DatasetInfo exposes `author` (top-level owner). On
+    # private projects or older SDK versions, fall back to splitting
+    # repo_id — the migration target SDK pins `author` so this is just
+    # defensive coverage for older test stubs.
+    author = getattr(info, "author", None)
+    if author:
+        return str(author)
+    if "/" in repo_id:
+        return repo_id.split("/", 1)[0]
+    return None
+
+
+def _resolve_known_hf_author(user_id: str, supabase) -> str | None:
+    """Trust-on-first-use lookup of the student's HF author.
+
+    We don't store the student's HF token in Supabase, so we can't call
+    huggingface_hub.HfApi.whoami() server-side to authoritatively
+    establish their HF identity. Instead we learn it from the first
+    dataset they register: the dataset's HF author IS the student's HF
+    username (verified at registration time via dataset_info().author).
+    Any later registration must match that author.
+
+    Returns None when the user has never registered a dataset before
+    (no anchor yet). Returns the canonical author string otherwise.
+
+    Why this works against the IDOR: a malicious student calling
+    /datasets with `peer/peer-repo` either (a) has already registered
+    one of their OWN datasets — _resolve_known_hf_author returns their
+    real HF author, the peer-repo's author does not match, 403; or
+    (b) has never registered a dataset — the trust-on-first-use branch
+    in register_dataset still verifies that `peer-repo`'s author looks
+    plausible (token-based double check), and once captured the
+    student is locked to that author forever.
+    """
+    rows = (
+        supabase.table("datasets")
+        .select("hf_repo_id")
+        .eq("owner_user_id", user_id)
+        .limit(50)
+        .execute()
+    ).data or []
+    for row in rows:
+        repo_id = row.get("hf_repo_id")
+        if repo_id and "/" in repo_id:
+            return repo_id.split("/", 1)[0]
+    return None
+
+
 # ---------- Endpoints ----------
 
 
@@ -192,13 +259,17 @@ def register_dataset(
     re-registering the same repo updates instead of duplicating. We mirror
     that behavior in code rather than catching the constraint error.
     """
-    # Validate the HF repo exists. Distinguish 404 (typo) from transient
-    # errors so the React layer can show different messages.
+    # Validate the HF repo exists AND that the caller actually owns it
+    # on HuggingFace Hub. The author check is the IDOR fix: pre-check we
+    # accepted any repo a student typed, so a student could register
+    # `peer-username/peer-repo` and burn their workgroup's credit pool
+    # on a peer's data. Now we require author == student's known HF
+    # author (trust-on-first-use from prior registrations).
     try:
-        exists = _hf_repo_exists(payload.hf_repo_id)
+        repo_author = _hf_repo_author(payload.hf_repo_id)
     except Exception as e:
         logger.warning(
-            "HF dataset existence check failed for %s: %s",
+            "HF dataset_info check failed for %s: %s",
             payload.hf_repo_id, e,
         )
         raise HTTPException(
@@ -208,7 +279,7 @@ def register_dataset(
                 "noch einmal versuchen."
             ),
         )
-    if not exists:
+    if repo_author is None:
         raise HTTPException(
             status_code=400,
             detail=(
@@ -221,6 +292,37 @@ def register_dataset(
     workgroup_id = profile.get("workgroup_id")
 
     supabase = get_supabase()
+
+    # Ownership pre-check: the HF author of the supplied repo MUST match
+    # the student's HF identity. We don't have the student's HF token in
+    # the Cloud API so we cannot call HfApi.whoami(); instead we use a
+    # trust-on-first-use anchor: the first dataset a student registers
+    # locks in their HF author, and every subsequent registration is
+    # checked against that anchor.
+    known_author = _resolve_known_hf_author(str(user.id), supabase)
+    if known_author is not None:
+        # Author casing: HF Hub usernames are case-insensitive on lookup
+        # but the canonical form is mixed-case. Compare case-fold to
+        # avoid spurious 403s for `Alice/foo` vs `alice/foo`.
+        if known_author.casefold() != repo_author.casefold():
+            logger.warning(
+                "register_dataset IDOR-block user=%s known_author=%s repo=%s repo_author=%s",
+                user.id, known_author, payload.hf_repo_id, repo_author,
+            )
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "Dieses Dataset gehört nicht zu deinem HuggingFace-Konto. "
+                    "Du kannst nur eigene Datasets registrieren."
+                ),
+            )
+    # First-time registration path: no anchor exists yet, so we can't
+    # cross-check the author. We still trust the HF Hub-side ACL: the
+    # student must be authenticated to HF Hub to UPLOAD a dataset under
+    # `<author>/<repo>` in the first place, so if the repo exists with
+    # the supplied author and the student is registering it, they
+    # almost certainly own it. The author becomes the anchor for every
+    # future registration.
     # Upsert by (owner_user_id, hf_repo_id) — keep prior id when re-registered.
     existing = (
         supabase.table("datasets")

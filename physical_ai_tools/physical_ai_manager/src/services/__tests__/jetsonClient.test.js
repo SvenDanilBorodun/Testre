@@ -26,6 +26,7 @@ import {
   getClassroomJetson,
   heartbeatJetson,
   pairJetson,
+  pairJetsonIntent,
   regeneratePairingCode,
   releaseJetson,
   releaseJetsonBeacon,
@@ -103,17 +104,96 @@ describe('jetsonClient request shape', () => {
     );
   });
 
-  test('pairJetson sends pairing_code in body and optionally mdns_name', async () => {
+  test('pairJetson sends pairing_code + intent_token in body and optionally mdns_name', async () => {
     global.fetch.mockResolvedValue(jsonResponse(200, { jetson_id: 'j-1', mdns_name: 'm' }));
-    await pairJetson('jwt-token', 'classroom-1', '123456');
+    await pairJetson('jwt-token', 'classroom-1', '123456', 'intent-uuid-1');
     const opts = global.fetch.mock.calls[0][1];
-    expect(JSON.parse(opts.body)).toEqual({ pairing_code: '123456' });
+    expect(JSON.parse(opts.body)).toEqual({
+      pairing_code: '123456',
+      intent_token: 'intent-uuid-1',
+    });
+    expect(global.fetch).toHaveBeenLastCalledWith(
+      'https://api.test.example/teacher/classrooms/classroom-1/jetson/pair',
+      expect.objectContaining({ method: 'POST' })
+    );
 
     global.fetch.mockClear();
     global.fetch.mockResolvedValue(jsonResponse(200, { jetson_id: 'j-1', mdns_name: 'custom' }));
-    await pairJetson('jwt-token', 'classroom-1', '654321', 'custom.local');
+    await pairJetson('jwt-token', 'classroom-1', '654321', 'intent-uuid-2', 'custom.local');
     const opts2 = global.fetch.mock.calls[0][1];
-    expect(JSON.parse(opts2.body)).toEqual({ pairing_code: '654321', mdns_name: 'custom.local' });
+    expect(JSON.parse(opts2.body)).toEqual({
+      pairing_code: '654321',
+      intent_token: 'intent-uuid-2',
+      mdns_name: 'custom.local',
+    });
+  });
+
+  test('pairJetson refuses to call the API when intentToken is missing', async () => {
+    global.fetch.mockResolvedValue(jsonResponse(200, { jetson_id: 'j-1' }));
+    await expect(
+      pairJetson('jwt-token', 'classroom-1', '123456')
+    ).rejects.toMatchObject({
+      message: expect.stringContaining('Pairing-Intent fehlt'),
+    });
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  test('pairJetson maps 403 to the German "intent abgelaufen" message and tags step="pair"', async () => {
+    global.fetch.mockResolvedValue(
+      jsonResponse(403, { detail: 'intent_token mismatch' })
+    );
+    await expect(
+      pairJetson('jwt-token', 'classroom-1', '123456', 'intent-uuid-bad')
+    ).rejects.toMatchObject({
+      status: 403,
+      step: 'pair',
+      message:
+        'Pairing-Intent abgelaufen oder ungültig. Bitte erneut versuchen.',
+    });
+  });
+
+  test('pairJetsonIntent hits the pair-intent endpoint and returns intent_token', async () => {
+    global.fetch.mockResolvedValue(
+      jsonResponse(200, { intent_token: 'uuid-intent-abc' })
+    );
+    const result = await pairJetsonIntent('jwt-token', 'classroom-1', '123456');
+    expect(result).toEqual({ intent_token: 'uuid-intent-abc' });
+    expect(global.fetch).toHaveBeenCalledWith(
+      'https://api.test.example/teacher/classrooms/classroom-1/jetson/pair-intent',
+      expect.objectContaining({
+        method: 'POST',
+        headers: expect.objectContaining({
+          Authorization: 'Bearer jwt-token',
+        }),
+      })
+    );
+    const opts = global.fetch.mock.calls[0][1];
+    expect(JSON.parse(opts.body)).toEqual({ pairing_code: '123456' });
+  });
+
+  test('pairJetsonIntent maps 409 to the German "bereits beansprucht" message and tags step="intent"', async () => {
+    global.fetch.mockResolvedValue(
+      jsonResponse(409, { detail: 'pairing code already claimed' })
+    );
+    await expect(
+      pairJetsonIntent('jwt-token', 'classroom-1', '123456')
+    ).rejects.toMatchObject({
+      status: 409,
+      step: 'intent',
+      message:
+        'Dieser Pairing-Code wurde bereits von einem anderen Lehrer beansprucht. Bitte den Schüler-Agenten neu starten.',
+    });
+  });
+
+  test('pairJetsonIntent passes 404 through (code invalid/expired)', async () => {
+    global.fetch.mockResolvedValue(
+      jsonResponse(404, { detail: 'pairing_code unknown' })
+    );
+    await expect(
+      pairJetsonIntent('jwt-token', 'classroom-1', '000000')
+    ).rejects.toMatchObject({
+      status: 404,
+    });
   });
 
   test('regeneratePairingCode hits the teacher endpoint and returns the new code payload', async () => {

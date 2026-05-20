@@ -28,6 +28,33 @@ Postgres → HTTP error code mapping in this module:
   P0011 → 403  Klassenzimmer gehört nicht zu diesem Lehrer
   P0030 → 409  Jetson belegt
   P0031 → 410  Lock verloren
+  P0032 → 409  Pairing-Intent bereits von anderem Lehrer beansprucht  (022)
+  P0033 → 403  Pairing-Intent ungültig oder abgelaufen                (022)
+
+Two-step Jetson pairing (migration 022)
+---------------------------------------
+The 6-digit pairing code is a 20-bit numeric secret printed to the
+Jetson's stdout on first boot. Two teachers on the same school LAN
+both see it; whichever calls /pair first would historically win. To
+defeat that IDOR the pair flow is now in TWO steps, both authenticated
+as the same teacher:
+
+  1. POST /teacher/classrooms/{classroom_id}/jetson/pair-intent
+       body: {"pairing_code": "123456"}
+       → 200 {"intent_token": "<uuid>", "classroom_id": "..."}
+       Atomically writes intent_teacher_id on the matching unpaired
+       jetsons row. A second teacher calling /pair-intent on the same
+       code gets 409.
+
+  2. POST /teacher/classrooms/{classroom_id}/jetson/pair
+       body: {"pairing_code": "123456", "intent_token": "<uuid>"}
+       → 200 {"jetson_id": "...", "mdns_name": "..."}
+       Verifies the (code, intent_token, teacher) triple before binding
+       the classroom. Without intent_token from step 1 the call cannot
+       succeed.
+
+React's PairJetsonDialog runs the two calls back-to-back; from the
+teacher's perspective it's still one button click.
 """
 
 from __future__ import annotations
@@ -118,8 +145,35 @@ class JetsonInfo(BaseModel):
     claimed_at: str | None
 
 
-class JetsonPairRequest(BaseModel):
+class JetsonPairIntentRequest(BaseModel):
+    """First-step pair: teacher claims the 6-digit code (migration 022).
+
+    No classroom_id in the body — the path captures it. The intent only
+    binds the calling teacher to the code; the classroom binding happens
+    at /pair-confirm. This keeps the two steps cleanly separable so a
+    teacher who clicks the wrong classroom in step 2 doesn't poison the
+    intent claim and force a /regenerate-code.
+    """
+
     pairing_code: str = Field(..., min_length=4, max_length=32)
+
+
+class JetsonPairIntentResponse(BaseModel):
+    intent_token: str
+    classroom_id: str
+
+
+class JetsonPairRequest(BaseModel):
+    """Second-step pair: teacher confirms with code + intent_token.
+
+    intent_token comes from the /pair-intent response (migration 022).
+    The Postgres RPC refuses to bind the classroom unless the
+    (pairing_code, intent_token, teacher_id) triple all match the row,
+    closing the cross-teacher LAN pairing-code race.
+    """
+
+    pairing_code: str = Field(..., min_length=4, max_length=32)
+    intent_token: str = Field(..., min_length=32, max_length=64)
 
 
 class JetsonPairResponse(BaseModel):
@@ -300,12 +354,33 @@ def _assert_jetson_owner(user_id: str, jetson_id: str) -> dict:
 
 
 def _map_pg_error(exc: Exception) -> HTTPException:
-    """Convert known Postgres error codes from migration 019 to HTTP."""
+    """Convert known Postgres error codes from migrations 019/020/022 to HTTP."""
     msg = str(exc)
     if "P0030" in msg:
         return HTTPException(status_code=409, detail="Jetson ist bereits belegt")
     if "P0031" in msg:
         return HTTPException(status_code=410, detail="Lock verloren — bitte erneut verbinden")
+    if "P0032" in msg:
+        # Migration 022: a different teacher already claimed this pairing
+        # code via /pair-intent. The local agent needs to be restarted so a
+        # fresh code is minted; the school admin should also investigate
+        # the cross-teacher claim attempt.
+        return HTTPException(
+            status_code=409,
+            detail=(
+                "Dieser Pairing-Code wurde bereits von einem anderen Lehrer "
+                "beansprucht. Bitte den Schüler-Agenten neu starten."
+            ),
+        )
+    if "P0033" in msg:
+        # Migration 022: the intent_token does not match what's on the row
+        # (the teacher's React app lost the token, the code was rotated by
+        # /regenerate-code in between, or the intent expired with the
+        # pairing-code's 30-min lifetime).
+        return HTTPException(
+            status_code=403,
+            detail="Pairing-Intent abgelaufen oder ungültig.",
+        )
     if "P0011" in msg:
         return HTTPException(status_code=403, detail="Klassenzimmer gehört nicht zu diesem Lehrer")
     if "P0002" in msg:
@@ -675,6 +750,76 @@ async def release_jetson_beacon(
 
 
 @teacher_router.post(
+    "/classrooms/{classroom_id}/jetson/pair-intent",
+    response_model=JetsonPairIntentResponse,
+)
+async def pair_jetson_intent_endpoint(
+    classroom_id: str = Path(...),
+    req: JetsonPairIntentRequest = Body(...),
+    teacher=Depends(get_current_teacher),
+):
+    """Step 1/2 of the pair flow (migration 022).
+
+    Teacher enters the 6-digit pairing code shown on the Jetson's stdout.
+    This endpoint atomically claims the code for the calling teacher and
+    returns an `intent_token` that must be passed to /pair on step 2.
+
+    Why two steps: the 6-digit code is a 20-bit numeric secret. Two
+    teachers on the same school LAN both see it. The pre-022 single-step
+    /pair would let either teacher win the race; we now require the
+    teacher to prove possession of an opaque intent_token derived from a
+    successful /pair-intent before the classroom is bound.
+
+    Authorisation: classroom-ownership is verified at /pair (step 2). At
+    /pair-intent we only verify the caller is a teacher — multiple
+    teachers can call /pair-intent for the same classroom over the
+    lifetime of a code, but only the FIRST to land here wins the race,
+    and only the teacher who actually owns the classroom they confirm at
+    step 2 can complete the pair.
+
+    Idempotent for the SAME teacher: re-calling /pair-intent with the
+    same code returns the same intent_token (the RPC checks
+    `intent_teacher_id <> p_teacher_id` before raising P0032). A
+    different teacher gets 409.
+    """
+    # Verify the teacher owns this classroom before letting them claim
+    # the pairing-intent. Without this check a teacher from class B
+    # could pre-claim the intent for the device they think is in class B
+    # but is actually class A, and then class A's teacher would be
+    # blocked from completing /pair (annoying but not a security bug —
+    # the IDOR is defeated either way).
+    classroom = _fetch_classroom(classroom_id)
+    if classroom.get("teacher_id") != teacher["id"]:
+        raise HTTPException(
+            status_code=403,
+            detail="Klassenzimmer gehört nicht zu diesem Lehrer",
+        )
+
+    supabase = get_supabase()
+    try:
+        result = supabase.rpc(
+            "claim_pair_intent",
+            {
+                "p_pairing_code": req.pairing_code.strip(),
+                "p_teacher_id": teacher["id"],
+            },
+        ).execute()
+    except Exception as exc:
+        raise _map_pg_error(exc)
+    intent_token = result.data if isinstance(result.data, str) else None
+    if not intent_token:
+        raise HTTPException(status_code=500, detail="Pairing-Intent fehlgeschlagen")
+    logger.info(
+        "pair-intent claimed: classroom=%s teacher=%s",
+        classroom_id, teacher["id"],
+    )
+    return JetsonPairIntentResponse(
+        intent_token=intent_token,
+        classroom_id=classroom_id,
+    )
+
+
+@teacher_router.post(
     "/classrooms/{classroom_id}/jetson/pair",
     response_model=JetsonPairResponse,
 )
@@ -683,9 +828,17 @@ async def pair_jetson_endpoint(
     req: JetsonPairRequest = Body(...),
     teacher=Depends(get_current_teacher),
 ):
-    """Teacher enters the 6-digit pairing code from the Jetson's
-    stdout. Binds the registered Jetson to this classroom and assigns
-    its mDNS name."""
+    """Step 2/2 of the pair flow (migration 022).
+
+    Teacher confirms with the 6-digit code AND the intent_token returned
+    by /pair-intent. The Postgres RPC verifies that the
+    (pairing_code, intent_token, teacher_id) triple all agree before
+    binding the classroom — this is the IDOR fix.
+
+    Pre-022 callers that pass only the pairing_code will fail at the
+    Pydantic layer (intent_token is required); a forgotten step-1 call
+    therefore fails loudly instead of silently bypassing the new check.
+    """
     supabase = get_supabase()
     # We can't generate the mdns_name until we know the jetson_id, but
     # the RPC expects it as an input. Approach: insert a placeholder,
@@ -702,6 +855,7 @@ async def pair_jetson_endpoint(
                 "p_pairing_code": req.pairing_code.strip(),
                 "p_teacher_id": teacher["id"],
                 "p_mdns_name": placeholder,
+                "p_intent_token": req.intent_token.strip(),
             },
         ).execute()
     except Exception as exc:
@@ -730,6 +884,10 @@ async def pair_jetson_endpoint(
             status_code=500,
             detail="Jetson gepaart, aber mDNS-Name konnte nicht gesetzt werden. Bitte Pairing wiederholen.",
         )
+    logger.info(
+        "pair completed: classroom=%s teacher=%s jetson=%s",
+        classroom_id, teacher["id"], jetson_id,
+    )
 
     return JetsonPairResponse(jetson_id=jetson_id, mdns_name=mdns)
 

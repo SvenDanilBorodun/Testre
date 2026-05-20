@@ -73,9 +73,10 @@ jobs:
   validate:
     name: Lint + parse migrations
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: supabase/setup-cli@v1
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - uses: supabase/setup-cli@cd9b0fd6c9b461031b64e97090fcbdec9ba23711  # v1.6.1
         with:
           version: latest
       - name: List migrations to be applied
@@ -102,11 +103,12 @@ jobs:
     if: github.event_name == 'pull_request' && (github.event.action == 'opened' || github.event.action == 'synchronize' || github.event.action == 'reopened')
     needs: [validate]
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     env:
       SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: supabase/setup-cli@v1
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - uses: supabase/setup-cli@cd9b0fd6c9b461031b64e97090fcbdec9ba23711  # v1.6.1
         with:
           version: latest
       - name: Link to the production project (creates branches under it)
@@ -140,15 +142,23 @@ jobs:
           } >> "$GITHUB_OUTPUT"
       - name: Push migrations to PR branch (targets branch DB, not prod)
         working-directory: robotis_ai_setup/supabase
+        env:
+          BRANCH_DB_URL: ${{ steps.branch.outputs.branch_db_url }}
         run: |
           # Same pattern as apply-production: extract password and use
           # --linked --password since --db-url is unreliable on v2.x.
-          DB_URL='${{ steps.branch.outputs.branch_db_url }}'
-          DB_PASSWORD=$(printf '%s' "$DB_URL" | sed -E 's|^postgresql://[^:]+:([^@]+)@.*|\1|')
+          # urllib.parse handles passwords that contain `@`, URL-encoded
+          # chars (`%40`, `%23`), spaces, etc. — the previous sed regex
+          # `s|^postgresql://[^:]+:([^@]+)@.*|\1|` mangled all of these.
+          DB_PASSWORD=$(python3 -c "import os, urllib.parse as u; print(u.urlparse(os.environ['BRANCH_DB_URL']).password or '', end='')")
+          if [ -z "$DB_PASSWORD" ]; then
+            echo "::error::Could not extract password from BRANCH_DB_URL (urllib.parse returned empty)"
+            exit 1
+          fi
           echo "::add-mask::$DB_PASSWORD"
           supabase db push --linked --password "$DB_PASSWORD"
       - name: Comment on PR with branch URL + status
-        uses: actions/github-script@v7
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b  # v7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
@@ -177,11 +187,12 @@ jobs:
     name: Tear down PR branch on close
     if: github.event_name == 'pull_request' && github.event.action == 'closed'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     env:
       SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: supabase/setup-cli@v1
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - uses: supabase/setup-cli@cd9b0fd6c9b461031b64e97090fcbdec9ba23711  # v1.6.1
         with:
           version: latest
       - name: Link
@@ -202,11 +213,12 @@ jobs:
       (github.event_name == 'workflow_dispatch' && inputs.target == 'production' && (inputs.rollback_to == '' || inputs.rollback_to == null))
     needs: [validate]
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     env:
       SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: supabase/setup-cli@v1
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - uses: supabase/setup-cli@cd9b0fd6c9b461031b64e97090fcbdec9ba23711  # v1.6.1
         with:
           version: latest
       - name: Link to production
@@ -227,9 +239,17 @@ jobs:
           # Extracting the password from SUPABASE_DB_URL and using
           # --linked --password is the path that reliably works.
           # Pattern: postgresql://USER:PASSWORD@HOST:PORT/DB
-          DB_PASSWORD=$(printf '%s' "$SUPABASE_DB_URL" | sed -E 's|^postgresql://[^:]+:([^@]+)@.*|\1|')
-          if [ -z "$DB_PASSWORD" ] || [ "$DB_PASSWORD" = "$SUPABASE_DB_URL" ]; then
-            echo "::error::Could not extract password from SUPABASE_DB_URL. Format: postgresql://USER:PASS@HOST:PORT/DB"
+          #
+          # We use urllib.parse — NOT sed — because the previous regex
+          # `s|^postgresql://[^:]+:([^@]+)@.*|\1|` mangles passwords
+          # that contain `@` (legal when URL-encoded as `%40`), `%`, `:`
+          # in the password, or anything that needs percent-encoding.
+          # urllib's robust parser was the documented fix for the 2026-05
+          # CI breakage where this step failed silently on first runs.
+          DB_PASSWORD=$(python3 -c "import os, urllib.parse as u; print(u.urlparse(os.environ['SUPABASE_DB_URL']).password or '', end='')")
+          if [ -z "$DB_PASSWORD" ]; then
+            echo "::error::Could not extract password from SUPABASE_DB_URL (urllib.parse returned empty)"
+            echo "::error::Format: postgresql://USER:PASS@HOST:PORT/DB"
             echo "::error::URL length: ${#SUPABASE_DB_URL} (should be ~110)"
             exit 1
           fi
@@ -240,32 +260,33 @@ jobs:
           # applied via the one-time `supabase migration repair` step
           # documented in supabase/_archive/README.md.
           supabase db push --linked --password "$DB_PASSWORD" --include-all
-      - name: Probe production fingerprint via Railway /health
-        # The Railway FastAPI runs _validate_required_schema() at every
-        # boot. If our migration broke a contract, /health will be 503.
-        run: |
-          set -e
-          API="https://scintillating-empathy-production-1068.up.railway.app/health"
-          for attempt in $(seq 1 30); do
-            CODE=$(curl -s -o /dev/null -w "%{http_code}" "$API" || echo "000")
-            if [ "$CODE" = "200" ]; then
-              echo "Production /health = 200 after migration."
-              exit 0
-            fi
-            echo "Attempt $attempt: /health = $CODE — retrying in 2s"
-            sleep 2
-          done
-          echo "::error::Production /health never returned 200 within 60s post-migration."
-          exit 1
+      - name: List currently applied migrations
+        # The previous step polled the Railway /health endpoint as a
+        # post-migration smoke test. That probe was meaningless for
+        # *this* job: the Railway FastAPI hasn't redeployed yet, so a
+        # 200 just means the OLD pod (running OLD code against the NEW
+        # schema) is still up — not a signal of migration correctness.
+        # The real "did this migration break a contract?" gate is the
+        # `schema-probe` job in railway-deploy-cloud-api.yml, which
+        # imports the NEW FastAPI code against the NEW schema BEFORE
+        # `railway up` is invoked.
+        #
+        # Replace the broken probe with a simple `supabase migration
+        # list` — it confirms the new rows landed in the
+        # schema_migrations ledger AND gives the operator a paper trail
+        # in the run log of exactly what was just applied.
+        working-directory: robotis_ai_setup/supabase
+        run: supabase migration list --linked
 
   rollback:
     name: Rollback (manual dispatch)
     if: github.event_name == 'workflow_dispatch' && inputs.rollback_to != ''
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     env:
       PGPASSWORD: dummy  # psql reads from SUPABASE_DB_URL; this just silences a warning
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
       - name: Install psql
         run: |
           sudo apt-get update

@@ -2,10 +2,16 @@
   "$schema": "https://railway.com/railway.schema.json",
   "build": {
     "builder": "DOCKERFILE",
-    "dockerfilePath": "Dockerfile.web"
+    "dockerfilePath": "Dockerfile.web",
+    "_comment_buildArgs": "Railway interpolates $RAILWAY_GIT_COMMIT_SHA at build time. This is what flows into REACT_APP_BUILD_ID, which CRA inlines into main.*.js + /version.json. WITHOUT this entry, the build-arg defaults to 'dev' (Dockerfile.web ARG default) or — worse — picks up a frozen REACT_APP_BUILD_ID Railway service variable from a stale local build (Agent E's 2026-05-20 root-cause finding). OPERATOR ACTION: delete any REACT_APP_BUILD_ID service variable from the teacher-web Railway service so this interpolation wins.",
+    "buildArgs": {
+      "REACT_APP_BUILD_ID": "$RAILWAY_GIT_COMMIT_SHA"
+    }
   },
   "deploy": {
     "restartPolicyType": "ON_FAILURE",
-    "restartPolicyMaxRetries": 3
+    "restartPolicyMaxRetries": 10,
+    "healthcheckPath": "/version.json",
+    "healthcheckTimeout": 30
   }
 }

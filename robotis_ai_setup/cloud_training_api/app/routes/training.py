@@ -633,6 +633,28 @@ async def start_training(req: StartTrainingRequest, user=Depends(get_current_use
 
 @router.post("/cancel")
 async def cancel_training(req: CancelTrainingRequest, user=Depends(get_current_user)):
+    """Cancel a running training (migration 023 cost-bomb fix).
+
+    Two-phase commit semantics:
+      1. Flip status to `cancel_requested` and record the attempt.
+         The credit STAYS consumed at this stage — get_remaining_credits
+         counts cancel_requested as "used" (not in failed/canceled).
+      2. Attempt Modal cancel.
+         * Success → flip to `canceled` (credit auto-frees), null
+           worker_token so the worker can't overwrite the terminal
+           status via update_training_progress (migration 010 guard).
+         * Failure → leave status='cancel_requested'. The background
+           training_cancel_sweep retries every 30 s, up to 5 attempts.
+           After 5 failed attempts the sweep marks the row failed —
+           credit still frees, the operator notices stuck rows in logs.
+
+    Why this matters: the pre-023 path always flipped to canceled +
+    refunded the credit even when Modal cancel raised. A student
+    looping start→cancel against flaky Modal could leave up to 10 GPU
+    containers running to their full timeout_hours cap — a real
+    cost-bomb. The new flow ensures the credit is only refunded once
+    the GPU is actually released.
+    """
     supabase = get_supabase()
     user_id = str(user.id)
     logger.info("POST /trainings/cancel user=%s training_id=%s", user_id, req.training_id)
@@ -650,36 +672,76 @@ async def cancel_training(req: CancelTrainingRequest, user=Depends(get_current_u
         raise HTTPException(status_code=404, detail="Training not found")
 
     training = result.data[0]
-    if training["status"] not in ("queued", "running"):
+    # 'cancel_requested' is a valid mid-flight state: the user clicked
+    # cancel, we tried Modal once and failed, the sweep hasn't retried
+    # yet, and the student impatiently clicks cancel again. Treat this
+    # as a re-attempt rather than a 400 — bump cancel_attempts and try
+    # Modal again synchronously.
+    if training["status"] not in ("queued", "running", "cancel_requested"):
         raise HTTPException(status_code=400, detail="Training is not active")
 
-    # Cancel on Modal
+    # Phase 1: record the cancel intent. We do this BEFORE talking to
+    # Modal so even if the Cloud API crashes mid-cancel, the sweep can
+    # pick up the row and finish the job.
+    now_iso = datetime.now(timezone.utc).isoformat()
+    current_attempts = int(training.get("cancel_attempts") or 0)
+    supabase.table("trainings").update(
+        {
+            "status": "cancel_requested",
+            "cancel_attempted_at": now_iso,
+            "cancel_attempts": current_attempts + 1,
+        }
+    ).eq("id", req.training_id).execute()
+
+    # Phase 2: attempt the Modal cancel. We deliberately do NOT touch
+    # the credit / status here — that only happens on Modal success.
+    modal_ok = False
     if training.get("cloud_job_id"):
         try:
             await cancel_training_job(training["cloud_job_id"])
+            modal_ok = True
         except Exception as e:
-            # Still mark as canceled locally even if Modal fails — but log it
-            # so a stuck-on-Modal job is at least visible in Railway logs.
+            # Leave the row in cancel_requested; the sweep will retry.
+            # The user-visible HTTP response is still 200 because the
+            # cancel REQUEST was accepted — the eventual state is
+            # canceled or failed, both terminal and credit-free.
             logger.warning(
-                "Modal cancel failed for training %s call %s: %s",
-                req.training_id, training["cloud_job_id"], e,
+                "Modal cancel failed for training %s call %s "
+                "(attempt %d, sweep will retry): %s",
+                req.training_id, training["cloud_job_id"], current_attempts + 1, e,
             )
+    else:
+        # No cloud_job_id means start_training_job failed at /start
+        # without recording an id, so there's nothing to cancel on
+        # Modal. We can short-circuit straight to canceled — the GPU
+        # never spun up.
+        modal_ok = True
 
-    # Mark as canceled (auto-frees the credit). Null worker_token so a
-    # still-running Modal worker (Modal cancel can fail silently) cannot
-    # call update_training_progress and overwrite this status with
-    # succeeded/failed. Defense in depth — migration 010's RPC also
-    # refuses writes against terminal-state rows.
-    supabase.table("trainings").update(
-        {
-            "status": "canceled",
-            "terminated_at": datetime.now(timezone.utc).isoformat(),
-            "worker_token": None,
-        }
-    ).eq("id", req.training_id).execute()
-    logger.info("Canceled training %s for user=%s", req.training_id, user_id)
+    if modal_ok:
+        # Flip to canceled. This auto-frees the credit because
+        # get_remaining_credits filters `status NOT IN ('failed',
+        # 'canceled')`. Null worker_token as defense-in-depth so a
+        # racing worker can't overwrite the terminal status via
+        # update_training_progress (migration 010 guard is the
+        # authoritative protection; this is belt-and-suspenders).
+        supabase.table("trainings").update(
+            {
+                "status": "canceled",
+                "terminated_at": datetime.now(timezone.utc).isoformat(),
+                "worker_token": None,
+            }
+        ).eq("id", req.training_id).execute()
+        logger.info("Canceled training %s for user=%s", req.training_id, user_id)
+        return {"status": "canceled", "training_id": req.training_id}
 
-    return {"status": "canceled", "training_id": req.training_id}
+    # Modal cancel failed and the sweep will retry. Return cancel_requested
+    # so the React UI can surface a "Abbruch in Bearbeitung…" toast and
+    # keep polling.
+    logger.info(
+        "Cancel queued for training %s (sweep will retry Modal cancel)",
+        req.training_id,
+    )
+    return {"status": "cancel_requested", "training_id": req.training_id}
 
 
 @router.get("/list", response_model=list[TrainingJob])

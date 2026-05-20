@@ -21,6 +21,7 @@ import {
   forceReleaseJetson,
   getClassroomJetson,
   pairJetson,
+  pairJetsonIntent,
   regeneratePairingCode,
   unpairJetson,
 } from '../../services/jetsonClient';
@@ -124,7 +125,26 @@ export default function JetsonSection({ classroomId }) {
       if (!token) throw new Error('Nicht angemeldet');
       setWorking(true);
       try {
-        const result = await pairJetson(token, classroomId, pairingCode);
+        // Two-step pairing flow (2026-05 IDOR fix). Step 1 acquires
+        // an exclusive intent_token bound to this teacher; step 2
+        // consumes that token to write the classroom_id on the
+        // jetson row. The spinner stays active across both calls so
+        // the teacher sees a single "Pairen…" state.
+        //
+        // Edge case: if step 1 succeeds but step 2 fails, the
+        // intent_token is consumed server-side and we have no
+        // client-callable release endpoint. The teacher must wait
+        // for the agent to rotate its pairing_code (next register
+        // or regenerate_pairing_code RPC) before retrying. The
+        // modal surfaces this via the toast wired in
+        // PairJetsonModal::handleSubmit.
+        const intent = await pairJetsonIntent(token, classroomId, pairingCode);
+        const result = await pairJetson(
+          token,
+          classroomId,
+          pairingCode,
+          intent.intent_token
+        );
         await refresh();
         return result;
       } finally {

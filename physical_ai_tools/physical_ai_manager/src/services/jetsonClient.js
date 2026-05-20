@@ -125,20 +125,88 @@ export function releaseJetsonBeacon(accessToken, jetsonId) {
 // ---------- Teacher-only endpoints (v2.3.0) ----------
 
 /**
- * Teacher pairs an unbound Jetson to one of their classrooms via the
- * 6-digit pairing code from setup.sh stdout. 404 if the code is
- * invalid or expired; 403 if the classroom doesn't belong to the
- * caller; 409 if the Jetson is already bound to a classroom.
+ * Step 1 of the two-step pairing flow (added 2026-05 to close a
+ * teacher-vs-teacher IDOR on the 6-digit pairing code). Claims an
+ * exclusive intent_token for this teacher against the given code so
+ * a second teacher who happens to guess / be told the same code
+ * cannot race in between code-validation and Jetson row-update.
+ *
+ * Error mapping:
+ *   404 — code invalid or expired (caller shows German "ungültig").
+ *   409 — code is currently claimed by a different teacher's intent
+ *         token. The agent must rotate its pairing_code (either by
+ *         re-registering, or via the regenerate_pairing_code RPC)
+ *         before any teacher can pair again.
  */
-export async function pairJetson(accessToken, classroomId, pairingCode, mdnsName = null) {
-  const body = { pairing_code: pairingCode };
+export async function pairJetsonIntent(accessToken, classroomId, pairingCode) {
+  try {
+    const result = await _request(
+      `/teacher/classrooms/${classroomId}/jetson/pair-intent`,
+      'POST',
+      accessToken,
+      { pairing_code: pairingCode }
+    );
+    return result;
+  } catch (err) {
+    // Tag the step so the UI can distinguish a 409 here (different
+    // teacher claimed the same code) from a 409 in step 2 (Jetson
+    // already paired to a classroom).
+    if (err && typeof err === 'object') err.step = 'intent';
+    if (err?.status === 409) {
+      const wrapped = new Error(
+        'Dieser Pairing-Code wurde bereits von einem anderen Lehrer beansprucht. Bitte den Schüler-Agenten neu starten.'
+      );
+      wrapped.status = 409;
+      wrapped.step = 'intent';
+      wrapped.cause = err;
+      throw wrapped;
+    }
+    throw err;
+  }
+}
+
+/**
+ * Step 2 of the two-step pairing flow. Consumes the intent_token from
+ * step 1 alongside the pairing_code; the Cloud API rejects (403) if
+ * the intent_token doesn't match the current claim on the code or
+ * belongs to a different teacher. 404 — code invalid; 409 — Jetson
+ * already bound to a classroom (race with another concurrent pair).
+ *
+ * The intent_token is single-use; on any failure here the teacher
+ * must restart from step 1 (which will 409 until the agent rotates
+ * its code).
+ */
+export async function pairJetson(accessToken, classroomId, pairingCode, intentToken, mdnsName = null) {
+  if (!intentToken) {
+    // Defense in depth — the call site should always provide it.
+    // Throwing locally instead of relying on the server's 422 keeps
+    // the React error UI consistent.
+    throw new Error('Pairing-Intent fehlt. Bitte erneut versuchen.');
+  }
+  const body = { pairing_code: pairingCode, intent_token: intentToken };
   if (mdnsName) body.mdns_name = mdnsName;
-  return _request(
-    `/teacher/classrooms/${classroomId}/jetson/pair`,
-    'POST',
-    accessToken,
-    body
-  );
+  try {
+    return await _request(
+      `/teacher/classrooms/${classroomId}/jetson/pair`,
+      'POST',
+      accessToken,
+      body
+    );
+  } catch (err) {
+    // Tag the step so PairJetsonModal can show the
+    // "intent consumed but pair failed → regenerate code" toast.
+    if (err && typeof err === 'object') err.step = 'pair';
+    if (err?.status === 403) {
+      const wrapped = new Error(
+        'Pairing-Intent abgelaufen oder ungültig. Bitte erneut versuchen.'
+      );
+      wrapped.status = 403;
+      wrapped.step = 'pair';
+      wrapped.cause = err;
+      throw wrapped;
+    }
+    throw err;
+  }
 }
 
 /**

@@ -1,6 +1,6 @@
 name: release
 
-# Top-level release dispatcher. Chains the four CI-driven surface
+# Top-level release dispatcher. Chains the five CI-driven surface
 # workflows in the golden order:
 #
 #   W1 supabase-migrate
@@ -13,6 +13,14 @@ name: release
 #       │
 #       ▼
 #   W4 docker-publish
+#       │
+#       ▼
+#   W5 release-installer
+#
+# release-installer MUST run AFTER docker-publish — the installer's
+# auto-update poll directs students at the `:vX.Y.Z` image tags that
+# docker-publish pushes, so attaching the .exe before those tags exist
+# causes first-boot pull 404 on every student that picks up the update.
 #
 # Modal deploys are MANUAL (operator runs `modal deploy modal_app.py`
 # and `modal deploy vision_app.py` from their workstation). Modal's
@@ -82,10 +90,24 @@ jobs:
     uses: ./.github/workflows/railway-deploy-teacher-web.yml
     secrets: inherit
 
-  # ── W4: Docker images (last — student installs pull these) ──
+  # ── W4: Docker images (student installs pull these) ──
   docker:
     name: W4. Build + publish Docker images
     needs: [teacher-web]
     if: always() && needs.teacher-web.result == 'success'
     uses: ./.github/workflows/docker-publish.yml
+    secrets: inherit
+
+  # ── W5: Installer .exe (must run AFTER docker so the auto-update
+  # poll has matching :vX.Y.Z image tags to pull on first boot) ──
+  #
+  # Only fires when docker succeeded (NOT skipped) — the installer's
+  # existence implies the images exist. If docker was skipped, that's
+  # because the trigger only changed installer-irrelevant code, and we
+  # shouldn't be cutting a new installer in that case either.
+  installer:
+    name: W5. Build + attach installer .exe
+    needs: [docker]
+    if: always() && needs.docker.result == 'success'
+    uses: ./.github/workflows/release-installer.yml
     secrets: inherit

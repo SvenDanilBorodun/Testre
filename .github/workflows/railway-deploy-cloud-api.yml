@@ -44,6 +44,7 @@ jobs:
     # better to refuse the deploy here than to ship a broken service.
     name: Pre-deploy schema fingerprint probe
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     env:
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
@@ -51,8 +52,8 @@ jobs:
       MODAL_TOKEN_SECRET: ci-probe
       ALLOWED_ORIGINS: http://localhost
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5
         with:
           python-version: "3.11"
       - name: Install full deps for the probe
@@ -76,10 +77,11 @@ jobs:
     name: Railway up
     needs: [schema-probe]
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     env:
       RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
       - name: Install Railway CLI via npm
         # GH runners come with Node.js + npm pre-installed. npm install
         # of @railway/cli is more stable in CI than the curl install
@@ -87,6 +89,16 @@ jobs:
         run: |
           npm install -g @railway/cli
           railway --version
+      - name: Stage VERSION file into build context
+        # The Dockerfile COPYs ./VERSION into the image so main.py's drift
+        # check (GUI_VERSION env vs in-tree VERSION) works in production.
+        # `--path-as-root .` below scopes the build context to this dir, so
+        # we have to physically place VERSION here. Re-staged on every CI
+        # run, never committed.
+        working-directory: robotis_ai_setup/cloud_training_api
+        run: |
+          cp "${GITHUB_WORKSPACE}/VERSION" VERSION
+          test -s VERSION || { echo "::error::VERSION file empty or missing"; exit 1; }
       - name: Deploy
         working-directory: robotis_ai_setup/cloud_training_api
         run: |
@@ -108,22 +120,44 @@ jobs:
     name: Health probe
     needs: [deploy]
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - name: Poll /health until 200
+      - name: Poll /health until commit matches
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
         run: |
           set -e
-          # The FastAPI's /health endpoint is registered last in main.py
-          # so a 200 means startup validators all passed + routers loaded.
-          # Up to 60s budget; deploy itself typically completes inside 20s.
+          # The FastAPI's /health endpoint returns {"status":"ok","commit":"<sha>"}.
+          # A bare 200 is NOT a valid signal that THIS deploy succeeded:
+          # Railway routes traffic to the OLD pod while the new one boots,
+          # and if the new pod's startup validators fail (e.g.,
+          # _validate_required_schema sees a schema drift), Railway keeps
+          # the old pod serving forever — `curl /health` returns 200 from
+          # the old code against either the old or new schema, and CI
+          # silently passes while production is stuck on the previous
+          # release. Polling for `commit == github.sha` forces us to wait
+          # for the new pod to actually take traffic.
+          #
+          # 5-min budget (was 60s) — Railway's pre-warm + healthcheck cycle
+          # on cold image pulls regularly takes 90-180s; the old 60s was
+          # actually short enough to false-negative on legitimate deploys.
           URL=https://scintillating-empathy-production-1068.up.railway.app/health
-          for attempt in $(seq 1 30); do
-            CODE=$(curl -s -o /dev/null -w "%{http_code}" "$URL" || echo 000)
-            if [ "$CODE" = "200" ]; then
-              echo "Cloud API healthy."
-              exit 0
+          for attempt in $(seq 1 150); do
+            BODY=$(curl -fsS --max-time 5 "$URL" 2>/dev/null || true)
+            if [ -n "$BODY" ]; then
+              if python3 -c "import json, os, sys; d = json.loads(sys.argv[1]); sys.exit(0 if d.get('commit') == os.environ['EXPECTED_SHA'] else 1)" "$BODY"; then
+                echo "Cloud API healthy at commit $EXPECTED_SHA."
+                echo "  body: $BODY"
+                exit 0
+              fi
+              ACTUAL=$(echo "$BODY" | python3 -c "import json, sys; print(json.loads(sys.stdin.read()).get('commit', '<missing>'))" 2>/dev/null || echo "<unparseable>")
+              echo "Attempt $attempt: serving commit=$ACTUAL, expected $EXPECTED_SHA"
+            else
+              echo "Attempt $attempt: $URL → curl failed or empty body"
             fi
-            echo "Attempt $attempt: $URL → $CODE"
             sleep 2
           done
-          echo "::error::Cloud API did not return 200 within 60s after Railway deploy."
+          echo "::error::Cloud API did not serve commit=$EXPECTED_SHA within 5 minutes after Railway deploy."
+          echo "::error::Most likely the new pod's startup validator failed and Railway kept routing to the old pod."
+          echo "::error::Inspect Railway logs for the scintillating-empathy service."
           exit 1

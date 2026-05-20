@@ -272,6 +272,50 @@ Act autonomously on: reading files, editing code with low blast radius, running 
 - Touching `start_training_safe` / `get_remaining_credits` / `adjust_workgroup_credits` semantics — workgroup credit pool is load-bearing for grouped students (migration 011); regressions are silent over-spend or refused trainings
 - Reintroducing software-side inference safety guards (see rule 2)
 
+## Known issues + open work (2026-05 audit)
+
+State as of 2026-05-20. Confirm against current files before acting — these may be fixed by the time you read them.
+
+### Pipeline-level
+
+- **Docker builds use NATIVE arm64 runners** (`ubuntu-24.04-arm`, no QEMU). amd64 also uses a `jlumbroso/free-disk-space@54081f1` step because the 15.5 GB `nettername/physical-ai-server:latest` doesn't fit on the default 14 GB runner. Removing either silently breaks the matrix.
+- **`supabase-migrate.yml` CI is broken** at the `Apply pending migrations` step (sed-extract password from `SUPABASE_DB_URL` mishandles passwords with `@`, URL-encoded chars, or whitespace). Workarounds: `supabase db push --linked` from operator terminal, OR Claude's `mcp__claude_ai_Supabase__apply_migration`. Production migrations are applied; CI is not. Fix: replace sed with `urllib.parse` in Python, OR add a separate `SUPABASE_DB_PASSWORD` secret.
+- **`release-installer.yml` races `release.yml`** on `v*.*.*` tag push — both fire with no `needs:` linkage. The .exe can attach to the GitHub Release before `docker-publish` has pushed the matching `:vX.Y.Z` image tags, causing first-boot pull 404s. Fix: make `release-installer.yml` a `workflow_call` invoked by `release.yml` after the docker job.
+- **`docker-publish::cleanup_dirty_tags` is dead code**: `if: inputs.cleanup_dirty_tags == 'true'` compares boolean input to string. Always false. Cleanup never runs from workflow_dispatch. Fix: drop the quotes or use `fromJSON(...)`.
+- **`tools/modal-cleanup.sh` regex doesn't match** the truncated CLI output (`example-mcp-…` truncates names). The `ap-zcXteUTGARIAT8rFG2R4j2` example-mcp app stays orphaned in the Modal workspace. Fix: switch to `modal app list --json` + JSON parsing.
+- **Supabase PR-branch flow has never run** — Branching is not enabled on the project (Pro+ feature). The `apply-branch` job in `supabase-migrate.yml` will fail on the first PR with migrations. Either enable Branching in the dashboard, or disable that job until then.
+
+### Image-level (forensic audit findings)
+
+- **~6 GB of upstream build cache** ships in every `nettername/physical-ai-server` image — `/root/.cache/pip` (4.1 GB), `/root/.cache/puccinialin` (962 MB), `/root/.rustup` (1.2 GB). All inherited from Robotis base, never stripped. Adding `RUN rm -rf /root/.cache /root/.rustup /root/.cargo` to `physical_ai_server/Dockerfile` would shed every student that bandwidth on every update.
+- **`.git` directories in production images**: 334 MB in `/root/ros2_ws/src/physical_ai_tools/.git`. Inherited from upstream, not stripped. `RUN find /root/ros2_ws -name '.git' -type d -exec rm -rf {} +` strips them.
+- **`/opt/talos_system_manager` (216 MB)** ships in every PAS image — full noVNC + `docker-compose.dev.yml`, unrelated to EduBotics. Upstream's; would need post-FROM strip.
+- **Source maps in `nettername/physical-ai-manager`** (~15 MB of `*.map` files) — full React source readable via browser devtools, plus bandwidth waste. Fix: `ENV GENERATE_SOURCEMAP=false` before `npm run build` in both `Dockerfile` and `Dockerfile.web`.
+- **No image provenance labels**: zero `org.opencontainers.image.revision` / `created` / `source` on any image. Live containers can't be traced to a git commit without consulting the registry tag. Fix: add `--label org.opencontainers.image.revision=$BUILD_ID --label org.opencontainers.image.created=$(date -u +%FT%TZ)` to the buildx commands in `build-images.sh`.
+- **PyTorch version drift**: Rule §5 above mentions `cu121`. The actual amd64 image ships `torch==2.7.0+cu128`. Either Rule §5 is stale OR an unintended upgrade slipped past. Verify the next Modal preflight.
+- **Cross-arch package drift**: `safetensors 0.7 (amd64) vs 0.8.0rc (arm64)`, `protobuf 6 vs 7`, `pillow 12.1 vs 12.2`. Not breaking anything now, but `protobuf 6→7` is the classic "works on amd64, fails on Jetson" pattern. Fix: pin these explicitly in both Dockerfiles.
+- **The `versions.env` plumbing is half-built**: 3 readers exist (`pull_images.ps1`, `gui/constants.py`, GUI), 0 writers. File doesn't exist. GUI's IMAGE_TAG resolution always falls back to `:latest`, and `docker-compose.yml`'s `${IMAGE_TAG:-latest}` substitution does too — they agree by coincidence. **Documented rollback via IMAGE_TAG mechanically can't work** until a writer is added (probably in `docker-publish.yml` emitting `versions.env` to be baked into the installer).
+
+### What audits confirmed CLEAN
+
+- LeRobot SHA `989f3d05ba47f872d75c587e76838e9cc574857a` verified INSIDE both amd64 and arm64 PAS images via `git rev-parse HEAD` on the embedded LeRobot checkout. The "trust on PR review" gap exists in CI but production is correct today.
+- No pre-2026-05 safety guards leaked into images (grep for `joint_clamp|stale_camera|velocity_cap|nan_guard|safety_envelope` → 0 hits).
+- No `.env` / credentials / tokens accidentally COPY'd into any image.
+- All 4 PAS overlays + 14 OMX overlays bit-identical across arches (sha256 verified inside images).
+- YOLOX-tiny ONNX present as exactly one copy per image with the correct sha256.
+- All `apply_overlay` chain entries covered — no orphan overlay files in the repo's `overlays/` dir that don't reach the image.
+- `.s6-keep` bind-mount truly load-bearing: `s6-rc.d/user/contents.d/` only has `s6-agent` enabled at image-build time; `physical_ai_server` service is defined but inactive without the runtime mount.
+
+### What's deferred to next session
+
+- Run `tools/docker-hub-cleanup.sh --execute` (cleans 5 junk repos + 8 `*-dirty` tags from April)
+- Run `tools/modal-cleanup.sh --execute` (after fixing the regex bug above)
+- Toggle Supabase leaked-password protection in dashboard (closes 11th advisor warning; user chose to skip earlier)
+- Fix `supabase-migrate` CI with `urllib.parse`
+- Strip the 6 GB upstream cache + .git dirs from `physical_ai_server/Dockerfile`
+- Disable source maps in manager builds
+- Add provenance labels to images
+
 ## When in doubt
 
 The single source of truth is **the code**. This file describes invariants at the time it was written. Verify against `git log` and the current file when stakes are high. If this file disagrees with the code, fix this file in the same change — the whole point is that it stays in sync.

@@ -94,19 +94,16 @@ The LeRobot 5-site contract is now trust-on-PR-review (the `lerobot-sha-check` j
 
 ### 6. CI/CD deploys
 
-Five workflows in `.github/workflows/` are the canonical path for four surfaces:
+Six workflows in `.github/workflows/` are the canonical path for five surfaces:
 
-- `supabase-migrate.yml` — Supabase migrations (`supabase db push` against project `fnnbysrjkfugsqzwcksd`). **CI currently broken** — see "Supabase migration CI: known issue" below.
-- `railway-deploy-cloud-api.yml` — FastAPI to `scintillating-empathy` service
-- `railway-deploy-teacher-web.yml` — React SPA to `teacher-web` service
-- `docker-publish.yml` — three production images to `nettername/*` Docker Hub
-- `release.yml` — top-level dispatcher that fires all four in the golden order on tag pushes
+- `supabase-migrate.yml` — Supabase migrations (`supabase db push` against project `fnnbysrjkfugsqzwcksd`). Password extraction uses `urllib.parse` (was sed, fixed in `16b8378`).
+- `railway-deploy-cloud-api.yml` — FastAPI to `scintillating-empathy` service. Health-gate polls `/health` and asserts `body.commit == github.sha` (no more "old pod returns 200" false-positives).
+- `railway-deploy-teacher-web.yml` — React SPA to `teacher-web` service. Health-gate polls `/version.json` and asserts the buildId contains the new SHA. `railway.json` `buildArgs` interpolates `$RAILWAY_GIT_COMMIT_SHA` into `REACT_APP_BUILD_ID` (defeats the frozen-service-variable bug surfaced 2026-05).
+- `docker-publish.yml` — three production images to `nettername/*` Docker Hub.
+- `release-installer.yml` — Windows `.exe` build. **`workflow_call`-only**; invoked from `release.yml` as W5 after `docker:` completes. No longer races on `push.tags`.
+- `release.yml` — top-level dispatcher that fires all five in the golden order on tag pushes (W1 supabase → W2 cloud-api → W3 teacher-web → W4 docker → W5 installer).
 
-**Supabase migration CI: known issue.** The `supabase db push` step in `apply-production` consistently fails on first runs (CLI auth, `--db-url` parsing, or `--linked --password` quirk — couldn't pin without admin GH-Actions log access). Until fixed:
-
-- **Apply new migrations via either** (a) `supabase db push --linked --password "$DB_PASSWORD"` from your terminal after `supabase link --project-ref fnnbysrjkfugsqzwcksd`, OR (b) Claude's Supabase MCP `apply_migration` tool from chat. Both update `supabase_migrations.schema_migrations` correctly.
-- Production schema state after CI failure is unchanged (the failure is at step 5 before any SQL is sent).
-- Investigation next session: get a fine-grained GH PAT with `Actions: Read`, install `gh auth login --with-token`, read the actual error log on the failed step.
+**Applying migrations.** `supabase db push --linked --password "$DB_PASSWORD"` from terminal works; Claude's MCP `apply_migration` tool also works. **Important quirk**: MCP re-stamps the version prefix into the ledger, so on-disk filenames must be renamed to the MCP-stamped value after applying, otherwise the next `supabase db push` sees ghost-unapplied migrations and crashes on `ALTER TABLE … ADD COLUMN`. (Fixed once in commit `de7d635`; pattern to watch for.)
 
 **Modal apps (`edubotics-training` + `edubotics-vision`) deploy MANUALLY.** The Modal image build happens in Modal's infrastructure (not on GH runners), and the CI auth + image-build feedback loop is slow to debug remotely. Until we have a strong reason to move Modal into CI, the operator owns it:
 
@@ -136,9 +133,15 @@ Manual `railway up`, `psql -f migration.sql`, and `build-images.sh` from a devel
 
 - **`.s6-keep` is load-bearing.** `physical_ai_server` bind-mounts `./physical_ai_server/.s6-keep` (empty 1-byte file) at `/etc/s6-overlay/s6-rc.d/user/contents.d/physical_ai_server:ro`. Remove the mount and the ROS node never starts inside the container even though `s6` reports healthy.
 
-- **Single uvicorn worker on Railway.** The in-process rate limiter requires `uvicorn --workers 1`. If you raise this, switch the limiter to Redis or a Postgres advisory lock, and add the same for the dataset reconciliation sweep started in `app/main.py::_start_dataset_sweep`.
+- **Single uvicorn worker on Railway.** The in-process rate limiter requires `uvicorn --workers 1` (now explicit in the Dockerfile CMD — was implicit and silently breakable if `WEB_CONCURRENCY` was set). If you raise it, switch the limiter to Redis or a Postgres advisory lock, and add the same for the dataset reconciliation sweep started in `app/main.py::_start_dataset_sweep` AND the new training-cancel sweep started in `_start_training_cancel_sweep`.
 
-- **Boot-time schema fingerprint.** `cloud_training_api/app/main.py::_validate_required_schema()` probes every table + RPC the routes touch (workflow_versions, tutorial_progress, vision-quota RPCs, jetson RPCs). Railway aborts the deploy if the live Supabase schema is behind the on-disk migrations. Override with `EDUBOTICS_SKIP_SCHEMA_CHECK=1` for unit-test contexts only — never on Railway.
+- **Boot-time schema fingerprint.** `cloud_training_api/app/main.py::_validate_required_schema()` probes every table + RPC the routes touch (workflow_versions, tutorial_progress, vision-quota RPCs, jetson RPCs incl. the new `claim_pair_intent` + 5-arg `pair_jetson`, training cancel columns). Railway aborts the deploy if the live Supabase schema is behind the on-disk migrations. Exception messages are scrubbed via `_sanitize_probe_error` (strips `Bearer` / `apikey` tokens) before re-raise — added 2026-05 to close a service-role-key leak surface in CI logs. Override with `EDUBOTICS_SKIP_SCHEMA_CHECK=1` for unit-test contexts only — never on Railway.
+
+- **Two-step Jetson pairing (post-022).** `/teacher/classrooms/{id}/jetson/pair-intent` → `claim_pair_intent` atomically writes `intent_teacher_id` + returns an `intent_token` UUID; then `/jetson/pair` → `pair_jetson` (5-arg, requires the token). A second teacher on the same LAN attempting `/pair-intent` on a claimed code gets P0032 → 409 with German detail; a teacher attempting `/pair` without the matching token gets P0033 → 403. React `PairJetsonModal` does both calls inside one spinner. Migration 022 + commit `16b8378`.
+
+- **Two-phase Modal cancel + `cancel_requested` transitional status (post-023).** `/trainings/cancel` writes `status='cancel_requested'` and only flips to `canceled` after Modal confirms. A background sweep (`training_sweep.py`, 30 s tick) retries Modal cancel up to 5 times. After 5 failures the row flips to `failed` (credit refunds via the existing `status NOT IN ('failed','canceled')` filter; GPU may have run, but a stuck `cancel_requested` is worse). Migration 010's terminal-state guard is unchanged — `cancel_requested` is NOT terminal. Closes the start→cancel×10 cost-bomb.
+
+- **Cloud-API `/health` and `/version` payloads (post-`16b8378`).** `/health` returns `{status, commit, schema_ok, boot_completed_at, version}`. `status="starting"` + HTTP 503 until the module-level `STARTUP_SCHEMA_OK` flag flips (after `include_router`). Both Railway deploy workflows AND any future CI gate poll for `commit == github.sha`, not bare 200 — closes the "old pod returns 200" silent-deploy-failure pattern. `/version` drops the dead `required:true` field (the GUI never read it), returns `null` for missing `GUI_VERSION`/`GUI_DOWNLOAD_URL` instead of 503 (silent-fail was masking misconfig).
 
 ## Common commands
 
@@ -197,10 +200,10 @@ python -m compileall -q robotis_ai_setup/gui robotis_ai_setup/scripts \
 **Always via GitHub Actions** (per non-negotiable rule §6). The golden order is encoded as `needs:` edges in `.github/workflows/release.yml`:
 
 ```
-W1 supabase-migrate ──► W2 railway-deploy-cloud-api ──► W3 railway-deploy-teacher-web ──► W4 docker-publish
+W1 supabase-migrate ──► W2 railway-deploy-cloud-api ──► W3 railway-deploy-teacher-web ──► W4 docker-publish ──► W5 release-installer
 ```
 
-For partial changes, push to `main` with changes scoped to one surface and that surface's path-filtered workflow fires by itself. For coordinated whole-stack releases, `git tag vX.Y.Z && git push --tags` runs the full chain via `release.yml`.
+For partial changes, push to `main` with changes scoped to one surface and that surface's path-filtered workflow fires by itself. For coordinated whole-stack releases, `git tag vX.Y.Z && git push --tags` runs the full chain via `release.yml`. W5 was previously a standalone `push.tags`-triggered workflow that raced W4 (installer attached to GH Release before Docker images existed → first-boot 404). Since `16b8378` it's `workflow_call`-only, invoked after W4 success.
 
 **One-time operator setup** (after merging this PR):
 
@@ -212,7 +215,7 @@ For partial changes, push to `main` with changes scoped to one surface and that 
    ```
 3. Enable leaked-password protection in the Supabase Auth dashboard (the security-fixes migration applies the other 10 advisor warnings).
 
-**Bumping product VERSION** is still a four-place change: `VERSION` file, `installer/robotis_ai_setup.iss AppVersion`, `gui/app/constants.py` fallback constant, AND the Railway `GUI_VERSION` + `GUI_DOWNLOAD_URL` env vars on the `scintillating-empathy` Cloud API service AFTER the matching `gh release create v<version>` with the `EduBotics_Setup.exe` asset. Without the Railway+GitHub side, the in-tree bump is invisible to existing student installs — the `/version`-poll update gate never fires.
+**Bumping product VERSION** is a 4-place change PLUS one auto-COPY: `VERSION` file, `installer/robotis_ai_setup.iss AppVersion`, `gui/app/constants.py` fallback constant, AND the Railway `GUI_VERSION` + `GUI_DOWNLOAD_URL` env vars on the `scintillating-empathy` Cloud API service AFTER the matching `gh release create v<version>` with the `EduBotics_Setup.exe` asset. Without the Railway+GitHub side, the in-tree bump is invisible to existing student installs — the `/version`-poll update gate never fires. The Cloud API Dockerfile now `COPY VERSION ./VERSION` (staged from the repo root by `railway-deploy-cloud-api.yml`'s "Stage VERSION file into build context" step), so `/health.version` and the boot-time GUI_VERSION-vs-VERSION drift warning are automatic — no fifth file.
 
 Cloud API URL: `https://scintillating-empathy-production-1068.up.railway.app` (the older `production-9efd` slug is dead; do not reintroduce).
 
@@ -272,33 +275,51 @@ Act autonomously on: reading files, editing code with low blast radius, running 
 - Touching `start_training_safe` / `get_remaining_credits` / `adjust_workgroup_credits` semantics — workgroup credit pool is load-bearing for grouped students (migration 011); regressions are silent over-spend or refused trainings
 - Reintroducing software-side inference safety guards (see rule 2)
 
-## Known issues + open work (2026-05 audit)
+## Known issues + open work
 
-State as of 2026-05-20. Confirm against current files before acting — these may be fixed by the time you read them.
+State as of 2026-05-20 post commit `16b8378` + `de7d635`. Confirm against current files before acting — these may be fixed by the time you read them.
 
-### Pipeline-level
+### Pipeline-level — still open
 
 - **Docker builds use NATIVE arm64 runners** (`ubuntu-24.04-arm`, no QEMU). amd64 also uses a `jlumbroso/free-disk-space@54081f1` step because the 15.5 GB `nettername/physical-ai-server:latest` doesn't fit on the default 14 GB runner. Removing either silently breaks the matrix.
-- **`supabase-migrate.yml` CI is broken** at the `Apply pending migrations` step (sed-extract password from `SUPABASE_DB_URL` mishandles passwords with `@`, URL-encoded chars, or whitespace). Workarounds: `supabase db push --linked` from operator terminal, OR Claude's `mcp__claude_ai_Supabase__apply_migration`. Production migrations are applied; CI is not. Fix: replace sed with `urllib.parse` in Python, OR add a separate `SUPABASE_DB_PASSWORD` secret.
-- **`release-installer.yml` races `release.yml`** on `v*.*.*` tag push — both fire with no `needs:` linkage. The .exe can attach to the GitHub Release before `docker-publish` has pushed the matching `:vX.Y.Z` image tags, causing first-boot pull 404s. Fix: make `release-installer.yml` a `workflow_call` invoked by `release.yml` after the docker job.
-- **`docker-publish::cleanup_dirty_tags` is dead code**: `if: inputs.cleanup_dirty_tags == 'true'` compares boolean input to string. Always false. Cleanup never runs from workflow_dispatch. Fix: drop the quotes or use `fromJSON(...)`.
 - **`tools/modal-cleanup.sh` regex doesn't match** the truncated CLI output (`example-mcp-…` truncates names). The `ap-zcXteUTGARIAT8rFG2R4j2` example-mcp app stays orphaned in the Modal workspace. Fix: switch to `modal app list --json` + JSON parsing.
 - **Supabase PR-branch flow has never run** — Branching is not enabled on the project (Pro+ feature). The `apply-branch` job in `supabase-migrate.yml` will fail on the first PR with migrations. Either enable Branching in the dashboard, or disable that job until then.
 
-### Image-level (forensic audit findings)
+### Pipeline-level — FIXED in `16b8378` (do NOT reintroduce)
 
-- **~6 GB of upstream build cache** ships in every `nettername/physical-ai-server` image — `/root/.cache/pip` (4.1 GB), `/root/.cache/puccinialin` (962 MB), `/root/.rustup` (1.2 GB). All inherited from Robotis base, never stripped. Adding `RUN rm -rf /root/.cache /root/.rustup /root/.cargo` to `physical_ai_server/Dockerfile` would shed every student that bandwidth on every update.
-- **`.git` directories in production images**: 334 MB in `/root/ros2_ws/src/physical_ai_tools/.git`. Inherited from upstream, not stripped. `RUN find /root/ros2_ws -name '.git' -type d -exec rm -rf {} +` strips them.
-- **`/opt/talos_system_manager` (216 MB)** ships in every PAS image — full noVNC + `docker-compose.dev.yml`, unrelated to EduBotics. Upstream's; would need post-FROM strip.
-- **Source maps in `nettername/physical-ai-manager`** (~15 MB of `*.map` files) — full React source readable via browser devtools, plus bandwidth waste. Fix: `ENV GENERATE_SOURCEMAP=false` before `npm run build` in both `Dockerfile` and `Dockerfile.web`.
-- **No image provenance labels**: zero `org.opencontainers.image.revision` / `created` / `source` on any image. Live containers can't be traced to a git commit without consulting the registry tag. Fix: add `--label org.opencontainers.image.revision=$BUILD_ID --label org.opencontainers.image.created=$(date -u +%FT%TZ)` to the buildx commands in `build-images.sh`.
+- ~~`supabase-migrate.yml` CI is broken at the sed-extract password step~~ → replaced with `python3 -c "import urllib.parse..."` in both `apply-branch` and `apply-production`. CI now applies migrations correctly.
+- ~~`release-installer.yml` races `release.yml` on tag push~~ → `release-installer.yml` is now `workflow_call`-only and invoked as W5 of `release.yml` after W4 docker success.
+- ~~`docker-publish::cleanup_dirty_tags` is dead code (`== 'true'` boolean compared to string)~~ → now uses `fromJSON(inputs.cleanup_dirty_tags || 'false')`.
+- ~~Health-gate polls accept any 200 (verifies old pod, not new deploy)~~ → both Railway workflows now assert `body.commit == github.sha` from `/health` / `/version.json`.
+
+### Image-level — Dockerfile-fixed in `16b8378`, awaits next docker-publish to materialize on registry
+
+- ~~~6 GB of upstream build cache + 1.2 GB rustup + 962 MB puccinialin~~ → final `RUN rm -rf /root/.cache /root/.rustup /root/.cargo` appended to `physical_ai_server/Dockerfile`.
+- ~~334 MB `.git` directories under `/root/ros2_ws/src/`~~ → `find … -name .git … -exec rm -rf {} +` in the same RUN layer.
+- ~~`/opt/talos_system_manager` (216 MB) unused by EduBotics~~ → `rm -rf /opt/talos_system_manager` + scrubs the PYTHONPATH from `/root/.bashrc`.
+- ~~Source maps in manager images (~15 MB)~~ → `ENV GENERATE_SOURCEMAP=false` before `npm run build` in both `Dockerfile` (student) and `Dockerfile.web` (Railway).
+- ~~No `org.opencontainers.image.*` labels on any image~~ → `OCI_LABELS=("--label" "org.opencontainers.image.revision=$BUILD_ID" ...)` appended to every `docker buildx build` in `build-images.sh`; cloud-api Dockerfile carries the same labels.
+- **Re-verify the cache strip after next docker-publish run** — registry tags from before `16b8378` still carry the bloat. Expected `:latest` shrink: 15.09 GB → ~9 GB on `nettername/physical-ai-server`.
+
+### Image-level — still open
+
 - **PyTorch version drift**: Rule §5 above mentions `cu121`. The actual amd64 image ships `torch==2.7.0+cu128`. Either Rule §5 is stale OR an unintended upgrade slipped past. Verify the next Modal preflight.
 - **Cross-arch package drift**: `safetensors 0.7 (amd64) vs 0.8.0rc (arm64)`, `protobuf 6 vs 7`, `pillow 12.1 vs 12.2`. Not breaking anything now, but `protobuf 6→7` is the classic "works on amd64, fails on Jetson" pattern. Fix: pin these explicitly in both Dockerfiles.
-- **The `versions.env` plumbing is half-built**: 3 readers exist (`pull_images.ps1`, `gui/constants.py`, GUI), 0 writers. File doesn't exist. GUI's IMAGE_TAG resolution always falls back to `:latest`, and `docker-compose.yml`'s `${IMAGE_TAG:-latest}` substitution does too — they agree by coincidence. **Documented rollback via IMAGE_TAG mechanically can't work** until a writer is added (probably in `docker-publish.yml` emitting `versions.env` to be baked into the installer).
+- **The `versions.env` plumbing is half-built**: 3 readers exist (`pull_images.ps1`, `gui/constants.py`, GUI), 0 writers. File doesn't exist. GUI's IMAGE_TAG resolution always falls back to `:latest`. **Documented rollback via IMAGE_TAG mechanically can't work** until a writer is added (probably in `docker-publish.yml` emitting `versions.env` to be baked into the installer).
+- **arm64 LeRobot SHA pin** — `physical_ai_server/Dockerfile.arm64` carries a FIXME block (the agent doing the strip had no network access to resolve a pinning SHA). Run `git ls-remote https://github.com/ROBOTIS-GIT/physical_ai_tools.git jazzy` from a developer terminal and hard-pin.
+
+### Cloud-API + Supabase — security/correctness fixes landed in `16b8378`
+
+- ~~Jetson pairing-code race IDOR~~ → migration 022 + 2-step pair-intent flow (covered in "Critical architectural choices").
+- ~~`register_dataset` IDOR (any student could register a peer's HF repo)~~ → trust-on-first-use HF author anchor in `routes/datasets.py`. KNOWN edge case (LOW): a student who deletes ALL their datasets can re-anchor on a peer's repo. KNOWN race (MEDIUM): 2 concurrent first-time registers can each capture a different author — rate-limit (20/60s) is the partial mitigation.
+- ~~Modal cancel cost-bomb (start→cancel×10 → 10 GPUs running to timeout cap)~~ → migration 023 `cancel_requested` + `training_sweep.py` retry sweep (covered in "Critical architectural choices").
+- ~~Service-role key leak via re-raised httpx/supabase exceptions in CI~~ → `main.py::_sanitize_probe_error` regex-strips Bearer/apikey before re-raise.
+- ~~`/health` always 200, deploy gates verify the wrong pod~~ → `/health` returns commit+schema_ok, deploy gates assert commit equality.
+- ~~Supabase 144 perf advisors + 3 actionable security~~ → migration 024 consolidates 32→11 policies, wraps every `auth.uid()` in `(SELECT auth.uid())` InitPlan subquery, drops 11 unused indexes; migration 025 hotfixes 3 FK-covering indexes that 024 over-eagerly dropped. Result: **144 perf → 7** (all 7 are `unused_index` INFO-level on freshly-created indexes, will "green up" once queries hit them). Security retentions: 2× `update_training_progress` (anon+authenticated EXECUTE — Modal worker uses anon key + worker_token row-lock; stronger than the proposed pre-check which would TOCTOU); 1× `workflow_versions WITH CHECK (true)` (trigger uses `app.user_id` GUC not `auth.uid()`; documented TODO for a future migration that adds a GUC-backed predicate).
 
 ### What audits confirmed CLEAN
 
-- LeRobot SHA `989f3d05ba47f872d75c587e76838e9cc574857a` verified INSIDE both amd64 and arm64 PAS images via `git rev-parse HEAD` on the embedded LeRobot checkout. The "trust on PR review" gap exists in CI but production is correct today.
+- LeRobot SHA `989f3d05ba47f872d75c587e76838e9cc574857a` verified INSIDE both amd64 and arm64 PAS images via `git rev-parse HEAD` on the embedded LeRobot checkout.
 - No pre-2026-05 safety guards leaked into images (grep for `joint_clamp|stale_camera|velocity_cap|nan_guard|safety_envelope` → 0 hits).
 - No `.env` / credentials / tokens accidentally COPY'd into any image.
 - All 4 PAS overlays + 14 OMX overlays bit-identical across arches (sha256 verified inside images).
@@ -306,15 +327,21 @@ State as of 2026-05-20. Confirm against current files before acting — these ma
 - All `apply_overlay` chain entries covered — no orphan overlay files in the repo's `overlays/` dir that don't reach the image.
 - `.s6-keep` bind-mount truly load-bearing: `s6-rc.d/user/contents.d/` only has `s6-agent` enabled at image-build time; `physical_ai_server` service is defined but inactive without the runtime mount.
 
+### Operator action items (cannot be done from CI)
+
+- **Delete `REACT_APP_BUILD_ID` Railway service variable** on the `teacher-web` service. `railway.json` `buildArgs` should interpolate `$RAILWAY_GIT_COMMIT_SHA` correctly, but a residual frozen service variable was the 2026-05-19 root cause of the 5-day-stale teacher-web bundle. Belt-and-suspenders.
+- **Enable Supabase leaked-password protection** in dashboard (closes 4th security advisor).
+- **Resolve the arm64 LeRobot SHA pin FIXME** in `Dockerfile.arm64`.
+
 ### What's deferred to next session
 
-- Run `tools/docker-hub-cleanup.sh --execute` (cleans 5 junk repos + 8 `*-dirty` tags from April)
-- Run `tools/modal-cleanup.sh --execute` (after fixing the regex bug above)
-- Toggle Supabase leaked-password protection in dashboard (closes 11th advisor warning; user chose to skip earlier)
-- Fix `supabase-migrate` CI with `urllib.parse`
-- Strip the 6 GB upstream cache + .git dirs from `physical_ai_server/Dockerfile`
-- Disable source maps in manager builds
-- Add provenance labels to images
+- Run `tools/docker-hub-cleanup.sh --execute` (cleans 5 junk repos + 12 `*-dirty` tags from April; 81 GB recovery from `robotis-ai-training` orphan)
+- Run `tools/modal-cleanup.sh --execute` (after fixing the regex bug)
+- Reconcile PyTorch cu121 vs cu128 drift
+- Pin cross-arch package versions (safetensors, protobuf, pillow)
+- Decide on `versions.env` plumbing (add a writer OR drop the 3 readers as dead code)
+- Tighten `workflow_versions` "Trigger inserts" INSERT policy via a GUC-backed predicate (S2 TODO in migration 024)
+- Harden `register_dataset` HF-author anchor against the concurrent-first-register race
 
 ## When in doubt
 

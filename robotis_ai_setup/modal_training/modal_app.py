@@ -107,4 +107,14 @@ def smoke_test():
     missing = [k for k in required if not os.environ.get(k)]
     print(f"torch={torch.__version__} cuda_available={torch.cuda.is_available()}")
     print(f"missing secrets: {missing or 'none'}")
-    return {"torch": torch.__version__, "missing_secrets": missing}
+    # Cast torch.__version__ to a plain `str` — it's actually a TorchVersion
+    # subclass instance, and pickling it serializes the class reference, so
+    # `modal run` deserializing on a torch-less Mac raises:
+    #   DeserializationError: Deserialization failed because the 'torch'
+    #   module is not available in the local environment.
+    # Same for the cuda_available bool — wrap to plain Python types only.
+    return {
+        "torch": str(torch.__version__),
+        "cuda_available": bool(torch.cuda.is_available()),
+        "missing_secrets": list(missing),
+    }

@@ -22,7 +22,17 @@ app = modal.App("edubotics-training")
 
 image = (
     modal.Image.from_registry(
-        "nvidia/cuda:12.1.1-devel-ubuntu22.04",
+        # Bumped 12.1.1 → 12.4.1 to satisfy LeRobot's pyproject.toml at the
+        # pinned SHA — that pyproject.toml declares `torchvision>=0.21.0`,
+        # and torchvision 0.21.x ships only on the cu124/cu126 wheel indexes
+        # (cu121 tops out at 0.20.1). Without this bump the index_url below
+        # silently resolves torchvision DOWN to 0.20.1, which breaks v2
+        # transform dispatch with NotImplementedError on ColorJitter /
+        # SharpnessJitter at training time. Verified 2026-05-20 via direct
+        # fetch of LeRobot's pyproject.toml at the SHA constant above + an
+        # HTML scrape of the cu121 wheel index. Modal L4 GPUs run R550+
+        # drivers which support CUDA 12.4 fine.
+        "nvidia/cuda:12.4.1-devel-ubuntu22.04",
         add_python="3.11",
     )
     # clang + build-essential needed because lerobot pulls in evdev, whose
@@ -35,13 +45,17 @@ image = (
         "supabase",
     )
     .pip_install(
-        "torch",
-        "torchvision",
+        # Both versions pinned so a future torch/torchvision release on
+        # pytorch.org doesn't silently shift the image under us. The pair
+        # 2.6.0 + 0.21.0 is the latest on the cu124 index as of 2026-05-20
+        # and matches LeRobot's pyproject floor (torch>=2.2.1, torchvision>=0.21.0).
+        "torch==2.6.0",
+        "torchvision==0.21.0",
         # Use `index_url` (not `extra_index_url`) so pip cannot fall back to
-        # Modal's default mirror — without this, pip picks torch+cu130 and the
-        # cu121 CUDA base image crashes at runtime. The single index forces
-        # cu121 wheels from pytorch.org.
-        index_url="https://download.pytorch.org/whl/cu121",
+        # PyPI — without this constraint pip picks a CPU-only or cu130 wheel
+        # and the CUDA base image runtime-crashes (the trap CLAUDE.md Rule §5
+        # documents — same lesson applies on cu124).
+        index_url="https://download.pytorch.org/whl/cu124",
         extra_options="--force-reinstall",
     )
     .run_commands("python -m pip uninstall -y torchcodec || true")

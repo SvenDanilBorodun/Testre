@@ -78,7 +78,46 @@ echo "========================================"
 # of the snapshot. Without it the upload prefixes everything with
 # physical_ai_tools/physical_ai_manager/ and the Dockerfile path
 # resolution silently breaks.
-exec railway up . --path-as-root --ci \
+#
+# railway up --ci has a known bug: it exits non-zero on "Failed to
+# stream build logs" or "reqwest timeout" against backboard.railway.com
+# even when the deploy itself proceeds fine on Railway's side
+# (confirmed 2026-05-20: deployment 297eeb38 went SUCCESS while CI
+# reported failure). We capture the deployment ID from the upload
+# output, then poll `railway deployment list` until the deployment
+# reaches a terminal state — that way we don't depend on the log-stream
+# working. Same pattern as railway-deploy-cloud-api.yml.
+set +e
+OUTPUT=$(railway up . --path-as-root --ci \
     --service "${SERVICE}" \
     --environment "${ENVIRONMENT}" \
-    "$@"
+    "$@" 2>&1)
+UP_EXIT=$?
+set -e
+echo "${OUTPUT}"
+
+DEPLOY_ID=$(echo "${OUTPUT}" | grep -oE 'id=[a-f0-9-]{36}' | head -1 | sed 's/^id=//')
+if [ -z "${DEPLOY_ID}" ]; then
+    echo "::error::Could not extract deployment ID — upload likely failed before reaching Railway"
+    exit "${UP_EXIT:-1}"
+fi
+echo "Tracking deployment ${DEPLOY_ID} (railway up exit=${UP_EXIT})"
+
+# Poll deployment until SUCCESS or FAILED — cap at 18 min to stay under
+# the workflow's 20-min job timeout.
+for i in $(seq 1 108); do
+    STATUS=$(railway deployment list \
+        --service "${SERVICE}" --environment "${ENVIRONMENT}" \
+        --json 2>/dev/null | \
+        python3 -c "import json,sys; print(next((x['status'] for x in json.load(sys.stdin) if x['id'].startswith('${DEPLOY_ID%%-*}')), 'UNKNOWN'))")
+    echo "[${i}] deployment ${DEPLOY_ID:0:8}... status=${STATUS}"
+    case "${STATUS}" in
+        SUCCESS) echo "Deployment ${DEPLOY_ID} succeeded"; exit 0 ;;
+        FAILED|CRASHED|REMOVED|SKIPPED)
+            echo "::error::Deployment ${DEPLOY_ID} terminal=${STATUS}"
+            exit 1 ;;
+    esac
+    sleep 10
+done
+echo "::error::Deployment ${DEPLOY_ID} did not reach terminal state within 18 min"
+exit 1

@@ -8,10 +8,27 @@ FROM ${BASE_IMAGE}
 
 # Install Python dynamixel-sdk for identify_arm.py
 # Install v4l-utils for camera device discovery (v4l2-ctl --info)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        v4l-utils python3-pip \
-    && rm -rf /var/lib/apt/lists/* \
-    && pip3 install --no-cache-dir --break-system-packages dynamixel-sdk==4.0.3
+#
+# apt-get retry loop (added 2026-05-20 after docker-publish run #26166193986
+# failed on arm64 with "ports.ubuntu.com noble-security/main: Mirror sync in
+# progress, File has unexpected size"). The Ubuntu ports mirror (used by
+# arm64 builds) intermittently serves stale index files for a few minutes
+# while it re-syncs. Up to 5 retries with exponential-ish backoff (5, 10,
+# 15, 20, 25 seconds = 75s total worst case) absorbs typical mirror sync
+# windows without artificially extending green build times.
+RUN set -eux; \
+    for i in 1 2 3 4 5; do \
+        apt-get update && \
+        apt-get install -y --no-install-recommends v4l-utils python3-pip && \
+        break || { \
+            echo "apt-get retry $i/5 (mirror sync or transient network)"; \
+            rm -rf /var/lib/apt/lists/*; \
+            sleep $((i * 5)); \
+        }; \
+        [ "$i" = "5" ] && exit 1; \
+    done; \
+    rm -rf /var/lib/apt/lists/*; \
+    pip3 install --no-cache-dir --break-system-packages dynamixel-sdk==4.0.3
 
 # Copy entrypoint and identification script
 COPY entrypoint_omx.sh /entrypoint_omx.sh

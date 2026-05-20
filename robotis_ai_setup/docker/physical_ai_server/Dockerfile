@@ -225,9 +225,23 @@ RUN set -e && \
 #      get a working PyKDL IK solver instead of None.
 # Once the apt packages land for Jazzy, this whole block can be replaced
 # with a normal apt install — the pip-vendoring is a transition shim.
-RUN apt-get update && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        ros-jazzy-python-orocos-kdl-vendor && \
+# apt-get retry loop (added 2026-05-20 — same rationale as open_manipulator/
+# Dockerfile: Ubuntu ports/archive mirrors occasionally serve stale Packages.gz
+# during sync windows. 5 retries with 5s/10s/15s/20s/25s backoff = 75s worst
+# case before bailing.) The trac-ik-python install is intentionally a soft
+# fail (or-echo) — only ros-jazzy-python-orocos-kdl-vendor must succeed.
+RUN set -eux; \
+    for i in 1 2 3 4 5; do \
+        apt-get update && \
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            ros-jazzy-python-orocos-kdl-vendor && \
+        break || { \
+            echo "apt-get retry $i/5 (mirror sync or transient network)"; \
+            rm -rf /var/lib/apt/lists/*; \
+            sleep $((i * 5)); \
+        }; \
+        [ "$i" = "5" ] && exit 1; \
+    done; \
     (DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         ros-jazzy-trac-ik-python || \
      echo 'INFO: ros-jazzy-trac-ik-python not in apt yet — IK uses PyKDL fallback (kdl_parser_py vendored below)') && \

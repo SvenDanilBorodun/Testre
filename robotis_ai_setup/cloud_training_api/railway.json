@@ -12,6 +12,7 @@
     "restartPolicyType": "ON_FAILURE",
     "restartPolicyMaxRetries": 10,
     "healthcheckPath": "/health",
-    "healthcheckTimeout": 30
+    "_comment_healthcheckTimeout": "Bumped 30→300 (2026-05-20, post-ee6197f failure). The pre-16b8378 /health returned {status:ok} instantly from a route handler with zero side effects. Post-16b8378 main.py runs _validate_required_schema() at module-import (line 449), making 11 table-existence probes + ~21 RPC-existence probes = ~32 sequential Supabase round-trips BEFORE uvicorn even binds. STARTUP_SCHEMA_OK only flips at line 812, after include_router. Cold-start budget: 15-25s best, 30-50s on first probe of a warm-cold Supabase. Railway's 30s window was tight; 3 consecutive deploys (16b8378, ee6197f×2) failed with '1/1 replicas never became healthy'. 300s gives 2.5x ceiling headroom and matches the CI health-gate's 5-min budget (railway-deploy-cloud-api.yml:144). Long-term TODO: move schema probe into @app.on_event('startup') so uvicorn binds first and /health returns 503-while-warming instead of connection-refused.",
+    "healthcheckTimeout": 300
   }
 }

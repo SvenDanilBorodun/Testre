@@ -121,15 +121,13 @@ def generate_launch_description():
         condition=UnlessCondition(use_sim),
     )
 
-    # gravity_compensation_controller is spawned first so it activates before
-    # entrypoint_omx.sh Phase 3 runs the follower-sync trajectory. This avoids
-    # a wake-up torque spike if the operator rests a hand on a limp leader arm
-    # during the boot window.
+    # Gravity compensation was intentionally removed — the leader arm runs
+    # with no effort writer on joints 1-5, so it goes limp on boot. The
+    # operator must support the arm by hand during teleop.
     robot_controller_spawner = Node(
         package='controller_manager',
         executable='spawner',
         arguments=[
-            'gravity_compensation_controller',
             'joint_state_broadcaster',
             'trigger_position_controller',
             'joint_trajectory_command_broadcaster',

@@ -88,7 +88,15 @@ The SHA `989f3d05ba47f872d75c587e76838e9cc574857a` must agree across:
 - `meta/info.json` `codebase_version: "v2.1"`
 - Modal preflight in `training_handler.py` enforcing `codebase_version == "v2.1"`
 
-Bumping LeRobot is a **5-place change in one PR**. Modal also force-reinstalls torch+torchvision from `https://download.pytorch.org/whl/cu121` and uninstalls `torchcodec` — without that, pip picks `cu130` wheels that crash the cu121 base.
+Bumping LeRobot is a **5-place change in one PR**.
+
+**Two PyTorch surfaces, two different CUDA pins — by design, not drift.** Don't try to "unify" them.
+
+- **Modal worker** (`modal_training/modal_app.py` lines 24-46): base image `nvidia/cuda:12.1.1-devel-ubuntu22.04` + `pip_install("torch","torchvision", index_url="https://download.pytorch.org/whl/cu121", extra_options="--force-reinstall")` + `pip uninstall -y torchcodec`. Without the explicit `index_url` (note: `index_url`, NOT `extra_index_url`), pip picks `torch+cu130` wheels and the cu121 CUDA base crashes at runtime. Modal runs on NVIDIA L4 GPUs and needs CUDA-matched wheels.
+- **Student `physical_ai_server` image** (both `physical_ai_tools/physical_ai_server/Dockerfile.amd64` and `Dockerfile.arm64`): base image `robotis/ros:jazzy-ros-base-torch2.7.0-cuda12.8.0` — torch 2.7.0+cu128 inherited from Robotis upstream. The LeRobot install strips torch/torchvision from `lerobot/pyproject.toml` (via `sed -i '/"torch[^\"]*",/d'`) so the inherited torch is preserved. Students run on Windows with no GPU; the GPU/CUDA libs are dead weight but not actively harmful (torch falls back to CPU). Don't change this — switching to a CPU-only torch wheel would invalidate the upstream Robotis base image contract and re-trigger the cu130 trap from a different angle.
+- **Jetson Orin Nano classroom agent**: arm64 `Dockerfile.arm64` sets `PIP_INDEX_URL=https://pypi.jetson-ai-lab.io/jp6/cu126/+simple` for the LeRobot install layer; torch itself is NOT replaced (it stays at 2.7.0+cu128 from the base). The Jetson AI Lab index only resolves the non-torch transitive deps (numpy, scipy, etc.) to ARM-compatible wheels.
+
+The audit found "torch 2.7.0+cu128 ships in nettername/physical-ai-server" — that's correct and intentional. Rule §5 used to read as if Modal's cu121 pin applied to the student image too; it doesn't.
 
 The LeRobot 5-site contract is now trust-on-PR-review (the `lerobot-sha-check` job was removed alongside `modal-deploy.yml` when Modal moved to manual deploys). Any bump must touch all 5 sites in one PR.
 
@@ -281,9 +289,12 @@ State as of 2026-05-20 post commit `16b8378` + `de7d635`. Confirm against curren
 
 ### Pipeline-level — still open
 
-- **Docker builds use NATIVE arm64 runners** (`ubuntu-24.04-arm`, no QEMU). amd64 also uses a `jlumbroso/free-disk-space@54081f1` step because the 15.5 GB `nettername/physical-ai-server:latest` doesn't fit on the default 14 GB runner. Removing either silently breaks the matrix.
+- **Docker builds use NATIVE per-arch runners — no QEMU.** `docker-publish.yml::build` matrix: `amd64` → `ubuntu-latest` (x86_64), `arm64` → `ubuntu-24.04-arm` (aarch64-native, GA 2025-01). `setup-qemu-action` is intentionally absent; `smoke-test` asserts `uname -m` matches the matrix arch as a belt-and-suspenders check. `build-images.sh` branches on `PLATFORM` (default `amd64`): `arm64` sets `DOCKER_BUILDX_ARGS="--platform linux/arm64 --push"` and pushes to the separate Jetson repos (`nettername/*-jetson`); the manager image is amd64-only and is skipped on arm64. Two non-redundant guards keep the matrix green:
+  - **`jlumbroso/free-disk-space@54081f1` runs ONLY on amd64** (`if: matrix.platform == 'amd64'`). The amd64 `physical-ai-server` image is ~15.5 GB; `ubuntu-latest` ships ~14 GB free. The strip (android+dotnet+haskell+large-packages+swap, ~31 GB reclaimed) is what makes `--no-cache --pull` survive. arm64 image is ~7.4 GB and fits — skipping the strip there saves ~2 min/build. Remove the step entirely and amd64 OOM-disks at ~70%; remove the `if:` gate and arm64 wastes 2 min for nothing.
+  - **`fail-fast: false`** keeps one arch's failure from killing the other mid-flight.
+  - Fallback if `ubuntu-24.04-arm` ever leaves the free GHA tier for public repos: add `docker/setup-qemu-action@<pinned-sha>` before `setup-buildx-action` and drop the `ubuntu-24.04-arm` runner. Expect 5-8× slower arm64 builds (~90 min vs ~15 min) and FP / glibc-string edge cases that diverge between real silicon and `qemu-user`. Cross-ref: the first "Pipeline-level — still open" finding in this section.
 - **`tools/modal-cleanup.sh` regex doesn't match** the truncated CLI output (`example-mcp-…` truncates names). The `ap-zcXteUTGARIAT8rFG2R4j2` example-mcp app stays orphaned in the Modal workspace. Fix: switch to `modal app list --json` + JSON parsing.
-- **Supabase PR-branch flow has never run** — Branching is not enabled on the project (Pro+ feature). The `apply-branch` job in `supabase-migrate.yml` will fail on the first PR with migrations. Either enable Branching in the dashboard, or disable that job until then.
+- **Supabase PR-branch flow is gated, never runs by default** — Branching is not enabled on the project (Pro+ feature). The `apply-branch` and `teardown-branch` jobs in `supabase-migrate.yml` are gated behind the GHA repo variable `vars.SUPABASE_BRANCHING_ENABLED` (Settings → Secrets and variables → Actions → **Variables** tab, not Secrets). With the variable unset (or anything other than the exact string `true`), both jobs skip cleanly on every PR — PR checks stay green instead of perpetually red. To turn the flow on, the operator must do BOTH: (1) enable Branching in the Supabase dashboard (Project Settings → Branching, requires Pro+), and (2) set the GHA repo variable `SUPABASE_BRANCHING_ENABLED=true`. Flipping only one of the two will not start the flow. `apply-production` is unchanged and continues to apply migrations on `push` to `main`.
 
 ### Pipeline-level — FIXED in `16b8378` (do NOT reintroduce)
 
@@ -303,10 +314,10 @@ State as of 2026-05-20 post commit `16b8378` + `de7d635`. Confirm against curren
 
 ### Image-level — still open
 
-- **PyTorch version drift**: Rule §5 above mentions `cu121`. The actual amd64 image ships `torch==2.7.0+cu128`. Either Rule §5 is stale OR an unintended upgrade slipped past. Verify the next Modal preflight.
-- **Cross-arch package drift**: `safetensors 0.7 (amd64) vs 0.8.0rc (arm64)`, `protobuf 6 vs 7`, `pillow 12.1 vs 12.2`. Not breaking anything now, but `protobuf 6→7` is the classic "works on amd64, fails on Jetson" pattern. Fix: pin these explicitly in both Dockerfiles.
+- **PyTorch version drift**: ~~Rule §5 above mentions `cu121`. The actual amd64 image ships `torch==2.7.0+cu128`. Either Rule §5 is stale OR an unintended upgrade slipped past.~~ **RESOLVED 2026-05.** Rule §5 was ambiguous — Modal worker is cu121 (deliberate, GPU), student image is cu128 (inherited from Robotis base, CPU at runtime). Both are correct. Rule §5 now distinguishes the two surfaces explicitly. No code change needed.
+- ~~**Cross-arch package drift**: `safetensors 0.7 (amd64) vs 0.8.0rc (arm64)`, `protobuf 6 vs 7`, `pillow 12.1 vs 12.2`.~~ **RESOLVED 2026-05.** Both Dockerfiles now pin `safetensors==0.7.0`, `protobuf==6.31.0`, `pillow==12.1.0` via `pip install --force-reinstall` AFTER all other pip layers. Pinned to the lower common denominator that ships as stable on both arches AND matches LeRobot's `grpcio-dep` contract. Verification command embedded in the layer prints the resolved versions at build time.
 - **The `versions.env` plumbing is half-built**: 3 readers exist (`pull_images.ps1`, `gui/constants.py`, GUI), 0 writers. File doesn't exist. GUI's IMAGE_TAG resolution always falls back to `:latest`. **Documented rollback via IMAGE_TAG mechanically can't work** until a writer is added (probably in `docker-publish.yml` emitting `versions.env` to be baked into the installer).
-- **arm64 LeRobot SHA pin** — `physical_ai_server/Dockerfile.arm64` carries a FIXME block (the agent doing the strip had no network access to resolve a pinning SHA). Run `git ls-remote https://github.com/ROBOTIS-GIT/physical_ai_tools.git jazzy` from a developer terminal and hard-pin.
+- ~~**arm64 LeRobot SHA pin** — `physical_ai_server/Dockerfile.arm64` carries a FIXME block~~. **RESOLVED 2026-05.** `Dockerfile.arm64` now pins `PHYSICAL_AI_TOOLS_REF=577371eb75df552c50e15a379365f0d8821a9361` (commit "Bump 0.8.3", whose lerobot submodule entry is exactly `989f3d05...`, matching Rule §5). The clone layer hard-fails the build if the recorded submodule SHA drifts — so a future bump cannot silently violate the 5-site contract. `talos_system_manager` is also now SHA-pinned to `40981c6d...` for build reproducibility (the directory itself is still stripped by the amd64 thin-overlay).
 
 ### Cloud-API + Supabase — security/correctness fixes landed in `16b8378`
 
@@ -331,14 +342,14 @@ State as of 2026-05-20 post commit `16b8378` + `de7d635`. Confirm against curren
 
 - **Delete `REACT_APP_BUILD_ID` Railway service variable** on the `teacher-web` service. `railway.json` `buildArgs` should interpolate `$RAILWAY_GIT_COMMIT_SHA` correctly, but a residual frozen service variable was the 2026-05-19 root cause of the 5-day-stale teacher-web bundle. Belt-and-suspenders.
 - **Enable Supabase leaked-password protection** in dashboard (closes 4th security advisor).
-- **Resolve the arm64 LeRobot SHA pin FIXME** in `Dockerfile.arm64`.
+- ~~Resolve the arm64 LeRobot SHA pin FIXME in `Dockerfile.arm64`.~~ **DONE 2026-05.**
 
 ### What's deferred to next session
 
 - Run `tools/docker-hub-cleanup.sh --execute` (cleans 5 junk repos + 12 `*-dirty` tags from April; 81 GB recovery from `robotis-ai-training` orphan)
 - Run `tools/modal-cleanup.sh --execute` (after fixing the regex bug)
-- Reconcile PyTorch cu121 vs cu128 drift
-- Pin cross-arch package versions (safetensors, protobuf, pillow)
+- ~~Reconcile PyTorch cu121 vs cu128 drift~~ → Rule §5 now distinguishes Modal (cu121, GPU) from student image (cu128, inherited from Robotis base). DONE 2026-05.
+- ~~Pin cross-arch package versions (safetensors, protobuf, pillow)~~ → both Dockerfiles pin to LCD via `--force-reinstall`. DONE 2026-05.
 - Decide on `versions.env` plumbing (add a writer OR drop the 3 readers as dead code)
 - Tighten `workflow_versions` "Trigger inserts" INSERT policy via a GUC-backed predicate (S2 TODO in migration 024)
 - Harden `register_dataset` HF-author anchor against the concurrent-first-register race

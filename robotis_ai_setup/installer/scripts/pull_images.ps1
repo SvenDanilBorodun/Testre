@@ -17,8 +17,22 @@ function Write-OK   { param([string]$msg) Write-Host "   OK: $msg" -ForegroundCo
 # Read IMAGE_TAG from docker/versions.env so we pull the SAME bytes that
 # docker-compose.yml will run later. Falls back to :latest if the file is
 # missing (e.g. dev install before any maintainer build has shipped).
+#
+# Path resolution: in the installed layout the script lives at
+# {app}\scripts\pull_images.ps1 and versions.env at {app}\docker\versions.env,
+# so we resolve via the parent of $PSScriptRoot (= {app}), not via "..\.."
+# which would walk above {app}. The previous "..\.." form only worked from
+# the dev tree (robotis_ai_setup/installer/scripts/), so production installs
+# silently always fell back to :latest.
 $ImageTag = "latest"
-$VersionsEnv = Join-Path $PSScriptRoot "..\..\docker\versions.env"
+$AppRoot = Split-Path -Parent $PSScriptRoot
+$VersionsEnv = Join-Path $AppRoot "docker\versions.env"
+# Dev-tree fallback: the dev layout has scripts at robotis_ai_setup/installer/
+# scripts/ and versions.env at robotis_ai_setup/docker/versions.env — two
+# levels up. Try the dev path if the installed path is missing.
+if (-not (Test-Path $VersionsEnv)) {
+    $VersionsEnv = Join-Path $PSScriptRoot "..\..\docker\versions.env"
+}
 if (Test-Path $VersionsEnv) {
     Get-Content $VersionsEnv | ForEach-Object {
         if ($_ -match '^\s*IMAGE_TAG\s*=\s*(.+?)\s*$') { $ImageTag = $Matches[1] }

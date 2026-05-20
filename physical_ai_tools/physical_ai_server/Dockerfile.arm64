@@ -28,33 +28,44 @@ RUN apt-get update && apt-get install -y \
 ENV COLCON_WS=/root/ros2_ws
 WORKDIR ${COLCON_WS}
 
-# ┌─────────────────────────────────────────────────────────────────────┐
-# │ FIXME (Rule §5, 5-site contract): SHA-pin physical_ai_tools.        │
-# │                                                                     │
-# │ The `git clone -b jazzy --recursive` below tracks the MOVING jazzy  │
-# │ branch tip, so next rebuild can silently pick up a new LeRobot      │
-# │ submodule SHA. The amd64 base image (robotis/physical-ai-server:    │
-# │ amd64-0.8.2, registry-pinned) freezes a known-good state; this      │
-# │ arm64 base does NOT.                                                │
-# │                                                                     │
-# │ The Modal worker enforces LeRobot @ 989f3d05ba47f872d75c587e76838e9 │
-# │ cc574857a (modal_app.py::LEROBOT_COMMIT). The arm64 base must pin   │
-# │ the parent physical_ai_tools commit that records the matching       │
-# │ submodule SHA. To find it:                                          │
-# │   git ls-remote https://github.com/ROBOTIS-GIT/physical_ai_tools.git jazzy │
-# │   git clone ... && cd physical_ai_tools                             │
-# │   git log --oneline | head -30                                      │
-# │   git -C lerobot rev-parse HEAD   # must == 989f3d05ba...           │
-# │                                                                     │
-# │ Then convert the clone below to:                                    │
-# │   ARG PHYSICAL_AI_TOOLS_REF=<sha>                                   │
-# │   git clone https://github.com/ROBOTIS-GIT/physical_ai_tools.git && \│
-# │     cd physical_ai_tools && git checkout ${PHYSICAL_AI_TOOLS_REF}   │
-# │     && git submodule update --init --recursive                      │
-# └─────────────────────────────────────────────────────────────────────┘
-RUN mkdir -p ${COLCON_WS}/src && \
+# SHA-pinned physical_ai_tools clone (Rule §5, 5-site LeRobot contract).
+#
+# Why pinned: the previous `git clone -b jazzy --recursive` tracked the moving
+# jazzy branch tip, so every rebuild could silently pick up a new LeRobot
+# submodule SHA. The amd64 base image (robotis/physical-ai-server:amd64-0.8.2,
+# registry-pinned) freezes a known-good state by virtue of being a fixed tag;
+# this arm64 base did NOT until this pin landed.
+#
+# The pin (577371eb..., commit "Bump 0.8.3", 2026-04-30) was chosen because
+# its lerobot submodule entry is exactly:
+#   989f3d05ba47f872d75c587e76838e9cc574857a
+# — which matches modal_app.py::LEROBOT_COMMIT and the static lerobot snapshot
+# at physical_ai_tools/lerobot/ in this repo. Verified via:
+#   curl https://api.github.com/repos/ROBOTIS-GIT/physical_ai_tools/contents/\
+#        lerobot?ref=577371eb75df552c50e15a379365f0d8821a9361
+#
+# The runtime SHA-check below is the load-bearing guard — if a future bump
+# moves either SHA out of sync, the arm64 build fails loudly here instead of
+# shipping a silently-drifted LeRobot that crashes inside the LeRobot v2.1
+# preflight on a Jetson at a student's bench.
+ARG PHYSICAL_AI_TOOLS_REF=577371eb75df552c50e15a379365f0d8821a9361
+ARG LEROBOT_EXPECTED_SHA=989f3d05ba47f872d75c587e76838e9cc574857a
+RUN set -e && \
+    mkdir -p ${COLCON_WS}/src && \
     cd ${COLCON_WS}/src && \
-    git clone -b jazzy https://github.com/ROBOTIS-GIT/physical_ai_tools.git --recursive
+    git clone https://github.com/ROBOTIS-GIT/physical_ai_tools.git && \
+    cd physical_ai_tools && \
+    git checkout "${PHYSICAL_AI_TOOLS_REF}" && \
+    git submodule update --init --recursive && \
+    actual_lerobot_sha="$(git -C lerobot rev-parse HEAD)" && \
+    if [ "${actual_lerobot_sha}" != "${LEROBOT_EXPECTED_SHA}" ]; then \
+        echo "::error::LeRobot submodule SHA drift at physical_ai_tools@${PHYSICAL_AI_TOOLS_REF}:"; \
+        echo "::error::  expected ${LEROBOT_EXPECTED_SHA}"; \
+        echo "::error::  got      ${actual_lerobot_sha}"; \
+        echo "::error::Bump PHYSICAL_AI_TOOLS_REF to a parent commit whose lerobot submodule matches Rule §5."; \
+        exit 1; \
+    fi && \
+    echo "LeRobot SHA verified: ${actual_lerobot_sha} (matches Rule §5 contract)"
 
 RUN cd ${COLCON_WS} && \
     apt-get update && \
@@ -75,6 +86,34 @@ RUN cd ${COLCON_WS}/src/physical_ai_tools/lerobot && \
 
 RUN pip install --no-cache-dir setuptools==68.1.2
 RUN pip install --no-cache-dir 'numpy<2'
+
+# Cross-arch package floor — pin safetensors / protobuf / pillow to the same
+# version on BOTH arches. The 2026-05 audit caught arm64 silently resolving
+# safetensors==0.8.0rc (pre-release!), protobuf==7.x, and pillow==12.2 while
+# amd64 stayed on 0.7 / 6.x / 12.1. None breaks the pipeline today, but
+# `protobuf 6 → 7` is the classic "works on x86, fails on Jetson arm64" pattern
+# (proto plugin ABI changes are routinely opaque). Pin to the lower common
+# denominator that ships as stable on BOTH arches AND matches LeRobot's
+# grpcio-dep contract (lerobot/pyproject.toml: protobuf==6.31.0).
+#
+#   safetensors==0.7.0   (last non-RC; 0.8 is still rc0/dev as of 2026-05)
+#   protobuf==6.31.0     (matches LeRobot grpcio-dep pin; onnx>=1.16 needs
+#                         protobuf>=4.25 so 6.x is fine)
+#   pillow==12.1.0       (LCD across arches; both amd64 and arm64 wheel-
+#                         available; feature-set identical to 12.2)
+#
+# Installed AFTER the LeRobot install + numpy pin so this overrides any
+# transitive resolution. `--force-reinstall` ensures the wheels actually get
+# swapped in even when the resolver thinks a satisfying version is present.
+# Mirrored in robotis_ai_setup/docker/physical_ai_server/Dockerfile for amd64
+# (the thin overlay over robotis/physical-ai-server:amd64-0.8.2).
+RUN pip install --no-cache-dir --force-reinstall \
+        safetensors==0.7.0 \
+        protobuf==6.31.0 \
+        pillow==12.1.0 && \
+    python3 -c "import safetensors, google.protobuf, PIL; \
+                print('cross-arch floor:', safetensors.__version__, \
+                      google.protobuf.__version__, PIL.__version__)"
 
 RUN echo 'export PYTHONPATH=${COLCON_WS}/src/physical_ai_tools/lerobot/src:$PYTHONPATH' >> /root/.bashrc && \
     export PYTHONPATH=${COLCON_WS}/src/physical_ai_tools/lerobot/src:$PYTHONPATH;
@@ -98,7 +137,17 @@ RUN mkdir -p /var/run/agent && \
 # itself + the PYTHONPATH entry are stripped from the production image by the
 # thin-overlay Dockerfile in robotis_ai_setup/docker/physical_ai_server/, so
 # nothing depends on /opt/talos_system_manager existing at runtime.
-RUN git clone -b main https://github.com/ROBOTIS-GIT/talos_system_manager.git /opt/talos_system_manager
+#
+# SHA-pinned (commit "BUMP 0.1.2", 2026-02-05) so the requirements.txt list
+# can't shift under us between builds. Only the pip-installed packages persist
+# into the production image (the directory itself is stripped). Bumping this
+# pin is safe as long as the new commit's requirements.txt resolves cleanly
+# alongside the LeRobot deps installed in the layers above.
+ARG TALOS_SYSTEM_MANAGER_REF=40981c6d15a1e0f1cba9e3d424fe292833c1b7f9
+RUN set -e && \
+    git clone https://github.com/ROBOTIS-GIT/talos_system_manager.git /opt/talos_system_manager && \
+    git -C /opt/talos_system_manager checkout "${TALOS_SYSTEM_MANAGER_REF}" && \
+    echo "talos_system_manager pinned to ${TALOS_SYSTEM_MANAGER_REF}"
 
 ENV PYTHONPATH=/opt/talos_system_manager:${PYTHONPATH}
 

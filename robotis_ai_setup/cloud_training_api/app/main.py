@@ -393,6 +393,25 @@ def _validate_required_schema() -> None:
             "p_expires_at": "1970-01-01T00:00:00+00:00",
         }),
         ("unpair_jetson", {"p_jetson_id": dummy, "p_teacher_id": dummy}),
+        # Migration 026 — atomic register_dataset upsert + HF-author
+        # anchor check. Without this RPC, /datasets POST 500s on the
+        # supabase-py rpc('register_dataset_safe') call (PGRST202).
+        # Probe with a non-existent UUID; the RPC's first action is
+        # SELECT id FROM users FOR UPDATE which raises P0002 ("Benutzer
+        # nicht gefunden") for any unknown user — that proves the
+        # function is registered without requiring a real row.
+        ("register_dataset_safe", {
+            "p_user_id": dummy,
+            "p_hf_repo_id": "_probe/_probe",
+            "p_hf_author": "_probe",
+            "p_workgroup_id": None,
+            "p_name": "_probe",
+            "p_description": "",
+            "p_episode_count": None,
+            "p_total_frames": None,
+            "p_fps": None,
+            "p_robot_type": None,
+        }),
     )
     missing_rpcs: list[str] = []
     for name, args in required_rpcs:

@@ -100,7 +100,16 @@ jobs:
 
   apply-branch:
     name: Apply to ephemeral Supabase Branch (PR)
-    if: github.event_name == 'pull_request' && (github.event.action == 'opened' || github.event.action == 'synchronize' || github.event.action == 'reopened')
+    # Gated behind the SUPABASE_BRANCHING_ENABLED repo variable
+    # (Settings → Secrets and variables → Actions → Variables tab).
+    # Supabase Branching is a Pro+ feature that must ALSO be enabled
+    # in the project dashboard (Project Settings → Branching). The
+    # variable is a second switch the operator flips AFTER enabling
+    # Branching in the dashboard — without both, this job is skipped
+    # so PRs are not perpetually red. Once both are on, the job runs
+    # exactly as before. See CLAUDE.md "Known issues" for the toggle
+    # procedure.
+    if: ${{ github.event_name == 'pull_request' && vars.SUPABASE_BRANCHING_ENABLED == 'true' && (github.event.action == 'opened' || github.event.action == 'synchronize' || github.event.action == 'reopened') }}
     needs: [validate]
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -185,7 +194,10 @@ jobs:
 
   teardown-branch:
     name: Tear down PR branch on close
-    if: github.event_name == 'pull_request' && github.event.action == 'closed'
+    # Same gate as apply-branch: without Branching enabled in the
+    # dashboard AND vars.SUPABASE_BRANCHING_ENABLED == 'true', there
+    # is no PR branch to tear down. Skipping is safe + idempotent.
+    if: ${{ github.event_name == 'pull_request' && vars.SUPABASE_BRANCHING_ENABLED == 'true' && github.event.action == 'closed' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:

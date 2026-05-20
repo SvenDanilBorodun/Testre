@@ -134,10 +134,18 @@ if ($usbipdOk) {
 # 5. Docker images
 # Read REGISTRY + IMAGE_TAG from docker/versions.env so this script checks
 # the SAME bytes that docker-compose will run later.
+# Path resolution: installed layout has {app}\docker\versions.env (parent of
+# scripts dir); dev tree has it two levels up. Try installed first, fall
+# back to dev. The previous "..\.." form only worked in dev — production
+# installs silently always fell back to :latest.
 Write-Host "   Checking Docker images..." -ForegroundColor White
 $registry = "nettername"
 $imageTag = "latest"
-$VersionsEnv = Join-Path $PSScriptRoot "..\..\docker\versions.env"
+$AppRootForVersions = Split-Path -Parent $PSScriptRoot
+$VersionsEnv = Join-Path $AppRootForVersions "docker\versions.env"
+if (-not (Test-Path $VersionsEnv)) {
+    $VersionsEnv = Join-Path $PSScriptRoot "..\..\docker\versions.env"
+}
 if (Test-Path $VersionsEnv) {
     Get-Content $VersionsEnv | ForEach-Object {
         if ($_ -match '^\s*IMAGE_TAG\s*=\s*(.+?)\s*$') { $imageTag = $Matches[1] }

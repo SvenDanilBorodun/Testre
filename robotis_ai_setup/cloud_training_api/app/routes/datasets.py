@@ -149,40 +149,34 @@ def _hf_repo_author(repo_id: str) -> str | None:
     return None
 
 
-def _resolve_known_hf_author(user_id: str, supabase) -> str | None:
-    """Trust-on-first-use lookup of the student's HF author.
+def _map_register_dataset_error(exc: Exception) -> HTTPException:
+    """Convert Postgres SQLSTATEs from register_dataset_safe to HTTP.
 
-    We don't store the student's HF token in Supabase, so we can't call
-    huggingface_hub.HfApi.whoami() server-side to authoritatively
-    establish their HF identity. Instead we learn it from the first
-    dataset they register: the dataset's HF author IS the student's HF
-    username (verified at registration time via dataset_info().author).
-    Any later registration must match that author.
-
-    Returns None when the user has never registered a dataset before
-    (no anchor yet). Returns the canonical author string otherwise.
-
-    Why this works against the IDOR: a malicious student calling
-    /datasets with `peer/peer-repo` either (a) has already registered
-    one of their OWN datasets — _resolve_known_hf_author returns their
-    real HF author, the peer-repo's author does not match, 403; or
-    (b) has never registered a dataset — the trust-on-first-use branch
-    in register_dataset still verifies that `peer-repo`'s author looks
-    plausible (token-based double check), and once captured the
-    student is locked to that author forever.
+    Mirrors the _map_pg_error helper in routes/jetson.py. Migration 026
+    raises:
+      P0034 → 403  HF-author anchor mismatch (the IDOR block)
+      P0002 → 404  user row not found (auth.users / public.users skew)
+    Anything else surfaces as a 500 so an operator notices.
     """
-    rows = (
-        supabase.table("datasets")
-        .select("hf_repo_id")
-        .eq("owner_user_id", user_id)
-        .limit(50)
-        .execute()
-    ).data or []
-    for row in rows:
-        repo_id = row.get("hf_repo_id")
-        if repo_id and "/" in repo_id:
-            return repo_id.split("/", 1)[0]
-    return None
+    msg = str(exc)
+    if "P0034" in msg:
+        return HTTPException(
+            status_code=403,
+            detail=(
+                "Dieses Dataset gehört nicht zu deinem HuggingFace-Konto. "
+                "Du kannst nur eigene Datasets registrieren."
+            ),
+        )
+    if "P0002" in msg:
+        return HTTPException(
+            status_code=404,
+            detail="Benutzerkonto nicht gefunden.",
+        )
+    logger.error("register_dataset_safe RPC failed: %s", msg)
+    return HTTPException(
+        status_code=500,
+        detail="Datensatz konnte nicht gespeichert werden.",
+    )
 
 
 # ---------- Endpoints ----------
@@ -256,15 +250,20 @@ def register_dataset(
     """Register a freshly uploaded HF dataset.
 
     Idempotent: the UNIQUE (owner_user_id, hf_repo_id) constraint means
-    re-registering the same repo updates instead of duplicating. We mirror
-    that behavior in code rather than catching the constraint error.
+    re-registering the same repo updates instead of duplicating. The
+    upsert + author-anchor check is delegated to migration 026's
+    register_dataset_safe RPC so that two concurrent first-time POSTs
+    from the same student cannot each pass a "no prior author" check
+    and create two rows with different HF authors (the V1 audit MEDIUM,
+    deferred — see migration 026 header).
     """
-    # Validate the HF repo exists AND that the caller actually owns it
-    # on HuggingFace Hub. The author check is the IDOR fix: pre-check we
-    # accepted any repo a student typed, so a student could register
-    # `peer-username/peer-repo` and burn their workgroup's credit pool
-    # on a peer's data. Now we require author == student's known HF
-    # author (trust-on-first-use from prior registrations).
+    # Validate the HF repo exists AND fetch its canonical author. The
+    # author check is the IDOR fix: pre-check we accepted any repo a
+    # student typed, so a student could register `peer-username/peer-
+    # repo` and burn their workgroup's credit pool on a peer's data.
+    # Now we require author == student's known HF author (trust-on-
+    # first-use anchored in the datasets row; enforced atomically inside
+    # the migration-026 RPC).
     try:
         repo_author = _hf_repo_author(payload.hf_repo_id)
     except Exception as e:
@@ -293,69 +292,48 @@ def register_dataset(
 
     supabase = get_supabase()
 
-    # Ownership pre-check: the HF author of the supplied repo MUST match
-    # the student's HF identity. We don't have the student's HF token in
-    # the Cloud API so we cannot call HfApi.whoami(); instead we use a
-    # trust-on-first-use anchor: the first dataset a student registers
-    # locks in their HF author, and every subsequent registration is
-    # checked against that anchor.
-    known_author = _resolve_known_hf_author(str(user.id), supabase)
-    if known_author is not None:
-        # Author casing: HF Hub usernames are case-insensitive on lookup
-        # but the canonical form is mixed-case. Compare case-fold to
-        # avoid spurious 403s for `Alice/foo` vs `alice/foo`.
-        if known_author.casefold() != repo_author.casefold():
+    # Atomic upsert + anchor-check via the SECURITY DEFINER RPC. The
+    # RPC takes a row-lock on public.users for p_user_id so that two
+    # concurrent first-time registrations from the same student
+    # serialise — the second one observes the just-inserted anchor and
+    # either confirms or raises P0034 → 403.
+    try:
+        result = supabase.rpc(
+            "register_dataset_safe",
+            {
+                "p_user_id": str(user.id),
+                "p_hf_repo_id": payload.hf_repo_id,
+                "p_hf_author": repo_author,
+                "p_workgroup_id": workgroup_id,
+                "p_name": payload.name,
+                "p_description": payload.description,
+                "p_episode_count": payload.episode_count,
+                "p_total_frames": payload.total_frames,
+                "p_fps": payload.fps,
+                "p_robot_type": payload.robot_type,
+            },
+        ).execute()
+    except Exception as exc:
+        if "P0034" in str(exc):
             logger.warning(
-                "register_dataset IDOR-block user=%s known_author=%s repo=%s repo_author=%s",
-                user.id, known_author, payload.hf_repo_id, repo_author,
+                "register_dataset IDOR-block user=%s repo=%s repo_author=%s",
+                user.id, payload.hf_repo_id, repo_author,
             )
-            raise HTTPException(
-                status_code=403,
-                detail=(
-                    "Dieses Dataset gehört nicht zu deinem HuggingFace-Konto. "
-                    "Du kannst nur eigene Datasets registrieren."
-                ),
-            )
-    # First-time registration path: no anchor exists yet, so we can't
-    # cross-check the author. We still trust the HF Hub-side ACL: the
-    # student must be authenticated to HF Hub to UPLOAD a dataset under
-    # `<author>/<repo>` in the first place, so if the repo exists with
-    # the supplied author and the student is registering it, they
-    # almost certainly own it. The author becomes the anchor for every
-    # future registration.
-    # Upsert by (owner_user_id, hf_repo_id) — keep prior id when re-registered.
-    existing = (
-        supabase.table("datasets")
-        .select("*")
-        .eq("owner_user_id", user.id)
-        .eq("hf_repo_id", payload.hf_repo_id)
-        .execute()
-    )
-    update_fields: dict = {
-        "name": payload.name,
-        "description": payload.description,
-        "episode_count": payload.episode_count,
-        "total_frames": payload.total_frames,
-        "fps": payload.fps,
-        "robot_type": payload.robot_type,
-        "workgroup_id": workgroup_id,
-    }
-    if existing.data:
-        result = (
-            supabase.table("datasets")
-            .update(update_fields)
-            .eq("id", existing.data[0]["id"])
-            .execute()
-        )
-    else:
-        insert_payload = {**update_fields, "owner_user_id": user.id, "hf_repo_id": payload.hf_repo_id}
-        result = supabase.table("datasets").insert(insert_payload).execute()
+        raise _map_register_dataset_error(exc)
 
-    if not result.data:
+    # supabase-py returns the RPC's RETURNS public.datasets row as a
+    # dict (RETURNS row → JSONB on PostgREST). The shape matches the
+    # .select('*') output that _serialize() expects.
+    row = result.data
+    if isinstance(row, list):
+        # supabase-py historically wraps single-row composite returns
+        # in a list; tolerate both shapes for forward compatibility.
+        row = row[0] if row else None
+    if not row:
         raise HTTPException(
             status_code=500, detail="Datensatz konnte nicht gespeichert werden."
         )
-    return _serialize(result.data[0], viewer_id=str(user.id))
+    return _serialize(row, viewer_id=str(user.id))
 
 
 @router.patch("/{dataset_id}", response_model=DatasetResponse)

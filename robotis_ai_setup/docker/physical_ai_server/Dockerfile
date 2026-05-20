@@ -263,6 +263,33 @@ RUN set -e && \
 # adds a new pip dep, the WORKFLOW.md license rule still applies.
 RUN echo "AGPL audit: relies on explicit dependency manifest, see Dockerfile comment"
 
+# Cross-arch package floor — pin safetensors / protobuf / pillow to a single
+# version on BOTH arches. The 2026-05 audit caught arm64 silently resolving
+# safetensors==0.8.0rc (pre-release!), protobuf==7.x, and pillow==12.2 while
+# amd64 stayed on 0.7 / 6.x / 12.1. None of these is breaking the pipeline
+# today, but `protobuf 6 → 7` is the classic "works on x86, fails on Jetson
+# arm64" pattern (proto plugin ABI changes are routinely opaque). Pin to the
+# lower common denominator that ships as stable on BOTH arches AND matches
+# LeRobot's grpcio-dep contract (lerobot/pyproject.toml: protobuf==6.31.0).
+#
+#   safetensors==0.7.0   (last non-RC; 0.8 is still rc0/dev as of 2026-05)
+#   protobuf==6.31.0     (matches LeRobot grpcio-dep pin; pip-resolvable
+#                         alongside onnx>=1.16 which only needs protobuf>=4.25)
+#   pillow==12.1.0       (LCD across arches; both amd64 and arm64 wheel-
+#                         available; image-quality/feature-set identical to 12.2)
+#
+# Installed AFTER all other pip layers so this pin overrides any transitive
+# resolution from earlier `pip install` calls or base-image-inherited versions.
+# `--force-reinstall` ensures the wheels actually get swapped in even when the
+# resolver thinks an existing satisfying version is already present.
+RUN python3 -m pip install --no-cache-dir --force-reinstall \
+        safetensors==0.7.0 \
+        protobuf==6.31.0 \
+        pillow==12.1.0 && \
+    python3 -c "import safetensors, google.protobuf, PIL; \
+                print('cross-arch floor:', safetensors.__version__, \
+                      google.protobuf.__version__, PIL.__version__)"
+
 # Roboter Studio workflow module (calibration, perception, IK, motion handlers,
 # Blockly interpreter). Not present in upstream; copied in as an addition
 # rather than an overlay since there is no existing file to sha256-compare.

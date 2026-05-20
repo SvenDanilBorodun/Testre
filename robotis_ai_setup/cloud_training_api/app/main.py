@@ -121,11 +121,25 @@ def _warn_optional_secrets() -> None:
     gui_version_env = os.environ.get("GUI_VERSION")
     if gui_version_env:
         here = pathlib.Path(__file__).resolve()
-        version_candidates = [
-            here.parents[3] / "VERSION",       # repo root in dev
-            here.parents[2] / "VERSION",       # cloud_training_api/VERSION
-            pathlib.Path("/app/VERSION"),       # image root
+        # Build candidates LAZILY — in production the file resolves to
+        # /app/app/main.py whose .parents has only 3 entries (parents[3]
+        # would raise IndexError, crashing module import BEFORE uvicorn
+        # binds, which kills every deploy with "1/1 replicas never became
+        # healthy"). Use a helper that returns None for missing indices
+        # and filter them out before joining the VERSION segment.
+        def _safe_parent(p: pathlib.Path, n: int) -> pathlib.Path | None:
+            try:
+                return p.parents[n]
+            except IndexError:
+                return None
+
+        version_candidates: list[pathlib.Path] = [
+            pathlib.Path("/app/VERSION"),  # image root (production layout)
         ]
+        for n in (4, 3, 2):  # 4=repo root w/ extra nesting, 3=repo root, 2=cloud_training_api
+            parent = _safe_parent(here, n)
+            if parent is not None:
+                version_candidates.append(parent / "VERSION")
         in_tree_version: str | None = None
         for path in version_candidates:
             try:

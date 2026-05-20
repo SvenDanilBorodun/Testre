@@ -46,6 +46,25 @@ cd "${MANAGER_DIR}"
 SERVICE="${TEACHER_WEB_SERVICE:-teacher-web}"
 ENVIRONMENT="${TEACHER_WEB_ENV:-production}"
 
+# Stamp REACT_APP_BUILD_ID as a Railway service variable BEFORE `railway up`
+# so railway.json's `buildArgs: {"REACT_APP_BUILD_ID": "$REACT_APP_BUILD_ID"}`
+# interpolation has the current SHA to substitute. Without this, the
+# Dockerfile.web `ARG REACT_APP_BUILD_ID=dev` default wins and /version.json
+# serves "dev" — Railway's `$RAILWAY_GIT_COMMIT_SHA` only populates on the
+# native git-push integration, NOT on `railway up --ci` source uploads
+# (which is how GHA invokes this script).
+#
+# `--skip-deploys` prevents the variable change from triggering its own
+# deploy; the `railway up` two lines below picks up the new value
+# atomically.
+if [ -n "${GITHUB_SHA:-}" ]; then
+    echo "  stamping REACT_APP_BUILD_ID=${GITHUB_SHA:0:7} (full=${GITHUB_SHA})"
+    railway variable set "REACT_APP_BUILD_ID=${GITHUB_SHA}" \
+        --service "${SERVICE}" --environment "${ENVIRONMENT}" \
+        --skip-deploys >/dev/null 2>&1 || \
+        echo "  warning: failed to stamp REACT_APP_BUILD_ID — build may use 'dev'"
+fi
+
 echo "========================================"
 echo "Deploying physical_ai_manager → Railway"
 echo "  service:     ${SERVICE}"

@@ -3,10 +3,7 @@
   "build": {
     "builder": "DOCKERFILE",
     "dockerfilePath": "Dockerfile.web",
-    "_comment_buildArgs": "Railway interpolates $RAILWAY_GIT_COMMIT_SHA at build time. This is what flows into REACT_APP_BUILD_ID, which CRA inlines into main.*.js + /version.json. WITHOUT this entry, the build-arg defaults to 'dev' (Dockerfile.web ARG default) or — worse — picks up a frozen REACT_APP_BUILD_ID Railway service variable from a stale local build (Agent E's 2026-05-20 root-cause finding). OPERATOR ACTION: delete any REACT_APP_BUILD_ID service variable from the teacher-web Railway service so this interpolation wins.",
-    "buildArgs": {
-      "REACT_APP_BUILD_ID": "$RAILWAY_GIT_COMMIT_SHA"
-    }
+    "_comment_buildArgs_removed": "Previously had buildArgs: {REACT_APP_BUILD_ID: $RAILWAY_GIT_COMMIT_SHA}. That env var is ONLY populated by Railway's native git-push integration; `railway up --ci` (the CLI upload path GHA uses) has no git context, so the substitution resolved to empty, which was then explicitly passed as --build-arg, OVERRIDING the service variable Railway would otherwise auto-pass. Result: every CI deploy baked buildId='dev' (Agent F's 2026-05-20 17:50Z finding). Fix lives in scripts/railway-deploy.sh: stamp REACT_APP_BUILD_ID as a service variable to $GITHUB_SHA before `railway up`, then Railway auto-passes the service variable as a build-arg via Dockerfile.web's ARG declaration. No explicit buildArgs entry here — service variable wins."
   },
   "deploy": {
     "restartPolicyType": "ON_FAILURE",

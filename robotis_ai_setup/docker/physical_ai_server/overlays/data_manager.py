@@ -68,7 +68,8 @@ class DataManager:
             self,
             save_root_path,
             robot_type,
-            task_info):
+            task_info,
+            upload_callback=None):
         self._robot_type = robot_type
         import re
         safe_task_name = re.sub(r'[^a-zA-Z0-9._-]', '-', task_info.task_name).strip('-')
@@ -78,6 +79,21 @@ class DataManager:
         self._on_saving = False
         self._single_task = len(task_info.task_instruction) == 1
         self._task_info = task_info
+        # Wired by the node to HfApiWorker.send_request so the
+        # end-of-recording auto-push runs out-of-process, surfaces errors
+        # on /huggingface/status, and lets the React side fire the
+        # /datasets/register Cloud-API call on success. None when the
+        # DataManager is constructed standalone (tests, fallback path).
+        self._upload_callback = upload_callback
+        # One-shot idempotency guard. The state machine has two call
+        # sites that can both reach _upload_dataset on the same tick
+        # (the 'finish' branch and the post-loop cap-reached check); the
+        # timer also normally stops on RECORD_COMPLETED, but we belt-
+        # and-suspenders against a future refactor that loses that stop,
+        # plus the joystick re-entry path. Reset to False is intentional
+        # only at construction — a new DataManager is built for every
+        # recording (see init_robot_control_parameters_from_user_task).
+        self._upload_enqueued = False
 
         self._lerobot_dataset = None
         self._record_episode_count = 0
@@ -753,16 +769,51 @@ class DataManager:
             )
 
     def _upload_dataset(self, tags, private=False):
-        """Push the dataset to HuggingFace.
+        """Auto-push the recorded dataset to HuggingFace.
 
-        ``private`` is honoured as passed in by the caller — the GUI
-        defaults the toggle to True, but professional users / paired
-        student work / teacher-published reference datasets can opt out.
+        Prefers the HfApiWorker callback (wired by the node) so the
+        upload runs out-of-process: the ROS spin thread stays
+        responsive, progress + Success/Failed events flow through
+        /huggingface/status (German toasts in the React UI), and a
+        successful upload triggers the React side to call
+        /datasets/register on the Cloud API — without that registration,
+        Modal training cannot discover the dataset.
+
+        Falls back to a direct push_to_hub when no callback was wired
+        (tests, standalone import). ``private`` is intentionally ignored:
+        classroom recordings can contain children's faces / audio, so
+        the upload is always private. Teachers can flip individual
+        repos to public from the HF dashboard if they want to share.
         """
-        self._lerobot_dataset.push_to_hub(
-            tags=tags,
-            private=private,
-            upload_large_folder=True)
+        del private  # always private — see docstring
+        if self._upload_enqueued:
+            # Already kicked off; subsequent state-machine ticks are no-ops.
+            return
+        self._upload_enqueued = True
+        if self._upload_callback is not None:
+            try:
+                self._upload_callback(
+                    self._save_repo_name,
+                    str(self._save_path),
+                )
+            except Exception as e:
+                print(
+                    f'[WARNUNG] Upload konnte nicht eingereiht werden: {e}',
+                    file=sys.stderr, flush=True,
+                )
+            return
+
+        # Standalone fallback — no progress events, no auto-register.
+        try:
+            self._lerobot_dataset.push_to_hub(
+                tags=tags,
+                private=True,
+                upload_large_folder=True)
+        except Exception as e:
+            print(
+                f'[WARNUNG] Direkter Hub-Upload fehlgeschlagen: {e}',
+                file=sys.stderr, flush=True,
+            )
 
     def _download_dataset(self, repo_id):
         snapshot_download(

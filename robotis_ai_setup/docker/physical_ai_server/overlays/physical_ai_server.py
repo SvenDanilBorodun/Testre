@@ -466,7 +466,8 @@ class PhysicalAIServer(Node):
         self.data_manager = DataManager(
             save_root_path=self.DEFAULT_SAVE_ROOT_PATH,
             robot_type=self.robot_type,
-            task_info=task_info
+            task_info=task_info,
+            upload_callback=self._enqueue_dataset_upload,
         )
         self.communicator.clear_latest_data()
 
@@ -1401,6 +1402,17 @@ class PhysicalAIServer(Node):
 
     def _init_hf_api_worker(self):
         """Initialize HF API Worker and status monitoring timer."""
+        # Publisher is created eagerly + once, so the synthetic Failed
+        # emit path in _enqueue_dataset_upload always has a target —
+        # even when the worker fails to start. Idempotent across re-init
+        # cycles (post-idle-shutdown, post-cancel) because we only
+        # create when the attribute is missing.
+        if not hasattr(self, 'hf_status_publisher') or self.hf_status_publisher is None:
+            self.hf_status_publisher = self.create_publisher(
+                HFOperationStatus,
+                '/huggingface/status',
+                self.PUB_QOS_SIZE
+            )
         try:
             self.hf_api_worker = HfApiWorker()
             if self.hf_api_worker.start():
@@ -1415,12 +1427,6 @@ class PhysicalAIServer(Node):
                     callback_function=self._hf_status_timer_callback
                 )
                 self.hf_status_timer.start(timer_name='hf_status')
-                # Create publisher for HF status
-                self.hf_status_publisher = self.create_publisher(
-                    HFOperationStatus,
-                    '/huggingface/status',
-                    self.PUB_QOS_SIZE
-                )
             else:
                 self.get_logger().error('Failed to start HF API Worker')
         except Exception as e:
@@ -1454,6 +1460,103 @@ class PhysicalAIServer(Node):
                 self._hf_idle_count = 0
         except Exception as e:
             self.get_logger().error(f'Error in HF status timer callback: {str(e)}')
+
+    def _publish_synthetic_upload_failed(self, repo_id, german_message):
+        """Publish a synthetic HFOperationStatus(Failed) for the auto-upload path.
+
+        Used when _enqueue_dataset_upload bails BEFORE the worker
+        starts the task (worker dead, busy, send_request False). Without
+        this, the React side has no /huggingface/status event to render
+        a toast on AND never fires registerDataset — so the student
+        thinks the recording was uploaded when it wasn't. The message
+        body is German; the React subscriber at useRosTopicSubscription
+        :520-521 displays it verbatim via toast.error(message).
+        """
+        try:
+            self._publish_hf_operation_status_msg({
+                'operation': 'upload',
+                'status': 'Failed',
+                'repo_id': repo_id or '',
+                'local_path': '',
+                'message': german_message,
+                'progress': {'current': 0, 'total': 0, 'percentage': 0.0},
+            })
+        except Exception as e:
+            self.get_logger().error(
+                f'Failed to publish synthetic upload-failed status: {e}')
+
+    def _enqueue_dataset_upload(self, repo_id, local_dir):
+        """Enqueue the end-of-recording dataset push into HfApiWorker.
+
+        Wired into DataManager via the ``upload_callback`` constructor
+        argument. Restarts the worker if it auto-shut-down idle, then
+        sends a standard 'upload' request. Status events flow back via
+        /huggingface/status, which (a) renders German toasts in the
+        React UI on failure and (b) triggers the React side to call
+        /datasets/register on the Cloud API so Modal training can
+        discover the dataset. Closes the "record → upload → train"
+        seam that was previously broken because the recording path
+        called push_to_hub directly and bypassed the worker / status
+        publisher entirely.
+
+        Every bail path publishes a synthetic Failed status so the
+        student gets a German toast — silent skip would let "Aufnahme
+        abgeschlossen" lie to them.
+        """
+        try:
+            if self.hf_api_worker is None or not self.hf_api_worker.is_alive():
+                self.get_logger().info(
+                    'HF API Worker not running, restarting for auto-upload...')
+                self._init_hf_api_worker()
+
+            if self.hf_api_worker is None or not self.hf_api_worker.is_alive():
+                self.get_logger().error(
+                    f'HF API Worker failed to start; auto-upload skipped: {repo_id}')
+                self._publish_synthetic_upload_failed(
+                    repo_id,
+                    'Automatischer Upload fehlgeschlagen: HF-Worker konnte '
+                    'nicht gestartet werden. Bitte über "Datensatz '
+                    'bearbeiten" manuell hochladen.',
+                )
+                return
+
+            if self.hf_api_worker.is_busy():
+                self.get_logger().warning(
+                    f'HF API Worker busy; auto-upload skipped: {repo_id}')
+                self._publish_synthetic_upload_failed(
+                    repo_id,
+                    'Automatischer Upload übersprungen: Ein anderer HF-Vorgang '
+                    'läuft gerade. Bitte über "Datensatz bearbeiten" manuell '
+                    'hochladen, wenn er beendet ist.',
+                )
+                return
+
+            request_data = {
+                'mode': 'upload',
+                'repo_id': repo_id,
+                'local_dir': local_dir,
+                'repo_type': 'dataset',
+                'author': '',
+            }
+            if self.hf_api_worker.send_request(request_data):
+                self.get_logger().info(f'Auto-upload enqueued: {repo_id}')
+            else:
+                self.get_logger().error(
+                    f'Failed to enqueue auto-upload: {repo_id}')
+                self._publish_synthetic_upload_failed(
+                    repo_id,
+                    'Automatischer Upload fehlgeschlagen: HF-Worker hat die '
+                    'Anfrage abgelehnt. Bitte über "Datensatz bearbeiten" '
+                    'manuell hochladen.',
+                )
+        except Exception as e:
+            self.get_logger().error(
+                f'Error enqueuing auto-upload for {repo_id}: {str(e)}')
+            self._publish_synthetic_upload_failed(
+                repo_id,
+                f'Automatischer Upload fehlgeschlagen: {e}. Bitte über '
+                f'"Datensatz bearbeiten" manuell hochladen.',
+            )
 
     def _publish_hf_operation_status_msg(self, status):
         status_msg = HFOperationStatus()

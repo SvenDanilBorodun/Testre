@@ -97,6 +97,7 @@ RUN TARGETS=$(find /root/ros2_ws -name "server_inference.py" -path "*/inference/
 COPY overlays/inference_manager.py /tmp/overlays/inference_manager.py
 COPY overlays/data_manager.py /tmp/overlays/data_manager.py
 COPY overlays/data_converter.py /tmp/overlays/data_converter.py
+COPY overlays/hf_api_worker.py /tmp/overlays/hf_api_worker.py
 COPY overlays/omx_f_config.yaml /tmp/overlays/omx_f_config.yaml
 # physical_ai_server.py overlay keeps the bearer-token log scrubber,
 # the workflow-detection cache that feeds the React debugger, and all
@@ -160,6 +161,7 @@ RUN set -e && \
     apply_overlay inference_manager.py "*/inference/*" && \
     apply_overlay data_manager.py "*/data_processing/*" && \
     apply_overlay data_converter.py "*/data_processing/*" && \
+    apply_overlay hf_api_worker.py "*/data_processing/*" && \
     apply_overlay omx_f_config.yaml "" && \
     apply_overlay physical_ai_server.py "*/physical_ai_server/physical_ai_server.py" && \
     apply_overlay communicator.py "*/communication/communicator.py" && \

@@ -21,12 +21,15 @@ name: docker-publish
 
 on:
   push:
-    # YAML mappings forbid duplicate keys, so branch+path filters and tag
-    # triggers must share a single `push:` block. Note: when `paths` is
-    # set, `paths` is ignored for tag pushes (GHA-specific behavior) so
-    # tag pushes still fire on this same block.
+    # Tag-push trigger removed (was: `tags: ["v*.*.*"]`). On a tag push
+    # release.yml is the coordinator and invokes this workflow via the
+    # `workflow_call` below. With both triggers active, every tag push
+    # produced TWO parallel docker-publish runs (one per trigger) racing
+    # to push the same `:vX.Y.Z` and `:latest` to Docker Hub — same trap
+    # release-installer.yml fixed in 16b8378.
+    # Path-filtered pushes to main still fire here for incremental
+    # builds. Tagged releases go through release.yml only.
     branches: [main]
-    tags: ["v*.*.*"]
     paths:
       - "robotis_ai_setup/docker/**"
       - "open_manipulator/**"
@@ -35,6 +38,7 @@ on:
       - ".github/workflows/docker-publish.yml"
   workflow_call:
     # Allows release.yml to invoke this as a reusable workflow.
+    # Single trigger per tag now — no race with a tag-push duplicate.
   workflow_dispatch:
     inputs:
       cleanup_dirty_tags:

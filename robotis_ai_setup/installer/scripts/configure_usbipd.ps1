@@ -1,4 +1,4 @@
-# configure_usbipd.ps1 — Set up usbipd policy for EduBotics USB-Geräte
+﻿# configure_usbipd.ps1 — Set up usbipd policy for EduBotics USB-Geräte
 # Requires usbipd 4.x+ for policy support
 # Must run elevated (as Administrator)
 #

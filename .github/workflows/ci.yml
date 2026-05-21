@@ -98,6 +98,46 @@ jobs:
             robotis_ai_setup/jetson_agent/setup.sh \
             physical_ai_tools/physical_ai_manager/scripts/railway-deploy.sh
 
+  powershell-encoding:
+    # Windows PowerShell 5.1 (the default shell on Win10/Win11 used by the
+    # installer's [Run] steps) decodes .ps1 files using the system code page
+    # (CP1252 on German Windows) UNLESS a UTF-8 BOM is present. The student
+    # PCs run German Windows, and the German UI strings + em-dashes in our
+    # scripts are multi-byte UTF-8. Without a BOM, the parser sees mojibake
+    # and chokes with "Die schließende '}' fehlt im Anweisungsblock" — the
+    # exact failure mode that broke the v2.3.4 "usbipd reparieren" flow
+    # because bind_devices.ps1 + configure_usbipd.ps1 shipped sans BOM.
+    #
+    # PowerShell 7.x (pwsh) defaults to UTF-8 even without BOM, but we cannot
+    # assume pwsh on student PCs — they run the bundled Windows PowerShell.
+    # Enforce BOM here so the regression cannot recur.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - name: Assert every .ps1 file has a UTF-8 BOM
+        run: |
+          fail=0
+          while IFS= read -r f; do
+            head -c 3 "$f" | od -An -tx1 | tr -d ' \n' > /tmp/bom_check
+            actual=$(cat /tmp/bom_check)
+            if [ "$actual" != "efbbbf" ]; then
+              echo "::error file=$f::PowerShell script missing UTF-8 BOM (first 3 bytes: $actual). Windows PowerShell 5.1 will mis-decode non-ASCII chars on student PCs."
+              fail=1
+            fi
+          done < <(find robotis_ai_setup physical_ai_tools -name '*.ps1' -type f)
+          if [ "$fail" -eq 1 ]; then
+            echo
+            echo "Fix locally with:"
+            echo "  for f in <missing.ps1>; do"
+            echo "    tmp=\"\$f.bomtmp\""
+            echo "    printf '\\xEF\\xBB\\xBF' > \"\$tmp\""
+            echo "    cat \"\$f\" >> \"\$tmp\""
+            echo "    mv \"\$tmp\" \"\$f\""
+            echo "  done"
+            exit 1
+          fi
+
   compose-validate:
     runs-on: ubuntu-latest
     timeout-minutes: 10

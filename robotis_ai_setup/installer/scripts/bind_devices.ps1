@@ -1,4 +1,4 @@
-# bind_devices.ps1 — Add AutoBind policy + `usbipd bind` for a set of VID:PID
+﻿# bind_devices.ps1 — Add AutoBind policy + `usbipd bind` for a set of VID:PID
 #                     hardware-IDs.
 #
 # Called by the GUI's "Kameras freigeben" repair flow when the scan detects

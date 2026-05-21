@@ -377,6 +377,23 @@ class EduBoticsApp:
         self.root.after(0, lambda: self.progress.start(10))
         self._log("Voraussetzungen werden geprüft...")
 
+        # usbipd reachability — checked before WSL2 so the "Reparieren" UX
+        # fires up-front instead of after a 30s "Arme scannen" diagnose loop.
+        # The resolver looks in PATH, %ProgramFiles%\usbipd-win, the Uninstall
+        # registry, and a registry-refreshed PATH. If it still can't find
+        # usbipd we offer one-click repair (elevates + re-runs the prereq
+        # + policy scripts), which makes the install bullet-proof against
+        # the post-install PATH-propagation race.
+        self._set_status("usbipd wird gesucht...")
+        if not device_manager.usbipd_reachable():
+            self._log("usbipd wurde nicht gefunden (auch nicht in Program Files).")
+            self.root.after(0, lambda: self.progress.stop())
+            self.root.after(0, self._prompt_repair_usbipd)
+            return
+        resolved = device_manager.usbipd_path()
+        if resolved:
+            self._log(f"usbipd: OK ({resolved})")
+
         # Check the EduBotics WSL2 distro is installed and docker engine is up
         self._set_status("EduBotics-Umgebung wird geprüft...")
         if not docker_manager.is_distro_registered():
@@ -494,6 +511,130 @@ class EduBoticsApp:
         self._set_status("Bereit — Hardware scannen, um zu beginnen")
         self.root.after(0, lambda: self.progress.stop())
         self._log("Systemprüfung abgeschlossen. Arme und Kamera anschließen, dann auf Scannen klicken.")
+
+    # ── Repair: usbipd missing (driver-level prerequisite) ──────────
+
+    def _resolve_repair_scripts(self):
+        """Find install_prerequisites.ps1 + configure_usbipd.ps1.
+
+        Returns (install_prereq_path_or_None, configure_usbipd_path_or_None).
+        Supports both production install layout and dev-tree layout.
+        """
+        from .constants import INSTALL_DIR
+        prereq_candidates = [
+            os.path.join(INSTALL_DIR, "scripts", "install_prerequisites.ps1"),
+            os.path.join(INSTALL_DIR, "installer", "scripts", "install_prerequisites.ps1"),
+        ]
+        configure_candidates = [
+            os.path.join(INSTALL_DIR, "scripts", "configure_usbipd.ps1"),
+            os.path.join(INSTALL_DIR, "installer", "scripts", "configure_usbipd.ps1"),
+        ]
+        prereq = next((p for p in prereq_candidates if os.path.isfile(p)), None)
+        configure = next((p for p in configure_candidates if os.path.isfile(p)), None)
+        return prereq, configure
+
+    def _prompt_repair_usbipd(self):
+        """Offer one-click repair when usbipd is missing.
+
+        Launches install_prerequisites.ps1 + configure_usbipd.ps1 elevated.
+        After the elevated child exits we invalidate the resolver cache
+        and re-run the prerequisite chain — if the repair worked, the
+        student lands on the normal "Bereit" state without restarting
+        the GUI.
+        """
+        prereq, configure = self._resolve_repair_scripts()
+        if prereq is None or configure is None:
+            messagebox.showerror(
+                "Reparatur nicht möglich",
+                "usbipd-win konnte nicht gefunden werden und die "
+                "Reparaturskripte fehlen ebenfalls. Bitte den EduBotics-"
+                "Installer erneut ausführen.",
+            )
+            self._set_status("usbipd fehlt — Installer erneut ausführen")
+            return
+
+        wants_run = messagebox.askyesno(
+            "usbipd-win reparieren",
+            "Der USB-Treiber 'usbipd-win' fehlt oder ist noch nicht im "
+            "Suchpfad. Ohne ihn können Roboterarme und Kameras nicht erkannt "
+            "werden.\n\n"
+            "Reparatur jetzt starten? Dies erfordert einmalig Administrator-"
+            "Rechte und dauert 1-3 Minuten.",
+        )
+        if not wants_run:
+            self._set_status("usbipd fehlt — Reparatur übersprungen")
+            return
+
+        self._set_status("Reparatur läuft (UAC-Zustimmung erforderlich)...")
+        self._log("usbipd-Reparatur wird mit Administrator-Rechten gestartet...")
+
+        def _run_elevated():
+            # We chain both scripts in a single elevated shell so the
+            # student sees one UAC prompt, not two. The combined script
+            # writes its transcript so the GUI can show what happened.
+            import tempfile
+            log_file = os.path.join(tempfile.gettempdir(), "edubotics_repair_usbipd.log")
+            try:
+                if os.path.isfile(log_file):
+                    os.remove(log_file)
+            except OSError:
+                pass
+
+            ps_cmd = (
+                f'-NoProfile -ExecutionPolicy Bypass -Command '
+                f'"Start-Transcript -Path \'{log_file}\' -Force | Out-Null; '
+                f'& \'{prereq}\'; '
+                f'$prereq_rc = $LASTEXITCODE; '
+                f'& \'{configure}\'; '
+                f'$cfg_rc = $LASTEXITCODE; '
+                f'Stop-Transcript | Out-Null; '
+                f'if ($prereq_rc -ne 0) {{ exit $prereq_rc }} '
+                f'elseif ($cfg_rc -ne 0) {{ exit $cfg_rc }} '
+                f'else {{ exit 0 }}"'
+            )
+            exit_code, cancelled, err = _elevate_and_wait(
+                exe="powershell.exe",
+                args=ps_cmd,
+            )
+            if err:
+                self._log(f"UAC-Fehler: {err}")
+
+            # Surface the transcript tail.
+            try:
+                if os.path.isfile(log_file) and os.path.getsize(log_file) > 0:
+                    with open(log_file, "r", encoding="utf-8", errors="replace") as fh:
+                        lines = [ln for ln in fh.read().splitlines() if ln.strip()]
+                    tail = lines[-25:]
+                    if tail:
+                        self._log("── Reparatur-Protokoll ──")
+                        for line in tail:
+                            self._log(f"  {line}")
+            except OSError:
+                pass
+
+            # Invalidate the resolver cache and re-probe. The repair scripts
+            # may have just installed usbipd into a path PATH still doesn't
+            # know about — the resolver looks in Program Files + the
+            # Uninstall registry, so we should find it now.
+            from .usbipd_resolver import find_usbipd, reset_cache_for_tests
+            reset_cache_for_tests()
+            new_path = find_usbipd()
+            if new_path:
+                self._log(f"usbipd gefunden: {new_path}")
+                self._log("Reparatur erfolgreich. Systemprüfung wird fortgesetzt...")
+                self.root.after(0, lambda: self._run_prerequisite_checks())
+            else:
+                if cancelled:
+                    self._log("Reparatur abgebrochen (UAC-Zustimmung verweigert).")
+                    self._set_status("Reparatur abgebrochen — erneut versuchen")
+                else:
+                    self._log(
+                        f"Reparatur fehlgeschlagen (exit {exit_code}). "
+                        "Bitte den EduBotics-Installer erneut ausführen."
+                    )
+                    self._set_status("Reparatur fehlgeschlagen — siehe Protokoll")
+
+        threading.Thread(target=_run_elevated, daemon=True).start()
 
     # ── Finalize Install (post-reboot continuation) ─────────────────
 
@@ -812,6 +953,16 @@ class EduBoticsApp:
             self._log("Video-Geräte werden gescannt...")
 
             self.cameras = device_manager.scan_cameras()
+            # After the scan, also look for cameras Windows sees that usbipd
+            # has NOT bound yet — i.e. webcams plugged in AFTER the installer
+            # ran, whose VID:PID never got a policy. The student gets a one-
+            # click "Freigeben" repair if any are found. Cheap call (no docker,
+            # no WSL — just usbipd list + Get-PnpDevice).
+            try:
+                unbound = device_manager.list_unbound_cameras()
+            except Exception as exc:  # never block the scan UI on this probe
+                self._log(f"Unfreigegebene Kameras konnten nicht ermittelt werden: {exc}")
+                unbound = []
 
             def _update_checkbuttons():
                 # Clear old checkbuttons
@@ -835,6 +986,24 @@ class EduBoticsApp:
                 else:
                     ttk.Label(self.camera_checks_frame, text="Keine Kameras gefunden (optional)", foreground="gray").pack(anchor=tk.W)
                     self._log("Keine Kameras gefunden. Kameras sind optional — Start ohne Kamera möglich.")
+
+                # Unbound-cameras hint + repair button. Shows even when SOME
+                # cameras were found, because the student may have plugged in
+                # one bound + one unbound camera.
+                if unbound:
+                    summary = ", ".join(
+                        f"{d.description or d.vid_pid}" for d in unbound
+                    )
+                    self._log(
+                        f"Hinweis: {len(unbound)} Kamera(s) sichtbar aber nicht freigegeben: {summary}"
+                    )
+                    btn = ttk.Button(
+                        self.camera_checks_frame,
+                        text=f"Kamera(s) freigeben ({len(unbound)})",
+                        command=lambda u=unbound: self._prompt_bind_cameras(u),
+                    )
+                    btn.pack(anchor=tk.W, pady=(5, 0))
+
                 self.btn_scan_camera.config(state=tk.NORMAL)
 
             self._scanning = False
@@ -842,6 +1011,106 @@ class EduBoticsApp:
             self._set_status("Kamera-Scan abgeschlossen.")
 
         threading.Thread(target=_do_scan, daemon=True).start()
+
+    def _prompt_bind_cameras(self, unbound: "list[device_manager.USBDevice]"):
+        """Bind the listed UVC cameras via one elevated PowerShell call.
+
+        Flow:
+          1. Confirm with the student (German messagebox lists VID:PIDs).
+          2. UAC prompt → elevated bind_devices.ps1 with the VID:PIDs.
+          3. After exit, re-run _scan_cameras so the newly-bound camera
+             attaches to WSL and shows up in the checkbox list.
+
+        One UAC prompt covers the whole batch — usbipd accepts multiple
+        hardware-IDs in sequence inside the script.
+        """
+        from .constants import INSTALL_DIR
+        script_candidates = [
+            os.path.join(INSTALL_DIR, "scripts", "bind_devices.ps1"),
+            os.path.join(INSTALL_DIR, "installer", "scripts", "bind_devices.ps1"),
+        ]
+        script = next((p for p in script_candidates if os.path.isfile(p)), None)
+        if script is None:
+            messagebox.showerror(
+                "Reparatur nicht möglich",
+                "Das Skript bind_devices.ps1 wurde nicht gefunden. "
+                "Bitte den EduBotics-Installer erneut ausführen.",
+            )
+            return
+
+        hw_ids = device_manager.hardware_ids_for_devices(unbound)
+        if not hw_ids:
+            return
+
+        device_lines = "\n".join(
+            f"  • {d.description or '(unbekannt)'} ({d.vid_pid})"
+            for d in unbound
+        )
+        wants_run = messagebox.askyesno(
+            "Kameras freigeben",
+            "Folgende Kameras sind angeschlossen, aber noch nicht für die "
+            "EduBotics-Umgebung freigegeben:\n\n"
+            f"{device_lines}\n\n"
+            "Jetzt freigeben? Dies erfordert einmalig Administrator-Rechte.",
+        )
+        if not wants_run:
+            return
+
+        self._set_status("Kameras werden freigegeben (UAC-Zustimmung erforderlich)...")
+        self._log("Freigabe wird mit Administrator-Rechten gestartet...")
+
+        def _run_elevated():
+            import tempfile
+            log_file = os.path.join(tempfile.gettempdir(), "edubotics_bind_devices.log")
+            try:
+                if os.path.isfile(log_file):
+                    os.remove(log_file)
+            except OSError:
+                pass
+
+            # PowerShell parses comma-separated string arrays from -HardwareIds
+            # natively when we quote each element. Building the literal as a
+            # comma-joined list of double-quoted strings is the safest form
+            # across PowerShell 5.1 and 7.x.
+            hw_args = ",".join(f'"{h}"' for h in hw_ids)
+            ps_args = (
+                f'-NoProfile -ExecutionPolicy Bypass -File "{script}" '
+                f'-HardwareIds {hw_args} '
+                f'-LogPath "{log_file}"'
+            )
+            exit_code, cancelled, err = _elevate_and_wait(
+                exe="powershell.exe",
+                args=ps_args,
+            )
+            if err:
+                self._log(f"UAC-Fehler: {err}")
+
+            # Show the tail of what happened.
+            try:
+                if os.path.isfile(log_file) and os.path.getsize(log_file) > 0:
+                    with open(log_file, "r", encoding="utf-8", errors="replace") as fh:
+                        lines = [ln for ln in fh.read().splitlines() if ln.strip()]
+                    tail = lines[-20:]
+                    if tail:
+                        self._log("── Freigabe-Protokoll ──")
+                        for line in tail:
+                            self._log(f"  {line}")
+            except OSError:
+                pass
+
+            if cancelled:
+                self._log("Freigabe abgebrochen (UAC-Zustimmung verweigert).")
+                self._set_status("Freigabe abgebrochen — erneut versuchen")
+                return
+            if exit_code not in (0, None):
+                self._log(f"Freigabe-Skript exit={exit_code}. Siehe Protokoll oben.")
+
+            # Auto re-scan so the newly-bound camera lands in the checkbox
+            # list without the student clicking Scan a second time.
+            self._log("Kamera-Scan wird nach Freigabe wiederholt...")
+            self.root.after(200, self._scan_cameras)
+
+        threading.Thread(target=_run_elevated, daemon=True).start()
 
     def _on_cameras_changed(self):
         """Ausgewählte Kameras in HardwareConfig speichern und Rollenzuweisung anzeigen."""

@@ -34,7 +34,7 @@
 [Setup]
 AppId={{B7E3F2A1-8C4D-4E5F-9A6B-1D2E3F4A5B6C}
 AppName=EduBotics
-AppVersion=2.3.1
+AppVersion=2.3.2
 AppPublisher=EduBotics
 DefaultDirName={autopf}\EduBotics
 DefaultGroupName=EduBotics
@@ -47,6 +47,17 @@ WizardStyle=modern
 LicenseFile=assets\license.txt
 SetupIconFile=assets\icon.ico
 UninstallDisplayIcon={app}\gui\EduBotics.exe
+; ChangesEnvironment=yes broadcasts WM_SETTINGCHANGE at the end of
+; install so processes started AFTER Setup ends (via explorer.exe,
+; Start menu shortcuts) pick up the updated system PATH — which the
+; usbipd-win MSI extends with C:\Program Files\usbipd-win. Without
+; this directive, students who don't reboot can still hit "usbipd
+; not on PATH" if they launch EduBotics from any process that was
+; running before install (incl. the postinstall checkbox). The GUI
+; also self-heals via gui/app/usbipd_resolver.py — this directive is
+; belt-and-suspenders for any path that shells out to `usbipd`
+; without going through the resolver.
+ChangesEnvironment=yes
 
 [InstallDelete]
 ; Wipe the entire gui/ folder before upgrade — guarantees no stale files
@@ -152,7 +163,18 @@ Filename: "powershell.exe"; \
   Description: "Installation überprüfen"
 
 ; Step 7: App starten (optional, nach der Installation)
-Filename: "{app}\gui\EduBotics.exe"; \
+; Launch via explorer.exe so the GUI inherits the post-WM_SETTINGCHANGE
+; environment (which includes %ProgramFiles%\usbipd-win on PATH after
+; ChangesEnvironment=yes broadcasts). Inno Setup launches Filename:
+; targets as direct children of itself, so a bare {app}\gui\EduBotics.exe
+; would inherit Setup's STALE env captured at install start — see the
+; PATH-propagation race documented in gui/app/usbipd_resolver.py.
+;
+; The GUI also self-heals via the resolver, so this is belt-and-
+; suspenders — but it shaves the awkward "find usbipd in Program Files"
+; latency off the very first launch.
+Filename: "{win}\explorer.exe"; \
+  Parameters: """{app}\gui\EduBotics.exe"""; \
   Description: "EduBotics jetzt starten"; \
   Flags: nowait postinstall skipifsilent
 

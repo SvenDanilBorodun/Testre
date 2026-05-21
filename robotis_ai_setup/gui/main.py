@@ -15,6 +15,33 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 
+def _refresh_path_for_subprocess_helpers() -> None:
+    """Best-effort: inject usbipd's install dir into PATH at process start.
+
+    The Inno Setup postinstall step launches this EXE before Windows has
+    broadcast WM_SETTINGCHANGE, so our PATH is whatever Inno Setup inherited
+    from explorer.exe at install start — i.e. without the usbipd-win MSI's
+    install dir. Resolve it now so PowerShell helpers we shell out to (e.g.
+    elevated configure_usbipd.ps1) find ``usbipd`` without a reboot.
+
+    On non-Windows this is a no-op. The resolver caches the path so this
+    is also a cheap no-op on subsequent imports.
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        from app.usbipd_resolver import find_usbipd
+        find_usbipd()
+    except Exception:
+        # Never block GUI startup on a resolver bug. The device_manager
+        # path will re-attempt resolution lazily and surface a clear
+        # German error if it still cannot find usbipd.
+        pass
+
+
+_refresh_path_for_subprocess_helpers()
+
+
 def _dispatch_webview() -> int:
     """Handle the `--webview ...` subprocess invocation."""
     import argparse

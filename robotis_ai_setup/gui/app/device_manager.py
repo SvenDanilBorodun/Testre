@@ -23,6 +23,11 @@ _SUBPROCESS_KWARGS = {"creationflags": _CREATE_NO_WINDOW} if sys.platform == "wi
 
 from . import wsl_bridge
 from .constants import ROBOTIS_VID, WSL_DISTRO_NAME
+from .usbipd_resolver import (
+    UsbipdNotFoundError,
+    find_usbipd,
+    usbipd_cmd,
+)
 
 
 def _diagnostics_log_path() -> str:
@@ -95,7 +100,13 @@ _USBIPD_RELAXED_RE = re.compile(
 
 
 class UsbipdMissingError(RuntimeError):
-    """`usbipd` is not on PATH (installer did not run, or PATH not refreshed yet)."""
+    """`usbipd` cannot be located by usbipd_resolver.
+
+    Distinct from a FileNotFoundError on a single subprocess.run call — this
+    means the resolver walked PATH, %ProgramFiles%\\usbipd-win, and the
+    Uninstall registry, and still found nothing. The caller should surface
+    the German "bitte den Installer erneut ausfuehren" UX.
+    """
 
 
 def _run_usbipd_list() -> Optional[str]:
@@ -107,14 +118,21 @@ def _run_usbipd_list() -> Optional[str]:
     gefunden".
     """
     try:
+        cmd = usbipd_cmd("list")
+    except UsbipdNotFoundError as exc:
+        _append_diag("usbipd_list", f"UsbipdNotFoundError: {exc}")
+        raise UsbipdMissingError(str(exc))
+    try:
         result = subprocess.run(
-            ["usbipd", "list"],
+            cmd,
             capture_output=True, text=True, timeout=10,
             **_SUBPROCESS_KWARGS,
         )
     except FileNotFoundError:
-        _append_diag("usbipd_list", "FileNotFoundError: usbipd not on PATH")
-        raise UsbipdMissingError("usbipd is not installed or not on PATH")
+        # Race: resolver returned a path, but the file was removed (e.g.
+        # mid-uninstall) between resolve and exec. Treat as missing.
+        _append_diag("usbipd_list", "FileNotFoundError after resolve — uninstall race?")
+        raise UsbipdMissingError("usbipd resolved but no longer present on disk")
     except subprocess.TimeoutExpired:
         _append_diag("usbipd_list", "TimeoutExpired after 10s")
         return None
@@ -210,11 +228,16 @@ def attach_usb_to_wsl(busid: str, retries: int = 3) -> bool:
     "Unrecognized command or argument '<name>'" — keep --wsl <distro> adjacent.
     """
     import time
+    try:
+        argv = usbipd_cmd("attach", "--wsl", WSL_DISTRO_NAME, "--busid", busid)
+    except UsbipdNotFoundError as exc:
+        _append_diag("attach_usb_to_wsl", f"busid={busid}: {exc}")
+        return False
     last_stderr = ""
     for attempt in range(retries):
         try:
             result = subprocess.run(
-                ["usbipd", "attach", "--wsl", WSL_DISTRO_NAME, "--busid", busid],
+                argv,
                 capture_output=True, text=True, timeout=15,
                 **_SUBPROCESS_KWARGS,
             )
@@ -224,7 +247,7 @@ def attach_usb_to_wsl(busid: str, retries: int = 3) -> bool:
         except FileNotFoundError:
             _append_diag(
                 "attach_usb_to_wsl",
-                f"busid={busid}: usbipd.exe not on PATH",
+                f"busid={busid}: usbipd resolved but missing at exec time",
             )
             return False
         except subprocess.TimeoutExpired:
@@ -242,8 +265,12 @@ def attach_usb_to_wsl(busid: str, retries: int = 3) -> bool:
 def detach_usb_from_wsl(busid: str) -> bool:
     """Detach a USB device from WSL2."""
     try:
+        argv = usbipd_cmd("detach", "--busid", busid)
+    except UsbipdNotFoundError:
+        return False
+    try:
         result = subprocess.run(
-            ["usbipd", "detach", "--busid", busid],
+            argv,
             capture_output=True, text=True, timeout=10,
             **_SUBPROCESS_KWARGS,
         )
@@ -665,15 +692,20 @@ def diagnose_usb_environment(image: Optional[str] = None) -> UsbDiagnosis:
     diag = UsbDiagnosis()
 
     # 1. usbipd reachable?
+    # The resolver looks in PATH, %ProgramFiles%\usbipd-win, the Uninstall
+    # registry, and a registry-refreshed PATH before giving up. If we still
+    # land in the "missing" branch, usbipd genuinely is not installed on
+    # this machine (or was uninstalled after our last successful call).
     try:
         raw = _run_usbipd_list()
     except UsbipdMissingError:
         diag.usbipd_missing = True
         diag.message_de = (
-            "usbipd ist nicht installiert oder nicht im Suchpfad. "
-            "Bitte den EduBotics-Installer erneut ausführen und Windows neu starten."
+            "usbipd-win ist nicht installiert. "
+            "Bitte die EduBotics-Reparatur ausführen (Menü → System reparieren) "
+            "oder den EduBotics-Installer erneut starten."
         )
-        diag.details = "usbipd.exe not on PATH"
+        diag.details = "usbipd.exe not found via PATH, Program Files, or Uninstall registry"
         return diag
 
     if raw is None:
@@ -816,3 +848,60 @@ def diagnose_usb_environment(image: Optional[str] = None) -> UsbDiagnosis:
 def get_diagnostics_log_path() -> str:
     """Public accessor — GUI uses this to tell the student where to find the log."""
     return _diagnostics_log_path()
+
+
+def usbipd_reachable() -> bool:
+    """Cheap probe: can we locate usbipd.exe right now?
+
+    Called by the GUI's startup prerequisite check so the "Reparieren"
+    UX surfaces BEFORE the student clicks Arme scannen and sees a 30-second
+    diagnose loop. Does not invoke usbipd — just resolves the path.
+    """
+    return find_usbipd() is not None
+
+
+def usbipd_path() -> Optional[str]:
+    """Return the absolute path the resolver settled on, or None."""
+    return find_usbipd()
+
+
+def list_unbound_cameras() -> list[USBDevice]:
+    """Return UVC cameras Windows sees but usbipd has not bound yet.
+
+    These are devices in `Not shared` state whose VID:PID matches a Windows
+    Camera/Image class device. Used by the GUI's "Kameras freigeben" repair
+    flow: the student plugged in a webcam AFTER install ran, so its VID:PID
+    never got a usbipd policy, so attaching it would require admin every time.
+
+    We deliberately do NOT auto-bind these from the GUI's non-admin scan path
+    — many camera-vendor VIDs (Logitech, Microsoft, Lenovo) also ship mice
+    and keyboards, and silently binding those would break input. The student
+    confirms the bind via the explicit "Freigeben" button + UAC prompt.
+    """
+    camera_vid_pids = {vp for vp, _ in _list_usb_camera_vid_pids()}
+    if not camera_vid_pids:
+        return []
+    unbound: list[USBDevice] = []
+    for dev in list_usb_devices():
+        if dev.vid_pid.lower() not in camera_vid_pids:
+            continue
+        if dev.state == "Not shared":
+            unbound.append(dev)
+    return unbound
+
+
+def hardware_ids_for_devices(devs: list[USBDevice]) -> list[str]:
+    """Extract unique VID:PID hardware-ID strings (lowercased) from devices.
+
+    The output is the input format `bind_devices.ps1` expects. De-duplicated
+    so we don't pass `usbipd bind` two arguments for two devices sharing a
+    VID:PID (rare for cameras but possible).
+    """
+    seen: set[str] = set()
+    out: list[str] = []
+    for d in devs:
+        key = d.vid_pid.lower()
+        if key not in seen:
+            seen.add(key)
+            out.append(key)
+    return out

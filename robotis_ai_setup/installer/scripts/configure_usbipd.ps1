@@ -138,6 +138,21 @@ foreach ($productId in $knownPIDs) {
         }
     }
 
+    # Even with an AutoBind policy in place, the FIRST attach against a
+    # device that was already plugged in at install time needs the device
+    # to be explicitly `bind`'d. AutoBind handles future replugs but the
+    # currently-plugged ROBOTIS arm sits in `Not shared` until we bind it
+    # here (we ARE elevated — this is the only chance). Without this the
+    # student would have to unplug+replug each arm after install before
+    # the GUI could attach it. Mirrors the camera-bind block below.
+    if ($added) {
+        $bindOut = usbipd bind --hardware-id $hwid 2>&1 | Out-String
+        Write-Diag "robotis_bind_$hwid" "rc=$LASTEXITCODE`n$bindOut"
+        if ($LASTEXITCODE -eq 0) {
+            Write-OK "ROBOTIS $hwid bound (immediately attachable without replug)"
+        }
+    }
+
     if (-not $added) {
         Write-Warn "Could not add policy for $hwid — see install_diagnostics.log"
     }

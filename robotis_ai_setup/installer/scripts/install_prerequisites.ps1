@@ -56,20 +56,54 @@ if ($osVersion.Build -lt 22000) {
 }
 Write-OK "Windows 11 build $($osVersion.Build)"
 
-# ── Check Windows edition ──
-# WSL2 + Hyper-V require Pro/Enterprise/Education. Home edition silently
-# fails at `wsl --install` with an unhelpful error. Fail loud up front.
+# ── Log Windows edition (informational only) ──
+# WSL2 supports ALL Windows 10/11 editions including Home since Windows 10
+# v2004 (build 19041, May 2020). The earlier WSL1+Hyper-V combo needed
+# Pro/Enterprise/Education, but WSL2 uses the lightweight Virtual Machine
+# Platform feature which is available on Home as well. usbipd-win has no
+# edition restrictions either. The actual prerequisite is the build
+# number (checked above) plus the VMP + WSL features (enabled via dism
+# below). Do not refuse on edition alone — that was a 2020-era false
+# alarm that silently locked out Home users for years.
 try {
     $edition = (Get-CimInstance Win32_OperatingSystem).Caption
     Write-Host "   Edition: $edition" -ForegroundColor Gray
-    if ($edition -match '\bHome\b') {
-        Write-Host "ERROR: Windows Home edition cannot run WSL2 with Hyper-V." -ForegroundColor Red
-        Write-Host "       EduBotics requires Windows 11 Pro, Enterprise, or Education." -ForegroundColor Red
-        Write-Host "       Please upgrade the edition or use a different machine." -ForegroundColor Red
-        exit 1
-    }
+    Write-Diag "edition" $edition
 } catch {
-    Write-Host "   (Edition check skipped: $_)" -ForegroundColor Yellow
+    Write-Host "   (Edition probe failed: $_)" -ForegroundColor Yellow
+    Write-Diag "edition" "Get-CimInstance raised: $_"
+}
+
+# ── Enable Virtual Machine Platform + WSL features explicitly ──
+# `wsl --install` (called below) IS supposed to enable both features, but
+# its behaviour across Windows 11 builds — especially on Home edition where
+# the dism manifests differ slightly — has been inconsistent in the field.
+# Driving the feature enablement explicitly via dism is idempotent (no-op
+# if already on) and gives us a deterministic exit code:
+#   0    = feature was enabled successfully (or was already on)
+#   3010 = feature enabled, host reboot required
+#   any other non-zero = real failure; we log and let wsl --install retry
+# We do NOT exit on dism failure — `wsl --install` is the authoritative
+# fallback. We just want to maximize the chance Home machines reach the
+# WSL2 install step in a workable state.
+Write-Step "Ensuring WSL2 prerequisite Windows features are enabled..."
+foreach ($feature in @("VirtualMachinePlatform", "Microsoft-Windows-Subsystem-Linux")) {
+    try {
+        $dismOut = dism /online /enable-feature /featurename:$feature /all /norestart 2>&1 | Out-String
+        $rc = $LASTEXITCODE
+        Write-Diag "feature_$feature" "rc=$rc`n$dismOut"
+        if ($rc -eq 0) {
+            Write-OK "$feature is enabled"
+        } elseif ($rc -eq 3010) {
+            Write-OK "$feature enabled (reboot required to take effect)"
+            $needsReboot = $true
+        } else {
+            Write-Host "   (dism $feature rc=$rc — wsl --install will attempt to enable too)" -ForegroundColor Yellow
+        }
+    } catch {
+        Write-Diag "feature_$feature" "dism raised: $_"
+        Write-Host "   (Could not run dism for ${feature}: $_)" -ForegroundColor Yellow
+    }
 }
 
 # ── Check virtualization ──

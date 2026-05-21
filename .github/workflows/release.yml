@@ -58,7 +58,17 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
-  contents: read
+  # Union of permissions required by all called workflows. GH refuses to
+  # start the run if any callee declares a permission that's stricter on
+  # the caller — observed as a startup_failure on v2.3.2 + v2.3.3 with
+  # the error "The workflow is requesting 'pull-requests: write', but is
+  # only allowed 'pull-requests: none'." (the previous `contents: read`
+  # block silently set ALL other scopes to `none`, including the
+  # pull-requests: write that supabase-migrate.yml needs for branch-PR
+  # comments and the contents: write that release-installer.yml needs to
+  # upload the .exe to the GH Release page).
+  contents: write       # release-installer.yml: upload .exe to GH Release
+  pull-requests: write  # supabase-migrate.yml: comment on the PR
 
 jobs:
   # ── W1: Supabase ──────────────────────────────────────────────────

@@ -64,10 +64,18 @@ jobs:
   # ── W1: Supabase ──────────────────────────────────────────────────
   supabase:
     name: W1. Apply migrations
-    # On tag pushes inputs.skip_supabase is undefined (null); fromJSON
-    # of null is null, and !null evaluates true → run by default. On
-    # workflow_dispatch the boolean reaches us as 'true'/'false' string.
-    if: ${{ !fromJSON(inputs.skip_supabase || 'false') }}
+    # `inputs` context only exists on workflow_dispatch / workflow_call events.
+    # On a tag push, referencing `inputs.skip_supabase` triggers a workflow
+    # validation error ("Unrecognized named-value: 'inputs'") which surfaces
+    # as a startup_failure on the whole release — observed on v2.3.2's first
+    # push. Gate on github.event_name first so the `inputs` access only
+    # evaluates on the workflow_dispatch path. The `||` operator in GH
+    # Actions short-circuits, so the inputs access is never reached on push.
+    if: >-
+      ${{
+        github.event_name != 'workflow_dispatch' ||
+        !fromJSON(inputs.skip_supabase || 'false')
+      }}
     uses: ./.github/workflows/supabase-migrate.yml
     secrets: inherit
 

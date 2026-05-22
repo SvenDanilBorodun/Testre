@@ -213,8 +213,8 @@ class LeRobotDatasetWrapper(LeRobotDataset):
                 f'Aufnahme-Puffer hat {self._episode_image_bytes // (1024 ** 3)} GB '
                 f'erreicht (Limit {self._DEFAULT_MAX_BUFFER_BYTES // (1024 ** 3)} GB). '
                 f'Episode wird automatisch gespeichert, damit der Container nicht '
-                f'wegen Arbeitsspeicher-Überlauf beendet wird. Naechste Aufnahmen '
-                f'bitte kuerzer halten oder Aufloesung reduzieren.'
+                f'wegen Arbeitsspeicher-Überlauf beendet wird. Nächste Aufnahmen '
+                f'bitte kürzer halten oder Auflösung reduzieren.'
             )
 
     def reset_buffer_accounting(self) -> None:

@@ -362,18 +362,18 @@ def self_heal_wsl_serial() -> dict:
     a teacher can see *which* layer needed repair on each scan.
     """
     diag = {"ran": False, "stdout": "", "stderr": "", "rc": None}
+    # Route through wsl_bridge.run so this share the c87bde5 stdin-bytes
+    # path. Direct `bash -c "<multi-line script>"` previously truncated
+    # scripts whose $(...) captures contain literal tabs or parentheses
+    # — see wsl_bridge.run docstring for the full failure mode.
     try:
-        result = subprocess.run(
-            ["wsl", "-d", WSL_DISTRO_NAME, "--", "bash", "-c", _SELF_HEAL_SCRIPT],
-            capture_output=True, text=True, timeout=15,
-            **_SUBPROCESS_KWARGS,
-        )
+        result = wsl_bridge.run(_SELF_HEAL_SCRIPT, timeout=15, check=False)
         diag["ran"] = True
         diag["rc"] = result.returncode
         diag["stdout"] = (result.stdout or "")[-500:]
         diag["stderr"] = (result.stderr or "")[-500:]
-    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-        diag["stderr"] = f"{type(exc).__name__}: {exc}"
+    except wsl_bridge.WSLError as exc:
+        diag["stderr"] = f"WSLError: {exc}"
     _append_diag(
         "self_heal_wsl_serial",
         f"rc={diag['rc']} stdout={diag['stdout']!r} stderr={diag['stderr']!r}",
@@ -527,31 +527,37 @@ def _list_camera_vid_pids_from_wsl() -> set[str]:
     """
     if sys.platform != "win32":
         return set()
-    script = (
-        "for sysdev in /sys/class/video4linux/video*; do "
-        "  [ -e \"$sysdev\" ] || continue; "
-        "  dev=$(readlink -f \"$sysdev\"); "
-        "  while [ -n \"$dev\" ] && [ \"$dev\" != \"/\" ]; do "
-        "    if [ -f \"$dev/idVendor\" ] && [ -f \"$dev/idProduct\" ]; then "
-        "      v=$(cat \"$dev/idVendor\"); p=$(cat \"$dev/idProduct\"); "
-        "      echo \"$v:$p\"; break; "
-        "    fi; "
-        "    dev=$(dirname \"$dev\"); "
-        "  done; "
-        "done | sort -u"
-    )
+    script = r"""
+for sysdev in /sys/class/video4linux/video*; do
+    [ -e "$sysdev" ] || continue
+    dev=$(readlink -f "$sysdev")
+    while [ -n "$dev" ] && [ "$dev" != "/" ]; do
+        if [ -f "$dev/idVendor" ] && [ -f "$dev/idProduct" ]; then
+            v=$(cat "$dev/idVendor")
+            p=$(cat "$dev/idProduct")
+            echo "$v:$p"
+            break
+        fi
+        dev=$(dirname "$dev")
+    done
+done | sort -u
+"""
+    # Route through wsl_bridge.run for the same stdin-bytes safety as
+    # self_heal_wsl_serial — keeps the c87bde5 fix universal.
     try:
-        result = subprocess.run(
-            ["wsl", "-d", WSL_DISTRO_NAME, "--", "bash"],
-            input=script,
-            capture_output=True, text=True, timeout=10,
-            **_SUBPROCESS_KWARGS,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+        result = wsl_bridge.run(script, timeout=10, check=False)
+    except wsl_bridge.WSLError:
         return set()
     if result.returncode != 0:
         return set()
-    return {line.strip().lower() for line in result.stdout.splitlines() if line.strip()}
+    # Defence-in-depth: the usbipd stub registers under VID 80EE:CAFE
+    # when no real camera class device is bound. Drop it so callers
+    # don't try to match the stub against a real-camera VID:PID.
+    return {
+        line.strip().lower()
+        for line in result.stdout.splitlines()
+        if line.strip() and line.strip().lower() != "80ee:cafe"
+    }
 
 
 def _list_usb_camera_vid_pids() -> list[tuple[str, str]]:

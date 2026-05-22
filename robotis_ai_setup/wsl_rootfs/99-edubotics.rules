@@ -1,0 +1,70 @@
+# EduBotics udev rules — stable device symlinks for plug-and-play.
+#
+# Goal: identify cameras and arms deterministically regardless of which
+# USB port the student picks, even after `wsl --shutdown`, `usbipd
+# detach`/`attach`, and Windows reboot.
+#
+# Two-layer strategy:
+#   1. Match by *serial number* when the device exposes one. This is
+#      stable across replug into ANY port on ANY machine.
+#   2. Fall back to *port path* (KERNELS) when no serial is exposed.
+#      Same-port replug works; different-port replug does not. The GUI's
+#      first-run wizard pairs port path → role and persists the mapping;
+#      the symlink emitted here gives ROS launch files a stable target
+#      regardless.
+#
+# Reload after editing:  sudo udevadm control --reload && sudo udevadm trigger
+#
+# These rules deliberately do NOT chmod the device — the entrypoint
+# scripts already `chmod 666` on the resolved path. Chmod here would
+# only mask the entrypoint's diagnostic logging.
+
+# ─── Innomaker U20CAM-720P cameras (VID:PID 0c45:6367) ───────────────────────
+# Some units expose a USB serial ("SN0001"), others do not (firmware
+# variance). The serial rule is matched first; cameras without a serial
+# fall through to the port-path rules below.
+#
+# The MODE+= attribute lets ros2 launch open the device without sudo.
+SUBSYSTEM=="video4linux", \
+  ATTRS{idVendor}=="0c45", ATTRS{idProduct}=="6367", \
+  ATTRS{serial}=="SN0001", \
+  SYMLINK+="edubotics-camera-by-serial-%s{serial}", \
+  MODE="0666"
+
+# Port-path rules covering the two USB hubs the GUI's installer pre-binds.
+# The KERNELS attribute is the parent USB hub busid (visible via
+# `udevadm info -a -n /dev/videoN`). Two example ports — adjust to match
+# what your specific Windows machine assigns; the GUI's wizard surfaces
+# the actual port path so a teacher can copy it here on first install.
+#
+# We intentionally do NOT hardcode every possible port path. The two
+# rules below are documented exemplars; the GUI writes the actual paths
+# into the per-student device_map.json and the entrypoint reads from
+# /dev/v4l/by-path/ when the by-id symlink is missing.
+SUBSYSTEM=="video4linux", \
+  ATTRS{idVendor}=="0c45", ATTRS{idProduct}=="6367", \
+  MODE="0666"
+
+# ─── ROBOTIS OpenRB-150 (VID 2F5D) — both leader + follower arms ─────────────
+# OpenRB-150 boards ship a unique flash-burned USB serial. The serial
+# rule below labels each arm with its own symlink so the entrypoint can
+# pick by serial instead of by-id-which-points-at-wherever-the-kernel-
+# decided-this-time.
+SUBSYSTEM=="tty", \
+  ATTRS{idVendor}=="2f5d", \
+  SYMLINK+="edubotics-arm-by-serial-%s{serial}", \
+  MODE="0666"
+
+# ─── FTDI U2D2 (VID 0403) — legacy classrooms with U2D2 bridge ───────────────
+# FTDI EEPROM holds the serial. Most factory units have unique serials;
+# duplicates can be reflashed via pyftdi (see u2d2-preflight). The GUI
+# refuses to start if it sees two U2D2s with identical serials.
+SUBSYSTEM=="tty", \
+  ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6014", \
+  SYMLINK+="edubotics-arm-by-serial-%s{serial}", \
+  MODE="0666"
+
+SUBSYSTEM=="tty", \
+  ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6001", \
+  SYMLINK+="edubotics-arm-by-serial-%s{serial}", \
+  MODE="0666"

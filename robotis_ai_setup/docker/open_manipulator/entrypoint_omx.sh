@@ -399,28 +399,28 @@ for i in 1 2; do
     # producing `VIDIOC_S_FMT: Invalid argument` on the second camera
     # (silenced into stderr, healthcheck used to miss it).
     #
-    # 2026-05-22: default `pixel_format` flipped from `yuyv` to
-    # `raw_mjpeg`. Previously usb_cam negotiated the camera to MJPG and
-    # then did software MJPEG→RGB decode (`mjpeg2rgb` from
-    # params_1.yaml), saturating the container at 94% CPU on EduBotics
-    # student hardware; ROS topic rate collapsed from 30 Hz target to
-    # ~10 Hz, the recording feed showed 400 ms freezes, and the
-    # Dynamixel 100 Hz loop reported "Overrun detected". `raw_mjpeg`
-    # makes usb_cam emit the camera's native JPEG bytes straight to
-    # `/image_raw/compressed` with no decode step — recording feed
-    # back to ~30 Hz, CPU headroom restored, ACT training inputs
-    # marginally cleaner (one fewer JPEG round-trip per frame).
-    # Verified safe across recording, ACT training, inference,
-    # browser preview, perception/Blockly, and calibration paths —
-    # all consume `/image_raw/compressed` only, no consumer of the
-    # uncompressed `/image_raw` topic exists in the tree.
+    # pixel_format MUST stay at `yuyv` — the ROBOTIS upstream
+    # camera_usb_cam.launch.py declared default. Earlier this entrypoint
+    # overrode to `raw_mjpeg` (a usb_cam 0.8.1 mode that passes camera
+    # MJPG bytes straight through without decoding). That mode is BROKEN:
+    # usb_cam tags the message `encoding="yuv422"` and lies about the
+    # buffer size, so every downstream consumer (recording, browser
+    # preview, perception, training) gets either green tiles or RNG noise.
+    # Confirmed by saving a snapshot JPEG via web_video_server — the file
+    # was 30 KB of garbage. `yuyv` does in-driver V4L2 negotiation, no
+    # software decode (avoids the 94 % CPU `mjpeg2rgb` saturation), and
+    # the image_transport republisher handles JPEG compression on
+    # `/image_raw/compressed` for ROS subscribers that want bytes-on-the-
+    # wire savings. Override via EDUBOTICS_CAMERA_PIXEL_FORMAT only if you
+    # genuinely know what you're doing — keep `raw_mjpeg` out of the
+    # supported set.
     ros2 launch open_manipulator_bringup camera_usb_cam.launch.py \
         name:="$name" \
         video_device:="$device" \
         image_width:="${EDUBOTICS_CAMERA_WIDTH:-640}" \
         image_height:="${EDUBOTICS_CAMERA_HEIGHT:-480}" \
         framerate:="${EDUBOTICS_CAMERA_FRAMERATE:-30.0}" \
-        pixel_format:="${EDUBOTICS_CAMERA_PIXEL_FORMAT:-raw_mjpeg}" &
+        pixel_format:="${EDUBOTICS_CAMERA_PIXEL_FORMAT:-yuyv}" &
     PIDS="$PIDS $!"
 done
 

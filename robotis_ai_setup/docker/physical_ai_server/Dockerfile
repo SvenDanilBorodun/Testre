@@ -119,6 +119,14 @@ COPY overlays/communicator.py /tmp/overlays/communicator.py
 # directory as data_manager.py / data_converter.py) so the cleaner
 # `preset='fast', crf=23` defaults actually ship.
 COPY overlays/lerobot_dataset_wrapper.py /tmp/overlays/lerobot_dataset_wrapper.py
+# Audit F36: web_video_server loopback bind + respawn. The launch file
+# in the upstream base image binds `0.0.0.0:8080` and lacks respawn — a
+# misconfigured Windows Firewall would expose the unauthenticated MJPEG
+# stream to the school LAN, and one SIGSEGV would leave the browser
+# preview blank until container restart. The overlay version binds
+# `127.0.0.1:8080` (defence-in-depth alongside the compose port mapping)
+# and adds `respawn=True, respawn_delay=2.0`.
+COPY overlays/physical_ai_server_bringup.launch.py /tmp/overlays/physical_ai_server_bringup.launch.py
 RUN set -e && \
     apply_overlay() { \
         local name="$1" path_filter="$2" src="/tmp/overlays/$1"; \
@@ -166,6 +174,7 @@ RUN set -e && \
     apply_overlay physical_ai_server.py "*/physical_ai_server/physical_ai_server.py" && \
     apply_overlay communicator.py "*/communication/communicator.py" && \
     apply_overlay lerobot_dataset_wrapper.py "*/data_processing/*" && \
+    apply_overlay physical_ai_server_bringup.launch.py "*/physical_ai_server/launch/*" && \
     rm -rf /tmp/overlays
 
 # Roboter Studio runtime dependencies. opencv-contrib-python is required

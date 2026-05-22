@@ -98,6 +98,14 @@ COPY daemon.json /etc/docker/daemon.json
 COPY start-dockerd.sh /usr/local/bin/start-dockerd.sh
 RUN chmod +x /usr/local/bin/start-dockerd.sh
 
+# udev rules for stable device symlinks across replug + reboot. Cameras
+# and arms get /dev/edubotics-* names derived from USB serial (or port
+# path when no serial is exposed). The rootfs ships these rules; the
+# rest of the EduBotics stack reads from the stable names so the
+# student can unplug and replug a device into a different port without
+# re-running the setup wizard.
+COPY 99-edubotics.rules /etc/udev/rules.d/99-edubotics.rules
+
 # Friendly hostname — shows up in wsl --list and inside the shell
 RUN echo "edubotics" > /etc/hostname
 

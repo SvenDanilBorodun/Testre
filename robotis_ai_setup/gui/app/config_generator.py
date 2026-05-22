@@ -8,6 +8,25 @@ from .constants import ENV_FILE, ROS_DOMAIN_ID, REGISTRY
 from .device_manager import HardwareConfig
 
 
+# Keys this generator owns. Anything in the existing .env that is NOT
+# in this set gets preserved verbatim across rewrites. The set must stay
+# in sync with the lines emitted below; orphaning a managed key here
+# would leak stale values into newly generated files.
+MANAGED_KEYS = frozenset({
+    "FOLLOWER_PORT",
+    "LEADER_PORT",
+    "ROS_DOMAIN_ID",
+    "REGISTRY",
+    # CAMERA_DEVICE_N / CAMERA_NAME_N are handled by prefix-match below
+    # because the count varies with how many cameras are connected.
+})
+_MANAGED_PREFIXES = ("CAMERA_DEVICE_", "CAMERA_NAME_")
+
+
+def _is_managed_key(key: str) -> bool:
+    return key in MANAGED_KEYS or key.startswith(_MANAGED_PREFIXES)
+
+
 def _quote(value: str) -> str:
     """Double-quote a value so docker-compose handles spaces.
 
@@ -58,6 +77,43 @@ def _atomic_write(path: str, content: str) -> None:
     os.replace(tmp, path)
 
 
+def _read_unmanaged_lines(path: str) -> list[str]:
+    """Return non-managed lines (comments, blanks, unknown KEY=VALUE)
+    from an existing .env so a regenerate doesn't wipe operator-added
+    overrides like EDUBOTICS_CAMERA_PIXEL_FORMAT, EDUBOTICS_ROS_DOMAIN,
+    EDUBOTICS_REGISTRY, or per-classroom HF_TOKEN.
+
+    Returns an empty list when the file doesn't exist yet.
+    """
+    try:
+        with open(path, encoding="utf-8") as f:
+            raw = f.readlines()
+    except (OSError, UnicodeDecodeError):
+        return []
+
+    preserved: list[str] = []
+    for line in raw:
+        stripped = line.strip()
+        # Drop trailing newline; we re-add when emitting.
+        text = line.rstrip("\r\n")
+        if not stripped or stripped.startswith("#"):
+            # Keep comments + blank lines so the file stays human-readable
+            # if anyone hand-edited it. Skipped only if duplicated below.
+            preserved.append(text)
+            continue
+        if "=" not in stripped:
+            # Malformed line — keep it. Compose will reject it, the
+            # student will see the error, and they can fix it; better
+            # than silently dropping their manual edit.
+            preserved.append(text)
+            continue
+        key = stripped.split("=", 1)[0].strip()
+        if _is_managed_key(key):
+            continue
+        preserved.append(text)
+    return preserved
+
+
 def generate_env_file(config: HardwareConfig, output_path: str = ENV_FILE) -> str:
     """Write .env file with hardware paths.
 
@@ -72,7 +128,8 @@ def generate_env_file(config: HardwareConfig, output_path: str = ENV_FILE) -> st
         raise ValueError("Both leader and follower arms must be configured before generating .env")
 
     domain_id = _resolve_ros_domain_id()
-    lines = []
+    preserved = _read_unmanaged_lines(output_path)
+    lines: list[str] = []
     lines.append(f"FOLLOWER_PORT={_quote(config.follower.serial_path)}")
     lines.append(f"LEADER_PORT={_quote(config.leader.serial_path)}")
 
@@ -92,6 +149,10 @@ def generate_env_file(config: HardwareConfig, output_path: str = ENV_FILE) -> st
 
     lines.append(f"ROS_DOMAIN_ID={domain_id}")
     lines.append(f"REGISTRY={REGISTRY}")
+    if preserved:
+        lines.append("")
+        lines.append("# Operator overrides preserved across regeneration.")
+        lines.extend(preserved)
     lines.append("")  # trailing newline
 
     content = "\n".join(lines)
@@ -108,6 +169,7 @@ def generate_cloud_only_env(output_path: str = ENV_FILE) -> str:
     would emit warnings about unset variables.
     """
     domain_id = _resolve_ros_domain_id()
+    preserved = _read_unmanaged_lines(output_path)
     lines = [
         "# Cloud-only mode — no robot hardware connected.",
         'FOLLOWER_PORT=""',
@@ -118,8 +180,12 @@ def generate_cloud_only_env(output_path: str = ENV_FILE) -> str:
         'CAMERA_NAME_2="scene"',
         f"ROS_DOMAIN_ID={domain_id}",
         f"REGISTRY={REGISTRY}",
-        "",
     ]
+    if preserved:
+        lines.append("")
+        lines.append("# Operator overrides preserved across regeneration.")
+        lines.extend(preserved)
+    lines.append("")
     content = "\n".join(lines)
     _atomic_write(output_path, content)
     return content

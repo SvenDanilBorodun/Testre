@@ -40,3 +40,8 @@ node_modules/
 # Claude Code agent metadata (per-checkout, not project code)
 .claude/
 .audit-cache/
+
+# Local audit scratch notes — per-session in-flight handoff docs that
+# should not land on main. Move worth-keeping content into docs/ as a
+# tracked file before deleting the local copy.
+CRITICAL_FIXES.md

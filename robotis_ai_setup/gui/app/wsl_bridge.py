@@ -145,6 +145,20 @@ def list_video_devices() -> list[dict]:
         # zero image formats. Keep only the ones with at least one
         # `[0]: 'FOURCC' ...` format entry, otherwise the student sees
         # twice as many cameras as they plugged in.
+        # Pick the most stable path udev offers for each camera, in this
+        # preference order:
+        #   1. /dev/v4l/by-id/...    — serial-anchored; survives replug
+        #                              into ANY port (camera must expose
+        #                              a USB serial)
+        #   2. /dev/v4l/by-path/...  — USB-topology-anchored; survives
+        #                              replug into the SAME port across
+        #                              reboot / wsl shutdown. Used for
+        #                              the un-serialed Innomaker.
+        #   3. /dev/videoN           — kernel-assigned; reshuffles on
+        #                              every enumeration. Last resort.
+        # Whichever is picked must also resolve back to $d via readlink,
+        # otherwise we'd hand the same symlink name to both cameras
+        # when udev's name-generation collides (no-serial case).
         cmd = r"""
 for d in /dev/video*; do
     formats=$(v4l2-ctl --device="$d" --list-formats 2>/dev/null)
@@ -152,16 +166,25 @@ for d in /dev/video*; do
     info=$(v4l2-ctl --device="$d" --info 2>/dev/null)
     name=$(echo "$info" | grep 'Card type' | sed 's/.*Card type[[:space:]]*:[[:space:]]*//')
     bus=$(echo "$info" | grep 'Bus info' | sed 's/.*Bus info[[:space:]]*:[[:space:]]*//')
-    stable=$(udevadm info -q symlink -n "$d" 2>/dev/null | tr ' ' '\n' | grep -m1 'v4l/by-id' || true)
+    symlinks=$(udevadm info -q symlink -n "$d" 2>/dev/null | tr ' ' '\n')
     path="$d"
-    if [ -n "$stable" ] && [ -e "/dev/$stable" ]; then
-        # Only trust the by-id symlink if it actually resolves to the
-        # current device — when two cameras share VID:PID and one lacks
-        # a serial, udev hands the same symlink name to both but the
-        # filesystem link points at only one of them.
-        if [ "$(readlink -f "/dev/$stable")" = "$d" ]; then
-            path="/dev/$stable"
+    chosen=""
+    for candidate in $(echo "$symlinks" | grep 'v4l/by-id'); do
+        if [ -e "/dev/$candidate" ] && [ "$(readlink -f "/dev/$candidate")" = "$d" ]; then
+            chosen="/dev/$candidate"
+            break
         fi
+    done
+    if [ -z "$chosen" ]; then
+        for candidate in $(echo "$symlinks" | grep 'v4l/by-path'); do
+            if [ -e "/dev/$candidate" ] && [ "$(readlink -f "/dev/$candidate")" = "$d" ]; then
+                chosen="/dev/$candidate"
+                break
+            fi
+        done
+    fi
+    if [ -n "$chosen" ]; then
+        path="$chosen"
     fi
     echo "$path|$name|$d|$bus"
 done

@@ -397,15 +397,30 @@ for i in 1 2; do
     # of relying on whatever upstream `params_1.yaml` defaults to. Two
     # webcams with different native modes used to share params_1.yaml,
     # producing `VIDIOC_S_FMT: Invalid argument` on the second camera
-    # (silenced into stderr, healthcheck used to miss it). 640×480
-    # YUYV @ 30 fps is the documented EduBotics baseline.
+    # (silenced into stderr, healthcheck used to miss it).
+    #
+    # 2026-05-22: default `pixel_format` flipped from `yuyv` to
+    # `raw_mjpeg`. Previously usb_cam negotiated the camera to MJPG and
+    # then did software MJPEG→RGB decode (`mjpeg2rgb` from
+    # params_1.yaml), saturating the container at 94% CPU on EduBotics
+    # student hardware; ROS topic rate collapsed from 30 Hz target to
+    # ~10 Hz, the recording feed showed 400 ms freezes, and the
+    # Dynamixel 100 Hz loop reported "Overrun detected". `raw_mjpeg`
+    # makes usb_cam emit the camera's native JPEG bytes straight to
+    # `/image_raw/compressed` with no decode step — recording feed
+    # back to ~30 Hz, CPU headroom restored, ACT training inputs
+    # marginally cleaner (one fewer JPEG round-trip per frame).
+    # Verified safe across recording, ACT training, inference,
+    # browser preview, perception/Blockly, and calibration paths —
+    # all consume `/image_raw/compressed` only, no consumer of the
+    # uncompressed `/image_raw` topic exists in the tree.
     ros2 launch open_manipulator_bringup camera_usb_cam.launch.py \
         name:="$name" \
         video_device:="$device" \
         image_width:="${EDUBOTICS_CAMERA_WIDTH:-640}" \
         image_height:="${EDUBOTICS_CAMERA_HEIGHT:-480}" \
         framerate:="${EDUBOTICS_CAMERA_FRAMERATE:-30.0}" \
-        pixel_format:="${EDUBOTICS_CAMERA_PIXEL_FORMAT:-yuyv}" &
+        pixel_format:="${EDUBOTICS_CAMERA_PIXEL_FORMAT:-raw_mjpeg}" &
     PIDS="$PIDS $!"
 done
 

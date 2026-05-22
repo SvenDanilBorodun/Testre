@@ -21,6 +21,16 @@ class WSLError(Exception):
 def run(cmd: str, timeout: int = 30, check: bool = True, distro: Optional[str] = None) -> subprocess.CompletedProcess:
     """Execute a command inside the EduBotics WSL2 distribution.
 
+    The script is fed to bash via stdin rather than `bash -c "<script>"`.
+    Reason: wsl.exe + bash -c mishandles multi-line scripts whose `$(...)`
+    command substitution captures output containing literal `(` and tab-
+    indented lines (e.g. `v4l2-ctl --info`). The captured output ends up
+    being parsed by bash itself, producing "bash: line N: Card: command
+    not found" and an empty stdout — silently breaking camera discovery.
+    Piping the script via stdin avoids the argv path entirely. CRLF is
+    normalized so Windows-source-file line endings don't reach bash as
+    `$'\\r'` tokens.
+
     Args:
         cmd: Bash command string to execute.
         timeout: Seconds before the command is killed.
@@ -31,11 +41,15 @@ def run(cmd: str, timeout: int = 30, check: bool = True, distro: Optional[str] =
         CompletedProcess with stdout/stderr as decoded strings.
     """
     target = distro or WSL_DISTRO_NAME
+    # Send stdin as raw bytes so Python's text-mode \n→\r\n translation on
+    # Windows doesn't reinsert the CRs we just stripped. We still want
+    # str-typed stdout/stderr, so decode manually after.
+    script_bytes = cmd.replace("\r\n", "\n").replace("\r", "\n").encode("utf-8")
     try:
         result = subprocess.run(
-            ["wsl", "-d", target, "--", "bash", "-c", cmd],
+            ["wsl", "-d", target, "--", "bash"],
+            input=script_bytes,
             capture_output=True,
-            text=True,
             timeout=timeout,
             **_SUBPROCESS_KWARGS,
         )
@@ -43,6 +57,9 @@ def run(cmd: str, timeout: int = 30, check: bool = True, distro: Optional[str] =
         raise WSLError("WSL is not installed or not in PATH.")
     except subprocess.TimeoutExpired:
         raise WSLError(f"WSL command timed out after {timeout}s: {cmd}")
+
+    result.stdout = (result.stdout or b"").decode("utf-8", errors="replace")
+    result.stderr = (result.stderr or b"").decode("utf-8", errors="replace")
 
     if check and result.returncode != 0:
         raise WSLError(
@@ -111,35 +128,67 @@ def list_video_devices() -> list[dict]:
     the udev `/dev/v4l/by-id/...` symlink when available so the env
     file survives a replug. Mirrors the existing `/dev/serial/by-id/`
     pattern used for the arms.
+
+    Two-cameras-same-VID:PID quirk: when a classroom plugs in two
+    identical UVC cameras and only one of them exposes a USB serial
+    string, udev generates a `usb-..._SN0001-...` symlink only for the
+    serialed one — but `udevadm info -q symlink` returns that same
+    by-id name for BOTH devices' v4l capture nodes. Without de-dup the
+    function would return two CameraDevices pointing at the same path.
+    We emit `$d` (the kernel-assigned /dev/videoN) as a third column so
+    we can de-dup by real video node, not by stable path.
     """
     try:
-        # Find devices that support Video Capture, extract their friendly
-        # names, then resolve to a stable /dev/v4l/by-id/... symlink so
-        # the .env file survives a USB replug.
+        # Filter to real capture nodes only — UVC cameras expose
+        # secondary /dev/videoN entries for metadata / extended-control
+        # channels that also report `Type: Video Capture` but enumerate
+        # zero image formats. Keep only the ones with at least one
+        # `[0]: 'FOURCC' ...` format entry, otherwise the student sees
+        # twice as many cameras as they plugged in.
         cmd = r"""
 for d in /dev/video*; do
+    formats=$(v4l2-ctl --device="$d" --list-formats 2>/dev/null)
+    echo "$formats" | grep -qE '^[[:space:]]+\[0\]:' || continue
     info=$(v4l2-ctl --device="$d" --info 2>/dev/null)
-    if echo "$info" | grep -q "Video Capture"; then
-        name=$(echo "$info" | grep "Card type" | sed 's/.*: //')
-        stable=$(udevadm info -q symlink -n "$d" 2>/dev/null | tr ' ' '\n' | grep -m1 'v4l/by-id' || true)
-        if [ -n "$stable" ]; then
+    name=$(echo "$info" | grep 'Card type' | sed 's/.*Card type[[:space:]]*:[[:space:]]*//')
+    bus=$(echo "$info" | grep 'Bus info' | sed 's/.*Bus info[[:space:]]*:[[:space:]]*//')
+    stable=$(udevadm info -q symlink -n "$d" 2>/dev/null | tr ' ' '\n' | grep -m1 'v4l/by-id' || true)
+    path="$d"
+    if [ -n "$stable" ] && [ -e "/dev/$stable" ]; then
+        # Only trust the by-id symlink if it actually resolves to the
+        # current device — when two cameras share VID:PID and one lacks
+        # a serial, udev hands the same symlink name to both but the
+        # filesystem link points at only one of them.
+        if [ "$(readlink -f "/dev/$stable")" = "$d" ]; then
             path="/dev/$stable"
-        else
-            path="$d"
         fi
-        echo "$path|$name"
     fi
+    echo "$path|$name|$d|$bus"
 done
 """
         result = run(cmd, timeout=15, check=False)
         if not result.stdout.strip():
             return []
 
-        devices = []
+        # Dedup by physical camera. `Bus info` from v4l2 is unique per
+        # physical USB port (e.g. `usb-vhci_hcd.0-1` vs `usb-vhci_hcd.0-2`),
+        # so we key on that to guarantee one entry per camera even when
+        # both expose the same by-id symlink.
+        devices: list[dict] = []
+        seen_bus: set[str] = set()
         for line in result.stdout.strip().splitlines():
-            if "|" in line:
-                path, name = line.split("|", 1)
-                devices.append({"path": path.strip(), "name": name.strip() or path.strip()})
+            parts = line.split("|", 3)
+            if len(parts) < 3:
+                continue
+            path = parts[0].strip()
+            name = parts[1].strip()
+            real_path = parts[2].strip()
+            bus = parts[3].strip() if len(parts) == 4 else ""
+            key = bus or real_path
+            if key in seen_bus:
+                continue
+            seen_bus.add(key)
+            devices.append({"path": path, "name": name or path})
         return devices
     except WSLError:
         return []

@@ -515,6 +515,45 @@ def scan_and_identify_arms(image: str) -> tuple[Optional[ArmDevice], Optional[Ar
     return leader, follower
 
 
+def _list_camera_vid_pids_from_wsl() -> set[str]:
+    """Enumerate VID:PID of every UVC capture node currently inside the EduBotics distro.
+
+    Fallback used when Windows PnP returns nothing — that case happens
+    routinely once usbipd has forwarded the camera into WSL: Windows
+    then sees only the `VID_80EE:CAFE` usbipd stub, not a Camera-class
+    device, so `_list_usb_camera_vid_pids()` is empty even though the
+    camera is healthy. We walk /sys/class/video4linux back to the USB
+    parent and read idVendor / idProduct from sysfs.
+    """
+    if sys.platform != "win32":
+        return set()
+    script = (
+        "for sysdev in /sys/class/video4linux/video*; do "
+        "  [ -e \"$sysdev\" ] || continue; "
+        "  dev=$(readlink -f \"$sysdev\"); "
+        "  while [ -n \"$dev\" ] && [ \"$dev\" != \"/\" ]; do "
+        "    if [ -f \"$dev/idVendor\" ] && [ -f \"$dev/idProduct\" ]; then "
+        "      v=$(cat \"$dev/idVendor\"); p=$(cat \"$dev/idProduct\"); "
+        "      echo \"$v:$p\"; break; "
+        "    fi; "
+        "    dev=$(dirname \"$dev\"); "
+        "  done; "
+        "done | sort -u"
+    )
+    try:
+        result = subprocess.run(
+            ["wsl", "-d", WSL_DISTRO_NAME, "--", "bash"],
+            input=script,
+            capture_output=True, text=True, timeout=10,
+            **_SUBPROCESS_KWARGS,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return set()
+    if result.returncode != 0:
+        return set()
+    return {line.strip().lower() for line in result.stdout.splitlines() if line.strip()}
+
+
 def _list_usb_camera_vid_pids() -> list[tuple[str, str]]:
     """Query Windows PnP for currently-connected USB cameras.
 
@@ -524,6 +563,11 @@ def _list_usb_camera_vid_pids() -> list[tuple[str, str]]:
     and the GUI's `Kameras scannen` button silently finds nothing
     (the camera sits in usbipd's `Not shared` state and never reaches
     /dev/video* inside the distro).
+
+    Returns an empty list when cameras are already forwarded to WSL —
+    the usbipd stub registers under `VID_80EE:CAFE` (not Class Camera),
+    so Windows PnP no longer sees the device. Callers must handle that
+    case by falling back to `_list_camera_vid_pids_from_wsl()`.
     """
     if sys.platform != "win32":
         return []
@@ -581,6 +625,19 @@ def attach_cameras_to_wsl() -> list[USBDevice]:
     webcam after install and we never bound its VID:PID".
     """
     camera_vid_pids = {vp for vp, _ in _list_usb_camera_vid_pids()}
+    if not camera_vid_pids:
+        # Windows PnP is blind to cameras that are already forwarded to
+        # WSL (only the usbipd stub VID_80EE:CAFE shows up there). Ask
+        # the distro directly which UVC devices it currently exposes —
+        # this lets us still count them as "attached" rather than
+        # returning [] and making the GUI think no cameras were found.
+        camera_vid_pids = _list_camera_vid_pids_from_wsl()
+        if camera_vid_pids:
+            _append_diag(
+                "attach_cameras_to_wsl",
+                f"Windows PnP empty; using WSL-side UVC enumeration: "
+                f"{sorted(camera_vid_pids)}",
+            )
     if not camera_vid_pids:
         return []
     attached: list[USBDevice] = []

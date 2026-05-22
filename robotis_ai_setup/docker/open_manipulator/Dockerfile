@@ -52,6 +52,7 @@ COPY overlays/omx_f_hardware_controller_manager.yaml /tmp/overlays/omx_f_hardwar
 COPY overlays/omx_l.ros2_control.xacro /tmp/overlays/omx_l.ros2_control.xacro
 COPY overlays/omx_l_leader_ai.launch.py /tmp/overlays/omx_l_leader_ai.launch.py
 COPY overlays/omx_l_leader_ai_hardware_controller_manager.yaml /tmp/overlays/omx_l_leader_ai_hardware_controller_manager.yaml
+COPY overlays/camera_usb_cam.launch.py /tmp/overlays/camera_usb_cam.launch.py
 RUN set -e && \
     apply_overlay() { \
         local name="$1" path_filter="$2" src="$3"; \
@@ -85,6 +86,7 @@ RUN set -e && \
     apply_overlay omx_l.ros2_control.xacro "*/ros2_control/*" /tmp/overlays/omx_l.ros2_control.xacro && \
     apply_overlay omx_l_leader_ai.launch.py "*/launch/*" /tmp/overlays/omx_l_leader_ai.launch.py && \
     apply_overlay hardware_controller_manager.yaml "*/omx_l_leader_ai/*" /tmp/overlays/omx_l_leader_ai_hardware_controller_manager.yaml && \
+    apply_overlay camera_usb_cam.launch.py "*/launch/*" /tmp/overlays/camera_usb_cam.launch.py && \
     rm -rf /tmp/overlays
 
 ENTRYPOINT ["/entrypoint_omx.sh"]

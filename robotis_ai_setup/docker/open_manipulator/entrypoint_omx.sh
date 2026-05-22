@@ -379,6 +379,19 @@ for i in 1 2; do
         # configured camera is missing.
         continue
     fi
+    # Resolve /dev/v4l/by-id/* symlinks to the underlying /dev/videoN.
+    # usb_cam's V4L2 wrapper strips the path components naively and
+    # ends up trying to open `/dev/../../video2`, which fails with
+    # "Device specified is not available or is not a valid V4L2 device".
+    # The GUI writes by-id paths into .env when a camera exposes a USB
+    # serial (stable across replug); the resolution stays per-launch.
+    if [ -L "$device" ]; then
+        resolved="$(readlink -f "$device" 2>/dev/null || true)"
+        if [ -e "$resolved" ]; then
+            echo "[LAUNCH] Camera $i: resolved $device → $resolved"
+            device="$resolved"
+        fi
+    fi
     echo "[LAUNCH] Starting camera $i ($name on $device)..."
     # Audit F22: declare an explicit resolution + format here instead
     # of relying on whatever upstream `params_1.yaml` defaults to. Two

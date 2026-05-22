@@ -45,12 +45,25 @@ import time
 from physical_ai_server.data_processing.data_manager import DataManager
 
 
+# Use the 'spawn' start method explicitly. Linux's default 'fork' causes
+# the child to inherit the parent's rclpy state — including the
+# `physical_ai_server` ROS node registration. The duplicate node then
+# competes for DDS service routing and `/task/command` calls from the
+# React UI time out (symptom: "Befehlsausführung fehlgeschlagen [Stop]:
+# Service call failed for /task/command"). 'spawn' boots a clean Python
+# interpreter in the child, so no inherited node, publishers, or
+# subscriptions follow. The trade-off is a small startup cost (~200 ms
+# for the child to re-import its modules) which is invisible at the
+# per-recording cadence this worker is used.
+_MP_CTX = multiprocessing.get_context('spawn')
+
+
 class HfApiWorker:
 
     def __init__(self):
-        self.input_queue = multiprocessing.Queue()
-        self.output_queue = multiprocessing.Queue()
-        self.progress_queue = multiprocessing.Queue()
+        self.input_queue = _MP_CTX.Queue()
+        self.output_queue = _MP_CTX.Queue()
+        self.progress_queue = _MP_CTX.Queue()
         self.process = None
         self.logger = logging.getLogger('HfApiWorker')
 
@@ -83,7 +96,7 @@ class HfApiWorker:
         try:
             self.logger.info('Starting HF API worker process...')
 
-            self.process = multiprocessing.Process(
+            self.process = _MP_CTX.Process(
                 target=self._worker_process_loop,
                 args=(
                     self.input_queue,

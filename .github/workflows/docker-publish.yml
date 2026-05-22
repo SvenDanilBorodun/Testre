@@ -150,19 +150,24 @@ jobs:
           fetch-depth: 0  # build-images.sh greps git log for BUILD_SHA
       - name: Free up runner disk
         # ubuntu-latest ships with ~14 GB free on /, but physical-ai-server
-        # builds to ~15.5 GB. Without freeing pre-installed Android SDK +
-        # dotnet + Haskell + boost (~30 GB total), the amd64 build OOM-disks
-        # at ~70% through. arm64 is 7.4 GB so it fits — only run the clean
-        # on amd64 to keep the arm64 build fast.
+        # builds to ~15.5 GB. The original config (android, dotnet,
+        # haskell, large-packages, swap = ~30 GB) was borderline and
+        # randomly hit "No space left on device" on 2026-05-22 — both
+        # the initial run and a manual rerun failed at the same s6
+        # CRLF-cleanup step. Add tool-cache + docker-images to reclaim
+        # the remaining headroom (these jobs don't rely on the
+        # preinstalled node/python tool cache, and we always `--pull`
+        # our base images so the cached ones are dead weight).
+        # arm64 builds to 7.4 GB and skips this step.
         if: matrix.platform == 'amd64'
         uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be  # v1.3.1
         with:
-          tool-cache: false        # keep node/python — used elsewhere
+          tool-cache: true         # reclaims ~5 GB (no step needs node/python)
           android: true            # reclaims ~17 GB
           dotnet: true             # reclaims ~2 GB
           haskell: true            # reclaims ~5 GB
           large-packages: true     # reclaims ~3 GB (mongodb, etc.)
-          docker-images: false     # we need fresh space; nothing to keep
+          docker-images: true      # reclaims ~3 GB (we always --pull anyway)
           swap-storage: true       # reclaims ~4 GB swap file
       - name: Show available disk
         run: df -h /

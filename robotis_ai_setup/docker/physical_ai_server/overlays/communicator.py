@@ -174,6 +174,20 @@ class Communicator:
         return enabled_sources
 
     def init_subscribers(self):
+        # Camera-specific QoS: depth=10 absorbs ~333 ms of subscriber-side
+        # stall before frame loss. multi_subscriber.add_subscriber's
+        # default is depth=1 — a single GC pause or executor-thread
+        # contention during a 33 ms tick at 30 Hz silently overwrites
+        # the in-flight frame at the DDS layer. depth=10 gives the
+        # executor a real chance to drain even when callbacks queue
+        # behind a recording-tick decode (~20 ms) or a rosbridge
+        # service call. Joint subs intentionally stay at the depth=1
+        # default — state topics genuinely want latest-only semantics.
+        camera_qos = QoSProfile(
+            depth=10,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            history=HistoryPolicy.KEEP_LAST,
+        )
         # Initialize camera subscribers if defined
         for name, topic in self.camera_topics.items():
             self.multi_subscriber.add_subscriber(
@@ -181,7 +195,8 @@ class Communicator:
                 name=name,
                 topic=topic,
                 msg_type=CompressedImage,
-                callback=partial(self._camera_callback, name)
+                callback=partial(self._camera_callback, name),
+                qos_profile=camera_qos,
             )
             self.camera_topic_msgs[name] = None
             self.node.get_logger().info(f'Camera subscriber: {name} -> {topic}')

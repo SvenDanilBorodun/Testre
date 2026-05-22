@@ -161,6 +161,25 @@ class DataManager:
                 return self.RECORDING
 
         elif self._status == 'run':
+            # RAM safety valve: lerobot_dataset_wrapper raises
+            # _buffer_full when accumulated decoded-image bytes pass
+            # EDUBOTICS_MAX_BUFFER_GB (default 4 GB). At 30 Hz × 2 cams
+            # of 640×480 RGB uint8 the unbounded buffer reliably
+            # OOMkills the container at ~110 s into a 5-min episode.
+            # When the flag fires we surface the German warning and
+            # short-circuit to 'save' instead of appending another
+            # ~1.8 MB tick. The episode that lands on disk is shorter
+            # than the student requested but at least exists.
+            if getattr(self._lerobot_dataset, '_buffer_full', False):
+                self._last_warning_message = (
+                    self._lerobot_dataset._buffer_full_warning
+                )
+                print(
+                    f'[WARNUNG] {self._last_warning_message}',
+                    file=sys.stderr, flush=True,
+                )
+                self._status = 'save'
+                return self.RECORDING
             if not self._check_time(self._task_info.episode_time_s, 'save'):
                 frame = self.create_frame(images, state, action)
                 if self._task_info.use_optimized_save_mode:
@@ -586,9 +605,14 @@ class DataManager:
 
         if image_msgs is not None:
             for key, value in image_msgs.items():
-                camera_data[key] = cv2.cvtColor(
-                    self.data_converter.compressed_image2cvmat(value),
-                    cv2.COLOR_BGR2RGB)
+                # cv_bridge handles the BGR→RGB swap in-decoder when we
+                # ask for rgb8, which saves one full-frame allocation +
+                # a memcpy per camera per tick (~1 ms × 60 ops/s = 6 %
+                # of one core, plus reduced allocator pressure which
+                # lowers GC pause frequency — and GC pauses are what
+                # were exhausting the depth=1 QoS budget upstream).
+                camera_data[key] = self.data_converter.compressed_image2cvmat(
+                    value, desired_encoding='rgb8')
             stale = self._check_stale_cameras(camera_data)
             if stale is not None:
                 # Warn (don't halt) — slow precision demos legitimately
@@ -661,6 +685,13 @@ class DataManager:
         # immediately advance the stale clock.
         self._last_image_hashes.clear()
         self._last_image_change_time.clear()
+        # Zero the RAM-safety-valve counters so the next episode gets
+        # its full byte budget back. No-op on overlays that pre-date
+        # the helper.
+        if self._lerobot_dataset is not None and hasattr(
+            self._lerobot_dataset, 'reset_buffer_accounting'
+        ):
+            self._lerobot_dataset.reset_buffer_accounting()
         # NOTE: _last_warning_message is deliberately NOT cleared here.
         # _episode_reset() runs inside the same record() tick that set the
         # warning (RAM truncation -> record_early_save -> save -> encoding

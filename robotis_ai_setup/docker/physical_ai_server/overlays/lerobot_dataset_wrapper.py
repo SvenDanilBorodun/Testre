@@ -35,6 +35,21 @@ from physical_ai_server.video_encoder.ffmpeg_encoder import FFmpegEncoder
 
 class LeRobotDatasetWrapper(LeRobotDataset):
 
+    # Audit (2026-05-22): cap the in-RAM episode buffer at 4 GB. Decoded
+    # frames are RGB uint8 ndarrays (~921 KB/frame at 640×480); at
+    # 30 Hz × 2 cams a 5-min episode produces ~16.6 GB and reliably
+    # OOMkills the container (`mem_limit: 6g` in docker-compose.yml).
+    # Above this cap we set a German warning + a `_buffer_full` flag —
+    # the data_manager polls it between ticks and forces a save before
+    # the next frame would push us past the docker limit. This is a
+    # safety valve, not the long-term fix; v2.4's plan is to keep the
+    # buffer as raw JPEG bytes (~30 KB/frame, 50× smaller) and decode
+    # only inside FFmpegEncoder. Override via EDUBOTICS_MAX_BUFFER_GB.
+    _DEFAULT_MAX_BUFFER_BYTES = int(
+        float(__import__('os').environ.get('EDUBOTICS_MAX_BUFFER_GB', '4.0'))
+        * (1024 ** 3)
+    )
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.encoders = {}
@@ -42,6 +57,13 @@ class LeRobotDatasetWrapper(LeRobotDataset):
         self.episode_ranges = []
         self._append_in_progress = False
         self._robot_type = 'default'  # default
+        # Approximate decoded-image bytes accumulated since last save.
+        # Updated on each add_frame_without_write_image call. Public so
+        # data_manager can read it for the buffer-full check; cleared
+        # in save_episode_without_*.
+        self._episode_image_bytes = 0
+        self._buffer_full = False
+        self._buffer_full_warning = ''
 
     def set_robot_type(self, robot_type: str) -> None:
         self._robot_type = robot_type
@@ -163,9 +185,44 @@ class LeRobotDatasetWrapper(LeRobotDataset):
                 self.episode_buffer[key] = [frame[key]]
             else:
                 self.episode_buffer[key].append(frame[key])
+            # Track decoded-image bytes for the RAM safety valve. Only
+            # observation.images.* fields are large enough to matter;
+            # joint vectors are < 1 KB and rounding noise.
+            if 'observation.images' in key:
+                value = frame[key]
+                nbytes = getattr(value, 'nbytes', None)
+                if nbytes is None and hasattr(value, '__len__'):
+                    # Fallback for non-ndarray entries (e.g. lists)
+                    nbytes = len(value) * 921_600
+                if nbytes is not None:
+                    self._episode_image_bytes += int(nbytes)
 
         self.episode_buffer['task'].append(task)
         self.episode_buffer['size'] += 1
+
+        # RAM safety valve. If the buffer has crossed the cap, raise the
+        # flag so data_manager forces a save before the next decode
+        # would push us into OOMkill territory. We never raise here —
+        # the current frame is already in; the caller drains.
+        if (
+            not self._buffer_full
+            and self._episode_image_bytes > self._DEFAULT_MAX_BUFFER_BYTES
+        ):
+            self._buffer_full = True
+            self._buffer_full_warning = (
+                f'Aufnahme-Puffer hat {self._episode_image_bytes // (1024 ** 3)} GB '
+                f'erreicht (Limit {self._DEFAULT_MAX_BUFFER_BYTES // (1024 ** 3)} GB). '
+                f'Episode wird automatisch gespeichert, damit der Container nicht '
+                f'wegen Arbeitsspeicher-Überlauf beendet wird. Naechste Aufnahmen '
+                f'bitte kuerzer halten oder Aufloesung reduzieren.'
+            )
+
+    def reset_buffer_accounting(self) -> None:
+        """Zero the RAM-valve counters. Called from the save path so the
+        next episode starts with a fresh budget."""
+        self._episode_image_bytes = 0
+        self._buffer_full = False
+        self._buffer_full_warning = ''
 
     def save_episode_without_video_encoding(self):
         episode_buffer = self.episode_buffer

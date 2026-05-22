@@ -663,22 +663,29 @@ class PhysicalAIServer(Node):
         now = time.perf_counter()
         if not hasattr(self, '_last_waiting_log'):
             self._last_waiting_log = {}
-        # Audit F17: one-shot camera-fps sanity check ~1.5 s after
-        # start_recording_time. If an enabled camera publishes below
-        # 0.8x of task_info.fps, surface a German [WARNUNG] so the
-        # operator knows the dataset will repeat frames (which trains
-        # strobing behavior into the policy).
+        # Audit F17 (re-armed): camera-fps sanity check every 5 s during
+        # recording. Was one-shot at +1.5 s; that missed mid-recording
+        # USB starvation / thermal throttling / hub contention, and the
+        # dataset silently grew with the same frame repeated N times
+        # (`camera_topic_msgs[name]` overwrite-in-place is what feeds
+        # convert_msgs_to_raw_datas — a stale cache reads the same
+        # CompressedImage twice). Strobing dataset trains a jittery ACT
+        # policy. 5 s cadence + 3 s observation window catches typical
+        # degradations within the same episode and re-fires the German
+        # warning, while staying out of the way of momentary jitter.
+        last_check_t = getattr(self, '_camera_fps_last_check_t', 0.0)
+        now_t = time.perf_counter()
         if (
             self.start_recording_time > 0
-            and not getattr(self, '_camera_fps_checked', False)
-            and (time.perf_counter() - self.start_recording_time) > 1.5
+            and (now_t - self.start_recording_time) > 1.5
+            and (now_t - last_check_t) > 5.0
         ):
-            self._camera_fps_checked = True
+            self._camera_fps_last_check_t = now_t
             try:
                 target_fps = float(getattr(self.task_info, 'fps', 0) or 0)
                 if target_fps > 0 and hasattr(self.communicator, 'get_camera_observed_hz'):
                     for cam_name in self.communicator.camera_topic_msgs.keys():
-                        observed = self.communicator.get_camera_observed_hz(cam_name, 1.0)
+                        observed = self.communicator.get_camera_observed_hz(cam_name, 3.0)
                         if observed is not None and observed < target_fps * 0.8:
                             warning = (
                                 f'Kamera "{cam_name}" liefert nur '
@@ -1090,10 +1097,12 @@ class PhysicalAIServer(Node):
                 )
 
                 self.start_recording_time = time.perf_counter()
-                # Audit F17: re-arm the one-shot camera-fps check at
-                # every START_RECORD so a slow-Hz warning fires once
-                # per session, not once per process.
+                # Audit F17 (re-armed): zero the throttle timestamp so
+                # the first 5 s check window starts fresh per episode.
+                # Legacy `_camera_fps_checked` kept for back-compat with
+                # any other reader; new logic uses _camera_fps_last_check_t.
                 self._camera_fps_checked = False
+                self._camera_fps_last_check_t = 0.0
                 self.on_recording = True
                 response.success = True
                 response.message = 'Recording started'
@@ -3134,15 +3143,20 @@ class PhysicalAIServer(Node):
 def main(args=None):
     rclpy.init(args=args)
     node = PhysicalAIServer()
-    # Multi-threaded executor so /calibration/cancel can dispatch while
-    # /calibration/execute_pose is blocked inside chunked_publish's
-    # 4-second sleep loop. Without this the stop-event polling at
-    # ~50ms cadence is unreachable — a single-threaded spin would
-    # serialise both callbacks and the cancel signal would never
-    # arrive in time. Three threads is enough for the typical wizard
-    # (one execute_pose in flight + concurrent cancel + status).
+    # Multi-threaded executor. Originally 3 threads — enough for the
+    # calibration wizard alone but provably too few for recording: this
+    # node carries ~35 service callbacks + 2 CompressedImage subs +
+    # several timers + rosbridge surface, all default
+    # MutuallyExclusiveCallbackGroup. A recording-tick decode (~20 ms
+    # per camera) can occupy 2 of 3 threads; a sensor_snapshot timer
+    # tick takes the third; any rosbridge call then queues at the
+    # executor level and drops camera frames at depth=1 QoS — the
+    # documented compounding bug that caused "10 Hz Aufnahme" classroom
+    # reports. 6 threads gives true parallel decode (cv2 releases the
+    # GIL during JPEG decode) and leaves headroom for services. Python
+    # GIL-bound for pure-Python callbacks; yields better under contention.
     from rclpy.executors import MultiThreadedExecutor
-    executor = MultiThreadedExecutor(num_threads=3)
+    executor = MultiThreadedExecutor(num_threads=6)
     executor.add_node(node)
     try:
         executor.spin()

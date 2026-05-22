@@ -186,6 +186,57 @@ jobs:
           EOF
           docker compose --env-file .env -f docker-compose.jetson.yml config > /dev/null
 
+  env-forwarding-guard:
+    # Every EDUBOTICS_* env var referenced by an entrypoint script
+    # must also be forwarded by docker-compose.yml. Without this guard
+    # the 2026-05 raw_mjpeg-override bug recurs: the entrypoint reads
+    # an env var that compose never injected into the container, the
+    # operator's `.env` change is silently a no-op, and students hit
+    # the entrypoint's hardcoded default forever. See finding #1 in
+    # the 2026-05-22 audit.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - name: Assert every EDUBOTICS_* in entrypoints is in compose
+        run: |
+          set -euo pipefail
+          # Scan entrypoint shell scripts for "${EDUBOTICS_FOO..." references.
+          referenced=$(
+            grep -rhoE 'EDUBOTICS_[A-Z0-9_]+' \
+                robotis_ai_setup/docker/open_manipulator/entrypoint_omx.sh \
+                robotis_ai_setup/wsl_rootfs/start-dockerd.sh \
+              2>/dev/null \
+              | sort -u
+          )
+          if [ -z "$referenced" ]; then
+            echo "No EDUBOTICS_* references found — guard is vacuously green."
+            exit 0
+          fi
+          # The same names must appear on the LEFT of an `=` inside any
+          # `environment:` list in any compose file we ship. Includes
+          # the Jetson compose so follower-only mode counts as forwarded.
+          # Uses POSIX [[:space:]] for portability across GNU + BSD sed.
+          forwarded=$(
+            grep -hoE '^[[:space:]]*-[[:space:]]*EDUBOTICS_[A-Z0-9_]+=' \
+                robotis_ai_setup/docker/docker-compose.yml \
+                robotis_ai_setup/docker/docker-compose.gpu.yml \
+                robotis_ai_setup/jetson_agent/docker-compose.jetson.yml \
+              2>/dev/null \
+              | sed -E 's/^[[:space:]]*-[[:space:]]*//;s/=.*//' \
+              | sort -u
+          )
+          missing=$(comm -23 <(echo "$referenced") <(echo "$forwarded"))
+          if [ -n "$missing" ]; then
+            echo "::error::The following EDUBOTICS_* env vars are read by entrypoint scripts but NOT forwarded by ANY compose file:"
+            echo "$missing" | sed 's/^/  - /'
+            echo
+            echo "Add each missing key to the relevant service's 'environment:' list with a sensible default."
+            exit 1
+          fi
+          echo "All EDUBOTICS_* env vars are forwarded:"
+          echo "$referenced" | sed 's/^/  OK /'
+
   overlay-guard:
     runs-on: ubuntu-latest
     timeout-minutes: 10

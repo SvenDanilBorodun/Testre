@@ -28,6 +28,24 @@ services:
       - CAMERA_NAME_1=${CAMERA_NAME_1:-gripper}
       - CAMERA_DEVICE_2=${CAMERA_DEVICE_2:-}
       - CAMERA_NAME_2=${CAMERA_NAME_2:-scene}
+      # Camera tuning knobs. Without these, entrypoint_omx.sh's
+      # `:-yuyv` etc. defaults always win and any per-classroom
+      # override in the host .env never reaches the container. Compose
+      # ${VAR} interpolation operates on the YAML only — the container
+      # runtime env is whatever this list specifies. yuyv default
+      # matches the ROBOTIS upstream camera_usb_cam.launch.py declared
+      # default; raw_mjpeg is intentionally NOT supported (broken in
+      # usb_cam 0.8.1, ros-drivers/usb_cam#346) and mjpeg2rgb saturates
+      # the CPU at 30 Hz × 2 cams.
+      - EDUBOTICS_CAMERA_PIXEL_FORMAT=${EDUBOTICS_CAMERA_PIXEL_FORMAT:-yuyv}
+      - EDUBOTICS_CAMERA_WIDTH=${EDUBOTICS_CAMERA_WIDTH:-640}
+      - EDUBOTICS_CAMERA_HEIGHT=${EDUBOTICS_CAMERA_HEIGHT:-480}
+      - EDUBOTICS_CAMERA_FRAMERATE=${EDUBOTICS_CAMERA_FRAMERATE:-30.0}
+      # Follower-only mode: student PCs default to 0 (both arms physically
+      # present); the classroom Jetson agent's compose file sets it to 1
+      # because the leader stays at the student's desk. Listed here so
+      # the env-forwarding-guard CI job stays green.
+      - EDUBOTICS_FOLLOWER_ONLY=${EDUBOTICS_FOLLOWER_ONLY:-0}
     volumes:
       - /dev:/dev
       - /dev/shm:/dev/shm

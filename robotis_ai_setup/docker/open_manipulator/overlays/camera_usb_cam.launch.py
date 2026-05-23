@@ -81,6 +81,16 @@ def generate_launch_description():
         Node(
             package='usb_cam',
             executable='usb_cam_node_exe',
+            # Per-camera node name. Without this both usb_cam launches
+            # land on the default name `usb_cam`, producing two nodes
+            # with identical names — `ros2 param get /usb_cam …` then
+            # only reaches one of them non-deterministically and
+            # `ros2 node info /usb_cam` warns about the collision.
+            # Using the same launch-config that drives the topic
+            # remappings keeps node name and topic prefix in lock-step
+            # (so /gripper publishes /gripper/image_raw, /scene
+            # publishes /scene/image_raw).
+            name=name,
             parameters=[
                 camera_config,
                 {

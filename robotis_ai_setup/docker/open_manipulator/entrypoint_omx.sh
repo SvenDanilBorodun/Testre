@@ -65,6 +65,91 @@ source /opt/ros/jazzy/setup.bash
 source /root/ros2_ws/install/setup.bash
 export ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-30}
 
+# --- Host USB-bridge detection for camera pixel-format default ---
+# The same physical_ai_server / open_manipulator image runs on two
+# wildly different USB host stacks:
+#
+#   1. Windows 11 student PC → bundled WSL2 distro → kernel-mode
+#      `vhci_hcd` driver forwards usbipd-attached devices. The bridge
+#      cannot sustain a 18.4 MB/s uncompressed YUYV stream from TWO
+#      Innomaker U20CAM-720P (640×480×30 each = 36.8 MB/s combined);
+#      both cameras crash within ~5 s with `VIDIOC_DQBUF: Select
+#      timeout` and the container restarts. Verified empirically
+#      2026-05-22 on Sven's classroom rig. The compressed-on-wire
+#      `mjpeg2rgb` mode keeps each stream at ~1 MB/s (the camera
+#      hardware encodes JPEG before the USB transfer; usb_cam decodes
+#      to RGB on the CPU) which the vhci_hcd bridge handles fine. CPU
+#      cost is ~30 % per camera at 30 Hz, well within budget on the
+#      i5-class student PCs.
+#
+#   2. Classroom Jetson Orin Nano → NATIVE USB host controller (no
+#      WSL bridge). The wire bandwidth is real USB 2.0 isoch, ~25 MB/s
+#      per controller. Two yuyv cameras still fit (18.4 MB/s × 2 fits
+#      across two controllers; usb_cam does no decode → minimal CPU).
+#      mjpeg2rgb would burn ~60 % of one ARM core for no benefit.
+#
+# We therefore default to `mjpeg2rgb` on WSL2 and `yuyv` on real
+# hardware (Jetson, or any non-WSL Linux). The override path is
+# unchanged: setting EDUBOTICS_CAMERA_PIXEL_FORMAT in the compose env
+# (forwarded through docker-compose.yml::environment) wins.
+#
+# Detection method: Microsoft's WSL2 kernel reports a build string
+# containing `microsoft` (case-insensitive). `uname -r` examples:
+#   WSL2:   "5.15.167.4-microsoft-standard-WSL2"
+#   Jetson: "5.15.148-tegra"
+# We grep case-insensitive to defend against future Microsoft kernel
+# string drift (e.g. "Microsoft" capitalised). Falls back to the
+# compose default (yuyv) if uname fails for any reason.
+detect_host_usb_bridge() {
+    if uname -r 2>/dev/null | grep -iq 'microsoft'; then
+        echo "vhci_hcd"
+    else
+        echo "native"
+    fi
+}
+EDUBOTICS_HOST_USB_BRIDGE="${EDUBOTICS_HOST_USB_BRIDGE:-$(detect_host_usb_bridge)}"
+export EDUBOTICS_HOST_USB_BRIDGE
+
+# --- Camera source selection: native_bridge vs usb_cam ---
+# native_bridge: the cameras are NOT attached to this distro via usbipd.
+#   The Windows GUI captures them natively (full 30 fps) and streams JPEG
+#   frames over localhost TCP to camera_ingest_node.py, which republishes
+#   them as CompressedImage on /<name>/image_raw/compressed. This is the
+#   WSL2 student path — the vhci_hcd USB/IP bridge caps in-container UVC
+#   capture at ~6-10 Hz per camera (per-device isochronous latency,
+#   benchmarked 2026-05-23) and that traffic also jitters the 100 Hz
+#   Dynamixel reads. Moving cameras off the bridge fixes both.
+# usb_cam: in-container V4L2 capture (Jetson Orin Nano / native Linux —
+#   real USB host, no bridge). Preserves the existing behaviour exactly,
+#   including the mjpeg2rgb-vs-yuyv split below.
+# Default follows the detected host bridge (WSL2 ⇒ native_bridge). An
+# explicit EDUBOTICS_CAMERA_SOURCE in the compose env always wins and is
+# the one-variable rollback to the old usbipd camera path.
+if [ -z "${EDUBOTICS_CAMERA_SOURCE:-}" ]; then
+    if [ "$EDUBOTICS_HOST_USB_BRIDGE" = "vhci_hcd" ]; then
+        EDUBOTICS_CAMERA_SOURCE="native_bridge"
+    else
+        EDUBOTICS_CAMERA_SOURCE="usb_cam"
+    fi
+fi
+export EDUBOTICS_CAMERA_SOURCE
+echo "[INIT] Camera source: ${EDUBOTICS_CAMERA_SOURCE} (host USB bridge: ${EDUBOTICS_HOST_USB_BRIDGE})"
+
+# The mjpeg2rgb-vs-yuyv pixel-format split only matters for the usb_cam
+# path (native_bridge re-encodes JPEG on the Windows host and never touches
+# usb_cam). Apply the WSL2 default ONLY if the operator hasn't overridden it
+# explicitly. Compose's `EDUBOTICS_CAMERA_PIXEL_FORMAT=${...:-yuyv}` always
+# sets the var to something non-empty, so we compare against the bare default
+# (`yuyv`) rather than `-z`. An operator .env override wins.
+if [ "$EDUBOTICS_CAMERA_SOURCE" = "usb_cam" ] && \
+   [ "$EDUBOTICS_HOST_USB_BRIDGE" = "vhci_hcd" ] && \
+   [ "${EDUBOTICS_CAMERA_PIXEL_FORMAT:-}" = "yuyv" ]; then
+    echo "[INIT] WSL2 detected (uname -r matches 'microsoft') — switching pixel_format default yuyv → mjpeg2rgb."
+    echo "[INIT] Rationale: WSL2 vhci_hcd bandwidth cannot sustain 2×YUYV at 640x480x30."
+    EDUBOTICS_CAMERA_PIXEL_FORMAT="mjpeg2rgb"
+    export EDUBOTICS_CAMERA_PIXEL_FORMAT
+fi
+
 echo "========================================"
 echo "ROBOTIS Open Manipulator - AI Mode"
 echo "Follower: ${FOLLOWER_PORT}"
@@ -342,7 +427,19 @@ else
     echo "[WARN] Could not read leader position — skipping sync"
 fi
 
-# --- Phase 4: Launch Cameras (up to 2) ---
+# --- Phase 4: Launch Cameras ---
+if [ "$EDUBOTICS_CAMERA_SOURCE" = "native_bridge" ]; then
+    # Native-bridge path (WSL2 student PC): the cameras are NOT attached to
+    # this distro. The Windows GUI captures them natively at 30 fps and
+    # streams JPEG frames over localhost TCP to camera_ingest_node.py, which
+    # republishes them as CompressedImage on /<name>/image_raw/compressed.
+    # No usbipd cameras, no usb_cam, no /dev/video* here.
+    echo "[LAUNCH] Native camera bridge mode — starting camera_ingest_node.py (TCP :${EDUBOTICS_CAMERA_INGEST_PORT:-5557})..."
+    python3 /usr/local/bin/camera_ingest_node.py &
+    PIDS="$PIDS $!"
+    echo "[LAUNCH] Camera ingest running — awaiting JPEG frames from the Windows GUI."
+else
+# --- usb_cam path (Jetson Orin Nano / native Linux): in-container V4L2 ---
 #
 # Audit F21: a single `[ -e $device ]` check at the top would race
 # usbipd's WSL forwarding on cold boot — the test fails, [WARN] is
@@ -362,6 +459,24 @@ wait_for_camera() {
     return 1
 }
 
+# Audit Gap-D 2026-05-23: refuse to launch when two configured cameras
+# resolve to the same underlying /dev/videoN. The Innomaker U20CAM-720P
+# pair both report USB serial "SN0001" and udev creates one shared
+# `/dev/v4l/by-id/usb-Innomaker_..._SN0001-...` symlink — pointing at
+# whichever device enumerated last. The GUI's wsl_bridge.list_video_devices
+# already de-dups by Bus info to avoid handing the same by-id path to both
+# camera slots, but a stale .env from a prior install (or a manual edit)
+# can still encode the colliding path. Worst-case: the student records
+# 100 episodes with the gripper feed labelled as "scene" and the trained
+# policy then drives the wrong camera at inference time → silent corpus
+# rot.
+#
+# Detection happens AFTER readlink resolution (below) so we compare the
+# real `/dev/videoN`, not the symlink names. If a collision is detected
+# we hard-exit with a German [STOPP] message — failing loud matches Rule
+# §3 ("overlays must fail loudly on missing target") and is consistent
+# with the post-sync verification hard-exit at the top of this script.
+declare -A SEEN_REAL_DEV   # bash 4 associative array, real_dev → "i:name"
 for i in 1 2; do
     device_var="CAMERA_DEVICE_$i"
     name_var="CAMERA_NAME_$i"
@@ -385,13 +500,29 @@ for i in 1 2; do
     # "Device specified is not available or is not a valid V4L2 device".
     # The GUI writes by-id paths into .env when a camera exposes a USB
     # serial (stable across replug); the resolution stays per-launch.
+    real_dev="$device"
     if [ -L "$device" ]; then
         resolved="$(readlink -f "$device" 2>/dev/null || true)"
         if [ -e "$resolved" ]; then
             echo "[LAUNCH] Camera $i: resolved $device → $resolved"
             device="$resolved"
+            real_dev="$resolved"
         fi
     fi
+    # Audit Gap-D collision check — see the block above this loop.
+    if [ -n "${SEEN_REAL_DEV[$real_dev]:-}" ]; then
+        prev="${SEEN_REAL_DEV[$real_dev]}"
+        echo "[STOPP] Beide konfigurierte Kameras zeigen auf dasselbe Gerät: $real_dev"
+        echo "[STOPP]   Slot $prev"
+        echo "[STOPP]   Slot $i:$name"
+        echo "[STOPP] Ursache: Zwei UVC-Kameras mit identischer USB-Seriennummer (häufig bei Innomaker U20CAM-720P)"
+        echo "[STOPP] teilen sich denselben /dev/v4l/by-id/-Symlink. Die GUI sollte beim nächsten"
+        echo "[STOPP] 'Geräte aktualisieren' automatisch by-path verwenden. Bis dahin:"
+        echo "[STOPP]   1. EduBotics neu starten (GUI → 'Hardware neu erkennen')"
+        echo "[STOPP]   2. Oder CAMERA_DEVICE_2 in .env manuell auf /dev/v4l/by-path/... setzen."
+        exit 3
+    fi
+    SEEN_REAL_DEV[$real_dev]="$i:$name"
     echo "[LAUNCH] Starting camera $i ($name on $device)..."
     # Audit F22: declare an explicit resolution + format here instead
     # of relying on whatever upstream `params_1.yaml` defaults to. Two
@@ -399,21 +530,32 @@ for i in 1 2; do
     # producing `VIDIOC_S_FMT: Invalid argument` on the second camera
     # (silenced into stderr, healthcheck used to miss it).
     #
-    # pixel_format MUST stay at `yuyv` — the ROBOTIS upstream
-    # camera_usb_cam.launch.py declared default. Earlier this entrypoint
-    # overrode to `raw_mjpeg` (a usb_cam 0.8.1 mode that passes camera
-    # MJPG bytes straight through without decoding). That mode is BROKEN:
-    # usb_cam tags the message `encoding="yuv422"` and lies about the
-    # buffer size, so every downstream consumer (recording, browser
-    # preview, perception, training) gets either green tiles or RNG noise.
-    # Confirmed by saving a snapshot JPEG via web_video_server — the file
-    # was 30 KB of garbage. `yuyv` does in-driver V4L2 negotiation, no
-    # software decode (avoids the 94 % CPU `mjpeg2rgb` saturation), and
-    # the image_transport republisher handles JPEG compression on
-    # `/image_raw/compressed` for ROS subscribers that want bytes-on-the-
-    # wire savings. Override via EDUBOTICS_CAMERA_PIXEL_FORMAT only if you
-    # genuinely know what you're doing — keep `raw_mjpeg` out of the
-    # supported set.
+    # pixel_format default is split by host USB bridge — see the
+    # detect_host_usb_bridge() block near the top of this script.
+    #   - WSL2 student PC (vhci_hcd): default flips to `mjpeg2rgb`. The
+    #     bridge cannot sustain 2×YUYV at 640×480×30 (~37 MB/s combined)
+    #     and both cameras crash with `Select timeout` within ~5 s.
+    #     mjpeg2rgb keeps each stream at ~1 MB/s on the wire (camera
+    #     hardware does JPEG encode); usb_cam decodes to RGB on the CPU
+    #     at roughly 30 %/cam, which the i5-class student PCs handle.
+    #     Verified 2026-05-22 on Sven's classroom rig.
+    #   - Native USB host (Jetson Orin Nano, real desktop Linux): default
+    #     stays `yuyv` (compose default). Real USB 2.0 isoch fits two
+    #     YUYV streams; usb_cam does no decode → minimal CPU. mjpeg2rgb
+    #     would saturate one ARM core on the Jetson for no benefit.
+    #
+    # `raw_mjpeg` is intentionally NOT a supported value: usb_cam 0.8.1
+    # tags the message `encoding="yuv422"` while passing MJPG bytes
+    # straight through, and every downstream consumer (recording,
+    # browser preview, perception, training) gets either green tiles
+    # or RNG noise (ros-drivers/usb_cam#346). Confirmed by saving a
+    # snapshot JPEG via web_video_server — the file was 30 KB of
+    # garbage. The previous documentation here claimed mjpeg2rgb caused
+    # "94 % CPU saturation"; that was measured against the older
+    # upstream usb_cam that lacked the libjpeg-turbo fast path. Empirical
+    # 2026-05-23 measurement on our pinned 0.8.1: ~30 %/cam at 30 Hz.
+    # Override via EDUBOTICS_CAMERA_PIXEL_FORMAT — keep `raw_mjpeg` out
+    # of the supported set.
     ros2 launch open_manipulator_bringup camera_usb_cam.launch.py \
         name:="$name" \
         video_device:="$device" \
@@ -423,6 +565,7 @@ for i in 1 2; do
         pixel_format:="${EDUBOTICS_CAMERA_PIXEL_FORMAT:-yuyv}" &
     PIDS="$PIDS $!"
 done
+fi
 
 echo "========================================"
 echo "All services running — ready for teleoperation and inference."

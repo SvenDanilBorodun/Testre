@@ -27,6 +27,11 @@ def _is_managed_key(key: str) -> bool:
     return key in MANAGED_KEYS or key.startswith(_MANAGED_PREFIXES)
 
 
+def _has_camera_source(preserved: list[str]) -> bool:
+    """True if a preserved (operator-set) line already defines the camera source."""
+    return any(p.lstrip().startswith("EDUBOTICS_CAMERA_SOURCE=") for p in preserved)
+
+
 def _quote(value: str) -> str:
     """Double-quote a value so docker-compose handles spaces.
 
@@ -127,6 +132,9 @@ def generate_env_file(config: HardwareConfig, output_path: str = ENV_FILE) -> st
     if config.leader is None or config.follower is None:
         raise ValueError("Both leader and follower arms must be configured before generating .env")
 
+    from .constants import cameras_use_native_bridge
+    native = cameras_use_native_bridge()
+
     domain_id = _resolve_ros_domain_id()
     preserved = _read_unmanaged_lines(output_path)
     lines: list[str] = []
@@ -144,11 +152,23 @@ def generate_env_file(config: HardwareConfig, output_path: str = ENV_FILE) -> st
                 raise ValueError(
                     f"Kamera ohne gueltige Rolle (gripper/scene): {cam.path}"
                 )
-            lines.append(f"CAMERA_DEVICE_{i}={_quote(cam.path)}")
+            # In native_bridge mode the container does NOT capture from
+            # /dev/video* (the Windows GUI streams JPEG frames into
+            # camera_ingest_node.py). CAMERA_DEVICE stays empty so the
+            # entrypoint/healthcheck never wait on a non-existent device;
+            # the role still drives the published /<role>/image_raw/compressed
+            # topic. The capture index lives in the GUI session, not the .env.
+            device_value = "" if native else cam.path
+            lines.append(f"CAMERA_DEVICE_{i}={_quote(device_value)}")
             lines.append(f"CAMERA_NAME_{i}={_quote(cam.role)}")
 
     lines.append(f"ROS_DOMAIN_ID={domain_id}")
     lines.append(f"REGISTRY={REGISTRY}")
+    # Default camera source. Yields to an operator override already present in
+    # the preserved (unmanaged) lines, so EDUBOTICS_CAMERA_SOURCE=usb_cam in a
+    # hand-edited .env survives regeneration (one-variable rollback).
+    if native and not _has_camera_source(preserved):
+        lines.append("EDUBOTICS_CAMERA_SOURCE=native_bridge")
     if preserved:
         lines.append("")
         lines.append("# Operator overrides preserved across regeneration.")
@@ -181,6 +201,9 @@ def generate_cloud_only_env(output_path: str = ENV_FILE) -> str:
         f"ROS_DOMAIN_ID={domain_id}",
         f"REGISTRY={REGISTRY}",
     ]
+    from .constants import cameras_use_native_bridge
+    if cameras_use_native_bridge() and not _has_camera_source(preserved):
+        lines.append("EDUBOTICS_CAMERA_SOURCE=native_bridge")
     if preserved:
         lines.append("")
         lines.append("# Operator overrides preserved across regeneration.")

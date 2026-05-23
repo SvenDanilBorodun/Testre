@@ -171,6 +171,26 @@ jobs:
           EOF
           docker compose --env-file .env config > /dev/null
           docker compose --env-file .env -f docker-compose.yml -f docker-compose.gpu.yml config > /dev/null
+      - name: Assert manager healthcheck uses 127.0.0.1 (not localhost)
+        # Audit 2026-05-23: nginx:alpine's busybox wget resolves
+        # `localhost` to ::1 first (NSS hosts file order) and does not
+        # fall back to IPv4. nginx in the manager image listens IPv4-only,
+        # so a `wget http://localhost/...` healthcheck always returns
+        # "Connection refused" → perpetual unhealthy state that masks
+        # real failures. Lock this against future regression — see
+        # robotis_ai_setup/docker/docker-compose.yml::physical_ai_manager
+        # healthcheck for the full rationale.
+        run: |
+          if ! grep -q '127\.0\.0\.1/version\.json' \
+               robotis_ai_setup/docker/docker-compose.yml ; then
+            echo "::error::physical_ai_manager healthcheck must use 127.0.0.1/version.json, not localhost"
+            exit 1
+          fi
+          if grep -q 'localhost/version\.json' \
+                 robotis_ai_setup/docker/docker-compose.yml ; then
+            echo "::error::physical_ai_manager healthcheck still references localhost — busybox wget AAAA-first regression"
+            exit 1
+          fi
       - name: docker compose config (Jetson)
         # Migration 019: the Jetson agent ships its own compose file.
         # Same kind of validation — parses YAML, expands env, asserts
@@ -198,14 +218,26 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-      - name: Assert every EDUBOTICS_* in entrypoints is in compose
+      - name: Assert every EDUBOTICS_* in entrypoints + overlays is in compose
         run: |
           set -euo pipefail
-          # Scan entrypoint shell scripts for "${EDUBOTICS_FOO..." references.
+          # Scan entrypoint shell scripts AND overlay Python modules for
+          # any "EDUBOTICS_FOO..." reference. Extended 2026-05-23 to
+          # include the physical_ai_server + open_manipulator overlay
+          # trees — those modules read `os.environ.get('EDUBOTICS_*')`
+          # at module import time, so a missing compose-forward leaves
+          # the operator's .env override invisible to the container in
+          # exactly the same way as a missing entrypoint forward did
+          # in the 2026-05 raw_mjpeg-override regression.
           referenced=$(
             grep -rhoE 'EDUBOTICS_[A-Z0-9_]+' \
+                --exclude-dir=__pycache__ \
+                --include='*.py' --include='*.sh' \
                 robotis_ai_setup/docker/open_manipulator/entrypoint_omx.sh \
+                robotis_ai_setup/docker/open_manipulator/camera_ingest_node.py \
                 robotis_ai_setup/wsl_rootfs/start-dockerd.sh \
+                robotis_ai_setup/docker/physical_ai_server/overlays \
+                robotis_ai_setup/docker/open_manipulator/overlays \
               2>/dev/null \
               | sort -u
           )

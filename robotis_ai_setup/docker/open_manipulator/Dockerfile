@@ -33,9 +33,15 @@ RUN set -eux; \
 # Copy entrypoint and identification script
 COPY entrypoint_omx.sh /entrypoint_omx.sh
 COPY identify_arm.py /usr/local/bin/identify_arm.py
+# Native-camera ingest node (WSL2/Windows student path). NOT an apply_overlay
+# target — it's a brand-new standalone rclpy script with no upstream file to
+# replace, so it's COPY'd like identify_arm.py. The entrypoint runs it (instead
+# of usb_cam) when EDUBOTICS_CAMERA_SOURCE=native_bridge. See the script header
+# and CLAUDE.md "native camera capture bridge" for the full rationale.
+COPY camera_ingest_node.py /usr/local/bin/camera_ingest_node.py
 # Strip Windows CRLF line endings (Git on Windows may convert LF→CRLF)
-RUN sed -i 's/\r$//' /entrypoint_omx.sh /usr/local/bin/identify_arm.py \
-    && chmod +x /entrypoint_omx.sh /usr/local/bin/identify_arm.py
+RUN sed -i 's/\r$//' /entrypoint_omx.sh /usr/local/bin/identify_arm.py /usr/local/bin/camera_ingest_node.py \
+    && chmod +x /entrypoint_omx.sh /usr/local/bin/identify_arm.py /usr/local/bin/camera_ingest_node.py
 
 # Overlay patched ros2_control configs:
 #   - follower (omx_f): joint limits + aligned gripper current limit

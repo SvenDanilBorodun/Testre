@@ -113,6 +113,7 @@ def _apply_window_icon(root: tk.Tk) -> None:
 
 
 from . import device_manager, docker_manager, health_checker, config_generator, wsl_bridge, update_checker, webview_window
+from . import camera_bridge as camera_bridge_mod
 from .constants import (
     APP_VERSION,
     UPDATE_API_URL,
@@ -120,6 +121,7 @@ from .constants import (
     PORT_WEB_UI,
     DOCKER_DIR,
     ENV_FILE,
+    cameras_use_native_bridge,
 )
 
 
@@ -136,6 +138,9 @@ class EduBoticsApp:
         # State
         self.hardware = device_manager.HardwareConfig()
         self.cameras: list[device_manager.CameraDevice] = []
+        # Native camera capture bridge (Windows student path). Created on
+        # environment start, stopped on environment stop / app close.
+        self.camera_bridge = None
         self.gpu_available = False
         self.running = False
         self._scanning = False
@@ -958,11 +963,18 @@ class EduBoticsApp:
             # ran, whose VID:PID never got a policy. The student gets a one-
             # click "Freigeben" repair if any are found. Cheap call (no docker,
             # no WSL — just usbipd list + Get-PnpDevice).
-            try:
-                unbound = device_manager.list_unbound_cameras()
-            except Exception as exc:  # never block the scan UI on this probe
-                self._log(f"Unfreigegebene Kameras konnten nicht ermittelt werden: {exc}")
+            #
+            # Skipped in native_bridge mode: cameras are captured natively on
+            # Windows and never attached to WSL via usbipd, so a "not bound"
+            # state is irrelevant there.
+            if cameras_use_native_bridge():
                 unbound = []
+            else:
+                try:
+                    unbound = device_manager.list_unbound_cameras()
+                except Exception as exc:  # never block the scan UI on this probe
+                    self._log(f"Unfreigegebene Kameras konnten nicht ermittelt werden: {exc}")
+                    unbound = []
 
             def _update_checkbuttons():
                 # Clear old checkbuttons
@@ -1275,6 +1287,12 @@ class EduBoticsApp:
                 for service, ok in health.items():
                     self._log(f"  {service}: {'OK' if ok else 'NICHT BEREIT'}")
 
+                # 4.5 Kamera-Bridge starten (native Aufnahme auf Windows →
+                # Stream in den Container). Nur im native_bridge-Modus und
+                # wenn Kameras zugewiesen sind.
+                if not is_cloud_only:
+                    self._start_camera_bridge()
+
                 # 5. Web-Oberfläche öffnen
                 self._log("Web-Oberfläche wird geöffnet...")
                 self._open_webview()
@@ -1295,6 +1313,47 @@ class EduBoticsApp:
                     self._update_start_button()
 
         threading.Thread(target=_do_start, daemon=True).start()
+
+    # ── Native camera bridge ─────────────────────────────────────────
+
+    def _start_camera_bridge(self):
+        """Start native Windows camera capture → TCP stream into the container.
+
+        No-op when cameras run via usb_cam (Jetson) or when no camera was
+        assigned a role. Maps each assigned camera's OpenCV index to its role
+        (gripper -> cam_id 0, scene -> cam_id 1, matching the container's
+        EDUBOTICS_CAMERA_NAMES order).
+        """
+        if not cameras_use_native_bridge():
+            return
+        # Tear down any previous bridge (e.g. a stop→start without app restart).
+        self._stop_camera_bridge()
+        role_to_index = {
+            cam.role: cam.win_index
+            for cam in self.hardware.cameras
+            if cam.role in ("gripper", "scene") and cam.win_index >= 0
+        }
+        if not role_to_index:
+            self._log("Keine Kamera zugewiesen — Kamera-Bridge wird nicht gestartet.")
+            return
+        try:
+            self.camera_bridge = camera_bridge_mod.CameraBridge(role_to_index)
+            self.camera_bridge.start()
+            roles = ", ".join(sorted(role_to_index))
+            self._log(f"Kamera-Bridge gestartet (nativ, {roles}) — streamt mit "
+                      f"{int(camera_bridge_mod.constants.CAMERA_FRAMERATE)} fps in den Container.")
+        except Exception as e:  # noqa: BLE001
+            self.camera_bridge = None
+            self._log(f"WARNUNG: Kamera-Bridge konnte nicht gestartet werden: {e}")
+
+    def _stop_camera_bridge(self):
+        """Stop the native camera bridge if running. Best-effort."""
+        if self.camera_bridge is not None:
+            try:
+                self.camera_bridge.stop()
+            except Exception:  # noqa: BLE001
+                pass
+            self.camera_bridge = None
 
     # ── Stop Environment ─────────────────────────────────────────────
 
@@ -1356,6 +1415,7 @@ class EduBoticsApp:
             self._log("Container werden gestoppt...")
             self.root.after(0, lambda: self.progress.start(10))
 
+            self._stop_camera_bridge()
             if self.cloud_only.get():
                 docker_manager.stop_cloud_only(log=self._log)
             else:
@@ -1379,6 +1439,7 @@ class EduBoticsApp:
                 "Die Umgebung läuft noch.\nContainer stoppen und beenden?",
             ):
                 self._log("Beende — Container werden gestoppt...")
+                self._stop_camera_bridge()
                 webview_window.destroy_all()
                 if self.cloud_only.get():
                     docker_manager.stop_cloud_only()

@@ -20,10 +20,17 @@ pywebview_binaries = collect_dynamic_libs('webview')
 pythonnet_binaries = collect_dynamic_libs('clr_loader') + collect_dynamic_libs('pythonnet')
 pywebview_datas = collect_data_files('webview', includes=['lib/*'])
 
+# OpenCV (cv2) + numpy power the native camera bridge (camera_bridge.py /
+# win_camera.py). PyInstaller ships hooks for both, but collect their native
+# DLLs explicitly so the camera capture works on a clean student PC with no
+# Python install. cv2's DirectShow capture also needs the MSVC runtime, which
+# is present on Win10/11 by default.
+cv2_binaries = collect_dynamic_libs('cv2')
+
 a = Analysis(
     ['main.py'],
     pathex=[],
-    binaries=pywebview_binaries + pythonnet_binaries,
+    binaries=pywebview_binaries + pythonnet_binaries + cv2_binaries,
     datas=([
         ('assets', 'assets'),
     ] if os.path.isdir('assets') and os.listdir('assets') != ['.gitkeep'] else []) + pywebview_datas,
@@ -37,6 +44,8 @@ a = Analysis(
         'clr',
         'clr_loader',
         'clr_loader.netfx',
+        'cv2',
+        'numpy',
     ],
     hookspath=[],
     hooksconfig={},

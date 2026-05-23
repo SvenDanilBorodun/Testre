@@ -118,6 +118,35 @@ def list_serial_devices() -> list[str]:
         return []
 
 
+def _resolve_to_by_path(real_path: str) -> Optional[str]:
+    """Return a `/dev/v4l/by-path/...` symlink that resolves to ``real_path``.
+
+    Used as a fallback when two cameras share a colliding by-id symlink
+    (the Innomaker SN0001 case — see ``list_video_devices`` for context).
+    by-path is anchored to the USB topology, so even identical-serial
+    cameras get distinct symlinks. Returns ``None`` if no by-path entry
+    resolves back to the device.
+    """
+    if not real_path:
+        return None
+    cmd = (
+        f"udevadm info -q symlink -n {real_path} 2>/dev/null | tr ' ' '\\n' | "
+        f"grep 'v4l/by-path' | while read s; do "
+        f"  if [ \"$(readlink -f /dev/$s 2>/dev/null)\" = \"{real_path}\" ]; then "
+        f"    echo /dev/$s; break; "
+        f"  fi; "
+        f"done"
+    )
+    try:
+        res = run(cmd, timeout=5, check=False)
+    except WSLError:
+        return None
+    line = res.stdout.strip().splitlines()
+    if line and line[0].strip():
+        return line[0].strip()
+    return None
+
+
 def list_video_devices() -> list[dict]:
     """List /dev/video* capture devices with friendly names.
 
@@ -197,7 +226,7 @@ done
         # physical USB port (e.g. `usb-vhci_hcd.0-1` vs `usb-vhci_hcd.0-2`),
         # so we key on that to guarantee one entry per camera even when
         # both expose the same by-id symlink.
-        devices: list[dict] = []
+        raw_rows: list[dict] = []
         seen_bus: set[str] = set()
         for line in result.stdout.strip().splitlines():
             parts = line.split("|", 3)
@@ -211,7 +240,42 @@ done
             if key in seen_bus:
                 continue
             seen_bus.add(key)
-            devices.append({"path": path, "name": name or path})
-        return devices
+            raw_rows.append({
+                "path": path,
+                "name": name or path,
+                "real_path": real_path,
+                "bus": bus,
+            })
+
+        # Audit Gap-D 2026-05-23: when TWO physical cameras report the
+        # IDENTICAL USB serial (e.g. the Innomaker U20CAM-720P pair both
+        # report SN0001), udev's by-id symlink generation collides: each
+        # device gets the SAME `/dev/v4l/by-id/usb-..._SN0001-...` name,
+        # pointing at whichever device enumerated last. The shell loop
+        # above picks the by-id path for each row independently, so two
+        # rows can carry the same by-id `path` while differing in `bus`.
+        # If we hand those colliding by-id paths to .env, the entrypoint
+        # opens the same /dev/videoN twice → silent gripper↔scene swap.
+        #
+        # Fix: detect by-id collisions across the de-duped row set and
+        # downgrade the colliding rows to their by-path equivalent.
+        # by-path is anchored to the physical USB topology
+        # (`usb-vhci_hcd.0-1` vs `-2`), so it survives reboot without
+        # colliding even on identical-serial cameras. We re-query
+        # `udevadm symlink` for each affected row.
+        if len(raw_rows) > 1:
+            path_counts: dict[str, int] = {}
+            for row in raw_rows:
+                if "/by-id/" in row["path"]:
+                    path_counts[row["path"]] = path_counts.get(row["path"], 0) + 1
+            colliding = {p for p, c in path_counts.items() if c > 1}
+            if colliding:
+                for row in raw_rows:
+                    if row["path"] in colliding:
+                        by_path = _resolve_to_by_path(row["real_path"])
+                        if by_path:
+                            row["path"] = by_path
+
+        return [{"path": r["path"], "name": r["name"]} for r in raw_rows]
     except WSLError:
         return []

@@ -8,3 +8,10 @@
 # so `pip install -r requirements.txt --pre` is required.
 pywebview>=6.2.1
 pythonnet>=3.1.0rc0
+
+# Native camera bridge: capture the USB cameras directly on Windows (OpenCV
+# DirectShow, cv2.CAP_DSHOW) and stream JPEG frames into the container. The
+# full opencv-python wheel is required (NOT -headless — we need the DirectShow
+# capture backend); it bundles numpy.
+opencv-python>=4.8
+numpy>=1.24

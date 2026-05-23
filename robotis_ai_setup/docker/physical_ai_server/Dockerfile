@@ -119,13 +119,26 @@ COPY overlays/communicator.py /tmp/overlays/communicator.py
 # directory as data_manager.py / data_converter.py) so the cleaner
 # `preset='fast', crf=23` defaults actually ship.
 COPY overlays/lerobot_dataset_wrapper.py /tmp/overlays/lerobot_dataset_wrapper.py
-# Audit F36: web_video_server loopback bind + respawn. The launch file
-# in the upstream base image binds `0.0.0.0:8080` and lacks respawn — a
-# misconfigured Windows Firewall would expose the unauthenticated MJPEG
-# stream to the school LAN, and one SIGSEGV would leave the browser
-# preview blank until container restart. The overlay version binds
-# `127.0.0.1:8080` (defence-in-depth alongside the compose port mapping)
-# and adds `respawn=True, respawn_delay=2.0`.
+# Audit F36 + 2026-05-23 fix: web_video_server explicit address + port
+# binding and respawn-on-crash. The upstream launch file leaves these
+# unset, so `web_video_server` falls through to its own internal default
+# (binds 0.0.0.0:8080 — fine for our use case) and has no respawn.
+#
+# The overlay sets both fields explicitly to lock the contract against
+# any future upstream default flip, and pairs that with
+# `respawn=True, respawn_delay=2.0` so a SIGSEGV on malformed
+# CompressedImage frames does NOT leave the browser preview blank
+# until container restart.
+#
+# IMPORTANT: the overlay binds the container's 0.0.0.0, NOT 127.0.0.1.
+# Docker port-publish (`127.0.0.1:8080:8080` in docker-compose.yml)
+# forwards host packets to the container's eth0 — a container-side
+# 127.0.0.1 bind makes the stream unreachable from the host, which
+# manifests as blank Aufnahme preview cells. LAN isolation is enforced
+# by the compose loopback mapping; that is the actual defence-in-depth
+# layer. An earlier iteration of this overlay (pre-2026-05-23) bound
+# 127.0.0.1 inside the container and was the root cause of the blank
+# preview regression on Sven's classroom rig.
 COPY overlays/physical_ai_server_bringup.launch.py /tmp/overlays/physical_ai_server_bringup.launch.py
 RUN set -e && \
     apply_overlay() { \

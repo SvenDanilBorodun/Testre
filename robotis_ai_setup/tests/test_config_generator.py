@@ -10,6 +10,21 @@ from gui.app.device_manager import ArmDevice, CameraDevice, HardwareConfig
 
 class TestConfigGenerator(unittest.TestCase):
 
+    def setUp(self):
+        # These tests assert the usb_cam .env layout (CAMERA_DEVICE carries the
+        # /dev/video path). Pin the camera source so the result is identical on
+        # Linux CI and a Windows workstation (where native_bridge is the
+        # default and would empty CAMERA_DEVICE). The native_bridge layout is
+        # covered by TestConfigGeneratorNativeBridge below.
+        self._prev_src = os.environ.get("EDUBOTICS_CAMERA_SOURCE")
+        os.environ["EDUBOTICS_CAMERA_SOURCE"] = "usb_cam"
+
+    def tearDown(self):
+        if self._prev_src is None:
+            os.environ.pop("EDUBOTICS_CAMERA_SOURCE", None)
+        else:
+            os.environ["EDUBOTICS_CAMERA_SOURCE"] = self._prev_src
+
     def test_generate_env_with_cameras(self):
         config = HardwareConfig(
             leader=ArmDevice(
@@ -135,6 +150,61 @@ class TestConfigGenerator(unittest.TestCase):
 
         config.follower = ArmDevice("1-4", "/dev/ttyACM1", "follower", "test")
         self.assertTrue(config.is_complete)
+
+
+class TestConfigGeneratorNativeBridge(unittest.TestCase):
+    """native_bridge mode: cameras captured on Windows, container CAMERA_DEVICE
+    stays empty, EDUBOTICS_CAMERA_SOURCE=native_bridge is emitted."""
+
+    def setUp(self):
+        self._prev_src = os.environ.get("EDUBOTICS_CAMERA_SOURCE")
+        os.environ["EDUBOTICS_CAMERA_SOURCE"] = "native_bridge"
+
+    def tearDown(self):
+        if self._prev_src is None:
+            os.environ.pop("EDUBOTICS_CAMERA_SOURCE", None)
+        else:
+            os.environ["EDUBOTICS_CAMERA_SOURCE"] = self._prev_src
+
+    def _config(self):
+        return HardwareConfig(
+            leader=ArmDevice("1-3", "/dev/serial/by-id/leader", "leader", "OpenRB-150"),
+            follower=ArmDevice("1-4", "/dev/serial/by-id/follower", "follower", "OpenRB-150"),
+            cameras=[
+                CameraDevice(path="Index 0", name="Gripper Cam", role="gripper", win_index=0),
+                CameraDevice(path="Index 1", name="Scene Cam", role="scene", win_index=1),
+            ],
+        )
+
+    def test_native_bridge_empties_camera_device_and_sets_source(self):
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".env", delete=False) as f:
+            tmp_path = f.name
+        try:
+            content = generate_env_file(self._config(), output_path=tmp_path)
+            # Container does not capture from /dev/video* — device stays empty.
+            self.assertIn('CAMERA_DEVICE_1=""', content)
+            self.assertIn('CAMERA_DEVICE_2=""', content)
+            # Roles still drive the published topic names.
+            self.assertIn('CAMERA_NAME_1="gripper"', content)
+            self.assertIn('CAMERA_NAME_2="scene"', content)
+            # Source emitted so the container/healthcheck branch correctly.
+            self.assertIn("EDUBOTICS_CAMERA_SOURCE=native_bridge", content)
+        finally:
+            os.unlink(tmp_path)
+
+    def test_operator_usb_cam_override_is_preserved(self):
+        """A hand-edited EDUBOTICS_CAMERA_SOURCE=usb_cam must survive regen
+        (one-variable rollback) and we must not duplicate the key."""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".env", delete=False) as f:
+            tmp_path = f.name
+            f.write("EDUBOTICS_CAMERA_SOURCE=usb_cam\n")
+        try:
+            content = generate_env_file(self._config(), output_path=tmp_path)
+            self.assertEqual(content.count("EDUBOTICS_CAMERA_SOURCE="), 1)
+            self.assertIn("EDUBOTICS_CAMERA_SOURCE=usb_cam", content)
+            self.assertNotIn("EDUBOTICS_CAMERA_SOURCE=native_bridge", content)
+        finally:
+            os.unlink(tmp_path)
 
 
 if __name__ == "__main__":

@@ -20,7 +20,7 @@ def _read_version_file() -> str:
             return candidate.read_text(encoding="utf-8").strip()
         except (OSError, UnicodeDecodeError):
             continue
-    return "2.3.7"
+    return "2.4.0"
 
 
 # GUI version — read from repo-root VERSION file (single source of truth).
@@ -94,6 +94,39 @@ ALL_IMAGES = [IMAGE_OPEN_MANIPULATOR, IMAGE_PHYSICAL_AI_SERVER, IMAGE_PHYSICAL_A
 PORT_WEB_UI = 80
 PORT_VIDEO_SERVER = 8080
 PORT_ROSBRIDGE = 9090
+
+# --- Native camera bridge (WSL2/Windows student path) ---
+# The two USB cameras are captured NATIVELY on Windows (the WSL2 usbipd bridge
+# caps in-container UVC at ~6-10 Hz — see CLAUDE.md "native camera capture
+# bridge") and streamed as JPEG over a localhost TCP socket into the
+# open_manipulator container's camera_ingest_node.py, which republishes them as
+# CompressedImage on /<role>/image_raw/compressed. usb_cam is used only on the
+# native-Linux / Jetson path (no GUI).
+CAMERA_INGEST_HOST = os.environ.get("EDUBOTICS_CAMERA_INGEST_HOST", "127.0.0.1")
+PORT_CAMERA_INGEST = int(os.environ.get("EDUBOTICS_CAMERA_INGEST_PORT", "5557"))
+# cam_id index -> role. MUST match the container's EDUBOTICS_CAMERA_NAMES order
+# (default "gripper,scene") so cam_id 0 publishes /gripper/... and 1 /scene/...
+CAMERA_BRIDGE_ROLES = ("gripper", "scene")
+CAMERA_WIDTH = int(os.environ.get("EDUBOTICS_CAMERA_WIDTH", "640"))
+CAMERA_HEIGHT = int(os.environ.get("EDUBOTICS_CAMERA_HEIGHT", "480"))
+CAMERA_FRAMERATE = float(os.environ.get("EDUBOTICS_CAMERA_FRAMERATE", "30.0"))
+CAMERA_JPEG_QUALITY = int(os.environ.get("EDUBOTICS_CAMERA_JPEG_QUALITY", "80"))
+
+
+def cameras_use_native_bridge() -> bool:
+    """Whether cameras are captured natively on Windows (vs usb_cam-over-usbipd).
+
+    The GUI only runs on Windows, where native capture is always the right
+    choice. `EDUBOTICS_CAMERA_SOURCE=usb_cam` is the one-variable rollback to
+    the old usbipd camera path (must also be set in the .env for the container).
+    """
+    import sys
+    src = os.environ.get("EDUBOTICS_CAMERA_SOURCE", "").strip().lower()
+    if src == "native_bridge":
+        return True
+    if src == "usb_cam":
+        return False
+    return sys.platform == "win32"
 
 # USB identifiers
 ROBOTIS_VID = "2F5D"  # ROBOTIS USB Vendor ID (OpenRB-150 boards, PIDs: 0103, 2202)

@@ -20,6 +20,13 @@ services:
       memlock: 8428281856
     networks:
       - ros_net
+    ports:
+      # Native-camera ingest TCP server (camera_ingest_node.py). Loopback-bind
+      # so the JPEG stream from the Windows GUI is reachable at localhost:5557
+      # via the WSL2 NAT localhost-forwarder, but never exposed to the school
+      # LAN. Only used when EDUBOTICS_CAMERA_SOURCE=native_bridge (WSL2 student
+      # path); harmless on the Jetson (the GUI simply never connects).
+      - "127.0.0.1:5557:5557"
     environment:
       - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-30}
       - FOLLOWER_PORT=${FOLLOWER_PORT}
@@ -32,20 +39,48 @@ services:
       # `:-yuyv` etc. defaults always win and any per-classroom
       # override in the host .env never reaches the container. Compose
       # ${VAR} interpolation operates on the YAML only — the container
-      # runtime env is whatever this list specifies. yuyv default
-      # matches the ROBOTIS upstream camera_usb_cam.launch.py declared
-      # default; raw_mjpeg is intentionally NOT supported (broken in
-      # usb_cam 0.8.1, ros-drivers/usb_cam#346) and mjpeg2rgb saturates
-      # the CPU at 30 Hz × 2 cams.
+      # runtime env is whatever this list specifies.
+      #
+      # The default here (`yuyv`) is the safe choice for the Jetson
+      # Orin Nano classroom target, which runs on a native USB host
+      # controller and has the bandwidth budget. The student-PC path
+      # (WSL2 vhci_hcd) cannot sustain 2×YUYV at 640×480×30 — both
+      # cameras crash with `VIDIOC_DQBUF: Select timeout` inside ~5 s.
+      # entrypoint_omx.sh detects the WSL2 kernel via `uname -r` and
+      # flips the runtime default to `mjpeg2rgb` for that case (see
+      # the detect_host_usb_bridge() block in that script). Any
+      # explicit override in the host .env wins over both defaults.
+      #
+      # `raw_mjpeg` is intentionally NOT supported (broken in usb_cam
+      # 0.8.1, ros-drivers/usb_cam#346 — falsifies the message
+      # encoding and downstream consumers see green tiles / noise).
       - EDUBOTICS_CAMERA_PIXEL_FORMAT=${EDUBOTICS_CAMERA_PIXEL_FORMAT:-yuyv}
       - EDUBOTICS_CAMERA_WIDTH=${EDUBOTICS_CAMERA_WIDTH:-640}
       - EDUBOTICS_CAMERA_HEIGHT=${EDUBOTICS_CAMERA_HEIGHT:-480}
       - EDUBOTICS_CAMERA_FRAMERATE=${EDUBOTICS_CAMERA_FRAMERATE:-30.0}
+      # Host USB-bridge type. Auto-detected inside entrypoint_omx.sh
+      # via `uname -r` (Microsoft kernel ⇒ vhci_hcd, else native).
+      # Forwarded here so an operator can pin it for testing
+      # (e.g. EDUBOTICS_HOST_USB_BRIDGE=native on a WSL2 install to
+      # force-test the yuyv path) and so the env-forwarding-guard CI
+      # job stays green. Empty default = auto-detect.
+      - EDUBOTICS_HOST_USB_BRIDGE=${EDUBOTICS_HOST_USB_BRIDGE:-}
       # Follower-only mode: student PCs default to 0 (both arms physically
       # present); the classroom Jetson agent's compose file sets it to 1
       # because the leader stays at the student's desk. Listed here so
       # the env-forwarding-guard CI job stays green.
       - EDUBOTICS_FOLLOWER_ONLY=${EDUBOTICS_FOLLOWER_ONLY:-0}
+      # Camera capture source. native_bridge = cameras captured natively on
+      # the Windows host and streamed in over TCP (WSL2 student path —
+      # camera_ingest_node.py republishes them; usbipd cannot sustain UVC at
+      # 30 Hz). usb_cam = in-container V4L2 over usbipd/native USB (Jetson /
+      # native Linux). Empty = auto-detect in entrypoint_omx.sh (WSL2 kernel
+      # ⇒ native_bridge). The GUI writes `native_bridge` explicitly into the
+      # student .env so the healthcheck below can branch on it. Setting
+      # `usb_cam` is the one-variable rollback to the old usbipd camera path.
+      - EDUBOTICS_CAMERA_SOURCE=${EDUBOTICS_CAMERA_SOURCE:-}
+      - EDUBOTICS_CAMERA_INGEST_PORT=${EDUBOTICS_CAMERA_INGEST_PORT:-5557}
+      - EDUBOTICS_CAMERA_NAMES=${EDUBOTICS_CAMERA_NAMES:-gripper,scene}
     volumes:
       - /dev:/dev
       - /dev/shm:/dev/shm
@@ -65,10 +100,15 @@ services:
       # dead usb_cam container reported "healthy" → physical_ai_server
       # starts → recording proceeds with black frames → failure
       # surfaced only at first record-press via 5s topic-wait.
-      # Now also assert each configured camera's compressed image
-      # topic is being published. The ${CAMERA_DEVICE_*} env-var
-      # checks let single-camera setups stay healthy.
-      test: ["CMD-SHELL", "bash -c 'source /opt/ros/jazzy/setup.bash && source /root/ros2_ws/install/setup.bash && ros2 topic list 2>/dev/null | grep -q /joint_states && ([ -z \"$$CAMERA_DEVICE_1\" ] || ros2 topic list | grep -q /$${CAMERA_NAME_1:-gripper}/image_raw/compressed) && ([ -z \"$$CAMERA_DEVICE_2\" ] || ros2 topic list | grep -q /$${CAMERA_NAME_2:-scene}/image_raw/compressed)'"]
+      # Now also assert the camera compressed-image topics are published.
+      #   - native_bridge: assert both ingest topics exist (camera_ingest_node
+      #     is up). Frame-flow itself is monitored by the GUI + the node's 10s
+      #     Hz log; a 5s healthcheck can't run `ros2 topic hz`.
+      #   - usb_cam: per-camera ${CAMERA_DEVICE_*} env-var gating lets
+      #     single-camera setups stay healthy.
+      # EDUBOTICS_CAMERA_SOURCE may be empty (auto-detect); fall back to the
+      # same uname WSL2 detection the entrypoint uses so the branch matches.
+      test: ["CMD-SHELL", "bash -c 'source /opt/ros/jazzy/setup.bash && source /root/ros2_ws/install/setup.bash && (ros2 topic list 2>/dev/null | grep -q /joint_states || exit 1); src=\"$$EDUBOTICS_CAMERA_SOURCE\"; if [ -z \"$$src\" ] && uname -r | grep -qi microsoft; then src=native_bridge; fi; if [ \"$$src\" = native_bridge ]; then ros2 topic list | grep -q /$${CAMERA_NAME_1:-gripper}/image_raw/compressed && ros2 topic list | grep -q /$${CAMERA_NAME_2:-scene}/image_raw/compressed; else ([ -z \"$$CAMERA_DEVICE_1\" ] || ros2 topic list | grep -q /$${CAMERA_NAME_1:-gripper}/image_raw/compressed) && ([ -z \"$$CAMERA_DEVICE_2\" ] || ros2 topic list | grep -q /$${CAMERA_NAME_2:-scene}/image_raw/compressed); fi'"]
       interval: 10s
       timeout: 5s
       retries: 3
@@ -106,6 +146,27 @@ services:
       # the student enables the open-vocab block. Defaults to the
       # Railway production endpoint; override in .env for staging.
       - EDUBOTICS_CLOUD_API_URL=${EDUBOTICS_CLOUD_API_URL:-https://scintillating-empathy-production-1068.up.railway.app}
+      # Aufnahme RAM safety valve: the lerobot_dataset_wrapper overlay
+      # forces an end-of-episode save when the in-RAM image buffer
+      # crosses this many GiB. At 30 Hz × 2 cams = 1.84 MB/tick, the
+      # 4.0 default caps episode length at ~74 s. See the
+      # "Aufnahme recording RAM is capped at 4 GB by the safety valve"
+      # block in CLAUDE.md before changing.
+      - EDUBOTICS_MAX_BUFFER_GB=${EDUBOTICS_MAX_BUFFER_GB:-4.0}
+      # Roboter Studio calibration dir (ChArUco intrinsics, hand-eye
+      # transforms, HSV color profile). Default lands inside the
+      # edubotics_calib named volume mounted below. Overlay readers:
+      # workflow/calibration_manager.py, workflow/color_profile.py,
+      # physical_ai_server.py.
+      - EDUBOTICS_CALIB_DIR=${EDUBOTICS_CALIB_DIR:-/root/.cache/edubotics}
+      # Vision detector selection + ONNX paths for the Roboter Studio
+      # open-vocab block. `yolox-tiny` is the only fully-wired path
+      # today; `dfine-n` is reserved (see overlays/workflow/perception.py
+      # comment). Custom ONNX paths support side-loading a fine-tuned
+      # model into the container without rebuilding the image.
+      - EDUBOTICS_DETECTOR=${EDUBOTICS_DETECTOR:-yolox-tiny}
+      - EDUBOTICS_YOLOX_ONNX=${EDUBOTICS_YOLOX_ONNX:-/opt/edubotics/yolox_tiny.onnx}
+      - EDUBOTICS_DFINE_ONNX=${EDUBOTICS_DFINE_ONNX:-/opt/edubotics/dfine_n.onnx}
     volumes:
       # This container does inference/recording on ROS topics; it does NOT
       # talk to raw USB. /dev:/dev + privileged were unnecessary attack
@@ -144,7 +205,15 @@ services:
     mem_limit: 512m
     pids_limit: 128
     healthcheck:
-      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost/version.json || exit 1"]
+      # Use 127.0.0.1 explicitly — busybox wget in nginx:alpine resolves
+      # `localhost` to ::1 first (NSS hosts file order) and does not
+      # fall back to IPv4 on connection refused. nginx in this image
+      # listens IPv4-only (`listen 80;` with no `listen [::]:80;`), so
+      # `wget http://localhost/...` from inside the container always
+      # gets "Connection refused" → unhealthy. Cosmetic only — the
+      # published port worked the whole time — but a perpetual
+      # "unhealthy" flag masks real failures.
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/version.json || exit 1"]
       interval: 10s
       timeout: 3s
       retries: 3

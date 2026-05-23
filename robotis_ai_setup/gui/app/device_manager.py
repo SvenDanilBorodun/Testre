@@ -69,9 +69,10 @@ class ArmDevice:
 @dataclass
 class CameraDevice:
     """A video capture device."""
-    path: str  # /dev/video0
+    path: str  # /dev/video0 (usb_cam path) or a display string (native bridge)
     name: str  # Human-readable name like "Logitech C920"
     role: str = ""  # "gripper" or "scene" — assigned by student in GUI
+    win_index: int = -1  # OpenCV device index for native-bridge capture; -1 on the usb_cam path
 
 
 @dataclass
@@ -674,19 +675,45 @@ def attach_cameras_to_wsl() -> list[USBDevice]:
 
 
 def scan_cameras() -> list[CameraDevice]:
-    """Scan for video capture devices available in WSL2.
+    """Scan for video capture devices.
 
-    Three-step auto-recovery:
+    native_bridge path (Windows student PC, the default): enumerate cameras
+    directly on Windows via OpenCV/DirectShow. The cameras are NOT attached to
+    WSL via usbipd — they are captured natively and streamed into the container
+    (see camera_bridge.py + CLAUDE.md "native camera capture bridge").
+
+    usb_cam path (Jetson / native Linux, or EDUBOTICS_CAMERA_SOURCE=usb_cam):
       1. self_heal_wsl_serial() loads uvcvideo (+ udev + USB-Serial mods)
-      2. attach_cameras_to_wsl() auto-attaches Windows-visible webcams
-         that have a usbipd policy (set up by configure_usbipd.ps1 for
-         devices plugged in at install time)
+      2. attach_cameras_to_wsl() auto-attaches Windows-visible webcams that
+         have a usbipd policy (set up by configure_usbipd.ps1)
       3. wsl_bridge.list_video_devices() lists /dev/video* + by-id
     """
+    from .constants import cameras_use_native_bridge
+    if cameras_use_native_bridge():
+        return _scan_cameras_native()
     self_heal_wsl_serial()
     attach_cameras_to_wsl()
     raw = wsl_bridge.list_video_devices()
     return [CameraDevice(path=d["path"], name=d["name"]) for d in raw]
+
+
+def _scan_cameras_native() -> list[CameraDevice]:
+    """Enumerate Windows cameras for native capture (no usbipd attach).
+
+    `path` is a human-readable display string only — in native_bridge mode the
+    container's CAMERA_DEVICE_* stays empty (it doesn't open /dev/video*); the
+    `win_index` is what the capture bridge opens with OpenCV.
+    """
+    try:
+        from . import win_camera
+        cams = win_camera.list_windows_cameras()
+    except Exception as exc:  # noqa: BLE001 — never let a probe failure crash the scan
+        _append_diag("scan_cameras_native", f"enumeration failed: {exc}")
+        return []
+    return [
+        CameraDevice(path=f"Index {c.index}", name=c.name, win_index=c.index)
+        for c in cams
+    ]
 
 
 # ── Diagnostics ─────────────────────────────────────────────────────────────

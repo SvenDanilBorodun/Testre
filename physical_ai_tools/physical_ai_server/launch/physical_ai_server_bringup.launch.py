@@ -52,10 +52,13 @@ def generate_launch_description():
     )
 
     # web_video_server node
-    # Audit F36: bind to loopback so a misconfigured Windows Firewall
-    # can't expose the unauthenticated MJPEG stream to the school
-    # LAN. The compose port mapping (`127.0.0.1:8080:8080`) already
-    # restricts this, but binding here is defence-in-depth.
+    # Bind 0.0.0.0 inside the container. Docker port-publish forwards
+    # host packets to the container's eth0, not its loopback — a
+    # container-side 127.0.0.1 bind makes the stream unreachable
+    # (Aufnahme cells stay blank). LAN isolation is enforced by the
+    # compose mapping `127.0.0.1:8080:8080`, which is the actual
+    # defence-in-depth. Audit F36's original 127.0.0.1 bind was the
+    # root cause of the blank-preview regression; fixed 2026-05-23.
     #
     # respawn=True: web_video_server has been observed to SIGSEGV on
     # malformed CompressedImage frames (e.g. mid-replug). Without
@@ -66,7 +69,7 @@ def generate_launch_description():
         package='web_video_server',
         executable='web_video_server',
         name='web_video_server',
-        parameters=[{'address': '127.0.0.1', 'port': 8080}],
+        parameters=[{'address': '0.0.0.0', 'port': 8080}],
         output='screen',
         respawn=True,
         respawn_delay=2.0,

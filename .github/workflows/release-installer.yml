@@ -203,6 +203,14 @@ jobs:
         with:
           files: robotis_ai_setup/installer/output/EduBotics_Setup.exe
           fail_on_unmatched_files: true
+          # Explicit token. softprops/action-gh-release v3.0.0 has a known
+          # regression where token discovery via the implicit `GITHUB_TOKEN`
+          # env path fails with "Bad credentials" when this workflow is
+          # invoked via workflow_call (release.yml -> here). Passing the
+          # token explicitly via `with:` bypasses the discovery path and
+          # uses the secret value directly. v2.3.7 hit this; this line is
+          # the fix. See the v2.3.7 release-installer failure log.
+          token: ${{ secrets.GITHUB_TOKEN }}
           # Don't auto-generate notes — operator writes them in the dashboard.
           # Don't mark as latest until the operator has bumped Railway env vars
           # (see CLAUDE.md §14): bumping GUI_VERSION before this release is

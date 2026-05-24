@@ -31,9 +31,16 @@ capture_unix_nanos is carried for diagnostics only; the published header.stamp
 uses the node clock at receipt (avoids host/container clock skew, and recorded
 LeRobot timestamps are regularized to frame_index/fps at save anyway).
 
-The published CompressedImage uses BEST_EFFORT / KEEP_LAST QoS to match the
-recorder's subscriber (multi_subscriber.py: depth=1 BEST_EFFORT KEEP_LAST) and
-web_video_server. format="jpeg"; the bytes are standard JPEG so cv_bridge's
+The published CompressedImage uses RELIABLE / KEEP_LAST QoS. A RELIABLE
+publisher is the only one compatible with BOTH consumers: web_video_server
+(the Aufnahme-tab preview on :8080) subscribes RELIABLE-only with no QoS
+override in this build, and the recorder/inference subscribers
+(multi_subscriber.py: depth=1 BEST_EFFORT KEEP_LAST) accept a RELIABLE
+publisher fine (a BEST_EFFORT subscriber matches a RELIABLE publisher; the
+reverse — our previous BEST_EFFORT publisher — silently dropped every frame to
+web_video_server with "requesting incompatible QoS"). usb_cam's compressed
+topic was RELIABLE-compatible, which is why the preview worked before the
+native bridge. format="jpeg"; the bytes are standard JPEG so cv_bridge's
 `compressed_imgmsg_to_cv2(passthrough)` decodes them to BGR exactly as it did
 for usb_cam's compressed topic.
 """
@@ -70,9 +77,13 @@ class CameraIngestNode(Node):
         # One publisher per camera. Topic mirrors usb_cam's remapped
         # /<name>/image_raw/compressed exactly (see omx_f_config.yaml
         # camera_topic_list and physical_ai_server communicator subscribers).
+        # RELIABLE so web_video_server (RELIABLE-only) receives frames; the
+        # BEST_EFFORT recorder/inference subscribers match a RELIABLE publisher
+        # too. KEEP_LAST depth bounds history so a slow consumer can't make the
+        # publisher block. See the module docstring for the full rationale.
         qos = QoSProfile(
             depth=5,
-            reliability=ReliabilityPolicy.BEST_EFFORT,
+            reliability=ReliabilityPolicy.RELIABLE,
             history=HistoryPolicy.KEEP_LAST,
         )
         self.publishers_by_id = {}

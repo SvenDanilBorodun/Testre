@@ -20,7 +20,7 @@ def _read_version_file() -> str:
             return candidate.read_text(encoding="utf-8").strip()
         except (OSError, UnicodeDecodeError):
             continue
-    return "2.4.0"
+    return "2.4.1"
 
 
 # GUI version — read from repo-root VERSION file (single source of truth).
@@ -109,6 +109,17 @@ PORT_CAMERA_INGEST = int(os.environ.get("EDUBOTICS_CAMERA_INGEST_PORT", "5557"))
 CAMERA_BRIDGE_ROLES = ("gripper", "scene")
 CAMERA_WIDTH = int(os.environ.get("EDUBOTICS_CAMERA_WIDTH", "640"))
 CAMERA_HEIGHT = int(os.environ.get("EDUBOTICS_CAMERA_HEIGHT", "480"))
+# Native-bridge (Windows) nominal capture target. Measured 2026-05-24: with the
+# MSMF backend + MJPG fourcc and WITHOUT requesting a resolution (which would
+# force a ~12s open + a slower ~24fps mode), the Innomaker U20CAM-720P runs its
+# native 640x480 MJPG mode at a true ~30 fps (both cameras concurrently). The
+# event-driven sender forwards every captured frame (no rate cap), so delivery
+# tracks the real capture rate (~30); the recorder subsamples to its own
+# task_info.fps. NOTE: this value is now only the *nominal* target — it sets the
+# DSHOW-rollback CAP_PROP_FPS request; on the MSMF path it is informational (the
+# sender no longer throttles to it). To record at a LOWER fps, change the
+# recorder/UI fps (task_info.fps), NOT this. The Jetson / usb_cam path uses the
+# compose EDUBOTICS_CAMERA_FRAMERATE (real native USB host), independent of this.
 CAMERA_FRAMERATE = float(os.environ.get("EDUBOTICS_CAMERA_FRAMERATE", "30.0"))
 CAMERA_JPEG_QUALITY = int(os.environ.get("EDUBOTICS_CAMERA_JPEG_QUALITY", "80"))
 

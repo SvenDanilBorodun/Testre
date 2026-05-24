@@ -1,10 +1,19 @@
 """Native camera capture + TCP streaming to the container ingest node.
 
-Captures each assigned Windows camera in its own free-running thread (latest-
-frame-wins, no buffer — phosphobot's stability trick), and a single sender
-thread paces at the target fps, JPEG-encodes the newest frame from each camera,
-and writes it over one multiplexed localhost TCP connection to
-camera_ingest_node.py inside the open_manipulator container.
+Each assigned Windows camera gets TWO threads and its OWN TCP connection:
+
+  * a free-running *capture* thread (latest-frame-wins, no buffer —
+    phosphobot's stability trick), and
+  * a *sender* thread that paces to the target fps on an absolute deadline,
+    JPEG-encodes the newest frame, and writes it over that camera's own
+    localhost TCP connection to camera_ingest_node.py.
+
+One connection PER camera (was: a single multiplexed connection for both)
+decouples the cameras — a stall or reconnect on one camera can no longer delay
+the other, and removes a structural ≤1-frame-per-tick ceiling that capped the
+shared sender at the tick rate. The wire frame still carries `cam_id`, so the
+ingest node demuxes per-frame regardless of which connection it arrived on
+(and a single multiplexed client still works for backward compatibility).
 
 Wire protocol (must match camera_ingest_node.py):
     [ uint8 cam_id ][ uint32 BE jpeg_len ][ uint64 BE capture_unix_nanos ][ jpeg ]
@@ -12,8 +21,8 @@ cam_id is the index into constants.CAMERA_BRIDGE_ROLES, so gripper -> 0 ->
 /gripper/image_raw/compressed and scene -> 1 -> /scene/image_raw/compressed
 (the container's EDUBOTICS_CAMERA_NAMES must list the roles in the same order).
 
-The bridge is a CLIENT: it connects to the container's TCP server (published as
-127.0.0.1:5557 via the WSL2 NAT localhost-forwarder) and reconnects with
+Each sender is a CLIENT: it connects to the container's TCP server (published
+as 127.0.0.1:5557 via the WSL2 NAT localhost-forwarder) and reconnects with
 backoff, so a container restart or a late "Umgebung starten" both recover
 without restarting the GUI.
 """
@@ -42,20 +51,39 @@ class _CaptureWorker(threading.Thread):
         self.role = role
         self.index = index
         self._stop = threading.Event()
-        self._lock = threading.Lock()
+        self._cond = threading.Condition()
         self._latest = None          # (frame_bgr, capture_ns)
         self._latest_seq = 0         # monotonic; lets the sender detect new frames
         self.fps = 0.0
         self.last_error_de = ""
+        # Negotiated (read-back) capture format — set on open. A camera that
+        # silently runs at 15 fps when 30 was requested shows up here; the GUI
+        # surfaces `format_warn_de` so a half-rate feed isn't invisible.
+        self.negotiated_fps = 0.0
+        self.negotiated_fourcc = ""
+        self.format_warn_de = ""
         self._frame_count = 0
         self._rate_t0 = time.monotonic()
 
     def latest(self):
-        with self._lock:
+        with self._cond:
+            return self._latest, self._latest_seq
+
+    def wait_new(self, last_seq, timeout):
+        """Block until a frame newer than last_seq is stored — woken
+        immediately by the capture loop's notify (NOT subject to the Windows
+        ~15.6ms timer granularity that a polled Event.wait suffers), or until
+        timeout (for stop responsiveness). Returns (latest, seq)."""
+        with self._cond:
+            if self._latest_seq == last_seq:
+                self._cond.wait(timeout)
             return self._latest, self._latest_seq
 
     def stop(self):
         self._stop.set()
+        # Wake any sender blocked in wait_new so stop() is prompt.
+        with self._cond:
+            self._cond.notify_all()
 
     def run(self):
         cv2 = None
@@ -66,9 +94,27 @@ class _CaptureWorker(threading.Thread):
                 try:
                     import cv2 as _cv2
                     cv2 = _cv2
-                    cap = win_camera.open_capture(
+                    cap, info = win_camera.open_capture(
                         self.index, constants.CAMERA_WIDTH,
                         constants.CAMERA_HEIGHT, constants.CAMERA_FRAMERATE)
+                    self.negotiated_fps = info.get("fps", 0.0)
+                    self.negotiated_fourcc = info.get("fourcc", "")
+                    # The camera always *claims* 30 fps via CAP_PROP_FPS even
+                    # when it can't deliver it, so the negotiated fps is not a
+                    # reliable signal — the real rate is `self.fps` (measured
+                    # below). The one reliable warn is a reported non-MJPG
+                    # fourcc (DSHOW's YUY2 fallback → ~14 fps). MSMF returns a
+                    # garbage fourcc read-back, so skip the warn there entirely.
+                    if (not info.get("msmf")
+                            and self.negotiated_fourcc
+                            and self.negotiated_fourcc != "MJPG"):
+                        self.format_warn_de = (
+                            f"Kamera '{self.role}': Treiber nutzt "
+                            f"{self.negotiated_fourcc} statt MJPG — niedrige "
+                            f"Bildrate möglich (EDUBOTICS_CAMERA_BACKEND prüfen)."
+                        )
+                    else:
+                        self.format_warn_de = ""
                     self.last_error_de = ""
                     failures = 0
                 except win_camera.CameraUnavailableError as exc:
@@ -88,10 +134,20 @@ class _CaptureWorker(threading.Thread):
                     time.sleep(0.5)
                 continue
             failures = 0
+            # Normalise resolution to the target. On MSMF we deliberately do NOT
+            # request a resolution at open (it would force a ~12s re-negotiation
+            # and a slower mode — see win_camera.open_capture), so the camera
+            # runs its native size; resize only if it differs from the target.
+            # The Innomaker's native MSMF size is already 640x480 (no-op here);
+            # this keeps the bridge correct on cameras whose native size differs.
+            if (frame.shape[1] != constants.CAMERA_WIDTH
+                    or frame.shape[0] != constants.CAMERA_HEIGHT):
+                frame = cv2.resize(frame, (constants.CAMERA_WIDTH, constants.CAMERA_HEIGHT))
             ns = time.time_ns()
-            with self._lock:
+            with self._cond:
                 self._latest = (frame, ns)
                 self._latest_seq += 1
+                self._cond.notify_all()
             self._frame_count += 1
             now = time.monotonic()
             if now - self._rate_t0 >= 2.0:
@@ -102,59 +158,21 @@ class _CaptureWorker(threading.Thread):
             cap.release()
 
 
-class CameraBridge:
-    """Owns the capture workers + the TCP sender thread."""
+class _SenderWorker(threading.Thread):
+    """Owns ONE camera's TCP connection. Event-driven: blocks on the capture
+    worker's Condition and forwards each newly-captured frame as it arrives (no
+    rate cap — the real capture rate is the limiter). Reconnects with backoff."""
 
-    def __init__(self, role_to_index: dict[str, int],
-                 host: str | None = None, port: int | None = None):
-        self.host = host or constants.CAMERA_INGEST_HOST
-        self.port = port or constants.PORT_CAMERA_INGEST
-        self.workers: list[_CaptureWorker] = []
-        for role, index in role_to_index.items():
-            if index is None:
-                continue
-            if role not in constants.CAMERA_BRIDGE_ROLES:
-                raise ValueError(f"Unbekannte Kamerarolle: {role!r}")
-            cam_id = constants.CAMERA_BRIDGE_ROLES.index(role)
-            self.workers.append(_CaptureWorker(cam_id, role, index))
-        self._stop = threading.Event()
-        self._sender = threading.Thread(target=self._send_loop, name="cam-sender", daemon=True)
+    def __init__(self, worker: _CaptureWorker, host: str, port: int,
+                 stop_event: threading.Event):
+        super().__init__(name=f"cam-send-{worker.role}", daemon=True)
+        self.worker = worker
+        self.host = host
+        self.port = port
+        self._stop = stop_event
         self.connected = False
         self.last_error_de = ""
 
-    def start(self):
-        for w in self.workers:
-            w.start()
-        self._sender.start()
-
-    def stop(self, join_timeout: float = 3.0):
-        self._stop.set()
-        for w in self.workers:
-            w.stop()
-        # `ident is None` until a thread is started — guard so stop() is safe
-        # even if start() was never called (e.g. construction then teardown).
-        if self._sender.ident is not None:
-            self._sender.join(timeout=join_timeout)
-        for w in self.workers:
-            if w.ident is not None:
-                w.join(timeout=join_timeout)
-
-    def status(self) -> dict:
-        """Per-camera health for the GUI status line (German error strings)."""
-        return {
-            "connected": self.connected,
-            "error": self.last_error_de,
-            "cameras": {
-                w.role: {
-                    "fps": round(w.fps, 1),
-                    "index": w.index,
-                    "error": w.last_error_de,
-                }
-                for w in self.workers
-            },
-        }
-
-    # ----- sender -----
     def _connect(self) -> socket.socket | None:
         attempt = 0
         while not self._stop.is_set():
@@ -164,7 +182,7 @@ class CameraBridge:
                 self.connected = True
                 self.last_error_de = ""
                 return sock
-            except OSError as exc:
+            except OSError:
                 self.connected = False
                 self.last_error_de = (
                     f"Warte auf Kamera-Verbindung zum Container "
@@ -172,39 +190,49 @@ class CameraBridge:
                 )
                 backoff = _RECONNECT_BACKOFF_S[min(attempt, len(_RECONNECT_BACKOFF_S) - 1)]
                 attempt += 1
-                # Sleep in small slices so stop() is responsive.
-                slept = 0.0
-                while slept < backoff and not self._stop.is_set():
-                    time.sleep(0.1)
-                    slept += 0.1
-                del exc
+                # Wait responsively so stop() returns promptly.
+                if self._stop.wait(backoff):
+                    break
         return None
 
-    def _send_loop(self):
+    def run(self):
         import cv2
-        period = 1.0 / max(constants.CAMERA_FRAMERATE, 1.0)
         jpeg_params = [cv2.IMWRITE_JPEG_QUALITY, constants.CAMERA_JPEG_QUALITY]
-        last_seq = {w.cam_id: -1 for w in self.workers}
+        last_seq = -1
         sock = None
         while not self._stop.is_set():
             if sock is None:
                 sock = self._connect()
                 if sock is None:
                     break  # stopped while connecting
-            tick = time.monotonic()
+            # Event-driven: block until the capture worker stores a NEW frame
+            # (woken by its notify — immediate, NOT the ~15.6ms Windows timer
+            # tick that throttled the previous polled pacer to ~20fps). The
+            # 0.5s timeout is only a stop-responsiveness fallback.
+            #
+            # We forward EVERY captured frame — NO rate cap. The capture worker
+            # is latest-frame-wins at the camera's true ~30fps, so the sender is
+            # a 1:1 forwarder bounded by the real capture rate. A per-frame rate
+            # cap here previously clipped delivery to ~28fps (its post-send
+            # timestamp accumulated the encode time into each period) which made
+            # the recorder — a fixed-rate timer that grabs the latest cached
+            # frame — occasionally re-grab the same frame (~6.7% duplicate frames
+            # at 28-vs-30). Delivering at full capture rate keeps a fresh frame
+            # always available; sub-rate recording is the recorder's job (it
+            # subsamples to task_info.fps), not the bridge's.
+            latest, seq = self.worker.wait_new(last_seq, 0.5)
+            if latest is None or seq == last_seq:
+                continue  # timeout with no new frame — re-check stop and wait
+            frame, ns = latest
+            ok, buf = cv2.imencode(".jpg", frame, jpeg_params)
+            if not ok:
+                continue
+            jpeg = buf.tobytes()
+            header = _HEADER.pack(self.worker.cam_id, len(jpeg),
+                                  ns & 0xFFFFFFFFFFFFFFFF)
             try:
-                for w in self.workers:
-                    latest, seq = w.latest()
-                    if latest is None or seq == last_seq[w.cam_id]:
-                        continue  # no frame yet, or unchanged since last send
-                    frame, ns = latest
-                    ok, buf = cv2.imencode(".jpg", frame, jpeg_params)
-                    if not ok:
-                        continue
-                    jpeg = buf.tobytes()
-                    header = _HEADER.pack(w.cam_id, len(jpeg), ns & 0xFFFFFFFFFFFFFFFF)
-                    sock.sendall(header + jpeg)
-                    last_seq[w.cam_id] = seq
+                sock.sendall(header + jpeg)
+                last_seq = seq
             except OSError as exc:
                 self.connected = False
                 self.last_error_de = f"Kamera-Verbindung verloren: {exc}"
@@ -214,12 +242,109 @@ class CameraBridge:
                     pass
                 sock = None
                 continue
-            # Pace to target fps.
-            elapsed = time.monotonic() - tick
-            if elapsed < period:
-                time.sleep(period - elapsed)
         if sock is not None:
             try:
                 sock.close()
             except OSError:
                 pass
+
+
+class CameraBridge:
+    """Owns one capture worker + one sender (own TCP connection) per camera."""
+
+    def __init__(self, role_to_index: dict[str, int],
+                 host: str | None = None, port: int | None = None):
+        self.host = host or constants.CAMERA_INGEST_HOST
+        self.port = port or constants.PORT_CAMERA_INGEST
+        self.workers: list[_CaptureWorker] = []
+        self._stop = threading.Event()
+        self._timer_raised = False
+        self._senders: list[_SenderWorker] = []
+        for role, index in role_to_index.items():
+            if index is None:
+                continue
+            if role not in constants.CAMERA_BRIDGE_ROLES:
+                raise ValueError(f"Unbekannte Kamerarolle: {role!r}")
+            cam_id = constants.CAMERA_BRIDGE_ROLES.index(role)
+            worker = _CaptureWorker(cam_id, role, index)
+            self.workers.append(worker)
+            self._senders.append(
+                _SenderWorker(worker, self.host, self.port, self._stop))
+        self.last_error_de = ""
+
+    @property
+    def connected(self) -> bool:
+        """True once every camera's sender has an open connection."""
+        return bool(self._senders) and all(s.connected for s in self._senders)
+
+    def _raise_timer_resolution(self):
+        """Drop the Windows system timer granularity from ~15.6ms to 1ms while
+        the bridge runs. Defensive: keeps every timer-based wait fine-grained
+        (Condition/Event timeouts, OpenCV internals, the connect backoff) so
+        nothing rounds up to the ~15.6ms tick. This was essential when the sender
+        was a polled pacer (it otherwise collapsed to ~17fps); the sender is now
+        event-driven (woken immediately by the capture Condition notify), but the
+        1ms timer is retained as a low-cost safety — the standard move for
+        real-time capture apps (OBS, phosphobot). Paired with timeEndPeriod(1) in
+        stop(). No-op off Windows / on failure."""
+        import sys
+        if sys.platform != "win32":
+            return
+        try:
+            import ctypes
+            if ctypes.windll.winmm.timeBeginPeriod(1) == 0:  # TIMERR_NOERROR
+                self._timer_raised = True
+        except Exception:  # noqa: BLE001
+            pass
+
+    def start(self):
+        self._raise_timer_resolution()
+        for w in self.workers:
+            w.start()
+        for s in self._senders:
+            s.start()
+
+    def stop(self, join_timeout: float = 3.0):
+        self._stop.set()
+        for w in self.workers:
+            w.stop()
+        # `ident is None` until a thread is started — guard so stop() is safe
+        # even if start() was never called (e.g. construction then teardown).
+        for s in self._senders:
+            if s.ident is not None:
+                s.join(timeout=join_timeout)
+        for w in self.workers:
+            if w.ident is not None:
+                w.join(timeout=join_timeout)
+        if self._timer_raised:
+            try:
+                import ctypes
+                ctypes.windll.winmm.timeEndPeriod(1)
+            except Exception:  # noqa: BLE001
+                pass
+            self._timer_raised = False
+
+    def status(self) -> dict:
+        """Per-camera health for the GUI status line (German error strings)."""
+        sender_by_role = {s.worker.role: s for s in self._senders}
+        # Surface the first non-empty error/warn across all cameras.
+        agg_error = self.last_error_de
+        for w in self.workers:
+            agg_error = agg_error or w.last_error_de or w.format_warn_de
+        return {
+            "connected": self.connected,
+            "error": agg_error,
+            "cameras": {
+                w.role: {
+                    "fps": round(w.fps, 1),
+                    "negotiated_fps": round(w.negotiated_fps, 1),
+                    "index": w.index,
+                    "connected": (
+                        sender_by_role[w.role].connected
+                        if w.role in sender_by_role else False
+                    ),
+                    "error": w.last_error_de or w.format_warn_de,
+                }
+                for w in self.workers
+            },
+        }

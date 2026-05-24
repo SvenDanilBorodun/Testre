@@ -351,6 +351,16 @@ class SyncNode(Node):
         # rad commanded delta still trips the >=50% motion check below),
         # but accepts the routine ~10-20° finishing lag from rest pose.
         tol = 0.30  # rad — was 0.08; see commit log for rationale
+        # 2026-05-24: the gripper (gripper_joint_1, index 5) is EXEMPT from
+        # verification. The leader gripper sits at its held trigger position
+        # (e.g. ~-0.70 rad) while the follower gripper starts open (~0.0), so
+        # the follower legitimately does NOT track the leader gripper at boot
+        # — a ~1.4 rad err + 0.0 motion that is benign and expected, not a
+        # dropout. Including it made the verifier soft-fail on EVERY boot,
+        # masking its real job (catching an actual arm-joint dropout). We
+        # verify the 5 arm joints only — err AND motion — so a truly stuck
+        # joint1..joint5 still hard-detects.
+        ARM_IDX = [0, 1, 2, 3, 4]  # joint1..joint5; exclude gripper_joint_1 (5)
         # Audit E3: also require the arm to have actually moved for any
         # joint whose initial delta was meaningful. The pre-E3 check passed
         # vacuously when /joint_states stopped publishing mid-sync: a stale
@@ -360,20 +370,23 @@ class SyncNode(Node):
         # offset (|delta| > tol).
         motion = [abs(a - b) for a, b in zip(self.follower_pos, self._sync_start_pos)]
         motion_ok = True
-        for i, d in enumerate(self._sync_initial_deltas):
+        for i in ARM_IDX:
+            d = self._sync_initial_deltas[i]
             if abs(d) > tol and motion[i] < 0.5 * abs(d):
                 motion_ok = False
                 break
-        if all(e < tol for e in err) and motion_ok:
+        if all(err[i] < tol for i in ARM_IDX) and motion_ok:
             self.get_logger().info(
-                f'Sync verified (max err {max(err):.3f} rad, '
-                f'max motion {max(motion):.3f} rad).'
+                f'Sync verified (arm max err {max(err[i] for i in ARM_IDX):.3f} rad, '
+                f'arm max motion {max(motion[i] for i in ARM_IDX):.3f} rad; '
+                f'gripper exempt).'
             )
             sys.exit(0)
         if time.monotonic() > self._verify_deadline:
             stale_joints = [
-                JOINTS[i] for i, d in enumerate(self._sync_initial_deltas)
-                if abs(d) > tol and motion[i] < 0.5 * abs(d)
+                JOINTS[i] for i in ARM_IDX
+                if abs(self._sync_initial_deltas[i]) > tol
+                and motion[i] < 0.5 * abs(self._sync_initial_deltas[i])
             ]
             reason = (
                 f'follower stale (no motion on: {stale_joints})'

@@ -67,6 +67,20 @@ class TestCameraBridgeMapping(unittest.TestCase):
         self.assertIn("cameras", status)
         self.assertEqual(set(status["cameras"]), {"gripper", "scene"})
         self.assertIn("fps", status["cameras"]["gripper"])
+        self.assertIn("negotiated_fps", status["cameras"]["gripper"])
+
+    def test_one_sender_per_camera(self):
+        # Each camera gets its OWN sender (own TCP connection) so one camera's
+        # stall can't delay the other.
+        bridge = camera_bridge.CameraBridge({"gripper": 2, "scene": 3})
+        self.assertEqual(len(bridge._senders), 2)
+        self.assertEqual({s.worker.role for s in bridge._senders}, {"gripper", "scene"})
+        # senders share the bridge's single stop event
+        self.assertTrue(all(s._stop is bridge._stop for s in bridge._senders))
+
+    def test_connected_false_before_start(self):
+        bridge = camera_bridge.CameraBridge({"gripper": 0})
+        self.assertFalse(bridge.connected)
 
 
 class TestConstants(unittest.TestCase):

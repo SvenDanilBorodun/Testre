@@ -7,12 +7,13 @@ OpenCV's DirectShow backend, exactly like phosphobot does, and streams frames
 into the container. This module owns the Windows-side enumeration and the
 OpenCV VideoCapture configuration; the streaming lives in camera_bridge.py.
 
-Why DirectShow (CAP_DSHOW) and not MSMF: DirectShow gives a stable enumeration
-order that matches the OpenCV device index, MJPG fourcc works reliably, and the
-device monikers expose the USB topology we use to keep role assignments stable
-across restarts. cv2 is imported lazily so importing this module never hard-
-fails if OpenCV is somehow missing from a build — callers get a clear German
-error when they actually try to use a camera.
+Backend (see `_capture_backend`): we use MSMF, not DirectShow. DSHOW was the
+original choice (stable enumeration, topology monikers) but was measured to
+hard-cap these cameras at ~14 fps and refuse to leave YUY2; MSMF sustains ~25.
+Enumeration and capture share the backend so device indices stay consistent.
+cv2 is imported lazily so importing this module never hard-fails if OpenCV is
+somehow missing from a build — callers get a clear German error when they
+actually try to use a camera.
 
 Disambiguating two identical cameras (R1): the Innomaker U20CAM-720P pair both
 report identical name/VID/PID/serial, so we cannot tell "gripper" from "scene"
@@ -24,6 +25,7 @@ GUI can warn when indices shuffle after a replug.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -35,6 +37,32 @@ _SUBPROCESS_KWARGS = {"creationflags": _CREATE_NO_WINDOW} if sys.platform == "wi
 # cameras; 8 leaves head-room for a laptop's built-in cam + a couple of spares
 # without making the probe (which opens each device briefly) too slow.
 _MAX_PROBE = 8
+
+
+def _capture_backend(cv2):
+    """OpenCV capture backend for BOTH enumeration and capture.
+
+    Measured on Sven's classroom rig 2026-05-24 (Innomaker U20CAM-720P,
+    640x480): the **MSMF** backend sustains ~25 fps per camera (and ~26 each
+    with both open concurrently — no contention penalty), whereas **DSHOW**
+    hard-caps at ~14 fps for the same camera/format and silently refuses to
+    leave YUY2 even when MJPG is requested. Decode is never the limiter (the
+    grab-only rate equals the read rate; a separate decode runs at >400 fps).
+    So 30 fps is physically unreachable here — ~25 is the camera/USB/MSMF
+    ceiling — and MSMF nearly doubles the usable rate. We therefore default to
+    MSMF. Enumeration AND capture MUST use the same backend, because the OpenCV
+    device-index order can differ between backends (index N under DSHOW may be a
+    different physical camera than index N under MSMF), which would scramble the
+    student's gripper/scene role pick.
+
+    Override with EDUBOTICS_CAMERA_BACKEND=dshow for rollback (e.g. if a future
+    rig's MSMF driver is flaky — MSMF can emit a transient async ReadSample
+    warning at open, harmless here).
+    """
+    sel = os.environ.get("EDUBOTICS_CAMERA_BACKEND", "msmf").strip().lower()
+    if sel == "dshow":
+        return cv2.CAP_DSHOW
+    return cv2.CAP_MSMF
 
 
 class CameraUnavailableError(RuntimeError):
@@ -116,10 +144,11 @@ def list_windows_cameras(max_probe: int = _MAX_PROBE) -> list[CameraInfo]:
     capture bridge is running on the same camera.
     """
     cv2 = _import_cv2()
+    backend = _capture_backend(cv2)
     pnp = _pnp_camera_details()
     cams: list[CameraInfo] = []
     for idx in range(max_probe):
-        cap = cv2.VideoCapture(idx, cv2.CAP_DSHOW)
+        cap = cv2.VideoCapture(idx, backend)
         try:
             opened = cap.isOpened()
         finally:
@@ -136,29 +165,91 @@ def list_windows_cameras(max_probe: int = _MAX_PROBE) -> list[CameraInfo]:
     return cams
 
 
+def _readback(cap, cv2) -> dict:
+    """Read back what the backend (DirectShow or MSMF) actually negotiated
+    (NOT what we requested).
+
+    `set()` returns True even when the driver silently clamps to its nearest
+    supported descriptor, so the only way to know the real format/rate is to
+    `get()` it back. (On MSMF the fourcc read-back is garbage — callers flag
+    that via info["msmf"] and ignore it.)
+    """
+    raw_fourcc = int(cap.get(cv2.CAP_PROP_FOURCC))
+    try:
+        fourcc = (raw_fourcc.to_bytes(4, "little")
+                  .decode("latin1", "replace").strip("\x00 "))
+    except Exception:  # noqa: BLE001
+        fourcc = str(raw_fourcc)
+    return {
+        "fourcc": fourcc,
+        "fps": float(cap.get(cv2.CAP_PROP_FPS) or 0.0),
+        "width": int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0),
+        "height": int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0),
+    }
+
+
 def open_capture(index: int, width: int, height: int, fps: float):
     """Open and configure a VideoCapture for streaming.
 
     Forces MJPG fourcc (camera-side JPEG — the only way 2×640×480@30 fits a
     USB 2.0 budget and matches phosphobot) and the target resolution/fps.
     Raises CameraUnavailableError if the device won't open.
+
+    Returns ``(cap, info)`` where ``info`` is the *negotiated* format read back
+    from the driver (``{"fourcc","fps","width","height"}``). DirectShow / UVC
+    silently downgrade to the camera's nearest supported frame-interval
+    descriptor — e.g. an Innomaker that exposes a 15 fps MJPG mode will quietly
+    run at 15 even though we asked for 30, with no error. The caller MUST
+    inspect ``info`` and surface a mismatch (a steady 15 Hz with no error in the
+    logs is exactly this trap). We also retry the format push once, because
+    some UVC cameras only expose the 30 fps interval under MJPG and a stale
+    graph can otherwise pin the rate.
     """
     cv2 = _import_cv2()
-    cap = cv2.VideoCapture(index, cv2.CAP_DSHOW)
+    backend = _capture_backend(cv2)
+    cap = cv2.VideoCapture(index, backend)
     if not cap.isOpened():
         cap.release()
         raise CameraUnavailableError(
             f"Kamera mit Index {index} konnte nicht geöffnet werden."
         )
-    # Order matters on DirectShow: set FOURCC before size/fps.
-    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
-    cap.set(cv2.CAP_PROP_FPS, fps)
+
+    is_msmf = backend == cv2.CAP_MSMF
+
+    def _apply():
+        if is_msmf:
+            # MSMF: set ONLY the MJPG fourcc. Measured 2026-05-24 that setting
+            # CAP_PROP_FRAME_WIDTH/HEIGHT/FPS on MSMF triggers a ~12 s open
+            # re-negotiation AND pins the camera to a slower ~24 fps mode;
+            # setting only the fourcc opens in ~3 s and runs the camera's native
+            # mode — 640x480 MJPG @ ~30 fps on the Innomaker U20CAM-720P. We do
+            # NOT request a resolution here; the capture worker normalises to
+            # the target size with a cheap resize if a camera's native size
+            # differs. (MSMF reports an empty fourcc read-back — harmless.)
+            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+        else:
+            # DSHOW (rollback path): FOURCC must be set LAST or the camera stays
+            # on YUY2 (uncompressed, ~14 fps). Size/fps first, fourcc last.
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+            cap.set(cv2.CAP_PROP_FPS, fps)
+            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+
+    _apply()
+    info = _readback(cap, cv2)
+    # DSHOW only: if it reported a non-MJPG fourcc (YUY2 fallback), push the
+    # format once more and re-read. MSMF reports an empty fourcc, so this never
+    # fires there.
+    if not is_msmf and info["fourcc"] and info["fourcc"] != "MJPG":
+        _apply()
+        info = _readback(cap, cv2)
     # 1-deep driver buffer so read() returns the freshest frame, not a backlog.
     # (Best-effort; not all DirectShow drivers honour BUFFERSIZE.)
     try:
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
     except Exception:  # noqa: BLE001
         pass
-    return cap
+    # MSMF returns a garbage-but-non-empty CAP_PROP_FOURCC read-back; flag it so
+    # callers don't false-warn about a "non-MJPG" format on the MSMF path.
+    info["msmf"] = is_msmf
+    return cap, info

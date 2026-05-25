@@ -7,6 +7,11 @@
 ARG BASE_IMAGE=robotis/physical-ai-server:amd64-0.8.2
 FROM ${BASE_IMAGE}
 
+# LeRobot v0.5.1 (dataset format v3.0). MUST agree with the other pinning
+# sites — see CLAUDE.md Rule §5. EduBotics self-manages this install (below)
+# rather than depending on the base image bundling the right version.
+ARG LEROBOT_COMMIT=1396b9fab7aecddd10006c33c47a487ffdcb54b4
+
 # Patch upstream bug: ServerInference.__init__ never initializes self._endpoints,
 # causing AttributeError on first register_endpoint() call.
 # Ref: physical_ai_tools/physical_ai_server/physical_ai_server/inference/server_inference.py
@@ -24,6 +29,30 @@ RUN find /etc/s6-overlay/s6-rc.d -type f \
         -exec sed -i 's/\r$//' {} + && \
     find /usr/local/lib/s6-services -type f -name "*.sh" -exec sed -i 's/\r$//' {} + && \
     echo "Fixed CRLF in s6 service files"
+
+# ── Self-managed LeRobot v0.5.1 install ───────────────────────────────────
+# Replace the LeRobot that the base image bundles (old 0.2.0 / dataset v2.1)
+# with v0.5.1 (dataset v3.0) pinned at LEROBOT_COMMIT. We strip torch /
+# torchvision from LeRobot's pyproject so the base image's torch 2.7.0+cu128
+# is preserved (it satisfies v0.5.1's `torch>=2.7` floor); the remaining core
+# deps (datasets>=4, numpy>=2, torchcodec, av, transformers via the policy
+# extras …) are resolved by pip. `[pi,smolvla]` installs both VLA policy
+# families for on-robot inference (the `[pi0]` extra was renamed `[pi]` in
+# v0.5.1). The base runs Python 3.12, which v0.5.1 requires.
+RUN set -e && \
+    LR_DIR=$(find /root/ros2_ws -type d -path "*/physical_ai_tools/lerobot" | head -n1) && \
+    [ -n "$LR_DIR" ] || { echo "ERROR: bundled LeRobot dir not found in base image"; exit 1; } && \
+    echo "Replacing bundled LeRobot at $LR_DIR with v0.5.1 (${LEROBOT_COMMIT})" && \
+    rm -rf "$LR_DIR" && \
+    git clone --filter=blob:none https://github.com/huggingface/lerobot.git "$LR_DIR" && \
+    git -C "$LR_DIR" checkout "${LEROBOT_COMMIT}" && \
+    cd "$LR_DIR" && \
+    sed -i '/"torch[^"]*",/d' pyproject.toml && \
+    sed -i '/"torchvision[^"]*",/d' pyproject.toml && \
+    pip install --no-cache-dir -e ".[pi,smolvla]" && \
+    python3 -c "import lerobot; from lerobot.datasets.dataset_metadata import CODEBASE_VERSION as cv; \
+                assert cv == 'v3.0', f'unexpected codebase_version {cv}'; \
+                print('LeRobot', getattr(lerobot, '__version__', '?'), 'codebase', cv)"
 
 # Re-build physical_ai_interfaces with the v1 + audit additions.
 #
@@ -88,8 +117,14 @@ RUN TARGETS=$(find /root/ros2_ws -name "server_inference.py" -path "*/inference/
     rm /tmp/fix_server_inference.py
 
 # Overlay modified source files (inference validation, data sanitization, joint safety, dual camera config)
-# Note: LeRobot itself is NOT overlaid — the base image clones the same version (989f3d05)
-# that the Modal training image pins. Only physical_ai_server files are patched here.
+# LeRobot v0.5.1 upgrade: EduBotics now SELF-MANAGES the LeRobot install (it
+# pins commit 1396b9fab... = v0.5.1, dataset format v3.0). The base image's
+# bundled LeRobot must be replaced with v0.5.1 by a dedicated install layer
+# (clone @ pinned SHA → strip torch/torchvision from pyproject → pip install -e .)
+# so it agrees with modal_app.py::LEROBOT_COMMIT and the vendored tree under
+# physical_ai_tools/lerobot/. See CLAUDE.md Rule §5.
+# PREREQUISITE: the base image's Python must be >=3.12 (v0.5.1 floor) — verify
+# with `docker run <base> python3 --version` before relying on this build.
 #
 # Every overlay is now sha256-compared after cp to prove the target file
 # actually changed. Without this, an upstream rename would have silently
@@ -140,6 +175,15 @@ COPY overlays/lerobot_dataset_wrapper.py /tmp/overlays/lerobot_dataset_wrapper.p
 # 127.0.0.1 inside the container and was the root cause of the blank
 # preview regression on Sven's classroom rig.
 COPY overlays/physical_ai_server_bringup.launch.py /tmp/overlays/physical_ai_server_bringup.launch.py
+# LeRobot v0.5.1 upgrade: training_manager.py is overlaid to import the local
+# LerobotTrainer LAZILY (inside _get_trainer) instead of at module load. The
+# upstream module-level import pulls in lerobot_trainer.py, which references
+# symbols that MOVED in v0.5.1 (lerobot.scripts.eval → scripts.lerobot_eval,
+# lerobot.utils.wandb_utils → rl.wandb_utils, get_safe_torch_device →
+# utils.device_utils). TrainingManager is imported by physical_ai_server.py at
+# ROS-node boot, so without this overlay the node crashes on startup. EduBotics
+# trains in the cloud (Modal), so the local trainer is never exercised.
+COPY overlays/training_manager.py /tmp/overlays/training_manager.py
 RUN set -e && \
     apply_overlay() { \
         local name="$1" path_filter="$2" src="/tmp/overlays/$1"; \
@@ -187,6 +231,7 @@ RUN set -e && \
     apply_overlay physical_ai_server.py "*/physical_ai_server/physical_ai_server.py" && \
     apply_overlay communicator.py "*/communication/communicator.py" && \
     apply_overlay lerobot_dataset_wrapper.py "*/data_processing/*" && \
+    apply_overlay training_manager.py "*/training/training_manager.py" && \
     apply_overlay physical_ai_server_bringup.launch.py "*/physical_ai_server/launch/*" && \
     rm -rf /tmp/overlays
 
@@ -308,13 +353,14 @@ RUN echo "AGPL audit: relies on explicit dependency manifest, see Dockerfile com
 # today, but `protobuf 6 → 7` is the classic "works on x86, fails on Jetson
 # arm64" pattern (proto plugin ABI changes are routinely opaque). Pin to the
 # lower common denominator that ships as stable on BOTH arches AND matches
-# LeRobot's grpcio-dep contract (lerobot/pyproject.toml: protobuf==6.31.0).
+# LeRobot v0.5.1's pyproject contract.
 #
-#   safetensors==0.7.0   (last non-RC; 0.8 is still rc0/dev as of 2026-05)
-#   protobuf==6.31.0     (matches LeRobot grpcio-dep pin; pip-resolvable
-#                         alongside onnx>=1.16 which only needs protobuf>=4.25)
-#   pillow==12.1.0       (LCD across arches; both amd64 and arm64 wheel-
-#                         available; image-quality/feature-set identical to 12.2)
+#   safetensors==0.7.0   (within v0.5.1 floor safetensors>=0.4.3,<1.0)
+#   protobuf==6.31.1     (v0.5.1 grpcio-dep: protobuf>=6.31.1,<6.32 — the old
+#                         6.31.0 pin is now BELOW the floor and would fail)
+#   pillow==12.1.0       (within v0.5.1 imageio Pillow range; LCD across arches)
+#   numpy>=2.0.0,<2.3.0  (v0.5.1 REQUIRES numpy 2.x — matches lerobot's own
+#                         core-dep range; the old `numpy<2` is gone)
 #
 # Installed AFTER all other pip layers so this pin overrides any transitive
 # resolution from earlier `pip install` calls or base-image-inherited versions.
@@ -322,11 +368,12 @@ RUN echo "AGPL audit: relies on explicit dependency manifest, see Dockerfile com
 # resolver thinks an existing satisfying version is already present.
 RUN python3 -m pip install --no-cache-dir --force-reinstall \
         safetensors==0.7.0 \
-        protobuf==6.31.0 \
-        pillow==12.1.0 && \
-    python3 -c "import safetensors, google.protobuf, PIL; \
+        protobuf==6.31.1 \
+        pillow==12.1.0 \
+        "numpy>=2.0.0,<2.3.0" && \
+    python3 -c "import safetensors, google.protobuf, PIL, numpy; \
                 print('cross-arch floor:', safetensors.__version__, \
-                      google.protobuf.__version__, PIL.__version__)"
+                      google.protobuf.__version__, PIL.__version__, numpy.__version__)"
 
 # Roboter Studio workflow module (calibration, perception, IK, motion handlers,
 # Blockly interpreter). Not present in upstream; copied in as an addition

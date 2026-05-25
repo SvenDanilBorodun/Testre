@@ -16,49 +16,54 @@ vars via the Modal Secret `edubotics-training-secrets`. Per-training args
 
 import modal
 
-LEROBOT_COMMIT = "989f3d05ba47f872d75c587e76838e9cc574857a"
+# LeRobot v0.5.1 (tag v0.5.1). Dataset format codebase_version "v3.0".
+# This MUST agree with the 5 other pinning sites — see CLAUDE.md Rule §5.
+LEROBOT_COMMIT = "1396b9fab7aecddd10006c33c47a487ffdcb54b4"
 
 app = modal.App("edubotics-training")
 
 image = (
     modal.Image.from_registry(
-        # Bumped 12.1.1 → 12.4.1 to satisfy LeRobot's pyproject.toml at the
-        # pinned SHA — that pyproject.toml declares `torchvision>=0.21.0`,
-        # and torchvision 0.21.x ships only on the cu124/cu126 wheel indexes
-        # (cu121 tops out at 0.20.1). Without this bump the index_url below
-        # silently resolves torchvision DOWN to 0.20.1, which breaks v2
-        # transform dispatch with NotImplementedError on ColorJitter /
-        # SharpnessJitter at training time. Verified 2026-05-20 via direct
-        # fetch of LeRobot's pyproject.toml at the SHA constant above + an
-        # HTML scrape of the cu121 wheel index. Modal L4 GPUs run R550+
-        # drivers which support CUDA 12.4 fine.
-        "nvidia/cuda:12.4.1-devel-ubuntu22.04",
-        add_python="3.11",
+        # cu124 → cu126: LeRobot v0.5.1 requires torch>=2.7 (pyproject core
+        # dep), and torch 2.7.x ships ONLY on the cu126/cu128 wheel indexes —
+        # cu124 tops out at torch 2.6 (verified 2026-05-25 against
+        # download.pytorch.org/whl/cu124|cu126). The torch pip wheel bundles
+        # its own CUDA runtime libs, so the base-image CUDA version mainly
+        # gates nvcc/devel builds; Modal L4 GPUs run R570+ drivers (CUDA 12.6
+        # OK under minor-version compat).
+        "nvidia/cuda:12.6.3-devel-ubuntu22.04",
+        # 3.11 → 3.12: LeRobot v0.5.1 floors requires-python at ">=3.12".
+        add_python="3.12",
     )
     # clang + build-essential needed because lerobot pulls in evdev, whose
     # setup.py compiles a C extension. The CUDA devel base does not include
     # either by default once Modal replaces Python via add_python.
     .apt_install("git", "ffmpeg", "clang", "build-essential")
     .pip_install(
-        f"lerobot[pi0] @ git+https://github.com/huggingface/lerobot.git@{LEROBOT_COMMIT}",
+        # v0.5.1 renamed the `[pi0]` extra to `[pi]`; add `[smolvla]` too so
+        # both VLA policy families are trainable. torch/torchvision/torchcodec/
+        # numpy/av are CORE deps in v0.5.1 and resolve automatically.
+        f"lerobot[pi,smolvla] @ git+https://github.com/huggingface/lerobot.git@{LEROBOT_COMMIT}",
         "huggingface_hub",
         "supabase",
     )
     .pip_install(
-        # Both versions pinned so a future torch/torchvision release on
-        # pytorch.org doesn't silently shift the image under us. The pair
-        # 2.6.0 + 0.21.0 is the latest on the cu124 index as of 2026-05-20
-        # and matches LeRobot's pyproject floor (torch>=2.2.1, torchvision>=0.21.0).
-        "torch==2.6.0",
-        "torchvision==0.21.0",
+        # Pin the exact cu126 pair so a future torch/torchvision release on
+        # pytorch.org doesn't silently shift the image under us. 2.7.1 + 0.22.1
+        # is the official pairing within LeRobot's floors (torch>=2.7,<2.11;
+        # torchvision>=0.22,<0.26) and both ship on the cu126 cp312 index.
+        "torch==2.7.1",
+        "torchvision==0.22.1",
         # Use `index_url` (not `extra_index_url`) so pip cannot fall back to
         # PyPI — without this constraint pip picks a CPU-only or cu130 wheel
         # and the CUDA base image runtime-crashes (the trap CLAUDE.md Rule §5
-        # documents — same lesson applies on cu124).
-        index_url="https://download.pytorch.org/whl/cu124",
+        # documents).
+        index_url="https://download.pytorch.org/whl/cu126",
         extra_options="--force-reinstall",
     )
-    .run_commands("python -m pip uninstall -y torchcodec || true")
+    # NOTE: torchcodec is NO LONGER uninstalled. v3.0 datasets reference
+    # videos that LeRobot decodes at training time via torchcodec (the safe
+    # default video backend); it is a CORE dep in v0.5.1 and is left in place.
     .env({"PYTHONUNBUFFERED": "1"})
     .add_local_python_source("training_handler")
 )

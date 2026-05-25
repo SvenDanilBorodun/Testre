@@ -64,7 +64,7 @@ If you genuinely need to reintroduce a software safety guard that modifies the p
 
 `patches/fix_server_inference.py` self-verifies and exits 2/3 on no-op; CI's `overlay-guard` job tests this with a synthetic input.
 
-LeRobot itself is **not** overlaid — it must be byte-identical to upstream SHA `989f3d05ba47f872d75c587e76838e9cc574857a` (LeRobot v0.2.0).
+LeRobot itself is **not** overlaid — the vendored tree `physical_ai_tools/lerobot/` is byte-identical to upstream SHA `1396b9fab7aecddd10006c33c47a487ffdcb54b4` (LeRobot **v0.5.1**, dataset format **v3.0**). In the student/Jetson image, LeRobot is **self-managed**: the shared thin Dockerfile (`docker/physical_ai_server/Dockerfile`) re-clones it at that SHA over the base image and `pip install -e ".[pi,smolvla]"` (see Rule §5).
 
 ### 4. Service-role key bypasses RLS — authorization is your job
 
@@ -81,26 +81,26 @@ The Modal worker uses the **anon key** + per-row `worker_token` (UUID). Its only
 
 ### 5. Don't introduce drift between the LeRobot pinning sites
 
-The SHA `989f3d05ba47f872d75c587e76838e9cc574857a` must agree across:
-- `physical_ai_tools/lerobot/` (static byte-identical snapshot)
+**LeRobot v0.5.1 (dataset format v3.0).** The SHA `1396b9fab7aecddd10006c33c47a487ffdcb54b4` must agree across:
+- `physical_ai_tools/lerobot/` (static byte-identical snapshot — v0.5.1 tree)
 - `robotis_ai_setup/modal_training/modal_app.py` constant `LEROBOT_COMMIT`
-- `robotis/physical-ai-server:amd64-0.8.2` base image's internal pin
-- `meta/info.json` `codebase_version: "v2.1"`
-- Modal preflight in `training_handler.py` enforcing `codebase_version == "v2.1"`
+- `robotis_ai_setup/docker/physical_ai_server/Dockerfile` `ARG LEROBOT_COMMIT` (the self-managed install layer that re-clones LeRobot over the base image, both arches)
+- dataset `codebase_version: "v3.0"` (written at recording time by `data_manager.py::upload_huggingface_repo`'s `create_tag(..., tag="v3.0")`; constant in vendored `datasets/dataset_metadata.py`)
+- Modal preflight in `training_handler.py::EXPECTED_CODEBASE_VERSION = "v3.0"`
 
-Bumping LeRobot is a **5-place change in one PR**.
+Bumping LeRobot is a **5-place change in one PR**. The amd64 self-managed install layer's `python3 -c "... assert CODEBASE_VERSION=='v3.0'"` is the build-time guard.
+
+**v0.5.1 hard floors that drove the upgrade:** Python **≥3.12** (both base images already run 3.12), torch **≥2.7,<2.11**, torchvision **≥0.22,<0.26**, numpy **≥2.0,<2.3** (the old `numpy<2` pin is GONE — watch for base-image packages compiled against numpy 1.x ABI), transformers **5.x**, protobuf **≥6.31.1,<6.32** (old `6.31.0` floor was below it), torchcodec **≥0.3** (now a CORE dep + the default video-decode backend — no longer uninstalled on Modal). The `[pi0]` extra was renamed **`[pi]`**. Train entrypoint moved `lerobot.scripts.train` → **`lerobot.scripts.lerobot_train`**. Dataset recording: `add_frame` takes `task` INSIDE the frame dict, `finalize()` is mandatory before `push_to_hub`, on-disk layout is sharded (`meta/tasks.parquet`, `meta/episodes/*.parquet`, `videos/{key}/chunk-NNN/file-NNN.mp4`). Inference REQUIRES the processor pipeline (`make_pre_post_processors` → `preprocessor`/`select_action`/`postprocessor`); normalization moved out of the policy. Policy `pi0fast`→`pi0_fast`, new `pi05`.
 
 **Two PyTorch surfaces, two different CUDA pins — by design, not drift.** Don't try to "unify" them.
 
-- **Modal worker** (`modal_training/modal_app.py` lines 19-63): base image `nvidia/cuda:12.4.1-devel-ubuntu22.04` + `pip_install("torch==2.6.0", "torchvision==0.21.0", index_url="https://download.pytorch.org/whl/cu124", extra_options="--force-reinstall")` + `pip uninstall -y torchcodec`. Bumped from cu121/torch 2.7.0 → cu124/torch 2.6.0 on 2026-05-20 because LeRobot's pyproject.toml at the pinned SHA declares `torchvision>=0.21.0`, and torchvision 0.21.x ships only on the cu124/cu126 wheel indexes (cu121 tops out at 0.20.1). Without this bump the index silently resolved torchvision DOWN to 0.20.1 → `NotImplementedError` on `ColorJitter` / `SharpnessJitter` at training time. The `index_url` (NOT `extra_index_url`) constraint is still mandatory: without it pip picks a CPU-only or cu130 wheel and the CUDA base runtime-crashes. Modal runs on NVIDIA L4 GPUs with R550+ drivers (CUDA 12.4 OK).
-- **Student `physical_ai_server` image** (both `physical_ai_tools/physical_ai_server/Dockerfile.amd64` and `Dockerfile.arm64`): base image `robotis/ros:jazzy-ros-base-torch2.7.0-cuda12.8.0` — torch 2.7.0+cu128 inherited from Robotis upstream. The LeRobot install strips torch/torchvision from `lerobot/pyproject.toml` (via `sed -i '/"torch[^\"]*",/d'`) so the inherited torch is preserved. Students run on Windows with no GPU; the GPU/CUDA libs are dead weight but not actively harmful (torch falls back to CPU). Don't change this — switching to a CPU-only torch wheel would invalidate the upstream Robotis base image contract and re-trigger the cu130 trap from a different angle.
-- **Jetson Orin Nano classroom agent**: arm64 `Dockerfile.arm64` sets `PIP_INDEX_URL=https://pypi.jetson-ai-lab.io/jp6/cu126/+simple` for the LeRobot install layer; torch itself is NOT replaced (it stays at 2.7.0+cu128 from the base). The Jetson AI Lab index only resolves the non-torch transitive deps (numpy, scipy, etc.) to ARM-compatible wheels.
+- **Modal worker** (`modal_training/modal_app.py`): base image `nvidia/cuda:12.6.3-devel-ubuntu22.04` + `add_python="3.12"` + `pip_install("torch==2.7.1","torchvision==0.22.1", index_url=".../cu126", extra_options="--force-reinstall")`. Bumped cu124→cu126 on 2026-05-25 because v0.5.1 needs torch≥2.7, and torch 2.7.x ships ONLY on cu126/cu128 (cu124 tops out at 2.6). torchcodec is NO LONGER uninstalled (v3.0 reads videos with it). The `index_url` (NOT `extra_index_url`) constraint is still mandatory or pip picks a CPU/cu130 wheel and the CUDA base runtime-crashes.
+- **Student `physical_ai_server` image** (shared thin `docker/physical_ai_server/Dockerfile` over `robotis/physical-ai-server:amd64-0.8.2`): base ships torch 2.7.0+cu128 (Python 3.12) — satisfies v0.5.1. The self-managed install strips torch/torchvision from `lerobot/pyproject.toml` (`sed -i '/"torch[^\"]*",/d'`) so the inherited torch is preserved, then `pip install -e ".[pi,smolvla]"`. Cross-arch floor pins applied AFTER (protobuf 6.31.1, numpy>=2.0,<2.3, safetensors 0.7.0, pillow 12.1.0).
+- **Jetson Orin Nano**: the SAME shared thin Dockerfile runs on top of the arm64 base, so it replaces LeRobot on Jetson too. The arm64 base sets `PIP_INDEX_URL=https://pypi.jetson-ai-lab.io/jp6/cu126/+simple` (+ PyPI fallback), which the thin install layer inherits; verify that index serves v0.5.1's numpy 2.x / datasets 4.x / torchcodec arm64 wheels. Torch is not replaced (stays 2.7.0+cu128 from the base).
 
-The audit found "torch 2.7.0+cu128 ships in nettername/physical-ai-server" — that's correct and intentional. Rule §5 used to read as if Modal's cu121 pin applied to the student image too; it doesn't.
+The LeRobot 5-site contract is trust-on-PR-review. Any bump must touch all 5 sites in one PR.
 
-The LeRobot 5-site contract is now trust-on-PR-review (the `lerobot-sha-check` job was removed alongside `modal-deploy.yml` when Modal moved to manual deploys). Any bump must touch all 5 sites in one PR.
-
-**Known soft spot in the contract:** `physical_ai_tools/physical_ai_server/Dockerfile.amd64` does not pin a `PHYSICAL_AI_TOOLS_REF` and clones the moving `jazzy` branch tip. The arm64 Dockerfile has a `LEROBOT_EXPECTED_SHA` runtime `rev-parse` check that hard-fails on drift; the amd64 build relies entirely on the ROBOTIS base image to vendor the right LeRobot. If a future ROBOTIS base bump silently advances the embedded LeRobot SHA, only arm64 builds would catch it. Backport the arm64 SHA-check to amd64 the next time you touch either Dockerfile.
+**Dormant-importer boot guard:** `training_manager.py` is overlaid to import the local `LerobotTrainer` LAZILY (it's imported by `physical_ai_server.py` at boot, and `lerobot_trainer.py` references several symbols that MOVED in v0.5.1: `scripts.eval`→`scripts.lerobot_eval`, `utils.wandb_utils`→`rl.wandb_utils`, `get_safe_torch_device`→`utils.device_utils`). EduBotics trains on Modal, so the local trainer is dead weight; deferring its import keeps the ROS node from crashing at startup.
 
 ### 6. CI/CD deploys
 

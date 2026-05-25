@@ -37,7 +37,7 @@ from supabase import create_client
 OUTPUT_DIR = Path("/tmp/training_output")
 
 # ---------------- ROBOTIS OMX expected schema ----------------
-EXPECTED_CODEBASE_VERSION = "v2.1"
+EXPECTED_CODEBASE_VERSION = "v3.0"
 MIN_JOINTS = 4
 MAX_JOINTS = 20
 
@@ -231,9 +231,11 @@ def _preflight_dataset(dataset_name: str, hf_token: str) -> None:
         )
     if version != EXPECTED_CODEBASE_VERSION:
         raise ValueError(
-            f"Dataset '{dataset_name}' hat codebase_version='{version}', "
-            f"erwartet wird '{EXPECTED_CODEBASE_VERSION}'. "
-            f"Bitte mit aktueller Recording-Software neu aufnehmen."
+            f"Dataset '{dataset_name}' hat das alte Aufnahme-Format "
+            f"(codebase_version='{version}'), benoetigt wird jetzt "
+            f"'{EXPECTED_CODEBASE_VERSION}'. Datensaetze aus der alten "
+            f"EduBotics-Version sind nicht mehr kompatibel — bitte mit der "
+            f"aktuellen Version neu aufnehmen."
         )
 
     fps = info.get("fps")
@@ -313,7 +315,9 @@ def _build_training_command(
     cmd = [
         sys.executable,
         "-m",
-        "lerobot.scripts.train",
+        # v0.5.1 renamed scripts/train.py → scripts/lerobot_train.py (console
+        # entry `lerobot-train`). The old `lerobot.scripts.train` module is gone.
+        "lerobot.scripts.lerobot_train",
         f"--policy.type={model_type}",
         "--policy.device=cuda",
         f"--dataset.repo_id={dataset_name}",
@@ -404,6 +408,13 @@ def _upload_model_to_hf(model_name: str, hf_token: str) -> str:
     # includes every observation.images.* key the model expects). The inference
     # overlay reads that file directly, so no separate camera_config.json is
     # needed — it would be a second source of truth for data that already exists.
+    #
+    # v0.5.1: LeRobot's save_checkpoint() also writes the processor configs
+    # (preprocessor.save_pretrained / postprocessor.save_pretrained) INTO
+    # checkpoints/last/pretrained_model/. upload_large_folder uploads the whole
+    # directory, so policy_preprocessor.json / policy_postprocessor.json ride
+    # along automatically — the inference overlay needs them for
+    # make_pre_post_processors() (normalization moved out of the policy in v0.5.1).
 
     hf_api.upload_large_folder(
         repo_id=model_name,

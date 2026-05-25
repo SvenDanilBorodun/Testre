@@ -18,10 +18,19 @@
 
 import os
 
+from lerobot.policies.factory import make_pre_post_processors
 from lerobot.policies.pretrained import PreTrainedPolicy
+from lerobot.policies.utils import prepare_observation_for_inference
 import numpy as np
 from physical_ai_server.utils.file_utils import read_json_file
 import torch
+
+# v0.5.1 moved normalization OUT of the policy into a processor pipeline.
+# A trained model now ships these two files in pretrained_model/; a model
+# from the old EduBotics version (LeRobot 0.2.0 / dataset v2.1) does NOT have
+# them and cannot be run for inference — the user must retrain.
+_PREPROCESSOR_CONFIG = 'policy_preprocessor.json'
+_POSTPROCESSOR_CONFIG = 'policy_postprocessor.json'
 
 
 class InferenceManager:
@@ -39,6 +48,9 @@ class InferenceManager:
         self.policy_type = None
         self.policy_path = None
         self.policy = None
+        # v0.5.1 processor pipeline (built in load_policy from the model dir).
+        self.preprocessor = None
+        self.postprocessor = None
         self._expected_image_keys = []
 
     def validate_policy(self, policy_path: str) -> bool:
@@ -82,11 +94,31 @@ class InferenceManager:
                 flush=True,
             )
             return False
+        # v0.5.1: a model trained with the old EduBotics version has no
+        # processor configs. Without them inference would silently run with
+        # un-normalized observations. Fail loudly in German instead.
+        pre_cfg = os.path.join(self.policy_path, _PREPROCESSOR_CONFIG)
+        post_cfg = os.path.join(self.policy_path, _POSTPROCESSOR_CONFIG)
+        if not (os.path.exists(pre_cfg) and os.path.exists(post_cfg)):
+            print(
+                '[FEHLER] Dieses Modell stammt aus einer älteren EduBotics-'
+                'Version und ist mit der aktuellen Inferenz nicht kompatibel '
+                f'({_PREPROCESSOR_CONFIG}/{_POSTPROCESSOR_CONFIG} fehlen). '
+                'Bitte das Modell mit der aktuellen Version neu trainieren.',
+                flush=True,
+            )
+            return False
         try:
             policy_cls = self._get_policy_class(self.policy_type)
             self.policy = policy_cls.from_pretrained(self.policy_path)
             self.policy.to(self.device)
             self.policy.eval()
+            # Build the pre/post processor pipeline from the saved configs.
+            # Normalization (mean/std) lives here in v0.5.1, not in the policy.
+            self.preprocessor, self.postprocessor = make_pre_post_processors(
+                policy_cfg=self.policy.config,
+                pretrained_path=self.policy_path,
+            )
             self.reset_policy()
             self._expected_image_keys = self._read_expected_image_keys()
             return True
@@ -114,6 +146,8 @@ class InferenceManager:
         if hasattr(self, 'policy'):
             del self.policy
             self.policy = None
+            self.preprocessor = None
+            self.postprocessor = None
         else:
             print('No policy to clear.')
 
@@ -146,56 +180,29 @@ class InferenceManager:
                     if f'observation.images.{k}' in self._expected_image_keys
                 }
 
-        observation = self._preprocess(images, state, task_instruction)
+        # Build the RAW observation dict (numpy, HWC uint8 images + state).
+        # prepare_observation_for_inference() does the channel-first / float32
+        # /255 / batch-dim / device conversion; the preprocessor then applies
+        # the policy's mean/std normalization. Doing the /255 here too would
+        # double-normalize — that is why the old manual _preprocess is gone.
+        observation = {}
+        for key, value in images.items():
+            observation['observation.images.' + key] = value
+        observation['observation.state'] = (
+            np.asarray(state, dtype=np.float32) if isinstance(state, list) else state
+        )
 
+        device = torch.device(self.device)
         with torch.inference_mode():
+            observation = prepare_observation_for_inference(
+                observation, device, task=task_instruction or '', robot_type=None
+            )
+            observation = self.preprocessor(observation)
             action = self.policy.select_action(observation)
+            action = self.postprocessor(action)
             action = action.squeeze(0).to('cpu').numpy()
 
         return action
-
-    def _preprocess(
-            self,
-            images: dict[str, np.ndarray],
-            state: list,
-            task_instruction: str = None) -> dict:
-
-        observation = self._convert_images2tensors(images)
-        observation['observation.state'] = self._convert_np2tensors(state)
-        for key in observation.keys():
-            observation[key] = observation[key].to(self.device)
-
-        if task_instruction is not None:
-            observation['task'] = [task_instruction]
-
-        return observation
-
-    def _convert_images2tensors(
-            self,
-            images: dict[str, np.ndarray]) -> dict[str, torch.Tensor]:
-
-        processed_images = {}
-        for key, value in images.items():
-            image = torch.from_numpy(value)
-            image = image.to(torch.float32) / 255
-            image = image.permute(2, 0, 1)
-            image = image.to(self.device, non_blocking=True)
-            image = image.unsqueeze(0)
-            processed_images['observation.images.' + key] = image
-
-        return processed_images
-
-    def _convert_np2tensors(
-            self,
-            data):
-        if isinstance(data, list):
-            data = np.array(data)
-        tensor_data = torch.from_numpy(data)
-        tensor_data = tensor_data.to(torch.float32)
-        tensor_data = tensor_data.to(self.device, non_blocking=True)
-        tensor_data = tensor_data.unsqueeze(0)
-
-        return tensor_data
 
     def _get_policy_class(self, name: str) -> PreTrainedPolicy:
         if name == 'tdmpc':
@@ -218,9 +225,15 @@ class InferenceManager:
             from lerobot.policies.pi0.modeling_pi0 import PI0Policy
 
             return PI0Policy
-        elif name == 'pi0fast':
-            from lerobot.policies.pi0fast.modeling_pi0fast import PI0FASTPolicy
-            return PI0FASTPolicy
+        elif name == 'pi0_fast':
+            # v0.5.1: dir pi0fast→pi0_fast, class PI0FASTPolicy→PI0FastPolicy,
+            # registered type 'pi0fast'→'pi0_fast'.
+            from lerobot.policies.pi0_fast.modeling_pi0_fast import PI0FastPolicy
+            return PI0FastPolicy
+        elif name == 'pi05':
+            # New in v0.5.1 (Pi-0.5).
+            from lerobot.policies.pi05.modeling_pi05 import PI05Policy
+            return PI05Policy
         elif name == 'smolvla':
             from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy
             return SmolVLAPolicy
@@ -240,7 +253,8 @@ class InferenceManager:
             'act',
             'vqbet',
             'pi0',
-            'pi0fast',
+            'pi0_fast',
+            'pi05',
             'smolvla',
         ]
 

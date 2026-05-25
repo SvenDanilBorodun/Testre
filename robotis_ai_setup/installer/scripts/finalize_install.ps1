@@ -52,6 +52,36 @@ try {
     Write-Host "   LogPath: $LogPath"
     Write-Host "   Elevated: $([bool]([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator))"
 
+    # Phase 0: Make sure WSL2 + usbipd are actually installed before we try to
+    # import a distro. The GUI calls finalize when the EduBotics distro is
+    # missing, but that can also mean WSL itself never installed (a failed or
+    # skipped prerequisites step, or a machine where `wsl --install` needed a
+    # reboot that never happened). Importing into a non-existent WSL would fail
+    # with a cryptic error — run the prerequisites first so this one button
+    # fixes both cases.
+    $wslOk = $false
+    try {
+        wsl --status *>$null
+        if ($LASTEXITCODE -eq 0) { $wslOk = $true }
+    } catch { }
+    if (-not $wslOk) {
+        Write-Step "Schritt 0/2: WSL2/usbipd werden installiert..."
+        & (Join-Path $PSScriptRoot "install_prerequisites.ps1")
+        $prereqRc = $LASTEXITCODE
+        # install_prerequisites writes .reboot_required when a fresh WSL2
+        # install needs a host reboot before a distro can be imported.
+        $rebootFlagAfter = Join-Path $PSScriptRoot ".reboot_required"
+        if (Test-Path $rebootFlagAfter) {
+            Write-Step "NEUSTART ERFORDERLICH: Bitte den PC neu starten und EduBotics erneut öffnen."
+            exit 0
+        }
+        if ($prereqRc -ne 0) {
+            Write-FAIL "Voraussetzungen konnten nicht installiert werden (exit $prereqRc)."
+            exit 1
+        }
+        Write-OK "Voraussetzungen installiert"
+    }
+
     # Clear the reboot flag — prerequisites are in place now (post-reboot).
     $flagPath = Join-Path $PSScriptRoot ".reboot_required"
     if (Test-Path $flagPath) { Remove-Item $flagPath -Force }

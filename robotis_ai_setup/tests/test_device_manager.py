@@ -20,6 +20,8 @@ from gui.app.device_manager import (
     CameraDevice,
     HardwareConfig,
     list_robotis_devices,
+    list_unbound_robotis,
+    hardware_ids_for_devices,
 )
 
 
@@ -69,6 +71,31 @@ class TestListRobotisDevices(unittest.TestCase):
         result = list_robotis_devices()
         self.assertEqual(len(result), 2)
         self.assertTrue(all(d.vid_pid.startswith("2F5D") for d in result))
+
+
+class TestListUnboundRobotis(unittest.TestCase):
+
+    @patch("gui.app.device_manager.list_usb_devices")
+    def test_only_not_shared_or_unknown_robotis(self, mock_list):
+        mock_list.return_value = [
+            USBDevice("1-1", "2F5D:0103", "OpenRB-150", "Not shared"),  # unbound
+            USBDevice("1-2", "2F5D:0104", "OpenRB-150", "Shared"),      # already bound
+            USBDevice("1-3", "2F5D:2202", "OpenRB-150", "Attached"),    # already attached
+            USBDevice("1-4", "2F5D:0105", "OpenRB-150", "Unknown"),     # relaxed-parse -> unbound
+            USBDevice("1-5", "046D:0825", "Logitech Webcam", "Not shared"),  # not ROBOTIS
+        ]
+        result = list_unbound_robotis()
+        busids = sorted(d.busid for d in result)
+        self.assertEqual(busids, ["1-1", "1-4"])
+
+    @patch("gui.app.device_manager.list_usb_devices")
+    def test_hardware_ids_dedup_lowercased(self, mock_list):
+        mock_list.return_value = [
+            USBDevice("1-1", "2F5D:0103", "OpenRB-150", "Not shared"),
+            USBDevice("1-2", "2F5D:0103", "OpenRB-150", "Not shared"),  # same VID:PID
+        ]
+        ids = hardware_ids_for_devices(list_unbound_robotis())
+        self.assertEqual(ids, ["2f5d:0103"])
 
 
 if __name__ == "__main__":

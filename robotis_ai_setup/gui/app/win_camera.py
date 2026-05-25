@@ -135,6 +135,46 @@ def _pnp_camera_details() -> list[dict]:
     return details
 
 
+def camera_privacy_blocked() -> "bool | None":
+    """Best-effort: is Windows blocking desktop apps from the camera?
+
+    Windows 10/11 has a global "Let desktop apps access your camera" toggle
+    (Settings → Privacy & security → Camera). When OFF, OpenCV's
+    ``VideoCapture.isOpened()`` silently returns False for EVERY camera, so the
+    GUI's scan finds nothing even though Device Manager shows the camera as
+    healthy. This is one of the most common "no cameras found" causes on a
+    fresh student PC. We read the ConsentStore registry value so the GUI can
+    surface a precise fix instead of a generic "keine Kameras".
+
+    Returns True if access is denied, False if allowed, None if undeterminable
+    (non-Windows, registry unreadable, key absent → treat as "unknown").
+    """
+    if sys.platform != "win32":
+        return None
+    try:
+        import winreg  # type: ignore[import-untyped]
+    except ImportError:
+        return None
+    # The per-machine desktop-app (NonPackaged) consent governs OpenCV here.
+    # HKCU wins for the logged-in user; "Deny" means blocked.
+    for hive, sub in (
+        (winreg.HKEY_CURRENT_USER,
+         r"Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\webcam\NonPackaged"),
+        (winreg.HKEY_CURRENT_USER,
+         r"Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\webcam"),
+        (winreg.HKEY_LOCAL_MACHINE,
+         r"SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\webcam\NonPackaged"),
+    ):
+        try:
+            with winreg.OpenKey(hive, sub) as k:
+                val, _ = winreg.QueryValueEx(k, "Value")
+                if isinstance(val, str) and val.strip().lower() == "deny":
+                    return True
+        except OSError:
+            continue
+    return False
+
+
 def list_windows_cameras(max_probe: int = _MAX_PROBE) -> list[CameraInfo]:
     """Enumerate openable OpenCV (DirectShow) camera indices.
 

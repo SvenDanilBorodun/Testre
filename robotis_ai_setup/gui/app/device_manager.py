@@ -980,6 +980,25 @@ def list_unbound_cameras() -> list[USBDevice]:
     return unbound
 
 
+def list_unbound_robotis() -> list[USBDevice]:
+    """Return ROBOTIS arms Windows/usbipd sees but that are not yet attachable.
+
+    Mirrors ``list_unbound_cameras()`` for the arms. A device that is in
+    ``Not shared`` (or the relaxed-parse ``Unknown``) state cannot be attached
+    by the GUI without admin, because non-admin ``usbipd attach`` only works
+    once the device is ``Shared`` (bound) — see usbipd 5.x policy semantics.
+    This is the load-bearing list behind the GUI's "Arme freigeben" repair:
+    when ``configure_usbipd.ps1`` failed to bind at install time (the classic
+    post-install PATH race), the arms sit here and the student needs one
+    elevated ``bind`` to make them attachable.
+    """
+    unbound: list[USBDevice] = []
+    for dev in list_robotis_devices():
+        if dev.state in ("Not shared", "Unknown"):
+            unbound.append(dev)
+    return unbound
+
+
 def hardware_ids_for_devices(devs: list[USBDevice]) -> list[str]:
     """Extract unique VID:PID hardware-ID strings (lowercased) from devices.
 

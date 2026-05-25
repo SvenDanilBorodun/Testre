@@ -41,9 +41,65 @@ function Write-Warn { param([string]$msg) Write-Host "   WARN: $msg" -Foreground
 
 Write-Step "Configuring usbipd policy for EduBotics-Geräte..."
 
+# ── Resolve usbipd.exe robustly ────────────────────────────────────────────
+# CRITICAL: this script is launched by Inno Setup as a SEPARATE powershell.exe
+# whose environment was captured from explorer.exe BEFORE Step 1 installed the
+# usbipd-win MSI in the same install session. So bare `usbipd` is frequently
+# NOT on this shell's PATH yet — and if we exit here, the AutoBind policy + the
+# `usbipd bind` below never run, leaving every arm in the `Not shared` state.
+# At runtime the GUI's non-admin `usbipd attach` then fails ("found but can't
+# attach") because attach is only non-admin for a device that is already
+# Shared. Refresh PATH from the registry first, then fall back to the known
+# install locations + the Uninstall registry key — exactly like the GUI's
+# usbipd_resolver.py and bind_devices.ps1, so this script succeeds on the same
+# install timeline without requiring a reboot.
+try {
+    $machinePath = [System.Environment]::GetEnvironmentVariable("Path", "Machine")
+    $userPath    = [System.Environment]::GetEnvironmentVariable("Path", "User")
+    $env:Path = (@($machinePath, $userPath) | Where-Object { $_ }) -join ";"
+} catch { }
+
+$UsbipdExe = $null
+$cmd = Get-Command usbipd -ErrorAction SilentlyContinue
+if ($cmd) { $UsbipdExe = $cmd.Source }
+if (-not $UsbipdExe) {
+    $candidates = @(
+        (Join-Path $env:ProgramFiles "usbipd-win\usbipd.exe"),
+        (Join-Path ${env:ProgramFiles(x86)} "usbipd-win\usbipd.exe"),
+        "$env:ProgramW6432\usbipd-win\usbipd.exe"
+    ) | Where-Object { $_ } | Select-Object -Unique
+    foreach ($c in $candidates) {
+        if (Test-Path $c) { $UsbipdExe = $c; break }
+    }
+}
+if (-not $UsbipdExe) {
+    # Last resort: walk the Uninstall hive for the MSI's InstallLocation.
+    foreach ($hive in @(
+        "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*",
+        "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*"
+    )) {
+        try {
+            $entry = Get-ItemProperty $hive -ErrorAction SilentlyContinue |
+                Where-Object { $_.DisplayName -match 'usbipd' } | Select-Object -First 1
+            if ($entry -and $entry.InstallLocation) {
+                $exe = Join-Path $entry.InstallLocation "usbipd.exe"
+                if (Test-Path $exe) { $UsbipdExe = $exe; break }
+            }
+        } catch { }
+    }
+}
+if (-not $UsbipdExe) {
+    Write-Host "ERROR: usbipd not found (PATH, Program Files, registry)." -ForegroundColor Red
+    Write-Host "       A reboot usually fixes the post-install PATH race — the GUI" -ForegroundColor Yellow
+    Write-Host "       offers a one-click 'Reparieren' that re-runs this step elevated." -ForegroundColor Yellow
+    Write-Diag "resolve" "usbipd.exe not found on PATH, Program Files, or Uninstall registry"
+    exit 1
+}
+Write-OK "usbipd: $UsbipdExe"
+
 # ── usbipd version detection ───────────────────────────────────────────────
 try {
-    $versionOutput = usbipd --version 2>&1
+    $versionOutput = & $UsbipdExe --version 2>&1
     Write-Diag "version" ($versionOutput | Out-String)
     if ($versionOutput -match '(\d+\.\d+\.\d+)') {
         $version = [version]$Matches[1]
@@ -54,7 +110,7 @@ try {
     }
     Write-Host "   usbipd version: $version" -ForegroundColor White
 } catch {
-    Write-Host "ERROR: usbipd not found. Install it first." -ForegroundColor Red
+    Write-Host "ERROR: usbipd resolved but --version failed." -ForegroundColor Red
     Write-Diag "version" "usbipd --version raised: $_"
     exit 1
 }
@@ -70,7 +126,7 @@ if ($version.Major -lt 4) {
 $knownPIDs = @("0103", "2202")  # OpenRB-150 default + alt firmware
 $listOutput = ""
 try {
-    $listOutput = usbipd list 2>&1 | Out-String
+    $listOutput = & $UsbipdExe list 2>&1 | Out-String
     Write-Diag "usbipd_list_at_install" $listOutput
     foreach ($line in $listOutput -split "`n") {
         if ($line -match "($ROBOTIS_VID):([0-9a-fA-F]{4})") {
@@ -90,7 +146,7 @@ $armConnected = $listOutput -match "($ROBOTIS_VID):"
 # ── Add policy entries ────────────────────────────────────────────────────
 $existingPolicies = ""
 try {
-    $existingPolicies = usbipd policy list 2>&1 | Out-String
+    $existingPolicies = & $UsbipdExe policy list 2>&1 | Out-String
     Write-Diag "usbipd_policy_list_before" $existingPolicies
 } catch { }
 
@@ -128,7 +184,7 @@ foreach ($productId in $knownPIDs) {
         # operator is on a *variable name*, not on a literal expression,
         # so we copy into a local before invoking.
         $splat = $attempt.args
-        $output = & usbipd @splat 2>&1 | Out-String
+        $output = & $UsbipdExe @splat 2>&1 | Out-String
         Write-Diag "policy_add_${hwid}_$($attempt.label)" "rc=$LASTEXITCODE`n$output"
         if ($LASTEXITCODE -eq 0) {
             Write-OK "Policy added ($($attempt.label)): $hwid -> Allow"
@@ -146,7 +202,7 @@ foreach ($productId in $knownPIDs) {
     # student would have to unplug+replug each arm after install before
     # the GUI could attach it. Mirrors the camera-bind block below.
     if ($added) {
-        $bindOut = usbipd bind --hardware-id $hwid 2>&1 | Out-String
+        $bindOut = & $UsbipdExe bind --hardware-id $hwid 2>&1 | Out-String
         Write-Diag "robotis_bind_$hwid" "rc=$LASTEXITCODE`n$bindOut"
         if ($LASTEXITCODE -eq 0) {
             Write-OK "ROBOTIS $hwid bound (immediately attachable without replug)"
@@ -216,7 +272,7 @@ try {
             }
             foreach ($attempt in $attempts) {
                 $splat = $attempt.args
-                $output = & usbipd @splat 2>&1 | Out-String
+                $output = & $UsbipdExe @splat 2>&1 | Out-String
                 Write-Diag "policy_add_camera_${hwid}_$($attempt.label)" "rc=$LASTEXITCODE`n$output"
                 if ($LASTEXITCODE -eq 0) {
                     Write-OK "Camera policy added ($($attempt.label)): $hwid -> Allow"
@@ -232,7 +288,7 @@ try {
             # this the student would have to unplug+replug after install just to
             # get the camera into a shareable state.
             if ($added) {
-                $bindOut = usbipd bind --hardware-id $hwid 2>&1 | Out-String
+                $bindOut = & $UsbipdExe bind --hardware-id $hwid 2>&1 | Out-String
                 Write-Diag "camera_bind_$hwid" "rc=$LASTEXITCODE`n$bindOut"
                 if ($LASTEXITCODE -eq 0) {
                     Write-OK "Camera $hwid bound (immediately attachable without replug)"
@@ -250,7 +306,7 @@ try {
 # Refresh the policy snapshot for the log so post-install support has
 # the after-state cached.
 try {
-    $afterPolicies = usbipd policy list 2>&1 | Out-String
+    $afterPolicies = & $UsbipdExe policy list 2>&1 | Out-String
     Write-Diag "usbipd_policy_list_after" $afterPolicies
 } catch { }
 
@@ -310,13 +366,13 @@ if (-not $smokeBusid) {
 }
 
 Write-Step "Attach smoke test on busid=$smokeBusid"
-$attachOut = usbipd attach --wsl $DistroName --busid $smokeBusid 2>&1 | Out-String
+$attachOut = & $UsbipdExe attach --wsl $DistroName --busid $smokeBusid 2>&1 | Out-String
 Write-Diag "attach_smoke" "attach rc=$LASTEXITCODE`n$attachOut"
 
 if ($LASTEXITCODE -eq 0) {
     Write-OK "USB attach works on this machine."
     # Detach again — the GUI will re-attach when the student clicks scan.
-    $detachOut = usbipd detach --busid $smokeBusid 2>&1 | Out-String
+    $detachOut = & $UsbipdExe detach --busid $smokeBusid 2>&1 | Out-String
     Write-Diag "attach_smoke_detach" "detach rc=$LASTEXITCODE`n$detachOut"
 } else {
     Write-Warn "USB attach smoke test failed. The GUI will show a diagnostic when the student clicks 'Arme scannen'."

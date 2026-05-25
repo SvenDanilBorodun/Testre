@@ -222,6 +222,12 @@ class EduBoticsApp:
         self.follower_status_var = tk.StringVar(value="Nicht gescannt")
         ttk.Label(follower_row, textvariable=self.follower_status_var, foreground="gray").pack(side=tk.LEFT, padx=10)
 
+        # Guided repair area for the arms — populated by _show_arm_repair()
+        # after a failed scan with the action button that matches the actual
+        # failure (bind arms, repair usbipd, finish setup, cable/power hints).
+        self.arm_repair_frame = ttk.Frame(follower_frame)
+        self.arm_repair_frame.pack(fill=tk.X, pady=(4, 0))
+
         # ── Schritt C: Kameras ──
         camera_frame = ttk.LabelFrame(main, text="Schritt C: Kameras (bis zu 2)", padding=10)
         camera_frame.pack(fill=tk.X, pady=5)
@@ -888,6 +894,9 @@ class EduBoticsApp:
             self.root.after(0, lambda: self.progress.start(10))
             self._log("USB-Geräte werden nach Roboterarmen durchsucht...")
 
+            # Clear any repair button from a previous failed scan.
+            self.root.after(0, self._clear_arm_repair)
+
             leader, follower = device_manager.scan_and_identify_arms(IMAGE_OPEN_MANIPULATOR)
 
             if leader:
@@ -942,7 +951,118 @@ class EduBoticsApp:
             )
             self._set_status(short_status)
 
+            # Turn the diagnosis into a one-click guided repair button that
+            # matches the actual failure, instead of leaving the student to
+            # parse a wall of log text.
+            self.root.after(0, lambda d=diag: self._show_arm_repair(d))
+
         threading.Thread(target=_do_scan, daemon=True).start()
+
+    # ── Guided arm repair ────────────────────────────────────────────────
+
+    def _clear_arm_repair(self):
+        """Remove any repair widgets from a previous failed arm scan."""
+        for w in self.arm_repair_frame.winfo_children():
+            w.destroy()
+
+    def _show_arm_repair(self, diag: "device_manager.UsbDiagnosis"):
+        """Show the action button that matches the arm-scan failure reason.
+
+        Maps each UsbDiagnosis flag to the cheapest fix the student can do
+        themselves:
+          - usbipd_missing       → re-run prereq + policy elevated
+          - wsl_distro_missing   → finalize install elevated
+          - attach_failed /
+            no_serial_after_attach → one elevated `usbipd bind` of the arms
+          - everything else      → just a "scan again" button (cable/power
+                                    checklist already printed to the log).
+        """
+        self._clear_arm_repair()
+
+        if diag.usbipd_missing:
+            ttk.Button(
+                self.arm_repair_frame,
+                text="usbipd reparieren (Administrator)",
+                command=self._prompt_repair_usbipd,
+            ).pack(anchor=tk.W, pady=(2, 0))
+            return
+
+        if diag.wsl_distro_missing:
+            ttk.Button(
+                self.arm_repair_frame,
+                text="Einrichtung abschließen (Administrator)",
+                command=self._prompt_finalize_install,
+            ).pack(anchor=tk.W, pady=(2, 0))
+            return
+
+        # attach_failed / no_serial_after_attach: the arms ARE visible to
+        # usbipd but never reached the Shared state — the install-time bind
+        # didn't happen (post-install PATH race) or a stale policy is missing.
+        # Offer the same one-UAC bind flow the cameras have.
+        if diag.attach_failed or diag.no_serial_after_attach:
+            try:
+                unbound = device_manager.list_unbound_robotis()
+            except Exception:  # noqa: BLE001
+                unbound = []
+            if not unbound:
+                # Fall back to every visible ROBOTIS device — binding an
+                # already-bound one is a cheap no-op in bind_devices.ps1.
+                try:
+                    unbound = device_manager.list_robotis_devices()
+                except Exception:  # noqa: BLE001
+                    unbound = []
+            if unbound:
+                n = len(unbound)
+                ttk.Label(
+                    self.arm_repair_frame,
+                    text="Die Arme werden erkannt, sind aber noch nicht für die "
+                         "EduBotics-Umgebung freigegeben.",
+                    foreground="gray", wraplength=620, justify=tk.LEFT,
+                ).pack(anchor=tk.W)
+                ttk.Button(
+                    self.arm_repair_frame,
+                    text=f"Arme freigeben (Administrator) ({n})",
+                    command=lambda u=unbound: self._prompt_bind_arms(u),
+                ).pack(anchor=tk.W, pady=(2, 0))
+                return
+
+        # Generic fallback — cable/power/driver problem (windows_sees_no_robotis
+        # etc.). The detailed checklist is already in the log; give a quick
+        # re-scan affordance.
+        ttk.Button(
+            self.arm_repair_frame,
+            text="Erneut scannen",
+            command=self._scan_arms,
+        ).pack(anchor=tk.W, pady=(2, 0))
+
+    def _prompt_bind_arms(self, unbound: "list[device_manager.USBDevice]"):
+        """Bind the ROBOTIS arms via one elevated bind_devices.ps1 call.
+
+        Mirror of _prompt_bind_cameras for the arms: one UAC prompt adds the
+        AutoBind policy + `usbipd bind` for each arm's VID:PID, moving them
+        into the Shared state so the next (non-admin) scan can attach them.
+        """
+        hw_ids = device_manager.hardware_ids_for_devices(unbound)
+        if not hw_ids:
+            return
+        device_lines = "\n".join(
+            f"  • {d.description or '(unbekannt)'} ({d.vid_pid})" for d in unbound
+        )
+        wants_run = messagebox.askyesno(
+            "Arme freigeben",
+            "Folgende Roboterarme sind angeschlossen, aber noch nicht für die "
+            "EduBotics-Umgebung freigegeben:\n\n"
+            f"{device_lines}\n\n"
+            "Jetzt freigeben? Dies erfordert einmalig Administrator-Rechte. "
+            "Danach wird automatisch erneut gescannt.",
+        )
+        if not wants_run:
+            return
+        self._run_bind_devices_elevated(
+            hw_ids,
+            status="Arme werden freigegeben (UAC-Zustimmung erforderlich)...",
+            on_done=lambda: self.root.after(200, self._scan_arms),
+        )
 
     # ── Camera Scanning ──────────────────────────────────────────────
 
@@ -998,6 +1118,35 @@ class EduBoticsApp:
                 else:
                     ttk.Label(self.camera_checks_frame, text="Keine Kameras gefunden (optional)", foreground="gray").pack(anchor=tk.W)
                     self._log("Keine Kameras gefunden. Kameras sind optional — Start ohne Kamera möglich.")
+                    # Native-bridge cameras are opened directly via OpenCV on
+                    # Windows. The #1 reason a healthy camera yields 0 hits is
+                    # the Windows privacy toggle blocking desktop apps — detect
+                    # it and give a precise fix instead of a generic message.
+                    if cameras_use_native_bridge():
+                        blocked = None
+                        try:
+                            from . import win_camera
+                            blocked = win_camera.camera_privacy_blocked()
+                        except Exception:  # noqa: BLE001
+                            blocked = None
+                        if blocked:
+                            self._log(
+                                "ACHTUNG: Windows blockiert den Kamera-Zugriff für "
+                                "Desktop-Apps. Einstellungen → Datenschutz und "
+                                "Sicherheit → Kamera → 'Desktop-Apps den Zugriff "
+                                "auf Ihre Kamera erlauben' EINSCHALTEN, dann erneut scannen."
+                            )
+                            ttk.Button(
+                                self.camera_checks_frame,
+                                text="Windows-Kamera-Einstellungen öffnen",
+                                command=self._open_camera_privacy_settings,
+                            ).pack(anchor=tk.W, pady=(4, 0))
+                        else:
+                            self._log(
+                                "Tipp: Kamera per USB anschließen und prüfen, ob sie im "
+                                "Windows Geräte-Manager als 'Kamera' erscheint. "
+                                "Bei Bedarf USB-Port wechseln, dann erneut scannen."
+                            )
 
                 # Unbound-cameras hint + repair button. Shows even when SOME
                 # cameras were found, because the student may have plugged in
@@ -1024,24 +1173,25 @@ class EduBoticsApp:
 
         threading.Thread(target=_do_scan, daemon=True).start()
 
-    def _prompt_bind_cameras(self, unbound: "list[device_manager.USBDevice]"):
-        """Bind the listed UVC cameras via one elevated PowerShell call.
-
-        Flow:
-          1. Confirm with the student (German messagebox lists VID:PIDs).
-          2. UAC prompt → elevated bind_devices.ps1 with the VID:PIDs.
-          3. After exit, re-run _scan_cameras so the newly-bound camera
-             attaches to WSL and shows up in the checkbox list.
-
-        One UAC prompt covers the whole batch — usbipd accepts multiple
-        hardware-IDs in sequence inside the script.
-        """
+    def _resolve_bind_script(self):
+        """Locate bind_devices.ps1 in either the production or dev layout."""
         from .constants import INSTALL_DIR
-        script_candidates = [
+        candidates = [
             os.path.join(INSTALL_DIR, "scripts", "bind_devices.ps1"),
             os.path.join(INSTALL_DIR, "installer", "scripts", "bind_devices.ps1"),
         ]
-        script = next((p for p in script_candidates if os.path.isfile(p)), None)
+        return next((p for p in candidates if os.path.isfile(p)), None)
+
+    def _run_bind_devices_elevated(self, hw_ids, status: str, on_done):
+        """Run bind_devices.ps1 elevated for the given VID:PIDs, then call on_done.
+
+        Shared by the camera ("Kameras freigeben") and arm ("Arme freigeben")
+        repair flows. One UAC prompt processes the whole batch — usbipd accepts
+        the hardware-IDs in sequence inside the script. ``on_done`` runs after
+        the elevated child exits (regardless of success) so the caller can
+        re-scan; it is NOT called on UAC cancel.
+        """
+        script = self._resolve_bind_script()
         if script is None:
             messagebox.showerror(
                 "Reparatur nicht möglich",
@@ -1049,26 +1199,10 @@ class EduBoticsApp:
                 "Bitte den EduBotics-Installer erneut ausführen.",
             )
             return
-
-        hw_ids = device_manager.hardware_ids_for_devices(unbound)
         if not hw_ids:
             return
 
-        device_lines = "\n".join(
-            f"  • {d.description or '(unbekannt)'} ({d.vid_pid})"
-            for d in unbound
-        )
-        wants_run = messagebox.askyesno(
-            "Kameras freigeben",
-            "Folgende Kameras sind angeschlossen, aber noch nicht für die "
-            "EduBotics-Umgebung freigegeben:\n\n"
-            f"{device_lines}\n\n"
-            "Jetzt freigeben? Dies erfordert einmalig Administrator-Rechte.",
-        )
-        if not wants_run:
-            return
-
-        self._set_status("Kameras werden freigegeben (UAC-Zustimmung erforderlich)...")
+        self._set_status(status)
         self._log("Freigabe wird mit Administrator-Rechten gestartet...")
 
         def _run_elevated():
@@ -1117,12 +1251,54 @@ class EduBoticsApp:
             if exit_code not in (0, None):
                 self._log(f"Freigabe-Skript exit={exit_code}. Siehe Protokoll oben.")
 
-            # Auto re-scan so the newly-bound camera lands in the checkbox
-            # list without the student clicking Scan a second time.
+            if on_done is not None:
+                on_done()
+
+        threading.Thread(target=_run_elevated, daemon=True).start()
+
+    def _prompt_bind_cameras(self, unbound: "list[device_manager.USBDevice]"):
+        """Bind the listed UVC cameras via one elevated PowerShell call.
+
+        Flow:
+          1. Confirm with the student (German messagebox lists VID:PIDs).
+          2. UAC prompt → elevated bind_devices.ps1 with the VID:PIDs.
+          3. After exit, re-run _scan_cameras so the newly-bound camera
+             attaches to WSL and shows up in the checkbox list.
+        """
+        hw_ids = device_manager.hardware_ids_for_devices(unbound)
+        if not hw_ids:
+            return
+
+        device_lines = "\n".join(
+            f"  • {d.description or '(unbekannt)'} ({d.vid_pid})"
+            for d in unbound
+        )
+        wants_run = messagebox.askyesno(
+            "Kameras freigeben",
+            "Folgende Kameras sind angeschlossen, aber noch nicht für die "
+            "EduBotics-Umgebung freigegeben:\n\n"
+            f"{device_lines}\n\n"
+            "Jetzt freigeben? Dies erfordert einmalig Administrator-Rechte.",
+        )
+        if not wants_run:
+            return
+
+        def _rescan_cameras():
             self._log("Kamera-Scan wird nach Freigabe wiederholt...")
             self.root.after(200, self._scan_cameras)
 
-        threading.Thread(target=_run_elevated, daemon=True).start()
+        self._run_bind_devices_elevated(
+            hw_ids,
+            status="Kameras werden freigegeben (UAC-Zustimmung erforderlich)...",
+            on_done=_rescan_cameras,
+        )
+
+    def _open_camera_privacy_settings(self):
+        """Open the Windows camera privacy settings page (ms-settings deep link)."""
+        try:
+            os.startfile("ms-settings:privacy-webcam")  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001
+            webbrowser.open("ms-settings:privacy-webcam")
 
     def _on_cameras_changed(self):
         """Ausgewählte Kameras in HardwareConfig speichern und Rollenzuweisung anzeigen."""

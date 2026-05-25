@@ -47,8 +47,14 @@ RUN set -e && \
     git clone --filter=blob:none https://github.com/huggingface/lerobot.git "$LR_DIR" && \
     git -C "$LR_DIR" checkout "${LEROBOT_COMMIT}" && \
     cd "$LR_DIR" && \
-    sed -i '/"torch[^"]*",/d' pyproject.toml && \
-    sed -i '/"torchvision[^"]*",/d' pyproject.toml && \
+    # Strip ONLY the torch + torchvision dependency lines (anchored to the
+    # version operator) so the base image's torch 2.7.0+cu128 is preserved.
+    # IMPORTANT: do NOT use `"torch[^"]*"` — that greedily eats the env-marker
+    # on the `"torchcodec>=...; sys_platform..."` line and deletes torchcodec
+    # (a CORE dep + the default video backend). Anchor to `"torch>=` / `"torchvision>=`.
+    sed -i -E '/^[[:space:]]*"torch>=/d' pyproject.toml && \
+    sed -i -E '/^[[:space:]]*"torchvision>=/d' pyproject.toml && \
+    grep -q '"torchcodec' pyproject.toml || { echo "ERROR: torchcodec dep accidentally stripped"; exit 1; } && \
     pip install --no-cache-dir -e ".[pi,smolvla]" && \
     python3 -c "import lerobot; from lerobot.datasets.dataset_metadata import CODEBASE_VERSION as cv; \
                 assert cv == 'v3.0', f'unexpected codebase_version {cv}'; \
@@ -373,7 +379,15 @@ RUN python3 -m pip install --no-cache-dir --force-reinstall \
         "numpy>=2.0.0,<2.3.0" && \
     python3 -c "import safetensors, google.protobuf, PIL, numpy; \
                 print('cross-arch floor:', safetensors.__version__, \
-                      google.protobuf.__version__, PIL.__version__, numpy.__version__)"
+                      google.protobuf.__version__, PIL.__version__, numpy.__version__)" && \
+    # numpy 1.x->2.x ABI guard: v0.5.1 requires numpy 2.x, but the base image
+    # historically pinned numpy<2. Any base C-extension compiled against the
+    # numpy 1.x ABI raises "_ARRAY_API not found" under numpy 2.x. Import the
+    # at-risk modules here so an ABI break fails the BUILD loudly instead of
+    # crashing the ROS node at a student's bench. (cv_bridge needs ROS sourced,
+    # so it's covered by the node's own startup, not here.)
+    python3 -c "import torch, torchvision, cv2, onnxruntime, pupil_apriltags; \
+                print('numpy-2 ABI ok: torch', torch.__version__, '| cv2', cv2.__version__)"
 
 # Roboter Studio workflow module (calibration, perception, IK, motion handlers,
 # Blockly interpreter). Not present in upstream; copied in as an addition

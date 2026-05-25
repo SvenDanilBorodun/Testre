@@ -81,7 +81,7 @@ class TestBuildTrainingCommand(unittest.TestCase):
             "vqbet",
             "tdmpc",
             "pi0",
-            "pi0fast",
+            "pi0_fast",
             "smolvla",
         ):
             cmd = training_handler._build_training_command(
@@ -114,7 +114,7 @@ class TestBuildTrainingCommand(unittest.TestCase):
         different field names or interpretations.
 
         Iterates the full non-ACT subset of `ALLOWED_POLICIES`."""
-        for policy in ("diffusion", "vqbet", "tdmpc", "pi0", "pi0fast", "smolvla"):
+        for policy in ("diffusion", "vqbet", "tdmpc", "pi0", "pi0_fast", "smolvla"):
             cmd = training_handler._build_training_command(
                 dataset_name="user/data",
                 model_type=policy,
@@ -132,7 +132,7 @@ class TestBuildTrainingCommand(unittest.TestCase):
         `n_action_steps` in training_params must still NOT receive
         `--policy.n_action_steps=` — that field is ACT-specific. The
         F64 verifier flagged this as a cross-policy leak."""
-        for policy in ("diffusion", "vqbet", "tdmpc", "pi0", "pi0fast", "smolvla"):
+        for policy in ("diffusion", "vqbet", "tdmpc", "pi0", "pi0_fast", "smolvla"):
             cmd = training_handler._build_training_command(
                 dataset_name="user/data",
                 model_type=policy,

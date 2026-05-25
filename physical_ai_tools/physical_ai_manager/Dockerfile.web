@@ -12,7 +12,7 @@ ARG REACT_APP_CLOUD_API_URL
 ARG REACT_APP_MODE=web
 # Teacher/admin web deployment: expose every policy by default. Override via
 # Railway variable REACT_APP_ALLOWED_POLICIES if you want to narrow it.
-ARG REACT_APP_ALLOWED_POLICIES=tdmpc,diffusion,act,vqbet,pi0,pi0fast,smolvla
+ARG REACT_APP_ALLOWED_POLICIES=tdmpc,diffusion,act,vqbet,pi0,pi0_fast,pi05,smolvla
 # Build identifier (e.g. Railway commit SHA). Baked into the bundle and written
 # to build/version.json so the running app can detect a new deploy and self-reload.
 ARG REACT_APP_BUILD_ID=dev

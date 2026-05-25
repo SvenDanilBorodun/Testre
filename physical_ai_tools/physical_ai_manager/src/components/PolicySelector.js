@@ -27,7 +27,7 @@ import { getPolicies } from '../services/cloudTrainingApi';
 import toast from 'react-hot-toast';
 
 // Env-gated allowlist — students only see ACT, admin/dev builds override via
-// REACT_APP_ALLOWED_POLICIES=tdmpc,diffusion,act,vqbet,pi0,pi0fast,smolvla.
+// REACT_APP_ALLOWED_POLICIES=tdmpc,diffusion,act,vqbet,pi0,pi0_fast,pi05,smolvla.
 const ALLOWED_POLICIES = (process.env.REACT_APP_ALLOWED_POLICIES || 'act')
   .split(',')
   .map((s) => s.trim().toLowerCase())

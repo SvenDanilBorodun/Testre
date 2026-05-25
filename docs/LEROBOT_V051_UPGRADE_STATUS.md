@@ -149,3 +149,38 @@ The v2.1 wrapper reimplements internals that are all removed — **delete, don't
 - `physical_ai_tools/lerobot/` — vendored tree swap
 - `physical_ai_tools/physical_ai_server/Dockerfile.amd64`, `Dockerfile.arm64`, `robotis_ai_setup/docker/physical_ai_server/Dockerfile` — self-managed install + floor pins
 - `CLAUDE.md` §5, `.github/workflows/ci.yml`, `VERSION` (+ iss/constants/Railway)
+
+---
+
+## CODE REVIEW (2026-05-25, 4 Opus agents) — findings + fixes applied
+
+### Fixes applied this round (committed)
+- **modal/training torchcodec ABI (was CRITICAL):** `lerobot[...]` resolves newest torchcodec (>=0.3,<0.11) then torch is force-reinstalled to 2.7.1 → torchcodec ABI-mismatched → crash on first v3.0 video read (find_spec succeeds so LeRobot picks it). **Fix:** `_build_training_command` now passes `--dataset.video_backend=pyav` (av is a core dep, no torch ABI). `DatasetConfig.video_backend` confirmed valid.
+- **checkpoint symlink upload (was HIGH):** `checkpoints/last` is a relative symlink; `upload_large_folder` could skip it → silent empty model. **Fix:** `_upload_model_to_hf` now `.resolve()`s the path and asserts `*.safetensors`/`*.bin` + `config.json` exist before upload.
+- **Dockerfile sed over-strip (was HIGH):** `"torch[^"]*"` also deleted the `torchcodec` core-dep line. **Fix:** anchored seds `"torch>=` / `"torchvision>=` + a `grep -q '"torchcodec'` guard.
+- **numpy-2 ABI build guard (was MEDIUM):** added `import torch, torchvision, cv2, onnxruntime, pupil_apriltags` to the floor-pin verifier so a numpy 1.x→2.x ABI break fails the build loudly.
+- **`pi0fast`→`pi0_fast` cross-cutting (was HIGH):** fixed in `cloud_training_api/app/routes/training.py` (ALLOWED_POLICIES + POLICY_MAX_TIMEOUT_HOURS, added `pi05`), `physical_ai_manager/Dockerfile.web`, `PolicySelector.js`, and `tests/test_training_handler_cli.py`. Recording/training/inference policy names now consistent.
+- **docstring:** `training_handler.py` top docstring `scripts.train`→`scripts.lerobot_train`.
+
+### CONFIRMED CORRECT by review (no action)
+- cu126 carries torch 2.7.1/tv 0.22.1 cp312; base 12.6.3 tag real; v0.5.1 floors all satisfied. Every train CLI flag valid; `lerobot_train` runnable; preflight v3.0 schema correct; `save_checkpoint` writes processor jsons into pretrained_model/. Inference pipeline matches v0.5.1 canonical `predict_action` (no double-normalize); all 8 policy module paths/classes/type-strings correct. `training_manager` lazy import fully removes lerobot_trainer from the boot graph. Vendored swap complete; LFS removal safe; apply_overlay chain 1:1; self-managed install path/ordering/pins correct.
+
+### STILL OPEN — handle in Layer 4 work or on-build
+- **BOOT CRASH until Layer 4 lands (KNOWN):** `overlays/lerobot_dataset_wrapper.py` still imports removed v2.1 symbols from `lerobot.datasets.utils` (`write_info`, `write_episode`, `write_episode_stats`, `validate_frame`, `validate_episode_buffer`). It's on the boot path (data_manager imports it), so **the image will NOT boot until the Layer 4 rewrite is done.** Expected (Layer 4 pending).
+- **arm64 base (`Dockerfile.arm64`) NOT updated:** still pins old `LEROBOT_EXPECTED_SHA=989f3d05` + `numpy<2` + `protobuf==6.31.0`. The shared thin layer overrides these at build so the final Jetson image is *probably* correct, but the base double-installs old lerobot, the SHA guard is misleading, and **the jetson-ai-lab `jp6/cu126` index may be pruned** (cu129 reported as the usable one late-2025) — MUST verify aarch64 wheels (numpy2/datasets4/transformers5/av) on a real arm64 build.
+- **CI boot-import job** not added to `ci.yml`.
+- **MUST-VERIFY-ON-BUILD:** base python>=3.12 (`docker run`); numpy-2 ABI on cv_bridge (ROS-sourced, not in the build smoke); torchcodec/pyav decode; full record→train→infer e2e on a fresh v3.0 dataset.
+
+### Layer 4 recording-rewrite spec — CORRECTED (these supersede the spec above)
+1. **vcodec = `"h264"` (NOT `libx264`)** — `resolve_vcodec` raises on `libx264`. Valid set `{h264,hevc,libsvtav1,auto}`.
+2. **Resume is NOT `__init__`** — `LeRobotDataset(repo_id, root)` is READ-ONLY in v0.5.1 (writer=None → add_frame raises). Use `LeRobotDataset.resume(repo_id, root=<path>)` (requires explicit `root`). Fix `data_manager.check_lerobot_dataset`.
+3. **`start_image_writer` moved to `DatasetWriter`** — pass `image_writer_processes`/`image_writer_threads` to `create()`/`resume()`, or call `self.writer.start_image_writer(...)`.
+4. **`episode_buffer` is on `self.writer`** — use the facade helper `has_pending_frames()`.
+5. **`write_episode_stats` is GONE** (not a rename) — rework the call site; `validate_frame`/`validate_episode_buffer`→`lerobot.datasets.feature_utils`; `write_info`/`write_episode`→`lerobot.datasets.io_utils`.
+6. **`meta.add_task`→`meta.save_episode_tasks(list)`**; `meta.get_episode_chunk`/`_save_episode_table` gone (v3.0 `save_episode` owns this).
+7. **`_verify_saved_video_files`** — v3.0 path `videos/{key}/chunk-NNN/file-NNN.mp4`; derive via `meta.get_video_file_path(ep, key)` AFTER `save_episode` (indices unknown before save).
+8. **`set_robot_type`** — pass `robot_type=` to `create()`/`resume()` at construction.
+9. **`finalize()`** — call once before HF upload; `create_tag('v2.1')`→`'v3.0'` (or use `dataset.push_to_hub(...)` which auto-tags CODEBASE_VERSION, making manual create_tag redundant).
+10. **RAM valve must be RE-FRAMED** — v3.0 stages images to a temp dir; buffer holds path strings, so the decoded-ndarray byte premise is false. Use frame-count / temp-disk / wall-clock cap.
+11. **README `data/*/*.parquet` glob is STILL VALID** for v3.0 (one level deep) — earlier spec flagged it wrongly; the **video** glob does change.
+12. **Twins are dead/overlaid** — the `physical_ai_tools/physical_ai_server/.../*` twins are overwritten by apply_overlay at build and are NOT on a separate boot path; do NOT mirror edits into them. Only the `overlays/` copies ship.

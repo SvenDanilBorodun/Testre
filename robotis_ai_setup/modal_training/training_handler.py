@@ -4,7 +4,7 @@ Invoked by `modal_app.train`.
 
 Responsibilities:
   - Preflight the HuggingFace dataset (schema, codebase_version, joints, cameras).
-  - Spawn `python -m lerobot.scripts.train` and stream its stdout.
+  - Spawn `python -m lerobot.scripts.lerobot_train` and stream its stdout.
   - Parse `step: N loss: X.Y` lines and push progress to Supabase via the
     scoped `update_training_progress` RPC (anon key + per-row worker_token).
   - Upload the trained checkpoint to HuggingFace Hub on success.
@@ -331,6 +331,14 @@ def _build_training_command(
         # morning- and afternoon-lit classroom sessions for small student
         # datasets. Defaults live in lerobot.datasets.transforms.ImageTransformsConfig.
         "--dataset.image_transforms.enable=true",
+        # Force the pyav video-decode backend (DatasetConfig.video_backend).
+        # v0.5.1 defaults to torchcodec, but `lerobot[...]` resolves the newest
+        # torchcodec in its range (>=0.3,<0.11) while the image then
+        # force-reinstalls torch==2.7.1 — leaving torchcodec ABI-mismatched (it
+        # loads libtorch C++ ops at decode time; find_spec still succeeds so
+        # LeRobot picks it and crashes on the first v3.0 video read). `av` is a
+        # CORE dep with no torch ABI coupling, so pyav is the robust choice here.
+        "--dataset.video_backend=pyav",
     ]
 
     # Audit F64: ACT-specific inference-quality default. With chunk_size=100 at
@@ -392,16 +400,32 @@ def _upload_model_to_hf(model_name: str, hf_token: str) -> str:
 
     output_path = OUTPUT_DIR / model_name.replace("/", "_")
 
-    # LeRobot saves to checkpoints/last/pretrained_model/
-    checkpoint_dir = output_path / "checkpoints" / "last" / "pretrained_model"
+    # LeRobot saves to checkpoints/last/pretrained_model/. NOTE: `checkpoints/last`
+    # is a RELATIVE SYMLINK to checkpoints/<NNNNNN> (update_last_checkpoint in
+    # lerobot/utils/train_utils.py). Path.exists() follows it, but
+    # upload_large_folder can skip symlinked trees / resolve to an empty set —
+    # which would silently upload an EMPTY repo while reporting success. Resolve
+    # the symlink so folder_path points at the real checkpoint directory.
+    checkpoint_dir = (output_path / "checkpoints" / "last" / "pretrained_model").resolve()
     if not checkpoint_dir.exists():
         for p in output_path.rglob("pretrained_model"):
-            checkpoint_dir = p
+            checkpoint_dir = p.resolve()
             break
 
     if not checkpoint_dir.exists():
         raise FileNotFoundError(
             f"No pretrained_model directory found in {output_path}"
+        )
+
+    # Guard against a silent empty upload: the trained weights + config MUST be
+    # present before we flip the row to succeeded.
+    has_weights = any(checkpoint_dir.glob("*.safetensors")) or any(
+        checkpoint_dir.glob("*.bin")
+    )
+    if not (has_weights and (checkpoint_dir / "config.json").exists()):
+        raise FileNotFoundError(
+            f"Checkpoint at {checkpoint_dir} is missing weights (*.safetensors) "
+            f"or config.json — refusing to upload an incomplete model."
         )
 
     # Note: LeRobot already writes config.json with `input_features` (which

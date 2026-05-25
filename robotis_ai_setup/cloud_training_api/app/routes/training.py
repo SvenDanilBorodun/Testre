@@ -63,7 +63,7 @@ ALLOWED_POLICIES = {
     p.strip().lower()
     for p in os.environ.get(
         "ALLOWED_POLICIES",
-        "tdmpc,diffusion,act,vqbet,pi0,pi0fast,smolvla",
+        "tdmpc,diffusion,act,vqbet,pi0,pi0_fast,pi05,smolvla",
     ).split(",")
     if p.strip()
 }
@@ -79,8 +79,9 @@ POLICY_MAX_TIMEOUT_HOURS = {
     "vqbet": 4.0,
     "tdmpc": 4.0,
     "diffusion": 6.0,
-    "pi0fast": 6.0,
+    "pi0_fast": 6.0,
     "pi0": 10.0,
+    "pi05": 10.0,
     "smolvla": 10.0,
 }
 _policy_overrides_raw = os.environ.get("POLICY_TIMEOUT_OVERRIDES_JSON", "").strip()

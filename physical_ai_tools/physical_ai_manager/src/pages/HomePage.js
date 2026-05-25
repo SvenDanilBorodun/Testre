@@ -18,7 +18,8 @@ import React from 'react';
 import { useSelector, useDispatch } from 'react-redux';
 import RobotTypeSelector from '../components/RobotTypeSelector';
 import HeartbeatStatus from '../components/HeartbeatStatus';
-import { Card, Pill, Btn, SectionHeader } from '../components/EbUI';
+import RobotStartup from '../components/RobotStartup';
+import { Btn, SectionHeader } from '../components/EbUI';
 import packageJson from '../../package.json';
 import PageType from '../constants/pageType';
 import { moveToPage } from '../features/ui/uiSlice';
@@ -36,15 +37,15 @@ export default function HomePage() {
   const fullName = useSelector((state) => state.auth.fullName);
   const username = useSelector((state) => state.auth.username);
   const heartbeatStatus = useSelector((state) => state.tasks.heartbeatStatus);
-  const imageTopicList = useSelector((state) => state.ros.imageTopicList);
+  const armReady = useSelector((state) => state.armStartup.armReady);
 
   const firstName = (fullName && fullName.split(' ')[0]) || username || 'Schüler';
 
   const bridgeReady = heartbeatStatus === 'connected';
-  const camCount = imageTopicList?.length || 0;
 
   const goRecord = () => {
     if (!robotType || robotType.trim() === '') return;
+    if (!armReady) return;
     dispatch(moveToPage(PageType.RECORD));
   };
 
@@ -60,73 +61,26 @@ export default function HomePage() {
         />
 
         <div className="grid grid-cols-12 gap-4 md:gap-6">
-          {/* Hero robot card */}
-          <div className="col-span-12 lg:col-span-7 xl:col-span-8">
-            <Card padded={false}>
-              <div className="relative h-[280px] sm:h-[340px] md:h-[380px] xl:h-[440px] camera-noise rounded-t-[var(--radius-lg)] overflow-hidden">
-                <svg
-                  viewBox="0 0 600 400"
-                  className="absolute inset-0 w-full h-full opacity-80"
-                  preserveAspectRatio="xMidYMid meet"
-                >
-                  <defs>
-                    <linearGradient id="armg" x1="0" x2="0" y1="0" y2="1">
-                      <stop offset="0" stopColor="#E8EBEC" />
-                      <stop offset="1" stopColor="#9CA1A6" />
-                    </linearGradient>
-                  </defs>
-                  <rect x="220" y="320" width="160" height="50" rx="6" fill="#24292B" />
-                  <rect x="270" y="200" width="60" height="130" rx="4" fill="url(#armg)" />
-                  <rect x="260" y="170" width="80" height="40" rx="6" fill="#3B4145" />
-                  <rect x="290" y="110" width="20" height="70" rx="4" fill="url(#armg)" />
-                  <circle cx="300" cy="105" r="18" fill="#3B4145" />
-                  <rect x="288" y="80" width="24" height="22" rx="3" fill="url(#armg)" />
-                  <rect x="285" y="60" width="12" height="26" rx="2" fill="#9CA1A6" />
-                  <rect x="303" y="60" width="12" height="26" rx="2" fill="#9CA1A6" />
-                  <circle cx="300" cy="105" r="3" fill="var(--accent)" />
-                </svg>
-                <div className="absolute top-4 left-4 flex items-center gap-2">
-                  <Pill tone="glass" dot>
-                    LIVE
-                  </Pill>
-                  <Pill tone="glass">
-                    <span className="font-mono">ros_bridge</span>
-                  </Pill>
-                </div>
-                <div className="absolute bottom-4 left-4 right-4 flex items-end justify-between gap-4">
-                  <div className="min-w-0">
-                    <div className="text-white/60 font-mono text-[10px] uppercase tracking-wider">
-                      Aktueller Roboter
-                    </div>
-                    <div className="text-white font-semibold text-xl tracking-tight leading-tight truncate">
-                      {robotType || 'Kein Robotertyp gewählt'}
-                    </div>
-                  </div>
-                  <div className="font-mono text-[11px] text-white/60 shrink-0 whitespace-nowrap">
-                    EduBotics v{packageJson.version}
-                  </div>
-                </div>
+          {/* Animated robot-startup hero — homing + leader-sync live here */}
+          <div className="col-span-12 lg:col-span-7 xl:col-span-8 flex flex-col gap-4">
+            <RobotStartup packageVersion={packageJson.version} />
+
+            {/* Aufnahme is gated on a verified arm — disabled until armReady */}
+            <div className="flex flex-wrap items-center justify-between gap-3 px-1">
+              <div className="text-sm text-[var(--ink-3)]">
+                {armReady
+                  ? 'Der Roboter ist synchronisiert — du kannst jetzt aufnehmen.'
+                  : 'Starte zuerst den Roboter, um aufzunehmen.'}
               </div>
-              <div className="p-5 flex flex-wrap items-center justify-between gap-3">
-                <div className="text-sm text-[var(--ink-3)]">
-                  <span className="text-[var(--ink)] font-semibold">
-                    {bridgeReady ? 'Bereit.' : 'Warte auf Roboter.'}
-                  </span>{' '}
-                  {bridgeReady
-                    ? `ROS-Bridge läuft, ${camCount} Kamera${camCount === 1 ? '' : 's'} erkannt.`
-                    : 'Prüfe die Verbindung zum Roboter.'}
-                </div>
-                <div className="flex items-center gap-2">
-                  <Btn
-                    variant="primary"
-                    onClick={goRecord}
-                    disabled={!robotType || !bridgeReady}
-                  >
-                    Aufnahme starten
-                  </Btn>
-                </div>
-              </div>
-            </Card>
+              <Btn
+                variant="primary"
+                onClick={goRecord}
+                disabled={!robotType || !bridgeReady || !armReady}
+                title={!armReady ? 'Starte zuerst den Roboter' : undefined}
+              >
+                Aufnahme starten
+              </Btn>
+            </div>
           </div>
 
           {/* Robot type selector */}

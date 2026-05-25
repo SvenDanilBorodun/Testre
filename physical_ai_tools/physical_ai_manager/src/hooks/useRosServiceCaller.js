@@ -167,6 +167,26 @@ export function useRosServiceCaller() {
     [callService, taskInfo, page]
   );
 
+  // On-demand robot-arm startup (homing → leader-sync → blocking verify).
+  // The container's arm_startup_node.py runs the whole sequence and returns
+  // {success, message(de)} at the end; live progress arrives separately on
+  // the /edubotics/arm_state topic. The timeout is generous (45 s) to cover
+  // home + sync + verify + up to 2 retries for a large follower↔leader gap.
+  const startArm = useCallback(async () => {
+    try {
+      const result = await callService(
+        '/edubotics/start_arm',
+        'std_srvs/srv/Trigger',
+        {},
+        45000
+      );
+      return result; // { success: bool, message: string }
+    } catch (error) {
+      console.error('Failed to start arm:', error);
+      throw new Error(`${error.message || error}`);
+    }
+  }, [callService]);
+
   const getImageTopicList = useCallback(async () => {
     try {
       const result = await callService(
@@ -740,6 +760,7 @@ export function useRosServiceCaller() {
   return {
     callService,
     sendRecordCommand,
+    startArm,
     getImageTopicList,
     getRobotTypeList,
     setRobotType,

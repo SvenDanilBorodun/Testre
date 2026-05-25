@@ -39,9 +39,16 @@ COPY identify_arm.py /usr/local/bin/identify_arm.py
 # of usb_cam) when EDUBOTICS_CAMERA_SOURCE=native_bridge. See the script header
 # and CLAUDE.md "native camera capture bridge" for the full rationale.
 COPY camera_ingest_node.py /usr/local/bin/camera_ingest_node.py
+# On-demand homing + leader-sync node (WSL2/Windows student path). Like
+# camera_ingest_node.py it's a brand-new standalone rclpy script with no
+# upstream file to replace, so it's COPY'd, NOT an apply_overlay target. The
+# entrypoint runs it (instead of the old boot-time quintic sync) so the
+# follower stays limp until the student clicks "Roboter starten". See the
+# script header and CLAUDE.md Rule §2 for the rationale.
+COPY arm_startup_node.py /usr/local/bin/arm_startup_node.py
 # Strip Windows CRLF line endings (Git on Windows may convert LF→CRLF)
-RUN sed -i 's/\r$//' /entrypoint_omx.sh /usr/local/bin/identify_arm.py /usr/local/bin/camera_ingest_node.py \
-    && chmod +x /entrypoint_omx.sh /usr/local/bin/identify_arm.py /usr/local/bin/camera_ingest_node.py
+RUN sed -i 's/\r$//' /entrypoint_omx.sh /usr/local/bin/identify_arm.py /usr/local/bin/camera_ingest_node.py /usr/local/bin/arm_startup_node.py \
+    && chmod +x /entrypoint_omx.sh /usr/local/bin/identify_arm.py /usr/local/bin/camera_ingest_node.py /usr/local/bin/arm_startup_node.py
 
 # Overlay patched ros2_control configs:
 #   - follower (omx_f): joint limits + aligned gripper current limit

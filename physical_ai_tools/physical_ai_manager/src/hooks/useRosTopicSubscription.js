@@ -53,6 +53,7 @@ import {
   setPaused,
   setVariable,
 } from '../features/workshop/workshopSlice';
+import { setArmStartupStatus } from '../store/armStartupSlice';
 import HFStatus from '../constants/HFStatus';
 import store from '../store/store';
 import rosConnectionManager from '../utils/rosConnectionManager';
@@ -61,6 +62,7 @@ import { registerDataset } from '../services/datasetsApi';
 export function useRosTopicSubscription() {
   const taskStatusTopicRef = useRef(null);
   const heartbeatTopicRef = useRef(null);
+  const armStateTopicRef = useRef(null);
   const trainingStatusTopicRef = useRef(null);
   const workflowStatusTopicRef = useRef(null);
   const workflowSensorsTopicRef = useRef(null);
@@ -147,6 +149,7 @@ export function useRosTopicSubscription() {
     // Unsubscribe from all topics
     unsubscribeFromTopic(taskStatusTopicRef, 'Task status');
     unsubscribeFromTopic(heartbeatTopicRef, 'Heartbeat');
+    unsubscribeFromTopic(armStateTopicRef, 'Arm state');
     unsubscribeFromTopic(trainingStatusTopicRef, 'Training status');
     unsubscribeFromTopic(hfStatusTopicRef, 'HF status');
     // Workshop subscribers added in Phase-2/3 — without these the
@@ -378,6 +381,46 @@ export function useRosTopicSubscription() {
     }
   }, [dispatch, rosbridgeUrl]);
 
+  const subscribeToArmState = useCallback(async () => {
+    try {
+      const ros = await rosConnectionManager.getConnection(rosbridgeUrl);
+      if (!ros) return;
+
+      // Skip if already subscribed
+      if (armStateTopicRef.current) {
+        console.log('Arm state already subscribed, skipping...');
+        return;
+      }
+
+      armStateTopicRef.current = new ROSLIB.Topic({
+        ros,
+        name: '/edubotics/arm_state',
+        messageType: 'std_msgs/msg/String',
+      });
+
+      armStateTopicRef.current.subscribe((msg) => {
+        try {
+          const data = JSON.parse(msg.data);
+          dispatch(
+            setArmStartupStatus({
+              phase: data.phase,
+              percent: data.percent,
+              message: data.message,
+              error: data.error,
+              perJointErr: data.per_joint_err,
+            })
+          );
+        } catch (e) {
+          console.error('Failed to parse arm_state JSON:', e, msg.data);
+        }
+      });
+
+      console.log('Arm state subscription established');
+    } catch (error) {
+      console.error('Failed to subscribe to arm state topic:', error);
+    }
+  }, [dispatch, rosbridgeUrl]);
+
   // Start connection and subscription
   useEffect(() => {
     if (!rosbridgeUrl) return;
@@ -389,6 +432,7 @@ export function useRosTopicSubscription() {
       try {
         await subscribeToTaskStatus();
         await subscribeToHeartbeat();
+        await subscribeToArmState();
         await subscribeToTrainingStatus();
         await subscribeHFStatus();
       } catch (error) {
@@ -624,6 +668,7 @@ export function useRosTopicSubscription() {
     try {
       await subscribeToTaskStatus();
       await subscribeToHeartbeat();
+      await subscribeToArmState();
       await subscribeToTrainingStatus();
       await subscribeHFStatus();
       console.log('ROS subscriptions initialized successfully');
@@ -635,6 +680,7 @@ export function useRosTopicSubscription() {
     cleanup,
     subscribeToTaskStatus,
     subscribeToHeartbeat,
+    subscribeToArmState,
     subscribeToTrainingStatus,
     subscribeHFStatus,
   ]);
@@ -882,6 +928,7 @@ export function useRosTopicSubscription() {
       cleanup,
       getPhaseName,
       resetTaskToIdle,
+      subscribeToArmState,
       subscribeToTrainingStatus,
       subscribeHFStatus,
       subscribeToWorkflowStatus,
@@ -894,6 +941,7 @@ export function useRosTopicSubscription() {
       cleanup,
       getPhaseName,
       resetTaskToIdle,
+      subscribeToArmState,
       subscribeToTrainingStatus,
       subscribeHFStatus,
       subscribeToWorkflowStatus,

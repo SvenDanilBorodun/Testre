@@ -184,8 +184,7 @@ wait_for_device() {
 wait_for_device "$FOLLOWER_PORT" "Follower arm"
 
 if [ "$FOLLOWER_ONLY" = "1" ]; then
-    echo "[LAUNCH] FOLLOWER_ONLY=1 — skipping leader port wait, leader launch, and quintic sync."
-    LEADER_POS=""
+    echo "[LAUNCH] FOLLOWER_ONLY=1 — skipping leader port wait and leader launch."
 else
     wait_for_device "$LEADER_PORT" "Leader arm"
 
@@ -204,39 +203,13 @@ else
     done
     sleep 2
     echo "[LAUNCH] Leader ready."
-
-    # Read leader's current position
-    LEADER_POS=$(python3 -c "
-import rclpy, json
-from rclpy.node import Node
-from sensor_msgs.msg import JointState
-
-class ReadOnce(Node):
-    def __init__(self):
-        super().__init__('read_leader')
-        self.sub = self.create_subscription(JointState, '/leader/joint_states', self.cb, 10)
-        self.joints = ['joint1','joint2','joint3','joint4','joint5','gripper_joint_1']
-        self.done = False
-    def cb(self, msg):
-        if self.done:
-            return
-        if set(self.joints).issubset(set(msg.name)):
-            pos = [msg.position[msg.name.index(j)] for j in self.joints]
-            print(json.dumps(pos))
-            self.done = True
-            raise SystemExit
-
-rclpy.init()
-node = ReadOnce()
-try:
-    rclpy.spin(node)
-except SystemExit:
-    pass
-node.destroy_node()
-rclpy.shutdown()
-" 2>/dev/null)
-
-    echo "[LAUNCH] Leader position: ${LEADER_POS}"
+    # NOTE: the leader-pose read used to happen here, feeding the boot-time
+    # quintic sync below. Both moved into arm_startup_node.py (Phase 3') so
+    # the follower stays LIMP until the student clicks "Roboter starten" in
+    # the dashboard. The node reads the leader's CURRENT pose at click time
+    # (the student may reposition the leader after boot) and verifies the
+    # sync as a BLOCKING gate before the arm reports ready. See the script
+    # header for the full rationale.
 fi
 
 # --- Phase 2: Launch Follower ---
@@ -255,189 +228,22 @@ echo "[LAUNCH] Follower ready (/joint_states detected)."
 # Wait for arm_controller to be fully active
 sleep 3
 
-# --- Phase 3: Move follower to leader position smoothly ---
-# Publish trajectory directly to /leader/joint_trajectory (the topic the
-# follower's arm_controller subscribes to via remapping).
-# Uses quintic smoothing over 3s so the follower glides to the leader position.
-if [ -n "$LEADER_POS" ] && [ "$LEADER_POS" != "null" ]; then
-    echo "[LAUNCH] Moving follower to match leader (3s smooth trajectory)..."
-    python3 -c "
-import rclpy, sys, json, time
-from rclpy.node import Node
-from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy
-from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
-from sensor_msgs.msg import JointState
-
-LEADER_POS = json.loads('${LEADER_POS}')
-JOINTS = ['joint1','joint2','joint3','joint4','joint5','gripper_joint_1']
-DURATION = 3.0
-
-class SyncNode(Node):
-    def __init__(self):
-        super().__init__('sync_follower')
-        self.follower_pos = None
-        # Subscription stays live throughout — verify step reads the latest
-        # follower pose from here, not a stale snapshot.
-        self.sub = self.create_subscription(JointState, '/joint_states', self.cb, 10)
-        # Publish to the same topic the leader uses — follower's arm_controller
-        # is remapped to subscribe here
-        qos = QoSProfile(depth=10,
-            durability=DurabilityPolicy.TRANSIENT_LOCAL,
-            reliability=ReliabilityPolicy.RELIABLE)
-        self.pub = self.create_publisher(JointTrajectory, '/leader/joint_trajectory', qos)
-        self.sent = False
-
-    def cb(self, msg):
-        if not set(JOINTS).issubset(set(msg.name)):
-            return
-        self.follower_pos = [msg.position[msg.name.index(j)] for j in JOINTS]
-        if not self.sent:
-            self.send_sync()
-
-    def send_sync(self):
-        self.sent = True
-        # Audit E3: capture the pose at sync-publish time so the verifier
-        # can prove the arm actually moved. Before this snapshot, a stale
-        # follower_pos (callback stopped publishing mid-sync) could match
-        # LEADER_POS vacuously and the 0.08 rad tolerance would pass even
-        # though the arm never moved at all.
-        self._sync_start_pos = list(self.follower_pos)
-        traj = JointTrajectory()
-        traj.joint_names = list(JOINTS)
-        N = 50
-        # Quintic smoothing with explicit velocities + accelerations. Zero
-        # at both endpoints, no snap. Without these the controller has to
-        # numerically interpolate and can overshoot.
-        deltas = [l - f for f, l in zip(self.follower_pos, LEADER_POS)]
-        self._sync_initial_deltas = list(deltas)
-        for i in range(N):
-            t = (i + 1) / N
-            s = 10*t**3 - 15*t**4 + 6*t**5
-            s_dot = (30*t**2 - 60*t**3 + 30*t**4) / DURATION
-            s_ddot = (60*t - 180*t**2 + 120*t**3) / (DURATION * DURATION)
-            pt = JointTrajectoryPoint()
-            pt.positions = [f + d * s for f, d in zip(self.follower_pos, deltas)]
-            pt.velocities = [d * s_dot for d in deltas]
-            pt.accelerations = [d * s_ddot for d in deltas]
-            secs = DURATION * t
-            pt.time_from_start.sec = int(secs)
-            pt.time_from_start.nanosec = int((secs % 1) * 1e9)
-            traj.points.append(pt)
-        self.pub.publish(traj)
-        self.get_logger().info(f'Published sync trajectory ({N} points, {DURATION}s)')
-        # After the motion should be done, verify the follower actually
-        # reached the target. If it didn't, that signals a servo dropout or
-        # a blocked arm — fail loud so the first real inference command
-        # doesn't come in on top of a mispositioned robot.
-        self._verify_t = None
-        self.create_timer(
-            DURATION + 0.5, lambda: self._start_verify())
-
-    def _start_verify(self):
-        self._verify_deadline = time.monotonic() + 2.0
-        self._verify_timer = self.create_timer(0.1, self._verify_tick)
-
-    def _verify_tick(self):
-        if self.follower_pos is None:
-            return
-        err = [abs(a - b) for a, b in zip(self.follower_pos, LEADER_POS)]
-        # 2026-05-18: bumped 0.08 → 0.30 rad. The pre-bump value was a tight
-        # post-sync correctness check; in practice the follower's
-        # arm_controller aborts the 3s quintic sync mid-flight (via
-        # JointTrajectoryController state_tolerance) before the follower
-        # gets close enough to the leader, so this verify always failed →
-        # exit 2 → docker compose restart-loop. 0.30 still catches a real
-        # servo dropout (the arm not moving at all on a joint with a 0.7
-        # rad commanded delta still trips the >=50% motion check below),
-        # but accepts the routine ~10-20° finishing lag from rest pose.
-        tol = 0.30  # rad — was 0.08; see commit log for rationale
-        # 2026-05-24: the gripper (gripper_joint_1, index 5) is EXEMPT from
-        # verification. The leader gripper sits at its held trigger position
-        # (e.g. ~-0.70 rad) while the follower gripper starts open (~0.0), so
-        # the follower legitimately does NOT track the leader gripper at boot
-        # — a ~1.4 rad err + 0.0 motion that is benign and expected, not a
-        # dropout. Including it made the verifier soft-fail on EVERY boot,
-        # masking its real job (catching an actual arm-joint dropout). We
-        # verify the 5 arm joints only — err AND motion — so a truly stuck
-        # joint1..joint5 still hard-detects.
-        ARM_IDX = [0, 1, 2, 3, 4]  # joint1..joint5; exclude gripper_joint_1 (5)
-        # Audit E3: also require the arm to have actually moved for any
-        # joint whose initial delta was meaningful. The pre-E3 check passed
-        # vacuously when /joint_states stopped publishing mid-sync: a stale
-        # follower_pos snapshot can match LEADER_POS without the arm ever
-        # leaving its start pose. We require >=50% of the commanded delta to
-        # have been traversed on every joint that had a meaningful initial
-        # offset (|delta| > tol).
-        motion = [abs(a - b) for a, b in zip(self.follower_pos, self._sync_start_pos)]
-        motion_ok = True
-        for i in ARM_IDX:
-            d = self._sync_initial_deltas[i]
-            if abs(d) > tol and motion[i] < 0.5 * abs(d):
-                motion_ok = False
-                break
-        if all(err[i] < tol for i in ARM_IDX) and motion_ok:
-            self.get_logger().info(
-                f'Sync verified (arm max err {max(err[i] for i in ARM_IDX):.3f} rad, '
-                f'arm max motion {max(motion[i] for i in ARM_IDX):.3f} rad; '
-                f'gripper exempt).'
-            )
-            sys.exit(0)
-        if time.monotonic() > self._verify_deadline:
-            stale_joints = [
-                JOINTS[i] for i in ARM_IDX
-                if abs(self._sync_initial_deltas[i]) > tol
-                and motion[i] < 0.5 * abs(self._sync_initial_deltas[i])
-            ]
-            reason = (
-                f'follower stale (no motion on: {stale_joints})'
-                if stale_joints
-                else 'follower not at leader'
-            )
-            self.get_logger().error(
-                f'Sync verification FAILED: {reason}. '
-                f'Per-joint err (rad): {[round(e, 3) for e in err]}. '
-                f'Per-joint motion (rad): {[round(m, 3) for m in motion]}. '
-                f'Refusing to proceed — check for mechanical block or servo dropout.'
-            )
-            sys.exit(2)
-
-rclpy.init()
-node = SyncNode()
-_exit_code = 0
-try:
-    rclpy.spin(node)
-except SystemExit as _se:
-    # Capture the code so we can re-raise AFTER clean shutdown. A bare
-    # 'pass' here silently ate sys.exit(2) and the shell saw rc=0, making
-    # the whole verification-hard-exit path dead code.
-    _exit_code = _se.code if isinstance(_se.code, int) else 0
-node.destroy_node()
-rclpy.shutdown()
-sys.exit(_exit_code)
-" || sync_rc=$?
-    sync_rc=${sync_rc:-0}
-    if [ $sync_rc -eq 2 ]; then
-        # 2026-05-18: soft-fail instead of `exit 2`. Hard-failing here put
-        # docker compose's restart-policy into a tight crash-loop whenever
-        # the follower couldn't reach the leader pose within 0.30 rad in
-        # 3+2 seconds — a common scenario in classroom setups where the
-        # human positions the leader arm at an extreme pose before clicking
-        # Start, or where servos are torque-disabled from a prior shutdown.
-        # The trade-off: the first leader move can now drive the follower
-        # through a larger initial delta. The arm_controller's own state
-        # tolerance still catches a runaway trajectory.
-        echo "[WARN] Sync verification did not pass — continuing anyway."
-        echo "[WARN] First leader move may produce a larger-than-usual follower"
-        echo "[WARN] motion as the controller catches up to the leader pose."
-    elif [ $sync_rc -ne 0 ]; then
-        echo "[WARN] Sync script exited with status $sync_rc — follower may snap on first leader move"
-    else
-        echo "[LAUNCH] Sync complete."
-    fi
-elif [ "$FOLLOWER_ONLY" = "1" ]; then
-    echo "[LAUNCH] FOLLOWER_ONLY=1 — sync skipped. Jetson agent will move follower to safe home after the container is healthy."
+# --- Phase 3': On-demand homing + leader-sync (deferred to a button) ---
+# The follower stays LIMP (torque off, no motion) at boot. arm_startup_node.py
+# advertises /edubotics/start_arm (std_srvs/Trigger) and publishes progress on
+# /edubotics/arm_state; when the student clicks "Roboter starten" in the
+# dashboard it homes the follower, reads the leader's CURRENT pose, syncs, and
+# VERIFIES convergence as a blocking gate before reporting ready. This replaces
+# the old boot-time quintic sync (which soft-failed and let students record on
+# a mis-synced arm). On the classroom Jetson there is no leader to sync to, so
+# the node is NOT started — the Jetson agent homes the follower itself, exactly
+# as before.
+if [ "$FOLLOWER_ONLY" = "1" ]; then
+    echo "[LAUNCH] FOLLOWER_ONLY=1 — arm_startup_node skipped. Jetson agent homes the follower after the container is healthy."
 else
-    echo "[WARN] Could not read leader position — skipping sync"
+    echo "[LAUNCH] Starting arm_startup_node (follower limp until /edubotics/start_arm)..."
+    python3 /usr/local/bin/arm_startup_node.py &
+    PIDS="$PIDS $!"
 fi
 
 # --- Phase 4: Launch Cameras ---

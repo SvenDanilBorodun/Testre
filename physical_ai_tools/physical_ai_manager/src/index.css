@@ -119,6 +119,37 @@ code,
 }
 .eb-pulse-dot { animation: eb-pulse-dot 1.8s ease-out infinite; }
 
+/* --- Robot-startup hero animations (HomePage "Roboter starten" flow) --- */
+
+/* Vertical scanline that sweeps the camera panel while the arm is homing /
+   syncing — reads as the system "booting" the hardware. */
+@keyframes eb-scan {
+  0% { transform: translateY(-100%); opacity: 0; }
+  10% { opacity: 1; }
+  90% { opacity: 1; }
+  100% { transform: translateY(800%); opacity: 0; }
+}
+.eb-scan { animation: eb-scan 2.4s cubic-bezier(.45,0,.55,1) infinite; }
+
+/* Energised joint: soft accent halo that breathes during motion. */
+@keyframes eb-joint-pulse {
+  0%,100% { opacity: .55; r: 4; }
+  50% { opacity: 1; r: 6; }
+}
+.eb-joint-pulse { animation: eb-joint-pulse 1.4s ease-in-out infinite; transform-box: fill-box; transform-origin: center; }
+
+/* Success pop for the ready checkmark / badge. */
+@keyframes eb-pop {
+  0% { transform: scale(.4); opacity: 0; }
+  60% { transform: scale(1.12); opacity: 1; }
+  100% { transform: scale(1); opacity: 1; }
+}
+.eb-pop { animation: eb-pop .42s cubic-bezier(.34,1.56,.64,1) both; }
+
+/* Gentle float for the idle (limp) arm so the panel never looks frozen. */
+@keyframes eb-float { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-3px); } }
+.eb-float { animation: eb-float 4.5s ease-in-out infinite; }
+
 /* Shared responsive page shell — every content page uses this
    so spacing scales consistently from mobile → ultra-wide */
 .eb-shell {

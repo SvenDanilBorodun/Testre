@@ -184,3 +184,24 @@ The v2.1 wrapper reimplements internals that are all removed — **delete, don't
 10. **RAM valve must be RE-FRAMED** — v3.0 stages images to a temp dir; buffer holds path strings, so the decoded-ndarray byte premise is false. Use frame-count / temp-disk / wall-clock cap.
 11. **README `data/*/*.parquet` glob is STILL VALID** for v3.0 (one level deep) — earlier spec flagged it wrongly; the **video** glob does change.
 12. **Twins are dead/overlaid** — the `physical_ai_tools/physical_ai_server/.../*` twins are overwritten by apply_overlay at build and are NOT on a separate boot path; do NOT mirror edits into them. Only the `overlays/` copies ship.
+
+---
+
+## FINAL INVESTIGATION (2026-05-25, 3 Opus agents, read-only) — verdict + extra Layer-4 gaps
+
+**Verdict:** review fixes (commit 29d4a6e) are **regression-free**; Layers 1,2,5,6,7,8 **confirmed correct**. The ONLY blocker is Layer 4 (recording), which is un-migrated and makes the image **non-bootable** (the `lerobot_dataset_wrapper.py` overlay imports removed v2.1 symbols → ImportError at ROS boot). CI is **false-green** on this (compileall doesn't import; tests are mocked) — add the boot-import job.
+
+**Fixes re-confirmed:** pyav backend valid (routes to torchvision VideoReader, never imports torchcodec; valid set {torchcodec,pyav,video_reader}); sed strips torch+torchvision only (torchcodec kept); numpy-2 ABI smoke has NO false-fail risk (cv2/onnxruntime/pupil_apriltags installed at Dockerfile L265-273, before the verifier L389); checkpoint `.resolve()`+assert correct (`model.safetensors` caught); `pi0fast→pi0_fast` complete (only dead twins + comments remain).
+
+**7 ADDITIONAL Layer-4 gaps the spec above under-stated (handle in the rewrite):**
+1. `info['total_videos']` / `info['total_chunks']` are **absent KEYS** in v3.0 info.json → `save_meta_info`'s writes are `KeyError`, not just removed methods. (React only reads `codebase_version`, so likely safe — grep before landing.)
+2. `validate_frame` semantic change: now **requires `task` as a key in the frame** AND rejects any `DEFAULT_FEATURES` key in the frame. (Handled if you route through `super().add_frame`; breaks any manual `validate_frame` call.)
+3. `get_episode_index()` (wrapper) is consumed by `data_manager.get_save_rosbag_path()` (~L140) and the video-path derivation (~L315) — re-express as `self.writer.episode_buffer['episode_index']`, don't silently drop it (rosbag pathing breaks otherwise).
+4. **Student-facing regression:** the SAVING-phase **progress bar** (`_get_encoding_progress` ~L550 → `TaskStatus.encoding_progress`) reads `self._lerobot_dataset.encoders`, which is GONE under v3.0's synchronous `save_episode()`. It will read 100%/dead. Decide: use `streaming_encoding=True` to keep a live signal, or accept a blocking save with no percentage. Not just an internal refactor.
+5. `_verify_saved_video_files`: v3.0 **concatenates multiple episodes into one `file-NNN.mp4`** (`concatenate_video_files`), so per-episode mp4 verification is no longer 1:1. Existence/zero-byte check still works on the shared file; the per-episode German warning wording is misleading.
+6. `_check_dataset_exists` (~L716) passes structurally on a leftover v2.1 directory (all of `meta/`,`videos/`,`data/` exist) → add a real `codebase_version == "v3.0"` gate (or, given the clean-break decision, just always rmtree+recreate).
+7. `get_video_file_path(ep,key)` raises **IndexError** (not empty path) if called before `save_episode` — it indexes `meta.episodes[ep]`. Always call it AFTER `save_episode`.
+
+**Cosmetic (non-blocking):** (a) `modal_app.py:64-66` comment calls torchcodec "the safe default backend" — now in tension with the pyav override; add a one-line reconciling note. (b) `test_training_handler_cli.py` loops omit the new `pi05` (coverage drift; tests pass).
+
+**MUST-VERIFY-ON-BUILD (Windows/Docker/hardware):** base image Python ≥3.12 (`docker run robotis/physical-ai-server:amd64-0.8.2 python3 --version`); numpy-2 ABI on `cv_bridge` (ROS-sourced, not in the build smoke — exercised at node boot); Modal image build (torch 2.7.1+cu126); arm64 build + jetson-ai-lab cu126 wheel availability (may be pruned → cu129); full record→train→infer on a fresh v3.0 dataset.

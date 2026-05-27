@@ -27,7 +27,6 @@ import teacherSlice from '../features/teacher/teacherSlice';
 import adminSlice from '../features/admin/adminSlice';
 import workshopSlice from '../features/workshop/workshopSlice';
 import jetsonSlice from './jetsonSlice';
-import armStartupSlice from './armStartupSlice';
 
 export const store = configureStore({
   reducer: {
@@ -41,7 +40,6 @@ export const store = configureStore({
     admin: adminSlice,
     workshop: workshopSlice,
     jetson: jetsonSlice,
-    armStartup: armStartupSlice,
   },
   middleware: (getDefaultMiddleware) => getDefaultMiddleware(),
 });

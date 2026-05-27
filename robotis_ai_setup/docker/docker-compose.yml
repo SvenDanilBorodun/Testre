@@ -81,19 +81,6 @@ services:
       - EDUBOTICS_CAMERA_SOURCE=${EDUBOTICS_CAMERA_SOURCE:-}
       - EDUBOTICS_CAMERA_INGEST_PORT=${EDUBOTICS_CAMERA_INGEST_PORT:-5557}
       - EDUBOTICS_CAMERA_NAMES=${EDUBOTICS_CAMERA_NAMES:-gripper,scene}
-      # On-demand arm-startup tunables (arm_startup_node.py). The follower
-      # launches limp at boot; the student clicks "Roboter starten" in the
-      # dashboard, which homes the follower to EDUBOTICS_HOME_POSE, reads the
-      # leader's current pose, then syncs with a quintic whose duration scales
-      # with the largest joint delta (bounded by _MAX_VEL rad/s, floored at
-      # _BASE_SEC) and verifies convergence as a blocking gate, retrying up to
-      # _RETRIES times. Listed here because the node reads them at startup and
-      # compose ${VAR} interpolation never reaches the container runtime env
-      # otherwise (env-forwarding-guard enforces this).
-      - EDUBOTICS_HOME_POSE=${EDUBOTICS_HOME_POSE:-0.0,0.0,0.0,0.0,0.0,0.0}
-      - EDUBOTICS_ARM_SYNC_BASE_SEC=${EDUBOTICS_ARM_SYNC_BASE_SEC:-3.0}
-      - EDUBOTICS_ARM_SYNC_MAX_VEL=${EDUBOTICS_ARM_SYNC_MAX_VEL:-0.6}
-      - EDUBOTICS_ARM_SYNC_RETRIES=${EDUBOTICS_ARM_SYNC_RETRIES:-2}
     volumes:
       - /dev:/dev
       - /dev/shm:/dev/shm

@@ -235,7 +235,6 @@ jobs:
                 --include='*.py' --include='*.sh' \
                 robotis_ai_setup/docker/open_manipulator/entrypoint_omx.sh \
                 robotis_ai_setup/docker/open_manipulator/camera_ingest_node.py \
-                robotis_ai_setup/docker/open_manipulator/arm_startup_node.py \
                 robotis_ai_setup/wsl_rootfs/start-dockerd.sh \
                 robotis_ai_setup/docker/physical_ai_server/overlays \
                 robotis_ai_setup/docker/open_manipulator/overlays \

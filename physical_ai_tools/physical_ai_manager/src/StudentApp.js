@@ -63,12 +63,6 @@ function StudentApp() {
   // v2.3.0: needed so the signOut handlers below can fire a beacon
   // release with the still-valid JWT before the session goes away.
   const jetsonId = useSelector((state) => state.jetson.jetsonId);
-  // The robot arms launch limp at boot; Aufnahme / Inferenz / Roboter Studio
-  // all need a homed + leader-synced follower, so they stay locked until the
-  // student starts the robot on the Start page and the sync verifies
-  // (state.armStartup.armReady). On the classroom Jetson there is no local
-  // arm-startup flow, so don't gate when connected to a Jetson.
-  const armReady = useSelector((state) => state.armStartup.armReady);
   const cloudOnly = isCloudOnlyMode();
   const currentRosHost = useSelector((state) => state.ros.rosHost);
 
@@ -253,19 +247,13 @@ function StudentApp() {
   // page gracefully renders the "Kein Klassen-Jetson in diesem Raum"
   // state when no Jetson is paired, so it's safe to leave the tab
   // visible even in environments with no robot at all.
-  // True when the local robot arm must be started first. Only applies to the
-  // local-hardware path: cloud-only has no arm, and a Jetson connection drives
-  // a remote arm with its own lifecycle.
-  const armGate = !cloudOnly && !jetsonConnected && !armReady;
-  const armGateTip = 'Starte zuerst den Roboter';
-
   const navItems = [
     { key: PageType.HOME, label: 'Start', Icon: MdHome, onClick: handleHomePageNavigation },
-    { key: PageType.RECORD, label: 'Aufnahme', Icon: MdVideocam, onClick: handleRecordPageNavigation, hardwareOnly: true, jetsonIncompatible: true, disabled: armGate, disabledTip: armGateTip },
+    { key: PageType.RECORD, label: 'Aufnahme', Icon: MdVideocam, onClick: handleRecordPageNavigation, hardwareOnly: true, jetsonIncompatible: true },
     { key: PageType.TRAINING, label: 'Training', Icon: GoGraph, onClick: handleTrainingPageNavigation },
-    { key: PageType.INFERENCE, label: 'Inferenz', Icon: MdMemory, onClick: handleInferencePageNavigation, disabled: armGate, disabledTip: armGateTip },
+    { key: PageType.INFERENCE, label: 'Inferenz', Icon: MdMemory, onClick: handleInferencePageNavigation },
     { key: PageType.EDIT_DATASET, label: 'Daten', Icon: MdWidgets, onClick: handleEditDatasetPageNavigation, sep: true, jetsonIncompatible: true },
-    { key: PageType.WORKSHOP, label: 'Roboter Studio', Icon: MdConstruction, onClick: handleWorkshopPageNavigation, hardwareOnly: true, jetsonIncompatible: true, disabled: armGate, disabledTip: armGateTip },
+    { key: PageType.WORKSHOP, label: 'Roboter Studio', Icon: MdConstruction, onClick: handleWorkshopPageNavigation, hardwareOnly: true, jetsonIncompatible: true },
   ]
     .filter((n) => !cloudOnly || !n.hardwareOnly)
     .filter((n) => !jetsonConnected || !n.jetsonIncompatible);
@@ -312,15 +300,10 @@ function StudentApp() {
                 )}
                 <button
                   onClick={n.onClick}
-                  disabled={n.disabled}
-                  title={n.disabled ? n.disabledTip : n.label}
+                  title={n.label}
                   className={clsx(
                     'group w-12 md:w-[68px] py-2.5 md:py-3 rounded-[var(--radius)] flex flex-col items-center gap-1 md:gap-1.5 transition',
-                    n.disabled
-                      ? isDarkPage
-                        ? 'text-white/25 cursor-not-allowed'
-                        : 'text-[var(--ink-4)] cursor-not-allowed'
-                      : active
+                    active
                       ? isDarkPage
                         ? 'bg-white/[0.08] text-white'
                         : 'bg-[var(--accent-wash)] text-[var(--accent-ink)]'
@@ -425,12 +408,9 @@ function StudentApp() {
               <button
                 key={n.key}
                 onClick={n.onClick}
-                disabled={n.disabled}
-                title={n.disabled ? n.disabledTip : n.label}
                 className={clsx(
                   'flex-1 min-w-0 flex flex-col items-center justify-center gap-0.5 transition',
-                  n.disabled && 'opacity-40 cursor-not-allowed',
-                  active && !n.disabled
+                  active
                     ? isDarkPage
                       ? 'text-white'
                       : 'text-[var(--accent-ink)]'

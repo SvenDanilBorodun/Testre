@@ -23,7 +23,10 @@ from lerobot.datasets.compute_stats import (
 )
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.datasets.utils import (
+    DEFAULT_FEATURES,
     validate_episode_buffer,
+    validate_feature_dtype_and_shape,
+    validate_features_presence,
     validate_frame,
     write_episode,
     write_episode_stats,
@@ -31,6 +34,88 @@ from lerobot.datasets.utils import (
 )
 import numpy as np
 from physical_ai_server.video_encoder.ffmpeg_encoder import FFmpegEncoder
+
+
+class JpegFrame:
+    """A single camera frame held as its original JPEG bytes plus the
+    decoded ``(height, width, channels)`` shape.
+
+    EduBotics P1 (JPEG-in-RAM): the recording buffer used to retain a
+    decoded RGB uint8 ndarray per frame (~920 KB at 640×480), so a
+    30 Hz × 2-cam episode grew the in-RAM buffer ~1.84 MB/tick and
+    OOM-killed the 6 GB container at ~108 s (the EDUBOTICS_MAX_BUFFER_GB
+    valve then capped episodes at ~74 s). The frames already arrive from
+    the camera as JPEG (~30 KB), so keeping the *compressed* bytes in the
+    buffer is ~30× smaller and removes the practical episode-length cap.
+    Pixels are materialized lazily, and only where genuinely needed:
+    stats sampling (~100–1000 frames) and the video encode (one chunk at
+    a time, via :class:`_LazyDecodeBuffer`). The hot 30 Hz append path
+    never decodes.
+
+    Gated by ``EDUBOTICS_JPEG_BUFFER`` in data_manager; when that flag is
+    off, the legacy RGB-ndarray buffer is used and this class is never
+    constructed, so the old path is an exact rollback.
+    """
+
+    __slots__ = ('jpeg', 'shape')
+
+    def __init__(self, jpeg: np.ndarray, shape: tuple):
+        # jpeg: 1-D uint8 ndarray of the compressed JPEG bytes (a private
+        # copy — the source CompressedImage buffer is overwritten in
+        # place by the communicator). shape: (h, w, c) of the decode.
+        self.jpeg = jpeg
+        self.shape = tuple(shape)
+
+    @property
+    def nbytes(self) -> int:
+        # Read by add_frame_without_write_image for the RAM-valve
+        # accounting; ~30 KB here instead of ~920 KB for decoded RGB.
+        return int(self.jpeg.nbytes)
+
+    def decode(self) -> np.ndarray:
+        """Decode to an (h, w, c) RGB uint8 ndarray. cv2 is imported
+        lazily so importing this module stays OpenCV-free (mirrors the
+        GUI camera_bridge pattern)."""
+        import cv2
+        bgr = cv2.imdecode(self.jpeg, cv2.IMREAD_COLOR)
+        if bgr is None:
+            raise RuntimeError(
+                'JpegFrame.decode: cv2.imdecode returned None (corrupt '
+                'JPEG in recording buffer)'
+            )
+        return cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+
+
+class _LazyDecodeBuffer:
+    """A read-only sequence view over a list of :class:`JpegFrame` that
+    decodes to RGB ndarrays on access.
+
+    Handed to ``FFmpegEncoder.set_buffer`` in JPEG mode so the encoder —
+    which already iterates the buffer in ``chunk_size`` slices — only
+    ever materializes one chunk of decoded frames at a time (peak extra
+    RAM ≈ chunk_size × ~920 KB), instead of the whole episode. The
+    encoder itself is left untouched (no overlay needed): it calls
+    ``len(buffer)``, ``buffer[0].shape`` and ``buffer[i:j]`` then
+    ``frame.tobytes()`` — all satisfied here. A plain ndarray (legacy
+    mode) is passed through unwrapped, so this class is JPEG-mode-only.
+    """
+
+    __slots__ = ('_frames',)
+
+    def __init__(self, frames):
+        self._frames = frames
+
+    def __len__(self):
+        return len(self._frames)
+
+    @staticmethod
+    def _decode_one(f):
+        return f.decode() if isinstance(f, JpegFrame) else f
+
+    def __getitem__(self, idx):
+        if isinstance(idx, slice):
+            return [self._decode_one(f) for f in self._frames[idx]]
+        return self._decode_one(self._frames[idx])
 
 
 class LeRobotDatasetWrapper(LeRobotDataset):
@@ -167,8 +252,40 @@ class LeRobotDatasetWrapper(LeRobotDataset):
         finally:
             self._append_in_progress = False
 
+    def _validate_frame_allow_jpeg(self, frame: dict) -> None:
+        """Frame validation that tolerates JpegFrame image values.
+
+        Mirrors lerobot.datasets.utils.validate_frame exactly (same
+        presence check, same per-feature dtype/shape check for non-image
+        features) but, for image/video features supplied as a JpegFrame,
+        validates the carried ``.shape`` against the declared feature
+        shape instead of routing the un-decoded JpegFrame through
+        validate_feature_image_or_video (which only accepts ndarray /
+        PIL.Image and would reject it). When the frame contains no
+        JpegFrame (legacy RGB mode), this is behaviourally identical to
+        validate_frame.
+        """
+        expected_features = set(self.features) - set(DEFAULT_FEATURES)
+        actual_features = set(frame)
+        error_message = validate_features_presence(actual_features, expected_features)
+        for name in (actual_features & expected_features) - {'task'}:
+            value = frame[name]
+            if isinstance(value, JpegFrame):
+                expected_shape = tuple(self.features[name]['shape'])
+                c_h_w = (expected_shape[2], expected_shape[0], expected_shape[1])
+                if value.shape != expected_shape and value.shape != c_h_w:
+                    error_message += (
+                        f"The feature '{name}' of shape '{value.shape}' does "
+                        f"not have the expected shape '{expected_shape}'.\n"
+                    )
+            else:
+                error_message += validate_feature_dtype_and_shape(
+                    name, self.features[name], value)
+        if error_message:
+            raise ValueError(error_message)
+
     def add_frame_without_write_image(self, frame: dict, task: str) -> None:
-        validate_frame(frame, self.features)
+        self._validate_frame_allow_jpeg(frame)
 
         if self.episode_buffer is None:
             self.episode_buffer = self.create_episode_buffer()
@@ -224,7 +341,26 @@ class LeRobotDatasetWrapper(LeRobotDataset):
         self._buffer_full = False
         self._buffer_full_warning = ''
 
-    def save_episode_without_video_encoding(self):
+    def _save_episode_common(self, encode_now: bool):
+        """Shared body of the two optimized save paths.
+
+        EduBotics P4 de-dup: ``save_episode_without_video_encoding`` (the
+        multi-task path, which defers encoding to ``video_encoding()``)
+        and ``save_episode_without_write_image`` (the single-task path,
+        which encodes inline) were byte-for-byte identical except for two
+        things — whether ``_create_video`` runs in the per-camera loop,
+        and whether the caller appends to the multi-episode buffer
+        afterwards. Both forks now share this body so a future change to
+        the parquet/meta/stats prologue can't drift between them.
+
+        ``encode_now``: when True, kick the async FFmpeg encode for each
+        camera immediately (single-task); when False, only record the
+        video metadata and leave encoding to a later ``video_encoding()``
+        pass (multi-task batched encode).
+
+        Returns ``(episode_buffer, episode_length)`` so the multi-task
+        caller can hand them to ``append_episode_buffer``.
+        """
         episode_buffer = self.episode_buffer
         validate_episode_buffer(
             episode_buffer,
@@ -265,6 +401,8 @@ class LeRobotDatasetWrapper(LeRobotDataset):
             if 'observation.images' in key:
                 video_path = self.root / self.meta.get_video_file_path(episode_index, key)
                 video_paths[key] = str(video_path)
+                if encode_now:
+                    self._create_video(ep, video_path)
                 video_count += 1
                 video_info = {
                     'video.height': self.features[key]['shape'][0],
@@ -282,6 +420,10 @@ class LeRobotDatasetWrapper(LeRobotDataset):
             episode_tasks,
             ep_stats
         )
+        return episode_buffer, episode_length
+
+    def save_episode_without_video_encoding(self):
+        episode_buffer, episode_length = self._save_episode_common(encode_now=False)
         self.append_episode_buffer(episode_buffer, episode_length)
 
     def get_episode_index(self):
@@ -290,63 +432,7 @@ class LeRobotDatasetWrapper(LeRobotDataset):
         return self.episode_buffer['episode_index']
 
     def save_episode_without_write_image(self):
-        episode_buffer = self.episode_buffer
-        validate_episode_buffer(
-            episode_buffer,
-            self.meta.total_episodes,
-            self.features)
-
-        episode_length = episode_buffer.pop('size')
-        tasks = episode_buffer.pop('task')
-        episode_tasks = list(set(tasks))
-        episode_index = episode_buffer['episode_index']
-
-        episode_buffer['index'] = np.arange(
-            self.meta.total_frames,
-            self.meta.total_frames + episode_length)
-        episode_buffer['episode_index'] = np.full((episode_length,), episode_index)
-        # Add new tasks to the tasks dictionary
-        for task in episode_tasks:
-            task_index = self.meta.get_task_index(task)
-            if task_index is None:
-                self.meta.add_task(task)
-
-        # Given tasks in natural language, find their corresponding task indices
-        episode_buffer['task_index'] = np.array([self.meta.get_task_index(task) for task in tasks])
-
-        for key, ft in self.features.items():
-            if (key in ['index', 'episode_index', 'task_index'] or
-                    ft['dtype'] in ['image', 'video']):
-                continue
-            episode_buffer[key] = np.stack(episode_buffer[key])
-
-        self._save_episode_table(episode_buffer, episode_index)
-        ep_stats = self.compute_episode_stats_buffer(episode_buffer, self.features)
-
-        video_paths = {}
-        video_count = 0
-        for key, ep in self.episode_buffer.items():
-            if 'observation.images' in key:
-                video_path = self.root / self.meta.get_video_file_path(episode_index, key)
-                video_paths[key] = str(video_path)
-                self._create_video(ep, video_path)
-                video_count += 1
-                video_info = {
-                    'video.height': self.features[key]['shape'][0],
-                    'video.width': self.features[key]['shape'][1],
-                    'video.channels': self.features[key]['shape'][2],
-                    'video.codec': 'libx264',
-                    'video.pix_fmt': 'yuv420p',
-                }
-                self.meta.info['features'][key]['info'] = video_info
-
-        self.save_meta_info(
-            video_count,
-            episode_index,
-            episode_length,
-            episode_tasks,
-            ep_stats
-        )
+        self._save_episode_common(encode_now=True)
 
     def save_meta_info(
             self,
@@ -393,7 +479,14 @@ class LeRobotDatasetWrapper(LeRobotDataset):
                 pix_fmt='yuv420p',
                 vcodec='libx264'
             )
-        self.encoders[save_path].set_buffer(image_buffer)
+        # JPEG-in-RAM mode (P1): the buffer holds JpegFrame objects. Wrap
+        # it so the encoder decodes one chunk at a time (peak extra RAM ≈
+        # chunk_size frames) instead of forcing a full-episode decode
+        # up-front. Legacy RGB ndarrays pass through untouched.
+        encoder_buffer = image_buffer
+        if len(image_buffer) > 0 and isinstance(image_buffer[0], JpegFrame):
+            encoder_buffer = _LazyDecodeBuffer(image_buffer)
+        self.encoders[save_path].set_buffer(encoder_buffer)
         encoding_thread = threading.Thread(
             target=self.encoders[save_path].encode_video,
             args=(save_path,)
@@ -489,6 +582,10 @@ class LeRobotDatasetWrapper(LeRobotDataset):
         images = None
         for i, idx in enumerate(sampled_indices):
             img = image_array[idx]
+            # JPEG-in-RAM mode (P1): the buffer holds JpegFrame, not
+            # decoded RGB. Decode only the sparse sampled frames here.
+            if isinstance(img, JpegFrame):
+                img = img.decode()
             img = np.transpose(img, (2, 0, 1))
             img = self._auto_downsample_height_width(img)
             if images is None:

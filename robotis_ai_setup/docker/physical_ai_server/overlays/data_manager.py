@@ -44,7 +44,10 @@ from nav_msgs.msg import Odometry
 import numpy as np
 from physical_ai_interfaces.msg import TaskStatus
 from physical_ai_server.data_processing.data_converter import DataConverter
-from physical_ai_server.data_processing.lerobot_dataset_wrapper import LeRobotDatasetWrapper
+from physical_ai_server.data_processing.lerobot_dataset_wrapper import (
+    JpegFrame,
+    LeRobotDatasetWrapper,
+)
 from physical_ai_server.data_processing.progress_tracker import (
     HuggingFaceProgressTqdm
 )
@@ -132,6 +135,27 @@ class DataManager:
         self._last_image_change_time: dict[str, float] = {}
         self._stale_threshold_s = 2.0
         self._stale_halt_threshold_s = 5.0
+        # JPEG-in-RAM mode (P1). When on (default), camera frames are kept
+        # in the recording buffer as their original compressed JPEG bytes
+        # (~30 KB) instead of decoded RGB (~920 KB), removing the ~74 s
+        # episode-length cap the RAM safety valve otherwise imposes.
+        # EDUBOTICS_JPEG_BUFFER=0 restores the exact legacy RGB path.
+        # Only valid in optimized-save mode: the non-optimized path calls
+        # upstream LeRobot add_frame(), which writes PNGs via the image
+        # writer and validates frames as ndarray/PIL — a JpegFrame would
+        # break it. So a student who turns optimized-save off transparently
+        # falls back to the decoded-RGB buffer regardless of the flag.
+        _jpeg_flag = os.environ.get(
+            'EDUBOTICS_JPEG_BUFFER', '1'
+        ).strip().lower() not in ('0', 'false', 'no', 'off')
+        self._jpeg_buffer_mode = _jpeg_flag and bool(
+            getattr(task_info, 'use_optimized_save_mode', False)
+        )
+        # Per-camera decoded (h, w, c) shape, learned by decoding the
+        # FIRST frame of each camera once and reused for every subsequent
+        # JpegFrame so the 30 Hz append path never decodes. Keyed by
+        # camera name (same keys as the image_msgs dict).
+        self._camera_shape_cache: dict[str, tuple] = {}
 
     def get_status(self):
         return self._status
@@ -572,7 +596,14 @@ class DataManager:
         now = time.monotonic()
         halt_on: str | None = None
         for name, img in camera_data.items():
-            buf = img.data.tobytes()
+            # JPEG mode (P1): hash the compressed bytes directly — a
+            # frozen feed re-delivers byte-identical JPEG, so this detects
+            # staleness without decoding. Legacy mode hashes the decoded
+            # RGB ndarray buffer.
+            if isinstance(img, JpegFrame):
+                buf = img.jpeg.tobytes()
+            else:
+                buf = img.data.tobytes()
             n = len(buf)
             if n <= 1024:
                 sample = buf
@@ -605,14 +636,28 @@ class DataManager:
 
         if image_msgs is not None:
             for key, value in image_msgs.items():
-                # cv_bridge handles the BGR→RGB swap in-decoder when we
-                # ask for rgb8, which saves one full-frame allocation +
-                # a memcpy per camera per tick (~1 ms × 60 ops/s = 6 %
-                # of one core, plus reduced allocator pressure which
-                # lowers GC pause frequency — and GC pauses are what
-                # were exhausting the depth=1 QoS budget upstream).
-                camera_data[key] = self.data_converter.compressed_image2cvmat(
-                    value, desired_encoding='rgb8')
+                if self._jpeg_buffer_mode:
+                    # JPEG-in-RAM (P1): retain the camera's original
+                    # compressed JPEG bytes instead of a decoded RGB
+                    # frame. The CompressedImage buffer is overwritten in
+                    # place by the communicator, so copy the bytes out.
+                    jpeg = np.frombuffer(value.data, dtype=np.uint8).copy()
+                    shape = self._camera_shape_cache.get(key)
+                    if shape is None:
+                        # Learn the (h, w, c) shape once per camera by
+                        # decoding the first frame, then reuse it so the
+                        # 30 Hz append path never decodes again.
+                        rgb = self.data_converter.compressed_image2cvmat(
+                            value, desired_encoding='rgb8')
+                        shape = tuple(rgb.shape)
+                        self._camera_shape_cache[key] = shape
+                    camera_data[key] = JpegFrame(jpeg, shape)
+                else:
+                    # Legacy RGB path. cv_bridge handles the BGR→RGB swap
+                    # in-decoder when we ask for rgb8, which saves one
+                    # full-frame allocation + a memcpy per camera per tick.
+                    camera_data[key] = self.data_converter.compressed_image2cvmat(
+                        value, desired_encoding='rgb8')
             stale = self._check_stale_cameras(camera_data)
             if stale is not None:
                 # Warn (don't halt) — slow precision demos legitimately
@@ -811,12 +856,15 @@ class DataManager:
         Modal training cannot discover the dataset.
 
         Falls back to a direct push_to_hub when no callback was wired
-        (tests, standalone import). ``private`` is intentionally ignored:
-        classroom recordings can contain children's faces / audio, so
-        the upload is always private. Teachers can flip individual
-        repos to public from the HF dashboard if they want to share.
+        (tests, standalone import). ``private`` is forwarded from the
+        student's "Privater Modus" choice in the React UI (TaskInfo
+        .private_mode). It defaults to True so a missing/garbled flag
+        fails safe to private — classroom recordings can contain
+        children's faces / audio. A student may opt a repo public at
+        record time; teachers can also flip individual repos later from
+        the HF dashboard.
         """
-        del private  # always private — see docstring
+        private = bool(private)
         if self._upload_enqueued:
             # Already kicked off; subsequent state-machine ticks are no-ops.
             return
@@ -826,6 +874,7 @@ class DataManager:
                 self._upload_callback(
                     self._save_repo_name,
                     str(self._save_path),
+                    private,
                 )
             except Exception as e:
                 print(
@@ -838,7 +887,7 @@ class DataManager:
         try:
             self._lerobot_dataset.push_to_hub(
                 tags=tags,
-                private=True,
+                private=private,
                 upload_large_folder=True)
         except Exception as e:
             print(
@@ -1181,6 +1230,7 @@ class DataManager:
         repo_id,
         repo_type,
         local_dir,
+        private=True,
     ):
         try:
             api = HfApi()
@@ -1194,16 +1244,25 @@ class DataManager:
                 print('Please make sure you are authenticated with HuggingFace')
                 return False
 
-            # Create repository. Default to PRIVATE: student recordings
-            # may contain faces, classroom audio, or other data that must
-            # not leak to the public HF index (GDPR / school DPA).
-            # Teachers can flip individual repos to public later from the
-            # HF dashboard if they genuinely want to share.
-            print(f'Creating HuggingFace repository: {repo_id}')
+            # Repository visibility follows the student's "Privater Modus"
+            # choice (forwarded from TaskInfo.private_mode). Defaults to
+            # PRIVATE so a missing flag fails safe: student recordings may
+            # contain faces, classroom audio, or other data that must not
+            # leak to the public HF index (GDPR / school DPA). When the
+            # student opts public, the repo is created public; teachers can
+            # still flip any repo's visibility later from the HF dashboard.
+            # NOTE: exist_ok=True only verifies an existing repo — it does
+            # not retroactively change visibility, so the flag only takes
+            # effect on the first (creating) upload of a given repo_id.
+            private = bool(private)
+            print(
+                f'Creating HuggingFace repository: {repo_id} '
+                f'(private={private})'
+            )
             url = api.create_repo(
                 repo_id,
                 repo_type=repo_type,
-                private=True,
+                private=private,
                 exist_ok=True,
             )
             print(f'Repository created/verified: {url}')

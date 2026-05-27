@@ -363,6 +363,9 @@ class HfApiWorker:
                         repo_type = data.get('repo_type')
                         local_dir = data.get('local_dir')
                         author = data.get('author')
+                        # Defaults True so an upload request without the
+                        # key fails safe to a private repo.
+                        private = bool(data.get('private', True))
 
                         logger.info(f'Processing {mode} request for repo: {repo_id}')
 
@@ -372,7 +375,8 @@ class HfApiWorker:
                             result = DataManager.upload_huggingface_repo(
                                 repo_id=repo_id,
                                 repo_type=repo_type,
-                                local_dir=local_dir
+                                local_dir=local_dir,
+                                private=private
                             )
                             if result:
                                 message = f'Uploaded Hugging Face repo: {repo_id}'

@@ -55,3 +55,45 @@ function buildStub() {
 export const supabase = isSupabaseConfigured
   ? createClient(supabaseUrl, supabaseAnonKey)
   : buildStub();
+
+// --- Keep the Realtime websocket's JWT in sync with the auth session ---
+//
+// Every `postgres_changes` subscription in this app (trainings, workflows,
+// datasets, tutorial_progress, jetsons) is RLS-filtered — e.g. the trainings
+// SELECT policy is `auth.uid() = user_id`. Realtime enforces those policies
+// using whatever JWT the websocket last authenticated with. If the socket is
+// still on the anon apikey, `auth.uid()` is NULL, RLS drops EVERY event, yet
+// the channel still reports SUBSCRIBED — so the hooks' poll fallback never
+// engages and the UI is dead until a manual REST refetch ("click reload").
+//
+// supabase-js only auto-pushes the token to Realtime on the SIGNED_IN and
+// TOKEN_REFRESHED auth events. It does NOT do so on INITIAL_SESSION — the
+// event fired when a persisted session is restored from localStorage on every
+// page load/reload. Students stay logged in across reloads, so without this
+// the Realtime socket boots as anon on every visit and live updates are dead.
+//
+// We therefore drive `realtime.setAuth()` explicitly from the session
+// lifecycle: once at startup for the restored session, and on every auth state
+// change (login, refresh ~hourly during long trainings, logout → null clears).
+// This fixes all RLS-filtered Realtime subscriptions at the root, not just the
+// training tab.
+if (isSupabaseConfigured) {
+  const syncRealtimeAuth = (token) => {
+    try {
+      // setAuth is async in realtime-js v2; fire-and-forget, swallow rejections
+      // (e.g. socket not yet connected) so we never produce an unhandled reject.
+      Promise.resolve(supabase.realtime.setAuth(token ?? null)).catch(() => {});
+    } catch {
+      /* stub / unavailable realtime client — nothing to sync */
+    }
+  };
+
+  supabase.auth
+    .getSession()
+    .then(({ data: { session } }) => syncRealtimeAuth(session?.access_token))
+    .catch(() => {});
+
+  supabase.auth.onAuthStateChange((_event, session) => {
+    syncRealtimeAuth(session?.access_token);
+  });
+}

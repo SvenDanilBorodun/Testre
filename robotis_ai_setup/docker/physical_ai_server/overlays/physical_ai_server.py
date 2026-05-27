@@ -1494,12 +1494,16 @@ class PhysicalAIServer(Node):
             self.get_logger().error(
                 f'Failed to publish synthetic upload-failed status: {e}')
 
-    def _enqueue_dataset_upload(self, repo_id, local_dir):
+    def _enqueue_dataset_upload(self, repo_id, local_dir, private=True):
         """Enqueue the end-of-recording dataset push into HfApiWorker.
 
         Wired into DataManager via the ``upload_callback`` constructor
-        argument. Restarts the worker if it auto-shut-down idle, then
-        sends a standard 'upload' request. Status events flow back via
+        argument. ``private`` carries the student's "Privater Modus"
+        choice (TaskInfo.private_mode) through to HfApiWorker, which
+        creates the HF repo with that visibility; it defaults True so a
+        missing flag fails safe to a private repo. Restarts the worker
+        if it auto-shut-down idle, then sends a standard 'upload'
+        request. Status events flow back via
         /huggingface/status, which (a) renders German toasts in the
         React UI on failure and (b) triggers the React side to call
         /datasets/register on the Cloud API so Modal training can
@@ -1546,6 +1550,7 @@ class PhysicalAIServer(Node):
                 'local_dir': local_dir,
                 'repo_type': 'dataset',
                 'author': '',
+                'private': bool(private),
             }
             if self.hf_api_worker.send_request(request_data):
                 self.get_logger().info(f'Auto-upload enqueued: {repo_id}')

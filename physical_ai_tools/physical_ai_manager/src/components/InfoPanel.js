@@ -508,21 +508,23 @@ const InfoPanel = () => {
         <div className={clsx('flex', 'items-center', 'mb-2')}>
           <span className={classLabel}>Privater Modus</span>
           <div className={clsx('flex', 'items-center')}>
-            {/* Locked on by policy. The server-side data_manager overlay
-                forces private=True regardless of what the UI sends, to
-                keep classroom recordings (faces, voices) off the public
-                HF index. Lehrer können einzelne Repos später öffentlich
-                machen. */}
+            {/* User-selectable. The choice (info.privateMode) is sent on
+                the wire as TaskInfo.private_mode and threaded through the
+                server-side data_manager overlay → HfApiWorker →
+                create_repo(private=…), so the HF repo is created with the
+                chosen visibility. Defaults to private for data protection
+                (faces, voices); teachers can also flip visibility later
+                from the HF dashboard. */}
             <input
               className={classCheckbox}
               type="checkbox"
-              checked={true}
-              readOnly
-              disabled
-              title="Aufnahmen sind aus Datenschutzgründen immer privat. Lehrer können einzelne Repos später öffentlich machen."
+              checked={!!info.privateMode}
+              onChange={(e) => handleChange('privateMode', e.target.checked)}
+              disabled={!isEditable}
+              title="Privat: Datensatz ist nur für dich und deine Lehrkraft sichtbar (empfohlen für Aufnahmen mit Personen). Öffentlich: jeder auf Hugging Face kann ihn sehen."
             />
             <span className={clsx('ml-2', 'text-sm', 'text-gray-500')}>
-              Immer aktiviert (Datenschutz)
+              {info.privateMode ? 'Privat (empfohlen)' : 'Öffentlich'}
             </span>
           </div>
         </div>

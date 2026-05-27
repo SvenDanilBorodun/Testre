@@ -14,7 +14,7 @@
 //
 // Author: Kiwoong Park
 
-import React, { useCallback, useEffect, useMemo } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef } from 'react';
 import { useSelector, useDispatch } from 'react-redux';
 import clsx from 'clsx';
 import toast, { useToasterStore } from 'react-hot-toast';
@@ -79,8 +79,20 @@ export default function TrainingPage() {
   const trainingsUsed = useSelector((state) => state.auth.trainingsUsed);
   const selectedTrainingId = useSelector((state) => state.training.selectedTrainingId);
   const jetsonId = useSelector((state) => state.jetson.jetsonId);
+  const cloudJobsRefreshCounter = useSelector((state) => state.training.cloudJobsRefreshCounter);
 
   const { jobs, loading, refetch, isRealtime } = useSupabaseTrainings();
+
+  // After "Training starten", TrainingControlPanel dispatches
+  // triggerCloudJobsRefresh() which bumps this counter. Pull the new row in via
+  // REST immediately so the job card appears instantly — a guaranteed path that
+  // does not depend on the Realtime channel having delivered the INSERT yet.
+  const prevRefreshCounterRef = useRef(cloudJobsRefreshCounter);
+  useEffect(() => {
+    if (cloudJobsRefreshCounter === prevRefreshCounterRef.current) return;
+    prevRefreshCounterRef.current = cloudJobsRefreshCounter;
+    refetch();
+  }, [cloudJobsRefreshCounter, refetch]);
 
   const { toasts } = useToasterStore();
   const TOAST_LIMIT = 3;

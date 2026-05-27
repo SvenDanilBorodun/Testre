@@ -153,6 +153,14 @@ services:
       # "Aufnahme recording RAM is capped at 4 GB by the safety valve"
       # block in CLAUDE.md before changing.
       - EDUBOTICS_MAX_BUFFER_GB=${EDUBOTICS_MAX_BUFFER_GB:-4.0}
+      # JPEG-in-RAM recording buffer (P1). Default "1" keeps each camera
+      # frame in the episode buffer as its ~30 KB compressed JPEG instead
+      # of ~920 KB decoded RGB, so the EDUBOTICS_MAX_BUFFER_GB valve above
+      # effectively stops capping episode length. Set to "0" for an exact
+      # rollback to the decoded-RGB buffer. Only active in optimized-save
+      # mode (data_manager gates it; the non-optimized PNG path is
+      # unaffected). Read by data_manager.py.
+      - EDUBOTICS_JPEG_BUFFER=${EDUBOTICS_JPEG_BUFFER:-1}
       # Roboter Studio calibration dir (ChArUco intrinsics, hand-eye
       # transforms, HSV color profile). Default lands inside the
       # edubotics_calib named volume mounted below. Overlay readers:

@@ -40,10 +40,12 @@ const initialState = {
     numEpisodes: 5,
     token: '',
     pushToHub: true,
-    // Forced true: the server-side data_manager overlay overrides this
-    // unconditionally for student/DPA reasons. Keeping the default true
-    // here so the value sent on the wire matches what gets uploaded —
-    // and the UI renders the toggle locked + checked (see InfoPanel.js).
+    // User-selectable via the "Privater Modus" toggle (InfoPanel.js /
+    // InferencePanel.js). Sent on the wire as TaskInfo.private_mode and
+    // threaded through the server-side data_manager overlay →
+    // HfApiWorker → create_repo(private=…). Defaults true so the
+    // privacy-safe option is pre-selected and a fresh recording without
+    // a deliberate toggle still uploads private (faces / classroom audio).
     privateMode: true,
     useOptimizedSave: true,
     recordRosBag2: false,

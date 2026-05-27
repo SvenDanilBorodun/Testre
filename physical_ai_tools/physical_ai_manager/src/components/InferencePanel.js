@@ -550,18 +550,19 @@ const InferencePanel = () => {
             <div className={clsx('flex', 'items-center', 'mb-2')}>
               <span className={classLabel}>Privater Modus</span>
               <div className={clsx('flex', 'items-center')}>
-                {/* Locked on by policy — see InfoPanel.js. Backend
-                    overrides any value sent here to private=True. */}
+                {/* User-selectable — see InfoPanel.js. The choice is sent
+                    as TaskInfo.private_mode and threaded through the
+                    backend to create_repo(private=…). Defaults private. */}
                 <input
                   className={classCheckbox}
                   type="checkbox"
-                  checked={true}
-                  readOnly
-                  disabled
-                  title="Aufnahmen sind aus Datenschutzgründen immer privat. Lehrer können einzelne Repos später öffentlich machen."
+                  checked={!!info.privateMode}
+                  onChange={(e) => handleChange('privateMode', e.target.checked)}
+                  disabled={!isEditable || !info.recordInferenceMode}
+                  title="Privat: Datensatz ist nur für dich und deine Lehrkraft sichtbar (empfohlen für Aufnahmen mit Personen). Öffentlich: jeder auf Hugging Face kann ihn sehen."
                 />
                 <span className={clsx('ml-2', 'text-sm', 'text-gray-500')}>
-                  Immer aktiviert (Datenschutz)
+                  {info.privateMode ? 'Privat (empfohlen)' : 'Öffentlich'}
                 </span>
               </div>
             </div>

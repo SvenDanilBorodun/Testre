@@ -73,7 +73,7 @@ class TestBuildTrainingCommand(unittest.TestCase):
         train without brightness/contrast/saturation/hue jitter and
         struggle to generalise across classroom lighting changes.
 
-        Iterates the full 7-policy `ALLOWED_POLICIES` set from CLAUDE.md
+        Iterates the full 8-policy `ALLOWED_POLICIES` set from CLAUDE.md
         §7.3 so a new policy keyword can't silently bypass F63."""
         for policy in (
             "act",
@@ -81,7 +81,8 @@ class TestBuildTrainingCommand(unittest.TestCase):
             "vqbet",
             "tdmpc",
             "pi0",
-            "pi0fast",
+            "pi0_fast",
+            "pi05",
             "smolvla",
         ):
             cmd = training_handler._build_training_command(
@@ -113,8 +114,8 @@ class TestBuildTrainingCommand(unittest.TestCase):
         own chunk semantics and their respective config classes use
         different field names or interpretations.
 
-        Iterates the full non-ACT subset of `ALLOWED_POLICIES`."""
-        for policy in ("diffusion", "vqbet", "tdmpc", "pi0", "pi0fast", "smolvla"):
+        Iterates the full non-ACT subset of `ALLOWED_POLICIES` (8-policy set)."""
+        for policy in ("diffusion", "vqbet", "tdmpc", "pi0", "pi0_fast", "pi05", "smolvla"):
             cmd = training_handler._build_training_command(
                 dataset_name="user/data",
                 model_type=policy,
@@ -132,7 +133,7 @@ class TestBuildTrainingCommand(unittest.TestCase):
         `n_action_steps` in training_params must still NOT receive
         `--policy.n_action_steps=` — that field is ACT-specific. The
         F64 verifier flagged this as a cross-policy leak."""
-        for policy in ("diffusion", "vqbet", "tdmpc", "pi0", "pi0fast", "smolvla"):
+        for policy in ("diffusion", "vqbet", "tdmpc", "pi0", "pi0_fast", "pi05", "smolvla"):
             cmd = training_handler._build_training_command(
                 dataset_name="user/data",
                 model_type=policy,

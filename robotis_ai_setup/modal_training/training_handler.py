@@ -4,7 +4,7 @@ Invoked by `modal_app.train`.
 
 Responsibilities:
   - Preflight the HuggingFace dataset (schema, codebase_version, joints, cameras).
-  - Spawn `python -m lerobot.scripts.train` and stream its stdout.
+  - Spawn `python -m lerobot.scripts.lerobot_train` and stream its stdout.
   - Parse `step: N loss: X.Y` lines and push progress to Supabase via the
     scoped `update_training_progress` RPC (anon key + per-row worker_token).
   - Upload the trained checkpoint to HuggingFace Hub on success.
@@ -37,7 +37,10 @@ from supabase import create_client
 OUTPUT_DIR = Path("/tmp/training_output")
 
 # ---------------- ROBOTIS OMX expected schema ----------------
-EXPECTED_CODEBASE_VERSION = "v2.1"
+# LeRobot v0.5.1 ships codebase_version="v3.0" (moved out of lerobot_dataset.py
+# into lerobot/datasets/dataset_metadata.py). v2.1 datasets recorded with the
+# pre-v2.5.0 EduBotics stack are NOT compatible — students must re-record.
+EXPECTED_CODEBASE_VERSION = "v3.0"
 MIN_JOINTS = 4
 MAX_JOINTS = 20
 
@@ -313,7 +316,10 @@ def _build_training_command(
     cmd = [
         sys.executable,
         "-m",
-        "lerobot.scripts.train",
+        # v0.5.1: the legacy `lerobot.scripts:train` module was renamed to
+        # `lerobot.scripts.lerobot_train` (PR #2033, v0.4.0). The old module
+        # is GONE — no back-compat alias.
+        "lerobot.scripts.lerobot_train",
         f"--policy.type={model_type}",
         "--policy.device=cuda",
         f"--dataset.repo_id={dataset_name}",

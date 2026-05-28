@@ -16,46 +16,57 @@ vars via the Modal Secret `edubotics-training-secrets`. Per-training args
 
 import modal
 
-LEROBOT_COMMIT = "989f3d05ba47f872d75c587e76838e9cc574857a"
+LEROBOT_VERSION = "0.5.1"
 
 app = modal.App("edubotics-training")
 
 image = (
     modal.Image.from_registry(
-        # Bumped 12.1.1 → 12.4.1 to satisfy LeRobot's pyproject.toml at the
-        # pinned SHA — that pyproject.toml declares `torchvision>=0.21.0`,
-        # and torchvision 0.21.x ships only on the cu124/cu126 wheel indexes
-        # (cu121 tops out at 0.20.1). Without this bump the index_url below
-        # silently resolves torchvision DOWN to 0.20.1, which breaks v2
-        # transform dispatch with NotImplementedError on ColorJitter /
-        # SharpnessJitter at training time. Verified 2026-05-20 via direct
-        # fetch of LeRobot's pyproject.toml at the SHA constant above + an
-        # HTML scrape of the cu121 wheel index. Modal L4 GPUs run R550+
-        # drivers which support CUDA 12.4 fine.
-        "nvidia/cuda:12.4.1-devel-ubuntu22.04",
-        add_python="3.11",
+        # CUDA 12.6.1 + torch 2.7.0/cu126 chosen to match LeRobot v0.5.1's
+        # `torch>=2.7,<2.11.0` pin (its lowest supported torch). cu126 wheel
+        # index ships torch 2.7.0 and torchvision 0.22.0, both inside v0.5.1's
+        # allowed ranges. Keeping torch on 2.7.0 matches the student image's
+        # torch 2.7.0+cu128 from the Robotis base — one fewer surface to drift.
+        # Modal L4 GPUs (Ampere) run R550+ drivers; CUDA 12.6 is fully supported.
+        "nvidia/cuda:12.6.1-devel-ubuntu22.04",
+        add_python="3.12",
     )
     # clang + build-essential needed because lerobot pulls in evdev, whose
     # setup.py compiles a C extension. The CUDA devel base does not include
     # either by default once Modal replaces Python via add_python.
     .apt_install("git", "ffmpeg", "clang", "build-essential")
     .pip_install(
-        f"lerobot[pi0] @ git+https://github.com/huggingface/lerobot.git@{LEROBOT_COMMIT}",
+        # LeRobot v0.5.1 from PyPI — pinned exact for reproducible builds.
+        # Extras: [pi0] pulls PI0+PI0Fast deps, [smolvla] pulls transformers
+        # (==5.3.0, the LeRobot exact pin) + SmolVLM deps, [peft] pulls PEFT
+        # adapter support (required by lerobot.policies.factory.make_policy
+        # when cfg.use_peft is True). [smolvla] also transitively covers the
+        # new pi05 (Pi-0.5) policy's transformer/processor stack.
+        # Do NOT pre-pin transformers here — let the [smolvla,peft] extras
+        # resolve to the exact transformers==5.3.0 LeRobot requires.
+        f"lerobot[pi0,smolvla,peft]=={LEROBOT_VERSION}",
+        # accelerate is a hard runtime dep in v0.5.1 (was optional in 0.2.0).
+        # Pin to a safe minor-version range so a future major doesn't break
+        # the resolver out from under us.
+        "accelerate>=1.10.0,<2.0.0",
         "huggingface_hub",
         "supabase",
     )
     .pip_install(
-        # Both versions pinned so a future torch/torchvision release on
-        # pytorch.org doesn't silently shift the image under us. The pair
-        # 2.6.0 + 0.21.0 is the latest on the cu124 index as of 2026-05-20
-        # and matches LeRobot's pyproject floor (torch>=2.2.1, torchvision>=0.21.0).
-        "torch==2.6.0",
-        "torchvision==0.21.0",
+        # Pin torch + torchvision to the cu126 wheel that matches LeRobot v0.5.1's
+        # range (torch>=2.7,<2.11.0; torchvision>=0.22.0,<0.26.0). 2.7.0 + 0.22.0
+        # is the LCD that keeps Modal's GPU torch and the student image's
+        # Robotis-base torch 2.7.0+cu128 on the same major+minor — minimal
+        # cross-surface drift. Pinned exact so a future PyTorch release on
+        # pytorch.org cannot silently shift us into a 2.10.x or 2.11.x build
+        # that LeRobot doesn't allow.
+        "torch==2.7.0",
+        "torchvision==0.22.0",
         # Use `index_url` (not `extra_index_url`) so pip cannot fall back to
         # PyPI — without this constraint pip picks a CPU-only or cu130 wheel
         # and the CUDA base image runtime-crashes (the trap CLAUDE.md Rule §5
-        # documents — same lesson applies on cu124).
-        index_url="https://download.pytorch.org/whl/cu124",
+        # documents — same lesson applies on cu126).
+        index_url="https://download.pytorch.org/whl/cu126",
         extra_options="--force-reinstall",
     )
     .run_commands("python -m pip uninstall -y torchcodec || true")

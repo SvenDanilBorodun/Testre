@@ -129,7 +129,6 @@ class PhysicalAIServer(Node):
     DEFAULT_SAVE_ROOT_PATH = Path.home() / '.cache/huggingface/lerobot'
     DEFAULT_TOPIC_TIMEOUT = 5.0  # seconds
     PUB_QOS_SIZE = 10
-    TRAINING_STATUS_TIMER_FREQUENCY = 0.5  # seconds
 
     class RosbagNotReadyException(Exception):
         """Exception raised when rosbag recording cannot start yet."""
@@ -176,9 +175,12 @@ class PhysicalAIServer(Node):
         self.robot_type_list = self.get_robot_type_list()
         self.start_recording_time: float = 0.0
 
-        self.training_thread = None
+        # Retained for legacy mode-arbitration in _assert_no_other_active;
+        # the value is never flipped to True after on-device training was
+        # removed in v2.5.0, so the training branch there is dead but
+        # harmless (and keeping the attribute avoids an AttributeError if
+        # some other code path reads it during transition).
         self.is_training = False
-        self.training_status_timer = None
 
         self._init_core_components()
 
@@ -198,7 +200,11 @@ class PhysicalAIServer(Node):
         self.heartbeat_timer: Optional[TimerManager] = None
         self.training_timer: Optional[TimerManager] = None
         self.inference_manager: Optional[InferenceManager] = None
-        self.training_manager: Optional[TrainingManager] = None
+        # EduBotics v2.5.0: on-device training removed; Modal Cloud handles training.
+        # The TrainingManager class is kept only as a holder for two static helpers
+        # (get_weight_save_root_path, get_available_list) used by inference-side
+        # callbacks. There is no instance.
+        self.training_manager = None
         # Calibration manager is constructed lazily on first calibration call
         # — same pattern as TrainingManager — so a server that never enters
         # Roboter Studio doesn't pay the OpenCV-aruco import cost.
@@ -437,25 +443,14 @@ class PhysicalAIServer(Node):
             f'ROS parameters initialized successfully for robot type: {robot_type}')
 
     def get_training_status(self):
+        """Stub — on-device training is gone (v2.5.0). Status is reported via
+        the Web UI for cloud trainings; this ROS topic publishes an empty
+        status so legacy listeners don't crash on missing field."""
         msg = TrainingStatus()
-        if self.training_manager is None:
-            return
-        try:
-            current_status = self.training_manager.get_current_training_status()
-            training_info = current_status.training_info
-            current_step = current_status.current_step
-            current_loss = current_status.current_loss
-            msg.training_info = training_info
-            msg.current_step = current_step
-            msg.current_loss = current_loss
-            msg.is_training = self.is_training
-            msg.error = ''
-        except Exception as e:
-            msg.current_step = 0
-            msg.current_loss = float('nan')
-            msg.error = str(e)
-            self.get_logger().error(f'Error publishing training status: {msg.error}')
-            return msg
+        msg.current_step = 0
+        msg.current_loss = float('nan')
+        msg.is_training = False
+        msg.error = ''
         return msg
 
     def init_robot_control_parameters_from_user_task(
@@ -898,180 +893,22 @@ class PhysicalAIServer(Node):
             return
 
     def user_training_interaction_callback(self, request, response):
+        """Cloud-only stub (EduBotics v2.5.0).
+
+        On-device training was removed because all classroom training runs on
+        Modal cloud workers. Returns success=False with a German operator-
+        facing message so the React UI surfaces a clear error if a legacy
+        client still calls this service.
+
+        SendTrainingCommand.Request.START and .FINISH both reject with the
+        same message — the React UI's "Training starten" / "Training stoppen"
+        buttons should be disabled / re-pointed at the Cloud Web UI.
         """
-        Handle training command requests (START/FINISH).
-
-        Supports both new training and resume functionality with proper validation.
-        """
-        try:
-            if request.command == SendTrainingCommand.Request.START:
-                ok, msg = self._assert_no_other_active('training')
-                if not ok:
-                    response.success = False
-                    response.message = msg
-                    return response
-
-                # Initialize training components
-                self.training_manager = TrainingManager()
-                self.training_timer = TimerManager(node=self)
-                self._setup_training_status_timer()
-
-                # Validate training state
-                if self.training_thread and self.training_thread.is_alive():
-                    response.success = False
-                    response.message = 'Training is already in progress'
-                    return response
-
-                # Extract resume parameters
-                resume = getattr(request, 'resume', False)
-                resume_model_path = getattr(request, 'resume_model_path', '').strip()
-
-                # Log training request details
-                output_folder_name = request.training_info.output_folder_name
-                weight_save_root_path = TrainingManager.get_weight_save_root_path()
-                self.get_logger().info(
-                    f'Training request - Output: {output_folder_name}, '
-                    f'Resume: {resume}, Model path: {resume_model_path}'
-                )
-
-                # Validate training configuration
-                validation_result = self._validate_training_request(
-                    resume, resume_model_path, output_folder_name, weight_save_root_path
-                )
-                if not validation_result['success']:
-                    response.success = False
-                    response.message = validation_result['message']
-                    self._cleanup_training_on_error()
-                    return response
-
-                # Configure and start training
-                self._configure_training_manager(request, resume, resume_model_path)
-                self._start_training_thread()
-
-                response.success = True
-                response.message = 'Training started successfully'
-
-            else:
-                # Handle FINISH command
-                if request.command == SendTrainingCommand.Request.FINISH:
-                    self._stop_training()
-                    response.success = True
-                    response.message = 'Training stopped successfully'
-                else:
-                    response.success = False
-                    response.message = f'Unknown command: {request.command}'
-
-        except Exception as e:
-            self.get_logger().error(f'Error in training callback: {str(e)}')
-            response.success = False
-            response.message = f'Training error: {str(e)}'
-            self._cleanup_training_on_error()
-
-        return response
-
-    def _setup_training_status_timer(self):
-        """Set up timer for publishing training status updates."""
-        self.training_timer.set_timer(
-            timer_name='training_status',
-            timer_frequency=self.TRAINING_STATUS_TIMER_FREQUENCY,
-            callback_function=lambda: self.training_status_publisher.publish(
-                self.get_training_status()
-            )
+        response.success = False
+        response.message = (
+            'Training läuft nur in der Cloud — bitte Web-UI nutzen.'
         )
-        self.training_timer.start(timer_name='training_status')
-
-    def _validate_training_request(
-            self,
-            resume,
-            resume_model_path,
-            output_folder_name,
-            weight_save_root_path
-    ):
-        """
-        Validate training request parameters.
-
-        Returns
-        -------
-        dict
-            {'success': bool, 'message': str}
-
-        """
-        # Check output folder conflicts for new training
-        if not resume:
-            output_path = weight_save_root_path / output_folder_name
-            if output_path.exists():
-                return {
-                    'success': False,
-                    'message': f'Output folder already exists: {output_path}'
-                }
-
-        # Validate resume configuration
-        if resume:
-            if not resume_model_path:
-                return {
-                    'success': False,
-                    'message': 'Resume model path is required when resume=True'
-                }
-
-            # Check if resume config file exists
-            full_config_path = weight_save_root_path / resume_model_path
-            if not full_config_path.exists():
-                return {
-                    'success': False,
-                    'message': f'Resume config file not found: {full_config_path}'
-                }
-
-        return {'success': True, 'message': 'Validation passed'}
-
-    def _configure_training_manager(self, request, resume, resume_model_path):
-        """Configure training manager with request parameters."""
-        self.training_manager.training_info = request.training_info
-        self.training_manager.resume = resume
-        self.training_manager.resume_model_path = resume_model_path
-
-    def _start_training_thread(self):
-        """Start training in a separate thread."""
-        def run_training():
-            try:
-                self.training_manager.train()
-            except Exception as e:
-                self.get_logger().error(f'Training error: {str(e)}')
-            finally:
-                self._cleanup_training_on_completion()
-
-        self.training_thread = threading.Thread(target=run_training, daemon=True)
-        self.training_thread.start()
-        self.is_training = True
-
-    def _stop_training(self):
-        """Stop training gracefully."""
-        self.is_training = False
-        if self.training_manager:
-            self.training_manager.stop_event.set()
-        if self.training_thread and self.training_thread.is_alive():
-            self.training_thread.join(timeout=self.DEFAULT_TOPIC_TIMEOUT)
-        self._cleanup_training_on_completion()
-
-    def _cleanup_training_on_completion(self):
-        """Cleanup training resources on normal completion."""
-        self.is_training = False
-        self.get_logger().info('Training completed.')
-        training_status = self.get_training_status()
-        self.training_status_publisher.publish(training_status)
-        if self.training_manager:
-            self.training_manager.stop_event.set()
-        if hasattr(self, 'training_timer'):
-            self.training_timer.stop('training_status')
-
-    def _cleanup_training_on_error(self):
-        """Cleanup training resources on error."""
-        self.is_training = False
-        training_status = self.get_training_status()
-        self.training_status_publisher.publish(training_status)
-        if self.training_manager:
-            self.training_manager.stop_event.set()
-        if hasattr(self, 'training_timer'):
-            self.training_timer.stop('training_status')
+        return response
 
     def user_interaction_callback(self, request, response):
         try:

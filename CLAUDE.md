@@ -2,6 +2,12 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Recent changes — v2.5.0 (2026-05-28)
+
+* **LeRobot bumped v0.2.0 (SHA `989f3d05`) → v0.5.1 (PyPI pin).** Adopts upstream `streaming_encoding=True` (replaces our v2.4 JPEG-in-RAM hack), the `predict_action` + `make_pre_post_processors` inference pipeline (replaces bare `select_action` which returns garbage without the processors), and the new `pi05` (Pi-0.5) policy. Dataset codebase_version `v2.1` → `v3.0`. Existing student v2.1 datasets are NOT compatible — students re-record. Pre-v2.5.0 trained checkpoints lack `policy_preprocessor.json` / `policy_postprocessor.json` and cannot be loaded by the new inference path — students re-train. See commits `7842c81`..`<current HEAD>` for the 5-phase rollout.
+* **On-device training deleted.** Modal Cloud is the only training path. `physical_ai_server/training/` and `physical_ai_server/evaluation/` directories are gone; `user_training_interaction_callback` returns a German "Cloud-only" stub.
+* **SmolVLA hidden on aarch64 hosts.** Upstream bug #3636 (Jetson Orin SmolVLA produces wrong actions vs x86_64) gates SmolVLA out of the React policy dropdown when `platform.machine() == 'aarch64'`.
+
 ## What this is
 
 **EduBotics** — a vertically integrated educational stack for teaching Physical AI on **ROBOTIS OpenMANIPULATOR-X** arms to **German-speaking students**. Student lifecycle: install `.exe` → setup wizard → record demos (ROS 2) → train policy (Modal cloud GPU) → inference → optional Roboter Studio (Blockly authoring + classical CV).
@@ -53,7 +59,7 @@ Software-side inference safety envelopes (NaN/Inf guard, joint clamp, per-tick v
 - **Xacro Dynamixel limits** (`omx_f.ros2_control.xacro`, `omx_l.ros2_control.xacro`): joint min/max position limits + gripper current limits (follower 350 mA, leader 300 mA, Op Mode 5)
 - **ros2_control YAML**: 100 Hz, JointTrajectoryController 2.0 rad in-flight trajectory tolerance (effectively off — the safety floor is the Dynamixel current limit above, not the controller tolerance), 0.10 rad arm goal tolerance, 0.50 rad gripper goal tolerance, goal_time 5.0 s. The 2.0 / 0.10 / 0.50 / 5.0 values were bumped from upstream's 0.15 / 0.05 / 0.10 / 1.0 on 2026-05-18 — the tight upstream values caused the follower's `arm_controller` to abort the 3 s quintic boot-sync mid-flight in classroom poses, looping docker compose into a restart-storm. See the inline comment in `robotis_ai_setup/docker/open_manipulator/overlays/omx_f_hardware_controller_manager.yaml`.
 - **SIGTERM/SIGINT torque-disable** in `docker/open_manipulator/entrypoint_omx.sh::disable_torque()`
-- **Phase-4 post-sync verification** in `entrypoint_omx.sh` — 0.08 rad tolerance after the 3 s quintic ramp; hard-exit 2 on mismatch
+- **Phase-4 post-sync verification** in `entrypoint_omx.sh` — 0.30 rad tolerance after the 3 s quintic ramp; soft-fail `[WARN]` on mismatch (bumped from 0.08 rad / hard-exit 2 on 2026-05-18 after the tight upstream values triggered false-positive Phase-4 aborts on classroom start poses). Only the camera-disambiguation guard (Section "Two identical-serial cameras…") still hard-exits.
 - Recording-side guards are warning-only — episodes always complete (stale-camera 5 s, timestamp-gap > 2× expected_dt, video-file verifier, usb_cam Hz)
 
 If you genuinely need to reintroduce a software safety guard that modifies the pipeline, **stop and ask the user**.
@@ -64,7 +70,7 @@ If you genuinely need to reintroduce a software safety guard that modifies the p
 
 `patches/fix_server_inference.py` self-verifies and exits 2/3 on no-op; CI's `overlay-guard` job tests this with a synthetic input.
 
-LeRobot itself is **not** overlaid — it must be byte-identical to upstream SHA `989f3d05ba47f872d75c587e76838e9cc574857a` (LeRobot v0.2.0).
+LeRobot itself is **not** overlaid — it's pip-installed from PyPI at version `0.5.1` in the base Dockerfiles. The 3-site version contract (Rule §5) keeps Modal, the amd64 Dockerfile, and the arm64 Dockerfile in lockstep; no per-file overlays needed.
 
 ### 4. Service-role key bypasses RLS — authorization is your job
 
@@ -81,26 +87,22 @@ The Modal worker uses the **anon key** + per-row `worker_token` (UUID). Its only
 
 ### 5. Don't introduce drift between the LeRobot pinning sites
 
-The SHA `989f3d05ba47f872d75c587e76838e9cc574857a` must agree across:
-- `physical_ai_tools/lerobot/` (static byte-identical snapshot)
-- `robotis_ai_setup/modal_training/modal_app.py` constant `LEROBOT_COMMIT`
-- `robotis/physical-ai-server:amd64-0.8.2` base image's internal pin
-- `meta/info.json` `codebase_version: "v2.1"`
-- Modal preflight in `training_handler.py` enforcing `codebase_version == "v2.1"`
+The LeRobot **version pin** `0.5.1` must agree across:
+- `robotis_ai_setup/modal_training/modal_app.py` constant `LEROBOT_VERSION`
+- `physical_ai_tools/physical_ai_server/Dockerfile.amd64` `pip install "lerobot[pi0,smolvla,peft]==0.5.1"`
+- `physical_ai_tools/physical_ai_server/Dockerfile.arm64` same install line under the Jetson AI Lab pip index
 
-Bumping LeRobot is a **5-place change in one PR**.
+Bumping LeRobot is a **3-place change in one PR**.
 
-**Two PyTorch surfaces, two different CUDA pins — by design, not drift.** Don't try to "unify" them.
+`meta/info.json` `codebase_version: "v3.0"` and the Modal preflight constant `EXPECTED_CODEBASE_VERSION="v3.0"` (`training_handler.py:40`) are **derived** checks — they should match the LeRobot version's expected codebase format, but they are not pin sites. If LeRobot v0.5.x ever bumps codebase_version to v3.1, those two consts move together with the LeRobot pin in the same PR.
 
-- **Modal worker** (`modal_training/modal_app.py` lines 19-63): base image `nvidia/cuda:12.4.1-devel-ubuntu22.04` + `pip_install("torch==2.6.0", "torchvision==0.21.0", index_url="https://download.pytorch.org/whl/cu124", extra_options="--force-reinstall")` + `pip uninstall -y torchcodec`. Bumped from cu121/torch 2.7.0 → cu124/torch 2.6.0 on 2026-05-20 because LeRobot's pyproject.toml at the pinned SHA declares `torchvision>=0.21.0`, and torchvision 0.21.x ships only on the cu124/cu126 wheel indexes (cu121 tops out at 0.20.1). Without this bump the index silently resolved torchvision DOWN to 0.20.1 → `NotImplementedError` on `ColorJitter` / `SharpnessJitter` at training time. The `index_url` (NOT `extra_index_url`) constraint is still mandatory: without it pip picks a CPU-only or cu130 wheel and the CUDA base runtime-crashes. Modal runs on NVIDIA L4 GPUs with R550+ drivers (CUDA 12.4 OK).
-- **Student `physical_ai_server` image** (both `physical_ai_tools/physical_ai_server/Dockerfile.amd64` and `Dockerfile.arm64`): base image `robotis/ros:jazzy-ros-base-torch2.7.0-cuda12.8.0` — torch 2.7.0+cu128 inherited from Robotis upstream. The LeRobot install strips torch/torchvision from `lerobot/pyproject.toml` (via `sed -i '/"torch[^\"]*",/d'`) so the inherited torch is preserved. Students run on Windows with no GPU; the GPU/CUDA libs are dead weight but not actively harmful (torch falls back to CPU). Don't change this — switching to a CPU-only torch wheel would invalidate the upstream Robotis base image contract and re-trigger the cu130 trap from a different angle.
-- **Jetson Orin Nano classroom agent**: arm64 `Dockerfile.arm64` sets `PIP_INDEX_URL=https://pypi.jetson-ai-lab.io/jp6/cu126/+simple` for the LeRobot install layer; torch itself is NOT replaced (it stays at 2.7.0+cu128 from the base). The Jetson AI Lab index only resolves the non-torch transitive deps (numpy, scipy, etc.) to ARM-compatible wheels.
+**One PyTorch surface (torch 2.7.x), three CUDA channels — by design.** Don't try to "unify" CUDA versions across surfaces; each surface picks the channel matching its hardware.
 
-The audit found "torch 2.7.0+cu128 ships in nettername/physical-ai-server" — that's correct and intentional. Rule §5 used to read as if Modal's cu121 pin applied to the student image too; it doesn't.
+- **Modal worker** (`modal_training/modal_app.py`): `nvidia/cuda:12.6.1-devel-ubuntu22.04` + `add_python="3.12"` + `pip_install("torch==2.7.0", "torchvision==0.22.0", index_url="https://download.pytorch.org/whl/cu126", extra_options="--force-reinstall")` + `pip uninstall -y torchcodec`. cu126 chosen because v0.5.1's torch range is `>=2.7,<2.11.0` and torchvision is `>=0.22.0,<0.26.0`; cu126 ships compatible wheels. Modal L4 GPUs on R550+ drivers handle CUDA 12.6 fine.
+- **Student `physical_ai_server` image** (both `physical_ai_tools/physical_ai_server/Dockerfile.amd64` and `Dockerfile.arm64`): base image `robotis/ros:jazzy-ros-base-torch2.7.0-cuda12.8.0` — torch 2.7.0+cu128 inherited from the Robotis upstream base. LeRobot is pip-installed from PyPI v0.5.1; the inherited torch is preserved (LeRobot's pyproject torch pin doesn't get re-installed because the install resolves the existing torch as satisfying the `>=2.7` range). Students run on Windows with no GPU; CUDA libs are dead weight but not active.
+- **Jetson Orin Nano classroom agent**: arm64 `Dockerfile.arm64` sets `PIP_INDEX_URL=https://pypi.jetson-ai-lab.io/jp6/cu126/+simple` for the LeRobot install layer; torch stays at 2.7.0+cu128 from the Robotis base. The Jetson AI Lab index resolves the arm64-native heavy transitive deps (transformers VLM components, etc.); PyPI is the extra-index fallback.
 
-The LeRobot 5-site contract is now trust-on-PR-review (the `lerobot-sha-check` job was removed alongside `modal-deploy.yml` when Modal moved to manual deploys). Any bump must touch all 5 sites in one PR.
-
-**Known soft spot in the contract:** `physical_ai_tools/physical_ai_server/Dockerfile.amd64` does not pin a `PHYSICAL_AI_TOOLS_REF` and clones the moving `jazzy` branch tip. The arm64 Dockerfile has a `LEROBOT_EXPECTED_SHA` runtime `rev-parse` check that hard-fails on drift; the amd64 build relies entirely on the ROBOTIS base image to vendor the right LeRobot. If a future ROBOTIS base bump silently advances the embedded LeRobot SHA, only arm64 builds would catch it. Backport the arm64 SHA-check to amd64 the next time you touch either Dockerfile.
+The LeRobot 3-site contract is now trust-on-PR-review (the historical `lerobot-sha-check` job is gone; no SHA pins remain in either Dockerfile). The build-time policy-import smoke test in all 3 Dockerfiles (asserts every modeling module imports + `CODEBASE_VERSION == 'v3.0'`) catches the most common drift class: a future LeRobot release reorganising module paths.
 
 ### 6. CI/CD deploys
 
@@ -292,6 +294,7 @@ Act autonomously on: reading files, editing code with low blast radius, running 
 - `git push` (and never force-push to `main`)
 - `wsl --unregister EduBotics` (destroys VHDX → named volumes `ai_workspace`, `huggingface_cache`, `edubotics_calib` gone)
 - `docker compose down -v` or `docker volume rm` of `huggingface_cache` / `edubotics_calib` (datasets / calibration gone)
+- (v2.5.0 upgrade) Student PCs and classroom Jetsons may have downloaded v2.1-codebase_version datasets / pre-v0.5.1 model checkpoints into `huggingface_cache` / `jetson_huggingface_cache` Docker volumes. After installing v2.5.0, those caches are stale (v2.1 datasets fail Modal preflight, pre-0.5.1 checkpoints lack the `policy_preprocessor.json` / `policy_postprocessor.json` files inference now requires). Wipe via the GUI "Factory Reset" button or `wsl -d EduBotics -- docker volume rm robotis_ai_setup_huggingface_cache` (or the jetson_agent equivalent). Document this in the v2.5.0 GitHub Release note in German for students.
 - Force-push, `git reset --hard`, `git clean -fd`, `--no-verify`
 - Modal `cancel` on a running training (charges credit)
 - `supabase.auth.admin.delete_user` calls
@@ -335,7 +338,7 @@ State as of 2026-05-20 post commit `16b8378` + `de7d635`. Confirm against curren
 - **PyTorch version drift**: ~~Rule §5 above mentions `cu121`. The actual amd64 image ships `torch==2.7.0+cu128`. Either Rule §5 is stale OR an unintended upgrade slipped past.~~ **RESOLVED 2026-05.** Rule §5 was ambiguous — Modal worker is cu121 (deliberate, GPU), student image is cu128 (inherited from Robotis base, CPU at runtime). Both are correct. Rule §5 now distinguishes the two surfaces explicitly. No code change needed.
 - ~~**Cross-arch package drift**: `safetensors 0.7 (amd64) vs 0.8.0rc (arm64)`, `protobuf 6 vs 7`, `pillow 12.1 vs 12.2`.~~ **RESOLVED 2026-05.** Both Dockerfiles now pin `safetensors==0.7.0`, `protobuf==6.31.0`, `pillow==12.1.0` via `pip install --force-reinstall` AFTER all other pip layers. Pinned to the lower common denominator that ships as stable on both arches AND matches LeRobot's `grpcio-dep` contract. Verification command embedded in the layer prints the resolved versions at build time.
 - **The `versions.env` plumbing is half-built**: 3 readers exist (`pull_images.ps1`, `gui/constants.py`, GUI), 0 writers. File doesn't exist. GUI's IMAGE_TAG resolution always falls back to `:latest`. **Documented rollback via IMAGE_TAG mechanically can't work** until a writer is added (probably in `docker-publish.yml` emitting `versions.env` to be baked into the installer).
-- ~~**arm64 LeRobot SHA pin** — `physical_ai_server/Dockerfile.arm64` carries a FIXME block~~. **RESOLVED 2026-05.** `Dockerfile.arm64` now pins `PHYSICAL_AI_TOOLS_REF=577371eb75df552c50e15a379365f0d8821a9361` (commit "Bump 0.8.3", whose lerobot submodule entry is exactly `989f3d05...`, matching Rule §5). The clone layer hard-fails the build if the recorded submodule SHA drifts — so a future bump cannot silently violate the 5-site contract. `talos_system_manager` is also now SHA-pinned to `40981c6d...` for build reproducibility (the directory itself is still stripped by the amd64 thin-overlay).
+- ~~**arm64 LeRobot SHA pin** — `physical_ai_server/Dockerfile.arm64` carries a FIXME block~~. **SUPERSEDED 2026-05-28 (v2.5.0 LeRobot migration).** The arm64 (and amd64) SHA-pin verification machinery was removed when both Dockerfiles switched to `pip install lerobot[pi0,smolvla,peft]==0.5.1` from PyPI — no more git submodule, no more `PHYSICAL_AI_TOOLS_REF` / `LEROBOT_EXPECTED_SHA` ARGs, no more `git rev-parse` runtime check. The 5-site SHA contract is gone; see Rule §5 (now a 3-site PyPI version contract). `talos_system_manager` is still SHA-pinned to `40981c6d...` on arm64 for build reproducibility of its `requirements.txt` (separate concern from LeRobot — the directory itself is still stripped by the amd64 thin-overlay).
 
 ### Cloud-API + Supabase — security/correctness fixes landed in `16b8378`
 
@@ -348,7 +351,7 @@ State as of 2026-05-20 post commit `16b8378` + `de7d635`. Confirm against curren
 
 ### What audits confirmed CLEAN
 
-- LeRobot SHA `989f3d05ba47f872d75c587e76838e9cc574857a` verified INSIDE both amd64 and arm64 PAS images via `git rev-parse HEAD` on the embedded LeRobot checkout.
+- LeRobot v0.5.1 installed via PyPI in both amd64 and arm64 base Dockerfiles. Build-time smoke tests in all 3 Dockerfiles (Dockerfile.amd64, Dockerfile.arm64, thin overlay) import every policy modeling module + `predict_action` + `make_pre_post_processors` and assert `CODEBASE_VERSION == 'v3.0'`. The old SHA `989f3d05ba47f872d75c587e76838e9cc574857a` is no longer pinned anywhere in the code; the 5-site contract has been superseded by the 3-site PyPI version contract (Rule §5).
 - No pre-2026-05 safety guards leaked into images (grep for `joint_clamp|stale_camera|velocity_cap|nan_guard|safety_envelope` → 0 hits).
 - No `.env` / credentials / tokens accidentally COPY'd into any image.
 - All 4 PAS overlays + 14 OMX overlays bit-identical across arches (sha256 verified inside images).
@@ -366,7 +369,7 @@ State as of 2026-05-20 post commit `16b8378` + `de7d635`. Confirm against curren
 
 - Run `tools/docker-hub-cleanup.sh --execute` (cleans 5 junk repos + 12 `*-dirty` tags from April; 81 GB recovery from `robotis-ai-training` orphan)
 - Run `tools/modal-cleanup.sh --execute` (after fixing the regex bug)
-- ~~Reconcile PyTorch cu121 vs cu128 drift~~ → Rule §5 now distinguishes Modal (cu121, GPU) from student image (cu128, inherited from Robotis base). DONE 2026-05.
+- ~~Reconcile PyTorch cu121 vs cu128 drift~~ → Rule §5 was rewritten for v2.5.0: torch 2.7.x is now the single PyTorch version across all surfaces (Modal cu126 channel, student/Jetson cu128 channel inherited from Robotis base). DONE 2026-05-28 (LeRobot v0.5.1 migration).
 - ~~Pin cross-arch package versions (safetensors, protobuf, pillow)~~ → both Dockerfiles pin to LCD via `--force-reinstall`. DONE 2026-05.
 - Decide on `versions.env` plumbing (add a writer OR drop the 3 readers as dead code)
 - Tighten `workflow_versions` "Trigger inserts" INSERT policy via a GUC-backed predicate (S2 TODO in migration 024)

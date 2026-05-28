@@ -192,6 +192,43 @@ RUN set -e && \
     apply_overlay physical_ai_server_bringup.launch.py "*/physical_ai_server/launch/*" && \
     rm -rf /tmp/overlays
 
+# Override the base image's inherited LeRobot v0.2.0 with PyPI v0.5.1.
+#
+# Why this lives in the thin overlay, not the upstream Dockerfile.amd64:
+# `build-images.sh` for amd64 PULLS robotis/physical-ai-server:amd64-0.8.2
+# (which still ships LeRobot v0.2.0 inside) — it does NOT build from
+# Dockerfile.amd64. The Phase 4 edits to Dockerfile.amd64 are kept as
+# forward-compatible "if we ever rebuild the base" scaffolding, but the
+# actual v0.5.1 install for student images happens HERE.
+#
+# Two cleanups are mandatory beyond pip install:
+#   1. Strip the lerobot/src PYTHONPATH entries from /root/.bashrc AND from
+#      the s6 service script. Without this, PYTHONPATH is searched before
+#      site-packages and the ROS node imports v0.2.0 at runtime regardless
+#      of what pip just installed.
+#   2. rm -rf the inherited lerobot/ subdir so no dead v0.2.0 code can be
+#      reached by any other path resolution path (and to recover ~500 MB
+#      of disk space — the strip-bloat block later removes everything else).
+#
+# torchcodec uninstall mirrors the Modal worker (modal_app.py): v0.5.1 still
+# falls back to pyav when torchcodec is absent, and torchcodec wheels for
+# our CPU-only student arch are unstable.
+#
+# accelerate is now a hard runtime dep in v0.5.1 (was optional in v0.2.0);
+# pin to a safe minor-version range so a future major doesn't break the
+# resolver. Do NOT pre-pin transformers — let lerobot[smolvla,peft] extras
+# resolve transformers==5.3.0 (LeRobot's exact pin).
+RUN set -e && \
+    python3 -m pip uninstall -y lerobot torchcodec 2>/dev/null || true && \
+    python3 -m pip install --no-cache-dir \
+        "lerobot[pi0,smolvla,peft]==0.5.1" \
+        "accelerate>=1.10.0,<2.0.0" && \
+    rm -rf /root/ros2_ws/src/physical_ai_tools/lerobot && \
+    sed -i '\|physical_ai_tools/lerobot/src|d' /root/.bashrc 2>/dev/null || true && \
+    sed -i '\|physical_ai_tools/lerobot/src|d' /usr/local/lib/s6-services/ros2_service_run.sh 2>/dev/null || true && \
+    sed -i '\|physical_ai_tools/lerobot/src|d' /etc/s6-overlay/s6-rc.d/physical_ai_server/run 2>/dev/null || true && \
+    python3 -c "import lerobot; assert lerobot.__version__ == '0.5.1', f'expected lerobot==0.5.1, got {lerobot.__version__}'; print(f'LeRobot v{lerobot.__version__} installed (overrode base image v0.2.0)')"
+
 # Roboter Studio runtime dependencies. opencv-contrib-python is required
 # for cv2.aruco (the main opencv-python wheel does NOT include the
 # contrib aruco module). pupil-apriltags is BSD-licensed, lightweight

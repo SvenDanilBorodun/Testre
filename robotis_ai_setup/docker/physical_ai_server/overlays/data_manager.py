@@ -136,8 +136,9 @@ class DataManager:
         self._stale_halt_threshold_s = 5.0
         # v2.5.0: streaming_encoding=True (LeRobotDatasetWrapper default) feeds
         # camera frames directly to ffmpeg as they arrive — no per-frame PNG
-        # temp files, no in-RAM frame accumulation. The v2.4 JpegFrame +
-        # EDUBOTICS_MAX_BUFFER_GB safety valve are gone.
+        # temp files, no in-RAM frame accumulation. The v2.4 JpegFrame buffer
+        # + its env-var-toggled safety valve are gone (env var removed from
+        # docker-compose.yml; ROS node bounds memory architecturally now).
 
     def get_status(self):
         return self._status
@@ -169,8 +170,8 @@ class DataManager:
         elif self._status == 'run':
             # v2.5.0: streaming_encoding=True bounds the in-RAM episode buffer
             # at upstream's frame_index/None placeholder level, so the v2.4
-            # EDUBOTICS_MAX_BUFFER_GB / _buffer_full safety valve is no longer
-            # needed — the container can record arbitrarily long episodes.
+            # in-RAM safety valve is no longer needed — the container can
+            # record arbitrarily long episodes.
             if not self._check_time(self._task_info.episode_time_s, 'save'):
                 frame = self.create_frame(images, state, action)
                 if self._task_info.use_optimized_save_mode:

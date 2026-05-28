@@ -146,21 +146,13 @@ services:
       # the student enables the open-vocab block. Defaults to the
       # Railway production endpoint; override in .env for staging.
       - EDUBOTICS_CLOUD_API_URL=${EDUBOTICS_CLOUD_API_URL:-https://scintillating-empathy-production-1068.up.railway.app}
-      # Aufnahme RAM safety valve: the lerobot_dataset_wrapper overlay
-      # forces an end-of-episode save when the in-RAM image buffer
-      # crosses this many GiB. At 30 Hz × 2 cams = 1.84 MB/tick, the
-      # 4.0 default caps episode length at ~74 s. See the
-      # "Aufnahme recording RAM is capped at 4 GB by the safety valve"
-      # block in CLAUDE.md before changing.
-      - EDUBOTICS_MAX_BUFFER_GB=${EDUBOTICS_MAX_BUFFER_GB:-4.0}
-      # JPEG-in-RAM recording buffer (P1). Default "1" keeps each camera
-      # frame in the episode buffer as its ~30 KB compressed JPEG instead
-      # of ~920 KB decoded RGB, so the EDUBOTICS_MAX_BUFFER_GB valve above
-      # effectively stops capping episode length. Set to "0" for an exact
-      # rollback to the decoded-RGB buffer. Only active in optimized-save
-      # mode (data_manager gates it; the non-optimized PNG path is
-      # unaffected). Read by data_manager.py.
-      - EDUBOTICS_JPEG_BUFFER=${EDUBOTICS_JPEG_BUFFER:-1}
+      # Recording video codec (v2.5.0 / LeRobot v0.5.1). Default 'h264'
+      # (software libx264 under the hood) — fast CPU decode on Win10
+      # student PCs in the React preview. Upstream LeRobot defaults to
+      # 'libsvtav1' (AV1) which is 5-10x slower to decode on CPU. Other
+      # valid values per LeRobot v0.5.1: 'hevc', 'libsvtav1', 'auto'.
+      # Read by lerobot_dataset_wrapper.py's _apply_edubotics_defaults.
+      - EDUBOTICS_VCODEC=${EDUBOTICS_VCODEC:-h264}
       # Roboter Studio calibration dir (ChArUco intrinsics, hand-eye
       # transforms, HSV color profile). Default lands inside the
       # edubotics_calib named volume mounted below. Overlay readers:

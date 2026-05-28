@@ -15,8 +15,8 @@ so:
   - No PNG-per-frame temp files written to disk during recording. Frames go
     directly into ffmpeg via StreamingVideoEncoder. Episode-buffer image slots
     hold None placeholders; in-RAM footprint is bounded regardless of episode
-    length, replacing the EDUBOTICS_MAX_BUFFER_GB safety valve that was
-    fundamental to the v2.4 JpegFrame architecture.
+    length, replacing the v2.4 in-RAM safety valve (formerly toggled by
+    an env var that no longer exists; see CLAUDE.md "Recent changes").
 
 Wrapper-only methods kept ONLY for backward compatibility with data_manager.py
 call sites — every one is a thin alias that delegates to upstream
@@ -122,6 +122,6 @@ class LeRobotDatasetWrapper(LeRobotDataset):
     # ---------- Removed in v2.5.0 (kept ONLY as no-ops to avoid AttributeError) ----------
 
     def reset_buffer_accounting(self) -> None:
-        """No-op — EDUBOTICS_MAX_BUFFER_GB valve replaced by upstream
+        """No-op — the v2.4 in-RAM safety valve is replaced by upstream
         streaming_encoding. The data_manager.py reset call is now harmless."""
         return None

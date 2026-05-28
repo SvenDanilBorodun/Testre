@@ -88,8 +88,10 @@ RUN TARGETS=$(find /root/ros2_ws -name "server_inference.py" -path "*/inference/
     rm /tmp/fix_server_inference.py
 
 # Overlay modified source files (inference validation, data sanitization, joint safety, dual camera config)
-# Note: LeRobot itself is NOT overlaid — the base image clones the same version (989f3d05)
-# that the Modal training image pins. Only physical_ai_server files are patched here.
+# Note: LeRobot itself is NOT overlaid — it's pip-installed from PyPI at version 0.5.1
+# in the base image (see physical_ai_tools/physical_ai_server/Dockerfile.{amd64,arm64}).
+# The Modal training image at robotis_ai_setup/modal_training/modal_app.py pins the
+# same version. Only physical_ai_server source files are patched here.
 #
 # Every overlay is now sha256-compared after cp to prove the target file
 # actually changed. Without this, an upstream rename would have silently
@@ -302,28 +304,22 @@ RUN set -e && \
 RUN echo "AGPL audit: relies on explicit dependency manifest, see Dockerfile comment"
 
 # Cross-arch package floor — pin safetensors / protobuf / pillow to a single
-# version on BOTH arches. The 2026-05 audit caught arm64 silently resolving
-# safetensors==0.8.0rc (pre-release!), protobuf==7.x, and pillow==12.2 while
-# amd64 stayed on 0.7 / 6.x / 12.1. None of these is breaking the pipeline
-# today, but `protobuf 6 → 7` is the classic "works on x86, fails on Jetson
-# arm64" pattern (proto plugin ABI changes are routinely opaque). Pin to the
-# lower common denominator that ships as stable on BOTH arches AND matches
-# LeRobot's grpcio-dep contract (lerobot/pyproject.toml: protobuf==6.31.0).
+# version on BOTH arches. v0.5.1 resolves these naturally to compatible versions,
+# but we pin explicitly to keep amd64 + arm64 producing byte-identical
+# site-packages. Versions chosen from Phase 0's verified pip resolve of
+# `lerobot[pi0,smolvla,peft]==0.5.1` on Python 3.12.
 #
-#   safetensors==0.7.0   (last non-RC; 0.8 is still rc0/dev as of 2026-05)
-#   protobuf==6.31.0     (matches LeRobot grpcio-dep pin; pip-resolvable
-#                         alongside onnx>=1.16 which only needs protobuf>=4.25)
-#   pillow==12.1.0       (LCD across arches; both amd64 and arm64 wheel-
-#                         available; image-quality/feature-set identical to 12.2)
+#   safetensors==0.7.0   (LCD across arches; v0.8 still rc as of 2026-05)
+#   protobuf==6.33.6     (bumped from 6.31.0 for v0.5.1's grpcio-dep)
+#   pillow==12.2.0       (bumped from 12.1.0; v0.5.1's natural resolve)
 #
-# Installed AFTER all other pip layers so this pin overrides any transitive
-# resolution from earlier `pip install` calls or base-image-inherited versions.
-# `--force-reinstall` ensures the wheels actually get swapped in even when the
-# resolver thinks an existing satisfying version is already present.
+# Mirrored in physical_ai_tools/physical_ai_server/Dockerfile.arm64.
+# `--force-reinstall` so the pins override any transitive resolve from the
+# base image's pip layers.
 RUN python3 -m pip install --no-cache-dir --force-reinstall \
         safetensors==0.7.0 \
-        protobuf==6.31.0 \
-        pillow==12.1.0 && \
+        protobuf==6.33.6 \
+        pillow==12.2.0 && \
     python3 -c "import safetensors, google.protobuf, PIL; \
                 print('cross-arch floor:', safetensors.__version__, \
                       google.protobuf.__version__, PIL.__version__)"
@@ -366,6 +362,30 @@ RUN set -e && \
     rm -rf /opt/talos_system_manager && \
     sed -i '\|/opt/talos_system_manager|d' /root/.bashrc /etc/bash.bashrc 2>/dev/null || true && \
     echo "Stripped upstream bloat: ~6.75 GB removed from image layer"
+
+# Build-time policy import smoke test. Catches a LeRobot module-layout drift
+# at `docker buildx build` time instead of at student-bench inference time.
+# Imports every policy modeling module that inference_manager.py lazy-loads,
+# plus the v0.5.1 inference helpers and v3.0 dataset I/O symbols. If any of
+# these fail (a future LeRobot release reorganises modules without bumping
+# our pin via PyPI's preview channel), the image build aborts loudly.
+RUN python3 -c "\
+import lerobot; print(f'lerobot=={lerobot.__version__}'); \
+from lerobot.policies.act.modeling_act import ACTPolicy; \
+from lerobot.policies.diffusion.modeling_diffusion import DiffusionPolicy; \
+from lerobot.policies.tdmpc.modeling_tdmpc import TDMPCPolicy; \
+from lerobot.policies.vqbet.modeling_vqbet import VQBeTPolicy; \
+from lerobot.policies.pi0.modeling_pi0 import PI0Policy; \
+from lerobot.policies.pi0_fast.modeling_pi0_fast import PI0FastPolicy; \
+from lerobot.policies.pi05.modeling_pi05 import PI05Policy; \
+from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy; \
+from lerobot.utils.control_utils import predict_action; \
+from lerobot.policies.factory import make_pre_post_processors; \
+from lerobot.datasets.feature_utils import validate_frame; \
+from lerobot.datasets.io_utils import write_info, write_episodes, write_stats; \
+from lerobot.datasets.dataset_metadata import CODEBASE_VERSION; \
+assert CODEBASE_VERSION == 'v3.0', f'unexpected codebase_version: {CODEBASE_VERSION}'; \
+print('all v0.5.1 imports OK; codebase_version=v3.0')"
 
 # Scrub upstream-base ENV leaks that the sed of /root/.bashrc above can't
 # touch (image-config ENV directives are independent of interactive-shell

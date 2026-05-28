@@ -23,9 +23,15 @@ RUN apt-get update && apt-get install -y \
 ENV COLCON_WS=/root/ros2_ws
 WORKDIR ${COLCON_WS}
 
+# Clone physical_ai_tools WITHOUT the LeRobot submodule. v2.5.0 installs LeRobot
+# v0.5.1 directly from PyPI (see next RUN). The clone still provides the ROS
+# Python packages (physical_ai_interfaces, physical_ai_server source) that
+# colcon builds in the layer below; the lerobot subdir is stripped to make
+# certain no v0.2.0 import path bleeds into the runtime image.
 RUN mkdir -p ${COLCON_WS}/src && \
     cd ${COLCON_WS}/src && \
-    git clone -b jazzy https://github.com/ROBOTIS-GIT/physical_ai_tools.git --recursive
+    git clone --depth 1 -b jazzy https://github.com/ROBOTIS-GIT/physical_ai_tools.git && \
+    rm -rf physical_ai_tools/lerobot
 
 RUN cd ${COLCON_WS} && \
     apt-get update && \
@@ -34,23 +40,60 @@ RUN cd ${COLCON_WS} && \
     rm -rf /var/lib/apt/lists/*
 
 
-RUN cd ${COLCON_WS}/src/physical_ai_tools/lerobot && \
-    sed -i '/"torch[^\"]*",/d' pyproject.toml && \
-    sed -i '/"torchvision[^\"]*",/d' pyproject.toml && \
-    pip install --ignore-installed -e .
+# LeRobot v0.5.1 from PyPI. Extras:
+#   [pi0]      pulls PI0Policy + PI0FastPolicy deps
+#   [smolvla]  pulls transformers==5.3.0 (exact pin from LeRobot's pyproject)
+#              + SmolVLM deps; transitively covers pi05 (Pi-0.5, new in v0.5.1)
+#   [peft]     pulls PeftConfig/PeftModel for make_policy's cfg.use_peft branch
+#
+# Do NOT pre-pin transformers — let the [smolvla,peft] extras resolve to the
+# exact transformers==5.3.0 LeRobot requires. accelerate is now a hard runtime
+# dep (was optional in v0.2.0); pin to a safe range so a future major doesn't
+# break the resolver.
+#
+# torchcodec is uninstalled because v0.5.1 still uses pyav as the fallback when
+# torchcodec is absent, and torchcodec wheels for some arch/CUDA combos can be
+# missing or unstable. The student image runs torch on CPU anyway (no GPU on
+# Windows 11 student PCs), so torchcodec offers no value here.
+#
+# numpy<2 (the prior pin) is dropped: v0.5.1 requires numpy>=2.0.0,<2.3.0 per
+# its pyproject. setuptools 68 pin is dropped: not needed for the PyPI install
+# of v0.5.1.
+RUN python3 -m pip uninstall -y torchcodec 2>/dev/null || true && \
+    pip install --no-cache-dir \
+        "lerobot[pi0,smolvla,peft]==0.5.1" \
+        "accelerate>=1.10.0,<2.0.0"
 
-RUN cd ${COLCON_WS}/src/physical_ai_tools/lerobot && \
-    pip install -e ".[smolvla]"
-
-RUN pip install --no-cache-dir setuptools==68.1.2
-RUN pip install --no-cache-dir 'numpy<2'
-
-RUN echo 'export PYTHONPATH=${COLCON_WS}/src/physical_ai_tools/lerobot/src:$PYTHONPATH' >> /root/.bashrc && \
-    export PYTHONPATH=${COLCON_WS}/src/physical_ai_tools/lerobot/src:$PYTHONPATH
+# v2.5.0: LeRobot is now installed via pip into site-packages, NOT under the
+# physical_ai_tools clone. The historic PYTHONPATH=...lerobot/src entry is gone.
 
 RUN bash -c "source /opt/ros/${ROS_DISTRO}/setup.bash && \
     cd ${COLCON_WS} && \
     colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release"
+
+# Build-time policy import smoke test. Catches a LeRobot module-layout drift
+# at `docker buildx build` time instead of at student-bench inference time.
+# Imports every policy modeling module that inference_manager.py lazy-loads,
+# plus the v0.5.1 inference helpers and v3.0 dataset I/O symbols. If any of
+# these fail (a future LeRobot release reorganises modules without bumping
+# our pin via PyPI's preview channel), the image build aborts loudly.
+RUN python3 -c "\
+import lerobot; print(f'lerobot=={lerobot.__version__}'); \
+from lerobot.policies.act.modeling_act import ACTPolicy; \
+from lerobot.policies.diffusion.modeling_diffusion import DiffusionPolicy; \
+from lerobot.policies.tdmpc.modeling_tdmpc import TDMPCPolicy; \
+from lerobot.policies.vqbet.modeling_vqbet import VQBeTPolicy; \
+from lerobot.policies.pi0.modeling_pi0 import PI0Policy; \
+from lerobot.policies.pi0_fast.modeling_pi0_fast import PI0FastPolicy; \
+from lerobot.policies.pi05.modeling_pi05 import PI05Policy; \
+from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy; \
+from lerobot.utils.control_utils import predict_action; \
+from lerobot.policies.factory import make_pre_post_processors; \
+from lerobot.datasets.feature_utils import validate_frame; \
+from lerobot.datasets.io_utils import write_info, write_episodes, write_stats; \
+from lerobot.datasets.dataset_metadata import CODEBASE_VERSION; \
+assert CODEBASE_VERSION == 'v3.0', f'unexpected codebase_version: {CODEBASE_VERSION}'; \
+print('all v0.5.1 imports OK; codebase_version=v3.0')"
 
 RUN echo "source /opt/ros/${ROS_DISTRO}/setup.bash" >> ~/.bashrc  && \
     echo "source ${COLCON_WS}/install/setup.bash" >> ~/.bashrc  && \

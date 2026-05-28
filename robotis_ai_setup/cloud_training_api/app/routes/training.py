@@ -63,7 +63,11 @@ ALLOWED_POLICIES = {
     p.strip().lower()
     for p in os.environ.get(
         "ALLOWED_POLICIES",
-        "tdmpc,diffusion,act,vqbet,pi0,pi0fast,smolvla",
+        # v2.5.0 / LeRobot v0.5.1: pi0fast -> pi0_fast (underscore rename;
+        # PyPI/upstream module is lerobot.policies.pi0_fast.modeling_pi0_fast,
+        # cfg.type string is "pi0_fast"). New first-class policy "pi05"
+        # (Pi-0.5, lerobot.policies.pi05.modeling_pi05.PI05Policy) added.
+        "tdmpc,diffusion,act,vqbet,pi0,pi0_fast,pi05,smolvla",
     ).split(",")
     if p.strip()
 }
@@ -79,8 +83,9 @@ POLICY_MAX_TIMEOUT_HOURS = {
     "vqbet": 4.0,
     "tdmpc": 4.0,
     "diffusion": 6.0,
-    "pi0fast": 6.0,
+    "pi0_fast": 6.0,         # v0.5.1 underscore rename (was "pi0fast" pre-v2.5.0)
     "pi0": 10.0,
+    "pi05": 10.0,            # v0.5.1 NEW: Pi-0.5 VLA (similar weight class to pi0)
     "smolvla": 10.0,
 }
 _policy_overrides_raw = os.environ.get("POLICY_TIMEOUT_OVERRIDES_JSON", "").strip()

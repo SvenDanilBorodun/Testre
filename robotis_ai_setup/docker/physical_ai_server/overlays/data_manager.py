@@ -45,7 +45,6 @@ import numpy as np
 from physical_ai_interfaces.msg import TaskStatus
 from physical_ai_server.data_processing.data_converter import DataConverter
 from physical_ai_server.data_processing.lerobot_dataset_wrapper import (
-    JpegFrame,
     LeRobotDatasetWrapper,
 )
 from physical_ai_server.data_processing.progress_tracker import (
@@ -135,27 +134,10 @@ class DataManager:
         self._last_image_change_time: dict[str, float] = {}
         self._stale_threshold_s = 2.0
         self._stale_halt_threshold_s = 5.0
-        # JPEG-in-RAM mode (P1). When on (default), camera frames are kept
-        # in the recording buffer as their original compressed JPEG bytes
-        # (~30 KB) instead of decoded RGB (~920 KB), removing the ~74 s
-        # episode-length cap the RAM safety valve otherwise imposes.
-        # EDUBOTICS_JPEG_BUFFER=0 restores the exact legacy RGB path.
-        # Only valid in optimized-save mode: the non-optimized path calls
-        # upstream LeRobot add_frame(), which writes PNGs via the image
-        # writer and validates frames as ndarray/PIL — a JpegFrame would
-        # break it. So a student who turns optimized-save off transparently
-        # falls back to the decoded-RGB buffer regardless of the flag.
-        _jpeg_flag = os.environ.get(
-            'EDUBOTICS_JPEG_BUFFER', '1'
-        ).strip().lower() not in ('0', 'false', 'no', 'off')
-        self._jpeg_buffer_mode = _jpeg_flag and bool(
-            getattr(task_info, 'use_optimized_save_mode', False)
-        )
-        # Per-camera decoded (h, w, c) shape, learned by decoding the
-        # FIRST frame of each camera once and reused for every subsequent
-        # JpegFrame so the 30 Hz append path never decodes. Keyed by
-        # camera name (same keys as the image_msgs dict).
-        self._camera_shape_cache: dict[str, tuple] = {}
+        # v2.5.0: streaming_encoding=True (LeRobotDatasetWrapper default) feeds
+        # camera frames directly to ffmpeg as they arrive — no per-frame PNG
+        # temp files, no in-RAM frame accumulation. The v2.4 JpegFrame +
+        # EDUBOTICS_MAX_BUFFER_GB safety valve are gone.
 
     def get_status(self):
         return self._status
@@ -185,25 +167,10 @@ class DataManager:
                 return self.RECORDING
 
         elif self._status == 'run':
-            # RAM safety valve: lerobot_dataset_wrapper raises
-            # _buffer_full when accumulated decoded-image bytes pass
-            # EDUBOTICS_MAX_BUFFER_GB (default 4 GB). At 30 Hz × 2 cams
-            # of 640×480 RGB uint8 the unbounded buffer reliably
-            # OOMkills the container at ~110 s into a 5-min episode.
-            # When the flag fires we surface the German warning and
-            # short-circuit to 'save' instead of appending another
-            # ~1.8 MB tick. The episode that lands on disk is shorter
-            # than the student requested but at least exists.
-            if getattr(self._lerobot_dataset, '_buffer_full', False):
-                self._last_warning_message = (
-                    self._lerobot_dataset._buffer_full_warning
-                )
-                print(
-                    f'[WARNUNG] {self._last_warning_message}',
-                    file=sys.stderr, flush=True,
-                )
-                self._status = 'save'
-                return self.RECORDING
+            # v2.5.0: streaming_encoding=True bounds the in-RAM episode buffer
+            # at upstream's frame_index/None placeholder level, so the v2.4
+            # EDUBOTICS_MAX_BUFFER_GB / _buffer_full safety valve is no longer
+            # needed — the container can record arbitrarily long episodes.
             if not self._check_time(self._task_info.episode_time_s, 'save'):
                 frame = self.create_frame(images, state, action)
                 if self._task_info.use_optimized_save_mode:
@@ -596,14 +563,10 @@ class DataManager:
         now = time.monotonic()
         halt_on: str | None = None
         for name, img in camera_data.items():
-            # JPEG mode (P1): hash the compressed bytes directly — a
-            # frozen feed re-delivers byte-identical JPEG, so this detects
-            # staleness without decoding. Legacy mode hashes the decoded
-            # RGB ndarray buffer.
-            if isinstance(img, JpegFrame):
-                buf = img.jpeg.tobytes()
-            else:
-                buf = img.data.tobytes()
+            # v2.5.0: hash the decoded RGB ndarray's bytes. Streaming encoding
+            # means the recording buffer never holds compressed JPEG, so the
+            # JpegFrame branch is gone.
+            buf = img.tobytes() if hasattr(img, 'tobytes') else bytes(img)
             n = len(buf)
             if n <= 1024:
                 sample = buf
@@ -636,28 +599,14 @@ class DataManager:
 
         if image_msgs is not None:
             for key, value in image_msgs.items():
-                if self._jpeg_buffer_mode:
-                    # JPEG-in-RAM (P1): retain the camera's original
-                    # compressed JPEG bytes instead of a decoded RGB
-                    # frame. The CompressedImage buffer is overwritten in
-                    # place by the communicator, so copy the bytes out.
-                    jpeg = np.frombuffer(value.data, dtype=np.uint8).copy()
-                    shape = self._camera_shape_cache.get(key)
-                    if shape is None:
-                        # Learn the (h, w, c) shape once per camera by
-                        # decoding the first frame, then reuse it so the
-                        # 30 Hz append path never decodes again.
-                        rgb = self.data_converter.compressed_image2cvmat(
-                            value, desired_encoding='rgb8')
-                        shape = tuple(rgb.shape)
-                        self._camera_shape_cache[key] = shape
-                    camera_data[key] = JpegFrame(jpeg, shape)
-                else:
-                    # Legacy RGB path. cv_bridge handles the BGR→RGB swap
-                    # in-decoder when we ask for rgb8, which saves one
-                    # full-frame allocation + a memcpy per camera per tick.
-                    camera_data[key] = self.data_converter.compressed_image2cvmat(
-                        value, desired_encoding='rgb8')
+                # v2.5.0: always decode to RGB ndarray. streaming_encoding=True
+                # bounds in-RAM growth at the encoder boundary, so the v2.4
+                # JpegFrame compressed-bytes optimization is no longer needed.
+                # cv_bridge handles the BGR→RGB swap in-decoder when we ask
+                # for rgb8, saving one full-frame allocation + memcpy per
+                # camera per tick.
+                camera_data[key] = self.data_converter.compressed_image2cvmat(
+                    value, desired_encoding='rgb8')
             stale = self._check_stale_cameras(camera_data)
             if stale is not None:
                 # Warn (don't halt) — slow precision demos legitimately
@@ -730,13 +679,6 @@ class DataManager:
         # immediately advance the stale clock.
         self._last_image_hashes.clear()
         self._last_image_change_time.clear()
-        # Zero the RAM-safety-valve counters so the next episode gets
-        # its full byte budget back. No-op on overlays that pre-date
-        # the helper.
-        if self._lerobot_dataset is not None and hasattr(
-            self._lerobot_dataset, 'reset_buffer_accounting'
-        ):
-            self._lerobot_dataset.reset_buffer_accounting()
         # NOTE: _last_warning_message is deliberately NOT cleared here.
         # _episode_reset() runs inside the same record() tick that set the
         # warning (RAM truncation -> record_early_save -> save -> encoding
@@ -1298,8 +1240,8 @@ class DataManager:
             if repo_type == 'dataset':
                 try:
                     print(f'Creating tag for {repo_id} ({repo_type})')
-                    api.create_tag(repo_id=repo_id, tag='v2.1', repo_type=repo_type)
-                    print(f'Tag "v2.1" created successfully for {repo_id}')
+                    api.create_tag(repo_id=repo_id, tag='v3.0', repo_type=repo_type)
+                    print(f'Tag "v3.0" created successfully for {repo_id}')
                 except Exception as e:
                     print(f'Warning: Failed to create tag for {repo_id} ({repo_type}): {e}')
                     # Don't fail the entire upload just because tag creation failed

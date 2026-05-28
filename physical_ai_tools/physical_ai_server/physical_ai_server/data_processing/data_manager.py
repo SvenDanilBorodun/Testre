@@ -911,8 +911,8 @@ class DataManager:
             if repo_type == 'dataset':
                 try:
                     print(f'Creating tag for {repo_id} ({repo_type})')
-                    api.create_tag(repo_id=repo_id, tag='v2.1', repo_type=repo_type)
-                    print(f'Tag "v2.1" created successfully for {repo_id}')
+                    api.create_tag(repo_id=repo_id, tag='v3.0', repo_type=repo_type)
+                    print(f'Tag "v3.0" created successfully for {repo_id}')
                 except Exception as e:
                     print(f'Warning: Failed to create tag for {repo_id} ({repo_type}): {e}')
                     # Don't fail the entire upload just because tag creation failed

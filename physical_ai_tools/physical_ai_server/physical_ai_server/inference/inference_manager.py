@@ -17,8 +17,11 @@
 # Author: Dongyun Kim
 
 import os
+import platform
 
+from lerobot.policies.factory import make_pre_post_processors
 from lerobot.policies.pretrained import PreTrainedPolicy
+from lerobot.utils.control_utils import predict_action
 import numpy as np
 from physical_ai_server.utils.file_utils import read_json_file
 import torch
@@ -34,6 +37,8 @@ class InferenceManager:
         self.policy_type = None
         self.policy_path = None
         self.policy = None
+        self.preprocessor = None
+        self.postprocessor = None
         self._expected_image_keys = []
 
     def validate_policy(self, policy_path: str) -> bool:
@@ -69,6 +74,21 @@ class InferenceManager:
             self.policy = policy_cls.from_pretrained(self.policy_path)
             self.policy.to(self.device)
             self.policy.eval()
+            # v0.5.1: load processor pipelines that were saved alongside the
+            # checkpoint (policy_preprocessor.json + policy_postprocessor.json).
+            # Without these, predict_action's preprocessor would have no
+            # normalization stats and the policy output would be garbage
+            # (upstream bug #3645 symptom: "mean is infinity").
+            self.preprocessor, self.postprocessor = make_pre_post_processors(
+                policy_cfg=self.policy.config,
+                pretrained_path=self.policy_path,
+            )
+            print(
+                f'Loaded processor pipeline: '
+                f'pre={len(self.preprocessor.steps)} steps, '
+                f'post={len(self.postprocessor.steps)} steps',
+                flush=True,
+            )
             self.reset_policy()
             self._expected_image_keys = self._read_expected_image_keys()
             return True
@@ -96,6 +116,8 @@ class InferenceManager:
         if hasattr(self, 'policy'):
             del self.policy
             self.policy = None
+            self.preprocessor = None
+            self.postprocessor = None
         else:
             print('No policy to clear.')
 
@@ -121,10 +143,32 @@ class InferenceManager:
                     f'Bitte die Kamera-Namen in der Robot-Config an das Modell anpassen.'
                 )
 
-        observation = self._preprocess(images, state, task_instruction)
-        with torch.inference_mode():
-            action = self.policy.select_action(observation)
-            action = action.squeeze(0).to('cpu').numpy()
+        # v0.5.1: predict_action runs prepare_observation_for_inference +
+        # preprocessor + policy.select_action + postprocessor under
+        # torch.inference_mode() with optional autocast for CUDA. Pass raw
+        # ndarrays keyed with the canonical 'observation.images.<cam>' /
+        # 'observation.state' names; predict_action handles channel-first,
+        # /255, batch dim, and device move. Returns a torch.Tensor of shape
+        # (1, action_dim).
+        observation = {}
+        for key, value in images.items():
+            observation[f'observation.images.{key}'] = value
+        observation['observation.state'] = (
+            np.asarray(state, dtype=np.float32)
+            if not isinstance(state, np.ndarray) else state.astype(np.float32)
+        )
+
+        action = predict_action(
+            observation=observation,
+            policy=self.policy,
+            device=torch.device(self.device) if isinstance(self.device, str) else self.device,
+            preprocessor=self.preprocessor,
+            postprocessor=self.postprocessor,
+            use_amp=getattr(self.policy.config, 'use_amp', False),
+            task=task_instruction,
+            robot_type=getattr(self, '_robot_type', None),
+        )
+        action = action.squeeze(0).cpu().numpy()
 
         return action
 
@@ -192,9 +236,12 @@ class InferenceManager:
             from lerobot.policies.pi0.modeling_pi0 import PI0Policy
 
             return PI0Policy
-        elif name == 'pi0fast':
-            from lerobot.policies.pi0fast.modeling_pi0fast import PI0FASTPolicy
-            return PI0FASTPolicy
+        elif name == 'pi0_fast':
+            from lerobot.policies.pi0_fast.modeling_pi0_fast import PI0FastPolicy
+            return PI0FastPolicy
+        elif name == 'pi05':
+            from lerobot.policies.pi05.modeling_pi05 import PI05Policy
+            return PI05Policy
         elif name == 'smolvla':
             from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy
             return SmolVLAPolicy
@@ -208,15 +255,22 @@ class InferenceManager:
 
     @staticmethod
     def get_available_policies() -> list[str]:
-        return [
+        # v0.5.1: pi0_fast (underscore rename) + new pi05 (Pi-0.5).
+        # SmolVLA is hidden on aarch64 hosts (Jetson) due to upstream bug #3636:
+        # SmolVLA on Jetson Orin ARM64 produces wrong actions vs x86_64 (pyav vs
+        # torchcodec decoder discrepancy). Will re-enable when upstream fixes.
+        policies = [
             'tdmpc',
             'diffusion',
             'act',
             'vqbet',
             'pi0',
-            'pi0fast',
-            'smolvla',
+            'pi0_fast',
+            'pi05',
         ]
+        if platform.machine() != 'aarch64':
+            policies.append('smolvla')
+        return policies
 
     @staticmethod
     def get_saved_policies():

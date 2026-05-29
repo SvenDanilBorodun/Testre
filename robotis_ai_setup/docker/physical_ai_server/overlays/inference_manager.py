@@ -46,7 +46,7 @@ class InferenceManager:
         self.postprocessor = None
         self._expected_image_keys = []
 
-    def validate_policy(self, policy_path: str) -> bool:
+    def validate_policy(self, policy_path: str) -> tuple[bool, str]:
         result_message = ''
         if not os.path.exists(policy_path) or not os.path.isdir(policy_path):
             result_message = f'Policy path {policy_path} does not exist or is not a directory.'
@@ -207,7 +207,11 @@ class InferenceManager:
             postprocessor=self.postprocessor,
             use_amp=getattr(self.policy.config, 'use_amp', False),
             task=task_instruction,
-            robot_type=getattr(self, '_robot_type', None),
+            # InferenceManager never sets a robot_type — LeRobot infers it
+            # from the loaded policy config — so this was always None. Pass
+            # None explicitly instead of a getattr that implied a settable
+            # attribute existed.
+            robot_type=None,
         )
         action = action.squeeze(0).cpu().numpy()
 

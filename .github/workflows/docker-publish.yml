@@ -13,8 +13,9 @@ name: docker-publish
 # Modal now (see build-images.sh:395-397). The stale Docker Hub copy
 # is on the cleanup list in tools/docker-hub-cleanup.sh.
 #
-# This is W5 in the golden order — runs LAST because the FastAPI
-# bundle has to be live for the student GUI to talk to it.
+# This is W4 in the golden order — the three production images publish
+# AFTER W1 supabase, W2 cloud-api, and W3 teacher-web, and BEFORE W5 (the
+# Windows installer, which bakes these image tags into the .exe payload).
 #
 # Cache policy: --no-cache --pull on every build, per user decision.
 # Build time tradeoff (~20 min) is accepted for correctness.

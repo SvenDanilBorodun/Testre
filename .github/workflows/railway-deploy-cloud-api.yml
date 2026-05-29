@@ -4,7 +4,7 @@ name: railway-deploy-cloud-api
 # the Railway project `scintillating-empathy`, service
 # `scintillating-empathy` (URL scintillating-empathy-production-1068.up.railway.app).
 #
-# This is W3 in the golden order — runs AFTER W1 supabase-migrate
+# This is W2 in the golden order — runs AFTER W1 supabase-migrate
 # completes, because the FastAPI's startup hook
 # _validate_required_schema() probes every table + RPC the routes need
 # and refuses to boot if Supabase is behind.

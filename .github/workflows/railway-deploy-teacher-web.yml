@@ -3,7 +3,7 @@ name: railway-deploy-teacher-web
 # Deploys physical_ai_tools/physical_ai_manager/ (the React 19 SPA) to
 # the Railway service `teacher-web` (URL teacher-web-production.up.railway.app).
 #
-# This is W4 in the golden order. The build is gated on the existing
+# This is W3 in the golden order. The build is gated on the existing
 # `teacher-web-build-validate` job in ci.yml, which already produces an
 # identical image with placeholder secrets and asserts the bundle
 # contains the inlined env vars.

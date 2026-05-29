@@ -58,7 +58,21 @@ async def start_training_job(
 
 
 async def cancel_training_job(job_id: str) -> bool:
-    """Cancel a running Modal job. Returns True on success, raises on failure."""
+    """Cancel a running Modal job. Returns True on success, raises on failure.
+
+    terminate_containers=True is INTENTIONAL — do not drop it. Stopping the
+    GPU container is the whole point of the migration-023 cost-bomb fix:
+    the L4 keeps billing until the container actually dies, and a plain
+    cancel only sends the input SIGINT (+30s grace) which a wedged worker
+    might never honour. The worker's _on_shutdown cleanup that a hard kill
+    bypasses (proc.kill, status='failed' write, /tmp cleanup) is fully
+    redundant on the cancel path: routes/training.py + training_sweep.py
+    already write the terminal status and null worker_token API-side, the
+    migration-010 terminal-state guard makes the worker's late status write
+    a no-op, and tearing the container down reclaims /tmp and the GPU
+    anyway. No HF push or credit logic lives in _on_shutdown, so nothing
+    correctness-critical is lost.
+    """
     try:
         call = modal.FunctionCall.from_id(job_id)
         await call.cancel.aio(terminate_containers=True)

@@ -149,11 +149,20 @@ async def _tick() -> int:
     from app.services.supabase_client import get_supabase
 
     supabase = get_supabase()
+    # No upper bound on cancel_attempts. The cap is enforced by _retry_one,
+    # which flips any row whose attempt has reached MAX_CANCEL_ATTEMPTS to
+    # 'failed' (terminal, credit freed). Bounding the query by
+    # `cancel_attempts < MAX` instead used to STRAND any row that reached
+    # the cap WITHOUT being flipped terminal — e.g. a student spam-clicking
+    # Abbrechen drove cancel_attempts past the cap via the route (which has
+    # no cap), or this sweep crashed right after its optimistic pre-write
+    # bumped the count to the cap. Such a row sat in cancel_requested
+    # forever and never freed its credit. Selecting every cancel_requested
+    # row lets _retry_one resolve any of them on the next tick.
     rows = (
         supabase.table("trainings")
         .select("id, cloud_job_id, cancel_attempts, cancel_attempted_at, status")
         .eq("status", "cancel_requested")
-        .lt("cancel_attempts", MAX_CANCEL_ATTEMPTS)
         .order("cancel_attempted_at", desc=False)
         .limit(BATCH_LIMIT)
         .execute()

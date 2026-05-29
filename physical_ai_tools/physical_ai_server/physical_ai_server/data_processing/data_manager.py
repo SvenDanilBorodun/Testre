@@ -241,7 +241,11 @@ class DataManager:
                 if self._lerobot_dataset.check_video_encoding_completed():
                     self._on_saving = False
                     self._episode_reset()
-                    if (self._task_info.push_to_hub and
+                    # v0.5.1: close the data ParquetWriter + flush the episode
+                    # metadata buffer to disk BEFORE upload — without this the
+                    # dataset is incomplete on disk (see _finalize_dataset).
+                    finalized = self._finalize_dataset()
+                    if (finalized and self._task_info.push_to_hub and
                             self._record_episode_count > 0):
                         self._upload_dataset(
                             self._task_info.tags,
@@ -256,7 +260,11 @@ class DataManager:
 
         if self._record_episode_count >= self._task_info.num_episodes:
             if self._lerobot_dataset.check_video_encoding_completed():
-                if (self._task_info.push_to_hub and
+                # v0.5.1: flush writers to disk BEFORE upload (see
+                # _finalize_dataset) — this is the auto-complete path that fires
+                # once the target episode count is reached.
+                finalized = self._finalize_dataset()
+                if (finalized and self._task_info.push_to_hub and
                         self._record_episode_count > 0):
                     self._upload_dataset(
                         self._task_info.tags,
@@ -290,6 +298,38 @@ class DataManager:
         else:
             if self._lerobot_dataset.episode_buffer['size'] > 0:
                 self._lerobot_dataset.save_episode()
+
+    def _finalize_dataset(self) -> bool:
+        """Flush LeRobot's writers so the on-disk dataset is actually complete.
+
+        LeRobot v0.5.1 keeps the data ParquetWriter open and buffers per-episode
+        metadata (DatasetMetadata._metadata_buffer, default size 10) until
+        finalize() runs. Without an explicit finalize() a recording of fewer
+        than 10 episodes ships a data parquet with NO footer (unreadable by
+        pyarrow/datasets) and NO meta/episodes/*.parquet at all — yet info.json
+        and the mp4 files still look valid, so the corruption is silent and only
+        surfaces when Modal training (or a local re-read) tries to load the
+        dataset. Must run once after the last save_episode() and before upload.
+        Idempotent: LeRobotDataset.finalize() guards on its _is_finalized flag.
+
+        Returns True when the dataset is finalized (or was already); False when
+        finalize() raised — in which case the caller MUST skip the upload, since
+        the on-disk files would be incomplete.
+        """
+        ds = self._lerobot_dataset
+        if ds is None:
+            return False
+        try:
+            ds.finalize()
+            return True
+        except Exception as e:
+            warning = (
+                'Datensatz konnte nicht abgeschlossen werden — die Aufnahme '
+                'ist unvollständig und muss neu aufgenommen werden.'
+            )
+            self._last_warning_message = warning
+            print(f'[FEHLER] {warning} ({e})', file=sys.stderr, flush=True)
+            return False
 
     def _verify_saved_video_files(self):
         """After save_episode() returns, verify each camera produced a

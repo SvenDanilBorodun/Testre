@@ -46,7 +46,13 @@ class DatasetRegister(BaseModel):
     name: str = Field(..., min_length=1, max_length=200)
     description: str = Field(default="", max_length=2000)
     episode_count: int | None = Field(default=None, ge=0, le=10_000_000)
-    total_frames: int | None = Field(default=None, ge=0, le=10_000_000_000)
+    # Cap at PostgreSQL int4 max (2,147,483,647): the datasets.total_frames
+    # column is INTEGER, so a larger value (the old le=1e10 accepted up to
+    # 10e9) passed Pydantic + the BIGINT RPC arg and then raised an
+    # uncaught 22003 numeric_value_out_of_range at the INSERT → HTTP 500.
+    # Realistic classroom datasets are far below int4 max; reject oversized
+    # values at the API boundary instead of widening the column.
+    total_frames: int | None = Field(default=None, ge=0, le=2_147_483_647)
     fps: int | None = Field(default=None, ge=1, le=240)
     robot_type: str | None = Field(default=None, max_length=64)
 

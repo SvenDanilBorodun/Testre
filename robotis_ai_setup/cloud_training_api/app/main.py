@@ -2,9 +2,6 @@ import logging
 import os
 import pathlib
 import re
-import time
-from collections import defaultdict, deque
-from threading import Lock
 from urllib.parse import urlparse
 
 from dotenv import load_dotenv
@@ -28,6 +25,7 @@ from app.routes.workflows import router as workflows_router
 from app.routes.workgroups import router as workgroups_router
 from app.services.dataset_sweep import sweep_loop as _dataset_sweep_loop
 from app.services.jetson_sweep import sweep_loop as _jetson_sweep_loop
+from app.services.rate_limiter import RateLimiter
 from app.services.training_sweep import sweep_loop as _training_cancel_sweep_loop
 
 load_dotenv()
@@ -505,30 +503,14 @@ logger.info("CORS allowed origins: %s", allowed_origins)
 
 # ─── Simple in-process rate limiter ────────────────────────────────────
 # Stops a student script from hammering /trainings/start or the auth
-# endpoints. Keyed by client IP from X-Forwarded-For (Railway proxies
-# everything; request.client.host alone would be the proxy IP and every
-# student would share one bucket). Trades cross-instance accuracy for
-# zero-dependency: state lives in-process, so this only behaves correctly
-# at uvicorn --workers 1 (Railway default). If we ever scale out, swap
-# to Redis-backed slowapi.
-class RateLimiter:
-    def __init__(self) -> None:
-        # { bucket_name: { key: deque[timestamps] } }
-        self._buckets: dict[str, dict[str, deque]] = defaultdict(lambda: defaultdict(deque))
-        self._lock = Lock()
-
-    def check(self, bucket: str, key: str, limit: int, window_s: float) -> bool:
-        now = time.monotonic()
-        with self._lock:
-            hist = self._buckets[bucket][key]
-            while hist and now - hist[0] > window_s:
-                hist.popleft()
-            if len(hist) >= limit:
-                return False
-            hist.append(now)
-            return True
-
-
+# endpoints. The RateLimiter implementation lives in
+# app.services.rate_limiter (extracted so it is unit-testable without the
+# full FastAPI app import, and so the LRU key-cap memory guard is
+# documented in one place). Keyed by client IP from X-Forwarded-For for
+# most rules, or a hashed bearer token for the per-user prefixes below.
+# State lives in-process, so this only behaves correctly at
+# uvicorn --workers 1 (Railway default). If we ever scale out, swap to
+# Redis-backed slowapi.
 _rate_limiter = RateLimiter()
 
 # (method, path prefix, limit, window seconds). Method "*" matches any.
@@ -665,7 +647,14 @@ def _user_key_from_jwt(request: Request) -> str | None:
 # so a NAT'd classroom of 30 students doesn't share one bucket. The
 # /jetson/register sub-prefix has no JWT and falls back to IP keying
 # (the _user_key_from_jwt helper returns None → IP path).
-_PER_USER_RATE_LIMIT_PREFIXES = ("/vision/detect", "/jetson/")
+#
+# /trainings/ (covers the rate-limited /trainings/start + /trainings/cancel
+# rules) is per-user for the same NAT reason: both endpoints require
+# Depends(get_current_user) so a JWT is always present, and IP keying
+# meant 30 students behind one school NAT shared the 10/min start bucket —
+# the 11th student got a spurious 429 even though nobody individually
+# exceeded the limit. The IP fallback still covers any missing header.
+_PER_USER_RATE_LIMIT_PREFIXES = ("/vision/detect", "/jetson/", "/trainings/")
 
 
 # Audit A2: hard upper bound on workflow-write request bodies.

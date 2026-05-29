@@ -452,9 +452,17 @@ def _bring_up_stack() -> None:
     logger.info("Bringing up Jetson container stack...")
     _compose("up", "-d", "--remove-orphans", timeout=180)
     # Poll for health — both services have healthchecks declared in the
-    # compose file. 60s is generous; the open_manipulator launch waits
-    # up to 60s for USB enumeration itself.
-    deadline = time.monotonic() + 120
+    # compose file. The deadline must cover the worst-case stacked
+    # start_period chain: open_manipulator start_period 120s (USB
+    # enumeration + camera topics) THEN physical_ai_server start_period
+    # 60s, brought up serially via depends_on: service_healthy. A 120s
+    # budget could expire on a slow cold boot even though the stack is
+    # healthy seconds later — spuriously failing the claim and burning a
+    # _failed_claim_attempts strike (which can deadlock the lock). A
+    # healthy boot still returns the instant both report healthy (see the
+    # early return below), so the larger ceiling only extends the wait on
+    # a genuinely stuck boot.
+    deadline = time.monotonic() + 240
     while time.monotonic() < deadline:
         result = _compose("ps", "--format", "json", timeout=15, check=False)
         if result.returncode == 0:
@@ -495,7 +503,7 @@ def _bring_up_stack() -> None:
                 logger.info("Stack ready (%d services healthy)", healthy)
                 return
         time.sleep(2)
-    raise RuntimeError("Stack did not become healthy within 120s")
+    raise RuntimeError("Stack did not become healthy within 240s")
 
 
 def _bring_down_stack() -> None:
@@ -617,6 +625,7 @@ class Homer(Node):
 
 rclpy.init()
 node = Homer()
+code = 0  # bound before spin so the finally's sys.exit() can't NameError
 try:
     rclpy.spin(node)
 except SystemExit as se:
@@ -732,8 +741,18 @@ def _transition_to_claimed(owner_id: str) -> None:
     # fresh chance.
     prior_failures = _failed_claim_attempts.get(owner_id, 0)
     if prior_failures >= CLAIM_RETRY_LIMIT:
-        if _state != "paired_idle":
-            _state = "paired_idle"
+        # Gave up bringing the stack up for this owner. Re-free the
+        # server-side lock on every tick (a cheap POST) rather than
+        # trusting the 5-min sweeper: the sweeper keys on the student's
+        # React heartbeat (current_owner_heartbeat_at), which stays fresh
+        # while their tab is open, so it can never reap this row. Resetting
+        # the local view to None lets the next heartbeat reconcile — once
+        # the release lands the lock frees, and a genuine fresh claim
+        # (server goes NULL then back to a UUID) resets the retry budget
+        # via the NULL branch in _main_loop.
+        _release_lock_via_cloud_api(owner_id)
+        _current_owner_user_id = None
+        _state = "paired_idle"
         return
     logger.info("Owner change: NULL → %s — claiming (attempt %d/%d)",
                 owner_id, prior_failures + 1, CLAIM_RETRY_LIMIT)
@@ -875,17 +894,28 @@ def _main_loop(env: dict) -> None:
                     "Unexpected owner transition %s → %s — wiping + reclaiming",
                     _current_owner_user_id, new_owner,
                 )
+                # The previous owner is gone — drop the per-owner retry
+                # counters so a stale strike can't short-circuit the
+                # incoming owner's claim into a deadlock.
+                _failed_claim_attempts.clear()
                 _transition_to_released()
                 _current_owner_user_id = new_owner
                 _transition_to_claimed(new_owner)
-        elif new_owner is None and _current_owner_user_id is not None:
-            # Authoritative: server has released the lock (explicit
-            # Trennen, 5-min sweep, or teacher force-release). Wipe.
-            _current_owner_user_id = None
-            # Reset claim-retry counters — they're per-owner, and the
-            # previous owner is gone.
+        elif new_owner is None:
+            # Authoritative: the server has no owner (explicit Trennen,
+            # 5-min sweep, teacher force-release, or a claim the gave-up
+            # path above already re-freed locally). Reset the per-owner
+            # claim-retry counters unconditionally: a freed lock means the
+            # next claimant — even the same owner once a transient fault
+            # clears — deserves a fresh retry budget. (When
+            # _current_owner_user_id is already None the old `and ... is
+            # not None` guard skipped this, stranding a stale counter that
+            # short-circuited the owner's next claim — see CLAIM_RETRY_LIMIT
+            # early-return in _transition_to_claimed.)
             _failed_claim_attempts.clear()
-            _transition_to_released()
+            if _current_owner_user_id is not None:
+                _current_owner_user_id = None
+                _transition_to_released()
         # else: no change.
 
         if _shutdown.wait(AGENT_HEARTBEAT_INTERVAL_S):
@@ -923,8 +953,17 @@ def main():
     finally:
         # On shutdown, try to release any held lock + bring containers
         # down cleanly so the next agent start finds a sane state.
-        if _current_owner_user_id is not None:
+        held = _current_owner_user_id
+        if held is not None:
             logger.info("Shutdown: releasing held lock + tearing down stack")
+            # Actually free the server-side lock. Without this the row's
+            # current_owner_user_id stays pointed at the departed owner
+            # across an agent restart, and the 5-min sweeper can't reap it
+            # while the student's React tab keeps heartbeating — so a
+            # different student is shown "Jetson belegt" indefinitely.
+            # _release_lock_via_cloud_api is best-effort (swallows network
+            # failure, falls back to the sweeper), so it's safe here.
+            _release_lock_via_cloud_api(held)
             _stop_proxy()
             _bring_down_stack()
 

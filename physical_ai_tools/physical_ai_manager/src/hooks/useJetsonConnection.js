@@ -36,6 +36,16 @@ const HEARTBEAT_INTERVAL_MS = 30_000;
 // :9091 directly.
 const PROXY_PORT = 9091;
 
+// Refresh-vs-close discriminator (M4). On unload while connected we drop
+// this sessionStorage marker and then fire the release beacon.
+// sessionStorage survives a same-tab refresh but is wiped on a real tab
+// close, so on the next mount the discovery effect can tell a refresh
+// (→ auto-reclaim the lock the beacon just freed) from a genuine close
+// (→ leave the lock freed for the next student). The grace window bounds
+// how long a stale marker can trigger an auto-reclaim.
+const RECONNECT_MARKER_KEY = 'edubotics.jetson.reconnect';
+const RECONNECT_GRACE_MS = 30_000;
+
 /**
  * React hook that drives the entire Jetson connection lifecycle for
  * the Inference tab:
@@ -62,9 +72,25 @@ export function useJetsonConnection() {
   const tokenRef = useRef(accessToken);
   const jetsonIdRef = useRef(jetsonId);
   const statusRef = useRef(status);
+  const classroomIdRef = useRef(classroomId);
   useEffect(() => { tokenRef.current = accessToken; }, [accessToken]);
   useEffect(() => { jetsonIdRef.current = jetsonId; }, [jetsonId]);
   useEffect(() => { statusRef.current = status; }, [status]);
+  useEffect(() => { classroomIdRef.current = classroomId; }, [classroomId]);
+
+  // M3: keep the rosbridge proxy's auth token current. supabase-js
+  // refreshes the access token roughly hourly during long sessions;
+  // without pushing the rotated token to the manager, a WS reconnect
+  // after the old token expired would send a dead JWT (the :9091 proxy
+  // closes the socket) while the HTTP heartbeat — which reads the fresh
+  // token via tokenRef — keeps the chip "connected". Gate on the live
+  // status so we never clobber the null token of a local (non-Jetson)
+  // session.
+  useEffect(() => {
+    if (statusRef.current === 'connected' && accessToken) {
+      rosConnectionManager.setAuthToken(accessToken);
+    }
+  }, [accessToken]);
 
   // 1. Discovery on mount / classroom change.
   useEffect(() => {
@@ -81,17 +107,47 @@ export function useJetsonConnection() {
           return;
         }
         dispatch(setJetsonInfo(info));
-        // Status flows from owner field:
-        if (!info.current_owner_user_id) {
-          dispatch(setJetsonStatus('available'));
-        } else if (info.current_owner_user_id === userId) {
-          // Reconnect-after-refresh: we still hold the lock. Resume the
-          // session by re-pointing rosbridge at the Jetson and starting
-          // the heartbeat. No extra claim call needed.
+        // Status flows from the owner field, with one refinement: a freed
+        // lock that THIS tab just released on a refresh (fresh marker)
+        // should be re-claimed rather than shown as merely "available".
+        const action = planJetsonDiscoveryAction({
+          owner: info.current_owner_user_id,
+          userId,
+          marker: _readReconnectMarker(),
+          classroomId,
+          now: Date.now(),
+        });
+        if (action !== 'reclaim') {
+          _clearReconnectMarker();  // one-shot; only the refresh path consumes it
+        }
+        if (action === 'resume') {
+          // We still hold the lock server-side (the unload beacon didn't
+          // land, or this is a non-beacon reload). Re-point rosbridge at
+          // the Jetson and resume the heartbeat — no extra claim needed.
           _swapRosbridgeToJetson(info, dispatch, accessToken);
           dispatch(setJetsonStatus('connected'));
-        } else {
+        } else if (action === 'reclaim') {
+          // Page was refreshed and our unload beacon freed the lock.
+          // Re-claim it so an F5 doesn't drop the student's session.
+          _clearReconnectMarker();
+          dispatch(setJetsonStatus('claiming'));
+          try {
+            const claimed = await claimJetson(accessToken, info.jetson_id);
+            if (cancelled) return;
+            dispatch(setJetsonInfo(claimed));
+            _swapRosbridgeToJetson(claimed, dispatch, accessToken);
+            dispatch(setJetsonStatus('connected'));
+          } catch (claimErr) {
+            if (cancelled) return;
+            // A peer grabbed the lock in the ~1 s reload window (409), or
+            // the re-claim otherwise failed — fall back to the normal
+            // available/busy view.
+            dispatch(setJetsonStatus(claimErr?.status === 409 ? 'busy' : 'available'));
+          }
+        } else if (action === 'busy') {
           dispatch(setJetsonStatus('busy'));
+        } else {
+          dispatch(setJetsonStatus('available'));
         }
       } catch (err) {
         if (cancelled) return;
@@ -194,18 +250,78 @@ export function useJetsonConnection() {
     };
   }, [status, accessToken, jetsonId, localRosHost, dispatch]);
 
-  // 4. Best-effort release on tab unload.
+  // 4. Best-effort release on tab unload. We listen on `pagehide` (fires
+  // on tab close, navigation, AND bfcache eviction; `beforeunload` is
+  // unreliable and blocks the back/forward cache). Before releasing we
+  // drop a short-lived sessionStorage marker so the next mount can tell a
+  // same-tab refresh (marker survives → auto-reclaim) from a real close
+  // (marker wiped with the tab → leave the lock freed). This keeps
+  // v2.3.0's prompt release-on-close while no longer dropping the
+  // student's session on F5.
   useEffect(() => {
     const onUnload = () => {
       if (statusRef.current === 'connected' && tokenRef.current && jetsonIdRef.current) {
+        _writeReconnectMarker(classroomIdRef.current);
         releaseJetsonBeacon(tokenRef.current, jetsonIdRef.current);
       }
     };
-    window.addEventListener('beforeunload', onUnload);
-    return () => window.removeEventListener('beforeunload', onUnload);
+    window.addEventListener('pagehide', onUnload);
+    return () => window.removeEventListener('pagehide', onUnload);
   }, []);
 
   return { connect, disconnect, status };
+}
+
+// ---- Refresh-vs-close marker helpers (M4) ----
+
+function _readReconnectMarker() {
+  try {
+    const raw = window.sessionStorage.getItem(RECONNECT_MARKER_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch (_) {
+    return null;  // sessionStorage unavailable / malformed — treat as no marker
+  }
+}
+
+function _writeReconnectMarker(classroomId) {
+  try {
+    window.sessionStorage.setItem(
+      RECONNECT_MARKER_KEY,
+      JSON.stringify({ classroomId, at: Date.now() })
+    );
+  } catch (_) {
+    /* best-effort: sessionStorage unavailable / full */
+  }
+}
+
+function _clearReconnectMarker() {
+  try {
+    window.sessionStorage.removeItem(RECONNECT_MARKER_KEY);
+  } catch (_) {
+    /* best-effort */
+  }
+}
+
+/**
+ * Pure decision for the discovery effect's owner branch. Exported for
+ * unit testing.
+ *   'resume'    — server still names us owner → re-attach, no claim call.
+ *   'reclaim'   — lock is free AND this tab just released it on a refresh
+ *                 (fresh marker for this classroom) → re-claim it.
+ *   'busy'      — a different user holds the lock.
+ *   'available' — lock is free and no fresh refresh marker → normal idle.
+ * @returns {'resume'|'reclaim'|'busy'|'available'}
+ */
+export function planJetsonDiscoveryAction({ owner, userId, marker, classroomId, now }) {
+  if (owner && userId && owner === userId) return 'resume';
+  if (owner) return 'busy';
+  const fresh =
+    marker &&
+    marker.classroomId === classroomId &&
+    typeof marker.at === 'number' &&
+    now - marker.at >= 0 &&
+    now - marker.at < RECONNECT_GRACE_MS;
+  return fresh ? 'reclaim' : 'available';
 }
 
 function _swapRosbridgeToJetson(info, dispatch, accessToken) {
@@ -271,6 +387,9 @@ export function resetJetsonOnLogout(dispatch, accessToken = null, jetsonId = nul
   if (accessToken && jetsonId) {
     try { releaseJetsonBeacon(accessToken, jetsonId); } catch (_) { /* swallow */ }
   }
+  // Drop any pending refresh-reconnect marker so a later sign-in to the
+  // same classroom doesn't auto-reclaim on a stale marker.
+  _clearReconnectMarker();
   rosConnectionManager.setAuthToken(null);
   dispatch(clearJetson());
 }

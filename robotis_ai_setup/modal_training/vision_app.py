@@ -73,9 +73,13 @@ image = (
         "huggingface_hub==0.26.2",
         "numpy",
     )
-    # Force the cu121 torch wheels — same posture as modal_app.py per
-    # CLAUDE.md §1.5. Without `index_url=...whl/cu121` pip resolves
-    # CPU wheels from PyPI and the T4 GPU sits idle. Audit round-3 §H.
+    # Pin torch 2.4.0 + torchvision 0.19.0 from the cu121 wheel index.
+    # This is the vision surface's OWN channel, matched to its
+    # transformers==4.46.0 OWLv2 stack — INDEPENDENT of modal_app.py's
+    # training channel (torch 2.7.0 + cu126). Vision is deliberately NOT
+    # part of Rule §5's 3-site LeRobot version contract. Without the
+    # explicit cu121 index_url pip resolves CPU wheels from PyPI and the
+    # GPU sits idle. Audit round-3 §H.
     .pip_install(
         "torch==2.4.0",
         "torchvision==0.19.0",
@@ -339,13 +343,14 @@ def smoke_test() -> dict[str, Any]:
             "The edubotics-vision image must run on a T4-or-better GPU."
         )
 
-    # 2) Required env vars. We don't need the values, just confirm they
-    # decoded out of the secret bundle. A missing bundle → KeyError.
-    required = ("EDUBOTICS_VISION_AUTH",)  # placeholder; whatever 4.x ships
-    missing = [k for k in required if not _os.environ.get(k)]
-    # The placeholder above is intentional — at deploy time the
-    # required key set is whatever the operator put in the bundle.
-    # The smoke still proves the bundle is mounted by listing env keys.
+    # 2) Confirm the secret bundle decoded into the container env. The
+    # exact key set varies by deploy, so we assert presence by listing
+    # the EDUBOTICS_* keys rather than checking specific names — a
+    # missing bundle yields an empty list, visible in the returned
+    # payload. (A previous `required`/`missing` placeholder check was
+    # removed: it computed a missing-keys list against a placeholder key
+    # name and never raised on it — dead, and any "fix" that raised would
+    # have failed every run against the placeholder.)
     bundle_keys = sorted(k for k in _os.environ.keys() if k.startswith("EDUBOTICS_"))
 
     # 3) Load the model just like @modal.enter would. If the
@@ -376,7 +381,6 @@ def smoke_test() -> dict[str, Any]:
         "cuda_available": True,  # guaranteed by the check above
         "model": MODEL_NAME,
         "vision_secret_keys": bundle_keys,
-        "missing_required_keys": missing,
     }
 
 

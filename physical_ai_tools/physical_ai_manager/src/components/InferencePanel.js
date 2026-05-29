@@ -94,11 +94,11 @@ const InferencePanel = () => {
         setTokenInput('');
         toast.success('Benutzer-ID-Liste erfolgreich aktualisiert!');
       } else {
-        toast.error('Failed to get user ID list from response');
+        toast.error('Benutzer-ID-Liste konnte aus der Antwort nicht ermittelt werden');
       }
     } catch (error) {
       console.error('Error registering HF user:', error);
-      toast.error(`Failed to register user: ${error.message}`);
+      toast.error(`Benutzer konnte nicht registriert werden: ${error.message}`);
     } finally {
       setIsLoading(false);
     }
@@ -115,11 +115,11 @@ const InferencePanel = () => {
         toast.success('Benutzer-ID-Liste erfolgreich geladen!');
         setShowUserIdDropdown(true);
       } else {
-        toast.error('Failed to get user ID list from response');
+        toast.error('Benutzer-ID-Liste konnte aus der Antwort nicht ermittelt werden');
       }
     } catch (error) {
       console.error('Error loading HF user list:', error);
-      toast.error(`Failed to load user ID list: ${error.message}`);
+      toast.error(`Benutzer-ID-Liste konnte nicht geladen werden: ${error.message}`);
     } finally {
       setIsLoading(false);
     }
@@ -497,7 +497,7 @@ const InferencePanel = () => {
       </div>
 
       <div className="text-xs text-gray-400 mt-1 ml-2">
-        Recording during inference will be supported in a future update
+        Aufnahme während der Inferenz wird in einem zukünftigen Update unterstützt
       </div>
 
       {false && (
@@ -867,10 +867,10 @@ const InferencePanel = () => {
         onClose={() => setShowPolicyPathModal(false)}
         onFileSelect={handlePolicyPathSelect}
         title="Modellpfad auswählen"
-        selectButtonText="Select"
+        selectButtonText="Auswählen"
         allowDirectorySelect={true}
         targetFileName={[TARGET_FILES.POLICY_MODEL]}
-        targetFileLabel="Policy file found! 🎯"
+        targetFileLabel="Modelldatei gefunden! 🎯"
         initialPath={DEFAULT_PATHS.POLICY_MODEL_PATH}
         defaultPath={DEFAULT_PATHS.POLICY_MODEL_PATH}
         homePath=""

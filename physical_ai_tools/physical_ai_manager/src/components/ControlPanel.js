@@ -40,31 +40,31 @@ const phaseGuideMessages = {
 };
 
 const requiredFieldsForRecord = [
-  { key: 'taskName', label: 'Task Name' },
-  { key: 'taskInstruction', label: 'Task Instruction' },
-  { key: 'userId', label: 'User ID' },
+  { key: 'taskName', label: 'Aufgabenname' },
+  { key: 'taskInstruction', label: 'Aufgabenanweisung' },
+  { key: 'userId', label: 'Benutzer-ID' },
   { key: 'fps', label: 'FPS' },
-  { key: 'warmupTime', label: 'Warmup Time' },
-  { key: 'episodeTime', label: 'Episode Time' },
-  { key: 'resetTime', label: 'Reset Time' },
-  { key: 'numEpisodes', label: 'Num Episodes' },
+  { key: 'warmupTime', label: 'Aufwärmzeit' },
+  { key: 'episodeTime', label: 'Episodenzeit' },
+  { key: 'resetTime', label: 'Rücksetzzeit' },
+  { key: 'numEpisodes', label: 'Anzahl Episoden' },
 ];
 
 const requiredFieldsForRecordInferenceMode = [
-  { key: 'taskName', label: 'Task Name' },
-  { key: 'taskInstruction', label: 'Task Instruction' },
-  { key: 'policyPath', label: 'Policy Path' },
-  { key: 'userId', label: 'User ID' },
+  { key: 'taskName', label: 'Aufgabenname' },
+  { key: 'taskInstruction', label: 'Aufgabenanweisung' },
+  { key: 'policyPath', label: 'Modellpfad' },
+  { key: 'userId', label: 'Benutzer-ID' },
   { key: 'fps', label: 'FPS' },
-  { key: 'warmupTime', label: 'Warmup Time' },
-  { key: 'episodeTime', label: 'Episode Time' },
-  { key: 'resetTime', label: 'Reset Time' },
-  { key: 'numEpisodes', label: 'Num Episodes' },
+  { key: 'warmupTime', label: 'Aufwärmzeit' },
+  { key: 'episodeTime', label: 'Episodenzeit' },
+  { key: 'resetTime', label: 'Rücksetzzeit' },
+  { key: 'numEpisodes', label: 'Anzahl Episoden' },
 ];
 
 const requiredFieldsForInferenceOnly = [
-  { key: 'taskInstruction', label: 'Task Instruction' },
-  { key: 'policyPath', label: 'Policy Path' },
+  { key: 'taskInstruction', label: 'Aufgabenanweisung' },
+  { key: 'policyPath', label: 'Modellpfad' },
 ];
 
 const spinnerFrames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧'];
@@ -83,67 +83,77 @@ export default function ControlPanel() {
   const [spinnerIndex, setSpinnerIndex] = useState(0);
   const startedRef = useRef(started);
 
+  // NOTE: `label` doubles as the command key (handleControlCommand switch,
+  // buttonEnabled / isButtonEnabled / getButtonFromKey all key on it), so it
+  // stays English. `displayLabel` is the German text actually rendered on the
+  // button face — translating only the display avoids breaking dispatch.
   const buttons = [
     {
       label: 'Start',
+      displayLabel: 'Start',
       icon: MdPlayArrow,
       color: '#1976d2',
-      description: page === PageType.RECORD ? 'Start recording task' : 'Start inference',
+      description: page === PageType.RECORD ? 'Aufnahme starten' : 'Inferenz starten',
       shortcut: 'Space',
     },
     {
       label: 'Stop',
+      displayLabel: 'Stopp',
       icon: MdStop,
       color: '#d32f2f',
       description:
         page === PageType.RECORD
           ? useMultiTaskMode
-            ? 'Stop current task'
-            : 'Stop and save current episode'
+            ? 'Aktuelle Aufgabe stoppen'
+            : 'Stoppen und aktuelle Episode speichern'
           : '',
       shortcut: 'Space',
     },
     {
       label: 'Skip\nTask',
+      displayLabel: 'Aufgabe\nüberspringen',
       icon: MdNavigateNext,
       color: '#388e3c',
-      description: page === PageType.RECORD ? 'Skip current task' : '',
+      description: page === PageType.RECORD ? 'Aktuelle Aufgabe überspringen' : '',
       shortcut: 'Ctrl+Shift+N',
     },
     {
       label: 'Retry',
+      displayLabel: 'Wiederholen',
       icon: MdReplay,
       color: '#fbc02d',
       description:
         page === PageType.RECORD
           ? useMultiTaskMode
-            ? 'Retry current task'
-            : 'Retry current episode'
+            ? 'Aktuelle Aufgabe wiederholen'
+            : 'Aktuelle Episode wiederholen'
           : '',
       shortcut: '←',
     },
     {
       label: 'Next',
+      displayLabel: 'Weiter',
       icon: MdSkipNext,
       color: '#388e3c',
       description:
         page === PageType.RECORD
           ? useMultiTaskMode
-            ? 'Move to next task'
-            : 'Move to next episode'
+            ? 'Zur nächsten Aufgabe'
+            : 'Zur nächsten Episode'
           : '',
       shortcut: '→',
     },
     {
       label: 'Finish',
+      displayLabel: 'Fertig',
       icon: MdCheck,
       color: '#388e3c',
       description:
         page === PageType.RECORD
           ? useMultiTaskMode
-            ? 'Finish and save'
-            : 'Finish and save task'
-          : 'Finish inference',
+            ? 'Fertigstellen und speichern'
+            : 'Aufgabe fertigstellen und speichern'
+          : 'Inferenz beenden',
       shortcut: 'Ctrl+Shift+X',
     },
   ];
@@ -317,7 +327,7 @@ export default function ControlPanel() {
             result = await sendRecordCommand('start_inference');
           } else {
             console.warn(`Unknown page: ${page}`);
-            toast.error(`Unknown page: ${page}`);
+            toast.error(`Unbekannte Seite: ${page}`);
             return;
           }
         } else if (cmd === 'Stop') {
@@ -332,7 +342,7 @@ export default function ControlPanel() {
           result = await sendRecordCommand('finish');
         } else {
           console.warn(`Unknown command: ${cmd}`);
-          toast.error(`Unknown command: ${cmd}`);
+          toast.error(`Unbekannter Befehl: ${cmd}`);
           return;
         }
 
@@ -340,17 +350,17 @@ export default function ControlPanel() {
 
         // Handle service response
         if (result && result.success === false) {
-          toast.error(`Befehl fehlgeschlagen: ${result.message || 'Unknown error'}`);
+          toast.error(`Befehl fehlgeschlagen: ${result.message || 'Unbekannter Fehler'}`);
           console.error(`Command '${cmd}' failed:`, result.message);
         } else if (result && result.success === true) {
-          toast.success(`Command [${cmd}] erfolgreich ausgeführt`);
+          toast.success(`Befehl [${cmd}] erfolgreich ausgeführt`);
           console.log(`Command '${cmd}' executed successfully`);
 
           // Task status will be updated automatically from ROS
         } else {
           // Handle case where result is undefined or doesn't have success field
           console.warn(`Unexpected result format for command '${cmd}':`, result);
-          toast.error(`Command [${cmd}] completed with uncertain status`);
+          toast.error(`Befehl [${cmd}] mit unklarem Status abgeschlossen`);
         }
       } catch (error) {
         console.error('Error handling control command:', error);
@@ -364,7 +374,7 @@ export default function ControlPanel() {
         ) {
           toast.error(`🔌 ROS-Verbindung fehlgeschlagen: Rosbridge-Server läuft nicht (${rosHost})`);
         } else if (errorMessage.includes('timeout')) {
-          toast.error(`⏰ Befehlsausführung Zeitüberschreitung [${cmd}]: Server did not respond`);
+          toast.error(`⏰ Befehlsausführung Zeitüberschreitung [${cmd}]: Server hat nicht geantwortet`);
         } else {
           toast.error(`❌ Befehlsausführung fehlgeschlagen [${cmd}]: ${errorMessage}`);
         }
@@ -577,7 +587,7 @@ export default function ControlPanel() {
   return (
     <div className={classControlPanelBody} style={controlPanelBodyStyle}>
       <div className="flex flex-[2_2_320px] min-w-[280px] w-full h-[104px] gap-2 md:gap-3">
-        {buttons.map(({ label, icon: Icon, color, description, shortcut }) => {
+        {buttons.map(({ label, displayLabel, icon: Icon, color, description, shortcut }) => {
           const isDisabled = !isButtonEnabled(label);
 
           const tooltipContent = (
@@ -585,10 +595,10 @@ export default function ControlPanel() {
               <div className="font-semibold text-lg">{description}</div>
               {!isDisabled && (
                 <div className="text-md mt-1 text-gray-300">
-                  Press <span className="font-mono bg-gray-700 px-1 rounded">{shortcut}</span>
+                  Taste <span className="font-mono bg-gray-700 px-1 rounded">{shortcut}</span> drücken
                 </div>
               )}
-              {isDisabled && <div className="text-xs mt-1 text-red-300">Currently disabled</div>}
+              {isDisabled && <div className="text-xs mt-1 text-red-300">Derzeit deaktiviert</div>}
             </div>
           );
 
@@ -626,7 +636,7 @@ export default function ControlPanel() {
                   />
                 </span>
                 <span className="text-center whitespace-pre-line leading-tight text-ellipsis overflow-hidden block w-full h-full flex items-center justify-center">
-                  {label}
+                  {displayLabel}
                 </span>
               </button>
             </Tooltip>
@@ -698,7 +708,7 @@ export default function ControlPanel() {
               <SystemStatus label="RAM" type="ram" />
             ) : (
               /* Storage Details */
-              <SystemStatus label="Storage" type="storage" />
+              <SystemStatus label="Speicher" type="storage" />
             )}
           </div>
         ) : (
@@ -716,7 +726,7 @@ export default function ControlPanel() {
 
             {/* Storage */}
             <div onClick={() => setExpandedSystemIndex(2)} className="cursor-pointer">
-              <CompactSystemStatus label="Storage" type="storage" />
+              <CompactSystemStatus label="Speicher" type="storage" />
             </div>
           </>
         )}

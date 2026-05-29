@@ -170,9 +170,16 @@ log "Schreibe Konfiguration nach ${ENV_DIR}/jetson.env ..."
 mkdir -p "$ENV_DIR"
 ENV_FILE="${ENV_DIR}/jetson.env"
 
-# Derive a per-machine ROS_DOMAIN_ID like the GUI's _resolve_ros_domain_id:
-# /etc/machine-id hash mod 233 (avoids two Jetsons in the same school
-# Wi-Fi sharing domain 30 and cross-talking).
+# Derive a per-machine ROS_DOMAIN_ID in the GUI's spirit (a stable
+# per-host hash mod 233, so two Jetsons on the same school Wi-Fi don't
+# share domain 30 and cross-talk). NOTE: this is analogous to — not
+# byte-identical with — the GUI's config_generator._resolve_ros_domain_id:
+# the GUI hashes the MAC-derived uuid.getnode() and consumes the first 2
+# raw digest bytes, while here we hash /etc/machine-id (hostname fallback)
+# and consume the first 8 hex chars. Both land in [0,232] via mod 233.
+# Cross-device agreement is NOT required — a classroom Jetson and a
+# student PC are different machines and never need a matching domain id;
+# only intra-LAN uniqueness matters.
 MACHINE_ID="$(cat /etc/machine-id 2>/dev/null || hostname)"
 ROS_DOMAIN_ID=$(printf '%s' "$MACHINE_ID" | sha256sum | head -c 8 | python3 -c 'import sys; print(int(sys.stdin.read(),16) % 233)')
 

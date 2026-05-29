@@ -193,5 +193,179 @@ class TestDetectLanIp(unittest.TestCase):
         self.assertIsInstance(result, str)
 
 
+class _StateMachineTestBase(unittest.TestCase):
+    """Shared setUp/tearDown that snapshots + restores the agent's module
+    globals so state-machine tests can't leak into one another (or into
+    the pull/digest tests above)."""
+
+    def setUp(self):
+        self._owner_backup = agent._current_owner_user_id
+        self._state_backup = agent._state
+        self._attempts_backup = dict(agent._failed_claim_attempts)
+        agent._current_owner_user_id = None
+        agent._state = "paired_idle"
+        agent._failed_claim_attempts.clear()
+        agent._shutdown.clear()
+
+    def tearDown(self):
+        agent._shutdown.clear()
+        agent._current_owner_user_id = self._owner_backup
+        agent._state = self._state_backup
+        agent._failed_claim_attempts.clear()
+        agent._failed_claim_attempts.update(self._attempts_backup)
+
+
+class TestClaimRetryRelease(_StateMachineTestBase):
+    """H4 / M5: a persistent claim failure must not strand the server-side
+    lock. After CLAIM_RETRY_LIMIT failures the gave-up tick re-frees the
+    lock and resets the local view instead of silently returning."""
+
+    def test_giveup_tick_releases_lock_and_resets_owner(self):
+        owner = "student-uuid"
+        with patch.object(agent, "_bring_up_stack", side_effect=RuntimeError("boom")) as bring_up, \
+                patch.object(agent, "_move_to_safe_home"), \
+                patch.object(agent, "_start_proxy"), \
+                patch.object(agent, "_stop_proxy"), \
+                patch.object(agent, "_bring_down_stack"), \
+                patch.object(agent, "_release_lock_via_cloud_api") as release:
+            # Exhaust the retry budget. The main loop assigns the owner to
+            # the local view before each call (NULL -> UUID); the exception
+            # path then frees the local view back to None.
+            for _ in range(agent.CLAIM_RETRY_LIMIT):
+                agent._current_owner_user_id = owner
+                agent._transition_to_claimed(owner)
+                self.assertIsNone(agent._current_owner_user_id)
+            self.assertEqual(bring_up.call_count, agent.CLAIM_RETRY_LIMIT)
+            self.assertEqual(
+                agent._failed_claim_attempts.get(owner), agent.CLAIM_RETRY_LIMIT
+            )
+
+            # The next claim attempt for the SAME owner hits the early
+            # return. It must release the server-side lock, reset the local
+            # owner view, and NOT re-run the docker bring-up storm.
+            release.reset_mock()
+            agent._current_owner_user_id = owner
+            agent._transition_to_claimed(owner)
+
+            release.assert_called_once_with(owner)
+            self.assertIsNone(agent._current_owner_user_id)
+            self.assertEqual(agent._state, "paired_idle")
+            self.assertEqual(bring_up.call_count, agent.CLAIM_RETRY_LIMIT)  # unchanged
+
+    def test_successful_claim_clears_counter(self):
+        owner = "student-uuid"
+        agent._failed_claim_attempts[owner] = 1
+        with patch.object(agent, "_bring_up_stack"), \
+                patch.object(agent, "_move_to_safe_home"), \
+                patch.object(agent, "_start_proxy"), \
+                patch.object(agent, "_stop_proxy"), \
+                patch.object(agent, "_bring_down_stack"), \
+                patch.object(agent, "_release_lock_via_cloud_api"):
+            agent._current_owner_user_id = owner
+            agent._transition_to_claimed(owner)
+        self.assertEqual(agent._state, "claimed")
+        self.assertNotIn(owner, agent._failed_claim_attempts)
+
+
+class TestMainLoopRetryReset(_StateMachineTestBase):
+    """M5: the per-owner retry counter must be cleared whenever the server
+    authoritatively reports no owner — even if the local view is already
+    None (the gave-up path leaves it None). Otherwise a stale counter
+    short-circuits the same owner's next claim into the H4 deadlock."""
+
+    def _run_one_iteration(self, heartbeats):
+        seq = iter(heartbeats)
+
+        def fake_heartbeat(_env):
+            return next(seq)
+
+        def fake_wait(_timeout):
+            # Break the loop after each scripted heartbeat is consumed.
+            agent._shutdown.set()
+            return True
+
+        with patch.object(agent, "_agent_heartbeat", side_effect=fake_heartbeat), \
+                patch.object(agent._shutdown, "wait", side_effect=fake_wait), \
+                patch.object(agent, "_transition_to_released") as released, \
+                patch.object(agent, "_transition_to_claimed") as claimed:
+            agent._main_loop({"env": "x"})
+        return released, claimed
+
+    def test_server_free_clears_stale_counter_when_local_already_none(self):
+        agent._failed_claim_attempts["ghost"] = agent.CLAIM_RETRY_LIMIT
+        agent._current_owner_user_id = None  # already re-freed locally
+
+        released, _ = self._run_one_iteration([(True, None)])
+
+        self.assertEqual(agent._failed_claim_attempts, {})
+        released.assert_not_called()  # nothing to wipe — local view was None
+
+    def test_server_release_wipes_and_clears_counter(self):
+        agent._failed_claim_attempts["old"] = 2
+        agent._current_owner_user_id = "old"  # we still think we hold it
+
+        released, _ = self._run_one_iteration([(True, None)])
+
+        self.assertEqual(agent._failed_claim_attempts, {})
+        self.assertIsNone(agent._current_owner_user_id)
+        released.assert_called_once()
+
+    def test_unreachable_api_does_not_clear_counter_or_wipe(self):
+        # ok=False (network blip) must NOT be treated as "owner is None".
+        agent._failed_claim_attempts["holder"] = 1
+        agent._current_owner_user_id = "holder"
+
+        released, claimed = self._run_one_iteration([(False, None)])
+
+        self.assertEqual(agent._failed_claim_attempts, {"holder": 1})
+        self.assertEqual(agent._current_owner_user_id, "holder")
+        released.assert_not_called()
+        claimed.assert_not_called()
+
+
+class TestShutdownReleasesLock(_StateMachineTestBase):
+    """H2: main()'s finally must release a held server-side lock, not just
+    tear down the containers (the log line claimed it did, but the call was
+    missing)."""
+
+    def test_main_finally_releases_held_lock(self):
+        agent._current_owner_user_id = "held-owner"
+        env = {
+            "EDUBOTICS_JETSON_ID": "jetson-1",
+            "EDUBOTICS_AGENT_TOKEN": "tok",
+            "EDUBOTICS_CLOUD_API_URL": "https://cloud.example.com",
+        }
+        with patch.object(agent, "_load_env", return_value=env), \
+                patch.object(agent, "_start_loopback_server"), \
+                patch.object(agent, "_auto_pull_images"), \
+                patch.object(agent, "_main_loop"), \
+                patch.object(agent, "_release_lock_via_cloud_api") as release, \
+                patch.object(agent, "_stop_proxy") as stop_proxy, \
+                patch.object(agent, "_bring_down_stack") as bring_down, \
+                patch("agent.signal.signal"):
+            agent.main()
+        release.assert_called_once_with("held-owner")
+        stop_proxy.assert_called_once()
+        bring_down.assert_called_once()
+
+    def test_main_finally_noop_when_no_lock_held(self):
+        agent._current_owner_user_id = None
+        env = {
+            "EDUBOTICS_JETSON_ID": "jetson-1",
+            "EDUBOTICS_AGENT_TOKEN": "tok",
+            "EDUBOTICS_CLOUD_API_URL": "https://cloud.example.com",
+        }
+        with patch.object(agent, "_load_env", return_value=env), \
+                patch.object(agent, "_start_loopback_server"), \
+                patch.object(agent, "_auto_pull_images"), \
+                patch.object(agent, "_main_loop"), \
+                patch.object(agent, "_release_lock_via_cloud_api") as release, \
+                patch.object(agent, "_stop_proxy"), \
+                patch.object(agent, "_bring_down_stack"), \
+                patch("agent.signal.signal"):
+            agent.main()
+        release.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -176,7 +176,7 @@ export default function PolicySelector({ readonly = false }) {
         disabled={fetching || loading || readonly}
       >
         <option value="" disabled={readonly}>
-          Choose policy...
+          Modell auswählen...
         </option>
         {policyList.map((item) => (
           <option key={item} value={item}>

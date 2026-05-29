@@ -17,6 +17,7 @@ from app.services.modal_client import (
     start_training_job,
 )
 from app.services.supabase_client import get_supabase
+from app.services.training_sweep import MAX_CANCEL_ATTEMPTS
 from app.services.workgroups import resolve_visible_workgroup_ids
 from huggingface_hub import HfApi
 from huggingface_hub.utils import RepositoryNotFoundError
@@ -739,9 +740,37 @@ async def cancel_training(req: CancelTrainingRequest, user=Depends(get_current_u
         logger.info("Canceled training %s for user=%s", req.training_id, user_id)
         return {"status": "canceled", "training_id": req.training_id}
 
-    # Modal cancel failed and the sweep will retry. Return cancel_requested
-    # so the React UI can surface a "Abbruch in Bearbeitung…" toast and
-    # keep polling.
+    # Modal cancel failed. If this synchronous attempt has now reached the
+    # retry cap — e.g. a student spam-clicking Abbrechen against a flaky
+    # Modal drove cancel_attempts to MAX_CANCEL_ATTEMPTS — flip straight to
+    # 'failed' here so the credit frees immediately and further clicks stop
+    # issuing redundant Modal cancels, rather than depending on the
+    # background sweep to notice. Mirrors the sweep's give-up message
+    # (training_sweep._retry_one) so the student sees one consistent text.
+    if current_attempts + 1 >= MAX_CANCEL_ATTEMPTS:
+        supabase.table("trainings").update(
+            {
+                "status": "failed",
+                "terminated_at": datetime.now(timezone.utc).isoformat(),
+                "worker_token": None,
+                "error_message": (
+                    "Abbruch konnte nicht an Cloud-Worker zugestellt werden "
+                    f"(Modal-Cancel nach {MAX_CANCEL_ATTEMPTS} Versuchen "
+                    "weiterhin fehlgeschlagen). Credit wurde freigegeben — "
+                    "bitte Training neu starten."
+                ),
+            }
+        ).eq("id", req.training_id).execute()
+        logger.error(
+            "Cancel for training %s exhausted %d synchronous attempts, "
+            "marked failed (credit freed)",
+            req.training_id, MAX_CANCEL_ATTEMPTS,
+        )
+        return {"status": "failed", "training_id": req.training_id}
+
+    # Below the cap: leave the row in cancel_requested. The background
+    # training_cancel_sweep retries every 30 s. Return cancel_requested so
+    # the React UI can surface a "Abbruch in Bearbeitung…" toast and poll.
     logger.info(
         "Cancel queued for training %s (sweep will retry Modal cancel)",
         req.training_id,

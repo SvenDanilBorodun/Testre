@@ -90,8 +90,10 @@ RUN apt-get update && \
 COPY wsl.conf /etc/wsl.conf
 
 # Docker daemon config — register NVIDIA runtime so docker-compose.gpu.yml works.
-# userland-proxy is disabled so dockerd doesn't need the absolute proxy path
-# injected by Docker Desktop (WSL2 uses iptables port forwarding anyway).
+# userland-proxy-path points dockerd at the in-image /usr/bin/docker-proxy so it
+# doesn't look for the Docker-Desktop-injected proxy path (WSL2 also has iptables
+# port forwarding). The proxy itself is left at its default (enabled) — daemon.json
+# sets only the path, NOT "userland-proxy": false.
 COPY daemon.json /etc/docker/daemon.json
 
 # dockerd launcher invoked from /etc/wsl.conf [boot] command. Idempotent.

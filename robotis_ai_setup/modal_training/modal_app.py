@@ -37,14 +37,16 @@ image = (
     .apt_install("git", "ffmpeg", "clang", "build-essential")
     .pip_install(
         # LeRobot v0.5.1 from PyPI — pinned exact for reproducible builds.
-        # Extras: [pi0] pulls PI0+PI0Fast deps, [smolvla] pulls transformers
-        # (==5.3.0, the LeRobot exact pin) + SmolVLM deps, [peft] pulls PEFT
-        # adapter support (required by lerobot.policies.factory.make_policy
-        # when cfg.use_peft is True). [smolvla] also transitively covers the
-        # new pi05 (Pi-0.5) policy's transformer/processor stack.
+        # Extras: [pi] pulls the PI0 / PI0Fast / Pi-0.5 deps (scipy +
+        # transformers); [smolvla] pulls transformers (==5.3.0, the LeRobot
+        # exact pin) + SmolVLM deps; [peft] pulls PEFT adapter support
+        # (required by lerobot.policies.factory.make_policy when cfg.use_peft
+        # is True). NOTE: the extra is named "pi" in v0.5.1 — there is no
+        # "pi0" extra (an unknown extra is only a non-fatal pip warning, but
+        # "pi" is the correct name and actually installs scipy).
         # Do NOT pre-pin transformers here — let the [smolvla,peft] extras
         # resolve to the exact transformers==5.3.0 LeRobot requires.
-        f"lerobot[pi0,smolvla,peft]=={LEROBOT_VERSION}",
+        f"lerobot[pi,smolvla,peft]=={LEROBOT_VERSION}",
         # accelerate is a hard runtime dep in v0.5.1 (was optional in 0.2.0).
         # Pin to a safe minor-version range so a future major doesn't break
         # the resolver out from under us.

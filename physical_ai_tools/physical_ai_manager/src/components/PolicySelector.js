@@ -27,7 +27,9 @@ import { getPolicies } from '../services/cloudTrainingApi';
 import toast from 'react-hot-toast';
 
 // Env-gated allowlist — students only see ACT, admin/dev builds override via
-// REACT_APP_ALLOWED_POLICIES=tdmpc,diffusion,act,vqbet,pi0,pi0fast,smolvla.
+// REACT_APP_ALLOWED_POLICIES=tdmpc,diffusion,act,vqbet,pi0,pi0_fast,pi05,smolvla.
+// Names must match LeRobot v0.5.1's registered policy types exactly
+// (pi0_fast with an underscore, plus pi05) or they get filtered out below.
 const ALLOWED_POLICIES = (process.env.REACT_APP_ALLOWED_POLICIES || 'act')
   .split(',')
   .map((s) => s.trim().toLowerCase())

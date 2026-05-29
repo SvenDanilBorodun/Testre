@@ -221,7 +221,7 @@ RUN set -e && \
 RUN set -e && \
     python3 -m pip uninstall -y lerobot torchcodec 2>/dev/null || true && \
     python3 -m pip install --no-cache-dir \
-        "lerobot[pi0,smolvla,peft]==0.5.1" \
+        "lerobot[pi,smolvla,peft]==0.5.1" \
         "accelerate>=1.10.0,<2.0.0" && \
     rm -rf /root/ros2_ws/src/physical_ai_tools/lerobot && \
     sed -i '\|physical_ai_tools/lerobot/src|d' /root/.bashrc 2>/dev/null || true && \
@@ -344,7 +344,7 @@ RUN echo "AGPL audit: relies on explicit dependency manifest, see Dockerfile com
 # version on BOTH arches. v0.5.1 resolves these naturally to compatible versions,
 # but we pin explicitly to keep amd64 + arm64 producing byte-identical
 # site-packages. Versions chosen from Phase 0's verified pip resolve of
-# `lerobot[pi0,smolvla,peft]==0.5.1` on Python 3.12.
+# `lerobot[pi,smolvla,peft]==0.5.1` on Python 3.12.
 #
 #   safetensors==0.7.0   (LCD across arches; v0.8 still rc as of 2026-05)
 #   protobuf==6.33.6     (bumped from 6.31.0 for v0.5.1's grpcio-dep)

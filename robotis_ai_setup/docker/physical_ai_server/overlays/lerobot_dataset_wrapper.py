@@ -79,6 +79,58 @@ class LeRobotDatasetWrapper(LeRobotDataset):
             return None
         return buf['episode_index']
 
+    # ---- v0.5.1 lifecycle bridges (DatasetWriter moved these off the dataset) ----
+    # In LeRobot v0.5.1 the in-flight episode buffer, the image writer, and the
+    # streaming encoder all live on self.writer (DatasetWriter), not on the
+    # dataset object. data_manager.py still uses the pre-v0.5.1 call shapes
+    # (self._lerobot_dataset.episode_buffer, a 2-arg add_frame, and a direct
+    # start_image_writer). These three bridges keep those call sites working
+    # without a full state-machine refactor, so the recording loop runs against
+    # real v0.5.1 instead of raising AttributeError/TypeError on the first save.
+
+    @property
+    def episode_buffer(self):
+        """Bridge data_manager.py's ``self._lerobot_dataset.episode_buffer``
+        reads onto the v0.5.1 DatasetWriter. Returns None before the first
+        frame or when the dataset is read-only (writer is None)."""
+        writer = getattr(self, 'writer', None)
+        if writer is None:
+            return None
+        return getattr(writer, 'episode_buffer', None)
+
+    @episode_buffer.setter
+    def episode_buffer(self, value):
+        """Bridge the ``episode_buffer = None`` teardown in
+        data_manager._episode_reset onto the writer. Setting None is safe:
+        upstream add_frame lazily recreates the buffer via
+        _create_episode_buffer(), and save_episode() already resets it to a
+        fresh empty buffer on its own."""
+        writer = getattr(self, 'writer', None)
+        if writer is not None:
+            writer.episode_buffer = value
+
+    def add_frame(self, frame: dict, task: str = None, **kwargs) -> None:
+        """v0.5.1 add_frame takes a single ``frame`` dict that must carry a
+        ``'task'`` key. The non-optimized-save call site in data_manager.py
+        passes the task as a second positional arg (the pre-v0.5.1 signature);
+        accept it and fold it into the dict so both the one-arg (upstream) and
+        two-arg (legacy) call styles work."""
+        if task is not None:
+            frame = dict(frame)
+            frame['task'] = task
+        return super().add_frame(frame, **kwargs)
+
+    def start_image_writer(self, num_processes: int = 0, num_threads: int = 4) -> None:
+        """v0.5.1 moved start_image_writer onto the DatasetWriter. Forward to
+        it so data_manager.py's non-optimized-save branch keeps working. With
+        streaming_encoding=True (our default) and all-video camera features
+        there are no PNG image-features to write, so this is effectively a
+        no-op — but we forward for correctness if image-dtype features are
+        ever added."""
+        writer = getattr(self, 'writer', None)
+        if writer is not None and hasattr(writer, 'start_image_writer'):
+            writer.start_image_writer(num_processes, num_threads)
+
     def add_frame_without_write_image(self, frame: dict, task: str) -> None:
         """Alias for upstream add_frame — streaming_encoding=True means there
         are no PNG temp files to skip writing in the first place. We keep the

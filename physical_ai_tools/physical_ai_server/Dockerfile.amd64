@@ -61,7 +61,7 @@ RUN cd ${COLCON_WS} && \
 # of v0.5.1.
 RUN python3 -m pip uninstall -y torchcodec 2>/dev/null || true && \
     pip install --no-cache-dir \
-        "lerobot[pi0,smolvla,peft]==0.5.1" \
+        "lerobot[pi,smolvla,peft]==0.5.1" \
         "accelerate>=1.10.0,<2.0.0"
 
 # v2.5.0: LeRobot is now installed via pip into site-packages, NOT under the

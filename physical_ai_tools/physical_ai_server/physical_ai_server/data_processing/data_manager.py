@@ -23,6 +23,7 @@ from pathlib import Path
 import queue
 import shutil
 import subprocess
+import sys
 import threading
 import time
 
@@ -43,7 +44,9 @@ from nav_msgs.msg import Odometry
 import numpy as np
 from physical_ai_interfaces.msg import TaskStatus
 from physical_ai_server.data_processing.data_converter import DataConverter
-from physical_ai_server.data_processing.lerobot_dataset_wrapper import LeRobotDatasetWrapper
+from physical_ai_server.data_processing.lerobot_dataset_wrapper import (
+    LeRobotDatasetWrapper,
+)
 from physical_ai_server.data_processing.progress_tracker import (
     HuggingFaceProgressTqdm
 )
@@ -58,7 +61,6 @@ from trajectory_msgs.msg import JointTrajectory
 class DataManager:
     RECORDING = False
     RECORD_COMPLETED = True
-    RAM_LIMIT_GB = 2  # GB
     SKIP_TIME = 0.1  # Seconds
 
     # Progress queue for multiprocessing communication
@@ -68,7 +70,8 @@ class DataManager:
             self,
             save_root_path,
             robot_type,
-            task_info):
+            task_info,
+            upload_callback=None):
         self._robot_type = robot_type
         import re
         safe_task_name = re.sub(r'[^a-zA-Z0-9._-]', '-', task_info.task_name).strip('-')
@@ -78,6 +81,21 @@ class DataManager:
         self._on_saving = False
         self._single_task = len(task_info.task_instruction) == 1
         self._task_info = task_info
+        # Wired by the node to HfApiWorker.send_request so the
+        # end-of-recording auto-push runs out-of-process, surfaces errors
+        # on /huggingface/status, and lets the React side fire the
+        # /datasets/register Cloud-API call on success. None when the
+        # DataManager is constructed standalone (tests, fallback path).
+        self._upload_callback = upload_callback
+        # One-shot idempotency guard. The state machine has two call
+        # sites that can both reach _upload_dataset on the same tick
+        # (the 'finish' branch and the post-loop cap-reached check); the
+        # timer also normally stops on RECORD_COMPLETED, but we belt-
+        # and-suspenders against a future refactor that loses that stop,
+        # plus the joystick re-entry path. Reset to False is intentional
+        # only at construction — a new DataManager is built for every
+        # recording (see init_robot_control_parameters_from_user_task).
+        self._upload_enqueued = False
 
         self._lerobot_dataset = None
         self._record_episode_count = 0
@@ -86,12 +104,37 @@ class DataManager:
         self._status = 'warmup'
         self._cpu_checker = CPUChecker()
         self.data_converter = DataConverter()
+        # Propagate the task fps into the action-duration setter so
+        # published action messages use the right time_from_start at
+        # non-30 Hz recordings. Safe no-op if fps is missing/zero.
+        self.data_converter.set_action_duration_from_fps(
+            getattr(task_info, 'fps', 0) or 0
+        )
         self.force_save_for_safety = False
         self._stop_save_completed = False
         self.current_instruction = ''
         self._current_task = 0
         self._init_task_limits()
         self._current_scenario_number = 0
+        # Surfaced to TaskStatus.error as a [WARNUNG] prefix so the React UI
+        # renders a banner after the truncated episode saves. Cleared on the
+        # next episode reset.
+        self._last_warning_message: str = ''
+        # Stale-camera detection at recording time (mirrors the inference
+        # path's overlay/inference_manager.py:_check_stale_cameras). Without
+        # this a frozen USB camera silently writes the same frame to every
+        # tick of the dataset — the trained model then learns from a static
+        # observation. Hashing 4 sparse 256-byte slices is cheap (~µs per
+        # frame) and detects any decoded-pixel change.
+        self._last_image_hashes: dict[str, int] = {}
+        self._last_image_change_time: dict[str, float] = {}
+        self._stale_threshold_s = 2.0
+        self._stale_halt_threshold_s = 5.0
+        # v2.5.0: streaming_encoding=True (LeRobotDatasetWrapper default) feeds
+        # camera frames directly to ffmpeg as they arrive — no per-frame PNG
+        # temp files, no in-RAM frame accumulation. The v2.4 JpegFrame buffer
+        # + its env-var-toggled safety valve are gone (env var removed from
+        # docker-compose.yml; ROS node bounds memory architecturally now).
 
     def get_status(self):
         return self._status
@@ -121,13 +164,11 @@ class DataManager:
                 return self.RECORDING
 
         elif self._status == 'run':
+            # v2.5.0: streaming_encoding=True bounds the in-RAM episode buffer
+            # at upstream's frame_index/None placeholder level, so the v2.4
+            # in-RAM safety valve is no longer needed — the container can
+            # record arbitrarily long episodes.
             if not self._check_time(self._task_info.episode_time_s, 'save'):
-                if RAMChecker.get_free_ram_gb() < self.RAM_LIMIT_GB:
-                    if not self._single_task:
-                        self._status = 'finish'
-                    else:
-                        self.record_early_save()
-                    return self.RECORDING
                 frame = self.create_frame(images, state, action)
                 if self._task_info.use_optimized_save_mode:
                     self._lerobot_dataset.add_frame_without_write_image(
@@ -147,6 +188,7 @@ class DataManager:
                         and self._lerobot_dataset.check_append_buffer_completed()
                     )
                 ):
+                    self._verify_saved_video_files()
                     self._episode_reset()
                     self._record_episode_count += 1
                     self._get_current_scenario_number()
@@ -226,6 +268,20 @@ class DataManager:
     def save(self):
         if self._lerobot_dataset.episode_buffer is None:
             return
+        # Validate the buffer BEFORE save() consumes it. Logs to stderr only —
+        # validation never blocks the actual save.
+        try:
+            self._validate_episode_buffer()
+        except Exception as e:
+            print(
+                f'[WARNUNG] Episode-Prüfung fehlgeschlagen (nicht kritisch): {e}',
+                file=sys.stderr, flush=True,
+            )
+        # v2.5.0: with streaming_encoding=True + parallel_encoding=False the
+        # video files are fully written by the time save_episode() returns, so
+        # there is no async encoder snapshot to take here. The mp4s are checked
+        # for real, after the save, in _verify_saved_video_files() against the
+        # v3.0 on-disk layout — see that method.
         if self._task_info.use_optimized_save_mode:
             if not self._single_task:
                 self._lerobot_dataset.save_episode_without_video_encoding()
@@ -234,6 +290,103 @@ class DataManager:
         else:
             if self._lerobot_dataset.episode_buffer['size'] > 0:
                 self._lerobot_dataset.save_episode()
+
+    def _verify_saved_video_files(self):
+        """After save_episode() returns, verify each camera produced a
+        non-empty video file on disk.
+
+        LeRobot v0.5.1 (dataset codebase v3.0) writes one *concatenated* mp4
+        per video key at <root>/videos/<video_key>/chunk-NNN/file-NNN.mp4 —
+        several episodes share a file, so the exact per-episode filename is not
+        predictable from here. (The pre-v2.5.0 v2.1 layout
+        videos/chunk-NNN/<key>/episode_NNNNNN.mp4 no longer exists; checking
+        it produced false-positive "muss neu aufgenommen werden" errors on
+        every single episode.) We therefore verify, per camera, that the key's
+        video directory holds at least one non-empty .mp4 — which still catches
+        the catastrophic "no video was written at all" case without
+        false-positiving on the concatenated layout. The warning is surfaced in
+        German on TaskStatus.error; it never blocks the save.
+        """
+        ds = self._lerobot_dataset
+        if ds is None:
+            return
+        try:
+            root = Path(str(getattr(ds, 'root', '') or ''))
+            meta = getattr(ds, 'meta', None)
+            video_keys = list(getattr(meta, 'video_keys', []) or []) if meta else []
+        except Exception:
+            return
+        if not str(root) or not video_keys:
+            return
+        missing: list = []
+        for key in video_keys:
+            key_dir = root / 'videos' / key
+            try:
+                has_video = key_dir.is_dir() and any(
+                    p.is_file() and p.stat().st_size > 0
+                    for p in key_dir.rglob('*.mp4')
+                )
+            except OSError:
+                has_video = False
+            if not has_video:
+                missing.append(key.replace('observation.images.', ''))
+        if missing:
+            warning = (
+                f'Episode {self._record_episode_count + 1}: Für Kamera(s) '
+                f'{missing} wurde keine Video-Datei gespeichert. Diese Episode '
+                f'muss neu aufgenommen werden, sonst ist das Training '
+                f'unbrauchbar.'
+            )
+            self._last_warning_message = warning
+            print(f'[FEHLER] {warning}', file=sys.stderr, flush=True)
+
+    def _validate_episode_buffer(self):
+        """Inspect the in-memory episode buffer for silent data loss.
+
+        Checks frame timestamp gaps larger than 2x the expected frame interval —
+        usually a camera publisher hiccup or callback starvation.
+
+        Findings are logged in German for the student-facing operator UI;
+        they never block the save.
+        """
+        buf = self._lerobot_dataset.episode_buffer
+        if buf is None:
+            return
+
+        episode_no = self._record_episode_count + 1
+        fps = getattr(self._task_info, 'fps', None)
+        expected_dt = (1.0 / fps) if fps and fps > 0 else None
+
+        # Timestamp gaps inside the buffer.
+        timestamps = buf.get('timestamp')
+        if (
+            expected_dt is not None
+            and isinstance(timestamps, list)
+            and len(timestamps) >= 2
+        ):
+            threshold = 2.0 * expected_dt
+            gaps = []
+            for i in range(1, len(timestamps)):
+                try:
+                    dt = float(timestamps[i]) - float(timestamps[i - 1])
+                except (TypeError, ValueError):
+                    continue
+                if dt > threshold:
+                    gaps.append((i, dt))
+            if gaps:
+                # Limit the report to the worst few so we don't spam stderr.
+                gaps.sort(key=lambda g: g[1], reverse=True)
+                worst = gaps[:3]
+                summary = ', '.join(
+                    f'Frame {idx}: {dt * 1000:.0f} ms' for idx, dt in worst
+                )
+                print(
+                    f'[WARNUNG] Episode {episode_no}: {len(gaps)} '
+                    f'Zeitlücken erkannt (erwartet ~{expected_dt * 1000:.0f} ms '
+                    f'pro Frame). Größte Lücken: {summary}. '
+                    f'Mögliche Ursache: Kamera oder Sensor hat Frames verloren.',
+                    file=sys.stderr, flush=True,
+                )
 
     def create_frame(
             self,
@@ -313,6 +466,17 @@ class DataManager:
         current_status.proceed_time = int(getattr(self, '_proceed_time', 0))
         current_status.current_episode_number = int(self._record_episode_count)
 
+        # Propagate the last non-fatal warning (e.g. RAM truncation) into
+        # TaskStatus.error with a [WARNUNG] prefix so the React UI can
+        # render it distinctly from hard errors. Without this, truncation
+        # was invisible to the student. Clear-on-read so a persistent
+        # warning surfaces exactly once per occurrence: if a new
+        # truncation/mismatch happens, the warning is re-set by record()
+        # and re-surfaced on the next status tick.
+        if self._last_warning_message:
+            current_status.error = f'[WARNUNG] {self._last_warning_message}'
+            self._last_warning_message = ''
+
         total_storage, used_storage = StorageChecker.get_storage_gb('/')
         current_status.used_storage_size = float(used_storage)
         current_status.total_storage_size = float(total_storage)
@@ -336,19 +500,46 @@ class DataManager:
             self._current_scenario_number += 1
 
     def _get_encoding_progress(self):
-        min_encoding_percentage = 100
-        is_saving = False
-        if self._lerobot_dataset is not None:
-            if hasattr(self._lerobot_dataset, 'encoders') and \
-                    self._lerobot_dataset.encoders is not None:
-                if self._lerobot_dataset.encoders:
-                    is_saving = True
-                    for key, values in self._lerobot_dataset.encoders.items():
-                        min_encoding_percentage = min(
-                            min_encoding_percentage,
-                            values.get_encoding_status()['progress_percentage'])
+        # v2.5.0: streaming_encoding=True + parallel_encoding=False means
+        # save_episode() encodes synchronously and only returns once the
+        # episode's video is fully written. There is no async per-camera
+        # encoder to poll (the v2.4 self.encoders dict is gone in LeRobot
+        # v0.5.1), so the SAVING phase is effectively instantaneous. Report
+        # "not saving / 100%" so the React UI never renders a progress bar
+        # that can't move.
+        return False, 100.0
 
-        return is_saving, float(min_encoding_percentage)
+    def _check_stale_cameras(self, camera_data: dict) -> str | None:
+        """Hash sparse byte slices of each decoded camera frame to detect
+        a frozen feed. Mirrors overlays/inference_manager.py logic so
+        recording and inference treat dead cameras the same way. Returns
+        the camera name once it has been frozen >_stale_halt_threshold_s,
+        or None when fresh.
+        """
+        now = time.monotonic()
+        halt_on: str | None = None
+        for name, img in camera_data.items():
+            # v2.5.0: hash the decoded RGB ndarray's bytes. Streaming encoding
+            # means the recording buffer never holds compressed JPEG, so the
+            # JpegFrame branch is gone.
+            buf = img.tobytes() if hasattr(img, 'tobytes') else bytes(img)
+            n = len(buf)
+            if n <= 1024:
+                sample = buf
+            else:
+                slice_size = 256
+                offsets = (0, n // 4, n // 2, (3 * n) // 4)
+                sample = b''.join(buf[o:o + slice_size] for o in offsets)
+            h = hash(sample)
+            prev = self._last_image_hashes.get(name)
+            if prev != h:
+                self._last_image_hashes[name] = h
+                self._last_image_change_time[name] = now
+                continue
+            last_change = self._last_image_change_time.get(name, now)
+            if now - last_change > self._stale_halt_threshold_s and halt_on is None:
+                halt_on = name
+        return halt_on
 
     def convert_msgs_to_raw_datas(
             self,
@@ -364,9 +555,33 @@ class DataManager:
 
         if image_msgs is not None:
             for key, value in image_msgs.items():
-                camera_data[key] = cv2.cvtColor(
-                    self.data_converter.compressed_image2cvmat(value),
-                    cv2.COLOR_BGR2RGB)
+                # v2.5.0: always decode to RGB ndarray. streaming_encoding=True
+                # bounds in-RAM growth at the encoder boundary, so the v2.4
+                # JpegFrame compressed-bytes optimization is no longer needed.
+                # cv_bridge handles the BGR→RGB swap in-decoder when we ask
+                # for rgb8, saving one full-frame allocation + memcpy per
+                # camera per tick.
+                camera_data[key] = self.data_converter.compressed_image2cvmat(
+                    value, desired_encoding='rgb8')
+            stale = self._check_stale_cameras(camera_data)
+            if stale is not None:
+                # Warn (don't halt) — slow precision demos legitimately
+                # produce static scenes for >5 s (insertion, alignment,
+                # waiting for a human to place an object). Aborting the
+                # episode here was the single most-frequent false
+                # positive against real workflows. The inference path
+                # still halts on stale cameras (inference_manager.py)
+                # because there it's load-bearing; at recording time
+                # the worst case is a degraded frame, not a hardware
+                # event.
+                warning = (
+                    f'Kamera "{stale}" liefert seit über '
+                    f'{self._stale_halt_threshold_s:.0f}s dasselbe Bild. '
+                    f'Aufnahme läuft weiter — bitte prüfen, ob die '
+                    f'Szene wirklich statisch ist oder die Kamera hängt.'
+                )
+                self._last_warning_message = warning
+                print(f'[WARNUNG] {warning}', file=sys.stderr, flush=True)
         if follower_msgs is not None:
             for key, value in follower_msgs.items():
                 if value is not None:
@@ -403,8 +618,8 @@ class DataManager:
     def _episode_reset(self):
         if (
             self._lerobot_dataset
-            and hasattr(self._lerobot_dataset, 'episode_buffer')
-            or self._current_task == 0
+            and (hasattr(self._lerobot_dataset, 'episode_buffer')
+                 or self._current_task == 0)
         ):
             if self._lerobot_dataset.episode_buffer is not None:
                 for key, value in self._lerobot_dataset.episode_buffer.items():
@@ -414,6 +629,21 @@ class DataManager:
                 self._lerobot_dataset.episode_buffer.clear()
             self._lerobot_dataset.episode_buffer = None
         self._start_time_s = 0
+        # Drop the stale-camera hashes so a re-recorded episode starts
+        # fresh — otherwise the very first frame of the new episode would
+        # always be flagged "same as last frame of previous episode" and
+        # immediately advance the stale clock.
+        self._last_image_hashes.clear()
+        self._last_image_change_time.clear()
+        # NOTE: _last_warning_message is deliberately NOT cleared here.
+        # _episode_reset() runs inside the same record() tick that set the
+        # warning (RAM truncation -> record_early_save -> save -> encoding
+        # complete -> _episode_reset), so clearing here would wipe the
+        # warning before get_current_record_status() — called from the
+        # outer ROS timer — ever surfaces it to the UI. Instead, the
+        # warning is cleared in get_current_record_status() after it has
+        # been copied onto TaskStatus.error, which guarantees the student
+        # sees it at least once.
         gc.collect()
 
     def _check_time(self, limit_time, next_status):
@@ -475,7 +705,6 @@ class DataManager:
                             num_threads=1
                         )
             self._lerobot_dataset.set_robot_type(self._robot_type)
-
             return True
         except Exception as e:
             print(f'Error checking lerobot dataset: {e}')
@@ -514,13 +743,55 @@ class DataManager:
             )
 
     def _upload_dataset(self, tags, private=False):
+        """Auto-push the recorded dataset to HuggingFace.
+
+        Prefers the HfApiWorker callback (wired by the node) so the
+        upload runs out-of-process: the ROS spin thread stays
+        responsive, progress + Success/Failed events flow through
+        /huggingface/status (German toasts in the React UI), and a
+        successful upload triggers the React side to call
+        /datasets/register on the Cloud API — without that registration,
+        Modal training cannot discover the dataset.
+
+        Falls back to a direct push_to_hub when no callback was wired
+        (tests, standalone import). ``private`` is forwarded from the
+        student's "Privater Modus" choice in the React UI (TaskInfo
+        .private_mode). It defaults to True so a missing/garbled flag
+        fails safe to private — classroom recordings can contain
+        children's faces / audio. A student may opt a repo public at
+        record time; teachers can also flip individual repos later from
+        the HF dashboard.
+        """
+        private = bool(private)
+        if self._upload_enqueued:
+            # Already kicked off; subsequent state-machine ticks are no-ops.
+            return
+        self._upload_enqueued = True
+        if self._upload_callback is not None:
+            try:
+                self._upload_callback(
+                    self._save_repo_name,
+                    str(self._save_path),
+                    private,
+                )
+            except Exception as e:
+                print(
+                    f'[WARNUNG] Upload konnte nicht eingereiht werden: {e}',
+                    file=sys.stderr, flush=True,
+                )
+            return
+
+        # Standalone fallback — no progress events, no auto-register.
         try:
             self._lerobot_dataset.push_to_hub(
                 tags=tags,
                 private=private,
                 upload_large_folder=True)
         except Exception as e:
-            print(f'Error uploading dataset: {e}')
+            print(
+                f'[WARNUNG] Direkter Hub-Upload fehlgeschlagen: {e}',
+                file=sys.stderr, flush=True,
+            )
 
     def _download_dataset(self, repo_id):
         snapshot_download(
@@ -649,7 +920,11 @@ class DataManager:
     ):
         download_path = {
             'dataset': Path.home() / '.cache/huggingface/lerobot',
-            'model': Path.home() / 'ros2_ws/src/physical_ai_tools/lerobot/outputs/train/'
+            # v2.5.0: the LeRobot install is pip-managed from PyPI and the
+            # vendored ros2_ws/src/physical_ai_tools/lerobot tree is stripped
+            # by the image build, so model downloads must NOT target a path
+            # under it. Use a stable outputs dir outside the stripped tree.
+            'model': Path.home() / 'ros2_ws/outputs/train/'
         }
 
         save_path = download_path.get(repo_type)
@@ -857,6 +1132,7 @@ class DataManager:
         repo_id,
         repo_type,
         local_dir,
+        private=True,
     ):
         try:
             api = HfApi()
@@ -870,12 +1146,25 @@ class DataManager:
                 print('Please make sure you are authenticated with HuggingFace')
                 return False
 
-            # Create repository
-            print(f'Creating HuggingFace repository: {repo_id}')
+            # Repository visibility follows the student's "Privater Modus"
+            # choice (forwarded from TaskInfo.private_mode). Defaults to
+            # PRIVATE so a missing flag fails safe: student recordings may
+            # contain faces, classroom audio, or other data that must not
+            # leak to the public HF index (GDPR / school DPA). When the
+            # student opts public, the repo is created public; teachers can
+            # still flip any repo's visibility later from the HF dashboard.
+            # NOTE: exist_ok=True only verifies an existing repo — it does
+            # not retroactively change visibility, so the flag only takes
+            # effect on the first (creating) upload of a given repo_id.
+            private = bool(private)
+            print(
+                f'Creating HuggingFace repository: {repo_id} '
+                f'(private={private})'
+            )
             url = api.create_repo(
                 repo_id,
                 repo_type=repo_type,
-                private=False,
+                private=private,
                 exist_ok=True,
             )
             print(f'Repository created/verified: {url}')

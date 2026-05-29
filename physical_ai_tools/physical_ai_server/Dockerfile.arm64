@@ -64,14 +64,14 @@ ENV PIP_EXTRA_INDEX_URL=https://pypi.org/simple
 # a SmolVLA model in principle, just blocked by the dropdown gate.
 RUN python3 -m pip uninstall -y torchcodec 2>/dev/null || true && \
     pip install --no-cache-dir \
-        "lerobot[pi0,smolvla,peft]==0.5.1" \
+        "lerobot[pi,smolvla,peft]==0.5.1" \
         "accelerate>=1.10.0,<2.0.0"
 
 # Cross-arch package floor — pin safetensors / protobuf / pillow to a single
 # version on BOTH arches. v0.5.1 resolves these naturally to compatible versions,
 # but we pin explicitly to keep amd64 + arm64 producing byte-identical
 # site-packages for these libs. Versions chosen from Phase 0's verified pip
-# resolve of `lerobot[pi0,smolvla,peft]==0.5.1` on Python 3.12.
+# resolve of `lerobot[pi,smolvla,peft]==0.5.1` on Python 3.12.
 #
 #   safetensors==0.7.0   (unchanged; still the LCD across arches)
 #   protobuf==6.33.6     (bumped from 6.31.0; v0.5.1's grpcio-dep wants 6.31+)

@@ -120,10 +120,6 @@ class DataManager:
         # renders a banner after the truncated episode saves. Cleared on the
         # next episode reset.
         self._last_warning_message: str = ''
-        # Filled by save() with the mp4 paths we expect each episode to
-        # produce. Verified after video_encoding_completed goes True so
-        # the episode isn't marked saved with a missing / zero-byte mp4.
-        self._expected_video_paths: list = []
         # Stale-camera detection at recording time (mirrors the inference
         # path's overlay/inference_manager.py:_check_stale_cameras). Without
         # this a frozen USB camera silently writes the same frame to every
@@ -281,50 +277,11 @@ class DataManager:
                 f'[WARNUNG] Episode-Prüfung fehlgeschlagen (nicht kritisch): {e}',
                 file=sys.stderr, flush=True,
             )
-        # Snapshot which video files we expect for this episode so we can
-        # verify they actually land on disk after async encoding completes.
-        self._expected_video_paths = []
-        try:
-            encoders = getattr(self._lerobot_dataset, 'encoders', None) or {}
-            for save_path, enc in encoders.items():
-                out = getattr(enc, 'output_path', None) or save_path
-                if out:
-                    self._expected_video_paths.append(out)
-        except Exception:
-            pass
-        # Audit F23: when the snapshot is empty (single-task path —
-        # encoders dict is populated by the async writer thread AFTER
-        # save_episode_without_write_image, NOT before), derive the
-        # expected paths from the canonical LeRobot v2.1 layout so
-        # _verify_saved_video_files isn't a no-op. The verifier still
-        # silently passes if these paths happen to be wrong; this is
-        # the documented v2.1 mp4 layout (root/videos/chunk-NNN/
-        # observation.images.{cam}/episode_{idx:06d}.mp4).
-        if not self._expected_video_paths:
-            try:
-                root = Path(str(getattr(self._lerobot_dataset, 'root', '') or ''))
-                if root:
-                    idx_attr = getattr(self._lerobot_dataset, 'get_episode_index', None)
-                    idx = idx_attr() if callable(idx_attr) else None
-                    if not isinstance(idx, int):
-                        idx = self._record_episode_count
-                    chunk = idx // 1000
-                    features = getattr(self._lerobot_dataset, 'features', {}) or {}
-                    for key in features:
-                        if not key.startswith('observation.images.'):
-                            continue
-                        self._expected_video_paths.append(
-                            str(
-                                root / 'videos' / f'chunk-{chunk:03d}'
-                                / key / f'episode_{idx:06d}.mp4'
-                            )
-                        )
-            except Exception as e:
-                # Defensive — verification is best-effort; don't crash save().
-                print(
-                    f'[WARNUNG] Konnte erwartete Video-Pfade nicht ableiten: {e}',
-                    file=sys.stderr, flush=True,
-                )
+        # v2.5.0: with streaming_encoding=True + parallel_encoding=False the
+        # video files are fully written by the time save_episode() returns, so
+        # there is no async encoder snapshot to take here. The mp4s are checked
+        # for real, after the save, in _verify_saved_video_files() against the
+        # v3.0 on-disk layout — see that method.
         if self._task_info.use_optimized_save_mode:
             if not self._single_task:
                 self._lerobot_dataset.save_episode_without_video_encoding()
@@ -335,47 +292,50 @@ class DataManager:
                 self._lerobot_dataset.save_episode()
 
     def _verify_saved_video_files(self):
-        """After async video encoding reports complete, verify each mp4
-        actually landed on disk and is non-zero.
+        """After save_episode() returns, verify each camera produced a
+        non-empty video file on disk.
 
-        The upstream check_video_encoding_completed() trusts the encoder's
-        own `encoding_completed` flag — which can go true even if
-        GStreamer silently dropped the file mid-stream. Without this
-        check the episode is marked saved with a ghost mp4, the dataset
-        lists the episode as complete, and training later fails with an
-        opaque "video file not found" error. Surface the problem here,
-        at record time, where the student can re-record.
+        LeRobot v0.5.1 (dataset codebase v3.0) writes one *concatenated* mp4
+        per video key at <root>/videos/<video_key>/chunk-NNN/file-NNN.mp4 —
+        several episodes share a file, so the exact per-episode filename is not
+        predictable from here. (The pre-v2.5.0 v2.1 layout
+        videos/chunk-NNN/<key>/episode_NNNNNN.mp4 no longer exists; checking
+        it produced false-positive "muss neu aufgenommen werden" errors on
+        every single episode.) We therefore verify, per camera, that the key's
+        video directory holds at least one non-empty .mp4 — which still catches
+        the catastrophic "no video was written at all" case without
+        false-positiving on the concatenated layout. The warning is surfaced in
+        German on TaskStatus.error; it never blocks the save.
         """
-        paths = getattr(self, '_expected_video_paths', None) or []
-        if not paths:
+        ds = self._lerobot_dataset
+        if ds is None:
+            return
+        try:
+            root = Path(str(getattr(ds, 'root', '') or ''))
+            meta = getattr(ds, 'meta', None)
+            video_keys = list(getattr(meta, 'video_keys', []) or []) if meta else []
+        except Exception:
+            return
+        if not str(root) or not video_keys:
             return
         missing: list = []
-        zero_byte: list = []
-        for p in paths:
+        for key in video_keys:
+            key_dir = root / 'videos' / key
             try:
-                sp = Path(str(p))
-            except Exception:
-                continue
-            if not sp.exists():
-                missing.append(str(sp))
-            else:
-                try:
-                    if sp.stat().st_size == 0:
-                        zero_byte.append(str(sp))
-                except OSError:
-                    pass
-        self._expected_video_paths = []
-        if missing or zero_byte:
-            problems = []
-            if missing:
-                problems.append(f'fehlt: {missing}')
-            if zero_byte:
-                problems.append(f'leer (0 Bytes): {zero_byte}')
+                has_video = key_dir.is_dir() and any(
+                    p.is_file() and p.stat().st_size > 0
+                    for p in key_dir.rglob('*.mp4')
+                )
+            except OSError:
+                has_video = False
+            if not has_video:
+                missing.append(key.replace('observation.images.', ''))
+        if missing:
             warning = (
-                f'Episode {self._record_episode_count + 1}: Video-Datei(en) '
-                f'nicht korrekt gespeichert ({"; ".join(problems)}). '
-                f'Diese Episode muss neu aufgenommen werden, sonst ist das '
-                f'Training unbrauchbar.'
+                f'Episode {self._record_episode_count + 1}: Für Kamera(s) '
+                f'{missing} wurde keine Video-Datei gespeichert. Diese Episode '
+                f'muss neu aufgenommen werden, sonst ist das Training '
+                f'unbrauchbar.'
             )
             self._last_warning_message = warning
             print(f'[FEHLER] {warning}', file=sys.stderr, flush=True)
@@ -540,19 +500,14 @@ class DataManager:
             self._current_scenario_number += 1
 
     def _get_encoding_progress(self):
-        min_encoding_percentage = 100
-        is_saving = False
-        if self._lerobot_dataset is not None:
-            if hasattr(self._lerobot_dataset, 'encoders') and \
-                    self._lerobot_dataset.encoders is not None:
-                if self._lerobot_dataset.encoders:
-                    is_saving = True
-                    for key, values in self._lerobot_dataset.encoders.items():
-                        min_encoding_percentage = min(
-                            min_encoding_percentage,
-                            values.get_encoding_status()['progress_percentage'])
-
-        return is_saving, float(min_encoding_percentage)
+        # v2.5.0: streaming_encoding=True + parallel_encoding=False means
+        # save_episode() encodes synchronously and only returns once the
+        # episode's video is fully written. There is no async per-camera
+        # encoder to poll (the v2.4 self.encoders dict is gone in LeRobot
+        # v0.5.1), so the SAVING phase is effectively instantaneous. Report
+        # "not saving / 100%" so the React UI never renders a progress bar
+        # that can't move.
+        return False, 100.0
 
     def _check_stale_cameras(self, camera_data: dict) -> str | None:
         """Hash sparse byte slices of each decoded camera frame to detect
@@ -965,7 +920,11 @@ class DataManager:
     ):
         download_path = {
             'dataset': Path.home() / '.cache/huggingface/lerobot',
-            'model': Path.home() / 'ros2_ws/src/physical_ai_tools/lerobot/outputs/train/'
+            # v2.5.0: the LeRobot install is pip-managed from PyPI and the
+            # vendored ros2_ws/src/physical_ai_tools/lerobot tree is stripped
+            # by the image build, so model downloads must NOT target a path
+            # under it. Use a stable outputs dir outside the stripped tree.
+            'model': Path.home() / 'ros2_ws/outputs/train/'
         }
 
         save_path = download_path.get(repo_type)

@@ -154,6 +154,22 @@ class InferenceManager:
         # — the policy still runs with the cameras it expects.
         if self._expected_image_keys:
             provided = {f'observation.images.{k}' for k in images}
+            # A camera the policy REQUIRES but that isn't present would fail
+            # deep inside predict_action with an opaque tensor-shape error.
+            # Surface a clear German message instead so the operator knows to
+            # check the camera connection and restart inference. This is input
+            # validation (wrong observation keys), not a removed safety
+            # envelope — the run fails either way; we only make it legible.
+            missing = set(self._expected_image_keys) - provided
+            if missing:
+                missing_names = [
+                    k.replace('observation.images.', '') for k in sorted(missing)
+                ]
+                raise RuntimeError(
+                    f'Modell erwartet Kamera(s) {missing_names}, die nicht '
+                    f'verfügbar sind. Bitte Kamera-Verbindung prüfen und die '
+                    f'Inferenz neu starten.'
+                )
             unexpected = provided - set(self._expected_image_keys)
             if unexpected:
                 expected_names = [k.replace('observation.images.', '') for k in self._expected_image_keys]

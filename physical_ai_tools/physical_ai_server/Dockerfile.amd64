@@ -59,10 +59,14 @@ RUN cd ${COLCON_WS} && \
 # numpy<2 (the prior pin) is dropped: v0.5.1 requires numpy>=2.0.0,<2.3.0 per
 # its pyproject. setuptools 68 pin is dropped: not needed for the PyPI install
 # of v0.5.1.
+# scipy is pinned explicitly (v2.5.1 audit): it is otherwise only a transitive
+# of the lerobot[pi] extra and that resolve proved non-deterministic across
+# builds — pi0_fast inference hard-needs scipy.fftpack.idct, so pin it directly.
 RUN python3 -m pip uninstall -y torchcodec 2>/dev/null || true && \
     pip install --no-cache-dir \
         "lerobot[pi,smolvla,peft]==0.5.1" \
-        "accelerate>=1.10.0,<2.0.0"
+        "accelerate>=1.10.0,<2.0.0" \
+        "scipy>=1.14.0,<2.0.0"
 
 # v2.5.0: LeRobot is now installed via pip into site-packages, NOT under the
 # physical_ai_tools clone. The historic PYTHONPATH=...lerobot/src entry is gone.

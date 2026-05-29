@@ -62,10 +62,14 @@ ENV PIP_EXTRA_INDEX_URL=https://pypi.org/simple
 # dropdown on aarch64 hosts. The dep is installed anyway — students on
 # x86 connected to a Jetson via rosbridge can still ask the Jetson to load
 # a SmolVLA model in principle, just blocked by the dropdown gate.
+# scipy is pinned explicitly (v2.5.1 audit): it is otherwise only a transitive
+# of the lerobot[pi] extra and that resolve proved non-deterministic across
+# builds — pi0_fast inference hard-needs scipy.fftpack.idct, so pin it directly.
 RUN python3 -m pip uninstall -y torchcodec 2>/dev/null || true && \
     pip install --no-cache-dir \
         "lerobot[pi,smolvla,peft]==0.5.1" \
-        "accelerate>=1.10.0,<2.0.0"
+        "accelerate>=1.10.0,<2.0.0" \
+        "scipy>=1.14.0,<2.0.0"
 
 # Cross-arch package floor — pin safetensors / protobuf / pillow to a single
 # version on BOTH arches. v0.5.1 resolves these naturally to compatible versions,

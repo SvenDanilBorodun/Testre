@@ -106,6 +106,22 @@ COPY overlays/omx_f_config.yaml /tmp/overlays/omx_f_config.yaml
 # Roboter Studio service handlers. The inference-time safety envelope
 # was removed in the safety stripdown.
 COPY overlays/physical_ai_server.py /tmp/overlays/physical_ai_server.py
+# training_manager.py overlay (v2.5.1 audit fix): the v2.5.0 LeRobot v0.5.1
+# migration slimmed this file 269->66 lines (a stub holding only two static
+# helpers) and DELETED training/trainers/ + evaluation/ in the monorepo, but
+# never added training_manager.py to this apply_overlay chain. The base image
+# therefore kept upstream's 269-line copy, whose
+#   from physical_ai_server.training.trainers.lerobot.lerobot_trainer import LerobotTrainer
+#   -> from lerobot.scripts.eval import eval_policy
+# is dead under LeRobot 0.5.1 (scripts/eval.py renamed to scripts/lerobot_eval.py).
+# The shipping physical_ai_server.py overlay imports TrainingManager at module
+# top-level, so the ROS node ModuleNotFoundError-crashed at startup -> recording
+# AND inference dead on every student PC and classroom Jetson. Overlaying the
+# 66-line stub (path filter matches src/build/install trees) + the rm -rf of the
+# dead trees below restores a clean import. Re-runs of LeRobot training still go
+# through Modal Cloud (Rule §5); the stub only backs get_available_list() +
+# get_weight_save_root_path() that the inference/model-list callbacks call.
+COPY overlays/training_manager.py /tmp/overlays/training_manager.py
 # communicator.py adds get_latest_bgr_frame + get_latest_follower_joints
 # (decode CompressedImage + return JointState position) so the
 # Roboter Studio calibration manager can actually collect frames + EEF
@@ -187,10 +203,22 @@ RUN set -e && \
     apply_overlay hf_api_worker.py "*/data_processing/*" && \
     apply_overlay omx_f_config.yaml "" && \
     apply_overlay physical_ai_server.py "*/physical_ai_server/physical_ai_server.py" && \
+    apply_overlay training_manager.py "*/physical_ai_server/training/training_manager.py" && \
     apply_overlay communicator.py "*/communication/communicator.py" && \
     apply_overlay lerobot_dataset_wrapper.py "*/data_processing/*" && \
     apply_overlay physical_ai_server_bringup.launch.py "*/physical_ai_server/launch/*" && \
-    rm -rf /tmp/overlays
+    rm -rf /tmp/overlays && \
+    # v2.5.1 audit fix (paired with the training_manager.py overlay above):
+    # purge the on-device training trees the monorepo DELETED in v2.5.0 but
+    # which still live in the upstream base image. The 66-line stub no longer
+    # imports them, so they are pure dead code now — but removing them across
+    # the src/ AND colcon build/ AND install/ trees guarantees no other import
+    # path can re-reach the dead lerobot_trainer.py (-> lerobot.scripts.eval).
+    # `|| true` keeps the build green if the base layout ever omits them.
+    find /root/ros2_ws -type d \
+        \( -path "*/physical_ai_server/training/trainers" \
+           -o -path "*/physical_ai_server/evaluation" \) \
+        -exec rm -rf {} + 2>/dev/null || true
 
 # Override the base image's inherited LeRobot v0.2.0 with PyPI v0.5.1.
 #
@@ -218,16 +246,27 @@ RUN set -e && \
 # pin to a safe minor-version range so a future major doesn't break the
 # resolver. Do NOT pre-pin transformers — let lerobot[smolvla,peft] extras
 # resolve transformers==5.3.0 (LeRobot's exact pin).
+# scipy is pinned EXPLICITLY (v2.5.1 audit fix). It is otherwise only a
+# TRANSITIVE dep of the lerobot[pi] extra (lerobot 0.5.1: extra 'pi' ->
+# 'scipy-dep' -> scipy>=1.14.0,<2.0.0), and that transitive failed to
+# materialize on at least one published build (physical-ai-server:latest@fb3cc44
+# shipped WITHOUT scipy). pi0_fast's action decoder hard-needs scipy.fftpack.idct
+# (lerobot/policies/pi0_fast/modeling_pi0_fast.py: idct=None when scipy is
+# absent -> TypeError at inference). Pinning it directly here makes pi0_fast
+# inference deterministic across builds and both arches. Range matches LeRobot's
+# own scipy-dep constraint.
 RUN set -e && \
     python3 -m pip uninstall -y lerobot torchcodec 2>/dev/null || true && \
     python3 -m pip install --no-cache-dir \
         "lerobot[pi,smolvla,peft]==0.5.1" \
-        "accelerate>=1.10.0,<2.0.0" && \
+        "accelerate>=1.10.0,<2.0.0" \
+        "scipy>=1.14.0,<2.0.0" && \
     rm -rf /root/ros2_ws/src/physical_ai_tools/lerobot && \
     sed -i '\|physical_ai_tools/lerobot/src|d' /root/.bashrc 2>/dev/null || true && \
     sed -i '\|physical_ai_tools/lerobot/src|d' /usr/local/lib/s6-services/ros2_service_run.sh 2>/dev/null || true && \
     sed -i '\|physical_ai_tools/lerobot/src|d' /etc/s6-overlay/s6-rc.d/physical_ai_server/run 2>/dev/null || true && \
-    python3 -c "import lerobot; assert lerobot.__version__ == '0.5.1', f'expected lerobot==0.5.1, got {lerobot.__version__}'; print(f'LeRobot v{lerobot.__version__} installed (overrode base image v0.2.0)')"
+    python3 -c "import lerobot; assert lerobot.__version__ == '0.5.1', f'expected lerobot==0.5.1, got {lerobot.__version__}'; print(f'LeRobot v{lerobot.__version__} installed (overrode base image v0.2.0)')" && \
+    python3 -c "import scipy; from scipy.fftpack import idct; print(f'scipy {scipy.__version__} OK (pi0_fast idct available)')"
 
 # Roboter Studio runtime dependencies. opencv-contrib-python is required
 # for cv2.aruco (the main opencv-python wheel does NOT include the
@@ -423,6 +462,21 @@ from lerobot.datasets.io_utils import write_info, write_episodes, write_stats; \
 from lerobot.datasets.dataset_metadata import CODEBASE_VERSION; \
 assert CODEBASE_VERSION == 'v3.0', f'unexpected codebase_version: {CODEBASE_VERSION}'; \
 print('all v0.5.1 imports OK; codebase_version=v3.0')"
+
+# Build-time NODE-import smoke test (v2.5.1 audit). The policy smoke test above
+# imports lerobot.policies.* but NEVER imports physical_ai_server itself, so it
+# could not catch the v2.5.0 regression where the shipping physical_ai_server.py
+# overlay does a module-level `from physical_ai_server.training.training_manager
+# import TrainingManager` while the un-overlaid upstream training_manager.py
+# pulled the removed `lerobot.scripts.eval` -> ModuleNotFoundError at node
+# startup (recording + inference dead). This step imports the exact module the
+# s6 service loads at runtime; sourcing the colcon workspace makes
+# physical_ai_interfaces + the overlaid package resolvable. Any dead module-level
+# import now fails the build loudly instead of every student's classroom.
+RUN bash -c "set -e && \
+    source /opt/ros/jazzy/setup.bash && \
+    source /root/ros2_ws/install/setup.bash && \
+    python3 -c 'import physical_ai_server.physical_ai_server; print(\"physical_ai_server node module imports OK\")'"
 
 # Scrub upstream-base ENV leaks that the sed of /root/.bashrc above can't
 # touch (image-config ENV directives are independent of interactive-shell

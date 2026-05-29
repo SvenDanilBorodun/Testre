@@ -1,0 +1,9 @@
+# Keep Python bytecode caches out of the build context. The overlay files are
+# COPY'd verbatim into the image, so a stray __pycache__/ (e.g. a compiled
+# safety_envelope.pyc or training_manager.pyc left over from a deleted source)
+# must never enter the context — otherwise a local/dirty-tree build could ship
+# bytecode for a file whose source no longer exists. CI refuses dirty trees, but
+# this guarantees the same for ad-hoc local builds.
+**/__pycache__/
+**/*.pyc
+**/*.pyo

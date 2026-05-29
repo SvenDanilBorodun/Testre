@@ -72,6 +72,12 @@ image = (
         # 4.46.0 contract.
         "huggingface_hub==0.26.2",
         "numpy",
+        # transformers 4.46.0's Owlv2ImageProcessor.resize() calls into
+        # scipy at runtime and it is NOT pulled in transitively, so without
+        # this the OWLv2 /vision/detect path raises ImportError on the very
+        # first image preprocess. Caught by vision_app.py::smoke_test on
+        # 2026-05-29 (the image had never declared scipy).
+        "scipy",
     )
     # Pin torch 2.4.0 + torchvision 0.19.0 from the cu121 wheel index.
     # This is the vision surface's OWN channel, matched to its

@@ -32,7 +32,7 @@ const validateHfRepoName = (repoName) => {
   if (repoName.length > 96) {
     return {
       isValid: false,
-      message: 'Repository name must be 96 characters or less',
+      message: 'Repository-Name darf höchstens 96 Zeichen lang sein',
     };
   }
 
@@ -45,7 +45,7 @@ const validateHfRepoName = (repoName) => {
   ) {
     return {
       isValid: false,
-      message: 'Repository name cannot start or end with "-" or "."',
+      message: 'Repository-Name darf nicht mit "-" oder "." beginnen oder enden',
     };
   }
 
@@ -53,7 +53,7 @@ const validateHfRepoName = (repoName) => {
   if (repoName.includes('--') || repoName.includes('..')) {
     return {
       isValid: false,
-      message: 'Repository name cannot contain "--" or ".."',
+      message: 'Repository-Name darf "--" oder ".." nicht enthalten',
     };
   }
 
@@ -62,7 +62,7 @@ const validateHfRepoName = (repoName) => {
   if (!allowedPattern.test(repoName)) {
     return {
       isValid: false,
-      message: 'Repository name can only contain letters, numbers, "-", "_", and "."',
+      message: 'Repository-Name darf nur Buchstaben, Zahlen, "-", "_" und "." enthalten',
     };
   }
 
@@ -172,11 +172,11 @@ const PolicyDownloadModal = ({ isOpen, onClose, onDownloadComplete }) => {
         setShowTokenPopup(false);
         toast.success('Benutzer-ID-Liste erfolgreich aktualisiert!');
       } else {
-        toast.error('Failed to get user ID list from response');
+        toast.error('Benutzer-ID-Liste konnte aus der Antwort nicht ermittelt werden');
       }
     } catch (error) {
       console.error('Error registering HF user:', error);
-      toast.error(`Failed to register user: ${error.message}`);
+      toast.error(`Benutzer konnte nicht registriert werden: ${error.message}`);
     } finally {
       setIsLoading(false);
     }
@@ -193,14 +193,14 @@ const PolicyDownloadModal = ({ isOpen, onClose, onDownloadComplete }) => {
           setUserIdList(result.user_id_list);
           toast.success('Benutzer-ID-Liste erfolgreich geladen!');
         } else {
-          toast.error('Failed to get user ID list:\n' + result.message);
+          toast.error('Benutzer-ID-Liste konnte nicht ermittelt werden:\n' + result.message);
         }
       } else {
-        toast.error('Failed to get user ID list from response');
+        toast.error('Benutzer-ID-Liste konnte aus der Antwort nicht ermittelt werden');
       }
     } catch (error) {
       console.error('Error loading HF user list:', error);
-      toast.error(`Failed to load user ID list: ${error.message}`);
+      toast.error(`Benutzer-ID-Liste konnte nicht geladen werden: ${error.message}`);
     } finally {
       setIsLoading(false);
     }
@@ -233,19 +233,19 @@ const PolicyDownloadModal = ({ isOpen, onClose, onDownloadComplete }) => {
   // Download operation
   const handleDownloadPolicy = async () => {
     if (!hfRepoId || hfRepoId.trim() === '') {
-      toast.error('Please enter a Repository ID first');
+      toast.error('Bitte zuerst eine Repository-ID eingeben');
       return;
     }
 
     if (!userId || userId.trim() === '') {
-      toast.error('Please select a User ID first');
+      toast.error('Bitte zuerst eine Benutzer-ID auswählen');
       return;
     }
 
     // Additional validation check
     const validation = validateHfRepoName(hfRepoId.trim());
     if (!validation.isValid) {
-      toast.error(`Invalid repository name: ${validation.message}`);
+      toast.error(`Ungültiger Repository-Name: ${validation.message}`);
       return;
     }
 
@@ -255,7 +255,7 @@ const PolicyDownloadModal = ({ isOpen, onClose, onDownloadComplete }) => {
       const result = await controlHfServer('download', repoId, 'model');
       console.log('Download policy result:', result);
 
-      toast.success(`Policy download started successfully for ${repoId}!`);
+      toast.success(`Modell-Download für ${repoId} erfolgreich gestartet!`);
 
       // Call the completion callback if provided
       if (onDownloadComplete) {
@@ -263,7 +263,7 @@ const PolicyDownloadModal = ({ isOpen, onClose, onDownloadComplete }) => {
       }
     } catch (error) {
       console.error('Error downloading policy:', error);
-      toast.error(`Failed to download policy: ${error.message}`);
+      toast.error(`Modell konnte nicht heruntergeladen werden: ${error.message}`);
     } finally {
       setIsDownloading(false);
     }
@@ -273,10 +273,10 @@ const PolicyDownloadModal = ({ isOpen, onClose, onDownloadComplete }) => {
     try {
       const result = await controlHfServer('cancel', hfRepoId, 'model');
       console.log('Cancel download result:', result);
-      toast.success(`Cancelling... (${hfRepoId})`);
+      toast.success(`Wird abgebrochen... (${hfRepoId})`);
     } catch (error) {
       console.error('Error canceling download:', error);
-      toast.error(`Failed to cancel download: ${error.message}`);
+      toast.error(`Download konnte nicht abgebrochen werden: ${error.message}`);
     }
   };
 
@@ -454,7 +454,7 @@ const PolicyDownloadModal = ({ isOpen, onClose, onDownloadComplete }) => {
                               }
                             )}
                             type="text"
-                            placeholder="Enter repository id or username/repo"
+                            placeholder="Repository-ID oder benutzername/repo eingeben"
                             value={hfRepoId || ''}
                             onChange={(e) => handleRepoIdChange(e.target.value)}
                             disabled={isDownloading}

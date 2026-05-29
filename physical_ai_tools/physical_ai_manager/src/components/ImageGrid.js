@@ -57,7 +57,7 @@ export default function ImageGrid({ isActive = true }) {
       console.log(`Final ${isRefresh ? 're-assigned' : 'auto-assigned'} topics:`, autoTopics);
       setAsignedImageTopicList(autoTopics);
       toast.success(
-        `${isRefresh ? 'Re-a' : 'Auto-a'}ssigned ${Math.min(imageTopics.length, 3)} topics to grid`
+        `${isRefresh ? 'Erneut' : 'Automatisch'} ${Math.min(imageTopics.length, 3)} Topics dem Raster zugewiesen`
       );
     }
   }, []);
@@ -81,22 +81,22 @@ export default function ImageGrid({ isActive = true }) {
           const imageTopics = result.image_topic_list || [];
           dispatch(setImageTopicList(imageTopics));
           setTopicListError(null);
-          toast.success(`Loaded ${imageTopics.length} image topics`);
+          toast.success(`${imageTopics.length} Bild-Topics geladen`);
 
           // Auto-assign topics to grid cells
           autoAssignTopics(imageTopics, false);
         } else {
           console.error('Failed to get image topic list:', result?.message);
-          const errorMsg = result?.message || 'Unknown error occurred';
-          setTopicListError(`Service error: ${errorMsg}`);
+          const errorMsg = result?.message || 'Unbekannter Fehler aufgetreten';
+          setTopicListError(`Dienstfehler: ${errorMsg}`);
           dispatch(setImageTopicList([]));
-          toast.error(`Failed to load image topics: ${errorMsg}`);
+          toast.error(`Bild-Topics konnten nicht geladen werden: ${errorMsg}`);
         }
       } catch (error) {
         console.error('Error fetching image topic list:', error);
-        setTopicListError('Failed to load image topic list');
+        setTopicListError('Bild-Topic-Liste konnte nicht geladen werden');
         dispatch(setImageTopicList([]));
-        toast.error('Failed to load image topic list');
+        toast.error('Bild-Topic-Liste konnte nicht geladen werden');
       } finally {
         setIsLoadingTopics(false);
       }
@@ -149,17 +149,17 @@ export default function ImageGrid({ isActive = true }) {
         const imageTopics = result.image_topic_list || [];
         dispatch(setImageTopicList(imageTopics));
         setTopicListError(null);
-        toast.success(`Refreshed: ${imageTopics.length} image topics`);
+        toast.success(`Aktualisiert: ${imageTopics.length} Bild-Topics`);
       } else {
-        const errorMsg = result?.message || 'Unknown error occurred';
-        setTopicListError(`Service error: ${errorMsg}`);
+        const errorMsg = result?.message || 'Unbekannter Fehler aufgetreten';
+        setTopicListError(`Dienstfehler: ${errorMsg}`);
         dispatch(setImageTopicList([]));
-        toast.error(`Failed to refresh topics: ${errorMsg}`);
+        toast.error(`Topics konnten nicht aktualisiert werden: ${errorMsg}`);
       }
     } catch (error) {
-      setTopicListError('Failed to load image topic list');
+      setTopicListError('Bild-Topic-Liste konnte nicht geladen werden');
       dispatch(setImageTopicList([]));
-      toast.error('Failed to refresh image topics');
+      toast.error('Bild-Topics konnten nicht aktualisiert werden');
     } finally {
       setIsLoadingTopics(false);
     }

@@ -33,10 +33,11 @@ class RosConnectionManager {
     // Jetson auth: when the URL points at a Jetson rosbridge proxy
     // (port 9091), the proxy expects the first WS frame to be
     // {op: "auth", token: "<JWT>"}. We send that on the 'connection'
-    // event BEFORE any user-facing subscribe/advertise. The JWT is
-    // refreshed by useJetsonConnection on every reconnect via
-    // setAuthToken so a Supabase token rotation mid-session doesn't
-    // strand the WS.
+    // event BEFORE any user-facing subscribe/advertise. useJetsonConnection
+    // pushes the rotated Supabase access token here via setAuthToken
+    // whenever it changes during a connected session (see its accessToken
+    // effect), so authToken is always current and a reconnect after a
+    // mid-session token rotation carries a live JWT instead of a dead one.
     this.authToken = null;
   }
 

@@ -416,15 +416,6 @@ export function useRosTopicSubscription() {
     return phaseNames[phase] || 'UNKNOWN';
   }, []);
 
-  // Function to reset task to initial state
-  const resetTaskToIdle = useCallback(() => {
-    setTaskStatus((prevStatus) => ({
-      ...prevStatus,
-      running: false,
-      phase: 0,
-    }));
-  }, []);
-
   const subscribeToTrainingStatus = useCallback(async () => {
     try {
       const ros = await rosConnectionManager.getConnection(rosbridgeUrl);
@@ -881,7 +872,6 @@ export function useRosTopicSubscription() {
       subscribeToTaskStatus,
       cleanup,
       getPhaseName,
-      resetTaskToIdle,
       subscribeToTrainingStatus,
       subscribeHFStatus,
       subscribeToWorkflowStatus,
@@ -893,7 +883,6 @@ export function useRosTopicSubscription() {
       subscribeToTaskStatus,
       cleanup,
       getPhaseName,
-      resetTaskToIdle,
       subscribeToTrainingStatus,
       subscribeHFStatus,
       subscribeToWorkflowStatus,

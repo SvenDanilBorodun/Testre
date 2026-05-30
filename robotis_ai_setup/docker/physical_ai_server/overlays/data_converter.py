@@ -20,7 +20,6 @@ from typing import Any, Dict, List
 
 from builtin_interfaces.msg import Duration
 import cv2
-from cv_bridge import CvBridge
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
 import numpy as np
@@ -32,7 +31,11 @@ from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 class DataConverter:
 
     def __init__(self):
-        self._image_converter = CvBridge()  # Image converter using CVBridge
+        # cv_bridge is intentionally NOT used. Its boost C-extension is
+        # compiled against the numpy 1.x ABI in the ROS Jazzy base, and
+        # LeRobot 0.5.1 (v2.5.0) forces numpy 2.2.x — importing/using it
+        # crashes the node. compressed_image2cvmat() decodes via cv2
+        # directly (opencv-contrib 4.10.x is numpy-2-clean). See that method.
         self._joint_converter = None  # Joint data converter
         # Action-message time_from_start. Historically hardcoded to 50 ms,
         # which is ~1.5x the period at 30 Hz and breaks at any other fps.
@@ -61,26 +64,35 @@ class DataConverter:
             self,
             msg: CompressedImage,
             desired_encoding: str = 'bgr8') -> np.ndarray:
-        # Audit F5: 'passthrough' returned whatever cv_bridge decoded,
-        # then callers (data_manager.convert_msgs_to_raw_datas) ran an
-        # unconditional BGR2RGB swap on the result. usb_cam MJPEG
-        # happens to decode BGR today so it works — but any future
-        # driver/kernel returning a non-BGR decode would silently
-        # mis-train. 'bgr8' makes cv_bridge raise on a mismatch.
+        # Decode the JPEG/PNG buffer with OpenCV directly instead of
+        # cv_bridge.compressed_imgmsg_to_cv2(). cv_bridge's decode routes
+        # through its boost C-extension (cv_bridge.boost.cvtColor2), which
+        # is compiled against the numpy 1.x ABI shipped in the ROS Jazzy
+        # base image. LeRobot 0.5.1 (v2.5.0) forces numpy 2.2.x, so that
+        # extension SEGFAULTs (process exit 139) the first time a frame is
+        # converted — i.e. on the first recorded/inferred camera frame, even
+        # though the node imports and idles healthy. cv2 (opencv-contrib
+        # 4.10.x) is numpy-2-clean, so cv2.imdecode sidesteps the ABI break.
+        #
+        # CompressedImage.data is the raw encoded buffer. cv2.IMREAD_COLOR
+        # always yields an 8-bit, 3-channel BGR ndarray — exactly what
+        # desired_encoding='bgr8' meant before, so the downstream
+        # BGR2RGB swap in data_manager.convert_msgs_to_raw_datas still
+        # produces correct RGB. Behaviour is preserved; only the decoder
+        # backend changed.
         try:
-            cv_image = self._image_converter.compressed_imgmsg_to_cv2(
-                    msg,
-                    desired_encoding=desired_encoding)
+            buf = np.frombuffer(msg.data, dtype=np.uint8)
+            cv_image = cv2.imdecode(buf, cv2.IMREAD_COLOR)
             if cv_image is None:
-                raise RuntimeError('cv_bridge returned None')
-            if cv_image.dtype == np.uint16:
-                cv_image = cv2.normalize(
-                        cv_image,
-                        None,
-                        0,
-                        255,
-                        cv2.NORM_MINMAX,
-                        dtype=cv2.CV_8U)
+                raise RuntimeError('cv2.imdecode returned None (corrupt/empty frame?)')
+            # IMREAD_COLOR decodes to BGR. Honour non-default encodings so
+            # this stays a drop-in replacement for the cv_bridge contract.
+            enc = (desired_encoding or 'bgr8').lower()
+            if enc in ('rgb8', 'rgb'):
+                cv_image = cv2.cvtColor(cv_image, cv2.COLOR_BGR2RGB)
+            elif enc in ('mono8', 'mono', 'gray', 'grayscale'):
+                cv_image = cv2.cvtColor(cv_image, cv2.COLOR_BGR2GRAY)
+            # 'bgr8' / 'passthrough' → leave as the decoded BGR ndarray.
             return cv_image
         except Exception as e:
             raise RuntimeError(f'Failed to convert compressed image: {str(e)}')

@@ -888,6 +888,43 @@ def manager_container_running() -> bool:
         return False
 
 
+def ensure_environment_stopped(log=None) -> bool:
+    """Tear down any EduBotics containers left over from a previous session.
+
+    The GUI is the SOLE owner of the container lifecycle: the robot stack
+    must run only after the student explicitly clicks "Umgebung starten".
+    Two paths can leave it running prematurely:
+      1. dockerd resurrects containers on distro boot when they were created
+         with a `restart` policy other than "no" (pre-2.5.3 images shipped
+         `unless-stopped`), and the distro boots the moment the GUI first
+         touches WSL;
+      2. a previous GUI session simply left the stack up.
+    Either case means the arm could be driven — and the Dynamixel serial bus
+    held — before the student has scanned hardware, which ALSO makes the arm
+    scan fail (identify_arm.py opens the same /dev/serial port the live
+    controller is hammering at 100 Hz, so its pings collide and neither arm
+    is identified).
+
+    A graceful `compose down` (SIGTERM) lets open_manipulator's entrypoint
+    disable servo torque before exit, and removing the containers means the
+    next `up --force-recreate` recreates them with the current `restart:
+    "no"` policy (self-healing for stacks created by an older image). The
+    gpu override file is not needed for `down`. Idempotent: a fast no-op
+    (exit 0) when nothing is present.
+
+    Returns True iff at least one project container was present and a
+    teardown was issued.
+    """
+    status = get_container_status()
+    present = [name for name, s in status.items() if s not in ("not found", "error")]
+    if not present:
+        return False
+    if log:
+        log(f"Vorherige Container gefunden ({', '.join(present)}) — werden gestoppt...")
+    stop_containers(gpu=False)
+    return True
+
+
 def stop_containers(gpu: bool = False) -> bool:
     """Stop all containers via docker compose down."""
     cmd = _docker_cmd(

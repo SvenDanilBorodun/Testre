@@ -430,6 +430,22 @@ class EduBoticsApp:
         docker_manager.start_keepalive()
         self._log("EduBotics-Umgebung: OK")
 
+        # ── Lifecycle: the GUI is the SOLE owner of the container lifecycle ──
+        # The robot stack must come up ONLY after the student has scanned both
+        # arms and clicked "Umgebung starten" — never before. Two paths can
+        # leave it running prematurely: (1) dockerd resurrects containers on
+        # distro boot when they carry a `restart` policy other than "no"
+        # (pre-2.5.3 images used `unless-stopped`), and the distro boots the
+        # moment this GUI first touched WSL above; (2) a previous session left
+        # the stack up. Either way the arm would be driven — and the Dynamixel
+        # serial bus held — before any scan, which ALSO breaks the scan itself
+        # (identify_arm.py collides with the live controller on the same
+        # /dev/serial port → neither arm is identified). Tear it down now so
+        # the student starts from a clean, deterministic state.
+        self._set_status("Vorherige Sitzung wird aufgeräumt...")
+        if docker_manager.ensure_environment_stopped(log=self._log):
+            self._log("Umgebung gestoppt — sie startet erst, wenn du auf 'Umgebung starten' klickst.")
+
         # Check images
         self._set_status("Images werden geprüft...")
         img_status = docker_manager.images_exist()
@@ -495,23 +511,10 @@ class EduBoticsApp:
             # and continue with the existing (working) flow.
             self._log(f"  (Frische-Status konnte nicht gelesen werden: {exc})")
 
-        # Check if containers are already running from a previous session
-        if docker_manager.all_containers_running():
-            self._log("Container laufen bereits von einer vorherigen Sitzung.")
-            self._log("Umgebung ist aktiv — Browser kann geöffnet werden.")
-            self.running = True
-            self.root.after(0, lambda: self.btn_stop.config(state=tk.NORMAL))
-            self.root.after(0, lambda: self.btn_open_browser.config(state=tk.NORMAL))
-            self._set_status("Aktiv — Umgebung läuft (fortgesetzt)")
-        elif docker_manager.manager_container_running():
-            self._log("Cloud-Container läuft bereits von einer vorherigen Sitzung.")
-            self.running = True
-            # Auto-tick the cloud-only checkbox so Stop / Browser buttons act on the right thing.
-            self.root.after(0, lambda: self.cloud_only.set(True))
-            self.root.after(0, self._on_mode_changed)
-            self.root.after(0, lambda: self.btn_stop.config(state=tk.NORMAL))
-            self.root.after(0, lambda: self.btn_open_browser.config(state=tk.NORMAL))
-            self._set_status("Aktiv — Cloud-Modus läuft (fortgesetzt)")
+        # NOTE: we intentionally do NOT auto-resume a stack found running here.
+        # `ensure_environment_stopped()` above already tore down any leftover /
+        # resurrected containers, so the student always starts from a clean
+        # state and the stack comes up only when they click "Umgebung starten".
 
         # Check GPU
         self.gpu_available = docker_manager.has_gpu()
@@ -893,6 +896,21 @@ class EduBoticsApp:
             self._set_status("Roboterarme werden gesucht...")
             self.root.after(0, lambda: self.progress.start(10))
             self._log("USB-Geräte werden nach Roboterarmen durchsucht...")
+
+            # The arm identification opens the SAME /dev/serial ports the
+            # running stack uses. If open_manipulator is up it holds those
+            # ports and drives the Dynamixel bus at 100 Hz — identify_arm.py's
+            # pings then collide with the live controller traffic and BOTH
+            # arms fail to identify (the original "Arme konnten nicht
+            # zugeordnet werden" while teleop was visibly running). Free the
+            # bus first: tear down any running environment before scanning.
+            if docker_manager.ensure_environment_stopped(log=self._log):
+                self._log("Laufende Umgebung wurde für den Scan gestoppt.")
+                self._stop_camera_bridge()
+                self.running = False
+                self.root.after(0, lambda: self.btn_stop.config(state=tk.DISABLED))
+                self.root.after(0, lambda: self.btn_open_browser.config(state=tk.DISABLED))
+                self.root.after(0, self._update_start_button)
 
             # Clear any repair button from a previous failed scan.
             self.root.after(0, self._clear_arm_repair)

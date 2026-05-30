@@ -2,6 +2,19 @@
 # and on the classroom Jetson (arm64; via the -jetson images per service).
 # Image tags are resolved from ${IMAGE_TAG:-latest}; the GUI updates the
 # tag via versions.env. See docs/deploy/PIPELINE.md for the build pipeline.
+#
+# Lifecycle: `restart: "no"` on every service is deliberate — the Windows
+# GUI (EduBotics.exe) is the SOLE owner of the container lifecycle. The
+# stack must come up ONLY after the student has scanned both arms and
+# clicked "Umgebung starten". With `unless-stopped` (the old value) dockerd
+# resurrected the stack the moment the distro booted (i.e. the moment the
+# GUI first touched WSL), so the arm was driven and the Dynamixel serial
+# bus held BEFORE any scan — which also broke the scan itself (identify_arm
+# .py collides with the live controller on the same /dev/serial port). The
+# GUI tears down any leftover stack at startup and on a re-scan; `no` keeps
+# dockerd from bringing it back behind the GUI's back. It also removes a
+# documented footgun: a boot-sync abort used to loop compose's restart
+# policy into a crash-storm.
 networks:
   ros_net:
     driver: bridge
@@ -11,7 +24,7 @@ services:
     container_name: open_manipulator
     image: ${REGISTRY:-nettername}/open-manipulator:${IMAGE_TAG:-latest}
     tty: true
-    restart: unless-stopped
+    restart: "no"
     cap_add:
       - SYS_NICE
     ulimits:
@@ -124,7 +137,7 @@ services:
         # and the UI flashed a misleading error.
         condition: service_healthy
     tty: true
-    restart: unless-stopped
+    restart: "no"
     cap_add:
       - SYS_NICE
     ulimits:
@@ -201,7 +214,7 @@ services:
       - ros_net
     ports:
       - "127.0.0.1:80:80"
-    restart: unless-stopped
+    restart: "no"
     mem_limit: 512m
     pids_limit: 128
     healthcheck:

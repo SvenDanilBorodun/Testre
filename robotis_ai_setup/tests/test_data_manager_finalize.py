@@ -30,9 +30,11 @@ import unittest
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+# v2.5.3: physical-ai-server is now COPY-wholesale — the single source of truth
+# is the package tree, not the (deleted) docker overlays/ dir.
 DATA_MANAGER_PATH = (
-    REPO_ROOT / 'robotis_ai_setup' / 'docker' / 'physical_ai_server'
-    / 'overlays' / 'data_manager.py'
+    REPO_ROOT / 'physical_ai_tools' / 'physical_ai_server' / 'physical_ai_server'
+    / 'data_processing' / 'data_manager.py'
 )
 
 

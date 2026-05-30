@@ -29,7 +29,7 @@ Single git repo, no submodules. ROBOTIS upstream (`open_manipulator/`, `physical
 6. **React 19 SPA (student + web dashboard)** — `physical_ai_tools/physical_ai_manager/`; one codebase, two builds via `Dockerfile` (student) and `Dockerfile.web` (Railway)
 7. **Cloud training (Railway + Modal + Supabase)** — `robotis_ai_setup/cloud_training_api/`, `robotis_ai_setup/modal_training/`, `robotis_ai_setup/supabase/`
 8. **Inference (load policy → drive arm)** — overlay `inference_manager.py` + upstream `inference/`
-9. **Roboter Studio (Blockly + classical CV)** — `physical_ai_server/overlays/workflow/` + `cloud_training_api/app/routes/workflows.py` + Supabase `008_workflows.sql`
+9. **Roboter Studio (Blockly + classical CV)** — `physical_ai_tools/physical_ai_server/physical_ai_server/workflow/` (ships via the physical-ai-server package COPY) + `cloud_training_api/app/routes/workflows.py` + Supabase `008_workflows.sql`
 10. **Classroom Jetson Orin Nano** — shared remote inference target (Inferenz tab only); `robotis_ai_setup/jetson_agent/` + `cloud_training_api/app/routes/jetson.py` + migration `019_classroom_jetsons.sql`
 
 ```
@@ -65,11 +65,15 @@ Software-side inference safety envelopes (NaN/Inf guard, joint clamp, per-tick v
 
 If you genuinely need to reintroduce a software safety guard that modifies the pipeline, **stop and ask the user**.
 
-### 3. Overlays must fail loudly on missing target, no-op when already applied
+### 3. The shipped image must reflect the repo — physical-ai-server is COPY-wholesale; open-manipulator still overlays
 
-`apply_overlay()` in `docker/physical_ai_server/Dockerfile` and `docker/open_manipulator/Dockerfile` does sha256 pre/post copy verification. If the upstream file is missing, build aborts. If the target is already byte-identical, it logs `Overlay already in place` and continues (idempotent). When adding an overlay you **must** add it to the `apply_overlay` chain with a unique path filter — without that, the source edit lives in the repo but never reaches the image.
+**physical-ai-server (v2.5.2+): COPY-WHOLESALE, no overlays.** The thin-overlay `docker/physical_ai_server/Dockerfile` no longer `apply_overlay`s ~9 hand-listed files onto the upstream clone. That model silently dropped any monorepo edit OR deletion not wired into the chain — the v2.5.0 `training_manager.py` regression (a slimmed file never reached the image → dead `lerobot.scripts.eval` import → node crash). Now the image's `physical_ai_server` package is a **verbatim copy of the single source of truth** `physical_ai_tools/physical_ai_server/` (staged into the build context as `pkg_src/` by `build-images.sh`, then `rm`'d + `COPY`'d + re-`colcon`'d). "Image == repo HEAD" is true by construction: edits, new files AND deletions all propagate, no list to forget. The `server_inference.py` upstream-bug fix is now baked into the source tree (the separate `fix_server_inference.py` patch step is gone), and `workflow/` rides along inside the package. The Dockerfile asserts the stripped `safety_envelope.py` (Rule §2) and the dead `training/trainers/`+`evaluation/` trees never re-enter, and a build-time `import physical_ai_server.physical_ai_server` proves the node loads.
 
-`patches/fix_server_inference.py` self-verifies and exits 2/3 on no-op; CI's `overlay-guard` job tests this with a synthetic input.
+**open-manipulator: STILL the overlay model.** `apply_overlay()` in `docker/open_manipulator/Dockerfile` does sha256 pre/post copy verification (build aborts on missing upstream target; idempotent "Overlay already in place" when byte-identical). It was kept (not converted to COPY-wholesale) because open_manipulator contains C++ `ros2_control` packages where a full re-`colcon` is heavy/risky, and the package set is drift-free. When adding an open_manipulator overlay you **must** add it to the chain with a unique path filter — without that the source edit never reaches the image.
+
+**Both are guarded by `image-source-parity`** (`.github/scripts/image_source_parity.sh`, run per-arch in `docker-publish.yml::smoke-test`): physical-ai-server asserts the image package is **byte-identical** to the repo (`diff -r`); open-manipulator asserts every overlay file is present (by sha256) in the image src tree. This is the durable backstop against the drift class — see the §3-style detail in "Critical architectural choices".
+
+`patches/fix_server_inference.py` is retained (no longer used by the physical-ai-server build — the fix is baked into source) and CI's `overlay-guard` job still tests it standalone with a synthetic input; it remains live for any future overlay-style patch.
 
 LeRobot itself is **not** overlaid — it's pip-installed from PyPI at version `0.5.1` in the base Dockerfiles. The 3-site version contract (Rule §5) keeps Modal, the amd64 Dockerfile, and the arm64 Dockerfile in lockstep; no per-file overlays needed.
 
@@ -154,7 +158,7 @@ Manual `railway up`, `psql -f migration.sql`, and `build-images.sh` from a devel
 
 - **Aufnahme recording RAM is bounded by upstream `streaming_encoding=True` (v2.5.0 / LeRobot v0.5.1), NOT by a software valve.** `LeRobotDatasetWrapper` sets `streaming_encoding=True` by default (`lerobot_dataset_wrapper.py::_apply_edubotics_defaults`, applied in both `__init__` and `create`); camera frames are fed straight to the ffmpeg streaming encoder as they arrive instead of being decoded to RGB ndarrays and accumulated in `episode_buffer`, so the in-RAM footprint is bounded regardless of episode length and episodes can record arbitrarily long. The whole v2.4 mechanism this replaced is **gone**: the JPEG-in-RAM buffer, the `_episode_image_bytes` counter, the `_buffer_full` flag, the forced save-on-buffer-full, the `EDUBOTICS_MAX_BUFFER_GB` env var (removed from `docker-compose.yml`), and the ~74 s hard episode cap. `lerobot_dataset_wrapper.reset_buffer_accounting()` survives only as a no-op back-compat stub. There is no longer any buffer-full `[WARNUNG]` or 5-minute short-circuit.
 
-- **Roboter Studio is bolted onto `physical_ai_server`, not a separate container.** The Dockerfile (a) rebuilds `physical_ai_interfaces` because the base image predates the new msgs/srvs, (b) installs `opencv-contrib-python==4.10.0.84`, `pupil-apriltags==1.0.4`, `onnxruntime==1.20.1` (CMake 4 compatibility via `ENV CMAKE_POLICY_VERSION_MINIMUM=3.5`), (c) downloads YOLOX-tiny ONNX from a pinned GitHub release URL and SHA-256 verifies `427cc366d34e27ff7a03e2899b5e3671425c262ea2291f88bb942bc1cc70b0f7`. Then copies in the `overlays/workflow/` module.
+- **Roboter Studio is bolted onto `physical_ai_server`, not a separate container.** The Dockerfile (a) rebuilds `physical_ai_interfaces` because the base image predates the new msgs/srvs, (b) installs `opencv-contrib-python==4.10.0.84`, `pupil-apriltags==1.0.4`, `onnxruntime==1.20.1` (CMake 4 compatibility via `ENV CMAKE_POLICY_VERSION_MINIMUM=3.5`), (c) downloads YOLOX-tiny ONNX from a pinned GitHub release URL and SHA-256 verifies `427cc366d34e27ff7a03e2899b5e3671425c262ea2291f88bb942bc1cc70b0f7`. The `workflow/` module ships as part of the COPY-wholesale physical_ai_server package (Rule §3) — it is no longer a separate `overlays/workflow/` COPY.
 
 - **`.s6-keep` is load-bearing.** `physical_ai_server` bind-mounts `./physical_ai_server/.s6-keep` (empty 1-byte file) at `/etc/s6-overlay/s6-rc.d/user/contents.d/physical_ai_server:ro`. Remove the mount and the ROS node never starts inside the container even though `s6` reports healthy.
 
@@ -220,7 +224,7 @@ docker compose -f robotis_ai_setup/docker/docker-compose.yml \
 # Python compileall (mirrors CI)
 python -m compileall -q robotis_ai_setup/gui robotis_ai_setup/scripts \
   robotis_ai_setup/cloud_training_api robotis_ai_setup/modal_training \
-  robotis_ai_setup/docker/physical_ai_server/overlays \
+  physical_ai_tools/physical_ai_server/physical_ai_server \
   robotis_ai_setup/docker/physical_ai_server/patches
 ```
 
@@ -273,7 +277,7 @@ Two layers — `ci.yml` (validators) and the five deploy workflows.
 - **modal-import-validate** — `modal_app.py` + `vision_app.py` (NOT `training_handler.py` — it imports container-only deps)
 - **teacher-web-build-validate** — builds `Dockerfile.web` with `physical_ai_manager/` as the build context (matches `railway up --path-as-root .`)
 - **manager-build-validate** — builds student `Dockerfile` with placeholder secrets; asserts each placeholder reached `main.*.js` (white-screen regression catcher)
-- **tutorials-validate** — JSON-parses `physical_ai_manager/public/tutorials/*.json`, cross-checks `allowed_blocks` against runtime dispatch (`STATEMENT_HANDLERS` + `VALUE_EVALUATORS` keys in `overlays/workflow/handlers/__init__.py`, `HAT_BLOCK_TYPES` in `overlays/workflow/interpreter.py`, plus Blockly built-ins)
+- **tutorials-validate** — JSON-parses `physical_ai_manager/public/tutorials/*.json`, cross-checks `allowed_blocks` against runtime dispatch (`STATEMENT_HANDLERS` + `VALUE_EVALUATORS` keys in `physical_ai_tools/physical_ai_server/physical_ai_server/workflow/handlers/__init__.py`, `HAT_BLOCK_TYPES` in `…/workflow/interpreter.py`, plus Blockly built-ins)
 - **interfaces-validate** — verifies every `.srv` has exactly one `---`; cross-checks `CMakeLists.txt` against on-disk files
 - **nginx-validate** — `envsubst $PORT` on `nginx.web.conf.template` then `nginx -t` on both configs
 
@@ -355,9 +359,9 @@ State as of 2026-05-20 post commit `16b8378` + `de7d635`. Confirm against curren
 - LeRobot v0.5.1 installed via PyPI in both amd64 and arm64 base Dockerfiles. Build-time smoke tests in all 3 Dockerfiles (Dockerfile.amd64, Dockerfile.arm64, thin overlay) import every policy modeling module + `predict_action` + `make_pre_post_processors` and assert `CODEBASE_VERSION == 'v3.0'`. The old SHA `989f3d05ba47f872d75c587e76838e9cc574857a` is no longer pinned anywhere in the code; the 5-site contract has been superseded by the 3-site PyPI version contract (Rule §5).
 - No pre-2026-05 safety guards leaked into images (grep for `joint_clamp|stale_camera|velocity_cap|nan_guard|safety_envelope` → 0 hits).
 - No `.env` / credentials / tokens accidentally COPY'd into any image.
-- All 4 PAS overlays + 14 OMX overlays bit-identical across arches (sha256 verified inside images).
+- physical-ai-server (v2.5.2+) ships its `physical_ai_server` package as a verbatim COPY of `physical_ai_tools/physical_ai_server/` (no overlays); the `image-source-parity` job asserts the image package is byte-identical to the repo, both arches. OMX overlays remain bit-identical across arches (sha256 verified inside images + by the parity gate).
 - YOLOX-tiny ONNX present as exactly one copy per image with the correct sha256.
-- All `apply_overlay` chain entries covered — no orphan overlay files in the repo's `overlays/` dir that don't reach the image.
+- OMX `apply_overlay` chain entries all covered — no orphan overlay files in `open_manipulator/overlays/` that don't reach the image. (physical-ai-server no longer uses an overlay chain — it is COPY-wholesale.)
 - `.s6-keep` bind-mount truly load-bearing: `s6-rc.d/user/contents.d/` only has `s6-agent` enabled at image-build time; `physical_ai_server` service is defined but inactive without the runtime mount.
 
 ### Operator action items (cannot be done from CI)

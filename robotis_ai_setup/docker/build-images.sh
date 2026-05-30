@@ -138,12 +138,16 @@ done
 # build. Each cleanup branch is no-op when its variable is empty.
 COCO_SNAPSHOT=""
 INTERFACES_STAGING=""
+PKG_STAGING=""
 _build_cleanup() {
     if [ -n "${COCO_SNAPSHOT:-}" ]; then
         rm -f "${COCO_SNAPSHOT}"
     fi
     if [ -n "${INTERFACES_STAGING:-}" ]; then
         rm -rf "${INTERFACES_STAGING}"
+    fi
+    if [ -n "${PKG_STAGING:-}" ]; then
+        rm -rf "${PKG_STAGING}"
     fi
 }
 trap _build_cleanup EXIT
@@ -316,8 +320,34 @@ cp "${PHYSICAL_AI_TOOLS_DIR}/physical_ai_interfaces/msg/"*.msg      "${INTERFACE
 cp "${PHYSICAL_AI_TOOLS_DIR}/physical_ai_interfaces/srv/"*.srv      "${INTERFACES_STAGING}/srv/"
 
 # Cleanup is already registered above via _build_cleanup, which removes
-# both ${COCO_SNAPSHOT} and ${INTERFACES_STAGING} on exit. We must NOT
-# overwrite the trap here — that's the v1 bug — so this is a no-op.
+# ${COCO_SNAPSHOT}, ${INTERFACES_STAGING} and ${PKG_STAGING} on exit. We must
+# NOT overwrite the trap here — that's the v1 bug — so this is a no-op.
+
+# Stage the EduBotics physical_ai_server ROS package (the single source of
+# truth) into the build context so the Dockerfile can COPY it wholesale over
+# the upstream-cloned package. This replaces the historical apply_overlay model
+# (which silently dropped any edit/deletion not in the hand-listed chain — the
+# v2.5.0 training_manager.py crash). Excludes test/, the per-arch Dockerfiles,
+# CHANGELOG.rst and __pycache__/*.pyc (build inputs / dev-only, not runtime).
+# "Image == repo HEAD" is then true by construction; CI's image-source-parity
+# job re-asserts byte equality after every build.
+PKG_STAGING="${SCRIPT_DIR}/physical_ai_server/pkg_src"
+echo ""
+echo ">> Staging physical_ai_server package (COPY-wholesale source of truth)..."
+rm -rf "${PKG_STAGING}"
+mkdir -p "${PKG_STAGING}"
+cp -a "${PHYSICAL_AI_TOOLS_DIR}/physical_ai_server/." "${PKG_STAGING}/"
+rm -rf "${PKG_STAGING}/test" \
+       "${PKG_STAGING}/Dockerfile.amd64" \
+       "${PKG_STAGING}/Dockerfile.arm64" \
+       "${PKG_STAGING}/CHANGELOG.rst"
+find "${PKG_STAGING}" -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
+find "${PKG_STAGING}" -name '*.pyc' -delete 2>/dev/null || true
+# Belt: the stripped safety guard (Rule §2) must never reach the staged tree.
+if [ -e "${PKG_STAGING}/physical_ai_server/workflow/safety_envelope.py" ]; then
+    echo "ERROR: safety_envelope.py present in staged package — stripped guard must not ship (Rule §2)" >&2
+    exit 1
+fi
 
 echo ""
 echo ">> Building physical_ai_server thin layer (patches + interface rebuild)..."

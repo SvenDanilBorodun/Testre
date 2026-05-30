@@ -7,13 +7,18 @@
 # You may obtain a copy of the License at
 #
 #     http://www.apache.org/licenses/LICENSE-2.0
-"""Three-mode perception: HSV color blobs, YOLOX-tiny COCO objects, AprilTags.
+"""Three-mode perception: LAB color blobs, YOLOX-tiny COCO objects, AprilTags.
 
 Mode selection is per-block in the workflow interpreter:
 
-- ``color``: HSV ``inRange`` from the per-classroom color profile, contours,
-  centroid + bbox, label = the German colour name.
-- ``yolo+color``: YOLOX-tiny ONNX inference at 640x640 letterbox; if a
+- ``color``: LAB-space distance from the per-classroom color profile
+  (per-channel |x-μ|/σ within a threshold), contours, centroid + bbox,
+  label = the German colour name. Audit F59 fixed the misleading "HSV"
+  reference in this docstring — the implementation has been LAB-space
+  since the color-profile rewrite.
+- ``yolo+color``: YOLOX-tiny ONNX inference at 416x416 letterbox (matches the
+  pinned yolox_tiny.onnx input shape — earlier prose said 640x640 but the
+  released ONNX is 416-input; B1 audit fix 2026-05-18); if a
   ``coco_class`` filter is supplied, only that class is returned; if a
   ``color`` filter is also supplied, a 10x10 px HSV patch around the bbox
   centre is sampled and the detection is kept only when the patch falls
@@ -23,11 +28,13 @@ Mode selection is per-block in the workflow interpreter:
   optional ``aruco_id`` filter.
 
 Both the ONNX session and the AprilTag detector are constructed eagerly
-in ``__init__`` and any failure raises ``RuntimeError`` with a German
-message. Earlier versions returned ``False`` from internal ``_ensure_*``
-helpers which caused detection blocks to silently return ``[]`` when
-the YOLOX ONNX wasn't baked into the image — see commit history for
-the audit that removed that fallback.
+in ``__init__``. On any failure (missing file, missing dependency,
+malformed model) the underlying handle stays ``None`` and the matching
+``_detect_*`` method returns ``[]`` silently. The hard-raise variant
+that existed earlier was dropped in the 2026-05 safety stripdown — a
+missing detector is a configuration issue, not a motion-safety event,
+and the Workshop UX continues with empty detections so the student can
+still use the rest of the workflow.
 """
 
 from __future__ import annotations
@@ -42,12 +49,27 @@ import numpy as np
 
 from physical_ai_server.workflow.coco_classes import COCO_CLASSES, ID_TO_LABEL
 
+# Detector dispatch — Phase-3 (2026-05). The default is the
+# Apache-2.0 YOLOX-tiny ONNX baked into the image. ``EDUBOTICS_DETECTOR``
+# is reserved for the future D-FINE-N swap; the postprocessing branches
+# below currently assume the YOLOX head shape, so setting
+# ``EDUBOTICS_DETECTOR=dfine-n`` today would index out-of-bounds on the
+# D-FINE-N output tensor. Until the decode head is wired (tracked in
+# ``docs/ROBOTER_STUDIO_DEFERRED.md`` §7.2 and ``tools/dfine_finetune.md``)
+# any non-default value is ignored and YOLOX-tiny is loaded anyway —
+# the env var stays here so the future bring-up can flip ``_ACTIVE_ONNX_PATH``
+# without rewriting the call sites.
+DETECTOR_KIND = os.environ.get('EDUBOTICS_DETECTOR', 'yolox-tiny').strip().lower()
 YOLOX_ONNX_PATH = Path(os.environ.get('EDUBOTICS_YOLOX_ONNX', '/opt/edubotics/yolox_tiny.onnx'))
-YOLOX_INPUT_SIZE = (640, 640)
+DFINE_ONNX_PATH = Path(os.environ.get('EDUBOTICS_DFINE_ONNX', '/opt/edubotics/dfine_n.onnx'))
+
+# Which ONNX file we actually load — currently always YOLOX-tiny.
+_ACTIVE_ONNX_PATH = YOLOX_ONNX_PATH
+
+YOLOX_INPUT_SIZE = (416, 416)
 YOLOX_CONFIDENCE_THRESHOLD = 0.30
 YOLOX_NMS_IOU_THRESHOLD = 0.45
 
-LAB_MIN_BLOB_AREA_PX = 100
 COLOR_PATCH_SIZE_PX = 10
 
 
@@ -65,10 +87,11 @@ class Detection:
 class Perception:
     """Eager-initialised wrapper over HSV, YOLOX, and AprilTag backends.
 
-    Construction raises ``RuntimeError`` (German message) if either
-    backend isn't available. The Workshop UX is built around the
-    promise that perception either works or fails-loud, never silently
-    drops detections.
+    If a backend can't be constructed (missing ONNX, missing
+    ``pupil_apriltags``), the corresponding handle stays ``None`` and
+    the matching ``_detect_*`` method returns an empty list. The
+    workflow keeps running so the student can use the remaining blocks;
+    a "no detections" outcome surfaces naturally to the editor.
     """
 
     def __init__(self) -> None:
@@ -129,8 +152,6 @@ class Perception:
         detections: list[Detection] = []
         for contour in contours:
             area = cv2.contourArea(contour)
-            if area < LAB_MIN_BLOB_AREA_PX:
-                continue
             x, y, w, h = cv2.boundingRect(contour)
             cx, cy = x + w // 2, y + h // 2
             detections.append(Detection(
@@ -145,30 +166,22 @@ class Perception:
     # YOLOX
     # ------------------------------------------------------------------
     def _init_yolox(self) -> None:
-        """Load the baked-in YOLOX-tiny ONNX. Fails loudly if the file
-        is missing or the runtime can't open it — there is no fallback
-        path."""
-        if not YOLOX_ONNX_PATH.exists():
-            raise RuntimeError(
-                f'YOLOX-tiny-Modell fehlt unter {YOLOX_ONNX_PATH} — '
-                'Image neu bauen.'
-            )
+        """Load the active detector ONNX (YOLOX-tiny by default). On any
+        failure (missing file, missing onnxruntime, malformed model) the
+        session stays None and detect_yolo silently returns []."""
+        path = _ACTIVE_ONNX_PATH
         try:
+            if not path.exists():
+                return
             import onnxruntime as ort
-        except ImportError as e:
-            raise RuntimeError(
-                'onnxruntime ist nicht installiert — Image neu bauen.'
-            ) from e
-        try:
             providers = ['CPUExecutionProvider']
             self._yolox_session = ort.InferenceSession(
-                str(YOLOX_ONNX_PATH), providers=providers,
+                str(path), providers=providers,
             )
             self._yolox_input_name = self._yolox_session.get_inputs()[0].name
-        except Exception as e:
-            raise RuntimeError(
-                f'YOLOX-Modell konnte nicht geladen werden: {e}'
-            ) from e
+        except Exception:
+            self._yolox_session = None
+            self._yolox_input_name = None
 
     @staticmethod
     def _letterbox(bgr: np.ndarray, target_size: tuple[int, int]) -> tuple[np.ndarray, float, tuple[int, int]]:
@@ -183,20 +196,61 @@ class Perception:
         padded[pad_y:pad_y + new_h, pad_x:pad_x + new_w] = resized
         return padded, ratio, (pad_x, pad_y)
 
+    @staticmethod
+    def _yolox_demo_postprocess(
+        outputs: np.ndarray,
+        img_size: tuple[int, int],
+        strides: tuple[int, ...] = (8, 16, 32),
+    ) -> np.ndarray:
+        """Apply YOLOX grid + stride decoding.
+
+        Megvii's ``yolox_tiny.onnx`` (pinned by SHA in the Dockerfile)
+        emits ``(N, 85)`` predictions where the ``(cx, cy, w, h)`` are
+        **grid-relative offsets per feature level** at strides
+        ``{8, 16, 32}`` (audit F2). Without this decode, predictions
+        live in [0..80) px and NMS keeps nothing → silent empty.
+
+        Mirrors the upstream ``demo_postprocess`` in
+        ``YOLOX/yolox/utils/demo_utils.py``.
+        """
+        grids = []
+        expanded_strides = []
+        hsizes = [img_size[0] // s for s in strides]
+        wsizes = [img_size[1] // s for s in strides]
+        for hsize, wsize, stride in zip(hsizes, wsizes, strides):
+            xv, yv = np.meshgrid(np.arange(wsize), np.arange(hsize))
+            grid = np.stack((xv, yv), 2).reshape(1, -1, 2)
+            grids.append(grid)
+            shape = grid.shape[:2]
+            expanded_strides.append(np.full((*shape, 1), stride))
+        grids = np.concatenate(grids, 1)
+        expanded_strides = np.concatenate(expanded_strides, 1)
+        outputs[..., :2] = (outputs[..., :2] + grids) * expanded_strides
+        outputs[..., 2:4] = np.exp(outputs[..., 2:4]) * expanded_strides
+        return outputs
+
     def _detect_yolo(
         self,
         bgr: np.ndarray,
         coco_class: str | None,
         color_filter: str | None,
     ) -> list[Detection]:
-        # Session is loaded in __init__; if we got here it's ready.
+        if self._yolox_session is None or self._yolox_input_name is None:
+            return []
         padded, ratio, (pad_x, pad_y) = self._letterbox(bgr, YOLOX_INPUT_SIZE)
         # YOLOX expects BGR uint8 -> CHW float32 (no normalisation).
         tensor = padded.transpose(2, 0, 1).astype(np.float32)
         tensor = np.expand_dims(tensor, 0)
 
         outputs = self._yolox_session.run(None, {self._yolox_input_name: tensor})
-        predictions = outputs[0][0]   # (N, 85): [cx, cy, w, h, obj, cls0..79]
+        # Audit F2: outputs[0] is grid-relative offsets per feature
+        # level. Decode through demo_postprocess before slicing.
+        # img_size is (H, W); YOLOX_INPUT_SIZE here is (W, H) but they
+        # match so the order is irrelevant.
+        predictions = self._yolox_demo_postprocess(
+            outputs[0].copy(),
+            img_size=(YOLOX_INPUT_SIZE[1], YOLOX_INPUT_SIZE[0]),
+        )[0]
         if predictions.size == 0:
             return []
 
@@ -215,8 +269,8 @@ class Perception:
         class_ids = class_ids[keep]
         confidences = max_scores[keep]
 
-        # YOLOX outputs grid-anchor offsets that are already at 640x640 stride.
-        # Convert to xyxy in padded image coordinates.
+        # Boxes are now at full YOLOX_INPUT_SIZE (currently 416×416) stride in
+        # padded image coordinates. Convert to xyxy for NMS / cropping.
         cx = boxes_xywh[:, 0]
         cy = boxes_xywh[:, 1]
         w = boxes_xywh[:, 2]
@@ -278,7 +332,13 @@ class Perception:
         class_ids: np.ndarray,
     ) -> list[int]:
         """Per-class non-maximum suppression. Returns indices into the
-        original arrays."""
+        original arrays.
+
+        Audit F3: ``cv2.dnn.NMSBoxes`` expects ``[x, y, w, h]`` boxes;
+        we receive ``[x1, y1, x2, y2]`` from the YOLOX decode. Convert
+        before passing or IoU collapses (near-origin boxes look tiny,
+        near-bottom-right boxes look huge → wrong dedupe).
+        """
         keep_total: list[int] = []
         for cid in np.unique(class_ids):
             mask = class_ids == cid
@@ -286,8 +346,14 @@ class Perception:
             sub_scores = scores[mask]
             if sub_boxes.size == 0:
                 continue
+            # xyxy -> xywh for NMSBoxes
+            x1 = sub_boxes[:, 0]
+            y1 = sub_boxes[:, 1]
+            x2 = sub_boxes[:, 2]
+            y2 = sub_boxes[:, 3]
+            sub_boxes_xywh = np.stack([x1, y1, x2 - x1, y2 - y1], axis=1)
             indices = cv2.dnn.NMSBoxes(
-                bboxes=sub_boxes.tolist(),
+                bboxes=sub_boxes_xywh.tolist(),
                 scores=sub_scores.tolist(),
                 score_threshold=YOLOX_CONFIDENCE_THRESHOLD,
                 nms_threshold=YOLOX_NMS_IOU_THRESHOLD,
@@ -295,6 +361,8 @@ class Perception:
             if indices is None:
                 continue
             indices = np.array(indices).reshape(-1)
+            if indices.size == 0:
+                continue
             original_indices = np.where(mask)[0]
             keep_total.extend(original_indices[indices].tolist())
         return keep_total
@@ -324,15 +392,11 @@ class Perception:
     # AprilTag
     # ------------------------------------------------------------------
     def _init_apriltag(self) -> None:
-        """Construct the pupil_apriltags detector. Fails loudly on
-        missing dependency — no fallback."""
+        """Construct the pupil_apriltags detector. On failure (missing
+        dependency, init error) the detector stays None and
+        detect_apriltag silently returns []."""
         try:
             from pupil_apriltags import Detector
-        except ImportError as e:
-            raise RuntimeError(
-                'pupil_apriltags ist nicht installiert — Image neu bauen.'
-            ) from e
-        try:
             self._apriltag_detector = Detector(
                 families='tag36h11',
                 nthreads=2,
@@ -342,13 +406,12 @@ class Perception:
                 decode_sharpening=0.25,
                 debug=False,
             )
-        except Exception as e:
-            raise RuntimeError(
-                f'AprilTag-Detektor konnte nicht initialisiert werden: {e}'
-            ) from e
+        except Exception:
+            self._apriltag_detector = None
 
     def _detect_apriltag(self, bgr: np.ndarray, aruco_id: int | None) -> list[Detection]:
-        # Detector is constructed in __init__; if we got here it's ready.
+        if self._apriltag_detector is None:
+            return []
         gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
         results = self._apriltag_detector.detect(gray)
         detections: list[Detection] = []

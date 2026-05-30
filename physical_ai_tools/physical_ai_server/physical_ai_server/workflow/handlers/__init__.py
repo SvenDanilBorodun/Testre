@@ -30,6 +30,8 @@ STATEMENT_HANDLERS: dict[str, callable] = {
     # Output
     'edubotics_log': output_handlers.log,
     'edubotics_play_sound': output_handlers.play_sound,
+    'edubotics_speak_de': output_handlers.speak_de,
+    'edubotics_play_tone': output_handlers.play_tone,
 }
 
 
@@ -42,6 +44,7 @@ VALUE_EVALUATORS: dict[str, callable] = {
     'edubotics_wait_until_color': perception_handlers.wait_until_color,
     'edubotics_wait_until_object': perception_handlers.wait_until_object,
     'edubotics_wait_until_marker': perception_handlers.wait_until_marker,
+    'edubotics_detect_open_vocab': perception_handlers.detect_open_vocab,
 }
 
 

@@ -17,11 +17,10 @@ path uses (the topic is then remapped to the controller's
 introduce a parallel motion path.
 
 To honour the <100 ms command-side stop guarantee, ``chunked_publish``
-splits the full trajectory into <= 1 s pieces, calls
-``should_stop()`` between pieces, and runs each commanded point through
-the caller-supplied ``SafetyEnvelope.apply``. The physical arm may
-overshoot by up to one chunk while finishing the in-flight trajectory
-— that's the documented v1 stop behaviour.
+splits the full trajectory into <= 1 s pieces and calls
+``should_stop()`` between pieces. The physical arm may overshoot by up
+to one chunk while finishing the in-flight trajectory — that's the
+documented v1 stop behaviour.
 """
 
 from __future__ import annotations
@@ -30,6 +29,7 @@ import time
 from typing import Callable, Iterable
 
 import numpy as np
+
 
 DEFAULT_FPS = 30
 DEFAULT_CHUNK_DURATION_S = 1.0
@@ -74,17 +74,14 @@ def build_segment(
 def chunked_publish(
     publisher: Callable[[list[tuple[list[float], float]]], None],
     points: Iterable[tuple[list[float], float]],
-    safety_apply: Callable[[np.ndarray], np.ndarray | None] | None,
     should_stop: Callable[[], bool],
     chunk_duration_s: float = DEFAULT_CHUNK_DURATION_S,
     fps: int = DEFAULT_FPS,
 ) -> bool:
     """Publish ``points`` to ``publisher`` in chunks of ``chunk_duration_s``.
 
-    Each point's joint vector is passed through ``safety_apply`` (when
-    provided); a ``None`` return drops the point. Between chunks
-    ``should_stop()`` is polled — a True return cancels the rest of the
-    publish and returns ``False`` from this function.
+    Between chunks ``should_stop()`` is polled — a True return cancels
+    the rest of the publish and returns ``False`` from this function.
 
     Returns ``True`` if the entire trajectory was published, ``False`` if
     cancellation aborted it.
@@ -96,11 +93,6 @@ def chunked_publish(
     for q, t in points:
         if should_stop():
             return False
-        if safety_apply is not None:
-            clamped = safety_apply(np.asarray(q, dtype=np.float32))
-            if clamped is None:
-                continue
-            q = clamped.tolist()
         chunk.append((q, t - chunk_start_t))
         if len(chunk) >= chunk_size:
             publisher(chunk)

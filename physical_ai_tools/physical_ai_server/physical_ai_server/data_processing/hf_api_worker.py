@@ -15,6 +15,26 @@
 # limitations under the License.
 #
 # Author: Dongyun Kim
+#
+# EduBotics overlay: fixes the two correctness bugs in check_task_status
+# that surfaced when the recording auto-push started routing through
+# this worker:
+#
+#   1. Original lines 158-162 had unreachable code after `return result`
+#      and reported "HF API worker process died" even when the worker
+#      was simply idle. Replaced with a clean control flow that
+#      distinguishes idle from died.
+#
+#   2. If the worker process was killed mid-upload (OOM during a 5 GB
+#      multipart upload on a 6 GB-limit container is the realistic
+#      scenario), is_alive() went False but is_processing stayed True
+#      (the worker never got to put a result on output_queue). The
+#      original code set status='Failed' at the top of check_task_status
+#      then OVERWROTE it to 'Uploading' at line 213, so the React UI
+#      saw "Uploading" forever and the recording auto-upload pipeline
+#      stalled silently. Now: detect the (dead worker + still
+#      processing) state, emit ONE Failed event with a German message,
+#      reset internal state so subsequent ticks report Idle.
 
 import logging
 import multiprocessing
@@ -25,12 +45,25 @@ import time
 from physical_ai_server.data_processing.data_manager import DataManager
 
 
+# Use the 'spawn' start method explicitly. Linux's default 'fork' causes
+# the child to inherit the parent's rclpy state — including the
+# `physical_ai_server` ROS node registration. The duplicate node then
+# competes for DDS service routing and `/task/command` calls from the
+# React UI time out (symptom: "Befehlsausführung fehlgeschlagen [Stop]:
+# Service call failed for /task/command"). 'spawn' boots a clean Python
+# interpreter in the child, so no inherited node, publishers, or
+# subscriptions follow. The trade-off is a small startup cost (~200 ms
+# for the child to re-import its modules) which is invisible at the
+# per-recording cadence this worker is used.
+_MP_CTX = multiprocessing.get_context('spawn')
+
+
 class HfApiWorker:
 
     def __init__(self):
-        self.input_queue = multiprocessing.Queue()
-        self.output_queue = multiprocessing.Queue()
-        self.progress_queue = multiprocessing.Queue()
+        self.input_queue = _MP_CTX.Queue()
+        self.output_queue = _MP_CTX.Queue()
+        self.progress_queue = _MP_CTX.Queue()
         self.process = None
         self.logger = logging.getLogger('HfApiWorker')
 
@@ -63,7 +96,7 @@ class HfApiWorker:
         try:
             self.logger.info('Starting HF API worker process...')
 
-            self.process = multiprocessing.Process(
+            self.process = _MP_CTX.Process(
                 target=self._worker_process_loop,
                 args=(
                     self.input_queue,
@@ -149,27 +182,52 @@ class HfApiWorker:
             }
         }
 
+        # Carry the in-flight task identifiers into the result early so
+        # the dead-worker branch below has a repo_id to surface.
         mode = None
+        if self.current_task:
+            mode = self.current_task.get('mode', 'Processing')
+            result['operation'] = mode
+            result['repo_id'] = self.current_task.get('repo_id', '')
+            result['local_path'] = self.current_task.get('local_path', '')
 
-        if not self.is_alive():
-            self.logger.error('HF API worker process died')
+        # Dead-worker recovery. If the worker process was killed (OOM,
+        # SIGSEGV, external kill) while a task was in flight, the
+        # output_queue never got a result; without this branch
+        # is_processing stays True forever, and the downstream UI shows
+        # "Uploading" indefinitely because the per-mode branches below
+        # overwrite the Failed status. Emit ONE Failed event with a
+        # German message, then reset state so subsequent polls report
+        # Idle (worker can be restarted by the node).
+        if not self.is_alive() and self.is_processing:
+            self.logger.error(
+                'HF API worker process died while processing — emitting Failed.')
             result['status'] = 'Failed'
-
-        if not self.is_processing:
-            result['message'] = 'HF API worker process died'
+            if mode == 'upload':
+                result['message'] = (
+                    'Upload abgebrochen: Worker-Prozess unerwartet beendet. '
+                    'Bitte erneut versuchen.'
+                )
+            elif mode == 'download':
+                result['message'] = (
+                    'Download abgebrochen: Worker-Prozess unerwartet beendet. '
+                    'Bitte erneut versuchen.'
+                )
+            else:
+                result['message'] = (
+                    'HF-Anfrage abgebrochen: Worker-Prozess unerwartet beendet.'
+                )
+            self.is_processing = False
+            self.current_task = None
             return result
-            result['status'] = 'Idle'
+
+        # Worker is up but idle — no task to report on.
+        if not self.is_processing:
             return result
 
         try:
-            if self.current_task:
-                mode = self.current_task.get('mode', 'Processing')
-                result['repo_id'] = self.current_task.get('repo_id', '')
-                result['local_path'] = self.current_task.get('local_path', '')
-
-            # Check for download progress
+            # Check for download / upload progress updates.
             if mode == 'download' or mode == 'upload':
-                # Check for progress updates from worker process
                 self.current_progress = self.get_progress_from_progress_queue()
                 current = self.current_progress.get('current', 0)
                 total = self.current_progress.get('total', 0)
@@ -180,7 +238,6 @@ class HfApiWorker:
 
                 # Only log when current value changes
                 if current != self.last_logged_current_progress:
-                    # self.logger.info(f'{mode.capitalize()} {current}/{total} ({percentage}%)')
                     self.last_logged_current_progress = current
 
             # Check for task result
@@ -306,6 +363,9 @@ class HfApiWorker:
                         repo_type = data.get('repo_type')
                         local_dir = data.get('local_dir')
                         author = data.get('author')
+                        # Defaults True so an upload request without the
+                        # key fails safe to a private repo.
+                        private = bool(data.get('private', True))
 
                         logger.info(f'Processing {mode} request for repo: {repo_id}')
 
@@ -315,7 +375,8 @@ class HfApiWorker:
                             result = DataManager.upload_huggingface_repo(
                                 repo_id=repo_id,
                                 repo_type=repo_type,
-                                local_dir=local_dir
+                                local_dir=local_dir,
+                                private=private
                             )
                             if result:
                                 message = f'Uploaded Hugging Face repo: {repo_id}'

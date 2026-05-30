@@ -24,6 +24,32 @@ from typing import Any
 from physical_ai_server.workflow.handlers.motion import WorkflowError
 
 
+# Audit fix #12: classroom palette accepted by the German UI. Defined
+# here (rather than imported from color_profile.py) so a perception
+# handler isn't coupled to the calibration manager's import surface.
+# Keep in sync with overlays/workflow/color_profile.py:DEFAULT_COLORS.
+_ALLOWED_COLORS: frozenset[str] = frozenset({'rot', 'gruen', 'blau', 'gelb'})
+
+
+def _validate_color(color: Any) -> str:
+    """Validate a color string against the allowed set, raising a
+    German WorkflowError on miss. Returns the normalized lower-case
+    color. The Perception backend silently returns [] when the colour
+    profile isn't loaded for an unknown color — that's a UX trap the
+    student can't debug, so we fail loudly here instead.
+    """
+    if color is None:
+        raise WorkflowError('Keine Farbe angegeben.')
+    if not isinstance(color, str):
+        raise WorkflowError(f'Ungültige Farbe: {color}.')
+    normalized = color.strip().lower()
+    if normalized not in _ALLOWED_COLORS:
+        raise WorkflowError(
+            f'Unbekannte Farbe: {color}. Erlaubt: rot, gruen, blau, gelb.'
+        )
+    return normalized
+
+
 def _ensure_perception(ctx):
     if ctx.perception is None:
         raise WorkflowError(
@@ -72,10 +98,14 @@ def _attach_world_xyz(ctx, detections: list) -> list:
 
 def detect_color(ctx, args: dict[str, Any]) -> list:
     _ensure_perception(ctx)
+    # Audit fix #12: validate before reaching Perception so an unknown
+    # German color string surfaces an actionable error instead of an
+    # empty-detections result that looks like "no color visible".
+    color = _validate_color(args.get('color'))
     bgr = ctx.get_scene_frame() if ctx.get_scene_frame else None
     if bgr is None:
         raise WorkflowError('Kein Szenenbild verfügbar.')
-    detections = ctx.perception.detect(bgr, camera='scene', mode='color', color=args.get('color'))
+    detections = ctx.perception.detect(bgr, camera='scene', mode='color', color=color)
     return _attach_world_xyz(ctx, detections)
 
 
@@ -84,10 +114,17 @@ def detect_object(ctx, args: dict[str, Any]) -> list:
     bgr = ctx.get_scene_frame() if ctx.get_scene_frame else None
     if bgr is None:
         raise WorkflowError('Kein Szenenbild verfügbar.')
+    # Audit fix #12: color is optional on detect_object (the block lets
+    # the student narrow a class to a specific color). When provided,
+    # validate to fail loudly on unknown values instead of silently
+    # producing empty detections.
+    color = args.get('color')
+    if color is not None and str(color).strip():
+        color = _validate_color(color)
     detections = ctx.perception.detect(
         bgr, camera='scene', mode='yolo+color',
         coco_class=args.get('class'),
-        color=args.get('color'),
+        color=color,
     )
     return _attach_world_xyz(ctx, detections)
 
@@ -126,20 +163,60 @@ def _poll_until(ctx, predicate, timeout_s: float, label: str) -> bool:
     block sees nothing. The previous implementation had a dead
     ``on_timeout='continue'`` branch reading from a block field that
     never existed; if that affordance is wanted later, expose a
-    dropdown on the wait_until_* blocks first."""
+    dropdown on the wait_until_* blocks first.
+
+    Audit S1: this poll is pure perception (no motion). When called from
+    inside a hat-block handler, the surrounding ``with ctx.motion_lock``
+    pinned the lock for up to ``timeout_s``, blocking every other
+    motion thread including the recovery routine's 2s acquire. Recovery
+    then proceeded **without** the lock, allowing a recovered home
+    trajectory to race the still-running hat handler's body. Release
+    the motion lock around the wait so it acts as a "wait barrier" only,
+    not a "block-everyone-else barrier"; reacquire on exit so the hat
+    handler resumes with the same locking invariants it had before.
+    """
     deadline = time.monotonic() + timeout_s
-    while time.monotonic() < deadline:
-        if ctx.should_stop():
-            raise WorkflowError('Workflow wurde gestoppt.')
-        if predicate():
-            return True
-        time.sleep(0.2)
-    raise WorkflowError(f'Timeout: {label} nicht erkannt.')
+    motion_lock = getattr(ctx, 'motion_lock', None)
+    released = False
+    if motion_lock is not None:
+        try:
+            motion_lock.release()
+            released = True
+        except RuntimeError:
+            # Lock wasn't held by this thread — fine, just don't try to
+            # reacquire in finally. This happens when _poll_until is
+            # called from a non-hat path (e.g. test harness).
+            released = False
+    try:
+        while time.monotonic() < deadline:
+            if ctx.should_stop():
+                raise WorkflowError('Workflow wurde gestoppt.')
+            if predicate():
+                return True
+            time.sleep(0.2)
+        raise WorkflowError(f'Timeout: {label} nicht erkannt.')
+    finally:
+        if released and motion_lock is not None:
+            # Audit fix #9: bounded reacquire. The previous unbounded
+            # acquire() could hang forever if another thread held the
+            # lock and never released it (e.g. a runaway motion handler
+            # in another hat). 10 s is generous for a single motion
+            # chunk to finish; past that we'd rather raise a clear
+            # German error so the caller's `with motion_lock` __exit__
+            # has SOMETHING to release. The exception propagates out
+            # through whatever wrapped the _poll_until call.
+            if not motion_lock.acquire(timeout=10.0):
+                raise WorkflowError(
+                    'Bewegung-Sperre konnte nicht zurückgewonnen werden.'
+                )
 
 
 def wait_until_color(ctx, args: dict[str, Any]) -> bool:
     timeout_s = float(args.get('timeout', 10))
-    color = args.get('color')
+    # Audit fix #12: validate up-front so a bad color name fails the
+    # block immediately rather than polling for `timeout_s` and then
+    # raising a misleading "Farbe nicht erkannt" timeout.
+    color = _validate_color(args.get('color'))
     return _poll_until(
         ctx,
         lambda: bool(detect_color(ctx, {'color': color})),
@@ -168,3 +245,88 @@ def wait_until_marker(ctx, args: dict[str, Any]) -> bool:
         timeout_s,
         f'Marker {marker_id}',
     )
+
+
+# Phase-3: open-vocabulary detection. Routes German prompts through a
+# small synonym dict to YOLOX/D-FINE-N closed-vocab when possible
+# (cheap + offline). Falls back to OWLv2 on Modal via the cloud bridge.
+#
+# The cloud_vision dict on ctx supplies:
+#   {
+#     'enabled': bool,                          # default False
+#     'cloud_burst': callable,                  # (image_bgr, prompt, should_stop=None) -> list[Detection]
+#     'translate': dict[str,str]                # German prompt -> COCO class label
+#   }
+# The handler asks ctx.cloud_vision['translate'] first; on miss, if
+# cloud_burst is callable, posts the latest scene frame to it. The
+# burst receives ctx.should_stop (audit O3) so it can abort between
+# JPEG encode and the 15 s HTTP wait when /workflow/stop fires.
+def detect_open_vocab(ctx, args: dict[str, Any]) -> list:
+    _ensure_perception(ctx)
+    prompt = args.get('prompt')
+    if not prompt:
+        raise WorkflowError('Kein Suchbegriff angegeben.')
+    prompt = str(prompt).strip()
+    cv = getattr(ctx, 'cloud_vision', None) or {}
+    translate = (cv.get('translate') or {}) if isinstance(cv, dict) else {}
+    # Audit F1: each entry is a dispatch dict
+    # ``{'mode':'object'|'color', 'class':<german>, 'color':<rot|...>}``,
+    # NOT a bare class string. Forwarding the whole dict to detect_object
+    # crashed at ``coco_class in COCO_CLASSES`` with TypeError.
+    entry = translate.get(prompt.lower())
+    if isinstance(entry, dict):
+        mode = entry.get('mode')
+        if mode == 'object':
+            return detect_object(ctx, {
+                'class': entry.get('class'),
+                'color': entry.get('color'),
+            })
+        if mode == 'color':
+            return detect_color(ctx, {'color': entry.get('color')})
+        # Unknown mode falls through to the cloud path — defensive only.
+    elif isinstance(entry, str):
+        # Legacy single-string format (older synonym dicts) — treat as
+        # an object class. Kept for forward-compat if the dict moves
+        # to a YAML loader.
+        return detect_object(ctx, {'class': entry})
+    # Cloud path. Audit F54: respect the explicit `enabled` flag —
+    # decoupling "cloud_burst is bound" from "student has opted in"
+    # prevents quota/cost leak once the burst is wired.
+    burst = cv.get('cloud_burst') if isinstance(cv, dict) else None
+    if not cv.get('enabled') or not callable(burst):
+        raise WorkflowError(
+            f'Begriff "{prompt}" ist lokal nicht bekannt und Cloud-Erkennung '
+            'ist deaktiviert. Bitte aktivieren oder einen bekannten Begriff '
+            'verwenden.'
+        )
+    bgr = ctx.get_scene_frame() if ctx.get_scene_frame else None
+    if bgr is None:
+        raise WorkflowError('Kein Szenenbild verfügbar.')
+    try:
+        # Audit O3: forward ctx.should_stop so the burst can short-
+        # circuit on stop between encode and the HTTP send.
+        try:
+            detections = burst(bgr, prompt, ctx.should_stop)
+        except TypeError:
+            # Backwards compat: an older burst signature without the
+            # should_stop kwarg. Fall back to the 2-arg call.
+            detections = burst(bgr, prompt)
+    except WorkflowError:
+        raise
+    except NotImplementedError as e:
+        # Audit F56: the stub used to re-wrap its own message into
+        # "Cloud-Erkennung fehlgeschlagen: Cloud-Erkennung ist…". Pass
+        # the original German message through.
+        raise WorkflowError(str(e))
+    except Exception:
+        # Audit M6: don't f-string the raw Exception into the student-
+        # facing message — it leaks Python tracebacks / requests-lib
+        # internals into German UI text. Log server-side, surface a
+        # fixed German message to the student.
+        import traceback
+        try:
+            ctx.log(f'[FEHLER] Cloud-Erkennung fehlgeschlagen: {traceback.format_exc()}')
+        except Exception:
+            pass
+        raise WorkflowError('Cloud-Erkennung fehlgeschlagen — bitte erneut versuchen.')
+    return _attach_world_xyz(ctx, detections or [])

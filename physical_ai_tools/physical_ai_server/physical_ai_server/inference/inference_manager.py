@@ -33,6 +33,11 @@ class InferenceManager:
             self,
             device: str = 'cuda'):
 
+        # NOTE: CUDA availability is checked in load_policy(), NOT here.
+        # InferenceManager is constructed unconditionally in
+        # PhysicalAIServer.init_ros_params() — including when the user is
+        # only recording. Failing the constructor on a CPU-only/dev box
+        # would also break recording mode, which doesn't need a GPU.
         self.device = device
         self.policy_type = None
         self.policy_path = None
@@ -41,7 +46,7 @@ class InferenceManager:
         self.postprocessor = None
         self._expected_image_keys = []
 
-    def validate_policy(self, policy_path: str) -> bool:
+    def validate_policy(self, policy_path: str) -> tuple[bool, str]:
         result_message = ''
         if not os.path.exists(policy_path) or not os.path.isdir(policy_path):
             result_message = f'Policy path {policy_path} does not exist or is not a directory.'
@@ -69,6 +74,19 @@ class InferenceManager:
         return True, f'Policy {policy_type} is valid.'
 
     def load_policy(self):
+        # CUDA check moved here from __init__: failing the constructor
+        # would also break recording-mode init (see __init__ comment).
+        # Returning False keeps the ROS node alive so the operator can
+        # see the German error in TaskStatus instead of a hard crash.
+        if self.device == 'cuda' and not torch.cuda.is_available():
+            print(
+                '[FEHLER] Inferenz benötigt eine CUDA-fähige GPU, aber '
+                'keine wurde gefunden. Bitte prüfen: NVIDIA-Treiber auf '
+                'dem Windows-Host, `nvidia-smi` in der WSL2-Distro, '
+                'docker-compose.gpu.yml aktiv.',
+                flush=True,
+            )
+            return False
         try:
             policy_cls = self._get_policy_class(self.policy_type)
             self.policy = policy_cls.from_pretrained(self.policy_path)
@@ -130,18 +148,41 @@ class InferenceManager:
             state: list[float],
             task_instruction: str = None) -> list:
 
+        # Audit F10: drop EXTRA cameras the policy wasn't trained on so a
+        # 1-camera-trained policy with 2 connected cameras doesn't crash
+        # the policy on an unknown observation key. Pure correctness fix
+        # — the policy still runs with the cameras it expects.
         if self._expected_image_keys:
             provided = {f'observation.images.{k}' for k in images}
+            # A camera the policy REQUIRES but that isn't present would fail
+            # deep inside predict_action with an opaque tensor-shape error.
+            # Surface a clear German message instead so the operator knows to
+            # check the camera connection and restart inference. This is input
+            # validation (wrong observation keys), not a removed safety
+            # envelope — the run fails either way; we only make it legible.
             missing = set(self._expected_image_keys) - provided
-
             if missing:
-                expected_names = [k.replace('observation.images.', '') for k in self._expected_image_keys]
-                connected_names = list(images.keys())
+                missing_names = [
+                    k.replace('observation.images.', '') for k in sorted(missing)
+                ]
                 raise RuntimeError(
-                    f'Inferenz fehlgeschlagen: Das Modell erwartet die Kameras {expected_names}, '
-                    f'aber verbunden sind nur {connected_names}. '
-                    f'Bitte die Kamera-Namen in der Robot-Config an das Modell anpassen.'
+                    f'Modell erwartet Kamera(s) {missing_names}, die nicht '
+                    f'verfügbar sind. Bitte Kamera-Verbindung prüfen und die '
+                    f'Inferenz neu starten.'
                 )
+            unexpected = provided - set(self._expected_image_keys)
+            if unexpected:
+                expected_names = [k.replace('observation.images.', '') for k in self._expected_image_keys]
+                unexpected_names = [k.replace('observation.images.', '') for k in unexpected]
+                print(
+                    f'[WARNUNG] Zusätzliche Kameras werden ignoriert: '
+                    f'{unexpected_names}, Modell erwartet nur {expected_names}.',
+                    flush=True,
+                )
+                images = {
+                    k: v for k, v in images.items()
+                    if f'observation.images.{k}' in self._expected_image_keys
+                }
 
         # v0.5.1: predict_action runs prepare_observation_for_inference +
         # preprocessor + policy.select_action + postprocessor under
@@ -166,7 +207,11 @@ class InferenceManager:
             postprocessor=self.postprocessor,
             use_amp=getattr(self.policy.config, 'use_amp', False),
             task=task_instruction,
-            robot_type=getattr(self, '_robot_type', None),
+            # InferenceManager never sets a robot_type — LeRobot infers it
+            # from the loaded policy config — so this was always None. Pass
+            # None explicitly instead of a getattr that implied a settable
+            # attribute existed.
+            robot_type=None,
         )
         action = action.squeeze(0).cpu().numpy()
 
@@ -314,8 +359,10 @@ class InferenceManager:
                                 elif 'model_type' in config:
                                     saved_policy_path.append(pretrained_model_path)
                                     saved_policy_type.append(config['model_type'])
-                        except (json.JSONDecodeError, IOError):
-                            # If config.json cannot be read, store path only
-                            print('File IO Errors : ', IOError)
+                        except (json.JSONDecodeError, IOError) as e:
+                            # If config.json cannot be read, log the actual
+                            # exception so the operator has a debugging trail.
+                            print(f'[WARNUNG] config.json lesbar nicht in '
+                                  f'{pretrained_model_path}: {e}', flush=True)
 
         return saved_policy_path, saved_policy_type

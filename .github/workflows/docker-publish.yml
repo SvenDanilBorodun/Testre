@@ -390,6 +390,17 @@ jobs:
             exit 1
           fi
           echo "OK: native ${{ matrix.platform }} runner ($UNAME_M)"
+      - name: Image-source parity (image reflects repo HEAD, no left-outs)
+        # The durable guard against the v2.5.0/v2.5.1 class of bug where a
+        # monorepo edit/deletion silently never reached the image. For
+        # physical-ai-server (COPY-wholesale) the image package must be
+        # BYTE-IDENTICAL to the repo source of truth; for open-manipulator
+        # (overlay model) every overlay must be present in the image.
+        run: |
+          set -e
+          chmod +x .github/scripts/image_source_parity.sh
+          .github/scripts/image_source_parity.sh physical-ai-server "nettername/${{ matrix.server_repo }}:latest"
+          .github/scripts/image_source_parity.sh open-manipulator "nettername/${{ matrix.arm_repo }}:latest"
 
   cleanup-dirty-tags:
     # Manual-dispatch only — sweeps any *-dirty tags from Docker Hub.

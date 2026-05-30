@@ -14,8 +14,12 @@ The pipeline is a 4-step state machine driven by the React wizard:
     -> hand-eye (scene, eye-to-base) -> colour profile
 
 ChArUco board: 7x5 squares, 30 mm square, 22 mm marker, DICT_5X5_250. Hand-eye
-is dual-solved with PARK + TSAI; the manager warns if the two methods
-disagree by more than the configured thresholds (~2 deg / 5 mm).
+is dual-solved with PARK + TSAI; the manager refuses to persist when the two
+methods disagree by more than the configured thresholds
+(``ANGLE_DISAGREEMENT_WARN_DEG`` = 4.0 deg and
+``TRANSLATION_DISAGREEMENT_WARN_M`` = 0.010 m / 10 mm). Audit fix #19 — the
+earlier docstring said "~2 deg / 5 mm" which never matched the constants
+below.
 
 Calibration state is persisted to per-camera YAML files under
 CALIB_DIR (a docker named volume mount inside the physical_ai_server
@@ -24,6 +28,7 @@ container). Re-running a step overwrites the corresponding YAML.
 
 from __future__ import annotations
 
+import math
 import os
 import threading
 import time
@@ -37,8 +42,8 @@ import numpy as np
 CALIB_DIR = Path(os.environ.get('EDUBOTICS_CALIB_DIR', '/root/.cache/edubotics/calibration'))
 INTRINSIC_FRAMES_REQUIRED = 12
 HANDEYE_FRAMES_REQUIRED = 14
-ANGLE_DISAGREEMENT_WARN_DEG = 2.0
-TRANSLATION_DISAGREEMENT_WARN_M = 0.005
+ANGLE_DISAGREEMENT_WARN_DEG = 4.0
+TRANSLATION_DISAGREEMENT_WARN_M = 0.010
 
 CHARUCO_SQUARES_X = 7
 CHARUCO_SQUARES_Y = 5
@@ -130,9 +135,18 @@ class CalibrationManager:
                 fs.release()
                 if K is not None and dist is not None:
                     self._intrinsics[camera] = {'K': K, 'dist': dist}
-            except Exception:
-                # Corrupt YAML is recoverable by re-running calibration.
-                pass
+            except Exception as e:
+                # Audit F61: corrupt YAML is recoverable by re-running
+                # calibration, but logging beats silent. Without this
+                # log a YAML that fails to parse on every node restart
+                # leaves the operator wondering why calibration always
+                # appears uninitialised.
+                import sys
+                print(
+                    f'[WARNUNG] {camera}-Kalibrierdatei beschädigt '
+                    f'({path}): {e}. Bitte Kalibrierung neu starten.',
+                    file=sys.stderr, flush=True,
+                )
 
     def has_intrinsics(self, camera: str) -> bool:
         return camera in self._intrinsics
@@ -269,9 +283,18 @@ class CalibrationManager:
             R_g2b, t_g2b = pose
             K = self._intrinsics[camera]['K']
             dist = self._intrinsics[camera]['dist']
-            object_points, image_points = cv2.aruco.getBoardObjectAndImagePoints(
-                self._board, corners, ids,
-            )
+            # Audit F60: cv2.aruco.getBoardObjectAndImagePoints is
+            # deprecated in OpenCV 4.10+; switch to the
+            # CharucoBoard.matchImagePoints API (4.7+). Fall back to
+            # the legacy call if the new API isn't available so the
+            # overlay still applies cleanly on older OpenCV builds.
+            match_fn = getattr(self._board, 'matchImagePoints', None)
+            if callable(match_fn):
+                object_points, image_points = match_fn(corners, ids)
+            else:
+                object_points, image_points = cv2.aruco.getBoardObjectAndImagePoints(
+                    self._board, corners, ids,
+                )
             if object_points is None or len(object_points) < 4:
                 return False, 0, 0, 0.0, 'Zu wenige Tafel-Punkte erkannt.'
             ok, rvec, tvec = cv2.solvePnP(object_points, image_points, K, dist)
@@ -328,6 +351,18 @@ class CalibrationManager:
             )
         except cv2.error as e:
             return False, 0.0, 0.0, f'OpenCV-Solver-Fehler: {e}'
+
+        # Audit fix #18: refuse to persist a degenerate solve. NaN/Inf
+        # comes out of calibrateCameraCharucoExtended when the captured
+        # set is collinear or otherwise degenerate; > 5 px reprojection
+        # error is a noisy/blurry set. Either way the resulting K/dist
+        # would calibrate the perception pipeline against garbage and
+        # silently mis-project every pixel click. Force a re-capture.
+        if not math.isfinite(ret) or ret > 5.0:
+            return False, float(ret) if math.isfinite(ret) else 0.0, 0.0, (
+                'Reprojektionsfehler zu hoch — bitte mit unterschiedlichen '
+                'Posen neu kalibrieren.'
+            )
 
         self._intrinsics[camera] = {'K': K, 'dist': dist}
         path = self._intrinsic_path(camera)
@@ -388,6 +423,12 @@ class CalibrationManager:
             angle_deg > ANGLE_DISAGREEMENT_WARN_DEG
             or translation_diff_m > TRANSLATION_DISAGREEMENT_WARN_M
         ):
+            # Audit F14: drop the captured buffer so a re-press of the
+            # solve button doesn't keep failing on the SAME noisy poses.
+            # The student has to re-capture from scratch — which is the
+            # correct response since the captured set is the input that
+            # produced the disagreement.
+            self._handeye_buffers.pop(camera, None)
             msg = (
                 f'Hand-Auge-Solve abgewiesen: PARK ↔ TSAI weichen um '
                 f'{angle_deg:.2f}° / {translation_diff_m * 1000:.1f} mm '
@@ -418,16 +459,42 @@ class CalibrationManager:
         return True, 0.0, angle_deg, 'Hand-Auge-Kalibrierung gespeichert.'
 
     def _derive_z_table(self, camera: str, T_cam_to_base: np.ndarray) -> float | None:
-        """Median z-coordinate of the board origin across the captured poses,
-        expressed in base frame. Used to project pixel clicks onto the table."""
+        """Median z-coordinate of the board plane across the captured poses,
+        expressed in base frame. Used to project pixel clicks onto the table.
+
+        Audit F15: the prior implementation medianed only the BOARD
+        ORIGIN. A tilted ChArUco puts the origin 2-3 cm above the table
+        even when the corners touch it → projected cubes mis-located by
+        that bias. Fix by sampling the four board corners per frame
+        (origin + the diagonally opposite corner at full extent + the
+        two cross corners) so a tilted-but-flat board averages out to
+        the actual table plane z.
+        """
         buf = self._handeye_buffers.get(camera)
         if buf is None:
             return None
-        zs = []
+        # The four extreme corners of the ChArUco board in the BOARD
+        # coordinate frame (z=0 by construction). Adding these gives us
+        # 4 z-samples per frame instead of 1.
+        board_w = (CHARUCO_SQUARES_X - 1) * CHARUCO_SQUARE_LENGTH_M
+        board_h = (CHARUCO_SQUARES_Y - 1) * CHARUCO_SQUARE_LENGTH_M
+        sample_pts = np.array(
+            [
+                [0.0,     0.0,     0.0, 1.0],
+                [board_w, 0.0,     0.0, 1.0],
+                [0.0,     board_h, 0.0, 1.0],
+                [board_w, board_h, 0.0, 1.0],
+            ],
+            dtype=np.float64,
+        ).T  # shape (4, 4) homogeneous columns
+        zs: list[float] = []
         for R, t in zip(buf.R_target2cam, buf.t_target2cam):
-            origin_cam = np.vstack([t, [[1.0]]])
-            origin_base = T_cam_to_base @ origin_cam
-            zs.append(float(origin_base[2]))
+            T_target_to_cam = np.eye(4)
+            T_target_to_cam[:3, :3] = R
+            T_target_to_cam[:3, 3] = t.reshape(3)
+            T_target_to_base = T_cam_to_base @ T_target_to_cam
+            pts_base = T_target_to_base @ sample_pts  # 4x4
+            zs.extend(float(z) for z in pts_base[2, :].tolist())
         if not zs:
             return None
         return float(np.median(zs))

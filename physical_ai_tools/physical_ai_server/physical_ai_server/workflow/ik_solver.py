@@ -22,10 +22,13 @@ point with the requested approach direction.
 
 from __future__ import annotations
 
+import logging
 import math
 from typing import Optional
 
 import numpy as np
+
+_logger = logging.getLogger(__name__)
 
 
 _BX = 1e-3
@@ -65,8 +68,19 @@ class IKSolver:
             )
 
     def _try_init_tracik(self):
+        # Distinguish "package not installed" (expected on Jazzy until apt
+        # ships ros-jazzy-trac-ik-python) from "URDF/chain misconfigured"
+        # (a bug the operator must see). Both reduce to "no TRAC-IK" but
+        # only the latter is worth a warning in container logs.
         try:
             from trac_ik_python.trac_ik import IK
+        except ImportError:
+            _logger.info(
+                'TRAC-IK Python bindings not installed; '
+                'falling back to PyKDL.'
+            )
+            return None
+        try:
             return IK(
                 self._base_link,
                 self._tip_link,
@@ -75,6 +89,11 @@ class IKSolver:
                 solve_type='Distance',
             )
         except Exception:
+            _logger.exception(
+                'TRAC-IK construction failed (base=%s tip=%s) — '
+                'falling back to PyKDL. Check the URDF and link names.',
+                self._base_link, self._tip_link,
+            )
             return None
 
     def _try_init_kdl(self):
@@ -82,9 +101,19 @@ class IKSolver:
             import PyKDL
             from urdf_parser_py.urdf import URDF
             from kdl_parser_py.urdf import treeFromUrdfModel
+        except ImportError:
+            _logger.info(
+                'PyKDL or kdl_parser_py not installed; IK disabled.'
+            )
+            return None
+        try:
             urdf = URDF.from_xml_string(self._urdf_string)
             ok, tree = treeFromUrdfModel(urdf)
             if not ok:
+                _logger.error(
+                    'kdl_parser_py.treeFromUrdfModel returned ok=False — '
+                    'URDF is malformed; IK disabled.'
+                )
                 return None
             chain = tree.getChain(self._base_link, self._tip_link)
             return {
@@ -95,6 +124,11 @@ class IKSolver:
                 'num_joints': chain.getNrOfJoints(),
             }
         except Exception:
+            _logger.exception(
+                'PyKDL chain construction failed (base=%s tip=%s) — '
+                'IK disabled. Check the URDF and link names.',
+                self._base_link, self._tip_link,
+            )
             return None
 
     def num_joints(self) -> int:

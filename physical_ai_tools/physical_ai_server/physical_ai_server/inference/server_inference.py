@@ -68,11 +68,7 @@ class ServerInference:
         self.socket = self.context.socket(zmq.REP)
         self.socket.bind(f'tcp://{server_address}:{port}')
 
-        self.inference_manager = InferenceManager(
-            policy_type=policy_type,
-            policy_path=policy_path,
-            device=device
-        )
+        self._endpoints = {}
 
         # Register the ping endpoint by default
         self.register_endpoint('ping', self._handle_ping, requires_input=False)

@@ -44,7 +44,7 @@ jobs:
             robotis_ai_setup/scripts \
             robotis_ai_setup/cloud_training_api \
             robotis_ai_setup/modal_training \
-            robotis_ai_setup/docker/physical_ai_server/overlays \
+            physical_ai_tools/physical_ai_server/physical_ai_server \
             robotis_ai_setup/docker/physical_ai_server/patches
       - name: Unit tests
         run: |
@@ -236,7 +236,7 @@ jobs:
                 robotis_ai_setup/docker/open_manipulator/entrypoint_omx.sh \
                 robotis_ai_setup/docker/open_manipulator/camera_ingest_node.py \
                 robotis_ai_setup/wsl_rootfs/start-dockerd.sh \
-                robotis_ai_setup/docker/physical_ai_server/overlays \
+                physical_ai_tools/physical_ai_server/physical_ai_server \
                 robotis_ai_setup/docker/open_manipulator/overlays \
               2>/dev/null \
               | sort -u
@@ -580,7 +580,7 @@ jobs:
           # since they're hardcoded in the interpreter's btype ladder.
           allowed: set[str] = set()
           handlers_src = open(
-              'robotis_ai_setup/docker/physical_ai_server/overlays/workflow/handlers/__init__.py'
+              'physical_ai_tools/physical_ai_server/physical_ai_server/workflow/handlers/__init__.py'
           ).read()
           for table in ('STATEMENT_HANDLERS', 'VALUE_EVALUATORS'):
               m = re.search(
@@ -590,7 +590,7 @@ jobs:
               assert m, f'could not locate {table} in handlers/__init__.py'
               allowed |= set(re.findall(r"'([^']+)'\s*:", m.group(1)))
           interp_src = open(
-              'robotis_ai_setup/docker/physical_ai_server/overlays/workflow/interpreter.py'
+              'physical_ai_tools/physical_ai_server/physical_ai_server/workflow/interpreter.py'
           ).read()
           m = re.search(
               r"HAT_BLOCK_TYPES[^=]*=\s*frozenset\(\{([^}]+)\}\)",
@@ -741,7 +741,7 @@ jobs:
           # German transliterations.
           OFFENDERS=$(grep -rnE \
             "(\[FEHLER\]|\[WARNUNG\]|\[STOPP\]).*\b(frueh|kuerzer|schliessen|Zeitluecken|Groesste|Luecken|Moegliche|ueber[a-z]|laeuft|haengt|pruefen|Pruefung|ueberschritten|Schueler|benoetigen|Oberflaeche|uebersprungen|enthaelt|zusaetzliche|Verfuegbar|geaendert|beschaedigt|koennte|faehige|Bildaufloesung)\b" \
-            robotis_ai_setup/docker/physical_ai_server/overlays/ \
+            physical_ai_tools/physical_ai_server/physical_ai_server/ \
             robotis_ai_setup/gui/ \
             robotis_ai_setup/installer/ \
             2>/dev/null || true)

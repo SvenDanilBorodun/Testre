@@ -18,6 +18,7 @@ handlers can resolve "ablegen bei A" to a coordinate.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from physical_ai_server.workflow.handlers.motion import WorkflowError
@@ -25,11 +26,28 @@ from physical_ai_server.workflow.handlers.motion import WorkflowError
 
 UNPINNED_SENTINEL = '—'
 
+# Audit fix #17: destination names appear in log lines and the React
+# editor; restrict to ASCII alphanumerics + German umlauts + space /
+# underscore / hyphen, capped at 40 chars. Rejecting weird control
+# characters here keeps later log-strip rendering predictable and
+# prevents log-message-spoofing tricks (a `\n[FEHLER] …` injection).
+_DESTINATION_NAME_RE = re.compile(r'^[A-Za-zÄÖÜäöüß0-9 _\-]{1,40}$')
+
+
+def _validate_destination_name(name: str) -> None:
+    if not name or not _DESTINATION_NAME_RE.match(name):
+        raise WorkflowError('Ungültiger Ziel-Name.')
+
 
 def destination_pin(ctx, args: dict[str, Any]) -> None:
     name = (args.get('name') or '').strip()
     if not name:
         raise WorkflowError('Ziel-Name fehlt.')
+    # Audit fix #17: reject names containing control chars / overly
+    # long strings BEFORE we touch ctx.destinations — keeps the
+    # subsequent log line and the React editor's destination list
+    # clean.
+    _validate_destination_name(name)
     raw_x = args.get('x')
     raw_y = args.get('y')
     raw_z = args.get('z')
@@ -65,6 +83,9 @@ def destination_current(ctx, args: dict[str, Any]) -> None:
     name = (args.get('name') or '').strip()
     if not name:
         raise WorkflowError('Ziel-Name fehlt.')
+    # Audit fix #17: same name validation as destination_pin so both
+    # paths share the canonical alphabet.
+    _validate_destination_name(name)
     if not callable(getattr(ctx, 'get_current_pose_xyz', None)):
         raise WorkflowError(
             'Aktuelle Position kann nicht ermittelt werden — Vorwärts-Kinematik fehlt.'

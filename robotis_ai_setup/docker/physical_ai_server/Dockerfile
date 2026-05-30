@@ -7,16 +7,10 @@
 ARG BASE_IMAGE=robotis/physical-ai-server:amd64-0.8.2
 FROM ${BASE_IMAGE}
 
-# Patch upstream bug: ServerInference.__init__ never initializes self._endpoints,
-# causing AttributeError on first register_endpoint() call.
-# Ref: physical_ai_tools/physical_ai_server/physical_ai_server/inference/server_inference.py
-#
-# Also removes duplicate InferenceManager initialization (lines 71-75 repeat 60-64).
-# Fix CRLF line endings in s6 service files.
-# When building on Windows, Git converts LF to CRLF. s6-overlay rejects
-# "longrun\r" as an invalid type. Strip \r from text files only — the
-# previous `find … -type f -exec sed` would also rewrite binaries that
-# happened to sit in the s6 tree, corrupting them.
+# Fix CRLF line endings in s6 service files. When building on Windows, Git
+# converts LF to CRLF and s6-overlay rejects "longrun\r" as an invalid type.
+# Strip \r from text files only — a blanket `find … -type f -exec sed` would
+# also rewrite binaries that happen to sit in the s6 tree, corrupting them.
 RUN find /etc/s6-overlay/s6-rc.d -type f \
         \( -name "*.sh" -o -name "type" -o -name "run" -o -name "up" \
            -o -name "finish" -o -name "notification-fd" -o -name "*.conf" \
@@ -71,154 +65,44 @@ RUN set -e && \
     rm -rf /tmp/interfaces_src && \
     echo "physical_ai_interfaces re-built with audit additions"
 
-# Patch upstream bug: ServerInference.__init__ never initializes self._endpoints,
-# causing AttributeError on first register_endpoint() call.
-# Also removes duplicate InferenceManager initialization (lines 71-75 repeat 60-64).
+# ── EduBotics physical_ai_server package — COPY-WHOLESALE (v2.5.2 durable fix) ──
 #
-# fix_server_inference.py now exits non-zero if the target file isn't actually
-# modified (sha changes pre/post), so an upstream reformat that slides the patch
-# out of range fails the build loudly instead of shipping an unpatched image.
-COPY patches/fix_server_inference.py /tmp/fix_server_inference.py
-RUN TARGETS=$(find /root/ros2_ws -name "server_inference.py" -path "*/inference/*" 2>/dev/null) && \
-    [ -n "$TARGETS" ] || { echo "ERROR: server_inference.py not found — patch cannot be applied"; exit 1; } && \
-    for f in $TARGETS; do \
-        python3 /tmp/fix_server_inference.py "$f" || \
-          { echo "ERROR: patch verification failed on $f"; exit 1; } \
-    done && \
-    rm /tmp/fix_server_inference.py
-
-# Overlay modified source files (inference validation, data sanitization, joint safety, dual camera config)
-# Note: LeRobot itself is NOT overlaid — it's pip-installed from PyPI at version 0.5.1
-# in the base image (see physical_ai_tools/physical_ai_server/Dockerfile.{amd64,arm64}).
-# The Modal training image at robotis_ai_setup/modal_training/modal_app.py pins the
-# same version. Only physical_ai_server source files are patched here.
+# Replaces the historical "apply_overlay ~9 hand-listed files onto the upstream
+# clone" model. That model silently dropped any monorepo edit OR DELETION not
+# wired into the chain — the root cause of the v2.5.0 regression where a slimmed
+# training_manager.py never reached the image, leaving the dead 269-line upstream
+# copy whose `from lerobot.scripts.eval import eval_policy` (renamed in LeRobot
+# 0.5.1) crashed the ROS node at startup → recording + inference dead, both arches.
 #
-# Every overlay is now sha256-compared after cp to prove the target file
-# actually changed. Without this, an upstream rename would have silently
-# left stock code in place.
-COPY overlays/inference_manager.py /tmp/overlays/inference_manager.py
-COPY overlays/data_manager.py /tmp/overlays/data_manager.py
-COPY overlays/data_converter.py /tmp/overlays/data_converter.py
-COPY overlays/hf_api_worker.py /tmp/overlays/hf_api_worker.py
-COPY overlays/omx_f_config.yaml /tmp/overlays/omx_f_config.yaml
-# physical_ai_server.py overlay keeps the bearer-token log scrubber,
-# the workflow-detection cache that feeds the React debugger, and all
-# Roboter Studio service handlers. The inference-time safety envelope
-# was removed in the safety stripdown.
-COPY overlays/physical_ai_server.py /tmp/overlays/physical_ai_server.py
-# training_manager.py overlay (v2.5.1 audit fix): the v2.5.0 LeRobot v0.5.1
-# migration slimmed this file 269->66 lines (a stub holding only two static
-# helpers) and DELETED training/trainers/ + evaluation/ in the monorepo, but
-# never added training_manager.py to this apply_overlay chain. The base image
-# therefore kept upstream's 269-line copy, whose
-#   from physical_ai_server.training.trainers.lerobot.lerobot_trainer import LerobotTrainer
-#   -> from lerobot.scripts.eval import eval_policy
-# is dead under LeRobot 0.5.1 (scripts/eval.py renamed to scripts/lerobot_eval.py).
-# The shipping physical_ai_server.py overlay imports TrainingManager at module
-# top-level, so the ROS node ModuleNotFoundError-crashed at startup -> recording
-# AND inference dead on every student PC and classroom Jetson. Overlaying the
-# 66-line stub (path filter matches src/build/install trees) + the rm -rf of the
-# dead trees below restores a clean import. Re-runs of LeRobot training still go
-# through Modal Cloud (Rule §5); the stub only backs get_available_list() +
-# get_weight_save_root_path() that the inference/model-list callbacks call.
-COPY overlays/training_manager.py /tmp/overlays/training_manager.py
-# communicator.py adds get_latest_bgr_frame + get_latest_follower_joints
-# (decode CompressedImage + return JointState position) so the
-# Roboter Studio calibration manager can actually collect frames + EEF
-# poses on real hardware. Without this overlay the v1.2 provider hooks
-# in physical_ai_server.py find no methods to call and the wizard
-# returns "Kein Kamerabild verfügbar." on every capture press.
-COPY overlays/communicator.py /tmp/overlays/communicator.py
-# Audit F62: lerobot_dataset_wrapper.py was previously NOT overlaid, so
-# every prior build shipped the upstream baseline's `preset='ultrafast',
-# crf=28` mp4 encoder defaults — the F62 source change in
-# physical_ai_tools/... never reached student installs. Adding it here
-# as an overlay (path filter `*/data_processing/*` matches the same
-# directory as data_manager.py / data_converter.py) so the cleaner
-# `preset='fast', crf=23` defaults actually ship.
-COPY overlays/lerobot_dataset_wrapper.py /tmp/overlays/lerobot_dataset_wrapper.py
-# Audit F36 + 2026-05-23 fix: web_video_server explicit address + port
-# binding and respawn-on-crash. The upstream launch file leaves these
-# unset, so `web_video_server` falls through to its own internal default
-# (binds 0.0.0.0:8080 — fine for our use case) and has no respawn.
-#
-# The overlay sets both fields explicitly to lock the contract against
-# any future upstream default flip, and pairs that with
-# `respawn=True, respawn_delay=2.0` so a SIGSEGV on malformed
-# CompressedImage frames does NOT leave the browser preview blank
-# until container restart.
-#
-# IMPORTANT: the overlay binds the container's 0.0.0.0, NOT 127.0.0.1.
-# Docker port-publish (`127.0.0.1:8080:8080` in docker-compose.yml)
-# forwards host packets to the container's eth0 — a container-side
-# 127.0.0.1 bind makes the stream unreachable from the host, which
-# manifests as blank Aufnahme preview cells. LAN isolation is enforced
-# by the compose loopback mapping; that is the actual defence-in-depth
-# layer. An earlier iteration of this overlay (pre-2026-05-23) bound
-# 127.0.0.1 inside the container and was the root cause of the blank
-# preview regression on Sven's classroom rig.
-COPY overlays/physical_ai_server_bringup.launch.py /tmp/overlays/physical_ai_server_bringup.launch.py
+# The image's physical_ai_server package is now a VERBATIM copy of the repo's
+# single source of truth, physical_ai_tools/physical_ai_server/, staged into this
+# build context as pkg_src/ by build-images.sh (test/, the two Dockerfiles,
+# CHANGELOG and __pycache__ excluded — build inputs / dev-only, not runtime).
+# "Image == repo HEAD" is now true BY CONSTRUCTION: edits, new files AND deletions
+# all propagate, with no hand-maintained list to forget. The server_inference.py
+# upstream-bug fix (self._endpoints init + de-dup) and the Roboter Studio workflow/
+# module are part of this tree now, so the separate fix_server_inference.py patch
+# step and the workflow COPY block are gone. The asserts below fail loudly if a
+# stripped guard (safety_envelope.py, Rule §2) or the dead on-device-training trees
+# ever re-enter; CI's image-source-parity job re-asserts byte equality after every
+# build, and the build-time node import near the end is the runtime belt.
+COPY pkg_src/ /tmp/pkg_src/
 RUN set -e && \
-    apply_overlay() { \
-        local name="$1" path_filter="$2" src="/tmp/overlays/$1"; \
-        local targets; \
-        if [ -n "$path_filter" ]; then \
-            targets=$(find /root/ros2_ws -name "$name" -path "$path_filter" 2>/dev/null); \
-        else \
-            targets=$(find /root/ros2_ws -name "$name" 2>/dev/null); \
-        fi; \
-        if [ -z "$targets" ]; then \
-            echo "ERROR: $name not found in base image — overlay cannot be applied"; \
-            return 1; \
-        fi; \
-        # Audit E4: scrub CR characters from the staged overlay BEFORE
-        # the sha256 so a Windows checkout with core.autocrlf=true (which
-        # rewrote our LF files to CRLF) still produces a byte-identical
-        # copy. Without this, the sha256 post-check would still pass IF
-        # both the staged file AND the in-image file ended up CRLF (silent
-        # content-equivalence), but xacro/yaml parsers in the base image
-        # would then fail with confusing line-ending errors at runtime.
-        # The .gitattributes LF rule landed at the same time defends new
-        # clones; this is the build-side belt for stale working trees.
-        sed -i 's/\r$//' "$src"; \
-        local expected; expected=$(sha256sum "$src" | cut -d' ' -f1); \
-        for f in $targets; do \
-            before=$(sha256sum "$f" | cut -d' ' -f1); \
-            if [ "$before" = "$expected" ]; then \
-                echo "Overlay already in place: $f"; \
-                continue; \
-            fi; \
-            cp "$src" "$f"; \
-            after=$(sha256sum "$f" | cut -d' ' -f1); \
-            if [ "$after" != "$expected" ]; then \
-                echo "ERROR: overlay cp failed on $f ($after != $expected)"; \
-                return 1; \
-            fi; \
-            echo "Overlaid: $f ($before -> $after)"; \
-        done; \
-    } && \
-    apply_overlay inference_manager.py "*/inference/*" && \
-    apply_overlay data_manager.py "*/data_processing/*" && \
-    apply_overlay data_converter.py "*/data_processing/*" && \
-    apply_overlay hf_api_worker.py "*/data_processing/*" && \
-    apply_overlay omx_f_config.yaml "" && \
-    apply_overlay physical_ai_server.py "*/physical_ai_server/physical_ai_server.py" && \
-    apply_overlay training_manager.py "*/physical_ai_server/training/training_manager.py" && \
-    apply_overlay communicator.py "*/communication/communicator.py" && \
-    apply_overlay lerobot_dataset_wrapper.py "*/data_processing/*" && \
-    apply_overlay physical_ai_server_bringup.launch.py "*/physical_ai_server/launch/*" && \
-    rm -rf /tmp/overlays && \
-    # v2.5.1 audit fix (paired with the training_manager.py overlay above):
-    # purge the on-device training trees the monorepo DELETED in v2.5.0 but
-    # which still live in the upstream base image. The 66-line stub no longer
-    # imports them, so they are pure dead code now — but removing them across
-    # the src/ AND colcon build/ AND install/ trees guarantees no other import
-    # path can re-reach the dead lerobot_trainer.py (-> lerobot.scripts.eval).
-    # `|| true` keeps the build green if the base layout ever omits them.
-    find /root/ros2_ws -type d \
-        \( -path "*/physical_ai_server/training/trainers" \
-           -o -path "*/physical_ai_server/evaluation" \) \
-        -exec rm -rf {} + 2>/dev/null || true
+    mod_dir=$(find /root/ros2_ws/src -type d -path "*/physical_ai_tools/physical_ai_server/physical_ai_server" | head -n1) && \
+    [ -n "$mod_dir" ] || { echo "ERROR: physical_ai_server package not found in base image"; exit 1; } && \
+    pkg_root=$(dirname "$mod_dir") && \
+    echo "Replacing upstream-cloned package at $pkg_root with the repo source of truth" && \
+    rm -rf "$pkg_root" && mkdir -p "$pkg_root" && \
+    cp -a /tmp/pkg_src/. "$pkg_root/" && \
+    rm -rf /tmp/pkg_src && \
+    test -f "$pkg_root/package.xml" || { echo "ERROR: package.xml missing after copy"; exit 1; } && \
+    test -f "$pkg_root/physical_ai_server/physical_ai_server.py" || { echo "ERROR: node module missing after copy"; exit 1; } && \
+    { test ! -e "$pkg_root/physical_ai_server/workflow/safety_envelope.py" || { echo "ERROR: stripped safety_envelope.py present (Rule §2)"; exit 1; }; } && \
+    { test ! -e "$pkg_root/physical_ai_server/training/trainers" || { echo "ERROR: dead training/trainers/ present"; exit 1; }; } && \
+    { test ! -e "$pkg_root/physical_ai_server/evaluation" || { echo "ERROR: dead evaluation/ present"; exit 1; }; } && \
+    cd /root/ros2_ws && \
+    bash -c "source /opt/ros/jazzy/setup.bash && colcon build --packages-select physical_ai_server --symlink-install" && \
+    echo "physical_ai_server replaced from repo source of truth + colcon-rebuilt"
 
 # Override the base image's inherited LeRobot v0.2.0 with PyPI v0.5.1.
 #
@@ -400,24 +284,9 @@ RUN python3 -m pip install --no-cache-dir --force-reinstall \
                 print('cross-arch floor:', safetensors.__version__, \
                       google.protobuf.__version__, PIL.__version__)"
 
-# Roboter Studio workflow module (calibration, perception, IK, motion handlers,
-# Blockly interpreter). Not present in upstream; copied in as an addition
-# rather than an overlay since there is no existing file to sha256-compare.
-COPY overlays/workflow/ /tmp/workflow/
-RUN set -e && \
-    target_dir=$(find /root/ros2_ws -type d -name physical_ai_server -path "*/physical_ai_server/physical_ai_server" | head -n1) && \
-    [ -n "$target_dir" ] || { echo "ERROR: physical_ai_server package directory not found"; exit 1; } && \
-    cp -r /tmp/workflow "$target_dir/workflow" && \
-    test -f "$target_dir/workflow/__init__.py" && \
-    test -f "$target_dir/workflow/calibration_manager.py" && \
-    echo "Roboter Studio workflow module installed at $target_dir/workflow" && \
-    rm -rf /tmp/workflow
-
 # Strip ~6.75 GB of upstream bloat — see CLAUDE.md image-level audit (2026-05).
-# This MUST come AFTER all apply_overlay chains + the YOLOX download + the
-# colcon rebuild + the Roboter Studio workflow copy. Any earlier and we
-# either delete sources the build still needs, or invalidate the sha256
-# pre/post checks the overlays rely on.
+# This MUST come AFTER the package replacement + colcon rebuild + the YOLOX
+# download. Any earlier and we delete sources the build still needs.
 #
 # Breakdown (verified via `du -sh` inside :latest):
 #   /root/.cache       ~5.0 GB  (pip wheel cache + puccinialin 962 MB, inherited from upstream base)
@@ -466,13 +335,13 @@ print('all v0.5.1 imports OK; codebase_version=v3.0')"
 # Build-time NODE-import smoke test (v2.5.1 audit). The policy smoke test above
 # imports lerobot.policies.* but NEVER imports physical_ai_server itself, so it
 # could not catch the v2.5.0 regression where the shipping physical_ai_server.py
-# overlay does a module-level `from physical_ai_server.training.training_manager
-# import TrainingManager` while the un-overlaid upstream training_manager.py
+# does a module-level `from physical_ai_server.training.training_manager import
+# TrainingManager` while the (then un-overlaid) upstream training_manager.py
 # pulled the removed `lerobot.scripts.eval` -> ModuleNotFoundError at node
 # startup (recording + inference dead). This step imports the exact module the
 # s6 service loads at runtime; sourcing the colcon workspace makes
-# physical_ai_interfaces + the overlaid package resolvable. Any dead module-level
-# import now fails the build loudly instead of every student's classroom.
+# physical_ai_interfaces + the package resolvable. Any dead module-level import
+# now fails the build loudly instead of every student's classroom.
 RUN bash -c "set -e && \
     source /opt/ros/jazzy/setup.bash && \
     source /root/ros2_ws/install/setup.bash && \

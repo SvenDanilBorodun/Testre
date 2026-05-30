@@ -68,6 +68,15 @@ RUN python3 -m pip uninstall -y torchcodec 2>/dev/null || true && \
         "accelerate>=1.10.0,<2.0.0" \
         "scipy>=1.14.0,<2.0.0"
 
+# v2.5.4 cv_bridge ABI fix: force numpy<2 AFTER lerobot (which pulls numpy>=2).
+# ros-jazzy-cv-bridge's boost C-extension is compiled against NumPy 1.x; under
+# numpy 2.x the rgb8/bgr8 color-conversion path used by recording + inference
+# SEGFAULTS on the first camera frame. Must be a separate --force-reinstall RUN:
+# numpy<2 is unsatisfiable in the same resolve as lerobot's numpy>=2.
+# Mirrored in Dockerfile.arm64 + the thin-overlay cross-arch floor.
+RUN pip install --no-cache-dir --force-reinstall "numpy==1.26.4" && \
+    python3 -c "import numpy; assert numpy.__version__.startswith('1.'), numpy.__version__; print('numpy floor', numpy.__version__)"
+
 # v2.5.0: LeRobot is now installed via pip into site-packages, NOT under the
 # physical_ai_tools clone. The historic PYTHONPATH=...lerobot/src entry is gone.
 

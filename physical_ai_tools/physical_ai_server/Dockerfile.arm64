@@ -83,13 +83,17 @@ RUN python3 -m pip uninstall -y torchcodec 2>/dev/null || true && \
 #
 # Mirrored in robotis_ai_setup/docker/physical_ai_server/Dockerfile (the thin
 # overlay that runs over either base image).
+# numpy==1.26.4 added v2.5.4: cv_bridge_boost.so is built against NumPy 1.x, so
+# lerobot's numpy>=2 segfaults the recording/inference rgb8 decode path. Pin <2.
 RUN pip install --no-cache-dir --force-reinstall \
         safetensors==0.7.0 \
         protobuf==6.33.6 \
-        pillow==12.2.0 && \
-    python3 -c "import safetensors, google.protobuf, PIL; \
+        pillow==12.2.0 \
+        numpy==1.26.4 && \
+    python3 -c "import safetensors, google.protobuf, PIL, numpy; \
                 print('cross-arch floor:', safetensors.__version__, \
-                      google.protobuf.__version__, PIL.__version__)"
+                      google.protobuf.__version__, PIL.__version__, numpy.__version__); \
+                assert numpy.__version__.startswith('1.'), 'numpy must be <2 for cv_bridge ABI'"
 
 # v2.5.0: LeRobot is in site-packages, not under physical_ai_tools/lerobot/src.
 # The historic PYTHONPATH entry is no longer needed.

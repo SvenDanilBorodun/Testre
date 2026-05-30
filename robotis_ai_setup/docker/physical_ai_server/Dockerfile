@@ -263,26 +263,43 @@ RUN set -e && \
 # adds a new pip dep, the WORKFLOW.md license rule still applies.
 RUN echo "AGPL audit: relies on explicit dependency manifest, see Dockerfile comment"
 
-# Cross-arch package floor — pin safetensors / protobuf / pillow to a single
-# version on BOTH arches. v0.5.1 resolves these naturally to compatible versions,
-# but we pin explicitly to keep amd64 + arm64 producing byte-identical
+# Cross-arch package floor — pin safetensors / protobuf / pillow / numpy to a
+# single version on BOTH arches. v0.5.1 resolves these naturally to compatible
+# versions, but we pin explicitly to keep amd64 + arm64 producing byte-identical
 # site-packages. Versions chosen from Phase 0's verified pip resolve of
 # `lerobot[pi,smolvla,peft]==0.5.1` on Python 3.12.
 #
 #   safetensors==0.7.0   (LCD across arches; v0.8 still rc as of 2026-05)
 #   protobuf==6.33.6     (bumped from 6.31.0 for v0.5.1's grpcio-dep)
 #   pillow==12.2.0       (bumped from 12.1.0; v0.5.1's natural resolve)
+#   numpy==1.26.4        (v2.5.4 cv_bridge ABI fix — see below)
 #
-# Mirrored in physical_ai_tools/physical_ai_server/Dockerfile.arm64.
-# `--force-reinstall` so the pins override any transitive resolve from the
-# base image's pip layers.
+# numpy==1.26.4 is the v2.5.4 ship-blocker fix. lerobot 0.5.1 pulls numpy 2.2.6
+# (its pyproject demands numpy>=2), which SHADOWS the base image's numpy 1.26.4
+# at node runtime. But ros-jazzy-cv-bridge 4.1.0's cv_bridge_boost.so is compiled
+# against NumPy 1.x — so the color-conversion path (compressed_imgmsg_to_cv2,
+# desired_encoding='rgb8') used by BOTH the recording save loop and the inference
+# loop (data_manager.convert_msgs_to_raw_datas) SEGFAULTS on the first camera
+# frame under numpy 2.x (a SIGSEGV uncatchable by the node's try/except → the ROS
+# node dies). A bare `import cv_bridge` only warns and exits 0, so the import-only
+# smoke tests never caught it. Pinning numpy<2 here (after the lerobot install)
+# restores the cv_bridge ABI match; verified in-image that lerobot 0.5.1 / torch
+# 2.7.0 / scipy 1.17.1 / cv2 / all policy imports + predict_action +
+# make_pre_post_processors still work under 1.26.4. The build-time functional
+# decode gate below proves the fix held. Pre-existing since v2.5.0; fixed v2.5.4.
+#
+# Mirrored in physical_ai_tools/physical_ai_server/Dockerfile.{amd64,arm64}.
+# `--force-reinstall` so the pins override any transitive resolve (incl. lerobot's
+# numpy>=2) from the earlier pip layers.
 RUN python3 -m pip install --no-cache-dir --force-reinstall \
         safetensors==0.7.0 \
         protobuf==6.33.6 \
-        pillow==12.2.0 && \
-    python3 -c "import safetensors, google.protobuf, PIL; \
+        pillow==12.2.0 \
+        numpy==1.26.4 && \
+    python3 -c "import safetensors, google.protobuf, PIL, numpy; \
                 print('cross-arch floor:', safetensors.__version__, \
-                      google.protobuf.__version__, PIL.__version__)"
+                      google.protobuf.__version__, PIL.__version__, numpy.__version__); \
+                assert numpy.__version__.startswith('1.'), 'numpy must be <2 for cv_bridge ABI'"
 
 # Strip ~6.75 GB of upstream bloat — see CLAUDE.md image-level audit (2026-05).
 # This MUST come AFTER the package replacement + colcon rebuild + the YOLOX
@@ -346,6 +363,27 @@ RUN bash -c "set -e && \
     source /opt/ros/jazzy/setup.bash && \
     source /root/ros2_ws/install/setup.bash && \
     python3 -c 'import physical_ai_server.physical_ai_server; print(\"physical_ai_server node module imports OK\")'"
+
+# Build-time FUNCTIONAL cv_bridge decode gate (v2.5.4). The import-only smoke
+# tests above cannot catch the NumPy-2-vs-cv_bridge ABI segfault: `import
+# cv_bridge` merely warns and exits 0; the crash only happens when the C-API is
+# actually CALLED with a color conversion. This gate runs the EXACT recording/
+# inference camera-decode path — compressed_imgmsg_to_cv2(desired_encoding='rgb8')
+# on a real JPEG (data_manager.convert_msgs_to_raw_datas) — so a future numpy/
+# cv_bridge ABI mismatch SIGSEGVs the build instead of every student's first
+# recorded frame. Paired with the numpy==1.26.4 cross-arch floor pin above.
+RUN bash -c "set -e && \
+    source /opt/ros/jazzy/setup.bash && \
+    python3 -c '\
+import numpy as np, cv2; \
+from cv_bridge import CvBridge; \
+from sensor_msgs.msg import CompressedImage; \
+img = (np.random.default_rng(0).random((48, 64, 3)) * 255).astype(np.uint8); \
+ok, jpg = cv2.imencode(\".jpg\", img); assert ok; \
+m = CompressedImage(); m.format = \"jpeg\"; m.data = jpg.tobytes(); \
+out = CvBridge().compressed_imgmsg_to_cv2(m, desired_encoding=\"rgb8\"); \
+assert out.shape == (48, 64, 3), out.shape; \
+print(f\"cv_bridge functional decode gate OK (numpy {np.__version__})\")'"
 
 # Scrub upstream-base ENV leaks that the sed of /root/.bashrc above can't
 # touch (image-config ENV directives are independent of interactive-shell

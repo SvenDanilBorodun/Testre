@@ -206,7 +206,7 @@ jobs:
           for attempt in $(seq 1 150); do
             BODY=$(curl -fsS --max-time 5 "$URL" 2>/dev/null || true)
             if [ -n "$BODY" ]; then
-              if python3 -c "import json, os, sys; d = json.loads(sys.argv[1]); sys.exit(0 if d.get('version') == os.environ['EXPECTED'] else 1)" "$BODY"; then
+              if python3 -c "import json, sys; d = json.loads(sys.argv[1]); sys.exit(0 if d.get('version') == sys.argv[2] else 1)" "$BODY" "$EXPECTED"; then
                 echo "/version now advertises ${EXPECTED}."
                 echo "  body: $BODY"
                 exit 0

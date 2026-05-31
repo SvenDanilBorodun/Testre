@@ -235,32 +235,54 @@ jobs:
           AMD64_REPOS="open-manipulator physical-ai-server physical-ai-manager"
           ARM64_REPOS="open-manipulator-jetson physical-ai-server-jetson"
 
-          # Retry helper — `imagetools create` can 429 on Docker Hub during
-          # busy periods. Each repo gets up to 3 attempts with backoff.
+          # _tag_exists: FREE existence probe via the Docker Hub web API
+          # (hub.docker.com), which is NOT the registry pull endpoint and does
+          # NOT consume the 200/6h pull-rate budget. nettername/* repos are
+          # public so no auth is needed. This is the key to surviving Docker Hub
+          # rate-limiting: on a re-run, tags created by a prior partial attempt
+          # are SKIPPED, so we only spend pull budget on the tags actually
+          # missing — instead of re-reading :latest ~20x every run (the 2026-05
+          # 429 hard-block that failed v2.5.4's retag 3x in a row).
+          _tag_exists() {
+            local repo="$1" tag="$2" code
+            code=$(curl -fsS -o /dev/null -w "%{http_code}" --max-time 15 \
+              "https://hub.docker.com/v2/repositories/nettername/${repo}/tags/${tag}/" 2>/dev/null || echo "000")
+            [ "$code" = "200" ]
+          }
+
+          # _retag: `imagetools create` reads the source manifest (1 pull). 6
+          # attempts with quadratic backoff (5/20/45/80/125/180s) to ride out a
+          # transient 429 burst.
           _retag() {
-            local target="$1" source="$2"
-            for attempt in 1 2 3; do
+            local target="$1" source="$2" attempt
+            for attempt in 1 2 3 4 5 6; do
               if docker buildx imagetools create -t "$target" "$source"; then
                 return 0
               fi
-              echo "WARN: retag $target attempt $attempt failed; sleeping $((attempt*5))s"
-              sleep $((attempt*5))
+              echo "WARN: retag $target attempt $attempt/6 failed; sleeping $((attempt*attempt*5))s"
+              sleep $((attempt*attempt*5))
             done
-            echo "::error::Failed to retag $target after 3 attempts"
+            echo "::error::Failed to retag $target after 6 attempts"
             return 1
+          }
+
+          # _maybe_retag: skip tags that already exist (free), retag only what's missing.
+          _maybe_retag() {
+            local repo="$1" tag="$2" source="$3"
+            if _tag_exists "$repo" "$tag"; then
+              echo "skip (already on Docker Hub): nettername/${repo}:${tag}"
+              return 0
+            fi
+            _retag "nettername/${repo}:${tag}" "$source"
           }
 
           for REPO in $AMD64_REPOS $ARM64_REPOS; do
             SRC="nettername/${REPO}:${SRC_TAG}"
-            # Always: sha-short tag (immutable)
-            _retag "nettername/${REPO}:${SHORT}" "$SRC"
-            # Always: full-sha tag (immutable)
-            _retag "nettername/${REPO}:${{ github.sha }}" "$SRC"
-            # On tag pushes: semver tags
+            _maybe_retag "$REPO" "$SHORT" "$SRC"                 # sha-short (immutable)
+            _maybe_retag "$REPO" "${{ github.sha }}" "$SRC"      # full-sha (immutable)
             if [ -n "$SEMVER" ]; then
-              MAJ_MIN="${SEMVER%.*}"
-              _retag "nettername/${REPO}:${SEMVER}" "$SRC"
-              _retag "nettername/${REPO}:${MAJ_MIN}" "$SRC"
+              _maybe_retag "$REPO" "$SEMVER" "$SRC"              # e.g. 2.5.4
+              _maybe_retag "$REPO" "${SEMVER%.*}" "$SRC"         # e.g. 2.5
             fi
             # :latest is already what build-images.sh pushed; no action needed.
           done

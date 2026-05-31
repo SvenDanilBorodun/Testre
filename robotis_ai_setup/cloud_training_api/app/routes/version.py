@@ -17,6 +17,14 @@ Two changes from the v1 shape:
 
   3. Added `commit` so CI health-gates can verify the running image's
      SHA matches the just-pushed commit (catches stale-cache deploys).
+
+  4. `download_url` auto-derives from GUI_VERSION + GUI_RELEASE_REPO when
+     GUI_DOWNLOAD_URL is unset. The release pipeline (release.yml W6
+     `publish-gui-version`) sets BOTH vars explicitly after the installer
+     asset is uploaded, so this derivation is a defensive backstop — it
+     removes GUI_DOWNLOAD_URL as a SEPARATELY-driftable surface. The GH
+     Release asset URL is deterministic from the tag:
+       https://github.com/<repo>/releases/download/v<version>/EduBotics_Setup.exe
 """
 
 import os
@@ -24,6 +32,9 @@ import os
 from fastapi import APIRouter
 
 router = APIRouter()
+
+# Asset filename produced by release-installer.yml's softprops upload.
+_INSTALLER_ASSET = "EduBotics_Setup.exe"
 
 
 def _resolve_commit() -> str:
@@ -35,20 +46,44 @@ def _resolve_commit() -> str:
     return "unknown"
 
 
+def _resolve_download_url(version: str | None) -> str | None:
+    """Explicit GUI_DOWNLOAD_URL wins; else derive the GH Release asset URL
+    from GUI_VERSION + GUI_RELEASE_REPO (owner/repo). Returns None when
+    neither is available so the GUI treats it as 'no update'.
+
+    Deriving keeps the version string and its download URL from drifting
+    apart: a single GUI_VERSION bump is enough for the update gate to point
+    at the right `.exe`, instead of two env vars that can disagree.
+    """
+    explicit = os.environ.get("GUI_DOWNLOAD_URL")
+    if explicit:
+        return explicit
+    repo = os.environ.get("GUI_RELEASE_REPO")
+    if version and repo:
+        return (
+            f"https://github.com/{repo}/releases/download/"
+            f"v{version}/{_INSTALLER_ASSET}"
+        )
+    return None
+
+
 @router.get("/version")
 async def get_latest_version():
     """Return the latest GUI version and download URL.
 
     Configured via Railway environment variables:
-      GUI_VERSION      — e.g. "2.1.0"
-      GUI_DOWNLOAD_URL — public URL to the installer .exe
+      GUI_VERSION      — e.g. "2.1.0" (the publish gate; advertise only
+                         after the matching .exe asset exists)
+      GUI_DOWNLOAD_URL — public URL to the installer .exe (optional; when
+                         unset, derived from GUI_VERSION + GUI_RELEASE_REPO)
+      GUI_RELEASE_REPO — "owner/repo" used to derive the download URL
 
-    When either is unset the response is still 200 with null values so
+    When GUI_VERSION is unset the response is still 200 with null values so
     the GUI's update_checker treats it as "no update available" instead
     of failing closed on a 503.
     """
     version = os.environ.get("GUI_VERSION") or None
-    download_url = os.environ.get("GUI_DOWNLOAD_URL") or None
+    download_url = _resolve_download_url(version)
 
     return {
         "version": version,

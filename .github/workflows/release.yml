@@ -16,11 +16,22 @@ name: release
 #       │
 #       ▼
 #   W5 release-installer
+#       │
+#       ▼
+#   W6 publish-gui-version
 #
 # release-installer MUST run AFTER docker-publish — the installer's
 # auto-update poll directs students at the `:vX.Y.Z` image tags that
 # docker-publish pushes, so attaching the .exe before those tags exist
 # causes first-boot pull 404 on every student that picks up the update.
+#
+# publish-gui-version (W6) MUST run AFTER release-installer — it flips the
+# Railway GUI_VERSION/GUI_DOWNLOAD_URL env vars that drive the student
+# auto-update gate (/version). Setting them before the .exe is attached to
+# the GH Release would point every updating student at a 404. Automating
+# this here removes the manual "bump Railway env after gh release" step
+# (CLAUDE.md §"Bumping product VERSION") that silently drifted — a GUI
+# could auto-update while the images it pulls stayed on a stale `:latest`.
 #
 # Modal deploys are MANUAL (operator runs `modal deploy modal_app.py`
 # and `modal deploy vision_app.py` from their workstation). Modal's
@@ -129,3 +140,83 @@ jobs:
     if: always() && needs.docker.result == 'success'
     uses: ./.github/workflows/release-installer.yml
     secrets: inherit
+
+  # ── W6: Flip the student auto-update gate (must run AFTER the installer
+  # .exe is attached to the GH Release, so /version never advertises a
+  # version whose download asset 404s) ──
+  #
+  # Sets GUI_VERSION / GUI_DOWNLOAD_URL / GUI_RELEASE_REPO on the cloud-api
+  # Railway service. The variable change triggers ONE redeploy that picks
+  # up all three atomically; /version then advertises the new version and
+  # existing student installs auto-update — which lands a new installer
+  # whose baked docker/versions.env pins the matching immutable IMAGE_TAG,
+  # so the pulled images can't drift from the GUI version.
+  #
+  # Tag-push only: on workflow_dispatch the installer's Release-attach step
+  # is skipped (no tag), so there's no asset to advertise.
+  publish-gui-version:
+    name: W6. Publish GUI auto-update gate
+    needs: [installer]
+    if: always() && needs.installer.result == 'success' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+    steps:
+      - name: Install Railway CLI via npm
+        run: |
+          npm install -g @railway/cli
+          railway --version
+      - name: Set GUI auto-update env vars on the cloud-api service
+        env:
+          GIT_REF_NAME: ${{ github.ref_name }}
+          GIT_REPO: ${{ github.repository }}
+        run: |
+          set -e
+          # github.ref_name on a tag push is the bare tag (e.g. "v2.5.4").
+          # GUI_VERSION is the numeric version with the leading "v" stripped;
+          # the download URL keeps the "v" since that's the GH Release tag.
+          TAG="${GIT_REF_NAME}"
+          VERSION="${TAG#v}"
+          DOWNLOAD_URL="https://github.com/${GIT_REPO}/releases/download/${TAG}/EduBotics_Setup.exe"
+          echo "Publishing GUI update gate: version=${VERSION} url=${DOWNLOAD_URL}"
+
+          # Set the two non-triggering vars first with --skip-deploys, then
+          # GUI_VERSION WITHOUT it so exactly ONE redeploy fires and picks up
+          # all three atomically (mirrors railway-deploy-cloud-api.yml's
+          # BUILD_COMMIT pattern).
+          railway variable set "GUI_RELEASE_REPO=${GIT_REPO}" \
+              --service scintillating-empathy --environment production \
+              --skip-deploys >/dev/null
+          railway variable set "GUI_DOWNLOAD_URL=${DOWNLOAD_URL}" \
+              --service scintillating-empathy --environment production \
+              --skip-deploys >/dev/null
+          railway variable set "GUI_VERSION=${VERSION}" \
+              --service scintillating-empathy --environment production >/dev/null
+          echo "  set GUI_RELEASE_REPO, GUI_DOWNLOAD_URL, GUI_VERSION (redeploy triggered)"
+      - name: Verify /version advertises the new release
+        env:
+          GIT_REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -e
+          EXPECTED="${GIT_REF_NAME#v}"
+          URL=https://scintillating-empathy-production-1068.up.railway.app/version
+          # Railway redeploy + healthcheck on an env-only change is fast, but
+          # pad for cold-pod routing. 5-min budget like the cloud-api gate.
+          for attempt in $(seq 1 150); do
+            BODY=$(curl -fsS --max-time 5 "$URL" 2>/dev/null || true)
+            if [ -n "$BODY" ]; then
+              if python3 -c "import json, os, sys; d = json.loads(sys.argv[1]); sys.exit(0 if d.get('version') == os.environ['EXPECTED'] else 1)" "$BODY"; then
+                echo "/version now advertises ${EXPECTED}."
+                echo "  body: $BODY"
+                exit 0
+              fi
+              ACTUAL=$(echo "$BODY" | python3 -c "import json, sys; print(json.loads(sys.stdin.read()).get('version', '<missing>'))" 2>/dev/null || echo "<unparseable>")
+              echo "Attempt $attempt: /version=$ACTUAL, expected $EXPECTED"
+            else
+              echo "Attempt $attempt: $URL → curl failed or empty body"
+            fi
+            sleep 2
+          done
+          echo "::error::/version did not advertise ${EXPECTED} within 5 minutes after setting Railway env vars."
+          exit 1

@@ -118,6 +118,7 @@ from .constants import (
     APP_VERSION,
     UPDATE_API_URL,
     IMAGE_OPEN_MANIPULATOR,
+    IMAGE_TAG,
     PORT_WEB_UI,
     DOCKER_DIR,
     ENV_FILE,
@@ -1566,8 +1567,18 @@ class EduBoticsApp:
             return
         self._last_webview_click_ms = now_ms
 
-        suffix = "/?cloud=1" if self.cloud_only.get() else "/"
-        url = f"http://localhost:{PORT_WEB_UI}{suffix}"
+        # Cache-bust the top-level navigation with the running image tag. The
+        # embedded WebView2 keeps a PERSISTENT disk cache (private_mode=False),
+        # so a window opened after an image update could otherwise be served a
+        # prior session's app shell. index.html is already `no-store` at nginx,
+        # so this is belt-and-suspenders — but it also defeats bfcache/in-memory
+        # reuse on a window reopened right after a --force-recreate. The `_v`
+        # changes whenever the pinned IMAGE_TAG changes (i.e. on every GUI
+        # update / image bump), forcing a fresh fetch of the shell.
+        params = [f"_v={IMAGE_TAG}"]
+        if self.cloud_only.get():
+            params.insert(0, "cloud=1")
+        url = f"http://localhost:{PORT_WEB_UI}/?{'&'.join(params)}"
 
         icon = os.path.join(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))),

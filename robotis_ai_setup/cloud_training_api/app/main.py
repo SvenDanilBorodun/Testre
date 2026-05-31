@@ -90,17 +90,23 @@ def _warn_optional_secrets() -> None:
         # GUI_VERSION / GUI_DOWNLOAD_URL feed /version which the student
         # installer polls on every launch. When missing, the update gate
         # silently disables — existing installs never learn about new
-        # releases. Per Rule §6 ("Bumping product VERSION"), these are
-        # one of four places the version string must agree.
+        # releases. These are normally set automatically by release.yml's
+        # W6 publish-gui-version job after the installer .exe is attached
+        # to the GH Release; a warning here means that job didn't run (or a
+        # manual deploy bypassed it).
         (
             "GUI_VERSION",
             "/version returns version=null — student installs cannot detect updates. "
-            "Set to match the in-tree VERSION file after `gh release create`.",
+            "Normally set by release.yml W6; matches the in-tree VERSION file.",
         ),
+        # GUI_DOWNLOAD_URL is OPTIONAL now: /version derives the GH Release
+        # asset URL from GUI_VERSION + GUI_RELEASE_REPO when it's unset. We
+        # warn on GUI_RELEASE_REPO instead — without it (and without an
+        # explicit GUI_DOWNLOAD_URL) the derive yields null.
         (
-            "GUI_DOWNLOAD_URL",
-            "/version returns download_url=null — even if GUI_VERSION is set, "
-            "the installer has nowhere to fetch the .exe from.",
+            "GUI_RELEASE_REPO",
+            "/version may return download_url=null — set to 'owner/repo' (or set "
+            "GUI_DOWNLOAD_URL explicitly) so the update gate can locate the .exe.",
         ),
     )
     for key, msg in optional_warns:

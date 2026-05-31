@@ -92,7 +92,7 @@ git push
 
 **Required env vars** (Railway dashboard): `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET`.
 
-**Production-relevant optional:** `ALLOWED_ORIGINS`, `GUI_VERSION` + `GUI_DOWNLOAD_URL` (drives student `.exe` auto-update — bump these to force re-install), `HF_TOKEN` (GDPR + dataset sweep), `MAX_TRAINING_TIMEOUT_HOURS`, `STALLED_WORKER_MINUTES`, `MODAL_VISION_*`, `VISION_MODAL_TIMEOUT_S`, `EDUBOTICS_JETSON_HF_TOKEN` (read-only HF token returned to Jetson agents at `/jetson/register` — REQUIRED if any classroom has a paired Jetson; otherwise `/jetson/register` returns 503).
+**Production-relevant optional:** `ALLOWED_ORIGINS`, `GUI_VERSION` + `GUI_DOWNLOAD_URL` + `GUI_RELEASE_REPO` (drives student `.exe` auto-update — normally set automatically by `release.yml` W6 on a `vX.Y.Z` tag; `GUI_DOWNLOAD_URL` is optional and derived from `GUI_VERSION` + `GUI_RELEASE_REPO` when unset), `HF_TOKEN` (GDPR + dataset sweep), `MAX_TRAINING_TIMEOUT_HOURS`, `STALLED_WORKER_MINUTES`, `MODAL_VISION_*`, `VISION_MODAL_TIMEOUT_S`, `EDUBOTICS_JETSON_HF_TOKEN` (read-only HF token returned to Jetson agents at `/jetson/register` — REQUIRED if any classroom has a paired Jetson; otherwise `/jetson/register` returns 503).
 
 **Never** set `EDUBOTICS_SKIP_SCHEMA_CHECK=1` on Railway.
 
@@ -220,9 +220,9 @@ docker run --rm --platform linux/amd64 --entrypoint sh \
 
 ### Student propagation
 
-GUI 2.2.4 auto-pulls on every launch: TCP probe to Docker Hub (5 s offline-skip) → manifest-digest pre-check → only pulls if remote ≠ local → persists last-pull timestamp to `%LOCALAPPDATA%/EduBotics/.last_image_pull.json`. Banner past `IMAGE_FRESHNESS_WARN_DAYS=14`. Disable with `EDUBOTICS_SKIP_AUTO_PULL=1`.
+GUI 2.2.4 auto-pulls on every launch: TCP probe to Docker Hub (5 s offline-skip) → manifest-digest pre-check → only pulls if remote ≠ local → persists last-pull timestamp to `%LOCALAPPDATA%/EduBotics/.last_image_pull.json`. Banner past `IMAGE_FRESHNESS_WARN_DAYS=14`. Disable with `EDUBOTICS_SKIP_AUTO_PULL=1`. As of v2.5.4 the GUI ALSO pulls the pinned image tag at environment start (`_compose_pull` before `up --force-recreate`, `--ignore-pull-failures`), so clicking "Umgebung starten" never recreates onto a stale local image even when the PC was offline at GUI launch.
 
-**To force re-install** of the `.exe` itself: bump `VERSION` + `installer/robotis_ai_setup.iss AppVersion` + `gui/app/constants.py` fallback together, build the new `.exe`, upload, then set Railway `GUI_VERSION` + `GUI_DOWNLOAD_URL`.
+**To force re-install** of the `.exe` itself: bump `VERSION` + `installer/robotis_ai_setup.iss AppVersion` + `gui/app/constants.py` fallback together, then push a `vX.Y.Z` tag. `release.yml` builds + attaches the `.exe` (W5) and then W6 `publish-gui-version` sets Railway `GUI_VERSION` / `GUI_DOWNLOAD_URL` / `GUI_RELEASE_REPO` automatically (after the asset exists). No manual Railway bump needed on the tagged path; for an off-pipeline hotfix you can still set those three vars by hand.
 
 ---
 
@@ -352,7 +352,7 @@ The schema fingerprint prevents Railway booting against a half-rolled-back DB �
 - [ ] **Railway Cloud API** deploy status SUCCESS on the commit you just pushed? (`mcp__railway__list-deployments` or dashboard)
 - [ ] **Railway env vars** matched against the new code paths? (every new env var the route reads is set; no required env left at default)
 - [ ] **Docker Hub** images pushed with the new content? (latest manifest digest matches the build you just ran; verify with `docker buildx imagetools inspect`)
-- [ ] **GitHub release** matches `VERSION` file? (if VERSION was bumped this PR, `gh release create v<version> --title "..." ./installer/output/EduBotics_Setup.exe` was run AND Railway `GUI_VERSION` + `GUI_DOWNLOAD_URL` were bumped — without these the auto-update gate is invisible to existing student installs)
+- [ ] **GitHub release** matches `VERSION` file? (on the tagged path, `release.yml` W5 attaches `EduBotics_Setup.exe` and W6 `publish-gui-version` sets Railway `GUI_VERSION` / `GUI_DOWNLOAD_URL` / `GUI_RELEASE_REPO` automatically + verifies `/version`; only a manual off-pipeline release needs `gh release create v<version> ./installer/output/EduBotics_Setup.exe` AND a hand-set of those three Railway vars — without them the auto-update gate is invisible to existing student installs)
 - [ ] **Smoke test** golden path: a real student logs in via the v<version>.exe → connects to a Jetson if paired → records or runs inference → no console errors. The image-build CI's `manager-build-validate` smoke is necessary but not sufficient.
 - [ ] **Teacher smoke**: a real teacher logs in via Railway teacher-web → opens a classroom → pairs a Jetson via the new modal → forces release → unpairs → no console errors.
 - [ ] **CLAUDE.md** §0 last-verified line bumped + the load-bearing section that changed has a fresh entry (§3 if architecture, §7 if Cloud API endpoint, §9 if migration, §11 if GUI, §12 if React, §13 if workflow, §16 if glossary).

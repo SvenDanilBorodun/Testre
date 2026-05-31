@@ -796,11 +796,60 @@ def _compose_args(gpu: bool = False) -> list[str]:
     return args
 
 
+def _compose_pull(gpu: bool = False, service: Optional[str] = None, log=None) -> bool:
+    """Refresh images for the tag pinned in versions.env, BEFORE recreating.
+
+    Why this exists: `start_containers()` recreates with --force-recreate, but
+    compose's default pull_policy is `missing` — it reuses whatever local image
+    the `…:${IMAGE_TAG}` reference already resolves to. So a --force-recreate
+    against a stale local `:latest` recreates onto stale bytes. The GUI's only
+    other refresh is check_for_updates() at *launch*, which is skipped when the
+    PC was offline at launch (and only reconnected before the student clicked
+    "Umgebung starten"), or when a freshly-installed .exe bumped versions.env
+    after launch. Pulling here closes that launch→start gap: the recreate one
+    line below always lands on the image the pinned tag currently points at.
+
+    Best-effort by design — `--ignore-pull-failures` lets an offline classroom
+    still start on cached images instead of refusing to boot. A pinned
+    immutable tag already present locally makes this a fast manifest no-op.
+    """
+    args = list(_compose_args(gpu))
+    args.append("pull")
+    args.append("--ignore-pull-failures")
+    if service:
+        args.append(service)
+    cmd = _docker_cmd(*args, cwd_wsl=DOCKER_DIR_WSL)
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True, text=True, timeout=600,
+            **_SUBPROCESS_KWARGS,
+        )
+        if result.returncode != 0 and log:
+            detail = (result.stderr or "").strip().splitlines()
+            tail = detail[-1][:140] if detail else ""
+            log(
+                "Hinweis: Image-Aktualisierung übersprungen — vorhandene Images "
+                f"werden verwendet.{(' (' + tail + ')') if tail else ''}"
+            )
+        return result.returncode == 0
+    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+        if log:
+            log(
+                "Hinweis: Image-Aktualisierung übersprungen — vorhandene Images "
+                f"werden verwendet. ({e})"
+            )
+        return False
+
+
 def start_containers(gpu: bool = False, log=None) -> bool:
     """Start all containers via docker compose up -d.
 
-    Uses --force-recreate to handle stale containers cleanly.
+    Pulls the pinned image tag first (best-effort) so --force-recreate never
+    lands on a stale local image, then uses --force-recreate to handle stale
+    containers cleanly.
     """
+    _compose_pull(gpu=gpu, log=log)
     cmd = _docker_cmd(
         *_compose_args(gpu), "up", "-d", "--force-recreate",
         cwd_wsl=DOCKER_DIR_WSL,
@@ -829,6 +878,7 @@ def start_cloud_only(log=None) -> bool:
     Uses --no-deps so docker-compose doesn't transitively pull in
     physical_ai_server via the depends_on relationship.
     """
+    _compose_pull(gpu=False, service="physical_ai_manager", log=log)
     cmd = _docker_cmd(
         *_compose_args(gpu=False),
         "up", "-d", "--force-recreate", "--no-deps", "physical_ai_manager",

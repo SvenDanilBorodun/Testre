@@ -26,6 +26,7 @@ import {
   setLastHeartbeatTime,
   setUseMultiTaskMode,
   setMultiTaskIndex,
+  setCollision,
 } from '../features/tasks/taskSlice';
 import {
   setIsTraining,
@@ -238,6 +239,20 @@ export function useRosTopicSubscription() {
         console.log('Received task status:', msg);
 
         let progress = 0;
+
+        // Teleop force/collision e-stop. The server publishes phase=COLLISION (error kept
+        // empty) when the follower was forced against an object, stopped, and driven to the
+        // safe home pose. Drive the blocking CollisionModal off this, and clear it when a
+        // non-COLLISION status arrives (resume publishes phase=READY). Handled BEFORE the
+        // error early-return below so it can never be masked by an error toast.
+        if (msg.phase === TaskPhase.COLLISION) {
+          dispatch(setCollision({ active: true, message: msg.current_task_instruction || '' }));
+          previousPhaseRef.current = msg.phase;
+          return;
+        }
+        if (previousPhaseRef.current === TaskPhase.COLLISION) {
+          dispatch(setCollision({ active: false, message: '' }));
+        }
 
         if (msg.error !== '') {
           console.log('error:', msg.error);

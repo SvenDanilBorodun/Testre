@@ -180,6 +180,23 @@ services:
       - EDUBOTICS_DETECTOR=${EDUBOTICS_DETECTOR:-yolox-tiny}
       - EDUBOTICS_YOLOX_ONNX=${EDUBOTICS_YOLOX_ONNX:-/opt/edubotics/yolox_tiny.onnx}
       - EDUBOTICS_DFINE_ONNX=${EDUBOTICS_DFINE_ONNX:-/opt/edubotics/dfine_n.onnx}
+      # Teleop force/collision e-stop (Rule §2 software guard, teleop-only). Read by the
+      # collision monitor in safety/collision_monitor.py + collision_detector.py. Defaults are
+      # conservative and safe even unset; an operator refines the per-joint current thresholds
+      # per-rig with calibrate_collision_currents.py. EDUBOTICS_COLLISION_ENABLED=0 is the
+      # one-variable rollback (full disable; the extra Dynamixel state reads stay harmless).
+      # MUST stay listed here (left of '=') or ci.yml::env-forwarding-guard fails.
+      - EDUBOTICS_COLLISION_ENABLED=${EDUBOTICS_COLLISION_ENABLED:-1}
+      - EDUBOTICS_COLLISION_CURRENT_J1=${EDUBOTICS_COLLISION_CURRENT_J1:-1.5}
+      - EDUBOTICS_COLLISION_CURRENT_J2=${EDUBOTICS_COLLISION_CURRENT_J2:-1.5}
+      - EDUBOTICS_COLLISION_CURRENT_J3=${EDUBOTICS_COLLISION_CURRENT_J3:-1.2}
+      - EDUBOTICS_COLLISION_CURRENT_J4=${EDUBOTICS_COLLISION_CURRENT_J4:-1.0}
+      - EDUBOTICS_COLLISION_CURRENT_J5=${EDUBOTICS_COLLISION_CURRENT_J5:-1.0}
+      - EDUBOTICS_COLLISION_VELOCITY_GATE=${EDUBOTICS_COLLISION_VELOCITY_GATE:-0.05}
+      - EDUBOTICS_COLLISION_DEBOUNCE_MS=${EDUBOTICS_COLLISION_DEBOUNCE_MS:-150}
+      - EDUBOTICS_COLLISION_RESUME_TOL_RAD=${EDUBOTICS_COLLISION_RESUME_TOL_RAD:-0.30}
+      - EDUBOTICS_COLLISION_GPIO_TOPIC=${EDUBOTICS_COLLISION_GPIO_TOPIC:-/gpio_command_controller/gpio_states}
+      - EDUBOTICS_COLLISION_USE_OVERLOAD_BIT=${EDUBOTICS_COLLISION_USE_OVERLOAD_BIT:-1}
     volumes:
       # This container does inference/recording on ROS topics; it does NOT
       # talk to raw USB. /dev:/dev + privileged were unnecessary attack

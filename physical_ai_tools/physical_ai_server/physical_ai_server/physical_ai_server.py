@@ -111,6 +111,7 @@ from physical_ai_server.communication.communicator import Communicator
 from physical_ai_server.data_processing.data_manager import DataManager
 from physical_ai_server.data_processing.hf_api_worker import HfApiWorker
 from physical_ai_server.inference.inference_manager import InferenceManager
+from physical_ai_server.safety.collision_monitor import CollisionMonitorMixin
 from physical_ai_server.timer.timer_manager import TimerManager
 from physical_ai_server.training.training_manager import TrainingManager
 from physical_ai_server.utils.parameter_utils import (
@@ -123,7 +124,7 @@ import rclpy
 from rclpy.node import Node
 
 
-class PhysicalAIServer(Node):
+class PhysicalAIServer(CollisionMonitorMixin, Node):
     # Define operation modes (constants taken from Communicator)
 
     DEFAULT_SAVE_ROOT_PATH = Path.home() / '.cache/huggingface/lerobot'
@@ -186,6 +187,10 @@ class PhysicalAIServer(Node):
 
         self._init_ros_publisher()
         self._init_ros_service()
+
+        # EduBotics teleop force/collision e-stop (Rule §2 software guard, teleop-only).
+        # Arms the read-only force monitor + the safe-home/resync orchestration.
+        self._init_collision_monitor()
 
         self._setup_timer_callbacks()
 
@@ -975,6 +980,15 @@ class PhysicalAIServer(Node):
                 self.start_recording_time = time.perf_counter()
                 response.success = True
                 response.message = 'Inference started'
+
+            elif request.command == SendCommand.Request.RESUME_TELEOP:
+                # EduBotics teleop collision e-stop: clear a collision-stop and resync the
+                # follower to the leader. Handled here (not under the "currently recording"
+                # guard below) because a collision sets on_recording=False, so the system is
+                # idle when the student clicks "Teleoperation neu starten".
+                success, message = self.resume_teleop()
+                response.success = success
+                response.message = message
 
             else:
                 if not self.on_recording and not self.on_inference:

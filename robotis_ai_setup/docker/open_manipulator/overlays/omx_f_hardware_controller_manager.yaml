@@ -9,6 +9,14 @@
       arm_controller:
         type: joint_trajectory_controller/JointTrajectoryController
 
+      # EduBotics teleop collision e-stop: read-only broadcaster that surfaces the
+      # arm-joint Present Current + Hardware Error Status (declared in
+      # omx_f.ros2_control.xacro) on ~/gpio_states as control_msgs/DynamicJointState
+      # at the CM update_rate (100 Hz). It claims NO command interface, so it cannot
+      # drive the servos and does not touch the Goal Position command path (Rule §2).
+      gpio_command_controller:
+        type: gpio_controllers/GpioCommandController
+
 /**:
   arm_controller:
     ros__parameters:
@@ -57,3 +65,47 @@
         joint4: { trajectory: 2.0, goal: 0.10 }
         joint5: { trajectory: 2.0, goal: 0.10 }
         gripper_joint_1: { trajectory: 2.0, goal: 0.50 }
+
+/**:
+  gpio_command_controller:
+    ros__parameters:
+      type: gpio_controllers/GpioCommandController
+      # State-only: the collision monitor in physical_ai_server reads these over
+      # /gpio_command_controller/gpio_states. NO command_interfaces block — claiming
+      # a command interface here would conflict with arm_controller's Goal Position
+      # and could write the servos. The gripper (dxl16) is intentionally absent: it is
+      # an XL430-class servo whose control table lacks a Present Current register
+      # (declaring it would hard-fail hardware init) and it is already current-limited
+      # in Op Mode 5, so it needs no software force monitoring.
+      gpios:
+        - dxl11
+        - dxl12
+        - dxl13
+        - dxl14
+        - dxl15
+      state_interfaces:
+        dxl11:
+          - interfaces:
+            - Present Current
+            - Present Velocity
+            - Hardware Error Status
+        dxl12:
+          - interfaces:
+            - Present Current
+            - Present Velocity
+            - Hardware Error Status
+        dxl13:
+          - interfaces:
+            - Present Current
+            - Present Velocity
+            - Hardware Error Status
+        dxl14:
+          - interfaces:
+            - Present Current
+            - Present Velocity
+            - Hardware Error Status
+        dxl15:
+          - interfaces:
+            - Present Current
+            - Present Velocity
+            - Hardware Error Status

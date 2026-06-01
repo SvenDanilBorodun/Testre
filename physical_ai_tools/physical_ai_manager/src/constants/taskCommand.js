@@ -26,6 +26,7 @@ const TaskCommand = {
   RERECORD: 5,
   FINISH: 6,
   SKIP_TASK: 7,
+  RESUME_TELEOP: 8, // clear a teleop collision-stop and resync follower -> leader
 };
 
 export default TaskCommand;

@@ -26,6 +26,7 @@ import InferencePage from './pages/InferencePage';
 import TrainingPage from './pages/TrainingPage';
 import EditDatasetPage from './pages/EditDatasetPage';
 import WorkshopPage from './pages/WorkshopPage';
+import CollisionModal from './components/CollisionModal';
 import StartupGate from './components/StartupGate';
 import { LogoMark } from './components/EbUI';
 import packageJson from '../package.json';
@@ -426,6 +427,9 @@ function StudentApp() {
           })}
         </nav>
       </div>
+      {/* Teleop force/collision e-stop: blocking overlay shown whenever the server reports a
+          collision-stop (phase=COLLISION). Mounted globally so it covers every page. */}
+      <CollisionModal />
     </StartupGate>
   );
 }

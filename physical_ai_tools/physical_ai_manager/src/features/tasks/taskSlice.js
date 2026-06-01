@@ -78,6 +78,13 @@ const initialState = {
   lastHeartbeatTime: 0,
   useMultiTaskMode: false,
   multiTaskIndex: undefined,
+  // Teleop force/collision e-stop. Set active when /task/status reports phase=COLLISION
+  // (the server stopped the arm against an object and drove it to the safe home pose);
+  // cleared when a non-COLLISION status arrives. Drives the blocking CollisionModal.
+  collision: {
+    active: false,
+    message: '',
+  },
 };
 
 const taskSlice = createSlice({
@@ -138,6 +145,9 @@ const taskSlice = createSlice({
     setMultiTaskIndex: (state, action) => {
       state.multiTaskIndex = action.payload;
     },
+    setCollision: (state, action) => {
+      state.collision = { ...state.collision, ...action.payload };
+    },
   },
 });
 
@@ -158,6 +168,7 @@ export const {
   setLastHeartbeatTime,
   setUseMultiTaskMode,
   setMultiTaskIndex,
+  setCollision,
 } = taskSlice.actions;
 
 export default taskSlice.reducer;

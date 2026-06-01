@@ -25,6 +25,7 @@ const TaskPhase = {
   SAVING: 4,
   STOPPED: 5,
   INFERENCING: 6,
+  COLLISION: 7, // follower forced against an object during teleop; stopped + homed
   // Add more phases as needed
 };
 

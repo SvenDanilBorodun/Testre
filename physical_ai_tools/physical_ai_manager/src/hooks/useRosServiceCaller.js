@@ -167,6 +167,18 @@ export function useRosServiceCaller() {
     [callService, taskInfo, page]
   );
 
+  // Teleop collision e-stop: clear the stop and resync the follower to the leader. Uses a
+  // minimal request (the server ignores task_info for RESUME_TELEOP) so it does not depend on
+  // the current page / taskInfo like sendRecordCommand does. Returns { success, message }.
+  const resumeTeleop = useCallback(
+    async () =>
+      callService('/task/command', 'physical_ai_interfaces/srv/SendCommand', {
+        command: TaskCommand.RESUME_TELEOP,
+        task_info: {},
+      }),
+    [callService]
+  );
+
   const getImageTopicList = useCallback(async () => {
     try {
       const result = await callService(
@@ -740,6 +752,7 @@ export function useRosServiceCaller() {
   return {
     callService,
     sendRecordCommand,
+    resumeTeleop,
     getImageTopicList,
     getRobotTypeList,
     setRobotType,

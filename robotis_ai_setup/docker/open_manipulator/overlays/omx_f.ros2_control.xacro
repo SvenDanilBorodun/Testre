@@ -78,6 +78,14 @@
         <command_interface name="Goal Position"/>
         <state_interface name="Present Position"/>
         <state_interface name="Present Velocity"/>
+        <!-- EduBotics teleop collision e-stop: read-only force signal. Adds two
+             registers to the 100 Hz sync-read (Present Current addr 126 = 2.69 mA/LSB;
+             Hardware Error Status addr 70). Command path (Goal Position) is untouched,
+             so the recorded action distribution is unchanged (Rule §2). Surfaced via
+             gpio_command_controller (see omx_f_hardware_controller_manager.yaml). The
+             same plugin already declares these in open_manipulator_x_position.ros2_control.xacro. -->
+        <state_interface name="Present Current"/>
+        <state_interface name="Hardware Error Status"/>
         <param name="Drive Mode">4</param>
         <param name="Operating Mode">4</param>
         <param name="Return Delay Time">0</param>
@@ -93,6 +101,8 @@
         <command_interface name="Goal Position"/>
         <state_interface name="Present Position"/>
         <state_interface name="Present Velocity"/>
+        <state_interface name="Present Current"/>
+        <state_interface name="Hardware Error Status"/>
         <param name="Drive Mode">4</param>
         <param name="Operating Mode">3</param>
         <param name="Return Delay Time">0</param>
@@ -110,6 +120,8 @@
         <command_interface name="Goal Position"/>
         <state_interface name="Present Position"/>
         <state_interface name="Present Velocity"/>
+        <state_interface name="Present Current"/>
+        <state_interface name="Hardware Error Status"/>
         <param name="Drive Mode">4</param>
         <param name="Operating Mode">3</param>
         <param name="Return Delay Time">0</param>
@@ -127,6 +139,8 @@
         <command_interface name="Goal Position"/>
         <state_interface name="Present Position"/>
         <state_interface name="Present Velocity"/>
+        <state_interface name="Present Current"/>
+        <state_interface name="Hardware Error Status"/>
         <param name="Drive Mode">4</param>
         <param name="Operating Mode">3</param>
         <param name="Return Delay Time">0</param>
@@ -144,6 +158,8 @@
         <command_interface name="Goal Position"/>
         <state_interface name="Present Position"/>
         <state_interface name="Present Velocity"/>
+        <state_interface name="Present Current"/>
+        <state_interface name="Hardware Error Status"/>
         <param name="Drive Mode">4</param>
         <param name="Operating Mode">3</param>
         <param name="Return Delay Time">0</param>

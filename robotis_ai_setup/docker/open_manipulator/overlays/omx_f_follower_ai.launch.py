@@ -167,7 +167,11 @@ def generate_launch_description():
         arguments=[
             'arm_controller',
             'joint_state_broadcaster',
-            # 'gpio_command_controller',
+            # EduBotics teleop collision e-stop: spawns the read-only broadcaster that
+            # surfaces arm-joint Present Current / Hardware Error Status on
+            # /gpio_command_controller/gpio_states (config in
+            # omx_f_hardware_controller_manager.yaml). State-only — does not drive servos.
+            'gpio_command_controller',
         ],
         output='both',
         parameters=[{'robot_description': robot_description}],

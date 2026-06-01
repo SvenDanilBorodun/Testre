@@ -39,9 +39,12 @@ COPY identify_arm.py /usr/local/bin/identify_arm.py
 # of usb_cam) when EDUBOTICS_CAMERA_SOURCE=native_bridge. See the script header
 # and CLAUDE.md "native camera capture bridge" for the full rationale.
 COPY camera_ingest_node.py /usr/local/bin/camera_ingest_node.py
+# Teleop collision-threshold calibration helper (operator runs it once per rig). Standalone
+# rclpy script, COPY'd like identify_arm.py / camera_ingest_node.py — NOT an apply_overlay target.
+COPY calibrate_collision_currents.py /usr/local/bin/calibrate_collision_currents.py
 # Strip Windows CRLF line endings (Git on Windows may convert LF→CRLF)
-RUN sed -i 's/\r$//' /entrypoint_omx.sh /usr/local/bin/identify_arm.py /usr/local/bin/camera_ingest_node.py \
-    && chmod +x /entrypoint_omx.sh /usr/local/bin/identify_arm.py /usr/local/bin/camera_ingest_node.py
+RUN sed -i 's/\r$//' /entrypoint_omx.sh /usr/local/bin/identify_arm.py /usr/local/bin/camera_ingest_node.py /usr/local/bin/calibrate_collision_currents.py \
+    && chmod +x /entrypoint_omx.sh /usr/local/bin/identify_arm.py /usr/local/bin/camera_ingest_node.py /usr/local/bin/calibrate_collision_currents.py
 
 # Overlay patched ros2_control configs:
 #   - follower (omx_f): joint limits + aligned gripper current limit

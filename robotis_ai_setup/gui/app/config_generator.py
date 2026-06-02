@@ -1,5 +1,7 @@
 """Generate .env file from discovered hardware configuration."""
 
+from __future__ import annotations
+
 import hashlib
 import os
 import uuid
@@ -21,6 +23,11 @@ MANAGED_KEYS = frozenset({
     # because the count varies with how many cameras are connected.
 })
 _MANAGED_PREFIXES = ("CAMERA_DEVICE_", "CAMERA_NAME_")
+
+# Auto-added separator before the preserved operator-override block. Defined
+# once so _read_unmanaged_lines can skip it on re-read (otherwise a fresh copy
+# compounds on every regenerate) and the two emitters stay in sync.
+_PRESERVE_MARKER = "# Operator overrides preserved across regeneration."
 
 
 def _is_managed_key(key: str) -> bool:
@@ -103,7 +110,11 @@ def _read_unmanaged_lines(path: str) -> list[str]:
         text = line.rstrip("\r\n")
         if not stripped or stripped.startswith("#"):
             # Keep comments + blank lines so the file stays human-readable
-            # if anyone hand-edited it. Skipped only if duplicated below.
+            # if anyone hand-edited it. EXCEPT the auto-added section marker:
+            # re-preserving it would compound a fresh copy on every regenerate
+            # (one extra marker per hardware re-scan).
+            if stripped == _PRESERVE_MARKER:
+                continue
             preserved.append(text)
             continue
         if "=" not in stripped:
@@ -116,7 +127,85 @@ def _read_unmanaged_lines(path: str) -> list[str]:
         if _is_managed_key(key):
             continue
         preserved.append(text)
+    # Strip leading blank lines: generate_env_file always re-adds a single
+    # separating blank before the marker, so carrying leading blanks here
+    # would compound them across regenerates.
+    while preserved and not preserved[0].strip():
+        preserved.pop(0)
     return preserved
+
+
+def _unquote(value: str) -> str:
+    """Inverse of _quote: strip one surrounding pair of double-quotes and
+    unescape \\" / \\\\. Unquoted values pass through unchanged."""
+    v = value.strip()
+    if len(v) >= 2 and v[0] == '"' and v[-1] == '"':
+        v = v[1:-1].replace('\\"', '"').replace('\\\\', '\\')
+    return v
+
+
+def read_env_var(key: str, path: str = ENV_FILE) -> str | None:
+    """Return the value of ``key`` from the .env at ``path``, or None if absent.
+
+    Tolerates the quoting written by _quote() and surrounding whitespace.
+    The GUI uses this to show a "token already saved on this PC" state
+    WITHOUT re-displaying the secret value. Returns None when the file is
+    missing/unreadable.
+    """
+    try:
+        with open(path, encoding="utf-8") as f:
+            raw = f.readlines()
+    except (OSError, UnicodeDecodeError):
+        return None
+    for line in raw:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        existing_key, _, existing_value = stripped.partition("=")
+        if existing_key.strip() == key:
+            return _unquote(existing_value)
+    return None
+
+
+def upsert_env_var(key: str, value: str, path: str = ENV_FILE) -> None:
+    """Insert or replace ``key=value`` in the .env at ``path``, preserving
+    every other line (managed keys, comments, operator overrides) verbatim.
+
+    This is the SOLE writer of HF_TOKEN. HF_TOKEN is deliberately NOT a
+    MANAGED_KEY: generate_env_file() carries it across hardware-rescan
+    rewrites via _read_unmanaged_lines(), and this helper is how the GUI
+    sets it once at setup. An empty ``value`` removes the key (token clear).
+    Value is quoted via _quote() so a token with shell-special chars is safe.
+    """
+    try:
+        with open(path, encoding="utf-8") as f:
+            raw = f.readlines()
+    except (OSError, UnicodeDecodeError):
+        raw = []
+
+    new_line = f"{key}={_quote(value)}"
+    out: list[str] = []
+    replaced = False
+    for line in raw:
+        text = line.rstrip("\r\n")
+        stripped = text.strip()
+        if "=" in stripped and not stripped.startswith("#"):
+            if stripped.split("=", 1)[0].strip() == key:
+                # Replace the first occurrence; drop any duplicates. When
+                # value is empty we drop the line entirely (removal).
+                if value and not replaced:
+                    out.append(new_line)
+                    replaced = True
+                continue
+        out.append(text)
+
+    if value and not replaced:
+        out.append(new_line)
+
+    content = "\n".join(out).rstrip("\n")
+    if content:
+        content += "\n"
+    _atomic_write(path, content)
 
 
 def generate_env_file(config: HardwareConfig, output_path: str = ENV_FILE) -> str:
@@ -171,7 +260,7 @@ def generate_env_file(config: HardwareConfig, output_path: str = ENV_FILE) -> st
         lines.append("EDUBOTICS_CAMERA_SOURCE=native_bridge")
     if preserved:
         lines.append("")
-        lines.append("# Operator overrides preserved across regeneration.")
+        lines.append(_PRESERVE_MARKER)
         lines.extend(preserved)
     lines.append("")  # trailing newline
 
@@ -206,7 +295,7 @@ def generate_cloud_only_env(output_path: str = ENV_FILE) -> str:
         lines.append("EDUBOTICS_CAMERA_SOURCE=native_bridge")
     if preserved:
         lines.append("")
-        lines.append("# Operator overrides preserved across regeneration.")
+        lines.append(_PRESERVE_MARKER)
         lines.extend(preserved)
     lines.append("")
     content = "\n".join(lines)

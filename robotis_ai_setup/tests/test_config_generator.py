@@ -4,7 +4,12 @@ import os
 import tempfile
 import unittest
 
-from gui.app.config_generator import generate_env_file, generate_cloud_only_env
+from gui.app.config_generator import (
+    generate_env_file,
+    generate_cloud_only_env,
+    read_env_var,
+    upsert_env_var,
+)
 from gui.app.device_manager import ArmDevice, CameraDevice, HardwareConfig
 
 
@@ -205,6 +210,89 @@ class TestConfigGeneratorNativeBridge(unittest.TestCase):
             self.assertNotIn("EDUBOTICS_CAMERA_SOURCE=native_bridge", content)
         finally:
             os.unlink(tmp_path)
+
+
+class TestEnvVarHelpers(unittest.TestCase):
+    """read_env_var / upsert_env_var — the GUI's HF_TOKEN persistence path."""
+
+    def _seed(self, body):
+        f = tempfile.NamedTemporaryFile(mode="w", suffix=".env", delete=False)
+        f.write(body)
+        f.close()
+        self.addCleanup(lambda: os.path.exists(f.name) and os.unlink(f.name))
+        return f.name
+
+    @staticmethod
+    def _read(p):
+        with open(p, encoding="utf-8") as f:
+            return f.read()
+
+    def test_insert_and_read_round_trip(self):
+        p = self._seed("")
+        upsert_env_var("HF_TOKEN", "hf_abc123", p)
+        self.assertEqual(read_env_var("HF_TOKEN", p), "hf_abc123")
+
+    def test_other_lines_preserved(self):
+        p = self._seed('FOLLOWER_PORT="/dev/ttyUSB0"\n# note\nEDUBOTICS_CAMERA_SOURCE=usb_cam\n')
+        upsert_env_var("HF_TOKEN", "hf_abc123", p)
+        body = self._read(p)
+        self.assertIn('FOLLOWER_PORT="/dev/ttyUSB0"', body)
+        self.assertIn("# note", body)
+        self.assertIn("EDUBOTICS_CAMERA_SOURCE=usb_cam", body)
+
+    def test_update_does_not_duplicate(self):
+        p = self._seed("")
+        upsert_env_var("HF_TOKEN", "hf_one", p)
+        upsert_env_var("HF_TOKEN", "hf_two", p)
+        self.assertEqual(self._read(p).count("HF_TOKEN="), 1)
+        self.assertEqual(read_env_var("HF_TOKEN", p), "hf_two")
+
+    def test_empty_value_removes_key(self):
+        p = self._seed('FOLLOWER_PORT="/dev/ttyUSB0"\n')
+        upsert_env_var("HF_TOKEN", "hf_abc", p)
+        upsert_env_var("HF_TOKEN", "", p)
+        self.assertIsNone(read_env_var("HF_TOKEN", p))
+        self.assertIn("FOLLOWER_PORT", self._read(p))
+
+    def test_read_missing_file_returns_none(self):
+        self.assertIsNone(read_env_var("HF_TOKEN", "/no/such/path/.env"))
+
+    def test_value_with_space_round_trips(self):
+        p = self._seed("")
+        upsert_env_var("HF_TOKEN", "a b", p)
+        self.assertEqual(read_env_var("HF_TOKEN", p), "a b")
+
+    def test_token_survives_generate_env_file(self):
+        # The real invariant: a token saved by the GUI must persist across a
+        # hardware re-scan (generate_env_file rewrite), because HF_TOKEN is an
+        # unmanaged key carried through by _read_unmanaged_lines().
+        p = self._seed("")
+        upsert_env_var("HF_TOKEN", "hf_persist_me", p)
+        config = HardwareConfig(
+            leader=ArmDevice("1-3", "/dev/serial/by-id/leader", "leader", "OpenRB-150"),
+            follower=ArmDevice("1-4", "/dev/serial/by-id/follower", "follower", "OpenRB-150"),
+        )
+        content = generate_env_file(config, output_path=p)
+        self.assertIn("HF_TOKEN=", content)
+        self.assertEqual(content.count("HF_TOKEN="), 1)
+        self.assertEqual(read_env_var("HF_TOKEN", p), "hf_persist_me")
+
+    def test_repeated_regenerate_does_not_compound(self):
+        # A token must survive many hardware re-scans without the .env
+        # accumulating duplicate HF_TOKEN lines or "Operator overrides
+        # preserved" markers.
+        p = self._seed("")
+        upsert_env_var("HF_TOKEN", "hf_keepme", p)
+        config = HardwareConfig(
+            leader=ArmDevice("1-3", "/dev/serial/by-id/leader", "leader", "OpenRB-150"),
+            follower=ArmDevice("1-4", "/dev/serial/by-id/follower", "follower", "OpenRB-150"),
+        )
+        for _ in range(3):
+            generate_env_file(config, output_path=p)
+        body = self._read(p)
+        self.assertEqual(body.count("HF_TOKEN="), 1, body)
+        self.assertLessEqual(body.count("Operator overrides preserved"), 1, body)
+        self.assertEqual(read_env_var("HF_TOKEN", p), "hf_keepme")
 
 
 if __name__ == "__main__":

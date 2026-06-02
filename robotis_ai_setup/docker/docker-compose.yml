@@ -154,6 +154,13 @@ services:
       - "127.0.0.1:9090:9090"
     environment:
       - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-30}
+      # Student's HuggingFace token, set ONCE in the Windows GUI (Schritt D)
+      # and stored in %LOCALAPPDATA%\EduBotics\.env (config_generator.upsert_env_var).
+      # huggingface_hub reads $HF_TOKEN automatically, so recording upload,
+      # whoami (Benutzer-ID list) and local policy download all authenticate
+      # with no in-app re-entry. Empty default keeps cloud-only / no-token
+      # starts working without a compose warning.
+      - HF_TOKEN=${HF_TOKEN:-}
       # Phase-3 cloud-vision: the on-host server POSTs base64 JPEGs +
       # German prompts to ${EDUBOTICS_CLOUD_API_URL}/vision/detect when
       # the student enables the open-vocab block. Defaults to the

@@ -14,13 +14,10 @@
 //
 // Author: Kiwoong Park
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { useSelector, useDispatch } from 'react-redux';
 import clsx from 'clsx';
-import toast from 'react-hot-toast';
-import { MdVisibility, MdVisibilityOff, MdFolderOpen, MdDownload } from 'react-icons/md';
-import { useRosServiceCaller } from '../hooks/useRosServiceCaller';
-import TagInput from './TagInput';
+import { MdFolderOpen, MdDownload } from 'react-icons/md';
 import FileBrowserModal from './FileBrowserModal';
 import PolicyDownloadModal from './PolicyDownloadModal';
 import TaskPhase from '../constants/taskPhases';
@@ -40,25 +37,11 @@ const InferencePanel = () => {
   const disabled = taskStatus.phase !== TaskPhase.READY || !isTaskStatusPaused;
   const [isEditable, setIsEditable] = useState(!disabled);
 
-  // User ID list for dropdown
-  const [userIdList, setUserIdList] = useState([]);
-
-  // Token popup states
-  const [showTokenPopup, setShowTokenPopup] = useState(false);
-  const [tokenInput, setTokenInput] = useState('');
-  const [isLoading, setIsLoading] = useState(false);
-  const [showPassword, setShowPassword] = useState(false);
-
-  // User ID selection states
-  const [showUserIdDropdown, setShowUserIdDropdown] = useState(false);
-
   // File browser modal states
   const [showPolicyPathModal, setShowPolicyPathModal] = useState(false);
 
   // Policy download modal states
   const [showPolicyDownloadModal, setShowPolicyDownloadModal] = useState(false);
-
-  const { registerHFUser, getRegisteredHFUser } = useRosServiceCaller();
 
   const handleChange = useCallback(
     (field, value) => {
@@ -77,62 +60,6 @@ const InferencePanel = () => {
     [isEditable, handleChange]
   );
 
-  const handleTokenSubmit = async () => {
-    if (!tokenInput.trim()) {
-      toast.error('Bitte gib ein Token ein');
-      return;
-    }
-
-    setIsLoading(true);
-    try {
-      const result = await registerHFUser(tokenInput.trim());
-      console.log('registerHFUser result:', result);
-
-      if (result && result.user_id_list) {
-        setUserIdList(result.user_id_list);
-        setShowTokenPopup(false);
-        setTokenInput('');
-        toast.success('Benutzer-ID-Liste erfolgreich aktualisiert!');
-      } else {
-        toast.error('Benutzer-ID-Liste konnte aus der Antwort nicht ermittelt werden');
-      }
-    } catch (error) {
-      console.error('Error registering HF user:', error);
-      toast.error(`Benutzer konnte nicht registriert werden: ${error.message}`);
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  const handleLoadUserId = useCallback(async () => {
-    setIsLoading(true);
-    try {
-      const result = await getRegisteredHFUser();
-      console.log('getRegisteredHFUser result:', result);
-
-      if (result && result.user_id_list) {
-        setUserIdList(result.user_id_list);
-        toast.success('Benutzer-ID-Liste erfolgreich geladen!');
-        setShowUserIdDropdown(true);
-      } else {
-        toast.error('Benutzer-ID-Liste konnte aus der Antwort nicht ermittelt werden');
-      }
-    } catch (error) {
-      console.error('Error loading HF user list:', error);
-      toast.error(`Benutzer-ID-Liste konnte nicht geladen werden: ${error.message}`);
-    } finally {
-      setIsLoading(false);
-    }
-  }, [getRegisteredHFUser]);
-
-  const handleUserIdSelect = useCallback(
-    (selectedUserId) => {
-      handleChange('userId', selectedUserId);
-      setShowUserIdDropdown(false);
-    },
-    [handleChange]
-  );
-
   const handleDownloadPolicyComplete = useCallback(
     (repoId) => {
       // Update the policy path with the local cache path
@@ -146,12 +73,6 @@ const InferencePanel = () => {
   useEffect(() => {
     setIsEditable(!disabled);
   }, [disabled]);
-  // Reset dropdown state when Push to Hub is unchecked
-  useEffect(() => {
-    if (!info.pushToHub) {
-      setShowUserIdDropdown(false);
-    }
-  }, [info.pushToHub]);
 
   // track task status update
   useEffect(() => {
@@ -189,27 +110,6 @@ const InferencePanel = () => {
     'overflow-y-auto',
     'scrollbar-thin',
     'max-h-[calc(100vh-220px)]'
-  );
-
-  const classTaskNameTextarea = clsx(
-    'text-sm',
-    'resize-y',
-    'min-h-8',
-    'max-h-20',
-    'h-10',
-    'w-full',
-    'p-2',
-    'border',
-    'border-gray-300',
-    'rounded-md',
-    'focus:outline-none',
-    'focus:ring-2',
-    'focus:ring-teal-500',
-    'focus:border-transparent',
-    {
-      'bg-gray-100 cursor-not-allowed': !isEditable,
-      'bg-white': isEditable,
-    }
   );
 
   const classTaskInstructionTextarea = clsx(
@@ -252,27 +152,6 @@ const InferencePanel = () => {
     }
   );
 
-  const classRepoIdTextarea = clsx(
-    'text-sm',
-    'resize-y',
-    'min-h-10',
-    'max-h-24',
-    'h-10',
-    'w-full',
-    'p-2',
-    'border',
-    'border-gray-300',
-    'rounded-md',
-    'focus:outline-none',
-    'focus:ring-2',
-    'focus:ring-teal-500',
-    'focus:border-transparent',
-    {
-      'bg-gray-100 cursor-not-allowed': !isEditable || info.pushToHub,
-      'bg-white': isEditable && !info.pushToHub,
-    }
-  );
-
   const classTextInput = clsx(
     'text-sm',
     'w-full',
@@ -290,70 +169,6 @@ const InferencePanel = () => {
       'bg-white': isEditable,
     }
   );
-
-  const classSelect = clsx(
-    'text-sm',
-    'w-full',
-    'h-8',
-    'px-2',
-    'border',
-    'border-gray-300',
-    'rounded-md',
-    'focus:outline-none',
-    'focus:ring-2',
-    'focus:ring-teal-500',
-    'focus:border-transparent',
-    {
-      'bg-gray-100 cursor-not-allowed': !isEditable,
-      'bg-white': isEditable,
-    }
-  );
-
-  const classCheckbox = clsx(
-    'w-4',
-    'h-4',
-    'text-teal-600',
-    'bg-gray-100',
-    'border-gray-300',
-    'rounded',
-    'focus:ring-teal-500',
-    'focus:ring-2',
-    {
-      'cursor-not-allowed opacity-50': !isEditable,
-      'cursor-pointer': isEditable,
-    }
-  );
-
-  // Common button base styles
-  const classButtonBase = clsx(
-    'px-3',
-    'py-1',
-    'text-s',
-    'font-medium',
-    'rounded-xl',
-    'transition-colors'
-  );
-
-  // Button variants
-  const getButtonVariant = (variant, isActive = true, isLoading = false) => {
-    const variants = {
-      blue: {
-        active: 'bg-teal-200 text-teal-800 hover:bg-teal-300',
-        disabled: 'bg-gray-200 text-gray-500 cursor-not-allowed',
-      },
-      red: {
-        active: 'bg-red-200 text-red-800 hover:bg-red-300',
-        disabled: 'bg-gray-200 text-gray-500 cursor-not-allowed',
-      },
-      green: {
-        active: 'bg-green-200 text-green-800 hover:bg-green-300',
-        disabled: 'bg-gray-200 text-gray-500 cursor-not-allowed',
-      },
-    };
-
-    const isDisabled = !isActive || isLoading;
-    return variants[variant]?.[isDisabled ? 'disabled' : 'active'] || '';
-  };
 
   return (
     <div className={classInfoPanel}>
@@ -499,368 +314,6 @@ const InferencePanel = () => {
       <div className="text-xs text-gray-400 mt-1 ml-2">
         Aufnahme während der Inferenz wird in einem zukünftigen Update unterstützt
       </div>
-
-      {false && (
-        <>
-          <div className="h-3 w-full"></div>
-          <div className={clsx('flex', 'items-center', 'mb-2')}>
-            <span className={classLabel}>Aufnahme</span>
-            <div className={clsx('flex', 'items-center')}>
-              <input
-                className={classCheckbox}
-                type="checkbox"
-                checked={info.recordInferenceMode}
-                onChange={(e) => handleChange('recordInferenceMode', e.target.checked)}
-                disabled={true}
-              />
-              <span className={clsx('ml-2', 'text-sm', 'text-gray-500')}>
-                {info.recordInferenceMode ? 'Aktiviert' : 'Deaktiviert'}
-              </span>
-            </div>
-          </div>
-
-          <div className={clsx('flex', 'items-center', 'mb-2.5')}>
-            <span className={classLabel}>Aufgabenname</span>
-            <textarea
-              className={classTaskNameTextarea}
-              value={info.taskName || ''}
-              onChange={(e) => handleChange('taskName', e.target.value)}
-              disabled={!isEditable || !info.recordInferenceMode}
-              placeholder="Aufgabennamen eingeben"
-            />
-          </div>
-
-          <div className={clsx('flex', 'items-center', 'mb-2')}>
-            <span className={classLabel}>Auf Hub hochladen</span>
-            <div className={clsx('flex', 'items-center')}>
-              <input
-                className={classCheckbox}
-                type="checkbox"
-                checked={!!info.pushToHub}
-                onChange={(e) => handleChange('pushToHub', e.target.checked)}
-                disabled={!isEditable || !info.recordInferenceMode}
-              />
-              <span className={clsx('ml-2', 'text-sm', 'text-gray-500')}>
-                {info.pushToHub ? 'Aktiviert' : 'Deaktiviert'}
-              </span>
-            </div>
-          </div>
-
-          {info.pushToHub && (
-            <div className={clsx('flex', 'items-center', 'mb-2')}>
-              <span className={classLabel}>Privater Modus</span>
-              <div className={clsx('flex', 'items-center')}>
-                {/* User-selectable — see InfoPanel.js. The choice is sent
-                    as TaskInfo.private_mode and threaded through the
-                    backend to create_repo(private=…). Defaults private. */}
-                <input
-                  className={classCheckbox}
-                  type="checkbox"
-                  checked={!!info.privateMode}
-                  onChange={(e) => handleChange('privateMode', e.target.checked)}
-                  disabled={!isEditable || !info.recordInferenceMode}
-                  title="Privat: Datensatz ist nur für dich und deine Lehrkraft sichtbar (empfohlen für Aufnahmen mit Personen). Öffentlich: jeder auf Hugging Face kann ihn sehen."
-                />
-                <span className={clsx('ml-2', 'text-sm', 'text-gray-500')}>
-                  {info.privateMode ? 'Privat (empfohlen)' : 'Öffentlich'}
-                </span>
-              </div>
-            </div>
-          )}
-
-          <div className={clsx('flex', 'items-start', 'mb-2.5')}>
-            <span
-              className={clsx(
-                'text-xs',
-                'text-gray-600',
-                'w-[120px]',
-                'flex-shrink-0',
-                'font-medium',
-                'leading-snug',
-                'break-words',
-                'pt-2'
-              )}
-            >
-              Benutzer-ID
-            </span>
-
-            <div className="flex-1 min-w-0">
-              {/* Common Load button for both modes */}
-              <div className="flex gap-2 mb-2">
-                <button
-                  className={clsx(
-                    classButtonBase,
-                    getButtonVariant('blue', isEditable && info.recordInferenceMode, isLoading)
-                  )}
-                  onClick={() => {
-                    if (isEditable && !isLoading && info.recordInferenceMode) {
-                      handleLoadUserId();
-                    }
-                  }}
-                  disabled={!isEditable || isLoading || !info.recordInferenceMode}
-                >
-                  {isLoading ? 'Laden...' : 'Laden'}
-                </button>
-                {!info.pushToHub && showUserIdDropdown && (
-                  <button
-                    className={clsx(
-                      classButtonBase,
-                      getButtonVariant('red', isEditable && info.recordInferenceMode)
-                    )}
-                    onClick={() => setShowUserIdDropdown(false)}
-                    disabled={!isEditable || !info.recordInferenceMode}
-                  >
-                    Manual Input
-                  </button>
-                )}
-                {info.pushToHub && (
-                  <button
-                    className={clsx(
-                      classButtonBase,
-                      getButtonVariant('green', isEditable && info.recordInferenceMode, isLoading)
-                    )}
-                    onClick={() => {
-                      if (isEditable && !isLoading && info.recordInferenceMode) {
-                        setShowTokenPopup(true);
-                      }
-                    }}
-                    disabled={!isEditable || isLoading || !info.recordInferenceMode}
-                  >
-                    Ändern
-                  </button>
-                )}
-              </div>
-
-              {info.pushToHub ? (
-                /* Dropdown selection only when Push to Hub is enabled */
-                <>
-                  <select
-                    className={classSelect}
-                    value={info.userId || ''}
-                    onChange={(e) => handleChange('userId', e.target.value)}
-                    disabled={!isEditable || !info.recordInferenceMode}
-                  >
-                    <option value="">Benutzer-ID auswählen</option>
-                    {userIdList.map((userId) => (
-                      <option key={userId} value={userId}>
-                        {userId}
-                      </option>
-                    ))}
-                  </select>
-                  <div className="text-xs text-gray-500 mt-1 leading-relaxed">
-                    Aus registrierten Benutzer-IDs auswählen (für Hub-Upload erforderlich)
-                  </div>
-                </>
-              ) : (
-                /* Text input with optional registered ID selection when Push to Hub is disabled */
-                <>
-                  {!showUserIdDropdown ? (
-                    <>
-                      <textarea
-                        className={classRepoIdTextarea}
-                        value={info.userId || ''}
-                        onChange={(e) => handleChange('userId', e.target.value)}
-                        disabled={!isEditable || !info.recordInferenceMode}
-                        placeholder="Benutzer-ID eingeben oder aus registrierten IDs laden"
-                      />
-                      <div className="text-xs text-gray-500 mt-1 leading-relaxed">
-                        Benutzer-ID manuell eingeben oder aus registrierten IDs laden
-                      </div>
-                    </>
-                  ) : (
-                    <>
-                      <select
-                        className={classSelect}
-                        value=""
-                        onChange={(e) => {
-                          if (e.target.value) {
-                            handleUserIdSelect(e.target.value);
-                          }
-                        }}
-                        disabled={!isEditable || !info.recordInferenceMode}
-                      >
-                        <option value="">Aus registrierten Benutzer-IDs auswählen</option>
-                        {userIdList.map((userId) => (
-                          <option key={userId} value={userId}>
-                            {userId}
-                          </option>
-                        ))}
-                      </select>
-                      <div className="text-xs text-gray-500 mt-1 leading-relaxed">
-                        Registrierte Benutzer-ID auswählen oder Abbrechen-Button oben verwenden
-                      </div>
-                    </>
-                  )}
-                </>
-              )}
-            </div>
-          </div>
-
-          <div className={clsx('flex', 'items-start', 'mb-2.5')}>
-            <span className={clsx(classLabel, 'pt-2')}>Tags</span>
-            <div className="flex-1 min-w-0">
-              <TagInput
-                tags={info.tags || []}
-                onChange={(newTags) => handleChange('tags', newTags)}
-                disabled={!isEditable || !info.recordInferenceMode}
-              />
-              <div className="text-xs text-gray-500 mt-1 leading-relaxed">
-                Enter oder Komma drücken, um Tags hinzuzufügen
-              </div>
-            </div>
-          </div>
-
-          <div className={clsx('flex', 'items-center', 'mb-2.5')}>
-            <span className={classLabel}>Aufwärmzeit (s)</span>
-            <input
-              className={classTextInput}
-              type="number"
-              step="5"
-              min={0}
-              max={65535}
-              value={info.warmupTime || ''}
-              onChange={(e) => handleChange('warmupTime', Number(e.target.value) || 0)}
-              disabled={!isEditable || !info.recordInferenceMode}
-            />
-          </div>
-
-          <div className={clsx('flex', 'items-center', 'mb-2.5')}>
-            <span className={classLabel}>Episodenzeit (s)</span>
-            <input
-              className={classTextInput}
-              type="number"
-              step="5"
-              min={0}
-              max={65535}
-              value={info.episodeTime || ''}
-              onChange={(e) => handleChange('episodeTime', Number(e.target.value) || 0)}
-              disabled={!isEditable || !info.recordInferenceMode}
-            />
-          </div>
-
-          <div className={clsx('flex', 'items-center', 'mb-2.5')}>
-            <span className={classLabel}>Rücksetzzeit (s)</span>
-            <input
-              className={classTextInput}
-              type="number"
-              step="5"
-              min={0}
-              max={65535}
-              value={info.resetTime || ''}
-              onChange={(e) => handleChange('resetTime', Number(e.target.value) || 0)}
-              disabled={!isEditable || !info.recordInferenceMode}
-            />
-          </div>
-
-          <div className={clsx('flex', 'items-center', 'mb-2.5')}>
-            <span className={classLabel}>Anz. Episoden</span>
-            <input
-              className={classTextInput}
-              type="number"
-              step="1"
-              min={0}
-              max={65535}
-              value={info.numEpisodes || ''}
-              onChange={(e) => handleChange('numEpisodes', Number(e.target.value) || 0)}
-              disabled={!isEditable || !info.recordInferenceMode}
-            />
-          </div>
-
-          <div className={clsx('flex', 'items-center', 'mb-2')}>
-            <span className={classLabel}>Optimiertes Speichern</span>
-            <div className={clsx('flex', 'items-center')}>
-              <input
-                className={classCheckbox}
-                type="checkbox"
-                checked={!!info.useOptimizedSave}
-                onChange={(e) => handleChange('useOptimizedSave', e.target.checked)}
-                disabled={!isEditable || !info.recordInferenceMode}
-              />
-              <span className={clsx('ml-2', 'text-sm', 'text-gray-500')}>
-                {info.useOptimizedSave ? 'Aktiviert' : 'Deaktiviert'}
-              </span>
-            </div>
-          </div>
-        </>
-      )}
-
-      {/* Input Hugging Face Token Popup */}
-      {showTokenPopup && (
-        <div className="fixed inset-0 bg-black bg-opacity-40 flex items-center justify-center z-50">
-          <div className="bg-white p-6 rounded-lg shadow-lg max-w-md w-full">
-            <div className="mb-4 font-bold text-lg">Hugging Face Token eingeben</div>
-            <div className="mb-4">
-              <label className="block text-sm font-medium text-gray-700 mb-2">Token</label>
-              <div className="relative">
-                <input
-                  type={showPassword ? 'text' : 'password'}
-                  className={clsx(
-                    'w-full',
-                    'p-3',
-                    'pr-10',
-                    'border',
-                    'border-gray-300',
-                    'rounded-md',
-                    'focus:outline-none',
-                    'focus:ring-2',
-                    'focus:ring-teal-500',
-                    'focus:border-transparent'
-                  )}
-                  value={tokenInput}
-                  onChange={(e) => setTokenInput(e.target.value)}
-                  placeholder="Dein Hugging Face Token eingeben"
-                  disabled={isLoading}
-                />
-                <button
-                  type="button"
-                  className="absolute inset-y-0 right-0 pr-3 flex items-center"
-                  onClick={() => setShowPassword(!showPassword)}
-                  disabled={isLoading}
-                >
-                  {showPassword ? (
-                    <MdVisibilityOff className="h-5 w-5 text-gray-400 hover:text-gray-600" />
-                  ) : (
-                    <MdVisibility className="h-5 w-5 text-gray-400 hover:text-gray-600" />
-                  )}
-                </button>
-              </div>
-              <div className="text-xs text-gray-500 mt-1">
-                Dieses Token wird verwendet, um deine verfügbaren Benutzer-IDs abzurufen
-              </div>
-            </div>
-            <div className="flex gap-3">
-              <button
-                className={clsx(
-                  'flex-1',
-                  'px-4',
-                  'py-2',
-                  'rounded',
-                  'font-medium',
-                  'transition-colors',
-                  {
-                    'bg-teal-500 text-white hover:bg-teal-600': !isLoading,
-                    'bg-gray-400 text-gray-600 cursor-not-allowed': isLoading,
-                  }
-                )}
-                onClick={handleTokenSubmit}
-                disabled={isLoading}
-              >
-                {isLoading ? 'Laden...' : 'Absenden'}
-              </button>
-              <button
-                className="flex-1 px-4 py-2 bg-gray-400 text-white rounded hover:bg-gray-500 transition-colors"
-                onClick={() => {
-                  setShowTokenPopup(false);
-                  setTokenInput('');
-                }}
-                disabled={isLoading}
-              >
-                Abbrechen
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
 
       <FileBrowserModal
         isOpen={showPolicyPathModal}

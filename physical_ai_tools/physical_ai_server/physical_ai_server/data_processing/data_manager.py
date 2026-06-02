@@ -892,8 +892,13 @@ class DataManager:
         thread.start()
 
         try:
-            # Wait for result with 1.5 second timeout
-            status, data = result_queue.get(timeout=1.5)
+            # Wait for the whoami result. 8 s (was 1.5 s) so the Benutzer-ID
+            # list still loads on a slow/cold school network instead of
+            # silently returning an empty list. Safe to block this long: the
+            # HF services run in their own ReentrantCallbackGroup
+            # (physical_ai_server._init_ros_service), so this wait no longer
+            # stalls the heartbeat / task-status timers.
+            status, data = result_queue.get(timeout=8.0)
             if status == 'success':
                 if data:
                     print(data)
@@ -901,7 +906,7 @@ class DataManager:
             else:
                 raise data
         except queue.Empty:
-            print('Token validation timed out after 1.5 seconds')
+            print('HuggingFace whoami timed out after 8 seconds')
             return None
 
     @staticmethod

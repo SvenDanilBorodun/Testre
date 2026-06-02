@@ -27,7 +27,7 @@ import {
 } from '../editDatasetSlice';
 import { useRosServiceCaller } from '../../../hooks/useRosServiceCaller';
 import FileBrowserModal from '../../../components/FileBrowserModal';
-import TokenInputPopup from '../../../components/TokenInputPopup';
+import { useHfUserList } from '../../../hooks/useHfUserList';
 import SectionSelector from './SectionSelector';
 import { DEFAULT_PATHS, TARGET_FOLDERS, TARGET_FILES } from '../../../constants/paths';
 import HFStatus from '../../../constants/HFStatus';
@@ -145,7 +145,9 @@ const HuggingfaceSection = () => {
   const uploadStatus = useSelector((state) => state.editDataset.uploadStatus);
   const hfDataType = useSelector((state) => state.editDataset.hfDataType);
 
-  const { controlHfServer, registerHFUser, getRegisteredHFUser } = useRosServiceCaller();
+  const { controlHfServer } = useRosServiceCaller();
+  // Benutzer-ID list from Redux (fetched once on connect, survives tab switches).
+  const { hfUserList, reload: reloadHfUsers } = useHfUserList();
 
   // Local states
   const [activeSection, setActiveSection] = useState(SECTION_NAME.UPLOAD);
@@ -154,8 +156,6 @@ const HuggingfaceSection = () => {
   const [isDownloading, setIsDownloading] = useState(false);
   const [showHfLocalDirBrowserModal, setShowHfLocalDirBrowserModal] = useState(false);
   const [showHfLocalModelDirBrowserModal, setShowHfLocalModelDirBrowserModal] = useState(false);
-  const [userIdList, setUserIdList] = useState([]);
-  const [showTokenPopup, setShowTokenPopup] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
 
   // Validation states
@@ -212,56 +212,19 @@ const HuggingfaceSection = () => {
     return variants[variant]?.[isDisabled ? 'disabled' : 'active'] || '';
   };
 
-  // Token related handlers
-  const handleTokenSubmit = async (token) => {
-    if (!token || !token.trim()) {
-      toast.error('Please enter a token');
-      return;
-    }
-
-    setIsLoading(true);
-    try {
-      const result = await registerHFUser(token);
-      console.log('registerHFUser result:', result);
-
-      if (result && result.user_id_list) {
-        setUserIdList(result.user_id_list);
-        setShowTokenPopup(false);
-        toast.success('User ID list updated successfully!');
-      } else {
-        toast.error('Failed to get user ID list from response');
-      }
-    } catch (error) {
-      console.error('Error registering HF user:', error);
-      toast.error(`Failed to register user: ${error.message}`);
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
   const handleLoadUserId = useCallback(async () => {
     setIsLoading(true);
     try {
-      const result = await getRegisteredHFUser();
-      console.log('getRegisteredHFUser result:', result);
-
-      if (result && result.user_id_list) {
-        if (result.success) {
-          setUserIdList(result.user_id_list);
-          toast.success('User ID list loaded successfully!');
-        } else {
-          toast.error('Failed to get user ID list:\n' + result.message);
-        }
+      const list = await reloadHfUsers();
+      if (list && list.length > 0) {
+        toast.success('Benutzer-ID-Liste erfolgreich geladen!');
       } else {
-        toast.error('Failed to get user ID list from response');
+        toast.error('Keine Benutzer-ID gefunden. Bitte HuggingFace-Token in EduBotics setzen.');
       }
-    } catch (error) {
-      console.warn('Error loading HF user list:', error);
-      toast.error(`Failed to load user ID list: ${error.message}`);
     } finally {
       setIsLoading(false);
     }
-  }, [getRegisteredHFUser]);
+  }, [reloadHfUsers]);
 
   // File browser handlers
   const handleHfLocalDirSelect = useCallback((item) => {
@@ -282,7 +245,7 @@ const HuggingfaceSection = () => {
       const head = value.split('/')[0];
       const tail = value.split('/')[1];
 
-      if (userIdList.includes(head)) {
+      if (hfUserList.includes(head)) {
         dispatch(setHFUserId(head));
         repo_id = tail;
       } else {
@@ -372,10 +335,12 @@ const HuggingfaceSection = () => {
     },
   };
 
-  // Auto-load User ID list on component mount
+  // Load the Benutzer-ID list on mount if not already cached.
   useEffect(() => {
-    handleLoadUserId();
-  }, [handleLoadUserId]);
+    if (hfUserList.length === 0) {
+      reloadHfUsers();
+    }
+  }, [hfUserList.length, reloadHfUsers]);
 
   // track hf status update
   useEffect(() => {
@@ -416,7 +381,7 @@ const HuggingfaceSection = () => {
                 disabled={isDownloading || isUploading}
               >
                 <option value="">Select User ID</option>
-                {userIdList.map((userId) => (
+                {hfUserList.map((userId) => (
                   <option key={userId} value={userId}>
                     {userId}
                   </option>
@@ -433,20 +398,6 @@ const HuggingfaceSection = () => {
                   disabled={isLoading}
                 >
                   {isLoading ? 'Loading...' : 'Load'}
-                </button>
-                <button
-                  className={clsx(
-                    STYLES.loadUserButton,
-                    getButtonVariant('green', true, isLoading)
-                  )}
-                  onClick={() => {
-                    if (!isLoading) {
-                      setShowTokenPopup(true);
-                    }
-                  }}
-                  disabled={isLoading}
-                >
-                  Change
                 </button>
               </div>
             </div>
@@ -835,13 +786,6 @@ const HuggingfaceSection = () => {
         homePath=""
       />
 
-      {/* Token Input Popup */}
-      <TokenInputPopup
-        isOpen={showTokenPopup}
-        onClose={() => setShowTokenPopup(false)}
-        onSubmit={handleTokenSubmit}
-        isLoading={isLoading}
-      />
     </div>
   );
 };

@@ -268,12 +268,20 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         # and read disk state.
         from rclpy.callback_groups import ReentrantCallbackGroup
         self._preempt_cb_group = ReentrantCallbackGroup()
+        # Dedicated group for the HuggingFace services. whoami()/login do
+        # blocking network I/O (seconds on a cold/slow school LAN); without
+        # isolating them from the node's default MutuallyExclusiveCallbackGroup
+        # they serialize against the 1 Hz heartbeat + /task/status timers, so a
+        # slow Benutzer-ID lookup stalls the heartbeat and flickers the React
+        # connection to "disconnected". A separate group lets the 6-thread
+        # executor run them on another thread.
+        self._hf_cb_group = ReentrantCallbackGroup()
         service_definitions = [
             ('/task/command', SendCommand, self.user_interaction_callback),
             ('/get_robot_types', GetRobotTypeList, self.get_robot_types_callback),
             ('/set_robot_type', SetRobotType, self.set_robot_type_callback),
-            ('/register_hf_user', SetHFUser, self.set_hf_user_callback),
-            ('/get_registered_hf_user', GetHFUser, self.get_hf_user_callback),
+            ('/register_hf_user', SetHFUser, self.set_hf_user_callback, self._hf_cb_group),
+            ('/get_registered_hf_user', GetHFUser, self.get_hf_user_callback, self._hf_cb_group),
             ('/get_policy_list', GetPolicyList, self.get_policy_list_callback),
             ('/get_saved_policies', GetSavedPolicyList, self.get_saved_policies_callback),
             ('/training/command', SendTrainingCommand, self.user_training_interaction_callback),

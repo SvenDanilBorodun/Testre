@@ -323,7 +323,9 @@ export function useRosTopicSubscription() {
             taskInstruction: msg.task_info.task_instruction || [],
             policyPath: msg.task_info.policy_path || '',
             recordInferenceMode: msg.task_info.record_inference_mode || false,
-            userId: msg.task_info.user_id || '',
+            // userId intentionally NOT defaulted to '' here — that would wipe
+            // the student's saved Benutzer-ID on every idle status tick. It is
+            // adopted from the server only when non-empty, below.
             fps: msg.task_info.fps || 0,
             episodeTime: msg.task_info.episode_time_s || 0,
             resetTime: msg.task_info.reset_time_s || 0,
@@ -339,6 +341,12 @@ export function useRosTopicSubscription() {
           if (isRunning) {
             infoUpdate.tags = msg.task_info.tags || [];
             infoUpdate.warmupTime = msg.task_info.warmup_time_s || 0;
+          }
+
+          // Adopt the server's user_id only when non-empty (e.g. resuming a
+          // task started elsewhere); never overwrite a saved selection with ''.
+          if (msg.task_info.user_id) {
+            infoUpdate.userId = msg.task_info.user_id;
           }
 
           dispatch(setTaskInfo(infoUpdate));

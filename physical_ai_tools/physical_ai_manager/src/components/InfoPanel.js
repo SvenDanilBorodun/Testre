@@ -19,9 +19,8 @@ import { useSelector, useDispatch } from 'react-redux';
 import clsx from 'clsx';
 import TaskInstructionInput from './TaskInstructionInput';
 import toast from 'react-hot-toast';
-import { useRosServiceCaller } from '../hooks/useRosServiceCaller';
+import { useHfUserList } from '../hooks/useHfUserList';
 import TagInput from './TagInput';
-import TokenInputPopup from './TokenInputPopup';
 import TaskPhase from '../constants/taskPhases';
 import { setTaskInfo, setUseMultiTaskMode } from '../features/tasks/taskSlice';
 
@@ -72,17 +71,15 @@ const InfoPanel = () => {
   const disabled = taskStatus.phase !== TaskPhase.READY || !isTaskStatusPaused;
   const [isEditable, setIsEditable] = useState(!disabled);
 
-  // User ID list for dropdown
-  const [userIdList, setUserIdList] = useState([]);
-
-  // Token popup states
-  const [showTokenPopup, setShowTokenPopup] = useState(false);
+  // Benutzer-ID list comes from Redux (fetched once on connect, see
+  // useHfUserList) so it survives tab switches — it used to live in local
+  // useState and reset to [] on every unmount, which is why the selection
+  // looked "wiped" when switching tabs.
+  const { hfUserList, reload: reloadHfUsers } = useHfUserList();
   const [isLoading, setIsLoading] = useState(false);
 
-  // User ID selection states
+  // Manual-input mode toggle (only when Push-to-Hub is off).
   const [showUserIdDropdown, setShowUserIdDropdown] = useState(false);
-
-  const { registerHFUser, getRegisteredHFUser } = useRosServiceCaller();
 
   const handleChange = useCallback(
     (field, value) => {
@@ -97,56 +94,22 @@ const InfoPanel = () => {
     setShowPopup(false);
   };
 
-  const handleTokenSubmit = async (token) => {
-    if (!token || !token.trim()) {
-      toast.error('Bitte gib ein Token ein');
-      return;
-    }
-
-    setIsLoading(true);
-    try {
-      const result = await registerHFUser(token);
-      console.log('registerHFUser result:', result);
-
-      if (result && result.user_id_list) {
-        setUserIdList(result.user_id_list);
-        setShowTokenPopup(false);
-        toast.success('Benutzer-ID-Liste erfolgreich aktualisiert!');
-      } else {
-        toast.error('Failed to get user ID list from response');
-      }
-    } catch (error) {
-      console.error('Error registering HF user:', error);
-      toast.error(`Failed to register user: ${error.message}`);
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
   const handleLoadUserId = useCallback(async () => {
     setIsLoading(true);
     try {
-      const result = await getRegisteredHFUser();
-      console.log('getRegisteredHFUser result:', result);
-
-      if (result && result.user_id_list) {
-        if (result.success) {
-          setUserIdList(result.user_id_list);
-          toast.success('Benutzer-ID-Liste erfolgreich geladen!');
-          setShowUserIdDropdown(true);
-        } else {
-          toast.error('Failed to get user ID list:\n' + result.message);
-        }
+      const list = await reloadHfUsers();
+      if (list && list.length > 0) {
+        toast.success('Benutzer-ID-Liste erfolgreich geladen!');
+        setShowUserIdDropdown(true);
       } else {
-        toast.error('Failed to get user ID list from response');
+        toast.error(
+          'Keine Benutzer-ID gefunden. Bitte HuggingFace-Token in EduBotics setzen.'
+        );
       }
-    } catch (error) {
-      console.error('Error loading HF user list:', error);
-      toast.error(`Failed to load user ID list: ${error.message}`);
     } finally {
       setIsLoading(false);
     }
-  }, [getRegisteredHFUser]);
+  }, [reloadHfUsers]);
 
   const handleUserIdSelect = useCallback(
     (selectedUserId) => {
@@ -180,17 +143,20 @@ const InfoPanel = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [useMultiTaskMode, info.useOptimizedSave, dispatch]);
 
+  // Ensure the list is loaded if this mount races the connect-time fetch in
+  // StudentApp. Silent (no toast) — the "Laden" button is the noisy path.
   useEffect(() => {
-    if (info.pushToHub) {
-      handleLoadUserId();
+    if (hfUserList.length === 0) {
+      reloadHfUsers();
     }
-  }, [handleLoadUserId, info.pushToHub]);
+  }, [hfUserList.length, reloadHfUsers]);
 
+  // Auto-select the first account on first run (no saved Benutzer-ID yet).
   useEffect(() => {
-    if (userIdList.length > 0 && info.userId === undefined) {
-      handleUserIdSelect(userIdList[0]);
+    if (hfUserList.length > 0 && info.userId === undefined) {
+      handleUserIdSelect(hfUserList[0]);
     }
-  }, [userIdList, info.userId, handleUserIdSelect]);
+  }, [hfUserList, info.userId, handleUserIdSelect]);
 
   // track task status update
   useEffect(() => {
@@ -569,19 +535,6 @@ const InfoPanel = () => {
                 Manual Input
               </button>
             )}
-            {info.pushToHub && (
-              <button
-                className={clsx(classButtonBase, getButtonVariant('green', isEditable, isLoading))}
-                onClick={() => {
-                  if (isEditable && !isLoading) {
-                    setShowTokenPopup(true);
-                  }
-                }}
-                disabled={!isEditable || isLoading}
-              >
-                Ändern
-              </button>
-            )}
           </div>
 
           {info.pushToHub ? (
@@ -594,7 +547,7 @@ const InfoPanel = () => {
                 disabled={!isEditable}
               >
                 <option value="">Benutzer-ID auswählen</option>
-                {userIdList.map((userId) => (
+                {hfUserList.map((userId) => (
                   <option key={userId} value={userId}>
                     {userId}
                   </option>
@@ -633,7 +586,7 @@ const InfoPanel = () => {
                     disabled={!isEditable}
                   >
                     <option value="">Aus registrierten Benutzer-IDs auswählen</option>
-                    {userIdList.map((userId) => (
+                    {hfUserList.map((userId) => (
                       <option key={userId} value={userId}>
                         {userId}
                       </option>
@@ -838,13 +791,6 @@ const InfoPanel = () => {
         </div>
       )}
 
-      {/* Token Input Popup */}
-      <TokenInputPopup
-        isOpen={showTokenPopup}
-        onClose={() => setShowTokenPopup(false)}
-        onSubmit={handleTokenSubmit}
-        isLoading={isLoading}
-      />
     </div>
   );
 };

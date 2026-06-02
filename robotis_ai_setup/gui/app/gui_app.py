@@ -126,6 +126,21 @@ from .constants import (
 )
 
 
+def _redact_secret_env_line(line: str) -> str:
+    """Mask secret values (HF_TOKEN, *_SECRET, *_KEY, *_PASSWORD) when echoing
+    the generated .env to the on-screen Protokoll, so a token can't leak into a
+    screenshot / screen-share / support paste. Non-secret lines pass through
+    unchanged. Generated .env lines have no leading indentation (the log call
+    adds it), so returning ``key=***`` is safe."""
+    stripped = line.strip()
+    if "=" not in stripped or stripped.startswith("#"):
+        return line
+    key = stripped.split("=", 1)[0].strip()
+    if any(marker in key.upper() for marker in ("TOKEN", "SECRET", "PASSWORD", "KEY")):
+        return f"{key}=***"
+    return line
+
+
 class EduBoticsApp:
     """Hauptfenster der Anwendung."""
 
@@ -251,6 +266,40 @@ class EduBoticsApp:
         self.gripper_cam_var = tk.StringVar()
         self.scene_cam_var = tk.StringVar()
 
+        # ── Schritt D: HuggingFace Token ──
+        # One-time token entry. Stored on THIS PC in %LOCALAPPDATA%\EduBotics\.env
+        # (config_generator.upsert_env_var) and forwarded into the container via
+        # docker-compose --env-file, so Aufnahme/Training/Inferenz all pick it up
+        # from $HF_TOKEN without the student re-entering it anywhere.
+        hf_frame = ttk.LabelFrame(main, text="Schritt D: HuggingFace Token", padding=10)
+        hf_frame.pack(fill=tk.X, pady=5)
+        self.hf_frame = hf_frame
+        ttk.Label(
+            hf_frame,
+            text=(
+                "Einmalig dein HuggingFace-Token eingeben. Es wird auf diesem PC "
+                "gespeichert und für Aufnahme, Training und Inferenz verwendet — "
+                "du musst es später nirgends erneut eingeben."
+            ),
+            foreground="gray", font=("Segoe UI", 8), wraplength=620, justify=tk.LEFT,
+        ).pack(anchor=tk.W)
+        hf_row = ttk.Frame(hf_frame)
+        hf_row.pack(fill=tk.X, pady=5)
+        self.hf_token_var = tk.StringVar()
+        self.hf_token_entry = ttk.Entry(
+            hf_row, textvariable=self.hf_token_var, show="•", width=42,
+        )
+        self.hf_token_entry.pack(side=tk.LEFT)
+        self.btn_save_token = ttk.Button(
+            hf_row, text="Token speichern", command=self._save_hf_token,
+        )
+        self.btn_save_token.pack(side=tk.LEFT, padx=8)
+        self.hf_token_status_var = tk.StringVar()
+        ttk.Label(
+            hf_row, textvariable=self.hf_token_status_var, foreground="gray",
+        ).pack(side=tk.LEFT, padx=4)
+        self._refresh_hf_token_status()
+
         # ── Start-Button ──
         btn_frame = ttk.Frame(main)
         btn_frame.pack(fill=tk.X, pady=15)
@@ -285,6 +334,50 @@ class EduBoticsApp:
             font=("Consolas", 9), wrap=tk.WORD,
         )
         self.log_text.pack(fill=tk.BOTH, expand=True)
+
+    # ── HuggingFace token ────────────────────────────────────────────
+
+    def _refresh_hf_token_status(self):
+        """Reflect whether a token is already saved on this PC — without
+        revealing the secret. Read from the .env each time so it stays
+        accurate after a save or an external edit."""
+        try:
+            existing = config_generator.read_env_var("HF_TOKEN", ENV_FILE)
+        except Exception:
+            existing = None
+        if existing:
+            self.hf_token_status_var.set("✓ Token gespeichert")
+        else:
+            self.hf_token_status_var.set("Kein Token gespeichert")
+
+    def _save_hf_token(self):
+        """Persist the entered HF token to %LOCALAPPDATA%\\EduBotics\\.env.
+
+        The token is cleared from the widget afterwards so the secret isn't
+        left on screen; the status label confirms it's saved. Takes effect in
+        the container on the next 'Umgebung starten' (--force-recreate)."""
+        token = self.hf_token_var.get().strip()
+        if not token:
+            messagebox.showwarning(
+                "Kein Token",
+                "Bitte gib dein HuggingFace-Token ein (beginnt mit 'hf_').",
+            )
+            return
+        try:
+            config_generator.upsert_env_var("HF_TOKEN", token, ENV_FILE)
+        except Exception as e:
+            messagebox.showerror(
+                "Fehler", f"Token konnte nicht gespeichert werden: {e}"
+            )
+            return
+        self.hf_token_var.set("")
+        self._refresh_hf_token_status()
+        self._log("HuggingFace-Token auf diesem PC gespeichert.")
+        messagebox.showinfo(
+            "Gespeichert",
+            "HuggingFace-Token wurde gespeichert. Es wird beim nächsten "
+            "'Umgebung starten' aktiv.",
+        )
 
     # ── Logging ──────────────────────────────────────────────────────
 
@@ -1388,6 +1481,10 @@ class EduBoticsApp:
     def _start_environment(self):
         """EduBotics-Umgebung starten und Web-Oberfläche öffnen."""
         is_cloud_only = self.cloud_only.get()
+        # Capture on the main thread — tk StringVar reads from the worker
+        # thread below are not thread-safe. Empty means "leave the saved
+        # token untouched" (generate_env_file preserves the existing one).
+        hf_token = self.hf_token_var.get().strip()
 
         if not is_cloud_only and not self.hardware.is_complete:
             messagebox.showwarning("Fehlende Hardware", "Bitte beide Arme scannen und identifizieren, bevor du startest.")
@@ -1439,6 +1536,19 @@ class EduBoticsApp:
                         self._log(f"WARNUNG: Serielle Ports konnten nicht validiert werden: {e}")
                         self._log("Fahre trotzdem fort — Container versuchen erneut auf Geräte zuzugreifen.")
 
+                # 0.5 Persist a freshly-typed HF token (if any) BEFORE the .env
+                # is regenerated, so generate_env_file() carries it through as
+                # an unmanaged key. An already-saved token (empty field) is
+                # left untouched and preserved by the regenerate.
+                if hf_token:
+                    try:
+                        config_generator.upsert_env_var("HF_TOKEN", hf_token, ENV_FILE)
+                        self._log("HuggingFace-Token gespeichert.")
+                        self.root.after(0, lambda: self.hf_token_var.set(""))
+                        self.root.after(0, self._refresh_hf_token_status)
+                    except Exception as e:
+                        self._log(f"WARNUNG: HF-Token konnte nicht gespeichert werden: {e}")
+
                 # 1. .env generieren
                 self._set_status("Konfiguration wird erstellt...")
                 self._log(".env-Datei wird erstellt...")
@@ -1448,7 +1558,7 @@ class EduBoticsApp:
                     env_content = config_generator.generate_env_file(self.hardware, ENV_FILE)
                 self._log(f"Konfiguration geschrieben: {ENV_FILE}")
                 for line in env_content.strip().splitlines():
-                    self._log(f"  {line}")
+                    self._log(f"  {_redact_secret_env_line(line)}")
 
                 # 2. Container starten
                 use_gpu = self.gpu_available and not is_cloud_only

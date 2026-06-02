@@ -24,6 +24,15 @@ const savedRobotType = (() => {
   catch { return ''; }
 })();
 
+// Benutzer-ID (the HF account/org the student records under). Persisted like
+// robotType so it survives a full page reload (e.g. the GUI WebView reload on
+// restart), not just tab switches. `undefined` when never set, so the
+// InfoPanel auto-select can still pick the first account on first run.
+const savedUserId = (() => {
+  try { return localStorage.getItem('edubotics_userId') || undefined; }
+  catch { return undefined; }
+})();
+
 const initialState = {
   taskInfo: {
     taskName: '',
@@ -31,7 +40,7 @@ const initialState = {
     taskInstruction: [],
     policyPath: '',
     recordInferenceMode: false,
-    userId: undefined,
+    userId: savedUserId,
     fps: 30,
     tags: [],
     warmupTime: 5,
@@ -93,6 +102,12 @@ const taskSlice = createSlice({
   reducers: {
     setTaskInfo: (state, action) => {
       state.taskInfo = { ...state.taskInfo, ...action.payload };
+      // Persist the Benutzer-ID like robotType so it survives a full reload.
+      // Only on a truthy value — never clobber the saved id with '' (the
+      // /task/status handler is also guarded not to send an empty userId).
+      if (action.payload.userId) {
+        try { localStorage.setItem('edubotics_userId', action.payload.userId); } catch {}
+      }
     },
     resetTaskInfo: (state) => {
       state.taskInfo = initialState.taskInfo;

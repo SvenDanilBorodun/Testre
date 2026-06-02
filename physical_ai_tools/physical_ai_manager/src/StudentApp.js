@@ -31,6 +31,7 @@ import StartupGate from './components/StartupGate';
 import { LogoMark } from './components/EbUI';
 import packageJson from '../package.json';
 import { useRosTopicSubscription } from './hooks/useRosTopicSubscription';
+import { useHfUserList } from './hooks/useHfUserList';
 import rosConnectionManager from './utils/rosConnectionManager';
 import { useDispatch, useSelector } from 'react-redux';
 import { setRosHost } from './features/ros/rosSlice';
@@ -91,6 +92,21 @@ function StudentApp() {
   if (!cloudOnly) {
     rosConnectionManager.setOnConnected(rosSubscriptionControls.initializeSubscriptions);
   }
+
+  // Fetch the HuggingFace Benutzer-ID list ONCE when the local ROS connection
+  // comes up, and cache it in Redux so it survives tab switches. The token now
+  // comes from $HF_TOKEN in the container env (set once in the GUI), so this
+  // succeeds with no in-app token entry. Re-fires only if the list is still
+  // empty on a later (re)connect.
+  const { reload: reloadHfUsers } = useHfUserList();
+  const heartbeatStatus = useSelector((state) => state.tasks.heartbeatStatus);
+  const hfUserListLen = useSelector((state) => state.ui.hfUserList.length);
+  useEffect(() => {
+    if (cloudOnly) return;
+    if (heartbeatStatus === 'connected' && hfUserListLen === 0) {
+      reloadHfUsers();
+    }
+  }, [cloudOnly, heartbeatStatus, hfUserListLen, reloadHfUsers]);
 
   useEffect(() => {
     return () => {

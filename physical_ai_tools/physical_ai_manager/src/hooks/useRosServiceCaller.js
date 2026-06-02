@@ -258,7 +258,10 @@ export function useRosServiceCaller() {
         '/get_registered_hf_user',
         'physical_ai_interfaces/srv/GetHFUser',
         {},
-        3000
+        // 10 s: must exceed the server-side whoami wait (8 s, data_manager.py)
+        // so a slow/cold school-network Benutzer-ID lookup isn't cut off
+        // client-side before the server can answer. (Was 3 s.)
+        10000
       );
 
       console.log('getRegisteredHFUser service response:', result);

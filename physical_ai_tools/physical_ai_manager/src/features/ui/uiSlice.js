@@ -28,6 +28,12 @@ const initialState = {
   modalOpen: false,
   notifications: [],
   robotTypeList: [],
+  // HuggingFace Benutzer-ID list (account + orgs from whoami). Fetched ONCE
+  // on ROS connect (StudentApp) and shared via Redux so it survives tab
+  // switches — the dropdown options used to live in per-component useState
+  // and reset to [] on every unmount, which is why the Benutzer-ID looked
+  // "wiped" when switching tabs.
+  hfUserList: [],
   isFirstLoad: {
     home: true,
     record: true,
@@ -77,6 +83,9 @@ const uiSlice = createSlice({
     setRobotTypeList: (state, action) => {
       state.robotTypeList = action.payload;
     },
+    setHfUserList: (state, action) => {
+      state.hfUserList = Array.isArray(action.payload) ? action.payload : [];
+    },
     setIsFirstLoadFalse: (state, action) => {
       state.isFirstLoad[action.payload] = false;
     },
@@ -98,6 +107,7 @@ export const {
   removeNotification,
   clearNotifications,
   setRobotTypeList,
+  setHfUserList,
   setIsFirstLoadFalse,
   setIsFirstLoadTrue,
 } = uiSlice.actions;

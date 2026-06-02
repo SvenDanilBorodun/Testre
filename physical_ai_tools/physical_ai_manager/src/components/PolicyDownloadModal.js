@@ -20,7 +20,7 @@ import { useSelector } from 'react-redux';
 import toast from 'react-hot-toast';
 import { MdOutlineFileDownload, MdClose } from 'react-icons/md';
 import { useRosServiceCaller } from '../hooks/useRosServiceCaller';
-import TokenInputPopup from './TokenInputPopup';
+import { useHfUserList } from '../hooks/useHfUserList';
 import HFStatus from '../constants/HFStatus';
 import { DEFAULT_PATHS } from '../constants/paths';
 
@@ -107,15 +107,15 @@ const PolicyDownloadModal = ({ isOpen, onClose, onDownloadComplete }) => {
   const hfStatus = useSelector((state) => state.editDataset.hfStatus);
   // const downloadStatus = useSelector((state) => state.editDataset.downloadStatus);
 
-  const { controlHfServer, registerHFUser, getRegisteredHFUser } = useRosServiceCaller();
+  const { controlHfServer } = useRosServiceCaller();
+  // Benutzer-ID list from Redux (fetched once on connect, survives tab switches).
+  const { hfUserList, reload: reloadHfUsers } = useHfUserList();
 
   // Local states
   const [hfRepoId, setHfRepoId] = useState('');
   const [userId, setUserId] = useState('');
   const [isDownloading, setIsDownloading] = useState(false);
   const [finalStatus, setFinalStatus] = useState(null); // Store final SUCCESS/FAILED status
-  const [userIdList, setUserIdList] = useState([]);
-  const [showTokenPopup, setShowTokenPopup] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
 
   // Validation states
@@ -155,56 +155,19 @@ const PolicyDownloadModal = ({ isOpen, onClose, onDownloadComplete }) => {
     return variants[variant]?.[isDisabled ? 'disabled' : 'active'] || '';
   };
 
-  // Token related handlers
-  const handleTokenSubmit = async (token) => {
-    if (!token || !token.trim()) {
-      toast.error('Bitte gib ein Token ein');
-      return;
-    }
-
-    setIsLoading(true);
-    try {
-      const result = await registerHFUser(token);
-      console.log('registerHFUser result:', result);
-
-      if (result && result.user_id_list) {
-        setUserIdList(result.user_id_list);
-        setShowTokenPopup(false);
-        toast.success('Benutzer-ID-Liste erfolgreich aktualisiert!');
-      } else {
-        toast.error('Benutzer-ID-Liste konnte aus der Antwort nicht ermittelt werden');
-      }
-    } catch (error) {
-      console.error('Error registering HF user:', error);
-      toast.error(`Benutzer konnte nicht registriert werden: ${error.message}`);
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
   const handleLoadUserId = useCallback(async () => {
     setIsLoading(true);
     try {
-      const result = await getRegisteredHFUser();
-      console.log('getRegisteredHFUser result:', result);
-
-      if (result && result.user_id_list) {
-        if (result.success) {
-          setUserIdList(result.user_id_list);
-          toast.success('Benutzer-ID-Liste erfolgreich geladen!');
-        } else {
-          toast.error('Benutzer-ID-Liste konnte nicht ermittelt werden:\n' + result.message);
-        }
+      const list = await reloadHfUsers();
+      if (list && list.length > 0) {
+        toast.success('Benutzer-ID-Liste erfolgreich geladen!');
       } else {
-        toast.error('Benutzer-ID-Liste konnte aus der Antwort nicht ermittelt werden');
+        toast.error('Keine Benutzer-ID gefunden. Bitte HuggingFace-Token in EduBotics setzen.');
       }
-    } catch (error) {
-      console.error('Error loading HF user list:', error);
-      toast.error(`Benutzer-ID-Liste konnte nicht geladen werden: ${error.message}`);
     } finally {
       setIsLoading(false);
     }
-  }, [getRegisteredHFUser]);
+  }, [reloadHfUsers]);
 
   // Input handlers with validation
   const handleRepoIdChange = (value) => {
@@ -214,7 +177,7 @@ const PolicyDownloadModal = ({ isOpen, onClose, onDownloadComplete }) => {
       const head = value.split('/')[0];
       const tail = value.split('/')[1];
 
-      if (userIdList.includes(head)) {
+      if (hfUserList.includes(head)) {
         setUserId(head);
         repo_id = tail;
       } else {
@@ -285,12 +248,12 @@ const PolicyDownloadModal = ({ isOpen, onClose, onDownloadComplete }) => {
     onClose();
   };
 
-  // Auto-load User ID list on component mount
+  // Load the Benutzer-ID list when the modal opens, if not already cached.
   useEffect(() => {
-    if (isOpen) {
-      handleLoadUserId();
+    if (isOpen && hfUserList.length === 0) {
+      reloadHfUsers();
     }
-  }, [isOpen, handleLoadUserId]);
+  }, [isOpen, hfUserList.length, reloadHfUsers]);
 
   // track hf status update
   useEffect(() => {
@@ -385,7 +348,7 @@ const PolicyDownloadModal = ({ isOpen, onClose, onDownloadComplete }) => {
                       disabled={isDownloading}
                     >
                       <option value="">Benutzer-ID auswählen</option>
-                      {userIdList.map((id) => (
+                      {hfUserList.map((id) => (
                         <option key={id} value={id}>
                           {id}
                         </option>
@@ -405,20 +368,6 @@ const PolicyDownloadModal = ({ isOpen, onClose, onDownloadComplete }) => {
                         disabled={isLoading}
                       >
                         {isLoading ? 'Laden...' : 'Laden'}
-                      </button>
-                      <button
-                        className={clsx(
-                          STYLES.loadUserButton,
-                          getButtonVariant('green', true, isLoading)
-                        )}
-                        onClick={() => {
-                          if (!isLoading) {
-                            setShowTokenPopup(true);
-                          }
-                        }}
-                        disabled={isLoading}
-                      >
-                        Ändern
                       </button>
                     </div>
                   </div>
@@ -564,13 +513,6 @@ const PolicyDownloadModal = ({ isOpen, onClose, onDownloadComplete }) => {
         </div>
       </div>
 
-      {/* Token Input Popup */}
-      <TokenInputPopup
-        isOpen={showTokenPopup}
-        onClose={() => setShowTokenPopup(false)}
-        onSubmit={handleTokenSubmit}
-        isLoading={isLoading}
-      />
     </>
   );
 };

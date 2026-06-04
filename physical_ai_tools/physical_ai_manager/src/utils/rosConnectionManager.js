@@ -70,6 +70,21 @@ class RosConnectionManager {
    * @returns {Promise<ROSLIB.Ros>} ROS connection object
    */
   async getConnection(rosbridgeUrl) {
+    // Guard: never let a caller holding an unset URL tear down a healthy
+    // connection. Components capture state.ros.rosbridgeUrl in render
+    // closures; an early render (before StudentApp seeds setRosHost) captures
+    // the Redux initial '' — and a retry from that stale closure used to fall
+    // into the "URL changed" branch below: disconnect() killed the live
+    // socket AND set intentionalDisconnect, and _scheduleReconnect's
+    // `!this.url` guard then blocked every reconnect. Net effect (observed
+    // live 2026-06-04): every page's live updates — collision modal, task
+    // status, heartbeat — died ~10 s after load and only a manual reload
+    // recovered. An empty URL can never be a real target, so fail the single
+    // call instead of poisoning the singleton.
+    if (!rosbridgeUrl) {
+      throw new Error('rosbridge URL not configured yet');
+    }
+
     // If URL has changed, clean up existing connection
     if (this.url !== rosbridgeUrl) {
       this.disconnect();

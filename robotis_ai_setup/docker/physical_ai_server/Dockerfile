@@ -211,16 +211,24 @@ RUN set -e && \
 #      get a working PyKDL IK solver instead of None.
 # Once the apt packages land for Jazzy, this whole block can be replaced
 # with a normal apt install — the pip-vendoring is a transition shim.
+# ros-jazzy-control-msgs: the teleop collision e-stop's gpio subscription
+# (safety/collision_monitor.py) needs control_msgs/DynamicInterfaceGroupValues.
+# ros-base does NOT ship control_msgs; without this install the import guard
+# silently fail-opens ("[KOLLISION] ... detection DISABLED") and force
+# protection is off on every shipped image (caught on-rig 2026-06-03).
+# package.xml declares the dep; this is where it actually materializes.
 # apt-get retry loop (added 2026-05-20 — same rationale as open_manipulator/
 # Dockerfile: Ubuntu ports/archive mirrors occasionally serve stale Packages.gz
 # during sync windows. 5 retries with 5s/10s/15s/20s/25s backoff = 75s worst
 # case before bailing.) The trac-ik-python install is intentionally a soft
-# fail (or-echo) — only ros-jazzy-python-orocos-kdl-vendor must succeed.
+# fail (or-echo) — only ros-jazzy-python-orocos-kdl-vendor and
+# ros-jazzy-control-msgs must succeed.
 RUN set -eux; \
     for i in 1 2 3 4 5; do \
         apt-get update && \
         DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            ros-jazzy-python-orocos-kdl-vendor && \
+            ros-jazzy-python-orocos-kdl-vendor \
+            ros-jazzy-control-msgs && \
         break || { \
             echo "apt-get retry $i/5 (mirror sync or transient network)"; \
             rm -rf /var/lib/apt/lists/*; \
@@ -363,6 +371,16 @@ RUN bash -c "set -e && \
     source /opt/ros/jazzy/setup.bash && \
     source /root/ros2_ws/install/setup.bash && \
     python3 -c 'import physical_ai_server.physical_ai_server; print(\"physical_ai_server node module imports OK\")'"
+
+# Build-time COLLISION-GUARD gate. The node-import test above CANNOT catch a
+# missing control_msgs: collision_monitor.py guards the import (fail-open ->
+# "[KOLLISION] ... detection DISABLED") so the node still imports and every
+# health check passes while force protection is silently OFF (exactly how the
+# 2026-06-03 on-rig session found it). Assert the Jazzy gpio state message is
+# importable so the regression becomes a loud build failure.
+RUN bash -c "set -e && \
+    source /opt/ros/jazzy/setup.bash && \
+    python3 -c 'from control_msgs.msg import DynamicInterfaceGroupValues; print(\"control_msgs gpio state msg OK — collision guard can arm\")'"
 
 # Build-time FUNCTIONAL cv_bridge decode gate (v2.5.4). The import-only smoke
 # tests above cannot catch the NumPy-2-vs-cv_bridge ABI segfault: `import

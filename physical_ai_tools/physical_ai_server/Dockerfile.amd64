@@ -11,13 +11,19 @@ RUN tar -C / -Jxpf /tmp/s6-overlay-x86_64.tar.xz
 # Set environment variables
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Install realsense and physical_ai_tools dependencies
+# Install realsense and physical_ai_tools dependencies.
+# ros-jazzy-control-msgs: the teleop collision e-stop subscribes to
+# control_msgs/DynamicInterfaceGroupValues (safety/collision_monitor.py);
+# ros-base does not ship it and the guarded import silently fail-opens without
+# it. Mirrored in the thin overlay Dockerfile (which is what CI actually builds
+# on top of the published base, and where the operative install lives).
 RUN apt-get update && apt-get install -y \
     xz-utils \
     ffmpeg \
     vim \
     nano \
     python3-pip \
+    ros-jazzy-control-msgs \
     && rm -rf /var/lib/apt/lists/*
 
 ENV COLCON_WS=/root/ros2_ws

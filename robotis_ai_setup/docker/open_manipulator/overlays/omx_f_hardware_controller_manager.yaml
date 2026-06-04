@@ -9,11 +9,14 @@
       arm_controller:
         type: joint_trajectory_controller/JointTrajectoryController
 
-      # EduBotics teleop collision e-stop: read-only broadcaster that surfaces the
-      # arm-joint Present Current + Hardware Error Status (declared in
+      # EduBotics teleop collision e-stop: read-only broadcaster that surfaces each
+      # arm joint's native force signal + Hardware Error Status (declared in
       # omx_f.ros2_control.xacro) on ~/gpio_states as control_msgs/DynamicJointState
-      # at the CM update_rate (100 Hz). It claims NO command interface, so it cannot
-      # drive the servos and does not touch the Goal Position command path (Rule §2).
+      # at the CM update_rate (100 Hz). MODEL-AWARE: 'Present Load' for the XL430-W250
+      # base joints (dxl11-13), 'Present Current' for the XL330-M288 wrist joints
+      # (dxl14-15) — the two models expose different addr-126 registers. It claims NO
+      # command interface, so it cannot drive the servos and does not touch the Goal
+      # Position command path (Rule §2).
       gpio_command_controller:
         type: gpio_controllers/GpioCommandController
 
@@ -73,10 +76,12 @@
       # State-only: the collision monitor in physical_ai_server reads these over
       # /gpio_command_controller/gpio_states. NO command_interfaces block — claiming
       # a command interface here would conflict with arm_controller's Goal Position
-      # and could write the servos. The gripper (dxl16) is intentionally absent: it is
-      # an XL430-class servo whose control table lacks a Present Current register
-      # (declaring it would hard-fail hardware init) and it is already current-limited
-      # in Op Mode 5, so it needs no software force monitoring.
+      # and could write the servos. Each joint requests ONLY the force register its
+      # servo model actually has (XL430-W250 dxl11-13 -> Present Load; XL330-M288
+      # dxl14-15 -> Present Current); requesting a register the model lacks hard-fails
+      # hardware init (InitDxlReadItems "Cannot find control item"). The gripper
+      # (dxl16) is intentionally absent: it is already current-limited in Op Mode 5,
+      # so it needs no software force monitoring.
       gpios:
         - dxl11
         - dxl12
@@ -86,17 +91,17 @@
       state_interfaces:
         dxl11:
           - interfaces:
-            - Present Current
+            - Present Load
             - Present Velocity
             - Hardware Error Status
         dxl12:
           - interfaces:
-            - Present Current
+            - Present Load
             - Present Velocity
             - Hardware Error Status
         dxl13:
           - interfaces:
-            - Present Current
+            - Present Load
             - Present Velocity
             - Hardware Error Status
         dxl14:

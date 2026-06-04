@@ -87,11 +87,15 @@ const initialState = {
   lastHeartbeatTime: 0,
   useMultiTaskMode: false,
   multiTaskIndex: undefined,
-  // Teleop force/collision e-stop. Set active when /task/status reports phase=COLLISION
-  // (the server stopped the arm against an object and drove it to the safe home pose);
-  // cleared when a non-COLLISION status arrives. Drives the blocking CollisionModal.
+  // Teleop force/collision e-stop. Set active when /task/status reports one of the
+  // collision phases; cleared when a non-collision status arrives. `stage` mirrors the
+  // server's two-step recovery: 'stopped' (phase=COLLISION — arm halted in place, student
+  // removes the obstacle), 'homing' (phase=COLLISION_HOMING — safe-home glide running),
+  // 'homed' (phase=COLLISION_HOMED — step 2: match the leader, resume). Drives the
+  // blocking CollisionModal.
   collision: {
     active: false,
+    stage: 'stopped',
     message: '',
   },
 };

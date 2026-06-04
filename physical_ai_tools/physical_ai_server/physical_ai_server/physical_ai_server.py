@@ -989,11 +989,21 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 response.success = True
                 response.message = 'Inference started'
 
+            elif request.command == getattr(SendCommand.Request, 'HOME_FOLLOWER', 9):
+                # EduBotics teleop collision e-stop STEP 1: after the student removed the
+                # obstacle, glide the follower to the safe home pose (verified, non-blocking).
+                # getattr fallback: a container whose compiled interfaces predate the new srv
+                # constant still routes the raw command id (the React side sends the int).
+                success, message = self.home_follower()
+                response.success = success
+                response.message = message
+
             elif request.command == SendCommand.Request.RESUME_TELEOP:
-                # EduBotics teleop collision e-stop: clear a collision-stop and resync the
-                # follower to the leader. Handled here (not under the "currently recording"
-                # guard below) because a collision sets on_recording=False, so the system is
-                # idle when the student clicks "Teleoperation neu starten".
+                # EduBotics teleop collision e-stop STEP 2: resync the follower to the leader
+                # and resume (refused until the follower reached home — strict ordering).
+                # Handled here (not under the "currently recording" guard below) because a
+                # collision sets on_recording=False, so the system is idle when the student
+                # clicks "Teleoperation fortsetzen".
                 success, message = self.resume_teleop()
                 response.success = success
                 response.message = message

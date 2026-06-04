@@ -240,18 +240,38 @@ export function useRosTopicSubscription() {
 
         let progress = 0;
 
-        // Teleop force/collision e-stop. The server publishes phase=COLLISION (error kept
-        // empty) when the follower was forced against an object, stopped, and driven to the
-        // safe home pose. Drive the blocking CollisionModal off this, and clear it when a
-        // non-COLLISION status arrives (resume publishes phase=READY). Handled BEFORE the
-        // error early-return below so it can never be masked by an error toast.
-        if (msg.phase === TaskPhase.COLLISION) {
-          dispatch(setCollision({ active: true, message: msg.current_task_instruction || '' }));
+        // Teleop force/collision e-stop. The server publishes (error kept empty)
+        // phase=COLLISION when the follower was forced against an object and halted in
+        // place, phase=COLLISION_HOMING while the student-triggered safe-home glide runs,
+        // and phase=COLLISION_HOMED once the follower verifiably reached home. Drive the
+        // blocking two-step CollisionModal off these, and clear it when a non-collision
+        // status arrives (resume publishes phase=READY). Handled BEFORE the error
+        // early-return below so it can never be masked by an error toast.
+        const collisionStage =
+          msg.phase === TaskPhase.COLLISION
+            ? 'stopped'
+            : msg.phase === TaskPhase.COLLISION_HOMING
+              ? 'homing'
+              : msg.phase === TaskPhase.COLLISION_HOMED
+                ? 'homed'
+                : null;
+        if (collisionStage !== null) {
+          dispatch(
+            setCollision({
+              active: true,
+              stage: collisionStage,
+              message: msg.current_task_instruction || '',
+            })
+          );
           previousPhaseRef.current = msg.phase;
           return;
         }
-        if (previousPhaseRef.current === TaskPhase.COLLISION) {
-          dispatch(setCollision({ active: false, message: '' }));
+        if (
+          previousPhaseRef.current === TaskPhase.COLLISION ||
+          previousPhaseRef.current === TaskPhase.COLLISION_HOMING ||
+          previousPhaseRef.current === TaskPhase.COLLISION_HOMED
+        ) {
+          dispatch(setCollision({ active: false, stage: 'stopped', message: '' }));
         }
 
         if (msg.error !== '') {

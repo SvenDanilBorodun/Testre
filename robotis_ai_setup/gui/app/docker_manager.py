@@ -797,7 +797,12 @@ def _compose_args(gpu: bool = False) -> list[str]:
 
 
 def _compose_pull(gpu: bool = False, service: Optional[str] = None, log=None) -> bool:
-    """Refresh images for the tag pinned in versions.env, BEFORE recreating.
+    """Refresh images for the pinned tag, BEFORE recreating.
+
+    The tag reaches compose via the GUI-managed .env: constants.IMAGE_TAG
+    (EDUBOTICS_IMAGE_TAG env > docker/versions.env > latest) is emitted as a
+    MANAGED IMAGE_TAG line by config_generator, and _compose_args() hands
+    that .env to compose via --env-file.
 
     Why this exists: `start_containers()` recreates with --force-recreate, but
     compose's default pull_policy is `missing` — it reuses whatever local image

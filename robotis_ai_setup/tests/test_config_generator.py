@@ -212,6 +212,61 @@ class TestConfigGeneratorNativeBridge(unittest.TestCase):
             os.unlink(tmp_path)
 
 
+class TestImageTagPinning(unittest.TestCase):
+    """IMAGE_TAG is a MANAGED key: emitted from constants.IMAGE_TAG (the
+    EDUBOTICS_IMAGE_TAG env > docker/versions.env > latest resolution) and
+    superseding any stale hand-pinned operator line — so compose can never
+    silently run :latest on a pinned install, nor chase a dead local-only
+    tag (the 2026-06-05 collision-validate incident)."""
+
+    def _config(self):
+        return HardwareConfig(
+            leader=ArmDevice("1-3", "/dev/serial/by-id/leader", "leader", "OpenRB-150"),
+            follower=ArmDevice("1-4", "/dev/serial/by-id/follower", "follower", "OpenRB-150"),
+        )
+
+    def test_image_tag_emitted_from_constants(self):
+        from gui.app.constants import IMAGE_TAG
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".env", delete=False) as f:
+            tmp_path = f.name
+        try:
+            content = generate_env_file(self._config(), output_path=tmp_path)
+            self.assertIn(f"IMAGE_TAG={IMAGE_TAG}", content)
+            self.assertEqual(content.count("IMAGE_TAG="), 1)
+        finally:
+            os.unlink(tmp_path)
+
+    def test_cloud_only_emits_image_tag(self):
+        from gui.app.constants import IMAGE_TAG
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".env", delete=False) as f:
+            tmp_path = f.name
+        try:
+            content = generate_cloud_only_env(output_path=tmp_path)
+            self.assertIn(f"IMAGE_TAG={IMAGE_TAG}", content)
+            self.assertEqual(content.count("IMAGE_TAG="), 1)
+        finally:
+            os.unlink(tmp_path)
+
+    def test_stale_operator_image_tag_is_superseded(self):
+        # Regression for 2026-06-05: a validation session left
+        # IMAGE_TAG=collision-validate as a hand-edited line. The pre-fix
+        # GUI preserved it as an unmanaged operator override forever, and
+        # after an installer upgrade wiped the local image, compose chased
+        # a tag that existed nowhere -> "manifest unknown" on every start.
+        # Managed means regeneration replaces it with the pinned tag.
+        from gui.app.constants import IMAGE_TAG
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".env", delete=False) as f:
+            tmp_path = f.name
+            f.write("IMAGE_TAG=collision-validate\n")
+        try:
+            content = generate_env_file(self._config(), output_path=tmp_path)
+            self.assertNotIn("collision-validate", content)
+            self.assertEqual(content.count("IMAGE_TAG="), 1)
+            self.assertIn(f"IMAGE_TAG={IMAGE_TAG}", content)
+        finally:
+            os.unlink(tmp_path)
+
+
 class TestEnvVarHelpers(unittest.TestCase):
     """read_env_var / upsert_env_var — the GUI's HF_TOKEN persistence path."""
 

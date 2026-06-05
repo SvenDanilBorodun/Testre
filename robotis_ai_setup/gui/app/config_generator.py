@@ -6,7 +6,7 @@ import hashlib
 import os
 import uuid
 
-from .constants import ENV_FILE, ROS_DOMAIN_ID, REGISTRY
+from .constants import ENV_FILE, IMAGE_TAG, ROS_DOMAIN_ID, REGISTRY
 from .device_manager import HardwareConfig
 
 
@@ -19,6 +19,14 @@ MANAGED_KEYS = frozenset({
     "LEADER_PORT",
     "ROS_DOMAIN_ID",
     "REGISTRY",
+    # IMAGE_TAG pins compose to the installer's image build (constants.py
+    # resolves it: EDUBOTICS_IMAGE_TAG env > docker/versions.env > latest).
+    # It is MANAGED so a stale hand-pinned tag is superseded on the next
+    # regenerate instead of silently redirecting compose: a leftover
+    # validation-only IMAGE_TAG=collision-validate in the preserved block
+    # broke "Umgebung starten" with "manifest unknown" on 2026-06-05 after
+    # an installer upgrade had wiped the local image it pointed at.
+    "IMAGE_TAG",
     # CAMERA_DEVICE_N / CAMERA_NAME_N are handled by prefix-match below
     # because the count varies with how many cameras are connected.
 })
@@ -253,6 +261,11 @@ def generate_env_file(config: HardwareConfig, output_path: str = ENV_FILE) -> st
 
     lines.append(f"ROS_DOMAIN_ID={domain_id}")
     lines.append(f"REGISTRY={REGISTRY}")
+    # Pin compose to the image build this GUI ships with. docker-compose.yml
+    # resolves ${IMAGE_TAG:-latest} from this file (--env-file); without the
+    # line, compose silently runs :latest — drifting past the installer's
+    # pinned tag AND re-downloading ~9 GB the installer already pulled.
+    lines.append(f"IMAGE_TAG={IMAGE_TAG}")
     # Default camera source. Yields to an operator override already present in
     # the preserved (unmanaged) lines, so EDUBOTICS_CAMERA_SOURCE=usb_cam in a
     # hand-edited .env survives regeneration (one-variable rollback).
@@ -289,6 +302,7 @@ def generate_cloud_only_env(output_path: str = ENV_FILE) -> str:
         'CAMERA_NAME_2="scene"',
         f"ROS_DOMAIN_ID={domain_id}",
         f"REGISTRY={REGISTRY}",
+        f"IMAGE_TAG={IMAGE_TAG}",
     ]
     from .constants import cameras_use_native_bridge
     if cameras_use_native_bridge() and not _has_camera_source(preserved):

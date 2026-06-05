@@ -44,9 +44,11 @@
 #     and clear /collision_flag + publish phase=READY only after the resync completes.
 #
 # Inference safety (Rule §2): the detector is gated off when self.on_inference is True, AND
-# structurally the leader broadcaster (the only consumer of /collision_flag) does not run the
-# inference action path (inference publishes JointTrajectory directly), so the guard is doubly
-# invisible to inference and never reshapes the recorded->replayed action distribution.
+# structurally the /collision_flag consumers (the leader's trajectory broadcaster and the
+# leader's gravity-compensation controller — both leader-side, stock upstream subscriptions)
+# do not run the inference action path (inference publishes JointTrajectory directly), so the
+# guard is doubly invisible to inference and never reshapes the recorded->replayed action
+# distribution.
 
 import os
 

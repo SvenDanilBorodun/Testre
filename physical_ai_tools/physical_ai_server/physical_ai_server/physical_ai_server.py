@@ -998,12 +998,15 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 response.success = success
                 response.message = message
 
-            elif request.command == SendCommand.Request.RESUME_TELEOP:
+            elif request.command == getattr(SendCommand.Request, 'RESUME_TELEOP', 8):
                 # EduBotics teleop collision e-stop STEP 2: resync the follower to the leader
                 # and resume (refused until the follower reached home — strict ordering).
                 # Handled here (not under the "currently recording" guard below) because a
                 # collision sets on_recording=False, so the system is idle when the student
                 # clicks "Teleoperation fortsetzen".
+                # getattr fallback mirrors HOME_FOLLOWER above: with pre-rebuild compiled
+                # interfaces a bare attribute access would raise AttributeError and break
+                # /task/command for EVERY command, not just this one.
                 success, message = self.resume_teleop()
                 response.success = success
                 response.message = message

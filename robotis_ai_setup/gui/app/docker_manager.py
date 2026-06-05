@@ -477,13 +477,14 @@ def check_for_updates(log=None) -> bool:
          would otherwise burn ~12 min before giving up on a classroom
          without internet. Logged in German so the operator sees we
          intentionally skipped, not silently failed.
-      2. **Manifest-digest pre-check** (``_get_remote_manifest_digest`` vs
+      2. **Manifest-digest pre-check** (``_get_remote_digest_candidates`` vs
          ``_get_local_repo_digest``): for each image, fetch the registry's
-         linux/amd64 manifest digest (single HEAD request, no layers) and
-         compare to the locally-cached RepoDigest. Match → skip the pull
-         entirely (logs "bereits aktuell"). Mismatch / unknown → fall
-         through to a real pull. Cuts the "all-images-up-to-date" path
-         from ~30 s of docker-pull round-trips to ~3 s of HEAD requests.
+         digest candidate set (manifest-list digest + per-platform child
+         digests; one round-trip, no layers) and check the locally-cached
+         RepoDigest for membership. Match → skip the pull entirely (logs
+         "bereits aktuell"). No match / unknown → fall through to a real
+         pull. Cuts the "all-images-up-to-date" path from ~30 s of
+         docker-pull round-trips to ~3 s of HEAD requests.
       3. **Last-pull persistence** (``_save_last_pull_info``): on a
          successful check (any combination of pulls + skips that ended
          without a hard failure), record the per-image digests and a

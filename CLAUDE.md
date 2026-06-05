@@ -2,6 +2,13 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Recent changes — v2.6.1 (2026-06-05)
+
+* **Compose image pinning finally bridged into the GUI-managed `.env` (`2da5b22`).** Nothing ever wrote `IMAGE_TAG` into the `--env-file` compose reads — clean installs silently ran `:latest` (re-downloading ~9 GB the installer had already pulled pinned, drifting past the .exe), and a stale hand-pinned tag from a validation session survived `.env` regeneration forever (broke „Umgebung starten" with `manifest unknown` on the reference rig after the 2.6.0 upgrade wiped the local image). `IMAGE_TAG` is now a MANAGED key — see the dedicated bullet under "Critical architectural choices".
+* **Installer upgrades no longer destroy the distro + Docker volumes (`537bb36`).** `import_edubotics_wsl.ps1` used to `wsl --unregister` unconditionally on every upgrade (datasets/HF cache/calibration gone). Now gated on `wsl_rootfs/ROOTFS_VERSION` (baked into the rootfs as `/etc/edubotics-rootfs-version`; tarball sha can't gate — CI rebuilds it non-reproducibly every release) with a German consent MsgBox when a real re-import is needed; `-Force` restores the old behavior. New CI job `rootfs-version-guard` fails any `wsl_rootfs/` change without a version bump. Distros from ≤2.6.0 installers have no marker → their FIRST 2.6.1 upgrade still re-imports (with consent) — release notes warn students to upload datasets first.
+* **Auto-pull digest pre-check actually fires now.** Layer 2 of the 2.2.4 hardening compared the remote amd64 CHILD manifest digest against the local RepoDigest (the manifest-LIST digest for buildx pushes) — never equal, so every GUI launch logged a false „Update verfügbar" and did a no-op pull. `_get_remote_digest_candidates()` (buildx imagetools, legacy probe as fallback) returns both shapes; comparison is set membership.
+* Smaller: `RESUME_TELEOP` dispatch got the same getattr fallback as `HOME_FOLLOWER` (a bare attribute under pre-rebuild compiled interfaces broke ALL of `/task/command`); `/collision_flag` consumer list corrected (leader broadcaster + leader gravity-compensation controller); `.env.template` refreshed to current reality; canonical Docker tag set documented correctly (`X.Y.Z`, no `v` prefix).
+
 ## Recent changes — v2.6.0 (2026-06-04)
 
 * **Teleop force/collision e-stop, student-paced two-step recovery (the ONE sanctioned Rule §2 software guard).** During teleop/recording, pressing the follower against an object trips a per-joint over-force detector → the follower freezes + relaxes in place (NO auto-home) → React modal Schritt 1 „Hindernis entfernen + Follower in Grundstellung fahren" (`SendCommand.HOME_FOLLOWER=9`, verified glide) → Schritt 2 „Leader angleichen + Teleoperation fortsetzen" (`RESUME_TELEOP=8`, strictly refused until homed). Gated OFF during inference. Hardware-validated 2026-06-04 (7 live cycles). Full mechanics under "Critical architectural choices"; first shipped attempt (`96f5ee0`, in `:latest` until v2.6.0) **bricked the follower** — see the entry for the five on-rig findings.
@@ -259,6 +266,8 @@ W1 supabase-migrate ──► W2 railway-deploy-cloud-api ──► W3 railway-d
 
 For partial changes, push to `main` with changes scoped to one surface and that surface's path-filtered workflow fires by itself. For coordinated whole-stack releases, `git tag vX.Y.Z && git push --tags` runs the full chain via `release.yml`. W5 was previously a standalone `push.tags`-triggered workflow that raced W4 (installer attached to GH Release before Docker images existed → first-boot 404). Since `16b8378` it's `workflow_call`-only, invoked after W4 success.
 
+**Before every tag: prove the installer builds.** Trigger `release-installer.yml` via workflow_dispatch (GitHub → Actions → release-installer → Run workflow; set `version_tag` to the PREVIOUS release, e.g. `v2.6.0`, so the baked `versions.env` points at images that already exist on Docker Hub) and confirm the .exe artifact builds — the `.iss` Pascal `[Code]` section has no other compile check anywhere in CI. For releases touching the upgrade path (installer scripts, `wsl_rootfs/`), additionally install the artifact TWICE on a dev rig: the first install over an existing distro must show the German consent dialog and re-import; the second install of the same build must log „Import übersprungen" and preserve the Docker volumes (plant a marker file in `huggingface_cache` to prove it).
+
 **One-time operator setup** (after merging this PR):
 
 1. Mint these 12 GHA secrets (Settings → Secrets and variables → Actions): `DOCKERHUB_USERNAME`, `DOCKERHUB_TOKEN`, `RAILWAY_TOKEN`, `MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET`, `SUPABASE_ACCESS_TOKEN`, `SUPABASE_DB_URL`, `SUPABASE_PROJECT_REF`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_ANON_KEY`, `REACT_APP_CLOUD_API_URL`.
@@ -289,7 +298,7 @@ python scripts/bootstrap_admin.py --username admin --full-name "Sven"
 
 Two layers — `ci.yml` (validators) and the five deploy workflows.
 
-### `.github/workflows/ci.yml` — 10 validator jobs on every push/PR to `main`
+### `.github/workflows/ci.yml` — 14 validator jobs on every push/PR to `main`
 
 - **python-tests** — `compileall` of all Python dirs, plus unittest discover in `tests/` and `cloud_training_api/app/tests/`
 - **shell-lint** — shellcheck `-S error` on all shipped shell scripts
@@ -301,13 +310,17 @@ Two layers — `ci.yml` (validators) and the five deploy workflows.
 - **tutorials-validate** — JSON-parses `physical_ai_manager/public/tutorials/*.json`, cross-checks `allowed_blocks` against runtime dispatch (`STATEMENT_HANDLERS` + `VALUE_EVALUATORS` keys in `physical_ai_tools/physical_ai_server/physical_ai_server/workflow/handlers/__init__.py`, `HAT_BLOCK_TYPES` in `…/workflow/interpreter.py`, plus Blockly built-ins)
 - **interfaces-validate** — verifies every `.srv` has exactly one `---`; cross-checks `CMakeLists.txt` against on-disk files
 - **nginx-validate** — `envsubst $PORT` on `nginx.web.conf.template` then `nginx -t` on both configs
+- **env-forwarding-guard** — every `EDUBOTICS_*` env var read by `entrypoint_omx.sh`, `start-dockerd.sh`, `camera_ingest_node.py`, or any overlay `.py` must appear in a compose `environment:` list (full rationale under "Critical architectural choices")
+- **powershell-encoding** — every shipped `.ps1` must carry a UTF-8 BOM (Windows PowerShell 5.1 on German Windows decodes BOM-less files as CP1252 → parser mojibake; broke the v2.3.4 usbipd-repair flow)
+- **german-strings-lint** — rejects ae/oe/ue transliterations inside `[FEHLER]`/`[WARNUNG]`/`[STOPP]` student-facing lines (Rule §1 mandates literal ä/ö/ü/ß)
+- **rootfs-version-guard** — fails any `wsl_rootfs/` change that doesn't bump `ROOTFS_VERSION` (the installer upgrade gate would otherwise silently skip shipping the changed rootfs; added 2026-06-05 with the volume-wipe fix)
 
 ### Deploy workflows (path-scoped + tag-triggered)
 
 - **`supabase-migrate.yml`** — applies `robotis_ai_setup/supabase/migrations/*.sql` to production via `supabase db push`. PRs that touch this path get an ephemeral Supabase Branch with a fingerprint probe; merge to `main` applies to production and probes the Railway `/health` endpoint as a post-apply gate.
 - **`railway-deploy-cloud-api.yml`** — runs the import-time schema-probe (read-only) against production Supabase, then `railway up`, then polls `/health` to 200.
 - **`railway-deploy-teacher-web.yml`** — same Dockerfile.web build CI validates, then `scripts/railway-deploy.sh` (`--service teacher-web`), then polls `/version.json` to 200.
-- **`docker-publish.yml`** — refuses on dirty tree; checks upstream base digests via `bump-upstream-digests.sh`; builds amd64 + arm64 in a matrix via `build-images.sh` (`--no-cache --pull`); applies the canonical tag set (`<sha>`, `<sha>-short`, `:latest` on main, `:vX.Y.Z` + `:vX.Y` on tags); pulls + greps each published image to verify build-args reached the bundle.
+- **`docker-publish.yml`** — refuses on dirty tree; checks upstream base digests via `bump-upstream-digests.sh`; builds amd64 + arm64 in a matrix via `build-images.sh` (`--no-cache --pull`); applies the canonical tag set (`<sha>`, `<sha>-short`, `:latest` on main, `:X.Y.Z` + `:X.Y` on tags — **no `v` prefix**, matching versions.env's `IMAGE_TAG`); pulls + greps each published image to verify build-args reached the bundle.
 - **`release.yml`** — top-level dispatcher; on tag push fires W1→W4 in the golden order via `needs:` edges.
 
 **Modal is manual** — see Rule §6 above. Run `modal deploy modal_app.py vision_app.py` from your terminal BEFORE pushing a tag if the release touches Modal.

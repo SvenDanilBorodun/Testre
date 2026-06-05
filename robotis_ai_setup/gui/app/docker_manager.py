@@ -15,6 +15,7 @@ Handles:
 import atexit
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -349,6 +350,53 @@ def _get_remote_manifest_digest(
     return None
 
 
+_DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
+
+
+def _parse_digest_candidates(text: str) -> set:
+    """Extract every sha256 digest mentioned in ``docker buildx imagetools
+    inspect`` output. The set contains the manifest-LIST digest (the
+    "Digest:" header — what RepoDigests records for an image pulled by tag
+    from a buildx push) AND every per-platform child manifest digest, so a
+    local RepoDigest of either shape can match.
+    """
+    return set(_DIGEST_RE.findall(text or ""))
+
+
+def _get_remote_digest_candidates(
+    image: str,
+    timeout: int = MANIFEST_INSPECT_TIMEOUT,
+) -> set:
+    """Return the set of registry-side digests that count as "local image is
+    current" for ``image`` — empty set on any error.
+
+    Primary probe: ``docker buildx imagetools inspect`` (one registry
+    round-trip, no layer downloads; buildx ships in the EduBotics rootfs).
+    Its output names BOTH the manifest-list digest and the per-platform
+    child digests. This matters: the local RepoDigest of a buildx-pushed
+    image is the LIST digest, while the legacy probe
+    (`_get_remote_manifest_digest`, kept as fallback) returns the amd64
+    CHILD digest — the old equality comparison therefore never matched,
+    layer 2 of the 2.2.4 hardening silently never fired, and every GUI
+    launch logged "Update verfügbar" + did a no-op pull (fixed 2026-06-05).
+    """
+    try:
+        result = subprocess.run(
+            _docker_cmd("buildx", "imagetools", "inspect", image),
+            capture_output=True, text=True, timeout=timeout,
+            **_SUBPROCESS_KWARGS,
+        )
+        if result.returncode == 0:
+            candidates = _parse_digest_candidates(result.stdout)
+            if candidates:
+                return candidates
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+    # Fallback: the legacy single-digest probe (amd64 child manifest digest).
+    digest = _get_remote_manifest_digest(image, timeout=timeout)
+    return {digest} if digest else set()
+
+
 def _load_last_pull_info() -> Optional[dict]:
     """Read the persisted last-pull state. Returns ``None`` if no file exists
     or the file is unreadable (treat as 'never pulled')."""
@@ -471,15 +519,16 @@ def check_for_updates(log=None) -> bool:
         short = image.split("/")[-1]
 
         local_digest = _get_local_repo_digest(image)
-        remote_digest = _get_remote_manifest_digest(image)
+        remote_candidates = _get_remote_digest_candidates(image)
 
         # Layer 2: digest pre-check. Saves the per-image docker-pull
-        # round-trip when local already matches remote.
-        if (
-            local_digest is not None
-            and remote_digest is not None
-            and local_digest == remote_digest
-        ):
+        # round-trip when local already matches remote. Membership (not
+        # equality against one digest): the local RepoDigest is the
+        # manifest-LIST digest for buildx-pushed images, the old probe
+        # returned the amd64 CHILD digest — a fixed pair never matched, so
+        # this layer was silently dead (every launch: "Update verfügbar" +
+        # no-op pull). The candidate set contains both shapes.
+        if local_digest is not None and local_digest in remote_candidates:
             if log:
                 log(f"  [{i+1}/{total}] {short}: bereits aktuell ({local_digest[7:19]}).")
             pulled_digests[image] = local_digest
@@ -491,7 +540,7 @@ def check_for_updates(log=None) -> bool:
         if log:
             reason = (
                 "lokal nicht vorhanden" if local_digest is None
-                else "Update verfügbar" if remote_digest is not None
+                else "Update verfügbar" if remote_candidates
                 else "Manifest-Probe fehlgeschlagen"
             )
             log(f"  [{i+1}/{total}] {short}: {reason}, ziehe...")
@@ -520,7 +569,9 @@ def check_for_updates(log=None) -> bool:
             continue
 
         # Pull succeeded — record the new digest for last-pull state.
-        new_digest = _get_local_repo_digest(image) or remote_digest
+        new_digest = _get_local_repo_digest(image) or (
+            sorted(remote_candidates)[0] if remote_candidates else None
+        )
         pulled_digests[image] = new_digest
 
         try:

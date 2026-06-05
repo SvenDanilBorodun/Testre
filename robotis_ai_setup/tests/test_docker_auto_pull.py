@@ -140,6 +140,75 @@ class TestRemoteManifestDigest(unittest.TestCase):
         self.assertIsNone(docker_manager._get_remote_manifest_digest("any:latest"))
 
 
+class TestDigestCandidates(unittest.TestCase):
+    """The 2026-06-05 fix: layer 2 compares the local RepoDigest against a
+    SET of registry digests (manifest-list digest + per-platform children),
+    because the list-vs-child mismatch made the old single-digest equality
+    check never fire (every GUI launch: false "Update verfügbar" + no-op
+    pull)."""
+
+    _IMAGETOOLS_SAMPLE = (
+        "Name:      docker.io/nettername/physical-ai-server:2.6.0\n"
+        "MediaType: application/vnd.oci.image.index.v1+json\n"
+        "Digest:    sha256:"
+        + "a" * 64
+        + "\n\n"
+        "Manifests:\n"
+        "  Name:        docker.io/nettername/physical-ai-server:2.6.0@sha256:"
+        + "b" * 64
+        + "\n"
+        "  MediaType:   application/vnd.oci.image.manifest.v1+json\n"
+        "  Platform:    linux/amd64\n"
+    )
+
+    def test_parse_extracts_list_and_child_digests(self):
+        from gui.app.docker_manager import _parse_digest_candidates
+        candidates = _parse_digest_candidates(self._IMAGETOOLS_SAMPLE)
+        self.assertIn("sha256:" + "a" * 64, candidates)  # list digest
+        self.assertIn("sha256:" + "b" * 64, candidates)  # amd64 child
+        self.assertEqual(len(candidates), 2)
+
+    def test_parse_empty_and_garbage(self):
+        from gui.app.docker_manager import _parse_digest_candidates
+        self.assertEqual(_parse_digest_candidates(""), set())
+        self.assertEqual(_parse_digest_candidates(None), set())
+        self.assertEqual(_parse_digest_candidates("sha256:tooshort"), set())
+
+    @patch("gui.app.docker_manager.subprocess.run")
+    def test_local_list_digest_matches_candidates(self, mock_run):
+        # THE regression: RepoDigest == manifest-list digest must count as
+        # current even though the legacy probe would have returned the
+        # (different) amd64 child digest.
+        mock_run.return_value = MagicMock(
+            returncode=0, stdout=self._IMAGETOOLS_SAMPLE
+        )
+        candidates = docker_manager._get_remote_digest_candidates("any:tag")
+        self.assertIn("sha256:" + "a" * 64, candidates)
+
+    @patch(
+        "gui.app.docker_manager._get_remote_manifest_digest",
+        return_value="sha256:" + "c" * 64,
+    )
+    @patch("gui.app.docker_manager.subprocess.run")
+    def test_falls_back_to_legacy_probe_when_buildx_fails(
+        self, mock_run, _legacy
+    ):
+        mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="no buildx")
+        candidates = docker_manager._get_remote_digest_candidates("any:tag")
+        self.assertEqual(candidates, {"sha256:" + "c" * 64})
+
+    @patch(
+        "gui.app.docker_manager._get_remote_manifest_digest",
+        return_value=None,
+    )
+    @patch("gui.app.docker_manager.subprocess.run")
+    def test_returns_empty_set_when_everything_fails(self, mock_run, _legacy):
+        mock_run.return_value = MagicMock(returncode=1, stdout="")
+        self.assertEqual(
+            docker_manager._get_remote_digest_candidates("any:tag"), set()
+        )
+
+
 class TestLastPullPersistence(unittest.TestCase):
     """Layer 3: persist + load + expose freshness for the GUI banner."""
 
@@ -239,8 +308,8 @@ class TestCheckForUpdatesOrchestration(unittest.TestCase):
     @patch("gui.app.docker_manager._save_last_pull_info")
     @patch("gui.app.docker_manager._pull_one_image")
     @patch(
-        "gui.app.docker_manager._get_remote_manifest_digest",
-        return_value="sha256:samedigestforall",
+        "gui.app.docker_manager._get_remote_digest_candidates",
+        return_value={"sha256:samedigestforall"},
     )
     @patch(
         "gui.app.docker_manager._get_local_repo_digest",
@@ -263,8 +332,8 @@ class TestCheckForUpdatesOrchestration(unittest.TestCase):
     @patch("gui.app.docker_manager._save_last_pull_info")
     @patch("gui.app.docker_manager._pull_one_image", return_value=True)
     @patch(
-        "gui.app.docker_manager._get_remote_manifest_digest",
-        return_value="sha256:newremoteversion",
+        "gui.app.docker_manager._get_remote_digest_candidates",
+        return_value={"sha256:newremoteversion"},
     )
     @patch(
         "gui.app.docker_manager._get_local_repo_digest",

@@ -98,6 +98,42 @@ jobs:
             robotis_ai_setup/jetson_agent/setup.sh \
             physical_ai_tools/physical_ai_manager/scripts/railway-deploy.sh
 
+  rootfs-version-guard:
+    # The installer's upgrade gate (import_edubotics_wsl.ps1 +
+    # robotis_ai_setup.iss::ShouldImportDistro, 2026-06-05) skips the
+    # destructive distro re-import when wsl_rootfs/ROOTFS_VERSION matches
+    # the marker baked into the existing distro. A rootfs change shipped
+    # WITHOUT a version bump would therefore never install on upgrades —
+    # the inverse failure of the silent-volume-wipe bug the gate fixed.
+    # Fail any change under wsl_rootfs/ that doesn't touch ROOTFS_VERSION.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          fetch-depth: 0
+      - name: Assert ROOTFS_VERSION bumped when wsl_rootfs/ changes
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE="${{ github.event.pull_request.base.sha }}"
+          else
+            BASE="${{ github.event.before }}"
+          fi
+          # First push to a branch / rewritten history: fall back to the
+          # parent commit, or the empty tree for a single-commit repo.
+          if [ -z "$BASE" ] || ! git cat-file -e "$BASE" 2>/dev/null; then
+            BASE="$(git rev-parse HEAD~1 2>/dev/null || git hash-object -t tree /dev/null)"
+          fi
+          CHANGED="$(git diff --name-only "$BASE" HEAD -- robotis_ai_setup/wsl_rootfs/ | grep -v 'ROOTFS_VERSION$' || true)"
+          BUMPED="$(git diff --name-only "$BASE" HEAD -- robotis_ai_setup/wsl_rootfs/ROOTFS_VERSION || true)"
+          if [ -n "$CHANGED" ] && [ -z "$BUMPED" ]; then
+            echo "::error::wsl_rootfs/ changed without bumping ROOTFS_VERSION — the installer upgrade gate would skip shipping the new rootfs:"
+            echo "$CHANGED"
+            exit 1
+          fi
+          echo "rootfs-version-guard OK"
+
   powershell-encoding:
     # Windows PowerShell 5.1 (the default shell on Win10/Win11 used by the
     # installer's [Run] steps) decodes .ps1 files using the system code page

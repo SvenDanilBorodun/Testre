@@ -5,16 +5,22 @@
 # Reads wsl_rootfs/edubotics-rootfs.tar.gz shipped inside {app}, imports it as
 # a WSL2 distro named "EduBotics", and waits for dockerd to come up.
 #
-# Safe to re-run: on upgrades, the existing distro is unregistered first so the
-# fresh rootfs replaces it (named volumes live inside the distro, so this is a
-# one-time re-pull on upgrade — documented in release notes).
+# Safe to re-run. Upgrade behavior (2026-06-05): when the existing distro's
+# baked rootfs version (/etc/edubotics-rootfs-version) matches the shipped
+# wsl_rootfs/ROOTFS_VERSION, the import is SKIPPED and the distro — including
+# its Docker volumes (datasets, HF cache, calibration) — is preserved. Only a
+# genuine rootfs change (or -Force) unregisters and re-imports, which destroys
+# the named volumes (the installer UI asks for consent first).
 #
 # Must run elevated (as Administrator).
 
 param(
     [string]$DistroName   = "EduBotics",
     [string]$InstallRoot  = "$env:ProgramData\EduBotics\wsl",
-    [string]$RootfsPath   = ""  # resolved below if empty
+    [string]$RootfsPath   = "",  # resolved below if empty
+    # Restore the pre-2026-06 unconditional unregister+re-import (manual
+    # recovery from a corrupted distro; DESTROYS the Docker volumes).
+    [switch]$Force
 )
 
 $ErrorActionPreference = "Stop"
@@ -56,7 +62,28 @@ if (-not (Test-Path $RootfsPath)) {
 $sizeMB = [math]::Round((Get-Item $RootfsPath).Length / 1MB, 1)
 Write-OK "Rootfs: $RootfsPath ($sizeMB MB)"
 
-# Unregister any existing EduBotics distro (upgrade path)
+# Rootfs upgrade gate (2026-06-05). The unconditional unregister+re-import on
+# every upgrade silently DESTROYED the distro's Docker volumes (recorded
+# datasets, HF cache, Roboter-Studio calibration). build_rootfs.sh now bakes
+# wsl_rootfs/ROOTFS_VERSION into /etc/edubotics-rootfs-version; when the
+# existing distro carries the SAME stamp as this installer's shipped rootfs,
+# the import is skipped and the student's data survives the upgrade. The
+# installer UI additionally asks for consent before a destructive re-import
+# (robotis_ai_setup.iss::ShouldImportDistro); this script re-checks the gate
+# so manual invocations behave identically. Distros imported by installers
+# <= 2.6.0 have no marker -> gate misses -> one final re-import.
+$shippedVersion = ""
+foreach ($vf in @(
+    (Join-Path (Split-Path -Parent $RootfsPath) "ROOTFS_VERSION"),  # production: next to the tarball
+    (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) "wsl_rootfs\ROOTFS_VERSION")  # dev tree
+)) {
+    if (Test-Path $vf) {
+        try { $shippedVersion = (Get-Content $vf -First 1).Trim() } catch { $shippedVersion = "" }
+        if ($shippedVersion) { break }
+    }
+}
+
+# Detect an existing EduBotics distro (upgrade path)
 Write-Step "Checking for existing EduBotics distro..."
 $existing = $false
 try {
@@ -69,94 +96,129 @@ try {
     }
 } catch { }
 
+$skipImport = $false
 if ($existing) {
-    Write-Host "   Unregistering existing $DistroName (upgrade)..." -ForegroundColor White
-    wsl --unregister $DistroName *>$null
-    if ($LASTEXITCODE -ne 0) {
-        Write-FAIL "Konnte existierenden Distro nicht entfernen."
-        exit 1
+    $distroVersion = ""
+    if (-not $Force -and $shippedVersion) {
+        try {
+            $distroVersion = ((wsl -d $DistroName -- cat /etc/edubotics-rootfs-version 2>&1 | Out-String) -replace "`0", "").Trim()
+            if ($LASTEXITCODE -ne 0) { $distroVersion = "" }
+        } catch { $distroVersion = "" }
     }
-    Write-OK "Existing distro removed"
-}
-
-# Ensure install root exists
-if (-not (Test-Path $InstallRoot)) {
-    New-Item -ItemType Directory -Path $InstallRoot -Force | Out-Null
-}
-
-Write-Step "Importing $DistroName (can take 1-3 minutes)..."
-
-# Disk-space preflight. `wsl --import` is not atomic: if it runs out of
-# space mid-copy, it leaves a corrupt VHDX and a subsequent re-run tries
-# to import over broken state. 20 GB gives dockerd + the 3 images + some
-# working room.
-try {
-    $drive = ([System.IO.DirectoryInfo]$InstallRoot).Root.FullName.TrimEnd('\').TrimEnd(':')
-    $vol = Get-Volume -DriveLetter $drive -ErrorAction Stop
-    $freeGb = [math]::Round($vol.SizeRemaining / 1GB, 1)
-    if ($freeGb -lt 20) {
-        Write-FAIL "Nicht genug Speicher auf Laufwerk $drive`: ${freeGb} GB frei, 20 GB werden benoetigt."
-        Write-Host "   Bitte Speicher freigeben und Installation erneut starten." -ForegroundColor Red
-        exit 1
+    if ($distroVersion -and ($distroVersion -eq $shippedVersion)) {
+        Write-OK "Vorhandene EduBotics-Umgebung ist aktuell (Rootfs-Version $shippedVersion) — Import übersprungen."
+        Write-Host "   Lokale Daten (Datensätze, Modelle, Kalibrierung) bleiben erhalten." -ForegroundColor Green
+        $skipImport = $true
+    } else {
+        if ($Force) {
+            Write-Host "   Re-Import erzwungen (-Force)." -ForegroundColor White
+        } else {
+            Write-Host "   Rootfs-Version unterschiedlich (vorhanden: '$distroVersion', neu: '$shippedVersion')." -ForegroundColor White
+        }
+        Write-Host "   Unregistering existing $DistroName (upgrade)..." -ForegroundColor White
+        wsl --unregister $DistroName *>$null
+        if ($LASTEXITCODE -ne 0) {
+            Write-FAIL "Konnte existierenden Distro nicht entfernen."
+            exit 1
+        }
+        Write-OK "Existing distro removed"
     }
-} catch {
-    Write-Host "   (Speicherplatz-Prüfung übersprungen: $_)" -ForegroundColor Yellow
 }
 
-# SHA256 integrity check on the rootfs tar. If a matching .sha256 file
-# ships alongside, verify it before wasting 1-3 minutes on `wsl --import`
-# of a corrupted/swapped tarball.
-#
-# Audit H22: the sidecar verify used to be fail-SOFT — a yellow warning
-# on read error and the import proceeded. That defeats the entire
-# point of shipping a sidecar (tamper detection). The sidecar IS
-# shipped by build_rootfs.sh, so its absence is suspicious, not a
-# routine state. Hard-fail on read or parse error.
-$sha256File = "$RootfsPath.sha256"
-if (Test-Path $sha256File) {
-    $expectedLine = $null
+if (-not $skipImport) {
+    # Ensure install root exists
+    if (-not (Test-Path $InstallRoot)) {
+        New-Item -ItemType Directory -Path $InstallRoot -Force | Out-Null
+    }
+
+    Write-Step "Importing $DistroName (can take 1-3 minutes)..."
+
+    # Disk-space preflight. `wsl --import` is not atomic: if it runs out of
+    # space mid-copy, it leaves a corrupt VHDX and a subsequent re-run tries
+    # to import over broken state. 20 GB gives dockerd + the 3 images + some
+    # working room.
     try {
-        $expectedLine = (Get-Content $sha256File -First 1).Trim()
+        $drive = ([System.IO.DirectoryInfo]$InstallRoot).Root.FullName.TrimEnd('\').TrimEnd(':')
+        $vol = Get-Volume -DriveLetter $drive -ErrorAction Stop
+        $freeGb = [math]::Round($vol.SizeRemaining / 1GB, 1)
+        if ($freeGb -lt 20) {
+            Write-FAIL "Nicht genug Speicher auf Laufwerk $drive`: ${freeGb} GB frei, 20 GB werden benoetigt."
+            Write-Host "   Bitte Speicher freigeben und Installation erneut starten." -ForegroundColor Red
+            exit 1
+        }
     } catch {
-        Write-FAIL "SHA256-Sidecar konnte nicht gelesen werden: $_"
-        Write-Host "   Die Datei $sha256File ist beschädigt oder gesperrt." -ForegroundColor Red
-        exit 1
+        Write-Host "   (Speicherplatz-Prüfung übersprungen: $_)" -ForegroundColor Yellow
     }
-    if (-not $expectedLine) {
-        Write-FAIL "SHA256-Sidecar ist leer: $sha256File"
-        exit 1
-    }
-    $expected = ($expectedLine -split '\s+')[0].ToUpper()
-    if (-not $expected -or $expected.Length -ne 64) {
-        Write-FAIL "SHA256-Sidecar enthält keinen gültigen 64-stelligen Hash."
-        exit 1
-    }
-    $actual = (Get-FileHash -Path $RootfsPath -Algorithm SHA256).Hash.ToUpper()
-    if ($expected -ne $actual) {
-        Write-FAIL "Rootfs SHA256 passt nicht: expected=$expected actual=$actual"
-        Write-Host "   Die Installer-Datei könnte beschädigt oder manipuliert sein." -ForegroundColor Red
-        exit 1
-    }
-    Write-OK "Rootfs SHA256 verified"
-} else {
-    # No sidecar at all — log a warning but allow (older installers
-    # may legitimately ship without one). build_rootfs.sh always
-    # generates the sidecar, so a missing one in a fresh build is
-    # the suspicious case; an old release shipped to upgrade is fine.
-    Write-Host "   (kein SHA256-Sidecar gefunden: $sha256File)" -ForegroundColor Yellow
-}
 
-wsl --import $DistroName $InstallRoot $RootfsPath --version 2
-if ($LASTEXITCODE -ne 0) {
-    Write-FAIL "wsl --import fehlgeschlagen (exit $LASTEXITCODE)"
-    Write-Host "   Prüfen Sie: Antivirus-Ausnahme, genug Speicherplatz, WSL2 aktiviert." -ForegroundColor Red
-    # Clean up partial VHDX to prevent "import over broken state" on retry.
-    if (Test-Path $InstallRoot) {
-        try { Remove-Item -Path (Join-Path $InstallRoot 'ext4.vhdx') -Force -ErrorAction SilentlyContinue } catch {}
+    # SHA256 integrity check on the rootfs tar. If a matching .sha256 file
+    # ships alongside, verify it before wasting 1-3 minutes on `wsl --import`
+    # of a corrupted/swapped tarball.
+    #
+    # Audit H22: the sidecar verify used to be fail-SOFT — a yellow warning
+    # on read error and the import proceeded. That defeats the entire
+    # point of shipping a sidecar (tamper detection). The sidecar IS
+    # shipped by build_rootfs.sh, so its absence is suspicious, not a
+    # routine state. Hard-fail on read or parse error.
+    $sha256File = "$RootfsPath.sha256"
+    if (Test-Path $sha256File) {
+        $expectedLine = $null
+        try {
+            $expectedLine = (Get-Content $sha256File -First 1).Trim()
+        } catch {
+            Write-FAIL "SHA256-Sidecar konnte nicht gelesen werden: $_"
+            Write-Host "   Die Datei $sha256File ist beschädigt oder gesperrt." -ForegroundColor Red
+            exit 1
+        }
+        if (-not $expectedLine) {
+            Write-FAIL "SHA256-Sidecar ist leer: $sha256File"
+            exit 1
+        }
+        $expected = ($expectedLine -split '\s+')[0].ToUpper()
+        if (-not $expected -or $expected.Length -ne 64) {
+            Write-FAIL "SHA256-Sidecar enthält keinen gültigen 64-stelligen Hash."
+            exit 1
+        }
+        $actual = (Get-FileHash -Path $RootfsPath -Algorithm SHA256).Hash.ToUpper()
+        if ($expected -ne $actual) {
+            Write-FAIL "Rootfs SHA256 passt nicht: expected=$expected actual=$actual"
+            Write-Host "   Die Installer-Datei könnte beschädigt oder manipuliert sein." -ForegroundColor Red
+            exit 1
+        }
+        Write-OK "Rootfs SHA256 verified"
+    } else {
+        # No sidecar at all — log a warning but allow (older installers
+        # may legitimately ship without one). build_rootfs.sh always
+        # generates the sidecar, so a missing one in a fresh build is
+        # the suspicious case; an old release shipped to upgrade is fine.
+        Write-Host "   (kein SHA256-Sidecar gefunden: $sha256File)" -ForegroundColor Yellow
     }
-    exit 1
+
+    wsl --import $DistroName $InstallRoot $RootfsPath --version 2
+    if ($LASTEXITCODE -ne 0) {
+        Write-FAIL "wsl --import fehlgeschlagen (exit $LASTEXITCODE)"
+        Write-Host "   Prüfen Sie: Antivirus-Ausnahme, genug Speicherplatz, WSL2 aktiviert." -ForegroundColor Red
+        # Clean up partial VHDX to prevent "import over broken state" on retry.
+        if (Test-Path $InstallRoot) {
+            try { Remove-Item -Path (Join-Path $InstallRoot 'ext4.vhdx') -Force -ErrorAction SilentlyContinue } catch {}
+        }
+        exit 1
+    }
+    Write-OK "Distro imported"
+
+    # Read back the baked version marker so the NEXT upgrade can skip. A
+    # missing marker (rootfs built before the stamp existed, or an unstamped
+    # dev build) is only a warning — that upgrade will re-import once more.
+    try {
+        $markerVer = ((wsl -d $DistroName -- cat /etc/edubotics-rootfs-version 2>&1 | Out-String) -replace "`0", "").Trim()
+        if ($LASTEXITCODE -eq 0 -and $markerVer) {
+            Write-OK "Rootfs-Versionsstempel: $markerVer"
+        } else {
+            Write-Warn "Rootfs ohne Versionsstempel (Dev-Build?) — das nächste Upgrade importiert erneut."
+        }
+    } catch {
+        Write-Warn "Rootfs-Versionsstempel konnte nicht gelesen werden."
+    }
 }
-Write-OK "Distro imported"
 
 # Boot the distro (triggers systemd via wsl.conf) and wait for dockerd
 Write-Step "Starting EduBotics-Umgebung..."

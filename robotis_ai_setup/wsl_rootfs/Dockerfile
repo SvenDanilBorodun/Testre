@@ -108,6 +108,18 @@ RUN chmod +x /usr/local/bin/start-dockerd.sh
 # re-running the setup wizard.
 COPY 99-edubotics.rules /etc/udev/rules.d/99-edubotics.rules
 
+# Rootfs generation stamp — read back by the installer's upgrade gate
+# (import_edubotics_wsl.ps1 + robotis_ai_setup.iss::ShouldImportDistro) to
+# skip the distro re-import (and the Docker-volume wipe that comes with it:
+# recorded datasets, HF cache, Roboter-Studio calibration) when the shipped
+# rootfs is unchanged. build_rootfs.sh injects the value from
+# wsl_rootfs/ROOTFS_VERSION; the default 0 marks an unstamped dev build and
+# never matches a shipped version, failing toward re-import. Bump
+# wsl_rootfs/ROOTFS_VERSION whenever ANY rootfs build input changes (this
+# Dockerfile, wsl.conf, daemon.json, start-dockerd.sh, 99-edubotics.rules).
+ARG EDUBOTICS_ROOTFS_VERSION=0
+RUN echo "${EDUBOTICS_ROOTFS_VERSION}" > /etc/edubotics-rootfs-version
+
 # Friendly hostname — shows up in wsl --list and inside the shell
 RUN echo "edubotics" > /etc/hostname
 

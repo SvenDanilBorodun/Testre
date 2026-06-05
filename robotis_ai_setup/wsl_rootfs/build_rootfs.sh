@@ -11,14 +11,34 @@ OUT_DIR="${SCRIPT_DIR}/../installer/assets"
 OUT_FILE="${OUT_DIR}/edubotics-rootfs.tar.gz"
 IMAGE_TAG="edubotics-rootfs:latest"
 
+# Rootfs generation stamp, baked into /etc/edubotics-rootfs-version inside
+# the image. The installer's upgrade gate compares it against the shipped
+# wsl_rootfs/ROOTFS_VERSION file to decide whether an upgrade must
+# unregister + re-import the distro (which destroys the student's Docker
+# volumes). The tarball bytes are NOT reproducible across CI builds (apt
+# timestamps), so this explicit stamp — not the tarball sha — is the gate.
+# Bump wsl_rootfs/ROOTFS_VERSION whenever any rootfs build input changes
+# (Dockerfile, wsl.conf, daemon.json, start-dockerd.sh, 99-edubotics.rules).
+if [ ! -f "${SCRIPT_DIR}/ROOTFS_VERSION" ]; then
+    echo "ERROR: ${SCRIPT_DIR}/ROOTFS_VERSION is missing." >&2
+    exit 1
+fi
+ROOTFS_VERSION="$(tr -d '[:space:]' < "${SCRIPT_DIR}/ROOTFS_VERSION")"
+if [ -z "${ROOTFS_VERSION}" ]; then
+    echo "ERROR: ${SCRIPT_DIR}/ROOTFS_VERSION is empty." >&2
+    exit 1
+fi
+
 # WSL2 on Windows always runs amd64. The Dockerfile hardcodes
 # `arch=amd64` in /etc/apt/sources.list.d/docker.list, so building this
 # image as anything other than linux/amd64 breaks at the docker-ce apt
 # install step. On Apple Silicon Macs `docker build` defaults to the
 # host's linux/arm64, so pin --platform explicitly here. On Linux/x86_64
 # build hosts this is a no-op.
-echo ">> Building image ${IMAGE_TAG} for linux/amd64"
-docker build --pull --platform linux/amd64 -t "${IMAGE_TAG}" "${SCRIPT_DIR}"
+echo ">> Building image ${IMAGE_TAG} for linux/amd64 (rootfs version ${ROOTFS_VERSION})"
+docker build --pull --platform linux/amd64 \
+    --build-arg EDUBOTICS_ROOTFS_VERSION="${ROOTFS_VERSION}" \
+    -t "${IMAGE_TAG}" "${SCRIPT_DIR}"
 
 echo ">> Creating temporary container"
 CID="$(docker create --platform linux/amd64 "${IMAGE_TAG}" true)"

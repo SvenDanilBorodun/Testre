@@ -84,6 +84,11 @@ Source: "..\docker\.env.template"; DestDir: "{app}\docker"; Flags: ignoreversion
 ; release-installer.yml before iscc runs; skipped on local dev builds where
 ; the file doesn't exist (readers safely fall back to :latest).
 Source: "..\docker\versions.env"; DestDir: "{app}\docker"; Flags: ignoreversion skipifsourcedoesntexist
+; Rootfs version stamp — ShouldImportDistro (below) + import_edubotics_wsl.ps1
+; compare it against the marker baked into the existing distro
+; (/etc/edubotics-rootfs-version) and SKIP the destructive unregister+re-import
+; when the rootfs is unchanged, preserving the student's Docker volumes.
+Source: "..\wsl_rootfs\ROOTFS_VERSION"; DestDir: "{app}\wsl_rootfs"; Flags: ignoreversion
 ; s6-overlay marker to auto-start ROS2 services (mounted by docker-compose.yml)
 Source: "..\docker\physical_ai_server\.s6-keep"; DestDir: "{app}\docker\physical_ai_server"; Flags: ignoreversion
 
@@ -226,10 +231,80 @@ begin
   Result := FileExists(ExpandConstant('{app}\scripts\.reboot_required'));
 end;
 
-// Import the distro only when WSL2 is fully up (no pending reboot).
-function ShouldImportDistro(): Boolean;
+// Read the shipped rootfs version stamp ({app}\wsl_rootfs\ROOTFS_VERSION).
+// Empty string when the file is missing (dev builds without the stamp).
+function GetShippedRootfsVersion(): String;
+var
+  Lines: TArrayOfString;
 begin
-  Result := not IsRebootRequired();
+  Result := '';
+  if LoadStringsFromFile(ExpandConstant('{app}\wsl_rootfs\ROOTFS_VERSION'), Lines) then
+    if GetArrayLength(Lines) > 0 then
+      Result := Trim(Lines[0]);
+end;
+
+// Read the version marker baked into the existing distro's rootfs
+// (/etc/edubotics-rootfs-version, UTF-8 single line). Empty string when the
+// distro can't be queried or predates the marker (installers <= 2.6.0).
+function GetDistroRootfsVersion(): String;
+var
+  ResultCode: Integer;
+  TempFile: String;
+  Lines: TArrayOfString;
+begin
+  Result := '';
+  TempFile := ExpandConstant('{tmp}\distro_rootfs_version.txt');
+  if not Exec(ExpandConstant('{cmd}'), '/c wsl -d EduBotics -- cat /etc/edubotics-rootfs-version > "' + TempFile + '" 2>&1', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+    exit;
+  if ResultCode <> 0 then
+    exit;
+  if not LoadStringsFromFile(TempFile, Lines) then
+    exit;
+  if GetArrayLength(Lines) > 0 then
+    Result := Trim(Lines[0]);
+end;
+
+// Import the distro when WSL2 is fully up (no pending reboot) AND either no
+// distro exists yet (fresh install — nothing to lose) or the shipped rootfs
+// differs from the one the existing distro was imported from. A re-import
+// DESTROYS the distro's Docker volumes (recorded datasets, HF cache,
+// Roboter-Studio calibration), so when one is actually needed the student
+// must explicitly confirm. Silent installs with /SUPPRESSMSGBOXES take the
+// default (Yes) — the pre-2026-06 behavior.
+function ShouldImportDistro(): Boolean;
+var
+  Shipped, Existing: String;
+begin
+  if IsRebootRequired() then
+  begin
+    Result := False;
+    exit;
+  end;
+  if not IsDistroRegistered() then
+  begin
+    Result := True;
+    exit;
+  end;
+  Shipped := GetShippedRootfsVersion();
+  Existing := GetDistroRootfsVersion();
+  if (Shipped <> '') and (Existing <> '') and (Shipped = Existing) then
+  begin
+    Log('EduBotics rootfs unchanged (version ' + Shipped + ') - re-import skipped, Docker volumes preserved.');
+    Result := False;
+    exit;
+  end;
+  Result := MsgBox(
+    'Die EduBotics-Umgebung muss neu aufgebaut werden (System-Update).'
+    + #13#10 + #13#10
+    + 'Dabei werden alle lokal gespeicherten Daten gelöscht:'
+    + #13#10 + '  - aufgenommene Datensätze (falls nicht zu Hugging Face hochgeladen)'
+    + #13#10 + '  - heruntergeladene Modelle'
+    + #13#10 + '  - die Roboter-Studio-Kalibrierung'
+    + #13#10 + #13#10
+    + 'Jetzt fortfahren?',
+    mbConfirmation, MB_YESNO) = IDYES;
+  if not Result then
+    Log('User declined the rootfs re-import - keeping the existing EduBotics distro.');
 end;
 
 // Pull images only when the distro is ready.

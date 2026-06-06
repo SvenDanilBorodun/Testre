@@ -319,6 +319,12 @@ RUN python3 -m pip install --no-cache-dir --force-reinstall \
 #   /root/.cargo       ~0.1 GB  (cargo registry cache)
 #   .git dirs          ~331 MB  (inherited from `git clone --recursive` in upstream Dockerfile)
 #   /opt/talos_system_manager ~216 MB  (Robotis VNC dashboard, dev-only — see comment below)
+#   …/physical_ai_tools/physical_ai_manager  (stale upstream React tree from the base clone —
+#       the SPA ships from the separate physical-ai-manager image; this copy is never
+#       built/served but carries files deleted from the repo (TokenInputPopup.js,
+#       ResumePolicySelector.js) that trip audits. Whiteout-hidden, base bytes remain.)
+#   /opt/torch2trt/.git  (NVIDIA leftover in the arm64 Jetson base; path absent on amd64,
+#       where the rm is a harmless no-op)
 #
 # EduBotics does NOT import from talos_system_manager. Verify nothing else references it:
 #   grep -rn 'talos' /root/ros2_ws/   ->  zero hits in EduBotics overlays.
@@ -331,7 +337,9 @@ RUN set -e && \
     find /root/ros2_ws -type d -name ".git" -exec rm -rf {} + 2>/dev/null || true && \
     rm -rf /opt/talos_system_manager && \
     sed -i '\|/opt/talos_system_manager|d' /root/.bashrc /etc/bash.bashrc 2>/dev/null || true && \
-    echo "Stripped upstream bloat: ~6.75 GB removed from image layer"
+    find /root/ros2_ws/src -type d -path "*/physical_ai_tools/physical_ai_manager" -exec rm -rf {} + 2>/dev/null || true && \
+    rm -rf /opt/torch2trt/.git && \
+    echo "Stripped upstream bloat (+ stale manager tree, torch2trt/.git whiteouts)"
 
 # Build-time policy import smoke test. Catches a LeRobot module-layout drift
 # at `docker buildx build` time instead of at student-bench inference time.

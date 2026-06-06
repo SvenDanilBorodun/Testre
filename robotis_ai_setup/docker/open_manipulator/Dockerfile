@@ -98,4 +98,18 @@ RUN set -e && \
     apply_overlay camera_usb_cam.launch.py "*/launch/*" /tmp/overlays/camera_usb_cam.launch.py && \
     rm -rf /tmp/overlays
 
+# Audit hygiene: hide base-image-inherited VCS/build cruft — the .git trees
+# left by the upstream base's `git clone` steps (open_manipulator,
+# realsense-ros, DynamixelSDK, rmw_zenoh, …: ~43 MB amd64 / ~145 MB arm64)
+# plus the zenoh cargo/build caches. These bytes live in BASE layers, so this
+# RUN only adds a whiteout: the files vanish from the running container (and
+# from container audits), but registry/pull size does NOT change. Mirrors the
+# physical-ai-server strip in ../physical_ai_server/Dockerfile. The overlay
+# sources under /root/ros2_ws/src are untouched (image-source-parity checks
+# overlay file sha256s, not .git dirs).
+RUN set -e && \
+    find /root/ros2_ws -type d -name ".git" -exec rm -rf {} + 2>/dev/null || true && \
+    rm -rf /root/.cargo /root/.cache && \
+    echo "Whiteout-stripped base-inherited .git dirs + cargo/build caches"
+
 ENTRYPOINT ["/entrypoint_omx.sh"]

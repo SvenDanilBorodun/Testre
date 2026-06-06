@@ -16,6 +16,14 @@ docker-compose*.yml   text eol=lf
 *.xacro               text eol=lf
 *.yaml                text eol=lf
 *.yml                 text eol=lf
+# Version stamp + env template: read by Linux-side consumers (build_rootfs.sh
+# bakes ROOTFS_VERSION into /etc/edubotics-rootfs-version; compose reads the
+# .env the GUI derives from the template). Under bare `text=auto` a Windows
+# checkout (installer CI runner, student dev box) materializes CRLF — the
+# v2.6.1 installer shipped ROOTFS_VERSION as "1\r\n" and only survived
+# because every current reader .Trim()s. Pin LF so no future reader needs to.
+robotis_ai_setup/wsl_rootfs/ROOTFS_VERSION  text eol=lf
+*.env.template        text eol=lf
 
 # PowerShell scripts on Windows should stay CRLF or UTF-8+BOM (the scripts
 # are explicitly saved with BOM to survive Windows PowerShell 5.1 parsing).

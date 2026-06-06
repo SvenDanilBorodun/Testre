@@ -2,6 +2,12 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Recent changes — post-v2.6.1 hotfix + hygiene batch (2026-06-06, on main — ships with the next tag)
+
+* **`/vision/detect` was down since the Railway deploy resolved modal 1.x (`788287e`).** The vision route's class-method dispatch needed the modal≥1.x `modal.Cls.from_name(...)` lookup form (repro: `modal.Function.from_name("edubotics-vision", "OWLv2Detector.detect")` → `InvalidError`). Fixed + health-gate-verified on Railway. `cloud_training_api/requirements.txt` now pins **`modal>=1.4,<2`** — a pin-site to review deliberately before any modal 2.x bump. Same commit translated the remaining English `app/auth.py` + `routes/training.py` detail strings.
+* **Hygiene batch (2026-06-06):** migration **027** closes migration-024's S2 TODO — the `workflow_versions` INSERT policy is now the GUC-backed predicate (direct PostgREST forgery of version history denied; the SECURITY DEFINER trigger and service-role API bypass RLS and are untouched; rollback file shipped). The **Jetson agent** got the GUI's `970905d` set-membership digest pre-check port (no more no-op pull on every agent start; 6 new unit tests). The floating **`:X.Y` Docker Hub tag now always re-points** on tag pushes (was stuck at X.Y.0 — `:2.5` froze at the 2.5.4 build; the retag existence-probe is bypassed for the minor tag only, validates live at the next release). **Inno Setup pinned 6.7.0** in release-installer. **`.gitattributes`** pins LF for `ROOTFS_VERSION` + `*.env.template` (Windows-runner checkouts shipped `"1\r\n"`; every current reader trims, no future reader has to). Both robot images **whiteout-strip base-inherited cruft** (.git trees, cargo caches, the stale upstream React tree incl. repo-deleted `TokenInputPopup.js`, `/opt/torch2trt/.git`) — audit hygiene only, registry size unchanged (bytes live in base layers). **`german-strings-lint` gained an AST step** (`.github/scripts/german_detail_lint.py`) over cloud-api `detail=`/`error_message=` in all three binding shapes — the gap that let auth.py ship English; it immediately surfaced + we fixed 23 legacy transliterations (teacher/workgroups) and 3 more English stragglers (the 429 rate-limit detail in `main.py`, admin self-delete + `Loeschanfrage` in `me.py`).
+* **Operator decision (2026-06-06): docker-publish KEEPS its tag-push trigger.** The dual-fire with release.yml W4 (two ~45-min `--no-cache` builds per tag) stays accepted in exchange for faster raw-image availability — do not re-propose removal without new evidence.
+
 ## Recent changes — v2.6.1 (2026-06-05)
 
 * **Compose image pinning finally bridged into the GUI-managed `.env` (`2da5b22`).** Nothing ever wrote `IMAGE_TAG` into the `--env-file` compose reads — clean installs silently ran `:latest` (re-downloading ~9 GB the installer had already pulled pinned, drifting past the .exe), and a stale hand-pinned tag from a validation session survived `.env` regeneration forever (broke „Umgebung starten" with `manifest unknown` on the reference rig after the 2.6.0 upgrade wiped the local image). `IMAGE_TAG` is now a MANAGED key — see the dedicated bullet under "Critical architectural choices".
@@ -113,7 +119,7 @@ The LeRobot **version pin** `0.5.1` must agree across:
 
 Bumping LeRobot is a **3-place change in one PR**.
 
-`meta/info.json` `codebase_version: "v3.0"` and the Modal preflight constant `EXPECTED_CODEBASE_VERSION="v3.0"` (`training_handler.py:40`) are **derived** checks — they should match the LeRobot version's expected codebase format, but they are not pin sites. If LeRobot v0.5.x ever bumps codebase_version to v3.1, those two consts move together with the LeRobot pin in the same PR.
+`meta/info.json` `codebase_version: "v3.0"` and the Modal preflight constant `EXPECTED_CODEBASE_VERSION="v3.0"` (`robotis_ai_setup/modal_training/training_handler.py:43`) are **derived** checks — they should match the LeRobot version's expected codebase format, but they are not pin sites. If LeRobot v0.5.x ever bumps codebase_version to v3.1, those two consts move together with the LeRobot pin in the same PR.
 
 **One PyTorch surface (torch 2.7.x), three CUDA channels — by design.** Don't try to "unify" CUDA versions across surfaces; each surface picks the channel matching its hardware.
 
@@ -385,11 +391,11 @@ State as of 2026-05-20 post commit `16b8378` + `de7d635`. Confirm against curren
 ### Cloud-API + Supabase — security/correctness fixes landed in `16b8378`
 
 - ~~Jetson pairing-code race IDOR~~ → migration 022 + 2-step pair-intent flow (covered in "Critical architectural choices").
-- ~~`register_dataset` IDOR (any student could register a peer's HF repo)~~ → trust-on-first-use HF author anchor in `routes/datasets.py`. KNOWN edge case (LOW): a student who deletes ALL their datasets can re-anchor on a peer's repo. KNOWN race (MEDIUM): 2 concurrent first-time registers can each capture a different author — rate-limit (20/60s) is the partial mitigation.
+- ~~`register_dataset` IDOR (any student could register a peer's HF repo)~~ → trust-on-first-use HF author anchor in `routes/datasets.py`. KNOWN edge case (LOW): a student who deletes ALL their datasets can re-anchor on a peer's repo. ~~KNOWN race (MEDIUM): 2 concurrent first-time registers can each capture a different author~~ → FIXED by migration 026 `register_dataset_safe` (`ee6197f`): the whole register flow moved into a SECURITY DEFINER RPC serialised by `SELECT … FOR UPDATE` on the caller's users row; mismatch raises P0034 → 403. The LOW delete-all edge remains.
 - ~~Modal cancel cost-bomb (start→cancel×10 → 10 GPUs running to timeout cap)~~ → migration 023 `cancel_requested` + `training_sweep.py` retry sweep (covered in "Critical architectural choices").
 - ~~Service-role key leak via re-raised httpx/supabase exceptions in CI~~ → `main.py::_sanitize_probe_error` regex-strips Bearer/apikey before re-raise.
 - ~~`/health` always 200, deploy gates verify the wrong pod~~ → `/health` returns commit+schema_ok, deploy gates assert commit equality.
-- ~~Supabase 144 perf advisors + 3 actionable security~~ → migration 024 consolidates 32→11 policies, wraps every `auth.uid()` in `(SELECT auth.uid())` InitPlan subquery, drops 11 unused indexes; migration 025 hotfixes 3 FK-covering indexes that 024 over-eagerly dropped. Result: **144 perf → 7** (all 7 are `unused_index` INFO-level on freshly-created indexes, will "green up" once queries hit them). Security retentions: 2× `update_training_progress` (anon+authenticated EXECUTE — Modal worker uses anon key + worker_token row-lock; stronger than the proposed pre-check which would TOCTOU); 1× `workflow_versions WITH CHECK (true)` (trigger uses `app.user_id` GUC not `auth.uid()`; documented TODO for a future migration that adds a GUC-backed predicate).
+- ~~Supabase 144 perf advisors + 3 actionable security~~ → migration 024 consolidates 32→11 policies, wraps every `auth.uid()` in `(SELECT auth.uid())` InitPlan subquery, drops 11 unused indexes; migration 025 hotfixes 3 FK-covering indexes that 024 over-eagerly dropped. Result: **144 perf → 7** (all 7 are `unused_index` INFO-level on freshly-created indexes, will "green up" once queries hit them). Security retentions: 2× `update_training_progress` (anon+authenticated EXECUTE — Modal worker uses anon key + worker_token row-lock; stronger than the proposed pre-check which would TOCTOU); 1× `workflow_versions WITH CHECK (true)` (trigger uses `app.user_id` GUC not `auth.uid()`; documented TODO for a future migration that adds a GUC-backed predicate) — **closed 2026-06-06 by migration 027** (GUC predicate live in production; rollback file in `supabase/rollback/`).
 
 ### What audits confirmed CLEAN
 
@@ -414,8 +420,8 @@ State as of 2026-05-20 post commit `16b8378` + `de7d635`. Confirm against curren
 - ~~Reconcile PyTorch cu121 vs cu128 drift~~ → Rule §5 was rewritten for v2.5.0: torch 2.7.x is now the single PyTorch version across all surfaces (Modal cu126 channel, student/Jetson cu128 channel inherited from Robotis base). DONE 2026-05-28 (LeRobot v0.5.1 migration).
 - ~~Pin cross-arch package versions (safetensors, protobuf, pillow)~~ → both Dockerfiles pin to LCD via `--force-reinstall`. DONE 2026-05.
 - ~~Decide on `versions.env` plumbing (add a writer OR drop the 3 readers as dead code)~~ → **DONE**: writers exist in `docker-publish.yml` + `release-installer.yml`; do NOT drop the readers (that would break installer tag-pinned rollback).
-- Tighten `workflow_versions` "Trigger inserts" INSERT policy via a GUC-backed predicate (S2 TODO in migration 024)
-- Harden `register_dataset` HF-author anchor against the concurrent-first-register race
+- ~~Tighten `workflow_versions` "Trigger inserts" INSERT policy via a GUC-backed predicate (S2 TODO in migration 024)~~ → DONE 2026-06-06, migration 027.
+- ~~Harden `register_dataset` HF-author anchor against the concurrent-first-register race~~ → was ALREADY DONE by migration 026 (`ee6197f`); this entry had gone stale.
 
 ## When in doubt
 

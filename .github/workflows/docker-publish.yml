@@ -266,7 +266,9 @@ jobs:
             return 1
           }
 
-          # _maybe_retag: skip tags that already exist (free), retag only what's missing.
+          # _maybe_retag: skip tags that already exist (free), retag only what's
+          # missing. Correct for IMMUTABLE tags only (sha, sha-short, X.Y.Z) —
+          # the floating :X.Y minor tag below must bypass this probe.
           _maybe_retag() {
             local repo="$1" tag="$2" source="$3"
             if _tag_exists "$repo" "$tag"; then
@@ -282,7 +284,13 @@ jobs:
             _maybe_retag "$REPO" "${{ github.sha }}" "$SRC"      # full-sha (immutable)
             if [ -n "$SEMVER" ]; then
               _maybe_retag "$REPO" "$SEMVER" "$SRC"              # e.g. 2.5.4
-              _maybe_retag "$REPO" "${SEMVER%.*}" "$SRC"         # e.g. 2.5
+              # Floating minor tag: ALWAYS re-point. _maybe_retag's existence
+              # probe would skip it forever after X.Y.0 (confirmed: :2.5 stuck
+              # at the 2.5.4 build, :2.6 at 2.6.0 — the probe sees the old tag
+              # and bails). 1 imagetools manifest read+write per repo per tag
+              # push; idempotent when already current. Nothing student-facing
+              # consumes :X.Y (versions.env pins X.Y.Z) — operator clarity tag.
+              _retag "nettername/${REPO}:${SEMVER%.*}" "$SRC"    # e.g. 2.5 — always advance
             fi
             # :latest is already what build-images.sh pushed; no action needed.
           done

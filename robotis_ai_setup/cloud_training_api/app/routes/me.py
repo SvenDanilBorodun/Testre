@@ -345,7 +345,7 @@ async def delete_my_account(profile=Depends(get_current_profile)):
                 {
                     "status": "canceled",
                     "terminated_at": datetime.now(timezone.utc).isoformat(),
-                    "error_message": "Auto-canceled: account deletion requested",
+                    "error_message": "Automatisch abgebrochen: Kontolöschung angefordert.",
                 }
             ).eq("id", row["id"]).execute()
             cancelled_ids.append(row["id"])

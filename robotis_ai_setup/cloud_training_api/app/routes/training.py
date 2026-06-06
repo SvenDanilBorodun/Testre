@@ -357,11 +357,11 @@ async def _sync_modal_status(training: dict) -> dict:
         if stalled:
             stalled_minutes = int(STALLED_WORKER_THRESHOLD.total_seconds() / 60)
             update_data["error_message"] = (
-                f"Worker hat ueber {stalled_minutes} Minuten keine Updates gesendet "
-                f"(vermutlich haengt der Trainings-Prozess). Job wurde abgebrochen."
+                f"Worker hat über {stalled_minutes} Minuten keine Updates gesendet "
+                f"(vermutlich hängt der Trainings-Prozess). Job wurde abgebrochen."
             )
         else:
-            update_data["error_message"] = f"Modal status: {modal_status}"
+            update_data["error_message"] = f"Training fehlgeschlagen (Modal-Status: {modal_status})."
 
     supabase.table("trainings").update(update_data).eq("id", training["id"]).execute()
 
@@ -538,7 +538,7 @@ async def start_training(req: StartTrainingRequest, user=Depends(get_current_use
         logger.warning("Dataset not found on HF: %s", req.dataset_name)
         raise HTTPException(
             status_code=400,
-            detail=f"Dataset '{req.dataset_name}' not found on HuggingFace Hub.",
+            detail=f"Dataset '{req.dataset_name}' wurde nicht auf dem HuggingFace Hub gefunden.",
         )
     except Exception as e:
         # Rate limit, DNS blip, 5xx — tell the student to retry, don't send
@@ -620,11 +620,11 @@ async def start_training(req: StartTrainingRequest, user=Depends(get_current_use
         supabase.table("trainings").update(
             {
                 "status": "failed",
-                "error_message": f"Failed to dispatch: {e}",
+                "error_message": f"Training konnte nicht an den Cloud-Worker übergeben werden: {e}",
                 "terminated_at": datetime.now(timezone.utc).isoformat(),
             }
         ).eq("id", training_id).execute()
-        raise HTTPException(status_code=500, detail=f"Failed to start training: {e}")
+        raise HTTPException(status_code=500, detail=f"Training konnte nicht gestartet werden: {e}")
 
     # 4. Update with the Modal FunctionCall id.
     supabase.table("trainings").update(

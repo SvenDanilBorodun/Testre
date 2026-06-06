@@ -308,8 +308,9 @@ async def delete_my_account(profile=Depends(get_current_profile)):
             status_code=400,
             content={
                 "detail": (
-                    "Admin accounts cannot be self-deleted. Have another "
-                    "admin remove you, or contact the platform owner."
+                    "Admin-Konten können sich nicht selbst löschen. Bitte "
+                    "einen anderen Admin darum bitten oder den "
+                    "Plattform-Betreiber kontaktieren."
                 )
             },
         )
@@ -401,7 +402,7 @@ async def delete_my_account(profile=Depends(get_current_profile)):
             status_code=500,
             content={
                 "detail": (
-                    "Loeschanfrage konnte nicht gespeichert werden — bitte "
+                    "Löschanfrage konnte nicht gespeichert werden — bitte "
                     "erneut versuchen oder den Administrator informieren."
                 )
             },

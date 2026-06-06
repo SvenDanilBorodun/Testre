@@ -68,7 +68,7 @@ export default function CreateWorkgroupModal({ onClose, onSubmit }) {
             required
           />
           <p className="text-[11px] text-[var(--ink-3)] mt-1.5 leading-snug">
-            Bis zu 10 Schueler teilen sich Credits, Trainings, Datensaetze und Workflows.
+            Bis zu 10 Schüler teilen sich Credits, Trainings, Datensätze und Workflows.
           </p>
         </label>
       </form>

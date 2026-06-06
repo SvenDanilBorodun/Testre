@@ -771,7 +771,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                     # client would see a 500 instead of a clean 429.
                     return JSONResponse(
                         status_code=429,
-                        content={"detail": "Too many requests — please wait a moment."},
+                        content={"detail": "Zu viele Anfragen — bitte einen Moment warten."},
                     )
                 break
         return await call_next(request)

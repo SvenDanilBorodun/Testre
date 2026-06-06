@@ -146,10 +146,10 @@ def _assert_student_owned(teacher_id: str, student_id: str) -> dict:
         .execute()
     )
     if not result.data:
-        raise HTTPException(status_code=404, detail="Schueler nicht gefunden")
+        raise HTTPException(status_code=404, detail="Schüler nicht gefunden")
     student = result.data[0]
     if not student.get("classroom_id"):
-        raise HTTPException(status_code=404, detail="Schueler gehoert zu keinem Klassenzimmer")
+        raise HTTPException(status_code=404, detail="Schüler gehört zu keinem Klassenzimmer")
     _assert_classroom_owned(teacher_id, student["classroom_id"])
     return student
 
@@ -463,7 +463,7 @@ async def delete_classroom(classroom_id: str, teacher=Depends(get_current_teache
     if (count_res.count or 0) > 0:
         raise HTTPException(
             status_code=409,
-            detail="Klassenzimmer ist nicht leer - erst alle Schueler entfernen",
+            detail="Klassenzimmer ist nicht leer - erst alle Schüler entfernen",
         )
     # Workflow templates and student workflows tied to this classroom would
     # otherwise be left with classroom_id=NULL (FK is ON DELETE SET NULL),
@@ -549,8 +549,8 @@ async def create_student(
             logger.error("Rollback delete_user failed: %s", del_err)
         msg = str(e).lower()
         if "p0010" in msg or "kapazitaet" in msg:
-            raise HTTPException(status_code=409, detail="Klassenzimmer voll (30 Schueler)")
-        raise HTTPException(status_code=500, detail="Schueler-Profil konnte nicht gesetzt werden")
+            raise HTTPException(status_code=409, detail="Klassenzimmer voll (30 Schüler)")
+        raise HTTPException(status_code=500, detail="Schüler-Profil konnte nicht gesetzt werden")
 
     # Allocate initial credits via the RPC (enforces teacher-pool limits).
     if req.initial_credits > 0:
@@ -570,7 +570,7 @@ async def create_student(
                 logger.warning("Insufficient pool when creating %s: %s", username, e)
                 raise HTTPException(
                     status_code=409,
-                    detail="Schueler erstellt, aber Lehrer-Pool reicht nicht fuer die Startguthaben",
+                    detail="Schüler erstellt, aber Lehrer-Pool reicht nicht für die Startguthaben",
                 )
             logger.error("Initial credit allocation failed: %s", e)
             # Student still exists with 0 credits — return instead of failing.
@@ -609,7 +609,7 @@ async def patch_student(
     except Exception as e:
         msg = str(e).lower()
         if "p0010" in msg or "kapazitaet" in msg:
-            raise HTTPException(status_code=409, detail="Ziel-Klassenzimmer voll (30 Schueler)")
+            raise HTTPException(status_code=409, detail="Ziel-Klassenzimmer voll (30 Schüler)")
         logger.error("patch_student failed: %s", e)
         raise HTTPException(status_code=500, detail="Aktualisierung fehlgeschlagen")
 
@@ -799,20 +799,20 @@ async def adjust_credits(
     except Exception as e:
         msg = str(e)
         if "P0011" in msg:
-            raise HTTPException(status_code=403, detail="Schueler gehoert nicht zu diesem Lehrer")
+            raise HTTPException(status_code=403, detail="Schüler gehört nicht zu diesem Lehrer")
         if "P0012" in msg:
             raise HTTPException(
                 status_code=409,
                 detail="Neuer Betrag waere kleiner als bereits verbrauchte Credits",
             )
         if "P0013" in msg:
-            raise HTTPException(status_code=409, detail="Credits duerfen nicht negativ werden")
+            raise HTTPException(status_code=409, detail="Credits dürfen nicht negativ werden")
         if "P0014" in msg:
             raise HTTPException(status_code=409, detail="Lehrer hat nicht genug Credits im Pool")
         if "P0023" in msg:
             raise HTTPException(
                 status_code=409,
-                detail="Schueler ist in einer Arbeitsgruppe — bitte Credits ueber die Gruppe anpassen",
+                detail="Schüler ist in einer Arbeitsgruppe — bitte Credits über die Gruppe anpassen",
             )
         logger.error("adjust_student_credits failed: %s", e)
         raise HTTPException(status_code=500, detail="Credit-Anpassung fehlgeschlagen")
@@ -924,7 +924,7 @@ def _assert_workgroup_in_classroom(
         raise HTTPException(status_code=404, detail="Arbeitsgruppe nicht gefunden")
     if g.data[0].get("classroom_id") != classroom_id:
         raise HTTPException(
-            status_code=400, detail="Arbeitsgruppe gehoert nicht zu dieser Klasse"
+            status_code=400, detail="Arbeitsgruppe gehört nicht zu dieser Klasse"
         )
     _assert_classroom_owned(teacher_id, classroom_id)
 
@@ -982,7 +982,7 @@ async def create_progress_entry(
         raise HTTPException(
             status_code=400,
             detail=(
-                "Eintrag kann entweder einem Schueler oder einer Gruppe "
+                "Eintrag kann entweder einem Schüler oder einer Gruppe "
                 "zugewiesen werden, aber nicht beidem."
             ),
         )
@@ -991,7 +991,7 @@ async def create_progress_entry(
         if student.get("classroom_id") != classroom_id:
             raise HTTPException(
                 status_code=400,
-                detail="Schueler gehoert nicht zu dieser Klasse",
+                detail="Schüler gehört nicht zu dieser Klasse",
             )
     if req.workgroup_id:
         _assert_workgroup_in_classroom(teacher["id"], classroom_id, req.workgroup_id)
@@ -1013,7 +1013,7 @@ async def create_progress_entry(
         if "duplicate" in msg or "unique" in msg:
             raise HTTPException(
                 status_code=409,
-                detail="Fuer diesen Tag existiert bereits ein Eintrag - bearbeite ihn stattdessen",
+                detail="Für diesen Tag existiert bereits ein Eintrag - bearbeite ihn stattdessen",
             )
         logger.error("create_progress_entry failed: %s", e)
         raise HTTPException(status_code=500, detail="Eintrag konnte nicht erstellt werden")

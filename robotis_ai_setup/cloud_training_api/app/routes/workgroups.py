@@ -364,21 +364,21 @@ async def add_workgroup_member(
     if student.get("classroom_id") != group["classroom_id"]:
         raise HTTPException(
             status_code=409,
-            detail="Schueler ist nicht im selben Klassenzimmer wie die Gruppe",
+            detail="Schüler ist nicht im selben Klassenzimmer wie die Gruppe",
         )
 
     # Refuse if student is already in another group.
     if student.get("workgroup_id") and student["workgroup_id"] != workgroup_id:
         raise HTTPException(
             status_code=409,
-            detail="Schueler ist bereits in einer anderen Arbeitsgruppe",
+            detail="Schüler ist bereits in einer anderen Arbeitsgruppe",
         )
 
     # Capacity belt+braces; trigger raises P0021 if we somehow miss it.
     if _group_member_count(workgroup_id) >= MAX_GROUP_SIZE:
         raise HTTPException(
             status_code=409,
-            detail=f"Arbeitsgruppe ist voll (max {MAX_GROUP_SIZE} Schueler)",
+            detail=f"Arbeitsgruppe ist voll (max {MAX_GROUP_SIZE} Schüler)",
         )
 
     supabase = get_supabase()
@@ -391,17 +391,17 @@ async def add_workgroup_member(
         if "P0020" in msg:
             raise HTTPException(
                 status_code=409,
-                detail="Schueler ist nicht im selben Klassenzimmer wie die Gruppe",
+                detail="Schüler ist nicht im selben Klassenzimmer wie die Gruppe",
             )
         if "P0021" in msg:
             raise HTTPException(
                 status_code=409,
-                detail=f"Arbeitsgruppe ist voll (max {MAX_GROUP_SIZE} Schueler)",
+                detail=f"Arbeitsgruppe ist voll (max {MAX_GROUP_SIZE} Schüler)",
             )
         logger.error("add_workgroup_member update failed: %s", e)
         raise HTTPException(
             status_code=500,
-            detail="Schueler konnte nicht zur Gruppe hinzugefuegt werden",
+            detail="Schüler konnte nicht zur Gruppe hinzugefügt werden",
         )
 
     # Maintain the membership-audit row. Re-add resets left_at to NULL so
@@ -561,7 +561,7 @@ async def adjust_workgroup_credits(
         if "P0022" in msg:
             raise HTTPException(
                 status_code=403,
-                detail="Arbeitsgruppe gehoert nicht zu diesem Lehrer",
+                detail="Arbeitsgruppe gehört nicht zu diesem Lehrer",
             )
         if "P0012" in msg:
             raise HTTPException(
@@ -570,7 +570,7 @@ async def adjust_workgroup_credits(
             )
         if "P0013" in msg:
             raise HTTPException(
-                status_code=409, detail="Credits duerfen nicht negativ werden"
+                status_code=409, detail="Credits dürfen nicht negativ werden"
             )
         if "P0014" in msg:
             raise HTTPException(

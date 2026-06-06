@@ -759,6 +759,10 @@ jobs:
     # CLAUDE.md §1.1 mandates literal ä/ö/ü/ß for every German string
     # the user reads; the drift accumulated silently across the
     # overlays + GUI + installer. This job is the regression fence.
+    # Second step (2026-06-06): AST-scan the Cloud API's detail= /
+    # error_message= strings for English + transliterations — the
+    # surface the grep step never covered (which is how auth.py shipped
+    # English until 788287e and main.py's 429 detail until today).
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -789,3 +793,10 @@ jobs:
             exit 1
           fi
           echo "German strings clean."
+      - name: Cloud-API detail/error_message German lint (AST)
+        # Covers call keywords, dict literals and subscript assignments —
+        # HTTPException detail= reaches React toasts; trainings-table
+        # error_message is rendered raw by MyModels.js/TrainingLiveChart.js.
+        # DB-error matchers ('... in msg') are comparisons, not bindings,
+        # so they are structurally excluded and stay English on purpose.
+        run: python3 .github/scripts/german_detail_lint.py

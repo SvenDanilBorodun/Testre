@@ -1,7 +1,11 @@
 fastapi==0.115.12
 uvicorn[standard]==0.34.2
 supabase==2.15.1
-modal>=0.64
+# Bounded: the old unbounded `modal>=0.64` floated to 1.4.3 on the
+# 2026-06-06 deploy and broke /vision/detect (Function.from_name
+# rejects dotted class-method names on >=1.x; vision.py now uses
+# Cls.from_name). 1.4.x is verified working; review before 2.x.
+modal>=1.4,<2
 httpx==0.28.1
 python-dotenv==1.1.0
 pydantic==2.11.3

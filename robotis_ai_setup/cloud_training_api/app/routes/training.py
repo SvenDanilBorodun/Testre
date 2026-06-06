@@ -243,7 +243,7 @@ def _get_remaining_credits(user_id: str) -> dict:
         "get_remaining_credits", {"p_user_id": user_id}
     ).execute()
     if not result.data:
-        raise HTTPException(status_code=404, detail="User profile not found")
+        raise HTTPException(status_code=404, detail="Benutzerprofil nicht gefunden.")
     row = result.data[0]
     return {
         "training_credits": row["training_credits"],
@@ -546,7 +546,7 @@ async def start_training(req: StartTrainingRequest, user=Depends(get_current_use
         logger.warning("HF dataset check transient error for %s: %s", req.dataset_name, e)
         raise HTTPException(
             status_code=502,
-            detail="HuggingFace Hub is temporarily unavailable. Please retry in a moment.",
+            detail="HuggingFace Hub ist vorübergehend nicht erreichbar. Bitte gleich erneut versuchen.",
         )
 
     # 2. Atomic credit-check + training row insert via start_training_safe RPC.
@@ -587,16 +587,16 @@ async def start_training(req: StartTrainingRequest, user=Depends(get_current_use
         msg = str(e)
         if "P0003" in msg or "credits remaining" in msg:
             logger.info("Credit-exhausted /start for user=%s", user_id)
-            raise HTTPException(status_code=403, detail="No training credits remaining.")
+            raise HTTPException(status_code=403, detail="Keine Trainings-Credits mehr übrig.")
         if "P0002" in msg or "User profile not found" in msg:
             logger.warning("User profile not found: %s", user_id)
-            raise HTTPException(status_code=404, detail="User profile not found")
+            raise HTTPException(status_code=404, detail="Benutzerprofil nicht gefunden.")
         logger.error("start_training_safe RPC failed for user=%s: %s", user_id, e)
         raise
 
     if not rpc_result.data:
         logger.error("start_training_safe returned no rows for user=%s", user_id)
-        raise HTTPException(status_code=500, detail="start_training_safe returned no row")
+        raise HTTPException(status_code=500, detail="Interner Fehler beim Starten des Trainings.")
     training_id = rpc_result.data[0]["training_id"]
     logger.info("Created training %s for user=%s model=%s", training_id, user_id, model_name)
 
@@ -675,7 +675,7 @@ async def cancel_training(req: CancelTrainingRequest, user=Depends(get_current_u
         .execute()
     )
     if not result.data:
-        raise HTTPException(status_code=404, detail="Training not found")
+        raise HTTPException(status_code=404, detail="Training nicht gefunden.")
 
     training = result.data[0]
     # 'cancel_requested' is a valid mid-flight state: the user clicked
@@ -684,7 +684,7 @@ async def cancel_training(req: CancelTrainingRequest, user=Depends(get_current_u
     # as a re-attempt rather than a 400 — bump cancel_attempts and try
     # Modal again synchronously.
     if training["status"] not in ("queued", "running", "cancel_requested"):
-        raise HTTPException(status_code=400, detail="Training is not active")
+        raise HTTPException(status_code=400, detail="Training ist nicht aktiv.")
 
     # Phase 1: record the cancel intent. We do this BEFORE talking to
     # Modal so even if the Cloud API crashes mid-cancel, the sweep can
@@ -822,13 +822,13 @@ async def get_training(training_id: int, user=Depends(get_current_user)):
         .execute()
     )
     if not result.data:
-        raise HTTPException(status_code=404, detail="Training not found")
+        raise HTTPException(status_code=404, detail="Training nicht gefunden.")
     row = result.data[0]
     if row["user_id"] != user_id:
         # Allow group siblings (current and former) to read.
         wg = row.get("workgroup_id")
         if not wg or wg not in resolve_visible_workgroup_ids(user_id):
-            raise HTTPException(status_code=404, detail="Training not found")
+            raise HTTPException(status_code=404, detail="Training nicht gefunden.")
 
     training = await _sync_modal_status(row)
     return training

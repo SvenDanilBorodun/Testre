@@ -13,8 +13,12 @@ Quota: per-user term cap (default 200 calls), enforced via the
 
 The endpoint accepts a base64-encoded JPEG/PNG and a list of German
 prompts; returns the model's detections. The actual Modal invocation
-goes through ``modal.Function.from_name(..., "OWLv2Detector.detect")``
-which preserves the cold-start caching behavior.
+resolves the class via ``modal.Cls.from_name(..., "OWLv2Detector")``
+and binds ``.detect`` — Modal >=1.x raises ``InvalidError`` for dotted
+class-method names in ``Function.from_name`` (regression 2026-06-06:
+every /vision/detect 503'd once the Railway pod resolved modal 1.4.3
+from the old unbounded pin). Plain function names still go through
+``Function.from_name``.
 """
 
 from __future__ import annotations
@@ -139,7 +143,16 @@ async def _invoke_modal(image_bytes: bytes, prompts: list[str], score_threshold:
             detail="Cloud-Erkennung ist auf diesem Server nicht verfügbar.",
         )
     try:
-        fn = modal.Function.from_name(VISION_APP_NAME, VISION_FUNCTION_NAME)
+        if "." in VISION_FUNCTION_NAME:
+            # Modal >=1.x hard-rejects dotted class-method names in
+            # Function.from_name (InvalidError: "... use `modal.Cls.from_name`
+            # instead"). The bound method handle below is a modal.Function
+            # exposing the same `.remote.aio` surface the invoke path uses.
+            cls_name, method_name = VISION_FUNCTION_NAME.split(".", 1)
+            detector_cls = modal.Cls.from_name(VISION_APP_NAME, cls_name)
+            fn = getattr(detector_cls(), method_name)
+        else:
+            fn = modal.Function.from_name(VISION_APP_NAME, VISION_FUNCTION_NAME)
     except Exception as e:
         # Audit F50: distinguish "Modal app never deployed" (NotFoundError)
         # from "Modal API is currently unreachable" (transient) so the

@@ -16,7 +16,7 @@ async def get_current_user(authorization: str | None = Header(default=None, alia
     internals in error messages.
     """
     if not authorization:
-        raise HTTPException(status_code=401, detail="Missing authorization header")
+        raise HTTPException(status_code=401, detail="Anmeldung erforderlich.")
 
     # RFC 7235 §2.1: auth-scheme is case-insensitive. Some HTTP clients
     # send "bearer <token>" instead of "Bearer <token>"; rejecting those
@@ -24,14 +24,14 @@ async def get_current_user(authorization: str | None = Header(default=None, alia
     # Case-fold the prefix check only, preserving the token's original
     # casing (the JWT body itself is case-sensitive base64url).
     if not authorization.lower().startswith("bearer "):
-        raise HTTPException(status_code=401, detail="Invalid authorization header")
+        raise HTTPException(status_code=401, detail="Ungültige Anmeldedaten.")
 
     token = authorization[len("Bearer "):].strip()
 
     # Cheap structural check: a JWT is three base64url segments separated by dots.
     # Saves a network round-trip when someone sends "Bearer foo".
     if token.count(".") != 2 or not all(token.split(".")):
-        raise HTTPException(status_code=401, detail="Invalid token")
+        raise HTTPException(status_code=401, detail="Ungültige oder abgelaufene Sitzung.")
 
     try:
         user_response = get_supabase().auth.get_user(token)
@@ -39,11 +39,11 @@ async def get_current_user(authorization: str | None = Header(default=None, alia
         # Network failure, Supabase outage, malformed response — log internally,
         # return a generic 401 to avoid leaking infrastructure details.
         logger.warning("Supabase auth.get_user failed: %s", e)
-        raise HTTPException(status_code=401, detail="Invalid token")
+        raise HTTPException(status_code=401, detail="Ungültige oder abgelaufene Sitzung.")
 
     user = getattr(user_response, "user", None)
     if user is None:
-        raise HTTPException(status_code=401, detail="Invalid token")
+        raise HTTPException(status_code=401, detail="Ungültige oder abgelaufene Sitzung.")
 
     return user
 
@@ -73,21 +73,21 @@ def get_user_profile(user_id: str) -> dict:
         .execute()
     )
     if not result.data:
-        raise HTTPException(status_code=404, detail="User profile not found")
+        raise HTTPException(status_code=404, detail="Benutzerprofil nicht gefunden.")
     return result.data
 
 
 async def get_current_teacher(user=Depends(get_current_user)) -> dict:
     profile = get_user_profile(str(user.id))
     if profile["role"] != "teacher":
-        raise HTTPException(status_code=403, detail="Forbidden: teacher role required")
+        raise HTTPException(status_code=403, detail="Nur für Lehrkräfte erlaubt.")
     return profile
 
 
 async def get_current_admin(user=Depends(get_current_user)) -> dict:
     profile = get_user_profile(str(user.id))
     if profile["role"] != "admin":
-        raise HTTPException(status_code=403, detail="Forbidden: admin role required")
+        raise HTTPException(status_code=403, detail="Nur für Administratoren erlaubt.")
     return profile
 
 

@@ -172,7 +172,12 @@ jobs:
       - name: Install Inno Setup
         shell: pwsh
         run: |
-          choco install innosetup -y --no-progress
+          # Pinned like the action SHAs above: an unpinned ISCC major bump
+          # could silently change compiled-installer behavior (the .iss
+          # Pascal [Code] section has no other compile check in CI).
+          # v2.6.1 shipped built with 6.7.0 — bump deliberately, with a
+          # workflow_dispatch test build against the PREVIOUS release tag.
+          choco install innosetup --version=6.7.0 -y --no-progress
           $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
           if (-not (Test-Path $iscc)) { throw "Inno Setup ISCC.exe not at expected path" }
           echo "ISCC=$iscc" >> $env:GITHUB_ENV

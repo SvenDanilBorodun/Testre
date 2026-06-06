@@ -10,6 +10,10 @@ What we cover:
   - _is_dockerhub_reachable: returns True/False based on socket success
   - _get_local_repo_digest: parses `docker image inspect` output
   - _get_remote_manifest_digest: picks linux/arm64 from the manifest list
+  - _parse_digest_candidates / _get_remote_digest_candidates: the 970905d
+    set-membership pre-check (imagetools primary, legacy probe fallback)
+  - _auto_pull_images digest pre-check: membership match skips the pull,
+    non-match pulls
   - _save_last_pull_info: round-trips via the JSON file
   - _detect_lan_ip: returns a string (no actual network needed)
 """
@@ -165,6 +169,105 @@ class TestDigests(unittest.TestCase):
     def test_remote_manifest_digest_none_on_invalid_json(self):
         with patch("agent.subprocess.run", return_value=self._fake_run("not json")):
             self.assertIsNone(agent._get_remote_manifest_digest("foo"))
+
+
+# Full-length digests: _DIGEST_RE only matches sha256: + 64 hex chars, so the
+# short fakes used by the legacy tests above would silently not match here.
+_LIST_DIGEST = "sha256:" + "a" * 64
+_ARM64_DIGEST = "sha256:" + "b" * 64
+_AMD64_DIGEST = "sha256:" + "c" * 64
+
+_IMAGETOOLS_OUTPUT = f"""\
+Name:      nettername/foo:arm64-latest
+MediaType: application/vnd.oci.image.index.v1+json
+Digest:    {_LIST_DIGEST}
+
+Manifests:
+  Name:        nettername/foo:arm64-latest@{_ARM64_DIGEST}
+  MediaType:   application/vnd.oci.image.manifest.v1+json
+  Platform:    linux/arm64
+
+  Name:        nettername/foo:arm64-latest@{_AMD64_DIGEST}
+  MediaType:   application/vnd.oci.image.manifest.v1+json
+  Platform:    linux/amd64
+"""
+
+
+class TestDigestCandidates(unittest.TestCase):
+    """The 970905d set-membership pre-check, ported from the GUI: the local
+    RepoDigest of a buildx-pushed image is the manifest-LIST digest while the
+    legacy probe returns the arm64 CHILD digest — plain equality never
+    matched, so the pre-check was dead and every agent start did a no-op
+    pull. Candidates must contain BOTH shapes."""
+
+    def _fake_run(self, stdout, returncode=0):
+        return MagicMock(stdout=stdout, returncode=returncode)
+
+    def test_parse_digest_candidates_extracts_all(self):
+        candidates = agent._parse_digest_candidates(_IMAGETOOLS_OUTPUT)
+        self.assertEqual(candidates, {_LIST_DIGEST, _ARM64_DIGEST, _AMD64_DIGEST})
+
+    def test_parse_digest_candidates_empty_on_none_or_garbage(self):
+        self.assertEqual(agent._parse_digest_candidates(""), set())
+        self.assertEqual(agent._parse_digest_candidates(None), set())
+        self.assertEqual(agent._parse_digest_candidates("sha256:tooshort"), set())
+
+    def test_remote_candidates_from_imagetools(self):
+        with patch(
+            "agent.subprocess.run",
+            return_value=self._fake_run(_IMAGETOOLS_OUTPUT),
+        ) as run_mock:
+            candidates = agent._get_remote_digest_candidates("nettername/foo:arm64-latest")
+        self.assertEqual(candidates, {_LIST_DIGEST, _ARM64_DIGEST, _AMD64_DIGEST})
+        self.assertEqual(
+            run_mock.call_args[0][0][:4],
+            ["docker", "buildx", "imagetools", "inspect"],
+        )
+
+    def test_remote_candidates_fallback_to_legacy(self):
+        # imagetools fails (rc=1) -> falls back to `docker manifest inspect`,
+        # which still picks the arm64 CHILD digest (wrapped in a set).
+        manifest = json.dumps({
+            "manifests": [
+                {"platform": {"architecture": "amd64", "os": "linux"},
+                 "digest": _AMD64_DIGEST},
+                {"platform": {"architecture": "arm64", "os": "linux"},
+                 "digest": _ARM64_DIGEST},
+            ]
+        })
+        with patch(
+            "agent.subprocess.run",
+            side_effect=[self._fake_run("", returncode=1), self._fake_run(manifest)],
+        ):
+            candidates = agent._get_remote_digest_candidates("nettername/foo:arm64-latest")
+        self.assertEqual(candidates, {_ARM64_DIGEST})
+
+    def test_membership_short_circuits_pull(self):
+        # Local RepoDigest is the LIST digest; candidates contain it ->
+        # no pull, digest carried into the last-pull payload.
+        saved: dict = {}
+        with patch.object(agent, "_images_from_compose", return_value=["nettername/foo:arm64-latest"]), \
+                patch.object(agent, "_is_dockerhub_reachable", return_value=True), \
+                patch.object(agent, "_get_local_repo_digest", return_value=_LIST_DIGEST), \
+                patch.object(agent, "_get_remote_digest_candidates",
+                             return_value={_LIST_DIGEST, _ARM64_DIGEST}), \
+                patch.object(agent, "_pull_one_image_with_retries") as pull_mock, \
+                patch.object(agent, "_save_last_pull_info", side_effect=saved.update):
+            agent._auto_pull_images()
+        pull_mock.assert_not_called()
+        self.assertEqual(saved, {"nettername/foo:arm64-latest": _LIST_DIGEST})
+
+    def test_non_match_triggers_pull(self):
+        with patch.object(agent, "_images_from_compose", return_value=["nettername/foo:arm64-latest"]), \
+                patch.object(agent, "_is_dockerhub_reachable", return_value=True), \
+                patch.object(agent, "_get_local_repo_digest", return_value=_LIST_DIGEST), \
+                patch.object(agent, "_get_remote_digest_candidates",
+                             return_value={_ARM64_DIGEST, _AMD64_DIGEST}), \
+                patch.object(agent, "_pull_one_image_with_retries",
+                             return_value=_LIST_DIGEST) as pull_mock, \
+                patch.object(agent, "_save_last_pull_info"):
+            agent._auto_pull_images()
+        pull_mock.assert_called_once_with("nettername/foo:arm64-latest")
 
 
 class TestLastPullInfo(unittest.TestCase):

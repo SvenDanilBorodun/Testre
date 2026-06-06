@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import signal
 import socket
 import subprocess
@@ -201,6 +202,51 @@ def _get_remote_manifest_digest(image: str) -> Optional[str]:
     return None
 
 
+_DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
+
+
+def _parse_digest_candidates(text: str) -> set:
+    """Extract every sha256 digest mentioned in ``docker buildx imagetools
+    inspect`` output. The set contains the manifest-LIST digest (the
+    "Digest:" header — what RepoDigests records for an image pulled by tag
+    from a buildx push) AND every per-platform child manifest digest, so a
+    local RepoDigest of either shape can match.
+    """
+    return set(_DIGEST_RE.findall(text or ""))
+
+
+def _get_remote_digest_candidates(
+    image: str,
+    timeout: int = MANIFEST_INSPECT_TIMEOUT,
+) -> set:
+    """Return the set of registry-side digests that count as "local image is
+    current" for ``image`` — empty set on any error.
+
+    Port of the GUI fix from ``gui/app/docker_manager.py`` (970905d), native
+    docker instead of the WSL wrapper. The old pre-check compared the arm64
+    CHILD manifest digest (``_get_remote_manifest_digest``) against the local
+    RepoDigest, which for buildx-pushed images is the manifest-LIST digest —
+    never equal, so every agent start logged "Resolving image" + did a no-op
+    pull round-trip. ``docker buildx imagetools inspect`` (one registry
+    round-trip, no layer downloads; buildx ships with the Jetson's Docker)
+    names BOTH shapes; comparison is set membership at the call site.
+    """
+    try:
+        result = subprocess.run(
+            ["docker", "buildx", "imagetools", "inspect", image],
+            capture_output=True, text=True, timeout=timeout,
+        )
+        if result.returncode == 0:
+            candidates = _parse_digest_candidates(result.stdout)
+            if candidates:
+                return candidates
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+    # Fallback: the legacy single-digest probe (arm64 child manifest digest).
+    digest = _get_remote_manifest_digest(image)
+    return {digest} if digest else set()
+
+
 def _save_last_pull_info(per_image_digests: dict[str, Optional[str]]) -> None:
     payload = {
         "timestamp": int(time.time()),
@@ -322,10 +368,14 @@ def _auto_pull_images() -> None:
     per_image_digests: dict[str, Optional[str]] = {}
     for image in images:
         logger.info("Resolving image %s", image)
-        remote = _get_remote_manifest_digest(image)
         local = _get_local_repo_digest(image)
-        if remote and local and remote == local:
-            logger.info("  already up to date (%s)", remote[:19])
+        # Membership, not equality: the local RepoDigest is the manifest-LIST
+        # digest for buildx-pushed images, while the legacy probe returned the
+        # arm64 CHILD digest — a fixed pair never matched, so this pre-check
+        # was silently dead and every agent start did a no-op pull (the bug
+        # 970905d fixed in the GUI). The candidate set contains both shapes.
+        if local is not None and local in _get_remote_digest_candidates(image):
+            logger.info("  already up to date (%s)", local[:19])
             per_image_digests[image] = local
             continue
         per_image_digests[image] = _pull_one_image_with_retries(image)

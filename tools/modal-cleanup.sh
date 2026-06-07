@@ -100,11 +100,15 @@ else
     if $DRY_RUN; then
       # Literal text, NOT a backtick subshell — dry-run must never invoke
       # the command it claims to preview.
-      echo "  DRY-RUN: would run 'modal app stop $app_id && modal app remove $app_id --yes'  ($desc)"
+      echo "  DRY-RUN: would run 'modal app stop $app_id --yes'  ($desc)"
     else
-      echo "  Removing $app_id ($desc)..."
-      modal app stop "$app_id" 2>/dev/null || true
-      modal app remove "$app_id" --yes 2>&1 || echo "    WARN: remove failed"
+      echo "  Stopping $app_id ($desc)..."
+      # `modal app stop` needs --yes under non-interactive shells (it
+      # otherwise aborts on its own confirmation prompt — and the old
+      # `|| true` swallowed exactly that abort, 2026-06-07 finding).
+      # There is NO `modal app remove` on modal CLI >=1.x: stopped apps
+      # linger in `modal app list` history by design.
+      modal app stop "$app_id" --yes 2>&1 || echo "    WARN: stop failed"
     fi
     APPS_HANDLED=$((APPS_HANDLED + 1))
   done <<< "$APPS"

@@ -35,10 +35,11 @@ COPY . .
 RUN test -n "$REACT_APP_SUPABASE_URL"      || (echo "ERROR: --build-arg REACT_APP_SUPABASE_URL is required (was empty)"      && exit 1) && \
     test -n "$REACT_APP_SUPABASE_ANON_KEY" || (echo "ERROR: --build-arg REACT_APP_SUPABASE_ANON_KEY is required (was empty)" && exit 1) && \
     test -n "$REACT_APP_CLOUD_API_URL"     || (echo "ERROR: --build-arg REACT_APP_CLOUD_API_URL is required (was empty)"     && exit 1)
-# Disable source maps — they expose React source via DevTools and add ~15 MB
-# to the shipped bundle. CRA reads this env at build time; the build/static/js/
-# directory should contain zero *.map files after this.
-ENV GENERATE_SOURCEMAP=false
+# Source maps are disabled in vite.config.js (`build.sourcemap: false`) — they
+# expose React source via DevTools and add ~15 MB to the shipped bundle. (This
+# replaces CRA's GENERATE_SOURCEMAP=false env, which Vite does not read.)
+# `npm run build` runs `vite build`; npm first runs the `prebuild` hook
+# (the Workshop block-sync vitest contract) which still gates the build.
 RUN npm run build
 RUN printf '{"buildId":"%s","builtAt":"%s"}\n' "${REACT_APP_BUILD_ID}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > build/version.json
 

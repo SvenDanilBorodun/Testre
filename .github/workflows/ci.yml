@@ -536,12 +536,17 @@ jobs:
             physical_ai_tools/physical_ai_manager/
       - name: Assert placeholder secrets reached the bundle
         run: |
+          # Path-agnostic: recursively grep the whole nginx html root for each
+          # needle rather than a fixed bundle filename. CRA emitted
+          # static/js/main.*.js; Vite emits static/js/index-*.js. Using
+          # `grep -r` on the html root means a future bundler/output rename
+          # never silently breaks this white-screen guard again.
           for needle in \
             'CI_VALIDATE.supabase.co' \
             'CI_VALIDATE_ANON_KEY' \
             'CI_VALIDATE.api.example' ; do
               if ! docker run --rm --entrypoint sh edubotics-teacher-web-validate -c \
-                   "grep -q -F '$needle' /usr/share/nginx/html/static/js/main.*.js" ; then
+                   "grep -q -r -F '$needle' /usr/share/nginx/html" ; then
                   echo "FAIL: '$needle' not found in built bundle"
                   exit 1
               fi
@@ -581,18 +586,23 @@ jobs:
           rm -f physical_ai_tools/physical_ai_manager/_coco_classes.py
       - name: Assert placeholder secrets reached the React bundle
         run: |
-          # Each placeholder must appear as a string literal in main.*.js.
-          # If Webpack didn't inline process.env.REACT_APP_SUPABASE_URL,
+          # Each placeholder must appear as a string literal in the built JS.
+          # If the bundler didn't inline process.env.REACT_APP_SUPABASE_URL,
           # the URL is absent and only the library's defensive throw
           # ("supabaseUrl is required") is in the bundle — exactly the
           # bug we're guarding against.
+          #
+          # Path-agnostic: recursively grep the whole nginx html root rather
+          # than a fixed bundle filename. CRA emitted static/js/main.*.js;
+          # Vite emits static/js/index-*.js. `grep -r` on the html root means
+          # a future bundler/output rename never silently breaks this guard.
           for needle in \
             'CI_VALIDATE.supabase.co' \
             'CI_VALIDATE_ANON_KEY' \
             'CI_VALIDATE.api.example' ; do
               if ! docker run --rm --entrypoint sh edubotics-manager-validate -c \
-                   "grep -q -F '$needle' /usr/share/nginx/html/static/js/main.*.js" ; then
-                  echo "FAIL: '$needle' not found in built bundle — Webpack did not inline its env var."
+                   "grep -q -r -F '$needle' /usr/share/nginx/html" ; then
+                  echo "FAIL: '$needle' not found in built bundle — the bundler did not inline its env var."
                   echo "      Likely the Dockerfile dropped the ARG, or the React app stopped importing the var."
                   exit 1
               fi
@@ -883,8 +893,9 @@ jobs:
     # exact bug class CLAUDE.md documents as shipped regressions —
     # react-hooks/exhaustive-deps stale closures (the rosbridge singleton
     # empty-URL outage, the Benutzer-ID wipe) — had no blocking check.
-    # react-scripts bundles eslint-config-react-app and package.json's
-    # eslintConfig extends it, so `npx eslint` needs zero new deps.
+    # Since the Vite migration (react-scripts removed), eslint and
+    # eslint-config-react-app are explicit devDependencies and package.json's
+    # eslintConfig extends the config, so `npx eslint` resolves after npm ci.
     # BLOCKING from day one: the pre-existing backlog (19 problems) was
     # fixed in the same PR that added this job.
     runs-on: ubuntu-latest

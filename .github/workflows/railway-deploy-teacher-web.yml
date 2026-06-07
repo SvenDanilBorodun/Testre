@@ -54,11 +54,18 @@ jobs:
             -f physical_ai_tools/physical_ai_manager/Dockerfile.web \
             physical_ai_tools/physical_ai_manager/
       - name: Assert placeholders reached the bundle
+        # Path-agnostic: recursively grep the whole nginx html root rather
+        # than a fixed bundle filename. CRA emitted static/js/main.*.js; Vite
+        # emits static/js/index-*.js. `grep -r` on the html root means a
+        # future bundler/output rename never silently breaks this guard —
+        # this was the 6th grep site the Vite migration touched, and the only
+        # one gating the LIVE deploy (prebuild-validate blocks `deploy`);
+        # caught by the PR-6 adversarial review.
         run: |
           for needle in CI_VALIDATE.supabase.co CI_VALIDATE_ANON_KEY CI_VALIDATE.api.example; do
             if ! docker run --rm --entrypoint sh edubotics-teacher-web-validate \
-                 -c "grep -q -F '$needle' /usr/share/nginx/html/static/js/main.*.js"; then
-              echo "::error::Placeholder '$needle' missing — Webpack did not inline."
+                 -c "grep -q -r -F '$needle' /usr/share/nginx/html"; then
+              echo "::error::Placeholder '$needle' missing — the bundler did not inline it."
               exit 1
             fi
             echo "OK: $needle present in bundle"

@@ -12,10 +12,11 @@
 // Cloud API doesn't accept) and the lock leak would only surface in a
 // classroom.
 
-// The cloudConfig stub below is hoisted by babel-jest ABOVE this import,
-// so jetsonClient's top-level imports resolve the mocked module cleanly
-// without REACT_APP_CLOUD_API_URL being set in the test env — source
-// order of import vs jest.mock() is irrelevant.
+// The cloudConfig stub below is hoisted by Vitest ABOVE this import (vi.mock
+// is statically hoisted, like babel-jest's jest.mock), so jetsonClient's
+// top-level imports resolve the mocked module cleanly without
+// REACT_APP_CLOUD_API_URL being set in the test env — source order of import
+// vs vi.mock() is irrelevant.
 import {
   claimJetson,
   forceReleaseJetson,
@@ -29,9 +30,9 @@ import {
   unpairJetson,
 } from '../jetsonClient';
 
-jest.mock('../cloudConfig', () => ({
+vi.mock('../cloudConfig', () => ({
   CLOUD_API_URL: 'https://api.test.example',
-  assertCloudApiConfigured: jest.fn(),
+  assertCloudApiConfigured: vi.fn(),
 }));
 
 function jsonResponse(status, body) {

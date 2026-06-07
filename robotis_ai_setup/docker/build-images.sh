@@ -239,15 +239,20 @@ docker buildx build --platform linux/amd64 --load --no-cache --pull \
 # silently produce a broken image again — exactly how the white-screen
 # bug went unnoticed across 4 previously-published tags.
 #
-# We grep for the literal URL string we passed in. If Webpack inlined
-# `process.env.REACT_APP_SUPABASE_URL`, the URL is a string literal in
-# main.*.js. If it wasn't inlined, the only thing in the bundle is the
+# We grep for the literal URL string we passed in. If the bundler inlined
+# `process.env.REACT_APP_SUPABASE_URL`, the URL is a string literal in the
+# built JS. If it wasn't inlined, the only thing in the bundle is the
 # library's defensive throw "supabaseUrl is required" — which is what
 # the broken images showed.
+#
+# Path-agnostic: recursively grep the whole nginx html root rather than a
+# fixed bundle filename. CRA emitted static/js/main.*.js; Vite (v2.6.x
+# migration) emits static/js/index-*.js. `grep -r` on the html root means a
+# future bundler/output rename never silently breaks this guard again.
 echo "   Verifying secrets reached the bundle..."
 _smoke_image="${REGISTRY}/physical-ai-manager:latest"
 if ! docker run --rm --platform linux/amd64 --entrypoint sh "$_smoke_image" -c \
-        "grep -q -F '${SUPABASE_URL}' /usr/share/nginx/html/static/js/main.*.js"; then
+        "grep -q -r -F '${SUPABASE_URL}' /usr/share/nginx/html"; then
     echo ""
     echo "ERROR: SUPABASE_URL not found in the built bundle."
     echo "       The React build did NOT inline process.env.REACT_APP_SUPABASE_URL."
@@ -256,7 +261,7 @@ if ! docker run --rm --platform linux/amd64 --entrypoint sh "$_smoke_image" -c \
     exit 1
 fi
 if ! docker run --rm --platform linux/amd64 --entrypoint sh "$_smoke_image" -c \
-        "grep -q -F '${CLOUD_API_URL}' /usr/share/nginx/html/static/js/main.*.js"; then
+        "grep -q -r -F '${CLOUD_API_URL}' /usr/share/nginx/html"; then
     echo ""
     echo "ERROR: CLOUD_API_URL not found in the built bundle. Aborting."
     exit 1

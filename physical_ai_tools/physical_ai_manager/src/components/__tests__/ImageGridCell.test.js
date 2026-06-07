@@ -13,30 +13,33 @@
 
 import React from 'react';
 import { render, screen, waitFor, act } from '@testing-library/react';
-// Safe to import the component here even though the jest.mock() calls sit
-// below: babel-jest HOISTS every jest.mock() above all imports, so the
-// component always resolves the mocked react-redux/rosConnectionManager/
-// roslib modules regardless of source order.
+// Safe to import the component here even though the vi.mock() calls sit
+// below: Vitest HOISTS every vi.mock() above all imports (like babel-jest's
+// jest.mock), so the component always resolves the mocked react-redux/
+// rosConnectionManager/roslib modules regardless of source order. The
+// `mock*`-prefixed variables referenced inside the factories are exempt from
+// the hoist-time "cannot access before initialization" guard (same naming
+// convention Jest used).
 import ImageGridCell from '../ImageGridCell';
 
 // react-redux: a selector-aware stub backed by a mutable module-level state.
 let mockState;
-jest.mock('react-redux', () => ({
+vi.mock('react-redux', () => ({
   __esModule: true,
   useSelector: (sel) => sel(mockState),
 }));
 
 // rosbridge connection manager: resolve a dummy ros handle.
-jest.mock('../../utils/rosConnectionManager', () => ({
+vi.mock('../../utils/rosConnectionManager', () => ({
   __esModule: true,
-  default: { getConnection: jest.fn(() => Promise.resolve({ rosHandle: true })) },
+  default: { getConnection: vi.fn(() => Promise.resolve({ rosHandle: true })) },
 }));
 
 // roslib Topic: capture constructor opts + the subscribe callback.
-const mockTopicCtor = jest.fn();
-const mockSubscribe = jest.fn();
-const mockUnsubscribe = jest.fn();
-jest.mock('roslib', () => ({
+const mockTopicCtor = vi.fn();
+const mockSubscribe = vi.fn();
+const mockUnsubscribe = vi.fn();
+vi.mock('roslib', () => ({
   __esModule: true,
   default: {
     Topic: function TopicMock(opts) {

@@ -382,15 +382,19 @@ jobs:
       - name: Pull + grep manager bundle for inlined env (amd64 only)
         if: matrix.manager_repo != ''
         # Lifts the assertion build-images.sh already does at lines 226-243.
-        # If the React build skipped a build-arg, the placeholder won't be
-        # in main.*.js and this fails. This is the white-screen catcher.
+        # If the React build skipped a build-arg, the placeholder won't be in
+        # the JS bundle and this fails. This is the white-screen catcher.
+        # Path-agnostic: recursively grep the whole nginx html root rather than
+        # a fixed bundle filename. CRA emitted static/js/main.*.js; Vite emits
+        # static/js/index-*.js. `grep -r` on the html root means a future
+        # bundler/output rename never silently breaks this guard again.
         run: |
           set -e
           docker pull nettername/${{ matrix.manager_repo }}:latest
           for needle in "${{ secrets.SUPABASE_URL }}" "${{ secrets.REACT_APP_CLOUD_API_URL }}"; do
             HASH=$(echo "$needle" | sha256sum | cut -c1-8)
             if ! docker run --rm --entrypoint sh nettername/${{ matrix.manager_repo }}:latest \
-                 -c "grep -q -F '$needle' /usr/share/nginx/html/static/js/main.*.js"; then
+                 -c "grep -q -r -F '$needle' /usr/share/nginx/html"; then
               echo "::error::Bundle does not contain expected env (hash=$HASH)."
               exit 1
             fi

@@ -1,9 +1,12 @@
+/* EduBotics design tokens — the Google Fonts @import MUST be the first
+ * statement: the CSS spec requires @import to precede all other rules, and
+ * Vite/postcss (unlike CRA's webpack pipeline, which tolerated it lower down)
+ * drops a mis-ordered @import with a warning, silently losing the webfont. */
+@import url('https://fonts.googleapis.com/css2?family=Inter+Tight:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap');
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
-
-/* EduBotics design tokens */
-@import url('https://fonts.googleapis.com/css2?family=Inter+Tight:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap');
 
 :root {
   --bg: #FAFAF7;

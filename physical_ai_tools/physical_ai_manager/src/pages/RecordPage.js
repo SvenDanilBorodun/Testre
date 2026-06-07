@@ -3,17 +3,31 @@
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, Suspense, lazy } from 'react';
 import { useSelector, useDispatch } from 'react-redux';
 import clsx from 'clsx';
 import toast, { useToasterStore } from 'react-hot-toast';
-import { MdKeyboardDoubleArrowLeft, MdKeyboardDoubleArrowRight, MdTask } from 'react-icons/md';
+import {
+  MdKeyboardDoubleArrowLeft,
+  MdKeyboardDoubleArrowRight,
+  MdTask,
+  MdViewInAr,
+  MdClose,
+} from 'react-icons/md';
 import ControlPanel from '../components/ControlPanel';
 import HeartbeatStatus from '../components/HeartbeatStatus';
 import ImageGrid from '../components/ImageGrid';
 import InfoPanel from '../components/InfoPanel';
 import { addTag } from '../features/tasks/taskSlice';
 import { setIsFirstLoadFalse } from '../features/ui/uiSlice';
+
+// The 3D follower twin pulls in three.js (~600 KB) + urdf-loader. Load it as a
+// LAZY chunk so it stays out of the entry bundle the white-screen CI greps, and
+// only mounts while the „3D-Ansicht" panel is open (full WebGL teardown on
+// collapse — see UrdfTwin's disposal effect).
+const UrdfTwin = lazy(() => import('../components/UrdfTwin'));
+
+const URDF_OPEN_STORAGE_KEY = 'edubotics_urdf_open';
 
 export default function RecordPage({ isActive = true }) {
   const dispatch = useDispatch();
@@ -31,6 +45,27 @@ export default function RecordPage({ isActive = true }) {
   const getInitialCollapsed = () =>
     typeof window !== 'undefined' && window.innerWidth < 900;
   const [isRightPanelCollapsed, setIsRightPanelCollapsed] = useState(getInitialCollapsed);
+
+  // 3D twin panel. Default COLLAPSED (the camera view stays primary); the
+  // student's open/closed choice persists across reloads in localStorage.
+  const [isUrdfOpen, setIsUrdfOpen] = useState(() => {
+    try {
+      return typeof window !== 'undefined' &&
+        window.localStorage.getItem(URDF_OPEN_STORAGE_KEY) === '1';
+    } catch (_) {
+      return false;
+    }
+  });
+
+  const toggleUrdf = () => {
+    setIsUrdfOpen((prev) => {
+      const next = !prev;
+      try {
+        window.localStorage.setItem(URDF_OPEN_STORAGE_KEY, next ? '1' : '0');
+      } catch (_) { /* private mode / quota — ignore */ }
+      return next;
+    });
+  };
 
   useEffect(() => {
     const onResize = () => {
@@ -83,6 +118,20 @@ export default function RecordPage({ isActive = true }) {
             {camCount} {camCount === 1 ? 'Kamera' : 'Kameras'} aktiv
           </div>
         )}
+        <button
+          onClick={toggleUrdf}
+          className={clsx(
+            'h-8 px-3 rounded-full border backdrop-blur-md flex items-center gap-1.5 text-[11px] font-mono whitespace-nowrap transition-colors',
+            isUrdfOpen
+              ? 'bg-white/20 border-white/30 text-white'
+              : 'bg-white/[0.08] border-white/15 text-white/80 hover:bg-white/15'
+          )}
+          title={isUrdfOpen ? '3D-Ansicht schließen' : '3D-Ansicht öffnen'}
+          aria-pressed={isUrdfOpen}
+        >
+          <MdViewInAr size={16} />
+          3D-Ansicht
+        </button>
         <div className="flex-1" />
         {isRightPanelCollapsed && (
           <button
@@ -99,6 +148,30 @@ export default function RecordPage({ isActive = true }) {
       <div className="flex-1 flex items-start min-h-0 pt-[56px] pb-2 px-2 sm:px-3 lg:px-4 gap-2 sm:gap-3 lg:gap-4">
         <div className="flex-1 self-stretch min-w-0 relative rounded-[var(--radius-lg)] overflow-hidden">
           <ImageGrid isActive={isActive} />
+
+          {/* 3D follower twin — floating card over the camera view. Mounts only
+              while open (lazy chunk + full WebGL teardown on close). Read-only:
+              mirrors /joint_states, never drives the arm (Rule §2). */}
+          {isUrdfOpen && (
+            <div className="absolute top-3 right-3 z-20 w-[min(360px,42vw)] h-[min(300px,40vh)] rounded-[var(--radius-lg)] overflow-hidden border border-white/15 shadow-pop bg-[#1a1d23]">
+              <button
+                onClick={toggleUrdf}
+                className="absolute top-2 right-2 z-20 w-7 h-7 bg-black/50 text-white rounded-full flex items-center justify-center hover:bg-black/70"
+                title="3D-Ansicht schließen"
+              >
+                <MdClose size={16} />
+              </button>
+              <Suspense
+                fallback={
+                  <div className="w-full h-full flex items-center justify-center text-[12px] text-white/70">
+                    3D-Modell wird geladen …
+                  </div>
+                }
+              >
+                <UrdfTwin />
+              </Suspense>
+            </div>
+          )}
 
           {useMultiTaskMode && taskStatus?.currentTaskInstruction && (
             <div className="absolute bottom-3 left-3 right-3 max-w-[560px] pointer-events-none z-20">

@@ -52,16 +52,24 @@ concurrency:
   group: release-installer-${{ github.ref }}
   cancel-in-progress: false
 
-permissions:
-  contents: write  # required to upload assets to the Release
+# Permissions are declared PER JOB (zizmor excessive-permissions): only
+# build-installer needs contents:write (the GH-Release asset upload);
+# build-rootfs is read-only. The caller (release.yml `installer:` job)
+# must grant at least contents:write or GH fails the run at startup —
+# see the v2.3.2 startup_failure note in release.yml.
+permissions: {}
 
 jobs:
   build-rootfs:
     name: Build WSL2 rootfs (Ubuntu host)
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
 
       - name: Build rootfs tarball via Docker
         run: |
@@ -88,8 +96,12 @@ jobs:
     # network jitter and pip wheel-building when pythonnet 3.1.0rc lacks
     # a wheel for the runner's Python patch level.
     timeout-minutes: 90
+    permissions:
+      contents: write  # softprops/action-gh-release: attach the .exe asset
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
 
       - name: Set up Python 3.11
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
@@ -112,9 +124,14 @@ jobs:
         # cross-workflow artifact download requires a token-scoped lookup
         # and we prefer self-contained workflows).
         shell: bash
+        env:
+          # Env indirection instead of inline ${{ }} expansion inside the
+          # run block (zizmor template-injection): a crafted version_tag
+          # could otherwise expand into executable bash. The input is
+          # maintainer-supplied, but the env hop costs nothing.
+          INPUT_TAG: ${{ inputs.version_tag }}
         run: |
           set -e
-          INPUT_TAG="${{ inputs.version_tag }}"
           if [ -n "$INPUT_TAG" ]; then
             REF="${INPUT_TAG#refs/tags/}"
           else

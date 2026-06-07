@@ -10,8 +10,9 @@ pywebview>=6.2.1
 pythonnet>=3.1.0rc0
 
 # Native camera bridge: capture the USB cameras directly on Windows (OpenCV
-# DirectShow, cv2.CAP_DSHOW) and stream JPEG frames into the container. The
-# full opencv-python wheel is required (NOT -headless — we need the DirectShow
-# capture backend); it bundles numpy.
+# MSMF, cv2.CAP_MSMF — DSHOW is the EDUBOTICS_CAMERA_BACKEND=dshow rollback,
+# see win_camera._capture_backend) and stream JPEG frames into the container.
+# The full opencv-python wheel is required (NOT -headless — we need the
+# Windows capture backends); it bundles numpy.
 opencv-python>=4.8
 numpy>=1.24

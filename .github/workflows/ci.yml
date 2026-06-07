@@ -30,6 +30,8 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
         with:
           python-version: "3.11"
@@ -84,6 +86,8 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
       - name: Install shellcheck
         run: sudo apt-get update && sudo apt-get install -y shellcheck
       - name: shellcheck
@@ -111,6 +115,7 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
+          persist-credentials: false
           fetch-depth: 0
       - name: Assert ROOTFS_VERSION bumped when wsl_rootfs/ changes
         run: |
@@ -151,6 +156,8 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
       - name: Assert every .ps1 file has a UTF-8 BOM
         run: |
           fail=0
@@ -179,6 +186,8 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
       - name: Assert .s6-keep mount target exists
         # Audit H29: compose mounts physical_ai_server/.s6-keep as an
         # RO bind. The file enables the s6 longrun service inside the
@@ -254,6 +263,8 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
       - name: Assert every EDUBOTICS_* in entrypoints + overlays is in compose
         run: |
           set -euo pipefail
@@ -310,6 +321,8 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
       - name: Patch script self-check
         run: |
           # Prove the patch script still exits non-zero on a no-op.
@@ -433,6 +446,8 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
         with:
           python-version: "3.11"
@@ -507,6 +522,8 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
       - name: Build physical_ai_manager via Dockerfile.web (Railway path)
         run: |
           docker build \
@@ -543,6 +560,8 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
       - name: Build physical_ai_manager with placeholder secrets
         run: |
           # Stage the same coco_classes.py snapshot that build-images.sh
@@ -602,6 +621,8 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
         with:
           python-version: "3.11"
@@ -688,6 +709,8 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
       - name: Lint srv/msg files
         run: |
           python3 - <<'PY'
@@ -725,6 +748,8 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
       - name: Install nginx + envsubst
         run: |
           sudo apt-get update
@@ -767,6 +792,8 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
       - name: Scan student-facing German strings for transliterations
         run: |
           set -e
@@ -800,3 +827,102 @@ jobs:
         # DB-error matchers ('... in msg') are comparisons, not bindings,
         # so they are structurally excluded and stay English on purpose.
         run: python3 .github/scripts/german_detail_lint.py
+
+  enum-parity:
+    # The TaskPhase/TaskCommand wire ints are hand-duplicated across FOUR
+    # sources (SendCommand.srv + TaskStatus.msg on the ROS side,
+    # taskCommand.js + taskPhases.js on the React side) PLUS literal
+    # getattr() fallbacks in the server package (the pre-rebuild-compiled-
+    # interfaces survival dance, see collision_monitor.py) and hardcoded
+    # ints in the e-stop contract test. rosbridge ships raw ints, so an
+    # enum added or renumbered on one side only is a SILENT mis-decode —
+    # the names already diverge (MOVE_TO_NEXT vs NEXT share int 4), and
+    # until this job nothing asserted the ints agree. leLab-comparison
+    # finding (2026-06-07): the getattr scar had no guardrail.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Cross-check wire-int constants (srv/msg <-> js <-> fallbacks)
+        run: python3 .github/scripts/enum_parity.py
+
+  secret-scan:
+    # gitleaks over the FULL git history on every push/PR. This repo's
+    # workflows carry 12 GHA secrets, service-role keys, HF tokens and
+    # Supabase DB URLs — a hardcoded credential in a future commit would
+    # otherwise ship silently. Runs the pinned BINARY (sha256-verified),
+    # not gitleaks-action (the action requires an org license key).
+    # Known-benign historical hits are fingerprinted in .gitleaksignore
+    # (an expired GitHub presigned URL in the old vendored lerobot README
+    # + one generic-api-key false positive in a deleted doc).
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+          fetch-depth: 0  # full history — leaks usually live in old commits
+      - name: Install gitleaks (pinned + sha256-verified)
+        run: |
+          set -euo pipefail
+          VERSION=8.28.0
+          SHA256=a65b5253807a68ac0cafa4414031fd740aeb55f54fb7e55f386acb52e6a840eb
+          curl -sSfL -o /tmp/gitleaks.tar.gz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${VERSION}/gitleaks_${VERSION}_linux_x64.tar.gz"
+          echo "${SHA256}  /tmp/gitleaks.tar.gz" | sha256sum -c -
+          tar -C /tmp -xzf /tmp/gitleaks.tar.gz gitleaks
+          /tmp/gitleaks version
+      - name: Scan full history
+        run: /tmp/gitleaks detect --no-banner --redact --source .
+
+  react-lint:
+    # ESLint gate for the React SPA. CRA's build-time lint is WARNING-ONLY
+    # (eslint-webpack-plugin never fails the build), so until this job the
+    # exact bug class CLAUDE.md documents as shipped regressions —
+    # react-hooks/exhaustive-deps stale closures (the rosbridge singleton
+    # empty-URL outage, the Benutzer-ID wipe) — had no blocking check.
+    # react-scripts bundles eslint-config-react-app and package.json's
+    # eslintConfig extends it, so `npx eslint` needs zero new deps.
+    # BLOCKING from day one: the pre-existing backlog (19 problems) was
+    # fixed in the same PR that added this job.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@395ad3262231945c25e8478fd5baf05154b1d79f  # v6.1.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: physical_ai_tools/physical_ai_manager/package-lock.json
+      - name: npm ci
+        working-directory: physical_ai_tools/physical_ai_manager
+        run: npm ci --no-audit --no-fund
+      - name: ESLint (errors AND warnings fail)
+        working-directory: physical_ai_tools/physical_ai_manager
+        run: npx eslint --ext .js,.jsx --max-warnings 0 src/
+
+  actions-security:
+    # zizmor lints the workflows themselves: unpinned actions, checkout
+    # credential persistence (artipacked — the token-in-artifact class),
+    # template injection into run/github-script blocks, overly broad
+    # workflow-level permissions. Config in .github/zizmor.yml documents
+    # the one accepted deviation (release.yml secrets:inherit to its five
+    # same-repo callees). Gate at LOW so the suite stays at today's
+    # zero-findings baseline.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: "3.11"
+      - name: Run zizmor (pinned)
+        run: |
+          python -m pip install --quiet zizmor==1.25.2
+          zizmor --no-progress --min-severity low .github/workflows/

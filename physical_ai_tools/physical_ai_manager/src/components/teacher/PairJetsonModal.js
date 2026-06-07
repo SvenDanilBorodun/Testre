@@ -10,10 +10,6 @@ import React, { useState } from 'react';
 import toast from 'react-hot-toast';
 import Modal from './Modal';
 import { Btn } from '../EbUI';
-import { pairJetson } from '../../services/jetsonClient';
-
-const inputClass =
-  'w-full h-10 px-3 bg-white border border-[var(--line)] rounded-[var(--radius-sm)] text-sm text-[var(--ink)] placeholder:text-[var(--ink-4)] focus:outline-none focus:border-[var(--accent)] focus:ring-2 focus:ring-[color:var(--accent-wash)] transition';
 
 const codeInputClass =
   'w-full h-14 px-3 bg-white border border-[var(--line)] rounded-[var(--radius-sm)] text-2xl font-mono text-center tracking-[0.4em] text-[var(--ink)] placeholder:text-[var(--ink-4)] focus:outline-none focus:border-[var(--accent)] focus:ring-2 focus:ring-[color:var(--accent-wash)] transition';

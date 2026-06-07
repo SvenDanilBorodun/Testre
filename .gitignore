@@ -45,3 +45,9 @@ node_modules/
 # should not land on main. Move worth-keeping content into docs/ as a
 # tracked file before deleting the local copy.
 CRITICAL_FIXES.md
+
+# Transient pre-build spec/plan one-pagers (leLab-style docs/superpowers
+# pattern, adopted 2026-06-07): written BEFORE any feature touching >1 of
+# the 10 layers, deleted after the feature ships. Deliberately untracked —
+# permanent invariants belong in CLAUDE.md, not here.
+docs/plans/

@@ -79,9 +79,10 @@ RUN set -e && \
 # build context as pkg_src/ by build-images.sh (test/, the two Dockerfiles,
 # CHANGELOG and __pycache__ excluded — build inputs / dev-only, not runtime).
 # "Image == repo HEAD" is now true BY CONSTRUCTION: edits, new files AND deletions
-# all propagate, with no hand-maintained list to forget. The server_inference.py
-# upstream-bug fix (self._endpoints init + de-dup) and the Roboter Studio workflow/
-# module are part of this tree now, so the separate fix_server_inference.py patch
+# all propagate, with no hand-maintained list to forget. The dead ZMQ pair
+# (server_inference.py + client_inference.py — never instantiated; deleted from
+# the tree 2026-06-07) propagates out the same way. The Roboter Studio workflow/
+# module is part of this tree, so the separate fix_server_inference.py patch
 # step and the workflow COPY block are gone. The asserts below fail loudly if a
 # stripped guard (safety_envelope.py, Rule §2) or the dead on-device-training trees
 # ever re-enter; CI's image-source-parity job re-asserts byte equality after every

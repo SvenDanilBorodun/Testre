@@ -68,18 +68,18 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: true
 
-permissions:
-  # Union of permissions required by all called workflows. GH refuses to
-  # start the run if any callee declares a permission that's stricter on
-  # the caller — observed as a startup_failure on v2.3.2 + v2.3.3 with
-  # the error "The workflow is requesting 'pull-requests: write', but is
-  # only allowed 'pull-requests: none'." (the previous `contents: read`
-  # block silently set ALL other scopes to `none`, including the
-  # pull-requests: write that supabase-migrate.yml needs for branch-PR
-  # comments and the contents: write that release-installer.yml needs to
-  # upload the .exe to the GH Release page).
-  contents: write       # release-installer.yml: upload .exe to GH Release
-  pull-requests: write  # supabase-migrate.yml: comment on the PR
+# Permissions are granted PER JOB (zizmor excessive-permissions) — each
+# caller job grants exactly what its callee workflow declares, no more.
+# CRITICAL (v2.3.2 + v2.3.3 startup_failure scar): GH refuses to start
+# the run if any callee declares a permission stricter than the CALLER
+# grants — "The workflow is requesting 'pull-requests: write', but is
+# only allowed 'pull-requests: none'." When a callee's permissions
+# change, the matching caller job below MUST change in the same PR:
+#   supabase-migrate.yml   → contents: read + pull-requests: write
+#   railway-deploy-*.yml   → contents: read
+#   docker-publish.yml     → contents: read
+#   release-installer.yml  → contents: write (GH-Release asset upload)
+permissions: {}
 
 jobs:
   # ── W1: Supabase ──────────────────────────────────────────────────
@@ -97,6 +97,9 @@ jobs:
         github.event_name != 'workflow_dispatch' ||
         !fromJSON(inputs.skip_supabase || 'false')
       }}
+    permissions:
+      contents: read
+      pull-requests: write  # supabase-migrate.yml declares it (branch-PR comments)
     uses: ./.github/workflows/supabase-migrate.yml
     secrets: inherit
 
@@ -108,6 +111,8 @@ jobs:
     name: W2. Deploy cloud_training_api
     needs: [supabase]
     if: always() && (needs.supabase.result == 'success' || needs.supabase.result == 'skipped')
+    permissions:
+      contents: read
     uses: ./.github/workflows/railway-deploy-cloud-api.yml
     secrets: inherit
 
@@ -116,6 +121,8 @@ jobs:
     name: W3. Deploy teacher-web
     needs: [cloud-api]
     if: always() && needs.cloud-api.result == 'success'
+    permissions:
+      contents: read
     uses: ./.github/workflows/railway-deploy-teacher-web.yml
     secrets: inherit
 
@@ -124,6 +131,8 @@ jobs:
     name: W4. Build + publish Docker images
     needs: [teacher-web]
     if: always() && needs.teacher-web.result == 'success'
+    permissions:
+      contents: read
     uses: ./.github/workflows/docker-publish.yml
     secrets: inherit
 
@@ -138,6 +147,8 @@ jobs:
     name: W5. Build + attach installer .exe
     needs: [docker]
     if: always() && needs.docker.result == 'success'
+    permissions:
+      contents: write  # release-installer.yml uploads the .exe to the GH Release
     uses: ./.github/workflows/release-installer.yml
     secrets: inherit
 
@@ -160,6 +171,7 @@ jobs:
     if: always() && needs.installer.result == 'success' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions: {}  # talks only to Railway via RAILWAY_TOKEN; no GITHUB_TOKEN use
     env:
       RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
     steps:

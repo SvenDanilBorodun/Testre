@@ -1,0 +1,15 @@
+# zizmor (GitHub Actions security linter) configuration.
+# Run by ci.yml::actions-security; pinned version there.
+
+rules:
+  secrets-inherit:
+    # release.yml is the golden-order dispatcher (W1→W6, CLAUDE.md Rule §6):
+    # it intentionally forwards the full secret set to its five SAME-REPO,
+    # path-pinned (./.github/workflows/...) callees — each callee is already
+    # the canonical deploy workflow for its surface and consumes a distinct
+    # subset of the 12 documented GHA secrets. Converting to explicit
+    # `secrets:` lists would require declaring a workflow_call secrets schema
+    # in all five callees and keeping six files in lockstep for zero trust
+    # gain (no third-party callee is ever invoked).
+    ignore:
+      - release.yml

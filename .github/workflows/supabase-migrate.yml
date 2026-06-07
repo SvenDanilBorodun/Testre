@@ -65,9 +65,13 @@ concurrency:
   group: supabase-migrate-production
   cancel-in-progress: false
 
+# Baseline read-only; ONLY apply-branch elevates (zizmor excessive-
+# permissions): it needs pull-requests:write for its PR comment. NOTE for
+# release.yml (the workflow_call caller): its `supabase:` job must keep
+# granting contents:read + pull-requests:write — a caller granting less
+# than a callee job requests is a STARTUP failure (v2.3.2 scar).
 permissions:
   contents: read
-  pull-requests: write  # for the apply-branch job to comment on the PR
 
 jobs:
   validate:
@@ -76,6 +80,8 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
       - uses: supabase/setup-cli@52a446718e4edd1a9f1e2631186019c87e329f60  # v2.1.0
         with:
           version: latest
@@ -113,10 +119,15 @@ jobs:
     needs: [validate]
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    permissions:
+      contents: read
+      pull-requests: write  # the github-script PR comment below
     env:
       SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
       - uses: supabase/setup-cli@52a446718e4edd1a9f1e2631186019c87e329f60  # v2.1.0
         with:
           version: latest
@@ -168,11 +179,18 @@ jobs:
           supabase db push --linked --password "$DB_PASSWORD"
       - name: Comment on PR with branch URL + status
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
+        env:
+          # Env indirection instead of ${{ }} inside the script (zizmor
+          # template-injection): branch_name derives from the PR head ref,
+          # which a fork PR controls — inline expansion would let a crafted
+          # branch name inject JS into this privileged github-script step.
+          BRANCH_API_URL: ${{ steps.branch.outputs.branch_api_url }}
+          BRANCH_NAME: ${{ steps.branch.outputs.branch_name }}
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            const branchUrl = "${{ steps.branch.outputs.branch_api_url }}";
-            const branchName = "${{ steps.branch.outputs.branch_name }}";
+            const branchUrl = process.env.BRANCH_API_URL;
+            const branchName = process.env.BRANCH_NAME;
             const body = [
               "## Supabase PR-Branch Migration applied ✅",
               "",
@@ -204,6 +222,8 @@ jobs:
       SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
       - uses: supabase/setup-cli@52a446718e4edd1a9f1e2631186019c87e329f60  # v2.1.0
         with:
           version: latest
@@ -230,6 +250,8 @@ jobs:
       SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
       - uses: supabase/setup-cli@52a446718e4edd1a9f1e2631186019c87e329f60  # v2.1.0
         with:
           version: latest
@@ -299,6 +321,8 @@ jobs:
       PGPASSWORD: dummy  # psql reads from SUPABASE_DB_URL; this just silences a warning
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
       - name: Install psql
         run: |
           sudo apt-get update

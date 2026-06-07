@@ -59,8 +59,6 @@ export function useJetsonConnection() {
   const dispatch = useDispatch();
   const status = useSelector((s) => s.jetson.status);
   const jetsonId = useSelector((s) => s.jetson.jetsonId);
-  const lanIp = useSelector((s) => s.jetson.lanIp);
-  const mdnsName = useSelector((s) => s.jetson.mdnsName);
   const classroomId = useSelector((s) => s.auth.classroomId);
   const accessToken = useSelector((s) => s.auth.session?.access_token);
   const userId = useSelector((s) => s.auth.session?.user?.id);

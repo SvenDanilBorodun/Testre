@@ -12,14 +12,10 @@
 // Cloud API doesn't accept) and the lock leak would only surface in a
 // classroom.
 
-// Stub the cloudConfig module BEFORE importing jetsonClient so its
-// top-level imports resolve cleanly without REACT_APP_CLOUD_API_URL
-// being set in the test env.
-jest.mock('../cloudConfig', () => ({
-  CLOUD_API_URL: 'https://api.test.example',
-  assertCloudApiConfigured: jest.fn(),
-}));
-
+// The cloudConfig stub below is hoisted by babel-jest ABOVE this import,
+// so jetsonClient's top-level imports resolve the mocked module cleanly
+// without REACT_APP_CLOUD_API_URL being set in the test env — source
+// order of import vs jest.mock() is irrelevant.
 import {
   claimJetson,
   forceReleaseJetson,
@@ -32,6 +28,11 @@ import {
   releaseJetsonBeacon,
   unpairJetson,
 } from '../jetsonClient';
+
+jest.mock('../cloudConfig', () => ({
+  CLOUD_API_URL: 'https://api.test.example',
+  assertCloudApiConfigured: jest.fn(),
+}));
 
 function jsonResponse(status, body) {
   return {
@@ -228,15 +229,23 @@ describe('jetsonClient request shape', () => {
 });
 
 describe('releaseJetsonBeacon (v2.3.0 sendBeacon fix)', () => {
-  let originalNavigator;
+  // jsdom (Node >=22 vintage) exposes `global.navigator` as a getter-only
+  // accessor: the old `global.navigator = {...}` assignment SILENTLY
+  // no-op'd, sendBeacon stayed undefined, and the two assertion tests
+  // below failed (while the "absent" test passed vacuously). Stub the
+  // method on the existing navigator object instead — defineProperty with
+  // configurable:true so afterEach can remove it cleanly.
+  const setSendBeacon = (impl) =>
+    Object.defineProperty(global.navigator, 'sendBeacon', {
+      value: impl,
+      writable: true,
+      configurable: true,
+    });
   beforeEach(() => {
-    originalNavigator = global.navigator;
-    global.navigator = {
-      sendBeacon: jest.fn(() => true),
-    };
+    setSendBeacon(jest.fn(() => true));
   });
   afterEach(() => {
-    global.navigator = originalNavigator;
+    delete global.navigator.sendBeacon;
   });
 
   test('hits the dedicated release-beacon endpoint (NOT /release)', () => {
@@ -246,26 +255,33 @@ describe('releaseJetsonBeacon (v2.3.0 sendBeacon fix)', () => {
     expect(url).toBe('https://api.test.example/jetson/j-1/release-beacon');
   });
 
-  test('sends body as application/json Blob with access_token field', () => {
+  test('sends body as application/json Blob with access_token field', async () => {
     releaseJetsonBeacon('jwt-token-xyz', 'j-1');
     const body = global.navigator.sendBeacon.mock.calls[0][1];
     expect(body).toBeInstanceOf(Blob);
     expect(body.type).toBe('application/json');
-    // Blob → text → JSON parse to confirm the payload shape.
-    return body.text().then((text) => {
-      expect(JSON.parse(text)).toEqual({ access_token: 'jwt-token-xyz' });
+    // Read via FileReader — jsdom's Blob lacks .text() on the jest
+    // (jsdom ~20) environment CRA ships; FileReader works everywhere.
+    const text = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = () => reject(reader.error);
+      reader.readAsText(body);
     });
+    expect(JSON.parse(text)).toEqual({ access_token: 'jwt-token-xyz' });
   });
 
   test('no-op when navigator.sendBeacon is absent (Node SSR, old browsers)', () => {
-    global.navigator = {};
+    delete global.navigator.sendBeacon;
     expect(() => releaseJetsonBeacon('jwt-token', 'j-1')).not.toThrow();
   });
 
   test('swallows sendBeacon throws (quota / payload-size)', () => {
-    global.navigator.sendBeacon = jest.fn(() => {
-      throw new Error('quota');
-    });
+    setSendBeacon(
+      jest.fn(() => {
+        throw new Error('quota');
+      })
+    );
     expect(() => releaseJetsonBeacon('jwt-token', 'j-1')).not.toThrow();
   });
 });

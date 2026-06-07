@@ -1,0 +1,12 @@
+# gitleaks fingerprint allowlist (commit:file:rule:line).
+# Both entries verified benign 2026-06-07 (leLab-comparison PR-0):
+#
+# 1. ALLOWED_POLICIES=act — a config VALUE (the policy allowlist env var) in a
+#    long-deleted pipeline doc; generic-api-key false positive.
+6904b979190a590c971f0966aaf5ca1fdcafba86:CLAUDE_PIPELINE.md:generic-api-key:367
+#
+# 2. AKIAVCODYLSA53PQK4ZA — GitHub's OWN S3 signing key id inside an EXPIRED
+#    (2024-05-05, 300 s TTL) presigned github-production-user-asset .mov URL,
+#    vendored from upstream LeRobot's README (tree removed in 8d1962d). Not an
+#    EduBotics credential; not exploitable.
+b0b601fac9e3b30b1e9288425c91d0f3eb30f793:physical_ai_tools/lerobot/README.md:aws-access-token:207

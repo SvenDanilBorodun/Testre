@@ -13,7 +13,7 @@ import { useSelector } from 'react-redux';
 import * as Blockly from 'blockly/core';
 import 'blockly/blocks';
 import * as De from 'blockly/msg/de';
-import { TOOLBOX, buildToolbox } from './blocks/toolbox';
+import { buildToolbox } from './blocks/toolbox';
 import { registerMotionBlocks, attachMotionWorkspaceValidators } from './blocks/motion';
 import { registerPerceptionBlocks } from './blocks/perception';
 import { registerDestinationBlocks } from './blocks/destinations';

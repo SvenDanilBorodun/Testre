@@ -35,7 +35,6 @@ function DebugPanel({ workspace }) {
   return (
     <aside
       className="bg-white rounded-lg border border-[var(--line)] flex flex-col h-full overflow-hidden"
-      role="complementary"
       aria-label="Debug-Panel"
     >
       <div role="tablist" className="flex border-b border-[var(--line)] bg-[var(--bg-sunk)]">

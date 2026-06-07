@@ -35,7 +35,8 @@ import {
 import useTeacherJetsonRealtime from '../../hooks/useTeacherJetsonRealtime';
 import PairJetsonModal from './PairJetsonModal';
 
-const HEARTBEAT_OFFLINE_MS = 60 * 1000; // matches Cloud API _is_online threshold
+// Online/offline badge logic lives server-side (Cloud API _is_online,
+// threshold 60 s); the client only renders the server's verdict.
 
 function formatAge(isoString) {
   if (!isoString) return '—';

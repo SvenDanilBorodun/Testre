@@ -64,7 +64,16 @@ function StudentApp() {
   const jetsonConnected = useSelector((state) => state.jetson.status === 'connected');
   // v2.3.0: needed so the signOut handlers below can fire a beacon
   // release with the still-valid JWT before the session goes away.
+  // Mirrored into a ref so the profile-fetch effect (keyed on the access
+  // token only) reads the CURRENT jetsonId at fire time without listing it
+  // as a dep — re-running getMe on every Jetson connect/disconnect would
+  // spuriously re-fetch the profile and re-toast. Same latest-value-by-ref
+  // pattern as useJetsonConnection's beacon refs.
   const jetsonId = useSelector((state) => state.jetson.jetsonId);
+  const jetsonIdRef = useRef(jetsonId);
+  useEffect(() => {
+    jetsonIdRef.current = jetsonId;
+  }, [jetsonId]);
   const cloudOnly = isCloudOnlyMode();
   const currentRosHost = useSelector((state) => state.ros.rosHost);
 
@@ -159,7 +168,7 @@ function StudentApp() {
           // JWT is still valid for the beacon-style release call.
           // Without this, the lock leaks for the full 5-min sweeper
           // window every time a wrong-role account hits the student app.
-          resetJetsonOnLogout(dispatch, session.access_token, jetsonId);
+          resetJetsonOnLogout(dispatch, session.access_token, jetsonIdRef.current);
           supabase.auth.signOut();
           dispatch(clearSession());
         }

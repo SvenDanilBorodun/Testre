@@ -3,7 +3,7 @@
 On the Windows student PC the cameras are NOT forwarded into WSL via usbipd
 (that bridge caps UVC at ~6-10 Hz and jitters the Dynamixel bus — see CLAUDE.md
 "native camera capture bridge"). Instead the GUI opens them directly with
-OpenCV's DirectShow backend, exactly like phosphobot does, and streams frames
+OpenCV's MSMF backend (phosphobot's native-capture model) and streams frames
 into the container. This module owns the Windows-side enumeration and the
 OpenCV VideoCapture configuration; the streaming lives in camera_bridge.py.
 

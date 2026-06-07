@@ -342,5 +342,73 @@ class TestNewRouteSurfaces(unittest.TestCase):
         self.assertTrue(callable(jetson_routes.unpair_jetson_endpoint))
 
 
+class _ChainCapture:
+    """Minimal chainable supabase-table stub capturing insert payloads."""
+
+    def __init__(self, store):
+        self.store = store
+
+    def table(self, name):
+        self.store.setdefault("tables", []).append(name)
+        return self
+
+    def insert(self, row):
+        self.store["inserted"] = row
+        return self
+
+    def select(self, *_a, **_k):
+        return self
+
+    def eq(self, *_a, **_k):
+        return self
+
+    def order(self, *_a, **_k):
+        return self
+
+    def limit(self, *_a, **_k):
+        return self
+
+    def execute(self):
+        return SimpleNamespace(data=[])
+
+
+class TestRecordInferenceRunIdor(unittest.TestCase):
+    """leLab-comparison PR-5b: the run record is keyed to the verified JWT
+    identity. A body that smuggles student_user_id/classroom_id must be
+    IGNORED — the service-role client bypasses RLS, so this assert IS the
+    authorization layer (Rule §4)."""
+
+    def test_row_keyed_to_profile_not_body(self):
+        import asyncio
+
+        store = {}
+        fake_supabase = _ChainCapture(store)
+        body = jetson_routes.InferenceRunCreate(
+            policy_repo="org/model",
+            jetson_id=None,
+            started_at="2026-06-07T10:00:00Z",
+            duration_s=12.5,
+            exit_reason="stopped",
+            error_message_de="",
+        )
+        # Adversarial extra attributes a crafted client might send — the
+        # route must never read them.
+        body.student_user_id = "attacker-id"
+        body.classroom_id = "attacker-classroom"
+
+        profile = {"id": "real-student", "classroom_id": "real-classroom"}
+        with patch.object(jetson_routes, "get_supabase",
+                          return_value=fake_supabase):
+            result = asyncio.run(
+                jetson_routes.record_inference_run(body, profile=profile))
+
+        self.assertEqual(result, {"ok": True})
+        inserted = store["inserted"]
+        self.assertEqual(inserted["student_user_id"], "real-student")
+        self.assertEqual(inserted["classroom_id"], "real-classroom")
+        self.assertEqual(inserted["policy_repo"], "org/model")
+        self.assertNotIn("attacker", str(inserted.get("student_user_id")))
+
+
 if __name__ == "__main__":
     unittest.main()

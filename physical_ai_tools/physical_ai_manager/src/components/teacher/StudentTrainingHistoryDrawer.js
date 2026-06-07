@@ -3,7 +3,11 @@ import clsx from 'clsx';
 import toast from 'react-hot-toast';
 import { MdClose } from 'react-icons/md';
 import { useSelector } from 'react-redux';
-import { listStudentTrainings, listTrainingCheckpoints } from '../../services/teacherApi';
+import {
+  listStudentTrainings,
+  listStudentInferenceRuns,
+  listTrainingCheckpoints,
+} from '../../services/teacherApi';
 import { Avatar, Pill } from '../EbUI';
 
 const STATUS_TONE = {
@@ -50,6 +54,8 @@ export default function StudentTrainingHistoryDrawer({ student, onClose }) {
       });
   };
 
+  const [inferenceRuns, setInferenceRuns] = useState([]);
+
   useEffect(() => {
     if (!token || !student) return;
     setLoading(true);
@@ -57,6 +63,10 @@ export default function StudentTrainingHistoryDrawer({ student, onClose }) {
       .then((t) => setTrainings(t))
       .catch((err) => toast.error(err.message || 'Fehler beim Laden'))
       .finally(() => setLoading(false));
+    // Jetson inference run records (PR-5b) — best-effort side load.
+    listStudentInferenceRuns(token, student.id)
+      .then((runs) => setInferenceRuns(runs))
+      .catch(() => setInferenceRuns([]));
   }, [token, student]);
 
   if (!student) return null;
@@ -180,6 +190,49 @@ export default function StudentTrainingHistoryDrawer({ student, onClose }) {
                 )}
               </div>
             ))
+          )}
+          {inferenceRuns.length > 0 && (
+            <div className="pt-4 mt-2 border-t border-[var(--line)]">
+              <h4 className="text-xs font-semibold uppercase tracking-wide text-[var(--ink-3)] mb-2">
+                Inferenz-Läufe (Klassen-Jetson)
+              </h4>
+              <div className="space-y-2">
+                {inferenceRuns.map((run) => (
+                  <div
+                    key={run.id}
+                    className="p-3 border border-[var(--line)] rounded-[var(--radius)] bg-white text-[11px] font-mono"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="truncate text-[var(--ink)]">{run.policy_repo}</span>
+                      <Pill
+                        tone={
+                          run.exit_reason === 'error'
+                            ? 'danger'
+                            : run.exit_reason === 'finished'
+                              ? 'success'
+                              : 'neutral'
+                        }
+                      >
+                        {run.exit_reason === 'error'
+                          ? 'Fehler'
+                          : run.exit_reason === 'finished'
+                            ? 'Beendet'
+                            : 'Gestoppt'}
+                      </Pill>
+                    </div>
+                    <div className="mt-1 text-[var(--ink-3)]">
+                      {formatDate(run.created_at)} ·{' '}
+                      {run.duration_s != null ? `${Math.round(run.duration_s)} s` : '—'}
+                    </div>
+                    {run.error_message_de && (
+                      <div className="mt-1 text-[color:var(--danger)]">
+                        {run.error_message_de}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
           )}
         </div>
       </aside>

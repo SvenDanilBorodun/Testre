@@ -249,3 +249,9 @@ export async function unpairJetson(accessToken, classroomId) {
     accessToken
   );
 }
+
+// leLab-comparison PR-5b: compact per-run inference record (student-self;
+// the server keys the row to the JWT identity, never to this body).
+export async function recordInferenceRun(accessToken, payload) {
+  return _request('/jetson/inference-runs', 'POST', accessToken, payload);
+}

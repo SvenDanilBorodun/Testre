@@ -58,6 +58,7 @@ import HFStatus from '../constants/HFStatus';
 import store from '../store/store';
 import rosConnectionManager from '../utils/rosConnectionManager';
 import { registerDataset } from '../services/datasetsApi';
+import { recordInferenceRun } from '../services/jetsonClient';
 
 export function useRosTopicSubscription() {
   const taskStatusTopicRef = useRef(null);
@@ -69,6 +70,11 @@ export function useRosTopicSubscription() {
   const audioContextRef = useRef(null);
   // Episode number that already received its 3-seconds-left warning beeps.
   const lastWarnEpisodeRef = useRef(null);
+  // In-flight Jetson inference run (leLab-comparison PR-5b): start time +
+  // policy captured on entering the inference phases; a compact record is
+  // POSTed when the run ends (Jetson sessions are ephemeral — volume +
+  // container logs wiped — so this is the only after-the-fact forensics).
+  const inferenceRunRef = useRef(null);
   const hfStatusTopicRef = useRef(null);
   const lastTrainingUpdateRef = useRef(0);
   // Track the per-ros-instance reconnect listener so we don't double-bind
@@ -215,6 +221,29 @@ export function useRosTopicSubscription() {
     };
   }, [initializeAudioContext]);
 
+  // Finalize + POST the in-flight Jetson inference run (best-effort; only
+  // when a Jetson is connected and the student is signed in).
+  const finalizeInferenceRun = useCallback((exitReason, errorMessage = '') => {
+    const run = inferenceRunRef.current;
+    inferenceRunRef.current = null;
+    if (!run) return;
+    const state = store.getState();
+    if (state.jetson?.status !== 'connected') return;
+    const token = state.auth?.session?.access_token;
+    if (!token) return;
+    recordInferenceRun(token, {
+      policy_repo: run.policyRepo || 'unbekannt',
+      jetson_id: state.jetson?.jetsonId || null,
+      started_at: run.startedAtIso,
+      duration_s: Math.max(0, (Date.now() - run.startedAtMs) / 1000),
+      exit_reason: exitReason,
+      error_message_de: (errorMessage || '').slice(0, 2000),
+    }).catch((err) => {
+      // Telemetry only — never surface a failure to the student.
+      console.warn('Inferenz-Protokoll konnte nicht gespeichert werden:', err);
+    });
+  }, []);
+
   const subscribeToTaskStatus = useCallback(async () => {
     try {
       const RECORDING_BEEP_FREQUENCY = 1000;
@@ -284,6 +313,11 @@ export function useRosTopicSubscription() {
 
         if (msg.error !== '') {
           console.log('error:', msg.error);
+          // An error while a Jetson inference run is in flight is that
+          // run's exit reason (PR-5b).
+          if (inferenceRunRef.current) {
+            finalizeInferenceRun('error', msg.error);
+          }
           toast.error(msg.error);
           return;
         }
@@ -338,6 +372,27 @@ export function useRosTopicSubscription() {
           [0, 250, 500].forEach((delay) => {
             setTimeout(() => playBeep(880, 120), delay);
           });
+        }
+
+        // Jetson inference run lifecycle (PR-5b). Entering either
+        // inference phase from outside starts the record; leaving to a
+        // non-inference phase finalizes it as 'stopped' (inference has no
+        // natural completion — the student presses Stopp; errors are
+        // finalized in the error branch above).
+        const inferencePhases = [TaskPhase.INFERENCING, TaskPhase.INFERENCE_LOADING];
+        const inInference = inferencePhases.includes(currentPhase);
+        const wasInference = inferencePhases.includes(previousPhase);
+        if (inInference && !wasInference) {
+          const jetsonState = store.getState();
+          if (jetsonState.jetson?.status === 'connected') {
+            inferenceRunRef.current = {
+              startedAtMs: Date.now(),
+              startedAtIso: new Date().toISOString(),
+              policyRepo: jetsonState.tasks?.taskInfo?.policyPath || '',
+            };
+          }
+        } else if (!inInference && wasInference && inferenceRunRef.current) {
+          finalizeInferenceRun('stopped');
         }
 
         previousPhaseRef.current = currentPhase;
@@ -439,7 +494,7 @@ export function useRosTopicSubscription() {
     } catch (error) {
       console.error('Failed to subscribe to task status topic:', error);
     }
-  }, [dispatch, rosbridgeUrl, playBeep]);
+  }, [dispatch, rosbridgeUrl, playBeep, finalizeInferenceRun]);
 
   const subscribeToHeartbeat = useCallback(async () => {
     try {

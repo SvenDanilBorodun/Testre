@@ -37,6 +37,9 @@ export const listStudentTrainings = (token, studentId) =>
 
 // Mid-training checkpoint steps the Modal worker mirrored to the model
 // repo (leLab-comparison PR-5a). Teacher-only diagnostics.
+export const listStudentInferenceRuns = (token, studentId) =>
+  apiRequest(`/teacher/students/${studentId}/inference-runs`, 'GET', token);
+
 export const listTrainingCheckpoints = (token, studentId, trainingId) =>
   apiRequest(
     `/teacher/students/${studentId}/trainings/${trainingId}/checkpoints`,

@@ -292,6 +292,9 @@ def _validate_required_schema() -> None:
         # 028: full-log pointer written by the extended
         # update_training_progress RPC on terminal transitions.
         ("trainings", "log_url"),
+        # 029: compact Jetson inference run records (student-self write,
+        # teacher read).
+        ("inference_runs", "id, student_user_id, policy_repo, exit_reason"),
     )
     for table, cols in required_columns:
         try:

@@ -65,6 +65,7 @@ import secrets
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Path
 from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field
 
 from app.auth import get_current_profile, get_current_teacher
 from app.services.supabase_client import get_supabase
@@ -1021,4 +1022,79 @@ async def unpair_jetson_endpoint(
         ).execute()
     except Exception as exc:
         raise _map_pg_error(exc)
+    return {"ok": True}
+
+# ---------- Inference run records (leLab-comparison PR-5b) ----------
+#
+# Jetson sessions are ephemeral (volume wiped on disconnect, container
+# logs gone) — when a student's run failed, nobody could later see why.
+# The React app POSTs ONE compact record per finished run; teachers read
+# them per student. WRITE IS STUDENT-SELF ONLY: the row is keyed to the
+# verified JWT's user id + the profile's classroom — never to body
+# fields (Rule §4: service-role bypasses RLS; a body user_id would be a
+# textbook IDOR).
+
+# Keep the newest N records per student (bounded growth — a looping
+# classroom session must not grow the table forever).
+_INFERENCE_RUNS_KEEP = 50
+
+
+class InferenceRunCreate(BaseModel):
+    policy_repo: str = Field(..., min_length=1, max_length=300)
+    jetson_id: str | None = None
+    started_at: str | None = None  # ISO timestamp from the client clock
+    duration_s: float | None = Field(default=None, ge=0, le=24 * 3600)
+    exit_reason: str = Field(..., pattern="^(finished|error|stopped)$")
+    error_message_de: str = Field(default="", max_length=2000)
+
+
+@router.post("/jetson/inference-runs")
+async def record_inference_run(
+    body: InferenceRunCreate,
+    profile=Depends(get_current_profile),
+):
+    """Student-self write of a compact Jetson inference run record."""
+    supabase = get_supabase()
+    row = {
+        # Keyed to the JWT identity — NEVER a body field.
+        "student_user_id": profile["id"],
+        "classroom_id": profile.get("classroom_id"),
+        "jetson_id": body.jetson_id,
+        "policy_repo": body.policy_repo,
+        "started_at": body.started_at,
+        "duration_s": body.duration_s,
+        "exit_reason": body.exit_reason,
+        "error_message_de": body.error_message_de,
+    }
+    try:
+        supabase.table("inference_runs").insert(row).execute()
+    except Exception:
+        raise HTTPException(
+            status_code=500,
+            detail="Inferenz-Protokoll konnte nicht gespeichert werden.",
+        )
+
+    # Bounded retention: drop everything older than the newest N for this
+    # student. Best-effort — a failure here never fails the request.
+    try:
+        keep = (
+            supabase.table("inference_runs")
+            .select("id")
+            .eq("student_user_id", profile["id"])
+            .order("created_at", desc=True)
+            .limit(_INFERENCE_RUNS_KEEP)
+            .execute()
+        ).data or []
+        if len(keep) >= _INFERENCE_RUNS_KEEP:
+            keep_ids = [r["id"] for r in keep]
+            (
+                supabase.table("inference_runs")
+                .delete()
+                .eq("student_user_id", profile["id"])
+                .not_.in_("id", keep_ids)
+                .execute()
+            )
+    except Exception as exc:  # noqa: BLE001 — retention is best-effort
+        logger.warning("inference_runs retention sweep failed: %s", exc)
+
     return {"ok": True}

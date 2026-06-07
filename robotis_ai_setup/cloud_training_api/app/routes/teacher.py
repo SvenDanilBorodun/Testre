@@ -925,6 +925,44 @@ async def list_training_checkpoints(
         training_id=training_id, model_name=model_name, steps=steps)
 
 
+# ---------- Jetson inference run records (leLab-comparison PR-5b) ----------
+
+
+class InferenceRunSummary(BaseModel):
+    id: int
+    policy_repo: str
+    started_at: str | None
+    duration_s: float | None
+    exit_reason: str
+    error_message_de: str
+    created_at: str
+
+
+@router.get(
+    "/students/{student_id}/inference-runs",
+    response_model=list[InferenceRunSummary],
+)
+async def list_student_inference_runs(
+    student_id: str,
+    teacher=Depends(get_current_teacher),
+):
+    """Compact Jetson inference run records for failure forensics."""
+    _assert_student_owned(teacher["id"], student_id)
+    supabase = get_supabase()
+    result = (
+        supabase.table("inference_runs")
+        .select(
+            "id, policy_repo, started_at, duration_s, exit_reason, "
+            "error_message_de, created_at"
+        )
+        .eq("student_user_id", student_id)
+        .order("created_at", desc=True)
+        .limit(50)
+        .execute()
+    )
+    return [InferenceRunSummary(**r) for r in (result.data or [])]
+
+
 # ---------- Daily progress entries ----------
 #
 # Each entry is scoped to a single day (entry_date) under a classroom.

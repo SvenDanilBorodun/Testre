@@ -381,5 +381,66 @@ class ResumeContractTest(unittest.TestCase):
         self.assertEqual(CM.PHASE_COLLISION_HOMED, 9)
 
 
+class JointDistTelemetryContractTest(unittest.TestCase):
+    """Per-joint homing telemetry on /task/status (leLab-comparison PR-2).
+
+    The module-level _TaskStatus stub deliberately LACKS joint_dist_to_home —
+    mirroring a container whose compiled interfaces predate the field. The
+    publish must keep flowing (the safety status is load-bearing) and simply
+    omit the telemetry; a field-bearing TaskStatus gets the 5 floats.
+    """
+
+    def test_stale_interface_publish_survives_without_field(self):
+        host = _Host()
+        host._collision_follower_pos = dict(CONTACT_POSE)
+        host._publish_collision_status()
+        status = host.pub_for('/task/status').published[-1]
+        self.assertFalse(hasattr(status, 'joint_dist_to_home'),
+                         'stale-interface publish must not grow the field')
+        self.assertEqual(status.phase, CM.PHASE_COLLISION)
+
+    def test_fresh_interface_carries_per_joint_distances(self):
+        class _TaskStatusWithField(_TaskStatus):
+            def __init__(self):
+                super().__init__()
+                self.joint_dist_to_home = []
+
+        original = CM.TaskStatus
+        CM.TaskStatus = _TaskStatusWithField
+        try:
+            host = _Host()
+            host._collision_follower_pos = dict(CONTACT_POSE)
+            host._publish_collision_status()
+            status = host.pub_for('/task/status').published[-1]
+            self.assertEqual(len(status.joint_dist_to_home), 5)
+            for i, joint in enumerate(CM.ARM_JOINT_NAMES):
+                self.assertAlmostEqual(
+                    status.joint_dist_to_home[i],
+                    abs(CONTACT_POSE[joint] - CM.SAFE_HOME_ARM[i]),
+                    places=6,
+                )
+            self.assertTrue(
+                all(isinstance(d, float) for d in status.joint_dist_to_home))
+        finally:
+            CM.TaskStatus = original
+
+    def test_per_joint_and_max_agree(self):
+        host = _Host()
+        host._collision_follower_pos = dict(CONTACT_POSE)
+        per_joint = host._dist_to_home_per_joint()
+        self.assertEqual(len(per_joint), 5)
+        self.assertAlmostEqual(max(per_joint), host._dist_to_home(), places=9)
+
+    def test_no_joint_sample_yields_none_and_clean_publish(self):
+        host = _Host()
+        host._collision_follower_pos = {}
+        self.assertIsNone(host._dist_to_home_per_joint())
+        self.assertIsNone(host._dist_to_home())
+        host._publish_collision_status()  # must not raise without a sample
+        self.assertEqual(
+            host.pub_for('/task/status').published[-1].phase,
+            CM.PHASE_COLLISION)
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -406,13 +406,21 @@ class CollisionMonitorMixin:
         # gripper_joint_1 stays at its current position (don't release a grasped object).
         self._publish_quintic(LEADER_JOINTS, start, target, COLLISION_HOME_DURATION_S)
 
+    def _dist_to_home_per_joint(self):
+        """Per-arm-joint |pos - safe_home| (rad), joint1..joint5 order; None before
+        the first /joint_states sample. Feeds the CollisionModal's read-only
+        homing progress strip (leLab-comparison PR-2) — telemetry only, never
+        part of the recovery state machine."""
+        if not all(j in self._collision_follower_pos for j in ARM_JOINT_NAMES):
+            return None
+        return [abs(self._collision_follower_pos[j] - SAFE_HOME_ARM[i])
+                for i, j in enumerate(ARM_JOINT_NAMES)]
+
     def _dist_to_home(self):
         """Max arm-joint distance (rad) from the safe-home pose; None before the first
         /joint_states sample."""
-        if not all(j in self._collision_follower_pos for j in ARM_JOINT_NAMES):
-            return None
-        return max(abs(self._collision_follower_pos[j] - SAFE_HOME_ARM[i])
-                   for i, j in enumerate(ARM_JOINT_NAMES))
+        per_joint = self._dist_to_home_per_joint()
+        return None if per_joint is None else max(per_joint)
 
     def _cancel_glide_timer(self):
         if self._glide_timer is not None:
@@ -505,6 +513,13 @@ class CollisionMonitorMixin:
         status.current_task_instruction = self._collision_message
         # Leave .error empty: the React /task/status handler short-circuits to a transient
         # toast on a non-empty error. The collision banner rides the phase instead.
+        # Per-joint homing telemetry for the CollisionModal progress strip.
+        # getattr-SAFE: a container running pre-rebuild compiled interfaces has
+        # no joint_dist_to_home field, and a bare setattr would raise inside
+        # this publish — the safety status must keep flowing regardless.
+        per_joint = self._dist_to_home_per_joint()
+        if per_joint is not None and hasattr(status, 'joint_dist_to_home'):
+            status.joint_dist_to_home = [float(d) for d in per_joint]
         self._collision_status_pub.publish(status)
 
     def _publish_cleared_status(self):

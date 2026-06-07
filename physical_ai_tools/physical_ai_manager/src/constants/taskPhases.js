@@ -28,6 +28,7 @@ const TaskPhase = {
   COLLISION: 7, // follower forced against an object during teleop; stopped in place (modal step 1)
   COLLISION_HOMING: 8, // safe-home glide in progress (HOME_FOLLOWER accepted)
   COLLISION_HOMED: 9, // follower verified at the home pose (modal step 2)
+  INFERENCE_LOADING: 10, // policy load + processor build after START_INFERENCE (10-30 s)
   // Add more phases as needed
 };
 

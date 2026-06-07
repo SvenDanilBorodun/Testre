@@ -50,6 +50,15 @@ export default function CollisionModal() {
   const stage = collision.stage || 'stopped';
   const isHomed = stage === 'homed';
   const isHoming = stage === 'homing';
+  // Per-joint |pos - home| in rad (joint1..joint5) — published by the
+  // collision monitor while a joint_states sample exists. Empty on
+  // pre-rebuild server images (the strip simply hides). Read-only
+  // telemetry: never feeds the recovery state machine (Rule §2 scope).
+  const jointDists = Array.isArray(collision.jointDistToHome)
+    ? collision.jointDistToHome
+    : [];
+  // Mirrors HOME_ARRIVED_TOL_RAD in collision_monitor.py (0.10 rad).
+  const HOME_TOL_RAD = 0.1;
 
   const callStep = async (serviceCall, errorToast) => {
     setBusy(true);
@@ -105,6 +114,32 @@ export default function CollisionModal() {
                   'zuerst das Hindernis und klicke dann auf „Follower in Grundstellung fahren".')}
           </p>
           {hint && <p className="text-sm font-medium text-amber-700">{hint}</p>}
+          {isHoming && jointDists.length > 0 && (
+            <div
+              className="mt-1 flex w-full flex-row items-center justify-center gap-2"
+              role="status"
+              aria-label="Fortschritt je Gelenk"
+            >
+              {jointDists.map((dist, i) => {
+                const done = dist <= HOME_TOL_RAD;
+                const deg = Math.round((dist * 180) / Math.PI);
+                return (
+                  <div
+                    key={i}
+                    className={`flex min-w-14 flex-col items-center rounded-lg border px-2 py-1 text-xs font-medium ${
+                      done
+                        ? 'border-green-300 bg-green-50 text-green-700'
+                        : 'border-amber-300 bg-amber-50 text-amber-700'
+                    }`}
+                    title={`Gelenk ${i + 1}: noch ${deg}° bis zur Grundstellung`}
+                  >
+                    <span>G{i + 1}</span>
+                    <span>{done ? '✓' : `${deg}°`}</span>
+                  </div>
+                );
+              })}
+            </div>
+          )}
           {isHomed ? (
             <button
               type="button"

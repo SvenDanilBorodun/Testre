@@ -18,6 +18,7 @@ import {
   MdRefresh,
 } from 'react-icons/md';
 import ControlPanel from '../components/ControlPanel';
+import TaskPhase from '../constants/taskPhases';
 import HeartbeatStatus from '../components/HeartbeatStatus';
 import ImageGrid from '../components/ImageGrid';
 import InferencePanel from '../components/InferencePanel';
@@ -387,6 +388,21 @@ export default function InferencePage({ isActive = true }) {
       <div className="flex-1 flex items-start min-h-0 pt-[56px] pb-2 px-2 sm:px-3 lg:px-4 gap-2 sm:gap-3 lg:gap-4">
         <div className="flex-1 self-stretch min-w-0 relative rounded-[var(--radius-lg)] overflow-hidden">
           <ImageGrid isActive={isActive} />
+          {taskStatus.phase === TaskPhase.INFERENCE_LOADING && (
+            <div
+              className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-3 bg-black/55 backdrop-blur-sm"
+              role="status"
+              aria-live="polite"
+            >
+              <div className="h-10 w-10 animate-spin rounded-full border-4 border-white/25 border-t-white" />
+              <span className="text-base font-semibold text-white">
+                Modell wird geladen &amp; Roboter verbindet …
+              </span>
+              <span className="text-xs text-white/70">
+                Das kann beim ersten Start bis zu 30 Sekunden dauern.
+              </span>
+            </div>
+          )}
         </div>
         <div
           className={clsx(

@@ -97,6 +97,9 @@ const initialState = {
     active: false,
     stage: 'stopped',
     message: '',
+    // Per-joint |pos - home| (rad, joint1..joint5) for the homing strip;
+    // [] when the server image predates the TaskStatus field.
+    jointDistToHome: [],
   },
 };
 

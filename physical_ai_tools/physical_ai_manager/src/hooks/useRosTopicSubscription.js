@@ -261,6 +261,10 @@ export function useRosTopicSubscription() {
               active: true,
               stage: collisionStage,
               message: msg.current_task_instruction || '',
+              // Per-joint |pos - home| (rad, joint1..joint5) for the homing
+              // progress strip. Pre-rebuild server images omit the field —
+              // default to [] so the modal simply hides the strip.
+              jointDistToHome: Array.from(msg.joint_dist_to_home ?? []),
             })
           );
           previousPhaseRef.current = msg.phase;
@@ -271,7 +275,9 @@ export function useRosTopicSubscription() {
           previousPhaseRef.current === TaskPhase.COLLISION_HOMING ||
           previousPhaseRef.current === TaskPhase.COLLISION_HOMED
         ) {
-          dispatch(setCollision({ active: false, stage: 'stopped', message: '' }));
+          dispatch(
+            setCollision({ active: false, stage: 'stopped', message: '', jointDistToHome: [] })
+          );
         }
 
         if (msg.error !== '') {
@@ -309,7 +315,8 @@ export function useRosTopicSubscription() {
           msg.phase === TaskPhase.RESETTING ||
           msg.phase === TaskPhase.RECORDING ||
           msg.phase === TaskPhase.SAVING ||
-          msg.phase === TaskPhase.INFERENCING;
+          msg.phase === TaskPhase.INFERENCING ||
+          msg.phase === TaskPhase.INFERENCE_LOADING;
 
         // ROS message to React state
         dispatch(

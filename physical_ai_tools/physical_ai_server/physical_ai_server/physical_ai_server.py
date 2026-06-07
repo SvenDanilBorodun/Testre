@@ -131,6 +131,13 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
     DEFAULT_TOPIC_TIMEOUT = 5.0  # seconds
     PUB_QOS_SIZE = 10
 
+    # Wire int for the policy-loading phase. getattr fallback mirrors the
+    # collision constants (collision_monitor.py): a container whose COMPILED
+    # physical_ai_interfaces predate the constant still publishes the right
+    # raw value — React compares ints (taskPhases.js); enum-parity CI keeps
+    # the literal in sync with the .msg.
+    PHASE_INFERENCE_LOADING = getattr(TaskStatus, 'INFERENCE_LOADING', 10)
+
     class RosbagNotReadyException(Exception):
         """Exception raised when rosbag recording cannot start yet."""
 
@@ -146,6 +153,10 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         self.on_inference = False
         self.on_calibration = False
         self.on_workflow = False
+        # True while the eager background policy load (START_INFERENCE ->
+        # _eager_load_policy thread) is in flight; the inference FPS timer
+        # skips its tick and re-publishes INFERENCE_LOADING instead.
+        self._inference_policy_loading = False
         # Cached Supabase JWT forwarded from the React app's
         # StartWorkflow request — consumed by _cloud_vision_burst.
         # None until the next workflow start.
@@ -825,7 +836,54 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             self.timer_manager.stop(timer_name=self.operation_mode)
             return
 
+    def _eager_load_policy(self):
+        """Background policy load kicked by START_INFERENCE.
+
+        Plain daemon thread on purpose: load_policy() is pure torch/file
+        I/O (no rclpy calls inside), so it needs no executor thread — and
+        must not occupy one for 10-30 s. The FPS timer skips its tick while
+        ``_inference_policy_loading`` is set; because the flag clears only
+        AFTER the failure teardown below, the timer's lazy-load fallback and
+        predict() can never race a failed/half-loaded policy.
+        """
+        try:
+            ok = self.inference_manager.load_policy()
+        except Exception as e:  # defensive — load_policy logs its own errors
+            self.get_logger().error(f'Eager policy load crashed: {e}')
+            ok = False
+        # Teardown-before-flag-clear: while the flag is set the timer keeps
+        # skipping ticks, so this teardown cannot race the lazy-load fallback
+        # or a predict() against a half-loaded policy (load_policy may set
+        # self.policy and then fail building the processors). The finally
+        # guarantees the flag ALWAYS clears — a teardown exception must not
+        # freeze the loading UI forever.
+        try:
+            if not ok and self.on_inference:
+                self.get_logger().error('Eager policy load failed')
+                current_status = self.data_manager.get_current_record_status()
+                current_status.phase = TaskStatus.READY
+                current_status.error = (
+                    'Das Modell konnte nicht geladen werden. Bitte Modellpfad '
+                    'prüfen und erneut versuchen.'
+                )
+                self.on_inference = False
+                self.on_recording = False
+                self.communicator.publish_status(status=current_status)
+                self.inference_manager.clear_policy()
+                self.timer_manager.stop(timer_name=self.operation_mode)
+        finally:
+            self._inference_policy_loading = False
+
     def _inference_timer_callback(self):
+        if self._inference_policy_loading:
+            # Eager load still in flight — keep the React side on the
+            # German "Modell wird geladen…" state instead of silently
+            # waiting on the lazy load with a stale phase.
+            current_status = self.data_manager.get_current_record_status()
+            current_status.phase = self.PHASE_INFERENCE_LOADING
+            self.communicator.publish_status(status=current_status)
+            return
+
         error_msg = ''
         current_status = TaskStatus()
         camera_msgs, follower_msgs, _ = self.communicator.get_latest_data()
@@ -986,6 +1044,25 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 self.on_inference = True
                 self.inference_manager.reset_policy()
                 self.start_recording_time = time.perf_counter()
+
+                # Eager policy load (leLab-comparison PR-2): the first load
+                # takes 10-30 s (HF cache read + make_pre_post_processors).
+                # The lazy load inside the FPS timer left the student staring
+                # at a frozen arm with a stale phase the whole time; loading
+                # HERE would be worse — /task/command runs on the default
+                # MutuallyExclusiveCallbackGroup, and a 10-30 s block there
+                # starves the 1 Hz heartbeat + /task/status timers (the
+                # documented "disconnected"-flicker class, see _hf_cb_group).
+                # So: publish INFERENCE_LOADING immediately, load on a daemon
+                # thread, and let the timer skip ticks until the load ends.
+                self._inference_policy_loading = True
+                loading_status = self.data_manager.get_current_record_status()
+                loading_status.phase = self.PHASE_INFERENCE_LOADING
+                self.communicator.publish_status(status=loading_status)
+                threading.Thread(
+                    target=self._eager_load_policy, daemon=True
+                ).start()
+
                 response.success = True
                 response.message = 'Inference started'
 

@@ -103,7 +103,7 @@ const STYLES = {
   cancelButton: clsx('px-6', 'py-2', 'text-sm', 'font-medium', 'rounded-lg', 'transition-colors'),
 };
 
-const PolicyDownloadModal = ({ isOpen, onClose, onDownloadComplete }) => {
+const PolicyDownloadModal = ({ isOpen, onClose, onDownloadComplete, initialRepoId = '' }) => {
   const hfStatus = useSelector((state) => state.editDataset.hfStatus);
   // const downloadStatus = useSelector((state) => state.editDataset.downloadStatus);
 
@@ -120,6 +120,16 @@ const PolicyDownloadModal = ({ isOpen, onClose, onDownloadComplete }) => {
 
   // Validation states
   const [repoValidation, setRepoValidation] = useState({ isValid: true, message: '' });
+
+  // Prefill from the "Neuestes Modell" chip (leLab-comparison PR-3): a full
+  // 'org/name' repo-id splits into the modal's two fields when it opens.
+  useEffect(() => {
+    if (isOpen && initialRepoId && initialRepoId.includes('/')) {
+      const [owner, ...rest] = initialRepoId.split('/');
+      setUserId(owner);
+      setHfRepoId(rest.join('/'));
+    }
+  }, [isOpen, initialRepoId]);
 
   // Computed values
   const isHfStatusReady =

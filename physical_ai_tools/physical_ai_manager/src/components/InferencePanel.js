@@ -23,6 +23,7 @@ import PolicyDownloadModal from './PolicyDownloadModal';
 import TaskPhase from '../constants/taskPhases';
 import { DEFAULT_PATHS, TARGET_FILES } from '../constants/paths';
 import { setTaskInfo } from '../features/tasks/taskSlice';
+import useSupabaseTrainings from '../hooks/useSupabaseTrainings';
 
 const InferencePanel = () => {
   const dispatch = useDispatch();
@@ -42,6 +43,14 @@ const InferencePanel = () => {
 
   // Policy download modal states
   const [showPolicyDownloadModal, setShowPolicyDownloadModal] = useState(false);
+  // "Neuestes Modell" one-click default (leLab-comparison PR-3): the
+  // student's most recent succeeded Modal training, already streamed by
+  // the Supabase trainings hook the Training tab uses.
+  const { jobs: trainingJobs } = useSupabaseTrainings();
+  const latestSucceededModel = (trainingJobs || [])
+    .filter((j) => j.status === 'succeeded' && j.model_name)
+    .sort((a, b) => new Date(b.requested_at || 0) - new Date(a.requested_at || 0))[0]?.model_name;
+  const [downloadPrefill, setDownloadPrefill] = useState('');
 
   const handleChange = useCallback(
     (field, value) => {
@@ -208,13 +217,19 @@ const InferencePanel = () => {
         >
           Aufgabenanweisung
         </span>
-        <textarea
-          className={classTaskInstructionTextarea}
-          value={info.taskInstruction || ''}
-          onChange={(e) => handleChange('taskInstruction', [e.target.value])}
-          disabled={!isEditable}
-          placeholder="Aufgabenanweisung eingeben"
-        />
+        <div className="flex flex-1 flex-col gap-1">
+          <textarea
+            className={classTaskInstructionTextarea}
+            value={info.taskInstruction || ''}
+            onChange={(e) => handleChange('taskInstruction', [e.target.value])}
+            disabled={!isEditable}
+            placeholder="Aufgabenanweisung eingeben"
+          />
+          <span className="text-[11px] leading-snug text-gray-400">
+            Nur für Sprachmodelle (SmolVLA, Pi0, Pi0-Fast, Pi0.5) nötig — ACT
+            ignoriert dieses Feld.
+          </span>
+        </div>
       </div>
 
       <div className={clsx('flex', 'items-start', 'mb-2.5')}>
@@ -260,10 +275,47 @@ const InferencePanel = () => {
             <MdFolderOpen size={16} />
             Modellpfad durchsuchen
           </button>
+          {latestSucceededModel && !info.policyPath && (
+            <button
+              type="button"
+              disabled={!isEditable}
+              onClick={() => {
+                setDownloadPrefill(latestSucceededModel);
+                setShowPolicyDownloadModal(true);
+              }}
+              className={clsx(
+                'flex',
+                'items-center',
+                'gap-2',
+                'px-3',
+                'py-2',
+                'text-sm',
+                'bg-blue-50',
+                'text-blue-700',
+                'border',
+                'border-blue-200',
+                'rounded-lg',
+                'hover:bg-blue-100',
+                'transition-colors',
+                'disabled:bg-gray-100',
+                'disabled:text-gray-400',
+                'w-fit'
+              )}
+              title={latestSucceededModel}
+            >
+              <MdDownload size={16} />
+              <span className="truncate max-w-[220px]">
+                Neuestes Modell laden: {latestSucceededModel.split('/').pop()}
+              </span>
+            </button>
+          )}
           {/* Download Policy Button */}
           <button
             disabled={!isEditable}
-            onClick={() => setShowPolicyDownloadModal(true)}
+            onClick={() => {
+              setDownloadPrefill('');
+              setShowPolicyDownloadModal(true);
+            }}
             className={clsx(
               'flex',
               'items-center',
@@ -333,6 +385,7 @@ const InferencePanel = () => {
         isOpen={showPolicyDownloadModal}
         onClose={() => setShowPolicyDownloadModal(false)}
         onDownloadComplete={handleDownloadPolicyComplete}
+        initialRepoId={downloadPrefill}
       />
     </div>
   );

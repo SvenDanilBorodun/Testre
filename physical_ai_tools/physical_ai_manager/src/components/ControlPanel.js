@@ -18,7 +18,16 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useSelector } from 'react-redux';
 import clsx from 'clsx';
 import toast, { useToasterStore } from 'react-hot-toast';
-import { MdPlayArrow, MdStop, MdReplay, MdSkipNext, MdCheck, MdNavigateNext } from 'react-icons/md';
+import {
+  MdPlayArrow,
+  MdStop,
+  MdReplay,
+  MdSkipNext,
+  MdCheck,
+  MdNavigateNext,
+  MdVolumeUp,
+  MdVolumeOff,
+} from 'react-icons/md';
 import { useRosServiceCaller } from '../hooks/useRosServiceCaller';
 import CompactSystemStatus from './CompactSystemStatus';
 import EpisodeStatus from './EpisodeStatus';
@@ -81,6 +90,18 @@ export default function ControlPanel() {
   const [started, setStarted] = useState(false);
   const [expandedSystemIndex, setExpandedSystemIndex] = useState(null);
   const [spinnerIndex, setSpinnerIndex] = useState(0);
+  // Audio-cue mute (leLab-comparison PR-3). Persisted; the /task/status
+  // hook reads the key on every event, so flipping it applies instantly.
+  const [audioMuted, setAudioMuted] = useState(
+    () => localStorage.getItem('edubotics_audio_muted') === '1'
+  );
+  const toggleAudioMuted = () => {
+    setAudioMuted((prev) => {
+      const next = !prev;
+      localStorage.setItem('edubotics_audio_muted', next ? '1' : '0');
+      return next;
+    });
+  };
   const startedRef = useRef(started);
 
   // NOTE: `label` doubles as the command key (handleControlCommand switch,
@@ -661,6 +682,15 @@ export default function ControlPanel() {
               </span>
             )}
           </div>
+          <button
+            type="button"
+            onClick={toggleAudioMuted}
+            className="flex items-center justify-center rounded-full p-1.5 text-white/60 hover:bg-white/10 hover:text-white"
+            aria-label={audioMuted ? 'Ton einschalten' : 'Ton ausschalten'}
+            title={audioMuted ? 'Ton einschalten' : 'Ton ausschalten'}
+          >
+            {audioMuted ? <MdVolumeOff size={20} /> : <MdVolumeUp size={20} />}
+          </button>
         </div>
         {!useMultiTaskMode && (
           <div className="w-full flex flex-col items-center gap-1">

@@ -16,6 +16,7 @@
 #
 # Author: Dongyun Kim
 
+import gc
 import os
 import platform
 
@@ -46,27 +47,73 @@ class InferenceManager:
         self.postprocessor = None
         self._expected_image_keys = []
 
+    # Policies that consume a natural-language task instruction (the React
+    # Aufgabenanweisung). Mirrors the upstream language-conditioned set; used
+    # by read_policy_summary so the UI can tell students when the field
+    # actually matters. leLab-comparison PR-3.
+    LANGUAGE_CONDITIONED_POLICY_TYPES = frozenset(
+        {'smolvla', 'pi0', 'pi0_fast', 'pi05'})
+
+    @staticmethod
+    def read_policy_summary(policy_path: str) -> dict:
+        """Pre-flight introspection of a checkpoint's config.json.
+
+        Cheap local read (no torch); safe to call before any policy is
+        loaded. Returns policy_type (or None), the SHORT camera names the
+        policy was trained on (the keys predict() will demand), and whether
+        the policy consumes a task instruction. START_INFERENCE uses this to
+        reject a camera-contract mismatch in German BEFORE the run instead
+        of the opaque mid-run teardown.
+        """
+        config = read_json_file(os.path.join(policy_path, 'config.json')) or {}
+        policy_type = config.get('type') or config.get('model_type')
+        expected_cameras = [
+            k.replace('observation.images.', '')
+            for k in (config.get('input_features') or {})
+            if k.startswith('observation.images.')
+        ]
+        return {
+            'policy_type': policy_type,
+            'expected_cameras': expected_cameras,
+            'requires_task': policy_type
+            in InferenceManager.LANGUAGE_CONDITIONED_POLICY_TYPES,
+        }
+
     def validate_policy(self, policy_path: str) -> tuple[bool, str]:
+        # Failure strings are student-facing (they ride response.message
+        # into a React toast) — German per Rule §1.
         result_message = ''
         if not os.path.exists(policy_path) or not os.path.isdir(policy_path):
-            result_message = f'Policy path {policy_path} does not exist or is not a directory.'
+            result_message = (
+                f'Der Modellpfad {policy_path} existiert nicht oder ist '
+                f'kein Ordner.'
+            )
             return False, result_message
 
         config_path = os.path.join(policy_path, 'config.json')
         if not os.path.exists(config_path):
-            result_message = f'config.json file does not exist in {policy_path}.'
+            result_message = (
+                f'Im Modellordner {policy_path} fehlt die config.json — '
+                f'ist das Modell vollständig heruntergeladen?'
+            )
             return False, result_message
 
         config = read_json_file(config_path)
         if (config is None or
                 ('type' not in config and 'model_type' not in config)):
-            result_message = f'config.json malformed or missing fields in {policy_path}.'
+            result_message = (
+                f'Die config.json in {policy_path} ist beschädigt oder '
+                f'unvollständig.'
+            )
             return False, result_message
 
         available_policies = self.__class__.get_available_policies()
         policy_type = config.get('type') or config.get('model_type')
         if policy_type not in available_policies:
-            result_message = f'Policy type {policy_type} is not supported.'
+            result_message = (
+                f'Der Modelltyp „{policy_type}" wird auf diesem Gerät nicht '
+                f'unterstützt.'
+            )
             return False, result_message
 
         self.policy_path = policy_path
@@ -136,6 +183,15 @@ class InferenceManager:
             self.policy = None
             self.preprocessor = None
             self.postprocessor = None
+            # Eager GPU reclaim (leLab-comparison PR-3): this node lives for
+            # the whole session; without an explicit cache flush, freed
+            # allocator blocks accumulate across student checkpoint reloads
+            # on the memory-constrained shared Jetson Orin. No-op on the
+            # GPU-less student PCs. Only here on the stop/error paths —
+            # never in the predict hot loop.
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            gc.collect()
         else:
             print('No policy to clear.')
 

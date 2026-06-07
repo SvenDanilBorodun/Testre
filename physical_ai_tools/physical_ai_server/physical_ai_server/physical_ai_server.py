@@ -118,6 +118,7 @@ from physical_ai_server.utils.parameter_utils import (
     declare_parameters,
     load_parameters,
     log_parameters,
+    parse_topic_list_with_names,
 )
 
 import rclpy
@@ -461,6 +462,42 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 callback_function=self.communicator.heartbeat_timer_callback
             )
             self.heartbeat_timer.start(timer_name='heartbeat')
+
+        # One-shot stale-session notice (leLab-comparison PR-3): a
+        # *.session.json sibling marker means a recording crashed mid-
+        # session — the buffered episodes died with the process, so the
+        # dataset on disk is incomplete (the finalize() footer never
+        # wrote). DETECT + INFORM ONLY, never auto-finalize/delete: the
+        # student decides in the Daten tab. Delayed 5 s so the React
+        # /task/status subscriber is attached when the toast fires.
+        if not getattr(self, '_stale_session_notice_done', False):
+            self._stale_session_notice_done = True
+            try:
+                stale_markers = sorted(
+                    self.DEFAULT_SAVE_ROOT_PATH.glob('*/*.session.json'))
+            except OSError:
+                stale_markers = []
+            if stale_markers:
+                names = [
+                    m.name[: -len('.session.json')] for m in stale_markers
+                ]
+                shown = ', '.join(names[:3]) + (' …' if len(names) > 3 else '')
+                self.get_logger().warning(
+                    f'Stale recording session markers found: {names}')
+
+                def _stale_session_notify():
+                    self._stale_notice_timer.cancel()
+                    notice = TaskStatus()
+                    notice.phase = TaskStatus.READY
+                    notice.error = (
+                        f'Eine frühere Aufnahme wurde unterbrochen und ist '
+                        f'unvollständig: {shown}. Bitte im Daten-Tab prüfen '
+                        f'und gegebenenfalls löschen.'
+                    )
+                    self.communicator.publish_status(status=notice)
+
+                self._stale_notice_timer = self.create_timer(
+                    5.0, _stale_session_notify)
 
         self.inference_manager = InferenceManager()
         self.get_logger().info(
@@ -1012,6 +1049,9 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 self._camera_fps_checked = False
                 self._camera_fps_last_check_t = 0.0
                 self.on_recording = True
+                # Arm the crash-recovery session marker — RECORDING sessions
+                # only (see DataManager._session_marker_enabled).
+                self.data_manager._session_marker_enabled = True
                 response.success = True
                 response.message = 'Recording started'
 
@@ -1036,11 +1076,61 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                     self.get_logger().error(response.message)
                     return response
 
+                # Pre-flight camera contract (leLab-comparison PR-3): the
+                # checkpoint's config.json names the cameras it was trained
+                # on; predict() would tear the run down mid-flight with a
+                # RuntimeError when one is missing. Reject HERE, before any
+                # timer starts, with a German message naming both sides.
+                # Camera names come from the same params the pipeline keys
+                # its image dict on (communicator.camera_topics).
+                summary = InferenceManager.read_policy_summary(
+                    task_info.policy_path)
+                expected_cams = set(summary['expected_cameras'])
+                available_cams = set(
+                    parse_topic_list_with_names(
+                        self.params['camera_topic_list']).keys()
+                ) if self.params else set()
+                # A language-conditioned policy (SmolVLA/Pi0 family) with an
+                # EMPTY Aufgabenanweisung produces unguided behavior — reject
+                # at START with the fix, mirroring the camera pre-flight.
+                if summary['requires_task'] and not any(
+                        s.strip() for s in task_info.task_instruction):
+                    response.success = False
+                    response.message = (
+                        'Dieses Modell benötigt eine Aufgabenanweisung '
+                        '(z. B. „Greife den roten Würfel"). Bitte das Feld '
+                        '„Aufgabenanweisung" ausfüllen und erneut starten.'
+                    )
+                    self.get_logger().error(
+                        'Pre-flight: language-conditioned policy started '
+                        'without a task instruction')
+                    return response
+
+                missing_cams = expected_cams - available_cams
+                if missing_cams:
+                    response.success = False
+                    response.message = (
+                        f'Dieses Modell erwartet die Kamera(s) '
+                        f'{", ".join(sorted(missing_cams))} — verfügbar '
+                        f'{"ist" if len(available_cams) == 1 else "sind"}: '
+                        f'{", ".join(sorted(available_cams)) or "keine"}. '
+                        f'Bitte Kameras prüfen („Hardware neu erkennen") '
+                        f'und erneut starten.'
+                    )
+                    self.get_logger().error(
+                        f'Camera contract pre-flight failed: model expects '
+                        f'{sorted(expected_cams)}, available '
+                        f'{sorted(available_cams)}')
+                    return response
+
                 self.init_robot_control_parameters_from_user_task(
                     task_info
                 )
                 if task_info.record_inference_mode:
                     self.on_recording = True
+                    # This inference session RECORDS — arm the crash marker
+                    # like a plain recording session.
+                    self.data_manager._session_marker_enabled = True
                 self.on_inference = True
                 self.inference_manager.reset_policy()
                 self.start_recording_time = time.perf_counter()

@@ -67,6 +67,8 @@ export function useRosTopicSubscription() {
   const workflowSensorsTopicRef = useRef(null);
   const previousPhaseRef = useRef(null);
   const audioContextRef = useRef(null);
+  // Episode number that already received its 3-seconds-left warning beeps.
+  const lastWarnEpisodeRef = useRef(null);
   const hfStatusTopicRef = useRef(null);
   const lastTrainingUpdateRef = useRef(0);
   // Track the per-ros-instance reconnect listener so we don't double-bind
@@ -289,14 +291,53 @@ export function useRosTopicSubscription() {
         const currentPhase = msg.phase;
         const previousPhase = previousPhaseRef.current;
 
+        // Audio cues (leLab-comparison PR-3). A student demonstrating a
+        // manipulation task watches the ARM, not the screen — sound is the
+        // right channel for phase changes. Muteable via the ControlPanel
+        // „Ton"-toggle (localStorage, read fresh each event so the toggle
+        // applies without re-subscribing).
+        const audioMuted = localStorage.getItem('edubotics_audio_muted') === '1';
+
         if (currentPhase === TaskPhase.RECORDING && previousPhase !== TaskPhase.RECORDING) {
           console.log('🔊 Recording started - playing beep sound');
+          // New episode/session entering RECORDING — re-arm the 3-seconds
+          // warning (the episode counter restarts per session, and a stale
+          // ref from the previous session could suppress one warning).
+          lastWarnEpisodeRef.current = null;
 
-          setTimeout(() => {
-            playBeep(RECORDING_BEEP_FREQUENCY, RECORDING_BEEP_DURATION);
-          }, BEEP_DELAY);
+          if (!audioMuted) {
+            setTimeout(() => {
+              playBeep(RECORDING_BEEP_FREQUENCY, RECORDING_BEEP_DURATION);
+            }, BEEP_DELAY);
+          }
 
-          toast.success('Recording started! 🎬');
+          toast.success('Aufnahme gestartet! 🎬');
+        }
+
+        // Falling two-tone when the episode leaves RECORDING (auto-save or
+        // reset) — the eyes-on-arm signal that this take is in the can.
+        if (
+          previousPhase === TaskPhase.RECORDING &&
+          (currentPhase === TaskPhase.SAVING || currentPhase === TaskPhase.RESETTING) &&
+          !audioMuted
+        ) {
+          playBeep(660, 180);
+          setTimeout(() => playBeep(440, 220), 200);
+        }
+
+        // Triple warning beep in the final 3 s before the episode
+        // auto-saves, once per episode (guarded by episode number).
+        if (
+          currentPhase === TaskPhase.RECORDING &&
+          msg.total_time > 0 &&
+          msg.total_time - msg.proceed_time <= 3 &&
+          lastWarnEpisodeRef.current !== msg.current_episode_number &&
+          !audioMuted
+        ) {
+          lastWarnEpisodeRef.current = msg.current_episode_number;
+          [0, 250, 500].forEach((delay) => {
+            setTimeout(() => playBeep(880, 120), delay);
+          });
         }
 
         previousPhaseRef.current = currentPhase;

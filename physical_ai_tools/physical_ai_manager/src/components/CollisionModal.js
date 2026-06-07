@@ -31,17 +31,57 @@
 //                                        leader is too far; on success the modal unmounts when
 //                                        the next non-collision /task/status arrives.
 
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import toast from 'react-hot-toast';
 import { useSelector } from 'react-redux';
 
 import { useRosServiceCaller } from '../hooks/useRosServiceCaller';
+
+// Show-the-remedy escalation (leLab-comparison PR-3): after repeated failed
+// homing attempts a 13-year-old needs a PICTURE of the fix, not another
+// paragraph. Inline SVG — bundled with the app, no hot-link (classrooms are
+// offline), no binary asset.
+function RemedyDiagram() {
+  return (
+    <svg
+      viewBox="0 0 280 110"
+      className="w-full max-w-xs"
+      role="img"
+      aria-label="Hindernis aus dem Bewegungsbereich des Arms entfernen"
+    >
+      {/* table */}
+      <line x1="10" y1="95" x2="270" y2="95" stroke="#9ca3af" strokeWidth="3" />
+      {/* robot base + arm */}
+      <rect x="30" y="75" width="34" height="20" rx="3" fill="#6b7280" />
+      <line x1="47" y1="75" x2="70" y2="40" stroke="#374151" strokeWidth="7" strokeLinecap="round" />
+      <line x1="70" y1="40" x2="105" y2="58" stroke="#374151" strokeWidth="6" strokeLinecap="round" />
+      <circle cx="70" cy="40" r="5" fill="#111827" />
+      {/* obstacle pressed against the gripper */}
+      <rect x="108" y="52" width="26" height="43" rx="4" fill="#f59e0b" />
+      {/* arrow moving the obstacle away */}
+      <line x1="150" y1="72" x2="215" y2="72" stroke="#dc2626" strokeWidth="5" strokeLinecap="round" />
+      <polygon points="215,62 235,72 215,82" fill="#dc2626" />
+      {/* obstacle at its new, safe spot (ghost) */}
+      <rect x="240" y="52" width="26" height="43" rx="4" fill="#fcd34d" opacity="0.55" />
+    </svg>
+  );
+}
 
 export default function CollisionModal() {
   const collision = useSelector((state) => state.tasks.collision);
   const { homeFollower, resumeTeleop } = useRosServiceCaller();
   const [busy, setBusy] = useState(false);
   const [hint, setHint] = useState('');
+  // Failed step-1 attempts since this collision began — drives the
+  // visual-remedy escalation below. Reset whenever the modal closes.
+  const [homeAttempts, setHomeAttempts] = useState(0);
+
+  useEffect(() => {
+    if (!collision?.active) {
+      setHomeAttempts(0);
+      setHint('');
+    }
+  }, [collision?.active]);
 
   if (!collision?.active) {
     return null;
@@ -79,8 +119,14 @@ export default function CollisionModal() {
     }
   };
 
-  const handleHome = () =>
-    callStep(homeFollower, '„Follower in Grundstellung fahren" fehlgeschlagen.');
+  const handleHome = () => {
+    setHomeAttempts((n) => n + 1);
+    return callStep(homeFollower, '„Follower in Grundstellung fahren" fehlgeschlagen.');
+  };
+  // Escalate to the picture after the second attempt that did NOT get the
+  // arm home (the server falls back to stage 'stopped' with a retry hint
+  // when the glide exhausts its re-sends).
+  const showRemedyDiagram = stage === 'stopped' && homeAttempts >= 2;
   const handleResume = () => callStep(resumeTeleop, '„Teleoperation fortsetzen" fehlgeschlagen.');
 
   return (
@@ -114,6 +160,16 @@ export default function CollisionModal() {
                   'zuerst das Hindernis und klicke dann auf „Follower in Grundstellung fahren".')}
           </p>
           {hint && <p className="text-sm font-medium text-amber-700">{hint}</p>}
+          {showRemedyDiagram && (
+            <div className="flex w-full flex-col items-center gap-1 rounded-xl border border-amber-200 bg-amber-50 p-3">
+              <RemedyDiagram />
+              <p className="text-sm font-medium text-amber-800">
+                Hindernis ganz aus dem Bewegungsbereich nehmen — auch unter
+                dem Greifer nachsehen. Danach erneut auf „Follower in
+                Grundstellung fahren" klicken.
+              </p>
+            </div>
+          )}
           {isHoming && jointDists.length > 0 && (
             <div
               className="mt-1 flex w-full flex-row items-center justify-center gap-2"

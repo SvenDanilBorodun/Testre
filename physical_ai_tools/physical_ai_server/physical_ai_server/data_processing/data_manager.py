@@ -99,6 +99,14 @@ class DataManager:
 
         self._lerobot_dataset = None
         self._record_episode_count = 0
+        # Session-marker state (leLab-comparison PR-3). DISARMED by
+        # default: the inference timer also drives record(), and a pure
+        # inference run must never plant a "recording was interrupted"
+        # marker. The node arms it for START_RECORD and for
+        # record_inference_mode inference sessions only.
+        self._session_marker_enabled = False
+        self._session_marker_written = False
+        self._session_started_unix = 0
         self._start_time_s = 0
         self._proceed_time = 0
         self._status = 'warmup'
@@ -148,6 +156,55 @@ class DataManager:
     def should_record_rosbag2(self):
         return self._task_info.record_rosbag2
 
+    # ── Crash-recoverable session marker (leLab-comparison PR-3) ─────────
+    # A tiny SIBLING json next to the dataset dir (never inside it —
+    # push_to_hub uploads the folder verbatim) that exists exactly while a
+    # recording session is in flight. A crash/power-cut leaves it behind;
+    # the node surfaces a one-shot German notice at the next start so the
+    # student knows the dataset is incomplete and can delete it in the
+    # Daten tab. DETECT + INFORM ONLY: the buffered (<10) episodes died
+    # with the process — finalizing a crashed session is impossible, so
+    # nothing here ever auto-finalizes or auto-deletes.
+
+    SESSION_MARKER_SUFFIX = '.session.json'
+
+    def _session_marker_path(self):
+        # Telemetry only: a DataManager built without the full __init__
+        # (tests construct via __new__; standalone helpers) has no
+        # _save_path — markers silently disable rather than ever touching
+        # the recording/finalize contract.
+        save_path = getattr(self, '_save_path', None)
+        if not isinstance(save_path, Path):
+            return None
+        return save_path.parent / (save_path.name + self.SESSION_MARKER_SUFFIX)
+
+    def _write_session_marker(self):
+        try:
+            marker = self._session_marker_path()
+            if marker is None:
+                return
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            payload = json.dumps({
+                'repo_id': getattr(self, '_save_repo_name', ''),
+                'episodes_saved': getattr(self, '_record_episode_count', 0),
+                'status': getattr(self, '_status', ''),
+                'started_unix': getattr(self, '_session_started_unix', 0),
+            })
+            tmp = marker.with_name(marker.name + '.tmp')
+            tmp.write_text(payload, encoding='utf-8')
+            os.replace(tmp, marker)
+        except Exception as e:  # noqa: BLE001 — telemetry must never block
+            print(f'[WARNUNG] Sitzungsmarker konnte nicht geschrieben '
+                  f'werden: {e}', file=sys.stderr, flush=True)
+
+    def _clear_session_marker(self):
+        try:
+            marker = self._session_marker_path()
+            if marker is not None:
+                marker.unlink(missing_ok=True)
+        except Exception:  # noqa: BLE001 — telemetry must never block
+            pass
+
     def record(
             self,
             images,
@@ -156,6 +213,11 @@ class DataManager:
 
         if self._start_time_s == 0:
             self._start_time_s = time.perf_counter()
+            if (getattr(self, '_session_marker_enabled', False)
+                    and not getattr(self, '_session_marker_written', True)):
+                self._session_marker_written = True
+                self._session_started_unix = time.time()
+                self._write_session_marker()
 
         if self._status == 'warmup':
             self._current_task = 0
@@ -191,6 +253,7 @@ class DataManager:
                     self._verify_saved_video_files()
                     self._episode_reset()
                     self._record_episode_count += 1
+                    self._write_session_marker()
                     self._get_current_scenario_number()
                     self._current_task += 1
                     self._on_saving = False
@@ -227,6 +290,7 @@ class DataManager:
                         self._on_saving = False
                         self._episode_reset()
                         self._record_episode_count += 1
+                        self._write_session_marker()
                         self._get_current_scenario_number()
                         self._current_task += 1
                         self._stop_save_completed = True
@@ -321,6 +385,9 @@ class DataManager:
             return False
         try:
             ds.finalize()
+            # The session completed cleanly — drop the crash marker so the
+            # next boot raises no stale-session notice.
+            self._clear_session_marker()
             return True
         except Exception as e:
             warning = (

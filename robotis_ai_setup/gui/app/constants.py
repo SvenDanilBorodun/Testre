@@ -95,6 +95,41 @@ PORT_WEB_UI = 80
 PORT_VIDEO_SERVER = 8080
 PORT_ROSBRIDGE = 9090
 
+# --- Phone-as-3rd-camera (optional, GUI-hosted HTTPS receiver) ---
+# A school phone's browser captures via getUserMedia and POSTs JPEG frames over
+# HTTPS to this port on the Windows host; the GUI forwards them over the EXISTING
+# TCP multiplex (127.0.0.1:5557) as cam_id 2 so camera_ingest_node.py republishes
+# /phone/image_raw/compressed. The phone NEVER touches WSL2/usbipd (bypasses the
+# vhci_hcd USB ceiling). getUserMedia requires a secure context → HTTPS with a
+# once-generated self-signed cert (Windows New-SelfSignedCertificate, user-scope).
+PORT_PHONE_HTTPS = int(os.environ.get("EDUBOTICS_PHONE_HTTPS_PORT", "8444"))
+# The phone is cam_id 2 — the 3rd entry, AFTER gripper(0)/scene(1). The role name
+# "phone" must appear at index 2 of the container's EDUBOTICS_CAMERA_NAMES
+# (gripper,scene,phone) so the published topic is /phone/image_raw/compressed.
+PHONE_CAM_ID = 2
+PHONE_CAMERA_NAME = "phone"
+# Drop a stale phone frame rather than re-sending the last one forever: only
+# forward the slot when its newest frame is younger than this (the phone posts at
+# ~10 fps, so 2 s tolerates a few dropped POSTs without freezing on a dead feed).
+PHONE_FRAME_STALE_MAX_AGE_S = 2.0
+# Reject an oversized POST body early (a 640x480 JPEG q0.7 is ~30-80 KB; 2 MB is
+# a generous ceiling that still stops a runaway upload from allocating gigabytes).
+PHONE_MAX_FRAME_BYTES = 2 * 1024 * 1024
+
+
+def _resolve_phone_cert_dir() -> str:
+    """Directory holding the once-generated self-signed cert (cert.pem/key.pem)
+    for the phone HTTPS receiver. Lives under %LOCALAPPDATA%\\EduBotics so the
+    GUI can write it without admin rights; reused across runs."""
+    override = os.environ.get("EDUBOTICS_PHONE_CERT_DIR")
+    if override:
+        return override
+    base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+    return os.path.join(base, "EduBotics", "phone-cert")
+
+
+PHONE_CERT_DIR = _resolve_phone_cert_dir()
+
 # --- Native camera bridge (WSL2/Windows student path) ---
 # The two USB cameras are captured NATIVELY on Windows (the WSL2 usbipd bridge
 # caps in-container UVC at ~6-10 Hz — see CLAUDE.md "native camera capture

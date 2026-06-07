@@ -27,6 +27,11 @@ MANAGED_KEYS = frozenset({
     # broke "Umgebung starten" with "manifest unknown" on 2026-06-05 after
     # an installer upgrade had wiped the local image it pointed at.
     "IMAGE_TAG",
+    # EDUBOTICS_CAMERA_NAMES is MANAGED so the phone-as-3rd-camera toggle is
+    # the single source of truth: enabling it emits gripper,scene,phone and
+    # disabling it later (line absent → compose default gripper,scene) SUPERSEDES
+    # a stale 3-name value instead of leaving the /phone publisher orphaned.
+    "EDUBOTICS_CAMERA_NAMES",
     # CAMERA_DEVICE_N / CAMERA_NAME_N are handled by prefix-match below
     # because the count varies with how many cameras are connected.
 })
@@ -216,12 +221,28 @@ def upsert_env_var(key: str, value: str, path: str = ENV_FILE) -> None:
     _atomic_write(path, content)
 
 
-def generate_env_file(config: HardwareConfig, output_path: str = ENV_FILE) -> str:
+def _phone_camera_names_line() -> str:
+    """The managed EDUBOTICS_CAMERA_NAMES line that adds the phone as cam_id 2.
+
+    Built from CAMERA_BRIDGE_ROLES + the phone name so the order stays in lockstep
+    with camera_bridge's cam_id mapping (gripper=0, scene=1, phone=2)."""
+    from .constants import CAMERA_BRIDGE_ROLES, PHONE_CAMERA_NAME
+    names = ",".join(list(CAMERA_BRIDGE_ROLES) + [PHONE_CAMERA_NAME])
+    return f"EDUBOTICS_CAMERA_NAMES={names}"
+
+
+def generate_env_file(config: HardwareConfig, output_path: str = ENV_FILE,
+                      phone_camera: bool = False) -> str:
     """Write .env file with hardware paths.
 
     Args:
         config: Discovered hardware configuration.
         output_path: Path to write the .env file.
+        phone_camera: When True, emit the managed
+            ``EDUBOTICS_CAMERA_NAMES=gripper,scene,phone`` line so the ingest
+            node publishes /phone/image_raw/compressed (cam_id 2). When False the
+            line is omitted and compose's default (gripper,scene) wins — and a
+            stale 3-name value is superseded because the key is MANAGED.
 
     Returns:
         The content written to the file.
@@ -271,6 +292,12 @@ def generate_env_file(config: HardwareConfig, output_path: str = ENV_FILE) -> st
     # hand-edited .env survives regeneration (one-variable rollback).
     if native and not _has_camera_source(preserved):
         lines.append("EDUBOTICS_CAMERA_SOURCE=native_bridge")
+    # Phone-as-3rd-camera: add "phone" to the published camera names so
+    # camera_ingest_node publishes /phone/image_raw/compressed (cam_id 2). Only
+    # when the student enabled the toggle; otherwise omitted (compose default
+    # gripper,scene). MANAGED key → unchecking later supersedes a stale value.
+    if phone_camera:
+        lines.append(_phone_camera_names_line())
     if preserved:
         lines.append("")
         lines.append(_PRESERVE_MARKER)
@@ -282,13 +309,19 @@ def generate_env_file(config: HardwareConfig, output_path: str = ENV_FILE) -> st
     return content
 
 
-def generate_cloud_only_env(output_path: str = ENV_FILE) -> str:
+def generate_cloud_only_env(output_path: str = ENV_FILE,
+                            phone_camera: bool = False) -> str:
     """Write a minimal .env for cloud-only mode (no robot hardware).
 
     Docker Compose still reads .env when starting any service, so we provide
     empty placeholders for the variables referenced by the open_manipulator
     service (which we don't start in this mode anyway). Without this, compose
     would emit warnings about unset variables.
+
+    ``phone_camera`` is accepted for signature symmetry with generate_env_file
+    but is effectively a no-op here: cloud-only never starts open_manipulator,
+    so no camera ingest node consumes EDUBOTICS_CAMERA_NAMES. We still honour it
+    so a toggled-on value round-trips rather than being dropped.
     """
     domain_id = _resolve_ros_domain_id()
     preserved = _read_unmanaged_lines(output_path)
@@ -307,6 +340,8 @@ def generate_cloud_only_env(output_path: str = ENV_FILE) -> str:
     from .constants import cameras_use_native_bridge
     if cameras_use_native_bridge() and not _has_camera_source(preserved):
         lines.append("EDUBOTICS_CAMERA_SOURCE=native_bridge")
+    if phone_camera:
+        lines.append(_phone_camera_names_line())
     if preserved:
         lines.append("")
         lines.append(_PRESERVE_MARKER)

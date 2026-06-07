@@ -158,22 +158,16 @@ class _CaptureWorker(threading.Thread):
             cap.release()
 
 
-class _SenderWorker(threading.Thread):
-    """Owns ONE camera's TCP connection. Event-driven: blocks on the capture
-    worker's Condition and forwards each newly-captured frame as it arrives (no
-    rate cap — the real capture rate is the limiter). Reconnects with backoff."""
+class _ConnectMixin:
+    """Shared connect-with-backoff for the camera senders.
 
-    def __init__(self, worker: _CaptureWorker, host: str, port: int,
-                 stop_event: threading.Event):
-        super().__init__(name=f"cam-send-{worker.role}", daemon=True)
-        self.worker = worker
-        self.host = host
-        self.port = port
-        self._stop = stop_event
-        self.connected = False
-        self.last_error_de = ""
+    Both the per-camera sender and the phone external sender are CLIENTS to the
+    container's TCP server and reconnect identically; only the frame source
+    differs. Subclasses set ``self.host`` / ``self.port`` / ``self._stop`` /
+    ``self.connected`` / ``self.last_error_de`` and call ``self._connect()``.
+    """
 
-    def _connect(self) -> socket.socket | None:
+    def _connect(self) -> "socket.socket | None":
         attempt = 0
         while not self._stop.is_set():
             try:
@@ -194,6 +188,22 @@ class _SenderWorker(threading.Thread):
                 if self._stop.wait(backoff):
                     break
         return None
+
+
+class _SenderWorker(_ConnectMixin, threading.Thread):
+    """Owns ONE camera's TCP connection. Event-driven: blocks on the capture
+    worker's Condition and forwards each newly-captured frame as it arrives (no
+    rate cap — the real capture rate is the limiter). Reconnects with backoff."""
+
+    def __init__(self, worker: _CaptureWorker, host: str, port: int,
+                 stop_event: threading.Event):
+        super().__init__(name=f"cam-send-{worker.role}", daemon=True)
+        self.worker = worker
+        self.host = host
+        self.port = port
+        self._stop = stop_event
+        self.connected = False
+        self.last_error_de = ""
 
     def run(self):
         import cv2
@@ -249,8 +259,84 @@ class _SenderWorker(threading.Thread):
                 pass
 
 
+class _ExternalSenderWorker(_ConnectMixin, threading.Thread):
+    """Forwards an EXTERNAL JPEG source (the phone receiver's latest-slot) over
+    its OWN TCP connection to camera_ingest_node.py as a fixed cam_id.
+
+    Unlike _SenderWorker there is no local OpenCV capture and the bytes are
+    ALREADY JPEG (the phone encoded them) — we forward verbatim, NO re-encode.
+    The slot is polled (the phone posts at ~10 fps, so a tight event loop buys
+    nothing) and a STALENESS GATE drops the frame when the phone stopped posting:
+    we only send a slot whose newest frame is < stale_max_age old AND whose
+    sequence advanced since the last send. That way a closed tab / locked screen
+    lets the /phone topic go quiet instead of pinning the last frame forever.
+
+    The slot is a phone_camera.LatestFrameSlot, but this worker only relies on
+    its duck-typed (get()->(jpeg,capture_ns,seq) | None, fresh_within(age)->bool)
+    surface so the bridge stays import-light and the worker is unit-testable with
+    a fake slot.
+    """
+
+    def __init__(self, slot, cam_id: int, host: str, port: int,
+                 stop_event: threading.Event,
+                 stale_max_age_s: float = constants.PHONE_FRAME_STALE_MAX_AGE_S,
+                 poll_interval_s: float = 0.05):
+        super().__init__(name=f"cam-send-ext-{cam_id}", daemon=True)
+        self.slot = slot
+        self.cam_id = cam_id
+        self.host = host
+        self.port = port
+        self._stop = stop_event
+        self.stale_max_age_s = stale_max_age_s
+        self.poll_interval_s = poll_interval_s
+        self.connected = False
+        self.last_error_de = ""
+        # role label used by status() — a synthetic name for the external feed.
+        self.role = constants.PHONE_CAMERA_NAME
+
+    def run(self):
+        last_seq = -1
+        sock = None
+        while not self._stop.is_set():
+            if sock is None:
+                sock = self._connect()
+                if sock is None:
+                    break  # stopped while connecting
+            # Poll the slot. Send only a NEW, FRESH frame; otherwise idle.
+            got = self.slot.get() if self.slot is not None else None
+            if (got is None
+                    or got[2] == last_seq
+                    or not self.slot.fresh_within(self.stale_max_age_s)):
+                if self._stop.wait(self.poll_interval_s):
+                    break
+                continue
+            jpeg, capture_ns, seq = got
+            header = _HEADER.pack(self.cam_id, len(jpeg),
+                                  int(capture_ns) & 0xFFFFFFFFFFFFFFFF)
+            try:
+                sock.sendall(header + jpeg)
+                last_seq = seq
+            except OSError as exc:
+                self.connected = False
+                self.last_error_de = f"Handy-Kamera-Verbindung verloren: {exc}"
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+                sock = None
+                continue
+        if sock is not None:
+            try:
+                sock.close()
+            except OSError:
+                pass
+
+
 class CameraBridge:
-    """Owns one capture worker + one sender (own TCP connection) per camera."""
+    """Owns one capture worker + one sender (own TCP connection) per camera.
+
+    May ALSO carry one external sender (the phone receiver's latest-slot →
+    cam_id 2) registered via register_external_source() before start()."""
 
     def __init__(self, role_to_index: dict[str, int],
                  host: str | None = None, port: int | None = None):
@@ -260,6 +346,7 @@ class CameraBridge:
         self._stop = threading.Event()
         self._timer_raised = False
         self._senders: list[_SenderWorker] = []
+        self._external_senders: list[_ExternalSenderWorker] = []
         for role, index in role_to_index.items():
             if index is None:
                 continue
@@ -272,9 +359,24 @@ class CameraBridge:
                 _SenderWorker(worker, self.host, self.port, self._stop))
         self.last_error_de = ""
 
+    def register_external_source(self, cam_id: int, slot) -> None:
+        """Register an external JPEG source (the phone receiver's latest-slot)
+        to be forwarded as ``cam_id`` over its own TCP connection.
+
+        Call BEFORE start(). The phone is cam_id 2 (after gripper/scene); the
+        container's EDUBOTICS_CAMERA_NAMES must list a 3rd name ("phone") so the
+        ingest node has a publisher for /phone/image_raw/compressed. Frames flow
+        only while the phone keeps posting (staleness gate in the worker)."""
+        self._external_senders.append(
+            _ExternalSenderWorker(slot, cam_id, self.host, self.port, self._stop))
+
     @property
     def connected(self) -> bool:
-        """True once every camera's sender has an open connection."""
+        """True once every CAMERA sender has an open connection.
+
+        The phone (external sender) is intentionally excluded: it is optional and
+        may legitimately be disconnected (no phone paired) while the local
+        cameras are fine. Phone state is reported separately via status()."""
         return bool(self._senders) and all(s.connected for s in self._senders)
 
     def _raise_timer_resolution(self):
@@ -303,6 +405,8 @@ class CameraBridge:
             w.start()
         for s in self._senders:
             s.start()
+        for es in self._external_senders:
+            es.start()
 
     def stop(self, join_timeout: float = 3.0):
         self._stop.set()
@@ -313,6 +417,9 @@ class CameraBridge:
         for s in self._senders:
             if s.ident is not None:
                 s.join(timeout=join_timeout)
+        for es in self._external_senders:
+            if es.ident is not None:
+                es.join(timeout=join_timeout)
         for w in self.workers:
             if w.ident is not None:
                 w.join(timeout=join_timeout)
@@ -331,20 +438,31 @@ class CameraBridge:
         agg_error = self.last_error_de
         for w in self.workers:
             agg_error = agg_error or w.last_error_de or w.format_warn_de
+        cameras = {
+            w.role: {
+                "fps": round(w.fps, 1),
+                "negotiated_fps": round(w.negotiated_fps, 1),
+                "index": w.index,
+                "connected": (
+                    sender_by_role[w.role].connected
+                    if w.role in sender_by_role else False
+                ),
+                "error": w.last_error_de or w.format_warn_de,
+            }
+            for w in self.workers
+        }
+        # The phone (external) feed reports connection + its own error only — no
+        # local capture metrics (it has no _CaptureWorker / OpenCV device).
+        for es in self._external_senders:
+            cameras[es.role] = {
+                "fps": 0.0,
+                "negotiated_fps": 0.0,
+                "index": -1,
+                "connected": es.connected,
+                "error": es.last_error_de,
+            }
         return {
             "connected": self.connected,
             "error": agg_error,
-            "cameras": {
-                w.role: {
-                    "fps": round(w.fps, 1),
-                    "negotiated_fps": round(w.negotiated_fps, 1),
-                    "index": w.index,
-                    "connected": (
-                        sender_by_role[w.role].connected
-                        if w.role in sender_by_role else False
-                    ),
-                    "error": w.last_error_de or w.format_warn_de,
-                }
-                for w in self.workers
-            },
+            "cameras": cameras,
         }

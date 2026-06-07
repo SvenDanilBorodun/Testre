@@ -27,13 +27,24 @@ pywebview_datas = collect_data_files('webview', includes=['lib/*'])
 # is present on Win10/11 by default.
 cv2_binaries = collect_dynamic_libs('cv2')
 
+# Bundle the GUI's PowerShell helpers (e.g. new_phone_cert.ps1 — mints the
+# self-signed cert for the phone-camera HTTPS receiver) into the payload under
+# `scripts/` so phone_cert._find_helper_script() resolves them via sys._MEIPASS
+# on a frozen build. The .ps1 files carry a UTF-8 BOM (powershell-encoding CI
+# gate); PyInstaller copies them byte-for-byte.
+ps_scripts = (
+    [(os.path.join('app', 'scripts'), 'scripts')]
+    if os.path.isdir(os.path.join('app', 'scripts')) else []
+)
+
 a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=pywebview_binaries + pythonnet_binaries + cv2_binaries,
     datas=([
         ('assets', 'assets'),
-    ] if os.path.isdir('assets') and os.listdir('assets') != ['.gitkeep'] else []) + pywebview_datas,
+    ] if os.path.isdir('assets') and os.listdir('assets') != ['.gitkeep'] else [])
+        + ps_scripts + pywebview_datas,
     hiddenimports=[
         'tkinter',
         'tkinter.ttk',

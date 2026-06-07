@@ -114,12 +114,16 @@ def _apply_window_icon(root: tk.Tk) -> None:
 
 from . import device_manager, docker_manager, health_checker, config_generator, wsl_bridge, update_checker, webview_window
 from . import camera_bridge as camera_bridge_mod
+from . import phone_camera as phone_camera_mod
+from . import phone_cert as phone_cert_mod
 from .constants import (
     APP_VERSION,
     UPDATE_API_URL,
     IMAGE_OPEN_MANIPULATOR,
     IMAGE_TAG,
     PORT_WEB_UI,
+    PORT_PHONE_HTTPS,
+    PHONE_CAM_ID,
     DOCKER_DIR,
     ENV_FILE,
     cameras_use_native_bridge,
@@ -141,6 +145,35 @@ def _redact_secret_env_line(line: str) -> str:
     return line
 
 
+def _primary_lan_ip() -> str:
+    """Best-effort primary outbound IPv4 of this PC, for the phone-camera URL.
+
+    Uses the classic UDP-connect trick: connecting a UDP socket to a public
+    address makes the OS pick the primary egress interface WITHOUT sending any
+    packet, so we can read its local address. Falls back to the hostname-
+    resolved address, then 127.0.0.1. The teacher can edit the URL if a VPN /
+    multi-NIC setup makes this wrong (the dialog has a copy button)."""
+    import socket
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("8.8.8.8", 80))  # no traffic — just selects the route
+            ip = s.getsockname()[0]
+        finally:
+            s.close()
+        if ip and not ip.startswith("127."):
+            return ip
+    except OSError:
+        pass
+    try:
+        host_ip = socket.gethostbyname(socket.gethostname())
+        if host_ip and not host_ip.startswith("127."):
+            return host_ip
+    except OSError:
+        pass
+    return "127.0.0.1"
+
+
 class EduBoticsApp:
     """Hauptfenster der Anwendung."""
 
@@ -157,6 +190,11 @@ class EduBoticsApp:
         # Native camera capture bridge (Windows student path). Created on
         # environment start, stopped on environment stop / app close.
         self.camera_bridge = None
+        # Phone-as-3rd-camera HTTPS receiver (optional). Created on environment
+        # start when the toggle is on; the slot is shared with the camera
+        # bridge's external sender (cam_id 2).
+        self.phone_server = None
+        self.phone_frame_slot = None
         self.gpu_available = False
         self.running = False
         self._scanning = False
@@ -164,6 +202,8 @@ class EduBoticsApp:
         # Cloud-only mode: skip arm/camera scan, only start physical_ai_manager
         # so the user can open the Cloud tab without any robot hardware.
         self.cloud_only = tk.BooleanVar(value=False)
+        # Optional: use a school phone (browser) as a 3rd camera (cam_id 2).
+        self.phone_camera_enabled = tk.BooleanVar(value=False)
 
         self._build_ui()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -265,6 +305,27 @@ class EduBoticsApp:
         self.camera_role_frame.pack(fill=tk.X, pady=5)
         self.gripper_cam_var = tk.StringVar()
         self.scene_cam_var = tk.StringVar()
+
+        # Optional: phone as a 3rd camera. The phone's browser streams over
+        # HTTPS to EduBotics.exe, which forwards the frames into the container
+        # as /phone/image_raw/compressed (cam_id 2) — it never goes through WSL2
+        # USB, so it bypasses the usbipd camera ceiling.
+        self.phone_cam_check = ttk.Checkbutton(
+            camera_frame,
+            text="Handy als 3. Kamera verwenden (über WLAN, kein USB)",
+            variable=self.phone_camera_enabled,
+        )
+        self.phone_cam_check.pack(anchor=tk.W, pady=(6, 0))
+        ttk.Label(
+            camera_frame,
+            text=(
+                "Beim Start zeigt EduBotics eine Web-Adresse an, die du am Handy "
+                "im Browser öffnest. Das Handybild erscheint dann als zusätzliche "
+                "Kamera /phone (für Roboter-Studio und die Vorschau). Das Handy "
+                "muss im selben WLAN sein."
+            ),
+            foreground="gray", font=("Segoe UI", 8), wraplength=620, justify=tk.LEFT,
+        ).pack(anchor=tk.W, pady=(2, 0))
 
         # ── Schritt D: HuggingFace Token ──
         # One-time token entry. Stored on THIS PC in %LOCALAPPDATA%\EduBotics\.env
@@ -1707,6 +1768,9 @@ class EduBoticsApp:
         # thread below are not thread-safe. Empty means "leave the saved
         # token untouched" (generate_env_file preserves the existing one).
         hf_token = self.hf_token_var.get().strip()
+        # Phone-as-3rd-camera toggle — captured here for the same thread-safety
+        # reason. Only meaningful on the native_bridge (Windows) path.
+        phone_enabled = bool(self.phone_camera_enabled.get()) and not is_cloud_only
 
         if not is_cloud_only and not self.hardware.is_complete:
             messagebox.showwarning("Fehlende Hardware", "Bitte beide Arme scannen und identifizieren, bevor du startest.")
@@ -1775,9 +1839,11 @@ class EduBoticsApp:
                 self._set_status("Konfiguration wird erstellt...")
                 self._log(".env-Datei wird erstellt...")
                 if is_cloud_only:
-                    env_content = config_generator.generate_cloud_only_env(ENV_FILE)
+                    env_content = config_generator.generate_cloud_only_env(
+                        ENV_FILE, phone_camera=phone_enabled)
                 else:
-                    env_content = config_generator.generate_env_file(self.hardware, ENV_FILE)
+                    env_content = config_generator.generate_env_file(
+                        self.hardware, ENV_FILE, phone_camera=phone_enabled)
                 self._log(f"Konfiguration geschrieben: {ENV_FILE}")
                 for line in env_content.strip().splitlines():
                     self._log(f"  {_redact_secret_env_line(line)}")
@@ -1816,9 +1882,10 @@ class EduBoticsApp:
 
                 # 4.5 Kamera-Bridge starten (native Aufnahme auf Windows →
                 # Stream in den Container). Nur im native_bridge-Modus und
-                # wenn Kameras zugewiesen sind.
+                # wenn Kameras zugewiesen sind. Bei aktiviertem Handy-Modus wird
+                # der Handy-Empfänger gestartet und als 3. Kamera registriert.
                 if not is_cloud_only:
-                    self._start_camera_bridge()
+                    self._start_camera_bridge(phone_enabled=phone_enabled)
 
                 # 5. Web-Oberfläche öffnen
                 self._log("Web-Oberfläche wird geöffnet...")
@@ -1843,35 +1910,157 @@ class EduBoticsApp:
 
     # ── Native camera bridge ─────────────────────────────────────────
 
-    def _start_camera_bridge(self):
+    def _start_camera_bridge(self, phone_enabled: bool = False):
         """Start native Windows camera capture → TCP stream into the container.
 
-        No-op when cameras run via usb_cam (Jetson) or when no camera was
-        assigned a role. Maps each assigned camera's OpenCV index to its role
-        (gripper -> cam_id 0, scene -> cam_id 1, matching the container's
-        EDUBOTICS_CAMERA_NAMES order).
+        No-op when cameras run via usb_cam (Jetson). Maps each assigned camera's
+        OpenCV index to its role (gripper -> cam_id 0, scene -> cam_id 1,
+        matching the container's EDUBOTICS_CAMERA_NAMES order). When
+        ``phone_enabled`` is True, also starts the phone HTTPS receiver and
+        registers its frame slot as cam_id 2 (/phone/image_raw/compressed).
         """
         if not cameras_use_native_bridge():
+            if phone_enabled:
+                self._log(
+                    "Handy-Kamera benötigt den nativen Kamera-Modus (Windows) — "
+                    "übersprungen.")
             return
-        # Tear down any previous bridge (e.g. a stop→start without app restart).
+        # Tear down any previous bridge + phone server (stop→start, no restart).
         self._stop_camera_bridge()
+        self._stop_phone_server()
         role_to_index = {
             cam.role: cam.win_index
             for cam in self.hardware.cameras
             if cam.role in ("gripper", "scene") and cam.win_index >= 0
         }
-        if not role_to_index:
+        if not role_to_index and not phone_enabled:
             self._log("Keine Kamera zugewiesen — Kamera-Bridge wird nicht gestartet.")
             return
+
+        # Start the phone receiver FIRST so its slot exists before we register
+        # the external sender on the bridge. A failure here is non-fatal: the
+        # USB cameras still run; only the phone is skipped.
+        phone_slot = None
+        if phone_enabled:
+            phone_slot = self._start_phone_server()
+
         try:
             self.camera_bridge = camera_bridge_mod.CameraBridge(role_to_index)
+            if phone_slot is not None:
+                # register_external_source MUST precede start().
+                self.camera_bridge.register_external_source(PHONE_CAM_ID, phone_slot)
             self.camera_bridge.start()
-            roles = ", ".join(sorted(role_to_index))
-            self._log(f"Kamera-Bridge gestartet (nativ, {roles}) — streamt mit "
+            roles = ", ".join(sorted(role_to_index)) or "keine USB-Kamera"
+            phone_note = " + Handy" if phone_slot is not None else ""
+            self._log(f"Kamera-Bridge gestartet (nativ, {roles}{phone_note}) — streamt mit "
                       f"{int(camera_bridge_mod.constants.CAMERA_FRAMERATE)} fps in den Container.")
         except Exception as e:  # noqa: BLE001
             self.camera_bridge = None
             self._log(f"WARNUNG: Kamera-Bridge konnte nicht gestartet werden: {e}")
+
+    def _start_phone_server(self):
+        """Ensure the cert, start the phone HTTPS receiver, show the URL.
+
+        Returns the LatestFrameSlot to register on the bridge, or None on
+        failure (the USB cameras still run without the phone).
+        """
+        try:
+            cert_path, key_path = phone_cert_mod.ensure_cert()
+        except phone_cert_mod.PhoneCertError as exc:
+            self._log(f"WARNUNG: Handy-Kamera konnte nicht aktiviert werden: {exc}")
+            return None
+        slot = phone_camera_mod.LatestFrameSlot()
+        try:
+            server = phone_camera_mod.PhoneCameraServer(
+                cert_path, key_path, frame_slot=slot,
+                port=PORT_PHONE_HTTPS, log=self._log,
+            )
+            server.start()
+        except OSError as exc:
+            self._log(
+                f"WARNUNG: Handy-Empfänger konnte Port {PORT_PHONE_HTTPS} nicht "
+                f"öffnen ({exc}) — Handy-Kamera deaktiviert.")
+            return None
+        except Exception as exc:  # noqa: BLE001
+            self._log(f"WARNUNG: Handy-Empfänger konnte nicht starten: {exc}")
+            return None
+        self.phone_server = server
+        self.phone_frame_slot = slot
+        url = f"https://{_primary_lan_ip()}:{PORT_PHONE_HTTPS}"
+        self._log(f"Handy-Kamera aktiv — am Handy im Browser öffnen: {url}")
+        self._log(
+            "Hinweis: Beim ersten Öffnen zeigt das Handy eine Sicherheitswarnung "
+            "(selbst signiertes Zertifikat) — „Erweitert“ → „Trotzdem fortfahren“.")
+        # Windows-Firewall: do NOT auto-add a rule (needs elevation). Log the
+        # exact manual command the teacher can run once if the phone can't reach
+        # the PC. (Auto-firewall-rule via an elevated helper is a documented
+        # non-goal — see docs/plans/2026-06-07-phone-camera.md.)
+        self._log(
+            "Falls das Handy keine Verbindung bekommt, einmalig als Administrator "
+            "die Windows-Firewall öffnen:")
+        self._log(
+            f'  netsh advfirewall firewall add rule name="EduBotics Handy-Kamera" '
+            f'dir=in action=allow protocol=TCP localport={PORT_PHONE_HTTPS}')
+        self.root.after(0, lambda: self._show_phone_url_dialog(url))
+        return slot
+
+    def _show_phone_url_dialog(self, url: str):
+        """Small modal showing the phone URL + a „URL kopieren" button (no QR —
+        a QR dependency is a documented non-goal)."""
+        try:
+            win = tk.Toplevel(self.root)
+            win.title("Handy als Kamera")
+            win.transient(self.root)
+            win.resizable(False, False)
+            frame = ttk.Frame(win, padding=16)
+            frame.pack(fill=tk.BOTH, expand=True)
+            ttk.Label(
+                frame,
+                text="Diese Adresse am Handy im Browser öffnen:",
+                font=("Segoe UI", 10),
+            ).pack(anchor=tk.W)
+            ttk.Label(
+                frame, text=url, font=("Segoe UI", 14, "bold"), foreground="#0A6",
+            ).pack(anchor=tk.W, pady=(6, 10))
+
+            def _copy():
+                try:
+                    self.root.clipboard_clear()
+                    self.root.clipboard_append(url)
+                    copied_var.set("Kopiert!")
+                except tk.TclError:
+                    copied_var.set("Kopieren fehlgeschlagen")
+
+            row = ttk.Frame(frame)
+            row.pack(fill=tk.X)
+            ttk.Button(row, text="URL kopieren", command=_copy).pack(side=tk.LEFT)
+            copied_var = tk.StringVar()
+            ttk.Label(row, textvariable=copied_var, foreground="gray").pack(
+                side=tk.LEFT, padx=8)
+            ttk.Button(row, text="Schließen", command=win.destroy).pack(side=tk.RIGHT)
+            ttk.Label(
+                frame,
+                text=(
+                    "Das Handy muss im selben WLAN sein. Beim ersten Öffnen die "
+                    "Sicherheitswarnung bestätigen („Erweitert“ → „Trotzdem "
+                    "fortfahren“)."
+                ),
+                foreground="gray", font=("Segoe UI", 8), wraplength=360,
+                justify=tk.LEFT,
+            ).pack(anchor=tk.W, pady=(10, 0))
+        except tk.TclError:
+            # Headless / teardown — the URL is already in the Protokoll.
+            pass
+
+    def _stop_phone_server(self):
+        """Stop the phone HTTPS receiver if running. Best-effort + idempotent."""
+        if self.phone_server is not None:
+            try:
+                self.phone_server.shutdown()
+            except Exception:  # noqa: BLE001
+                pass
+            self.phone_server = None
+        self.phone_frame_slot = None
 
     def _stop_camera_bridge(self):
         """Stop the native camera bridge if running. Best-effort."""
@@ -1953,6 +2142,7 @@ class EduBoticsApp:
             self.root.after(0, lambda: self.progress.start(10))
 
             self._stop_camera_bridge()
+            self._stop_phone_server()
             if self.cloud_only.get():
                 docker_manager.stop_cloud_only(log=self._log)
             else:
@@ -2020,6 +2210,7 @@ class EduBoticsApp:
             ):
                 self._log("Beende — Container werden gestoppt...")
                 self._stop_camera_bridge()
+                self._stop_phone_server()
                 webview_window.destroy_all()
                 if self.cloud_only.get():
                     docker_manager.stop_cloud_only()

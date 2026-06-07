@@ -194,7 +194,11 @@ jobs:
           # Pascal [Code] section has no other compile check in CI).
           # v2.6.1 shipped built with 6.7.0 — bump deliberately, with a
           # workflow_dispatch test build against the PREVIOUS release tag.
-          choco install innosetup --version=6.7.0 -y --no-progress
+          # --allow-downgrade --force: the windows-latest image started
+          # pre-installing a NEWER Inno Setup (6.7.1, 2026-06-07) and bare
+          # choco refuses to downgrade (exit 1) — the flags make the pin
+          # win over whatever the runner image ships.
+          choco install innosetup --version=6.7.0 -y --no-progress --allow-downgrade --force
           $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
           if (-not (Test-Path $iscc)) { throw "Inno Setup ISCC.exe not at expected path" }
           echo "ISCC=$iscc" >> $env:GITHUB_ENV

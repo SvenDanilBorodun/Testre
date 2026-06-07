@@ -26,6 +26,7 @@ import {
 } from '../editDatasetSlice';
 import { useRosServiceCaller } from '../../../hooks/useRosServiceCaller';
 import FileBrowserModal from '../../../components/FileBrowserModal';
+import LocalDatasetQuickPick from './LocalDatasetQuickPick';
 import { DEFAULT_PATHS, TARGET_FOLDERS } from '../../../constants/paths';
 
 // Style Classes
@@ -110,16 +111,17 @@ const parseEpisodeNumbers = (input) => {
 
 const showOperationSuccess = (operation, episodeNums = []) => {
   if (operation === 'delete') {
-    const episodeText = episodeNums.length > 0 ? ` (Episodes: ${episodeNums.join(', ')})` : '';
-    toast.success(`Dataset deleted successfully!${episodeText}`);
+    const episodeText = episodeNums.length > 0 ? ` (Episoden: ${episodeNums.join(', ')})` : '';
+    toast.success(`Episoden erfolgreich gelöscht!${episodeText}`);
   }
 };
 
 const showOperationError = (operation, errorMessage = '') => {
-  const operationText = 'delete';
+  // errorMessage carries the server's German DataEditError detail when
+  // the v3.0 editor rejected the request — show it verbatim.
   const message = errorMessage
-    ? `Failed to ${operationText} dataset:\n${errorMessage}`
-    : `Failed to ${operationText} dataset`;
+    ? `Löschen fehlgeschlagen:\n${errorMessage}`
+    : 'Löschen fehlgeschlagen.';
   toast.error(message);
 };
 
@@ -128,7 +130,7 @@ const EpisodeNumberInput = ({ value, onChange, disabled = false, className, pars
   const parsedNumbers = useMemo(() => parseFunction(value), [value, parseFunction]);
 
   const hasValidInput = value && parsedNumbers.length > 0;
-  const previewText = hasValidInput ? parsedNumbers.join(', ') : 'No valid episodes';
+  const previewText = hasValidInput ? parsedNumbers.join(', ') : 'Keine gültigen Episoden';
 
   return (
     <div className="flex flex-col gap-2 w-full">
@@ -138,16 +140,16 @@ const EpisodeNumberInput = ({ value, onChange, disabled = false, className, pars
           'bg-white': !disabled,
         })}
         type="text"
-        placeholder="Enter episode numbers to delete (e.g., 0,1,2,3,10-15,20)"
+        placeholder="Episodennummern, z. B. 0,1,2,10-15"
         value={value}
         onChange={(e) => onChange(e.target.value)}
         disabled={disabled}
-        aria-label="Episode numbers input"
+        aria-label="Episodennummern"
       />
       {value && (
         <div className="text-sm text-gray-600" role="status" aria-live="polite">
-          <span className="font-medium">Preview:</span> {previewText} ({parsedNumbers.length}{' '}
-          {parsedNumbers.length === 1 ? 'episode' : 'episodes'})
+          <span className="font-medium">Vorschau:</span> {previewText} ({parsedNumbers.length}{' '}
+          {parsedNumbers.length === 1 ? 'Episode' : 'Episoden'})
         </div>
       )}
     </div>
@@ -242,14 +244,24 @@ const DeleteSection = ({ isEditable = true }) => {
   return (
     <div className="w-full flex flex-col items-center justify-start bg-gray-100 p-10 gap-8 rounded-xl">
       <div className="w-full flex items-center justify-start">
-        <h1 className="text-2xl font-bold mb-4">Delete Episodes from Dataset</h1>
+        <h1 className="text-2xl font-bold mb-4">Episoden aus einem Datensatz löschen</h1>
       </div>
+
+      {/* Name-based quick pick (leLab-comparison PR-1) — fills the path
+          textarea below; the browse button stays as the fallback. */}
+      <LocalDatasetQuickPick
+        disabled={!isEditable}
+        onPick={(path) => {
+          handlers.datasetToDeleteEpisodeChange(path);
+          fetchDatasetInfo(path);
+        }}
+      />
 
       <div className="flex flex-row items-center justify-start gap-20 w-full">
         <div className="flex flex-col items-start justify-start gap-2 w-full">
           <div className="flex items-center justify-start gap-2 w-full">
             <div className="flex flex-row items-center justify-start gap-2 bg-white pr-2 pl-4 py-2 rounded-full shadow-md">
-              <span className="text-md font-bold">Total Episodes</span>
+              <span className="text-md font-bold">Episoden gesamt</span>
               <span className="text-lg font-bold bg-gray-200 px-3 py-0 rounded-full">
                 {datasetInfo.totalEpisodes}
               </span>
@@ -271,14 +283,14 @@ const DeleteSection = ({ isEditable = true }) => {
               value={datasetToDeleteEpisode}
               onChange={(e) => handlers.datasetToDeleteEpisodeChange(e.target.value)}
               disabled={!isEditable}
-              placeholder="Enter dataset to delete episodes"
+              placeholder="Pfad zum Datensatz"
             />
 
             <button
               type="button"
               onClick={() => setShowSelectDatasetPathBrowserModal(true)}
               className="flex items-center justify-center w-12 h-12 text-blue-500 bg-gray-200 rounded-md hover:text-blue-700"
-              aria-label="Browse files for dataset to delete"
+              aria-label="Datensatz-Ordner durchsuchen"
             >
               <MdFolderOpen className="w-10 h-10" />
             </button>
@@ -286,7 +298,7 @@ const DeleteSection = ({ isEditable = true }) => {
         </div>
 
         <div className="flex flex-col items-start justify-start gap-2 w-full">
-          <span className="text-lg font-bold">Episode Numbers to Delete</span>
+          <span className="text-lg font-bold">Zu löschende Episoden</span>
           <EpisodeNumberInput
             value={deleteEpisodeNumsInput}
             onChange={handlers.deleteEpisodeNumsChange}
@@ -306,7 +318,7 @@ const DeleteSection = ({ isEditable = true }) => {
         onClick={operations.deleteDataset}
         disabled={datasetToDeleteEpisode === '' || deleteEpisodeNums.length === 0 || !isEditable}
       >
-        Delete
+        Löschen
       </button>
 
       {/* File Browser Modal */}
@@ -314,8 +326,8 @@ const DeleteSection = ({ isEditable = true }) => {
         isOpen={showSelectDatasetPathBrowserModal}
         onClose={() => setShowSelectDatasetPathBrowserModal(false)}
         onFileSelect={handlers.selectDatasetPathSelect}
-        title="Select Dataset Path"
-        selectButtonText="Select"
+        title="Datensatz auswählen"
+        selectButtonText="Auswählen"
         allowDirectorySelect={false}
         targetFolderName={[
           TARGET_FOLDERS.DATASET_METADATA,

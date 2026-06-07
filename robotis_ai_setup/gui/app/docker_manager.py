@@ -1049,6 +1049,76 @@ def stop_containers(gpu: bool = False) -> bool:
         return False
 
 
+# The three persistent data volumes compose declares (docker-compose.yml).
+# Compose prefixes them with the project name at create time (e.g.
+# robotis_ai_setup_huggingface_cache), so factory_reset matches by suffix
+# against `docker volume ls` instead of hardcoding the prefix.
+EDUBOTICS_DATA_VOLUME_SUFFIXES = (
+    "ai_workspace",
+    "huggingface_cache",
+    "edubotics_calib",
+)
+
+
+def factory_reset(log=None) -> tuple[bool, str]:
+    """Delete the persistent EduBotics data volumes (Factory Reset).
+
+    Wipes datasets, downloaded models/HF cache and the Roboter-Studio
+    calibration — the exact set the v2.5.0 upgrade notes tell students to
+    clear. The DISTRO survives (``wsl --unregister`` is the uninstaller's
+    job, gated by its own consent dialog); the next "Umgebung starten"
+    recreates the volumes empty.
+
+    Order matters: ``compose down`` first (idempotent fast no-op when
+    nothing runs) so the entrypoint torque-disables on SIGTERM and the
+    containers release their volume references — ``docker volume rm``
+    refuses volumes that are still referenced.
+
+    Returns (ok, german_message). CLAUDE.md has referenced this button
+    since v2.5.0; it ships since 2026-06-07 (leLab-comparison PR-1).
+    """
+    if log:
+        log("Daten zurücksetzen: stoppe laufende Container ...")
+    stop_containers(gpu=False)
+    try:
+        result = subprocess.run(
+            _docker_cmd("volume", "ls", "--format", "{{.Name}}"),
+            capture_output=True, text=True, timeout=30,
+            **_SUBPROCESS_KWARGS,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+        return False, f"Docker ist nicht erreichbar: {e}"
+    if result.returncode != 0:
+        return False, (
+            "Die Volume-Liste konnte nicht gelesen werden: "
+            + result.stderr.strip()
+        )
+    targets = [
+        name for name in result.stdout.split()
+        if any(
+            name == suffix or name.endswith(f"_{suffix}")
+            for suffix in EDUBOTICS_DATA_VOLUME_SUFFIXES
+        )
+    ]
+    if not targets:
+        return True, "Keine EduBotics-Daten-Volumes vorhanden — nichts zu löschen."
+    if log:
+        log(f"Daten zurücksetzen: lösche {', '.join(sorted(targets))} ...")
+    rm = subprocess.run(
+        _docker_cmd("volume", "rm", *targets),
+        capture_output=True, text=True, timeout=60,
+        **_SUBPROCESS_KWARGS,
+    )
+    if rm.returncode != 0:
+        return False, (
+            "Die Daten-Volumes konnten nicht gelöscht werden: "
+            + rm.stderr.strip()
+        )
+    return True, (
+        f"{len(targets)} Daten-Volume(s) gelöscht: {', '.join(sorted(targets))}"
+    )
+
+
 def get_container_status() -> dict[str, str]:
     """Get status of all project containers.
 

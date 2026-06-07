@@ -191,11 +191,18 @@ Filename: "powershell.exe"; \
   Flags: runhidden; \
   RunOnceId: "StopContainers"
 
-; EduBotics WSL2-Distro deregistrieren
+; EduBotics WSL2-Distro deregistrieren — NUR mit Zustimmung (Check:).
+; `wsl --unregister` zerstört die VHDX und damit ALLE Docker-Volumes
+; (ai_workspace, huggingface_cache, edubotics_calib). Bis 2026-06-07 lief
+; das ohne Rückfrage — der Upgrade-Pfad bekam mit v2.6.1 die ROOTFS_VERSION-
+; Schutzabfrage, die Deinstallation wischte weiter stumm. Der Dialog in
+; ConfirmDistroWipe() fragt mit Default NEIN (Daten behalten), damit auch
+; /SUPPRESSMSGBOXES niemals stumm löscht.
 Filename: "wsl.exe"; \
   Parameters: "--unregister EduBotics"; \
   Flags: runhidden; \
-  RunOnceId: "UnregisterDistro"
+  RunOnceId: "UnregisterDistro"; \
+  Check: ConfirmDistroWipe
 
 [Code]
 // Pascal Script: Check if the EduBotics WSL distro is registered
@@ -305,6 +312,45 @@ begin
     mbConfirmation, MB_YESNO) = IDYES;
   if not Result then
     Log('User declined the rootfs re-import - keeping the existing EduBotics distro.');
+end;
+
+// Uninstall consent for the destructive distro wipe. Mirrors the upgrade
+// dialog in ShouldImportDistro, but with the OPPOSITE default: declining an
+// upgrade re-import merely postpones it, declining the uninstall wipe is the
+// safe choice forever — a kept distro costs disk space, a wiped one costs a
+// student their only copy of every dataset. MB_DEFBUTTON2 makes "Nein" the
+// default, so silent uninstalls (/SUPPRESSMSGBOXES takes the default button)
+// PRESERVE the data. Cached: Inno may evaluate Check: more than once.
+var
+  DistroWipeAsked: Boolean;
+  DistroWipeConfirmed: Boolean;
+
+function ConfirmDistroWipe(): Boolean;
+begin
+  if DistroWipeAsked then
+  begin
+    Result := DistroWipeConfirmed;
+    exit;
+  end;
+  DistroWipeAsked := True;
+  DistroWipeConfirmed := MsgBox(
+    'Sollen auch alle EduBotics-Daten gelöscht werden?'
+    + #13#10 + #13#10
+    + 'Dabei werden unwiderruflich entfernt:'
+    + #13#10 + '  - aufgenommene Datensätze (falls nicht zu Hugging Face hochgeladen)'
+    + #13#10 + '  - heruntergeladene Modelle'
+    + #13#10 + '  - die Roboter-Studio-Kalibrierung'
+    + #13#10 + #13#10
+    + 'Tipp: Datensätze vorher in der EduBotics-App zu Hugging Face hochladen.'
+    + #13#10 + #13#10
+    + 'Bei "Nein" wird nur das Programm entfernt; die Daten bleiben erhalten'
+    + #13#10 + 'und werden bei einer Neuinstallation wiederverwendet.',
+    mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES;
+  if DistroWipeConfirmed then
+    Log('Uninstall: user confirmed the distro wipe - Docker volumes will be deleted.')
+  else
+    Log('Uninstall: distro wipe declined/defaulted - EduBotics distro + data preserved.');
+  Result := DistroWipeConfirmed;
 end;
 
 // Pull images only when the distro is ready.

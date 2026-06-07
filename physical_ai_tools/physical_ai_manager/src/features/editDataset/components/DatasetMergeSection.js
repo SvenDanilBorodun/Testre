@@ -27,6 +27,7 @@ import {
 } from '../editDatasetSlice';
 import { useRosServiceCaller } from '../../../hooks/useRosServiceCaller';
 import FileBrowserModal from '../../../components/FileBrowserModal';
+import LocalDatasetQuickPick from './LocalDatasetQuickPick';
 import { DEFAULT_PATHS, TARGET_FOLDERS } from '../../../constants/paths';
 
 // Style Classes
@@ -169,15 +170,16 @@ const checkFolderNameConflict = (folderName, existingFolders) => {
 
 const showOperationSuccess = (operation) => {
   if (operation === 'merge') {
-    toast.success('Dataset merged successfully!');
+    toast.success('Datensätze erfolgreich zusammengeführt!');
   }
 };
 
 const showOperationError = (operation, errorMessage = '') => {
-  const operationText = 'merge';
+  // errorMessage carries the server's German DataEditError detail when
+  // the v3.0 editor rejected the request — show it verbatim.
   const message = errorMessage
-    ? `Failed to ${operationText} dataset:\n${errorMessage}`
-    : `Failed to ${operationText} dataset`;
+    ? `Zusammenführen fehlgeschlagen:\n${errorMessage}`
+    : 'Zusammenführen fehlgeschlagen.';
   toast.error(message);
 };
 
@@ -475,11 +477,28 @@ const MergeSection = ({ isEditable = true }) => {
   return (
     <div className="w-full flex flex-col items-center justify-start bg-gray-100 p-10 gap-8 rounded-xl">
       <div className="w-full flex items-center justify-start">
-        <span className="text-2xl font-bold mb-4">Merge Datasets</span>
+        <span className="text-2xl font-bold mb-4">Datensätze zusammenführen</span>
       </div>
+
+      {/* Name-based quick pick (leLab-comparison PR-1) — fills the first
+          empty slot or appends; the per-row browse button stays. */}
+      <LocalDatasetQuickPick
+        disabled={!isEditable}
+        onPick={(path) => {
+          const emptyIdx = mergeDatasetList.findIndex(
+            (d) => !d || d.trim() === ''
+          );
+          const next =
+            emptyIdx >= 0
+              ? mergeDatasetList.map((d, i) => (i === emptyIdx ? path : d))
+              : [...mergeDatasetList, path];
+          handlers.mergeDatasetsChange(next);
+        }}
+      />
+
       <div className="w-full h-full flex flex-row items-center justify-start gap-8">
         <div className="w-full min-w-72 bg-white p-5 rounded-md flex flex-col items-start justify-center gap-2 shadow-md">
-          <span className="text-xl font-bold">Enter Datasets to Merge</span>
+          <span className="text-xl font-bold">Zu kombinierende Datensätze</span>
           <DatasetListInput
             datasets={mergeDatasetList}
             onChange={handlers.mergeDatasetsChange}

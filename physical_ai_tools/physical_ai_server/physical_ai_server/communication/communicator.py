@@ -35,7 +35,9 @@ from physical_ai_interfaces.srv import (
     GetImageTopicList
 )
 from physical_ai_server.communication.multi_subscriber import MultiSubscriber
+from physical_ai_server.data_processing import data_editor_v3
 from physical_ai_server.data_processing.data_editor import DataEditor
+from physical_ai_server.data_processing.data_editor_v3 import DataEditError
 from physical_ai_server.utils.file_browse_utils import FileBrowseUtils
 from physical_ai_server.utils.parameter_utils import (
     parse_topic_list,
@@ -700,28 +702,61 @@ class Communicator:
         return response
 
     def dataset_edit_callback(self, request, response):
+        # Layout gate (leLab-comparison PR-1, 2026-06-07): the legacy
+        # DataEditor performs v2.1 per-episode-file surgery, but the v2.5.0
+        # recorder writes the v3.0 concatenated layout — running the v2.1
+        # path on a v3.0 dataset FileNotFoundErrors on the first shard.
+        # Route on meta/info.json::codebase_version per dataset; v3.0 goes
+        # through data_editor_v3 (upstream dataset_tools + atomic swap).
         try:
             if request.mode == EditDataset.Request.MERGE:
-                merge_dataset_list = request.merge_dataset_list
+                merge_dataset_list = list(request.merge_dataset_list)
                 output_path = request.output_path
                 # TODO: Implement HuggingFace upload functionality if needed
                 # upload_huggingface = request.upload_huggingface
-                self.data_editor.merge_datasets(
-                    merge_dataset_list, output_path)
+                v3_flags = [
+                    data_editor_v3.is_v3_dataset(p) for p in merge_dataset_list
+                ]
+                if v3_flags and all(v3_flags):
+                    data_editor_v3.merge_datasets_v3(
+                        merge_dataset_list, output_path)
+                elif any(v3_flags):
+                    response.success = False
+                    response.message = (
+                        'Die ausgewählten Datensätze haben unterschiedliche '
+                        'Formate (v2.1 und v3.0) und können nicht '
+                        'zusammengeführt werden.'
+                    )
+                    return response
+                else:
+                    self.data_editor.merge_datasets(
+                        merge_dataset_list, output_path)
 
             elif request.mode == EditDataset.Request.DELETE:
                 delete_dataset_path = request.delete_dataset_path
                 delete_episode_num = list(request.delete_episode_num)
                 # TODO: Implement HuggingFace upload functionality if needed
                 # upload_huggingface = request.upload_huggingface
+                if not delete_episode_num:
+                    response.success = False
+                    response.message = 'Keine Episoden zum Löschen ausgewählt.'
+                    return response
 
-                # Use batch delete for better performance
-                if len(delete_episode_num) > 1:
+                # Missing paths route through the v3 module too: it raises
+                # the German 'nicht gefunden' DataEditError, while the
+                # legacy editor would surface an English FileNotFoundError.
+                if (data_editor_v3.dataset_dir_missing(delete_dataset_path)
+                        or data_editor_v3.is_v3_dataset(delete_dataset_path)):
+                    data_editor_v3.delete_episodes_v3(
+                        delete_dataset_path, delete_episode_num
+                    )
+                elif len(delete_episode_num) > 1:
+                    # v2.1 legacy layout — batch delete for performance
                     self.data_editor.delete_episodes_batch(
                         delete_dataset_path, delete_episode_num
                     )
                 else:
-                    # Single episode deletion
+                    # v2.1 legacy layout — single episode deletion
                     self.data_editor.delete_episode(
                         delete_dataset_path, delete_episode_num[0]
                     )
@@ -732,6 +767,15 @@ class Communicator:
 
             response.success = True
             response.message = f'Successfully processed edit mode: {request.mode}'
+            return response
+
+        except DataEditError as e:
+            # Student-facing German message; technical cause already logged
+            # by data_editor_v3 (and chained on the exception).
+            self.node.get_logger().error(
+                f'dataset_edit_callback rejected: {e.__cause__ or e}')
+            response.success = False
+            response.message = str(e)
             return response
 
         except Exception as e:

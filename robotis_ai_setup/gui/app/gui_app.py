@@ -325,6 +325,16 @@ class EduBoticsApp:
         )
         self.btn_open_browser.pack(side=tk.LEFT, padx=5)
 
+        # Factory Reset (rechtsbündig, bewusst abgesetzt von Start/Stopp):
+        # löscht die Daten-Volumes (Datensätze/Modelle/Kalibrierung), die
+        # Distro bleibt. CLAUDE.md verweist seit v2.5.0 auf diesen Knopf.
+        self.btn_factory_reset = ttk.Button(
+            btn_frame, text="Daten zurücksetzen",
+            command=self._factory_reset,
+            state=tk.DISABLED,
+        )
+        self.btn_factory_reset.pack(side=tk.RIGHT, padx=5)
+
         # ── Protokoll-Ausgabe ──
         log_frame = ttk.LabelFrame(main, text="Protokoll", padding=5)
         log_frame.pack(fill=tk.BOTH, expand=True, pady=5)
@@ -402,7 +412,11 @@ class EduBoticsApp:
         def _update():
             if not self._prerequisites_done or self.running:
                 self.btn_start.config(state=tk.DISABLED)
+                self.btn_factory_reset.config(state=tk.DISABLED)
                 return
+            # Factory Reset needs only a ready distro, no hardware scan —
+            # it must work in cloud-only mode and on a half-configured rig.
+            self.btn_factory_reset.config(state=tk.NORMAL)
             if self.cloud_only.get():
                 self.btn_start.config(state=tk.NORMAL)
             elif self.hardware.is_complete:
@@ -1745,6 +1759,48 @@ class EduBoticsApp:
 
         threading.Thread(target=_do_stop, daemon=True).start()
 
+    def _factory_reset(self):
+        """Daten-Volumes löschen (Datensätze, Modelle, Kalibrierung).
+
+        Die Distro und das Programm bleiben installiert — gelöscht werden
+        nur die persistenten Docker-Volumes. Der Uninstaller hat seinen
+        eigenen (Check:-gesteuerten) Dialog für die komplette Distro.
+        """
+        confirmed = messagebox.askyesno(
+            "Daten zurücksetzen",
+            "Sollen wirklich ALLE EduBotics-Daten gelöscht werden?\n\n"
+            "Unwiderruflich entfernt werden:\n"
+            "  - aufgenommene Datensätze (falls nicht zu Hugging Face hochgeladen)\n"
+            "  - heruntergeladene Modelle\n"
+            "  - die Roboter-Studio-Kalibrierung\n\n"
+            "Tipp: Datensätze vorher in der Web-Oberfläche zu Hugging Face hochladen.\n\n"
+            "Das Programm und die EduBotics-Umgebung bleiben installiert.",
+            default=messagebox.NO,
+        )
+        if not confirmed:
+            self._log("Daten zurücksetzen abgebrochen — nichts gelöscht.")
+            return
+
+        self.btn_factory_reset.config(state=tk.DISABLED)
+        self.btn_start.config(state=tk.DISABLED)
+
+        def _do_reset():
+            self._set_status("Daten werden zurückgesetzt...")
+            self.root.after(0, lambda: self.progress.start(10))
+            ok, msg = docker_manager.factory_reset(log=self._log)
+            self._log(("" if ok else "[FEHLER] ") + msg)
+            if ok:
+                self._log(
+                    "Beim nächsten 'Umgebung starten' werden die Daten-Volumes "
+                    "leer neu angelegt."
+                )
+                self._set_status("Daten zurückgesetzt")
+            else:
+                self._set_status("Daten zurücksetzen fehlgeschlagen")
+            self.root.after(0, lambda: self.progress.stop())
+            self._update_start_button()
+
+        threading.Thread(target=_do_reset, daemon=True).start()
 
     def _on_close(self):
         """Fenster-Schließen abfangen — Container stoppen, wenn nötig."""

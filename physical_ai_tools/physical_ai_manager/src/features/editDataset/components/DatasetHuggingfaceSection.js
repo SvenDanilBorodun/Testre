@@ -265,19 +265,19 @@ const HuggingfaceSection = () => {
   const operations = {
     uploadDataset: async () => {
       if (!hfRepoIdUpload || hfRepoIdUpload.trim() === '') {
-        toast.error('Please enter a Repo ID first');
+        toast.error('Bitte zuerst eine Repo-ID eingeben.');
         return;
       }
 
       if (!hfLocalDirUpload || hfLocalDirUpload.trim() === '') {
-        toast.error('Please select a Local Directory first');
+        toast.error('Bitte zuerst einen lokalen Ordner auswählen.');
         return;
       }
 
       // Additional validation check
       const validation = validateHfRepoName(hfRepoIdUpload.trim());
       if (!validation.isValid) {
-        toast.error(`Invalid repository name: ${validation.message}`);
+        toast.error(`Ungültiger Repository-Name: ${validation.message}`);
         return;
       }
 
@@ -287,10 +287,10 @@ const HuggingfaceSection = () => {
         const localDir = hfLocalDirUpload.trim();
         const result = await controlHfServer('upload', repoId, hfDataType.toLowerCase(), localDir);
         console.log('Upload dataset result:', result);
-        toast.success(`Upload started! (${repoId})`);
+        toast.success(`Upload gestartet! (${repoId})`);
       } catch (error) {
         console.error('Error uploading dataset:', error);
-        toast.error(`Failed to upload dataset: ${error.message}`);
+        toast.error(`Upload fehlgeschlagen: ${error.message}`);
       } finally {
         setIsUploading(false);
       }
@@ -298,14 +298,14 @@ const HuggingfaceSection = () => {
 
     downloadDataset: async () => {
       if (!hfRepoIdDownload || hfRepoIdDownload.trim() === '') {
-        toast.error('Please enter a Repo ID first');
+        toast.error('Bitte zuerst eine Repo-ID eingeben.');
         return;
       }
 
       // Additional validation check
       const validation = validateHfRepoName(hfRepoIdDownload.trim());
       if (!validation.isValid) {
-        toast.error(`Invalid repository name: ${validation.message}`);
+        toast.error(`Ungültiger Repository-Name: ${validation.message}`);
         return;
       }
 
@@ -315,10 +315,10 @@ const HuggingfaceSection = () => {
         const result = await controlHfServer('download', repoId, hfDataType.toLowerCase());
         console.log('Download dataset result:', result);
 
-        toast.success(`Download started!\n(${repoId})`);
+        toast.success(`Download gestartet!\n(${repoId})`);
       } catch (error) {
         console.error('Error downloading dataset:', error);
-        toast.error(`Failed to download dataset: ${error.message}`);
+        toast.error(`Download fehlgeschlagen: ${error.message}`);
       } finally {
         setIsDownloading(false);
       }
@@ -327,10 +327,10 @@ const HuggingfaceSection = () => {
       try {
         const result = await controlHfServer('cancel', hfRepoIdDownload, hfDataType.toLowerCase());
         console.log('Cancel download result:', result);
-        toast.success(`Cancelling... (${hfRepoIdDownload})`);
+        toast.success(`Wird abgebrochen … (${hfRepoIdDownload})`);
       } catch (error) {
         console.error('Error canceling download:', error);
-        toast.error(`Failed to cancel download: ${error.message}`);
+        toast.error(`Abbrechen fehlgeschlagen: ${error.message}`);
       }
     },
   };

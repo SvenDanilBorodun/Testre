@@ -979,6 +979,7 @@ class DataManager:
 
         save_dir = save_path / repo_id
 
+        DataManager._last_hf_failure_reason_de = None
         try:
             print(f'Starting download of {repo_id} ({repo_type})...')
 
@@ -1003,6 +1004,9 @@ class DataManager:
             # Print more detailed error information
             import traceback
             print(f'Detailed error traceback:\n{traceback.format_exc()}')
+            DataManager._last_hf_failure_reason_de = (
+                DataManager._classify_hf_failure_de(e)
+            )
             return False
 
     @classmethod
@@ -1172,6 +1176,41 @@ class DataManager:
             import traceback
             print(f'Traceback: {traceback.format_exc()}')
 
+    # Student-facing German explanation for an invalid/expired HF token —
+    # MUST point at the GUI token field ("Schritt D"), never at `hf auth
+    # login` (the token lives in the host .env, set once in the GUI; there
+    # is deliberately NO in-app token UI). leLab-comparison PR-1.
+    HF_AUTH_ERROR_DE = (
+        'Hugging Face-Token ungültig oder abgelaufen. Bitte in der '
+        'EduBotics-App unter „Schritt D: HuggingFace-Token" einen gültigen '
+        'Token speichern und die Umgebung neu starten.'
+    )
+
+    # German failure reason of the most recent upload/download attempt.
+    # The HfApiWorker calls upload/download IN ITS OWN PROCESS and reads
+    # this immediately after a falsy return (single-threaded loop), so the
+    # class attribute is a safe side-channel that keeps the long-standing
+    # bool/path return contracts intact.
+    _last_hf_failure_reason_de = None
+
+    @staticmethod
+    def _classify_hf_failure_de(error_text):
+        """Map an HF exception text to a precise German reason (or None)."""
+        lowered = str(error_text).lower()
+        auth_markers = (
+            '401',
+            'unauthorized',
+            'authentication',
+            'authenticated',
+            'invalid user token',
+            'invalid token',
+            'huggingfacehub_token',
+            'token is required',
+        )
+        if any(marker in lowered for marker in auth_markers):
+            return DataManager.HF_AUTH_ERROR_DE
+        return None
+
     @staticmethod
     def upload_huggingface_repo(
         repo_id,
@@ -1179,6 +1218,7 @@ class DataManager:
         local_dir,
         private=True,
     ):
+        DataManager._last_hf_failure_reason_de = None
         try:
             api = HfApi()
 
@@ -1189,6 +1229,10 @@ class DataManager:
             except Exception as auth_e:
                 print(f'Authentication failed: {auth_e}')
                 print('Please make sure you are authenticated with HuggingFace')
+                # whoami failing IS the auth failure — no substring guessing.
+                DataManager._last_hf_failure_reason_de = (
+                    DataManager.HF_AUTH_ERROR_DE
+                )
                 return False
 
             # Repository visibility follows the student's "Privater Modus"
@@ -1257,6 +1301,9 @@ class DataManager:
             # Print more detailed error information
             import traceback
             print(f'Detailed error traceback:\n{traceback.format_exc()}')
+            DataManager._last_hf_failure_reason_de = (
+                DataManager._classify_hf_failure_de(e)
+            )
             return False
 
     @staticmethod

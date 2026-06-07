@@ -370,6 +370,14 @@ class HfApiWorker:
                         logger.info(f'Processing {mode} request for repo: {repo_id}')
 
                         # Process the request based on mode
+                        # The ('error', message) tuples below land in
+                        # TaskStatus.error and surface verbatim as a student
+                        # toast — German per Rule §1. When the DataManager
+                        # call classified the failure (e.g. invalid HF token
+                        # -> the "Schritt D" hint), surface that precise
+                        # reason instead of the generic line. The reason
+                        # side-channel is same-process: this worker loop is
+                        # single-threaded and reads it right after the call.
                         if mode == 'upload':
                             logger.info(f'Starting upload for repo: {repo_id}')
                             result = DataManager.upload_huggingface_repo(
@@ -379,13 +387,17 @@ class HfApiWorker:
                                 private=private
                             )
                             if result:
-                                message = f'Uploaded Hugging Face repo: {repo_id}'
+                                message = f'Hugging Face-Upload abgeschlossen: {repo_id}'
                                 logger.info(f'✅ Upload completed: {repo_id}')
                                 output_queue.put(('success', message))
                             else:
-                                message = (f'Failed to upload Hugging Face repo'
-                                           f'\n{repo_id}, '
-                                           f'\nPlease check the repo ID and try again.')
+                                reason = DataManager._last_hf_failure_reason_de
+                                message = reason or (
+                                    f'Upload zu Hugging Face fehlgeschlagen:'
+                                    f'\n{repo_id}'
+                                    f'\nBitte Internetverbindung und Repo-Namen '
+                                    f'prüfen und erneut versuchen.'
+                                )
                                 logger.error(f'❌ Upload failed: {repo_id}')
                                 output_queue.put(('error', message))
 
@@ -396,13 +408,17 @@ class HfApiWorker:
                                 repo_type=repo_type
                             )
                             if result:
-                                message = f'Downloaded Hugging Face repo: {repo_id}'
+                                message = f'Hugging Face-Download abgeschlossen: {repo_id}'
                                 logger.info(f'✅ Download completed: {repo_id}')
                                 output_queue.put(('success', message))
                             else:
-                                message = (f'Failed to download Hugging Face repo:'
-                                           f'\n{repo_id}, '
-                                           f'\nPlease check the repo ID and try again.')
+                                reason = DataManager._last_hf_failure_reason_de
+                                message = reason or (
+                                    f'Download von Hugging Face fehlgeschlagen:'
+                                    f'\n{repo_id}'
+                                    f'\nBitte Internetverbindung und Repo-Namen '
+                                    f'prüfen und erneut versuchen.'
+                                )
                                 logger.error(f'❌ Download failed: {repo_id}')
                                 output_queue.put(('error', message))
 

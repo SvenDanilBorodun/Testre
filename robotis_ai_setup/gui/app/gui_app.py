@@ -634,6 +634,14 @@ class EduBoticsApp:
         self.root.after(0, lambda: self.progress.stop())
         self._log("Systemprüfung abgeschlossen. Arme und Kamera anschließen, dann auf Scannen klicken.")
 
+        # PR-4: try to rehydrate the previous session's arm mapping from the
+        # persisted .env — saves the full scan (container + pings) on every
+        # GUI launch when the same two arms are still plugged in. Scheduled
+        # onto the MAIN thread: _run_prerequisite_checks runs in a worker,
+        # and the cloud_only tk Var read inside must happen on main (same
+        # convention as _start_environment's capture-first pattern).
+        self.root.after(0, self._try_rehydrate_arms)
+
     # ── Repair: usbipd missing (driver-level prerequisite) ──────────
 
     def _resolve_repair_scripts(self):
@@ -1197,6 +1205,8 @@ class EduBoticsApp:
         if self._scanning:
             return
         self._scanning = True
+        # Rescanning probes the devices — release previews first (PR-4).
+        self._stop_camera_previews()
         self.btn_scan_camera.config(state=tk.DISABLED)
 
         def _do_scan():
@@ -1434,6 +1444,10 @@ class EduBoticsApp:
                 selected.append(self.cameras[i])
         selected = selected[:2]  # Max 2 cameras
 
+        # Release any running previews BEFORE the role frame (which hosts
+        # them) is rebuilt — and before captures could double-open.
+        self._stop_camera_previews()
+
         # Clear role assignment UI
         for w in self.camera_role_frame.winfo_children():
             w.destroy()
@@ -1445,6 +1459,7 @@ class EduBoticsApp:
             ttk.Label(self.camera_role_frame,
                       text=f"Greifer-Kamera: {selected[0].name}",
                       foreground="green").pack(anchor=tk.W)
+            self._start_camera_previews(selected)
         elif len(selected) == 2:
             # Two cameras — let student assign roles
             cam_names = [f"{c.name} ({c.path})" for c in selected]
@@ -1472,6 +1487,7 @@ class EduBoticsApp:
             scene_combo.bind("<<ComboboxSelected>>", lambda e: self._assign_camera_roles(selected, cam_names))
 
             self._assign_camera_roles(selected, cam_names)
+            self._start_camera_previews(selected)
         else:
             self.hardware.cameras = selected
 
@@ -1490,10 +1506,202 @@ class EduBoticsApp:
         # Order: gripper first, scene second
         self.hardware.cameras = [cameras[gripper_idx], cameras[scene_idx]]
 
+    # ── Arm-Konfiguration aus letzter Sitzung wiederherstellen (PR-4) ──
+
+    def _try_rehydrate_arms(self):
+        """Restore leader/follower from the persisted .env without a full scan.
+
+        Light path only (attach + by-id presence check; no scanner container,
+        no serial pings). Silent on any mismatch — the student simply scans
+        as before. Never runs in cloud-only mode or over an existing scan.
+        """
+        if (self.cloud_only.get() or self.hardware.is_complete
+                or self._scanning):
+            return
+        try:
+            leader_port = config_generator.read_env_var("LEADER_PORT", ENV_FILE)
+            follower_port = config_generator.read_env_var("FOLLOWER_PORT", ENV_FILE)
+        except Exception:  # noqa: BLE001 — missing .env on first run
+            return
+        if not leader_port or not follower_port:
+            return
+
+        def _do_rehydrate():
+            self._log("Prüfe letzte Arm-Konfiguration ...")
+            try:
+                leader, follower = device_manager.fast_rehydrate_arms(
+                    leader_port, follower_port
+                )
+            except Exception as exc:  # noqa: BLE001
+                self._log(f"(Schnellprüfung übersprungen: {exc})")
+                return
+            if leader is None or follower is None:
+                self._log(
+                    "Letzte Arm-Konfiguration nicht bestätigt — bitte "
+                    "'Arme scannen' klicken."
+                )
+                return
+            # A manual scan may be running or completed meanwhile — never
+            # race or overwrite it (the scan's identify result outranks
+            # the rehydrated mapping).
+            if self._scanning or self.hardware.is_complete:
+                return
+            self.hardware.leader = leader
+            self.hardware.follower = follower
+            self.root.after(0, lambda: self.leader_status_var.set(
+                f"Wiederhergestellt: {leader.description} ({leader.serial_path})"
+            ))
+            self.root.after(0, lambda: self.follower_status_var.set(
+                f"Wiederhergestellt: {follower.description} ({follower.serial_path})"
+            ))
+            self._log(
+                "Letzte Arm-Konfiguration wiederhergestellt — bei Probleme"
+                "n mit den Armen bitte erneut 'Arme scannen' klicken."
+            )
+            self._update_start_button()
+
+        threading.Thread(target=_do_rehydrate, daemon=True).start()
+
+    # ── Live-Kameravorschau bei der Rollenzuweisung (PR-4) ─────────────
+
+    def _stop_camera_previews(self):
+        """Release every preview capture + cancel the poll loop.
+
+        MUST run before anything else claims the devices (the capture
+        bridge at environment start, a camera rescan) — concurrent opens of
+        the same index are the exact contention class the native bridge
+        exists to avoid.
+        """
+        # Invalidate any in-flight worker opens first (they release their
+        # captures instead of installing into a torn-down preview row).
+        self._preview_generation = getattr(self, "_preview_generation", 0) + 1
+        if getattr(self, "_preview_after_id", None) is not None:
+            try:
+                self.root.after_cancel(self._preview_after_id)
+            except Exception:  # noqa: BLE001
+                pass
+            self._preview_after_id = None
+        for cap in getattr(self, "_preview_caps", {}).values():
+            try:
+                cap.release()
+            except Exception:  # noqa: BLE001
+                pass
+        self._preview_caps = {}
+        self._preview_labels = {}
+        self._preview_images = {}
+
+    def _start_camera_previews(self, cameras):
+        """Open a small live preview per selected camera (pre-start only).
+
+        leLab-comparison PR-4: two identical-serial Innomakers are
+        indistinguishable by name — the student picked gripper/scene BLIND,
+        and a swap silently corrupts every recorded dataset (the policy
+        learns the wrong view). A live thumbnail per camera makes the
+        mistake visually impossible. Rendering uses tk.PhotoImage with raw
+        PPM bytes (numpy BGR→RGB + subsample) — deliberately NO Pillow
+        dependency. Open-once-poll-close at ~5 Hz; previews stop before the
+        bridge claims the devices.
+        """
+        self._stop_camera_previews()
+        if not cameras:
+            return
+        try:
+            from . import win_camera
+        except Exception:  # noqa: BLE001
+            return
+
+        # Generation counter: a selection change mid-open bumps it, and the
+        # worker discards (releases) captures that finish for a stale
+        # generation instead of installing them after _stop ran.
+        self._preview_generation = getattr(self, "_preview_generation", 0) + 1
+        generation = self._preview_generation
+
+        preview_row = ttk.Frame(self.camera_role_frame)
+        preview_row.pack(fill=tk.X, pady=(6, 2))
+        targets = []
+        for cam in cameras:
+            holder = ttk.Frame(preview_row)
+            holder.pack(side=tk.LEFT, padx=6)
+            label = ttk.Label(holder, text="Vorschau lädt ...", anchor=tk.CENTER)
+            label.pack()
+            ttk.Label(holder, text=f"{cam.name}", foreground="gray").pack()
+            if cam.win_index < 0:
+                # usb_cam rollback path — no native index to open (the
+                # bridge guards the same way); opening -1 would grab an
+                # arbitrary device (e.g. a laptop's built-in camera).
+                label.config(text="Keine Vorschau (usb_cam-Modus)")
+                continue
+            targets.append((cam.win_index, label))
+
+        if not targets:
+            return
+
+        def _open_captures():
+            # MSMF open costs ~1-3 s per camera — NEVER on the Tk main
+            # thread (a 2-camera pick froze the GUI ~6 s). Open here, then
+            # marshal the handles back; cap.read() at 5 Hz stays on main
+            # (cheap, and Tk widgets are touched only there).
+            for win_index, label in targets:
+                try:
+                    cap, _info = win_camera.open_capture(win_index, 640, 480, 15)
+                except Exception as exc:  # noqa: BLE001
+                    self.root.after(0, lambda lbl=label, e=exc: lbl.config(
+                        text=f"Keine Vorschau ({e})"))
+                    continue
+
+                def _install(idx=win_index, c=cap, lbl=label):
+                    if generation != getattr(self, "_preview_generation", -1):
+                        # Selection changed while opening — stale handle.
+                        try:
+                            c.release()
+                        except Exception:  # noqa: BLE001
+                            pass
+                        return
+                    self._preview_caps[idx] = c
+                    self._preview_labels[idx] = lbl
+                    if self._preview_after_id is None:
+                        self._preview_after_id = self.root.after(
+                            50, self._poll_camera_previews)
+
+                self.root.after(0, _install)
+
+        threading.Thread(target=_open_captures, daemon=True).start()
+
+    def _poll_camera_previews(self):
+        self._preview_after_id = None
+        if not self._preview_caps:
+            return
+        for win_index, cap in list(self._preview_caps.items()):
+            label = self._preview_labels.get(win_index)
+            if label is None:
+                continue
+            try:
+                ok, frame = cap.read()
+                if not ok or frame is None:
+                    continue
+                # BGR→RGB + 2x subsample (≈320×240) without Pillow: raw
+                # binary PPM (P6) feeds tk.PhotoImage directly.
+                small = frame[::2, ::2, ::-1]
+                height, width = small.shape[:2]
+                ppm = (f"P6 {width} {height} 255 ".encode("ascii")
+                       + small.tobytes())
+                photo = tk.PhotoImage(data=ppm)
+                label.config(image=photo, text="")
+                # Keep a reference — Tk drops the image otherwise.
+                self._preview_images[win_index] = photo
+            except Exception:  # noqa: BLE001 — preview is best-effort
+                continue
+        if self._preview_caps:
+            self._preview_after_id = self.root.after(
+                200, self._poll_camera_previews)
+
     # ── Start Environment ────────────────────────────────────────────
 
     def _start_environment(self):
         """EduBotics-Umgebung starten und Web-Oberfläche öffnen."""
+        # The capture bridge claims the cameras exclusively — previews must
+        # be released first (PR-4; the leLab 5-revert contention class).
+        self._stop_camera_previews()
         is_cloud_only = self.cloud_only.get()
         # Capture on the main thread — tk StringVar reads from the worker
         # thread below are not thread-safe. Empty means "leave the saved
@@ -1804,6 +2012,7 @@ class EduBoticsApp:
 
     def _on_close(self):
         """Fenster-Schließen abfangen — Container stoppen, wenn nötig."""
+        self._stop_camera_previews()
         if self.running:
             if messagebox.askyesno(
                 "EduBotics beenden",

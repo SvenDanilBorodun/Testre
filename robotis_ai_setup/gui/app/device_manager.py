@@ -516,6 +516,60 @@ def scan_and_identify_arms(image: str) -> tuple[Optional[ArmDevice], Optional[Ar
     return leader, follower
 
 
+def fast_rehydrate_arms(
+    saved_leader_path: str, saved_follower_path: str
+) -> tuple[Optional[ArmDevice], Optional[ArmDevice]]:
+    """Light revalidation of the previous session's arm mapping (PR-4).
+
+    Skips the two SLOW stages of scan_and_identify_arms — the throwaway
+    scanner container and the per-device serial pings — and only attaches
+    the ROBOTIS USB devices (idempotent) and confirms BOTH saved
+    /dev/serial/by-id paths are present and distinct. The path↔role binding
+    is trusted from the saved .env: ROBOTIS arms expose DISTINCT stable
+    by-id serials (the identical-serial problem is camera-only, see
+    CLAUDE.md), so a binding cannot silently swap between sessions — the
+    path either reappears as the same physical arm or doesn't appear at
+    all. ANY mismatch returns (None, None) and the caller falls back to
+    the full scan.
+    """
+    import time
+
+    if (not saved_leader_path or not saved_follower_path
+            or saved_leader_path == saved_follower_path):
+        return None, None
+
+    self_heal_wsl_serial()
+    attached = attach_all_robotis_devices()
+    if not attached:
+        return None, None
+
+    serial_paths: list[str] = []
+    for _ in range(10):
+        serial_paths = find_serial_paths_for_robotis()
+        if (saved_leader_path in serial_paths
+                and saved_follower_path in serial_paths):
+            break
+        time.sleep(1)
+    if not (saved_leader_path in serial_paths
+            and saved_follower_path in serial_paths):
+        return None, None
+
+    def _rebuild(path: str, role: str) -> ArmDevice:
+        desc = path.split("/")[-1]
+        busid = ""
+        for dev in attached:
+            if any(part in path for part in dev.description.split()):
+                busid = dev.busid
+                desc = dev.description
+                break
+        return ArmDevice(busid=busid, serial_path=path, role=role, description=desc)
+
+    return (
+        _rebuild(saved_leader_path, "leader"),
+        _rebuild(saved_follower_path, "follower"),
+    )
+
+
 def _list_camera_vid_pids_from_wsl() -> set[str]:
     """Enumerate VID:PID of every UVC capture node currently inside the EduBotics distro.
 

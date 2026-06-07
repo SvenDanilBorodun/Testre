@@ -1,5 +1,7 @@
 import logging
 import os
+import re
+import time
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from huggingface_hub import HfApi
@@ -89,6 +91,9 @@ class TrainingSummary(BaseModel):
     requested_at: str
     terminated_at: str | None
     error_message: str | None
+    # 028: full worker stdout in the private HF model repo (terminal
+    # transitions only) — the teacher's failure-forensics artifact.
+    log_url: str | None = None
 
 
 class ClassroomDetail(BaseModel):
@@ -835,7 +840,8 @@ async def list_student_trainings(
         .select(
             "id, status, dataset_name, model_name, model_type, "
             "current_step, total_steps, current_loss, "
-            "requested_at, terminated_at, error_message, workgroup_id"
+            "requested_at, terminated_at, error_message, log_url, "
+            "workgroup_id"
         )
         .eq("user_id", student_id)
         .order("requested_at", desc=True)
@@ -845,6 +851,78 @@ async def list_student_trainings(
     rows = result.data or []
     # Strip workgroup_id from the response model — internal only.
     return [TrainingSummary(**{k: v for k, v in t.items() if k != "workgroup_id"}) for t in rows]
+
+
+# ---------- Mid-training checkpoints (leLab-comparison PR-5a) ----------
+#
+# The Modal worker uploads each intermediate checkpoint to the model repo
+# as checkpoints/<step>/pretrained_model (watcher thread, save_freq
+# default 20k). Teachers introspect them here via Hub list_repo_files —
+# the same pattern leLab's jobs.py uses. TEACHER-ONLY diagnostics: the
+# student flow stays one-click (no checkpoint selection).
+
+_CKPT_PATH_RE = re.compile(r"^checkpoints/(\d+)/pretrained_model/config\.json$")
+# (repo_id) -> (expires_unix, [steps]); 30 s TTL bounds Hub traffic when a
+# teacher dashboard polls during a live run.
+_ckpt_cache: dict[str, tuple[float, list[int]]] = {}
+_CKPT_CACHE_TTL_S = 30.0
+
+
+class TrainingCheckpoints(BaseModel):
+    training_id: int
+    model_name: str
+    steps: list[int]
+
+
+@router.get(
+    "/students/{student_id}/trainings/{training_id}/checkpoints",
+    response_model=TrainingCheckpoints,
+)
+async def list_training_checkpoints(
+    student_id: str,
+    training_id: int,
+    teacher=Depends(get_current_teacher),
+):
+    _assert_student_owned(teacher["id"], student_id)
+    supabase = get_supabase()
+    row = (
+        supabase.table("trainings")
+        .select("id, model_name, user_id")
+        .eq("id", training_id)
+        .limit(1)
+        .execute()
+    )
+    if not row.data or row.data[0].get("user_id") != student_id:
+        raise HTTPException(
+            status_code=404,
+            detail="Training nicht gefunden oder gehört nicht zu dieser "
+                   "Schülerin/diesem Schüler.",
+        )
+    model_name = row.data[0]["model_name"]
+
+    now = time.time()
+    cached = _ckpt_cache.get(model_name)
+    if cached and cached[0] > now:
+        steps = cached[1]
+    else:
+        try:
+            files = HfApi(token=os.environ.get("HF_TOKEN") or None).list_repo_files(
+                model_name, repo_type="model")
+        except Exception:
+            raise HTTPException(
+                status_code=502,
+                detail="Checkpoint-Liste konnte nicht von Hugging Face "
+                       "geladen werden.",
+            )
+        steps = sorted(
+            int(m.group(1))
+            for f in files
+            if (m := _CKPT_PATH_RE.match(f)) is not None
+        )
+        _ckpt_cache[model_name] = (now + _CKPT_CACHE_TTL_S, steps)
+
+    return TrainingCheckpoints(
+        training_id=training_id, model_name=model_name, steps=steps)
 
 
 # ---------- Daily progress entries ----------

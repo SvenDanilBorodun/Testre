@@ -178,6 +178,9 @@ class TrainingJob(BaseModel):
     terminated_at: str | None
     error_message: str | None
     last_progress_at: str | None = None
+    # 028: full worker stdout (training_log.txt in the private HF model
+    # repo); teacher/admin forensics, set on the terminal transition.
+    log_url: str | None = None
 
 
 class StartTrainingResponse(BaseModel):

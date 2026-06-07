@@ -108,6 +108,7 @@ def _call_progress_rpc(
     total_steps: int | None = None,
     current_loss: float | None = None,
     error_message: str | None = None,
+    log_url: str | None = None,
 ):
     """Invoke the scoped RPC. Only the row matching (id, worker_token) is updated."""
     client = _get_supabase_client(supabase_url, supabase_anon_key)
@@ -119,6 +120,9 @@ def _call_progress_rpc(
         "p_total_steps": total_steps,
         "p_current_loss": current_loss,
         "p_error_message": error_message,
+        # 028: full-log pointer; the RPC persists it only on the terminal
+        # transition (succeeded/failed/canceled).
+        "p_log_url": log_url,
     }
     client.rpc("update_training_progress", payload).execute()
 
@@ -130,11 +134,12 @@ def _update_supabase_status(
     training_id: int,
     status: str,
     error_message: str | None = None,
+    log_url: str | None = None,
 ):
     """Update training status in Supabase via the scoped RPC."""
     _call_progress_rpc(
         supabase_url, supabase_anon_key, worker_token, training_id,
-        status=status, error_message=error_message,
+        status=status, error_message=error_message, log_url=log_url,
     )
 
 
@@ -379,6 +384,91 @@ def _build_training_command(
 
 
 # ---------------- HuggingFace upload ----------------
+
+
+def _upload_training_log(
+    model_name: str, hf_token: str, output_lines,
+) -> str | None:
+    """Persist the FULL worker stdout as training_log.txt in the model repo.
+
+    leLab-comparison PR-5a: error_message keeps only a 2 KB truncated
+    blob (the student-facing German path); the complete log is the
+    teacher/admin forensics artifact. Reuses the repo + token the model
+    upload already owns — zero new infra, and the repo is private by
+    default. Returns the hf.co blob URL, or None on ANY failure: the log
+    is telemetry and must never change the job outcome.
+    """
+    try:
+        hf_api = HfApi(token=hf_token)
+        hf_api.create_repo(repo_id=model_name, repo_type="model", exist_ok=True)
+        log_bytes = "".join(output_lines).encode("utf-8", errors="replace")
+        hf_api.upload_file(
+            path_or_fileobj=log_bytes,
+            path_in_repo="training_log.txt",
+            repo_id=model_name,
+            repo_type="model",
+        )
+        return f"https://huggingface.co/{model_name}/blob/main/training_log.txt"
+    except Exception as e:  # noqa: BLE001 — never fail the job over the log
+        print(f"Warnung: Trainingslog-Upload fehlgeschlagen: {e}")
+        return None
+
+
+def _start_checkpoint_watcher(
+    model_name: str, hf_token: str, output_path: Path, stop_event,
+):
+    """Upload intermediate checkpoints to the Hub as LeRobot writes them.
+
+    leLab-comparison PR-5a (mirrors leLab's hf_cloud sidecar): lerobot
+    saves checkpoints/<step>/ every save_freq steps (upstream default
+    20_000, save_checkpoint defaults True) but EduBotics only shipped
+    checkpoints/last at the very end — a crashed/canceled long run left
+    nothing. The watcher polls every 60 s and uploads each NEW numeric
+    checkpoint's pretrained_model to checkpoints/<step>/pretrained_model
+    in the model repo (teacher-side introspection lists them via
+    list_repo_files). Best-effort: failures log and retry next tick;
+    MAX_STEPS=500k / save_freq=20k bounds this at <=25 uploads.
+    Returns the daemon thread (joined briefly at shutdown).
+    """
+    def _watch():
+        uploaded: set[str] = set()
+        hf_api = HfApi(token=hf_token)
+        repo_ready = False
+        while not stop_event.wait(60):
+            try:
+                ckpt_root = output_path / "checkpoints"
+                if not ckpt_root.is_dir():
+                    continue
+                for step_dir in sorted(ckpt_root.iterdir()):
+                    if (not step_dir.is_dir()
+                            or not step_dir.name.isdigit()
+                            or step_dir.name in uploaded):
+                        continue
+                    pretrained = step_dir / "pretrained_model"
+                    if not pretrained.is_dir():
+                        continue
+                    if not repo_ready:
+                        hf_api.create_repo(
+                            repo_id=model_name, repo_type="model",
+                            exist_ok=True)
+                        repo_ready = True
+                    print(f"Checkpoint-Watcher: lade Schritt "
+                          f"{step_dir.name} hoch ...", flush=True)
+                    hf_api.upload_folder(
+                        repo_id=model_name,
+                        repo_type="model",
+                        folder_path=str(pretrained),
+                        path_in_repo=(
+                            f"checkpoints/{step_dir.name}/pretrained_model"),
+                    )
+                    uploaded.add(step_dir.name)
+            except Exception as e:  # noqa: BLE001 — retry next tick
+                print(f"Warnung: Checkpoint-Upload fehlgeschlagen "
+                      f"(nächster Versuch in 60 s): {e}")
+
+    thread = threading.Thread(target=_watch, daemon=True)
+    thread.start()
+    return thread
 
 
 def _upload_model_to_hf(model_name: str, hf_token: str) -> str:
@@ -640,6 +730,16 @@ def run_training(
         reader_thread = threading.Thread(target=_read_output, daemon=True)
         reader_thread.start()
 
+        # Mid-training checkpoint uploads (leLab-comparison PR-5a): lerobot
+        # writes checkpoints/<step>/ every save_freq (default 20k) steps;
+        # the watcher mirrors each new one to the model repo so a teacher
+        # can inspect (and a crashed run isn't a total loss). Best-effort.
+        ckpt_stop = threading.Event()
+        _start_checkpoint_watcher(
+            model_name, hf_token,
+            OUTPUT_DIR / model_name.replace("/", "_"), ckpt_stop,
+        )
+
         # Wait for process with timeout protection (default 5h, configurable).
         # The Modal function's own timeout=7h is a hard outer bound.
         timeout_hours = training_params.get("timeout_hours", 5)
@@ -651,13 +751,17 @@ def run_training(
                 proc.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 pass
+            ckpt_stop.set()
+            log_url = _upload_training_log(model_name, hf_token, output_lines)
             _update_supabase_status(
                 supabase_url, supabase_anon_key, worker_token, training_id, "failed",
                 f"Training Zeitlimit ueberschritten ({timeout_hours}h Limit)",
+                log_url=log_url,
             )
             return {"status": "failed", "error": f"Training timed out ({timeout_hours}h limit)"}
 
         reader_thread.join(timeout=10)
+        ckpt_stop.set()
         output_text = "".join(output_lines)
 
         if proc.returncode != 0:
@@ -665,9 +769,12 @@ def run_training(
                 error_msg = output_text[:1000] + "\n...[truncated]...\n" + output_text[-1000:]
             else:
                 error_msg = output_text or "Unknown error"
+            # error_message stays the truncated student-facing blob; the
+            # FULL stdout goes to training_log.txt for teacher forensics.
+            log_url = _upload_training_log(model_name, hf_token, output_lines)
             _update_supabase_status(
                 supabase_url, supabase_anon_key, worker_token, training_id,
-                "failed", error_msg,
+                "failed", error_msg, log_url=log_url,
             )
             return {"status": "failed", "error": error_msg}
 
@@ -690,14 +797,17 @@ def run_training(
                 f"fehlgeschlagen: {upload_err}. Checkpoint liegt im Worker-"
                 f"Output; bitte HF_TOKEN pruefen und Training neu starten."
             )
+            log_url = _upload_training_log(model_name, hf_token, output_lines)
             _update_supabase_status(
                 supabase_url, supabase_anon_key, worker_token, training_id,
-                "failed", err_msg,
+                "failed", err_msg, log_url=log_url,
             )
             return {"status": "failed", "error": err_msg}
 
+        log_url = _upload_training_log(model_name, hf_token, output_lines)
         _update_supabase_status(
-            supabase_url, supabase_anon_key, worker_token, training_id, "succeeded"
+            supabase_url, supabase_anon_key, worker_token, training_id, "succeeded",
+            log_url=log_url,
         )
         return {"status": "succeeded", "model_url": model_url}
 

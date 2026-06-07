@@ -3,7 +3,7 @@ import clsx from 'clsx';
 import toast from 'react-hot-toast';
 import { MdClose } from 'react-icons/md';
 import { useSelector } from 'react-redux';
-import { listStudentTrainings } from '../../services/teacherApi';
+import { listStudentTrainings, listTrainingCheckpoints } from '../../services/teacherApi';
 import { Avatar, Pill } from '../EbUI';
 
 const STATUS_TONE = {
@@ -35,6 +35,20 @@ export default function StudentTrainingHistoryDrawer({ student, onClose }) {
   const token = useSelector((s) => s.auth.session?.access_token);
   const [trainings, setTrainings] = useState([]);
   const [loading, setLoading] = useState(true);
+  // training id -> sorted checkpoint steps (or 'loading')
+  const [checkpoints, setCheckpoints] = useState({});
+
+  const loadCheckpoints = (trainingId) => {
+    setCheckpoints((prev) => ({ ...prev, [trainingId]: 'loading' }));
+    listTrainingCheckpoints(token, student.id, trainingId)
+      .then((res) =>
+        setCheckpoints((prev) => ({ ...prev, [trainingId]: res.steps || [] }))
+      )
+      .catch((err) => {
+        setCheckpoints((prev) => ({ ...prev, [trainingId]: [] }));
+        toast.error(err.message || 'Checkpoints konnten nicht geladen werden');
+      });
+  };
 
   useEffect(() => {
     if (!token || !student) return;
@@ -129,6 +143,39 @@ export default function StudentTrainingHistoryDrawer({ student, onClose }) {
                     )}
                   >
                     {t.error_message}
+                  </div>
+                )}
+                {t.log_url && (
+                  <a
+                    href={t.log_url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="mt-2 inline-block text-[11px] font-medium text-[var(--accent)] hover:underline"
+                    title="Vollständiges Trainingsprotokoll (training_log.txt im privaten HF-Repo)"
+                  >
+                    Vollständiges Protokoll öffnen ↗
+                  </a>
+                )}
+                {(t.status === 'succeeded' || t.status === 'running') && (
+                  <div className="mt-2 text-[11px] font-mono">
+                    {checkpoints[t.id] === undefined ? (
+                      <button
+                        type="button"
+                        onClick={() => loadCheckpoints(t.id)}
+                        className="text-[var(--accent)] hover:underline"
+                      >
+                        Zwischenstände anzeigen
+                      </button>
+                    ) : checkpoints[t.id] === 'loading' ? (
+                      <span className="text-[var(--ink-3)]">Lade Zwischenstände…</span>
+                    ) : checkpoints[t.id].length === 0 ? (
+                      <span className="text-[var(--ink-3)]">Keine Zwischenstände hochgeladen.</span>
+                    ) : (
+                      <span className="text-[var(--ink-2)]">
+                        Zwischenstände (Schritt):{' '}
+                        {checkpoints[t.id].map((s) => s.toLocaleString('de-DE')).join(', ')}
+                      </span>
+                    )}
                   </div>
                 )}
               </div>

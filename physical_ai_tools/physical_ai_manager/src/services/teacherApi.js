@@ -35,6 +35,15 @@ export const adjustStudentCredits = (token, studentId, delta) =>
 export const listStudentTrainings = (token, studentId) =>
   apiRequest(`/teacher/students/${studentId}/trainings`, 'GET', token);
 
+// Mid-training checkpoint steps the Modal worker mirrored to the model
+// repo (leLab-comparison PR-5a). Teacher-only diagnostics.
+export const listTrainingCheckpoints = (token, studentId, trainingId) =>
+  apiRequest(
+    `/teacher/students/${studentId}/trainings/${trainingId}/checkpoints`,
+    'GET',
+    token
+  );
+
 // ---------- Daily progress entries ----------
 
 export const listProgressEntries = (

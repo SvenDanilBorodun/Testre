@@ -289,6 +289,9 @@ def _validate_required_schema() -> None:
         # 2026-05 audit). The status CHECK constraint expansion can't be
         # probed via PostgREST, but the new columns can.
         ("trainings", "cancel_attempted_at, cancel_attempts"),
+        # 028: full-log pointer written by the extended
+        # update_training_progress RPC on terminal transitions.
+        ("trainings", "log_url"),
     )
     for table, cols in required_columns:
         try:

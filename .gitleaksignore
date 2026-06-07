@@ -1,12 +1,20 @@
 # gitleaks fingerprint allowlist (commit:file:rule:line).
-# Both entries verified benign 2026-06-07 (leLab-comparison PR-0):
+# All entries verified benign 2026-06-07 (leLab-comparison PR-0):
 #
 # 1. ALLOWED_POLICIES=act — a config VALUE (the policy allowlist env var) in a
 #    long-deleted pipeline doc; generic-api-key false positive.
 6904b979190a590c971f0966aaf5ca1fdcafba86:CLAUDE_PIPELINE.md:generic-api-key:367
 #
-# 2. AKIAVCODYLSA53PQK4ZA — GitHub's OWN S3 signing key id inside an EXPIRED
-#    (2024-05-05, 300 s TTL) presigned github-production-user-asset .mov URL,
-#    vendored from upstream LeRobot's README (tree removed in 8d1962d). Not an
-#    EduBotics credential; not exploitable.
+# 2. AKIAVCODYLSA53… (id deliberately truncated here so this file itself never
+#    matches the aws-access-token regex again) — GitHub's OWN S3 signing key id
+#    inside an EXPIRED (2024-05-05, 300 s TTL) presigned
+#    github-production-user-asset .mov URL, vendored from upstream LeRobot's
+#    README (tree removed in 8d1962d). Not an EduBotics credential; not
+#    exploitable.
 b0b601fac9e3b30b1e9288425c91d0f3eb30f793:physical_ai_tools/lerobot/README.md:aws-access-token:207
+#
+# 3. Self-scan artifact: the PR-0 version of THIS file documented entry 2 with
+#    the full literal key id, so the commit introducing it is itself flagged by
+#    the full-history scan. The literal is truncated as of the commit adding
+#    this entry; the historical introduction stays fingerprinted here.
+09ad31012468a47d12dc7c85457edaedb73f05f6:.gitleaksignore:aws-access-token:8

@@ -90,7 +90,7 @@ class TestCheckForUpdate(unittest.TestCase):
         with patch("gui.app.update_checker.urllib.request.urlopen",
                    side_effect=self._dispatch(payload, "ok")):
             r = update_checker.check_for_update("2.8.0", self.API)
-        self.assertEqual(r, {"version": "2.9.0", "download_url": self.URL})
+        self.assertEqual(r, {"version": "2.9.0", "download_url": self.URL, "sha256": ""})
 
     def test_newer_but_asset_404_returns_none(self):
         # The lockout fix: a missing asset must NOT open the forced modal.
@@ -126,6 +126,82 @@ class TestCheckForUpdate(unittest.TestCase):
         with patch("gui.app.update_checker.urllib.request.urlopen",
                    side_effect=self._dispatch({"version": "", "download_url": ""}, "ok")):
             self.assertIsNone(update_checker.check_for_update("2.8.0", self.API))
+
+    def test_returns_installer_sha256(self):
+        payload = {"version": "2.9.0", "download_url": self.URL, "installer_sha256": "ab" * 32}
+        with patch("gui.app.update_checker.urllib.request.urlopen",
+                   side_effect=self._dispatch(payload, "ok")):
+            r = update_checker.check_for_update("2.8.0", self.API)
+        self.assertEqual(r["sha256"], "ab" * 32)
+
+    def test_sha256_absent_is_empty_string(self):
+        # Old deploy without installer_sha256 → "" (GUI skips hash verify).
+        payload = {"version": "2.9.0", "download_url": self.URL}
+        with patch("gui.app.update_checker.urllib.request.urlopen",
+                   side_effect=self._dispatch(payload, "ok")):
+            r = update_checker.check_for_update("2.8.0", self.API)
+        self.assertEqual(r["sha256"], "")
+
+
+class _FakeResp:
+    """Mimics urlopen()'s response for download_installer."""
+    def __init__(self, body: bytes, content_length=None):
+        self._body = body
+        self._pos = 0
+        cl = len(body) if content_length is None else content_length
+        self.headers = {"Content-Length": str(cl)}
+
+    def read(self, n):
+        chunk = self._body[self._pos:self._pos + n]
+        self._pos += len(chunk)
+        return chunk
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+class TestDownloadInstaller(unittest.TestCase):
+    import hashlib as _hashlib
+    BODY = b"pretend-this-is-the-installer-exe-bytes" * 1000
+    GOOD = _hashlib.sha256(BODY).hexdigest()
+
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.mkdtemp()
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _dl(self, content_length=None, expected=None):
+        with patch("gui.app.update_checker.urllib.request.urlopen",
+                   return_value=_FakeResp(self.BODY, content_length)):
+            return update_checker.download_installer(
+                "http://x/EduBotics_Setup.exe", dest_dir=self.tmp,
+                expected_sha256=expected,
+            )
+
+    def test_good_download_no_hash(self):
+        path = self._dl()
+        self.assertTrue(path and os.path.isfile(path))
+
+    def test_good_download_matching_hash(self):
+        path = self._dl(expected=self.GOOD)
+        self.assertTrue(path and os.path.isfile(path))
+
+    def test_mismatched_hash_rejected_and_cleaned(self):
+        path = self._dl(expected="00" * 32)
+        self.assertIsNone(path)
+        self.assertFalse(os.path.isfile(os.path.join(self.tmp, "EduBotics_Setup.exe")))
+
+    def test_truncated_download_rejected(self):
+        # Server claims more bytes than it delivers → truncation guard fires.
+        path = self._dl(content_length=len(self.BODY) + 5000)
+        self.assertIsNone(path)
+        self.assertFalse(os.path.isfile(os.path.join(self.tmp, "EduBotics_Setup.exe")))
 
 
 if __name__ == "__main__":

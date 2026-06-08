@@ -359,19 +359,36 @@ jobs:
           DOWNLOAD_URL="https://github.com/${GIT_REPO}/releases/download/${TAG}/EduBotics_Setup.exe"
           echo "Publishing GUI update gate: version=${VERSION} url=${DOWNLOAD_URL}"
 
-          # Set the two non-triggering vars first with --skip-deploys, then
+          # Hash the EXACT .exe asset W5 just attached, so /version can advertise
+          # an integrity hash the GUI verifies before launching the installer as
+          # admin. On failure, ADVERTISE NO HASH (empty) — never a stale one, or
+          # the GUI would reject the new .exe against the previous release's
+          # hash and every student would be unable to update.
+          SHA=""
+          if curl -fsSL --retry 3 -o /tmp/EduBotics_Setup.exe "$DOWNLOAD_URL"; then
+            SHA="$(sha256sum /tmp/EduBotics_Setup.exe | awk '{print $1}')"
+            echo "  installer sha256=${SHA}"
+          else
+            echo "::warning::could not download the installer asset to hash it — advertising version without an integrity hash (GUI falls back to the Content-Length guard)"
+          fi
+
+          # Set the non-triggering vars first with --skip-deploys, then
           # GUI_VERSION WITHOUT it so exactly ONE redeploy fires and picks up
-          # all three atomically (mirrors railway-deploy-cloud-api.yml's
-          # BUILD_COMMIT pattern).
+          # all four atomically (mirrors railway-deploy-cloud-api.yml's
+          # BUILD_COMMIT pattern). GUI_INSTALLER_SHA256 is always set (to $SHA
+          # or empty) so it can never be stale from a prior release.
           railway variable set "GUI_RELEASE_REPO=${GIT_REPO}" \
               --service scintillating-empathy --environment production \
               --skip-deploys >/dev/null
           railway variable set "GUI_DOWNLOAD_URL=${DOWNLOAD_URL}" \
               --service scintillating-empathy --environment production \
               --skip-deploys >/dev/null
+          railway variable set "GUI_INSTALLER_SHA256=${SHA}" \
+              --service scintillating-empathy --environment production \
+              --skip-deploys >/dev/null
           railway variable set "GUI_VERSION=${VERSION}" \
               --service scintillating-empathy --environment production >/dev/null
-          echo "  set GUI_RELEASE_REPO, GUI_DOWNLOAD_URL, GUI_VERSION (redeploy triggered)"
+          echo "  set GUI_RELEASE_REPO, GUI_DOWNLOAD_URL, GUI_INSTALLER_SHA256, GUI_VERSION (redeploy triggered)"
       - name: Verify /version advertises the new release
         env:
           GIT_REF_NAME: ${{ github.ref_name }}

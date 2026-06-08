@@ -6,6 +6,7 @@ dependencies.
 """
 
 import glob
+import hashlib
 import json
 import os
 import re
@@ -77,7 +78,12 @@ def check_for_update(current_version: str, api_url: str) -> dict | None:
         if _parse_version(remote_version) > _parse_version(current_version):
             if not _asset_available(download_url):
                 return None
-            return {"version": remote_version, "download_url": download_url}
+            return {
+                "version": remote_version,
+                "download_url": download_url,
+                # Optional integrity hash (None/"" on old deploys → skip verify).
+                "sha256": data.get("installer_sha256") or "",
+            }
     except Exception:
         return None
     return None
@@ -117,20 +123,32 @@ def cleanup_stale_installers(max_age_hours: int = 24) -> int:
 
 
 def download_installer(url: str, dest_dir: str = None,
-                       progress_callback=None) -> str | None:
-    """Download the installer .exe to a temporary directory.
+                       progress_callback=None,
+                       expected_sha256: str = None) -> str | None:
+    """Download the installer .exe to a temporary directory, verifying integrity.
 
     Args:
         url: Public URL of the installer.
         dest_dir: Directory to save the file (defaults to system temp).
         progress_callback: Optional callable(bytes_downloaded, total_bytes).
+        expected_sha256: Optional lowercase-hex SHA-256 the download must match.
+
+    Two integrity gates before the file is handed back to be launched as admin:
+      (A) Content-Length — a short/truncated download (server closed the
+          connection early; the read loop ends "successfully" with a partial
+          file) is rejected instead of launching a broken installer.
+      (B) SHA-256 — when the cloud /version advertised a hash, the bytes must
+          match it (corruption guard). A None/empty hash skips this gate (old
+          deploys), so it's backward-compatible.
 
     Returns:
-        Full path to the downloaded file, or None on failure.
+        Full path to the verified file, or None on failure (partial file
+        cleaned up).
     """
     if dest_dir is None:
         dest_dir = tempfile.gettempdir()
     dest_path = os.path.join(dest_dir, "EduBotics_Setup.exe")
+    expected = (expected_sha256 or "").strip().lower() or None
 
     try:
         req = urllib.request.Request(url)
@@ -138,6 +156,7 @@ def download_installer(url: str, dest_dir: str = None,
             total = int(resp.headers.get("Content-Length", 0))
             downloaded = 0
             chunk_size = 64 * 1024  # 64 KB
+            hasher = hashlib.sha256()
 
             with open(dest_path, "wb") as f:
                 while True:
@@ -145,13 +164,23 @@ def download_installer(url: str, dest_dir: str = None,
                     if not chunk:
                         break
                     f.write(chunk)
+                    hasher.update(chunk)
                     downloaded += len(chunk)
                     if progress_callback:
                         progress_callback(downloaded, total)
 
+        # (A) reject a truncated download
+        if total > 0 and downloaded != total:
+            raise IOError(
+                f"unvollständiger Download ({downloaded}/{total} Bytes)"
+            )
+        # (B) reject a corrupted download against the advertised hash
+        if expected and hasher.hexdigest().lower() != expected:
+            raise IOError("Prüfsumme stimmt nicht (beschädigter Download)")
+
         return dest_path
     except Exception:
-        # Clean up partial download
+        # Clean up partial / failed-verification download
         try:
             os.remove(dest_path)
         except OSError:

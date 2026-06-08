@@ -1,0 +1,181 @@
+name: bundle-test
+
+# Dispatch-only: build the OFFLINE bundle (EduBotics_Setup_Full.exe) for an
+# EXISTING image tag and upload it to an R2 *test* path, so the P4 Windows-rig
+# pilot can validate the offline install WITHOUT cutting a production release.
+#
+# It reuses the real installer build (release-installer.yml) so the inner
+# installer carries the CURRENT branch's load_images.ps1 / stage_bundle.ps1
+# logic, then runs the SAME bundle steps as release.yml's `bundle` job — but
+# writes to `test/EduBotics_Setup_Full_<tag>.exe` (never the production object).
+#
+# Result URL: <R2_PUBLIC_BASE_URL>/test/EduBotics_Setup_Full_<tag>.exe
+#
+# This is NOT in the golden order and is never triggered by a push/tag.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version_tag:
+        description: "Image tag to bundle: 'latest' or 'vX.Y.Z' (must exist on Docker Hub)."
+        required: false
+        default: "latest"
+        type: string
+
+permissions: {}
+
+jobs:
+  # Normalise the input so the inner installer's baked versions.env tag and the
+  # bundle's docker-save tag CANNOT diverge.
+  prep:
+    name: Resolve tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions: {}
+    outputs:
+      image_tag: ${{ steps.r.outputs.image_tag }}
+      installer_tag: ${{ steps.r.outputs.installer_tag }}
+    steps:
+      - id: r
+        env:
+          INPUT_TAG: ${{ inputs.version_tag }}
+        run: |
+          REF="${INPUT_TAG:-latest}"; REF="${REF#v}"
+          case "$REF" in
+            [0-9]*.[0-9]*.[0-9]*) echo "image_tag=$REF" >> "$GITHUB_OUTPUT"; echo "installer_tag=v$REF" >> "$GITHUB_OUTPUT" ;;
+            *)                    echo "image_tag=latest" >> "$GITHUB_OUTPUT"; echo "installer_tag=latest" >> "$GITHUB_OUTPUT" ;;
+          esac
+
+  # Build the inner installer from THIS ref (current main) — carries the new
+  # offline-load logic. versions.env is pinned to installer_tag. The GH-Release
+  # attach inside release-installer is gated on a tag push, so a branch dispatch
+  # never touches a Release.
+  installer:
+    name: Build inner installer
+    needs: [prep]
+    permissions:
+      contents: write  # release-installer.yml declares it; caller must superset
+    uses: ./.github/workflows/release-installer.yml
+    with:
+      version_tag: ${{ needs.prep.outputs.installer_tag }}
+    secrets: inherit
+
+  bundle:
+    name: Build + upload TEST bundle to R2
+    needs: [prep, installer]
+    if: always() && needs.installer.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      actions: read   # download the inner-installer artifact from this run
+    env:
+      REGISTRY: nettername
+      IMAGE_TAG: ${{ needs.prep.outputs.image_tag }}
+      AWS_DEFAULT_REGION: auto
+      AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+      AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+    steps:
+      - name: Checkout (sfx stub + config)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Preflight — is the bundle configured?
+        id: pre
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_KEY: ${{ secrets.R2_ACCESS_KEY_ID }}
+        run: |
+          ready=true
+          if [ ! -f robotis_ai_setup/installer/sfx/7zSD.sfx ]; then
+            echo "::error::installer/sfx/7zSD.sfx missing (see installer/sfx/README.md)."
+            ready=false
+          elif [ -f robotis_ai_setup/installer/sfx/7zSD.sfx.sha256 ]; then
+            ( cd robotis_ai_setup/installer/sfx && sha256sum -c 7zSD.sfx.sha256 )
+          fi
+          if [ -z "$R2_ACCOUNT_ID" ] || [ -z "$R2_KEY" ]; then
+            echo "::error::R2_* secrets not set."
+            ready=false
+          fi
+          echo "ready=$ready" >> "$GITHUB_OUTPUT"
+
+      - name: Free disk space
+        if: steps.pre.outputs.ready == 'true'
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          swap-storage: true
+
+      - name: Docker Hub login
+        if: steps.pre.outputs.ready == 'true'
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Download inner installer (.exe)
+        if: steps.pre.outputs.ready == 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: EduBotics_Setup
+          path: inner
+
+      - name: Pull, save per image, checksum, collect digests
+        if: steps.pre.outputs.ready == 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p sfx_root/images
+          digests="{}"
+          for repo in open-manipulator physical-ai-server physical-ai-manager; do
+            ref="${REGISTRY}/${repo}:${IMAGE_TAG}"
+            echo "::group::$ref"
+            list_digest="$(docker buildx imagetools inspect "$ref" | awk '/^Digest:/ {print $2; exit}')"
+            if [[ ! "$list_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              echo "::error::bad/empty manifest-list digest for $ref: '$list_digest'"; exit 1
+            fi
+            docker pull "$ref"
+            docker save "$ref" | gzip -1 > "sfx_root/images/${repo}.tar.gz"
+            ( cd sfx_root/images && sha256sum "${repo}.tar.gz" > "${repo}.tar.gz.sha256" )
+            docker image rm "$ref" >/dev/null 2>&1 || true
+            digests="$(echo "$digests" | jq --arg k "$ref" --arg v "$list_digest" '. + {($k): $v}')"
+            echo "::endgroup::"
+          done
+          echo "$digests" | jq . > sfx_root/bundled_digests.json
+          cp inner/EduBotics_Setup.exe sfx_root/EduBotics_Setup.exe
+          echo "── bundle size (un-slimmed) ──"; du -h sfx_root/images/*.tar.gz; du -sh sfx_root
+          cat sfx_root/bundled_digests.json; df -h /
+
+      - name: Assemble 7-Zip SFX (one file)
+        if: steps.pre.outputs.ready == 'true'
+        run: |
+          set -euo pipefail
+          ( cd sfx_root && 7z a -mx=0 ../archive.7z . >/dev/null )
+          cat robotis_ai_setup/installer/sfx/7zSD.sfx \
+              robotis_ai_setup/installer/sfx/config.txt \
+              archive.7z > EduBotics_Setup_Full.exe
+          rm -f archive.7z; ls -lh EduBotics_Setup_Full.exe
+
+      - name: Upload TEST bundle to R2 (multipart) + verify
+        if: steps.pre.outputs.ready == 'true'
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          R2_PUBLIC_BASE_URL: ${{ secrets.R2_PUBLIC_BASE_URL }}
+        run: |
+          set -euo pipefail
+          endpoint="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+          key="test/EduBotics_Setup_Full_${IMAGE_TAG}.exe"
+          aws s3 cp EduBotics_Setup_Full.exe "s3://${R2_BUCKET}/${key}" \
+            --endpoint-url "$endpoint" \
+            --content-type application/octet-stream \
+            --content-disposition "attachment; filename=EduBotics_Setup_Full.exe"
+          aws s3api head-object --bucket "$R2_BUCKET" --key "$key" --endpoint-url "$endpoint"
+          echo "TEST bundle ready for P4:"
+          echo "  ${R2_PUBLIC_BASE_URL:-<R2_PUBLIC_BASE_URL>}/${key}"

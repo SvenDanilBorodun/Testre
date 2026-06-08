@@ -95,14 +95,15 @@ try {
     }
     Write-OK "EduBotics-Umgebung eingerichtet"
 
-    # Phase 2: Pull images
-    Write-Step "Schritt 2/2: Docker-Images werden heruntergeladen..."
-    & (Join-Path $PSScriptRoot "pull_images.ps1")
+    # Phase 2: Provide images — OFFLINE bundle (staged to %ProgramData% before
+    # the reboot by stage_bundle.ps1) if present, else a Docker Hub pull.
+    Write-Step "Schritt 2/2: Docker-Images werden bereitgestellt..."
+    & (Join-Path $PSScriptRoot "load_images.ps1") -BundleDir (Join-Path $env:ProgramData "EduBotics\bundle")
     if ($LASTEXITCODE -ne 0) {
-        Write-FAIL "Image-Download fehlgeschlagen (exit $LASTEXITCODE). Internetverbindung prüfen."
+        Write-FAIL "Images konnten nicht bereitgestellt werden (exit $LASTEXITCODE). Bei Online-Installation bitte Internetverbindung prüfen."
         exit 1
     }
-    Write-OK "Images heruntergeladen"
+    Write-OK "Images bereitgestellt"
 
     Write-Step "Fertig! Sie können EduBotics jetzt nutzen."
     exit 0

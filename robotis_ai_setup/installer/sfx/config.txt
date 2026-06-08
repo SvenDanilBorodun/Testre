@@ -1,0 +1,4 @@
+;!@Install@!UTF-8!
+Title="EduBotics Setup"
+RunProgram="EduBotics_Setup.exe"
+;!@InstallEnd@!

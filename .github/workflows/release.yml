@@ -152,6 +152,172 @@ jobs:
     uses: ./.github/workflows/release-installer.yml
     secrets: inherit
 
+  # ── W5b: Offline image bundle → Cloudflare R2 (LEAF, additive) ──
+  # Builds EduBotics_Setup_Full.exe — the small inner installer (the W5
+  # `EduBotics_Setup` artifact) + a `docker save` of the 3 amd64 images + a
+  # manifest-digest sidecar, wrapped in a 7-Zip SFX — and uploads it to R2 so
+  # NEW students install fully OFFLINE. Existing machines auto-update over the
+  # network via the small .exe and never touch this file.
+  #
+  # Heavy packaging runs on LINUX by necessity: Inno's 2.1 GB per-output-file
+  # ceiling makes a single >9 GB .exe impossible, windows-latest lacks the
+  # disk, and upload-artifact caps at 5 GB.
+  #
+  # LEAF + tag-push only + JOB-level continue-on-error + NOTHING depends on it:
+  # an R2/build failure can NEVER fail the release run or block W6 — online
+  # install + auto-update stay fully functional. Runs green-but-skipped until
+  # the operator completes the one-time setup (vendor
+  # robotis_ai_setup/installer/sfx/7zSD.sfx per its README; mint the R2_* GHA
+  # secrets).
+  bundle:
+    name: W5b. Build + upload offline bundle (R2)
+    needs: [installer]
+    if: always() && needs.installer.result == 'success' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    continue-on-error: true   # JOB-level — a bundle failure must not fail the release
+    permissions:
+      contents: read
+      actions: read           # download the W5 inner-installer artifact (same run)
+    env:
+      REGISTRY: nettername
+      # aws-cli v2.25+ sends CRC64-NVME/CRC32 request checksums that R2 rejects
+      # ("x-amz-checksum-algorithm not implemented"); force when_required so
+      # PutObject + multipart succeed against R2.
+      AWS_DEFAULT_REGION: auto
+      AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+      AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+    steps:
+      - name: Checkout (sfx stub + config)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Preflight — is the bundle configured?
+        id: pre
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_KEY: ${{ secrets.R2_ACCESS_KEY_ID }}
+        run: |
+          ready=true
+          if [ ! -f robotis_ai_setup/installer/sfx/7zSD.sfx ]; then
+            echo "::warning::installer/sfx/7zSD.sfx not vendored yet (see installer/sfx/README.md) — skipping offline bundle."
+            ready=false
+          elif [ -f robotis_ai_setup/installer/sfx/7zSD.sfx.sha256 ]; then
+            ( cd robotis_ai_setup/installer/sfx && sha256sum -c 7zSD.sfx.sha256 )
+          fi
+          if [ -z "$R2_ACCOUNT_ID" ] || [ -z "$R2_KEY" ]; then
+            echo "::warning::R2_* secrets not set — skipping offline bundle upload."
+            ready=false
+          fi
+          echo "ready=$ready" >> "$GITHUB_OUTPUT"
+
+      - name: Free disk space
+        if: steps.pre.outputs.ready == 'true'
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          swap-storage: true
+
+      - name: Resolve IMAGE_TAG from the release tag
+        id: tag
+        if: steps.pre.outputs.ready == 'true'
+        env:
+          GIT_REF_NAME: ${{ github.ref_name }}
+        run: |
+          TAG="${GIT_REF_NAME}"
+          echo "image_tag=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Docker Hub login
+        if: steps.pre.outputs.ready == 'true'
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Download inner installer (.exe) from W5
+        if: steps.pre.outputs.ready == 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: EduBotics_Setup
+          path: inner
+
+      - name: Pull, save per image, checksum, collect digests (P0 size measure)
+        if: steps.pre.outputs.ready == 'true'
+        env:
+          IMAGE_TAG: ${{ steps.tag.outputs.image_tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p sfx_root/images
+          digests="{}"
+          for repo in open-manipulator physical-ai-server physical-ai-manager; do
+            ref="${REGISTRY}/${repo}:${IMAGE_TAG}"
+            echo "::group::$ref"
+            # Manifest-LIST digest = the 'Digest:' header (== what a pull-by-tag
+            # RepoDigest records == what the GUI's _parse_digest_candidates
+            # extracts). Registry-side; independent of the local store.
+            list_digest="$(docker buildx imagetools inspect "$ref" | awk '/^Digest:/ {print $2; exit}')"
+            # Shape-assert the digest so a malformed sidecar value is caught at
+            # build time, not on a student PC (it must be a member of the GUI's
+            # _parse_digest_candidates set, i.e. sha256:<64 hex>).
+            if [[ ! "$list_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              echo "::error::bad/empty manifest-list digest for $ref: '$list_digest'"; exit 1
+            fi
+            docker pull "$ref"
+            docker save "$ref" | gzip -1 > "sfx_root/images/${repo}.tar.gz"
+            ( cd sfx_root/images && sha256sum "${repo}.tar.gz" > "${repo}.tar.gz.sha256" )
+            docker image rm "$ref" >/dev/null 2>&1 || true   # release graph space now
+            digests="$(echo "$digests" | jq --arg k "$ref" --arg v "$list_digest" '. + {($k): $v}')"
+            echo "::endgroup::"
+          done
+          echo "$digests" | jq . > sfx_root/bundled_digests.json
+          cp inner/EduBotics_Setup.exe sfx_root/EduBotics_Setup.exe
+          echo "── bundle size (un-slimmed; P0 measure) ──"
+          du -h sfx_root/images/*.tar.gz
+          du -sh sfx_root
+          cat sfx_root/bundled_digests.json
+          df -h /
+
+      - name: Assemble 7-Zip SFX (one file)
+        if: steps.pre.outputs.ready == 'true'
+        run: |
+          set -euo pipefail
+          ( cd sfx_root && 7z a -mx=0 ../archive.7z . >/dev/null )
+          cat robotis_ai_setup/installer/sfx/7zSD.sfx \
+              robotis_ai_setup/installer/sfx/config.txt \
+              archive.7z > EduBotics_Setup_Full.exe
+          rm -f archive.7z
+          ls -lh EduBotics_Setup_Full.exe
+
+      - name: Upload to Cloudflare R2 (multipart) + verify
+        if: steps.pre.outputs.ready == 'true'
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          IMAGE_TAG: ${{ steps.tag.outputs.image_tag }}
+        run: |
+          set -euo pipefail
+          endpoint="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+          cd_header="attachment; filename=EduBotics_Setup_Full.exe"
+          # Stable name (hand this URL to new students) + an immutable versioned copy.
+          for key in "EduBotics_Setup_Full.exe" "EduBotics_Setup_Full_${IMAGE_TAG}.exe"; do
+            aws s3 cp EduBotics_Setup_Full.exe "s3://${R2_BUCKET}/${key}" \
+              --endpoint-url "$endpoint" \
+              --content-type application/octet-stream \
+              --content-disposition "$cd_header"
+          done
+          # head-object so a checksum/region failure surfaces LOUDLY rather than
+          # being masked by continue-on-error (which would otherwise leave the
+          # student download URL 404'ing silently).
+          aws s3api head-object --bucket "$R2_BUCKET" --key "EduBotics_Setup_Full.exe" --endpoint-url "$endpoint"
+          echo "Uploaded EduBotics_Setup_Full.exe (${IMAGE_TAG}) to R2."
+
   # ── W6: Flip the student auto-update gate (must run AFTER the installer
   # .exe is attached to the GH Release, so /version never advertises a
   # version whose download asset 404s) ──

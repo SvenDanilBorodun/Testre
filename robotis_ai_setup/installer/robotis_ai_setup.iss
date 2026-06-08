@@ -145,6 +145,16 @@ Filename: "powershell.exe"; \
   StatusMsg: "USB-Geräterichtlinie wird konfiguriert..."; \
   Flags: runhidden waituntilterminated
 
+; Step 3b: Offline-Image-Paket aus der Installationsdatei in einen dauerhaften
+; Ordner verschieben — BEVOR ein evtl. nötiger Neustart die volatile
+; SFX-%TEMP%-Ablage löscht. UNGATED (läuft auch im Neustart-Fall, anders als
+; Schritt 4/5), damit finalize_install.ps1 das Paket nach dem Neustart noch
+; findet. No-op bei der kleinen Online-/Update-Installationsdatei (kein Paket).
+Filename: "powershell.exe"; \
+  Parameters: "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File ""{app}\scripts\stage_bundle.ps1"" -SrcDir ""{src}"""; \
+  StatusMsg: "Installationsdaten werden vorbereitet..."; \
+  Flags: runhidden waituntilterminated
+
 ; Step 4: EduBotics WSL2-Distro importieren (skipped if reboot pending)
 Filename: "powershell.exe"; \
   Parameters: "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File ""{app}\scripts\import_edubotics_wsl.ps1"""; \
@@ -152,12 +162,14 @@ Filename: "powershell.exe"; \
   Flags: runhidden waituntilterminated; \
   Check: ShouldImportDistro
 
-; Step 5: Docker-Images herunterladen (skipped if reboot pending or distro missing)
+; Step 5: Docker-Images bereitstellen (skipped if reboot pending or distro missing)
+; load_images.ps1 dispatches: OFFLINE bundle (staged at {commonappdata}\EduBotics\
+; bundle by Step 3b) → docker load; sonst → pull_images.ps1 (Docker Hub).
 Filename: "powershell.exe"; \
-  Parameters: "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File ""{app}\scripts\pull_images.ps1"""; \
-  StatusMsg: "Docker-Images werden heruntergeladen (kann etwas dauern)..."; \
+  Parameters: "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File ""{app}\scripts\load_images.ps1"" -BundleDir ""{commonappdata}\EduBotics\bundle"""; \
+  StatusMsg: "Docker-Images werden bereitgestellt (kann etwas dauern)..."; \
   Flags: runhidden waituntilterminated; \
-  Description: "Docker-Images jetzt herunterladen (empfohlen)"; \
+  Description: "Docker-Images jetzt bereitstellen (empfohlen)"; \
   Check: ShouldPullImages
 
 ; Step 6: Installation überprüfen
@@ -203,6 +215,13 @@ Filename: "wsl.exe"; \
   Flags: runhidden; \
   RunOnceId: "UnregisterDistro"; \
   Check: ConfirmDistroWipe
+
+[UninstallDelete]
+; The offline image bundle is staged here during install and deleted by
+; load_images.ps1 after a successful load — but an ABORTED install can orphan
+; multi-GB tarballs that escape the {app}-scoped cleanup. Remove the staging
+; dir on uninstall so a failed offline install never strands ~8 GB.
+Type: filesandordirs; Name: "{commonappdata}\EduBotics\bundle"
 
 [Code]
 // Pascal Script: Check if the EduBotics WSL distro is registered

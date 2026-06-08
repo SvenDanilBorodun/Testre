@@ -142,7 +142,7 @@ if (-not $skipImport) {
         $vol = Get-Volume -DriveLetter $drive -ErrorAction Stop
         $freeGb = [math]::Round($vol.SizeRemaining / 1GB, 1)
         if ($freeGb -lt 20) {
-            Write-FAIL "Nicht genug Speicher auf Laufwerk $drive`: ${freeGb} GB frei, 20 GB werden benoetigt."
+            Write-FAIL "Nicht genug Speicher auf Laufwerk $drive`: ${freeGb} GB frei, 20 GB werden benötigt."
             Write-Host "   Bitte Speicher freigeben und Installation erneut starten." -ForegroundColor Red
             exit 1
         }

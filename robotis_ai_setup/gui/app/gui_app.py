@@ -1043,6 +1043,7 @@ class EduBoticsApp:
             path = update_checker.download_installer(
                 update_info["download_url"],
                 progress_callback=_progress,
+                expected_sha256=update_info.get("sha256"),
             )
 
             if path:

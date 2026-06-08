@@ -46,6 +46,23 @@ def _resolve_commit() -> str:
     return "unknown"
 
 
+def _resolve_installer_sha256() -> str | None:
+    """The SHA-256 of the advertised EduBotics_Setup.exe, set by release.yml W6
+    (publish-gui-version) after it hashes the just-attached GH-Release asset.
+
+    Lets the GUI verify integrity of the downloaded installer before launching
+    it (corruption/truncation guard). Optional + backward-compatible: when
+    unset (old deploy, or W6 didn't run) the GUI simply skips the hash check
+    and keeps the Content-Length truncation guard. Normalised to lowercase hex;
+    a malformed value returns None so the GUI doesn't reject a valid download
+    against garbage.
+    """
+    val = (os.environ.get("GUI_INSTALLER_SHA256") or "").strip().lower()
+    if len(val) == 64 and all(c in "0123456789abcdef" for c in val):
+        return val
+    return None
+
+
 def _resolve_download_url(version: str | None) -> str | None:
     """Explicit GUI_DOWNLOAD_URL wins; else derive the GH Release asset URL
     from GUI_VERSION + GUI_RELEASE_REPO (owner/repo). Returns None when
@@ -88,5 +105,6 @@ async def get_latest_version():
     return {
         "version": version,
         "download_url": download_url,
+        "installer_sha256": _resolve_installer_sha256(),
         "commit": _resolve_commit(),
     }

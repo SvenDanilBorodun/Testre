@@ -36,6 +36,7 @@ _keepalive_proc: Optional[subprocess.Popen] = None
 
 from .constants import (
     ALL_IMAGES,
+    BUNDLED_DIGESTS_FILE,
     COMPOSE_FILE,
     COMPOSE_GPU_FILE,
     DOCKER_DIR,
@@ -43,6 +44,9 @@ from .constants import (
     DOCKER_STARTUP_TIMEOUT,
     ENV_FILE,
     IMAGE_FRESHNESS_WARN_DAYS,
+    IMAGE_OPEN_MANIPULATOR,
+    IMAGE_PHYSICAL_AI_MANAGER,
+    IMAGE_PHYSICAL_AI_SERVER,
     LAST_PULL_FILE,
     MANIFEST_INSPECT_TIMEOUT,
     NETWORK_PROBE_TIMEOUT,
@@ -50,6 +54,17 @@ from .constants import (
     WSL_DISTRO_NAME,
     _to_wsl_path,
 )
+
+# docker-compose service name → the pinned image it runs. Lets the env-start
+# pull-skip (and any future per-service logic) reason about exactly the
+# image(s) a given `docker compose pull <service>` would touch — cloud-only
+# starts ONLY physical_ai_manager, so it must not be forced to pull because an
+# unrelated image (open_manipulator) looks stale.
+_SERVICE_IMAGE = {
+    "open_manipulator": IMAGE_OPEN_MANIPULATOR,
+    "physical_ai_server": IMAGE_PHYSICAL_AI_SERVER,
+    "physical_ai_manager": IMAGE_PHYSICAL_AI_MANAGER,
+}
 
 
 class DockerError(Exception):
@@ -397,6 +412,87 @@ def _get_remote_digest_candidates(
     return {digest} if digest else set()
 
 
+# ── Offline-bundle sidecar: recognise docker-load'd images as current ─────────
+
+
+def _load_bundled_digests() -> dict:
+    """Read the install-seeded ``bundled_digests.json`` sidecar, or ``{}``.
+
+    Written by ``installer/scripts/load_images.ps1`` when the OFFLINE bundle
+    is loaded — maps each loaded image ref to its registry manifest-LIST
+    digest. Absent on online / self-update installs (then the sidecar fallback
+    never fires). Read fresh each call: the file is tiny, set once at install,
+    and re-reading avoids any stale-cache bug across a self-update.
+    """
+    try:
+        with open(BUNDLED_DIGESTS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _bundled_digest_for(image: str) -> Optional[str]:
+    """The bundled manifest-list digest for ``image`` (full ``registry/repo:tag``
+    ref from ALL_IMAGES), or None.
+
+    Matches the exact ref first, then tolerantly on the bare ``repo:tag`` so an
+    ``EDUBOTICS_REGISTRY`` override (ALL_IMAGES uses the override registry while
+    the bundle was saved under ``nettername/``) still resolves the digest.
+    """
+    digests = _load_bundled_digests()
+    if not digests:
+        return None
+    value = digests.get(image)
+    if isinstance(value, str) and value.startswith("sha256:"):
+        return value
+    bare = image.split("/", 1)[-1]
+    for key, val in digests.items():
+        if (
+            isinstance(val, str)
+            and val.startswith("sha256:")
+            and isinstance(key, str)
+            and key.split("/", 1)[-1] == bare
+        ):
+            return val
+    return None
+
+
+def _resolve_local_digest(image: str) -> tuple[Optional[str], bool]:
+    """Return ``(digest, is_bundled)`` for the locally-present ``image``.
+
+    Prefers the real RepoDigest (a genuinely-pulled image). Only when that is
+    empty — the signature of a ``docker load``-ed bundle image (moby#22011) —
+    fall back to the sidecar's manifest-list digest. The fallback is confined
+    here so ``_get_local_repo_digest`` stays repo-only and the post-pull
+    freshness record keeps reflecting a real pull.
+    """
+    repo = _get_local_repo_digest(image)
+    if repo is not None:
+        return repo, False
+    bundled = _bundled_digest_for(image)
+    return bundled, (bundled is not None)
+
+
+def _image_is_current(image: str, remote_candidates: Optional[set] = None) -> bool:
+    """Whether the locally-present ``image`` (a real pull OR a docker-load'd
+    bundle) already matches the registry, so a pull would be a no-op.
+
+    For a BUNDLED image whose remote digest probe fails (offline / rate-limited
+    Docker Hub), treat it as current rather than re-downloading the multi-GB
+    image we already loaded. A genuinely-pulled image with a failed probe keeps
+    the existing 'unknown → pull' behaviour.
+    """
+    digest, is_bundled = _resolve_local_digest(image)
+    if digest is None:
+        return False
+    if remote_candidates is None:
+        remote_candidates = _get_remote_digest_candidates(image)
+    if digest in remote_candidates:
+        return True
+    return bool(is_bundled and not remote_candidates)
+
+
 def _load_last_pull_info() -> Optional[dict]:
     """Read the persisted last-pull state. Returns ``None`` if no file exists
     or the file is unreadable (treat as 'never pulled')."""
@@ -519,7 +615,13 @@ def check_for_updates(log=None) -> bool:
     for i, image in enumerate(ALL_IMAGES):
         short = image.split("/")[-1]
 
-        local_digest = _get_local_repo_digest(image)
+        # Sidecar-aware local digest: a docker-load'd OFFLINE-bundle image has
+        # an EMPTY RepoDigests (moby#22011), so the raw probe returns None and
+        # the pre-check below would treat it as "lokal nicht vorhanden" and
+        # re-download the full image on the first online launch. The fallback
+        # substitutes the install-seeded manifest-LIST digest, which IS a
+        # member of remote_candidates for a buildx-pushed image.
+        local_digest, is_bundled = _resolve_local_digest(image)
         remote_candidates = _get_remote_digest_candidates(image)
 
         # Layer 2: digest pre-check. Saves the per-image docker-pull
@@ -528,8 +630,13 @@ def check_for_updates(log=None) -> bool:
         # manifest-LIST digest for buildx-pushed images, the old probe
         # returned the amd64 CHILD digest — a fixed pair never matched, so
         # this layer was silently dead (every launch: "Update verfügbar" +
-        # no-op pull). The candidate set contains both shapes.
-        if local_digest is not None and local_digest in remote_candidates:
+        # no-op pull). The candidate set contains both shapes. For a bundled
+        # image whose remote probe failed (flaky Hub), treat as current so we
+        # don't re-download the loaded bytes.
+        if local_digest is not None and (
+            local_digest in remote_candidates
+            or (is_bundled and not remote_candidates)
+        ):
             if log:
                 log(f"  [{i+1}/{total}] {short}: bereits aktuell ({local_digest[7:19]}).")
             pulled_digests[image] = local_digest
@@ -869,7 +976,43 @@ def _compose_pull(gpu: bool = False, service: Optional[str] = None, log=None) ->
     Best-effort by design — `--ignore-pull-failures` lets an offline classroom
     still start on cached images instead of refusing to boot. A pinned
     immutable tag already present locally makes this a fast manifest no-op.
+
+    OFFLINE-BUNDLE caveat: `docker compose pull` ALWAYS contacts the registry,
+    and a docker-load'd bundle image has an EMPTY RepoDigests so the registry
+    treats it as absent and re-downloads the full image (moby#46664). So we
+    must short-circuit: if the relevant pinned image(s) are already current
+    (real RepoDigest match OR the bundle sidecar), skip the compose pull and
+    let `up --force-recreate` reuse the present images (compose's default
+    pull_policy `missing` never re-pulls a present image). Service-scoped so
+    cloud-only (physical_ai_manager only) isn't forced to pull because an
+    unrelated image looks stale. EDUBOTICS_SKIP_AUTO_PULL additionally forces
+    the skip (consistent with the launch path); `up` still self-heals a
+    genuinely-missing image.
     """
+    relevant = (
+        [_SERVICE_IMAGE[service]]
+        if service and service in _SERVICE_IMAGE
+        else list(ALL_IMAGES)
+    )
+    if relevant:
+        if SKIP_AUTO_PULL:
+            if log:
+                log("  Auto-Pull deaktiviert — vorhandene Images werden verwendet.")
+            return True
+        # Offline short-circuit (mirrors check_for_updates): can't pull anyway,
+        # and probing each image's remote digest would burn ~10 s/image of
+        # manifest timeouts before the bundle fallback fires. Reuse the present
+        # images; `up` self-heals a genuinely missing one (and fails clearly if
+        # offline + missing — same as today's --ignore-pull-failures path).
+        if not is_dockerhub_reachable():
+            if log:
+                log("  Docker Hub nicht erreichbar — vorhandene Images werden verwendet.")
+            return True
+        if all(_image_is_current(img) for img in relevant):
+            if log:
+                log("  Images bereits aktuell — Aktualisierung übersprungen.")
+            return True
+
     args = list(_compose_args(gpu))
     args.append("pull")
     args.append("--ignore-pull-failures")

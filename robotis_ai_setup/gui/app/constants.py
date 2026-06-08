@@ -290,3 +290,31 @@ def _resolve_last_pull_file() -> str:
 
 
 LAST_PULL_FILE = _resolve_last_pull_file()
+
+
+def _resolve_bundled_digests_file() -> str:
+    """Sidecar emitted by the OFFLINE image bundle: per-image manifest-LIST
+    digests for the docker-load'd images.
+
+    A `docker load`-ed image has an EMPTY RepoDigests (moby#22011), so the
+    GUI's launch/env-start digest pre-checks would treat a bundled image as
+    "not current" and re-download the full image from Docker Hub on the first
+    online start. This file lets `_get_local_repo_digest`'s sidecar fallback
+    report the bundled image as current, making that re-pull a no-op.
+
+    Written at install time by `installer/scripts/load_images.ps1` into the
+    install dir alongside `versions.env` (machine-wide, world-readable — NOT
+    %LOCALAPPDATA%, which under the elevated installer would be the admin's
+    profile, not the student's). Format: JSON
+    {"<registry>/<image>:<tag>": "sha256:<manifest-list digest>"}.
+
+    Absent on online installs / self-update reinstalls (no bundle) — the
+    fallback then simply never fires.
+    """
+    override = os.environ.get("EDUBOTICS_BUNDLED_DIGESTS_FILE")
+    if override:
+        return override
+    return os.path.join(DOCKER_DIR, "bundled_digests.json")
+
+
+BUNDLED_DIGESTS_FILE = _resolve_bundled_digests_file()

@@ -83,8 +83,38 @@ foreach ($image in $images) {
     Write-OK "$image pulled"
 }
 
+# Remove SUPERSEDED tags by enumeration. After a self-update reinstall pulls
+# :X.Y.Z, the previously-installed :X.Y-1 image still carries its tag — and
+# `docker image prune -f` is dangling-ONLY, so it never reclaims a tagged
+# image. Over a few classroom updates the VHDX would otherwise grow by a full
+# image per past version. We can't decrement the tag (2.7.0->2.8.0 isn't
+# "X.Y-1"; patch bumps make it meaningless), so enumerate the local tags per
+# repo and remove every one that isn't the current $ImageTag. Untag-by-tag is
+# layer-safe: only layers NOT shared with the kept :$ImageTag are dropped.
+$repos = @(
+    "${Registry}/open-manipulator",
+    "${Registry}/physical-ai-server",
+    "${Registry}/physical-ai-manager"
+)
+Write-Step "Removing superseded image tags..."
+foreach ($repo in $repos) {
+    $tags = wsl -d $DistroName -- docker images $repo --format '{{.Tag}}' 2>$null
+    foreach ($tag in $tags) {
+        $tag = ($tag -replace "`0", "").Trim()
+        if ($tag -and $tag -ne '<none>' -and $tag -ne $ImageTag) {
+            wsl -d $DistroName -- docker image rm "${repo}:${tag}" *>$null 2>&1
+        }
+    }
+}
+
 Write-Step "Cleaning up old images..."
 wsl -d $DistroName -- docker image prune -f *>$null
 Write-OK "Old images removed"
 
 Write-Step "All $total images pulled successfully!"
+
+# Explicit success: don't let the script's exit code fall through to the prune's
+# $LASTEXITCODE. A transient non-zero prune would otherwise make the finalize
+# (post-reboot) caller falsely report a failed image step (load_images.ps1 and
+# finalize_install.ps1 both propagate/check $LASTEXITCODE).
+exit 0

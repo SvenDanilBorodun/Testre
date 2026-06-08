@@ -75,10 +75,14 @@ try {
     }
     New-Item -ItemType Directory -Path $DestDir -Force | Out-Null
 
+    # The per-image <repo>.tar.gz.sha256 checksums live INSIDE images/ (the CI
+    # writes them there) and are carried by this whole-directory move — so
+    # load_images.ps1 finds them at $DestDir\images\<repo>.tar.gz.sha256. Do NOT
+    # add a separate SrcDir-root *.sha256 sweep: it would move nothing today and
+    # would silently relocate the checksums away from where load_images reads
+    # them if the CI layout ever changed.
     Move-Item -LiteralPath $srcImages -Destination (Join-Path $DestDir "images") -Force
     Move-Item -LiteralPath $marker -Destination (Join-Path $DestDir "bundled_digests.json") -Force
-    Get-ChildItem -LiteralPath $SrcDir -Filter "*.sha256" -File -ErrorAction SilentlyContinue |
-        ForEach-Object { Move-Item -LiteralPath $_.FullName -Destination $DestDir -Force }
 } catch {
     Write-Host "[FEHLER] Installationsdaten konnten nicht vorbereitet werden: $($_.Exception.Message)" -ForegroundColor Red
     exit 1

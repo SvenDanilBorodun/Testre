@@ -1057,7 +1057,12 @@ class EduBoticsApp:
                 self.root.after(0, lambda: btn_update.config(
                     state=tk.NORMAL, text="Erneut versuchen"
                 ))
-                if self._update_fail_count >= 3:
+                # Enable "skip" after the FIRST failed download (was 3) so a
+                # student on a flaky link / behind a blocked asset URL is never
+                # hard-locked behind the non-closable modal. The asset HEAD
+                # pre-check in update_checker already prevents a 404 asset from
+                # ever opening this modal; this covers a mid-download failure.
+                if self._update_fail_count >= 1:
                     self.root.after(0, lambda: btn_skip.config(state=tk.NORMAL))
 
         def _on_update_click():

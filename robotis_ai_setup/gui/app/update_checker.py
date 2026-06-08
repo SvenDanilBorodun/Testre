@@ -8,22 +8,62 @@ dependencies.
 import glob
 import json
 import os
+import re
 import tempfile
 import time
 import urllib.request
 import urllib.error
 
 
+_NUM_RE = re.compile(r"\d+")
+
+
 def _parse_version(v: str) -> tuple:
-    """Convert '2.1.0' → (2, 1, 0) for comparison."""
-    return tuple(int(x) for x in v.strip().split("."))
+    """Best-effort numeric version tuple, padded to 3 parts, for comparison.
+
+    Tolerant of a leading 'v', pre-release/build suffixes, and short forms:
+    'v2.8.1' / '2.8.1-rc1' / '2.8.1+build' → (2, 8, 1); '2.8' → (2, 8, 0);
+    non-numeric / empty → (0, 0, 0).
+
+    The previous ``int(x) for x in v.split('.')`` raised ValueError on ANY
+    non-purely-numeric segment, and the caller swallowed it as "no update" —
+    so a single non-numeric release tag (e.g. an '-rc1' hotfix) would silently
+    stop every student from EVER updating while reporting "GUI ist aktuell".
+    Padding also fixes the (2,8) > (2,8,0) == False short-form asymmetry.
+    """
+    nums = _NUM_RE.findall(v or "")
+    if not nums:
+        return (0, 0, 0)
+    t = tuple(int(n) for n in nums[:3])
+    return t + (0,) * (3 - len(t))
+
+
+def _asset_available(url: str) -> bool:
+    """HEAD the installer asset. Returns False ONLY when the server
+    DEFINITIVELY reports it gone (404) — so we never lock a student behind the
+    forced, non-closable update modal for a release whose .exe asset is
+    missing/deleted/not-yet-propagated. Any other outcome (200, redirect, 405
+    "HEAD not allowed", or a transient network error) returns True: we can't
+    prove absence, and the download attempt + the skip path handle the rest.
+    """
+    try:
+        req = urllib.request.Request(url, method="HEAD")
+        with urllib.request.urlopen(req, timeout=5):
+            return True
+    except urllib.error.HTTPError as e:
+        return e.code != 404
+    except Exception:
+        return True
 
 
 def check_for_update(current_version: str, api_url: str) -> dict | None:
     """Check the cloud API for a newer GUI version.
 
     Returns {"version": "x.y.z", "download_url": "..."} if an update is
-    available, or None if current / on any error.
+    available AND its installer asset is reachable, or None if current / on any
+    error. The asset pre-check prevents the forced-modal lockout when /version
+    advertises a version whose .exe asset 404s (deleted release, hand-bumped
+    GUI_VERSION before the asset landed, etc.).
     """
     url = f"{api_url.rstrip('/')}/version"
     try:
@@ -35,6 +75,8 @@ def check_for_update(current_version: str, api_url: str) -> dict | None:
         if not remote_version or not download_url:
             return None
         if _parse_version(remote_version) > _parse_version(current_version):
+            if not _asset_available(download_url):
+                return None
             return {"version": remote_version, "download_url": download_url}
     except Exception:
         return None

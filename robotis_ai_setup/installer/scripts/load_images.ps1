@@ -135,18 +135,23 @@ foreach ($repo in $repos) {
     }
 
     # Integrity gate before load (mirrors the rootfs .sha256 gate). A truncated
-    # download must fail fast, not corrupt the Docker store.
+    # download must fail fast, not corrupt the Docker store. The checksum is
+    # MANDATORY: every CI bundle ships <repo>.tar.gz.sha256 inside images/, so a
+    # missing one means a broken/tampered bundle — hard-fail rather than load
+    # unverified bytes (defense-in-depth, not opt-in-by-file-presence).
     $shaFile = "${tar}.sha256"
-    if (Test-Path -LiteralPath $shaFile) {
-        $expected = $null
-        if ((Get-Content -LiteralPath $shaFile -Raw) -match '([0-9a-fA-F]{64})') {
-            $expected = $Matches[1].ToLower()
-        }
-        $actual = (Get-FileHash -LiteralPath $tar -Algorithm SHA256).Hash.ToLower()
-        if (-not $expected -or $expected -ne $actual) {
-            Write-Host "[FEHLER] Prüfsumme von '$repo' stimmt nicht — Download beschädigt. Bitte erneut herunterladen." -ForegroundColor Red
-            exit 1
-        }
+    if (-not (Test-Path -LiteralPath $shaFile)) {
+        Write-Host "[FEHLER] Prüfsumme für '$repo' fehlt im Paket — Installation abgebrochen. Bitte EduBotics neu herunterladen." -ForegroundColor Red
+        exit 1
+    }
+    $expected = $null
+    if ((Get-Content -LiteralPath $shaFile -Raw) -match '([0-9a-fA-F]{64})') {
+        $expected = $Matches[1].ToLower()
+    }
+    $actual = (Get-FileHash -LiteralPath $tar -Algorithm SHA256).Hash.ToLower()
+    if (-not $expected -or $expected -ne $actual) {
+        Write-Host "[FEHLER] Prüfsumme von '$repo' stimmt nicht — Download beschädigt. Bitte erneut herunterladen." -ForegroundColor Red
+        exit 1
     }
 
     Write-Host "`n   [$current/$total] $repo wird geladen ..." -ForegroundColor White

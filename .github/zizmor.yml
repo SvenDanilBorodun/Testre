@@ -11,5 +11,10 @@ rules:
     # `secrets:` lists would require declaring a workflow_call secrets schema
     # in all five callees and keeping six files in lockstep for zero trust
     # gain (no third-party callee is ever invoked).
+    # bundle-test.yml (dispatch-only P4 enabler) reuses the SAME same-repo
+    # release-installer.yml callee that release.yml already inherits to, for
+    # the same reason — release-installer consumes the documented secret set to
+    # build the installer. No third-party callee; same trust profile as above.
     ignore:
       - release.yml
+      - bundle-test.yml

@@ -28,6 +28,7 @@ from huggingface_hub.utils import RepositoryNotFoundError
 from pydantic import BaseModel, Field, field_validator
 
 from app.auth import get_current_user, get_user_profile
+from app.services.hf_identity import is_denied_author
 from app.services.supabase_client import get_supabase
 
 logger = logging.getLogger(__name__)
@@ -84,6 +85,13 @@ class DatasetResponse(BaseModel):
     updated_at: str
     is_owned: bool
     is_group_shared: bool
+
+
+class DatasetSyncResult(BaseModel):
+    hf_username: str
+    total_found: int
+    registered: int
+    already_known: int
 
 
 # ---------- Helpers ----------
@@ -340,6 +348,126 @@ def register_dataset(
             status_code=500, detail="Datensatz konnte nicht gespeichert werden."
         )
     return _serialize(row, viewer_id=str(user.id))
+
+
+@router.post("/sync", response_model=DatasetSyncResult)
+def sync_datasets(user=Depends(get_current_user)) -> DatasetSyncResult:
+    """Register every HF dataset under the caller's linked hf_username.
+
+    The reliable, on-demand replacement for the old "hope the upload-success
+    ROS event fired" client auto-registration (which silently dropped a
+    dataset whenever the rosbridge reconnect raced or the access token wasn't
+    in Redux at that instant). Self-only: enumerates ONLY the caller's own HF
+    namespace (author == their hf_username) and registers each missing repo via
+    register_dataset_safe — the same SECURITY DEFINER RPC the live POST uses,
+    so the author anchor is set/enforced and a peer's repo can never be pulled
+    in once the anchor exists.
+
+    hf_username must be linked first (PATCH /me); the React app auto-links it
+    from the ROS whoami Benutzer-ID. Returns the discovery tallies so the UI can
+    say "N neue Datensätze synchronisiert".
+    """
+    profile = get_user_profile(str(user.id))
+    hf_username = profile.get("hf_username")
+    if not hf_username:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Bitte zuerst deine HuggingFace-Benutzer-ID verknüpfen, dann "
+                "erneut synchronisieren."
+            ),
+        )
+    if is_denied_author(hf_username):
+        # A student's hf_username should never be an upstream/system account;
+        # refuse rather than pull hundreds of example datasets into the registry.
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Diese Benutzer-ID ist nicht zulässig (System- oder "
+                "Beispielkonto)."
+            ),
+        )
+
+    api = HfApi(token=os.environ.get("HF_TOKEN", ""))
+    try:
+        hf_datasets = list(api.list_datasets(author=hf_username, limit=500))
+    except Exception as exc:
+        logger.warning(
+            "sync_datasets list_datasets(author=%s) failed: %s", hf_username, exc
+        )
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "HuggingFace Hub ist gerade nicht erreichbar — bitte gleich "
+                "noch einmal versuchen."
+            ),
+        )
+
+    supabase = get_supabase()
+    already = {
+        r["hf_repo_id"]
+        for r in (
+            supabase.table("datasets")
+            .select("hf_repo_id")
+            .eq("owner_user_id", str(user.id))
+            .execute()
+        ).data or []
+        if r.get("hf_repo_id")
+    }
+    workgroup_id = profile.get("workgroup_id")
+
+    total_found = 0
+    registered = 0
+    already_known = 0
+    for ds in hf_datasets:
+        repo_id = getattr(ds, "id", None) or getattr(ds, "repo_id", None)
+        if not repo_id or "/" not in repo_id:
+            continue
+        # Defensive: only register repos actually owned by the caller's author
+        # (list_datasets(author=...) should already guarantee this).
+        if repo_id.split("/", 1)[0] != hf_username:
+            continue
+        total_found += 1
+        if repo_id in already:
+            already_known += 1
+            continue
+        try:
+            supabase.rpc(
+                "register_dataset_safe",
+                {
+                    "p_user_id": str(user.id),
+                    "p_hf_repo_id": repo_id,
+                    "p_hf_author": hf_username,
+                    "p_workgroup_id": workgroup_id,
+                    "p_name": repo_id.split("/", 1)[-1],
+                    "p_description": "",
+                    "p_episode_count": None,
+                    "p_total_frames": None,
+                    "p_fps": None,
+                    "p_robot_type": None,
+                },
+            ).execute()
+            registered += 1
+        except Exception as exc:
+            # P0034 = anchor mismatch (e.g. the student re-linked a different
+            # hf_username after registering under the old one). Log + skip so
+            # the remaining repos still register.
+            logger.warning(
+                "sync_datasets register %s for user=%s failed: %s",
+                repo_id, user.id, exc,
+            )
+            continue
+
+    logger.info(
+        "sync_datasets user=%s hf=%s found=%d registered=%d known=%d",
+        user.id, hf_username, total_found, registered, already_known,
+    )
+    return DatasetSyncResult(
+        hf_username=hf_username,
+        total_found=total_found,
+        registered=registered,
+        already_known=already_known,
+    )
 
 
 @router.patch("/{dataset_id}", response_model=DatasetResponse)

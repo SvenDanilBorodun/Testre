@@ -16,7 +16,23 @@ const initialState = {
   // logic falls back to the per-user path. workgroupName is shown in chips.
   workgroupId: null,
   workgroupName: null,
+  // The student's linked HuggingFace "Benutzer-ID" (from /me.hf_username).
+  // Null until the cloud profile has been linked to the HF identity. The
+  // Training tab links it automatically once both the cloud login and the
+  // ROS whoami Benutzer-ID are known (StudentApp auto-link effect).
+  hfUsername: null,
   profileLoaded: false,
+  // Set when GET /me fails in a NON-auth way (404 = JWT valid but no
+  // public.users row; network/5xx after retries). profileLoaded stays
+  // false; the Training/Inferenz gates render a German error card with a
+  // retry button instead of the workspace. Cleared on a successful load
+  // and on session change.
+  profileError: null,
+  // Bumped by requestProfileRefetch() (e.g. the Training tab "Erneut
+  // versuchen" button). The single useMeProfile owner (StudentApp/WebApp)
+  // watches this and re-runs GET /me. A nonce instead of a thunk keeps the
+  // fetch in ONE place — no dual hooks, no stale closures, no double toast.
+  profileRefetchNonce: 0,
   // Only populated for teachers.
   poolTotal: null,
   allocatedTotal: null,
@@ -40,7 +56,9 @@ const authSlice = createSlice({
         state.classroomId = null;
         state.workgroupId = null;
         state.workgroupName = null;
+        state.hfUsername = null;
         state.profileLoaded = false;
+        state.profileError = null;
         state.poolTotal = null;
         state.allocatedTotal = null;
         state.poolAvailable = null;
@@ -60,7 +78,9 @@ const authSlice = createSlice({
       state.classroomId = null;
       state.workgroupId = null;
       state.workgroupName = null;
+      state.hfUsername = null;
       state.profileLoaded = false;
+      state.profileError = null;
       state.poolTotal = null;
       state.allocatedTotal = null;
       state.poolAvailable = null;
@@ -83,7 +103,9 @@ const authSlice = createSlice({
       state.classroomId = p.classroom_id;
       state.workgroupId = p.workgroup_id ?? null;
       state.workgroupName = p.workgroup_name ?? null;
+      state.hfUsername = p.hf_username ?? null;
       state.profileLoaded = true;
+      state.profileError = null;
       if (p.role === 'teacher') {
         state.poolTotal = p.pool_total;
         state.allocatedTotal = p.allocated_total;
@@ -92,6 +114,23 @@ const authSlice = createSlice({
         state.groupCount = p.group_count ?? 0;
         state.groupCreditsTotal = p.group_credits_total ?? 0;
       }
+    },
+    // Update just the linked HF Benutzer-ID after a successful PATCH /me
+    // (the StudentApp auto-link effect). Kept separate from setProfile so
+    // the link can be reflected without re-applying the whole profile.
+    setHfUsername: (state, action) => {
+      state.hfUsername = action.payload ?? null;
+    },
+    // Surface a profile-load failure to the UI gates without signing out
+    // (a valid JWT can still hit a missing public.users row, or a 5xx).
+    // Passing null clears it (e.g. just before a manual refetch).
+    setProfileError: (state, action) => {
+      state.profileError = action.payload ?? null;
+    },
+    // Ask the single useMeProfile owner to re-run GET /me. The "Erneut
+    // versuchen" buttons on the Training/Inferenz error cards dispatch this.
+    requestProfileRefetch: (state) => {
+      state.profileRefetchNonce += 1;
     },
     updateTeacherPool: (state, action) => {
       // Called when a teacher adjusts credits and we want a fresh pool total.
@@ -112,6 +151,9 @@ export const {
   setIsLoading,
   setQuota,
   setProfile,
+  setHfUsername,
+  setProfileError,
+  requestProfileRefetch,
   updateTeacherPool,
 } = authSlice.actions;
 

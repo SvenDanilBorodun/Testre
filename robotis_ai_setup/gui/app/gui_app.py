@@ -7,6 +7,7 @@ Bietet eine schrittweise Oberfläche für:
   4. EduBotics Web-Oberfläche in eingebettetem Fenster öffnen
 """
 
+import base64
 import os
 import subprocess
 import sys
@@ -128,6 +129,31 @@ from .constants import (
     ENV_FILE,
     cameras_use_native_bridge,
 )
+
+
+def _frame_to_photo_data(frame_bgr):
+    """Encode a BGR frame (numpy ndarray) to base64-PNG bytes for tk.PhotoImage(data=...).
+
+    Tk 8.6 (the shipped Python 3.11 build) cannot reliably render raw binary PPM via
+    the image -data option — NUL bytes truncate through the Tcl string bridge. base64
+    PNG is binary-safe and renders on Tk 8.6 and 9.0. Returns ascii base64 bytes, or
+    None if the frame can't be encoded.
+    """
+    try:
+        import cv2
+        small = frame_bgr[::2, ::2]  # 2x subsample thumbnail; keep BGR (cv2 handles BGR->PNG colors)
+        if small.ndim == 2:
+            small = cv2.cvtColor(small, cv2.COLOR_GRAY2BGR)
+        elif small.ndim == 3 and small.shape[2] == 4:
+            small = cv2.cvtColor(small, cv2.COLOR_BGRA2BGR)
+        if small.ndim != 3 or small.shape[2] != 3:
+            return None
+        ok, buf = cv2.imencode(".png", small)
+        if not ok:
+            return None
+        return base64.b64encode(buf.tobytes())
+    except Exception:  # noqa: BLE001 — preview is best-effort
+        return None
 
 
 def _redact_secret_env_line(line: str) -> str:
@@ -1650,6 +1676,14 @@ class EduBoticsApp:
         self._preview_caps = {}
         self._preview_labels = {}
         self._preview_images = {}
+        # Per-camera diagnostic state (keyed by win_index) — reset every
+        # teardown so a re-open starts fresh. So the "Vorschau lädt ..."
+        # stall can never again be silent: we count renders/empty reads and
+        # log a one-time give-up per camera.
+        self._preview_names = {}
+        self._preview_frames_rendered = {}
+        self._preview_empty_reads = {}
+        self._preview_error_logged = {}
 
     def _start_camera_previews(self, cameras):
         """Open a small live preview per selected camera (pre-start only).
@@ -1658,14 +1692,28 @@ class EduBoticsApp:
         indistinguishable by name — the student picked gripper/scene BLIND,
         and a swap silently corrupts every recorded dataset (the policy
         learns the wrong view). A live thumbnail per camera makes the
-        mistake visually impossible. Rendering uses tk.PhotoImage with raw
-        PPM bytes (numpy BGR→RGB + subsample) — deliberately NO Pillow
-        dependency. Open-once-poll-close at ~5 Hz; previews stop before the
-        bridge claims the devices.
+        mistake visually impossible. Rendering encodes each frame to
+        base64-PNG and feeds it to tk.PhotoImage (the shipped Tk 8.6 cannot
+        reliably render raw binary PPM — NUL bytes truncate it; cv2 is
+        already in this path, no Pillow dependency). Open-once-poll-close at
+        ~5 Hz; previews stop before the bridge claims the devices.
         """
         self._stop_camera_previews()
         if not cameras:
             return
+
+        # Contention guard: while the environment runs, the capture bridge
+        # holds the cameras EXCLUSIVELY. A second MSMF open returns a
+        # frameless handle (an endless "Vorschau lädt ..."), so don't even
+        # try — show a German note instead.
+        if self.running or self.camera_bridge is not None:
+            ttk.Label(
+                self.camera_role_frame,
+                text="Vorschau pausiert, während die Umgebung läuft.",
+                foreground="gray",
+            ).pack(anchor=tk.W, pady=(6, 2))
+            return
+
         try:
             from . import win_camera
         except Exception:  # noqa: BLE001
@@ -1692,7 +1740,7 @@ class EduBoticsApp:
                 # arbitrary device (e.g. a laptop's built-in camera).
                 label.config(text="Keine Vorschau (usb_cam-Modus)")
                 continue
-            targets.append((cam.win_index, label))
+            targets.append((cam.win_index, label, cam.name))
 
         if not targets:
             return
@@ -1702,15 +1750,18 @@ class EduBoticsApp:
             # thread (a 2-camera pick froze the GUI ~6 s). Open here, then
             # marshal the handles back; cap.read() at 5 Hz stays on main
             # (cheap, and Tk widgets are touched only there).
-            for win_index, label in targets:
+            for win_index, label, name in targets:
                 try:
                     cap, _info = win_camera.open_capture(win_index, 640, 480, 15)
                 except Exception as exc:  # noqa: BLE001
                     self.root.after(0, lambda lbl=label, e=exc: lbl.config(
                         text=f"Keine Vorschau ({e})"))
+                    self.root.after(0, lambda i=win_index, e=exc: self._log(
+                        f"Kamera-Vorschau konnte nicht geöffnet werden "
+                        f"(Index {i}): {e}"))
                     continue
 
-                def _install(idx=win_index, c=cap, lbl=label):
+                def _install(idx=win_index, c=cap, lbl=label, nm=name):
                     if generation != getattr(self, "_preview_generation", -1):
                         # Selection changed while opening — stale handle.
                         try:
@@ -1720,6 +1771,10 @@ class EduBoticsApp:
                         return
                     self._preview_caps[idx] = c
                     self._preview_labels[idx] = lbl
+                    self._preview_names[idx] = nm
+                    self._preview_frames_rendered.setdefault(idx, 0)
+                    self._preview_empty_reads.setdefault(idx, 0)
+                    self._preview_error_logged.setdefault(idx, False)
                     if self._preview_after_id is None:
                         self._preview_after_id = self.root.after(
                             50, self._poll_camera_previews)
@@ -1732,26 +1787,76 @@ class EduBoticsApp:
         self._preview_after_id = None
         if not self._preview_caps:
             return
+        # ~15 ticks at the 200 ms cadence ≈ 3 s before we give up on a
+        # camera that has never produced a frame.
+        give_up_ticks = 15
         for win_index, cap in list(self._preview_caps.items()):
             label = self._preview_labels.get(win_index)
             if label is None:
                 continue
+            name = self._preview_names.get(win_index, f"Index {win_index}")
+
+            def _log_once(message):
+                # One log line per camera; subsequent failures stay quiet.
+                if not self._preview_error_logged.get(win_index):
+                    self._preview_error_logged[win_index] = True
+                    self._log(message)
+
             try:
                 ok, frame = cap.read()
-                if not ok or frame is None:
-                    continue
-                # BGR→RGB + 2x subsample (≈320×240) without Pillow: raw
-                # binary PPM (P6) feeds tk.PhotoImage directly.
-                small = frame[::2, ::2, ::-1]
-                height, width = small.shape[:2]
-                ppm = (f"P6 {width} {height} 255 ".encode("ascii")
-                       + small.tobytes())
-                photo = tk.PhotoImage(data=ppm)
-                label.config(image=photo, text="")
-                # Keep a reference — Tk drops the image otherwise.
-                self._preview_images[win_index] = photo
-            except Exception:  # noqa: BLE001 — preview is best-effort
+            except Exception as exc:  # noqa: BLE001 — preview is best-effort
+                label.config(
+                    text="Kamera liefert kein Bild – evtl. belegt oder "
+                         "Treiberproblem")
+                _log_once(
+                    f"Kamera-Vorschau Lesefehler ({name}, Index "
+                    f"{win_index}): {exc}")
                 continue
+
+            if not ok or frame is None:
+                # No frame this tick — count it, and give up loudly once a
+                # camera has yielded ZERO frames after ~3 s so the student
+                # never stares at an endless "Vorschau lädt ...".
+                self._preview_empty_reads[win_index] = (
+                    self._preview_empty_reads.get(win_index, 0) + 1)
+                if (self._preview_frames_rendered.get(win_index, 0) == 0
+                        and self._preview_empty_reads[win_index]
+                        >= give_up_ticks):
+                    label.config(
+                        text="Kamera liefert kein Bild – evtl. belegt oder "
+                             "Treiberproblem")
+                    _log_once(
+                        f"Kamera-Vorschau liefert kein Bild ({name}, Index "
+                        f"{win_index}) — evtl. belegt oder Treiberproblem.")
+                continue
+
+            data = _frame_to_photo_data(frame)
+            if data is None:
+                label.config(
+                    text="Kamera liefert kein Bild – evtl. belegt oder "
+                         "Treiberproblem")
+                _log_once(
+                    f"Kamera-Vorschau konnte das Bild nicht kodieren "
+                    f"({name}, Index {win_index}).")
+                continue
+            try:
+                photo = tk.PhotoImage(data=data)
+            except Exception as exc:  # noqa: BLE001 — preview is best-effort
+                label.config(
+                    text="Kamera liefert kein Bild – evtl. belegt oder "
+                         "Treiberproblem")
+                _log_once(
+                    f"Kamera-Vorschau Anzeigefehler ({name}, Index "
+                    f"{win_index}): {exc}")
+                continue
+
+            label.config(image=photo, text="")
+            # Keep a reference — Tk drops the image otherwise.
+            self._preview_images[win_index] = photo
+            prev = self._preview_frames_rendered.get(win_index, 0)
+            self._preview_frames_rendered[win_index] = prev + 1
+            if prev == 0:
+                self._log(f"Kamera-Vorschau aktiv: {name}")
         if self._preview_caps:
             self._preview_after_id = self.root.after(
                 200, self._poll_camera_previews)

@@ -4,9 +4,10 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-from app.auth import get_current_profile
+from app.auth import get_current_profile, get_user_profile
+from app.services.hf_identity import is_denied_author, normalize_hf_username
 from app.services.modal_client import cancel_training_job
 from app.services.supabase_client import get_supabase
 from app.services.workgroups import resolve_visible_workgroup_ids
@@ -21,6 +22,10 @@ class MyProfile(BaseModel):
     role: str
     username: str | None
     full_name: str | None
+    # Migration 030: the student's linked HuggingFace username (Benutzer-ID).
+    # The anchor for dataset discovery; None until the React app auto-links it
+    # from the ROS whoami or the student sets it via PATCH /me.
+    hf_username: str | None = None
     classroom_id: str | None
     workgroup_id: str | None = None
     workgroup_name: str | None = None
@@ -39,13 +44,17 @@ class MyProfile(BaseModel):
     vision_used_per_term: int | None = None
 
 
-@router.get("", response_model=MyProfile)
-async def read_me(profile=Depends(get_current_profile)):
+def _build_my_profile(profile: dict) -> MyProfile:
+    """Assemble the MyProfile response from a public.users row.
+
+    Shared by GET /me and PATCH /me so both return the identical shape.
+    """
     data = {
         "id": profile["id"],
         "role": profile["role"],
         "username": profile.get("username"),
         "full_name": profile.get("full_name"),
+        "hf_username": profile.get("hf_username"),
         "classroom_id": profile.get("classroom_id"),
         "workgroup_id": profile.get("workgroup_id"),
         "training_credits": profile["training_credits"],
@@ -118,6 +127,65 @@ async def read_me(profile=Depends(get_current_profile)):
         )
 
     return MyProfile(**data)
+
+
+@router.get("", response_model=MyProfile)
+async def read_me(profile=Depends(get_current_profile)):
+    return _build_my_profile(profile)
+
+
+class HfUsernameUpdate(BaseModel):
+    hf_username: str = Field(..., min_length=1, max_length=96)
+
+
+@router.patch("", response_model=MyProfile)
+async def update_me(
+    body: HfUsernameUpdate, profile=Depends(get_current_profile)
+):
+    """Link (or update) the caller's HuggingFace username (Benutzer-ID).
+
+    Self-only: the row is keyed to the JWT-verified profile id, never to a
+    body field (Rule §4). The React app calls this automatically from the ROS
+    whoami Benutzer-ID (StudentApp auto-link); a student can also set it by
+    hand. The value is the SOLE anchor the dataset_sweep + POST /datasets/sync
+    use to discover this student's datasets, so it is format-validated and
+    deny-listed against upstream/system namespaces.
+    """
+    cleaned = normalize_hf_username(body.hf_username)
+    if cleaned is None:
+        raise HTTPException(
+            status_code=400, detail="Ungültige HuggingFace-Benutzer-ID."
+        )
+    if is_denied_author(cleaned):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Diese Benutzer-ID ist nicht zulässig (System- oder "
+                "Beispielkonto)."
+            ),
+        )
+    supabase = get_supabase()
+    try:
+        result = (
+            supabase.table("users")
+            .update({"hf_username": cleaned})
+            .eq("id", profile["id"])
+            .execute()
+        )
+        if not result.data:
+            raise RuntimeError("update returned no rows")
+    except Exception as exc:
+        logger.error(
+            "hf_username update failed for user=%s: %s", profile["id"], exc
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="Benutzer-ID konnte nicht gespeichert werden.",
+        ) from exc
+    # Re-fetch so the response reflects the persisted value alongside the rest
+    # of the profile (group name, credits, quota).
+    fresh = get_user_profile(str(profile["id"]))
+    return _build_my_profile(fresh)
 
 
 @router.get("/export")

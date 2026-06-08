@@ -15,8 +15,19 @@ async function apiRequest(endpoint, method, accessToken, body = null) {
   const response = await fetch(`${CLOUD_API_URL}${endpoint}`, options);
 
   if (!response.ok) {
-    const error = await response.json().catch(() => ({ detail: response.statusText }));
-    throw new Error(error.detail || `Request failed: ${response.status}`);
+    // Same status-carrying contract as services/apiClient.js — callers
+    // (e.g. the quota refetch) can branch on err.status instead of parsing
+    // an opaque message string.
+    let detail;
+    try {
+      detail = (await response.json()).detail;
+    } catch {
+      detail = response.statusText;
+    }
+    const err = new Error(detail || `HTTP ${response.status}`);
+    err.status = response.status;
+    err.detail = detail;
+    throw err;
   }
 
   return response.json();

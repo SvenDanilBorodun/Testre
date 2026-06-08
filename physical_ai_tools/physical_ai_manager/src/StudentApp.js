@@ -14,7 +14,7 @@
 //
 // Author: Kiwoong Park
 
-import React, { useEffect, useRef } from 'react';
+import React, { useCallback, useEffect, useRef } from 'react';
 import clsx from 'clsx';
 import { MdHome, MdVideocam, MdMemory, MdWidgets, MdConstruction } from 'react-icons/md';
 import { GoGraph } from 'react-icons/go';
@@ -41,10 +41,9 @@ import { supabase } from './lib/supabaseClient';
 import {
   setSession,
   setIsLoading,
-  setProfile,
   clearSession,
 } from './features/auth/authSlice';
-import { getMe } from './services/meApi';
+import { useMeProfile } from './hooks/useMeProfile';
 import { resetJetsonOnLogout } from './hooks/useJetsonConnection';
 import { isCloudOnlyMode } from './utils/cloudMode';
 
@@ -152,54 +151,29 @@ function StudentApp() {
     return () => subscription.unsubscribe();
   }, [dispatch]);
 
-  useEffect(() => {
-    if (!session?.access_token) return;
-    let alive = true;
-    getMe(session.access_token)
-      .then((me) => {
-        if (!alive) return;
-        dispatch(setProfile(me));
-        if (me.role !== 'student') {
-          toast.error(
-            'Dieses Konto ist für die Web-App. Bitte nutze die Lehrer-URL.',
-            { duration: 6000 }
-          );
-          // v2.3.0: release the Jetson lock BEFORE signOut so the
-          // JWT is still valid for the beacon-style release call.
-          // Without this, the lock leaks for the full 5-min sweeper
-          // window every time a wrong-role account hits the student app.
-          resetJetsonOnLogout(dispatch, session.access_token, jetsonIdRef.current);
-          supabase.auth.signOut();
-          dispatch(clearSession());
-        }
-      })
-      .catch((err) => {
-        if (!alive) return;
-        console.error('getMe failed', err);
-        // A 401 means the session token is dead (expired, revoked, user
-        // deleted server-side). Previously the error was swallowed and the
-        // app ended up with a session object but no profile — a blank
-        // state with no actionable UI. Sign out so the login form shows.
-        const status = err?.status ?? err?.response?.status;
-        if (status === 401 || status === 403) {
-          toast.error('Sitzung abgelaufen — bitte erneut anmelden.');
-          // v2.3.0: 401/403 means the JWT is already dead, so the
-          // beacon release will fail server-side anyway. Still clear
-          // local Redux + rosbridge auth so the next session starts
-          // clean. The lock will be reaped by the 5-min sweeper.
-          resetJetsonOnLogout(dispatch);
-          supabase.auth.signOut();
-          dispatch(clearSession());
-        } else {
-          // Network / 5xx — don't sign out (session may still be valid);
-          // just surface it so the user knows why nothing is loading.
-          toast.error('Server nicht erreichbar — bitte Verbindung prüfen.');
-        }
-      });
-    return () => {
-      alive = false;
-    };
-  }, [session?.access_token, dispatch]);
+  // Robust /me load (retry/backoff + 401/403 sign-out + 404/5xx error state)
+  // and the HF-identity auto-link live in useMeProfile. The only student-app-
+  // specific piece is the wrong-role bounce below; everything else (incl. the
+  // refetch the Training tab's "Erneut versuchen" button calls) is shared.
+  const handleProfile = useCallback(
+    (me) => {
+      if (me.role !== 'student') {
+        toast.error(
+          'Dieses Konto ist für die Web-App. Bitte nutze die Lehrer-URL.',
+          { duration: 6000 }
+        );
+        // v2.3.0: release the Jetson lock BEFORE signOut so the JWT is still
+        // valid for the beacon-style release call. Without this, the lock
+        // leaks for the full 5-min sweeper window every time a wrong-role
+        // account hits the student app.
+        resetJetsonOnLogout(dispatch, session?.access_token, jetsonIdRef.current);
+        supabase.auth.signOut();
+        dispatch(clearSession());
+      }
+    },
+    [dispatch, session?.access_token]
+  );
+  useMeProfile({ onProfile: handleProfile, enableHfLink: true });
 
   useEffect(() => {
     if (isFirstLoad.current && page === PageType.HOME && taskStatus.topicReceived) {

@@ -1,0 +1,63 @@
+-- ============================================================================
+-- DATA OP (manual, one-time) — purge the sweep-imported mock dataset registry.
+--
+-- This is NOT a tracked migration and must NOT live in supabase/migrations/.
+-- Reason — ORDERING: the golden release order applies migrations (W1) BEFORE
+-- the Cloud API deploys (W2). The OLD dataset_sweep (still live until W2)
+-- re-derives HF authors from trainings.dataset_name (21 RobotisSW + 1 Hotteok
+-- + 6 SvenBorodun rows) and would RE-IMPORT every deleted row within its 10-min
+-- tick. So this purge is safe ONLY after the migration-030 Cloud API (the
+-- rewritten per-hf_username sweep + the upstream deny-list) is LIVE. Run it
+-- by hand (Supabase MCP execute_sql / psql) as the FINAL step.
+--
+-- WHAT: as of 2026-06-08 the public.datasets registry held 628 rows, EVERY ONE
+-- discovered_via_sweep = TRUE and ZERO legitimately student-registered:
+--   * RobotisSW  600  (upstream example repos, fan-registered across 3 accounts)
+--   * Hotteok      9  (upstream sample repos)
+--   * SvenBorodun 19  (the maintainer's own throwaway test repos)
+-- The RobotisSW rows also poisoned each student's register_dataset_safe author
+-- anchor (first dataset's author = RobotisSW), so real uploads 403'd. The user
+-- chose a CLEAN SLATE: delete all sweep-discovered rows; real datasets re-appear
+-- via the migration-030 per-user sync (POST /datasets/sync + the rewritten
+-- sweep) once each student's hf_username is linked. HF repos are NOT touched —
+-- only the discovery registry rows (no FK references datasets; verified 2026-06-08).
+--
+-- PRECONDITIONS (verify before running):
+--   1. The migration-030 Cloud API is deployed and /health reports the new SHA.
+--   2. SELECT count(*) FROM public.datasets WHERE NOT discovered_via_sweep;  -- 0
+--      (any student-registered row would be preserved by the predicate below,
+--       but confirm none appeared that you'd want to keep.)
+--
+-- BACKUP (run FIRST, save the output as the restore file):
+--   Generate idempotent INSERTs for every row this op will delete and store them
+--   in supabase/rollback/2026-06-08_purge_sweep_mock_datasets_restore.sql.
+--   (Page in chunks if the client truncates large results.)
+--
+--     SELECT string_agg(
+--       format(
+--         'INSERT INTO public.datasets '
+--         '(id,owner_user_id,workgroup_id,hf_repo_id,name,description,'
+--         'episode_count,total_frames,fps,robot_type,created_at,updated_at,'
+--         'discovered_via_sweep) VALUES (%L,%L,%L,%L,%L,%L,%s,%s,%s,%L,%L,%L,%L) '
+--         'ON CONFLICT (owner_user_id,hf_repo_id) DO NOTHING;',
+--         id, owner_user_id, workgroup_id, hf_repo_id, name, description,
+--         COALESCE(episode_count::text,'NULL'), COALESCE(total_frames::text,'NULL'),
+--         COALESCE(fps::text,'NULL'), robot_type, created_at, updated_at,
+--         discovered_via_sweep),
+--       E'\n' ORDER BY created_at)
+--     FROM public.datasets WHERE discovered_via_sweep = TRUE;
+--
+-- THE PURGE (predicate preserves any future student-registered row):
+--   DELETE FROM public.datasets WHERE discovered_via_sweep = TRUE;
+--
+-- VERIFY:
+--   SELECT count(*) FROM public.datasets;  -- expect only non-sweep rows (0 today)
+--
+-- RESTORE (if ever needed): psql -f
+--   supabase/rollback/2026-06-08_purge_sweep_mock_datasets_restore.sql
+-- ============================================================================
+
+-- (Statements are commented out so an accidental `psql -f` / `db push` is a
+--  no-op. Uncomment to run manually, AFTER the preconditions above hold.)
+
+-- DELETE FROM public.datasets WHERE discovered_via_sweep = TRUE;

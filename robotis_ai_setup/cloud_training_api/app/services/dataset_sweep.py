@@ -1,34 +1,34 @@
 """Periodic HuggingFace → Supabase dataset reconciliation.
 
-Why this service exists: the React app POSTs /datasets right after an
-HF upload reports Success so group siblings can see the new dataset
-within seconds. If the WSL distro has no internet at exactly that
-moment (classroom Wi-Fi blip, brief Cloud API outage), the upload
-succeeds on HF but registration never runs. Without this service the
-dataset would never be visible to siblings until the student manually
-re-triggered something — and there is no UI for that.
+Why this service exists: the React app registers a dataset right after an HF
+upload reports Success (POST /datasets) and on demand (POST /datasets/sync). If
+neither runs — a classroom Wi-Fi blip at the wrong instant, a rosbridge
+reconnect race, or a student who uploaded outside the app — the dataset would be
+invisible in the training tab until something re-triggered registration. This
+sweep is the safety net.
 
-How it works:
-  1. Every SWEEP_INTERVAL_S, derive the set of HF authors used by our
-     students by parsing the `dataset_name` column of the trainings
-     table (always stored as "<author>/<repo>"). Map author -> a list
-     of (user_id, workgroup_id) candidates so we know who to credit a
-     newly-discovered dataset to.
-  2. For each author, list every HF dataset they own via
-     HfApi.list_datasets(author=...). Compare against the existing
-     datasets registry rows.
-  3. Insert any missing rows with discovered_via_sweep = TRUE and
-     workgroup_id derived from the candidate user's *current*
-     users.workgroup_id. Group attribution at sweep time matches the
-     behaviour of late manual registrations.
-  4. We never DELETE registry rows. If a student deletes the HF repo
-     from their HF account, that is their call (they used to own it);
-     the orphan registry row simply stops resolving on the React side.
+How it works (migration 030 rewrite). The OLD design GUESSED an author by
+parsing trainings.dataset_name + existing datasets rows and then back-filled
+EVERY candidate user that ever touched that author. That is exactly how ~200
+upstream `RobotisSW`/`Hotteok` example datasets got fan-registered across every
+account (600+ junk rows) and poisoned each student's register_dataset_safe
+author anchor so real uploads 403'd. The rewrite removes all author guessing:
 
-The sweep is single-tenant by design: Cloud API runs uvicorn --workers 1
-on Railway, so spawning the task once at startup is correct. If the
-worker count is ever raised, switch to a Postgres advisory lock so only
-one instance sweeps at a time.
+  1. Every SWEEP_INTERVAL_S, read the SOLE per-student anchor —
+     public.users.hf_username (migration 030). No guessing, no fan-out.
+  2. For each student that has an hf_username (and isn't on the upstream
+     deny-list), list THAT student's HF datasets via
+     HfApi.list_datasets(author=hf_username) and insert any missing registry
+     rows (discovered_via_sweep = TRUE), attributed to that student + their
+     current workgroup.
+  3. We never DELETE registry rows.
+
+Kill-switch: DATASET_SWEEP_ENABLED=0 makes every tick a no-op (an operational
+lever — e.g. during a data cleanup — without redeploying different code).
+
+Single-tenant by design: Cloud API runs uvicorn --workers 1 on Railway, so
+spawning the task once at startup is correct. If the worker count is ever
+raised, switch to a Postgres advisory lock so only one instance sweeps.
 """
 
 from __future__ import annotations
@@ -38,12 +38,22 @@ import logging
 import os
 from typing import Any
 
+from app.services.hf_identity import is_denied_author
+
 logger = logging.getLogger(__name__)
 
-# Default cadence: 10 min is enough that "I uploaded 5 min ago" complaints
-# resolve themselves without a refresh, and slow enough to keep the HF
-# rate-limit budget intact (one list_datasets call per known author).
+# Default cadence: 10 min is enough that "I uploaded 5 min ago" resolves
+# without a refresh, and slow enough to keep the HF rate-limit budget intact
+# (one list_datasets call per student who has linked an hf_username).
 DEFAULT_SWEEP_INTERVAL_S = 600
+
+
+def _sweep_enabled() -> bool:
+    """DATASET_SWEEP_ENABLED kill-switch (default ON). Only an explicit falsey
+    value turns the sweep off; anything else keeps it running."""
+    return os.environ.get("DATASET_SWEEP_ENABLED", "1").strip().lower() not in (
+        "0", "false", "no", "off",
+    )
 
 
 def _parse_author(repo_id: str | None) -> str | None:
@@ -54,105 +64,26 @@ def _parse_author(repo_id: str | None) -> str | None:
     return author or None
 
 
-def _gather_author_candidates(supabase) -> dict[str, list[dict[str, Any]]]:
-    """Build {hf_author: [{user_id, workgroup_id, full_name}, ...]}.
+def _students_with_hf_username(supabase) -> list[dict[str, Any]]:
+    """Every user that has linked an HF username (migration 030).
 
-    We learn an author's identity in two places:
-      - trainings.dataset_name and trainings.model_name (any HF repo
-        ever used) — gives us the author + the user_id who used it
-      - datasets.hf_repo_id (any already-registered repo) — gives us
-        the author + the canonical owner_user_id
-
-    A single author can map to multiple users (e.g. a class shares an
-    "EduBotics-Solutions" account). We therefore track candidates as a
-    list and pick the matching candidate per discovered dataset using
-    a follow-up users-table lookup.
+    Returns [{id, hf_username, workgroup_id}, ...]. The hf_username is the only
+    anchor we trust — no author guessing from trainings/datasets rows. A missing
+    column (pre-030 deploy) is caught and treated as "no students" so the sweep
+    goes dormant rather than erroring.
     """
-    candidates: dict[str, list[dict[str, Any]]] = {}
-
-    def _add(author: str, user_id: str) -> None:
-        candidates.setdefault(author, [])
-        # Deduplicate by user_id so one user mentioned in 50 trainings
-        # doesn't show up 50 times.
-        if not any(c.get("user_id") == user_id for c in candidates[author]):
-            candidates[author].append({"user_id": user_id})
-
     try:
-        # Page through trainings: author info lives in dataset_name +
-        # model_name. We pull a generous slice; on a 1k-training
-        # classroom this is well under 1 MB.
-        trainings = (
-            supabase.table("trainings")
-            .select("user_id, dataset_name, model_name")
-            .limit(5000)
-            .execute()
-        ).data or []
-        for row in trainings:
-            uid = row.get("user_id")
-            if not uid:
-                continue
-            for col in ("dataset_name", "model_name"):
-                a = _parse_author(row.get(col))
-                if a:
-                    _add(a, uid)
-    except Exception as exc:
-        logger.warning("dataset_sweep: trainings author scan failed: %s", exc)
-
-    try:
-        ds_rows = (
-            supabase.table("datasets")
-            .select("owner_user_id, hf_repo_id")
-            .limit(5000)
-            .execute()
-        ).data or []
-        for row in ds_rows:
-            uid = row.get("owner_user_id")
-            a = _parse_author(row.get("hf_repo_id"))
-            if uid and a:
-                _add(a, uid)
-    except Exception as exc:
-        logger.warning("dataset_sweep: datasets author scan failed: %s", exc)
-
-    return candidates
-
-
-def _enrich_with_workgroup(
-    supabase, candidates: dict[str, list[dict[str, Any]]]
-) -> dict[str, list[dict[str, Any]]]:
-    """Attach the *current* workgroup_id for each candidate user.
-
-    A late registration inherits the author's current group, matching
-    the behaviour of a late manual POST /datasets — documented in the
-    plan. If the student moved groups between upload and sweep, the
-    new row attributes to the new group; siblings of the old group
-    keep visibility on already-registered rows via the audit table.
-    """
-    # Flatten unique user ids so we can do one IN() lookup.
-    uids: set[str] = set()
-    for cs in candidates.values():
-        for c in cs:
-            if c.get("user_id"):
-                uids.add(c["user_id"])
-    if not uids:
-        return candidates
-
-    try:
-        users = (
+        rows = (
             supabase.table("users")
-            .select("id, workgroup_id, full_name, username")
-            .in_("id", list(uids))
+            .select("id, hf_username, workgroup_id")
+            .not_.is_("hf_username", "null")
+            .limit(5000)
             .execute()
         ).data or []
-        by_id = {u["id"]: u for u in users}
-        for cs in candidates.values():
-            for c in cs:
-                u = by_id.get(c.get("user_id")) or {}
-                c["workgroup_id"] = u.get("workgroup_id")
-                c["username"] = u.get("username")
-                c["full_name"] = u.get("full_name")
     except Exception as exc:
-        logger.warning("dataset_sweep: workgroup lookup failed: %s", exc)
-    return candidates
+        logger.warning("dataset_sweep: users hf_username scan failed: %s", exc)
+        return []
+    return [r for r in rows if r.get("id") and r.get("hf_username")]
 
 
 def _registered_repo_ids(supabase, owner_user_id: str) -> set[str]:
@@ -173,10 +104,10 @@ def _registered_repo_ids(supabase, owner_user_id: str) -> set[str]:
 
 
 def _list_hf_datasets(api, author: str) -> list[Any]:
-    """Wrap HfApi.list_datasets so a single bad author doesn't blow up
-    the whole tick."""
+    """Wrap HfApi.list_datasets so a single bad author doesn't blow up the
+    whole tick."""
     try:
-        return list(api.list_datasets(author=author, limit=200))
+        return list(api.list_datasets(author=author, limit=500))
     except Exception as exc:
         logger.warning(
             "dataset_sweep: HfApi.list_datasets(author=%s) failed: %s",
@@ -185,106 +116,107 @@ def _list_hf_datasets(api, author: str) -> list[Any]:
         return []
 
 
-def _extract_meta(ds_obj: Any) -> dict[str, Any]:
-    """HF SDK returns DatasetInfo objects; the field set varies across
-    versions. Pull the basics defensively, never raise.
-    """
-    out: dict[str, Any] = {}
-    repo_id = getattr(ds_obj, "id", None) or getattr(ds_obj, "repo_id", None)
-    if repo_id:
-        out["hf_repo_id"] = repo_id
-        out["name"] = repo_id.split("/", 1)[-1] if "/" in repo_id else repo_id
-    return out
+def _extract_repo_id(ds_obj: Any) -> str | None:
+    """HF SDK returns DatasetInfo objects; the id field name varies across
+    versions. Pull it defensively, never raise."""
+    return getattr(ds_obj, "id", None) or getattr(ds_obj, "repo_id", None)
 
 
 def _run_sweep_once() -> int:
     """One iteration. Returns the number of newly-registered rows.
 
-    Bounded work — a missing HF token makes this a no-op so a deploy
-    that intentionally turned the sweep off (no HF_TOKEN) doesn't spam
-    Railway logs.
+    No-ops (returning 0) when the kill-switch is off or HF_TOKEN is unset, so a
+    deploy that intentionally paused the sweep doesn't spam Railway logs.
     """
+    if not _sweep_enabled():
+        logger.info(
+            "dataset_sweep: disabled via DATASET_SWEEP_ENABLED, skipping tick"
+        )
+        return 0
+
     hf_token = os.environ.get("HF_TOKEN", "")
     if not hf_token:
         logger.info("dataset_sweep: HF_TOKEN not set, skipping tick")
         return 0
 
-    # Imports are deferred so a no-op tick (no HF_TOKEN) doesn't pay
-    # the import cost or fail in environments where heavy deps are
-    # intentionally absent (e.g. unit tests).
+    # Imports deferred so a no-op tick doesn't pay the import cost or fail in
+    # environments where heavy deps are intentionally absent (unit tests).
     from huggingface_hub import HfApi  # local import keeps cold start fast
 
     from app.services.supabase_client import get_supabase
 
     supabase = get_supabase()
-    candidates = _enrich_with_workgroup(supabase, _gather_author_candidates(supabase))
-    if not candidates:
+    students = _students_with_hf_username(supabase)
+    if not students:
         return 0
 
     api = HfApi(token=hf_token)
     discovered_total = 0
 
-    for author, cands in candidates.items():
+    for student in students:
+        uid = student["id"]
+        author = str(student["hf_username"]).strip()
+        if is_denied_author(author):
+            # A student's hf_username should never be an upstream/system
+            # account; never enumerate one (the deny-list is the belt to the
+            # per-user-anchor's suspenders — see migration 030).
+            logger.info(
+                "dataset_sweep: skipping denied author %s for user %s",
+                author, uid,
+            )
+            continue
+
         hf_datasets = _list_hf_datasets(api, author)
         if not hf_datasets:
             continue
 
-        # For each candidate user that maps to this author, find any
-        # HF datasets not yet in their registry and back-fill them.
-        for cand in cands:
-            uid = cand.get("user_id")
-            if not uid:
+        already = _registered_repo_ids(supabase, uid)
+        for ds in hf_datasets:
+            repo_id = _extract_repo_id(ds)
+            if not repo_id or repo_id in already:
                 continue
-            already = _registered_repo_ids(supabase, uid)
-            for ds in hf_datasets:
-                meta = _extract_meta(ds)
-                repo_id = meta.get("hf_repo_id")
-                if not repo_id or repo_id in already:
+            # Only this student's own namespace. list_datasets(author=) should
+            # already guarantee it; belt-and-suspenders against an SDK that
+            # ever returns cross-namespace results.
+            if _parse_author(repo_id) != author:
+                continue
+            payload = {
+                "owner_user_id": uid,
+                "hf_repo_id": repo_id,
+                "name": repo_id.split("/", 1)[-1] if "/" in repo_id else repo_id,
+                "description": "",
+                "workgroup_id": student.get("workgroup_id"),
+                "discovered_via_sweep": True,
+            }
+            try:
+                supabase.table("datasets").insert(payload).execute()
+                discovered_total += 1
+                logger.info(
+                    "dataset_sweep: registered %s for user %s", repo_id, uid
+                )
+            except Exception as exc:
+                # UNIQUE (owner_user_id, hf_repo_id) means a racing live POST
+                # got there first — ignore.
+                msg = str(exc).lower()
+                if "duplicate" in msg or "unique" in msg or "23505" in msg:
                     continue
-                # Defensive: only attribute repos to a candidate when
-                # the author of the repo matches the candidate's known
-                # author. (We iterate per-author already, but a future
-                # change could share authors across users.)
-                if _parse_author(repo_id) != author:
-                    continue
-                payload = {
-                    "owner_user_id": uid,
-                    "hf_repo_id": repo_id,
-                    "name": meta.get("name", repo_id),
-                    "description": "",
-                    "workgroup_id": cand.get("workgroup_id"),
-                    "discovered_via_sweep": True,
-                }
-                try:
-                    supabase.table("datasets").insert(payload).execute()
-                    discovered_total += 1
-                    logger.info(
-                        "dataset_sweep: Datensatz %s fuer Schueler %s ergaenzt",
-                        repo_id, cand.get("username") or uid,
-                    )
-                except Exception as exc:
-                    # UNIQUE (owner_user_id, hf_repo_id) means a
-                    # racing live POST got there first — ignore.
-                    msg = str(exc).lower()
-                    if "duplicate" in msg or "unique" in msg or "23505" in msg:
-                        continue
-                    logger.warning(
-                        "dataset_sweep: insert for %s/%s failed: %s",
-                        uid, repo_id, exc,
-                    )
+                logger.warning(
+                    "dataset_sweep: insert for %s/%s failed: %s",
+                    uid, repo_id, exc,
+                )
 
     return discovered_total
 
 
 async def sweep_loop(interval_s: int | None = None) -> None:
-    """Async wrapper that invokes the sync sweep on a thread so we
-    don't block the FastAPI event loop with HF list_datasets calls."""
+    """Async wrapper that invokes the sync sweep on a thread so we don't block
+    the FastAPI event loop with HF list_datasets calls."""
     s = interval_s or int(
         os.environ.get("DATASET_SWEEP_INTERVAL_S", DEFAULT_SWEEP_INTERVAL_S)
     )
     logger.info("dataset_sweep: starting loop, interval=%ds", s)
-    # First tick: small initial delay so we don't race the import-time
-    # health check on a cold deploy.
+    # First tick: small initial delay so we don't race the import-time health
+    # check on a cold deploy.
     await asyncio.sleep(min(60, s))
     while True:
         try:
@@ -292,7 +224,7 @@ async def sweep_loop(interval_s: int | None = None) -> None:
             if new_count:
                 logger.info("dataset_sweep: tick added %d row(s)", new_count)
         except Exception as exc:
-            # Loop must never die — a failed tick gets logged and we
-            # try again next interval.
+            # Loop must never die — a failed tick gets logged and we try again
+            # next interval.
             logger.error("dataset_sweep: tick raised %s", exc)
         await asyncio.sleep(s)

@@ -18,7 +18,7 @@ import React, { useCallback, useEffect, useMemo, useRef } from 'react';
 import { useSelector, useDispatch } from 'react-redux';
 import clsx from 'clsx';
 import toast, { useToasterStore } from 'react-hot-toast';
-import { MdLogout } from 'react-icons/md';
+import { MdLogout, MdRefresh } from 'react-icons/md';
 import DatasetSelector from '../components/DatasetSelector';
 import PolicySelector from '../components/PolicySelector';
 import TrainingOutputFolderInput from '../components/TrainingOutputFolderInput';
@@ -30,7 +30,11 @@ import LoginForm from '../components/LoginForm';
 import HeartbeatStatus from '../components/HeartbeatStatus';
 import { Card, Pill, Btn, SectionHeader } from '../components/EbUI';
 import { supabase } from '../lib/supabaseClient';
-import { clearSession, setQuota } from '../features/auth/authSlice';
+import {
+  clearSession,
+  setQuota,
+  requestProfileRefetch,
+} from '../features/auth/authSlice';
 import { getQuota } from '../services/cloudTrainingApi';
 import useSupabaseTrainings from '../hooks/useSupabaseTrainings';
 import useRefetchOnFocus from '../hooks/useRefetchOnFocus';
@@ -74,6 +78,9 @@ export default function TrainingPage() {
   const dispatch = useDispatch();
   const isAuthenticated = useSelector((state) => state.auth.isAuthenticated);
   const isLoading = useSelector((state) => state.auth.isLoading);
+  const profileLoaded = useSelector((state) => state.auth.profileLoaded);
+  const profileError = useSelector((state) => state.auth.profileError);
+  const hfUsername = useSelector((state) => state.auth.hfUsername);
   const session = useSelector((state) => state.auth.session);
   const trainingCredits = useSelector((state) => state.auth.trainingCredits);
   const trainingsUsed = useSelector((state) => state.auth.trainingsUsed);
@@ -145,6 +152,41 @@ export default function TrainingPage() {
     return <LoginForm />;
   }
 
+  // Profile load failed in a non-auth way (404 = no public.users row; 5xx /
+  // network after retries). The JWT is still valid — DON'T show the login
+  // form (that loops). Offer a retry that bumps the shared refetch nonce.
+  if (profileError) {
+    return (
+      <div className="flex items-center justify-center h-full px-4">
+        <Card className="max-w-md text-center">
+          <h2 className="text-lg font-semibold tracking-tight text-[var(--ink)] mb-2">
+            Profil konnte nicht geladen werden
+          </h2>
+          <p className="text-sm text-[var(--ink-3)] mb-5">{profileError}</p>
+          <div className="flex items-center justify-center gap-3">
+            <Btn variant="primary" onClick={() => dispatch(requestProfileRefetch())}>
+              <MdRefresh /> Erneut versuchen
+            </Btn>
+            <Btn variant="ghost" onClick={handleLogout}>
+              <MdLogout /> Abmelden
+            </Btn>
+          </div>
+        </Card>
+      </div>
+    );
+  }
+
+  // Session is live but GET /me hasn't resolved yet — slim spinner, exactly
+  // like InferencePage's profileLoaded gate. Without this the credit pill +
+  // dataset list rendered with stale zeros before the profile landed.
+  if (!profileLoaded) {
+    return (
+      <div className="flex items-center justify-center h-full">
+        <div className="text-[var(--ink-3)] text-lg">Profil wird geladen…</div>
+      </div>
+    );
+  }
+
   const remaining = trainingCredits - trainingsUsed;
   const creditTone = remaining <= 0 ? 'danger' : remaining <= 2 ? 'amber' : 'success';
 
@@ -178,6 +220,40 @@ export default function TrainingPage() {
             </div>
           }
         />
+
+        {/* Cloud-login vs HF-token clarification. The single most common
+            student confusion: "ich habe den HF-Token gesetzt, warum geht
+            Training nicht?" — the HF token (GUI Schritt D) drives recording
+            uploads; cloud Training needs THIS separate cloud login. Also
+            surfaces the linked Benutzer-ID so a mis-link is visible. */}
+        <div
+          className={clsx(
+            'rounded-[var(--radius)] border px-4 py-3 text-sm leading-snug',
+            hfUsername
+              ? 'bg-[var(--accent-wash)] border-[color:var(--accent)]/20 text-[var(--ink-2)]'
+              : 'bg-amber-50 border-amber-200 text-amber-800'
+          )}
+        >
+          <p>
+            Cloud-Training läuft über deine <strong>Cloud-Anmeldung</strong>{' '}
+            (oben angemeldet als {session?.user?.email || 'dein Konto'}) — das
+            ist getrennt vom HuggingFace-Token, den du im Setup („Schritt D")
+            für Aufnahme-Uploads eingegeben hast.
+          </p>
+          {hfUsername ? (
+            <p className="mt-1.5">
+              Verknüpfte HuggingFace-ID:{' '}
+              <span className="font-mono font-semibold">{hfUsername}</span> —
+              deine Datensätze werden hierüber gefunden.
+            </p>
+          ) : (
+            <p className="mt-1.5">
+              Es ist noch keine HuggingFace-ID mit deinem Konto verknüpft. Wähle
+              im Aufnahme-Tab deine Benutzer-ID — sie wird dann automatisch
+              verknüpft, damit deine Datensätze hier erscheinen.
+            </p>
+          )}
+        </div>
 
         {/* Setup rail */}
         <div>

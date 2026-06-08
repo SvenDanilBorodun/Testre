@@ -31,6 +31,10 @@ export default function useGroupDatasets() {
 
   const [datasets, setDatasets] = useState([]);
   const [loading, setLoading] = useState(false);
+  // Surface a list-fetch failure to the selector instead of swallowing it —
+  // a silent empty list looked identical to "you have no datasets", which
+  // sent students re-recording data they had already uploaded.
+  const [error, setError] = useState(null);
   const [isOwnRealtime, setIsOwnRealtime] = useState(false);
   const [isGroupRealtime, setIsGroupRealtime] = useState(false);
   const isRealtime = isOwnRealtime || (workgroupId ? isGroupRealtime : false);
@@ -50,9 +54,17 @@ export default function useGroupDatasets() {
     setLoading(true);
     try {
       const data = await listDatasets(accessToken);
-      if (isMountedRef.current) setDatasets(data);
+      if (isMountedRef.current) {
+        setDatasets(data);
+        setError(null);
+      }
     } catch (e) {
       console.warn('[useGroupDatasets] refetch failed:', e?.message || e);
+      if (isMountedRef.current) {
+        setError(
+          'Datensätze konnten nicht geladen werden. Bitte später erneut versuchen.'
+        );
+      }
     } finally {
       if (isMountedRef.current) setLoading(false);
     }
@@ -63,6 +75,7 @@ export default function useGroupDatasets() {
   useEffect(() => {
     if (!accessToken) {
       setDatasets([]);
+      setError(null);
       return;
     }
     refetch();
@@ -146,5 +159,5 @@ export default function useGroupDatasets() {
     return () => clearInterval(id);
   }, [isRealtime, accessToken]);
 
-  return { datasets, loading, refetch, isRealtime };
+  return { datasets, loading, error, refetch, isRealtime };
 }

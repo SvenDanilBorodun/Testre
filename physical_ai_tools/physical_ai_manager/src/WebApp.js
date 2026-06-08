@@ -1,17 +1,17 @@
 // WebApp — public web deployment for teachers and admin.
 // No ROS, no robot pages — just login + role-based dashboard.
 
-import React, { useEffect } from 'react';
+import React, { useCallback, useEffect } from 'react';
 import toast from 'react-hot-toast';
 import { useDispatch, useSelector } from 'react-redux';
 import { supabase } from './lib/supabaseClient';
 import {
   setSession,
   setIsLoading,
-  setProfile,
   clearSession,
+  requestProfileRefetch,
 } from './features/auth/authSlice';
-import { getMe } from './services/meApi';
+import { useMeProfile } from './hooks/useMeProfile';
 import LoginForm from './components/LoginForm';
 import TeacherDashboard from './pages/teacher/TeacherDashboard';
 import AdminDashboard from './pages/admin/AdminDashboard';
@@ -21,9 +21,9 @@ function WebApp() {
   const dispatch = useDispatch();
   const isLoading = useSelector((s) => s.auth.isLoading);
   const isAuthenticated = useSelector((s) => s.auth.isAuthenticated);
-  const session = useSelector((s) => s.auth.session);
   const role = useSelector((s) => s.auth.role);
   const profileLoaded = useSelector((s) => s.auth.profileLoaded);
+  const profileError = useSelector((s) => s.auth.profileError);
 
   useEffect(() => {
     supabase.auth
@@ -46,46 +46,28 @@ function WebApp() {
     return () => subscription.unsubscribe();
   }, [dispatch]);
 
-  useEffect(() => {
-    if (!session?.access_token) return;
-    let alive = true;
-    getMe(session.access_token)
-      .then((me) => {
-        if (!alive) return;
-        dispatch(setProfile(me));
-        if (me.role === 'student') {
-          toast.error(
-            'Schüler-Konten können die Web-App nicht nutzen. Bitte öffne die Desktop-App.',
-            { duration: 6000 }
-          );
-          // v2.3.0: teacher web doesn't claim Jetsons (only the
-          // student app does), so the beacon-release-on-logout step is
-          // a no-op here — but we still clear the slice for symmetry
-          // and to keep the rosbridge auth token reset.
-          resetJetsonOnLogout(dispatch);
-          supabase.auth.signOut();
-          dispatch(clearSession());
-        }
-      })
-      .catch((err) => {
-        if (!alive) return;
-        console.error('getMe failed', err);
-        // 401/403 => token dead; sign out so the login form returns.
-        // Network/5xx => keep the session, just surface the problem.
-        const status = err?.status ?? err?.response?.status;
-        if (status === 401 || status === 403) {
-          toast.error('Sitzung abgelaufen — bitte erneut anmelden.');
-          resetJetsonOnLogout(dispatch);
-          supabase.auth.signOut();
-          dispatch(clearSession());
-        } else {
-          toast.error('Profil konnte nicht geladen werden — Server erreichbar?');
-        }
-      });
-    return () => {
-      alive = false;
-    };
-  }, [session?.access_token, dispatch]);
+  // Shared robust /me loader: retry/backoff, 401/403 → sign-out, 404/5xx →
+  // profileError (no sign-out). Teacher web doesn't link an HF identity, so
+  // enableHfLink stays off. The only web-specific piece is bouncing a
+  // wrong-role (student) account back to the desktop app.
+  const handleProfile = useCallback(
+    (me) => {
+      if (me.role === 'student') {
+        toast.error(
+          'Schüler-Konten können die Web-App nicht nutzen. Bitte öffne die Desktop-App.',
+          { duration: 6000 }
+        );
+        // v2.3.0: teacher web doesn't claim Jetsons (only the student app
+        // does), so the beacon-release-on-logout step is a no-op here — but
+        // we still clear the slice for symmetry and reset the rosbridge auth.
+        resetJetsonOnLogout(dispatch);
+        supabase.auth.signOut();
+        dispatch(clearSession());
+      }
+    },
+    [dispatch]
+  );
+  useMeProfile({ onProfile: handleProfile });
 
   const handleLogout = async () => {
     // v2.3.0: clear Jetson-side state on the way out so a re-login in
@@ -115,6 +97,36 @@ function WebApp() {
         style={{ background: 'var(--bg)' }}
       >
         <LoginForm subtitle="Anmelden für Lehrer / Admin" />
+      </div>
+    );
+  }
+
+  if (profileError) {
+    return (
+      <div
+        className="min-h-screen flex items-center justify-center px-4"
+        style={{ background: 'var(--bg)' }}
+      >
+        <div className="bg-white rounded-[var(--radius-lg)] shadow-pop border border-[var(--line)] p-8 max-w-md text-center">
+          <h2 className="text-xl font-semibold tracking-tight text-[var(--ink)] mb-2">
+            Profil konnte nicht geladen werden
+          </h2>
+          <p className="text-[var(--ink-3)] mb-5">{profileError}</p>
+          <div className="flex items-center justify-center gap-3">
+            <button
+              onClick={() => dispatch(requestProfileRefetch())}
+              className="h-10 px-4 bg-[var(--accent)] text-white rounded-[var(--radius-sm)] hover:brightness-110 transition"
+            >
+              Erneut versuchen
+            </button>
+            <button
+              onClick={handleLogout}
+              className="h-10 px-4 bg-white border border-[var(--line)] text-[var(--ink)] rounded-[var(--radius-sm)] hover:bg-[var(--bg-sunk)] transition"
+            >
+              Abmelden
+            </button>
+          </div>
+        </div>
       </div>
     );
   }

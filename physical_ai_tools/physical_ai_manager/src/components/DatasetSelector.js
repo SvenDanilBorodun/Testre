@@ -26,11 +26,14 @@ import {
   MdKeyboardArrowRight,
   MdKeyboardArrowDown,
   MdEdit,
+  MdSync,
+  MdErrorOutline,
 } from 'react-icons/md';
 import { useRosServiceCaller } from '../hooks/useRosServiceCaller';
 import { setUserList, setDatasetRepoId } from '../features/training/trainingSlice';
 import { setSelectedUser, setSelectedDataset } from '../features/training/trainingSlice';
 import useGroupDatasets from '../hooks/useGroupDatasets';
+import { syncDatasets } from '../services/datasetsApi';
 import { Pill } from './EbUI';
 
 export default function DatasetSelector() {
@@ -45,7 +48,15 @@ export default function DatasetSelector() {
   // ROS-backed local browse list — the two never overlap because the ROS
   // service only sees datasets cached locally on the kit, while the cloud
   // registry covers everything any group sibling has uploaded to HF Hub.
-  const { datasets: cloudDatasets } = useGroupDatasets();
+  const {
+    datasets: cloudDatasets,
+    error: cloudError,
+    refetch: refetchCloud,
+  } = useGroupDatasets();
+
+  // Cloud identity needed for the manual "Datensätze synchronisieren" action.
+  const accessToken = useSelector((state) => state.auth.session?.access_token);
+  const hfUsername = useSelector((state) => state.auth.hfUsername);
 
   const { getUserList, getDatasetList } = useRosServiceCaller();
 
@@ -57,6 +68,7 @@ export default function DatasetSelector() {
   const [userDatasets, setUserDatasets] = useState({});
   const [manualMode, setManualMode] = useState(false);
   const [manualRepoId, setManualRepoId] = useState('');
+  const [syncing, setSyncing] = useState(false);
 
   // Fetch user list
   const fetchUsers = useCallback(async () => {
@@ -183,6 +195,55 @@ export default function DatasetSelector() {
     dispatch(setDatasetRepoId(trimmed));
     toast.success(`Datensatz ausgewählt:\n${trimmed}`);
   }, [manualRepoId, dispatch]);
+
+  // Manually reconcile the cloud registry with HF Hub: enumerate the
+  // student's HF datasets (by their linked hf_username) and register the
+  // missing ones. The escape hatch when the auto-register on upload missed
+  // a dataset (offline at upload, a transient 5xx, or a dataset uploaded
+  // outside this app).
+  const handleSyncDatasets = useCallback(async () => {
+    if (!accessToken) {
+      toast.error('Nicht angemeldet — bitte zuerst im Training-Tab anmelden.');
+      return;
+    }
+    setSyncing(true);
+    try {
+      const result = await syncDatasets(accessToken);
+      // Pull the freshly-registered rows into the visible list immediately
+      // (don't wait for the Realtime channel).
+      await refetchCloud();
+      const registered = result?.registered ?? 0;
+      if (registered > 0) {
+        toast.success(
+          registered === 1
+            ? '1 neuer Datensatz synchronisiert'
+            : `${registered} neue Datensätze synchronisiert`
+        );
+      } else {
+        toast.success('Keine neuen Datensätze gefunden');
+      }
+    } catch (err) {
+      if (err?.status === 400) {
+        // hf_username not linked yet.
+        toast.error(
+          'Es ist noch keine HuggingFace-ID mit deinem Konto verknüpft. ' +
+            'Wähle im Aufnahme-Tab deine Benutzer-ID, dann erneut synchronisieren.'
+        );
+      } else if (err?.status === 502) {
+        toast.error(
+          'HuggingFace ist gerade nicht erreichbar. Bitte später erneut versuchen.'
+        );
+      } else {
+        toast.error(
+          err?.detail ||
+            err?.message ||
+            'Synchronisierung fehlgeschlagen. Bitte erneut versuchen.'
+        );
+      }
+    } finally {
+      setSyncing(false);
+    }
+  }, [accessToken, refetchCloud]);
 
   // Auto-switch to manual mode if ROS is not connected
   useEffect(() => {
@@ -333,17 +394,60 @@ export default function DatasetSelector() {
         </div>
       )}
 
-      {/* Group-shared datasets (cloud registry) */}
-      {cloudDatasets && cloudDatasets.length > 0 && (
-        <div className="mb-4">
-          <div className="flex items-center justify-between mb-2">
-            <h3 className="text-sm font-semibold text-gray-700">
-              Eigene & geteilte Datensätze
-            </h3>
-            <span className="text-[11px] text-gray-500 font-mono">
-              {cloudDatasets.length}
-            </span>
+      {/* Group-shared datasets (cloud registry) — always rendered so the
+          sync button + empty-state hint are reachable even with zero rows. */}
+      <div className="mb-4">
+        <div className="flex items-center justify-between mb-2 gap-2">
+          <h3 className="text-sm font-semibold text-gray-700">
+            Eigene &amp; geteilte Datensätze
+          </h3>
+          <div className="flex items-center gap-2">
+            {cloudDatasets && cloudDatasets.length > 0 && (
+              <span className="text-[11px] text-gray-500 font-mono">
+                {cloudDatasets.length}
+              </span>
+            )}
+            <button
+              type="button"
+              onClick={handleSyncDatasets}
+              disabled={syncing || isTraining}
+              title="Eigene HuggingFace-Datensätze mit der Cloud abgleichen"
+              className={clsx(
+                'flex items-center gap-1 px-2.5 py-1 text-xs font-medium rounded-full transition-colors',
+                'bg-teal-50 text-teal-700 hover:bg-teal-100',
+                'disabled:opacity-50 disabled:cursor-not-allowed'
+              )}
+            >
+              <MdSync className={syncing ? 'animate-spin' : ''} size={14} />
+              {syncing ? 'Synchronisiere…' : 'Datensätze synchronisieren'}
+            </button>
           </div>
+        </div>
+
+        {cloudError && (
+          <div className="flex items-start gap-2 text-xs text-red-700 bg-red-50 border border-red-200 rounded-md p-2 mb-2">
+            <MdErrorOutline className="shrink-0 mt-0.5" size={14} />
+            <div className="min-w-0 flex-1">
+              <span>{cloudError}</span>
+              <button
+                type="button"
+                onClick={refetchCloud}
+                className="ml-1 underline hover:no-underline"
+              >
+                Erneut laden
+              </button>
+            </div>
+          </div>
+        )}
+
+        {!hfUsername && !cloudError && (
+          <p className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-md p-2 mb-2 leading-snug">
+            Noch keine HuggingFace-ID verknüpft. Wähle im Aufnahme-Tab deine
+            Benutzer-ID — danach erscheinen deine Datensätze hier automatisch.
+          </p>
+        )}
+
+        {cloudDatasets && cloudDatasets.length > 0 ? (
           <div className="border border-gray-300 rounded-md max-h-60 overflow-y-auto bg-gray-50 divide-y divide-gray-200">
             {cloudDatasets.map((d) => {
               const [user, ...rest] = (d.hf_repo_id || '/').split('/');
@@ -380,8 +484,16 @@ export default function DatasetSelector() {
               );
             })}
           </div>
-        </div>
-      )}
+        ) : (
+          !cloudError && (
+            <p className="text-xs text-gray-500 bg-gray-50 border border-gray-200 rounded-md p-3 leading-snug">
+              Noch keine Datensätze – nimm im Aufnahme-Tab etwas auf oder klicke
+              „Datensätze synchronisieren", um deine HuggingFace-Datensätze zu
+              laden.
+            </p>
+          )
+        )}
+      </div>
 
       {/* Manual HuggingFace Repo ID Input */}
       {manualMode ? (

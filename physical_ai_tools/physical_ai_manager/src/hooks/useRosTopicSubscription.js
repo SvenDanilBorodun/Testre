@@ -625,6 +625,64 @@ export function useRosTopicSubscription() {
     }
   }, [dispatch, rosbridgeUrl]);
 
+  // Register a freshly-uploaded HF dataset in the cloud registry, with one
+  // retry on a transient failure and a German warning toast on final
+  // failure. Reads the access token + task context from the store at call
+  // time (this runs inside a ROS topic callback, not a render), so it has no
+  // reactive deps. Best-effort by contract — never throws into the caller.
+  const registerUploadedDataset = useCallback((repoId) => {
+    const accessToken = store.getState().auth.session?.access_token;
+    if (!accessToken) {
+      // No cloud session (e.g. recording before login). The student can
+      // sync later from the Training tab; nothing to warn about here.
+      console.warn('[datasets] skip auto-register: not signed in');
+      return;
+    }
+    const taskInfo = store.getState().tasks?.taskInfo || {};
+    const repoLeaf = repoId.split('/').slice(1).join('/') || repoId;
+    const payload = {
+      hf_repo_id: repoId,
+      name: taskInfo.taskName || repoLeaf,
+      description: '',
+      fps: taskInfo.fps || undefined,
+      robot_type: store.getState().tasks?.taskStatus?.robotType || undefined,
+    };
+
+    const RETRY_DELAY_MS = 1500;
+    const attempt = (retriesLeft) => {
+      registerDataset(accessToken, payload).catch((err) => {
+        const status = err?.status;
+        // A 4xx (already-registered 409, auth 401/403, validation 422) won't
+        // be fixed by retrying — only retry transient (5xx / network) once.
+        const transient = !status || status >= 500;
+        if (retriesLeft > 0 && transient) {
+          console.warn(
+            '[datasets] register failed, retrying once:',
+            err?.message || err
+          );
+          setTimeout(() => attempt(retriesLeft - 1), RETRY_DELAY_MS);
+          return;
+        }
+        // A 409 (already known) is a success from the student's POV — the
+        // dataset IS in the registry. Don't alarm them.
+        if (status === 409) {
+          console.warn('[datasets] already registered (409) — treating as ok');
+          return;
+        }
+        console.warn(
+          '[datasets] register failed (final):',
+          err?.message || err
+        );
+        toast.error(
+          'Datensatz konnte nicht automatisch registriert werden – im ' +
+            'Training-Tab „Datensätze synchronisieren" klicken.',
+          { duration: 7000 }
+        );
+      });
+    };
+    attempt(1);
+  }, []);
+
   const subscribeHFStatus = useCallback(async () => {
     try {
       const ros = await rosConnectionManager.getConnection(rosbridgeUrl);
@@ -660,36 +718,13 @@ export function useRosTopicSubscription() {
           toast.success(message);
           // Register the freshly-uploaded HF dataset in the cloud
           // registry so group siblings can discover it. Best-effort:
-          // failure here doesn't break recording — the student can
-          // still pass the repo_id manually.
+          // failure here doesn't break recording. Hardened (vs the old
+          // silent single-shot `.catch`): require the access token,
+          // retry once on a transient failure, and on FINAL failure show
+          // a German warning toast pointing at the manual sync button —
+          // so a dropped registration is visible, not silently lost.
           if (operation === 'upload' && repoId && repoId.includes('/')) {
-            try {
-              const accessToken =
-                store.getState().auth.session?.access_token;
-              if (accessToken) {
-                const taskInfo = store.getState().tasks?.taskInfo || {};
-                const repoLeaf = repoId.split('/').slice(1).join('/') || repoId;
-                registerDataset(accessToken, {
-                  hf_repo_id: repoId,
-                  name: taskInfo.taskName || repoLeaf,
-                  description: '',
-                  fps: taskInfo.fps || undefined,
-                  robot_type:
-                    store.getState().tasks?.taskStatus?.robotType ||
-                    undefined,
-                }).catch((err) => {
-                  console.warn(
-                    '[datasets] register failed (non-fatal):',
-                    err?.message || err
-                  );
-                });
-              }
-            } catch (err) {
-              console.warn(
-                '[datasets] register pre-call error (non-fatal):',
-                err
-              );
-            }
+            registerUploadedDataset(repoId);
           }
         }
 
@@ -744,7 +779,7 @@ export function useRosTopicSubscription() {
     } catch (error) {
       console.error('Failed to subscribe to HF status topic:', error);
     }
-  }, [dispatch, rosbridgeUrl]);
+  }, [dispatch, rosbridgeUrl, registerUploadedDataset]);
 
   // Manual initialization function
   const initializeSubscriptions = useCallback(async () => {

@@ -10,11 +10,10 @@ when test infrastructure is in place.
 What we cover:
   - resolve_visible_workgroup_ids: audit-table primary path + fallback
   - dataset_sweep._parse_author: defensive parsing
-  - dataset_sweep._gather_author_candidates: trainings + datasets scan,
-    dedup by user_id
-  - dataset_sweep._extract_meta: tolerant of missing HF SDK fields
-  - dataset_sweep._run_sweep_once: skips when HF_TOKEN missing,
-    duplicates handled gracefully
+  - dataset_sweep._students_with_hf_username: migration-030 per-user anchor
+  - dataset_sweep._extract_repo_id: tolerant of missing HF SDK fields
+  - dataset_sweep._run_sweep_once: kill-switch + HF_TOKEN gating, per-user
+    anchor (no fan-out across users), upstream deny-list
 """
 
 from __future__ import annotations
@@ -89,6 +88,10 @@ class FakeQuery:
         return self
 
     def is_(self, *_a, **_kw):
+        return self
+
+    @property
+    def not_(self):
         return self
 
     def order(self, *_a, **_kw):
@@ -208,102 +211,227 @@ class TestParseAuthor(unittest.TestCase):
 
 
 # ------------------------------------------------------------------
-# dataset_sweep._gather_author_candidates
+# dataset_sweep._students_with_hf_username (migration 030 anchor)
 # ------------------------------------------------------------------
-class TestGatherAuthorCandidates(unittest.TestCase):
-    def test_dedup_by_user_id(self):
+class TestStudentsWithHfUsername(unittest.TestCase):
+    def test_keeps_only_rows_with_id_and_hf_username(self):
         from app.services import dataset_sweep as ds
 
+        # The stub doesn't apply the `.not_.is_(hf_username, null)` filter, so
+        # the code's own defensive filter (id AND hf_username truthy) is what
+        # we exercise here.
         fake = FakeSupabase(
             {
-                "trainings": [
+                "users": [
                     [
-                        {"user_id": "u1", "dataset_name": "alice/d1", "model_name": "alice/m1"},
-                        {"user_id": "u1", "dataset_name": "alice/d2", "model_name": None},
-                        {"user_id": "u2", "dataset_name": "bob/d3", "model_name": "alice/m2"},
-                    ],
-                ],
-                "datasets": [
-                    [
-                        {"owner_user_id": "u1", "hf_repo_id": "alice/d1"},
-                        {"owner_user_id": "u3", "hf_repo_id": "alice/d4"},
-                    ],
+                        {"id": "u1", "hf_username": "alice", "workgroup_id": "g1"},
+                        {"id": "u2", "hf_username": None, "workgroup_id": None},
+                        {"id": None, "hf_username": "bob", "workgroup_id": None},
+                    ]
                 ],
             }
         )
-        result = ds._gather_author_candidates(fake)
-        # Both u1 and u2 wrote to "alice", but only one entry per user.
-        alice = sorted([c["user_id"] for c in result["alice"]])
-        self.assertEqual(alice, ["u1", "u2", "u3"])
-        bob = [c["user_id"] for c in result["bob"]]
-        self.assertEqual(bob, ["u2"])
+        rows = ds._students_with_hf_username(fake)
+        ids = [r["id"] for r in rows]
+        self.assertEqual(ids, ["u1"])
 
-    def test_skips_invalid_repo_ids(self):
+    def test_scan_failure_returns_empty(self):
         from app.services import dataset_sweep as ds
 
-        fake = FakeSupabase(
-            {
-                "trainings": [
-                    [
-                        {"user_id": "u1", "dataset_name": "no_slash", "model_name": ""},
-                    ],
-                ],
-            }
-        )
-        result = ds._gather_author_candidates(fake)
-        self.assertEqual(result, {})
+        class _Boom:
+            def table(self, _n):
+                raise RuntimeError("column hf_username does not exist")
+
+        self.assertEqual(ds._students_with_hf_username(_Boom()), [])
 
 
 # ------------------------------------------------------------------
-# dataset_sweep._extract_meta
+# dataset_sweep._extract_repo_id
 # ------------------------------------------------------------------
-class TestExtractMeta(unittest.TestCase):
+class TestExtractRepoId(unittest.TestCase):
     def test_id_preferred(self):
-        from app.services.dataset_sweep import _extract_meta
+        from app.services.dataset_sweep import _extract_repo_id
 
         obj = SimpleNamespace(id="alice/data-x", repo_id="ignored/ignored")
-        meta = _extract_meta(obj)
-        self.assertEqual(meta["hf_repo_id"], "alice/data-x")
-        self.assertEqual(meta["name"], "data-x")
+        self.assertEqual(_extract_repo_id(obj), "alice/data-x")
 
     def test_repo_id_fallback(self):
-        from app.services.dataset_sweep import _extract_meta
+        from app.services.dataset_sweep import _extract_repo_id
 
-        obj = SimpleNamespace(repo_id="alice/data-y")
-        meta = _extract_meta(obj)
-        self.assertEqual(meta["hf_repo_id"], "alice/data-y")
+        self.assertEqual(_extract_repo_id(SimpleNamespace(repo_id="alice/y")), "alice/y")
 
-    def test_no_id_returns_empty(self):
-        from app.services.dataset_sweep import _extract_meta
+    def test_no_id_returns_none(self):
+        from app.services.dataset_sweep import _extract_repo_id
 
-        obj = SimpleNamespace()
-        self.assertEqual(_extract_meta(obj), {})
+        self.assertIsNone(_extract_repo_id(SimpleNamespace()))
 
 
 # ------------------------------------------------------------------
-# dataset_sweep._run_sweep_once
+# dataset_sweep._run_sweep_once (migration 030 per-user anchor)
 # ------------------------------------------------------------------
+class _SweepSupabase:
+    """Supabase double for the sweep: serves a fixed users payload and a fixed
+    'already registered' datasets payload, and records every datasets insert."""
+
+    def __init__(self, users, registered=None):
+        self._users = users
+        self._registered = registered or []
+        self.inserted = []
+
+    def table(self, name):
+        outer = self
+
+        class _Q:
+            def __init__(self):
+                self._payload = None
+
+            def select(self, *a, **k):
+                return self
+
+            def eq(self, *a, **k):
+                return self
+
+            @property
+            def not_(self):
+                return self
+
+            def is_(self, *a, **k):
+                return self
+
+            def limit(self, *a, **k):
+                return self
+
+            def insert(self, payload):
+                self._payload = payload
+                return self
+
+            def execute(self):
+                if self._payload is not None:
+                    outer.inserted.append(self._payload)
+                    return SimpleNamespace(data=[self._payload])
+                if name == "users":
+                    return SimpleNamespace(data=outer._users)
+                if name == "datasets":
+                    return SimpleNamespace(data=outer._registered)
+                return SimpleNamespace(data=[])
+
+        return _Q()
+
+
 class TestRunSweepOnce(unittest.TestCase):
+    def test_kill_switch_disables_tick(self):
+        from app.services import dataset_sweep as ds
+
+        with patch.dict(
+            os.environ, {"DATASET_SWEEP_ENABLED": "0", "HF_TOKEN": "t"}, clear=False
+        ):
+            self.assertEqual(ds._run_sweep_once(), 0)
+
     def test_no_token_short_circuits(self):
         from app.services import dataset_sweep as ds
 
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("HF_TOKEN", None)
+            os.environ.pop("DATASET_SWEEP_ENABLED", None)
             self.assertEqual(ds._run_sweep_once(), 0)
 
-    def test_no_candidates_no_calls(self):
+    def test_no_students_no_calls(self):
         from app.services import dataset_sweep as ds
-        # Import the module so the patch target resolves; it's only
-        # imported lazily inside _run_sweep_once otherwise.
         import app.services.supabase_client  # noqa: F401
 
-        fake = FakeSupabase({"trainings": [[]], "datasets": [[]]})
         with patch.dict(os.environ, {"HF_TOKEN": "t"}, clear=False), patch.object(
-            ds, "_gather_author_candidates", return_value={}
-        ), patch.object(
-            ds, "_enrich_with_workgroup", return_value={}
-        ), patch("app.services.supabase_client.get_supabase", return_value=fake):
+            ds, "_students_with_hf_username", return_value=[]
+        ), patch(
+            "app.services.supabase_client.get_supabase", return_value=_SweepSupabase([])
+        ):
             self.assertEqual(ds._run_sweep_once(), 0)
+
+    def test_per_user_anchor_registers_only_own_namespace(self):
+        # The core migration-030 contract: a student anchored to "alice" gets
+        # ONLY alice/* repos, attributed to THEM — no fan-out, no cross-author.
+        from app.services import dataset_sweep as ds
+        import app.services.supabase_client  # noqa: F401
+
+        sb = _SweepSupabase(
+            users=[{"id": "u1", "hf_username": "alice", "workgroup_id": "g1"}],
+            registered=[],
+        )
+
+        class _HfApi:
+            def __init__(self, *a, **k):
+                pass
+
+            def list_datasets(self, author=None, **k):
+                return [
+                    SimpleNamespace(id="alice/d1"),
+                    SimpleNamespace(id="alice/d2"),
+                    SimpleNamespace(id="bob/stolen"),  # cross-namespace → dropped
+                ]
+
+        with patch.dict(
+            os.environ, {"HF_TOKEN": "t", "DATASET_SWEEP_ENABLED": "1"}, clear=False
+        ), patch(
+            "app.services.supabase_client.get_supabase", return_value=sb
+        ), patch.object(sys.modules["huggingface_hub"], "HfApi", _HfApi):
+            count = ds._run_sweep_once()
+
+        self.assertEqual(count, 2)
+        repos = sorted(p["hf_repo_id"] for p in sb.inserted)
+        self.assertEqual(repos, ["alice/d1", "alice/d2"])
+        self.assertTrue(all(p["owner_user_id"] == "u1" for p in sb.inserted))
+        self.assertTrue(all(p["discovered_via_sweep"] for p in sb.inserted))
+
+    def test_already_registered_repos_skipped(self):
+        from app.services import dataset_sweep as ds
+        import app.services.supabase_client  # noqa: F401
+
+        sb = _SweepSupabase(
+            users=[{"id": "u1", "hf_username": "alice", "workgroup_id": None}],
+            registered=[{"hf_repo_id": "alice/d1"}],
+        )
+
+        class _HfApi:
+            def __init__(self, *a, **k):
+                pass
+
+            def list_datasets(self, author=None, **k):
+                return [SimpleNamespace(id="alice/d1"), SimpleNamespace(id="alice/d2")]
+
+        with patch.dict(os.environ, {"HF_TOKEN": "t"}, clear=False), patch(
+            "app.services.supabase_client.get_supabase", return_value=sb
+        ), patch.object(sys.modules["huggingface_hub"], "HfApi", _HfApi):
+            count = ds._run_sweep_once()
+
+        self.assertEqual(count, 1)
+        self.assertEqual([p["hf_repo_id"] for p in sb.inserted], ["alice/d2"])
+
+    def test_deny_listed_author_never_enumerated(self):
+        # A student whose hf_username is an upstream account (RobotisSW) must
+        # NEVER be enumerated — the exact mass-import bug migration 030 fixes.
+        from app.services import dataset_sweep as ds
+        import app.services.supabase_client  # noqa: F401
+
+        sb = _SweepSupabase(
+            users=[{"id": "u9", "hf_username": "RobotisSW", "workgroup_id": None}]
+        )
+        list_calls = []
+
+        class _HfApi:
+            def __init__(self, *a, **k):
+                pass
+
+            def list_datasets(self, author=None, **k):
+                list_calls.append(author)
+                return [SimpleNamespace(id="RobotisSW/x")]
+
+        with patch.dict(os.environ, {"HF_TOKEN": "t"}, clear=False), patch(
+            "app.services.supabase_client.get_supabase", return_value=sb
+        ), patch.object(sys.modules["huggingface_hub"], "HfApi", _HfApi):
+            count = ds._run_sweep_once()
+
+        self.assertEqual(count, 0)
+        self.assertEqual(list_calls, [])  # list_datasets never called for denied author
+        self.assertEqual(sb.inserted, [])
 
 
 # ------------------------------------------------------------------

@@ -282,6 +282,11 @@ def _validate_required_schema() -> None:
     # the column at call time, not at function-create time.
     required_columns: tuple[tuple[str, str], ...] = (
         ("users", "vision_quota_per_term, vision_used_per_term"),
+        # Migration 030 — the HF-identity anchor read by auth.get_user_profile,
+        # GET/PATCH /me, POST /datasets/sync, and the rewritten dataset_sweep.
+        # A deploy that lands the new code before the ALTER TABLE would 500 on
+        # every profile read; fail the deploy fast instead.
+        ("users", "hf_username"),
         # Migration 022 — jetsons pair-intent columns (Fix #1 of the
         # 2026-05 audit). Without these the new two-step pair flow 500s.
         ("jetsons", "intent_token, intent_teacher_id"),

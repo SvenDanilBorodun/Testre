@@ -210,5 +210,41 @@ class TestBuildTrainingCommand(unittest.TestCase):
         self.assertIn("--steps=50000", cmd)
 
 
+class TestTerminalCancelDetection(unittest.TestCase):
+    """The worker self-terminates when its scoped progress RPC reports the row
+    is terminal (canceled/failed API-side) — the defence that bounds the
+    "cancel just continues on Modal" failure to one progress interval even if
+    the Modal-side terminate raised. _is_terminal_cancel_error is the gate."""
+
+    def test_terminal_errors_match(self):
+        # update_training_progress raises ERRCODE P0001 + this message when the
+        # row is terminal / the worker_token was nulled on cancel.
+        for msg in (
+            '{"code":"P0001","message":"Invalid worker token, training not '
+            'found, or training already terminal"}',
+            "training already terminal",
+            "Invalid worker token",
+            "... ERRCODE P0001 ...",
+        ):
+            self.assertTrue(
+                training_handler._is_terminal_cancel_error(Exception(msg)),
+                f"should be treated as a cancel signal: {msg!r}",
+            )
+
+    def test_transient_errors_do_not_match(self):
+        # Network blips / 5xx must NOT trip self-termination — they get the
+        # normal bounded retry so a flaky Supabase doesn't kill a live run.
+        for msg in (
+            "Connection reset by peer",
+            "503 Service Unavailable",
+            "read timeout",
+            "Temporary failure in name resolution",
+        ):
+            self.assertFalse(
+                training_handler._is_terminal_cancel_error(Exception(msg)),
+                f"transient error must NOT be treated as cancel: {msg!r}",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

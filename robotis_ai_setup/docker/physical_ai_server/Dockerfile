@@ -272,6 +272,51 @@ RUN set -e && \
 # adds a new pip dep, the WORKFLOW.md license rule still applies.
 RUN echo "AGPL audit: relies on explicit dependency manifest, see Dockerfile comment"
 
+# ── amd64-only: drop CUDA / GPU torch (student PCs have NO GPU) ──────────────
+# Gated by SLIM_CUDA, passed =1 ONLY for amd64 by build-images.sh; arm64/Jetson
+# never set it, so this whole step is a no-op there and the shared Dockerfile
+# stays Jetson-safe. The inherited base is built on nvidia/cuda:12.8.0-devel with
+# torch 2.7.0+cu128 — ~13 GB of CUDA a GPU-less student image never uses:
+# inference is hard-gated (inference_manager.load_policy() returns a German
+# "needs GPU" error when torch.cuda.is_available() is False), recording never
+# loads a policy, and on-device training is Cloud-only. Swap to torch 2.7.0+cpu
+# (SAME version — still satisfies LeRobot 0.5.1's torch>=2.7,<2.11, so Rule §5 is
+# unchanged), drop the CUDA runtime wheels (nvidia-*-cu12 / triton / torchaudio)
+# and /usr/local/cuda.
+#
+# These rm/uninstalls write WHITEOUTS over the immutable base layers, so
+# `docker save` would still ship the bytes — build-images.sh FLATTENs the amd64
+# image (docker export|import) AFTER this Dockerfile to actually reclaim them.
+# Placed BEFORE the cross-arch floor pin (so numpy<2 is re-asserted after the
+# torch swap) and BEFORE the build-time smoke gates (so node-import + the
+# cv_bridge functional decode + collision + all policy imports run on the CPU
+# torch — a CPU-torch regression fails the build here, not on a student PC).
+ARG SLIM_CUDA=0
+RUN if [ "$SLIM_CUDA" = "1" ]; then \
+        set -eux; \
+        echo "[SLIM] amd64 CPU-only: torch+cu128 -> torch+cpu, removing CUDA"; \
+        python3 -m pip uninstall -y torch torchvision torchaudio triton 2>/dev/null || true; \
+        # The +cpu local-version pin can't be satisfied by PyPI's plain 2.7.0
+        # (PEP 440), so --extra-index-url can't pull a CUDA build; the extra-index
+        # IS needed to resolve torch's PyPI-only pure-python deps
+        # (sympy/networkx/jinja2/filelock/fsspec). Do NOT drop it for "consistency".
+        python3 -m pip install --no-cache-dir \
+            --index-url https://download.pytorch.org/whl/cpu \
+            --extra-index-url https://pypi.org/simple \
+            "torch==2.7.0+cpu" "torchvision==0.22.0+cpu"; \
+        nv="$(python3 -m pip list --format=freeze 2>/dev/null | grep -iE '^(nvidia-|triton)' | cut -d= -f1 || true)"; \
+        if [ -n "$nv" ]; then echo "$nv" | xargs -r python3 -m pip uninstall -y || true; fi; \
+        rm -rf /usr/local/cuda* /usr/local/nvidia 2>/dev/null || true; \
+        python3 -c "import torch, torchvision; print('[SLIM] torch', torch.__version__, 'torchvision', torchvision.__version__, 'cuda=', torch.version.cuda); assert torch.version.cuda is None, 'expected a CPU-only torch build'"; \
+        # Hard-fail on incomplete CUDA removal so a maintainer-local build catches
+        # it too (not only the docker-publish size gate in CI).
+        rem="$(python3 -m pip list --format=freeze 2>/dev/null | grep -iE '^(nvidia-|triton)' || true)"; \
+        [ -z "$rem" ] || { echo "[SLIM] ERROR: GPU wheels survived: $rem"; exit 1; }; \
+        [ ! -d /usr/local/cuda ] || { echo "[SLIM] ERROR: /usr/local/cuda still present"; exit 1; }; \
+    else \
+        echo "[SLIM] SLIM_CUDA=0 — keeping GPU torch (arm64/Jetson path, untouched)"; \
+    fi
+
 # Cross-arch package floor — pin safetensors / protobuf / pillow / numpy to a
 # single version on BOTH arches. v0.5.1 resolves these naturally to compatible
 # versions, but we pin explicitly to keep amd64 + arm64 producing byte-identical

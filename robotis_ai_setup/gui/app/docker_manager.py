@@ -1022,7 +1022,12 @@ def _compose_pull(gpu: bool = False, service: Optional[str] = None, log=None) ->
     try:
         result = subprocess.run(
             cmd,
-            capture_output=True, text=True, timeout=600,
+            # 1800 s (not 600): the CUDA-flattened amd64 physical-ai-server is one
+            # ~5-6 GB layer, so on a slow classroom link a shorter wall-clock can
+            # kill the pull mid-layer with no resumable progress. This only runs
+            # when an image is genuinely stale AND online (the short-circuits above
+            # cover the common cases); a timeout stays best-effort — `up` self-heals.
+            capture_output=True, text=True, timeout=1800,
             **_SUBPROCESS_KWARGS,
         )
         if result.returncode != 0 and log:

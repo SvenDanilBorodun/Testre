@@ -88,6 +88,30 @@ def _parse_abbreviated_number(s: str) -> int | None:
 # ---------------- Supabase RPC helpers ----------------
 
 
+def _is_terminal_cancel_error(exc: BaseException) -> bool:
+    """True iff a progress-RPC failure means the training row is now terminal.
+
+    update_training_progress (migration 010/028) raises ERRCODE P0001 with
+    "Invalid worker token, training not found, or training already terminal"
+    when the Cloud API has marked this training canceled/failed and nulled the
+    worker_token. That is the worker's only in-band signal that it was canceled
+    (it has no SELECT access to the row — anon key + scoped RPC only). When the
+    worker sees it, it must stop training and let the container exit so the GPU
+    is released — otherwise a cancel whose Modal-side terminate failed leaves
+    the job running to its timeout_hours cap ("cancel just continues on Modal").
+
+    Matched defensively on the PG error code AND the message text so it survives
+    supabase-py error-shape changes. Transient network/5xx errors do NOT match,
+    so a flaky Supabase still gets the normal bounded retry, not a false stop.
+    """
+    s = str(exc)
+    return (
+        "P0001" in s
+        or "already terminal" in s
+        or "Invalid worker token" in s
+    )
+
+
 def _get_supabase_client(supabase_url: str, supabase_anon_key: str):
     """Create a Supabase client using the public anon key.
 
@@ -689,6 +713,10 @@ def run_training(
         # Bounded ring buffer — long failures previously OOM'd the worker.
         # Shared between stdout display and error-report-on-failure.
         output_lines: deque[str] = deque(maxlen=4000)
+        # Set by the reader thread when the scoped progress RPC reports the row
+        # is terminal (canceled/failed API-side). Drives an early, clean exit so
+        # the GPU is released on cancel even if the Modal-side terminate failed.
+        cancel_detected = threading.Event()
         last_progress_step = -1
         step_pattern = re.compile(r"step[:\s]+(\d+\.?\d*[KMBkmb]?)")
         loss_pattern = re.compile(r"loss[:\s]+([\d.]+(?:e[+-]?\d+)?)")
@@ -718,6 +746,22 @@ def run_training(
                             )
                             break
                         except Exception as _e:
+                            # Row went terminal API-side (canceled/failed, token
+                            # nulled) → this training was canceled. Kill the
+                            # subprocess and stop reading so the worker exits and
+                            # Modal frees the GPU — don't burn the timeout cap.
+                            if _is_terminal_cancel_error(_e):
+                                print(
+                                    "Training wurde serverseitig abgebrochen — "
+                                    "beende Trainingsprozess und gebe GPU frei.",
+                                    flush=True,
+                                )
+                                cancel_detected.set()
+                                try:
+                                    proc.kill()
+                                except Exception:
+                                    pass
+                                return
                             print(
                                 f"Warnung: Supabase Update fehlgeschlagen "
                                 f"(Versuch {_attempt + 1}/3): {_e}"
@@ -763,6 +807,17 @@ def run_training(
         reader_thread.join(timeout=10)
         ckpt_stop.set()
         output_text = "".join(output_lines)
+
+        # Canceled API-side mid-run: the reader thread already killed proc and
+        # the row is terminal. Exit cleanly — a status write here would be a
+        # P0001 no-op, and there's no checkpoint worth uploading. The container
+        # returning is what releases the GPU.
+        if cancel_detected.is_set():
+            print(
+                "Training serverseitig abgebrochen — Worker beendet sich.",
+                flush=True,
+            )
+            return {"status": "canceled"}
 
         if proc.returncode != 0:
             if len(output_text) > 2000:

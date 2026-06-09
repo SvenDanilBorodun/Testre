@@ -9,6 +9,7 @@ live in the Modal Secret `edubotics-training-secrets` and are injected into
 the worker's env at invocation — we do NOT pass them through the payload.
 """
 
+import asyncio
 import logging
 import os
 
@@ -57,8 +58,28 @@ async def start_training_job(
     return call.object_id
 
 
+def _cancel_blocking(job_id: str) -> None:
+    """Synchronous Modal cancel — run inside a worker thread (see below)."""
+    call = modal.FunctionCall.from_id(job_id)
+    call.cancel(terminate_containers=True)
+
+
 async def cancel_training_job(job_id: str) -> bool:
     """Cancel a running Modal job. Returns True on success, raises on failure.
+
+    Runs Modal's BLOCKING API in a worker thread via ``asyncio.to_thread``
+    instead of the ``.cancel.aio(...)`` async variant. This is the fix for the
+    "cancel just continues on Modal" bug: every cancel was raising at runtime
+    (rows wedged at ``cancel_attempts=5`` → ``failed`` while the L4 kept
+    billing to its ``timeout_hours`` cap), because the ``.aio()`` path bridges
+    through Modal's own synchronicity event loop from inside uvicorn's loop on
+    a ``FunctionCall`` retrieved via ``from_id`` — a fragile combination Modal
+    has broken before (modal-client #v1.1.2, the from_id-handle cancel/get
+    regression). Modal's blocking API run in a plain thread is the documented,
+    robust way to call Modal from an async server, and ``to_thread`` keeps the
+    FastAPI event loop unblocked just as ``.aio()`` did. The worker also now
+    self-terminates when its row goes terminal (training_handler), so the GPU
+    stops even if this API cancel ever fails again — defence in depth.
 
     terminate_containers=True is INTENTIONAL — do not drop it. Stopping the
     GPU container is the whole point of the migration-023 cost-bomb fix:
@@ -74,11 +95,12 @@ async def cancel_training_job(job_id: str) -> bool:
     correctness-critical is lost.
     """
     try:
-        call = modal.FunctionCall.from_id(job_id)
-        await call.cancel.aio(terminate_containers=True)
+        await asyncio.to_thread(_cancel_blocking, job_id)
         return True
     except Exception as e:
-        logger.warning("Modal cancel failed for call %s: %s", job_id, e)
+        # %r so the exception TYPE is captured in the Railway log, not just
+        # its (often empty) str — the missing diagnostic that hid this bug.
+        logger.warning("Modal cancel failed for call %s: %r", job_id, e)
         raise
 
 
@@ -97,25 +119,37 @@ async def get_job_status(job_id: str) -> str:
 
     Normal return values: QUEUED, IN_PROGRESS, COMPLETED, FAILED, CANCELLED,
     TIMED_OUT, UNKNOWN.
+
+    Runs Modal's BLOCKING ``get`` in a worker thread (``asyncio.to_thread``)
+    for the same reason as ``cancel_training_job``: the ``.get.aio(...)`` async
+    variant on a ``from_id`` handle was unreliable from inside uvicorn's event
+    loop. Here the failure was SILENT — the generic ``except`` below returned
+    UNKNOWN, so Modal reconciliation quietly did nothing and rows relied solely
+    on the worker's own status writes. The blocking-in-thread form actually
+    reconciles wedged/finished jobs again.
     """
-    try:
+    def _get_blocking() -> str:
         call = modal.FunctionCall.from_id(job_id)
-        await call.get.aio(timeout=0)
-        return "COMPLETED"
-    except (modal.exception.TimeoutError, TimeoutError):
-        # Client-side poll expired — job is still queued or running.
-        # Modal's SDK raises the BUILT-IN TimeoutError for a still-in-flight
-        # call (not the Modal-namespaced one), so we catch both to be safe
-        # across SDK versions. Mismatching this fires every time the UI
-        # polls /trainings/list and flips live rows to failed.
-        return "IN_PROGRESS"
-    except modal.exception.FunctionTimeoutError:
-        # Function itself exceeded its server-side `timeout=` limit.
-        return "TIMED_OUT"
-    except modal.exception.InputCancellation:
-        return "CANCELLED"
-    except (modal.exception.RemoteError, modal.exception.ExecutionError):
-        return "FAILED"
+        try:
+            call.get(timeout=0)
+            return "COMPLETED"
+        except (modal.exception.TimeoutError, TimeoutError):
+            # Client-side poll expired — job is still queued or running.
+            # Modal's SDK raises the BUILT-IN TimeoutError for a still-in-flight
+            # call (not the Modal-namespaced one), so we catch both to be safe
+            # across SDK versions. Mismatching this fires every time the UI
+            # polls /trainings/list and flips live rows to failed.
+            return "IN_PROGRESS"
+        except modal.exception.FunctionTimeoutError:
+            # Function itself exceeded its server-side `timeout=` limit.
+            return "TIMED_OUT"
+        except modal.exception.InputCancellation:
+            return "CANCELLED"
+        except (modal.exception.RemoteError, modal.exception.ExecutionError):
+            return "FAILED"
+
+    try:
+        return await asyncio.to_thread(_get_blocking)
     except Exception as e:
         # Unknown SDK error class, deserialization issue, transient network
         # blip. Fail open — don't touch the row's status, let the next poll

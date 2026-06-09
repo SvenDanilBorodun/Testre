@@ -1,0 +1,4 @@
+# Build artifacts produced by the CI bundle job / local cross-compile.
+*.o
+*.exe
+*.dat

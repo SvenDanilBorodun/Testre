@@ -1,15 +1,19 @@
 name: bundle-test
 
-# Dispatch-only: build the OFFLINE bundle (EduBotics_Setup_Full.exe) for an
-# EXISTING image tag and upload it to an R2 *test* path, so the P4 Windows-rig
-# pilot can validate the offline install WITHOUT cutting a production release.
+# Dispatch-only: build the OFFLINE bundle (launcher EduBotics_Setup_Full.exe +
+# companion EduBotics_Setup_Full.dat) for an EXISTING image tag and upload it to
+# an R2 *test* path, so the P4 Windows-rig pilot can validate the offline install
+# WITHOUT cutting a production release.
 #
 # It reuses the real installer build (release-installer.yml) so the inner
 # installer carries the CURRENT branch's load_images.ps1 / stage_bundle.ps1
 # logic, then runs the SAME bundle steps as release.yml's `bundle` job — but
-# writes to `test/EduBotics_Setup_Full_<tag>.exe` (never the production object).
+# writes to `test/EduBotics_Setup_Full_<tag>.{exe,dat}` (never the production
+# object).
 #
-# Result URL: <R2_PUBLIC_BASE_URL>/test/EduBotics_Setup_Full_<tag>.exe
+# Result: download BOTH of these into one folder, then double-click the .exe:
+#   <R2_PUBLIC_BASE_URL>/test/EduBotics_Setup_Full_<tag>.exe
+#   <R2_PUBLIC_BASE_URL>/test/EduBotics_Setup_Full_<tag>.dat
 #
 # This is NOT in the golden order and is never triggered by a push/tag.
 
@@ -76,7 +80,7 @@ jobs:
       AWS_REQUEST_CHECKSUM_CALCULATION: when_required
       AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
     steps:
-      - name: Checkout (sfx stub + config)
+      - name: Checkout (installer/stub launcher source)
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           persist-credentials: false
@@ -88,17 +92,24 @@ jobs:
           R2_KEY: ${{ secrets.R2_ACCESS_KEY_ID }}
         run: |
           ready=true
-          if [ ! -f robotis_ai_setup/installer/sfx/7zSD.sfx ]; then
-            echo "::error::installer/sfx/7zSD.sfx missing (see installer/sfx/README.md)."
-            ready=false
-          elif [ -f robotis_ai_setup/installer/sfx/7zSD.sfx.sha256 ]; then
-            ( cd robotis_ai_setup/installer/sfx && sha256sum -c 7zSD.sfx.sha256 )
-          fi
+          for f in robotis_ai_setup/installer/stub/main.c \
+                   robotis_ai_setup/installer/stub/edb_payload.c \
+                   robotis_ai_setup/installer/stub/edb_payload.h \
+                   robotis_ai_setup/installer/stub/pack_payload.py; do
+            if [ ! -f "$f" ]; then
+              echo "::error::missing $f"
+              ready=false
+            fi
+          done
           if [ -z "$R2_ACCOUNT_ID" ] || [ -z "$R2_KEY" ]; then
             echo "::error::R2_* secrets not set."
             ready=false
           fi
           echo "ready=$ready" >> "$GITHUB_OUTPUT"
+          # bundle-test is an operator tool whose whole point is to PRODUCE a test
+          # bundle, so a green run with no artifact is a footgun. Hard-fail when
+          # unconfigured (unlike release.yml's bundle LEAF, which skips green).
+          [ "$ready" = true ] || { echo "::error::bundle-test cannot run unconfigured (missing stub source or R2_* secrets)."; exit 1; }
 
       - name: Free disk space
         if: steps.pre.outputs.ready == 'true'
@@ -147,18 +158,32 @@ jobs:
           done
           echo "$digests" | jq . > sfx_root/bundled_digests.json
           cp inner/EduBotics_Setup.exe sfx_root/EduBotics_Setup.exe
-          echo "── bundle size (un-slimmed) ──"; du -h sfx_root/images/*.tar.gz; du -sh sfx_root
+          echo "── bundle size (amd64 CUDA-slimmed) ──"; du -h sfx_root/images/*.tar.gz; du -sh sfx_root
           cat sfx_root/bundled_digests.json; df -h /
 
-      - name: Assemble 7-Zip SFX (one file)
+      - name: Build launcher + pack payload (two-file offline bundle)
         if: steps.pre.outputs.ready == 'true'
         run: |
           set -euo pipefail
-          ( cd sfx_root && 7z a -mx=0 ../archive.7z . >/dev/null )
-          cat robotis_ai_setup/installer/sfx/7zSD.sfx \
-              robotis_ai_setup/installer/sfx/config.txt \
-              archive.7z > EduBotics_Setup_Full.exe
-          rm -f archive.7z; ls -lh EduBotics_Setup_Full.exe
+          for i in 1 2 3; do
+            sudo apt-get update && \
+              sudo apt-get install -y --no-install-recommends gcc-mingw-w64-x86-64 && break
+            echo "apt-get retry $i/3"; sleep $((i * 5))
+          done
+          ( cd robotis_ai_setup/installer/stub && \
+            x86_64-w64-mingw32-windres launcher.rc launcher_res.o )
+          x86_64-w64-mingw32-gcc -O2 -municode -mwindows -std=c11 \
+            -finput-charset=UTF-8 -fwide-exec-charset=UTF-16LE \
+            -o EduBotics_Setup_Full.exe \
+            robotis_ai_setup/installer/stub/main.c \
+            robotis_ai_setup/installer/stub/edb_payload.c \
+            robotis_ai_setup/installer/stub/launcher_res.o \
+            -lcomctl32 -lshell32 -luser32 -lkernel32
+          file EduBotics_Setup_Full.exe | grep -q 'PE32+ executable .*x86-64' \
+            || { echo "::error::launcher is not a 64-bit Windows PE"; exit 1; }
+          python3 robotis_ai_setup/installer/stub/pack_payload.py pack \
+            sfx_root EduBotics_Setup_Full.dat
+          ls -lh EduBotics_Setup_Full.exe EduBotics_Setup_Full.dat
 
       - name: Upload TEST bundle to R2 (multipart) + verify
         if: steps.pre.outputs.ready == 'true'
@@ -171,11 +196,18 @@ jobs:
         run: |
           set -euo pipefail
           endpoint="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
-          key="test/EduBotics_Setup_Full_${IMAGE_TAG}.exe"
-          aws s3 cp EduBotics_Setup_Full.exe "s3://${R2_BUCKET}/${key}" \
-            --endpoint-url "$endpoint" \
-            --content-type application/octet-stream \
-            --content-disposition "attachment; filename=EduBotics_Setup_Full.exe"
-          aws s3api head-object --bucket "$R2_BUCKET" --key "$key" --endpoint-url "$endpoint"
-          echo "TEST bundle ready for P4:"
-          echo "  ${R2_PUBLIC_BASE_URL:-<R2_PUBLIC_BASE_URL>}/${key}"
+          upload() {  # $1 = local file, $2 = R2 key
+            aws s3 cp "$1" "s3://${R2_BUCKET}/$2" \
+              --endpoint-url "$endpoint" \
+              --content-type application/octet-stream \
+              --content-disposition "attachment; filename=$(basename "$2")"
+          }
+          exe_key="test/EduBotics_Setup_Full_${IMAGE_TAG}.exe"
+          dat_key="test/EduBotics_Setup_Full_${IMAGE_TAG}.dat"
+          upload EduBotics_Setup_Full.exe "$exe_key"
+          upload EduBotics_Setup_Full.dat "$dat_key"
+          aws s3api head-object --bucket "$R2_BUCKET" --key "$exe_key" --endpoint-url "$endpoint"
+          aws s3api head-object --bucket "$R2_BUCKET" --key "$dat_key" --endpoint-url "$endpoint"
+          echo "TEST bundle ready for P4 — download BOTH into one folder, run the .exe:"
+          echo "  ${R2_PUBLIC_BASE_URL:-<R2_PUBLIC_BASE_URL>}/${exe_key}"
+          echo "  ${R2_PUBLIC_BASE_URL:-<R2_PUBLIC_BASE_URL>}/${dat_key}"

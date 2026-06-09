@@ -107,6 +107,96 @@ OCI_LABELS=(
 # Honour an upstream value if set, else derive from the most recent commit time.
 export SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-$(git -C "$PROJECT_ROOT" log -1 --pretty=%ct 2>/dev/null || echo 0)}"
 
+# ── amd64 CUDA-slim flatten ──────────────────────────────────────────────────
+# The Dockerfile's SLIM_CUDA step removes torch+cu128 / nvidia-* / /usr/local/cuda,
+# but those rm/uninstalls only write WHITEOUTS over the immutable base layers, so
+# `docker save` would still ship the ~13 GB of CUDA. Flatten collapses the layers
+# so the whiteouts become real deletions: `docker export | docker import`, STREAMED
+# (the exported rootfs is the merged, whiteout-applied view ~5-6 GB, so there is no
+# multi-GB intermediate tar and disk peak stays ~22 GB). The runtime config
+# (Env/Entrypoint/Cmd/WorkingDir/User/StopSignal/Labels/Expose) is re-applied from
+# the pre-flatten inspect, then VERIFIED — a dropped s6 entrypoint or ROS env fails
+# the build LOUDLY. amd64-only; the arm64/Jetson build never calls this and KEEPS
+# its GPU torch. The pushed AND bundle-saved image are this same flattened image,
+# so the GUI's manifest-digest sidecar gate stays consistent (see docs/plans).
+flatten_amd64_image() {
+    local img="$1"
+    local orig_id
+    orig_id=$(docker image inspect "$img" --format '{{.Id}}')
+    docker image inspect "$img" --format '{{json .Config}}' > /tmp/edb_cfg_before.json
+
+    # Re-apply the runtime config via `docker import -c` (values quoted so a
+    # space-bearing env/label can't be mis-parsed).
+    local cargs=() line wd usr ep cmd ss
+    while IFS= read -r line; do
+        [ -n "$line" ] && cargs+=(-c "ENV \"${line%%=*}\"=\"${line#*=}\"")
+    done < <(docker image inspect "$img" --format '{{range .Config.Env}}{{println .}}{{end}}')
+    wd=$(docker image inspect "$img" --format '{{.Config.WorkingDir}}')
+    [ -n "$wd" ] && cargs+=(-c "WORKDIR $wd")
+    usr=$(docker image inspect "$img" --format '{{.Config.User}}')
+    [ -n "$usr" ] && cargs+=(-c "USER $usr")
+    ep=$(docker image inspect "$img" --format '{{json .Config.Entrypoint}}')
+    [ -n "$ep" ] && [ "$ep" != "null" ] && cargs+=(-c "ENTRYPOINT $ep")
+    cmd=$(docker image inspect "$img" --format '{{json .Config.Cmd}}')
+    [ -n "$cmd" ] && [ "$cmd" != "null" ] && cargs+=(-c "CMD $cmd")
+    ss=$(docker image inspect "$img" --format '{{.Config.StopSignal}}')
+    [ -n "$ss" ] && [ "$ss" != "<no value>" ] && cargs+=(-c "STOPSIGNAL $ss")
+    while IFS= read -r line; do
+        [ -n "$line" ] && cargs+=(-c "LABEL \"${line%%=*}\"=\"${line#*=}\"")
+    done < <(docker image inspect "$img" --format '{{range $k,$v := .Config.Labels}}{{$k}}={{$v}}{{println}}{{end}}')
+    while IFS= read -r line; do
+        [ -n "$line" ] && cargs+=(-c "EXPOSE ${line%%/*}")
+    done < <(docker image inspect "$img" --format '{{range $p,$_ := .Config.ExposedPorts}}{{$p}}{{println}}{{end}}')
+
+    # --platform linux/amd64: docker import stamps .Architecture from the HOST,
+    # not the source image. flatten_amd64_image is amd64-only by construction, so
+    # pin it — otherwise a maintainer building amd64 on an Apple-Silicon host would
+    # re-import the (correct amd64) rootfs LABELED arm64 and break student pulls.
+    local cid
+    cid=$(docker create --platform linux/amd64 "$img")
+    docker export "$cid" | docker import --platform linux/amd64 "${cargs[@]}" - "$img"
+    docker rm "$cid" >/dev/null
+
+    # Verify the critical config survived (Entrypoint/Cmd/WorkingDir/User exact;
+    # ROS_DISTRO=jazzy + a non-empty PATH present). A drop fails the build here.
+    docker image inspect "$img" --format '{{json .Config}}' > /tmp/edb_cfg_after.json
+    python3 - "$img" <<'PYEOF'
+import json, sys
+img = sys.argv[1]
+before = json.load(open('/tmp/edb_cfg_before.json'))
+after = json.load(open('/tmp/edb_cfg_after.json'))
+def fail(m):
+    print(f"ERROR: flatten config drift for {img}: {m}", file=sys.stderr)
+    sys.exit(1)
+for f in ('Entrypoint', 'Cmd', 'WorkingDir', 'User'):
+    if before.get(f) != after.get(f):
+        fail(f"{f}: {before.get(f)!r} -> {after.get(f)!r}")
+benv = dict(e.split('=', 1) for e in (before.get('Env') or []) if '=' in e)
+aenv = dict(e.split('=', 1) for e in (after.get('Env') or []) if '=' in e)
+dropped = sorted(k for k in benv if k not in aenv)
+changed = sorted(k for k in benv if k in aenv and benv[k] != aenv[k])
+if dropped:
+    fail(f"Env keys dropped by flatten: {dropped}")
+if changed:
+    print(f"WARNING: flatten changed Env values for {changed} (check -c quoting)", file=sys.stderr)
+if aenv.get('ROS_DISTRO') != 'jazzy':
+    fail(f"ROS_DISTRO={aenv.get('ROS_DISTRO')!r}, expected 'jazzy'")
+if not aenv.get('PATH'):
+    fail("PATH is empty after flatten")
+print("   OK: flatten preserved config (Entrypoint/Cmd/WorkingDir/User + full Env keys + ROS_DISTRO + PATH)")
+PYEOF
+
+    # Functional post-flatten smoke: the Dockerfile's node-import gate ran BEFORE
+    # the flatten, so prove the FLATTENED image still loads the ROS node — catching
+    # a flatten that corrupted env/torch HERE, not on a student PC.
+    docker run --rm --entrypoint bash "$img" -lc \
+        'source /opt/ros/jazzy/setup.bash && source /root/ros2_ws/install/setup.bash && python3 -c "import physical_ai_server.physical_ai_server; print(\"[SLIM] flattened node-import OK\")"'
+
+    # Drop the fat pre-flatten image to reclaim disk before the push.
+    docker rmi "$orig_id" >/dev/null 2>&1 || docker image prune -f >/dev/null 2>&1 || true
+    docker image inspect "$img" --format '   flattened size: {{.Size}} bytes'
+}
+
 # Expect repos to be siblings of robotis_ai_setup
 OPEN_MANIPULATOR_DIR="${OPEN_MANIPULATOR_DIR:-$(dirname "$PROJECT_ROOT")/open_manipulator}"
 PHYSICAL_AI_TOOLS_DIR="${PHYSICAL_AI_TOOLS_DIR:-$(dirname "$PROJECT_ROOT")/physical_ai_tools}"
@@ -380,11 +470,20 @@ else
     docker buildx build --platform linux/amd64 --load --no-cache --pull \
         "${OCI_LABELS[@]}" \
         --build-arg BASE_IMAGE="${PAS_BASE_IMAGE}" \
+        --build-arg SLIM_CUDA=1 \
         -t "${PAS_OUT_REPO}:${IMAGE_TAG_SUFFIX}" \
         -f "${SCRIPT_DIR}/physical_ai_server/Dockerfile" \
         "${SCRIPT_DIR}/physical_ai_server/"
 fi
 echo "   OK: physical-ai-server built (with patches)"
+
+# amd64-only: flatten to reclaim the whiteout-hidden CUDA bytes the SLIM_CUDA
+# Dockerfile step removed (the arm64/Jetson image keeps GPU torch + is untouched).
+if [ "$PLATFORM" = "amd64" ]; then
+    echo ""
+    echo ">> CUDA-slim: flattening physical-ai-server (amd64) to reclaim CUDA bytes..."
+    flatten_amd64_image "${PAS_OUT_REPO}:${IMAGE_TAG_SUFFIX}"
+fi
 
 # ── Image 3: open_manipulator base ──
 # amd64: ROBOTIS publishes amd64-4.1.4; pull from Docker Hub by default,

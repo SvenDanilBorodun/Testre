@@ -1,12 +1,13 @@
 ﻿# stage_bundle.ps1 — Relocate the OFFLINE image bundle to a persistent dir
 #
-# The big "EduBotics_Setup_Full.exe" is a 7-Zip SFX that extracts the inner
-# installer + images/<repo>.tar.gz + bundled_digests.json to a %TEMP% dir and
-# auto-runs the inner installer from there. That %TEMP% dir is DESTROYED when
-# the inner installer exits — and on a fresh Windows PC `wsl --install` forces
-# a reboot, so the image load is deferred to finalize_install.ps1 which runs
-# AFTER %TEMP% is gone. It also detaches from the SFX's %TEMP% cleanup on UAC
-# re-elevation. So we MOVE the bundle out of {src} (%TEMP%) into
+# The big "EduBotics_Setup_Full.exe" is a small launcher that extracts the inner
+# installer + images/<repo>.tar.gz + bundled_digests.json from its companion
+# .dat into %LOCALAPPDATA%\EduBotics\stage-<id> and auto-runs the inner installer
+# from there ({src} = that dir). That per-user stage dir is transient (cleaned on
+# the launcher's next run) and is NOT machine-wide — and on a fresh Windows PC
+# `wsl --install` forces a reboot, so the image load is deferred to
+# finalize_install.ps1 which runs AFTER the install (possibly as a different
+# user / after the stage dir is gone). So we MOVE the bundle out of {src} into
 # %ProgramData%\EduBotics\bundle (persistent, survives reboot, machine-wide)
 # BEFORE Steps 4/5 and before any reboot. load_images.ps1 (Step 5 and the
 # post-reboot finalize) then load from there.

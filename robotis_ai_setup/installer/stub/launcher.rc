@@ -1,0 +1,39 @@
+/* Windows resources for the offline-bundle launcher.
+ * Compiled with: x86_64-w64-mingw32-windres -I <this dir> launcher.rc launcher_res.o
+ * and linked into EduBotics_Setup_Full.exe alongside main.c + edb_payload.c.
+ *
+ * The RT_MANIFEST embeds launcher.manifest (asInvoker + DPI + Win10/11). The
+ * VERSIONINFO gives the unsigned launcher legitimate publisher/version metadata
+ * (a metadata-less PE is a stronger SmartScreen/Defender-ML heuristic target).
+ */
+#include <windows.h>
+
+CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "launcher.manifest"
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION    1,0,0,0
+ PRODUCTVERSION 1,0,0,0
+ FILEFLAGSMASK  0x3fL
+ FILEFLAGS      0x0L
+ FILEOS         VOS_NT_WINDOWS32
+ FILETYPE       VFT_APP
+ FILESUBTYPE    0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040704b0"  /* German (Germany), Unicode codepage 1200 */
+        BEGIN
+            VALUE "CompanyName",      "EduBotics"
+            VALUE "FileDescription",  "EduBotics Offline-Installation"
+            VALUE "FileVersion",      "1.0.0.0"
+            VALUE "InternalName",     "EduBotics_Setup_Full"
+            VALUE "OriginalFilename", "EduBotics_Setup_Full.exe"
+            VALUE "ProductName",      "EduBotics"
+            VALUE "ProductVersion",   "1.0.0.0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x407, 1200  /* German, Unicode */
+    END
+END

@@ -150,11 +150,12 @@ Filename: "powershell.exe"; \
   StatusMsg: "USB-Geräterichtlinie wird konfiguriert..."; \
   Flags: runhidden waituntilterminated
 
-; Step 3b: Offline-Image-Paket aus der Installationsdatei in einen dauerhaften
-; Ordner verschieben — BEVOR ein evtl. nötiger Neustart die volatile
-; SFX-%TEMP%-Ablage löscht. UNGATED (läuft auch im Neustart-Fall, anders als
-; Schritt 4/5), damit finalize_install.ps1 das Paket nach dem Neustart noch
-; findet. No-op bei der kleinen Online-/Update-Installationsdatei (kein Paket).
+; Step 3b: Offline-Image-Paket aus dem Launcher-Entpackordner in einen
+; dauerhaften Ordner verschieben — BEVOR ein evtl. nötiger Neustart die
+; temporäre Entpack-Ablage (%LOCALAPPDATA%\EduBotics\stage-...) aufräumt.
+; UNGATED (läuft auch im Neustart-Fall, anders als Schritt 4/5), damit
+; finalize_install.ps1 das Paket nach dem Neustart noch findet. No-op bei der
+; kleinen Online-/Update-Installationsdatei (kein Paket).
 Filename: "powershell.exe"; \
   Parameters: "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File ""{app}\scripts\stage_bundle.ps1"" -SrcDir ""{src}"""; \
   StatusMsg: "Installationsdaten werden vorbereitet..."; \

@@ -36,10 +36,12 @@ robotis_ai_setup/wsl_rootfs/ROOTFS_VERSION  text eol=lf
 *.jpg                 binary
 *.ico                 binary
 *.exe                 binary
-# 7-Zip SFX self-extracting installer assets (offline image bundle). The stub
-# is a Windows PE — keep it byte-exact. config.txt MUST stay CRLF: the CI
-# `cat 7zSD.sfx config.txt archive.7z` concatenates it into the SFX and the
-# config parser expects CRLF; bare `text=auto` would normalize it to LF in the
-# repo and check it out LF on the Linux runner.
-*.sfx                 binary
-robotis_ai_setup/installer/sfx/config.txt  text eol=crlf
+# Offline-bundle launcher source (installer/stub/) is C cross-compiled on the
+# Linux runner. Pin LF so the German wide-string literals + comments are never
+# CRLF-mangled on a Windows dev checkout (autocrlf=true). The produced launcher
+# .exe is covered by `*.exe binary` above; the .dat is runner-generated (never
+# committed).
+robotis_ai_setup/installer/stub/*.c        text eol=lf
+robotis_ai_setup/installer/stub/*.h        text eol=lf
+robotis_ai_setup/installer/stub/*.rc       text eol=lf
+robotis_ai_setup/installer/stub/*.manifest text eol=lf

@@ -67,7 +67,8 @@ class TestBundledDigestLookup(unittest.TestCase):
 
 
 class TestResolveLocalDigest(unittest.TestCase):
-    """`_resolve_local_digest`: real RepoDigest wins; sidecar only fills the gap."""
+    """`_resolve_local_digest`: real RepoDigest wins; sidecar only fills the gap,
+    and ONLY when the image is actually present (not merely in a stale sidecar)."""
 
     def test_real_repo_digest_takes_precedence(self):
         with patch.object(docker_manager, "_get_local_repo_digest", return_value=_CHILD), \
@@ -76,19 +77,48 @@ class TestResolveLocalDigest(unittest.TestCase):
             self.assertEqual(digest, _CHILD)
             self.assertFalse(is_bundled)
 
-    def test_falls_back_to_sidecar_when_repodigest_empty(self):
+    def test_falls_back_to_sidecar_when_present_and_repodigest_empty(self):
+        # The docker-load'd-bundle case: image IS present, RepoDigest empty.
         with patch.object(docker_manager, "_get_local_repo_digest", return_value=None), \
+             patch.object(docker_manager, "_image_present_locally", return_value=True), \
              patch.object(docker_manager, "_bundled_digest_for", return_value=_LIST):
             digest, is_bundled = docker_manager._resolve_local_digest(ALL_IMAGES[0])
             self.assertEqual(digest, _LIST)
             self.assertTrue(is_bundled)
 
-    def test_none_when_neither_present(self):
+    def test_absent_image_with_stale_sidecar_returns_none(self):
+        # The hardened edge: the image is GONE (distro re-created) but the
+        # install-dir sidecar still lists its digest. Trusting it would skip a
+        # required pull → `manifest unknown` at compose up. Must NOT resolve.
         with patch.object(docker_manager, "_get_local_repo_digest", return_value=None), \
+             patch.object(docker_manager, "_image_present_locally", return_value=False), \
+             patch.object(docker_manager, "_bundled_digest_for", return_value=_LIST):
+            digest, is_bundled = docker_manager._resolve_local_digest(ALL_IMAGES[0])
+            self.assertIsNone(digest)
+            self.assertFalse(is_bundled)
+
+    def test_present_but_no_sidecar_entry_returns_none(self):
+        with patch.object(docker_manager, "_get_local_repo_digest", return_value=None), \
+             patch.object(docker_manager, "_image_present_locally", return_value=True), \
              patch.object(docker_manager, "_bundled_digest_for", return_value=None):
             digest, is_bundled = docker_manager._resolve_local_digest(ALL_IMAGES[0])
             self.assertIsNone(digest)
             self.assertFalse(is_bundled)
+
+
+class TestImagePresentLocally(unittest.TestCase):
+    """`_image_present_locally`: rc==0 from `docker image inspect` ⇒ present;
+    distinguishes a docker-load'd bundle image (empty RepoDigests) from absent."""
+
+    def test_present_when_inspect_succeeds(self):
+        with patch("gui.app.docker_manager.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="sha256:id\n")
+            self.assertTrue(docker_manager._image_present_locally(ALL_IMAGES[0]))
+
+    def test_absent_when_inspect_fails(self):
+        with patch("gui.app.docker_manager.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="No such image")
+            self.assertFalse(docker_manager._image_present_locally(ALL_IMAGES[0]))
 
 
 class TestImageIsCurrent(unittest.TestCase):
@@ -131,9 +161,10 @@ class TestCheckForUpdatesBundleNoOp(unittest.TestCase):
     @patch("gui.app.docker_manager._save_last_pull_info")
     @patch("gui.app.docker_manager._pull_one_image")
     @patch("gui.app.docker_manager._get_remote_digest_candidates", return_value={_LIST, _CHILD})
+    @patch("gui.app.docker_manager._image_present_locally", return_value=True)  # loaded, present
     @patch("gui.app.docker_manager._get_local_repo_digest", return_value=None)  # loaded → empty
     @patch("gui.app.docker_manager.is_dockerhub_reachable", return_value=True)
-    def test_loaded_images_are_no_op(self, _reach, _local, _remote, mock_pull, _save):
+    def test_loaded_images_are_no_op(self, _reach, _local, _present, _remote, mock_pull, _save):
         sidecar = {img: _LIST for img in ALL_IMAGES}
         logs: list[str] = []
         with patch.object(docker_manager, "_load_bundled_digests", return_value=sidecar):
@@ -141,6 +172,21 @@ class TestCheckForUpdatesBundleNoOp(unittest.TestCase):
         self.assertFalse(result)
         mock_pull.assert_not_called()
         self.assertEqual(sum(1 for l in logs if "bereits aktuell" in l), len(ALL_IMAGES))
+
+    @patch("gui.app.docker_manager._save_last_pull_info")
+    @patch("gui.app.docker_manager._pull_one_image", return_value=True)
+    @patch("gui.app.docker_manager._get_remote_digest_candidates", return_value={_LIST, _CHILD})
+    @patch("gui.app.docker_manager._image_present_locally", return_value=False)  # GONE
+    @patch("gui.app.docker_manager._get_local_repo_digest", return_value=None)
+    @patch("gui.app.docker_manager.is_dockerhub_reachable", return_value=True)
+    def test_absent_images_with_stale_sidecar_are_pulled(self, _reach, _local, _present, _remote, mock_pull, _save):
+        # Even though the sidecar still lists each image's digest AND that digest
+        # is in the remote candidate set, the images are GONE locally → the gate
+        # must PULL all three rather than falsely report 'bereits aktuell'.
+        sidecar = {img: _LIST for img in ALL_IMAGES}
+        with patch.object(docker_manager, "_load_bundled_digests", return_value=sidecar):
+            docker_manager.check_for_updates(log=lambda *_: None)
+        self.assertEqual(mock_pull.call_count, len(ALL_IMAGES))
 
     @patch("gui.app.docker_manager._save_last_pull_info")
     @patch("gui.app.docker_manager._pull_one_image", return_value=True)

@@ -181,6 +181,30 @@ jobs:
             exit 1
           fi
 
+  powershell-native-stderr:
+    # Windows PowerShell 5.1 promotes a NATIVE command's stderr to a TERMINATING
+    # NativeCommandError under a file-level $ErrorActionPreference='Stop' — for
+    # every redirection form (2>&1, 2>$null, *>$null), and EVEN ON SUCCESS
+    # (`docker info` prints "WARNING: No swap limit support" to stderr on a healthy
+    # daemon; `docker image inspect <missing>` prints "No such image"). That
+    # silently aborted the offline installer: import_edubotics_wsl.ps1's
+    # dockerd-readiness poll threw on iteration 1, the import "failed", and Inno
+    # skipped the offline `docker load` (the 2026-06-09 pilot bug). The proven-safe
+    # pattern is EAP=Continue + explicit $LASTEXITCODE checks (verify_system.ps1).
+    # This guard rejects any .ps1 that pairs a file-level EAP=Stop with a native
+    # wsl/docker call whose stderr is captured. Static text lint → Linux, no Win rig.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: "3.11"
+      - name: Lint installer .ps1 for native-stderr-under-EAP=Stop
+        run: python3 .github/scripts/ps_native_stderr_lint.py
+
   bundle-stub-roundtrip:
     # The offline-bundle launcher (installer/stub/) reads a multi-GB payload with
     # 64-bit I/O. Its >4 GiB correctness CANNOT be exercised by the tiny payloads

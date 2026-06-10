@@ -23,7 +23,15 @@ param(
     [switch]$Force
 )
 
-$ErrorActionPreference = "Stop"
+# EAP=Continue, NOT Stop (load-bearing — mirrors verify_system.ps1). In Windows
+# PowerShell 5.1 a native command (wsl/docker) writing to stderr is promoted to a
+# TERMINATING NativeCommandError under EAP=Stop — for every redirection form, and
+# even on success (`docker info` prints a swap-limit warning to stderr on a healthy
+# daemon). Under Stop this aborted the dockerd-readiness poll on iteration 1, so the
+# import "failed" and the offline image load was silently skipped. Native outcomes
+# are checked via $LASTEXITCODE; do NOT revert to Stop without wrapping every
+# wsl/docker call in try/catch.
+$ErrorActionPreference = "Continue"
 
 function Write-Step { param([string]$msg) Write-Host "`n>> $msg" -ForegroundColor Cyan }
 function Write-OK   { param([string]$msg) Write-Host "   OK: $msg" -ForegroundColor Green }
@@ -233,34 +241,48 @@ $maxWait = 180
 $elapsed = 0
 $dockerReady = $false
 $lastErr = ""
+# Probe via stderr->FILE (not `2>&1` into the pipeline): readiness is decided by the
+# EXIT CODE alone. `docker info` writes to stderr both while the daemon is still
+# booting ("Cannot connect…") AND on a HEALTHY daemon ("WARNING: No swap limit
+# support"); merging that with `2>&1` emits a NativeCommandError record on every
+# poll (harmless under EAP=Continue, but it spams the install log). A file redirect
+# keeps stdout/stderr out of the PowerShell streams entirely.
+$dockerErrFile = Join-Path $env:TEMP "edubotics_dockerinfo.err"
 while ($elapsed -lt $maxWait) {
-    # Capture stderr alongside exit code so the operator can see why docker
-    # info failed (previously silently swallowed into $null).
-    $lastErr = (wsl -d $DistroName -- docker info 2>&1 | Out-String)
+    & wsl -d $DistroName -- docker info 1>$null 2>$dockerErrFile
     if ($LASTEXITCODE -eq 0) {
         $dockerReady = $true
         break
     }
+    $lastErr = (Get-Content -LiteralPath $dockerErrFile -Raw -ErrorAction SilentlyContinue)
     Start-Sleep -Seconds 2
     $elapsed += 2
     Write-Host "   Warte auf Docker-Engine... ${elapsed}s/${maxWait}s" -ForegroundColor Gray
 }
 
 if (-not $dockerReady) {
-    # Boot-time autostart didn't fire — invoke the dockerd wrapper directly
+    # Boot-time autostart didn't fire — invoke the dockerd wrapper directly, then
+    # give it a few guarded rechecks (a cold dockerd can take >3s to open its socket).
     Write-Warn "dockerd nicht automatisch gestartet — Wrapper wird manuell ausgeführt"
     Write-Host "   Last docker-info stderr:" -ForegroundColor Gray
     Write-Host "   $lastErr" -ForegroundColor Gray
     wsl -d $DistroName -- /usr/local/bin/start-dockerd.sh *>$null
-    Start-Sleep -Seconds 3
-    $lastErr = (wsl -d $DistroName -- docker info 2>&1 | Out-String)
-    if ($LASTEXITCODE -ne 0) {
+    $extra = 0
+    while ($extra -lt 30) {
+        Start-Sleep -Seconds 2
+        $extra += 2
+        & wsl -d $DistroName -- docker info 1>$null 2>$dockerErrFile
+        if ($LASTEXITCODE -eq 0) { $dockerReady = $true; break }
+        $lastErr = (Get-Content -LiteralPath $dockerErrFile -Raw -ErrorAction SilentlyContinue)
+    }
+    if (-not $dockerReady) {
         Write-FAIL "Docker-Engine konnte nicht gestartet werden."
         Write-Host "   Fehler: $lastErr" -ForegroundColor Red
         Write-Host "   Diagnose: wsl -d $DistroName -- tail -n 50 /var/log/dockerd.log" -ForegroundColor Red
         exit 1
     }
 }
+Remove-Item -LiteralPath $dockerErrFile -Force -ErrorAction SilentlyContinue
 
 Write-OK "Docker-Engine läuft in $DistroName"
 

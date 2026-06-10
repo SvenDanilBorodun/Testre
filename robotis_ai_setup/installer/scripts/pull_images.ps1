@@ -9,7 +9,14 @@ param(
     [string]$DistroName = "EduBotics"
 )
 
-$ErrorActionPreference = "Stop"
+# EAP=Continue, NOT Stop (load-bearing — mirrors verify_system.ps1). In Windows
+# PowerShell 5.1 a native command (wsl/docker) writing to stderr is promoted to a
+# TERMINATING NativeCommandError under EAP=Stop — for every redirection form, and
+# even on success (`docker info` prints a swap-limit warning to stderr; `docker pull`
+# streams its layer progress to stderr). Under Stop the online pull threw on the first
+# image. Native outcomes are checked via $LASTEXITCODE; do NOT revert to Stop without
+# wrapping every wsl/docker call in try/catch.
+$ErrorActionPreference = "Continue"
 
 function Write-Step { param([string]$msg) Write-Host "`n>> $msg" -ForegroundColor Cyan }
 function Write-OK   { param([string]$msg) Write-Host "   OK: $msg" -ForegroundColor Green }

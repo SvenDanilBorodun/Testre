@@ -238,26 +238,29 @@ function IsDistroRegistered(): Boolean;
 var
   ResultCode: Integer;
   TempFile: String;
-  Lines: TArrayOfString;
-  i: Integer;
-  Line: String;
+  Raw: AnsiString;
+  S: String;
 begin
   Result := False;
   TempFile := ExpandConstant('{tmp}\wsl_list.txt');
-  // `wsl --list --quiet` prints distros in UTF-16LE; write to a file then read
+  // `wsl --list --quiet` writes BOM-less UTF-16LE. Inno's Unicode
+  // LoadStringsFromFile mis-decodes that as ANSI (a NUL between every byte), so a
+  // direct `Line = 'EduBotics'` never matched and this returned False even when the
+  // distro WAS registered — which silently skipped Step 5's offline image load via
+  // ShouldPullImages -> IsDistroRegistered (the pilot bug). Every other consumer of
+  // this command in the repo strips the NULs (import_edubotics_wsl.ps1,
+  // load_images.ps1, verify_system.ps1, gui/app/docker_manager.py); do the same
+  // here: load the raw bytes, drop the NULs (and CR), then whole-line match.
+  // Validated live against a real registered distro (old=FALSE, new=TRUE).
   if not Exec(ExpandConstant('{cmd}'), '/c wsl --list --quiet > "' + TempFile + '" 2>&1', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
     exit;
-  if not LoadStringsFromFile(TempFile, Lines) then
+  if not LoadStringFromFile(TempFile, Raw) then
     exit;
-  for i := 0 to GetArrayLength(Lines) - 1 do
-  begin
-    Line := Trim(Lines[i]);
-    if Line = 'EduBotics' then
-    begin
-      Result := True;
-      exit;
-    end;
-  end;
+  S := String(Raw);
+  StringChangeEx(S, #0, '', True);   // drop the interleaved UTF-16 NUL high-bytes
+  StringChangeEx(S, #13, '', True);  // drop CR; LF remains the line separator
+  if Pos(#10 + 'EduBotics' + #10, #10 + S + #10) > 0 then
+    Result := True;
 end;
 
 // Check if a reboot is required (flag written by install_prerequisites.ps1)

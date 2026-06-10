@@ -21,7 +21,14 @@ param(
     [string]$UsbipdMsiSha256 = $env:EDUBOTICS_USBIPD_SHA256
 )
 
-$ErrorActionPreference = "Stop"
+# EAP=Continue, NOT Stop (load-bearing — mirrors verify_system.ps1). In Windows
+# PowerShell 5.1 a native command (wsl/docker) writing to stderr is promoted to a
+# TERMINATING NativeCommandError under EAP=Stop — for every redirection form. Under
+# Stop `wsl --install` (which prints feature/progress text to stderr) threw on a
+# clean WSL-less PC before its $LASTEXITCODE was ever checked. Native outcomes are
+# checked via $LASTEXITCODE; do NOT revert to Stop without wrapping every wsl/docker
+# call in try/catch.
+$ErrorActionPreference = "Continue"
 $needsReboot = $false
 
 # ── Diagnostics sink ───────────────────────────────────────────────────────

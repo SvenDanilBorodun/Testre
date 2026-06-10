@@ -458,6 +458,30 @@ def _bundled_digest_for(image: str) -> Optional[str]:
     return None
 
 
+def _image_present_locally(image: str) -> bool:
+    """True if ``image`` exists in the local Docker store, regardless of whether
+    it carries a RepoDigest.
+
+    A ``docker load``-ed bundle image (present, EMPTY RepoDigests — moby#22011)
+    and an ABSENT image both make ``_get_local_repo_digest`` return None, but
+    only the former should trust the sidecar digest. Without this distinction a
+    stale sidecar for a DELETED image (e.g. the distro was re-created while the
+    install-dir ``bundled_digests.json`` survived) would make ``_image_is_current``
+    report the image as current and SILENTLY SKIP the pull it actually needs —
+    then ``compose up`` fails with ``manifest unknown``. Cheap: only called when
+    the RepoDigest is empty (bundle or absent), never for a normal pulled image.
+    """
+    try:
+        result = subprocess.run(
+            _docker_cmd("image", "inspect", image, "--format", "{{.Id}}"),
+            capture_output=True, text=True, timeout=10,
+            **_SUBPROCESS_KWARGS,
+        )
+        return result.returncode == 0
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+
+
 def _resolve_local_digest(image: str) -> tuple[Optional[str], bool]:
     """Return ``(digest, is_bundled)`` for the locally-present ``image``.
 
@@ -466,10 +490,17 @@ def _resolve_local_digest(image: str) -> tuple[Optional[str], bool]:
     fall back to the sidecar's manifest-list digest. The fallback is confined
     here so ``_get_local_repo_digest`` stays repo-only and the post-pull
     freshness record keeps reflecting a real pull.
+
+    The sidecar fallback is gated on the image ACTUALLY being present
+    (``_image_present_locally``): an empty RepoDigest also means "absent", and a
+    stale sidecar for a deleted image must NOT be reported as current (that would
+    skip a required pull → ``manifest unknown`` at compose up).
     """
     repo = _get_local_repo_digest(image)
     if repo is not None:
         return repo, False
+    if not _image_present_locally(image):
+        return None, False
     bundled = _bundled_digest_for(image)
     return bundled, (bundled is not None)
 

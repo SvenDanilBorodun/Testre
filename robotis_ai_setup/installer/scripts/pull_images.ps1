@@ -85,12 +85,26 @@ foreach ($name in $repoNames) {
     $current++
     $primary = "${Registry}/${name}:${ImageTag}"
     Write-Host "`n   [$current/$total] Pulling $primary ..." -ForegroundColor White
-    wsl -d $DistroName -- docker pull $primary
-    if ($LASTEXITCODE -eq 0) {
+    # Retry the PRIMARY (GHCR) a few times before falling back. GHCR/Fastly
+    # throws transient 502/503 Bad-Gateway errors mid-pull (observed on a German
+    # classroom rig); an immediate Docker Hub fallback on a single blip would
+    # stampede 30 PCs onto rate-limited Docker Hub (the 100/6h limit this whole
+    # migration exists to escape). The GUI (_pull_one_image) and the Jetson agent
+    # already retry; match that here. 5s/10s backoff between attempts.
+    $pulled = $false
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        wsl -d $DistroName -- docker pull $primary
+        if ($LASTEXITCODE -eq 0) { $pulled = $true; break }
+        if ($attempt -lt 3) {
+            Write-Host "   GHCR pull failed (attempt $attempt/3), retrying..." -ForegroundColor Yellow
+            Start-Sleep -Seconds (5 * $attempt)
+        }
+    }
+    if ($pulled) {
         Write-OK "$primary pulled"
         continue
     }
-    # Primary (GHCR) failed — fall back to the digest-identical Docker Hub twin
+    # All GHCR attempts failed — fall back to the digest-identical Docker Hub twin
     # and re-tag it to the primary name so docker-compose's ${REGISTRY} ref
     # resolves locally. Drop the redundant fallback tag afterwards (layers stay,
     # kept by the primary tag). Only hard-fail if BOTH registries fail.

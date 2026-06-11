@@ -22,21 +22,16 @@ name: docker-publish
 
 on:
   push:
-    # Tag-push trigger is KEPT (per maintainer decision): a direct tag
-    # push starts the docker build immediately rather than waiting for
-    # release.yml's W1+W2+W3 chain (~10 min on the critical path). The
-    # concurrency block below uses cancel-in-progress=false + a per-ref
-    # group, so when release.yml's chain also reaches docker-publish on
-    # the same tag, the second invocation queues instead of racing.
-    # Trade-off: the queued second build re-publishes the same images
-    # (--no-cache --pull rebuilds from scratch); accepted for now in
-    # exchange for faster time-to-image-on-Docker-Hub on tag push.
-    # YAML mappings forbid duplicate keys, so branch+path filters and tag
-    # triggers must share a single `push:` block. Note: when `paths` is
-    # set, `paths` is ignored for tag pushes (GHA-specific behavior) so
-    # tag pushes still fire on this same block.
+    # NOTE (2026-06-11): the standalone tag-push trigger (tags: ["v*.*.*"]) was
+    # REMOVED. The GHCR dual-push copies image manifests FROM Docker Hub TO GHCR,
+    # which reads from Docker Hub; running the build+retag twice per tag (this
+    # standalone trigger AND release.yml's W4 reusable call) doubled those reads
+    # and hit Docker Hub's authenticated 429 rate limit, failing v2.8.2's retag.
+    # On a tag push, ONLY release.yml now builds — via the workflow_call below.
+    # (This reverses the earlier "keep the dual-fire for faster time-to-image"
+    # maintainer decision: with the GHCR cross-registry copy the dual-fire is a
+    # net liability, not a win.) Main-branch pushes still build :latest here.
     branches: [main]
-    tags: ["v*.*.*"]
     paths:
       - "robotis_ai_setup/docker/**"
       - "open_manipulator/**"
@@ -44,7 +39,7 @@ on:
       - "tools/**"
       - ".github/workflows/docker-publish.yml"
   workflow_call:
-    # Allows release.yml to invoke this as a reusable workflow.
+    # Allows release.yml to invoke this as a reusable workflow (the tag path).
   workflow_dispatch:
     inputs:
       cleanup_dirty_tags:
@@ -309,29 +304,33 @@ jobs:
             _retag "${HUB}/${repo}:${tag}" "$source"
           }
 
-          # _both: apply an IMMUTABLE tag to Hub (existence-gated) AND GHCR
-          # (always create — idempotent; GHCR has no free existence probe).
-          _both() {
-            local repo="$1" tag="$2" source="$3"
-            _maybe_retag_hub "$repo" "$tag" "$source"
-            _retag "${GHCR}/${repo}:${tag}" "$source"
-          }
-
           for REPO in $AMD64_REPOS $ARM64_REPOS; do
-            SRC="${HUB}/${REPO}:${SRC_TAG}"
-            _both "$REPO" "$SHORT" "$SRC"                        # sha-short (immutable)
-            _both "$REPO" "${{ github.sha }}" "$SRC"             # full-sha (immutable)
-            # :latest — Hub already has it (build-images.sh); GHCR needs it copied.
-            _retag "${GHCR}/${REPO}:${SRC_TAG}" "$SRC"
+            HUB_SRC="${HUB}/${REPO}:${SRC_TAG}"     # :latest pushed by build-images.sh
+            GHCR_SRC="${GHCR}/${REPO}:${SRC_TAG}"   # :latest seeded on GHCR below
+
+            # ONE cross-registry copy per repo: Hub:latest -> GHCR:latest. EVERY
+            # other GHCR tag is then derived from GHCR:latest (intra-GHCR), so we
+            # read image manifests FROM Docker Hub at most ONCE per repo. The old
+            # form copied all 5 GHCR tags straight from Hub (5 cross-registry
+            # reads/repo), which — combined with the dual-fire — hit Docker Hub's
+            # authenticated 429 rate limit on v2.8.2's retag (the migration's
+            # whole point is to stop reading from Docker Hub).
+            _retag "$GHCR_SRC" "$HUB_SRC"
+
+            # Immutable tags on BOTH registries, each derived from its OWN :latest
+            # (intra-registry — no cross-registry / Hub reads beyond the one above).
+            _maybe_retag_hub "$REPO" "$SHORT" "$HUB_SRC"
+            _retag "${GHCR}/${REPO}:${SHORT}" "$GHCR_SRC"            # sha-short
+            _maybe_retag_hub "$REPO" "${{ github.sha }}" "$HUB_SRC"
+            _retag "${GHCR}/${REPO}:${{ github.sha }}" "$GHCR_SRC"   # full-sha
             if [ -n "$SEMVER" ]; then
-              _both "$REPO" "$SEMVER" "$SRC"                     # e.g. 2.5.4 (immutable, both)
-              # Floating minor tag: ALWAYS re-point on BOTH registries.
-              # _maybe_retag_hub's existence probe would skip it forever after
-              # X.Y.0 (confirmed: :2.5 stuck at the 2.5.4 build). Nothing
-              # student-facing consumes :X.Y (versions.env pins X.Y.Z) —
-              # operator-clarity tag.
-              _retag "${HUB}/${REPO}:${SEMVER%.*}" "$SRC"        # e.g. 2.5 — always advance
-              _retag "${GHCR}/${REPO}:${SEMVER%.*}" "$SRC"
+              _maybe_retag_hub "$REPO" "$SEMVER" "$HUB_SRC"
+              _retag "${GHCR}/${REPO}:${SEMVER}" "$GHCR_SRC"         # e.g. 2.8.2
+              # Floating minor tag: ALWAYS re-point on BOTH registries (the
+              # existence probe would freeze it at X.Y.0). Nothing student-facing
+              # consumes :X.Y — versions.env pins X.Y.Z.
+              _retag "${HUB}/${REPO}:${SEMVER%.*}" "$HUB_SRC"        # e.g. 2.8
+              _retag "${GHCR}/${REPO}:${SEMVER%.*}" "$GHCR_SRC"
             fi
           done
 

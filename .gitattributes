@@ -36,12 +36,3 @@ robotis_ai_setup/wsl_rootfs/ROOTFS_VERSION  text eol=lf
 *.jpg                 binary
 *.ico                 binary
 *.exe                 binary
-# Offline-bundle launcher source (installer/stub/) is C cross-compiled on the
-# Linux runner. Pin LF so the German wide-string literals + comments are never
-# CRLF-mangled on a Windows dev checkout (autocrlf=true). The produced launcher
-# .exe is covered by `*.exe binary` above; the .dat is runner-generated (never
-# committed).
-robotis_ai_setup/installer/stub/*.c        text eol=lf
-robotis_ai_setup/installer/stub/*.h        text eol=lf
-robotis_ai_setup/installer/stub/*.rc       text eol=lf
-robotis_ai_setup/installer/stub/*.manifest text eol=lf

@@ -7,7 +7,8 @@ plan as a follow-up smoke step.
 
 What we cover:
   - _images_from_compose: parses image: lines from the compose file
-  - _is_dockerhub_reachable: returns True/False based on socket success
+  - _is_registry_reachable: True/False from GHCR-then-Hub socket probes
+  - _pull_one_image_with_retries: GHCR→Docker Hub fallback + re-tag
   - _get_local_repo_digest: parses `docker image inspect` output
   - _get_remote_manifest_digest: picks linux/arm64 from the manifest list
   - _parse_digest_candidates / _get_remote_digest_candidates: the 970905d
@@ -92,6 +93,8 @@ class TestImagesFromCompose(unittest.TestCase):
             os.unlink(path)
 
     def test_expands_registry_default(self):
+        # The regex expands ${REGISTRY:-<anything>} to the resolved REGISTRY
+        # constant, regardless of what default the compose file carries.
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yml", delete=False) as f:
             f.write(
                 "services:\n"
@@ -100,9 +103,10 @@ class TestImagesFromCompose(unittest.TestCase):
             )
             path = f.name
         try:
-            with patch.object(agent, "COMPOSE_PATH", Path(path)):
+            with patch.object(agent, "COMPOSE_PATH", Path(path)), \
+                    patch.object(agent, "REGISTRY", "ghcr.io/svendanilborodun"):
                 images = agent._images_from_compose()
-            self.assertEqual(images, ["nettername/foo:arm64-latest"])
+            self.assertEqual(images, ["ghcr.io/svendanilborodun/foo:arm64-latest"])
         finally:
             os.unlink(path)
 
@@ -111,21 +115,32 @@ class TestImagesFromCompose(unittest.TestCase):
             self.assertEqual(agent._images_from_compose(), [])
 
 
-class TestDockerhubReachable(unittest.TestCase):
+class TestRegistryReachable(unittest.TestCase):
     def test_returns_true_when_connect_succeeds(self):
         mock_sock = MagicMock()
         mock_sock.__enter__ = MagicMock(return_value=mock_sock)
         mock_sock.__exit__ = MagicMock(return_value=None)
         with patch("agent.socket.create_connection", return_value=mock_sock):
-            self.assertTrue(agent._is_dockerhub_reachable())
+            self.assertTrue(agent._is_registry_reachable())
 
-    def test_returns_false_on_oserror(self):
+    def test_returns_false_on_oserror_for_both_hosts(self):
+        # OSError on every probe (primary GHCR + fallback Hub) -> offline.
         with patch("agent.socket.create_connection", side_effect=OSError("ENETUNREACH")):
-            self.assertFalse(agent._is_dockerhub_reachable())
+            self.assertFalse(agent._is_registry_reachable())
 
     def test_returns_false_on_timeout(self):
         with patch("agent.socket.create_connection", side_effect=socket.timeout):
-            self.assertFalse(agent._is_dockerhub_reachable())
+            self.assertFalse(agent._is_registry_reachable())
+
+    def test_falls_back_to_hub_when_primary_down(self):
+        def _side(addr, timeout):
+            if addr == ("ghcr.io", 443):
+                raise OSError("ghcr down")
+            return MagicMock()
+        with patch.object(agent, "REGISTRY", "ghcr.io/svendanilborodun"), \
+                patch.object(agent, "REGISTRY_FALLBACK", "nettername"), \
+                patch("agent.socket.create_connection", side_effect=_side):
+            self.assertTrue(agent._is_registry_reachable())
 
 
 class TestDigests(unittest.TestCase):
@@ -247,7 +262,7 @@ class TestDigestCandidates(unittest.TestCase):
         # no pull, digest carried into the last-pull payload.
         saved: dict = {}
         with patch.object(agent, "_images_from_compose", return_value=["nettername/foo:arm64-latest"]), \
-                patch.object(agent, "_is_dockerhub_reachable", return_value=True), \
+                patch.object(agent, "_is_registry_reachable", return_value=True), \
                 patch.object(agent, "_get_local_repo_digest", return_value=_LIST_DIGEST), \
                 patch.object(agent, "_get_remote_digest_candidates",
                              return_value={_LIST_DIGEST, _ARM64_DIGEST}), \
@@ -259,7 +274,7 @@ class TestDigestCandidates(unittest.TestCase):
 
     def test_non_match_triggers_pull(self):
         with patch.object(agent, "_images_from_compose", return_value=["nettername/foo:arm64-latest"]), \
-                patch.object(agent, "_is_dockerhub_reachable", return_value=True), \
+                patch.object(agent, "_is_registry_reachable", return_value=True), \
                 patch.object(agent, "_get_local_repo_digest", return_value=_LIST_DIGEST), \
                 patch.object(agent, "_get_remote_digest_candidates",
                              return_value={_ARM64_DIGEST, _AMD64_DIGEST}), \
@@ -268,6 +283,58 @@ class TestDigestCandidates(unittest.TestCase):
                 patch.object(agent, "_save_last_pull_info"):
             agent._auto_pull_images()
         pull_mock.assert_called_once_with("nettername/foo:arm64-latest")
+
+
+class TestRegistryFallbackHelpers(unittest.TestCase):
+    def test_registry_host(self):
+        self.assertEqual(agent._registry_host("ghcr.io/svendanilborodun"), "ghcr.io")
+        self.assertEqual(agent._registry_host("nettername"), "registry-1.docker.io")
+
+    def test_fallback_ref(self):
+        with patch.object(agent, "REGISTRY", "ghcr.io/svendanilborodun"), \
+                patch.object(agent, "REGISTRY_FALLBACK", "nettername"):
+            self.assertEqual(
+                agent._fallback_ref("ghcr.io/svendanilborodun/foo-jetson:latest"),
+                "nettername/foo-jetson:latest",
+            )
+            self.assertIsNone(agent._fallback_ref("nettername/foo:1"))
+
+
+class TestPullFallback(unittest.TestCase):
+    """_pull_one_image_with_retries falls back to the Docker Hub twin when every
+    primary (GHCR) attempt fails, re-tagging it to the primary name."""
+
+    def test_fallback_to_hub_on_primary_failure(self):
+        calls = []
+        digest = "sha256:" + "d" * 64
+
+        def fake_run(cmd, *a, **k):
+            calls.append(cmd)
+            if cmd[:2] == ["docker", "pull"]:
+                ref = cmd[2]
+                # GHCR fails, the Docker Hub twin succeeds.
+                return MagicMock(returncode=0 if ref.startswith("nettername/") else 1, stderr="x")
+            if cmd[:2] == ["docker", "tag"]:
+                return MagicMock(returncode=0, stderr="")
+            # _get_local_repo_digest inspect
+            return MagicMock(returncode=0, stdout=f"nettername/foo@{digest}|\n")
+
+        with patch.object(agent, "REGISTRY", "ghcr.io/svendanilborodun"), \
+                patch.object(agent, "REGISTRY_FALLBACK", "nettername"), \
+                patch.object(agent._shutdown, "wait", return_value=False), \
+                patch("agent.subprocess.run", side_effect=fake_run):
+            result = agent._pull_one_image_with_retries(
+                "ghcr.io/svendanilborodun/foo:latest"
+            )
+
+        self.assertEqual(result, digest)
+        pulls = [c[2] for c in calls if c[:2] == ["docker", "pull"]]
+        self.assertIn("nettername/foo:latest", pulls)
+        tags = [c for c in calls if c[:2] == ["docker", "tag"]]
+        self.assertTrue(
+            any(t[2] == "nettername/foo:latest"
+                and t[3] == "ghcr.io/svendanilborodun/foo:latest" for t in tags)
+        )
 
 
 class TestLastPullInfo(unittest.TestCase):

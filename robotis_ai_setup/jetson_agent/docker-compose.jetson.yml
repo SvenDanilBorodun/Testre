@@ -14,7 +14,7 @@ services:
     # v2.3.0 follow-up: separate repo (-jetson suffix) for the arm64
     # Jetson images so bumping them never collides with the amd64
     # student images at ${REGISTRY}/open-manipulator. See build-images.sh.
-    image: ${REGISTRY:-nettername}/open-manipulator-jetson:latest
+    image: ${REGISTRY:-ghcr.io/svendanilborodun}/open-manipulator-jetson:latest
     container_name: edubotics_open_manipulator
     privileged: true
     cap_add: [SYS_NICE]
@@ -75,7 +75,7 @@ services:
 
   physical_ai_server:
     # v2.3.0 follow-up: separate repo (-jetson suffix), same reason.
-    image: ${REGISTRY:-nettername}/physical-ai-server-jetson:latest
+    image: ${REGISTRY:-ghcr.io/svendanilborodun}/physical-ai-server-jetson:latest
     container_name: edubotics_physical_ai_server
     depends_on:
       open_manipulator:

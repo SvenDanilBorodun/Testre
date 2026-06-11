@@ -95,10 +95,10 @@ try {
     }
     Write-OK "EduBotics-Umgebung eingerichtet"
 
-    # Phase 2: Provide images — OFFLINE bundle (staged to %ProgramData% before
-    # the reboot by stage_bundle.ps1) if present, else a Docker Hub pull.
+    # Phase 2: Provide images — pull from the primary registry (GHCR) with a
+    # Docker Hub fallback (pull_images.ps1 reads versions.env for tag+registry).
     Write-Step "Schritt 2/2: Docker-Images werden bereitgestellt..."
-    & (Join-Path $PSScriptRoot "load_images.ps1") -BundleDir (Join-Path $env:ProgramData "EduBotics\bundle")
+    & (Join-Path $PSScriptRoot "pull_images.ps1")
     if ($LASTEXITCODE -ne 0) {
         Write-FAIL "Images konnten nicht bereitgestellt werden (exit $LASTEXITCODE). Bei Online-Installation bitte Internetverbindung prüfen."
         exit 1

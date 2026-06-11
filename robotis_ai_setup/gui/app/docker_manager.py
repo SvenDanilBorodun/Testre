@@ -36,10 +36,8 @@ _keepalive_proc: Optional[subprocess.Popen] = None
 
 from .constants import (
     ALL_IMAGES,
-    BUNDLED_DIGESTS_FILE,
     COMPOSE_FILE,
     COMPOSE_GPU_FILE,
-    DOCKER_DIR,
     DOCKER_DIR_WSL,
     DOCKER_STARTUP_TIMEOUT,
     ENV_FILE,
@@ -50,6 +48,8 @@ from .constants import (
     LAST_PULL_FILE,
     MANIFEST_INSPECT_TIMEOUT,
     NETWORK_PROBE_TIMEOUT,
+    REGISTRY,
+    REGISTRY_FALLBACK,
     SKIP_AUTO_PULL,
     WSL_DISTRO_NAME,
     _to_wsl_path,
@@ -261,24 +261,44 @@ def images_exist() -> dict[str, bool]:
 # ── Auto-pull on GUI start: helpers ───────────────────────────────────────
 
 
-def is_dockerhub_reachable(timeout: int = NETWORK_PROBE_TIMEOUT) -> bool:
-    """Fast pre-check whether Docker Hub is reachable BEFORE we burn ~12 min
-    on retry storms when offline. Plain TCP probe to `registry-1.docker.io:443`
-    — doesn't authenticate, doesn't pull, just confirms the network can route
-    to the registry.
+def _registry_host(registry: str) -> str:
+    """The DNS host to TCP-probe for a registry value.
 
-    Used by check_for_updates() to short-circuit the per-image loop on a
-    disconnected classroom network. Returns False on any DNS / connection /
-    timeout error.
+    A value carrying a host segment (``ghcr.io/svendanilborodun``) probes that
+    host; a bare owner (``nettername``, no dot/colon in the first segment) means
+    Docker Hub, whose registry endpoint is ``registry-1.docker.io``.
     """
+    first = registry.split("/", 1)[0]
+    if "." in first or ":" in first or first == "localhost":
+        return first.split(":", 1)[0]
+    return "registry-1.docker.io"
+
+
+def _host_reachable(host: str, timeout: int = NETWORK_PROBE_TIMEOUT) -> bool:
+    """Plain TCP probe to ``host:443`` — no auth, no pull, just confirms the
+    network can route to the registry. Returns False on any DNS / connection /
+    timeout error."""
     try:
-        with socket.create_connection(
-            ("registry-1.docker.io", 443),
-            timeout=timeout,
-        ):
+        with socket.create_connection((host, 443), timeout=timeout):
             return True
     except (OSError, socket.timeout):
         return False
+
+
+def is_registry_reachable(timeout: int = NETWORK_PROBE_TIMEOUT) -> bool:
+    """Fast pre-check whether ANY image registry is reachable BEFORE we burn
+    ~12 min on retry storms when offline. Probes the PRIMARY registry host
+    (GHCR), then the FALLBACK host (Docker Hub) — only when NEITHER answers do
+    we treat the classroom as offline.
+
+    Used by check_for_updates() / _compose_pull() to short-circuit the per-image
+    loop on a disconnected network.
+    """
+    if _host_reachable(_registry_host(REGISTRY), timeout):
+        return True
+    if REGISTRY_FALLBACK and _host_reachable(_registry_host(REGISTRY_FALLBACK), timeout):
+        return True
+    return False
 
 
 def _get_local_repo_digest(image: str) -> Optional[str]:
@@ -378,12 +398,11 @@ def _parse_digest_candidates(text: str) -> set:
     return set(_DIGEST_RE.findall(text or ""))
 
 
-def _get_remote_digest_candidates(
+def _remote_digest_candidates_for_ref(
     image: str,
     timeout: int = MANIFEST_INSPECT_TIMEOUT,
 ) -> set:
-    """Return the set of registry-side digests that count as "local image is
-    current" for ``image`` — empty set on any error.
+    """Probe ONE registry ref for its digest candidate set — empty on any error.
 
     Primary probe: ``docker buildx imagetools inspect`` (one registry
     round-trip, no layer downloads; buildx ships in the EduBotics rootfs).
@@ -394,6 +413,10 @@ def _get_remote_digest_candidates(
     CHILD digest — the old equality comparison therefore never matched,
     layer 2 of the 2.2.4 hardening silently never fired, and every GUI
     launch logged "Update verfügbar" + did a no-op pull (fixed 2026-06-05).
+
+    ``buildx imagetools inspect`` handles anonymous reads of PUBLIC GHCR
+    packages; we keep it (not plain ``docker manifest inspect``, which is
+    flaky against some GHCR images).
     """
     try:
         result = subprocess.run(
@@ -412,64 +435,52 @@ def _get_remote_digest_candidates(
     return {digest} if digest else set()
 
 
-# ── Offline-bundle sidecar: recognise docker-load'd images as current ─────────
+def _get_remote_digest_candidates(
+    image: str,
+    timeout: int = MANIFEST_INSPECT_TIMEOUT,
+) -> set:
+    """Registry-side digest candidate set for ``image``, trying the PRIMARY ref
+    (GHCR) first and the digest-identical Docker Hub twin second.
 
-
-def _load_bundled_digests() -> dict:
-    """Read the install-seeded ``bundled_digests.json`` sidecar, or ``{}``.
-
-    Written by ``installer/scripts/load_images.ps1`` when the OFFLINE bundle
-    is loaded — maps each loaded image ref to its registry manifest-LIST
-    digest. Absent on online / self-update installs (then the sidecar fallback
-    never fires). Read fresh each call: the file is tiny, set once at install,
-    and re-reading avoids any stale-cache bug across a self-update.
+    Because the images are dual-pushed via ``docker buildx imagetools create``
+    (a content-addressed copy), the manifest digest is byte-identical on both
+    registries — so a local RepoDigest from EITHER registry matches this set,
+    and the digest pre-check stays correct whichever registry served the pull.
     """
-    try:
-        with open(BUNDLED_DIGESTS_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        return data if isinstance(data, dict) else {}
-    except (OSError, ValueError):
-        return {}
+    candidates = _remote_digest_candidates_for_ref(image, timeout)
+    if candidates:
+        return candidates
+    fb = _fallback_ref(image)
+    if fb is not None:
+        return _remote_digest_candidates_for_ref(fb, timeout)
+    return set()
 
 
-def _bundled_digest_for(image: str) -> Optional[str]:
-    """The bundled manifest-list digest for ``image`` (full ``registry/repo:tag``
-    ref from ALL_IMAGES), or None.
+# ── Registry fallback: pull the Docker Hub twin when the primary (GHCR) fails ──
 
-    Matches the exact ref first, then tolerantly on the bare ``repo:tag`` so an
-    ``EDUBOTICS_REGISTRY`` override (ALL_IMAGES uses the override registry while
-    the bundle was saved under ``nettername/``) still resolves the digest.
+
+def _fallback_ref(image: str) -> Optional[str]:
+    """Map a PRIMARY (GHCR) image ref to its Docker Hub fallback twin, or None
+    if ``image`` isn't a primary-registry ref / no distinct fallback is set.
+
+    Both refs share the bare ``<name>:<tag>``; we swap the ``REGISTRY`` prefix
+    for ``REGISTRY_FALLBACK`` via an exact prefix match — NOT ``split('/')``,
+    which mis-parses a two-segment registry like ``ghcr.io/<owner>``.
     """
-    digests = _load_bundled_digests()
-    if not digests:
+    if not REGISTRY_FALLBACK or REGISTRY_FALLBACK == REGISTRY:
         return None
-    value = digests.get(image)
-    if isinstance(value, str) and value.startswith("sha256:"):
-        return value
-    bare = image.split("/", 1)[-1]
-    for key, val in digests.items():
-        if (
-            isinstance(val, str)
-            and val.startswith("sha256:")
-            and isinstance(key, str)
-            and key.split("/", 1)[-1] == bare
-        ):
-            return val
-    return None
+    prefix = REGISTRY + "/"
+    if not image.startswith(prefix):
+        return None
+    return REGISTRY_FALLBACK + "/" + image[len(prefix):]
 
 
 def _image_present_locally(image: str) -> bool:
-    """True if ``image`` exists in the local Docker store, regardless of whether
-    it carries a RepoDigest.
+    """True if ``image`` exists in the local Docker store.
 
-    A ``docker load``-ed bundle image (present, EMPTY RepoDigests — moby#22011)
-    and an ABSENT image both make ``_get_local_repo_digest`` return None, but
-    only the former should trust the sidecar digest. Without this distinction a
-    stale sidecar for a DELETED image (e.g. the distro was re-created while the
-    install-dir ``bundled_digests.json`` survived) would make ``_image_is_current``
-    report the image as current and SILENTLY SKIP the pull it actually needs —
-    then ``compose up`` fails with ``manifest unknown``. Cheap: only called when
-    the RepoDigest is empty (bundle or absent), never for a normal pulled image.
+    Used to detect whether a pull (primary or fallback-retag) actually landed
+    the image before ``compose up`` reuses it — and to avoid re-pulling a
+    present image.
     """
     try:
         result = subprocess.run(
@@ -482,46 +493,71 @@ def _image_present_locally(image: str) -> bool:
         return False
 
 
-def _resolve_local_digest(image: str) -> tuple[Optional[str], bool]:
-    """Return ``(digest, is_bundled)`` for the locally-present ``image``.
+def _pull_fallback_and_retag(image: str, idx: int, total: int, log=None) -> bool:
+    """Pull the Docker Hub twin of ``image`` and re-tag it to the primary name.
 
-    Prefers the real RepoDigest (a genuinely-pulled image). Only when that is
-    empty — the signature of a ``docker load``-ed bundle image (moby#22011) —
-    fall back to the sidecar's manifest-list digest. The fallback is confined
-    here so ``_get_local_repo_digest`` stays repo-only and the post-pull
-    freshness record keeps reflecting a real pull.
-
-    The sidecar fallback is gated on the image ACTUALLY being present
-    (``_image_present_locally``): an empty RepoDigest also means "absent", and a
-    stale sidecar for a deleted image must NOT be reported as current (that would
-    skip a required pull → ``manifest unknown`` at compose up).
+    The twin is dual-pushed (digest-identical), so re-tagging it to the primary
+    ``${REGISTRY}`` ref lets compose find it with no `manifest unknown`, and the
+    local RepoDigest still matches the remote candidate set. Returns True iff the
+    primary-named image is present locally afterwards. Best-effort — never raises.
     """
-    repo = _get_local_repo_digest(image)
-    if repo is not None:
-        return repo, False
-    if not _image_present_locally(image):
-        return None, False
-    bundled = _bundled_digest_for(image)
-    return bundled, (bundled is not None)
+    fb = _fallback_ref(image)
+    if fb is None:
+        return False
+    if not _pull_one_image(fb, idx, total, log=log, stall_timeout=120, max_retries=2):
+        return False
+    try:
+        result = subprocess.run(
+            _docker_cmd("tag", fb, image),
+            capture_output=True, text=True, timeout=15,
+            **_SUBPROCESS_KWARGS,
+        )
+        return result.returncode == 0
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+
+
+def _pull_image_with_fallback(
+    image: str,
+    idx: int,
+    total: int,
+    log=None,
+    stall_timeout: int = 120,
+    max_retries: int = 2,
+) -> bool:
+    """Pull ``image`` from the PRIMARY registry (GHCR); on an unreachable host
+    or a failed pull, fall back to the digest-identical Docker Hub twin and
+    re-tag it to the primary name. Returns True iff the primary-named image is
+    present locally afterwards.
+    """
+    short = image.split("/")[-1]
+    if _host_reachable(_registry_host(REGISTRY)):
+        if _pull_one_image(
+            image, idx, total, log=log,
+            stall_timeout=stall_timeout, max_retries=max_retries,
+        ):
+            return True
+    if _fallback_ref(image) is None:
+        return False
+    if log:
+        log(
+            f"  [{idx+1}/{total}] {short}: Primär-Registry (GHCR) nicht verfügbar "
+            "— wechsle zu Docker Hub..."
+        )
+    return _pull_fallback_and_retag(image, idx, total, log=log)
 
 
 def _image_is_current(image: str, remote_candidates: Optional[set] = None) -> bool:
-    """Whether the locally-present ``image`` (a real pull OR a docker-load'd
-    bundle) already matches the registry, so a pull would be a no-op.
-
-    For a BUNDLED image whose remote digest probe fails (offline / rate-limited
-    Docker Hub), treat it as current rather than re-downloading the multi-GB
-    image we already loaded. A genuinely-pulled image with a failed probe keeps
-    the existing 'unknown → pull' behaviour.
+    """Whether the locally-present ``image`` already matches the registry, so a
+    pull would be a no-op. A normally-pulled image always carries a RepoDigest;
+    a missing digest or a non-matching one means a pull is needed.
     """
-    digest, is_bundled = _resolve_local_digest(image)
+    digest = _get_local_repo_digest(image)
     if digest is None:
         return False
     if remote_candidates is None:
         remote_candidates = _get_remote_digest_candidates(image)
-    if digest in remote_candidates:
-        return True
-    return bool(is_bundled and not remote_candidates)
+    return digest in remote_candidates
 
 
 def _load_last_pull_info() -> Optional[dict]:
@@ -590,20 +626,25 @@ def get_last_pull_status() -> dict:
 
 
 def check_for_updates(log=None) -> bool:
-    """Auto-pull on GUI start: keep student images in lockstep with
-    nettername/<image>:latest on Docker Hub.
+    """Auto-pull on GUI start: keep student images in lockstep with the pinned
+    tag on the PRIMARY registry (GHCR), with a Docker Hub fallback.
+
+    Each image is pulled from GHCR; if GHCR is unreachable or the pull fails,
+    the digest-identical Docker Hub twin is pulled and re-tagged to the primary
+    name (``_pull_image_with_fallback``), so compose's single ``${REGISTRY}``
+    reference always resolves.
 
     Hardened in 2.2.4 with three layers of defence so the existing-installs
     case (.exe rolled out months ago, F62-F66 just pushed) actually picks up
     the new bits next launch instead of silently keeping the cached version
     forever:
 
-      1. **Offline short-circuit** (``is_dockerhub_reachable``): a 5 s TCP
-         probe to registry-1.docker.io:443. If unreachable, we don't even
-         try to pull — the existing per-image 2-retry × 120 s stall storm
-         would otherwise burn ~12 min before giving up on a classroom
-         without internet. Logged in German so the operator sees we
-         intentionally skipped, not silently failed.
+      1. **Offline short-circuit** (``is_registry_reachable``): a 5 s TCP
+         probe to the primary (GHCR) host, then the fallback (Docker Hub) host.
+         If NEITHER answers, we don't even try to pull — the existing per-image
+         2-retry × 120 s stall storm would otherwise burn ~12 min before giving
+         up on a classroom without internet. Logged in German so the operator
+         sees we intentionally skipped, not silently failed.
       2. **Manifest-digest pre-check** (``_get_remote_digest_candidates`` vs
          ``_get_local_repo_digest``): for each image, fetch the registry's
          digest candidate set (manifest-list digest + per-platform child
@@ -631,10 +672,10 @@ def check_for_updates(log=None) -> bool:
             log("  Auto-Pull deaktiviert (EDUBOTICS_SKIP_AUTO_PULL=1).")
         return False
 
-    if not is_dockerhub_reachable():
+    if not is_registry_reachable():
         if log:
             log(
-                "  Docker Hub nicht erreichbar — vorhandene Images werden verwendet. "
+                "  Registry (GHCR/Docker Hub) nicht erreichbar — vorhandene Images werden verwendet. "
                 "Bitte Internetverbindung prüfen, falls aktuelle Versionen benötigt werden."
             )
         return False
@@ -646,13 +687,7 @@ def check_for_updates(log=None) -> bool:
     for i, image in enumerate(ALL_IMAGES):
         short = image.split("/")[-1]
 
-        # Sidecar-aware local digest: a docker-load'd OFFLINE-bundle image has
-        # an EMPTY RepoDigests (moby#22011), so the raw probe returns None and
-        # the pre-check below would treat it as "lokal nicht vorhanden" and
-        # re-download the full image on the first online launch. The fallback
-        # substitutes the install-seeded manifest-LIST digest, which IS a
-        # member of remote_candidates for a buildx-pushed image.
-        local_digest, is_bundled = _resolve_local_digest(image)
+        local_digest = _get_local_repo_digest(image)
         remote_candidates = _get_remote_digest_candidates(image)
 
         # Layer 2: digest pre-check. Saves the per-image docker-pull
@@ -661,13 +696,10 @@ def check_for_updates(log=None) -> bool:
         # manifest-LIST digest for buildx-pushed images, the old probe
         # returned the amd64 CHILD digest — a fixed pair never matched, so
         # this layer was silently dead (every launch: "Update verfügbar" +
-        # no-op pull). The candidate set contains both shapes. For a bundled
-        # image whose remote probe failed (flaky Hub), treat as current so we
-        # don't re-download the loaded bytes.
-        if local_digest is not None and (
-            local_digest in remote_candidates
-            or (is_bundled and not remote_candidates)
-        ):
+        # no-op pull). The candidate set contains both shapes, from EITHER
+        # registry (dual-push → identical digests), so the check is correct
+        # whichever registry served the cached pull.
+        if local_digest is not None and local_digest in remote_candidates:
             if log:
                 log(f"  [{i+1}/{total}] {short}: bereits aktuell ({local_digest[7:19]}).")
             pulled_digests[image] = local_digest
@@ -698,7 +730,7 @@ def check_for_updates(log=None) -> bool:
         except (FileNotFoundError, subprocess.TimeoutExpired):
             old_id = ""
 
-        ok = _pull_one_image(image, i, total, log=log, stall_timeout=120, max_retries=2)
+        ok = _pull_image_with_fallback(image, i, total, log=log, stall_timeout=120, max_retries=2)
         if not ok:
             if log:
                 log(f"  Übersprungen: {short} (aktuelle Version wird weiter verwendet).")
@@ -1008,17 +1040,19 @@ def _compose_pull(gpu: bool = False, service: Optional[str] = None, log=None) ->
     still start on cached images instead of refusing to boot. A pinned
     immutable tag already present locally makes this a fast manifest no-op.
 
-    OFFLINE-BUNDLE caveat: `docker compose pull` ALWAYS contacts the registry,
-    and a docker-load'd bundle image has an EMPTY RepoDigests so the registry
-    treats it as absent and re-downloads the full image (moby#46664). So we
-    must short-circuit: if the relevant pinned image(s) are already current
-    (real RepoDigest match OR the bundle sidecar), skip the compose pull and
-    let `up --force-recreate` reuse the present images (compose's default
-    pull_policy `missing` never re-pulls a present image). Service-scoped so
-    cloud-only (physical_ai_manager only) isn't forced to pull because an
-    unrelated image looks stale. EDUBOTICS_SKIP_AUTO_PULL additionally forces
-    the skip (consistent with the launch path); `up` still self-heals a
-    genuinely-missing image.
+    Pre-check: if the relevant pinned image(s) are already current (RepoDigest
+    matches the registry's manifest digest), skip the compose pull and let
+    `up --force-recreate` reuse the present images (compose's default pull_policy
+    `missing` never re-pulls a present image). Service-scoped so cloud-only
+    (physical_ai_manager only) isn't forced to pull because an unrelated image
+    looks stale. EDUBOTICS_SKIP_AUTO_PULL additionally forces the skip; `up`
+    still self-heals a genuinely-missing image.
+
+    REGISTRY FALLBACK: `docker compose pull` references the PRIMARY ${REGISTRY}
+    (GHCR). If GHCR is degraded and a relevant image is still missing afterwards,
+    we pull the digest-identical Docker Hub twin and re-tag it to the primary
+    name so `up --force-recreate` reuses it instead of failing on
+    `manifest unknown`.
     """
     relevant = (
         [_SERVICE_IMAGE[service]]
@@ -1032,12 +1066,12 @@ def _compose_pull(gpu: bool = False, service: Optional[str] = None, log=None) ->
             return True
         # Offline short-circuit (mirrors check_for_updates): can't pull anyway,
         # and probing each image's remote digest would burn ~10 s/image of
-        # manifest timeouts before the bundle fallback fires. Reuse the present
-        # images; `up` self-heals a genuinely missing one (and fails clearly if
-        # offline + missing — same as today's --ignore-pull-failures path).
-        if not is_dockerhub_reachable():
+        # manifest timeouts. Reuse the present images; `up` self-heals a
+        # genuinely missing one (and fails clearly if offline + missing — same
+        # as today's --ignore-pull-failures path).
+        if not is_registry_reachable():
             if log:
-                log("  Docker Hub nicht erreichbar — vorhandene Images werden verwendet.")
+                log("  Registry (GHCR/Docker Hub) nicht erreichbar — vorhandene Images werden verwendet.")
             return True
         if all(_image_is_current(img) for img in relevant):
             if log:
@@ -1050,6 +1084,7 @@ def _compose_pull(gpu: bool = False, service: Optional[str] = None, log=None) ->
     if service:
         args.append(service)
     cmd = _docker_cmd(*args, cwd_wsl=DOCKER_DIR_WSL)
+    ok = False
     try:
         result = subprocess.run(
             cmd,
@@ -1061,21 +1096,37 @@ def _compose_pull(gpu: bool = False, service: Optional[str] = None, log=None) ->
             capture_output=True, text=True, timeout=1800,
             **_SUBPROCESS_KWARGS,
         )
-        if result.returncode != 0 and log:
+        ok = result.returncode == 0
+        if not ok and log:
             detail = (result.stderr or "").strip().splitlines()
             tail = detail[-1][:140] if detail else ""
             log(
                 "Hinweis: Image-Aktualisierung übersprungen — vorhandene Images "
                 f"werden verwendet.{(' (' + tail + ')') if tail else ''}"
             )
-        return result.returncode == 0
     except (FileNotFoundError, subprocess.TimeoutExpired) as e:
         if log:
             log(
                 "Hinweis: Image-Aktualisierung übersprungen — vorhandene Images "
                 f"werden verwendet. ({e})"
             )
-        return False
+
+    # GHCR fallback: a relevant image still missing after the compose pull means
+    # GHCR is degraded/unauthorized. If Docker Hub is reachable, pull the
+    # digest-identical twin and re-tag it to the primary name so the recreate
+    # below reuses it. Best-effort — never blocks the boot.
+    missing = [img for img in relevant if not _image_present_locally(img)]
+    if missing and REGISTRY_FALLBACK and _host_reachable(_registry_host(REGISTRY_FALLBACK)):
+        if log:
+            log("  GHCR unvollständig — fehlende Images werden von Docker Hub geladen...")
+        landed = 0
+        for i, img in enumerate(missing):
+            if _pull_fallback_and_retag(img, i, len(missing), log=log):
+                landed += 1
+        if landed == len(missing):
+            ok = True
+
+    return ok
 
 
 def start_containers(gpu: bool = False, log=None) -> bool:

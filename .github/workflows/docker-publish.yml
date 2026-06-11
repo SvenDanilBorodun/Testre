@@ -215,6 +215,13 @@ jobs:
     needs: [build]
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # packages: write is needed to push to GHCR via GITHUB_TOKEN. Per-job (not
+    # workflow-level) keeps the grant scoped to the only job that pushes. NOTE
+    # (zizmor superset rule): release.yml's `docker` job that calls this workflow
+    # MUST also grant packages: write, or the whole release startup-fails.
+    permissions:
+      contents: read
+      packages: write
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
@@ -224,13 +231,27 @@ jobs:
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: GHCR login
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121  # v4.1.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - name: Set up Buildx
         uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd  # v4.0.0
-      - name: Re-tag each image with the canonical set
+      - name: Re-tag each image with the canonical set (Docker Hub + GHCR)
         run: |
           set -e
           SHORT=$(echo "${{ github.sha }}" | cut -c1-7)
-          SRC_TAG="latest"   # build-images.sh pushed :latest as the source
+          SRC_TAG="latest"   # build-images.sh pushed :latest to Docker Hub as the source
+
+          # DUAL-PUSH: every tag is created on BOTH Docker Hub (nettername/*,
+          # the permanent fallback) and GHCR (ghcr.io/svendanilborodun/*, the
+          # student-facing primary). `imagetools create` is a content-addressed
+          # copy, so the cross-registry manifest digest is BYTE-IDENTICAL — which
+          # is what makes the runtime GHCR→Hub fallback a safe, same-image swap.
+          HUB="nettername"
+          GHCR="ghcr.io/svendanilborodun"
 
           # Derive the semver tag if this is a tag push.
           REF="${GITHUB_REF#refs/tags/}"
@@ -245,11 +266,10 @@ jobs:
           # _tag_exists: FREE existence probe via the Docker Hub web API
           # (hub.docker.com), which is NOT the registry pull endpoint and does
           # NOT consume the 200/6h pull-rate budget. nettername/* repos are
-          # public so no auth is needed. This is the key to surviving Docker Hub
-          # rate-limiting: on a re-run, tags created by a prior partial attempt
-          # are SKIPPED, so we only spend pull budget on the tags actually
-          # missing — instead of re-reading :latest ~20x every run (the 2026-05
-          # 429 hard-block that failed v2.5.4's retag 3x in a row).
+          # public so no auth is needed. On a re-run, tags created by a prior
+          # partial attempt are SKIPPED, so we only spend pull budget on the
+          # tags actually missing. Docker-Hub-specific — GHCR has no equivalent
+          # web API of this shape, so the GHCR side always re-creates (idempotent).
           _tag_exists() {
             local repo="$1" tag="$2" code
             code=$(curl -fsS -o /dev/null -w "%{http_code}" --max-time 15 \
@@ -273,34 +293,71 @@ jobs:
             return 1
           }
 
-          # _maybe_retag: skip tags that already exist (free), retag only what's
-          # missing. Correct for IMMUTABLE tags only (sha, sha-short, X.Y.Z) —
-          # the floating :X.Y minor tag below must bypass this probe.
-          _maybe_retag() {
+          # _maybe_retag_hub: skip Hub tags that already exist (free), retag only
+          # what's missing. Correct for IMMUTABLE tags only (sha, sha-short,
+          # X.Y.Z) — the floating :X.Y minor tag below must bypass this probe.
+          _maybe_retag_hub() {
             local repo="$1" tag="$2" source="$3"
             if _tag_exists "$repo" "$tag"; then
-              echo "skip (already on Docker Hub): nettername/${repo}:${tag}"
+              echo "skip (already on Docker Hub): ${HUB}/${repo}:${tag}"
               return 0
             fi
-            _retag "nettername/${repo}:${tag}" "$source"
+            _retag "${HUB}/${repo}:${tag}" "$source"
+          }
+
+          # _both: apply an IMMUTABLE tag to Hub (existence-gated) AND GHCR
+          # (always create — idempotent; GHCR has no free existence probe).
+          _both() {
+            local repo="$1" tag="$2" source="$3"
+            _maybe_retag_hub "$repo" "$tag" "$source"
+            _retag "${GHCR}/${repo}:${tag}" "$source"
           }
 
           for REPO in $AMD64_REPOS $ARM64_REPOS; do
-            SRC="nettername/${REPO}:${SRC_TAG}"
-            _maybe_retag "$REPO" "$SHORT" "$SRC"                 # sha-short (immutable)
-            _maybe_retag "$REPO" "${{ github.sha }}" "$SRC"      # full-sha (immutable)
+            SRC="${HUB}/${REPO}:${SRC_TAG}"
+            _both "$REPO" "$SHORT" "$SRC"                        # sha-short (immutable)
+            _both "$REPO" "${{ github.sha }}" "$SRC"             # full-sha (immutable)
+            # :latest — Hub already has it (build-images.sh); GHCR needs it copied.
+            _retag "${GHCR}/${REPO}:${SRC_TAG}" "$SRC"
             if [ -n "$SEMVER" ]; then
-              _maybe_retag "$REPO" "$SEMVER" "$SRC"              # e.g. 2.5.4
-              # Floating minor tag: ALWAYS re-point. _maybe_retag's existence
-              # probe would skip it forever after X.Y.0 (confirmed: :2.5 stuck
-              # at the 2.5.4 build, :2.6 at 2.6.0 — the probe sees the old tag
-              # and bails). 1 imagetools manifest read+write per repo per tag
-              # push; idempotent when already current. Nothing student-facing
-              # consumes :X.Y (versions.env pins X.Y.Z) — operator clarity tag.
-              _retag "nettername/${REPO}:${SEMVER%.*}" "$SRC"    # e.g. 2.5 — always advance
+              _both "$REPO" "$SEMVER" "$SRC"                     # e.g. 2.5.4 (immutable, both)
+              # Floating minor tag: ALWAYS re-point on BOTH registries.
+              # _maybe_retag_hub's existence probe would skip it forever after
+              # X.Y.0 (confirmed: :2.5 stuck at the 2.5.4 build). Nothing
+              # student-facing consumes :X.Y (versions.env pins X.Y.Z) —
+              # operator-clarity tag.
+              _retag "${HUB}/${REPO}:${SEMVER%.*}" "$SRC"        # e.g. 2.5 — always advance
+              _retag "${GHCR}/${REPO}:${SEMVER%.*}" "$SRC"
             fi
-            # :latest is already what build-images.sh pushed; no action needed.
           done
+
+      - name: Verify GHCR ↔ Docker Hub digest parity (dual-push integrity)
+        run: |
+          set -e
+          HUB="nettername"
+          GHCR="ghcr.io/svendanilborodun"
+          REPOS="open-manipulator physical-ai-server physical-ai-manager open-manipulator-jetson physical-ai-server-jetson"
+          _digest() {
+            # The registry-side manifest-list digest — the `Digest:` header line
+            # of `imagetools inspect` (stable across buildx versions; both refs
+            # are read identically so the comparison is apples-to-apples).
+            docker buildx imagetools inspect "$1" 2>/dev/null | awk '/^Digest:/{print $2; exit}'
+          }
+          fail=0
+          for REPO in $REPOS; do
+            H=$(_digest "${HUB}/${REPO}:latest")
+            G=$(_digest "${GHCR}/${REPO}:latest")
+            if [ -z "$G" ]; then
+              echo "::error::GHCR ${GHCR}/${REPO}:latest not found — dual-push failed (is the package created?)."
+              fail=1
+            elif [ "$H" != "$G" ]; then
+              echo "::error::Digest mismatch for ${REPO}: Hub=$H GHCR=$G"
+              fail=1
+            else
+              echo "OK ${REPO}: Hub == GHCR ($G)"
+            fi
+          done
+          [ "$fail" = "0" ]
 
   versions-env:
     # Emit docker/versions.env capturing the canonical IMAGE_TAG this build
@@ -340,9 +397,11 @@ jobs:
           cat > out/versions.env <<EOF
           # Generated by .github/workflows/docker-publish.yml — DO NOT EDIT BY HAND.
           # Consumed by pull_images.ps1, verify_system.ps1, and gui/app/constants.py.
-          # When this file is missing, those readers fall back to IMAGE_TAG=latest.
+          # When this file is missing, those readers fall back to IMAGE_TAG=latest
+          # and their hardcoded registry defaults (GHCR primary, Docker Hub fallback).
           IMAGE_TAG=${{ steps.derive.outputs.IMAGE_TAG }}
-          REGISTRY=nettername
+          REGISTRY=ghcr.io/svendanilborodun
+          REGISTRY_FALLBACK=nettername
           EOF
           cat out/versions.env
       - name: Upload versions.env artifact

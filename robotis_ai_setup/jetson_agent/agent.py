@@ -79,6 +79,14 @@ IMAGE_FRESHNESS_WARN_DAYS = 14
 NETWORK_PROBE_TIMEOUT = 5
 MANIFEST_INSPECT_TIMEOUT = 30
 
+# Image registry: PRIMARY = GHCR (public packages have no anonymous pull rate
+# limit); FALLBACK = Docker Hub (dual-pushed → digest-identical). Compose
+# substitutes ${REGISTRY:-...} from the REGISTRY env var (setup.sh writes it into
+# jetson.env); the agent pulls the primary and falls back to the Hub twin,
+# re-tagging it to the primary name so compose's ${REGISTRY} ref resolves.
+REGISTRY = os.environ.get("REGISTRY", "ghcr.io/svendanilborodun")
+REGISTRY_FALLBACK = os.environ.get("REGISTRY_FALLBACK", "nettername")
+
 # Safe-home pose for v1 — matches the workflow HOME pose in CLAUDE.md §16.
 # Moves follower to this configuration on every claim so the previous
 # student's last pose isn't where the new student starts.
@@ -143,15 +151,43 @@ def _load_env() -> dict:
 # ---------------------------------------------------------------------------
 
 
-def _is_dockerhub_reachable(timeout: int = NETWORK_PROBE_TIMEOUT) -> bool:
+def _registry_host(registry: str) -> str:
+    """The DNS host to TCP-probe for a registry value. A host-bearing value
+    (``ghcr.io/<owner>``) probes that host; a bare owner (``nettername``) means
+    Docker Hub (``registry-1.docker.io``)."""
+    first = registry.split("/", 1)[0]
+    if "." in first or ":" in first or first == "localhost":
+        return first.split(":", 1)[0]
+    return "registry-1.docker.io"
+
+
+def _host_reachable(host: str, timeout: int = NETWORK_PROBE_TIMEOUT) -> bool:
     try:
-        with socket.create_connection(
-            ("registry-1.docker.io", 443),
-            timeout=timeout,
-        ):
+        with socket.create_connection((host, 443), timeout=timeout):
             return True
     except (OSError, socket.timeout):
         return False
+
+
+def _is_registry_reachable(timeout: int = NETWORK_PROBE_TIMEOUT) -> bool:
+    """True if EITHER the primary (GHCR) or fallback (Docker Hub) host answers."""
+    if _host_reachable(_registry_host(REGISTRY), timeout):
+        return True
+    if REGISTRY_FALLBACK and _host_reachable(_registry_host(REGISTRY_FALLBACK), timeout):
+        return True
+    return False
+
+
+def _fallback_ref(image: str) -> Optional[str]:
+    """Map a PRIMARY (GHCR) image ref to its Docker Hub twin, or None if it
+    isn't a primary-registry ref. Exact prefix swap (not split('/'), which
+    mis-parses a two-segment ghcr.io/<owner> registry)."""
+    if not REGISTRY_FALLBACK or REGISTRY_FALLBACK == REGISTRY:
+        return None
+    prefix = REGISTRY + "/"
+    if not image.startswith(prefix):
+        return None
+    return REGISTRY_FALLBACK + "/" + image[len(prefix):]
 
 
 def _get_local_repo_digest(image: str) -> Optional[str]:
@@ -273,11 +309,10 @@ def _images_from_compose() -> list[str]:
         stripped = line.strip()
         if stripped.startswith("image:"):
             ref = stripped.removeprefix("image:").strip().strip('"').strip("'")
-            # Expand ${REGISTRY:-default} in a minimal way.
-            ref = ref.replace(
-                "${REGISTRY:-nettername}",
-                os.environ.get("REGISTRY", "nettername"),
-            )
+            # Expand ${REGISTRY:-<anything>} to the resolved REGISTRY. A regex
+            # (not an exact-literal str.replace) so a change to the compose
+            # default can never silently break expansion.
+            ref = re.sub(r"\$\{REGISTRY:-[^}]*\}", REGISTRY, ref)
             if ref:
                 images.append(ref)
     return images
@@ -332,6 +367,32 @@ def _pull_one_image_with_retries(image: str) -> Optional[str]:
             logger.warning("  attempt %d timed out after %d s", attempt + 1, timeout_s)
         except Exception as exc:  # noqa: BLE001 — defensive sweep
             logger.warning("  attempt %d raised: %s", attempt + 1, exc)
+
+    # Primary (GHCR) exhausted — pull the digest-identical Docker Hub twin and
+    # re-tag it to the primary name so compose's ${REGISTRY} ref resolves.
+    fb = _fallback_ref(image)
+    if fb is not None:
+        logger.info("  primary registry exhausted — falling back to %s", fb)
+        try:
+            pull = subprocess.run(
+                ["docker", "pull", fb],
+                capture_output=True, text=True, timeout=timeout_s,
+            )
+            if pull.returncode == 0:
+                tag = subprocess.run(
+                    ["docker", "tag", fb, image],
+                    capture_output=True, text=True, timeout=15,
+                )
+                if tag.returncode == 0:
+                    new_local = _get_local_repo_digest(image)
+                    logger.info("  pulled via fallback (%s)", (new_local or "no-digest")[:19])
+                    return new_local
+            logger.warning("  fallback pull failed: %s", pull.stderr.strip())
+        except subprocess.TimeoutExpired:
+            logger.warning("  fallback pull timed out after %d s", timeout_s)
+        except Exception as exc:  # noqa: BLE001 — defensive sweep
+            logger.warning("  fallback pull raised: %s", exc)
+
     logger.warning(
         "  giving up on %s after %d attempts — keeping cached digest %s",
         image, _PULL_MAX_ATTEMPTS, (last_local or "none")[:19],
@@ -359,9 +420,10 @@ def _auto_pull_images() -> None:
     if not images:
         return
 
-    if not _is_dockerhub_reachable():
+    if not _is_registry_reachable():
         logger.warning(
-            "Docker Hub not reachable — skipping auto-pull (running with cached images)"
+            "No image registry (GHCR/Docker Hub) reachable — skipping auto-pull "
+            "(running with cached images)"
         )
         return
 
@@ -475,6 +537,7 @@ def _scrubbed_env() -> dict:
         "LC_ALL",
         # Compose-substitution vars (read at parse time).
         "REGISTRY",
+        "REGISTRY_FALLBACK",
         "ROS_DOMAIN_ID",
         # Passed THROUGH to physical_ai_server as HF_TOKEN (intentional —
         # the container needs to download policies from HF).

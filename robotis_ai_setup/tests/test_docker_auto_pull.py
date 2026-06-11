@@ -1,9 +1,12 @@
 """Cross-platform unit tests for the 2.2.4 auto-pull-on-GUI-start hardening.
 
-Covers the three layers added on 2026-05-15 in `docker_manager.check_for_updates`:
-  1. Offline short-circuit via `is_dockerhub_reachable`.
+Covers the three layers in `docker_manager.check_for_updates`:
+  1. Offline short-circuit via `is_registry_reachable` (GHCR then Docker Hub).
   2. Manifest-digest pre-check (skip pull when local == remote).
   3. Last-pull persistence + freshness banner.
+
+Plus the GHCR→Docker Hub registry fallback (`_pull_image_with_fallback`,
+`_fallback_ref`, `_registry_host`) added in the GHCR migration.
 
 These tests intentionally don't depend on Windows-specific argv shapes (the
 existing `test_docker_manager_wsl.py` covers that for the Windows runner) so
@@ -31,34 +34,84 @@ from gui.app import docker_manager  # noqa: E402
 from gui.app.constants import ALL_IMAGES, IMAGE_FRESHNESS_WARN_DAYS  # noqa: E402
 
 
-class TestIsDockerhubReachable(unittest.TestCase):
-    """Layer 1: offline short-circuit so the GUI doesn't burn ~12 min of
-    retry storm on a disconnected classroom network."""
+class TestRegistryHelpers(unittest.TestCase):
+    """Registry host extraction + fallback-ref derivation."""
 
-    @patch("gui.app.docker_manager.socket.create_connection")
-    def test_returns_true_when_socket_opens(self, mock_conn):
-        mock_conn.return_value.__enter__ = MagicMock(return_value=MagicMock())
-        mock_conn.return_value.__exit__ = MagicMock(return_value=False)
-        self.assertTrue(docker_manager.is_dockerhub_reachable())
-        mock_conn.assert_called_once_with(
-            ("registry-1.docker.io", 443),
-            timeout=docker_manager.NETWORK_PROBE_TIMEOUT,
+    def test_registry_host_for_ghcr(self):
+        self.assertEqual(
+            docker_manager._registry_host("ghcr.io/svendanilborodun"), "ghcr.io"
         )
 
-    @patch("gui.app.docker_manager.socket.create_connection")
-    def test_returns_false_on_connection_refused(self, mock_conn):
-        mock_conn.side_effect = OSError("connection refused")
-        self.assertFalse(docker_manager.is_dockerhub_reachable())
+    def test_registry_host_for_bare_owner_is_docker_hub(self):
+        self.assertEqual(
+            docker_manager._registry_host("nettername"), "registry-1.docker.io"
+        )
+
+    def test_registry_host_strips_port(self):
+        self.assertEqual(docker_manager._registry_host("localhost:5000"), "localhost")
+
+    def test_fallback_ref_swaps_primary_for_fallback(self):
+        with patch.object(docker_manager, "REGISTRY", "ghcr.io/svendanilborodun"), \
+             patch.object(docker_manager, "REGISTRY_FALLBACK", "nettername"):
+            self.assertEqual(
+                docker_manager._fallback_ref(
+                    "ghcr.io/svendanilborodun/physical-ai-server:2.8.1"
+                ),
+                "nettername/physical-ai-server:2.8.1",
+            )
+
+    def test_fallback_ref_none_for_non_primary_ref(self):
+        with patch.object(docker_manager, "REGISTRY", "ghcr.io/svendanilborodun"), \
+             patch.object(docker_manager, "REGISTRY_FALLBACK", "nettername"):
+            self.assertIsNone(docker_manager._fallback_ref("nettername/foo:1"))
+
+    def test_fallback_ref_none_when_fallback_equals_primary(self):
+        with patch.object(docker_manager, "REGISTRY", "nettername"), \
+             patch.object(docker_manager, "REGISTRY_FALLBACK", "nettername"):
+            self.assertIsNone(docker_manager._fallback_ref("nettername/foo:1"))
+
+
+class TestIsRegistryReachable(unittest.TestCase):
+    """Layer 1: offline short-circuit. Probes the primary (GHCR) host, then the
+    fallback (Docker Hub) host; offline only when NEITHER answers."""
+
+    def setUp(self):
+        self._p1 = patch.object(docker_manager, "REGISTRY", "ghcr.io/svendanilborodun")
+        self._p2 = patch.object(docker_manager, "REGISTRY_FALLBACK", "nettername")
+        self._p1.start()
+        self._p2.start()
+        self.addCleanup(self._p1.stop)
+        self.addCleanup(self._p2.stop)
 
     @patch("gui.app.docker_manager.socket.create_connection")
-    def test_returns_false_on_dns_failure(self, mock_conn):
-        mock_conn.side_effect = socket.gaierror("dns failed")
-        self.assertFalse(docker_manager.is_dockerhub_reachable())
+    def test_true_when_primary_opens(self, mock_conn):
+        # MagicMock supports the context-manager protocol used by _host_reachable.
+        self.assertTrue(docker_manager.is_registry_reachable())
+        # First probe targets the primary (GHCR) host.
+        self.assertEqual(mock_conn.call_args_list[0][0][0], ("ghcr.io", 443))
 
     @patch("gui.app.docker_manager.socket.create_connection")
-    def test_returns_false_on_timeout(self, mock_conn):
+    def test_falls_back_to_hub_when_primary_down(self, mock_conn):
+        def _side(addr, timeout):
+            if addr == ("ghcr.io", 443):
+                raise OSError("ghcr down")
+            return MagicMock()
+        mock_conn.side_effect = _side
+        self.assertTrue(docker_manager.is_registry_reachable())
+        # Probed both the primary and the fallback host.
+        probed = [c[0][0] for c in mock_conn.call_args_list]
+        self.assertIn(("ghcr.io", 443), probed)
+        self.assertIn(("registry-1.docker.io", 443), probed)
+
+    @patch("gui.app.docker_manager.socket.create_connection")
+    def test_false_when_both_down(self, mock_conn):
+        mock_conn.side_effect = OSError("all down")
+        self.assertFalse(docker_manager.is_registry_reachable())
+
+    @patch("gui.app.docker_manager.socket.create_connection")
+    def test_false_on_timeout_both(self, mock_conn):
         mock_conn.side_effect = socket.timeout()
-        self.assertFalse(docker_manager.is_dockerhub_reachable())
+        self.assertFalse(docker_manager.is_registry_reachable())
 
 
 class TestLocalRepoDigest(unittest.TestCase):
@@ -283,7 +336,7 @@ class TestCheckForUpdatesOrchestration(unittest.TestCase):
     """Top-level: the hardened `check_for_updates` short-circuits the right
     paths in the right order."""
 
-    @patch("gui.app.docker_manager.is_dockerhub_reachable")
+    @patch("gui.app.docker_manager.is_registry_reachable")
     @patch.object(docker_manager, "SKIP_AUTO_PULL", True)
     def test_skip_env_var_short_circuits(self, mock_reach):
         logs: list[str] = []
@@ -293,8 +346,8 @@ class TestCheckForUpdatesOrchestration(unittest.TestCase):
         self.assertTrue(any("Auto-Pull deaktiviert" in line for line in logs))
 
     @patch("gui.app.docker_manager._save_last_pull_info")
-    @patch("gui.app.docker_manager._pull_one_image")
-    @patch("gui.app.docker_manager.is_dockerhub_reachable", return_value=False)
+    @patch("gui.app.docker_manager._pull_image_with_fallback")
+    @patch("gui.app.docker_manager.is_registry_reachable", return_value=False)
     def test_offline_skips_all_pulls(self, _reach, mock_pull, mock_save):
         logs: list[str] = []
         result = docker_manager.check_for_updates(log=logs.append)
@@ -302,11 +355,11 @@ class TestCheckForUpdatesOrchestration(unittest.TestCase):
         mock_pull.assert_not_called()
         mock_save.assert_not_called()
         self.assertTrue(
-            any("Docker Hub nicht erreichbar" in line for line in logs)
+            any("Registry (GHCR/Docker Hub) nicht erreichbar" in line for line in logs)
         )
 
     @patch("gui.app.docker_manager._save_last_pull_info")
-    @patch("gui.app.docker_manager._pull_one_image")
+    @patch("gui.app.docker_manager._pull_image_with_fallback")
     @patch(
         "gui.app.docker_manager._get_remote_digest_candidates",
         return_value={"sha256:samedigestforall"},
@@ -315,7 +368,7 @@ class TestCheckForUpdatesOrchestration(unittest.TestCase):
         "gui.app.docker_manager._get_local_repo_digest",
         return_value="sha256:samedigestforall",
     )
-    @patch("gui.app.docker_manager.is_dockerhub_reachable", return_value=True)
+    @patch("gui.app.docker_manager.is_registry_reachable", return_value=True)
     def test_digest_match_skips_pull(
         self, _reach, _local, _remote, mock_pull, mock_save
     ):
@@ -330,7 +383,7 @@ class TestCheckForUpdatesOrchestration(unittest.TestCase):
         self.assertEqual(bereits_count, len(ALL_IMAGES))
 
     @patch("gui.app.docker_manager._save_last_pull_info")
-    @patch("gui.app.docker_manager._pull_one_image", return_value=True)
+    @patch("gui.app.docker_manager._pull_image_with_fallback", return_value=True)
     @patch(
         "gui.app.docker_manager._get_remote_digest_candidates",
         return_value={"sha256:newremoteversion"},
@@ -339,7 +392,7 @@ class TestCheckForUpdatesOrchestration(unittest.TestCase):
         "gui.app.docker_manager._get_local_repo_digest",
         return_value="sha256:oldlocalversion",
     )
-    @patch("gui.app.docker_manager.is_dockerhub_reachable", return_value=True)
+    @patch("gui.app.docker_manager.is_registry_reachable", return_value=True)
     def test_digest_mismatch_triggers_pull(
         self, _reach, _local, _remote, mock_pull, _save
     ):
@@ -347,8 +400,87 @@ class TestCheckForUpdatesOrchestration(unittest.TestCase):
         with patch("gui.app.docker_manager.subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0, stdout="oldid\n")
             docker_manager.check_for_updates(log=lambda *_: None)
-        # _pull_one_image called once per image
+        # the fallback-aware pull is called once per image
         self.assertEqual(mock_pull.call_count, len(ALL_IMAGES))
+
+
+class TestPullWithFallback(unittest.TestCase):
+    """Primary→fallback pull: GHCR first, Docker Hub twin + retag on failure."""
+
+    def setUp(self):
+        for attr, val in (("REGISTRY", "ghcr.io/svendanilborodun"),
+                          ("REGISTRY_FALLBACK", "nettername")):
+            p = patch.object(docker_manager, attr, val)
+            p.start()
+            self.addCleanup(p.stop)
+
+    @patch("gui.app.docker_manager._pull_one_image", return_value=True)
+    @patch("gui.app.docker_manager._host_reachable", return_value=True)
+    def test_primary_success_no_fallback(self, _reach, mock_pull):
+        ok = docker_manager._pull_image_with_fallback(
+            "ghcr.io/svendanilborodun/physical-ai-server:latest", 0, 1
+        )
+        self.assertTrue(ok)
+        mock_pull.assert_called_once()
+        self.assertEqual(
+            mock_pull.call_args[0][0],
+            "ghcr.io/svendanilborodun/physical-ai-server:latest",
+        )
+
+    @patch("gui.app.docker_manager.subprocess.run")
+    @patch("gui.app.docker_manager._pull_one_image")
+    @patch("gui.app.docker_manager._host_reachable", return_value=True)
+    def test_fallback_pull_and_retag_on_primary_failure(self, _reach, mock_pull, mock_run):
+        # GHCR pull fails, the Docker Hub twin succeeds; `docker tag` returns 0.
+        mock_pull.side_effect = lambda image, *a, **k: image.startswith("nettername/")
+        mock_run.return_value = MagicMock(returncode=0)
+        ok = docker_manager._pull_image_with_fallback(
+            "ghcr.io/svendanilborodun/physical-ai-server:latest", 0, 1
+        )
+        self.assertTrue(ok)
+        pulled = [c[0][0] for c in mock_pull.call_args_list]
+        self.assertIn("ghcr.io/svendanilborodun/physical-ai-server:latest", pulled)
+        self.assertIn("nettername/physical-ai-server:latest", pulled)
+        # A `docker tag nettername/... ghcr.io/...` was issued.
+        self.assertIn("tag", mock_run.call_args[0][0])
+
+    @patch("gui.app.docker_manager.subprocess.run")
+    @patch("gui.app.docker_manager._pull_one_image", return_value=False)
+    @patch("gui.app.docker_manager._host_reachable", return_value=True)
+    def test_both_fail_returns_false(self, _reach, _pull, _run):
+        ok = docker_manager._pull_image_with_fallback(
+            "ghcr.io/svendanilborodun/physical-ai-server:latest", 0, 1
+        )
+        self.assertFalse(ok)
+
+
+class TestRegistryResolution(unittest.TestCase):
+    """constants.py resolves REGISTRY / REGISTRY_FALLBACK / IMAGE_TAG via
+    env → docker/versions.env → hardcoded default (GHCR primary)."""
+
+    def test_resolve_setting_env_override(self):
+        from gui.app import constants
+        with patch.dict(os.environ, {"EDUBOTICS_TEST_REG": "myreg"}):
+            self.assertEqual(
+                constants._resolve_setting("EDUBOTICS_TEST_REG", "TEST_REG", "default"),
+                "myreg",
+            )
+
+    def test_resolve_setting_default_when_absent(self):
+        from gui.app import constants
+        self.assertEqual(
+            constants._resolve_setting(
+                "EDUBOTICS_DEFINITELY_UNSET_XYZ", "UNSET_KEY_XYZ", "thedefault"
+            ),
+            "thedefault",
+        )
+
+    @unittest.skipIf(os.environ.get("EDUBOTICS_REGISTRY"), "registry overridden in env")
+    def test_default_registry_is_ghcr_with_hub_fallback(self):
+        from gui.app import constants
+        self.assertTrue(constants.REGISTRY.startswith("ghcr.io/"))
+        self.assertEqual(constants.REGISTRY_FALLBACK, "nettername")
+        self.assertTrue(all(img.startswith("ghcr.io/") for img in constants.ALL_IMAGES))
 
 
 if __name__ == "__main__":

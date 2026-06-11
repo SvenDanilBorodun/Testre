@@ -77,7 +77,7 @@ concurrency:
 # change, the matching caller job below MUST change in the same PR:
 #   supabase-migrate.yml   → contents: read + pull-requests: write
 #   railway-deploy-*.yml   → contents: read
-#   docker-publish.yml     → contents: read
+#   docker-publish.yml     → contents: read + packages: write (GHCR push)
 #   release-installer.yml  → contents: write (GH-Release asset upload)
 permissions: {}
 
@@ -133,6 +133,7 @@ jobs:
     if: always() && needs.teacher-web.result == 'success'
     permissions:
       contents: read
+      packages: write  # docker-publish.yml's retag job pushes to GHCR (zizmor superset rule)
     uses: ./.github/workflows/docker-publish.yml
     secrets: inherit
 
@@ -151,212 +152,6 @@ jobs:
       contents: write  # release-installer.yml uploads the .exe to the GH Release
     uses: ./.github/workflows/release-installer.yml
     secrets: inherit
-
-  # ── W5b: Offline image bundle → Cloudflare R2 (LEAF, additive) ──
-  # Builds the TWO-FILE offline bundle and uploads it to R2 so NEW students
-  # install fully OFFLINE: a tiny mingw-cross-compiled launcher
-  # `EduBotics_Setup_Full.exe` + a companion `EduBotics_Setup_Full.dat` (the
-  # `EDBP1` container of the W5 inner installer + a `docker save` of the 3 amd64
-  # images + the manifest-digest sidecar). The student downloads both into one
-  # folder and double-clicks the .exe. Existing machines auto-update over the
-  # network via the small .exe and never touch this bundle.
-  #
-  # WHY TWO FILES (not one .exe): Windows refuses to LAUNCH any single .exe
-  # > ~4 GiB (PE image-size is a 32-bit field; arch-independent). Even the
-  # CUDA-slimmed ~5-6 GB bundle stays above 4 GiB, so a runnable one-file .exe
-  # is physically impossible — the launcher stays tiny and reads the big .dat
-  # with 64-bit I/O. See installer/stub/README.md.
-  #
-  # Heavy packaging runs on LINUX by necessity: windows-latest lacks the disk
-  # and upload-artifact caps at 5 GB; we upload straight to R2.
-  #
-  # LEAF + tag-push only + JOB-level continue-on-error + NOTHING depends on it:
-  # an R2/build failure can NEVER fail the release run or block W6 — online
-  # install + auto-update stay fully functional. Runs green-but-skipped until
-  # the operator mints the R2_* GHA secrets (the launcher source is in-repo).
-  bundle:
-    name: W5b. Build + upload offline bundle (R2)
-    needs: [installer]
-    if: always() && needs.installer.result == 'success' && startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
-    timeout-minutes: 90
-    continue-on-error: true   # JOB-level — a bundle failure must not fail the release
-    permissions:
-      contents: read
-      actions: read           # download the W5 inner-installer artifact (same run)
-    env:
-      REGISTRY: nettername
-      # aws-cli v2.25+ sends CRC64-NVME/CRC32 request checksums that R2 rejects
-      # ("x-amz-checksum-algorithm not implemented"); force when_required so
-      # PutObject + multipart succeed against R2.
-      AWS_DEFAULT_REGION: auto
-      AWS_REQUEST_CHECKSUM_CALCULATION: when_required
-      AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
-    steps:
-      - name: Checkout (installer/stub launcher source)
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-        with:
-          persist-credentials: false
-
-      - name: Preflight — is the bundle configured?
-        id: pre
-        env:
-          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
-          R2_KEY: ${{ secrets.R2_ACCESS_KEY_ID }}
-        run: |
-          ready=true
-          # The launcher is built from in-repo source (installer/stub/), so the
-          # only real gate is whether R2 is configured. Sanity-check the sources.
-          for f in robotis_ai_setup/installer/stub/main.c \
-                   robotis_ai_setup/installer/stub/edb_payload.c \
-                   robotis_ai_setup/installer/stub/edb_payload.h \
-                   robotis_ai_setup/installer/stub/pack_payload.py; do
-            if [ ! -f "$f" ]; then
-              echo "::warning::missing $f — skipping offline bundle."
-              ready=false
-            fi
-          done
-          if [ -z "$R2_ACCOUNT_ID" ] || [ -z "$R2_KEY" ]; then
-            echo "::warning::R2_* secrets not set — skipping offline bundle upload."
-            ready=false
-          fi
-          echo "ready=$ready" >> "$GITHUB_OUTPUT"
-
-      - name: Free disk space
-        if: steps.pre.outputs.ready == 'true'
-        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be
-        with:
-          tool-cache: true
-          android: true
-          dotnet: true
-          haskell: true
-          large-packages: true
-          swap-storage: true
-
-      - name: Resolve IMAGE_TAG from the release tag
-        id: tag
-        if: steps.pre.outputs.ready == 'true'
-        env:
-          GIT_REF_NAME: ${{ github.ref_name }}
-        run: |
-          TAG="${GIT_REF_NAME}"
-          echo "image_tag=${TAG#v}" >> "$GITHUB_OUTPUT"
-
-      - name: Docker Hub login
-        if: steps.pre.outputs.ready == 'true'
-        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Download inner installer (.exe) from W5
-        if: steps.pre.outputs.ready == 'true'
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
-        with:
-          name: EduBotics_Setup
-          path: inner
-
-      - name: Pull, save per image, checksum, collect digests (P0 size measure)
-        if: steps.pre.outputs.ready == 'true'
-        env:
-          IMAGE_TAG: ${{ steps.tag.outputs.image_tag }}
-        run: |
-          set -euo pipefail
-          mkdir -p sfx_root/images
-          digests="{}"
-          for repo in open-manipulator physical-ai-server physical-ai-manager; do
-            ref="${REGISTRY}/${repo}:${IMAGE_TAG}"
-            echo "::group::$ref"
-            # Manifest-LIST digest = the 'Digest:' header (== what a pull-by-tag
-            # RepoDigest records == what the GUI's _parse_digest_candidates
-            # extracts). Registry-side; independent of the local store.
-            list_digest="$(docker buildx imagetools inspect "$ref" | awk '/^Digest:/ {print $2; exit}')"
-            # Shape-assert the digest so a malformed sidecar value is caught at
-            # build time, not on a student PC (it must be a member of the GUI's
-            # _parse_digest_candidates set, i.e. sha256:<64 hex>).
-            if [[ ! "$list_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-              echo "::error::bad/empty manifest-list digest for $ref: '$list_digest'"; exit 1
-            fi
-            docker pull "$ref"
-            docker save "$ref" | gzip -1 > "sfx_root/images/${repo}.tar.gz"
-            ( cd sfx_root/images && sha256sum "${repo}.tar.gz" > "${repo}.tar.gz.sha256" )
-            docker image rm "$ref" >/dev/null 2>&1 || true   # release graph space now
-            digests="$(echo "$digests" | jq --arg k "$ref" --arg v "$list_digest" '. + {($k): $v}')"
-            echo "::endgroup::"
-          done
-          echo "$digests" | jq . > sfx_root/bundled_digests.json
-          cp inner/EduBotics_Setup.exe sfx_root/EduBotics_Setup.exe
-          echo "── bundle size (amd64 CUDA-slimmed) ──"
-          du -h sfx_root/images/*.tar.gz
-          du -sh sfx_root
-          cat sfx_root/bundled_digests.json
-          df -h /
-
-      - name: Build launcher + pack payload (two-file offline bundle)
-        if: steps.pre.outputs.ready == 'true'
-        run: |
-          set -euo pipefail
-          # A single runnable .exe > ~4 GiB cannot launch on Windows (PE image-size
-          # is a 32-bit field). So we ship a SMALL launcher .exe + a companion .dat
-          # the launcher reads with 64-bit I/O. See installer/stub/README.md.
-          # mingw-w64 cross-compiler (Ubuntu repos; retry transient mirror hiccups).
-          for i in 1 2 3; do
-            sudo apt-get update && \
-              sudo apt-get install -y --no-install-recommends gcc-mingw-w64-x86-64 && break
-            echo "apt-get retry $i/3"; sleep $((i * 5))
-          done
-          ( cd robotis_ai_setup/installer/stub && \
-            x86_64-w64-mingw32-windres launcher.rc launcher_res.o )
-          x86_64-w64-mingw32-gcc -O2 -municode -mwindows -std=c11 \
-            -finput-charset=UTF-8 -fwide-exec-charset=UTF-16LE \
-            -o EduBotics_Setup_Full.exe \
-            robotis_ai_setup/installer/stub/main.c \
-            robotis_ai_setup/installer/stub/edb_payload.c \
-            robotis_ai_setup/installer/stub/launcher_res.o \
-            -lcomctl32 -lshell32 -luser32 -lkernel32
-          file EduBotics_Setup_Full.exe
-          file EduBotics_Setup_Full.exe | grep -q 'PE32+ executable .*x86-64' \
-            || { echo "::error::launcher is not a 64-bit Windows PE"; exit 1; }
-          # Pack the whole sfx_root (inner installer + images/ + sidecar) into the
-          # companion .dat the launcher extracts at run time.
-          python3 robotis_ai_setup/installer/stub/pack_payload.py pack \
-            sfx_root EduBotics_Setup_Full.dat
-          ls -lh EduBotics_Setup_Full.exe EduBotics_Setup_Full.dat
-
-      - name: Upload to Cloudflare R2 (multipart) + verify
-        if: steps.pre.outputs.ready == 'true'
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
-          R2_BUCKET: ${{ secrets.R2_BUCKET }}
-          IMAGE_TAG: ${{ steps.tag.outputs.image_tag }}
-        run: |
-          set -euo pipefail
-          endpoint="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
-          # Upload BOTH the launcher and its payload. New students download both
-          # (the stable-named pair) into ONE folder, then double-click the .exe.
-          # The immutable versioned copies self-pair because the launcher derives
-          # the .dat name from its own basename (…_X.Y.Z.exe -> …_X.Y.Z.dat).
-          upload() {  # $1 = local file, $2 = R2 key
-            aws s3 cp "$1" "s3://${R2_BUCKET}/$2" \
-              --endpoint-url "$endpoint" \
-              --content-type application/octet-stream \
-              --content-disposition "attachment; filename=$(basename "$2")"
-          }
-          upload EduBotics_Setup_Full.exe "EduBotics_Setup_Full.exe"
-          upload EduBotics_Setup_Full.dat "EduBotics_Setup_Full.dat"
-          upload EduBotics_Setup_Full.exe "EduBotics_Setup_Full_${IMAGE_TAG}.exe"
-          upload EduBotics_Setup_Full.dat "EduBotics_Setup_Full_${IMAGE_TAG}.dat"
-          # head-object so a checksum/region failure surfaces LOUDLY rather than
-          # being masked by continue-on-error (which would otherwise leave the
-          # student download URL 404'ing silently). ALL FOUR objects must exist —
-          # the versioned pair backs pinned re-installs.
-          aws s3api head-object --bucket "$R2_BUCKET" --key "EduBotics_Setup_Full.exe" --endpoint-url "$endpoint"
-          aws s3api head-object --bucket "$R2_BUCKET" --key "EduBotics_Setup_Full.dat" --endpoint-url "$endpoint"
-          aws s3api head-object --bucket "$R2_BUCKET" --key "EduBotics_Setup_Full_${IMAGE_TAG}.exe" --endpoint-url "$endpoint"
-          aws s3api head-object --bucket "$R2_BUCKET" --key "EduBotics_Setup_Full_${IMAGE_TAG}.dat" --endpoint-url "$endpoint"
-          echo "Uploaded launcher + payload (${IMAGE_TAG}) to R2."
 
   # ── W6: Flip the student auto-update gate (must run AFTER the installer
   # .exe is attached to the GH Release, so /version never advertises a

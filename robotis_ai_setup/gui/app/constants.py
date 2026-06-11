@@ -32,35 +32,24 @@ UPDATE_API_URL = os.environ.get(
     "https://scintillating-empathy-production-1068.up.railway.app",
 )
 
-# Docker image registry — override with EDUBOTICS_REGISTRY env var.
-REGISTRY = os.environ.get("EDUBOTICS_REGISTRY", "nettername")
+def _read_versions_env(key: str) -> str:
+    """Return the value of ``key`` from ``docker/versions.env`` (the CI-baked
+    pin file beside the compose file), or ``""`` if the file or key is absent.
 
-
-def _read_image_tag_from_versions_env() -> str:
-    """Read IMAGE_TAG from docker/versions.env so the GUI references the
-    SAME image build that docker-compose pulls.
-
-    Resolution order:
-      1. EDUBOTICS_IMAGE_TAG environment variable (escape hatch for ops)
-      2. docker/versions.env next to the compose file
-      3. Fallback to :latest (matches docker-compose.yml's ${IMAGE_TAG:-latest})
-
-    Without this, the GUI's pull/health-check paths used :latest while compose
-    pulled :GIT_SHA — same bytes today (build script tags both in lockstep)
-    but a latent bug if a SHA build ever ships without :latest.
+    Resolves the file via the same install-dir walk for every key, so the GUI
+    references the SAME image build (and registry) that docker-compose runs.
+    The installed layout puts the GUI under ``<install>/gui/app/`` and
+    versions.env under ``<install>/docker/versions.env``; a PyInstaller dist
+    puts the exe under ``<install>/gui/``. We walk up from both the executable
+    dir and this module's dir. ``import sys`` is lazy to avoid any module-load
+    ordering surprise.
     """
-    env_override = os.environ.get("EDUBOTICS_IMAGE_TAG")
-    if env_override:
-        return env_override
-
-    # Resolve docker/versions.env via the same install-dir walk as below.
-    # We import lazily to avoid a circular reference at module load time.
-    from pathlib import Path
     import sys
     candidates = [
         Path(os.path.dirname(os.path.abspath(sys.executable))),
         Path(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
     ]
+    prefix = f"{key}="
     for start in candidates:
         d = start
         for _ in range(6):
@@ -69,26 +58,68 @@ def _read_image_tag_from_versions_env() -> str:
                 try:
                     for line in versions_env.read_text().splitlines():
                         line = line.strip()
-                        if line.startswith("IMAGE_TAG="):
-                            return line.split("=", 1)[1].strip()
+                        if line.startswith(prefix):
+                            val = line.split("=", 1)[1].strip()
+                            if val:
+                                return val
                 except OSError:
                     pass
-                break  # found the file, no IMAGE_TAG line — bail
+                break  # found the file in this root, key absent — try next root
             parent = d.parent
             if parent == d:
                 break
             d = parent
-    return "latest"
+    return ""
 
 
-IMAGE_TAG = _read_image_tag_from_versions_env()
+def _resolve_setting(env_var: str, versions_key: str, default: str) -> str:
+    """Resolve a setting: env override → docker/versions.env → hardcoded default.
+
+    This is the SAME order IMAGE_TAG has always used; sharing it means a future
+    registry change ships in the CI-baked versions.env with NO GUI rebuild.
+    """
+    override = os.environ.get(env_var)
+    if override:
+        return override
+    from_file = _read_versions_env(versions_key)
+    if from_file:
+        return from_file
+    return default
+
+
+# Docker image registry. PRIMARY = GHCR (public packages have no anonymous pull
+# rate limit — Docker Hub's 100/6 h-per-IP 429s a 30-PC classroom on one NAT);
+# FALLBACK = Docker Hub (the images are dual-pushed with byte-identical manifest
+# digests), so a degraded GHCR/Fastly edge can't strand a classroom — the GUI
+# pulls the fallback and re-tags it to the primary name. Both resolve
+# env → versions.env → default (see _resolve_setting). Per-rig override:
+# EDUBOTICS_REGISTRY / EDUBOTICS_REGISTRY_FALLBACK (e.g. =nettername to roll back
+# to Docker Hub as primary with no rebuild).
+REGISTRY = _resolve_setting("EDUBOTICS_REGISTRY", "REGISTRY", "ghcr.io/svendanilborodun")
+REGISTRY_FALLBACK = _resolve_setting(
+    "EDUBOTICS_REGISTRY_FALLBACK", "REGISTRY_FALLBACK", "nettername"
+)
+IMAGE_TAG = _resolve_setting("EDUBOTICS_IMAGE_TAG", "IMAGE_TAG", "latest")
+
+# Image SHORT names (the registry-independent per-repo component). Deriving both
+# the primary and fallback full refs from one list avoids split('/') munging,
+# which breaks on a two-segment registry like ghcr.io/<owner>.
+IMAGE_NAMES = ["open-manipulator", "physical-ai-server", "physical-ai-manager"]
+
+
+def image_ref(name: str, registry: str = REGISTRY, tag: str = "") -> str:
+    """Full image reference for a short ``name``. Defaults to the PRIMARY
+    registry and the resolved IMAGE_TAG; pass ``registry=REGISTRY_FALLBACK`` for
+    the Docker Hub twin."""
+    return f"{registry}/{name}:{tag or IMAGE_TAG}"
+
 
 # Docker image names — use the SAME tag docker-compose resolves so the GUI
 # never accidentally pulls a newer/older image than what compose runs.
-IMAGE_OPEN_MANIPULATOR = f"{REGISTRY}/open-manipulator:{IMAGE_TAG}"
-IMAGE_PHYSICAL_AI_SERVER = f"{REGISTRY}/physical-ai-server:{IMAGE_TAG}"
-IMAGE_PHYSICAL_AI_MANAGER = f"{REGISTRY}/physical-ai-manager:{IMAGE_TAG}"
-ALL_IMAGES = [IMAGE_OPEN_MANIPULATOR, IMAGE_PHYSICAL_AI_SERVER, IMAGE_PHYSICAL_AI_MANAGER]
+IMAGE_OPEN_MANIPULATOR = image_ref("open-manipulator")
+IMAGE_PHYSICAL_AI_SERVER = image_ref("physical-ai-server")
+IMAGE_PHYSICAL_AI_MANAGER = image_ref("physical-ai-manager")
+ALL_IMAGES = [image_ref(n) for n in IMAGE_NAMES]
 
 # Network ports
 PORT_WEB_UI = 80
@@ -290,31 +321,3 @@ def _resolve_last_pull_file() -> str:
 
 
 LAST_PULL_FILE = _resolve_last_pull_file()
-
-
-def _resolve_bundled_digests_file() -> str:
-    """Sidecar emitted by the OFFLINE image bundle: per-image manifest-LIST
-    digests for the docker-load'd images.
-
-    A `docker load`-ed image has an EMPTY RepoDigests (moby#22011), so the
-    GUI's launch/env-start digest pre-checks would treat a bundled image as
-    "not current" and re-download the full image from Docker Hub on the first
-    online start. This file lets `_get_local_repo_digest`'s sidecar fallback
-    report the bundled image as current, making that re-pull a no-op.
-
-    Written at install time by `installer/scripts/load_images.ps1` into the
-    install dir alongside `versions.env` (machine-wide, world-readable — NOT
-    %LOCALAPPDATA%, which under the elevated installer would be the admin's
-    profile, not the student's). Format: JSON
-    {"<registry>/<image>:<tag>": "sha256:<manifest-list digest>"}.
-
-    Absent on online installs / self-update reinstalls (no bundle) — the
-    fallback then simply never fires.
-    """
-    override = os.environ.get("EDUBOTICS_BUNDLED_DIGESTS_FILE")
-    if override:
-        return override
-    return os.path.join(DOCKER_DIR, "bundled_digests.json")
-
-
-BUNDLED_DIGESTS_FILE = _resolve_bundled_digests_file()

@@ -5,8 +5,9 @@
 # headless Docker Engine, imported by import_edubotics_wsl.ps1.
 
 param(
-    [string]$Registry   = "nettername",
-    [string]$DistroName = "EduBotics"
+    [string]$Registry         = "ghcr.io/svendanilborodun",
+    [string]$RegistryFallback = "nettername",
+    [string]$DistroName       = "EduBotics"
 )
 
 # EAP=Continue, NOT Stop (load-bearing — mirrors verify_system.ps1). In Windows
@@ -46,15 +47,16 @@ if (Test-Path $VersionsEnv) {
         if ($_ -match '^\s*REGISTRY\s*=\s*(.+?)\s*$' -and -not $PSBoundParameters.ContainsKey('Registry')) {
             $Registry = $Matches[1]
         }
+        if ($_ -match '^\s*REGISTRY_FALLBACK\s*=\s*(.+?)\s*$' -and -not $PSBoundParameters.ContainsKey('RegistryFallback')) {
+            $RegistryFallback = $Matches[1]
+        }
     }
 }
-Write-Host "Using image tag: $ImageTag (registry: $Registry, distro: $DistroName)" -ForegroundColor Cyan
+Write-Host "Using image tag: $ImageTag (registry: $Registry, fallback: $RegistryFallback, distro: $DistroName)" -ForegroundColor Cyan
 
-$images = @(
-    "${Registry}/open-manipulator:${ImageTag}",
-    "${Registry}/physical-ai-server:${ImageTag}",
-    "${Registry}/physical-ai-manager:${ImageTag}"
-)
+# Image SHORT names; the primary ref is ${Registry}/<name>:<tag>, the fallback
+# (Docker Hub twin, dual-pushed → digest-identical) is ${RegistryFallback}/<name>:<tag>.
+$repoNames = @("open-manipulator", "physical-ai-server", "physical-ai-manager")
 
 Write-Step "Pulling Docker images into $DistroName..."
 
@@ -77,17 +79,36 @@ if ($LASTEXITCODE -ne 0) {
     exit 1
 }
 
-$total = $images.Count
+$total = $repoNames.Count
 $current = 0
-foreach ($image in $images) {
+foreach ($name in $repoNames) {
     $current++
-    Write-Host "`n   [$current/$total] Pulling $image ..." -ForegroundColor White
-    wsl -d $DistroName -- docker pull $image
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "ERROR: Failed to pull $image" -ForegroundColor Red
-        exit 1
+    $primary = "${Registry}/${name}:${ImageTag}"
+    Write-Host "`n   [$current/$total] Pulling $primary ..." -ForegroundColor White
+    wsl -d $DistroName -- docker pull $primary
+    if ($LASTEXITCODE -eq 0) {
+        Write-OK "$primary pulled"
+        continue
     }
-    Write-OK "$image pulled"
+    # Primary (GHCR) failed — fall back to the digest-identical Docker Hub twin
+    # and re-tag it to the primary name so docker-compose's ${REGISTRY} ref
+    # resolves locally. Drop the redundant fallback tag afterwards (layers stay,
+    # kept by the primary tag). Only hard-fail if BOTH registries fail.
+    if ($RegistryFallback -and $RegistryFallback -ne $Registry) {
+        $fallback = "${RegistryFallback}/${name}:${ImageTag}"
+        Write-Host "   GHCR unavailable, falling back to Docker Hub: $fallback ..." -ForegroundColor Yellow
+        wsl -d $DistroName -- docker pull $fallback
+        if ($LASTEXITCODE -eq 0) {
+            wsl -d $DistroName -- docker tag $fallback $primary
+            if ($LASTEXITCODE -eq 0) {
+                wsl -d $DistroName -- docker image rm $fallback *>$null 2>&1
+                Write-OK "$primary pulled (via Docker Hub fallback)"
+                continue
+            }
+        }
+    }
+    Write-Host "ERROR: Failed to pull $primary (GHCR and Docker Hub fallback)" -ForegroundColor Red
+    exit 1
 }
 
 # Remove SUPERSEDED tags by enumeration. After a self-update reinstall pulls
@@ -98,11 +119,7 @@ foreach ($image in $images) {
 # "X.Y-1"; patch bumps make it meaningless), so enumerate the local tags per
 # repo and remove every one that isn't the current $ImageTag. Untag-by-tag is
 # layer-safe: only layers NOT shared with the kept :$ImageTag are dropped.
-$repos = @(
-    "${Registry}/open-manipulator",
-    "${Registry}/physical-ai-server",
-    "${Registry}/physical-ai-manager"
-)
+$repos = $repoNames | ForEach-Object { "${Registry}/$_" }
 Write-Step "Removing superseded image tags..."
 foreach ($repo in $repos) {
     $tags = wsl -d $DistroName -- docker images $repo --format '{{.Tag}}' 2>$null
@@ -122,6 +139,6 @@ Write-Step "All $total images pulled successfully!"
 
 # Explicit success: don't let the script's exit code fall through to the prune's
 # $LASTEXITCODE. A transient non-zero prune would otherwise make the finalize
-# (post-reboot) caller falsely report a failed image step (load_images.ps1 and
-# finalize_install.ps1 both propagate/check $LASTEXITCODE).
+# (post-reboot) caller falsely report a failed image step (finalize_install.ps1
+# and the .iss Step 5 both propagate/check $LASTEXITCODE).
 exit 0

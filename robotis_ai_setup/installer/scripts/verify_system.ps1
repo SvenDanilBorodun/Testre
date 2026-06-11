@@ -139,7 +139,10 @@ if ($usbipdOk) {
 # back to dev. The previous "..\.." form only worked in dev — production
 # installs silently always fell back to :latest.
 Write-Host "   Checking Docker images..." -ForegroundColor White
-$registry = "nettername"
+# Primary registry default (GHCR). pull_images.ps1 re-tags any Docker Hub
+# fallback pull to the primary name, so checking the primary ref finds the
+# image regardless of which registry served it.
+$registry = "ghcr.io/svendanilborodun"
 $imageTag = "latest"
 $AppRootForVersions = Split-Path -Parent $PSScriptRoot
 $VersionsEnv = Join-Path $AppRootForVersions "docker\versions.env"

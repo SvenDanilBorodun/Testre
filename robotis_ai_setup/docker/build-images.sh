@@ -32,6 +32,11 @@
 
 set -euo pipefail
 
+# Build/push namespace. build-images.sh pushes :latest to Docker Hub
+# (nettername/*); docker-publish.yml's retag job then mirrors every tag to GHCR
+# (ghcr.io/svendanilborodun/*) via `imagetools create` (digest-identical) — so
+# the student-facing primary (GHCR) and the fallback (Hub) stay in lockstep
+# without this script needing two logins. Override REGISTRY for a private build.
 REGISTRY=${REGISTRY:-nettername}
 BUILD_BASE=${BUILD_BASE:-0}
 # Platform selector: amd64 (default, current behaviour) or arm64 (classroom

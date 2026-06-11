@@ -6,7 +6,7 @@ import hashlib
 import os
 import uuid
 
-from .constants import ENV_FILE, IMAGE_TAG, ROS_DOMAIN_ID, REGISTRY
+from .constants import ENV_FILE, IMAGE_TAG, ROS_DOMAIN_ID, REGISTRY, REGISTRY_FALLBACK
 from .device_manager import HardwareConfig
 
 
@@ -19,6 +19,10 @@ MANAGED_KEYS = frozenset({
     "LEADER_PORT",
     "ROS_DOMAIN_ID",
     "REGISTRY",
+    # REGISTRY_FALLBACK records the Docker Hub twin so the .env documents both
+    # registries. Compose runs only ${REGISTRY}; the GUI's pull fallback uses
+    # constants.REGISTRY_FALLBACK directly. MANAGED so it tracks constants.
+    "REGISTRY_FALLBACK",
     # IMAGE_TAG pins compose to the installer's image build (constants.py
     # resolves it: EDUBOTICS_IMAGE_TAG env > docker/versions.env > latest).
     # It is MANAGED so a stale hand-pinned tag is superseded on the next
@@ -282,6 +286,7 @@ def generate_env_file(config: HardwareConfig, output_path: str = ENV_FILE,
 
     lines.append(f"ROS_DOMAIN_ID={domain_id}")
     lines.append(f"REGISTRY={REGISTRY}")
+    lines.append(f"REGISTRY_FALLBACK={REGISTRY_FALLBACK}")
     # Pin compose to the image build this GUI ships with. docker-compose.yml
     # resolves ${IMAGE_TAG:-latest} from this file (--env-file); without the
     # line, compose silently runs :latest — drifting past the installer's
@@ -335,6 +340,7 @@ def generate_cloud_only_env(output_path: str = ENV_FILE,
         'CAMERA_NAME_2="scene"',
         f"ROS_DOMAIN_ID={domain_id}",
         f"REGISTRY={REGISTRY}",
+        f"REGISTRY_FALLBACK={REGISTRY_FALLBACK}",
         f"IMAGE_TAG={IMAGE_TAG}",
     ]
     from .constants import cameras_use_native_bridge

@@ -214,7 +214,11 @@ jobs:
     name: Apply canonical tag set
     needs: [build]
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # 45 (was 15): the Hub-side retags are manifest-only (near-instant), but the
+    # GHCR side is a CROSS-REGISTRY blob copy — `imagetools create` streams every
+    # layer (~6 GB/repo, blobs deduped per repo so ~once each) from Docker Hub
+    # through the runner up to GHCR. ~30 GB across the 5 repos on the first push.
+    timeout-minutes: 45
     # packages: write is needed to push to GHCR via GITHUB_TOKEN. Per-job (not
     # workflow-level) keeps the grant scoped to the only job that pushes. NOTE
     # (zizmor superset rule): release.yml's `docker` job that calls this workflow

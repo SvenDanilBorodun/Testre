@@ -993,7 +993,11 @@ def pull_images(callback=None, log=None) -> bool:
             if log:
                 log(f"  [{i+1}/{total}] {image.split('/')[-1]}: bereits vorhanden, überspringen.")
             continue
-        if not _pull_one_image(image, i, total, log=log):
+        # GHCR→Docker Hub fallback (same as check_for_updates / _compose_pull):
+        # if the GHCR pull fails, pull the digest-identical Hub twin and re-tag it
+        # to the primary name. Without this, a missing-image recovery while GHCR
+        # is degraded would hard-fail even though the Hub fallback is available.
+        if not _pull_image_with_fallback(image, i, total, log=log):
             return False
     return True
 

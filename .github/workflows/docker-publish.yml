@@ -184,6 +184,18 @@ jobs:
       # eliminates emulation-specific failure modes.
       - name: Set up Buildx
         uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd  # v4.0.0
+        with:
+          # Route ALL docker.io pulls through Google's pull-through mirror so the
+          # build's base images never hit Docker Hub's rate limit. The manager
+          # Dockerfile's `FROM node:22` + `FROM nginx:...` (Docker OFFICIAL images)
+          # are the surface that 429'd v2.8.2's build — mirror.gcr.io serves
+          # byte-identical official images with no Hub pull limit. Third-party/own
+          # repos not in the mirror (robotis/*, nettername/*-jetson-base) get a
+          # 404 from the mirror and buildkit transparently falls back to docker.io
+          # (authenticated via the login below), so nothing breaks.
+          buildkitd-config-inline: |
+            [registry."docker.io"]
+              mirrors = ["mirror.gcr.io"]
       - name: Docker Hub login
         uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121  # v4.1.0
         with:
@@ -292,16 +304,28 @@ jobs:
             return 1
           }
 
-          # _maybe_retag_hub: skip Hub tags that already exist (free), retag only
-          # what's missing. Correct for IMMUTABLE tags only (sha, sha-short,
-          # X.Y.Z) — the floating :X.Y minor tag below must bypass this probe.
+          # _retag_be: BEST-EFFORT retag for the Docker Hub FALLBACK side. GHCR is
+          # the registry students pull; Docker Hub is the digest-identical fallback.
+          # A Hub-side failure (e.g. a transient 429) must NOT fail the release as
+          # long as GHCR succeeds — warn and continue. (GHCR-side _retag calls stay
+          # FATAL under `set -e`, so a GHCR failure correctly fails the release.)
+          _retag_be() {
+            local target="$1" source="$2"
+            if ! _retag "$target" "$source"; then
+              echo "::warning::Hub-side retag of $target failed (best-effort; GHCR is primary). The Docker Hub fallback for this tag may be stale until the next release."
+            fi
+            return 0
+          }
+
+          # _maybe_retag_hub: existence-gated + best-effort, for IMMUTABLE per-commit
+          # sha tags only — skip if already on Hub (free web-API check, no pull).
           _maybe_retag_hub() {
             local repo="$1" tag="$2" source="$3"
             if _tag_exists "$repo" "$tag"; then
               echo "skip (already on Docker Hub): ${HUB}/${repo}:${tag}"
               return 0
             fi
-            _retag "${HUB}/${repo}:${tag}" "$source"
+            _retag_be "${HUB}/${repo}:${tag}" "$source"
           }
 
           for REPO in $AMD64_REPOS $ARM64_REPOS; do
@@ -310,27 +334,27 @@ jobs:
 
             # ONE cross-registry copy per repo: Hub:latest -> GHCR:latest. EVERY
             # other GHCR tag is then derived from GHCR:latest (intra-GHCR), so we
-            # read image manifests FROM Docker Hub at most ONCE per repo. The old
-            # form copied all 5 GHCR tags straight from Hub (5 cross-registry
-            # reads/repo), which — combined with the dual-fire — hit Docker Hub's
-            # authenticated 429 rate limit on v2.8.2's retag (the migration's
-            # whole point is to stop reading from Docker Hub).
+            # read image manifests FROM Docker Hub at most ONCE per repo. GHCR is
+            # the student-facing primary, so this copy stays FATAL.
             _retag "$GHCR_SRC" "$HUB_SRC"
 
-            # Immutable tags on BOTH registries, each derived from its OWN :latest
-            # (intra-registry — no cross-registry / Hub reads beyond the one above).
+            # Immutable sha tags: GHCR fatal (primary), Hub best-effort + gated.
             _maybe_retag_hub "$REPO" "$SHORT" "$HUB_SRC"
             _retag "${GHCR}/${REPO}:${SHORT}" "$GHCR_SRC"            # sha-short
             _maybe_retag_hub "$REPO" "${{ github.sha }}" "$HUB_SRC"
             _retag "${GHCR}/${REPO}:${{ github.sha }}" "$GHCR_SRC"   # full-sha
             if [ -n "$SEMVER" ]; then
-              _maybe_retag_hub "$REPO" "$SEMVER" "$HUB_SRC"
+              # Semver :X.Y.Z — ALWAYS re-point on BOTH registries (NOT existence-
+              # gated). A failed-then-retried release of the SAME version produces a
+              # new build; existence-gating Hub:X.Y.Z would freeze it on the OLD
+              # build while GHCR re-creates -> exactly the GHCR/Hub :X.Y.Z divergence
+              # the audit found. Always re-pointing reconciles both registries to
+              # the final build. GHCR fatal, Hub best-effort.
               _retag "${GHCR}/${REPO}:${SEMVER}" "$GHCR_SRC"         # e.g. 2.8.2
-              # Floating minor tag: ALWAYS re-point on BOTH registries (the
-              # existence probe would freeze it at X.Y.0). Nothing student-facing
-              # consumes :X.Y — versions.env pins X.Y.Z.
-              _retag "${HUB}/${REPO}:${SEMVER%.*}" "$HUB_SRC"        # e.g. 2.8
+              _retag_be "${HUB}/${REPO}:${SEMVER}" "$HUB_SRC"
+              # Floating minor :X.Y — always re-point, both registries.
               _retag "${GHCR}/${REPO}:${SEMVER%.*}" "$GHCR_SRC"
+              _retag_be "${HUB}/${REPO}:${SEMVER%.*}" "$HUB_SRC"
             fi
           done
 
@@ -375,6 +399,28 @@ jobs:
               fail=1
             fi
           done
+
+          # SEMVER parity (the student-pinned :X.Y.Z — what versions.env pins).
+          # GHCR is authoritative (students pull it); a MISSING GHCR :X.Y.Z is
+          # FATAL. The Hub :X.Y.Z is best-effort (a 429 may leave it stale), so a
+          # GHCR-vs-Hub mismatch WARNS rather than fails. This is the check that
+          # would have caught the dormant :2.8.2 divergence the audit found.
+          REF="${GITHUB_REF#refs/tags/}"
+          case "$REF" in v*.*.*) SEMVER="${REF#v}" ;; *) SEMVER="" ;; esac
+          if [ -n "$SEMVER" ]; then
+            for REPO in $REPOS; do
+              GS=$(_top "${GHCR}/${REPO}:${SEMVER}")
+              HS=$(_top "${HUB}/${REPO}:${SEMVER}")
+              if [ -z "$GS" ]; then
+                echo "::error::GHCR ${GHCR}/${REPO}:${SEMVER} missing — students would 404 on this release."
+                fail=1
+              elif [ "$GS" = "$HS" ]; then
+                echo "OK ${REPO}: GHCR == Hub :${SEMVER} (${GS})"
+              else
+                echo "::warning::${REPO}: GHCR :${SEMVER} (${GS}) != Hub :${SEMVER} (${HS:-<missing>}). GHCR is authoritative; the Docker Hub fallback for :${SEMVER} may be stale."
+              fi
+            done
+          fi
           [ "$fail" = "0" ]
 
   versions-env:
@@ -437,6 +483,13 @@ jobs:
     # we now actually test arm64 images instead of trusting "build succeeded".
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
+    # Smoke-test the GHCR images (the STUDENT-FACING primary) — not the Docker
+    # Hub copies. This both validates the registry students actually pull AND
+    # removes 6 anonymous Docker Hub pulls/release (the strictest rate-limit
+    # bucket, on shared runner IPs). packages: read lets the GHCR login pull.
+    permissions:
+      contents: read
+      packages: read
     strategy:
       fail-fast: false
       matrix:
@@ -456,6 +509,12 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           persist-credentials: false
+      - name: GHCR login
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121  # v4.1.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - name: Pull + grep manager bundle for inlined env (amd64 only)
         if: matrix.manager_repo != ''
         # Lifts the assertion build-images.sh already does at lines 226-243.
@@ -467,10 +526,10 @@ jobs:
         # bundler/output rename never silently breaks this guard again.
         run: |
           set -e
-          docker pull nettername/${{ matrix.manager_repo }}:latest
+          docker pull ghcr.io/svendanilborodun/${{ matrix.manager_repo }}:latest
           for needle in "${{ secrets.SUPABASE_URL }}" "${{ secrets.REACT_APP_CLOUD_API_URL }}"; do
             HASH=$(echo "$needle" | sha256sum | cut -c1-8)
-            if ! docker run --rm --entrypoint sh nettername/${{ matrix.manager_repo }}:latest \
+            if ! docker run --rm --entrypoint sh ghcr.io/svendanilborodun/${{ matrix.manager_repo }}:latest \
                  -c "grep -q -r -F '$needle' /usr/share/nginx/html"; then
               echo "::error::Bundle does not contain expected env (hash=$HASH)."
               exit 1
@@ -479,8 +538,8 @@ jobs:
           done
       - name: Pull + assert server image has ROS 2 Jazzy
         run: |
-          docker pull nettername/${{ matrix.server_repo }}:latest
-          ROS_DISTRO=$(docker run --rm --entrypoint sh nettername/${{ matrix.server_repo }}:latest \
+          docker pull ghcr.io/svendanilborodun/${{ matrix.server_repo }}:latest
+          ROS_DISTRO=$(docker run --rm --entrypoint sh ghcr.io/svendanilborodun/${{ matrix.server_repo }}:latest \
                        -c 'echo "$ROS_DISTRO"')
           if [ "$ROS_DISTRO" != "jazzy" ]; then
             echo "::error::${{ matrix.server_repo }} ROS_DISTRO=$ROS_DISTRO, expected jazzy"
@@ -498,7 +557,7 @@ jobs:
         # exempt.)
         run: |
           set -e
-          SIZE=$(docker image inspect nettername/${{ matrix.server_repo }}:latest --format '{{.Size}}')
+          SIZE=$(docker image inspect ghcr.io/svendanilborodun/${{ matrix.server_repo }}:latest --format '{{.Size}}')
           # .Size is UNCOMPRESSED on-disk bytes. The fat (CUDA-back) image is ~16 GB;
           # the CPU-slimmed image is much smaller but its exact uncompressed size is
           # build-dependent (ROS + torch-cpu + transformers + opencv). 11 GB sits
@@ -514,8 +573,8 @@ jobs:
           echo "OK: amd64 server image is CUDA-slimmed (${SIZE} bytes)."
       - name: Pull + assert open-manipulator has Dynamixel SDK
         run: |
-          docker pull nettername/${{ matrix.arm_repo }}:latest
-          if ! docker run --rm --entrypoint sh nettername/${{ matrix.arm_repo }}:latest \
+          docker pull ghcr.io/svendanilborodun/${{ matrix.arm_repo }}:latest
+          if ! docker run --rm --entrypoint sh ghcr.io/svendanilborodun/${{ matrix.arm_repo }}:latest \
                -c 'python3 -c "import dynamixel_sdk"'; then
             echo "::error::${{ matrix.arm_repo }} missing dynamixel_sdk"
             exit 1
@@ -544,8 +603,8 @@ jobs:
         run: |
           set -e
           chmod +x .github/scripts/image_source_parity.sh
-          .github/scripts/image_source_parity.sh physical-ai-server "nettername/${{ matrix.server_repo }}:latest"
-          .github/scripts/image_source_parity.sh open-manipulator "nettername/${{ matrix.arm_repo }}:latest"
+          .github/scripts/image_source_parity.sh physical-ai-server "ghcr.io/svendanilborodun/${{ matrix.server_repo }}:latest"
+          .github/scripts/image_source_parity.sh open-manipulator "ghcr.io/svendanilborodun/${{ matrix.arm_repo }}:latest"
 
   cleanup-dirty-tags:
     # Manual-dispatch only — sweeps any *-dirty tags from Docker Hub.

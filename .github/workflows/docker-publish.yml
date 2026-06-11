@@ -335,30 +335,45 @@ jobs:
             fi
           done
 
-      - name: Verify GHCR ↔ Docker Hub digest parity (dual-push integrity)
+      - name: Verify GHCR ↔ Docker Hub dual-push integrity
         run: |
           set -e
           HUB="nettername"
           GHCR="ghcr.io/svendanilborodun"
           REPOS="open-manipulator physical-ai-server physical-ai-manager open-manipulator-jetson physical-ai-server-jetson"
-          _digest() {
-            # The registry-side manifest-list digest — the `Digest:` header line
-            # of `imagetools inspect` (stable across buildx versions; both refs
-            # are read identically so the comparison is apples-to-apples).
+          # Top-level manifest digest of a ref (the `Digest:` header line).
+          _top() {
             docker buildx imagetools inspect "$1" 2>/dev/null | awk '/^Digest:/{print $2; exit}'
           }
+          # EVERY sha256 imagetools names for a ref: the top-level index digest
+          # PLUS every per-platform child manifest digest.
+          _all() {
+            docker buildx imagetools inspect "$1" 2>/dev/null | grep -oE 'sha256:[0-9a-f]{64}' | sort -u
+          }
+          # Integrity invariant: GHCR's :latest must CONTAIN Hub's :latest
+          # manifest — either equal to it (the arm64/jetson repos, where
+          # build-images.sh already pushed an index to Hub) OR wrapping it as a
+          # child. The amd64 :latest legitimately differs at the TOP level: Hub
+          # is a raw single-platform `docker push` (CLAUDE.md §dual-store), while
+          # `imagetools create` wraps that exact manifest in an OCI index on GHCR
+          # — same content (the child digest is byte-identical), so the Docker Hub
+          # fallback pulls identical bytes and the GUI's per-registry digest
+          # pre-check still matches via that shared child. (For SEMVER release tags
+          # both registries are imagetools-created → fully equal; only :latest is
+          # asymmetric, and nothing student-facing pulls :latest.)
           fail=0
           for REPO in $REPOS; do
-            H=$(_digest "${HUB}/${REPO}:latest")
-            G=$(_digest "${GHCR}/${REPO}:latest")
-            if [ -z "$G" ]; then
+            H=$(_top "${HUB}/${REPO}:latest")
+            G_ALL=$(_all "${GHCR}/${REPO}:latest")
+            if [ -z "$G_ALL" ]; then
               echo "::error::GHCR ${GHCR}/${REPO}:latest not found — dual-push failed (is the package created?)."
               fail=1
-            elif [ "$H" != "$G" ]; then
-              echo "::error::Digest mismatch for ${REPO}: Hub=$H GHCR=$G"
-              fail=1
+            elif printf '%s\n' "$G_ALL" | grep -qx "$H"; then
+              echo "OK ${REPO}: Hub manifest ${H} present in GHCR :latest"
             else
-              echo "OK ${REPO}: Hub == GHCR ($G)"
+              echo "::error::Parity FAILED for ${REPO}: Hub top digest ${H} not found in GHCR digest set:"
+              printf '%s\n' "$G_ALL" | sed 's/^/    /'
+              fail=1
             fi
           done
           [ "$fail" = "0" ]

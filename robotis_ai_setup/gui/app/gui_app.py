@@ -141,14 +141,19 @@ def _frame_to_photo_data(frame_bgr):
     """
     try:
         import cv2
-        small = frame_bgr[::2, ::2]  # 2x subsample thumbnail; keep BGR (cv2 handles BGR->PNG colors)
-        if small.ndim == 2:
-            small = cv2.cvtColor(small, cv2.COLOR_GRAY2BGR)
-        elif small.ndim == 3 and small.shape[2] == 4:
-            small = cv2.cvtColor(small, cv2.COLOR_BGRA2BGR)
-        if small.ndim != 3 or small.shape[2] != 3:
+        # Render the preview at the camera's full capture resolution (640x480 on
+        # the Innomaker). We used to 2x-subsample to 320x240 for a compact
+        # thumbnail, but that made the preview look low-res/"broken" — the
+        # capture/recording path is already full 640x480, so the preview should
+        # match it. Keep BGR (cv2 handles BGR->PNG colors).
+        img = frame_bgr
+        if img.ndim == 2:
+            img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+        elif img.ndim == 3 and img.shape[2] == 4:
+            img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+        if img.ndim != 3 or img.shape[2] != 3:
             return None
-        ok, buf = cv2.imencode(".png", small)
+        ok, buf = cv2.imencode(".png", img)
         if not ok:
             return None
         return base64.b64encode(buf.tobytes())

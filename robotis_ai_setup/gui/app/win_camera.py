@@ -96,12 +96,24 @@ class CameraInfo:
 
 
 def _pnp_camera_details() -> list[dict]:
-    """Query Windows PnP for present cameras (name + location), in PnP order.
+    """Query Windows PnP for present USB cameras (name + location), in PnP order.
 
     Best-effort: returns [] if PowerShell is unavailable. The order is not
     guaranteed to match the OpenCV index order, so we only use these for
     display names / stability keys, never to *choose* which camera is which —
     that is the student's visual assignment.
+
+    USB-only filter (the `InstanceId -like 'USB\\*'` guard, mirrored in Python):
+    the `Camera,Image` PnP class set also returns non-capture imaging devices —
+    a networked HP LaserJet MFP's WSD *scanner* enumerates as an `Image`-class
+    device (`SWD\\DAFWSDPROVIDER\\...\\SCANNER1`, LocationInfo = an `http://` URL),
+    and a phantom `ROOT\\IMAGE` SCSI scanner can appear too. Because such a
+    device sorts BEFORE the real UVC camera, the positional name/location zip in
+    `list_windows_cameras()` shifted by one and mislabelled the real Innomaker
+    as the printer (and gave it the printer's network URL as its stability key);
+    in a 2-camera classroom it scrambled the gripper/scene identity anchor.
+    Real UVC/WIA webcams always enumerate under `USB\\VID_...`, so restricting to
+    `USB\\`-rooted instance ids drops the scanners while keeping every webcam.
     """
     if sys.platform != "win32":
         return []
@@ -110,7 +122,8 @@ def _pnp_camera_details() -> list[dict]:
             [
                 "powershell.exe", "-NoProfile", "-Command",
                 "Get-PnpDevice -Class Camera,Image -PresentOnly | "
-                "Where-Object Status -eq 'OK' | ForEach-Object { "
+                "Where-Object { $_.Status -eq 'OK' -and "
+                "  $_.InstanceId -like 'USB\\*' } | ForEach-Object { "
                 "  $loc = (Get-PnpDeviceProperty -InstanceId $_.InstanceId "
                 "    -KeyName 'DEVPKEY_Device_LocationInfo' "
                 "    -ErrorAction SilentlyContinue).Data; "
@@ -131,6 +144,11 @@ def _pnp_camera_details() -> list[dict]:
         name = parts[0].strip() if len(parts) > 0 else ""
         loc = parts[1].strip() if len(parts) > 1 else ""
         inst = parts[2].strip() if len(parts) > 2 else ""
+        # Defense-in-depth for the USB-only filter above: skip any non-USB
+        # imaging device (network WSD / SCSI scanners) that slips past the
+        # PowerShell guard, so it can never shift the positional zip.
+        if inst and not inst.upper().startswith("USB\\"):
+            continue
         details.append({"name": name, "location": loc, "instance_id": inst})
     return details
 

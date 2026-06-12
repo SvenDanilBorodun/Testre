@@ -50,6 +50,28 @@ class TestPnpParsing(unittest.TestCase):
         self.assertEqual(details[0]["location"], "Port_#0003.Hub_#0001")
         self.assertEqual(details[1]["location"], "Port_#0004.Hub_#0001")
 
+    def test_drops_non_usb_imaging_devices(self):
+        # A networked HP LaserJet MFP's WSD scanner enumerates under the
+        # Camera,Image PnP class set (Image class) and, sorting first, used to
+        # mislabel the real Innomaker camera with the printer's name via the
+        # positional name/location zip in list_windows_cameras(). The USB-only
+        # filter must drop it (and the phantom ROOT\IMAGE SCSI scanner).
+        out = (
+            "NPIAC5861 (HP LaserJet MFP M140w)|http://192.168.178.49:3911/|"
+            "SWD\\DAFWSDPROVIDER\\URN:UUID:38BA/SCANNER1\n"
+            "Innomaker-U20CAM-720P|Port_#0003.Hub_#0001|"
+            "USB\\VID_0C45&PID_6367&MI_00\\7&2BD3AF6B&0&0000\n"
+            "SCSI-Scangeraet||ROOT\\IMAGE\\0000\n"
+        )
+        with patch("gui.app.win_camera.sys") as msys, \
+             patch("gui.app.win_camera.subprocess.run", return_value=_fake_completed(out)):
+            msys.platform = "win32"
+            details = win_camera._pnp_camera_details()
+        # Only the real USB camera survives; the printer/SCSI scanners are gone.
+        self.assertEqual(len(details), 1)
+        self.assertEqual(details[0]["name"], "Innomaker-U20CAM-720P")
+        self.assertEqual(details[0]["location"], "Port_#0003.Hub_#0001")
+
     def test_non_windows_returns_empty(self):
         with patch("gui.app.win_camera.sys") as msys:
             msys.platform = "linux"

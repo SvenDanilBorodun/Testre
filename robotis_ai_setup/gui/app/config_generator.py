@@ -6,7 +6,14 @@ import hashlib
 import os
 import uuid
 
-from .constants import ENV_FILE, IMAGE_TAG, ROS_DOMAIN_ID, REGISTRY, REGISTRY_FALLBACK
+from .constants import (
+    ENV_FILE,
+    IMAGE_TAG,
+    REGISTRY,
+    REGISTRY_FALLBACK,
+    ROS_DOMAIN_FILE,
+    ROS_DOMAIN_ID,
+)
 from .device_manager import HardwareConfig
 
 
@@ -69,26 +76,71 @@ def _quote(value: str) -> str:
     return f'"{escaped}"'
 
 
-def _resolve_ros_domain_id() -> int:
-    """Derive a per-machine ROS_DOMAIN_ID so two student laptops on the
-    same school LAN don't share ROS topics.
+def _read_persisted_ros_domain_id() -> int | None:
+    """Return the persisted per-machine ROS_DOMAIN_ID, or None when absent /
+    unreadable / out of the legal DDS range [0, 232]."""
+    try:
+        with open(ROS_DOMAIN_FILE, encoding="utf-8") as f:
+            raw = f.read().strip()
+    except (OSError, UnicodeDecodeError):
+        return None
+    if not raw.isdigit():
+        return None
+    value = int(raw)
+    if 0 <= value <= 232:
+        return value
+    return None
 
-    Hardcoded 30 across every install meant Student A's inference could
-    drive Student B's arm on the same Wi-Fi. We hash the machine's UUID
-    (stable across reboots, unique per install) to a value in the legal
-    DDS domain range [0, 232]. Override via EDUBOTICS_ROS_DOMAIN env var
-    if needed.
+
+def _persist_ros_domain_id(value: int) -> None:
+    """Best-effort write of the resolved domain id so it stays STABLE across
+    sessions regardless of NIC/VPN changes. Never raises — a failed persist
+    just means we re-derive next time (same value as long as getnode() agrees)."""
+    try:
+        os.makedirs(os.path.dirname(ROS_DOMAIN_FILE), exist_ok=True)
+        tmp = ROS_DOMAIN_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+            f.write(f"{value}\n")
+        os.replace(tmp, ROS_DOMAIN_FILE)
+    except OSError:
+        pass
+
+
+def _resolve_ros_domain_id() -> int:
+    """Resolve a STABLE per-machine ROS_DOMAIN_ID so two student laptops on the
+    same school LAN don't share ROS topics — and so a single laptop keeps the
+    SAME domain across sessions.
+
+    Order: EDUBOTICS_ROS_DOMAIN env override → persisted file → derive from
+    uuid.getnode() (then persist). Hardcoded 30 across every install meant
+    Student A's inference could drive Student B's arm on the same Wi-Fi, so we
+    hash the machine UUID to a value in the legal DDS range [0, 232]. But
+    getnode() is NOT stable on multi-NIC / VPN / docking-station PCs (it may
+    pick a different interface — or a random fallback — between runs), and the
+    .env is regenerated on every "Umgebung starten"; a changed domain splits
+    the DDS graph from any surviving container and the React app shows
+    "disconnected". So the first-derived value is PERSISTED (constants.
+    ROS_DOMAIN_FILE) and reused thereafter. The env override always wins and is
+    intentionally NOT persisted (it's an explicit per-run knob).
     """
     override = os.environ.get("EDUBOTICS_ROS_DOMAIN")
     if override and override.isdigit():
         return max(0, min(232, int(override)))
+
+    persisted = _read_persisted_ros_domain_id()
+    if persisted is not None:
+        return persisted
+
     try:
         node_id = uuid.getnode()  # 48-bit MAC-derived identifier
         digest = hashlib.sha256(str(node_id).encode()).digest()
-        return int.from_bytes(digest[:2], "big") % 233
+        resolved = int.from_bytes(digest[:2], "big") % 233
     except Exception:
         # Fall back to the legacy default if anything above fails.
-        return int(ROS_DOMAIN_ID)
+        resolved = int(ROS_DOMAIN_ID)
+
+    _persist_ros_domain_id(resolved)
+    return resolved
 
 
 def _atomic_write(path: str, content: str) -> None:

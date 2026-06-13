@@ -350,5 +350,69 @@ class TestEnvVarHelpers(unittest.TestCase):
         self.assertEqual(read_env_var("HF_TOKEN", p), "hf_keepme")
 
 
+class TestRosDomainPersistence(unittest.TestCase):
+    """ROS_DOMAIN_ID must stay STABLE across sessions (uuid.getnode() is not
+    reliable on multi-NIC / VPN PCs). The first-resolved value is persisted to
+    constants.ROS_DOMAIN_FILE and reused thereafter; an explicit env override
+    always wins and is never persisted."""
+
+    def setUp(self):
+        from gui.app import config_generator as cg
+        self._cg = cg
+        self._orig_file = cg.ROS_DOMAIN_FILE
+        self._tmpdir = tempfile.mkdtemp()
+        # Point the persistence file at a fresh temp path (module-global lookup
+        # at call time, so reassigning here is honoured by the helpers).
+        cg.ROS_DOMAIN_FILE = os.path.join(self._tmpdir, ".ros_domain_id")
+        self._prev_override = os.environ.pop("EDUBOTICS_ROS_DOMAIN", None)
+
+    def tearDown(self):
+        self._cg.ROS_DOMAIN_FILE = self._orig_file
+        if self._prev_override is not None:
+            os.environ["EDUBOTICS_ROS_DOMAIN"] = self._prev_override
+        else:
+            os.environ.pop("EDUBOTICS_ROS_DOMAIN", None)
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_first_resolve_persists_then_reuses(self):
+        # No file yet -> derive + persist.
+        first = self._cg._resolve_ros_domain_id()
+        self.assertTrue(0 <= first <= 232)
+        self.assertTrue(os.path.isfile(self._cg.ROS_DOMAIN_FILE))
+        with open(self._cg.ROS_DOMAIN_FILE) as f:
+            self.assertEqual(int(f.read().strip()), first)
+        # A later run reads the SAME value WITHOUT re-deriving — prove it by
+        # making getnode() raise: if it were consulted, we'd hit the fallback.
+        import uuid
+        orig = uuid.getnode
+        uuid.getnode = lambda: (_ for _ in ()).throw(RuntimeError("nic gone"))
+        try:
+            second = self._cg._resolve_ros_domain_id()
+        finally:
+            uuid.getnode = orig
+        self.assertEqual(second, first)
+
+    def test_env_override_wins_and_is_not_persisted(self):
+        os.environ["EDUBOTICS_ROS_DOMAIN"] = "42"
+        self.assertEqual(self._cg._resolve_ros_domain_id(), 42)
+        # Override must not leave a persisted file behind (it's a per-run knob).
+        self.assertFalse(os.path.isfile(self._cg.ROS_DOMAIN_FILE))
+
+    def test_persisted_value_is_used_over_getnode(self):
+        with open(self._cg.ROS_DOMAIN_FILE, "w") as f:
+            f.write("117\n")
+        self.assertEqual(self._cg._resolve_ros_domain_id(), 117)
+
+    def test_corrupt_or_out_of_range_file_falls_back_to_derive(self):
+        for bad in ("not-a-number", "999", "-1", ""):
+            with open(self._cg.ROS_DOMAIN_FILE, "w") as f:
+                f.write(bad)
+            self.assertIsNone(self._cg._read_persisted_ros_domain_id())
+            # _resolve still returns a legal domain (derives + re-persists).
+            resolved = self._cg._resolve_ros_domain_id()
+            self.assertTrue(0 <= resolved <= 232)
+
+
 if __name__ == "__main__":
     unittest.main()

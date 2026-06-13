@@ -122,7 +122,15 @@ from physical_ai_server.utils.parameter_utils import (
 )
 
 import rclpy
+from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 from rclpy.node import Node
+from rclpy.qos import (
+    DurabilityPolicy,
+    HistoryPolicy,
+    QoSProfile,
+    ReliabilityPolicy,
+)
+from std_msgs.msg import Empty
 
 
 class PhysicalAIServer(CollisionMonitorMixin, Node):
@@ -214,7 +222,8 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         self.communicator: Optional[Communicator] = None
         self.data_manager: Optional[DataManager] = None
         self.timer_manager: Optional[TimerManager] = None
-        self.heartbeat_timer: Optional[TimerManager] = None
+        # Liveness heartbeat is node-owned now (see _init_ros_publisher); no
+        # TimerManager-based heartbeat tied to robot selection any more.
         self.training_timer: Optional[TimerManager] = None
         self.inference_manager: Optional[InferenceManager] = None
         # EduBotics v2.5.0: on-device training removed; Modal Cloud handles training.
@@ -266,6 +275,41 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         self._sensor_snapshot_timer = self.create_timer(
             0.2, self._sensor_snapshot_timer_callback,
         )
+
+        # Liveness heartbeat — node-owned and started HERE in __init__, NOT in
+        # init_ros_params(). It used to live on the Communicator and was created
+        # only when the student selected a robot type (/set_robot_type ->
+        # init_ros_params), which coupled "is the node alive" to "has a robot been
+        # picked": after ANY node restart (crash/respawn/OOM) the React app showed
+        # "Getrennt" until the student re-selected the robot on the Start page, even
+        # though the node was already up. Decoupling it here means liveness is
+        # reported the moment the node starts.
+        #
+        # On its OWN MutuallyExclusiveCallbackGroup so a long-blocking callback on
+        # the node's default group (a slow service, a recording-tick decode) can no
+        # longer stall the 1 Hz tick and flicker the React connection to
+        # "disconnected" — the documented heartbeat-starvation class. QoS mirrors
+        # the old Communicator heartbeat (BEST_EFFORT / VOLATILE / KEEP_LAST depth 1).
+        self._heartbeat_cb_group = MutuallyExclusiveCallbackGroup()
+        heartbeat_qos = QoSProfile(
+            depth=1,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.VOLATILE,
+            history=HistoryPolicy.KEEP_LAST,
+        )
+        self._node_heartbeat_pub = self.create_publisher(
+            Empty, 'heartbeat', heartbeat_qos)
+        self._node_heartbeat_timer = self.create_timer(
+            1.0,
+            self._heartbeat_timer_callback,
+            callback_group=self._heartbeat_cb_group,
+        )
+
+    def _heartbeat_timer_callback(self):
+        # Node-level liveness beacon (1 Hz). Independent of robot selection /
+        # recording so the React heartbeat watchdog reports "Verbunden" whenever
+        # the node is alive. Publishing Empty() is allocation-cheap and cannot block.
+        self._node_heartbeat_pub.publish(Empty())
 
     def _init_ros_service(self):
         self.get_logger().info('Initializing ROS services...')
@@ -454,14 +498,9 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             params=self.params
         )
 
-        if self.heartbeat_timer is None:
-            self.heartbeat_timer = TimerManager(node=self)
-            self.heartbeat_timer.set_timer(
-                timer_name='heartbeat',
-                timer_frequency=1.0,
-                callback_function=self.communicator.heartbeat_timer_callback
-            )
-            self.heartbeat_timer.start(timer_name='heartbeat')
+        # NOTE: the 1 Hz liveness heartbeat is no longer created here — it is
+        # node-owned and started in _init_ros_publisher (__init__) so it is
+        # independent of robot selection. See the comment there.
 
         # One-shot stale-session notice (leLab-comparison PR-3): a
         # *.session.json sibling marker means a recording crashed mid-
@@ -545,9 +584,9 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         if self.timer_manager is not None:
             self.timer_manager = None
 
-        if self.heartbeat_timer is not None:
-            self.heartbeat_timer.stop(timer_name='heartbeat')
-            self.heartbeat_timer = None
+        # The heartbeat is node-owned (created in __init__) and intentionally
+        # NOT torn down here: a robot-type switch (clear_parameters +
+        # init_ros_params) must not silence liveness even momentarily.
 
         if self.training_timer is not None:
             self.training_timer.stop(timer_name='training_status')

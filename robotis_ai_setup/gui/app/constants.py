@@ -321,3 +321,24 @@ def _resolve_last_pull_file() -> str:
 
 
 LAST_PULL_FILE = _resolve_last_pull_file()
+
+
+def _resolve_ros_domain_file() -> str:
+    """Persisted ROS_DOMAIN_ID for this machine (plain integer, one line).
+
+    Lives next to ENV_FILE in %LOCALAPPDATA%\\EduBotics so the GUI can write it
+    without admin rights. The domain id was derived from uuid.getnode() on every
+    start, but getnode() is NOT stable on multi-NIC / VPN / docking-station PCs
+    (the chosen MAC, or a random fallback, can differ between sessions). A
+    changed domain across sessions splits the DDS graph from any surviving
+    container — the React app's rosbridge then sees no topics ("disconnected").
+    Persisting the first-resolved value pins it for the life of the install.
+    """
+    override = os.environ.get("EDUBOTICS_ROS_DOMAIN_FILE")
+    if override:
+        return override
+    base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+    return os.path.join(base, "EduBotics", ".ros_domain_id")
+
+
+ROS_DOMAIN_FILE = _resolve_ros_domain_file()

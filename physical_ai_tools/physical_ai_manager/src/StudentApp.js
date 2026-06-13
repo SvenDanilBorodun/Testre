@@ -32,6 +32,7 @@ import { LogoMark } from './components/EbUI';
 import packageJson from '../package.json';
 import { useRosTopicSubscription } from './hooks/useRosTopicSubscription';
 import { useHfUserList } from './hooks/useHfUserList';
+import { useRobotTypeRehydrate } from './hooks/useRobotTypeRehydrate';
 import rosConnectionManager from './utils/rosConnectionManager';
 import { useDispatch, useSelector } from 'react-redux';
 import { setRosHost } from './features/ros/rosSlice';
@@ -107,6 +108,14 @@ function StudentApp() {
   // succeeds with no in-app token entry. Re-fires only if the list is still
   // empty on a later (re)connect.
   const { reload: reloadHfUsers } = useHfUserList();
+
+  // After a physical_ai_server node restart the server loses its in-memory
+  // robot_type; re-issue /set_robot_type from the persisted value on heartbeat
+  // recovery so the student doesn't have to re-select on the Start page.
+  // Disabled in cloud-only and Jetson-routed modes (the local node isn't the
+  // rosbridge target there).
+  useRobotTypeRehydrate({ enabled: !cloudOnly && !jetsonConnected });
+
   const heartbeatStatus = useSelector((state) => state.tasks.heartbeatStatus);
   const hfUserListLen = useSelector((state) => state.ui.hfUserList.length);
   useEffect(() => {

@@ -45,14 +45,13 @@ from physical_ai_server.utils.parameter_utils import (
 )
 from rclpy.node import Node
 from rclpy.qos import (
-    DurabilityPolicy,
     HistoryPolicy,
     QoSProfile,
     ReliabilityPolicy
 )
 from rosbag_recorder.srv import SendCommand
 from sensor_msgs.msg import CompressedImage, JointState
-from std_msgs.msg import Empty, String
+from std_msgs.msg import String
 from trajectory_msgs.msg import JointTrajectory
 
 
@@ -133,13 +132,6 @@ class Communicator:
         self._camera_recent_msgs: Dict[str, deque] = {}
         self.follower_topic_msgs = {}
         self.leader_topic_msgs = {}
-
-        self.heartbeat_qos_profile = QoSProfile(
-            depth=1,
-            reliability=ReliabilityPolicy.BEST_EFFORT,
-            durability=DurabilityPolicy.VOLATILE,
-            history=HistoryPolicy.KEEP_LAST
-        )
 
         self.rosbag_service_available = False
 
@@ -270,10 +262,9 @@ class Communicator:
             self.PUB_QOS_SIZE
         )
 
-        self.heartbeat_publisher = self.node.create_publisher(
-            Empty,
-            'heartbeat',
-            self.heartbeat_qos_profile)
+        # The 1 Hz liveness heartbeat publisher now lives on the node
+        # (physical_ai_server._init_ros_publisher), decoupled from robot
+        # selection so liveness is reported even before /set_robot_type.
 
     def init_services(self):
         self.image_topic_list_service = self.node.create_service(
@@ -858,8 +849,7 @@ class Communicator:
 
     def _cleanup_publishers(self):
         publisher_names = [
-            'status_publisher',
-            'heartbeat_publisher'
+            'status_publisher'
         ]
         for publisher_name in publisher_names:
             self._destroy_publisher_if_exists(publisher_name)
@@ -897,10 +887,6 @@ class Communicator:
         ]
         for client_name in client_names:
             self._destroy_client_if_exists(client_name)
-
-    def heartbeat_timer_callback(self):
-        heartbeat_msg = Empty()
-        self.heartbeat_publisher.publish(heartbeat_msg)
 
     def joystick_trigger_callback(self, msg: String):
         self.node.get_logger().info(f'Received joystick trigger: {msg.data}')

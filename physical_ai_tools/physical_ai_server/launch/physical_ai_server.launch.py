@@ -32,12 +32,27 @@ def generate_launch_description():
     config_files = glob.glob(os.path.join(config_dir, '*.yaml'))
     config_files.sort()
 
+    # respawn=True: this node carries ~35 service callbacks + timers + the
+    # camera/recording pipeline on a MultiThreadedExecutor; an unhandled
+    # exception in any callback propagates out of spin() and the process exits
+    # (main() only catches KeyboardInterrupt). Without respawn the node stayed
+    # DEAD behind a still-running rosbridge (only web_video_server had respawn),
+    # so the React app showed "Getrennt" with no recovery short of a full
+    # environment restart. respawn restarts the node in place (rosbridge keeps
+    # its socket, so the browser barely notices); the node's liveness heartbeat
+    # is created in __init__ (decoupled from /set_robot_type), so a respawn
+    # re-establishes the heartbeat immediately and the React app re-issues the
+    # persisted robot type on heartbeat recovery (useRobotTypeRehydrate).
+    # 2 s delay throttles a crash loop (mirrors web_video_server's policy in
+    # physical_ai_server_bringup.launch.py).
     physical_ai_server = Node(
         package='physical_ai_server',
         executable='physical_ai_server',
         name='physical_ai_server',
         output='screen',
-        parameters=config_files
+        parameters=config_files,
+        respawn=True,
+        respawn_delay=2.0,
     )
 
     return LaunchDescription([

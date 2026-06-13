@@ -252,6 +252,23 @@ class CollisionMonitorMixin:
     # ---- detection -----------------------------------------------------------------------
 
     def _gpio_states_cb(self, msg):
+        # This subscription runs continuously (~100 Hz) on the executor and parses
+        # mixed-model Dynamixel gpio data (XL430 'Present Load' + XL330 'Present
+        # Current' + 'Hardware Error Status'). An unhandled exception here would
+        # propagate out of MultiThreadedExecutor.spin() and KILL the node — main()
+        # only catches KeyboardInterrupt — leaving the React app "Getrennt" with no
+        # recovery short of an environment restart (root-caused 2026-06-13 as the
+        # most credible intermittent-crash trigger on rigs with a Dynamixel storm).
+        # Never let a malformed/edge-case gpio message crash the node: log it and
+        # drop the tick (fail-safe = no detection for that frame, same posture as
+        # the fail-open control_msgs import guard).
+        try:
+            self._process_gpio_states(msg)
+        except Exception as exc:  # noqa: BLE001 - guard must never crash the node
+            self.get_logger().error(
+                f'[KOLLISION] gpio state processing failed (ignored): {exc}')
+
+    def _process_gpio_states(self, msg):
         if self._collision_active:
             return  # already stopped; ignore until resume
         efforts, err_bits = {}, {}

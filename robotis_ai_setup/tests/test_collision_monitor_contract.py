@@ -442,5 +442,51 @@ class JointDistTelemetryContractTest(unittest.TestCase):
             CM.PHASE_COLLISION)
 
 
+class GpioCallbackSafetyTest(unittest.TestCase):
+    """_gpio_states_cb runs continuously on the executor; a malformed/edge-case
+    Dynamixel gpio message must NEVER raise out of it — an unhandled exception
+    would propagate out of MultiThreadedExecutor.spin() and kill the node (main()
+    only catches KeyboardInterrupt), leaving the React app "Getrennt". The guard
+    wraps the parsing in try/except (fix 2026-06-13)."""
+
+    def _host(self):
+        host = _Host()
+        host._collision_follower_vel = {j: 0.0 for j in CM.ARM_JOINT_NAMES}
+        return host
+
+    def test_interface_values_none_does_not_crash(self):
+        host = self._host()
+        # len(None) inside _process_gpio_states would raise TypeError.
+        bad = types.SimpleNamespace(interface_groups=['dxl11'], interface_values=None)
+        try:
+            host._gpio_states_cb(bad)
+        except Exception as exc:  # noqa: BLE001
+            self.fail(f'_gpio_states_cb leaked an exception: {exc!r}')
+        self.assertFalse(host._collision_active)
+
+    def test_entry_missing_fields_does_not_crash(self):
+        host = self._host()
+        # An interface_values entry lacking .interface_names/.values raises
+        # AttributeError in dict(zip(...)); must be swallowed by the guard.
+        bad = types.SimpleNamespace(
+            interface_groups=['dxl11'],
+            interface_values=[types.SimpleNamespace()])
+        try:
+            host._gpio_states_cb(bad)
+        except Exception as exc:  # noqa: BLE001
+            self.fail(f'_gpio_states_cb leaked an exception: {exc!r}')
+        self.assertFalse(host._collision_active)
+
+    def test_wellformed_low_effort_processes_without_tripping(self):
+        host = self._host()
+        iv = types.SimpleNamespace(
+            interface_names=['Present Load', 'Hardware Error Status'],
+            values=[0.0, 0.0])
+        good = types.SimpleNamespace(
+            interface_groups=['dxl11'], interface_values=[iv])
+        host._gpio_states_cb(good)  # exercises the real parse path, no raise
+        self.assertFalse(host._collision_active)
+
+
 if __name__ == '__main__':
     unittest.main()

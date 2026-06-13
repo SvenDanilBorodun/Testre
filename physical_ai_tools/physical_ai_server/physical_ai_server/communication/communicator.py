@@ -16,6 +16,11 @@
 #
 # Author: Dongyun Kim, Seongwoo Kim, Kiwoong Park
 
+import json
+import os
+import subprocess
+import sys
+import threading
 import time
 from collections import deque
 from functools import partial
@@ -35,9 +40,8 @@ from physical_ai_interfaces.srv import (
     GetImageTopicList
 )
 from physical_ai_server.communication.multi_subscriber import MultiSubscriber
-from physical_ai_server.data_processing import data_editor_v3
+from physical_ai_server.data_processing import edit_worker
 from physical_ai_server.data_processing.data_editor import DataEditor
-from physical_ai_server.data_processing.data_editor_v3 import DataEditError
 from physical_ai_server.utils.file_browse_utils import FileBrowseUtils
 from physical_ai_server.utils.parameter_utils import (
     parse_topic_list,
@@ -107,6 +111,20 @@ class Communicator:
 
         # Initialize DataEditor for dataset editing
         self.data_editor = DataEditor()
+
+        # Dataset edits (delete/merge) re-encode video and can peg every CPU
+        # core for minutes on legacy AV1 datasets. Run them out-of-process at
+        # nice 19 (see edit_worker) so they can't starve the ROS executor; a
+        # single-flight lock blocks a client-timeout retry from stacking a
+        # second encode. EDUBOTICS_DATASET_EDIT_SUBPROCESS=0 reverts to the
+        # in-process call (same routing) for debugging.
+        self._edit_lock = threading.Lock()
+        self._edit_use_subprocess = (
+            os.environ.get('EDUBOTICS_DATASET_EDIT_SUBPROCESS', '1') != '0'
+        )
+        # Backstop so a wedged worker can't hold the single-flight lock forever
+        # (1 h is far above any real student-dataset edit).
+        self._edit_timeout_s = 3600
 
         # Initialize joint publishers
         self.joint_publishers = {}
@@ -279,10 +297,18 @@ class Communicator:
             self.browse_file_callback
         )
 
+        # Own callback group: a dataset edit blocks its callback thread for the
+        # whole (possibly multi-minute) edit. On the node's default
+        # MutuallyExclusiveCallbackGroup that serialized out heartbeat / status /
+        # get_robot_types — the dashboard went dead. A dedicated group lets the
+        # blocking wait run concurrently with the default group.
+        from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
+        self._edit_cb_group = MutuallyExclusiveCallbackGroup()
         self.data_editor_service = self.node.create_service(
             EditDataset,
             '/dataset/edit',
-            self.dataset_edit_callback
+            self.dataset_edit_callback,
+            callback_group=self._edit_cb_group
         )
 
         self.get_dataset_info_service = self.node.create_service(
@@ -693,88 +719,111 @@ class Communicator:
         return response
 
     def dataset_edit_callback(self, request, response):
-        # Layout gate (leLab-comparison PR-1, 2026-06-07): the legacy
-        # DataEditor performs v2.1 per-episode-file surgery, but the v2.5.0
-        # recorder writes the v3.0 concatenated layout — running the v2.1
-        # path on a v3.0 dataset FileNotFoundErrors on the first shard.
-        # Route on meta/info.json::codebase_version per dataset; v3.0 goes
-        # through data_editor_v3 (upstream dataset_tools + atomic swap).
+        # A dataset edit (delete/merge) re-encodes video and can saturate every
+        # CPU core for minutes on legacy AV1 datasets. We run it out-of-process
+        # at nice 19 (or in-process when EDUBOTICS_DATASET_EDIT_SUBPROCESS=0) so
+        # the ROS executor keeps answering services and the dashboard stays
+        # alive. The routing (v3-vs-legacy / delete-vs-merge, leLab PR-1) lives
+        # in edit_worker.run_edit, shared by both paths.
+
+        # Single-flight: a long edit can outlive the React client timeout; reject
+        # a concurrent retry instead of stacking a second multi-minute encode.
+        if not self._edit_lock.acquire(blocking=False):
+            response.success = False
+            response.message = (
+                'Es läuft bereits eine Bearbeitung. Bitte warten, bis sie '
+                'abgeschlossen ist.'
+            )
+            return response
+
         try:
-            if request.mode == EditDataset.Request.MERGE:
-                merge_dataset_list = list(request.merge_dataset_list)
-                output_path = request.output_path
-                # TODO: Implement HuggingFace upload functionality if needed
-                # upload_huggingface = request.upload_huggingface
-                v3_flags = [
-                    data_editor_v3.is_v3_dataset(p) for p in merge_dataset_list
-                ]
-                if v3_flags and all(v3_flags):
-                    data_editor_v3.merge_datasets_v3(
-                        merge_dataset_list, output_path)
-                elif any(v3_flags):
-                    response.success = False
-                    response.message = (
-                        'Die ausgewählten Datensätze haben unterschiedliche '
-                        'Formate (v2.1 und v3.0) und können nicht '
-                        'zusammengeführt werden.'
-                    )
-                    return response
-                else:
-                    self.data_editor.merge_datasets(
-                        merge_dataset_list, output_path)
-
-            elif request.mode == EditDataset.Request.DELETE:
-                delete_dataset_path = request.delete_dataset_path
-                delete_episode_num = list(request.delete_episode_num)
-                # TODO: Implement HuggingFace upload functionality if needed
-                # upload_huggingface = request.upload_huggingface
-                if not delete_episode_num:
-                    response.success = False
-                    response.message = 'Keine Episoden zum Löschen ausgewählt.'
-                    return response
-
-                # Missing paths route through the v3 module too: it raises
-                # the German 'nicht gefunden' DataEditError, while the
-                # legacy editor would surface an English FileNotFoundError.
-                if (data_editor_v3.dataset_dir_missing(delete_dataset_path)
-                        or data_editor_v3.is_v3_dataset(delete_dataset_path)):
-                    data_editor_v3.delete_episodes_v3(
-                        delete_dataset_path, delete_episode_num
-                    )
-                elif len(delete_episode_num) > 1:
-                    # v2.1 legacy layout — batch delete for performance
-                    self.data_editor.delete_episodes_batch(
-                        delete_dataset_path, delete_episode_num
-                    )
-                else:
-                    # v2.1 legacy layout — single episode deletion
-                    self.data_editor.delete_episode(
-                        delete_dataset_path, delete_episode_num[0]
-                    )
+            payload = self._build_edit_payload(request)
+            if self._edit_use_subprocess:
+                result = self._run_edit_subprocess(payload)
             else:
-                response.success = False
-                response.message = f'Unknown edit mode: {request.mode}'
-                return response
-
-            response.success = True
-            response.message = f'Successfully processed edit mode: {request.mode}'
+                result = edit_worker.run_edit(
+                    payload, logger=self.node.get_logger())
+            response.success = bool(result.get('success'))
+            response.message = str(result.get('message', ''))
             return response
-
-        except DataEditError as e:
-            # Student-facing German message; technical cause already logged
-            # by data_editor_v3 (and chained on the exception).
-            self.node.get_logger().error(
-                f'dataset_edit_callback rejected: {e.__cause__ or e}')
-            response.success = False
-            response.message = str(e)
-            return response
-
         except Exception as e:
-            self.node.get_logger().error(f'Error in dataset_edit_callback: {str(e)}')
+            self.node.get_logger().error(f'Error in dataset_edit_callback: {e}')
             response.success = False
-            response.message = f'Error: {str(e)}'
+            response.message = f'Error: {e}'
+            return response
+        finally:
+            self._edit_lock.release()
 
-        return response
+    def _build_edit_payload(self, request):
+        """Translate an EditDataset request into edit_worker's JSON payload.
+
+        The wire mode int is mapped to edit_worker's string constants so the
+        worker stays ROS-interface-free.
+        """
+        if request.mode == EditDataset.Request.MERGE:
+            mode = edit_worker.MODE_MERGE
+        elif request.mode == EditDataset.Request.DELETE:
+            mode = edit_worker.MODE_DELETE
+        else:
+            mode = str(request.mode)
+        return {
+            'mode': mode,
+            'merge_dataset_list': list(request.merge_dataset_list),
+            'delete_dataset_path': request.delete_dataset_path,
+            'delete_episode_num': [int(i) for i in request.delete_episode_num],
+            'output_path': request.output_path,
+            # upload_huggingface is accepted on the wire but not yet implemented
+            # (TODO carried over from the original callback).
+        }
+
+    def _run_edit_subprocess(self, payload):
+        """Run edit_worker as a nice'd subprocess and parse its result line.
+
+        Inherits the node env so the colcon overlay PYTHONPATH resolves the
+        ``-m`` module. stderr is folded into stdout so all lerobot/ffmpeg/SVT
+        noise is in one stream we grep for the RESULT_MARKER line. The blocking
+        wait is safe: this callback is on its own callback group (does not block
+        heartbeat) and the child is nice 19 (does not starve the executor).
+        """
+        cmd = edit_worker.build_command(sys.executable)
+        self.node.get_logger().info(
+            f'Dataset edit subprocess (nice 19): {" ".join(cmd)}')
+        try:
+            proc = subprocess.run(
+                cmd,
+                input=json.dumps(payload),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                env=os.environ.copy(),
+                text=True,
+                timeout=self._edit_timeout_s,
+            )
+        except subprocess.TimeoutExpired:
+            self.node.get_logger().error(
+                'Dataset edit worker exceeded the time limit and was killed.')
+            return {
+                'success': False,
+                'message': (
+                    'Die Bearbeitung hat zu lange gedauert und wurde '
+                    'abgebrochen. Der Datensatz wurde nicht verändert.'
+                ),
+            }
+
+        result = edit_worker.parse_output(proc.stdout)
+        if result is None:
+            tail = '\n'.join((proc.stdout or '').splitlines()[-15:])
+            self.node.get_logger().error(
+                f'Dataset edit worker exited {proc.returncode} with no result. '
+                f'Tail:\n{tail}'
+            )
+            return {
+                'success': False,
+                'message': (
+                    'Beim Bearbeiten des Datensatzes ist ein unerwarteter '
+                    'Fehler aufgetreten. Der Datensatz wurde nicht verändert.'
+                ),
+            }
+        return result
 
     def get_dataset_info_callback(self, request, response):
         try:

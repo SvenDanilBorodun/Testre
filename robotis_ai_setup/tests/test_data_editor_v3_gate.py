@@ -25,6 +25,7 @@ from pathlib import Path
 import shutil
 import sys
 import tempfile
+import threading
 import types
 import unittest
 from unittest import mock
@@ -32,6 +33,7 @@ from unittest import mock
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PKG_ROOT = REPO_ROOT / 'physical_ai_tools' / 'physical_ai_server' / 'physical_ai_server'
 V3_PATH = PKG_ROOT / 'data_processing' / 'data_editor_v3.py'
+WORKER_PATH = PKG_ROOT / 'data_processing' / 'edit_worker.py'
 COMMUNICATOR_PATH = PKG_ROOT / 'communication' / 'communicator.py'
 
 
@@ -118,6 +120,24 @@ def _load_v3_module():
     sys.modules[canonical] = module
     spec.loader.exec_module(module)
     sys.modules['physical_ai_server.data_processing'].data_editor_v3 = module
+    return module
+
+
+def _load_worker_module():
+    """Load edit_worker ONCE under its canonical name + attach to the package.
+
+    communicator.py imports it at top (`from …data_processing import
+    edit_worker`); the data_processing stub has no __path__, so the submodule
+    must be present as an attribute before communicator is exec'd.
+    """
+    canonical = 'physical_ai_server.data_processing.edit_worker'
+    if canonical in sys.modules:
+        return sys.modules[canonical]
+    spec = importlib.util.spec_from_file_location(canonical, str(WORKER_PATH))
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[canonical] = module
+    spec.loader.exec_module(module)
+    sys.modules['physical_ai_server.data_processing'].edit_worker = module
     return module
 
 
@@ -386,17 +406,19 @@ class _FakeNode:
 
 
 class _FakeLegacyEditor:
-    def __init__(self):
-        self.calls = []
+    # Class-level call log: the edit now instantiates a fresh DataEditor()
+    # inside edit_worker.run_edit, so a per-instance log would be invisible to
+    # the test. Reset in setUp.
+    calls = []
 
     def merge_datasets(self, paths, output):
-        self.calls.append(('merge', list(paths), output))
+        _FakeLegacyEditor.calls.append(('merge', list(paths), output))
 
     def delete_episode(self, path, idx):
-        self.calls.append(('delete_one', path, idx))
+        _FakeLegacyEditor.calls.append(('delete_one', path, idx))
 
     def delete_episodes_batch(self, path, indices):
-        self.calls.append(('delete_batch', path, list(indices)))
+        _FakeLegacyEditor.calls.append(('delete_batch', path, list(indices)))
 
 
 class _EditRequest:
@@ -474,6 +496,7 @@ class DatasetEditCallbackRoutingTest(unittest.TestCase):
         _install_lerobot_stubs()
         cls.v3 = _load_v3_module()
         cls.EditDataset = _install_ros_stubs()
+        cls.worker = _load_worker_module()
         canonical = 'physical_ai_server.communication.communicator'
         spec = importlib.util.spec_from_file_location(
             canonical, str(COMMUNICATOR_PATH))
@@ -489,12 +512,17 @@ class DatasetEditCallbackRoutingTest(unittest.TestCase):
         TOOLS.on_merge = None
         self.tmpdir = Path(tempfile.mkdtemp(prefix='v3route_'))
         self.addCleanup(shutil.rmtree, self.tmpdir, ignore_errors=True)
-        # Bypass __init__ (it wires real ROS services); the callback only
-        # touches self.node + self.data_editor.
+        # Bypass __init__ (it wires real ROS services); set just the attrs the
+        # callback touches. _edit_use_subprocess=False runs edit_worker.run_edit
+        # in-process so the routing hits the stubbed v3 module + legacy editor.
         comm_cls = self.communicator_mod.Communicator
         self.comm = comm_cls.__new__(comm_cls)
         self.comm.node = _FakeNode()
         self.comm.data_editor = _FakeLegacyEditor()
+        self.comm._edit_lock = threading.Lock()
+        self.comm._edit_use_subprocess = False
+        self.comm._edit_timeout_s = 3600
+        _FakeLegacyEditor.calls = []
 
     def _call(self, request):
         return self.communicator_mod.Communicator.dataset_edit_callback(
@@ -510,7 +538,7 @@ class DatasetEditCallbackRoutingTest(unittest.TestCase):
             episodes=[1]))
         self.assertTrue(resp.success, resp.message)
         self.assertEqual(len(TOOLS.delete_calls), 1, 'v3 path must be used')
-        self.assertEqual(self.comm.data_editor.calls, [],
+        self.assertEqual(_FakeLegacyEditor.calls, [],
                          'legacy editor must NOT run on a v3.0 dataset')
 
     def test_v21_delete_routes_to_legacy_path(self):
@@ -522,7 +550,7 @@ class DatasetEditCallbackRoutingTest(unittest.TestCase):
         self.assertTrue(resp.success, resp.message)
         self.assertEqual(TOOLS.delete_calls, [],
                          'v3 path must NOT run on a v2.1 dataset')
-        self.assertEqual(self.comm.data_editor.calls,
+        self.assertEqual(_FakeLegacyEditor.calls,
                          [('delete_one', str(src), 1)])
 
     def test_empty_delete_selection_is_german(self):
@@ -545,7 +573,7 @@ class DatasetEditCallbackRoutingTest(unittest.TestCase):
         self.assertFalse(resp.success)
         self.assertIn('unterschiedliche', resp.message)
         self.assertEqual(TOOLS.merge_calls, [])
-        self.assertEqual(self.comm.data_editor.calls, [])
+        self.assertEqual(_FakeLegacyEditor.calls, [])
 
     def test_v3_merge_routes_to_v3_and_v21_merge_to_legacy(self):
         a = self.tmpdir / 'student' / 'a'
@@ -560,7 +588,7 @@ class DatasetEditCallbackRoutingTest(unittest.TestCase):
             output_path=str(out)))
         self.assertTrue(resp.success, resp.message)
         self.assertEqual(len(TOOLS.merge_calls), 1)
-        self.assertEqual(self.comm.data_editor.calls, [])
+        self.assertEqual(_FakeLegacyEditor.calls, [])
 
         c = self.tmpdir / 'student' / 'c21'
         d = self.tmpdir / 'student' / 'd21'
@@ -572,7 +600,7 @@ class DatasetEditCallbackRoutingTest(unittest.TestCase):
         self.assertTrue(resp.success, resp.message)
         self.assertEqual(len(TOOLS.merge_calls), 1, 'no new v3 merge call')
         self.assertEqual(
-            self.comm.data_editor.calls,
+            _FakeLegacyEditor.calls,
             [('merge', [str(c), str(d)], str(self.tmpdir / 'out21'))])
 
     def test_dataediterror_maps_to_german_response(self):

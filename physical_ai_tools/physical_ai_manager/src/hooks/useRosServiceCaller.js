@@ -493,7 +493,15 @@ export function useRosServiceCaller() {
             output_path: output_path,
             delete_episode_num: editDatasetInfo.deleteEpisodeNums,
             upload_huggingface: editDatasetInfo.uploadHuggingface,
-          }
+          },
+          // 300 s: a delete/merge re-encodes video server-side (seconds for
+          // h264, minutes for legacy AV1). The server now runs it in a nice'd
+          // subprocess so the rest of the UI stays live regardless; this just
+          // keeps the client from giving up on a normal-size edit. A very large
+          // legacy-AV1 edit may still exceed this — it completes server-side and
+          // the dataset list reflects it on refresh (the single-flight lock
+          // makes a retry a safe no-op).
+          300000
         );
 
         console.log('sendEditDatasetCommand service response:', result);

@@ -173,6 +173,12 @@ services:
       # valid values per LeRobot v0.5.1: 'hevc', 'libsvtav1', 'auto'.
       # Read by lerobot_dataset_wrapper.py's _apply_edubotics_defaults.
       - EDUBOTICS_VCODEC=${EDUBOTICS_VCODEC:-h264}
+      # Dataset edits (Daten-tab delete/merge) re-encode video and can peg every
+      # CPU core for minutes on legacy AV1 datasets. Default '1' runs the edit in
+      # a nice-19 subprocess so it can't starve the ROS executor (the dashboard
+      # used to go dead — /get_robot_types timed out — until the encode finished).
+      # Read by communicator.py; '0' reverts to the in-process edit (debug only).
+      - EDUBOTICS_DATASET_EDIT_SUBPROCESS=${EDUBOTICS_DATASET_EDIT_SUBPROCESS:-1}
       # Roboter Studio calibration dir (ChArUco intrinsics, hand-eye
       # transforms, HSV color profile). Default lands inside the
       # edubotics_calib named volume mounted below. Overlay readers:

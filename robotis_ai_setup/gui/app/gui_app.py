@@ -141,11 +141,16 @@ def _frame_to_photo_data(frame_bgr):
     """
     try:
         import cv2
-        # Render the preview at the camera's full capture resolution (640x480 on
-        # the Innomaker). We used to 2x-subsample to 320x240 for a compact
-        # thumbnail, but that made the preview look low-res/"broken" — the
-        # capture/recording path is already full 640x480, so the preview should
-        # match it. Keep BGR (cv2 handles BGR->PNG colors).
+        # Downscale the preview for DISPLAY only — the capture/recording path
+        # keeps the full 640x480 frame untouched. Two previews render
+        # side-by-side (holder.pack(side=tk.LEFT)) in the 700px-wide setup
+        # window, so each must stay well under ~330px or the second camera's
+        # preview AND the gripper/scene role combos below get clipped
+        # off-screen — which would defeat the whole point of the side-by-side
+        # thumbnails (telling the two identical-serial Innomakers apart). We
+        # area-downscale to 320 wide: clean, unlike the old [::2,::2]
+        # nearest-decimation that looked aliased/"broken". Keep BGR (cv2
+        # handles BGR->PNG colors).
         img = frame_bgr
         if img.ndim == 2:
             img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
@@ -153,6 +158,13 @@ def _frame_to_photo_data(frame_bgr):
             img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
         if img.ndim != 3 or img.shape[2] != 3:
             return None
+        preview_max_width = 320
+        if img.shape[1] > preview_max_width:
+            new_height = max(
+                1, round(img.shape[0] * preview_max_width / img.shape[1]))
+            img = cv2.resize(
+                img, (preview_max_width, new_height),
+                interpolation=cv2.INTER_AREA)
         ok, buf = cv2.imencode(".png", img)
         if not ok:
             return None

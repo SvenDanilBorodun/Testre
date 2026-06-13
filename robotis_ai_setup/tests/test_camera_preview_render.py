@@ -99,6 +99,34 @@ class TestFrameToPhotoData(unittest.TestCase):
         decoded = base64.b64decode(data)
         self.assertTrue(decoded.startswith(PNG_SIGNATURE))
 
+    def test_full_capture_frame_downscaled_for_preview(self):
+        # Regression: the full 640x480 capture frame must be downscaled to a
+        # display width that fits TWO previews side-by-side in the 700px setup
+        # window. A full-res 640-wide preview overflowed and clipped the second
+        # camera + the gripper/scene role combos (defeating the disambiguation).
+        frame = np.zeros((480, 640, 3), dtype=np.uint8)
+        data = self.encode(frame)
+        self.assertIsNotNone(data)
+        decoded = cv2.imdecode(
+            np.frombuffer(base64.b64decode(data), dtype=np.uint8),
+            cv2.IMREAD_COLOR)
+        self.assertLessEqual(decoded.shape[1], 320)
+        # Aspect ratio preserved (4:3 -> 320x240).
+        self.assertEqual(
+            decoded.shape[0],
+            int(round(decoded.shape[1] * 480 / 640)))
+
+    def test_small_frame_not_upscaled(self):
+        # Sub-threshold frames pass through unchanged (no upscaling, and the
+        # isolated-snippet test loader stays self-contained).
+        frame = np.zeros((48, 64, 3), dtype=np.uint8)
+        data = self.encode(frame)
+        self.assertIsNotNone(data)
+        decoded = cv2.imdecode(
+            np.frombuffer(base64.b64decode(data), dtype=np.uint8),
+            cv2.IMREAD_COLOR)
+        self.assertEqual(decoded.shape[1], 64)
+
     def test_return_is_pure_ascii_base64(self):
         frame = np.full((480, 640, 3), 128, dtype=np.uint8)
         data = self.encode(frame)

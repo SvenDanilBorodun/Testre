@@ -1737,6 +1737,14 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         'calibration', 'workflow', 'recording', 'inference', 'training' —
         used only for error message clarity.
         """
+        # A collision recovery owns the arm until the student finishes the two-step
+        # home→resume flow (which, mid-recording, seamlessly resumes that recording). Block
+        # any new operation until then — defense-in-depth behind the non-dismissible
+        # CollisionModal, and it keeps the collision watchdog from fighting a new session's
+        # /task/status. Cleared implicitly: _collision_active goes False at resync-complete.
+        if getattr(self, '_collision_active', False):
+            return False, ('Eine Kollision wird gerade behoben — bitte zuerst die Schritte '
+                           'im Hinweisfenster abschließen.')
         if self.on_recording:
             return False, 'Aufnahme läuft gerade — bitte zuerst stoppen.'
         if self.on_inference:

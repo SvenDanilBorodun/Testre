@@ -157,15 +157,22 @@ class _Host(CM.CollisionMonitorMixin):
         self.timers = []          # chronological create_timer order
         self.on_inference = False
         self.on_recording = False
-        self.operation_mode = 'record'
+        self.operation_mode = 'collection'
+        self.start_recording_time = 0.0
         self.re_record_calls = 0
         self.timer_stop_calls = 0
+        self.timer_start_calls = []      # timer_name per start()
+        self.clear_latest_data_calls = 0
         host = self
         self.data_manager = types.SimpleNamespace(
             re_record=lambda: setattr(host, 're_record_calls', host.re_record_calls + 1))
         self.timer_manager = types.SimpleNamespace(
             stop=lambda timer_name: setattr(
-                host, 'timer_stop_calls', host.timer_stop_calls + 1))
+                host, 'timer_stop_calls', host.timer_stop_calls + 1),
+            start=lambda timer_name: host.timer_start_calls.append(timer_name))
+        self.communicator = types.SimpleNamespace(
+            clear_latest_data=lambda: setattr(
+                host, 'clear_latest_data_calls', host.clear_latest_data_calls + 1))
         self._init_collision_monitor()
 
     # Node surface ---------------------------------------------------------------
@@ -252,6 +259,20 @@ class TripContractTest(unittest.TestCase):
         self.assertEqual(host.re_record_calls, 1)
         self.assertEqual(host.timer_stop_calls, 1)
         self.assertFalse(host.on_recording)
+        # The interrupted recording is remembered so RESUME_TELEOP can continue the SAME
+        # session (the mode is captured for the timer restart).
+        self.assertTrue(host._collision_interrupted_recording)
+        self.assertEqual(host._collision_interrupted_mode, 'collection')
+
+    def test_trip_during_free_teleop_does_not_arm_resume(self):
+        # No recording in flight (free teleop): a trip must NOT mark a recording to resume,
+        # so RESUME_TELEOP later publishes READY rather than re-arming a phantom session.
+        host = self._host()
+        host.on_recording = False
+        _trip(host)
+        self.assertEqual(host.re_record_calls, 0)
+        self.assertEqual(host.timer_stop_calls, 0)
+        self.assertFalse(host._collision_interrupted_recording)
 
     def test_trip_with_incomplete_pose_skips_hold_never_commands_zeros(self):
         host = self._host()
@@ -372,6 +393,9 @@ class ResumeContractTest(unittest.TestCase):
         self.assertFalse(host._collision_homed)
         self.assertFalse(flag.published[-1].data)
         self.assertEqual(host.pub_for('/task/status').published[-1].phase, _TaskStatus.READY)
+        # Free teleop (no recording was interrupted): resume must NOT re-arm a recording.
+        self.assertEqual(host.timer_start_calls, [])
+        self.assertEqual(host.clear_latest_data_calls, 0)
 
     def test_getattr_fallback_wire_values_match_react(self):
         # The stub TaskStatus has no COLLISION_HOMING/HOMED constants (pre-rebuild container);
@@ -379,6 +403,85 @@ class ResumeContractTest(unittest.TestCase):
         self.assertEqual(CM.PHASE_COLLISION, 7)
         self.assertEqual(CM.PHASE_COLLISION_HOMING, 8)
         self.assertEqual(CM.PHASE_COLLISION_HOMED, 9)
+
+
+class ResumeRecordingContractTest(unittest.TestCase):
+    """A collision that interrupts a recording must SEAMLESSLY resume the SAME session on
+    RESUME_TELEOP (EduBotics 2026-06-13): the kept DataManager re-records the interrupted
+    episode after the Rücksetzzeit, prior episodes intact — the student loses nothing and
+    does not restart. Locks: timer restarted with the captured mode, stale caches cleared,
+    the topic-timeout window reset, and NO READY published (the resumed recording timer owns
+    /task/status; a READY would flicker the React UI back to 'Bereit')."""
+
+    def _recording_homed_host(self):
+        host = _Host()
+        host.timers = [t for t in host.timers if t.callback != host._collision_watchdog_cb]
+        host._collision_follower_pos = dict(CONTACT_POSE)
+        host.on_recording = True            # a recording is in flight at trip time
+        _trip(host)
+        host.fire_pending_timers()          # relax sends
+        host.home_follower()
+        host._collision_follower_pos = {**HOME, 'gripper_joint_1': 0.4}
+        host.fire_pending_timers()          # glide send
+        host.fire_pending_timers()          # verify -> homed
+        assert host._collision_homed
+        # The collision discarded the in-progress episode and halted capture.
+        self.assertEqual(host.re_record_calls, 1)
+        self.assertFalse(host.on_recording)
+        self.assertTrue(host._collision_interrupted_recording)
+        return host
+
+    def test_resume_rearms_the_same_recording_session(self):
+        host = self._recording_homed_host()
+        host._collision_leader_pos = {**HOME, 'gripper_joint_1': 0.4}
+        status_pub = host.pub_for('/task/status')
+
+        success, _ = host.resume_teleop()
+        self.assertTrue(success)
+        # Still frozen until the resync trajectory completes.
+        self.assertTrue(host._collision_active)
+        self.assertFalse(host.on_recording)
+
+        host.fire_pending_timers()          # resync completion -> _on_resync_complete
+
+        # Collision cleared + flag released.
+        self.assertFalse(host._collision_active)
+        self.assertFalse(host.pub_for(CM.COLLISION_FLAG_TOPIC).published[-1].data)
+        # Recording RE-ARMED on the SAME session (DataManager never rebuilt -> prior episodes
+        # + dataset kept; re_record() was NOT called again, so the interrupted episode index
+        # is preserved and re-recorded after the Rücksetzzeit).
+        self.assertTrue(host.on_recording)
+        self.assertEqual(host.timer_start_calls, ['collection'])
+        self.assertEqual(host.re_record_calls, 1)        # not re-discarded on resume
+        # Stale camera/follower/leader caches from the multi-second glide/resync are dropped.
+        self.assertEqual(host.clear_latest_data_calls, 1)
+        # The topic-timeout window is restarted so the first resumed tick can't insta-timeout.
+        self.assertGreater(host.start_recording_time, 0.0)
+        # The interrupted-recording marker is consumed.
+        self.assertFalse(host._collision_interrupted_recording)
+        # CRITICAL: no READY is published on resume — the resumed recording timer owns
+        # /task/status. The last status stays at COLLISION_HOMED until the recording publishes
+        # RESETTING (which closes the React modal as the first non-collision tick).
+        self.assertNotEqual(status_pub.published[-1].phase, _TaskStatus.READY)
+        self.assertEqual(status_pub.published[-1].phase, CM.PHASE_COLLISION_HOMED)
+
+    def test_resume_falls_back_to_ready_when_resume_helper_fails(self):
+        # If the recording objects vanished (a teardown raced the resync), resume must not
+        # crash and must fall back to the plain cleared READY status.
+        host = self._recording_homed_host()
+        host._collision_leader_pos = {**HOME, 'gripper_joint_1': 0.4}
+        host.data_manager = None            # simulate a torn-down session
+        status_pub = host.pub_for('/task/status')
+
+        success, _ = host.resume_teleop()
+        self.assertTrue(success)
+        host.fire_pending_timers()          # resync completion
+
+        self.assertFalse(host._collision_active)
+        self.assertFalse(host.on_recording)
+        self.assertEqual(host.timer_start_calls, [])
+        self.assertFalse(host._collision_interrupted_recording)
+        self.assertEqual(status_pub.published[-1].phase, _TaskStatus.READY)
 
 
 class JointDistTelemetryContractTest(unittest.TestCase):

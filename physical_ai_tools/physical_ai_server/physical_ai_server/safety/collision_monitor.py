@@ -23,7 +23,8 @@
 #        stops, commanded pose == measured pose). The arm does NOT auto-home.
 #     3. if recording: discard the in-progress (contaminated) episode via
 #        data_manager.re_record() and halt capture — nothing after the trip is recorded
-#        (Rule §2). Prior saved episodes are kept.
+#        (Rule §2). Prior saved episodes are kept, and the fact that a recording was in flight
+#        is remembered so RESUME_TELEOP can continue the SAME session (see below).
 #     4. surface phase=COLLISION on /task/status (re-asserted by the watchdog for late page
 #        loads). The React CollisionModal shows step 1: "Hindernis entfernen" + button
 #        „Follower in Grundstellung fahren".
@@ -41,7 +42,10 @@
 #   RESUME_TELEOP (/task/command, student clicked step 2): STRICT ordering — refused until
 #     the follower actually reached home (one mental model for students). Then: proximity
 #     check leader vs home (refuse + re-prompt if too far), quintic resync follower->leader,
-#     and clear /collision_flag + publish phase=READY only after the resync completes.
+#     and clear /collision_flag after the resync completes. If a recording was interrupted
+#     (step 3 above), the SAME session is seamlessly resumed instead of publishing READY —
+#     the kept DataManager re-records the interrupted episode after the Rücksetzzeit, prior
+#     episodes intact (the student loses nothing). Otherwise (free teleop) phase=READY.
 #
 # Inference safety (Rule §2): the detector is gated off when self.on_inference is True, AND
 # structurally the /collision_flag consumers (the leader's trajectory broadcaster and the
@@ -51,6 +55,7 @@
 # distribution.
 
 import os
+import time
 
 from physical_ai_interfaces.msg import TaskStatus
 from physical_ai_server.safety.collision_detector import (
@@ -163,6 +168,14 @@ class CollisionMonitorMixin:
         self._collision_overload_joints = []
         self._collision_message = COLLISION_MESSAGE_DE
         self._collision_resync_timer = None
+        # Seamless-resume state: when a collision trips MID-RECORDING we discard the
+        # in-progress episode and halt capture (Rule §2), but remember that a recording was
+        # in flight so RESUME_TELEOP can continue the SAME session (same dataset, prior
+        # episodes kept, the interrupted episode re-recorded after the Rücksetzzeit) instead
+        # of forcing the student to start over. Set at trip, cleared at resync-complete (and
+        # defensively coupled to _collision_active, which _assert_no_other_active blocks on).
+        self._collision_interrupted_recording = False
+        self._collision_interrupted_mode = None
         # Relax-in-place delivery state (see RELAX_* constants).
         self._relax_timer = None
         self._relax_sends = 0
@@ -318,18 +331,26 @@ class CollisionMonitorMixin:
         self._relax_sends = 0
         self._schedule_relax(RELAX_DELAY_S)
 
-        # 3. Discard the in-progress episode + halt capture so nothing after the trip is
-        #    recorded.
+        # 3. Halt capture + discard the in-progress (contaminated) episode so nothing after
+        #    the trip is recorded (Rule §2). REMEMBER the recording was in flight so the
+        #    two-step recovery can SEAMLESSLY resume the SAME session on RESUME_TELEOP — the
+        #    DataManager/TimerManager objects are kept (not rebuilt), re_record() rewinds the
+        #    FSM to 'reset' WITHOUT counting the episode, so capture resumes with the
+        #    Rücksetzzeit and re-records that very episode. Stop the timer BEFORE re_record()
+        #    so the gpio-thread FSM rewind can't be interleaved by a new recording tick on the
+        #    timer thread (no new tick starts once the timer is destroyed).
         if getattr(self, 'on_recording', False):
-            try:
-                self.data_manager.re_record()
-            except Exception as exc:  # noqa: BLE001 - never let cleanup crash the guard
-                self.get_logger().error(f'[KOLLISION] re_record failed: {exc}')
+            self._collision_interrupted_recording = True
+            self._collision_interrupted_mode = getattr(self, 'operation_mode', 'collection')
             self.on_recording = False
             try:
                 self.timer_manager.stop(timer_name=self.operation_mode)
             except Exception as exc:  # noqa: BLE001
                 self.get_logger().error(f'[KOLLISION] timer stop failed: {exc}')
+            try:
+                self.data_manager.re_record()
+            except Exception as exc:  # noqa: BLE001 - never let cleanup crash the guard
+                self.get_logger().error(f'[KOLLISION] re_record failed: {exc}')
 
         # 4. Tell the student (re-asserted by the watchdog).
         self._publish_collision_status()
@@ -609,8 +630,61 @@ class CollisionMonitorMixin:
         self._collision_overload_joints = []
         self._collision_detector.reset()
         self._publish_collision_flag(False)
-        self._publish_cleared_status()
-        self.get_logger().info('[KOLLISION] Teleoperation wiederhergestellt.')
+
+        # Seamlessly resume a recording the collision interrupted: re-arm the SAME session so
+        # the student continues where they left off. We deliberately do NOT publish the cleared
+        # READY status in this branch — the resumed recording timer owns /task/status from its
+        # first tick (phase=RESETTING, the Rücksetzzeit), and a READY published here would race
+        # that on the shared /task/status topic and flicker the React UI back to "Bereit"
+        # (re-enabling the Start button). The CollisionModal still closes correctly because it
+        # dismisses on the first NON-collision phase tick, which RESETTING satisfies.
+        resumed = False
+        if self._collision_interrupted_recording:
+            resumed = self._resume_interrupted_recording()
+        self._collision_interrupted_recording = False
+        self._collision_interrupted_mode = None
+        if resumed:
+            self.get_logger().info(
+                '[KOLLISION] Teleoperation wiederhergestellt — Aufnahme wird fortgesetzt.')
+        else:
+            self._publish_cleared_status()
+            self.get_logger().info('[KOLLISION] Teleoperation wiederhergestellt.')
+
+    def _resume_interrupted_recording(self):
+        """Re-arm the recording the collision interrupted, keeping the SAME DataManager.
+
+        Returns True when the recording timer was restarted. The DataManager is NOT rebuilt
+        (that would drop every prior episode + the dataset object); re_record() already left
+        the FSM at 'reset' with the episode count preserved, so the next ticks play out the
+        Rücksetzzeit and re-record the interrupted episode. Defensive: if the recording
+        objects are gone (a teardown raced us), fall back to the plain cleared-status path."""
+        mode = self._collision_interrupted_mode or 'collection'
+        timer_manager = getattr(self, 'timer_manager', None)
+        data_manager = getattr(self, 'data_manager', None)
+        if timer_manager is None or data_manager is None:
+            return False
+        try:
+            # Drop the stale camera/follower/leader caches + F65 sync rings captured during the
+            # (multi-second) relax/home/resync motion — otherwise the first resumed tick could
+            # pair a fresh frame with a stale-stamped one (the silent-misalignment class that
+            # clear_latest_data was built to prevent; see communicator.clear_latest_data).
+            communicator = getattr(self, 'communicator', None)
+            if communicator is not None:
+                communicator.clear_latest_data()
+            # Restart the DEFAULT_TOPIC_TIMEOUT "waiting for data" window so the first resumed
+            # tick (with momentarily-empty caches) does not instantly trip the timeout and kill
+            # the recording.
+            self.start_recording_time = time.perf_counter()
+            self.on_recording = True
+            # TimerManager kept the freq+callback from set_timer at record start; start()
+            # recreates the timer destroyed at trip time.
+            timer_manager.start(timer_name=mode)
+            return True
+        except Exception as exc:  # noqa: BLE001 - never let resume crash the guard
+            self.get_logger().error(
+                f'[KOLLISION] Aufnahme-Fortsetzung fehlgeschlagen: {exc}')
+            self.on_recording = False
+            return False
 
     def _best_effort_reboot(self, joints):
         """Reboot firmware-latched Dynamixels, then re-enable torque. Fully guarded; rare path."""

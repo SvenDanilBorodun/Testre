@@ -523,6 +523,12 @@ class DataManager:
 
     def re_record(self):
         self._stop_save_completed = False
+        # Abandon any in-flight save: re_record means "discard the current episode and
+        # restart it". If a collision (or a manual Wiederholen) fires while _status=='save'
+        # with _on_saving latched True, leaving it set would make the NEXT 'save' tick skip
+        # save() and jump straight to the encoding-complete branch — counting an episode whose
+        # frames were never written. Clearing it here keeps the re-recorded episode honest.
+        self._on_saving = False
         self._episode_reset()
         self._status = 'reset'
 

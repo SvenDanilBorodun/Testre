@@ -103,6 +103,7 @@ class CollisionDiscardContractTest(unittest.TestCase):
         dm._status = 'run'
         dm._current_task = 0
         dm._stop_save_completed = True
+        dm._on_saving = True                  # latched as if a save was mid-flight
         dm._start_time_s = 5.0
         dm._last_image_hashes = {'gripper': 'h1'}
         dm._last_image_change_time = {'gripper': 1.0}
@@ -120,6 +121,10 @@ class CollisionDiscardContractTest(unittest.TestCase):
         self.assertEqual(dm._status, 'reset')
         # ...and the save-completion latch is cleared so the next episode records cleanly.
         self.assertFalse(dm._stop_save_completed)
+        # ...the in-flight save latch is cleared too, so the NEXT 'save' tick actually calls
+        # save() (a collision mid-SAVING must not let the re-recorded episode be counted
+        # without its frames ever being written).
+        self.assertFalse(dm._on_saving)
         # Stale-frame hashes are dropped so the re-recorded episode starts fresh.
         self.assertEqual(dm._last_image_hashes, {})
         self.assertEqual(dm._last_image_change_time, {})

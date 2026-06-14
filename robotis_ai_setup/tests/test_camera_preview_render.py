@@ -17,6 +17,8 @@ importlib so a runner without tkinter/webview can still run these.
 import base64
 import importlib.util
 import os
+import textwrap
+import types
 import unittest
 
 try:  # numpy/cv2 may be absent on a bare runner.
@@ -136,6 +138,75 @@ class TestFrameToPhotoData(unittest.TestCase):
         # Decodes cleanly as ascii and round-trips through base64.
         text = data.decode("ascii")  # raises if non-ascii
         self.assertEqual(base64.b64encode(base64.b64decode(text)), data)
+
+
+def _load_stop_camera_previews():
+    """Return the `_stop_camera_previews` method as a standalone callable.
+
+    Prefers the real class; falls back to extracting + dedenting the method
+    source so this runs on a headless runner without tkinter/webview (the same
+    constraint the rest of this file works around).
+    """
+    try:
+        from gui.app.gui_app import EduBoticsGUI
+        return EduBoticsGUI._stop_camera_previews
+    except Exception:  # noqa: BLE001 — headless fallback (no tkinter/webview)
+        src = os.path.join(
+            os.path.dirname(__file__), "..", "gui", "app", "gui_app.py")
+        with open(src, "r", encoding="utf-8") as fh:
+            source = fh.read()
+        marker = "    def _stop_camera_previews(self):"
+        start = source.index(marker)
+        rest = source[start:]
+        end = rest.find("\n    def ", len(marker))
+        snippet = textwrap.dedent(rest[: end if end != -1 else len(rest)])
+        ns = {}
+        exec(compile(snippet, src, "exec"), ns)  # noqa: S102 — in-repo source
+        return ns["_stop_camera_previews"]
+
+
+class _FakeRoot:
+    def after_cancel(self, _id):  # pragma: no cover — trivial stub
+        pass
+
+
+class TestPreviewLifecycleInit(unittest.TestCase):
+    """Regression: the FIRST preview of the process must not silently stall.
+
+    `_stop_camera_previews` initialises every preview-state attribute; it used
+    to set `_preview_after_id` ONLY inside an `if ... is not None` block, so on
+    the first preview the attribute never existed and `_install`'s
+    `if self._preview_after_id is None` raised AttributeError into Tk's callback
+    handler (silent in the packaged .exe) — the poll was never scheduled and the
+    label stayed on "Vorschau lädt ..." forever with the cameras visibly free.
+    """
+
+    def test_stop_initialises_after_id_on_first_call(self):
+        stop = _load_stop_camera_previews()
+        fake = types.SimpleNamespace(root=_FakeRoot())
+        # First-ever call: no _preview_after_id exists yet.
+        self.assertFalse(hasattr(fake, "_preview_after_id"))
+        stop(fake)
+        # The attribute must now EXIST and be None ...
+        self.assertTrue(hasattr(fake, "_preview_after_id"))
+        self.assertIsNone(fake._preview_after_id)
+        # ... so the exact _install scheduling guard cannot raise.
+        try:
+            should_schedule = fake._preview_after_id is None
+        except AttributeError:  # pragma: no cover
+            self.fail("_preview_after_id missing — _install would AttributeError")
+        self.assertTrue(should_schedule)
+
+    def test_stop_cancels_and_clears_existing_after_id(self):
+        # A second teardown with a live scheduled id must cancel it and reset
+        # to None (so a stale id can't survive into the next preview session).
+        stop = _load_stop_camera_previews()
+        cancelled = []
+        root = types.SimpleNamespace(after_cancel=cancelled.append)
+        fake = types.SimpleNamespace(root=root, _preview_after_id="after#42")
+        stop(fake)
+        self.assertEqual(cancelled, ["after#42"])
+        self.assertIsNone(fake._preview_after_id)
 
 
 if __name__ == "__main__":

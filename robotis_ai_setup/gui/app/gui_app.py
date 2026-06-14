@@ -1685,12 +1685,20 @@ class EduBoticsApp:
         # Invalidate any in-flight worker opens first (they release their
         # captures instead of installing into a torn-down preview row).
         self._preview_generation = getattr(self, "_preview_generation", 0) + 1
-        if getattr(self, "_preview_after_id", None) is not None:
+        existing_after_id = getattr(self, "_preview_after_id", None)
+        if existing_after_id is not None:
             try:
-                self.root.after_cancel(self._preview_after_id)
+                self.root.after_cancel(existing_after_id)
             except Exception:  # noqa: BLE001
                 pass
-            self._preview_after_id = None
+        # Initialise UNCONDITIONALLY (like every other preview-state attr
+        # below). This used to be set ONLY inside the `if` above, so on the
+        # FIRST preview of the process the attribute never existed — and
+        # `_install`'s `if self._preview_after_id is None` then raised
+        # AttributeError into Tk's callback handler (silent in the packaged
+        # .exe). The poll was never scheduled → an endless "Vorschau lädt ..."
+        # with the cameras visibly free. Bug since PR-4 introduced previews.
+        self._preview_after_id = None
         for cap in getattr(self, "_preview_caps", {}).values():
             try:
                 cap.release()

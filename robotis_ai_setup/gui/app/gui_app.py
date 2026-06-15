@@ -255,7 +255,25 @@ class EduBoticsApp:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title("EduBotics")
-        self.root.geometry("700x830")
+        # Open at the preferred size, but never taller than the screen actually
+        # allows — on a 1366x768 student laptop a fixed 830px window runs off
+        # the bottom edge (below the taskbar), hiding "Umgebung starten" and the
+        # Protokoll. We clamp the initial height to the usable screen height; the
+        # scrollable container built in _build_ui() makes anything that still
+        # doesn't fit reachable by scrolling.
+        pref_w, pref_h = 700, 830
+        try:
+            screen_h = self.root.winfo_screenheight()
+            # Reserve room for the Windows taskbar + the title bar + a margin.
+            usable_h = max(480, screen_h - 80)
+            init_h = min(pref_h, usable_h)
+        except tk.TclError:
+            init_h = pref_h
+        self.root.geometry(f"{pref_w}x{init_h}")
+        # Place the top edge near the top of the screen so the window grows
+        # downward into the available space rather than off either edge.
+        self.root.geometry("+60+20")
+        self.root.minsize(560, 480)
         self.root.resizable(True, True)
         _apply_window_icon(self.root)
 
@@ -286,9 +304,71 @@ class EduBoticsApp:
 
     # ── UI Construction ──────────────────────────────────────────────
 
+    def _build_scrollable_container(self):
+        """Return a frame whose content can exceed the window height and stay
+        reachable via a vertical scrollbar / mouse wheel.
+
+        The whole form (Modus + Schritte A-D + Start-Buttons + Protokoll) is
+        taller than a small student laptop screen. Without this, the bottom
+        (the Start button, the Protokoll) is clipped off-screen and unreachable.
+        Everything is packed into the returned inner frame exactly as before."""
+        outer = ttk.Frame(self.root)
+        outer.pack(fill=tk.BOTH, expand=True)
+
+        canvas = tk.Canvas(outer, highlightthickness=0, borderwidth=0)
+        vbar = ttk.Scrollbar(outer, orient=tk.VERTICAL, command=canvas.yview)
+        canvas.configure(yscrollcommand=vbar.set)
+        vbar.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self._scroll_canvas = canvas
+
+        inner = ttk.Frame(canvas, padding=10)
+        window_id = canvas.create_window((0, 0), window=inner, anchor="nw")
+
+        def _sync_height():
+            # When the window is taller than the content, stretch the inner
+            # frame to fill the canvas so the Protokoll's expand=True still lets
+            # it grow (matches the pre-scroll behaviour on large screens). When
+            # the content is taller, leave it at its natural height so the
+            # scrollbar engages. Guarded against a configure feedback loop.
+            canvas_h = canvas.winfo_height()
+            target_h = max(inner.winfo_reqheight(), canvas_h)
+            if getattr(self, "_scroll_inner_h", None) != target_h:
+                self._scroll_inner_h = target_h
+                canvas.itemconfigure(window_id, height=target_h)
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        def _on_inner_configure(_event):
+            _sync_height()
+
+        def _on_canvas_configure(event):
+            # Keep the inner frame as wide as the canvas (so wraplength/fill=X
+            # widgets behave exactly as they did when packed straight into root).
+            canvas.itemconfigure(window_id, width=event.width)
+            _sync_height()
+
+        inner.bind("<Configure>", _on_inner_configure)
+        canvas.bind("<Configure>", _on_canvas_configure)
+
+        # Mouse-wheel scrolling, active only while the pointer is over the app.
+        # When the pointer is over the Protokoll text box, let that widget keep
+        # its own wheel handling instead of scrolling the whole form.
+        def _on_mousewheel(event):
+            widget = self.root.winfo_containing(event.x_root, event.y_root)
+            log = getattr(self, "log_text", None)
+            if widget is not None and log is not None:
+                wpath, lpath = str(widget), str(log)
+                if wpath == lpath or wpath.startswith(lpath + "."):
+                    return  # over the Protokoll — let it scroll itself
+            canvas.yview_scroll(int(-event.delta / 120), "units")
+
+        canvas.bind("<Enter>", lambda _e: canvas.bind_all("<MouseWheel>", _on_mousewheel))
+        canvas.bind("<Leave>", lambda _e: canvas.unbind_all("<MouseWheel>"))
+
+        return inner
+
     def _build_ui(self):
-        main = ttk.Frame(self.root, padding=10)
-        main.pack(fill=tk.BOTH, expand=True)
+        main = self._build_scrollable_container()
 
         # Title
         title = ttk.Label(main, text="EduBotics", font=("Segoe UI", 18, "bold"))

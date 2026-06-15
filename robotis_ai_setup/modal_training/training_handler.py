@@ -687,6 +687,19 @@ def run_training(
 
         total_steps = training_params.get("steps", 100000)
 
+        # Push an immediate 0/total point so the UI leaves the "Warte auf
+        # GPU-Worker" state the instant we're running. LeRobot's first real log
+        # line only lands at log_freq steps, and the cold start + dataset
+        # download before it can take a minute+. No loss => the RPC records no
+        # history point, it just sets total_steps/current_step + last_progress_at.
+        try:
+            _update_supabase_progress(
+                supabase_url, supabase_anon_key, worker_token,
+                training_id, 0, total_steps, None,
+            )
+        except Exception as _e:
+            print(f"Warnung: Initiales Fortschritts-Update fehlgeschlagen: {_e}", flush=True)
+
         # ----- 3. Spawn LeRobot training subprocess -----
         cmd = _build_training_command(dataset_name, model_type, model_name, training_params)
         print(f"Running training command: {' '.join(cmd)}")
@@ -717,6 +730,10 @@ def run_training(
         # is terminal (canceled/failed API-side). Drives an early, clean exit so
         # the GPU is released on cancel even if the Modal-side terminate failed.
         cancel_detected = threading.Event()
+        # Stops the liveness heartbeat thread. Always set BEFORE any terminal
+        # status write so a late heartbeat can never race a succeeded/failed
+        # transition (which nulls the worker_token → P0001 → false cancel).
+        progress_stop = threading.Event()
         last_progress_step = -1
         step_pattern = re.compile(r"step[:\s]+(\d+\.?\d*[KMBkmb]?)")
         loss_pattern = re.compile(r"loss[:\s]+([\d.]+(?:e[+-]?\d+)?)")
@@ -774,6 +791,46 @@ def run_training(
         reader_thread = threading.Thread(target=_read_output, daemon=True)
         reader_thread.start()
 
+        # Liveness heartbeat (every ~15s). LeRobot only logs every log_freq
+        # steps, and some phases (dataset download, periodic eval, checkpoint
+        # save) emit nothing for a while — during which last_progress_at would
+        # go stale and the student's chart would look frozen. A light periodic
+        # touch (current step, no new loss point) keeps last_progress_at fresh
+        # so the UI shows "aktiv · vor Xs". It also gives a cancel a second
+        # exit: a server-side cancel nulls the worker_token → P0001 here even
+        # while the reader is blocked on a quiet stdout, so the GPU is freed
+        # promptly instead of at the timeout cap. Each RPC call builds its own
+        # Supabase client, so running alongside the reader thread is safe.
+        heartbeat_interval_s = 15
+
+        def _heartbeat():
+            while not progress_stop.wait(heartbeat_interval_s):
+                if cancel_detected.is_set():
+                    return
+                try:
+                    _update_supabase_progress(
+                        supabase_url, supabase_anon_key, worker_token,
+                        training_id, max(last_progress_step, 0), total_steps, None,
+                    )
+                except Exception as _e:
+                    if _is_terminal_cancel_error(_e):
+                        print(
+                            "Training serverseitig abgebrochen (Heartbeat) — "
+                            "beende Trainingsprozess und gebe GPU frei.",
+                            flush=True,
+                        )
+                        cancel_detected.set()
+                        try:
+                            proc.kill()
+                        except Exception:
+                            pass
+                        return
+                    # Transient (network blip) — keep the heart beating.
+                    print(f"Warnung: Heartbeat-Update fehlgeschlagen: {_e}", flush=True)
+
+        heartbeat_thread = threading.Thread(target=_heartbeat, daemon=True)
+        heartbeat_thread.start()
+
         # Mid-training checkpoint uploads (leLab-comparison PR-5a): lerobot
         # writes checkpoints/<step>/ every save_freq (default 20k) steps;
         # the watcher mirrors each new one to the model repo so a teacher
@@ -790,6 +847,7 @@ def run_training(
         try:
             proc.wait(timeout=timeout_hours * 3600)
         except subprocess.TimeoutExpired:
+            progress_stop.set()
             proc.kill()
             try:
                 proc.wait(timeout=10)
@@ -804,6 +862,9 @@ def run_training(
             )
             return {"status": "failed", "error": f"Training timed out ({timeout_hours}h limit)"}
 
+        # Stop the heartbeat before evaluating the outcome — every path below
+        # writes a terminal status, and the heartbeat must not race it.
+        progress_stop.set()
         reader_thread.join(timeout=10)
         ckpt_stop.set()
         output_text = "".join(output_lines)

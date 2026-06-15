@@ -38,7 +38,9 @@ const defaultTrainingInfo = {
   batchSize: 8,
   steps: 50000,
   evalFreq: 0,
-  logFreq: 200,
+  // 100 (was 200): the worker writes one live progress point per log line, so a
+  // denser log_freq makes the step counter + loss curve advance ~2x more often.
+  logFreq: 100,
   saveFreq: 10000,
 };
 
@@ -145,7 +147,7 @@ const trainingSlice = createSlice({
         batchSize: 8,
         steps: 100000,
         evalFreq: 20000,
-        logFreq: 200,
+        logFreq: 100,
         saveFreq: 20000,
       };
     },

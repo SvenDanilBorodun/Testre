@@ -155,6 +155,7 @@ COLLISION_HOME_FAILED_MESSAGE_DE = (
     'Der Follower konnte die Grundstellung nicht erreichen. Prüfe, ob das Hindernis entfernt '
     'ist, und klicke erneut auf „Follower in Grundstellung fahren".'
 )
+RESYNC_IN_FLIGHT_MESSAGE_DE = 'Teleoperation wird bereits wiederhergestellt — bitte warten …'
 
 
 class CollisionMonitorMixin:
@@ -209,6 +210,17 @@ class CollisionMonitorMixin:
             durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self._collision_flag_pub = self.create_publisher(
             Bool, COLLISION_FLAG_TOPIC, latched_qos)
+        # Clear any STALE freeze latch on startup. The leader broadcaster
+        # (om_joint_trajectory_command_broadcaster) is a VOLATILE subscriber that NEVER
+        # self-clears collision_detected_ — it only un-freezes on an explicit
+        # /collision_flag=False. This node carries respawn=True (physical_ai_server.launch.py);
+        # if it respawned while a True flag was latched in the broadcaster (a collision was
+        # active, or an unhandled exception elsewhere killed the node mid-collision), the
+        # follower would stay frozen forever with NO active collision to recover from — env
+        # restart only (issue #19 finding #4). Publishing False at init un-freezes it
+        # immediately; the watchdog re-asserts False at 5 Hz to cover the discovery race (a
+        # one-shot publish can be missed before the broadcaster's subscription is matched).
+        self._publish_collision_flag(False)
         # Mirrors the entrypoint Phase-3 / jetson_agent safe-home publisher QoS.
         self._collision_leader_traj_pub = self.create_publisher(
             JointTrajectory, LEADER_TRAJECTORY_TOPIC, latched_qos)
@@ -321,15 +333,26 @@ class CollisionMonitorMixin:
         self._collision_message = COLLISION_MESSAGE_DE
         self.get_logger().warning(f'[KOLLISION] Stop ausgelöst: {result.reason}')
 
-        # 1. Freeze the leader broadcaster FIRST.
-        self._publish_collision_flag(True)
+        # 1. Freeze the leader broadcaster FIRST. Guarded INDEPENDENTLY of the relax below
+        #    (issue #19 finding #1): _trigger_collision_stop runs inside _gpio_states_cb's
+        #    try/except, so a raise here would be swallowed and could strand _collision_active
+        #    with no relax scheduled and no modal published. Each safety action runs on its
+        #    own so one failure can't skip the next; the watchdog also re-asserts the flag +
+        #    status at 5 Hz while active, so even a fully-failed publish self-heals.
+        try:
+            self._publish_collision_flag(True)
+        except Exception as exc:  # noqa: BLE001 - must not skip the relax below
+            self.get_logger().error(f'[KOLLISION] flag publish at trip failed: {exc}')
 
         # 2. Relax in place — DELAYED + re-sent (see RELAX_* constants): command the current
         #    measured pose so the position error (and with it the press force) drops to zero.
         #    The arm does NOT move home here; the student removes the obstacle first and
         #    triggers the home glide from the modal (HOME_FOLLOWER).
-        self._relax_sends = 0
-        self._schedule_relax(RELAX_DELAY_S)
+        try:
+            self._relax_sends = 0
+            self._schedule_relax(RELAX_DELAY_S)
+        except Exception as exc:  # noqa: BLE001 - must not skip the status publish below
+            self.get_logger().error(f'[KOLLISION] relax scheduling at trip failed: {exc}')
 
         # 3. Halt capture + discard the in-progress (contaminated) episode so nothing after
         #    the trip is recorded (Rule §2). REMEMBER the recording was in flight so the
@@ -352,8 +375,11 @@ class CollisionMonitorMixin:
             except Exception as exc:  # noqa: BLE001 - never let cleanup crash the guard
                 self.get_logger().error(f'[KOLLISION] re_record failed: {exc}')
 
-        # 4. Tell the student (re-asserted by the watchdog).
-        self._publish_collision_status()
+        # 4. Tell the student (re-asserted by the watchdog, so a failure here self-heals).
+        try:
+            self._publish_collision_status()
+        except Exception as exc:  # noqa: BLE001
+            self.get_logger().error(f'[KOLLISION] collision status publish at trip failed: {exc}')
 
     # ---- actuation helpers ---------------------------------------------------------------
 
@@ -415,6 +441,13 @@ class CollisionMonitorMixin:
         (same failure mode as the HF whoami heartbeat stall)."""
         if not self._collision_active:
             return False, 'Keine aktive Kollision — der Follower muss nicht in die Grundstellung.'
+        # Refuse while a resync is already in flight (a (force-)resume was clicked and its
+        # quintic + completion timer are live): a competing home glide on the SAME action rail
+        # would fight the resync trajectory. The force-resume path keeps phase=COLLISION
+        # (stage 'stopped') during the resync, so this step-1 button stays visible — guard it
+        # at the source of truth rather than relying on the UI to disable it.
+        if self._collision_resync_timer is not None:
+            return True, RESYNC_IN_FLIGHT_MESSAGE_DE
         if self._collision_homed:
             return True, 'Der Follower ist bereits in der Grundstellung.'
         if self._collision_homing:
@@ -571,6 +604,25 @@ class CollisionMonitorMixin:
             # (late page loads land in the correct modal step).
             self._publish_collision_flag(True)
             self._publish_collision_status()
+        else:
+            # Self-heal the freeze latch while idle (issue #19 finding #4): the broadcaster
+            # is a VOLATILE subscriber that never self-clears collision_detected_, so a stale
+            # /collision_flag=True latched before a respawn (respawn=True) would freeze the
+            # follower forever with no active collision to recover from. Asserting False keeps
+            # the broadcaster converged to "no collision" within one tick of the node coming
+            # up. Idempotent on the broadcaster (a plain atomic store); the gpio callback and
+            # this watchdog share the node default MutuallyExclusiveCallbackGroup, so a trip
+            # (which sets _collision_active=True before the next tick) can never race a False
+            # out here.
+            # Edge case (accepted): if the node respawned MID-collision, _collision_active is
+            # lost and this briefly un-freezes a still-pressed obstacle — but the fresh
+            # detector re-trips on the next gpio frame (~10 ms) and re-freezes, which is
+            # strictly better than the wedge-forever this replaces. Safe because in the
+            # shipped OMX stack the leader broadcaster is the ONLY /collision_flag consumer and
+            # there is NO competing publisher (the OMY self_collision_node / gravity-comp
+            # controller are not spawned — see CLAUDE.md Rule §2). If the OMY path is ever
+            # productized, gate this assertion on EduBotics owning the topic.
+            self._publish_collision_flag(False)
 
     # ---- resume --------------------------------------------------------------------------
 
@@ -578,6 +630,9 @@ class CollisionMonitorMixin:
         """Handle the RESUME_TELEOP command (modal step 2). Returns (success, german_message)."""
         if not self._collision_active:
             return True, 'Keine aktive Kollision — Teleoperation läuft bereits.'
+        # Already resyncing (double-click / re-click): don't schedule a second resync.
+        if self._collision_resync_timer is not None:
+            return True, RESYNC_IN_FLIGHT_MESSAGE_DE
 
         # 0. STRICT ordering: the follower must have completed the home glide first. One
         #    mental model for students: Hindernis weg -> Follower home -> Leader home -> weiter.
@@ -611,6 +666,58 @@ class CollisionMonitorMixin:
         #    the watchdog keeps the broadcaster frozen so it can't fight the resync trajectory.
         self._schedule_resync_completion(RESYNC_DURATION_S + 0.5)
         return True, 'Teleoperation wird wiederhergestellt …'
+
+    def force_resume_teleop(self):
+        """Handle FORCE_RESUME_TELEOP — the modal step-1 escape hatch (issue #19 finding #4).
+
+        For when the verified safe-home glide cannot complete (e.g. a degraded bus keeps the
+        follower from tracking home), which would otherwise wedge ALL operations behind the
+        freeze with env-restart the only recovery. Unlike resume_teleop this does NOT require
+        the follower to have reached home; instead it does a CONTROLLED, proximity-gated
+        quintic resync from the follower's CURRENT pose to the leader, then clears the freeze
+        on completion. The proximity gate (leader near the follower's CURRENT pose, not home)
+        keeps the move small so the follower can never jump when the broadcaster un-freezes —
+        the watchdog holds the freeze through the whole resync exactly like resume_teleop.
+
+        Returns (success, german_message). Does NOT auto-resume an interrupted recording: a
+        forced recovery ends the session (the student restarts recording deliberately)."""
+        if not self._collision_active:
+            return True, 'Keine aktive Kollision — Teleoperation läuft bereits.'
+        # Already resyncing (this button stays visible through the resync): no second resync.
+        if self._collision_resync_timer is not None:
+            return True, RESYNC_IN_FLIGHT_MESSAGE_DE
+        if not all(j in self._collision_leader_pos for j in ARM_JOINT_NAMES):
+            return False, ('Leader-Pose nicht verfügbar — bitte den Leader-Arm prüfen und '
+                           'erneut auf „Trotzdem fortsetzen" klicken.')
+        if not all(j in self._collision_follower_pos for j in ARM_JOINT_NAMES):
+            return False, ('Follower-Pose nicht verfügbar — bitte kurz warten und erneut auf '
+                           '„Trotzdem fortsetzen" klicken.')
+        # Proximity gate referenced to the follower's CURRENT pose (it may not be at home):
+        # keep the resync move small so the follower can't jump when the freeze clears.
+        too_far = [
+            j for j in ARM_JOINT_NAMES
+            if abs(self._collision_leader_pos[j] - self._collision_follower_pos[j])
+            > self._collision_resume_tol
+        ]
+        if too_far:
+            return False, ('Der Leader-Arm ist zu weit von der aktuellen Stellung des Followers '
+                           f'entfernt (Gelenke: {", ".join(too_far)}). Bringe den Leader nah an '
+                           'die AKTUELLE Stellung des Followers und klicke erneut auf '
+                           '„Trotzdem fortsetzen".')
+
+        # Cancel any stray relax/glide timer so nothing fires mid-resync.
+        self._cancel_relax_timer()
+        self._cancel_glide_timer()
+        # A forced recovery ends the interrupted recording (do NOT auto-resume it): clearing
+        # the marker makes _on_resync_complete take the plain cleared-status (READY) path.
+        self._collision_interrupted_recording = False
+        self._collision_interrupted_mode = None
+        start = {j: self._collision_follower_pos.get(j, self._collision_leader_pos.get(j, 0.0))
+                 for j in LEADER_JOINTS}
+        target = {j: self._collision_leader_pos.get(j, start[j]) for j in LEADER_JOINTS}
+        self._publish_quintic(LEADER_JOINTS, start, target, RESYNC_DURATION_S)
+        self._schedule_resync_completion(RESYNC_DURATION_S + 0.5)
+        return True, 'Teleoperation wird wiederhergestellt (Notentriegelung) …'
 
     def _schedule_resync_completion(self, delay):
         if self._collision_resync_timer is not None:

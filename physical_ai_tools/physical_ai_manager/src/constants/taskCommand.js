@@ -28,6 +28,7 @@ const TaskCommand = {
   SKIP_TASK: 7,
   RESUME_TELEOP: 8, // collision e-stop step 2: resync follower -> leader and resume
   HOME_FOLLOWER: 9, // collision e-stop step 1: glide the follower to the safe home pose
+  FORCE_RESUME_TELEOP: 10, // collision e-stop escape hatch: resync from the follower's CURRENT pose (home glide could not complete)
 };
 
 export default TaskCommand;

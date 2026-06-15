@@ -12,6 +12,7 @@ uint8 FINISH = 6
 uint8 SKIP_TASK = 7
 uint8 RESUME_TELEOP = 8         # collision e-stop step 2: resync the follower to the leader and resume
 uint8 HOME_FOLLOWER = 9         # collision e-stop step 1: glide the follower to the safe home pose
+uint8 FORCE_RESUME_TELEOP = 10  # collision e-stop escape hatch: resync from the follower's CURRENT pose (used when the verified home glide cannot complete)
 
 uint8 command
 TaskInfo task_info

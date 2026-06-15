@@ -1217,6 +1217,16 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 response.success = success
                 response.message = message
 
+            elif request.command == getattr(SendCommand.Request, 'FORCE_RESUME_TELEOP', 10):
+                # EduBotics teleop collision e-stop ESCAPE HATCH (issue #19 finding #4): when
+                # the verified safe-home glide cannot complete, the student forces a resync
+                # from the follower's CURRENT pose to the leader (proximity-gated) so a stuck
+                # collision no longer wedges everything behind the freeze (env restart only).
+                # getattr fallback mirrors RESUME_TELEOP/HOME_FOLLOWER above.
+                success, message = self.force_resume_teleop()
+                response.success = success
+                response.message = message
+
             else:
                 if not self.on_recording and not self.on_inference:
                     response.success = False

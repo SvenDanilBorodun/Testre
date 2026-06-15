@@ -69,7 +69,7 @@ function RemedyDiagram() {
 
 export default function CollisionModal() {
   const collision = useSelector((state) => state.tasks.collision);
-  const { homeFollower, resumeTeleop } = useRosServiceCaller();
+  const { homeFollower, resumeTeleop, forceResumeTeleop } = useRosServiceCaller();
   const [busy, setBusy] = useState(false);
   const [hint, setHint] = useState('');
   // Failed step-1 attempts since this collision began — drives the
@@ -128,6 +128,15 @@ export default function CollisionModal() {
   // when the glide exhausts its re-sends).
   const showRemedyDiagram = stage === 'stopped' && homeAttempts >= 2;
   const handleResume = () => callStep(resumeTeleop, '„Teleoperation fortsetzen" fehlgeschlagen.');
+  // Escape hatch (issue #19 finding #4): when the verified safe-home glide keeps failing
+  // (e.g. a degraded bus), homing can never reach step 2 and the freeze would otherwise wedge
+  // everything until an environment restart. After the same "you're stuck" threshold as the
+  // remedy picture, offer „Trotzdem fortsetzen" — the server forces a proximity-gated resync
+  // from the follower's CURRENT pose to the leader and clears the freeze. Surfaced only on
+  // the step-1 (stopped) screen so the normal two-step flow stays clean.
+  const showForceResume = showRemedyDiagram;
+  const handleForceResume = () =>
+    callStep(forceResumeTeleop, '„Trotzdem fortsetzen" fehlgeschlagen.');
 
   return (
     <div
@@ -206,14 +215,27 @@ export default function CollisionModal() {
               {busy ? 'Wird fortgesetzt …' : 'Teleoperation fortsetzen'}
             </button>
           ) : (
-            <button
-              type="button"
-              onClick={handleHome}
-              disabled={busy || isHoming}
-              className="mt-2 rounded-xl bg-red-600 px-6 py-3 text-base font-semibold text-white shadow hover:bg-red-700 disabled:opacity-50"
-            >
-              {isHoming ? 'Fährt in Grundstellung …' : 'Follower in Grundstellung fahren'}
-            </button>
+            <div className="mt-2 flex w-full flex-col items-center gap-2">
+              <button
+                type="button"
+                onClick={handleHome}
+                disabled={busy || isHoming}
+                className="rounded-xl bg-red-600 px-6 py-3 text-base font-semibold text-white shadow hover:bg-red-700 disabled:opacity-50"
+              >
+                {isHoming ? 'Fährt in Grundstellung …' : 'Follower in Grundstellung fahren'}
+              </button>
+              {showForceResume && (
+                <button
+                  type="button"
+                  onClick={handleForceResume}
+                  disabled={busy || isHoming}
+                  className="text-sm font-medium text-gray-500 underline underline-offset-2 hover:text-gray-700 disabled:opacity-50"
+                  title="Bringe den Leader-Arm nah an die aktuelle Stellung des Followers, dann hier klicken."
+                >
+                  Klappt nicht? Trotzdem fortsetzen (Notentriegelung)
+                </button>
+              )}
+            </div>
           )}
         </div>
       </div>

@@ -192,6 +192,19 @@ export function useRosServiceCaller() {
     [callService]
   );
 
+  // Teleop collision e-stop ESCAPE HATCH: when the verified safe-home glide cannot complete,
+  // force a resync from the follower's CURRENT pose to the leader and clear the freeze (the
+  // server refuses unless the leader is near the follower's current pose). Returns
+  // { success, message }.
+  const forceResumeTeleop = useCallback(
+    async () =>
+      callService('/task/command', 'physical_ai_interfaces/srv/SendCommand', {
+        command: TaskCommand.FORCE_RESUME_TELEOP,
+        task_info: {},
+      }),
+    [callService]
+  );
+
   const getImageTopicList = useCallback(async () => {
     try {
       const result = await callService(
@@ -778,6 +791,7 @@ export function useRosServiceCaller() {
     sendRecordCommand,
     homeFollower,
     resumeTeleop,
+    forceResumeTeleop,
     getImageTopicList,
     getRobotTypeList,
     setRobotType,

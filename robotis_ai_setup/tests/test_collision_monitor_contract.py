@@ -591,5 +591,158 @@ class GpioCallbackSafetyTest(unittest.TestCase):
         self.assertFalse(host._collision_active)
 
 
+class WatchdogSelfHealContractTest(unittest.TestCase):
+    """The freeze latch must SELF-HEAL (issue #19 finding #4). The leader broadcaster
+    (om_joint_trajectory_command_broadcaster) is a VOLATILE subscriber that never self-clears
+    collision_detected_ and only un-freezes on an explicit /collision_flag=False; this node
+    carries respawn=True, so a True flag latched before a respawn would freeze the follower
+    forever with NO active collision to recover from. The node clears the flag at init and the
+    idle watchdog re-asserts False every tick; while a collision is active the watchdog still
+    asserts True (and the banner)."""
+
+    def test_init_clears_the_freeze_flag(self):
+        host = _Host()
+        flag = host.pub_for(CM.COLLISION_FLAG_TOPIC)
+        # _init_collision_monitor publishes exactly one False (no trip, watchdog not fired yet).
+        self.assertGreaterEqual(len(flag.published), 1)
+        self.assertFalse(flag.published[-1].data)
+        # And it must NOT spuriously open the modal: no collision status at init.
+        self.assertEqual(host.pub_for('/task/status').published, [])
+
+    def test_watchdog_asserts_false_while_idle(self):
+        host = _Host()
+        flag = host.pub_for(CM.COLLISION_FLAG_TOPIC)
+        self.assertFalse(host._collision_active)
+        before = len(flag.published)
+        host._collision_watchdog_cb()
+        self.assertGreater(len(flag.published), before)
+        self.assertFalse(flag.published[-1].data)
+        # The idle watchdog must not publish a collision banner (modal stays closed).
+        self.assertEqual(host.pub_for('/task/status').published, [])
+
+    def test_watchdog_asserts_true_while_active(self):
+        host = _Host()
+        host._collision_follower_pos = dict(CONTACT_POSE)
+        _trip(host)
+        flag = host.pub_for(CM.COLLISION_FLAG_TOPIC)
+        host._collision_watchdog_cb()
+        self.assertTrue(flag.published[-1].data)
+        self.assertEqual(host.pub_for('/task/status').published[-1].phase, CM.PHASE_COLLISION)
+
+    def test_trigger_guard_swallows_flag_publish_failure_but_still_relaxes(self):
+        # issue #19 finding #1: a raise while publishing the freeze flag must not skip the
+        # relax scheduling or the status publish (the gpio try/except would otherwise swallow
+        # it and strand _collision_active with no relax + no modal).
+        host = _Host()
+        host.timers = [t for t in host.timers if t.callback != host._collision_watchdog_cb]
+        host._collision_follower_pos = dict(CONTACT_POSE)
+        flag = host.pub_for(CM.COLLISION_FLAG_TOPIC)
+        original_publish = flag.publish
+        calls = {'n': 0}
+
+        def _boom(msg):
+            calls['n'] += 1
+            if calls['n'] == 1:
+                raise RuntimeError('simulated DDS publish failure')
+            return original_publish(msg)
+
+        flag.publish = _boom
+        _trip(host)  # must not raise
+        # The relax was still scheduled despite the flag-publish failure.
+        rail = host.pub_for(CM.LEADER_TRAJECTORY_TOPIC)
+        host.fire_pending_timers()
+        self.assertEqual(len(rail.published), 1)
+        # And the modal status was still published.
+        self.assertEqual(host.pub_for('/task/status').published[-1].phase, CM.PHASE_COLLISION)
+
+
+class ForceResumeContractTest(unittest.TestCase):
+    """FORCE_RESUME_TELEOP escape hatch (issue #19 finding #4): when the verified safe-home
+    glide cannot complete (e.g. a degraded bus), homing can never reach step 2 and the freeze
+    would otherwise wedge everything until an environment restart. The student forces a
+    CONTROLLED, proximity-gated resync from the follower's CURRENT pose to the leader and the
+    freeze clears. Unlike resume_teleop it does NOT require the follower to have homed, its
+    proximity gate references the follower's CURRENT pose (not home), and it does NOT
+    auto-resume an interrupted recording."""
+
+    def _tripped_host(self, recording=False):
+        host = _Host()
+        host.timers = [t for t in host.timers if t.callback != host._collision_watchdog_cb]
+        host._collision_follower_pos = dict(CONTACT_POSE)
+        host.on_recording = recording
+        _trip(host)
+        return host
+
+    def test_force_resume_noop_without_active_collision(self):
+        host = _Host()
+        success, _ = host.force_resume_teleop()
+        self.assertTrue(success)  # nothing to recover
+
+    def test_force_resume_refused_when_leader_far_from_current_follower(self):
+        host = self._tripped_host()
+        # Leader sitting AT home while the follower's CURRENT pose is the contact pose: a big
+        # move. This is exactly the case resume_teleop's home-referenced gate WOULD allow and
+        # force_resume must REFUSE (it gates on the follower's current pose, not home).
+        host._collision_leader_pos = {**HOME}
+        success, _ = host.force_resume_teleop()
+        self.assertFalse(success)
+        self.assertTrue(host._collision_active)
+
+    def test_force_resume_resyncs_from_current_then_clears(self):
+        host = self._tripped_host()
+        host._collision_leader_pos = {**CONTACT_POSE}  # leader near the follower's current pose
+        rail = host.pub_for(CM.LEADER_TRAJECTORY_TOPIC)
+        flag = host.pub_for(CM.COLLISION_FLAG_TOPIC)
+
+        success, _ = host.force_resume_teleop()
+        self.assertTrue(success)
+        # A controlled multi-point resync is published; still frozen until it completes.
+        self.assertTrue(any(len(t.points) > 1 for t in rail.published))
+        self.assertTrue(host._collision_active)
+        self.assertTrue(flag.published[-1].data)
+
+        host.fire_pending_timers()  # resync completion -> _on_resync_complete
+        self.assertFalse(host._collision_active)
+        self.assertFalse(flag.published[-1].data)
+        self.assertEqual(host.pub_for('/task/status').published[-1].phase, _TaskStatus.READY)
+
+    def test_force_resume_blocks_competing_home_glide_during_resync(self):
+        # The force-resume button keeps phase=COLLISION (stage 'stopped') during the multi-second
+        # resync, so the step-1 "Follower in Grundstellung" button stays visible. A re-click must
+        # be refused at the source of truth so no competing home glide fights the resync on the
+        # shared /leader/joint_trajectory rail.
+        host = self._tripped_host()
+        host._collision_leader_pos = {**CONTACT_POSE}
+        rail = host.pub_for(CM.LEADER_TRAJECTORY_TOPIC)
+        self.assertTrue(host.force_resume_teleop()[0])
+        rail_after_resync = len(rail.published)
+
+        ok, msg = host.home_follower()
+        self.assertTrue(ok)
+        self.assertEqual(msg, CM.RESYNC_IN_FLIGHT_MESSAGE_DE)
+        self.assertFalse(host._collision_homing)
+        self.assertEqual(len(rail.published), rail_after_resync)  # no new trajectory published
+        # A re-click on the force-resume button is likewise a no-op (no second resync scheduled).
+        self.assertEqual(host.force_resume_teleop()[1], CM.RESYNC_IN_FLIGHT_MESSAGE_DE)
+
+        host.fire_pending_timers()  # the original resync still completes
+        self.assertFalse(host._collision_active)
+
+    def test_force_resume_does_not_auto_resume_recording(self):
+        host = self._tripped_host(recording=True)
+        self.assertTrue(host._collision_interrupted_recording)
+        host._collision_leader_pos = {**CONTACT_POSE}
+
+        success, _ = host.force_resume_teleop()
+        self.assertTrue(success)
+        # The marker is consumed immediately so completion takes the plain READY path.
+        self.assertFalse(host._collision_interrupted_recording)
+
+        host.fire_pending_timers()  # resync completion
+        self.assertEqual(host.timer_start_calls, [])  # recording NOT re-armed
+        self.assertFalse(host.on_recording)
+        self.assertEqual(host.pub_for('/task/status').published[-1].phase, _TaskStatus.READY)
+
+
 if __name__ == '__main__':
     unittest.main()

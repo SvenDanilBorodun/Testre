@@ -107,6 +107,45 @@ def train(
     )
 
 
+@app.function(
+    image=image,
+    # VLA policies (pi0 / pi05 / pi0_fast / smolvla) are 0.45-3.6 B-param
+    # vision-language-action models. pi0/pi05/pi0_fast (~3 B, PaliGemma) OOM
+    # on the 24 GB L4 even in bf16; they need an 80 GB A100. ACT-class policies
+    # stay on the cheaper L4 `train` above. Same body — only the GPU and
+    # timeout differ. timeout=11h covers the 10h A100-tier policy cap
+    # (routes/training.py POLICY_MAX_TIMEOUT_HOURS) so the cap is actually
+    # reachable (the L4 `train` keeps its 7h bound, above its ≤6h L4-tier caps).
+    gpu="A100-80GB",
+    timeout=11 * 3600,
+    secrets=secrets,
+    min_containers=0,
+)
+def train_vla(
+    dataset_name: str,
+    model_name: str,
+    model_type: str,
+    training_params: dict,
+    training_id: int,
+    worker_token: str,
+) -> dict:
+    """VLA training job (pi0/pi05/pi0_fast/smolvla) on an A100-80GB.
+
+    Identical body to `train`; the Cloud API routes A100-tier policies here via
+    the per-policy GPU tier in app.services.policy_profile. Returns
+    {"status": "succeeded"|"failed"|"canceled", ...}."""
+    from training_handler import run_training
+
+    return run_training(
+        dataset_name=dataset_name,
+        model_name=model_name,
+        model_type=model_type,
+        training_params=training_params,
+        training_id=training_id,
+        worker_token=worker_token,
+    )
+
+
 @app.function(image=image, secrets=secrets)
 def smoke_test():
     """Verify the image boots + secrets + GPU libs are importable.

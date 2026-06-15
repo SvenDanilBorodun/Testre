@@ -67,14 +67,16 @@ import training_handler  # noqa: E402
 class TestBuildTrainingCommand(unittest.TestCase):
     """Regression suite for the CLI defaults that ship to the Modal worker."""
 
-    def test_image_transforms_always_on(self):
-        """Audit F63: every training call enables dataset image transforms,
-        regardless of policy type. Without this, ACT/SmolVLA/Diffusion all
-        train without brightness/contrast/saturation/hue jitter and
-        struggle to generalise across classroom lighting changes.
+    def test_image_transforms_disabled(self):
+        """Image augmentation is deliberately DISABLED (C1, 2026-06-15): the
+        worker must NOT emit --dataset.image_transforms.enable at all. In
+        LeRobot v0.5.1 the default transform pool includes a geometric
+        RandomAffine (±5°/5% translate) that warps fixed-camera scene geometry,
+        and there's no per-key CLI override to keep only the photometric subset.
+        So the flag is gone for EVERY policy (no enable=true, no enable=false).
 
-        Iterates the full 8-policy `ALLOWED_POLICIES` set from CLAUDE.md
-        §7.3 so a new policy keyword can't silently bypass F63."""
+        Iterates the full 8-policy `ALLOWED_POLICIES` set so a new policy keyword
+        can't silently re-introduce augmentation."""
         for policy in (
             "act",
             "diffusion",
@@ -91,11 +93,11 @@ class TestBuildTrainingCommand(unittest.TestCase):
                 model_name="user/model",
                 training_params={},
             )
-            self.assertEqual(
-                cmd.count("--dataset.image_transforms.enable=true"),
-                1,
-                f"image transforms should be enabled exactly once for policy={policy}",
-            )
+            for arg in cmd:
+                self.assertFalse(
+                    arg.startswith("--dataset.image_transforms"),
+                    f"image transforms must not be configured for policy={policy}: {arg}",
+                )
 
     def test_act_default_n_action_steps_15(self):
         """Audit F64: ACT defaults n_action_steps=15 so the policy re-queries
@@ -208,6 +210,68 @@ class TestBuildTrainingCommand(unittest.TestCase):
         self.assertIn("--eval_freq=0", cmd)
         self.assertIn("--batch_size=16", cmd)
         self.assertIn("--steps=50000", cmd)
+
+
+class TestPolicyCliFlagsPassthrough(unittest.TestCase):
+    """VLA fine-tune recipe (V1, 2026-06-15): the Cloud API injects per-policy
+    base-checkpoint + precision flags as fully-formed --policy.* strings via
+    training_params['policy_cli_flags']; the worker appends them verbatim but
+    ONLY accepts --policy.* (so a malformed payload can't inject arbitrary CLI
+    args). The per-policy *content* of the recipe is owned + tested in the
+    Cloud API (app.services.policy_profile); here we test the passthrough."""
+
+    def _cmd(self, training_params):
+        return training_handler._build_training_command(
+            dataset_name="user/data",
+            model_type="pi05",
+            model_name="user/model",
+            training_params=training_params,
+        )
+
+    def test_policy_cli_flags_are_appended(self):
+        flags = [
+            "--policy.pretrained_path=lerobot/pi05_base",
+            "--policy.dtype=bfloat16",
+            "--policy.gradient_checkpointing=true",
+            "--policy.train_expert_only=true",
+        ]
+        cmd = self._cmd({"policy_cli_flags": flags})
+        for f in flags:
+            self.assertIn(f, cmd)
+
+    def test_non_policy_flags_are_filtered(self):
+        # Defence: only --policy.* strings pass through; anything else (an
+        # accidental/forged --output_dir, a bare token, a non-string) is dropped.
+        cmd = self._cmd({"policy_cli_flags": [
+            "--policy.dtype=bfloat16",
+            "--output_dir=/etc/evil",
+            "rm -rf /",
+            42,
+            None,
+        ]})
+        self.assertIn("--policy.dtype=bfloat16", cmd)
+        self.assertNotIn("--output_dir=/etc/evil", cmd)
+        self.assertNotIn("rm -rf /", cmd)
+        self.assertNotIn(42, cmd)
+
+    def test_missing_or_nonlist_flags_is_noop(self):
+        # ACT-class jobs carry no policy_cli_flags — passthrough is a clean no-op.
+        for params in ({}, {"policy_cli_flags": None}, {"policy_cli_flags": "x"}):
+            cmd = self._cmd(params)
+            self.assertFalse(
+                any(a.startswith("--policy.pretrained_path") for a in cmd),
+                f"unexpected pretrained_path for params={params}",
+            )
+
+    def test_act_emits_no_vla_flags_by_default(self):
+        # An ACT job with no injected flags must never carry a pretrained_path
+        # (ACT-from-scratch on the ImageNet resnet18 backbone is correct).
+        cmd = training_handler._build_training_command(
+            dataset_name="user/data", model_type="act",
+            model_name="user/model", training_params={},
+        )
+        self.assertFalse(any(a.startswith("--policy.pretrained_path") for a in cmd))
+        self.assertFalse(any(a.startswith("--policy.dtype") for a in cmd))
 
 
 class TestTerminalCancelDetection(unittest.TestCase):

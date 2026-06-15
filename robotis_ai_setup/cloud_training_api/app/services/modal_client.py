@@ -25,15 +25,23 @@ logger = logging.getLogger(__name__)
 UNKNOWN_STATUS = "UNKNOWN"
 
 
-def _get_train_function():
-    """Resolve the deployed Modal training function by name.
+def _get_train_function(gpu_tier: str = "l4"):
+    """Resolve the deployed Modal training function for the given GPU tier.
 
     MODAL_TOKEN_ID + MODAL_TOKEN_SECRET must be set in the Railway env; the
     Modal SDK picks them up automatically. App + function names are env-driven
     so the same code can point at a staging deployment without a code change.
+
+    Two functions live in the one `edubotics-training` app: `train` (L4, for
+    ACT-class policies) and `train_vla` (A100-80GB, for the VLA policies — see
+    app.services.policy_profile). They're resolved independently by name;
+    cancel/get_job_status use FunctionCall.from_id and are tier-agnostic.
     """
     app_name = os.environ.get("MODAL_TRAINING_APP_NAME", "edubotics-training")
-    fn_name = os.environ.get("MODAL_TRAINING_FUNCTION_NAME", "train")
+    if gpu_tier == "a100":
+        fn_name = os.environ.get("MODAL_TRAINING_VLA_FUNCTION_NAME", "train_vla")
+    else:
+        fn_name = os.environ.get("MODAL_TRAINING_FUNCTION_NAME", "train")
     return modal.Function.from_name(app_name, fn_name)
 
 
@@ -44,9 +52,15 @@ async def start_training_job(
     training_params: dict,
     training_id: int,
     worker_token: str,
+    gpu_tier: str = "l4",
 ) -> str:
-    """Dispatch a training job to Modal. Returns the FunctionCall object id."""
-    fn = _get_train_function()
+    """Dispatch a training job to Modal. Returns the FunctionCall object id.
+
+    ``gpu_tier`` ("l4"|"a100") selects which deployed function to spawn; it is
+    resolved by the Cloud API from the per-policy profile so VLA jobs land on
+    the A100 function.
+    """
+    fn = _get_train_function(gpu_tier)
     call = await fn.spawn.aio(
         dataset_name=dataset_name,
         model_name=model_name,
@@ -131,8 +145,14 @@ async def get_job_status(job_id: str) -> str:
     def _get_blocking() -> str:
         call = modal.FunctionCall.from_id(job_id)
         try:
-            call.get(timeout=0)
-            return "COMPLETED"
+            res = call.get(timeout=0)
+        except modal.exception.FunctionTimeoutError:
+            # Function itself exceeded its server-side `timeout=` limit. This
+            # MUST be caught BEFORE the generic TimeoutError below:
+            # FunctionTimeoutError subclasses modal.exception.TimeoutError, so
+            # ordering it after would let the broad clause swallow it as
+            # IN_PROGRESS and make TIMED_OUT unreachable.
+            return "TIMED_OUT"
         except (modal.exception.TimeoutError, TimeoutError):
             # Client-side poll expired — job is still queued or running.
             # Modal's SDK raises the BUILT-IN TimeoutError for a still-in-flight
@@ -140,13 +160,26 @@ async def get_job_status(job_id: str) -> str:
             # across SDK versions. Mismatching this fires every time the UI
             # polls /trainings/list and flips live rows to failed.
             return "IN_PROGRESS"
-        except modal.exception.FunctionTimeoutError:
-            # Function itself exceeded its server-side `timeout=` limit.
-            return "TIMED_OUT"
         except modal.exception.InputCancellation:
             return "CANCELLED"
         except (modal.exception.RemoteError, modal.exception.ExecutionError):
             return "FAILED"
+
+        # The function RETURNED normally. That is NOT proof of success:
+        # run_training never raises on an application-level failure — it catches
+        # everything and returns {"status": "succeeded"|"failed"|"canceled"}.
+        # Mapping a bare return to COMPLETED->succeeded was a silent bug: when a
+        # worker's terminal status write was dropped, the row stayed 'running'
+        # and the reconciler then stamped 'succeeded' over a FAILED run (no
+        # model on HF, credit wrongly consumed). Inspect the payload instead.
+        status = res.get("status") if isinstance(res, dict) else None
+        if status == "succeeded":
+            return "COMPLETED"
+        if status == "canceled":
+            return "CANCELLED"
+        # "failed", or an unexpected/None payload -> FAILED so the reconciler
+        # frees the credit rather than reporting a model that doesn't exist.
+        return "FAILED"
 
     try:
         return await asyncio.to_thread(_get_blocking)

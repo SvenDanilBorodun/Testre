@@ -44,6 +44,13 @@ EXPECTED_CODEBASE_VERSION = "v3.0"
 MIN_JOINTS = 4
 MAX_JOINTS = 20
 
+# VLA policies whose LeRobot config is language-conditioned: they build the
+# prompt from a per-frame task string and raise ValueError("No task found in
+# complementary data") deep in training if the dataset has none. The preflight
+# rejects a task-less dataset for these BEFORE the (expensive A100) GPU spins
+# up. ACT-class policies have no task requirement and are not gated.
+_LANGUAGE_CONDITIONED_POLICIES = frozenset({"pi0", "pi05", "pi0_fast", "smolvla"})
+
 # Module-level reference to the in-flight job. Used by the signal handler to
 # mark the training as failed and clean up before the container is killed.
 # Only ever one job in flight per Modal container invocation.
@@ -183,10 +190,58 @@ def _update_supabase_progress(
     )
 
 
+def _update_status_with_retry(
+    supabase_url: str,
+    supabase_anon_key: str,
+    worker_token: str,
+    training_id: int,
+    status: str,
+    error_message: str | None = None,
+    log_url: str | None = None,
+    attempts: int = 3,
+) -> bool:
+    """Terminal status write with bounded retry (mirrors the progress retry).
+
+    The progress reader already retries 3x, but the TERMINAL failed/succeeded
+    writes used to be single-shot. A dropped terminal write left the row
+    'running' — and because the Modal function returns normally even on an
+    application-level failure, the API reconciler then mapped that return to
+    'succeeded', stamping success over a failed run (no model on HF, credit
+    wrongly consumed). Retrying closes that window.
+
+    Stops early (returns False, no retry) if the RPC reports the row is already
+    terminal API-side (P0001 — e.g. canceled): that's not a transient failure,
+    and the row is correctly terminal. Returns True iff the write landed.
+    """
+    for attempt in range(attempts):
+        try:
+            _update_supabase_status(
+                supabase_url, supabase_anon_key, worker_token, training_id,
+                status, error_message, log_url,
+            )
+            return True
+        except Exception as e:
+            if _is_terminal_cancel_error(e):
+                print(
+                    f"Status-Update '{status}' uebersprungen — Zeile bereits "
+                    f"terminal (serverseitig): {e}",
+                    flush=True,
+                )
+                return False
+            print(
+                f"Warnung: Status-Update '{status}' fehlgeschlagen "
+                f"(Versuch {attempt + 1}/{attempts}): {e}",
+                flush=True,
+            )
+            if attempt < attempts - 1:
+                time.sleep(2 ** attempt)
+    return False
+
+
 # ---------------- Dataset preflight ----------------
 
 
-def _preflight_dataset(dataset_name: str, hf_token: str) -> None:
+def _preflight_dataset(dataset_name: str, hf_token: str, model_type: str = "") -> None:
     """Download just meta/info.json and validate the dataset is trainable.
 
     Catches the following failure modes BEFORE we waste 10+ GPU minutes:
@@ -198,6 +253,9 @@ def _preflight_dataset(dataset_name: str, hf_token: str) -> None:
       - Joint count out of reasonable bounds (< MIN_JOINTS or > MAX_JOINTS)
       - observation.state and action use different joint names (paired bug)
       - No camera features at all
+      - For language-conditioned VLAs (pi0/pi05/pi0_fast/smolvla): no task
+        strings (info.total_tasks == 0), which LeRobot would only surface deep
+        in training as ValueError("No task found in complementary data").
 
     Raises ValueError with a German operator-facing message on failure.
     """
@@ -315,9 +373,24 @@ def _preflight_dataset(dataset_name: str, hf_token: str) -> None:
         )
     cameras = [k.replace("observation.images.", "") for k in image_keys]
 
+    # Language-conditioned VLAs need per-frame task strings. info.json carries
+    # total_tasks (== number of distinct prompts); 0 means the dataset was
+    # recorded without any Aufgabenanweisung and would crash these policies
+    # deep in training. Gate only for those policies — ACT et al. don't care.
+    if (model_type or "").lower() in _LANGUAGE_CONDITIONED_POLICIES:
+        total_tasks = info.get("total_tasks")
+        if not total_tasks or total_tasks < 1:
+            raise ValueError(
+                f"Dataset '{dataset_name}' enthaelt keine Aufgaben-Texte "
+                f"(total_tasks={total_tasks!r}), die das Modell '{model_type}' "
+                f"benoetigt. Bitte mit einer Aufgabenanweisung neu aufnehmen "
+                f"oder ein ACT-Modell waehlen."
+            )
+
     print(
         f"Preflight OK: dataset='{dataset_name}' codebase_version={version} "
-        f"fps={fps} joints={state_names} cameras={cameras}"
+        f"fps={fps} joints={state_names} cameras={cameras} "
+        f"total_tasks={info.get('total_tasks')}"
     )
 
 
@@ -356,12 +429,17 @@ def _build_training_command(
         "--policy.push_to_hub=false",
         # Disable eval — no simulation env available on cloud worker.
         "--eval_freq=0",
-        # Audit F63: enable LeRobot's built-in image augmentations
-        # (brightness/contrast/saturation/hue/sharpness jitter, max 3 per frame,
-        # weighted random subset). Closes a real distribution-shift gap between
-        # morning- and afternoon-lit classroom sessions for small student
-        # datasets. Defaults live in lerobot.datasets.transforms.ImageTransformsConfig.
-        "--dataset.image_transforms.enable=true",
+        # Image augmentation is deliberately DISABLED — we leave LeRobot at its
+        # enable=False default by NOT emitting --dataset.image_transforms.enable.
+        # In v0.5.1 the default transform pool includes a GEOMETRIC `affine`
+        # (RandomAffine ±5°/5% translate) at weight 1.0 alongside the photometric
+        # jitter; on fixed gripper/scene cameras feeding an absolute-action
+        # policy that warps the very image→action geometry the policy must learn.
+        # There is no per-key CLI override on v0.5.1 (the `tfs` dict is parsed
+        # atomically by draccus), so enabling only the photometric subset isn't
+        # reachable from the CLI — we disable augmentation entirely rather than
+        # ship the geometric warp. (Earlier code emitted enable=true with a
+        # comment that wrongly claimed the set was photometric-only.)
     ]
 
     # Audit F64: ACT-specific inference-quality default. With chunk_size=100 at
@@ -403,6 +481,19 @@ def _build_training_command(
         value = training_params.get(param_key)
         if value is not None:
             cmd.append(f"{cli_flag}={value}")
+
+    # VLA fine-tune recipe (pi0/pi05/pi0_fast/smolvla): the Cloud API injects the
+    # per-policy base-checkpoint + precision/memory flags here as fully-formed
+    # --policy.* strings (app.services.policy_profile). Without a base checkpoint
+    # these VLAs train from random init and OOM. The set is curated per policy
+    # (e.g. SmolVLAConfig has no dtype/gradient_checkpointing field), so the
+    # worker just appends the pre-validated strings — and only --policy.* ones,
+    # so a malformed payload can't inject arbitrary CLI args.
+    policy_flags = training_params.get("policy_cli_flags")
+    if isinstance(policy_flags, list):
+        for flag in policy_flags:
+            if isinstance(flag, str) and flag.startswith("--policy."):
+                cmd.append(flag)
 
     return cmd
 
@@ -672,9 +763,9 @@ def run_training(
     try:
         # ----- 1. Preflight dataset (cheap, catches schema/auth issues early) -----
         try:
-            _preflight_dataset(dataset_name, hf_token)
+            _preflight_dataset(dataset_name, hf_token, model_type)
         except ValueError as e:
-            _update_supabase_status(
+            _update_status_with_retry(
                 supabase_url, supabase_anon_key, worker_token, training_id,
                 "failed", str(e),
             )
@@ -750,6 +841,12 @@ def run_training(
                     step = _parse_abbreviated_number(step_match.group(1))
                     if step is None:
                         continue
+                    # LeRobot logs the step abbreviated + rounded
+                    # (format_big_number(step, precision=0): 1500 -> "2K" -> 2000),
+                    # so the parsed value can overshoot total_steps and the UI
+                    # would render >100%. Clamp before reporting.
+                    if total_steps and step > total_steps:
+                        step = total_steps
                     loss_match = loss_pattern.search(line)
                     loss = _safe_float(loss_match.group(1)) if loss_match else None
                     if step <= last_progress_step:
@@ -855,7 +952,7 @@ def run_training(
                 pass
             ckpt_stop.set()
             log_url = _upload_training_log(model_name, hf_token, output_lines)
-            _update_supabase_status(
+            _update_status_with_retry(
                 supabase_url, supabase_anon_key, worker_token, training_id, "failed",
                 f"Training Zeitlimit ueberschritten ({timeout_hours}h Limit)",
                 log_url=log_url,
@@ -888,7 +985,7 @@ def run_training(
             # error_message stays the truncated student-facing blob; the
             # FULL stdout goes to training_log.txt for teacher forensics.
             log_url = _upload_training_log(model_name, hf_token, output_lines)
-            _update_supabase_status(
+            _update_status_with_retry(
                 supabase_url, supabase_anon_key, worker_token, training_id,
                 "failed", error_msg, log_url=log_url,
             )
@@ -914,14 +1011,14 @@ def run_training(
                 f"Output; bitte HF_TOKEN pruefen und Training neu starten."
             )
             log_url = _upload_training_log(model_name, hf_token, output_lines)
-            _update_supabase_status(
+            _update_status_with_retry(
                 supabase_url, supabase_anon_key, worker_token, training_id,
                 "failed", err_msg, log_url=log_url,
             )
             return {"status": "failed", "error": err_msg}
 
         log_url = _upload_training_log(model_name, hf_token, output_lines)
-        _update_supabase_status(
+        _update_status_with_retry(
             supabase_url, supabase_anon_key, worker_token, training_id, "succeeded",
             log_url=log_url,
         )
@@ -930,13 +1027,12 @@ def run_training(
     except Exception as e:
         err = str(e)
         error_msg = err[:1000] + "\n...[truncated]...\n" + err[-1000:] if len(err) > 2000 else err
-        try:
-            _update_supabase_status(
-                supabase_url, supabase_anon_key, worker_token, training_id,
-                "failed", error_msg,
-            )
-        except Exception as inner:
-            print(f"Failed to mark training as failed: {inner}")
+        # _update_status_with_retry swallows its own exceptions (and stops on a
+        # P0001 terminal-row signal), so no surrounding try/except is needed.
+        _update_status_with_retry(
+            supabase_url, supabase_anon_key, worker_token, training_id,
+            "failed", error_msg,
+        )
         return {"status": "failed", "error": error_msg}
 
     finally:

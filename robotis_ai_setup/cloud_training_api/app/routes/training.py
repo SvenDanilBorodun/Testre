@@ -16,6 +16,7 @@ from app.services.modal_client import (
     get_job_status,
     start_training_job,
 )
+from app.services.policy_profile import apply_training_tuning, get_policy_profile
 from app.services.supabase_client import get_supabase
 from app.services.training_sweep import MAX_CANCEL_ATTEMPTS
 from app.services.workgroups import resolve_visible_workgroup_ids
@@ -566,11 +567,30 @@ async def start_training(req: StartTrainingRequest, user=Depends(get_current_use
     training_params_dict = req.training_params.model_dump(exclude_none=True)
 
     # Cap timeout_hours per-policy. Protects against a wedged ACT job burning
-    # the handler's 5h default when ACT converges in <90 min.
+    # the handler's 5h default when ACT converges in <90 min. (L4-tier caps are
+    # all <7h = the L4 Modal function timeout; A100-tier caps <11h = the A100
+    # function timeout — so every cap is actually reachable now that VLAs route
+    # to the A100 `train_vla` function.)
     policy_cap = POLICY_MAX_TIMEOUT_HOURS.get(req.model_type.lower())
     if policy_cap is not None:
         requested = training_params_dict.get("timeout_hours", policy_cap)
         training_params_dict["timeout_hours"] = min(requested, policy_cap)
+
+    # Resolve the per-policy recipe + GPU tier (single source of truth in
+    # app.services.policy_profile). VLA policies (pi0/pi05/pi0_fast/smolvla) get
+    # their base-checkpoint + memory flags here and route to the A100 function;
+    # ACT-class get an empty flag list + L4. The recipe flags ride the Modal
+    # payload only (not the stored row's training_params) so the dedupe key and
+    # teacher-facing params stay the clean user-entered set.
+    profile = get_policy_profile(req.model_type)
+    gpu_tier = profile["gpu_tier"]
+
+    # Per-policy step cap + batch clamp (VLAs only; ACT-class is a no-op). Cap
+    # steps to save A100 hours and clamp batch into the safe/effective range.
+    # Mutates training_params_dict BEFORE the row insert + dispatch so the
+    # stored total_steps, the payload, and the worker all agree. p_total_steps
+    # below uses the (possibly capped) training_params_dict["steps"].
+    apply_training_tuning(profile, training_params_dict)
 
     try:
         rpc_result = supabase.rpc(
@@ -581,7 +601,7 @@ async def start_training(req: StartTrainingRequest, user=Depends(get_current_use
                 "p_model_name": model_name,
                 "p_model_type": req.model_type,
                 "p_training_params": training_params_dict,
-                "p_total_steps": req.training_params.steps,
+                "p_total_steps": training_params_dict["steps"],
                 "p_worker_token": worker_token,
             },
         ).execute()
@@ -608,14 +628,21 @@ async def start_training(req: StartTrainingRequest, user=Depends(get_current_use
     #    Modal Secret — we don't leak them through the function payload.
     #    With the token + anon key it can ONLY call update_training_progress()
     #    on this one row.
+    # Enrich the Modal payload with the per-policy recipe flags (kept out of the
+    # stored row's training_params — see the profile-resolution comment above).
+    modal_training_params = dict(training_params_dict)
+    if profile["policy_flags"]:
+        modal_training_params["policy_cli_flags"] = list(profile["policy_flags"])
+
     try:
         job_id = await start_training_job(
             dataset_name=req.dataset_name,
             model_name=model_name,
             model_type=req.model_type,
-            training_params=training_params_dict,
+            training_params=modal_training_params,
             training_id=training_id,
             worker_token=worker_token,
+            gpu_tier=gpu_tier,
         )
     except Exception as e:
         # Dispatch failed — mark training as failed (auto-frees the credit)

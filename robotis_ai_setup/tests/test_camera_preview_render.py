@@ -18,6 +18,7 @@ import base64
 import importlib.util
 import os
 import textwrap
+import time
 import types
 import unittest
 
@@ -148,8 +149,8 @@ def _load_stop_camera_previews():
     constraint the rest of this file works around).
     """
     try:
-        from gui.app.gui_app import EduBoticsGUI
-        return EduBoticsGUI._stop_camera_previews
+        from gui.app.gui_app import EduBoticsApp
+        return EduBoticsApp._stop_camera_previews
     except Exception:  # noqa: BLE001 — headless fallback (no tkinter/webview)
         src = os.path.join(
             os.path.dirname(__file__), "..", "gui", "app", "gui_app.py")
@@ -207,6 +208,169 @@ class TestPreviewLifecycleInit(unittest.TestCase):
         stop(fake)
         self.assertEqual(cancelled, ["after#42"])
         self.assertIsNone(fake._preview_after_id)
+
+
+def _load_module_func(func_name, extra_ns=None):
+    """Load a module-level function from gui_app headless (snippet-extract)."""
+    try:
+        from gui.app import gui_app
+        return getattr(gui_app, func_name)
+    except Exception:  # noqa: BLE001 — headless fallback
+        src = os.path.join(
+            os.path.dirname(__file__), "..", "gui", "app", "gui_app.py")
+        with open(src, "r", encoding="utf-8") as fh:
+            source = fh.read()
+        marker = f"def {func_name}("
+        start = source.index(marker)
+        rest = source[start:]
+        end = len(rest)
+        for token in ("\ndef ", "\nclass "):
+            idx = rest.find(token, len(marker))
+            if idx != -1:
+                end = min(end, idx)
+        ns = dict(extra_ns or {})
+        exec(compile(rest[:end], src, "exec"), ns)  # noqa: S102 — in-repo src
+        return ns[func_name]
+
+
+def _load_method(method_name):
+    """Load a class method from gui_app as a standalone callable (dedented)."""
+    try:
+        from gui.app.gui_app import EduBoticsApp
+        return getattr(EduBoticsApp, method_name)
+    except Exception:  # noqa: BLE001 — headless fallback
+        src = os.path.join(
+            os.path.dirname(__file__), "..", "gui", "app", "gui_app.py")
+        with open(src, "r", encoding="utf-8") as fh:
+            source = fh.read()
+        marker = f"    def {method_name}(self"
+        start = source.index(marker)
+        rest = source[start:]
+        end = rest.find("\n    def ", len(marker))
+        snippet = textwrap.dedent(rest[: end if end != -1 else len(rest)])
+        ns = {}
+        exec(compile(snippet, src, "exec"), ns)  # noqa: S102 — in-repo source
+        return ns[method_name]
+
+
+class _FakeVar:
+    def __init__(self, value=""):
+        self._v = value
+
+    def get(self):
+        return self._v
+
+    def set(self, value):
+        self._v = value
+
+
+class _FakeCam:
+    def __init__(self, name):
+        self.name = name
+        self.role = None
+
+
+class TestPreviewRoleAssignment(unittest.TestCase):
+    """The per-preview role picker (replaces the old gripper/scene dropdowns)."""
+
+    def _make(self):
+        fn = _load_method("_on_preview_role_changed")
+        cams = [_FakeCam("A"), _FakeCam("B")]
+        owner = types.SimpleNamespace(
+            _preview_role_vars=[_FakeVar("Greifer"), _FakeVar("Szene")],
+            hardware=types.SimpleNamespace(cameras=[]),
+            _log=lambda *a, **k: None,
+        )
+        return fn, owner, cams
+
+    def test_default_keeps_gripper_first(self):
+        fn, owner, cams = self._make()
+        fn(owner, cams, 0)  # camera 1 = Greifer
+        self.assertEqual(cams[0].role, "gripper")
+        self.assertEqual(cams[1].role, "scene")
+        self.assertEqual(owner.hardware.cameras, [cams[0], cams[1]])
+
+    def test_picking_greifer_on_second_flips_first_and_reorders(self):
+        fn, owner, cams = self._make()
+        owner._preview_role_vars[1].set("Greifer")  # user picks Greifer on cam 2
+        fn(owner, cams, 1)
+        self.assertEqual(cams[1].role, "gripper")
+        self.assertEqual(cams[0].role, "scene")
+        # The other selector auto-flips to the opposite role ...
+        self.assertEqual(owner._preview_role_vars[0].get(), "Szene")
+        # ... and hardware.cameras stays gripper-first.
+        self.assertEqual(owner.hardware.cameras, [cams[1], cams[0]])
+
+
+class _FakeCapBacklog:
+    """grab() returns instantly while a backlog exists, then 'waits' for fresh."""
+
+    def __init__(self, backlog):
+        self._remaining = backlog
+        self.grab_calls = 0
+        self.retrieve_calls = 0
+        self.read_calls = 0
+
+    def grab(self):
+        self.grab_calls += 1
+        if self._remaining > 0:
+            self._remaining -= 1
+            return True  # instant — pulled from the backlog
+        time.sleep(0.02)  # >12 ms → modelled as waiting for a fresh capture
+        return True
+
+    def retrieve(self):
+        self.retrieve_calls += 1
+        return True, ("fresh", self.grab_calls)
+
+    def read(self):
+        self.read_calls += 1
+        return True, ("plain",)
+
+
+class TestReadFreshestFrame(unittest.TestCase):
+    """Draining the backlog is what fixes the 'lags very much' preview delay."""
+
+    def test_drains_backlog_then_decodes_once(self):
+        read = _load_module_func("_read_freshest_frame", {"time": time})
+        cap = _FakeCapBacklog(backlog=5)
+        ok, frame = read(cap)
+        self.assertTrue(ok)
+        self.assertEqual(frame[0], "fresh")
+        self.assertEqual(cap.retrieve_calls, 1)  # decode exactly once
+        self.assertEqual(cap.grab_calls, 6)      # 5 backlog + 1 fresh
+        self.assertEqual(cap.read_calls, 0)      # never the slow plain read
+
+    def test_drain_is_bounded(self):
+        read = _load_module_func("_read_freshest_frame", {"time": time})
+        cap = _FakeCapBacklog(backlog=100)
+        ok, _frame = read(cap)
+        self.assertTrue(ok)
+        self.assertLessEqual(cap.grab_calls, 12)  # bounded — can't spin forever
+        self.assertEqual(cap.retrieve_calls, 1)
+
+    def test_falls_back_to_plain_read_without_grab(self):
+        read = _load_module_func("_read_freshest_frame", {"time": time})
+
+        class _NoGrab:
+            def __init__(self):
+                self.read_calls = 0
+
+            def grab(self):
+                return False
+
+            def retrieve(self):  # pragma: no cover — must not be reached
+                raise AssertionError("retrieve must not run when grab fails")
+
+            def read(self):
+                self.read_calls += 1
+                return True, ("plain",)
+
+        cap = _NoGrab()
+        ok, frame = read(cap)
+        self.assertTrue(ok)
+        self.assertEqual(frame[0], "plain")
+        self.assertEqual(cap.read_calls, 1)
 
 
 if __name__ == "__main__":

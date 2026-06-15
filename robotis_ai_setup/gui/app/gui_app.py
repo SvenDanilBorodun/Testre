@@ -173,6 +173,38 @@ def _frame_to_photo_data(frame_bgr):
         return None
 
 
+def _read_freshest_frame(cap):
+    """Read the FRESHEST frame, draining the driver's backlog first.
+
+    The preview polls slower than the camera captures (~30 fps), so MSMF queues
+    frames and a plain ``cap.read()`` returns the OLDEST queued one — the
+    preview then drifts further behind real time every tick (the "lags very
+    much" symptom). We ``grab()`` (cheap — no decode) while frames are
+    IMMEDIATELY available; the first grab that has to WAIT for a fresh capture
+    (>~12 ms) means the backlog is drained, so we ``retrieve()`` (decode) just
+    that newest frame. Bounded so a fast camera can't spin the loop. Returns
+    ``(ok, frame)`` like ``cap.read()``; falls back to a plain read if a backend
+    lacks grab/retrieve or anything raises.
+    """
+    try:
+        drained = False
+        for _ in range(12):  # bounded drain — never spin forever
+            t0 = time.monotonic()
+            if not cap.grab():
+                break
+            drained = True
+            if (time.monotonic() - t0) > 0.012:
+                # This grab waited for a fresh capture → backlog now empty.
+                break
+        if drained:
+            ok, frame = cap.retrieve()
+            if frame is not None:
+                return ok, frame
+    except Exception:  # noqa: BLE001 — fall back to a plain read
+        pass
+    return cap.read()
+
+
 def _redact_secret_env_line(line: str) -> str:
     """Mask secret values (HF_TOKEN, *_SECRET, *_KEY, *_PASSWORD) when echoing
     the generated .env to the on-screen Protokoll, so a token can't leak into a
@@ -343,11 +375,14 @@ class EduBoticsApp:
         self.camera_checks_frame.pack(fill=tk.X, pady=5)
         self.camera_check_vars: list[tk.BooleanVar] = []
 
-        # Camera role assignment (visible after 2 cameras selected)
+        # Camera role assignment (visible after 2 cameras selected). Roles are
+        # picked per-preview now (no separate dropdowns), so the old
+        # gripper_cam_var/scene_cam_var StringVars are gone — the live image
+        # under each "Kamera N" badge is the identifier (the two Innomakers are
+        # identical-serial, so a name/index can't disambiguate them).
         self.camera_role_frame = ttk.Frame(camera_frame)
         self.camera_role_frame.pack(fill=tk.X, pady=5)
-        self.gripper_cam_var = tk.StringVar()
-        self.scene_cam_var = tk.StringVar()
+        self._preview_role_vars = []
 
         # Optional: phone as a 3rd camera. The phone's browser streams over
         # HTTPS to EduBotics.exe, which forwards the frames into the container
@@ -1571,50 +1606,59 @@ class EduBoticsApp:
                       foreground="green").pack(anchor=tk.W)
             self._start_camera_previews(selected)
         elif len(selected) == 2:
-            # Two cameras — let student assign roles
-            cam_names = [f"{c.name} ({c.path})" for c in selected]
-
+            # Two cameras — the student assigns Greifer/Szene by LOOKING at the
+            # live preview under each (the two Innomakers are identical-serial,
+            # so a name/index can't disambiguate them). The role selectors live
+            # in the preview holders built by _start_camera_previews.
             ttk.Label(self.camera_role_frame,
                       text="Kamera-Rollen zuweisen:",
                       font=("", 9, "bold")).pack(anchor=tk.W, pady=(5, 2))
-
-            gripper_row = ttk.Frame(self.camera_role_frame)
-            gripper_row.pack(fill=tk.X, pady=2)
-            ttk.Label(gripper_row, text="Greifer-Kamera:").pack(side=tk.LEFT)
-            self.gripper_cam_var.set(cam_names[0])
-            gripper_combo = ttk.Combobox(gripper_row, textvariable=self.gripper_cam_var,
-                                         values=cam_names, state="readonly", width=40)
-            gripper_combo.pack(side=tk.LEFT, padx=5)
-            gripper_combo.bind("<<ComboboxSelected>>", lambda e: self._assign_camera_roles(selected, cam_names))
-
-            scene_row = ttk.Frame(self.camera_role_frame)
-            scene_row.pack(fill=tk.X, pady=2)
-            ttk.Label(scene_row, text="Szenen-Kamera: ").pack(side=tk.LEFT)
-            self.scene_cam_var.set(cam_names[1])
-            scene_combo = ttk.Combobox(scene_row, textvariable=self.scene_cam_var,
-                                       values=cam_names, state="readonly", width=40)
-            scene_combo.pack(side=tk.LEFT, padx=5)
-            scene_combo.bind("<<ComboboxSelected>>", lambda e: self._assign_camera_roles(selected, cam_names))
-
-            self._assign_camera_roles(selected, cam_names)
+            ttk.Label(self.camera_role_frame,
+                      text="Schau in die beiden Live-Vorschauen und wähle "
+                           "darunter die passende Rolle — Greifer = Kamera am "
+                           "Greifer, Szene = Übersicht.",
+                      foreground="gray", wraplength=620,
+                      justify=tk.LEFT).pack(anchor=tk.W, pady=(0, 2))
+            # Sensible default (corrected via the per-preview selectors): first
+            # camera = Greifer, second = Szene. Keep hardware.cameras gripper-
+            # first — the order config_generator / _start_camera_bridge expect.
+            selected[0].role = "gripper"
+            selected[1].role = "scene"
+            self.hardware.cameras = [selected[0], selected[1]]
             self._start_camera_previews(selected)
         else:
             self.hardware.cameras = selected
 
-    def _assign_camera_roles(self, cameras, cam_names):
-        """Assign gripper/scene roles based on combo selection and auto-swap."""
-        gripper_selection = self.gripper_cam_var.get()
-        gripper_idx = cam_names.index(gripper_selection) if gripper_selection in cam_names else 0
-        scene_idx = 1 - gripper_idx  # the other one
+    def _on_preview_role_changed(self, cameras, position):
+        """Per-preview role pick — keep the two cameras mutually exclusive.
 
-        # Auto-sync the other combo
-        self.scene_cam_var.set(cam_names[scene_idx])
-
-        cameras[gripper_idx].role = "gripper"
-        cameras[scene_idx].role = "scene"
-
-        # Order: gripper first, scene second
-        self.hardware.cameras = [cameras[gripper_idx], cameras[scene_idx]]
+        The student assigns a role by LOOKING at the live image under each
+        "Kamera N" badge, so there is no index→name mapping to get wrong (the
+        two Innomakers are identical-serial). Picking a role on one preview
+        flips the OTHER to the opposite role, and `self.hardware.cameras` is
+        kept gripper-first (the order config_generator / _start_camera_bridge
+        expect).
+        """
+        role_map = {"Greifer": "gripper", "Szene": "scene"}
+        role_vars = getattr(self, "_preview_role_vars", [])
+        if (len(cameras) < 2 or position >= len(role_vars)
+                or role_vars[position] is None):
+            return
+        chosen = role_vars[position].get()
+        if chosen not in role_map:
+            return
+        other = 1 - position
+        other_display = "Szene" if chosen == "Greifer" else "Greifer"
+        if other < len(role_vars) and role_vars[other] is not None:
+            role_vars[other].set(other_display)
+        cameras[position].role = role_map[chosen]
+        cameras[other].role = role_map[other_display]
+        gripper_cam = cameras[position] if chosen == "Greifer" else cameras[other]
+        scene_cam = cameras[other] if chosen == "Greifer" else cameras[position]
+        self.hardware.cameras = [gripper_cam, scene_cam]
+        self._log(
+            f"Kamera-Rolle gesetzt: Kamera {position + 1} = {chosen}, "
+            f"Kamera {other + 1} = {other_display}.")
 
     # ── Arm-Konfiguration aus letzter Sitzung wiederherstellen (PR-4) ──
 
@@ -1733,47 +1777,86 @@ class EduBoticsApp:
         if not cameras:
             return
 
-        # Contention guard: while the environment runs, the capture bridge
-        # holds the cameras EXCLUSIVELY. A second MSMF open returns a
-        # frameless handle (an endless "Vorschau lädt ..."), so don't even
-        # try — show a German note instead.
-        if self.running or self.camera_bridge is not None:
-            ttk.Label(
-                self.camera_role_frame,
-                text="Vorschau pausiert, während die Umgebung läuft.",
-                foreground="gray",
-            ).pack(anchor=tk.W, pady=(6, 2))
-            return
-
-        try:
-            from . import win_camera
-        except Exception:  # noqa: BLE001
-            return
-
         # Generation counter: a selection change mid-open bumps it, and the
         # worker discards (releases) captures that finish for a stale
         # generation instead of installing them after _stop ran.
         self._preview_generation = getattr(self, "_preview_generation", 0) + 1
         generation = self._preview_generation
 
+        # Distinct, colour-coded identity per camera. The two Innomakers are
+        # identical-serial (same name + serial), so a name can't tell them
+        # apart — the LIVE IMAGE does. Each gets a coloured "Kamera N" badge +
+        # border, and (with 2 cameras) the role selector sits directly under
+        # its own preview, so the student assigns Greifer/Szene by LOOKING at
+        # the picture, never by an opaque index. (UX redesign 2026-06-14.)
+        palette = [("#1f6feb", "Kamera 1"), ("#e8770e", "Kamera 2")]
+        two_cams = len(cameras) >= 2
+        self._preview_role_vars = []
+
         preview_row = ttk.Frame(self.camera_role_frame)
         preview_row.pack(fill=tk.X, pady=(6, 2))
         targets = []
-        for cam in cameras:
-            holder = ttk.Frame(preview_row)
-            holder.pack(side=tk.LEFT, padx=6)
-            label = ttk.Label(holder, text="Vorschau lädt ...", anchor=tk.CENTER)
-            label.pack()
-            ttk.Label(holder, text=f"{cam.name}", foreground="gray").pack()
+        for position, cam in enumerate(cameras):
+            color, cam_label = (
+                palette[position] if position < len(palette)
+                else ("#555555", f"Kamera {position + 1}"))
+            # tk.Frame (not ttk) so the coloured border renders via the
+            # highlight ring — ttk.Frame has no highlightthickness option.
+            holder = tk.Frame(
+                preview_row, highlightbackground=color, highlightcolor=color,
+                highlightthickness=3, bd=0)
+            holder.pack(side=tk.LEFT, padx=8)
+            tk.Label(
+                holder, text=cam_label, bg=color, fg="white",
+                font=("", 9, "bold"), padx=8, pady=2).pack(fill=tk.X)
+            label = ttk.Label(
+                holder, text="Vorschau lädt ...", anchor=tk.CENTER)
+            label.pack(padx=4, pady=4)
+            if two_cams:
+                role_var = tk.StringVar(
+                    value="Greifer" if position == 0 else "Szene")
+                self._preview_role_vars.append(role_var)
+                role_row = ttk.Frame(holder)
+                role_row.pack(fill=tk.X, padx=4, pady=(0, 4))
+                ttk.Label(role_row, text="Rolle:").pack(side=tk.LEFT)
+                combo = ttk.Combobox(
+                    role_row, textvariable=role_var,
+                    values=["Greifer", "Szene"], state="readonly", width=10)
+                combo.pack(side=tk.LEFT, padx=4)
+                combo.bind(
+                    "<<ComboboxSelected>>",
+                    lambda e, p=position: self._on_preview_role_changed(
+                        cameras, p))
+            else:
+                # Single camera — role is fixed (Greifer); no selector needed.
+                self._preview_role_vars.append(None)
+                ttk.Label(
+                    holder, text="Rolle: Greifer", foreground="gray").pack(
+                    padx=4, pady=(0, 4))
             if cam.win_index < 0:
                 # usb_cam rollback path — no native index to open (the
                 # bridge guards the same way); opening -1 would grab an
                 # arbitrary device (e.g. a laptop's built-in camera).
                 label.config(text="Keine Vorschau (usb_cam-Modus)")
                 continue
-            targets.append((cam.win_index, label, cam.name))
+            targets.append((cam.win_index, label, cam_label))
+
+        # Contention guard: while the environment runs the capture bridge holds
+        # the cameras EXCLUSIVELY. A second MSMF open returns a frameless handle
+        # (an endless "Vorschau lädt ..."), so don't open them — but the badges
+        # + role selectors above stay fully usable; just note it in each slot.
+        if self.running or self.camera_bridge is not None:
+            for _idx, paused_label, _name in targets:
+                paused_label.config(
+                    text="Vorschau pausiert,\nUmgebung läuft.")
+            return
 
         if not targets:
+            return
+
+        try:
+            from . import win_camera
+        except Exception:  # noqa: BLE001
             return
 
         def _open_captures():
@@ -1818,9 +1901,9 @@ class EduBoticsApp:
         self._preview_after_id = None
         if not self._preview_caps:
             return
-        # ~15 ticks at the 200 ms cadence ≈ 3 s before we give up on a
+        # ~30 ticks at the 100 ms cadence ≈ 3 s before we give up on a
         # camera that has never produced a frame.
-        give_up_ticks = 15
+        give_up_ticks = 30
         for win_index, cap in list(self._preview_caps.items()):
             label = self._preview_labels.get(win_index)
             if label is None:
@@ -1834,7 +1917,7 @@ class EduBoticsApp:
                     self._log(message)
 
             try:
-                ok, frame = cap.read()
+                ok, frame = _read_freshest_frame(cap)
             except Exception as exc:  # noqa: BLE001 — preview is best-effort
                 label.config(
                     text="Kamera liefert kein Bild – evtl. belegt oder "
@@ -1890,7 +1973,7 @@ class EduBoticsApp:
                 self._log(f"Kamera-Vorschau aktiv: {name}")
         if self._preview_caps:
             self._preview_after_id = self.root.after(
-                200, self._poll_camera_previews)
+                100, self._poll_camera_previews)
 
     # ── Start Environment ────────────────────────────────────────────
 

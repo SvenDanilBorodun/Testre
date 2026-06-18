@@ -86,6 +86,13 @@ class HardwareConfig:
     def is_complete(self) -> bool:
         return self.leader is not None and self.follower is not None
 
+    @property
+    def follower_present(self) -> bool:
+        """True when at least the follower is identified. This is the
+        sufficient hardware condition for Roboter Studio (follower-only): the
+        leader is not launched there, so it need not be scanned."""
+        return self.follower is not None
+
 
 # usbipd 5.x splits output into "Connected:" and "Persisted:" sections; older
 # 4.x prints a flat table. We parse strict first, then fall back to a VID:PID-

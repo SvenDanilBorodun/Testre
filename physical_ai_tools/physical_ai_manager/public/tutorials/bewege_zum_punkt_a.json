@@ -15,16 +15,17 @@
     },
     {
       "title": "Bewege zu A",
-      "body": "Setze einen \"bewege zu\"-Block ein und verbinde A als Ziel. Drücke Start.",
-      "allowed_blocks": ["edubotics_destination_pin", "edubotics_move_to", "edubotics_home"],
+      "body": "Setze einen \"bewege zu\"-Block ein. Ziehe dann aus der Kategorie Ziele einen \"Ziel\"-Block in das Feld des \"bewege zu\"-Blocks und schreibe denselben Namen wie dein Pin (A). Drücke Start.",
+      "allowed_blocks": ["edubotics_destination_pin", "edubotics_destination_ref", "edubotics_move_to", "edubotics_home"],
       "hints": [
-        "Vergiss nicht, am Ende mit \"Heimposition\" zurück zu fahren."
+        "Der \"Ziel\"-Block ist ein kleiner Baustein mit Ausgang — er passt in das Loch des \"bewege zu\"-Blocks.",
+        "Der Name im \"Ziel\"-Block muss genau zum Pin passen (A)."
       ]
     },
     {
       "title": "Mit Heimposition abschließen",
       "body": "Hänge \"Heimposition\" ans Ende, damit der Arm in Sicherheit zurückkehrt.",
-      "allowed_blocks": ["edubotics_destination_pin", "edubotics_move_to", "edubotics_home"]
+      "allowed_blocks": ["edubotics_destination_pin", "edubotics_destination_ref", "edubotics_move_to", "edubotics_home"]
     }
   ]
 }

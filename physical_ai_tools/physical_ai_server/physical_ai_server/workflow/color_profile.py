@@ -11,10 +11,11 @@
 
 Students place a single coloured cube of each colour in the scene
 camera's field of view; the manager segments the cube via Otsu
-(auto-polarity, falling back to a centre ROI) and records its
-LAB-space cluster centroid + per-channel standard deviation in
-``color_profile.yaml``. The Perception backend matches incoming
-frames against these clusters in LAB.
+(auto-polarity, interior-contour only — NO centre-ROI fallback, which
+silently sampled table+cube) and records its LAB-space cluster centroid
++ per-channel standard deviation in ``color_profile.yaml``. A loose
+name-vs-colour sanity check rejects the wrong cube held under a prompt.
+The Perception backend matches incoming frames against these clusters in LAB.
 
 The v1 implementation used HSV percentiles which silently broke for
 red (hue wraps at 180; the 5/95 percentiles spanned the whole wheel
@@ -49,7 +50,8 @@ PROFILE_PATH = CALIB_DIR / 'color_profile.yaml'
 DEFAULT_COLORS = ('rot', 'gruen', 'blau', 'gelb')
 
 # Minimum blob area in pixels before we trust an Otsu-segmented mask.
-# Below this, fall back to a centre ROI.
+# A smaller blob is rejected (the segmenter returns None — no centre-ROI
+# fallback) so the student re-positions the cube.
 MIN_BLOB_AREA_PX = 400
 
 # k * std bounds for the match criterion. 3 σ on a Gaussian covers
@@ -58,9 +60,31 @@ MIN_BLOB_AREA_PX = 400
 # classroom.
 DEFAULT_THRESHOLD_K = 3.0
 
-# Side length (in fraction of frame) of the centre-ROI fallback
-# when Otsu fails. 0.25 -> middle 25% of width and height.
-CENTRE_ROI_FRACTION = 0.25
+# Reference LAB (a, b) centroids for the four canonical cubes (OpenCV 8-bit
+# LAB, offset 128; L omitted because it is lighting-dependent). Note red and
+# blue BOTH have a high a* (~200) and are separated only by b* (red high, blue
+# low) — so a per-channel threshold can't distinguish them. The captured
+# cluster is therefore classified to the NEAREST reference in (a, b); a
+# mismatch with the requested name is rejected. This is robust to desaturation
+# (a dim red still sits closest to the red reference) and only trips on a GROSS
+# colour swap (e.g. the red cube held under the "blau" prompt).
+_COLOR_REF_AB = {
+    'rot':   (196.0, 178.0),
+    'gruen': (59.0, 193.0),
+    'blau':  (192.0, 37.0),
+    'gelb':  (113.0, 210.0),
+}
+
+
+def _color_matches_name(color: str, center) -> bool:
+    if color not in _COLOR_REF_AB:
+        return True
+    a, b = float(center[1]), float(center[2])
+    nearest = min(
+        _COLOR_REF_AB,
+        key=lambda k: (a - _COLOR_REF_AB[k][0]) ** 2 + (b - _COLOR_REF_AB[k][1]) ** 2,
+    )
+    return nearest == color
 
 
 class ColorProfileManager:
@@ -131,14 +155,22 @@ class ColorProfileManager:
             mask = self._segment_blob(bgr)
             if mask is None:
                 return False, (
-                    'Kein zusammenhängender Bereich erkannt — bitte '
-                    'Würfel mittig vor die Szenen-Kamera halten.'
+                    'Kein zusammenhängender Würfel erkannt — bitte den Würfel '
+                    'mittig und formatfüllend vor die Szenen-Kamera halten '
+                    '(mit Abstand zum Tischrand).'
                 ), [], []
             lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB)
             pixels = lab[mask > 0]
             if pixels.shape[0] < 50:
                 return False, 'Bereich war zu klein.', [], []
             center = pixels.mean(axis=0).astype(np.float32)
+            # Sanity: the captured cluster must actually look like the requested
+            # colour — catches the red cube held under the "blau" prompt etc.
+            if not _color_matches_name(color, center):
+                return False, (
+                    f'Die erfasste Farbe passt nicht zu „{color}" — bitte den '
+                    f'richtigen Würfel mittig vor die Kamera halten.'
+                ), [], []
             std = pixels.std(axis=0).astype(np.float32)
             # Floor std to a small positive value so a perfectly-uniform
             # cube doesn't make every match-test divide-by-zero. 1.0
@@ -158,9 +190,9 @@ class ColorProfileManager:
 
         Tries Otsu in both polarities, ignores contours whose bounding
         box touches the frame edge (those are the background, not the
-        cube), and picks the largest of the remaining contours. Falls
-        back to a centre ROI if neither polarity yields an interior
-        blob.
+        cube), and picks the largest of the remaining contours. Returns
+        None if neither polarity yields an interior blob (no centre-ROI
+        fallback — see the comment at the return below).
         """
         gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
         blurred = cv2.GaussianBlur(gray, (5, 5), 0)
@@ -194,18 +226,11 @@ class ColorProfileManager:
                 cv2.drawContours(m, [largest], -1, 255, thickness=cv2.FILLED)
                 best_mask = m
 
-        if best_mask is not None:
-            return best_mask
-
-        # Fallback: centre ROI. The student is told to place the cube
-        # centrally, so a square at the middle is a reasonable default.
-        side_w = int(w * CENTRE_ROI_FRACTION)
-        side_h = int(h * CENTRE_ROI_FRACTION)
-        x0 = (w - side_w) // 2
-        y0 = (h - side_h) // 2
-        m = np.zeros(gray.shape, dtype=np.uint8)
-        m[y0:y0 + side_h, x0:x0 + side_w] = 255
-        return m
+        # No interior blob found. We deliberately do NOT fall back to a centre
+        # ROI: that silently sampled whatever was in the middle 25% (table +
+        # cube mixed), inflating std and poisoning the profile. Return None so
+        # the student re-positions the cube and gets a clear German message.
+        return best_mask
 
     # ------------------------------------------------------------------
     # Lookups for Perception

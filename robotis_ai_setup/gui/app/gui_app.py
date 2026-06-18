@@ -114,6 +114,7 @@ def _apply_window_icon(root: tk.Tk) -> None:
 
 
 from . import device_manager, docker_manager, health_checker, config_generator, wsl_bridge, update_checker, webview_window
+from .roboter_studio_control import RoboterStudioControlServer
 from . import camera_bridge as camera_bridge_mod
 from . import phone_camera as phone_camera_mod
 from . import phone_cert as phone_cert_mod
@@ -297,6 +298,13 @@ class EduBoticsApp:
         self.cloud_only = tk.BooleanVar(value=False)
         # Optional: use a school phone (browser) as a 3rd camera (cam_id 2).
         self.phone_camera_enabled = tk.BooleanVar(value=False)
+        # Roboter-Studio leader toggle bridge: a localhost HTTP server the React
+        # Roboter Studio tab calls to switch the arm stack between follower-only
+        # (leader off — autonomous picking) and both-arms (teleop). Created when
+        # the environment starts; see _start_rs_control_server.
+        self._rs_control = None
+        self._rs_use_gpu = False
+        self._rs_phone_enabled = False
 
         self._build_ui()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -405,6 +413,19 @@ class EduBoticsApp:
             wraplength=620,
             justify=tk.LEFT,
         ).pack(anchor=tk.W, pady=(2, 0))
+
+        ttk.Label(
+            mode_frame,
+            text=(
+                "Roboter Studio (Greifen & Programmieren) wird direkt in der "
+                "Web-Oberfläche gestartet — dort schaltest du den Leader-Arm bei "
+                "Bedarf ab und wieder zu."
+            ),
+            foreground="gray",
+            font=("Segoe UI", 8),
+            wraplength=620,
+            justify=tk.LEFT,
+        ).pack(anchor=tk.W, pady=(6, 0))
 
         # ── Schritt A: Leader-Arm ──
         leader_frame = ttk.LabelFrame(main, text="Schritt A: Leader-Arm", padding=10)
@@ -1248,6 +1269,7 @@ class EduBoticsApp:
             if docker_manager.ensure_environment_stopped(log=self._log):
                 self._log("Laufende Umgebung wurde für den Scan gestoppt.")
                 self._stop_camera_bridge()
+                self._stop_rs_control_server()
                 self.running = False
                 self.root.after(0, lambda: self.btn_stop.config(state=tk.DISABLED))
                 self.root.after(0, lambda: self.btn_open_browser.config(state=tk.DISABLED))
@@ -2141,6 +2163,9 @@ class EduBoticsApp:
                     env_content = config_generator.generate_cloud_only_env(
                         ENV_FILE, phone_camera=phone_enabled)
                 else:
+                    # Always start with BOTH arms (recording/teleop available).
+                    # Roboter Studio switches to follower-only at RUNTIME via the
+                    # React leader toggle (_rs_set_leader_mode), not at start.
                     env_content = config_generator.generate_env_file(
                         self.hardware, ENV_FILE, phone_camera=phone_enabled)
                 self._log(f"Konfiguration geschrieben: {ENV_FILE}")
@@ -2185,6 +2210,11 @@ class EduBoticsApp:
                 # der Handy-Empfänger gestartet und als 3. Kamera registriert.
                 if not is_cloud_only:
                     self._start_camera_bridge(phone_enabled=phone_enabled)
+                    # 4.6 Roboter-Studio leader-toggle bridge: lets the React
+                    # Roboter Studio tab switch the arm between follower-only and
+                    # both-arms at runtime. Capture gpu/phone here so a later
+                    # toggle regenerates a consistent .env off the main thread.
+                    self._start_rs_control_server(use_gpu, phone_enabled)
 
                 # 5. Web-Oberfläche öffnen
                 self._log("Web-Oberfläche wird geöffnet...")
@@ -2202,6 +2232,10 @@ class EduBoticsApp:
             finally:
                 self.root.after(0, lambda: self.progress.stop())
                 if not startup_ok:
+                    # A failure after _start_rs_control_server (e.g. _open_webview
+                    # raising) would otherwise leave the :8769 socket + daemon
+                    # thread running with no environment behind it. Tear it down.
+                    self._stop_rs_control_server()
                     self.running = False
                     self._update_start_button()
 
@@ -2430,6 +2464,78 @@ class EduBoticsApp:
         )
         webbrowser.open(url)
 
+    # ── Roboter Studio leader toggle (React → GUI bridge) ────────────────────
+
+    def _start_rs_control_server(self, use_gpu: bool, phone_enabled: bool):
+        """Start the localhost control bridge the React Roboter Studio tab uses
+        to switch the arm between follower-only and both-arms. Idempotent; a
+        failure (e.g. port taken) just disables the toggle, never crashes."""
+        self._rs_use_gpu = bool(use_gpu)
+        self._rs_phone_enabled = bool(phone_enabled)
+        if self._rs_control is not None:
+            return
+        try:
+            self._rs_control = RoboterStudioControlServer(
+                on_set_mode=self._rs_set_leader_mode,
+                get_status=self._rs_get_status,
+                log=self._log,
+            )
+            if self._rs_control.start():
+                self._log(
+                    f"Roboter-Studio-Steuerung aktiv (Port {self._rs_control.port}).")
+            else:
+                self._rs_control = None
+        except Exception as e:  # noqa: BLE001 — never let it block startup
+            self._log(f"Roboter-Studio-Steuerung konnte nicht starten: {e}")
+            self._rs_control = None
+
+    def _stop_rs_control_server(self):
+        if self._rs_control is not None:
+            try:
+                self._rs_control.stop()
+            except Exception:  # noqa: BLE001
+                pass
+            self._rs_control = None
+
+    def _rs_get_status(self) -> dict:
+        """Current arm mode, read from the .env (the source of truth)."""
+        val = config_generator.read_env_var("EDUBOTICS_FOLLOWER_ONLY", ENV_FILE)
+        return {"follower_only": str(val).strip() == "1"}
+
+    def _rs_set_leader_mode(self, follower_only: bool, log):
+        """Switch the arm to follower-only (leader off) or both-arms (leader on)
+        and recreate ONLY the open_manipulator container. Runs on the control
+        server's thread; returns (ok, german_message).
+
+        Reuses the scanned hardware + the gpu/phone settings captured at env
+        start, so the regenerated .env is identical except FOLLOWER_ONLY /
+        LEADER_PORT. physical_ai_server (rosbridge + the React app) stays up via
+        --no-deps, so the student's session only sees the arm blip + re-home;
+        the native camera bridge auto-reconnects to the recreated ingest node."""
+        if self.hardware is None or self.hardware.follower is None:
+            return False, "Kein Follower-Arm konfiguriert."
+        if not follower_only and self.hardware.leader is None:
+            return False, "Kein Leader-Arm konfiguriert — bitte beide Arme scannen."
+        try:
+            config_generator.generate_env_file(
+                self.hardware, ENV_FILE,
+                phone_camera=self._rs_phone_enabled,
+                follower_only=follower_only,
+            )
+        except Exception as e:  # noqa: BLE001
+            return False, f"Konfiguration konnte nicht erstellt werden: {e}"
+        if follower_only:
+            log("Leader-Arm wird abgeschaltet — Roboter Studio wird vorbereitet …")
+        else:
+            log("Leader-Arm wird wieder verbunden — Teleoperation wird vorbereitet …")
+        ok = docker_manager.restart_open_manipulator(gpu=self._rs_use_gpu, log=log)
+        if not ok:
+            return False, "Der Arm-Container konnte nicht neu gestartet werden."
+        msg = ("Roboter Studio bereit — der Leader-Arm ist abgeschaltet."
+               if follower_only else
+               "Leader-Arm verbunden — Teleoperation ist wieder verfügbar.")
+        return True, msg
+
     def _stop_environment(self):
         """Alle Container in der EduBotics-Umgebung stoppen."""
         self.btn_stop.config(state=tk.DISABLED)
@@ -2442,6 +2548,7 @@ class EduBoticsApp:
 
             self._stop_camera_bridge()
             self._stop_phone_server()
+            self._stop_rs_control_server()
             if self.cloud_only.get():
                 docker_manager.stop_cloud_only(log=self._log)
             else:
@@ -2510,6 +2617,7 @@ class EduBoticsApp:
                 self._log("Beende — Container werden gestoppt...")
                 self._stop_camera_bridge()
                 self._stop_phone_server()
+                self._stop_rs_control_server()
                 webview_window.destroy_all()
                 if self.cloud_only.get():
                     docker_manager.stop_cloud_only()
@@ -2519,6 +2627,10 @@ class EduBoticsApp:
                 self.root.destroy()
             # else: user clicked No, don't close
         else:
+            # Not "running", but the control bridge may still be up from a
+            # partial start (it starts before _open_webview, which can fail) —
+            # don't leak the :8769 socket + thread past the GUI's exit.
+            self._stop_rs_control_server()
             webview_window.destroy_all()
             docker_manager.stop_keepalive()
             self.root.destroy()

@@ -11,11 +11,15 @@
 
 Uses the camera intrinsics + camera-to-base extrinsic from the scene
 calibration to back-project a pixel onto the plane ``z = z_table`` and
-return the resulting (x, y, z_table) point in base coordinates.
+return the resulting (x, y, z_table) point in base coordinates. This is
+THE path that turns a detected cube pixel into a base-frame grasp point
+for ``handlers.motion.pickup`` / ``drop_at``.
 
-The reverse direction (base -> pixel) is used by the gripper-cam refine
-phase of the pickup macro to confirm the predicted grasp pose lines up
-with the observed object.
+``project_base_to_pixel`` (the reverse) has NO live caller — the
+gripper-cam grasp refine that would have used it was cancelled with the
+WS4 scene-cam-only calibration decision (2026-06-17; the gripper camera
+is not modelled in the omx_f URDF). It is retained only as a tested,
+self-contained projection-math inverse for possible future use.
 """
 
 from __future__ import annotations
@@ -31,13 +35,19 @@ def project_pixel_to_table(
     dist: np.ndarray,
     T_cam_to_base: np.ndarray,
     z_table: float,
+    plane: tuple[float, float, float] | None = None,
 ) -> np.ndarray | None:
     """Cast a ray from the camera centre through (px, py) and intersect it
     with the table plane.
 
-    Returns the (x, y, z_table) point in base frame, or ``None`` if the
-    ray is parallel to the table plane (camera looking along the
-    horizon — should not happen in practice but worth guarding).
+    When ``plane = (a, b, c)`` is given (the touch-off measured plane
+    ``z = a·x + b·y + c``), the ray is intersected with that TILTED plane —
+    so a non-level table projects correctly. Otherwise the ray is intersected
+    with the flat plane ``z = z_table``.
+
+    Returns the (x, y, z) base-frame point, or ``None`` if the ray is parallel
+    to the plane (camera looking along the horizon) or the intersection is
+    behind the camera.
     """
     pixel = np.array([[[px, py]]], dtype=np.float32)
     undistorted = cv2.undistortPoints(pixel, K, dist).reshape(-1)
@@ -50,6 +60,17 @@ def project_pixel_to_table(
 
     direction_base = R @ direction_cam
     origin_base = t
+
+    if plane is not None:
+        # Tilted plane a·x + b·y − z + c = 0. Solve origin + s·dir on it.
+        a, b, c = (float(v) for v in plane)
+        denom = a * direction_base[0] + b * direction_base[1] - direction_base[2]
+        if abs(denom) < 1e-9:
+            return None
+        s = -(a * origin_base[0] + b * origin_base[1] - origin_base[2] + c) / denom
+        if s <= 0:
+            return None
+        return origin_base + s * direction_base
 
     if abs(direction_base[2]) < 1e-9:
         return None
@@ -69,7 +90,11 @@ def project_base_to_pixel(
     T_cam_to_base: np.ndarray,
 ) -> tuple[float, float] | None:
     """Project a base-frame point back to pixel coordinates of the named
-    camera. Returns ``None`` if the point is behind the camera."""
+    camera. Returns ``None`` if the point is behind the camera.
+
+    NOTE (WS4, 2026-06-17): no live caller — the gripper-cam grasp refine
+    that would have used this was cancelled (scene-cam-only calibration).
+    Kept as a tested projection-math inverse (see test_projection.py)."""
     R_cam_to_base = T_cam_to_base[:3, :3]
     t_cam_to_base = T_cam_to_base[:3, 3]
     R_base_to_cam = R_cam_to_base.T

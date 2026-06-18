@@ -414,5 +414,153 @@ class TestRosDomainPersistence(unittest.TestCase):
             self.assertTrue(0 <= resolved <= 232)
 
 
+class TestConfigGeneratorFollowerOnly(unittest.TestCase):
+    """Roboter Studio follower-only mode (EDUBOTICS_FOLLOWER_ONLY=1): no leader
+    launched, so the workflow/calibration publisher is the sole writer on
+    /leader/joint_trajectory (no teleop broadcaster to clobber it)."""
+
+    def setUp(self):
+        self._prev_src = os.environ.get("EDUBOTICS_CAMERA_SOURCE")
+        os.environ["EDUBOTICS_CAMERA_SOURCE"] = "usb_cam"
+
+    def tearDown(self):
+        if self._prev_src is None:
+            os.environ.pop("EDUBOTICS_CAMERA_SOURCE", None)
+        else:
+            os.environ["EDUBOTICS_CAMERA_SOURCE"] = self._prev_src
+
+    def _config(self, with_leader):
+        leader = None
+        if with_leader:
+            leader = ArmDevice(
+                busid="1-3", serial_path="/dev/serial/by-id/leader",
+                role="leader", description="OpenRB-150")
+        return HardwareConfig(
+            leader=leader,
+            follower=ArmDevice(
+                busid="1-4", serial_path="/dev/serial/by-id/follower",
+                role="follower", description="OpenRB-150"),
+            cameras=[CameraDevice(path="/dev/video2", name="Scene Cam", role="scene")],
+        )
+
+    def _tmp(self):
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".env", delete=False) as f:
+            return f.name
+
+    def test_follower_only_emits_flag_and_omits_leader(self):
+        tmp_path = self._tmp()
+        try:
+            content = generate_env_file(
+                self._config(with_leader=False), output_path=tmp_path,
+                follower_only=True)
+            self.assertIn("EDUBOTICS_FOLLOWER_ONLY=1", content)
+            self.assertIn('FOLLOWER_PORT="/dev/serial/by-id/follower"', content)
+            self.assertNotIn("LEADER_PORT=", content)
+        finally:
+            os.unlink(tmp_path)
+
+    def test_follower_only_tolerates_missing_leader(self):
+        # No leader scanned — must NOT raise in follower-only mode.
+        tmp_path = self._tmp()
+        try:
+            generate_env_file(
+                self._config(with_leader=False), output_path=tmp_path,
+                follower_only=True)
+        finally:
+            os.unlink(tmp_path)
+
+    def test_recording_mode_still_requires_leader(self):
+        tmp_path = self._tmp()
+        try:
+            with self.assertRaises(ValueError):
+                generate_env_file(
+                    self._config(with_leader=False), output_path=tmp_path,
+                    follower_only=False)
+        finally:
+            os.unlink(tmp_path)
+
+    def test_follower_only_flag_is_managed_and_superseded(self):
+        # A follower-only .env regenerated as a recording session must DROP the
+        # stale EDUBOTICS_FOLLOWER_ONLY=1 (MANAGED key) and restore LEADER_PORT.
+        tmp_path = self._tmp()
+        try:
+            c1 = generate_env_file(
+                self._config(with_leader=False), output_path=tmp_path,
+                follower_only=True)
+            self.assertIn("EDUBOTICS_FOLLOWER_ONLY=1", c1)
+            c2 = generate_env_file(
+                self._config(with_leader=True), output_path=tmp_path,
+                follower_only=False)
+            self.assertNotIn("EDUBOTICS_FOLLOWER_ONLY", c2)
+            self.assertIn("LEADER_PORT=", c2)
+        finally:
+            os.unlink(tmp_path)
+
+
+class TestSingleSceneCamera(unittest.TestCase):
+    """The Roboter Studio kit is ONE scene camera (no gripper cam). The .env it
+    produces must be a valid SINGLE-camera config: CAMERA_NAME_1=scene with NO
+    CAMERA_NAME_2 / CAMERA_DEVICE_2 line, so the native_bridge healthcheck (which
+    gates its 2nd-camera probe on a non-empty CAMERA_NAME_2) passes on the scene
+    topic alone. The 2-camera classroom path is covered by the tests above."""
+
+    def setUp(self):
+        self._prev_src = os.environ.get("EDUBOTICS_CAMERA_SOURCE")
+        os.environ["EDUBOTICS_CAMERA_SOURCE"] = "native_bridge"
+
+    def tearDown(self):
+        if self._prev_src is None:
+            os.environ.pop("EDUBOTICS_CAMERA_SOURCE", None)
+        else:
+            os.environ["EDUBOTICS_CAMERA_SOURCE"] = self._prev_src
+
+    def _single_scene_config(self):
+        # One scene camera, no leader — the Roboter Studio follower-only kit.
+        return HardwareConfig(
+            follower=ArmDevice(
+                "1-4", "/dev/serial/by-id/follower", "follower", "OpenRB-150"),
+            cameras=[
+                CameraDevice(path="Index 1", name="Scene Cam",
+                             role="scene", win_index=1),
+            ],
+        )
+
+    def test_single_scene_camera_env_is_valid(self):
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".env", delete=False) as f:
+            tmp_path = f.name
+        try:
+            content = generate_env_file(
+                self._single_scene_config(), output_path=tmp_path,
+                follower_only=True)
+            # Exactly ONE camera slot, named scene; native bridge so device is empty.
+            self.assertIn('CAMERA_NAME_1="scene"', content)
+            self.assertIn('CAMERA_DEVICE_1=""', content)
+            # No phantom 2nd slot — the healthcheck must not wait on a /scene_2.
+            self.assertNotIn("CAMERA_NAME_2", content)
+            self.assertNotIn("CAMERA_DEVICE_2", content)
+            # Follower-only Roboter Studio kit: no leader.
+            self.assertIn("EDUBOTICS_FOLLOWER_ONLY=1", content)
+            self.assertNotIn("LEADER_PORT=", content)
+        finally:
+            os.unlink(tmp_path)
+
+    def test_single_scene_camera_healthcheck_topic_is_scene(self):
+        # The container env-var CAMERA_NAME_1 the healthcheck probes is exactly
+        # the camera role, so a single scene camera maps to /scene/.../compressed.
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".env", delete=False) as f:
+            tmp_path = f.name
+        try:
+            content = generate_env_file(
+                self._single_scene_config(), output_path=tmp_path,
+                follower_only=True)
+            name1 = read_env_var("CAMERA_NAME_1", tmp_path)
+            self.assertEqual(name1, "scene")
+            # CAMERA_NAME_2 absent from the file -> container default empties it
+            # -> healthcheck skips the 2nd-camera probe.
+            self.assertIsNone(read_env_var("CAMERA_NAME_2", tmp_path))
+        finally:
+            os.unlink(tmp_path)
+
+
 if __name__ == "__main__":
     unittest.main()

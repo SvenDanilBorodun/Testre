@@ -57,3 +57,30 @@ def test_round_trip_pixel_to_base_to_pixel():
     assert pixel_back is not None
     assert abs(pixel_back[0] - px_in) < 1.0
     assert abs(pixel_back[1] - py_in) < 1.0
+
+
+def test_tilted_plane_centre_matches_flat_at_origin():
+    # At the work-area origin the tilted plane z = 0.1·x + 0 equals z=0, so the
+    # centre pixel still lands at (0, 0, 0).
+    K, dist, T = _identity_camera()
+    out = project_pixel_to_table(320, 240, K, dist, T, 0.0, plane=(0.1, 0.0, 0.0))
+    assert out is not None
+    assert abs(out[0]) < 1e-6 and abs(out[1]) < 1e-6 and abs(out[2]) < 1e-6
+
+
+def test_tilted_plane_offset_pixel_lands_on_the_plane():
+    # On the plane z = 0.1·x, an off-centre pixel's intersection must satisfy
+    # z == 0.1·x exactly (the ray hits the tilted, not the flat, surface).
+    K, dist, T = _identity_camera()
+    out = project_pixel_to_table(320 + 80, 240, K, dist, T, 0.0, plane=(0.1, 0.0, 0.0))
+    assert out is not None
+    assert out[0] > 0.0
+    assert abs(out[2] - 0.1 * out[0]) < 1e-9
+
+
+def test_tilted_plane_constant_offset_raises_whole_table():
+    # Plane z = 0 + 0.03 (flat but 3 cm up): centre pixel lands at z=0.03.
+    K, dist, T = _identity_camera()
+    out = project_pixel_to_table(320, 240, K, dist, T, 0.0, plane=(0.0, 0.0, 0.03))
+    assert out is not None
+    assert abs(out[2] - 0.03) < 1e-9

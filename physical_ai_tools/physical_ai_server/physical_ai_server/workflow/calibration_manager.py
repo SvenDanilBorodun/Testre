@@ -7,19 +7,30 @@
 # You may obtain a copy of the License at
 #
 #     http://www.apache.org/licenses/LICENSE-2.0
-"""Camera + hand-eye + colour-profile calibration for Roboter Studio.
+"""Camera + colour-profile calibration for Roboter Studio (SCENE-cam only).
 
-The pipeline is a 4-step state machine driven by the React wizard:
-    intrinsic (gripper) -> intrinsic (scene) -> hand-eye (gripper, eye-in-hand)
-    -> hand-eye (scene, eye-to-base) -> colour profile
+The pipeline is a 3-step state machine driven by the React wizard:
+    intrinsic (scene) -> extrinsic (scene, board-on-table) -> colour profile
 
-ChArUco board: 7x5 squares, 30 mm square, 22 mm marker, DICT_5X5_250. Hand-eye
-is dual-solved with PARK + TSAI; the manager refuses to persist when the two
-methods disagree by more than the configured thresholds
-(``ANGLE_DISAGREEMENT_WARN_DEG`` = 4.0 deg and
-``TRANSLATION_DISAGREEMENT_WARN_M`` = 0.010 m / 10 mm). Audit fix #19 — the
-earlier docstring said "~2 deg / 5 mm" which never matched the constants
-below.
+WS4 (2026-06-17) — the GRIPPER camera was DROPPED from calibration. The
+gripper camera rides on a 3D-printed eye-in-hand holder that is NOT modelled
+in the ``omx_f`` URDF (the URDF has zero camera links), so the software
+cannot know where the gripper camera is and cannot aim it. Its eye-in-hand
+hand-eye step was therefore unfinishable AND unused at runtime
+(``_load_workflow_calibration`` loads scene-only). The whole pick-and-place
+path runs on the SCENE camera's table-plane projection
+(``projection.project_pixel_to_table``), so calibration is now scene-only.
+
+The SCENE extrinsic is a **single-shot board-on-table** measurement (no arm
+motion — the prior eye-to-base flow needed precise IK to drive a
+gripper-mounted ChArUco through 14 auto-poses, which the deployed crude IK
+cannot do). The student lays the ChArUco board FLAT on the table at a marked
+reference position; the static scene cam sees it ONCE; ``solvePnP`` gives
+``T_board_to_cam``; combined with the known board-on-table placement
+``T_board_to_base`` (see ``_board_to_base_transform``) it yields the
+``T_cam_to_base`` extrinsic + ``z_table`` projection plane in one capture.
+
+ChArUco board: 7x5 squares, 30 mm square, 22 mm marker, DICT_5X5_250.
 
 Calibration state is persisted to per-camera YAML files under
 CALIB_DIR (a docker named volume mount inside the physical_ai_server
@@ -30,6 +41,7 @@ from __future__ import annotations
 
 import math
 import os
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
@@ -39,16 +51,114 @@ from typing import Callable
 import cv2
 import numpy as np
 
+
+def _safe_float_env(name: str, default: float) -> float:
+    """Parse a numeric env override, falling back to ``default`` on a malformed
+    value. A bad ``EDUBOTICS_*`` value (an operator typo) must NEVER crash module
+    import / manager construction — it degrades to the default with a warning."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        print(
+            f'[WARNUNG] {name}={raw!r} ist keine gültige Zahl — '
+            f'Standardwert {default} wird verwendet.',
+            file=sys.stderr, flush=True,
+        )
+        return default
+
+
+def _safe_int_env(name: str, default: int) -> int:
+    """Integer counterpart of :func:`_safe_float_env`."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        print(
+            f'[WARNUNG] {name}={raw!r} ist keine gültige Ganzzahl — '
+            f'Standardwert {default} wird verwendet.',
+            file=sys.stderr, flush=True,
+        )
+        return default
+
+
 CALIB_DIR = Path(os.environ.get('EDUBOTICS_CALIB_DIR', '/root/.cache/edubotics/calibration'))
 INTRINSIC_FRAMES_REQUIRED = 12
-HANDEYE_FRAMES_REQUIRED = 14
-ANGLE_DISAGREEMENT_WARN_DEG = 4.0
-TRANSLATION_DISAGREEMENT_WARN_M = 0.010
+# WS4 (2026-06-17): the SCENE extrinsic is now a SINGLE-SHOT board-on-table
+# measurement — one capture is enough. (The legacy multi-pose eye-to-base
+# constant ``HANDEYE_FRAMES_REQUIRED`` is gone with the arm-motion flow.)
+SCENE_EXTRINSIC_FRAMES_REQUIRED = 1
 
 CHARUCO_SQUARES_X = 7
 CHARUCO_SQUARES_Y = 5
 CHARUCO_SQUARE_LENGTH_M = 0.030
 CHARUCO_MARKER_LENGTH_M = 0.022
+
+# ── Board-on-table placement convention (base frame, metres) ────────────────
+# The student lays the ChArUco board FLAT on the table with its ORIGIN CORNER
+# at a marked reference point in front of the robot, board axes aligned to the
+# base axes (board +X points AWAY from the robot along base +X; board +Y to the
+# robot's LEFT along base +Y; board +Z up). The board's printed origin corner
+# is the chessboard corner shared by the marker-bearing squares — when the
+# board image is laid label-side-up with the long (7-square) edge running
+# left↔right and the ROBOT on the board's −X side, the OpenCV board frame
+# coincides with this convention. These offsets place that origin corner in
+# the base frame. Overridable per-classroom via env (forwarded by compose).
+#
+# Defaults: 18 cm in front of the base centreline, board centred laterally so
+# the 21 cm-wide board origin sits 7.5 cm to the right of centre (half the
+# 15 cm board height is the lateral half-extent). z = 0.0 = the table surface
+# coincides with the OMX base mounting plane (link0 origin), the standard
+# classroom-kit setup. Tune BOARD_TABLE_Z_M up/down if the table sits above or
+# below the base plate.
+BOARD_ORIGIN_X_M = _safe_float_env('EDUBOTICS_BOARD_ORIGIN_X_M', 0.18)
+BOARD_ORIGIN_Y_M = _safe_float_env('EDUBOTICS_BOARD_ORIGIN_Y_M', -0.075)
+BOARD_TABLE_Z_M = _safe_float_env('EDUBOTICS_BOARD_TABLE_Z_M', 0.0)
+# Yaw (deg) of the board's OpenCV frame about base +Z. With the 3D-printed
+# L-jig the board butts square to the base, so the default 0 (board axes ==
+# base axes) is mechanically guaranteed. A classroom whose jig holds the board
+# at 90°/180° sets this once (forwarded by compose) — no code change.
+BOARD_YAW_DEG = _safe_float_env('EDUBOTICS_BOARD_YAW_DEG', 0.0)
+
+# Extrinsic solve quality gates (no silent acceptance of a weak/wrong solve):
+#   min ChArUco corners for a trustworthy single-shot PnP, and the max mean
+#   reprojection error (px) of that PnP.
+SCENE_EXTRINSIC_MIN_CORNERS = 6
+SCENE_EXTRINSIC_MAX_REPROJ_PX = 1.5
+
+# Table touch-off ("Tisch vermessen"): hand-guide the torque-off follower to
+# tap the table at >= N spread points; FK → least-squares plane → z_table (+
+# tilt). Measures the table height directly in the IK/end-effector frame, the
+# quantity the grasp descends to. The plane-fit residual + xy-spread gates
+# reject a sloppy or near-collinear capture.
+TABLE_TOUCH_POINTS_REQUIRED = 3
+TABLE_TOUCH_MAX_RESIDUAL_M = 0.008      # 8 mm — points must lie on one plane
+TABLE_TOUCH_MIN_SPREAD_M = 0.06         # the xy points must span >= 6 cm (radius)
+# The points must also span a 2D AREA, not a line: near-collinear points pass a
+# radial-spread test but leave the table TILT in the perpendicular direction
+# unconstrained (lstsq returns 0 residual on the rank-deficient fit). Gate on
+# the minor-axis (perpendicular) rms spread.
+TABLE_TOUCH_MIN_MINOR_M = 0.015         # >= 1.5 cm spread off the dominant line
+# Loose cross-check vs the camera extrinsic's board height: the touch plane
+# (end-effector frame, a finger-length above the table) and the camera board
+# height differ by the finger length, so only a GROSS disagreement (wrong sign
+# / placement) is rejected.
+TABLE_TOUCH_VS_CAMERA_MAX_M = 0.12
+# Verticality gate for each touch-off tap. The grasp ALWAYS descends with the
+# gripper straight down (the closed-form IK is strict-vertical, approach axis
+# == base −z exactly), and we record the FK ``end_effector_link`` z as the
+# table height. That is only self-consistent if the student taps with the
+# gripper ALSO straight down: a tilted tap places the EE-link origin at a
+# different height than a vertical grasp would reach (a 15° tilt biases z by
+# ~4 mm and grows with arm extension), and the fingertip↔EE-link offset stops
+# being purely vertical. So reject a tap whose gripper approach axis deviates
+# more than this from straight-down. The approach axis is the EE-link local +x
+# (the forearm/tool pointing direction) in base frame = FK ``R[:, 0]``.
+TABLE_TOUCH_MAX_TILT_DEG = 12.0
 
 
 def _build_charuco_board() -> tuple[cv2.aruco.CharucoBoard, cv2.aruco.Dictionary]:
@@ -75,9 +185,11 @@ class IntrinsicCaptureBuffer:
 
 @dataclass
 class HandEyeCaptureBuffer:
-    """Aligned per-pose lists: (R_target2cam, t_target2cam) from the board
-    detection, and (R_gripper2base, t_gripper2base) from the joint-state +
-    forward kinematics callback."""
+    """Scene-extrinsic capture buffer (WS4 single-shot). Holds the latest
+    ``(R_target2cam, t_target2cam)`` from the board detection (solvePnP of the
+    flat-on-table ChArUco). The ``R/t_gripper2base`` lists are retained for
+    back-compat but are unused by the single-shot solve (kept empty); the
+    old multi-pose eye-to-base flow that filled them was removed."""
 
     R_target2cam: list[np.ndarray] = field(default_factory=list)
     t_target2cam: list[np.ndarray] = field(default_factory=list)
@@ -85,14 +197,29 @@ class HandEyeCaptureBuffer:
     t_gripper2base: list[np.ndarray] = field(default_factory=list)
 
 
+@dataclass
+class TableTouchBuffer:
+    """Touch-off table-measurement buffer. Each ``points`` entry is a
+    base-frame end-effector (x, y, z) read from FK when the student tapped the
+    gripper tip on the table; the least-squares plane ``z = a·x + b·y + c`` is
+    stored after solving."""
+
+    points: list[tuple[float, float, float]] = field(default_factory=list)
+    plane: tuple[float, float, float] | None = None
+
+
 class CalibrationManager:
-    """State machine + ChArUco / hand-eye math for Roboter Studio camera setup.
+    """State machine + ChArUco math for Roboter Studio SCENE-camera setup.
+
+    WS4 (2026-06-17): scene-cam only (intrinsic + single-shot board-on-table
+    extrinsic + colour profile). The gripper camera is no longer calibrated.
 
     Designed for single-threaded interaction from the ROS service callbacks
-    (the manager's lock serialises capture/solve calls). Image and gripper
-    pose acquisition is delegated to provider callables so the manager
-    stays unit-testable with synthetic frames.
-    """
+    (the manager's lock serialises capture/solve calls). Image acquisition is
+    delegated to provider callables so the manager stays unit-testable with
+    synthetic frames. ``get_gripper_pose`` is retained (the node still wires
+    its FK provider for ``destination_current``) but is no longer used by the
+    capture path."""
 
     def __init__(
         self,
@@ -107,9 +234,11 @@ class CalibrationManager:
         self._charuco_detector = None
         self._intrinsic_buffers: dict[str, IntrinsicCaptureBuffer] = {}
         self._handeye_buffers: dict[str, HandEyeCaptureBuffer] = {}
+        self._table_touch: TableTouchBuffer | None = None
         self._intrinsics: dict[str, dict] = {}
         CALIB_DIR.mkdir(parents=True, exist_ok=True)
         self._load_persisted_intrinsics()
+        self._seed_factory_intrinsics()
 
     # ------------------------------------------------------------------
     # Persistence helpers
@@ -148,11 +277,80 @@ class CalibrationManager:
                     file=sys.stderr, flush=True,
                 )
 
+    def _seed_factory_intrinsics(self) -> None:
+        """Seed shipped factory-default scene-camera intrinsics when no per-rig
+        calibration exists, so students can SKIP the fragile 12-frame ChArUco
+        intrinsic step. A per-rig intrinsic calibration (optional refine)
+        overwrites the YAML and supersedes this.
+
+        Env-read at call time (testable). Set ``EDUBOTICS_FACTORY_INTRINSICS=0``
+        to require the per-rig step instead.
+
+        HONEST NOTE: the default fx/fy below are an ESTIMATE for the Innomaker
+        scene camera at 640×480. The touch-off fixes grasp HEIGHT independently,
+        but the LATERAL scale depends on fx/fy — for best accuracy a teacher
+        calibrates once per camera model (or the real measured values are baked
+        here in P6). A wrong focal length scales every projected XY.
+        """
+        if os.environ.get('EDUBOTICS_FACTORY_INTRINSICS', '1') == '0':
+            return
+        if 'scene' in self._intrinsics:
+            return
+        fx = _safe_float_env('EDUBOTICS_FACTORY_FX', 600.0)
+        fy = _safe_float_env('EDUBOTICS_FACTORY_FY', 600.0)
+        cx = _safe_float_env('EDUBOTICS_FACTORY_CX', 320.0)
+        cy = _safe_float_env('EDUBOTICS_FACTORY_CY', 240.0)
+        w = _safe_int_env('EDUBOTICS_FACTORY_IMG_W', 640)
+        h = _safe_int_env('EDUBOTICS_FACTORY_IMG_H', 480)
+        K = np.array([[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]],
+                     dtype=np.float64)
+        dist = np.zeros((5, 1), dtype=np.float64)
+        self._intrinsics['scene'] = {'K': K, 'dist': dist}
+        # Persist so the runtime loader (_load_workflow_calibration, which reads
+        # the YAML directly) sees it too. source=factory_default marks it so a
+        # real calibration is distinguishable.
+        try:
+            path = self._intrinsic_path('scene')
+            if not path.exists():
+                fs = cv2.FileStorage(str(path), cv2.FILE_STORAGE_WRITE)
+                fs.write('camera_matrix', K)
+                fs.write('distortion_coefficients', dist)
+                fs.write('image_width', w)
+                fs.write('image_height', h)
+                fs.write('reprojection_error', -1.0)
+                fs.write('source', 'factory_default')
+                fs.release()
+        except Exception:  # noqa: BLE001 — seeding is best-effort
+            pass
+
     def has_intrinsics(self, camera: str) -> bool:
         return camera in self._intrinsics
 
     def has_handeye(self, camera: str) -> bool:
+        # Back-compat name; the scene-cam extrinsic is persisted to the same
+        # ``<camera>_handeye.yaml`` file so ``_load_workflow_calibration``
+        # keeps reading it unchanged. WS4 renamed the step ('extrinsic') but
+        # NOT the on-disk artifact.
         return self._handeye_path(camera).exists()
+
+    def has_extrinsic(self, camera: str) -> bool:
+        """WS4 alias for ``has_handeye`` — the scene-cam extrinsic
+        ('camera->base' transform). Same YAML on disk."""
+        return self.has_handeye(camera)
+
+    def has_table_plane(self, camera: str = 'scene') -> bool:
+        """True when the touch-off table measurement has been solved (the scene
+        extrinsic YAML carries a measured ``table_plane``)."""
+        path = self._handeye_path(camera)
+        if not path.exists():
+            return False
+        try:
+            fs = cv2.FileStorage(str(path), cv2.FILE_STORAGE_READ)
+            present = not fs.getNode('table_plane').empty()
+            fs.release()
+            return bool(present)
+        except Exception:
+            return False
 
     def has_color_profile(self) -> bool:
         return self._color_profile_path().exists()
@@ -162,14 +360,29 @@ class CalibrationManager:
     # ------------------------------------------------------------------
     def start_step(self, camera: str, step: str) -> tuple[bool, str]:
         with self._lock:
+            # WS4: the gripper camera is no longer calibrated (not modelled
+            # in the URDF; unused at runtime). Reject any gripper step so a
+            # stale frontend can't re-introduce the unfinishable flow.
+            if camera == 'gripper':
+                return False, (
+                    'Die Greifer-Kamera wird nicht mehr kalibriert — nur die '
+                    'Szenen-Kamera ist nötig. Bitte die Szenen-Kamera wählen.'
+                )
             if step == 'intrinsic':
-                # Drop any in-flight hand-eye buffer for this camera so
+                # Drop any in-flight extrinsic buffer for this camera so
                 # capture_frame doesn't route to the wrong solver after the
                 # student switches steps.
                 self._handeye_buffers.pop(camera, None)
                 self._intrinsic_buffers[camera] = IntrinsicCaptureBuffer()
                 return True, f'Intrinsische Kalibrierung für {camera} gestartet.'
-            if step == 'handeye':
+            # 'extrinsic' is the WS4 name; 'handeye' is accepted as a
+            # synonym so an in-flight older frontend build keeps working.
+            if step in ('extrinsic', 'handeye'):
+                if camera != 'scene':
+                    return False, (
+                        'Die Extrinsik wird nur für die Szenen-Kamera '
+                        'kalibriert.'
+                    )
                 if not self.has_intrinsics(camera):
                     return False, (
                         f'Bitte erst die intrinsische Kalibrierung der '
@@ -177,12 +390,16 @@ class CalibrationManager:
                     )
                 # Drop any leftover intrinsic buffer for this camera —
                 # without this, capture_frame's "if camera in
-                # _intrinsic_buffers" precedence routes hand-eye captures
+                # _intrinsic_buffers" precedence routes extrinsic captures
                 # into the intrinsic buffer and the student never collects
-                # a single hand-eye sample.
+                # a single extrinsic sample.
                 self._intrinsic_buffers.pop(camera, None)
                 self._handeye_buffers[camera] = HandEyeCaptureBuffer()
-                return True, f'Hand-Auge-Kalibrierung für {camera} gestartet.'
+                return True, (
+                    'Extrinsik der Szenen-Kamera gestartet — bitte die Tafel '
+                    'flach auf den markierten Punkt legen und ein Bild '
+                    'erfassen.'
+                )
             # The 'color_profile' step has no per-step start; capture is
             # gated by the prerequisite check inside
             # calibration_capture_color_callback. Anything other than
@@ -200,9 +417,11 @@ class CalibrationManager:
             if camera is None:
                 self._intrinsic_buffers.clear()
                 self._handeye_buffers.clear()
+                self._table_touch = None
                 return True, 'Alle Kalibrier-Schritte abgebrochen.'
             self._intrinsic_buffers.pop(camera, None)
             self._handeye_buffers.pop(camera, None)
+            self._table_touch = None
             return True, f'Kalibrier-Schritt für {camera} abgebrochen.'
 
     # ------------------------------------------------------------------
@@ -269,18 +488,17 @@ class CalibrationManager:
                     f'Bild {len(buf.all_corners)}/{INTRINSIC_FRAMES_REQUIRED} erfasst.'
                 )
 
-            # Hand-eye step
+            # Scene extrinsic step (WS4 single-shot board-on-table).
+            # NO arm motion, NO gripper pose: the board lies flat on the
+            # table, the static scene cam sees it once, solvePnP gives the
+            # board->camera transform, and the solve combines it with the
+            # known board-on-table placement (T_board_to_base) to recover
+            # T_camera_to_base. Each capture is latest-wins (re-pressing
+            # "Bild erfassen" overwrites), so the buffer holds at most one.
             if not self.has_intrinsics(camera):
                 return False, 0, 0, 0.0, (
                     f'Intrinsische Daten für {camera} fehlen.'
                 )
-            if self._get_gripper_pose is None:
-                return False, 0, 0, 0.0, 'Roboter-Pose-Provider fehlt.'
-            pose = self._get_gripper_pose()
-            if pose is None:
-                return False, 0, 0, 0.0, 'Aktuelle Roboter-Pose unbekannt.'
-
-            R_g2b, t_g2b = pose
             K = self._intrinsics[camera]['K']
             dist = self._intrinsics[camera]['dist']
             # Audit F60: cv2.aruco.getBoardObjectAndImagePoints is
@@ -295,22 +513,41 @@ class CalibrationManager:
                 object_points, image_points = cv2.aruco.getBoardObjectAndImagePoints(
                     self._board, corners, ids,
                 )
-            if object_points is None or len(object_points) < 4:
-                return False, 0, 0, 0.0, 'Zu wenige Tafel-Punkte erkannt.'
+            if object_points is None or len(object_points) < SCENE_EXTRINSIC_MIN_CORNERS:
+                return False, 0, 0, 0.0, (
+                    'Zu wenige Tafel-Punkte erkannt — bitte die Tafel näher / '
+                    'vollständig ins Bild legen.'
+                )
             ok, rvec, tvec = cv2.solvePnP(object_points, image_points, K, dist)
             if not ok:
                 return False, 0, 0, 0.0, 'Pose der Tafel konnte nicht bestimmt werden.'
+            # Reprojection-error gate: a weak/ambiguous planar solve (grazing
+            # angle, partial board) would silently mis-place the WHOLE world
+            # frame. Reject above the threshold instead of saving garbage.
+            reproj = self._reprojection_error_px(
+                object_points, image_points, rvec, tvec, K, dist)
+            if not math.isfinite(reproj) or reproj > SCENE_EXTRINSIC_MAX_REPROJ_PX:
+                shown = reproj if math.isfinite(reproj) else 0.0
+                return False, 0, 0, float(shown), (
+                    f'Tafel-Pose ungenau (Reprojektionsfehler {shown:.1f} px) — '
+                    'bitte die Tafel flach und vollständig ins Bild legen und '
+                    'erneut erfassen.'
+                )
             R_t2c, _ = cv2.Rodrigues(rvec)
             t_t2c = tvec.reshape(3, 1)
 
             buf = self._handeye_buffers[camera]
-            buf.R_target2cam.append(R_t2c)
-            buf.t_target2cam.append(t_t2c)
-            buf.R_gripper2base.append(R_g2b)
-            buf.t_gripper2base.append(t_g2b.reshape(3, 1))
+            # Latest-wins: replace any prior single-shot sample so a
+            # re-capture (board nudged) supersedes the old one cleanly.
+            buf.R_target2cam = [R_t2c]
+            buf.t_target2cam = [t_t2c]
+            buf.R_gripper2base = []
+            buf.t_gripper2base = []
 
-            return True, len(buf.R_target2cam), HANDEYE_FRAMES_REQUIRED, 0.0, (
-                f'Pose {len(buf.R_target2cam)}/{HANDEYE_FRAMES_REQUIRED} erfasst.'
+            return True, len(buf.R_target2cam), SCENE_EXTRINSIC_FRAMES_REQUIRED, float(reproj), (
+                f'Bild {len(buf.R_target2cam)}/{SCENE_EXTRINSIC_FRAMES_REQUIRED} '
+                f'erfasst (Reprojektionsfehler {reproj:.1f} px) — bitte berechnen '
+                '& speichern.'
             )
 
     def _estimate_view_rms(self, buf: IntrinsicCaptureBuffer) -> float | None:
@@ -326,6 +563,18 @@ class CalibrationManager:
         except cv2.error:
             return None
 
+    @staticmethod
+    def _reprojection_error_px(object_points, image_points, rvec, tvec, K, dist) -> float:
+        """Mean reprojection error (px) of a solvePnP result — the quality
+        signal for the single-shot extrinsic. Returns inf on an OpenCV error."""
+        try:
+            proj, _ = cv2.projectPoints(object_points, rvec, tvec, K, dist)
+            proj = np.asarray(proj, dtype=np.float64).reshape(-1, 2)
+            img = np.asarray(image_points, dtype=np.float64).reshape(-1, 2)
+            return float(np.mean(np.linalg.norm(proj - img, axis=1)))
+        except cv2.error:
+            return float('inf')
+
     # ------------------------------------------------------------------
     # Solve
     # ------------------------------------------------------------------
@@ -335,8 +584,10 @@ class CalibrationManager:
         with self._lock:
             if step == 'intrinsic':
                 return self._solve_intrinsic(camera)
-            if step == 'handeye':
-                return self._solve_handeye(camera)
+            # 'extrinsic' is the WS4 name; 'handeye' is accepted as a
+            # synonym so an in-flight older frontend build keeps working.
+            if step in ('extrinsic', 'handeye'):
+                return self._solve_scene_extrinsic(camera)
             return False, 0.0, 0.0, f'Unbekannter Solve-Schritt: {step}'
 
     def _solve_intrinsic(self, camera: str) -> tuple[bool, float, float, str]:
@@ -378,123 +629,309 @@ class CalibrationManager:
             f'Intrinsische Kalibrierung gespeichert (RMS {ret:.2f} px).'
         )
 
-    def _solve_handeye(self, camera: str) -> tuple[bool, float, float, str]:
+    @staticmethod
+    def _board_to_base_transform() -> np.ndarray:
+        """T_board_to_base — the known placement of the ChArUco board on the
+        table, in base frame.
+
+        Single-shot convention: the board lies FLAT on the table against the
+        3D-printed L-jig, so its origin corner sits at
+        ``(BOARD_ORIGIN_X_M, BOARD_ORIGIN_Y_M, BOARD_TABLE_Z_M)`` and its
+        in-plane axes are yawed ``BOARD_YAW_DEG`` about base +Z (0 when the jig
+        holds the board square to the base — the default). The jig makes this
+        placement MECHANICALLY reproducible instead of relying on tape, which is
+        the whole accuracy story for pick-and-place. The board stays flat (+Z
+        up), so only a yaw rotation is possible.
+        """
+        yaw = math.radians(BOARD_YAW_DEG)
+        c, s = math.cos(yaw), math.sin(yaw)
+        T = np.eye(4, dtype=np.float64)
+        T[:3, :3] = np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]],
+                             dtype=np.float64)
+        T[0, 3] = BOARD_ORIGIN_X_M
+        T[1, 3] = BOARD_ORIGIN_Y_M
+        T[2, 3] = BOARD_TABLE_Z_M
+        return T
+
+    def _solve_scene_extrinsic(self, camera: str) -> tuple[bool, float, float, str]:
+        """Single-shot board-on-table scene extrinsic (WS4).
+
+        Recovers ``T_cam_to_base`` from ONE capture and the known board
+        placement — NO arm motion, NO 14-pose hand-eye, NO PARK/TSAI. The
+        gripper camera is no longer calibrated, so this is scene-only.
+
+        Math:
+            T_board_to_cam  = [R_t2c | t_t2c]      (from solvePnP at capture)
+            T_cam_to_board  = inverse(T_board_to_cam)
+            T_cam_to_base   = T_board_to_base @ T_cam_to_board
+            z_table         = BOARD_TABLE_Z_M      (board lies flat at table z)
+        """
+        if camera != 'scene':
+            return False, 0.0, 0.0, (
+                'Die Extrinsik wird nur für die Szenen-Kamera kalibriert.'
+            )
         buf = self._handeye_buffers.get(camera)
-        if buf is None or len(buf.R_target2cam) < HANDEYE_FRAMES_REQUIRED:
-            need = HANDEYE_FRAMES_REQUIRED - len(buf.R_target2cam) if buf else HANDEYE_FRAMES_REQUIRED
-            return False, 0.0, 0.0, f'Es fehlen noch {need} Posen.'
+        if buf is None or len(buf.R_target2cam) < SCENE_EXTRINSIC_FRAMES_REQUIRED:
+            return False, 0.0, 0.0, (
+                'Es fehlt noch ein Bild der flach liegenden Tafel — bitte die '
+                'Tafel auf den markierten Punkt legen und "Bild erfassen" '
+                'drücken.'
+            )
 
-        R_g2b = buf.R_gripper2base
-        t_g2b = buf.t_gripper2base
-        R_t2c = buf.R_target2cam
-        t_t2c = buf.t_target2cam
+        R_t2c = buf.R_target2cam[-1]
+        t_t2c = buf.t_target2cam[-1]
 
-        if camera == 'scene':
-            # Eye-to-base setup: camera is fixed in the world, ChArUco rides
-            # on the gripper. Inverting the gripper pose lets us reuse the
-            # same `calibrateHandEye` API: we pass base->gripper in place of
-            # gripper->base, and the result is the camera->base transform.
-            R_inv = [r.T for r in R_g2b]
-            t_inv = [-r.T @ t for r, t in zip(R_g2b, t_g2b)]
-            R_g2b, t_g2b = R_inv, t_inv
-
+        # T_board_to_cam, then invert to T_cam_to_board.
+        T_board_to_cam = np.eye(4, dtype=np.float64)
+        T_board_to_cam[:3, :3] = R_t2c
+        T_board_to_cam[:3, 3] = t_t2c.reshape(3)
         try:
-            R_park, t_park = cv2.calibrateHandEye(
-                R_g2b, t_g2b, R_t2c, t_t2c, method=cv2.CALIB_HAND_EYE_PARK,
+            T_cam_to_board = np.linalg.inv(T_board_to_cam)
+        except np.linalg.LinAlgError:
+            return False, 0.0, 0.0, (
+                'Tafel-Pose ist entartet — bitte die Tafel flacher legen und '
+                'das Bild erneut erfassen.'
             )
-            R_tsai, t_tsai = cv2.calibrateHandEye(
-                R_g2b, t_g2b, R_t2c, t_t2c, method=cv2.CALIB_HAND_EYE_TSAI,
-            )
-        except cv2.error as e:
-            return False, 0.0, 0.0, f'Hand-Auge-Solver-Fehler: {e}'
 
-        R_disagreement = R_park.T @ R_tsai
-        cos_theta = max(-1.0, min(1.0, (np.trace(R_disagreement) - 1.0) / 2.0))
-        angle_deg = float(np.degrees(np.arccos(cos_theta)))
-        translation_diff_m = float(np.linalg.norm(t_park - t_tsai))
+        T_board_to_base = self._board_to_base_transform()
+        T_cam_to_base = T_board_to_base @ T_cam_to_board
 
-        # Audit §3.3 — refuse to persist a hand-eye solve where PARK and
-        # TSAI disagree by more than the warn thresholds. The v1 code
-        # only emitted an "Achtung:" string but always wrote the
-        # transform; that meant a noisy capture set silently calibrated
-        # the arm to drift several centimetres. Re-solving from the
-        # already-captured 14 poses is free, so promote warn → block.
-        if (
-            angle_deg > ANGLE_DISAGREEMENT_WARN_DEG
-            or translation_diff_m > TRANSLATION_DISAGREEMENT_WARN_M
-        ):
-            # Audit F14: drop the captured buffer so a re-press of the
-            # solve button doesn't keep failing on the SAME noisy poses.
-            # The student has to re-capture from scratch — which is the
-            # correct response since the captured set is the input that
-            # produced the disagreement.
+        # Sanity guard: the camera must be ABOVE the table (looking down at
+        # it). A camera origin below the table plane means the board was laid
+        # upside-down or the placement convention was not followed — refuse so
+        # projection never silently inverts.
+        cam_origin_z = float(T_cam_to_base[2, 3])
+        if cam_origin_z <= BOARD_TABLE_Z_M + 0.02:
             self._handeye_buffers.pop(camera, None)
-            msg = (
-                f'Hand-Auge-Solve abgewiesen: PARK ↔ TSAI weichen um '
-                f'{angle_deg:.2f}° / {translation_diff_m * 1000:.1f} mm '
-                f'ab (Limits: {ANGLE_DISAGREEMENT_WARN_DEG:.1f}° / '
-                f'{TRANSLATION_DISAGREEMENT_WARN_M * 1000:.1f} mm). '
-                'Bitte Posen erneut erfassen — am häufigsten hilft '
-                'gleichmäßigere Beleuchtung und eine plane Tafel.'
+            return False, 0.0, 0.0, (
+                'Die Kamera scheint nicht über dem Tisch zu liegen — bitte '
+                'prüfen, dass die ChArUco-Tafel mit der bedruckten Seite nach '
+                'oben flach auf dem markierten Punkt liegt, und erneut '
+                'erfassen.'
             )
-            return False, 0.0, angle_deg, msg
 
-        T = np.eye(4)
-        T[:3, :3] = R_park
-        T[:3, 3] = t_park.reshape(3)
-
-        z_table = self._derive_z_table(camera, T) if camera == 'scene' else None
+        # The board's supplied surface height. Written as ``board_table_z`` —
+        # NOT ``z_table`` — so the runtime grasp height (``z_table``) is the
+        # MEASURED touch-off value only. Until the touch-off runs, there is no
+        # ``z_table`` and projection/grasp correctly refuse (no silent grasp
+        # against the supplied/guessed surface in the wrong frame).
+        board_table_z = float(BOARD_TABLE_Z_M)
 
         path = self._handeye_path(camera)
         fs = cv2.FileStorage(str(path), cv2.FILE_STORAGE_WRITE)
-        fs.write('transform', T)
-        fs.write('method', 'PARK')
-        fs.write('angular_disagreement_deg', angle_deg)
-        fs.write('translation_disagreement_m', translation_diff_m)
-        if z_table is not None:
-            fs.write('z_table', float(z_table))
+        fs.write('transform', T_cam_to_base)
+        fs.write('method', 'BOARD_ON_TABLE')
+        fs.write('board_table_z', board_table_z)
+        fs.write('board_origin_x', float(BOARD_ORIGIN_X_M))
+        fs.write('board_origin_y', float(BOARD_ORIGIN_Y_M))
         fs.write('captured_at', time.strftime('%Y-%m-%dT%H:%M:%S'))
         fs.release()
 
-        return True, 0.0, angle_deg, 'Hand-Auge-Kalibrierung gespeichert.'
+        # method_disagreement (3rd return) is 0.0 — there is no PARK/TSAI
+        # disagreement in the single-shot path. The frontend hides that field
+        # for the scene extrinsic.
+        return True, 0.0, 0.0, (
+            f'Szenen-Extrinsik gespeichert (Kamera {cam_origin_z * 100:.0f} cm '
+            'über dem Tisch).'
+        )
 
-    def _derive_z_table(self, camera: str, T_cam_to_base: np.ndarray) -> float | None:
-        """Median z-coordinate of the board plane across the captured poses,
-        expressed in base frame. Used to project pixel clicks onto the table.
+    # ------------------------------------------------------------------
+    # Table touch-off ("Tisch vermessen") — measured z_table (+ tilt)
+    # ------------------------------------------------------------------
+    def start_table_touch(self) -> tuple[bool, str]:
+        """Begin a table-measurement session. Requires the scene extrinsic
+        (the camera→base transform) to already be calibrated."""
+        with self._lock:
+            if not self.has_extrinsic('scene'):
+                return False, (
+                    'Bitte zuerst die Szenen-Kamera ausrichten (Extrinsik), '
+                    'bevor du den Tisch vermisst.'
+                )
+            self._table_touch = TableTouchBuffer()
+            return True, (
+                'Tischvermessung gestartet — führe den Greifer von Hand, bis die '
+                'Spitze den Tisch berührt, dann drücke Erfassen.'
+            )
 
-        Audit F15: the prior implementation medianed only the BOARD
-        ORIGIN. A tilted ChArUco puts the origin 2-3 cm above the table
-        even when the corners touch it → projected cubes mis-located by
-        that bias. Fix by sampling the four board corners per frame
-        (origin + the diagonally opposite corner at full extent + the
-        two cross corners) so a tilted-but-flat board averages out to
-        the actual table plane z.
-        """
-        buf = self._handeye_buffers.get(camera)
-        if buf is None:
+    def capture_touch_point(self) -> tuple[bool, int, int, str]:
+        """Record one table-contact point: read the follower joints → FK →
+        base-frame end-effector (x, y, z). Returns (ok, count, required, msg)."""
+        with self._lock:
+            buf = self._table_touch
+            if buf is None:
+                return False, 0, TABLE_TOUCH_POINTS_REQUIRED, (
+                    'Tischvermessung nicht gestartet.'
+                )
+            if self._get_gripper_pose is None:
+                return False, len(buf.points), TABLE_TOUCH_POINTS_REQUIRED, (
+                    'Greiferpose (FK) nicht verfügbar.'
+                )
+            pose = self._get_gripper_pose()
+            if pose is None:
+                return False, len(buf.points), TABLE_TOUCH_POINTS_REQUIRED, (
+                    'Keine Gelenkdaten — bitte kurz warten und erneut erfassen.'
+                )
+            R, t = pose
+            # Verticality gate: the grasp descends strictly vertically and we
+            # record the EE-link z as the table height, so a tilted tap would
+            # bias z_table. The approach axis is the EE-link local +x (forearm/
+            # tool pointing direction) in base frame = R[:, 0]; reject taps that
+            # deviate more than TABLE_TOUCH_MAX_TILT_DEG from straight-down.
+            tilt_deg = self._approach_tilt_deg(R)
+            if tilt_deg is None:
+                return False, len(buf.points), TABLE_TOUCH_POINTS_REQUIRED, (
+                    'Greiferausrichtung unbekannt — bitte erneut erfassen.'
+                )
+            if tilt_deg > TABLE_TOUCH_MAX_TILT_DEG:
+                return False, len(buf.points), TABLE_TOUCH_POINTS_REQUIRED, (
+                    f'Greifer steht schräg ({tilt_deg:.0f}°) — bitte den Greifer '
+                    'senkrecht nach unten halten und die Spitze gerade auf den '
+                    'Tisch tippen, dann erneut erfassen.'
+                )
+            buf.points.append((float(t[0]), float(t[1]), float(t[2])))
+            n = len(buf.points)
+            return True, n, TABLE_TOUCH_POINTS_REQUIRED, (
+                f'Punkt {n}/{TABLE_TOUCH_POINTS_REQUIRED} erfasst.'
+            )
+
+    @staticmethod
+    def _approach_tilt_deg(R: np.ndarray) -> float | None:
+        """Angle (deg) between the gripper approach axis and straight-down.
+
+        The approach axis is the EE-link local +x (forearm/tool pointing
+        direction) expressed in base frame, i.e. the first column of the FK
+        rotation ``R``. Straight-down is base ``(0, 0, -1)``. Returns ``None``
+        when ``R`` is malformed / the axis is degenerate."""
+        try:
+            axis = np.asarray(R, dtype=np.float64).reshape(3, 3)[:, 0]
+        except (ValueError, TypeError):
             return None
-        # The four extreme corners of the ChArUco board in the BOARD
-        # coordinate frame (z=0 by construction). Adding these gives us
-        # 4 z-samples per frame instead of 1.
-        board_w = (CHARUCO_SQUARES_X - 1) * CHARUCO_SQUARE_LENGTH_M
-        board_h = (CHARUCO_SQUARES_Y - 1) * CHARUCO_SQUARE_LENGTH_M
-        sample_pts = np.array(
-            [
-                [0.0,     0.0,     0.0, 1.0],
-                [board_w, 0.0,     0.0, 1.0],
-                [0.0,     board_h, 0.0, 1.0],
-                [board_w, board_h, 0.0, 1.0],
-            ],
-            dtype=np.float64,
-        ).T  # shape (4, 4) homogeneous columns
-        zs: list[float] = []
-        for R, t in zip(buf.R_target2cam, buf.t_target2cam):
-            T_target_to_cam = np.eye(4)
-            T_target_to_cam[:3, :3] = R
-            T_target_to_cam[:3, 3] = t.reshape(3)
-            T_target_to_base = T_cam_to_base @ T_target_to_cam
-            pts_base = T_target_to_base @ sample_pts  # 4x4
-            zs.extend(float(z) for z in pts_base[2, :].tolist())
-        if not zs:
+        norm = float(np.linalg.norm(axis))
+        if not math.isfinite(norm) or norm < 1e-9:
             return None
-        return float(np.median(zs))
+        cos_a = float(np.dot(axis / norm, np.array([0.0, 0.0, -1.0])))
+        cos_a = max(-1.0, min(1.0, cos_a))
+        return math.degrees(math.acos(cos_a))
+
+    @staticmethod
+    def _fit_plane(points: np.ndarray) -> tuple[tuple[float, float, float], float]:
+        """Least-squares plane ``z = a·x + b·y + c`` over Nx3 points. Returns
+        ``((a, b, c), rms_residual_m)``."""
+        xy1 = np.column_stack([points[:, 0], points[:, 1], np.ones(len(points))])
+        z = points[:, 2]
+        coeff, *_ = np.linalg.lstsq(xy1, z, rcond=None)
+        resid = z - xy1 @ coeff
+        rms = float(np.sqrt(np.mean(resid ** 2)))
+        return (float(coeff[0]), float(coeff[1]), float(coeff[2])), rms
+
+    def solve_table_plane(self, camera: str = 'scene') -> tuple[bool, float, str]:
+        """Fit the table plane from the touch points + persist z_table (+ tilt)
+        into the scene extrinsic YAML. ``z_table`` is the end-effector-frame
+        table height (what the grasp descends to) — measured, not assumed.
+        Returns (ok, residual_m, message)."""
+        with self._lock:
+            buf = self._table_touch
+            if buf is None or len(buf.points) < TABLE_TOUCH_POINTS_REQUIRED:
+                have = len(buf.points) if buf else 0
+                need = TABLE_TOUCH_POINTS_REQUIRED - have
+                return False, 0.0, f'Es fehlen noch {need} Tisch-Punkte.'
+            pts = np.asarray(buf.points, dtype=np.float64)
+            # Reject a too-clustered OR near-collinear capture: radial spread
+            # catches clustering; the minor singular value of the centred XY
+            # cloud catches points strung along a line (which leave the tilt
+            # unconstrained).
+            xy = pts[:, :2] - pts[:, :2].mean(axis=0)
+            radial = float(np.max(np.linalg.norm(xy, axis=1)))
+            sv = np.linalg.svd(xy, compute_uv=False)
+            minor = float(sv[-1]) / float(np.sqrt(max(1, len(pts))))
+            if radial < TABLE_TOUCH_MIN_SPREAD_M or minor < TABLE_TOUCH_MIN_MINOR_M:
+                return False, 0.0, (
+                    'Die Tisch-Punkte liegen zu nah beisammen oder auf einer '
+                    'Linie — bitte über die Arbeitsfläche verteilt tippen '
+                    '(Ecken + Mitte).'
+                )
+            try:
+                (a, b, c), rms = self._fit_plane(pts)
+            except np.linalg.LinAlgError:
+                return False, 0.0, (
+                    'Ebene konnte nicht berechnet werden — bitte die Punkte '
+                    'weiter verteilen.'
+                )
+            if not math.isfinite(rms) or rms > TABLE_TOUCH_MAX_RESIDUAL_M:
+                return False, float(rms if math.isfinite(rms) else 0.0), (
+                    'Die Punkte liegen nicht auf einer ebenen Fläche — bitte '
+                    'jeweils sauber auf den Tisch tippen und erneut vermessen.'
+                )
+            cx, cy = float(pts[:, 0].mean()), float(pts[:, 1].mean())
+            z_table = float(a * cx + b * cy + c)
+            # Loose cross-check vs the camera extrinsic's board height — catches
+            # a grossly wrong extrinsic (sign flip / placement), not the
+            # finger-length offset between the tip-touch and the board.
+            board_z = self._load_board_table_z(camera)
+            if board_z is not None and abs(z_table - board_z) > TABLE_TOUCH_VS_CAMERA_MAX_M:
+                return False, float(rms), (
+                    'Gemessene Tischhöhe passt nicht zur Kamerakalibrierung — '
+                    'bitte die Kamera-Ausrichtung wiederholen.'
+                )
+            buf.plane = (a, b, c)
+            if not self._write_table_plane(camera, a, b, c, z_table):
+                return False, float(rms), (
+                    'Tischebene konnte nicht gespeichert werden.'
+                )
+            return True, float(rms), (
+                f'Tisch vermessen (Restfehler {rms * 1000:.1f} mm).'
+            )
+
+    def _load_board_table_z(self, camera: str) -> float | None:
+        """Read the SUPPLIED board surface height (``board_table_z``) from the
+        scene extrinsic YAML, or None — used only for the touch-off loose
+        cross-check (NOT for the grasp z, which is the measured touch-off
+        ``z_table``)."""
+        path = self._handeye_path(camera)
+        if not path.exists():
+            return None
+        try:
+            fs = cv2.FileStorage(str(path), cv2.FILE_STORAGE_READ)
+            node = fs.getNode('board_table_z')
+            z = float(node.real()) if not node.empty() else None
+            fs.release()
+            return z
+        except Exception:
+            return None
+
+    def _write_table_plane(self, camera: str, a: float, b: float, c: float,
+                           z_table: float) -> bool:
+        """Re-write the scene extrinsic YAML with the measured z_table + plane
+        (a, b, c), preserving the existing camera→base transform."""
+        path = self._handeye_path(camera)
+        if not path.exists():
+            return False
+        try:
+            fs = cv2.FileStorage(str(path), cv2.FILE_STORAGE_READ)
+            transform = fs.getNode('transform').mat()
+            bx = fs.getNode('board_origin_x')
+            board_x = float(bx.real()) if not bx.empty() else BOARD_ORIGIN_X_M
+            by = fs.getNode('board_origin_y')
+            board_y = float(by.real()) if not by.empty() else BOARD_ORIGIN_Y_M
+            bz = fs.getNode('board_table_z')
+            board_table_z = float(bz.real()) if not bz.empty() else BOARD_TABLE_Z_M
+            fs.release()
+            if transform is None:
+                return False
+        except Exception:
+            return False
+        try:
+            fs = cv2.FileStorage(str(path), cv2.FILE_STORAGE_WRITE)
+            fs.write('transform', transform)
+            fs.write('method', 'BOARD_ON_TABLE+TOUCHOFF')
+            # z_table = the MEASURED grasp/EE-frame table height (touch-off).
+            fs.write('z_table', float(z_table))
+            fs.write('table_plane', np.array([a, b, c], dtype=np.float64))
+            fs.write('board_table_z', float(board_table_z))
+            fs.write('board_origin_x', float(board_x))
+            fs.write('board_origin_y', float(board_y))
+            fs.write('captured_at', time.strftime('%Y-%m-%dT%H:%M:%S'))
+            fs.release()
+            return True
+        except Exception:
+            return False

@@ -635,26 +635,6 @@ export function useRosServiceCaller() {
     [callService]
   );
 
-  const autoPoseSuggest = useCallback(
-    async (camera) =>
-      callService(
-        '/calibration/auto_pose',
-        'physical_ai_interfaces/srv/AutoPoseSuggest',
-        { camera }
-      ),
-    [callService]
-  );
-
-  const executeCalibrationPose = useCallback(
-    async (target) =>
-      callService(
-        '/calibration/execute_pose',
-        'physical_ai_interfaces/srv/ExecuteCalibrationPose',
-        target
-      ),
-    [callService]
-  );
-
   // Audit A1 / §useRos-r1: the `startWorkflow` helper used to live here
   // but every actual caller (RunControls.jsx) calls `callService`
   // directly with the full StartWorkflow.srv payload. Deleted to keep
@@ -810,8 +790,6 @@ export function useRosServiceCaller() {
     startCalibration,
     calibrationCaptureFrame,
     calibrationSolve,
-    autoPoseSuggest,
-    executeCalibrationPose,
     stopWorkflow,
     markDestination,
     captureColor,

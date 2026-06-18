@@ -237,6 +237,12 @@ rclpy.shutdown()
 " 2>/dev/null)
 
     echo "[LAUNCH] Leader position: ${LEADER_POS}"
+
+    # NOTE: Roboter Studio runs FOLLOWER-ONLY (the GUI starts it with
+    # EDUBOTICS_FOLLOWER_ONLY=1), so this leader-present path is the
+    # recording/teleop session only. The 2026-06-17 teleop-suspend bridge that
+    # used to launch here was removed — there is no Roboter Studio motion to
+    # arbitrate against the leader broadcaster when the leader is present.
 fi
 
 # --- Phase 2: Launch Follower ---
@@ -435,7 +441,85 @@ sys.exit(_exit_code)
         echo "[LAUNCH] Sync complete."
     fi
 elif [ "$FOLLOWER_ONLY" = "1" ]; then
-    echo "[LAUNCH] FOLLOWER_ONLY=1 — sync skipped. Jetson agent will move follower to safe home after the container is healthy."
+    # FOLLOWER_ONLY (Roboter Studio on the student PC, and the Jetson): there is
+    # no leader to sync to, so move the follower to a DETERMINISTIC safe HOME.
+    # On the student PC nothing else homes the follower, so without this it
+    # would sit at its power-up pose and the first Roboter Studio command would
+    # jump from there. HOME must match workflow/handlers/motion.py
+    # HOME_JOINTS_RAD + gripper open. Soft: a failed home never kills boot.
+    # (On the Jetson the agent also moves the follower home afterwards — a
+    # harmless idempotent confirm.)
+    echo "[LAUNCH] FOLLOWER_ONLY=1 — moving follower to safe HOME (3s smooth trajectory)..."
+    python3 -c "
+import rclpy, sys, math
+from rclpy.node import Node
+from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy
+from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
+from sensor_msgs.msg import JointState
+
+JOINTS = ['joint1','joint2','joint3','joint4','joint5','gripper_joint_1']
+HOME = [0.0, -math.pi/4, math.pi/4, 0.0, 0.0, 0.8]
+DURATION = 3.0
+
+class HomeNode(Node):
+    def __init__(self):
+        super().__init__('home_follower')
+        self.follower_pos = None
+        self.sent = False
+        self.sub = self.create_subscription(JointState, '/joint_states', self.cb, 10)
+        qos = QoSProfile(depth=10,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            reliability=ReliabilityPolicy.RELIABLE)
+        self.pub = self.create_publisher(JointTrajectory, '/leader/joint_trajectory', qos)
+        # Bail if /joint_states never delivers all joints within ~10s.
+        self.create_timer(10.0, self._bail)
+
+    def cb(self, msg):
+        if self.sent or not set(JOINTS).issubset(set(msg.name)):
+            return
+        self.follower_pos = [msg.position[msg.name.index(j)] for j in JOINTS]
+        self._send_home()
+
+    def _send_home(self):
+        self.sent = True
+        deltas = [h - f for f, h in zip(self.follower_pos, HOME)]
+        traj = JointTrajectory()
+        traj.joint_names = list(JOINTS)
+        N = 50
+        for i in range(N):
+            t = (i + 1) / N
+            s = 10*t**3 - 15*t**4 + 6*t**5
+            s_dot = (30*t**2 - 60*t**3 + 30*t**4) / DURATION
+            s_ddot = (60*t - 180*t**2 + 120*t**3) / (DURATION * DURATION)
+            pt = JointTrajectoryPoint()
+            pt.positions = [f + d * s for f, d in zip(self.follower_pos, deltas)]
+            pt.velocities = [d * s_dot for d in deltas]
+            pt.accelerations = [d * s_ddot for d in deltas]
+            secs = DURATION * t
+            pt.time_from_start.sec = int(secs)
+            pt.time_from_start.nanosec = int((secs % 1) * 1e9)
+            traj.points.append(pt)
+        self.pub.publish(traj)
+        self.get_logger().info(f'Published HOME trajectory ({N} points, {DURATION}s)')
+        # Let the trajectory finish (publisher must stay alive so the
+        # TRANSIENT_LOCAL message is delivered to the controller) then exit.
+        self.create_timer(DURATION + 0.5, lambda: sys.exit(0))
+
+    def _bail(self):
+        if not self.sent:
+            self.get_logger().warn('No /joint_states for follower — skipping startup home.')
+            sys.exit(0)
+
+rclpy.init()
+node = HomeNode()
+try:
+    rclpy.spin(node)
+except SystemExit:
+    pass
+node.destroy_node()
+rclpy.shutdown()
+" || echo '[WARN] Startup home move failed (non-fatal) — follower stays at its power-up pose.'
+    echo '[LAUNCH] Follower startup home complete.'
 else
     echo "[WARN] Could not read leader position — skipping sync"
 fi

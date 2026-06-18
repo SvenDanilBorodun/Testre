@@ -75,6 +75,24 @@ def destination_pin(ctx, args: dict[str, Any]) -> None:
     ctx.log(f'Ziel "{name}" gespeichert ({x:.3f}, {y:.3f}, {z:.3f}).')
 
 
+def destination_ref(ctx, args: dict[str, Any]) -> str:
+    """VALUE block: emit a pinned destination's NAME so it can be dropped into a
+    ``move_to`` / ``drop_at`` value socket (the WS3 fix — ``destination_pin`` is
+    a statement and can't fill a value socket). The motion handlers'
+    ``_resolve_target`` resolves the returned name string against
+    ``ctx.destinations`` (teacher-pinned points loaded at workflow start)."""
+    name = (args.get('name') or '').strip()
+    if not name or name == UNPINNED_SENTINEL:
+        raise WorkflowError('Kein Ziel ausgewählt — bitte im Block ein Ziel wählen.')
+    _validate_destination_name(name)
+    if name not in ctx.destinations:
+        raise WorkflowError(
+            f'Unbekanntes Ziel: „{name}". Bitte das Ziel zuerst in der '
+            'Szenen-Kamera anklicken (pinnen).'
+        )
+    return name
+
+
 def destination_current(ctx, args: dict[str, Any]) -> None:
     """Save the gripper's current base-frame position under NAME. This is
     useful for "lege hier ab" workflows where the teacher physically

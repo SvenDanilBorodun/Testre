@@ -14,13 +14,18 @@ import { setCurrentStep, setCalibrationStatus } from '../../features/workshop/wo
 import { useRosServiceCaller } from '../../hooks/useRosServiceCaller';
 import IntrinsicCalibStep from './IntrinsicCalibStep';
 import HandEyeCalibStep from './HandEyeCalibStep';
+import TableTouchStep from './TableTouchStep';
 import ColorProfileStep from './ColorProfileStep';
 
+// WS4 (2026-06-17): scene-cam-only calibration. The two gripper-camera
+// steps (intrinsic + eye-in-hand) were removed — the gripper camera is not
+// modelled in the omx_f URDF and is unused at runtime. The scene extrinsic
+// is now a single-shot board-on-table measurement (no arm motion), so the
+// student sees a coherent 3-step flow.
 const STEPS = [
-  { key: 'gripper_intrinsic', label: 'Greifer-Kamera (intrinsisch)', component: IntrinsicCalibStep, props: { camera: 'gripper' } },
   { key: 'scene_intrinsic', label: 'Szenen-Kamera (intrinsisch)', component: IntrinsicCalibStep, props: { camera: 'scene' } },
-  { key: 'gripper_handeye', label: 'Greifer-Kamera (Hand-Auge)', component: HandEyeCalibStep, props: { camera: 'gripper' } },
-  { key: 'scene_handeye', label: 'Szenen-Kamera (Hand-Auge)', component: HandEyeCalibStep, props: { camera: 'scene' } },
+  { key: 'scene_handeye', label: 'Szenen-Kamera (Extrinsik)', component: HandEyeCalibStep, props: { camera: 'scene' } },
+  { key: 'table_touch', label: 'Tisch vermessen (Höhe)', component: TableTouchStep, props: {} },
   { key: 'color_profile', label: 'Farbprofil', component: ColorProfileStep, props: {} },
 ];
 
@@ -28,10 +33,9 @@ function CalibrationWizard() {
   const dispatch = useDispatch();
   const { getCalibrationStatus, cancelCalibration } = useRosServiceCaller();
   const currentStep = useSelector((s) => s.workshop.currentStep);
-  const hasIntrinsicGripper = useSelector((s) => s.workshop.hasIntrinsicGripper);
   const hasIntrinsicScene = useSelector((s) => s.workshop.hasIntrinsicScene);
-  const hasHandeyeGripper = useSelector((s) => s.workshop.hasHandeyeGripper);
   const hasHandeyeScene = useSelector((s) => s.workshop.hasHandeyeScene);
+  const hasTableTouch = useSelector((s) => s.workshop.hasTableTouch);
   const hasColorProfile = useSelector((s) => s.workshop.hasColorProfile);
 
   // Hydrate per-step badges from disk so reloading the page doesn't make
@@ -70,13 +74,15 @@ function CalibrationWizard() {
   }, []);
 
   const stepStatus = {
-    gripper_intrinsic: hasIntrinsicGripper,
     scene_intrinsic: hasIntrinsicScene,
-    gripper_handeye: hasHandeyeGripper,
     scene_handeye: hasHandeyeScene,
+    table_touch: hasTableTouch,
     color_profile: hasColorProfile,
   };
 
+  // A stale persisted currentStep (e.g. a removed 'gripper_intrinsic' from an
+  // older session) must not leave the wizard on a non-existent step; fall back
+  // to the first step.
   const active = STEPS.find((s) => s.key === currentStep) || STEPS[0];
   const ActiveComponent = active.component;
 

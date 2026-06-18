@@ -96,3 +96,37 @@ def test_persisted_profile_round_trips(calib_dir):
     assert profile is not None
     assert 'center' in profile and 'std' in profile and 'threshold' in profile
     assert profile['center'].shape == (3,)
+
+
+# ── Hardening (P3): no centre-ROI fallback + colour-name sanity ──────────────
+
+def test_uniform_image_yields_no_blob_and_is_rejected(calib_dir):
+    """A uniform frame (no cube) must NOT silently capture a centre ROI —
+    _segment_blob returns None and capture fails with a German message."""
+    from physical_ai_server.workflow.color_profile import ColorProfileManager
+    mgr = ColorProfileManager()
+    uniform = np.full((240, 320, 3), 128, dtype=np.uint8)
+    assert mgr._segment_blob(uniform) is None
+    ok, msg, _c, _s = mgr.capture('rot', uniform)
+    assert ok is False
+    assert 'Würfel' in msg
+
+
+def test_colour_name_mismatch_is_rejected(calib_dir):
+    """A blue cube held under the 'rot' prompt must be rejected."""
+    from physical_ai_server.workflow.color_profile import ColorProfileManager
+    mgr = ColorProfileManager()
+    ok, msg, _c, _s = mgr.capture('rot', _cube_image((30, 30, 220)))
+    assert ok is False
+    assert 'passt nicht' in msg
+
+
+def test_color_matches_name_helper(calib_dir):
+    import cv2
+    from physical_ai_server.workflow.color_profile import _color_matches_name
+    red = cv2.cvtColor(np.uint8([[[0, 0, 255]]]), cv2.COLOR_BGR2LAB)[0, 0]
+    blue = cv2.cvtColor(np.uint8([[[255, 0, 0]]]), cv2.COLOR_BGR2LAB)[0, 0]
+    assert _color_matches_name('rot', red) is True
+    assert _color_matches_name('rot', blue) is False
+    assert _color_matches_name('blau', blue) is True
+    assert _color_matches_name('blau', red) is False

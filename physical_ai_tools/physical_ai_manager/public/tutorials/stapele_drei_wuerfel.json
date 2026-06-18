@@ -11,9 +11,10 @@
     },
     {
       "title": "Würfel aufnehmen und ablegen",
-      "body": "Erkenne mit \"erkenne Farbe rot\" alle Würfel, nimm den ersten auf und lege ihn auf A ab. Wiederhole für B und C.",
+      "body": "Erkenne mit \"erkenne Farbe rot\" alle Würfel, nimm den ersten auf und lege ihn auf A ab. Ziehe dazu einen \"Ziel\"-Block (Name A) in das \"lege ab bei\"-Loch. Wiederhole für B und C.",
       "allowed_blocks": [
         "edubotics_destination_pin",
+        "edubotics_destination_ref",
         "edubotics_detect_color",
         "edubotics_pickup",
         "edubotics_drop_at",
@@ -30,6 +31,7 @@
       "body": "Packe die Aufnehm-Ablege-Sequenz in eine Funktion \"stapeln\" mit dem Ziel als Parameter — und rufe sie dreimal auf. Klicke auf das `+`-Symbol am Funktionsblock, um den Parameter `ziel` hinzuzufügen.",
       "allowed_blocks": [
         "edubotics_destination_pin",
+        "edubotics_destination_ref",
         "edubotics_detect_color",
         "edubotics_pickup",
         "edubotics_drop_at",

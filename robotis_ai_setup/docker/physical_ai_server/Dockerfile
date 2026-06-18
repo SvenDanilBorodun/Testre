@@ -198,37 +198,33 @@ RUN set -e && \
     echo '427cc366d34e27ff7a03e2899b5e3671425c262ea2291f88bb942bc1cc70b0f7  /opt/edubotics/yolox_tiny.onnx' \
         | sha256sum -c -
 
-# IK solvers: TRAC-IK preferred, PyKDL fallback.
-# Neither ros-jazzy-trac-ik-python nor ros-jazzy-kdl-parser-py is yet
-# packaged for ROS Jazzy on Ubuntu noble in the apt repo. We work around
-# this in two layers:
-#   1. Install python-orocos-kdl-vendor (provides the PyKDL bindings — IS
-#      packaged) and best-effort install of trac-ik-python (will skip).
-#   2. Vendor kdl_parser_py from the upstream ROS repo into site-packages
-#      directly — it's pure Python (126 lines), depends only on PyKDL
-#      and urdf_parser_py (both already installed). This re-enables the
-#      `from kdl_parser_py.urdf import treeFromUrdfModel` import in
-#      ik_solver._try_init_kdl, so motion handlers (Pickup/MoveTo/DropAt)
-#      get a working PyKDL IK solver instead of None.
-# Once the apt packages land for Jazzy, this whole block can be replaced
-# with a normal apt install — the pip-vendoring is a transition shim.
+# Runtime ROS message deps (NOT an IK install — IK is closed-form pure NumPy,
+# see the urdf-parser-py block below; there is no TRAC-IK / PyKDL / kdl_parser).
 # ros-jazzy-control-msgs: the teleop collision e-stop's gpio subscription
 # (safety/collision_monitor.py) needs control_msgs/DynamicInterfaceGroupValues.
 # ros-base does NOT ship control_msgs; without this install the import guard
 # silently fail-opens ("[KOLLISION] ... detection DISABLED") and force
 # protection is off on every shipped image (caught on-rig 2026-06-03).
 # package.xml declares the dep; this is where it actually materializes.
+#
+# controller_manager_msgs is deliberately ABSENT from this image — its
+# rosidl_typesupport_fastrtps_c .so is ABI-incompatible with the Fast-CDR pinned
+# here, so creating a SwitchController client crashes the node (undefined symbol
+# → exit 127, crash loop). Roboter Studio runs FOLLOWER-ONLY (no leader
+# broadcaster), so physical_ai_server never needs to switch a controller. Keep
+# controller_manager_msgs out — never add it back.
+#
 # apt-get retry loop (added 2026-05-20 — same rationale as open_manipulator/
 # Dockerfile: Ubuntu ports/archive mirrors occasionally serve stale Packages.gz
 # during sync windows. 5 retries with 5s/10s/15s/20s/25s backoff = 75s worst
-# case before bailing.) The trac-ik-python install is intentionally a soft
-# fail (or-echo) — only ros-jazzy-python-orocos-kdl-vendor and
-# ros-jazzy-control-msgs must succeed.
+# case before bailing.) ros-jazzy-control-msgs (the collision guard's
+# DynamicInterfaceGroupValues; ros-base does not ship it) MUST succeed. PyKDL is
+# NO LONGER installed — the closed-form ik_solver.py is pure NumPy with its own
+# exact forward kinematics, so neither orocos-kdl nor kdl_parser is needed.
 RUN set -eux; \
     for i in 1 2 3 4 5; do \
         apt-get update && \
         DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            ros-jazzy-python-orocos-kdl-vendor \
             ros-jazzy-control-msgs && \
         break || { \
             echo "apt-get retry $i/5 (mirror sync or transient network)"; \
@@ -237,30 +233,19 @@ RUN set -eux; \
         }; \
         [ "$i" = "5" ] && exit 1; \
     done; \
-    (DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        ros-jazzy-trac-ik-python || \
-     echo 'INFO: ros-jazzy-trac-ik-python not in apt yet — IK uses PyKDL fallback (kdl_parser_py vendored below)') && \
     rm -rf /var/lib/apt/lists/*
 
-# Vendor kdl_parser_py (pure Python) into site-packages so PyKDL fallback
-# can parse URDF strings. Files come from ros/kdl_parser@humble; same
-# tree on the ros2 / foxy / galactic / iron / jazzy branches.
-COPY patches/kdl_parser_py /tmp/kdl_parser_py_src
-# Two-step strategy: (1) reinstall urdf-parser-py via the SAME python3
-# that will run at runtime (`python3 -m pip` ensures interpreter/site
-# alignment regardless of how the upstream `pip` is configured); then
-# (2) drop kdl_parser_py into that same python's site-packages and
-# verify the chained import works end-to-end.
-RUN set -e && \
-    python3 -m pip install --no-cache-dir urdf-parser-py==0.0.4 && \
-    site=$(python3 -c 'import urdf_parser_py, os; print(os.path.dirname(os.path.dirname(urdf_parser_py.__file__)))') && \
-    [ -n "$site" ] || { echo "ERROR: urdf_parser_py site lookup failed"; exit 1; } && \
-    echo "kdl_parser_py vendor target site=$site" && \
-    mkdir -p "$site/kdl_parser_py" && \
-    cp /tmp/kdl_parser_py_src/__init__.py "$site/kdl_parser_py/__init__.py" && \
-    cp /tmp/kdl_parser_py_src/urdf.py "$site/kdl_parser_py/urdf.py" && \
-    rm -rf /tmp/kdl_parser_py_src && \
-    python3 -c "from kdl_parser_py.urdf import treeFromUrdfModel; print('kdl_parser_py vendored OK')"
+# ── IK is closed-form (pure NumPy) — no TRAC-IK / PyKDL / IKFast install ─────
+# ik_solver.py is an exact analytical solver for the OMX-F geometry with its own
+# NumPy forward kinematics. It deliberately has NO native-build dependency: the
+# old tracikpy install was a from-source SWIG build linking ROS shared libs
+# (the same Fast-CDR/ABI-crash risk class as controller_manager_msgs), and the
+# PyKDL LMA fallback caused the orientation-unconstrained "crazy motion". Both
+# are gone. The only Python dep is urdf-parser-py, used ONLY by ik_solver.py's
+# optional constant-verification (cross-checks the baked geometry against
+# /robot_description and warns on a mismatch) — the IK itself needs no URDF.
+RUN python3 -m pip install --no-cache-dir urdf-parser-py==0.0.4 \
+    && python3 -c "import urdf_parser_py.urdf; print('urdf_parser_py OK')"
 
 # AGPL audit: every package we explicitly pip-install above (opencv-contrib-
 # python 4.10 / pupil-apriltags / onnxruntime 1.20 / urdf-parser-py / pip-

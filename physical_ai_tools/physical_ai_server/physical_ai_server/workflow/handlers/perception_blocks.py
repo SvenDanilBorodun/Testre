@@ -57,6 +57,50 @@ def _ensure_perception(ctx):
         )
 
 
+def _scene_frame(ctx):
+    """Fetch a FRESH scene-camera frame, or raise a German error. Rejects a
+    frozen/stale frame (camera down mid-workflow) — not just a never-arrived
+    one — via the optional ctx.get_scene_frame_age getter."""
+    getter = getattr(ctx, 'get_scene_frame', None)
+    bgr = getter() if getter else None
+    if bgr is None:
+        raise WorkflowError(
+            'Kein aktuelles Szenenbild verfügbar — bitte die Szenen-Kamera prüfen.'
+        )
+    age_getter = getattr(ctx, 'get_scene_frame_age', None)
+    if callable(age_getter):
+        try:
+            age = age_getter()
+        except Exception:  # noqa: BLE001 — age is advisory
+            age = None
+        if age is not None and age > _SCENE_FRAME_MAX_AGE_S:
+            raise WorkflowError(
+                'Die Szenen-Kamera liefert kein aktuelles Bild — bitte die '
+                'Kamera prüfen.'
+            )
+    return bgr
+
+
+# A scene frame older than this is treated as stale (camera stalled / down).
+_SCENE_FRAME_MAX_AGE_S = 1.0
+
+
+def _require_object_detector(ctx):
+    if not ctx.perception.yolox_available():
+        raise WorkflowError(
+            'Objekt-Erkennung ist auf diesem Gerät nicht verfügbar '
+            '(Erkennungs-Modell fehlt) — bitte Farb- oder Marker-Erkennung '
+            'verwenden.'
+        )
+
+
+def _require_marker_detector(ctx):
+    if not ctx.perception.apriltag_available():
+        raise WorkflowError(
+            'Marker-Erkennung ist auf diesem Gerät nicht verfügbar.'
+        )
+
+
 def _attach_world_xyz(ctx, detections: list) -> list:
     """Project pixel centroids of detections to base-frame XYZ on the
     table plane and push the bounding-box list to the WorkflowStatus
@@ -83,9 +127,13 @@ def _attach_world_xyz(ctx, detections: list) -> list:
         dist = ctx.scene_intrinsics['dist']
         T = ctx.scene_extrinsics
         z = ctx.z_table
+        # Touch-off measured table plane (z = a·x + b·y + c) when present —
+        # the ray then intersects the real (possibly tilted) table, not a
+        # guessed flat z. Falls back to the flat z_table plane otherwise.
+        plane = getattr(ctx, 'table_plane', None)
         for d in detections:
             cx, cy = d.centroid_px
-            point = project_pixel_to_table(cx, cy, K, dist, T, z)
+            point = project_pixel_to_table(cx, cy, K, dist, T, z, plane=plane)
             if point is not None:
                 d.world_xyz_m = (float(point[0]), float(point[1]), float(point[2]))
     except Exception as e:
@@ -102,18 +150,20 @@ def detect_color(ctx, args: dict[str, Any]) -> list:
     # German color string surfaces an actionable error instead of an
     # empty-detections result that looks like "no color visible".
     color = _validate_color(args.get('color'))
-    bgr = ctx.get_scene_frame() if ctx.get_scene_frame else None
-    if bgr is None:
-        raise WorkflowError('Kein Szenenbild verfügbar.')
+    if not ctx.perception.has_color(color):
+        raise WorkflowError(
+            f'Farbe „{color}" ist nicht kalibriert — bitte im Kalibrier-Schritt '
+            '„Farben lernen" erfassen.'
+        )
+    bgr = _scene_frame(ctx)
     detections = ctx.perception.detect(bgr, camera='scene', mode='color', color=color)
     return _attach_world_xyz(ctx, detections)
 
 
 def detect_object(ctx, args: dict[str, Any]) -> list:
     _ensure_perception(ctx)
-    bgr = ctx.get_scene_frame() if ctx.get_scene_frame else None
-    if bgr is None:
-        raise WorkflowError('Kein Szenenbild verfügbar.')
+    _require_object_detector(ctx)
+    bgr = _scene_frame(ctx)
     # Audit fix #12: color is optional on detect_object (the block lets
     # the student narrow a class to a specific color). When provided,
     # validate to fail loudly on unknown values instead of silently
@@ -131,9 +181,8 @@ def detect_object(ctx, args: dict[str, Any]) -> list:
 
 def detect_marker(ctx, args: dict[str, Any]) -> list:
     _ensure_perception(ctx)
-    bgr = ctx.get_scene_frame() if ctx.get_scene_frame else None
-    if bgr is None:
-        raise WorkflowError('Kein Szenenbild verfügbar.')
+    _require_marker_detector(ctx)
+    bgr = _scene_frame(ctx)
     marker_id = args.get('marker_id')
     if marker_id is not None:
         try:
@@ -299,9 +348,7 @@ def detect_open_vocab(ctx, args: dict[str, Any]) -> list:
             'ist deaktiviert. Bitte aktivieren oder einen bekannten Begriff '
             'verwenden.'
         )
-    bgr = ctx.get_scene_frame() if ctx.get_scene_frame else None
-    if bgr is None:
-        raise WorkflowError('Kein Szenenbild verfügbar.')
+    bgr = _scene_frame(ctx)
     try:
         # Audit O3: forward ctx.should_stop so the burst can short-
         # circuit on stop between encode and the HTTP send.

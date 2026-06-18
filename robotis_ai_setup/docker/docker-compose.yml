@@ -47,7 +47,15 @@ services:
       - CAMERA_DEVICE_1=${CAMERA_DEVICE_1:-}
       - CAMERA_NAME_1=${CAMERA_NAME_1:-gripper}
       - CAMERA_DEVICE_2=${CAMERA_DEVICE_2:-}
-      - CAMERA_NAME_2=${CAMERA_NAME_2:-scene}
+      # CAMERA_NAME_2 default is EMPTY (not "scene") so a SINGLE-camera config
+      # (e.g. the Roboter Studio kit: one scene camera → .env has CAMERA_NAME_1
+      # but no CAMERA_NAME_2) is distinguishable from a 2-camera config inside
+      # the container. The healthcheck below gates its 2nd-camera topic probe on
+      # CAMERA_NAME_2 being non-empty, and entrypoint_omx.sh's usb_cam loop keeps
+      # its own internal `:-scene` fallback + the `CAMERA_DEVICE_2` empty-skip, so
+      # the 2-camera classroom/Jetson path (which always sets both names) is
+      # unchanged. camera_ingest_node.py keys off EDUBOTICS_CAMERA_NAMES, not this.
+      - CAMERA_NAME_2=${CAMERA_NAME_2:-}
       # Camera tuning knobs. Without these, entrypoint_omx.sh's
       # `:-yuyv` etc. defaults always win and any per-classroom
       # override in the host .env never reaches the container. Compose
@@ -114,14 +122,19 @@ services:
       # starts → recording proceeds with black frames → failure
       # surfaced only at first record-press via 5s topic-wait.
       # Now also assert the camera compressed-image topics are published.
-      #   - native_bridge: assert both ingest topics exist (camera_ingest_node
-      #     is up). Frame-flow itself is monitored by the GUI + the node's 10s
-      #     Hz log; a 5s healthcheck can't run `ros2 topic hz`.
+      #   - native_bridge: assert the ingest topic for each CONFIGURED camera
+      #     exists (camera_ingest_node is up). Slot 2 is gated on CAMERA_NAME_2
+      #     being non-empty, so a SINGLE-camera config (Roboter Studio kit: one
+      #     scene camera → CAMERA_NAME_1=scene, CAMERA_NAME_2 empty) stays healthy
+      #     on the scene topic alone instead of waiting forever for a phantom 2nd
+      #     camera. The 2-camera classroom path sets both names, so both are
+      #     checked. Frame-flow itself is monitored by the GUI + the node's 10s Hz
+      #     log; a 5s healthcheck can't run `ros2 topic hz`.
       #   - usb_cam: per-camera ${CAMERA_DEVICE_*} env-var gating lets
       #     single-camera setups stay healthy.
       # EDUBOTICS_CAMERA_SOURCE may be empty (auto-detect); fall back to the
       # same uname WSL2 detection the entrypoint uses so the branch matches.
-      test: ["CMD-SHELL", "bash -c 'source /opt/ros/jazzy/setup.bash && source /root/ros2_ws/install/setup.bash && (ros2 topic list 2>/dev/null | grep -q /joint_states || exit 1); src=\"$$EDUBOTICS_CAMERA_SOURCE\"; if [ -z \"$$src\" ] && uname -r | grep -qi microsoft; then src=native_bridge; fi; if [ \"$$src\" = native_bridge ]; then ros2 topic list | grep -q /$${CAMERA_NAME_1:-gripper}/image_raw/compressed && ros2 topic list | grep -q /$${CAMERA_NAME_2:-scene}/image_raw/compressed; else ([ -z \"$$CAMERA_DEVICE_1\" ] || ros2 topic list | grep -q /$${CAMERA_NAME_1:-gripper}/image_raw/compressed) && ([ -z \"$$CAMERA_DEVICE_2\" ] || ros2 topic list | grep -q /$${CAMERA_NAME_2:-scene}/image_raw/compressed); fi'"]
+      test: ["CMD-SHELL", "bash -c 'source /opt/ros/jazzy/setup.bash && source /root/ros2_ws/install/setup.bash && (ros2 topic list 2>/dev/null | grep -q /joint_states || exit 1); src=\"$$EDUBOTICS_CAMERA_SOURCE\"; if [ -z \"$$src\" ] && uname -r | grep -qi microsoft; then src=native_bridge; fi; if [ \"$$src\" = native_bridge ]; then ([ -z \"$$CAMERA_NAME_1\" ] || ros2 topic list | grep -q /$${CAMERA_NAME_1}/image_raw/compressed) && ([ -z \"$$CAMERA_NAME_2\" ] || ros2 topic list | grep -q /$${CAMERA_NAME_2}/image_raw/compressed); else ([ -z \"$$CAMERA_DEVICE_1\" ] || ros2 topic list | grep -q /$${CAMERA_NAME_1:-gripper}/image_raw/compressed) && ([ -z \"$$CAMERA_DEVICE_2\" ] || ros2 topic list | grep -q /$${CAMERA_NAME_2:-scene}/image_raw/compressed); fi'"]
       interval: 10s
       timeout: 5s
       retries: 3
@@ -185,6 +198,33 @@ services:
       # workflow/calibration_manager.py, workflow/color_profile.py,
       # physical_ai_server.py.
       - EDUBOTICS_CALIB_DIR=${EDUBOTICS_CALIB_DIR:-/root/.cache/edubotics}
+      # WS4 (2026-06-17) scene-cam single-shot extrinsic: the known
+      # board-on-table placement (base frame, metres). The student lays the
+      # ChArUco flat at this reference; the scene extrinsic + z_table derive
+      # from it. Read by workflow/calibration_manager.py at import time, so
+      # these MUST stay forwarded (ci.yml::env-forwarding-guard). Defaults
+      # (18 cm in front of base, centred, table = base plane) fit the typical
+      # OMX-F classroom station — see tools/classroom_kit_README.md.
+      - EDUBOTICS_BOARD_ORIGIN_X_M=${EDUBOTICS_BOARD_ORIGIN_X_M:-0.18}
+      - EDUBOTICS_BOARD_ORIGIN_Y_M=${EDUBOTICS_BOARD_ORIGIN_Y_M:--0.075}
+      - EDUBOTICS_BOARD_TABLE_Z_M=${EDUBOTICS_BOARD_TABLE_Z_M:-0.0}
+      # Yaw of the ChArUco board frame about base +Z (0 when the L-jig holds it
+      # square to the base — the default). For a jig that holds the board rotated.
+      - EDUBOTICS_BOARD_YAW_DEG=${EDUBOTICS_BOARD_YAW_DEG:-0.0}
+      # Factory-default scene-camera intrinsics (Innomaker @ 640x480) so students
+      # skip the 12-frame ChArUco step; a per-rig calibration supersedes them.
+      # Set EDUBOTICS_FACTORY_INTRINSICS=0 to require the per-rig step instead.
+      - EDUBOTICS_FACTORY_INTRINSICS=${EDUBOTICS_FACTORY_INTRINSICS:-1}
+      - EDUBOTICS_FACTORY_FX=${EDUBOTICS_FACTORY_FX:-600.0}
+      - EDUBOTICS_FACTORY_FY=${EDUBOTICS_FACTORY_FY:-600.0}
+      - EDUBOTICS_FACTORY_CX=${EDUBOTICS_FACTORY_CX:-320.0}
+      - EDUBOTICS_FACTORY_CY=${EDUBOTICS_FACTORY_CY:-240.0}
+      - EDUBOTICS_FACTORY_IMG_W=${EDUBOTICS_FACTORY_IMG_W:-640}
+      - EDUBOTICS_FACTORY_IMG_H=${EDUBOTICS_FACTORY_IMG_H:-480}
+      # Generic grasp: conservative descend clearance above the measured table
+      # plane, and a fixed tool-roll (j5) for the gripper. Rig-tunable.
+      - EDUBOTICS_GRASP_CLEARANCE_M=${EDUBOTICS_GRASP_CLEARANCE_M:-0.012}
+      - EDUBOTICS_GRASP_ROLL_DEG=${EDUBOTICS_GRASP_ROLL_DEG:-0.0}
       # Vision detector selection + ONNX paths for the Roboter Studio
       # open-vocab block. `yolox-tiny` is the only fully-wired path
       # today; `dfine-n` is reserved (see overlays/workflow/perception.py

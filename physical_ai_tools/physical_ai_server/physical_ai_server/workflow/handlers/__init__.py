@@ -36,6 +36,8 @@ STATEMENT_HANDLERS: dict[str, callable] = {
 
 
 VALUE_EVALUATORS: dict[str, callable] = {
+    # WS3: value-output reference to a pinned destination (fills move_to/drop_at).
+    'edubotics_destination_ref': destination_handlers.destination_ref,
     'edubotics_detect_color': perception_handlers.detect_color,
     'edubotics_detect_object': perception_handlers.detect_object,
     'edubotics_detect_marker': perception_handlers.detect_marker,

@@ -29,6 +29,36 @@ const BUTTON_BASE =
   + 'focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-1 '
   + 'disabled:opacity-50 disabled:cursor-not-allowed';
 
+// Leader-contention guard. The follower's arm_controller subscribes to
+// /leader/joint_trajectory; running a workflow publishes there too. While the
+// leader arm is ON (both-arms mode), its broadcaster also floods that topic at
+// ~100 Hz with the limp leader's pose, so the two writers fight and the follower
+// jerks between poses ("crazy motion") — the exact failure follower-only mode
+// exists to remove. We probe the GUI's localhost control bridge
+// (roboter_studio_control.py, the same one LeaderToggle uses) and hard-disable
+// the run button until the student has flipped to follower-only via the toggle.
+// When the bridge is ABSENT (Jetson/cloud/old GUI), there is no leader to fight
+// — Roboter Studio there is follower-only by construction — so we never block.
+const RS_CONTROL_BASE = 'http://localhost:8769';
+const RS_STATUS_TIMEOUT_MS = 4000;
+const RS_STATUS_POLL_MS = 8000;
+
+async function probeRsStatus() {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), RS_STATUS_TIMEOUT_MS);
+  try {
+    const res = await fetch(`${RS_CONTROL_BASE}/roboter-studio/status`, { signal: ctrl.signal });
+    if (!res.ok) return { available: false, followerOnly: false };
+    const body = await res.json().catch(() => ({}));
+    return { available: true, followerOnly: !!body.follower_only };
+  } catch (e) {
+    // No bridge reachable (Jetson/cloud/old GUI) → don't block.
+    return { available: false, followerOnly: false };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function RunControls({ workflowId, blocklyJson, workspace = null }) {
   const dispatch = useDispatch();
   const {
@@ -53,7 +83,32 @@ function RunControls({ workflowId, blocklyJson, workspace = null }) {
   const accessToken = useSelector((s) => s.auth?.session?.access_token);
   const [busy, setBusy] = useState(false);
 
+  // Leader-contention gate (see RS_CONTROL_BASE comment above). true ONLY when
+  // the bridge is reachable AND the leader is on; false while probing, on any
+  // probe error, and on Jetson/cloud (no bridge) — i.e. it fails open.
+  const [rsLeaderOn, setRsLeaderOn] = useState(false);
+
   const isRunning = runState === 'running' || phase === 'running' || paused;
+
+  // Poll the GUI control bridge so the gate tracks the leader toggle live (the
+  // student flips it from the same header). Only block on a POSITIVE answer
+  // (bridge present AND leader on); any unreachable/error result fails open so a
+  // transient probe hiccup never wedges the run button.
+  useEffect(() => {
+    let cancelled = false;
+    let intervalId = null;
+    const tick = async () => {
+      const { available, followerOnly } = await probeRsStatus();
+      if (cancelled) return;
+      setRsLeaderOn(available && !followerOnly);
+    };
+    tick();
+    intervalId = setInterval(tick, RS_STATUS_POLL_MS);
+    return () => {
+      cancelled = true;
+      if (intervalId) clearInterval(intervalId);
+    };
+  }, []);
 
   // Track the block ids we last warned on so a rerun without warnings
   // clears the previous bubbles. Audit round-3 §K — the prior version
@@ -95,6 +150,14 @@ function RunControls({ workflowId, blocklyJson, workspace = null }) {
   const handleStart = useCallback(async () => {
     if (!blocklyJson) {
       toast.error('Workflow ist leer.');
+      return;
+    }
+    // Belt-and-suspenders: refuse to start while the leader arm is on. The
+    // button is already disabled in this state, but a stale render or a
+    // keyboard activation must not start a contended run.
+    if (rsLeaderOn) {
+      toast.error(
+        'Bitte zuerst „Leader abschalten" (oben), bevor du das Programm ausführst.');
       return;
     }
     setBusy(true);
@@ -169,6 +232,7 @@ function RunControls({ workflowId, blocklyJson, workspace = null }) {
   // is picked up at the next Start press.
   }, [
     blocklyJson,
+    rsLeaderOn,
     callService,
     cloudVisionEnabled,
     accessToken,
@@ -261,7 +325,10 @@ function RunControls({ workflowId, blocklyJson, workspace = null }) {
           <button
             type="button"
             onClick={handleStart}
-            disabled={busy}
+            disabled={busy || rsLeaderOn}
+            title={rsLeaderOn
+              ? 'Bitte zuerst „Leader abschalten" (oben), bevor du das Programm ausführst.'
+              : undefined}
             className={
               BUTTON_BASE
               + ' bg-[var(--accent)] text-white hover:opacity-90 '
@@ -379,6 +446,17 @@ function RunControls({ workflowId, blocklyJson, workspace = null }) {
           🔍 Debug
         </button>
       </div>
+
+      {rsLeaderOn && !isRunning && (
+        <div
+          role="alert"
+          className="bg-amber-50 border border-amber-200 text-amber-800 text-sm rounded-md p-2 mb-2"
+        >
+          Der Leader-Arm ist noch eingeschaltet. Bitte zuerst oben
+          {' '}„Leader abschalten" drücken, bevor du das Programm ausführst —
+          {' '}sonst kämpfen Teleoperation und Programm um den Roboter.
+        </div>
+      )}
 
       {error && (
         <div

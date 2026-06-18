@@ -42,7 +42,6 @@ def test_chunked_publish_returns_within_100ms_of_stop():
     chunked_publish(
         publisher=lambda chunk: None,
         points=waypoints,
-        safety_apply=None,
         should_stop=stop_event.is_set,
         chunk_duration_s=1.0,
         fps=30,

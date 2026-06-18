@@ -18,6 +18,12 @@
   <depend>cv_bridge</depend>
   <depend>trajectory_msgs</depend>
   <depend>control_msgs</depend>
+  <!-- This package deliberately does NOT depend on controller_manager_msgs:
+       that package's Fast-CDR typesupport is ABI-incompatible with this image
+       and crashes the node on service-client creation (undefined symbol →
+       exit 127). Roboter Studio runs FOLLOWER-ONLY (no leader broadcaster to
+       arbitrate against), so nothing here ever needs to call
+       /leader/controller_manager/switch_controller. Keep it absent. -->
   <depend>rosbag_recorder</depend>
   <exec_depend>web_video_server</exec_depend>
   <exec_depend>rosbridge_suite</exec_depend>

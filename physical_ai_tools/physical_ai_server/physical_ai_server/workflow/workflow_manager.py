@@ -19,10 +19,13 @@ The manager owns:
 - the broadcast event registry,
 - the pause/step/breakpoint plumbing.
 
-Recovery (hold-current → open gripper → return home) runs on the main
-thread's ``finally`` block whenever the workflow exits stopped or
-errored. Hat threads themselves never run recovery — they exit when
-should_stop fires; the main thread handles the cleanup.
+Safe-stop on error/stop: the in-flight trajectory is cancelled
+(``chunked_publish`` observes ``should_stop`` between chunks) so the arm
+HOLDS at the last commanded waypoint — a safe in-place stop with no
+surprise auto-motion (auto-homing on an error could drive the arm into
+whatever went wrong). The student sends the arm Home explicitly with a
+"Heimposition" block when ready. The main thread's ``finally`` reaps the
+hat threads and fires ``on_finished``; hat threads exit on ``should_stop``.
 """
 
 from __future__ import annotations
@@ -63,6 +66,9 @@ class WorkflowContext:
     z_table: float | None = None
     scene_intrinsics: dict | None = None
     scene_extrinsics: Any | None = None
+    # Touch-off measured table plane (a, b, c) for z = a·x + b·y + c; None →
+    # projection uses the flat z_table plane.
+    table_plane: tuple[float, float, float] | None = None
     last_arm_joints: list[float] | None = None
     last_full_joints: list[float] = field(default_factory=lambda: [0.0] * 6)
     should_stop: Callable[[], bool] = field(default_factory=lambda: (lambda: False))
@@ -75,6 +81,9 @@ class WorkflowContext:
     variables: dict[str, Any] = field(default_factory=dict)
     get_scene_frame: Callable[[], Any] | None = None
     get_gripper_frame: Callable[[], Any] | None = None
+    # Age (seconds) of the latest scene frame, for the perception staleness
+    # gate (reject a frozen camera). None → unknown (gate skipped).
+    get_scene_frame_age: Callable[[], float | None] | None = None
     get_current_pose_xyz: Callable[[], tuple[float, float, float] | None] | None = None
     # Phase-2 additions
     motion_lock: threading.RLock | None = None  # reentrant: hat body + inner publish
@@ -127,6 +136,7 @@ class WorkflowManager:
         on_finished: Callable[[str], None] | None = None,
         get_scene_frame: Callable[[], Any] | None = None,
         get_gripper_frame: Callable[[], Any] | None = None,
+        get_scene_frame_age: Callable[[], float | None] | None = None,
         get_current_pose_xyz: Callable[[], tuple[float, float, float] | None] | None = None,
         get_follower_joints: Callable[[], list[float] | None] | None = None,
     ) -> None:
@@ -142,6 +152,7 @@ class WorkflowManager:
         self._on_finished = on_finished or (lambda _phase: None)
         self._get_scene_frame = get_scene_frame
         self._get_gripper_frame = get_gripper_frame
+        self._get_scene_frame_age = get_scene_frame_age
         self._get_current_pose_xyz = get_current_pose_xyz
         # Audit S2: source of the current follower joint state, used at
         # workflow start to seed ctx.last_full_joints with the real arm pose
@@ -343,11 +354,13 @@ class WorkflowManager:
                 z_table=calib.get('z_table'),
                 scene_intrinsics=calib.get('scene_intrinsics'),
                 scene_extrinsics=calib.get('scene_extrinsics'),
+                table_plane=calib.get('table_plane'),
                 should_stop=self._stop_event.is_set,
                 log=lambda msg: self._emit_status({'log_message': msg}),
                 emit_detections=lambda dets: self._emit_status({'detections': dets}),
                 get_scene_frame=self._get_scene_frame,
                 get_gripper_frame=self._get_gripper_frame,
+                get_scene_frame_age=self._get_scene_frame_age,
                 get_current_pose_xyz=self._get_current_pose_xyz,
                 motion_lock=self._motion_lock,
                 var_lock=self._var_lock,
@@ -750,6 +763,10 @@ class WorkflowManager:
         # Audit fix #6: ctx.last_full_joints is seeded synchronously in
         # start() before any handler thread spawns, so this block no
         # longer needs to redo the work here.
+        #
+        # Follower-only: the workflow trajectory publisher is the sole writer
+        # on /leader/joint_trajectory (no leader broadcaster launched), so no
+        # teleop arbitration is needed around the run.
         try:
             self._emit_status({
                 'workflow_id': self._workflow_id or '',

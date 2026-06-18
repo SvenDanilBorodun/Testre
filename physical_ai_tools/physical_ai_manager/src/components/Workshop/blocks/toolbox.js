@@ -88,6 +88,7 @@ export function buildToolbox(restrictedBlocks = null, cloudVisionEnabled = false
 
   const destinations = filterContents([
     { kind: 'block', type: 'edubotics_destination_pin' },
+    { kind: 'block', type: 'edubotics_destination_ref' },
     { kind: 'block', type: 'edubotics_destination_current' },
   ], restricted);
 

@@ -27,15 +27,16 @@ def test_on_finished_fires_with_finished_phase_on_natural_end():
     )
     # Trivial workflow: one log block.
     payload = _ws([{'type': 'edubotics_log', 'fields': {'MESSAGE': 'hi'}}])
-    ok, _msg = mgr.start(payload, 'wf-natural')
+    ok, _msg, _unreachable = mgr.start(payload, 'wf-natural')
     assert ok is True
 
-    # Wait for the daemon thread to exit. The recovery path on
-    # 'finished' is a no-op (only stopped / error trigger auto-home),
-    # so this should resolve quickly.
+    # Wait for the on_finished callback itself. is_running flips False the
+    # moment the _run finally sets _stop_event (is_running short-circuits on
+    # it) — which is BEFORE on_finished fires a few lines later. Gating on
+    # is_running therefore races the callback; gate on `received` instead.
     deadline = time.monotonic() + 5.0
-    while mgr.is_running and time.monotonic() < deadline:
-        time.sleep(0.05)
+    while not received and time.monotonic() < deadline:
+        time.sleep(0.02)
 
     assert mgr.is_running is False
     assert received == ['finished']
@@ -66,7 +67,7 @@ def test_on_finished_fires_with_stopped_phase_on_stop():
             },
         },
     }])
-    ok, _msg = mgr.start(payload, 'wf-loop')
+    ok, _msg, _unreachable = mgr.start(payload, 'wf-loop')
     assert ok is True
     # Let the daemon enter the loop, then stop it. The wait_seconds
     # handler polls should_stop every 50 ms so the stop is observed
@@ -75,7 +76,7 @@ def test_on_finished_fires_with_stopped_phase_on_stop():
     mgr.stop()
 
     deadline = time.monotonic() + 10.0  # auto-home recovery is ~4.5s
-    while mgr.is_running and time.monotonic() < deadline:
+    while not received and time.monotonic() < deadline:
         time.sleep(0.05)
 
     assert mgr.is_running is False
@@ -91,6 +92,6 @@ def test_size_limit_rejects_huge_payload():
     )
     mgr = WorkflowManager(publisher=lambda p: None)
     payload = '{"blocks":' + ('a' * (MAX_WORKFLOW_JSON_BYTES + 100)) + '}'
-    ok, msg = mgr.start(payload, 'wf-big')
+    ok, msg, _unreachable = mgr.start(payload, 'wf-big')
     assert ok is False
     assert 'zu groß' in msg.lower() or 'gross' in msg.lower()

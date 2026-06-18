@@ -66,6 +66,21 @@ export const DESTINATION_BLOCKS = [
     colour: DEST_COLOR,
     extensions: ['edubotics_validate_destination_name'],
   },
+  {
+    // WS3: a VALUE reference to a pinned destination. destination_pin is a
+    // STATEMENT (it can't plug into a value socket), so move_to / drop_at had
+    // no producible value to fill their DESTINATION input. This block outputs
+    // the pinned NAME string; the runtime resolves it against ctx.destinations.
+    type: 'edubotics_destination_ref',
+    message0: DE.DESTINATION_REF,
+    args0: [{ type: 'field_input', name: 'NAME', text: 'A' }],
+    output: 'String',
+    colour: DEST_COLOR,
+    tooltip:
+      'Verweist auf ein gepinntes Ziel (gleicher Name wie ein „Pin"-Block). '
+      + 'Ziehe diesen Block in „bewege zu" oder „lege ab bei".',
+    extensions: ['edubotics_validate_destination_name'],
+  },
 ];
 
 /**

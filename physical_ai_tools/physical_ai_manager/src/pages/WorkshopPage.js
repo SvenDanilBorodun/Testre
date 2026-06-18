@@ -12,6 +12,7 @@ import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import toast from 'react-hot-toast';
 import CalibrationWizard from '../components/Workshop/CalibrationWizard';
+import LeaderToggle from '../components/Workshop/LeaderToggle';
 import BlocklyWorkspace from '../components/Workshop/BlocklyWorkspace';
 import RunControls from '../components/Workshop/RunControls';
 import CameraFeedOverlay from '../components/Workshop/CameraFeedOverlay';
@@ -38,10 +39,13 @@ import {
 
 function WorkshopPage({ isActive }) {
   const dispatch = useDispatch();
-  const hasIntrinsicGripper = useSelector((s) => s.workshop.hasIntrinsicGripper);
+  // WS4 (2026-06-17): scene-cam-only calibration. The gripper camera is no
+  // longer calibrated (not modelled in the omx_f URDF; unused at runtime), so
+  // the editor-unlock gate requires ONLY scene intrinsic + scene extrinsic +
+  // color profile. The gripper flags are intentionally NOT read here.
   const hasIntrinsicScene = useSelector((s) => s.workshop.hasIntrinsicScene);
-  const hasHandeyeGripper = useSelector((s) => s.workshop.hasHandeyeGripper);
   const hasHandeyeScene = useSelector((s) => s.workshop.hasHandeyeScene);
+  const hasTableTouch = useSelector((s) => s.workshop.hasTableTouch);
   const hasColorProfile = useSelector((s) => s.workshop.hasColorProfile);
   const selectedWorkflowId = useSelector((s) => s.workshop.selectedWorkflowId);
   const unsavedBlocklyJson = useSelector((s) => s.workshop.unsavedBlocklyJson);
@@ -66,10 +70,9 @@ function WorkshopPage({ isActive }) {
   const workspaceRef = useRef(null);
 
   const calibrated =
-    hasIntrinsicGripper &&
     hasIntrinsicScene &&
-    hasHandeyeGripper &&
     hasHandeyeScene &&
+    hasTableTouch &&
     hasColorProfile;
 
   // Re-subscribe to /workflow/status whenever this page is active OR
@@ -225,14 +228,21 @@ function WorkshopPage({ isActive }) {
   return (
     <div className="flex flex-col h-full w-full overflow-hidden">
       <header className="px-4 sm:px-6 py-3 sm:py-4 border-b border-[var(--line)] bg-white">
-        <h1 className="text-lg sm:text-xl font-semibold text-[var(--ink)]">
-          Roboter Studio
-        </h1>
-        <p className="text-xs sm:text-sm text-[var(--ink-3)]">
-          {calibrated
-            ? 'Bausteine ziehen, Aufgabe zusammenstellen und vom Roboter ausführen lassen.'
-            : 'Bevor wir loslegen können, muss die Kamera eingerichtet werden.'}
-        </p>
+        <div className="flex items-start justify-between gap-3 flex-wrap">
+          <div className="min-w-0">
+            <h1 className="text-lg sm:text-xl font-semibold text-[var(--ink)]">
+              Roboter Studio
+            </h1>
+            <p className="text-xs sm:text-sm text-[var(--ink-3)]">
+              {calibrated
+                ? 'Bausteine ziehen, Aufgabe zusammenstellen und vom Roboter ausführen lassen.'
+                : 'Bevor wir loslegen können, muss die Kamera eingerichtet werden.'}
+            </p>
+          </div>
+          {/* Follower-only leader toggle (Windows student rig only; self-hides
+              on Jetson/cloud where the GUI control bridge is absent). */}
+          <LeaderToggle isActive={isActive} />
+        </div>
       </header>
       <main className="flex-1 overflow-hidden flex flex-col">
         {calibrated ? (

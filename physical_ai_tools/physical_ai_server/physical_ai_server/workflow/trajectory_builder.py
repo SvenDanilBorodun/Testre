@@ -34,12 +34,43 @@ import numpy as np
 DEFAULT_FPS = 30
 DEFAULT_CHUNK_DURATION_S = 1.0
 
+# OMX joint velocity limit (rad/s) — every revolute joint in omx_f.urdf
+# carries velocity="4.8". We size segment durations so no joint's PEAK
+# quintic velocity exceeds this fraction of the limit.
+JOINT_VELOCITY_LIMIT_RAD_S = 4.8
+_VELOCITY_SAFETY_FRACTION = 0.6
+# A quintic blend (10s³−15s⁴+6s⁵) has a peak velocity factor of 15/8 = 1.875
+# at s=0.5, so peak joint velocity = |delta| · 1.875 / duration.
+_QUINTIC_PEAK_VELOCITY_FACTOR = 15.0 / 8.0
+
 
 def quintic_blend(s: float) -> float:
     """Smooth scalar blend ``s in [0, 1]`` -> blended position with zero
     velocity and zero acceleration at the endpoints."""
     s = max(0.0, min(1.0, s))
     return 10 * s ** 3 - 15 * s ** 4 + 6 * s ** 5
+
+
+def _velocity_safe_duration(delta: "np.ndarray", duration_s: float) -> float:
+    """Return a duration at least large enough that no joint's peak quintic
+    velocity exceeds ``_VELOCITY_SAFETY_FRACTION`` of the joint limit.
+
+    A large single-joint swing — most dangerously a joint1 base-yaw that
+    sweeps the long way (~2π) when consecutive targets straddle ±π, e.g. a
+    front-of-arm point followed by a manually-pinned behind-the-base
+    destination — would otherwise hit the requested 2.5 s and graze the
+    4.8 rad/s limit (peak ≈ |delta|·1.875/duration → 6.28·1.875/2.5 ≈
+    4.71 rad/s). Scaling the duration with the largest joint delta keeps the
+    motion smooth and within limits for ANY swing; small moves keep their
+    requested (faster) duration unchanged."""
+    if delta.size == 0:
+        return duration_s
+    max_delta = float(np.max(np.abs(delta)))
+    if max_delta <= 0.0:
+        return duration_s
+    v_safe = _VELOCITY_SAFETY_FRACTION * JOINT_VELOCITY_LIMIT_RAD_S
+    min_duration = max_delta * _QUINTIC_PEAK_VELOCITY_FACTOR / v_safe
+    return max(duration_s, min_duration)
 
 
 def build_segment(
@@ -51,7 +82,11 @@ def build_segment(
     """Return a list of (q, t_from_start_s) waypoints sampled at ``fps``
     Hz over a quintic-blended path from q_start to q_end. The first
     sample is at ``t = dt`` (not 0) so chained segments don't emit a
-    zero-time duplicate."""
+    zero-time duplicate.
+
+    ``duration_s`` is the REQUESTED duration; it is automatically extended
+    (never shortened) when a large joint delta would otherwise exceed the
+    safe per-joint velocity fraction — see ``_velocity_safe_duration``."""
     if len(q_start) != len(q_end):
         raise ValueError('q_start and q_end must have the same length')
     if duration_s <= 0:
@@ -60,6 +95,8 @@ def build_segment(
     q_start_arr = np.asarray(q_start, dtype=np.float64)
     q_end_arr = np.asarray(q_end, dtype=np.float64)
     delta = q_end_arr - q_start_arr
+
+    duration_s = _velocity_safe_duration(delta, duration_s)
 
     num_samples = max(1, int(round(duration_s * fps)))
     dt = duration_s / num_samples
@@ -90,6 +127,18 @@ def chunked_publish(
     chunk: list[tuple[list[float], float]] = []
     chunk_start_t = 0.0
 
+    def _pace(seconds: float) -> bool:
+        """Block ``seconds`` of real wall-clock time (polling should_stop)
+        so the controller has time to consume the just-published chunk
+        before anything else is published onto the same topic. Returns
+        ``False`` if a stop was requested mid-pace."""
+        sleep_target = time.monotonic() + seconds
+        while time.monotonic() < sleep_target:
+            if should_stop():
+                return False
+            time.sleep(min(0.05, sleep_target - time.monotonic()))
+        return True
+
     for q, t in points:
         if should_stop():
             return False
@@ -98,17 +147,28 @@ def chunked_publish(
             publisher(chunk)
             chunk = []
             chunk_start_t = t
-            # Sleep for the chunk duration so the controller has time to
-            # consume the trajectory before the next chunk is published.
             # Real-time clock — ros2 controllers want their inputs paced.
-            sleep_target = time.monotonic() + chunk_duration_s
-            while time.monotonic() < sleep_target:
-                if should_stop():
-                    return False
-                time.sleep(min(0.05, sleep_target - time.monotonic()))
+            if not _pace(chunk_duration_s):
+                return False
 
     if chunk:
         if should_stop():
             return False
+        # The remainder (a sub-chunk_size tail) is the LAST piece of this
+        # segment. Pace it by its own remaining duration before returning so
+        # the NEXT _publish_motion call can't pre-empt it the instant it's
+        # sent. Without this, a short segment whose whole trajectory fits in
+        # one remainder (e.g. a 0.5 s / 15-point gripper close, below the
+        # 1.0 s / 30-point chunk_size) returns in ~0 ms and the following
+        # segment (the lift) is published immediately — the arm starts
+        # lifting before the gripper has physically closed, slipping the
+        # object. ``chunk[-1][1]`` is the remainder's end-time measured from
+        # ``chunk_start_t`` (build_segment emits monotonically increasing
+        # per-chunk times), i.e. exactly how long the controller needs to
+        # play it out.
+        remainder_duration_s = chunk[-1][1] if chunk else 0.0
         publisher(chunk)
+        if remainder_duration_s > 0.0:
+            if not _pace(remainder_duration_s):
+                return False
     return True

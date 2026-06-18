@@ -89,6 +89,7 @@ export const DE = {
   // Destinations
   DESTINATION_PIN: 'setze %1 = Pin (Klick auf Szenenkamera)',
   DESTINATION_CURRENT: 'setze %1 = aktuelle Position',
+  DESTINATION_REF: 'Ziel %1',
 
   // Output
   LOG: 'melde %1',
@@ -162,11 +163,6 @@ export const DE = {
   DEBUG_VISIBLE_OBJECTS: 'Sichtbare Objekte',
 
   // Calibration wizard rebuild
-  CALIB_STEP_1: 'Schritt 1 von 5',
-  CALIB_STEP_2: 'Schritt 2 von 5',
-  CALIB_STEP_3: 'Schritt 3 von 5',
-  CALIB_STEP_4: 'Schritt 4 von 5',
-  CALIB_STEP_5: 'Schritt 5 von 5',
   CALIB_DIVERSITY_HINT:
     'Mindestens 12 Bilder für die Kamerakalibrierung und 14 für die '
     + 'Hand-Auge-Kalibrierung aus verschiedenen Winkeln aufnehmen — '

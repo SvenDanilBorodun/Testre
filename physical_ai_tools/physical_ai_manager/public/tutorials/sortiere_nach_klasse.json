@@ -23,10 +23,11 @@
     },
     {
       "title": "Liste durchsortieren",
-      "body": "Schreibe eine Schleife: für jedes Element in der Beschreibungsliste {Banane, Tasse, Würfel} fahre dorthin und lege es auf den passenden Pin ab.",
+      "body": "Schreibe eine Schleife: für jedes Element in der Beschreibungsliste {Banane, Tasse, Würfel} fahre dorthin und lege es auf den passenden Pin ab. Ziehe für \"lege ab bei\" einen \"Ziel\"-Block mit dem Pin-Namen in das Loch.",
       "allowed_blocks": [
         "edubotics_detect_open_vocab",
         "edubotics_destination_pin",
+        "edubotics_destination_ref",
         "edubotics_pickup",
         "edubotics_drop_at",
         "edubotics_home",

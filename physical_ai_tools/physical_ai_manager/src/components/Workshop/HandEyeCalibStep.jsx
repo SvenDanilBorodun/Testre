@@ -12,86 +12,67 @@ import React, { useState, useCallback, useEffect } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import toast from 'react-hot-toast';
 import { useRosServiceCaller } from '../../hooks/useRosServiceCaller';
+import CameraFeedOverlay from './CameraFeedOverlay';
 import {
   markStepComplete,
   setCalibProgress,
-  setMethodDisagreement,
   setCalibError,
   resetCalibProgress,
 } from '../../features/workshop/workshopSlice';
 
-const SETTLE_MS = 1000;
-
+// WS4 (2026-06-17): SCENE-camera extrinsic via a SINGLE-SHOT board-on-table
+// measurement — NO arm motion. The student lays the ChArUco board flat on the
+// table at the marked reference point; the static scene camera sees it once;
+// the server computes T_camera_to_base from the known board placement. This
+// replaces the old auto-pose eye-to-base flow that drove a gripper-mounted
+// board through 14 IK poses (which the deployed crude IK cannot do).
+//
+// Only `camera === 'scene'` is ever passed here now (the gripper steps were
+// removed from the wizard); the `camera` prop is kept for clarity.
 function HandEyeCalibStep({ camera }) {
   const dispatch = useDispatch();
   const {
     startCalibration,
-    autoPoseSuggest,
-    executeCalibrationPose,
     calibrationCaptureFrame,
     calibrationSolve,
   } = useRosServiceCaller();
   const framesCaptured = useSelector((s) => s.workshop.framesCaptured);
   const framesRequired = useSelector((s) => s.workshop.framesRequired);
-  const methodDisagreement = useSelector((s) => s.workshop.methodDisagreement);
   const calibError = useSelector((s) => s.workshop.calibError);
   const [busy, setBusy] = useState(null);
   const [started, setStarted] = useState(false);
 
-  const cameraLabel = camera === 'gripper'
-    ? 'Greifer-Kamera (eye-in-hand)'
-    : 'Szenen-Kamera (eye-to-base)';
-
-  // Reset progress on camera change so a switch doesn't show stale
-  // counts.
+  // Reset progress on mount / camera change so a switch doesn't show stale
+  // counts. The single-shot extrinsic needs exactly one frame.
   useEffect(() => {
     setStarted(false);
     dispatch(resetCalibProgress());
-    dispatch(setCalibProgress({ framesCaptured: 0, framesRequired: 14 }));
+    dispatch(setCalibProgress({ framesCaptured: 0, framesRequired: 1 }));
   }, [camera, dispatch]);
 
   const handleStart = useCallback(async () => {
     setBusy('start');
     try {
-      const r = await startCalibration(camera, 'handeye');
+      // 'extrinsic' is the WS4 step name; the server also accepts the legacy
+      // 'handeye' synonym, but we send the new name.
+      const r = await startCalibration(camera, 'extrinsic');
       if (!r.success) {
         toast.error(r.message || 'Kalibrierung konnte nicht gestartet werden.');
         return;
       }
       setStarted(true);
+      dispatch(setCalibError(null));
       toast.success(r.message);
     } catch (e) {
       toast.error(`Service-Aufruf fehlgeschlagen: ${e.message || e}`);
     } finally {
       setBusy(null);
     }
-  }, [startCalibration, camera]);
+  }, [startCalibration, camera, dispatch]);
 
-  const handleSuggestAndExecute = useCallback(async () => {
-    setBusy('move');
+  const handleCapture = useCallback(async () => {
+    setBusy('capture');
     try {
-      const suggest = await autoPoseSuggest(camera);
-      if (!suggest.success) {
-        toast.error(suggest.message || 'Keine erreichbare Pose gefunden.');
-        return;
-      }
-      const target = {
-        target_x: suggest.target_x,
-        target_y: suggest.target_y,
-        target_z: suggest.target_z,
-        target_qx: suggest.target_qx,
-        target_qy: suggest.target_qy,
-        target_qz: suggest.target_qz,
-        target_qw: suggest.target_qw,
-      };
-      const exec = await executeCalibrationPose(target);
-      if (!exec.success) {
-        toast.error(exec.message || 'Pose konnte nicht angefahren werden.');
-        return;
-      }
-      // Settle the arm before capturing — the trajectory has finished
-      // publishing but the controller may still be tracking residuals.
-      await new Promise((resolve) => setTimeout(resolve, SETTLE_MS));
       const cap = await calibrationCaptureFrame(camera);
       if (!cap.success) {
         toast.error(cap.message || 'Bild konnte nicht erfasst werden.');
@@ -100,26 +81,25 @@ function HandEyeCalibStep({ camera }) {
       dispatch(setCalibProgress({
         framesCaptured: cap.frames_captured,
         framesRequired: cap.frames_required,
-        lastViewRms: cap.last_view_rms,
       }));
-      toast.success(cap.message || 'Pose erfasst.');
+      toast.success(cap.message || 'Bild erfasst.');
     } catch (e) {
       toast.error(`Service-Aufruf fehlgeschlagen: ${e.message || e}`);
     } finally {
       setBusy(null);
     }
-  }, [autoPoseSuggest, executeCalibrationPose, calibrationCaptureFrame, camera, dispatch]);
+  }, [calibrationCaptureFrame, camera, dispatch]);
 
   const handleSolve = useCallback(async () => {
     setBusy('solve');
     try {
-      const r = await calibrationSolve(camera, 'handeye');
+      const r = await calibrationSolve(camera, 'extrinsic');
       if (!r.success) {
-        dispatch(setCalibError(r.message || 'Hand-Auge-Solver fehlgeschlagen.'));
-        toast.error(r.message || 'Hand-Auge-Solver fehlgeschlagen.');
+        dispatch(setCalibError(r.message || 'Extrinsik-Solver fehlgeschlagen.'));
+        toast.error(r.message || 'Extrinsik-Solver fehlgeschlagen.');
         return;
       }
-      dispatch(setMethodDisagreement(r.method_disagreement));
+      dispatch(setCalibError(null));
       dispatch(markStepComplete(`${camera}_handeye`));
       toast.success(r.message);
     } catch (e) {
@@ -129,33 +109,64 @@ function HandEyeCalibStep({ camera }) {
     }
   }, [calibrationSolve, camera, dispatch]);
 
-  const enoughFrames = framesCaptured >= framesRequired;
+  const haveFrame = framesCaptured >= (framesRequired || 1);
 
   return (
     <div className="max-w-2xl">
       <h3 className="text-lg font-semibold text-[var(--ink)] mb-2">
-        Hand-Auge-Kalibrierung — {cameraLabel}
+        Szenen-Kamera — Extrinsik (Tafel auf dem Tisch)
       </h3>
-      <p className="text-sm text-[var(--ink-3)] mb-4">
-        Der Roboter fährt eine Reihe von Kalibrier-Posen automatisch an. Bitte
-        kontrolliere bei jeder Pose, dass die ChArUco-Tafel im Bild zu sehen ist.
+      <p className="text-sm text-[var(--ink-3)] mb-3">
+        In diesem Schritt lernt der Roboter, wo die Szenen-Kamera relativ zu
+        seiner Basis steht. Dafür reicht <strong>ein einziges Bild</strong> —
+        der Roboterarm bewegt sich dabei nicht.
       </p>
 
-      <div className="bg-white border border-[var(--line)] rounded-lg p-4 mb-4">
-        <div className="flex items-center justify-between mb-2">
-          <span className="text-sm text-[var(--ink-3)]">Posen erfasst</span>
-          <span className="text-sm font-mono">
-            {framesCaptured} / {framesRequired}
-          </span>
-        </div>
-        {methodDisagreement !== null && methodDisagreement !== undefined && (
-          <p className="text-xs text-[var(--ink-4)] mt-2">
-            Übereinstimmung PARK ↔ TSAI: {methodDisagreement.toFixed(2)}°
+      <ol className="text-sm text-[var(--ink-3)] mb-4 list-decimal pl-5 space-y-1">
+        <li>
+          Lege die ChArUco-Tafel <strong>flach auf den Tisch</strong>, bedruckte
+          Seite nach oben.
+        </li>
+        <li>
+          Schiebe die Tafel an den <strong>markierten Punkt</strong> vor dem
+          Roboter: die Ecke mit dem ersten Marker zeigt zum Roboter, die lange
+          Kante (7 Felder) verläuft <strong>quer</strong> (links–rechts), die
+          Tafel liegt gerade — parallel zur Tischkante.
+        </li>
+        <li>
+          Prüfe im Kamerabild rechts, dass die ganze Tafel gut sichtbar und
+          nicht verdeckt ist.
+        </li>
+        <li>
+          „Bild erfassen" drücken, danach „Berechnen &amp; speichern".
+        </li>
+      </ol>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-4">
+        <div className="bg-white border border-[var(--line)] rounded-lg p-4">
+          <div className="flex items-center justify-between mb-1">
+            <span className="text-sm text-[var(--ink-3)]">Bild erfasst</span>
+            <span className="text-sm font-mono">
+              {framesCaptured} / {framesRequired || 1}
+            </span>
+          </div>
+          {haveFrame && (
+            <p className="text-xs text-emerald-700 mt-1">
+              Tafel erkannt — jetzt „Berechnen &amp; speichern".
+            </p>
+          )}
+          {calibError && (
+            <p className="text-xs text-amber-700 mt-2">{calibError}</p>
+          )}
+          <p className="text-xs text-[var(--ink-4)] italic mt-3">
+            Tipp: Den markierten Punkt einmal mit Klebeband fixieren, damit die
+            Tafel jederzeit gleich liegt. Die Genauigkeit beim Aufnehmen hängt
+            davon ab.
           </p>
-        )}
-        {calibError && (
-          <p className="text-xs text-amber-700 mt-2">{calibError}</p>
-        )}
+        </div>
+        <div className="min-h-[180px]">
+          <CameraFeedOverlay camera="scene" clickable={false} />
+        </div>
       </div>
 
       <div className="flex gap-2 flex-wrap">
@@ -166,21 +177,21 @@ function HandEyeCalibStep({ camera }) {
             onClick={handleStart}
             className="px-4 py-2 rounded-md text-sm font-medium bg-[var(--accent)] text-white hover:opacity-90 disabled:opacity-50"
           >
-            {busy === 'start' ? '…' : 'Kalibrierung starten'}
+            {busy === 'start' ? '…' : 'Extrinsik starten'}
           </button>
         ) : (
           <>
             <button
               type="button"
-              disabled={busy !== null || enoughFrames}
-              onClick={handleSuggestAndExecute}
+              disabled={busy !== null}
+              onClick={handleCapture}
               className="px-4 py-2 rounded-md text-sm font-medium bg-[var(--accent-wash)] text-[var(--accent-ink)] hover:bg-[var(--accent)] hover:text-white disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              {busy === 'move' ? 'Anfahren …' : 'Nächste Pose anfahren & erfassen'}
+              {busy === 'capture' ? 'Erfassen …' : (haveFrame ? 'Neu erfassen' : 'Bild erfassen')}
             </button>
             <button
               type="button"
-              disabled={busy !== null || !enoughFrames}
+              disabled={busy !== null || !haveFrame}
               onClick={handleSolve}
               className="px-4 py-2 rounded-md text-sm font-medium bg-[var(--accent)] text-white hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed"
             >
@@ -189,11 +200,6 @@ function HandEyeCalibStep({ camera }) {
           </>
         )}
       </div>
-
-      <p className="text-xs text-[var(--ink-4)] italic mt-3">
-        Tipp: Falls eine Pose ausserhalb des Arbeitsbereichs liegt, einfach
-        erneut "Nächste Pose" drücken — der Sampler wählt eine neue Position.
-      </p>
     </div>
   );
 }

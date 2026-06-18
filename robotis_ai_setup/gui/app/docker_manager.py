@@ -1190,6 +1190,36 @@ def start_cloud_only(log=None) -> bool:
         return False
 
 
+def restart_open_manipulator(gpu: bool = False, log=None) -> bool:
+    """Recreate ONLY the open_manipulator (arm) container, in place.
+
+    The Roboter-Studio leader toggle regenerates the .env (with or without
+    EDUBOTICS_FOLLOWER_ONLY=1) and then calls this to relaunch the arm stack in
+    the new mode. ``--no-deps`` leaves physical_ai_server (rosbridge + the React
+    app's connection + the camera ingest) running, so the student's session
+    stays connected — only the arm topics blip for ~15-20 s while the arm
+    re-homes. Compose reads the freshly-written .env via --env-file, so the new
+    FOLLOWER_ONLY value takes effect on this recreate. No image pull (the image
+    is already local; we are only recreating with a new env)."""
+    cmd = _docker_cmd(
+        *_compose_args(gpu),
+        "up", "-d", "--force-recreate", "--no-deps", "open_manipulator",
+        cwd_wsl=DOCKER_DIR_WSL,
+    )
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=180,
+            **_SUBPROCESS_KWARGS,
+        )
+        if result.returncode != 0 and log:
+            log(f"Docker Compose Fehler: {result.stderr.strip()}")
+        return result.returncode == 0
+    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+        if log:
+            log(f"Docker Compose Fehler: {e}")
+        return False
+
+
 def stop_cloud_only(log=None) -> bool:
     """Stop the physical_ai_manager container (cloud-only mode counterpart).
 

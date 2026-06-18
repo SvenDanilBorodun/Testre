@@ -30,11 +30,15 @@ Mode selection is per-block in the workflow interpreter:
 Both the ONNX session and the AprilTag detector are constructed eagerly
 in ``__init__``. On any failure (missing file, missing dependency,
 malformed model) the underlying handle stays ``None`` and the matching
-``_detect_*`` method returns ``[]`` silently. The hard-raise variant
-that existed earlier was dropped in the 2026-05 safety stripdown — a
-missing detector is a configuration issue, not a motion-safety event,
-and the Workshop UX continues with empty detections so the student can
-still use the rest of the workflow.
+``_detect_*`` method returns ``[]`` at this low level. The detection
+*blocks* never reach that empty-list path silently, though: the workflow
+guards (``handlers/perception_blocks._require_object_detector`` /
+``_require_marker_detector`` / ``has_color``) check the corresponding
+``*_available()`` getter and raise a precise German error AT THE BLOCK
+on its first detect when the backend is missing — so the student sees
+"...nicht verfügbar" naming the exact block, not a vacuous "no objects
+found". A scene-frame freshness gate (``_scene_frame``) does the same for
+a stale/absent camera frame.
 """
 
 from __future__ import annotations
@@ -85,13 +89,15 @@ class Detection:
 
 
 class Perception:
-    """Eager-initialised wrapper over HSV, YOLOX, and AprilTag backends.
+    """Eager-initialised wrapper over LAB-colour, YOLOX, and AprilTag backends.
 
     If a backend can't be constructed (missing ONNX, missing
-    ``pupil_apriltags``), the corresponding handle stays ``None`` and
-    the matching ``_detect_*`` method returns an empty list. The
-    workflow keeps running so the student can use the remaining blocks;
-    a "no detections" outcome surfaces naturally to the editor.
+    ``pupil_apriltags``), the corresponding handle stays ``None`` and the
+    matching ``_detect_*`` method returns an empty list at this level. The
+    ``*_available()`` getters expose that state so the workflow's detection
+    blocks (``handlers/perception_blocks``) can fail LOUD with a German
+    error at the block instead of silently yielding "no detections" — see
+    the module docstring.
     """
 
     def __init__(self) -> None:
@@ -108,6 +114,19 @@ class Perception:
     def set_color_profile(self, profile: dict[str, dict]) -> None:
         """Inject LAB clusters from ``ColorProfileManager.lab_profile`` outputs."""
         self._color_profile = profile
+
+    def yolox_available(self) -> bool:
+        """True when the YOLOX object detector loaded. Used to fail LOUD at
+        workflow start instead of silently returning [] for a missing model."""
+        return self._yolox_session is not None
+
+    def apriltag_available(self) -> bool:
+        """True when the AprilTag marker detector loaded."""
+        return self._apriltag_detector is not None
+
+    def has_color(self, color: str | None) -> bool:
+        """True when ``color`` has a loaded LAB profile."""
+        return bool(color) and color in self._color_profile
 
     def detect(
         self,

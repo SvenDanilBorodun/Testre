@@ -14,3 +14,6 @@ bool has_scene_intrinsics
 bool has_gripper_handeye
 bool has_scene_handeye
 bool has_color_profile
+# Touch-off table measurement solved (scene extrinsic YAML carries a measured
+# table_plane). Optional accuracy step — recommended, not gating.
+bool has_table_plane

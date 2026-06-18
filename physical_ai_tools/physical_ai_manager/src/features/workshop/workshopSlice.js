@@ -12,17 +12,23 @@ import { createSlice } from '@reduxjs/toolkit';
 
 const initialState = {
   // Calibration wizard state
+  // WS4 (2026-06-17): scene-cam-only calibration. The wizard starts on the
+  // scene intrinsic step (the gripper steps were removed). The gripper flags
+  // are kept (defaulted true = "not required") so any legacy gate that still
+  // ANDs them never blocks the editor.
   calibState: 'idle',
-  currentStep: 'gripper_intrinsic',
+  currentStep: 'scene_intrinsic',
   framesCaptured: 0,
   framesRequired: 12,
   lastViewRms: null,
   methodDisagreement: null,
   calibError: null,
-  hasIntrinsicGripper: false,
+  hasIntrinsicGripper: true,
   hasIntrinsicScene: false,
-  hasHandeyeGripper: false,
+  hasHandeyeGripper: true,
   hasHandeyeScene: false,
+  // Touch-off table measurement (optional accuracy step, recommended).
+  hasTableTouch: false,
   hasColorProfile: false,
   // Phase-2 calibration UX additions
   // 16-cell coverage map: array of length 16, each cell is the count
@@ -129,6 +135,7 @@ const workshopSlice = createSlice({
       else if (step === 'scene_intrinsic') state.hasIntrinsicScene = true;
       else if (step === 'gripper_handeye') state.hasHandeyeGripper = true;
       else if (step === 'scene_handeye') state.hasHandeyeScene = true;
+      else if (step === 'table_touch') state.hasTableTouch = true;
       else if (step === 'color_profile') state.hasColorProfile = true;
     },
     setCalibrationStatus: (state, action) => {
@@ -140,12 +147,14 @@ const workshopSlice = createSlice({
         has_scene_intrinsics,
         has_gripper_handeye,
         has_scene_handeye,
+        has_table_plane,
         has_color_profile,
       } = action.payload || {};
       if (has_gripper_intrinsics !== undefined) state.hasIntrinsicGripper = !!has_gripper_intrinsics;
       if (has_scene_intrinsics !== undefined) state.hasIntrinsicScene = !!has_scene_intrinsics;
       if (has_gripper_handeye !== undefined) state.hasHandeyeGripper = !!has_gripper_handeye;
       if (has_scene_handeye !== undefined) state.hasHandeyeScene = !!has_scene_handeye;
+      if (has_table_plane !== undefined) state.hasTableTouch = !!has_table_plane;
       if (has_color_profile !== undefined) state.hasColorProfile = !!has_color_profile;
     },
     resetCalibProgress: (state) => {
@@ -165,12 +174,18 @@ const workshopSlice = createSlice({
       // wipe them entirely the student would need `docker volume rm
       // edubotics_calib` (separate operator path; intentional, since
       // we never want to delete calibration without explicit intent).
-      state.hasIntrinsicGripper = false;
-      state.hasIntrinsicScene = false;
-      state.hasHandeyeGripper = false;
+      // WS4: keep the (vestigial) gripper flags satisfied; only the scene
+      // artefacts gate the editor now. Reset to the first scene step.
+      state.hasIntrinsicGripper = true;
+      // Intrinsics are factory-defaulted on disk (always present), so keep the
+      // intrinsic step satisfied and re-start recalibration at the extrinsic —
+      // the first step the student actually performs.
+      state.hasIntrinsicScene = true;
+      state.hasHandeyeGripper = true;
       state.hasHandeyeScene = false;
+      state.hasTableTouch = false;
       state.hasColorProfile = false;
-      state.currentStep = 'gripper_intrinsic';
+      state.currentStep = 'scene_handeye';
       state.framesCaptured = 0;
       state.methodDisagreement = null;
       state.calibError = null;

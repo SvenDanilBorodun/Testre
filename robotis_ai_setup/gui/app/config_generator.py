@@ -43,6 +43,12 @@ MANAGED_KEYS = frozenset({
     # disabling it later (line absent → compose default gripper,scene) SUPERSEDES
     # a stale 3-name value instead of leaving the /phone publisher orphaned.
     "EDUBOTICS_CAMERA_NAMES",
+    # EDUBOTICS_FOLLOWER_ONLY is MANAGED so the Roboter-Studio-vs-recording
+    # session mode is the single source of truth: a Roboter Studio start emits
+    # =1 (no leader launched); a recording start omits the line so compose's
+    # default (0) SUPERSEDES a stale =1 instead of silently keeping the leader
+    # off in a session that needs it.
+    "EDUBOTICS_FOLLOWER_ONLY",
     # CAMERA_DEVICE_N / CAMERA_NAME_N are handled by prefix-match below
     # because the count varies with how many cameras are connected.
 })
@@ -288,7 +294,8 @@ def _phone_camera_names_line() -> str:
 
 
 def generate_env_file(config: HardwareConfig, output_path: str = ENV_FILE,
-                      phone_camera: bool = False) -> str:
+                      phone_camera: bool = False,
+                      follower_only: bool = False) -> str:
     """Write .env file with hardware paths.
 
     Args:
@@ -299,11 +306,22 @@ def generate_env_file(config: HardwareConfig, output_path: str = ENV_FILE,
             node publishes /phone/image_raw/compressed (cam_id 2). When False the
             line is omitted and compose's default (gripper,scene) wins — and a
             stale 3-name value is superseded because the key is MANAGED.
+        follower_only: When True (Roboter Studio mode), emit the managed
+            ``EDUBOTICS_FOLLOWER_ONLY=1`` line and OMIT ``LEADER_PORT`` — the
+            entrypoint then never launches the leader, so the follower's
+            arm_controller is driven solely by the workflow/calibration
+            trajectory publisher (no leader broadcaster to clobber it). A
+            leader need not be scanned/configured in this mode. When False a
+            recording/teleop session is configured and both arms are required;
+            the follower-only line is omitted so compose's default (0)
+            supersedes any stale =1 (the key is MANAGED).
 
     Returns:
         The content written to the file.
     """
-    if config.leader is None or config.follower is None:
+    if config.follower is None:
+        raise ValueError("Der Follower-Arm muss konfiguriert sein, bevor die .env erzeugt wird")
+    if not follower_only and config.leader is None:
         raise ValueError("Both leader and follower arms must be configured before generating .env")
 
     from .constants import cameras_use_native_bridge
@@ -313,7 +331,14 @@ def generate_env_file(config: HardwareConfig, output_path: str = ENV_FILE,
     preserved = _read_unmanaged_lines(output_path)
     lines: list[str] = []
     lines.append(f"FOLLOWER_PORT={_quote(config.follower.serial_path)}")
-    lines.append(f"LEADER_PORT={_quote(config.leader.serial_path)}")
+    if follower_only:
+        # Roboter Studio: no leader launched. The workflow/calibration publisher
+        # is the sole writer on /leader/joint_trajectory — there is no leader
+        # broadcaster to arbitrate against. LEADER_PORT is intentionally omitted
+        # (MANAGED → a stale value is dropped, not preserved).
+        lines.append("EDUBOTICS_FOLLOWER_ONLY=1")
+    else:
+        lines.append(f"LEADER_PORT={_quote(config.leader.serial_path)}")
 
     if config.cameras:
         for i, cam in enumerate(config.cameras, 1):

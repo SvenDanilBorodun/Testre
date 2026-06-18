@@ -18,7 +18,9 @@ detection is the ``Detection`` instance, etc.). Handlers raise
 
 from __future__ import annotations
 
+import logging
 import math
+import os
 import time
 from typing import Any
 
@@ -28,10 +30,52 @@ from physical_ai_server.workflow.trajectory_builder import (
 )
 
 
+_logger = logging.getLogger(__name__)
+
+
+def _safe_float(env_name: str, default: float) -> float:
+    """Read a float from ``os.environ[env_name]`` at import time, falling
+    back to ``default`` (with a logged English [WARNUNG]) on a malformed
+    value instead of raising ``ValueError``.
+
+    A non-numeric operator override (e.g. ``EDUBOTICS_GRASP_CLEARANCE_M=12mm``
+    or an empty string) used to raise at module import — which cascades up
+    through ``handlers/__init__.py`` (it imports this module to build the
+    dispatch tables) and takes the WHOLE Roboter Studio dispatch down with an
+    opaque traceback the student can't act on. Degrade to the tuned default
+    and log loudly so the misconfiguration is visible without bricking the
+    runtime."""
+    raw = os.environ.get(env_name)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        _logger.warning(
+            '[WARNUNG] %s=%r is not a number — falling back to %s.',
+            env_name, raw, default,
+        )
+        return default
+
+
 HOME_JOINTS_RAD = [0.0, -math.pi / 4, math.pi / 4, 0.0, 0.0]
 DEFAULT_APPROACH_HEIGHT_M = 0.06
 GRIPPER_OPEN_RAD = 0.8
 GRIPPER_CLOSED_RAD = -0.5
+
+# Generic grasp (object-agnostic): the gripper descends to the measured table
+# plane (z_table from the touch-off) PLUS this conservative clearance, so the
+# fingertips straddle the lower part of a low-profile object instead of driving
+# into the table. Tuned on the rig (env-overridable).
+GRASP_CLEARANCE_M = _safe_float('EDUBOTICS_GRASP_CLEARANCE_M', 0.012)
+# Fixed tool roll (j5) for the grasp. 0 = the gripper's default orientation,
+# which grips cubes / small objects in any orientation. Orientation-from-box
+# (rotating j5 across an elongated object's short axis) is a rig-calibrated
+# refinement — it needs the camera-yaw + a rotated detection box and is left as
+# a tunable offset here rather than a guessed world-angle mapping.
+GRASP_ROLL_RAD = math.radians(_safe_float('EDUBOTICS_GRASP_ROLL_DEG', 0.0))
+# Workspace floor: never command the end-effector below the table plane.
+WORKSPACE_FLOOR_MARGIN_M = 0.01
 
 DEFAULT_HOME_DURATION_S = 3.0
 DEFAULT_MOVE_DURATION_S = 2.5
@@ -43,6 +87,32 @@ DEFAULT_GRASP_DURATION_S = 1.0
 class WorkflowError(Exception):
     """Raised by handlers with a German message ready for the editor's
     log strip and toast."""
+
+
+# The dataclass default for ctx.last_full_joints (workflow_manager seeds the
+# real follower pose over it at start, best-effort). All-exactly-zero is never
+# a real arm pose — HOME alone is [0, -π/4, π/4, 0, 0, …] — so an unchanged
+# all-zero vector means the synchronous seed never ran (no follower joints had
+# arrived / the joint source was unavailable). Commanding a motion FROM this
+# fake zero pose makes the first waypoint ≈ [0]*6, yanking j2/j3 toward 0
+# before the arm starts tracking — a lurch. We fail loud instead.
+_UNSEEDED_POSE_TOL_RAD = 1e-6
+
+
+def _require_seeded_start_pose(ctx) -> None:
+    """Raise a German error if ``ctx.last_full_joints`` is still the unseeded
+    all-zero sentinel, so the first move never commands from a fake pose."""
+    pose = getattr(ctx, 'last_full_joints', None)
+    if not pose:
+        raise WorkflowError(
+            'Aktuelle Armstellung ist noch nicht bekannt — bitte kurz warten, '
+            'bis der Roboter verbunden ist, und erneut starten.'
+        )
+    if all(abs(float(v)) <= _UNSEEDED_POSE_TOL_RAD for v in pose):
+        raise WorkflowError(
+            'Aktuelle Armstellung ist noch nicht bekannt — bitte kurz warten, '
+            'bis der Roboter verbunden ist, und erneut starten.'
+        )
 
 
 def _publish_motion(ctx, q_start: list[float], q_end: list[float], duration_s: float) -> None:
@@ -86,15 +156,28 @@ def _publish_motion(ctx, q_start: list[float], q_end: list[float], duration_s: f
         raise WorkflowError('Workflow wurde gestoppt.')
 
 
-def _solve_or_raise(ctx, target_xyz: tuple[float, float, float], free_yaw: bool = True) -> list[float]:
+def _solve_or_raise(
+    ctx,
+    target_xyz: tuple[float, float, float],
+    free_yaw: bool = True,
+    roll: float | None = None,
+) -> list[float]:
     if ctx.ik is None:
         raise WorkflowError(
-            'Kein IK-Solver verfügbar. Bitte zuerst die Kalibrierung abschließen.'
+            'Roboter-Beschreibung nicht verfügbar — der Bewegungsrechner (IK) '
+            'konnte nicht gestartet werden. Bitte die Umgebung neu starten.'
         )
+    # Workspace floor: never drive the end-effector below the table plane.
+    z_table = getattr(ctx, 'z_table', None)
+    if z_table is not None and float(target_xyz[2]) < float(z_table) - WORKSPACE_FLOOR_MARGIN_M:
+        raise WorkflowError('Zielpunkt liegt unter der Tischebene.')
     seed = ctx.last_arm_joints or HOME_JOINTS_RAD
-    solution = ctx.ik.solve(target_xyz=target_xyz, seed=seed, free_yaw=free_yaw)
+    solution = ctx.ik.solve(target_xyz=target_xyz, seed=seed, free_yaw=free_yaw, roll=roll)
     if solution is None:
-        raise WorkflowError('Position außerhalb des Arbeitsbereichs.')
+        raise WorkflowError(
+            'Position außerhalb des Arbeitsbereichs — bitte das Objekt in den '
+            'markierten Greifbereich legen (nicht zu nah am Roboter, nicht zu weit).'
+        )
     return list(solution)
 
 
@@ -122,10 +205,28 @@ def _resolve_target(value: Any, ctx) -> tuple[float, float, float]:
         return float(x), float(y), float(z)
     if isinstance(value, (list, tuple)) and len(value) == 3:
         return float(value[0]), float(value[1]), float(value[2])
+    # A Detection whose world_xyz_m is still None reached a motion block.
+    # perception_blocks._attach_world_xyz leaves it None (silently — so the
+    # count_* blocks keep working) when the calibration is incomplete:
+    # ctx.z_table / scene_intrinsics / scene_extrinsics is missing. Name the
+    # exact missing step instead of the generic "could not evaluate" message,
+    # so the student knows to finish the touch-off rather than re-running the
+    # detect block. (Both the dict shape with a None world_xyz_m and the
+    # Detection object shape land here.)
+    has_world_key = (
+        (isinstance(value, dict) and 'world_xyz_m' in value)
+        or hasattr(value, 'world_xyz_m')
+    )
+    if has_world_key:
+        raise WorkflowError(
+            'Für diesen Block muss die Tischhöhe kalibriert sein — bitte '
+            'zuerst „Tisch vermessen" abschließen.'
+        )
     raise WorkflowError('Ziel-Wert konnte nicht ausgewertet werden.')
 
 
 def home(ctx, args: dict[str, Any]) -> None:
+    _require_seeded_start_pose(ctx)
     q_start = ctx.last_full_joints
     q_end = list(HOME_JOINTS_RAD) + [GRIPPER_OPEN_RAD]
     _publish_motion(ctx, q_start, q_end, DEFAULT_HOME_DURATION_S)
@@ -134,6 +235,7 @@ def home(ctx, args: dict[str, Any]) -> None:
 
 
 def open_gripper(ctx, args: dict[str, Any]) -> None:
+    _require_seeded_start_pose(ctx)
     q_start = ctx.last_full_joints
     q_end = q_start[:5] + [GRIPPER_OPEN_RAD]
     _publish_motion(ctx, q_start, q_end, DEFAULT_GRIPPER_DURATION_S)
@@ -141,6 +243,7 @@ def open_gripper(ctx, args: dict[str, Any]) -> None:
 
 
 def close_gripper(ctx, args: dict[str, Any]) -> None:
+    _require_seeded_start_pose(ctx)
     q_start = ctx.last_full_joints
     q_end = q_start[:5] + [GRIPPER_CLOSED_RAD]
     _publish_motion(ctx, q_start, q_end, DEFAULT_GRIPPER_DURATION_S)
@@ -148,8 +251,9 @@ def close_gripper(ctx, args: dict[str, Any]) -> None:
 
 
 def move_to(ctx, args: dict[str, Any]) -> None:
+    _require_seeded_start_pose(ctx)
     target = _resolve_target(args.get('destination'), ctx)
-    arm_q = _solve_or_raise(ctx, target)
+    arm_q = _solve_or_raise(ctx, target, roll=GRASP_ROLL_RAD)
     q_end = arm_q + [ctx.last_full_joints[5]]
     _publish_motion(ctx, ctx.last_full_joints, q_end, DEFAULT_MOVE_DURATION_S)
     ctx.last_arm_joints = arm_q
@@ -157,11 +261,15 @@ def move_to(ctx, args: dict[str, Any]) -> None:
 
 
 def pickup(ctx, args: dict[str, Any]) -> None:
+    _require_seeded_start_pose(ctx)
     target = _resolve_target(args.get('target'), ctx)
+    # Conservative descend: grasp at the measured table plane + clearance so the
+    # fingertips straddle the lower part of a low object, not the table itself.
+    grasp_xyz = (target[0], target[1], target[2] + GRASP_CLEARANCE_M)
     above = (target[0], target[1], target[2] + DEFAULT_APPROACH_HEIGHT_M)
 
-    above_arm_q = _solve_or_raise(ctx, above)
-    grasp_arm_q = _solve_or_raise(ctx, target)
+    above_arm_q = _solve_or_raise(ctx, above, roll=GRASP_ROLL_RAD)
+    grasp_arm_q = _solve_or_raise(ctx, grasp_xyz, roll=GRASP_ROLL_RAD)
     lift_arm_q = above_arm_q
 
     open_q = ctx.last_full_joints[:5] + [GRIPPER_OPEN_RAD]
@@ -210,11 +318,13 @@ def drop_at(ctx, args: dict[str, Any]) -> None:
     ship moved straight to the target XYZ in joint space, which produced
     a swept-arc carry path — adjacent obstacles could be clipped on the
     way in. The bounded-quintic approach is consistent with pickup."""
+    _require_seeded_start_pose(ctx)
     target = _resolve_target(args.get('destination'), ctx)
+    drop_xyz = (target[0], target[1], target[2] + GRASP_CLEARANCE_M)
     above = (target[0], target[1], target[2] + DEFAULT_APPROACH_HEIGHT_M)
 
-    above_arm_q = _solve_or_raise(ctx, above)
-    drop_arm_q = _solve_or_raise(ctx, target)
+    above_arm_q = _solve_or_raise(ctx, above, roll=GRASP_ROLL_RAD)
+    drop_arm_q = _solve_or_raise(ctx, drop_xyz, roll=GRASP_ROLL_RAD)
 
     above_closed_q = above_arm_q + [GRIPPER_CLOSED_RAD]
     drop_closed_q = drop_arm_q + [GRIPPER_CLOSED_RAD]

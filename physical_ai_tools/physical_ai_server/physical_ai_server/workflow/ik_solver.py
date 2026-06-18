@@ -7,17 +7,51 @@
 # You may obtain a copy of the License at
 #
 #     http://www.apache.org/licenses/LICENSE-2.0
-"""Inverse kinematics for the OMX-F arm: TRAC-IK preferred, PyKDL fallback.
+"""Closed-form analytical inverse kinematics for the OMX-F arm.
 
-The solver returns the 5 arm joints (joint1..joint5); the gripper is
-appended separately by the motion handlers from the workflow primitives.
+The OMX-F (OpenMANIPULATOR-X follower) is a **5-DOF** arm:
 
-When ``free_yaw=True`` the bounds on the rotational tolerance around the
-end-effector's z-axis (``brz``) are relaxed to a full revolution, which
-lets the picker grab table-top objects from any approach angle. The
-positional tolerances (``bx,by,bz``) and the planar rotation tolerances
-(``brx,bry``) stay tight so the gripper still arrives at the requested
-point with the requested approach direction.
+* ``joint1`` — yaw about base z (aims the arm at the target column)
+* ``joint2/3/4`` — pitch about y, **coplanar** (shoulder / elbow / wrist-pitch)
+* ``joint5`` — roll about the forearm x-axis (tool roll)
+* (``gripper`` is a separate open/close servo, not a positioning DOF)
+
+Roboter Studio does **top-down** table-top picking, so this solver computes a
+single **strict-vertical (straight-down) grasp** configuration: the gripper
+approaches the target pointing straight down, ``joint5`` rolls the tool to a
+requested angle (e.g. across an elongated object's short axis), and the elbow
+is fixed **elbow-up** for a deterministic, smooth, repeatable posture.
+
+Why closed-form (and nothing else):
+
+* **Deterministic** — same input → bit-identical output. No RNG, no wall-clock
+  timeout, no thread race. This is what kills the erratic "crazy motion" that
+  orientation-unconstrained numerical IK (KDL-LMA / TRAC-IK free-yaw) produced:
+  those flip between contorted configs between consecutive targets.
+* **No fragile dependency** — pure Python + NumPy. No ``tracikpy`` SWIG/ROS-lib
+  build (the Fast-CDR ABI-crash class), no IKFast generation (which fails to
+  generate for this non-spherical-wrist + bent-link geometry).
+* **Verifiable** — an exact NumPy forward kinematics (``fk``) is built from the
+  same URDF constants, so ``fk(solve(p)) ≈ p`` is a pure-Python CI gate
+  (``test_ik_solver.py``) that needs no container / PyKDL.
+
+The arm physically cannot hold an arbitrary 6-DOF orientation (tool yaw is
+locked to ``joint1``), and strict-vertical reach is a table-top **annulus**.
+The wrist-centre 2R span bounds the reach at ``|L2−L3| ≈ 0.04`` to
+``L2+L3 ≈ 0.28`` m from the shoulder; projected onto the table plane (z=0,
+straight-down grasp) the inner reachable radius is ~0.04 m and the practical
+outer radius is ~0.26 m (rig/CI-verified: ``solve`` returns None at 0.03 m,
+reachable from ~0.04 m). The classroom mat marks the usable ring; the
+authoritative bound is always ``solve(...) is not None``, not a hard-coded
+radius. A target outside the annulus / joint limits returns ``None`` (the
+motion handler surfaces a clean German "unreachable" message) — this is a
+property of the hardware, not a fallback.
+
+Geometry constants are transcribed from
+``open_manipulator/open_manipulator_description/urdf/omx_f/omx_f.urdf`` (parent
+→ child joint-origin xyz). When a ``urdf_string`` is supplied the constants are
+**verified** against it at construction (a mismatch logs loudly) so a future
+URDF edit can't silently invalidate the hand-derived math.
 """
 
 from __future__ import annotations
@@ -31,217 +65,246 @@ import numpy as np
 _logger = logging.getLogger(__name__)
 
 
-_BX = 1e-3
-_BY = 1e-3
-_BZ = 1e-3
-_BRX = 1e-2
-_BRY = 1e-2
-_BRZ_FREE_YAW = 2 * math.pi
-_BRZ_LOCKED = 1e-2
+# ── Kinematic constants (metres) — omx_f.urdf parent→child joint origins ─────
+# link0 → joint1 (axis z); link1 → joint2 (axis y); link2 → joint3 (axis y,
+# the BENT link); link3 → joint4 (axis y); link4 → joint5 (axis x); link5 →
+# end_effector_link (fixed).
+_J1_XYZ = (-0.01125, 0.0, 0.034)
+_J2_XYZ = (0.0, 0.0, 0.0635)
+_J3_XYZ = (0.0415, 0.0, 0.11315)
+_J4_XYZ = (0.162, 0.0, 0.0)
+_J5_XYZ = (0.0287, 0.0, 0.0)
+_EE_XYZ = (0.09193, -0.0016, 0.0)
 
-_DEFAULT_TIMEOUT_S = 0.05
-_DEFAULT_RETRIES = 2
-_SEED_PERTURBATION_RAD = 0.10
+# Derived planar parameters (in the joint-1 vertical plane):
+#   shoulder (joint2) height above base:
+_SHOULDER_Z = _J1_XYZ[2] + _J2_XYZ[2]                 # 0.0975 m
+#   shoulder horizontal offset along base-x of the joint-1 axis:
+_J1_AXIS_X = _J1_XYZ[0]                                # -0.01125 m
+#   upper arm joint2→joint3: length + bent-link offset angle from vertical:
+_L2 = math.hypot(_J3_XYZ[0], _J3_XYZ[2])              # 0.12053 m
+_PHI0 = math.atan2(_J3_XYZ[0], _J3_XYZ[2])            # 0.35155 rad (20.14 deg)
+#   forearm joint3→joint4:
+_L3 = _J4_XYZ[0]                                       # 0.162 m
+#   tool joint4→end_effector along the forearm x-axis (the ~1.6 mm lateral
+#   y-offset of the EE is ignored — it is perpendicular to the vertical
+#   approach and well under the grasp tolerance):
+_L_TOOL = _J5_XYZ[0] + _EE_XYZ[0]                     # 0.12063 m
+
+#   strict-vertical reach annulus (wrist-center distance from shoulder must lie
+#   within the 2R span); used for an early reachability message.
+_REACH_MIN = abs(_L2 - _L3)                            # 0.0415 m
+_REACH_MAX = _L2 + _L3                                 # 0.2825 m
+
+# Default downward approach: the cumulative pitch joint2+joint3+joint4 that
+# points the forearm/tool straight down (-z) is +pi/2.
+_VERTICAL_PITCH_SUM = math.pi / 2.0
+
+
+# ── Real Dynamixel arm joint position limits (radians) ──────────────────────
+# Source: docker/open_manipulator/overlays/omx_f.ros2_control.xacro Min/Max
+# Position Limit (encoder ticks, 4096/rev, centre 2048 → 0 rad). joint2/3 carry
+# explicit Min/Max Position Limit params (transcribed below); joint1/4/5 carry
+# no such param, so here they are clamped to a conservative one-turn range
+# (-pi, pi) rather than the URDF's full ±2 pi — a single revolution is more
+# than the top-down picker needs and keeps j1 from winding multiple turns.
+# Authoritative motion clamp (tighter than the URDF ±2 pi).
+def _ticks_to_rad(ticks: float) -> float:
+    return (ticks - 2048.0) * (2.0 * math.pi / 4096.0)
+
+
+_DXL_JOINT_LIMITS_RAD: list[tuple[float, float]] = [
+    (-math.pi, math.pi),                                   # joint1 (dxl11)
+    (_ticks_to_rad(830), _ticks_to_rad(3129)),             # joint2 (dxl12)
+    (_ticks_to_rad(1024), _ticks_to_rad(3140)),            # joint3 (dxl13)
+    (-math.pi, math.pi),                                   # joint4 (dxl14)
+    (-math.pi, math.pi),                                   # joint5 (dxl15)
+]
+
+# FK∘IK acceptance: a returned solve() must place the EE within this many
+# metres of the requested target (covers the ~1.6 mm structural tool offset +
+# float noise). The CI gate uses the same bound.
+_FK_TOL_M = 3e-3
+
+
+def _rot(axis: str, theta: float) -> np.ndarray:
+    c, s = math.cos(theta), math.sin(theta)
+    if axis == 'x':
+        return np.array([[1, 0, 0], [0, c, -s], [0, s, c]], dtype=np.float64)
+    if axis == 'y':
+        return np.array([[c, 0, s], [0, 1, 0], [-s, 0, c]], dtype=np.float64)
+    return np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]], dtype=np.float64)  # z
+
+
+def _tf(xyz: tuple[float, float, float], axis: Optional[str], theta: float) -> np.ndarray:
+    T = np.eye(4, dtype=np.float64)
+    if axis is not None:
+        T[:3, :3] = _rot(axis, theta)
+    T[:3, 3] = xyz
+    return T
 
 
 class IKSolver:
-    """Cartesian-pose -> joint solver. Constructed once with the URDF
-    string; ``solve()`` is called per motion primitive."""
+    """Closed-form Cartesian→joint solver for the OMX-F arm.
+
+    Constructed once (optionally with the ``/robot_description`` URDF string,
+    used only to *verify* the baked constants). ``solve()`` is called per
+    motion primitive; ``fk()`` provides exact forward kinematics for
+    calibration touch-off / pose readout.
+    """
 
     def __init__(
         self,
-        urdf_string: str,
+        urdf_string: Optional[str] = None,
         base_link: str = 'link0',
         tip_link: str = 'end_effector_link',
     ) -> None:
         self._base_link = base_link
         self._tip_link = tip_link
-        self._urdf_string = urdf_string
-        self._tracik = self._try_init_tracik()
-        self._kdl = None
-        if self._tracik is None:
-            self._kdl = self._try_init_kdl()
-        if self._tracik is None and self._kdl is None:
-            raise RuntimeError(
-                'Neither TRAC-IK nor PyKDL is available — install '
-                'ros-jazzy-trac-ik-python or ros-jazzy-python-orocos-kdl-vendor.'
-            )
+        self._joint_limits = list(_DXL_JOINT_LIMITS_RAD)
+        if urdf_string:
+            self._verify_constants(urdf_string)
 
-    def _try_init_tracik(self):
-        # Distinguish "package not installed" (expected on Jazzy until apt
-        # ships ros-jazzy-trac-ik-python) from "URDF/chain misconfigured"
-        # (a bug the operator must see). Both reduce to "no TRAC-IK" but
-        # only the latter is worth a warning in container logs.
-        try:
-            from trac_ik_python.trac_ik import IK
-        except ImportError:
-            _logger.info(
-                'TRAC-IK Python bindings not installed; '
-                'falling back to PyKDL.'
-            )
-            return None
-        try:
-            return IK(
-                self._base_link,
-                self._tip_link,
-                urdf_string=self._urdf_string,
-                timeout=_DEFAULT_TIMEOUT_S,
-                solve_type='Distance',
-            )
-        except Exception:
-            _logger.exception(
-                'TRAC-IK construction failed (base=%s tip=%s) — '
-                'falling back to PyKDL. Check the URDF and link names.',
-                self._base_link, self._tip_link,
-            )
-            return None
-
-    def _try_init_kdl(self):
-        try:
-            import PyKDL
-            from urdf_parser_py.urdf import URDF
-            from kdl_parser_py.urdf import treeFromUrdfModel
-        except ImportError:
-            _logger.info(
-                'PyKDL or kdl_parser_py not installed; IK disabled.'
-            )
-            return None
-        try:
-            urdf = URDF.from_xml_string(self._urdf_string)
-            ok, tree = treeFromUrdfModel(urdf)
-            if not ok:
-                _logger.error(
-                    'kdl_parser_py.treeFromUrdfModel returned ok=False — '
-                    'URDF is malformed; IK disabled.'
-                )
-                return None
-            chain = tree.getChain(self._base_link, self._tip_link)
-            return {
-                'PyKDL': PyKDL,
-                'chain': chain,
-                'fk_solver': PyKDL.ChainFkSolverPos_recursive(chain),
-                'ik_solver': PyKDL.ChainIkSolverPos_LMA(chain),
-                'num_joints': chain.getNrOfJoints(),
-            }
-        except Exception:
-            _logger.exception(
-                'PyKDL chain construction failed (base=%s tip=%s) — '
-                'IK disabled. Check the URDF and link names.',
-                self._base_link, self._tip_link,
-            )
-            return None
+    @property
+    def backend(self) -> str:
+        """Identifies the active solver. Always closed-form analytical."""
+        return 'closed-form'
 
     def num_joints(self) -> int:
-        """Return the number of joints in the IK chain (excludes any extra
-        passive/gripper joints)."""
-        if self._tracik is not None:
-            return int(self._tracik.number_of_joints)
-        if self._kdl is not None:
-            return int(self._kdl['num_joints'])
-        return 0
+        """Number of arm joints solved (joint1..joint5)."""
+        return 5
+
+    # ── verification ────────────────────────────────────────────────────────
+    def _verify_constants(self, urdf_string: str) -> None:
+        """Best-effort: parse the URDF joint origins and warn loudly if they
+        diverge from the baked constants the hand-derived math depends on."""
+        try:
+            from urdf_parser_py.urdf import URDF
+            urdf = URDF.from_xml_string(urdf_string)
+            origins = {}
+            for j in urdf.joints:
+                if j.origin is not None and j.origin.xyz is not None:
+                    origins[j.name] = tuple(float(v) for v in j.origin.xyz)
+            expect = {
+                'joint1': _J1_XYZ, 'joint2': _J2_XYZ, 'joint3': _J3_XYZ,
+                'joint4': _J4_XYZ, 'joint5': _J5_XYZ,
+                'end_effector_joint': _EE_XYZ,
+            }
+            for name, exp in expect.items():
+                got = origins.get(name)
+                if got is not None and not all(
+                    abs(a - b) < 1e-4 for a, b in zip(got, exp)
+                ):
+                    _logger.error(
+                        'IK constant mismatch for %s: URDF=%s baked=%s — the '
+                        'closed-form IK math assumes the baked geometry; update '
+                        'ik_solver.py if the arm changed.', name, got, exp,
+                    )
+        except Exception:  # noqa: BLE001 — verification is advisory only
+            _logger.info('URDF constant verification skipped (parse failed).')
+
+    # ── forward kinematics (exact, pure NumPy) ───────────────────────────────
+    def _fk_matrix(self, joints) -> Optional[np.ndarray]:
+        j = list(joints)
+        if len(j) < 5:
+            return None
+        T = (
+            _tf(_J1_XYZ, 'z', j[0])
+            @ _tf(_J2_XYZ, 'y', j[1])
+            @ _tf(_J3_XYZ, 'y', j[2])
+            @ _tf(_J4_XYZ, 'y', j[3])
+            @ _tf(_J5_XYZ, 'x', j[4])
+            @ _tf(_EE_XYZ, None, 0.0)
+        )
+        return T
 
     def fk(self, joints) -> Optional[tuple[np.ndarray, np.ndarray]]:
-        """Forward kinematics: returns ``(R 3x3, t 3,)`` of the end-effector
-        in base frame for the given joint vector, or ``None`` when FK is
-        unavailable (no PyKDL backend) or the input shape doesn't match
-        the IK chain. Always uses the PyKDL FK chain; lazily builds one
-        if only TRAC-IK was initialised."""
-        if self._kdl is None:
-            self._kdl = self._try_init_kdl()
-        if self._kdl is None:
+        """Forward kinematics: ``(R 3x3, t 3,)`` of ``end_effector_link`` in the
+        base frame for the given joint vector (joint1..joint5; extra entries
+        are ignored), or ``None`` if fewer than 5 joints are supplied."""
+        T = self._fk_matrix(joints)
+        if T is None:
             return None
-        n = self._kdl['num_joints']
-        joints = list(joints)
-        if len(joints) < n:
-            return None
-        PyKDL = self._kdl['PyKDL']
-        q = PyKDL.JntArray(n)
-        for i in range(n):
-            q[i] = float(joints[i])
-        frame = PyKDL.Frame()
-        rc = self._kdl['fk_solver'].JntToCart(q, frame)
-        if rc != 0:
-            return None
-        R = np.array([
-            [frame.M[0, 0], frame.M[0, 1], frame.M[0, 2]],
-            [frame.M[1, 0], frame.M[1, 1], frame.M[1, 2]],
-            [frame.M[2, 0], frame.M[2, 1], frame.M[2, 2]],
-        ], dtype=np.float64)
-        t = np.array([frame.p.x(), frame.p.y(), frame.p.z()], dtype=np.float64)
-        return R, t
+        return T[:3, :3].copy(), T[:3, 3].copy()
 
-    @staticmethod
-    def _rpy_to_rotation(rpy: tuple[float, float, float]) -> np.ndarray:
-        roll, pitch, yaw = rpy
-        cr, sr = math.cos(roll), math.sin(roll)
-        cp, sp = math.cos(pitch), math.sin(pitch)
-        cy, sy = math.cos(yaw), math.sin(yaw)
-        return np.array([
-            [cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr],
-            [sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr],
-            [-sp,     cp * sr,                cp * cr],
-        ])
+    def _fk_position(self, joints) -> Optional[np.ndarray]:
+        T = self._fk_matrix(joints)
+        return None if T is None else T[:3, 3].copy()
 
-    @staticmethod
-    def _quat_to_rotation(quat: tuple[float, float, float, float]) -> np.ndarray:
-        """Convert (qx, qy, qz, qw) to a 3x3 rotation matrix."""
-        qx, qy, qz, qw = quat
-        norm = math.sqrt(qx * qx + qy * qy + qz * qz + qw * qw)
-        if norm < 1e-9:
-            return np.eye(3)
-        qx /= norm
-        qy /= norm
-        qz /= norm
-        qw /= norm
-        return np.array([
-            [1 - 2 * (qy * qy + qz * qz), 2 * (qx * qy - qz * qw),     2 * (qx * qz + qy * qw)],
-            [2 * (qx * qy + qz * qw),     1 - 2 * (qx * qx + qz * qz), 2 * (qy * qz - qx * qw)],
-            [2 * (qx * qz - qy * qw),     2 * (qy * qz + qx * qw),     1 - 2 * (qx * qx + qy * qy)],
-        ])
-
-    @staticmethod
-    def _rotation_to_quaternion(R: np.ndarray) -> tuple[float, float, float, float]:
-        trace = R[0, 0] + R[1, 1] + R[2, 2]
-        if trace > 0.0:
-            s = math.sqrt(trace + 1.0) * 2.0
-            qw = 0.25 * s
-            qx = (R[2, 1] - R[1, 2]) / s
-            qy = (R[0, 2] - R[2, 0]) / s
-            qz = (R[1, 0] - R[0, 1]) / s
-        elif R[0, 0] > R[1, 1] and R[0, 0] > R[2, 2]:
-            s = math.sqrt(1.0 + R[0, 0] - R[1, 1] - R[2, 2]) * 2.0
-            qw = (R[2, 1] - R[1, 2]) / s
-            qx = 0.25 * s
-            qy = (R[0, 1] + R[1, 0]) / s
-            qz = (R[0, 2] + R[2, 0]) / s
-        elif R[1, 1] > R[2, 2]:
-            s = math.sqrt(1.0 + R[1, 1] - R[0, 0] - R[2, 2]) * 2.0
-            qw = (R[0, 2] - R[2, 0]) / s
-            qx = (R[0, 1] + R[1, 0]) / s
-            qy = 0.25 * s
-            qz = (R[1, 2] + R[2, 1]) / s
-        else:
-            s = math.sqrt(1.0 + R[2, 2] - R[0, 0] - R[1, 1]) * 2.0
-            qw = (R[1, 0] - R[0, 1]) / s
-            qx = (R[0, 2] + R[2, 0]) / s
-            qy = (R[1, 2] + R[2, 1]) / s
-            qz = 0.25 * s
-        return qx, qy, qz, qw
-
+    # ── inverse kinematics (closed form, strict vertical top-down) ───────────
     def solve(
         self,
         target_xyz: tuple[float, float, float] | np.ndarray,
         target_rpy: tuple[float, float, float] = (math.pi, 0.0, 0.0),
         seed: Optional[list[float]] = None,
         free_yaw: bool = True,
+        roll: Optional[float] = None,
     ) -> Optional[list[float]]:
-        target_xyz = np.asarray(target_xyz, dtype=np.float64).reshape(3)
-        R = self._rpy_to_rotation(target_rpy)
-        qx, qy, qz, qw = self._rotation_to_quaternion(R)
+        """Solve the 5 arm joints for a **strict-vertical** (straight-down)
+        grasp at ``target_xyz`` (base frame, metres).
 
-        if self._tracik is not None:
-            return self._solve_tracik(target_xyz, (qx, qy, qz, qw), seed, free_yaw)
-        return self._solve_kdl(target_xyz, R, seed)
+        ``roll`` sets joint5 (tool roll about the vertical approach); when
+        ``None`` it is taken from ``target_rpy``'s yaw if given, else 0.0.
+        ``seed``/``free_yaw``/``target_rpy`` are accepted for call-site
+        compatibility but do not change the deterministic position solution
+        (the picker is always top-down, elbow-up). Returns the joint list, or
+        ``None`` when the point is outside the reachable annulus / joint
+        limits.
+        """
+        x, y, z = (float(v) for v in np.asarray(target_xyz, dtype=np.float64).reshape(3))
+
+        if roll is None:
+            # target_rpy = (roll, pitch, yaw); only the yaw maps to tool roll
+            # about the vertical approach. Default 0.0.
+            roll = float(target_rpy[2]) if len(target_rpy) >= 3 else 0.0
+
+        # joint1 aims the j1 plane at the target. The shoulder sits on the j1
+        # axis (offset _J1_AXIS_X along base-x), so the radial direction is
+        # measured from that axis.
+        dx = x - _J1_AXIS_X
+        theta1 = math.atan2(y, dx)
+        r = math.hypot(dx, y)                         # radial distance from j1 axis
+
+        # Wrist centre (joint4) sits directly above the grasp by the tool
+        # length (tool points straight down).
+        w_u = r                                       # radial coord of wrist centre
+        w_v = z + _L_TOOL                             # vertical coord of wrist centre
+
+        # 2R chain (bent upper arm _L2 at intrinsic offset _PHI0, forearm _L3)
+        # from the shoulder (radial 0, vertical _SHOULDER_Z) to the wrist centre.
+        d_u = w_u
+        d_v = w_v - _SHOULDER_Z
+        rho = math.hypot(d_u, d_v)
+        if rho < _REACH_MIN - 1e-9 or rho > _REACH_MAX + 1e-9:
+            return None                               # outside the 2R span
+
+        cos_gamma = (rho * rho - _L2 * _L2 - _L3 * _L3) / (2.0 * _L2 * _L3)
+        cos_gamma = max(-1.0, min(1.0, cos_gamma))
+        gamma_mag = math.acos(cos_gamma)              # elbow bend magnitude
+
+        # Try elbow-up first (the natural picking posture), then elbow-down —
+        # deterministic order so a given target always yields the same config.
+        for gamma in (gamma_mag, -gamma_mag):
+            # A = upper-arm direction from vertical; B = forearm direction.
+            A = math.atan2(d_u, d_v) - math.atan2(_L3 * math.sin(gamma),
+                                                  _L2 + _L3 * math.cos(gamma))
+            B = A + gamma
+            theta2 = A - _PHI0
+            theta3 = (B - math.pi / 2.0) - theta2
+            theta4 = _VERTICAL_PITCH_SUM - (theta2 + theta3)
+            theta5 = roll
+            joints = [theta1, theta2, theta3, theta4, _wrap(theta5)]
+            if not self._within_limits(joints):
+                continue
+            # Verify with exact FK (catches any derivation/sign error and the
+            # tiny structural tool offset).
+            fk_pos = self._fk_position(joints)
+            if fk_pos is None:
+                continue
+            if float(np.linalg.norm(fk_pos - np.array([x, y, z]))) > _FK_TOL_M:
+                continue
+            return [float(v) for v in joints]
+        return None
 
     def solve_quat(
         self,
@@ -250,79 +313,29 @@ class IKSolver:
         seed: Optional[list[float]] = None,
         free_yaw: bool = False,
     ) -> Optional[list[float]]:
-        """Quaternion-input variant for the calibration auto-pose flow.
+        """Position-only solve (orientation argument ignored).
 
-        ``target_quat`` is (qx, qy, qz, qw) in the same convention as
-        ``geometry_msgs/Quaternion``. ``free_yaw`` defaults to ``False``
-        because calibration captures need the board to face the camera
-        from a specific orientation; relaxing yaw would let the gripper
-        swing past the board.
-        """
-        target_xyz = np.asarray(target_xyz, dtype=np.float64).reshape(3)
-        R = self._quat_to_rotation(target_quat)
-        if self._tracik is not None:
-            return self._solve_tracik(target_xyz, target_quat, seed, free_yaw)
-        return self._solve_kdl(target_xyz, R, seed)
+        The arm cannot hold an arbitrary board-facing orientation, and the only
+        autonomous-motion calibration that used an orientation target
+        (auto-pose) is removed in the single-shot calibration redesign. Kept
+        for call-site compatibility; resolves the same strict-vertical config
+        as ``solve``."""
+        return self.solve(target_xyz, seed=seed, free_yaw=free_yaw)
 
-    def _solve_tracik(
-        self,
-        xyz: np.ndarray,
-        quat: tuple[float, float, float, float],
-        seed: Optional[list[float]],
-        free_yaw: bool,
-    ) -> Optional[list[float]]:
-        ik = self._tracik
-        num_joints = ik.number_of_joints
-        if seed is None or len(seed) != num_joints:
-            seed = [0.0] * num_joints
+    # ── limits ───────────────────────────────────────────────────────────────
+    def _within_limits(self, joints, tol: float = 1e-6) -> bool:
+        for i in range(min(len(joints), len(self._joint_limits))):
+            lo, hi = self._joint_limits[i]
+            if joints[i] < lo - tol or joints[i] > hi + tol:
+                return False
+        return True
 
-        brz = _BRZ_FREE_YAW if free_yaw else _BRZ_LOCKED
-        rng = np.random.default_rng()
-        for attempt in range(_DEFAULT_RETRIES + 1):
-            try:
-                seed_attempt = seed if attempt == 0 else [
-                    s + float(rng.uniform(-_SEED_PERTURBATION_RAD, _SEED_PERTURBATION_RAD))
-                    for s in seed
-                ]
-                solution = ik.get_ik(
-                    seed_attempt,
-                    float(xyz[0]), float(xyz[1]), float(xyz[2]),
-                    quat[0], quat[1], quat[2], quat[3],
-                    _BX, _BY, _BZ, _BRX, _BRY, brz,
-                )
-                if solution is not None:
-                    return list(solution)
-            except Exception:
-                continue
-        return None
+    def in_workspace(self, target_xyz) -> bool:
+        """True when ``target_xyz`` yields a reachable strict-vertical grasp.
+        Used for the workflow IK pre-check / a clean German message."""
+        return self.solve(target_xyz) is not None
 
-    def _solve_kdl(
-        self,
-        xyz: np.ndarray,
-        R: np.ndarray,
-        seed: Optional[list[float]],
-    ) -> Optional[list[float]]:
-        kdl = self._kdl
-        if kdl is None:
-            return None
-        PyKDL = kdl['PyKDL']
-        num_joints = kdl['num_joints']
-        if seed is None or len(seed) != num_joints:
-            seed = [0.0] * num_joints
 
-        seed_array = PyKDL.JntArray(num_joints)
-        for i, s in enumerate(seed):
-            seed_array[i] = s
-
-        rot = PyKDL.Rotation(
-            R[0, 0], R[0, 1], R[0, 2],
-            R[1, 0], R[1, 1], R[1, 2],
-            R[2, 0], R[2, 1], R[2, 2],
-        )
-        target = PyKDL.Frame(rot, PyKDL.Vector(float(xyz[0]), float(xyz[1]), float(xyz[2])))
-
-        result = PyKDL.JntArray(num_joints)
-        rc = kdl['ik_solver'].CartToJnt(seed_array, target, result)
-        if rc != 0:
-            return None
-        return [result[i] for i in range(num_joints)]
+def _wrap(a: float) -> float:
+    """Wrap an angle to (-pi, pi]."""
+    return (a + math.pi) % (2.0 * math.pi) - math.pi

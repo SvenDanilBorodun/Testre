@@ -53,6 +53,13 @@
 # do not run the inference action path (inference publishes JointTrajectory directly), so the
 # guard is doubly invisible to inference and never reshapes the recorded->replayed action
 # distribution.
+#
+# Workflow safety (Rule §2, same scope): the detector is ALSO gated off when self.on_workflow
+# is True. A Roboter-Studio workflow's `pickup` descends onto the table at ~0 velocity — that
+# is a deliberate press, indistinguishable from a collision — and Roboter Studio runs
+# follower-only (no leader), so a trip would publish a freeze + relax to /leader/joint_trajectory
+# racing the workflow's own trajectory writer and then wait for a non-existent leader to recover.
+# The guard is therefore teleop/recording-ONLY (on_workflow == on_inference == False).
 
 import os
 import time
@@ -142,6 +149,12 @@ RESYNC_DURATION_S = 3.0
 WATCHDOG_PERIOD_S = 0.2
 DEFAULT_RESUME_TOL_RAD = 0.30
 
+# HIGH-6: a /leader/joint_states sample newer than this counts as a live leader
+# (a both-arms session). The leader broadcaster publishes joint states at the
+# controller rate (~100 Hz), so even a generous 2 s window only reads "active"
+# while a leader is genuinely running.
+LEADER_ACTIVE_FRESH_WINDOW_S = 2.0
+
 COLLISION_MESSAGE_DE = (
     'STOPP — Kollision erkannt: Der Arm wurde gegen ein Hindernis gedrückt und angehalten. '
     'Entferne zuerst das Hindernis und klicke dann auf „Follower in Grundstellung fahren".'
@@ -188,6 +201,14 @@ class CollisionMonitorMixin:
         self._collision_follower_pos = {}
         self._collision_follower_vel = {}
         self._collision_leader_pos = {}
+        # monotonic() of the last /leader/joint_states sample, or None if a
+        # leader has never published. Used by leader_appears_active() (HIGH-6)
+        # to refuse a follower-only Roboter-Studio workflow while a leader arm
+        # is live (a both-arms session): a live leader means the workflow's
+        # trajectory writer would contend with the leader broadcaster on
+        # /leader/joint_trajectory. The collision monitor already subscribes to
+        # this topic, so tracking arrival here is free.
+        self._leader_state_last_mono = None
 
         self._collision_resume_tol = _env_float(
             'EDUBOTICS_COLLISION_RESUME_TOL_RAD', DEFAULT_RESUME_TOL_RAD)
@@ -273,6 +294,45 @@ class CollisionMonitorMixin:
             if idx < len(msg.position):
                 pos[name] = msg.position[idx]
         self._collision_leader_pos = pos
+        # Record arrival for the HIGH-6 both-arms guard (leader_appears_active).
+        self._leader_state_last_mono = time.monotonic()
+
+    # ---- both-arms (leader-active) detection (HIGH-6) ------------------------------------
+
+    def leader_appears_active(self, fresh_window_s=LEADER_ACTIVE_FRESH_WINDOW_S):
+        """True when a leader arm appears to be live (a both-arms session), so a
+        follower-only Roboter-Studio workflow MUST NOT start (it would contend
+        with the leader broadcaster on /leader/joint_trajectory).
+
+        Two signals, strongest first:
+          1. EDUBOTICS_FOLLOWER_ONLY: the GUI bridge sets this to 1 when it flips
+             the arm container into Roboter-Studio (follower-only) mode. An
+             explicit '0'/'false'/'no'/'off' means a both-arms session was
+             launched → active. Unset means UNKNOWN (the env is not authoritative
+             on every rig), so we don't refuse on it alone.
+          2. Live /leader/joint_states within `fresh_window_s`: a leader that is
+             actually publishing joint states is, by definition, running. This is
+             the empirical backstop when the env is unset/unreliable.
+
+        Limitation: a both-arms session whose leader has momentarily stopped
+        publishing (>fresh_window_s) AND with the env unset reads as "not active".
+        The deterministic guard is EDUBOTICS_FOLLOWER_ONLY (set by the GUI on the
+        student path); the live-topic check only strengthens it. The GUI bridge is
+        hardened separately as the primary UI-level guard.
+        """
+        raw = os.environ.get('EDUBOTICS_FOLLOWER_ONLY')
+        if raw is not None and str(raw).strip() != '':
+            follower_only = str(raw).strip().lower() in ('1', 'true', 'yes', 'on')
+            if not follower_only:
+                # The env explicitly says both arms are launched.
+                return True
+            # Explicit follower-only: trust it, but still fall through to the
+            # live-topic check below — a stale env can't override a leader that
+            # is demonstrably publishing right now.
+        last = self._leader_state_last_mono
+        if last is None:
+            return False
+        return (time.monotonic() - last) <= max(0.0, float(fresh_window_s))
 
     # ---- detection -----------------------------------------------------------------------
 
@@ -296,6 +356,19 @@ class CollisionMonitorMixin:
     def _process_gpio_states(self, msg):
         if self._collision_active:
             return  # already stopped; ignore until resume
+        # Rule §2 scope: the teleop force/collision guard is teleop/recording-ONLY.
+        # During a Roboter-Studio workflow run (on_workflow=True, on_inference=False)
+        # the follower presses on the table at ~0 velocity by DESIGN (a `pickup`
+        # descend) — that looks exactly like a collision, so the detector would trip,
+        # publish to /leader/joint_trajectory (racing the workflow's own writer) and
+        # then wait for a leader that does not exist in the follower-only Roboter-Studio
+        # mode → the student is wedged with no recovery path. Treat a running workflow
+        # like inference: no detection, and reset the debounce counters so a residual
+        # bad-tick streak from before the workflow can't trip on the first tick after
+        # it ends. The guard stays fully armed for teleop/recording (on_workflow False).
+        if getattr(self, 'on_workflow', False):
+            self._collision_detector.reset()
+            return
         efforts, err_bits = {}, {}
         # Jazzy DynamicInterfaceGroupValues names its groups 'interface_groups'; the legacy
         # DynamicJointState equivalent is 'joint_names'. Same per-entry interface_values.

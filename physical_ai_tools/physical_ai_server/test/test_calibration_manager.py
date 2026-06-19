@@ -291,10 +291,18 @@ class _PoseSeq:
         return R, t
 
 
-def test_board_yaw_default_is_identity(calib_dir):
+def test_board_default_orientation_flips_z(calib_dir):
+    # Rig-found 2026-06-18: OpenCV's ChArUco board +Z exits the BACK, so a
+    # printed-side-up board needs an Rx(180°) flip (NOT identity) or the scene
+    # camera resolves BELOW the table. The default rotation must therefore be a
+    # PROPER rotation that sends board +Z -> base -Z (down) while keeping
+    # board +X -> base +X (board is physically in front of the robot).
     from physical_ai_server.workflow.calibration_manager import CalibrationManager
-    T = CalibrationManager._board_to_base_transform()
-    np.testing.assert_allclose(T[:3, :3], np.eye(3), atol=1e-9)
+    R = CalibrationManager._board_to_base_transform()[:3, :3]
+    assert abs(np.linalg.det(R) - 1.0) < 1e-9          # proper rotation
+    np.testing.assert_allclose(R @ np.array([0., 0., 1.]), [0, 0, -1], atol=1e-9)
+    np.testing.assert_allclose(R @ np.array([1., 0., 0.]), [1, 0, 0], atol=1e-9)
+    np.testing.assert_allclose(R @ np.array([0., 1., 0.]), [0, -1, 0], atol=1e-9)
 
 
 def test_board_yaw_applies_rotation(calib_dir, monkeypatch):

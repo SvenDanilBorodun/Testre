@@ -99,24 +99,28 @@ CHARUCO_SQUARE_LENGTH_M = 0.030
 CHARUCO_MARKER_LENGTH_M = 0.022
 
 # ── Board-on-table placement convention (base frame, metres) ────────────────
-# The student lays the ChArUco board FLAT on the table with its ORIGIN CORNER
-# at a marked reference point in front of the robot, board axes aligned to the
-# base axes (board +X points AWAY from the robot along base +X; board +Y to the
-# robot's LEFT along base +Y; board +Z up). The board's printed origin corner
-# is the chessboard corner shared by the marker-bearing squares — when the
-# board image is laid label-side-up with the long (7-square) edge running
-# left↔right and the ROBOT on the board's −X side, the OpenCV board frame
-# coincides with this convention. These offsets place that origin corner in
-# the base frame. Overridable per-classroom via env (forwarded by compose).
+# The student lays the ChArUco board FLAT on the table, PRINTED SIDE UP, with:
+#   * the LONG (7-square, 21 cm) edge running FRONT-BACK — i.e. pointing AWAY
+#     from the robot along base +X (NOT left-right),
+#   * the SHORT (5-square, 15 cm) edge running LEFT-RIGHT,
+#   * the board CENTRED on the robot's forward centre-line,
+#   * the ORIGIN corner (the marker-0 / OpenCV (0,0) corner) at the NEAR-LEFT
+#     (closest to the robot, on its left).
+# These offsets place that OpenCV origin corner in the base frame.
 #
-# Defaults: 18 cm in front of the base centreline, board centred laterally so
-# the 21 cm-wide board origin sits 7.5 cm to the right of centre (half the
-# 15 cm board height is the lateral half-extent). z = 0.0 = the table surface
-# coincides with the OMX base mounting plane (link0 origin), the standard
-# classroom-kit setup. Tune BOARD_TABLE_Z_M up/down if the table sits above or
-# below the base plate.
+# IMPORTANT (2026-06-18, rig-found): OpenCV's ChArUco board frame has its +Z
+# axis exiting the BACK of the board. With the board printed-side-UP on the
+# table, that +Z therefore points DOWN, so the board orientation in base is a
+# 180° flip about board +X (see _board_to_base_transform), NOT identity. With
+# the flip + this origin the scene camera resolves correctly ABOVE the table
+# and the board lands centred in front. (The old identity convention + a
+# 21-cm-wide / origin-on-the-right comment was never rig-validated and made the
+# camera resolve BELOW the table → the "Kamera nicht über dem Tisch" failure.)
+# z = 0.0 = table surface coincides with the OMX base mounting plane (link0).
+# All overridable per-classroom via env (forwarded by compose); a jig that
+# holds the board at a different yaw sets BOARD_YAW_DEG once.
 BOARD_ORIGIN_X_M = _safe_float_env('EDUBOTICS_BOARD_ORIGIN_X_M', 0.18)
-BOARD_ORIGIN_Y_M = _safe_float_env('EDUBOTICS_BOARD_ORIGIN_Y_M', -0.075)
+BOARD_ORIGIN_Y_M = _safe_float_env('EDUBOTICS_BOARD_ORIGIN_Y_M', 0.075)
 BOARD_TABLE_Z_M = _safe_float_env('EDUBOTICS_BOARD_TABLE_Z_M', 0.0)
 # Yaw (deg) of the board's OpenCV frame about base +Z. With the 3D-printed
 # L-jig the board butts square to the base, so the default 0 (board axes ==
@@ -129,6 +133,41 @@ BOARD_YAW_DEG = _safe_float_env('EDUBOTICS_BOARD_YAW_DEG', 0.0)
 #   reprojection error (px) of that PnP.
 SCENE_EXTRINSIC_MIN_CORNERS = 6
 SCENE_EXTRINSIC_MAX_REPROJ_PX = 1.5
+
+# ── Orientation sanity gate for the single-shot scene extrinsic ──────────────
+# The camera-above-table gate (below, in _solve_scene_extrinsic) catches a board
+# laid UPSIDE-DOWN (camera resolves below the table). On top of that, two
+# ROLL-INDEPENDENT checks catch a GROSSLY misplaced board (both computed purely
+# from the recovered T_cam_to_base, no ground-truth point needed):
+#
+#  (1) WORKSPACE-REGION: the camera's optical axis (cam +Z) must intersect the
+#      table inside the expected workspace band — forward of the robot
+#      (x in [REGION_X_MIN, REGION_X_MAX], around the board's 0.18–0.39 m span)
+#      and roughly centred laterally (|y| <= REGION_Y_ABS). Bounds are GENEROUS
+#      so a tilted/off-centre (but correctly placed) mount still passes.
+#  (2) OPTICAL-AXIS-DOWNWARD: cam +Z in base must point clearly DOWN (negative
+#      z) — the camera must look at the table, not sideways/up.
+#
+# HONEST SCOPE — what this CANNOT reliably catch (rig-found 2026-06-18; verified
+# 2026-06-18 second pass). The ONLY misplacement it reliably rejects is a board
+# whose look-point leaves the region (camera not aimed at the workspace) or a
+# camera not looking down. It does NOT reliably catch:
+#  * a 90°/-90° IN-PLANE board rotation,
+#  * a 180° rotation (whether its look-point leaves the band is CAMERA-POSITION
+#    dependent — a board centred under a near-overhead cam can be accepted), and
+#  * a left/right MIRROR (origin corner at near-RIGHT instead of near-LEFT).
+# A scene camera may be mounted at ANY roll (image-"up" toward OR away from the
+# robot — both valid), so the camera's image +X direction is NOT a reliable
+# "board points forward" signal: a 90° board yaw is geometrically
+# indistinguishable from a 90° camera roll from one top-down view. An earlier
+# forward-axis (cam +X) check tried to catch 90° but FALSE-REJECTED a correctly
+# placed board under a 180°-rolled real camera, so it was removed. The residual
+# 90°/180°/mirror is resolved by the rig GROUND-TRUTH check (place an object at a
+# measured (x,y) and confirm the detected position), not by this single-shot
+# gate — which is why that ground-truth step is MANDATORY before grasping.
+SCENE_EXTRINSIC_REGION_X_MIN = _safe_float_env('EDUBOTICS_EXTRINSIC_REGION_X_MIN', 0.08)
+SCENE_EXTRINSIC_REGION_X_MAX = _safe_float_env('EDUBOTICS_EXTRINSIC_REGION_X_MAX', 0.46)
+SCENE_EXTRINSIC_REGION_Y_ABS = _safe_float_env('EDUBOTICS_EXTRINSIC_REGION_Y_ABS', 0.18)
 
 # Table touch-off ("Tisch vermessen"): hand-guide the torque-off follower to
 # tap the table at >= N spread points; FK → least-squares plane → z_table (+
@@ -634,24 +673,115 @@ class CalibrationManager:
         """T_board_to_base — the known placement of the ChArUco board on the
         table, in base frame.
 
-        Single-shot convention: the board lies FLAT on the table against the
-        3D-printed L-jig, so its origin corner sits at
-        ``(BOARD_ORIGIN_X_M, BOARD_ORIGIN_Y_M, BOARD_TABLE_Z_M)`` and its
-        in-plane axes are yawed ``BOARD_YAW_DEG`` about base +Z (0 when the jig
-        holds the board square to the base — the default). The jig makes this
-        placement MECHANICALLY reproducible instead of relying on tape, which is
-        the whole accuracy story for pick-and-place. The board stays flat (+Z
-        up), so only a yaw rotation is possible.
+        Single-shot convention: the board lies FLAT on the table, printed-side
+        up, so its OpenCV origin corner sits at ``(BOARD_ORIGIN_X_M,
+        BOARD_ORIGIN_Y_M, BOARD_TABLE_Z_M)``.
+
+        Rotation = Rz(BOARD_YAW_DEG) @ Rx(180°). The Rx(180°) flip is REQUIRED,
+        not cosmetic: OpenCV's ChArUco board frame has +Z exiting the BACK of
+        the board, so with the board printed-side-up on the table that +Z points
+        DOWN. Without the flip, ``T_cam_to_base = T_board_to_base @
+        inv(T_board_to_cam)`` resolves the scene camera to the MIRROR position
+        BELOW the table (rig-found 2026-06-18 — the "Kamera nicht über dem
+        Tisch" failure; verified: identity → cam_z −0.35 m, Rx(180°) → +0.35 m).
+        The flip maps the board normal to base −Z and, with the right-hand rule
+        (board +X stays = base +X forward, since the board is physically in
+        FRONT of the robot), board +Y → base −Y. det = +1 (proper rotation).
+        BOARD_YAW_DEG adds an in-plane yaw on top (0 = board square to base).
         """
         yaw = math.radians(BOARD_YAW_DEG)
         c, s = math.cos(yaw), math.sin(yaw)
+        r_yaw = np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]],
+                         dtype=np.float64)
+        # Rx(180°): OpenCV board +Z exits the back -> flip so the board normal
+        # points base -Z (down) and the camera resolves ABOVE the table.
+        r_flip = np.diag([1.0, -1.0, -1.0]).astype(np.float64)
         T = np.eye(4, dtype=np.float64)
-        T[:3, :3] = np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]],
-                             dtype=np.float64)
+        T[:3, :3] = r_yaw @ r_flip
         T[0, 3] = BOARD_ORIGIN_X_M
         T[1, 3] = BOARD_ORIGIN_Y_M
         T[2, 3] = BOARD_TABLE_Z_M
         return T
+
+    @staticmethod
+    def _optical_axis_table_hit(T_cam_to_base: np.ndarray) -> np.ndarray | None:
+        """Where the camera's optical axis (cam +Z) hits the table plane
+        ``z = BOARD_TABLE_Z_M`` in base frame. Returns the (x, y, z) point, or
+        ``None`` when the optical axis is parallel to the table (no
+        intersection) or behind the camera."""
+        try:
+            origin = np.asarray(T_cam_to_base, dtype=np.float64)[:3, 3]
+            direction = np.asarray(T_cam_to_base, dtype=np.float64)[:3, 2]
+        except (ValueError, TypeError):
+            return None
+        dz = float(direction[2])
+        if not math.isfinite(dz) or abs(dz) < 1e-9:
+            return None
+        s = (BOARD_TABLE_Z_M - float(origin[2])) / dz
+        if not math.isfinite(s) or s <= 0:
+            # Table is behind the camera along the optical axis — the camera is
+            # not looking at the table at all.
+            return None
+        return origin + s * direction
+
+    def _check_extrinsic_orientation(
+        self, T_cam_to_base: np.ndarray
+    ) -> tuple[bool, str]:
+        """Roll-independent orientation sanity gate for the single-shot scene
+        extrinsic.
+
+        Catches a GROSSLY misplaced board (180° / wrong region / camera not
+        looking down) which would silently rotate the world frame while the
+        solve still "succeeds". Does NOT catch a 90° in-plane rotation or a
+        left/right mirror — those are resolved by the rig ground-truth check.
+        See the SCENE_EXTRINSIC_REGION_* constant block for the full rationale.
+
+        Returns ``(True, '')`` when the recovered pose is plausible, else
+        ``(False, german_message)``."""
+        # (1) Workspace-region: the camera must LOOK at the workspace in front
+        # of the robot, not off to the side / behind it.
+        hit = self._optical_axis_table_hit(T_cam_to_base)
+        if hit is None:
+            return False, (
+                'Die Kamera schaut nicht auf die Arbeitsfläche — bitte prüfen, '
+                'dass die ChArUco-Tafel flach auf dem markierten Punkt vor dem '
+                'Roboter liegt, und erneut erfassen.'
+            )
+        hit_x, hit_y = float(hit[0]), float(hit[1])
+        if not (SCENE_EXTRINSIC_REGION_X_MIN <= hit_x <= SCENE_EXTRINSIC_REGION_X_MAX
+                and abs(hit_y) <= SCENE_EXTRINSIC_REGION_Y_ABS):
+            return False, (
+                'Die Tafel scheint verdreht oder falsch platziert zu sein '
+                f'(Kamera-Blickpunkt x={hit_x * 100:.0f} cm, y={hit_y * 100:.0f} '
+                'cm). Bitte die Tafel mittig vor dem Roboter platzieren — die '
+                'lange Kante zeigt nach vorne (vom Roboter weg), die '
+                'Ursprungs-Ecke vorne links — und erneut erfassen.'
+            )
+        # (2) Optical-axis-downward (roll-INDEPENDENT): the camera must look DOWN
+        # at the table, not sideways/up. cam +Z in base must have a clearly
+        # negative z component. This (together with the camera-above-table gate
+        # in the caller and the region check above) is the strongest sanity we
+        # can apply WITHOUT knowing the camera's roll.
+        #
+        # NOTE — what this deliberately does NOT do: catch a 90° in-plane board
+        # rotation or a left/right mirror. A scene camera may be mounted at ANY
+        # roll (e.g. image-"up" toward OR away from the robot — both are valid),
+        # so the camera's image +X direction in base is NOT a reliable "board is
+        # forward" signal: a 90° board yaw is indistinguishable from a 90° camera
+        # roll from a single top-down view. (An earlier forward-axis check using
+        # cam +X false-rejected a correctly-placed board under a 180°-rolled
+        # camera — rig-found 2026-06-18.) The residual 90°/mirror is resolved by
+        # the rig ground-truth check (place an object at a measured (x,y) and
+        # confirm the detected position), not by this single-shot gate.
+        cam_z_axis = np.asarray(T_cam_to_base, dtype=np.float64)[:3, 2]
+        if not math.isfinite(float(cam_z_axis[2])) or float(cam_z_axis[2]) > -0.30:
+            return False, (
+                'Die Kamera schaut nicht nach unten auf den Tisch — bitte prüfen, '
+                'dass die Szenen-Kamera von oben auf die Arbeitsfläche zeigt und '
+                'die Tafel flach auf dem markierten Punkt liegt, und erneut '
+                'erfassen.'
+            )
+        return True, ''
 
     def _solve_scene_extrinsic(self, camera: str) -> tuple[bool, float, float, str]:
         """Single-shot board-on-table scene extrinsic (WS4).
@@ -709,6 +839,17 @@ class CalibrationManager:
                 'oben flach auf dem markierten Punkt liegt, und erneut '
                 'erfassen.'
             )
+
+        # Orientation sanity guard: the camera-above gate above only catches an
+        # upside-down board. A board rotated 90°/180° in-plane (or placed in the
+        # wrong region) still resolves the camera ABOVE the table but silently
+        # rotates/mirrors the whole world frame → every grasp goes to the wrong
+        # place. Reject a grossly-misoriented placement (see
+        # _check_extrinsic_orientation for what it can / cannot catch).
+        ok_orient, orient_msg = self._check_extrinsic_orientation(T_cam_to_base)
+        if not ok_orient:
+            self._handeye_buffers.pop(camera, None)
+            return False, 0.0, 0.0, orient_msg
 
         # The board's supplied surface height. Written as ``board_table_z`` —
         # NOT ``z_table`` — so the runtime grasp height (``z_table``) is the

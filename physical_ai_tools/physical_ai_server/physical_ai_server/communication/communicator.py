@@ -70,6 +70,14 @@ class Communicator:
     MODE_COLLECTION = 'collection'  # Full data collection mode (images, follower, leader)
     MODE_INFERENCE = 'inference'    # Inference mode (images, follower only)
 
+    # Canonical OMX-F follower joint order (matches omx_f_config.yaml joint_order.follower,
+    # collision_monitor.LEADER_JOINTS, and the IKSolver's joint expectations). The
+    # /joint_states broadcaster commonly publishes joints NAME-SORTED — i.e.
+    # [gripper_joint_1, joint1, joint2, joint3, joint4, joint5] — so a position vector read
+    # in MESSAGE order is scrambled relative to what FK / the workflow start-pose seed expect.
+    # get_latest_follower_joints() reorders by name into this canonical order.
+    FOLLOWER_JOINT_ORDER = ('joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'gripper_joint_1')
+
     PUB_QOS_SIZE = 100
 
     # Audit F65: paired-camera capture tolerance + ring depth.
@@ -472,10 +480,23 @@ class Communicator:
             return None
 
     def get_latest_follower_joints(self) -> Optional[List[float]]:
-        """Return the most recent follower-arm joint vector in the canonical
-        order (joint1..joint5 + gripper_joint_1) or None when no joint
-        state has arrived. Used by the hand-eye calibration to obtain
-        gripper-in-base pose via FK."""
+        """Return the most recent follower-arm joint vector in the CANONICAL
+        order (joint1..joint5 + gripper_joint_1) or None when no joint state
+        has arrived. Used by the Roboter-Studio workflow start-pose seed and
+        the touch-off / hand-eye FK (gripper-in-base pose).
+
+        The /joint_states broadcaster commonly publishes joints NAME-SORTED
+        ([gripper_joint_1, joint1..joint5]), NOT in the canonical arm order, so
+        reading msg.position in MESSAGE order scrambles the vector — a scrambled
+        seed makes the first workflow move lurch, and scrambled FK yields the
+        wrong z_table at touch-off. Reorder by msg.name (the same name-keyed
+        pattern the recording path and the collision monitor use) so the caller
+        always gets canonical order regardless of publish order.
+
+        Fails LOUD on a partial message (a canonical joint missing from
+        msg.name): returns None rather than silently zero-filling a missing
+        joint, which would otherwise feed a bogus value into FK / the seed.
+        """
         # The follower topic in omx_f_config.yaml is keyed simply 'follower'
         # but other configs may name it 'follower_arm'. Pick the first non-
         # mobile (JointState) follower message available.
@@ -484,10 +505,17 @@ class Communicator:
                 continue
             if 'mobile' in name.lower():
                 continue
-            positions = getattr(msg, 'position', None)
-            if positions is None or len(positions) == 0:
+            names = list(getattr(msg, 'name', []) or [])
+            positions = list(getattr(msg, 'position', []) or [])
+            if not names or not positions or len(names) != len(positions):
                 continue
-            return list(positions)
+            name_to_pos = dict(zip(names, positions))
+            # Require every canonical joint to be present — a partial message
+            # (e.g. mid-startup before the gripper joint is published) must not
+            # be silently zero-filled into a bogus pose.
+            if not all(j in name_to_pos for j in self.FOLLOWER_JOINT_ORDER):
+                continue
+            return [float(name_to_pos[j]) for j in self.FOLLOWER_JOINT_ORDER]
         return None
 
     # ``get_current_gripper_pose`` lives on the Node-level wrapper

@@ -36,6 +36,14 @@ import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Callable, Optional
+from urllib.parse import urlsplit
+
+# Hosts a browser Origin may legitimately carry when the React app (served from
+# the localhost container) POSTs to this bridge. Anything else is rejected.
+_ALLOWED_ORIGIN_HOSTS = frozenset({"localhost", "127.0.0.1"})
+# Cap the request body we drain so a malicious/oversized POST can't make us read
+# an unbounded amount into memory. The legitimate body is a few bytes of JSON.
+_MAX_BODY_BYTES = 64 * 1024
 
 # Fixed loopback port the React app POSTs to. High + uncommon to avoid clashes.
 DEFAULT_PORT = 8769
@@ -45,6 +53,8 @@ _HOST = "127.0.0.1"
 SetModeFn = Callable[[bool, Callable[[str], None]], "tuple[bool, str]"]
 # get_status() -> {"follower_only": bool}
 StatusFn = Callable[[], dict]
+# get_task_busy() -> bool (True while recording / inferencing — switch refused)
+TaskBusyFn = Callable[[], bool]
 
 
 class RoboterStudioControlServer:
@@ -56,9 +66,15 @@ class RoboterStudioControlServer:
         get_status: StatusFn,
         port: int = DEFAULT_PORT,
         log: Optional[Callable[[str], None]] = None,
+        get_task_busy: Optional[TaskBusyFn] = None,
     ) -> None:
         self._on_set_mode = on_set_mode
         self._get_status = get_status
+        # Refuse a mode switch while a recording / inference run is active —
+        # recreating the open_manipulator container mid-run blips /joint_states +
+        # the camera topics and corrupts the episode. The React toggle disables
+        # itself too, but that UI guard is bypassable; this is the enforced one.
+        self._get_task_busy = get_task_busy or (lambda: False)
         self._port = port
         self._log = log or (lambda _m: None)
         self._httpd: Optional[ThreadingHTTPServer] = None
@@ -104,12 +120,26 @@ class RoboterStudioControlServer:
             st = self._get_status() or {}
         except Exception as e:  # noqa: BLE001
             return 500, {"error": str(e)}
+        # ``ready`` reflects the TRUE arm-container state from the GUI (running
+        # vs restarting / down); ``busy`` is True while a switch is in flight on
+        # EITHER side, so the badge never claims the new mode is live early.
         return 200, {
             "follower_only": bool(st.get("follower_only", False)),
-            "busy": self._busy,
+            "ready": bool(st.get("ready", True)),
+            "busy": self._busy or bool(st.get("busy", False)),
         }
 
     def handle_set_mode(self, follower_only: bool) -> "tuple[int, dict]":
+        # Refuse mid-record / mid-inference — restarting the arm container then
+        # would corrupt the running episode. Checked BEFORE the busy lock so a
+        # busy-task rejection is reported as 409 task-busy, not 409 in-flight.
+        try:
+            task_busy = bool(self._get_task_busy())
+        except Exception:  # noqa: BLE001 — never let the probe block the bridge
+            task_busy = False
+        if task_busy:
+            return 409, {"ok": False,
+                         "message": "Während Aufnahme/Inferenz nicht verfügbar."}
         # Reject concurrent restarts — a second click while a restart is in
         # flight would race two `compose up` calls on the same container.
         with self._busy_lock:
@@ -162,17 +192,39 @@ class RoboterStudioControlServer:
                 else:
                     self._send(404, {"error": "not found"})
 
+            def _drain_body(self):
+                # Read + discard any request body so the kernel doesn't reset the
+                # connection (some clients send a body on POST); bounded so a
+                # bogus huge Content-Length can't exhaust memory.
+                try:
+                    length = int(self.headers.get("Content-Length", "0") or "0")
+                except (TypeError, ValueError):
+                    length = 0
+                if length > 0:
+                    try:
+                        self.rfile.read(min(length, _MAX_BODY_BYTES))
+                    except Exception:  # noqa: BLE001 — client hung up mid-body
+                        pass
+
             def _origin_allowed(self):
                 # The state-changing POSTs restart the arm container. CORS only
                 # blocks the cross-origin RESPONSE read, not a "simple" POST's
                 # SIDE EFFECT — so we reject a cross-site Origin at the handler.
                 # Empty Origin = same-origin / non-browser caller (allowed).
+                # Parse the URL and require the HOST to be EXACTLY localhost /
+                # 127.0.0.1 — a `startswith` check is bypassable by an attacker
+                # origin like http://localhost.evil.com.
                 origin = self.headers.get("Origin", "")
-                return (origin == ""
-                        or origin.startswith("http://localhost")
-                        or origin.startswith("http://127.0.0.1"))
+                if origin == "":
+                    return True
+                try:
+                    host = urlsplit(origin).hostname
+                except ValueError:
+                    return False
+                return host in _ALLOWED_ORIGIN_HOSTS
 
             def do_POST(self):  # noqa: N802
+                self._drain_body()
                 if not self._origin_allowed():
                     self._send(403, {"ok": False, "message": "Origin nicht erlaubt."})
                     return

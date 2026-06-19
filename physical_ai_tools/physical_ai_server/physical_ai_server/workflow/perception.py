@@ -44,6 +44,7 @@ a stale/absent camera frame.
 from __future__ import annotations
 
 import os
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -104,6 +105,15 @@ class Perception:
         self._yolox_session = None
         self._yolox_input_name: str | None = None
         self._apriltag_detector = None
+        # pupil_apriltags.Detector.detect() wraps a C library that is NOT
+        # thread-safe. Perception is a SINGLE shared instance and the workflow
+        # interpreter spawns one thread per hat block, so two concurrent
+        # detect_marker calls (e.g. two `when_marker_seen` hats) would race the
+        # shared C detector → possible segfault of the whole ROS node. Serialize
+        # AprilTag detection with this per-detector lock. The YOLOX path
+        # (onnxruntime is thread-safe) and the LAB-colour path (immutable
+        # profile + pure-numpy) stay unlocked — they do not need it.
+        self._apriltag_lock = threading.Lock()
         # LAB-space colour clusters keyed by colour name. Each value is
         # ``{'center': np.ndarray(3), 'std': np.ndarray(3), 'threshold': float}``
         # — see ``ColorProfileManager.lab_profile``.
@@ -432,7 +442,11 @@ class Perception:
         if self._apriltag_detector is None:
             return []
         gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
-        results = self._apriltag_detector.detect(gray)
+        # Serialize the non-thread-safe C detector across concurrent hat-block
+        # threads (see __init__). Holding the lock only around .detect() keeps
+        # the gray-conversion + result marshalling parallel.
+        with self._apriltag_lock:
+            results = self._apriltag_detector.detect(gray)
         detections: list[Detection] = []
         for r in results:
             if aruco_id is not None and r.tag_id != aruco_id:

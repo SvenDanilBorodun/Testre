@@ -458,7 +458,7 @@ from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 from sensor_msgs.msg import JointState
 
 JOINTS = ['joint1','joint2','joint3','joint4','joint5','gripper_joint_1']
-HOME = [0.0, -math.pi/4, math.pi/4, 0.0, 0.0, 0.8]
+HOME = [0.0, -math.pi/2, math.pi/2, 0.0, 0.0, 0.8]
 DURATION = 3.0
 
 class HomeNode(Node):

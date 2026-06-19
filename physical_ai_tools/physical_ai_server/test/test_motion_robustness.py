@@ -15,6 +15,14 @@ Covers the 2026-06-18 deep-dig fixes (no container / PyKDL needed):
   arm from a fake zero pose.
 * **j1 long-way sweep** — ``build_segment`` must extend the duration of a
   large joint swing so no joint exceeds the safe velocity fraction.
+* **HIGH-5** — an outer-ring target whose GRASP is reachable but whose
+  +approach pose falls outside the shrinking annulus must NOT be refused; the
+  approach height is clamped down to the reachable envelope.
+* **home-carries-gripper** — ``home`` must keep the current gripper state so a
+  ``pickup`` (closed) followed by ``home`` does not drop the held object.
+* **L1 tilted floor** — with a calibrated ``table_plane`` the workspace-floor
+  refusal must follow the plane z at the target (x, y), not the scalar
+  ``z_table`` (else a low corner is falsely refused).
 """
 
 from __future__ import annotations
@@ -32,12 +40,18 @@ import pytest
 from physical_ai_server.workflow import trajectory_builder
 from physical_ai_server.workflow.handlers import motion
 from physical_ai_server.workflow.handlers.motion import (
+    DEFAULT_APPROACH_HEIGHT_M,
+    GRASP_CLEARANCE_M,
     GRIPPER_CLOSED_RAD,
     GRIPPER_OPEN_RAD,
     HOME_JOINTS_RAD,
+    WORKSPACE_FLOOR_MARGIN_M,
     WorkflowError,
     _resolve_target,
     _require_seeded_start_pose,
+    _solve_grasp_and_approach,
+    _solve_or_raise,
+    drop_at,
     home,
     move_to,
     pickup,
@@ -46,6 +60,39 @@ from physical_ai_server.workflow.ik_solver import IKSolver
 
 
 REACHABLE_XYZ = (0.20, 0.0, 0.0)
+# Outer-ring target: at z=0 the grasp (z+clearance≈0.012) is reachable but the
+# +DEFAULT_APPROACH_HEIGHT_M (0.06) approach pose is NOT (the annulus shrinks
+# with height). Rig/solver-verified false-refusal window is ~0.260–0.268 m.
+OUTER_RING_XYZ = (0.262, 0.0, 0.0)
+
+
+class _RecordingCtx:
+    """SimpleNamespace-style ctx that captures published chunks and log lines,
+    carrying exactly the fields the motion handlers read. ``table_plane``
+    defaults to None (flat z_table floor)."""
+
+    def __init__(self, z_table=0.0, table_plane=None):
+        self.published: list = []
+        self.logs: list[str] = []
+        self.ik = IKSolver()
+        self.z_table = z_table
+        self.table_plane = table_plane
+        self.motion_lock = threading.RLock()
+        self.should_stop = lambda: False
+        self.last_full_joints = list(HOME_JOINTS_RAD) + [GRIPPER_OPEN_RAD]
+        self.last_arm_joints = None
+        self.destinations: dict = {}
+
+    def publisher(self, chunk):
+        self.published.append(list(chunk))
+
+    def log(self, msg):
+        self.logs.append(msg)
+
+    @property
+    def last_commanded_joints(self):
+        assert self.published, 'no motion was published'
+        return self.published[-1][-1][0]
 
 
 # ── H2: malformed env → default, not an import crash ─────────────────────────
@@ -243,7 +290,7 @@ def test_require_seeded_start_pose_accepts_real_home_pose():
     ctx = types.SimpleNamespace(
         last_full_joints=list(HOME_JOINTS_RAD) + [GRIPPER_OPEN_RAD]
     )
-    # HOME is [0, -pi/4, pi/4, 0, 0, 0.8] — not all-zero — so it passes.
+    # HOME is [0, -pi/2, pi/2, 0, 0, 0.8] — not all-zero — so it passes.
     _require_seeded_start_pose(ctx)
 
 
@@ -316,3 +363,141 @@ def test_build_segment_large_swing_stays_within_velocity_limit():
             max_v = max(max_v, float(np.max(np.abs(q - prev_q)) / dt))
         prev_q, prev_t = q, t
     assert max_v <= trajectory_builder.JOINT_VELOCITY_LIMIT_RAD_S
+
+
+# ── HIGH-5: outer-ring approach-height clamp, no false refusal ────────────────
+
+@pytest.fixture
+def _fast_chunk_pacing(monkeypatch):
+    """Replace ``trajectory_builder.time`` with a fake clock so the inter-chunk
+    pacing sleep doesn't slow these end-to-end pickup/drop tests. monotonic
+    jumps a large step each call so the pace while-loop exits at once; sleep is
+    a no-op. Published WAYPOINTS are byte-identical to production."""
+    state = {'t': 0.0}
+
+    def _monotonic():
+        state['t'] += 1000.0
+        return state['t']
+
+    fake = types.SimpleNamespace(monotonic=_monotonic, sleep=lambda _s: None)
+    monkeypatch.setattr(trajectory_builder, 'time', fake)
+    yield
+
+
+def test_outer_ring_grasp_reachable_but_approach_not_is_the_setup():
+    """Guard the test's premise: at OUTER_RING_XYZ the grasp solves but the full
+    +DEFAULT_APPROACH_HEIGHT_M approach does NOT. If the solver geometry changes
+    so this window closes, this assertion flags it (the HIGH-5 tests below would
+    otherwise pass vacuously)."""
+    ik = IKSolver()
+    gx, gy, gz = OUTER_RING_XYZ[0], OUTER_RING_XYZ[1], OUTER_RING_XYZ[2] + GRASP_CLEARANCE_M
+    assert ik.solve((gx, gy, gz)) is not None, 'grasp should be reachable'
+    assert ik.solve((gx, gy, gz + DEFAULT_APPROACH_HEIGHT_M)) is None, \
+        'full approach should be unreachable (annulus shrinks with height)'
+
+
+def test_solve_grasp_and_approach_clamps_at_outer_ring():
+    ctx = _RecordingCtx(z_table=0.0)
+    grasp_xyz = (OUTER_RING_XYZ[0], OUTER_RING_XYZ[1], OUTER_RING_XYZ[2] + GRASP_CLEARANCE_M)
+    grasp_q, approach_q = _solve_grasp_and_approach(
+        ctx, grasp_xyz, DEFAULT_APPROACH_HEIGHT_M, roll=0.0)
+    # Both solutions are valid 5-joint vectors — the grasp was NOT refused.
+    assert grasp_q is not None and len(grasp_q) == 5
+    assert approach_q is not None and len(approach_q) == 5
+    # The approach was clamped below the requested lift: a German [WARNUNG] was
+    # logged naming the reduced Anfahrhöhe.
+    assert any('Anfahrhöhe' in m for m in ctx.logs)
+
+
+def test_pickup_outer_ring_does_not_false_refuse(_fast_chunk_pacing):
+    """The flagship HIGH-5 regression: a graspable outer-ring object must be
+    picked up, not refused with 'Arbeitsbereich'."""
+    ctx = _RecordingCtx(z_table=0.0)
+    pickup(ctx, {'target': OUTER_RING_XYZ})
+    # End state: gripper closed (object held), motion published.
+    assert ctx.last_commanded_joints[5] == pytest.approx(GRIPPER_CLOSED_RAD)
+    assert ctx.published
+
+
+def test_drop_at_outer_ring_does_not_false_refuse(_fast_chunk_pacing):
+    ctx = _RecordingCtx(z_table=0.0)
+    ctx.last_full_joints = list(HOME_JOINTS_RAD) + [GRIPPER_CLOSED_RAD]
+    drop_at(ctx, {'destination': OUTER_RING_XYZ})
+    assert ctx.last_commanded_joints[5] == pytest.approx(GRIPPER_OPEN_RAD)
+    assert ctx.published
+
+
+def test_pickup_truly_unreachable_grasp_still_refuses():
+    """The clamp must only rescue a reachable GRASP. A target whose grasp is
+    itself outside the annulus must still raise 'Arbeitsbereich'."""
+    ctx = _RecordingCtx(z_table=0.0)
+    with pytest.raises(WorkflowError) as exc:
+        pickup(ctx, {'target': (0.50, 0.0, 0.0)})
+    assert 'Arbeitsbereich' in str(exc.value)
+
+
+# ── home carries the held gripper state (don't drop the object) ──────────────
+
+def test_home_carries_closed_gripper(_fast_chunk_pacing):
+    """pickup (closed) → home must keep the gripper CLOSED so the held object
+    stays held. home used to hardcode GRIPPER_OPEN_RAD and drop it."""
+    ctx = _RecordingCtx(z_table=0.0)
+    # Simulate the post-pickup state: holding an object (gripper closed).
+    ctx.last_full_joints = list(HOME_JOINTS_RAD) + [GRIPPER_CLOSED_RAD]
+    home(ctx, {})
+    assert ctx.last_full_joints[5] == pytest.approx(GRIPPER_CLOSED_RAD)
+    assert ctx.last_commanded_joints[5] == pytest.approx(GRIPPER_CLOSED_RAD)
+
+
+def test_home_carries_open_gripper(_fast_chunk_pacing):
+    """The empty-hand case still homes with the gripper open (unchanged)."""
+    ctx = _RecordingCtx(z_table=0.0)
+    ctx.last_full_joints = [0.1, 0.2, 0.3, 0.0, 0.0, GRIPPER_OPEN_RAD]
+    home(ctx, {})
+    assert ctx.last_full_joints[5] == pytest.approx(GRIPPER_OPEN_RAD)
+
+
+def test_pickup_then_home_keeps_object_held(_fast_chunk_pacing):
+    """End-to-end flagship-tutorial path: pickup → home, gripper stays closed."""
+    ctx = _RecordingCtx(z_table=0.0)
+    pickup(ctx, {'target': REACHABLE_XYZ})
+    assert ctx.last_full_joints[5] == pytest.approx(GRIPPER_CLOSED_RAD)
+    home(ctx, {})
+    assert ctx.last_full_joints[5] == pytest.approx(GRIPPER_CLOSED_RAD)
+    assert ctx.last_commanded_joints[5] == pytest.approx(GRIPPER_CLOSED_RAD)
+
+
+# ── L1: tilted table_plane floor follows the plane at (x, y) ──────────────────
+
+def test_solve_or_raise_tilted_plane_allows_low_corner():
+    """With a tilted table_plane, a target at a LOW corner (below the scalar
+    z_table but ON the plane) must NOT be refused as 'Tischebene'."""
+    # Plane tilts down along +x: z = -0.1·x + 0.0 → at x=0.20, plane z = -0.02.
+    # The scalar z_table is 0.0, so the old scalar floor would refuse a target
+    # at z=-0.02 (below 0.0 - margin). With the plane it is exactly on-surface.
+    ctx = _RecordingCtx(z_table=0.0, table_plane=(-0.1, 0.0, 0.0))
+    target = (0.20, 0.0, -0.02)        # on the tilted plane at x=0.20
+    solution = _solve_or_raise(ctx, target)
+    assert solution is not None and len(solution) == 5
+
+
+def test_solve_or_raise_tilted_plane_still_refuses_below_plane():
+    """The floor is still enforced — a target BELOW the tilted plane at its
+    (x, y) is refused."""
+    ctx = _RecordingCtx(z_table=0.0, table_plane=(-0.1, 0.0, 0.0))
+    # plane z at x=0.20 is -0.02; go well below it.
+    below = (0.20, 0.0, -0.02 - (WORKSPACE_FLOOR_MARGIN_M + 0.01))
+    with pytest.raises(WorkflowError) as exc:
+        _solve_or_raise(ctx, below)
+    assert 'Tischebene' in str(exc.value)
+
+
+def test_floor_z_at_uses_plane_when_present():
+    ctx = _RecordingCtx(z_table=0.0, table_plane=(0.1, -0.2, 0.05))
+    # z = 0.1·x − 0.2·y + 0.05
+    assert motion._floor_z_at(ctx, 0.2, 0.1) == pytest.approx(0.1 * 0.2 - 0.2 * 0.1 + 0.05)
+
+
+def test_floor_z_at_falls_back_to_scalar_without_plane():
+    ctx = _RecordingCtx(z_table=0.03, table_plane=None)
+    assert motion._floor_z_at(ctx, 0.2, 0.1) == pytest.approx(0.03)

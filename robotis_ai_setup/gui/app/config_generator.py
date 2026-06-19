@@ -349,7 +349,7 @@ def generate_env_file(config: HardwareConfig, output_path: str = ENV_FILE,
             # sets a role; this guard catches programmatic misuse.
             if cam.role not in ('gripper', 'scene'):
                 raise ValueError(
-                    f"Kamera ohne gueltige Rolle (gripper/scene): {cam.path}"
+                    f"Kamera ohne gültige Rolle (gripper/scene): {cam.path}"
                 )
             # In native_bridge mode the container does NOT capture from
             # /dev/video* (the Windows GUI streams JPEG frames into

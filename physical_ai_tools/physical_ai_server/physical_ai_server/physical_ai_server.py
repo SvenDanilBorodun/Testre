@@ -1904,13 +1904,19 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 and request.step != 'table_touch'):
             if not self._retorque_follower_or_keep_locked(response):
                 return response
-        self._active_calib_step = request.step
         # Touch-off ("Tisch vermessen") is a MANUAL-TEACH step: the student
         # hand-guides the torque-off follower to tap the table. No image, no
         # arm motion driven by us.
         if request.step == 'table_touch':
             success, message = manager.start_table_touch()
             if success:
+                # Mark the step ONLY after a successful start: a FAILED start
+                # (e.g. extrinsic not yet calibrated) never torqued the follower
+                # off, so leaving _active_calib_step at 'table_touch' would
+                # wrongly fire the re-torque path on the next /start or /cancel
+                # (MEDIUM ride-along). Set it BEFORE the torque-off so a later
+                # abort still correctly re-torques the now-limp arm.
+                self._active_calib_step = request.step
                 if not self._set_follower_torque(False):
                     message += (' [Hinweis: Arm konnte nicht automatisch '
                                 'freigeschaltet werden — bitte vorsichtig führen.]')
@@ -1918,6 +1924,9 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             response.success = success
             response.message = message
             return response
+        # Non-touch steps drive no torque side-effect; marking the step
+        # unconditionally is safe (and needed by capture_frame/solve routing).
+        self._active_calib_step = request.step
         success, message = manager.start_step(request.camera, request.step)
         if success:
             self._set_calibration_active(True)
@@ -2325,27 +2334,36 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             fs = cv2.FileStorage(str(handeye_path), cv2.FILE_STORAGE_READ)
             T = fs.getNode('transform').mat()
             z_table_node = fs.getNode('z_table')
-            # No 0.0 fallback — refuse if the table height was never measured.
+            # No 0.0 fallback — refuse if the grasp height was never measured.
             z_table = float(z_table_node.real()) if not z_table_node.empty() else None
-            plane_node = fs.getNode('table_plane')
-            plane_mat = plane_node.mat() if not plane_node.empty() else None
+            # board_table_z = the SURFACE height — the plane the click ray is
+            # intersected with to recover (x, y). z_table = the MEASURED grasp
+            # height — what move_to/drop_at descend to. Don't conflate them.
+            board_z_node = fs.getNode('board_table_z')
+            board_table_z = (
+                float(board_z_node.real()) if not board_z_node.empty() else None
+            )
             fs.release()
-            if z_table is None and plane_mat is None:
+            # The grasp height (z_table) is what move_to/drop_at descend to, so a
+            # destination is only meaningful once the touch-off has run.
+            if z_table is None:
                 response.success = False
                 response.message = (
                     'Die Tischhöhe ist noch nicht vermessen — bitte zuerst den '
                     'Schritt „Tisch vermessen" abschließen.'
                 )
                 return response
-            plane = None
-            if plane_mat is not None and plane_mat.size == 3:
-                f = [float(v) for v in plane_mat.reshape(-1)]
-                plane = (f[0], f[1], f[2])
             K = manager._intrinsics[request.camera]['K']
             dist = manager._intrinsics[request.camera]['dist']
+            # Recover (x, y) by intersecting the ray with the table SURFACE
+            # (board_table_z), NOT the grasp height — same tilted-camera lateral
+            # error fix as perception. Then store z = z_table so the descend is
+            # correct. Fall back to z_table for the projection plane only when an
+            # old YAML predates board_table_z (better than refusing the click).
+            surface_z = board_table_z if board_table_z is not None else z_table
             point = project_pixel_to_table(
                 float(request.pixel_x), float(request.pixel_y), K, dist, T,
-                z_table if z_table is not None else 0.0, plane=plane,
+                surface_z,
             )
             if point is None:
                 response.success = False
@@ -2356,16 +2374,18 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             response.success = True
             response.world_x = float(point[0])
             response.world_y = float(point[1])
-            response.world_z = float(point[2])
+            response.world_z = float(z_table)
             response.message = f'Ziel "{request.label}" gespeichert.'
             # Persist into the WorkflowManager so the next workflow run
             # can resolve "ablegen bei <label>" without a second click.
             try:
                 wfm = self._get_or_create_workflow_manager()
                 if wfm is not None and request.label:
+                    # Store the grasp height (z_table), matching response.world_z
+                    # — point[2] is the surface plane used only for (x, y).
                     wfm.set_destination(
                         request.label,
-                        float(point[0]), float(point[1]), float(point[2]),
+                        float(point[0]), float(point[1]), float(z_table),
                     )
             except Exception:
                 pass
@@ -2557,9 +2577,8 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         return (float(t[0]), float(t[1]), float(t[2]))
 
     def _load_workflow_calibration(self):
-        """Load scene intrinsics + extrinsic + z_table for projection
-        of perception detections to base-frame XYZ. Returns a dict
-        consumed by ``WorkflowContext``.
+        """Load scene intrinsics + extrinsic + the two table-height keys for
+        the workflow runtime. Returns a dict consumed by ``WorkflowContext``.
 
         WS4 (2026-06-17): the scene extrinsic is now the single-shot
         board-on-table transform; it is still persisted to
@@ -2568,12 +2587,21 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         — this has always been scene-only, which is why dropping gripper
         calibration is safe for the runtime).
 
-        We load whatever is available. ``z_table`` is whatever the extrinsic
-        / touch-off solve measured — NO silent 0.0 fallback: a missing
-        ``z_table`` leaves it None so the projection refuses (a clear German
-        "calibration incomplete" rather than grasping against a guessed plane).
-        ``table_plane`` (a, b, c) from the touch-off is loaded when present;
-        projection then intersects the measured (tilted) plane."""
+        DUAL Z-KEY (don't conflate — see CLAUDE.md):
+        - ``board_table_z`` = the table SURFACE height (written by the extrinsic
+          solve, default 0). This is the plane the camera ray must intersect to
+          recover an object's (x, y) — the object sits ON the surface, NOT at the
+          gripper's grasp height. Used by perception projection (_attach_world_xyz).
+        - ``z_table`` = the MEASURED end-effector-frame grasp height (written ONLY
+          by the touch-off, ~finger-length ABOVE the surface). This is the
+          DESCEND target for motion.pickup — NOT a projection plane. NO 0.0
+          fallback: a missing ``z_table`` leaves it None so grasp correctly
+          refuses ("Tisch vermessen zuerst").
+
+        ``table_plane`` (a, b, c) is the MEASURED EE-frame tilt from the touch-off;
+        it rides along for motion's descend, NOT for object projection (it is
+        offset above the surface, so projecting objects onto it reintroduces the
+        lateral error on a tilted camera that board_table_z avoids)."""
         from pathlib import Path
         import os
         import cv2
@@ -2604,6 +2632,14 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 z_node = fs.getNode('z_table')
                 # No 0.0 fallback: leave z_table absent if the YAML lacks it.
                 z_table = float(z_node.real()) if not z_node.empty() else None
+                # board_table_z = the SURFACE height (the projection plane).
+                # Written by the extrinsic solve, so present whenever the
+                # extrinsic is. No 0.0 fallback here either — absence means an
+                # old YAML; the projection then has no plane and refuses loudly.
+                board_z_node = fs.getNode('board_table_z')
+                board_table_z = (
+                    float(board_z_node.real()) if not board_z_node.empty() else None
+                )
                 plane_node = fs.getNode('table_plane')
                 plane_mat = plane_node.mat() if not plane_node.empty() else None
                 fs.release()
@@ -2611,6 +2647,8 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                     result['scene_extrinsics'] = T
                 if z_table is not None:
                     result['z_table'] = z_table
+                if board_table_z is not None:
+                    result['board_table_z'] = board_table_z
                 if plane_mat is not None and plane_mat.size == 3:
                     flat = [float(v) for v in plane_mat.reshape(-1)]
                     result['table_plane'] = (flat[0], flat[1], flat[2])
@@ -2628,6 +2666,32 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             response.unreachable_block_ids = []
             response.unreachable_messages = []
             return response
+        # HIGH-6 — refuse a follower-only Roboter-Studio workflow while a leader
+        # arm is live (a both-arms session). Roboter Studio's trajectory writer is
+        # the SOLE intended writer on /leader/joint_trajectory; with a leader
+        # broadcaster also publishing there the two contend and the follower jumps
+        # between the two command streams. The GUI flips the arm container into
+        # follower-only (EDUBOTICS_FOLLOWER_ONLY=1) BEFORE offering Roboter Studio;
+        # this is the server-side backstop (leader env says both-arms, or leader
+        # joint-states are actively flowing). getattr-guarded so a server built
+        # without the collision monitor still starts workflows normally.
+        leader_check = getattr(self, 'leader_appears_active', None)
+        if callable(leader_check):
+            try:
+                leader_active = leader_check()
+            except Exception as e:  # noqa: BLE001 — guard must not block a normal start
+                self.get_logger().warning(f'leader_appears_active check failed: {e}')
+                leader_active = False
+            if leader_active:
+                response.success = False
+                response.message = (
+                    'Roboter Studio kann nicht starten, solange der Leader-Arm '
+                    'aktiv ist. Bitte zuerst in den Follower-Modus wechseln '
+                    '(Leader-Schalter im Roboter-Studio-Tab) und erneut starten.'
+                )
+                response.unreachable_block_ids = []
+                response.unreachable_messages = []
+                return response
         manager = self._get_or_create_workflow_manager()
         if manager is None:
             response.success = False

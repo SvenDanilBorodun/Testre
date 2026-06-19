@@ -72,9 +72,13 @@ Auf eine abwischbare Matte (oder direkt auf den Tisch mit Klebeband):
   (genaue Werte beim Erst-Test prüfen, siehe unten). Objekte **nur in diesen
   Ring** legen — außerhalb meldet der Roboter „nicht erreichbar".
 - **Tafel-Platz markieren:** der Anschlag des L-Jigs, standardmäßig **ca. 18 cm
-  vor der Roboterbasis**, mittig. Über `EDUBOTICS_BOARD_ORIGIN_X_M`,
-  `EDUBOTICS_BOARD_ORIGIN_Y_M` und (falls der Jig die Tafel gedreht hält)
-  `EDUBOTICS_BOARD_YAW_DEG` anpassbar.
+  vor der Roboterbasis**, **mittig** auf der Vorwärts-Mittellinie. Die Tafel
+  liegt flach, bedruckte Seite nach oben, so dass die **lange Kante (7 Felder)
+  vom Roboter weg verläuft** (vorne–hinten) und die **kurze Kante (5 Felder)
+  quer liegt** (links–rechts). Die **Ursprungs-Ecke (Marker 0)** zeigt nach
+  **vorne links** — dem Roboter am nächsten, auf seiner linken Seite. Über
+  `EDUBOTICS_BOARD_ORIGIN_X_M`, `EDUBOTICS_BOARD_ORIGIN_Y_M` und (falls der Jig
+  die Tafel gedreht hält) `EDUBOTICS_BOARD_YAW_DEG` anpassbar.
 
 ### 4. Beleuchtung
 

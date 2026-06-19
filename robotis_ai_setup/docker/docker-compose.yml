@@ -198,6 +198,12 @@ services:
       # workflow/calibration_manager.py, workflow/color_profile.py,
       # physical_ai_server.py.
       - EDUBOTICS_CALIB_DIR=${EDUBOTICS_CALIB_DIR:-/root/.cache/edubotics}
+      # Follower-only (Roboter Studio) flag — ALSO read by physical_ai_server's
+      # leader_appears_active() server-side guard (collision_monitor.py), not
+      # just by open_manipulator's entrypoint, so it must be forwarded here too
+      # (rig-found 2026-06-18: without this the server-side guard's env signal
+      # was inert and silently fell back to the live /leader/joint_states probe).
+      - EDUBOTICS_FOLLOWER_ONLY=${EDUBOTICS_FOLLOWER_ONLY:-0}
       # WS4 (2026-06-17) scene-cam single-shot extrinsic: the known
       # board-on-table placement (base frame, metres). The student lays the
       # ChArUco flat at this reference; the scene extrinsic + z_table derive
@@ -206,11 +212,18 @@ services:
       # (18 cm in front of base, centred, table = base plane) fit the typical
       # OMX-F classroom station — see tools/classroom_kit_README.md.
       - EDUBOTICS_BOARD_ORIGIN_X_M=${EDUBOTICS_BOARD_ORIGIN_X_M:-0.18}
-      - EDUBOTICS_BOARD_ORIGIN_Y_M=${EDUBOTICS_BOARD_ORIGIN_Y_M:--0.075}
+      - EDUBOTICS_BOARD_ORIGIN_Y_M=${EDUBOTICS_BOARD_ORIGIN_Y_M:-0.075}
       - EDUBOTICS_BOARD_TABLE_Z_M=${EDUBOTICS_BOARD_TABLE_Z_M:-0.0}
       # Yaw of the ChArUco board frame about base +Z (0 when the L-jig holds it
       # square to the base — the default). For a jig that holds the board rotated.
       - EDUBOTICS_BOARD_YAW_DEG=${EDUBOTICS_BOARD_YAW_DEG:-0.0}
+      # Scene-extrinsic orientation sanity gate: the workspace band the camera's
+      # optical axis must hit (forward of the robot, roughly centred), so a
+      # grossly misplaced board is rejected. Generous defaults; relax per-rig for
+      # an unusual camera mount.
+      - EDUBOTICS_EXTRINSIC_REGION_X_MIN=${EDUBOTICS_EXTRINSIC_REGION_X_MIN:-0.08}
+      - EDUBOTICS_EXTRINSIC_REGION_X_MAX=${EDUBOTICS_EXTRINSIC_REGION_X_MAX:-0.46}
+      - EDUBOTICS_EXTRINSIC_REGION_Y_ABS=${EDUBOTICS_EXTRINSIC_REGION_Y_ABS:-0.18}
       # Factory-default scene-camera intrinsics (Innomaker @ 640x480) so students
       # skip the 12-frame ChArUco step; a per-rig calibration supersedes them.
       # Set EDUBOTICS_FACTORY_INTRINSICS=0 to require the per-rig step instead.

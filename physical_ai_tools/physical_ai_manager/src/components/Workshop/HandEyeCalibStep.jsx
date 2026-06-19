@@ -128,10 +128,16 @@ function HandEyeCalibStep({ camera }) {
           Seite nach oben.
         </li>
         <li>
-          Schiebe die Tafel an den <strong>markierten Punkt</strong> vor dem
-          Roboter: die Ecke mit dem ersten Marker zeigt zum Roboter, die lange
-          Kante (7 Felder) verläuft <strong>quer</strong> (links–rechts), die
-          Tafel liegt gerade — parallel zur Tischkante.
+          Schiebe die Tafel mittig an den <strong>markierten Punkt</strong> vor
+          dem Roboter (Vorderkante ca. 18&nbsp;cm vor der Basis): die lange Kante
+          (7 Felder) verläuft <strong>vom Roboter weg</strong> (vorne–hinten),
+          die kurze Kante (5 Felder) liegt <strong>quer</strong> (links–rechts).
+        </li>
+        <li>
+          Die Ecke mit dem ersten Marker (Marker&nbsp;0, der Ursprung) muss
+          <strong>vorne&nbsp;links</strong> liegen — also dem Roboter am nächsten
+          und auf seiner linken Seite. Die Tafel liegt mittig auf der
+          Vorwärts-Mittellinie des Roboters.
         </li>
         <li>
           Prüfe im Kamerabild rechts, dass die ganze Tafel gut sichtbar und

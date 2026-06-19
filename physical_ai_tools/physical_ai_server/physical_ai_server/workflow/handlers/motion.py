@@ -58,7 +58,7 @@ def _safe_float(env_name: str, default: float) -> float:
         return default
 
 
-HOME_JOINTS_RAD = [0.0, -math.pi / 4, math.pi / 4, 0.0, 0.0]
+HOME_JOINTS_RAD = [0.0, -math.pi / 2, math.pi / 2, 0.0, 0.0]
 DEFAULT_APPROACH_HEIGHT_M = 0.06
 GRIPPER_OPEN_RAD = 0.8
 GRIPPER_CLOSED_RAD = -0.5
@@ -91,7 +91,7 @@ class WorkflowError(Exception):
 
 # The dataclass default for ctx.last_full_joints (workflow_manager seeds the
 # real follower pose over it at start, best-effort). All-exactly-zero is never
-# a real arm pose — HOME alone is [0, -π/4, π/4, 0, 0, …] — so an unchanged
+# a real arm pose — HOME alone is [0, -π/2, π/2, 0, 0, …] — so an unchanged
 # all-zero vector means the synchronous seed never ran (no follower joints had
 # arrived / the joint source was unavailable). Commanding a motion FROM this
 # fake zero pose makes the first waypoint ≈ [0]*6, yanking j2/j3 toward 0
@@ -156,6 +156,29 @@ def _publish_motion(ctx, q_start: list[float], q_end: list[float], duration_s: f
         raise WorkflowError('Workflow wurde gestoppt.')
 
 
+def _floor_z_at(ctx, x: float, y: float) -> float | None:
+    """Return the table-surface z at base-frame (x, y) for the workspace-floor
+    refusal, or ``None`` when no table height is known.
+
+    L1 fix: when the touch-off measured a tilted ``table_plane = (a, b, c)``
+    (``z = a·x + b·y + c``) the legitimate grasp z VARIES across the table, so
+    comparing every target against the SCALAR ``z_table`` would falsely refuse
+    a low corner ("Tischebene"). With the plane present we evaluate the plane z
+    at the target's own (x, y); otherwise we fall back to the flat ``z_table``.
+    """
+    plane = getattr(ctx, 'table_plane', None)
+    if plane is not None:
+        try:
+            a, b, c = (float(v) for v in plane)
+            return a * float(x) + b * float(y) + c
+        except (TypeError, ValueError):
+            # A malformed plane must not fail-open the floor; fall through to
+            # the scalar z_table so the floor stays enforced.
+            pass
+    z_table = getattr(ctx, 'z_table', None)
+    return None if z_table is None else float(z_table)
+
+
 def _solve_or_raise(
     ctx,
     target_xyz: tuple[float, float, float],
@@ -167,9 +190,11 @@ def _solve_or_raise(
             'Roboter-Beschreibung nicht verfügbar — der Bewegungsrechner (IK) '
             'konnte nicht gestartet werden. Bitte die Umgebung neu starten.'
         )
-    # Workspace floor: never drive the end-effector below the table plane.
-    z_table = getattr(ctx, 'z_table', None)
-    if z_table is not None and float(target_xyz[2]) < float(z_table) - WORKSPACE_FLOOR_MARGIN_M:
+    # Workspace floor: never drive the end-effector below the table plane. When
+    # a tilted table_plane is calibrated the floor follows the plane at the
+    # target (x, y), not the scalar z_table (L1).
+    floor_z = _floor_z_at(ctx, target_xyz[0], target_xyz[1])
+    if floor_z is not None and float(target_xyz[2]) < floor_z - WORKSPACE_FLOOR_MARGIN_M:
         raise WorkflowError('Zielpunkt liegt unter der Tischebene.')
     seed = ctx.last_arm_joints or HOME_JOINTS_RAD
     solution = ctx.ik.solve(target_xyz=target_xyz, seed=seed, free_yaw=free_yaw, roll=roll)
@@ -179,6 +204,94 @@ def _solve_or_raise(
             'markierten Greifbereich legen (nicht zu nah am Roboter, nicht zu weit).'
         )
     return list(solution)
+
+
+# How close (metres) the bisected approach height is allowed to converge to the
+# grasp height before we accept it. A 2 mm step is below the grasp clearance, so
+# the worst-case "shrunk" approach is still a visibly distinct lift above the
+# grasp — never an approach that coincides with the grasp.
+_APPROACH_BISECT_TOL_M = 0.002
+
+
+def _solve_grasp_and_approach(
+    ctx,
+    grasp_xyz: tuple[float, float, float],
+    approach_height_m: float,
+    roll: float | None = None,
+) -> tuple[list[float], list[float]]:
+    """Solve the GRASP first, then the APPROACH derived from the reachable
+    envelope. Returns ``(grasp_arm_q, approach_arm_q)``.
+
+    HIGH-5 fix: the strict-vertical reach annulus SHRINKS with height, so at the
+    outer ring a target whose GRASP is reachable can have its
+    ``+approach_height_m`` approach pose fall outside the annulus. The old code
+    solved the approach FIRST and refused the whole pickup/drop ("Arbeitsbereich")
+    even though the object was graspable. Instead we:
+
+      1. Solve the grasp. If THAT is unreachable, refuse (the object really is
+         out of the workspace) — ``_solve_or_raise`` raises the German message.
+      2. Try the full requested approach height. If reachable, use it.
+      3. Otherwise bisect the lift between the grasp height and the requested
+         approach height down to the MAX reachable lift (never below the grasp),
+         so the arm still approaches from above — just by a smaller, reachable
+         amount — rather than refusing a graspable object.
+
+    Only an unreachable GRASP is refused.
+    """
+    gx, gy, gz = (float(v) for v in grasp_xyz)
+    grasp_arm_q = _solve_or_raise(ctx, (gx, gy, gz), roll=roll)
+
+    # Fast path: the full requested approach height is reachable.
+    full_approach = (gx, gy, gz + approach_height_m)
+    approach_arm_q = _try_solve(ctx, full_approach, roll=roll)
+    if approach_arm_q is not None:
+        return grasp_arm_q, approach_arm_q
+
+    # The annulus shrank at this height — bisect the lift down toward the grasp
+    # to the largest reachable approach. ``lo`` is always reachable (it's the
+    # grasp height, proven above); ``hi`` is the unreachable requested height.
+    lo, hi = 0.0, approach_height_m
+    best_q = grasp_arm_q          # worst case: approach == grasp (still valid)
+    best_lift = 0.0
+    while hi - lo > _APPROACH_BISECT_TOL_M:
+        mid = 0.5 * (lo + hi)
+        q = _try_solve(ctx, (gx, gy, gz + mid), roll=roll)
+        if q is not None:
+            lo, best_q, best_lift = mid, q, mid
+        else:
+            hi = mid
+    ctx.log(
+        f'[WARNUNG] Anfahrhöhe auf {best_lift * 1000:.0f} mm reduziert '
+        f'(angefordert: {approach_height_m * 1000:.0f} mm) — Ziel liegt am '
+        'Rand des Greifbereichs.'
+    )
+    return grasp_arm_q, best_q
+
+
+def _try_solve(
+    ctx,
+    target_xyz: tuple[float, float, float],
+    roll: float | None = None,
+) -> list[float] | None:
+    """Solve ``target_xyz`` like ``_solve_or_raise`` but return ``None`` (rather
+    than raising) when the point is unreachable — used by the approach-height
+    bisection where an unreachable lift is an expected, recoverable outcome.
+
+    The workspace-floor refusal still RAISES: an approach point can never be
+    below the table (it is always above the grasp), so hitting the floor here
+    is a genuine error, not an annulus-edge case to clamp.
+    """
+    floor_z = _floor_z_at(ctx, target_xyz[0], target_xyz[1])
+    if floor_z is not None and float(target_xyz[2]) < floor_z - WORKSPACE_FLOOR_MARGIN_M:
+        raise WorkflowError('Zielpunkt liegt unter der Tischebene.')
+    if ctx.ik is None:
+        raise WorkflowError(
+            'Roboter-Beschreibung nicht verfügbar — der Bewegungsrechner (IK) '
+            'konnte nicht gestartet werden. Bitte die Umgebung neu starten.'
+        )
+    seed = ctx.last_arm_joints or HOME_JOINTS_RAD
+    solution = ctx.ik.solve(target_xyz=target_xyz, seed=seed, roll=roll)
+    return None if solution is None else list(solution)
 
 
 def _resolve_target(value: Any, ctx) -> tuple[float, float, float]:
@@ -228,7 +341,14 @@ def _resolve_target(value: Any, ctx) -> tuple[float, float, float]:
 def home(ctx, args: dict[str, Any]) -> None:
     _require_seeded_start_pose(ctx)
     q_start = ctx.last_full_joints
-    q_end = list(HOME_JOINTS_RAD) + [GRIPPER_OPEN_RAD]
+    # CARRY the current gripper state (index 5) instead of forcing it open.
+    # Behavior change (deliberate): `home` used to hardcode GRIPPER_OPEN_RAD, so
+    # a `pickup` (closed) followed by `home` opened the gripper mid-flight and
+    # DROPPED the held object — the flagship tutorial does exactly pickup→home.
+    # Every other motion handler already carries last_full_joints[5]; home now
+    # matches, so a held object stays held across a home. Use `open_gripper`
+    # explicitly to release.
+    q_end = list(HOME_JOINTS_RAD) + [q_start[5]]
     _publish_motion(ctx, q_start, q_end, DEFAULT_HOME_DURATION_S)
     ctx.last_arm_joints = list(HOME_JOINTS_RAD)
     ctx.last_full_joints = q_end
@@ -266,10 +386,12 @@ def pickup(ctx, args: dict[str, Any]) -> None:
     # Conservative descend: grasp at the measured table plane + clearance so the
     # fingertips straddle the lower part of a low object, not the table itself.
     grasp_xyz = (target[0], target[1], target[2] + GRASP_CLEARANCE_M)
-    above = (target[0], target[1], target[2] + DEFAULT_APPROACH_HEIGHT_M)
 
-    above_arm_q = _solve_or_raise(ctx, above, roll=GRASP_ROLL_RAD)
-    grasp_arm_q = _solve_or_raise(ctx, grasp_xyz, roll=GRASP_ROLL_RAD)
+    # HIGH-5: solve the GRASP first; derive the approach from the reachable
+    # envelope (clamping the lift down at the annulus edge) instead of refusing
+    # a graspable object because its +approach pose fell outside the annulus.
+    grasp_arm_q, above_arm_q = _solve_grasp_and_approach(
+        ctx, grasp_xyz, DEFAULT_APPROACH_HEIGHT_M, roll=GRASP_ROLL_RAD)
     lift_arm_q = above_arm_q
 
     open_q = ctx.last_full_joints[:5] + [GRIPPER_OPEN_RAD]
@@ -321,10 +443,12 @@ def drop_at(ctx, args: dict[str, Any]) -> None:
     _require_seeded_start_pose(ctx)
     target = _resolve_target(args.get('destination'), ctx)
     drop_xyz = (target[0], target[1], target[2] + GRASP_CLEARANCE_M)
-    above = (target[0], target[1], target[2] + DEFAULT_APPROACH_HEIGHT_M)
 
-    above_arm_q = _solve_or_raise(ctx, above, roll=GRASP_ROLL_RAD)
-    drop_arm_q = _solve_or_raise(ctx, drop_xyz, roll=GRASP_ROLL_RAD)
+    # HIGH-5 (symmetric with pickup): solve the DROP first; derive the approach
+    # from the reachable envelope so an outer-ring destination whose drop is
+    # reachable isn't refused because its +approach pose fell outside the annulus.
+    drop_arm_q, above_arm_q = _solve_grasp_and_approach(
+        ctx, drop_xyz, DEFAULT_APPROACH_HEIGHT_M, roll=GRASP_ROLL_RAD)
 
     above_closed_q = above_arm_q + [GRIPPER_CLOSED_RAD]
     drop_closed_q = drop_arm_q + [GRIPPER_CLOSED_RAD]

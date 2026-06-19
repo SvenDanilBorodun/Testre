@@ -48,19 +48,110 @@ def _inject_single_capture(mgr, R_t2c, t_t2c):
 
 def _camera_looking_straight_down(height_m):
     """A board->cam transform for a camera mounted ``height_m`` above the board,
-    looking straight down. With the camera +Z pointing down at the board, the
-    board (z=0 plane) is at distance ``height_m`` along the camera's +Z, and the
-    camera-frame X/Y mirror the board frame. T_board_to_cam columns:
-        cam_x =  board_x,  cam_y = -board_y,  cam_z = -board_z
-    so the board origin sits at (0, 0, height) in the camera frame.
+    looking straight down — modelling OpenCV's REAL ChArUco convention where the
+    board +Z exits the BACK of the board. With the board printed-side-up on the
+    table, board +Z therefore points DOWN, the same way the straight-down
+    camera's +Z points, so T_board_to_cam rotation is IDENTITY and the board
+    origin sits at (0, 0, height) in the camera frame.
+
+    This reproduces the rig-found bug exactly: with the OLD identity
+    T_board_to_base this resolves the camera BELOW the table (z = -height); the
+    Rx(180°) flip in T_board_to_base corrects it to ABOVE (z = +height).
     """
-    R = np.array([
-        [1.0, 0.0, 0.0],
-        [0.0, -1.0, 0.0],
-        [0.0, 0.0, -1.0],
-    ], dtype=np.float64)
+    R = np.eye(3, dtype=np.float64)
     t = np.array([0.0, 0.0, float(height_m)], dtype=np.float64)
     return R, t
+
+
+def _board_on_table_capture(yaw_misplace_deg):
+    """Synthesize the solvePnP output (``R_target2cam``, ``t_target2cam`` =
+    ``T_board_to_cam``) for a board lying flat on the table, rotated
+    ``yaw_misplace_deg`` in-plane from the canonical placement, as seen by a
+    REALISTIC top-down scene camera mounted above the workspace centre with
+    image-"up" facing away from the robot.
+
+    yaw=0 is the correct placement; 90 / 180 / -90 are the gross misplacements
+    the orientation gate must reject.
+    """
+    import math
+
+    def _rz(deg):
+        c, s = math.cos(math.radians(deg)), math.sin(math.radians(deg))
+        return np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
+
+    from physical_ai_server.workflow.calibration_manager import (
+        BOARD_ORIGIN_X_M, BOARD_ORIGIN_Y_M, BOARD_TABLE_Z_M,
+    )
+    # T_board_to_base for the misplaced board (Rz(yaw) @ Rx(180°) flip).
+    r_flip = np.diag([1.0, -1.0, -1.0])
+    T_board_to_base = np.eye(4)
+    T_board_to_base[:3, :3] = _rz(yaw_misplace_deg) @ r_flip
+    T_board_to_base[:3, 3] = [BOARD_ORIGIN_X_M, BOARD_ORIGIN_Y_M, BOARD_TABLE_Z_M]
+
+    # Physical camera truth: top-down above the workspace centre, image-x along
+    # base +X, image-y along base −Y (optical +Z = base −Z, looking down).
+    R_cam_to_base = np.array([[1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, -1.0]])
+    T_cam_to_base = np.eye(4)
+    T_cam_to_base[:3, :3] = R_cam_to_base
+    T_cam_to_base[:3, 3] = [0.28, 0.0, 0.40]
+    T_base_to_cam = np.linalg.inv(T_cam_to_base)
+
+    # What the camera actually sees of the (mis)placed board.
+    T_board_to_cam = T_base_to_cam @ T_board_to_base
+    return T_board_to_cam[:3, :3].copy(), T_board_to_cam[:3, 3].copy()
+
+
+def test_correctly_placed_board_passes_orientation_gate(calib_dir):
+    """A canonically-placed board (long edge forward, origin near-left) passes
+    the orientation sanity gate and the extrinsic is saved."""
+    from physical_ai_server.workflow.calibration_manager import CalibrationManager
+
+    mgr = CalibrationManager()
+    R_t2c, t_t2c = _board_on_table_capture(0.0)
+    _inject_single_capture(mgr, R_t2c, t_t2c)
+
+    ok, _, _, msg = mgr.solve('scene', 'extrinsic')
+    assert ok is True, msg
+    assert mgr.has_extrinsic('scene') is True
+
+
+def test_board_rotated_90_NOT_caught_is_a_known_limitation(calib_dir):
+    """A 90°/-90° in-plane board rotation is NOT caught by the single-shot gate
+    and must NOT be (rig-found 2026-06-18): a scene camera may be mounted at ANY
+    roll, so a 90° board yaw is geometrically indistinguishable from a 90° camera
+    roll from one top-down view. The earlier forward-axis (cam +X) check that
+    "caught" 90° here ALSO false-rejected a correctly-placed board under a
+    180°-rolled real camera — so it was removed. The residual 90°/mirror is
+    resolved by the rig ground-truth check (object at a measured (x,y)), not by
+    this gate. This test pins that the gate does NOT false-reject these (the gate
+    must stay roll-independent)."""
+    from physical_ai_server.workflow.calibration_manager import CalibrationManager
+
+    for yaw in (90.0, -90.0):
+        mgr = CalibrationManager()
+        R_t2c, t_t2c = _board_on_table_capture(yaw)
+        _inject_single_capture(mgr, R_t2c, t_t2c)
+        ok, _, _, _ = mgr.solve('scene', 'extrinsic')
+        # The look-point stays inside the workspace band for a 90° yaw about the
+        # board origin, so the roll-independent gate accepts it.
+        assert ok is True, f'90° gate must stay roll-independent (yaw={yaw})'
+
+
+def test_board_rotated_180_rejected(calib_dir):
+    """A board rotated 180° in-plane IS rejected: the camera's look-point walks
+    out of the forward workspace region (roll-independent — this is the gross
+    misplacement the gate reliably catches)."""
+    from physical_ai_server.workflow.calibration_manager import CalibrationManager
+
+    mgr = CalibrationManager()
+    R_t2c, t_t2c = _board_on_table_capture(180.0)
+    _inject_single_capture(mgr, R_t2c, t_t2c)
+
+    ok, _, _, msg = mgr.solve('scene', 'extrinsic')
+    assert ok is False
+    assert ('verdreht' in msg or 'falsch platziert' in msg or 'nach unten' in msg)
+    assert mgr.has_extrinsic('scene') is False
+    assert 'scene' not in mgr._handeye_buffers
 
 
 def test_single_shot_solves_and_writes_z_table(calib_dir):

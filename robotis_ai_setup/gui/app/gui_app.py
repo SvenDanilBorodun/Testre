@@ -305,6 +305,11 @@ class EduBoticsApp:
         self._rs_control = None
         self._rs_use_gpu = False
         self._rs_phone_enabled = False
+        # True while THIS GUI is mid-leader-toggle (rewriting the .env +
+        # recreating the arm container). The bridge refuses a second switch and
+        # _rs_get_status reports the in-flight state instead of the optimistic
+        # .env value, so the badge never claims "ready" during the restart.
+        self._rs_switch_in_flight = False
 
         self._build_ui()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -2478,6 +2483,7 @@ class EduBoticsApp:
             self._rs_control = RoboterStudioControlServer(
                 on_set_mode=self._rs_set_leader_mode,
                 get_status=self._rs_get_status,
+                get_task_busy=self._rs_get_task_busy,
                 log=self._log,
             )
             if self._rs_control.start():
@@ -2498,9 +2504,32 @@ class EduBoticsApp:
             self._rs_control = None
 
     def _rs_get_status(self) -> dict:
-        """Current arm mode, read from the .env (the source of truth)."""
+        """Current arm mode for the React toggle badge.
+
+        Reports the TRUE running state, not just the optimistic .env: while a
+        switch is in flight the .env already holds the target mode but the arm
+        container is still restarting, so we surface ``ready: False`` and
+        ``busy: True`` and never claim the new mode is live until the arm
+        container is actually running again."""
         val = config_generator.read_env_var("EDUBOTICS_FOLLOWER_ONLY", ENV_FILE)
-        return {"follower_only": str(val).strip() == "1"}
+        follower_only = str(val).strip() == "1"
+        if self._rs_switch_in_flight:
+            return {"follower_only": follower_only, "ready": False, "busy": True}
+        try:
+            arm_status = docker_manager.get_container_status().get(
+                "open_manipulator", "not found")
+        except Exception:  # noqa: BLE001 — never let the probe break the badge
+            arm_status = "error"
+        return {"follower_only": follower_only,
+                "ready": arm_status == "running"}
+
+    def _rs_get_task_busy(self) -> bool:
+        """Whether a recording / inference run is active (the bridge refuses a
+        mode switch then — restarting the arm container mid-run corrupts the
+        episode). The GUI does not subscribe to ROS task status, so this is the
+        conservative GUI-side signal: a switch already in flight counts as busy
+        so a re-entrant restart can't slip past the bridge's own busy lock."""
+        return bool(self._rs_switch_in_flight)
 
     def _rs_set_leader_mode(self, follower_only: bool, log):
         """Switch the arm to follower-only (leader off) or both-arms (leader on)
@@ -2511,11 +2540,17 @@ class EduBoticsApp:
         start, so the regenerated .env is identical except FOLLOWER_ONLY /
         LEADER_PORT. physical_ai_server (rosbridge + the React app) stays up via
         --no-deps, so the student's session only sees the arm blip + re-home;
-        the native camera bridge auto-reconnects to the recreated ingest node."""
+        the native camera bridge auto-reconnects to the recreated ingest node.
+
+        On a restart FAILURE the .env is ROLLED BACK to the previous mode so the
+        badge + a later "Umgebung starten" don't lie about a dead arm."""
         if self.hardware is None or self.hardware.follower is None:
             return False, "Kein Follower-Arm konfiguriert."
         if not follower_only and self.hardware.leader is None:
             return False, "Kein Leader-Arm konfiguriert — bitte beide Arme scannen."
+        # Remember the mode we are leaving so we can restore it on failure.
+        prev_val = config_generator.read_env_var("EDUBOTICS_FOLLOWER_ONLY", ENV_FILE)
+        prev_follower_only = str(prev_val).strip() == "1"
         try:
             config_generator.generate_env_file(
                 self.hardware, ENV_FILE,
@@ -2528,9 +2563,26 @@ class EduBoticsApp:
             log("Leader-Arm wird abgeschaltet — Roboter Studio wird vorbereitet …")
         else:
             log("Leader-Arm wird wieder verbunden — Teleoperation wird vorbereitet …")
-        ok = docker_manager.restart_open_manipulator(gpu=self._rs_use_gpu, log=log)
+        self._rs_switch_in_flight = True
+        try:
+            ok = docker_manager.restart_open_manipulator(gpu=self._rs_use_gpu, log=log)
+        finally:
+            self._rs_switch_in_flight = False
         if not ok:
-            return False, "Der Arm-Container konnte nicht neu gestartet werden."
+            # Roll the .env back to the mode that was actually running before, so
+            # the status badge and the next env-start reflect reality and the
+            # student can retry from a consistent state.
+            try:
+                config_generator.generate_env_file(
+                    self.hardware, ENV_FILE,
+                    phone_camera=self._rs_phone_enabled,
+                    follower_only=prev_follower_only,
+                )
+                log("Moduswechsel fehlgeschlagen — Konfiguration zurückgesetzt.")
+            except Exception as e:  # noqa: BLE001
+                log(f"Rücksetzen der Konfiguration fehlgeschlagen: {e}")
+            return False, ("Der Arm-Container konnte nicht neu gestartet werden — "
+                           "der vorherige Modus bleibt aktiv.")
         msg = ("Roboter Studio bereit — der Leader-Arm ist abgeschaltet."
                if follower_only else
                "Leader-Arm verbunden — Teleoperation ist wieder verfügbar.")

@@ -115,7 +115,23 @@ def _attach_world_xyz(ctx, detections: list) -> list:
     if not detections:
         ctx.emit_detections([])
         return detections
-    if ctx.scene_intrinsics is None or ctx.scene_extrinsics is None or ctx.z_table is None:
+    # Recover the object's (x, y) by intersecting the camera ray with the table
+    # SURFACE plane (board_table_z), NOT the gripper grasp height (z_table). The
+    # object sits ON the surface; z_table is ~a finger-length ABOVE it, so
+    # intersecting the ray with z_table puts (x, y) at the wrong distance along
+    # the ray — a 15-26 mm lateral error on a tilted camera (invisible for a
+    # perfectly vertical camera).
+    #
+    # The world_xyz_m Z, however, stays z_table: motion.pickup derives its
+    # grasp-descend target from world_xyz_m[2] (target[2] + clearance), and the
+    # workspace-floor refusal compares against z_table / table_plane — both must
+    # keep seeing the MEASURED grasp height, not the surface. So: (x, y) from the
+    # surface projection, z = z_table. Both calibration values must be present
+    # for a graspable detection; otherwise leave world_xyz_m unset so motion
+    # raises the German "Tisch vermessen zuerst" error.
+    board_z = getattr(ctx, 'board_table_z', None)
+    if (ctx.scene_intrinsics is None or ctx.scene_extrinsics is None
+            or board_z is None or ctx.z_table is None):
         # Push the detections so the bbox overlay still renders, but
         # leave world_xyz_m unset; downstream motion handlers will
         # raise a clear German error if they try to act on these.
@@ -126,16 +142,16 @@ def _attach_world_xyz(ctx, detections: list) -> list:
         K = ctx.scene_intrinsics['K']
         dist = ctx.scene_intrinsics['dist']
         T = ctx.scene_extrinsics
-        z = ctx.z_table
-        # Touch-off measured table plane (z = a·x + b·y + c) when present —
-        # the ray then intersects the real (possibly tilted) table, not a
-        # guessed flat z. Falls back to the flat z_table plane otherwise.
-        plane = getattr(ctx, 'table_plane', None)
+        grasp_z = float(ctx.z_table)
+        # Flat surface plane only for the (x, y) recovery: the touch-off
+        # table_plane (a, b, c) is the MEASURED EE-frame tilt, offset above the
+        # surface, so projecting objects onto it would reintroduce the lateral
+        # error this fix removes. It is reserved for motion's descend/floor.
         for d in detections:
             cx, cy = d.centroid_px
-            point = project_pixel_to_table(cx, cy, K, dist, T, z, plane=plane)
+            point = project_pixel_to_table(cx, cy, K, dist, T, board_z)
             if point is not None:
-                d.world_xyz_m = (float(point[0]), float(point[1]), float(point[2]))
+                d.world_xyz_m = (float(point[0]), float(point[1]), grasp_z)
     except Exception as e:
         raise WorkflowError(
             f'Projektion fehlgeschlagen — bitte Kalibrierung prüfen: {e}'

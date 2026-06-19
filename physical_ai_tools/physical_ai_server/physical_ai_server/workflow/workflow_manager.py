@@ -47,7 +47,7 @@ from physical_ai_server.workflow.interpreter import (
 # Reference pose used to seed the IK pre-check at workflow start. Matches
 # handlers.motion.HOME_JOINTS_RAD + GRIPPER_OPEN_RAD; duplicated here to
 # avoid a circular import.
-_HOME_FULL_JOINTS = [0.0, -math.pi / 4, math.pi / 4, 0.0, 0.0, 0.8]
+_HOME_FULL_JOINTS = [0.0, -math.pi / 2, math.pi / 2, 0.0, 0.0, 0.8]
 
 # IK pre-check budget. Each concrete destination gets one solver
 # attempt; an overall cap so a 100-block workflow doesn't stall start.
@@ -63,11 +63,20 @@ class WorkflowContext:
     ik: Any | None = None
     perception: Any | None = None
     destinations: dict[str, dict[str, float]] = field(default_factory=dict)
+    # DUAL Z-KEY (don't conflate):
+    #   z_table        — MEASURED end-effector grasp height (touch-off). Used by
+    #                    motion.pickup as the descend target. NOT a projection plane.
+    #   board_table_z  — table SURFACE height (extrinsic solve). The plane the
+    #                    camera ray intersects to recover an object's (x, y); the
+    #                    object sits on the surface, not at the gripper grasp height.
     z_table: float | None = None
+    board_table_z: float | None = None
     scene_intrinsics: dict | None = None
     scene_extrinsics: Any | None = None
-    # Touch-off measured table plane (a, b, c) for z = a·x + b·y + c; None →
-    # projection uses the flat z_table plane.
+    # Touch-off MEASURED EE-frame table tilt (a, b, c) for z = a·x + b·y + c. Used
+    # by motion's descend; NOT used for object projection (it is offset above the
+    # surface by the finger length, so projecting onto it reintroduces lateral
+    # error on a tilted camera — perception projects onto board_table_z instead).
     table_plane: tuple[float, float, float] | None = None
     last_arm_joints: list[float] | None = None
     last_full_joints: list[float] = field(default_factory=lambda: [0.0] * 6)
@@ -352,6 +361,7 @@ class WorkflowManager:
                 perception=perception_instance,
                 destinations=destinations,
                 z_table=calib.get('z_table'),
+                board_table_z=calib.get('board_table_z'),
                 scene_intrinsics=calib.get('scene_intrinsics'),
                 scene_extrinsics=calib.get('scene_extrinsics'),
                 table_plane=calib.get('table_plane'),

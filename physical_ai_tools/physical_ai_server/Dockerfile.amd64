@@ -68,11 +68,17 @@ RUN cd ${COLCON_WS} && \
 # scipy is pinned explicitly (v2.5.1 audit): it is otherwise only a transitive
 # of the lerobot[pi] extra and that resolve proved non-deterministic across
 # builds — pi0_fast inference hard-needs scipy.fftpack.idct, so pin it directly.
+# v2.9.3: CAP <1.18. scipy 1.18.0 dropped numpy-1.x support and its
+# scipy.sparse._sputils references np.long (numpy-2-only); against the forced
+# numpy==1.26.4 cv_bridge floor below it raises "module 'numpy' has no attribute
+# 'long'" at the transformers D-FINE-loss import (broke the v2.9.2 build).
+# 1.17.1 is the proven-good last numpy-1.x-compatible release. Do NOT widen back
+# to <2.0.0 while numpy is floored at 1.26.4.
 RUN python3 -m pip uninstall -y torchcodec 2>/dev/null || true && \
     pip install --no-cache-dir \
         "lerobot[pi,smolvla,peft]==0.5.1" \
         "accelerate>=1.10.0,<2.0.0" \
-        "scipy>=1.14.0,<2.0.0"
+        "scipy>=1.14.0,<1.18"
 
 # v2.5.4 cv_bridge ABI fix: force numpy<2 AFTER lerobot (which pulls numpy>=2).
 # ros-jazzy-cv-bridge's boost C-extension is compiled against NumPy 1.x; under

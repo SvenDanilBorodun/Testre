@@ -138,14 +138,19 @@ RUN set -e && \
 # shipped WITHOUT scipy). pi0_fast's action decoder hard-needs scipy.fftpack.idct
 # (lerobot/policies/pi0_fast/modeling_pi0_fast.py: idct=None when scipy is
 # absent -> TypeError at inference). Pinning it directly here makes pi0_fast
-# inference deterministic across builds and both arches. Range matches LeRobot's
-# own scipy-dep constraint.
+# inference deterministic across builds and both arches.
+# v2.9.3: CAP <1.18 (was <2.0.0). scipy 1.18.0 dropped numpy-1.x support and its
+# scipy.sparse._sputils references np.long (numpy-2-only); against the forced
+# numpy==1.26.4 cv_bridge floor it raises "module 'numpy' has no attribute 'long'"
+# at the transformers D-FINE-loss import and broke the v2.9.2 build. 1.17.1 is the
+# proven-good last numpy-1.x-compatible release. Do NOT widen back to <2.0.0 while
+# numpy is floored at 1.26.4 (mirror this cap in the two base Dockerfiles).
 RUN set -e && \
     python3 -m pip uninstall -y lerobot torchcodec 2>/dev/null || true && \
     python3 -m pip install --no-cache-dir \
         "lerobot[pi,smolvla,peft]==0.5.1" \
         "accelerate>=1.10.0,<2.0.0" \
-        "scipy>=1.14.0,<2.0.0" && \
+        "scipy>=1.14.0,<1.18" && \
     rm -rf /root/ros2_ws/src/physical_ai_tools/lerobot && \
     sed -i '\|physical_ai_tools/lerobot/src|d' /root/.bashrc 2>/dev/null || true && \
     sed -i '\|physical_ai_tools/lerobot/src|d' /usr/local/lib/s6-services/ros2_service_run.sh 2>/dev/null || true && \

@@ -47,6 +47,15 @@ image = (
         # Do NOT pre-pin transformers here — let the [smolvla,peft] extras
         # resolve to the exact transformers==5.3.0 LeRobot requires.
         f"lerobot[pi,smolvla,peft]=={LEROBOT_VERSION}",
+        # scipy rides in as a transitive of the [pi] extra (>=1.14.0,<2.0.0).
+        # PIN it explicitly to <1.18: scipy 1.18.0 dropped numpy-1.x support and
+        # references np.long (numpy-2-only). Modal runs numpy 2.x, so the np.long
+        # crash that broke the v2.9.2 STUDENT image (which force-floors
+        # numpy==1.26.4 for the cv_bridge ABI) does NOT fire here — but capping
+        # keeps scipy reproducible across `--no-cache` builds and IDENTICAL to the
+        # three server Dockerfiles, so the same overnight transitive drift can
+        # never silently bite training. 1.17.1 is the proven-good release.
+        "scipy>=1.14.0,<1.18",
         # accelerate is a hard runtime dep in v0.5.1 (was optional in 0.2.0).
         # Pin to a safe minor-version range so a future major doesn't break
         # the resolver out from under us.

@@ -77,7 +77,11 @@ image = (
         # this the OWLv2 /vision/detect path raises ImportError on the very
         # first image preprocess. Caught by vision_app.py::smoke_test on
         # 2026-05-29 (the image had never declared scipy).
-        "scipy",
+        # PIN <1.18 (was bare "scipy"): scipy 1.18.0 dropped numpy-1.x support and
+        # uses np.long; capping keeps the OWLv2 preprocess reproducible across
+        # `--no-cache` builds (no overnight drift) and consistent with every other
+        # surface. 1.17.1 is the proven-good release.
+        "scipy>=1.14.0,<1.18",
     )
     # Pin torch 2.4.0 + torchvision 0.19.0 from the cu121 wheel index.
     # This is the vision surface's OWN channel, matched to its
@@ -381,9 +385,18 @@ def smoke_test() -> dict[str, Any]:
     with _torch.no_grad():
         _ = mdl(**inputs)
 
+    import scipy as _scipy
+
     return {
         "ok": True,
-        "torch_version": _torch.__version__,
+        # Cast TorchVersion -> plain str. TorchVersion pickles a torch class
+        # reference, so a torch-less local `modal run` (e.g. Windows) raises
+        # DeserializationError on the return value even though the remote ran
+        # fine. Same fix as modal_app.py::smoke_test.
+        "torch_version": str(_torch.__version__),
+        # Surface scipy so the smoke proves the <1.18 pin resolved (the
+        # Owlv2ImageProcessor.resize() above already exercised the scipy path).
+        "scipy_version": str(_scipy.__version__),
         "cuda_available": True,  # guaranteed by the check above
         "model": MODEL_NAME,
         "vision_secret_keys": bundle_keys,

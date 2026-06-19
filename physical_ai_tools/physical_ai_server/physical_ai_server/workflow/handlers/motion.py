@@ -331,6 +331,22 @@ def _resolve_target(value: Any, ctx) -> tuple[float, float, float]:
         or hasattr(value, 'world_xyz_m')
     )
     if has_world_key:
+        # Distinguish the two reasons world_xyz_m is unset so the student fixes
+        # the RIGHT step. The camera→table projection needs intrinsics +
+        # extrinsics + the board surface height; the grasp DESCEND additionally
+        # needs the measured touch-off z_table. With per-rig intrinsics now
+        # mandatory (#1), "camera not calibrated" is the common early case and
+        # must not be mislabelled as a missing table measurement.
+        cam_uncalibrated = (
+            getattr(ctx, 'scene_intrinsics', None) is None
+            or getattr(ctx, 'scene_extrinsics', None) is None
+            or getattr(ctx, 'board_table_z', None) is None
+        )
+        if cam_uncalibrated:
+            raise WorkflowError(
+                'Die Szenen-Kamera ist noch nicht kalibriert — bitte zuerst die '
+                'Kamera-Kalibrierung (intrinsisch + Ausrichtung) abschließen.'
+            )
         raise WorkflowError(
             'Für diesen Block muss die Tischhöhe kalibriert sein — bitte '
             'zuerst „Tisch vermessen" abschließen.'

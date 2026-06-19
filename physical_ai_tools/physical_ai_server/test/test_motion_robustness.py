@@ -247,8 +247,16 @@ class _FakeDetection:
         self.centroid_px = (100, 100)
 
 
+def _calibrated_ctx():
+    # Camera calibrated (intrinsics/extrinsics/board height present) but the
+    # touch-off z_table is still missing → the touch-off step is named (#1).
+    return types.SimpleNamespace(
+        destinations={}, scene_intrinsics={'K': 1}, scene_extrinsics=1,
+        board_table_z=0.0, z_table=None)
+
+
 def test_resolve_target_unprojected_detection_names_touch_off():
-    ctx = types.SimpleNamespace(destinations={})
+    ctx = _calibrated_ctx()
     with pytest.raises(WorkflowError) as exc:
         _resolve_target(_FakeDetection(world_xyz_m=None), ctx)
     msg = str(exc.value)
@@ -258,10 +266,21 @@ def test_resolve_target_unprojected_detection_names_touch_off():
 
 
 def test_resolve_target_unprojected_dict_detection_names_touch_off():
-    ctx = types.SimpleNamespace(destinations={})
+    ctx = _calibrated_ctx()
     with pytest.raises(WorkflowError) as exc:
         _resolve_target({'world_xyz_m': None, 'centroid_px': (1, 1)}, ctx)
     assert 'Tisch vermessen' in str(exc.value)
+
+
+def test_resolve_target_uncalibrated_camera_names_calibration():
+    # #1: when the scene camera is NOT calibrated (no intrinsics), the message
+    # points to the camera calibration, not the table measurement.
+    ctx = types.SimpleNamespace(destinations={})
+    with pytest.raises(WorkflowError) as exc:
+        _resolve_target(_FakeDetection(world_xyz_m=None), ctx)
+    msg = str(exc.value)
+    assert 'kalibriert' in msg and 'Kamera' in msg
+    assert 'Tisch vermessen' not in msg
 
 
 def test_resolve_target_projected_detection_returns_xyz():

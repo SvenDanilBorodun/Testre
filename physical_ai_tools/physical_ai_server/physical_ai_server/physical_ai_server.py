@@ -2618,8 +2618,19 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 fs = cv2.FileStorage(str(scene_intrinsic_path), cv2.FILE_STORAGE_READ)
                 K = fs.getNode('camera_matrix').mat()
                 dist = fs.getNode('distortion_coefficients').mat()
+                src_node = fs.getNode('source')
+                source = src_node.string() if not src_node.empty() else ''
                 fs.release()
-                if K is not None and dist is not None:
+                # #1 (2026-06-19): per-rig intrinsic calibration is mandatory.
+                # A stale factory-default YAML (guessed K) from an older install
+                # must NOT be loaded — leave scene_intrinsics absent so detection
+                # projection refuses loudly and the student calibrates for real.
+                if source == 'factory_default':
+                    self.get_logger().warning(
+                        'Ignoring factory-default scene_intrinsics.yaml — a '
+                        'per-rig intrinsic calibration is now required.'
+                    )
+                elif K is not None and dist is not None:
                     result['scene_intrinsics'] = {'K': K, 'dist': dist}
             except Exception as e:
                 self.get_logger().warning(

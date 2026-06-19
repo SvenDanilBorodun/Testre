@@ -829,9 +829,22 @@ class Interpreter:
                 lo, hi = hi, lo
             return min(max(v, lo), hi)
         if btype == 'math_modulo':
-            a = float(self._eval_value(self._get_input_block(block, 'DIVIDEND'), ctx) or 0)
-            b = float(self._eval_value(self._get_input_block(block, 'DIVISOR'), ctx) or 1)
-            return a % b if b != 0 else 0.0
+            # Read WITHOUT the old `or 1` coercion: `0 or 1 == 1` silently turned
+            # an explicit zero divisor into 1 (a different silent-wrong-value
+            # bug). Only a genuinely missing (None) input falls back to 1.
+            raw_a = self._eval_value(self._get_input_block(block, 'DIVIDEND'), ctx)
+            raw_b = self._eval_value(self._get_input_block(block, 'DIVISOR'), ctx)
+            a = float(raw_a if raw_a is not None else 0)
+            b = float(raw_b if raw_b is not None else 1)
+            # Fail loud instead of the old silent `0.0`: a modulo-by-zero is a
+            # student mistake, and returning 0 would feed a wrong value silently
+            # into the rest of the program (violates "no silent fallbacks").
+            if b == 0:
+                raise InterpreterError(
+                    'Rest-Division durch Null ist nicht möglich — bitte den '
+                    'Divisor prüfen.'
+                )
+            return a % b
         if btype == 'math_round':
             op = (block.get('fields') or {}).get('OP', 'ROUND')
             n = float(self._eval_value(self._get_input_block(block, 'NUM'), ctx) or 0)
@@ -986,9 +999,27 @@ class Interpreter:
         if op == 'MULTIPLY':
             return a * b
         if op == 'DIVIDE':
-            return a / b if b != 0 else 0.0
+            # Fail loud instead of the old silent `0.0`. Returning 0 on a
+            # division-by-zero silently propagates a wrong value through the
+            # rest of the student's program ("no silent fallbacks").
+            if b == 0:
+                raise InterpreterError(
+                    'Division durch Null ist nicht möglich — bitte den Teiler '
+                    'prüfen.'
+                )
+            return a / b
         if op == 'POWER':
-            return a ** b
+            result = a ** b
+            # A negative base with a fractional exponent yields a Python complex
+            # (e.g. (-2)**0.5) that would silently corrupt every downstream
+            # numeric comparison. Reject it with a clear German message rather
+            # than letting the complex leak into the program.
+            if isinstance(result, complex):
+                raise InterpreterError(
+                    'Diese Potenz hat kein reelles Ergebnis (negative Basis mit '
+                    'gebrochenem Exponenten).'
+                )
+            return float(result)
         return 0.0
 
     # ------------------------------------------------------------------

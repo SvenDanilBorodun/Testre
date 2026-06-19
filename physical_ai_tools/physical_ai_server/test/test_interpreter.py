@@ -192,3 +192,64 @@ def test_arithmetic_evaluation():
     ctx = _StubCtx()
     Interpreter.from_json(payload).execute(ctx, lambda *a: None)
     assert ctx.variables['sum'] == 7
+
+
+# ── #6: silent-wrong-value math now fails loud ───────────────────────────────
+
+def _arith_ws(op: str, a, b) -> str:
+    return _ws([{
+        'type': 'variables_set',
+        'fields': {'VAR': {'name': 'r'}},
+        'inputs': {'VALUE': {'block': {
+            'type': 'math_arithmetic',
+            'fields': {'OP': op},
+            'inputs': {
+                'A': {'block': {'type': 'math_number', 'fields': {'NUM': a}}},
+                'B': {'block': {'type': 'math_number', 'fields': {'NUM': b}}},
+            },
+        }}},
+    }])
+
+
+def _modulo_ws(a, b) -> str:
+    return _ws([{
+        'type': 'variables_set',
+        'fields': {'VAR': {'name': 'r'}},
+        'inputs': {'VALUE': {'block': {
+            'type': 'math_modulo',
+            'inputs': {
+                'DIVIDEND': {'block': {'type': 'math_number', 'fields': {'NUM': a}}},
+                'DIVISOR': {'block': {'type': 'math_number', 'fields': {'NUM': b}}},
+            },
+        }}},
+    }])
+
+
+def test_divide_by_zero_raises_german_error():
+    interp = Interpreter.from_json(_arith_ws('DIVIDE', 5, 0))
+    with pytest.raises(InterpreterError) as exc:
+        interp.execute(_StubCtx(), lambda *a: None)
+    assert 'Division durch Null' in str(exc.value)
+
+
+def test_modulo_by_zero_raises_german_error():
+    interp = Interpreter.from_json(_modulo_ws(5, 0))
+    with pytest.raises(InterpreterError) as exc:
+        interp.execute(_StubCtx(), lambda *a: None)
+    assert 'durch Null' in str(exc.value)
+
+
+def test_power_negative_base_fractional_exponent_raises():
+    interp = Interpreter.from_json(_arith_ws('POWER', -2, 0.5))
+    with pytest.raises(InterpreterError) as exc:
+        interp.execute(_StubCtx(), lambda *a: None)
+    assert 'reelles Ergebnis' in str(exc.value)
+
+
+def test_valid_divide_and_modulo_still_work():
+    c1 = _StubCtx()
+    Interpreter.from_json(_arith_ws('DIVIDE', 6, 2)).execute(c1, lambda *a: None)
+    assert c1.variables['r'] == 3
+    c2 = _StubCtx()
+    Interpreter.from_json(_modulo_ws(7, 3)).execute(c2, lambda *a: None)
+    assert c2.variables['r'] == 1

@@ -277,7 +277,13 @@ class CalibrationManager:
         self._intrinsics: dict[str, dict] = {}
         CALIB_DIR.mkdir(parents=True, exist_ok=True)
         self._load_persisted_intrinsics()
-        self._seed_factory_intrinsics()
+        # #1 (2026-06-19): per-rig intrinsic calibration is MANDATORY — the
+        # factory-default seeding was REMOVED. A guessed focal length scales
+        # every projected XY (the Innomaker scene cam is a ~102° lens, so a
+        # 600 px default could be ~2x wrong), and the touch-off only fixes
+        # grasp HEIGHT, not lateral scale. No guessed K ever ships now: the
+        # student runs the 12-frame ChArUco intrinsic step, which the extrinsic
+        # step already gates on (start_step 'extrinsic' requires has_intrinsics).
 
     # ------------------------------------------------------------------
     # Persistence helpers
@@ -300,7 +306,15 @@ class CalibrationManager:
                 fs = cv2.FileStorage(str(path), cv2.FILE_STORAGE_READ)
                 K = fs.getNode('camera_matrix').mat()
                 dist = fs.getNode('distortion_coefficients').mat()
+                src_node = fs.getNode('source')
+                source = src_node.string() if not src_node.empty() else ''
                 fs.release()
+                # #1: a YAML left by the old factory-default seeding is a GUESSED
+                # K — ignore it so a rig upgraded from an older install still
+                # requires a real per-rig intrinsic calibration (no silent
+                # guessed projection).
+                if source == 'factory_default':
+                    continue
                 if K is not None and dist is not None:
                     self._intrinsics[camera] = {'K': K, 'dist': dist}
             except Exception as e:
@@ -315,52 +329,6 @@ class CalibrationManager:
                     f'({path}): {e}. Bitte Kalibrierung neu starten.',
                     file=sys.stderr, flush=True,
                 )
-
-    def _seed_factory_intrinsics(self) -> None:
-        """Seed shipped factory-default scene-camera intrinsics when no per-rig
-        calibration exists, so students can SKIP the fragile 12-frame ChArUco
-        intrinsic step. A per-rig intrinsic calibration (optional refine)
-        overwrites the YAML and supersedes this.
-
-        Env-read at call time (testable). Set ``EDUBOTICS_FACTORY_INTRINSICS=0``
-        to require the per-rig step instead.
-
-        HONEST NOTE: the default fx/fy below are an ESTIMATE for the Innomaker
-        scene camera at 640×480. The touch-off fixes grasp HEIGHT independently,
-        but the LATERAL scale depends on fx/fy — for best accuracy a teacher
-        calibrates once per camera model (or the real measured values are baked
-        here in P6). A wrong focal length scales every projected XY.
-        """
-        if os.environ.get('EDUBOTICS_FACTORY_INTRINSICS', '1') == '0':
-            return
-        if 'scene' in self._intrinsics:
-            return
-        fx = _safe_float_env('EDUBOTICS_FACTORY_FX', 600.0)
-        fy = _safe_float_env('EDUBOTICS_FACTORY_FY', 600.0)
-        cx = _safe_float_env('EDUBOTICS_FACTORY_CX', 320.0)
-        cy = _safe_float_env('EDUBOTICS_FACTORY_CY', 240.0)
-        w = _safe_int_env('EDUBOTICS_FACTORY_IMG_W', 640)
-        h = _safe_int_env('EDUBOTICS_FACTORY_IMG_H', 480)
-        K = np.array([[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]],
-                     dtype=np.float64)
-        dist = np.zeros((5, 1), dtype=np.float64)
-        self._intrinsics['scene'] = {'K': K, 'dist': dist}
-        # Persist so the runtime loader (_load_workflow_calibration, which reads
-        # the YAML directly) sees it too. source=factory_default marks it so a
-        # real calibration is distinguishable.
-        try:
-            path = self._intrinsic_path('scene')
-            if not path.exists():
-                fs = cv2.FileStorage(str(path), cv2.FILE_STORAGE_WRITE)
-                fs.write('camera_matrix', K)
-                fs.write('distortion_coefficients', dist)
-                fs.write('image_width', w)
-                fs.write('image_height', h)
-                fs.write('reprojection_error', -1.0)
-                fs.write('source', 'factory_default')
-                fs.release()
-        except Exception:  # noqa: BLE001 — seeding is best-effort
-            pass
 
     def has_intrinsics(self, camera: str) -> bool:
         return camera in self._intrinsics

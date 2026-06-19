@@ -58,9 +58,9 @@ def test_gripper_steps_rejected(calib_dir):
         assert 'Greifer-Kamera' in msg or 'Szenen-Kamera' in msg
 
 
-def test_start_extrinsic_blocked_without_intrinsics(calib_dir, monkeypatch):
-    # Disable the factory default so this exercises the no-intrinsics block.
-    monkeypatch.setenv('EDUBOTICS_FACTORY_INTRINSICS', '0')
+def test_start_extrinsic_blocked_without_intrinsics(calib_dir):
+    # #1: per-rig intrinsics are mandatory — with no calibrated K the extrinsic
+    # step is blocked until the intrinsic step runs.
     from physical_ai_server.workflow.calibration_manager import CalibrationManager
     mgr = CalibrationManager()
     ok, msg = mgr.start_step('scene', 'extrinsic')
@@ -68,32 +68,40 @@ def test_start_extrinsic_blocked_without_intrinsics(calib_dir, monkeypatch):
     assert 'intrinsisch' in msg.lower()
 
 
-def test_factory_intrinsics_seeded_by_default(calib_dir):
-    from physical_ai_server.workflow.calibration_manager import CalibrationManager
-    mgr = CalibrationManager()
-    assert mgr.has_intrinsics('scene') is True
-    # Persisted so the runtime YAML loader (_load_workflow_calibration) sees it.
-    assert (calib_dir / 'scene_intrinsics.yaml').exists()
-
-
-def test_factory_intrinsics_can_be_disabled(calib_dir, monkeypatch):
-    monkeypatch.setenv('EDUBOTICS_FACTORY_INTRINSICS', '0')
+def test_no_factory_intrinsics_by_default(calib_dir):
+    # #1: the factory-default seeding was REMOVED — a fresh manager has NO
+    # intrinsics (and writes no YAML) until the student runs the per-rig
+    # ChArUco intrinsic step. No guessed K ever ships.
     from physical_ai_server.workflow.calibration_manager import CalibrationManager
     mgr = CalibrationManager()
     assert mgr.has_intrinsics('scene') is False
+    assert not (calib_dir / 'scene_intrinsics.yaml').exists()
 
 
-def test_real_intrinsics_supersede_factory(calib_dir):
+def test_factory_intrinsics_env_no_longer_seeds(calib_dir, monkeypatch):
+    # The old EDUBOTICS_FACTORY_INTRINSICS knob is gone; even =1 seeds nothing.
+    monkeypatch.setenv('EDUBOTICS_FACTORY_INTRINSICS', '1')
+    from importlib import reload
+    from physical_ai_server.workflow import calibration_manager as cm
+    reload(cm)
+    mgr = cm.CalibrationManager()
+    assert mgr.has_intrinsics('scene') is False
+
+
+def test_factory_default_yaml_ignored(calib_dir):
+    # #1: a stale factory-default YAML (guessed K) left by an older install must
+    # be IGNORED so the upgraded rig still requires a real per-rig calibration.
     import cv2
-    _write_intrinsics(calib_dir, 'scene')  # a real per-rig YAML already exists
-    from physical_ai_server.workflow.calibration_manager import CalibrationManager
-    CalibrationManager()
-    # The factory seed must NOT overwrite a real calibration.
-    fs = cv2.FileStorage(str(calib_dir / 'scene_intrinsics.yaml'), cv2.FILE_STORAGE_READ)
-    src = fs.getNode('source')
-    is_factory = (not src.empty()) and src.string() == 'factory_default'
+    K = np.array([[600.0, 0, 320], [0, 600, 240], [0, 0, 1]], dtype=np.float64)
+    dist = np.zeros((5, 1), dtype=np.float64)
+    fs = cv2.FileStorage(str(calib_dir / 'scene_intrinsics.yaml'), cv2.FILE_STORAGE_WRITE)
+    fs.write('camera_matrix', K)
+    fs.write('distortion_coefficients', dist)
+    fs.write('source', 'factory_default')
     fs.release()
-    assert is_factory is False
+    from physical_ai_server.workflow.calibration_manager import CalibrationManager
+    mgr = CalibrationManager()
+    assert mgr.has_intrinsics('scene') is False
 
 
 def test_handeye_synonym_accepted_for_scene(calib_dir):

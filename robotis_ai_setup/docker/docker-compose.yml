@@ -224,16 +224,10 @@ services:
       - EDUBOTICS_EXTRINSIC_REGION_X_MIN=${EDUBOTICS_EXTRINSIC_REGION_X_MIN:-0.08}
       - EDUBOTICS_EXTRINSIC_REGION_X_MAX=${EDUBOTICS_EXTRINSIC_REGION_X_MAX:-0.46}
       - EDUBOTICS_EXTRINSIC_REGION_Y_ABS=${EDUBOTICS_EXTRINSIC_REGION_Y_ABS:-0.18}
-      # Factory-default scene-camera intrinsics (Innomaker @ 640x480) so students
-      # skip the 12-frame ChArUco step; a per-rig calibration supersedes them.
-      # Set EDUBOTICS_FACTORY_INTRINSICS=0 to require the per-rig step instead.
-      - EDUBOTICS_FACTORY_INTRINSICS=${EDUBOTICS_FACTORY_INTRINSICS:-1}
-      - EDUBOTICS_FACTORY_FX=${EDUBOTICS_FACTORY_FX:-600.0}
-      - EDUBOTICS_FACTORY_FY=${EDUBOTICS_FACTORY_FY:-600.0}
-      - EDUBOTICS_FACTORY_CX=${EDUBOTICS_FACTORY_CX:-320.0}
-      - EDUBOTICS_FACTORY_CY=${EDUBOTICS_FACTORY_CY:-240.0}
-      - EDUBOTICS_FACTORY_IMG_W=${EDUBOTICS_FACTORY_IMG_W:-640}
-      - EDUBOTICS_FACTORY_IMG_H=${EDUBOTICS_FACTORY_IMG_H:-480}
+      # #1 (2026-06-19): per-rig intrinsic calibration is MANDATORY — the
+      # factory-default-intrinsics seeding (the old EDUBOTICS_FACTORY_* knobs)
+      # was REMOVED. A guessed focal length scales every projected XY, so no
+      # guessed K ships; the student runs the 12-frame ChArUco intrinsic step.
       # Generic grasp: conservative descend clearance above the measured table
       # plane, and a fixed tool-roll (j5) for the gripper. Rig-tunable.
       - EDUBOTICS_GRASP_CLEARANCE_M=${EDUBOTICS_GRASP_CLEARANCE_M:-0.012}

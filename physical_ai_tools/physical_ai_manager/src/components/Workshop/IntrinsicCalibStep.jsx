@@ -122,6 +122,13 @@ function IntrinsicCalibStep({ camera }) {
         Halte die ChArUco-Tafel langsam aus verschiedenen Winkeln vor die Kamera.
         Mindestens {framesRequired} verschiedene Ansichten werden benötigt.
       </p>
+      <p className="text-sm text-[var(--ink-3)] mb-4 rounded-md bg-amber-50 border border-amber-200 px-3 py-2">
+        <strong>Dieser Schritt ist erforderlich.</strong> Er misst die echte
+        Brennweite deiner Kamera — ohne ihn wären alle berechneten Positionen
+        seitlich verschoben. Die Tischvermessung korrigiert nur die Höhe, nicht
+        den seitlichen Maßstab. Erst danach lässt sich die Ausrichtung
+        kalibrieren.
+      </p>
 
       <div className="bg-white border border-[var(--line)] rounded-lg p-4 mb-4">
         <div className="flex items-center justify-between mb-2">

@@ -41,12 +41,14 @@ function WorkshopPage({ isActive }) {
   const dispatch = useDispatch();
   // WS4 (2026-06-17): scene-cam-only calibration. The gripper camera is no
   // longer calibrated (not modelled in the omx_f URDF; unused at runtime), so
-  // the editor-unlock gate requires ONLY scene intrinsic + scene extrinsic +
-  // color profile. The gripper flags are intentionally NOT read here.
+  // the editor-unlock gate reads only scene flags. The gripper flags are
+  // intentionally NOT read here.
+  // 2026-06-22: the colour-profile step was dropped — the editor unlocks after
+  // the 3 geometry steps (intrinsic + extrinsic + table touch-off). The grasp
+  // path needs only those three; the colour profile gated nothing else.
   const hasIntrinsicScene = useSelector((s) => s.workshop.hasIntrinsicScene);
   const hasHandeyeScene = useSelector((s) => s.workshop.hasHandeyeScene);
   const hasTableTouch = useSelector((s) => s.workshop.hasTableTouch);
-  const hasColorProfile = useSelector((s) => s.workshop.hasColorProfile);
   const selectedWorkflowId = useSelector((s) => s.workshop.selectedWorkflowId);
   const unsavedBlocklyJson = useSelector((s) => s.workshop.unsavedBlocklyJson);
   const accessToken = useSelector((s) => s.auth?.session?.access_token);
@@ -72,8 +74,7 @@ function WorkshopPage({ isActive }) {
   const calibrated =
     hasIntrinsicScene &&
     hasHandeyeScene &&
-    hasTableTouch &&
-    hasColorProfile;
+    hasTableTouch;
 
   // Re-subscribe to /workflow/status whenever this page is active OR
   // the rosbridge connection state flips back to connected. The v1

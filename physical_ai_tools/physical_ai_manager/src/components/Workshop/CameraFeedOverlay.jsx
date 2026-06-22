@@ -60,7 +60,18 @@ function CameraFeedOverlay({ camera = 'scene', clickable = false, onMark, ...res
 
     let cancelled = false;
     const timestamp = Date.now();
-    img.src = `http://${rosHost}:8080/stream?quality=${STREAM_QUALITY}&type=ros_compressed&default_transport=compressed&topic=${topic}&t=${timestamp}`;
+    // web_video_server's `compressed` image_transport appends `/compressed`
+    // itself when default_transport=compressed, so it must receive the BARE
+    // base topic (matching ImageGridCell/Aufnahme, whose /image/get_available_list
+    // already strips the suffix). Passing the already-/compressed-suffixed name
+    // makes it subscribe to the phantom `<topic>/compressed/compressed`, which
+    // has no publisher → black feed. CAMERA_TOPICS keeps the real /compressed
+    // name because the rosbridge liveness subscription below subscribes directly
+    // (no auto-append) and needs it.
+    const streamTopic = topic.endsWith('/compressed')
+      ? topic.slice(0, -'/compressed'.length)
+      : topic;
+    img.src = `http://${rosHost}:8080/stream?quality=${STREAM_QUALITY}&type=ros_compressed&default_transport=compressed&topic=${streamTopic}&t=${timestamp}`;
     img.alt = topic;
     img.className = 'block w-full h-full object-contain rounded-lg bg-black';
     img.onload = () => {

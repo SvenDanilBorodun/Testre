@@ -167,6 +167,25 @@ def _make_v21_tree(root: Path, total_episodes: int):
     }), encoding='utf-8')
 
 
+def _make_corrupt_info_tree(root: Path, total_episodes: int = 3):
+    """A REAL v3.0 layout on disk, but with a TRUNCATED (unparseable) info.json.
+
+    This is the regression case: the directory exists and the tree is genuinely
+    v3, but json.load raises JSONDecodeError so the version can't be read.
+    """
+    _make_v3_tree(root, total_episodes)
+    # Truncated mid-object -> json.load raises JSONDecodeError (a ValueError).
+    (root / 'meta' / 'info.json').write_text(
+        '{"codebase_version": "v3.0", "total_episo', encoding='utf-8')
+
+
+def _make_versionless_info_tree(root: Path, total_episodes: int = 3):
+    """A real v3.0 layout whose info.json parses but lacks codebase_version."""
+    _make_v3_tree(root, total_episodes)
+    (root / 'meta' / 'info.json').write_text(
+        json.dumps({'total_episodes': total_episodes}), encoding='utf-8')
+
+
 class DataEditorV3ModuleTest(unittest.TestCase):
 
     @classmethod
@@ -193,6 +212,38 @@ class DataEditorV3ModuleTest(unittest.TestCase):
         self.assertTrue(self.v3.is_v3_dataset(v3))
         self.assertFalse(self.v3.is_v3_dataset(v21))
         self.assertFalse(self.v3.is_v3_dataset(self.tmpdir / 'missing'))
+
+    def test_is_v21_dataset_positive_only(self):
+        # Routing to the destructive legacy editor keys on THIS. It must be a
+        # positive v2.x check, never the negation of is_v3_dataset: a corrupt /
+        # version-less / missing dataset is NOT positively v2.1.
+        v21 = self.tmpdir / 's' / 'ds_v21'
+        _make_v21_tree(v21, 3)
+        v3 = self.tmpdir / 's' / 'ds_v3'
+        _make_v3_tree(v3, 3)
+        corrupt = self.tmpdir / 's' / 'ds_corrupt'
+        _make_corrupt_info_tree(corrupt, 3)
+        versionless = self.tmpdir / 's' / 'ds_nover'
+        _make_versionless_info_tree(versionless, 3)
+        self.assertTrue(self.v3.is_v21_dataset(v21))
+        self.assertFalse(self.v3.is_v21_dataset(v3))
+        self.assertFalse(self.v3.is_v21_dataset(corrupt))
+        self.assertFalse(self.v3.is_v21_dataset(versionless))
+        self.assertFalse(self.v3.is_v21_dataset(self.tmpdir / 's' / 'missing'))
+
+    def test_delete_corrupt_info_is_german_beschaedigt_no_upstream(self):
+        # A v3 dataset with a truncated info.json must fail loud in German and
+        # touch neither upstream nor the on-disk info.json.
+        src = self.tmpdir / 's' / 'ds'
+        _make_corrupt_info_tree(src, 3)
+        before = (src / 'meta' / 'info.json').read_text()
+        with self.assertRaises(self.v3.DataEditError) as ctx:
+            self.v3.delete_episodes_v3(str(src), [1])
+        self.assertIn('beschädigt', str(ctx.exception))
+        self.assertEqual(TOOLS.delete_calls, [],
+                         'must reject before any upstream call')
+        self.assertEqual((src / 'meta' / 'info.json').read_text(), before,
+                         'corrupt info.json must be left byte-untouched')
 
     # -- pre-validation fires BEFORE upstream ----------------------------------------
 
@@ -613,6 +664,38 @@ class DatasetEditCallbackRoutingTest(unittest.TestCase):
         self.assertIn('Alle Episoden', resp.message)
         self.assertNotIn('Error:', resp.message,
                          'must be the German DataEditError, not the generic')
+
+    def test_v3_corrupt_info_delete_routes_to_v3_not_legacy(self):
+        # The regression: a REAL v3.0 dataset with a truncated info.json. Under
+        # the old routing this hit the DESTRUCTIVE legacy editor (English
+        # FileNotFoundError on the single path; silent no-op + info.json
+        # clobbered to {} + false success on the batch path). It must now route
+        # to the v3 module: fail in German (beschädigt), never touch the legacy
+        # editor, and leave the on-disk info.json byte-untouched.
+        src = self.tmpdir / 'student' / 'ds'
+        _make_corrupt_info_tree(src, 3)
+        before = (src / 'meta' / 'info.json').read_text()
+
+        resp = self._call(_EditRequest(
+            self.EditDataset.Request.DELETE, delete_path=str(src),
+            episodes=[1]))
+        self.assertFalse(resp.success)
+        self.assertIn('beschädigt', resp.message)
+        self.assertNotIn('Error:', resp.message)
+        self.assertEqual(_FakeLegacyEditor.calls, [],
+                         'legacy editor must NOT run on a corrupt v3 dataset')
+        self.assertEqual(TOOLS.delete_calls, [])
+
+        # multi-episode (the old silent-no-op + info.json-clobber batch path)
+        _FakeLegacyEditor.calls = []
+        resp = self._call(_EditRequest(
+            self.EditDataset.Request.DELETE, delete_path=str(src),
+            episodes=[1, 2]))
+        self.assertFalse(resp.success)
+        self.assertIn('beschädigt', resp.message)
+        self.assertEqual(_FakeLegacyEditor.calls, [])
+        self.assertEqual((src / 'meta' / 'info.json').read_text(), before,
+                         'corrupt info.json must be left byte-untouched')
 
 
 if __name__ == '__main__':

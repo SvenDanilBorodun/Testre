@@ -15,18 +15,24 @@ import { useRosServiceCaller } from '../../hooks/useRosServiceCaller';
 import IntrinsicCalibStep from './IntrinsicCalibStep';
 import HandEyeCalibStep from './HandEyeCalibStep';
 import TableTouchStep from './TableTouchStep';
-import ColorProfileStep from './ColorProfileStep';
 
 // WS4 (2026-06-17): scene-cam-only calibration. The two gripper-camera
 // steps (intrinsic + eye-in-hand) were removed — the gripper camera is not
 // modelled in the omx_f URDF and is unused at runtime. The scene extrinsic
-// is now a single-shot board-on-table measurement (no arm motion), so the
-// student sees a coherent 3-step flow.
+// is now a single-shot board-on-table measurement (no arm motion).
+//
+// 2026-06-22: the optional 4th step (Farbprofil) was DROPPED — Roboter Studio
+// unlocks after the 3 geometry steps. The grasp/projection path needs only
+// intrinsics + extrinsic + the touch-off z_table; the colour profile gated
+// nothing in the runtime (perception builds fine with an empty profile) and
+// only enabled the colour-detection blocks. With the step gone, those blocks
+// fail loud ("Farbe … nicht kalibriert"); object + marker detection are
+// unaffected. ColorProfileStep.jsx / the /calibration capture-colour service
+// are left in place but unreferenced.
 const STEPS = [
   { key: 'scene_intrinsic', label: 'Szenen-Kamera (intrinsisch)', component: IntrinsicCalibStep, props: { camera: 'scene' } },
   { key: 'scene_handeye', label: 'Szenen-Kamera (Extrinsik)', component: HandEyeCalibStep, props: { camera: 'scene' } },
   { key: 'table_touch', label: 'Tisch vermessen (Höhe)', component: TableTouchStep, props: {} },
-  { key: 'color_profile', label: 'Farbprofil', component: ColorProfileStep, props: {} },
 ];
 
 function CalibrationWizard() {
@@ -36,7 +42,6 @@ function CalibrationWizard() {
   const hasIntrinsicScene = useSelector((s) => s.workshop.hasIntrinsicScene);
   const hasHandeyeScene = useSelector((s) => s.workshop.hasHandeyeScene);
   const hasTableTouch = useSelector((s) => s.workshop.hasTableTouch);
-  const hasColorProfile = useSelector((s) => s.workshop.hasColorProfile);
 
   // Hydrate per-step badges from disk so reloading the page doesn't make
   // students redo intrinsic captures. Run once on mount; the underlying
@@ -77,7 +82,6 @@ function CalibrationWizard() {
     scene_intrinsic: hasIntrinsicScene,
     scene_handeye: hasHandeyeScene,
     table_touch: hasTableTouch,
-    color_profile: hasColorProfile,
   };
 
   // A stale persisted currentStep (e.g. a removed 'gripper_intrinsic' from an

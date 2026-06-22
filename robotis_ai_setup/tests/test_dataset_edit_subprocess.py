@@ -86,8 +86,11 @@ class EditWorkerTest(unittest.TestCase):
 
     def setUp(self):
         _FakeDataEditor.calls.clear()
-        # Reset routing hooks to inert defaults each test.
+        # Reset routing hooks to inert defaults each test. The legacy editor is
+        # reached ONLY when is_v21_dataset is positively True; everything else
+        # (v3 / missing / corrupt) routes to the v3 module.
         self.v3.is_v3_dataset = lambda p: False
+        self.v3.is_v21_dataset = lambda p: False
         self.v3.dataset_dir_missing = lambda p: False
         self.v3.delete_episodes_v3 = mock.Mock(name='delete_episodes_v3')
         self.v3.merge_datasets_v3 = mock.Mock(name='merge_datasets_v3')
@@ -114,13 +117,16 @@ class EditWorkerTest(unittest.TestCase):
         self.assertEqual(_FakeDataEditor.calls, [])
 
     def test_delete_missing_path_routes_to_v3_for_german_error(self):
-        # Missing path -> v3 module (which raises the German 'nicht gefunden').
-        self.v3.dataset_dir_missing = lambda p: True
+        # A missing path is not positively v2.1 (is_v21=False), so it routes to
+        # the v3 module, which raises the German 'nicht gefunden' DataEditError.
+        self.v3.is_v21_dataset = lambda p: False
         self.worker.run_edit(
             {'mode': 'delete', 'delete_dataset_path': '/gone', 'delete_episode_num': [0]})
         self.v3.delete_episodes_v3.assert_called_once()
+        self.assertEqual(_FakeDataEditor.calls, [])
 
     def test_delete_v21_single_routes_to_legacy(self):
+        self.v3.is_v21_dataset = lambda p: True
         res = self.worker.run_edit(
             {'mode': 'delete', 'delete_dataset_path': '/old', 'delete_episode_num': [2]})
         self.assertTrue(res['success'])
@@ -128,9 +134,22 @@ class EditWorkerTest(unittest.TestCase):
         self.v3.delete_episodes_v3.assert_not_called()
 
     def test_delete_v21_batch_routes_to_legacy_batch(self):
+        self.v3.is_v21_dataset = lambda p: True
         self.worker.run_edit(
             {'mode': 'delete', 'delete_dataset_path': '/old', 'delete_episode_num': [1, 2]})
         self.assertEqual(_FakeDataEditor.calls, [('delete_batch', '/old', [1, 2])])
+        self.v3.delete_episodes_v3.assert_not_called()
+
+    def test_delete_non_v21_batch_never_routes_to_legacy(self):
+        # The destructive legacy batch editor is reachable ONLY for a positively
+        # v2.1 dataset. A v3 / missing / corrupt-info dataset (is_v21=False)
+        # routes to v3 even for a multi-episode delete — the old code sent these
+        # to the silent-no-op + info.json-clobbering legacy batch path.
+        self.v3.is_v21_dataset = lambda p: False
+        self.worker.run_edit(
+            {'mode': 'delete', 'delete_dataset_path': '/ds', 'delete_episode_num': [1, 2]})
+        self.v3.delete_episodes_v3.assert_called_once()
+        self.assertEqual(_FakeDataEditor.calls, [])
 
     def test_merge_all_v3_routes_to_v3(self):
         self.v3.is_v3_dataset = lambda p: True
@@ -150,10 +169,22 @@ class EditWorkerTest(unittest.TestCase):
         self.assertEqual(_FakeDataEditor.calls, [])
 
     def test_merge_all_v21_routes_to_legacy(self):
+        self.v3.is_v21_dataset = lambda p: True
         res = self.worker.run_edit(
             {'mode': 'merge', 'merge_dataset_list': ['/a', '/b'], 'output_path': '/out'})
         self.assertTrue(res['success'])
         self.assertEqual(_FakeDataEditor.calls, [('merge', ['/a', '/b'], '/out')])
+
+    def test_merge_all_corrupt_refused_not_legacy(self):
+        # All members unreadable -> neither positively v3 nor positively v2.1.
+        # Must be refused in German, never silently legacy-merged into a broken
+        # output reported as success.
+        res = self.worker.run_edit(
+            {'mode': 'merge', 'merge_dataset_list': ['/a', '/b'], 'output_path': '/out'})
+        self.assertFalse(res['success'])
+        self.assertIn('beschädigt', res['message'])
+        self.v3.merge_datasets_v3.assert_not_called()
+        self.assertEqual(_FakeDataEditor.calls, [])
 
     def test_data_edit_error_maps_to_german_failure(self):
         self.v3.is_v3_dataset = lambda p: True

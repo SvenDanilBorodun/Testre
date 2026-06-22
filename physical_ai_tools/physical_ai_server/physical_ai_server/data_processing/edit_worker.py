@@ -85,22 +85,29 @@ def run_edit(payload: dict, logger: Optional[logging.Logger] = None) -> dict:
         if mode == MODE_MERGE:
             merge_dataset_list: List[str] = list(payload.get('merge_dataset_list') or [])
             output_path = payload.get('output_path') or ''
+            # Classify by POSITIVE detection on BOTH sides so an unreadable /
+            # corrupt info.json (neither positively v3 nor positively v2.1) can
+            # NEVER fall through to the legacy merge. The old else-is-legacy
+            # default ran v2.1 surgery on an all-corrupt-v3 selection, building a
+            # broken output reported as success.
             v3_flags = [data_editor_v3.is_v3_dataset(p) for p in merge_dataset_list]
+            v21_flags = [data_editor_v3.is_v21_dataset(p) for p in merge_dataset_list]
             if v3_flags and all(v3_flags):
                 data_editor_v3.merge_datasets_v3(
                     merge_dataset_list, output_path, logger=logger)
-            elif any(v3_flags):
+            elif v21_flags and all(v21_flags):
+                from physical_ai_server.data_processing.data_editor import DataEditor
+                DataEditor().merge_datasets(merge_dataset_list, output_path)
+            else:
                 return {
                     'success': False,
                     'message': (
-                        'Die ausgewählten Datensätze haben unterschiedliche '
-                        'Formate (v2.1 und v3.0) und können nicht '
-                        'zusammengeführt werden.'
+                        'Die ausgewählten Datensätze konnten nicht '
+                        'zusammengeführt werden — sie haben unterschiedliche '
+                        'Formate (v2.1 und v3.0) oder mindestens einer ist '
+                        'beschädigt.'
                     ),
                 }
-            else:
-                from physical_ai_server.data_processing.data_editor import DataEditor
-                DataEditor().merge_datasets(merge_dataset_list, output_path)
 
         elif mode == MODE_DELETE:
             delete_dataset_path = payload.get('delete_dataset_path') or ''
@@ -111,21 +118,27 @@ def run_edit(payload: dict, logger: Optional[logging.Logger] = None) -> dict:
                     'message': 'Keine Episoden zum Löschen ausgewählt.',
                 }
 
-            # Missing paths route through the v3 module too: it raises the
-            # German 'nicht gefunden' DataEditError, while the legacy editor
-            # would surface an English FileNotFoundError.
-            if (data_editor_v3.dataset_dir_missing(delete_dataset_path)
-                    or data_editor_v3.is_v3_dataset(delete_dataset_path)):
+            # Route to the DESTRUCTIVE legacy v2.1 in-place editor ONLY when the
+            # dataset POSITIVELY declares a v2.x codebase_version. A v3.0
+            # dataset, a missing path, OR a dataset whose meta/info.json is
+            # missing / truncated / unreadable (version unconfirmable) all route
+            # to the v3 module, which raises a German 'nicht gefunden' /
+            # 'beschädigt' DataEditError and never runs the v2.1 surgery. Keying
+            # on is_v3_dataset instead let a v3.0 dataset with a corrupt
+            # info.json fall through to the legacy editor: an English
+            # FileNotFoundError (single) or — worse — a silent no-op that
+            # clobbers info.json to {} and falsely reports success (batch).
+            if data_editor_v3.is_v21_dataset(delete_dataset_path):
+                from physical_ai_server.data_processing.data_editor import DataEditor
+                if len(delete_episode_num) > 1:
+                    DataEditor().delete_episodes_batch(
+                        delete_dataset_path, delete_episode_num)
+                else:
+                    DataEditor().delete_episode(
+                        delete_dataset_path, delete_episode_num[0])
+            else:
                 data_editor_v3.delete_episodes_v3(
                     delete_dataset_path, delete_episode_num, logger=logger)
-            elif len(delete_episode_num) > 1:
-                from physical_ai_server.data_processing.data_editor import DataEditor
-                DataEditor().delete_episodes_batch(
-                    delete_dataset_path, delete_episode_num)
-            else:
-                from physical_ai_server.data_processing.data_editor import DataEditor
-                DataEditor().delete_episode(
-                    delete_dataset_path, delete_episode_num[0])
 
         else:
             return {'success': False, 'message': f'Unknown edit mode: {mode}'}

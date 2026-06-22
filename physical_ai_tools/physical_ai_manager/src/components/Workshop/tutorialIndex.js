@@ -10,9 +10,14 @@
 
 // Static index of bundled tutorials. The body of each is shipped as a
 // JSON document under public/tutorials/{id}.json so the editor can
-// fetch it on demand without bundling all 6 tutorials into the main
+// fetch it on demand without bundling every tutorial into the main
 // chunk. The index here is the list shown in the SkillmapPlayer
 // sidebar before a student picks one.
+//
+// 2026-06-22: the two colour-detection tutorials (roten_wuerfel_aufnehmen,
+// zaehle_blaue_objekte) were removed together with the dropped Farbprofil
+// calibration step — without a colour profile the detect/count-colour blocks
+// they teach can no longer succeed. Object + marker tutorials are unaffected.
 
 export const TUTORIAL_INDEX = Object.freeze([
   {
@@ -24,16 +29,6 @@ export const TUTORIAL_INDEX = Object.freeze([
     id: 'bewege_zum_punkt_a',
     title_de: 'Bewege zum Punkt A',
     level: 1,
-  },
-  {
-    id: 'roten_wuerfel_aufnehmen',
-    title_de: 'Hebe einen roten Würfel auf',
-    level: 2,
-  },
-  {
-    id: 'zaehle_blaue_objekte',
-    title_de: 'Zähle blaue Objekte und sage die Anzahl',
-    level: 2,
   },
   {
     id: 'stapele_drei_wuerfel',

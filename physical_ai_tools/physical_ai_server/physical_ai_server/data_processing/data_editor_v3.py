@@ -88,6 +88,28 @@ def is_v3_dataset(dataset_path: Path) -> bool:
     return isinstance(version, str) and version.startswith('v3')
 
 
+def is_v21_dataset(dataset_path) -> bool:
+    """True ONLY when meta/info.json POSITIVELY declares a v2.x codebase version.
+
+    The routing to the DESTRUCTIVE legacy in-place editor keys off THIS, not the
+    negation of ``is_v3_dataset``. A dataset whose ``meta/info.json`` is missing,
+    truncated, or otherwise unreadable (``read_dataset_info`` swallows the parse
+    error and returns ``{}``), or whose ``codebase_version`` is absent / not a
+    string, is NOT positively v2.1 — so it must NOT receive the legacy v2.1
+    surgery. Such a dataset routes to the v3 module instead, which raises a
+    German 'nicht gefunden' / 'beschädigt' ``DataEditError`` and never mutates a
+    v3.0 tree.
+
+    Why the negation matters: a real v3.0 dataset with a corrupt ``info.json``
+    used to fall through to the legacy editor (``is_v3_dataset`` -> False), which
+    FileNotFoundErrors in English on the single-episode path and — worse — on the
+    multi-episode batch path silently deletes nothing, overwrites ``info.json``
+    with ``{}`` and falsely reports success.
+    """
+    version = read_dataset_info(dataset_path).get('codebase_version')
+    return isinstance(version, str) and version.startswith('v2')
+
+
 def dataset_dir_missing(dataset_path) -> bool:
     """True when the path is not an existing directory.
 

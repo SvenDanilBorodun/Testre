@@ -126,13 +126,15 @@ def test_dispatch_imports_clean_with_malformed_env():
     env['EDUBOTICS_GRASP_ROLL_DEG'] = 'tilt'
     env['PYTHONPATH'] = os.pathsep.join(sys.path)
     code = (
+        'import math; '
         'from physical_ai_server.workflow.handlers import '
         'STATEMENT_HANDLERS, VALUE_EVALUATORS; '
         'from physical_ai_server.workflow.handlers import motion as m; '
         "assert 'edubotics_pickup' in STATEMENT_HANDLERS; "
         "assert 'edubotics_detect_color' in VALUE_EVALUATORS; "
         'assert m.GRASP_CLEARANCE_M == 0.012; '
-        'assert m.GRASP_ROLL_RAD == 0.0; '
+        # malformed EDUBOTICS_GRASP_ROLL_DEG falls back to the 90.0 default
+        'assert abs(m.GRASP_ROLL_RAD - math.radians(90.0)) < 1e-9; '
         "print('OK')"
     )
     result = subprocess.run(

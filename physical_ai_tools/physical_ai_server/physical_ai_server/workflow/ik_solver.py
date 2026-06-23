@@ -335,6 +335,22 @@ class IKSolver:
         Used for the workflow IK pre-check / a clean German message."""
         return self.solve(target_xyz) is not None
 
+    def base_yaw(self, x: float, y: float) -> float:
+        """Base joint (joint1) yaw, in radians, that aims the arm's vertical
+        plane at the table point ``(x, y)`` (base frame, metres).
+
+        This is **exactly** the ``theta1`` that :meth:`solve` computes (the
+        shoulder sits on the joint-1 axis, offset ``_J1_AXIS_X`` along base-x,
+        so the bearing is measured from that axis — NOT from the base origin).
+        Exposed for the named-object grasp orientation math, where the live
+        tool roll is ``joint5 = base_yaw(x, y) − tag_yaw + GRASP_ROLL``.
+
+        Returns a value in ``(−π, π]`` (``atan2`` range). It is **not** gated on
+        reachability — callers use :meth:`in_workspace` / :meth:`solve` for
+        that. Sign-trap (matches ``solve``): use ``x − _J1_AXIS_X``
+        (numerically ``x + 0.01125``), never ``atan2(y, x)``."""
+        return math.atan2(float(y), float(x) - _J1_AXIS_X)
+
 
 def _wrap(a: float) -> float:
     """Wrap an angle to (-pi, pi]."""

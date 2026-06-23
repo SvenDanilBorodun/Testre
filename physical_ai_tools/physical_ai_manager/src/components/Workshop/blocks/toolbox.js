@@ -73,6 +73,12 @@ export function buildToolbox(restrictedBlocks = null, cloudVisionEnabled = false
     { kind: 'block', type: 'edubotics_detect_object' },
     { kind: 'block', type: 'edubotics_wait_until_object' },
     { kind: 'block', type: 'edubotics_count_objects_class' },
+    // Named-object AprilTag grasping (dropdown fed by the runtime catalog).
+    { kind: 'block', type: 'edubotics_grasp_object' },
+    { kind: 'block', type: 'edubotics_while_visible' },
+    { kind: 'block', type: 'edubotics_see_object' },
+    { kind: 'block', type: 'edubotics_count_object' },
+    { kind: 'block', type: 'edubotics_wait_until_object_seen' },
   ];
   if (cloudVisionEnabled) {
     perceptionBase.push({ kind: 'block', type: 'edubotics_detect_open_vocab' });
@@ -84,6 +90,7 @@ export function buildToolbox(restrictedBlocks = null, cloudVisionEnabled = false
     { kind: 'block', type: 'edubotics_when_broadcast' },
     { kind: 'block', type: 'edubotics_when_marker_seen' },
     { kind: 'block', type: 'edubotics_when_color_seen' },
+    { kind: 'block', type: 'edubotics_when_object_seen' },
   ], restricted);
 
   const destinations = filterContents([

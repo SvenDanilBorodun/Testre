@@ -38,7 +38,12 @@ jobs:
       - name: Install test dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install pyyaml
+          # pyyaml: the validator jobs below. numpy + opencv-contrib-python-headless
+          # + pytest: the Roboter Studio workflow/IK test suite (pure-Python, no
+          # ROS — the workflow modules import onnxruntime/pupil_apriltags/rclpy
+          # lazily; calibration uses cv2.aruco which is the contrib build; headless
+          # avoids GUI libs on the runner).
+          python -m pip install pyyaml pytest numpy opencv-contrib-python-headless
       - name: Syntax-check Python modules
         run: |
           python -m compileall -q \
@@ -80,6 +85,19 @@ jobs:
         run: |
           cd robotis_ai_setup/jetson_agent
           python -m unittest discover -s tests -v
+
+      - name: Roboter Studio workflow + IK unit tests (pure-Python, no ROS)
+        # numpy + opencv only (workflow modules import ROS/onnx/pupil lazily).
+        # Covers the closed-form IK round-trip + base_yaw, the AprilTag
+        # tag-pose/yaw math (the SOLE automated guard for the orientation chain —
+        # the IK self-check is position-only), the object catalog schema, the
+        # motion/named-object grasp handlers, calibration, projection, the
+        # interpreter, and the trajectory builder. These are pytest-style
+        # (monkeypatch/tmp_path/pytest.approx fixtures), so this is a pytest run,
+        # NOT unittest discover. Previously this dir was compileall-checked only.
+        run: |
+          cd physical_ai_tools/physical_ai_server
+          python -m pytest test/ -q
 
   shell-lint:
     runs-on: ubuntu-latest
@@ -694,6 +712,9 @@ jobs:
           allowed |= {
               'controls_if', 'controls_repeat_ext', 'controls_whileUntil',
               'controls_for', 'controls_forEach',
+              # Named-object loop — a CONTROL block dispatched by the interpreter
+              # btype ladder (not the handler tables), so it must be listed here.
+              'edubotics_while_visible',
               'logic_boolean', 'logic_compare', 'logic_negate', 'logic_operation',
               'math_number', 'math_arithmetic', 'math_random_int',
               'math_constrain', 'math_modulo', 'math_round',

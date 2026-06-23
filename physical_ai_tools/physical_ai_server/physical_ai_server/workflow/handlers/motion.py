@@ -68,12 +68,16 @@ GRIPPER_CLOSED_RAD = -0.5
 # fingertips straddle the lower part of a low-profile object instead of driving
 # into the table. Tuned on the rig (env-overridable).
 GRASP_CLEARANCE_M = _safe_float('EDUBOTICS_GRASP_CLEARANCE_M', 0.012)
-# Fixed tool roll (j5) for the grasp. 0 = the gripper's default orientation,
-# which grips cubes / small objects in any orientation. Orientation-from-box
-# (rotating j5 across an elongated object's short axis) is a rig-calibrated
-# refinement — it needs the camera-yaw + a rotated detection box and is left as
-# a tunable offset here rather than a guessed world-angle mapping.
-GRASP_ROLL_RAD = math.radians(_safe_float('EDUBOTICS_GRASP_ROLL_DEG', 0.0))
+# Tool roll (j5) jaw constant. The OMX-F gripper's jaws separate along the
+# end-effector Y axis (URDF: both fingers pivot about EE-Z, offset along EE-Y),
+# whose base azimuth is π/2 + joint1 − joint5 — so the geometrically-correct
+# top-down jaw constant is 90°, NOT 0° (0° would pinch the perpendicular axis).
+# This is the additive const in the live named-object grasp roll
+# (joint5 = base_yaw − tag_yaw + GRASP_ROLL) AND the fixed roll the legacy
+# pickup/drop_at/move_to use. Default 90°, env-overridable, rig-validated by the
+# P0 jaw-check (which may trim a few degrees — the finger pads are not perfectly
+# symmetric about EE-Y).
+GRASP_ROLL_RAD = math.radians(_safe_float('EDUBOTICS_GRASP_ROLL_DEG', 90.0))
 # Workspace floor: never command the end-effector below the table plane.
 WORKSPACE_FLOOR_MARGIN_M = 0.01
 
@@ -84,9 +88,47 @@ DEFAULT_APPROACH_DURATION_S = 1.5
 DEFAULT_GRASP_DURATION_S = 1.0
 
 
+def _parse_observe_pose() -> list[float]:
+    """Observation pose ("Beobachtungspose") — the 5 arm joints (rad) the
+    named-object loop retreats to between passes so the arm is out of the scene
+    camera's view and doesn't occlude the remaining objects during re-detection.
+    ``EDUBOTICS_OBSERVE_POSE`` = comma-separated 5 joint radians; default HOME."""
+    raw = os.environ.get('EDUBOTICS_OBSERVE_POSE')
+    if not raw:
+        return list(HOME_JOINTS_RAD)
+    try:
+        vals = [float(v) for v in raw.split(',')]
+    except (TypeError, ValueError):
+        _logger.warning(
+            '[WARNUNG] EDUBOTICS_OBSERVE_POSE=%r is not 5 comma-separated numbers '
+            '— falling back to HOME.', raw)
+        return list(HOME_JOINTS_RAD)
+    if len(vals) != 5:
+        _logger.warning(
+            '[WARNUNG] EDUBOTICS_OBSERVE_POSE=%r must have exactly 5 values '
+            '— falling back to HOME.', raw)
+        return list(HOME_JOINTS_RAD)
+    return vals
+
+
+OBSERVE_POSE_JOINTS = _parse_observe_pose()
+
+
 class WorkflowError(Exception):
     """Raised by handlers with a German message ready for the editor's
     log strip and toast."""
+
+
+class GraspSkip(WorkflowError):
+    """A per-instance, RECOVERABLE grasp failure: the selected object can't be
+    grasped right now — it vanished between detect and grasp, every visible
+    instance is out of reach, or its orientation couldn't be read — but OTHER
+    instances may be fine. ``grasp_object`` marks the offending tag(s) SKIPPED
+    before raising this, so the „Solange <Typ> sichtbar" loop can swallow it and
+    make progress on the rest. A standalone „greife" lets it propagate (it IS a
+    WorkflowError) and fails loud with the German message. Distinct from a hard
+    ``WorkflowError`` (missing calibration, stopped) which MUST abort the loop —
+    the loop catches ONLY ``GraspSkip``, never the base class."""
 
 
 # The dataclass default for ctx.last_full_joints (workflow_manager seeds the
@@ -370,6 +412,21 @@ def home(ctx, args: dict[str, Any]) -> None:
     ctx.last_full_joints = q_end
 
 
+def go_to_observation_pose(ctx) -> None:
+    """Move the arm to the observation pose (out of the scene-cam view) so the
+    named-object loop's re-detection between passes isn't occluded by the arm.
+    Carries the current gripper state (index 5) so a held object is NOT dropped.
+    Used by the interpreter's ``edubotics_while_visible`` branch — not a Blockly
+    block."""
+    _require_seeded_start_pose(ctx)
+    q_start = ctx.last_full_joints
+    arm = list(OBSERVE_POSE_JOINTS)
+    q_end = arm + [q_start[5]]
+    _publish_motion(ctx, q_start, q_end, DEFAULT_MOVE_DURATION_S)
+    ctx.last_arm_joints = arm
+    ctx.last_full_joints = q_end
+
+
 def open_gripper(ctx, args: dict[str, Any]) -> None:
     _require_seeded_start_pose(ctx)
     q_start = ctx.last_full_joints
@@ -396,25 +453,54 @@ def move_to(ctx, args: dict[str, Any]) -> None:
     ctx.last_full_joints = q_end
 
 
-def pickup(ctx, args: dict[str, Any]) -> None:
-    _require_seeded_start_pose(ctx)
-    target = _resolve_target(args.get('target'), ctx)
-    # Conservative descend: grasp at the measured table plane + clearance so the
-    # fingertips straddle the lower part of a low object, not the table itself.
-    grasp_xyz = (target[0], target[1], target[2] + GRASP_CLEARANCE_M)
+def compute_grasp_roll(ctx, x: float, y: float, tag_yaw: float) -> float:
+    """Live tool roll (joint5) for a top-down named-object grasp::
 
-    # HIGH-5: solve the GRASP first; derive the approach from the reachable
-    # envelope (clamping the lift down at the annulus edge) instead of refusing
-    # a graspable object because its +approach pose fell outside the annulus.
+        joint5 = base_yaw(x, y) − tag_yaw + GRASP_ROLL_RAD
+
+    wrapped to (−π, π]. ``tag_yaw`` is the tag's base-frame yaw
+    (``tag_pose.tag_yaw_base``); ``GRASP_ROLL_RAD`` is the rig-pinned jaw
+    constant. Keeps the const + ``base_yaw`` in this one place (the named-object
+    detection handler only carries the raw ``tag_yaw`` on the Detection). Raises
+    a German error if IK is unavailable."""
+    from physical_ai_server.workflow.tag_pose import grasp_joint5
+    if ctx.ik is None:
+        raise WorkflowError(
+            'Roboter-Beschreibung nicht verfügbar — der Bewegungsrechner (IK) '
+            'konnte nicht gestartet werden. Bitte die Umgebung neu starten.'
+        )
+    base = ctx.ik.base_yaw(float(x), float(y))
+    return grasp_joint5(base, float(tag_yaw), GRASP_ROLL_RAD)
+
+
+def _execute_pickup(
+    ctx,
+    grasp_xyz: tuple[float, float, float],
+    approach_height_m: float,
+    roll: float,
+    close_rad: float,
+) -> None:
+    """Open → hover above → descend straight down → close → lift, at the FINAL
+    ``grasp_xyz`` (NO extra clearance added here — the caller supplies the exact
+    descend point; this is what avoids the §23.7 ``+GRASP_CLEARANCE_M``
+    double-add on the named-object path). ``roll`` is joint5; ``close_rad`` is
+    the gripper close angle. Shared by the ``pickup`` block (fixed roll +
+    table-clearance + full close) and the named-object ``grasp_object`` handler
+    (live roll + per-object close).
+
+    HIGH-5: solve the GRASP first; derive the approach from the reachable
+    envelope (clamping the lift at the annulus edge) instead of refusing a
+    graspable object because its +approach pose fell outside the annulus.
+    """
     grasp_arm_q, above_arm_q = _solve_grasp_and_approach(
-        ctx, grasp_xyz, DEFAULT_APPROACH_HEIGHT_M, roll=GRASP_ROLL_RAD)
+        ctx, grasp_xyz, approach_height_m, roll=roll)
     lift_arm_q = above_arm_q
 
     open_q = ctx.last_full_joints[:5] + [GRIPPER_OPEN_RAD]
     above_q = above_arm_q + [GRIPPER_OPEN_RAD]
     grasp_q = grasp_arm_q + [GRIPPER_OPEN_RAD]
-    closed_q = grasp_arm_q + [GRIPPER_CLOSED_RAD]
-    lift_q = lift_arm_q + [GRIPPER_CLOSED_RAD]
+    closed_q = grasp_arm_q + [close_rad]
+    lift_q = lift_arm_q + [close_rad]
 
     # Audit round-3 §22+§23: hold motion_lock for the whole pickup
     # sequence so a hat handler cannot interleave between the descend,
@@ -447,6 +533,16 @@ def pickup(ctx, args: dict[str, Any]) -> None:
                 lock.release()
             except RuntimeError:
                 pass
+
+
+def pickup(ctx, args: dict[str, Any]) -> None:
+    _require_seeded_start_pose(ctx)
+    target = _resolve_target(args.get('target'), ctx)
+    # Conservative descend: grasp at the measured table plane + clearance so the
+    # fingertips straddle the lower part of a low object, not the table itself.
+    grasp_xyz = (target[0], target[1], target[2] + GRASP_CLEARANCE_M)
+    _execute_pickup(ctx, grasp_xyz, DEFAULT_APPROACH_HEIGHT_M,
+                    GRASP_ROLL_RAD, GRIPPER_CLOSED_RAD)
 
 
 def drop_at(ctx, args: dict[str, Any]) -> None:

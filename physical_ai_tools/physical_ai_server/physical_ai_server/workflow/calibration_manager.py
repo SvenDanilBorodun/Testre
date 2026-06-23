@@ -88,10 +88,23 @@ def _safe_int_env(name: str, default: int) -> int:
 
 CALIB_DIR = Path(os.environ.get('EDUBOTICS_CALIB_DIR', '/root/.cache/edubotics/calibration'))
 INTRINSIC_FRAMES_REQUIRED = 12
-# WS4 (2026-06-17): the SCENE extrinsic is now a SINGLE-SHOT board-on-table
-# measurement — one capture is enough. (The legacy multi-pose eye-to-base
-# constant ``HANDEYE_FRAMES_REQUIRED`` is gone with the arm-motion flow.)
+# WS4 (2026-06-17): the SCENE extrinsic is one board-on-table capture. The
+# student still presses "Bild erfassen" ONCE; the buffer holds one (averaged)
+# sample, so this stays 1.
 SCENE_EXTRINSIC_FRAMES_REQUIRED = 1
+# P3a (multi-frame averaging): one "Bild erfassen" click internally BURSTS this
+# many camera reads of the (L-jig-fixed) board and averages the per-read solvePnP
+# poses (translation mean + SO(3) rotation mean), reducing sensor jitter ~sqrt(N)
+# with NO change to the student workflow. The board is fixed, so consecutive
+# reads differ only by sensor noise — averaging attacks that. Set BURST_FRAMES=1
+# to revert to the exact single-shot behaviour. INTERVAL spaces the reads past
+# the ~25 fps scene-cam frame period so each read is a distinct frame.
+EXTRINSIC_BURST_FRAMES = max(1, _safe_int_env('EDUBOTICS_EXTRINSIC_BURST_FRAMES', 8))
+# Clamp ≥ 0: a negative override would make time.sleep() raise ValueError.
+EXTRINSIC_BURST_INTERVAL_S = max(0.0, _safe_float_env('EDUBOTICS_EXTRINSIC_BURST_INTERVAL_S', 0.06))
+# Minimum reads that must pass the per-frame gates for an averaged capture to be
+# accepted (else the board wasn't stably visible — ask for a re-capture).
+EXTRINSIC_BURST_MIN_PASS = max(1, EXTRINSIC_BURST_FRAMES // 2)
 
 CHARUCO_SQUARES_X = 7
 CHARUCO_SQUARES_Y = 5
@@ -467,12 +480,13 @@ class CalibrationManager:
             if frame is None:
                 return False, 0, 0, 0.0, 'Kein Kamerabild verfügbar.'
 
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            corners, ids = self._detect_charuco(gray)
-            if corners is None:
-                return False, 0, 0, 0.0, 'ChArUco-Tafel nicht erkannt — bitte Position anpassen.'
-
             if camera in self._intrinsic_buffers:
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                corners, ids = self._detect_charuco(gray)
+                if corners is None:
+                    return False, 0, 0, 0.0, (
+                        'ChArUco-Tafel nicht erkannt — bitte Position anpassen.'
+                    )
                 buf = self._intrinsic_buffers[camera]
                 # Image-size guard: cv2.calibrateCameraCharucoExtended takes
                 # a single image_size, so a mixed-resolution capture set
@@ -495,65 +509,64 @@ class CalibrationManager:
                     f'Bild {len(buf.all_corners)}/{INTRINSIC_FRAMES_REQUIRED} erfasst.'
                 )
 
-            # Scene extrinsic step (WS4 single-shot board-on-table).
-            # NO arm motion, NO gripper pose: the board lies flat on the
-            # table, the static scene cam sees it once, solvePnP gives the
-            # board->camera transform, and the solve combines it with the
-            # known board-on-table placement (T_board_to_base) to recover
-            # T_camera_to_base. Each capture is latest-wins (re-pressing
-            # "Bild erfassen" overwrites), so the buffer holds at most one.
+            # Scene extrinsic step (WS4 board-on-table) with P3a multi-frame
+            # averaging. NO arm motion, NO gripper pose: the board lies flat on
+            # the table, the static scene cam reads it, solvePnP gives the
+            # board->camera transform, and the solve combines it with the known
+            # board-on-table placement (T_board_to_base) to recover T_cam_to_base.
+            # One "Bild erfassen" click BURSTS EXTRINSIC_BURST_FRAMES reads of the
+            # fixed board and AVERAGES the per-read poses (jitter reduction); the
+            # averaged sample replaces any prior one (latest-wins).
             if not self.has_intrinsics(camera):
                 return False, 0, 0, 0.0, (
                     f'Intrinsische Daten für {camera} fehlen.'
                 )
             K = self._intrinsics[camera]['K']
             dist = self._intrinsics[camera]['dist']
-            # Audit F60: cv2.aruco.getBoardObjectAndImagePoints is
-            # deprecated in OpenCV 4.10+; switch to the
-            # CharucoBoard.matchImagePoints API (4.7+). Fall back to
-            # the legacy call if the new API isn't available so the
-            # overlay still applies cleanly on older OpenCV builds.
-            match_fn = getattr(self._board, 'matchImagePoints', None)
-            if callable(match_fn):
-                object_points, image_points = match_fn(corners, ids)
-            else:
-                object_points, image_points = cv2.aruco.getBoardObjectAndImagePoints(
-                    self._board, corners, ids,
-                )
-            if object_points is None or len(object_points) < SCENE_EXTRINSIC_MIN_CORNERS:
+
+            # First read = the frame already in hand; then burst additional live
+            # reads (each a distinct camera frame, spaced past the frame period).
+            # An EXPLICIT bgr (unit tests) is a single deterministic capture — no
+            # burst — so the existing single-frame behaviour is preserved exactly.
+            samples = []
+            first = self._board_pose_from_frame(frame, K, dist)
+            if first is not None:
+                samples.append(first)
+            if bgr is None and self._get_frame is not None:
+                for _ in range(EXTRINSIC_BURST_FRAMES - 1):
+                    time.sleep(EXTRINSIC_BURST_INTERVAL_S)
+                    f = self._get_frame(camera)
+                    if f is None:
+                        continue
+                    s = self._board_pose_from_frame(f, K, dist)
+                    if s is not None:
+                        samples.append(s)
+
+            min_pass = 1 if bgr is not None else EXTRINSIC_BURST_MIN_PASS
+            if len(samples) < min_pass:
                 return False, 0, 0, 0.0, (
-                    'Zu wenige Tafel-Punkte erkannt — bitte die Tafel näher / '
-                    'vollständig ins Bild legen.'
+                    'Die Tafel konnte nicht stabil erfasst werden — bitte die '
+                    'Tafel flach und vollständig ins Bild legen und erneut '
+                    'erfassen.'
                 )
-            ok, rvec, tvec = cv2.solvePnP(object_points, image_points, K, dist)
-            if not ok:
-                return False, 0, 0, 0.0, 'Pose der Tafel konnte nicht bestimmt werden.'
-            # Reprojection-error gate: a weak/ambiguous planar solve (grazing
-            # angle, partial board) would silently mis-place the WHOLE world
-            # frame. Reject above the threshold instead of saving garbage.
-            reproj = self._reprojection_error_px(
-                object_points, image_points, rvec, tvec, K, dist)
-            if not math.isfinite(reproj) or reproj > SCENE_EXTRINSIC_MAX_REPROJ_PX:
-                shown = reproj if math.isfinite(reproj) else 0.0
-                return False, 0, 0, float(shown), (
-                    f'Tafel-Pose ungenau (Reprojektionsfehler {shown:.1f} px) — '
-                    'bitte die Tafel flach und vollständig ins Bild legen und '
-                    'erneut erfassen.'
-                )
-            R_t2c, _ = cv2.Rodrigues(rvec)
-            t_t2c = tvec.reshape(3, 1)
+
+            R_avg = self._average_rotations([s[0] for s in samples])
+            t_avg = np.mean(
+                np.stack([np.asarray(s[1], dtype=np.float64).reshape(3) for s in samples],
+                         axis=0),
+                axis=0,
+            ).reshape(3, 1)
+            mean_reproj = float(np.mean([s[2] for s in samples]))
 
             buf = self._handeye_buffers[camera]
-            # Latest-wins: replace any prior single-shot sample so a
-            # re-capture (board nudged) supersedes the old one cleanly.
-            buf.R_target2cam = [R_t2c]
-            buf.t_target2cam = [t_t2c]
+            buf.R_target2cam = [R_avg]
+            buf.t_target2cam = [t_avg]
             buf.R_gripper2base = []
             buf.t_gripper2base = []
 
-            return True, len(buf.R_target2cam), SCENE_EXTRINSIC_FRAMES_REQUIRED, float(reproj), (
-                f'Bild {len(buf.R_target2cam)}/{SCENE_EXTRINSIC_FRAMES_REQUIRED} '
-                f'erfasst (Reprojektionsfehler {reproj:.1f} px) — bitte berechnen '
+            return True, len(buf.R_target2cam), SCENE_EXTRINSIC_FRAMES_REQUIRED, mean_reproj, (
+                f'Bild erfasst ({len(samples)} Messung(en) gemittelt, '
+                f'Reprojektionsfehler {mean_reproj:.1f} px) — bitte berechnen '
                 '& speichern.'
             )
 
@@ -569,6 +582,54 @@ class CalibrationManager:
             return float(ret)
         except cv2.error:
             return None
+
+    def _board_pose_from_frame(self, frame, K, dist):
+        """Detect the ChArUco board in ONE frame and solvePnP its pose.
+
+        Returns ``(R_t2c 3x3, t_t2c 3x1, reproj_px)`` or ``None`` when detection
+        / matching / solve fails OR the reprojection gate rejects the frame. The
+        per-frame quality gates (min corners, reprojection error) are the SAME as
+        the legacy single-shot path — multi-frame averaging only feeds the solve
+        frames that already pass them, so a bad read can't pull the average."""
+        try:
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        except cv2.error:
+            return None
+        corners, ids = self._detect_charuco(gray)
+        if corners is None:
+            return None
+        match_fn = getattr(self._board, 'matchImagePoints', None)
+        if callable(match_fn):
+            object_points, image_points = match_fn(corners, ids)
+        else:
+            object_points, image_points = cv2.aruco.getBoardObjectAndImagePoints(
+                self._board, corners, ids,
+            )
+        if object_points is None or len(object_points) < SCENE_EXTRINSIC_MIN_CORNERS:
+            return None
+        ok, rvec, tvec = cv2.solvePnP(object_points, image_points, K, dist)
+        if not ok:
+            return None
+        reproj = self._reprojection_error_px(object_points, image_points, rvec, tvec, K, dist)
+        if not math.isfinite(reproj) or reproj > SCENE_EXTRINSIC_MAX_REPROJ_PX:
+            return None
+        R_t2c, _ = cv2.Rodrigues(rvec)
+        return R_t2c, tvec.reshape(3, 1), float(reproj)
+
+    @staticmethod
+    def _average_rotations(Rs: list[np.ndarray]) -> np.ndarray:
+        """Chordal L2 mean of rotation matrices, projected back onto SO(3) via
+        SVD (the standard rotation average for tightly-clustered rotations — the
+        per-read jitter of a fixed board). ``R = U·diag(1,1,det(U·Vᵀ))·Vᵀ``
+        guarantees a proper rotation (det +1)."""
+        M = np.mean(
+            np.stack([np.asarray(R, dtype=np.float64).reshape(3, 3) for R in Rs], axis=0),
+            axis=0,
+        )
+        U, _, Vt = np.linalg.svd(M)
+        D = np.eye(3, dtype=np.float64)
+        D[2, 2] = float(np.sign(np.linalg.det(U @ Vt)) or 1.0)
+        return U @ D @ Vt
 
     @staticmethod
     def _reprojection_error_px(object_points, image_points, rvec, tvec, K, dist) -> float:

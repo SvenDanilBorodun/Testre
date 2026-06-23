@@ -119,6 +119,22 @@ class WorkflowContext:
     )
     # Cloud-vision configuration (phase 3)
     cloud_vision: dict[str, Any] = field(default_factory=dict)
+    # Roboter Studio named-object grasping: the loaded ObjectCatalog (tag_id →
+    # type → grasp recipe), or None with object_catalog_error holding the German
+    # load error. Loaded TOLERANTLY at start() — a workflow with no named-object
+    # blocks runs fine without a catalog; a named block fails loud at the block.
+    object_catalog: Any | None = None
+    object_catalog_error: str | None = None
+    # Per-run claimed/skipped tag-id sets for the „Solange <Typ> sichtbar" loop:
+    # a tag id is CLAIMED after a successful grasp (so a placed object re-entering
+    # view is never re-grabbed and the loop terminates) and SKIPPED after a
+    # confirmed failed grab (reserved for the future grasp-success heuristic).
+    # Guarded by claim_lock — a separate RLock from motion_lock, because the set
+    # is a distinct data structure a hat thread can mutate concurrently (§24.3;
+    # mirrors var_lock guarding the variables dict).
+    claimed_tags: set = field(default_factory=set)
+    skipped_tags: set = field(default_factory=set)
+    claim_lock: threading.RLock | None = None
 
 
 MAX_WORKFLOW_JSON_BYTES = 256 * 1024  # 256 KiB; see plan §2.5
@@ -148,6 +164,7 @@ class WorkflowManager:
         get_scene_frame_age: Callable[[], float | None] | None = None,
         get_current_pose_xyz: Callable[[], tuple[float, float, float] | None] | None = None,
         get_follower_joints: Callable[[], list[float] | None] | None = None,
+        load_object_catalog: Callable[[], Any] | None = None,
     ) -> None:
         self._publisher = publisher
         self._ik_factory = ik_factory
@@ -167,6 +184,9 @@ class WorkflowManager:
         # workflow start to seed ctx.last_full_joints with the real arm pose
         # instead of the [0]*6 dataclass default.
         self._get_follower_joints = get_follower_joints
+        # Roboter Studio named-object catalog loader (may raise on a
+        # missing/corrupt catalog — caught at start(), surfaced at the block).
+        self._load_object_catalog = load_object_catalog
         self._thread: Optional[threading.Thread] = None
         self._hat_threads: list[threading.Thread] = []
         self._stop_event = threading.Event()
@@ -189,6 +209,10 @@ class WorkflowManager:
         # Variable mutation lock (Audit §A1). Re-entrant so a procedure
         # call can read/write inside an outer variables_set.
         self._var_lock = threading.RLock()
+        # Claimed/skipped tag-id set lock for the named-object loop. Separate
+        # from motion_lock (which serializes motion, not set integrity) so a
+        # when_object_seen hat that grabs can't tear the set vs the main loop.
+        self._claim_lock = threading.RLock()
         self._lock = threading.Lock()
         # Audit fix #4: store breakpoints as an immutable frozenset that
         # set_breakpoints() rebinds atomically. The interpreter reads via
@@ -313,6 +337,21 @@ class WorkflowManager:
             self._workflow_id = workflow_id
 
             calib = self._load_calibration() or {}
+
+            # Load the named-object catalog tolerantly: a failure (missing /
+            # corrupt / invalid JSON) is carried as a German error string and
+            # only raised when a named-object block actually runs, so a workflow
+            # with no named blocks is unaffected. Re-read each start so a catalog
+            # edit applies on the next run without an environment restart.
+            object_catalog = None
+            object_catalog_error = None
+            if self._load_object_catalog is not None:
+                try:
+                    object_catalog = self._load_object_catalog()
+                except Exception as e:  # noqa: BLE001 — surfaced at the block
+                    object_catalog = None
+                    object_catalog_error = str(e)
+
             destinations = dict(self._persisted_destinations)
             for k, v in (self._load_destinations() or {}).items():
                 destinations.setdefault(k, v)
@@ -384,6 +423,13 @@ class WorkflowManager:
                 wait_for_resume=self._wait_for_resume,
                 set_paused=self._set_paused,
                 cloud_vision=dict(cloud_vision or {}),
+                object_catalog=object_catalog,
+                object_catalog_error=object_catalog_error,
+                # Fresh per-run claimed/skipped sets (never persisted across runs)
+                # + the shared lock guarding them.
+                claimed_tags=set(),
+                skipped_tags=set(),
+                claim_lock=self._claim_lock,
             )
 
             # Apply the synchronous seed so hat threads start with a
@@ -633,8 +679,11 @@ class WorkflowManager:
                 if not triggered:
                     # For perception hats, an un-triggered poll cycle
                     # means the condition is currently false; re-arm.
+                    # MUST list the SAME hats as the edge-gate below, or a hat
+                    # fires once and then never re-arms (edge_armed stuck False).
                     if btype in {'edubotics_when_marker_seen',
-                                 'edubotics_when_color_seen'}:
+                                 'edubotics_when_color_seen',
+                                 'edubotics_when_object_seen'}:
                         edge_armed = True
                     continue
                 if ctx.should_stop():
@@ -642,7 +691,8 @@ class WorkflowManager:
                 # Edge-trigger gate. Skip body execution while we wait
                 # for the condition to clear and re-arm.
                 if btype in {'edubotics_when_marker_seen',
-                             'edubotics_when_color_seen'}:
+                             'edubotics_when_color_seen',
+                             'edubotics_when_object_seen'}:
                     if not edge_armed:
                         time.sleep(0.1)
                         continue
@@ -709,6 +759,9 @@ class WorkflowManager:
             color = (fields.get('COLOR') or '').strip()
             min_pixels = int(fields.get('MIN_PIXELS', 200) or 200)
             return self._wait_color_visible(color, min_pixels, ctx)
+        if btype == 'edubotics_when_object_seen':
+            type_name = (fields.get('OBJECT_TYPE') or '').strip()
+            return self._wait_object_visible(type_name, ctx)
         return False
 
     def _wait_marker_visible(self, target_id: int, ctx: WorkflowContext) -> bool:
@@ -733,6 +786,39 @@ class WorkflowManager:
                     frame, camera='scene', mode='apriltag', aruco_id=target_id,
                 )
                 if detections:
+                    return True
+            except Exception:
+                pass
+            time.sleep(0.2)
+        return False
+
+    def _wait_object_visible(self, type_name: str, ctx: WorkflowContext) -> bool:
+        """Edge-trigger poll for ``edubotics_when_object_seen``: True when any
+        catalog tag of ``type_name`` is visible. Mirrors _wait_marker_visible but
+        resolves the type's tag ids from the object catalog. Catalog/perception
+        errors are swallowed (the hat simply doesn't fire) — a named block on the
+        MAIN stack surfaces the German catalog error loudly instead."""
+        if not type_name:
+            return False
+        for _ in range(2):  # 2 × ~0.5 s budget, matching the other hats
+            if ctx.should_stop():
+                return False
+            try:
+                catalog = getattr(ctx, 'object_catalog', None)
+                if (catalog is None or ctx.perception is None
+                        or ctx.get_scene_frame is None):
+                    time.sleep(0.5)
+                    return False
+                recipe = catalog.recipe_for_type(type_name)  # ObjectCatalogError on unknown
+                wanted = set(recipe.tag_ids)
+                frame = ctx.get_scene_frame()
+                if frame is None:
+                    time.sleep(0.2)
+                    return False
+                detections = ctx.perception.detect(
+                    frame, camera='scene', mode='apriltag', aruco_id=None,
+                )
+                if any(getattr(d, 'aruco_id', None) in wanted for d in (detections or [])):
                     return True
             except Exception:
                 pass

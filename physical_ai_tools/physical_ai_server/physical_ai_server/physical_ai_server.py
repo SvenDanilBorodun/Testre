@@ -85,6 +85,7 @@ from physical_ai_interfaces.srv import (
     GetDatasetList,
     GetHFUser,
     GetModelWeightList,
+    GetObjectCatalog,
     GetPolicyList,
     GetRobotTypeList,
     GetSavedPolicyList,
@@ -389,6 +390,7 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 self._preempt_cb_group,
             ),
             ('/workshop/mark_destination', MarkDestination, self.mark_destination_callback),
+            ('/workshop/get_object_catalog', GetObjectCatalog, self.get_object_catalog_callback),
             ('/workflow/start', StartWorkflow, self.workflow_start_callback),
             ('/workflow/stop', StopWorkflow, self.workflow_stop_callback),
             # Phase-2 debugger plumbing. Pause/Step/Continue must dispatch
@@ -2397,6 +2399,33 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             response.message = 'Projektion fehlgeschlagen — bitte Kalibrierung prüfen.'
             return response
 
+    def get_object_catalog_callback(self, request, response):
+        """Return the named-object catalog's type list (keys + German labels)
+        for the Roboter Studio Blockly dropdowns. Reads the catalog JSON from
+        the calib volume at call time. On an absent/corrupt/invalid catalog:
+        empty arrays, success=False, German message (the load error)."""
+        try:
+            from physical_ai_server.workflow.object_catalog import (
+                load_catalog, seed_default_catalog_if_missing,
+            )
+            # Seed a working example catalog on a fresh calib volume so the
+            # dropdown is never empty (best-effort; never raises).
+            seed_default_catalog_if_missing()
+            catalog = load_catalog()
+            labels = catalog.labels()  # [(type_name, label_de), ...] in catalog order
+            response.type_names = [name for name, _label in labels]
+            response.labels_de = [label for _name, label in labels]
+            response.success = True
+            response.message = ''
+        except Exception as e:
+            # load_catalog raises German ObjectCatalogError on every bad-catalog
+            # path; surface it so the editor can show the teacher what to fix.
+            response.type_names = []
+            response.labels_de = []
+            response.success = False
+            response.message = str(e)
+        return response
+
     # ------------------------------------------------------------------
     # Roboter Studio — workflow runtime services
     # ------------------------------------------------------------------
@@ -2521,8 +2550,26 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 if self.communicator is not None
                 else None
             ),
+            # Roboter Studio named-object grasping: load the teacher-edited
+            # object catalog from the calib volume at each workflow start. Raises
+            # a German ObjectCatalogError on a missing/corrupt/invalid catalog,
+            # which WorkflowManager.start() catches and surfaces at the first
+            # named-object block (a workflow with no named blocks is unaffected).
+            load_object_catalog=self._load_object_catalog,
         )
         return self.workflow_manager
+
+    def _load_object_catalog(self):
+        """Load the named-object catalog (tag_id → type → grasp recipe) from the
+        edubotics_calib volume. Re-read each workflow start so a catalog edit
+        applies on the next run without an environment restart."""
+        from physical_ai_server.workflow.object_catalog import (
+            load_catalog, seed_default_catalog_if_missing,
+        )
+        # Seed a working example catalog on a fresh calib volume so the first
+        # named-object workflow finds a file instead of failing loud (best-effort).
+        seed_default_catalog_if_missing()
+        return load_catalog()
 
     def _build_ik_solver(self):
         """Return the closed-form IKSolver, built ONCE per server lifetime.

@@ -34,6 +34,7 @@ KeyError out of the handler tables — the upstream behavior after the
 from __future__ import annotations
 
 import json
+import os
 import random
 import time
 from typing import Any, Callable, Iterable
@@ -48,6 +49,7 @@ HAT_BLOCK_TYPES: frozenset[str] = frozenset({
     'edubotics_when_broadcast',
     'edubotics_when_marker_seen',
     'edubotics_when_color_seen',
+    'edubotics_when_object_seen',
 })
 
 # Hard cap on iterations for any single loop construct
@@ -56,6 +58,27 @@ HAT_BLOCK_TYPES: frozenset[str] = frozenset({
 # silently truncating — a student who actually needed 11k iterations is
 # almost certainly looking at an infinite-loop bug.
 MAX_LOOP_ITERATIONS = 10000
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return max(1, int(os.environ.get(name, default)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return max(0.0, float(os.environ.get(name, default)))
+    except (TypeError, ValueError):
+        return default
+
+
+# Empty-debounce for the named-object „Solange <Typ> sichtbar" loop: require
+# WHILE_EMPTY_FRAMES consecutive empty detections (WHILE_EMPTY_SECONDS apart)
+# before terminating, so one occluded/dropped frame doesn't end the loop early.
+WHILE_EMPTY_FRAMES = _env_int('EDUBOTICS_WHILE_EMPTY_FRAMES', 2)
+WHILE_EMPTY_SECONDS = _env_float('EDUBOTICS_WHILE_EMPTY_SECONDS', 0.5)
 
 
 class _ProcedureReturn(Exception):
@@ -316,6 +339,9 @@ class Interpreter:
             if btype == 'controls_forEach':
                 self._exec_for_each(block, ctx, on_block_change)
                 return
+            if btype == 'edubotics_while_visible':
+                self._exec_while_visible(block, ctx, on_block_change)
+                return
             if btype == 'variables_set':
                 self._exec_variables_set(block, ctx)
                 return
@@ -476,6 +502,79 @@ class Interpreter:
                     'Schleife abgebrochen — Maximum von 10000 Wiederholungen erreicht.'
                 )
             self._exec_chain(do_block, ctx, on_block_change)
+
+    def _exec_while_visible(
+        self,
+        block: dict[str, Any],
+        ctx,
+        on_block_change: Callable[[str, str, float], None],
+    ) -> None:
+        """„Solange <Typ> sichtbar" — the reliable multi-object loop.
+
+        Each pass: retreat to the observation pose (arm out of the scene-cam
+        view so it doesn't occlude the remaining objects), re-detect UNCLAIMED
+        instances of the type on a FRESH frame, and run the body if any remain.
+        Terminate only after WHILE_EMPTY_FRAMES consecutive empty detections
+        (empty-debounce — one occluded/dropped frame won't end the loop early).
+        The body typically holds „greife <Typ>" (which CLAIMS the grabbed tag, so
+        the loop makes progress and terminates) + „lege ab". ``should_stop`` +
+        ``MAX_LOOP_ITERATIONS`` bound it. This is a CONTROL block: the field
+        OBJECT_TYPE + the DO statement body are read directly (not via the
+        handler dispatch tables), so the type must be added to ci.yml's
+        tutorials-validate built-in allowlist."""
+        type_name = (block.get('fields') or {}).get('OBJECT_TYPE')
+        if not type_name:
+            raise InterpreterError('„Solange sichtbar": kein Objekt ausgewählt.')
+        do_block = self._get_statement_block(block, 'DO')
+        # Lazy import (handlers/__init__ already loads these; avoids any cycle).
+        from physical_ai_server.workflow.handlers import motion as _mo
+        from physical_ai_server.workflow.handlers import perception_blocks as _pb
+        from physical_ai_server.workflow.handlers.motion import GraspSkip
+        iter_count = 0
+        empty_streak = 0
+        while True:
+            if ctx.should_stop():
+                raise WorkflowError('Workflow wurde gestoppt.')
+            # Retreat so the arm doesn't occlude remaining objects during detect.
+            # LIMITATION (rig-validate): if a grasping `edubotics_when_object_seen`
+            # hat runs CONCURRENTLY with this loop, the hat can hold motion_lock
+            # for a full pickup (~6.5 s); this retreat's _publish_motion waits up
+            # to 10 s for the lock and then raises "Bewegung blockiert", ending the
+            # loop. Two things driving the arm at once is an inherently conflicting
+            # program — don't pair a grasping when-seen hat with this loop. The
+            # failure is a clean German error, not a hang (motion_lock is an RLock
+            # with a bounded acquire). Revisit (graceful retreat-skip) if a real
+            # use case needs them together.
+            _mo.go_to_observation_pose(ctx)
+            if _pb.count_unclaimed_visible(ctx, type_name) > 0:
+                empty_streak = 0
+                iter_count += 1
+                if iter_count > MAX_LOOP_ITERATIONS:
+                    raise InterpreterError(
+                        'Schleife abgebrochen — Maximum von 10000 '
+                        'Wiederholungen erreicht.'
+                    )
+                if do_block is not None:
+                    try:
+                        self._exec_chain(do_block, ctx, on_block_change)
+                    except GraspSkip as e:
+                        # One instance couldn't be grasped (out of reach /
+                        # orientation unreadable / vanished) and was marked
+                        # skipped by grasp_object — keep going on the rest
+                        # instead of aborting the whole loop. A HARD error
+                        # (calibration, stop) is NOT a GraspSkip and still
+                        # propagates out and ends the loop.
+                        ctx.log(f'[WARNUNG] {e} Wird übersprungen.')
+                continue
+            # No unclaimed instances visible — debounce before terminating.
+            empty_streak += 1
+            if empty_streak >= WHILE_EMPTY_FRAMES:
+                break
+            deadline = time.monotonic() + WHILE_EMPTY_SECONDS
+            while time.monotonic() < deadline:
+                if ctx.should_stop():
+                    raise WorkflowError('Workflow wurde gestoppt.')
+                time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
 
     def _exec_for(
         self,

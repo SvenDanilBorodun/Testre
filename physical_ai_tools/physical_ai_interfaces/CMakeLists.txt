@@ -33,6 +33,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/GetHFUser.srv"
   "srv/GetImageTopicList.srv"
   "srv/GetModelWeightList.srv"
+  "srv/GetObjectCatalog.srv"
   "srv/GetPolicyList.srv"
   "srv/GetRobotTypeList.srv"
   "srv/GetSavedPolicyList.srv"

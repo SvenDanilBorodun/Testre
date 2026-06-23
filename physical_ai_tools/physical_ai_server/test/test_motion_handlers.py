@@ -18,6 +18,7 @@ only the wait between chunks is skipped.
 
 from __future__ import annotations
 
+import math
 import threading
 import types
 
@@ -26,17 +27,21 @@ import pytest
 from physical_ai_server.workflow import trajectory_builder
 from physical_ai_server.workflow.handlers import motion
 from physical_ai_server.workflow.handlers.motion import (
+    GRASP_ROLL_RAD,
     GRIPPER_CLOSED_RAD,
     GRIPPER_OPEN_RAD,
     HOME_JOINTS_RAD,
     WORKSPACE_FLOOR_MARGIN_M,
     WorkflowError,
+    compute_grasp_roll,
     drop_at,
     move_to,
     pickup,
+    _execute_pickup,
     _solve_or_raise,
 )
 from physical_ai_server.workflow.ik_solver import IKSolver
+from physical_ai_server.workflow.tag_pose import grasp_joint5
 
 
 # A reachable strict-vertical grasp point on/near the table plane (well
@@ -127,6 +132,61 @@ def test_pickup_unreachable_target_raises_arbeitsbereich():
     with pytest.raises(WorkflowError) as exc:
         pickup(ctx, {'target': UNREACHABLE_XYZ})
     assert 'Arbeitsbereich' in str(exc.value)
+
+
+# ── named-object grasp primitives (live roll, no double-add, per-object close) ─
+
+def test_grasp_roll_default_is_90_degrees():
+    # The geometrically-correct top-down jaw constant (fleet default).
+    assert GRASP_ROLL_RAD == pytest.approx(math.radians(90.0))
+
+
+def test_compute_grasp_roll_matches_formula():
+    ctx = _ctx()
+    x, y, tag_yaw = 0.20, 0.05, 0.3
+    roll = compute_grasp_roll(ctx, x, y, tag_yaw)
+    expected = grasp_joint5(ctx.ik.base_yaw(x, y), tag_yaw, GRASP_ROLL_RAD)
+    assert roll == pytest.approx(expected)
+
+
+def _closed_arm_configs(ctx):
+    """Every published waypoint's arm vector whose gripper is CLOSED."""
+    out = []
+    for chunk in ctx.published:
+        for q, _t in chunk:
+            if q[5] == pytest.approx(GRIPPER_CLOSED_RAD):
+                out.append(q[:5])
+    return out
+
+
+def test_execute_pickup_descends_to_exact_grasp_z_no_double_add():
+    # _execute_pickup must descend to EXACTLY grasp_xyz[2] — NOT
+    # grasp_xyz[2] + GRASP_CLEARANCE_M (the §23.7 double-add). Distinguish by
+    # comparing the published grasp arm config against the exact-z IK solve vs
+    # the +clearance IK solve (they differ).
+    ctx = _ctx()
+    gx, gy, gz, roll = 0.20, 0.0, 0.03, 0.4
+    _execute_pickup(ctx, (gx, gy, gz), 0.06, roll, GRIPPER_CLOSED_RAD)
+    exact = ctx.ik.solve((gx, gy, gz), roll=roll)
+    plus_clear = ctx.ik.solve((gx, gy, gz + motion.GRASP_CLEARANCE_M), roll=roll)
+    assert exact is not None and plus_clear is not None
+    arms = _closed_arm_configs(ctx)
+
+    def _matches(arm, ref):
+        return all(a == pytest.approx(b, abs=1e-9) for a, b in zip(arm, ref))
+
+    assert any(_matches(arm, exact) for arm in arms), 'grasp not at exact z'
+    assert not any(_matches(arm, plus_clear) for arm in arms), 'double-add detected'
+
+
+def test_execute_pickup_uses_given_close_rad_and_roll():
+    ctx = _ctx()
+    _execute_pickup(ctx, (0.20, 0.0, 0.03), 0.06, 0.4, -0.25)
+    # final gripper is the per-object close angle, not the global GRIPPER_CLOSED_RAD
+    assert ctx.last_commanded_joints[5] == pytest.approx(-0.25)
+    # joint5 of the descend config reflects the requested roll
+    exact = ctx.ik.solve((0.20, 0.0, 0.03), roll=0.4)
+    assert exact is not None and exact[4] == pytest.approx(0.4)
 
 
 # ── drop_at ──────────────────────────────────────────────────────────────────

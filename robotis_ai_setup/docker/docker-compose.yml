@@ -198,6 +198,27 @@ services:
       # workflow/calibration_manager.py, workflow/color_profile.py,
       # physical_ai_server.py.
       - EDUBOTICS_CALIB_DIR=${EDUBOTICS_CALIB_DIR:-/root/.cache/edubotics}
+      # Roboter Studio named-object grasping (plan 2026-06-22): the teacher-edited
+      # object catalog (tag_id -> type -> grasp recipe) lives in the edubotics_calib
+      # volume; edit the file + restart, no image rebuild. Default path derives from
+      # EDUBOTICS_CALIB_DIR. EDUBOTICS_TAG_SIZE_M is the AprilTag size (metres) used
+      # for the solvePnP tag-pose scale (the catalog's "tag_size_m" overrides it).
+      # Read by workflow/object_catalog.py — MUST stay forwarded (env-forwarding-guard).
+      - EDUBOTICS_OBJECT_CATALOG=${EDUBOTICS_OBJECT_CATALOG:-}
+      - EDUBOTICS_TAG_SIZE_M=${EDUBOTICS_TAG_SIZE_M:-0.024}
+      # Tag-edge sanity gate: a named-object grasp drops the recovered tag
+      # orientation (→ skips the instance, never grasps with a wrong wrist roll)
+      # when the back-projected tag side deviates from the catalog tag_size_m by
+      # more than this fraction. Read by workflow/handlers/perception_blocks.py.
+      - EDUBOTICS_TAG_EDGE_TOL_FRAC=${EDUBOTICS_TAG_EDGE_TOL_FRAC:-0.5}
+      # Named-object „Solange <Typ> sichtbar" loop: the observation pose the arm
+      # retreats to between passes (out of the scene-cam view; 5 comma-separated
+      # joint radians, empty = HOME), and the empty-debounce (require K empty
+      # detections T seconds apart before the loop terminates). Read by
+      # workflow/handlers/motion.py + workflow/interpreter.py.
+      - EDUBOTICS_OBSERVE_POSE=${EDUBOTICS_OBSERVE_POSE:-}
+      - EDUBOTICS_WHILE_EMPTY_FRAMES=${EDUBOTICS_WHILE_EMPTY_FRAMES:-2}
+      - EDUBOTICS_WHILE_EMPTY_SECONDS=${EDUBOTICS_WHILE_EMPTY_SECONDS:-0.5}
       # Follower-only (Roboter Studio) flag — ALSO read by physical_ai_server's
       # leader_appears_active() server-side guard (collision_monitor.py), not
       # just by open_manipulator's entrypoint, so it must be forwarded here too
@@ -224,6 +245,13 @@ services:
       - EDUBOTICS_EXTRINSIC_REGION_X_MIN=${EDUBOTICS_EXTRINSIC_REGION_X_MIN:-0.08}
       - EDUBOTICS_EXTRINSIC_REGION_X_MAX=${EDUBOTICS_EXTRINSIC_REGION_X_MAX:-0.46}
       - EDUBOTICS_EXTRINSIC_REGION_Y_ABS=${EDUBOTICS_EXTRINSIC_REGION_Y_ABS:-0.18}
+      # P3a: one extrinsic "Bild erfassen" click internally bursts this many
+      # camera reads of the fixed board and averages the solvePnP poses (sensor-
+      # jitter reduction, ~sqrt(N)). =1 reverts to the exact single-shot path.
+      # INTERVAL spaces the reads past the ~25 fps frame period. Read by
+      # workflow/calibration_manager.py.
+      - EDUBOTICS_EXTRINSIC_BURST_FRAMES=${EDUBOTICS_EXTRINSIC_BURST_FRAMES:-8}
+      - EDUBOTICS_EXTRINSIC_BURST_INTERVAL_S=${EDUBOTICS_EXTRINSIC_BURST_INTERVAL_S:-0.06}
       # #1 (2026-06-19): per-rig intrinsic calibration is MANDATORY — the
       # factory-default-intrinsics seeding (the old EDUBOTICS_FACTORY_* knobs)
       # was REMOVED. A guessed focal length scales every projected XY, so no
@@ -231,7 +259,12 @@ services:
       # Generic grasp: conservative descend clearance above the measured table
       # plane, and a fixed tool-roll (j5) for the gripper. Rig-tunable.
       - EDUBOTICS_GRASP_CLEARANCE_M=${EDUBOTICS_GRASP_CLEARANCE_M:-0.012}
-      - EDUBOTICS_GRASP_ROLL_DEG=${EDUBOTICS_GRASP_ROLL_DEG:-0.0}
+      # Top-down jaw constant (deg). The OMX-F jaws separate along EE-Y, so the
+      # geometrically-correct value is 90 (0 would pinch the perpendicular axis);
+      # it is the additive const in the live named-object grasp roll AND the fixed
+      # roll the legacy pickup/drop_at/move_to use. Rig-validated by the P0
+      # jaw-check. Read by workflow/handlers/motion.py.
+      - EDUBOTICS_GRASP_ROLL_DEG=${EDUBOTICS_GRASP_ROLL_DEG:-90.0}
       # Vision detector selection + ONNX paths for the Roboter Studio
       # open-vocab block. `yolox-tiny` is the only fully-wired path
       # today; `dfine-n` is reserved (see overlays/workflow/perception.py

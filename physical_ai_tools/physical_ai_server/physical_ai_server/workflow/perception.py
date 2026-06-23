@@ -86,6 +86,12 @@ class Detection:
     label: str
     aruco_id: int | None = None
     world_xyz_m: tuple[float, float, float] | None = None
+    # AprilTag only: the 4 tag corners in image pixels as a float (4, 2) ndarray,
+    # in pupil_apriltags' native counter-clockwise order. Kept as float (the
+    # detector also computes an int-cast copy for the bbox) because the
+    # downstream tag-pose solvePnP (workflow/tag_pose.py) needs sub-pixel
+    # corners — an int cast measurably degrades the recovered yaw of a ~24 mm tag.
+    corners_px: Any | None = None
     extras: dict[str, Any] = field(default_factory=dict)
 
 
@@ -452,8 +458,12 @@ class Perception:
             if aruco_id is not None and r.tag_id != aruco_id:
                 continue
             cx, cy = int(r.center[0]), int(r.center[1])
-            corners = r.corners.astype(int)
-            xs, ys = corners[:, 0], corners[:, 1]
+            # Sub-pixel float corners (pupil's native CCW order) for the
+            # downstream tag-pose solvePnP; a separate int-cast copy drives the
+            # bbox so the existing overlay/bbox path is byte-unchanged.
+            corners_f = np.asarray(r.corners, dtype=np.float64)
+            corners_i = corners_f.astype(int)
+            xs, ys = corners_i[:, 0], corners_i[:, 1]
             x, y = int(xs.min()), int(ys.min())
             w, h = int(xs.max() - xs.min()), int(ys.max() - ys.min())
             detections.append(Detection(
@@ -462,5 +472,6 @@ class Perception:
                 confidence=float(r.decision_margin) / 100.0,
                 label=f'tag{r.tag_id}',
                 aruco_id=int(r.tag_id),
+                corners_px=corners_f,
             ))
         return detections

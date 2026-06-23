@@ -24,6 +24,8 @@ STATEMENT_HANDLERS: dict[str, callable] = {
     'edubotics_pickup': motion_handlers.pickup,
     'edubotics_drop_at': motion_handlers.drop_at,
     'edubotics_wait_seconds': motion_handlers.wait_seconds,
+    # Named-object grasp (Roboter Studio AprilTag grasping)
+    'edubotics_grasp_object': perception_handlers.grasp_object,
     # Destinations
     'edubotics_destination_pin': destination_handlers.destination_pin,
     'edubotics_destination_current': destination_handlers.destination_current,
@@ -47,6 +49,10 @@ VALUE_EVALUATORS: dict[str, callable] = {
     'edubotics_wait_until_object': perception_handlers.wait_until_object,
     'edubotics_wait_until_marker': perception_handlers.wait_until_marker,
     'edubotics_detect_open_vocab': perception_handlers.detect_open_vocab,
+    # Named-object value blocks (Roboter Studio AprilTag grasping)
+    'edubotics_see_object': perception_handlers.see_object,
+    'edubotics_count_object': perception_handlers.count_object,
+    'edubotics_wait_until_object_seen': perception_handlers.wait_until_object_seen,
 }
 
 

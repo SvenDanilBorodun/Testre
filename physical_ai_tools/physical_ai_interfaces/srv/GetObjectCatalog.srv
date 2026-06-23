@@ -1,0 +1,11 @@
+# Roboter Studio named-object grasping: return the object catalog's type list
+# for the Blockly dropdowns. type_names[i] is the internal type key (the block
+# field value); labels_de[i] is its German display label (parallel arrays). On
+# an absent / corrupt / invalid catalog the arrays are empty, success is false,
+# and message carries the German reason. The service reads the catalog JSON from
+# the edubotics_calib volume at call time (edit + re-fetch, no image rebuild).
+---
+string[] type_names
+string[] labels_de
+bool success
+string message

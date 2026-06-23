@@ -31,6 +31,11 @@ import {
   requestRecalibration,
 } from '../features/workshop/workshopSlice';
 import { useRosTopicSubscription } from '../hooks/useRosTopicSubscription';
+import { useRosServiceCaller } from '../hooks/useRosServiceCaller';
+import {
+  setObjectCatalogOptions,
+  setWorkspaceAccessor,
+} from '../components/Workshop/blocks/perception';
 import {
   getWorkflow,
   createWorkflow,
@@ -70,6 +75,7 @@ function WorkshopPage({ isActive }) {
   const [saving, setSaving] = useState(false);
   const [view, setView] = useState('editor'); // 'editor' | 'gallery'
   const subscriptions = useRosTopicSubscription();
+  const { getObjectCatalog } = useRosServiceCaller();
   const workspaceRef = useRef(null);
 
   const calibrated =
@@ -142,6 +148,38 @@ function WorkshopPage({ isActive }) {
     workspaceRef.current = ws;
     setWorkspace(ws);
   }, []);
+
+  // Wire the workspace accessor so a late object-catalog refresh can reach the
+  // live OBJECT_TYPE dropdowns (perception.js refreshObjectTypeDropdowns).
+  useEffect(() => {
+    setWorkspaceAccessor(() => workspaceRef.current);
+    return () => setWorkspaceAccessor(null);
+  }, []);
+
+  // Fetch the named-object catalog for the Blockly dropdowns once the editor is
+  // available (calibrated). Re-fetch if the student calibrates in-session. The
+  // GetObjectCatalog service reads the volume catalog at call time, so this also
+  // picks up a teacher's catalog edit after an environment restart.
+  useEffect(() => {
+    if (!isActive || !calibrated) return undefined;
+    let cancelled = false;
+    getObjectCatalog()
+      .then((r) => {
+        if (cancelled) return;
+        if (r && r.success && Array.isArray(r.type_names)) {
+          const labels = Array.isArray(r.labels_de) ? r.labels_de : [];
+          setObjectCatalogOptions(r.type_names.map((t, i) => [labels[i] || t, t]));
+        } else if (r && r.message) {
+          toast.error(r.message);
+        }
+      })
+      .catch((e) => {
+        if (!cancelled) console.warn('getObjectCatalog failed', e);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isActive, calibrated, getObjectCatalog]);
 
   // TemplatePicker calls onPicked(workflowObject) — the full row, not
   // just the id. We extract the id and store it in Redux; the editor's

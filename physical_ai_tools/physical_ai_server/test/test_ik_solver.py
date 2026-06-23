@@ -128,6 +128,36 @@ def test_roll_sets_joint5():
     np.testing.assert_allclose(q0[:4], qr[:4], atol=1e-9)
 
 
+def test_base_yaw_matches_solve_theta1():
+    # base_yaw MUST equal the theta1 (joint1) that solve() picks, for every
+    # reachable point — they share the same aiming math. This is the contract
+    # the named-object orientation formula (joint5 = base_yaw − tag_yaw + const)
+    # depends on.
+    ik = _ik()
+    for x, y, z in [(0.20, 0.0, 0.02), (0.18, 0.08, 0.0),
+                    (0.15, -0.10, 0.05), (0.22, 0.05, 0.03)]:
+        q = ik.solve((x, y, z))
+        assert q is not None
+        assert abs(ik.base_yaw(x, y) - q[0]) < 1e-12
+
+
+def test_base_yaw_uses_j1_axis_offset_and_sign():
+    # Exact formula atan2(y, x - _J1_AXIS_X), NOT atan2(y, x) — the sign-trap
+    # the plan (§23.1) flags. _J1_AXIS_X is negative, so x - _J1_AXIS_X = x + 0.01125.
+    from physical_ai_server.workflow.ik_solver import _J1_AXIS_X
+    ik = _ik()
+    assert _J1_AXIS_X < 0
+    assert abs(ik.base_yaw(0.20, 0.10) - math.atan2(0.10, 0.20 - _J1_AXIS_X)) < 1e-12
+    # +y -> positive yaw, -y -> negative yaw, straight ahead -> ~0
+    assert ik.base_yaw(0.20, 0.10) > 0
+    assert ik.base_yaw(0.20, -0.10) < 0
+    assert abs(ik.base_yaw(0.20, 0.0)) < 1e-9
+    # range is (-pi, pi]
+    for x, y in [(-0.20, 0.0), (0.0, 0.20), (0.0, -0.20), (-0.20, -1e-9)]:
+        v = ik.base_yaw(x, y)
+        assert -math.pi < v <= math.pi + 1e-12
+
+
 def test_solve_quat_is_position_only():
     ik = _ik()
     q = ik.solve_quat((0.20, 0.0, 0.03), (0.0, 0.0, 0.0, 1.0))

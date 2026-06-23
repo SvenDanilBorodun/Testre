@@ -86,6 +86,23 @@ export const DE = {
   COUNT_OBJECT: 'Anzahl Objekt %1',
   DETECT_OPEN_VOCAB: 'finde Objekt mit Beschreibung %1',
 
+  // Named-object grasping (AprilTag). Custom-init blocks use a prefix label +
+  // a runtime-populated dropdown (no %1), so these are prefixes, not templates.
+  GRASP_OBJECT_PREFIX: 'Greife',
+  SEE_OBJECT_PREFIX: 'sehe ich',
+  COUNT_OBJECT_PREFIX: 'Anzahl',
+  OBJECT_TYPE_LOADING: '(lädt …)',
+  OBJECT_TYPE_EMPTY: '(kein Objekt)',
+  // P2 loop + event blocks (custom-init, prefix/suffix fragments around the
+  // OBJECT_TYPE dropdown).
+  WHILE_VISIBLE_PREFIX: 'Solange',
+  WHILE_VISIBLE_SUFFIX: 'sichtbar',
+  WAIT_UNTIL_OBJECT_SEEN_PREFIX: 'warte bis',
+  WAIT_UNTIL_OBJECT_SEEN_MID: 'sichtbar, max',
+  WAIT_UNTIL_OBJECT_SEEN_SUFFIX: 's',
+  WHEN_OBJECT_SEEN_PREFIX: 'wenn',
+  WHEN_OBJECT_SEEN_SUFFIX: 'erkannt',
+
   // Destinations
   DESTINATION_PIN: 'setze %1 = Pin (Klick auf Szenenkamera)',
   DESTINATION_CURRENT: 'setze %1 = aktuelle Position',

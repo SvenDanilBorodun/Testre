@@ -660,6 +660,20 @@ export function useRosServiceCaller() {
     [callService]
   );
 
+  // Roboter Studio named-object grasping: fetch the object catalog's type list
+  // (parallel arrays type_names[] + labels_de[]) for the Blockly dropdowns. The
+  // service reads the catalog JSON from the calib volume at call time.
+  const getObjectCatalog = useCallback(
+    async () =>
+      callService(
+        '/workshop/get_object_catalog',
+        'physical_ai_interfaces/srv/GetObjectCatalog',
+        {},
+        5000
+      ),
+    [callService]
+  );
+
   const captureColor = useCallback(
     async (color) =>
       callService(
@@ -792,6 +806,7 @@ export function useRosServiceCaller() {
     calibrationSolve,
     stopWorkflow,
     markDestination,
+    getObjectCatalog,
     captureColor,
     cancelCalibration,
     getCalibrationStatus,

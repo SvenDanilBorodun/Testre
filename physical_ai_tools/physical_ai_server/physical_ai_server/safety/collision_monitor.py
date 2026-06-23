@@ -304,31 +304,20 @@ class CollisionMonitorMixin:
         follower-only Roboter-Studio workflow MUST NOT start (it would contend
         with the leader broadcaster on /leader/joint_trajectory).
 
-        Two signals, strongest first:
-          1. EDUBOTICS_FOLLOWER_ONLY: the GUI bridge sets this to 1 when it flips
-             the arm container into Roboter-Studio (follower-only) mode. An
-             explicit '0'/'false'/'no'/'off' means a both-arms session was
-             launched → active. Unset means UNKNOWN (the env is not authoritative
-             on every rig), so we don't refuse on it alone.
-          2. Live /leader/joint_states within `fresh_window_s`: a leader that is
-             actually publishing joint states is, by definition, running. This is
-             the empirical backstop when the env is unset/unreliable.
+        Sole signal: live /leader/joint_states within `fresh_window_s`. A powered
+        leader publishes joint states continuously at ~100 Hz, so a sample inside
+        the window is real-time proof a leader is running; staleness/absence is
+        proof it is not — and it is the same condition that governs whether the
+        leader broadcaster contends on /leader/joint_trajectory.
 
-        Limitation: a both-arms session whose leader has momentarily stopped
-        publishing (>fresh_window_s) AND with the env unset reads as "not active".
-        The deterministic guard is EDUBOTICS_FOLLOWER_ONLY (set by the GUI on the
-        student path); the live-topic check only strengthens it. The GUI bridge is
-        hardened separately as the primary UI-level guard.
+        EDUBOTICS_FOLLOWER_ONLY is deliberately NOT consulted here. The GUI leader
+        toggle recreates ONLY the open_manipulator container (`--no-deps`), so
+        THIS process (physical_ai_server) keeps whatever value it was *started*
+        with. After a both-arms „Umgebung starten" that env is permanently '0'
+        even once the student flips into follower-only Roboter Studio — so
+        trusting it refused EVERY toggled-in workflow start (root cause, 2026-06-23).
+        The live leader topic is the only signal that actually tracks the toggle.
         """
-        raw = os.environ.get('EDUBOTICS_FOLLOWER_ONLY')
-        if raw is not None and str(raw).strip() != '':
-            follower_only = str(raw).strip().lower() in ('1', 'true', 'yes', 'on')
-            if not follower_only:
-                # The env explicitly says both arms are launched.
-                return True
-            # Explicit follower-only: trust it, but still fall through to the
-            # live-topic check below — a stale env can't override a leader that
-            # is demonstrably publishing right now.
         last = self._leader_state_last_mono
         if last is None:
             return False

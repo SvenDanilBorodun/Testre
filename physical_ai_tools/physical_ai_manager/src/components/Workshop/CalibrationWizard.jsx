@@ -42,6 +42,13 @@ function CalibrationWizard() {
   const hasIntrinsicScene = useSelector((s) => s.workshop.hasIntrinsicScene);
   const hasHandeyeScene = useSelector((s) => s.workshop.hasHandeyeScene);
   const hasTableTouch = useSelector((s) => s.workshop.hasTableTouch);
+  const recalibrating = useSelector((s) => s.workshop.recalibrating);
+  // Mount-time snapshot: when the wizard was opened via „Kalibrierung neu
+  // starten" the per-step flags were deliberately reset, so we must NOT
+  // re-hydrate them from the still-present on-disk YAMLs (that bounced the
+  // student straight back to the editor — 2026-06-23). useRef captures the
+  // value at mount and never updates, which is exactly the lifetime we want.
+  const recalAtMountRef = useRef(recalibrating);
 
   // Hydrate per-step badges from disk so reloading the page doesn't make
   // students redo intrinsic captures. Run once on mount; the underlying
@@ -63,14 +70,18 @@ function CalibrationWizard() {
   useEffect(() => { cancelRef.current = cancelCalibration; }, [cancelCalibration]);
   useEffect(() => {
     let cancelled = false;
-    (async () => {
-      try {
-        const r = await getStatusRef.current();
-        if (!cancelled && r && r.success) {
-          dispatchRef.current(setCalibrationStatus(r));
-        }
-      } catch (_) { /* ignore — wizard works without hydration */ }
-    })();
+    // Skip disk hydration during an explicit recalibration — the flags were
+    // just reset on purpose and the on-disk YAMLs would undo that.
+    if (!recalAtMountRef.current) {
+      (async () => {
+        try {
+          const r = await getStatusRef.current();
+          if (!cancelled && r && r.success) {
+            dispatchRef.current(setCalibrationStatus(r));
+          }
+        } catch (_) { /* ignore — wizard works without hydration */ }
+      })();
+    }
     return () => {
       cancelled = true;
       cancelRef.current('').catch(() => {});

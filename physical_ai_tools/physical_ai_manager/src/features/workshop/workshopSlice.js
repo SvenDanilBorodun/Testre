@@ -30,6 +30,12 @@ const initialState = {
   // Touch-off table measurement (optional accuracy step, recommended).
   hasTableTouch: false,
   hasColorProfile: false,
+  // True between „Kalibrierung neu starten" and the moment the student finishes
+  // re-running the geometry steps. Forces the wizard to stay open even though
+  // valid YAMLs still exist on disk — without it the wizard's mount-time
+  // /calibration/status hydrate re-reads those YAMLs and flips `calibrated`
+  // straight back to true, bouncing the student back to the editor (2026-06-23).
+  recalibrating: false,
   // Phase-2 calibration UX additions
   // 16-cell coverage map: array of length 16, each cell is the count
   // of captured frames whose board centroid landed in that cell.
@@ -137,6 +143,11 @@ const workshopSlice = createSlice({
       else if (step === 'scene_handeye') state.hasHandeyeScene = true;
       else if (step === 'table_touch') state.hasTableTouch = true;
       else if (step === 'color_profile') state.hasColorProfile = true;
+      // Once all three scene steps are done again, recalibration is complete —
+      // drop the override so the WorkshopPage gate returns to the editor.
+      if (state.hasIntrinsicScene && state.hasHandeyeScene && state.hasTableTouch) {
+        state.recalibrating = false;
+      }
     },
     setCalibrationStatus: (state, action) => {
       // Hydrate per-step badges from /calibration/status so the wizard
@@ -176,6 +187,9 @@ const workshopSlice = createSlice({
       // we never want to delete calibration without explicit intent).
       // WS4: keep the (vestigial) gripper flags satisfied; only the scene
       // artefacts gate the editor now. Reset to the first scene step.
+      // Force the wizard to stay open despite the on-disk YAMLs (see the
+      // `recalibrating` field doc) until the steps are actually re-run.
+      state.recalibrating = true;
       state.hasIntrinsicGripper = true;
       // Intrinsics are factory-defaulted on disk (always present), so keep the
       // intrinsic step satisfied and re-start recalibration at the extrinsic —

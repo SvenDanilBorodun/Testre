@@ -49,6 +49,7 @@ function WorkshopPage({ isActive }) {
   const hasIntrinsicScene = useSelector((s) => s.workshop.hasIntrinsicScene);
   const hasHandeyeScene = useSelector((s) => s.workshop.hasHandeyeScene);
   const hasTableTouch = useSelector((s) => s.workshop.hasTableTouch);
+  const recalibrating = useSelector((s) => s.workshop.recalibrating);
   const selectedWorkflowId = useSelector((s) => s.workshop.selectedWorkflowId);
   const unsavedBlocklyJson = useSelector((s) => s.workshop.unsavedBlocklyJson);
   const accessToken = useSelector((s) => s.auth?.session?.access_token);
@@ -75,6 +76,12 @@ function WorkshopPage({ isActive }) {
     hasIntrinsicScene &&
     hasHandeyeScene &&
     hasTableTouch;
+
+  // The editor unlocks only when calibrated AND not mid-recalibration. The
+  // `recalibrating` override (set by „Kalibrierung neu starten") keeps the
+  // wizard open even though the on-disk YAMLs still satisfy `calibrated` — it
+  // clears once the student finishes re-running the steps (workshopSlice).
+  const showEditor = calibrated && !recalibrating;
 
   // Re-subscribe to /workflow/status whenever this page is active OR
   // the rosbridge connection state flips back to connected. The v1
@@ -235,7 +242,7 @@ function WorkshopPage({ isActive }) {
               Roboter Studio
             </h1>
             <p className="text-xs sm:text-sm text-[var(--ink-3)]">
-              {calibrated
+              {showEditor
                 ? 'Bausteine ziehen, Aufgabe zusammenstellen und vom Roboter ausführen lassen.'
                 : 'Bevor wir loslegen können, muss die Kamera eingerichtet werden.'}
             </p>
@@ -246,7 +253,7 @@ function WorkshopPage({ isActive }) {
         </div>
       </header>
       <main className="flex-1 overflow-hidden flex flex-col">
-        {calibrated ? (
+        {showEditor ? (
           <>
             <div className="px-3 sm:px-4 pt-2 sm:pt-3 flex items-center gap-2 flex-wrap">
               <div className="flex items-center gap-1 rounded-md border border-[var(--line)] bg-white p-0.5">

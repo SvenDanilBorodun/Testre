@@ -8,8 +8,10 @@ detector must NOT trip then (it would publish a freeze/relax to
 non-existent leader). The guard must STAY armed for teleop/recording.
 
 HIGH-6: the server must be able to refuse a follower-only workflow while a
-leader arm is live (a both-arms session). leader_appears_active() reads the
-EDUBOTICS_FOLLOWER_ONLY env and live /leader/joint_states freshness.
+leader arm is live (a both-arms session). leader_appears_active() keys on live
+/leader/joint_states freshness — the only signal that tracks the GUI leader
+toggle, which recreates open_manipulator but NOT this physical_ai_server process
+(so its EDUBOTICS_FOLLOWER_ONLY env goes stale and is deliberately not used).
 
 collision_monitor.py imports rclpy/ROS msgs at module level; we stub those in
 sys.modules and load the monitor under a throwaway name (same approach as the
@@ -294,9 +296,24 @@ class LeaderActiveTest(unittest.TestCase):
         with _EnvGuard(EDUBOTICS_FOLLOWER_ONLY=None):
             self.assertFalse(host.leader_appears_active())
 
-    def test_env_explicitly_both_arms_reads_active(self):
+    def test_stale_both_arms_env_without_live_leader_reads_inactive(self):
+        # Root cause (2026-06-23): the leader toggle recreates ONLY
+        # open_manipulator, so physical_ai_server keeps the both-arms
+        # EDUBOTICS_FOLLOWER_ONLY='0' it was started with even after the student
+        # flips into follower-only Roboter Studio. The env must NOT be trusted —
+        # with no live leader publishing, the gate must read INACTIVE (else every
+        # toggled-in workflow start is refused forever).
         host = self._plain_host()
         host._leader_state_last_mono = None
+        with _EnvGuard(EDUBOTICS_FOLLOWER_ONLY='0'):
+            self.assertFalse(host.leader_appears_active())
+
+    def test_both_arms_env_with_live_leader_reads_active(self):
+        # A genuinely-live leader (both-arms) is caught by the joint_states
+        # freshness signal regardless of the env value.
+        import time
+        host = self._plain_host()
+        host._leader_state_last_mono = time.monotonic()
         with _EnvGuard(EDUBOTICS_FOLLOWER_ONLY='0'):
             self.assertTrue(host.leader_appears_active())
 

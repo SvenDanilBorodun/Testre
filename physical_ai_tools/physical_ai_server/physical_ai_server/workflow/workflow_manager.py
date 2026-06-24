@@ -125,6 +125,15 @@ class WorkflowContext:
     # blocks runs fine without a catalog; a named block fails loud at the block.
     object_catalog: Any | None = None
     object_catalog_error: str | None = None
+    # W5 — ground-truth accuracy correction (from the "Genauigkeit prüfen" step).
+    # xy_correction is a 2x3 affine (numpy) mapping detected base XY -> corrected
+    # base XY (None → no correction / identity); yaw_bias_rad is added to the
+    # measured tag yaw before commanding the wrist roll (0.0 → no change). Both
+    # are consumed via getattr by perception_blocks (_apply_xy_correction /
+    # _apply_yaw_bias), so they are safe to read before/after this attribute
+    # exists. Threaded from the calib dict in start(), mirroring z_table.
+    xy_correction: Any | None = None
+    yaw_bias_rad: float = 0.0
     # Per-run claimed/skipped tag-id sets for the „Solange <Typ> sichtbar" loop:
     # a tag id is CLAIMED after a successful grasp (so a placed object re-entering
     # view is never re-grabbed and the loop terminates) and SKIPPED after a
@@ -404,6 +413,9 @@ class WorkflowManager:
                 scene_intrinsics=calib.get('scene_intrinsics'),
                 scene_extrinsics=calib.get('scene_extrinsics'),
                 table_plane=calib.get('table_plane'),
+                # W5 — ground-truth accuracy correction (None/0.0 when never run).
+                xy_correction=calib.get('xy_correction'),
+                yaw_bias_rad=float(calib.get('yaw_bias_rad', 0.0) or 0.0),
                 should_stop=self._stop_event.is_set,
                 log=lambda msg: self._emit_status({'log_message': msg}),
                 emit_detections=lambda dets: self._emit_status({'detections': dets}),

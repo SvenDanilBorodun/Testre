@@ -161,6 +161,24 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         self.on_inference = False
         self.on_calibration = False
         self.on_workflow = False
+        # W1 — force recalibration on every fresh container start (DEFAULT ON).
+        # Read ONCE at startup. When ON, calibration_status_callback reports the
+        # scene calibration as ABSENT (intrinsics + extrinsic + table-plane) until
+        # the FULL flow's last step (the touch-off plane solve) completes THIS
+        # boot — at which point _recalibrated_this_boot latches True and the
+        # reported status reflects the real on-disk YAMLs again. No YAML is
+        # deleted; the latch resets on the next restart. One-var rollback: set
+        # EDUBOTICS_FORCE_RECALIBRATION=0 (or false/no/off) for the classroom.
+        self._force_recalib = os.environ.get(
+            'EDUBOTICS_FORCE_RECALIBRATION', '1'
+        ).strip().lower() not in ('0', 'false', 'no', 'off', '')
+        self._recalibrated_this_boot = False
+        # W5 — collected ground-truth verify points for /calibration/verify:
+        # each entry is (truth_xy, detected_xy, truth_yaw_rad|None,
+        # detected_yaw_rad|None). Mutated only inside the verify callback (which
+        # runs on the reentrant preempt group), so guard it with a lock.
+        self._verify_points: list = []
+        self._verify_lock = threading.Lock()
         # True while the eager background policy load (START_INFERENCE ->
         # _eager_load_policy thread) is in flight; the inference FPS timer
         # skips its tick and re-publishes INFERENCE_LOADING instead.
@@ -425,7 +443,17 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             ),
             # Phase-2 calibration helpers (see CalibrationManager).
             ('/calibration/preview', CalibrationPreview, self.calibration_preview_callback),
-            ('/calibration/verify', VerifyCalibration, self.calibration_verify_callback),
+            # The verify "add_point" branch grabs a scene frame + runs the
+            # AprilTag detector (blocking), so it rides the reentrant preempt
+            # group — otherwise it queues behind / starves the 1 Hz heartbeat
+            # timer on the node default mutually-exclusive group (the documented
+            # whoami/HF pattern).
+            (
+                '/calibration/verify',
+                VerifyCalibration,
+                self.calibration_verify_callback,
+                self._preempt_cb_group,
+            ),
             ('/calibration/history', CalibrationHistory, self.calibration_history_callback),
         ]
 
@@ -2127,6 +2155,11 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                     return response
                 self._set_calibration_active(False)
                 self._active_calib_step = None
+                # W1 — the touch-off plane solve is the FINAL step of the full
+                # calibration flow; its success marks the rig as recalibrated for
+                # this boot, so the force-recalib gate in
+                # calibration_status_callback stops hiding the on-disk YAMLs.
+                self._recalibrated_this_boot = True
             response.success = success
             response.message = message
             return response
@@ -2233,6 +2266,18 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             # pre-rebuild compiled interface (lacking the field) doesn't crash.
             if hasattr(response, 'has_table_plane'):
                 response.has_table_plane = bool(mgr.has_table_plane('scene'))
+            # W1 — force a FULL recalibration on every fresh container start.
+            # While the flag is ON and the touch-off plane solve hasn't completed
+            # THIS boot, report the scene calibration as absent (intrinsics +
+            # extrinsic + table-plane) so the wizard re-runs the whole flow. The
+            # YAMLs are untouched on disk; once the student re-runs the flow to
+            # the touch-off, _recalibrated_this_boot latches and the real status
+            # is reported for the rest of the session. Resets next restart.
+            if self._force_recalib and not self._recalibrated_this_boot:
+                response.has_scene_intrinsics = False
+                response.has_scene_handeye = False
+                if hasattr(response, 'has_table_plane'):
+                    response.has_table_plane = False
             response.success = True
             response.message = 'Kalibrier-Status geladen.'
         except Exception as e:
@@ -2373,9 +2418,26 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                     'Klick konnte nicht auf den Tisch projiziert werden.'
                 )
                 return response
+            # W5 — apply the ground-truth XY correction (identity when the
+            # accuracy-verify step was never run) so a pinned destination gets
+            # the SAME correction a named grasp does. z / table_plane unchanged.
+            corr_x, corr_y = float(point[0]), float(point[1])
+            try:
+                corr = manager.read_verify_correction(request.camera)
+                if corr is not None and corr.get('xy_correction') is not None:
+                    from physical_ai_server.workflow.calibration_manager import (
+                        CalibrationManager,
+                    )
+                    corr_x, corr_y = CalibrationManager.apply_xy_correction(
+                        (corr_x, corr_y), corr['xy_correction']
+                    )
+            except Exception as e:
+                self.get_logger().warning(
+                    f'mark_destination correction skipped: {e}'
+                )
             response.success = True
-            response.world_x = float(point[0])
-            response.world_y = float(point[1])
+            response.world_x = corr_x
+            response.world_y = corr_y
             response.world_z = float(z_table)
             response.message = f'Ziel "{request.label}" gespeichert.'
             # Persist into the WorkflowManager so the next workflow run
@@ -2384,10 +2446,12 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 wfm = self._get_or_create_workflow_manager()
                 if wfm is not None and request.label:
                     # Store the grasp height (z_table), matching response.world_z
-                    # — point[2] is the surface plane used only for (x, y).
+                    # — point[2] is the surface plane used only for (x, y). The
+                    # corrected (corr_x, corr_y) is what response carried, so the
+                    # persisted destination matches the click feedback exactly.
                     wfm.set_destination(
                         request.label,
-                        float(point[0]), float(point[1]), float(z_table),
+                        corr_x, corr_y, float(z_table),
                     )
             except Exception:
                 pass
@@ -2714,6 +2778,22 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 self.get_logger().warning(
                     f'scene_handeye.yaml load failed: {e}'
                 )
+        # W5 — ground-truth XY correction + yaw bias (identity / 0 when the
+        # student never ran the accuracy-verify step). perception_blocks
+        # (_attach_named_world) + mark_destination apply these AFTER projecting
+        # to base, via CalibrationManager.apply_xy_correction. Default safe:
+        # xy_correction None → no correction; yaw_bias_rad 0.0 → no change.
+        result['xy_correction'] = None
+        result['yaw_bias_rad'] = 0.0
+        try:
+            manager = self._get_or_create_calibration_manager()
+            if manager is not None:
+                corr = manager.read_verify_correction('scene')
+                if corr is not None:
+                    result['xy_correction'] = corr.get('xy_correction')
+                    result['yaw_bias_rad'] = float(corr.get('yaw_bias_rad', 0.0))
+        except Exception as e:
+            self.get_logger().warning(f'verify correction load failed: {e}')
         return result
 
     def workflow_start_callback(self, request, response):
@@ -2899,12 +2979,267 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         response.message = 'Live-Vorschau wird in einer späteren Version aktiviert.'
         return response
 
+    def _verify_reset_response(self, response):
+        """Zero-fill the VerifyCalibration response numeric fields so every
+        return path is fully populated regardless of the branch."""
+        response.detected_x = 0.0
+        response.detected_y = 0.0
+        response.detected_yaw_deg = 0.0
+        response.has_detection = False
+        response.point_count = 0
+        response.residual_mm_mean = 0.0
+        response.residual_mm_max = 0.0
+        response.yaw_bias_deg = 0.0
+        response.mirror_detected = False
+        return response
+
     def calibration_verify_callback(self, request, response):
+        """W5 — ground-truth correction + orientation verify.
+
+        Routes ``add_point`` / ``solve`` / ``reset``. The student places a single
+        tag36h11 at a KNOWN base (x, y) (+ optional yaw); ``add_point`` projects
+        the detected tag with the CURRENT scene calibration (the same intrinsics +
+        extrinsic + board_table_z projection path mark_destination /
+        _attach_named_world use) and records (truth, detected). ``solve`` fits a 2D
+        similarity (Umeyama, via CalibrationManager.fit_xy_correction); on success
+        it persists xy_correction + yaw_bias into scene_handeye.yaml, on a
+        mirror/handedness flip it refuses + persists nothing. German throughout."""
+        import math as _math
+
+        self._verify_reset_response(response)
+        command = (getattr(request, 'command', '') or '').strip().lower()
+
+        if command == 'reset':
+            with self._verify_lock:
+                self._verify_points = []
+            response.success = True
+            response.message = 'Prüfpunkte zurückgesetzt.'
+            response.point_count = 0
+            return response
+
+        if command == 'add_point':
+            return self._verify_add_point(request, response)
+
+        if command == 'solve':
+            return self._verify_solve(response)
+
         response.success = False
-        response.predicted_pixel_x = 0.0
-        response.predicted_pixel_y = 0.0
-        response.residual_mm = 0.0
-        response.message = 'Kalibrierungsprüfung wird in einer späteren Version aktiviert.'
+        response.message = (
+            f'Unbekannter Befehl „{command}". Erwartet: add_point, solve, reset.'
+        )
+        return response
+
+    def _verify_add_point(self, request, response):
+        """Detect exactly one tag in the current scene frame, project its centre
+        to base, read its yaw, and append (truth, detected) to the verify buffer.
+        Fails loud in German on: camera not calibrated / no frame / no tag /
+        multiple tags."""
+        import math as _math
+
+        calib = self._load_workflow_calibration()
+        scene_intr = calib.get('scene_intrinsics')
+        T = calib.get('scene_extrinsics')
+        board_table_z = calib.get('board_table_z')
+        if scene_intr is None or T is None or board_table_z is None:
+            response.success = False
+            response.message = (
+                'Die Szenen-Kamera ist noch nicht vollständig kalibriert '
+                '(Intrinsik + Extrinsik). Bitte zuerst die Kalibrierung '
+                'abschließen.'
+            )
+            return response
+
+        bgr = self._get_latest_camera_frame('scene')
+        if bgr is None:
+            response.success = False
+            response.message = 'Kein Kamerabild der Szenen-Kamera verfügbar.'
+            return response
+
+        try:
+            from physical_ai_server.workflow.perception import Perception
+            from physical_ai_server.workflow.projection import project_pixel_to_table
+            from physical_ai_server.workflow.tag_pose import tag_yaw_base
+        except Exception as e:
+            self.get_logger().error(f'verify add_point import failed: {e}')
+            response.success = False
+            response.message = 'Erkennungsmodul fehlt.'
+            return response
+
+        perc = Perception()
+        if not perc.apriltag_available():
+            response.success = False
+            response.message = (
+                'Der AprilTag-Detektor ist nicht verfügbar (pupil_apriltags fehlt).'
+            )
+            return response
+
+        try:
+            detections = perc.detect(bgr, camera='scene', mode='apriltag', aruco_id=None)
+        except Exception as e:
+            self.get_logger().error(f'verify add_point detect failed: {e}')
+            response.success = False
+            response.message = 'Markererkennung fehlgeschlagen.'
+            return response
+
+        if not detections:
+            response.success = False
+            response.message = (
+                'Kein AprilTag im Bild erkannt. Bitte genau einen Tag flach in '
+                'die Sicht der Szenen-Kamera legen.'
+            )
+            return response
+        if len(detections) > 1:
+            response.success = False
+            response.message = (
+                f'{len(detections)} Tags erkannt. Bitte genau einen Tag in der '
+                'Sicht lassen.'
+            )
+            return response
+
+        d = detections[0]
+        K = scene_intr['K']
+        dist = scene_intr['dist']
+        try:
+            cx, cy = d.centroid_px
+            point = project_pixel_to_table(
+                float(cx), float(cy), K, dist, T, float(board_table_z)
+            )
+        except Exception as e:
+            self.get_logger().error(f'verify add_point projection failed: {e}')
+            point = None
+        if point is None:
+            response.success = False
+            response.message = (
+                'Der erkannte Tag konnte nicht auf den Tisch projiziert werden — '
+                'bitte Kalibrierung prüfen.'
+            )
+            return response
+
+        detected_x = float(point[0])
+        detected_y = float(point[1])
+        detected_yaw = None
+        if getattr(d, 'corners_px', None) is not None:
+            try:
+                detected_yaw = tag_yaw_base(
+                    d.corners_px, K, dist, T, float(board_table_z)
+                )
+            except Exception as e:
+                self.get_logger().warning(f'verify add_point yaw failed: {e}')
+                detected_yaw = None
+
+        truth_xy = (float(request.truth_x), float(request.truth_y))
+        truth_yaw = None
+        if bool(getattr(request, 'has_yaw', False)):
+            truth_yaw = _math.radians(float(request.truth_yaw_deg))
+
+        with self._verify_lock:
+            self._verify_points.append(
+                (truth_xy, (detected_x, detected_y), truth_yaw, detected_yaw)
+            )
+            count = len(self._verify_points)
+
+        response.success = True
+        response.has_detection = True
+        response.detected_x = detected_x
+        response.detected_y = detected_y
+        response.detected_yaw_deg = (
+            _math.degrees(detected_yaw) if detected_yaw is not None else 0.0
+        )
+        response.point_count = int(count)
+        # Live per-point error (mm) so the student sees the residual building up.
+        err_mm = _math.hypot(detected_x - truth_xy[0],
+                             detected_y - truth_xy[1]) * 1000.0
+        response.message = (
+            f'Punkt {count} erfasst (Abweichung {err_mm:.0f} mm). '
+            'Empfohlen: 4–6 über die Arbeitsfläche verteilte Punkte.'
+        )
+        return response
+
+    def _verify_solve(self, response):
+        """Fit + persist the ground-truth correction from the collected points."""
+        import math as _math
+
+        with self._verify_lock:
+            points = list(self._verify_points)
+
+        n = len(points)
+        response.point_count = int(n)
+        if n < 2:
+            response.success = False
+            response.message = (
+                'Mindestens zwei Prüfpunkte werden benötigt (empfohlen 4–6, über '
+                'die Arbeitsfläche verteilt). Bitte mehr Punkte erfassen.'
+            )
+            return response
+
+        truth_xy = [p[0] for p in points]
+        detected_xy = [p[1] for p in points]
+        # Yaw pairs only where BOTH truth and detected yaw are present.
+        truth_yaws = []
+        detected_yaws = []
+        for _t, _d, ty, dy in points:
+            if ty is not None and dy is not None:
+                truth_yaws.append(ty)
+                detected_yaws.append(dy)
+        ty_arg = truth_yaws or None
+        dy_arg = detected_yaws or None
+
+        manager = self._get_or_create_calibration_manager()
+        if manager is None:
+            response.success = False
+            response.message = 'Kalibrierung kann nicht initialisiert werden.'
+            return response
+
+        try:
+            result = manager.fit_xy_correction(
+                truth_xy, detected_xy, truth_yaws=ty_arg, detected_yaws=dy_arg
+            )
+        except Exception as e:
+            self.get_logger().error(f'verify solve fit failed: {e}')
+            response.success = False
+            response.message = 'Korrekturberechnung fehlgeschlagen.'
+            return response
+
+        response.point_count = int(result.get('point_count', n))
+        response.residual_mm_mean = float(result.get('residual_mm_mean', 0.0))
+        response.residual_mm_max = float(result.get('residual_mm_max', 0.0))
+        response.yaw_bias_deg = _math.degrees(float(result.get('yaw_bias_rad', 0.0)))
+        response.mirror_detected = bool(result.get('mirror_detected', False))
+
+        if not result.get('ok'):
+            # Includes the mirror/handedness case — persist nothing, surface the
+            # German message verbatim.
+            response.success = False
+            response.message = result.get('message', 'Korrektur fehlgeschlagen.')
+            return response
+
+        wrote = False
+        try:
+            wrote = manager.write_verify_correction(
+                'scene',
+                result['xy_correction'],
+                float(result.get('yaw_bias_rad', 0.0)),
+                float(result.get('residual_mm_mean', 0.0)),
+                int(result.get('point_count', n)),
+            )
+        except Exception as e:
+            self.get_logger().error(f'verify solve persist failed: {e}')
+            wrote = False
+
+        if not wrote:
+            response.success = False
+            response.message = (
+                'Korrektur berechnet, konnte aber nicht gespeichert werden — '
+                'bitte die Szenen-Extrinsik prüfen.'
+            )
+            return response
+
+        response.success = True
+        msg = result.get('message', 'Korrektur gespeichert.')
+        if response.point_count < 4:
+            msg += (' Hinweis: für eine zuverlässige Korrektur werden 4–6 '
+                    'verteilte Punkte empfohlen.')
+        response.message = msg
         return response
 
     def calibration_history_callback(self, request, response):

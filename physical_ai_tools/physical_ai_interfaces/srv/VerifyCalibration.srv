@@ -1,13 +1,34 @@
-# Post-solve "Jetzt prüfen" reprojection test. The student places a
-# marker at a known XY world position; the server reprojects that XY
-# back into image pixels using the freshly-solved calibration and
-# reports the residual.
-string camera
-float32 world_x
-float32 world_y
+# W5 ground-truth correction + orientation verify ("Genauigkeit prüfen").
+#
+# The student places a single tag36h11 at a KNOWN base-frame (x, y) — optionally
+# at a known yaw — and the server projects the detected tag with the current
+# calibration. Several such points are collected ("add_point") and then a 2D
+# similarity correction is fit + persisted ("solve"); "reset" clears the buffer.
+#
+#   command == "add_point": grab the current scene frame, detect exactly one
+#       tag, project its centre to base + read its yaw. Appends (truth, detected)
+#       and returns where the calibration put the tag (detected_x/y/yaw) so the
+#       student sees the live residual. Fails loud in German if the camera is not
+#       calibrated, no tag / multiple tags are visible.
+#   command == "solve": fit truth<-detected (Umeyama similarity) over the
+#       collected points; on success persist xy_correction + yaw_bias into
+#       scene_handeye.yaml and report residuals; on a mirror/handedness flip
+#       return success=False with a German message and persist nothing.
+#   command == "reset": clear the collected points.
+string command            # "add_point" | "solve" | "reset"
+float64 truth_x           # base-frame metres (add_point)
+float64 truth_y
+float64 truth_yaw_deg     # optional known tag yaw (degrees), used when has_yaw
+bool has_yaw
 ---
 bool success
-float32 predicted_pixel_x
-float32 predicted_pixel_y
-float32 residual_mm
-string message
+string message            # German
+float64 detected_x        # add_point: where the calibration projected the tag
+float64 detected_y
+float64 detected_yaw_deg
+bool has_detection
+uint32 point_count
+float64 residual_mm_mean  # solve
+float64 residual_mm_max
+float64 yaw_bias_deg
+bool mirror_detected

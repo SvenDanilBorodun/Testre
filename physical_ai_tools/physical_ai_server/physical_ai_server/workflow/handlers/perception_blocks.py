@@ -20,7 +20,9 @@ from __future__ import annotations
 
 import math
 import time
-from typing import Any
+from typing import Any, Optional
+
+import numpy as np
 
 from physical_ai_server.workflow.handlers import motion as _motion
 from physical_ai_server.workflow.handlers.motion import GraspSkip, WorkflowError
@@ -32,6 +34,20 @@ from physical_ai_server.workflow.handlers.motion import GraspSkip, WorkflowError
 # default so only gross errors (≈2× scale) trip it. env-forwarding-guard: this
 # var is forwarded in robotis_ai_setup/docker/docker-compose.yml.
 _TAG_EDGE_TOL_FRAC = max(0.0, _motion._safe_float('EDUBOTICS_TAG_EDGE_TOL_FRAC', 0.5))
+
+# Multi-frame yaw averaging for the grasped instance. Yaw error scales as
+# pixel_noise / tag_edge_pixels, so a single frame's corner noise mis-pinches
+# the wrist. We sample N live scene frames of the SAME tag, circular-mean the
+# per-frame tag_yaw_base, and gate on the mean resultant length R (≈1 = tight
+# agreement, low = scattered/untrustworthy → drop the yaw so the existing
+# skip-on-unreadable-yaw path handles it rather than blind-grasping).
+# env-forwarding-guard: both vars are forwarded in
+# robotis_ai_setup/docker/docker-compose.yml.
+_TAG_YAW_FRAMES = max(1, int(_motion._safe_float('EDUBOTICS_TAG_YAW_FRAMES', 7.0)))
+_TAG_YAW_MIN_RESULTANT = min(
+    1.0, max(0.0, _motion._safe_float('EDUBOTICS_TAG_YAW_MIN_RESULTANT', 0.9)))
+# Spacing between consecutive yaw-sampling frames (~30 ms, plan W3b).
+_TAG_YAW_FRAME_INTERVAL_S = 0.03
 
 
 # Audit fix #12: classroom palette accepted by the German UI. Defined
@@ -499,6 +515,44 @@ def count_unclaimed_visible(ctx, type_name) -> int:
     return len(_detect_named_unclaimed(ctx, type_name))
 
 
+def _apply_xy_correction(ctx, x: float, y: float) -> tuple[float, float]:
+    """Apply the optional ground-truth XY correction stored on ctx.
+
+    Another agent (W5 calibration verify) populates ``ctx.xy_correction`` with a
+    2x3 affine (numpy array) mapping detected base XY → corrected base XY, fit
+    from known-position tags. Consumed SAFELY with getattr so this code works
+    before/after that attribute exists (absent → identity, no correction)."""
+    M = getattr(ctx, 'xy_correction', None)
+    if M is None:
+        return (float(x), float(y))
+    try:
+        Marr = np.asarray(M, dtype=np.float64).reshape(2, 3)
+        v = Marr @ np.array([float(x), float(y), 1.0], dtype=np.float64)
+        cx, cy = float(v[0]), float(v[1])
+        if not (math.isfinite(cx) and math.isfinite(cy)):
+            return (float(x), float(y))
+        return (cx, cy)
+    except Exception:
+        # A malformed correction must never break grasping — fall back to raw.
+        return (float(x), float(y))
+
+
+def _apply_yaw_bias(ctx, yaw: Optional[float]) -> Optional[float]:
+    """Add the optional ground-truth yaw bias (radians) stored on ctx and
+    re-wrap. ``ctx.yaw_bias_rad`` is populated by the W5 calibration verify;
+    consumed SAFELY (absent / None → 0.0, no change)."""
+    if yaw is None:
+        return None
+    try:
+        yb = float(getattr(ctx, 'yaw_bias_rad', 0.0) or 0.0)
+    except (TypeError, ValueError):
+        yb = 0.0
+    if yb == 0.0:
+        return float(yaw)
+    from physical_ai_server.workflow.tag_pose import _wrap
+    return _wrap(float(yaw) + yb)
+
+
 def _attach_named_world(ctx, detections: list, recipe) -> list:
     """Attach ``world_xyz_m`` (grasp column x, y + grasp z) and ``tag_yaw`` to
     each named-object detection.
@@ -535,7 +589,9 @@ def _attach_named_world(ctx, detections: list, recipe) -> list:
         point = project_pixel_to_table(cx, cy, K, dist, T, tag_plane_z)
         if point is None:
             continue
-        d.world_xyz_m = (float(point[0]), float(point[1]), grasp_z)
+        # W5-apply: ground-truth XY correction (identity when unset).
+        wx, wy = _apply_xy_correction(ctx, float(point[0]), float(point[1]))
+        d.world_xyz_m = (wx, wy, grasp_z)
         yaw = None
         if getattr(d, 'corners_px', None) is not None:
             yaw = tag_yaw_base(d.corners_px, K, dist, T, tag_plane_z)
@@ -553,7 +609,10 @@ def _attach_named_world(ctx, detections: list, recipe) -> list:
                         'zu stark ab — Ausrichtung verworfen.'
                     )
                     yaw = None
-        d.extras['tag_yaw'] = yaw
+        # W5-apply: ground-truth yaw bias (no-op when unset). Single-frame here
+        # for see/count display; grasp_object re-samples the GRASPED instance
+        # over N frames (circular mean) before committing the wrist roll.
+        d.extras['tag_yaw'] = _apply_yaw_bias(ctx, yaw)
         d.extras['gripper_close_rad'] = float(recipe.gripper_close_rad)
         d.extras['object_type'] = recipe.type_name
     ctx.emit_detections(detections)
@@ -602,6 +661,79 @@ def _select_nearest_reachable(ctx, detections):
 
     candidates.sort(key=_key)
     return candidates[0]
+
+
+def _multiframe_tag_yaw(ctx, recipe, tag_id, fallback_yaw):
+    """Robust grasp yaw for ONE tag id: sample ``_TAG_YAW_FRAMES`` live scene
+    frames (~30 ms apart, object static pre-grasp), compute ``tag_yaw_base`` per
+    frame (same back-projection + edge gate as ``_attach_named_world``),
+    circular-mean them, and gate on the mean resultant length R.
+
+    Returns the circular-mean yaw (rad, with ``yaw_bias_rad`` applied) when
+    R ≥ ``_TAG_YAW_MIN_RESULTANT`` and ≥2 valid frames were read; otherwise
+    returns ``None`` so ``grasp_object`` SKIPS the instance (never blind-grasps).
+    Yaw error scales as pixel_noise / tag_edge_pixels, so averaging tightens the
+    wrist roll and R rejects an unstable / occluded tag.
+
+    Called only for the SINGLE instance being grasped (held under motion_lock by
+    the caller) — never for every detection — so the N detects are cheap. On any
+    setup failure (missing calibration / corners) falls back to ``fallback_yaw``
+    (the single-frame value already on the detection)."""
+    board_z = getattr(ctx, 'board_table_z', None)
+    if (ctx.scene_intrinsics is None or ctx.scene_extrinsics is None
+            or board_z is None or ctx.z_table is None or tag_id is None):
+        return fallback_yaw
+    if _TAG_YAW_FRAMES <= 1:
+        return fallback_yaw
+    from physical_ai_server.workflow.tag_pose import (
+        circular_mean_resultant,
+        tag_edge_length_base,
+        tag_yaw_base,
+    )
+    K = ctx.scene_intrinsics['K']
+    dist = ctx.scene_intrinsics['dist']
+    T = ctx.scene_extrinsics
+    tag_plane_z = float(board_z) + float(recipe.object_height_m)
+    cat = getattr(ctx, 'object_catalog', None)
+    expected_edge = float(getattr(cat, 'tag_size_m', 0.0) or 0.0)
+    yaws: list[float] = []
+    want = int(tag_id)
+    for i in range(_TAG_YAW_FRAMES):
+        if i > 0:
+            time.sleep(_TAG_YAW_FRAME_INTERVAL_S)
+        try:
+            bgr = _scene_frame(ctx)
+        except WorkflowError:
+            # A stale/absent frame mid-burst: stop sampling and decide on what
+            # we have (the resultant/count gate below catches too-few frames).
+            break
+        dets = ctx.perception.detect(
+            bgr, camera='scene', mode='apriltag', aruco_id=want)
+        d = next((x for x in dets if x.aruco_id == want), None)
+        if d is None or getattr(d, 'corners_px', None) is None:
+            continue
+        y = tag_yaw_base(d.corners_px, K, dist, T, tag_plane_z)
+        if y is None:
+            continue
+        # Same edge sanity gate as the single-frame path.
+        if expected_edge > 0.0 and _TAG_EDGE_TOL_FRAC > 0.0:
+            edge = tag_edge_length_base(d.corners_px, K, dist, T, tag_plane_z)
+            if edge is None or abs(edge - expected_edge) > _TAG_EDGE_TOL_FRAC * expected_edge:
+                continue
+        yaws.append(float(y))
+    if len(yaws) < 2:
+        return None
+    res = circular_mean_resultant(yaws)
+    if res is None:
+        return None
+    mean, R = res
+    if R < _TAG_YAW_MIN_RESULTANT:
+        ctx.log(
+            f'[WARNUNG] Tag {want}: Ausrichtung über {len(yaws)} Bilder zu '
+            f'unstabil (R={R:.2f}) — Ausrichtung verworfen.'
+        )
+        return None
+    return _apply_yaw_bias(ctx, mean)
 
 
 def grasp_object(ctx, args: dict[str, Any]) -> None:
@@ -658,7 +790,13 @@ def grasp_object(ctx, args: dict[str, Any]) -> None:
             )
         _motion._require_seeded_start_pose(ctx)
         x, y, z = target.world_xyz_m
-        tag_yaw = target.extras.get('tag_yaw')
+        # Refine the SELECTED target's yaw over N frames (circular mean + R gate)
+        # before committing the wrist roll — single-frame corner noise mis-pinches
+        # the jaw. Multi-sample only this one instance (object static pre-grasp),
+        # not every detection. R below threshold / <2 valid frames → yaw None →
+        # the skip-on-unreadable-yaw path below handles it (no blind grasp).
+        tag_yaw = _multiframe_tag_yaw(
+            ctx, recipe, target.aruco_id, target.extras.get('tag_yaw'))
         if tag_yaw is None:
             # Orientation couldn't be recovered (bad corners / failed the tag-edge
             # sanity gate). Do NOT commit a blind fixed-roll grasp — on an

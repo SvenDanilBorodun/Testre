@@ -119,9 +119,20 @@ function IntrinsicCalibStep({ camera }) {
         Intrinsische Kalibrierung — {cameraLabel}
       </h3>
       <p className="text-sm text-[var(--ink-3)] mb-4">
-        Halte die ChArUco-Tafel langsam aus verschiedenen Winkeln vor die Kamera.
-        Mindestens {framesRequired} verschiedene Ansichten werden benötigt.
+        Halte die ChArUco-Tafel langsam aus möglichst <strong>verschiedenen
+        Winkeln</strong> vor die Kamera. Es werden etwa <strong>{framesRequired}
+        Aufnahmen</strong> benötigt — je unterschiedlicher die Ansichten, desto
+        genauer.
       </p>
+      <ul className="text-sm text-[var(--ink-3)] mb-4 list-disc pl-5 space-y-1">
+        <li>Die Tafel aus <strong>verschiedenen Winkeln</strong> zeigen und
+        jeweils um <strong>bis zu ±45°</strong> kippen (nach links/rechts und
+        oben/unten).</li>
+        <li>Die Tafel auch in die <strong>Bildecken und an die Bildränder</strong>
+        bewegen, nicht nur in die Mitte.</li>
+        <li>Abstand variieren (nah und weiter weg) und die Tafel ruhig halten,
+        bevor du erfasst.</li>
+      </ul>
       <p className="text-sm text-[var(--ink-3)] mb-4 rounded-md bg-amber-50 border border-amber-200 px-3 py-2">
         <strong>Dieser Schritt ist erforderlich.</strong> Er misst die echte
         Brennweite deiner Kamera — ohne ihn wären alle berechneten Positionen

@@ -87,7 +87,11 @@ def _safe_int_env(name: str, default: int) -> int:
 
 
 CALIB_DIR = Path(os.environ.get('EDUBOTICS_CALIB_DIR', '/root/.cache/edubotics/calibration'))
-INTRINSIC_FRAMES_REQUIRED = 12
+# W4 (2026-06-24): raised 12 -> 20. SOTA camera-calibration practice is 20-30
+# well-spread views (varied tilt + board pushed into the image corners) so the
+# RATIONAL_MODEL's 8 distortion coefficients are well-conditioned for the wide
+# ~100-degree scene lens; 12 frames under-constrains the k4/k5/k6 terms.
+INTRINSIC_FRAMES_REQUIRED = 20
 # WS4 (2026-06-17): the SCENE extrinsic is one board-on-table capture. The
 # student still presses "Bild erfassen" ONCE; the buffer holds one (averaged)
 # sample, so this stays 1.
@@ -550,6 +554,18 @@ class CalibrationManager:
                     'erfassen.'
                 )
 
+            # W2 (2026-06-24): robustly drop per-frame outliers BEFORE the SVD
+            # rotation mean. The mean only attenuates zero-mean jitter; a single
+            # frame with a markedly higher reprojection error (a partial/blurred
+            # detection that still squeaked under the 1.5 px gate, or a transient
+            # bad PnP) would otherwise pull both the translation mean and the
+            # SO(3) chordal mean toward a biased pose. A robust MAD threshold
+            # (median + k·MAD) is insensitive to up to ~50% contamination; we
+            # always keep at least EXTRINSIC_BURST_MIN_PASS frames (or, if too
+            # few survive, the lowest-reproj ones) so a tight cluster with one
+            # outlier still produces an averaged sample.
+            samples = self._reject_reproj_outliers(samples, min_pass)
+
             R_avg = self._average_rotations([s[0] for s in samples])
             t_avg = np.mean(
                 np.stack([np.asarray(s[1], dtype=np.float64).reshape(3) for s in samples],
@@ -607,14 +623,76 @@ class CalibrationManager:
             )
         if object_points is None or len(object_points) < SCENE_EXTRINSIC_MIN_CORNERS:
             return None
-        ok, rvec, tvec = cv2.solvePnP(object_points, image_points, K, dist)
+        # W2 (2026-06-24): solve with SQPNP instead of the default ITERATIVE.
+        # SQPNP (Terzakis & Lourakis 2020, OpenCV >=4.7) is a GLOBAL-optimal,
+        # single-solution PnP that is well-conditioned on the near-planar
+        # ChArUco point set (ITERATIVE is a local Levenberg-Marquardt descent
+        # from a homography/DLT seed that can settle in a worse local minimum
+        # and, on a planar target, suffers the two-fold pose ambiguity). We then
+        # polish with solvePnPRefineLM (a few LM iterations seeded by the SQPNP
+        # result) to squeeze the last reprojection residual. Both reduce the
+        # SYSTEMATIC per-frame pose bias — something the later SO(3) burst
+        # averaging cannot do (averaging only attenuates zero-mean jitter).
+        # Fallback to ITERATIVE only if SQPNP raises (defensive — it needs >=3
+        # points and the board has many, so this should never fire).
+        try:
+            ok, rvec, tvec = cv2.solvePnP(
+                object_points, image_points, K, dist, flags=cv2.SOLVEPNP_SQPNP,
+            )
+        except cv2.error as e:
+            print(
+                f'[WARNUNG] SQPNP-Solver fehlgeschlagen ({e}); '
+                f'Rückfall auf ITERATIVE.',
+                file=sys.stderr, flush=True,
+            )
+            ok, rvec, tvec = cv2.solvePnP(
+                object_points, image_points, K, dist, flags=cv2.SOLVEPNP_ITERATIVE,
+            )
         if not ok:
             return None
+        # Polish the pose with a Levenberg-Marquardt refinement seeded by the
+        # SQPNP result (in-place on rvec/tvec). Best-effort: a refinement error
+        # leaves the already-valid SQPNP pose untouched.
+        try:
+            rvec, tvec = cv2.solvePnPRefineLM(
+                object_points, image_points, K, dist, rvec, tvec,
+            )
+        except cv2.error:
+            pass
         reproj = self._reprojection_error_px(object_points, image_points, rvec, tvec, K, dist)
         if not math.isfinite(reproj) or reproj > SCENE_EXTRINSIC_MAX_REPROJ_PX:
             return None
         R_t2c, _ = cv2.Rodrigues(rvec)
         return R_t2c, tvec.reshape(3, 1), float(reproj)
+
+    @staticmethod
+    def _reject_reproj_outliers(samples: list, min_keep: int, k: float = 3.0) -> list:
+        """Drop burst frames whose per-frame reprojection error is a robust
+        outlier (> median + k·MAD), keeping at least ``min_keep`` frames.
+
+        Each sample is ``(R_3x3, t_3x1, reproj_px)``. The MAD (median absolute
+        deviation, scaled by 1.4826 so it estimates the Gaussian σ) is used
+        instead of the standard deviation because it is not itself dragged by
+        the very outliers it is meant to detect. When fewer than ``min_keep``
+        frames survive the threshold we fall back to the ``min_keep``
+        lowest-reproj frames so a noisy burst with several borderline frames
+        still yields the best-available averaged sample (never fewer than the
+        min-pass count the caller already validated). With <=2 input frames
+        there is nothing robust to estimate, so the set passes through."""
+        if len(samples) <= 2:
+            return samples
+        errs = np.asarray([float(s[2]) for s in samples], dtype=np.float64)
+        med = float(np.median(errs))
+        mad = float(np.median(np.abs(errs - med)))
+        # 1.4826: MAD→σ consistency factor for a normal distribution.
+        thresh = med + k * 1.4826 * mad
+        kept = [s for s, e in zip(samples, errs) if e <= thresh]
+        if len(kept) >= min_keep:
+            return kept
+        # Too few survived (or MAD==0 edge cases): keep the lowest-reproj frames.
+        order = np.argsort(errs)
+        n = max(min_keep, 1)
+        return [samples[i] for i in order[:n]]
 
     @staticmethod
     def _average_rotations(Rs: list[np.ndarray]) -> np.ndarray:
@@ -664,9 +742,18 @@ class CalibrationManager:
             need = INTRINSIC_FRAMES_REQUIRED - len(buf.all_corners) if buf else INTRINSIC_FRAMES_REQUIRED
             return False, 0.0, 0.0, f'Es fehlen noch {need} Bilder.'
         try:
+            # W4 (2026-06-24): CALIB_RATIONAL_MODEL fits the 8-term rational
+            # radial distortion (k1,k2,p1,p2,k3,k4,k5,k6) instead of the default
+            # 5-term plane (k1,k2,p1,p2,k3). The scene cam is a ~100-degree lens
+            # whose strong barrel distortion the 5-term polynomial cannot model
+            # to the edges — the extra k4..k6 denominator terms capture it, and
+            # all downstream readers feed ``dist`` straight to cv2
+            # (undistortPoints / projectPoints / solvePnP) which accept the
+            # variable-length vector natively, so the 8-coeff dist is persisted
+            # as-is with no slicing/reshaping.
             ret, K, dist, _, _, _, _, _ = cv2.aruco.calibrateCameraCharucoExtended(
                 buf.all_corners, buf.all_ids, self._board, buf.image_size,
-                None, None,
+                None, None, flags=cv2.CALIB_RATIONAL_MODEL,
             )
         except cv2.error as e:
             return False, 0.0, 0.0, f'OpenCV-Solver-Fehler: {e}'
@@ -1105,3 +1192,268 @@ class CalibrationManager:
             return True
         except Exception:
             return False
+
+    # ------------------------------------------------------------------
+    # W5 — ground-truth XY correction + yaw bias (P3b accuracy verify)
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _umeyama_similarity_2d(
+        src: np.ndarray, dst: np.ndarray
+    ) -> tuple[np.ndarray, float] | None:
+        """Closed-form least-squares 2D SIMILARITY (rotation + uniform scale +
+        translation) mapping ``src`` -> ``dst`` via Umeyama (1991).
+
+        ``src`` / ``dst`` are Nx2 (N>=2). Returns ``(M_2x3, det_R)`` where the
+        2x3 affine ``M = [sR | t]`` applies as ``dst ≈ (M[:, :2] @ p) + M[:, 2]``
+        and ``det_R`` is the determinant of the (pre-scale) rotation block sign
+        proxy — actually the determinant of the recovered linear block scaled
+        by ``1/s**2`` so a reflection shows as a negative determinant. We force
+        a PROPER rotation (no reflection) in the returned ``M`` regardless, and
+        report the handedness via the sign so the caller can REJECT a mirror
+        rather than silently flatten it. Returns ``None`` on a degenerate input
+        (all source points coincident → zero variance).
+
+        Umeyama is preferred over ``cv2.estimateAffinePartial2D`` because it is
+        a deterministic closed form (no RANSAC randomness) and exposes the
+        reflection cleanly through the diagonal correction term ``S``."""
+        src = np.asarray(src, dtype=np.float64).reshape(-1, 2)
+        dst = np.asarray(dst, dtype=np.float64).reshape(-1, 2)
+        n = src.shape[0]
+        mu_src = src.mean(axis=0)
+        mu_dst = dst.mean(axis=0)
+        src_c = src - mu_src
+        dst_c = dst - mu_dst
+        var_src = float(np.mean(np.sum(src_c ** 2, axis=1)))
+        if not math.isfinite(var_src) or var_src < 1e-12:
+            return None
+        # Covariance dst<-src (2x2).
+        cov = (dst_c.T @ src_c) / n
+        U, D, Vt = np.linalg.svd(cov)
+        # S corrects the reflection so U·S·Vt is a PROPER rotation.
+        S = np.eye(2, dtype=np.float64)
+        det_uv = float(np.linalg.det(U) * np.linalg.det(Vt))
+        # det_uv < 0 means the optimal alignment is a reflection (mirror); the
+        # caller decides what to do. We still build a proper rotation here.
+        if det_uv < 0:
+            S[-1, -1] = -1.0
+        R = U @ S @ Vt
+        scale = float(np.trace(np.diag(D) @ S) / var_src)
+        sR = scale * R
+        t = mu_dst - sR @ mu_src
+        M = np.zeros((2, 3), dtype=np.float64)
+        M[:, :2] = sR
+        M[:, 2] = t
+        # det_R proxy: sign carries the handedness (negative => mirror needed).
+        det_R = det_uv
+        return M, det_R
+
+    @staticmethod
+    def apply_xy_correction(xy, M) -> tuple[float, float]:
+        """Apply a 2x3 affine correction ``M`` to a base-frame ``(x, y)`` point.
+
+        ``corrected = M[:, :2] @ [x, y] + M[:, 2]``. Provided here (the owner of
+        the correction math) so the server/loader applies the SAME convention
+        that :func:`fit_xy_correction` solved for. ``M`` may be a list or
+        ndarray (2x3)."""
+        Mn = np.asarray(M, dtype=np.float64).reshape(2, 3)
+        p = np.asarray(xy, dtype=np.float64).reshape(2)
+        out = Mn[:, :2] @ p + Mn[:, 2]
+        return float(out[0]), float(out[1])
+
+    @staticmethod
+    def _circular_mean(angles: np.ndarray) -> float:
+        """Circular mean of angles (rad) = ``atan2(Σsin, Σcos)``. Robust to the
+        ±π wrap that a plain arithmetic mean of yaw differences would mishandle."""
+        a = np.asarray(angles, dtype=np.float64).reshape(-1)
+        return float(math.atan2(float(np.sum(np.sin(a))), float(np.sum(np.cos(a)))))
+
+    def fit_xy_correction(
+        self,
+        truth_xy,
+        detected_xy,
+        truth_yaws=None,
+        detected_yaws=None,
+    ) -> dict:
+        """Fit a 2D similarity correction ``detected -> truth`` (base-frame
+        metres) and the optional yaw bias.
+
+        Args:
+            truth_xy, detected_xy: Nx2 base-frame metres, N>=2 (the KNOWN placed
+                positions vs the positions the current calibration detected).
+            truth_yaws, detected_yaws: optional lists of yaw (rad). When >=1
+                paired value is given, ``yaw_bias_rad`` = circular-mean(truth −
+                detected); else 0.0.
+
+        Returns a dict:
+            ``{ok, message(German), xy_correction(2x3 list), yaw_bias_rad,
+               residual_mm_mean, residual_mm_max, mirror_detected, point_count}``
+
+        A mirror / handedness flip (det of the 2x2 linear block < 0) is a real
+        axis/orientation error that must NOT be silently "corrected" by folding
+        a reflection into the affine — it would happily fit but every grasp's
+        joint5 handedness would stay wrong. So we detect it, return ``ok=False,
+        mirror_detected=True`` with a German message, and persist NOTHING."""
+        truth = np.asarray(truth_xy, dtype=np.float64).reshape(-1, 2)
+        detected = np.asarray(detected_xy, dtype=np.float64).reshape(-1, 2)
+        n = truth.shape[0]
+        if detected.shape[0] != n:
+            return {
+                'ok': False,
+                'message': 'Anzahl der Soll- und Ist-Punkte stimmt nicht überein.',
+                'xy_correction': None, 'yaw_bias_rad': 0.0,
+                'residual_mm_mean': 0.0, 'residual_mm_max': 0.0,
+                'mirror_detected': False, 'point_count': int(n),
+            }
+        if n < 2:
+            return {
+                'ok': False,
+                'message': ('Mindestens zwei Referenzpunkte werden benötigt — '
+                            'bitte mehr Punkte erfassen.'),
+                'xy_correction': None, 'yaw_bias_rad': 0.0,
+                'residual_mm_mean': 0.0, 'residual_mm_max': 0.0,
+                'mirror_detected': False, 'point_count': int(n),
+            }
+        fit = self._umeyama_similarity_2d(detected, truth)
+        if fit is None:
+            return {
+                'ok': False,
+                'message': ('Die Referenzpunkte sind entartet (alle gleich) — '
+                            'bitte über die Arbeitsfläche verteilt erfassen.'),
+                'xy_correction': None, 'yaw_bias_rad': 0.0,
+                'residual_mm_mean': 0.0, 'residual_mm_max': 0.0,
+                'mirror_detected': False, 'point_count': int(n),
+            }
+        M, det_R = fit
+        # Mirror / handedness flip: the optimal alignment needed a reflection.
+        # det of the recovered 2x2 linear block (= s**2 * det(R)) is negative
+        # exactly when the underlying rotation is a reflection.
+        det_linear = float(np.linalg.det(M[:, :2]))
+        if det_R < 0 or det_linear < 0:
+            return {
+                'ok': False,
+                'message': ('Achsen-/Spiegelungsfehler erkannt: die erkannten '
+                            'Positionen sind gegenüber den Soll-Positionen '
+                            'gespiegelt. Bitte die Kamera-Ausrichtung '
+                            '(Extrinsik) prüfen und die Kalibrierung '
+                            'wiederholen.'),
+                'xy_correction': None, 'yaw_bias_rad': 0.0,
+                'residual_mm_mean': 0.0, 'residual_mm_max': 0.0,
+                'mirror_detected': True, 'point_count': int(n),
+            }
+        # Residuals: apply the fit to the detected points, compare vs truth (mm).
+        corrected = (M[:, :2] @ detected.T).T + M[:, 2]
+        resid_m = np.linalg.norm(corrected - truth, axis=1)
+        residual_mm_mean = float(np.mean(resid_m) * 1000.0)
+        residual_mm_max = float(np.max(resid_m) * 1000.0)
+        # Yaw bias = circular-mean(truth - detected) over the paired yaws given.
+        yaw_bias_rad = 0.0
+        if truth_yaws is not None and detected_yaws is not None:
+            ty = np.asarray(truth_yaws, dtype=np.float64).reshape(-1)
+            dy = np.asarray(detected_yaws, dtype=np.float64).reshape(-1)
+            m = min(ty.shape[0], dy.shape[0])
+            if m >= 1:
+                yaw_bias_rad = self._circular_mean(ty[:m] - dy[:m])
+        return {
+            'ok': True,
+            'message': (f'Korrektur berechnet aus {n} Punkten '
+                        f'(Restfehler Ø {residual_mm_mean:.1f} mm, '
+                        f'max {residual_mm_max:.1f} mm).'),
+            'xy_correction': M.tolist(),
+            'yaw_bias_rad': float(yaw_bias_rad),
+            'residual_mm_mean': residual_mm_mean,
+            'residual_mm_max': residual_mm_max,
+            'mirror_detected': False,
+            'point_count': int(n),
+        }
+
+    def write_verify_correction(
+        self,
+        camera: str,
+        xy_correction,
+        yaw_bias_rad: float,
+        residual_mm_mean: float,
+        point_count: int,
+    ) -> bool:
+        """Add the ground-truth correction keys to the EXISTING scene extrinsic
+        YAML, preserving every other key byte-for-byte.
+
+        Adds: ``xy_correction`` (2x3 opencv-matrix), ``yaw_bias_rad``,
+        ``verify_residual_mm``, ``verify_points``. Mirrors the read-modify-write
+        pattern of :func:`_write_table_plane` — read the existing transform /
+        table / board keys, then rewrite the whole file (FileStorage has no
+        in-place append) carrying them forward unchanged plus the new keys."""
+        path = self._handeye_path(camera)
+        if not path.exists():
+            return False
+        try:
+            fs = cv2.FileStorage(str(path), cv2.FILE_STORAGE_READ)
+            transform = fs.getNode('transform').mat()
+            method_node = fs.getNode('method')
+            method = method_node.string() if not method_node.empty() else 'BOARD_ON_TABLE'
+            # Preserve the touch-off / board keys when present.
+            def _real(name, default):
+                node = fs.getNode(name)
+                return float(node.real()) if not node.empty() else default
+            z_table = _real('z_table', None)
+            table_plane = fs.getNode('table_plane').mat()
+            board_table_z = _real('board_table_z', BOARD_TABLE_Z_M)
+            board_x = _real('board_origin_x', BOARD_ORIGIN_X_M)
+            board_y = _real('board_origin_y', BOARD_ORIGIN_Y_M)
+            fs.release()
+            if transform is None:
+                return False
+        except Exception:
+            return False
+        try:
+            M = np.asarray(xy_correction, dtype=np.float64).reshape(2, 3)
+        except Exception:
+            return False
+        try:
+            fs = cv2.FileStorage(str(path), cv2.FILE_STORAGE_WRITE)
+            fs.write('transform', transform)
+            fs.write('method', method)
+            if z_table is not None:
+                fs.write('z_table', float(z_table))
+            if table_plane is not None:
+                fs.write('table_plane', np.asarray(table_plane, dtype=np.float64))
+            fs.write('board_table_z', float(board_table_z))
+            fs.write('board_origin_x', float(board_x))
+            fs.write('board_origin_y', float(board_y))
+            # New ground-truth correction keys.
+            fs.write('xy_correction', M)
+            fs.write('yaw_bias_rad', float(yaw_bias_rad))
+            fs.write('verify_residual_mm', float(residual_mm_mean))
+            fs.write('verify_points', int(point_count))
+            fs.write('captured_at', time.strftime('%Y-%m-%dT%H:%M:%S'))
+            fs.release()
+            return True
+        except Exception:
+            return False
+
+    def read_verify_correction(self, camera: str = 'scene') -> dict | None:
+        """Read the ground-truth correction from the scene extrinsic YAML.
+
+        Returns ``{'xy_correction': np.ndarray(2x3), 'yaw_bias_rad': float}`` or
+        ``None`` when the keys are absent (backward-safe: an old YAML without a
+        verify step → ``None`` → the caller applies no correction / identity)."""
+        path = self._handeye_path(camera)
+        if not path.exists():
+            return None
+        try:
+            fs = cv2.FileStorage(str(path), cv2.FILE_STORAGE_READ)
+            node = fs.getNode('xy_correction')
+            if node.empty():
+                fs.release()
+                return None
+            M = node.mat()
+            yb_node = fs.getNode('yaw_bias_rad')
+            yaw_bias_rad = float(yb_node.real()) if not yb_node.empty() else 0.0
+            fs.release()
+            if M is None:
+                return None
+            return {
+                'xy_correction': np.asarray(M, dtype=np.float64).reshape(2, 3),
+                'yaw_bias_rad': yaw_bias_rad,
+            }
+        except Exception:
+            return None

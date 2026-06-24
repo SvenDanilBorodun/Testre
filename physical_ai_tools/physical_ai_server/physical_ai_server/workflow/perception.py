@@ -444,6 +444,44 @@ class Perception:
         except Exception:
             self._apriltag_detector = None
 
+    # Sub-pixel corner refinement criteria/window for the AprilTag corners.
+    _SUBPIX_CRITERIA = (
+        cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.01,
+    )
+    _SUBPIX_WIN = (5, 5)
+    _SUBPIX_ZERO_ZONE = (-1, -1)
+
+    @staticmethod
+    def _refine_corners_subpix(gray: np.ndarray, corners_f: np.ndarray) -> np.ndarray:
+        """Polish the float tag corners with ``cv2.cornerSubPix`` on the gray
+        image. Returns the refined (4, 2) float64 corners in the SAME order;
+        falls back to the raw corners on any failure or when the search window
+        can't fit (tiny / image-edge tags)."""
+        try:
+            pts = np.asarray(corners_f, dtype=np.float64).reshape(-1, 2)
+            if pts.shape[0] < 1 or not np.all(np.isfinite(pts)):
+                return np.asarray(corners_f, dtype=np.float64)
+            h, w = gray.shape[:2]
+            win_x, win_y = Perception._SUBPIX_WIN
+            # cornerSubPix reads a (2*win+1) neighbourhood around each point; if
+            # any corner sits within that margin of the image border the call
+            # raises — bail to the raw corners rather than crash detection.
+            margin_x, margin_y = win_x + 1, win_y + 1
+            if (pts[:, 0].min() < margin_x or pts[:, 0].max() > w - 1 - margin_x
+                    or pts[:, 1].min() < margin_y or pts[:, 1].max() > h - 1 - margin_y):
+                return pts
+            corners32 = pts.astype(np.float32).reshape(-1, 1, 2)
+            refined = cv2.cornerSubPix(
+                gray, corners32, Perception._SUBPIX_WIN,
+                Perception._SUBPIX_ZERO_ZONE, Perception._SUBPIX_CRITERIA,
+            )
+            out = np.asarray(refined, dtype=np.float64).reshape(-1, 2)
+            if out.shape != pts.shape or not np.all(np.isfinite(out)):
+                return pts
+            return out
+        except Exception:
+            return np.asarray(corners_f, dtype=np.float64)
+
     def _detect_apriltag(self, bgr: np.ndarray, aruco_id: int | None) -> list[Detection]:
         if self._apriltag_detector is None:
             return []
@@ -462,6 +500,16 @@ class Perception:
             # downstream tag-pose solvePnP; a separate int-cast copy drives the
             # bbox so the existing overlay/bbox path is byte-unchanged.
             corners_f = np.asarray(r.corners, dtype=np.float64)
+            # Sub-pixel corner polish. pupil already runs refine_edges=True, but
+            # a cv2.cornerSubPix pass on the gray image squeezes the corners to
+            # the local intensity-gradient saddle — yaw error scales as
+            # pixel_noise / tag_edge_pixels, so a fraction-of-a-pixel corner
+            # improvement directly tightens the recovered wrist roll. cornerSubPix
+            # PRESERVES the input point order (it refines each point in place), so
+            # pupil's CCW winding is kept. Guard tags too small / against the image
+            # edge where the (5,5) search window can't fit — fall back to the raw
+            # detector corners on any failure.
+            corners_f = self._refine_corners_subpix(gray, corners_f)
             corners_i = corners_f.astype(int)
             xs, ys = corners_i[:, 0], corners_i[:, 1]
             x, y = int(xs.min()), int(ys.min())

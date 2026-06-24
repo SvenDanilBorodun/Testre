@@ -103,6 +103,80 @@ def test_burst_too_few_passes_fails(cm, monkeypatch):
     assert len(mgr._handeye_buffers['scene'].R_target2cam) == 0
 
 
+# ── W2: outlier reject before the SVD mean ──────────────────────────────────
+def test_reject_reproj_outliers_drops_high_error_frame(cm):
+    R = _rot('z', 0.1)
+    t = np.array([0, 0, 0.4]).reshape(3, 1)
+    # 4 tight frames (low reproj) + 1 gross outlier (reproj 50 px).
+    samples = [(R, t, 0.4), (R, t, 0.5), (R, t, 0.45), (R, t, 0.5), (R, t, 50.0)]
+    kept = cm.CalibrationManager._reject_reproj_outliers(samples, min_keep=2)
+    errs = sorted(s[2] for s in kept)
+    assert 50.0 not in errs            # the outlier is dropped
+    assert len(kept) == 4
+
+
+def test_reject_reproj_outliers_keeps_min_when_all_spread(cm):
+    R = _rot('z', 0.1)
+    t = np.array([0, 0, 0.4]).reshape(3, 1)
+    # Widely spread errors so the MAD threshold rejects most; min_keep floors it
+    # to the lowest-reproj frames.
+    samples = [(R, t, e) for e in (0.5, 5.0, 10.0, 20.0)]
+    kept = cm.CalibrationManager._reject_reproj_outliers(samples, min_keep=2)
+    assert len(kept) >= 2
+    assert min(s[2] for s in kept) == 0.5   # the best frame is always kept
+
+
+def test_reject_reproj_outliers_small_set_passthrough(cm):
+    R = _rot('z', 0.1)
+    t = np.array([0, 0, 0.4]).reshape(3, 1)
+    samples = [(R, t, 0.5), (R, t, 99.0)]   # <=2 -> nothing robust to estimate
+    kept = cm.CalibrationManager._reject_reproj_outliers(samples, min_keep=1)
+    assert len(kept) == 2
+
+
+def test_board_pose_uses_sqpnp_flag(cm, monkeypatch):
+    """_board_pose_from_frame must call cv2.solvePnP with SOLVEPNP_SQPNP and
+    then polish with solvePnPRefineLM (W2)."""
+    import cv2
+    mgr = cm.CalibrationManager()
+    K = np.array([[600.0, 0, 320.0], [0, 600.0, 240.0], [0, 0, 1.0]])
+    dist = np.zeros((5, 1))
+    # Stub the detection so we feed solvePnP a known many-point set.
+    obj = np.array([[0, 0, 0], [0.03, 0, 0], [0.03, 0.03, 0],
+                    [0, 0.03, 0], [0.06, 0, 0], [0.06, 0.03, 0]], dtype=np.float64)
+    img = np.array([[300, 220], [330, 220], [330, 250],
+                    [300, 250], [360, 220], [360, 250]], dtype=np.float64)
+    monkeypatch.setattr(mgr, '_detect_charuco', lambda gray: (img.reshape(-1, 1, 2), None))
+
+    class _StubBoard:
+        def matchImagePoints(self, c, i):
+            return obj.reshape(-1, 1, 3), img.reshape(-1, 1, 2)
+
+    monkeypatch.setattr(mgr, '_board', _StubBoard())
+
+    seen = {'flags': None, 'refine': 0}
+    real_solvepnp = cv2.solvePnP
+
+    def spy_solvepnp(o, p, k, d, *a, **kw):
+        seen['flags'] = kw.get('flags')
+        return real_solvepnp(o, p, k, d, *a, **kw)
+
+    real_refine = cv2.solvePnPRefineLM
+
+    def spy_refine(*a, **kw):
+        seen['refine'] += 1
+        return real_refine(*a, **kw)
+
+    monkeypatch.setattr(cv2, 'solvePnP', spy_solvepnp)
+    monkeypatch.setattr(cv2, 'solvePnPRefineLM', spy_refine)
+
+    frame = np.zeros((480, 640, 3), dtype=np.uint8)
+    res = mgr._board_pose_from_frame(frame, K, dist)
+    assert res is not None
+    assert seen['flags'] == cv2.SOLVEPNP_SQPNP
+    assert seen['refine'] == 1
+
+
 def test_explicit_bgr_is_single_capture_no_burst(cm, monkeypatch):
     mgr = _setup_extrinsic(cm, monkeypatch, burst=8, min_pass=4)
     calls = {'n': 0}

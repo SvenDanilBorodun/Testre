@@ -354,6 +354,130 @@ def test_attach_named_world_edge_gate_keeps_orientation_when_size_matches():
     assert out[0].extras['tag_yaw'] is not None
 
 
+# ── W5: ground-truth XY correction + yaw bias ────────────────────────────────
+def test_xy_correction_applied_to_world_xy():
+    # A pure-translation affine (+0.05 in x, -0.03 in y) shifts the recovered
+    # world XY by exactly that; identity (no attr) leaves it unchanged.
+    det = _make_detection(20, (0.20, 0.0), 0.0, 0.024, _overhead_T(), 0.040)
+    base = pb._detect_named(_Ctx([det]), 'banane')[0]
+    bx, by, _bz = base.world_xyz_m
+
+    ctx = _Ctx([_make_detection(20, (0.20, 0.0), 0.0, 0.024, _overhead_T(), 0.040)])
+    ctx.xy_correction = np.array([[1.0, 0.0, 0.05], [0.0, 1.0, -0.03]], dtype=np.float64)
+    out = pb._detect_named(ctx, 'banane')[0]
+    assert out.world_xyz_m[0] == pytest.approx(bx + 0.05, abs=1e-9)
+    assert out.world_xyz_m[1] == pytest.approx(by - 0.03, abs=1e-9)
+    # z unchanged by the XY correction
+    assert out.world_xyz_m[2] == pytest.approx(_bz, abs=1e-9)
+
+
+def test_xy_correction_with_rotation_scale():
+    # A 2x2 linear part (90° rot) maps detected (x,y) -> (-y, x); verify the
+    # full affine is applied as M @ [x,y,1].
+    det = _make_detection(20, (0.20, 0.0), 0.0, 0.024, _overhead_T(), 0.040)
+    base = pb._detect_named(_Ctx([det]), 'banane')[0]
+    bx, by, _bz = base.world_xyz_m
+    ctx = _Ctx([_make_detection(20, (0.20, 0.0), 0.0, 0.024, _overhead_T(), 0.040)])
+    ctx.xy_correction = np.array([[0.0, -1.0, 0.0], [1.0, 0.0, 0.0]], dtype=np.float64)
+    out = pb._detect_named(ctx, 'banane')[0]
+    assert out.world_xyz_m[0] == pytest.approx(-by, abs=1e-9)
+    assert out.world_xyz_m[1] == pytest.approx(bx, abs=1e-9)
+
+
+def test_malformed_xy_correction_falls_back_to_raw():
+    det = _make_detection(20, (0.20, 0.0), 0.0, 0.024, _overhead_T(), 0.040)
+    base = pb._detect_named(_Ctx([det]), 'banane')[0]
+    bx, by, _bz = base.world_xyz_m
+    ctx = _Ctx([_make_detection(20, (0.20, 0.0), 0.0, 0.024, _overhead_T(), 0.040)])
+    ctx.xy_correction = np.array([1.0, 2.0])  # wrong shape -> ignored
+    out = pb._detect_named(ctx, 'banane')[0]
+    assert out.world_xyz_m[0] == pytest.approx(bx, abs=1e-9)
+    assert out.world_xyz_m[1] == pytest.approx(by, abs=1e-9)
+
+
+def test_yaw_bias_added_to_tag_yaw():
+    det = _make_detection(20, (0.20, 0.0), 0.4, 0.024, _overhead_T(), 0.040)
+    base_yaw = pb._detect_named(_Ctx([det]), 'banane')[0].extras['tag_yaw']
+    ctx = _Ctx([_make_detection(20, (0.20, 0.0), 0.4, 0.024, _overhead_T(), 0.040)])
+    ctx.yaw_bias_rad = 0.10
+    biased = pb._detect_named(ctx, 'banane')[0].extras['tag_yaw']
+    d = (biased - base_yaw + math.pi) % (2 * math.pi) - math.pi
+    assert abs(d - 0.10) < 1e-6
+
+
+def test_yaw_bias_wraps():
+    # A near-π yaw plus a positive bias must re-wrap into (-π, π].
+    det = _make_detection(20, (0.20, 0.0), math.pi - 0.05, 0.024, _overhead_T(), 0.040)
+    ctx = _Ctx([det])
+    ctx.yaw_bias_rad = 0.2
+    biased = pb._detect_named(ctx, 'banane')[0].extras['tag_yaw']
+    assert -math.pi < biased <= math.pi
+
+
+# ── W3b: multi-frame yaw resultant gate at grasp time ────────────────────────
+class _NoisyYawPerception:
+    """Stub that returns the SAME tag id but at a per-call ROTATED yaw, so the
+    multi-frame circular mean sees a low resultant length (scattered/untrustworthy
+    orientation) and grasp_object must SKIP rather than blind-grasp. Each call
+    re-synthesises the corners at one of a wide spread of yaws."""
+
+    def __init__(self, tag_id, P, tag_size, T, object_height, yaw_sequence):
+        self._tag_id = tag_id
+        self._P = P
+        self._tag_size = tag_size
+        self._T = T
+        self._object_height = object_height
+        self._yaws = list(yaw_sequence)
+        self._calls = 0
+
+    def apriltag_available(self):
+        return True
+
+    def detect(self, bgr, camera, mode, color=None, coco_class=None, aruco_id=None):
+        if mode != 'apriltag':
+            return []
+        yaw = self._yaws[self._calls % len(self._yaws)]
+        self._calls += 1
+        d = _make_detection(
+            self._tag_id, self._P, yaw, self._tag_size, self._T, self._object_height)
+        out = [d]
+        if aruco_id is not None:
+            out = [x for x in out if x.aruco_id == aruco_id]
+        return out
+
+
+def test_grasp_object_skips_when_multiframe_yaw_resultant_too_low(monkeypatch):
+    # Force a tight frame budget and a high resultant threshold, then feed a tag
+    # whose recovered yaw scatters widely across frames -> R below threshold ->
+    # skip (never blind-grasp).
+    monkeypatch.setattr(pb, '_TAG_YAW_FRAMES', 6)
+    monkeypatch.setattr(pb, '_TAG_YAW_MIN_RESULTANT', 0.99)
+    monkeypatch.setattr(pb, '_TAG_YAW_FRAME_INTERVAL_S', 0.0)
+    ctx = _Ctx([_make_detection(20, (0.18, 0.0), 0.0, 0.024, _overhead_T(), 0.040)])
+    # Wide yaw spread per frame -> the unit vectors largely cancel -> low R.
+    ctx.perception = _NoisyYawPerception(
+        20, (0.18, 0.0), 0.024, _overhead_T(), 0.040,
+        yaw_sequence=[-1.2, 1.3, -0.6, 1.0, -1.4, 0.8],
+    )
+    with pytest.raises(GraspSkip, match='Ausrichtung'):
+        pb.grasp_object(ctx, {'object_type': 'banane'})
+    assert 20 in ctx.skipped_tags
+    assert 20 not in ctx.claimed_tags
+    assert not ctx.published
+
+
+def test_grasp_object_succeeds_when_multiframe_yaw_stable(monkeypatch):
+    # A perfectly stable tag (the default stub returns identical detections each
+    # call) -> R == 1 -> the multi-frame yaw passes and the grasp completes.
+    monkeypatch.setattr(pb, '_TAG_YAW_FRAMES', 5)
+    monkeypatch.setattr(pb, '_TAG_YAW_MIN_RESULTANT', 0.9)
+    monkeypatch.setattr(pb, '_TAG_YAW_FRAME_INTERVAL_S', 0.0)
+    ctx = _Ctx([_make_detection(20, (0.18, 0.0), 0.3, 0.024, _overhead_T(), 0.040)])
+    pb.grasp_object(ctx, {'object_type': 'banane'})
+    assert ctx.published
+    assert 20 in ctx.claimed_tags
+
+
 def test_grasp_object_unknown_type_raises_german():
     ctx = _Ctx([])
     with pytest.raises(WorkflowError, match='Unbekanntes Objekt'):

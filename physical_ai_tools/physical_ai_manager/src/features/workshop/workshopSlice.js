@@ -19,7 +19,10 @@ const initialState = {
   calibState: 'idle',
   currentStep: 'scene_intrinsic',
   framesCaptured: 0,
-  framesRequired: 12,
+  // Pre-capture placeholder; the backend overwrites it with the live
+  // frames_required on every capture (20 since the rational-distortion /
+  // wide-lens intrinsic upgrade, 2026-06-24 W4).
+  framesRequired: 20,
   lastViewRms: null,
   methodDisagreement: null,
   calibError: null,
@@ -30,6 +33,17 @@ const initialState = {
   // Touch-off table measurement (optional accuracy step, recommended).
   hasTableTouch: false,
   hasColorProfile: false,
+  // W5 (2026-06-24): after the touch-off completes, route the student into the
+  // OPTIONAL „Genauigkeit prüfen" step before the editor opens. `pendingVerify`
+  // holds the editor closed only during that just-finished wizard session; the
+  // student clears it with „Fertig" or „Überspringen". It is NOT part of the
+  // `calibrated` gate — on a normal page reload it defaults false, so a
+  // calibrated rig opens straight to the editor and verify never blocks use.
+  pendingVerify: false,
+  // Last accuracy-verify solve result (residuals / yaw bias / mirror flag),
+  // shown as a quality readout. {residual_mm_mean, residual_mm_max,
+  // yaw_bias_deg, mirror_detected, point_count, message}.
+  accuracyResult: null,
   // True between „Kalibrierung neu starten" and the moment the student finishes
   // re-running the geometry steps. Forces the wizard to stay open even though
   // valid YAMLs still exist on disk — without it the wizard's mount-time
@@ -148,6 +162,14 @@ const workshopSlice = createSlice({
       if (state.hasIntrinsicScene && state.hasHandeyeScene && state.hasTableTouch) {
         state.recalibrating = false;
       }
+      // W5: completing the touch-off routes the student into the OPTIONAL
+      // accuracy-verify step before the editor opens (gated by pendingVerify,
+      // which is not part of `calibrated`). The student finishes or skips it.
+      if (step === 'table_touch') {
+        state.pendingVerify = true;
+        state.currentStep = 'accuracy_verify';
+        state.accuracyResult = null;
+      }
     },
     setCalibrationStatus: (state, action) => {
       // Hydrate per-step badges from /calibration/status so the wizard
@@ -186,26 +208,32 @@ const workshopSlice = createSlice({
       // edubotics_calib` (separate operator path; intentional, since
       // we never want to delete calibration without explicit intent).
       // WS4: keep the (vestigial) gripper flags satisfied; only the scene
-      // artefacts gate the editor now. Reset to the first scene step.
+      // artefacts gate the editor now.
+      // 2026-06-24 (W1, FULL scope): the force-recalibration release made
+      // intrinsics MANDATORY on every restart — the backend reports all three
+      // scene flags false until the student re-runs the whole flow this boot.
+      // So a manual „Kalibrierung neu starten" must also redo intrinsics:
+      // reset hasIntrinsicScene too and restart at `scene_intrinsic` (the
+      // first step). The earlier "intrinsics are always present, jump to the
+      // extrinsic" assumption is dead (factory-default seeding was removed).
       // Force the wizard to stay open despite the on-disk YAMLs (see the
       // `recalibrating` field doc) until the steps are actually re-run.
       state.recalibrating = true;
       state.hasIntrinsicGripper = true;
-      // Intrinsics are factory-defaulted on disk (always present), so keep the
-      // intrinsic step satisfied and re-start recalibration at the extrinsic —
-      // the first step the student actually performs.
-      state.hasIntrinsicScene = true;
+      state.hasIntrinsicScene = false;
       state.hasHandeyeGripper = true;
       state.hasHandeyeScene = false;
       state.hasTableTouch = false;
       state.hasColorProfile = false;
-      state.currentStep = 'scene_handeye';
+      state.currentStep = 'scene_intrinsic';
       state.framesCaptured = 0;
       state.methodDisagreement = null;
       state.calibError = null;
       state.coverageMosaic = Array(16).fill(0);
       state.qualityHistory = [];
       state.verifyResult = null;
+      state.pendingVerify = false;
+      state.accuracyResult = null;
     },
     addCoverageCell: (state, action) => {
       const { cell, quality } = action.payload || {};
@@ -225,6 +253,15 @@ const workshopSlice = createSlice({
     },
     setVerifyResult: (state, action) => {
       state.verifyResult = action.payload || null;
+    },
+    // W5: store the accuracy-verify solve readout (residuals / yaw bias / mirror).
+    setAccuracyResult: (state, action) => {
+      state.accuracyResult = action.payload || null;
+    },
+    // W5: „Fertig" / „Überspringen" on the accuracy-verify step — drop the
+    // editor-hold so the WorkshopPage gate opens the editor.
+    finishVerify: (state) => {
+      state.pendingVerify = false;
     },
     setCalibHistory: (state, action) => {
       state.calibHistory = Array.isArray(action.payload) ? action.payload : [];
@@ -393,6 +430,8 @@ export const {
   addCoverageCell,
   setCharucoPreview,
   setVerifyResult,
+  setAccuracyResult,
+  finishVerify,
   setCalibHistory,
   setRunState,
   setPaused,

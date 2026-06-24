@@ -55,6 +55,10 @@ function WorkshopPage({ isActive }) {
   const hasHandeyeScene = useSelector((s) => s.workshop.hasHandeyeScene);
   const hasTableTouch = useSelector((s) => s.workshop.hasTableTouch);
   const recalibrating = useSelector((s) => s.workshop.recalibrating);
+  // W5: holds the editor closed only while the student is on the optional
+  // „Genauigkeit prüfen" step right after the touch-off (defaults false on a
+  // page reload, so a calibrated rig opens straight to the editor).
+  const pendingVerify = useSelector((s) => s.workshop.pendingVerify);
   const selectedWorkflowId = useSelector((s) => s.workshop.selectedWorkflowId);
   const unsavedBlocklyJson = useSelector((s) => s.workshop.unsavedBlocklyJson);
   const accessToken = useSelector((s) => s.auth?.session?.access_token);
@@ -83,11 +87,16 @@ function WorkshopPage({ isActive }) {
     hasHandeyeScene &&
     hasTableTouch;
 
-  // The editor unlocks only when calibrated AND not mid-recalibration. The
-  // `recalibrating` override (set by „Kalibrierung neu starten") keeps the
-  // wizard open even though the on-disk YAMLs still satisfy `calibrated` — it
-  // clears once the student finishes re-running the steps (workshopSlice).
-  const showEditor = calibrated && !recalibrating;
+  // The editor unlocks only when calibrated AND not mid-recalibration AND not
+  // holding for the optional accuracy-verify step. The `recalibrating` override
+  // (set by „Kalibrierung neu starten") keeps the wizard open even though the
+  // on-disk YAMLs still satisfy `calibrated` — it clears once the student
+  // finishes re-running the steps. `pendingVerify` (set right after the
+  // touch-off, cleared by „Fertig"/„Überspringen") routes the student through
+  // the optional „Genauigkeit prüfen" step before the editor opens; it is NOT
+  // part of `calibrated`, so a calibrated rig still opens straight to the
+  // editor on a fresh page load (workshopSlice).
+  const showEditor = calibrated && !recalibrating && !pendingVerify;
 
   // Re-subscribe to /workflow/status whenever this page is active OR
   // the rosbridge connection state flips back to connected. The v1

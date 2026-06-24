@@ -211,6 +211,12 @@ services:
       # when the back-projected tag side deviates from the catalog tag_size_m by
       # more than this fraction. Read by workflow/handlers/perception_blocks.py.
       - EDUBOTICS_TAG_EDGE_TOL_FRAC=${EDUBOTICS_TAG_EDGE_TOL_FRAC:-0.5}
+      # Tag-yaw precision (2026-06-24): the named grasp circular-means the tag
+      # yaw over FRAMES live scene frames and rejects the reading if the angular
+      # resultant R is below MIN_RESULTANT (jittery/occluded → skip the instance,
+      # never grasp with a noisy wrist roll). Read by workflow/handlers/perception_blocks.py.
+      - EDUBOTICS_TAG_YAW_FRAMES=${EDUBOTICS_TAG_YAW_FRAMES:-7}
+      - EDUBOTICS_TAG_YAW_MIN_RESULTANT=${EDUBOTICS_TAG_YAW_MIN_RESULTANT:-0.9}
       # Named-object „Solange <Typ> sichtbar" loop: the observation pose the arm
       # retreats to between passes (out of the scene-cam view; 5 comma-separated
       # joint radians, empty = HOME), and the empty-debounce (require K empty
@@ -252,6 +258,14 @@ services:
       # workflow/calibration_manager.py.
       - EDUBOTICS_EXTRINSIC_BURST_FRAMES=${EDUBOTICS_EXTRINSIC_BURST_FRAMES:-8}
       - EDUBOTICS_EXTRINSIC_BURST_INTERVAL_S=${EDUBOTICS_EXTRINSIC_BURST_INTERVAL_S:-0.06}
+      # DEV (2026-06-24): force a full recalibration (intrinsics + extrinsic +
+      # touch-off) on EVERY EduBotics restart, because the bench setup changes
+      # constantly during development. The server reads this ONCE at startup; the
+      # /calibration/status gate reports not-calibrated until the student re-runs
+      # the full wizard this boot (then it latches for the session, re-asserts next
+      # restart). Set to 0/false/no/off for the classroom (calibration persists).
+      # Read by physical_ai_server.py — MUST stay forwarded (env-forwarding-guard).
+      - EDUBOTICS_FORCE_RECALIBRATION=${EDUBOTICS_FORCE_RECALIBRATION:-1}
       # #1 (2026-06-19): per-rig intrinsic calibration is MANDATORY — the
       # factory-default-intrinsics seeding (the old EDUBOTICS_FACTORY_* knobs)
       # was REMOVED. A guessed focal length scales every projected XY, so no

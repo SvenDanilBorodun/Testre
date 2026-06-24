@@ -75,6 +75,33 @@ def _wrap(a: float) -> float:
     return (a + math.pi) % (2.0 * math.pi) - math.pi
 
 
+def circular_mean_resultant(yaws) -> Optional[tuple[float, float]]:
+    """Circular mean + resultant length of a set of angles (radians).
+
+    Yaw is an angle on the circle, so averaging it linearly is wrong (it breaks
+    across the ±π wrap and ignores the 0/2π identity). The correct mean is the
+    direction of the summed unit vectors::
+
+        mean = atan2(Σ sin θ, Σ cos θ)      (wrapped to (-π, π])
+        R    = hypot(mean(cos θ), mean(sin θ)) ∈ [0, 1]
+
+    ``R`` is the mean resultant length: ~1 when the per-frame yaws agree tightly
+    (low noise → trust the mean), → 0 when they scatter (noisy / inconsistent
+    corners → reject). The caller gates a multi-frame grasp yaw on ``R``.
+
+    Returns ``(mean_rad, R)`` or ``None`` when there are no finite inputs.
+    Pure NumPy."""
+    arr = np.asarray(list(yaws), dtype=np.float64).reshape(-1)
+    arr = arr[np.isfinite(arr)]
+    if arr.size == 0:
+        return None
+    s = float(np.mean(np.sin(arr)))
+    c = float(np.mean(np.cos(arr)))
+    mean = _wrap(math.atan2(s, c))
+    R = float(math.hypot(c, s))
+    return (mean, R)
+
+
 def tag_corner_object_points(tag_size_m: float) -> np.ndarray:
     """The 4 tag corners in the tag's own frame (x right, y up, z out of the
     tag face; origin at the tag centre), in the order this module ASSUMES for

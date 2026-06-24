@@ -15,6 +15,7 @@ import { useRosServiceCaller } from '../../hooks/useRosServiceCaller';
 import IntrinsicCalibStep from './IntrinsicCalibStep';
 import HandEyeCalibStep from './HandEyeCalibStep';
 import TableTouchStep from './TableTouchStep';
+import AccuracyVerifyStep from './AccuracyVerifyStep';
 
 // WS4 (2026-06-17): scene-cam-only calibration. The two gripper-camera
 // steps (intrinsic + eye-in-hand) were removed — the gripper camera is not
@@ -29,10 +30,16 @@ import TableTouchStep from './TableTouchStep';
 // fail loud ("Farbe … nicht kalibriert"); object + marker detection are
 // unaffected. ColorProfileStep.jsx / the /calibration capture-colour service
 // are left in place but unreferenced.
+// 2026-06-24 (W5): a 4th OPTIONAL step „Genauigkeit prüfen" runs after the
+// touch-off. It is NOT part of the editor-unlock gate (`calibrated` in
+// WorkshopPage) — the student reaches it after the touch-off via the
+// `pendingVerify` hold and can finish or skip it. `optional: true` keeps the
+// sidebar from drawing a required-style numbered marker for it.
 const STEPS = [
   { key: 'scene_intrinsic', label: 'Szenen-Kamera (intrinsisch)', component: IntrinsicCalibStep, props: { camera: 'scene' } },
   { key: 'scene_handeye', label: 'Szenen-Kamera (Extrinsik)', component: HandEyeCalibStep, props: { camera: 'scene' } },
   { key: 'table_touch', label: 'Tisch vermessen (Höhe)', component: TableTouchStep, props: {} },
+  { key: 'accuracy_verify', label: 'Genauigkeit prüfen (empfohlen)', component: AccuracyVerifyStep, props: {}, optional: true },
 ];
 
 function CalibrationWizard() {
@@ -42,6 +49,7 @@ function CalibrationWizard() {
   const hasIntrinsicScene = useSelector((s) => s.workshop.hasIntrinsicScene);
   const hasHandeyeScene = useSelector((s) => s.workshop.hasHandeyeScene);
   const hasTableTouch = useSelector((s) => s.workshop.hasTableTouch);
+  const accuracyResult = useSelector((s) => s.workshop.accuracyResult);
   const recalibrating = useSelector((s) => s.workshop.recalibrating);
   // Mount-time snapshot: when the wizard was opened via „Kalibrierung neu
   // starten" the per-step flags were deliberately reset, so we must NOT
@@ -93,6 +101,8 @@ function CalibrationWizard() {
     scene_intrinsic: hasIntrinsicScene,
     scene_handeye: hasHandeyeScene,
     table_touch: hasTableTouch,
+    // Optional step — "done" only when a correction was successfully computed.
+    accuracy_verify: !!(accuracyResult && accuracyResult.success),
   };
 
   // A stale persisted currentStep (e.g. a removed 'gripper_intrinsic' from an

@@ -716,13 +716,29 @@ export function useRosServiceCaller() {
     [callService]
   );
 
-  // Phase-2: post-solve "Jetzt prüfen" reprojection test.
+  // W5 (2026-06-24): ground-truth accuracy + orientation verification.
+  // The student places an AprilTag at a KNOWN base (x, y) — optionally a
+  // known yaw — and the server projects it with the current calibration.
+  //   command "add_point": collect one (truth, detected) pair, returns the
+  //     live detected_x/y/yaw + running point_count.
+  //   command "solve": fit the 2D-similarity correction over >=4 points,
+  //     returns residual_mm_mean/max + yaw_bias_deg; mirror_detected on a
+  //     handedness flip (German message, persists nothing).
+  //   command "reset": clear the collected points.
+  // 25 s timeout: add_point grabs + detects a live scene frame server-side.
   const verifyCalibration = useCallback(
-    async (camera, worldX, worldY) =>
+    async ({ command, truthX = 0, truthY = 0, truthYawDeg = 0, hasYaw = false }) =>
       callService(
         '/calibration/verify',
         'physical_ai_interfaces/srv/VerifyCalibration',
-        { camera, world_x: worldX, world_y: worldY },
+        {
+          command,
+          truth_x: Number(truthX) || 0,
+          truth_y: Number(truthY) || 0,
+          truth_yaw_deg: Number(truthYawDeg) || 0,
+          has_yaw: Boolean(hasYaw),
+        },
+        25000,
       ),
     [callService]
   );

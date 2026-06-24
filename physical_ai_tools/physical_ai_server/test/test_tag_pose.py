@@ -21,6 +21,7 @@ import pytest
 
 from physical_ai_server.workflow.ik_solver import IKSolver
 from physical_ai_server.workflow.tag_pose import (
+    circular_mean_resultant,
     grasp_joint5,
     tag_corner_object_points,
     tag_edge_length_base,
@@ -218,6 +219,56 @@ def test_grasp_joint5_fk_guard_catches_sign_flip():
     R, _t = ik.fk(cfg)
     jaw_az = math.atan2(float(R[1, 1]), float(R[0, 1]))
     assert _line_angle_diff(jaw_az, tag_yaw) > 0.1  # confidently wrong, as expected
+
+
+# ── circular mean + resultant (multi-frame yaw averaging) ────────────────────
+def test_circular_mean_resultant_known_values():
+    # Tight cluster around 0.5 rad → mean ≈ 0.5, R ≈ 1.
+    mean, R = circular_mean_resultant([0.49, 0.50, 0.51])
+    assert mean == pytest.approx(0.5, abs=1e-3)
+    assert R > 0.999
+    # Identical angles → R exactly 1.
+    mean, R = circular_mean_resultant([1.2, 1.2, 1.2, 1.2])
+    assert mean == pytest.approx(1.2)
+    assert R == pytest.approx(1.0)
+
+
+def test_circular_mean_resultant_wraps_across_pi():
+    # Angles straddling +π / −π must average to ±π, NOT to ~0 (the linear-mean
+    # bug). Inputs: just below +π and just above −π.
+    mean, R = circular_mean_resultant([math.pi - 0.05, -math.pi + 0.05])
+    # Mean direction is ±π; wrapped to (-π, π] that is +π (or numerically close).
+    d = (mean - math.pi + math.pi) % (2 * math.pi) - math.pi
+    assert abs(d) < 1e-6
+    assert R > 0.99  # they agree as directions
+
+
+def test_circular_mean_resultant_in_pi_range():
+    # The mean is produced via tag_pose._wrap, which maps to (-π, π] (with the
+    # ±π boundary landing on -π, the same _wrap convention the rest of the
+    # module uses); just assert it stays within [-π, π].
+    for yaws in ([0.0], [-3.0, 3.0], [1.0, -1.0, 2.0]):
+        mean, _R = circular_mean_resultant(yaws)
+        assert -math.pi - 1e-9 <= mean <= math.pi + 1e-9
+
+
+def test_circular_mean_resultant_low_R_on_scatter():
+    # Evenly spread angles → vectors cancel → R near 0 (the "untrustworthy" gate).
+    spread = list(np.linspace(-math.pi + 0.01, math.pi - 0.01, 12))
+    _mean, R = circular_mean_resultant(spread)
+    assert R < 0.1
+    # Opposed pair → R == 0 exactly.
+    _mean, R = circular_mean_resultant([0.0, math.pi])
+    assert R == pytest.approx(0.0, abs=1e-9)
+
+
+def test_circular_mean_resultant_filters_nonfinite_and_empty():
+    assert circular_mean_resultant([]) is None
+    assert circular_mean_resultant([np.nan, np.inf]) is None
+    # NaN filtered, finite survivors averaged.
+    mean, R = circular_mean_resultant([0.3, np.nan, 0.3])
+    assert mean == pytest.approx(0.3)
+    assert R == pytest.approx(1.0)
 
 
 # ── malformed inputs fail safe (None, not crash) ─────────────────────────────

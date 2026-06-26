@@ -148,6 +148,47 @@ class LeRobotDatasetWrapper(LeRobotDataset):
         """Alias for upstream save_episode — same reason as above."""
         self.save_episode(parallel_encoding=False)
 
+    # ---------- Streaming frame-drop accounting ----------
+    # With streaming_encoding=True, the per-camera StreamingVideoEncoder drops
+    # frames when its bounded queue stays full (encoder can't keep up — e.g. a
+    # CPU-starved student PC, video_utils.StreamingVideoEncoder.feed_frame). It
+    # only logs a warning; meanwhile add_frame still appends a parquet row (with
+    # a None video placeholder), so a dropped frame leaves the encoded video
+    # SHORTER than the data parquet for that episode. At train time LeRobot then
+    # raises FrameTimestampError. The encoder exposes a per-camera drop counter
+    # (_dropped_frames), reset at each episode's first frame (start_episode) and
+    # NOT cleared by finish_episode — so it must be read BEFORE save_episode()
+    # commits, which data_manager.save() does to discard + re-record the episode.
+
+    def streaming_dropped_frame_count(self) -> int:
+        """Total frames the streaming encoder dropped for the CURRENT (in-flight)
+        episode, summed across cameras. Returns 0 when streaming is disabled or
+        the encoder internals are unavailable — i.e. "no detection" rather than a
+        false positive."""
+        writer = getattr(self, 'writer', None)
+        enc = getattr(writer, '_streaming_encoder', None) if writer is not None else None
+        dropped = getattr(enc, '_dropped_frames', None) if enc is not None else None
+        if not dropped:
+            return 0
+        try:
+            return int(sum(int(v) for v in dropped.values()))
+        except (TypeError, ValueError, AttributeError):
+            return 0
+
+    def cancel_streaming_episode(self) -> None:
+        """Discard the in-flight streaming episode (its temp mp4 + encoder
+        threads) so a dropped-frame episode can be cleanly re-recorded. Safe
+        no-op when streaming is disabled. The next episode's start_episode would
+        also cancel a stale active episode, but doing it here frees the threads
+        and temp file promptly."""
+        writer = getattr(self, 'writer', None)
+        enc = getattr(writer, '_streaming_encoder', None) if writer is not None else None
+        if enc is not None and hasattr(enc, 'cancel_episode'):
+            try:
+                enc.cancel_episode()
+            except Exception:  # noqa: BLE001 — discard must never raise
+                pass
+
     # ---------- Multi-task / batched-encode no-ops ----------
     # EduBotics v2.5.0 is single-task per recording session (Modal Cloud
     # handles multi-task model training). The wrapper's pre-v2.5.0 multi-task

@@ -171,6 +171,8 @@ class _RecordingFinalizeTest(unittest.TestCase):
         dm._upload_dataset = lambda tags, private: events.append('upload')
         dm._verify_saved_video_files = lambda: None
         dm._get_current_scenario_number = lambda: None
+        dm._write_session_marker = lambda: None
+        dm._stop_save_completed = False
         return dm
 
     # ---- _finalize_dataset() unit behavior ----
@@ -251,6 +253,47 @@ class _RecordingFinalizeTest(unittest.TestCase):
         self.assertTrue(result)
         self.assertEqual(fake.finalize_calls, 1)
         self.assertEqual(events, ['finalize'])  # finalized, no upload
+
+    # ---- 'Stop' must finalize (and upload) exactly like 'finish' ----
+    # Pre-fix, the 'stop' branch saved the last episode but returned RECORDING
+    # without ever finalizing/uploading -> a Stop-ended dataset was a
+    # footer-less, possibly meta/episodes-less corrupt tree on disk.
+
+    def test_stop_state_finalizes_before_upload(self):
+        events = []
+        fake = _FakeDataset(events)
+        task_info = _FakeTaskInfo(num_episodes=5, push_to_hub=True)
+        # on_saving=True + not yet completed => the stop-completion tick fires.
+        dm = self._make_dm(events, fake, task_info,
+                           status='stop', on_saving=True, count=3)
+        result = dm.record(None, None, None)
+        self.assertTrue(result)  # RECORD_COMPLETED
+        self.assertEqual(events, ['finalize', 'upload'])
+        self.assertEqual(fake.finalize_calls, 1)
+        # The stop completion increments the saved-episode count.
+        self.assertEqual(dm._record_episode_count, 4)
+
+    def test_stop_state_finalizes_even_when_not_pushing(self):
+        events = []
+        fake = _FakeDataset(events)
+        task_info = _FakeTaskInfo(num_episodes=5, push_to_hub=False)
+        dm = self._make_dm(events, fake, task_info,
+                           status='stop', on_saving=True, count=3)
+        result = dm.record(None, None, None)
+        self.assertTrue(result)
+        self.assertEqual(fake.finalize_calls, 1)
+        self.assertEqual(events, ['finalize'])  # finalized, no upload
+
+    def test_stop_state_skips_upload_when_finalize_fails(self):
+        events = []
+        fake = _FakeDataset(events, finalize_raises=True)
+        task_info = _FakeTaskInfo(num_episodes=5, push_to_hub=True)
+        dm = self._make_dm(events, fake, task_info,
+                           status='stop', on_saving=True, count=3)
+        result = dm.record(None, None, None)
+        self.assertTrue(result)  # recording still completes...
+        self.assertEqual(events, [])  # ...but NO upload of an incomplete dataset
+        self.assertIn('unvollständig', dm._last_warning_message)
 
 
 if __name__ == '__main__':

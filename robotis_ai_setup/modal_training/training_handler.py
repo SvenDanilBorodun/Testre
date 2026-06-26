@@ -44,6 +44,20 @@ EXPECTED_CODEBASE_VERSION = "v3.0"
 MIN_JOINTS = 4
 MAX_JOINTS = 20
 
+# Normalization stats keys required on observation.state + action.
+# lerobot_train TRUSTS the dataset's baked meta/stats.json — it never recomputes
+# stats at train start — so a missing/incomplete stats.json crashes training at
+# processor build AFTER the (expensive, A100 for VLAs) GPU has spun up. We reject
+# in preflight instead. The required set is the UNION across every policy's
+# normalization mode, so the check is policy-independent and drift-proof:
+#   MEAN_STD (act/pi0/pi0_fast/smolvla) -> mean,std
+#   MIN_MAX  (diffusion/vqbet, tdmpc action) -> min,max
+#   QUANTILES (pi05 state+action) -> q01,q99
+# LeRobot v0.5.1's RunningQuantileStats writes ALL of these together for every
+# real recording, so requiring the union is zero-false-positive on a normally
+# recorded EduBotics dataset and only rejects corrupt/legacy/hand-built stats.
+_REQUIRED_STATS_KEYS = ("mean", "std", "min", "max", "q01", "q99")
+
 # VLA policies whose LeRobot config is language-conditioned: they build the
 # prompt from a per-frame task string and raise ValueError("No task found in
 # complementary data") deep in training if the dataset has none. The preflight
@@ -241,6 +255,49 @@ def _update_status_with_retry(
 # ---------------- Dataset preflight ----------------
 
 
+def _stat_value(stats: dict, feature: str, key: str):
+    """Read a single stat from a meta/stats.json dict, tolerant of both shapes.
+
+    On disk LeRobot v0.5.1 serializes stats FLAT with '/'-joined keys
+    (serialize_dict -> flatten_dict), e.g. "observation.state/mean". Older /
+    hand-built files may use the nested {feature: {key: ...}} shape. Accept both.
+    Returns None when absent.
+    """
+    flat = stats.get(f"{feature}/{key}")
+    if flat is not None:
+        return flat
+    nested = stats.get(feature)
+    if isinstance(nested, dict):
+        return nested.get(key)
+    return None
+
+
+def _validate_stats(stats: dict, dataset_name: str, n_joints: int) -> None:
+    """Reject a dataset whose normalization stats are missing/incomplete.
+
+    Requires observation.state + action to each carry every key in
+    _REQUIRED_STATS_KEYS as a list of length == n_joints. Raises ValueError with
+    a German operator-facing message on failure.
+    """
+    if not isinstance(stats, dict):
+        raise ValueError(
+            f"Dataset '{dataset_name}' hat eine ungueltige meta/stats.json "
+            f"(kein JSON-Objekt). Bitte mit aktueller Recording-Software neu "
+            f"aufnehmen."
+        )
+    for feature in ("observation.state", "action"):
+        for key in _REQUIRED_STATS_KEYS:
+            value = _stat_value(stats, feature, key)
+            if not isinstance(value, list) or len(value) != n_joints:
+                raise ValueError(
+                    f"Dataset '{dataset_name}' hat unvollstaendige "
+                    f"Normalisierungs-Statistiken (meta/stats.json: '{feature}' "
+                    f"'{key}' fehlt oder hat die falsche Laenge). Das Modell "
+                    f"wuerde mit falscher Normalisierung trainieren. Bitte mit "
+                    f"aktueller Recording-Software neu aufnehmen."
+                )
+
+
 def _preflight_dataset(dataset_name: str, hf_token: str, model_type: str = "") -> None:
     """Download just meta/info.json and validate the dataset is trainable.
 
@@ -373,6 +430,29 @@ def _preflight_dataset(dataset_name: str, hf_token: str, model_type: str = "") -
         )
     cameras = [k.replace("observation.images.", "") for k in image_keys]
 
+    # Normalization stats: lerobot_train trusts the dataset's baked
+    # meta/stats.json (it never recomputes). Download + validate it now so an
+    # incomplete/missing stats file fails cheaply here instead of crashing at
+    # processor build after the GPU has spun up. The repo is already proven
+    # reachable by the info.json download above, so a direct call is fine.
+    try:
+        stats_path = hf_hub_download(
+            repo_id=dataset_name,
+            filename="meta/stats.json",
+            repo_type="dataset",
+            token=hf_token,
+        )
+        with open(stats_path) as f:
+            stats = json.load(f)
+    except (OSError, json.JSONDecodeError, HfHubHTTPError,
+            RepositoryNotFoundError) as e:
+        raise ValueError(
+            f"Dataset '{dataset_name}' hat keine ladbare meta/stats.json "
+            f"({e}). Ohne Normalisierungs-Statistiken kann nicht trainiert "
+            f"werden. Bitte mit aktueller Recording-Software neu aufnehmen."
+        )
+    _validate_stats(stats, dataset_name, len(state_names))
+
     # Language-conditioned VLAs need per-frame task strings. info.json carries
     # total_tasks (== number of distinct prompts); 0 means the dataset was
     # recorded without any Aufgabenanweisung and would crash these policies
@@ -496,6 +576,26 @@ def _build_training_command(
                 cmd.append(flag)
 
     return cmd
+
+
+def _pretrained_load_failed(output_text: str, training_params: dict) -> bool:
+    """True iff a VLA base-checkpoint run silently fell back to random init.
+
+    For the VLA recipe (pi0/pi05/pi0_fast/smolvla) the Cloud API injects
+    --policy.pretrained_path=<base>. On v0.5.1, PI05Policy.from_pretrained (and
+    the pi0 family) wraps the weight load in a broad try/except that, on ANY
+    load_state_dict failure, only prints "Could not load state dict" and returns
+    a RANDOMLY-INITIALIZED model — which then "fine-tunes from scratch" and exits
+    0. That is a silently-wrong model (no base knowledge), so when we detect that
+    log line on a pretrained run we fail the job instead of reporting success.
+    Plain ACT-class runs carry no pretrained_path and are never gated.
+    """
+    flags = training_params.get("policy_cli_flags") or []
+    is_pretrained_run = any(
+        isinstance(f, str) and f.startswith("--policy.pretrained_path=")
+        for f in flags
+    )
+    return is_pretrained_run and "Could not load state dict" in (output_text or "")
 
 
 # ---------------- HuggingFace upload ----------------
@@ -990,6 +1090,24 @@ def run_training(
                 "failed", error_msg, log_url=log_url,
             )
             return {"status": "failed", "error": error_msg}
+
+        # Exit code 0 is NOT sufficient for a VLA base-checkpoint run: LeRobot
+        # silently falls back to random init if the base weights fail to load.
+        # Catch that here so we never report success on a from-scratch model.
+        if _pretrained_load_failed(output_text, training_params):
+            err_msg = (
+                "Training abgebrochen: Das vortrainierte Basismodell konnte "
+                "nicht geladen werden (LeRobot meldete 'Could not load state "
+                "dict') — das Modell waere mit zufaelligen Gewichten statt dem "
+                "Basismodell trainiert worden. Bitte Basismodell und Datensatz "
+                "pruefen und Training neu starten."
+            )
+            log_url = _upload_training_log(model_name, hf_token, output_lines)
+            _update_status_with_retry(
+                supabase_url, supabase_anon_key, worker_token, training_id,
+                "failed", err_msg, log_url=log_url,
+            )
+            return {"status": "failed", "error": err_msg}
 
         # ----- 4. Training succeeded — push progress to 100% before upload -----
         _update_supabase_progress(

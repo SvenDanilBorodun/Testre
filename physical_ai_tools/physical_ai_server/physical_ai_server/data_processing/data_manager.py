@@ -268,8 +268,11 @@ class DataManager:
                         # Finished! Set status to 'finish' to skip reset
                         self._status = 'finish'
             else:
-                self.save()
-                self._on_saving = True
+                # save() returns False when it discarded the episode for
+                # re-recording (streaming frame drop) — it has already set
+                # _status='reset', so do NOT latch _on_saving.
+                if self.save():
+                    self._on_saving = True
 
         elif self._status == 'reset':
             if not self._single_task:
@@ -294,10 +297,27 @@ class DataManager:
                         self._get_current_scenario_number()
                         self._current_task += 1
                         self._stop_save_completed = True
+                        # v3.0: 'Stop' must finalize (and upload) exactly like
+                        # 'finish' — otherwise a Stop-ended dataset ships a
+                        # footer-less data parquet (and, for <10 episodes, no
+                        # meta/episodes/*.parquet at all): silent corruption that
+                        # only surfaces at train time / on a later manual push.
+                        # Flush LeRobot's writers BEFORE upload (see
+                        # _finalize_dataset); skip the upload if finalize failed.
+                        finalized = self._finalize_dataset()
+                        if (finalized and self._task_info.push_to_hub and
+                                self._record_episode_count > 0):
+                            self._upload_dataset(
+                                self._task_info.tags,
+                                self._task_info.private_mode)
+                        return self.RECORD_COMPLETED
                 else:
-                    self.save()
-                    self._proceed_time = 0
-                    self._on_saving = True
+                    # save() returns False when it discarded the episode for
+                    # re-recording (streaming frame drop); _status is now
+                    # 'reset', so do NOT latch _on_saving.
+                    if self.save():
+                        self._proceed_time = 0
+                        self._on_saving = True
             return self.RECORDING
 
         elif self._status == 'finish':
@@ -316,11 +336,14 @@ class DataManager:
                             self._task_info.private_mode)
                     return self.RECORD_COMPLETED
             else:
-                self.save()
-                if not self._single_task:
-                    self._lerobot_dataset.video_encoding()
-                self._proceed_time = 0
-                self._on_saving = True
+                # save() returns False when it discarded the episode for
+                # re-recording (streaming frame drop); _status is now 'reset',
+                # so do NOT latch _on_saving or kick off encoding.
+                if self.save():
+                    if not self._single_task:
+                        self._lerobot_dataset.video_encoding()
+                    self._proceed_time = 0
+                    self._on_saving = True
 
         if self._record_episode_count >= self._task_info.num_episodes:
             if self._lerobot_dataset.check_video_encoding_completed():
@@ -337,9 +360,18 @@ class DataManager:
 
         return self.RECORDING
 
-    def save(self):
+    def save(self) -> bool:
+        """Commit the in-flight episode to disk.
+
+        Returns True when the episode was committed (or there was nothing to
+        commit), False when the episode was DISCARDED for automatic re-recording
+        because the streaming encoder dropped frames (see
+        _discard_episode_for_redo). Callers must only latch ``_on_saving = True``
+        when this returns True — a False return has already routed the state
+        machine back to 'reset'.
+        """
         if self._lerobot_dataset.episode_buffer is None:
-            return
+            return True
         # Validate the buffer BEFORE save() consumes it. Logs to stderr only —
         # validation never blocks the actual save.
         try:
@@ -349,6 +381,23 @@ class DataManager:
                 f'[WARNUNG] Episode-Prüfung fehlgeschlagen (nicht kritisch): {e}',
                 file=sys.stderr, flush=True,
             )
+        # Streaming frame-drop guard: with streaming_encoding=True the encoder
+        # silently drops camera frames under CPU overload while add_frame still
+        # appended a parquet row each tick — so the encoded video would be
+        # SHORTER than the data parquet and LeRobot would raise
+        # FrameTimestampError at train time. The encoder's per-episode drop
+        # counter is still valid here (start_episode cleared it on this episode's
+        # first frame; finish_episode hasn't run yet), so detect it BEFORE
+        # save_episode() commits and re-record the episode instead of shipping a
+        # desynced one. (This is detect-before-commit — strictly safer than the
+        # post-commit warning in _verify_saved_video_files.)
+        try:
+            dropped = self._lerobot_dataset.streaming_dropped_frame_count()
+        except Exception:  # noqa: BLE001 — detection must never block recording
+            dropped = 0
+        if dropped > 0:
+            self._discard_episode_for_redo(dropped)
+            return False
         # v2.5.0: with streaming_encoding=True + parallel_encoding=False the
         # video files are fully written by the time save_episode() returns, so
         # there is no async encoder snapshot to take here. The mp4s are checked
@@ -362,6 +411,35 @@ class DataManager:
         else:
             if self._lerobot_dataset.episode_buffer['size'] > 0:
                 self._lerobot_dataset.save_episode()
+        return True
+
+    def _discard_episode_for_redo(self, dropped_frames: int) -> None:
+        """Discard the current in-flight episode and route to re-recording it.
+
+        Called from save() when the streaming encoder dropped frames: the video
+        for this episode would be shorter than its parquet rows. We cancel the
+        streaming episode (drops the temp mp4), clear the in-RAM buffer, and set
+        _status='reset' so the SAME episode index is re-recorded — the episode
+        count is NOT incremented, so nothing desynced ever reaches disk. Mirrors
+        re_record()'s transition.
+        """
+        episode_no = self._record_episode_count + 1
+        warning = (
+            f'Episode {episode_no}: {dropped_frames} Kamera-Bild(er) gingen '
+            f'beim Speichern verloren (Video-Encoder überlastet). Video und '
+            f'Daten wären nicht synchron und das Training würde abbrechen — '
+            f'die Episode wird automatisch neu aufgenommen.'
+        )
+        self._last_warning_message = warning
+        print(f'[WARNUNG] {warning}', file=sys.stderr, flush=True)
+        try:
+            self._lerobot_dataset.cancel_streaming_episode()
+        except Exception:  # noqa: BLE001 — discard must never block recording
+            pass
+        self._stop_save_completed = False
+        self._on_saving = False
+        self._episode_reset()
+        self._status = 'reset'
 
     def _finalize_dataset(self) -> bool:
         """Flush LeRobot's writers so the on-disk dataset is actually complete.

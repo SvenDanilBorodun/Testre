@@ -11,6 +11,7 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import toast from 'react-hot-toast';
+import * as Blockly from 'blockly/core';
 import CalibrationWizard from '../components/Workshop/CalibrationWizard';
 import LeaderToggle from '../components/Workshop/LeaderToggle';
 import BlocklyWorkspace from '../components/Workshop/BlocklyWorkspace';
@@ -81,6 +82,12 @@ function WorkshopPage({ isActive }) {
   const subscriptions = useRosTopicSubscription();
   const { getObjectCatalog } = useRosServiceCaller();
   const workspaceRef = useRef(null);
+  // Blockly 12 ties getSelected() to the FocusManager, and clicking the
+  // camera overlay (a non-focusable div) blurs the block in Chromium →
+  // selection is null by the time the camera onClick runs. So we remember
+  // the id of the most-recently selected destination_pin block via a
+  // SELECTED change-listener and use THAT at mark time, not live selection.
+  const lastPinBlockIdRef = useRef(null);
 
   const calibrated =
     hasIntrinsicScene &&
@@ -156,6 +163,25 @@ function WorkshopPage({ isActive }) {
   const handleWorkspaceReady = useCallback((ws) => {
     workspaceRef.current = ws;
     setWorkspace(ws);
+    // ws is null on workspace teardown — drop the remembered pin so a stale
+    // id can't survive a remount/editorKey bump.
+    if (!ws) {
+      lastPinBlockIdRef.current = null;
+      return;
+    }
+    // Record the last-selected destination_pin so the camera click can find
+    // it after the click blurs Blockly's selection. On a deselect
+    // (newElementId empty) we intentionally KEEP the remembered pin — that
+    // deselect is exactly the camera-click blur we must survive.
+    ws.addChangeListener((e) => {
+      if (e.type !== Blockly.Events.SELECTED) return;
+      const id = e.newElementId;
+      if (!id) return; // deselect: keep the last remembered pin
+      const block = ws.getBlockById(id);
+      if (block && block.type === 'edubotics_destination_pin') {
+        lastPinBlockIdRef.current = id;
+      }
+    });
   }, []);
 
   // Wire the workspace accessor so a late object-catalog refresh can reach the
@@ -209,8 +235,14 @@ function WorkshopPage({ isActive }) {
   const handleMarkDestination = useCallback(({ label, world_x, world_y, world_z }) => {
     const ws = workspaceRef.current;
     if (!ws) return;
-    const selected = (typeof ws.getSelected === 'function') ? ws.getSelected() : null;
-    if (!selected || selected.type !== 'edubotics_destination_pin') {
+    // Use the remembered pin id, not live selection — the camera click has
+    // already blurred the block in Chromium (see lastPinBlockIdRef note).
+    // getBlockById returns null for a deleted/disposed block, so this also
+    // covers "selected a pin, then deleted it before clicking".
+    const id = lastPinBlockIdRef.current;
+    const block = id ? ws.getBlockById(id) : null;
+    if (!block || block.type !== 'edubotics_destination_pin') {
+      lastPinBlockIdRef.current = null;
       toast(
         'Tipp: Wähle zuerst einen "setze Ziel = Pin"-Block aus, '
         + 'dann klicke in die Szenen-Kamera, damit die Koordinaten '
@@ -220,7 +252,8 @@ function WorkshopPage({ isActive }) {
       );
       return;
     }
-    applyPinnedCoordinates(selected, world_x, world_y, world_z);
+    applyPinnedCoordinates(block, world_x, world_y, world_z);
+    toast.success(`Koordinaten in Block „${block.getFieldValue('NAME') || label}" geschrieben.`);
   }, []);
 
   // Autosave hook. Restores the most-recent local state if the parent

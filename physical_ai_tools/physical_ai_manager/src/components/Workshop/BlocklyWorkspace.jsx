@@ -137,14 +137,14 @@ function BlocklyWorkspace({
   // in-progress block layout). Audit §12.b found this regression.
   useEffect(() => {
     const ws = workspaceRef.current;
-    if (!ws || typeof ws.updateToolboxDefinition !== 'function') return;
+    if (!ws || typeof ws.updateToolbox !== 'function') return;
     try {
       // Always rebuild via buildToolbox so the cloud-vision flag is
       // applied. The pre-built TOOLBOX export is the disabled variant.
       const next = buildToolbox(restrictedBlocks, cloudVisionEnabled);
-      ws.updateToolboxDefinition(next);
+      ws.updateToolbox(next);
     } catch (e) {
-      console.warn('BlocklyWorkspace: updateToolboxDefinition failed', e);
+      console.warn('BlocklyWorkspace: updateToolbox failed', e);
     }
   }, [restrictedBlocks, cloudVisionEnabled]);
 

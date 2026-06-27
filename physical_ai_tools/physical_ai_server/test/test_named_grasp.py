@@ -144,6 +144,10 @@ class _Ctx:
         self.claim_lock = threading.RLock()
         self.claimed_tags = set()
         self.skipped_tags = set()
+        self.absent_since = {}
+        # No follower-joints readback by default → the grasp-success check returns
+        # None and falls back to claim-on-completion (the pre-#2 behaviour).
+        self.get_follower_joints = None
         self.should_stop = lambda: False
         self.last_full_joints = list(HOME_JOINTS_RAD) + [GRIPPER_OPEN_RAD]
         self.last_arm_joints = None
@@ -489,6 +493,79 @@ def test_grasp_object_uncalibrated_raises_precise_german():
     ctx = _Ctx(dets, calibrated=False)
     with pytest.raises(WorkflowError, match='kalibriert'):
         pb.grasp_object(ctx, {'object_type': 'banane'})
+
+
+# ── #2: grasp-success check + retry-once ─────────────────────────────────────
+def _joints_provider(values):
+    """A get_follower_joints stub. ``values`` is a constant gripper angle (rad) or
+    a per-call sequence; returns a 6-joint list with that angle at index 5. The
+    returned ``state['calls']`` counts how many times it was read (= attempts)."""
+    state = {'calls': 0}
+    seq = list(values) if isinstance(values, (list, tuple)) else None
+
+    def _get():
+        idx = state['calls']
+        state['calls'] += 1
+        g = seq[min(idx, len(seq) - 1)] if seq is not None else values
+        return [0.0, 0.0, 0.0, 0.0, 0.0, float(g)]
+
+    return _get, state
+
+
+def test_grasp_object_held_check_claims(monkeypatch):
+    # Held ~30 mm object leaves the jaws partly open (−0.07 > GRASP_HELD_MAX_RAD)
+    # → HELD → claim.
+    monkeypatch.setattr(motion, 'GRASP_SETTLE_S', 0.0)
+    monkeypatch.setattr(pb, '_TAG_YAW_FRAME_INTERVAL_S', 0.0)
+    ctx = _Ctx([_make_detection(20, (0.18, 0.0), 0.3, 0.024, _overhead_T(), 0.040)])
+    get, state = _joints_provider(-0.07)
+    ctx.get_follower_joints = get
+    pb.grasp_object(ctx, {'object_type': 'banane'})
+    assert 20 in ctx.claimed_tags
+    assert state['calls'] == 1            # one attempt, held first time
+    assert ctx.published
+
+
+def test_grasp_object_miss_after_retries_skips(monkeypatch):
+    # Empty close every time (−0.5 ≤ GRASP_HELD_MAX_RAD) → MISS. With GRASP_RETRY=1
+    # the detect→grasp runs twice, then the instance is SKIPPED (not claimed) and
+    # GraspSkip is raised.
+    monkeypatch.setattr(motion, 'GRASP_SETTLE_S', 0.0)
+    monkeypatch.setattr(motion, 'GRASP_RETRY', 1)
+    monkeypatch.setattr(pb, '_TAG_YAW_FRAME_INTERVAL_S', 0.0)
+    ctx = _Ctx([_make_detection(20, (0.18, 0.0), 0.3, 0.024, _overhead_T(), 0.040)])
+    get, state = _joints_provider(-0.5)
+    ctx.get_follower_joints = get
+    with pytest.raises(GraspSkip, match='konnte nicht gegriffen'):
+        pb.grasp_object(ctx, {'object_type': 'banane'})
+    assert 20 in ctx.skipped_tags
+    assert 20 not in ctx.claimed_tags
+    assert state['calls'] == 2            # initial + one retry
+
+
+def test_grasp_object_miss_then_held_on_retry_claims(monkeypatch):
+    # First close misses, retry holds → claimed; the retry was logged in German.
+    monkeypatch.setattr(motion, 'GRASP_SETTLE_S', 0.0)
+    monkeypatch.setattr(motion, 'GRASP_RETRY', 1)
+    monkeypatch.setattr(pb, '_TAG_YAW_FRAME_INTERVAL_S', 0.0)
+    ctx = _Ctx([_make_detection(20, (0.18, 0.0), 0.3, 0.024, _overhead_T(), 0.040)])
+    get, state = _joints_provider([-0.5, -0.07])
+    ctx.get_follower_joints = get
+    pb.grasp_object(ctx, {'object_type': 'banane'})
+    assert 20 in ctx.claimed_tags
+    assert 20 not in ctx.skipped_tags
+    assert state['calls'] == 2
+    assert any('neuer Versuch' in m for m in ctx.logs)
+
+
+def test_grasp_object_no_readback_falls_back_to_claim():
+    # No follower-joints readback → check returns None → the prior claim-on-
+    # completion behaviour is kept (no regression), with a one-time German note.
+    ctx = _Ctx([_make_detection(20, (0.18, 0.0), 0.3, 0.024, _overhead_T(), 0.040)])
+    ctx.get_follower_joints = None
+    pb.grasp_object(ctx, {'object_type': 'banane'})
+    assert 20 in ctx.claimed_tags
+    assert any('Erfolgskontrolle' in m for m in ctx.logs)
 
 
 # ── missing / broken catalog ─────────────────────────────────────────────────

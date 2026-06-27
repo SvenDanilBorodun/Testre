@@ -440,12 +440,30 @@ def test_pickup_outer_ring_does_not_false_refuse(_fast_chunk_pacing):
     assert ctx.published
 
 
-def test_drop_at_outer_ring_does_not_false_refuse(_fast_chunk_pacing):
+def test_drop_at_outer_ring_does_not_false_refuse(_fast_chunk_pacing, monkeypatch):
+    # The drop RELEASE height (DROP_HEIGHT_M, 5 cm) deliberately shrinks the
+    # reachable radius — at OUTER_RING_XYZ a 5 cm-high drop is genuinely out of
+    # reach (documented trade-off: pin a high-release drop spot closer to the
+    # base). This test isolates the approach-CLAMPING logic (HIGH-5: a reachable
+    # drop must not be false-refused because only its +approach pose fell outside
+    # the annulus), so pin the low clearance height here.
+    monkeypatch.setattr(motion, 'DROP_HEIGHT_M', GRASP_CLEARANCE_M)
     ctx = _RecordingCtx(z_table=0.0)
     ctx.last_full_joints = list(HOME_JOINTS_RAD) + [GRIPPER_CLOSED_RAD]
     drop_at(ctx, {'destination': OUTER_RING_XYZ})
     assert ctx.last_commanded_joints[5] == pytest.approx(GRIPPER_OPEN_RAD)
     assert ctx.published
+
+
+def test_drop_at_high_release_refuses_outer_ring(_fast_chunk_pacing):
+    """Documents the trade-off: with the default 5 cm release height, a drop at
+    the outer ring is correctly refused (the raised release point is outside the
+    top-down annulus) — a high drop must be pinned closer to the base."""
+    ctx = _RecordingCtx(z_table=0.0)
+    ctx.last_full_joints = list(HOME_JOINTS_RAD) + [GRIPPER_CLOSED_RAD]
+    with pytest.raises(WorkflowError) as exc:
+        drop_at(ctx, {'destination': OUTER_RING_XYZ})
+    assert 'Arbeitsbereich' in str(exc.value)
 
 
 def test_pickup_truly_unreachable_grasp_still_refuses():

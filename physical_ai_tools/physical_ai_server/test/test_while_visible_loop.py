@@ -40,6 +40,8 @@ def _fast(monkeypatch):
                         types.SimpleNamespace(monotonic=_mono, sleep=lambda _s: None))
     monkeypatch.setattr(interp_mod, 'WHILE_EMPTY_SECONDS', 0.0)
     monkeypatch.setattr(interp_mod, 'WHILE_EMPTY_FRAMES', 2)
+    # #3: make the retreat-settle instant so the suite stays fast.
+    monkeypatch.setattr(interp_mod, 'WHILE_SETTLE_S', 0.0)
     yield
 
 
@@ -123,6 +125,10 @@ class _Ctx:
         self.claim_lock = threading.RLock()
         self.claimed_tags = set()
         self.skipped_tags = set()
+        self.absent_since = {}
+        # No follower-joints readback by default → the grasp-success check returns
+        # None and falls back to claim-on-completion (the pre-#2 behaviour).
+        self.get_follower_joints = None
         self.last_full_joints = list(HOME_JOINTS_RAD) + [GRIPPER_OPEN_RAD]
         self.last_arm_joints = None
         self.variables = {}
@@ -283,3 +289,68 @@ def test_loop_no_object_selected_raises_german():
     block = {'type': 'edubotics_while_visible', 'fields': {}, 'inputs': {}}
     with pytest.raises(interp_mod.InterpreterError, match='kein Objekt'):
         Interpreter([])._exec_while_visible(block, ctx, lambda *a: None)
+
+
+# ── #1: recycled-object reclaim ──────────────────────────────────────────────
+def test_reclaim_unclaims_recycled_object(monkeypatch):
+    # A claimed object that goes ABSENT and then reappears (removed + put back) is
+    # un-claimed so it is grabbed again. Driven directly through the unclaimed-view
+    # detection (which runs the reclaim) across present→absent→present frames.
+    from physical_ai_server.workflow.handlers import perception_blocks as pb
+    monkeypatch.setattr(pb, '_RECLAIM_ABSENT_S', 0.0)
+    det = _det(20, (0.18, 0.0))
+    frames = {'mode': 'present'}
+    ctx = _Ctx(_StubPerception(lambda _c: ([det] if frames['mode'] == 'present' else [])))
+    ctx.claimed_tags.add(20)
+    # Frame 1: visible + claimed, never absent → still excluded, not reclaimed.
+    assert pb.count_unclaimed_visible(ctx, 'banane') == 0
+    assert 20 in ctx.claimed_tags
+    assert 20 not in ctx.absent_since
+    # Frame 2: absent → the absence clock starts.
+    frames['mode'] = 'absent'
+    assert pb.count_unclaimed_visible(ctx, 'banane') == 0
+    assert 20 in ctx.absent_since
+    # Frame 3: visible again after >= RECLAIM_ABSENT_S absent → reclaimed.
+    frames['mode'] = 'present'
+    assert pb.count_unclaimed_visible(ctx, 'banane') == 1
+    assert 20 not in ctx.claimed_tags
+    assert any('zurückgelegt' in m for m in ctx.logs)
+
+
+def test_reclaim_not_triggered_by_brief_occlusion(monkeypatch):
+    # A claimed tag occluded for a frame but NOT past RECLAIM_ABSENT_S stays
+    # claimed (no premature re-grab).
+    from physical_ai_server.workflow.handlers import perception_blocks as pb
+    monkeypatch.setattr(pb, '_RECLAIM_ABSENT_S', 1000.0)   # effectively never
+    det = _det(20, (0.18, 0.0))
+    frames = {'mode': 'present'}
+    ctx = _Ctx(_StubPerception(lambda _c: ([det] if frames['mode'] == 'present' else [])))
+    ctx.claimed_tags.add(20)
+    frames['mode'] = 'absent'
+    assert pb.count_unclaimed_visible(ctx, 'banane') == 0
+    frames['mode'] = 'present'
+    # Reappeared, but absence never reached the threshold → still claimed.
+    assert pb.count_unclaimed_visible(ctx, 'banane') == 0
+    assert 20 in ctx.claimed_tags
+
+
+# ── #3: flicker-spin guard + wall-clock cap ──────────────────────────────────
+def test_loop_stall_guard_breaks_on_no_progress(monkeypatch):
+    # count gate stays >0 (a banana is always visible) but the body never makes
+    # progress (no DO block → nothing claimed/skipped). The loop must break after
+    # WHILE_STALL_PASSES instead of spinning to MAX_LOOP_ITERATIONS.
+    monkeypatch.setattr(interp_mod, 'WHILE_STALL_PASSES', 3)
+    ctx = _Ctx(_StubPerception([_det(20, (0.18, 0.0))]))
+    block = {'type': 'edubotics_while_visible',
+             'fields': {'OBJECT_TYPE': 'banane'}, 'inputs': {}}   # no DO body
+    Interpreter([])._exec_while_visible(block, ctx, lambda *a: None)  # must not hang
+    assert ctx.claimed_tags == set()
+    assert any('kein Fortschritt' in m for m in ctx.logs)
+
+
+def test_loop_wall_clock_cap_breaks(monkeypatch):
+    monkeypatch.setattr(interp_mod, 'WHILE_MAX_SECONDS', -1.0)   # already over budget
+    ctx = _Ctx(_StubPerception([_det(20, (0.18, 0.0))]))
+    _run(ctx)
+    assert ctx.claimed_tags == set()
+    assert any('Zeitlimit' in m for m in ctx.logs)

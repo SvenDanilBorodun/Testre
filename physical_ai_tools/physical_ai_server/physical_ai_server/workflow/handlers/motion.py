@@ -68,6 +68,14 @@ GRIPPER_CLOSED_RAD = -0.5
 # fingertips straddle the lower part of a low-profile object instead of driving
 # into the table. Tuned on the rig (env-overridable).
 GRASP_CLEARANCE_M = _safe_float('EDUBOTICS_GRASP_CLEARANCE_M', 0.012)
+# Release height ABOVE the destination surface for `drop_at`. Deliberately much
+# higher than the grasp clearance so the held object is dropped from a safe
+# height that clears a low container/bucket rim, instead of pressing the gripper
+# down to ~table level (which collides with anything standing at the target).
+# Tune via EDUBOTICS_DROP_HEIGHT_M (metres above the surface). NOTE: a higher
+# release shrinks the reachable XY radius slightly, so pin the drop spot a bit
+# closer to the base if a high drop reports "außerhalb des Arbeitsbereichs".
+DROP_HEIGHT_M = _safe_float('EDUBOTICS_DROP_HEIGHT_M', 0.05)
 # Tool roll (j5) jaw constant. The OMX-F gripper's jaws separate along the
 # end-effector Y axis (URDF: both fingers pivot about EE-Z, offset along EE-Y),
 # whose base azimuth is π/2 + joint1 − joint5 — so the geometrically-correct
@@ -80,6 +88,18 @@ GRASP_CLEARANCE_M = _safe_float('EDUBOTICS_GRASP_CLEARANCE_M', 0.012)
 GRASP_ROLL_RAD = math.radians(_safe_float('EDUBOTICS_GRASP_ROLL_DEG', 90.0))
 # Workspace floor: never command the end-effector below the table plane.
 WORKSPACE_FLOOR_MARGIN_M = 0.01
+
+# Grasp-success check (#2): after the gripper closes, read the achieved gripper
+# angle (follower joint index 5). A held ~30 mm object stops the jaws partway
+# open (ABOVE GRASP_HELD_MAX_RAD, e.g. ≈ −0.07 rad); an empty close reaches
+# ≈ GRIPPER_CLOSED_RAD (−0.5). Achieved ≤ GRASP_HELD_MAX_RAD ⇒ the grasp MISSED.
+# GRASP_RETRY re-tries the whole detect→select→grasp that many times before the
+# instance is skipped; GRASP_SETTLE_S lets the servo settle before the readback.
+# Rig-tunable; env-forwarding-guard: all three are forwarded in
+# robotis_ai_setup/docker/docker-compose.yml.
+GRASP_HELD_MAX_RAD = _safe_float('EDUBOTICS_GRASP_HELD_MAX_RAD', -0.35)
+GRASP_RETRY = max(0, int(_safe_float('EDUBOTICS_GRASP_RETRY', 1.0)))
+GRASP_SETTLE_S = _safe_float('EDUBOTICS_GRASP_SETTLE_S', 0.3)
 
 DEFAULT_HOME_DURATION_S = 3.0
 DEFAULT_MOVE_DURATION_S = 2.5
@@ -535,6 +555,34 @@ def _execute_pickup(
                 pass
 
 
+def check_grasp_held(ctx) -> bool | None:
+    """Decide HELD vs EMPTY after a gripper close, from the achieved gripper
+    angle (follower joint index 5).
+
+    Returns ``True`` (object held), ``False`` (empty close — the grasp missed),
+    or ``None`` when the follower-joint readback is unavailable (the caller then
+    falls back to claim-on-completion — no regression). A held ~30 mm object
+    leaves the jaws partway open (ABOVE ``GRASP_HELD_MAX_RAD``); an empty close
+    reaches ≈ ``GRIPPER_CLOSED_RAD``. Settles ``GRASP_SETTLE_S`` so the servo has
+    reached its blocked/closed angle before the readback."""
+    getter = getattr(ctx, 'get_follower_joints', None)
+    if not callable(getter):
+        return None
+    if GRASP_SETTLE_S > 0:
+        time.sleep(GRASP_SETTLE_S)
+    try:
+        joints = getter()
+    except Exception:  # noqa: BLE001 — readback is best-effort
+        return None
+    if not joints or len(joints) < 6:
+        return None
+    try:
+        gripper = float(joints[5])
+    except (TypeError, ValueError):
+        return None
+    return gripper > GRASP_HELD_MAX_RAD
+
+
 def pickup(ctx, args: dict[str, Any]) -> None:
     _require_seeded_start_pose(ctx)
     target = _resolve_target(args.get('target'), ctx)
@@ -554,7 +602,9 @@ def drop_at(ctx, args: dict[str, Any]) -> None:
     way in. The bounded-quintic approach is consistent with pickup."""
     _require_seeded_start_pose(ctx)
     target = _resolve_target(args.get('destination'), ctx)
-    drop_xyz = (target[0], target[1], target[2] + GRASP_CLEARANCE_M)
+    # Release from a safe height above the surface (clears a low container rim),
+    # not just the grasp clearance — see DROP_HEIGHT_M.
+    drop_xyz = (target[0], target[1], target[2] + DROP_HEIGHT_M)
 
     # HIGH-5 (symmetric with pickup): solve the DROP first; derive the approach
     # from the reachable envelope so an outer-ring destination whose drop is

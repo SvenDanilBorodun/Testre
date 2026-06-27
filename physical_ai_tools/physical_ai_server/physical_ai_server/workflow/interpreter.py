@@ -74,11 +74,38 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
-# Empty-debounce for the named-object „Solange <Typ> sichtbar" loop: require
-# WHILE_EMPTY_FRAMES consecutive empty detections (WHILE_EMPTY_SECONDS apart)
-# before terminating, so one occluded/dropped frame doesn't end the loop early.
+# Empty-window for the named-object „Solange <Typ> sichtbar" loop: terminate only
+# after the type has been CONTINUOUSLY empty (0 unclaimed visible) for ≥
+# WHILE_EMPTY_SECONDS AND across ≥ WHILE_EMPTY_FRAMES consecutive detections, so a
+# briefly occluded/dropped frame — or a slow hand placing a recycled object back —
+# doesn't end the loop early. A reclaim that returns an object (count>0) resets the
+# empty state.
 WHILE_EMPTY_FRAMES = _env_int('EDUBOTICS_WHILE_EMPTY_FRAMES', 2)
-WHILE_EMPTY_SECONDS = _env_float('EDUBOTICS_WHILE_EMPTY_SECONDS', 0.5)
+WHILE_EMPTY_SECONDS = _env_float('EDUBOTICS_WHILE_EMPTY_SECONDS', 5.0)
+# Flicker-spin guard (#3): break the loop after this many CONSECUTIVE passes where
+# the count gate said >0 but the body made no progress (a GraspSkip that neither
+# grasped nor skipped a tag), instead of spinning to MAX_LOOP_ITERATIONS. A pass
+# that claims OR skips a tag resets the counter.
+WHILE_STALL_PASSES = _env_int('EDUBOTICS_WHILE_STALL_PASSES', 3)
+# Wall-clock cap (#3): break the loop with a German notice once it has run this
+# long, regardless of progress (monotonic).
+WHILE_MAX_SECONDS = _env_float('EDUBOTICS_WHILE_MAX_SECONDS', 120.0)
+# Settle delay (#3) AFTER the retreat-to-observation-pose and BEFORE re-detecting,
+# so the first detect frame isn't a still-settling/blurred arm.
+WHILE_SETTLE_S = _env_float('EDUBOTICS_WHILE_SETTLE_S', 0.2)
+
+
+def _claim_progress_count(ctx) -> int:
+    """Total claimed+skipped tag count — the progress signal for the while-visible
+    flicker-spin guard (#3). Read under claim_lock so a concurrent grasp in a hat
+    thread can't tear the sets."""
+    lock = getattr(ctx, 'claim_lock', None)
+    claimed = getattr(ctx, 'claimed_tags', None) or set()
+    skipped = getattr(ctx, 'skipped_tags', None) or set()
+    if lock is not None:
+        with lock:
+            return len(claimed) + len(skipped)
+    return len(claimed) + len(skipped)
 
 
 class _ProcedureReturn(Exception):
@@ -532,9 +559,20 @@ class Interpreter:
         from physical_ai_server.workflow.handlers.motion import GraspSkip
         iter_count = 0
         empty_streak = 0
+        empty_since: float | None = None
+        stall_passes = 0
+        loop_start = time.monotonic()
         while True:
             if ctx.should_stop():
                 raise WorkflowError('Workflow wurde gestoppt.')
+            # Wall-clock cap (#3): never run forever even if the body keeps making
+            # (slow) progress or a flaky camera keeps the gate flickering.
+            if time.monotonic() - loop_start > WHILE_MAX_SECONDS:
+                ctx.log(
+                    '[WARNUNG] „Solange sichtbar": Zeitlimit erreicht — Schleife '
+                    'beendet.'
+                )
+                break
             # Retreat so the arm doesn't occlude remaining objects during detect.
             # LIMITATION (rig-validate): if a grasping `edubotics_when_object_seen`
             # hat runs CONCURRENTLY with this loop, the hat can hold motion_lock
@@ -546,35 +584,72 @@ class Interpreter:
             # with a bounded acquire). Revisit (graceful retreat-skip) if a real
             # use case needs them together.
             _mo.go_to_observation_pose(ctx)
+            # Settle after the retreat so the first detect frame isn't a still-
+            # settling/blurred arm (#3).
+            self._interruptible_wait(ctx, WHILE_SETTLE_S)
             if _pb.count_unclaimed_visible(ctx, type_name) > 0:
                 empty_streak = 0
+                empty_since = None
                 iter_count += 1
                 if iter_count > MAX_LOOP_ITERATIONS:
                     raise InterpreterError(
                         'Schleife abgebrochen — Maximum von 10000 '
                         'Wiederholungen erreicht.'
                     )
+                # Flicker-spin guard (#3): a pass makes progress iff the body
+                # CLAIMS or SKIPS a tag (the claimed+skipped count grows).
+                # count_unclaimed_visible already ran the reclaim, so this snapshot
+                # is post-reclaim; the body (grasp) is the only thing that mutates
+                # the sets between here and the re-read.
+                before = _claim_progress_count(ctx)
                 if do_block is not None:
                     try:
                         self._exec_chain(do_block, ctx, on_block_change)
                     except GraspSkip as e:
                         # One instance couldn't be grasped (out of reach /
-                        # orientation unreadable / vanished) and was marked
-                        # skipped by grasp_object — keep going on the rest
-                        # instead of aborting the whole loop. A HARD error
-                        # (calibration, stop) is NOT a GraspSkip and still
-                        # propagates out and ends the loop.
+                        # orientation unreadable / vanished / not held after
+                        # retries) and was marked skipped by grasp_object — keep
+                        # going on the rest instead of aborting the whole loop. A
+                        # HARD error (calibration, stop) is NOT a GraspSkip and
+                        # still propagates out and ends the loop.
                         ctx.log(f'[WARNUNG] {e} Wird übersprungen.')
+                if _claim_progress_count(ctx) > before:
+                    stall_passes = 0
+                else:
+                    stall_passes += 1
+                    if stall_passes >= WHILE_STALL_PASSES:
+                        ctx.log(
+                            '[WARNUNG] „Solange sichtbar": kein Fortschritt — '
+                            'Schleife beendet.'
+                        )
+                        break
                 continue
-            # No unclaimed instances visible — debounce before terminating.
+            # No unclaimed instances visible — start/continue the empty window. A
+            # reclaim that returns an object (count>0 above) resets empty_since/
+            # empty_streak, so this measures CONTINUOUS emptiness.
+            now = time.monotonic()
+            if empty_since is None:
+                empty_since = now
             empty_streak += 1
-            if empty_streak >= WHILE_EMPTY_FRAMES:
+            # Terminate only after BOTH the consecutive-frame count AND the
+            # continuous-empty duration thresholds are met.
+            if (empty_streak >= WHILE_EMPTY_FRAMES
+                    and (now - empty_since) >= WHILE_EMPTY_SECONDS):
                 break
-            deadline = time.monotonic() + WHILE_EMPTY_SECONDS
-            while time.monotonic() < deadline:
-                if ctx.should_stop():
-                    raise WorkflowError('Workflow wurde gestoppt.')
-                time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+            self._interruptible_wait(ctx, WHILE_EMPTY_SECONDS)
+
+    @staticmethod
+    def _interruptible_wait(ctx, seconds: float) -> None:
+        """Sleep up to ``seconds`` (monotonic), bailing immediately on stop with
+        the standard German WorkflowError. Used by the while-visible loop's settle
+        + empty-window waits."""
+        if seconds <= 0:
+            return
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            if ctx.should_stop():
+                raise WorkflowError('Workflow wurde gestoppt.')
+            time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
 
     def _exec_for(
         self,

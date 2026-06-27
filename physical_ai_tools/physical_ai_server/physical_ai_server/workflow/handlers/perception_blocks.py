@@ -49,6 +49,13 @@ _TAG_YAW_MIN_RESULTANT = min(
 # Spacing between consecutive yaw-sampling frames (~30 ms, plan W3b).
 _TAG_YAW_FRAME_INTERVAL_S = 0.03
 
+# Recycled-object reclaim (#1): a claimed/skipped tag that has been continuously
+# ABSENT for ≥ this many seconds and then reappears was removed and put back, so
+# it is un-claimed/un-skipped and grabbed again. Generous default so a tag merely
+# occluded for a frame or two is NOT reclaimed. env-forwarding-guard: this var is
+# forwarded in robotis_ai_setup/docker/docker-compose.yml.
+_RECLAIM_ABSENT_S = max(0.0, _motion._safe_float('EDUBOTICS_RECLAIM_ABSENT_S', 1.5))
+
 
 # Audit fix #12: classroom palette accepted by the German UI. Defined
 # here (rather than imported from color_profile.py) so a perception
@@ -503,10 +510,64 @@ def _skip_tag(ctx, tag_id) -> None:
         skipped.add(int(tag_id))
 
 
+def _reclaim_recycled(ctx, recipe, visible_type_ids) -> None:
+    """Un-claim / un-skip a RECYCLED object so it is grabbed again (#1).
+
+    Given the set of currently-visible tag ids OF THIS TYPE, update the per-tag
+    absence tracker and, for each claimed/skipped tag of the type:
+      * visible now AND continuously absent ≥ ``_RECLAIM_ABSENT_S`` → it was
+        removed and put back: drop it from claimed/skipped and clear its absence
+        (it gets grabbed again);
+      * visible now but not long-absent → clear its absence;
+      * not visible now → mark it absent (monotonic) if not already.
+    Mutates claimed_tags/skipped_tags/absent_since under claim_lock. No-op when
+    the claim state is absent (e.g. a unit-test ctx without the sets)."""
+    claimed = getattr(ctx, 'claimed_tags', None)
+    skipped = getattr(ctx, 'skipped_tags', None)
+    absent_since = getattr(ctx, 'absent_since', None)
+    if claimed is None or skipped is None or absent_since is None:
+        return
+    type_ids = {int(i) for i in recipe.tag_ids}
+    visible = {int(i) for i in visible_type_ids}
+    now = time.monotonic()
+    lock = getattr(ctx, 'claim_lock', None)
+
+    def _update():
+        for tag in ((set(claimed) | set(skipped)) & type_ids):
+            if tag in visible:
+                started = absent_since.get(tag)
+                if started is not None and (now - started) >= _RECLAIM_ABSENT_S:
+                    claimed.discard(tag)
+                    skipped.discard(tag)
+                    absent_since.pop(tag, None)
+                    try:
+                        ctx.log(
+                            f'„{recipe.label_de}" ({tag}) wurde zurückgelegt — '
+                            'wird erneut gegriffen.'
+                        )
+                    except Exception:
+                        pass
+                else:
+                    # Visible but not (yet) long-absent: reset the absence clock.
+                    absent_since.pop(tag, None)
+            else:
+                # Not visible now: start the absence clock if not running.
+                if tag not in absent_since:
+                    absent_since[tag] = now
+
+    if lock is not None:
+        with lock:
+            _update()
+    else:
+        _update()
+
+
 def _detect_named_unclaimed(ctx, type_name) -> list:
     """``_detect_named`` minus the per-run claimed/skipped ids — the basis for
-    the loop gate + see/count/wait blocks (a placed object is not re-counted)."""
-    return _detect_named(ctx, type_name, exclude_ids=_excluded_ids(ctx))
+    the loop gate + see/count/wait blocks (a placed object is not re-counted).
+    Runs the recycled-object reclaim first (on the full set of visible type ids),
+    so a removed-then-replaced object is un-claimed and grabbed again (#1)."""
+    return _detect_named(ctx, type_name, reclaim=True)
 
 
 def count_unclaimed_visible(ctx, type_name) -> int:
@@ -619,17 +680,35 @@ def _attach_named_world(ctx, detections: list, recipe) -> list:
     return detections
 
 
-def _detect_named(ctx, type_name, exclude_ids=None) -> list:
+def _detect_named(ctx, type_name, exclude_ids=None, reclaim=False) -> list:
     """All catalog tags of ``type_name`` currently visible (minus
     ``exclude_ids``), with world_xyz_m + tag_yaw + close_rad attached. Reusable
-    by grasp_object / see_object / count_object and the P2 while-visible loop."""
+    by grasp_object / see_object / count_object and the P2 while-visible loop.
+
+    With ``reclaim=True`` (the unclaimed-view path), the FULL set of visible type
+    ids is known here — before any claimed/skipped filter — so the recycled-object
+    reclaim runs first (it may un-claim/un-skip a removed-then-replaced object),
+    and the effective exclude set is read AFTER the reclaim. ``exclude_ids`` is
+    ignored in that mode (the live claimed/skipped sets are used instead)."""
     _ensure_perception(ctx)
     _require_marker_detector(ctx)
     cat = _require_catalog(ctx)
     if not type_name:
         raise WorkflowError('Kein Objekt ausgewählt.')
     recipe = _recipe_for(cat, type_name)               # German on unknown type
-    wanted = set(recipe.tag_ids)
+    type_ids = set(recipe.tag_ids)
+    if reclaim:
+        # Detect unconditionally — the reclaim needs the full set of visible type
+        # ids even when every instance is currently claimed/skipped.
+        bgr = _scene_frame(ctx)
+        detections = ctx.perception.detect(
+            bgr, camera='scene', mode='apriltag', aruco_id=None)
+        visible_type_ids = {d.aruco_id for d in detections if d.aruco_id in type_ids}
+        _reclaim_recycled(ctx, recipe, visible_type_ids)
+        wanted = type_ids - {int(i) for i in _excluded_ids(ctx)}
+        kept = [d for d in detections if d.aruco_id in wanted]
+        return _attach_named_world(ctx, kept, recipe)
+    wanted = set(type_ids)
     if exclude_ids:
         wanted -= {int(i) for i in exclude_ids}
     if not wanted:
@@ -736,25 +815,49 @@ def _multiframe_tag_yaw(ctx, recipe, tag_id, fallback_yaw):
     return _apply_yaw_bias(ctx, mean)
 
 
+def _note_grasp_check_unavailable(ctx) -> None:
+    """Log ONCE per workflow that the grasp-success check is unavailable (no
+    follower-joint readback), so the fall-back-to-claim behaviour is visible
+    without spamming the log on every grasp."""
+    if getattr(ctx, '_grasp_check_warned', False):
+        return
+    try:
+        ctx._grasp_check_warned = True
+    except Exception:
+        pass
+    try:
+        ctx.log(
+            '[WARNUNG] Greif-Erfolgskontrolle nicht verfügbar (keine Gelenkdaten) '
+            '— Objekt wird nach dem Greifen als erledigt markiert.'
+        )
+    except Exception:
+        pass
+
+
 def grasp_object(ctx, args: dict[str, Any]) -> None:
     """Detect the nearest reachable UNCLAIMED instance of the chosen object type
     and grasp it top-down with the live tag-derived wrist roll + per-object
-    gripper close, then mark that tag CLAIMED.
+    gripper close, verify the grasp actually HELD, then mark that tag CLAIMED.
 
-    Open-loop: the grasp-success heuristic + retry-once is a later sub-step
-    (gated on the P0 held-vs-empty separability measurement), so the tag is
-    claimed unconditionally AFTER a completed grasp — this guarantees the
-    „Solange <Typ> sichtbar" loop terminates (each pass takes the next unclaimed
-    instance). detect→select→grasp is held under motion_lock so a concurrent
-    when_object_seen hat can't grab the same instance between the detect and the
-    pickup (TOCTOU, §12).
+    Grasp-success check + retry (#2): after the gripper closes,
+    ``motion.check_grasp_held`` reads the achieved gripper angle — an empty close
+    reaches ≈ GRIPPER_CLOSED_RAD, a held object stops the jaws partway open. On a
+    MISS the whole detect→select→grasp retries up to ``GRASP_RETRY`` times
+    (retreating to the observation pose between tries so the arm doesn't occlude
+    the object); on a miss after the last try the instance is SKIPPED (never
+    claimed) and ``GraspSkip`` is raised. When the joint readback is unavailable
+    (``None``) the prior claim-on-completion behaviour is kept (no regression).
+    detect→select→grasp is held under motion_lock so a concurrent when_object_seen
+    hat can't grab the same instance between the detect and the pickup (TOCTOU,
+    §12).
 
     Recoverable per-instance failures (nothing visible right now, every instance
-    out of reach, or the orientation couldn't be read) mark the offending tag(s)
-    SKIPPED and raise ``GraspSkip`` — the loop swallows it and continues on the
-    rest, a standalone „greife" fails loud (``GraspSkip`` IS a ``WorkflowError``).
-    A HARD failure (missing calibration) raises the base ``WorkflowError`` so the
-    loop ABORTS instead of spinning forever."""
+    out of reach, the orientation couldn't be read, or the grab failed after
+    retries) mark the offending tag(s) SKIPPED and raise ``GraspSkip`` — the loop
+    swallows it and continues on the rest, a standalone „greife" fails loud
+    (``GraspSkip`` IS a ``WorkflowError``). A HARD failure (missing calibration)
+    raises the base ``WorkflowError`` so the loop ABORTS instead of spinning
+    forever."""
     type_name = args.get('object_type')
     if not type_name:
         raise WorkflowError('Kein Objekt ausgewählt.')
@@ -763,55 +866,83 @@ def grasp_object(ctx, args: dict[str, Any]) -> None:
     if lock is not None:
         lock.acquire()
     try:
-        detections = _detect_named(ctx, type_name, exclude_ids=_excluded_ids(ctx))
-        if not detections:
-            # The object vanished between the loop's count and this grasp (or a
-            # standalone „greife" with nothing in view). Recoverable: the loop
-            # re-detects next pass; standalone fails loud.
-            raise GraspSkip(
-                f'Kein „{recipe.label_de}" sichtbar — bitte das Objekt in den '
-                'markierten Greifbereich legen.'
-            )
-        target = _select_nearest_reachable(ctx, detections)
-        if target is None:
-            # Calibration incomplete (world_xyz_m unset) → _resolve_target raises
-            # the precise German calib message — a HARD WorkflowError so the loop
-            # aborts (calibration won't fix itself mid-run).
-            if all(d.world_xyz_m is None for d in detections):
-                _motion._resolve_target(detections[0], ctx)   # raises calib error
-            # Calibrated but every visible instance is out of reach. SKIP them all
-            # so the loop terminates (next pass excludes them) instead of
-            # retreat→redetect→fail forever; standalone fails loud.
-            for d in detections:
-                _skip_tag(ctx, d.aruco_id)
-            raise GraspSkip(
-                f'„{recipe.label_de}" gesehen, aber außerhalb des Greifbereichs — '
-                'bitte näher in den markierten Bereich legen.'
-            )
-        _motion._require_seeded_start_pose(ctx)
-        x, y, z = target.world_xyz_m
-        # Refine the SELECTED target's yaw over N frames (circular mean + R gate)
-        # before committing the wrist roll — single-frame corner noise mis-pinches
-        # the jaw. Multi-sample only this one instance (object static pre-grasp),
-        # not every detection. R below threshold / <2 valid frames → yaw None →
-        # the skip-on-unreadable-yaw path below handles it (no blind grasp).
-        tag_yaw = _multiframe_tag_yaw(
-            ctx, recipe, target.aruco_id, target.extras.get('tag_yaw'))
-        if tag_yaw is None:
-            # Orientation couldn't be recovered (bad corners / failed the tag-edge
-            # sanity gate). Do NOT commit a blind fixed-roll grasp — on an
-            # elongated object that pinches the wrong (long) axis and topples it.
-            # SKIP this instance so the loop tries the next one / ends cleanly.
-            _skip_tag(ctx, target.aruco_id)
-            raise GraspSkip(
-                f'„{recipe.label_de}" erkannt, aber die Ausrichtung konnte nicht '
-                'bestimmt werden — bitte den Tag flach und gut sichtbar aufkleben.'
-            )
-        roll = _motion.compute_grasp_roll(ctx, x, y, tag_yaw)
-        close_rad = float(target.extras.get('gripper_close_rad', _motion.GRIPPER_CLOSED_RAD))
-        _motion._execute_pickup(ctx, (x, y, z), float(recipe.approach_clear_m), roll, close_rad)
-        # Claim AFTER a completed grasp so the loop never re-grabs this instance.
-        _claim_tag(ctx, target.aruco_id)
+        attempts = _motion.GRASP_RETRY + 1
+        for attempt in range(attempts):
+            detections = _detect_named(ctx, type_name, exclude_ids=_excluded_ids(ctx))
+            if not detections:
+                # The object vanished between the loop's count and this grasp (or a
+                # standalone „greife" with nothing in view). Recoverable: the loop
+                # re-detects next pass; standalone fails loud.
+                raise GraspSkip(
+                    f'Kein „{recipe.label_de}" sichtbar — bitte das Objekt in den '
+                    'markierten Greifbereich legen.'
+                )
+            target = _select_nearest_reachable(ctx, detections)
+            if target is None:
+                # Calibration incomplete (world_xyz_m unset) → _resolve_target
+                # raises the precise German calib message — a HARD WorkflowError so
+                # the loop aborts (calibration won't fix itself mid-run).
+                if all(d.world_xyz_m is None for d in detections):
+                    _motion._resolve_target(detections[0], ctx)   # raises calib error
+                # Calibrated but every visible instance is out of reach. SKIP them
+                # all so the loop terminates (next pass excludes them) instead of
+                # retreat→redetect→fail forever; standalone fails loud.
+                for d in detections:
+                    _skip_tag(ctx, d.aruco_id)
+                raise GraspSkip(
+                    f'„{recipe.label_de}" gesehen, aber außerhalb des Greifbereichs — '
+                    'bitte näher in den markierten Bereich legen.'
+                )
+            _motion._require_seeded_start_pose(ctx)
+            x, y, z = target.world_xyz_m
+            # Refine the SELECTED target's yaw over N frames (circular mean + R
+            # gate) before committing the wrist roll — single-frame corner noise
+            # mis-pinches the jaw. Multi-sample only this one instance (object
+            # static pre-grasp), not every detection. R below threshold / <2 valid
+            # frames → yaw None → the skip-on-unreadable-yaw path below handles it.
+            tag_yaw = _multiframe_tag_yaw(
+                ctx, recipe, target.aruco_id, target.extras.get('tag_yaw'))
+            if tag_yaw is None:
+                # Orientation couldn't be recovered (bad corners / failed the
+                # tag-edge sanity gate). Do NOT commit a blind fixed-roll grasp —
+                # on an elongated object that pinches the wrong (long) axis and
+                # topples it. SKIP this instance so the loop tries the next one.
+                _skip_tag(ctx, target.aruco_id)
+                raise GraspSkip(
+                    f'„{recipe.label_de}" erkannt, aber die Ausrichtung konnte nicht '
+                    'bestimmt werden — bitte den Tag flach und gut sichtbar aufkleben.'
+                )
+            roll = _motion.compute_grasp_roll(ctx, x, y, tag_yaw)
+            close_rad = float(target.extras.get('gripper_close_rad', _motion.GRIPPER_CLOSED_RAD))
+            _motion._execute_pickup(
+                ctx, (x, y, z), float(recipe.approach_clear_m), roll, close_rad)
+            held = _motion.check_grasp_held(ctx)
+            if held is False:
+                # The jaws closed empty — the object slipped or was mis-pinched.
+                if attempt < attempts - 1:
+                    ctx.log(
+                        f'[WARNUNG] „{recipe.label_de}" nicht gegriffen — neuer '
+                        'Versuch.'
+                    )
+                    # Retreat out of the scene-cam view before re-detecting so the
+                    # arm doesn't occlude the object on the retry frame.
+                    _motion.go_to_observation_pose(ctx)
+                    continue
+                # Retries exhausted: SKIP this instance so the loop makes progress;
+                # a standalone „greife" fails loud (GraspSkip IS a WorkflowError).
+                # Do NOT claim a missed grab.
+                _skip_tag(ctx, target.aruco_id)
+                raise GraspSkip(
+                    f'„{recipe.label_de}" konnte nicht gegriffen werden — bitte das '
+                    'Objekt prüfen und neu in den Greifbereich legen.'
+                )
+            # held is True (object held) OR None (no readback → keep the prior
+            # claim-on-completion behaviour). Claim either way so the loop makes
+            # progress and never re-grabs this instance.
+            if held is None:
+                _note_grasp_check_unavailable(ctx)
+            _claim_tag(ctx, target.aruco_id)
+            return
     finally:
         if lock is not None:
             try:

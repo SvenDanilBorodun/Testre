@@ -219,12 +219,23 @@ services:
       - EDUBOTICS_TAG_YAW_MIN_RESULTANT=${EDUBOTICS_TAG_YAW_MIN_RESULTANT:-0.9}
       # Named-object „Solange <Typ> sichtbar" loop: the observation pose the arm
       # retreats to between passes (out of the scene-cam view; 5 comma-separated
-      # joint radians, empty = HOME), and the empty-debounce (require K empty
-      # detections T seconds apart before the loop terminates). Read by
+      # joint radians, empty = HOME), and the generous empty-WINDOW (terminate only
+      # after the type has been CONTINUOUSLY empty for ≥ WHILE_EMPTY_SECONDS AND
+      # across ≥ WHILE_EMPTY_FRAMES consecutive detections). Read by
       # workflow/handlers/motion.py + workflow/interpreter.py.
       - EDUBOTICS_OBSERVE_POSE=${EDUBOTICS_OBSERVE_POSE:-}
       - EDUBOTICS_WHILE_EMPTY_FRAMES=${EDUBOTICS_WHILE_EMPTY_FRAMES:-2}
-      - EDUBOTICS_WHILE_EMPTY_SECONDS=${EDUBOTICS_WHILE_EMPTY_SECONDS:-0.5}
+      - EDUBOTICS_WHILE_EMPTY_SECONDS=${EDUBOTICS_WHILE_EMPTY_SECONDS:-5.0}
+      # Flicker-spin guard (break after this many consecutive no-progress passes),
+      # wall-clock cap (seconds), and the settle delay after the retreat before
+      # re-detecting. Read by workflow/interpreter.py.
+      - EDUBOTICS_WHILE_STALL_PASSES=${EDUBOTICS_WHILE_STALL_PASSES:-3}
+      - EDUBOTICS_WHILE_MAX_SECONDS=${EDUBOTICS_WHILE_MAX_SECONDS:-120}
+      - EDUBOTICS_WHILE_SETTLE_S=${EDUBOTICS_WHILE_SETTLE_S:-0.2}
+      # Recycled-object reclaim: a claimed/skipped object continuously ABSENT for
+      # ≥ this many seconds and then put back is grabbed again. Read by
+      # workflow/handlers/perception_blocks.py.
+      - EDUBOTICS_RECLAIM_ABSENT_S=${EDUBOTICS_RECLAIM_ABSENT_S:-1.5}
       # Follower-only (Roboter Studio) flag — ALSO read by physical_ai_server's
       # leader_appears_active() server-side guard (collision_monitor.py), not
       # just by open_manipulator's entrypoint, so it must be forwarded here too
@@ -273,12 +284,25 @@ services:
       # Generic grasp: conservative descend clearance above the measured table
       # plane, and a fixed tool-roll (j5) for the gripper. Rig-tunable.
       - EDUBOTICS_GRASP_CLEARANCE_M=${EDUBOTICS_GRASP_CLEARANCE_M:-0.012}
+      # Release height (m) above the destination surface for `ablegen bei` (drop_at)
+      # so the held object is dropped from a safe height that clears a low
+      # container rim instead of pressing the gripper down to ~table level.
+      - EDUBOTICS_DROP_HEIGHT_M=${EDUBOTICS_DROP_HEIGHT_M:-0.05}
       # Top-down jaw constant (deg). The OMX-F jaws separate along EE-Y, so the
       # geometrically-correct value is 90 (0 would pinch the perpendicular axis);
       # it is the additive const in the live named-object grasp roll AND the fixed
       # roll the legacy pickup/drop_at/move_to use. Rig-validated by the P0
       # jaw-check. Read by workflow/handlers/motion.py.
       - EDUBOTICS_GRASP_ROLL_DEG=${EDUBOTICS_GRASP_ROLL_DEG:-90.0}
+      # Grasp-success check (named-object grasp): after the gripper closes, the
+      # achieved gripper angle (follower joint 5) tells HELD from EMPTY — an
+      # achieved angle ≤ GRASP_HELD_MAX_RAD means the jaws closed empty (missed).
+      # GRASP_RETRY re-tries the detect→grasp that many times before skipping the
+      # instance; GRASP_SETTLE_S settles the servo before the readback. Read by
+      # workflow/handlers/motion.py.
+      - EDUBOTICS_GRASP_HELD_MAX_RAD=${EDUBOTICS_GRASP_HELD_MAX_RAD:--0.35}
+      - EDUBOTICS_GRASP_RETRY=${EDUBOTICS_GRASP_RETRY:-1}
+      - EDUBOTICS_GRASP_SETTLE_S=${EDUBOTICS_GRASP_SETTLE_S:-0.3}
       # Vision detector selection + ONNX paths for the Roboter Studio
       # open-vocab block. `yolox-tiny` is the only fully-wired path
       # today; `dfine-n` is reserved (see overlays/workflow/perception.py

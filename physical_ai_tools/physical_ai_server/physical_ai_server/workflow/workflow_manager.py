@@ -94,6 +94,12 @@ class WorkflowContext:
     # gate (reject a frozen camera). None → unknown (gate skipped).
     get_scene_frame_age: Callable[[], float | None] | None = None
     get_current_pose_xyz: Callable[[], tuple[float, float, float] | None] | None = None
+    # Latest 6-joint follower readback (index 5 = gripper), for the grasp-success
+    # check (#2): after the gripper closes, the achieved gripper angle tells HELD
+    # (object blocks the jaws, stays partly open) from EMPTY (jaws close fully).
+    # None when the joint source is unavailable → the check falls back to the
+    # claim-on-completion behaviour (no regression).
+    get_follower_joints: Callable[[], list[float] | None] | None = None
     # Phase-2 additions
     motion_lock: threading.RLock | None = None  # reentrant: hat body + inner publish
     # Re-entrant variable lock so the variables_get/set blocks from main
@@ -144,6 +150,12 @@ class WorkflowContext:
     claimed_tags: set = field(default_factory=set)
     skipped_tags: set = field(default_factory=set)
     claim_lock: threading.RLock | None = None
+    # Per-tag absence tracking for the recycled-object reclaim (#1): tag id →
+    # monotonic time it was first seen ABSENT. When a claimed/skipped tag of the
+    # loop's type reappears after ≥ RECLAIM_ABSENT_S continuously absent, it was
+    # removed and put back → un-claimed/un-skipped so it is grabbed again.
+    # Guarded by claim_lock (same as claimed_tags/skipped_tags).
+    absent_since: dict = field(default_factory=dict)
 
 
 MAX_WORKFLOW_JSON_BYTES = 256 * 1024  # 256 KiB; see plan §2.5
@@ -423,6 +435,9 @@ class WorkflowManager:
                 get_gripper_frame=self._get_gripper_frame,
                 get_scene_frame_age=self._get_scene_frame_age,
                 get_current_pose_xyz=self._get_current_pose_xyz,
+                # Grasp-success check (#2): read the achieved gripper angle after
+                # a close to confirm the object is actually held.
+                get_follower_joints=self._get_follower_joints,
                 motion_lock=self._motion_lock,
                 var_lock=self._var_lock,
                 breakpoints=self._breakpoints,
@@ -442,6 +457,8 @@ class WorkflowManager:
                 claimed_tags=set(),
                 skipped_tags=set(),
                 claim_lock=self._claim_lock,
+                # Fresh per-run absence tracker for the recycled-object reclaim.
+                absent_since={},
             )
 
             # Apply the synchronous seed so hat threads start with a

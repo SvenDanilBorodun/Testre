@@ -661,18 +661,19 @@ def _greifziel_xyz_roll(ctx, ziel) -> tuple[float, float, float, float]:
     """Resolve a Greifziel (a ``Detection`` value) into the grasp ``(x, y, z)``
     plus the oriented wrist roll.
 
-    Raises a German ``WorkflowError`` when no Greifziel was supplied (the student
-    forgot ``finde``), the PRECISE calibration error via ``_resolve_target`` when
-    the detection has no ``world_xyz_m`` yet, and a ``GraspSkip`` when the tag
-    orientation couldn't be read (``extras['tag_yaw']`` is ``None``) — so we never
-    commit a blind fixed-roll grasp that would pinch an elongated object on its
-    long axis. In a "Solange sichtbar" loop the ``GraspSkip`` is swallowed and the
-    loop moves on; a standalone use fails loud (``GraspSkip`` IS a
-    ``WorkflowError``)."""
+    Raises a ``GraspSkip`` when no Greifziel was supplied (the student forgot
+    ``finde`` / didn't guard with ``falls Ziel``) OR when the tag orientation
+    couldn't be read (``extras['tag_yaw']`` is ``None``) — both per-instance,
+    RECOVERABLE failures, so a "Solange sichtbar" loop swallows them and moves on
+    instead of ABORTING the whole run, while a standalone use still fails loud
+    (``GraspSkip`` IS a ``WorkflowError``). Raises the PRECISE calibration error
+    via ``_resolve_target`` when the detection has no ``world_xyz_m`` yet. Never
+    commits a blind fixed-roll grasp that would pinch an elongated object on its
+    long axis."""
     if ziel is None:
-        raise WorkflowError(
-            'Kein Greifziel — bitte zuerst „finde …" benutzen und das Ergebnis '
-            'verwenden (z. B. in einer Variable „Ziel").'
+        raise GraspSkip(
+            'Kein Greifziel — bitte „finde …" benutzen, das Ergebnis in einer '
+            'Variable speichern und mit „falls" prüfen.'
         )
     x, y, z = _resolve_target(ziel, ctx)   # Detection.world_xyz_m + precise calib error
     tag_yaw = None
@@ -710,7 +711,12 @@ def move_above(ctx, args: dict[str, Any]) -> None:
     ziel = args.get('ziel')
     x, y, z, roll = _greifziel_xyz_roll(ctx, ziel)
     approach = _greifziel_approach(ziel)
-    arm_q = _solve_or_raise(ctx, (x, y, z + approach), roll=roll)
+    # Clamp the hover to the reachable envelope (reuse the canned path's HIGH-5
+    # bisection) instead of REFUSING an outer-ring object whose grasp `finde`
+    # already accepted but whose +approach pose is just outside the shrinking
+    # annulus — solves the grasp first (raises only if THAT is unreachable) and
+    # derives the largest reachable hover.
+    _grasp_q, arm_q = _solve_grasp_and_approach(ctx, (x, y, z), approach, roll=roll)
     q_end = arm_q + [ctx.last_full_joints[5]]
     _publish_motion(ctx, ctx.last_full_joints, q_end, DEFAULT_MOVE_DURATION_S)
     ctx.last_arm_joints = arm_q
@@ -734,16 +740,27 @@ def close_on_object(ctx, args: dict[str, Any]) -> None:
     """„schließe um <Ziel>" — close the gripper to the Greifziel's tuned close
     angle (``extras['gripper_close_rad']``) at the current arm pose, falling back
     to the full close ``GRIPPER_CLOSED_RAD`` when the angle is missing/malformed."""
+    ziel = args.get('ziel')
+    # Consistent with the other split blocks: a missing Greifziel is a recoverable
+    # skip (a loop moves on; standalone fails loud) — NOT a silent full-close,
+    # which could over-close (overload) on a wide object.
+    if ziel is None:
+        raise GraspSkip(
+            'Kein Greifziel — bitte „finde …" benutzen, das Ergebnis in einer '
+            'Variable speichern und mit „falls" prüfen.'
+        )
     _require_seeded_start_pose(ctx)
     close_rad = GRIPPER_CLOSED_RAD
-    extras = getattr(args.get('ziel'), 'extras', None)
+    extras = getattr(ziel, 'extras', None)
     if isinstance(extras, dict):
         raw = extras.get('gripper_close_rad')
         if raw is not None:
             try:
-                close_rad = float(raw)
+                parsed = float(raw)
             except (TypeError, ValueError):
-                close_rad = GRIPPER_CLOSED_RAD
+                parsed = GRIPPER_CLOSED_RAD
+            # NaN/inf passes float() but would command a garbage gripper angle.
+            close_rad = parsed if math.isfinite(parsed) else GRIPPER_CLOSED_RAD
     q_start = ctx.last_full_joints
     q_end = q_start[:5] + [close_rad]
     _publish_motion(ctx, q_start, q_end, DEFAULT_GRIPPER_DURATION_S)
@@ -766,11 +783,17 @@ def lift(ctx, args: dict[str, Any]) -> None:
         raise WorkflowError('Aktuelle Position ist unbekannt.')
     _R, t = pose
     x, y, z = float(t[0]), float(t[1]), float(t[2])
+    # Clamp the lift to the reachable envelope (reuse the canned path's HIGH-5
+    # bisection) so an outer-ring grasp is never STRANDED at table level by an
+    # unreachable full +approach lift: the current (reachable) pose is the lower
+    # bound, the lift bisects up to the max reachable height.
+    _grasp_q, above_q = _solve_grasp_and_approach(
+        ctx, (x, y, z), DEFAULT_APPROACH_HEIGHT_M)
     # j5 is (very nearly) pure tool roll about the top-down tool axis — the tip
     # sits within ~1.6 mm of that axis (the EE y-offset the IK itself ignores) —
-    # so overriding j5 after the solve keeps the (x, y, z+approach) position to
-    # sub-grasp-tolerance while preserving the held object's orientation.
-    arm_q = list(_solve_or_raise(ctx, (x, y, z + DEFAULT_APPROACH_HEIGHT_M)))
+    # so overriding j5 after the solve keeps the position to sub-grasp-tolerance
+    # while preserving the held object's orientation.
+    arm_q = list(above_q)
     arm_q[4] = cur[4]
     q_end = arm_q + [cur[5]]
     _publish_motion(ctx, cur, q_end, DEFAULT_APPROACH_DURATION_S)

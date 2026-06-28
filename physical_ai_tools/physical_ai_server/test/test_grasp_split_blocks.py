@@ -27,9 +27,13 @@ from physical_ai_server.workflow.handlers import perception_blocks as pb
 from physical_ai_server.workflow.handlers.motion import (
     GRIPPER_OPEN_RAD,
     HOME_JOINTS_RAD,
+    GraspSkip,
     WorkflowError,
+    close_on_object,
+    move_above,
 )
 from physical_ai_server.workflow.ik_solver import IKSolver
+from physical_ai_server.workflow.interpreter import Interpreter
 from physical_ai_server.workflow.object_catalog import parse_catalog
 from physical_ai_server.workflow.perception import Detection
 
@@ -131,10 +135,13 @@ def test_find_object_nothing_visible_returns_none():
     assert pb.find_object(_PCtx([]), {'object_type': 'wuerfel'}) is None
 
 
-def test_find_object_out_of_reach_returns_none():
-    # Far outside the reach annulus → not selectable, but calibrated → None.
-    ctx = _PCtx([_det(world=(0.50, 0.0, 0.03))])
+def test_find_object_out_of_reach_skips_and_returns_none():
+    # Far outside the reach annulus → not selectable, calibrated → None AND the
+    # tag is SKIPPED so a „Solange sichtbar" loop's gate drops to 0 and ends
+    # cleanly instead of stalling for 3 passes (#B1).
+    ctx = _PCtx([_det(world=(0.50, 0.0, 0.03), aruco_id=7)])
     assert pb.find_object(ctx, {'object_type': 'wuerfel'}) is None
+    assert 7 in ctx.skipped_tags
 
 
 def test_find_object_uncalibrated_raises_precise_error():
@@ -203,3 +210,38 @@ def test_mark_done_claims_tag():
 def test_mark_done_none_raises():
     with pytest.raises(WorkflowError):
         pb.mark_done(_PCtx([]), {'ziel': None})
+
+
+# ── #HIGH-3 / #MED-4: split blocks raise GraspSkip (loop-graceful) on None ────
+def test_split_blocks_raise_graspskip_on_none():
+    """move_above / close_on_object / mark_done raise GraspSkip (NOT a bare
+    WorkflowError) on a missing Greifziel, so an unguarded „Solange sichtbar" loop
+    body moves on instead of ABORTING the whole run; standalone still fails loud
+    (GraspSkip IS a WorkflowError)."""
+    ctx = _PCtx([])
+    with pytest.raises(GraspSkip):
+        move_above(ctx, {'ziel': None})
+    with pytest.raises(GraspSkip):
+        close_on_object(ctx, {'ziel': None})
+    with pytest.raises(GraspSkip):
+        pb.mark_done(ctx, {'ziel': None})
+
+
+# ── #BUG-4: the ZIEL→ziel dispatch contract (unit tests bypass _build_args) ───
+def test_split_block_ziel_input_lowercased_for_handler():
+    """The React input NAME 'ZIEL' must reach the handler as args['ziel'] (the
+    server↔React contract). _build_args lowercases it; this locks the contract
+    the direct-call unit tests bypass."""
+    interp = Interpreter([])
+    ctx = _PCtx([])
+    det = _det()
+    ctx.variables = {'Ziel': det}
+    block = {
+        'type': 'edubotics_move_above',
+        'inputs': {'ZIEL': {'block': {
+            'type': 'variables_get',
+            'fields': {'VAR': {'name': 'Ziel'}},
+        }}},
+    }
+    args = interp._build_args(block, ctx)
+    assert 'ziel' in args and args['ziel'] is det

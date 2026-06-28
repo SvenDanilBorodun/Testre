@@ -57,6 +57,12 @@ HAT_BLOCK_TYPES: frozenset[str] = frozenset({
 # almost certainly looking at an infinite-loop bug.
 MAX_LOOP_ITERATIONS = 10000
 
+# Cap on the [VAR:..] inspector-sentinel payload. The [VAR:] path bypasses
+# output.log's MAX_LOG_CHARS, so without this a forever-loop self-concatenating a
+# text variable would re-emit an unbounded, growing string into the realtime
+# status channel every iteration.
+_MAX_VAR_PAYLOAD_CHARS = 2000
+
 
 def _env_int(name: str, default: int) -> int:
     try:
@@ -108,11 +114,12 @@ FOREVER_MIN_CYCLE_S = 0.05
 # same failure mode WHILE_MAX_SECONDS guards in the while-visible loop. So the
 # wait breaks with a German [WARNUNG] (the workflow then CONTINUES, exactly like
 # the while-visible wall-clock break — not a hard raise) once it has polled this
-# long. Deliberately a plain module constant, NOT an EDUBOTICS_* env var: a new
-# env knob would have to be forwarded through docker-compose (ci.yml's
-# env-forwarding-guard scans this package), which is out of this change's scope.
-# Promote to _env_float('EDUBOTICS_WAIT_UNTIL_MAX_SECONDS', …) + a compose
-# forward later if operators need it tunable. Tests monkeypatch the constant.
+# long. Deliberately a plain module constant, NOT an env-var override: a new env
+# knob would have to be forwarded through docker-compose (ci.yml's
+# env-forwarding-guard scans this package — and would flag the very token name if
+# it appeared here), which is out of this change's scope. Promote it to an
+# `_env_float(...)` read + a compose forward later if operators need it tunable.
+# Tests monkeypatch the constant.
 WAIT_UNTIL_MAX_SECONDS = 300.0
 
 
@@ -756,6 +763,11 @@ class Interpreter:
         while True:
             if ctx.should_stop():
                 raise WorkflowError('Workflow wurde gestoppt.')
+            # Honor Pause between iterations / for an empty body — the body's own
+            # blocks check pause per-block, but the empty-body idle and the
+            # rate-floor sleep would otherwise ignore it (#E3).
+            if callable(getattr(ctx, 'wait_if_paused', None)):
+                ctx.wait_if_paused()
             if do_block is None:
                 # Empty body: never busy-wait. Idle one tick (still bailing on
                 # stop via _interruptible_wait's German WorkflowError) and loop.
@@ -816,6 +828,10 @@ class Interpreter:
             while True:
                 if ctx.should_stop():
                     raise WorkflowError('Workflow wurde gestoppt.')
+                # Honor Pause inside the wait (#E3) — the poll never runs a block,
+                # so without this Pause would do nothing until the condition/cap.
+                if callable(getattr(ctx, 'wait_if_paused', None)):
+                    ctx.wait_if_paused()
                 cond = self._eval_value(bool_block, ctx) if bool_block is not None else False
                 if self._truthy(cond):
                     return
@@ -828,8 +844,10 @@ class Interpreter:
                     except Exception:
                         pass
                     return
-                # ~0.1 s between polls (bails immediately on stop).
-                self._interruptible_wait(ctx, 0.1)
+                # ~0.2 s between polls — matches perception_blocks._poll_until so a
+                # perception condition isn't detected at 2× the usual cadence; bails
+                # immediately on stop.
+                self._interruptible_wait(ctx, 0.2)
         finally:
             if released and motion_lock is not None:
                 # Bounded reacquire so the hat's `with motion_lock` __exit__ has
@@ -913,8 +931,14 @@ class Interpreter:
         # Emit a [VAR:name=json] sentinel so the React variable
         # inspector (debugger panel) can mirror the change. Failures
         # here must not raise — variables are best-effort observability.
+        # Cap the payload (the [VAR:] path bypasses output.log's MAX_LOG_CHARS):
+        # `forever { setze x = verbinde(x, …) }` would otherwise re-emit an
+        # ever-growing string ~20×/s and flood the realtime channel.
         try:
-            ctx.log(f'[VAR:{name}={json.dumps(_jsonable(value))}]')
+            payload = json.dumps(_jsonable(value))
+            if len(payload) > _MAX_VAR_PAYLOAD_CHARS:
+                payload = payload[:_MAX_VAR_PAYLOAD_CHARS] + ' …'
+            ctx.log(f'[VAR:{name}={payload}]')
         except Exception:
             pass
 

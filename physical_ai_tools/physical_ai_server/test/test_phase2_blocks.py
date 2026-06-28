@@ -319,3 +319,17 @@ def test_wait_until_releases_motion_lock_during_poll():
     t2.join()
     assert after == [False], 'motion_lock was NOT reacquired after wait_until'
     lock.release()
+
+
+# ── #P1: [VAR:] payload cap (forever + text_join self-concat flood guard) ─────
+def test_set_variable_caps_var_payload():
+    """A huge variable value is truncated in the [VAR:] inspector emission so a
+    `forever { setze x = verbinde(x, …) }` can't re-emit an unbounded growing
+    string into the realtime channel (#P1)."""
+    interp = Interpreter([])
+    ctx = _Ctx()
+    interp._set_variable(ctx, 'huge', 'x' * 50000)
+    var_lines = [m for m in ctx.logs if m.startswith('[VAR:huge=')]
+    assert var_lines, 'no [VAR:] emission'
+    assert ' …' in var_lines[0]          # truncation marker present
+    assert len(var_lines[0]) < 5000      # capped well below the 50k payload

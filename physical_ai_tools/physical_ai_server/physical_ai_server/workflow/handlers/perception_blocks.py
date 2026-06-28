@@ -755,6 +755,20 @@ def find_object(ctx, args: dict[str, Any]):
         # the student would misread as "nothing there".
         if all(d.world_xyz_m is None for d in detections):
             _motion._resolve_target(detections[0], ctx)   # raises the precise calib error
+        # Calibrated but every visible instance is out of reach: SKIP them all
+        # (exactly like grasp_object, perception_blocks.py grasp branch) so a
+        # „Solange sichtbar" loop's gate drops to 0 and it ends cleanly with
+        # „nichts mehr sichtbar — fertig", instead of re-selecting them every pass
+        # until the 3-pass stall guard trips with the scary „kein Fortschritt".
+        for d in detections:
+            _skip_tag(ctx, d.aruco_id)
+        try:
+            ctx.log(
+                f'[WARNUNG] „{recipe.label_de}" gesehen, aber außerhalb des '
+                'Greifbereichs — bitte näher in den markierten Bereich legen.'
+            )
+        except Exception:
+            pass
         return None
     tag_yaw = _multiframe_tag_yaw(
         ctx, recipe, target.aruco_id, target.extras.get('tag_yaw'))
@@ -812,7 +826,12 @@ def mark_done(ctx, args: dict[str, Any]) -> None:
     grasp path doesn't auto-claim like the one-block ``Greife``)."""
     ziel = args.get('ziel')
     if ziel is None:
-        raise WorkflowError('Kein Greifziel — bitte zuerst „finde …" benutzen.')
+        # Recoverable skip (consistent with the split motion blocks) so an
+        # unguarded loop body moves on instead of aborting; standalone fails loud.
+        raise GraspSkip(
+            'Kein Greifziel — bitte „finde …" benutzen, das Ergebnis in einer '
+            'Variable speichern und mit „falls" prüfen.'
+        )
     tag_id = getattr(ziel, 'aruco_id', None)
     if tag_id is None:
         raise WorkflowError('Greifziel hat keine Marker-ID.')

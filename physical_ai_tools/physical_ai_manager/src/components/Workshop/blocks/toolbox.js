@@ -53,6 +53,11 @@ export function buildToolbox(restrictedBlocks = null) {
     { kind: 'block', type: 'edubotics_move_to' },
     { kind: 'block', type: 'edubotics_pickup' },
     { kind: 'block', type: 'edubotics_drop_at' },
+    // Grasp split (Phase 1) — explicit pick sequence (top-to-bottom order).
+    { kind: 'block', type: 'edubotics_move_above' },
+    { kind: 'block', type: 'edubotics_descend_to' },
+    { kind: 'block', type: 'edubotics_close_on_object' },
+    { kind: 'block', type: 'edubotics_lift' },
     {
       kind: 'block',
       type: 'edubotics_wait_seconds',
@@ -67,6 +72,12 @@ export function buildToolbox(restrictedBlocks = null) {
     { kind: 'block', type: 'edubotics_see_object' },
     { kind: 'block', type: 'edubotics_count_object' },
     { kind: 'block', type: 'edubotics_wait_until_object_seen' },
+    // Grasp split (Phase 1) — natural pick sequence (find → position →
+    // held? → mark done).
+    { kind: 'block', type: 'edubotics_find_object' },
+    { kind: 'block', type: 'edubotics_object_position' },
+    { kind: 'block', type: 'edubotics_grasp_held' },
+    { kind: 'block', type: 'edubotics_mark_done' },
   ], restricted);
 
   const events = filterContents([

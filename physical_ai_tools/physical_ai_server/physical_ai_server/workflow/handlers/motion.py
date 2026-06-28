@@ -641,6 +641,143 @@ def drop_at(ctx, args: dict[str, Any]) -> None:
                 pass
 
 
+# ── Grasp-split primitives (Phase 1) ─────────────────────────────────────────
+# The one-block ``grasp_object`` ("Greife <Typ>") is decomposed into composable
+# blocks the student sequences: ``fahre über`` (move_above) → ``senke auf``
+# (descend_to) → ``schließe um`` (close_on_object) → ``hebe an`` (lift), each
+# acting on a Greifziel (a ``Detection`` produced by perception_blocks.find_object,
+# normally latched into a Blockly variable first). They reuse the SAME IK +
+# trajectory path as ``_execute_pickup``; each is a single ``_publish_motion``.
+# UNLIKE ``pickup``/``move_to`` (fixed ``GRASP_ROLL_RAD``, tag yaw ignored), the
+# split blocks use the ORIENTED roll derived from the Greifziel's
+# ``extras['tag_yaw']`` so an elongated object is pinched on the correct axis.
+# Note (deliberate): each block re-solves its own target, so the HIGH-5
+# approach/grasp coupling and cross-step ``motion_lock`` atomicity of the canned
+# ``_execute_pickup`` are not shared — acceptable for the teaching path; the
+# canned ``Greife`` remains the atomic option (and the loop body in Beginner mode).
+
+
+def _greifziel_xyz_roll(ctx, ziel) -> tuple[float, float, float, float]:
+    """Resolve a Greifziel (a ``Detection`` value) into the grasp ``(x, y, z)``
+    plus the oriented wrist roll.
+
+    Raises a German ``WorkflowError`` when no Greifziel was supplied (the student
+    forgot ``finde``), the PRECISE calibration error via ``_resolve_target`` when
+    the detection has no ``world_xyz_m`` yet, and a ``GraspSkip`` when the tag
+    orientation couldn't be read (``extras['tag_yaw']`` is ``None``) — so we never
+    commit a blind fixed-roll grasp that would pinch an elongated object on its
+    long axis. In a "Solange sichtbar" loop the ``GraspSkip`` is swallowed and the
+    loop moves on; a standalone use fails loud (``GraspSkip`` IS a
+    ``WorkflowError``)."""
+    if ziel is None:
+        raise WorkflowError(
+            'Kein Greifziel — bitte zuerst „finde …" benutzen und das Ergebnis '
+            'verwenden (z. B. in einer Variable „Ziel").'
+        )
+    x, y, z = _resolve_target(ziel, ctx)   # Detection.world_xyz_m + precise calib error
+    tag_yaw = None
+    extras = getattr(ziel, 'extras', None)
+    if isinstance(extras, dict):
+        tag_yaw = extras.get('tag_yaw')
+    if tag_yaw is None:
+        raise GraspSkip(
+            'Die Ausrichtung des Objekts konnte nicht bestimmt werden — bitte den '
+            'Tag flach und gut sichtbar aufkleben.'
+        )
+    roll = compute_grasp_roll(ctx, x, y, float(tag_yaw))
+    return float(x), float(y), float(z), roll
+
+
+def _greifziel_approach(ziel) -> float:
+    """Hover/approach height for a Greifziel: the recipe value baked onto the
+    detection by ``find_object`` (``extras['approach_clear_m']``), else the
+    module default. Never raises."""
+    extras = getattr(ziel, 'extras', None)
+    if isinstance(extras, dict):
+        raw = extras.get('approach_clear_m')
+        if raw is not None:
+            try:
+                return float(raw)
+            except (TypeError, ValueError):
+                pass
+    return DEFAULT_APPROACH_HEIGHT_M
+
+
+def move_above(ctx, args: dict[str, Any]) -> None:
+    """„fahre über <Ziel>" — hover straight above the Greifziel at its approach
+    height, with the oriented wrist roll. Gripper state carried unchanged."""
+    _require_seeded_start_pose(ctx)
+    ziel = args.get('ziel')
+    x, y, z, roll = _greifziel_xyz_roll(ctx, ziel)
+    approach = _greifziel_approach(ziel)
+    arm_q = _solve_or_raise(ctx, (x, y, z + approach), roll=roll)
+    q_end = arm_q + [ctx.last_full_joints[5]]
+    _publish_motion(ctx, ctx.last_full_joints, q_end, DEFAULT_MOVE_DURATION_S)
+    ctx.last_arm_joints = arm_q
+    ctx.last_full_joints = q_end
+
+
+def descend_to(ctx, args: dict[str, Any]) -> None:
+    """„senke auf <Ziel>" — descend straight down to the Greifziel's grasp height
+    with the oriented wrist roll. Gripper state carried unchanged (open,
+    normally)."""
+    _require_seeded_start_pose(ctx)
+    x, y, z, roll = _greifziel_xyz_roll(ctx, args.get('ziel'))
+    arm_q = _solve_or_raise(ctx, (x, y, z), roll=roll)
+    q_end = arm_q + [ctx.last_full_joints[5]]
+    _publish_motion(ctx, ctx.last_full_joints, q_end, DEFAULT_GRASP_DURATION_S)
+    ctx.last_arm_joints = arm_q
+    ctx.last_full_joints = q_end
+
+
+def close_on_object(ctx, args: dict[str, Any]) -> None:
+    """„schließe um <Ziel>" — close the gripper to the Greifziel's tuned close
+    angle (``extras['gripper_close_rad']``) at the current arm pose, falling back
+    to the full close ``GRIPPER_CLOSED_RAD`` when the angle is missing/malformed."""
+    _require_seeded_start_pose(ctx)
+    close_rad = GRIPPER_CLOSED_RAD
+    extras = getattr(args.get('ziel'), 'extras', None)
+    if isinstance(extras, dict):
+        raw = extras.get('gripper_close_rad')
+        if raw is not None:
+            try:
+                close_rad = float(raw)
+            except (TypeError, ValueError):
+                close_rad = GRIPPER_CLOSED_RAD
+    q_start = ctx.last_full_joints
+    q_end = q_start[:5] + [close_rad]
+    _publish_motion(ctx, q_start, q_end, DEFAULT_GRIPPER_DURATION_S)
+    ctx.last_full_joints = q_end
+
+
+def lift(ctx, args: dict[str, Any]) -> None:
+    """„hebe an" — raise the end-effector straight up by the default approach
+    height from its CURRENT position, preserving the wrist roll (j5) so a held
+    object isn't twisted, and the gripper state so a held object stays held."""
+    _require_seeded_start_pose(ctx)
+    cur = ctx.last_full_joints
+    if ctx.ik is None:
+        raise WorkflowError(
+            'Roboter-Beschreibung nicht verfügbar — der Bewegungsrechner (IK) '
+            'konnte nicht gestartet werden. Bitte die Umgebung neu starten.'
+        )
+    pose = ctx.ik.fk(cur[:5])
+    if pose is None:
+        raise WorkflowError('Aktuelle Position ist unbekannt.')
+    _R, t = pose
+    x, y, z = float(t[0]), float(t[1]), float(t[2])
+    # j5 is (very nearly) pure tool roll about the top-down tool axis — the tip
+    # sits within ~1.6 mm of that axis (the EE y-offset the IK itself ignores) —
+    # so overriding j5 after the solve keeps the (x, y, z+approach) position to
+    # sub-grasp-tolerance while preserving the held object's orientation.
+    arm_q = list(_solve_or_raise(ctx, (x, y, z + DEFAULT_APPROACH_HEIGHT_M)))
+    arm_q[4] = cur[4]
+    q_end = arm_q + [cur[5]]
+    _publish_motion(ctx, cur, q_end, DEFAULT_APPROACH_DURATION_S)
+    ctx.last_arm_joints = arm_q
+    ctx.last_full_joints = q_end
+
+
 WAIT_SECONDS_MAX = 300.0  # 5 minutes — anything longer is almost certainly a mistake
 
 

@@ -85,6 +85,45 @@ export const MOTION_BLOCKS = [
     colour: MOTION_COLOR,
     tooltip: 'Wartet die angegebene Zeit, bevor der nächste Block läuft.',
   },
+  // Grasp split (Phase 1): the explicit pick sequence the student assembles
+  // by hand (fahre über → senke auf → schließe um → hebe an). Each consumes a
+  // Greifziel except „hebe an". Input NAME ZIEL is a hard contract with the
+  // Python server (`_build_args` lowercases it → arg `ziel`).
+  {
+    type: 'edubotics_move_above',
+    message0: DE.MOVE_ABOVE,
+    args0: [{ type: 'input_value', name: 'ZIEL', check: 'Greifziel' }],
+    previousStatement: null,
+    nextStatement: null,
+    colour: MOTION_COLOR,
+    tooltip: 'Fährt den Greifer über das Greifziel, ohne abzusenken.',
+  },
+  {
+    type: 'edubotics_descend_to',
+    message0: DE.DESCEND_TO,
+    args0: [{ type: 'input_value', name: 'ZIEL', check: 'Greifziel' }],
+    previousStatement: null,
+    nextStatement: null,
+    colour: MOTION_COLOR,
+    tooltip: 'Senkt den Greifer auf Greifhöhe des Greifziels ab.',
+  },
+  {
+    type: 'edubotics_close_on_object',
+    message0: DE.CLOSE_ON_OBJECT,
+    args0: [{ type: 'input_value', name: 'ZIEL', check: 'Greifziel' }],
+    previousStatement: null,
+    nextStatement: null,
+    colour: MOTION_COLOR,
+    tooltip: 'Schließt den Greifer um das Greifziel.',
+  },
+  {
+    type: 'edubotics_lift',
+    message0: DE.LIFT,
+    previousStatement: null,
+    nextStatement: null,
+    colour: MOTION_COLOR,
+    tooltip: 'Hebt das gegriffene Objekt an.',
+  },
 ];
 
 /**

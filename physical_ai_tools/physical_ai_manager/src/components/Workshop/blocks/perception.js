@@ -30,10 +30,50 @@ const OBJECT_TYPE_BLOCK_TYPES = [
   'edubotics_grasp_object',
   'edubotics_see_object',
   'edubotics_count_object',
+  'edubotics_find_object',
   'edubotics_while_visible',
   'edubotics_wait_until_object_seen',
   'edubotics_when_object_seen',
 ];
+// ── Grasp split (Phase 1) — static JSON perception blocks ────────────────────
+// Value/statement blocks that produce or consume a Greifziel. Unlike the
+// named-object blocks above they do NOT use the runtime dropdown, so they're
+// plain JSON registered with the same HMR/Jest re-definition guard as the
+// other files. Input/field NAMEs are a hard contract with the Python server
+// (`_build_args` lowercases them → ZIEL → arg `ziel`).
+const PERCEPTION_JSON_BLOCKS = [
+  {
+    type: 'edubotics_object_position',
+    message0: DE.OBJECT_POSITION,
+    args0: [{ type: 'input_value', name: 'ZIEL', check: 'Greifziel' }],
+    // Output 'String' to match edubotics_destination_ref so it plugs into the
+    // same „bewege zu" / „ablegen bei" sockets (which carry no check today).
+    output: 'String',
+    colour: PERCEPTION_COLOR,
+    tooltip:
+      'Liefert die Position eines erkannten Greifziels als Ziel-Wert, der '
+      + 'in „bewege zu" oder „ablegen bei" gesteckt werden kann.',
+  },
+  {
+    type: 'edubotics_grasp_held',
+    message0: DE.GRASP_HELD,
+    output: 'Boolean',
+    colour: PERCEPTION_COLOR,
+    tooltip: 'Wahr, wenn der Greifer gerade ein Objekt hält.',
+  },
+  {
+    type: 'edubotics_mark_done',
+    message0: DE.MARK_DONE,
+    args0: [{ type: 'input_value', name: 'ZIEL', check: 'Greifziel' }],
+    previousStatement: null,
+    nextStatement: null,
+    colour: PERCEPTION_COLOR,
+    tooltip:
+      'Merkt sich dieses Greifziel als erledigt, damit es nicht erneut '
+      + 'gegriffen wird.',
+  },
+];
+
 const _objectTypePlaceholder = () => [[DE.OBJECT_TYPE_LOADING, '__none__']];
 const _objectTypeEmpty = () => [[DE.OBJECT_TYPE_EMPTY, '__none__']];
 let OBJECT_TYPE_OPTIONS = _objectTypePlaceholder();
@@ -88,6 +128,17 @@ export function registerPerceptionBlocks() {
   defineObjectTypeBlock('edubotics_grasp_object', DE.GRASP_OBJECT_PREFIX, 'statement');
   defineObjectTypeBlock('edubotics_see_object', DE.SEE_OBJECT_PREFIX, 'Boolean');
   defineObjectTypeBlock('edubotics_count_object', DE.COUNT_OBJECT_PREFIX, 'Number');
+  // Grasp split (Phase 1): „finde <Typ>" outputs a Greifziel value (the helper
+  // calls setOutput(true, kind) for any non-'statement' kind).
+  defineObjectTypeBlock('edubotics_find_object', DE.FIND_OBJECT_PREFIX, 'Greifziel');
+
+  // Static JSON perception blocks (no runtime dropdown). HMR/Jest-guarded.
+  const toDefine = PERCEPTION_JSON_BLOCKS.filter(
+    (def) => !(def && def.type && Blockly.Blocks[def.type])
+  );
+  if (toDefine.length > 0) {
+    Blockly.defineBlocksWithJsonArray(toDefine);
+  }
 
   // P2 named-object loop + event blocks. Custom init (dynamic OBJECT_TYPE
   // dropdown can't be expressed in JSON). HMR/StrictMode-guarded.

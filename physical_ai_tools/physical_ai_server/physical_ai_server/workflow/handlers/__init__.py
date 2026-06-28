@@ -24,8 +24,17 @@ STATEMENT_HANDLERS: dict[str, callable] = {
     'edubotics_pickup': motion_handlers.pickup,
     'edubotics_drop_at': motion_handlers.drop_at,
     'edubotics_wait_seconds': motion_handlers.wait_seconds,
+    # Grasp-split motion primitives (Phase 1) — the one-block grasp decomposed
+    # into composable steps acting on a Greifziel (a Detection from find_object).
+    'edubotics_move_above': motion_handlers.move_above,
+    'edubotics_descend_to': motion_handlers.descend_to,
+    'edubotics_close_on_object': motion_handlers.close_on_object,
+    'edubotics_lift': motion_handlers.lift,
     # Named-object grasp (Roboter Studio AprilTag grasping)
     'edubotics_grasp_object': perception_handlers.grasp_object,
+    # Grasp-split claim — marks a Greifziel done so a "Solange sichtbar" loop
+    # using the split path still makes progress (the split blocks don't auto-claim).
+    'edubotics_mark_done': perception_handlers.mark_done,
     # Destinations
     'edubotics_destination_pin': destination_handlers.destination_pin,
     'edubotics_destination_current': destination_handlers.destination_current,
@@ -47,6 +56,11 @@ VALUE_EVALUATORS: dict[str, callable] = {
     'edubotics_see_object': perception_handlers.see_object,
     'edubotics_count_object': perception_handlers.count_object,
     'edubotics_wait_until_object_seen': perception_handlers.wait_until_object_seen,
+    # Grasp-split value blocks (Phase 1): find a graspable object (→ Greifziel),
+    # read its position, and check whether the gripper is holding something.
+    'edubotics_find_object': perception_handlers.find_object,
+    'edubotics_object_position': perception_handlers.object_position,
+    'edubotics_grasp_held': perception_handlers.grasp_held,
 }
 
 

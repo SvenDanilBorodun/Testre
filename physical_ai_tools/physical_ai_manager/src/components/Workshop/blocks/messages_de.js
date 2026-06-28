@@ -42,6 +42,12 @@ export const DE = {
   PICKUP: 'aufnehmen %1',
   DROP_AT: 'ablegen bei %1',
   WAIT_SECONDS: 'warte %1 Sekunden',
+  // Grasp split (Phase 1) — explicit grasp-sequence motion steps, each
+  // consuming a Greifziel (except LIFT, which has no argument).
+  MOVE_ABOVE: 'fahre über %1',
+  DESCEND_TO: 'senke auf %1',
+  CLOSE_ON_OBJECT: 'schließe um %1',
+  LIFT: 'hebe an',
 
   // Named-object grasping (AprilTag). Custom-init blocks use a prefix label +
   // a runtime-populated dropdown (no %1), so these are prefixes, not templates.
@@ -62,6 +68,12 @@ export const DE = {
   WAIT_UNTIL_OBJECT_SEEN_SUFFIX: 's',
   WHEN_OBJECT_SEEN_PREFIX: 'wenn',
   WHEN_OBJECT_SEEN_SUFFIX: 'erkannt',
+  // Grasp split (Phase 1) — perception blocks producing/consuming a Greifziel.
+  // FIND_OBJECT_PREFIX is a prefix label (runtime-populated dropdown, no %1).
+  FIND_OBJECT_PREFIX: 'finde',
+  OBJECT_POSITION: 'Position von %1',
+  GRASP_HELD: 'Greifer hält etwas?',
+  MARK_DONE: 'merke %1 als erledigt',
 
   // Destinations
   DESTINATION_PIN: 'setze %1 = Pin (Klick auf Szenenkamera)',

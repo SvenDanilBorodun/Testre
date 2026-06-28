@@ -32,9 +32,14 @@ from physical_ai_server.workflow.handlers.motion import (
     GRIPPER_OPEN_RAD,
     HOME_JOINTS_RAD,
     WORKSPACE_FLOOR_MARGIN_M,
+    GraspSkip,
     WorkflowError,
+    close_on_object,
     compute_grasp_roll,
+    descend_to,
     drop_at,
+    lift,
+    move_above,
     move_to,
     pickup,
     _execute_pickup,
@@ -243,3 +248,88 @@ def test_solve_or_raise_reachable_returns_five_joints():
     ctx = _ctx()
     solution = _solve_or_raise(ctx, REACHABLE_XYZ)
     assert solution is not None and len(solution) == 5
+
+
+# ── grasp-split motion primitives (Phase 1) ──────────────────────────────────
+# The split blocks act on a Greifziel (a Detection-shaped value) and use the
+# ORIENTED roll from extras['tag_yaw'] (not the fixed GRASP_ROLL_RAD).
+
+def _greifziel(xyz=(0.20, 0.0, 0.03), tag_yaw=0.3, close=-0.25, approach=0.06,
+               aruco_id=7):
+    return types.SimpleNamespace(
+        world_xyz_m=xyz,
+        aruco_id=aruco_id,
+        extras={'tag_yaw': tag_yaw, 'gripper_close_rad': close,
+                'approach_clear_m': approach},
+    )
+
+
+def test_move_above_uses_oriented_roll_and_hovers():
+    ctx = _ctx()
+    move_above(ctx, {'ziel': _greifziel()})
+    assert ctx.published, 'move_above should publish a motion'
+    expected_roll = compute_grasp_roll(ctx, 0.20, 0.0, 0.3)
+    # j5 reflects the ORIENTED roll, not the fixed GRASP_ROLL_RAD.
+    assert ctx.last_arm_joints[4] == pytest.approx(expected_roll, abs=1e-6)
+    # gripper carried unchanged (was open).
+    assert ctx.last_full_joints[5] == pytest.approx(GRIPPER_OPEN_RAD)
+    # hovered at grasp z + approach.
+    ref = ctx.ik.solve((0.20, 0.0, 0.03 + 0.06), roll=expected_roll)
+    assert ref is not None
+    assert all(a == pytest.approx(b, abs=1e-9)
+               for a, b in zip(ctx.last_arm_joints, ref))
+
+
+def test_descend_to_reaches_grasp_z_with_oriented_roll():
+    ctx = _ctx()
+    descend_to(ctx, {'ziel': _greifziel()})
+    expected_roll = compute_grasp_roll(ctx, 0.20, 0.0, 0.3)
+    ref = ctx.ik.solve((0.20, 0.0, 0.03), roll=expected_roll)
+    assert ref is not None
+    assert all(a == pytest.approx(b, abs=1e-9)
+               for a, b in zip(ctx.last_arm_joints, ref))
+
+
+def test_close_on_object_uses_tuned_close_angle():
+    ctx = _ctx()
+    close_on_object(ctx, {'ziel': _greifziel(close=-0.25)})
+    assert ctx.last_commanded_joints[5] == pytest.approx(-0.25)
+    assert ctx.last_full_joints[5] == pytest.approx(-0.25)
+
+
+def test_close_on_object_falls_back_to_full_close():
+    ctx = _ctx()
+    g = types.SimpleNamespace(world_xyz_m=(0.20, 0.0, 0.03), aruco_id=7,
+                              extras={'tag_yaw': 0.3})  # no gripper_close_rad
+    close_on_object(ctx, {'ziel': g})
+    assert ctx.last_commanded_joints[5] == pytest.approx(GRIPPER_CLOSED_RAD)
+
+
+def test_lift_preserves_gripper_and_wrist_roll():
+    ctx = _ctx()
+    arm = ctx.ik.solve((0.20, 0.0, 0.05), roll=0.4)
+    assert arm is not None
+    ctx.last_full_joints = list(arm) + [GRIPPER_CLOSED_RAD]
+    ctx.last_arm_joints = list(arm)
+    lift(ctx, {})
+    # gripper carried (a held object stays held).
+    assert ctx.last_commanded_joints[5] == pytest.approx(GRIPPER_CLOSED_RAD)
+    # wrist roll j5 preserved (don't twist a held object).
+    assert ctx.last_arm_joints[4] == pytest.approx(arm[4])
+    # EE rose by ~the approach height.
+    _r0, t0 = ctx.ik.fk(arm)
+    _r1, t1 = ctx.ik.fk(ctx.last_arm_joints)
+    assert 0.05 < float(t1[2] - t0[2]) < 0.07
+
+
+def test_split_block_missing_greifziel_raises():
+    ctx = _ctx()
+    with pytest.raises(WorkflowError) as exc:
+        move_above(ctx, {'ziel': None})
+    assert 'Greifziel' in str(exc.value)
+
+
+def test_split_block_unknown_orientation_raises_graspskip():
+    ctx = _ctx()
+    with pytest.raises(GraspSkip):
+        move_above(ctx, {'ziel': _greifziel(tag_yaw=None)})

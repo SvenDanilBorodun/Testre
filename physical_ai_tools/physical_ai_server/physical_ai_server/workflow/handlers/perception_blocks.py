@@ -718,3 +718,102 @@ def wait_until_object_seen(ctx, args: dict[str, Any]) -> bool:
         timeout_s,
         f'Objekt {type_name}',
     )
+
+
+# ------------------------------------------------------------------
+# Grasp-split value + claim blocks (Phase 1)
+# ------------------------------------------------------------------
+# The one-block ``grasp_object`` is decomposed so students compose the pick. A
+# ``finde`` VALUE block yields a Greifziel (the selected Detection with refined
+# yaw baked in); the motion blocks (handlers/motion.py) consume it; ``mark_done``
+# claims its tag for the loop. The detector runs ONCE in ``find_object`` — the
+# taught pattern latches the result into a variable and reuses it.
+def find_object(ctx, args: dict[str, Any]):
+    """„finde <Typ>" — VALUE: the nearest reachable UNCLAIMED instance of the
+    chosen type as a Greifziel (a ``Detection`` with ``world_xyz_m`` +
+    ``extras['tag_yaw']`` + ``extras['approach_clear_m']`` attached), refining its
+    orientation over several frames before returning.
+
+    Returns ``None`` when nothing graspable is currently visible (so the student
+    null-checks: „falls Ziel …"). Raises the PRECISE German calibration error
+    (not the generic one) when instances ARE visible but their world position is
+    unset — mirroring ``grasp_object``'s disambiguation so the student fixes the
+    right step. The detector runs ONCE here; latch the result into a variable and
+    reuse it across the motion blocks rather than calling „finde" in each."""
+    type_name = args.get('object_type')
+    if not type_name:
+        raise WorkflowError('Kein Objekt ausgewählt.')
+    recipe = _recipe_for(_require_catalog(ctx), type_name)
+    detections = _detect_named_unclaimed(ctx, type_name)
+    if not detections:
+        return None
+    target = _select_nearest_reachable(ctx, detections)
+    if target is None:
+        # _select_nearest_reachable returns None for BOTH "calibration incomplete"
+        # (world_xyz_m unset) AND "every instance out of reach". Disambiguate so an
+        # uncalibrated rig gets the precise calib message instead of a silent None
+        # the student would misread as "nothing there".
+        if all(d.world_xyz_m is None for d in detections):
+            _motion._resolve_target(detections[0], ctx)   # raises the precise calib error
+        return None
+    tag_yaw = _multiframe_tag_yaw(
+        ctx, recipe, target.aruco_id, target.extras.get('tag_yaw'))
+    if tag_yaw is None:
+        # Orientation unreadable — SKIP this instance (exactly like grasp_object)
+        # so a „Solange sichtbar" loop excludes it next pass and makes progress on
+        # the rest, instead of re-selecting it every pass until the stall guard
+        # trips and ends the whole loop. Returns None so a standalone „finde"
+        # null-checks cleanly.
+        _skip_tag(ctx, target.aruco_id)
+        try:
+            ctx.log(
+                f'[WARNUNG] „{recipe.label_de}" erkannt, aber die Ausrichtung '
+                'konnte nicht bestimmt werden — wird übersprungen.'
+            )
+        except Exception:
+            pass
+        return None
+    target.extras['tag_yaw'] = tag_yaw
+    target.extras['approach_clear_m'] = float(recipe.approach_clear_m)
+    return target
+
+
+def object_position(ctx, args: dict[str, Any]):
+    """„Position von <Ziel>" — VALUE: the Greifziel's base-frame ``{x, y, z}`` so a
+    found object's location can drive ``bewege zu`` / ``lege ab bei``. Raises the
+    precise German calib error when the position isn't known yet."""
+    ziel = args.get('ziel')
+    if ziel is None:
+        raise WorkflowError('Kein Greifziel — bitte zuerst „finde …" benutzen.')
+    xyz = getattr(ziel, 'world_xyz_m', None)
+    if xyz is None:
+        _motion._resolve_target(ziel, ctx)   # raises the precise calib error
+        raise WorkflowError('Position des Objekts ist unbekannt.')
+    x, y, z = xyz
+    return {'x': float(x), 'y': float(y), 'z': float(z)}
+
+
+def grasp_held(ctx, args: dict[str, Any]) -> bool:
+    """„Greifer hält etwas?" — VALUE (Boolean): True when the gripper closed on an
+    object, False on an empty close. Raises a German error when the joint readback
+    is unavailable — no silent False (that would mis-report on every rig without
+    follower-joint feedback)."""
+    result = _motion.check_grasp_held(ctx)
+    if result is None:
+        raise WorkflowError(
+            'Greif-Erfolgskontrolle ist nicht verfügbar (keine Gelenkdaten).'
+        )
+    return bool(result)
+
+
+def mark_done(ctx, args: dict[str, Any]) -> None:
+    """„merke <Ziel> als erledigt" — CLAIM the Greifziel's tag so a
+    „Solange <Typ> sichtbar" loop counts it done and makes progress (the split
+    grasp path doesn't auto-claim like the one-block ``Greife``)."""
+    ziel = args.get('ziel')
+    if ziel is None:
+        raise WorkflowError('Kein Greifziel — bitte zuerst „finde …" benutzen.')
+    tag_id = getattr(ziel, 'aruco_id', None)
+    if tag_id is None:
+        raise WorkflowError('Greifziel hat keine Marker-ID.')
+    _claim_tag(ctx, tag_id)

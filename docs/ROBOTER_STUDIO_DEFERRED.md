@@ -62,8 +62,8 @@ Python overlay must register the handlers, otherwise every call returns
 | # | Severity | Item | Where |
 |---|---|---|---|
 | 3.1 | LOW | `CALIB_DIVERSITY_HINT` says "20 Bilder" but `framesRequired` defaults to 12 (or 14 for handeye). Fix the count. | `physical_ai_manager/src/components/Workshop/blocks/messages_de.js:166` |
-| 3.2 | LOW | `roten_wuerfel_aufnehmen.json:9` — explain that "ziel" is a list (not a single detection) since `edubotics_detect_color` returns a list. | tutorials |
-| 3.3 | LOW | `zaehle_blaue_objekte.json` step 3 — body says "wiederhole 3 mal" but the shadow default is 10. Add "ändere die 10 auf 3" hint. | tutorials |
+| 3.2 | **REMOVED (P4 2026-06-28)** | **Won't do — named-object AprilTag grasping superseded this.** `roten_wuerfel_aufnehmen.json` + `edubotics_detect_color` were deleted in P4. (Was: explain that "ziel" is a list.) | n/a |
+| 3.3 | **REMOVED (P4 2026-06-28)** | **Won't do — named-object AprilTag grasping superseded this.** `zaehle_blaue_objekte.json` was deleted (v2.9.4) / the colour blocks removed in P4. (Was: "ändere die 10 auf 3" hint.) | n/a |
 | 3.4 | LOW | `stapele_drei_wuerfel.json` step 3 — body says "Funktion mit Ziel als Parameter" but doesn't tell the student where the `+` button is on `procedures_defnoreturn`. | tutorials |
 | 3.5 | LOW | `sage_hallo.json` step 3 mixes `edubotics_play_sound` (legacy) with the new `edubotics_play_tone` taxonomy. Pick one consistently. | tutorials |
 
@@ -109,7 +109,7 @@ Python overlay must register the handlers, otherwise every call returns
 | 6.1 | MEDIUM | `BreakpointList` × close button is below 24×24 px target. Add `min-w-[24px] min-h-[24px]`. | `BreakpointList.jsx:121` |
 | 6.2 | MEDIUM | `SkillmapPlayer` ▶ play buttons have no `aria-label` — only emoji content. SR reads "play button" with no tutorial context. | `SkillmapPlayer.jsx:158-165` |
 | 6.3 | MEDIUM | `CameraFeedOverlay` clickable div lacks `role="button" tabIndex={0}` + `onKeyDown` — no keyboard access. | `CameraFeedOverlay.jsx` |
-| 6.4 | MEDIUM | `ColorProfileStep` color swatch span lacks `aria-label` — SR users can't tell colors apart. | `ColorProfileStep.jsx:130` |
+| 6.4 | **REMOVED (P4 2026-06-28)** | **Won't do — named-object AprilTag grasping superseded this.** `ColorProfileStep.jsx` was deleted (v2.9.4) and the colour-detection path removed in P4. (Was: add `aria-label` to the colour swatch.) | n/a |
 | 6.5 | MEDIUM | Multiple Tailwind animations (`transition-all`, `transition-colors`, `bg-yellow-50 transition-colors` on variable flash) aren't gated by `motion-safe:`. | scattered |
 | 6.6 | LOW | `DebugPanel` `<div role="tabpanel">` lacks `aria-labelledby` to link to the active tab's button. | `DebugPanel.jsx:62` |
 | 6.7 | LOW | `RunControls` badge wrapper has `aria-live="polite"` but on the whole subtree including emoji dots — SR re-reads emojis. Move to a text-only sibling. | `RunControls.jsx:269` |

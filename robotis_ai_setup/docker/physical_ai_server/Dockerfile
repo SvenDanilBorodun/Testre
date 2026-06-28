@@ -46,7 +46,6 @@ RUN set -e && \
     bash -c "source /opt/ros/jazzy/setup.bash && colcon build --packages-select physical_ai_interfaces --cmake-args -DCMAKE_BUILD_TYPE=Release" && \
     install_root=/root/ros2_ws/install/physical_ai_interfaces/lib/python3.12/site-packages/physical_ai_interfaces && \
     test -f "$install_root/srv/_start_calibration.py" && \
-    test -f "$install_root/srv/_calibration_capture_color.py" && \
     test -f "$install_root/msg/_detection.py" && \
     test -f "$install_root/msg/_workflow_status.py" && \
     # Phase-2/3 (audit round-3 §F/§Y): assert every new generated

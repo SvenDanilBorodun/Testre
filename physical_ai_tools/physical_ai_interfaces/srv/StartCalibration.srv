@@ -2,7 +2,7 @@
 # requested step's state machine and waits for capture/solve calls.
 #
 # camera: 'gripper' or 'scene'
-# step:   'intrinsic' | 'handeye' | 'color_profile'
+# step:   'intrinsic' | 'handeye'
 string camera
 string step
 ---

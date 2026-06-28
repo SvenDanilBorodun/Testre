@@ -25,11 +25,11 @@ import AccuracyVerifyStep from './AccuracyVerifyStep';
 // 2026-06-22: the optional 4th step (Farbprofil) was DROPPED — Roboter Studio
 // unlocks after the 3 geometry steps. The grasp/projection path needs only
 // intrinsics + extrinsic + the touch-off z_table; the colour profile gated
-// nothing in the runtime (perception builds fine with an empty profile) and
-// only enabled the colour-detection blocks. With the step gone, those blocks
-// fail loud ("Farbe … nicht kalibriert"); object + marker detection are
-// unaffected. ColorProfileStep.jsx / the /calibration capture-colour service
-// are left in place but unreferenced.
+// nothing in the runtime and only enabled the colour-detection blocks. Those
+// blocks (and ColorProfileStep.jsx, color_profile.py, the /calibration
+// capture-colour service, the CalibrationCaptureColor srv) were all removed
+// in P4 (2026-06-28); AprilTag named-object detection is the only perception
+// path now.
 // 2026-06-24 (W5): a 4th OPTIONAL step „Genauigkeit prüfen" runs after the
 // touch-off. It is NOT part of the editor-unlock gate (`calibrated` in
 // WorkshopPage) — the student reaches it after the touch-off via the

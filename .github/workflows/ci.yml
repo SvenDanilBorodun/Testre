@@ -695,10 +695,16 @@ jobs:
               # Named-object loop — a CONTROL block dispatched by the interpreter
               # btype ladder (not the handler tables), so it must be listed here.
               'edubotics_while_visible',
+              # Phase-2 quick-win CONTROL blocks — also dispatched by the
+              # interpreter btype ladder (forever loop + generic wait-until),
+              # so they live here, not in the handler tables.
+              'edubotics_forever', 'edubotics_wait_until',
               'logic_boolean', 'logic_compare', 'logic_negate', 'logic_operation',
               'math_number', 'math_arithmetic', 'math_random_int',
               'math_constrain', 'math_modulo', 'math_round',
-              'text',
+              # text_join — Blockly built-in string composition evaluated
+              # directly in _eval_value_impl (not via VALUE_EVALUATORS).
+              'text', 'text_join',
               'lists_create_with', 'lists_repeat', 'lists_length',
               'lists_isEmpty', 'lists_indexOf', 'lists_getIndex',
               'lists_setIndex', 'lists_getSublist',

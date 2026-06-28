@@ -75,6 +75,10 @@ export const DE = {
   GRASP_HELD: 'Greifer hält etwas?',
   MARK_DONE: 'merke %1 als erledigt',
 
+  // Control (Phase-2 quick-win blocks, Logik category)
+  FOREVER: 'wiederhole fortlaufend',
+  WAIT_UNTIL: 'warte bis %1',
+
   // Destinations
   DESTINATION_PIN: 'setze %1 = Pin (Klick auf Szenenkamera)',
   DESTINATION_CURRENT: 'setze %1 = aktuelle Position',
@@ -132,6 +136,8 @@ export const DE = {
   RUN_STOP: 'Stopp',
   RUN_READY: 'Bereit',
   RUN_PAUSED: 'Pausiert',
+  RUN_RUNNING: 'Läuft',
+  RUN_ERROR: 'Fehler',
 
   // Debug panel
   DEBUG_TAB_SENSORS: 'Sensoren',

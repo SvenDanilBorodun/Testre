@@ -92,6 +92,29 @@ WHILE_MAX_SECONDS = _env_float('EDUBOTICS_WHILE_MAX_SECONDS', 120.0)
 # so the first detect frame isn't a still-settling/blurred arm.
 WHILE_SETTLE_S = _env_float('EDUBOTICS_WHILE_SETTLE_S', 0.2)
 
+# Forever-loop rate floor (#H1): a „wiederhole fortlaufend" whose body is only
+# fast value/log blocks would otherwise loop thousands of times/sec — flooding
+# the WorkflowStatus realtime channel (3 publishes per body block, no server-side
+# throttle) and spinning the executor. Enforce a minimum cycle time so the
+# publish rate is bounded (~20 Hz); a motion-bearing body naturally exceeds this
+# and pays nothing. Plain constant (NOT EDUBOTICS_* — a new env knob would need a
+# docker-compose forward per the env-forwarding-guard); monkeypatchable in tests.
+FOREVER_MIN_CYCLE_S = 0.05
+
+# Wall-clock safety cap for the generic „warte bis <Bedingung>"
+# (edubotics_wait_until). Scratch's wait-until is uncapped, but in a classroom a
+# student can author a condition that never becomes true (typo'd threshold, an
+# object that is never placed) and wedge the whole session indefinitely — the
+# same failure mode WHILE_MAX_SECONDS guards in the while-visible loop. So the
+# wait breaks with a German [WARNUNG] (the workflow then CONTINUES, exactly like
+# the while-visible wall-clock break — not a hard raise) once it has polled this
+# long. Deliberately a plain module constant, NOT an EDUBOTICS_* env var: a new
+# env knob would have to be forwarded through docker-compose (ci.yml's
+# env-forwarding-guard scans this package), which is out of this change's scope.
+# Promote to _env_float('EDUBOTICS_WAIT_UNTIL_MAX_SECONDS', …) + a compose
+# forward later if operators need it tunable. Tests monkeypatch the constant.
+WAIT_UNTIL_MAX_SECONDS = 300.0
+
 
 def _claim_progress_count(ctx) -> int:
     """Total claimed+skipped tag count — the progress signal for the while-visible
@@ -366,6 +389,12 @@ class Interpreter:
                 return
             if btype == 'edubotics_while_visible':
                 self._exec_while_visible(block, ctx, on_block_change)
+                return
+            if btype == 'edubotics_forever':
+                self._exec_forever(block, ctx, on_block_change)
+                return
+            if btype == 'edubotics_wait_until':
+                self._exec_wait_until(block, ctx, on_block_change)
                 return
             if btype == 'variables_set':
                 self._exec_variables_set(block, ctx)
@@ -687,6 +716,130 @@ class Interpreter:
                 raise WorkflowError('Workflow wurde gestoppt.')
             time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
 
+    def _exec_forever(
+        self,
+        block: dict[str, Any],
+        ctx,
+        on_block_change: Callable[[str, str, float], None],
+    ) -> None:
+        """„wiederhole fortlaufend" — an intentionally infinite C-block.
+
+        The Stop button (``ctx.should_stop``) is the ONLY exit; this loop
+        deliberately does NOT apply ``MAX_LOOP_ITERATIONS`` — a finite cap
+        would silently end a loop the student meant to run forever. The body
+        (the ``DO`` statement chain) already re-checks ``should_stop`` at the
+        top of every block via ``_exec_chain``, and the outer check below
+        bounds the gap between body runs.
+
+        Empty-body decision (DO is None): we do NOT raise a „leere Schleife"
+        error. A forever loop with no body is a legitimate "keep the workflow
+        alive while hat handlers (when_broadcast / when_object_seen) do the
+        work" idiom — exactly Scratch's bottom-of-script ``forever``. Raising
+        would also punish a student who dropped the block and hit Run before
+        filling it. Instead the empty body idles in a small ``should_stop``-
+        honoring sleep so it can never spin a tight CPU loop and always stops
+        promptly.
+
+        Rate floor (#H1): a NON-empty body of only fast value/log blocks would
+        otherwise loop thousands of times/sec and flood the WorkflowStatus
+        realtime channel (unlike ``controls_whileUntil``, which self-terminates
+        at ``MAX_LOOP_ITERATIONS`` — ``forever`` is deliberately uncapped, so it
+        needs its own rate limit). We enforce ``FOREVER_MIN_CYCLE_S`` per
+        iteration: a body faster than the floor sleeps the remainder (bounding
+        the publish rate to ~20 Hz); a motion-bearing body naturally exceeds the
+        floor and pays nothing. NOTE: a ``forever`` nested INSIDE a ``when_*`` hat
+        handler holds ``motion_lock`` for its whole (infinite) run — that is the
+        same "two writers driving the arm" conflict the while-visible loop
+        documents as unsupported; don't pair them.
+        """
+        do_block = self._get_statement_block(block, 'DO')
+        while True:
+            if ctx.should_stop():
+                raise WorkflowError('Workflow wurde gestoppt.')
+            if do_block is None:
+                # Empty body: never busy-wait. Idle one tick (still bailing on
+                # stop via _interruptible_wait's German WorkflowError) and loop.
+                self._interruptible_wait(ctx, 0.1)
+                continue
+            cycle_start = time.monotonic()
+            self._exec_chain(do_block, ctx, on_block_change)
+            elapsed = time.monotonic() - cycle_start
+            if elapsed < FOREVER_MIN_CYCLE_S:
+                self._interruptible_wait(ctx, FOREVER_MIN_CYCLE_S - elapsed)
+
+    def _exec_wait_until(
+        self,
+        block: dict[str, Any],
+        ctx,
+        on_block_change: Callable[[str, str, float], None],
+    ) -> None:
+        """„warte bis <Bedingung>" — block until the Boolean input is truthy.
+
+        Polls the ``BOOL`` value input every ~0.1 s, RE-EVALUATING it each
+        tick (so a perception / variable / count condition is checked live,
+        not snapshotted once). ``ctx.should_stop`` raises the standard German
+        stopped error so the Stop button always works.
+
+        Safety-cap decision: unlike Scratch's uncapped wait-until, we apply a
+        generous wall-clock cap (``WAIT_UNTIL_MAX_SECONDS`` = 300 s). A
+        classroom student can author a condition that never becomes true
+        (typo'd threshold, an object that is never placed) and wedge the whole
+        session — the same risk WHILE_MAX_SECONDS guards in the while-visible
+        loop. On hitting the cap we MIRROR that loop: log a German [WARNUNG]
+        and break (the workflow CONTINUES to the next block), rather than
+        hanging forever or hard-raising. 300 s is long enough that a normal
+        „warte bis Banane gesehen" never trips it.
+
+        Motion-lock (#H2): we RELEASE ``motion_lock`` around the poll (mirroring
+        ``perception_blocks._poll_until``, audit S1) and bounded-reacquire on
+        exit. A ``warte bis`` dropped inside a ``when_*`` hat handler — whose
+        body runs under ``with ctx.motion_lock`` — would otherwise hold the lock
+        for up to the 300 s cap, starving the main stack + every other hat's
+        motion (the 10 s ``acquire`` would raise „Bewegung blockiert") and
+        re-opening the collision-recovery race ``_poll_until`` was written to
+        close. The poll itself is pure value evaluation (no motion), so dropping
+        the lock during it is safe; reacquire keeps the hat's locking invariant.
+        """
+        bool_block = self._get_input_block(block, 'BOOL')
+        motion_lock = getattr(ctx, 'motion_lock', None)
+        released = False
+        if motion_lock is not None:
+            try:
+                motion_lock.release()
+                released = True
+            except RuntimeError:
+                # Not held by this thread (the normal main-stack path) — fine;
+                # don't reacquire in finally.
+                released = False
+        try:
+            start = time.monotonic()
+            while True:
+                if ctx.should_stop():
+                    raise WorkflowError('Workflow wurde gestoppt.')
+                cond = self._eval_value(bool_block, ctx) if bool_block is not None else False
+                if self._truthy(cond):
+                    return
+                if time.monotonic() - start > WAIT_UNTIL_MAX_SECONDS:
+                    try:
+                        ctx.log(
+                            '[WARNUNG] „Warte bis": Zeitlimit erreicht — die '
+                            'Bedingung wurde nicht erfüllt. Es geht weiter.'
+                        )
+                    except Exception:
+                        pass
+                    return
+                # ~0.1 s between polls (bails immediately on stop).
+                self._interruptible_wait(ctx, 0.1)
+        finally:
+            if released and motion_lock is not None:
+                # Bounded reacquire so the hat's `with motion_lock` __exit__ has
+                # something to release; a stuck lock raises a clear German error
+                # rather than hanging (matches _poll_until's audit fix #9).
+                if not motion_lock.acquire(timeout=10.0):
+                    raise WorkflowError(
+                        'Bewegung-Sperre konnte nicht zurückgewonnen werden.'
+                    )
+
     def _exec_for(
         self,
         block: dict[str, Any],
@@ -997,6 +1150,29 @@ class Interpreter:
                 return 0.0
         if btype == 'text':
             return block.get('fields', {}).get('TEXT', '')
+        if btype == 'text_join':
+            # Blockly built-in string composition (mutator → ADD0..ADDn value
+            # inputs). Lets a student build „Ich sehe 3 Bananen" for melde/sage
+            # instead of only constant literals. Scan every ADDk input present
+            # (mirrors lists_create_with's sort-by-integer-suffix scan), convert
+            # each value to text, and concatenate. A present-but-empty slot OR a
+            # gap in the index sequence contributes '' (an absent middle item).
+            # Iterating only the present indices (not range(max+1)) keeps a
+            # crafted huge ADDk index from blowing up the loop, and gives the
+            # same result as gap→'' since '' adds nothing.
+            inputs = block.get('inputs') or {}
+            add_indices = sorted(
+                int(k[3:]) for k in inputs.keys()
+                if isinstance(k, str) and k.startswith('ADD') and k[3:].isdigit()
+            )
+            parts: list[str] = []
+            for i in add_indices:
+                inner = self._get_input_block(block, f'ADD{i}')
+                if inner is None:
+                    parts.append('')
+                else:
+                    parts.append(self._to_text(self._eval_value(inner, ctx)))
+            return ''.join(parts)
         if btype == 'logic_boolean':
             return block.get('fields', {}).get('BOOL', 'FALSE') == 'TRUE'
 
@@ -1300,6 +1476,28 @@ class Interpreter:
         if isinstance(value, (list, tuple, dict, str)):
             return len(value) > 0
         return bool(value)
+
+    @staticmethod
+    def _to_text(value: Any) -> str:
+        """Stringify a block-runtime value for text_join concatenation.
+
+        None → '' (a missing item adds nothing). bool → German 'wahr'/'falsch'
+        (a student-facing surface — Rule §1). An integer-valued float drops the
+        trailing '.0' so „Anzahl Banane" (which evaluates to e.g. 3.0) reads as
+        „3", not „3.0". Everything else falls back to str(). bool is checked
+        before the float branch because ``bool`` is an ``int`` subclass but is
+        NOT a ``float`` — order only matters to keep True from ever reaching
+        the numeric formatter.
+        """
+        if value is None:
+            return ''
+        if isinstance(value, bool):
+            return 'wahr' if value else 'falsch'
+        if isinstance(value, float):
+            if value.is_integer():
+                return str(int(value))
+            return str(value)
+        return str(value)
 
 
 def _jsonable(value: Any) -> Any:

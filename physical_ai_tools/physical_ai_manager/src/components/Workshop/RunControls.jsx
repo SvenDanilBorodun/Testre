@@ -69,6 +69,7 @@ function RunControls({ workflowId, blocklyJson, workspace = null }) {
   } = useRosServiceCaller();
   const runState = useSelector((s) => s.workshop.runState);
   const phase = useSelector((s) => s.workshop.phase);
+  const currentBlockId = useSelector((s) => s.workshop.currentBlockId);
   const paused = useSelector((s) => s.workshop.paused);
   const log = useSelector((s) => s.workshop.log);
   const error = useSelector((s) => s.workshop.workflowError);
@@ -140,6 +141,23 @@ function RunControls({ workflowId, blocklyJson, workspace = null }) {
     });
     previouslyWarnedIdsRef.current = nextIds;
   }, [debuggerWarnings, workspace]);
+
+  // Live run-highlighting. The interpreter emits WorkflowStatus.current_block_id
+  // per executed block (→ workshopSlice.currentBlockId, flicker-guarded). Paint
+  // the running block with Blockly's single-block highlight, which auto-clears
+  // the previous one. `highlightBlock(null)` clears everything when the run is
+  // not running (idle/stopped/finished/error — handleStop dispatches
+  // setRunState('stopped') → runState 'idle', re-running this effect) or the id
+  // is empty. NOTE: glowStack/glowBlock do not exist in blockly@12.5.1; the
+  // installed API is WorkspaceSvg.highlightBlock(id|null).
+  useEffect(() => {
+    if (!workspace || typeof workspace.highlightBlock !== 'function') return;
+    if (runState === 'running' && currentBlockId) {
+      workspace.highlightBlock(currentBlockId);
+    } else {
+      workspace.highlightBlock(null);
+    }
+  }, [currentBlockId, runState, workspace]);
 
   const handleStart = useCallback(async () => {
     if (!blocklyJson) {
@@ -297,9 +315,16 @@ function RunControls({ workflowId, blocklyJson, workspace = null }) {
     dispatch(toggleDebugger());
   }, [dispatch]);
 
+  // State-driven German label (#L2): the raw server `phase` is English
+  // ('running'/'done') and now lingers between blocks (truthy-guarded), so map
+  // to German by state instead of echoing the raw string into the UI (Rule §1).
   const phaseLabel = paused
     ? DE.RUN_PAUSED
-    : (phase || DE.RUN_READY);
+    : phase === 'error'
+    ? DE.RUN_ERROR
+    : isRunning
+    ? DE.RUN_RUNNING
+    : DE.RUN_READY;
 
   return (
     <div className="border-t border-[var(--line)] bg-white p-3 sm:p-4">

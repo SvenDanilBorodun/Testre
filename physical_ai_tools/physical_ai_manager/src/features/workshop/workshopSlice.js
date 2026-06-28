@@ -260,18 +260,30 @@ const workshopSlice = createSlice({
       if (next === 'finished' || next === 'stopped' || next === 'error') {
         state.runState = 'idle';
         state.phase = '';
+        state.currentBlockId = null;
       } else {
         state.runState = next;
       }
-      if (next === 'running') state.paused = false;
+      if (next === 'running') {
+        state.paused = false;
+        // Clear the previous run's highlighted block so the next run doesn't
+        // briefly flash it before the first new block id arrives (#L1).
+        state.currentBlockId = null;
+      }
     },
     setPaused: (state, action) => {
       state.paused = !!action.payload;
     },
     setWorkflowStatus: (state, action) => {
       const { current_block_id, phase, progress, error, log_message } = action.payload;
-      if (current_block_id !== undefined) state.currentBlockId = current_block_id;
-      if (phase !== undefined) state.phase = phase;
+      // Live run-highlighting flicker fix: partial-payload emits (ctx.log
+      // lines, detection updates) publish a fresh WorkflowStatus whose
+      // string fields default to '' — current_block_id='' AND phase=''. A
+      // bare `!== undefined` guard would blank the highlighted block (and the
+      // status chip) on every mid-block log tick. Only adopt a TRUTHY value;
+      // terminal phases ('' on stop/finish) are driven by setRunState, not here.
+      if (current_block_id) state.currentBlockId = current_block_id;
+      if (phase) state.phase = phase;
       if (progress !== undefined) state.progress = progress;
       if (error !== undefined) state.workflowError = error;
       if (log_message) state.log.push({ ts: Date.now(), text: log_message });

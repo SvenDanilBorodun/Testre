@@ -18,6 +18,7 @@ import { registerPerceptionBlocks } from './blocks/perception';
 import { registerDestinationBlocks } from './blocks/destinations';
 import { registerOutputBlocks } from './blocks/output';
 import { registerEventBlocks } from './blocks/events';
+import { registerControlBlocks } from './blocks/control';
 
 let blocksRegistered = false;
 function registerAllBlocksOnce() {
@@ -28,6 +29,7 @@ function registerAllBlocksOnce() {
   registerDestinationBlocks();
   registerOutputBlocks();
   registerEventBlocks();
+  registerControlBlocks();
   blocksRegistered = true;
 }
 

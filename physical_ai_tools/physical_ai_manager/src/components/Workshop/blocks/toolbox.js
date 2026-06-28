@@ -111,6 +111,14 @@ export function buildToolbox(restrictedBlocks = null) {
       },
     },
     { kind: 'block', type: 'controls_forEach' },
+    // Phase-2 control idioms (Scratch „forever" / NEPO „warte bis").
+    { kind: 'block', type: 'edubotics_forever' },
+    {
+      kind: 'block',
+      type: 'edubotics_wait_until',
+      // Pre-fill the Boolean hole with a shadow so it isn't an empty slot.
+      inputs: { BOOL: { shadow: { type: 'logic_boolean' } } },
+    },
     { kind: 'block', type: 'logic_compare' },
     { kind: 'block', type: 'logic_operation' },
     { kind: 'block', type: 'logic_negate' },
@@ -163,6 +171,16 @@ export function buildToolbox(restrictedBlocks = null) {
   // by `edubotics_log` / `edubotics_speak_de`.
   const textCat = filterContents([
     { kind: 'block', type: 'text', fields: { TEXT: '' } },
+    // Built-in string-composition (mutator) block. Lets a student build a
+    // dynamic message („Ich sehe 3 Bananen") for melde/sage; the interpreter
+    // evaluates ADD0..ADDn server-side. The default text_join carries two
+    // inputs (ADD0, ADD1) on init, so the text shadows attach without a
+    // mutation override.
+    {
+      kind: 'block',
+      type: 'text_join',
+      inputs: { ADD0: textShadow(''), ADD1: textShadow('') },
+    },
   ], restricted);
 
   const output = filterContents([

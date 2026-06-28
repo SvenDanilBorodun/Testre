@@ -2659,14 +2659,28 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             return None
 
     def _build_perception(self):
-        # No silent fallback: any failure here is a build/config bug
-        # that should surface as a German error in the workflow editor
-        # instead of a workflow that "runs" with disabled perception.
-        # WorkflowManager.start wraps this call in its own try/except
-        # and reports the message back to the student.
-        from physical_ai_server.workflow.perception import Perception
+        # Cache the Perception instance (onnxruntime YOLOX session + AprilTag
+        # detector) for the server lifetime. Building a FRESH one per workflow
+        # start (the old behaviour) allocated a new ONNX arena + detector each
+        # run on top of the resident torch/LeRobot baseline; repeated Start/Stop
+        # in Roboter Studio could push the container RSS past its 6 GB mem_limit
+        # -> cgroup OOM-kill -> the WHOLE container (incl. rosbridge) restarts ->
+        # the React app's rosbridge connection drops AND the node's in-RAM
+        # robot_type is lost (the student then has to re-select the robot). The
+        # IK solver is cached the same way (_build_ik_solver). Detection is
+        # stateless per call, so one shared instance is safe; the (cheap) colour
+        # profile is re-applied each call so a re-calibration between runs still
+        # takes effect.
+        #
+        # No silent fallback: if Perception() raises (a build/config bug) it
+        # propagates and WorkflowManager.start reports the German message to the
+        # student; nothing is cached, so the next start retries cleanly.
         from physical_ai_server.workflow.color_profile import ColorProfileManager
-        perc = Perception()
+        perc = getattr(self, '_perception', None)
+        if perc is None:
+            from physical_ai_server.workflow.perception import Perception
+            perc = Perception()
+            self._perception = perc
         color_mgr = ColorProfileManager()
         profile = {}
         for color in ('rot', 'gruen', 'blau', 'gelb'):

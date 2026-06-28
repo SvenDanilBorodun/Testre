@@ -637,6 +637,17 @@ class Communicator:
             self.joint_publishers[name].publish(joint_msg)
 
     def publish_status(self, status: TaskStatus):
+        # Stamp the selected robot type onto any status that doesn't already
+        # carry one. Several callers build a bare TaskStatus() (the stale-
+        # recording-session notice, the record/inference error branches) which
+        # would otherwise publish robot_type='' WHILE a robot is selected — the
+        # React app treats an empty robot_type as "robot deselected" and there is
+        # no steady idle status to correct it, so a single such tick used to
+        # force the student to re-select the robot. When the node genuinely has
+        # no robot (before /set_robot_type, or after a restart) this stays ''
+        # (correct: the client then rehydrates from its persisted selection).
+        if not getattr(status, 'robot_type', ''):
+            status.robot_type = getattr(self.node, 'robot_type', '') or ''
         self.status_publisher.publish(status)
 
     def get_image_topic_list_callback(self, request, response):

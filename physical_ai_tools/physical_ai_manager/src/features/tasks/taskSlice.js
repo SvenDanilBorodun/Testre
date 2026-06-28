@@ -120,9 +120,21 @@ const taskSlice = createSlice({
       state.taskInfo = initialState.taskInfo;
     },
     setTaskStatus: (state, action) => {
-      state.taskStatus = { ...state.taskStatus, ...action.payload };
-      if (action.payload.robotType) {
-        try { localStorage.setItem('edubotics_robotType', action.payload.robotType); } catch {}
+      // Never let an idle/post-restart /task/status tick (robot_type='') wipe
+      // the student's selected robot type. The server reports an empty
+      // robot_type in several ordinary situations — a node restart that lost
+      // its in-RAM selection, the stale-recording-session notice, the bare
+      // TaskStatus() error branches in the record/inference timer — and there is
+      // NO steady idle status publisher to re-set it, so an unconditional spread
+      // used to clobber taskStatus.robotType to '' permanently: only a manual
+      // re-select or a full reload recovered it, and it silently defeated
+      // useRobotTypeRehydrate (which reads THIS Redux value). Adopt robotType
+      // only when non-empty — the same guard userId already has below.
+      const { robotType, ...rest } = action.payload;
+      state.taskStatus = { ...state.taskStatus, ...rest };
+      if (robotType) {
+        state.taskStatus.robotType = robotType;
+        try { localStorage.setItem('edubotics_robotType', robotType); } catch {}
       }
     },
     selectRobotType: (state, action) => {

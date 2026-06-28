@@ -33,6 +33,7 @@ import packageJson from '../package.json';
 import { useRosTopicSubscription } from './hooks/useRosTopicSubscription';
 import { useHfUserList } from './hooks/useHfUserList';
 import { useRobotTypeRehydrate } from './hooks/useRobotTypeRehydrate';
+import { useHeartbeatWatchdog } from './hooks/useHeartbeatWatchdog';
 import rosConnectionManager from './utils/rosConnectionManager';
 import { useDispatch, useSelector } from 'react-redux';
 import { setRosHost } from './features/ros/rosSlice';
@@ -108,6 +109,13 @@ function StudentApp() {
   // succeeds with no in-app token entry. Re-fires only if the list is still
   // empty on a later (re)connect.
   const { reload: reloadHfUsers } = useHfUserList();
+
+  // App-global liveness watchdog: drive the heartbeat 'connected'->'timeout'->
+  // 'disconnected' transitions on EVERY page, not only those that render the
+  // <HeartbeatStatus> pill (Roboter Studio / Daten have none). Without it, a
+  // node restart on those pages produced no 'disconnected'->'connected' edge, so
+  // the rehydrate below never fired and the student had to re-select the robot.
+  useHeartbeatWatchdog({ enabled: !cloudOnly });
 
   // After a physical_ai_server node restart the server loses its in-memory
   // robot_type; re-issue /set_robot_type from the persisted value on heartbeat

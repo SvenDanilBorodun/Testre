@@ -39,6 +39,9 @@ function wrapperFor(store) {
 beforeEach(() => {
   mockSetRobotType.mockReset();
   mockSetRobotType.mockResolvedValue({ success: true });
+  // Isolate the localStorage fallback path between tests (the 'no robot type'
+  // case relies on an empty store).
+  try { localStorage.clear(); } catch { /* jsdom always has it */ }
 });
 
 describe('useRobotTypeRehydrate', () => {
@@ -98,6 +101,21 @@ describe('useRobotTypeRehydrate', () => {
       store.dispatch(setHeartbeatStatus('connected'));
     });
     expect(mockSetRobotType).not.toHaveBeenCalled();
+  });
+
+  it('falls back to the persisted robot type when Redux was wiped empty', async () => {
+    const store = makeStore(); // Redux robotType '' (never selected this session)
+    // A prior session persisted the selection; a node restart must still recover
+    // from localStorage even though Redux is empty.
+    localStorage.setItem('edubotics_robotType', 'omx');
+    renderHook(() => useRobotTypeRehydrate({ enabled: true }), {
+      wrapper: wrapperFor(store),
+    });
+    await act(async () => {
+      store.dispatch(setHeartbeatStatus('connected'));
+    });
+    expect(mockSetRobotType).toHaveBeenCalledTimes(1);
+    expect(mockSetRobotType).toHaveBeenCalledWith('omx');
   });
 
   it('is a no-op when no robot type has been selected yet', async () => {

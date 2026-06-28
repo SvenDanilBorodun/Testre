@@ -71,7 +71,16 @@ export function useRobotTypeRehydrate({ enabled = true } = {}) {
     if (!enabled) return;
     // Only on a recovery edge into 'connected'.
     if (heartbeatStatus !== 'connected' || prev === 'connected') return;
-    if (!robotType || robotType.trim() === '') return;
+    // Prefer the live Redux value; fall back to the persisted selection so a
+    // node restart still recovers even if Redux was momentarily empty (a
+    // pre-fix bundle that wiped it, or a /task/status race). localStorage is the
+    // same store taskSlice hydrates into Redux on a full reload.
+    let effectiveType = robotType;
+    if (!effectiveType || effectiveType.trim() === '') {
+      try { effectiveType = localStorage.getItem('edubotics_robotType') || ''; }
+      catch { effectiveType = ''; }
+    }
+    if (!effectiveType || effectiveType.trim() === '') return;
     // Never clobber a live task (clear_parameters + init_ros_params).
     if (running || phase > TaskPhase.READY) return;
     // Never clobber a running Roboter Studio workflow or calibration.
@@ -82,7 +91,7 @@ export function useRobotTypeRehydrate({ enabled = true } = {}) {
     if (inFlightRef.current) return;
 
     inFlightRef.current = true;
-    setRobotType(robotType)
+    setRobotType(effectiveType)
       .catch((e) => {
         // Best-effort: the manual RobotTypeSelector remains the fallback.
         console.warn('Robotertyp-Wiederherstellung fehlgeschlagen:', e?.message || e);

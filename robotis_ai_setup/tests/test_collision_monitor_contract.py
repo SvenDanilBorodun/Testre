@@ -591,6 +591,53 @@ class GpioCallbackSafetyTest(unittest.TestCase):
         self.assertFalse(host._collision_active)
 
 
+class StateCallbackSafetyTest(unittest.TestCase):
+    """The /joint_states + /leader/joint_states subscriptions run continuously on
+    the executor — including ACROSS the open_manipulator container blip when the
+    Roboter-Studio leader toggle recreates that container (`up --force-recreate
+    --no-deps`). A malformed JointState (e.g. msg.name=None during the freshly-
+    recreated controller's startup transient) must NEVER raise out of the
+    callback: an unhandled exception would propagate out of
+    MultiThreadedExecutor.spin() and kill the node (main() only catches
+    KeyboardInterrupt), dropping the React rosbridge connection and losing the
+    in-RAM robot_type → the student is forced to re-select the robot. The guards
+    wrap the parse in try/except (fix 2026-06-28), mirroring _gpio_states_cb."""
+
+    def test_follower_state_malformed_does_not_crash(self):
+        host = _Host()
+        bad = types.SimpleNamespace(name=None, position=[], velocity=[])
+        try:
+            host._collision_follower_state_cb(bad)
+        except Exception as exc:  # noqa: BLE001
+            self.fail(f'_collision_follower_state_cb leaked an exception: {exc!r}')
+
+    def test_leader_state_malformed_does_not_crash_and_records_no_arrival(self):
+        host = _Host()
+        bad = types.SimpleNamespace(name=None, position=[])
+        try:
+            host._collision_leader_state_cb(bad)
+        except Exception as exc:  # noqa: BLE001
+            self.fail(f'_collision_leader_state_cb leaked an exception: {exc!r}')
+        # A malformed leader tick must not register a (false) leader-active
+        # arrival — leader_appears_active would otherwise wrongly gate workflows.
+        self.assertIsNone(host._leader_state_last_mono)
+
+    def test_follower_state_wellformed_populates_pose_and_velocity(self):
+        host = _Host()
+        good = types.SimpleNamespace(
+            name=['joint1', 'joint2'], position=[0.1, 0.2], velocity=[0.0, 0.5])
+        host._collision_follower_state_cb(good)
+        self.assertAlmostEqual(host._collision_follower_pos['joint1'], 0.1)
+        self.assertAlmostEqual(host._collision_follower_vel['joint2'], 0.5)
+
+    def test_leader_state_wellformed_records_arrival(self):
+        host = _Host()
+        good = types.SimpleNamespace(name=['joint1', 'joint2'], position=[0.3, 0.4])
+        host._collision_leader_state_cb(good)
+        self.assertAlmostEqual(host._collision_leader_pos['joint1'], 0.3)
+        self.assertIsNotNone(host._leader_state_last_mono)
+
+
 class WatchdogSelfHealContractTest(unittest.TestCase):
     """The freeze latch must SELF-HEAL (issue #19 finding #4). The leader broadcaster
     (om_joint_trajectory_command_broadcaster) is a VOLATILE subscriber that never self-clears

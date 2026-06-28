@@ -279,6 +279,22 @@ class CollisionMonitorMixin:
     # ---- state subscriptions -------------------------------------------------------------
 
     def _collision_follower_state_cb(self, msg):
+        # Continuously-running /joint_states subscription — it also fires across
+        # the open_manipulator container blip when the Roboter-Studio leader
+        # toggle recreates that container (`up --force-recreate --no-deps`). A
+        # malformed JointState (e.g. msg.name=None during the freshly-recreated
+        # controller's startup transient) would raise out of
+        # MultiThreadedExecutor.spin() and KILL the node — main() only catches
+        # KeyboardInterrupt — leaving the React app "Getrennt" and the server's
+        # in-RAM robot_type lost. Same fail-safe posture as _gpio_states_cb: log
+        # and drop the tick, never crash the node.
+        try:
+            self._process_follower_state(msg)
+        except Exception as exc:  # noqa: BLE001 - guard must never crash the node
+            self.get_logger().error(
+                f'[KOLLISION] follower state processing failed (ignored): {exc}')
+
+    def _process_follower_state(self, msg):
         pos, vel = {}, {}
         for idx, name in enumerate(msg.name):
             if idx < len(msg.position):
@@ -289,6 +305,15 @@ class CollisionMonitorMixin:
         self._collision_follower_vel = vel
 
     def _collision_leader_state_cb(self, msg):
+        # See _collision_follower_state_cb — same node-crash guard for the
+        # /leader/joint_states subscription (also exposed to the toggle blip).
+        try:
+            self._process_leader_state(msg)
+        except Exception as exc:  # noqa: BLE001 - guard must never crash the node
+            self.get_logger().error(
+                f'[KOLLISION] leader state processing failed (ignored): {exc}')
+
+    def _process_leader_state(self, msg):
         pos = {}
         for idx, name in enumerate(msg.name):
             if idx < len(msg.position):

@@ -254,14 +254,12 @@ Six workflows in `.github/workflows/` are the canonical path for five surfaces:
 
 **Applying migrations.** `supabase db push --linked --password "$DB_PASSWORD"` from terminal works; Claude's MCP `apply_migration` tool also works. **Important quirk**: MCP re-stamps the version prefix into the ledger, so on-disk filenames must be renamed to the MCP-stamped value after applying, otherwise the next `supabase db push` sees ghost-unapplied migrations and crashes on `ALTER TABLE … ADD COLUMN`. (Fixed once in commit `de7d635`; pattern to watch for.)
 
-**Modal apps (`edubotics-training` + `edubotics-vision`) deploy MANUALLY.** The Modal image build happens in Modal's infrastructure (not on GH runners), and the CI auth + image-build feedback loop is slow to debug remotely. Until we have a strong reason to move Modal into CI, the operator owns it:
+**The Modal app (`edubotics-training`) deploys MANUALLY.** The Modal image build happens in Modal's infrastructure (not on GH runners), and the CI auth + image-build feedback loop is slow to debug remotely. Until we have a strong reason to move Modal into CI, the operator owns it:
 
 ```bash
 cd robotis_ai_setup/modal_training
 modal deploy modal_app.py
-modal deploy vision_app.py
 modal run modal_app.py::smoke_test    # optional verification
-modal run vision_app.py::smoke_test
 ```
 
 Manual `railway up`, `psql -f migration.sql`, and `build-images.sh` from a developer terminal are EMERGENCY-only for the other four surfaces.
@@ -402,7 +400,7 @@ Cloud API URL: `https://scintillating-empathy-production-1068.up.railway.app` (t
 
 **Manual emergency deploy** (off-pipeline, document in a PR before merging):
 - Supabase: `supabase db push` (CLI auth) against the project, OR `psql $DB_URL -f rollback/NNN_*.sql` for rollbacks.
-- Modal: `cd robotis_ai_setup/modal_training && modal deploy modal_app.py vision_app.py`.
+- Modal: `cd robotis_ai_setup/modal_training && modal deploy modal_app.py`.
 - Railway: `railway up --service scintillating-empathy --environment production --path-as-root . --ci` from `cloud_training_api/`.
 - Docker: `build-images.sh` from a clean Linux build host.
 
@@ -422,7 +420,7 @@ Two layers — `ci.yml` (validators) and the five deploy workflows.
 - **shell-lint** — shellcheck `-S error` on all shipped shell scripts
 - **compose-validate** — `docker compose config` on both compose files with a fake `.env`
 - **overlay-guard** — runs `fix_server_inference.py` against a synthetic upstream and asserts non-zero exit on no-op
-- **modal-import-validate** — `modal_app.py` + `vision_app.py` (NOT `training_handler.py` — it imports container-only deps)
+- **modal-import-validate** — `modal_app.py` (NOT `training_handler.py` — it imports container-only deps)
 - **teacher-web-build-validate** — builds `Dockerfile.web` with `physical_ai_manager/` as the build context (matches `railway up --path-as-root .`)
 - **manager-build-validate** — builds student `Dockerfile` with placeholder secrets; asserts each placeholder reached `main.*.js` (white-screen regression catcher)
 - **tutorials-validate** — JSON-parses `physical_ai_manager/public/tutorials/*.json`, cross-checks `allowed_blocks` against runtime dispatch (`STATEMENT_HANDLERS` + `VALUE_EVALUATORS` keys in `physical_ai_tools/physical_ai_server/physical_ai_server/workflow/handlers/__init__.py`, `HAT_BLOCK_TYPES` in `…/workflow/interpreter.py`, plus Blockly built-ins)
@@ -445,7 +443,7 @@ Two layers — `ci.yml` (validators) and the five deploy workflows.
 - **`docker-publish.yml`** — refuses on dirty tree; checks upstream base digests via `bump-upstream-digests.sh`; builds amd64 + arm64 in a matrix via `build-images.sh` (`--no-cache --pull`); applies the canonical tag set (`<sha>`, `<sha>-short`, `:latest` on main, `:X.Y.Z` + `:X.Y` on tags — **no `v` prefix**, matching versions.env's `IMAGE_TAG`); pulls + greps each published image to verify build-args reached the bundle.
 - **`release.yml`** — top-level dispatcher; on tag push fires W1→W4 in the golden order via `needs:` edges.
 
-**Modal is manual** — see Rule §6 above. Run `modal deploy modal_app.py vision_app.py` from your terminal BEFORE pushing a tag if the release touches Modal.
+**Modal is manual** — see Rule §6 above. Run `modal deploy modal_app.py` from your terminal BEFORE pushing a tag if the release touches Modal.
 
 ## When to ask the user
 

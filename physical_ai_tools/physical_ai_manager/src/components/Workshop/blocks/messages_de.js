@@ -8,38 +8,6 @@
  *     http://www.apache.org/licenses/LICENSE-2.0
  */
 
-// MUST stay in sync with server-side coco_classes.py — enforced by a
-// Jest test (objectClasses.sync.test.js).
-export const OBJECT_CLASSES = [
-  'Flasche',
-  'Tasse',
-  'Gabel',
-  'Löffel',
-  'Schüssel',
-  'Banane',
-  'Apfel',
-  'Orange',
-  'Karotte',
-  'Brokkoli',
-  'Maus',
-  'Fernbedienung',
-  'Handy',
-  'Buch',
-  'Schere',
-  'Teddybär',
-];
-
-export const COLORS = [
-  ['Rot', 'rot'],
-  ['Grün', 'gruen'],
-  ['Blau', 'blau'],
-  ['Gelb', 'gelb'],
-];
-
-// Lower-case set used by validators so a typo in a typed dropdown
-// option (rare but possible via Blockly's keyboard input) is rejected.
-export const ALLOWED_COLOR_VALUES = new Set(['rot', 'gruen', 'blau', 'gelb']);
-
 // Robot-arm safety envelope mirrored from omx_f_config.yaml so the
 // editor's setValidator() can clamp move_to coordinates *before* a
 // runtime safety_envelope rejects the trajectory. The values here MUST
@@ -75,17 +43,6 @@ export const DE = {
   DROP_AT: 'ablegen bei %1',
   WAIT_SECONDS: 'warte %1 Sekunden',
 
-  // Perception blocks
-  DETECT_COLOR: 'erkenne Farbe %1',
-  WAIT_UNTIL_COLOR: 'warte bis Farbe %1 erkannt (max %2 s)',
-  COUNT_COLOR: 'Anzahl Farbe %1',
-  DETECT_MARKER: 'erkenne Marker %1',
-  WAIT_UNTIL_MARKER: 'warte bis Marker %1 erkannt (max %2 s)',
-  DETECT_OBJECT: 'erkenne Objekt %1',
-  WAIT_UNTIL_OBJECT: 'warte bis Objekt %1 erkannt (max %2 s)',
-  COUNT_OBJECT: 'Anzahl Objekt %1',
-  DETECT_OPEN_VOCAB: 'finde Objekt mit Beschreibung %1',
-
   // Named-object grasping (AprilTag). Custom-init blocks use a prefix label +
   // a runtime-populated dropdown (no %1), so these are prefixes, not templates.
   GRASP_OBJECT_PREFIX: 'Greife',
@@ -97,6 +54,9 @@ export const DE = {
   // OBJECT_TYPE dropdown).
   WHILE_VISIBLE_PREFIX: 'Solange',
   WHILE_VISIBLE_SUFFIX: 'sichtbar',
+  // #6 student repetition cap on the loop block (0 = unbegrenzt).
+  WHILE_VISIBLE_MAX_PREFIX: 'höchstens',
+  WHILE_VISIBLE_MAX_SUFFIX: 'Mal',
   WAIT_UNTIL_OBJECT_SEEN_PREFIX: 'warte bis',
   WAIT_UNTIL_OBJECT_SEEN_MID: 'sichtbar, max',
   WAIT_UNTIL_OBJECT_SEEN_SUFFIX: 's',
@@ -117,8 +77,6 @@ export const DE = {
   // Events
   BROADCAST: 'sende Ereignis %1',
   WHEN_BROADCAST: 'wenn Ereignis %1 empfangen',
-  WHEN_MARKER_SEEN: 'wenn Marker %1 erkannt',
-  WHEN_COLOR_SEEN: 'wenn Farbe %1 erkannt (mind. %2 Pixel)',
 
   // Sensor history
   AVERAGE_LAST_N: 'Mittelwert der letzten %1 Werte von %2',
@@ -153,8 +111,6 @@ export const DE = {
   // Validators
   VALIDATOR_OUT_OF_RANGE: 'Wert außerhalb des erlaubten Bereichs.',
   VALIDATOR_NEGATIVE_NOT_ALLOWED: 'Negative Werte sind nicht erlaubt.',
-  VALIDATOR_BAD_COLOR: 'Ungültige Farbe.',
-  VALIDATOR_BAD_OBJECT_CLASS: 'Unbekannte Objektklasse.',
 
   // Run controls (debugger)
   RUN_START: 'Start',
@@ -176,8 +132,6 @@ export const DE = {
   DEBUG_FOLLOWER_JOINTS: 'Folge-Gelenke (rad)',
   DEBUG_GRIPPER_OPENING: 'Greifer geöffnet (rad)',
   DEBUG_VISIBLE_MARKERS: 'Sichtbare Marker',
-  DEBUG_COLOR_COUNTS: 'Farb-Pixelzahl',
-  DEBUG_VISIBLE_OBJECTS: 'Sichtbare Objekte',
 
   // Calibration wizard rebuild
   CALIB_DIVERSITY_HINT:
@@ -204,7 +158,6 @@ export const DE = {
   CALIB_HISTORY_TITLE: 'Kalibrierungs-Verlauf',
   CALIB_HISTORY_EMPTY: 'Noch keine früheren Kalibrierungen vorhanden.',
   CALIB_HISTORY_LOAD: 'Diese Version laden',
-  CALIB_COLOR_ONLY: 'Nur Farbprofil neu erfassen',
 
   // Workflow versions
   VERSION_HISTORY: 'Verlauf',
@@ -223,8 +176,4 @@ export const DE = {
   GALLERY_BY: 'von',
   GALLERY_CLONE: 'Klonen',
   GALLERY_EMPTY: 'Noch keine Workflows in der Galerie.',
-
-  // Cloud-vision
-  CLOUD_VISION_TOGGLE: 'Cloud-Erkennung verwenden',
-  CLOUD_VISION_LOADING: 'Cloud-Erkennung wird gestartet …',
 };

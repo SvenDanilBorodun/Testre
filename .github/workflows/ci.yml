@@ -40,8 +40,8 @@ jobs:
           python -m pip install --upgrade pip
           # pyyaml: the validator jobs below. numpy + opencv-contrib-python-headless
           # + pytest: the Roboter Studio workflow/IK test suite (pure-Python, no
-          # ROS — the workflow modules import onnxruntime/pupil_apriltags/rclpy
-          # lazily; calibration uses cv2.aruco which is the contrib build; headless
+          # ROS — the workflow modules import pupil_apriltags/rclpy lazily;
+          # calibration uses cv2.aruco which is the contrib build; headless
           # avoids GUI libs on the runner).
           python -m pip install pyyaml pytest numpy opencv-contrib-python-headless
       - name: Syntax-check Python modules
@@ -515,17 +515,16 @@ jobs:
         working-directory: robotis_ai_setup/modal_training
         run: |
           set -e
-          for f in modal_app.py vision_app.py; do
+          for f in modal_app.py; do
             echo "== importing $f =="
             python -c "import importlib.util, sys; spec = importlib.util.spec_from_file_location('m', '$f'); mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod); print('  OK: import succeeded')"
           done
       - name: Smoke-import cloud_training_api routes that touch Modal SDK
-        # Audit H28: routes/training.py and routes/vision.py both call
-        # `modal.Function.from_name(...)` and `.remote.aio(...)`. An SDK
-        # rename of either symbol would slip past the modal_app /
-        # vision_app import sweep (those are decoration-time only). Pull
-        # in just enough cloud_training_api deps to materialise the
-        # route modules and prove the Modal SDK call sites still parse.
+        # Audit H28: routes/training.py calls `modal.Function.from_name(...)`
+        # and `.remote.aio(...)`. An SDK rename of either symbol would slip
+        # past the modal_app import sweep (decoration-time only). Pull in just
+        # enough cloud_training_api deps to materialise the route module and
+        # prove the Modal SDK call sites still parse.
         run: |
           python -m pip install --quiet \
             'fastapi==0.115.12' 'pydantic==2.11.3' 'supabase==2.15.1' \
@@ -541,25 +540,13 @@ jobs:
           # modal` and any function-decoration call paths. We do NOT
           # call main.app at FastAPI level — just import the modules so
           # an SDK contract regression surfaces here.
-          python -c "from app.routes import training, vision; print('OK')"
+          python -c "from app.routes import training; print('OK')"
 
   teacher-web-build-validate:
     # Builds Dockerfile.web exactly the way Railway's `railway up
     # --path-as-root .` build does — with only physical_ai_manager/ as
     # the build context — so any path-scope regression surfaces in CI
-    # instead of as a failed Railway deploy. The original case:
-    # Dockerfile.web's `npm run build` triggers a Jest `prebuild` that
-    # reads coco_classes.py from a sibling-repo path; the file isn't
-    # in the build context, the test fails, the build fails. The
-    # graceful-skip in objectClasses.sync.test.js is the local defence;
-    # this job is the systemic one.
-    #
-    # NOTE: we deliberately do NOT stage `_coco_classes.py` here — the
-    # whole point is to test the Railway-equivalent context. With the
-    # graceful-skip, the prebuild test skips and the build succeeds.
-    # The sister job `manager-build-validate` already builds the
-    # student Dockerfile WITH staging, so dropdown↔server drift is
-    # still enforced.
+    # instead of as a failed Railway deploy.
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -611,12 +598,6 @@ jobs:
           persist-credentials: false
       - name: Build physical_ai_manager with placeholder secrets
         run: |
-          # Stage the same coco_classes.py snapshot that build-images.sh
-          # stages, so the prebuild Jest hook
-          # (src/components/Workshop/blocks/__tests__/objectClasses.sync.test.js)
-          # can run inside the build context.
-          cp physical_ai_tools/physical_ai_server/physical_ai_server/workflow/coco_classes.py \
-             physical_ai_tools/physical_ai_manager/_coco_classes.py
           docker build \
             --build-arg REACT_APP_SUPABASE_URL=https://CI_VALIDATE.supabase.co \
             --build-arg REACT_APP_SUPABASE_ANON_KEY=CI_VALIDATE_ANON_KEY \
@@ -625,7 +606,6 @@ jobs:
             -t edubotics-manager-validate \
             -f physical_ai_tools/physical_ai_manager/Dockerfile \
             physical_ai_tools/physical_ai_manager/
-          rm -f physical_ai_tools/physical_ai_manager/_coco_classes.py
       - name: Assert placeholder secrets reached the React bundle
         run: |
           # Each placeholder must appear as a string literal in the built JS.

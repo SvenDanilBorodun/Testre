@@ -54,9 +54,11 @@ def test_motion_blocks_registered():
 
 
 def test_perception_object_blocks_registered():
+    # Named-object (AprilTag) value blocks — the legacy colour/COCO/marker
+    # detection blocks were removed (P4).
     expected = {
-        'edubotics_detect_object', 'edubotics_wait_until_object',
-        'edubotics_count_objects_class',
+        'edubotics_see_object', 'edubotics_count_object',
+        'edubotics_wait_until_object_seen',
     }
     assert expected.issubset(set(VALUE_EVALUATORS))
 

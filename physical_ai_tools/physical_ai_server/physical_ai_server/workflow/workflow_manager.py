@@ -123,8 +123,6 @@ class WorkflowContext:
     call_procedure: Callable[[str, list[Any]], Any] = field(
         default_factory=lambda: (lambda _name, _args: None)
     )
-    # Cloud-vision configuration (phase 3)
-    cloud_vision: dict[str, Any] = field(default_factory=dict)
     # Roboter Studio named-object grasping: the loaded ObjectCatalog (tag_id →
     # type → grasp recipe), or None with object_catalog_error holding the German
     # load error. Loaded TOLERANTLY at start() — a workflow with no named-object
@@ -333,7 +331,6 @@ class WorkflowManager:
         self,
         workflow_json: str,
         workflow_id: str,
-        cloud_vision: dict[str, Any] | None = None,
     ) -> tuple[bool, str, list[dict[str, Any]]]:
         with self._lock:
             if self.is_running:
@@ -449,7 +446,6 @@ class WorkflowManager:
                 wait_if_paused=self._wait_if_paused,
                 wait_for_resume=self._wait_for_resume,
                 set_paused=self._set_paused,
-                cloud_vision=dict(cloud_vision or {}),
                 object_catalog=object_catalog,
                 object_catalog_error=object_catalog_error,
                 # Fresh per-run claimed/skipped sets (never persisted across runs)
@@ -688,17 +684,16 @@ class WorkflowManager:
         the body once. Motion blocks inside the body acquire ctx.motion_lock
         so they don't race the main stack.
 
-        Audit fix #14: marker / color hat handlers use EDGE-triggered
-        semantics — once they fire, they must observe the condition
-        going false (marker leaves frame / color disappears) before
-        re-arming. The previous level-triggered design re-ran the body
-        every poll while the trigger stayed true, which means a marker
-        held in front of the camera would fire the handler hundreds of
-        times. Broadcasts are inherently edge-triggered (count > last)
-        so they're unaffected.
+        Audit fix #14: the object-seen perception hat uses EDGE-triggered
+        semantics — once it fires, it must observe the condition going false
+        (the object leaves frame) before re-arming. A level-triggered design
+        would re-run the body every poll while the trigger stayed true, firing
+        the handler hundreds of times for an object held in front of the camera.
+        Broadcasts are inherently edge-triggered (count > last) so they're
+        unaffected.
         """
         btype = hat.get('type')
-        # Edge-trigger arming state for marker / color hats. None means
+        # Edge-trigger arming state for the object-seen hat. None means
         # 'first wait, treat as armed'; True means armed (allowed to fire
         # on next true), False means waiting for the condition to clear.
         edge_armed = True
@@ -710,18 +705,14 @@ class WorkflowManager:
                     # means the condition is currently false; re-arm.
                     # MUST list the SAME hats as the edge-gate below, or a hat
                     # fires once and then never re-arms (edge_armed stuck False).
-                    if btype in {'edubotics_when_marker_seen',
-                                 'edubotics_when_color_seen',
-                                 'edubotics_when_object_seen'}:
+                    if btype == 'edubotics_when_object_seen':
                         edge_armed = True
                     continue
                 if ctx.should_stop():
                     return
                 # Edge-trigger gate. Skip body execution while we wait
                 # for the condition to clear and re-arm.
-                if btype in {'edubotics_when_marker_seen',
-                             'edubotics_when_color_seen',
-                             'edubotics_when_object_seen'}:
+                if btype == 'edubotics_when_object_seen':
                     if not edge_armed:
                         time.sleep(0.1)
                         continue
@@ -781,50 +772,15 @@ class WorkflowManager:
                     state['consumed'][tid] = state['count']
                     return True
                 return False
-        if btype == 'edubotics_when_marker_seen':
-            target_id = int(fields.get('MARKER_ID', 0) or 0)
-            return self._wait_marker_visible(target_id, ctx)
-        if btype == 'edubotics_when_color_seen':
-            color = (fields.get('COLOR') or '').strip()
-            min_pixels = int(fields.get('MIN_PIXELS', 200) or 200)
-            return self._wait_color_visible(color, min_pixels, ctx)
         if btype == 'edubotics_when_object_seen':
             type_name = (fields.get('OBJECT_TYPE') or '').strip()
             return self._wait_object_visible(type_name, ctx)
         return False
 
-    def _wait_marker_visible(self, target_id: int, ctx: WorkflowContext) -> bool:
-        # Poll perception @ 5 Hz; bail on stop.
-        for _ in range(2):  # 2 × 0.5 s = 1 s blocking budget per loop
-            if ctx.should_stop():
-                return False
-            try:
-                if ctx.perception is None or ctx.get_scene_frame is None:
-                    time.sleep(0.5)
-                    return False
-                frame = ctx.get_scene_frame()
-                if frame is None:
-                    time.sleep(0.2)
-                    return False
-                # Mode name must match Perception.detect() dispatch:
-                # 'apriltag' (not 'marker'). Audit round-3 §AI — the
-                # earlier `'marker'` literal silently fell through the
-                # if/elif and returned `[]`, so the hat block never
-                # fired even when a tag was visible.
-                detections = ctx.perception.detect(
-                    frame, camera='scene', mode='apriltag', aruco_id=target_id,
-                )
-                if detections:
-                    return True
-            except Exception:
-                pass
-            time.sleep(0.2)
-        return False
-
     def _wait_object_visible(self, type_name: str, ctx: WorkflowContext) -> bool:
         """Edge-trigger poll for ``edubotics_when_object_seen``: True when any
-        catalog tag of ``type_name`` is visible. Mirrors _wait_marker_visible but
-        resolves the type's tag ids from the object catalog. Catalog/perception
+        catalog tag of ``type_name`` is visible. Resolves the type's tag ids from
+        the object catalog and polls AprilTag perception. Catalog/perception
         errors are swallowed (the hat simply doesn't fire) — a named block on the
         MAIN stack surfaces the German catalog error loudly instead."""
         if not type_name:
@@ -848,35 +804,6 @@ class WorkflowManager:
                     frame, camera='scene', mode='apriltag', aruco_id=None,
                 )
                 if any(getattr(d, 'aruco_id', None) in wanted for d in (detections or [])):
-                    return True
-            except Exception:
-                pass
-            time.sleep(0.2)
-        return False
-
-    def _wait_color_visible(self, color: str, min_pixels: int, ctx: WorkflowContext) -> bool:
-        for _ in range(2):
-            if ctx.should_stop():
-                return False
-            try:
-                if ctx.perception is None or ctx.get_scene_frame is None:
-                    time.sleep(0.5)
-                    return False
-                frame = ctx.get_scene_frame()
-                if frame is None:
-                    time.sleep(0.2)
-                    return False
-                detections = ctx.perception.detect(
-                    frame, camera='scene', mode='color', color=color,
-                )
-                # Each detection has a bbox (x, y, w, h); approximate
-                # pixel area as w*h.
-                total = 0
-                for d in detections or []:
-                    bbox = getattr(d, 'bbox_px', None)
-                    if bbox and len(bbox) == 4:
-                        total += int(bbox[2]) * int(bbox[3])
-                if total >= min_pixels:
                     return True
             except Exception:
                 pass

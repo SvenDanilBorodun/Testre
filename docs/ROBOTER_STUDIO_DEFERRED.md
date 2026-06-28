@@ -29,7 +29,7 @@ Python overlay must register the handlers, otherwise every call returns
 | 1.1 | CRITICAL | Register service callbacks for `WorkflowPause`, `WorkflowStep`, `WorkflowContinue`, `WorkflowSetBreakpoints` on the physical_ai_server node. Each callback calls `WorkflowManager.pause()` / `step()` / `resume()` / `set_breakpoints()`. | `robotis_ai_setup/docker/physical_ai_server/overlays/physical_ai_server.py` (extend the overlay) |
 | 1.2 | CRITICAL | Register service callbacks for `CalibrationPreview`, `VerifyCalibration`, `CalibrationHistory`. These need new methods on `CalibrationManager`: `get_charuco_preview(camera) -> {detected, corners_x, corners_y, board_area_pct}`, `verify_pose(camera, world_x, world_y) -> {predicted_pixel_x, predicted_pixel_y, residual_mm}`, `list_history(camera) -> [{timestamp, step, reprojection_error_px, agreement_deg}]`. | Same overlay + `overlays/workflow/calibration_manager.py` |
 | 1.3 | CRITICAL | Publish `/workflow/sensors` (SensorSnapshot.msg) at 5 Hz when a workflow is active. Wire `WorkflowManager` to expose follower joints + gripper opening + visible apriltag IDs + color pixel counts + visible YOLO classes. The React `useRosTopicSubscription.subscribeToWorkflowSensors` subscribes; the publisher is absent. | Same overlay + `overlays/workflow/workflow_manager.py` (add a snapshot accessor) |
-| 1.4 | HIGH | Wire `cloud_vision_enabled` request field from `StartWorkflow.srv` into the `WorkflowManager.start(workflow_json, workflow_id, cloud_vision=...)` parameter. Build the `cloud_vision` dict on the server side: `translate=<synonym dict>`, `cloud_burst=lambda bgr, prompt: post_to_cloud_api(...)`. Without this, the open-vocab block always raises German "Cloud-Erkennung deaktiviert". | Same overlay |
+| 1.4 | **REMOVED (P4 2026-06-28)** | **Won't do — named-object AprilTag grasping superseded this.** The cloud-vision / open-vocab block, the `cloud_vision_enabled` request field, `cloud_training_api/app/routes/vision.py`, and `modal_training/vision_app.py` (OWLv2) were all deleted in P4. (Was: wire `cloud_vision_enabled` from `StartWorkflow.srv` into `WorkflowManager.start(...)`.) | n/a |
 | 1.5 | HIGH | Implement `CalibrationManager.compute_frame_quality(corners, board_area_pct, sharpness) -> int8` (1=POOR, 2=OK, 3=GOOD). Map to the `CalibrationCaptureFrame.srv` response's `quality` field. Coverage cell = `int8 (board_centroid_x // (img_w/4)) + 4*(board_centroid_y // (img_h/4))`. | `overlays/workflow/calibration_manager.py:_save_intrinsic_frame` |
 | 1.6 | HIGH | Add the calibration history directory at `/root/.cache/edubotics/calibration/history/{camera}_{ISO timestamp}.yaml`, prune-keep-newest-5 on every save. | `overlays/workflow/calibration_manager.py:_solve_intrinsic`, `_solve_handeye` |
 | 1.7 | MEDIUM | Use Postgres session-GUC `app.saved_by` (set via `SET LOCAL` from the cloud API on every save) so the `snapshot_workflow_version` trigger can record `saved_by` instead of leaving it NULL. | `015_workflow_versions.sql` + `cloud_training_api/app/routes/workflows.py:update_workflow` |
@@ -49,7 +49,7 @@ Python overlay must register the handlers, otherwise every call returns
 | 2.7 | MEDIUM | `RunControls` IK warnings effect attaches warnings via `setWarningText` but never clears them. Old warnings persist on blocks across runs. | `physical_ai_manager/src/components/Workshop/RunControls.jsx:51-63` |
 | 2.8 | MEDIUM | `setActiveTutorial({id: null})` doesn't clear `restrictedBlocks` inside the reducer — relies on a follow-up dispatch from SkillmapPlayer. If the component unmounts in the same tick, the toolbox stays restricted. Clear in the reducer. | `physical_ai_manager/src/features/workshop/workshopSlice.js:setActiveTutorial` |
 | 2.9 | MEDIUM | PDF export button — `jsPDF` + `html-to-image` are in `package.json` but no button or generator is wired. Plan §6.6 specified it. | `ToolbarButtons.jsx` + new `pseudoCodeDeGenerator.js` |
-| 2.10 | MEDIUM | LAB color debug overlay — show the captured LAB center + k×σ envelope on the camera feed when `edubotics_detect_color` runs. Helps students see why a yellow banana sometimes counts as red. | `physical_ai_manager/src/components/Workshop/CameraFeedOverlay.jsx` + new debug-overlay sub-component |
+| 2.10 | **REMOVED (P4 2026-06-28)** | **Won't do — named-object AprilTag grasping superseded this.** The `edubotics_detect_color` colour-detection block was deleted in P4. (Was: LAB colour debug overlay on the camera feed.) | n/a |
 | 2.11 | LOW | Toolbar `Ctrl+Shift+E` keyboard shortcut for export mentioned in a comment but never wired. | `physical_ai_manager/src/components/Workshop/ToolbarButtons.jsx:79` |
 | 2.12 | LOW | Cloud-only mode (`?cloud=1`) doesn't short-circuit WorkshopPage — it tries to call ROS services and the wizard never loads. Add a banner: "Roboter Studio benötigt eine Roboter-Verbindung." | `physical_ai_manager/src/pages/WorkshopPage.js` |
 | 2.13 | LOW | `CameraFeedOverlay` uses `window.prompt` (blocks rendering, no Esc, no keyboard). Replace with a small modal. | `physical_ai_manager/src/components/Workshop/CameraFeedOverlay.jsx:74` |
@@ -77,11 +77,11 @@ Python overlay must register the handlers, otherwise every call returns
 | 4.2 | MEDIUM | `RateLimitMiddleware` prefix matching uses `startswith()` — a POST to `/vision/detectors` (hypothetical) matches `/vision/detect`. Anchor with `path == prefix or path.startswith(prefix + "/")`. | `cloud_training_api/app/main.py:193` |
 | 4.3 | MEDIUM | `_RATE_LIMIT_RULES` bucket dict grows without bound across uvicorn lifetime. Add periodic GC: every N inserts, drop buckets whose newest entry is older than `window_s`. | Same file, `RateLimiter` |
 | 4.4 | MEDIUM | `_client_ip` trusts `X-Forwarded-For` unconditionally. A request hitting `*.railway.app` directly with a spoofed XFF burns the victim's rate-limit bucket. Trust XFF only when `request.client.host` is in a known proxy CIDR. | Same file, `_client_ip` |
-| 4.5 | MEDIUM | `/vision/detect` rate-limits per-IP. A 30-student classroom behind one NAT shares a bucket. Switch to per-user keying. | Same file |
-| 4.6 | MEDIUM | Modal cold-start failure can return a 500 OK with `{detections: [], error: ...}` — the user gets degraded results AND consumes quota. Refund quota when `detections == []` AND `cold_start == True`. | `cloud_training_api/app/routes/vision.py` |
-| 4.7 | MEDIUM | Image base64 validator decodes the bytes twice (once in validator, once at line ~170). Cache decoded bytes on the model. | `cloud_training_api/app/routes/vision.py` |
-| 4.8 | MEDIUM | `vision_app.py` `cold_start = not getattr(self, "_warmed", False)` is per-container, but `_warmed` survives a snapshot resume → reports `False` on the first post-resume call. Record a wall-time-since-setup heuristic instead. | `modal_training/vision_app.py:detect` |
-| 4.9 | LOW | Modal `score_threshold` default 0.10 surfaces many OWLv2 false positives. 0.20-0.30 is more typical for German prompts. | Same file |
+| 4.5 | **REMOVED (P4 2026-06-28)** | **Won't do — named-object AprilTag grasping superseded this.** `/vision/detect` and the cloud OWLv2 path were deleted in P4. (Was: switch the per-IP rate-limit to per-user keying.) | n/a |
+| 4.6 | **REMOVED (P4 2026-06-28)** | **Won't do — named-object AprilTag grasping superseded this.** `cloud_training_api/app/routes/vision.py` was deleted in P4. (Was: refund vision quota on cold-start empty results.) | n/a |
+| 4.7 | **REMOVED (P4 2026-06-28)** | **Won't do — named-object AprilTag grasping superseded this.** `cloud_training_api/app/routes/vision.py` was deleted in P4. (Was: cache decoded image bytes in the base64 validator.) | n/a |
+| 4.8 | **REMOVED (P4 2026-06-28)** | **Won't do — named-object AprilTag grasping superseded this.** `modal_training/vision_app.py` was deleted in P4 (`edubotics-vision` Modal app stopped). (Was: fix the `_warmed` cold-start heuristic across snapshot resume.) | n/a |
+| 4.9 | **REMOVED (P4 2026-06-28)** | **Won't do — named-object AprilTag grasping superseded this.** The OWLv2 `vision_app.py` path was deleted in P4. (Was: raise the OWLv2 `score_threshold` default.) | n/a |
 | 4.10 | LOW | `me.py:list_tutorial_progress` doesn't paginate — unbounded with 100+ tutorials. | `cloud_training_api/app/routes/me.py` |
 | 4.11 | LOW | `tutorial_progress.touch_tutorial_progress_updated_at` lacks `SET search_path = public`. Audit §J11. | `016_tutorial_progress.sql` |
 
@@ -98,7 +98,7 @@ Python overlay must register the handlers, otherwise every call returns
 | 5.5 | LOW | `BroadcastShim` class is dead code (legacy compat) after the broadcast counter refactor. Delete. | `overlays/workflow/workflow_manager.py:782-813` |
 | 5.6 | LOW | `cv2.FileStorage` writes (`_solve_intrinsic`, `_solve_handeye`) don't wrap `fs.release()` in `try/finally`. A mid-write exception leaks the fd + leaves corrupt YAML. | `overlays/workflow/calibration_manager.py:334-341, 408-416` |
 | 5.7 | LOW | `safety_envelope.py` uses `print()` instead of a logger. Document that this is intentional (so logs land in `docker logs` even if logging config breaks) or migrate to logger. | `overlays/workflow/safety_envelope.py` |
-| 5.8 | LOW | `vision_app.py:smoke_test` calls `__import__("torch")` twice when `torch` was already imported a line earlier. Cosmetic. | `modal_training/vision_app.py:217-218` |
+| 5.8 | **REMOVED (P4 2026-06-28)** | **Won't do — named-object AprilTag grasping superseded this.** `modal_training/vision_app.py` was deleted in P4. (Was: cosmetic double `__import__("torch")` in `smoke_test`.) | n/a |
 
 ---
 
@@ -122,12 +122,12 @@ Python overlay must register the handlers, otherwise every call returns
 
 | # | Severity | Item | Where |
 |---|---|---|---|
-| 7.1 | LOW | `tools/eval_perception.py`, `tools/capture_eval_set.py`, `tools/onnx_smoke.py`, `tools/eval_open_vocab.py` are referenced in `tools/perception_eval.md` + `tools/dfine_finetune.md` but not present. Write them or update the docs (the "current state" headers help but the script paths still suggest readiness). | `tools/` |
-| 7.2 | LOW | `D-FINE-N` ONNX is not actually downloaded by the Dockerfile. The env-flag works; the file just isn't in the image. Add `RUN curl -fL ... dfine_n.onnx && echo "<sha256>  dfine_n.onnx" \| sha256sum -c` once a hosted URL exists. | `robotis_ai_setup/docker/physical_ai_server/Dockerfile` |
+| 7.1 | **REMOVED (P4 2026-06-28)** | **Won't do — named-object AprilTag grasping superseded this.** The YOLOX/D-FINE/OWLv2 detector eval pipeline was removed in P4; `tools/perception_eval.md` + `tools/dfine_finetune.md` are now marked historical. (Was: write the referenced eval helper scripts.) | n/a |
+| 7.2 | **REMOVED (P4 2026-06-28)** | **Won't do — named-object AprilTag grasping superseded this.** The YOLOX/D-FINE detector path (incl. `onnxruntime` + the YOLOX-tiny ONNX download) was removed from the server Dockerfile in P4. (Was: bake a D-FINE-N ONNX into the image.) | n/a |
 | 7.3 | LOW | CLAUDE.md §14 drift table still lists `0.8.2` for `package.json` — we bumped to `0.9.0`. Update. | `Testre/CLAUDE.md` |
 | 7.4 | LOW | CLAUDE.md §13.6 "Ask before:" list should mention applying Supabase migrations — they're irreversible (well, with rollback files, but mid-deploy is a moment of risk). | `Testre/CLAUDE.md` |
 | 7.5 | LOW | Plan §6.6 PDF export — `jsPDF` and `html-to-image` are in package.json deps but no code uses them yet. Remove until needed, or implement. | `package.json` |
-| 7.6 | LOW | The cost estimate for the cloud-vision path is given as three slightly different numbers across `vision_app.py:21-26`, the plan, and `CLAUDE.md` §8.3. Reconcile. | various |
+| 7.6 | **REMOVED (P4 2026-06-28)** | **Won't do — named-object AprilTag grasping superseded this.** The cloud-vision path (`vision_app.py`) was deleted in P4. (Was: reconcile the cloud-vision cost estimate across files.) | n/a |
 
 ---
 
@@ -136,10 +136,10 @@ Python overlay must register the handlers, otherwise every call returns
 Recommended order, biggest student-impact first:
 
 1. **Item 1.1–1.3** (server-side ROS handlers + SensorSnapshot publisher) — without these the entire phase-2 debugger and live calibration UX is dead.
-2. **Item 1.4** (cloud_vision wiring) — without it, the open-vocab block + tutorial 6 don't work.
+2. ~~**Item 1.4** (cloud_vision wiring)~~ — **REMOVED (P4 2026-06-28)**; the cloud-vision / open-vocab path was deleted, superseded by named-object AprilTag grasping.
 3. **Item 1.5–1.6** (frame quality + calibration history) — visible calibration UX upgrades.
 4. **Item 2.1–2.2** (audio context + topic-unsubscribe leaks) — student-visible mute + memory bloat over long sessions.
-5. **Item 4.6** (refund quota on cold-start empty results) — fairness fix.
+5. ~~**Item 4.6** (refund quota on cold-start empty results)~~ — **REMOVED (P4 2026-06-28)**; `routes/vision.py` was deleted.
 6. **Item 2.10** (LAB color debug overlay) — pedagogically valuable.
 7. **Item 2.9** (PDF export) — teacher-requested feature.
 8. **Item 1.7** + 4.x cleanup — DB hygiene.

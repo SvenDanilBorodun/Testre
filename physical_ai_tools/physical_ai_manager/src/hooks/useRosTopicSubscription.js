@@ -910,8 +910,6 @@ export function useRosTopicSubscription() {
           follower_joints: Array.from(msg.follower_joints || []),
           gripper_opening: Number(msg.gripper_opening || 0),
           visible_apriltag_ids: Array.from(msg.visible_apriltag_ids || []),
-          color_counts: Array.from(msg.color_counts || [0, 0, 0, 0]),
-          visible_object_classes: Array.from(msg.visible_object_classes || []),
         }));
       });
       workflowSensorsTopicRef.current = topic;
@@ -1013,6 +1011,12 @@ export function useRosTopicSubscription() {
               h: d.h,
               label: d.label,
               confidence: d.confidence,
+              // Grasp-orientation overlay (named-object grasping): a pinch-axis
+              // angle (image space, rad) + a flag for whether it's meaningful.
+              // This mapper cherry-picks Detection fields, so an unmapped field
+              // is silently dropped — keep these two in sync with Detection.msg.
+              graspAngleRad: d.grasp_angle_rad,
+              hasGraspAngle: d.has_grasp_angle,
             })),
           }));
         }

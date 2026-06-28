@@ -9,11 +9,9 @@
  */
 
 import * as Blockly from 'blockly/core';
-import { COLORS, ALLOWED_COLOR_VALUES, DE } from './messages_de';
+import { DE } from './messages_de';
 
 const EVENT_COLOR = '#ec4899';
-
-const COLOR_DROPDOWN = COLORS.map(([label, value]) => [label, value]);
 
 // Hat blocks ("when X happens") have no `previousStatement` so they
 // only appear at the top of the workspace. The runtime interpreter
@@ -24,15 +22,6 @@ const HAT_SHAPE = {
   // No previousStatement — this makes the block a hat (top-only).
   nextStatement: null,
 };
-
-// Color-seen pixel threshold. Defaults to 200 px which is roughly a
-// red Lego cube at 60 cm camera distance. Range is empirical.
-const COLOR_PIXEL_MIN = 50;
-const COLOR_PIXEL_MAX = 50_000;
-
-// AprilTag IDs constrained by the printable kit, matching perception.js.
-const MARKER_ID_MIN = 0;
-const MARKER_ID_MAX = 255;
 
 const NAME_MAX_LEN = 40;
 function eventNameValidator(newValue) {
@@ -68,41 +57,6 @@ export const EVENT_BLOCKS = [
       + 'gesendet wird.',
     extensions: ['edubotics_validate_event_name'],
   },
-  {
-    type: 'edubotics_when_marker_seen',
-    message0: DE.WHEN_MARKER_SEEN,
-    args0: [
-      {
-        type: 'field_number',
-        name: 'MARKER_ID',
-        value: 5,
-        min: MARKER_ID_MIN,
-        max: MARKER_ID_MAX,
-        precision: 1,
-      },
-    ],
-    ...HAT_SHAPE,
-    colour: EVENT_COLOR,
-    extensions: ['edubotics_validate_marker_id_evt'],
-  },
-  {
-    type: 'edubotics_when_color_seen',
-    message0: DE.WHEN_COLOR_SEEN,
-    args0: [
-      { type: 'field_dropdown', name: 'COLOR', options: COLOR_DROPDOWN },
-      {
-        type: 'field_number',
-        name: 'MIN_PIXELS',
-        value: 200,
-        min: COLOR_PIXEL_MIN,
-        max: COLOR_PIXEL_MAX,
-        precision: 1,
-      },
-    ],
-    ...HAT_SHAPE,
-    colour: EVENT_COLOR,
-    extensions: ['edubotics_validate_color_event'],
-  },
 ];
 
 function registerExtensionOnce(name, fn) {
@@ -116,44 +70,6 @@ export function registerEventBlocks() {
     const f = this.getField('EVENT_NAME');
     if (f && typeof f.setValidator === 'function') {
       f.setValidator(eventNameValidator);
-    }
-  });
-  registerExtensionOnce('edubotics_validate_marker_id_evt', function () {
-    const f = this.getField('MARKER_ID');
-    if (f && typeof f.setValidator === 'function') {
-      f.setValidator((v) => {
-        const n = Number(v);
-        if (!Number.isFinite(n)) return MARKER_ID_MIN;
-        if (n < MARKER_ID_MIN) return MARKER_ID_MIN;
-        if (n > MARKER_ID_MAX) return MARKER_ID_MAX;
-        return Math.round(n);
-      });
-    }
-  });
-  registerExtensionOnce('edubotics_validate_color_event', function () {
-    const px = this.getField('MIN_PIXELS');
-    if (px && typeof px.setValidator === 'function') {
-      px.setValidator((v) => {
-        const n = Number(v);
-        if (!Number.isFinite(n)) return COLOR_PIXEL_MIN;
-        if (n < COLOR_PIXEL_MIN) return COLOR_PIXEL_MIN;
-        if (n > COLOR_PIXEL_MAX) return COLOR_PIXEL_MAX;
-        return Math.round(n);
-      });
-    }
-    // Audit §events-r1: also validate COLOR against the shared
-    // ALLOWED_COLOR_VALUES set (rot/gruen/blau/gelb). Without this, a
-    // user could programmatically inject a non-allowed value via a
-    // hand-edited workspace JSON and the on-host runtime would reject
-    // the workflow at start time instead of at block-edit time. Source
-    // of truth lives in messages_de.js so this validator stays in sync
-    // with perception.js's edubotics_validate_color extension.
-    const colorField = this.getField('COLOR');
-    if (colorField && typeof colorField.setValidator === 'function') {
-      colorField.setValidator((newValue) => {
-        if (!ALLOWED_COLOR_VALUES.has(newValue)) return null;
-        return newValue;
-      });
     }
   });
   // Audit round-3 §A — guard against re-definition on hot-reload or

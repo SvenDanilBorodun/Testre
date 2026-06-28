@@ -41,7 +41,7 @@ function filterContents(contents, restricted) {
  * only block entries whose `type` is in the set are kept (used by
  * tutorial scaffolding).
  */
-export function buildToolbox(restrictedBlocks = null, cloudVisionEnabled = false) {
+export function buildToolbox(restrictedBlocks = null) {
   const restricted = restrictedBlocks instanceof Set
     ? restrictedBlocks
     : (restrictedBlocks ? new Set(restrictedBlocks) : null);
@@ -60,36 +60,18 @@ export function buildToolbox(restrictedBlocks = null, cloudVisionEnabled = false
     },
   ], restricted);
 
-  // Audit F28: only surface the open-vocab block when cloud vision is
-  // enabled. The block was previously visible unconditionally and a
-  // student who dragged it with the toggle OFF got a runtime "lokal
-  // nicht bekannt + Cloud deaktiviert" error with no UI hint why.
-  const perceptionBase = [
-    { kind: 'block', type: 'edubotics_detect_color' },
-    { kind: 'block', type: 'edubotics_wait_until_color' },
-    { kind: 'block', type: 'edubotics_count_color' },
-    { kind: 'block', type: 'edubotics_detect_marker' },
-    { kind: 'block', type: 'edubotics_wait_until_marker' },
-    { kind: 'block', type: 'edubotics_detect_object' },
-    { kind: 'block', type: 'edubotics_wait_until_object' },
-    { kind: 'block', type: 'edubotics_count_objects_class' },
-    // Named-object AprilTag grasping (dropdown fed by the runtime catalog).
+  // Named-object AprilTag grasping (dropdown fed by the runtime catalog).
+  const perception = filterContents([
     { kind: 'block', type: 'edubotics_grasp_object' },
     { kind: 'block', type: 'edubotics_while_visible' },
     { kind: 'block', type: 'edubotics_see_object' },
     { kind: 'block', type: 'edubotics_count_object' },
     { kind: 'block', type: 'edubotics_wait_until_object_seen' },
-  ];
-  if (cloudVisionEnabled) {
-    perceptionBase.push({ kind: 'block', type: 'edubotics_detect_open_vocab' });
-  }
-  const perception = filterContents(perceptionBase, restricted);
+  ], restricted);
 
   const events = filterContents([
     { kind: 'block', type: 'edubotics_broadcast' },
     { kind: 'block', type: 'edubotics_when_broadcast' },
-    { kind: 'block', type: 'edubotics_when_marker_seen' },
-    { kind: 'block', type: 'edubotics_when_color_seen' },
     { kind: 'block', type: 'edubotics_when_object_seen' },
   ], restricted);
 

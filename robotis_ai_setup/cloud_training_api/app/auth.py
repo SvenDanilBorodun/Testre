@@ -61,12 +61,6 @@ def get_user_profile(user_id: str) -> dict:
         .select(
             "id, email, role, username, full_name, classroom_id, "
             "workgroup_id, training_credits, created_by, "
-            # Audit: cloud-vision quota columns surfaced so teacher
-            # ceiling-enforcement (routes/teacher.py:set_student_vision_quota)
-            # can read the caller's own cap without a second query.
-            # Migration 017 adds these; pre-017 deployments still
-            # receive NULL via the .select() rather than an error.
-            "vision_quota_per_term, vision_used_per_term, "
             # Migration 030: the student's linked HuggingFace username. The
             # boot-time schema probe (main.py::_validate_required_schema)
             # guarantees the column exists before this select runs, so a

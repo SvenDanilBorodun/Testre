@@ -38,8 +38,7 @@ RUN test -n "$REACT_APP_SUPABASE_URL"      || (echo "ERROR: --build-arg REACT_AP
 # Source maps are disabled in vite.config.js (`build.sourcemap: false`) — they
 # expose React source via DevTools and add ~15 MB to the shipped bundle. (This
 # replaces CRA's GENERATE_SOURCEMAP=false env, which Vite does not read.)
-# `npm run build` runs `vite build`; npm first runs the `prebuild` hook
-# (the Workshop block-sync vitest contract) which still gates the build.
+# `npm run build` runs `vite build`.
 RUN npm run build
 RUN printf '{"buildId":"%s","builtAt":"%s"}\n' "${REACT_APP_BUILD_ID}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > build/version.json
 

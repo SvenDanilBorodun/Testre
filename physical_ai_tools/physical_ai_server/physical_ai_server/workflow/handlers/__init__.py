@@ -40,16 +40,10 @@ STATEMENT_HANDLERS: dict[str, callable] = {
 VALUE_EVALUATORS: dict[str, callable] = {
     # WS3: value-output reference to a pinned destination (fills move_to/drop_at).
     'edubotics_destination_ref': destination_handlers.destination_ref,
-    'edubotics_detect_color': perception_handlers.detect_color,
-    'edubotics_detect_object': perception_handlers.detect_object,
-    'edubotics_detect_marker': perception_handlers.detect_marker,
-    'edubotics_count_color': perception_handlers.count_color,
-    'edubotics_count_objects_class': perception_handlers.count_objects_class,
-    'edubotics_wait_until_color': perception_handlers.wait_until_color,
-    'edubotics_wait_until_object': perception_handlers.wait_until_object,
-    'edubotics_wait_until_marker': perception_handlers.wait_until_marker,
-    'edubotics_detect_open_vocab': perception_handlers.detect_open_vocab,
-    # Named-object value blocks (Roboter Studio AprilTag grasping)
+    # Named-object value blocks (Roboter Studio AprilTag grasping). The legacy
+    # colour / COCO-object / raw-marker / open-vocabulary detection blocks were
+    # removed in the named-object cleanup (P4) — AprilTag named-object detection
+    # is the only perception workflow now.
     'edubotics_see_object': perception_handlers.see_object,
     'edubotics_count_object': perception_handlers.count_object,
     'edubotics_wait_until_object_seen': perception_handlers.wait_until_object_seen,

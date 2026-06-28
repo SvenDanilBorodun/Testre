@@ -161,9 +161,9 @@ class ObjectCatalog:
 
 # ── env / path resolution ────────────────────────────────────────────────────
 def _calib_dir() -> Path:
-    # Matches calibration_manager.py / color_profile.py: read EDUBOTICS_CALIB_DIR
-    # (compose forwards it; runtime value points inside the edubotics_calib
-    # volume). The literal default mirrors those modules.
+    # Matches calibration_manager.py: read EDUBOTICS_CALIB_DIR (compose forwards
+    # it; runtime value points inside the edubotics_calib volume). The literal
+    # default mirrors that module.
     return Path(os.environ.get('EDUBOTICS_CALIB_DIR', '/root/.cache/edubotics/calibration'))
 
 

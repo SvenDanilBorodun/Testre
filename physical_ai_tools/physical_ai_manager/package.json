@@ -47,7 +47,6 @@
   },
   "scripts": {
     "start": "vite",
-    "prebuild": "vitest run --dir src/components/Workshop/blocks/__tests__",
     "build": "vite build",
     "preview": "vite preview",
     "test": "vitest run",

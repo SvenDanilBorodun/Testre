@@ -2,14 +2,12 @@
 
 ``pupil_apriltags.Detector.detect()`` wraps a C library that is NOT
 thread-safe, but ``Perception`` is a single shared instance and the workflow
-interpreter spawns one thread per hat block. Two concurrent ``detect_marker``
-calls (e.g. two ``when_marker_seen`` hats) would race the shared C detector →
-possible segfault of the whole ROS node.
+interpreter spawns one thread per hat block. Two concurrent AprilTag detect
+calls (e.g. a ``when_object_seen`` hat racing the main stack) would race the
+shared C detector → possible segfault of the whole ROS node.
 
 These tests assert the per-detector lock serializes concurrent AprilTag
 detection: a fake detector records whether two ``.detect()`` calls ever overlap.
-The YOLOX / colour paths are deliberately left unlocked (onnxruntime is
-thread-safe; the colour profile is immutable) — not exercised here.
 """
 
 from __future__ import annotations
@@ -115,9 +113,8 @@ def test_lock_held_around_detect_call():
     )
 
 
-def test_unlocked_paths_unaffected():
-    """Sanity: a colour detect (unlocked path) still works while no profile is
-    set (returns [] cleanly) — the lock change must not touch it."""
+def test_unknown_mode_returns_empty():
+    """A non-apriltag mode (the colour/COCO modes were removed) returns [] rather
+    than raising."""
     p = Perception()
-    out = p.detect(_img(), camera='scene', mode='color', color='rot')
-    assert out == []
+    assert p.detect(_img(), camera='scene', mode='color') == []

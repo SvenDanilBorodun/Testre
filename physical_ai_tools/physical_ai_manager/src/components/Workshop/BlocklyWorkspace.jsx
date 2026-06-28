@@ -9,7 +9,6 @@
  */
 
 import React, { useEffect, useRef, useState } from 'react';
-import { useSelector } from 'react-redux';
 import * as Blockly from 'blockly/core';
 import 'blockly/blocks';
 import * as De from 'blockly/msg/de';
@@ -111,9 +110,6 @@ function BlocklyWorkspace({
   const containerRef = useRef(null);
   const workspaceRef = useRef(null);
   const [, setReadyTick] = useState(0);
-  // Audit F28: the toolbox should reflect the cloud-vision toggle so
-  // the open-vocab block is only draggable when it can actually run.
-  const cloudVisionEnabled = useSelector((s) => !!s.workshop.cloudVisionEnabled);
 
   // Hold the latest onChange in a ref so a parent that rebuilds the
   // callback on every render doesn't trigger our injection effect.
@@ -139,20 +135,18 @@ function BlocklyWorkspace({
     const ws = workspaceRef.current;
     if (!ws || typeof ws.updateToolbox !== 'function') return;
     try {
-      // Always rebuild via buildToolbox so the cloud-vision flag is
-      // applied. The pre-built TOOLBOX export is the disabled variant.
-      const next = buildToolbox(restrictedBlocks, cloudVisionEnabled);
+      const next = buildToolbox(restrictedBlocks);
       ws.updateToolbox(next);
     } catch (e) {
       console.warn('BlocklyWorkspace: updateToolbox failed', e);
     }
-  }, [restrictedBlocks, cloudVisionEnabled]);
+  }, [restrictedBlocks]);
 
   useEffect(() => {
     registerAllBlocksOnce();
     if (!containerRef.current) return undefined;
 
-    const toolbox = buildToolbox(restrictedBlocks, cloudVisionEnabled);
+    const toolbox = buildToolbox(restrictedBlocks);
 
     const workspace = Blockly.inject(containerRef.current, {
       toolbox,

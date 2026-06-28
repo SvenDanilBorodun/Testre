@@ -131,7 +131,7 @@ def test_dispatch_imports_clean_with_malformed_env():
         'STATEMENT_HANDLERS, VALUE_EVALUATORS; '
         'from physical_ai_server.workflow.handlers import motion as m; '
         "assert 'edubotics_pickup' in STATEMENT_HANDLERS; "
-        "assert 'edubotics_detect_color' in VALUE_EVALUATORS; "
+        "assert 'edubotics_see_object' in VALUE_EVALUATORS; "
         'assert m.GRASP_CLEARANCE_M == 0.012; '
         # malformed EDUBOTICS_GRASP_ROLL_DEG falls back to the 90.0 default
         'assert abs(m.GRASP_ROLL_RAD - math.radians(90.0)) < 1e-9; '

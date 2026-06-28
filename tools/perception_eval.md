@@ -1,5 +1,15 @@
 # Roboter Studio perception evaluation
 
+> **⚠ HISTORICAL / INAPPLICABLE (P4 2026-06-28).** The YOLOX-tiny /
+> D-FINE on-device object detector and the cloud OWLv2 open-vocabulary
+> path documented below were **REMOVED in P4**. The YOLOX-tiny ONNX
+> download + `onnxruntime` were dropped from the server Dockerfile, and
+> the cloud vision service (`cloud_training_api/app/routes/vision.py` +
+> `modal_training/vision_app.py`, Modal app `edubotics-vision`) was
+> deleted/stopped. Named-object **AprilTag** grasping is the only
+> perception path now. This document is kept for historical reference
+> only — nothing here describes a current build, command, or env var.
+
 > **Current state (2026-05).** The helper Python scripts mentioned
 > below (``tools/eval_perception.py`` etc.) are NOT yet committed to
 > this repo. The evaluation methodology is documented for the

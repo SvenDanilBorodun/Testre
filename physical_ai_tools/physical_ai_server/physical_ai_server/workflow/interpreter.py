@@ -47,8 +47,6 @@ from physical_ai_server.workflow.handlers.motion import WorkflowError
 # separate handler stacks by WorkflowManager.
 HAT_BLOCK_TYPES: frozenset[str] = frozenset({
     'edubotics_when_broadcast',
-    'edubotics_when_marker_seen',
-    'edubotics_when_color_seen',
     'edubotics_when_object_seen',
 })
 
@@ -549,9 +547,22 @@ class Interpreter:
         OBJECT_TYPE + the DO statement body are read directly (not via the
         handler dispatch tables), so the type must be added to ci.yml's
         tutorials-validate built-in allowlist."""
-        type_name = (block.get('fields') or {}).get('OBJECT_TYPE')
+        fields = block.get('fields') or {}
+        type_name = fields.get('OBJECT_TYPE')
         if not type_name:
             raise InterpreterError('„Solange sichtbar": kein Objekt ausgewählt.')
+        # Student-facing repetition cap (#6): the optional MAX_REPS field on the
+        # block bounds how many passes (≈ objects) the loop runs. 0 / absent /
+        # malformed = unbegrenzt (the hidden wall-clock + no-progress env guards
+        # still bound it). A negative value is treated as 0. This is the visible
+        # counterpart to those env caps.
+        max_reps = 0
+        raw_max = fields.get('MAX_REPS')
+        if raw_max is not None:
+            try:
+                max_reps = max(0, int(float(raw_max)))
+            except (TypeError, ValueError):
+                max_reps = 0
         do_block = self._get_statement_block(block, 'DO')
         # Lazy import (handlers/__init__ already loads these; avoids any cycle).
         from physical_ai_server.workflow.handlers import motion as _mo
@@ -587,7 +598,8 @@ class Interpreter:
             # Settle after the retreat so the first detect frame isn't a still-
             # settling/blurred arm (#3).
             self._interruptible_wait(ctx, WHILE_SETTLE_S)
-            if _pb.count_unclaimed_visible(ctx, type_name) > 0:
+            n_visible = _pb.count_unclaimed_visible(ctx, type_name)
+            if n_visible > 0:
                 empty_streak = 0
                 empty_since = None
                 iter_count += 1
@@ -596,6 +608,13 @@ class Interpreter:
                         'Schleife abgebrochen — Maximum von 10000 '
                         'Wiederholungen erreicht.'
                     )
+                # Per-pass positive feedback (#7): tell the student how many of
+                # this type are still to do, so the loop isn't a silent black box.
+                try:
+                    label = _pb.label_for(ctx, type_name)
+                    ctx.log(f'„{label}": noch {n_visible} sichtbar — greife eines.')
+                except Exception:
+                    pass
                 # Flicker-spin guard (#3): a pass makes progress iff the body
                 # CLAIMS or SKIPS a tag (the claimed+skipped count grows).
                 # count_unclaimed_visible already ran the reclaim, so this snapshot
@@ -623,6 +642,14 @@ class Interpreter:
                             'Schleife beendet.'
                         )
                         break
+                # Student repetition cap (#6): stop after the requested number of
+                # passes even if more objects remain visible.
+                if max_reps > 0 and iter_count >= max_reps:
+                    ctx.log(
+                        f'„Solange sichtbar": Höchstzahl von {max_reps} erreicht '
+                        '— Schleife beendet.'
+                    )
+                    break
                 continue
             # No unclaimed instances visible — start/continue the empty window. A
             # reclaim that returns an object (count>0 above) resets empty_since/
@@ -635,6 +662,15 @@ class Interpreter:
             # continuous-empty duration thresholds are met.
             if (empty_streak >= WHILE_EMPTY_FRAMES
                     and (now - empty_since) >= WHILE_EMPTY_SECONDS):
+                # Clean completion (#7): a friendly "done" line so the student
+                # knows the loop finished because nothing is left (not an error).
+                try:
+                    ctx.log(
+                        f'„{_pb.label_for(ctx, type_name)}": nichts mehr sichtbar '
+                        '— fertig.'
+                    )
+                except Exception:
+                    pass
                 break
             self._interruptible_wait(ctx, WHILE_EMPTY_SECONDS)
 

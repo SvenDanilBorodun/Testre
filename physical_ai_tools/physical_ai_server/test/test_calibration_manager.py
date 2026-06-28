@@ -116,9 +116,8 @@ def test_handeye_synonym_accepted_for_scene(calib_dir):
 
 
 def test_start_color_profile_no_longer_a_step(calib_dir):
-    """The color_profile path has no per-step start_step entry — capture
-    is gated by the /calibration/capture_color callback's prerequisite
-    check. start_step('color_profile') is now an unknown-step error."""
+    """'color_profile' is not a calibration step (the colour-detection workflow
+    was removed). start_step('color_profile') is an unknown-step error."""
     from physical_ai_server.workflow.calibration_manager import CalibrationManager
     mgr = CalibrationManager()
     ok, msg = mgr.start_step('scene', 'color_profile')

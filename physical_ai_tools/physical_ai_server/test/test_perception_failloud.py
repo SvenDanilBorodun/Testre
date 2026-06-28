@@ -1,8 +1,11 @@
-"""Detection fail-loud + scene-frame freshness gate (P4).
+"""Perception fail-loud + scene-frame freshness gate.
 
-A missing object/marker model, an uncalibrated colour, or a stale/frozen scene
-frame must raise a precise German WorkflowError at the block — not silently
-return an empty list (indistinguishable from "nothing on the table").
+A missing AprilTag detector or a stale/frozen scene frame must raise a precise
+German WorkflowError at the block — not silently return an empty list
+(indistinguishable from "nothing on the table"). The legacy colour/COCO/marker
+detection blocks were removed (P4); AprilTag named-object detection is the only
+perception path, so these gates cover the marker detector + the shared
+scene-frame freshness check.
 """
 
 from __future__ import annotations
@@ -12,10 +15,9 @@ import pytest
 
 from physical_ai_server.workflow.handlers.motion import WorkflowError
 from physical_ai_server.workflow.handlers.perception_blocks import (
+    _ensure_perception,
+    _require_marker_detector,
     _scene_frame,
-    detect_color,
-    detect_marker,
-    detect_object,
 )
 
 
@@ -33,19 +35,11 @@ class _Ctx:
 
 
 class _Perc:
-    def __init__(self, yolox=True, apriltag=True, colors=()):
-        self._yolox = yolox
+    def __init__(self, apriltag=True):
         self._at = apriltag
-        self._colors = set(colors)
-
-    def yolox_available(self):
-        return self._yolox
 
     def apriltag_available(self):
         return self._at
-
-    def has_color(self, c):
-        return c in self._colors
 
     def detect(self, *a, **k):
         return []
@@ -75,22 +69,15 @@ def test_scene_frame_unknown_age_does_not_block():
     assert _scene_frame(_Ctx(frame=_img(), age=None)) is not None
 
 
-def test_object_detector_missing_raises():
-    ctx = _Ctx(frame=_img(), age=0.1, perception=_Perc(yolox=False))
-    with pytest.raises(WorkflowError) as e:
-        detect_object(ctx, {'class': 'banana'})
-    assert 'Objekt-Erkennung' in str(e.value)
-
-
 def test_marker_detector_missing_raises():
     ctx = _Ctx(frame=_img(), age=0.1, perception=_Perc(apriltag=False))
     with pytest.raises(WorkflowError) as e:
-        detect_marker(ctx, {'marker_id': 1})
+        _require_marker_detector(ctx)
     assert 'Marker-Erkennung' in str(e.value)
 
 
-def test_uncalibrated_color_raises():
-    ctx = _Ctx(frame=_img(), age=0.1, perception=_Perc(colors=()))
+def test_perception_uninitialised_raises():
+    ctx = _Ctx(frame=_img(), age=0.1, perception=None)
     with pytest.raises(WorkflowError) as e:
-        detect_color(ctx, {'color': 'rot'})
-    assert 'kalibriert' in str(e.value)
+        _ensure_perception(ctx)
+    assert 'Wahrnehmung' in str(e.value)

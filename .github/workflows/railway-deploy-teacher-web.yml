@@ -13,7 +13,6 @@ on:
     branches: [main]
     paths:
       - "physical_ai_tools/physical_ai_manager/**"
-      - "physical_ai_tools/physical_ai_server/physical_ai_server/workflow/coco_classes.py"
       - ".github/workflows/railway-deploy-teacher-web.yml"
   workflow_call:
     # Allows release.yml to invoke this as a reusable workflow.
@@ -78,9 +77,6 @@ jobs:
     timeout-minutes: 20
     env:
       RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-      # The script reads PHYSICAL_AI_TOOLS_DIR for the coco_classes.py path.
-      # Default in the script is `<repo>/physical_ai_tools` which matches our
-      # monorepo layout — no override needed.
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
@@ -93,9 +89,9 @@ jobs:
           npm install -g @railway/cli
           railway --version
       - name: Deploy via the existing script
-        # The script handles _coco_classes.py staging (trap cleanup EXIT),
-        # --path-as-root, and --service teacher-web. We just invoke it.
-        # It uses `exec railway up` so its exit code IS the deploy result.
+        # The script handles --path-as-root and --service teacher-web. We just
+        # invoke it. It uses `exec railway up` so its exit code IS the deploy
+        # result.
         run: bash physical_ai_tools/physical_ai_manager/scripts/railway-deploy.sh
 
   health-gate:

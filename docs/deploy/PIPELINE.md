@@ -151,7 +151,6 @@ For coordinated multi-surface releases, prefer the tag path (next).
 # If the release touches Modal (modal_training/**), deploy it FIRST:
 cd robotis_ai_setup/modal_training
 modal deploy modal_app.py
-modal deploy vision_app.py
 cd -
 
 # Then tag and push
@@ -177,9 +176,7 @@ Modal deploys are intentionally NOT in CI. Run from your terminal when
 ```bash
 cd robotis_ai_setup/modal_training
 modal deploy modal_app.py       # ~30 sec — registers new app version
-modal deploy vision_app.py      # ~30 sec
 modal run modal_app.py::smoke_test     # optional: verify training app spawns
-modal run vision_app.py::smoke_test    # optional: verify vision app spawns
 ```
 
 **Important:** running training jobs that were spawned before the deploy
@@ -194,7 +191,6 @@ known-good SHA and re-running `modal deploy`:
 git checkout <good-sha> -- robotis_ai_setup/modal_training/
 cd robotis_ai_setup/modal_training
 modal deploy modal_app.py
-modal deploy vision_app.py
 git checkout HEAD -- robotis_ai_setup/modal_training/
 ```
 
@@ -250,7 +246,6 @@ git checkout <old-good-sha> -- robotis_ai_setup/modal_training/
 # Redeploy
 cd robotis_ai_setup/modal_training
 modal deploy modal_app.py
-modal deploy vision_app.py
 cd -
 
 # Restore your working tree
@@ -413,7 +408,7 @@ Don't remove those triggers.
 - Cloud API: `https://scintillating-empathy-production-1068.up.railway.app`
 - Teacher web: `https://teacher-web-production.up.railway.app`
 - Supabase: `https://fnnbysrjkfugsqzwcksd.supabase.co` (region eu-west-1)
-- Modal apps: `edubotics-training`, `edubotics-vision` in workspace `svendanilborodun`
+- Modal app: `edubotics-training` in workspace `svendanilborodun`
 - Docker Hub: `docker.io/nettername/{open-manipulator,physical-ai-server,physical-ai-manager}` (amd64) + same with `-jetson` suffix (arm64)
 
 ---
@@ -426,7 +421,7 @@ out-of-band hotfix:
 | Surface | Emergency command |
 |---|---|
 | Supabase | `supabase db push` after `supabase link --project-ref fnnbysrjkfugsqzwcksd`, OR `psql $SUPABASE_DB_URL -f rollback/NNN_*.sql` |
-| Modal | `cd robotis_ai_setup/modal_training && modal deploy modal_app.py vision_app.py` |
+| Modal | `cd robotis_ai_setup/modal_training && modal deploy modal_app.py` |
 | Railway cloud-api | `cd robotis_ai_setup/cloud_training_api && railway up . --service scintillating-empathy --environment production --path-as-root --ci` |
 | Railway teacher-web | `bash physical_ai_tools/physical_ai_manager/scripts/railway-deploy.sh` |
 | Docker images | `cd robotis_ai_setup/docker && SUPABASE_URL=... SUPABASE_ANON_KEY=... CLOUD_API_URL=... ./build-images.sh` |

@@ -10,9 +10,7 @@
 
 import React from 'react';
 import { useSelector } from 'react-redux';
-import { COLORS, DE } from './blocks/messages_de';
-
-const COLOR_LABELS = COLORS.map(([label]) => label);
+import { DE } from './blocks/messages_de';
 
 // Audit §sensor-r1: stable empty snapshot the selector falls back to
 // when Redux state hasn't been populated yet (cold mount before the
@@ -23,8 +21,6 @@ const EMPTY_SNAPSHOT = {
   follower_joints: [],
   gripper_opening: 0,
   visible_apriltag_ids: [],
-  color_counts: [0, 0, 0, 0],
-  visible_object_classes: [],
 };
 
 function fmtRad(value) {
@@ -66,27 +62,6 @@ function SensorPanel() {
         <p className="font-mono text-xs">
           {Array.isArray(snap.visible_apriltag_ids) && snap.visible_apriltag_ids.length > 0
             ? snap.visible_apriltag_ids.join(', ')
-            : '–'}
-        </p>
-      </div>
-
-      <div className="mb-3">
-        <h3 className="font-semibold mb-1">{DE.DEBUG_COLOR_COUNTS}</h3>
-        <ul className="space-y-0.5 font-mono text-xs">
-          {COLOR_LABELS.map((label, i) => (
-            <li key={label} className="flex justify-between gap-2">
-              <span>{label}</span>
-              <span>{(snap.color_counts && snap.color_counts[i]) || 0} px</span>
-            </li>
-          ))}
-        </ul>
-      </div>
-
-      <div className="mb-3">
-        <h3 className="font-semibold mb-1">{DE.DEBUG_VISIBLE_OBJECTS}</h3>
-        <p className="font-mono text-xs break-words">
-          {Array.isArray(snap.visible_object_classes) && snap.visible_object_classes.length > 0
-            ? snap.visible_object_classes.join(', ')
             : '–'}
         </p>
       </div>

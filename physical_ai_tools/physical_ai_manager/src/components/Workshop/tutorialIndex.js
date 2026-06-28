@@ -18,6 +18,12 @@
 // zaehle_blaue_objekte) were removed together with the dropped Farbprofil
 // calibration step — without a colour profile the detect/count-colour blocks
 // they teach can no longer succeed. Object + marker tutorials are unaffected.
+//
+// 2026-06-28: the legacy colour/COCO-object/marker detection block family was
+// removed in favour of the named-object (AprilTag) grasping blocks. The three
+// tutorials that taught the removed blocks (stapele_drei_wuerfel →
+// detect_color, sortiere_nach_klasse → detect_open_vocab,
+// ereignis_marker_gefunden → when_marker_seen) were deleted with them.
 
 export const TUTORIAL_INDEX = Object.freeze([
   {
@@ -29,21 +35,6 @@ export const TUTORIAL_INDEX = Object.freeze([
     id: 'bewege_zum_punkt_a',
     title_de: 'Bewege zum Punkt A',
     level: 1,
-  },
-  {
-    id: 'stapele_drei_wuerfel',
-    title_de: 'Stapele drei Würfel',
-    level: 3,
-  },
-  {
-    id: 'sortiere_nach_klasse',
-    title_de: 'Sortiere nach Klasse',
-    level: 4,
-  },
-  {
-    id: 'ereignis_marker_gefunden',
-    title_de: 'Ereignis: AprilTag entdeckt',
-    level: 3,
   },
 ]);
 

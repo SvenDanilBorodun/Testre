@@ -381,8 +381,8 @@ def _resolve_target(value: Any, ctx) -> tuple[float, float, float]:
     if isinstance(value, (list, tuple)) and len(value) == 3:
         return float(value[0]), float(value[1]), float(value[2])
     # A Detection whose world_xyz_m is still None reached a motion block.
-    # perception_blocks._attach_world_xyz leaves it None (silently — so the
-    # count_* blocks keep working) when the calibration is incomplete:
+    # perception_blocks._attach_named_world leaves it None (silently — so the
+    # see/count blocks keep working) when the calibration is incomplete:
     # ctx.z_table / scene_intrinsics / scene_extrinsics is missing. Name the
     # exact missing step instead of the generic "could not evaluate" message,
     # so the student knows to finish the touch-off rather than re-running the

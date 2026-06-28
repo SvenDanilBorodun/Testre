@@ -9,22 +9,24 @@
 #
 # Secrets targeted for delete (verified unused via grep against
 # robotis_ai_setup/modal_training/*.py):
-#   - stripe              (legacy; no code reference)
-#   - supabase            (superseded by edubotics-training-secrets)
-#   - hf-token            (superseded by edubotics-training-secrets HF_TOKEN)
-#   - huggingface         (superseded; old name)
+#   - stripe                    (legacy; no code reference)
+#   - supabase                  (superseded by edubotics-training-secrets)
+#   - hf-token                  (superseded by edubotics-training-secrets HF_TOKEN)
+#   - huggingface               (superseded; old name)
+#   - edubotics-vision-secrets  (orphaned — vision_app.py removed, app stopped)
 #
-# Volumes targeted for delete (verified not mounted in modal_app.py or
-# vision_app.py):
+# Volumes targeted for delete (verified not mounted in modal_app.py):
 #   - PaliGemma
 #   - act
 #   - gr00t-n1
+#   - edubotics-vision-cache    (orphaned — vision_app.py removed, app stopped)
 #
 # NEVER touched (production):
-#   - apps:     edubotics-training, edubotics-vision
-#   - secrets:  edubotics-training-secrets, edubotics-vision-secrets,
-#               mcp-edubotics
-#   - volumes:  edubotics-vision-cache
+#   - apps:     edubotics-training
+#   - secrets:  edubotics-training-secrets, mcp-edubotics
+# NOTE: the edubotics-vision app + its secret/volume are no longer production
+# (vision_app.py was deleted, the app stopped). The app itself lingers as
+# `stopped` in `modal app list` history (no `modal app remove` in CLI >=1.x).
 #
 # Auth: uses the Modal CLI's already-configured credentials. If you
 # need to re-auth, run `modal token set --token-id $ID --token-secret $S`.
@@ -117,7 +119,7 @@ fi
 # ── Secrets to delete ──
 echo ""
 echo ">> Legacy secrets to delete:"
-LEGACY_SECRETS=("stripe" "supabase" "hf-token" "huggingface")
+LEGACY_SECRETS=("stripe" "supabase" "hf-token" "huggingface" "edubotics-vision-secrets")
 
 SECRETS_JSON=$(modal secret list --json 2>/dev/null || true)
 if [ -z "$SECRETS_JSON" ]; then
@@ -151,7 +153,7 @@ done
 # ── Volumes to delete ──
 echo ""
 echo ">> Legacy volumes to delete:"
-LEGACY_VOLS=("PaliGemma" "act" "gr00t-n1")
+LEGACY_VOLS=("PaliGemma" "act" "gr00t-n1" "edubotics-vision-cache")
 
 VOLS_JSON=$(modal volume list --json 2>/dev/null || true)
 if [ -z "$VOLS_JSON" ]; then

@@ -176,6 +176,12 @@ def _while_block():
     }
 
 
+def _while_block_max(max_reps):
+    b = _while_block()
+    b['fields']['MAX_REPS'] = max_reps
+    return b
+
+
 def _run(ctx):
     Interpreter([])._exec_while_visible(_while_block(), ctx, lambda *a: None)
 
@@ -354,3 +360,40 @@ def test_loop_wall_clock_cap_breaks(monkeypatch):
     _run(ctx)
     assert ctx.claimed_tags == set()
     assert any('Zeitlimit' in m for m in ctx.logs)
+
+
+# ── #6: student repetition cap (MAX_REPS field) ──────────────────────────────
+def test_loop_respects_student_max_reps():
+    # 3 bananas visible but the student capped the loop at 2 → only 2 grabbed,
+    # with the German "Höchstzahl" notice.
+    dets = [_det(20, (0.18, 0.0)), _det(21, (0.20, 0.04)), _det(22, (0.16, -0.05))]
+    ctx = _Ctx(_StubPerception(dets))
+    Interpreter([])._exec_while_visible(_while_block_max(2), ctx, lambda *a: None)
+    assert len(ctx.claimed_tags) == 2
+    assert any('Höchstzahl' in m for m in ctx.logs)
+
+
+def test_loop_max_reps_zero_is_unlimited():
+    # 0 = unbegrenzt: the loop grabs all three despite the field being present.
+    dets = [_det(20, (0.18, 0.0)), _det(21, (0.20, 0.04)), _det(22, (0.16, -0.05))]
+    ctx = _Ctx(_StubPerception(dets))
+    Interpreter([])._exec_while_visible(_while_block_max(0), ctx, lambda *a: None)
+    assert ctx.claimed_tags == {20, 21, 22}
+
+
+def test_loop_max_reps_malformed_is_unlimited():
+    # A non-numeric field value must degrade to unbegrenzt, not crash the loop.
+    dets = [_det(20, (0.18, 0.0)), _det(21, (0.20, 0.04))]
+    ctx = _Ctx(_StubPerception(dets))
+    block = _while_block_max('nonsense')
+    Interpreter([])._exec_while_visible(block, ctx, lambda *a: None)
+    assert ctx.claimed_tags == {20, 21}
+
+
+# ── #7: per-pass German feedback ─────────────────────────────────────────────
+def test_loop_logs_per_pass_progress_and_completion():
+    ctx = _Ctx(_StubPerception([_det(20, (0.18, 0.0))]))
+    _run(ctx)
+    # one positive pass line naming the count, plus a friendly completion line
+    assert any('noch 1 sichtbar' in m for m in ctx.logs)
+    assert any('fertig' in m for m in ctx.logs)

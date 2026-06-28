@@ -6,13 +6,13 @@ One-page reference. Pair with `APPLY_MIGRATIONS.sql` / `ROLLBACK_MIGRATIONS.sql`
 
 ```
 1. Supabase migrations     ← schema fingerprint in Railway gates on this
-2. Modal apps              ← Railway will 503 on /vision/detect without this
+2. Modal app               ← training spawns fail without modal_app.py deployed
 3. Railway (Cloud API)     ← auto-deploys on git push to main
 4. Docker Hub images       ← students pull on next GUI launch
 5. git push                ← CI runs guardrails (10 jobs)
 ```
 
-Skip step 1 → Railway boot fails. Skip step 2 → `POST /vision/detect` → 503. Push images before Railway → student calls hit routes that don't exist yet.
+Skip step 1 → Railway boot fails. Skip step 2 → student training spawns fail (Modal app not deployed). Push images before Railway → student calls hit routes that don't exist yet.
 
 ---
 
@@ -38,35 +38,30 @@ $EDITOR robotis_ai_setup/supabase/rollback/019_<name>_rollback.sql
 
 ---
 
-## 2. Modal — training + vision apps
+## 2. Modal — training app
 
-Two apps, **two separate secret bundles** — never share them.
+One app, one secret bundle.
 
 | App | Module | Secret bundle | Contents |
 |---|---|---|---|
 | `edubotics-training` | `modal_training/modal_app.py` | `edubotics-training-secrets` | `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `HF_TOKEN` (write) |
-| `edubotics-vision` | `modal_training/vision_app.py` | `edubotics-vision-secrets` | `HF_TOKEN` (read-only) — no Supabase creds |
 
 ```bash
 cd robotis_ai_setup/modal_training
 
 # One-time, or when keys rotate:
 modal secret create edubotics-training-secrets SUPABASE_URL=… SUPABASE_ANON_KEY=… HF_TOKEN=…
-modal secret create edubotics-vision-secrets HF_TOKEN=hf_<read_token>
 
 # Sanity-check imports BEFORE deploy (catches Modal SDK API drift):
 modal run -m modal_app::smoke_test     # expect torch=2.x+cu121, cuda_available=true
-modal run -m vision_app::smoke_test    # expect cuda_available=true
 
 modal deploy modal_app.py
-modal deploy vision_app.py
 
 modal app list | grep edubotics
 ```
 
 **Don't break:**
 - LeRobot SHA in `modal_app.py:19` is one of 5 pinning sites — see CLAUDE.md §1.5 / §13.2.
-- `vision_app.py` uses `enable_memory_snapshot=True` with dual `@modal.enter(snap=True/False)`. The cold-start economics depend on it.
 - `min_containers=0` is correct. Don't "warm" by setting it to 1.
 
 ---
@@ -92,7 +87,7 @@ git push
 
 **Required env vars** (Railway dashboard): `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET`.
 
-**Production-relevant optional:** `ALLOWED_ORIGINS`, `GUI_VERSION` + `GUI_DOWNLOAD_URL` + `GUI_RELEASE_REPO` (drives student `.exe` auto-update — normally set automatically by `release.yml` W6 on a `vX.Y.Z` tag; `GUI_DOWNLOAD_URL` is optional and derived from `GUI_VERSION` + `GUI_RELEASE_REPO` when unset), `HF_TOKEN` (GDPR + dataset sweep), `MAX_TRAINING_TIMEOUT_HOURS`, `STALLED_WORKER_MINUTES`, `MODAL_VISION_*`, `VISION_MODAL_TIMEOUT_S`, `EDUBOTICS_JETSON_HF_TOKEN` (read-only HF token returned to Jetson agents at `/jetson/register` — REQUIRED if any classroom has a paired Jetson; otherwise `/jetson/register` returns 503).
+**Production-relevant optional:** `ALLOWED_ORIGINS`, `GUI_VERSION` + `GUI_DOWNLOAD_URL` + `GUI_RELEASE_REPO` (drives student `.exe` auto-update — normally set automatically by `release.yml` W6 on a `vX.Y.Z` tag; `GUI_DOWNLOAD_URL` is optional and derived from `GUI_VERSION` + `GUI_RELEASE_REPO` when unset), `HF_TOKEN` (GDPR + dataset sweep), `MAX_TRAINING_TIMEOUT_HOURS`, `STALLED_WORKER_MINUTES`, `EDUBOTICS_JETSON_HF_TOKEN` (read-only HF token returned to Jetson agents at `/jetson/register` — REQUIRED if any classroom has a paired Jetson; otherwise `/jetson/register` returns 503).
 
 **Never** set `EDUBOTICS_SKIP_SCHEMA_CHECK=1` on Railway.
 
@@ -107,9 +102,8 @@ Railway sometimes ignores the `cloud_training_api/Dockerfile` and falls back to 
 **Teacher-web React build** (separate Railway service):
 ```bash
 cd physical_ai_tools/physical_ai_manager
-./scripts/railway-deploy.sh   # stages _coco_classes.py + railway up --path-as-root .
+./scripts/railway-deploy.sh   # railway up --path-as-root .
 ```
-Never use bare `railway up` — the prebuild Jest hook needs the staged file.
 
 ---
 
@@ -137,10 +131,6 @@ export PHYSICAL_AI_TOOLS_DIR="$(cd ../../physical_ai_tools && pwd)"
 ### Build + push — `physical-ai-manager` (React)
 
 ```bash
-# Stage coco_classes for the prebuild Jest hook
-cp "$PHYSICAL_AI_TOOLS_DIR/physical_ai_server/physical_ai_server/workflow/coco_classes.py" \
-   "$PHYSICAL_AI_TOOLS_DIR/physical_ai_manager/_coco_classes.py"
-
 docker buildx build --platform linux/amd64 --push \
   --build-arg REACT_APP_SUPABASE_URL="$SUPABASE_URL" \
   --build-arg REACT_APP_SUPABASE_ANON_KEY="$SUPABASE_ANON_KEY" \
@@ -151,8 +141,6 @@ docker buildx build --platform linux/amd64 --push \
   -t "$REGISTRY/physical-ai-manager:$BUILD_ID" \
   -f "$PHYSICAL_AI_TOOLS_DIR/physical_ai_manager/Dockerfile" \
   "$PHYSICAL_AI_TOOLS_DIR/physical_ai_manager/"
-
-rm -f "$PHYSICAL_AI_TOOLS_DIR/physical_ai_manager/_coco_classes.py"
 ```
 
 ### Build + push — `physical-ai-server` (ROS2 + overlays)
@@ -312,11 +300,6 @@ URL=https://scintillating-empathy-production-1068.up.railway.app
 curl "$URL/health"                                     # {"status":"ok"}
 curl -H "Authorization: Bearer $TOKEN" "$URL/me"       # 200 + profile
 curl -H "Authorization: Bearer $TOKEN" "$URL/me/tutorial-progress"   # 200 [] for fresh user
-# Cloud-vision (1×1 PNG)
-IMG=iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYGBgAAAABQABh6FO1AAAAABJRU5ErkJggg==
-curl -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
-  -d "{\"image_b64\":\"$IMG\",\"prompts\":[\"rote Tasse\"]}" "$URL/vision/detect"
-# First call: cold_start: true, 5-30 s. 503 → migration 017 missing.
 
 # Image digests changed:
 docker buildx imagetools inspect nettername/physical-ai-manager:latest
@@ -324,7 +307,7 @@ docker buildx imagetools inspect nettername/physical-ai-server:latest
 docker buildx imagetools inspect nettername/open-manipulator:latest
 ```
 
-Then launch the GUI on a Windows box with a robot: toolbar renders, Galerie populates, Lernpfad lists tutorials, Cloud-Erkennung checkbox visible, breakpoint pause/continue works, Sensoren panel updates at ~5 Hz.
+Then launch the GUI on a Windows box with a robot: toolbar renders, Galerie populates, Lernpfad lists tutorials, breakpoint pause/continue works, Sensoren panel updates at ~5 Hz.
 
 ---
 

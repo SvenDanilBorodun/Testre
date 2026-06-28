@@ -20,7 +20,6 @@ from app.routes.policies import router as policies_router
 from app.routes.teacher import router as teacher_router
 from app.routes.training import router as training_router
 from app.routes.version import router as version_router
-from app.routes.vision import router as vision_router
 from app.routes.workflows import router as workflows_router
 from app.routes.workgroups import router as workgroups_router
 from app.services.dataset_sweep import sweep_loop as _dataset_sweep_loop
@@ -231,9 +230,9 @@ def _validate_required_schema() -> None:
     file lands in `robotis_ai_setup/supabase/` but the live database is
     behind (migration applied via SQL Editor with an earlier file
     content, or never applied at all). The Cloud API then boots, /health
-    returns 200, and the first student to hit /vision/detect — or the
-    first workflow PATCH that triggers the snapshot_workflow_version
-    trigger — gets a bare 500 with no signal that the DB is the cause.
+    returns 200, and the first workflow PATCH that triggers the
+    snapshot_workflow_version trigger gets a bare 500 with no signal
+    that the DB is the cause.
     By probing every schema object the code depends on at startup, the
     Railway deploy aborts with a named cause instead.
     Skip via EDUBOTICS_SKIP_SCHEMA_CHECK=1 (unit-test escape hatch).
@@ -276,12 +275,7 @@ def _validate_required_schema() -> None:
                 raise _sanitize_probe_error(f"table {table}", exc) from None
     # Audit A3: probe specific columns the routes read/write that a
     # partial migration could leave absent even when the table exists.
-    # 017 added the vision-quota columns; the RPCs are probed below, but
-    # a copy-paste-mistake apply order (RPCs first, ALTER TABLE skipped)
-    # would slip past the RPC probe because the function body resolves
-    # the column at call time, not at function-create time.
     required_columns: tuple[tuple[str, str], ...] = (
-        ("users", "vision_quota_per_term, vision_used_per_term"),
         # Migration 030 — the HF-identity anchor read by auth.get_user_profile,
         # GET/PATCH /me, POST /datasets/sync, and the rewritten dataset_sweep.
         # A deploy that lands the new code before the ALTER TABLE would 500 on
@@ -330,8 +324,6 @@ def _validate_required_schema() -> None:
     #    that added them ran, the tables they touch exist.
     dummy = "00000000-0000-0000-0000-000000000000"
     required_rpcs = (
-        ("consume_vision_quota", {"p_user_id": dummy}),       # 017
-        ("refund_vision_quota", {"p_user_id": dummy}),        # 017 round-3 — the c56c012 incident hot spot
         ("get_remaining_credits", {"p_user_id": dummy}),      # base
         ("get_teacher_credit_summary", {"p_teacher_id": dummy}),  # 002
         # Audit A3: previously skipped on the theory that "if 011 ran
@@ -555,11 +547,6 @@ _RATE_LIMIT_RULES: list[tuple[str, str, int, float]] = [
     # 20/min is more than enough for any classroom while stopping a
     # broken recording loop from spamming.
     ("POST", "/datasets", 20, 60.0),
-    # Cloud-burst perception (Phase 3 OWLv2 on Modal). Each call costs
-    # ~$0.0001 in compute but a runaway loop in a workflow could rack
-    # up dollars per classroom, so cap at 5/60s/user — well above any
-    # legitimate manual editing cadence.
-    ("POST", "/vision/detect", 5, 60.0),
     # Jetson agent bootstrap (no auth). IP-keyed because the agent has
     # no JWT yet. Five registrations per minute per public IP is fine
     # for a teacher physically setting up a Jetson; a rogue actor on
@@ -671,7 +658,7 @@ def _user_key_from_jwt(request: Request) -> str | None:
 # meant 30 students behind one school NAT shared the 10/min start bucket —
 # the 11th student got a spurious 429 even though nobody individually
 # exceeded the limit. The IP fallback still covers any missing header.
-_PER_USER_RATE_LIMIT_PREFIXES = ("/vision/detect", "/jetson/", "/trainings/")
+_PER_USER_RATE_LIMIT_PREFIXES = ("/jetson/", "/trainings/")
 
 
 # Audit A2: hard upper bound on workflow-write request bodies.
@@ -746,8 +733,8 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         for rule_method, prefix, limit, window in _RATE_LIMIT_RULES:
             if rule_method != "*" and rule_method != method:
                 continue
-            # Anchored prefix match: a rule for "/vision/detect" must
-            # NOT match "/vision/detectors". Either the path is exactly
+            # Anchored prefix match: a rule for "/trainings/start" must
+            # NOT match "/trainings/started". Either the path is exactly
             # the prefix or the prefix must be followed by "/" so the
             # next segment is fully delimited. Path prefixes that end
             # in "/" (e.g. "/jetson/") still match all sub-resources
@@ -813,7 +800,6 @@ app.include_router(datasets_router)
 app.include_router(policies_router)
 app.include_router(admin_router)
 app.include_router(workflows_router)
-app.include_router(vision_router)
 app.include_router(jetson_router)
 app.include_router(jetson_teacher_router)
 

@@ -2,10 +2,10 @@
 # Roboter Studio wizard can hydrate per-step badges after a page reload.
 # No request fields — this is a simple status read.
 #
-# Reads the persisted YAMLs (gripper_intrinsics.yaml, scene_intrinsics.yaml,
-# gripper_handeye.yaml, scene_handeye.yaml, color_profile.yaml) via the
-# CalibrationManager / ColorProfileManager has_* helpers. Cheap; safe to
-# call on every wizard mount.
+# Reads the persisted YAMLs (scene_intrinsics.yaml, scene_handeye.yaml) via
+# the CalibrationManager has_* helpers. Cheap; safe to call on every wizard
+# mount. The has_gripper_* / has_color_profile response fields are vestigial
+# (gripper camera + colour detection were removed) and always reported True.
 ---
 bool success
 string message

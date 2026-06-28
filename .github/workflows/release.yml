@@ -34,10 +34,10 @@ name: release
 # could auto-update while the images it pulls stayed on a stale `:latest`.
 #
 # Modal deploys are MANUAL (operator runs `modal deploy modal_app.py`
-# and `modal deploy vision_app.py` from their workstation). Modal's
-# image build occurs in Modal's infrastructure, not on GH runners, and
-# the auth / image-build feedback loop is slow to debug in CI. Until
-# we have a strong reason to move Modal into CI, the operator owns it.
+# from their workstation). Modal's image build occurs in Modal's
+# infrastructure, not on GH runners, and the auth / image-build feedback
+# loop is slow to debug in CI. Until we have a strong reason to move
+# Modal into CI, the operator owns it.
 #
 # Fires on tag pushes (v*.*.*) for full coordinated releases. For
 # everyday merges to main, each surface workflow fires INDEPENDENTLY
@@ -105,8 +105,8 @@ jobs:
 
   # ── W2: Cloud API (after Supabase so the FastAPI sees the new schema) ──
   # Note: if you bumped a Modal-side dependency in this release, run
-  # `modal deploy modal_app.py vision_app.py` MANUALLY BEFORE pushing
-  # the tag so the worker is ready before the FastAPI tries to call it.
+  # `modal deploy modal_app.py` MANUALLY BEFORE pushing the tag so the
+  # worker is ready before the FastAPI tries to call it.
   cloud-api:
     name: W2. Deploy cloud_training_api
     needs: [supabase]

@@ -18,7 +18,6 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/WorkflowStatus.msg"
   "srv/AutoPoseSuggest.srv"
   "srv/BrowseFile.srv"
-  "srv/CalibrationCaptureColor.srv"
   "srv/CalibrationCaptureFrame.srv"
   "srv/CalibrationHistory.srv"
   "srv/CalibrationPreview.srv"

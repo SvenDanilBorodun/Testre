@@ -18,7 +18,6 @@ import {
   toggleDebugger,
   clearVariables,
   setDebuggerWarnings,
-  setCloudVisionEnabled,
 } from '../../features/workshop/workshopSlice';
 import { useRosServiceCaller } from '../../hooks/useRosServiceCaller';
 import { DE } from './blocks/messages_de';
@@ -75,12 +74,7 @@ function RunControls({ workflowId, blocklyJson, workspace = null }) {
   const error = useSelector((s) => s.workshop.workflowError);
   const debuggerVisible = useSelector((s) => s.workshop.debuggerVisible);
   const debuggerWarnings = useSelector((s) => s.workshop.debuggerWarnings);
-  const cloudVisionEnabled = useSelector((s) => s.workshop.cloudVisionEnabled);
   const breakpoints = useSelector((s) => s.workshop.breakpoints);
-  // Forwarded to the on-host server via StartWorkflow.srv so the
-  // _cloud_vision_burst can authorise its POST to /vision/detect.
-  // Empty string when the user isn't logged in (e.g. cloud-only mode).
-  const accessToken = useSelector((s) => s.auth?.session?.access_token);
   const [busy, setBusy] = useState(false);
 
   // Leader-contention gate (see RS_CONTROL_BASE comment above). true ONLY when
@@ -189,10 +183,6 @@ function RunControls({ workflowId, blocklyJson, workspace = null }) {
         {
           workflow_json: JSON.stringify(blocklyJson),
           workflow_id: workflowId || `local-${Date.now()}`,
-          cloud_vision_enabled: !!cloudVisionEnabled,
-          auth_token: cloudVisionEnabled && typeof accessToken === 'string'
-            ? accessToken
-            : '',
         }
       );
       if (!r.success) {
@@ -225,17 +215,10 @@ function RunControls({ workflowId, blocklyJson, workspace = null }) {
     } finally {
       setBusy(false);
     }
-  // cloudVisionEnabled must be in the deps array — otherwise the
-  // useCallback retains the value captured at the first render and
-  // toggling the checkbox doesn't take effect. Audit round-3 §J / §W.
-  // accessToken is in the deps so a token refresh during a session
-  // is picked up at the next Start press.
   }, [
     blocklyJson,
     rsLeaderOn,
     callService,
-    cloudVisionEnabled,
-    accessToken,
     dispatch,
     workflowId,
     breakpoints,
@@ -418,21 +401,6 @@ function RunControls({ workflowId, blocklyJson, workspace = null }) {
           {phaseLabel}
         </span>
 
-        <label
-          className="inline-flex items-center gap-1.5 text-xs text-[var(--ink-3)] cursor-pointer select-none"
-          title="Wenn aktiv, dürfen 'finde Objekt mit Beschreibung'-Blöcke unbekannte Begriffe an die Cloud-Erkennung schicken."
-        >
-          <input
-            type="checkbox"
-            checked={!!cloudVisionEnabled}
-            onChange={(e) => dispatch(setCloudVisionEnabled(e.target.checked))}
-            className="w-4 h-4"
-            aria-label={DE.CLOUD_VISION_TOGGLE}
-          />
-          {DE.CLOUD_VISION_TOGGLE}
-        </label>
-        <VisionQuotaChip />
-
         <button
           type="button"
           onClick={handleToggleDebugger}
@@ -485,73 +453,6 @@ function RunControls({ workflowId, blocklyJson, workspace = null }) {
         )}
       </div>
     </div>
-  );
-}
-
-// Audit F30: per-term cloud-vision quota chip rendered next to the
-// toggle. Reads vision_quota_per_term + vision_used_per_term from
-// /me; renders nothing when the API does not return them
-// (e.g. migration 017 not deployed, or unbounded NULL quota).
-function VisionQuotaChip() {
-  const accessToken = useSelector((s) => s.auth?.session?.access_token);
-  // Audit U6: poll /me while a workflow is running and cloud-vision is
-  // enabled so the chip's "remaining" count actually decrements after a
-  // burst, instead of showing the mount-time value until page reload.
-  // Visible quota counts are read by the cloud API at every /me call,
-  // so a fresh GET is the cheapest correctness path (no need for a
-  // per-burst signal channel — the cloud API increments atomically and
-  // /me reads from the same row).
-  const runState = useSelector((s) => s.workshop.runState);
-  const paused = useSelector((s) => s.workshop.paused);
-  const cloudVisionEnabled = useSelector((s) => s.workshop.cloudVisionEnabled);
-  const [usage, setUsage] = useState(null);
-  useEffect(() => {
-    if (!accessToken) {
-      setUsage(null);
-      return undefined;
-    }
-    let cancelled = false;
-    const fetchMe = async () => {
-      try {
-        const mod = await import('../../services/meApi');
-        const me = await mod.getMe(accessToken);
-        if (cancelled) return;
-        const quota = me?.vision_quota_per_term;
-        const used = me?.vision_used_per_term;
-        if (typeof quota === 'number' && typeof used === 'number') {
-          setUsage({ quota, used });
-        } else {
-          setUsage(null);
-        }
-      } catch (_) {
-        if (!cancelled) setUsage(null);
-      }
-    };
-    fetchMe();
-    // Poll every 5 s while the workflow is live AND cloud-vision is
-    // enabled. 5 s is a compromise: a burst takes ~300 ms warm /
-    // 2-3 s cold, so the chip catches a burst within ~5 s — fast
-    // enough that a student watching the chip sees it move; slow
-    // enough that 30 students don't hammer /me at 1 Hz.
-    const isLive = (runState === 'running' || paused) && cloudVisionEnabled;
-    let intervalId = null;
-    if (isLive) {
-      intervalId = setInterval(fetchMe, 5000);
-    }
-    return () => {
-      cancelled = true;
-      if (intervalId) clearInterval(intervalId);
-    };
-  }, [accessToken, runState, paused, cloudVisionEnabled]);
-  if (!usage) return null;
-  const remaining = Math.max(0, usage.quota - usage.used);
-  return (
-    <span
-      className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs bg-blue-50 text-blue-700"
-      title="Cloud-Erkennung — verbleibende Aufrufe in diesem Halbjahr"
-    >
-      ☁ {remaining}/{usage.quota}
-    </span>
   );
 }
 

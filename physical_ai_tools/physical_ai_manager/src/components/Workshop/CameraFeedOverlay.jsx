@@ -247,6 +247,35 @@ function DetectionOverlay({ detections, naturalSize }) {
           typeof d.confidence === 'number'
             ? ` ${Math.round(d.confidence * 100)}%`
             : '';
+        // Grasp-orientation hint (named-object grasping): when the detection
+        // carries a pinch-axis angle, draw a dot at the grasp point (cx, cy)
+        // and a line along the axis the jaws separate over, so the student SEES
+        // where/how the robot will grab. The angle is image-space (y-down),
+        // matching the SVG, so no transform is needed. The pinch axis is a line
+        // (180°-periodic), so it's drawn through the centre in both directions.
+        const showGrasp =
+          d.hasGraspAngle && typeof d.graspAngleRad === 'number'
+          && Number.isFinite(d.graspAngleRad);
+        let grasp = null;
+        if (showGrasp) {
+          const half = Math.max(18, Math.max(d.w || 0, d.h || 0) * 0.7);
+          const dxg = Math.cos(d.graspAngleRad) * half;
+          const dyg = Math.sin(d.graspAngleRad) * half;
+          grasp = (
+            <g>
+              <line
+                x1={d.cx - dxg}
+                y1={d.cy - dyg}
+                x2={d.cx + dxg}
+                y2={d.cy + dyg}
+                stroke="#06b6d4"
+                strokeWidth="3"
+                strokeLinecap="round"
+              />
+              <circle cx={d.cx} cy={d.cy} r="5" fill="#06b6d4" />
+            </g>
+          );
+        }
         return (
           <g key={`${d.label || ''}-${idx}`}>
             <rect
@@ -258,6 +287,7 @@ function DetectionOverlay({ detections, naturalSize }) {
               stroke="#22c55e"
               strokeWidth="3"
             />
+            {grasp}
             {d.label && (
               <text
                 x={x}

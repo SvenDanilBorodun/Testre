@@ -311,9 +311,6 @@ class CalibrationManager:
     def _handeye_path(self, camera: str) -> Path:
         return CALIB_DIR / f'{camera}_handeye.yaml'
 
-    def _color_profile_path(self) -> Path:
-        return CALIB_DIR / 'color_profile.yaml'
-
     def _load_persisted_intrinsics(self) -> None:
         for camera in ('gripper', 'scene'):
             path = self._intrinsic_path(camera)
@@ -376,9 +373,6 @@ class CalibrationManager:
         except Exception:
             return False
 
-    def has_color_profile(self) -> bool:
-        return self._color_profile_path().exists()
-
     # ------------------------------------------------------------------
     # Step lifecycle
     # ------------------------------------------------------------------
@@ -424,11 +418,8 @@ class CalibrationManager:
                     'flach auf den markierten Punkt legen und ein Bild '
                     'erfassen.'
                 )
-            # The 'color_profile' step has no per-step start; capture is
-            # gated by the prerequisite check inside
-            # calibration_capture_color_callback. Anything other than
-            # 'intrinsic' / 'handeye' is rejected as unknown so a typo'd
-            # frontend call surfaces clearly.
+            # Anything other than 'intrinsic' / 'handeye' is rejected as
+            # unknown so a typo'd frontend call surfaces clearly.
             return False, f'Unbekannter Kalibrier-Schritt: {step}'
 
     def cancel_step(self, camera: str | None = None) -> tuple[bool, str]:

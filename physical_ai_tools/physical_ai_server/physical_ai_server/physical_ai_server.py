@@ -74,7 +74,6 @@ from physical_ai_interfaces.msg import (
     WorkflowStatus,
 )
 from physical_ai_interfaces.srv import (
-    CalibrationCaptureColor,
     CalibrationCaptureFrame,
     CalibrationHistory,
     CalibrationPreview,
@@ -183,17 +182,12 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         # _eager_load_policy thread) is in flight; the inference FPS timer
         # skips its tick and re-publishes INFERENCE_LOADING instead.
         self._inference_policy_loading = False
-        # Cached Supabase JWT forwarded from the React app's
-        # StartWorkflow request — consumed by _cloud_vision_burst.
-        # None until the next workflow start.
-        self._cloud_vision_auth_token: str | None = None
         # Audit O1: last detection list emitted by the workflow runtime,
         # consumed by _sensor_snapshot_timer_callback to populate the
         # React Sensoren tab. The list is whatever the most recent
-        # perception block (detect_color / detect_object /
-        # detect_marker / detect_open_vocab) produced — labels follow
-        # the perception.py conventions (color literal / COCO class /
-        # 'tag{id}'). Cleared by TTL in the timer when it goes stale.
+        # named-object detection block produced — labels follow the
+        # perception.py 'tag{id}' convention. Cleared by TTL in the timer
+        # when it goes stale.
         # Audit fix #15: pack (ts, detections) into a single tuple that
         # writers rebind atomically and readers snapshot in one read.
         # Avoids the dual-attribute race where the sensor timer could
@@ -390,11 +384,6 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 self.calibration_capture_callback,
             ),
             ('/calibration/solve', CalibrationSolve, self.calibration_solve_callback),
-            (
-                '/calibration/capture_color',
-                CalibrationCaptureColor,
-                self.calibration_capture_color_callback,
-            ),
             (
                 '/calibration/cancel',
                 CancelCalibration,
@@ -2086,37 +2075,6 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             response.success = False
             response.message = 'Kalibrierung wurde nicht gestartet.'
             return response
-        # The 'color_profile' step has no per-step solve (each
-        # capture_color call persists its own YAML). Treat a solve
-        # request for it as a "finish" signal: release the mutex if all
-        # four canonical colours are present.
-        if request.step == 'color_profile':
-            try:
-                from physical_ai_server.workflow.color_profile import ColorProfileManager
-                cm = ColorProfileManager()
-                if not cm.has_all_colors():
-                    response.success = False
-                    response.reprojection_error = 0.0
-                    response.method_disagreement = 0.0
-                    response.message = (
-                        'Farbprofil unvollständig — bitte alle vier '
-                        'Farben (rot/grün/blau/gelb) erfassen.'
-                    )
-                    return response
-                response.success = True
-                response.reprojection_error = 0.0
-                response.method_disagreement = 0.0
-                response.message = 'Farbprofil abgeschlossen.'
-                self._set_calibration_active(False)
-                return response
-            except Exception as e:
-                response.success = False
-                response.reprojection_error = 0.0
-                response.method_disagreement = 0.0
-                self.get_logger().error(f'color_profile finish-check raised: {e}')
-                response.message = 'Farbprofil-Status konnte nicht gelesen werden.'
-                return response
-
         # Touch-off solve: fit the table plane, then re-torque the follower so
         # it holds again. A FAILED fit (too few points) keeps torque OFF so the
         # student can keep tapping; only success / an exception re-torques.
@@ -2237,31 +2195,31 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         """Report which calibration artefacts already exist on disk so
         the wizard can show the right per-step badges after a page
         reload. Reads the persisted YAMLs via has_intrinsics /
-        has_extrinsic / has_color_profile — no manager state required, so
-        works even when the server hasn't seen any /calibration/start
-        call yet in its lifetime.
+        has_extrinsic — no manager state required, so works even when the
+        server hasn't seen any /calibration/start call yet in its lifetime.
 
         WS4 (2026-06-17): the gripper camera is no longer calibrated
         (scene-cam-only). The CalibrationStatus.srv still carries the two
         ``has_gripper_*`` fields (no interfaces rebuild), but they are
         reported as ``True`` = "not required / satisfied" so a mixed-version
         frontend that still ANDs them into its gate is never blocked. The
-        current frontend gate (WorkshopPage.js) requires only scene
-        intrinsics + scene extrinsic + color profile.
+        vestigial ``has_color_profile`` field is likewise reported ``True``
+        (the colour-detection workflow was removed — named-object grasping is
+        AprilTag-only). The current frontend gate (WorkshopPage.js) requires
+        only scene intrinsics + scene extrinsic + the touch-off.
         """
         try:
             from physical_ai_server.workflow.calibration_manager import (
                 CalibrationManager,
             )
-            from physical_ai_server.workflow.color_profile import ColorProfileManager
             mgr = CalibrationManager()
-            color_mgr = ColorProfileManager()
-            # Gripper fields are vestigial — always satisfied (not required).
+            # Gripper + colour-profile fields are vestigial — always satisfied
+            # (not required; colour detection was removed).
             response.has_gripper_intrinsics = True
             response.has_gripper_handeye = True
+            response.has_color_profile = True
             response.has_scene_intrinsics = bool(mgr.has_intrinsics('scene'))
             response.has_scene_handeye = bool(mgr.has_extrinsic('scene'))
-            response.has_color_profile = bool(color_mgr.has_all_colors())
             # has_table_plane is a post-rebuild field; set it getattr-safe so a
             # pre-rebuild compiled interface (lacking the field) doesn't crash.
             if hasattr(response, 'has_table_plane'):
@@ -2286,77 +2244,12 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             # blocker) but mark scene fields incomplete so the wizard shows.
             response.has_gripper_intrinsics = True
             response.has_gripper_handeye = True
+            response.has_color_profile = True
             response.has_scene_intrinsics = False
             response.has_scene_handeye = False
-            response.has_color_profile = False
             response.success = False
             response.message = 'Status konnte nicht gelesen werden.'
         return response
-
-    def calibration_capture_color_callback(self, request, response):
-        """Capture one cube colour for the per-classroom LAB profile.
-
-        Bound to /calibration/capture_color. The student places a cube
-        of the requested colour ('rot' | 'gruen' | 'blau' | 'gelb')
-        centrally in the scene camera frame and the server segments +
-        records its LAB cluster. See audit §1.7a.
-
-        Enforces the scene-calibration prerequisite at the service
-        boundary instead of relying on the frontend wizard ordering —
-        without intrinsic + hand-eye for the scene camera the LAB
-        cluster cannot be projected to base frame at runtime, so
-        capturing without those is meaningless. (Replaces the dead
-        start_step('color_profile') branch in calibration_manager.)
-        """
-        try:
-            from physical_ai_server.workflow.color_profile import ColorProfileManager
-            from physical_ai_server.workflow.calibration_manager import (
-                CalibrationManager,
-            )
-        except Exception as e:
-            self.get_logger().error(f'capture_color import failed: {e}')
-            response.success = False
-            response.message = 'Farbprofil-Modul fehlt.'
-            response.lab_center = []
-            response.lab_std = []
-            return response
-        # Prerequisite check: scene must be fully calibrated.
-        try:
-            cal = CalibrationManager()
-            if not (cal.has_intrinsics('scene') and cal.has_extrinsic('scene')):
-                response.success = False
-                response.message = (
-                    'Farbprofil benötigt eine kalibrierte Szenen-Kamera. '
-                    'Bitte zuerst die Schritte 1 (intrinsisch) und 2 '
-                    '(Extrinsik) abschließen.'
-                )
-                response.lab_center = []
-                response.lab_std = []
-                return response
-        except Exception as e:
-            self.get_logger().warning(f'capture_color prereq check failed: {e}')
-        bgr = self._get_latest_camera_frame('scene')
-        if bgr is None:
-            response.success = False
-            response.message = 'Kein Kamerabild der Szenen-Kamera verfügbar.'
-            response.lab_center = []
-            response.lab_std = []
-            return response
-        try:
-            mgr = ColorProfileManager()
-            ok, message, center, std = mgr.capture(request.color, bgr)
-            response.success = bool(ok)
-            response.message = message
-            response.lab_center = [float(v) for v in center]
-            response.lab_std = [float(v) for v in std]
-            return response
-        except Exception as e:
-            self.get_logger().error(f'capture_color failed: {e}')
-            response.success = False
-            response.message = 'Farbprofil konnte nicht gespeichert werden.'
-            response.lab_center = []
-            response.lab_std = []
-            return response
 
     def mark_destination_callback(self, request, response):
         """Project a pixel click on a calibrated camera to a base-frame
@@ -2506,6 +2399,7 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             # dataclass instance pushed by handlers via ctx.emit_detections.
             detections = payload.get('detections') or []
             packed = []
+            import math  # local import (module has no top-level math; see _math usages)
             for d in detections:
                 try:
                     cx, cy = d.centroid_px
@@ -2517,6 +2411,27 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                     det.h = int(bh)
                     det.label = str(getattr(d, 'label', '') or '')
                     det.confidence = float(getattr(d, 'confidence', 0.0) or 0.0)
+                    # Grasp-orientation overlay: for an AprilTag detection the
+                    # editor draws a grasp dot + pinch-axis line. The pinch axis
+                    # is the tag's +x edge ((c1-c0)+(c2-c3) in pupil's CCW corner
+                    # order — the SAME edge tag_pose.tag_yaw_base reads), measured
+                    # here in IMAGE pixels (y-down) so the SVG draws it with no
+                    # calibration round-trip. Colour/COCO detections have no
+                    # corners → has_grasp_angle stays False (plain bbox only).
+                    det.grasp_angle_rad = 0.0
+                    det.has_grasp_angle = False
+                    corners = getattr(d, 'corners_px', None)
+                    if corners is not None:
+                        try:
+                            c = [(float(p[0]), float(p[1])) for p in corners]
+                            if len(c) >= 4:
+                                dx = (c[1][0] - c[0][0]) + (c[2][0] - c[3][0])
+                                dy = (c[1][1] - c[0][1]) + (c[2][1] - c[3][1])
+                                if abs(dx) > 1e-9 or abs(dy) > 1e-9:
+                                    det.grasp_angle_rad = float(math.atan2(dy, dx))
+                                    det.has_grasp_angle = True
+                        except (TypeError, ValueError, IndexError):
+                            pass
                     packed.append(det)
                 except Exception:
                     # One malformed detection shouldn't kill the
@@ -2527,12 +2442,10 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             self.workflow_status_publisher.publish(msg)
             # Audit O1: cache the latest detection set so the 5 Hz
             # SensorSnapshot timer can populate the React Sensoren tab's
-            # visible_apriltag_ids / color_counts / visible_object_classes
-            # fields (which were hardcoded empty before this cache).
-            # Each detection block in the workflow runtime emits a new
-            # list (color/object/apriltag); the cache holds whichever
-            # ran most recently. TTL is enforced in the timer callback
-            # so a stale list from a finished workflow doesn't keep
+            # visible_apriltag_ids field (hardcoded empty before this cache).
+            # The named-object detection blocks emit a fresh list; the cache
+            # holds whichever ran most recently. TTL is enforced in the timer
+            # callback so a stale list from a finished workflow doesn't keep
             # showing up.
             if detections:
                 # Audit fix #15: pack ts + list into one tuple that
@@ -2659,35 +2572,25 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             return None
 
     def _build_perception(self):
-        # Cache the Perception instance (onnxruntime YOLOX session + AprilTag
-        # detector) for the server lifetime. Building a FRESH one per workflow
-        # start (the old behaviour) allocated a new ONNX arena + detector each
-        # run on top of the resident torch/LeRobot baseline; repeated Start/Stop
-        # in Roboter Studio could push the container RSS past its 6 GB mem_limit
-        # -> cgroup OOM-kill -> the WHOLE container (incl. rosbridge) restarts ->
-        # the React app's rosbridge connection drops AND the node's in-RAM
-        # robot_type is lost (the student then has to re-select the robot). The
-        # IK solver is cached the same way (_build_ik_solver). Detection is
-        # stateless per call, so one shared instance is safe; the (cheap) colour
-        # profile is re-applied each call so a re-calibration between runs still
-        # takes effect.
+        # Cache the Perception instance (AprilTag detector) for the server
+        # lifetime. Building a FRESH one per workflow start (the old behaviour)
+        # allocated a new detector each run on top of the resident torch/LeRobot
+        # baseline; repeated Start/Stop in Roboter Studio could push the container
+        # RSS past its 6 GB mem_limit -> cgroup OOM-kill -> the WHOLE container
+        # (incl. rosbridge) restarts -> the React app's rosbridge connection drops
+        # AND the node's in-RAM robot_type is lost (the student then has to
+        # re-select the robot). The IK solver is cached the same way
+        # (_build_ik_solver). Detection is stateless per call, so one shared
+        # instance is safe.
         #
         # No silent fallback: if Perception() raises (a build/config bug) it
         # propagates and WorkflowManager.start reports the German message to the
         # student; nothing is cached, so the next start retries cleanly.
-        from physical_ai_server.workflow.color_profile import ColorProfileManager
         perc = getattr(self, '_perception', None)
         if perc is None:
             from physical_ai_server.workflow.perception import Perception
             perc = Perception()
             self._perception = perc
-        color_mgr = ColorProfileManager()
-        profile = {}
-        for color in ('rot', 'gruen', 'blau', 'gelb'):
-            entry = color_mgr.lab_profile(color)
-            if entry is not None:
-                profile[color] = entry
-        perc.set_color_profile(profile)
         return perc
 
     def _get_current_gripper_xyz(self):
@@ -2716,7 +2619,7 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         - ``board_table_z`` = the table SURFACE height (written by the extrinsic
           solve, default 0). This is the plane the camera ray must intersect to
           recover an object's (x, y) — the object sits ON the surface, NOT at the
-          gripper's grasp height. Used by perception projection (_attach_world_xyz).
+          gripper's grasp height. Used by the named-object tag-pose projection.
         - ``z_table`` = the MEASURED end-effector-frame grasp height (written ONLY
           by the touch-off, ~finger-length ABOVE the surface). This is the
           DESCEND target for motion.pickup — NOT a projection plane. NO 0.0
@@ -2851,26 +2754,9 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             response.unreachable_block_ids = []
             response.unreachable_messages = []
             return response
-        # Phase-3: forward cloud_vision_enabled and resolve the burst
-        # callable here. The runtime block reads ctx.cloud_vision['enabled']
-        # and ctx.cloud_vision['cloud_burst'] (callable) to decide whether
-        # to bypass to Modal OWLv2. When disabled, the open-vocab block
-        # raises the German "Cloud-Erkennung deaktiviert" error.
-        # The auth_token (Supabase JWT) is cached on the node so
-        # _cloud_vision_burst can attach it as a Bearer header. Lives
-        # only in memory for the lifetime of the run.
-        auth_token = str(getattr(request, 'auth_token', '') or '')
-        self._cloud_vision_auth_token = auth_token if auth_token else None
-        cloud_burst = self._cloud_vision_burst if auth_token else None
-        cloud_vision = {
-            'enabled': bool(getattr(request, 'cloud_vision_enabled', False)),
-            'translate': self._cloud_vision_synonyms(),
-            'cloud_burst': cloud_burst,
-        }
         success, message, unreachable = manager.start(
             request.workflow_json,
             request.workflow_id,
-            cloud_vision=cloud_vision,
         )
         if success:
             self.on_workflow = True
@@ -3266,281 +3152,6 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         return response
 
     # ------------------------------------------------------------------
-    # Phase-3 cloud-vision plumbing
-    # ------------------------------------------------------------------
-    def _cloud_vision_synonyms(self) -> dict[str, dict]:
-        """Local German→COCO synonym dict consulted BEFORE bursting to
-        the Modal OWLv2 endpoint. Each entry maps a German prompt to a
-        local-detection fast-path that skips the cloud roundtrip.
-
-        Format per entry:
-          {'mode': 'object'|'color', 'class': '<german_label>',
-           'color': '<rot|gruen|blau|gelb>'}
-
-        German class labels MUST match keys in COCO_CLASSES (e.g.
-        ``Tasse``, ``Banane``, ``Apfel``) so the downstream YOLO filter
-        (``coco_class in COCO_CLASSES``) matches; English labels here
-        would silently return every detected object unfiltered (audit F1).
-
-        Audit F55: also consults
-        ``/root/.cache/edubotics/cloud_vision_synonyms.yaml`` if present
-        (the calibration volume survives ``docker compose down``).
-        This lets a classroom add "Stift", "Lineal", "Maus" without a
-        Hub rebuild + image pull. Hardcoded fallback below stays as
-        the source of truth so the system still works without the
-        YAML file.
-
-        The perception_blocks.detect_open_vocab handler resolves a prompt
-        against this dict first; on miss it calls ctx.cloud_vision[
-        'cloud_burst'] (the bound _cloud_vision_burst method) to reach
-        Modal via the cloud_training_api proxy.
-        """
-        hardcoded = self._cloud_vision_synonyms_hardcoded()
-        try:
-            from pathlib import Path as _Path
-            yaml_path = _Path('/root/.cache/edubotics/cloud_vision_synonyms.yaml')
-            if not yaml_path.exists():
-                return hardcoded
-            try:
-                import yaml as _yaml
-            except ImportError:
-                self.get_logger().warning(
-                    'cloud_vision_synonyms.yaml present but PyYAML missing — '
-                    'falling back to hardcoded dict.'
-                )
-                return hardcoded
-            with yaml_path.open('r', encoding='utf-8') as fh:
-                custom = _yaml.safe_load(fh) or {}
-            if not isinstance(custom, dict):
-                self.get_logger().warning(
-                    'cloud_vision_synonyms.yaml is not a mapping — ignored.'
-                )
-                return hardcoded
-            merged: dict[str, dict] = dict(hardcoded)
-            for k, v in custom.items():
-                if isinstance(k, str) and isinstance(v, dict):
-                    merged[k.lower()] = v
-            return merged
-        except Exception as e:
-            self.get_logger().warning(
-                f'cloud_vision_synonyms.yaml load failed, using hardcoded: {e}'
-            )
-            return hardcoded
-
-    def _cloud_vision_synonyms_hardcoded(self) -> dict[str, dict]:
-        return {
-            'rote tasse': {'mode': 'object', 'class': 'Tasse', 'color': 'rot'},
-            'tasse': {'mode': 'object', 'class': 'Tasse'},
-            'banane': {'mode': 'object', 'class': 'Banane'},
-            'gelbe banane': {'mode': 'object', 'class': 'Banane', 'color': 'gelb'},
-            'flasche': {'mode': 'object', 'class': 'Flasche'},
-            'apfel': {'mode': 'object', 'class': 'Apfel'},
-            'roter apfel': {'mode': 'object', 'class': 'Apfel', 'color': 'rot'},
-            'orange': {'mode': 'object', 'class': 'Orange'},
-            'buch': {'mode': 'object', 'class': 'Buch'},
-            'schere': {'mode': 'object', 'class': 'Schere'},
-            'roter wuerfel': {'mode': 'color', 'color': 'rot'},
-            'roter würfel': {'mode': 'color', 'color': 'rot'},
-            'blauer wuerfel': {'mode': 'color', 'color': 'blau'},
-            'blauer würfel': {'mode': 'color', 'color': 'blau'},
-            'gruener wuerfel': {'mode': 'color', 'color': 'gruen'},
-            'grüner würfel': {'mode': 'color', 'color': 'gruen'},
-            'gelber wuerfel': {'mode': 'color', 'color': 'gelb'},
-            'gelber würfel': {'mode': 'color', 'color': 'gelb'},
-        }
-
-    def _cloud_vision_burst(self, bgr_frame, prompt: str, should_stop=None):
-        """Forward a BGR frame and a German prompt to the cloud_training_api
-        /vision/detect endpoint. The endpoint proxies to the Modal
-        edubotics-vision app (OWLv2). Returns a list of perception.Detection
-        objects (possibly empty).
-
-        Requires:
-          - ``EDUBOTICS_CLOUD_API_URL`` env var (set by GUI / compose .env)
-          - A valid student JWT cached on ``self._cloud_vision_auth_token``
-            by ``workflow_start_callback`` (forwarded from the React app's
-            StartWorkflow.srv ``auth_token`` field).
-
-        Raises ``WorkflowError`` (German) on any failure so the workflow
-        runtime surfaces a clean message to the student.
-
-        Audit O3: ``should_stop`` is a callable from the workflow ctx so
-        we can abort between JPEG encode and the requests.post — without
-        it, a 15s cold-start HTTP wait can't be cancelled by /workflow/stop
-        and the student is billed for a burst they cancelled. Passed
-        through perception_blocks.detect_open_vocab so it tracks the
-        active context's stop event.
-        """
-        import base64
-        import os
-
-        import cv2
-        from physical_ai_server.workflow.handlers.motion import WorkflowError
-        from physical_ai_server.workflow.perception import Detection
-
-        cloud_api_url = os.environ.get('EDUBOTICS_CLOUD_API_URL', '').rstrip('/')
-        if not cloud_api_url:
-            raise WorkflowError(
-                'Cloud-Erkennung ist auf diesem Server nicht konfiguriert '
-                '(EDUBOTICS_CLOUD_API_URL fehlt).'
-            )
-        token = getattr(self, '_cloud_vision_auth_token', None)
-        if not token:
-            raise WorkflowError(
-                'Anmeldung fehlt für Cloud-Erkennung — bitte erneut einloggen '
-                'und Workflow neu starten.'
-            )
-        try:
-            import requests  # type: ignore
-        except ImportError:
-            raise WorkflowError(
-                'HTTP-Client (requests) ist nicht installiert — bitte Image '
-                'neu bauen.'
-            )
-
-        ok, jpg = cv2.imencode(
-            '.jpg', bgr_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80],
-        )
-        if not ok:
-            raise WorkflowError('JPEG-Kompression des Szenenbildes fehlgeschlagen.')
-        b64 = base64.b64encode(jpg.tobytes()).decode('ascii')
-
-        # Audit O3: re-check should_stop after the encode but BEFORE
-        # the HTTP send — encode can take a few ms on slower hosts, and
-        # the student may have hit Stop in between.
-        if callable(should_stop) and should_stop():
-            raise WorkflowError('Workflow wurde gestoppt.')
-
-        # Audit fix #10: stream the response so a long Modal cold-start
-        # (15 s+) is cancellable mid-read. Without this, /workflow/stop
-        # from the React UI couldn't take effect until the underlying
-        # socket recv() returned. Tuple timeout: 5 s to establish the
-        # connection, 2 s per read chunk (keeps the cancel-check cadence
-        # tight). Total upper bound is still bounded by the chunk-read
-        # cap of WALL_CLOCK_BUDGET so a network-stalled connection
-        # doesn't hang forever.
-        WALL_CLOCK_BUDGET = 30.0
-        session = requests.Session()
-        try:
-            response = session.post(
-                f'{cloud_api_url}/vision/detect',
-                json={
-                    'image_b64': b64,
-                    'prompts': [prompt],
-                    'score_threshold': 0.25,
-                },
-                headers={'Authorization': f'Bearer {token}'},
-                timeout=(5.0, 2.0),
-                stream=True,
-            )
-        except requests.exceptions.Timeout:
-            try:
-                session.close()
-            except Exception:
-                pass
-            raise WorkflowError(
-                'Cloud-Erkennung antwortet nicht — bitte erneut versuchen.'
-            )
-        except requests.exceptions.RequestException as e:
-            try:
-                session.close()
-            except Exception:
-                pass
-            raise WorkflowError(
-                f'Cloud-Erkennung nicht erreichbar: {type(e).__name__}.'
-            )
-
-        try:
-            if response.status_code == 401 or response.status_code == 403:
-                raise WorkflowError(
-                    'Anmeldung für Cloud-Erkennung abgelaufen — bitte neu einloggen.'
-                )
-            if response.status_code == 429:
-                raise WorkflowError(
-                    'Cloud-Erkennungs-Kontingent für dieses Halbjahr erreicht.'
-                )
-            if response.status_code == 503:
-                raise WorkflowError(
-                    'Cloud-Erkennung ist gerade nicht erreichbar.'
-                )
-            if response.status_code == 504:
-                raise WorkflowError(
-                    'Cloud-Erkennung lädt noch — bitte gleich erneut versuchen.'
-                )
-            if response.status_code >= 400:
-                raise WorkflowError(
-                    'Cloud-Erkennung ist fehlgeschlagen. Bitte erneut versuchen.'
-                )
-
-            # Audit fix #10: chunk-read the response body so the student
-            # can hit /workflow/stop during a slow download (Modal cold
-            # path returns >100 KiB of detection JSON on a busy scene).
-            # session.close() in the finally aborts the underlying
-            # socket immediately on stop.
-            collected = bytearray()
-            deadline = time.monotonic() + WALL_CLOCK_BUDGET
-            try:
-                for chunk in response.iter_content(chunk_size=8192):
-                    if callable(should_stop) and should_stop():
-                        raise WorkflowError('Workflow wurde gestoppt.')
-                    if time.monotonic() > deadline:
-                        raise WorkflowError(
-                            'Cloud-Erkennung antwortet nicht — bitte erneut versuchen.'
-                        )
-                    if chunk:
-                        collected.extend(chunk)
-            except requests.exceptions.RequestException as e:
-                raise WorkflowError(
-                    f'Cloud-Erkennung Verbindung verloren: {type(e).__name__}.'
-                )
-
-            try:
-                import json as _json
-                data = _json.loads(collected.decode('utf-8'))
-            except (ValueError, UnicodeDecodeError):
-                raise WorkflowError(
-                    'Cloud-Erkennung lieferte ungültige Antwort.'
-                )
-
-            raw_detections = data.get('detections', []) or []
-            h, w = bgr_frame.shape[:2]
-            out: list = []
-            for d in raw_detections:
-                try:
-                    bbox = d.get('bbox') or [0, 0, 0, 0]
-                    x1, y1, x2, y2 = (float(bbox[0]), float(bbox[1]),
-                                      float(bbox[2]), float(bbox[3]))
-                    x1 = max(0, min(w - 1, int(round(x1))))
-                    y1 = max(0, min(h - 1, int(round(y1))))
-                    x2 = max(0, min(w - 1, int(round(x2))))
-                    y2 = max(0, min(h - 1, int(round(y2))))
-                    bw = max(1, x2 - x1)
-                    bh = max(1, y2 - y1)
-                    cx = x1 + bw // 2
-                    cy = y1 + bh // 2
-                    out.append(Detection(
-                        centroid_px=(cx, cy),
-                        bbox_px=(x1, y1, bw, bh),
-                        confidence=float(d.get('score', 0.0)),
-                        label=str(d.get('label', prompt)),
-                    ))
-                except (TypeError, ValueError, KeyError):
-                    continue
-            return out
-        finally:
-            # Always close the streamed response + session so a cancel
-            # while iter_content was mid-flight releases the socket
-            # rather than holding it open until GC.
-            try:
-                response.close()
-            except Exception:
-                pass
-            try:
-                session.close()
-            except Exception:
-                pass
-
-    # ------------------------------------------------------------------
     # Phase-2 sensor snapshot publisher (~5 Hz while a workflow runs)
     # ------------------------------------------------------------------
     def _sensor_snapshot_timer_callback(self):
@@ -3581,8 +3192,6 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             # TTL the fields go back to empty (matches the React
             # side's "—" rendering for stale data).
             apriltag_ids: list[int] = []
-            color_counts = [0, 0, 0, 0]  # [rot, gruen, blau, gelb]
-            object_classes: list[str] = []
             # Audit fix #15: snapshot the tuple in one read so the ts
             # and list are guaranteed to belong together. Rebinding
             # _workflow_detections_state is atomic in CPython (single
@@ -3593,7 +3202,6 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             except (TypeError, ValueError):
                 last_ts, last = 0.0, []
             if last and (time.monotonic() - last_ts) < 2.0:
-                color_index = {'rot': 0, 'gruen': 1, 'blau': 2, 'gelb': 3}
                 for d in last:
                     label = str(getattr(d, 'label', '') or '')
                     if (
@@ -3605,19 +3213,7 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                             apriltag_ids.append(int(label[3:]))
                         except ValueError:
                             pass
-                        continue
-                    idx = color_index.get(label)
-                    if idx is not None:
-                        color_counts[idx] += 1
-                        continue
-                    # Anything else is treated as an object class
-                    # (COCO names + open-vocab prompts). De-dupe to
-                    # keep the chip count compact for the UI.
-                    if label and label not in object_classes:
-                        object_classes.append(label)
             msg.visible_apriltag_ids = apriltag_ids
-            msg.color_counts = color_counts
-            msg.visible_object_classes = object_classes
             self.sensor_snapshot_publisher.publish(msg)
         except Exception:
             # Snapshot publish must never crash the timer thread.

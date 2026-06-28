@@ -25,9 +25,9 @@ RUN find /etc/s6-overlay/s6-rc.d -type f \
 # was built BEFORE commit d408378 added the Roboter Studio service /
 # message types (StartCalibration, CalibrationCaptureFrame, CalibrationSolve,
 # AutoPoseSuggest, ExecuteCalibrationPose, MarkDestination, StartWorkflow,
-# StopWorkflow, WorkflowStatus). The audit also adds Detection.msg and
-# CalibrationCaptureColor.srv, plus changes WorkflowStatus.msg from a
-# parallel-array shape to a typed Detection[] field.
+# StopWorkflow, WorkflowStatus). The audit also adds Detection.msg, plus
+# changes WorkflowStatus.msg from a parallel-array shape to a typed
+# Detection[] field.
 #
 # Without this step physical_ai_server.py crashes at import time with
 # "ImportError: cannot import name 'StartCalibration'" — meaning the
@@ -163,10 +163,6 @@ RUN set -e && \
 # contrib aruco module). pupil-apriltags is BSD-licensed, lightweight
 # AprilTag detection. pip-licenses runs the cross-cutting AGPL gate.
 #
-# CPU-only onnxruntime keeps the image-size delta well under 100 MB
-# (GPU EP would add ~200 MB of CUDA libs we don't need; YOLOX-tiny at
-# 640x640 runs in ~80 ms on CPU which fits the workflow's 100 ms tick
-# budget).
 # pupil-apriltags 1.0.4 ships an upstream CMakeLists with
 # `cmake_minimum_required(VERSION 3.0)`, which CMake 4 (the version
 # bundled in the wheel build env) refuses to accept. The
@@ -183,25 +179,10 @@ RUN python3 -m pip uninstall -y opencv-python opencv-python-headless 2>/dev/null
     python3 -m pip install --no-cache-dir \
         opencv-contrib-python==4.10.0.84 \
         pupil-apriltags==1.0.4 \
-        onnxruntime==1.20.1 \
         pip-licenses==5.0.0 \
         urdf-parser-py==0.0.4 \
         requests==2.32.3 && \
-    python3 -c "import cv2, onnxruntime, pupil_apriltags, requests; print('runtime deps OK:', cv2.__version__, onnxruntime.__version__)"
-
-# YOLOX-tiny ONNX (Megvii, Apache-2.0). Pinned release URL + SHA-256
-# so the binary is stable across builds and a future GitHub release
-# re-upload can't silently swap weights past us. If you ever bump the
-# YOLOX version, recompute the digest with:
-#     sha256sum /opt/edubotics/yolox_tiny.onnx
-#
-# Image-size impact: ~19.3 MiB (well under the 100 MiB plan budget).
-RUN set -e && \
-    mkdir -p /opt/edubotics && \
-    curl -fL --retry 3 --retry-delay 5 -o /opt/edubotics/yolox_tiny.onnx \
-        https://github.com/Megvii-BaseDetection/YOLOX/releases/download/0.1.1rc0/yolox_tiny.onnx && \
-    echo '427cc366d34e27ff7a03e2899b5e3671425c262ea2291f88bb942bc1cc70b0f7  /opt/edubotics/yolox_tiny.onnx' \
-        | sha256sum -c -
+    python3 -c "import cv2, pupil_apriltags, requests; print('runtime deps OK:', cv2.__version__)"
 
 # Runtime ROS message deps (NOT an IK install — IK is closed-form pure NumPy,
 # see the urdf-parser-py block below; there is no TRAC-IK / PyKDL / kdl_parser).
@@ -253,13 +234,12 @@ RUN python3 -m pip install --no-cache-dir urdf-parser-py==0.0.4 \
     && python3 -c "import urdf_parser_py.urdf; print('urdf_parser_py OK')"
 
 # AGPL audit: every package we explicitly pip-install above (opencv-contrib-
-# python 4.10 / pupil-apriltags / onnxruntime 1.20 / urdf-parser-py / pip-
-# licenses) ships under Apache-2.0, BSD, or MIT. ultralytics (the original
-# AGPL concern) is NOT installed anywhere — we use Megvii YOLOX via ONNX
-# instead. A pip-licenses runtime gate broke on this base image (its `pip`
-# installs into a Python prefix that `python3 -m` can't see), so the gate
-# now lives in CI / manifest review rather than the Dockerfile. If anyone
-# adds a new pip dep, the WORKFLOW.md license rule still applies.
+# python 4.10 / pupil-apriltags / urdf-parser-py / pip-licenses) ships under
+# Apache-2.0, BSD, or MIT. ultralytics (the original AGPL concern) is NOT
+# installed anywhere. A pip-licenses runtime gate broke on this base image
+# (its `pip` installs into a Python prefix that `python3 -m` can't see), so
+# the gate now lives in CI / manifest review rather than the Dockerfile. If
+# anyone adds a new pip dep, the WORKFLOW.md license rule still applies.
 RUN echo "AGPL audit: relies on explicit dependency manifest, see Dockerfile comment"
 
 # ── amd64-only: drop CUDA / GPU torch (student PCs have NO GPU) ──────────────
@@ -346,8 +326,8 @@ RUN python3 -m pip install --no-cache-dir --force-reinstall \
                 assert numpy.__version__.startswith('1.'), 'numpy must be <2 for cv_bridge ABI'"
 
 # Strip ~6.75 GB of upstream bloat — see CLAUDE.md image-level audit (2026-05).
-# This MUST come AFTER the package replacement + colcon rebuild + the YOLOX
-# download. Any earlier and we delete sources the build still needs.
+# This MUST come AFTER the package replacement + colcon rebuild. Any earlier
+# and we delete sources the build still needs.
 #
 # Breakdown (verified via `du -sh` inside :latest):
 #   /root/.cache       ~5.0 GB  (pip wheel cache + puccinialin 962 MB, inherited from upstream base)

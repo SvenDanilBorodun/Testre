@@ -174,11 +174,6 @@ services:
       # with no in-app re-entry. Empty default keeps cloud-only / no-token
       # starts working without a compose warning.
       - HF_TOKEN=${HF_TOKEN:-}
-      # Phase-3 cloud-vision: the on-host server POSTs base64 JPEGs +
-      # German prompts to ${EDUBOTICS_CLOUD_API_URL}/vision/detect when
-      # the student enables the open-vocab block. Defaults to the
-      # Railway production endpoint; override in .env for staging.
-      - EDUBOTICS_CLOUD_API_URL=${EDUBOTICS_CLOUD_API_URL:-https://scintillating-empathy-production-1068.up.railway.app}
       # Recording video codec (v2.5.0 / LeRobot v0.5.1). Default 'h264'
       # (software libx264 under the hood) — fast CPU decode on Win10
       # student PCs in the React preview. Upstream LeRobot defaults to
@@ -192,10 +187,10 @@ services:
       # used to go dead — /get_robot_types timed out — until the encode finished).
       # Read by communicator.py; '0' reverts to the in-process edit (debug only).
       - EDUBOTICS_DATASET_EDIT_SUBPROCESS=${EDUBOTICS_DATASET_EDIT_SUBPROCESS:-1}
-      # Roboter Studio calibration dir (ChArUco intrinsics, hand-eye
-      # transforms, HSV color profile). Default lands inside the
-      # edubotics_calib named volume mounted below. Overlay readers:
-      # workflow/calibration_manager.py, workflow/color_profile.py,
+      # Roboter Studio calibration dir (ChArUco intrinsics + hand-eye
+      # transforms + the object catalog). Default lands inside the
+      # edubotics_calib named volume mounted below. Readers:
+      # workflow/calibration_manager.py, workflow/object_catalog.py,
       # physical_ai_server.py.
       - EDUBOTICS_CALIB_DIR=${EDUBOTICS_CALIB_DIR:-/root/.cache/edubotics}
       # Roboter Studio named-object grasping (plan 2026-06-22): the teacher-edited
@@ -303,14 +298,6 @@ services:
       - EDUBOTICS_GRASP_HELD_MAX_RAD=${EDUBOTICS_GRASP_HELD_MAX_RAD:--0.35}
       - EDUBOTICS_GRASP_RETRY=${EDUBOTICS_GRASP_RETRY:-1}
       - EDUBOTICS_GRASP_SETTLE_S=${EDUBOTICS_GRASP_SETTLE_S:-0.3}
-      # Vision detector selection + ONNX paths for the Roboter Studio
-      # open-vocab block. `yolox-tiny` is the only fully-wired path
-      # today; `dfine-n` is reserved (see overlays/workflow/perception.py
-      # comment). Custom ONNX paths support side-loading a fine-tuned
-      # model into the container without rebuilding the image.
-      - EDUBOTICS_DETECTOR=${EDUBOTICS_DETECTOR:-yolox-tiny}
-      - EDUBOTICS_YOLOX_ONNX=${EDUBOTICS_YOLOX_ONNX:-/opt/edubotics/yolox_tiny.onnx}
-      - EDUBOTICS_DFINE_ONNX=${EDUBOTICS_DFINE_ONNX:-/opt/edubotics/dfine_n.onnx}
       # Teleop force/collision e-stop (Rule §2 software guard, teleop-only). Read by the
       # collision monitor in safety/collision_monitor.py + collision_detector.py. The follower
       # is MIXED-MODEL: dxl11-13 (XL430-W250) expose 'Present Load', dxl14-15 (XL330-M288)

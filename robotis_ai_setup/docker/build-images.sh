@@ -231,13 +231,9 @@ done
 # inside the amd64 conditional, like the previous revision did, leaked
 # physical_ai_server/interfaces/ into the source tree on every arm64
 # build. Each cleanup branch is no-op when its variable is empty.
-COCO_SNAPSHOT=""
 INTERFACES_STAGING=""
 PKG_STAGING=""
 _build_cleanup() {
-    if [ -n "${COCO_SNAPSHOT:-}" ]; then
-        rm -f "${COCO_SNAPSHOT}"
-    fi
     if [ -n "${INTERFACES_STAGING:-}" ]; then
         rm -rf "${INTERFACES_STAGING}"
     fi
@@ -303,17 +299,6 @@ BUILD_ARGS="$BUILD_ARGS --build-arg REACT_APP_SUPABASE_ANON_KEY=${SUPABASE_ANON_
 BUILD_ARGS="$BUILD_ARGS --build-arg REACT_APP_CLOUD_API_URL=${CLOUD_API_URL}"
 BUILD_ARGS="$BUILD_ARGS --build-arg REACT_APP_ALLOWED_POLICIES=${ALLOWED_POLICIES}"
 BUILD_ARGS="$BUILD_ARGS --build-arg REACT_APP_BUILD_ID=${BUILD_ID}"
-
-# Stage server-side coco_classes.py into the manager build context so
-# the prebuild Jest hook (objectClasses.sync.test.js) can validate
-# that the React dropdown matches the server allowlist. Without this
-# the test would fail on ENOENT because physical_ai_server/ is a
-# sibling repo, not part of physical_ai_manager/. The trap registered
-# above the platform conditional ensures this file gets cleaned up on
-# every exit path.
-COCO_SNAPSHOT="${PHYSICAL_AI_TOOLS_DIR}/physical_ai_manager/_coco_classes.py"
-cp "${PHYSICAL_AI_TOOLS_DIR}/physical_ai_server/physical_ai_server/workflow/coco_classes.py" \
-   "${COCO_SNAPSHOT}"
 
 # CLAUDE.md §13.4.bis: build to local daemon first with buildx --load so
 # the post-build smoke grep can `docker run` against the image. A separate
@@ -420,8 +405,8 @@ cp "${PHYSICAL_AI_TOOLS_DIR}/physical_ai_interfaces/msg/"*.msg      "${INTERFACE
 cp "${PHYSICAL_AI_TOOLS_DIR}/physical_ai_interfaces/srv/"*.srv      "${INTERFACES_STAGING}/srv/"
 
 # Cleanup is already registered above via _build_cleanup, which removes
-# ${COCO_SNAPSHOT}, ${INTERFACES_STAGING} and ${PKG_STAGING} on exit. We must
-# NOT overwrite the trap here — that's the v1 bug — so this is a no-op.
+# ${INTERFACES_STAGING} and ${PKG_STAGING} on exit. We must NOT overwrite the
+# trap here — that's the v1 bug — so this is a no-op.
 
 # Stage the EduBotics physical_ai_server ROS package (the single source of
 # truth) into the build context so the Dockerfile can COPY it wholesale over

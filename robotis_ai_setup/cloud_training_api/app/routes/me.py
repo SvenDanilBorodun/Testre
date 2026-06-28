@@ -37,11 +37,6 @@ class MyProfile(BaseModel):
     student_count: int | None = None
     group_count: int | None = None
     group_credits_total: int | None = None
-    # Audit F30: Phase-3 cloud-vision quota readout so the React app
-    # can render a "Cloud-Erkennung: X/Y verbleibend" chip next to
-    # the toggle. NULL quota means unbounded (operator decision).
-    vision_quota_per_term: int | None = None
-    vision_used_per_term: int | None = None
 
 
 def _build_my_profile(profile: dict) -> MyProfile:
@@ -98,32 +93,6 @@ def _build_my_profile(profile: dict) -> MyProfile:
                 "group_count": row.get("group_count", 0),
                 "group_credits_total": row.get("group_credits_total", 0),
             }
-        )
-
-    # Audit F30: surface vision quota for the chip. Read directly from
-    # the users table because the columns are nullable + small —
-    # cheaper than a dedicated RPC.
-    try:
-        vq = (
-            supabase.table("users")
-            .select("vision_quota_per_term, vision_used_per_term")
-            .eq("id", profile["id"])
-            .single()
-            .execute()
-        )
-        if vq.data:
-            quota = vq.data.get("vision_quota_per_term")
-            used = vq.data.get("vision_used_per_term")
-            data["vision_quota_per_term"] = (
-                int(quota) if isinstance(quota, int) else None
-            )
-            data["vision_used_per_term"] = (
-                int(used) if isinstance(used, int) else None
-            )
-    except Exception as exc:
-        logger.info(
-            "vision quota lookup failed for user=%s: %s — column probably "
-            "missing (migration 017 not deployed)", profile["id"], exc,
         )
 
     return MyProfile(**data)
@@ -277,22 +246,6 @@ async def export_my_data(profile=Depends(get_current_profile)):
         bundle["tutorial_progress"] = tutorial_progress.data or []
     except Exception:
         bundle["tutorial_progress"] = []
-
-    # Best-effort: include the vision-quota counters so the student can
-    # see how much of their cloud budget has been used. NULL quota means
-    # "unbounded" and is also informative.
-    try:
-        vq = (
-            supabase.table("users")
-            .select("vision_quota_per_term, vision_used_per_term")
-            .eq("id", uid)
-            .single()
-            .execute()
-        )
-        if vq.data:
-            bundle["vision_quota"] = vq.data
-    except Exception:
-        pass
 
     if profile["role"] == "teacher":
         classrooms = (

@@ -1,5 +1,15 @@
 # Fine-tuning D-FINE-N for classroom perception
 
+> **⚠ HISTORICAL / INAPPLICABLE (P4 2026-06-28).** The YOLOX-tiny /
+> D-FINE on-device object detector was **REMOVED in P4**: the
+> `EDUBOTICS_DETECTOR` / `EDUBOTICS_DFINE_ONNX` env vars, the YOLOX-tiny
+> ONNX download, and `onnxruntime` were all dropped from the server
+> Dockerfile (and the perception overlay no longer ships a swappable
+> object-detector path). Named-object **AprilTag** grasping is the only
+> perception path now. This recipe is kept for historical reference
+> only — the env vars and Dockerfile edits it describes no longer
+> exist.
+
 D-FINE-N (Apache-2.0, https://github.com/Peterande/D-FINE) is the
 recommended Phase-3 upgrade for the local closed-vocabulary detector.
 It dominates YOLOX-tiny on COCO mAP at the same parameter budget — but

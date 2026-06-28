@@ -239,10 +239,10 @@ function DetectionOverlay({ detections, naturalSize }) {
         if (!d || d.cx === undefined || d.w === undefined) return null;
         const x = d.cx - d.w / 2;
         const y = d.cy - d.h / 2;
-        // Audit F31: render confidence next to the label so OWLv2's
-        // low-score boxes (default threshold 0.10) are visibly
-        // distinguishable from high-confidence locks. Confidence is a
-        // 0..1 fraction on the Detection msg.
+        // Render confidence next to the label so weaker detections are
+        // visibly distinguishable from high-confidence locks (for an AprilTag
+        // this is the decision margin). Confidence is a 0..1 fraction on the
+        // Detection msg.
         const conf =
           typeof d.confidence === 'number'
             ? ` ${Math.round(d.confidence * 100)}%`

@@ -21,6 +21,7 @@ from app.services.supabase_client import get_supabase
 from app.validators.workflow import (
     MAX_NAME_LENGTH,
     validate_blockly_json,
+    validate_sim_scene,
 )
 
 logger = logging.getLogger(__name__)
@@ -43,6 +44,9 @@ class WorkflowCreate(BaseModel):
     # When the caller is in a workgroup, default to sharing the workflow
     # with the group. Set False to keep it private to the author.
     share_with_group: bool = True
+    # Roboter Studio Phase-3 Sim-Szene (placed virtual objects). Optional —
+    # a non-sim workflow omits it and the column defaults to {}.
+    sim_scene: dict | None = None
 
 
 class WorkflowUpdate(BaseModel):
@@ -51,6 +55,10 @@ class WorkflowUpdate(BaseModel):
     blockly_json: dict | None = None
     # Re-share / un-share an already-saved workflow.
     share_with_group: bool | None = None
+    # Phase-3 Sim-Szene. A sim-only PATCH carries just this; a combined
+    # blockly+sim PATCH carries both (the sim_scene write is applied via the
+    # plain owner-scoped update BEFORE the snapshot RPC — see update_workflow).
+    sim_scene: dict | None = None
 
 
 class WorkflowResponse(BaseModel):
@@ -64,6 +72,10 @@ class WorkflowResponse(BaseModel):
     is_template: bool
     created_at: str
     updated_at: str
+    # Phase-3 Sim-Szene. Declared so the read round-trip carries the column
+    # back to the client (Pydantic drops undeclared fields). Defaults to None
+    # for tolerance of a pre-migration row that lacks the column.
+    sim_scene: dict | None = None
 
 
 # ---------- Helpers ----------
@@ -216,6 +228,8 @@ def create_workflow(
     user=Depends(get_current_user),
 ) -> WorkflowResponse:
     validate_blockly_json(payload.blockly_json)
+    if payload.sim_scene is not None:
+        validate_sim_scene(payload.sim_scene)
     supabase = get_supabase()
     profile = get_user_profile(str(user.id))
     workgroup_id = (
@@ -230,6 +244,7 @@ def create_workflow(
         "name": payload.name,
         "description": payload.description,
         "blockly_json": payload.blockly_json,
+        "sim_scene": payload.sim_scene or {},
         "is_template": False,
     }
     result = supabase.table("workflows").insert(insert_payload).execute()
@@ -253,6 +268,9 @@ def update_workflow(
     if payload.blockly_json is not None:
         validate_blockly_json(payload.blockly_json)
         update_payload["blockly_json"] = payload.blockly_json
+    if payload.sim_scene is not None:
+        validate_sim_scene(payload.sim_scene)
+        update_payload["sim_scene"] = payload.sim_scene
     if payload.share_with_group is not None:
         # Re-share or un-share. Sharing requires the caller currently be in
         # a group; un-sharing always allowed.
@@ -283,6 +301,14 @@ def update_workflow(
         if "workgroup_id" in update_payload:
             supabase.table("workflows").update(
                 {"workgroup_id": update_payload["workgroup_id"]}
+            ).eq("id", workflow_id).eq("owner_user_id", user.id).execute()
+        # Apply the Sim-Szene via the same plain owner-scoped update (the
+        # snapshot RPC writes only blockly_json/name/description; it does not
+        # touch sim_scene). Owner-scoped .eq("owner_user_id", user.id) keeps
+        # this IDOR-safe under the service-role client (Rule §4).
+        if "sim_scene" in update_payload:
+            supabase.table("workflows").update(
+                {"sim_scene": update_payload["sim_scene"]}
             ).eq("id", workflow_id).eq("owner_user_id", user.id).execute()
         try:
             supabase.rpc(
@@ -364,6 +390,9 @@ def clone_workflow(workflow_id: str, user=Depends(get_current_user)) -> Workflow
         "name": f"{src['name']} (Kopie)",
         "description": src.get("description", ""),
         "blockly_json": src["blockly_json"],
+        # Carry the Sim-Szene into the clone (already validated when the
+        # source was saved). Defaults to {} for a pre-Phase-3 source row.
+        "sim_scene": src.get("sim_scene") or {},
         "is_template": False,
     }
     inserted = supabase.table("workflows").insert(insert_payload).execute()

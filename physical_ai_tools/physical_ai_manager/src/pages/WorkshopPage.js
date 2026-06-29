@@ -17,6 +17,7 @@ import LeaderToggle from '../components/Workshop/LeaderToggle';
 import BlocklyWorkspace from '../components/Workshop/BlocklyWorkspace';
 import RunControls from '../components/Workshop/RunControls';
 import CameraFeedOverlay from '../components/Workshop/CameraFeedOverlay';
+import SimScene from '../components/Workshop/SimScene';
 import TemplatePicker from '../components/Workshop/TemplatePicker';
 import ToolbarButtons from '../components/Workshop/ToolbarButtons';
 import DebugPanel from '../components/Workshop/DebugPanel';
@@ -42,6 +43,11 @@ import {
   createWorkflow,
   updateWorkflow,
 } from '../services/workflowApi';
+
+// Phase-3 simulator fallback palette: an uncalibrated rig may have no
+// object_catalog.json yet, so seed at least one type so the sim editor is usable.
+const SIM_DEFAULT_CATALOG = [['Würfel', 'wuerfel']];
+const EMPTY_SIM_SCENE = { version: 1, objects: [] };
 
 function WorkshopPage({ isActive }) {
   const dispatch = useDispatch();
@@ -79,6 +85,13 @@ function WorkshopPage({ isActive }) {
   const [workspace, setWorkspace] = useState(null);
   const [saving, setSaving] = useState(false);
   const [view, setView] = useState('editor'); // 'editor' | 'gallery'
+  // Phase-3 "Test im Simulator". simMode opens the editor without calibration and
+  // swaps the live scene camera for the SimScene editor + virtual-arm preview.
+  const [simMode, setSimMode] = useState(false);
+  const [simScene, setSimScene] = useState(EMPTY_SIM_SCENE);
+  // [label_de, type_name] pairs from GetObjectCatalog, threaded to SimScene's
+  // object palette (the same source the Blockly dropdowns use).
+  const [objectCatalog, setObjectCatalog] = useState([]);
   const subscriptions = useRosTopicSubscription();
   const { getObjectCatalog } = useRosServiceCaller();
   const workspaceRef = useRef(null);
@@ -103,7 +116,9 @@ function WorkshopPage({ isActive }) {
   // the optional „Genauigkeit prüfen" step before the editor opens; it is NOT
   // part of `calibrated`, so a calibrated rig still opens straight to the
   // editor on a fresh page load (workshopSlice).
-  const showEditor = calibrated && !recalibrating && !pendingVerify;
+  // Phase-3: the simulator needs no calibration (real interpreter + real IK on a
+  // VIRTUAL arm — plan §WS-D), so simMode opens the editor regardless.
+  const showEditor = simMode || (calibrated && !recalibrating && !pendingVerify);
 
   // Re-subscribe to /workflow/status whenever this page is active OR
   // the rosbridge connection state flips back to connected. The v1
@@ -133,6 +148,13 @@ function WorkshopPage({ isActive }) {
         .then((w) => {
           if (cancelled) return;
           setInitialJsonForEditor(w?.blockly_json || null);
+          // Hydrate the persisted Sim-Szene (workflows.sim_scene); fall back to
+          // an empty scene when absent/empty so a non-sim workflow clears it.
+          setSimScene(
+            w?.sim_scene && Array.isArray(w.sim_scene.objects)
+              ? w.sim_scene
+              : EMPTY_SIM_SCENE,
+          );
           setEditorKey((k) => k + 1);
         })
         .catch((e) => {
@@ -195,26 +217,35 @@ function WorkshopPage({ isActive }) {
   // available (calibrated). Re-fetch if the student calibrates in-session. The
   // GetObjectCatalog service reads the volume catalog at call time, so this also
   // picks up a teacher's catalog edit after an environment restart.
+  // Phase-3: also fetch the catalog in simMode (even uncalibrated) so the
+  // simulator object palette is populated; an empty/failed fetch seeds a default.
   useEffect(() => {
-    if (!isActive || !calibrated) return undefined;
+    if (!isActive || !(calibrated || simMode)) return undefined;
     let cancelled = false;
     getObjectCatalog()
       .then((r) => {
         if (cancelled) return;
-        if (r && r.success && Array.isArray(r.type_names)) {
+        if (r && r.success && Array.isArray(r.type_names) && r.type_names.length) {
           const labels = Array.isArray(r.labels_de) ? r.labels_de : [];
-          setObjectCatalogOptions(r.type_names.map((t, i) => [labels[i] || t, t]));
+          const pairs = r.type_names.map((t, i) => [labels[i] || t, t]);
+          setObjectCatalogOptions(pairs);
+          setObjectCatalog(pairs);
+        } else if (simMode) {
+          // Non-fatal in the simulator — keep the palette usable.
+          setObjectCatalog(SIM_DEFAULT_CATALOG);
         } else if (r && r.message) {
           toast.error(r.message);
         }
       })
       .catch((e) => {
-        if (!cancelled) console.warn('getObjectCatalog failed', e);
+        if (cancelled) return;
+        console.warn('getObjectCatalog failed', e);
+        if (simMode) setObjectCatalog(SIM_DEFAULT_CATALOG);
       });
     return () => {
       cancelled = true;
     };
-  }, [isActive, calibrated, getObjectCatalog]);
+  }, [isActive, calibrated, simMode, getObjectCatalog]);
 
   // TemplatePicker calls onPicked(workflowObject) — the full row, not
   // just the id. We extract the id and store it in Redux; the editor's
@@ -271,7 +302,7 @@ function WorkshopPage({ isActive }) {
   );
   const { lastSavedAt } = useAutosave({
     workspace,
-    enabled: isActive && calibrated,
+    enabled: isActive && (calibrated || simMode),
     scopeKey: userId,
     onRestore: handleAutosaveRestore,
   });
@@ -291,12 +322,14 @@ function WorkshopPage({ isActive }) {
       if (selectedWorkflowId) {
         await updateWorkflow(accessToken, selectedWorkflowId, {
           blockly_json: json,
+          sim_scene: simScene,
         });
       } else {
         const created = await createWorkflow(accessToken, {
           name: 'Neuer Workflow',
           description: '',
           blockly_json: json,
+          sim_scene: simScene,
         });
         if (created && created.id) {
           dispatch(setSelectedWorkflowId(created.id));
@@ -309,7 +342,7 @@ function WorkshopPage({ isActive }) {
     } finally {
       setSaving(false);
     }
-  }, [accessToken, editorJson, unsavedBlocklyJson, selectedWorkflowId, dispatch]);
+  }, [accessToken, editorJson, unsavedBlocklyJson, selectedWorkflowId, simScene, dispatch]);
 
   if (!isActive) return null;
 
@@ -327,9 +360,28 @@ function WorkshopPage({ isActive }) {
                 : 'Bevor wir loslegen können, muss die Kamera eingerichtet werden.'}
             </p>
           </div>
-          {/* Follower-only leader toggle (Windows student rig only; self-hides
-              on Jetson/cloud where the GUI control bridge is absent). */}
-          <LeaderToggle isActive={isActive} />
+          <div className="flex items-center gap-2 flex-wrap">
+            {/* Phase-3: open the editor on a virtual arm — no calibration, no
+                real robot. The interpreter + IK run for real on a simulated
+                arm; only logic, order and reachability are validated. */}
+            <button
+              type="button"
+              onClick={() => setSimMode((v) => !v)}
+              aria-pressed={simMode}
+              title="Programm auf einem virtuellen Roboter testen — ohne echten Roboter und ohne Kalibrierung"
+              className={
+                'text-xs px-3 py-1.5 rounded-md border '
+                + (simMode
+                  ? 'bg-[var(--accent)] text-white border-[var(--accent)]'
+                  : 'bg-white text-[var(--ink-3)] border-[var(--line)] hover:bg-[var(--bg-sunk)]')
+              }
+            >
+              {simMode ? 'Simulator beenden' : 'Test im Simulator'}
+            </button>
+            {/* Follower-only leader toggle (Windows student rig only; self-hides
+                on Jetson/cloud where the GUI control bridge is absent). */}
+            <LeaderToggle isActive={isActive} />
+          </div>
         </div>
       </header>
       <main className="flex-1 overflow-hidden flex flex-col">
@@ -454,11 +506,19 @@ function WorkshopPage({ isActive }) {
                         : 'md:col-span-1')
                     }
                   >
-                    <CameraFeedOverlay
-                      camera="scene"
-                      clickable={true}
-                      onMark={handleMarkDestination}
-                    />
+                    {simMode ? (
+                      <SimScene
+                        scene={simScene}
+                        onChange={setSimScene}
+                        catalog={objectCatalog}
+                      />
+                    ) : (
+                      <CameraFeedOverlay
+                        camera="scene"
+                        clickable={true}
+                        onMark={handleMarkDestination}
+                      />
+                    )}
                     <SkillmapPlayer />
                   </div>
                   {debuggerVisible && (
@@ -471,6 +531,8 @@ function WorkshopPage({ isActive }) {
                   workflowId={selectedWorkflowId}
                   blocklyJson={editorJson || unsavedBlocklyJson}
                   workspace={workspace}
+                  simMode={simMode}
+                  simScene={simScene}
                 />
               </>
             )}

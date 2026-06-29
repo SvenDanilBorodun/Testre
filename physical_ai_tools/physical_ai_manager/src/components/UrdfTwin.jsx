@@ -14,14 +14,30 @@
 //
 // Live 3D "digital twin" of the OMX FOLLOWER arm (leLab-comparison PR-7).
 //
-// READ-ONLY: this component only SUBSCRIBES to /joint_states and mirrors the
-// real arm onto a three.js URDF model. It never publishes to any topic — Rule
-// §2 (no new software control surface onto the arm) is untouched.
+// READ-ONLY w.r.t. the real arm: this component only SUBSCRIBES to a joint-state
+// topic and mirrors the arm onto a three.js URDF model. It never publishes to
+// any topic — Rule §2 (no new software control surface onto the arm) is
+// untouched.
 //
 // This module is loaded as a LAZY chunk (React.lazy + dynamic import from
-// RecordPage), so three.js (~600 KB) and urdf-loader never land in the entry
-// bundle the white-screen CI greps. It mounts only while the „3D-Ansicht"
-// panel is open, and fully tears down its WebGL context on unmount/collapse.
+// RecordPage AND from Workshop/SimScene), so three.js (~600 KB) and urdf-loader
+// never land in the entry bundle the white-screen CI greps. It mounts only while
+// the panel is open, and fully tears down its WebGL context on unmount/collapse.
+//
+// Props (ALL optional — the default-prop call `<UrdfTwin/>` is byte-for-byte the
+// pre-Phase-3 behaviour, so RecordPage is untouched):
+//   * jointTopic   — the JointState topic to mirror (default the bare global
+//                    /joint_states; SimScene passes the sim-only /sim/joint_states).
+//   * objects      — Phase-3 sim objects [{type, tag_id, x, y, yaw}] rendered as
+//                    primitive meshes on a virtual table. Empty → nothing built.
+//   * showTable    — draw a flat table plane at the base z=0 plane.
+//   * heldObjectId — tag_id of the object currently grasped; its mesh is
+//                    re-parented to the end-effector link so it follows the
+//                    gripper, and dropped back to the table on release.
+//   * onEndEffector — callback({x,y,z,gripper}) fired per joint update with the
+//                    end-effector world position in BASE (ROS) frame + the
+//                    gripper angle, so SimScene can run the grasp-attach geometry
+//                    outside this thin renderer. Default null → never invoked.
 
 import React, { useEffect, useRef, useState } from 'react';
 import { useSelector } from 'react-redux';
@@ -61,7 +77,26 @@ const URDF_URL = `${process.env.PUBLIC_URL || ''}/omx-urdf/omx_f.urdf`;
 // cleaner, better-lit look in the viewer).
 const LINK_COLOR = 0xbfc4cc;
 
-export default function UrdfTwin() {
+// ── Phase-3 sim-object render constants ──────────────────────────────────────
+// `object_width_m` is deferred (plan §4): every placed object renders at one
+// fixed cube size. Colours: amber when resting, green while grasped.
+const SIM_OBJECT_SIZE_M = 0.03;
+const SIM_OBJECT_COLOR = 0xf59e0b;
+const SIM_OBJECT_HELD_COLOR = 0x22c55e;
+const SIM_TABLE_SIZE_M = 0.7;
+const SIM_TABLE_COLOR = 0x2a2e34;
+// The URDF link the gripper closes around — the verified grasp frame (a fixed
+// child of link5 via the URDF `end_effector_joint`). A held mesh is re-parented
+// here so it follows the gripper exactly.
+const EE_LINK_NAME = 'end_effector_link';
+
+export default function UrdfTwin({
+  jointTopic = '/joint_states',
+  objects = [],
+  showTable = false,
+  heldObjectId = null,
+  onEndEffector = null,
+}) {
   const rosbridgeUrl = useSelector((state) => state.ros.rosbridgeUrl);
 
   const mountRef = useRef(null);
@@ -77,9 +112,28 @@ export default function UrdfTwin() {
   const robotRef = useRef(null);
   const requestRenderRef = useRef(() => {});
 
+  // Phase-3 sim layer refs. All stay empty/unused for the default-prop call, so
+  // RecordPage (no objects / no table / no held / no onEndEffector) constructs
+  // ZERO of the extra three.js primitives — the jsdom three mock never sees
+  // Group/BoxGeometry/PlaneGeometry either.
+  const sceneRef = useRef(null);
+  const objectsGroupRef = useRef(null);
+  const objectMeshMapRef = useRef(new Map()); // tag_id -> THREE.Mesh
+  const tableMeshRef = useRef(null);
+  const prevHeldIdRef = useRef(null);
+  // Latest onEndEffector callback, read by the (stable) subscription closure.
+  const onEndEffectorRef = useRef(onEndEffector);
+  useEffect(() => {
+    onEndEffectorRef.current = onEndEffector;
+  }, [onEndEffector]);
+
   useEffect(() => {
     const mount = mountRef.current;
     if (!mount) return undefined;
+
+    // Capture the (stable, never-reassigned) sim-object map for use in the
+    // cleanup, so the lint's "ref may have changed by cleanup" guard is happy.
+    const objectMeshMap = objectMeshMapRef.current;
 
     let disposed = false;
     let animationId = null;
@@ -90,6 +144,7 @@ export default function UrdfTwin() {
 
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0x1a1d23);
+    sceneRef.current = scene;
 
     const camera = new THREE.PerspectiveCamera(45, width / height, 0.01, 100);
     camera.position.set(0.45, 0.35, 0.45);
@@ -196,17 +251,145 @@ export default function UrdfTwin() {
       if (animationId !== null) window.cancelAnimationFrame(animationId);
       controls.dispose();
       // Dispose every geometry/material reachable from the scene (three leaks
-      // GPU memory otherwise), then the shared link material + renderer.
+      // GPU memory otherwise), then the shared link material + renderer. This
+      // also reaches the sim-object meshes (under objectsGroup → scene) and a
+      // held mesh (under the robot → scene), so no separate dispose is needed.
       scene.traverse((obj) => disposeObject(obj));
       material.dispose();
       renderer.dispose();
       if (renderer.domElement && renderer.domElement.parentNode === mount) {
         mount.removeChild(renderer.domElement);
       }
+      // Drop the sim-layer bookkeeping (the meshes themselves were disposed by
+      // the traverse above).
+      sceneRef.current = null;
+      objectsGroupRef.current = null;
+      objectMeshMap.clear();
+      tableMeshRef.current = null;
+      prevHeldIdRef.current = null;
     };
   }, []);
 
-  // ---- rosbridge /joint_states subscription (ImageGridCell idiom) ----
+  // ---- Phase-3: sim objects + table layer (built/diffed on demand) ----------
+  // Lazily creates a THREE.Group the first time there is something to show, then
+  // builds/updates/removes primitive meshes to match `objects` and toggles the
+  // table plane. Held meshes are skipped here (the held effect owns their
+  // transform). For the default `<UrdfTwin/>` call (objects=[], showTable=false)
+  // this returns before constructing any primitive — RecordPage pays nothing.
+  useEffect(() => {
+    const scene = sceneRef.current;
+    if (!scene) return;
+    const map = objectMeshMapRef.current;
+    // Nothing to build and nothing built yet → no-op (keeps Group/geometry
+    // constructors out of the default path + the jsdom three mock).
+    if (objects.length === 0 && !showTable && !objectsGroupRef.current) return;
+
+    let group = objectsGroupRef.current;
+    if (!group) {
+      group = new THREE.Group();
+      scene.add(group);
+      objectsGroupRef.current = group;
+    }
+
+    // Table plane at the base z=0 plane (viewer y=0 after the robot's
+    // -π/2 X-rotation, which the object layer mirrors).
+    if (showTable && !tableMeshRef.current) {
+      const tableGeo = new THREE.PlaneGeometry(SIM_TABLE_SIZE_M, SIM_TABLE_SIZE_M);
+      const tableMat = new THREE.MeshStandardMaterial({
+        color: SIM_TABLE_COLOR,
+        metalness: 0.05,
+        roughness: 0.95,
+        side: THREE.DoubleSide,
+      });
+      const table = new THREE.Mesh(tableGeo, tableMat);
+      table.rotation.x = -Math.PI / 2;
+      table.position.set(0, 0, 0);
+      group.add(table);
+      tableMeshRef.current = table;
+    } else if (!showTable && tableMeshRef.current) {
+      const table = tableMeshRef.current;
+      if (table.parent) table.parent.remove(table);
+      disposeObject(table);
+      tableMeshRef.current = null;
+    }
+
+    // Diff the object meshes by tag_id.
+    const seen = new Set();
+    objects.forEach((o) => {
+      const id = simObjectKey(o);
+      if (id === null) return;
+      seen.add(id);
+      let mesh = map.get(id);
+      if (!mesh) {
+        const geo = new THREE.BoxGeometry(
+          SIM_OBJECT_SIZE_M, SIM_OBJECT_SIZE_M, SIM_OBJECT_SIZE_M);
+        const mat = new THREE.MeshStandardMaterial({
+          color: SIM_OBJECT_COLOR,
+          metalness: 0.2,
+          roughness: 0.6,
+        });
+        mesh = new THREE.Mesh(geo, mat);
+        mesh.userData.simId = id;
+        group.add(mesh);
+        map.set(id, mesh);
+      }
+      // A held mesh follows the gripper (held effect owns it) — don't yank it
+      // back to the table while the objects list is edited mid-carry.
+      if (id !== heldObjectId) positionSimObject(mesh, o);
+    });
+    // Remove meshes whose object is gone.
+    Array.from(map.keys()).forEach((id) => {
+      if (seen.has(id)) return;
+      const mesh = map.get(id);
+      if (mesh) {
+        if (mesh.parent) mesh.parent.remove(mesh);
+        disposeObject(mesh);
+      }
+      map.delete(id);
+    });
+
+    requestRenderRef.current();
+    // heldObjectId is read (to skip a carried mesh) but intentionally NOT a dep:
+    // the held effect re-parents on its own; re-running this on every grab would
+    // be wasteful. One-shot/diff effect idiom.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [objects, showTable]);
+
+  // ---- Phase-3: grasp re-parenting (mesh follows the gripper) ---------------
+  // On grab, re-parent the matching mesh under the end-effector link (attach()
+  // preserves world transform). On release, re-attach to the scene and snap it
+  // straight down onto the table. No-op for the default null heldObjectId.
+  useEffect(() => {
+    const robot = robotRef.current;
+    const scene = sceneRef.current;
+    const map = objectMeshMapRef.current;
+    const prev = prevHeldIdRef.current;
+
+    if (prev !== null && prev !== heldObjectId) {
+      const prevMesh = map.get(prev);
+      if (prevMesh && scene && typeof scene.attach === 'function') {
+        scene.attach(prevMesh);
+        snapMeshToTable(prevMesh);
+        setMeshColor(prevMesh, SIM_OBJECT_COLOR);
+        requestRenderRef.current();
+      }
+    }
+    if (heldObjectId !== null) {
+      const mesh = map.get(heldObjectId);
+      const link = robot && robot.links ? robot.links[EE_LINK_NAME] : null;
+      if (mesh && link && typeof link.attach === 'function') {
+        link.attach(mesh);
+        setMeshColor(mesh, SIM_OBJECT_HELD_COLOR);
+        requestRenderRef.current();
+      }
+    }
+    prevHeldIdRef.current = heldObjectId;
+  }, [heldObjectId]);
+
+  // ---- rosbridge joint-state subscription (ImageGridCell idiom) ----
+  // `jointTopic` defaults to the bare global /joint_states (RecordPage); SimScene
+  // passes the sim-only /sim/joint_states so the virtual arm never collides with
+  // the real joint_state_broadcaster.
   useEffect(() => {
     if (!rosbridgeUrl) return undefined;
 
@@ -219,7 +402,7 @@ export default function UrdfTwin() {
         ros = await rosConnectionManager.getConnection(rosbridgeUrl);
       } catch (err) {
         if (!cancelled) {
-          console.warn('UrdfTwin: rosbridge not connectable for /joint_states:', err.message);
+          console.warn(`UrdfTwin: rosbridge not connectable for ${jointTopic}:`, err.message);
         }
         return;
       }
@@ -227,20 +410,26 @@ export default function UrdfTwin() {
 
       subscription = new ROSLIB.Topic({
         ros,
-        name: '/joint_states',
+        name: jointTopic,
         messageType: 'sensor_msgs/msg/JointState',
         throttle_rate: JOINT_THROTTLE_MS,
         queue_length: JOINT_QUEUE_LENGTH,
       });
       subscription.subscribe((msg) => {
         if (cancelled) return;
-        applyJointState(robotRef.current, msg);
+        const robot = robotRef.current;
+        applyJointState(robot, msg);
         requestRenderRef.current();
         if (!cancelled) setHasJointData(true);
+        // Surface the end-effector pose + gripper for the sim grasp geometry —
+        // only when a consumer is wired (RecordPage passes none → zero cost,
+        // and the robot.links/getWorldPosition reads never run).
+        const cb = onEndEffectorRef.current;
+        if (cb && robot) emitEndEffector(robot, msg, cb);
       });
     };
     run().catch((err) => {
-      console.error('UrdfTwin: error subscribing to /joint_states:', err);
+      console.error(`UrdfTwin: error subscribing to ${jointTopic}:`, err);
     });
 
     return () => {
@@ -250,7 +439,7 @@ export default function UrdfTwin() {
         subscription = null;
       }
     };
-  }, [rosbridgeUrl]);
+  }, [rosbridgeUrl, jointTopic]);
 
   return (
     <div className="relative w-full h-full rounded-[var(--radius-lg)] overflow-hidden bg-[#1a1d23]">
@@ -305,6 +494,62 @@ function applyJointState(robot, msg) {
       }
     }
   }
+}
+
+// Stable id for a sim object: its (globally unique) tag_id. Returns null for a
+// malformed entry so the diff skips it.
+function simObjectKey(o) {
+  return o && o.tag_id !== undefined && o.tag_id !== null ? o.tag_id : null;
+}
+
+// Place a resting sim-object mesh from its base-frame (x, y, yaw). The robot is
+// added with rotation.x = -π/2 (URDF +Z up → viewer +Y up); the object layer
+// mirrors that mapping: base (x, y, z) → viewer (x, z, -y). A box of edge
+// SIM_OBJECT_SIZE_M rests with its bottom on the table (base z=0) at half-edge.
+// A base-z yaw maps to a viewer-y rotation (base +Z axis → viewer +Y axis).
+function positionSimObject(mesh, o) {
+  const half = SIM_OBJECT_SIZE_M / 2;
+  const x = typeof o.x === 'number' ? o.x : 0;
+  const y = typeof o.y === 'number' ? o.y : 0;
+  const yaw = typeof o.yaw === 'number' ? o.yaw : 0;
+  mesh.position.set(x, half, -y);
+  mesh.rotation.set(0, yaw, 0);
+}
+
+// On release, the mesh is re-attached to the scene with its carried world
+// transform; snap it straight down so it rests on the table (viewer y=half),
+// keeping its current x/z and yaw.
+function snapMeshToTable(mesh) {
+  if (mesh && mesh.position && typeof mesh.position.y === 'number') {
+    mesh.position.y = SIM_OBJECT_SIZE_M / 2;
+  }
+}
+
+// Recolour a sim-object mesh (amber resting / green grasped). Tolerant of a
+// missing material.color so a primitive without a standard material is a no-op.
+function setMeshColor(mesh, color) {
+  const mat = mesh && mesh.material;
+  if (mat && mat.color && typeof mat.color.set === 'function') {
+    mat.color.set(color);
+  }
+}
+
+// Read the end-effector link's world position, convert it back to the base (ROS)
+// frame (undo the robot's -π/2 X-rotation: viewer (X,Y,Z) → base (X, -Z, Y)),
+// extract the gripper angle from the message, and hand both to the consumer.
+function emitEndEffector(robot, msg, cb) {
+  const link = robot && robot.links ? robot.links[EE_LINK_NAME] : null;
+  if (!link || typeof link.getWorldPosition !== 'function') return;
+  const world = link.getWorldPosition(new THREE.Vector3());
+  let gripper = null;
+  if (msg && Array.isArray(msg.name) && Array.isArray(msg.position)) {
+    const gi = msg.name.indexOf('gripper_joint_1');
+    if (gi >= 0 && gi < msg.position.length) {
+      const v = msg.position[gi];
+      if (typeof v === 'number' && Number.isFinite(v)) gripper = v;
+    }
+  }
+  cb({ x: world.x, y: -world.z, z: world.y, gripper });
 }
 
 // Frame the camera + orbit target on the robot's bounding box so the whole arm

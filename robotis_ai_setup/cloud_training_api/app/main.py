@@ -294,6 +294,12 @@ def _validate_required_schema() -> None:
         # 029: compact Jetson inference run records (student-self write,
         # teacher read).
         ("inference_runs", "id, student_user_id, policy_repo, exit_reason"),
+        # Migration 033 — Roboter Studio Phase-3 Sim-Szene. WorkflowResponse
+        # round-trips this column on every read; routes/workflows.py writes it
+        # on create/update/clone. A deploy that lands the new code before the
+        # ALTER TABLE would 500 on the sim write — fail the deploy fast (golden
+        # order: W1 migration → W2 cloud-API).
+        ("workflows", "sim_scene"),
     )
     for table, cols in required_columns:
         try:

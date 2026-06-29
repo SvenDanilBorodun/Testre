@@ -58,7 +58,13 @@ async function probeRsStatus() {
   }
 }
 
-function RunControls({ workflowId, blocklyJson, workspace = null }) {
+function RunControls({
+  workflowId,
+  blocklyJson,
+  workspace = null,
+  simMode = false,
+  simScene = null,
+}) {
   const dispatch = useDispatch();
   const {
     callService,
@@ -166,8 +172,9 @@ function RunControls({ workflowId, blocklyJson, workspace = null }) {
     }
     // Belt-and-suspenders: refuse to start while the leader arm is on. The
     // button is already disabled in this state, but a stale render or a
-    // keyboard activation must not start a contended run.
-    if (rsLeaderOn) {
+    // keyboard activation must not start a contended run. In simMode the run
+    // drives a VIRTUAL arm (no leader contention) — the gate is bypassed.
+    if (rsLeaderOn && !simMode) {
       toast.error(
         'Bitte zuerst „Leader abschalten" (oben), bevor du das Programm ausführst.');
       return;
@@ -195,11 +202,22 @@ function RunControls({ workflowId, blocklyJson, workspace = null }) {
           console.warn('Pre-start setWorkflowBreakpoints failed:', e);
         }
       }
+      // Phase-3: in simMode inject the `sim` sibling into the workflow_json
+      // string (Contract B) — `Interpreter.from_json` reads only `data['blocks']`
+      // and silently ignores siblings, so the server runs the SAME program on a
+      // virtual arm against the placed objects. The persisted blockly_json /
+      // autosave blob never carries `sim` (it lives only in this run payload).
+      const simObjects = (simScene && Array.isArray(simScene.objects))
+        ? simScene.objects
+        : [];
+      const workflowJsonStr = simMode
+        ? JSON.stringify({ ...(blocklyJson || {}), sim: { enabled: true, objects: simObjects } })
+        : JSON.stringify(blocklyJson);
       const r = await callService(
         '/workflow/start',
         'physical_ai_interfaces/srv/StartWorkflow',
         {
-          workflow_json: JSON.stringify(blocklyJson),
+          workflow_json: workflowJsonStr,
           workflow_id: workflowId || `local-${Date.now()}`,
         }
       );
@@ -236,6 +254,8 @@ function RunControls({ workflowId, blocklyJson, workspace = null }) {
   }, [
     blocklyJson,
     rsLeaderOn,
+    simMode,
+    simScene,
     callService,
     dispatch,
     workflowId,
@@ -333,8 +353,8 @@ function RunControls({ workflowId, blocklyJson, workspace = null }) {
           <button
             type="button"
             onClick={handleStart}
-            disabled={busy || rsLeaderOn}
-            title={rsLeaderOn
+            disabled={busy || (rsLeaderOn && !simMode)}
+            title={rsLeaderOn && !simMode
               ? 'Bitte zuerst „Leader abschalten" (oben), bevor du das Programm ausführst.'
               : undefined}
             className={
@@ -440,7 +460,7 @@ function RunControls({ workflowId, blocklyJson, workspace = null }) {
         </button>
       </div>
 
-      {rsLeaderOn && !isRunning && (
+      {rsLeaderOn && !simMode && !isRunning && (
         <div
           role="alert"
           className="bg-amber-50 border border-amber-200 text-amber-800 text-sm rounded-md p-2 mb-2"
@@ -448,6 +468,17 @@ function RunControls({ workflowId, blocklyJson, workspace = null }) {
           Der Leader-Arm ist noch eingeschaltet. Bitte zuerst oben
           {' '}„Leader abschalten" drücken, bevor du das Programm ausführst —
           {' '}sonst kämpfen Teleoperation und Programm um den Roboter.
+        </div>
+      )}
+
+      {simMode && !isRunning && (
+        <div
+          role="status"
+          className="bg-blue-50 border border-blue-200 text-blue-800 text-sm rounded-md p-2 mb-2"
+        >
+          Simulator-Modus: Das Programm läuft auf einem virtuellen Roboter.
+          Geprüft werden Logik, Reihenfolge und Erreichbarkeit — nicht die echte
+          Physik.
         </div>
       )}
 

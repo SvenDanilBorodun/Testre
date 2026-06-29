@@ -24,6 +24,12 @@ MAX_BLOCKLY_JSON_BYTES = 256 * 1024
 MAX_BLOCKLY_DEPTH = 64
 MAX_NAME_LENGTH = 100
 
+# Roboter Studio Phase-3 Sim-Szene. Much smaller than blockly_json — it's a
+# flat list of placed catalog objects ({type, tag_id, x, y, yaw}). 64 KB is
+# generous (hundreds of objects) while still bounding a malicious payload
+# before it reaches Postgres.
+MAX_SIM_SCENE_JSON_BYTES = 64 * 1024
+
 
 def validate_blockly_json(payload: dict) -> None:
     """Defang malicious or runaway payloads before they hit Postgres.
@@ -60,3 +66,26 @@ def validate_blockly_json(payload: dict) -> None:
 
     if _depth(payload, 0) >= MAX_BLOCKLY_DEPTH + 1:
         raise HTTPException(status_code=400, detail="Workflow ist zu tief verschachtelt.")
+
+
+def validate_sim_scene(scene: dict) -> None:
+    """Defang a malicious or runaway Sim-Szene before it hits Postgres.
+
+    Mirrors ``validate_blockly_json``: a JSON-object type check plus a total
+    serialised-size cap. The semantic shape (objects must sit inside the IK
+    annulus, tag_ids unique, etc.) is enforced by the ROS sim runtime at
+    placement / run time — the cloud gate only guards size + type.
+    """
+    if not isinstance(scene, dict):
+        raise HTTPException(
+            status_code=400, detail="Sim-Szene muss ein JSON-Objekt sein."
+        )
+    try:
+        encoded = json.dumps(scene)
+    except (TypeError, ValueError) as e:
+        raise HTTPException(status_code=400, detail=f"Sim-Szene-JSON ist ungültig: {e}")
+    if len(encoded.encode("utf-8")) > MAX_SIM_SCENE_JSON_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Sim-Szene ist zu groß (>{MAX_SIM_SCENE_JSON_BYTES // 1024} KB).",
+        )

@@ -264,6 +264,17 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         self.calibration_manager = None
         # Workflow runtime is also lazily constructed.
         self.workflow_manager = None
+        # Roboter Studio Phase-3 simulation runtime: a parallel WorkflowManager
+        # driving a virtual arm (SimArm) + synthetic perception (SimPerception)
+        # over the sim-only /sim/joint_states topic. Lazily constructed; the
+        # placed virtual objects ride INSIDE the /workflow/start payload (a `sim`
+        # sibling key in workflow_json) — no .srv change.
+        self.sim_workflow_manager = None
+        self._sim_arm = None
+        self._sim_objects = []
+        self._sim_joint_state_publisher = None
+        self._sim_idle_timer = None
+        self._last_sim_joints = None
 
         # Initialize HF API Worker
         self.hf_api_worker: Optional[HfApiWorker] = None
@@ -629,6 +640,23 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 pass
             self.workflow_manager = None
             self.on_workflow = False
+        # Phase-3 sim runtime — discard the parallel manager + virtual arm on a
+        # robot-type switch for the same reason (new robot's IK chain / catalog).
+        if self.sim_workflow_manager is not None:
+            try:
+                self.sim_workflow_manager.stop()
+            except Exception:
+                pass
+            self.sim_workflow_manager = None
+            self._sim_arm = None
+            self.on_workflow = False
+            # LOW-3: clear the cached sim pose + scene so the idle-republish timer
+            # doesn't keep emitting the PREVIOUS robot's last pose on
+            # /sim/joint_states after a robot-type switch (the publisher/timer are
+            # reused and re-seeded on the next sim run; _sim_idle_republish
+            # returns early while _last_sim_joints is None).
+            self._last_sim_joints = None
+            self._sim_objects = []
         if self.calibration_manager is not None:
             # If a touch-off session left the follower torqued OFF, re-torque it
             # before tearing the manager down — a robot-type switch mid-touch-off
@@ -2536,6 +2564,125 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         )
         return self.workflow_manager
 
+    # ------------------------------------------------------------------
+    # Roboter Studio Phase-3 simulation runtime (virtual arm + perception)
+    # ------------------------------------------------------------------
+    _SIM_JOINT_NAMES = ['joint1', 'joint2', 'joint3', 'joint4', 'joint5',
+                        'gripper_joint_1']
+
+    def _ensure_sim_publisher(self):
+        """Lazily create the sim-only /sim/joint_states JointState publisher +
+        the idle-republish timer. Created on the ROS executor thread (from
+        workflow_start_callback) so SimArm.publish — which runs on the workflow
+        daemon thread — never races a cross-thread create_publisher. Reuses
+        sensor_msgs/msg/JointState, so NO interfaces rebuild."""
+        if self._sim_joint_state_publisher is not None:
+            return
+        try:
+            from sensor_msgs.msg import JointState
+        except ImportError:
+            self.get_logger().error('sensor_msgs not available for /sim/joint_states')
+            return
+        self._sim_joint_state_publisher = self.create_publisher(
+            JointState, '/sim/joint_states', 10,
+        )
+        if self._sim_idle_timer is None:
+            try:
+                # Low-rate republish of the last commanded pose so a freshly
+                # mounted React twin gets the current rest pose without waiting
+                # for the next motion.
+                self._sim_idle_timer = self.create_timer(0.5, self._sim_idle_republish)
+            except Exception as e:  # noqa: BLE001 — idle republish is best-effort
+                self.get_logger().warning(f'sim idle timer create failed: {e}')
+                self._sim_idle_timer = None
+
+    def _publish_sim_joint_state(self, q):
+        """Publish ONE virtual JointState(name=joint1..joint5,gripper_joint_1,
+        position=q) on /sim/joint_states and cache it for the idle republish.
+        The per-frame burst within a chunk is paced at the chunk level by
+        chunked_publish._pace (SimArm.publish never sleeps); the React twin
+        interpolates between received poses for smoothness."""
+        pub = self._sim_joint_state_publisher
+        if pub is None:
+            return
+        try:
+            from sensor_msgs.msg import JointState
+        except ImportError:
+            return
+        msg = JointState()
+        try:
+            msg.header.stamp = self.get_clock().now().to_msg()
+        except Exception:  # noqa: BLE001 — stamp is advisory
+            pass
+        positions = [float(v) for v in q]
+        msg.name = list(self._SIM_JOINT_NAMES)
+        msg.position = positions
+        pub.publish(msg)
+        self._last_sim_joints = positions
+
+    def _sim_idle_republish(self):
+        """Timer callback: republish the last commanded sim pose at a low rate
+        while no workflow is actively driving the virtual arm, so a twin that
+        mounts mid-idle still gets the rest pose. Suppressed during an active
+        run (the daemon thread is already streaming frames)."""
+        if getattr(self, 'on_workflow', False):
+            return
+        q = self._last_sim_joints
+        if q is None:
+            return
+        self._publish_sim_joint_state(q)
+
+    def _get_or_create_sim_workflow_manager(self):
+        """Mirror of _get_or_create_workflow_manager with the sim swaps:
+        publisher → SimArm.publish, perception → SimPerception, joints → SimArm,
+        scene frame → a 1x1 non-None dummy (only the None-check matters), scene
+        age → 0.0, calibration → empty dict (the critical bypass so
+        _attach_named_world preserves the preset world_xyz_m). The IK + object
+        catalog are the REAL ones, and emit_status / on_finished are reused so
+        the React editor, the on_workflow mutex, and status all behave
+        identically to a real run."""
+        if self.sim_workflow_manager is not None:
+            return self.sim_workflow_manager
+        try:
+            from physical_ai_server.workflow.workflow_manager import WorkflowManager
+            from physical_ai_server.workflow.sim_arm import SimArm
+            from physical_ai_server.workflow.sim_perception import SimPerception
+        except ImportError as e:
+            self.get_logger().error(f'Cannot import sim WorkflowManager: {e}')
+            return None
+        self._ensure_sim_publisher()
+        sim_arm = SimArm(
+            joint_state_sink=self._publish_sim_joint_state,
+            ik=self._build_ik_solver(),
+            objects=list(getattr(self, '_sim_objects', []) or []),
+        )
+        self._sim_arm = sim_arm
+        # 1x1 non-None dummy frame: perception_blocks._scene_frame only checks
+        # for None (SimPerception ignores the pixels entirely).
+        import numpy as np
+        sim_dummy_frame = np.zeros((1, 1, 3), dtype=np.uint8)
+        self.sim_workflow_manager = WorkflowManager(
+            publisher=sim_arm.publish,
+            ik_factory=self._build_ik_solver,
+            perception_factory=lambda: SimPerception(
+                list(getattr(self, '_sim_objects', []) or []),
+                self._load_object_catalog(),
+            ),
+            load_destinations=lambda: {},
+            # The critical bypass: no calibration in sim, so _attach_named_world
+            # early-returns and preserves SimPerception's preset world_xyz_m, and
+            # the workspace floor (z_table/table_plane both None) is disabled.
+            load_calibration=lambda: {},
+            emit_status=self._emit_workflow_status,
+            on_finished=self._on_workflow_finished,
+            get_scene_frame=lambda: sim_dummy_frame,
+            get_scene_frame_age=lambda: 0.0,
+            get_current_pose_xyz=lambda: sim_arm.fk_xyz(),
+            get_follower_joints=sim_arm.get_joints,
+            load_object_catalog=self._load_object_catalog,
+        )
+        return self.sim_workflow_manager
+
     def _load_object_catalog(self):
         """Load the named-object catalog (tag_id → type → grasp recipe) from the
         edubotics_calib volume. Re-read each workflow start so a catalog edit
@@ -2721,39 +2868,90 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             response.unreachable_block_ids = []
             response.unreachable_messages = []
             return response
-        # HIGH-6 — refuse a follower-only Roboter-Studio workflow while a leader
-        # arm is live (a both-arms session). Roboter Studio's trajectory writer is
-        # the SOLE intended writer on /leader/joint_trajectory; with a leader
-        # broadcaster also publishing there the two contend and the follower jumps
-        # between the two command streams. The GUI flips the arm container into
-        # follower-only (EDUBOTICS_FOLLOWER_ONLY=1) BEFORE offering Roboter Studio;
-        # this is the server-side backstop (leader env says both-arms, or leader
-        # joint-states are actively flowing). getattr-guarded so a server built
-        # without the collision monitor still starts workflows normally.
-        leader_check = getattr(self, 'leader_appears_active', None)
-        if callable(leader_check):
-            try:
-                leader_active = leader_check()
-            except Exception as e:  # noqa: BLE001 — guard must not block a normal start
-                self.get_logger().warning(f'leader_appears_active check failed: {e}')
-                leader_active = False
-            if leader_active:
-                response.success = False
-                response.message = (
-                    'Roboter Studio kann nicht starten, solange der Leader-Arm '
-                    'aktiv ist. Bitte zuerst in den Follower-Modus wechseln '
-                    '(Leader-Schalter im Roboter-Studio-Tab) und erneut starten.'
-                )
-                response.unreachable_block_ids = []
-                response.unreachable_messages = []
-                return response
-        manager = self._get_or_create_workflow_manager()
-        if manager is None:
+        # HIGH-1 — mutual exclusion across BOTH manager instances. The mode mutex
+        # above deliberately skips the on_workflow check for workflow requests
+        # (the single-manager design relied on WorkflowManager.start's own
+        # is_running guard). With a separate sim manager, a cross-kind start (a
+        # real start during a sim run, or vice versa, e.g. a second browser tab)
+        # would pass the mutex AND the target manager's is_running (a DIFFERENT
+        # instance) — running both, one driving the real follower. Refuse a start
+        # while ANY workflow (sim or real) is already live.
+        if self._active_workflow_manager() is not None:
             response.success = False
-            response.message = 'Workflow-Runtime kann nicht initialisiert werden.'
+            response.message = 'Es läuft bereits ein Workflow. Bitte zuerst stoppen.'
             response.unreachable_block_ids = []
             response.unreachable_messages = []
             return response
+        # Roboter Studio Phase-3 sim: the run flag rides a `sim` sibling key
+        # INSIDE workflow_json (Interpreter.from_json reads only data['blocks'],
+        # so the sibling is silently ignored by the interpreter). When enabled we
+        # route to the virtual-arm runtime and BYPASS the leader-contention gate
+        # below — a sim run never publishes to /leader/joint_trajectory, so a live
+        # leader can't contend with it.
+        # MED-2 — defensive parse: a crafted non-dict `sim` (string/int/list) or a
+        # non-list `objects` must fail cleanly to the real path, never crash the
+        # service callback (which would leave the response unpopulated → client
+        # hang). Only the top-level json.loads is wrapped; the field reads must be
+        # isinstance-guarded.
+        sim_cfg = None
+        try:
+            parsed = json.loads(request.workflow_json)
+            sim_cfg = parsed.get('sim') if isinstance(parsed, dict) else None
+        except (ValueError, TypeError):
+            sim_cfg = None
+        sim_enabled = isinstance(sim_cfg, dict) and bool(sim_cfg.get('enabled'))
+
+        if sim_enabled:
+            raw_objs = sim_cfg.get('objects')
+            self._sim_objects = list(raw_objs) if isinstance(raw_objs, list) else []
+            manager = self._get_or_create_sim_workflow_manager()
+            if manager is None:
+                response.success = False
+                response.message = 'Simulations-Runtime kann nicht initialisiert werden.'
+                response.unreachable_block_ids = []
+                response.unreachable_messages = []
+                return response
+            # Refresh the virtual scene on the cached SimArm so the held
+            # simulation sees the objects placed for THIS run.
+            try:
+                if self._sim_arm is not None:
+                    self._sim_arm.set_objects(self._sim_objects)
+            except Exception as e:  # noqa: BLE001 — scene refresh is best-effort
+                self.get_logger().warning(f'sim scene refresh failed: {e}')
+        else:
+            # HIGH-6 — refuse a follower-only Roboter-Studio workflow while a leader
+            # arm is live (a both-arms session). Roboter Studio's trajectory writer is
+            # the SOLE intended writer on /leader/joint_trajectory; with a leader
+            # broadcaster also publishing there the two contend and the follower jumps
+            # between the two command streams. The GUI flips the arm container into
+            # follower-only (EDUBOTICS_FOLLOWER_ONLY=1) BEFORE offering Roboter Studio;
+            # this is the server-side backstop (leader env says both-arms, or leader
+            # joint-states are actively flowing). getattr-guarded so a server built
+            # without the collision monitor still starts workflows normally.
+            leader_check = getattr(self, 'leader_appears_active', None)
+            if callable(leader_check):
+                try:
+                    leader_active = leader_check()
+                except Exception as e:  # noqa: BLE001 — guard must not block a normal start
+                    self.get_logger().warning(f'leader_appears_active check failed: {e}')
+                    leader_active = False
+                if leader_active:
+                    response.success = False
+                    response.message = (
+                        'Roboter Studio kann nicht starten, solange der Leader-Arm '
+                        'aktiv ist. Bitte zuerst in den Follower-Modus wechseln '
+                        '(Leader-Schalter im Roboter-Studio-Tab) und erneut starten.'
+                    )
+                    response.unreachable_block_ids = []
+                    response.unreachable_messages = []
+                    return response
+            manager = self._get_or_create_workflow_manager()
+            if manager is None:
+                response.success = False
+                response.message = 'Workflow-Runtime kann nicht initialisiert werden.'
+                response.unreachable_block_ids = []
+                response.unreachable_messages = []
+                return response
         success, message, unreachable = manager.start(
             request.workflow_json,
             request.workflow_id,
@@ -2795,8 +2993,22 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             pass
         self.on_workflow = False
 
+    def _active_workflow_manager(self):
+        """The currently-running workflow manager — the Phase-3 SIM manager takes
+        precedence (``on_workflow`` serialises sim vs real, so at most one runs at
+        a time). ``None`` when neither is running. The lifecycle callbacks
+        (stop/pause/step/continue) route through this so the Stop/Pause buttons
+        reach a sim run, not just a real one."""
+        sim = self.sim_workflow_manager
+        if sim is not None and sim.is_running:
+            return sim
+        real = self.workflow_manager
+        if real is not None and real.is_running:
+            return real
+        return None
+
     def workflow_stop_callback(self, request, response):
-        manager = self.workflow_manager
+        manager = self._active_workflow_manager()
         if manager is None:
             response.success = True
             response.message = 'Es läuft kein Workflow.'
@@ -2811,8 +3023,8 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
     # Phase-2 debugger plumbing — pause / step / continue / breakpoints
     # ------------------------------------------------------------------
     def workflow_pause_callback(self, request, response):
-        manager = self.workflow_manager
-        if manager is None or not manager.is_running:
+        manager = self._active_workflow_manager()
+        if manager is None:
             response.success = False
             response.message = 'Es läuft kein Workflow.'
             return response
@@ -2822,8 +3034,8 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         return response
 
     def workflow_step_callback(self, request, response):
-        manager = self.workflow_manager
-        if manager is None or not manager.is_running:
+        manager = self._active_workflow_manager()
+        if manager is None:
             response.success = False
             response.message = 'Es läuft kein Workflow.'
             return response
@@ -2833,8 +3045,8 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         return response
 
     def workflow_continue_callback(self, request, response):
-        manager = self.workflow_manager
-        if manager is None or not manager.is_running:
+        manager = self._active_workflow_manager()
+        if manager is None:
             response.success = False
             response.message = 'Es läuft kein Workflow.'
             return response
@@ -2854,7 +3066,10 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 'Zu viele Haltepunkte (max 256). Bitte einige entfernen.'
             )
             return response
-        manager = self._get_or_create_workflow_manager()
+        # Target the running manager (sim or real) so a breakpoint set during a
+        # sim run reaches the sim runtime; fall back to the real manager when
+        # nothing is running (the pre-arm-breakpoints case).
+        manager = self._active_workflow_manager() or self._get_or_create_workflow_manager()
         if manager is None:
             response.success = False
             response.message = 'Workflow-Runtime kann nicht initialisiert werden.'

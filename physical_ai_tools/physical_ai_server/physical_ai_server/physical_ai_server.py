@@ -2647,6 +2647,8 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             from physical_ai_server.workflow.workflow_manager import WorkflowManager
             from physical_ai_server.workflow.sim_arm import SimArm
             from physical_ai_server.workflow.sim_perception import SimPerception
+            import numpy as np   # E4: inside the guarded import — a missing dep
+            #                      degrades to a clean German error, not a hang.
         except ImportError as e:
             self.get_logger().error(f'Cannot import sim WorkflowManager: {e}')
             return None
@@ -2659,14 +2661,13 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         self._sim_arm = sim_arm
         # 1x1 non-None dummy frame: perception_blocks._scene_frame only checks
         # for None (SimPerception ignores the pixels entirely).
-        import numpy as np
         sim_dummy_frame = np.zeros((1, 1, 3), dtype=np.uint8)
         self.sim_workflow_manager = WorkflowManager(
             publisher=sim_arm.publish,
             ik_factory=self._build_ik_solver,
             perception_factory=lambda: SimPerception(
                 list(getattr(self, '_sim_objects', []) or []),
-                self._load_object_catalog(),
+                self._load_object_catalog_tolerant(),
             ),
             load_destinations=lambda: {},
             # The critical bypass: no calibration in sim, so _attach_named_world
@@ -2694,6 +2695,20 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         # named-object workflow finds a file instead of failing loud (best-effort).
         seed_default_catalog_if_missing()
         return load_catalog()
+
+    def _load_object_catalog_tolerant(self):
+        """Like ``_load_object_catalog`` but returns ``None`` on a corrupt /
+        unreadable catalog instead of raising (MED-2 / D6). The sim
+        ``perception_factory`` uses this so a SIM run with NO named-object blocks
+        still starts on a bad catalog — ``SimPerception`` handles a ``None``
+        catalog by skipping every object — matching the REAL path, where a bad
+        catalog only surfaces at the first named block, not at workflow start."""
+        from physical_ai_server.workflow.object_catalog import ObjectCatalogError
+        try:
+            return self._load_object_catalog()
+        except ObjectCatalogError as e:
+            self.get_logger().warning(f'Sim object catalog load failed: {e}')
+            return None
 
     def _build_ik_solver(self):
         """Return the closed-form IKSolver, built ONCE per server lifetime.
@@ -2876,7 +2891,18 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         # would pass the mutex AND the target manager's is_running (a DIFFERENT
         # instance) — running both, one driving the real follower. Refuse a start
         # while ANY workflow (sim or real) is already live.
-        if self._active_workflow_manager() is not None:
+        #
+        # ALSO gate on `on_workflow` (the teardown-race fix): `is_running` flips
+        # False at the daemon's FIRST finally line (`_stop_event.set()`), but
+        # `on_workflow` is cleared LAST (after the hat-thread joins, up to ~1 s
+        # each). In that window `_active_workflow_manager()` is None yet a workflow
+        # is still tearing down — without this a new start would slip in and the
+        # finishing daemon would then clear `on_workflow=False` mid-run, letting a
+        # concurrent recording/inference claim the arm. `on_workflow` stays True
+        # through teardown, so this closes the window without blocking a legit
+        # restart (clean finish → on_workflow already False).
+        if self._active_workflow_manager() is not None or getattr(
+                self, 'on_workflow', False):
             response.success = False
             response.message = 'Es läuft bereits ein Workflow. Bitte zuerst stoppen.'
             response.unreachable_block_ids = []
@@ -2918,6 +2944,16 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                     self._sim_arm.set_objects(self._sim_objects)
             except Exception as e:  # noqa: BLE001 — scene refresh is best-effort
                 self.get_logger().warning(f'sim scene refresh failed: {e}')
+            # B2: RunControls sends breakpoints BEFORE /workflow/start (the BP-r1
+            # contract — else early-block breakpoints are skipped); with no run
+            # active they land on the REAL manager via set_breakpoints' idle
+            # fallback. Copy them onto the sim manager so breakpoints work in sim.
+            try:
+                if self.workflow_manager is not None:
+                    manager.set_breakpoints(
+                        list(getattr(self.workflow_manager, '_breakpoints', ()) or ()))
+            except Exception as e:  # noqa: BLE001 — best-effort
+                self.get_logger().warning(f'sim breakpoint seed failed: {e}')
         else:
             # HIGH-6 — refuse a follower-only Roboter-Studio workflow while a leader
             # arm is live (a both-arms session). Roboter Studio's trajectory writer is

@@ -31,12 +31,18 @@ without a container.
 from __future__ import annotations
 
 import logging
+import math
 from typing import Any, Optional
 
 from physical_ai_server.workflow.perception import Detection
 
 
 _logger = logging.getLogger(__name__)
+
+# Defense-in-depth cap on placed sim objects (the cloud validator already bounds
+# the scene at 64 KB ≈ hundreds of entries; this bounds the one-time resolve loop
+# and the per-object skip-warning volume regardless of payload source).
+_MAX_SIM_OBJECTS = 64
 
 
 class SimPerception:
@@ -115,7 +121,11 @@ class SimPerception:
                     '[WARNUNG] Kein Objekt-Katalog geladen — alle Sim-Objekte '
                     'werden übersprungen.')
             return resolved
-        for obj in objects:
+        if len(objects) > _MAX_SIM_OBJECTS:
+            _logger.warning(
+                '[WARNUNG] %d Sim-Objekte platziert — nur die ersten %d werden '
+                'verwendet.', len(objects), _MAX_SIM_OBJECTS)
+        for obj in objects[:_MAX_SIM_OBJECTS]:
             if not isinstance(obj, dict):
                 continue
             type_name = obj.get('type')
@@ -148,6 +158,14 @@ class SimPerception:
             except (TypeError, ValueError):
                 _logger.warning(
                     '[WARNUNG] Sim-Objekt „%s" hat ungültige Koordinaten — '
+                    'wird übersprungen.', type_name)
+                continue
+            # HIGH-1: /workflow/start is an untrusted boundary and json.loads
+            # accepts the literal NaN — reject non-finite coords here so a NaN
+            # never reaches the IK / the published trajectory.
+            if not (math.isfinite(x) and math.isfinite(y) and math.isfinite(yaw)):
+                _logger.warning(
+                    '[WARNUNG] Sim-Objekt „%s" hat nicht-endliche Koordinaten — '
                     'wird übersprungen.', type_name)
                 continue
             used_per_type[type_name] = idx + 1

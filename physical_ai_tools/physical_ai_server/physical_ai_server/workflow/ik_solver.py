@@ -294,6 +294,14 @@ class IKSolver:
             theta4 = _VERTICAL_PITCH_SUM - (theta2 + theta3)
             theta5 = roll
             joints = [theta1, theta2, theta3, theta4, _wrap(theta5)]
+            # HIGH-1: reject a NON-FINITE solution (a NaN target or NaN roll
+            # yields NaN joints). Without this the FK-tolerance check below fails
+            # OPEN — `NaN > tol` is False, so `solve` would return all-NaN joints
+            # instead of None ("unreachable"), and the NaN would be commanded
+            # downstream (to /sim/joint_states, or the real follower if an
+            # upstream world coordinate ever went non-finite).
+            if not all(math.isfinite(v) for v in joints):
+                continue
             if not self._within_limits(joints):
                 continue
             # Verify with exact FK (catches any derivation/sign error and the
@@ -301,7 +309,8 @@ class IKSolver:
             fk_pos = self._fk_position(joints)
             if fk_pos is None:
                 continue
-            if float(np.linalg.norm(fk_pos - np.array([x, y, z]))) > _FK_TOL_M:
+            norm = float(np.linalg.norm(fk_pos - np.array([x, y, z])))
+            if not math.isfinite(norm) or norm > _FK_TOL_M:
                 continue
             return [float(v) for v in joints]
         return None

@@ -205,3 +205,26 @@ def test_urdf_constants_verify_clean_on_matching_urdf(caplog):
     with caplog.at_level(logging.ERROR):
         IKSolver(urdf_string=urdf)
     assert not [r for r in caplog.records if 'IK constant mismatch' in r.message]
+
+
+# ── #HIGH-1: the solver must REFUSE non-finite targets/roll (was fail-open) ────
+
+def test_solve_rejects_nonfinite_target():
+    ik = _ik()
+    for bad in [(float('nan'), 0.0, 0.02), (float('inf'), 0.0, 0.02),
+                (0.20, float('nan'), 0.02), (0.20, 0.0, float('nan')),
+                (0.20, 0.0, float('inf'))]:
+        assert ik.solve(bad) is None, f'solve({bad}) should be None, not garbage'
+        assert ik.in_workspace(bad) is False
+
+
+def test_solve_rejects_nonfinite_roll():
+    ik = _ik()
+    assert ik.solve((0.20, 0.0, 0.02), roll=float('nan')) is None
+    assert ik.solve((0.20, 0.0, 0.02), roll=float('inf')) is None
+
+
+def test_solve_still_returns_finite_for_reachable_target():
+    sol = _ik().solve((0.20, 0.0, 0.02))
+    assert sol is not None
+    assert all(math.isfinite(v) for v in sol)

@@ -29,6 +29,10 @@ MAX_NAME_LENGTH = 100
 # generous (hundreds of objects) while still bounding a malicious payload
 # before it reaches Postgres.
 MAX_SIM_SCENE_JSON_BYTES = 64 * 1024
+# Defense-in-depth object-count cap (parity with the server-side _MAX_SIM_OBJECTS):
+# a ≤64 KB scene could still carry hundreds of entries; bound the count so a junk
+# scene never reaches Postgres / the ROS sim resolve loop.
+MAX_SIM_SCENE_OBJECTS = 64
 
 
 def validate_blockly_json(payload: dict) -> None:
@@ -88,4 +92,14 @@ def validate_sim_scene(scene: dict) -> None:
         raise HTTPException(
             status_code=413,
             detail=f"Sim-Szene ist zu groß (>{MAX_SIM_SCENE_JSON_BYTES // 1024} KB).",
+        )
+    objects = scene.get("objects")
+    if objects is not None and not isinstance(objects, list):
+        raise HTTPException(
+            status_code=400, detail="Sim-Szene „objects“ muss eine Liste sein."
+        )
+    if isinstance(objects, list) and len(objects) > MAX_SIM_SCENE_OBJECTS:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Zu viele Objekte in der Sim-Szene (höchstens {MAX_SIM_SCENE_OBJECTS}).",
         )

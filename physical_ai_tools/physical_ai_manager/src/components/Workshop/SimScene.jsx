@@ -78,8 +78,11 @@ const GRIPPER_OPEN_RAD = 0.5;
 const CAPTURE_RADIUS_M = 0.06;
 
 // Fallback palette when the catalog service returns nothing (an uncalibrated rig
-// may have no object_catalog.json yet) — keeps the simulator usable.
-const DEFAULT_CATALOG = [['Würfel', 'wuerfel']];
+// may have no object_catalog.json yet) — keeps the simulator usable. The key
+// MUST match the server's seeded catalog type (`beispiel`, object_catalog.py),
+// else the server's recipe_for_type() raises and silently drops every placed
+// object (the run then "finds nothing" with no explanation).
+const DEFAULT_CATALOG = [['Beispiel-Objekt', 'beispiel']];
 
 // base (x,y) → SVG pixels. +x (forward) points UP, +y (left) points LEFT.
 function baseToSvg(x, y) {
@@ -165,7 +168,11 @@ function SimScene({ scene, onChange, catalog }) {
     return svgToBase(px, py);
   }, []);
 
-  // Click empty table area → place the selected type (clamped into the annulus).
+  // Pointer-DOWN on the empty table → place the selected type (clamped into the
+  // annulus). Bound to pointerdown, NOT click: an object's <g> stops its own
+  // pointerdown from bubbling here, so pressing an existing object selects/drags
+  // it and never reaches this handler — fixes the duplicate-on-select bug where
+  // pointerup cleared draggingIdRef before the synthesized click ran (#B1).
   const handlePlace = useCallback(
     (e) => {
       if (draggingIdRef.current !== null) return;
@@ -318,7 +325,7 @@ function SimScene({ scene, onChange, catalog }) {
           ref={svgRef}
           viewBox={`0 0 ${SVG_W} ${SVG_H}`}
           className="w-full h-auto rounded-md bg-[var(--bg-sunk)] touch-none cursor-crosshair"
-          onClick={handlePlace}
+          onPointerDown={handlePlace}
           onPointerMove={handlePointerMove}
           onPointerUp={handlePointerUp}
           onPointerLeave={handlePointerUp}

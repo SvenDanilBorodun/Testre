@@ -383,6 +383,19 @@ class TestValidateSimScene(unittest.TestCase):
             validate_sim_scene(big)
         self.assertEqual(cm.exception.status_code, 413)
 
+    def test_too_many_objects_rejected(self):
+        # Small payload (well under the byte cap) but too many entries → 413.
+        many = {"objects": [{"type": "wuerfel", "x": 0.2, "y": 0.0, "yaw": 0.0}
+                            for _ in range(65)]}
+        with self.assertRaises(HTTPException) as cm:
+            validate_sim_scene(many)
+        self.assertEqual(cm.exception.status_code, 413)
+
+    def test_non_list_objects_rejected(self):
+        with self.assertRaises(HTTPException) as cm:
+            validate_sim_scene({"objects": "nope"})
+        self.assertEqual(cm.exception.status_code, 400)
+
 
 class TestSchemaProbeListsColumn(unittest.TestCase):
     def test_main_required_columns_includes_sim_scene(self):

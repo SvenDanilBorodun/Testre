@@ -46,7 +46,9 @@ import {
 
 // Phase-3 simulator fallback palette: an uncalibrated rig may have no
 // object_catalog.json yet, so seed at least one type so the sim editor is usable.
-const SIM_DEFAULT_CATALOG = [['Würfel', 'wuerfel']];
+// The key MUST match the server's seeded catalog type (`beispiel`,
+// object_catalog.py) — else the server drops every placed object silently.
+const SIM_DEFAULT_CATALOG = [['Beispiel-Objekt', 'beispiel']];
 const EMPTY_SIM_SCENE = { version: 1, objects: [] };
 
 function WorkshopPage({ isActive }) {
@@ -89,6 +91,11 @@ function WorkshopPage({ isActive }) {
   // swaps the live scene camera for the SimScene editor + virtual-arm preview.
   const [simMode, setSimMode] = useState(false);
   const [simScene, setSimScene] = useState(EMPTY_SIM_SCENE);
+  // #B2: leaving simMode while a sim run is active would unmount RunControls (and
+  // its Stop button) on an uncalibrated rig, stranding the run. Lock the toggle
+  // while a sim run is in flight (mirrors LeaderToggle's run-guard).
+  const runState = useSelector((s) => s.workshop.runState);
+  const simRunActive = simMode && runState === 'running';
   // [label_de, type_name] pairs from GetObjectCatalog, threaded to SimScene's
   // object palette (the same source the Blockly dropdowns use).
   const [objectCatalog, setObjectCatalog] = useState([]);
@@ -366,11 +373,15 @@ function WorkshopPage({ isActive }) {
                 arm; only logic, order and reachability are validated. */}
             <button
               type="button"
-              onClick={() => setSimMode((v) => !v)}
+              onClick={() => { if (!simRunActive) setSimMode((v) => !v); }}
               aria-pressed={simMode}
-              title="Programm auf einem virtuellen Roboter testen — ohne echten Roboter und ohne Kalibrierung"
+              disabled={simRunActive}
+              title={simRunActive
+                ? 'Während ein Simulationslauf läuft, kann der Simulator nicht beendet werden — bitte zuerst stoppen.'
+                : 'Programm auf einem virtuellen Roboter testen — ohne echten Roboter und ohne Kalibrierung'}
               className={
-                'text-xs px-3 py-1.5 rounded-md border '
+                'text-xs px-3 py-1.5 rounded-md border disabled:opacity-50 '
+                + 'disabled:cursor-not-allowed '
                 + (simMode
                   ? 'bg-[var(--accent)] text-white border-[var(--accent)]'
                   : 'bg-white text-[var(--ink-3)] border-[var(--line)] hover:bg-[var(--bg-sunk)]')

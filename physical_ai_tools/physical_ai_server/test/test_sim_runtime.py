@@ -422,3 +422,25 @@ def test_sim_pickup_on_destination_pin_reaches_grasp():
         'pickup never reached the grasp pose'
     # Object held at the end of a canned pickup (full close).
     assert captured[-1][5] == pytest.approx(GRIPPER_CLOSED_RAD)
+
+
+def test_sim_perception_skips_nonfinite_coords():
+    # #HIGH-1: /workflow/start is untrusted and json accepts NaN — a non-finite
+    # coordinate must be dropped, never reach the IK / the published trajectory.
+    perc = SimPerception(
+        [{'type': 'wuerfel', 'x': float('nan'), 'y': 0.0, 'yaw': 0.0}],
+        SIM_CATALOG,
+    )
+    assert perc.detect(None, 'scene', 'apriltag') == []
+
+
+def test_sim_perception_caps_object_count():
+    from physical_ai_server.workflow.sim_perception import _MAX_SIM_OBJECTS
+    # wuerfel has 2 tag ids, so at most 2 resolve regardless — but the cap bounds
+    # the resolve loop itself; place many and confirm it stays bounded + the
+    # per-type tag limit still applies.
+    objs = [{'type': 'wuerfel', 'x': 0.2, 'y': 0.0, 'yaw': 0.0}
+            for _ in range(_MAX_SIM_OBJECTS + 50)]
+    perc = SimPerception(objs, SIM_CATALOG)
+    dets = perc.detect(None, 'scene', 'apriltag')
+    assert sorted(d.aruco_id for d in dets) == [7, 8]

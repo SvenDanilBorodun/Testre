@@ -38,6 +38,11 @@
 //                    end-effector world position in BASE (ROS) frame + the
 //                    gripper angle, so SimScene can run the grasp-attach geometry
 //                    outside this thin renderer. Default null → never invoked.
+//   * zones        — Phase-4 no-go ("Sperrzone") keep-out boxes
+//                    [{min:[x,y,z], max:[x,y,z]}] (base-frame metres) rendered as
+//                    translucent-red boxes + red wireframes. Empty (the default)
+//                    → the zone effect early-returns and builds ZERO meshes, so
+//                    RecordPage's `<UrdfTwin/>` is byte-for-byte unchanged.
 
 import React, { useEffect, useRef, useState } from 'react';
 import { useSelector } from 'react-redux';
@@ -85,6 +90,11 @@ const SIM_OBJECT_COLOR = 0xf59e0b;
 const SIM_OBJECT_HELD_COLOR = 0x22c55e;
 const SIM_TABLE_SIZE_M = 0.7;
 const SIM_TABLE_COLOR = 0x2a2e34;
+// Phase-4 no-go ("Sperrzone") box rendering: a translucent red volume + a
+// brighter red wireframe, distinct from the amber sim objects.
+const ZONE_COLOR = 0xef4444;
+const ZONE_EDGE_COLOR = 0xf87171;
+const ZONE_OPACITY = 0.22;
 // The URDF link the gripper closes around — the verified grasp frame (a fixed
 // child of link5 via the URDF `end_effector_joint`). A held mesh is re-parented
 // here so it follows the gripper exactly.
@@ -96,6 +106,7 @@ export default function UrdfTwin({
   showTable = false,
   heldObjectId = null,
   onEndEffector = null,
+  zones = [],
 }) {
   const rosbridgeUrl = useSelector((state) => state.ros.rosbridgeUrl);
 
@@ -121,6 +132,8 @@ export default function UrdfTwin({
   const objectMeshMapRef = useRef(new Map()); // tag_id -> THREE.Mesh
   const tableMeshRef = useRef(null);
   const prevHeldIdRef = useRef(null);
+  // Phase-4 no-go zone layer (stays null/unused for the default zones=[] call).
+  const zonesGroupRef = useRef(null);
   // Latest onEndEffector callback, read by the (stable) subscription closure.
   const onEndEffectorRef = useRef(onEndEffector);
   useEffect(() => {
@@ -267,6 +280,7 @@ export default function UrdfTwin({
       objectMeshMap.clear();
       tableMeshRef.current = null;
       prevHeldIdRef.current = null;
+      zonesGroupRef.current = null;
     };
   }, []);
 
@@ -385,6 +399,43 @@ export default function UrdfTwin({
     }
     prevHeldIdRef.current = heldObjectId;
   }, [heldObjectId]);
+
+  // ---- Phase-4: no-go zone layer (rebuilt on change) ------------------------
+  // Mirrors the objects-diff effect, but zones have no stable id (keyed by index
+  // in the editor), so a full rebuild on every change is simpler than a diff and
+  // cheap (zones ≤ 16). For the default zones=[] call this returns BEFORE
+  // constructing any THREE primitive — RecordPage's `<UrdfTwin/>` pays nothing and
+  // the jsdom three mock (which lacks Group/BoxGeometry/EdgesGeometry/LineSegments)
+  // is never exercised.
+  useEffect(() => {
+    const scene = sceneRef.current;
+    if (!scene) return;
+    const list = Array.isArray(zones) ? zones : [];
+    if (list.length === 0 && !zonesGroupRef.current) return;
+
+    let group = zonesGroupRef.current;
+    if (!group) {
+      group = new THREE.Group();
+      scene.add(group);
+      zonesGroupRef.current = group;
+    }
+
+    // Dispose + remove every existing zone child, then build fresh. Each child is
+    // a flat mesh or LineSegments, so a one-level disposeObject per child frees
+    // its geometry + material.
+    for (let i = group.children.length - 1; i >= 0; i -= 1) {
+      const child = group.children[i];
+      group.remove(child);
+      disposeObject(child);
+    }
+
+    list.forEach((z) => {
+      const built = buildZoneObjects(z);
+      if (built) built.forEach((obj) => group.add(obj));
+    });
+
+    requestRenderRef.current();
+  }, [zones]);
 
   // ---- rosbridge joint-state subscription (ImageGridCell idiom) ----
   // `jointTopic` defaults to the bare global /joint_states (RecordPage); SimScene
@@ -514,6 +565,52 @@ function positionSimObject(mesh, o) {
   const yaw = typeof o.yaw === 'number' ? o.yaw : 0;
   mesh.position.set(x, half, -y);
   mesh.rotation.set(0, yaw, 0);
+}
+
+// Build a translucent-red box + a red wireframe for one no-go ("Sperrzone") box.
+// Base (ROS) frame → viewer frame: the robot is added with rotation.x = -π/2
+// (URDF +Z up → viewer +Y up), and the zone layer mirrors that mapping, so base
+// (x, y, z) → viewer (x, z, -y). For a box [x0,y0,z0]..[x1,y1,z1] the viewer
+// center is ((x0+x1)/2, (z0+z1)/2, -(y0+y1)/2) and the size is (x1-x0, z1-z0,
+// y1-y0). Returns [boxMesh, edges] or null for a malformed/degenerate zone (the
+// server treats ctx.zones defensively too).
+function buildZoneObjects(z) {
+  if (!z || !Array.isArray(z.min) || !Array.isArray(z.max)) return null;
+  const [x0, y0, z0] = z.min;
+  const [x1, y1, z1] = z.max;
+  const finite = [x0, y0, z0, x1, y1, z1].every(
+    (v) => typeof v === 'number' && Number.isFinite(v),
+  );
+  if (!finite) return null;
+  const sx = Math.abs(x1 - x0);
+  const sy = Math.abs(z1 - z0); // viewer +Y is the zone HEIGHT (base +Z)
+  const sz = Math.abs(y1 - y0);
+  if (sx <= 0 || sy <= 0 || sz <= 0) return null;
+
+  const cx = (x0 + x1) / 2;
+  const cy = (z0 + z1) / 2;
+  const cz = -(y0 + y1) / 2;
+
+  const geo = new THREE.BoxGeometry(sx, sy, sz);
+  const mat = new THREE.MeshStandardMaterial({
+    color: ZONE_COLOR,
+    transparent: true,
+    opacity: ZONE_OPACITY,
+    metalness: 0.0,
+    roughness: 0.9,
+    depthWrite: false,
+  });
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.position.set(cx, cy, cz);
+
+  // EdgesGeometry derives its own geometry from the box; both the box geo (via
+  // the mesh) and the edges geo (via the LineSegments) are disposed on rebuild.
+  const edgesGeo = new THREE.EdgesGeometry(geo);
+  const edgesMat = new THREE.LineBasicMaterial({ color: ZONE_EDGE_COLOR });
+  const edges = new THREE.LineSegments(edgesGeo, edgesMat);
+  edges.position.set(cx, cy, cz);
+
+  return [mesh, edges];
 }
 
 // On release, the mesh is re-attached to the scene with its carried world

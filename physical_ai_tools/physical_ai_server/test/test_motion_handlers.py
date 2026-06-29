@@ -24,6 +24,7 @@ import types
 
 import pytest
 
+from physical_ai_server.workflow import path_guard
 from physical_ai_server.workflow import trajectory_builder
 from physical_ai_server.workflow.handlers import motion
 from physical_ai_server.workflow.handlers.motion import (
@@ -333,3 +334,179 @@ def test_split_block_unknown_orientation_raises_graspskip():
     ctx = _ctx()
     with pytest.raises(GraspSkip):
         move_above(ctx, {'ziel': _greifziel(tag_yaw=None)})
+
+
+# ── no-go zones (Phase 4): safe_move routing / descend exemption ──────────────
+# safe_move is the TRANSIT wrapper; it reroutes around no-go zones and is a
+# no-op (raw _publish_motion) when ctx has no zones (backward-safe — covered by
+# every test above, none of which set ctx.zones).
+
+def test_safe_move_no_zones_is_direct(monkeypatch):
+    # Zone-less ctx → exactly ONE _publish_motion (raw direct), like today.
+    calls = []
+    orig = motion._publish_motion
+    monkeypatch.setattr(motion, '_publish_motion',
+                        lambda c, a, b, d: (calls.append((a, b, d)), orig(c, a, b, d))[1])
+    ctx = _ctx()  # no .zones attribute
+    qs = ctx.last_full_joints
+    qe = list(ctx.ik.solve((0.20, 0.0, 0.05), roll=GRASP_ROLL_RAD)) + [qs[5]]
+    motion.safe_move(ctx, qs, qe, motion.DEFAULT_MOVE_DURATION_S)
+    assert len(calls) == 1
+    assert calls[0][1] == pytest.approx(qe)
+
+
+def test_safe_move_direct_when_zone_clear(monkeypatch):
+    calls = []
+    orig = motion._publish_motion
+    monkeypatch.setattr(motion, '_publish_motion',
+                        lambda c, a, b, d: (calls.append((a, b, d)), orig(c, a, b, d))[1])
+    ctx = _ctx()
+    ctx.zones = [{'min': [-0.05, 0.30, 0.0], 'max': [0.05, 0.40, 0.10]}]  # off-path
+    qs = ctx.last_full_joints
+    qe = list(ctx.ik.solve((0.20, 0.0, 0.05), roll=GRASP_ROLL_RAD)) + [qs[5]]
+    motion.safe_move(ctx, qs, qe, motion.DEFAULT_MOVE_DURATION_S)
+    assert len(calls) == 1                      # direct — the zone is nowhere near
+
+
+def test_safe_move_reroutes_blocked_transit(monkeypatch):
+    calls = []
+    orig = motion._publish_motion
+    monkeypatch.setattr(motion, '_publish_motion',
+                        lambda c, a, b, d: (calls.append((a, b, d)), orig(c, a, b, d))[1])
+    ctx = _ctx()
+    # a low wall straddling the straight lateral move from -y to +y
+    ctx.zones = [{'min': [0.06, -0.03, 0.0], 'max': [0.22, 0.03, 0.05]}]
+    qs = list(ctx.ik.solve((0.14, -0.12, 0.03), roll=GRASP_ROLL_RAD)) + [GRIPPER_OPEN_RAD]
+    qe = list(ctx.ik.solve((0.14, 0.12, 0.03), roll=GRASP_ROLL_RAD)) + [GRIPPER_OPEN_RAD]
+    ctx.last_full_joints = qs
+    motion.safe_move(ctx, qs, qe, motion.DEFAULT_MOVE_DURATION_S)
+    assert len(calls) >= 2                      # rerouted into multiple legs
+    # the final commanded pose is exactly the requested destination
+    assert calls[-1][1] == pytest.approx(qe)
+    # a German reroute notice was logged
+    assert any('Sperrzone' in m for m in ctx.logs)
+
+
+def test_safe_move_refuses_when_no_route():
+    ctx = _ctx()
+    # a giant tall box over the whole workspace → no safe route
+    ctx.zones = [{'min': [-0.5, -0.5, 0.0], 'max': [0.5, 0.5, 0.5]}]
+    qs = list(ctx.ik.solve((0.14, -0.12, 0.03), roll=GRASP_ROLL_RAD)) + [GRIPPER_OPEN_RAD]
+    qe = list(ctx.ik.solve((0.14, 0.12, 0.03), roll=GRASP_ROLL_RAD)) + [GRIPPER_OPEN_RAD]
+    ctx.last_full_joints = qs
+    with pytest.raises(WorkflowError) as exc:
+        motion.safe_move(ctx, qs, qe, motion.DEFAULT_MOVE_DURATION_S)
+    assert 'Sperrzone' in str(exc.value)
+
+
+def test_descend_to_is_exempt_from_zone_check(monkeypatch):
+    # descend_to uses RAW _publish_motion — the grasp corridor is NEVER
+    # zone-checked, even when the target sits inside a zone. It must publish
+    # one segment and never reroute/refuse.
+    calls = []
+    orig = motion._publish_motion
+    monkeypatch.setattr(motion, '_publish_motion',
+                        lambda c, a, b, d: (calls.append((a, b, d)), orig(c, a, b, d))[1])
+    ctx = _ctx()
+    # a zone sitting right on top of the grasp point
+    ctx.zones = [{'min': [0.10, -0.10, 0.0], 'max': [0.30, 0.10, 0.10]}]
+    descend_to(ctx, {'ziel': _greifziel(xyz=(0.20, 0.0, 0.03), tag_yaw=0.0)})
+    assert len(calls) == 1                      # one raw descend, no reroute
+    assert not any('Sperrzone' in m for m in ctx.logs)
+
+
+def test_pickup_descend_exempt_but_approach_reroutes(monkeypatch):
+    # In a full pickup, the APPROACH/lift-out transit reroutes around a zone
+    # while the descend/grasp corridor stays raw → the pickup still completes
+    # (gripper ends CLOSED) instead of refusing because a zone hugs the object.
+    ctx = _ctx()
+    ctx.zones = [{'min': [0.06, -0.03, 0.0], 'max': [0.22, 0.03, 0.05]}]
+    # object on the +y side; the arm starts on the -y side (so the approach
+    # transit crosses the wall) but the descend onto the object is exempt.
+    ctx.last_full_joints = list(ctx.ik.solve((0.14, -0.12, 0.06),
+                                             roll=GRASP_ROLL_RAD)) + [GRIPPER_OPEN_RAD]
+    pickup(ctx, {'target': (0.14, 0.12, 0.0)})
+    assert ctx.last_commanded_joints[5] == pytest.approx(GRIPPER_CLOSED_RAD)
+
+
+# ── FIX 1: home / observation-retreat are zone-routed whole-arm transits ──────
+# home + go_to_observation_pose now go through safe_move (like move_to / lift),
+# so a no-go zone on the path is rerouted instead of swept straight through. With
+# no zones safe_move is a pass-through → exactly one direct publish (no
+# regression). A blocking zone derived from the actual transit path proves the
+# reroute fires.
+
+def _wrap_publish(monkeypatch):
+    """Wrap motion._publish_motion to record every (start, end, dur) leg while
+    still executing the real publish, returning the call log."""
+    calls = []
+    orig = motion._publish_motion
+    monkeypatch.setattr(
+        motion, '_publish_motion',
+        lambda c, a, b, d: (calls.append((a, b, d)), orig(c, a, b, d))[1])
+    return calls
+
+
+def test_home_no_zones_single_direct_publish(monkeypatch):
+    # No zones → safe_move is a pass-through → exactly one _publish_motion call.
+    calls = _wrap_publish(monkeypatch)
+    ctx = _ctx()  # no .zones attribute
+    # Start at a real forward pose (not HOME) so home actually moves the arm.
+    ctx.last_full_joints = list(
+        ctx.ik.solve((0.20, 0.0, 0.05), roll=GRASP_ROLL_RAD)) + [GRIPPER_OPEN_RAD]
+    motion.home(ctx, {})
+    assert len(calls) == 1                       # direct, no reroute
+    assert calls[-1][1][:5] == pytest.approx(list(HOME_JOINTS_RAD))
+    assert ctx.last_arm_joints == pytest.approx(list(HOME_JOINTS_RAD))
+
+
+# A start pose + low no-go wall (base-frame metres) whose DIRECT joint-space
+# transit to HOME sweeps the wall (via a lower link), but the arm can route
+# around it — verified reachable + reroutable against the real IKSolver. HOME's
+# EE sits high + central, so a transit-blocking wall that is also reroutable is
+# geometrically narrow; this pair is fixed rather than derived so the test is
+# deterministic.
+_REROUTE_START_XYZ = (0.22, -0.14, 0.03)
+_REROUTE_WALL = [{'min': [0.10, -0.05, 0.0], 'max': [0.24, 0.01, 0.06]}]
+
+
+def test_home_reroutes_around_blocking_zone(monkeypatch):
+    calls = _wrap_publish(monkeypatch)
+    ctx = _ctx()
+    qs = list(ctx.ik.solve(_REROUTE_START_XYZ,
+                           roll=GRASP_ROLL_RAD)) + [GRIPPER_OPEN_RAD]
+    ctx.last_full_joints = qs
+    ctx.zones = _REROUTE_WALL
+    home_full = list(HOME_JOINTS_RAD) + [GRIPPER_OPEN_RAD]
+    # Precondition: the DIRECT transit to HOME is blocked by the wall.
+    assert path_guard.segment_blocked(
+        ctx.ik, qs, home_full, _REROUTE_WALL, path_guard.ZONE_MARGIN_M) is True
+    motion.home(ctx, {})
+    assert len(calls) >= 2                       # a reroute happened (>1 leg)
+    # No published leg sweeps the zone.
+    for a, b, _d in calls:
+        assert path_guard.segment_blocked(
+            ctx.ik, a, b, _REROUTE_WALL, path_guard.ZONE_MARGIN_M) is False
+    # The final commanded pose is exactly HOME (gripper carried).
+    assert calls[-1][1] == pytest.approx(home_full)
+    assert ctx.last_arm_joints == pytest.approx(list(HOME_JOINTS_RAD))
+
+
+def test_go_to_observation_pose_reroutes_around_blocking_zone(monkeypatch):
+    # The named-object loop's retreat is the same whole-arm transit and is now
+    # zone-routed too (OBSERVE_POSE defaults to HOME).
+    calls = _wrap_publish(monkeypatch)
+    ctx = _ctx()
+    qs = list(ctx.ik.solve(_REROUTE_START_XYZ,
+                           roll=GRASP_ROLL_RAD)) + [GRIPPER_OPEN_RAD]
+    ctx.last_full_joints = qs
+    ctx.zones = _REROUTE_WALL
+    observe_full = list(motion.OBSERVE_POSE_JOINTS) + [GRIPPER_OPEN_RAD]
+    assert path_guard.segment_blocked(
+        ctx.ik, qs, observe_full, _REROUTE_WALL, path_guard.ZONE_MARGIN_M) is True
+    motion.go_to_observation_pose(ctx)
+    assert len(calls) >= 2                       # rerouted
+    for a, b, _d in calls:
+        assert path_guard.segment_blocked(
+            ctx.ik, a, b, _REROUTE_WALL, path_guard.ZONE_MARGIN_M) is False
+    assert calls[-1][1] == pytest.approx(observe_full)

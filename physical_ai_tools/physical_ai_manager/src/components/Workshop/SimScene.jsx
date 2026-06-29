@@ -77,6 +77,18 @@ const GRIPPER_CLOSED_RAD = 0.2;
 const GRIPPER_OPEN_RAD = 0.5;
 const CAPTURE_RADIUS_M = 0.06;
 
+// No-go ("Sperrzone") keep-out boxes (Phase-4). The editor draws an axis-aligned
+// table rectangle and assigns a base-frame height band z0..z1 (metres). Rendered
+// red (distinct from the amber objects). A drag with < MIN_ZONE_M extent on
+// either axis is ignored (no accidental zero-size zone). Zone corners are NOT
+// clamped to the reach annulus — a keep-out box need not be reachable.
+const ZONE_Z0_DEFAULT = 0;
+const ZONE_Z1_DEFAULT = 0.12;
+const MIN_ZONE_M = 0.01;
+const ZONE_FILL = 'rgba(239,68,68,0.15)';
+const ZONE_DRAFT_FILL = 'rgba(239,68,68,0.12)';
+const ZONE_STROKE = '#ef4444';
+
 // Fallback palette when the catalog service returns nothing (an uncalibrated rig
 // may have no object_catalog.json yet) — keeps the simulator usable. The key
 // MUST match the server's seeded catalog type (`beispiel`, object_catalog.py),
@@ -109,6 +121,11 @@ function clampToAnnulus(x, y) {
   const k = rr / r;
   return { x: x * k, y: y * k };
 }
+// Clamp a scalar into [lo, hi]. Zone corners are clamped into the VIEW window
+// (not the reach annulus) so a drawn rectangle stays on the visible table.
+function clampRange(v, lo, hi) {
+  return Math.min(hi, Math.max(lo, v));
+}
 function round3(v) {
   return Math.round(v * 1000) / 1000;
 }
@@ -118,14 +135,25 @@ function SimScene({ scene, onChange, catalog }) {
     () => (scene && Array.isArray(scene.objects) ? scene.objects : []),
     [scene],
   );
+  const zones = useMemo(
+    () => (scene && Array.isArray(scene.zones) ? scene.zones : []),
+    [scene],
+  );
   const cat = Array.isArray(catalog) && catalog.length ? catalog : DEFAULT_CATALOG;
 
   const [selectedType, setSelectedType] = useState(cat[0][1]);
   const [selectedId, setSelectedId] = useState(null);
   const [heldObjectId, setHeldObjectId] = useState(null);
+  // Editor mode: place objects, or draw a no-go Sperrzone rectangle.
+  const [mode, setMode] = useState('object'); // 'object' | 'zone'
+  // Live drag-rectangle while drawing a zone, in base coords {x0,y0,x1,y1}.
+  const [zoneDraft, setZoneDraft] = useState(null);
 
   const svgRef = useRef(null);
   const draggingIdRef = useRef(null);
+  // Start corner of the in-progress zone draw (base coords) — a ref so the move
+  // handler doesn't need to re-bind on every pointermove.
+  const zoneStartRef = useRef(null);
   // Grasp state machine + latest pose, read by the (stable) onEndEffector cb.
   const graspRef = useRef({ closed: false });
   const heldRef = useRef(null);
@@ -148,13 +176,16 @@ function SimScene({ scene, onChange, catalog }) {
     }
   }, [objects, heldObjectId]);
 
+  // Emit a MERGED scene: keep the current objects + zones and apply only the
+  // given patch (`{objects}` or `{zones}`). Merging is required so an object edit
+  // never clobbers the zones and vice-versa (Phase-4).
   const emit = useCallback(
-    (nextObjects) => {
+    (patch) => {
       if (typeof onChange === 'function') {
-        onChange({ version: 1, objects: nextObjects });
+        onChange({ version: 1, objects, zones, ...patch });
       }
     },
-    [onChange],
+    [onChange, objects, zones],
   );
 
   // Pointer → base coords inside the SVG (handles CSS scaling).
@@ -175,6 +206,8 @@ function SimScene({ scene, onChange, catalog }) {
   // pointerup cleared draggingIdRef before the synthesized click ran (#B1).
   const handlePlace = useCallback(
     (e) => {
+      // Object-placement is gated to object mode (zone mode draws a rectangle).
+      if (mode !== 'object') return;
       if (draggingIdRef.current !== null) return;
       const base = eventToBase(e);
       if (!base) return;
@@ -186,20 +219,23 @@ function SimScene({ scene, onChange, catalog }) {
         ...objects,
         { type: selectedType, tag_id: nextTag, x: round3(x), y: round3(y), yaw: 0 },
       ];
-      emit(next);
+      emit({ objects: next });
       setSelectedId(nextTag);
     },
-    [eventToBase, objects, selectedType, emit],
+    [mode, eventToBase, objects, selectedType, emit],
   );
 
   const startDrag = useCallback((e, id) => {
+    // In zone mode let the pointerdown bubble to the SVG so a zone can be drawn
+    // starting from on top of an object (don't grab/move the object).
+    if (mode !== 'object') return;
     e.stopPropagation();
     draggingIdRef.current = id;
     setSelectedId(id);
     if (svgRef.current && typeof svgRef.current.setPointerCapture === 'function') {
       try { svgRef.current.setPointerCapture(e.pointerId); } catch (_) { /* ignore */ }
     }
-  }, []);
+  }, [mode]);
 
   const handlePointerMove = useCallback(
     (e) => {
@@ -208,11 +244,11 @@ function SimScene({ scene, onChange, catalog }) {
       const base = eventToBase(e);
       if (!base) return;
       const { x, y } = clampToAnnulus(base.x, base.y);
-      emit(
-        objects.map((o) =>
+      emit({
+        objects: objects.map((o) =>
           o.tag_id === id ? { ...o, x: round3(x), y: round3(y) } : o,
         ),
-      );
+      });
     },
     [eventToBase, objects, emit],
   );
@@ -225,26 +261,122 @@ function SimScene({ scene, onChange, catalog }) {
     (deg) => {
       if (selectedId === null) return;
       const yaw = (deg * Math.PI) / 180;
-      emit(
-        objects.map((o) =>
+      emit({
+        objects: objects.map((o) =>
           o.tag_id === selectedId ? { ...o, yaw: round3(yaw) } : o,
         ),
-      );
+      });
     },
     [selectedId, objects, emit],
   );
 
   const handleDelete = useCallback(() => {
     if (selectedId === null) return;
-    emit(objects.filter((o) => o.tag_id !== selectedId));
+    emit({ objects: objects.filter((o) => o.tag_id !== selectedId) });
     setSelectedId(null);
   }, [selectedId, objects, emit]);
 
   const handleClear = useCallback(() => {
     if (!objects.length) return;
-    emit([]);
+    emit({ objects: [] });
     setSelectedId(null);
   }, [objects, emit]);
+
+  // ---- No-go zone editing (Phase-4) ----------------------------------------
+  // Leaving zone mode (or losing the start corner) drops any in-progress draft.
+  useEffect(() => {
+    if (mode !== 'zone') {
+      zoneStartRef.current = null;
+      setZoneDraft(null);
+    }
+  }, [mode]);
+
+  // Per-zone height-band edit (z0 = floor, z1 = ceiling), keyed by list index.
+  const handleZoneHeight = useCallback(
+    (index, which, value) => {
+      if (!Number.isFinite(value)) return;
+      emit({
+        zones: zones.map((z, i) => {
+          if (i !== index) return z;
+          const min = Array.isArray(z.min) ? [...z.min] : [0, 0, 0];
+          const max = Array.isArray(z.max) ? [...z.max] : [0, 0, 0];
+          // Preserve min[2] <= max[2] so a student typing „von" > „bis" doesn't
+          // produce min[2] > max[2] — the server normalizes it but the cloud
+          // validator REJECTS it on save (400), failing the whole sim_scene save.
+          if (which === 'z0') min[2] = round3(Math.min(value, max[2]));
+          else max[2] = round3(Math.max(value, min[2]));
+          return { ...z, min, max };
+        }),
+      });
+    },
+    [zones, emit],
+  );
+
+  const handleZoneDelete = useCallback(
+    (index) => {
+      emit({ zones: zones.filter((_, i) => i !== index) });
+    },
+    [zones, emit],
+  );
+
+  // Combined SVG pointer handlers. In object mode they delegate to the existing
+  // place/drag handlers; in zone mode they draw a drag-rectangle.
+  const handleSvgPointerDown = useCallback(
+    (e) => {
+      if (mode === 'zone') {
+        const base = eventToBase(e);
+        if (!base) return;
+        const x = clampRange(base.x, VIEW_MIN_X, VIEW_MAX_X);
+        const y = clampRange(base.y, VIEW_MIN_Y, VIEW_MAX_Y);
+        zoneStartRef.current = { x, y };
+        setZoneDraft({ x0: x, y0: y, x1: x, y1: y });
+        if (svgRef.current && typeof svgRef.current.setPointerCapture === 'function') {
+          try { svgRef.current.setPointerCapture(e.pointerId); } catch (_) { /* ignore */ }
+        }
+        return;
+      }
+      handlePlace(e);
+    },
+    [mode, eventToBase, handlePlace],
+  );
+
+  const handleSvgPointerMove = useCallback(
+    (e) => {
+      if (mode === 'zone') {
+        if (!zoneStartRef.current) return;
+        const base = eventToBase(e);
+        if (!base) return;
+        const x = clampRange(base.x, VIEW_MIN_X, VIEW_MAX_X);
+        const y = clampRange(base.y, VIEW_MIN_Y, VIEW_MAX_Y);
+        setZoneDraft((d) => (d ? { ...d, x1: x, y1: y } : d));
+        return;
+      }
+      handlePointerMove(e);
+    },
+    [mode, eventToBase, handlePointerMove],
+  );
+
+  const handleSvgPointerUp = useCallback(() => {
+    if (mode === 'zone') {
+      const draft = zoneDraft;
+      zoneStartRef.current = null;
+      setZoneDraft(null);
+      if (!draft) return;
+      const x0 = Math.min(draft.x0, draft.x1);
+      const x1 = Math.max(draft.x0, draft.x1);
+      const y0 = Math.min(draft.y0, draft.y1);
+      const y1 = Math.max(draft.y0, draft.y1);
+      // Ignore a click / tiny drag — no accidental zero-size zone.
+      if (x1 - x0 < MIN_ZONE_M || y1 - y0 < MIN_ZONE_M) return;
+      const zone = {
+        min: [round3(x0), round3(y0), ZONE_Z0_DEFAULT],
+        max: [round3(x1), round3(y1), round3(ZONE_Z1_DEFAULT)],
+      };
+      emit({ zones: [...zones, zone] });
+      return;
+    }
+    handlePointerUp();
+  }, [mode, zoneDraft, zones, emit, handlePointerUp]);
 
   // Grasp-attach geometry. Stable callback (reads refs) so UrdfTwin's
   // onEndEffector prop identity never churns.
@@ -288,6 +420,21 @@ function SimScene({ scene, onChange, catalog }) {
     ? Math.round(((selected.yaw || 0) * 180) / Math.PI)
     : 0;
 
+  // Live zone-draw preview rectangle in SVG pixels. baseToSvg flips both axes, so
+  // take the min corner + |Δ| for the SVG <rect> origin/size.
+  const draftRect = zoneDraft
+    ? (() => {
+        const a = baseToSvg(zoneDraft.x0, zoneDraft.y0);
+        const b = baseToSvg(zoneDraft.x1, zoneDraft.y1);
+        return {
+          x: Math.min(a.px, b.px),
+          y: Math.min(a.py, b.py),
+          w: Math.abs(a.px - b.px),
+          h: Math.abs(a.py - b.py),
+        };
+      })()
+    : null;
+
   return (
     <div className="flex flex-col gap-3">
       {/* German notice: the simulator validates logic, not physics. */}
@@ -319,18 +466,54 @@ function SimScene({ scene, onChange, catalog }) {
         ))}
       </div>
 
+      {/* Editor mode toggle: place objects vs. draw a no-go Sperrzone. */}
+      <div className="flex flex-wrap items-center gap-1.5">
+        <span className="text-xs text-[var(--ink-3)]">Modus:</span>
+        <button
+          type="button"
+          onClick={() => setMode('object')}
+          aria-pressed={mode === 'object'}
+          className={
+            'px-2.5 py-1 text-xs rounded-md border '
+            + (mode === 'object'
+              ? 'bg-[var(--accent)] text-white border-[var(--accent)]'
+              : 'bg-white text-[var(--ink-3)] border-[var(--line)] hover:bg-[var(--bg-sunk)]')
+          }
+        >
+          Objekte platzieren
+        </button>
+        <button
+          type="button"
+          onClick={() => setMode('zone')}
+          aria-pressed={mode === 'zone'}
+          className={
+            'px-2.5 py-1 text-xs rounded-md border '
+            + (mode === 'zone'
+              ? 'bg-red-500 text-white border-red-500'
+              : 'bg-white text-red-700 border-red-200 hover:bg-red-50')
+          }
+        >
+          Sperrzone zeichnen
+        </button>
+        {mode === 'zone' && (
+          <span className="text-xs text-[var(--ink-4)]">
+            Ziehe ein Rechteck auf — der Roboter fährt um Sperrzonen herum.
+          </span>
+        )}
+      </div>
+
       {/* 2D top-down table editor */}
       <div className="rounded-lg border border-[var(--line)] bg-white p-2">
         <svg
           ref={svgRef}
           viewBox={`0 0 ${SVG_W} ${SVG_H}`}
           className="w-full h-auto rounded-md bg-[var(--bg-sunk)] touch-none cursor-crosshair"
-          onPointerDown={handlePlace}
-          onPointerMove={handlePointerMove}
-          onPointerUp={handlePointerUp}
-          onPointerLeave={handlePointerUp}
+          onPointerDown={handleSvgPointerDown}
+          onPointerMove={handleSvgPointerMove}
+          onPointerUp={handleSvgPointerUp}
+          onPointerLeave={handleSvgPointerUp}
           role="application"
-          aria-label="Simulator-Tisch — Objekte platzieren"
+          aria-label="Simulator-Tisch — Objekte und Sperrzonen platzieren"
         >
           {/* Reach annulus (graspable ring) */}
           <circle
@@ -361,6 +544,49 @@ function SimScene({ scene, onChange, catalog }) {
           >
             Roboter
           </text>
+
+          {/* No-go zones (top-down footprint, drawn under the objects) */}
+          {zones.map((z, i) => {
+            if (!Array.isArray(z.min) || !Array.isArray(z.max)) return null;
+            const a = baseToSvg(z.min[0], z.min[1]);
+            const b = baseToSvg(z.max[0], z.max[1]);
+            const x = Math.min(a.px, b.px);
+            const y = Math.min(a.py, b.py);
+            const w = Math.abs(a.px - b.px);
+            const h = Math.abs(a.py - b.py);
+            return (
+              <g key={`zone-${i}`}>
+                <rect
+                  x={x}
+                  y={y}
+                  width={w}
+                  height={h}
+                  fill={ZONE_FILL}
+                  stroke={ZONE_STROKE}
+                  strokeWidth="1.5"
+                  strokeDasharray="5 3"
+                />
+                <text x={x + 3} y={y + 11} fontSize="9" fill="#b91c1c">
+                  Sperrzone {i + 1}
+                </text>
+              </g>
+            );
+          })}
+
+          {/* Live zone-draw preview */}
+          {draftRect && (
+            <rect
+              x={draftRect.x}
+              y={draftRect.y}
+              width={draftRect.w}
+              height={draftRect.h}
+              fill={ZONE_DRAFT_FILL}
+              stroke={ZONE_STROKE}
+              strokeWidth="1.5"
+              strokeDasharray="3 2"
+              pointerEvents="none"
+            />
+          )}
 
           {/* Placed objects */}
           {objects.map((o) => {
@@ -451,6 +677,53 @@ function SimScene({ scene, onChange, catalog }) {
         </button>
       )}
 
+      {/* No-go zone list — per-zone height band + delete. */}
+      {zones.length > 0 && (
+        <div className="flex flex-col gap-1.5 rounded-md border border-red-200 bg-white px-3 py-2 text-xs">
+          <span className="font-medium text-red-700">Sperrzonen</span>
+          {zones.map((z, i) => {
+            const z0 = Array.isArray(z.min) && typeof z.min[2] === 'number' ? z.min[2] : 0;
+            const z1 = Array.isArray(z.max) && typeof z.max[2] === 'number' ? z.max[2] : 0;
+            return (
+              <div key={`zone-row-${i}`} className="flex flex-wrap items-center gap-2">
+                <span className="text-[var(--ink-3)]">Zone {i + 1}</span>
+                <label className="flex items-center gap-1">
+                  Höhe von:
+                  <input
+                    type="number"
+                    step={0.01}
+                    value={z0}
+                    onChange={(e) => handleZoneHeight(i, 'z0', Number(e.target.value))}
+                    className="w-16 rounded border border-[var(--line)] px-1 py-0.5 font-mono"
+                    aria-label={`Untere Höhe der Sperrzone ${i + 1}`}
+                  />
+                  m
+                </label>
+                <label className="flex items-center gap-1">
+                  bis:
+                  <input
+                    type="number"
+                    step={0.01}
+                    value={z1}
+                    onChange={(e) => handleZoneHeight(i, 'z1', Number(e.target.value))}
+                    className="w-16 rounded border border-[var(--line)] px-1 py-0.5 font-mono"
+                    aria-label={`Obere Höhe der Sperrzone ${i + 1}`}
+                  />
+                  m
+                </label>
+                <button
+                  type="button"
+                  onClick={() => handleZoneDelete(i)}
+                  className="ml-auto px-2 py-1 rounded-md border border-red-200 text-red-700 hover:bg-red-50"
+                >
+                  Löschen
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
       {/* 3D virtual-arm preview */}
       <div className="relative w-full aspect-video rounded-lg overflow-hidden border border-white/10 bg-[#1a1d23]">
         <Suspense
@@ -463,6 +736,7 @@ function SimScene({ scene, onChange, catalog }) {
           <UrdfTwin
             jointTopic={SIM_JOINT_TOPIC}
             objects={objects}
+            zones={zones}
             showTable
             heldObjectId={heldObjectId}
             onEndEffector={handleEndEffector}

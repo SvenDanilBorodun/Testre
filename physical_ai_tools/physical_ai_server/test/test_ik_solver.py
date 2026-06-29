@@ -50,6 +50,48 @@ def test_fk_requires_five_joints():
     assert _ik().fk([0, 0, 0]) is None
 
 
+# ── link_points (no-go-zone swept check support) ─────────────────────────────
+
+def test_link_points_requires_five_joints():
+    assert _ik().link_points([0, 0, 0]) is None
+
+
+def test_link_points_includes_base_joint_origins_and_ee():
+    ik = _ik()
+    q = ik.solve((0.20, 0.0, 0.03))
+    assert q is not None
+    pts = ik.link_points(q)
+    assert pts is not None and len(pts) >= 7
+    # the base origin is present
+    assert any(float(np.linalg.norm(np.asarray(p))) < 1e-9 for p in pts)
+    # the EE link point coincides with fk(q) (the round-trip vs fk)
+    _R, t = ik.fk(q)
+    assert any(float(np.linalg.norm(np.asarray(p) - t)) < 1e-9 for p in pts)
+    # every point is finite
+    assert all(np.all(np.isfinite(np.asarray(p))) for p in pts)
+
+
+def test_link_points_interpolates_along_the_long_links():
+    # More samples_per_link → more points, all interpolated ON the chain (so a
+    # thin obstacle can't hide between two joints).
+    ik = _ik()
+    q = ik.solve((0.20, 0.0, 0.03))
+    assert len(ik.link_points(q, samples_per_link=2)) < \
+        len(ik.link_points(q, samples_per_link=8))
+
+
+def test_link_points_extend_past_ee_along_tool_axis():
+    # The gripper fingers reach past the EE: at least one point lies beyond the
+    # EE along the +tool axis (for a top-down grasp that is straight down).
+    ik = _ik()
+    q = ik.solve((0.20, 0.0, 0.03))
+    R, t = ik.fk(q)
+    axis = R @ np.array([1.0, 0.0, 0.0])      # tool x-axis in the base frame
+    beyond = [p for p in ik.link_points(q)
+              if float(np.dot(np.asarray(p) - t, axis)) > 1e-4]
+    assert beyond, 'no link point projected past the EE along the tool axis'
+
+
 # ── FK∘IK round-trip (the CI gate) ───────────────────────────────────────────
 
 def test_fk_ik_roundtrip_over_reachable_grid():

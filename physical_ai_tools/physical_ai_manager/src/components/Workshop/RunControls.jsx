@@ -207,12 +207,23 @@ function RunControls({
       // and silently ignores siblings, so the server runs the SAME program on a
       // virtual arm against the placed objects. The persisted blockly_json /
       // autosave blob never carries `sim` (it lives only in this run payload).
+      // Phase-4: ALSO inject a TOP-LEVEL `zones` sibling into BOTH the sim and the
+      // real-run payload — the server's WorkflowContext reads it for the no-go
+      // path-guard (the interpreter still ignores the sibling). Zones persist via
+      // workflows.sim_scene.zones; this is the run payload only.
       const simObjects = (simScene && Array.isArray(simScene.objects))
         ? simScene.objects
         : [];
+      const zones = (simScene && Array.isArray(simScene.zones))
+        ? simScene.zones
+        : [];
       const workflowJsonStr = simMode
-        ? JSON.stringify({ ...(blocklyJson || {}), sim: { enabled: true, objects: simObjects } })
-        : JSON.stringify(blocklyJson);
+        ? JSON.stringify({
+            ...(blocklyJson || {}),
+            sim: { enabled: true, objects: simObjects },
+            zones,
+          })
+        : JSON.stringify({ ...(blocklyJson || {}), zones });
       const r = await callService(
         '/workflow/start',
         'physical_ai_interfaces/srv/StartWorkflow',

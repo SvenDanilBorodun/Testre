@@ -108,6 +108,7 @@ from fastapi import HTTPException  # noqa: E402
 from app.routes import workflows as wf  # noqa: E402
 from app.validators.workflow import (  # noqa: E402
     MAX_SIM_SCENE_JSON_BYTES,
+    MAX_SIM_SCENE_ZONES,
     validate_sim_scene,
 )
 
@@ -394,6 +395,81 @@ class TestValidateSimScene(unittest.TestCase):
     def test_non_list_objects_rejected(self):
         with self.assertRaises(HTTPException) as cm:
             validate_sim_scene({"objects": "nope"})
+        self.assertEqual(cm.exception.status_code, 400)
+
+    # --- Phase-4 No-Go zones -------------------------------------------
+
+    def test_valid_zones_pass(self):
+        scene = {
+            "objects": [],
+            "zones": [
+                {"min": [0.1, -0.1, 0.0], "max": [0.2, 0.1, 0.12]},
+                # Degenerate (min == max) is allowed; only min > max is rejected.
+                {"min": [0.0, 0.0, 0.0], "max": [0.0, 0.0, 0.0]},
+            ],
+        }
+        validate_sim_scene(scene)
+
+    def test_too_many_zones_rejected(self):
+        # Small payload (well under the byte cap) but too many zones → 413.
+        zone = {"min": [0.0, 0.0, 0.0], "max": [0.1, 0.1, 0.1]}
+        with self.assertRaises(HTTPException) as cm:
+            validate_sim_scene({"zones": [dict(zone) for _ in range(MAX_SIM_SCENE_ZONES + 1)]})
+        self.assertEqual(cm.exception.status_code, 413)
+
+    def test_non_list_zones_rejected(self):
+        with self.assertRaises(HTTPException) as cm:
+            validate_sim_scene({"zones": "nope"})
+        self.assertEqual(cm.exception.status_code, 400)
+
+    def test_zone_missing_min_or_max_rejected(self):
+        with self.assertRaises(HTTPException) as cm:
+            validate_sim_scene({"zones": [{"min": [0.0, 0.0, 0.0]}]})
+        self.assertEqual(cm.exception.status_code, 400)
+
+    def test_zone_wrong_length_corner_rejected(self):
+        with self.assertRaises(HTTPException) as cm:
+            validate_sim_scene(
+                {"zones": [{"min": [0.0, 0.0], "max": [0.1, 0.1, 0.1]}]}
+            )
+        self.assertEqual(cm.exception.status_code, 400)
+
+    def test_zone_nan_corner_rejected(self):
+        # json.loads accepts bare NaN; the validator must reject it.
+        nan = float("nan")
+        with self.assertRaises(HTTPException) as cm:
+            validate_sim_scene(
+                {"zones": [{"min": [0.0, 0.0, nan], "max": [0.1, 0.1, 0.1]}]}
+            )
+        self.assertEqual(cm.exception.status_code, 400)
+
+    def test_zone_infinite_corner_rejected(self):
+        with self.assertRaises(HTTPException) as cm:
+            validate_sim_scene(
+                {"zones": [{"min": [0.0, 0.0, 0.0], "max": [0.1, 0.1, float("inf")]}]}
+            )
+        self.assertEqual(cm.exception.status_code, 400)
+
+    def test_zone_non_number_corner_rejected(self):
+        with self.assertRaises(HTTPException) as cm:
+            validate_sim_scene(
+                {"zones": [{"min": [0.0, "x", 0.0], "max": [0.1, 0.1, 0.1]}]}
+            )
+        self.assertEqual(cm.exception.status_code, 400)
+
+    def test_zone_bool_corner_rejected(self):
+        # bool is an int subclass; it must not pass as a coordinate.
+        with self.assertRaises(HTTPException) as cm:
+            validate_sim_scene(
+                {"zones": [{"min": [0.0, 0.0, True], "max": [0.1, 0.1, 0.1]}]}
+            )
+        self.assertEqual(cm.exception.status_code, 400)
+
+    def test_zone_min_greater_than_max_rejected(self):
+        with self.assertRaises(HTTPException) as cm:
+            validate_sim_scene(
+                {"zones": [{"min": [0.2, 0.0, 0.0], "max": [0.1, 0.1, 0.1]}]}
+            )
         self.assertEqual(cm.exception.status_code, 400)
 
 

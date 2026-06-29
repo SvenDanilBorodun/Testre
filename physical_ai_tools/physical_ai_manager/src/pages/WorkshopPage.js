@@ -49,7 +49,10 @@ import {
 // The key MUST match the server's seeded catalog type (`beispiel`,
 // object_catalog.py) — else the server drops every placed object silently.
 const SIM_DEFAULT_CATALOG = [['Beispiel-Objekt', 'beispiel']];
-const EMPTY_SIM_SCENE = { version: 1, objects: [] };
+// Phase-4: `zones` is a first-class key alongside `objects` (no-go Sperrzonen).
+// hydrate/save round-trip the whole sim_scene unchanged, so persisted zones ride
+// along in workflows.sim_scene.zones.
+const EMPTY_SIM_SCENE = { version: 1, objects: [], zones: [] };
 
 function WorkshopPage({ isActive }) {
   const dispatch = useDispatch();

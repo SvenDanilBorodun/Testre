@@ -24,6 +24,12 @@ import os
 import time
 from typing import Any
 
+from physical_ai_server.workflow.path_guard import (
+    ZONE_MARGIN_M,
+    plan_safe_route,
+    point_in_any_zone,
+    segment_blocked,
+)
 from physical_ai_server.workflow.trajectory_builder import (
     build_segment,
     chunked_publish,
@@ -216,6 +222,59 @@ def _publish_motion(ctx, q_start: list[float], q_end: list[float], duration_s: f
                 pass
     if not ok:
         raise WorkflowError('Workflow wurde gestoppt.')
+
+
+def safe_move(
+    ctx,
+    q_start: list[float],
+    q_end: list[float],
+    duration_s: float,
+    roll: float | None = None,
+) -> None:
+    """Issue a TRANSIT move with no-go-zone (Sperrzone) avoidance.
+
+    Rule §2 note: this is a Roboter-Studio *workflow-level* guard — the SAME
+    class as the ``WORKSPACE_FLOOR_MARGIN_M`` table-floor refusal in
+    ``_solve_or_raise``/``_try_solve``. It reroutes/refuses a transit around
+    user-drawn keep-out boxes. It is NOT an inference safety envelope: it runs
+    only on the workflow runtime and never reshapes a recorded/replayed action.
+
+    Backward-safe: zones are read defensively via ``getattr(ctx, 'zones',
+    None)``. Empty/None (every non-Roboter-Studio path, and a Roboter-Studio run
+    with no zones drawn) → behaves EXACTLY like a raw ``_publish_motion`` — no
+    reroute, no extra IK, no regression. Only TRANSIT legs route through here;
+    the descend/grasp corridor + gripper-only moves call raw ``_publish_motion``
+    (zones are user obstacles, never the table/target — there is deliberately NO
+    hard zone backstop inside ``_publish_motion``).
+    """
+    zones = getattr(ctx, 'zones', None)
+    ik = getattr(ctx, 'ik', None)
+    if not zones or ik is None or not hasattr(ik, 'link_points'):
+        _publish_motion(ctx, q_start, q_end, duration_s)
+        return
+    if not segment_blocked(ik, q_start, q_end, zones, ZONE_MARGIN_M):
+        _publish_motion(ctx, q_start, q_end, duration_s)
+        return
+    # Direct path crosses a zone — plan a reroute (lift-and-travel → base-swing
+    # → refuse). plan_safe_route raises a German WorkflowError when no safe
+    # route exists (→ red banner + stop).
+    legs = plan_safe_route(ctx, q_start, q_end, zones, duration_s, roll=roll)
+    log = getattr(ctx, 'log', None)
+    if callable(log):
+        log('[WARNUNG] Sperrzone auf dem Weg — Ausweichroute wird gefahren.')
+    for leg_start, leg_end, leg_dur in legs:
+        _publish_motion(ctx, leg_start, leg_end, leg_dur)
+
+
+def _point_in_zone(ctx, x: float, y: float, z: float) -> bool:
+    """True when (x, y, z) lies inside any (raw, un-inflated) no-go zone on
+    ``ctx``. Used by the start-time pre-flight to warn about concrete
+    destination pins placed in a Sperrzone. Reads ``getattr(ctx, 'zones',
+    None)`` so a zone-less ctx is always False (backward-safe)."""
+    zones = getattr(ctx, 'zones', None)
+    if not zones:
+        return False
+    return point_in_any_zone(zones, (float(x), float(y), float(z)))
 
 
 def _floor_z_at(ctx, x: float, y: float) -> float | None:
@@ -427,7 +486,14 @@ def home(ctx, args: dict[str, Any]) -> None:
     # matches, so a held object stays held across a home. Use `open_gripper`
     # explicitly to release.
     q_end = list(HOME_JOINTS_RAD) + [q_start[5]]
-    _publish_motion(ctx, q_start, q_end, DEFAULT_HOME_DURATION_S)
+    # TRANSIT (whole-arm move to the Grundstellung) — route around any no-go
+    # zone, exactly like move_to/move_above/lift. With no zones drawn safe_move
+    # is a pass-through to raw _publish_motion, so behavior is unchanged. A zone
+    # that traps the home transit → clean German Sperrzone refusal (correct: the
+    # student drew a zone the arm can't get out of). `home` is a pure Blockly
+    # block (handlers/__init__ `edubotics_home`), never an un-catchable
+    # recovery/teardown, so raising here is safe.
+    safe_move(ctx, q_start, q_end, DEFAULT_HOME_DURATION_S)
     ctx.last_arm_joints = list(HOME_JOINTS_RAD)
     ctx.last_full_joints = q_end
 
@@ -442,7 +508,15 @@ def go_to_observation_pose(ctx) -> None:
     q_start = ctx.last_full_joints
     arm = list(OBSERVE_POSE_JOINTS)
     q_end = arm + [q_start[5]]
-    _publish_motion(ctx, q_start, q_end, DEFAULT_MOVE_DURATION_S)
+    # TRANSIT (whole-arm retreat out of the scene-cam view) — route around any
+    # no-go zone, like the other whole-arm transits. No zones → pass-through, so
+    # the named-object loop is unchanged. Both internal call sites (interpreter
+    # `edubotics_while_visible` loop body at interpreter.py and the grasp_object
+    # retry branch in perception_blocks.py) run on paths where a WorkflowError
+    # propagates as a normal German error — NEITHER is a `finally`/un-catchable
+    # teardown — so a Sperrzone refusal here is safe (it ends the run/loop
+    # cleanly, the intended "trapped arm" behavior).
+    safe_move(ctx, q_start, q_end, DEFAULT_MOVE_DURATION_S)
     ctx.last_arm_joints = arm
     ctx.last_full_joints = q_end
 
@@ -468,7 +542,9 @@ def move_to(ctx, args: dict[str, Any]) -> None:
     target = _resolve_target(args.get('destination'), ctx)
     arm_q = _solve_or_raise(ctx, target, roll=GRASP_ROLL_RAD)
     q_end = arm_q + [ctx.last_full_joints[5]]
-    _publish_motion(ctx, ctx.last_full_joints, q_end, DEFAULT_MOVE_DURATION_S)
+    # TRANSIT — route around any no-go zone (raw _publish_motion when none).
+    safe_move(ctx, ctx.last_full_joints, q_end, DEFAULT_MOVE_DURATION_S,
+              roll=GRASP_ROLL_RAD)
     ctx.last_arm_joints = arm_q
     ctx.last_full_joints = q_end
 
@@ -534,17 +610,23 @@ def _execute_pickup(
     if lock is not None:
         lock.acquire()
     try:
+        # Gripper-only open — arm joints unchanged → EXEMPT (raw).
         _publish_motion(ctx, ctx.last_full_joints, open_q, DEFAULT_GRIPPER_DURATION_S)
         ctx.last_full_joints = open_q
-        _publish_motion(ctx, open_q, above_q, DEFAULT_MOVE_DURATION_S)
+        # APPROACH (free-space hover) — TRANSIT, zone-avoided.
+        safe_move(ctx, open_q, above_q, DEFAULT_MOVE_DURATION_S, roll=roll)
         ctx.last_full_joints = above_q
         ctx.last_arm_joints = above_arm_q
+        # DESCEND onto the target — EXEMPT (raw): zones are user obstacles,
+        # never the table/target; the grasp corridor is never zone-checked.
         _publish_motion(ctx, above_q, grasp_q, DEFAULT_GRASP_DURATION_S)
         ctx.last_full_joints = grasp_q
         ctx.last_arm_joints = grasp_arm_q
+        # Gripper-only close — EXEMPT (raw).
         _publish_motion(ctx, grasp_q, closed_q, DEFAULT_GRIPPER_DURATION_S)
         ctx.last_full_joints = closed_q
-        _publish_motion(ctx, closed_q, lift_q, DEFAULT_APPROACH_DURATION_S)
+        # LIFT-OUT (carry up to the hover) — TRANSIT, zone-avoided.
+        safe_move(ctx, closed_q, lift_q, DEFAULT_APPROACH_DURATION_S, roll=roll)
         ctx.last_arm_joints = lift_arm_q
         ctx.last_full_joints = lift_q
     finally:
@@ -622,15 +704,21 @@ def drop_at(ctx, args: dict[str, Any]) -> None:
     if lock is not None:
         lock.acquire()
     try:
-        _publish_motion(ctx, ctx.last_full_joints, above_closed_q, DEFAULT_MOVE_DURATION_S)
+        # APPROACH (carry to the hover above the target) — TRANSIT, zone-avoided.
+        safe_move(ctx, ctx.last_full_joints, above_closed_q, DEFAULT_MOVE_DURATION_S,
+                  roll=GRASP_ROLL_RAD)
         ctx.last_full_joints = above_closed_q
         ctx.last_arm_joints = above_arm_q
+        # DESCEND to the place point — EXEMPT (raw).
         _publish_motion(ctx, above_closed_q, drop_closed_q, DEFAULT_APPROACH_DURATION_S)
         ctx.last_full_joints = drop_closed_q
         ctx.last_arm_joints = drop_arm_q
+        # Gripper-only open (release) — EXEMPT (raw).
         _publish_motion(ctx, drop_closed_q, drop_open_q, DEFAULT_GRIPPER_DURATION_S)
         ctx.last_full_joints = drop_open_q
-        _publish_motion(ctx, drop_open_q, retreat_open_q, DEFAULT_APPROACH_DURATION_S)
+        # RETREAT back up to the hover — TRANSIT, zone-avoided.
+        safe_move(ctx, drop_open_q, retreat_open_q, DEFAULT_APPROACH_DURATION_S,
+                  roll=GRASP_ROLL_RAD)
         ctx.last_arm_joints = above_arm_q
         ctx.last_full_joints = retreat_open_q
     finally:
@@ -718,7 +806,8 @@ def move_above(ctx, args: dict[str, Any]) -> None:
     # derives the largest reachable hover.
     _grasp_q, arm_q = _solve_grasp_and_approach(ctx, (x, y, z), approach, roll=roll)
     q_end = arm_q + [ctx.last_full_joints[5]]
-    _publish_motion(ctx, ctx.last_full_joints, q_end, DEFAULT_MOVE_DURATION_S)
+    # TRANSIT (hover above the object) — route around any no-go zone.
+    safe_move(ctx, ctx.last_full_joints, q_end, DEFAULT_MOVE_DURATION_S, roll=roll)
     ctx.last_arm_joints = arm_q
     ctx.last_full_joints = q_end
 
@@ -796,7 +885,8 @@ def lift(ctx, args: dict[str, Any]) -> None:
     arm_q = list(above_q)
     arm_q[4] = cur[4]
     q_end = arm_q + [cur[5]]
-    _publish_motion(ctx, cur, q_end, DEFAULT_APPROACH_DURATION_S)
+    # TRANSIT (straight-up lift) — route around any no-go zone.
+    safe_move(ctx, cur, q_end, DEFAULT_APPROACH_DURATION_S, roll=cur[4])
     ctx.last_arm_joints = arm_q
     ctx.last_full_joints = q_end
 

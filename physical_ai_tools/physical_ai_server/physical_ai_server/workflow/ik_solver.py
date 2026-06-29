@@ -91,6 +91,11 @@ _L3 = _J4_XYZ[0]                                       # 0.162 m
 #   approach and well under the grasp tolerance):
 _L_TOOL = _J5_XYZ[0] + _EE_XYZ[0]                     # 0.12063 m
 
+#   gripper fingers reach ~this far past end_effector_link along the tool
+#   x-axis; link_points adds a couple of samples there so the no-go-zone swept
+#   check covers the jaws, not just the EE frame origin.
+_TOOL_TIP_EXT_M = 0.04
+
 #   strict-vertical reach annulus (wrist-center distance from shoulder must lie
 #   within the 2R span); used for an early reachability message.
 _REACH_MIN = abs(_L2 - _L3)                            # 0.0415 m
@@ -230,6 +235,56 @@ class IKSolver:
     def _fk_position(self, joints) -> Optional[np.ndarray]:
         T = self._fk_matrix(joints)
         return None if T is None else T[:3, 3].copy()
+
+    def link_points(self, joints, samples_per_link: int = 5) -> Optional[list[np.ndarray]]:
+        """Sample points along the arm's links in the BASE frame, for a swept
+        obstacle (no-go-zone) check.
+
+        Returns a list of base-frame 3-vectors covering: the base origin, every
+        joint origin, the end-effector, ``samples_per_link`` points linearly
+        interpolated along each consecutive link (so a thin obstacle can't hide
+        *between* two joints), and two points projected past the EE along the
+        tool x-axis (the gripper fingers reach past ``end_effector_link``).
+        ``None`` when fewer than 5 joints are supplied (mirrors :meth:`fk`;
+        extra entries are ignored).
+
+        Pure NumPy — it accumulates the SAME cumulative-product chain as
+        ``_fk_matrix``, so it is CI-testable exactly like ``fk`` (no container /
+        ROS deps). Used by ``workflow/path_guard.py``.
+        """
+        j = list(joints)
+        if len(j) < 5:
+            return None
+        T1 = _tf(_J1_XYZ, 'z', j[0])
+        T2 = T1 @ _tf(_J2_XYZ, 'y', j[1])
+        T3 = T2 @ _tf(_J3_XYZ, 'y', j[2])
+        T4 = T3 @ _tf(_J4_XYZ, 'y', j[3])
+        T5 = T4 @ _tf(_J5_XYZ, 'x', j[4])
+        TEE = T5 @ _tf(_EE_XYZ, None, 0.0)
+
+        origins = [
+            np.zeros(3, dtype=np.float64),   # base (link0)
+            T1[:3, 3].copy(),                # joint1
+            T2[:3, 3].copy(),                # joint2 (shoulder)
+            T3[:3, 3].copy(),                # joint3 (elbow)
+            T4[:3, 3].copy(),                # joint4 (wrist)
+            T5[:3, 3].copy(),                # joint5
+            TEE[:3, 3].copy(),               # end-effector
+        ]
+        n = max(1, int(samples_per_link))
+        pts: list[np.ndarray] = [origins[0]]
+        for a, b in zip(origins[:-1], origins[1:]):
+            for k in range(1, n + 1):
+                pts.append(a + (b - a) * (k / n))
+        # Gripper fingers extend past the EE along the tool x-axis.
+        tool_axis = TEE[:3, 0]
+        nrm = float(np.linalg.norm(tool_axis))
+        if nrm > 1e-9:
+            tool_axis = tool_axis / nrm
+            ee = TEE[:3, 3]
+            pts.append(ee + tool_axis * (_TOOL_TIP_EXT_M * 0.5))
+            pts.append(ee + tool_axis * _TOOL_TIP_EXT_M)
+        return pts
 
     # ── inverse kinematics (closed form, strict vertical top-down) ───────────
     def solve(

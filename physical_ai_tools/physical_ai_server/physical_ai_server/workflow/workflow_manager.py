@@ -30,14 +30,16 @@ hat threads and fires ``on_finished``; hat threads exit on ``should_stop``.
 
 from __future__ import annotations
 
+import json
 import math
 import threading
 import time
 import traceback
+import types
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
-from physical_ai_server.workflow.handlers.motion import WorkflowError
+from physical_ai_server.workflow.handlers.motion import WorkflowError, _point_in_zone
 from physical_ai_server.workflow.interpreter import (
     Interpreter,
     InterpreterError,
@@ -154,6 +156,13 @@ class WorkflowContext:
     # removed and put back → un-claimed/un-skipped so it is grabbed again.
     # Guarded by claim_lock (same as claimed_tags/skipped_tags).
     absent_since: dict = field(default_factory=dict)
+    # Phase-4 no-go zones ("Sperrzonen"): a list of axis-aligned base-frame
+    # keep-out boxes ``{min:[x,y,z], max:[x,y,z]}`` (metres), parsed in start()
+    # from the top-level ``zones`` sibling of the workflow_json (injected for
+    # BOTH sim + real runs). None/empty → no zones → motion.safe_move behaves
+    # exactly like raw _publish_motion (backward-safe). Read defensively via
+    # getattr by motion.safe_move / motion._point_in_zone / path_guard.
+    zones: list | None = None
 
 
 MAX_WORKFLOW_JSON_BYTES = 256 * 1024  # 256 KiB; see plan §2.5
@@ -388,12 +397,20 @@ class WorkflowManager:
                 except Exception as e:
                     return False, f'Wahrnehmung konnte nicht initialisiert werden: {e}', []
 
+            # Phase-4 no-go zones ride a top-level `zones` sibling in the
+            # workflow_json (Interpreter.from_json reads only data['blocks'], so
+            # the sibling is ignored by the interpreter). Parsed defensively and
+            # threaded onto ctx.zones; both sim + real managers go through this
+            # one start(), so both get zones.
+            zones = self._parse_zones(workflow_json)
+
             # IK pre-check: walk the JSON for concrete destinations and
             # try a quick IK solve on each. Failures become
             # `unreachable_blocks` — non-fatal warnings the React side
-            # surfaces as setWarningText on the affected blocks. The
+            # surfaces as setWarningText on the affected blocks. A concrete pin
+            # that sits inside a no-go zone is flagged on the same list. The
             # safety envelope is still the authoritative runtime gate.
-            unreachable = self._ik_precheck(interpreter, ik_instance)
+            unreachable = self._ik_precheck(interpreter, ik_instance, zones)
 
             # Audit fix #6: seed ctx.last_full_joints synchronously HERE,
             # before hat threads (or the main daemon) ever spawn. The
@@ -455,6 +472,8 @@ class WorkflowManager:
                 claim_lock=self._claim_lock,
                 # Fresh per-run absence tracker for the recycled-object reclaim.
                 absent_since={},
+                # Phase-4 no-go zones (None/empty → motion behaves as today).
+                zones=zones,
             )
 
             # Apply the synchronous seed so hat threads start with a
@@ -634,13 +653,41 @@ class WorkflowManager:
     # ------------------------------------------------------------------
     # IK pre-check
     # ------------------------------------------------------------------
-    def _ik_precheck(self, interpreter: Interpreter, ik) -> list[dict[str, Any]]:
+    @staticmethod
+    def _parse_zones(workflow_json: str) -> list | None:
+        """Extract the top-level ``zones`` sibling injected into the
+        ``/workflow/start`` payload (Phase-4 no-go zones). Defensive: a missing
+        or non-list ``zones`` → None (run with no zones). The exact value
+        returned here is what start() puts on ``ctx.zones`` AND passes to the
+        pre-flight, for both the real and the sim manager."""
+        try:
+            parsed = json.loads(workflow_json)
+        except (ValueError, TypeError):
+            return None
+        if not isinstance(parsed, dict):
+            return None
+        raw = parsed.get('zones')
+        return raw if isinstance(raw, list) else None
+
+    def _ik_precheck(
+        self,
+        interpreter: Interpreter,
+        ik,
+        zones: list | None = None,
+    ) -> list[dict[str, Any]]:
         if ik is None or not hasattr(ik, 'solve'):
+            # Even without an IK solver we can still flag concrete pins that sit
+            # inside a no-go zone (a pure-geometry test).
+            if zones:
+                return self._zone_precheck_only(interpreter, zones)
             return []
         targets = interpreter.collect_concrete_destinations()
         if not targets:
             return []
         unreachable: list[dict[str, Any]] = []
+        # A lightweight ctx-shim carrying only ``zones`` so the pre-flight reuses
+        # motion._point_in_zone (which reads getattr(ctx, 'zones', None)).
+        zone_ctx = types.SimpleNamespace(zones=zones)
         # Scale the total budget proportionally so a 50-target workflow
         # doesn't silently truncate after the first 20 (audit round-3
         # §24). Hard floor 1 s, ceiling 5 s.
@@ -669,7 +716,30 @@ class WorkflowManager:
                     'block_id': target['block_id'],
                     'message': 'Diese Position ist außerhalb des Arbeitsbereichs.',
                 })
+            elif zones and _point_in_zone(zone_ctx, xyz[0], xyz[1], xyz[2]):
+                unreachable.append({
+                    'block_id': target['block_id'],
+                    'message': 'Diese Position liegt in einer Sperrzone.',
+                })
         return unreachable
+
+    def _zone_precheck_only(
+        self,
+        interpreter: Interpreter,
+        zones: list,
+    ) -> list[dict[str, Any]]:
+        """Flag concrete destination pins that sit inside a no-go zone, when no
+        IK solver is available (pure geometry)."""
+        out: list[dict[str, Any]] = []
+        zone_ctx = types.SimpleNamespace(zones=zones)
+        for target in interpreter.collect_concrete_destinations():
+            xyz = target['xyz']
+            if _point_in_zone(zone_ctx, xyz[0], xyz[1], xyz[2]):
+                out.append({
+                    'block_id': target['block_id'],
+                    'message': 'Diese Position liegt in einer Sperrzone.',
+                })
+        return out
 
     # ------------------------------------------------------------------
     # Main loop

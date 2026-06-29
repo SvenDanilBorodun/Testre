@@ -15,6 +15,7 @@ gate; the ROS server interprets whatever it sees.
 from __future__ import annotations
 
 import json
+import math
 from typing import Any
 
 from fastapi import HTTPException
@@ -33,6 +34,9 @@ MAX_SIM_SCENE_JSON_BYTES = 64 * 1024
 # a ≤64 KB scene could still carry hundreds of entries; bound the count so a junk
 # scene never reaches Postgres / the ROS sim resolve loop.
 MAX_SIM_SCENE_OBJECTS = 64
+# Phase-4 No-Go zones (axis-aligned base-frame keep-out boxes, persisted in
+# sim_scene.zones). Same defense-in-depth count cap as the objects list.
+MAX_SIM_SCENE_ZONES = 16
 
 
 def validate_blockly_json(payload: dict) -> None:
@@ -103,3 +107,64 @@ def validate_sim_scene(scene: dict) -> None:
             status_code=413,
             detail=f"Zu viele Objekte in der Sim-Szene (höchstens {MAX_SIM_SCENE_OBJECTS}).",
         )
+
+    _validate_zones(scene.get("zones"))
+
+
+def _validate_zones(zones: Any) -> None:
+    """Validate the Phase-4 No-Go zone list (sim_scene.zones).
+
+    Each zone is an axis-aligned base-frame box ``{"min": [x, y, z],
+    "max": [x, y, z]}`` in metres with ``min[i] <= max[i]``. The cloud gate
+    rejects non-list / over-count / malformed / non-finite corners before
+    they reach Postgres or the ROS path-guard; ``json.loads`` accepts bare
+    ``NaN``/``Infinity``, so a finite-check (``math.isfinite``) is required.
+    ``bool`` is excluded — it is an ``int`` subclass and never a coordinate.
+    """
+    if zones is None:
+        return
+    if not isinstance(zones, list):
+        raise HTTPException(
+            status_code=400, detail="Sim-Szene „zones“ muss eine Liste sein."
+        )
+    if len(zones) > MAX_SIM_SCENE_ZONES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Zu viele Sperrzonen in der Sim-Szene (höchstens {MAX_SIM_SCENE_ZONES}).",
+        )
+    for zone in zones:
+        if not isinstance(zone, dict) or "min" not in zone or "max" not in zone:
+            raise HTTPException(
+                status_code=400,
+                detail="Jede Sperrzone muss „min“ und „max“ enthalten.",
+            )
+        corner_min = _corner(zone["min"])
+        corner_max = _corner(zone["max"])
+        for lo, hi in zip(corner_min, corner_max):
+            if lo > hi:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Sperrzone ungültig: „min“ muss kleiner oder gleich „max“ sein.",
+                )
+
+
+def _corner(value: Any) -> list[float]:
+    """Coerce + validate a zone corner: a 3-element list of finite numbers
+    (``bool`` excluded). Raises HTTP 400 in German on any shape violation."""
+    if not isinstance(value, list) or len(value) != 3:
+        raise HTTPException(
+            status_code=400,
+            detail="Sperrzone ungültig: „min“ und „max“ müssen je drei Zahlen sein.",
+        )
+    for component in value:
+        if isinstance(component, bool) or not isinstance(component, (int, float)):
+            raise HTTPException(
+                status_code=400,
+                detail="Sperrzone ungültig: Koordinaten müssen Zahlen sein.",
+            )
+        if not math.isfinite(component):
+            raise HTTPException(
+                status_code=400,
+                detail="Sperrzone ungültig: Koordinaten müssen endliche Zahlen sein.",
+            )
+    return value

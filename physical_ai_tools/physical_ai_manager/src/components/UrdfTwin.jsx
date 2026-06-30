@@ -43,6 +43,15 @@
 //                    translucent-red boxes + red wireframes. Empty (the default)
 //                    → the zone effect early-returns and builds ZERO meshes, so
 //                    RecordPage's `<UrdfTwin/>` is byte-for-byte unchanged.
+//   * showPath     — Phase-5 "Bahn anzeigen": trace the end-effector world
+//                    position as a cyan polyline. Default false → the path layer
+//                    builds ZERO three primitives (no Line/BufferGeometry), so
+//                    RecordPage + the jsdom three mock are untouched.
+//   * pathClearToken — Phase-5 "Bahn löschen": bump this integer to empty the
+//                    accumulated path buffer (setDrawRange(0,0)). Default 0.
+//   * showFrames   — Phase-5 "Achsen": parent a small RGB AxesHelper to the base
+//                    (link0) and TCP (end_effector_link) links. Default false →
+//                    no AxesHelper is constructed (RecordPage + mock untouched).
 
 import React, { useEffect, useRef, useState } from 'react';
 import { useSelector } from 'react-redux';
@@ -100,6 +109,20 @@ const ZONE_OPACITY = 0.22;
 // here so it follows the gripper exactly.
 const EE_LINK_NAME = 'end_effector_link';
 
+// ── Phase-5 (3D-twin upgrade) path-trail + frame-triad constants ─────────────
+// "Bahn anzeigen": a cyan polyline tracing the end-effector world position over
+// time. Points are appended into a PREALLOCATED Float32Array (no per-frame GC);
+// the draw range grows as the arm moves. Capped so a long session can't grow the
+// buffer unbounded — once full, the trail simply freezes.
+const PATH_COLOR = 0x22d3ee; // cyan-400
+const PATH_MAX_POINTS = 4000;
+const PATH_MIN_MOVE_M = 0.001; // append only when the TCP moved ≥ ~1 mm
+// Base/TCP coordinate-frame triads ("Achsen"): a small RGB AxesHelper parented to
+// link0 (base) and end_effector_link (TCP). Parented under the robot so they
+// inherit its -π/2 viewer rotation automatically — no manual frame math.
+const BASE_LINK_NAME = 'link0';
+const FRAME_AXIS_SIZE_M = 0.07;
+
 export default function UrdfTwin({
   jointTopic = '/joint_states',
   objects = [],
@@ -107,6 +130,9 @@ export default function UrdfTwin({
   heldObjectId = null,
   onEndEffector = null,
   zones = [],
+  showPath = false,
+  pathClearToken = 0,
+  showFrames = false,
 }) {
   const rosbridgeUrl = useSelector((state) => state.ros.rosbridgeUrl);
 
@@ -139,6 +165,28 @@ export default function UrdfTwin({
   useEffect(() => {
     onEndEffectorRef.current = onEndEffector;
   }, [onEndEffector]);
+
+  // ---- Phase-5 (3D-twin upgrade) optional-layer refs ----
+  // All stay null/unused for the default-prop call (showPath/showFrames false), so
+  // RecordPage constructs ZERO of the path/axes primitives and the jsdom three
+  // mock (which lacks Line/BufferGeometry/AxesHelper) is never exercised.
+  const pathGroupRef = useRef(null);
+  const pathLineRef = useRef(null);
+  const pathPositionsRef = useRef(null); // Float32Array(PATH_MAX_POINTS * 3)
+  const pathStateRef = useRef({ count: 0, last: null }); // last: THREE.Vector3
+  const pathTmpRef = useRef(null); // reusable Vector3 for getWorldPosition
+  const axesBaseRef = useRef(null);
+  const axesTcpRef = useRef(null);
+  // Latest toggle values read by the (stable) subscription closure + the URDF
+  // load-success path (neither re-runs on a prop change).
+  const showPathRef = useRef(showPath);
+  const showFramesRef = useRef(showFrames);
+  useEffect(() => {
+    showPathRef.current = showPath;
+  }, [showPath]);
+  useEffect(() => {
+    showFramesRef.current = showFrames;
+  }, [showFrames]);
 
   useEffect(() => {
     const mount = mountRef.current;
@@ -224,6 +272,12 @@ export default function UrdfTwin({
         scene.add(robot);
         robotRef.current = robot;
         frameRobot(camera, controls, robot);
+        // Phase-5: if the „Achsen" toggle was already on before the URDF
+        // finished loading, attach the base/TCP triads now (the frames effect
+        // bailed earlier because robotRef was still null).
+        if (showFramesRef.current) {
+          buildFrameTriads(robot, axesBaseRef, axesTcpRef);
+        }
         needsRender = true;
       },
       undefined,
@@ -281,6 +335,16 @@ export default function UrdfTwin({
       tableMeshRef.current = null;
       prevHeldIdRef.current = null;
       zonesGroupRef.current = null;
+      // Phase-5: the path line (under pathGroup → scene) and the frame triads
+      // (under robot links → scene) were already disposed by the traverse above;
+      // just drop the bookkeeping refs + the accumulator state.
+      pathGroupRef.current = null;
+      pathLineRef.current = null;
+      pathPositionsRef.current = null;
+      pathStateRef.current = { count: 0, last: null };
+      pathTmpRef.current = null;
+      axesBaseRef.current = null;
+      axesTcpRef.current = null;
     };
   }, []);
 
@@ -437,6 +501,74 @@ export default function UrdfTwin({
     requestRenderRef.current();
   }, [zones]);
 
+  // ---- Phase-5: end-effector path trail ("Bahn anzeigen") -------------------
+  // Lazily builds a cyan THREE.Line over a PREALLOCATED Float32Array the first
+  // time the trail is enabled, then just toggles its visibility. Points are
+  // appended in the joint-state callback (guarded by showPathRef). For the
+  // default showPath=false call this returns BEFORE constructing any THREE
+  // primitive — RecordPage's `<UrdfTwin/>` and the jsdom three mock (no Line/
+  // BufferGeometry/LineBasicMaterial) are never exercised.
+  useEffect(() => {
+    const scene = sceneRef.current;
+    if (!scene) return;
+    if (!showPath && !pathGroupRef.current) return;
+
+    let group = pathGroupRef.current;
+    if (!group) {
+      group = new THREE.Group();
+      const positions = new Float32Array(PATH_MAX_POINTS * 3);
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+      geo.setDrawRange(0, 0);
+      const mat = new THREE.LineBasicMaterial({ color: PATH_COLOR });
+      const line = new THREE.Line(geo, mat);
+      // The preallocated (mostly-zero) buffer makes the auto bounding sphere
+      // wrong until it fills, so skip culling — the trail must never be hidden
+      // when the camera frames a sub-region of the scene.
+      line.frustumCulled = false;
+      group.add(line);
+      scene.add(group);
+      pathGroupRef.current = group;
+      pathLineRef.current = line;
+      pathPositionsRef.current = positions;
+      pathStateRef.current.count = 0;
+      pathStateRef.current.last = null;
+    }
+    group.visible = showPath;
+    requestRenderRef.current();
+  }, [showPath]);
+
+  // ---- Phase-5: clear the path trail ("Bahn löschen") -----------------------
+  // A bumped pathClearToken empties the preallocated buffer's draw range and
+  // resets the accumulator. Runs once on mount with the default token 0 (the line
+  // isn't built yet → refs-only no-op, constructs nothing).
+  useEffect(() => {
+    const line = pathLineRef.current;
+    pathStateRef.current.count = 0;
+    pathStateRef.current.last = null;
+    if (line && line.geometry) {
+      line.geometry.setDrawRange(0, 0);
+      if (line.geometry.attributes && line.geometry.attributes.position) {
+        line.geometry.attributes.position.needsUpdate = true;
+      }
+    }
+    requestRenderRef.current();
+  }, [pathClearToken]);
+
+  // ---- Phase-5: base/TCP coordinate-frame triads ("Achsen") -----------------
+  // Attaches/removes an AxesHelper on link0 (base) + end_effector_link (TCP).
+  // When the robot hasn't loaded yet this returns; the URDF load-success path
+  // re-attaches if the toggle is already on (showFramesRef). For the default
+  // showFrames=false call no AxesHelper is constructed — RecordPage + the jsdom
+  // three mock (no AxesHelper) are untouched.
+  useEffect(() => {
+    const robot = robotRef.current;
+    if (!robot || !robot.links) return;
+    if (showFrames) buildFrameTriads(robot, axesBaseRef, axesTcpRef);
+    else disposeFrameTriads(axesBaseRef, axesTcpRef);
+    requestRenderRef.current();
+  }, [showFrames]);
+
   // ---- rosbridge joint-state subscription (ImageGridCell idiom) ----
   // `jointTopic` defaults to the bare global /joint_states (RecordPage); SimScene
   // passes the sim-only /sim/joint_states so the virtual arm never collides with
@@ -472,6 +604,20 @@ export default function UrdfTwin({
         applyJointState(robot, msg);
         requestRenderRef.current();
         if (!cancelled) setHasJointData(true);
+        // Phase-5: accumulate the end-effector world position into the path trail
+        // — only while „Bahn anzeigen" is on (showPathRef). RecordPage's default
+        // showPath=false skips this entirely (no getWorldPosition, no allocation).
+        if (showPathRef.current && robot) {
+          if (!pathTmpRef.current) pathTmpRef.current = new THREE.Vector3();
+          const added = appendPathPoint(
+            robot,
+            pathLineRef.current,
+            pathPositionsRef.current,
+            pathStateRef.current,
+            pathTmpRef.current,
+          );
+          if (added) requestRenderRef.current();
+        }
         // Surface the end-effector pose + gripper for the sim grasp geometry —
         // only when a consumer is wired (RecordPage passes none → zero cost,
         // and the robot.links/getWorldPosition reads never run).
@@ -664,6 +810,84 @@ function frameRobot(camera, controls, robot) {
   camera.far = maxDim * 100;
   camera.updateProjectionMatrix();
   controls.update();
+}
+
+// Phase-5: append the end-effector world position to the preallocated path
+// buffer when the arm has moved at least PATH_MIN_MOVE_M since the last recorded
+// point. The stored coordinates are VIEWER-frame (the line is added straight to
+// the scene, so it draws where the TCP visibly is — no base-frame conversion).
+// Returns true when a point was added so the caller can request a render. Caps at
+// PATH_MAX_POINTS — once full, further points are dropped (the trail freezes).
+function appendPathPoint(robot, line, positions, state, tmp) {
+  const link = robot && robot.links ? robot.links[EE_LINK_NAME] : null;
+  if (!link || typeof link.getWorldPosition !== 'function' || !line || !positions) {
+    return false;
+  }
+  const world = link.getWorldPosition(tmp);
+  if (!world || typeof world.x !== 'number') return false;
+  if (state.last) {
+    const dx = world.x - state.last.x;
+    const dy = world.y - state.last.y;
+    const dz = world.z - state.last.z;
+    if (dx * dx + dy * dy + dz * dz < PATH_MIN_MOVE_M * PATH_MIN_MOVE_M) {
+      return false;
+    }
+  }
+  if (state.count >= PATH_MAX_POINTS) return false;
+  const i = state.count * 3;
+  positions[i] = world.x;
+  positions[i + 1] = world.y;
+  positions[i + 2] = world.z;
+  state.count += 1;
+  if (!state.last) state.last = new THREE.Vector3();
+  state.last.set(world.x, world.y, world.z);
+  const geo = line.geometry;
+  if (geo) {
+    geo.setDrawRange(0, state.count);
+    if (geo.attributes && geo.attributes.position) {
+      geo.attributes.position.needsUpdate = true;
+    }
+  }
+  return true;
+}
+
+// Phase-5: parent a small RGB AxesHelper to the base (link0) and TCP
+// (end_effector_link) links so each frame's orientation is shown. Idempotent (a
+// triad already attached for a link is left in place) and safe when the robot/
+// links aren't ready (returns without building). Parented UNDER the robot, so the
+// triads inherit its -π/2 viewer rotation automatically — no manual frame math.
+function buildFrameTriads(robot, baseRef, tcpRef) {
+  if (!robot || !robot.links) return false;
+  let built = false;
+  const base = robot.links[BASE_LINK_NAME];
+  if (base && typeof base.add === 'function' && !baseRef.current) {
+    const ax = new THREE.AxesHelper(FRAME_AXIS_SIZE_M);
+    base.add(ax);
+    baseRef.current = ax;
+    built = true;
+  }
+  const tcp = robot.links[EE_LINK_NAME];
+  if (tcp && typeof tcp.add === 'function' && !tcpRef.current) {
+    const ax = new THREE.AxesHelper(FRAME_AXIS_SIZE_M);
+    tcp.add(ax);
+    tcpRef.current = ax;
+    built = true;
+  }
+  return built;
+}
+
+// Phase-5: remove + dispose both frame triads (no-op for an unattached ref).
+// AxesHelper is a LineSegments with its own geometry + LineBasicMaterial, both
+// freed by disposeObject.
+function disposeFrameTriads(baseRef, tcpRef) {
+  [baseRef, tcpRef].forEach((ref) => {
+    const ax = ref.current;
+    if (ax) {
+      if (ax.parent) ax.parent.remove(ax);
+      disposeObject(ax);
+      ref.current = null;
+    }
+  });
 }
 
 // Recursively dispose three geometries/materials under an object (GPU memory).

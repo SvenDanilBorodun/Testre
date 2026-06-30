@@ -183,6 +183,27 @@ export function registerPerceptionBlocks() {
       },
     };
   }
+  // „warte bis Greifer hält (max N s)" — Boolean value block + TIMEOUT field,
+  // NO object dropdown (it watches the gripper, not the scene). Custom init for
+  // symmetry with wait_until_object_seen; field name TIMEOUT → args['timeout']
+  // (a hard contract with perception_blocks.wait_until_held).
+  if (!Blockly.Blocks['edubotics_wait_until_held']) {
+    Blockly.Blocks['edubotics_wait_until_held'] = {
+      init() {
+        this.appendDummyInput()
+          .appendField(DE.WAIT_UNTIL_HELD_PREFIX)
+          .appendField(
+            new Blockly.FieldNumber(10, TIMEOUT_MIN_S, TIMEOUT_MAX_S, 1), 'TIMEOUT')
+          .appendField(DE.WAIT_UNTIL_HELD_SUFFIX);
+        this.setOutput(true, 'Boolean');
+        this.setColour(PERCEPTION_COLOR);
+        this.setTooltip(
+          'Wartet, bis der Greifer ein Objekt hält (oder die Zeit abläuft). ' +
+          'Verwende ihn direkt nach „Greifer schließen" — bei geöffnetem ' +
+          'Greifer kann fälschlich „hält" gemeldet werden.');
+      },
+    };
+  }
   // „wenn <Typ> erkannt" — a HAT block (top-only: nextStatement, no previous).
   if (!Blockly.Blocks['edubotics_when_object_seen']) {
     Blockly.Blocks['edubotics_when_object_seen'] = {

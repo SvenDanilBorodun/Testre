@@ -7,10 +7,13 @@
 # You may obtain a copy of the License at
 #
 #     http://www.apache.org/licenses/LICENSE-2.0
-"""Camera + colour-profile calibration for Roboter Studio (SCENE-cam only).
+"""Camera calibration for Roboter Studio (SCENE-cam only).
 
 The pipeline is a 3-step state machine driven by the React wizard:
-    intrinsic (scene) -> extrinsic (scene, board-on-table) -> colour profile
+    intrinsic (scene) -> extrinsic (scene, board-on-table) -> table touch-off
+
+(The former 4th colour-profile step was removed in v2.9.4 — colour detection
+is gone; the editor unlocks after the touch-off. There is no colour profile.)
 
 WS4 (2026-06-17) — the GRIPPER camera was DROPPED from calibration. The
 gripper camera rides on a 3D-printed eye-in-hand holder that is NOT modelled
@@ -237,6 +240,11 @@ class IntrinsicCaptureBuffer:
     all_ids: list[np.ndarray] = field(default_factory=list)
     image_size: tuple[int, int] | None = None
     last_view_rms: float | None = None
+    # Phase-2 wizard UX (set on each successful intrinsic capture; NOT part of
+    # capture_frame's tested return tuple): which 4x4 mosaic cell the board
+    # centroid landed in (0..15) and a 1/2/3 quality badge from last_view_rms.
+    last_coverage_cell: int | None = None
+    last_quality: int | None = None
 
 
 @dataclass
@@ -268,7 +276,7 @@ class CalibrationManager:
     """State machine + ChArUco math for Roboter Studio SCENE-camera setup.
 
     WS4 (2026-06-17): scene-cam only (intrinsic + single-shot board-on-table
-    extrinsic + colour profile). The gripper camera is no longer calibrated.
+    extrinsic + table touch-off). The gripper camera is no longer calibrated.
 
     Designed for single-threaded interaction from the ROS service callbacks
     (the manager's lock serialises capture/solve calls). Image acquisition is
@@ -299,8 +307,9 @@ class CalibrationManager:
         # every projected XY (the Innomaker scene cam is a ~102° lens, so a
         # 600 px default could be ~2x wrong), and the touch-off only fixes
         # grasp HEIGHT, not lateral scale. No guessed K ever ships now: the
-        # student runs the 12-frame ChArUco intrinsic step, which the extrinsic
-        # step already gates on (start_step 'extrinsic' requires has_intrinsics).
+        # student runs the 20-frame ChArUco intrinsic step (INTRINSIC_FRAMES_
+        # REQUIRED), which the extrinsic step already gates on (start_step
+        # 'extrinsic' requires has_intrinsics).
 
     # ------------------------------------------------------------------
     # Persistence helpers
@@ -500,6 +509,13 @@ class CalibrationManager:
                 buf.image_size = this_size
                 rms = self._estimate_view_rms(buf)
                 buf.last_view_rms = rms
+                # Phase-2 wizard UX: stash the 4x4 coverage cell + 1/2/3 quality
+                # badge for THIS capture on the buffer so the capture callback can
+                # fill CalibrationCaptureFrame.coverage_cell/quality WITHOUT
+                # changing capture_frame's (tested) 5-tuple return signature.
+                cx, cy = self._charuco_centroid_px(corners)
+                buf.last_coverage_cell = self._coverage_cell(cx, cy, this_size)
+                buf.last_quality = self._quality_from_rms(rms)
                 return True, len(buf.all_corners), INTRINSIC_FRAMES_REQUIRED, float(rms or 0.0), (
                     f'Bild {len(buf.all_corners)}/{INTRINSIC_FRAMES_REQUIRED} erfasst.'
                 )
@@ -579,7 +595,7 @@ class CalibrationManager:
 
     def _estimate_view_rms(self, buf: IntrinsicCaptureBuffer) -> float | None:
         """Run a quick calibration on the current set to estimate quality. Cheap
-        enough at <=12 frames to surface live RMS feedback in the wizard."""
+        enough at <=20 frames to surface live RMS feedback in the wizard."""
         if len(buf.all_corners) < 4 or buf.image_size is None:
             return None
         try:
@@ -589,6 +605,97 @@ class CalibrationManager:
             return float(ret)
         except cv2.error:
             return None
+
+    # ------------------------------------------------------------------
+    # Live preview (lock-free) + wizard coverage/quality helpers
+    # ------------------------------------------------------------------
+    def detect_preview(
+        self, frame: np.ndarray | None
+    ) -> tuple[bool, list[float], list[float], int]:
+        """LOCK-FREE live ChArUco corner preview for the wizard overlay.
+
+        Detects the board in ONE frame and returns the detected corner pixel
+        coordinates + a rough board-area-fill percentage — WITHOUT taking
+        ``self._lock``. The wizard polls this a few Hz and it MUST NOT queue
+        behind a multi-second intrinsic solve, so it deliberately holds no lock.
+        It only READS the detector params / dictionary / board built ONCE in
+        ``__init__`` and never mutated thereafter — ``cv2.aruco.detectMarkers`` /
+        ``interpolateCornersCharuco`` treat them as const inputs and keep their
+        own local working buffers — so it is safe to run concurrently with a
+        capture/solve that holds the lock (no shared mutable state is touched).
+
+        Returns ``(detected, corners_x, corners_y, board_area_pct)``. On no
+        detection / a missing or malformed frame returns ``(False, [], [], 0)``.
+        ``corners_x`` / ``corners_y`` are parallel pixel-coordinate lists in the
+        camera's NATIVE resolution (the same resolution the MJPEG stream serves,
+        so the React SVG overlay's viewBox lines up — see the callback note)."""
+        if frame is None:
+            return False, [], [], 0
+        try:
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        except cv2.error:
+            return False, [], [], 0
+        corners, _ids = self._detect_charuco(gray)
+        if corners is None:
+            return False, [], [], 0
+        pts = np.asarray(corners, dtype=np.float64).reshape(-1, 2)
+        if pts.shape[0] == 0:
+            return False, [], [], 0
+        xs = [float(x) for x in pts[:, 0]]
+        ys = [float(y) for y in pts[:, 1]]
+        h, w = gray.shape[:2]
+        area_pct = 0
+        if w > 0 and h > 0 and pts.shape[0] >= 4:
+            bw = float(pts[:, 0].max() - pts[:, 0].min())
+            bh = float(pts[:, 1].max() - pts[:, 1].min())
+            frac = (bw * bh) / float(w * h)
+            if math.isfinite(frac):
+                area_pct = int(max(0.0, min(100.0, frac * 100.0)))
+        return True, xs, ys, area_pct
+
+    def last_intrinsic_capture_meta(self, camera: str) -> tuple[int, int]:
+        """Return ``(coverage_cell, quality)`` for the most recent INTRINSIC
+        capture of ``camera``, or ``(0, 0)`` when there is no intrinsic buffer /
+        no capture yet (e.g. an extrinsic or touch-off capture). Lock-free read
+        of two plain ints written under the capture lock — a torn read at worst
+        shows a stale cell/quality for the live wizard, never a crash."""
+        buf = self._intrinsic_buffers.get(camera)
+        if buf is None:
+            return 0, 0
+        cell = buf.last_coverage_cell if buf.last_coverage_cell is not None else 0
+        quality = buf.last_quality if buf.last_quality is not None else 0
+        return int(cell), int(quality)
+
+    @staticmethod
+    def _charuco_centroid_px(corners) -> tuple[float, float]:
+        """Mean (x, y) pixel of the detected ChArUco corners."""
+        pts = np.asarray(corners, dtype=np.float64).reshape(-1, 2)
+        return float(pts[:, 0].mean()), float(pts[:, 1].mean())
+
+    @staticmethod
+    def _coverage_cell(cx: float, cy: float, image_size: tuple[int, int]) -> int:
+        """Map a pixel ``(cx, cy)`` to a 0..15 cell index of a 4x4 grid laid over
+        the image (row-major: cell = row*4 + col). ``image_size`` is ``(W, H)``.
+        Out-of-range / degenerate inputs clamp to a valid cell (0)."""
+        w, h = int(image_size[0]), int(image_size[1])
+        if w <= 0 or h <= 0 or not (math.isfinite(cx) and math.isfinite(cy)):
+            return 0
+        col = min(3, max(0, int(cx / w * 4)))
+        row = min(3, max(0, int(cy / h * 4)))
+        return row * 4 + col
+
+    @staticmethod
+    def _quality_from_rms(rms: float | None) -> int:
+        """Map a per-view reprojection RMS (px) to a 1/2/3 badge
+        (1=POOR, 2=OK, 3=GOOD), or 0 when unknown (None / non-finite). Lower
+        RMS = a sharper, better-conditioned view."""
+        if rms is None or not math.isfinite(rms):
+            return 0
+        if rms < 1.0:
+            return 3
+        if rms < 2.0:
+            return 2
+        return 1
 
     def _board_pose_from_frame(self, frame, K, dist):
         """Detect the ChArUco board in ONE frame and solvePnP its pose.

@@ -77,6 +77,7 @@ export function buildToolbox(restrictedBlocks = null) {
     { kind: 'block', type: 'edubotics_find_object' },
     { kind: 'block', type: 'edubotics_object_position' },
     { kind: 'block', type: 'edubotics_grasp_held' },
+    { kind: 'block', type: 'edubotics_wait_until_held' },
     { kind: 'block', type: 'edubotics_mark_done' },
   ], restricted);
 
@@ -84,6 +85,14 @@ export function buildToolbox(restrictedBlocks = null) {
     { kind: 'block', type: 'edubotics_broadcast' },
     { kind: 'block', type: 'edubotics_when_broadcast' },
     { kind: 'block', type: 'edubotics_when_object_seen' },
+  ], restricted);
+
+  // Zähler — named per-run integer counters (reset / +1 / read / threshold hat).
+  const counters = filterContents([
+    { kind: 'block', type: 'edubotics_counter_reset' },
+    { kind: 'block', type: 'edubotics_counter_add' },
+    { kind: 'block', type: 'edubotics_counter_get' },
+    { kind: 'block', type: 'edubotics_when_counter_gt' },
   ], restricted);
 
   const destinations = filterContents([
@@ -189,6 +198,11 @@ export function buildToolbox(restrictedBlocks = null) {
       type: 'edubotics_log',
       inputs: { MESSAGE: textShadow('Hallo!') },
     },
+    {
+      kind: 'block',
+      type: 'edubotics_toast',
+      inputs: { TEXT: textShadow('Fertig!') },
+    },
     { kind: 'block', type: 'edubotics_play_sound' },
     {
       kind: 'block',
@@ -273,6 +287,12 @@ export function buildToolbox(restrictedBlocks = null) {
       name: DE.CATEGORY_AUSGABE,
       colour: '#a855f7',
       contents: output,
+    },
+    {
+      kind: 'category',
+      name: DE.CATEGORY_ZAEHLER,
+      colour: '#0891b2',
+      contents: counters,
     },
   ].filter((c) => {
     // Keep dynamic categories regardless; drop static categories with

@@ -48,6 +48,7 @@ from physical_ai_server.workflow.handlers.motion import WorkflowError
 HAT_BLOCK_TYPES: frozenset[str] = frozenset({
     'edubotics_when_broadcast',
     'edubotics_when_object_seen',
+    'edubotics_when_counter_gt',
 })
 
 # Hard cap on iterations for any single loop construct

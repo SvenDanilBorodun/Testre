@@ -16,23 +16,36 @@ import {
   setCalibError,
   markStepComplete,
   resetCalibProgress,
+  setCharucoPreview,
+  addCoverageCell,
 } from '../../features/workshop/workshopSlice';
 import { useRosServiceCaller } from '../../hooks/useRosServiceCaller';
+import CameraFeedOverlay from './CameraFeedOverlay';
 
 function IntrinsicCalibStep({ camera }) {
   const dispatch = useDispatch();
-  const { startCalibration, calibrationCaptureFrame, calibrationSolve } = useRosServiceCaller();
+  const {
+    startCalibration,
+    calibrationCaptureFrame,
+    calibrationSolve,
+    calibrationPreview,
+  } = useRosServiceCaller();
 
   const framesCaptured = useSelector((s) => s.workshop.framesCaptured);
   const framesRequired = useSelector((s) => s.workshop.framesRequired);
   const lastViewRms = useSelector((s) => s.workshop.lastViewRms);
   const calibError = useSelector((s) => s.workshop.calibError);
+  const charucoPreview = useSelector((s) => s.workshop.charucoPreview);
+  const coverageMosaic = useSelector((s) => s.workshop.coverageMosaic);
+  const qualityHistory = useSelector((s) => s.workshop.qualityHistory);
 
   const [busy, setBusy] = useState(false);
   const [started, setStarted] = useState(false);
   // Final reprojection error from the most recent successful solve.
   // Different from lastViewRms (which is the per-capture estimate); this
-  // is the consolidated 12-frame RMS the solver actually persisted.
+  // is the consolidated full-set RMS the solver actually persisted (the
+  // intrinsic step captures framesRequired views — 20 since the wide-lens
+  // rational-distortion upgrade, 2026-06-24 W4).
   const [solvedRms, setSolvedRms] = useState(null);
 
   const cameraLabel = camera === 'gripper' ? 'Greifer-Kamera' : 'Szenen-Kamera';
@@ -69,6 +82,9 @@ function IntrinsicCalibStep({ camera }) {
           framesRequired: r.frames_required,
           lastViewRms: r.last_view_rms,
         }));
+        // Tier-b: record which 4x4 coverage cell the board landed in + the
+        // 1/2/3 quality badge the backend computed for this capture.
+        dispatch(addCoverageCell({ cell: r.coverage_cell, quality: r.quality }));
         toast.success(r.message);
       }
     } catch (e) {
@@ -111,10 +127,50 @@ function IntrinsicCalibStep({ camera }) {
     dispatch(resetCalibProgress());
   }, [camera, dispatch]);
 
+  // Tier-b: live ChArUco corner preview. While the intrinsic step is active,
+  // poll /calibration/preview at ~3 Hz (client-side interval only — no
+  // EDUBOTICS_* env / compose change) and push the detected corners into Redux
+  // so CameraFeedOverlay draws them on top of the live stream. Preview is
+  // advisory: a dropped poll clears the overlay but never toasts the student.
+  useEffect(() => {
+    if (!started) return undefined;
+    let cancelled = false;
+    let inFlight = false;
+    const tick = async () => {
+      if (cancelled || inFlight) return;
+      inFlight = true;
+      try {
+        const r = await calibrationPreview(camera);
+        if (cancelled) return;
+        const xs = r.corners_x || [];
+        const ys = r.corners_y || [];
+        const n = Math.min(xs.length, ys.length);
+        const corners = [];
+        for (let i = 0; i < n; i += 1) {
+          corners.push({ x: xs[i], y: ys[i] });
+        }
+        dispatch(setCharucoPreview({ detected: !!r.detected, corners }));
+      } catch (e) {
+        if (!cancelled) dispatch(setCharucoPreview({ detected: false, corners: [] }));
+      } finally {
+        inFlight = false;
+      }
+    };
+    const id = setInterval(tick, 300);
+    tick();
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+      dispatch(setCharucoPreview({ detected: false, corners: [] }));
+    };
+  }, [started, camera, calibrationPreview, dispatch]);
+
   const canSolve = framesCaptured >= framesRequired;
+  const previewCorners =
+    charucoPreview && charucoPreview.detected ? charucoPreview.corners : [];
 
   return (
-    <div className="max-w-2xl">
+    <div className="max-w-3xl">
       <h3 className="text-lg font-semibold text-[var(--ink)] mb-2">
         Intrinsische Kalibrierung — {cameraLabel}
       </h3>
@@ -141,29 +197,100 @@ function IntrinsicCalibStep({ camera }) {
         kalibrieren.
       </p>
 
-      <div className="bg-white border border-[var(--line)] rounded-lg p-4 mb-4">
-        <div className="flex items-center justify-between mb-2">
-          <span className="text-sm text-[var(--ink-3)]">Bilder erfasst</span>
-          <span className="text-sm font-mono">
-            {framesCaptured} / {framesRequired}
-          </span>
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-4">
+        {/* Left column: live progress + capture quality / coverage. */}
+        <div className="space-y-3">
+          <div className="bg-white border border-[var(--line)] rounded-lg p-4">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-sm text-[var(--ink-3)]">Bilder erfasst</span>
+              <span className="text-sm font-mono">
+                {framesCaptured} / {framesRequired}
+              </span>
+            </div>
+            <div className="h-2 bg-[var(--bg-sunk)] rounded">
+              <div
+                className="h-2 bg-[var(--accent)] rounded transition-all"
+                style={{ width: `${Math.min(100, (framesCaptured / framesRequired) * 100)}%` }}
+              />
+            </div>
+            {lastViewRms !== null && lastViewRms !== undefined && lastViewRms > 0 && (
+              <p className="text-xs text-[var(--ink-4)] mt-2">
+                Aktueller Reprojektionsfehler: {Number(lastViewRms).toFixed(2)} px
+              </p>
+            )}
+            {solvedRms !== null && solvedRms !== undefined && solvedRms > 0 && (
+              <p className="text-xs text-emerald-700 mt-1 font-medium">
+                Gespeichert — Gesamt-Reprojektionsfehler: {Number(solvedRms).toFixed(2)} px
+              </p>
+            )}
+          </div>
+
+          {/* Tier-b: 4x4 coverage mosaic — which parts of the frame the board
+              has already covered. Nudges the student to push the board into
+              the corners so the wide-lens distortion is well-constrained. */}
+          <div className="bg-white border border-[var(--line)] rounded-lg p-4">
+            <p className="text-sm text-[var(--ink-3)] mb-2">
+              Abdeckung der Tafel im Bild
+            </p>
+            <div className="grid grid-cols-4 gap-1 w-28">
+              {coverageMosaic.map((count, idx) => (
+                <div
+                  key={idx}
+                  className={
+                    'aspect-square rounded-sm border ' +
+                    (count > 0
+                      ? 'bg-emerald-400 border-emerald-500'
+                      : 'bg-[var(--bg-sunk)] border-[var(--line)]')
+                  }
+                  title={count > 0 ? `${count} Aufnahme(n)` : 'noch nicht abgedeckt'}
+                />
+              ))}
+            </div>
+            <p className="text-xs text-[var(--ink-4)] mt-2">
+              Bewege die Tafel auch in die <strong>Ecken</strong>, bis möglichst
+              alle Felder grün sind.
+            </p>
+            {qualityHistory.length > 0 && (
+              <div className="mt-3">
+                <p className="text-xs text-[var(--ink-4)] mb-1">
+                  Qualität je Aufnahme
+                </p>
+                <div className="flex flex-wrap gap-1">
+                  {qualityHistory.map((q, idx) => (
+                    <span
+                      key={idx}
+                      className={
+                        'inline-block w-3 h-3 rounded-full ' +
+                        (q === 'good'
+                          ? 'bg-emerald-500'
+                          : q === 'ok'
+                            ? 'bg-amber-400'
+                            : 'bg-red-500')
+                      }
+                      title={
+                        q === 'good' ? 'gut' : q === 'ok' ? 'in Ordnung' : 'schwach'
+                      }
+                    />
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
         </div>
-        <div className="h-2 bg-[var(--bg-sunk)] rounded">
-          <div
-            className="h-2 bg-[var(--accent)] rounded transition-all"
-            style={{ width: `${Math.min(100, (framesCaptured / framesRequired) * 100)}%` }}
+
+        {/* Right column: live camera feed with the detected-corner overlay. */}
+        <div className="min-h-[180px]">
+          <CameraFeedOverlay
+            camera={camera}
+            clickable={false}
+            charucoCorners={previewCorners}
           />
+          <p className="text-xs text-[var(--ink-4)] mt-1">
+            {charucoPreview && charucoPreview.detected
+              ? 'Tafel erkannt — die markierten Punkte zeigen die erkannten Ecken.'
+              : 'Tafel ins Bild halten, bis die Ecken markiert werden.'}
+          </p>
         </div>
-        {lastViewRms !== null && lastViewRms !== undefined && lastViewRms > 0 && (
-          <p className="text-xs text-[var(--ink-4)] mt-2">
-            Aktueller Reprojektionsfehler: {Number(lastViewRms).toFixed(2)} px
-          </p>
-        )}
-        {solvedRms !== null && solvedRms !== undefined && solvedRms > 0 && (
-          <p className="text-xs text-emerald-700 mt-1 font-medium">
-            Gespeichert — Gesamt-Reprojektionsfehler: {Number(solvedRms).toFixed(2)} px
-          </p>
-        )}
       </div>
 
       {calibError && (

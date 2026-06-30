@@ -13,6 +13,7 @@ from physical_ai_server.workflow.handlers import motion as motion_handlers
 from physical_ai_server.workflow.handlers import perception_blocks as perception_handlers
 from physical_ai_server.workflow.handlers import destinations as destination_handlers
 from physical_ai_server.workflow.handlers import output as output_handlers
+from physical_ai_server.workflow.handlers import counters as counter_handlers
 
 
 STATEMENT_HANDLERS: dict[str, callable] = {
@@ -43,6 +44,12 @@ STATEMENT_HANDLERS: dict[str, callable] = {
     'edubotics_play_sound': output_handlers.play_sound,
     'edubotics_speak_de': output_handlers.speak_de,
     'edubotics_play_tone': output_handlers.play_tone,
+    'edubotics_toast': output_handlers.toast,
+    # Counters (named per-run integer counters). The get block is a VALUE
+    # evaluator below; the when_counter_gt hat is interpreter-native
+    # (HAT_BLOCK_TYPES + WorkflowManager._wait_for_hat_trigger).
+    'edubotics_counter_reset': counter_handlers.reset,
+    'edubotics_counter_add': counter_handlers.add,
 }
 
 
@@ -56,11 +63,16 @@ VALUE_EVALUATORS: dict[str, callable] = {
     'edubotics_see_object': perception_handlers.see_object,
     'edubotics_count_object': perception_handlers.count_object,
     'edubotics_wait_until_object_seen': perception_handlers.wait_until_object_seen,
+    # Poll until the gripper holds an object (or a German timeout). Mirrors
+    # grasp_held's no-silent-False contract (raises on missing joint readback).
+    'edubotics_wait_until_held': perception_handlers.wait_until_held,
     # Grasp-split value blocks (Phase 1): find a graspable object (→ Greifziel),
     # read its position, and check whether the gripper is holding something.
     'edubotics_find_object': perception_handlers.find_object,
     'edubotics_object_position': perception_handlers.object_position,
     'edubotics_grasp_held': perception_handlers.grasp_held,
+    # Counter value block.
+    'edubotics_counter_get': counter_handlers.get,
 }
 
 

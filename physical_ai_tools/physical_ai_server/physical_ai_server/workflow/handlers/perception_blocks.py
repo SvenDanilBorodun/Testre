@@ -720,6 +720,38 @@ def wait_until_object_seen(ctx, args: dict[str, Any]) -> bool:
     )
 
 
+def wait_until_held(ctx, args: dict[str, Any]) -> bool:
+    """„warte bis Greifer hält (max N s)" — VALUE (Boolean): poll until the
+    gripper has closed on an object, or raise a German timeout. ``timeout``
+    seconds, default 10.
+
+    Mirrors ``grasp_held``'s no-silent-False contract: when the follower-joint
+    readback is unavailable, ``motion.check_grasp_held`` returns ``None`` — raise
+    the German „keine Gelenkdaten" error (the poll surfaces it on the first
+    tick) instead of silently looping to the timeout on every rig without
+    follower-joint feedback.
+
+    LIMITATION (position-only sensing, document-only fix 2026-06-30):
+    ``check_grasp_held`` reads the achieved gripper angle, which is ABOVE
+    ``GRASP_HELD_MAX_RAD`` whenever the gripper is OPEN (the rest state) — so
+    this block returns True immediately if the gripper is open. It is only
+    meaningful directly AFTER a close (e.g. „Greifer schließen" or a grasp).
+    The block tooltip states this; tightening the shared ``check_grasp_held``
+    band was deliberately deferred to avoid touching the rig-validated
+    ``grasp_object`` path."""
+    timeout_s = float(args.get('timeout', 10))
+
+    def _held() -> bool:
+        result = _motion.check_grasp_held(ctx)
+        if result is None:
+            raise WorkflowError(
+                'Greif-Erfolgskontrolle ist nicht verfügbar (keine Gelenkdaten).'
+            )
+        return result is True
+
+    return _poll_until(ctx, _held, timeout_s, 'Greifer hält etwas')
+
+
 # ------------------------------------------------------------------
 # Grasp-split value + claim blocks (Phase 1)
 # ------------------------------------------------------------------

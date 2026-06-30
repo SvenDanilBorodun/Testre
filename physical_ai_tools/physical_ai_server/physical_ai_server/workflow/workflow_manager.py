@@ -90,6 +90,10 @@ class WorkflowContext:
     # adapter packs them into the typed Detection[] on the message.
     emit_detections: Callable[[list], None] = field(default_factory=lambda: (lambda _: None))
     variables: dict[str, Any] = field(default_factory=dict)
+    # Named per-run integer counters (name → int) for the Zähler blocks
+    # (reset/add/get) + the edubotics_when_counter_gt hat. Fresh per run (seeded
+    # in start()); reads/writes serialize under var_lock (see handlers/counters).
+    counters: dict[str, int] = field(default_factory=dict)
     get_scene_frame: Callable[[], Any] | None = None
     get_gripper_frame: Callable[[], Any] | None = None
     # Age (seconds) of the latest scene frame, for the perception staleness
@@ -465,6 +469,9 @@ class WorkflowManager:
                 set_paused=self._set_paused,
                 object_catalog=object_catalog,
                 object_catalog_error=object_catalog_error,
+                # Fresh per-run counter store for the Zähler blocks + the
+                # when_counter_gt hat (never persisted across runs).
+                counters={},
                 # Fresh per-run claimed/skipped sets (never persisted across runs)
                 # + the shared lock guarding them.
                 claimed_tags=set(),
@@ -763,26 +770,28 @@ class WorkflowManager:
         unaffected.
         """
         btype = hat.get('type')
-        # Edge-trigger arming state for the object-seen hat. None means
-        # 'first wait, treat as armed'; True means armed (allowed to fire
-        # on next true), False means waiting for the condition to clear.
+        # Edge-trigger arming state for the level-triggered perception/counter
+        # hats. None means 'first wait, treat as armed'; True means armed
+        # (allowed to fire on next true), False means waiting for the condition
+        # to clear (object leaves frame / counter drops back to ≤ N).
+        _EDGE_HATS = ('edubotics_when_object_seen', 'edubotics_when_counter_gt')
         edge_armed = True
         try:
             while not ctx.should_stop():
                 triggered = self._wait_for_hat_trigger(hat, ctx)
                 if not triggered:
-                    # For perception hats, an un-triggered poll cycle
-                    # means the condition is currently false; re-arm.
-                    # MUST list the SAME hats as the edge-gate below, or a hat
-                    # fires once and then never re-arms (edge_armed stuck False).
-                    if btype == 'edubotics_when_object_seen':
+                    # For the level-triggered hats, an un-triggered poll cycle
+                    # means the condition is currently false; re-arm. MUST list
+                    # the SAME hats as the edge-gate below, or a hat fires once
+                    # and then never re-arms (edge_armed stuck False).
+                    if btype in _EDGE_HATS:
                         edge_armed = True
                     continue
                 if ctx.should_stop():
                     return
                 # Edge-trigger gate. Skip body execution while we wait
                 # for the condition to clear and re-arm.
-                if btype == 'edubotics_when_object_seen':
+                if btype in _EDGE_HATS:
                     if not edge_armed:
                         time.sleep(0.1)
                         continue
@@ -845,6 +854,33 @@ class WorkflowManager:
         if btype == 'edubotics_when_object_seen':
             type_name = (fields.get('OBJECT_TYPE') or '').strip()
             return self._wait_object_visible(type_name, ctx)
+        if btype == 'edubotics_when_counter_gt':
+            return self._wait_counter_gt(fields, ctx)
+        return False
+
+    def _wait_counter_gt(self, fields: dict[str, Any], ctx: WorkflowContext) -> bool:
+        """Edge-trigger poll for ``edubotics_when_counter_gt``: True when the
+        named counter exceeds the threshold N. Polls a short budget (matching the
+        other hats' cadence) so the handler loop never spins hot; the per-name
+        edge gate in _run_hat_handler stops the body re-firing every poll while
+        the counter stays above N (it re-arms once a ``reset`` drops it ≤ N)."""
+        name = (fields.get('NAME') or '').strip()
+        if not name:
+            time.sleep(0.2)
+            return False
+        try:
+            threshold = float(fields.get('N', 0))
+        except (TypeError, ValueError):
+            threshold = 0.0
+        # Lazy import (handlers/__init__ already loads counters; avoids any
+        # import-order fragility at module top).
+        from physical_ai_server.workflow.handlers import counters as _counters
+        for _ in range(2):  # ~0.4 s budget, matching the object-seen hat
+            if ctx.should_stop():
+                return False
+            if _counters.get_count(ctx, name) > threshold:
+                return True
+            time.sleep(0.2)
         return False
 
     def _wait_object_visible(self, type_name: str, ctx: WorkflowContext) -> bool:

@@ -20,6 +20,8 @@ Phase-2 additions:
   read the text out via window.speechSynthesis (de-DE voice).
 - ``edubotics_play_tone`` emits ``[TONE:freq:seconds]`` for a
   parameterized beep.
+- ``edubotics_toast`` emits ``[TOAST:level:seconds:text]`` so the React
+  layer shows an on-screen react-hot-toast popup (severity → toast type).
 """
 
 from __future__ import annotations
@@ -37,6 +39,11 @@ TONE_FREQ_MIN = 100
 TONE_FREQ_MAX = 4000
 TONE_SECONDS_MIN = 0.05
 TONE_SECONDS_MAX = 5.0
+# Toast bounds (mirror the React-side clamp in useRosTopicSubscription).
+MAX_TOAST_CHARS = 240
+TOAST_SECONDS_MIN = 1
+TOAST_SECONDS_MAX = 15
+_TOAST_LEVELS = ('info', 'success', 'warning', 'error')
 
 
 def log(ctx, args: dict[str, Any]) -> None:
@@ -99,3 +106,36 @@ def play_tone(ctx, args: dict[str, Any]) -> None:
     freq = max(TONE_FREQ_MIN, min(TONE_FREQ_MAX, freq))
     seconds = max(TONE_SECONDS_MIN, min(TONE_SECONDS_MAX, seconds))
     ctx.log(f'[TONE:{freq:.1f}:{seconds:.3f}]')
+
+
+def toast(ctx, args: dict[str, Any]) -> None:
+    """Emit a ``[TOAST:level:seconds:text]`` sentinel the React layer renders as
+    a react-hot-toast popup. Frontend-only effect — like speak_de / play_tone the
+    ROS node only logs the sentinel; ``level`` ∈ {info, success, warning, error}
+    maps to the toast severity, ``seconds`` is the display duration."""
+    level = str(args.get('level', 'info')).strip().lower()
+    if level not in _TOAST_LEVELS:
+        level = 'info'
+    try:
+        seconds = int(round(float(args.get('seconds', 3))))
+    except (TypeError, ValueError):
+        seconds = 3
+    seconds = max(TOAST_SECONDS_MIN, min(TOAST_SECONDS_MAX, seconds))
+    text = args.get('text')
+    if text is None:
+        text = ''
+    text = str(text)
+    # Truncate FIRST so a multi-MB input doesn't go through the full strip chain.
+    if len(text) > MAX_TOAST_CHARS:
+        text = text[:MAX_TOAST_CHARS]
+    # Collapse newlines (the [TOAST:..] token is single-line) and strip the
+    # bracket chars so a student's text can't break the sentinel or spoof
+    # another token (e.g. typing "[SOUND]" into the message).
+    text = (
+        text.replace('\r', ' ')
+            .replace('\n', ' ')
+            .replace('[', '(')
+            .replace(']', ')')
+    )
+    text = ' '.join(text.split())
+    ctx.log(f'[TOAST:{level}:{seconds}:{text}]')

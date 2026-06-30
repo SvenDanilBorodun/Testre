@@ -8,7 +8,7 @@
  *     http://www.apache.org/licenses/LICENSE-2.0
  */
 
-import React, { useEffect, useState, useCallback, useRef } from 'react';
+import React, { useEffect, useState, useCallback, useRef, Suspense, lazy } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import toast from 'react-hot-toast';
 import * as Blockly from 'blockly/core';
@@ -43,6 +43,16 @@ import {
   createWorkflow,
   updateWorkflow,
 } from '../services/workflowApi';
+
+// Phase-5: live 3D follower twin in the real-mode editor (stacked below the scene
+// camera). LAZY-loaded so three.js (~600 KB) + urdf-loader stay out of the entry
+// bundle the white-screen CI greps (same idiom as RecordPage + SimScene). Mounts
+// only while the „3D-Ansicht" panel is open; full WebGL teardown on collapse.
+const UrdfTwin = lazy(() => import('../components/UrdfTwin'));
+
+// The student's „3D-Ansicht" open/closed choice persists across reloads. Distinct
+// key from RecordPage's `edubotics_urdf_open` so the two panels are independent.
+const WORKSHOP_URDF_OPEN_KEY = 'edubotics_workshop_urdf_open';
 
 // Phase-3 simulator fallback palette: an uncalibrated rig may have no
 // object_catalog.json yet, so seed at least one type so the sim editor is usable.
@@ -111,6 +121,39 @@ function WorkshopPage({ isActive }) {
   // the id of the most-recently selected destination_pin block via a
   // SELECTED change-listener and use THAT at mark time, not live selection.
   const lastPinBlockIdRef = useRef(null);
+
+  // Phase-5: real-mode 3D follower twin panel. Default COLLAPSED (the scene
+  // camera stays primary); the open/closed choice persists in localStorage.
+  const [isUrdfOpen, setIsUrdfOpen] = useState(() => {
+    try {
+      return typeof window !== 'undefined'
+        && window.localStorage.getItem(WORKSHOP_URDF_OPEN_KEY) === '1';
+    } catch (_) {
+      return false;
+    }
+  });
+  const toggleUrdf = useCallback(() => {
+    setIsUrdfOpen((prev) => {
+      const next = !prev;
+      try {
+        window.localStorage.setItem(WORKSHOP_URDF_OPEN_KEY, next ? '1' : '0');
+      } catch (_) { /* private mode / quota — ignore */ }
+      return next;
+    });
+  }, []);
+  // Twin overlays: the end-effector path trail + base/TCP coordinate triads.
+  const [showPath, setShowPath] = useState(false);
+  const [showFrames, setShowFrames] = useState(false);
+  // Bumped to clear the path trail (manual „Bahn löschen" + auto on run start).
+  const [pathClearToken, setPathClearToken] = useState(0);
+  // Auto-clear the trail when a run begins, so each run draws a fresh path.
+  const prevRunStateRef = useRef(runState);
+  useEffect(() => {
+    if (runState === 'running' && prevRunStateRef.current !== 'running') {
+      setPathClearToken((t) => t + 1);
+    }
+    prevRunStateRef.current = runState;
+  }, [runState]);
 
   const calibrated =
     hasIntrinsicScene &&
@@ -511,7 +554,13 @@ function WorkshopPage({ isActive }) {
                   </div>
                   <div
                     className={
-                      'flex flex-col gap-3 overflow-auto md:overflow-hidden '
+                      // md+: the column is a fixed-height grid cell. Opening the
+                      // „3D-Ansicht" panel inserts an aspect-video block that can
+                      // push SkillmapPlayer past the cell height; clip horizontally
+                      // (as before) but let the column scroll vertically so nothing
+                      // is hidden without a scrollbar. Mobile keeps overflow-auto.
+                      'flex flex-col gap-3 overflow-auto '
+                      + 'md:overflow-x-hidden md:overflow-y-auto '
                       + 'min-w-0 '
                       + (debuggerVisible
                         ? 'md:col-span-3'
@@ -527,11 +576,96 @@ function WorkshopPage({ isActive }) {
                         catalog={objectCatalog}
                       />
                     ) : (
-                      <CameraFeedOverlay
-                        camera="scene"
-                        clickable={true}
-                        onMark={handleMarkDestination}
-                      />
+                      <>
+                        <CameraFeedOverlay
+                          camera="scene"
+                          clickable={true}
+                          onMark={handleMarkDestination}
+                        />
+                        {/* Phase-5: live 3D follower twin, stacked BELOW the scene
+                            camera (the camera click-to-pin flow is untouched).
+                            Collapsible „3D-Ansicht" panel, default collapsed. */}
+                        <div className="rounded-lg border border-[var(--line)] bg-white overflow-hidden">
+                          <div className="flex items-center gap-1.5 flex-wrap px-2 py-1.5 border-b border-[var(--line)]">
+                            <button
+                              type="button"
+                              onClick={toggleUrdf}
+                              aria-pressed={isUrdfOpen}
+                              title={isUrdfOpen ? '3D-Ansicht schließen' : '3D-Ansicht öffnen'}
+                              className={
+                                'text-xs px-2.5 py-1 rounded-md border '
+                                + (isUrdfOpen
+                                  ? 'bg-[var(--accent)] text-white border-[var(--accent)]'
+                                  : 'bg-white text-[var(--ink-3)] border-[var(--line)] hover:bg-[var(--bg-sunk)]')
+                              }
+                            >
+                              3D-Ansicht
+                            </button>
+                            {isUrdfOpen && (
+                              <>
+                                <button
+                                  type="button"
+                                  onClick={() => setShowPath((v) => !v)}
+                                  aria-pressed={showPath}
+                                  title="Bewegungsbahn des Greifers anzeigen"
+                                  className={
+                                    'text-xs px-2.5 py-1 rounded-md border '
+                                    + (showPath
+                                      ? 'bg-[var(--accent)] text-white border-[var(--accent)]'
+                                      : 'bg-white text-[var(--ink-3)] border-[var(--line)] hover:bg-[var(--bg-sunk)]')
+                                  }
+                                >
+                                  {showPath ? 'Bahn verbergen' : 'Bahn anzeigen'}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setPathClearToken((t) => t + 1)}
+                                  title="Bewegungsbahn löschen"
+                                  className="text-xs px-2.5 py-1 rounded-md border bg-white text-[var(--ink-3)] border-[var(--line)] hover:bg-[var(--bg-sunk)]"
+                                >
+                                  Bahn löschen
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setShowFrames((v) => !v)}
+                                  aria-pressed={showFrames}
+                                  title="Koordinatenachsen an Basis und Greifer anzeigen"
+                                  className={
+                                    'text-xs px-2.5 py-1 rounded-md border '
+                                    + (showFrames
+                                      ? 'bg-[var(--accent)] text-white border-[var(--accent)]'
+                                      : 'bg-white text-[var(--ink-3)] border-[var(--line)] hover:bg-[var(--bg-sunk)]')
+                                  }
+                                >
+                                  {showFrames ? 'Achsen verbergen' : 'Achsen anzeigen'}
+                                </button>
+                              </>
+                            )}
+                          </div>
+                          {isUrdfOpen && (
+                            <div className="relative w-full aspect-video bg-[#1a1d23]">
+                              <Suspense
+                                fallback={
+                                  <div className="w-full h-full flex items-center justify-center text-[12px] text-white/70">
+                                    3D-Vorschau wird geladen …
+                                  </div>
+                                }
+                              >
+                                <UrdfTwin
+                                  showPath={showPath}
+                                  pathClearToken={pathClearToken}
+                                  showFrames={showFrames}
+                                />
+                              </Suspense>
+                              {showFrames && (
+                                <div className="absolute bottom-1.5 left-1.5 z-10 px-2 py-0.5 rounded bg-black/55 text-[10px] text-white/80 font-mono">
+                                  X rot · Y grün · Z blau
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      </>
                     )}
                     <SkillmapPlayer />
                   </div>

@@ -102,7 +102,9 @@ const initialState = {
 };
 
 function classifyQuality(score) {
-  if (score === undefined || score === null) return 'ok';
+  // Backend sends 0 for "unknown" (RMS not yet estimable, < 4 frames) — treat
+  // it like null so the first captures aren't flagged as a red "schwach" dot.
+  if (score === undefined || score === null || score === 0) return 'ok';
   if (score >= 3) return 'good';
   if (score >= 2) return 'ok';
   return 'poor';
@@ -261,14 +263,27 @@ const workshopSlice = createSlice({
         state.runState = 'idle';
         state.phase = '';
         state.currentBlockId = null;
+      } else if (next === 'running') {
+        state.paused = false;
+        // Clear the previous run's highlighted block ONLY on the transition
+        // INTO running (idle/stopped → running), so a fresh run doesn't briefly
+        // flash the PRIOR run's block before the first new block id arrives
+        // (#L1). Do NOT clear on every per-block 'running' tick:
+        // subscribeToWorkflowStatus dispatches setRunState('running') on EVERY
+        // running WorkflowStatus message, AFTER setWorkflowStatus has already
+        // adopted that tick's current_block_id — so an unconditional null wiped
+        // the live highlight on every block. The running (moving) block then
+        // never lit up; only its brief 'done'-tick window (no setRunState
+        // dispatch) and debugger pauses (phase='paused', no setRunState) kept
+        // the highlight — exactly the "blocks only light up when stopped or in
+        // debug, not live" report. Guarding on the transition preserves #L1 AND
+        // restores live run-highlighting.
+        if (state.runState !== 'running') {
+          state.currentBlockId = null;
+        }
+        state.runState = 'running';
       } else {
         state.runState = next;
-      }
-      if (next === 'running') {
-        state.paused = false;
-        // Clear the previous run's highlighted block so the next run doesn't
-        // briefly flash it before the first new block id arrives (#L1).
-        state.currentBlockId = null;
       }
     },
     setPaused: (state, action) => {

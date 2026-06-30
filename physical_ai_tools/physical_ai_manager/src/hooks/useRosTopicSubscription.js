@@ -813,10 +813,12 @@ export function useRosTopicSubscription() {
 
   // Intercept inline output tokens emitted by the workflow runtime via
   // ctx.log. We use a single text channel for all auxiliary outputs:
-  //   "[SOUND]"         — play the default 880 Hz beep
-  //   "[TONE:F:S]"      — play a tone of F Hz for S seconds
-  //   "[SPEAK:text]"    — speak `text` via window.speechSynthesis (de-DE)
-  //   "[VAR:name=json]" — variable inspector update
+  //   "[SOUND]"             — play the default 880 Hz beep
+  //   "[TONE:F:S]"          — play a tone of F Hz for S seconds
+  //   "[SPEAK:text]"        — speak `text` via window.speechSynthesis (de-DE)
+  //   "[TOAST:level:sec:t]" — on-screen react-hot-toast popup (level →
+  //                           info/success/warning/error, sec = duration)
+  //   "[VAR:name=json]"     — variable inspector update
   // None of the tokens leak into the user-visible log strip.
   const interceptToken = useCallback((message) => {
     if (typeof message !== 'string') return { intercepted: false };
@@ -847,6 +849,34 @@ export function useRosTopicSubscription() {
         }
       } catch (e) {
         console.warn('SpeechSynthesis failed', e);
+      }
+      return { intercepted: true };
+    }
+    // [TOAST:level:sec:text] — on-screen popup via the existing react-hot-toast
+    // instance (already imported above). The level alternation in the regex
+    // restricts it to the 4 known severities, so a malformed token is NOT
+    // intercepted (it falls through and stays visible in the log strip). The
+    // text is the last capture, so it may itself contain ':' (the backend
+    // strips ']' so it can't break the closing bracket).
+    m = /^\[TOAST:(info|success|warning|error):([\d.]+):(.*)\]$/s.exec(message);
+    if (m) {
+      const level = m[1];
+      const seconds = Math.max(1, Math.min(15, Number(m[2]) || 3));
+      const text = String(m[3] ?? '').slice(0, 240);
+      try {
+        const opts = { duration: seconds * 1000 };
+        if (level === 'success') {
+          toast.success(text, opts);
+        } else if (level === 'error') {
+          toast.error(text, opts);
+        } else if (level === 'warning') {
+          toast(text, { ...opts, icon: '⚠️' });
+        } else {
+          toast(text, opts);
+        }
+      } catch (e) {
+        // toast unavailable in a non-DOM test env — never break the feed.
+        console.warn('TOAST token failed', e);
       }
       return { intercepted: true };
     }

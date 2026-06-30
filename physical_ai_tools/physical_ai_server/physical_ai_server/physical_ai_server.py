@@ -441,8 +441,17 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 self.workflow_set_breakpoints_callback,
                 self._preempt_cb_group,
             ),
-            # Phase-2 calibration helpers (see CalibrationManager).
-            ('/calibration/preview', CalibrationPreview, self.calibration_preview_callback),
+            # Phase-2 calibration helpers (see CalibrationManager). The live
+            # ChArUco preview is polled a few Hz while the intrinsic step is
+            # active; it runs the lock-free detector and must NOT queue behind /
+            # starve the 1 Hz heartbeat on the node default group, so it rides
+            # the reentrant preempt group like /calibration/status.
+            (
+                '/calibration/preview',
+                CalibrationPreview,
+                self.calibration_preview_callback,
+                self._preempt_cb_group,
+            ),
             # The verify "add_point" branch grabs a scene frame + runs the
             # AprilTag detector (blocking), so it rides the reentrant preempt
             # group — otherwise it queues behind / starves the 1 Hz heartbeat
@@ -2095,6 +2104,17 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         response.frames_required = required
         response.last_view_rms = last_rms
         response.message = message
+        # Phase-2 wizard UX: surface the 4x4 coverage cell + 1/2/3 quality badge
+        # for the just-captured INTRINSIC frame so the React side can fill the
+        # coverage mosaic + quality strip. Returns (0, 0) for an extrinsic /
+        # touch-off capture or a failed capture (the wizard only consumes these
+        # on success). Best-effort: a meta lookup error never fails the capture.
+        try:
+            cell, quality = manager.last_intrinsic_capture_meta(request.camera)
+        except Exception:  # noqa: BLE001
+            cell, quality = 0, 0
+        response.coverage_cell = int(cell)
+        response.quality = int(quality)
         return response
 
     def calibration_solve_callback(self, request, response):
@@ -3123,11 +3143,48 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
     # rather than failing with rosbridge "service not advertised". Full
     # implementations live behind ROBOTER_STUDIO_DEFERRED.md §1.2.
     def calibration_preview_callback(self, request, response):
+        """Live ChArUco corner overlay for the intrinsic wizard (polled ~3-4 Hz).
+
+        Grabs the latest scene-camera frame and runs the manager's LOCK-FREE
+        ``detect_preview`` so the poll never queues behind a multi-second
+        intrinsic solve (and, on the reentrant preempt group, never starves the
+        1 Hz heartbeat). The returned corner pixels are in the camera's NATIVE
+        resolution — the SAME resolution the :8080 MJPEG stream serves (both
+        come from the one ``/scene/image_raw/compressed`` topic; web_video_server
+        only re-encodes JPEG quality, it does not resize), so the React SVG
+        overlay's ``naturalSize`` viewBox lines up with no offset.
+        """
         response.detected = False
         response.corners_x = []
         response.corners_y = []
         response.board_area_pct = 0
-        response.message = 'Live-Vorschau wird in einer späteren Version aktiviert.'
+        manager = self.calibration_manager
+        if manager is None:
+            response.message = 'Kalibrierung wurde nicht gestartet.'
+            return response
+        camera = (getattr(request, 'camera', '') or 'scene')
+        frame = self._get_latest_camera_frame(camera)
+        if frame is None:
+            response.message = 'Kein Kamerabild verfügbar.'
+            return response
+        # Freshness gate: never preview against a frozen camera (mirrors the
+        # workflow perception staleness gate). Age is advisory — None means the
+        # provider can't report it, in which case we proceed.
+        age = self._get_camera_frame_age(camera)
+        if age is not None and age > 1.0:
+            response.message = 'Kamerabild ist veraltet — bitte Kamera prüfen.'
+            return response
+        try:
+            detected, xs, ys, area_pct = manager.detect_preview(frame)
+        except Exception as e:  # noqa: BLE001 — preview is advisory, never fatal
+            self.get_logger().warning(f'Calibration preview failed: {e}')
+            response.message = 'Vorschau fehlgeschlagen.'
+            return response
+        response.detected = bool(detected)
+        response.corners_x = [float(x) for x in xs]
+        response.corners_y = [float(y) for y in ys]
+        response.board_area_pct = int(area_pct)
+        response.message = 'Tafel erkannt.' if detected else 'Tafel nicht erkannt.'
         return response
 
     def _verify_reset_response(self, response):

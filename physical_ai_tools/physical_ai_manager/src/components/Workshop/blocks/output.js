@@ -79,6 +79,41 @@ export const OUTPUT_BLOCKS = [
     colour: OUTPUT_COLOR,
     extensions: ['edubotics_validate_tone'],
   },
+  // On-screen message (toast). Frontend-only — the backend emits a
+  // [TOAST:level:sec:text] sentinel that useRosTopicSubscription turns into a
+  // react-hot-toast popup (severity → toast type). The LEVEL dropdown VALUEs
+  // (info/success/warning/error) + the TEXT input + SECONDS field NAMEs are a
+  // hard contract with handlers/output.py::toast (interpreter lowercases the
+  // field/input NAMEs → args level / text / seconds).
+  {
+    type: 'edubotics_toast',
+    message0: DE.TOAST,
+    args0: [
+      { type: 'input_value', name: 'TEXT' },
+      {
+        type: 'field_dropdown',
+        name: 'LEVEL',
+        options: [
+          [DE.TOAST_LEVEL_INFO, 'info'],
+          [DE.TOAST_LEVEL_SUCCESS, 'success'],
+          [DE.TOAST_LEVEL_WARNING, 'warning'],
+          [DE.TOAST_LEVEL_ERROR, 'error'],
+        ],
+      },
+      {
+        type: 'field_number',
+        name: 'SECONDS',
+        value: 3,
+        min: 1,
+        max: 15,
+        precision: 1,
+      },
+    ],
+    previousStatement: null,
+    nextStatement: null,
+    colour: OUTPUT_COLOR,
+    tooltip: 'Zeigt eine kurze Meldung am Bildschirm an.',
+  },
 ];
 
 function registerExtensionOnce(name, fn) {

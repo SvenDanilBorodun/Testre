@@ -31,7 +31,13 @@ const CAMERA_TOPICS = {
 // against a dead frame.
 const FROZEN_THRESHOLD_MS = 2000;
 
-function CameraFeedOverlay({ camera = 'scene', clickable = false, onMark, ...rest }) {
+function CameraFeedOverlay({
+  camera = 'scene',
+  clickable = false,
+  onMark,
+  charucoCorners = null,
+  ...rest
+}) {
   // Hooks first, no conditional returns above them — react-hooks/rules
   // requires the same call order on every render. The cloud-mode
   // placeholder branches below the hooks (audit §3.7).
@@ -209,6 +215,14 @@ function CameraFeedOverlay({ camera = 'scene', clickable = false, onMark, ...res
         detections={detections}
         naturalSize={naturalSize}
       />
+      {/* ChArUco live-preview corner overlay (intrinsic calibration). Kept
+          SEPARATE from DetectionOverlay — different data source (the polled
+          /calibration/preview corners, not the workflow detection channel) and
+          a different lifecycle — but it shares the same naturalSize viewBox. */}
+      <CharucoOverlay
+        corners={charucoCorners}
+        naturalSize={naturalSize}
+      />
       {streamError && (
         <div className="absolute inset-0 flex items-center justify-center bg-black/60 text-sm text-white px-4 text-center pointer-events-none">
           Kamera-Stream nicht erreichbar. Bitte Verbindung prüfen
@@ -300,6 +314,37 @@ function DetectionOverlay({ detections, naturalSize }) {
               </text>
             )}
           </g>
+        );
+      })}
+    </svg>
+  );
+}
+
+// Live ChArUco corner overlay for the intrinsic calibration step. `corners` is
+// an array of {x, y} pixel coordinates in the camera's NATIVE resolution (the
+// same resolution the MJPEG stream serves), so the shared naturalSize viewBox
+// places each marker exactly over its detected corner. Pure presentation, no
+// interaction — pointer-events disabled like DetectionOverlay.
+function CharucoOverlay({ corners, naturalSize }) {
+  if (!corners || corners.length === 0 || naturalSize.w === 0) return null;
+  return (
+    <svg
+      className="absolute inset-0 pointer-events-none w-full h-full"
+      viewBox={`0 0 ${naturalSize.w} ${naturalSize.h}`}
+      preserveAspectRatio="xMidYMid meet"
+    >
+      {corners.map((c, idx) => {
+        if (!c || typeof c.x !== 'number' || typeof c.y !== 'number') return null;
+        return (
+          <circle
+            key={idx}
+            cx={c.x}
+            cy={c.y}
+            r="4"
+            fill="none"
+            stroke="#f59e0b"
+            strokeWidth="2"
+          />
         );
       })}
     </svg>

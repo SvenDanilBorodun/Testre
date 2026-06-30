@@ -32,6 +32,7 @@ export const DE = {
   CATEGORY_MATHE: 'Mathe',
   CATEGORY_TEXT: 'Text',
   CATEGORY_AUSGABE: 'Ausgabe',
+  CATEGORY_ZAEHLER: 'Zähler',
   CATEGORY_VORSCHLAEGE: 'Vorschläge',
 
   // Motion blocks
@@ -66,6 +67,9 @@ export const DE = {
   WAIT_UNTIL_OBJECT_SEEN_PREFIX: 'warte bis',
   WAIT_UNTIL_OBJECT_SEEN_MID: 'sichtbar, max',
   WAIT_UNTIL_OBJECT_SEEN_SUFFIX: 's',
+  // „warte bis Greifer hält (max N s)" — Boolean value block, no dropdown.
+  WAIT_UNTIL_HELD_PREFIX: 'warte bis Greifer hält, max',
+  WAIT_UNTIL_HELD_SUFFIX: 's',
   WHEN_OBJECT_SEEN_PREFIX: 'wenn',
   WHEN_OBJECT_SEEN_SUFFIX: 'erkannt',
   // Grasp split (Phase 1) — perception blocks producing/consuming a Greifziel.
@@ -89,10 +93,22 @@ export const DE = {
   PLAY_SOUND: 'Ton spielen',
   SPEAK_DE: 'sage %1',
   PLAY_TONE: 'spiele Ton %1 Hz für %2 s',
+  // On-screen message (toast). %1 = text, %2 = severity dropdown, %3 = seconds.
+  TOAST: 'zeige Meldung %1 (%2) für %3 s',
+  TOAST_LEVEL_INFO: 'Info',
+  TOAST_LEVEL_SUCCESS: 'Erfolg',
+  TOAST_LEVEL_WARNING: 'Warnung',
+  TOAST_LEVEL_ERROR: 'Fehler',
 
   // Events
   BROADCAST: 'sende Ereignis %1',
   WHEN_BROADCAST: 'wenn Ereignis %1 empfangen',
+
+  // Counters (Zähler) — a named per-run integer counter.
+  COUNTER_RESET: 'setze Zähler %1 auf 0',
+  COUNTER_ADD: 'erhöhe Zähler %1 um 1',
+  COUNTER_GET: 'Zähler %1',
+  WHEN_COUNTER_GT: 'wenn Zähler %1 größer als %2',
 
   // Sensor history
   AVERAGE_LAST_N: 'Mittelwert der letzten %1 Werte von %2',

@@ -50,6 +50,17 @@ export const DE = {
   CLOSE_ON_OBJECT: 'schließe um %1',
   LIFT: 'hebe an',
 
+  // Phase-2 Tempo — OPTIONAL per-move „mit Tempo" dropdown on the transit blocks
+  // (bewege zu / fahre über / hebe an / aufnehmen / ablegen). The first option
+  // „Standard" → the server's _move_tempo returns None → the global run-bar
+  // tempo applies; the others force that move's speed. The field name
+  // GESCHWINDIGKEIT is a hard contract (interpreter lowercases → args['geschwindigkeit']).
+  TEMPO_FIELD_LABEL: 'Tempo',
+  TEMPO_GLOBAL: 'Standard',
+  TEMPO_LANGSAM: 'langsam',
+  TEMPO_NORMAL: 'normal',
+  TEMPO_SCHNELL: 'schnell',
+
   // Named-object grasping (AprilTag). Custom-init blocks use a prefix label +
   // a runtime-populated dropdown (no %1), so these are prefixes, not templates.
   GRASP_OBJECT_PREFIX: 'Greife',
@@ -154,6 +165,13 @@ export const DE = {
   RUN_PAUSED: 'Pausiert',
   RUN_RUNNING: 'Läuft',
   RUN_ERROR: 'Fehler',
+
+  // Phase-2 Tempo — global run-bar speed control (langsam ×0.5 / normal ×1 /
+  // schnell ×2). Applied to the WHOLE program at the next Start.
+  RUN_TEMPO_LABEL: 'Tempo',
+  RUN_TEMPO_SLOW: 'langsam',
+  RUN_TEMPO_NORMAL: 'normal',
+  RUN_TEMPO_FAST: 'schnell',
 
   // Debug panel
   DEBUG_TAB_SENSORS: 'Sensoren',

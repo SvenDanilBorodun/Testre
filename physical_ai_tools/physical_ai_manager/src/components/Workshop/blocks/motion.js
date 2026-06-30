@@ -13,6 +13,23 @@ import { DE, WORKSPACE_BOUNDS_M } from './messages_de';
 
 const MOTION_COLOR = '#3b82f6';
 
+// Phase-2 Tempo — OPTIONAL per-move „mit Tempo" override on the transit blocks.
+// Strictly additive: the dropdown defaults to 'global' (label „Standard"), which
+// the server's _move_tempo maps to None → the workflow-global run-bar tempo, so
+// an existing saved block (no GESCHWINDIGKEIT field) keeps the global speed. The
+// values mirror handlers/motion.py::_MOVE_TEMPO_PRESETS; the field name
+// GESCHWINDIGKEIT is the contract the interpreter lowercases → args['geschwindigkeit'].
+const TEMPO_OPTIONS = [
+  [DE.TEMPO_GLOBAL, 'global'],
+  [DE.TEMPO_LANGSAM, 'langsam'],
+  [DE.TEMPO_NORMAL, 'normal'],
+  [DE.TEMPO_SCHNELL, 'schnell'],
+];
+
+function tempoField() {
+  return { type: 'field_dropdown', name: 'GESCHWINDIGKEIT', options: TEMPO_OPTIONS };
+}
+
 // Wait-seconds bounds. The runtime overlay (handlers/motion.py)
 // also clamps server-side; this is the pre-flight UX hint. Limits
 // match the server-side cap so a 5-minute "Klassenraum-Pause" block
@@ -47,34 +64,38 @@ export const MOTION_BLOCKS = [
   },
   {
     type: 'edubotics_move_to',
-    message0: DE.MOVE_TO,
-    args0: [{ type: 'input_value', name: 'DESTINATION' }],
+    message0: `${DE.MOVE_TO} · ${DE.TEMPO_FIELD_LABEL} %2`,
+    args0: [{ type: 'input_value', name: 'DESTINATION' }, tempoField()],
+    inputsInline: true,
     previousStatement: null,
     nextStatement: null,
     colour: MOTION_COLOR,
-    tooltip: 'Bewegt den Greifer zu einem Ziel-Block.',
+    tooltip: 'Bewegt den Greifer zu einem Ziel-Block. Tempo „Standard" '
+      + 'übernimmt die globale Geschwindigkeit der Leiste.',
   },
   {
     type: 'edubotics_pickup',
-    message0: DE.PICKUP,
-    args0: [{ type: 'input_value', name: 'TARGET' }],
+    message0: `${DE.PICKUP} · ${DE.TEMPO_FIELD_LABEL} %2`,
+    args0: [{ type: 'input_value', name: 'TARGET' }, tempoField()],
+    inputsInline: true,
     previousStatement: null,
     nextStatement: null,
     colour: MOTION_COLOR,
     tooltip:
       'Fährt über das Ziel, schließt den Greifer und hebt das '
-      + 'Objekt an.',
+      + 'Objekt an. Tempo „Standard" übernimmt die globale Geschwindigkeit.',
   },
   {
     type: 'edubotics_drop_at',
-    message0: DE.DROP_AT,
-    args0: [{ type: 'input_value', name: 'DESTINATION' }],
+    message0: `${DE.DROP_AT} · ${DE.TEMPO_FIELD_LABEL} %2`,
+    args0: [{ type: 'input_value', name: 'DESTINATION' }, tempoField()],
+    inputsInline: true,
     previousStatement: null,
     nextStatement: null,
     colour: MOTION_COLOR,
     tooltip:
       'Fährt zum Ziel, öffnet den Greifer und hebt den Arm wieder '
-      + 'an.',
+      + 'an. Tempo „Standard" übernimmt die globale Geschwindigkeit.',
   },
   {
     type: 'edubotics_wait_seconds',
@@ -91,12 +112,14 @@ export const MOTION_BLOCKS = [
   // Python server (`_build_args` lowercases it → arg `ziel`).
   {
     type: 'edubotics_move_above',
-    message0: DE.MOVE_ABOVE,
-    args0: [{ type: 'input_value', name: 'ZIEL', check: 'Greifziel' }],
+    message0: `${DE.MOVE_ABOVE} · ${DE.TEMPO_FIELD_LABEL} %2`,
+    args0: [{ type: 'input_value', name: 'ZIEL', check: 'Greifziel' }, tempoField()],
+    inputsInline: true,
     previousStatement: null,
     nextStatement: null,
     colour: MOTION_COLOR,
-    tooltip: 'Fährt den Greifer über das Greifziel, ohne abzusenken.',
+    tooltip: 'Fährt den Greifer über das Greifziel, ohne abzusenken. Tempo '
+      + '„Standard" übernimmt die globale Geschwindigkeit.',
   },
   {
     type: 'edubotics_descend_to',
@@ -118,11 +141,13 @@ export const MOTION_BLOCKS = [
   },
   {
     type: 'edubotics_lift',
-    message0: DE.LIFT,
+    message0: `${DE.LIFT} · ${DE.TEMPO_FIELD_LABEL} %1`,
+    args0: [tempoField()],
     previousStatement: null,
     nextStatement: null,
     colour: MOTION_COLOR,
-    tooltip: 'Hebt das gegriffene Objekt an.',
+    tooltip: 'Hebt das gegriffene Objekt an. Tempo „Standard" übernimmt die '
+      + 'globale Geschwindigkeit.',
   },
 ];
 

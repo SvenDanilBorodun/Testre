@@ -109,6 +109,8 @@ from app.routes import workflows as wf  # noqa: E402
 from app.validators.workflow import (  # noqa: E402
     MAX_SIM_SCENE_JSON_BYTES,
     MAX_SIM_SCENE_ZONES,
+    TEMPO_MAX,
+    TEMPO_MIN,
     validate_sim_scene,
 )
 
@@ -470,6 +472,49 @@ class TestValidateSimScene(unittest.TestCase):
             validate_sim_scene(
                 {"zones": [{"min": [0.2, 0.0, 0.0], "max": [0.1, 0.1, 0.1]}]}
             )
+        self.assertEqual(cm.exception.status_code, 400)
+
+    # --- Phase-2 Tempo (sim_scene.tempo) -------------------------------
+
+    def test_tempo_absent_is_allowed(self):
+        validate_sim_scene({"objects": []})  # no tempo key
+
+    def test_tempo_in_range_passes(self):
+        validate_sim_scene({"tempo": TEMPO_MIN})
+        validate_sim_scene({"tempo": 1.0})
+        validate_sim_scene({"tempo": TEMPO_MAX})
+        validate_sim_scene({"tempo": 1})  # int is fine
+
+    def test_tempo_too_slow_rejected(self):
+        with self.assertRaises(HTTPException) as cm:
+            validate_sim_scene({"tempo": TEMPO_MIN - 0.1})
+        self.assertEqual(cm.exception.status_code, 400)
+
+    def test_tempo_too_fast_rejected(self):
+        with self.assertRaises(HTTPException) as cm:
+            validate_sim_scene({"tempo": TEMPO_MAX + 0.1})
+        self.assertEqual(cm.exception.status_code, 400)
+
+    def test_tempo_non_number_rejected(self):
+        with self.assertRaises(HTTPException) as cm:
+            validate_sim_scene({"tempo": "schnell"})
+        self.assertEqual(cm.exception.status_code, 400)
+
+    def test_tempo_bool_rejected(self):
+        # bool is an int subclass; it must not pass as a speed multiplier.
+        with self.assertRaises(HTTPException) as cm:
+            validate_sim_scene({"tempo": True})
+        self.assertEqual(cm.exception.status_code, 400)
+
+    def test_tempo_nan_rejected(self):
+        # json.loads accepts bare NaN; the validator must reject it.
+        with self.assertRaises(HTTPException) as cm:
+            validate_sim_scene({"tempo": float("nan")})
+        self.assertEqual(cm.exception.status_code, 400)
+
+    def test_tempo_infinite_rejected(self):
+        with self.assertRaises(HTTPException) as cm:
+            validate_sim_scene({"tempo": float("inf")})
         self.assertEqual(cm.exception.status_code, 400)
 
 

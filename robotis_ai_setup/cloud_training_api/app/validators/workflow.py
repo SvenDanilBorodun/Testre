@@ -37,6 +37,13 @@ MAX_SIM_SCENE_OBJECTS = 64
 # Phase-4 No-Go zones (axis-aligned base-frame keep-out boxes, persisted in
 # sim_scene.zones). Same defense-in-depth count cap as the objects list.
 MAX_SIM_SCENE_ZONES = 16
+# Phase-2 Tempo: the optional global speed multiplier persisted in
+# sim_scene.tempo. The window MUST match the ROS server's
+# handlers/motion.py ``_TEMPO_MIN`` / ``_TEMPO_MAX`` (the cloud API can't import
+# the physical_ai_server package — separate deployment — so the bounds are
+# duplicated here, like MAX_SIM_SCENE_OBJECTS mirrors the server-side cap).
+TEMPO_MIN = 0.5
+TEMPO_MAX = 2.0
 
 
 def validate_blockly_json(payload: dict) -> None:
@@ -109,6 +116,32 @@ def validate_sim_scene(scene: dict) -> None:
         )
 
     _validate_zones(scene.get("zones"))
+    _validate_tempo(scene.get("tempo"))
+
+
+def _validate_tempo(tempo: Any) -> None:
+    """Validate the optional Phase-2 run-bar Tempo (global speed multiplier)
+    persisted in ``sim_scene.tempo``.
+
+    ``None`` (absent) is allowed. Otherwise it must be a finite number
+    (``bool`` excluded — it is an ``int`` subclass and never a speed) inside the
+    ``[TEMPO_MIN, TEMPO_MAX]`` window; ``json.loads`` accepts bare
+    ``NaN``/``Infinity`` so a finite-check is required. German HTTP 400 on any
+    violation. Defense-in-depth only — Tempo is a teaching speed knob on the
+    workflow runtime, NOT a safety envelope; the cloud gate guards shape/range."""
+    if tempo is None:
+        return
+    if isinstance(tempo, bool) or not isinstance(tempo, (int, float)):
+        raise HTTPException(status_code=400, detail="Tempo muss eine Zahl sein.")
+    if not math.isfinite(tempo):
+        raise HTTPException(
+            status_code=400, detail="Tempo muss eine endliche Zahl sein."
+        )
+    if tempo < TEMPO_MIN or tempo > TEMPO_MAX:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Tempo muss zwischen {TEMPO_MIN} und {TEMPO_MAX} liegen.",
+        )
 
 
 def _validate_zones(zones: Any) -> None:

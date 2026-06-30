@@ -1,0 +1,12 @@
+# Roboter Studio "Position merken": capture the follower arm's CURRENT
+# base-frame gripper position (via forward kinematics) and persist it as a
+# named destination — the hand-guide counterpart to MarkDestination's
+# pixel-click pinning. The FK Z is stored verbatim (NOT snapped to z_table),
+# so a student can save a point at any height the arm currently holds.
+string name
+---
+bool success
+float32 world_x
+float32 world_y
+float32 world_z
+string message

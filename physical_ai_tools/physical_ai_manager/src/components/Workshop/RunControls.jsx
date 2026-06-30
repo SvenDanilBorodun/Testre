@@ -42,6 +42,37 @@ const RS_CONTROL_BASE = 'http://localhost:8769';
 const RS_STATUS_TIMEOUT_MS = 4000;
 const RS_STATUS_POLL_MS = 8000;
 
+// Phase-2 Tempo — the global run-bar speed multiplier injected as a top-level
+// `tempo` sibling into the /workflow/start payload (BOTH sim + real). The window
+// mirrors handlers/motion.py::_TEMPO_MIN/_TEMPO_MAX and the cloud validator.
+// Persisted per-browser in localStorage (NOT in the DB sim_scene — RunControls
+// has no setter for it; see the change report). The server clamps again
+// defensively, so a tampered value can never escape [TEMPO_MIN, TEMPO_MAX].
+const TEMPO_MIN = 0.5;
+const TEMPO_MAX = 2.0;
+const TEMPO_STORAGE_KEY = 'edubotics_workshop_tempo';
+const TEMPO_PRESETS = [
+  { value: TEMPO_MIN, label: DE.RUN_TEMPO_SLOW }, // langsam ×0.5
+  { value: 1.0, label: DE.RUN_TEMPO_NORMAL }, //     normal  ×1
+  { value: TEMPO_MAX, label: DE.RUN_TEMPO_FAST }, // schnell ×2
+];
+
+function clampTempo(value) {
+  return Math.min(TEMPO_MAX, Math.max(TEMPO_MIN, value));
+}
+
+function readStoredTempo(fallback) {
+  try {
+    const raw = window.localStorage.getItem(TEMPO_STORAGE_KEY);
+    if (raw == null) return fallback;
+    const n = Number(raw);
+    if (!Number.isFinite(n) || n <= 0) return fallback;
+    return clampTempo(n);
+  } catch (e) {
+    return fallback;
+  }
+}
+
 async function probeRsStatus() {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), RS_STATUS_TIMEOUT_MS);
@@ -83,6 +114,27 @@ function RunControls({
   const debuggerWarnings = useSelector((s) => s.workshop.debuggerWarnings);
   const breakpoints = useSelector((s) => s.workshop.breakpoints);
   const [busy, setBusy] = useState(false);
+
+  // Phase-2 Tempo: per-browser preference. Seeded from a forward-compat
+  // simScene.tempo (a future WorkshopPage could persist it in the DB sim_scene)
+  // when present, else the stored localStorage value, else normal (1.0).
+  const [tempo, setTempo] = useState(() => {
+    const fromScene = simScene && Number.isFinite(simScene.tempo)
+      ? clampTempo(simScene.tempo)
+      : null;
+    return readStoredTempo(fromScene != null ? fromScene : 1.0);
+  });
+
+  const handleTempo = useCallback((value) => {
+    const clamped = clampTempo(value);
+    setTempo(clamped);
+    try {
+      window.localStorage.setItem(TEMPO_STORAGE_KEY, String(clamped));
+    } catch (e) {
+      // Storage quota / disabled — keep the in-memory choice; it still ships in
+      // the run payload below, just doesn't survive a reload.
+    }
+  }, []);
 
   // Leader-contention gate (see RS_CONTROL_BASE comment above). true ONLY when
   // the bridge is reachable AND the leader is on; false while probing, on any
@@ -217,13 +269,18 @@ function RunControls({
       const zones = (simScene && Array.isArray(simScene.zones))
         ? simScene.zones
         : [];
+      // Phase-2: inject the global run-bar `tempo` as a top-level sibling into
+      // BOTH branches. `Interpreter.from_json` reads only `data['blocks']`, so
+      // the server's WorkflowManager._parse_tempo picks it up while the
+      // interpreter ignores it — exactly like `zones`/`sim`.
       const workflowJsonStr = simMode
         ? JSON.stringify({
             ...(blocklyJson || {}),
             sim: { enabled: true, objects: simObjects },
             zones,
+            tempo,
           })
-        : JSON.stringify({ ...(blocklyJson || {}), zones });
+        : JSON.stringify({ ...(blocklyJson || {}), zones, tempo });
       const r = await callService(
         '/workflow/start',
         'physical_ai_interfaces/srv/StartWorkflow',
@@ -267,6 +324,7 @@ function RunControls({
     rsLeaderOn,
     simMode,
     simScene,
+    tempo,
     callService,
     dispatch,
     workflowId,
@@ -456,6 +514,35 @@ function RunControls({
           />
           {phaseLabel}
         </span>
+
+        {/* Phase-2 global Tempo control. Applies to the WHOLE program at the
+            next Start (the server reads ctx.tempo once at workflow start). */}
+        <div
+          className="inline-flex items-center gap-1"
+          role="group"
+          aria-label={DE.RUN_TEMPO_LABEL}
+        >
+          <span className="text-xs text-[var(--ink-3)]">{DE.RUN_TEMPO_LABEL}:</span>
+          {TEMPO_PRESETS.map((p) => (
+            <button
+              key={p.value}
+              type="button"
+              onClick={() => handleTempo(p.value)}
+              disabled={busy}
+              aria-pressed={tempo === p.value}
+              title={`Tempo ${p.label} (×${p.value})`}
+              className={
+                'min-h-[28px] px-2 py-1 text-xs rounded-md border '
+                + 'disabled:opacity-50 disabled:cursor-not-allowed '
+                + (tempo === p.value
+                  ? 'bg-[var(--accent)] text-white border-[var(--accent)]'
+                  : 'bg-white text-[var(--ink-3)] border-[var(--line)] hover:bg-[var(--bg-sunk)]')
+              }
+            >
+              {p.label}
+            </button>
+          ))}
+        </div>
 
         <button
           type="button"

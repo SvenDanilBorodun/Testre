@@ -674,6 +674,22 @@ export function useRosServiceCaller() {
     [callService]
   );
 
+  // Roboter Studio „Position merken": capture the follower's CURRENT pose as a
+  // named destination (the server runs FK on the live joints, writes it to the
+  // destinations table, and returns the world coordinates). The named point is
+  // then usable by „Ziel <Name>" (destination_ref) / „bewege zu". The request
+  // is just { name }; the response carries { success, world_x, world_y,
+  // world_z, message }. Contract owned by the backend WorkshopCapturePose.srv.
+  const capturePose = useCallback(
+    async (name) =>
+      callService(
+        '/workshop/capture_pose',
+        'physical_ai_interfaces/srv/WorkshopCapturePose',
+        { name: String(name || '') }
+      ),
+    [callService]
+  );
+
   const cancelCalibration = useCallback(
     async (camera = '') =>
       callService(
@@ -813,6 +829,7 @@ export function useRosServiceCaller() {
     stopWorkflow,
     markDestination,
     getObjectCatalog,
+    capturePose,
     cancelCalibration,
     getCalibrationStatus,
     calibrationPreview,

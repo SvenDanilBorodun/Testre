@@ -50,9 +50,31 @@ import {
 // only while the „3D-Ansicht" panel is open; full WebGL teardown on collapse.
 const UrdfTwin = lazy(() => import('../components/UrdfTwin'));
 
+// Phase-2: read-only „Code"-Vorschau (the Blockly program rendered as real
+// Python). LAZY-loaded so the Python generator (`blockly/python`, a separate
+// async chunk pulled in by CodeView → pythonCodeGen) stays out of the entry
+// bundle; mounts only while the „Code"-panel is open.
+const CodeView = lazy(() => import('../components/Workshop/CodeView'));
+
 // The student's „3D-Ansicht" open/closed choice persists across reloads. Distinct
 // key from RecordPage's `edubotics_urdf_open` so the two panels are independent.
 const WORKSHOP_URDF_OPEN_KEY = 'edubotics_workshop_urdf_open';
+// The „Code anzeigen" open/closed choice persists across reloads too.
+const WORKSHOP_CODE_OPEN_KEY = 'edubotics_workshop_code_open';
+
+// Mirror the BACKEND validator (_DESTINATION_NAME_RE, handlers/destinations.py):
+// letters (incl. ä ö ü ß), digits, space, underscore, hyphen — 1..40 chars — so a
+// name the frontend accepts can't bounce off the backend with a generic error.
+// Used by „Position merken".
+const CAPTURE_NAME_MAX_LEN = 40;
+const CAPTURE_NAME_RE = /^[A-Za-zÄÖÜäöüß0-9 _-]{1,40}$/;
+function sanitizeDestinationName(raw) {
+  if (typeof raw !== 'string') return '';
+  const trimmed = raw.trim().slice(0, CAPTURE_NAME_MAX_LEN);
+  if (trimmed === '' || trimmed === '—') return '';
+  if (!CAPTURE_NAME_RE.test(trimmed)) return '';
+  return trimmed;
+}
 
 // Phase-3 simulator fallback palette: an uncalibrated rig may have no
 // object_catalog.json yet, so seed at least one type so the sim editor is usable.
@@ -113,7 +135,7 @@ function WorkshopPage({ isActive }) {
   // object palette (the same source the Blockly dropdowns use).
   const [objectCatalog, setObjectCatalog] = useState([]);
   const subscriptions = useRosTopicSubscription();
-  const { getObjectCatalog } = useRosServiceCaller();
+  const { getObjectCatalog, capturePose } = useRosServiceCaller();
   const workspaceRef = useRef(null);
   // Blockly 12 ties getSelected() to the FocusManager, and clicking the
   // camera overlay (a non-focusable div) blurs the block in Chromium →
@@ -141,6 +163,67 @@ function WorkshopPage({ isActive }) {
       return next;
     });
   }, []);
+
+  // Phase-2: read-only Python „Code"-Vorschau panel. Default COLLAPSED; the
+  // open/closed choice persists in localStorage (distinct key from 3D-Ansicht).
+  const [isCodeOpen, setIsCodeOpen] = useState(() => {
+    try {
+      return typeof window !== 'undefined'
+        && window.localStorage.getItem(WORKSHOP_CODE_OPEN_KEY) === '1';
+    } catch (_) {
+      return false;
+    }
+  });
+  const toggleCode = useCallback(() => {
+    setIsCodeOpen((prev) => {
+      const next = !prev;
+      try {
+        window.localStorage.setItem(WORKSHOP_CODE_OPEN_KEY, next ? '1' : '0');
+      } catch (_) { /* private mode / quota — ignore */ }
+      return next;
+    });
+  }, []);
+
+  // Phase-2: „Position merken" — capture the follower's current pose as a named
+  // destination via /workshop/capture_pose. Does NOT drive the arm; the named
+  // point is then usable by „Ziel <Name>" / „bewege zu".
+  const [capturing, setCapturing] = useState(false);
+  const handleCapturePose = useCallback(async () => {
+    if (typeof window === 'undefined') return;
+    const raw = window.prompt('Name für die gemerkte Position:', '');
+    if (raw === null) return; // student cancelled the prompt
+    const name = sanitizeDestinationName(raw);
+    if (!name) {
+      toast.error(
+        'Bitte einen gültigen Namen verwenden '
+        + '(Buchstaben, Zahlen, Leerzeichen, _ und -).',
+      );
+      return;
+    }
+    setCapturing(true);
+    try {
+      const res = await capturePose(name);
+      if (res && res.success) {
+        const x = Number(res.world_x || 0).toFixed(3);
+        const y = Number(res.world_y || 0).toFixed(3);
+        const z = Number(res.world_z || 0).toFixed(3);
+        toast.success(
+          `Position „${name}" gemerkt (x=${x}, y=${y}, z=${z}). `
+          + 'Du kannst sie jetzt mit „Ziel ' + name + '" verwenden.',
+        );
+      } else {
+        toast.error(
+          (res && res.message)
+            ? res.message
+            : 'Position konnte nicht gemerkt werden.',
+        );
+      }
+    } catch (e) {
+      toast.error(`Position konnte nicht gemerkt werden: ${e.message || e}`);
+    } finally {
+      setCapturing(false);
+    }
+  }, [capturePose]);
   // Twin overlays: the end-effector path trail + base/TCP coordinate triads.
   const [showPath, setShowPath] = useState(false);
   const [showFrames, setShowFrames] = useState(false);
@@ -582,6 +665,27 @@ function WorkshopPage({ isActive }) {
                           clickable={true}
                           onMark={handleMarkDestination}
                         />
+                        {/* Phase-2: capture the arm's CURRENT pose as a named
+                            destination (does NOT drive the arm). The point is
+                            then usable by „Ziel <Name>" / „bewege zu". */}
+                        <div className="rounded-lg border border-[var(--line)] bg-white px-2 py-1.5 flex items-center gap-2 flex-wrap">
+                          <button
+                            type="button"
+                            onClick={handleCapturePose}
+                            disabled={capturing}
+                            title="Aktuelle Roboterposition als benanntes Ziel speichern"
+                            className={
+                              'text-xs px-2.5 py-1 rounded-md border disabled:opacity-50 '
+                              + 'disabled:cursor-not-allowed bg-[var(--accent)] text-white '
+                              + 'border-[var(--accent)] hover:opacity-90'
+                            }
+                          >
+                            {capturing ? 'Wird gemerkt …' : 'Position merken'}
+                          </button>
+                          <span className="text-[11px] text-[var(--ink-3)]">
+                            Speichert die aktuelle Armposition als Ziel.
+                          </span>
+                        </div>
                         {/* Phase-5: live 3D follower twin, stacked BELOW the scene
                             camera (the camera click-to-pin flow is untouched).
                             Collapsible „3D-Ansicht" panel, default collapsed. */}
@@ -674,6 +778,47 @@ function WorkshopPage({ isActive }) {
                       <DebugPanel workspace={workspace} />
                     </div>
                   )}
+                </div>
+                {/* Phase-2: read-only Python „Code"-Vorschau. Full-width
+                    collapsible panel (own toggle, persisted) between the editor
+                    grid and the run controls — regenerated from the live
+                    workspace on every block change. Never executes. */}
+                <div className="px-3 sm:px-4 pb-1">
+                  <div className="rounded-lg border border-[var(--line)] bg-white overflow-hidden">
+                    <div className="flex items-center gap-2 px-3 py-1.5 border-b border-[var(--line)]">
+                      <button
+                        type="button"
+                        onClick={toggleCode}
+                        aria-pressed={isCodeOpen}
+                        title={isCodeOpen ? 'Code-Vorschau schließen' : 'Code-Vorschau öffnen'}
+                        className={
+                          'text-xs px-2.5 py-1 rounded-md border '
+                          + (isCodeOpen
+                            ? 'bg-[var(--accent)] text-white border-[var(--accent)]'
+                            : 'bg-white text-[var(--ink-3)] border-[var(--line)] hover:bg-[var(--bg-sunk)]')
+                        }
+                      >
+                        Code anzeigen
+                      </button>
+                      <span className="text-[11px] text-[var(--ink-3)]">
+                        Python-Vorschau deines Programms
+                      </span>
+                    </div>
+                    {isCodeOpen && (
+                      <Suspense
+                        fallback={
+                          <p className="px-3 py-4 text-xs text-[var(--ink-3)]">
+                            Code-Vorschau wird geladen …
+                          </p>
+                        }
+                      >
+                        <CodeView
+                          workspace={workspace}
+                          changeToken={editorJson || unsavedBlocklyJson}
+                        />
+                      </Suspense>
+                    )}
+                  </div>
                 </div>
                 <RunControls
                   workflowId={selectedWorkflowId}

@@ -103,6 +103,7 @@ from physical_ai_interfaces.srv import (
     WorkflowPause,
     WorkflowSetBreakpoints,
     WorkflowStep,
+    WorkshopCapturePose,
 )
 
 from physical_ai_server.communication.communicator import Communicator
@@ -408,6 +409,17 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 self._preempt_cb_group,
             ),
             ('/workshop/mark_destination', MarkDestination, self.mark_destination_callback),
+            # "Position merken" — capture the arm's CURRENT gripper pose into a
+            # named destination. A quick FK read + dict write; rides the
+            # reentrant preempt group so it can dispatch while a chunked
+            # workflow motion holds the node-default group (it gates on
+            # _assert_no_other_active anyway, so it refuses during an active run).
+            (
+                '/workshop/capture_pose',
+                WorkshopCapturePose,
+                self.capture_pose_callback,
+                self._preempt_cb_group,
+            ),
             ('/workshop/get_object_catalog', GetObjectCatalog, self.get_object_catalog_callback),
             ('/workflow/start', StartWorkflow, self.workflow_start_callback),
             ('/workflow/stop', StopWorkflow, self.workflow_stop_callback),
@@ -1818,8 +1830,8 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         """Reject a Roboter Studio request when another mode owns the arm.
 
         Returns (ok, german_message). `requested_mode` is one of
-        'calibration', 'workflow', 'recording', 'inference', 'training' —
-        used only for error message clarity.
+        'calibration', 'workflow', 'recording', 'inference', 'training',
+        'manual' — used only for error message clarity.
         """
         # A collision recovery owns the arm until the student finishes the two-step
         # home→resume flow (which, mid-recording, seamlessly resumes that recording). Block
@@ -2403,6 +2415,108 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             # Audit §3.21 — generic German, log details server-side.
             response.message = 'Projektion fehlgeschlagen — bitte Kalibrierung prüfen.'
             return response
+
+    def capture_pose_callback(self, request, response):
+        """"Position merken" — capture the follower arm's CURRENT base-frame
+        gripper position (forward kinematics) and persist it under a name. The
+        hand-guide counterpart to ``mark_destination_callback``'s pixel-click
+        pinning: same shape (refuse when another mode owns the arm, validate the
+        name, persist via ``WorkflowManager.set_destination``), except it reads
+        the CURRENT pose instead of projecting a clicked pixel. The FK Z is
+        stored VERBATIM — NOT snapped to z_table (product decision) — so a
+        student can save a point at whatever height the arm currently holds.
+        """
+        # Gate: refuse while recording / inference / training / calibration /
+        # workflow / collision-recovery owns the arm. 'manual' is not one of the
+        # mode names with a relaxation branch, so it refuses on EVERY active
+        # owner (no on_manual flag this batch — deferred to the jog/record work).
+        ok, msg = self._assert_no_other_active('manual')
+        if not ok:
+            response.success = False
+            response.world_x = 0.0
+            response.world_y = 0.0
+            response.world_z = 0.0
+            response.message = msg
+            return response
+
+        name = (request.name or '').strip()
+        # Reuse the canonical destination-name alphabet (ASCII + ä ö ü ß, 1..40
+        # chars) so a captured point and a teacher-pinned point validate
+        # identically and the React editor's destination list stays clean.
+        try:
+            from physical_ai_server.workflow.handlers.destinations import (
+                _DESTINATION_NAME_RE,
+            )
+            valid_name = bool(name) and bool(_DESTINATION_NAME_RE.match(name))
+        except Exception:  # noqa: BLE001 — validator import must never crash the service
+            # Fail CLOSED: if the shared validator import ever fails, fall back to a
+            # local charset check (NOT a bare non-empty test) so name/sentinel
+            # injection stays blocked even on the degraded path.
+            import re as _re
+            valid_name = bool(name) and bool(
+                _re.match(r'^[A-Za-zÄÖÜäöüß0-9 _\-]{1,40}$', name)
+            )
+        if not valid_name:
+            response.success = False
+            response.world_x = 0.0
+            response.world_y = 0.0
+            response.world_z = 0.0
+            response.message = 'Ungültiger Ziel-Name.'
+            return response
+
+        # No robot selected yet → communicator not wired → a distinct hint so
+        # the student knows to pick the robot first (vs. a transient missing
+        # joint state). Mirrors _get_current_gripper_pose's own None-on-comm
+        # guard, surfaced here as its own message.
+        if self.communicator is None:
+            response.success = False
+            response.world_x = 0.0
+            response.world_y = 0.0
+            response.world_z = 0.0
+            response.message = 'Bitte zuerst den Roboter auswählen.'
+            return response
+
+        # FK read of the current gripper position. Returns None when joint state
+        # hasn't arrived yet or the IK/FK solver is unavailable.
+        xyz = self._get_current_gripper_xyz()
+        if xyz is None:
+            response.success = False
+            response.world_x = 0.0
+            response.world_y = 0.0
+            response.world_z = 0.0
+            response.message = (
+                'Aktuelle Position ist unbekannt — bitte den Roboter bewegen '
+                'und erneut versuchen.'
+            )
+            return response
+
+        x, y, z = float(xyz[0]), float(xyz[1]), float(xyz[2])
+        # Persist into the WorkflowManager exactly as mark_destination_callback
+        # does (set_destination(name, x, y, z)) so the next workflow run resolves
+        # the captured name without a second action. Unlike mark_destination —
+        # where the projection result is the primary output and persistence is a
+        # best-effort bonus — here persistence IS the operation, so a failure to
+        # store fails LOUD rather than reporting a success that wasn't saved.
+        try:
+            wfm = self._get_or_create_workflow_manager()
+            if wfm is None:
+                raise RuntimeError('workflow manager unavailable')
+            wfm.set_destination(name, x, y, z)
+        except Exception as e:
+            self.get_logger().error(f'capture_pose persist failed: {e}')
+            response.success = False
+            response.world_x = 0.0
+            response.world_y = 0.0
+            response.world_z = 0.0
+            response.message = 'Position konnte nicht gespeichert werden.'
+            return response
+
+        response.success = True
+        response.world_x = x
+        response.world_y = y
+        response.world_z = z
+        response.message = f'Position „{name}" gespeichert.'
+        return response
 
     def get_object_catalog_callback(self, request, response):
         """Return the named-object catalog's type list (keys + German labels)

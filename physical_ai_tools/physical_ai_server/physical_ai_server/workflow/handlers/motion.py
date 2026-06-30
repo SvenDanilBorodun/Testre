@@ -113,6 +113,38 @@ DEFAULT_GRIPPER_DURATION_S = 0.5
 DEFAULT_APPROACH_DURATION_S = 1.5
 DEFAULT_GRASP_DURATION_S = 1.0
 
+# ── Phase-2 Tempo (global run-bar speed multiplier + optional per-move) ───────
+# Tempo is a Roboter-Studio *teaching* speed knob on the workflow runtime — a
+# multiplier on every motion DURATION. Rule §2: it is NOT an inference safety
+# envelope. It runs ONLY on the workflow runtime, never reshapes a
+# recorded/replayed action, and is invisible to the inference path. >1 = faster
+# (shorter duration; the build_segment velocity floor still protects a too-fast
+# move), <1 = slower (longer duration; capped below the controller goal_time).
+# Plain module constants (NOT env vars — a new EDUBOTICS_* knob would need a
+# docker-compose forward per the env-forwarding-guard); tests monkeypatch them.
+_TEMPO_MIN = 0.5   # „langsam" — half speed (clamp floor)
+_TEMPO_MAX = 2.0   # „schnell" — double speed (clamp ceiling)
+# ros2_control JointTrajectoryController goal_time tolerance is 5.0 s
+# (omx_f_hardware_controller_manager.yaml: constraints.goal_time = 5.0). A slow
+# tempo LENGTHENS a move; cap the stretched duration strictly below that slack so
+# a slowed move can never out-run the controller's overall-timing tolerance. The
+# longest default move (HOME, 3.0 s) at _TEMPO_MIN would otherwise be 6.0 s. The
+# build_segment velocity floor independently maxes at ~4.1 s for the worst ~2π
+# joint swing — also < goal_time — so the final published duration is always
+# < 5.0 s in both directions.
+_MAX_STRETCHED_DURATION_S = 4.5
+
+# Per-move „mit Tempo" dropdown values → speed multiplier. The default option
+# value 'global' (and any absent/unknown value) → None = use the workflow-global
+# ctx.tempo. Strictly additive: a transit block authored before this field
+# carries no `geschwindigkeit`, so every existing saved workflow keeps the global
+# tempo. Values mirror the run-bar control + the cloud validator window.
+_MOVE_TEMPO_PRESETS = {
+    'langsam': _TEMPO_MIN,
+    'normal': 1.0,
+    'schnell': _TEMPO_MAX,
+}
+
 
 def _parse_observe_pose() -> list[float]:
     """Observation pose ("Beobachtungspose") — the 5 arm joints (rad) the
@@ -183,7 +215,73 @@ def _require_seeded_start_pose(ctx) -> None:
         )
 
 
-def _publish_motion(ctx, q_start: list[float], q_end: list[float], duration_s: float) -> None:
+def _resolve_tempo(ctx, tempo: float | None) -> float:
+    """Resolve the effective speed multiplier for one motion.
+
+    Uses the per-move override ``tempo`` when given, else the workflow-global
+    ``ctx.tempo`` (default 1.0 — a non-Roboter-Studio ctx or a run with no Tempo
+    set). Non-finite / non-positive / non-numeric → 1.0. Clamped to
+    ``[_TEMPO_MIN, _TEMPO_MAX]``.
+
+    Rule §2: a teaching speed knob, not an inference safety envelope."""
+    raw = tempo if tempo is not None else getattr(ctx, 'tempo', 1.0)
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return 1.0
+    if not math.isfinite(val) or val <= 0.0:
+        return 1.0
+    return max(_TEMPO_MIN, min(_TEMPO_MAX, val))
+
+
+def _tempo_scaled_duration(ctx, duration_s: float, tempo: float | None) -> float:
+    """Scale a REQUESTED motion duration by the effective tempo.
+
+    Faster tempo (>1) SHORTENS the duration; build_segment's velocity floor
+    (``_velocity_safe_duration``) then extends it back up if the shrunk move
+    would exceed the safe per-joint velocity, so a fast tempo can never drive the
+    arm dangerously quickly. A slow tempo (<1) LENGTHENS it; the result is capped
+    at ``_MAX_STRETCHED_DURATION_S`` so a slowed move stays strictly below the
+    ros2_control goal_time tolerance (5.0 s)."""
+    eff = _resolve_tempo(ctx, tempo)
+    scaled = duration_s / eff
+    if scaled > _MAX_STRETCHED_DURATION_S:
+        scaled = _MAX_STRETCHED_DURATION_S
+    return scaled
+
+
+def _move_tempo(args: dict[str, Any]) -> float | None:
+    """Resolve an OPTIONAL per-move „mit Tempo" override from a transit block's
+    ``geschwindigkeit`` field (interpreter lowercases the field name). Absent /
+    'global' / unknown → ``None`` (use the workflow-global ctx.tempo). A named
+    preset → its multiplier. Never raises."""
+    raw = args.get('geschwindigkeit')
+    if raw is None:
+        return None
+    return _MOVE_TEMPO_PRESETS.get(str(raw).strip().lower())
+
+
+def _publish_motion_t(ctx, q_start, q_end, duration_s, tempo) -> None:
+    """Forward to ``_publish_motion``, passing the per-move ``tempo`` only when
+    set. Keeping the no-override call at the original 4-arg arity preserves the
+    4-arg ``_publish_motion`` monkeypatches in the motion tests (and is a no-op
+    behavioural difference: ``_publish_motion`` applies the global ctx.tempo when
+    its ``tempo`` is ``None``)."""
+    if tempo is None:
+        _publish_motion(ctx, q_start, q_end, duration_s)
+    else:
+        _publish_motion(ctx, q_start, q_end, duration_s, tempo)
+
+
+def _publish_motion(ctx, q_start: list[float], q_end: list[float],
+                    duration_s: float, tempo: float | None = None) -> None:
+    # Phase-2 Tempo: scale the REQUESTED duration by the per-move override
+    # (`tempo`) or, when None, the workflow-global ctx.tempo — BEFORE
+    # build_segment, so the velocity floor protects a fast tempo and the
+    # goal_time cap bounds a slow one. This is the SINGLE choke point every
+    # motion passes through, so the global tempo reaches every transit, gripper,
+    # and grasp-corridor move with no per-handler wiring. Rule §2: teaching-only.
+    duration_s = _tempo_scaled_duration(ctx, duration_s, tempo)
     waypoints = build_segment(q_start, q_end, duration_s)
     # Serialize motion across the main stack and any concurrent hat
     # handler. The hat scheduler holds ctx.motion_lock for its whole
@@ -230,8 +328,14 @@ def safe_move(
     q_end: list[float],
     duration_s: float,
     roll: float | None = None,
+    tempo: float | None = None,
 ) -> None:
     """Issue a TRANSIT move with no-go-zone (Sperrzone) avoidance.
+
+    ``tempo`` is the OPTIONAL per-move „mit Tempo" override (Phase-2). It is
+    forwarded to every published leg (direct OR rerouted) so a whole reroute
+    runs at the requested speed; ``None`` falls back to the workflow-global
+    ctx.tempo inside ``_publish_motion``.
 
     Rule §2 note: this is a Roboter-Studio *workflow-level* guard — the SAME
     class as the ``WORKSPACE_FLOOR_MARGIN_M`` table-floor refusal in
@@ -250,10 +354,10 @@ def safe_move(
     zones = getattr(ctx, 'zones', None)
     ik = getattr(ctx, 'ik', None)
     if not zones or ik is None or not hasattr(ik, 'link_points'):
-        _publish_motion(ctx, q_start, q_end, duration_s)
+        _publish_motion_t(ctx, q_start, q_end, duration_s, tempo)
         return
     if not segment_blocked(ik, q_start, q_end, zones, ZONE_MARGIN_M):
-        _publish_motion(ctx, q_start, q_end, duration_s)
+        _publish_motion_t(ctx, q_start, q_end, duration_s, tempo)
         return
     # Direct path crosses a zone — plan a reroute (lift-and-travel → base-swing
     # → refuse). plan_safe_route raises a German WorkflowError when no safe
@@ -263,7 +367,7 @@ def safe_move(
     if callable(log):
         log('[WARNUNG] Sperrzone auf dem Weg — Ausweichroute wird gefahren.')
     for leg_start, leg_end, leg_dur in legs:
-        _publish_motion(ctx, leg_start, leg_end, leg_dur)
+        _publish_motion_t(ctx, leg_start, leg_end, leg_dur, tempo)
 
 
 def _point_in_zone(ctx, x: float, y: float, z: float) -> bool:
@@ -543,8 +647,9 @@ def move_to(ctx, args: dict[str, Any]) -> None:
     arm_q = _solve_or_raise(ctx, target, roll=GRASP_ROLL_RAD)
     q_end = arm_q + [ctx.last_full_joints[5]]
     # TRANSIT — route around any no-go zone (raw _publish_motion when none).
+    # Optional per-move „mit Tempo" override; None → workflow-global tempo.
     safe_move(ctx, ctx.last_full_joints, q_end, DEFAULT_MOVE_DURATION_S,
-              roll=GRASP_ROLL_RAD)
+              roll=GRASP_ROLL_RAD, tempo=_move_tempo(args))
     ctx.last_arm_joints = arm_q
     ctx.last_full_joints = q_end
 
@@ -575,6 +680,7 @@ def _execute_pickup(
     approach_height_m: float,
     roll: float,
     close_rad: float,
+    tempo: float | None = None,
 ) -> None:
     """Open → hover above → descend straight down → close → lift, at the FINAL
     ``grasp_xyz`` (NO extra clearance added here — the caller supplies the exact
@@ -610,23 +716,26 @@ def _execute_pickup(
     if lock is not None:
         lock.acquire()
     try:
+        # Phase-2 Tempo: the per-move override (or global ctx.tempo when None)
+        # scales every sub-motion uniformly, so the whole pickup runs at the
+        # requested speed.
         # Gripper-only open — arm joints unchanged → EXEMPT (raw).
-        _publish_motion(ctx, ctx.last_full_joints, open_q, DEFAULT_GRIPPER_DURATION_S)
+        _publish_motion_t(ctx, ctx.last_full_joints, open_q, DEFAULT_GRIPPER_DURATION_S, tempo)
         ctx.last_full_joints = open_q
         # APPROACH (free-space hover) — TRANSIT, zone-avoided.
-        safe_move(ctx, open_q, above_q, DEFAULT_MOVE_DURATION_S, roll=roll)
+        safe_move(ctx, open_q, above_q, DEFAULT_MOVE_DURATION_S, roll=roll, tempo=tempo)
         ctx.last_full_joints = above_q
         ctx.last_arm_joints = above_arm_q
         # DESCEND onto the target — EXEMPT (raw): zones are user obstacles,
         # never the table/target; the grasp corridor is never zone-checked.
-        _publish_motion(ctx, above_q, grasp_q, DEFAULT_GRASP_DURATION_S)
+        _publish_motion_t(ctx, above_q, grasp_q, DEFAULT_GRASP_DURATION_S, tempo)
         ctx.last_full_joints = grasp_q
         ctx.last_arm_joints = grasp_arm_q
         # Gripper-only close — EXEMPT (raw).
-        _publish_motion(ctx, grasp_q, closed_q, DEFAULT_GRIPPER_DURATION_S)
+        _publish_motion_t(ctx, grasp_q, closed_q, DEFAULT_GRIPPER_DURATION_S, tempo)
         ctx.last_full_joints = closed_q
         # LIFT-OUT (carry up to the hover) — TRANSIT, zone-avoided.
-        safe_move(ctx, closed_q, lift_q, DEFAULT_APPROACH_DURATION_S, roll=roll)
+        safe_move(ctx, closed_q, lift_q, DEFAULT_APPROACH_DURATION_S, roll=roll, tempo=tempo)
         ctx.last_arm_joints = lift_arm_q
         ctx.last_full_joints = lift_q
     finally:
@@ -672,7 +781,7 @@ def pickup(ctx, args: dict[str, Any]) -> None:
     # fingertips straddle the lower part of a low object, not the table itself.
     grasp_xyz = (target[0], target[1], target[2] + GRASP_CLEARANCE_M)
     _execute_pickup(ctx, grasp_xyz, DEFAULT_APPROACH_HEIGHT_M,
-                    GRASP_ROLL_RAD, GRIPPER_CLOSED_RAD)
+                    GRASP_ROLL_RAD, GRIPPER_CLOSED_RAD, tempo=_move_tempo(args))
 
 
 def drop_at(ctx, args: dict[str, Any]) -> None:
@@ -684,6 +793,9 @@ def drop_at(ctx, args: dict[str, Any]) -> None:
     way in. The bounded-quintic approach is consistent with pickup."""
     _require_seeded_start_pose(ctx)
     target = _resolve_target(args.get('destination'), ctx)
+    # Optional per-move „mit Tempo" override; None → workflow-global tempo. Scales
+    # every sub-motion of the place uniformly.
+    tempo = _move_tempo(args)
     # Release from a safe height above the surface (clears a low container rim),
     # not just the grasp clearance — see DROP_HEIGHT_M.
     drop_xyz = (target[0], target[1], target[2] + DROP_HEIGHT_M)
@@ -706,19 +818,19 @@ def drop_at(ctx, args: dict[str, Any]) -> None:
     try:
         # APPROACH (carry to the hover above the target) — TRANSIT, zone-avoided.
         safe_move(ctx, ctx.last_full_joints, above_closed_q, DEFAULT_MOVE_DURATION_S,
-                  roll=GRASP_ROLL_RAD)
+                  roll=GRASP_ROLL_RAD, tempo=tempo)
         ctx.last_full_joints = above_closed_q
         ctx.last_arm_joints = above_arm_q
         # DESCEND to the place point — EXEMPT (raw).
-        _publish_motion(ctx, above_closed_q, drop_closed_q, DEFAULT_APPROACH_DURATION_S)
+        _publish_motion_t(ctx, above_closed_q, drop_closed_q, DEFAULT_APPROACH_DURATION_S, tempo)
         ctx.last_full_joints = drop_closed_q
         ctx.last_arm_joints = drop_arm_q
         # Gripper-only open (release) — EXEMPT (raw).
-        _publish_motion(ctx, drop_closed_q, drop_open_q, DEFAULT_GRIPPER_DURATION_S)
+        _publish_motion_t(ctx, drop_closed_q, drop_open_q, DEFAULT_GRIPPER_DURATION_S, tempo)
         ctx.last_full_joints = drop_open_q
         # RETREAT back up to the hover — TRANSIT, zone-avoided.
         safe_move(ctx, drop_open_q, retreat_open_q, DEFAULT_APPROACH_DURATION_S,
-                  roll=GRASP_ROLL_RAD)
+                  roll=GRASP_ROLL_RAD, tempo=tempo)
         ctx.last_arm_joints = above_arm_q
         ctx.last_full_joints = retreat_open_q
     finally:
@@ -806,8 +918,10 @@ def move_above(ctx, args: dict[str, Any]) -> None:
     # derives the largest reachable hover.
     _grasp_q, arm_q = _solve_grasp_and_approach(ctx, (x, y, z), approach, roll=roll)
     q_end = arm_q + [ctx.last_full_joints[5]]
-    # TRANSIT (hover above the object) — route around any no-go zone.
-    safe_move(ctx, ctx.last_full_joints, q_end, DEFAULT_MOVE_DURATION_S, roll=roll)
+    # TRANSIT (hover above the object) — route around any no-go zone. Optional
+    # per-move „mit Tempo" override; None → workflow-global tempo.
+    safe_move(ctx, ctx.last_full_joints, q_end, DEFAULT_MOVE_DURATION_S, roll=roll,
+              tempo=_move_tempo(args))
     ctx.last_arm_joints = arm_q
     ctx.last_full_joints = q_end
 
@@ -885,8 +999,10 @@ def lift(ctx, args: dict[str, Any]) -> None:
     arm_q = list(above_q)
     arm_q[4] = cur[4]
     q_end = arm_q + [cur[5]]
-    # TRANSIT (straight-up lift) — route around any no-go zone.
-    safe_move(ctx, cur, q_end, DEFAULT_APPROACH_DURATION_S, roll=cur[4])
+    # TRANSIT (straight-up lift) — route around any no-go zone. Optional per-move
+    # „mit Tempo" override; None → workflow-global tempo.
+    safe_move(ctx, cur, q_end, DEFAULT_APPROACH_DURATION_S, roll=cur[4],
+              tempo=_move_tempo(args))
     ctx.last_arm_joints = arm_q
     ctx.last_full_joints = q_end
 

@@ -39,7 +39,12 @@ import types
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
-from physical_ai_server.workflow.handlers.motion import WorkflowError, _point_in_zone
+from physical_ai_server.workflow.handlers.motion import (
+    WorkflowError,
+    _point_in_zone,
+    _TEMPO_MAX,
+    _TEMPO_MIN,
+)
 from physical_ai_server.workflow.interpreter import (
     Interpreter,
     InterpreterError,
@@ -167,6 +172,15 @@ class WorkflowContext:
     # exactly like raw _publish_motion (backward-safe). Read defensively via
     # getattr by motion.safe_move / motion._point_in_zone / path_guard.
     zones: list | None = None
+    # Phase-2 Tempo: a global speed multiplier on every motion DURATION, parsed
+    # in start() from the top-level ``tempo`` sibling of the workflow_json
+    # (injected for BOTH sim + real runs; ignored by Interpreter.from_json, which
+    # reads only data['blocks']). Read defensively via getattr(ctx, 'tempo', 1.0)
+    # by motion._publish_motion. SET ONCE in start() and NEVER mutated — so it is
+    # thread-safe across the main stack + hat handlers with no lock. Rule §2: a
+    # teaching speed knob on the workflow runtime, NOT an inference safety
+    # envelope (it never reshapes a recorded/replayed action).
+    tempo: float = 1.0
 
 
 MAX_WORKFLOW_JSON_BYTES = 256 * 1024  # 256 KiB; see plan §2.5
@@ -408,6 +422,12 @@ class WorkflowManager:
             # one start(), so both get zones.
             zones = self._parse_zones(workflow_json)
 
+            # Phase-2 Tempo: parse the top-level ``tempo`` sibling once (clamped /
+            # default 1.0) and thread it onto ctx.tempo below. Like zones, it is a
+            # workflow_json sibling the interpreter ignores; both the sim + real
+            # manager run through this start(), so both honour it.
+            tempo = self._parse_tempo(workflow_json)
+
             # IK pre-check: walk the JSON for concrete destinations and
             # try a quick IK solve on each. Failures become
             # `unreachable_blocks` — non-fatal warnings the React side
@@ -481,6 +501,8 @@ class WorkflowManager:
                 absent_since={},
                 # Phase-4 no-go zones (None/empty → motion behaves as today).
                 zones=zones,
+                # Phase-2 Tempo (global speed multiplier; 1.0 → unchanged speed).
+                tempo=tempo,
             )
 
             # Apply the synchronous seed so hat threads start with a
@@ -675,6 +697,34 @@ class WorkflowManager:
             return None
         raw = parsed.get('zones')
         return raw if isinstance(raw, list) else None
+
+    @staticmethod
+    def _parse_tempo(workflow_json: str) -> float:
+        """Extract the top-level ``tempo`` speed multiplier injected into the
+        ``/workflow/start`` payload (Phase-2 run-bar Tempo + optional per-move).
+        Mirrors ``_parse_zones``: ``Interpreter.from_json`` reads only
+        ``data['blocks']``, so the sibling is invisible to the interpreter. Both
+        the real and the sim manager call this one start(), so both honour Tempo.
+
+        Defensive: missing / non-dict JSON / non-numeric / bool / non-finite /
+        non-positive → 1.0 (normal speed); a valid value is CLAMPED to the safe
+        ``[_TEMPO_MIN, _TEMPO_MAX]`` window so ctx.tempo is always sane (motion's
+        ``_resolve_tempo`` re-clamps defensively too).
+
+        Rule §2: a teaching speed knob, not an inference safety envelope."""
+        try:
+            parsed = json.loads(workflow_json)
+        except (ValueError, TypeError):
+            return 1.0
+        if not isinstance(parsed, dict):
+            return 1.0
+        raw = parsed.get('tempo')
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+            return 1.0
+        val = float(raw)
+        if not math.isfinite(val) or val <= 0.0:
+            return 1.0
+        return max(_TEMPO_MIN, min(_TEMPO_MAX, val))
 
     def _ik_precheck(
         self,

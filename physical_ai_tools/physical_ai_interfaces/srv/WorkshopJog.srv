@@ -1,0 +1,28 @@
+# Roboter Studio manual control — jog the REAL follower one step. Reuses the
+# workflow trajectory path (quintic + velocity floor + the sole
+# /leader/joint_trajectory publisher), so a jog is a bounded, velocity-safe move
+# just like every workflow motion. Modes:
+#   joint      — nudge arm joint `index` (0..4) or the gripper (index 5) by
+#                `delta` rad; REFUSED (not silently clamped) if it exceeds the
+#                Dynamixel limit / gripper band.
+#   cartesian  — nudge the end-effector by `delta` m along X(0)/Y(1)/Z(2), or the
+#                tool roll (index 3) by `delta` rad. Pitch/yaw (index >=4) is
+#                rejected (the top-down arm cannot hold them).
+#   drive_to   — move straight to (target_x, target_y, target_z), top-down roll
+#                (the per-block „fahre dorthin" / the editor's Move button).
+# `duration_s` is the REQUESTED move duration (clamped; the velocity floor may
+# extend it). Torque is asserted ON at the start of the move.
+string mode
+int32 index
+float32 delta
+float32 target_x
+float32 target_y
+float32 target_z
+float32 duration_s
+---
+bool success
+float32[] joints
+float32 world_x
+float32 world_y
+float32 world_z
+string message

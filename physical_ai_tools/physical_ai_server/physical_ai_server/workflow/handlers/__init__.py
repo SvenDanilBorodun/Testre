@@ -14,6 +14,7 @@ from physical_ai_server.workflow.handlers import perception_blocks as perception
 from physical_ai_server.workflow.handlers import destinations as destination_handlers
 from physical_ai_server.workflow.handlers import output as output_handlers
 from physical_ai_server.workflow.handlers import counters as counter_handlers
+from physical_ai_server.workflow.handlers import trajectory as trajectory_handlers
 
 
 STATEMENT_HANDLERS: dict[str, callable] = {
@@ -25,6 +26,10 @@ STATEMENT_HANDLERS: dict[str, callable] = {
     'edubotics_pickup': motion_handlers.pickup,
     'edubotics_drop_at': motion_handlers.drop_at,
     'edubotics_wait_seconds': motion_handlers.wait_seconds,
+    # Replay a recorded hand-guided trajectory (Batch 2b). Reads
+    # ctx.trajectories[name] (CONTRACT C sibling of the workflow_json) and
+    # re-segments through the velocity floor — see handlers/trajectory.py.
+    'edubotics_replay_trajectory': trajectory_handlers.replay_trajectory,
     # Grasp-split motion primitives (Phase 1) — the one-block grasp decomposed
     # into composable steps acting on a Greifziel (a Detection from find_object).
     'edubotics_move_above': motion_handlers.move_above,

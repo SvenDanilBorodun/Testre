@@ -690,6 +690,87 @@ export function useRosServiceCaller() {
     [callService]
   );
 
+  // Roboter Studio Batch 2b — jog / hand-guide / record / replay services.
+
+  // Jog the follower one step. modes:
+  //   'joint'     — index 0-5 (j1..j5, gripper), `delta` radians.
+  //   'cartesian' — index 0=X / 1=Y / 2=Z / 3=roll (NO pitch/yaw), `delta`
+  //                 metres (X/Y/Z) or radians (roll).
+  //   'drive_to'  — absolute move to (target_x, target_y, target_z).
+  // Resp { success, joints[], world_x, world_y, world_z, message }. Contract
+  // owned by the backend WorkshopJog.srv. 15 s: a drive_to executes a motion.
+  const jogArm = useCallback(
+    async ({
+      mode,
+      index = 0,
+      delta = 0,
+      target_x = 0,
+      target_y = 0,
+      target_z = 0,
+      duration_s = 0,
+    } = {}) =>
+      callService(
+        '/workshop/jog',
+        'physical_ai_interfaces/srv/WorkshopJog',
+        {
+          mode: String(mode || ''),
+          index: Number(index) | 0,
+          delta: Number(delta) || 0,
+          target_x: Number(target_x) || 0,
+          target_y: Number(target_y) || 0,
+          target_z: Number(target_z) || 0,
+          duration_s: Number(duration_s) || 0,
+        },
+        15000,
+      ),
+    [callService]
+  );
+
+  // Torque the follower off (enabled=true → student can hand-guide it) or back
+  // on (enabled=false → the arm holds its pose). Resp { success, message }.
+  const handGuide = useCallback(
+    async (enabled) =>
+      callService(
+        '/workshop/hand_guide',
+        'physical_ai_interfaces/srv/WorkshopHandGuide',
+        { enabled: Boolean(enabled) },
+      ),
+    [callService]
+  );
+
+  // Control a hand-guided motion recording. action 'start' | 'stop' | 'cancel'.
+  // 'stop' returns { success, sample_count, duration_s, points_json, message }
+  // where points_json is the CONTRACT-B trajectory ({"fps":int,"points":[...]}).
+  const recordControl = useCallback(
+    async (action) =>
+      callService(
+        '/workshop/record',
+        'physical_ai_interfaces/srv/WorkshopRecordControl',
+        { action: String(action || '') },
+        15000,
+      ),
+    [callService]
+  );
+
+  // Replay a trajectory NOW on the follower (used for the RecordPanel preview
+  // and any direct playback). `points_json` is the CONTRACT-B JSON string;
+  // `speed` is a >0 multiplier. Resp { success, message }. 60 s: replays a whole
+  // recorded motion.
+  const replayMotion = useCallback(
+    async ({ name = '', points_json = '', speed = 1.0 } = {}) =>
+      callService(
+        '/workshop/replay',
+        'physical_ai_interfaces/srv/WorkshopReplay',
+        {
+          name: String(name || ''),
+          points_json: String(points_json || ''),
+          speed: Number(speed) > 0 ? Number(speed) : 1.0,
+        },
+        60000,
+      ),
+    [callService]
+  );
+
   const cancelCalibration = useCallback(
     async (camera = '') =>
       callService(
@@ -830,6 +911,10 @@ export function useRosServiceCaller() {
     markDestination,
     getObjectCatalog,
     capturePose,
+    jogArm,
+    handGuide,
+    recordControl,
+    replayMotion,
     cancelCalibration,
     getCalibrationStatus,
     calibrationPreview,

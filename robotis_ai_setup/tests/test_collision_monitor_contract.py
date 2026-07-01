@@ -591,6 +591,65 @@ class GpioCallbackSafetyTest(unittest.TestCase):
         self.assertFalse(host._collision_active)
 
 
+class ModeGateTest(unittest.TestCase):
+    """The teleop collision guard is teleop/recording-ONLY (Rule §2). It must be
+    GATED OFF during a Roboter-Studio workflow (on_workflow) AND during a Batch 2b
+    Handbetrieb session (on_manual) — both run follower-only (no leader pose), so
+    the leader-required two-step recovery can't run and arming the detector would
+    wedge the student. When gated the detector is RESET (so a residual bad-tick
+    streak can't trip the first frame after the mode ends) and update() is skipped.
+    Armed normally otherwise (on_workflow == on_manual == False)."""
+
+    def _spy_host(self):
+        host = _Host()
+        host.timers = [t for t in host.timers if t.callback != host._collision_watchdog_cb]
+        host._collision_follower_vel = {j: 0.0 for j in CM.ARM_JOINT_NAMES}
+        calls = {'reset': 0, 'update': 0}
+        real_reset = host._collision_detector.reset
+
+        def _reset():
+            calls['reset'] += 1
+            return real_reset()
+
+        def _update(*_a, **_k):
+            calls['update'] += 1
+            return types.SimpleNamespace(tripped=False, latched_overload=[], reason='')
+
+        host._collision_detector.reset = _reset
+        host._collision_detector.update = _update
+        return host, calls
+
+    def _good_msg(self):
+        # A well-formed, HIGH-effort gpio frame that would feed a trip if not gated.
+        iv = types.SimpleNamespace(
+            interface_names=['Present Load', 'Hardware Error Status'],
+            values=[900.0, 0.0])
+        return types.SimpleNamespace(interface_groups=['dxl11'], interface_values=[iv])
+
+    def test_on_manual_gates_detector_off(self):
+        host, calls = self._spy_host()
+        host.on_manual = True
+        host._process_gpio_states(self._good_msg())
+        self.assertEqual(calls['reset'], 1)   # debounce counters reset
+        self.assertEqual(calls['update'], 0)  # detection skipped entirely
+        self.assertFalse(host._collision_active)
+
+    def test_on_workflow_gates_detector_off(self):
+        host, calls = self._spy_host()
+        host.on_workflow = True
+        host._process_gpio_states(self._good_msg())
+        self.assertEqual(calls['reset'], 1)
+        self.assertEqual(calls['update'], 0)
+        self.assertFalse(host._collision_active)
+
+    def test_detector_runs_when_neither_workflow_nor_manual(self):
+        host, calls = self._spy_host()
+        host.on_manual = False    # defaults, but be explicit
+        host.on_workflow = False
+        host._process_gpio_states(self._good_msg())
+        self.assertEqual(calls['update'], 1)  # guard armed → detection ran
+
+
 class StateCallbackSafetyTest(unittest.TestCase):
     """The /joint_states + /leader/joint_states subscriptions run continuously on
     the executor — including ACROSS the open_manipulator container blip when the

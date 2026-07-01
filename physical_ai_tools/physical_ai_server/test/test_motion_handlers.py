@@ -140,6 +140,32 @@ def test_pickup_unreachable_target_raises_arbeitsbereich():
     assert 'Arbeitsbereich' in str(exc.value)
 
 
+def test_close_on_object_clamps_corrupt_gripper_rad_high():
+    # A corrupt catalog gripper_close_rad far ABOVE the open limit must be CLAMPED
+    # to GRIPPER_OPEN_RAD — a huge value otherwise stretches the velocity-floored
+    # close to tens of seconds (a wedged run) and commands an unreachable angle.
+    ctx = _ctx()
+    ziel = types.SimpleNamespace(extras={'gripper_close_rad': 100.0})
+    close_on_object(ctx, {'ziel': ziel})
+    assert ctx.last_commanded_joints[5] == pytest.approx(GRIPPER_OPEN_RAD)
+    assert ctx.last_full_joints[5] == pytest.approx(GRIPPER_OPEN_RAD)
+
+
+def test_close_on_object_clamps_corrupt_gripper_rad_low():
+    ctx = _ctx()
+    ziel = types.SimpleNamespace(extras={'gripper_close_rad': -100.0})
+    close_on_object(ctx, {'ziel': ziel})
+    assert ctx.last_commanded_joints[5] == pytest.approx(GRIPPER_CLOSED_RAD)
+
+
+def test_close_on_object_valid_rad_unchanged():
+    # An in-band catalog value passes through unclamped.
+    ctx = _ctx()
+    ziel = types.SimpleNamespace(extras={'gripper_close_rad': -0.25})
+    close_on_object(ctx, {'ziel': ziel})
+    assert ctx.last_commanded_joints[5] == pytest.approx(-0.25)
+
+
 # ── named-object grasp primitives (live roll, no double-add, per-object close) ─
 
 def test_grasp_roll_default_is_90_degrees():

@@ -20,6 +20,12 @@ import {
   setDebuggerWarnings,
 } from '../../features/workshop/workshopSlice';
 import { useRosServiceCaller } from '../../hooks/useRosServiceCaller';
+// Namespace import (not a named import) so this file builds independently of the
+// cloud agent that owns `getTrajectoryByName` in workflowApi.js — a missing
+// member is `undefined` and handled by the `typeof` guard below, rather than a
+// build-time "not exported" error. Called by name per CONTRACT C.
+import * as workflowApi from '../../services/workflowApi';
+import { collectReplayNames } from './blocks/trajectories';
 import { DE } from './blocks/messages_de';
 
 const BUTTON_BASE =
@@ -89,6 +95,27 @@ async function probeRsStatus() {
   }
 }
 
+// CONTRACT C — a fetched trajectory must reduce to { fps, points } for the run
+// payload. The cloud row is expected to expose `points` (array) + `fps`
+// directly (CONTRACT B), but tolerate a stringified `points_json` fallback so a
+// small cloud-shape difference doesn't wedge a replay run.
+function normalizeTrajectory(t) {
+  if (!t || typeof t !== 'object') return null;
+  let points = Array.isArray(t.points) ? t.points : null;
+  let fps = Number(t.fps) || 0;
+  if (!points && typeof t.points_json === 'string') {
+    try {
+      const parsed = JSON.parse(t.points_json);
+      if (parsed && Array.isArray(parsed.points)) {
+        points = parsed.points;
+        if (!fps) fps = Number(parsed.fps) || 0;
+      }
+    } catch (_) { /* leave points null → caller errors */ }
+  }
+  if (!points || points.length === 0) return null;
+  return { fps, points };
+}
+
 function RunControls({
   workflowId,
   blocklyJson,
@@ -105,6 +132,7 @@ function RunControls({
     setWorkflowBreakpoints,
   } = useRosServiceCaller();
   const runState = useSelector((s) => s.workshop.runState);
+  const accessToken = useSelector((s) => s.auth?.session?.access_token);
   const phase = useSelector((s) => s.workshop.phase);
   const currentBlockId = useSelector((s) => s.workshop.currentBlockId);
   const paused = useSelector((s) => s.workshop.paused);
@@ -118,6 +146,11 @@ function RunControls({
   // Phase-2 Tempo: per-browser preference. Seeded from a forward-compat
   // simScene.tempo (a future WorkshopPage could persist it in the DB sim_scene)
   // when present, else the stored localStorage value, else normal (1.0).
+  // The seed is INTENTIONALLY one-shot (no reconciling effect on later
+  // simScene.tempo changes): localStorage has priority and is the sole owner —
+  // there is no DB/sim_scene writer for tempo (see the RS_CONTROL_BASE block
+  // comment), so tracking simScene.tempo would only fight that priority and is
+  // inert in practice. Add a reconciling effect only once a real DB writer ships.
   const [tempo, setTempo] = useState(() => {
     const fromScene = simScene && Number.isFinite(simScene.tempo)
       ? clampTempo(simScene.tempo)
@@ -254,6 +287,44 @@ function RunControls({
           console.warn('Pre-start setWorkflowBreakpoints failed:', e);
         }
       }
+      // CONTRACT C: collect every trajectory name referenced by a „spiele
+      // Bewegung ab" replay block, fetch each recorded trajectory from the cloud
+      // and build a top-level `trajectories` sibling { name: { fps, points } }.
+      // The interpreter ignores the sibling; the server's WorkflowContext reads
+      // it to resolve each replay block. Fail LOUD (abort the start) if a
+      // referenced trajectory can't be fetched — running a replay program
+      // without its data would silently no-op the motion.
+      const replayNames = collectReplayNames(blocklyJson);
+      const trajectories = {};
+      if (replayNames.length > 0) {
+        if (!workflowId) {
+          toast.error(
+            'Bitte zuerst den Workflow speichern — aufgenommene Bewegungen '
+            + 'gehören zu einem gespeicherten Workflow.');
+          return;
+        }
+        if (typeof workflowApi.getTrajectoryByName !== 'function') {
+          toast.error('Aufgenommene Bewegungen können zurzeit nicht geladen werden.');
+          return;
+        }
+        try {
+          const fetched = await Promise.all(
+            replayNames.map((name) =>
+              workflowApi.getTrajectoryByName(accessToken, workflowId, name)
+                .then((t) => [name, t])),
+          );
+          for (const [name, t] of fetched) {
+            const norm = normalizeTrajectory(t);
+            if (!norm) {
+              throw new Error(`Bewegung „${name}" wurde nicht gefunden.`);
+            }
+            trajectories[name] = norm;
+          }
+        } catch (e) {
+          toast.error(`Bewegung konnte nicht geladen werden: ${e.message || e}`);
+          return;
+        }
+      }
       // Phase-3: in simMode inject the `sim` sibling into the workflow_json
       // string (Contract B) — `Interpreter.from_json` reads only `data['blocks']`
       // and silently ignores siblings, so the server runs the SAME program on a
@@ -279,8 +350,9 @@ function RunControls({
             sim: { enabled: true, objects: simObjects },
             zones,
             tempo,
+            trajectories,
           })
-        : JSON.stringify({ ...(blocklyJson || {}), zones, tempo });
+        : JSON.stringify({ ...(blocklyJson || {}), zones, tempo, trajectories });
       const r = await callService(
         '/workflow/start',
         'physical_ai_interfaces/srv/StartWorkflow',
@@ -328,6 +400,7 @@ function RunControls({
     callService,
     dispatch,
     workflowId,
+    accessToken,
     breakpoints,
     setWorkflowBreakpoints,
   ]);

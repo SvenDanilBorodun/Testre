@@ -22,6 +22,50 @@ const DEST_COLOR = '#f59e0b';
 // table plane and the gripper crashes into the table).
 const UNPINNED = '—';
 
+// Batch 2b — the per-block „fahre dorthin" button. A small clickable play glyph
+// on every destination_pin block. Clicking it drives the REAL follower to that
+// pinned point via /workshop/jog (mode 'drive_to'). Blockly blocks live outside
+// React, so the field's click handler bridges to WorkshopPage through a
+// module-level accessor (the same idiom perception.js uses for the object
+// catalog): WorkshopPage registers a handler (jogArm + German confirm/toast) via
+// setDriveToHandler; the field click reads the block's stored coords and calls
+// it. `_driveToHandler` is a MODULE-level singleton — WorkshopPage registers ONE
+// handler for the whole page (not per-block), so a flyout-block click is NOT a
+// no-op via "no handler registered". It is safe because: (a) driveToFromBlock
+// early-returns while no handler is registered (before WorkshopPage mounts /
+// after it unmounts), and (b) an un-pinned block's X/Y/Z read as the „—" sentinel
+// → NaN, which the registered handler REFUSES in German (the „— / NaN" guard in
+// WorkshopPage). The icon is an inline ASCII-only SVG (base64-safe, offline).
+const DRIVE_ICON =
+  'data:image/svg+xml;base64,'
+  + btoa(
+    "<svg xmlns='http://www.w3.org/2000/svg' width='22' height='16'>"
+    + "<rect x='0' y='0' width='22' height='16' rx='3' fill='#0f766e'/>"
+    + "<path d='M8 4 L15 8 L8 12 Z' fill='#ffffff'/></svg>",
+  );
+
+let _driveToHandler = null;
+
+// WorkshopPage wires this to a jogArm-backed handler (with German confirm +
+// toast). Pass a function taking { name, x, y, z }; pass null to unregister.
+export function setDriveToHandler(fn) {
+  _driveToHandler = typeof fn === 'function' ? fn : null;
+}
+
+// The logic the „fahre dorthin" field click runs. Reads the block's NAME/X/Y/Z
+// (X/Y/Z are the read-only labels updated by the camera click; un-pinned reads
+// as the „—" sentinel → NaN, which the registered handler rejects in German).
+// Exported so it can be unit-tested without simulating a real Blockly click.
+export function driveToFromBlock(block) {
+  if (!block || typeof block.getFieldValue !== 'function') return;
+  if (typeof _driveToHandler !== 'function') return;
+  const name = block.getFieldValue('NAME') || '';
+  const x = Number(block.getFieldValue('X'));
+  const y = Number(block.getFieldValue('Y'));
+  const z = Number(block.getFieldValue('Z'));
+  _driveToHandler({ name, x, y, z });
+}
+
 // Validator for the destination's NAME input. Names appear in
 // log lines and as keys in the runtime destinations dict; keep them
 // short and printable. We strip leading/trailing whitespace and reject
@@ -54,8 +98,12 @@ export const DESTINATION_BLOCKS = [
     colour: DEST_COLOR,
     tooltip:
       'Wähle diesen Block aus und klicke dann in die Szenen-Kamera, um '
-      + 'das Ziel zu setzen.',
-    extensions: ['edubotics_validate_destination_name'],
+      + 'das Ziel zu setzen. Mit „fahre dorthin" fährt der Roboter direkt '
+      + 'zu diesem Punkt.',
+    extensions: [
+      'edubotics_validate_destination_name',
+      'edubotics_destination_drive_button',
+    ],
   },
   {
     type: 'edubotics_destination_current',
@@ -111,6 +159,22 @@ export function registerDestinationBlocks() {
     if (field && typeof field.setValidator === 'function') {
       field.setValidator(nameValidator);
     }
+  });
+  // Batch 2b — append the clickable „fahre dorthin" button as a third row on the
+  // pin block. FieldImage with an onClick is Blockly's button-in-block idiom;
+  // the field is non-serializable so it adds nothing to the saved workflow. The
+  // click bridges to WorkshopPage via driveToFromBlock → the registered handler.
+  registerExtensionOnce('edubotics_destination_drive_button', function () {
+    const btn = new Blockly.FieldImage(
+      DRIVE_ICON,
+      22,
+      16,
+      'fahre dorthin',
+      (field) => driveToFromBlock(field && field.getSourceBlock && field.getSourceBlock()),
+    );
+    this.appendDummyInput('DRIVE_TO_ROW')
+      .appendField('fahre dorthin')
+      .appendField(btn, 'DRIVE_BTN');
   });
   // Skip re-definition on HMR / Jest re-import. Audit round-3 §A.
   const toDefine = DESTINATION_BLOCKS.filter(

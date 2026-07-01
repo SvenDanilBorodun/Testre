@@ -26,6 +26,7 @@ import { registerOutputBlocks } from '../blocks/output';
 import { registerEventBlocks } from '../blocks/events';
 import { registerControlBlocks } from '../blocks/control';
 import { registerCounterBlocks } from '../blocks/counters';
+import { registerTrajectoryBlocks } from '../blocks/trajectories';
 
 // Mirror BlocklyWorkspace.jsx::registerAllBlocksOnce() — same functions, same
 // order. Each register* call is idempotent (HMR/re-import guarded), so calling
@@ -38,6 +39,7 @@ function registerAllWorkshopBlocks() {
   registerEventBlocks();
   registerControlBlocks();
   registerCounterBlocks();
+  registerTrajectoryBlocks();
 }
 
 // Recursively collect every `{ kind: 'block', type }` entry from a toolbox JSON

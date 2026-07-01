@@ -1,0 +1,15 @@
+# Roboter Studio manual control — record / replay a hand-guided trajectory.
+#   action = "start"  → torque the follower OFF and begin sampling the follower
+#                       joints at ~25 Hz into a buffer (student moves the arm by
+#                       hand). Bounded by RECORD_MAX_S + a hard sample cap.
+#   action = "stop"   → stop sampling, RE-TORQUE (fail-loud), and return the
+#                       recorded path as CONTRACT-B `points_json`
+#                       {"fps":25,"points":[[j1..j5,grip,t_s], ...]}.
+#   action = "cancel" → stop sampling, re-torque, discard the buffer.
+string action
+---
+bool success
+uint32 sample_count
+float32 duration_s
+string points_json
+string message

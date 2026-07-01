@@ -226,13 +226,19 @@ class _EnvGuard:
                 os.environ[k] = v
 
 
-def _host_debounce1():
+def _host_debounce1(leader_active=True):
     # debounce_ms low so a single hard-press sample trips immediately.
     with _EnvGuard(EDUBOTICS_COLLISION_DEBOUNCE_MS='1',
                    EDUBOTICS_COLLISION_ENABLED='1',
                    EDUBOTICS_FOLLOWER_ONLY=None):
         host = _Host()
     host._collision_follower_vel = {j: 0.0 for j in CM.ARM_JOINT_NAMES}
+    # F5 — a real teleop/recording collision has a LIVE leader publishing
+    # /leader/joint_states; the trip is gated on that (a follower-only spurious
+    # trip must never arm the leader-requiring recovery). Simulate a fresh leader.
+    if leader_active:
+        import time
+        host._leader_state_last_mono = time.monotonic()
     return host
 
 
@@ -280,6 +286,60 @@ class WorkflowGateTest(unittest.TestCase):
         host.on_inference = True
         host._process_gpio_states(_hard_press_msg())
         self.assertFalse(host._collision_active)
+
+
+# ================================ F5 ============================================
+
+class SettleAndLeaderGateTest(unittest.TestCase):
+    """F5 — after a gated mode ends OR a re-torque, a holding-current spike must not
+    trip the LEADER-REQUIRING recovery in follower-only mode: (a) a settle window
+    suppresses detection for COLLISION_SETTLE_WINDOW_S, and (b) a trip is dropped
+    entirely when no leader is live (follower-only), so the dead-end recovery never
+    arms."""
+
+    def test_no_leader_hard_press_does_not_trip(self):
+        # Follower-only (no live leader): even a hard press must NOT trip — the
+        # leader-requiring two-step recovery can't run, so arming it would wedge.
+        host = _host_debounce1(leader_active=False)
+        host._leader_state_last_mono = None
+        host.on_workflow = False
+        host.on_inference = False
+        host._process_gpio_states(_hard_press_msg())
+        self.assertFalse(host._collision_active)
+
+    def test_settle_window_suppresses_after_manual_ends(self):
+        # While on_manual gates the detector, the settle window is armed. The FIRST
+        # tick after on_manual clears (a re-torque spike) is still suppressed.
+        host = _host_debounce1()
+        host.on_manual = True
+        host._process_gpio_states(_hard_press_msg())      # gated → arms settle
+        self.assertFalse(host._collision_active)
+        host.on_manual = False
+        host._process_gpio_states(_hard_press_msg())      # within settle → skipped
+        self.assertFalse(host._collision_active)
+        self.assertEqual(host._collision_detector._bad_ticks['joint1'], 0)
+
+    def test_note_resettle_arms_the_window(self):
+        import time
+        host = _host_debounce1()
+        host._collision_settle_until_mono = 0.0
+        host.note_collision_resettle()
+        self.assertGreater(host._collision_settle_until_mono, time.monotonic())
+        # A hard press within the window is suppressed (no trip).
+        host.on_manual = False
+        host.on_inference = False
+        host._process_gpio_states(_hard_press_msg())
+        self.assertFalse(host._collision_active)
+
+    def test_trip_resumes_after_settle_window_elapses(self):
+        host = _host_debounce1()
+        host.on_manual = True
+        host._process_gpio_states(_hard_press_msg())      # arms settle
+        host.on_manual = False
+        # Force the settle window into the past (as if it elapsed).
+        host._collision_settle_until_mono = 0.0
+        host._process_gpio_states(_hard_press_msg())      # armed again + live leader
+        self.assertTrue(host._collision_active)
 
 
 # ================================ HIGH-6 ========================================

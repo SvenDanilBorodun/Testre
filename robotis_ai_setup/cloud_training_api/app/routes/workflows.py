@@ -22,6 +22,9 @@ from app.validators.workflow import (
     MAX_NAME_LENGTH,
     validate_blockly_json,
     validate_sim_scene,
+    validate_trajectory,
+    validate_trajectory_metadata,
+    validate_trajectory_name,
 )
 
 logger = logging.getLogger(__name__)
@@ -128,6 +131,40 @@ def _resolve_visible_workgroup_ids(user_id: str) -> list[str]:
     profile = get_user_profile(user_id)
     wg = profile.get("workgroup_id")
     return [wg] if wg else []
+
+
+def _assert_workflow_visible(user_id: str, workflow_id: str) -> dict:
+    """Return the workflow row if user_id may READ it; 404 otherwise.
+
+    Read-visibility ladder (mirrors ``get_workflow`` / ``list_workflow_versions``):
+    owner OR group sibling (via the ``workgroup_memberships`` audit table) OR a
+    classroom member reading a template. Used by the child-table read endpoints
+    (versions, trajectories) which key on the parent workflow's visibility.
+    Returns the parent row (its owner/group/template/classroom columns) so a
+    caller that needs them avoids a second SELECT.
+    """
+    supabase = get_supabase()
+    workflow_row = (
+        supabase.table("workflows")
+        .select("owner_user_id, workgroup_id, is_template, classroom_id")
+        .eq("id", workflow_id)
+        .execute()
+    )
+    if not workflow_row.data:
+        raise HTTPException(status_code=404, detail="Workflow nicht gefunden")
+    row = workflow_row.data[0]
+    if row.get("owner_user_id") == user_id:
+        return row
+    if (
+        row.get("workgroup_id")
+        and row["workgroup_id"] in _resolve_visible_workgroup_ids(user_id)
+    ):
+        return row
+    if row.get("is_template"):
+        classroom_id = _get_user_classroom_id(user_id)
+        if classroom_id and row.get("classroom_id") == classroom_id:
+            return row
+    raise HTTPException(status_code=404, detail="Workflow nicht gefunden")
 
 
 # ---------- Endpoints ----------
@@ -398,7 +435,37 @@ def clone_workflow(workflow_id: str, user=Depends(get_current_user)) -> Workflow
     inserted = supabase.table("workflows").insert(insert_payload).execute()
     if not inserted.data:
         raise HTTPException(status_code=500, detail="Klon konnte nicht erstellt werden.")
-    return WorkflowResponse(**inserted.data[0])
+    new_workflow = inserted.data[0]
+
+    # Carry the source's recorded replay trajectories into the clone so the
+    # cloned „spiele Bewegung ab <name>" blocks still resolve. Copied under the
+    # CLONER's ownership + the NEW workflow_id (never the source's ids — Rule §4).
+    # Bounded to the per-workflow prune cap (16). Best-effort: a clone with no
+    # trajectories is still a valid workflow.
+    src_trajectories = (
+        supabase.table("workflow_trajectories")
+        .select("name, samples, point_count, duration_s, fps")
+        .eq("workflow_id", workflow_id)
+        .order("created_at", desc=True)
+        .limit(16)
+        .execute()
+    ).data or []
+    if src_trajectories:
+        copy_rows = [
+            {
+                "workflow_id": new_workflow["id"],
+                "owner_user_id": user.id,
+                "name": t.get("name"),
+                "samples": t.get("samples"),
+                "point_count": t.get("point_count"),
+                "duration_s": t.get("duration_s"),
+                "fps": t.get("fps"),
+            }
+            for t in src_trajectories
+        ]
+        supabase.table("workflow_trajectories").insert(copy_rows).execute()
+
+    return WorkflowResponse(**new_workflow)
 
 
 # ---------- Phase-2: server-side version history ----------
@@ -428,30 +495,8 @@ def list_workflow_versions(
     owner-only, which broke the Verlauf history dropdown for group
     siblings collaborating on a shared workflow.
     """
+    _assert_workflow_visible(user.id, workflow_id)
     supabase = get_supabase()
-    workflow_row = (
-        supabase.table("workflows")
-        .select("owner_user_id, workgroup_id, is_template, classroom_id")
-        .eq("id", workflow_id)
-        .execute()
-    )
-    if not workflow_row.data:
-        raise HTTPException(status_code=404, detail="Workflow nicht gefunden")
-    row = workflow_row.data[0]
-    visible = False
-    if row.get("owner_user_id") == user.id:
-        visible = True
-    elif (
-        row.get("workgroup_id")
-        and row["workgroup_id"] in _resolve_visible_workgroup_ids(user.id)
-    ):
-        visible = True
-    elif row.get("is_template"):
-        classroom_id = _get_user_classroom_id(user.id)
-        if classroom_id and row.get("classroom_id") == classroom_id:
-            visible = True
-    if not visible:
-        raise HTTPException(status_code=404, detail="Workflow nicht gefunden")
     result = (
         supabase.table("workflow_versions")
         .select("id, workflow_id, blockly_json, note, created_at")
@@ -513,3 +558,201 @@ def restore_workflow_version(
         raise HTTPException(status_code=500, detail="Wiederherstellen fehlgeschlagen.")
     row = rpc.data if isinstance(rpc.data, dict) else rpc.data[0]
     return WorkflowResponse(**row)
+
+
+# ---------- Batch-2b: recorded replay trajectories ----------
+#
+# A student torque-offs the follower, hand-guides a motion, and the ROS backend
+# streams the recorded CONTRACT-B samples ({"fps", "points"}) up here. A
+# „spiele Bewegung ab <name>" block later fetches them back via the by-name
+# endpoint and replays them. Storage mirrors the versions child-table (migration
+# 034): FK to workflows ON DELETE CASCADE, owner on the row, per-workflow prune
+# cap 16. Writes assert workflow ownership + set owner/workflow SERVER-SIDE
+# (Rule §4 — service-role bypasses RLS); reads use the workflow read-visibility
+# ladder (_assert_workflow_visible).
+
+
+class TrajectoryCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=MAX_NAME_LENGTH)
+    fps: float = Field(..., gt=0)
+    points: list
+    # Optional denormalised metadata; the server falls back to len(points) for
+    # point_count when the client omits it.
+    point_count: int | None = None
+    duration_s: float | None = None
+
+
+class TrajectoryResponse(BaseModel):
+    id: str
+    workflow_id: str
+    owner_user_id: str
+    name: str
+    point_count: int | None = None
+    duration_s: float | None = None
+    fps: float | None = None
+    created_at: str
+    updated_at: str
+    # Full CONTRACT-B samples ({"fps", "points"}). Present on the single-get
+    # response, omitted (None) on the list response to keep listings light.
+    samples: dict | None = None
+
+
+class TrajectorySamples(BaseModel):
+    """The run-payload sibling: exactly what „spiele Bewegung ab" needs to
+    replay — CONTRACT B ({"fps", "points"})."""
+
+    fps: float
+    points: list
+
+
+@router.post("/{workflow_id}/trajectories", response_model=TrajectoryResponse)
+def create_trajectory(
+    workflow_id: str,
+    payload: TrajectoryCreate,
+    user=Depends(get_current_user),
+) -> TrajectoryResponse:
+    """Persist one recorded hand-guided trajectory under this workflow.
+
+    Owner-only (``_assert_workflow_owned``); owner_user_id + workflow_id are set
+    server-side, never from the body (Rule §4)."""
+    _assert_workflow_owned(user.id, workflow_id)
+    # Mirror the ROS backend + Blockly frontend name rules (1–40 chars, charset).
+    # The cloud must not store a name no block can reference (dead storage) or one
+    # whose `/` breaks the by-name path route. Returns the trimmed name to store.
+    name = validate_trajectory_name(payload.name)
+    validate_trajectory(payload.points, payload.fps)
+    # Guard the denormalised metadata too: point_count / duration_s are stored
+    # verbatim from the body, so an out-of-int4-range count (500 on INSERT) or a
+    # non-finite/negative duration (stored as Infinity) must be rejected here.
+    validate_trajectory_metadata(payload.point_count, payload.duration_s)
+    supabase = get_supabase()
+    point_count = (
+        payload.point_count if payload.point_count is not None else len(payload.points)
+    )
+    insert_payload = {
+        "workflow_id": workflow_id,
+        "owner_user_id": user.id,
+        "name": name,
+        "samples": {"fps": payload.fps, "points": payload.points},
+        "point_count": point_count,
+        "duration_s": payload.duration_s,
+        "fps": payload.fps,
+    }
+    result = supabase.table("workflow_trajectories").insert(insert_payload).execute()
+    if not result.data:
+        raise HTTPException(
+            status_code=500, detail="Bewegung konnte nicht gespeichert werden."
+        )
+    return TrajectoryResponse(**result.data[0])
+
+
+@router.get("/{workflow_id}/trajectories", response_model=list[TrajectoryResponse])
+def list_trajectories(
+    workflow_id: str,
+    user=Depends(get_current_user),
+    limit: int = Query(default=100, ge=1, le=100),
+) -> list[TrajectoryResponse]:
+    """List this workflow's recorded trajectories, newest first (metadata only —
+    the samples blob is fetched on demand via the by-name / single-get routes).
+    Visibility mirrors the versions ladder (owner / group / classroom template).
+    """
+    _assert_workflow_visible(user.id, workflow_id)
+    supabase = get_supabase()
+    result = (
+        supabase.table("workflow_trajectories")
+        .select(
+            "id, workflow_id, owner_user_id, name, point_count, duration_s, fps, "
+            "created_at, updated_at"
+        )
+        .eq("workflow_id", workflow_id)
+        .order("created_at", desc=True)
+        .limit(limit)
+        .execute()
+    )
+    return [TrajectoryResponse(**r) for r in (result.data or [])]
+
+
+@router.get(
+    "/{workflow_id}/trajectories/by-name/{name}", response_model=TrajectorySamples
+)
+def get_trajectory_by_name(
+    workflow_id: str,
+    name: str,
+    user=Depends(get_current_user),
+) -> TrajectorySamples:
+    """Fetch the newest trajectory named ``name`` under this workflow as the
+    run-payload shape ({"fps", "points"}). Used by the „spiele Bewegung ab"
+    block. Newest-wins when a name was re-recorded (no uniqueness constraint).
+
+    Declared BEFORE the ``/{trajectory_id}`` route so the two-segment
+    ``by-name/<name>`` path can never be shadowed by the single-segment id route.
+    """
+    _assert_workflow_visible(user.id, workflow_id)
+    supabase = get_supabase()
+    result = (
+        supabase.table("workflow_trajectories")
+        .select("fps, samples")
+        .eq("workflow_id", workflow_id)
+        .eq("name", name)
+        .order("created_at", desc=True)
+        .limit(1)
+        .execute()
+    )
+    if not result.data:
+        raise HTTPException(status_code=404, detail="Bewegung nicht gefunden")
+    row = result.data[0]
+    samples = row.get("samples") if isinstance(row.get("samples"), dict) else {}
+    points = samples.get("points", [])
+    fps = row.get("fps")
+    if fps is None:
+        fps = samples.get("fps")
+    if fps is None:
+        # Defense-in-depth: a legacy/edge row with fps NULL in both the column and
+        # the samples blob would otherwise 500 on TrajectorySamples(fps=None). Fall
+        # back to the manual-record sampler default (25 Hz) so replay still works.
+        fps = 25.0
+    return TrajectorySamples(fps=fps, points=points)
+
+
+@router.get(
+    "/{workflow_id}/trajectories/{trajectory_id}", response_model=TrajectoryResponse
+)
+def get_trajectory(
+    workflow_id: str,
+    trajectory_id: str,
+    user=Depends(get_current_user),
+) -> TrajectoryResponse:
+    """Fetch a single trajectory (including its full CONTRACT-B samples) by id."""
+    _assert_workflow_visible(user.id, workflow_id)
+    supabase = get_supabase()
+    result = (
+        supabase.table("workflow_trajectories")
+        .select("*")
+        .eq("workflow_id", workflow_id)
+        .eq("id", trajectory_id)
+        .execute()
+    )
+    if not result.data:
+        raise HTTPException(status_code=404, detail="Bewegung nicht gefunden")
+    return TrajectoryResponse(**result.data[0])
+
+
+@router.delete("/{workflow_id}/trajectories/{trajectory_id}")
+def delete_trajectory(
+    workflow_id: str,
+    trajectory_id: str,
+    user=Depends(get_current_user),
+) -> dict:
+    """Delete one recorded trajectory. Owner-only (``_assert_workflow_owned``);
+    the delete is additionally owner-scoped as belt-and-suspenders (Rule §4)."""
+    _assert_workflow_owned(user.id, workflow_id)
+    supabase = get_supabase()
+    (
+        supabase.table("workflow_trajectories")
+        .delete()
+        .eq("workflow_id", workflow_id)
+        .eq("id", trajectory_id)
+        .eq("owner_user_id", user.id)
+        .execute()
+    )
+    return {"ok": True}

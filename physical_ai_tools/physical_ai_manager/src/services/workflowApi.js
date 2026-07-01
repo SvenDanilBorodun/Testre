@@ -128,6 +128,61 @@ export async function restoreWorkflowVersion(accessToken, workflowId, versionId)
   );
 }
 
+// ---------- Batch-2b: recorded replay trajectories ----------
+//
+// The „spiele Bewegung ab" block stores a hand-guided recording (CONTRACT B:
+// { fps, points:[[j1..j5, grip, t_s], ...] }) against its workflow and replays
+// it by name. These mirror the version/workflow REST calls: accessToken FIRST
+// (module convention — every function here threads the Supabase JWT explicitly),
+// then the workflow id, then the payload/name/id. Errors are WorkflowApiError
+// with .status/.detail like the rest of the module.
+
+export async function createTrajectory(accessToken, workflowId, payload) {
+  // payload = { name, fps, points, point_count?, duration_s? }
+  return apiRequest(
+    `/workflows/${workflowId}/trajectories`,
+    'POST',
+    accessToken,
+    payload,
+  );
+}
+
+export async function listTrajectories(accessToken, workflowId) {
+  // → [{ id, workflow_id, owner_user_id, name, point_count, duration_s, fps,
+  //      created_at, updated_at }] (metadata only, newest first).
+  return apiRequest(
+    `/workflows/${workflowId}/trajectories`,
+    'GET',
+    accessToken,
+  );
+}
+
+export async function getTrajectoryByName(accessToken, workflowId, name) {
+  // → { fps, points } — the run-payload sibling for „spiele Bewegung ab".
+  return apiRequest(
+    `/workflows/${workflowId}/trajectories/by-name/${encodeURIComponent(name)}`,
+    'GET',
+    accessToken,
+  );
+}
+
+export async function getTrajectory(accessToken, workflowId, trajectoryId) {
+  // → full row incl. { samples: { fps, points } }.
+  return apiRequest(
+    `/workflows/${workflowId}/trajectories/${trajectoryId}`,
+    'GET',
+    accessToken,
+  );
+}
+
+export async function deleteTrajectory(accessToken, workflowId, trajectoryId) {
+  return apiRequest(
+    `/workflows/${workflowId}/trajectories/${trajectoryId}`,
+    'DELETE',
+    accessToken,
+  );
+}
+
 export async function listClassroomTemplates(accessToken, classroomId) {
   return apiRequest(`/teacher/classrooms/${classroomId}/workflow-templates`, 'GET', accessToken);
 }

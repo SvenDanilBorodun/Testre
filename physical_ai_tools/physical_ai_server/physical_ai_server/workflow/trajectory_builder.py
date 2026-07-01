@@ -89,8 +89,14 @@ def build_segment(
     safe per-joint velocity fraction — see ``_velocity_safe_duration``."""
     if len(q_start) != len(q_end):
         raise ValueError('q_start and q_end must have the same length')
+    # A non-positive requested duration must NOT collapse into a single
+    # instantaneous waypoint — a large joint delta would then be an unsafe instant
+    # jump that bypasses the per-joint velocity floor. Floor the duration to one
+    # frame and fall through to _velocity_safe_duration below, which stretches it
+    # back up for a big delta (a zero/tiny delta keeps the one-frame move, so the
+    # degenerate result is behaviourally identical to the old single-point return).
     if duration_s <= 0:
-        return [(list(q_end), 1.0 / fps)]
+        duration_s = 1.0 / fps
 
     q_start_arr = np.asarray(q_start, dtype=np.float64)
     q_end_arr = np.asarray(q_end, dtype=np.float64)

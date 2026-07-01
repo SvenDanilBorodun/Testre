@@ -253,6 +253,7 @@ def _validate_required_schema() -> None:
         "workgroup_memberships",
         "workflows",
         "workflow_versions",  # 015
+        "workflow_trajectories",  # 034 — Roboter Studio Batch-2b replay trajectories
         "tutorial_progress",  # 016
         "datasets",
         "progress_entries",
@@ -664,7 +665,18 @@ def _user_key_from_jwt(request: Request) -> str | None:
 # meant 30 students behind one school NAT shared the 10/min start bucket —
 # the 11th student got a spurious 429 even though nobody individually
 # exceeded the limit. The IP fallback still covers any missing header.
-_PER_USER_RATE_LIMIT_PREFIXES = ("/jetson/", "/trainings/")
+#
+# /workflows (no trailing slash so it covers the bare `POST /workflows`
+# create path AS WELL AS `POST /workflows/{id}/{clone,versions/.../restore,
+# trajectories}`) is per-user for the identical NAT reason: the single
+# ("POST", "/workflows", 10, 60.0) rule matches by prefix, so all four
+# workflow POSTs share one bucket — IP-keyed, a 30-student NAT classroom
+# collectively blew the 10/min IP bucket → spurious 429. Every /workflows
+# route requires Depends(get_current_user) (verified: create_workflow,
+# clone_workflow, restore_workflow_version, create_trajectory), so a JWT is
+# always present and there is no no-JWT/beacon fallback to regress. The IP
+# fallback still covers any (unreachable) missing-header case.
+_PER_USER_RATE_LIMIT_PREFIXES = ("/jetson/", "/trainings/", "/workflows")
 
 
 # Audit A2: hard upper bound on workflow-write request bodies.

@@ -16,6 +16,7 @@ methods, not a re-implementation.
 from __future__ import annotations
 
 import ast
+import math
 import textwrap
 from pathlib import Path
 
@@ -37,7 +38,8 @@ def _load_method(name: str):
     for node in ast.walk(tree):
         if isinstance(node, ast.FunctionDef) and node.name == name:
             src = textwrap.dedent(ast.get_source_segment(source, node))
-            ns: dict = {}
+            # FIX 3 — the callback references math.isfinite; inject the module.
+            ns: dict = {'math': math}
             exec(compile(src, str(_SERVER_PY), 'exec'), ns)  # noqa: S102
             return ns[name]
     raise AssertionError(f'method {name} not found in {_SERVER_PY}')
@@ -86,16 +88,22 @@ class _StubNode:
     """Minimal `self` for the extracted callback."""
 
     def __init__(self, *, gate=(True, ''), communicator=object(), xyz=(0.0, 0.0, 0.0),
-                 wfm=None):
+                 wfm=None, stale=False):
+        import threading
         self._gate = gate
         self.communicator = communicator
         self._xyz = xyz
         self._wfm = wfm if wfm is not None else _real_wfm()
+        self._mode_lock = threading.Lock()  # F1 arbiter (held only around the gate)
+        self._stale = stale                 # FIX 3 stale-readback flag
         self.gate_modes = []  # records every requested_mode the callback passed
 
     def _assert_no_other_active(self, requested_mode):
         self.gate_modes.append(requested_mode)
         return self._gate
+
+    def _follower_joints_stale(self):
+        return self._stale
 
     def _get_current_gripper_xyz(self):
         return self._xyz
@@ -190,6 +198,37 @@ def test_pose_unknown_message():
     resp = _capture_pose(node, _Request('Ablage'), _Response())
     assert resp.success is False
     assert 'unbekannt' in resp.message
+    _assert_zeros(resp)
+    assert node._wfm.get_destinations() == {}
+
+
+# ---------------------------------------------------------------------------
+# FIX 3 — stale follower readback + non-finite FK are refused, nothing stored.
+# ---------------------------------------------------------------------------
+
+def test_stale_follower_readback_refused():
+    node = _StubNode(stale=True)
+    resp = _capture_pose(node, _Request('Ablage'), _Response())
+    assert resp.success is False
+    assert 'noch nicht bekannt' in resp.message
+    _assert_zeros(resp)
+    assert node._wfm.get_destinations() == {}
+
+
+def test_nonfinite_fk_refused():
+    node = _StubNode(xyz=(0.1, float('nan'), 0.3))
+    resp = _capture_pose(node, _Request('Ablage'), _Response())
+    assert resp.success is False
+    assert 'ungültig' in resp.message
+    _assert_zeros(resp)
+    assert node._wfm.get_destinations() == {}
+
+
+def test_infinite_fk_refused():
+    node = _StubNode(xyz=(0.1, 0.2, float('inf')))
+    resp = _capture_pose(node, _Request('Ablage'), _Response())
+    assert resp.success is False
+    assert 'ungültig' in resp.message
     _assert_zeros(resp)
     assert node._wfm.get_destinations() == {}
 

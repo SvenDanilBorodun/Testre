@@ -158,6 +158,12 @@ class Communicator:
         self._camera_recent_msgs: Dict[str, deque] = {}
         self.follower_topic_msgs = {}
         self.leader_topic_msgs = {}
+        # Wall-clock (monotonic) arrival time of the most recent follower
+        # JointState, for the follower-joint staleness gate — the arm-side
+        # analogue of _camera_msg_arrival. 0.0 = none arrived yet. Roboter Studio
+        # jog / replay refuse when this readback is stale (a frozen joint stream)
+        # so a driven move never seeds from a stale pose.
+        self._follower_last_arrival_mono: float = 0.0
 
         self.rosbag_service_available = False
 
@@ -451,6 +457,16 @@ class Communicator:
 
     def _follower_callback(self, name: str, msg: JointState) -> None:
         self.follower_topic_msgs[name] = msg
+        self._follower_last_arrival_mono = time.monotonic()
+
+    def get_follower_joints_age_s(self) -> Optional[float]:
+        """Seconds since the last follower JointState arrived, or None when none
+        has arrived yet. Used by Roboter Studio jog / replay to refuse a driven
+        move against a STALE (frozen) joint stream — a fresh readback is required
+        so the move never seeds from an old pose. Mirrors get_camera_msg_age_s."""
+        if self._follower_last_arrival_mono <= 0.0:
+            return None
+        return time.monotonic() - self._follower_last_arrival_mono
 
     def _leader_callback(self, name: str, msg: JointTrajectory) -> None:
         self.leader_topic_msgs[name] = msg
@@ -621,6 +637,10 @@ class Communicator:
             self.camera_topic_msgs[key] = None
         for key in self.follower_topic_msgs.keys():
             self.follower_topic_msgs[key] = None
+        # Drop the follower arrival stamp too so a resumed session's first tick
+        # reports the readback as "not yet arrived" (None age) rather than a huge
+        # stale age carried over from before the multi-second recovery motion.
+        self._follower_last_arrival_mono = 0.0
         for key in self.leader_topic_msgs.keys():
             self.leader_topic_msgs[key] = None
         # Audit F66: also drop the F65 sync rings. Without this, the first

@@ -70,6 +70,14 @@ class WorkflowContext:
     ik: Any | None = None
     perception: Any | None = None
     destinations: dict[str, dict[str, float]] = field(default_factory=dict)
+    # Batch 2b — recorded hand-guided trajectories, name → CONTRACT-B
+    # ``{"fps": int, "points": [[j1..j5, grip, t_s], ...]}``. Threaded from the
+    # top-level ``trajectories`` sibling of the workflow_json (CONTRACT C) merged
+    # with any server-persisted recordings, exactly like ``destinations``. Read by
+    # handlers/trajectory.replay_trajectory. Empty {} → the „Aufnahme abspielen"
+    # block fails loud with a German "Unbekannte Aufnahme" (backward-safe: a
+    # workflow with no replay block never touches it).
+    trajectories: dict[str, Any] = field(default_factory=dict)
     # DUAL Z-KEY (don't conflate):
     #   z_table        — MEASURED end-effector grasp height (touch-off). Used by
     #                    motion.pickup as the descend target. NOT a projection plane.
@@ -271,6 +279,10 @@ class WorkflowManager:
         # callbacks in physical_ai_server.py and read into WorkflowContext
         # at start time.
         self._persisted_destinations: dict[str, dict[str, float]] = {}
+        # Persistent recorded hand-guided trajectories across runs (Batch 2b) —
+        # set by the /workshop record path and read into WorkflowContext at start
+        # time, mirroring _persisted_destinations. name → CONTRACT-B dict.
+        self._persisted_trajectories: dict[str, Any] = {}
 
     @property
     def is_running(self) -> bool:
@@ -298,6 +310,18 @@ class WorkflowManager:
 
     def get_destinations(self) -> dict[str, dict[str, float]]:
         return dict(self._persisted_destinations)
+
+    def set_trajectory(self, name: str, trajectory: dict[str, Any]) -> None:
+        """Persist a recorded hand-guided trajectory (Batch 2b) so the next
+        workflow run has it in ``ctx.trajectories`` and ``/workshop/replay`` can
+        resolve it by name. Mirrors ``set_destination``. ``trajectory`` is the
+        CONTRACT-B ``{"fps": int, "points": [[j1..j5, grip, t_s], ...]}`` dict."""
+        if not name or not isinstance(trajectory, dict):
+            return
+        self._persisted_trajectories[name] = trajectory
+
+    def get_trajectories(self) -> dict[str, Any]:
+        return dict(self._persisted_trajectories)
 
     def set_breakpoints(self, block_ids: list[str]) -> None:
         """Replace the active breakpoint set. Safe to call before, during,
@@ -401,6 +425,13 @@ class WorkflowManager:
             for k, v in (self._load_destinations() or {}).items():
                 destinations.setdefault(k, v)
 
+            # Batch 2b — recorded trajectories: server-persisted recordings first,
+            # then the top-level ``trajectories`` sibling of workflow_json
+            # (CONTRACT C) via setdefault (persisted wins, mirroring destinations).
+            trajectories = dict(self._persisted_trajectories)
+            for k, v in self._parse_trajectories(workflow_json).items():
+                trajectories.setdefault(k, v)
+
             ik_instance = None
             if self._ik_factory is not None:
                 try:
@@ -449,7 +480,14 @@ class WorkflowManager:
                 try:
                     joints = self._get_follower_joints()
                     if joints and len(joints) >= 6:
-                        seeded_joints = [float(x) for x in joints[:6]]
+                        vals = [float(x) for x in joints[:6]]
+                        # Non-finite guard: a NaN/Inf joint value would seed the
+                        # first commanded pose with garbage (NaN published straight
+                        # through the trajectory, or Inf crashing build_segment).
+                        # Treat it as "no seed" so the safe HOME default is used
+                        # and the first real motion re-seeds cleanly.
+                        if all(math.isfinite(v) for v in vals):
+                            seeded_joints = vals
                 except Exception:  # noqa: BLE001 — best-effort seed
                     seeded_joints = None
 
@@ -458,6 +496,8 @@ class WorkflowManager:
                 ik=ik_instance,
                 perception=perception_instance,
                 destinations=destinations,
+                # Batch 2b — recorded hand-guided trajectories (name → CONTRACT-B).
+                trajectories=trajectories,
                 z_table=calib.get('z_table'),
                 board_table_z=calib.get('board_table_z'),
                 scene_intrinsics=calib.get('scene_intrinsics'),
@@ -697,6 +737,32 @@ class WorkflowManager:
             return None
         raw = parsed.get('zones')
         return raw if isinstance(raw, list) else None
+
+    @staticmethod
+    def _parse_trajectories(workflow_json: str) -> dict[str, Any]:
+        """Extract the top-level ``trajectories`` sibling injected into the
+        ``/workflow/start`` payload (Batch 2b, CONTRACT C: ``{"<name>": {"fps":
+        int, "points": [[j1..j5, grip, t_s], ...]}, ...}``). Defensive: missing /
+        non-dict / non-dict JSON → {} (run with no recordings). Only dict-valued
+        entries with string keys are kept; malformed entries are dropped (a bad
+        entry surfaces at the „Aufnahme abspielen" block, not at start). Mirrors
+        ``_parse_zones`` — ``Interpreter.from_json`` reads only ``data['blocks']``,
+        so the sibling is invisible to the interpreter, and both the real and the
+        sim manager run through this one start()."""
+        try:
+            parsed = json.loads(workflow_json)
+        except (ValueError, TypeError):
+            return {}
+        if not isinstance(parsed, dict):
+            return {}
+        raw = parsed.get('trajectories')
+        if not isinstance(raw, dict):
+            return {}
+        out: dict[str, Any] = {}
+        for k, v in raw.items():
+            if isinstance(k, str) and isinstance(v, dict):
+                out[k] = v
+        return out
 
     @staticmethod
     def _parse_tempo(workflow_json: str) -> float:

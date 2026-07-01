@@ -52,6 +52,10 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/WorkflowSetBreakpoints.srv"
   "srv/WorkflowStep.srv"
   "srv/WorkshopCapturePose.srv"
+  "srv/WorkshopHandGuide.srv"
+  "srv/WorkshopJog.srv"
+  "srv/WorkshopRecordControl.srv"
+  "srv/WorkshopReplay.srv"
   DEPENDENCIES std_msgs
 )
 

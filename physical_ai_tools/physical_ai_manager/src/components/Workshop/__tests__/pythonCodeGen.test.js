@@ -26,6 +26,7 @@ import { registerOutputBlocks } from '../blocks/output';
 import { registerEventBlocks } from '../blocks/events';
 import { registerControlBlocks } from '../blocks/control';
 import { registerCounterBlocks } from '../blocks/counters';
+import { registerTrajectoryBlocks } from '../blocks/trajectories';
 import { generatePython } from '../pythonCodeGen';
 
 function registerAll() {
@@ -36,6 +37,7 @@ function registerAll() {
   registerEventBlocks();
   registerControlBlocks();
   registerCounterBlocks();
+  registerTrajectoryBlocks();
 }
 
 // Build a headless workspace from a list of top-level serialized blocks, then
@@ -123,6 +125,13 @@ describe('pythonCodeGen — motion', () => {
     ]);
     expect(code).toContain("robot.move_to('B')");
     expect(code).not.toContain('tempo=');
+  });
+
+  test('replay_trajectory maps to robot.replay(<name>)', async () => {
+    const code = await gen([
+      { type: 'edubotics_replay_trajectory', fields: { NAME: 'Bewegung 1' } },
+    ]);
+    expect(code).toContain("robot.replay('Bewegung 1')");
   });
 });
 

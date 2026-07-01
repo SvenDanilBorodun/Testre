@@ -24,7 +24,12 @@ import DebugPanel from '../components/Workshop/DebugPanel';
 import GalleryTab from '../components/Workshop/GalleryTab';
 import SkillmapPlayer from '../components/Workshop/SkillmapPlayer';
 import VersionHistoryDropdown from '../components/Workshop/VersionHistoryDropdown';
-import { applyPinnedCoordinates } from '../components/Workshop/blocks/destinations';
+import JogPanel from '../components/Workshop/JogPanel';
+import RecordPanel from '../components/Workshop/RecordPanel';
+import {
+  applyPinnedCoordinates,
+  setDriveToHandler,
+} from '../components/Workshop/blocks/destinations';
 import { useAutosave } from '../components/Workshop/useAutosave';
 import {
   setUnsavedBlocklyJson,
@@ -63,11 +68,14 @@ const WORKSHOP_URDF_OPEN_KEY = 'edubotics_workshop_urdf_open';
 const WORKSHOP_CODE_OPEN_KEY = 'edubotics_workshop_code_open';
 
 // Mirror the BACKEND validator (_DESTINATION_NAME_RE, handlers/destinations.py):
-// letters (incl. ä ö ü ß), digits, space, underscore, hyphen — 1..40 chars — so a
-// name the frontend accepts can't bounce off the backend with a generic error.
-// Used by „Position merken".
-const CAPTURE_NAME_MAX_LEN = 40;
-const CAPTURE_NAME_RE = /^[A-Za-zÄÖÜäöüß0-9 _-]{1,40}$/;
+// letters (incl. ä ö ü ß), digits, space, underscore, hyphen — used by
+// „Position merken". Capped at 24 (NOT the backend's 40) to MATCH the
+// destination_pin / destination_ref block NAME field (destinations.js
+// NAME_MAX_LEN=24): a captured point is typed by name into those blocks, and a
+// 25–40-char name would be truncated to 24 there → „Ziel nicht gefunden" at run
+// time. 24 is a safe subset of the backend's 1..40 range.
+const CAPTURE_NAME_MAX_LEN = 24;
+const CAPTURE_NAME_RE = /^[A-Za-zÄÖÜäöüß0-9 _-]{1,24}$/;
 function sanitizeDestinationName(raw) {
   if (typeof raw !== 'string') return '';
   const trimmed = raw.trim().slice(0, CAPTURE_NAME_MAX_LEN);
@@ -134,8 +142,20 @@ function WorkshopPage({ isActive }) {
   // [label_de, type_name] pairs from GetObjectCatalog, threaded to SimScene's
   // object palette (the same source the Blockly dropdowns use).
   const [objectCatalog, setObjectCatalog] = useState([]);
+  // Batch 2b: rosbridge liveness gates the real-arm jog/record panels (the same
+  // signal the rest of the app uses for „Roboter verbunden").
+  const heartbeatStatus = useSelector((s) => s.tasks?.heartbeatStatus);
+  // Batch 2b: RecordPanel reports whether a hand-guide recording is in flight
+  // (lifted here) so we can disable JogPanel + the „fahre dorthin" drive-to while
+  // the arm is being hand-guided — a driven move would fight the student's hand.
+  const [recordPanelRecording, setRecordPanelRecording] = useState(false);
+  // Batch 2b: JogPanel reports whether a hand-guide (torque-off) session is open
+  // (lifted here, like recordPanelRecording) so we can disable RecordPanel while
+  // the arm is limp — one shared truth, so neither panel shows a stale
+  // „freigeschaltet"/disabled state after the sibling closes the session.
+  const [jogHandGuideOn, setJogHandGuideOn] = useState(false);
   const subscriptions = useRosTopicSubscription();
-  const { getObjectCatalog, capturePose } = useRosServiceCaller();
+  const { getObjectCatalog, capturePose, jogArm } = useRosServiceCaller();
   const workspaceRef = useRef(null);
   // Blockly 12 ties getSelected() to the FocusManager, and clicking the
   // camera overlay (a non-focusable div) blurs the block in Chromium →
@@ -348,6 +368,68 @@ function WorkshopPage({ isActive }) {
     setWorkspaceAccessor(() => workspaceRef.current);
     return () => setWorkspaceAccessor(null);
   }, []);
+
+  // Batch 2b: the per-block „fahre dorthin" button (destinations.js) bridges to
+  // this handler — it drives the REAL follower to the block's pinned point via
+  // /workshop/jog (mode 'drive_to'). Refuse in the simulator (no real arm) and
+  // while a program runs; an un-pinned point reads as NaN → German hint.
+  useEffect(() => {
+    setDriveToHandler(async ({ name, x, y, z }) => {
+      if (simMode) {
+        toast.error('Im Simulator kann der echte Roboter nicht gefahren werden.');
+        return;
+      }
+      // Refuse a driven move on a disconnected robot (matches JogPanel/RecordPanel
+      // gating) — without this the jog call silently no-ops "successfully".
+      if (heartbeatStatus !== 'connected') {
+        toast.error('Roboter nicht verbunden.');
+        return;
+      }
+      if (runState === 'running') {
+        toast.error('Während ein Programm läuft, ist das Fahren gesperrt.');
+        return;
+      }
+      if (recordPanelRecording) {
+        toast.error('Erst die Aufnahme beenden, dann fahren.');
+        return;
+      }
+      // Refuse a driven move while the arm is hand-guided (limp — the student's
+      // hand is on it in JogPanel „Arm freischalten"). Re-torquing + driving it
+      // would fight the student's hand while JogPanel still shows „freigeschaltet".
+      if (jogHandGuideOn) {
+        toast.error(
+          'Der Arm ist freigeschaltet — bitte zuerst festsetzen, '
+          + 'bevor du ihn zu einem Punkt fährst.',
+        );
+        return;
+      }
+      if (![x, y, z].every((v) => Number.isFinite(v))) {
+        toast.error(
+          'Dieses Ziel wurde noch nicht gesetzt — klicke zuerst in die '
+          + 'Szenen-Kamera, um die Koordinaten zu setzen.',
+        );
+        return;
+      }
+      const label = name || 'Ziel';
+      if (typeof window !== 'undefined'
+          && !window.confirm(
+            `Roboter zu „${label}" fahren `
+            + `(x=${x.toFixed(3)}, y=${y.toFixed(3)}, z=${z.toFixed(3)})?`)) {
+        return;
+      }
+      try {
+        const res = await jogArm({ mode: 'drive_to', target_x: x, target_y: y, target_z: z });
+        if (res && res.success) {
+          toast.success(`Fahre zu „${label}".`);
+        } else {
+          toast.error((res && res.message) || 'Fahrt nicht möglich.');
+        }
+      } catch (e) {
+        toast.error(`Fahrt fehlgeschlagen: ${e.message || e}`);
+      }
+    });
+    return () => setDriveToHandler(null);
+  }, [jogArm, simMode, runState, recordPanelRecording, heartbeatStatus, jogHandGuideOn]);
 
   // Fetch the named-object catalog for the Blockly dropdowns once the editor is
   // available (calibrated). Re-fetch if the student calibrates in-session. The
@@ -686,6 +768,23 @@ function WorkshopPage({ isActive }) {
                             Speichert die aktuelle Armposition als Ziel.
                           </span>
                         </div>
+                        {/* Batch 2b: manual jog (Tippbetrieb) + hand-guide, then
+                            record/replay a hand-guided motion. Disabled unless a
+                            real follower is connected and no program is running. */}
+                        <JogPanel
+                          disabled={heartbeatStatus !== 'connected'
+                            || runState === 'running'
+                            || recordPanelRecording}
+                          onHandGuideChange={setJogHandGuideOn}
+                        />
+                        <RecordPanel
+                          accessToken={accessToken}
+                          workflowId={selectedWorkflowId}
+                          disabled={heartbeatStatus !== 'connected'
+                            || runState === 'running'
+                            || jogHandGuideOn}
+                          onRecordingChange={setRecordPanelRecording}
+                        />
                         {/* Phase-5: live 3D follower twin, stacked BELOW the scene
                             camera (the camera click-to-pin flow is untouched).
                             Collapsible „3D-Ansicht" panel, default collapsed. */}

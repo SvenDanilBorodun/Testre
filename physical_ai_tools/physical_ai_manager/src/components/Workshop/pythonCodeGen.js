@@ -116,6 +116,8 @@ function registerForBlocks(generator, Order) {
   F.edubotics_descend_to = (b) => `robot.descend_to(${val(b, 'ZIEL')})\n`;
   F.edubotics_close_on_object = (b) => `robot.close_on_object(${val(b, 'ZIEL')})\n`;
   F.edubotics_lift = (b) => `robot.lift(${tempoOf(b) ? `tempo='${tempoOf(b)}'` : ''})\n`;
+  // Batch 2b — replay a recorded hand-guided motion by name.
+  F.edubotics_replay_trajectory = (b) => `robot.replay(${pyStr(b.getFieldValue('NAME'))})\n`;
 
   // ── Perception (Wahrnehmung) ───────────────────────────────────────────
   F.edubotics_grasp_object = (b) =>

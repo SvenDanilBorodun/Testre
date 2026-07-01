@@ -1,0 +1,15 @@
+# Roboter Studio manual control — replay a recorded hand-guided trajectory on
+# the REAL follower. Points come from `points_json` (inline, CONTRACT B) OR — when
+# empty — from a server-persisted trajectory named `name`. `speed` is a playback
+# multiplier (clamped). SAFETY: the recorded timestamps are NOT published raw ×
+# speed; each consecutive pair is re-segmented through the quintic velocity floor
+# (build_segment) so playback can never exceed the safe per-joint velocity — a
+# ×2 becomes "≤×2, clamped where unsafe". A velocity-safe lead-in from the arm's
+# current pose is prepended. Runs asynchronously (the callback returns a
+# "started" ack); the follower is re-torqued ON before any motion.
+string name
+string points_json
+float32 speed
+---
+bool success
+string message

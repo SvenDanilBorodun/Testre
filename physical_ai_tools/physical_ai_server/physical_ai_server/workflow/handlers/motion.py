@@ -124,14 +124,15 @@ DEFAULT_GRASP_DURATION_S = 1.0
 # docker-compose forward per the env-forwarding-guard); tests monkeypatch them.
 _TEMPO_MIN = 0.5   # „langsam" — half speed (clamp floor)
 _TEMPO_MAX = 2.0   # „schnell" — double speed (clamp ceiling)
-# ros2_control JointTrajectoryController goal_time tolerance is 5.0 s
-# (omx_f_hardware_controller_manager.yaml: constraints.goal_time = 5.0). A slow
-# tempo LENGTHENS a move; cap the stretched duration strictly below that slack so
-# a slowed move can never out-run the controller's overall-timing tolerance. The
-# longest default move (HOME, 3.0 s) at _TEMPO_MIN would otherwise be 6.0 s. The
-# build_segment velocity floor independently maxes at ~4.1 s for the worst ~2π
-# joint swing — also < goal_time — so the final published duration is always
-# < 5.0 s in both directions.
+# Cap on a tempo-slowed (or velocity-floored) SEGMENT duration. A slow tempo
+# LENGTHENS a move; this bounds the per-segment duration so a slowed move stays in
+# a sane range (the longest default move, HOME at 3.0 s, would otherwise be 6.0 s
+# at _TEMPO_MIN). NOTE: the goal_time comparison is MOOT — chunked_publish splits
+# every trajectory into <= 1 s chunks, each published with its own
+# time_from_start restarted per chunk, so the controller never sees a single
+# > goal_time (5.0 s) segment regardless of this cap; it stays purely a
+# teaching-speed sanity bound. The build_segment velocity floor independently
+# maxes a segment at ~4.1 s for the worst ~2π joint swing.
 _MAX_STRETCHED_DURATION_S = 4.5
 
 # Per-move „mit Tempo" dropdown values → speed multiplier. The default option
@@ -964,6 +965,12 @@ def close_on_object(ctx, args: dict[str, Any]) -> None:
                 parsed = GRIPPER_CLOSED_RAD
             # NaN/inf passes float() but would command a garbage gripper angle.
             close_rad = parsed if math.isfinite(parsed) else GRIPPER_CLOSED_RAD
+            # Clamp a corrupt catalog value into the physical gripper band. A value
+            # far outside [GRIPPER_CLOSED_RAD, GRIPPER_OPEN_RAD] otherwise makes
+            # build_segment's velocity floor stretch this gripper close to tens of
+            # seconds (e.g. close_rad=100 → ~65 s) — a wedged run — and commands a
+            # servo angle the hardware can't reach.
+            close_rad = max(GRIPPER_CLOSED_RAD, min(GRIPPER_OPEN_RAD, close_rad))
     q_start = ctx.last_full_joints
     q_end = q_start[:5] + [close_rad]
     _publish_motion(ctx, q_start, q_end, DEFAULT_GRIPPER_DURATION_S)

@@ -60,6 +60,11 @@
 # follower-only (no leader), so a trip would publish a freeze + relax to /leader/joint_trajectory
 # racing the workflow's own trajectory writer and then wait for a non-existent leader to recover.
 # The guard is therefore teleop/recording-ONLY (on_workflow == on_inference == False).
+#
+# Manual safety (Rule §2, same scope): the detector is ALSO gated off when self.on_manual is
+# True (Batch 2b Handbetrieb — manual jog / hand-guide / record / replay). It is follower-only
+# (no leader), and hand-guiding presses the arm by hand at ~0 velocity (looks like a collision),
+# so a trip would freeze/relax against a non-existent leader with no recovery path.
 
 import os
 import time
@@ -155,6 +160,15 @@ DEFAULT_RESUME_TOL_RAD = 0.30
 # while a leader is genuinely running.
 LEADER_ACTIVE_FRESH_WINDOW_S = 2.0
 
+# F5 — settle window. After a mode that gated the detector off (on_manual /
+# on_workflow) ends, OR after a follower re-torque, suppress detection for this
+# long. A re-torque holding-current spike in follower-only mode otherwise trips
+# the LEADER-REQUIRING two-step recovery on the first re-armed tick → the student
+# is wedged with no recovery path. During the window the detector is reset and
+# ticks are skipped. A few hundred ms comfortably covers the transient spike while
+# leaving the guard armed for genuine teleop/recording collisions.
+COLLISION_SETTLE_WINDOW_S = 0.5
+
 COLLISION_MESSAGE_DE = (
     'STOPP — Kollision erkannt: Der Arm wurde gegen ein Hindernis gedrückt und angehalten. '
     'Entferne zuerst das Hindernis und klicke dann auf „Follower in Grundstellung fahren".'
@@ -209,6 +223,10 @@ class CollisionMonitorMixin:
         # /leader/joint_trajectory. The collision monitor already subscribes to
         # this topic, so tracking arrival here is free.
         self._leader_state_last_mono = None
+
+        # F5 — monotonic() until which detection is suppressed after a gated mode
+        # (on_manual / on_workflow) or a re-torque; 0.0 = not settling.
+        self._collision_settle_until_mono = 0.0
 
         self._collision_resume_tol = _env_float(
             'EDUBOTICS_COLLISION_RESUME_TOL_RAD', DEFAULT_RESUME_TOL_RAD)
@@ -380,7 +398,26 @@ class CollisionMonitorMixin:
         # like inference: no detection, and reset the debounce counters so a residual
         # bad-tick streak from before the workflow can't trip on the first tick after
         # it ends. The guard stays fully armed for teleop/recording (on_workflow False).
-        if getattr(self, 'on_workflow', False):
+        #
+        # Batch 2b — SAME Rule §2 scope for Handbetrieb (manual jog / hand-guide /
+        # record / replay, on_manual=True). Follower-only Roboter Studio has NO leader
+        # pose, so the leader-required two-step collision recovery can never run —
+        # arming the detector would freeze the arm with no recovery path and wedge the
+        # student. Hand-guiding also DELIBERATELY presses the arm by hand at ~0
+        # velocity, which is indistinguishable from a collision. Gate it off exactly
+        # like on_workflow/on_inference: no detection, reset the debounce counters.
+        if getattr(self, 'on_workflow', False) or getattr(self, 'on_manual', False):
+            self._collision_detector.reset()
+            # F5 — keep the settle window armed WHILE gated so the FIRST ticks
+            # AFTER the mode ends (a re-torque holding-current spike) are also
+            # suppressed, not just the gated ticks themselves.
+            self._collision_settle_until_mono = (
+                time.monotonic() + COLLISION_SETTLE_WINDOW_S)
+            return
+        # F5 — settle window: after a gated mode / a re-torque, skip detection for
+        # a short window so a transient re-torque holding-current spike can't trip
+        # the leader-requiring recovery (which cannot run in follower-only mode).
+        if time.monotonic() < self._collision_settle_until_mono:
             self._collision_detector.reset()
             return
         efforts, err_bits = {}, {}
@@ -410,7 +447,36 @@ class CollisionMonitorMixin:
         result = self._collision_detector.update(
             efforts, velocities, err_bits, mode_is_inference=self.on_inference)
         if result.tripped:
+            # F5 — never arm the LEADER-REQUIRING two-step recovery when no leader
+            # is live (follower-only mode). The recovery freezes the arm and waits
+            # for a leader to resync; with no leader that path wedges the student
+            # forever. A genuine both-arms teleop/recording collision always has
+            # the leader publishing /leader/joint_states, so this passes; a
+            # spurious follower-only trip (e.g. a residual re-torque spike) is
+            # dropped instead of arming a dead-end recovery.
+            # FIX 6 — /leader/joint_states delivery is now SAFETY-LOAD-BEARING for
+            # teleop/recording collision protection: a genuine both-arms collision
+            # only arms the recovery because the leader is publishing, so a future
+            # topic-name / QoS change to /leader/joint_states would SILENTLY disable
+            # this guard. test_press_trips_in_teleop_recording_mode is the
+            # regression guard that a live leader keeps the recovery armed.
+            if not self.leader_appears_active():
+                self._collision_detector.reset()
+                return
             self._trigger_collision_stop(result)
+
+    def note_collision_resettle(self, window_s=COLLISION_SETTLE_WINDOW_S):
+        """F5 — arm the collision settle window (suppress detection briefly).
+        Called after a follower re-torque so a holding-current spike doesn't trip
+        the leader-requiring recovery in follower-only mode. Never lowers an
+        already-later deadline; safe to call from any thread (a plain float store).
+        """
+        try:
+            self._collision_settle_until_mono = max(
+                getattr(self, '_collision_settle_until_mono', 0.0),
+                time.monotonic() + max(0.0, float(window_s)))
+        except Exception:  # noqa: BLE001 — advisory; never raise into a caller
+            pass
 
     def _trigger_collision_stop(self, result):
         self._collision_active = True

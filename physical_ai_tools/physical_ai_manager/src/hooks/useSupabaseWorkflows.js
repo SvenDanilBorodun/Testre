@@ -1,7 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useSelector } from 'react-redux';
 import { supabase } from '../lib/supabaseClient';
-import { listWorkflows } from '../services/workflowApi';
+import {
+  listWorkflows,
+  createTrajectory as apiCreateTrajectory,
+  listTrajectories as apiListTrajectories,
+  getTrajectoryByName as apiGetTrajectoryByName,
+  deleteTrajectory as apiDeleteTrajectory,
+} from '../services/workflowApi';
 
 const POLL_FALLBACK_MS = 30000;
 
@@ -162,5 +168,40 @@ export default function useSupabaseWorkflows() {
     return () => clearInterval(id);
   }, [isRealtime, accessToken]);
 
-  return { workflows, loading, refetch, isRealtime };
+  // Batch-2b recorded replay trajectories. These close over the current
+  // accessToken so the caller (the „spiele Bewegung ab" recorder / run bar)
+  // uses the token-less contract shape — createTrajectory(workflowId, payload),
+  // getTrajectoryByName(workflowId, name), listTrajectories(workflowId),
+  // deleteTrajectory(workflowId, id) — while the underlying workflowApi module
+  // functions take accessToken first like every other REST call. Trajectories
+  // are fetched on demand (no realtime channel), so they are NOT part of the
+  // live `workflows` list above.
+  const createTrajectory = useCallback(
+    (workflowId, payload) => apiCreateTrajectory(accessToken, workflowId, payload),
+    [accessToken],
+  );
+  const listTrajectories = useCallback(
+    (workflowId) => apiListTrajectories(accessToken, workflowId),
+    [accessToken],
+  );
+  const getTrajectoryByName = useCallback(
+    (workflowId, name) => apiGetTrajectoryByName(accessToken, workflowId, name),
+    [accessToken],
+  );
+  const deleteTrajectory = useCallback(
+    (workflowId, trajectoryId) =>
+      apiDeleteTrajectory(accessToken, workflowId, trajectoryId),
+    [accessToken],
+  );
+
+  return {
+    workflows,
+    loading,
+    refetch,
+    isRealtime,
+    createTrajectory,
+    listTrajectories,
+    getTrajectoryByName,
+    deleteTrajectory,
+  };
 }

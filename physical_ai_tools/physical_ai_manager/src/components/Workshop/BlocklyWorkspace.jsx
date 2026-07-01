@@ -20,6 +20,7 @@ import { registerOutputBlocks } from './blocks/output';
 import { registerEventBlocks } from './blocks/events';
 import { registerControlBlocks } from './blocks/control';
 import { registerCounterBlocks } from './blocks/counters';
+import { registerTrajectoryBlocks } from './blocks/trajectories';
 
 let blocksRegistered = false;
 function registerAllBlocksOnce() {
@@ -32,6 +33,7 @@ function registerAllBlocksOnce() {
   registerEventBlocks();
   registerControlBlocks();
   registerCounterBlocks();
+  registerTrajectoryBlocks();
   blocksRegistered = true;
 }
 

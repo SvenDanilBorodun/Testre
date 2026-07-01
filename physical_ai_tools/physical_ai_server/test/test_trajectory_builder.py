@@ -39,6 +39,23 @@ def test_build_segment_ends_at_target():
         assert abs(v - 1.0) < 1e-3
 
 
+def test_build_segment_nonpositive_duration_floors_large_delta():
+    # A non-positive duration must NOT collapse a large delta into one instant
+    # jump — the per-joint velocity floor stretches it into a multi-sample quintic.
+    wps = build_segment([0.0] * 6, [3.0] + [0.0] * 5, duration_s=0.0, fps=30)
+    assert len(wps) > 1                             # stretched, not a single jump
+    assert abs(wps[-1][0][0] - 3.0) < 1e-3          # still ends at the target
+    # A negative duration is treated identically.
+    wps_neg = build_segment([0.0] * 6, [3.0] + [0.0] * 5, duration_s=-1.0, fps=30)
+    assert len(wps_neg) > 1
+
+
+def test_build_segment_nonpositive_duration_zero_delta_is_single_frame():
+    # A zero delta keeps the one-frame degenerate behaviour (no needless samples).
+    wps = build_segment([0.0] * 6, [0.0] * 6, duration_s=0.0, fps=30)
+    assert len(wps) == 1
+
+
 def test_chunked_publish_calls_publisher_per_chunk():
     """30 fps × 2 s of motion at 1 s chunks = 2 publishes."""
     waypoints = build_segment([0.0] * 6, [1.0] * 6, duration_s=2.0, fps=30)

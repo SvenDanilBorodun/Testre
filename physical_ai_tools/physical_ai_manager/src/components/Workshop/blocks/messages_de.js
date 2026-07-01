@@ -50,6 +50,12 @@ export const DE = {
   CLOSE_ON_OBJECT: 'schließe um %1',
   LIFT: 'hebe an',
 
+  // Batch 2b — replay a recorded hand-guided motion. The trajectory NAME field
+  // is a hard contract with the Python interpreter (`_build_args` lowercases →
+  // args['name']; the server resolves it against ctx.trajectories). The run bar
+  // (RunControls) injects the referenced trajectories as a top-level sibling.
+  REPLAY_TRAJECTORY: 'spiele Bewegung %1 ab',
+
   // Phase-2 Tempo — OPTIONAL per-move „mit Tempo" dropdown on the transit blocks
   // (bewege zu / fahre über / hebe an / aufnehmen / ablegen). The first option
   // „Standard" → the server's _move_tempo returns None → the global run-bar

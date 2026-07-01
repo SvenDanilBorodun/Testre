@@ -1,0 +1,10 @@
+# Roboter Studio manual control — hand-guide toggle. enabled=true torques the
+# follower OFF so the student can move it by hand (same limp-arm mechanism as the
+# calibration touch-off), and opens a manual session (on_manual). enabled=false
+# is the universal "exit manual mode": it aborts any in-flight jog/replay, re-
+# torques the follower (fail-loud — the mutex is kept held if the re-torque
+# fails, so no later mode drives a limp arm) and closes the manual session.
+bool enabled
+---
+bool success
+string message

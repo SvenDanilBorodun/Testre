@@ -320,6 +320,31 @@ def _run_to_completion(mgr, workflow_json, status_events, wid='wf-sim'):
     assert finished[-1] == 'finished', finished
 
 
+def test_manager_rejects_nonfinite_follower_seed():
+    # A NaN/Inf follower readback must NOT seed ctx.last_full_joints (it would
+    # publish NaN / crash build_segment). The guard drops it → the seed stays the
+    # all-zero sentinel → the first motion (home) fails loud with the German
+    # „Armstellung noch nicht bekannt" instead of driving garbage.
+    import json as _json
+    status_events: list = []
+    captured: list = []
+    mgr, _arm = _build_sim_manager([], captured, status_events)
+    mgr._get_follower_joints = lambda: [float('nan')] * 6
+    payload = _json.dumps({'blocks': {'languageVersion': 0,
+                                      'blocks': [{'type': 'edubotics_home'}]}})
+    ok, msg, _ = mgr.start(payload, 'wf-seed')
+    assert ok, msg
+    deadline = time.monotonic() + 15.0
+    while not _terminal_phases(status_events) and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert _terminal_phases(status_events) == ['error']
+    errs = [e for e in status_events
+            if isinstance(e, dict) and e.get('phase') == 'error']
+    assert any('Armstellung' in (e.get('error', '') or '') for e in errs), errs
+    # Nothing garbage was published to the sim arm before the loud refusal.
+    assert not any(any(v != v for v in q) for q in captured)  # no NaN in captures
+
+
 def _arms_match(arm, ref):
     return all(a == pytest.approx(b, abs=1e-9) for a, b in zip(arm, ref))
 

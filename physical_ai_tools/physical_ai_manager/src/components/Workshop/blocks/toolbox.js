@@ -63,6 +63,8 @@ export function buildToolbox(restrictedBlocks = null) {
       type: 'edubotics_wait_seconds',
       inputs: { SECONDS: numberShadow(1) },
     },
+    // Batch 2b — replay a recorded hand-guided motion by name.
+    { kind: 'block', type: 'edubotics_replay_trajectory' },
   ], restricted);
 
   // Named-object AprilTag grasping (dropdown fed by the runtime catalog).

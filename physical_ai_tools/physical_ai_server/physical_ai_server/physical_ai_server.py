@@ -19,6 +19,7 @@
 import glob
 import json
 import logging
+import math
 import os
 from pathlib import Path
 import re
@@ -104,6 +105,10 @@ from physical_ai_interfaces.srv import (
     WorkflowSetBreakpoints,
     WorkflowStep,
     WorkshopCapturePose,
+    WorkshopHandGuide,
+    WorkshopJog,
+    WorkshopRecordControl,
+    WorkshopReplay,
 )
 
 from physical_ai_server.communication.communicator import Communicator
@@ -130,6 +135,40 @@ from rclpy.qos import (
     ReliabilityPolicy,
 )
 from std_msgs.msg import Empty
+
+
+# Roboter Studio Batch 2b — manual hand-guide recording (/workshop/record).
+# Module consts (NOT env vars — a new EDUBOTICS_* knob would need a
+# docker-compose forward per the env-forwarding-guard). RECORD_MAX_S caps a
+# single recording; _MANUAL_RECORD_FPS is the sampling rate; the hard sample cap
+# is derived from the two with a margin so a wall-clock-runaway can't grow the
+# buffer without bound. Sub-threshold-identical samples (< _MANUAL_RECORD_MIN_DELTA_RAD
+# on every joint vs the previous kept sample) are dropped so a still arm doesn't
+# fill the buffer with duplicates.
+RECORD_MAX_S = 120.0
+_MANUAL_RECORD_FPS = 25
+_MANUAL_RECORD_MAX_SAMPLES = int(RECORD_MAX_S * _MANUAL_RECORD_FPS) + 100
+_MANUAL_RECORD_MIN_DELTA_RAD = 0.003
+# Timeout (s) for acquiring the manual-control mutex in a driving/torque-switch
+# callback. If a jog/replay drive is holding it, a new manual op is refused in
+# German rather than queueing (the callbacks run on the reentrant preempt group,
+# so a refusal is immediate and never starves the heartbeat).
+_MANUAL_LOCK_TIMEOUT_S = 2.0
+# F6 — a follower JointState older than this (seconds) is treated as STALE: a
+# driven jog/replay refuses rather than seed from a frozen pose.
+_FOLLOWER_JOINT_MAX_AGE_S = 1.0
+# F7 — bounded escape from a wedged Handbetrieb: after this many CONSECUTIVE
+# failed torque-ON asserts in the jog path, clear on_manual (with a loud German
+# error) so the student is never permanently blocked behind „Handbetrieb ist
+# aktiv" when the arm cannot be re-locked.
+_MANUAL_TORQUE_FAIL_LIMIT = 3
+# Backend idle re-torque watchdog — if a manual session is left open + idle (no
+# manual op) this long, the follower is re-torqued and on_manual cleared, so a
+# tab-close during „Arm freischalten" never leaves the arm limp forever (and no
+# mode stays wedged behind on_manual). Never fires during an active record or a
+# mid-jog/replay.
+_MANUAL_IDLE_RETORQUE_S = 30.0
+_MANUAL_IDLE_WATCHDOG_PERIOD_S = 5.0
 
 
 class PhysicalAIServer(CollisionMonitorMixin, Node):
@@ -161,6 +200,15 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         self.on_inference = False
         self.on_calibration = False
         self.on_workflow = False
+        # Batch 2b — manual-control session (jog / hand-guide / record / replay).
+        # While True the arm is owned by Handbetrieb: capture/jog/record/replay
+        # all coexist within the one session (they request mode 'manual', which
+        # _assert_no_other_active RELAXES against on_manual), and every OTHER mode
+        # (recording/inference/…) is refused so nothing claims the arm mid
+        # hand-guide (limp!) or mid driven jog/replay. Opened by hand_guide(true)
+        # / record(start) / (transiently) jog+replay; closed by hand_guide(false)
+        # / record(cancel).
+        self.on_manual = False
         # W1 — force recalibration on every fresh container start (DEFAULT ON).
         # Read ONCE at startup. When ON, calibration_status_callback reports the
         # scene calibration as ABSENT (intrinsics + extrinsic + table-plane) until
@@ -212,6 +260,64 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         # same client. The lock makes the torque switch atomic.
         self._dxl_torque_lock = threading.Lock()
 
+        # Batch 2b — manual-control (jog / hand-guide / record / replay).
+        # _manual_lock serializes the actual arm-driving/torque-switching across
+        # the manual services (held for a jog drive, briefly for hand-guide /
+        # record, and by the async replay daemon for its whole publish).
+        # _manual_stop_event is polled by chunked_publish so an in-flight jog /
+        # replay can be aborted (set by hand_guide(false); cleared at each new
+        # drive). _handguide_buffer holds the recorded [t_s, j1..j5, grip] samples.
+        self._manual_lock = threading.Lock()
+        self._manual_stop_event = threading.Event()
+        self._handguide_buffer: list = []
+        self._manual_record_active = False
+        self._manual_record_timer = None
+        self._manual_record_start_mono = 0.0
+        self._manual_replay_thread = None
+        # F1 — atomic mode arbiter. The four mode-ownership flags
+        # (on_manual / on_workflow / on_recording / on_inference) are set by
+        # callbacks dispatched across DIFFERENT callback groups; without one
+        # shared lock the check-then-set is a race (two tabs both pass
+        # _assert_no_other_active then both start, putting two writers on
+        # /leader/joint_trajectory or silently disabling the collision guard).
+        # Every mode entry point holds _mode_lock around BOTH its
+        # _assert_no_other_active check AND its owning-flag set, and sets the flag
+        # BEFORE spawning any driver. Held BRIEFLY only — always RELEASED before
+        # _manual_lock / motion_lock / any torque switch, so it never participates
+        # in a lock-ordering cycle (no deadlock). Distinct from _manual_lock
+        # (which serialises the actual arm drive within a manual session).
+        self._mode_lock = threading.Lock()
+        # F4 — one-shot cleanup timer + flag when a manual recording hits
+        # RECORD_MAX_S (re-torque + clear on_manual on the executor, off the
+        # sampler which must never block).
+        self._manual_record_cap_timer = None
+        self._manual_record_cap_reached = False
+        # F7 — consecutive failed torque-ON asserts in the jog path (reset on a
+        # successful torque switch); a bounded run triggers the on_manual escape.
+        self._manual_torque_fail_count = 0
+        # Idle re-torque watchdog bookkeeping: last manual-op wall-clock and the
+        # last confirmed follower torque state (None = unknown). _set_follower_torque
+        # is the single choke point that updates the torque state.
+        self._manual_last_activity_mono = 0.0
+        self._follower_torque_on: Optional[bool] = None
+
+        # FIX 1 + FIX 4 — session-ownership REFCOUNT + hard-exit GENERATION.
+        # on_manual is a DERIVED boolean (see _recompute_on_manual_locked): it is
+        # True iff a PERSISTENT hand-guide/record session is open OR at least one
+        # TRANSIENT jog/replay is in flight. The old per-call `opened` boolean
+        # cleared on_manual unlocked, so two concurrent transient ops let the first
+        # clear it while the second still drove — a workflow/inference start then
+        # saw the arm free (two writers on /leader/joint_trajectory). The refcount
+        # + persistent flag are mutated ONLY under _mode_lock, so the derived
+        # on_manual can never be cleared while another manual op still owns the arm.
+        #   INVARIANT: on_manual == (_manual_persistent or _manual_transient_ops > 0)
+        # _manual_exit_gen is bumped by every „Beenden" hard-exit so a jog/replay
+        # that committed (snapshotted the old generation) but has not driven yet
+        # ABORTS instead of driving the arm after the session was torn down.
+        self._manual_transient_ops = 0
+        self._manual_persistent = False
+        self._manual_exit_gen = 0
+
         self.hf_cancel_on_progress = False
 
         self.robot_type_list = self.get_robot_type_list()
@@ -241,6 +347,15 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         # arbiter/bridge stack was removed — see docs/plans/2026-06-18-*.)
 
         self._setup_timer_callbacks()
+
+        # Backend idle re-torque watchdog (low-rate safety net for Handbetrieb).
+        # On its own MutuallyExclusiveCallbackGroup so a re-torque switch (up to a
+        # few seconds) never stalls the node-default services / heartbeat.
+        self._manual_idle_watchdog = self.create_timer(
+            _MANUAL_IDLE_WATCHDOG_PERIOD_S,
+            self._manual_idle_watchdog_cb,
+            callback_group=MutuallyExclusiveCallbackGroup(),
+        )
 
         self.previous_data_manager_status = None
 
@@ -418,6 +533,36 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 '/workshop/capture_pose',
                 WorkshopCapturePose,
                 self.capture_pose_callback,
+                self._preempt_cb_group,
+            ),
+            # Batch 2b — manual control (jog / hand-guide / record / replay). All on
+            # the reentrant preempt group: a blocking jog / the async replay must
+            # not queue behind the node-default group and starve the heartbeat, and
+            # record start/stop must dispatch while a workflow motion holds the node
+            # default group. Each gates on _assert_no_other_active('manual') +
+            # leader_appears_active() and serializes on _manual_lock.
+            (
+                '/workshop/jog',
+                WorkshopJog,
+                self.workshop_jog_callback,
+                self._preempt_cb_group,
+            ),
+            (
+                '/workshop/hand_guide',
+                WorkshopHandGuide,
+                self.workshop_hand_guide_callback,
+                self._preempt_cb_group,
+            ),
+            (
+                '/workshop/record',
+                WorkshopRecordControl,
+                self.workshop_record_callback,
+                self._preempt_cb_group,
+            ),
+            (
+                '/workshop/replay',
+                WorkshopReplay,
+                self.workshop_replay_callback,
                 self._preempt_cb_group,
             ),
             ('/workshop/get_object_catalog', GetObjectCatalog, self.get_object_catalog_callback),
@@ -1153,18 +1298,32 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                     response.message = 'Restarting the recording.'
                     return response
 
-                ok, msg = self._assert_no_other_active('recording')
-                if not ok:
-                    response.success = False
-                    response.message = msg
-                    return response
+                # F1 — atomic claim: hold _mode_lock around the ownership check AND
+                # the on_recording set so a concurrent manual / inference / workflow
+                # start can't slip in between (two writers on the arm). Set
+                # on_recording BEFORE the collection timer spawns (inside
+                # init_robot_control_parameters); reset it if that init raises.
+                # _mode_lock is RELEASED before the init so it never nests
+                # _manual_lock/motion_lock (no lock-ordering deadlock).
+                with self._mode_lock:
+                    ok, msg = self._assert_no_other_active('recording')
+                    if not ok:
+                        response.success = False
+                        response.message = msg
+                        return response
+                    self.on_recording = True
 
                 self.get_logger().info('Start recording')
                 self.operation_mode = 'collection'
                 task_info = request.task_info
-                self.init_robot_control_parameters_from_user_task(
-                    task_info
-                )
+                try:
+                    self.init_robot_control_parameters_from_user_task(
+                        task_info
+                    )
+                except Exception:
+                    # Init failed → release the claim so the arm isn't wedged.
+                    self.on_recording = False
+                    raise
 
                 self.start_recording_time = time.perf_counter()
                 # Audit F17 (re-armed): zero the throttle timestamp so
@@ -1173,7 +1332,7 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 # any other reader; new logic uses _camera_fps_last_check_t.
                 self._camera_fps_checked = False
                 self._camera_fps_last_check_t = 0.0
-                self.on_recording = True
+                # on_recording already claimed under _mode_lock above.
                 # Arm the crash-recovery session marker — RECORDING sessions
                 # only (see DataManager._session_marker_enabled).
                 self.data_manager._session_marker_enabled = True
@@ -1181,102 +1340,123 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 response.message = 'Recording started'
 
             elif request.command == SendCommand.Request.START_INFERENCE:
-                ok, msg = self._assert_no_other_active('inference')
-                if not ok:
-                    response.success = False
-                    response.message = msg
-                    return response
+                # F1 — atomic claim under _mode_lock (see START_RECORD). on_inference
+                # is set here, BEFORE the pre-flight + eager-load driver; every
+                # pre-flight refusal below releases it inline, and the driver-start
+                # section resets both flags on any exception. _mode_lock is RELEASED
+                # before the pre-flight so it never nests other locks.
+                with self._mode_lock:
+                    ok, msg = self._assert_no_other_active('inference')
+                    if not ok:
+                        response.success = False
+                        response.message = msg
+                        return response
+                    self.on_inference = True
 
-                self.joint_topic_types = self.communicator.get_publisher_msg_types()
-                self.operation_mode = 'inference'
-                task_info = request.task_info
-                self.task_instruction = task_info.task_instruction
+                # Everything after the claim runs under ONE guard: a pre-flight
+                # refusal returns normally (each releases the claim inline), while
+                # ANY exception (a checkpoint read / policy validate / init raising)
+                # releases both mode claims + the loading flag before re-raising
+                # into the outer handler — so a failed start never leaks on_inference
+                # and wedges the arm / UI.
+                try:
+                    self.joint_topic_types = self.communicator.get_publisher_msg_types()
+                    self.operation_mode = 'inference'
+                    task_info = request.task_info
+                    self.task_instruction = task_info.task_instruction
 
-                valid_result, result_message = self.inference_manager.validate_policy(
-                    policy_path=task_info.policy_path)
+                    valid_result, result_message = self.inference_manager.validate_policy(
+                        policy_path=task_info.policy_path)
 
-                if not valid_result:
-                    response.success = False
-                    response.message = result_message
-                    self.get_logger().error(response.message)
-                    return response
+                    if not valid_result:
+                        self.on_inference = False  # F1 — release the claim on refusal
+                        response.success = False
+                        response.message = result_message
+                        self.get_logger().error(response.message)
+                        return response
 
-                # Pre-flight camera contract (leLab-comparison PR-3): the
-                # checkpoint's config.json names the cameras it was trained
-                # on; predict() would tear the run down mid-flight with a
-                # RuntimeError when one is missing. Reject HERE, before any
-                # timer starts, with a German message naming both sides.
-                # Camera names come from the same params the pipeline keys
-                # its image dict on (communicator.camera_topics).
-                summary = InferenceManager.read_policy_summary(
-                    task_info.policy_path)
-                expected_cams = set(summary['expected_cameras'])
-                available_cams = set(
-                    parse_topic_list_with_names(
-                        self.params['camera_topic_list']).keys()
-                ) if self.params else set()
-                # A language-conditioned policy (SmolVLA/Pi0 family) with an
-                # EMPTY Aufgabenanweisung produces unguided behavior — reject
-                # at START with the fix, mirroring the camera pre-flight.
-                if summary['requires_task'] and not any(
-                        s.strip() for s in task_info.task_instruction):
-                    response.success = False
-                    response.message = (
-                        'Dieses Modell benötigt eine Aufgabenanweisung '
-                        '(z. B. „Greife den roten Würfel"). Bitte das Feld '
-                        '„Aufgabenanweisung" ausfüllen und erneut starten.'
+                    # Pre-flight camera contract (leLab-comparison PR-3): the
+                    # checkpoint's config.json names the cameras it was trained
+                    # on; predict() would tear the run down mid-flight with a
+                    # RuntimeError when one is missing. Reject HERE, before any
+                    # timer starts, with a German message naming both sides.
+                    # Camera names come from the same params the pipeline keys
+                    # its image dict on (communicator.camera_topics).
+                    summary = InferenceManager.read_policy_summary(
+                        task_info.policy_path)
+                    expected_cams = set(summary['expected_cameras'])
+                    available_cams = set(
+                        parse_topic_list_with_names(
+                            self.params['camera_topic_list']).keys()
+                    ) if self.params else set()
+                    # A language-conditioned policy (SmolVLA/Pi0 family) with an
+                    # EMPTY Aufgabenanweisung produces unguided behavior — reject
+                    # at START with the fix, mirroring the camera pre-flight.
+                    if summary['requires_task'] and not any(
+                            s.strip() for s in task_info.task_instruction):
+                        self.on_inference = False  # F1 — release the claim on refusal
+                        response.success = False
+                        response.message = (
+                            'Dieses Modell benötigt eine Aufgabenanweisung '
+                            '(z. B. „Greife den roten Würfel"). Bitte das Feld '
+                            '„Aufgabenanweisung" ausfüllen und erneut starten.'
+                        )
+                        self.get_logger().error(
+                            'Pre-flight: language-conditioned policy started '
+                            'without a task instruction')
+                        return response
+
+                    missing_cams = expected_cams - available_cams
+                    if missing_cams:
+                        self.on_inference = False  # F1 — release the claim on refusal
+                        response.success = False
+                        response.message = (
+                            f'Dieses Modell erwartet die Kamera(s) '
+                            f'{", ".join(sorted(missing_cams))} — verfügbar '
+                            f'{"ist" if len(available_cams) == 1 else "sind"}: '
+                            f'{", ".join(sorted(available_cams)) or "keine"}. '
+                            f'Bitte Kameras prüfen („Hardware neu erkennen") '
+                            f'und erneut starten.'
+                        )
+                        self.get_logger().error(
+                            f'Camera contract pre-flight failed: model expects '
+                            f'{sorted(expected_cams)}, available '
+                            f'{sorted(available_cams)}')
+                        return response
+
+                    self.init_robot_control_parameters_from_user_task(
+                        task_info
                     )
-                    self.get_logger().error(
-                        'Pre-flight: language-conditioned policy started '
-                        'without a task instruction')
-                    return response
+                    if task_info.record_inference_mode:
+                        self.on_recording = True
+                        # This inference session RECORDS — arm the crash marker
+                        # like a plain recording session.
+                        self.data_manager._session_marker_enabled = True
+                    self.inference_manager.reset_policy()
+                    self.start_recording_time = time.perf_counter()
 
-                missing_cams = expected_cams - available_cams
-                if missing_cams:
-                    response.success = False
-                    response.message = (
-                        f'Dieses Modell erwartet die Kamera(s) '
-                        f'{", ".join(sorted(missing_cams))} — verfügbar '
-                        f'{"ist" if len(available_cams) == 1 else "sind"}: '
-                        f'{", ".join(sorted(available_cams)) or "keine"}. '
-                        f'Bitte Kameras prüfen („Hardware neu erkennen") '
-                        f'und erneut starten.'
-                    )
-                    self.get_logger().error(
-                        f'Camera contract pre-flight failed: model expects '
-                        f'{sorted(expected_cams)}, available '
-                        f'{sorted(available_cams)}')
-                    return response
-
-                self.init_robot_control_parameters_from_user_task(
-                    task_info
-                )
-                if task_info.record_inference_mode:
-                    self.on_recording = True
-                    # This inference session RECORDS — arm the crash marker
-                    # like a plain recording session.
-                    self.data_manager._session_marker_enabled = True
-                self.on_inference = True
-                self.inference_manager.reset_policy()
-                self.start_recording_time = time.perf_counter()
-
-                # Eager policy load (leLab-comparison PR-2): the first load
-                # takes 10-30 s (HF cache read + make_pre_post_processors).
-                # The lazy load inside the FPS timer left the student staring
-                # at a frozen arm with a stale phase the whole time; loading
-                # HERE would be worse — /task/command runs on the default
-                # MutuallyExclusiveCallbackGroup, and a 10-30 s block there
-                # starves the 1 Hz heartbeat + /task/status timers (the
-                # documented "disconnected"-flicker class, see _hf_cb_group).
-                # So: publish INFERENCE_LOADING immediately, load on a daemon
-                # thread, and let the timer skip ticks until the load ends.
-                self._inference_policy_loading = True
-                loading_status = self.data_manager.get_current_record_status()
-                loading_status.phase = self.PHASE_INFERENCE_LOADING
-                self.communicator.publish_status(status=loading_status)
-                threading.Thread(
-                    target=self._eager_load_policy, daemon=True
-                ).start()
+                    # Eager policy load (leLab-comparison PR-2): the first load
+                    # takes 10-30 s (HF cache read + make_pre_post_processors).
+                    # The lazy load inside the FPS timer left the student staring
+                    # at a frozen arm with a stale phase the whole time; loading
+                    # HERE would be worse — /task/command runs on the default
+                    # MutuallyExclusiveCallbackGroup, and a 10-30 s block there
+                    # starves the 1 Hz heartbeat + /task/status timers (the
+                    # documented "disconnected"-flicker class, see _hf_cb_group).
+                    # So: publish INFERENCE_LOADING immediately, load on a daemon
+                    # thread, and let the timer skip ticks until the load ends.
+                    self._inference_policy_loading = True
+                    loading_status = self.data_manager.get_current_record_status()
+                    loading_status.phase = self.PHASE_INFERENCE_LOADING
+                    self.communicator.publish_status(status=loading_status)
+                    threading.Thread(
+                        target=self._eager_load_policy, daemon=True
+                    ).start()
+                except Exception:
+                    self.on_inference = False
+                    self.on_recording = False
+                    self._inference_policy_loading = False
+                    raise
 
                 response.success = True
                 response.message = 'Inference started'
@@ -1851,6 +2031,13 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             return False, 'Kalibrierung läuft gerade — bitte zuerst beenden.'
         if requested_mode != 'workflow' and self.on_workflow:
             return False, 'Ein Workflow läuft gerade — bitte zuerst stoppen.'
+        # Batch 2b — Handbetrieb (manual jog / hand-guide / record / replay) owns
+        # the arm during a manual session. A 'manual' request RELAXES here so
+        # capture/jog/record/replay coexist within the one session; every OTHER
+        # mode refuses so a recording / inference can't claim the arm mid
+        # hand-guide (the follower is LIMP) or mid driven jog/replay.
+        if requested_mode != 'manual' and getattr(self, 'on_manual', False):
+            return False, 'Handbetrieb ist aktiv — bitte zuerst den Handbetrieb beenden.'
         return True, ''
 
     # ------------------------------------------------------------------
@@ -2034,7 +2221,20 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                     self.get_logger().warning('set_dxl_torque call timed out.')
                     return False
                 res = future.result()
-                return bool(getattr(res, 'success', False)) if res is not None else False
+                ok = bool(getattr(res, 'success', False)) if res is not None else False
+                if ok:
+                    # Track the confirmed torque state for the idle watchdog so it
+                    # knows whether a limp arm needs re-torquing.
+                    self._follower_torque_on = bool(enabled)
+                    if enabled:
+                        # F5 — a re-torque can spike holding current; arm the
+                        # collision settle window so it doesn't trip the leader-
+                        # requiring recovery in follower-only mode (getattr-safe if
+                        # the collision monitor isn't mixed in).
+                        resettle = getattr(self, 'note_collision_resettle', None)
+                        if callable(resettle):
+                            resettle()
+                return ok
             except Exception as e:  # noqa: BLE001
                 self.get_logger().warning(f'set_dxl_torque failed: {e!r}')
                 return False
@@ -2427,10 +2627,13 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         student can save a point at whatever height the arm currently holds.
         """
         # Gate: refuse while recording / inference / training / calibration /
-        # workflow / collision-recovery owns the arm. 'manual' is not one of the
-        # mode names with a relaxation branch, so it refuses on EVERY active
-        # owner (no on_manual flag this batch — deferred to the jog/record work).
-        ok, msg = self._assert_no_other_active('manual')
+        # workflow / collision-recovery owns the arm. 'manual' relaxes only against
+        # on_manual, so it refuses on EVERY active owner. F1 — hold _mode_lock
+        # around the check for arbiter consistency (this is a read-only FK snapshot
+        # that drives NOTHING and claims no flag, so the lock is released
+        # immediately; belt-and-suspenders with the mode arbiter).
+        with self._mode_lock:
+            ok, msg = self._assert_no_other_active('manual')
         if not ok:
             response.success = False
             response.world_x = 0.0
@@ -2476,6 +2679,18 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             response.message = 'Bitte zuerst den Roboter auswählen.'
             return response
 
+        # FIX 3 — refuse a capture against a STALE follower readback (a frozen
+        # joint stream): the FK would snapshot an outdated pose and persist a wrong
+        # destination. Mirrors the jog / replay staleness guard.
+        if self._follower_joints_stale():
+            response.success = False
+            response.world_x = 0.0
+            response.world_y = 0.0
+            response.world_z = 0.0
+            response.message = ('Aktuelle Position ist noch nicht bekannt — bitte '
+                                'kurz warten und erneut versuchen.')
+            return response
+
         # FK read of the current gripper position. Returns None when joint state
         # hasn't arrived yet or the IK/FK solver is unavailable.
         xyz = self._get_current_gripper_xyz()
@@ -2491,6 +2706,16 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             return response
 
         x, y, z = float(xyz[0]), float(xyz[1]), float(xyz[2])
+        # FIX 3 — a NaN/Inf FK result would persist a garbage destination that a
+        # later move_to would drive toward. Refuse rather than store it.
+        if not all(math.isfinite(v) for v in (x, y, z)):
+            response.success = False
+            response.world_x = 0.0
+            response.world_y = 0.0
+            response.world_z = 0.0
+            response.message = ('Aktuelle Position ist ungültig — bitte kurz '
+                                'warten und erneut versuchen.')
+            return response
         # Persist into the WorkflowManager exactly as mark_destination_callback
         # does (set_destination(name, x, y, z)) so the next workflow run resolves
         # the captured name without a second action. Unlike mark_destination —
@@ -2517,6 +2742,1114 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         response.world_z = z
         response.message = f'Position „{name}" gespeichert.'
         return response
+
+    # ------------------------------------------------------------------
+    # Roboter Studio Batch 2b — manual control (jog / hand-guide / record /
+    # replay). All four services gate on _assert_no_other_active('manual') +
+    # leader_appears_active() and serialize on _manual_lock. Rule §2: these are
+    # WORKFLOW-LEVEL teaching features that drive the REAL follower — NOT
+    # inference safety envelopes. SAFETY: torque-off (hand-guide/record) opens the
+    # on_manual mutex to protect the limp arm; every driving/torque path
+    # re-torques fail-loud and keeps the mutex if the re-torque fails.
+    # ------------------------------------------------------------------
+    def _manual_leader_blocks(self):
+        """(blocked, german_message) — True when a leader arm is live (a
+        both-arms session), so a follower-only manual op MUST NOT drive
+        /leader/joint_trajectory. Mirrors the workflow-start leader gate;
+        getattr-guarded so a server without the collision monitor still works."""
+        leader_check = getattr(self, 'leader_appears_active', None)
+        if not callable(leader_check):
+            return False, ''
+        try:
+            active = leader_check()
+        except Exception as e:  # noqa: BLE001 — gate must not block a normal op
+            self.get_logger().warning(f'leader_appears_active check failed: {e}')
+            return False, ''
+        if active:
+            return True, (
+                'Handbetrieb nicht möglich, solange der Leader-Arm aktiv ist. '
+                'Bitte zuerst in den Follower-Modus wechseln (Leader-Schalter im '
+                'Roboter-Studio-Tab).'
+            )
+        return False, ''
+
+    def _recompute_on_manual_locked(self):
+        """FIX 1 — recompute the DERIVED on_manual mode flag. MUST be called ONLY
+        while holding ``self._mode_lock``.
+
+            INVARIANT: on_manual == (_manual_persistent or _manual_transient_ops > 0)
+
+        on_manual gates the collision detector off (collision_monitor.py) and
+        blocks every other mode, so it MUST accurately reflect whether ANY manual
+        op owns the arm — a persistent hand-guide/record session OR a transient
+        jog/replay still in flight. Never clear on_manual by hand; mutate
+        ``_manual_persistent`` / ``_manual_transient_ops`` under ``_mode_lock`` and
+        call this."""
+        self.on_manual = bool(
+            self._manual_persistent or self._manual_transient_ops > 0)
+
+    def _jog_solve_floor(self, ik, target, roll, require_floor=False):
+        """Solve a Cartesian jog target with the workspace-floor refusal + reach
+        annulus, reusing ``motion._solve_or_raise`` (its German errors) via a
+        light ctx-shim. Raises ``motion.WorkflowError`` on a floor violation /
+        unreachable target.
+
+        ``require_floor``: when True and the table height is UNKNOWN (no touch-off
+        yet: both ``z_table`` and ``table_plane`` absent), REFUSE — ``_solve_or_raise``
+        can only enforce the floor when a height is known, so a downward move / a
+        drive-to on an uncalibrated rig has no floor and could drive the tool into
+        the table. Downward cartesian-Z and ``drive_to`` pass True; joint jog and
+        X/Y/roll leave it False (they can't descend past a known floor unaided)."""
+        from types import SimpleNamespace
+        from physical_ai_server.workflow.handlers import motion as _motion
+        calib = {}
+        try:
+            calib = self._load_workflow_calibration() or {}
+        except Exception:  # noqa: BLE001 — floor is advisory; solve still runs
+            calib = {}
+        z_table = calib.get('z_table')
+        table_plane = calib.get('table_plane')
+        if require_floor and z_table is None and table_plane is None:
+            raise _motion.WorkflowError(
+                'Tisch noch nicht vermessen — bitte zuerst „Tisch vermessen" in '
+                'der Kalibrierung abschließen, bevor der Arm nach unten oder zu '
+                'einem Ziel gefahren wird.')
+        shim = SimpleNamespace(
+            ik=ik,
+            z_table=z_table,
+            table_plane=table_plane,
+            last_arm_joints=None,
+        )
+        return _motion._solve_or_raise(shim, target, roll=roll)
+
+    def _compute_jog_target(self, mode, request, joints):
+        """Resolve a jog request into the achieved 6-joint vector + the FK world
+        (x, y, z). ``joints`` is the LIVE 6-joint follower readback. Clamps/REFUSES
+        (never silently clamps into a wall) via a German ``motion.WorkflowError``.
+        Modes: joint | cartesian | drive_to (see WorkshopJog.srv)."""
+        from physical_ai_server.workflow.handlers import motion as _motion
+        from physical_ai_server.workflow.ik_solver import _DXL_JOINT_LIMITS_RAD
+        ik = self._build_ik_solver()
+        if ik is None:
+            raise _motion.WorkflowError(
+                'Roboter-Beschreibung nicht verfügbar — der Bewegungsrechner (IK) '
+                'konnte nicht gestartet werden. Bitte die Umgebung neu starten.'
+            )
+        arm = [float(v) for v in joints[:5]]
+        grip = float(joints[5])
+        mode = (mode or '').strip().lower()
+
+        if mode == 'joint':
+            idx = int(request.index)
+            delta = float(request.delta)
+            if idx < 0 or idx > 5:
+                raise _motion.WorkflowError('Ungültiger Gelenk-Index.')
+            if idx == 5:
+                new = grip + delta
+                lo, hi = _motion.GRIPPER_CLOSED_RAD, _motion.GRIPPER_OPEN_RAD
+                if new < lo or new > hi:
+                    raise _motion.WorkflowError(
+                        'Greifer außerhalb des zulässigen Bereichs.')
+                q_end = arm + [new]
+            else:
+                new = arm[idx] + delta
+                lo, hi = _DXL_JOINT_LIMITS_RAD[idx]
+                if new < lo or new > hi:
+                    raise _motion.WorkflowError(
+                        f'Gelenk {idx + 1} außerhalb des zulässigen Bereichs.')
+                arm2 = list(arm)
+                arm2[idx] = new
+                q_end = arm2 + [grip]
+        elif mode == 'cartesian':
+            idx = int(request.index)
+            delta = float(request.delta)
+            pose = ik.fk(arm)
+            if pose is None:
+                raise _motion.WorkflowError('Aktuelle Position ist unbekannt.')
+            _R, t = pose
+            x, y, z = float(t[0]), float(t[1]), float(t[2])
+            if idx in (0, 1, 2):
+                target = [x, y, z]
+                target[idx] += delta
+                # A downward Z step (idx 2, delta < 0) needs a known table floor —
+                # refuse it on an uncalibrated rig. X/Y and an upward Z are always safe.
+                arm_q = self._jog_solve_floor(
+                    ik, (target[0], target[1], target[2]), roll=arm[4],
+                    require_floor=(idx == 2 and delta < 0.0))
+                q_end = list(arm_q) + [grip]
+            elif idx == 3:
+                new_roll = arm[4] + delta
+                lo, hi = _DXL_JOINT_LIMITS_RAD[4]
+                if new_roll < lo or new_roll > hi:
+                    raise _motion.WorkflowError(
+                        'Drehung außerhalb des zulässigen Bereichs.')
+                arm2 = list(arm)
+                arm2[4] = new_roll
+                q_end = arm2 + [grip]
+            else:
+                raise _motion.WorkflowError(
+                    'Nur Bewegung in X, Y, Z und Drehung ist möglich '
+                    '(keine Neigung).')
+        elif mode == 'drive_to':
+            target = (float(request.target_x), float(request.target_y),
+                      float(request.target_z))
+            # A drive_to descends toward the table — refuse it without a measured floor.
+            arm_q = self._jog_solve_floor(
+                ik, target, roll=_motion.GRASP_ROLL_RAD, require_floor=True)
+            q_end = list(arm_q) + [grip]
+        else:
+            raise _motion.WorkflowError('Unbekannter Handbetrieb-Modus.')
+
+        world = (0.0, 0.0, 0.0)
+        fk = ik.fk(q_end[:5])
+        if fk is not None:
+            _R2, t2 = fk
+            world = (float(t2[0]), float(t2[1]), float(t2[2]))
+        return [float(v) for v in q_end], world
+
+    def workshop_jog_callback(self, request, response):
+        """"/workshop/jog" — jog the follower one step. Reuses the workflow
+        trajectory path (quintic + velocity floor + the SOLE
+        /leader/joint_trajectory publisher — NO second publisher). Blocking
+        (a bounded, velocity-safe move) on the reentrant preempt group. Seeds from
+        LIVE joints each call; clamps/REFUSES out-of-range; torque asserted ON."""
+        from physical_ai_server.workflow.handlers.motion import WorkflowError
+        from physical_ai_server.workflow.trajectory_builder import (
+            build_segment, chunked_publish,
+        )
+        response.success = False
+        response.joints = []
+        response.world_x = 0.0
+        response.world_y = 0.0
+        response.world_z = 0.0
+        response.message = ''
+
+        # F6 — refuse a driven jog against a STALE follower readback (a frozen
+        # joint stream) so the move never seeds from an old pose. Pre-claim: this
+        # gate doesn't need the arbiter.
+        if self._follower_joints_stale():
+            response.message = ('Armstellung noch nicht bekannt — bitte kurz '
+                                'warten und erneut versuchen.')
+            return response
+
+        # F1 — atomic claim: hold _mode_lock around the ownership check AND the
+        # on_manual claim so a concurrent recording / inference / workflow start
+        # can't slip in between (two writers on the arm). FIX 1 — a jog is a
+        # TRANSIENT op: it claims a refcount slot (released in the outer finally on
+        # completion) instead of the old per-call `opened` boolean, so two
+        # overlapping jogs can't have the first clear on_manual out from under the
+        # second. FIX 4 — snapshot the exit generation so a „Beenden" that lands
+        # after this claim but before we drive aborts us. _mode_lock is RELEASED
+        # before _manual_lock / torque, so it never nests them (no deadlock).
+        with self._mode_lock:
+            ok, msg = self._assert_no_other_active('manual')
+            if not ok:
+                response.message = msg
+                return response
+            self._manual_transient_ops += 1
+            self._recompute_on_manual_locked()
+            exit_gen = self._manual_exit_gen
+            # Finding 2 — stamp activity INSIDE the claim lock (atomic with the
+            # ops increment) so the idle watchdog's under-_mode_lock idle re-check
+            # can never zero this fresh ref while re-torquing an "idle" session.
+            self._manual_last_activity_mono = time.monotonic()
+        keep_session = False  # set True to retain the ref (limp-arm protection)
+        try:
+            # Batch 2b: a driven jog while a hand-guide RECORDING is in flight would
+            # move the limp arm out from under the student's hand and corrupt the
+            # take. Refuse until the student ends the recording (frontend also
+            # blocks the buttons).
+            if self._manual_record_active:
+                response.message = 'Erst die Aufnahme beenden.'
+                return response
+            blocked, bmsg = self._manual_leader_blocks()
+            if blocked:
+                response.message = bmsg
+                return response
+            if self.communicator is None:
+                response.message = 'Bitte zuerst den Roboter auswählen.'
+                return response
+
+            acquired = self._manual_lock.acquire(timeout=_MANUAL_LOCK_TIMEOUT_S)
+            if not acquired:
+                response.message = ('Der Arm führt gerade eine andere Bewegung aus '
+                                    '— bitte kurz warten.')
+                return response
+            try:
+                # FIX 4 — a „Beenden" (hand_guide(false)) that bumped the exit
+                # generation while we waited on _manual_lock means the session was
+                # torn down; do NOT drive the (re-torqued) arm after it.
+                if self._manual_exit_gen != exit_gen:
+                    response.message = 'Handbetrieb wurde beendet.'
+                    return response
+                # F2 — re-validate the record flag INSIDE _manual_lock: a record
+                # start could have grabbed the lock first between our pre-check and
+                # here; driving the limp arm now would fight the student's hand.
+                if self._manual_record_active:
+                    response.message = 'Erst die Aufnahme beenden.'
+                    return response
+                self._manual_stop_event.clear()
+                # Assert torque ON defensively (a prior hand-guide may have left it
+                # OFF). F7 — after a bounded run of consecutive failures, clear
+                # on_manual so the student is never wedged behind „Handbetrieb".
+                if not self._set_follower_torque(True):
+                    self._manual_torque_fail_count += 1
+                    if self._manual_torque_fail_count >= _MANUAL_TORQUE_FAIL_LIMIT:
+                        # FIX 1/4 — EMERGENCY escape: a bounded run of torque-ON
+                        # failures would wedge the student behind „Handbetrieb".
+                        # Each failed retry is a SEPARATE jog call that leaked its
+                        # retained ref (keep_session), so by the limit several refs
+                        # have accumulated — absolute-zero is required to escape the
+                        # wedge (a single decrement would leave the arm wedged).
+                        # keep_session stops the outer finally from double-clearing.
+                        # (A concurrent jog that claimed a ref during this window
+                        # returns WITHOUT driving on its own torque-ON fail against
+                        # the same broken hardware, so zeroing its ref here cannot
+                        # produce a live second writer.)
+                        with self._mode_lock:
+                            self._manual_transient_ops = 0
+                            self._manual_persistent = False
+                            self._recompute_on_manual_locked()
+                        keep_session = True
+                        self._manual_torque_fail_count = 0
+                        response.message = (
+                            'Arm konnte wiederholt nicht verriegelt werden — der '
+                            'Handbetrieb wurde zurückgesetzt. Bitte die Umgebung '
+                            'neu starten, bevor der Arm weiter bewegt wird.')
+                        return response
+                    # Keep the ref (protect a possibly-limp arm); retry re-locks on
+                    # the next call (bounded by the limit above). The idle watchdog
+                    # resets the retained ref if the session is then left idle.
+                    keep_session = True
+                    response.message = ('Arm konnte nicht verriegelt werden — bitte '
+                                        'die Umgebung neu starten.')
+                    return response
+                self._manual_torque_fail_count = 0  # reset on a successful switch
+                joints = None
+                try:
+                    joints = self.communicator.get_latest_follower_joints()
+                except Exception:  # noqa: BLE001 — treat as "pose unknown"
+                    joints = None
+                if not joints or len(joints) < 6:
+                    response.message = ('Aktuelle Armstellung ist noch nicht bekannt '
+                                        '— bitte kurz warten und erneut versuchen.')
+                    return response
+                joints = [float(v) for v in joints[:6]]
+                # Non-finite seed guard: a NaN/Inf readback would publish NaN
+                # (garbage arm command) or crash build_segment on an Inf delta.
+                if not all(math.isfinite(v) for v in joints):
+                    response.message = ('Aktuelle Armstellung ist ungültig — bitte '
+                                        'kurz warten und erneut versuchen.')
+                    return response
+                try:
+                    q_end, world = self._compute_jog_target(request.mode, request, joints)
+                except WorkflowError as e:
+                    response.message = str(e)
+                    return response
+                try:
+                    duration = float(request.duration_s)
+                except (TypeError, ValueError):
+                    duration = 0.0
+                if not (duration > 0.0):
+                    duration = 1.0
+                duration = max(0.2, min(4.0, duration))
+                points = build_segment(joints, q_end, duration)
+                published = chunked_publish(
+                    publisher=self._trajectory_publisher,
+                    points=points,
+                    should_stop=self._manual_stop_event.is_set,
+                )
+                if not published:
+                    response.message = 'Bewegung abgebrochen.'
+                    return response
+                response.success = True
+                response.joints = [float(v) for v in q_end]
+                response.world_x = float(world[0])
+                response.world_y = float(world[1])
+                response.world_z = float(world[2])
+                response.message = 'Bewegung ausgeführt.'
+                return response
+            finally:
+                try:
+                    self._manual_lock.release()
+                except RuntimeError:
+                    pass
+        finally:
+            # FIX 1 — release this transient jog's ref under the arbiter lock,
+            # unless we must retain it to protect a possibly-limp arm (a torque-ON
+            # failure left keep_session True; the idle watchdog resets a retained
+            # ref if the session is then left idle).
+            self._manual_last_activity_mono = time.monotonic()
+            if not keep_session:
+                with self._mode_lock:
+                    self._manual_transient_ops = max(
+                        0, self._manual_transient_ops - 1)
+                    self._recompute_on_manual_locked()
+
+    def _follower_joints_stale(self) -> bool:
+        """True when the latest follower JointState is older than
+        _FOLLOWER_JOINT_MAX_AGE_S (F6) — i.e. the joint stream is FROZEN. A None
+        age (never arrived / no provider) is NOT stale here; the callers' own
+        `not joints` guard covers the never-arrived case. Never raises."""
+        comm = getattr(self, 'communicator', None)
+        if comm is None:
+            return False
+        getter = getattr(comm, 'get_follower_joints_age_s', None)
+        if not callable(getter):
+            return False
+        try:
+            age = getter()
+        except Exception:  # noqa: BLE001 — staleness is advisory
+            return False
+        return age is not None and age > _FOLLOWER_JOINT_MAX_AGE_S
+
+    def _manual_idle_watchdog_cb(self):
+        """Backend idle re-torque watchdog (low-rate safety net). If a Handbetrieb
+        session is left open + idle (no manual op) for _MANUAL_IDLE_RETORQUE_S —
+        e.g. the student closed the tab during „Arm freischalten", leaving the arm
+        limp forever, OR a rare transient-jog claim leaked on_manual — re-torque
+        the follower and clear on_manual so the arm is never left limp and no mode
+        stays wedged behind „Handbetrieb ist aktiv". NEVER acts during an active
+        record or a mid-jog/replay (the _manual_lock is held / _manual_record_active
+        is set then). Must never crash the node."""
+        try:
+            if not getattr(self, 'on_manual', False):
+                return
+            if getattr(self, '_manual_record_active', False):
+                return  # an active recording owns the limp arm — never re-torque under it
+            replay = getattr(self, '_manual_replay_thread', None)
+            if replay is not None and replay.is_alive():
+                return  # a replay is driving
+            idle_for = time.monotonic() - getattr(self, '_manual_last_activity_mono', 0.0)
+            if idle_for < _MANUAL_IDLE_RETORQUE_S:
+                return
+            # Grab the manual mutex WITHOUT blocking the executor; if a drive holds
+            # it, a manual op is in flight → skip this cycle and retry next tick.
+            if not self._manual_lock.acquire(blocking=False):
+                return
+            try:
+                # Re-check under the lock (state may have changed while acquiring).
+                if not getattr(self, 'on_manual', False):
+                    return
+                if getattr(self, '_manual_record_active', False):
+                    return
+                # Re-torque (idempotent) so a limp arm is re-locked; keep on_manual
+                # if it fails so we retry next cycle rather than releasing onto a
+                # limp arm. A confirmed-ON torque state needs no switch.
+                retorqued = True
+                if self._follower_torque_on is not True:
+                    retorqued = self._set_follower_torque(True)
+                if retorqued:
+                    # FIX 1 — BACKSTOP reset: an idle-leaked session (a stranded
+                    # persistent open OR a retained transient ref) is fully cleared
+                    # under _mode_lock so on_manual can never stay wedged True.
+                    # Finding 2 — re-check idle UNDER _mode_lock first: a manual op
+                    # may have claimed a ref AND stamped fresh activity (both under
+                    # this same lock) after our pre-check above but before we got
+                    # here. Only reset a session that is STILL idle so we never zero
+                    # a fresh legitimate claim (which would drop on_manual to False
+                    # while that op drives → two writers on the arm).
+                    reset = False
+                    with self._mode_lock:
+                        idle = (time.monotonic()
+                                - getattr(self, '_manual_last_activity_mono', 0.0))
+                        if idle >= _MANUAL_IDLE_RETORQUE_S:
+                            self._manual_persistent = False
+                            self._manual_transient_ops = 0
+                            self._recompute_on_manual_locked()
+                            reset = True
+                    if reset:
+                        self._manual_torque_fail_count = 0
+                        self.get_logger().warning(
+                            '[Handbetrieb] Sitzung war ungenutzt offen — Arm '
+                            'automatisch wieder verriegelt und Handbetrieb beendet.')
+            finally:
+                try:
+                    self._manual_lock.release()
+                except RuntimeError:
+                    pass
+        except Exception as e:  # noqa: BLE001 — watchdog must never crash the node
+            self.get_logger().error(f'manual idle watchdog failed: {e}')
+
+    def workshop_hand_guide_callback(self, request, response):
+        """"/workshop/hand_guide" — toggle hand-guiding. true → torque the
+        follower OFF (limp for hand-guiding) + open the manual session. false →
+        abort any in-flight jog/replay, re-torque (fail-loud, keep the ON_MANUAL
+        SESSION claimed if it fails — the _manual_lock itself is always released) +
+        close the session. false is NOT gated (re-locking must always be
+        possible)."""
+        response.success = False
+        response.message = ''
+        enabled = bool(request.enabled)
+
+        if enabled:
+            # F1 — atomic claim: hold _mode_lock around the ownership check AND the
+            # on_manual claim. FIX 1 — hand-guide opens a PERSISTENT session (it
+            # holds the arm limp until an explicit „Beenden"). `was_persistent`
+            # remembers the prior value so a refusal RESTORES it (never clobbers an
+            # already-open session). _mode_lock is RELEASED before _manual_lock /
+            # torque (no lock-ordering deadlock).
+            with self._mode_lock:
+                ok, msg = self._assert_no_other_active('manual')
+                if not ok:
+                    response.message = msg
+                    return response
+                was_persistent = self._manual_persistent
+                self._manual_persistent = True
+                self._recompute_on_manual_locked()
+                # Finding 2 — stamp INSIDE the claim lock so the idle watchdog's
+                # under-_mode_lock idle re-check can't clobber this fresh persistent
+                # claim (which would re-torque the arm + re-arm the collision
+                # detector on a hand-guided arm).
+                self._manual_last_activity_mono = time.monotonic()
+            blocked, bmsg = self._manual_leader_blocks()
+            if blocked:
+                with self._mode_lock:
+                    self._manual_persistent = was_persistent
+                    self._recompute_on_manual_locked()
+                response.message = bmsg
+                return response
+            acquired = self._manual_lock.acquire(timeout=_MANUAL_LOCK_TIMEOUT_S)
+            if not acquired:
+                with self._mode_lock:
+                    self._manual_persistent = was_persistent
+                    self._recompute_on_manual_locked()
+                response.message = ('Der Arm führt gerade eine andere Bewegung '
+                                    'aus — bitte kurz warten.')
+                return response
+            try:
+                # Persistent session already claimed under _mode_lock above.
+                if not self._set_follower_torque(False):
+                    # Could not make the arm limp; it stays torqued (SAFE, not
+                    # limp) → restore the prior persistent state rather than dangle
+                    # a session that never opened the arm.
+                    with self._mode_lock:
+                        self._manual_persistent = was_persistent
+                        self._recompute_on_manual_locked()
+                    response.message = ('Arm konnte nicht freigeschaltet werden '
+                                        '— bitte die Umgebung neu starten.')
+                    return response
+                response.success = True
+                response.message = ('Arm ist frei beweglich — du kannst ihn von '
+                                    'Hand führen.')
+                return response
+            finally:
+                try:
+                    self._manual_lock.release()
+                except RuntimeError:
+                    pass
+
+        # enabled == False → exit manual mode / re-lock.
+        self._manual_last_activity_mono = time.monotonic()
+        # FIX 4 — register the „Beenden" intent BEFORE the re-torque (and before we
+        # even block on _manual_lock) so a committed jog/replay that snapshotted the
+        # old exit generation aborts even if the re-torque below later fails.
+        with self._mode_lock:
+            self._manual_exit_gen += 1
+        self._manual_stop_event.set()  # abort any in-flight jog/replay drive
+        acquired = self._manual_lock.acquire(timeout=6.0)
+        if not acquired:
+            # A drive is still winding down — it will observe the stop flag and
+            # release the lock shortly. Leave the flag SET so it halts; the
+            # frontend retries. Never re-torque without the mutex (races the drive).
+            response.message = ('Der Arm ist noch in Bewegung — bitte kurz warten '
+                                'und erneut „Beenden" drücken.')
+            return response
+        try:
+            # Stop any active recording session first (its timer + limp arm).
+            self._manual_record_active = False
+            self._cancel_manual_record_cap_timer()  # F4 one-shot no longer needed
+            self._manual_record_cap_reached = False
+            if self._manual_record_timer is not None:
+                try:
+                    self.destroy_timer(self._manual_record_timer)
+                except Exception:  # noqa: BLE001
+                    pass
+                self._manual_record_timer = None
+            if not self._retorque_follower_or_keep_locked(response):
+                # F8 / FIX 1 — keep the PERSISTENT session claimed (no other mode
+                # drives a possibly-limp arm). NOTE: _manual_lock is NOT held after
+                # this returns — the finally below always releases it; only the
+                # persistent session flag is retained. response already carries the
+                # German failure message.
+                return response
+            with self._mode_lock:
+                # „Beenden" clears the persistent session. It deliberately does NOT
+                # touch _manual_transient_ops: a fresh jog/replay may have claimed a
+                # transient ref AFTER the exit-generation bump above — so its snapshot
+                # already equals the new generation and its exit-gen guard passes —
+                # and zeroing the refcount here would drop on_manual to False while
+                # that op then drives → TWO writers on /leader/joint_trajectory (the
+                # generation can't distinguish a leaked ref from a fresh live one).
+                # A leaked ref only arises from a jog torque-ON-FAIL retain, where
+                # on_manual staying True is CORRECT (the arm may be limp); it is
+                # cleared safely by the 30 s idle watchdog, which re-checks activity
+                # freshness under _mode_lock so it can never clobber a live claim.
+                self._manual_persistent = False
+                self._recompute_on_manual_locked()
+            response.success = True
+            response.message = 'Arm ist wieder verriegelt.'
+            return response
+        finally:
+            self._manual_stop_event.clear()
+            try:
+                self._manual_lock.release()
+            except RuntimeError:
+                pass
+
+    def workshop_record_callback(self, request, response):
+        """"/workshop/record" — start/stop/cancel a hand-guided recording.
+        Non-blocking: ``start`` torques OFF and arms a ~25 Hz sampling timer;
+        ``stop`` stops it, re-torques (fail-loud) and returns the CONTRACT-B
+        points_json; ``cancel`` stops it, re-torques and discards. stop/cancel are
+        NOT gated (re-locking must always be possible)."""
+        response.success = False
+        response.sample_count = 0
+        response.duration_s = 0.0
+        response.points_json = ''
+        response.message = ''
+        action = (request.action or '').strip().lower()
+
+        if action == 'start':
+            # F1 — atomic claim under _mode_lock (released before _manual_lock /
+            # torque). FIX 1 — a record start opens a PERSISTENT session (it holds
+            # the arm limp + samples until stop/cancel). `was_persistent` remembers
+            # the prior value so a refusal RESTORES it (never clobbers an
+            # already-open manual session).
+            with self._mode_lock:
+                ok, msg = self._assert_no_other_active('manual')
+                if not ok:
+                    response.message = msg
+                    return response
+                was_persistent = self._manual_persistent
+                self._manual_persistent = True
+                self._recompute_on_manual_locked()
+                # Finding 2 — stamp INSIDE the claim lock (see hand_guide) so the
+                # idle watchdog can't clobber this fresh persistent record claim.
+                self._manual_last_activity_mono = time.monotonic()
+            blocked, bmsg = self._manual_leader_blocks()
+            if blocked:
+                with self._mode_lock:
+                    self._manual_persistent = was_persistent
+                    self._recompute_on_manual_locked()
+                response.message = bmsg
+                return response
+            if self.communicator is None:
+                with self._mode_lock:
+                    self._manual_persistent = was_persistent
+                    self._recompute_on_manual_locked()
+                response.message = 'Bitte zuerst den Roboter auswählen.'
+                return response
+            acquired = self._manual_lock.acquire(timeout=_MANUAL_LOCK_TIMEOUT_S)
+            if not acquired:
+                with self._mode_lock:
+                    self._manual_persistent = was_persistent
+                    self._recompute_on_manual_locked()
+                response.message = ('Der Arm führt gerade eine andere Bewegung '
+                                    'aus — bitte kurz warten.')
+                return response
+            try:
+                if self._manual_record_active:
+                    with self._mode_lock:
+                        self._manual_persistent = was_persistent
+                        self._recompute_on_manual_locked()
+                    response.message = 'Es läuft bereits eine Aufnahme.'
+                    return response
+                # Persistent session already claimed under _mode_lock above.
+                if not self._set_follower_torque(False):
+                    # Arm stays torqued (SAFE, not limp) → restore prior state.
+                    with self._mode_lock:
+                        self._manual_persistent = was_persistent
+                        self._recompute_on_manual_locked()
+                    response.message = ('Arm konnte nicht freigeschaltet werden '
+                                        '— bitte die Umgebung neu starten.')
+                    return response
+                self._handguide_buffer = []
+                self._manual_record_cap_reached = False  # fresh recording
+                self._manual_record_start_mono = time.monotonic()
+                self._manual_record_active = True
+                try:
+                    self._manual_record_timer = self.create_timer(
+                        1.0 / _MANUAL_RECORD_FPS, self._manual_record_sample)
+                except Exception as e:  # noqa: BLE001
+                    self._manual_record_active = False
+                    self.get_logger().error(f'record timer create failed: {e}')
+                    if not self._retorque_follower_or_keep_locked(response):
+                        return response  # keep the session (arm may be limp)
+                    with self._mode_lock:
+                        self._manual_persistent = was_persistent
+                        self._recompute_on_manual_locked()
+                    response.message = 'Aufnahme konnte nicht gestartet werden.'
+                    return response
+                response.success = True
+                response.message = 'Aufnahme gestartet — bewege den Arm von Hand.'
+                return response
+            finally:
+                try:
+                    self._manual_lock.release()
+                except RuntimeError:
+                    pass
+
+        if action in ('stop', 'cancel'):
+            self._manual_last_activity_mono = time.monotonic()
+            acquired = self._manual_lock.acquire(timeout=6.0)
+            if not acquired:
+                response.message = ('Der Arm ist noch in Bewegung — bitte kurz '
+                                    'warten und erneut versuchen.')
+                return response
+            try:
+                self._manual_record_active = False
+                # Cancel the F4 cap-finish one-shot (if the RECORD_MAX_S auto-stop
+                # scheduled it) so it doesn't re-torque / re-clear behind us.
+                self._cancel_manual_record_cap_timer()
+                cap_reached = self._manual_record_cap_reached
+                self._manual_record_cap_reached = False
+                if self._manual_record_timer is not None:
+                    try:
+                        self.destroy_timer(self._manual_record_timer)
+                    except Exception:  # noqa: BLE001
+                        pass
+                    self._manual_record_timer = None
+                buf = list(self._handguide_buffer)
+                if action == 'cancel':
+                    self._handguide_buffer = []
+                    if not self._retorque_follower_or_keep_locked(response):
+                        return response  # keep the session (arm may be limp)
+                    with self._mode_lock:
+                        self._manual_persistent = False
+                        self._recompute_on_manual_locked()
+                    response.success = True
+                    response.message = 'Aufnahme verworfen.'
+                    return response
+                # stop
+                if not self._retorque_follower_or_keep_locked(response):
+                    response.sample_count = len(buf)  # report what was captured
+                    return response  # keep on_manual True (arm may be limp)
+                duration = float(buf[-1][0]) if buf else 0.0
+                # Buffer sample layout: [t_s, j1..j5, grip]. CONTRACT B point:
+                # [j1..j5, grip, t_s].
+                points = [[s[1], s[2], s[3], s[4], s[5], s[6], s[0]] for s in buf]
+                response.points_json = json.dumps({
+                    'fps': _MANUAL_RECORD_FPS, 'points': points,
+                })
+                response.sample_count = len(buf)
+                response.duration_s = duration
+                response.success = True
+                response.message = f'Aufnahme beendet — {len(buf)} Punkte.'
+                if cap_reached:
+                    # The RECORD_MAX_S cap auto-stopped this recording — tell the
+                    # student so a silently-truncated take isn't a surprise.
+                    response.message += (' Maximale Aufnahmedauer erreicht — die '
+                                         'Aufnahme wurde automatisch beendet.')
+                # _manual_persistent stays True (record STOP leaves the session
+                # open): the frontend exits via hand_guide(false), so record→replay
+                # works within the one session.
+                return response
+            finally:
+                try:
+                    self._manual_lock.release()
+                except RuntimeError:
+                    pass
+
+        response.message = 'Unbekannte Aufnahme-Aktion.'
+        return response
+
+    def _manual_record_sample(self):
+        """~25 Hz sampler for /workshop/record: append [t_s, j1..j5, grip] to the
+        hand-guide buffer, dropping sub-threshold-identical samples (still arm)
+        and enforcing RECORD_MAX_S + the hard sample cap. Runs on the executor;
+        fast + never blocks (drops a frame rather than waiting on the mutex)."""
+        if not self._manual_record_active:
+            return
+        joints = None
+        if self.communicator is not None:
+            try:
+                joints = self.communicator.get_latest_follower_joints()
+            except Exception:  # noqa: BLE001
+                joints = None
+        if not joints or len(joints) < 6:
+            return
+        t = time.monotonic() - self._manual_record_start_mono
+        sample = [float(t)] + [float(v) for v in joints[:6]]
+        acquired = self._manual_lock.acquire(timeout=0.05)
+        if not acquired:
+            return  # a stop/jog holds the mutex; drop this frame (bounded loss)
+        try:
+            if not self._manual_record_active:
+                return
+            self._manual_last_activity_mono = time.monotonic()
+            buf = self._handguide_buffer
+            if buf:
+                last = buf[-1]
+                if all(abs(sample[1 + i] - last[1 + i]) < _MANUAL_RECORD_MIN_DELTA_RAD
+                       for i in range(6)):
+                    # Still enforce the wall-clock cap while dropping duplicates.
+                    if t >= RECORD_MAX_S:
+                        self._manual_record_active = False
+                        # F4 — clean stop: schedule the executor to re-torque +
+                        # clear on_manual (the sampler must not block on it).
+                        self._schedule_manual_record_cap_finish()
+                    return
+            buf.append(sample)
+            if len(buf) >= _MANUAL_RECORD_MAX_SAMPLES or t >= RECORD_MAX_S:
+                self._manual_record_active = False
+                self._schedule_manual_record_cap_finish()  # F4 clean stop
+        finally:
+            try:
+                self._manual_lock.release()
+            except RuntimeError:
+                pass
+
+    def _schedule_manual_record_cap_finish(self):
+        """Schedule the F4 one-shot clean-stop after a RECORD_MAX_S auto-stop.
+        Called from the sampler (which must NEVER block): the actual re-torque +
+        on_manual clear runs on the executor in _finish_manual_record_on_cap.
+        Idempotent — schedules at most one pending cap-finish."""
+        if getattr(self, '_manual_record_cap_timer', None) is not None:
+            return
+        try:
+            self._manual_record_cap_timer = self.create_timer(
+                0.1, self._finish_manual_record_on_cap)
+        except Exception as e:  # noqa: BLE001
+            self.get_logger().error(f'record cap-finish schedule failed: {e}')
+
+    def _cancel_manual_record_cap_timer(self):
+        """Cancel/destroy the F4 cap-finish one-shot if pending (a manual stop /
+        cancel / re-lock got there first)."""
+        timer = getattr(self, '_manual_record_cap_timer', None)
+        if timer is not None:
+            try:
+                self.destroy_timer(timer)
+            except Exception:  # noqa: BLE001
+                pass
+            self._manual_record_cap_timer = None
+
+    def _finish_manual_record_on_cap(self):
+        """F4 one-shot: after RECORD_MAX_S auto-stopped a manual recording, tear
+        down the sampler timer, re-torque the follower (fail-loud → keep on_manual
+        so the next attempt retries rather than releasing onto a limp arm), clear
+        on_manual and surface a German „Maximale Aufnahmedauer erreicht" so the
+        student sees the auto-stop. Runs on the executor (scheduled from the
+        sampler, which must never block on the ~seconds-long torque switch).
+        One-shot: cancels its own timer first (create_timer is periodic)."""
+        from types import SimpleNamespace
+        self._cancel_manual_record_cap_timer()
+        acquired = self._manual_lock.acquire(timeout=6.0)
+        if not acquired:
+            # A stop/jog holds the mutex; retry shortly (the manual stop path will
+            # otherwise finish the cleanup and cancel this reschedule).
+            self._schedule_manual_record_cap_finish()
+            return
+        try:
+            self._manual_record_active = False
+            if self._manual_record_timer is not None:
+                try:
+                    self.destroy_timer(self._manual_record_timer)
+                except Exception:  # noqa: BLE001
+                    pass
+                self._manual_record_timer = None
+            holder = SimpleNamespace(message='', success=None)
+            if self._retorque_follower_or_keep_locked(holder):
+                # FIX 1 — close the persistent record session on a clean re-torque.
+                with self._mode_lock:
+                    self._manual_persistent = False
+                    self._recompute_on_manual_locked()
+            # Frontend-observable: surfaced on the next /workshop/record stop AND
+            # via the /task/status notice below.
+            self._manual_record_cap_reached = True
+        finally:
+            try:
+                self._manual_lock.release()
+            except RuntimeError:
+                pass
+        # Best-effort German notice on /task/status (React renders a toast on a
+        # non-empty error). Outside the lock so a slow publish can't hold it.
+        try:
+            if self.communicator is not None:
+                notice = TaskStatus()
+                notice.phase = TaskStatus.READY
+                notice.error = ('Maximale Aufnahmedauer erreicht — die Aufnahme '
+                                'wurde automatisch beendet.')
+                self.communicator.publish_status(status=notice)
+        except Exception as e:  # noqa: BLE001
+            self.get_logger().warning(f'record cap notice publish failed: {e}')
+
+    def workshop_replay_callback(self, request, response):
+        """"/workshop/replay" — replay a recorded hand-guided trajectory on the
+        follower. Async: re-torque ON (fail-loud) then spawn a daemon that
+        re-segments through the velocity floor (handlers/trajectory) and holds
+        _manual_lock for the whole publish. Points from ``points_json`` (inline,
+        CONTRACT B) OR a server-persisted trajectory named ``name``."""
+        from physical_ai_server.workflow.handlers.motion import WorkflowError
+        from physical_ai_server.workflow.handlers.trajectory import (
+            clamp_speed, extract_points, resegment_trajectory,
+        )
+        response.success = False
+        response.message = ''
+
+        # F6 — refuse a driven replay against a STALE follower readback (frozen
+        # joint stream) so the lead-in never seeds from an old pose. Pre-claim.
+        if self._follower_joints_stale():
+            response.message = ('Armstellung noch nicht bekannt — bitte kurz '
+                                'warten und erneut versuchen.')
+            return response
+
+        # Fast pre-check (re-checked atomically under _mode_lock below).
+        ok, msg = self._assert_no_other_active('manual')
+        if not ok:
+            response.message = msg
+            return response
+        # Batch 2b: driving the follower to replay a motion while a hand-guide
+        # RECORDING is still running would fight the student's hand + contaminate the
+        # take. Refuse until the recording is stopped (frontend also blocks this).
+        if self._manual_record_active:
+            response.message = 'Erst die Aufnahme beenden.'
+            return response
+        blocked, bmsg = self._manual_leader_blocks()
+        if blocked:
+            response.message = bmsg
+            return response
+        if self.communicator is None:
+            response.message = 'Bitte zuerst den Roboter auswählen.'
+            return response
+
+        existing = self._manual_replay_thread
+        if existing is not None and existing.is_alive():
+            response.message = 'Es läuft bereits eine Wiedergabe.'
+            return response
+
+        # Resolve the points: inline JSON first, else a persisted named trajectory.
+        points_json = (request.points_json or '').strip()
+        traj = None
+        if points_json:
+            try:
+                traj = json.loads(points_json)
+            except (ValueError, TypeError):
+                response.message = 'Aufnahme-Daten sind ungültig.'
+                return response
+        else:
+            name = (request.name or '').strip()
+            if name:
+                try:
+                    wfm = self._get_or_create_workflow_manager()
+                    if wfm is not None:
+                        traj = wfm.get_trajectories().get(name)
+                except Exception:  # noqa: BLE001
+                    traj = None
+            if traj is None:
+                response.message = 'Keine Aufnahme angegeben.'
+                return response
+        try:
+            points = extract_points(traj)
+        except WorkflowError as e:
+            response.message = str(e)
+            return response
+        speed = clamp_speed(request.speed)
+
+        current = None
+        try:
+            current = self.communicator.get_latest_follower_joints()
+        except Exception:  # noqa: BLE001
+            current = None
+        if not current or len(current) < 6:
+            response.message = ('Aktuelle Armstellung ist noch nicht bekannt — '
+                                'bitte kurz warten und erneut versuchen.')
+            return response
+        current = [float(v) for v in current[:6]]
+        # Non-finite guard: a NaN/Inf readback would publish NaN through the
+        # lead-in (garbage arm command) or crash build_segment on an Inf delta.
+        if not all(math.isfinite(v) for v in current):
+            response.message = ('Aktuelle Armstellung ist ungültig — bitte kurz '
+                                'warten und erneut versuchen.')
+            return response
+        # Floor guard for the synthetic lead-in (the recorded points are reachable-
+        # above-table by construction; the current-pose→start interpolation is
+        # not). Returns None (no check) when the floor is unknown → lead-in behaves
+        # exactly as before.
+        lead_floor = self._build_replay_lead_floor_check()
+        try:
+            segmented = resegment_trajectory(
+                points, speed, lead_in_from=current,
+                lead_in_floor_check=lead_floor,
+                point_floor_check=lead_floor)  # FIX 5 — floor-check recorded points
+        except WorkflowError as e:
+            response.message = str(e)
+            return response
+        if not segmented:
+            response.message = 'Die Aufnahme enthält keine Bewegung.'
+            return response
+
+        # Pre-create the trajectory publisher on the executor thread so the daemon
+        # never races a cross-thread create_publisher (mirrors _ensure_sim_publisher).
+        if getattr(self, '_workflow_traj_publisher', None) is None:
+            try:
+                from trajectory_msgs.msg import JointTrajectory
+                self._workflow_traj_publisher = self.create_publisher(
+                    JointTrajectory, '/leader/joint_trajectory', 10)
+            except Exception as e:  # noqa: BLE001
+                self.get_logger().warning(f'replay publisher pre-create failed: {e}')
+
+        # F1 — atomic claim: hold _mode_lock around the ownership re-check AND the
+        # on_manual claim so a concurrent recording/inference/workflow start can't
+        # slip in. The claim MUST live here (not in the daemon) so success=True
+        # never races a mode start against the not-yet-driving daemon. F9 — register
+        # _manual_replay_thread under the same lock (atomic with the claim + the
+        # replay-already-running re-check). F3 — the re-torque AND the stop-event
+        # clear happen in _run_replay AFTER it acquires _manual_lock (never clear
+        # the shared stop-event unlocked — it could defeat an in-flight jog's
+        # abort). _mode_lock is RELEASED before the daemon starts (it acquires
+        # _manual_lock, not _mode_lock → no deadlock).
+        with self._mode_lock:
+            ok, msg = self._assert_no_other_active('manual')
+            if not ok:
+                response.message = msg
+                return response
+            existing = self._manual_replay_thread
+            if existing is not None and existing.is_alive():
+                response.message = 'Es läuft bereits eine Wiedergabe.'
+                return response
+            # FIX 1 — a replay is a TRANSIENT op: it claims a refcount slot for the
+            # duration of the drive (released in _run_replay's finally), instead of
+            # the old per-call `opened` boolean. FIX 4 — snapshot the exit
+            # generation so a „Beenden" that lands before the daemon drives aborts
+            # it (checked in _run_replay under _manual_lock).
+            self._manual_transient_ops += 1
+            self._recompute_on_manual_locked()
+            exit_gen = self._manual_exit_gen
+            thread = threading.Thread(
+                target=self._run_replay,
+                args=(segmented, exit_gen),
+                name='workshop-replay',
+                daemon=True,
+            )
+            self._manual_replay_thread = thread
+            # Finding 2 — stamp activity INSIDE the claim lock (see the jog claim)
+            # so the idle watchdog never clobbers this fresh replay ref.
+            self._manual_last_activity_mono = time.monotonic()
+        thread.start()
+        response.success = True
+        response.message = 'Wiedergabe gestartet.'
+        return response
+
+    def _build_replay_lead_floor_check(self):
+        """Return a ``callable(q6) -> bool`` (True when a lead-in waypoint dips the
+        tool below the table floor) for the replay lead-in guard, or None when no
+        floor is known / IK is unavailable. Reuses motion._floor_z_at so the
+        plane/scalar table-height logic matches every other motion."""
+        ik = self._build_ik_solver()
+        if ik is None:
+            return None
+        try:
+            calib = self._load_workflow_calibration() or {}
+        except Exception:  # noqa: BLE001
+            calib = {}
+        z_table = calib.get('z_table')
+        table_plane = calib.get('table_plane')
+        if z_table is None and table_plane is None:
+            return None
+        from types import SimpleNamespace
+        from physical_ai_server.workflow.handlers import motion as _motion
+        shim = SimpleNamespace(z_table=z_table, table_plane=table_plane)
+
+        def _lead_floor(q6):
+            try:
+                pose = ik.fk([float(v) for v in q6[:5]])
+            except Exception:  # noqa: BLE001
+                return False
+            if pose is None:
+                return False
+            _R, t = pose
+            fz = _motion._floor_z_at(shim, float(t[0]), float(t[1]))
+            if fz is None:
+                return False
+            return float(t[2]) < fz - _motion.WORKSPACE_FLOOR_MARGIN_M
+
+        return _lead_floor
+
+    def _run_replay(self, segmented, exit_gen):
+        """Daemon body for /workshop/replay. Holds _manual_lock for the whole
+        chunked publish (so a jog can't drive concurrently). F3: the re-torque AND
+        the _manual_stop_event.clear() happen HERE, AFTER acquiring _manual_lock —
+        the stop-event is a SHARED abort signal, so clearing it unlocked could
+        defeat an in-flight jog's abort. On a re-torque failure the arm may be limp
+        → keep the transient ref (do NOT drive); the idle watchdog re-torques later.
+
+        FIX 4 — ``exit_gen`` is the exit generation snapshotted by the callback; if
+        a „Beenden" bumped it while we waited on _manual_lock the session was torn
+        down and we abort without driving. FIX 2 — a record start seizing the
+        (limp) arm between the claim and here also aborts the drive."""
+        from types import SimpleNamespace
+        from physical_ai_server.workflow.trajectory_builder import chunked_publish
+        acquired = self._manual_lock.acquire(timeout=30.0)
+        keep_session = False
+        try:
+            if not acquired:
+                self.get_logger().warning('replay could not acquire manual lock')
+                return
+            # FIX 4 — a „Beenden" bumped the exit generation while we waited on
+            # _manual_lock → the session was torn down; do NOT drive after it.
+            if self._manual_exit_gen != exit_gen:
+                self.get_logger().warning(
+                    'replay aborted — Handbetrieb was ended before the drive '
+                    'started.')
+                return
+            # FIX 2 — a record start seized the (limp) arm between the callback's
+            # claim and here; driving now would fight the student's hand. Mirror
+            # the jog F2 record re-check.
+            if self._manual_record_active:
+                self.get_logger().warning(
+                    'replay aborted — a recording started before the drive.')
+                return
+            # F3 — re-torque UNDER the lock (serialised against jogs), fail-loud.
+            if not self._retorque_follower_or_keep_locked(
+                    SimpleNamespace(message='', success=None)):
+                keep_session = True  # arm may be limp → keep the ref, do NOT drive
+                self.get_logger().error(
+                    'replay re-torque failed — not driving; Handbetrieb bleibt aktiv.')
+                return
+            # FIX 4 (Finding 1) — re-check the exit generation AFTER the blocking
+            # re-torque. A „Beenden" that landed DURING the re-torque bumped
+            # _manual_exit_gen and set the stop-event, but the pre-torque check
+            # above ran before it. Without this re-check the clear() below would
+            # wipe that stop-event and drive the whole replay after the student
+            # already pressed „Beenden".
+            if self._manual_exit_gen != exit_gen:
+                self.get_logger().warning(
+                    'replay aborted — Handbetrieb was ended during the re-torque.')
+                return
+            # F3 — clear the SHARED stop-event only now, under the lock.
+            self._manual_stop_event.clear()
+            # A „Beenden" that races the clear above still bumped the exit
+            # generation, so fold it into should_stop → chunked_publish halts at
+            # the next chunk boundary (≤1 velocity-safe segment) instead of driving
+            # the full trajectory even if the raw stop-event was just cleared.
+            chunked_publish(
+                publisher=self._trajectory_publisher,
+                points=segmented,
+                should_stop=lambda: (self._manual_stop_event.is_set()
+                                     or self._manual_exit_gen != exit_gen),
+            )
+        except Exception as e:  # noqa: BLE001 — daemon must never crash the node
+            self.get_logger().error(f'replay failed: {e!r}')
+        finally:
+            # FIX 1 — release this transient replay's ref under the arbiter lock,
+            # unless a re-torque failure left the arm possibly-limp (keep_session
+            # retains the ref; the idle watchdog resets it later).
+            if not keep_session:
+                with self._mode_lock:
+                    self._manual_transient_ops = max(
+                        0, self._manual_transient_ops - 1)
+                    self._recompute_on_manual_locked()
+            self._manual_last_activity_mono = time.monotonic()
+            # F9 — only clear the registration if it still points at THIS thread
+            # (a newer replay may have registered after we finished).
+            if self._manual_replay_thread is threading.current_thread():
+                self._manual_replay_thread = None
+            if acquired:
+                try:
+                    self._manual_lock.release()
+                except RuntimeError:
+                    pass
 
     def get_object_catalog_callback(self, request, response):
         """Return the named-object catalog's type list (keys + German labels)
@@ -3010,38 +4343,65 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         return result
 
     def workflow_start_callback(self, request, response):
-        ok, msg = self._assert_no_other_active('workflow')
-        if not ok:
-            response.success = False
-            response.message = msg
-            response.unreachable_block_ids = []
-            response.unreachable_messages = []
-            return response
-        # HIGH-1 — mutual exclusion across BOTH manager instances. The mode mutex
-        # above deliberately skips the on_workflow check for workflow requests
-        # (the single-manager design relied on WorkflowManager.start's own
-        # is_running guard). With a separate sim manager, a cross-kind start (a
-        # real start during a sim run, or vice versa, e.g. a second browser tab)
-        # would pass the mutex AND the target manager's is_running (a DIFFERENT
-        # instance) — running both, one driving the real follower. Refuse a start
-        # while ANY workflow (sim or real) is already live.
-        #
-        # ALSO gate on `on_workflow` (the teardown-race fix): `is_running` flips
-        # False at the daemon's FIRST finally line (`_stop_event.set()`), but
-        # `on_workflow` is cleared LAST (after the hat-thread joins, up to ~1 s
-        # each). In that window `_active_workflow_manager()` is None yet a workflow
-        # is still tearing down — without this a new start would slip in and the
-        # finishing daemon would then clear `on_workflow=False` mid-run, letting a
-        # concurrent recording/inference claim the arm. `on_workflow` stays True
-        # through teardown, so this closes the window without blocking a legit
-        # restart (clean finish → on_workflow already False).
-        if self._active_workflow_manager() is not None or getattr(
-                self, 'on_workflow', False):
-            response.success = False
-            response.message = 'Es läuft bereits ein Workflow. Bitte zuerst stoppen.'
-            response.unreachable_block_ids = []
-            response.unreachable_messages = []
-            return response
+        # F1 — atomic mode arbitration: hold _mode_lock around the ownership check
+        # AND the on_workflow claim so two tabs can't both pass the gate and end up
+        # with two writers on /leader/joint_trajectory. Claim on_workflow BEFORE
+        # any driver spawns (in _launch_workflow); the finally releases it when no
+        # workflow actually started. _mode_lock is RELEASED before _launch_workflow
+        # so it never nests _manual_lock/motion_lock (no lock-ordering deadlock).
+        with self._mode_lock:
+            ok, msg = self._assert_no_other_active('workflow')
+            if not ok:
+                response.success = False
+                response.message = msg
+                response.unreachable_block_ids = []
+                response.unreachable_messages = []
+                return response
+            # HIGH-1 — mutual exclusion across BOTH manager instances. The mode
+            # mutex above deliberately skips the on_workflow check for workflow
+            # requests (the single-manager design relied on WorkflowManager.start's
+            # own is_running guard). With a separate sim manager, a cross-kind
+            # start (a real start during a sim run, or vice versa, e.g. a second
+            # browser tab) would pass the mutex AND the target manager's is_running
+            # (a DIFFERENT instance) — running both, one driving the real follower.
+            # Refuse a start while ANY workflow (sim or real) is already live.
+            #
+            # ALSO gate on `on_workflow` (the teardown-race fix): `is_running`
+            # flips False at the daemon's FIRST finally line (`_stop_event.set()`),
+            # but `on_workflow` is cleared LAST (after the hat-thread joins, up to
+            # ~1 s each). In that window `_active_workflow_manager()` is None yet a
+            # workflow is still tearing down — without this a new start would slip
+            # in and the finishing daemon would then clear `on_workflow=False`
+            # mid-run, letting a concurrent recording/inference claim the arm.
+            # `on_workflow` stays True through teardown, so this closes the window
+            # without blocking a legit restart (clean finish → already False).
+            if self._active_workflow_manager() is not None or getattr(
+                    self, 'on_workflow', False):
+                response.success = False
+                response.message = 'Es läuft bereits ein Workflow. Bitte zuerst stoppen.'
+                response.unreachable_block_ids = []
+                response.unreachable_messages = []
+                return response
+            # Claim ownership under the lock BEFORE any driver spawns; a concurrent
+            # start now sees on_workflow True and refuses at the gate above.
+            self.on_workflow = True
+        started = False
+        try:
+            started = self._launch_workflow(request, response)
+        finally:
+            # No running workflow took the claim (refused routing / failed start /
+            # an exception) → release it so the arm isn't wedged.
+            if not started:
+                self.on_workflow = False
+        return response
+
+    def _launch_workflow(self, request, response) -> bool:
+        """Route + start a workflow (sim or real). Returns True iff a workflow
+        actually started (the running daemon then owns on_workflow); False on any
+        refusal/failure. Populates the response on every path. Split out of
+        workflow_start_callback so the F1 on_workflow claim (set by the caller
+        under _mode_lock) can be released in a finally without re-indenting the
+        whole routing body."""
         # Roboter Studio Phase-3 sim: the run flag rides a `sim` sibling key
         # INSIDE workflow_json (Interpreter.from_json reads only data['blocks'],
         # so the sibling is silently ignored by the interpreter). When enabled we
@@ -3070,7 +4430,7 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 response.message = 'Simulations-Runtime kann nicht initialisiert werden.'
                 response.unreachable_block_ids = []
                 response.unreachable_messages = []
-                return response
+                return False
             # Refresh the virtual scene on the cached SimArm so the held
             # simulation sees the objects placed for THIS run.
             try:
@@ -3114,23 +4474,21 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                     )
                     response.unreachable_block_ids = []
                     response.unreachable_messages = []
-                    return response
+                    return False
             manager = self._get_or_create_workflow_manager()
             if manager is None:
                 response.success = False
                 response.message = 'Workflow-Runtime kann nicht initialisiert werden.'
                 response.unreachable_block_ids = []
                 response.unreachable_messages = []
-                return response
+                return False
         success, message, unreachable = manager.start(
             request.workflow_json,
             request.workflow_id,
         )
-        if success:
-            self.on_workflow = True
-            # The on_finished callback (passed into WorkflowManager via
-            # _get_or_create_workflow_manager) flips this back to False
-            # when the daemon thread exits, regardless of how it exited.
+        # on_workflow was claimed under _mode_lock in workflow_start_callback; the
+        # caller's finally releases it when this returns False. On success the
+        # running daemon owns it (the on_finished callback clears it on exit).
         response.success = success
         response.message = message
         # IK pre-check warnings — the React side renders setWarningText()
@@ -3142,7 +4500,7 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         response.unreachable_messages = [
             str(u.get('message', '')) for u in (unreachable or [])
         ]
-        return response
+        return bool(success)
 
     def _on_workflow_finished(self, terminal_phase: str) -> None:
         """Fired by WorkflowManager._run on every exit path. Releases

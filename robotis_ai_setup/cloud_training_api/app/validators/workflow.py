@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from typing import Any
 
 from fastapi import HTTPException
@@ -44,6 +45,37 @@ MAX_SIM_SCENE_ZONES = 16
 # duplicated here, like MAX_SIM_SCENE_OBJECTS mirrors the server-side cap).
 TEMPO_MIN = 0.5
 TEMPO_MAX = 2.0
+
+# Batch-2b recorded replay trajectories (CONTRACT B):
+#   { "fps": <number>, "points": [ [j1, j2, j3, j4, j5, grip, t_s], ... ] }
+# validate_trajectory guards the `points` list (a hand-guided recording) before
+# it hits Postgres. 5000 points at 30 fps is ~166 s of motion — far beyond any
+# real hand-guided demo, so it is a hard OOM ceiling, not a UX limit; the JSON
+# byte cap (mirrors the blockly cap) is the binding guard for adversarial input.
+MAX_TRAJECTORY_POINTS = 5000
+MAX_TRAJECTORY_JSON_BYTES = 256 * 1024
+# Each point is exactly [j1..j5, gripper, t_seconds] — 7 finite numbers.
+TRAJECTORY_POINT_LEN = 7
+# Sanity ceiling on the recording rate. The recorder runs at 20-30 Hz; a value
+# past this is a client bug and would make replay timing nonsensical.
+TRAJECTORY_FPS_MAX = 1000.0
+# Postgres INTEGER (int4) upper bound. point_count is stored in an INTEGER column
+# (migration 034); a body value past this overflows the column and raises an
+# uncaught 500 on INSERT, so it is rejected at the gate instead.
+INT4_MAX = 2_147_483_647
+
+# Recorded-trajectory name charset + length. MUST mirror the ROS backend
+# (`_DESTINATION_NAME_RE` in physical_ai_server/workflow/handlers/destinations.py)
+# and the Blockly frontend: after trimming, a name is 1–40 chars of letters
+# (incl. German umlauts), digits, spaces, underscore, hyphen. The cloud API can't
+# import the physical_ai_server package (separate deployment), so the regex is
+# duplicated here — like MAX_SIM_SCENE_OBJECTS / TEMPO_* mirror their server-side
+# caps. Without this the cloud stored 41–100-char / whitespace-only / arbitrary
+# names (emoji, control chars, `/`) that NO Blockly block can reference (dead
+# storage) and that the ``by-name/{name}`` path route can't fetch (a `/` breaks
+# the path).
+TRAJECTORY_NAME_MAX_LENGTH = 40
+TRAJECTORY_NAME_RE = re.compile(r"^[A-Za-zÄÖÜäöüß0-9 _\-]{1,40}$")
 
 
 def validate_blockly_json(payload: dict) -> None:
@@ -201,3 +233,154 @@ def _corner(value: Any) -> list[float]:
                 detail="Sperrzone ungültig: Koordinaten müssen endliche Zahlen sein.",
             )
     return value
+
+
+def validate_trajectory_name(name: Any) -> str:
+    """Validate + trim a recorded-trajectory name and return the trimmed form.
+
+    Mirrors the ROS backend (``_DESTINATION_NAME_RE``) and the Blockly frontend:
+    after ``.strip()`` the name must match ``TRAJECTORY_NAME_RE`` (1–40 chars of
+    letters incl. German umlauts, digits, spaces, ``_`` and ``-``). Rejects
+    empty / whitespace-only / too-long / out-of-charset input with a German HTTP
+    400. The caller MUST store the returned (trimmed) value so a leading/trailing
+    space never survives to Postgres. Defense-in-depth against dead storage that
+    no Blockly block can reference and against a ``/`` breaking the by-name path
+    route — the ROS server is the semantic authority; the cloud gate mirrors it.
+    """
+    if not isinstance(name, str):
+        raise HTTPException(status_code=400, detail="Ungültiger Aufnahme-Name.")
+    trimmed = name.strip()
+    if not trimmed:
+        raise HTTPException(status_code=400, detail="Ungültiger Aufnahme-Name.")
+    if not TRAJECTORY_NAME_RE.match(trimmed):
+        # The regex already caps length at 40; a single message covers both the
+        # too-long and the out-of-charset case (mirrors the frontend hint).
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Der Aufnahme-Name darf höchstens 40 Zeichen lang sein und nur "
+                "Buchstaben, Ziffern, Leerzeichen, _ und - enthalten."
+            ),
+        )
+    return trimmed
+
+
+def validate_trajectory(points: Any, fps: Any = None) -> None:
+    """Defang a malicious or runaway recorded replay trajectory (CONTRACT B)
+    before it hits Postgres.
+
+    ``points`` must be a non-empty list of ≤ ``MAX_TRAJECTORY_POINTS`` entries,
+    each a list of exactly ``TRAJECTORY_POINT_LEN`` finite numbers
+    (``[j1..j5, gripper, t_s]`` — ``bool`` excluded, it is an ``int`` subclass
+    and never a joint value; ``json.loads`` accepts bare ``NaN``/``Infinity`` so
+    a finite-check is required). The total serialised size is capped at
+    ``MAX_TRAJECTORY_JSON_BYTES`` (mirrors ``validate_blockly_json``). When
+    ``fps`` is supplied it must be a positive finite number ≤ ``TRAJECTORY_FPS_MAX``.
+    German HTTP 400/413 on any violation. Defense-in-depth only — replay is a
+    teaching feature, not a safety envelope; the cloud gate guards shape/size.
+    """
+    if not isinstance(points, list):
+        raise HTTPException(
+            status_code=400, detail="Bewegungsdaten müssen eine Liste von Punkten sein."
+        )
+    if not points:
+        raise HTTPException(
+            status_code=400, detail="Bewegung enthält keine Punkte."
+        )
+    if len(points) > MAX_TRAJECTORY_POINTS:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Bewegung ist zu lang (höchstens {MAX_TRAJECTORY_POINTS} Punkte).",
+        )
+    try:
+        encoded = json.dumps(points)
+    except (TypeError, ValueError) as e:
+        raise HTTPException(status_code=400, detail=f"Bewegungsdaten sind ungültig: {e}")
+    if len(encoded.encode("utf-8")) > MAX_TRAJECTORY_JSON_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Bewegung ist zu groß (>{MAX_TRAJECTORY_JSON_BYTES // 1024} KB).",
+        )
+    for point in points:
+        _trajectory_point(point)
+    if fps is not None:
+        _validate_fps(fps)
+
+
+def _trajectory_point(value: Any) -> list[float]:
+    """Validate one recorded sample: exactly ``TRAJECTORY_POINT_LEN`` finite
+    numbers (``bool`` excluded). Raises HTTP 400 in German on any violation.
+    Mirrors ``_corner`` but for the 7-wide ``[j1..j5, grip, t_s]`` point."""
+    if not isinstance(value, list) or len(value) != TRAJECTORY_POINT_LEN:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Bewegungspunkt ungültig: jeder Punkt muss {TRAJECTORY_POINT_LEN} "
+                "Zahlen enthalten."
+            ),
+        )
+    for component in value:
+        if isinstance(component, bool) or not isinstance(component, (int, float)):
+            raise HTTPException(
+                status_code=400,
+                detail="Bewegungspunkt ungültig: Werte müssen Zahlen sein.",
+            )
+        if not math.isfinite(component):
+            raise HTTPException(
+                status_code=400,
+                detail="Bewegungspunkt ungültig: Werte müssen endliche Zahlen sein.",
+            )
+    return value
+
+
+def _validate_fps(fps: Any) -> None:
+    """Validate the trajectory recording rate: a positive finite number
+    (``bool`` excluded) not exceeding ``TRAJECTORY_FPS_MAX``. German HTTP 400."""
+    if isinstance(fps, bool) or not isinstance(fps, (int, float)):
+        raise HTTPException(status_code=400, detail="FPS muss eine Zahl sein.")
+    if not math.isfinite(fps) or fps <= 0:
+        raise HTTPException(
+            status_code=400, detail="FPS muss eine positive endliche Zahl sein."
+        )
+    if fps > TRAJECTORY_FPS_MAX:
+        raise HTTPException(
+            status_code=400,
+            detail=f"FPS ist zu hoch (höchstens {int(TRAJECTORY_FPS_MAX)}).",
+        )
+
+
+def validate_trajectory_metadata(point_count: Any, duration_s: Any) -> None:
+    """Validate the optional denormalised trajectory metadata columns before they
+    hit Postgres — ``validate_trajectory`` guards the ``points``/``fps`` payload,
+    but ``point_count``/``duration_s`` are otherwise stored verbatim from the body.
+
+    ``point_count`` (an INTEGER/int4 column) must, when supplied, be a
+    non-negative int within the int4 range (``bool`` excluded — it is an ``int``
+    subclass and never a count); a larger value would overflow the column and
+    raise an uncaught 500 on INSERT. ``duration_s`` (a DOUBLE PRECISION column)
+    must, when supplied, be a finite non-negative number (``bool`` excluded;
+    ``json.loads`` accepts bare ``NaN``/``Infinity`` so a finite-check is required
+    — an ``Infinity`` would otherwise be stored verbatim). ``None`` is allowed for
+    both (the route derives ``point_count`` from ``len(points)`` when omitted).
+    German HTTP 400 on any violation. Defense-in-depth only — the ROS server is
+    the semantic authority; the cloud gate guards type/range."""
+    if point_count is not None:
+        if isinstance(point_count, bool) or not isinstance(point_count, int):
+            raise HTTPException(
+                status_code=400, detail="Punktanzahl muss eine ganze Zahl sein."
+            )
+        if point_count < 0 or point_count > INT4_MAX:
+            raise HTTPException(
+                status_code=400,
+                detail="Punktanzahl liegt außerhalb des gültigen Bereichs.",
+            )
+    if duration_s is not None:
+        if isinstance(duration_s, bool) or not isinstance(duration_s, (int, float)):
+            raise HTTPException(
+                status_code=400, detail="Dauer muss eine Zahl sein."
+            )
+        if not math.isfinite(duration_s) or duration_s < 0:
+            raise HTTPException(
+                status_code=400,
+                detail="Dauer muss eine endliche, nicht-negative Zahl sein.",
+            )

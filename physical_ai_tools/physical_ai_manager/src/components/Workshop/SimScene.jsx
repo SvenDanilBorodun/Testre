@@ -89,12 +89,12 @@ const ZONE_FILL = 'rgba(239,68,68,0.15)';
 const ZONE_DRAFT_FILL = 'rgba(239,68,68,0.12)';
 const ZONE_STROKE = '#ef4444';
 
-// Fallback palette when the catalog service returns nothing (an uncalibrated rig
-// may have no object_catalog.json yet) — keeps the simulator usable. The key
-// MUST match the server's seeded catalog type (`beispiel`, object_catalog.py),
-// else the server's recipe_for_type() raises and silently drops every placed
-// object (the run then "finds nothing" with no explanation).
-const DEFAULT_CATALOG = [['Beispiel-Objekt', 'beispiel']];
+// Fallback palette when the catalog service momentarily returns nothing — keeps
+// the simulator usable. The key MUST be a real type in the server's FIXED object
+// set (`wuerfel`, object_catalog.py::_FIXED_CATALOG), else the server's
+// recipe_for_type() raises and silently drops every placed object (the run then
+// "finds nothing" with no explanation). `wuerfel` is always present.
+const DEFAULT_CATALOG = [['Würfel', 'wuerfel']];
 
 // base (x,y) → SVG pixels. +x (forward) points UP, +y (left) points LEFT.
 function baseToSvg(x, y) {

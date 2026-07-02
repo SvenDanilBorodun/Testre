@@ -3854,22 +3854,21 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
 
     def get_object_catalog_callback(self, request, response):
         """Return the named-object catalog's type list (keys + German labels)
-        for the Roboter Studio Blockly dropdowns. Reads the catalog JSON from
-        the calib volume at call time. On an absent/corrupt/invalid catalog:
-        empty arrays, success=False, German message (the load error)."""
+        for the Roboter Studio Blockly dropdowns. The set is the fixed, fleet-wide
+        constant baked into the image (identical on every PC/user), so the dropdown
+        is always populated. The except branch is a defensive backstop only — a
+        valid constant never raises."""
         try:
-            from physical_ai_server.workflow.object_catalog import resolve_catalog
-            # Prefer a teacher's volume override; else the shipped default set —
-            # so the dropdown is never empty even on a fresh PC (resolve_catalog).
-            catalog = resolve_catalog()
+            from physical_ai_server.workflow.object_catalog import fixed_catalog
+            catalog = fixed_catalog()
             labels = catalog.labels()  # [(type_name, label_de), ...] in catalog order
             response.type_names = [name for name, _label in labels]
             response.labels_de = [label for _name, label in labels]
             response.success = True
             response.message = ''
         except Exception as e:
-            # load_catalog raises German ObjectCatalogError on every bad-catalog
-            # path; surface it so the editor can show the teacher what to fix.
+            # fixed_catalog raises German ObjectCatalogError only on a developer
+            # typo in the constant; surface it defensively.
             response.type_names = []
             response.labels_de = []
             response.success = False
@@ -4158,12 +4157,12 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         return self.sim_workflow_manager
 
     def _load_object_catalog(self):
-        """Load the active named-object catalog (tag_id → type → grasp recipe):
-        a teacher's edubotics_calib override if present, else the shipped default
-        set baked into the image. Re-read each workflow start so a volume edit
+        """Return the fixed named-object catalog (tag_id → type → grasp recipe):
+        a single hardcoded set baked into the image, identical on every machine
+        and user. Re-read each workflow start so an EDUBOTICS_TAG_SIZE_M change
         applies on the next run without an environment restart."""
-        from physical_ai_server.workflow.object_catalog import resolve_catalog
-        return resolve_catalog()
+        from physical_ai_server.workflow.object_catalog import fixed_catalog
+        return fixed_catalog()
 
     def _load_object_catalog_tolerant(self):
         """Like ``_load_object_catalog`` but returns ``None`` on a corrupt /

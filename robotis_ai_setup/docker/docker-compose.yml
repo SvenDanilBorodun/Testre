@@ -188,18 +188,17 @@ services:
       # Read by communicator.py; '0' reverts to the in-process edit (debug only).
       - EDUBOTICS_DATASET_EDIT_SUBPROCESS=${EDUBOTICS_DATASET_EDIT_SUBPROCESS:-1}
       # Roboter Studio calibration dir (ChArUco intrinsics + hand-eye
-      # transforms + the object catalog). Default lands inside the
-      # edubotics_calib named volume mounted below. Readers:
-      # workflow/calibration_manager.py, workflow/object_catalog.py,
+      # transforms). Default lands inside the edubotics_calib named volume
+      # mounted below. Readers: workflow/calibration_manager.py,
       # physical_ai_server.py.
       - EDUBOTICS_CALIB_DIR=${EDUBOTICS_CALIB_DIR:-/root/.cache/edubotics}
-      # Roboter Studio named-object grasping (plan 2026-06-22): the teacher-edited
-      # object catalog (tag_id -> type -> grasp recipe) lives in the edubotics_calib
-      # volume; edit the file + restart, no image rebuild. Default path derives from
-      # EDUBOTICS_CALIB_DIR. EDUBOTICS_TAG_SIZE_M is the AprilTag size (metres) used
-      # for the solvePnP tag-pose scale (the catalog's "tag_size_m" overrides it).
+      # Roboter Studio named-object grasping: the object set is a FIXED constant
+      # baked into the physical-ai-server image (identical on every machine/user;
+      # workflow/object_catalog.py::_FIXED_CATALOG) — there is NO per-rig catalog
+      # file. EDUBOTICS_TAG_SIZE_M is the physical AprilTag edge length (metres)
+      # used for the tag-pose scale + tag-edge sanity gate; it stays env-tunable so
+      # a rig printing a different tag size can be corrected without a rebuild.
       # Read by workflow/object_catalog.py — MUST stay forwarded (env-forwarding-guard).
-      - EDUBOTICS_OBJECT_CATALOG=${EDUBOTICS_OBJECT_CATALOG:-}
       - EDUBOTICS_TAG_SIZE_M=${EDUBOTICS_TAG_SIZE_M:-0.024}
       # Tag-edge sanity gate: a named-object grasp drops the recovered tag
       # orientation (→ skips the instance, never grasps with a wrong wrist roll)

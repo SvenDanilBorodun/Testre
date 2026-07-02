@@ -159,21 +159,22 @@ def _poll_until(ctx, predicate, timeout_s: float, label: str) -> bool:
 # ------------------------------------------------------------------
 # Named-object detection + grasp (Roboter Studio AprilTag grasping)
 # ------------------------------------------------------------------
-# A printed object carries a unique AprilTag whose id maps (via the teacher's
-# object_catalog.json on ctx) to a TYPE + grasp recipe. The named-object blocks
-# detect by TYPE, attach the exact base-frame grasp point + tag yaw, and grasp
-# top-down with a live tag-derived wrist roll. See workflow/object_catalog.py +
-# workflow/tag_pose.py.
+# A printed object carries a unique AprilTag whose id maps (via the FIXED,
+# fleet-wide object set on ctx — workflow/object_catalog.py::_FIXED_CATALOG) to a
+# TYPE + grasp recipe. The named-object blocks detect by TYPE, attach the exact
+# base-frame grasp point + tag yaw, and grasp top-down with a live tag-derived
+# wrist roll. See workflow/object_catalog.py + workflow/tag_pose.py.
 def _require_catalog(ctx):
     """Return the loaded ObjectCatalog from ctx, or raise the German load error
     (catalog is loaded tolerantly at workflow start — a non-named workflow runs
-    fine without it; a named block fails loud here)."""
+    fine without it; a named block fails loud here). With the fixed hardcoded set
+    this only fires on a developer typo in the constant, never on a student PC."""
     cat = getattr(ctx, 'object_catalog', None)
     if cat is None:
         err = getattr(ctx, 'object_catalog_error', None)
         raise WorkflowError(
-            err or 'Objekt-Katalog ist nicht geladen — bitte „object_catalog.json" '
-            'im Kalibrier-Ordner anlegen.'
+            err or 'Objekt-Katalog konnte nicht geladen werden. '
+            'Bitte wende dich an deine Lehrkraft.'
         )
     return cat
 

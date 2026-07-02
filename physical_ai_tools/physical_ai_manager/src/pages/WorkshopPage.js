@@ -150,11 +150,12 @@ function sanitizeDestinationName(raw) {
   return trimmed;
 }
 
-// Phase-3 simulator fallback palette: an uncalibrated rig may have no
-// object_catalog.json yet, so seed at least one type so the sim editor is usable.
-// The key MUST match the server's seeded catalog type (`beispiel`,
-// object_catalog.py) — else the server drops every placed object silently.
-const SIM_DEFAULT_CATALOG = [['Beispiel-Objekt', 'beispiel']];
+// Phase-3 simulator fallback palette: if the catalog service momentarily returns
+// nothing, seed the base type so the sim editor stays usable. The key MUST be a
+// real type in the server's FIXED object set (`wuerfel`,
+// object_catalog.py::_FIXED_CATALOG) — else the server drops every placed object
+// silently. `wuerfel` is always present in the fixed set.
+const SIM_DEFAULT_CATALOG = [['Würfel', 'wuerfel']];
 // Phase-4: `zones` is a first-class key alongside `objects` (no-go Sperrzonen).
 // hydrate/save round-trip the whole sim_scene unchanged, so persisted zones ride
 // along in workflows.sim_scene.zones.

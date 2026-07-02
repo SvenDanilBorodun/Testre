@@ -15,29 +15,37 @@ depth, gripper close angle, approach clearance). The named-object Blockly blocks
 (``Greife <Objekt>``, ``Solange <Typ> sichtbar`` …) resolve a chosen type to its
 tag ids + recipe through this catalog.
 
-Design (CLAUDE.md / plan 2026-06-22):
+Design — ONE FIXED SET FOR THE WHOLE FLEET (2026-07-02):
 
-* **Shipped default + per-rig override** — the STANDARD printed-object set is a
-  fixed, measured-once-valid-everywhere constant baked into the image
-  (:data:`_SHIPPED_DEFAULT_CATALOG`), so every PC has the objects out of the box
-  with no per-PC setup and no cloud sync. A teacher can override/extend on one
-  rig by dropping an ``object_catalog.json`` into the ``edubotics_calib`` volume;
-  :func:`resolve_catalog` prefers that file when present (no image rebuild),
-  else uses the shipped default. Changing the STANDARD set means editing the
-  constant and rebuilding the image (COPY-wholesale, Rule §3). The active catalog
-  is re-read each workflow start, so a volume edit applies on the next run.
-* **Fail loud in German** — a missing / corrupt / schema-invalid catalog raises
-  :class:`ObjectCatalogError` with a student-facing German message. The runtime
-  surfaces it at the first named-object block, never silently degrades.
+* **Fixed, hardcoded object set** — the object set is a single constant baked
+  into the image (:data:`_FIXED_CATALOG`), identical on **every machine and every
+  user**. There is NO per-rig file, NO ``edubotics_calib`` override, NO seeding,
+  and NO cloud sync — a fixed set is what makes a student's saved workflow
+  resolve the same way on any classroom PC. The set is read through
+  :func:`fixed_catalog`; to change it, edit the constant and rebuild the
+  physical-ai-server image (COPY-wholesale, Rule §3). This is the same
+  "measured once, valid everywhere" model as the collision thresholds.
+* **No file I/O** — :func:`fixed_catalog` parses an in-memory constant, so the
+  catalog can never be "missing" or "corrupt" at runtime on a student PC. The
+  German fail-loud validation still exists in :func:`parse_catalog`, but on the
+  fixed path it can only fire for a developer typo in the constant — caught by
+  the unit tests at build time, never by a teacher.
+* **Tag size is env-tunable** — the physical AprilTag edge length comes from
+  ``EDUBOTICS_TAG_SIZE_M`` (default :data:`_DEFAULT_TAG_SIZE_M`), re-read on every
+  :func:`fixed_catalog` call, so a rig that prints a different tag size can be
+  corrected without an image rebuild. The fixed constant deliberately omits
+  ``tag_size_m`` so the env is the single source (a ``tag_size_m`` inside a
+  catalog would shadow the env — see :func:`parse_catalog`).
 * **Stable per-object identity** — every physical copy carries its OWN tag id,
   all grouped into one type. Tag ids are **globally unique** across types so a
   detected tag maps unambiguously back to its type + recipe (this is what makes
   the multi-instance ``Solange … sichtbar`` loop deterministic).
 
-Schema (see plan §9)::
+Schema accepted by :func:`parse_catalog` (the fixed constant is one instance)::
 
     {
-      "tag_size_m": 0.024,                 // optional; overrides EDUBOTICS_TAG_SIZE_M
+      "tag_size_m": 0.024,                 // OPTIONAL; overrides EDUBOTICS_TAG_SIZE_M.
+                                           //   Omitted in the fixed set so the env wins.
       "types": {
         "banane": {
           "label_de": "Banane",            // German dropdown label
@@ -50,25 +58,23 @@ Schema (see plan §9)::
       }
     }
 
-Pure-Python + stdlib only (``json``/``os``/``pathlib``/``dataclasses``) — unit
-testable without a container.
+Pure-Python + stdlib only (``os``/``re``/``dataclasses``) — unit testable
+without a container.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import re
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Optional
 
 _logger = logging.getLogger(__name__)
 
 
 # Default physical tag size (tag36h11 black-square edge length, metres) when
-# neither the catalog ``tag_size_m`` nor EDUBOTICS_TAG_SIZE_M is set.
+# EDUBOTICS_TAG_SIZE_M is unset / invalid.
 _DEFAULT_TAG_SIZE_M = 0.024
 # Default hover/approach clearance above an object (metres) when a type omits
 # ``approach_clear_m``. Mirrors motion.DEFAULT_APPROACH_HEIGHT_M (kept as a
@@ -84,8 +90,11 @@ _TYPE_NAME_RE = re.compile(r'^[A-Za-z0-9_]+$')
 
 class ObjectCatalogError(Exception):
     """Raised with a German, student-facing message when the catalog is
-    missing, corrupt, or schema-invalid, or when a lookup names an unknown
-    type. The workflow runtime surfaces ``str(err)`` to the editor."""
+    schema-invalid, or when a lookup names an unknown type. The workflow runtime
+    surfaces ``str(err)`` to the editor. On the fixed-set path a schema error can
+    only mean a developer typo in :data:`_FIXED_CATALOG` (caught by tests); an
+    unknown-type lookup can still happen for a stale saved workflow that names an
+    object no longer in the set."""
 
 
 @dataclass(frozen=True)
@@ -102,11 +111,11 @@ class GraspRecipe:
 
 
 class ObjectCatalog:
-    """Validated, indexed view over the catalog JSON.
+    """Validated, indexed view over the catalog.
 
-    Build via :func:`load_catalog` (from a file) or :func:`parse_catalog`
-    (from an already-decoded dict). Exposes type→recipe and tag_id→recipe
-    indices plus the dropdown label list.
+    Build via :func:`fixed_catalog` (the baked-in fleet-wide set) or
+    :func:`parse_catalog` (from an already-decoded dict — used by tests).
+    Exposes type→recipe and tag_id→recipe indices plus the dropdown label list.
     """
 
     def __init__(
@@ -116,7 +125,7 @@ class ObjectCatalog:
     ) -> None:
         self._tag_size_m = float(tag_size_m)
         # Insertion order preserved (Python 3.7+) so dropdowns list types in
-        # the order the teacher wrote them.
+        # the order they were written.
         self._by_type: dict[str, GraspRecipe] = dict(recipes)
         by_tag: dict[int, GraspRecipe] = {}
         for recipe in self._by_type.values():
@@ -164,37 +173,23 @@ class ObjectCatalog:
         return frozenset(self._by_tag.keys())
 
 
-# ── env / path resolution ────────────────────────────────────────────────────
-def _calib_dir() -> Path:
-    # Matches calibration_manager.py: read EDUBOTICS_CALIB_DIR (compose forwards
-    # it; runtime value points inside the edubotics_calib volume). The literal
-    # default mirrors that module.
-    return Path(os.environ.get('EDUBOTICS_CALIB_DIR', '/root/.cache/edubotics/calibration'))
-
-
-def default_catalog_path() -> Path:
-    """Resolve the catalog path: ``EDUBOTICS_OBJECT_CATALOG`` if set, else
-    ``<EDUBOTICS_CALIB_DIR>/object_catalog.json`` (in the calib volume)."""
-    override = os.environ.get('EDUBOTICS_OBJECT_CATALOG')
-    if override:
-        return Path(override)
-    return _calib_dir() / 'object_catalog.json'
-
-
-# ── shipped default catalog (baked into the image) ───────────────────────────
+# ── the FIXED object set (baked into the image) ──────────────────────────────
 # The named-object set is a FIXED, standardized set of printed EduBotics objects
-# (each with an assigned AprilTag) — the same physical object on every student's
+# (each with an assigned AprilTag) — the SAME physical object on every student's
 # desk, so its grasp recipe is "measured once, valid everywhere" (like the
-# collision thresholds calibrated on the reference rig). It therefore ships baked
-# into the image so EVERY PC has the objects out of the box — no per-PC file, no
-# cloud sync. A teacher can still override/extend per rig by dropping an
-# ``object_catalog.json`` into the calib volume (see :func:`resolve_catalog`),
-# which wins and needs no image rebuild. To change the STANDARD set, edit this
-# constant and rebuild the physical-ai-server image (COPY-wholesale, Rule §3).
+# collision thresholds calibrated on the reference rig). It is hardcoded here so
+# EVERY machine and EVERY user gets an identical set: no per-rig file, no cloud
+# sync, no seeding — which is what lets a student's saved workflow resolve the
+# same way on any classroom PC. To change the set, edit this constant and rebuild
+# the physical-ai-server image (COPY-wholesale, Rule §3).
 #
-# „Würfel" numbers are the rig-validated values (2026-06-27).
-_SHIPPED_DEFAULT_CATALOG: dict = {
-    'tag_size_m': 0.024,
+# Note: NO ``tag_size_m`` here on purpose — a value inside the catalog would
+# shadow EDUBOTICS_TAG_SIZE_M (see parse_catalog). Tag size stays env-tunable.
+#
+# „Würfel" numbers are the rig-validated values (2026-06-27). Add more objects by
+# giving each a unique key, its own globally-unique tag id(s) (one per physical
+# copy), and rig-measured object_height_m / grasp_depth_m / gripper_close_rad.
+_FIXED_CATALOG: dict = {
     'types': {
         'wuerfel': {
             'label_de': 'Würfel',
@@ -207,54 +202,14 @@ _SHIPPED_DEFAULT_CATALOG: dict = {
     },
 }
 
-# A pre-shipped-default build seeded this placeholder INTO the volume on first
-# run. Such a file must NOT shadow the baked-in default, so :func:`resolve_catalog`
-# recognises the untouched seed (exactly one ``beispiel`` type on tag 0 with this
-# label) and falls back to the shipped default — healing already-seeded PCs. A
-# teacher who edited that entry no longer matches, so their edit is honoured.
-_SEED_SENTINEL_TYPE = 'beispiel'
-_SEED_SENTINEL_LABEL = 'Beispiel-Objekt (bitte anpassen)'
 
-
-def shipped_default_catalog() -> ObjectCatalog:
-    """The standard EduBotics printed-object set, baked into the image. Used on
-    every PC that has no teacher override in the calib volume."""
-    return parse_catalog(_SHIPPED_DEFAULT_CATALOG)
-
-
-def _is_untouched_seed(catalog: ObjectCatalog) -> bool:
-    """True iff ``catalog`` is exactly the legacy auto-seed placeholder (one
-    ``beispiel`` type labelled "Beispiel-Objekt (bitte anpassen)" on tag id 0),
-    written into a volume by an older build before the shipped default existed."""
-    if catalog.type_names() != [_SEED_SENTINEL_TYPE]:
-        return False
-    recipe = catalog.recipe_for_type(_SEED_SENTINEL_TYPE)
-    return recipe.label_de == _SEED_SENTINEL_LABEL and recipe.tag_ids == (0,)
-
-
-def resolve_catalog(path: Optional[Path | str] = None) -> ObjectCatalog:
-    """Resolve the ACTIVE object catalog with a two-level precedence:
-
-    1. A teacher's ``object_catalog.json`` in the calib volume (``path`` /
-       :func:`default_catalog_path`) WINS if present and customized — a rig can
-       add or adjust objects with no image rebuild (the runtime-editable path).
-    2. Otherwise the SHIPPED default (baked into this module,
-       :func:`shipped_default_catalog`) is used, so every fresh PC has the
-       standard objects out of the box.
-
-    An untouched auto-seed placeholder in the volume is treated as NOT
-    customized and falls back to the shipped default (:func:`_is_untouched_seed`).
-    A volume file that EXISTS but is corrupt / schema-invalid still raises German
-    :class:`ObjectCatalogError` — a broken teacher edit fails loud, it is never
-    silently swapped for the default. Read fresh each call, so a volume edit
-    applies on the next workflow run without a full restart."""
-    catalog_path = Path(path) if path is not None else default_catalog_path()
-    if not catalog_path.is_file():
-        return shipped_default_catalog()
-    catalog = load_catalog(catalog_path)  # German ObjectCatalogError on corrupt/invalid
-    if _is_untouched_seed(catalog):
-        return shipped_default_catalog()
-    return catalog
+def fixed_catalog() -> ObjectCatalog:
+    """The single, fleet-wide named-object set — identical on every machine and
+    user. Parses the in-memory :data:`_FIXED_CATALOG` constant (no file I/O, so
+    it can never be missing/corrupt at runtime) and picks up the physical tag
+    size from ``EDUBOTICS_TAG_SIZE_M`` on each call (env-tunable, re-read per
+    workflow start)."""
+    return parse_catalog(_FIXED_CATALOG)
 
 
 def _env_tag_size_m() -> float:
@@ -383,11 +338,13 @@ def _parse_type(type_name: str, entry, seen_tags: dict[int, str]) -> GraspRecipe
     )
 
 
-# ── public loaders ───────────────────────────────────────────────────────────
+# ── public loader ────────────────────────────────────────────────────────────
 def parse_catalog(data) -> ObjectCatalog:
     """Validate an already-decoded catalog dict and build an
     :class:`ObjectCatalog`. Raises German :class:`ObjectCatalogError` on any
-    schema violation."""
+    schema violation. A ``tag_size_m`` in the dict overrides
+    ``EDUBOTICS_TAG_SIZE_M``; the env (default :data:`_DEFAULT_TAG_SIZE_M`) is
+    used when the dict omits it — which the fixed set does on purpose."""
     if not isinstance(data, dict):
         raise ObjectCatalogError(
             'Objekt-Katalog ungültig: die oberste Ebene muss ein JSON-Objekt sein.'
@@ -419,28 +376,3 @@ def parse_catalog(data) -> ObjectCatalog:
         recipes[type_name] = _parse_type(type_name, entry, seen_tags)
 
     return ObjectCatalog(tag_size_m=tag_size_m, recipes=recipes)
-
-
-def load_catalog(path: Optional[Path | str] = None) -> ObjectCatalog:
-    """Load + validate the catalog from ``path`` (default
-    :func:`default_catalog_path`). Raises German :class:`ObjectCatalogError`
-    when the file is missing, unreadable, not valid JSON, or schema-invalid."""
-    catalog_path = Path(path) if path is not None else default_catalog_path()
-    if not catalog_path.is_file():
-        raise ObjectCatalogError(
-            f'Objekt-Katalog nicht gefunden: {catalog_path}. Bitte die Datei '
-            '„object_catalog.json" im Kalibrier-Ordner anlegen.'
-        )
-    try:
-        text = catalog_path.read_text(encoding='utf-8')
-    except OSError as err:
-        raise ObjectCatalogError(
-            f'Objekt-Katalog konnte nicht gelesen werden: {catalog_path} ({err}).'
-        ) from err
-    try:
-        data = json.loads(text)
-    except json.JSONDecodeError as err:
-        raise ObjectCatalogError(
-            f'Objekt-Katalog ist beschädigt (kein gültiges JSON): {err}.'
-        ) from err
-    return parse_catalog(data)

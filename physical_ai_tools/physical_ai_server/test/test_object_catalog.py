@@ -1,25 +1,20 @@
-"""Object-catalog loader/validation tests for the named-object grasp workflow.
+"""Object-catalog validation tests for the named-object grasp workflow.
 
 Pure stdlib — runs without a container. Covers schema validation, the
-type↔tag_ids / tag_id↔recipe indices, tag-size resolution + override, and the
-German fail-loud paths (missing / corrupt / invalid catalog, unknown type,
-duplicate tag id).
+type↔tag_ids / tag_id↔recipe indices, env-tunable tag size, the German fail-loud
+paths (invalid catalog, unknown type, duplicate tag id), and the fixed,
+fleet-wide object set (:func:`fixed_catalog`).
 """
 
 from __future__ import annotations
-
-import json
 
 import pytest
 
 from physical_ai_server.workflow.object_catalog import (
     ObjectCatalog,
     ObjectCatalogError,
-    default_catalog_path,
-    load_catalog,
+    fixed_catalog,
     parse_catalog,
-    resolve_catalog,
-    shipped_default_catalog,
 )
 
 
@@ -225,60 +220,12 @@ def test_unknown_type_lookup_fails():
         cat.recipe_for_type('giraffe')
 
 
-# ── file loaders ─────────────────────────────────────────────────────────────
-def test_load_catalog_missing_file_fails(tmp_path):
-    with pytest.raises(ObjectCatalogError, match='nicht gefunden'):
-        load_catalog(tmp_path / 'object_catalog.json')
-
-
-def test_load_catalog_corrupt_json_fails(tmp_path):
-    p = tmp_path / 'object_catalog.json'
-    p.write_text('{ not valid json', encoding='utf-8')
-    with pytest.raises(ObjectCatalogError, match='beschädigt'):
-        load_catalog(p)
-
-
-def test_load_catalog_roundtrip(tmp_path):
-    p = tmp_path / 'object_catalog.json'
-    p.write_text(json.dumps(_valid_dict()), encoding='utf-8')
-    cat = load_catalog(p)
-    assert cat.type_names() == ['banane', 'wuerfel_blau']
-
-
-def test_default_catalog_path_uses_env_override(monkeypatch, tmp_path):
-    target = tmp_path / 'custom.json'
-    monkeypatch.setenv('EDUBOTICS_OBJECT_CATALOG', str(target))
-    assert default_catalog_path() == target
-
-
-def test_default_catalog_path_derives_from_calib_dir(monkeypatch, tmp_path):
-    monkeypatch.delenv('EDUBOTICS_OBJECT_CATALOG', raising=False)
-    monkeypatch.setenv('EDUBOTICS_CALIB_DIR', str(tmp_path))
-    assert default_catalog_path() == tmp_path / 'object_catalog.json'
-
-
-# ── shipped default (baked into the image) ───────────────────────────────────
-def _seed_placeholder_dict() -> dict:
-    # The legacy auto-seed a pre-shipped-default build wrote into a volume.
-    return {
-        'tag_size_m': 0.024,
-        'types': {
-            'beispiel': {
-                'label_de': 'Beispiel-Objekt (bitte anpassen)',
-                'tag_ids': [0],
-                'object_height_m': 0.03,
-                'grasp_depth_m': 0.012,
-                'gripper_close_rad': -0.25,
-                'approach_clear_m': 0.06,
-            },
-        },
-    }
-
-
-def test_shipped_default_is_valid_and_has_wuerfel():
-    # Every PC gets the standard object set out of the box, with the rig-validated
-    # „Würfel" numbers (2026-06-27).
-    cat = shipped_default_catalog()
+# ── the fixed, fleet-wide object set (baked into the image) ──────────────────
+def test_fixed_catalog_is_valid_and_has_wuerfel(monkeypatch):
+    # Every machine and user gets the SAME hardcoded set, with the rig-validated
+    # „Würfel" numbers (2026-06-27). Tag size defaults to 0.024 with no env set.
+    monkeypatch.delenv('EDUBOTICS_TAG_SIZE_M', raising=False)
+    cat = fixed_catalog()
     assert cat.type_names() == ['wuerfel']
     assert cat.labels() == [('wuerfel', 'Würfel')]
     assert cat.tag_size_m == pytest.approx(0.024)
@@ -290,51 +237,23 @@ def test_shipped_default_is_valid_and_has_wuerfel():
     assert r.approach_clear_m == pytest.approx(0.06)
 
 
-# ── resolve_catalog: volume override > shipped default ────────────────────────
-def test_resolve_uses_shipped_default_when_no_file(tmp_path):
-    # Fresh PC / no volume file -> the baked-in standard set (never empty).
-    cat = resolve_catalog(tmp_path / 'object_catalog.json')
-    assert cat.type_names() == ['wuerfel']
+def test_fixed_catalog_tag_size_env_tunable(monkeypatch):
+    # The fixed set omits tag_size_m on purpose, so EDUBOTICS_TAG_SIZE_M is the
+    # live source — a rig printing a different tag size is corrected via env, no
+    # image rebuild.
+    monkeypatch.setenv('EDUBOTICS_TAG_SIZE_M', '0.030')
+    assert fixed_catalog().tag_size_m == pytest.approx(0.030)
 
 
-def test_resolve_prefers_teacher_volume_file(tmp_path):
-    # A real teacher override wins over the shipped default (no image rebuild).
-    p = tmp_path / 'object_catalog.json'
-    p.write_text(json.dumps(_valid_dict()), encoding='utf-8')
-    assert resolve_catalog(p).type_names() == ['banane', 'wuerfel_blau']
+def test_fixed_catalog_reread_each_call(monkeypatch):
+    # Re-read per call so an env change applies on the next workflow start
+    # without a restart.
+    monkeypatch.setenv('EDUBOTICS_TAG_SIZE_M', '0.020')
+    assert fixed_catalog().tag_size_m == pytest.approx(0.020)
+    monkeypatch.setenv('EDUBOTICS_TAG_SIZE_M', '0.024')
+    assert fixed_catalog().tag_size_m == pytest.approx(0.024)
 
 
-def test_resolve_ignores_untouched_seed(tmp_path):
-    # A volume still holding the old auto-seed placeholder must NOT shadow the
-    # shipped default — an already-seeded PC heals to the real objects.
-    p = tmp_path / 'object_catalog.json'
-    p.write_text(json.dumps(_seed_placeholder_dict()), encoding='utf-8')
-    assert resolve_catalog(p).type_names() == ['wuerfel']
-
-
-def test_resolve_honours_edited_beispiel_entry(tmp_path):
-    # A teacher who reused the `beispiel` key for a REAL object (different label /
-    # tag) is honoured — only the pristine placeholder is treated as a seed.
-    data = _seed_placeholder_dict()
-    data['types']['beispiel']['label_de'] = 'Mein Objekt'
-    data['types']['beispiel']['tag_ids'] = [7]
-    p = tmp_path / 'object_catalog.json'
-    p.write_text(json.dumps(data), encoding='utf-8')
-    cat = resolve_catalog(p)
-    assert cat.type_names() == ['beispiel']
-    assert cat.recipe_for_type('beispiel').label_de == 'Mein Objekt'
-
-
-def test_resolve_corrupt_volume_file_still_fails_loud(tmp_path):
-    # A broken teacher edit surfaces the German error; it is NOT silently
-    # replaced by the shipped default.
-    p = tmp_path / 'object_catalog.json'
-    p.write_text('{ not valid json', encoding='utf-8')
-    with pytest.raises(ObjectCatalogError, match='beschädigt'):
-        resolve_catalog(p)
-
-
-def test_resolve_uses_default_path_when_none(monkeypatch, tmp_path):
-    # With no explicit path + no file at the default location -> shipped default.
-    monkeypatch.setenv('EDUBOTICS_OBJECT_CATALOG', str(tmp_path / 'object_catalog.json'))
-    assert resolve_catalog().type_names() == ['wuerfel']
+def test_fixed_catalog_is_a_fresh_instance_each_call():
+    # Stateless: no shared mutable global to corrupt between workflow starts.
+    assert fixed_catalog() is not fixed_catalog()

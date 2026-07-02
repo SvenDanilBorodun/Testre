@@ -18,7 +18,8 @@ from physical_ai_server.workflow.object_catalog import (
     default_catalog_path,
     load_catalog,
     parse_catalog,
-    seed_default_catalog_if_missing,
+    resolve_catalog,
+    shipped_default_catalog,
 )
 
 
@@ -256,40 +257,84 @@ def test_default_catalog_path_derives_from_calib_dir(monkeypatch, tmp_path):
     assert default_catalog_path() == tmp_path / 'object_catalog.json'
 
 
-# ── seed-on-first-run (fresh-volume template) ────────────────────────────────
-def test_seed_writes_valid_catalog_when_missing(tmp_path):
-    # A fresh volume (no file) gets a VALID, loadable template — the dropdown is
-    # never empty and the teacher has an editable starting point.
-    p = tmp_path / 'object_catalog.json'
-    assert not p.exists()
-    seeded = seed_default_catalog_if_missing(p)
-    assert seeded is True
-    assert p.is_file()
-    cat = load_catalog(p)                       # round-trips through the validator
-    assert cat.type_names()                     # non-empty dropdown source
-    assert cat.labels()[0][1]                   # has a German label
+# ── shipped default (baked into the image) ───────────────────────────────────
+def _seed_placeholder_dict() -> dict:
+    # The legacy auto-seed a pre-shipped-default build wrote into a volume.
+    return {
+        'tag_size_m': 0.024,
+        'types': {
+            'beispiel': {
+                'label_de': 'Beispiel-Objekt (bitte anpassen)',
+                'tag_ids': [0],
+                'object_height_m': 0.03,
+                'grasp_depth_m': 0.012,
+                'gripper_close_rad': -0.25,
+                'approach_clear_m': 0.06,
+            },
+        },
+    }
 
 
-def test_seed_is_noop_when_file_present(tmp_path):
-    # An existing teacher catalog is NEVER overwritten by the seed.
+def test_shipped_default_is_valid_and_has_wuerfel():
+    # Every PC gets the standard object set out of the box, with the rig-validated
+    # „Würfel" numbers (2026-06-27).
+    cat = shipped_default_catalog()
+    assert cat.type_names() == ['wuerfel']
+    assert cat.labels() == [('wuerfel', 'Würfel')]
+    assert cat.tag_size_m == pytest.approx(0.024)
+    r = cat.recipe_for_type('wuerfel')
+    assert r.tag_ids == (20, 21)
+    assert r.object_height_m == pytest.approx(0.030)
+    assert r.grasp_depth_m == pytest.approx(0.015)
+    assert r.gripper_close_rad == pytest.approx(-0.5)
+    assert r.approach_clear_m == pytest.approx(0.06)
+
+
+# ── resolve_catalog: volume override > shipped default ────────────────────────
+def test_resolve_uses_shipped_default_when_no_file(tmp_path):
+    # Fresh PC / no volume file -> the baked-in standard set (never empty).
+    cat = resolve_catalog(tmp_path / 'object_catalog.json')
+    assert cat.type_names() == ['wuerfel']
+
+
+def test_resolve_prefers_teacher_volume_file(tmp_path):
+    # A real teacher override wins over the shipped default (no image rebuild).
     p = tmp_path / 'object_catalog.json'
     p.write_text(json.dumps(_valid_dict()), encoding='utf-8')
-    seeded = seed_default_catalog_if_missing(p)
-    assert seeded is False
-    assert load_catalog(p).type_names() == ['banane', 'wuerfel_blau']  # untouched
+    assert resolve_catalog(p).type_names() == ['banane', 'wuerfel_blau']
 
 
-def test_seed_creates_parent_dir(tmp_path):
-    # The calib subdir may not exist yet on a brand-new volume.
-    p = tmp_path / 'calib' / 'object_catalog.json'
-    assert seed_default_catalog_if_missing(p) is True
-    assert p.is_file()
+def test_resolve_ignores_untouched_seed(tmp_path):
+    # A volume still holding the old auto-seed placeholder must NOT shadow the
+    # shipped default — an already-seeded PC heals to the real objects.
+    p = tmp_path / 'object_catalog.json'
+    p.write_text(json.dumps(_seed_placeholder_dict()), encoding='utf-8')
+    assert resolve_catalog(p).type_names() == ['wuerfel']
 
 
-def test_seed_uses_default_path(monkeypatch, tmp_path):
-    # With no explicit path it seeds default_catalog_path() (EDUBOTICS_OBJECT_CATALOG).
-    target = tmp_path / 'object_catalog.json'
-    monkeypatch.setenv('EDUBOTICS_OBJECT_CATALOG', str(target))
-    assert seed_default_catalog_if_missing() is True
-    assert target.is_file()
-    load_catalog()  # default path now loads without raising
+def test_resolve_honours_edited_beispiel_entry(tmp_path):
+    # A teacher who reused the `beispiel` key for a REAL object (different label /
+    # tag) is honoured — only the pristine placeholder is treated as a seed.
+    data = _seed_placeholder_dict()
+    data['types']['beispiel']['label_de'] = 'Mein Objekt'
+    data['types']['beispiel']['tag_ids'] = [7]
+    p = tmp_path / 'object_catalog.json'
+    p.write_text(json.dumps(data), encoding='utf-8')
+    cat = resolve_catalog(p)
+    assert cat.type_names() == ['beispiel']
+    assert cat.recipe_for_type('beispiel').label_de == 'Mein Objekt'
+
+
+def test_resolve_corrupt_volume_file_still_fails_loud(tmp_path):
+    # A broken teacher edit surfaces the German error; it is NOT silently
+    # replaced by the shipped default.
+    p = tmp_path / 'object_catalog.json'
+    p.write_text('{ not valid json', encoding='utf-8')
+    with pytest.raises(ObjectCatalogError, match='beschädigt'):
+        resolve_catalog(p)
+
+
+def test_resolve_uses_default_path_when_none(monkeypatch, tmp_path):
+    # With no explicit path + no file at the default location -> shipped default.
+    monkeypatch.setenv('EDUBOTICS_OBJECT_CATALOG', str(tmp_path / 'object_catalog.json'))
+    assert resolve_catalog().type_names() == ['wuerfel']

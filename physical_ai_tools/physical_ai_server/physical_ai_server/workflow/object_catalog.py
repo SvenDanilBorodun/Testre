@@ -9,18 +9,23 @@
 #     http://www.apache.org/licenses/LICENSE-2.0
 """Object catalog for the Roboter Studio named-object grasping workflow.
 
-A teacher-editable JSON file (in the ``edubotics_calib`` volume) maps each
-**type** of printed object to the set of AprilTag ids glued to its physical
-copies and to a per-object grasp recipe (height, grasp depth, gripper close
-angle, approach clearance). The named-object Blockly blocks (``Greife <Objekt>``,
-``Solange <Typ> sichtbar`` …) resolve a chosen type to its tag ids + recipe
-through this catalog.
+The catalog maps each **type** of printed object to the set of AprilTag ids
+glued to its physical copies and to a per-object grasp recipe (height, grasp
+depth, gripper close angle, approach clearance). The named-object Blockly blocks
+(``Greife <Objekt>``, ``Solange <Typ> sichtbar`` …) resolve a chosen type to its
+tag ids + recipe through this catalog.
 
 Design (CLAUDE.md / plan 2026-06-22):
 
-* **Runtime-editable, no image rebuild** — the JSON lives in the volume; edit
-  the file and restart the environment. The catalog is loaded once (at server
-  start); a mid-run edit is **not** picked up until restart.
+* **Shipped default + per-rig override** — the STANDARD printed-object set is a
+  fixed, measured-once-valid-everywhere constant baked into the image
+  (:data:`_SHIPPED_DEFAULT_CATALOG`), so every PC has the objects out of the box
+  with no per-PC setup and no cloud sync. A teacher can override/extend on one
+  rig by dropping an ``object_catalog.json`` into the ``edubotics_calib`` volume;
+  :func:`resolve_catalog` prefers that file when present (no image rebuild),
+  else uses the shipped default. Changing the STANDARD set means editing the
+  constant and rebuilding the image (COPY-wholesale, Rule §3). The active catalog
+  is re-read each workflow start, so a volume edit applies on the next run.
 * **Fail loud in German** — a missing / corrupt / schema-invalid catalog raises
   :class:`ObjectCatalogError` with a student-facing German message. The runtime
   surfaces it at the first named-object block, never silently degrades.
@@ -176,60 +181,80 @@ def default_catalog_path() -> Path:
     return _calib_dir() / 'object_catalog.json'
 
 
-# ── default template (seed-on-first-run) ─────────────────────────────────────
-# A fresh edubotics_calib volume ships NO catalog file, which makes the whole
-# named-object UI inert: the GetObjectCatalog service returns empty arrays so the
-# Blockly dropdown is empty, and every named block fails loud ("nicht gefunden").
-# To give the teacher a working, editable starting point — and a non-empty
-# dropdown — the node seeds this minimal VALID example into the volume on first
-# run (see :func:`seed_default_catalog_if_missing`). The single example type uses
-# tag id 0 and is labelled "bitte anpassen"; the teacher replaces it with the
-# real measured objects (heights, grasp depths, gripper-close angles, tag-id
-# groups). Edit the file + restart the environment — no image rebuild (D10).
-_DEFAULT_CATALOG_TEMPLATE: dict = {
-    'tag_size_m': _DEFAULT_TAG_SIZE_M,
+# ── shipped default catalog (baked into the image) ───────────────────────────
+# The named-object set is a FIXED, standardized set of printed EduBotics objects
+# (each with an assigned AprilTag) — the same physical object on every student's
+# desk, so its grasp recipe is "measured once, valid everywhere" (like the
+# collision thresholds calibrated on the reference rig). It therefore ships baked
+# into the image so EVERY PC has the objects out of the box — no per-PC file, no
+# cloud sync. A teacher can still override/extend per rig by dropping an
+# ``object_catalog.json`` into the calib volume (see :func:`resolve_catalog`),
+# which wins and needs no image rebuild. To change the STANDARD set, edit this
+# constant and rebuild the physical-ai-server image (COPY-wholesale, Rule §3).
+#
+# „Würfel" numbers are the rig-validated values (2026-06-27).
+_SHIPPED_DEFAULT_CATALOG: dict = {
+    'tag_size_m': 0.024,
     'types': {
-        'beispiel': {
-            'label_de': 'Beispiel-Objekt (bitte anpassen)',
-            'tag_ids': [0],
-            'object_height_m': 0.03,
-            'grasp_depth_m': 0.012,
-            'gripper_close_rad': -0.25,
+        'wuerfel': {
+            'label_de': 'Würfel',
+            'tag_ids': [20, 21],
+            'object_height_m': 0.030,
+            'grasp_depth_m': 0.015,
+            'gripper_close_rad': -0.5,
             'approach_clear_m': 0.06,
         },
     },
 }
 
+# A pre-shipped-default build seeded this placeholder INTO the volume on first
+# run. Such a file must NOT shadow the baked-in default, so :func:`resolve_catalog`
+# recognises the untouched seed (exactly one ``beispiel`` type on tag 0 with this
+# label) and falls back to the shipped default — healing already-seeded PCs. A
+# teacher who edited that entry no longer matches, so their edit is honoured.
+_SEED_SENTINEL_TYPE = 'beispiel'
+_SEED_SENTINEL_LABEL = 'Beispiel-Objekt (bitte anpassen)'
 
-def seed_default_catalog_if_missing(path: Optional[Path | str] = None) -> bool:
-    """Write the default example catalog to ``path`` (default
-    :func:`default_catalog_path`) **only if no file is there yet**, so a fresh
-    ``edubotics_calib`` volume gets a working, editable template instead of an
-    inert named-object UI. Returns ``True`` when a file was written, ``False``
-    when one already existed.
 
-    Best-effort: a write failure (e.g. a read-only volume) is logged and
-    swallowed — :func:`load_catalog` then still fails loud in German exactly as
-    before, so seeding never masks a real problem or blocks startup. The written
-    file is a VALID catalog (it round-trips through :func:`parse_catalog`)."""
+def shipped_default_catalog() -> ObjectCatalog:
+    """The standard EduBotics printed-object set, baked into the image. Used on
+    every PC that has no teacher override in the calib volume."""
+    return parse_catalog(_SHIPPED_DEFAULT_CATALOG)
+
+
+def _is_untouched_seed(catalog: ObjectCatalog) -> bool:
+    """True iff ``catalog`` is exactly the legacy auto-seed placeholder (one
+    ``beispiel`` type labelled "Beispiel-Objekt (bitte anpassen)" on tag id 0),
+    written into a volume by an older build before the shipped default existed."""
+    if catalog.type_names() != [_SEED_SENTINEL_TYPE]:
+        return False
+    recipe = catalog.recipe_for_type(_SEED_SENTINEL_TYPE)
+    return recipe.label_de == _SEED_SENTINEL_LABEL and recipe.tag_ids == (0,)
+
+
+def resolve_catalog(path: Optional[Path | str] = None) -> ObjectCatalog:
+    """Resolve the ACTIVE object catalog with a two-level precedence:
+
+    1. A teacher's ``object_catalog.json`` in the calib volume (``path`` /
+       :func:`default_catalog_path`) WINS if present and customized — a rig can
+       add or adjust objects with no image rebuild (the runtime-editable path).
+    2. Otherwise the SHIPPED default (baked into this module,
+       :func:`shipped_default_catalog`) is used, so every fresh PC has the
+       standard objects out of the box.
+
+    An untouched auto-seed placeholder in the volume is treated as NOT
+    customized and falls back to the shipped default (:func:`_is_untouched_seed`).
+    A volume file that EXISTS but is corrupt / schema-invalid still raises German
+    :class:`ObjectCatalogError` — a broken teacher edit fails loud, it is never
+    silently swapped for the default. Read fresh each call, so a volume edit
+    applies on the next workflow run without a full restart."""
     catalog_path = Path(path) if path is not None else default_catalog_path()
-    if catalog_path.exists():
-        return False
-    try:
-        catalog_path.parent.mkdir(parents=True, exist_ok=True)
-        catalog_path.write_text(
-            json.dumps(_DEFAULT_CATALOG_TEMPLATE, indent=2, ensure_ascii=False) + '\n',
-            encoding='utf-8',
-        )
-    except OSError as err:
-        _logger.warning(
-            '[WARNUNG] Standard-Objektkatalog konnte nicht angelegt werden (%s): '
-            '%s — bitte „object_catalog.json" im Kalibrier-Ordner manuell anlegen.',
-            catalog_path, err,
-        )
-        return False
-    _logger.info('Standard-Objektkatalog angelegt: %s (bitte anpassen).', catalog_path)
-    return True
+    if not catalog_path.is_file():
+        return shipped_default_catalog()
+    catalog = load_catalog(catalog_path)  # German ObjectCatalogError on corrupt/invalid
+    if _is_untouched_seed(catalog):
+        return shipped_default_catalog()
+    return catalog
 
 
 def _env_tag_size_m() -> float:

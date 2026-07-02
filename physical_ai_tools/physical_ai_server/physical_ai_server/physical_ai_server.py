@@ -3858,13 +3858,10 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         the calib volume at call time. On an absent/corrupt/invalid catalog:
         empty arrays, success=False, German message (the load error)."""
         try:
-            from physical_ai_server.workflow.object_catalog import (
-                load_catalog, seed_default_catalog_if_missing,
-            )
-            # Seed a working example catalog on a fresh calib volume so the
-            # dropdown is never empty (best-effort; never raises).
-            seed_default_catalog_if_missing()
-            catalog = load_catalog()
+            from physical_ai_server.workflow.object_catalog import resolve_catalog
+            # Prefer a teacher's volume override; else the shipped default set —
+            # so the dropdown is never empty even on a fresh PC (resolve_catalog).
+            catalog = resolve_catalog()
             labels = catalog.labels()  # [(type_name, label_de), ...] in catalog order
             response.type_names = [name for name, _label in labels]
             response.labels_de = [label for _name, label in labels]
@@ -4161,16 +4158,12 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         return self.sim_workflow_manager
 
     def _load_object_catalog(self):
-        """Load the named-object catalog (tag_id → type → grasp recipe) from the
-        edubotics_calib volume. Re-read each workflow start so a catalog edit
+        """Load the active named-object catalog (tag_id → type → grasp recipe):
+        a teacher's edubotics_calib override if present, else the shipped default
+        set baked into the image. Re-read each workflow start so a volume edit
         applies on the next run without an environment restart."""
-        from physical_ai_server.workflow.object_catalog import (
-            load_catalog, seed_default_catalog_if_missing,
-        )
-        # Seed a working example catalog on a fresh calib volume so the first
-        # named-object workflow finds a file instead of failing loud (best-effort).
-        seed_default_catalog_if_missing()
-        return load_catalog()
+        from physical_ai_server.workflow.object_catalog import resolve_catalog
+        return resolve_catalog()
 
     def _load_object_catalog_tolerant(self):
         """Like ``_load_object_catalog`` but returns ``None`` on a corrupt /

@@ -145,16 +145,27 @@ def chunked_publish(
             time.sleep(min(0.05, sleep_target - time.monotonic()))
         return True
 
-    for q, t in points:
+    for pt in points:
         if should_stop():
             return False
-        chunk.append((q, t - chunk_start_t))
+        q = pt[0]
+        t = pt[1]
+        # Carry an optional per-point velocity (3-tuple, replay only) through the
+        # time re-basing; workflow moves / jog pass 2-tuples (position-only).
+        chunk.append((q, t - chunk_start_t, pt[2]) if len(pt) >= 3
+                     else (q, t - chunk_start_t))
         if len(chunk) >= chunk_size:
             publisher(chunk)
+            # Pace by the chunk's ACTUAL playback span (its last point's re-based
+            # time), NOT the fixed chunk_duration_s. A fixed 1.0 s under-waits a
+            # 25 Hz replay chunk (~1.2 s span), so the next JointTrajectory
+            # preempts the still-running one early → a forward jump every chunk.
+            # This mirrors the remainder branch below. A 30 Hz workflow/jog chunk
+            # already spans ~1.0 s, so this is a no-op there (zero regression).
+            span = chunk[-1][1]
             chunk = []
             chunk_start_t = t
-            # Real-time clock — ros2 controllers want their inputs paced.
-            if not _pace(chunk_duration_s):
+            if not _pace(span):
                 return False
 
     if chunk:

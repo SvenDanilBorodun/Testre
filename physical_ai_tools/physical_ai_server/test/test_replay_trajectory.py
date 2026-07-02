@@ -189,6 +189,46 @@ def test_resegment_coincident_timestamps_no_zero_duration():
     assert all(b > a for a, b in zip(times, times[1:]))
 
 
+# --- with_velocities (smooth cubic playback) -------------------------------
+
+def test_resegment_default_returns_two_tuples():
+    # Backward compatibility: without the flag the stream stays (q, t) 2-tuples,
+    # so every existing caller (workflow moves, the tests) is unchanged.
+    points = [_pt(0.1, 0.0), _pt(0.2, 0.4), _pt(0.3, 0.8)]
+    seg = resegment_trajectory(points, speed=1.0, lead_in_from=[0.0] * 6)
+    assert all(len(item) == 2 for item in seg)
+
+
+def test_resegment_with_velocities_three_tuples_rest_endpoints():
+    points = [_pt(0.1, 0.0), _pt(0.2, 0.4), _pt(0.3, 0.8)]
+    seg = resegment_trajectory(points, speed=1.0, lead_in_from=[0.0] * 6,
+                               with_velocities=True)
+    assert all(len(item) == 3 for item in seg)
+    assert all(len(item[2]) == 6 for item in seg)     # a velocity per joint
+    # Start + stop at rest (v = 0 at both ends).
+    assert seg[0][2] == [0.0] * 6
+    assert seg[-1][2] == [0.0] * 6
+    # At least one interior waypoint actually carries motion.
+    assert any(any(abs(v) > 1e-9 for v in item[2]) for item in seg[1:-1])
+    # The swept joint PATH is identical to the 2-tuple stream (velocities are an
+    # ADD-ON, they never change positions/times).
+    seg2 = resegment_trajectory(points, speed=1.0, lead_in_from=[0.0] * 6)
+    assert [q for q, _t, _v in seg] == [q for q, _t in seg2]
+    assert [t for _q, t, _v in seg] == [t for _q, t in seg2]
+
+
+def test_resegment_velocities_within_velocity_floor():
+    # The finite-difference velocities never exceed the safe per-joint velocity —
+    # the segment times already passed build_segment's velocity floor.
+    points = [_pt(0.0, 0.0), _pt(2.0, 0.2)]
+    seg = resegment_trajectory(points, speed=3.0, lead_in_from=[0.0] * 6,
+                               with_velocities=True)
+    v_safe = _VELOCITY_SAFETY_FRACTION * JOINT_VELOCITY_LIMIT_RAD_S
+    for _q, _t, v in seg:
+        for vi in v:
+            assert abs(vi) <= v_safe * 1.05
+
+
 # --- replay_trajectory handler --------------------------------------------
 
 class _Ctx:

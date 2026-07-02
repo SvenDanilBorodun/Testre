@@ -3671,7 +3671,8 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             segmented = resegment_trajectory(
                 points, speed, lead_in_from=current,
                 lead_in_floor_check=lead_floor,
-                point_floor_check=lead_floor)  # FIX 5 — floor-check recorded points
+                point_floor_check=lead_floor,  # FIX 5 — floor-check recorded points
+                with_velocities=True)          # smooth cubic playback (velocities)
         except WorkflowError as e:
             response.message = str(e)
             return response
@@ -3983,9 +3984,17 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         msg = JointTrajectory()
         msg.joint_names = list(joint_names)
         last_q = None
-        for q, t in points:
+        for pt in points:
+            q = pt[0]
+            t = pt[1]
             point = JointTrajectoryPoint()
             point.positions = [float(v) for v in q]
+            # Replay passes an optional 3rd tuple element: per-joint velocities, so
+            # the controller uses a cubic spline with velocity continuity across
+            # chunk boundaries (smooth playback). Workflow moves / jog pass
+            # 2-tuples → position-only (linear), byte-identical to before.
+            if len(pt) >= 3 and pt[2] is not None:
+                point.velocities = [float(v) for v in pt[2]]
             point.time_from_start.sec = int(t)
             point.time_from_start.nanosec = int((t - int(t)) * 1e9)
             msg.points.append(point)

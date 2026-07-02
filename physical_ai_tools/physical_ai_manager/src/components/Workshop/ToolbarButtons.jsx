@@ -60,6 +60,7 @@ function ToolbarButtons({
   saving = false,
   onExportPdf = null,
   extra = null,
+  leading = null,
 }) {
   const [_, setTick] = useState(0);  // eslint-disable-line no-unused-vars
   const [theme, setTheme] = useState(readSavedTheme);
@@ -202,8 +203,12 @@ function ToolbarButtons({
     <div
       role="toolbar"
       aria-label="Workshop Werkzeugleiste"
-      className="flex flex-wrap items-center gap-2 px-3 py-2 bg-white border-b border-[var(--line)]"
+      className="flex flex-wrap items-center gap-1.5 px-3 py-1.5 bg-white border-b border-[var(--line)]"
     >
+      {leading}
+      {leading && (
+        <span className="mx-1 h-6 w-px bg-[var(--line)]" aria-hidden="true" />
+      )}
       <button
         type="button"
         className={BUTTON_BASE}

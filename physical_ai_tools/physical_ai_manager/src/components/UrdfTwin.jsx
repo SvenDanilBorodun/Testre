@@ -296,6 +296,14 @@ export default function UrdfTwin({
       needsRender = true;
     };
     window.addEventListener('resize', onResize);
+    // Also re-fit on CONTAINER resize (the dock/panel divider drag, or the whole
+    // dock being widened) — a window-resize listener alone leaves the canvas at
+    // its old size when only the panel changes width/height.
+    let resizeObserver = null;
+    if (typeof ResizeObserver !== 'undefined') {
+      resizeObserver = new ResizeObserver(() => onResize());
+      resizeObserver.observe(mount);
+    }
 
     const animate = () => {
       animationId = window.requestAnimationFrame(animate);
@@ -315,6 +323,7 @@ export default function UrdfTwin({
       requestRenderRef.current = () => {};
       robotRef.current = null;
       window.removeEventListener('resize', onResize);
+      if (resizeObserver) resizeObserver.disconnect();
       if (animationId !== null) window.cancelAnimationFrame(animationId);
       controls.dispose();
       // Dispose every geometry/material reachable from the scene (three leaks

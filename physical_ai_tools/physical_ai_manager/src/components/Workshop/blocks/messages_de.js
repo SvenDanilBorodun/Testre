@@ -179,6 +179,22 @@ export const DE = {
   RUN_TEMPO_NORMAL: 'normal',
   RUN_TEMPO_FAST: 'schnell',
 
+  // Roboter Studio right dock (Werkzeug-Dock) — the tabbed, collapsible panel
+  // that replaced the tall stacked right column. Up to two panels open at once.
+  DOCK_TAB_CAMERA: 'Kamera',
+  DOCK_TAB_CONTROL: 'Steuern',
+  DOCK_TAB_RECORD: 'Aufnehmen',
+  DOCK_TAB_3D: '3D-Ansicht',
+  DOCK_TAB_TUTORIAL: 'Lernpfad',
+  DOCK_TAB_DEBUG: 'Debug',
+  DOCK_COLLAPSE: 'Werkzeuge einklappen',
+  DOCK_EXPAND: 'Werkzeuge ausklappen',
+  DOCK_CLOSE_PANEL: 'Panel schließen',
+  DOCK_CLOSE_BUSY: 'Erst beenden, dann schließen.',
+  DOCK_OPEN_WORKFLOW: 'Öffnen',
+  DOCK_LOG_LABEL: 'Protokoll',
+  DOCK_CODE_LABEL: 'Code',
+
   // Debug panel
   DEBUG_TAB_SENSORS: 'Sensoren',
   DEBUG_TAB_VARIABLES: 'Variablen',

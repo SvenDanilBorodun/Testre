@@ -27,7 +27,9 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { useSelector } from 'react-redux';
 import toast from 'react-hot-toast';
+import ROSLIB from 'roslib';
 import TaskPhase from '../../constants/taskPhases';
+import rosConnectionManager from '../../utils/rosConnectionManager';
 
 // Switching the leader on/off recreates the open_manipulator container, which
 // blips /joint_states + the camera topics. Doing that DURING an active
@@ -53,6 +55,32 @@ const TOGGLE_TIMEOUT_MS = 210000;
 // flight on the GUI side). Cheap localhost GET; matches the GUI as source of
 // truth. Paused while THIS tab is mid-toggle so it doesn't clobber busyMsg.
 const STATUS_POLL_MS = 8000;
+
+// Readiness gate (Option A). `docker compose up -d` returns the moment the arm
+// container STARTS — but the follower then re-homes (~15-20 s) and the camera
+// topics blip and reconnect. The old code cleared the blocking overlay when the
+// POST returned, leaving the student on a frozen camera with clickable controls
+// on a not-yet-ready arm. We now HOLD the overlay after the POST until the arm is
+// genuinely back: the scene camera is delivering frames AGAIN, /joint_states is
+// flowing AGAIN, and the follower has SETTLED (re-home finished). A hard cap ends
+// the wait with a manual „Trotzdem fortfahren" so a missed signal never traps the
+// student. All browser-observed (rosbridge stays up — physical_ai_server is
+// recreated with --no-deps), so no GUI change is needed.
+const PREP_MIN_MS = 4000;          // ignore the first few s (old topics dropping)
+const PREP_CAM_LIVE_MS = 3000;     // a scene frame within this window = live
+const PREP_JOINT_LIVE_MS = 3000;   // a /joint_states within this window = flowing
+const PREP_SETTLE_DELTA_RAD = 0.01; // per-joint step below this = "not moving"
+const PREP_SETTLE_SAMPLES = 4;     // consecutive still samples → re-home done
+// „settled" alone is not enough: /joint_states starts publishing the STATIC
+// power-on pose a beat BEFORE the re-home quintic begins, so a naive settle can
+// clear the overlay just before the arm lurches. We require the arm to have been
+// SEEN MOVING (re-home witnessed) before a settle counts — OR, for the
+// already-at-home case where it barely moves, a time floor.
+const PREP_MOVE_FLOOR_MS = 12000;
+const PREP_CAP_MS = 90000;         // give up waiting → offer manual continue
+const PREP_TICK_MS = 500;
+const PREP_SCENE_TOPIC = '/scene/image_raw/compressed';
+const PREP_JOINTS_TOPIC = '/joint_states';
 
 async function rsFetch(path, options = {}, timeoutMs = STATUS_TIMEOUT_MS) {
   const ctrl = new AbortController();
@@ -83,6 +111,19 @@ export default function LeaderToggle({ isActive }) {
   const [busy, setBusy] = useState(false);
   const [busyMsg, setBusyMsg] = useState('');
   const [showReconnect, setShowReconnect] = useState(false);
+  // Post-toggle readiness gate (Option A). `preparing` keeps the blocking overlay
+  // up after the POST returns until the arm is really back; `prepTimedOut` offers
+  // a manual continue once the hard cap is hit.
+  const [preparing, setPreparing] = useState(false);
+  const [prepTimedOut, setPrepTimedOut] = useState(false);
+  const prepStartRef = useRef(0);
+  const lastCamRef = useRef(0);
+  const lastJointRef = useRef(0);
+  const settledCountRef = useRef(0);
+  const prevJointPosRef = useRef(null);
+  // True once the follower has actually MOVED during this prep (re-home seen), so
+  // a settle can't clear the overlay during the static pre-re-home window.
+  const movedRef = useRef(false);
 
   // Block the container-recreating toggle during an active recording/inference
   // run — restarting open_manipulator mid-run blips /joint_states + the camera
@@ -95,6 +136,11 @@ export default function LeaderToggle({ isActive }) {
   // overlay early on a status race).
   const busyRef = useRef(false);
   useEffect(() => { busyRef.current = busy; }, [busy]);
+  // Mirror `preparing` so the background status poll skips ticks while we hold
+  // the readiness overlay (a refreshStatus mid-prep could flip `available` and
+  // unmount the overlay).
+  const preparingRef = useRef(false);
+  useEffect(() => { preparingRef.current = preparing; }, [preparing]);
 
   const refreshStatus = useCallback(async () => {
     try {
@@ -118,7 +164,7 @@ export default function LeaderToggle({ isActive }) {
     // here. Skipped while this tab is mid-toggle (busyRef) to protect the
     // overlay.
     const intervalId = setInterval(() => {
-      if (!busyRef.current) refreshStatus();
+      if (!busyRef.current && !preparingRef.current) refreshStatus();
     }, STATUS_POLL_MS);
     return () => clearInterval(intervalId);
   }, [isActive, refreshStatus]);
@@ -128,12 +174,27 @@ export default function LeaderToggle({ isActive }) {
     setBusyMsg(disable
       ? 'Leader-Arm wird abgeschaltet — Roboter Studio wird vorbereitet …'
       : 'Leader-Arm wird verbunden — Teleoperation wird vorbereitet …');
+    let enteredPrep = false;
     try {
       const path = disable ? '/roboter-studio/leader-disable' : '/roboter-studio/leader-enable';
       const { ok, body } = await rsFetch(path, { method: 'POST' }, TOGGLE_TIMEOUT_MS);
       if (ok && body.ok) {
         setFollowerOnly(disable);
         toast.success(body.message || (disable ? 'Roboter Studio bereit.' : 'Leader verbunden.'));
+        // The POST returns when the arm container STARTS, not when it is ready
+        // (it still re-homes + the camera reconnects). Enter the „preparing"
+        // phase and HOLD the blocking overlay until the arm is genuinely back
+        // (readiness effect below), so the student can't click a frozen camera /
+        // a still-homing arm.
+        prepStartRef.current = Date.now();
+        lastCamRef.current = 0;
+        lastJointRef.current = 0;
+        settledCountRef.current = 0;
+        prevJointPosRef.current = null;
+        movedRef.current = false;
+        setPrepTimedOut(false);
+        setPreparing(true);
+        enteredPrep = true;
       } else {
         toast.error(body.message || 'Moduswechsel fehlgeschlagen.');
       }
@@ -142,10 +203,84 @@ export default function LeaderToggle({ isActive }) {
     } finally {
       setBusy(false);
       setBusyMsg('');
-      // The arm container re-homes for ~15-20 s; re-sync the badge shortly after.
-      setTimeout(refreshStatus, 2000);
+      // Failed toggle (no prep phase) → re-sync the badge shortly after; a
+      // successful one refreshes the badge when the readiness effect clears.
+      if (!enteredPrep) setTimeout(refreshStatus, 2000);
     }
   }, [refreshStatus]);
+
+  // Readiness effect (Option A): while „preparing", watch the browser-observed
+  // signals that the arm container is back — the scene camera delivering frames
+  // AGAIN, /joint_states flowing AGAIN, and the follower SETTLED (re-home done) —
+  // and clear the overlay only when all hold past a minimum settle. rosbridge
+  // stays up during the arm-only restart, so these subscriptions persist across
+  // the publisher blip and start receiving again when the arm returns. A hard cap
+  // flips `prepTimedOut` so the student can always continue manually.
+  useEffect(() => {
+    if (!preparing) return undefined;
+    const ros = rosConnectionManager?.ros;
+    let camSub = null;
+    let jointSub = null;
+    if (ros && ros.isConnected) {
+      try {
+        camSub = new ROSLIB.Topic({
+          ros, name: PREP_SCENE_TOPIC,
+          messageType: 'sensor_msgs/CompressedImage',
+          throttle_rate: 500, queue_length: 1,
+        });
+        camSub.subscribe(() => { lastCamRef.current = Date.now(); });
+      } catch (_) { /* subscribe failure → the cap fallback still applies */ }
+      try {
+        jointSub = new ROSLIB.Topic({
+          ros, name: PREP_JOINTS_TOPIC,
+          messageType: 'sensor_msgs/msg/JointState',
+          throttle_rate: 150, queue_length: 1,
+        });
+        jointSub.subscribe((msg) => {
+          lastJointRef.current = Date.now();
+          const pos = Array.isArray(msg?.position) ? msg.position : null;
+          const prev = prevJointPosRef.current;
+          if (pos && prev && pos.length === prev.length) {
+            let maxD = 0;
+            for (let i = 0; i < pos.length; i += 1) {
+              const d = Math.abs(pos[i] - prev[i]);
+              if (d > maxD) maxD = d;
+            }
+            if (maxD < PREP_SETTLE_DELTA_RAD) {
+              settledCountRef.current += 1;
+            } else {
+              settledCountRef.current = 0;
+              movedRef.current = true; // re-home motion witnessed
+            }
+          }
+          if (pos) prevJointPosRef.current = pos.slice();
+        });
+      } catch (_) { /* subscribe failure → the cap fallback still applies */ }
+    }
+    const id = setInterval(() => {
+      const now = Date.now();
+      const elapsed = now - prepStartRef.current;
+      const camLive = lastCamRef.current > 0 && (now - lastCamRef.current) < PREP_CAM_LIVE_MS;
+      const jointLive = lastJointRef.current > 0 && (now - lastJointRef.current) < PREP_JOINT_LIVE_MS;
+      // Settled counts only once the arm has moved (re-home witnessed), else
+      // after a time floor (covers the arm that was already at HOME and barely
+      // moves) — so the overlay never clears during the static pre-re-home window.
+      const settled = settledCountRef.current >= PREP_SETTLE_SAMPLES
+        && (movedRef.current || elapsed >= PREP_MOVE_FLOOR_MS);
+      if (elapsed >= PREP_MIN_MS && camLive && jointLive && settled) {
+        setPreparing(false);
+        setPrepTimedOut(false);
+        refreshStatus();
+      } else if (elapsed >= PREP_CAP_MS) {
+        setPrepTimedOut(true);
+      }
+    }, PREP_TICK_MS);
+    return () => {
+      clearInterval(id);
+      try { if (camSub) camSub.unsubscribe(); } catch (_) { /* torn down */ }
+      try { if (jointSub) jointSub.unsubscribe(); } catch (_) { /* torn down */ }
+    };
+  }, [preparing, refreshStatus]);
 
   if (available !== true) return null; // probing, or no GUI bridge (Jetson/cloud)
 
@@ -184,14 +319,30 @@ export default function LeaderToggle({ isActive }) {
         </span>
       )}
 
-      {busy && (
+      {(busy || preparing) && (
         <div style={overlayStyle}>
           <div style={boxStyle}>
             <div className="eb-pulse-dot" style={{
               width: 14, height: 14, borderRadius: '50%', background: '#2563eb',
               margin: '0 auto 12px',
             }} />
-            <p style={{ margin: 0, fontSize: 15 }}>{busyMsg || 'Bitte warten …'}</p>
+            <p style={{ margin: 0, fontSize: 15 }}>
+              {preparing
+                ? (prepTimedOut
+                    ? 'Der Roboter braucht länger als erwartet. Du kannst weiter warten oder trotzdem fortfahren.'
+                    : 'Roboter Studio wird vorbereitet — der Arm fährt in die Grundstellung und die '
+                      + 'Kamera verbindet sich neu. Bitte warten …')
+                : (busyMsg || 'Bitte warten …')}
+            </p>
+            {preparing && prepTimedOut && (
+              <button
+                type="button"
+                style={{ marginTop: 16 }}
+                onClick={() => { setPreparing(false); setPrepTimedOut(false); refreshStatus(); }}
+              >
+                Trotzdem fortfahren
+              </button>
+            )}
           </div>
         </div>
       )}

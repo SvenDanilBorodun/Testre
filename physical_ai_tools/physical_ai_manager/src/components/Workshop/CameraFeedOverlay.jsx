@@ -36,6 +36,12 @@ function CameraFeedOverlay({
   clickable = false,
   onMark,
   charucoCorners = null,
+  // Redesign: `fill` lets the feed grow to fill its container's HEIGHT (the dock
+  // panel) instead of a fixed 16:9 box, so the camera isn't a small strip with
+  // empty space below. The image is `object-contain` (letterboxed, never
+  // distorted); the click-mapping below accounts for the letterbox so
+  // click-to-mark stays accurate.
+  fill = false,
   ...rest
 }) {
   // Hooks first, no conditional returns above them — react-hooks/rules
@@ -154,8 +160,20 @@ function CameraFeedOverlay({
       if (!clickable || !imgRef.current || naturalSize.w === 0) return;
       const img = imgRef.current;
       const rect = img.getBoundingClientRect();
-      const x = ((e.clientX - rect.left) / rect.width) * naturalSize.w;
-      const y = ((e.clientY - rect.top) / rect.height) * naturalSize.h;
+      if (!rect.width || !rect.height) return;
+      // The <img> is `object-contain`, so the actual picture is scaled to fit and
+      // centred inside the element (letterboxed when the element's aspect ratio
+      // differs from the camera's — e.g. `fill` mode, or a 4:3 camera in a 16:9
+      // box). Map the click through the CONTAINED image rect so pixel coords stay
+      // correct. Degenerates to the old math when the element already matches the
+      // image aspect (offsets ≈ 0), so calibration overlays are unaffected.
+      const scale = Math.min(rect.width / naturalSize.w, rect.height / naturalSize.h);
+      const offX = (rect.width - naturalSize.w * scale) / 2;
+      const offY = (rect.height - naturalSize.h * scale) / 2;
+      const x = (e.clientX - rect.left - offX) / scale;
+      const y = (e.clientY - rect.top - offY) / scale;
+      // A click in the letterbox margins is outside the real image — ignore it.
+      if (x < 0 || y < 0 || x > naturalSize.w || y > naturalSize.h) return;
       const label = window.prompt('Wie soll dieses Ziel heißen?', 'Ziel') || 'Ziel';
       // Sanitize: 1-40 chars, German letters / digits / space / _ / - only.
       // Stops a stray paste or pathological prompt input from reaching the
@@ -191,9 +209,12 @@ function CameraFeedOverlay({
     [callService, camera, clickable, naturalSize, onMark]
   );
 
+  // `fill` grows to the container height (dock panel); otherwise a fixed 16:9 box.
+  const boxSize = fill ? 'w-full h-full min-h-0' : 'w-full aspect-video';
+
   if (cloudOnly) {
     return (
-      <div className="relative w-full aspect-video rounded-lg overflow-hidden bg-[var(--ink-5)] flex items-center justify-center text-center px-4">
+      <div className={`relative ${boxSize} rounded-lg overflow-hidden bg-[var(--ink-5)] flex items-center justify-center text-center px-4`}>
         <p className="text-sm text-[var(--ink-4)]">
           Kamera-Stream nur in der Desktop-App verfügbar.
         </p>
@@ -206,7 +227,7 @@ function CameraFeedOverlay({
       ref={containerRef}
       onClick={handleClick}
       className={
-        'relative w-full aspect-video rounded-lg overflow-hidden bg-black ' +
+        `relative ${boxSize} rounded-lg overflow-hidden bg-black ` +
         (clickable ? 'cursor-crosshair' : '')
       }
       {...rest}

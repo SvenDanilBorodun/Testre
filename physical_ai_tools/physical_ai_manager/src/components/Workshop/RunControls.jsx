@@ -122,6 +122,12 @@ function RunControls({
   workspace = null,
   simMode = false,
   simScene = null,
+  // Redesign: the Debug panel now lives in the RightDock. When these props are
+  // supplied (WorkshopPage), the „Debug" button toggles the dock tab and reflects
+  // its open state. They fall back to the Redux `debuggerVisible` flag when
+  // absent so the component still works standalone (and existing tests pass).
+  debugOpen = null,
+  onToggleDebug = null,
 }) {
   const dispatch = useDispatch();
   const {
@@ -142,6 +148,17 @@ function RunControls({
   const debuggerWarnings = useSelector((s) => s.workshop.debuggerWarnings);
   const breakpoints = useSelector((s) => s.workshop.breakpoints);
   const [busy, setBusy] = useState(false);
+  // Redesign (compact density): the Protokoll log used to be an always-on 192px
+  // block. It is now a collapsed-by-default drawer that auto-opens on a run start
+  // or an error, so the editor keeps that vertical space when nothing is running.
+  const [logOpen, setLogOpen] = useState(false);
+  // Effective Debug open/toggle: prefer the dock-backed props (WorkshopPage),
+  // else the standalone Redux flag + toggleDebugger dispatch.
+  const debugIsOpen = debugOpen != null ? debugOpen : debuggerVisible;
+  const handleDebugClick = useCallback(() => {
+    if (typeof onToggleDebug === 'function') onToggleDebug();
+    else dispatch(toggleDebugger());
+  }, [onToggleDebug, dispatch]);
 
   // Phase-2 Tempo: per-browser preference. Seeded from a forward-compat
   // simScene.tempo (a future WorkshopPage could persist it in the DB sim_scene)
@@ -249,6 +266,19 @@ function RunControls({
       workspace.highlightBlock(null);
     }
   }, [currentBlockId, runState, workspace]);
+
+  // Auto-open the Protokoll drawer when a run starts or an error appears, so the
+  // student never misses live output just because the log was collapsed.
+  const prevRunStateRef = useRef(runState);
+  useEffect(() => {
+    if (runState === 'running' && prevRunStateRef.current !== 'running') {
+      setLogOpen(true);
+    }
+    prevRunStateRef.current = runState;
+  }, [runState]);
+  useEffect(() => {
+    if (error) setLogOpen(true);
+  }, [error]);
 
   const handleStart = useCallback(async () => {
     if (!blocklyJson) {
@@ -473,10 +503,6 @@ function RunControls({
     }
   }, [continueWorkflow, dispatch]);
 
-  const handleToggleDebugger = useCallback(() => {
-    dispatch(toggleDebugger());
-  }, [dispatch]);
-
   // State-driven German label (#L2): the raw server `phase` is English
   // ('running'/'done') and now lingers between blocks (truthy-guarded), so map
   // to German by state instead of echoing the raw string into the UI (Rule §1).
@@ -617,18 +643,38 @@ function RunControls({
           ))}
         </div>
 
-        <button
-          type="button"
-          onClick={handleToggleDebugger}
-          aria-pressed={debuggerVisible}
-          className={
-            BUTTON_BASE
-            + ' ml-auto border border-[var(--line)] bg-white text-[var(--ink)] '
-            + 'hover:bg-[var(--bg-sunk)] focus-visible:ring-blue-500'
-          }
-        >
-          🔍 Debug
-        </button>
+        <div className="ml-auto flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setLogOpen((v) => !v)}
+            aria-pressed={logOpen}
+            title={logOpen ? 'Protokoll ausblenden' : 'Protokoll anzeigen'}
+            className={
+              BUTTON_BASE
+              + ' border border-[var(--line)] bg-white text-[var(--ink)] '
+              + 'hover:bg-[var(--bg-sunk)] focus-visible:ring-blue-500'
+            }
+          >
+            {logOpen ? '▾' : '▸'} {DE.DOCK_LOG_LABEL}
+            {!logOpen && log.length > 0 && (
+              <span className="ml-1.5 px-1.5 py-0.5 rounded-full bg-[var(--bg-sunk)] text-[10px] text-[var(--ink-3)]">
+                {log.length}
+              </span>
+            )}
+          </button>
+          <button
+            type="button"
+            onClick={handleDebugClick}
+            aria-pressed={debugIsOpen}
+            className={
+              BUTTON_BASE
+              + ' border border-[var(--line)] bg-white text-[var(--ink)] '
+              + 'hover:bg-[var(--bg-sunk)] focus-visible:ring-blue-500'
+            }
+          >
+            🔍 Debug
+          </button>
+        </div>
       </div>
 
       {rsLeaderOn && !simMode && !isRunning && (
@@ -662,23 +708,25 @@ function RunControls({
         </div>
       )}
 
-      <div
-        className="bg-[var(--bg-sunk)] rounded-md p-3 max-h-48 overflow-y-auto font-mono text-xs"
-        aria-label="Workflow-Log"
-      >
-        {log.length === 0 ? (
-          <p className="text-[var(--ink-4)]">Keine Meldungen.</p>
-        ) : (
-          log.map((entry, idx) => (
-            <div key={idx} className="text-[var(--ink-3)]">
-              <span className="text-[var(--ink-4)] mr-2">
-                {new Date(entry.ts).toLocaleTimeString('de-DE')}
-              </span>
-              {entry.text}
-            </div>
-          ))
-        )}
-      </div>
+      {logOpen && (
+        <div
+          className="bg-[var(--bg-sunk)] rounded-md p-3 max-h-40 overflow-y-auto font-mono text-xs"
+          aria-label="Workflow-Log"
+        >
+          {log.length === 0 ? (
+            <p className="text-[var(--ink-4)]">Keine Meldungen.</p>
+          ) : (
+            log.map((entry, idx) => (
+              <div key={idx} className="text-[var(--ink-3)]">
+                <span className="text-[var(--ink-4)] mr-2">
+                  {new Date(entry.ts).toLocaleTimeString('de-DE')}
+                </span>
+                {entry.text}
+              </div>
+            ))
+          )}
+        </div>
+      )}
     </div>
   );
 }

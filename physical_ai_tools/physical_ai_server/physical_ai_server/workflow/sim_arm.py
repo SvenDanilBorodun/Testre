@@ -114,7 +114,8 @@ class SimArm:
         sink = self._sink
         if sink is None:
             return
-        for q, _t in chunk:
+        for pt in chunk:
+            q = pt[0]  # (q, t) or (q, t, v) — replay carries an optional velocity
             try:
                 sink([float(v) for v in q])
             except Exception:  # noqa: BLE001 — a publish hiccup must not kill the run

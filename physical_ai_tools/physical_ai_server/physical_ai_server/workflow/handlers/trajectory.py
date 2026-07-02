@@ -102,6 +102,39 @@ def extract_points(traj: Any) -> list[list[float]]:
     return rows
 
 
+def _add_finite_diff_velocities(
+    segmented: list[tuple[list[float], float]],
+) -> list[tuple[list[float], float, list[float]]]:
+    """Attach a per-joint velocity to each ``(q, t)`` waypoint via a CENTRAL finite
+    difference over the global stream, with ``v = 0`` at the very first + last
+    waypoint (start/stop at rest); return ``(q, t, v)`` 3-tuples.
+
+    Replay-only smoothness layer: with velocities present the controller uses a
+    cubic spline that keeps velocity continuity ACROSS separately-published chunk
+    boundaries (no hold/near-stop at each ~1 s boundary → smooth playback), while
+    the swept joint PATH is unchanged. Velocities are bounded by construction — the
+    segment times already passed ``build_segment``'s per-joint velocity floor, so a
+    central difference cannot exceed the safe per-joint velocity."""
+    n = len(segmented)
+    out: list[tuple[list[float], float, list[float]]] = []
+    for i in range(n):
+        q_i = segmented[i][0]
+        t_i = segmented[i][1]
+        m = len(q_i)
+        if i == 0 or i == n - 1:
+            v = [0.0] * m
+        else:
+            q_prev, t_prev = segmented[i - 1][0], segmented[i - 1][1]
+            q_next, t_next = segmented[i + 1][0], segmented[i + 1][1]
+            dt = t_next - t_prev
+            if not math.isfinite(dt) or dt <= 0.0:
+                v = [0.0] * m
+            else:
+                v = [(q_next[j] - q_prev[j]) / dt for j in range(m)]
+        out.append((list(q_i), float(t_i), v))
+    return out
+
+
 def resegment_trajectory(
     points: list[list[float]],
     speed: float = 1.0,
@@ -109,7 +142,8 @@ def resegment_trajectory(
     lead_in_duration: float = DEFAULT_LEAD_IN_S,
     lead_in_floor_check=None,
     point_floor_check=None,
-) -> list[tuple[list[float], float]]:
+    with_velocities: bool = False,
+) -> list[tuple[list[float], float]] | list[tuple[list[float], float, list[float]]]:
     """Turn a CONTRACT-B point list into a velocity-safe, monotonic-time waypoint
     stream ready for ``chunked_publish``.
 
@@ -219,6 +253,10 @@ def resegment_trajectory(
             segmented.append((q, t_offset + t))
         if seg:
             t_offset += seg[-1][1]
+    # Replay opts into per-waypoint velocities (smooth cubic playback); every
+    # other caller / the tests get the unchanged (q, t) 2-tuple stream.
+    if with_velocities:
+        return _add_finite_diff_velocities(segmented)
     return segmented
 
 
@@ -277,7 +315,7 @@ def replay_trajectory(ctx, args: dict[str, Any]) -> None:
 
     segmented = resegment_trajectory(
         points, speed, lead_in_from=lead_in, lead_in_floor_check=_lead_floor,
-        point_floor_check=_lead_floor)
+        point_floor_check=_lead_floor, with_velocities=True)
     if not segmented:
         raise WorkflowError('Die Aufnahme enthält keine Bewegung.')
 

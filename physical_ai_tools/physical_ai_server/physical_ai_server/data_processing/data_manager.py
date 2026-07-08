@@ -30,6 +30,7 @@ import time
 import cv2
 from geometry_msgs.msg import Twist
 from huggingface_hub import (
+    CommitOperationDelete,
     DatasetCard,
     DatasetCardData,
     HfApi,
@@ -38,7 +39,8 @@ from huggingface_hub import (
     snapshot_download,
     upload_large_folder
 )
-from huggingface_hub.errors import LocalTokenNotFoundError
+from huggingface_hub.errors import LocalTokenNotFoundError, RevisionNotFoundError
+from lerobot.datasets.dataset_metadata import CODEBASE_VERSION
 from lerobot.datasets.utils import DEFAULT_FEATURES
 from nav_msgs.msg import Odometry
 import numpy as np
@@ -100,10 +102,10 @@ class DataManager:
         self._lerobot_dataset = None
         self._record_episode_count = 0
         # Session-marker state (leLab-comparison PR-3). DISARMED by
-        # default: the inference timer also drives record(), and a pure
-        # inference run must never plant a "recording was interrupted"
-        # marker. The node arms it for START_RECORD and for
-        # record_inference_mode inference sessions only.
+        # default; the node arms it for START_RECORD sessions only.
+        # (record_inference_mode is refused at START_INFERENCE — the
+        # inference timer has no record() path, so such a session would
+        # arm the marker while writing nothing.)
         self._session_marker_enabled = False
         self._session_marker_written = False
         self._session_started_unix = 0
@@ -760,11 +762,11 @@ class DataManager:
                 # produce static scenes for >5 s (insertion, alignment,
                 # waiting for a human to place an object). Aborting the
                 # episode here was the single most-frequent false
-                # positive against real workflows. The inference path
-                # still halts on stale cameras (inference_manager.py)
-                # because there it's load-bearing; at recording time
+                # positive against real workflows; at recording time
                 # the worst case is a degraded frame, not a hardware
-                # event.
+                # event. (The inference path currently has NO stale-
+                # camera halt of its own — this warning fires there too
+                # via convert_msgs_to_raw_datas, but is warn-only.)
                 warning = (
                     f'Kamera "{stale}" liefert seit über '
                     f'{self._stale_halt_threshold_s:.0f}s dasselbe Bild. '
@@ -1436,15 +1438,14 @@ class DataManager:
                     print_report_every=1,
                 )
 
-            # Create tag
+            # Post-upload maintenance for dataset repos: remote-orphan
+            # sweep + version-tag re-point. Both are LOAD-BEARING for
+            # training correctness, so a failure fails the whole upload
+            # (the student retries; upload_large_folder resumes cheaply).
             if repo_type == 'dataset':
-                try:
-                    print(f'Creating tag for {repo_id} ({repo_type})')
-                    api.create_tag(repo_id=repo_id, tag='v3.0', repo_type=repo_type)
-                    print(f'Tag "v3.0" created successfully for {repo_id}')
-                except Exception as e:
-                    print(f'Warning: Failed to create tag for {repo_id} ({repo_type}): {e}')
-                    # Don't fail the entire upload just because tag creation failed
+                if not DataManager._sync_dataset_repo_after_upload(
+                        api, repo_id, local_dir):
+                    return False
 
             return True
         except Exception as e:
@@ -1456,6 +1457,86 @@ class DataManager:
                 DataManager._classify_hf_failure_de(e)
             )
             return False
+
+    # Remote paths the orphan sweep may delete under. Everything else
+    # (README.md, .gitattributes, hub-managed files) is off-limits.
+    _DATASET_CONTENT_PREFIXES = ('data/', 'meta/', 'videos/')
+
+    @staticmethod
+    def _sync_dataset_repo_after_upload(api, repo_id, local_dir):
+        """Make the hub dataset trainable-correct after upload_large_folder.
+
+        1. Delete remote files that no longer exist locally.
+           upload_large_folder only adds/updates files; after an episode
+           delete the removed data/video files survive on the hub, and
+           LeRobot v3.0 loads data parquet by GLOB (io_utils.load_nested_
+           dataset) — an orphaned file can occupy row positions of live
+           episodes and silently corrupt training.
+        2. Re-point the version tag. LeRobot 0.5.1 trains at revision
+           CODEBASE_VERSION ('v3.0'); a bare create_tag 409s on the second
+           upload of a repo, leaving the tag pinned to the FIRST upload's
+           commit — every re-upload (edit, appended episodes) would be
+           invisible to training. Mirrors upstream push_to_hub
+           (delete_tag + create_tag, lerobot_dataset.py).
+
+        Returns True on success. On failure sets the German reason
+        side-channel and returns False — the upload must NOT be reported
+        successful, or training would silently use a stale/mixed state.
+        """
+        try:
+            local_files = {
+                p.relative_to(local_dir).as_posix()
+                for p in Path(local_dir).rglob('*')
+                if p.is_file()
+            }
+            remote_files = api.list_repo_files(repo_id, repo_type='dataset')
+            orphans = [
+                f for f in remote_files
+                if f.startswith(DataManager._DATASET_CONTENT_PREFIXES)
+                and f not in local_files
+            ]
+            if orphans:
+                print(
+                    f'Deleting {len(orphans)} remote file(s) no longer '
+                    f'present locally (first few: {orphans[:5]})'
+                )
+                api.create_commit(
+                    repo_id=repo_id,
+                    repo_type='dataset',
+                    operations=[
+                        CommitOperationDelete(path_in_repo=f) for f in orphans
+                    ],
+                    commit_message='Remove files deleted locally (EduBotics sync)',
+                )
+        except Exception as e:
+            print(f'Error syncing remote dataset files for {repo_id}: {e}')
+            DataManager._last_hf_failure_reason_de = (
+                'Alte Dateien auf Hugging Face konnten nicht entfernt '
+                'werden. Ohne Bereinigung würde das Training gelöschte '
+                'Episoden weiterverwenden — bitte den Upload erneut '
+                'versuchen.'
+            )
+            return False
+
+        try:
+            print(f'Re-pointing tag "{CODEBASE_VERSION}" for {repo_id}')
+            try:
+                api.delete_tag(
+                    repo_id=repo_id, tag=CODEBASE_VERSION,
+                    repo_type='dataset')
+            except RevisionNotFoundError:
+                pass  # first upload of this repo: no tag yet
+            api.create_tag(
+                repo_id=repo_id, tag=CODEBASE_VERSION, repo_type='dataset')
+        except Exception as e:
+            print(f'Error re-pointing version tag for {repo_id}: {e}')
+            DataManager._last_hf_failure_reason_de = (
+                'Der Versions-Tag des Datensatzes konnte nicht aktualisiert '
+                'werden. Ohne aktuellen Tag trainiert die Cloud auf einem '
+                'alten Stand — bitte den Upload erneut versuchen.'
+            )
+            return False
+        return True
 
     @staticmethod
     def _delete_dot_cache_folder_before_upload(local_dir):

@@ -72,11 +72,24 @@ class InferenceManager:
             for k in (config.get('input_features') or {})
             if k.startswith('observation.images.')
         ]
+        # Temporal contract: the LeRobot checkpoint carries no fps, so the
+        # Modal worker stamps the training dataset's fps into
+        # edubotics_model_meta.json next to config.json. None when the file
+        # is absent (models trained before the stamp) or the value is
+        # unusable — callers then skip the fps comparison.
+        model_meta = read_json_file(
+            os.path.join(policy_path, 'edubotics_model_meta.json')) or {}
+        trained_fps = model_meta.get('dataset_fps')
+        if (isinstance(trained_fps, bool)
+                or not isinstance(trained_fps, (int, float))
+                or trained_fps <= 0):
+            trained_fps = None
         return {
             'policy_type': policy_type,
             'expected_cameras': expected_cameras,
             'requires_task': policy_type
             in InferenceManager.LANGUAGE_CONDITIONED_POLICY_TYPES,
+            'trained_fps': trained_fps,
         }
 
     def validate_policy(self, policy_path: str) -> tuple[bool, str]:

@@ -30,7 +30,11 @@ from collections import deque
 from pathlib import Path
 
 from huggingface_hub import HfApi, hf_hub_download, login
-from huggingface_hub.utils import HfHubHTTPError, RepositoryNotFoundError
+from huggingface_hub.utils import (
+    HfHubHTTPError,
+    RepositoryNotFoundError,
+    RevisionNotFoundError,
+)
 from supabase import create_client
 
 
@@ -298,8 +302,10 @@ def _validate_stats(stats: dict, dataset_name: str, n_joints: int) -> None:
                 )
 
 
-def _preflight_dataset(dataset_name: str, hf_token: str, model_type: str = "") -> None:
+def _preflight_dataset(dataset_name: str, hf_token: str, model_type: str = "") -> dict:
     """Download just meta/info.json and validate the dataset is trainable.
+
+    Returns the parsed meta/info.json dict on success.
 
     Catches the following failure modes BEFORE we waste 10+ GPU minutes:
       - Dataset doesn't exist or worker token can't see it
@@ -321,12 +327,18 @@ def _preflight_dataset(dataset_name: str, hf_token: str, model_type: str = "") -
     # worker for the full 7-hour Modal function timeout, burning GPU credits.
     download_result: dict = {}
 
+    # Everything the preflight reads is pinned to the SAME revision the
+    # trainer will read: lerobot 0.5.1 loads datasets at revision
+    # CODEBASE_VERSION ('v3.0'), never main HEAD. An unpinned preflight
+    # validates whatever a re-upload last pushed to main while the GPU
+    # trains the tagged snapshot — the two can diverge silently.
     def _download_worker():
         try:
             download_result["path"] = hf_hub_download(
                 repo_id=dataset_name,
                 filename="meta/info.json",
                 repo_type="dataset",
+                revision=EXPECTED_CODEBASE_VERSION,
                 token=hf_token,
             )
         except BaseException as exc:  # propagate to main thread
@@ -347,6 +359,13 @@ def _preflight_dataset(dataset_name: str, hf_token: str, model_type: str = "") -
         raise ValueError(
             f"Dataset '{dataset_name}' wurde auf HuggingFace nicht gefunden "
             f"oder ist privat (Worker hat keinen Zugriff)."
+        )
+    if isinstance(err, RevisionNotFoundError):
+        raise ValueError(
+            f"Dataset '{dataset_name}' hat keinen "
+            f"'{EXPECTED_CODEBASE_VERSION}'-Versions-Tag auf HuggingFace — "
+            f"das Training laedt den Datensatz an genau diesem Tag. "
+            f"Bitte den Datensatz mit der EduBotics-App erneut hochladen."
         )
     if isinstance(err, HfHubHTTPError):
         raise ValueError(
@@ -387,6 +406,14 @@ def _preflight_dataset(dataset_name: str, hf_token: str, model_type: str = "") -
     if not fps or fps <= 0:
         raise ValueError(
             f"Dataset '{dataset_name}' hat keine gueltige 'fps' Angabe ({fps!r})."
+        )
+
+    total_episodes = info.get("total_episodes")
+    if not total_episodes or total_episodes < 1:
+        raise ValueError(
+            f"Dataset '{dataset_name}' enthaelt keine Episoden "
+            f"(total_episodes={total_episodes!r}). Bitte zuerst aufnehmen "
+            f"und hochladen."
         )
 
     features = info.get("features") or {}
@@ -440,6 +467,7 @@ def _preflight_dataset(dataset_name: str, hf_token: str, model_type: str = "") -
             repo_id=dataset_name,
             filename="meta/stats.json",
             repo_type="dataset",
+            revision=EXPECTED_CODEBASE_VERSION,
             token=hf_token,
         )
         with open(stats_path) as f:
@@ -452,6 +480,43 @@ def _preflight_dataset(dataset_name: str, hf_token: str, model_type: str = "") -
             f"werden. Bitte mit aktueller Recording-Software neu aufnehmen."
         )
     _validate_stats(stats, dataset_name, len(state_names))
+
+    # Layout completeness at the training revision: a crash mid-upload can
+    # leave meta/info.json + meta/stats.json on the hub while the data
+    # parquet, episode metadata, or videos are missing — every check above
+    # still passes, and training then burns GPU minutes before failing at
+    # dataset load. Require the moving parts to actually exist.
+    try:
+        repo_files = HfApi(token=hf_token).list_repo_files(
+            dataset_name, repo_type="dataset",
+            revision=EXPECTED_CODEBASE_VERSION,
+        )
+    except Exception as e:
+        raise ValueError(
+            f"Dataset '{dataset_name}' Dateiliste konnte nicht geladen "
+            f"werden: {e}"
+        )
+
+    def _layout_has(prefix: str, suffix: str) -> bool:
+        return any(
+            f.startswith(prefix) and f.endswith(suffix) for f in repo_files
+        )
+
+    missing_parts = []
+    if not _layout_has("data/", ".parquet"):
+        missing_parts.append("data/*.parquet")
+    if not _layout_has("meta/episodes/", ".parquet"):
+        missing_parts.append("meta/episodes/*.parquet")
+    for image_key in image_keys:
+        if not _layout_has(f"videos/{image_key}/", ".mp4"):
+            missing_parts.append(f"videos/{image_key}/*.mp4")
+    if missing_parts:
+        raise ValueError(
+            f"Dataset '{dataset_name}' ist unvollstaendig hochgeladen — es "
+            f"fehlen: {', '.join(missing_parts)}. Vermutlich wurde der "
+            f"Upload unterbrochen. Bitte den Datensatz mit der EduBotics-App "
+            f"erneut hochladen."
+        )
 
     # Language-conditioned VLAs need per-frame task strings. info.json carries
     # total_tasks (== number of distinct prompts); 0 means the dataset was
@@ -472,6 +537,11 @@ def _preflight_dataset(dataset_name: str, hf_token: str, model_type: str = "") -
         f"fps={fps} joints={state_names} cameras={cameras} "
         f"total_tasks={info.get('total_tasks')}"
     )
+    # The parsed info.json rides back to run_training so the final model
+    # artifact can carry the dataset fps (edubotics_model_meta.json) — the
+    # inference side uses it to refuse a tick rate that would time-scale
+    # the policy vs its training data.
+    return info
 
 
 # ---------------- Training command ----------------
@@ -578,24 +648,46 @@ def _build_training_command(
     return cmd
 
 
+# Log lines that mean the base checkpoint did NOT fully load. Two distinct
+# v0.5.1 code paths produce them (subprocess runs with stderr merged into
+# stdout, so logging.warning lines are captured too):
+#   - pi0/pi05/pi0_fast define their own from_pretrained that wraps the
+#     weight load in a broad try/except, prints "Could not load state dict",
+#     and continues on a RANDOMLY-INITIALIZED model.
+#   - smolvla has NO from_pretrained override: the base
+#     PreTrainedPolicy.from_pretrained loads with strict=False, where
+#     missing/unexpected KEYS are only logging.warning'd
+#     (policies/utils.py log_model_loading_keys) and training continues
+#     with those submodules randomly initialized. (Shape mismatches still
+#     raise loudly; only key mismatches are silent.)
+_PRETRAINED_LOAD_FAILURE_MARKERS = (
+    "Could not load state dict",
+    "Missing key(s) when loading model",
+    "Unexpected key(s) when loading model",
+)
+
+
 def _pretrained_load_failed(output_text: str, training_params: dict) -> bool:
     """True iff a VLA base-checkpoint run silently fell back to random init.
 
     For the VLA recipe (pi0/pi05/pi0_fast/smolvla) the Cloud API injects
-    --policy.pretrained_path=<base>. On v0.5.1, PI05Policy.from_pretrained (and
-    the pi0 family) wraps the weight load in a broad try/except that, on ANY
-    load_state_dict failure, only prints "Could not load state dict" and returns
-    a RANDOMLY-INITIALIZED model — which then "fine-tunes from scratch" and exits
-    0. That is a silently-wrong model (no base knowledge), so when we detect that
-    log line on a pretrained run we fail the job instead of reporting success.
-    Plain ACT-class runs carry no pretrained_path and are never gated.
+    --policy.pretrained_path=<base>. On v0.5.1 a failed/partial base-weight
+    load does not stop training — it "fine-tunes from scratch" and exits 0
+    (see _PRETRAINED_LOAD_FAILURE_MARKERS for the per-policy mechanics).
+    That is a silently-wrong model (no base knowledge), so when we detect
+    any of those log lines on a pretrained run we fail the job instead of
+    reporting success. Plain ACT-class runs carry no pretrained_path and
+    are never gated.
     """
     flags = training_params.get("policy_cli_flags") or []
     is_pretrained_run = any(
         isinstance(f, str) and f.startswith("--policy.pretrained_path=")
         for f in flags
     )
-    return is_pretrained_run and "Could not load state dict" in (output_text or "")
+    if not is_pretrained_run:
+        return False
+    text = output_text or ""
+    return any(marker in text for marker in _PRETRAINED_LOAD_FAILURE_MARKERS)
 
 
 # ---------------- HuggingFace upload ----------------
@@ -686,7 +778,9 @@ def _start_checkpoint_watcher(
     return thread
 
 
-def _upload_model_to_hf(model_name: str, hf_token: str) -> str:
+def _upload_model_to_hf(
+    model_name: str, hf_token: str, model_meta: dict | None = None,
+) -> str:
     """Upload trained model checkpoint via upload_large_folder.
 
     upload_large_folder splits the upload into chunks, retries failed chunks,
@@ -715,6 +809,24 @@ def _upload_model_to_hf(model_name: str, hf_token: str) -> str:
     # includes every observation.images.* key the model expects). The inference
     # overlay reads that file directly, so no separate camera_config.json is
     # needed — it would be a second source of truth for data that already exists.
+
+    # What LeRobot's checkpoint does NOT carry is anything temporal: the
+    # policy config has no fps, so the inference side cannot know the rate
+    # the training data was recorded at. Stamp the dataset fps (from the
+    # preflighted meta/info.json) next to config.json so it rides the same
+    # upload; the node preflights its tick rate against it.
+    if model_meta:
+        try:
+            meta_path = Path(checkpoint_dir) / "edubotics_model_meta.json"
+            meta_path.write_text(
+                json.dumps(model_meta, indent=2), encoding="utf-8"
+            )
+        except OSError as e:
+            print(
+                f"Warnung: edubotics_model_meta.json konnte nicht "
+                f"geschrieben werden: {e}",
+                flush=True,
+            )
 
     hf_api.upload_large_folder(
         repo_id=model_name,
@@ -863,7 +975,7 @@ def run_training(
     try:
         # ----- 1. Preflight dataset (cheap, catches schema/auth issues early) -----
         try:
-            _preflight_dataset(dataset_name, hf_token, model_type)
+            dataset_info = _preflight_dataset(dataset_name, hf_token, model_type)
         except ValueError as e:
             _update_status_with_retry(
                 supabase_url, supabase_anon_key, worker_token, training_id,
@@ -1097,8 +1209,9 @@ def run_training(
         if _pretrained_load_failed(output_text, training_params):
             err_msg = (
                 "Training abgebrochen: Das vortrainierte Basismodell konnte "
-                "nicht geladen werden (LeRobot meldete 'Could not load state "
-                "dict') — das Modell waere mit zufaelligen Gewichten statt dem "
+                "nicht vollstaendig geladen werden (LeRobot meldete einen "
+                "fehlgeschlagenen oder unvollstaendigen Gewichte-Load) — das "
+                "Modell waere teilweise mit zufaelligen Gewichten statt dem "
                 "Basismodell trainiert worden. Bitte Basismodell und Datensatz "
                 "pruefen und Training neu starten."
             )
@@ -1121,7 +1234,14 @@ def run_training(
         # model was missing on HF — the student then couldn't use it for
         # inference and the row lied about its state.
         try:
-            model_url = _upload_model_to_hf(model_name, hf_token)
+            model_url = _upload_model_to_hf(
+                model_name, hf_token,
+                model_meta={
+                    "dataset_repo_id": dataset_name,
+                    "dataset_fps": (dataset_info or {}).get("fps"),
+                    "policy_type": model_type,
+                },
+            )
         except Exception as upload_err:
             err_msg = (
                 f"Training erfolgreich, aber Model-Upload zu HuggingFace "

@@ -40,8 +40,12 @@ def _ensure_stubs() -> None:
         class _RepositoryNotFoundError(Exception):
             pass
 
+        class _RevisionNotFoundError(Exception):
+            pass
+
         utils.HfHubHTTPError = _HfHubHTTPError
         utils.RepositoryNotFoundError = _RepositoryNotFoundError
+        utils.RevisionNotFoundError = _RevisionNotFoundError
         sys.modules["huggingface_hub"] = m
         sys.modules["huggingface_hub.utils"] = utils
 
@@ -148,6 +152,26 @@ class TestPretrainedLoadFailed(unittest.TestCase):
         params = {"policy_cli_flags": [self._BASE]}
         self.assertFalse(training_handler._pretrained_load_failed("", params))
         self.assertFalse(training_handler._pretrained_load_failed(None, params))
+
+    def test_smolvla_strict_false_missing_keys_is_failed(self):
+        # SmolVLA has no from_pretrained override: the base
+        # PreTrainedPolicy.from_pretrained loads with strict=False, where a
+        # key mismatch is only logging.warning'd (policies/utils.py
+        # log_model_loading_keys) and training continues on partially
+        # random submodules. The gate must catch that marker too.
+        params = {"policy_cli_flags": [
+            "--policy.pretrained_path=lerobot/smolvla_base"]}
+        log = ("WARNING Missing key(s) when loading model: "
+               "['model.vlm.embed_tokens.weight']\nstep:1K loss:0.5\n")
+        self.assertTrue(training_handler._pretrained_load_failed(log, params))
+        log2 = ("WARNING Unexpected key(s) when loading model: "
+                "['model.old_head.weight']\n")
+        self.assertTrue(training_handler._pretrained_load_failed(log2, params))
+
+    def test_smolvla_markers_not_gated_without_pretrained_path(self):
+        params = {"policy_cli_flags": []}
+        log = "Missing key(s) when loading model: ['x']"
+        self.assertFalse(training_handler._pretrained_load_failed(log, params))
 
 
 if __name__ == "__main__":

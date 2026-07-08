@@ -44,8 +44,10 @@ Design (leLab-comparison PR-1, 2026-06-07):
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
+import os
 from pathlib import Path
 import shutil
 from typing import List, Optional
@@ -182,6 +184,45 @@ def _verify_v3_tree(root: Path, expected_episodes: int) -> None:
                 )
 
 
+@contextlib.contextmanager
+def _force_recorder_vcodec(dataset_tools, logger: logging.Logger):
+    """Pin upstream's mixed-file re-encode to the recorder's codec.
+
+    delete_episodes calls the private _copy_and_reindex_videos with its
+    default vcodec='libsvtav1': any video file containing both kept and
+    deleted episodes is fully decoded and re-encoded as AV1 — a lossy
+    generation on a codec the dataset's info.json doesn't declare, and a
+    software SVT-AV1 encode that saturates student CPUs (the 2026-06-07
+    scar). v0.5.1 exposes no vcodec passthrough on the public functions, so
+    for the duration of the edit we default the helper to the same codec
+    the recorder writes (EDUBOTICS_VCODEC, h264). merge_datasets never
+    re-encodes (it stream-copies via aggregate_datasets /
+    concatenate_video_files) — its wrap is defensive only. Version-pinned
+    private access, like lerobot_dataset_wrapper; if upstream ever renames
+    the helper we fall back to upstream defaults with a logged warning
+    instead of failing the edit.
+    """
+    vcodec = os.environ.get('EDUBOTICS_VCODEC', 'h264')
+    original = getattr(dataset_tools, '_copy_and_reindex_videos', None)
+    if original is None:
+        logger.warning(
+            '_copy_and_reindex_videos not found in lerobot dataset_tools — '
+            're-encoded video files will use the upstream default codec.'
+        )
+        yield
+        return
+
+    def _with_recorder_codec(*args, **kwargs):
+        kwargs.setdefault('vcodec', vcodec)
+        return original(*args, **kwargs)
+
+    dataset_tools._copy_and_reindex_videos = _with_recorder_codec
+    try:
+        yield
+    finally:
+        dataset_tools._copy_and_reindex_videos = original
+
+
 def _load_source_dataset(dataset_path: Path, logger: logging.Logger):
     """Construct the source LeRobotDataset (local-only for a complete tree).
 
@@ -263,12 +304,13 @@ def delete_episodes_v3(
         # Explicit output_dir + repo_id: the upstream defaults would create a
         # '<repo>_modified' SIBLING under the lerobot home instead of our
         # swap-managed tmp tree (dataset_tools.delete_episodes:115-116).
-        dataset_tools.delete_episodes(
-            source_dataset,
-            indices,
-            output_dir=tmp,
-            repo_id=_derive_repo_id(src),
-        )
+        with _force_recorder_vcodec(dataset_tools, logger):
+            dataset_tools.delete_episodes(
+                source_dataset,
+                indices,
+                output_dir=tmp,
+                repo_id=_derive_repo_id(src),
+            )
     except DataEditError:
         shutil.rmtree(tmp, ignore_errors=True)
         raise
@@ -372,9 +414,10 @@ def merge_datasets_v3(
         f'({expected_total} episodes) into {out}'
     )
     try:
-        dataset_tools.merge_datasets(
-            datasets, output_repo_id=_derive_repo_id(out), output_dir=out
-        )
+        with _force_recorder_vcodec(dataset_tools, logger):
+            dataset_tools.merge_datasets(
+                datasets, output_repo_id=_derive_repo_id(out), output_dir=out
+            )
     except DataEditError:
         raise
     except Exception as e:  # noqa: BLE001 — boundary to upstream

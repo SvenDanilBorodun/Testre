@@ -510,7 +510,43 @@ async def start_training(req: StartTrainingRequest, user=Depends(get_current_use
     #     sibling can't trap the entire group.
     await _sweep_user_running_jobs(user_id, workgroup_id=workgroup_id)
 
-    # 0b. Idempotency: a duplicate /start within DEDUPE_WINDOW returns the
+    # 0b. Build the EFFECTIVE params dict BEFORE the dedupe check — the same
+    #     dict that gets stored on the row and dispatched to Modal. The
+    #     dedupe must compare against what a previous identical request
+    #     actually STORED; comparing the raw request dump made the dedupe
+    #     dead in production (the stored dict always gained timeout_hours +
+    #     the VLA caps before insert, so a network-timeout retry never
+    #     matched and burned a second credit).
+    training_params_dict = req.training_params.model_dump(exclude_none=True)
+
+    # Cap timeout_hours per-policy. Protects against a wedged ACT job burning
+    # the handler's 5h default when ACT converges in <90 min. (L4-tier caps are
+    # all <7h = the L4 Modal function timeout; A100-tier caps <11h = the A100
+    # function timeout — so every cap is actually reachable now that VLAs route
+    # to the A100 `train_vla` function.)
+    policy_cap = POLICY_MAX_TIMEOUT_HOURS.get(req.model_type.lower())
+    if policy_cap is not None:
+        requested = training_params_dict.get("timeout_hours", policy_cap)
+        training_params_dict["timeout_hours"] = min(requested, policy_cap)
+
+    # Resolve the per-policy recipe + GPU tier (single source of truth in
+    # app.services.policy_profile). VLA policies (pi0/pi05/pi0_fast/smolvla) get
+    # their base-checkpoint + memory flags here and route to the A100 function;
+    # ACT-class get an empty flag list + L4. The recipe flags ride the Modal
+    # payload only (not the stored row's training_params) so the dedupe key and
+    # teacher-facing params stay the clean user-entered set.
+    profile = get_policy_profile(req.model_type)
+    gpu_tier = profile["gpu_tier"]
+
+    # Per-policy step cap + batch clamp (VLAs only; ACT-class is a no-op). Cap
+    # steps to save A100 hours and clamp batch into the safe/effective range.
+    # Mutates training_params_dict BEFORE the dedupe + row insert + dispatch so
+    # the dedupe key, the stored total_steps, the payload, and the worker all
+    # agree. p_total_steps below uses the (possibly capped)
+    # training_params_dict["steps"].
+    apply_training_tuning(profile, training_params_dict)
+
+    # 0c. Idempotency: a duplicate /start within DEDUPE_WINDOW returns the
     #     existing training instead of creating a new one. Catches network
     #     retries and accidental double-clicks. Zero schema/client cost.
     #     Params are part of the dedup key so changing `steps` actually
@@ -518,7 +554,7 @@ async def start_training(req: StartTrainingRequest, user=Depends(get_current_use
     #     instead of being silently collapsed. Group-scoped when grouped.
     duplicate = _find_recent_duplicate(
         user_id, req.dataset_name, req.model_type,
-        training_params=req.training_params.model_dump(exclude_none=True),
+        training_params=training_params_dict,
         workgroup_id=workgroup_id,
     )
     if duplicate:
@@ -563,34 +599,6 @@ async def start_training(req: StartTrainingRequest, user=Depends(get_current_use
         output_folder_name=req.training_params.output_folder_name,
     )
     worker_token = str(uuid.uuid4())
-    # Pydantic model → plain dict for JSON serialization to RPC + Modal.
-    training_params_dict = req.training_params.model_dump(exclude_none=True)
-
-    # Cap timeout_hours per-policy. Protects against a wedged ACT job burning
-    # the handler's 5h default when ACT converges in <90 min. (L4-tier caps are
-    # all <7h = the L4 Modal function timeout; A100-tier caps <11h = the A100
-    # function timeout — so every cap is actually reachable now that VLAs route
-    # to the A100 `train_vla` function.)
-    policy_cap = POLICY_MAX_TIMEOUT_HOURS.get(req.model_type.lower())
-    if policy_cap is not None:
-        requested = training_params_dict.get("timeout_hours", policy_cap)
-        training_params_dict["timeout_hours"] = min(requested, policy_cap)
-
-    # Resolve the per-policy recipe + GPU tier (single source of truth in
-    # app.services.policy_profile). VLA policies (pi0/pi05/pi0_fast/smolvla) get
-    # their base-checkpoint + memory flags here and route to the A100 function;
-    # ACT-class get an empty flag list + L4. The recipe flags ride the Modal
-    # payload only (not the stored row's training_params) so the dedupe key and
-    # teacher-facing params stay the clean user-entered set.
-    profile = get_policy_profile(req.model_type)
-    gpu_tier = profile["gpu_tier"]
-
-    # Per-policy step cap + batch clamp (VLAs only; ACT-class is a no-op). Cap
-    # steps to save A100 hours and clamp batch into the safe/effective range.
-    # Mutates training_params_dict BEFORE the row insert + dispatch so the
-    # stored total_steps, the payload, and the worker all agree. p_total_steps
-    # below uses the (possibly capped) training_params_dict["steps"].
-    apply_training_tuning(profile, training_params_dict)
 
     try:
         rpc_result = supabase.rpc(

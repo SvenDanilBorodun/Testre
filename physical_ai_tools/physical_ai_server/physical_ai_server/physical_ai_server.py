@@ -1012,7 +1012,12 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 if target_fps > 0 and hasattr(self.communicator, 'get_camera_observed_hz'):
                     for cam_name in self.communicator.camera_topic_msgs.keys():
                         observed = self.communicator.get_camera_observed_hz(cam_name, 3.0)
-                        if observed is not None and observed < target_fps * 0.8:
+                        # Threshold 0.9 (was 0.8): the documented real case is
+                        # the Innomaker MSMF ~25 Hz ceiling against a 30 fps
+                        # recording — ratio 0.833, which sat silently under
+                        # 0.8 while ~17% of frames duplicated. 0.9 catches it
+                        # with margin while tolerating ±10% window jitter.
+                        if observed is not None and observed < target_fps * 0.9:
                             warning = (
                                 f'Kamera "{cam_name}" liefert nur '
                                 f'{observed:.1f} Hz, Aufnahme erwartet '
@@ -1093,12 +1098,13 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         if not self.data_manager.check_lerobot_dataset(
                 camera_data,
                 self.total_joint_order):
-            # check_lerobot_dataset writes a specific German warning to
-            # _last_warning_message when the failure is a camera-name
-            # mismatch against a resumed dataset. Prefer that over the
-            # generic English fallback so the student sees something
-            # actionable (which cameras mismatch, what the expected names
-            # were) instead of being misdirected toward repo-name issues.
+            # check_lerobot_dataset returns False on any dataset-init
+            # failure. If a lower layer left a German warning in
+            # _last_warning_message, prefer it over the generic English
+            # fallback. (It does NOT specifically validate camera names
+            # against a resumed dataset — a feature mismatch on resume
+            # surfaces later, from add_frame inside record(), which is why
+            # record() below is exception-guarded.)
             specific = getattr(self.data_manager, '_last_warning_message', '')
             if specific:
                 error_msg = specific
@@ -1122,10 +1128,33 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 joystick_mode=self.communicator.joystick_state['mode'])
             self.communicator.joystick_state['updated'] = False
 
-        record_completed = self.data_manager.record(
-            images=camera_data,
-            state=follower_data,
-            action=leader_data)
+        try:
+            record_completed = self.data_manager.record(
+                images=camera_data,
+                state=follower_data,
+                action=leader_data)
+        except Exception as e:
+            # add_frame raises from inside upstream lerobot on (a) a feature
+            # mismatch when resuming an existing dataset on a changed rig
+            # (different camera set/names or joint count) and (b) a dead
+            # streaming-encoder thread (disk full, av error). Uncaught, the
+            # exception escapes the timer callback and kills the whole node
+            # (main() catches only KeyboardInterrupt) — turn it into a
+            # German stop like the convert-error handler above.
+            self.get_logger().error(f'record() failed: {e}')
+            error_msg = (
+                f'Aufnahme gestoppt: Frame konnte nicht gespeichert werden '
+                f'({e}). Häufige Ursachen: Der Datensatz wurde mit anderen '
+                f'Kameras/Gelenken begonnen (Fortsetzen auf geändertem '
+                f'Aufbau) oder der Speicher ist voll. Bitte Aufbau prüfen '
+                f'oder einen neuen Datensatz-Namen wählen.'
+            )
+            self.on_recording = False
+            current_status.phase = TaskStatus.READY
+            current_status.error = error_msg
+            self.communicator.publish_status(status=current_status)
+            self.timer_manager.stop(timer_name=self.operation_mode)
+            return
 
         current_status = self.data_manager.get_current_record_status()
         self.communicator.publish_status(status=current_status)
@@ -1424,14 +1453,65 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                             f'{sorted(available_cams)}')
                         return response
 
+                    # Temporal pre-flight: driving a policy at a different
+                    # rate than its training data time-scales every action
+                    # chunk (too fast/slow) — the checkpoint itself carries
+                    # no fps, so the Modal worker stamps the dataset fps
+                    # into edubotics_model_meta.json next to config.json.
+                    # Models trained before the stamp existed skip the
+                    # comparison; an fps of 0 would ZeroDivisionError at
+                    # timer creation either way, so refuse it always.
+                    task_fps = float(getattr(task_info, 'fps', 0) or 0)
+                    if task_fps <= 0:
+                        self.on_inference = False  # F1 — release the claim on refusal
+                        response.success = False
+                        response.message = (
+                            'Ungültige fps-Einstellung (0). Bitte im '
+                            'Inferenz-Panel eine gültige Bildrate setzen '
+                            '(z. B. 30) und erneut starten.'
+                        )
+                        self.get_logger().error('Pre-flight: fps <= 0')
+                        return response
+                    trained_fps = summary.get('trained_fps')
+                    if trained_fps and abs(task_fps - float(trained_fps)) > 0.5:
+                        self.on_inference = False  # F1 — release the claim on refusal
+                        response.success = False
+                        response.message = (
+                            f'Dieses Modell wurde mit '
+                            f'{float(trained_fps):.0f} fps trainiert, die '
+                            f'Inferenz ist auf {task_fps:.0f} fps '
+                            f'eingestellt. Bitte die fps im Inferenz-Panel '
+                            f'auf {float(trained_fps):.0f} setzen und erneut '
+                            f'starten.'
+                        )
+                        self.get_logger().error(
+                            f'Pre-flight: fps mismatch (trained '
+                            f'{trained_fps}, requested {task_fps})')
+                        return response
+
+                    if task_info.record_inference_mode:
+                        # The record-during-inference toggle is advertised by
+                        # the UI, but the inference timer has no record()
+                        # path — the only data_manager.record() call site is
+                        # the data-collection timer, which never runs in
+                        # inference mode. Arming on_recording here produced a
+                        # session that claimed to record and wrote NOTHING.
+                        # Refuse loudly until a real recording path exists.
+                        self.on_inference = False  # F1 — release the claim on refusal
+                        response.success = False
+                        response.message = (
+                            'Aufnahme während der Inferenz wird derzeit '
+                            'nicht unterstützt. Bitte den Aufnahme-Modus im '
+                            'Inferenz-Panel deaktivieren und erneut starten.'
+                        )
+                        self.get_logger().error(
+                            'Pre-flight: record_inference_mode requested but '
+                            'the inference timer has no record() path')
+                        return response
+
                     self.init_robot_control_parameters_from_user_task(
                         task_info
                     )
-                    if task_info.record_inference_mode:
-                        self.on_recording = True
-                        # This inference session RECORDS — arm the crash marker
-                        # like a plain recording session.
-                        self.data_manager._session_marker_enabled = True
                     self.inference_manager.reset_policy()
                     self.start_recording_time = time.perf_counter()
 

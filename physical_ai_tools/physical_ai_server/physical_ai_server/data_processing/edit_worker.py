@@ -143,7 +143,23 @@ def run_edit(payload: dict, logger: Optional[logging.Logger] = None) -> dict:
         else:
             return {'success': False, 'message': f'Unknown edit mode: {mode}'}
 
-        return {'success': True, 'message': f'Successfully processed edit mode: {mode}'}
+        # Success messages are student-facing (Rule §1). Deletes edit an
+        # EXISTING dataset in place — one that may already live on Hugging
+        # Face, and edits are local-only (no auto re-upload), so without the
+        # hint the student trains on the pre-edit hub copy believing the
+        # deleted episodes are gone. A merge builds a NEW local dataset that
+        # has never been uploaded, so no hint is needed there.
+        if mode == MODE_DELETE:
+            return {
+                'success': True,
+                'message': (
+                    'Bearbeitung abgeschlossen. Hinweis: Falls dieser '
+                    'Datensatz bereits zu Hugging Face hochgeladen wurde, '
+                    'bitte erneut hochladen — das Cloud-Training verwendet '
+                    'sonst weiterhin den alten Stand ohne diese Änderung.'
+                ),
+            }
+        return {'success': True, 'message': 'Bearbeitung abgeschlossen.'}
 
     except DataEditError as e:
         # Student-facing German message; technical cause already logged by

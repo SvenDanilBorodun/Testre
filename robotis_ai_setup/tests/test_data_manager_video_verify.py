@@ -61,16 +61,21 @@ def _install_stubs():
     _stub('trajectory_msgs.msg', JointTrajectory=_placeholder)
 
     _stub('huggingface_hub',
+          CommitOperationDelete=_placeholder,
           DatasetCard=_placeholder, DatasetCardData=_placeholder,
           HfApi=_placeholder, ModelCard=_placeholder, ModelCardData=_placeholder,
           snapshot_download=lambda *a, **k: None,
           upload_large_folder=lambda *a, **k: None)
-    _stub('huggingface_hub.errors', LocalTokenNotFoundError=type(
-        'LocalTokenNotFoundError', (Exception,), {}))
+    _stub('huggingface_hub.errors',
+          LocalTokenNotFoundError=type(
+              'LocalTokenNotFoundError', (Exception,), {}),
+          RevisionNotFoundError=type(
+              'RevisionNotFoundError', (Exception,), {}))
 
     _stub('lerobot')
     _stub('lerobot.datasets')
     _stub('lerobot.datasets.utils', DEFAULT_FEATURES={})
+    _stub('lerobot.datasets.dataset_metadata', CODEBASE_VERSION='v3.0')
 
     _stub('physical_ai_interfaces')
     _stub('physical_ai_interfaces.msg', TaskStatus=_placeholder)

@@ -41,8 +41,12 @@ def _ensure_stubs() -> None:
         class _RepositoryNotFoundError(Exception):
             pass
 
+        class _RevisionNotFoundError(Exception):
+            pass
+
         utils.HfHubHTTPError = _HfHubHTTPError
         utils.RepositoryNotFoundError = _RepositoryNotFoundError
+        utils.RevisionNotFoundError = _RevisionNotFoundError
         sys.modules["huggingface_hub"] = m
         sys.modules["huggingface_hub.utils"] = utils
 

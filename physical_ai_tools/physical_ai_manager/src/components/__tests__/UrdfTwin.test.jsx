@@ -83,6 +83,13 @@ const mockRobot = {
 const mockGroupCtor = vi.fn();
 const mockLineCtor = vi.fn();
 const mockAxesCtor = vi.fn();
+// Sim-stage spies — assert the catalog-sized boxes, the reach ring, and the
+// per-type object material colour. All stay uncalled for the default-prop call.
+const mockBoxGeometryCtor = vi.fn();
+const mockRingGeometryCtor = vi.fn();
+const mockStandardMaterialCtor = vi.fn(); // captures the opts (incl. color)
+// The captured WebGLRenderer instance so the shadow-map flag can be asserted.
+let mockRenderer = null;
 // Path-trail internals: a setDrawRange spy + the captured path BufferGeometry let
 // the extended tests assert the draw range advances (append) and resets (clear).
 const mockSetDrawRange = vi.fn();
@@ -149,20 +156,84 @@ vi.mock('three', () => {
       return noopObj({ updateProjectionMatrix: () => {}, aspect: 1, near: 0.1, far: 100 });
     },
     WebGLRenderer: function WebGLRenderer() {
-      return {
+      // Capture the instance + a shadowMap object so the sim-stage shadow test can
+      // assert `showShadows` flips renderer.shadowMap.enabled (and the default
+      // call leaves it false).
+      mockRenderer = {
         setPixelRatio: () => {},
         setSize: () => {},
         render: () => {},
         dispose: () => {},
+        shadowMap: { enabled: false, type: null },
         domElement: document.createElement('canvas'),
       };
+      return mockRenderer;
     },
     HemisphereLight: function HemisphereLight() { return noopObj(); },
-    DirectionalLight: function DirectionalLight() { return noopObj(); },
+    // The key light: a settable castShadow + a shadow object (mapSize.set + a
+    // shadow camera) so the sim-stage shadow config path runs. Only touched when
+    // showShadows is enabled.
+    DirectionalLight: function DirectionalLight() {
+      return noopObj({
+        castShadow: false,
+        shadow: {
+          bias: 0,
+          mapSize: { set: () => {} },
+          camera: { updateProjectionMatrix: () => {} },
+        },
+      });
+    },
     GridHelper: function GridHelper() { return noopObj(); },
-    MeshStandardMaterial: function MeshStandardMaterial() { return { dispose: () => {} }; },
+    MeshStandardMaterial: function MeshStandardMaterial(opts) {
+      // Capture the opts (incl. the per-type `color`) so the sim-stage tests can
+      // assert an object used its catalog colour; provide color.set for the
+      // grasp-recolor path.
+      mockStandardMaterialCtor(opts);
+      return { color: { set: () => {} }, dispose: () => {} };
+    },
     MeshPhongMaterial: function MeshPhongMaterial() { return { dispose: () => {} }; },
-    Mesh: function Mesh() { return noopObj(); },
+    MeshBasicMaterial: function MeshBasicMaterial() { return { color: { set: () => {} }, dispose: () => {} }; },
+    Mesh: function Mesh(geometry, material) {
+      // Rich enough for the sim-object/table/ring paths: userData bookkeeping, a
+      // settable position (positionSimObject/snapMeshToTable write .y), rotation,
+      // and shadow flags. Never constructed by the default-prop tests (objects/
+      // table/zones/ring are all off there).
+      return {
+        geometry,
+        material,
+        userData: {},
+        position: {
+          set(x = 0, y = 0, z = 0) { this.x = x; this.y = y; this.z = z; return this; },
+          x: 0, y: 0, z: 0,
+        },
+        rotation: { set: () => {}, x: 0 },
+        castShadow: false,
+        receiveShadow: false,
+        visible: true,
+        parent: null,
+        add: () => {},
+        dispose: () => {},
+      };
+    },
+    // Sim-object / zone / table / ring geometries. BoxGeometry + RingGeometry are
+    // spied so the sim-stage tests can assert per-type sizes + the reach ring
+    // bounds; all are inert no-ops otherwise.
+    BoxGeometry: function BoxGeometry(w, h, d) {
+      mockBoxGeometryCtor(w, h, d);
+      return { dispose: () => {} };
+    },
+    PlaneGeometry: function PlaneGeometry() { return { dispose: () => {} }; },
+    EdgesGeometry: function EdgesGeometry() { return { dispose: () => {} }; },
+    RingGeometry: function RingGeometry(inner, outer, seg) {
+      mockRingGeometryCtor(inner, outer, seg);
+      return { dispose: () => {} };
+    },
+    LineSegments: function LineSegments(geometry, material) {
+      return { geometry, material, position: { set: () => {} }, dispose: () => {} };
+    },
+    // three enum-ish constants the sim-stage paths reference.
+    PCFSoftShadowMap: 1,
+    DoubleSide: 2,
     // Phase-5 path-trail + frame-triad primitives (inert; constructed only when
     // showPath/showFrames are enabled).
     Group: function Group() { mockGroupCtor(); return noopObj({ visible: true }); },
@@ -219,6 +290,10 @@ beforeEach(() => {
   mockGroupCtor.mockClear();
   mockLineCtor.mockClear();
   mockAxesCtor.mockClear();
+  mockBoxGeometryCtor.mockClear();
+  mockRingGeometryCtor.mockClear();
+  mockStandardMaterialCtor.mockClear();
+  mockRenderer = null;
   mockSetDrawRange.mockClear();
   mockPathGeometry = null;
   mockEEWorld.x = 0;
@@ -415,5 +490,92 @@ describe('UrdfTwin — path trail accumulation (Phase-5)', () => {
     expect(mockPathGeometry.attributes.position.needsUpdate).toBe(true);
     // The mirror subscription is untouched by the clear (no re-subscribe).
     expect(mockSubscribe).toHaveBeenCalledTimes(1);
+  });
+});
+
+// Sim-stage layer: catalog-sized/coloured objects, the reach ring, and soft
+// shadows. All are additive + default-off — the default-prop tests above construct
+// none of these primitives and never set a renderer shadow flag.
+describe('UrdfTwin — sim-stage catalog objects / reach ring / shadows', () => {
+  test('default props build no Box/Ring geometry and leave the shadow map off', async () => {
+    render(<UrdfTwin />);
+    await waitFor(() => expect(mockSubscribe).toHaveBeenCalledTimes(1));
+    expect(mockBoxGeometryCtor).not.toHaveBeenCalled();
+    expect(mockRingGeometryCtor).not.toHaveBeenCalled();
+    expect(mockRenderer.shadowMap.enabled).toBe(false);
+  });
+
+  test('sim objects render per-type box dimensions + colour from catalogDims', async () => {
+    render(
+      <UrdfTwin
+        objects={[{ type: 'wuerfel', tag_id: 20, x: 0.15, y: 0, yaw: 0 }]}
+        catalogDims={{ wuerfel: { height_m: 0.05, width_m: 0.04, color: '#00ff00', max_instances: 2 } }}
+      />
+    );
+    await waitFor(() => expect(mockSubscribe).toHaveBeenCalledTimes(1));
+    // Box is width × height × width (footprint square, catalog height).
+    expect(mockBoxGeometryCtor).toHaveBeenCalledWith(0.04, 0.05, 0.04);
+    // One object material was built with the catalog colour.
+    const colors = mockStandardMaterialCtor.mock.calls.map((c) => c[0] && c[0].color);
+    expect(colors).toContain('#00ff00');
+  });
+
+  test('an object without catalog dims falls back to the amber cube', async () => {
+    render(<UrdfTwin objects={[{ type: 'wuerfel', tag_id: 20, x: 0.15, y: 0, yaw: 0 }]} catalogDims={{}} />);
+    await waitFor(() => expect(mockSubscribe).toHaveBeenCalledTimes(1));
+    expect(mockBoxGeometryCtor).toHaveBeenCalledWith(0.03, 0.03, 0.03);
+    const colors = mockStandardMaterialCtor.mock.calls.map((c) => c[0] && c[0].color);
+    expect(colors).toContain('#f59e0b');
+  });
+
+  test('late-arriving catalogDims disposes+rebuilds an existing mesh at the new size', async () => {
+    const objects = [{ type: 'wuerfel', tag_id: 20, x: 0.15, y: 0, yaw: 0 }];
+    const { rerender } = render(<UrdfTwin objects={objects} catalogDims={{}} />);
+    await waitFor(() => expect(mockSubscribe).toHaveBeenCalledTimes(1));
+    // Built once with the fallback cube.
+    expect(mockBoxGeometryCtor).toHaveBeenCalledWith(0.03, 0.03, 0.03);
+    mockBoxGeometryCtor.mockClear();
+
+    // Catalog arrives (async) with real dims -> the stale mesh is rebuilt.
+    rerender(
+      <UrdfTwin
+        objects={objects}
+        catalogDims={{ wuerfel: { height_m: 0.05, width_m: 0.04, color: '#00ff00', max_instances: 2 } }}
+      />
+    );
+    expect(mockBoxGeometryCtor).toHaveBeenCalledWith(0.04, 0.05, 0.04);
+  });
+
+  test('a type change under a reused tag_id rebuilds the mesh at the new type size', async () => {
+    const catalogDims = {
+      wuerfel: { height_m: 0.03, width_m: 0.03, color: '#f59e0b', max_instances: 2 },
+      kugel: { height_m: 0.06, width_m: 0.06, color: '#3b82f6', max_instances: 1 },
+    };
+    const { rerender } = render(
+      <UrdfTwin objects={[{ type: 'wuerfel', tag_id: 20, x: 0.15, y: 0, yaw: 0 }]} catalogDims={catalogDims} />
+    );
+    await waitFor(() => expect(mockSubscribe).toHaveBeenCalledTimes(1));
+    expect(mockBoxGeometryCtor).toHaveBeenCalledWith(0.03, 0.03, 0.03);
+    mockBoxGeometryCtor.mockClear();
+
+    // Same tag_id, different type (a re-hydrated workflow) -> dispose + rebuild.
+    rerender(
+      <UrdfTwin objects={[{ type: 'kugel', tag_id: 20, x: 0.15, y: 0, yaw: 0 }]} catalogDims={catalogDims} />
+    );
+    expect(mockBoxGeometryCtor).toHaveBeenCalledWith(0.06, 0.06, 0.06);
+  });
+
+  test('showReach builds the 0.10/0.28 ring and showShadows enables the renderer shadow map', async () => {
+    render(
+      <UrdfTwin
+        showReach
+        showShadows
+        showTable
+        objects={[{ type: 'wuerfel', tag_id: 20, x: 0.15, y: 0, yaw: 0 }]}
+      />
+    );
+    await waitFor(() => expect(mockSubscribe).toHaveBeenCalledTimes(1));
+    expect(mockRingGeometryCtor).toHaveBeenCalledWith(0.1, 0.28, 64);
+    expect(mockRenderer.shadowMap.enabled).toBe(true);
   });
 });

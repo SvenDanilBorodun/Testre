@@ -53,7 +53,9 @@ Schema accepted by :func:`parse_catalog` (the fixed constant is one instance)::
           "object_height_m": 0.040,        // tag/top plane above the table
           "grasp_depth_m": 0.015,          // jaws close this far below the top
           "gripper_close_rad": -0.30,      // tuned to the body width at the grasp band
-          "approach_clear_m": 0.06         // optional (default 0.06): hover height
+          "approach_clear_m": 0.06,        // optional (default 0.06): hover height
+          "object_width_m": 0.030,         // optional (default = object_height_m): render footprint width
+          "color_hex": "#f59e0b"           // optional (default amber): simulation render colour
         }
       }
     }
@@ -81,11 +83,17 @@ _DEFAULT_TAG_SIZE_M = 0.024
 # literal here to avoid importing the ROS-coupled motion module into this
 # stdlib-only loader).
 _DEFAULT_APPROACH_CLEAR_M = 0.06
+# Default render colour (amber) for a catalog object when a type omits
+# ``color_hex``. Render-only (simulation view / 3D twin), not a physical
+# property, so it has no rig-measured value.
+_DEFAULT_OBJECT_COLOR_HEX = '#f59e0b'
 
 # Type names become Blockly dropdown VALUES and lowercased handler arg values,
 # so they must be simple tokens (no spaces / punctuation). The German display
 # text lives in ``label_de``; the key is the internal identifier.
 _TYPE_NAME_RE = re.compile(r'^[A-Za-z0-9_]+$')
+# ``color_hex`` render colour must be a 6-digit hex string like ``#f59e0b``.
+_COLOR_HEX_RE = re.compile(r'^#[0-9A-Fa-f]{6}$')
 
 
 class ObjectCatalogError(Exception):
@@ -108,6 +116,13 @@ class GraspRecipe:
     grasp_depth_m: float
     gripper_close_rad: float
     approach_clear_m: float
+    # Render-only fields (simulation view), appended LAST WITH defaults because
+    # dataclass ordering forbids a defaulted field before the non-defaulted ones
+    # above. ``object_width_m`` 0.0 is a sentinel that ``_parse_type`` always
+    # resolves (it defaults to object_height_m — a cube — when the entry omits
+    # the key), so a resolved recipe never carries the 0.0.
+    object_width_m: float = 0.0
+    color_hex: str = _DEFAULT_OBJECT_COLOR_HEX
 
 
 class ObjectCatalog:
@@ -198,6 +213,8 @@ _FIXED_CATALOG: dict = {
             'grasp_depth_m': 0.015,
             'gripper_close_rad': -0.5,
             'approach_clear_m': 0.06,
+            'object_width_m': 0.030,
+            'color_hex': '#f59e0b',
         },
     },
 }
@@ -327,6 +344,26 @@ def _parse_type(type_name: str, entry, seen_tags: dict[int, str]) -> GraspRecipe
     else:
         approach_clear_m = _DEFAULT_APPROACH_CLEAR_M
 
+    # object_width_m is optional (render-only footprint width). Absent → default
+    # to the object height (a cube); present → must be a positive number.
+    if 'object_width_m' in entry:
+        object_width_m = _require_number(
+            entry.get('object_width_m'), type_name, 'object_width_m', positive=True)
+    else:
+        object_width_m = object_height_m
+
+    # color_hex is optional (render-only). Absent → default amber; present →
+    # must be a 6-digit hex colour like "#f59e0b".
+    if 'color_hex' in entry:
+        color_hex = entry.get('color_hex')
+        if not isinstance(color_hex, str) or not _COLOR_HEX_RE.match(color_hex):
+            raise ObjectCatalogError(
+                f'Objekt „{type_name}": Feld „color_hex" muss eine Farbe im '
+                'Format „#RRGGBB" sein.'
+            )
+    else:
+        color_hex = _DEFAULT_OBJECT_COLOR_HEX
+
     return GraspRecipe(
         type_name=type_name,
         label_de=label_de,
@@ -335,6 +372,8 @@ def _parse_type(type_name: str, entry, seen_tags: dict[int, str]) -> GraspRecipe
         grasp_depth_m=grasp_depth_m,
         gripper_close_rad=gripper_close_rad,
         approach_clear_m=approach_clear_m,
+        object_width_m=object_width_m,
+        color_hex=color_hex,
     )
 
 
@@ -376,3 +415,61 @@ def parse_catalog(data) -> ObjectCatalog:
         recipes[type_name] = _parse_type(type_name, entry, seen_tags)
 
     return ObjectCatalog(tag_size_m=tag_size_m, recipes=recipes)
+
+
+# ── GetObjectCatalog.srv response helpers ────────────────────────────────────
+# Field names are the srv response array names; the ROS handler assigns each list
+# to the matching response attribute. Kept here (pure / no rclpy) so the whole
+# wire contract is unit-testable without a container.
+def catalog_response_fields(catalog: ObjectCatalog) -> dict:
+    """Build the six parallel arrays for ``GetObjectCatalog.srv`` from a
+    validated :class:`ObjectCatalog`, in catalog order. ``max_instances`` is
+    ``len(recipe.tag_ids)`` — how many copies of a type the simulator can detect
+    (the 2D editor's placement cap). All returned lists are the same length."""
+    type_names: list[str] = []
+    labels_de: list[str] = []
+    object_height_m: list[float] = []
+    object_width_m: list[float] = []
+    color_hex: list[str] = []
+    max_instances: list[int] = []
+    for name in catalog.type_names():
+        recipe = catalog.recipe_for_type(name)
+        type_names.append(name)
+        labels_de.append(recipe.label_de)
+        object_height_m.append(float(recipe.object_height_m))
+        object_width_m.append(float(recipe.object_width_m))
+        color_hex.append(str(recipe.color_hex))
+        max_instances.append(len(recipe.tag_ids))
+    return {
+        'type_names': type_names,
+        'labels_de': labels_de,
+        'object_height_m': object_height_m,
+        'object_width_m': object_width_m,
+        'color_hex': color_hex,
+        'max_instances': max_instances,
+    }
+
+
+def build_object_catalog_response() -> dict:
+    """Full ``GetObjectCatalog.srv`` response payload for the fixed, fleet-wide
+    catalog: the six parallel arrays plus ``success`` + ``message``. Pure / ROS
+    -free so the wire contract can be unit-tested end-to-end. On any error (only
+    a developer typo in :data:`_FIXED_CATALOG` can trigger it) ALL SIX arrays are
+    emptied together, ``success`` is ``False``, and ``message`` carries the
+    German reason — parity across every array."""
+    try:
+        fields = catalog_response_fields(fixed_catalog())
+        fields['success'] = True
+        fields['message'] = ''
+    except Exception as e:
+        fields = {
+            'type_names': [],
+            'labels_de': [],
+            'object_height_m': [],
+            'object_width_m': [],
+            'color_hex': [],
+            'max_instances': [],
+            'success': False,
+            'message': str(e),
+        }
+    return fields

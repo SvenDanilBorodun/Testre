@@ -10,9 +10,12 @@ from __future__ import annotations
 
 import pytest
 
+from physical_ai_server.workflow import object_catalog as object_catalog_mod
 from physical_ai_server.workflow.object_catalog import (
     ObjectCatalog,
     ObjectCatalogError,
+    build_object_catalog_response,
+    catalog_response_fields,
     fixed_catalog,
     parse_catalog,
 )
@@ -257,3 +260,126 @@ def test_fixed_catalog_reread_each_call(monkeypatch):
 def test_fixed_catalog_is_a_fresh_instance_each_call():
     # Stateless: no shared mutable global to corrupt between workflow starts.
     assert fixed_catalog() is not fixed_catalog()
+
+
+# ── render fields: object_width_m + color_hex (simulation view) ──────────────
+def test_fixed_catalog_wuerfel_has_render_fields(monkeypatch):
+    # The rig-validated cube renders as a 3 cm amber box.
+    monkeypatch.delenv('EDUBOTICS_TAG_SIZE_M', raising=False)
+    r = fixed_catalog().recipe_for_type('wuerfel')
+    assert r.object_width_m == pytest.approx(0.030)
+    assert r.color_hex == '#f59e0b'
+
+
+def test_object_width_defaults_to_height_when_missing():
+    # A catalog without object_width_m stays valid; width defaults to the object
+    # height (a cube). _valid_dict() omits object_width_m on both types.
+    cat = parse_catalog(_valid_dict())
+    banane = cat.recipe_for_type('banane')
+    assert banane.object_width_m == pytest.approx(banane.object_height_m)  # 0.040
+    blau = cat.recipe_for_type('wuerfel_blau')
+    assert blau.object_width_m == pytest.approx(blau.object_height_m)  # 0.030
+
+
+def test_color_hex_defaults_when_missing():
+    # No color_hex key -> the amber default.
+    cat = parse_catalog(_valid_dict())
+    assert cat.recipe_for_type('banane').color_hex == '#f59e0b'
+
+
+def test_object_width_explicit_value_honored():
+    data = _valid_dict()
+    data['types']['banane']['object_width_m'] = 0.055
+    r = parse_catalog(data).recipe_for_type('banane')
+    assert r.object_width_m == pytest.approx(0.055)
+    assert r.object_height_m == pytest.approx(0.040)  # height unaffected
+
+
+@pytest.mark.parametrize('bad', [0.0, -0.01])
+def test_non_positive_object_width_fails(bad):
+    data = _valid_dict()
+    data['types']['banane']['object_width_m'] = bad
+    with pytest.raises(ObjectCatalogError, match='object_width_m'):
+        parse_catalog(data)
+
+
+@pytest.mark.parametrize('good', ['#AbCdEf', '#000000', '#FFFFFF', '#f59e0b'])
+def test_color_hex_valid_forms_accepted(good):
+    data = _valid_dict()
+    data['types']['banane']['color_hex'] = good
+    assert parse_catalog(data).recipe_for_type('banane').color_hex == good
+
+
+@pytest.mark.parametrize('bad', [
+    'f59e0b',    # missing '#'
+    '#f59e0',    # too short (5 hex digits)
+    '#f59e0bb',  # too long (7 hex digits)
+    '#f59e0g',   # non-hex character
+    '#12 456',   # space (not hex)
+    0xf59e0b,    # non-string (an int literal)
+    None,        # non-string
+])
+def test_bad_color_hex_rejected(bad):
+    data = _valid_dict()
+    data['types']['banane']['color_hex'] = bad
+    with pytest.raises(ObjectCatalogError, match='color_hex'):
+        parse_catalog(data)
+
+
+# ── GetObjectCatalog.srv response contract (six parallel arrays) ─────────────
+_RESPONSE_ARRAY_KEYS = (
+    'type_names', 'labels_de', 'object_height_m', 'object_width_m',
+    'color_hex', 'max_instances',
+)
+
+
+def test_catalog_response_fields_fixed_set(monkeypatch):
+    # The wire shape the handler ships: all six arrays same length, catalog
+    # order, correct values for the fixed wuerfel.
+    monkeypatch.delenv('EDUBOTICS_TAG_SIZE_M', raising=False)
+    fields = catalog_response_fields(fixed_catalog())
+    assert {len(fields[k]) for k in _RESPONSE_ARRAY_KEYS} == {1}
+    assert fields['type_names'] == ['wuerfel']
+    assert fields['labels_de'] == ['Würfel']
+    assert fields['object_height_m'] == pytest.approx([0.030])
+    assert fields['object_width_m'] == pytest.approx([0.030])
+    assert fields['color_hex'] == ['#f59e0b']
+    assert fields['max_instances'] == [2]  # tag_ids [20, 21]
+
+
+def test_catalog_response_fields_multi_type_order_and_caps():
+    # max_instances = len(tag_ids); order follows catalog insertion order; width
+    # defaults to height per type.
+    fields = catalog_response_fields(parse_catalog(_valid_dict()))
+    assert {len(fields[k]) for k in _RESPONSE_ARRAY_KEYS} == {2}
+    assert fields['type_names'] == ['banane', 'wuerfel_blau']
+    assert fields['labels_de'] == ['Banane', 'Blauer Würfel']
+    assert fields['object_height_m'] == pytest.approx([0.040, 0.030])
+    assert fields['object_width_m'] == pytest.approx([0.040, 0.030])
+    assert fields['color_hex'] == ['#f59e0b', '#f59e0b']
+    assert fields['max_instances'] == [5, 1]  # banane 5 copies, wuerfel_blau 1
+
+
+def test_build_object_catalog_response_success(monkeypatch):
+    monkeypatch.delenv('EDUBOTICS_TAG_SIZE_M', raising=False)
+    resp = build_object_catalog_response()
+    assert resp['success'] is True
+    assert resp['message'] == ''
+    assert resp['type_names'] == ['wuerfel']
+    assert resp['max_instances'] == [2]
+    assert {len(resp[k]) for k in _RESPONSE_ARRAY_KEYS} == {1}
+
+
+def test_build_object_catalog_response_empty_on_failure(monkeypatch):
+    # A developer typo in the constant (here: empty label_de) must empty ALL SIX
+    # arrays together (parity) and surface the German reason — the wire
+    # contract's failure branch the ROS handler forwards verbatim.
+    monkeypatch.setattr(
+        object_catalog_mod, '_FIXED_CATALOG',
+        {'types': {'kaputt': {'label_de': ''}}},
+    )
+    resp = build_object_catalog_response()
+    assert resp['success'] is False
+    assert resp['message']  # non-empty German reason
+    for k in _RESPONSE_ARRAY_KEYS:
+        assert resp[k] == []

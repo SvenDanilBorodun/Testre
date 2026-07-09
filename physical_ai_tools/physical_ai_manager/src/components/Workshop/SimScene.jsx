@@ -8,17 +8,26 @@
  *     http://www.apache.org/licenses/LICENSE-2.0
  */
 
-// Roboter Studio Phase-3 — "Test im Simulator" view.
+// Roboter Studio — "Test im Simulator" view.
 //
-// Replaces the live scene camera in Workshop's right column while the student is
-// in simulator mode. Two halves:
+// Owns the whole simulator surface while the student is in simulator mode. Two
+// halves, ONE UrdfTwin instance:
 //   * a 2D top-down TABLE EDITOR — drag catalog objects onto the arm's reach
 //     annulus (x,y base-frame plane), set each object's yaw, auto-assign a unique
 //     tag_id; emits the Sim-Szene `{version:1, objects:[{type,tag_id,x,y,yaw}]}`
 //     up to WorkshopPage via onChange (persisted in workflows.sim_scene on save,
-//     sent in the /workflow/start payload's `sim` sibling by RunControls).
+//     sent in the /workflow/start payload's `sim` sibling by RunControls). Objects
+//     size + colour PER TYPE from the `catalogDims` map (fallback amber cube), and
+//     placement is CAPPED per type at `max_instances` (each object needs its own
+//     tag_id — the sim silently skips extras server-side).
 //   * a LAZY 3D preview (UrdfTwin) of the virtual follower replaying the
 //     server's /sim/joint_states, with the placed objects on a virtual table.
+//
+// Layout: `layout="stack"` (default) is the original single-column view (the 3D
+// pane in an aspect-video box below the editor) — byte-identical for any caller
+// that does not opt in. `layout="split"` is the integrated sim stage: the 3D arm
+// pane fills the top, the 2D editor scrolls below. Both render the SAME single
+// UrdfTwin element (one WebGL context, one /sim/joint_states sub).
 //
 // Grasp-attach is computed HERE on the front end (the thin UrdfTwin renderer only
 // surfaces the end-effector pose + gripper angle via onEndEffector): when the
@@ -28,7 +37,8 @@
 //
 // three.js is pulled in ONLY through the React.lazy import below, so this module
 // (statically imported by the eagerly-loaded WorkshopPage) keeps three out of the
-// entry bundle the white-screen CI greps.
+// entry bundle the white-screen CI greps. simConstants.js (the shared reach/colour
+// constants) is dependency-free for the same reason.
 
 import React, {
   useCallback,
@@ -39,16 +49,24 @@ import React, {
   Suspense,
   lazy,
 } from 'react';
+import toast from 'react-hot-toast';
+import {
+  REACH_INNER_M,
+  REACH_OUTER_M,
+  SIM_OBJECT_FALLBACK_SIZE_M,
+  SIM_OBJECT_COLOR_HEX,
+  SIM_OBJECT_HELD_COLOR_HEX,
+} from './simConstants';
 
 const UrdfTwin = lazy(() => import('../UrdfTwin'));
 
 // Sim-only virtual joint stream (never the bare /joint_states — see plan §C).
 const SIM_JOINT_TOPIC = '/sim/joint_states';
 
-// Strict-vertical reach annulus of the OMX-F closed-form IK (ik_solver.py:
-// ~0.10–0.28 m table-top radius). Objects must sit inside it to be graspable.
-const REACH_INNER_M = 0.10;
-const REACH_OUTER_M = 0.28;
+// Strict-vertical reach annulus SHOWN TO THE STUDENT (~0.10–0.28 m table-top
+// radius). Objects must sit inside it to be graspable. Imported from
+// ./simConstants so the 2D SVG ring and the 3D twin's ring never desync — and so
+// this is NOT the solver's wrist-centre span (see the module note).
 
 // Base-frame view window (metres): x = forward (away from base), y = left.
 const VIEW_MAX_X = 0.32;
@@ -63,7 +81,10 @@ const SVG_H = PX_PER_M * (VIEW_MAX_X - VIEW_MIN_X); // 185
 // Base origin (robot base, x=0 y=0) in SVG pixels.
 const ORIGIN_PX = PX_PER_M * VIEW_MAX_Y;
 const ORIGIN_PY = PX_PER_M * VIEW_MAX_X;
-const OBJECT_PX = 15; // marker square edge (≈ SIM_OBJECT_SIZE_M at PX_PER_M)
+// Fallback marker-square edge in px for a type WITHOUT catalog dims
+// (SIM_OBJECT_FALLBACK_SIZE_M at PX_PER_M = 15 px). A type known to catalogDims
+// sizes its square from width_m × PX_PER_M instead, so the 2D + 3D panes agree.
+const OBJECT_PX = SIM_OBJECT_FALLBACK_SIZE_M * PX_PER_M;
 
 // Grasp-attach geometry (front-end, idealized). The OMX-F gripper joint rests
 // open ≈ +0.8 rad and any CLOSE drives it negative-ish (per-object close angles
@@ -130,7 +151,17 @@ function round3(v) {
   return Math.round(v * 1000) / 1000;
 }
 
-function SimScene({ scene, onChange, catalog }) {
+function SimScene({
+  scene,
+  onChange,
+  catalog,
+  catalogDims = {},
+  layout = 'stack',
+  showPath = false,
+  pathClearToken = 0,
+  showShadows = false,
+  showReach = false,
+}) {
   const objects = useMemo(
     () => (scene && Array.isArray(scene.objects) ? scene.objects : []),
     [scene],
@@ -140,6 +171,14 @@ function SimScene({ scene, onChange, catalog }) {
     [scene],
   );
   const cat = Array.isArray(catalog) && catalog.length ? catalog : DEFAULT_CATALOG;
+
+  // German label for a type key (declared BEFORE handlePlace so its placement-cap
+  // toast can reference it — a useCallback deps entry is read at render time, so a
+  // later `const` would be in the TDZ).
+  const typeLabel = useMemo(() => {
+    const m = new Map(cat.map(([label, value]) => [value, label]));
+    return (value) => m.get(value) || value;
+  }, [cat]);
 
   const [selectedType, setSelectedType] = useState(cat[0][1]);
   const [selectedId, setSelectedId] = useState(null);
@@ -211,6 +250,23 @@ function SimScene({ scene, onChange, catalog }) {
       if (draggingIdRef.current !== null) return;
       const base = eventToBase(e);
       if (!base) return;
+      // Placement cap: the sim can only detect as many objects of a type as it
+      // has tag_ids (catalogDims[type].max_instances); placing more would render
+      // objects the program silently never finds (the server skips extras with a
+      // container-log-only warning). Refuse in German instead. No cap when the
+      // map/type/max is absent (today's behaviour).
+      const dims = catalogDims && catalogDims[selectedType];
+      const max = dims && Number.isFinite(dims.max_instances) ? dims.max_instances : null;
+      if (max !== null) {
+        const count = objects.filter((o) => o.type === selectedType).length;
+        if (count >= max) {
+          toast.error(
+            `Höchstens ${max} × „${typeLabel(selectedType)}" im Simulator — `
+            + 'jedes Objekt braucht eine eigene Tag-ID.',
+          );
+          return;
+        }
+      }
       const { x, y } = clampToAnnulus(base.x, base.y);
       const nextTag = objects.length
         ? Math.max(...objects.map((o) => (typeof o.tag_id === 'number' ? o.tag_id : -1))) + 1
@@ -222,7 +278,7 @@ function SimScene({ scene, onChange, catalog }) {
       emit({ objects: next });
       setSelectedId(nextTag);
     },
-    [mode, eventToBase, objects, selectedType, emit],
+    [mode, eventToBase, objects, selectedType, emit, catalogDims, typeLabel],
   );
 
   const startDrag = useCallback((e, id) => {
@@ -410,11 +466,6 @@ function SimScene({ scene, onChange, catalog }) {
     }
   }, []);
 
-  const typeLabel = useMemo(() => {
-    const m = new Map(cat.map(([label, value]) => [value, label]));
-    return (value) => m.get(value) || value;
-  }, [cat]);
-
   const selected = objects.find((o) => o.tag_id === selectedId) || null;
   const selectedYawDeg = selected
     ? Math.round(((selected.yaw || 0) * 180) / Math.PI)
@@ -435,8 +486,11 @@ function SimScene({ scene, onChange, catalog }) {
       })()
     : null;
 
-  return (
-    <div className="flex flex-col gap-3">
+  // The 2D editor body (notice + palette + mode + table + selection + zones),
+  // shared by BOTH layouts so they never drift. A fragment adds no DOM node, so
+  // the default STACK layout below stays byte-identical to the previous markup.
+  const editorBody = (
+    <>
       {/* German notice: the simulator validates logic, not physics. */}
       <div className="rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-800">
         <strong>Test im Simulator.</strong> Hier prüfst du die Logik und
@@ -598,7 +652,16 @@ function SimScene({ scene, onChange, catalog }) {
             const lineLen = 14;
             const dx = -Math.sin(yaw) * lineLen;
             const dy = -Math.cos(yaw) * lineLen;
-            const fill = isHeld ? '#22c55e' : '#f59e0b';
+            // Per-type size + colour from the catalog (fallback amber cube), so the
+            // 2D square matches the 3D box the same object renders as.
+            const dims = catalogDims && catalogDims[o.type];
+            const sizePx = dims && Number.isFinite(dims.width_m) && dims.width_m > 0
+              ? dims.width_m * PX_PER_M
+              : OBJECT_PX;
+            const restFill = dims && typeof dims.color === 'string' && dims.color
+              ? dims.color
+              : SIM_OBJECT_COLOR_HEX;
+            const fill = isHeld ? SIM_OBJECT_HELD_COLOR_HEX : restFill;
             return (
               <g
                 key={o.tag_id}
@@ -606,10 +669,10 @@ function SimScene({ scene, onChange, catalog }) {
                 className="cursor-grab"
               >
                 <rect
-                  x={px - OBJECT_PX / 2}
-                  y={py - OBJECT_PX / 2}
-                  width={OBJECT_PX}
-                  height={OBJECT_PX}
+                  x={px - sizePx / 2}
+                  y={py - sizePx / 2}
+                  width={sizePx}
+                  height={sizePx}
                   transform={`rotate(${(-yaw * 180) / Math.PI} ${px} ${py})`}
                   fill={fill}
                   stroke={isSel ? '#1d4ed8' : '#92400e'}
@@ -724,25 +787,59 @@ function SimScene({ scene, onChange, catalog }) {
         </div>
       )}
 
-      {/* 3D virtual-arm preview */}
-      <div className="relative w-full aspect-video rounded-lg overflow-hidden border border-white/10 bg-[#1a1d23]">
-        <Suspense
-          fallback={
-            <div className="w-full h-full flex items-center justify-center text-[12px] text-white/70">
-              3D-Vorschau wird geladen …
-            </div>
-          }
-        >
-          <UrdfTwin
-            jointTopic={SIM_JOINT_TOPIC}
-            objects={objects}
-            zones={zones}
-            showTable
-            heldObjectId={heldObjectId}
-            onEndEffector={handleEndEffector}
-          />
-        </Suspense>
+    </>
+  );
+
+  // The 3D virtual-arm pane. In split mode it fills the available height (no
+  // aspect-video box); the stack className is byte-identical to the previous
+  // single-layout markup. ONE UrdfTwin instance in both layouts → one WebGL
+  // context + one /sim/joint_states subscription.
+  const previewClass = layout === 'split'
+    ? 'relative w-full flex-1 min-h-[220px] rounded-lg overflow-hidden border border-white/10 bg-[#1a1d23]'
+    : 'relative w-full aspect-video rounded-lg overflow-hidden border border-white/10 bg-[#1a1d23]';
+  const preview = (
+    <div className={previewClass}>
+      <Suspense
+        fallback={
+          <div className="w-full h-full flex items-center justify-center text-[12px] text-white/70">
+            3D-Vorschau wird geladen …
+          </div>
+        }
+      >
+        <UrdfTwin
+          jointTopic={SIM_JOINT_TOPIC}
+          objects={objects}
+          zones={zones}
+          showTable
+          heldObjectId={heldObjectId}
+          onEndEffector={handleEndEffector}
+          catalogDims={catalogDims}
+          showPath={showPath}
+          pathClearToken={pathClearToken}
+          showShadows={showShadows}
+          showReach={showReach}
+        />
+      </Suspense>
+    </div>
+  );
+
+  // SPLIT: 3D arm pane on top (fills), the 2D editor below (scrolls if needed).
+  // STACK (default): the previous single-column DOM, byte-identical.
+  if (layout === 'split') {
+    return (
+      <div className="flex h-full flex-col gap-3">
+        {preview}
+        <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">
+          {editorBody}
+        </div>
       </div>
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-3">
+      {editorBody}
+      {preview}
     </div>
   );
 }

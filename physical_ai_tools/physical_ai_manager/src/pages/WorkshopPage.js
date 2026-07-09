@@ -17,7 +17,7 @@ import LeaderToggle from '../components/Workshop/LeaderToggle';
 import BlocklyWorkspace from '../components/Workshop/BlocklyWorkspace';
 import RunControls from '../components/Workshop/RunControls';
 import CameraFeedOverlay from '../components/Workshop/CameraFeedOverlay';
-import SimScene from '../components/Workshop/SimScene';
+import SimStage from '../components/Workshop/SimStage';
 import TemplatePicker from '../components/Workshop/TemplatePicker';
 import ToolbarButtons from '../components/Workshop/ToolbarButtons';
 import DebugPanel from '../components/Workshop/DebugPanel';
@@ -27,6 +27,7 @@ import VersionHistoryDropdown from '../components/Workshop/VersionHistoryDropdow
 import JogPanel from '../components/Workshop/JogPanel';
 import RecordPanel from '../components/Workshop/RecordPanel';
 import RightDock from '../components/Workshop/RightDock';
+import { buildCatalogDims } from '../components/Workshop/simConstants';
 import { DE } from '../components/Workshop/blocks/messages_de';
 import {
   applyPinnedCoordinates,
@@ -254,6 +255,17 @@ function WorkshopPage({ isActive }) {
   // [label_de, type_name] pairs from GetObjectCatalog, threaded to SimScene's
   // object palette (the same source the Blockly dropdowns use).
   const [objectCatalog, setObjectCatalog] = useState([]);
+  // Sim-stage render seam: { [type]: {height_m, width_m, color, max_instances} },
+  // built from the parallel GetObjectCatalog srv arrays in the same fetch effect
+  // and threaded to SimStage → SimScene → UrdfTwin so objects render at their real
+  // catalog size/colour and placement is capped per type. A STABLE reference (set
+  // once per fetch) because it is a dep of UrdfTwin's object-diff effect. `{}` on
+  // an old server / failed fetch → both renderers fall back to the fixed defaults.
+  const [catalogDims, setCatalogDims] = useState({});
+  // Debug strip open-state WHILE in the simulator. In sim the RightDock (and its
+  // „Debug" tab) is replaced by SimStage, so RunControls' Debug button targets
+  // this flag instead of the dock tab (see onToggleDebug wiring below).
+  const [simDebugOpen, setSimDebugOpen] = useState(false);
   // Batch 2b: rosbridge liveness gates the real-arm jog/record panels (the same
   // signal the rest of the app uses for „Roboter verbunden").
   const heartbeatStatus = useSelector((s) => s.tasks?.heartbeatStatus);
@@ -335,7 +347,10 @@ function WorkshopPage({ isActive }) {
       try { Blockly.svgResize(ws); } catch (_) { /* workspace torn down */ }
     });
     return () => window.cancelAnimationFrame(id);
-  }, [dockWidth, dockCollapsed]);
+    // `simMode` swaps the right region (dock ↔ SimStage), changing the editor's
+    // available width — Blockly's window-scoped listener won't see that, so
+    // re-fit on the swap too.
+  }, [dockWidth, dockCollapsed, simMode]);
 
   // A panel is „busy" while it holds a live session that must NOT be torn out
   // (recording, hand-guide, or an active tutorial that owns the toolbox
@@ -374,36 +389,27 @@ function WorkshopPage({ isActive }) {
 
   const handleToggleCollapsed = useCallback(() => setDockCollapsed((c) => !c), []);
 
-  // Keep the Redux `debuggerVisible` flag in sync with the dock's Debug tab so
-  // any consumer of that flag stays accurate (RunControls reads it as a
-  // fallback; the dock is now the source of truth).
+  // Keep the Redux `debuggerVisible` flag in sync with whichever Debug surface is
+  // live: the dock's „Debug" tab normally, or SimStage's debug strip while in the
+  // simulator (where the dock — and its tab — is replaced by SimStage).
   useEffect(() => {
-    dispatch(setDebuggerVisible(dockOpen.includes('debug')));
-  }, [dockOpen, dispatch]);
-
-  // Entering the simulator: make sure the „Szene" panel (the camera tab, which
-  // renders the SimScene editor in simMode) is open + the dock expanded, so the
-  // student sees the virtual scene instead of an empty dock.
-  const prevSimRef = useRef(simMode);
-  useEffect(() => {
-    if (simMode && !prevSimRef.current) {
-      setDockOpen((prev) => (prev.includes('camera') ? prev : addOpenTab(prev, 'camera', isTabBusy)));
-      setDockCollapsed(false);
-    }
-    prevSimRef.current = simMode;
-  }, [simMode, isTabBusy]);
+    dispatch(setDebuggerVisible(simMode ? simDebugOpen : dockOpen.includes('debug')));
+  }, [dockOpen, simMode, simDebugOpen, dispatch]);
 
   // Force the „Lernpfad" tab open whenever a tutorial is active (it owns the
   // toolbox restriction via SkillmapPlayer — closing it would lift the
   // restriction mid-tutorial). Expand the dock the moment a tutorial STARTS.
+  // Skipped in simMode: the dock isn't rendered (SimStage replaces it), and sim
+  // entry is blocked while a tutorial is active anyway (the toggle is disabled).
   const prevTutorialRef = useRef(null);
   useEffect(() => {
+    if (simMode) return;
     const started = !!activeTutorialId && prevTutorialRef.current !== activeTutorialId;
     prevTutorialRef.current = activeTutorialId;
     if (!activeTutorialId) return;
     setDockOpen((prev) => (prev.includes('tutorial') ? prev : addOpenTab(prev, 'tutorial', isTabBusy)));
     if (started) setDockCollapsed(false);
-  }, [activeTutorialId, isTabBusy]);
+  }, [activeTutorialId, simMode, isTabBusy]);
 
   // Phase-2: read-only Python „Code"-Vorschau panel. Default COLLAPSED; the
   // open/closed choice persists in localStorage (distinct key from 3D-Ansicht).
@@ -669,9 +675,14 @@ function WorkshopPage({ isActive }) {
           const pairs = r.type_names.map((t, i) => [labels[i] || t, t]);
           setObjectCatalogOptions(pairs);
           setObjectCatalog(pairs);
+          // Sim-stage render seam: per-type size/colour/cap from the parallel srv
+          // arrays. `{}` on an old server (arrays absent) → renderers fall back to
+          // the fixed amber-cube defaults. Set once per fetch (stable reference).
+          setCatalogDims(buildCatalogDims(r));
         } else if (simMode) {
           // Non-fatal in the simulator — keep the palette usable.
           setObjectCatalog(SIM_DEFAULT_CATALOG);
+          setCatalogDims({});
         } else if (r && r.message) {
           toast.error(r.message);
         }
@@ -679,7 +690,10 @@ function WorkshopPage({ isActive }) {
       .catch((e) => {
         if (cancelled) return;
         console.warn('getObjectCatalog failed', e);
-        if (simMode) setObjectCatalog(SIM_DEFAULT_CATALOG);
+        if (simMode) {
+          setObjectCatalog(SIM_DEFAULT_CATALOG);
+          setCatalogDims({});
+        }
       });
     return () => {
       cancelled = true;
@@ -846,51 +860,48 @@ function WorkshopPage({ isActive }) {
   // Dock tab registry. `render` is INVOKED by RightDock (never used as a
   // `<tab.render/>` element type), so each panel INSTANCE stays mounted across
   // dock re-renders / resize — critical for JogPanel + RecordPanel, whose unmount
-  // teardown re-torques the arm / cancels a recording. In the simulator the
-  // real-arm tabs (Steuern/Aufnehmen/3D) hide and „Kamera" shows the SimScene.
+  // teardown re-torques the arm / cancels a recording. The whole dock is REPLACED
+  // by SimStage while in the simulator (see the render tree), so these tabs never
+  // render during sim — no `hidden: simMode` / SimScene special-casing is needed.
   const dockTabs = [
     {
       id: 'camera',
-      label: simMode ? 'Szene' : DE.DOCK_TAB_CAMERA,
-      icon: simMode ? '🧩' : '📷',
-      render: () =>
-        simMode ? (
-          <SimScene scene={simScene} onChange={setSimScene} catalog={objectCatalog} />
-        ) : (
-          <div className="flex flex-col gap-2 h-full">
-            {/* The feed fills the panel height (fill), so a taller panel shows a
-                bigger camera instead of a small strip with empty space below. */}
-            <div className="flex-1 min-h-0">
-              <CameraFeedOverlay camera="scene" clickable={true} fill onMark={handleMarkDestination} />
-            </div>
-            {/* Capture the arm's CURRENT pose as a named destination (does NOT
-                drive the arm). Usable afterwards via „Ziel <Name>" / „bewege zu". */}
-            <div className="shrink-0 flex items-center gap-2 flex-wrap">
-              <button
-                type="button"
-                onClick={handleCapturePose}
-                disabled={capturing}
-                title="Aktuelle Roboterposition als benanntes Ziel speichern"
-                className={
-                  'text-xs px-2.5 py-1 rounded-md border disabled:opacity-50 '
-                  + 'disabled:cursor-not-allowed bg-[var(--accent)] text-white '
-                  + 'border-[var(--accent)] hover:opacity-90'
-                }
-              >
-                {capturing ? 'Wird gemerkt …' : 'Position merken'}
-              </button>
-              <span className="text-[11px] text-[var(--ink-3)]">
-                Speichert die aktuelle Armposition als Ziel.
-              </span>
-            </div>
+      label: DE.DOCK_TAB_CAMERA,
+      icon: '📷',
+      render: () => (
+        <div className="flex flex-col gap-2 h-full">
+          {/* The feed fills the panel height (fill), so a taller panel shows a
+              bigger camera instead of a small strip with empty space below. */}
+          <div className="flex-1 min-h-0">
+            <CameraFeedOverlay camera="scene" clickable={true} fill onMark={handleMarkDestination} />
           </div>
-        ),
+          {/* Capture the arm's CURRENT pose as a named destination (does NOT
+              drive the arm). Usable afterwards via „Ziel <Name>" / „bewege zu". */}
+          <div className="shrink-0 flex items-center gap-2 flex-wrap">
+            <button
+              type="button"
+              onClick={handleCapturePose}
+              disabled={capturing}
+              title="Aktuelle Roboterposition als benanntes Ziel speichern"
+              className={
+                'text-xs px-2.5 py-1 rounded-md border disabled:opacity-50 '
+                + 'disabled:cursor-not-allowed bg-[var(--accent)] text-white '
+                + 'border-[var(--accent)] hover:opacity-90'
+              }
+            >
+              {capturing ? 'Wird gemerkt …' : 'Position merken'}
+            </button>
+            <span className="text-[11px] text-[var(--ink-3)]">
+              Speichert die aktuelle Armposition als Ziel.
+            </span>
+          </div>
+        </div>
+      ),
     },
     {
       id: 'control',
       label: DE.DOCK_TAB_CONTROL,
       icon: '🎮',
-      hidden: simMode,
       busy: jogHandGuideOn,
       render: () => (
         <JogPanel disabled={jogDisabled} onHandGuideChange={setJogHandGuideOn} />
@@ -900,7 +911,6 @@ function WorkshopPage({ isActive }) {
       id: 'record',
       label: DE.DOCK_TAB_RECORD,
       icon: '⏺',
-      hidden: simMode,
       busy: recordPanelRecording,
       render: () => (
         <RecordPanel
@@ -915,7 +925,6 @@ function WorkshopPage({ isActive }) {
       id: '3d',
       label: DE.DOCK_TAB_3D,
       icon: '🧊',
-      hidden: simMode,
       render: () => (
         <div className="flex flex-col gap-2 h-full">
           <div className="flex items-center gap-1.5 flex-wrap shrink-0">
@@ -1010,11 +1019,27 @@ function WorkshopPage({ isActive }) {
                 arm; only logic, order and reachability are validated. */}
             <button
               type="button"
-              onClick={() => { if (!simRunActive) setSimMode((v) => !v); }}
+              onClick={() => {
+                // Belt-and-suspenders (the button is already disabled for both):
+                // never toggle while a sim run is in flight, and never ENTER sim
+                // during an active tutorial (replacing the dock would unmount
+                // SkillmapPlayer + lift the toolbox restriction mid-tutorial).
+                if (simRunActive || (!simMode && !!activeTutorialId)) return;
+                setSimMode((v) => {
+                  const next = !v;
+                  // The avoidance trail is a headline sim feature — turn it on
+                  // once on ENTRY (the student can still toggle it off; real-mode
+                  // shares this same showPath state, so leaving sim keeps it).
+                  if (next) setShowPath(true);
+                  return next;
+                });
+              }}
               aria-pressed={simMode}
-              disabled={simRunActive}
+              disabled={simRunActive || (!simMode && !!activeTutorialId)}
               title={simRunActive
                 ? 'Während ein Simulationslauf läuft, kann der Simulator nicht beendet werden — bitte zuerst stoppen.'
+                : (!simMode && !!activeTutorialId)
+                ? 'Während ein Lernpfad aktiv ist, kann der Simulator nicht gestartet werden — bitte den Lernpfad zuerst beenden.'
                 : 'Programm auf einem virtuellen Roboter testen — ohne echten Roboter und ohne Kalibrierung'}
               className={
                 'text-xs px-3 py-1.5 rounded-md border disabled:opacity-50 '
@@ -1083,9 +1108,12 @@ function WorkshopPage({ isActive }) {
                     </>
                   }
                 />
-                {/* Editor + right dock. The editor grows to fill the row; the dock
-                    is a fixed-width tabbed column that folds to its rail. On mobile
-                    the two stack (editor on top, dock below). */}
+                {/* Editor + right region. The Blockly editor grows to fill the row
+                    on the LEFT; the right region is normally the tabbed RightDock
+                    and — while in the simulator — the integrated SimStage instead.
+                    The LEFT editor column is the SAME first child in both branches,
+                    so swapping the right sibling NEVER remounts the workspace (it
+                    is keyed only by editorKey). On mobile the two stack. */}
                 <div
                   ref={dockRowRef}
                   className="flex-1 min-h-0 flex flex-col md:flex-row overflow-hidden"
@@ -1101,31 +1129,53 @@ function WorkshopPage({ isActive }) {
                       />
                     </div>
                   </div>
-                  {/* Drag divider — students rebalance the blocks area vs. the
-                      dock. Desktop only (mobile stacks); hidden when the dock is
-                      collapsed to its rail. */}
-                  {!dockCollapsed && (
-                    <div
-                      role="separator"
-                      aria-orientation="vertical"
-                      onPointerDown={onDockResizeDown}
-                      onPointerMove={onDockResizeMove}
-                      onPointerUp={onDockResizeUp}
-                      title="Breite ziehen, um die Größe zu ändern"
-                      className="hidden md:flex shrink-0 w-2 cursor-col-resize items-center justify-center group touch-none"
-                    >
-                      <span className="h-10 w-1 rounded-full bg-[var(--line-2)] group-hover:bg-[var(--accent)]" />
-                    </div>
+                  {simMode ? (
+                    // Integrated sim stage: replaces BOTH the drag divider and the
+                    // dock. It owns its OWN width (§6.6) — a collapsed dock must
+                    // never yield a blank right region — and hosts the single
+                    // UrdfTwin via SimScene(layout="split").
+                    <SimStage
+                      scene={simScene}
+                      onChange={setSimScene}
+                      catalog={objectCatalog}
+                      catalogDims={catalogDims}
+                      workspace={workspace}
+                      debugOpen={simDebugOpen}
+                      onToggleDebug={() => setSimDebugOpen((v) => !v)}
+                      showPath={showPath}
+                      onToggleShowPath={() => setShowPath((v) => !v)}
+                      onClearPath={() => setPathClearToken((t) => t + 1)}
+                      pathClearToken={pathClearToken}
+                    />
+                  ) : (
+                    <>
+                      {/* Drag divider — students rebalance the blocks area vs. the
+                          dock. Desktop only (mobile stacks); hidden when the dock is
+                          collapsed to its rail. */}
+                      {!dockCollapsed && (
+                        <div
+                          role="separator"
+                          aria-orientation="vertical"
+                          onPointerDown={onDockResizeDown}
+                          onPointerMove={onDockResizeMove}
+                          onPointerUp={onDockResizeUp}
+                          title="Breite ziehen, um die Größe zu ändern"
+                          className="hidden md:flex shrink-0 w-2 cursor-col-resize items-center justify-center group touch-none"
+                        >
+                          <span className="h-10 w-1 rounded-full bg-[var(--line-2)] group-hover:bg-[var(--accent)]" />
+                        </div>
+                      )}
+                      <RightDock
+                        tabs={dockTabs}
+                        openIds={dockOpen}
+                        collapsed={dockCollapsed}
+                        width={dockWidth}
+                        onToggleTab={handleToggleTab}
+                        onCloseTab={handleCloseTab}
+                        onToggleCollapsed={handleToggleCollapsed}
+                      />
+                    </>
                   )}
-                  <RightDock
-                    tabs={dockTabs}
-                    openIds={dockOpen}
-                    collapsed={dockCollapsed}
-                    width={dockWidth}
-                    onToggleTab={handleToggleTab}
-                    onCloseTab={handleCloseTab}
-                    onToggleCollapsed={handleToggleCollapsed}
-                  />
                 </div>
                 {/* Read-only Python „Code"-Vorschau — compact, collapsible,
                     full-width strip between the editor row and the run controls. */}
@@ -1172,8 +1222,11 @@ function WorkshopPage({ isActive }) {
                   workspace={workspace}
                   simMode={simMode}
                   simScene={simScene}
-                  debugOpen={dockOpen.includes('debug')}
-                  onToggleDebug={() => handleToggleTab('debug')}
+                  debugOpen={simMode ? simDebugOpen : dockOpen.includes('debug')}
+                  onToggleDebug={() => {
+                    if (simMode) setSimDebugOpen((v) => !v);
+                    else handleToggleTab('debug');
+                  }}
                 />
               </>
             )}

@@ -1,11 +1,21 @@
-# Roboter Studio named-object grasping: return the object catalog's type list
-# for the Blockly dropdowns. type_names[i] is the internal type key (the block
-# field value); labels_de[i] is its German display label (parallel arrays). On
-# an absent / corrupt / invalid catalog the arrays are empty, success is false,
-# and message carries the German reason. The service reads the catalog JSON from
-# the edubotics_calib volume at call time (edit + re-fetch, no image rebuild).
+# Roboter Studio named-object grasping: return the fixed object catalog as
+# parallel per-type arrays. type_names[i] is the internal type key (the Blockly
+# block field value); labels_de[i] is its German display label. The render
+# arrays (object_height_m, object_width_m, color_hex) let the simulation editor
+# draw each object at its real catalog size and colour instead of a fixed box;
+# max_instances[i] = len(tag_ids) is how many copies of that type the sim can
+# detect, so the 2D editor caps placement at it. Every array is parallel — same
+# length, same catalog order. The catalog is the hardcoded, fleet-wide fixed set
+# (object_catalog.fixed_catalog()): identical on every PC/user, edited only via
+# _FIXED_CATALOG + an image rebuild. On an invalid catalog (a developer typo in
+# the constant) every array is empty, success is false, and message carries the
+# German reason.
 ---
-string[] type_names
-string[] labels_de
-bool success
-string message
+string[]  type_names        # internal type key / block field value
+string[]  labels_de         # German display label (parallel to type_names)
+float64[] object_height_m   # object height (m); render + info
+float64[] object_width_m    # footprint width (m); render box XY
+string[]  color_hex         # render colour, e.g. "#f59e0b"
+int32[]   max_instances     # len(tag_ids): copies the sim can detect / editor placement cap
+bool      success
+string    message           # German on failure

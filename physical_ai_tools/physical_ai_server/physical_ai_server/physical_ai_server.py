@@ -3933,26 +3933,28 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                     pass
 
     def get_object_catalog_callback(self, request, response):
-        """Return the named-object catalog's type list (keys + German labels)
-        for the Roboter Studio Blockly dropdowns. The set is the fixed, fleet-wide
-        constant baked into the image (identical on every PC/user), so the dropdown
-        is always populated. The except branch is a defensive backstop only — a
-        valid constant never raises."""
-        try:
-            from physical_ai_server.workflow.object_catalog import fixed_catalog
-            catalog = fixed_catalog()
-            labels = catalog.labels()  # [(type_name, label_de), ...] in catalog order
-            response.type_names = [name for name, _label in labels]
-            response.labels_de = [label for _name, label in labels]
-            response.success = True
-            response.message = ''
-        except Exception as e:
-            # fixed_catalog raises German ObjectCatalogError only on a developer
-            # typo in the constant; surface it defensively.
-            response.type_names = []
-            response.labels_de = []
-            response.success = False
-            response.message = str(e)
+        """Return the named-object catalog for the Roboter Studio Blockly
+        dropdowns AND the simulation editor: six parallel per-type arrays —
+        internal type keys, German labels, render dims (object_height_m /
+        object_width_m / color_hex) and max_instances (len(tag_ids), the sim
+        placement cap). The set is the fixed, fleet-wide constant baked into the
+        image (identical on every PC/user), so the dropdown is always populated.
+        The payload — including the German empty-on-failure fallback that keeps
+        all six arrays in parity — is built by the pure, unit-tested
+        object_catalog.build_object_catalog_response() helper (a valid constant
+        never fails)."""
+        from physical_ai_server.workflow.object_catalog import (
+            build_object_catalog_response,
+        )
+        fields = build_object_catalog_response()
+        response.type_names = fields['type_names']
+        response.labels_de = fields['labels_de']
+        response.object_height_m = fields['object_height_m']
+        response.object_width_m = fields['object_width_m']
+        response.color_hex = fields['color_hex']
+        response.max_instances = fields['max_instances']
+        response.success = fields['success']
+        response.message = fields['message']
         return response
 
     # ------------------------------------------------------------------

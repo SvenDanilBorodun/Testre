@@ -52,6 +52,23 @@
 //   * showFrames   — Phase-5 "Achsen": parent a small RGB AxesHelper to the base
 //                    (link0) and TCP (end_effector_link) links. Default false →
 //                    no AxesHelper is constructed (RecordPage + mock untouched).
+//   * catalogDims  — Sim-stage catalog render map { [type]: {height_m, width_m,
+//                    color} } (color '#rrggbb'). Each sim object is rendered as a
+//                    box of width_m × height_m × width_m in the catalog colour,
+//                    resting on the table. Default {} → every object falls back to
+//                    the fixed SIM_OBJECT_FALLBACK_SIZE_M amber cube (RecordPage +
+//                    any type absent from the map are unchanged). The map arrives
+//                    ASYNC (a service fetch) after a hydrated scene has already
+//                    built its meshes, so it is a dep of the object-diff effect
+//                    (a mesh whose resolved dims/type changed is disposed+rebuilt).
+//   * showShadows  — Sim-stage soft contact shadows: renderer shadow map + a
+//                    shadow-casting key light + robot/object castShadow + the sim
+//                    table as receiver. Default false → NO renderer flags are set
+//                    and nothing casts (RecordPage + jsdom mock untouched).
+//   * showReach    — Sim-stage translucent reach-annulus ring on the 3D table
+//                    (the SAME 0.10/0.28 bounds as the 2D editor, imported from
+//                    ./Workshop/simConstants — not the solver's wrist-centre span).
+//                    Default false → the ring layer builds ZERO primitives.
 
 import React, { useEffect, useRef, useState } from 'react';
 import { useSelector } from 'react-redux';
@@ -61,6 +78,13 @@ import { STLLoader } from 'three/examples/jsm/loaders/STLLoader';
 import URDFLoader from 'urdf-loader';
 import ROSLIB from 'roslib';
 import rosConnectionManager from '../utils/rosConnectionManager';
+import {
+  REACH_INNER_M,
+  REACH_OUTER_M,
+  SIM_OBJECT_FALLBACK_SIZE_M,
+  SIM_OBJECT_COLOR_HEX,
+  SIM_OBJECT_HELD_COLOR_HEX,
+} from './Workshop/simConstants';
 
 // The 6 follower joints the URDF exposes as drivable revolute joints, in the
 // wire order from omx_f_config.yaml::joint_order.follower. We map by NAME from
@@ -91,12 +115,13 @@ const URDF_URL = `${process.env.PUBLIC_URL || ''}/omx-urdf/omx_f.urdf`;
 // cleaner, better-lit look in the viewer).
 const LINK_COLOR = 0xbfc4cc;
 
-// ── Phase-3 sim-object render constants ──────────────────────────────────────
-// `object_width_m` is deferred (plan §4): every placed object renders at one
-// fixed cube size. Colours: amber when resting, green while grasped.
-const SIM_OBJECT_SIZE_M = 0.03;
-const SIM_OBJECT_COLOR = 0xf59e0b;
-const SIM_OBJECT_HELD_COLOR = 0x22c55e;
+// ── Sim-object render constants ──────────────────────────────────────────────
+// Objects are sized/coloured PER TYPE from the `catalogDims` prop (the sim-stage
+// catalog seam); a type absent from the map falls back to a fixed amber cube. The
+// fallback size + rest/held colours are shared with the 2D editor via
+// ./Workshop/simConstants (SIM_OBJECT_FALLBACK_SIZE_M / *_COLOR_HEX) so the two
+// panes never disagree. Held meshes turn green while carried, restore their own
+// per-type rest colour on release.
 const SIM_TABLE_SIZE_M = 0.7;
 const SIM_TABLE_COLOR = 0x2a2e34;
 // Phase-4 no-go ("Sperrzone") box rendering: a translucent red volume + a
@@ -123,6 +148,17 @@ const PATH_MIN_MOVE_M = 0.001; // append only when the TCP moved ≥ ~1 mm
 const BASE_LINK_NAME = 'link0';
 const FRAME_AXIS_SIZE_M = 0.07;
 
+// ── Sim-stage reach-annulus ring ("showReach") ───────────────────────────────
+// A translucent green ring on the table marking the graspable annulus, using the
+// SAME 0.10/0.28 bounds as the 2D editor (imported above). Green matches the 2D
+// SVG annulus stroke (#22c55e). Sits just above the table (y=0.001) to avoid
+// z-fighting; rendered only while showReach is true.
+const REACH_RING_COLOR = 0x22c55e;
+const REACH_RING_Y = 0.001;
+// ── Sim-stage soft-shadow tuning ("showShadows") ─────────────────────────────
+// Modest shadow map so the sim stays smooth on integrated GPUs.
+const SHADOW_MAP_SIZE = 1024;
+
 export default function UrdfTwin({
   jointTopic = '/joint_states',
   objects = [],
@@ -133,6 +169,9 @@ export default function UrdfTwin({
   showPath = false,
   pathClearToken = 0,
   showFrames = false,
+  catalogDims = {},
+  showShadows = false,
+  showReach = false,
 }) {
   const rosbridgeUrl = useSelector((state) => state.ros.rosbridgeUrl);
 
@@ -177,16 +216,23 @@ export default function UrdfTwin({
   const pathTmpRef = useRef(null); // reusable Vector3 for getWorldPosition
   const axesBaseRef = useRef(null);
   const axesTcpRef = useRef(null);
+  // Sim-stage reach-annulus ring (stays null/unused for the default showReach=false
+  // call — the ring effect early-returns and constructs no primitive).
+  const reachRingRef = useRef(null);
   // Latest toggle values read by the (stable) subscription closure + the URDF
-  // load-success path (neither re-runs on a prop change).
+  // load-success path + the [] -deps mount effect (none re-runs on a prop change).
   const showPathRef = useRef(showPath);
   const showFramesRef = useRef(showFrames);
+  const showShadowsRef = useRef(showShadows);
   useEffect(() => {
     showPathRef.current = showPath;
   }, [showPath]);
   useEffect(() => {
     showFramesRef.current = showFrames;
   }, [showFrames]);
+  useEffect(() => {
+    showShadowsRef.current = showShadows;
+  }, [showShadows]);
 
   useEffect(() => {
     const mount = mountRef.current;
@@ -221,6 +267,36 @@ export default function UrdfTwin({
     const key = new THREE.DirectionalLight(0xffffff, 1.4);
     key.position.set(1, 2, 1.5);
     scene.add(key);
+
+    // Sim-stage soft contact shadows (showShadows). RecordPage's default
+    // showShadows=false sets NO renderer flags and configures no shadow camera —
+    // the twin is byte-for-byte unchanged. Read through the ref so the [] -deps
+    // mount effect never lists the prop (a toggle would otherwise rebuild the
+    // whole scene). The sim table is the receiver (see the objects/table layer);
+    // robot + object meshes cast (URDF load path + buildSimObjectMesh).
+    if (showShadowsRef.current) {
+      renderer.shadowMap.enabled = true;
+      renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+      key.castShadow = true;
+      if (key.shadow) {
+        if (key.shadow.mapSize && typeof key.shadow.mapSize.set === 'function') {
+          key.shadow.mapSize.set(SHADOW_MAP_SIZE, SHADOW_MAP_SIZE);
+        }
+        const sc = key.shadow.camera;
+        if (sc) {
+          sc.near = 0.05;
+          sc.far = 6;
+          sc.left = -0.5;
+          sc.right = 0.5;
+          sc.top = 0.5;
+          sc.bottom = -0.5;
+          if (typeof sc.updateProjectionMatrix === 'function') {
+            sc.updateProjectionMatrix();
+          }
+        }
+        key.shadow.bias = -0.0005;
+      }
+    }
 
     // Ground grid for spatial reference (1 m, 20 divisions).
     const grid = new THREE.GridHelper(1, 20, 0x3a3f47, 0x2a2e34);
@@ -272,6 +348,14 @@ export default function UrdfTwin({
         scene.add(robot);
         robotRef.current = robot;
         frameRobot(camera, controls, robot);
+        // Sim-stage shadows: mark every robot mesh as a shadow caster once the
+        // URDF is in (the mount effect already enabled the renderer shadow map +
+        // key light). Guarded by the ref so RecordPage's default call skips it.
+        if (showShadowsRef.current && typeof robot.traverse === 'function') {
+          robot.traverse((obj) => {
+            if (obj && obj.isMesh) obj.castShadow = true;
+          });
+        }
         // Phase-5: if the „Achsen" toggle was already on before the URDF
         // finished loading, attach the base/TCP triads now (the frames effect
         // bailed earlier because robotRef was still null).
@@ -344,6 +428,8 @@ export default function UrdfTwin({
       tableMeshRef.current = null;
       prevHeldIdRef.current = null;
       zonesGroupRef.current = null;
+      // The reach ring (under scene) was disposed by the traverse above; drop the ref.
+      reachRingRef.current = null;
       // Phase-5: the path line (under pathGroup → scene) and the frame triads
       // (under robot links → scene) were already disposed by the traverse above;
       // just drop the bookkeeping refs + the accumulator state.
@@ -391,6 +477,9 @@ export default function UrdfTwin({
       const table = new THREE.Mesh(tableGeo, tableMat);
       table.rotation.x = -Math.PI / 2;
       table.position.set(0, 0, 0);
+      // Sim-stage shadows: the opaque sim table is the shadow receiver (cleaner
+      // than a separate ShadowMaterial plane — it is already the visible ground).
+      if (showShadowsRef.current) table.receiveShadow = true;
       group.add(table);
       tableMeshRef.current = table;
     } else if (!showTable && tableMeshRef.current) {
@@ -400,23 +489,32 @@ export default function UrdfTwin({
       tableMeshRef.current = null;
     }
 
-    // Diff the object meshes by tag_id.
+    // Diff the object meshes by tag_id. Each object is sized/coloured from the
+    // catalog by TYPE; the resolved dims + type are stashed on mesh.userData so
+    // the snap/recolor helpers read per-mesh dims and the diff can detect a stale
+    // mesh (catalogDims arrives async after a hydrated scene builds meshes, and a
+    // tag_id can be reused across workflows with a different type — both must
+    // dispose+rebuild). A currently-held mesh is left untouched (never yank a
+    // carried mesh); it reconciles on the NEXT objects/catalogDims change, not on
+    // release itself — so a mesh built before the catalog fetch resolved and then
+    // grasped mid-fetch keeps its fallback look until the next scene edit
+    // (cosmetic, near-unreachable: the local service resolves in ~100 ms while a
+    // grasp takes seconds to reach).
     const seen = new Set();
     objects.forEach((o) => {
       const id = simObjectKey(o);
       if (id === null) return;
       seen.add(id);
+      const dims = resolveDims(catalogDims, o.type);
       let mesh = map.get(id);
+      if (mesh && id !== heldObjectId && !simDimsMatch(mesh.userData, o.type, dims)) {
+        if (mesh.parent) mesh.parent.remove(mesh);
+        disposeObject(mesh);
+        map.delete(id);
+        mesh = null;
+      }
       if (!mesh) {
-        const geo = new THREE.BoxGeometry(
-          SIM_OBJECT_SIZE_M, SIM_OBJECT_SIZE_M, SIM_OBJECT_SIZE_M);
-        const mat = new THREE.MeshStandardMaterial({
-          color: SIM_OBJECT_COLOR,
-          metalness: 0.2,
-          roughness: 0.6,
-        });
-        mesh = new THREE.Mesh(geo, mat);
-        mesh.userData.simId = id;
+        mesh = buildSimObjectMesh(dims, o.type, id, showShadowsRef.current);
         group.add(mesh);
         map.set(id, mesh);
       }
@@ -436,11 +534,12 @@ export default function UrdfTwin({
     });
 
     requestRenderRef.current();
+    // catalogDims IS a dep (its async arrival must re-size existing meshes).
     // heldObjectId is read (to skip a carried mesh) but intentionally NOT a dep:
     // the held effect re-parents on its own; re-running this on every grab would
     // be wasteful. One-shot/diff effect idiom.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [objects, showTable]);
+  }, [objects, showTable, catalogDims]);
 
   // ---- Phase-3: grasp re-parenting (mesh follows the gripper) ---------------
   // On grab, re-parent the matching mesh under the end-effector link (attach()
@@ -457,7 +556,9 @@ export default function UrdfTwin({
       if (prevMesh && scene && typeof scene.attach === 'function') {
         scene.attach(prevMesh);
         snapMeshToTable(prevMesh);
-        setMeshColor(prevMesh, SIM_OBJECT_COLOR);
+        // Restore the mesh's OWN per-type rest colour (not a global amber — a
+        // catalog-coloured object would otherwise turn amber after being carried).
+        setMeshColor(prevMesh, restColorOf(prevMesh));
         requestRenderRef.current();
       }
     }
@@ -466,7 +567,7 @@ export default function UrdfTwin({
       const link = robot && robot.links ? robot.links[EE_LINK_NAME] : null;
       if (mesh && link && typeof link.attach === 'function') {
         link.attach(mesh);
-        setMeshColor(mesh, SIM_OBJECT_HELD_COLOR);
+        setMeshColor(mesh, SIM_OBJECT_HELD_COLOR_HEX);
         requestRenderRef.current();
       }
     }
@@ -577,6 +678,37 @@ export default function UrdfTwin({
     else disposeFrameTriads(axesBaseRef, axesTcpRef);
     requestRenderRef.current();
   }, [showFrames]);
+
+  // ---- Sim-stage: reach-annulus ring ("showReach") --------------------------
+  // Lazily builds a translucent green ring on the table (the 0.10/0.28 graspable
+  // annulus, shared with the 2D editor) the first time it is enabled, then just
+  // toggles its visibility. For the default showReach=false call this returns
+  // BEFORE constructing any THREE primitive — RecordPage's `<UrdfTwin/>` and the
+  // jsdom three mock (no RingGeometry/MeshBasicMaterial) are never exercised.
+  useEffect(() => {
+    const scene = sceneRef.current;
+    if (!scene) return;
+    if (!showReach && !reachRingRef.current) return;
+
+    let ring = reachRingRef.current;
+    if (!ring) {
+      const geo = new THREE.RingGeometry(REACH_INNER_M, REACH_OUTER_M, 64);
+      const mat = new THREE.MeshBasicMaterial({
+        color: REACH_RING_COLOR,
+        transparent: true,
+        opacity: 0.15,
+        side: THREE.DoubleSide,
+        depthWrite: false,
+      });
+      ring = new THREE.Mesh(geo, mat);
+      ring.rotation.x = -Math.PI / 2; // flat on the table (viewer y=0 plane)
+      ring.position.set(0, REACH_RING_Y, 0);
+      scene.add(ring);
+      reachRingRef.current = ring;
+    }
+    ring.visible = showReach;
+    requestRenderRef.current();
+  }, [showReach]);
 
   // ---- rosbridge joint-state subscription (ImageGridCell idiom) ----
   // `jointTopic` defaults to the bare global /joint_states (RecordPage); SimScene
@@ -708,13 +840,70 @@ function simObjectKey(o) {
   return o && o.tag_id !== undefined && o.tag_id !== null ? o.tag_id : null;
 }
 
+// Resolve a sim object's render dims from the catalog map by TYPE, with fallbacks
+// to the fixed amber cube for any type the catalog does not describe (a missing/
+// late catalog fetch, or an unknown type). Returns a plain {height, width, color}
+// stashed on the mesh's userData so positionSimObject / snapMeshToTable / the
+// release-recolor read the per-object dims without re-consulting the map.
+function resolveDims(catalogDims, type) {
+  const d = catalogDims && type ? catalogDims[type] : null;
+  const height = d && typeof d.height_m === 'number' && d.height_m > 0
+    ? d.height_m : SIM_OBJECT_FALLBACK_SIZE_M;
+  const width = d && typeof d.width_m === 'number' && d.width_m > 0
+    ? d.width_m : SIM_OBJECT_FALLBACK_SIZE_M;
+  const color = d && typeof d.color === 'string' && d.color
+    ? d.color : SIM_OBJECT_COLOR_HEX;
+  return { height, width, color };
+}
+
+// True when an existing mesh's stashed type + dims still match the freshly
+// resolved catalog dims — a mismatch (type reused across workflows, or catalogDims
+// arriving/changing) forces a dispose+rebuild so size/colour never go stale.
+function simDimsMatch(userData, type, dims) {
+  if (!userData || userData.simType !== type) return false;
+  const prev = userData.simDims;
+  if (!prev) return false;
+  return prev.height === dims.height
+    && prev.width === dims.width
+    && prev.color === dims.color;
+}
+
+// Build one sim-object box (width × height × width) in the catalog colour, with
+// its type + resolved dims stashed on userData. Casts a shadow when the sim-stage
+// shadow layer is on.
+function buildSimObjectMesh(dims, type, id, castShadow) {
+  const geo = new THREE.BoxGeometry(dims.width, dims.height, dims.width);
+  const mat = new THREE.MeshStandardMaterial({
+    color: dims.color,
+    metalness: 0.2,
+    roughness: 0.6,
+  });
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.userData.simId = id;
+  mesh.userData.simType = type;
+  mesh.userData.simDims = dims;
+  if (castShadow) mesh.castShadow = true;
+  return mesh;
+}
+
+// The per-type rest colour a released mesh restores (its own catalog colour, or
+// the amber fallback for an object built without catalog dims).
+function restColorOf(mesh) {
+  const dims = mesh && mesh.userData && mesh.userData.simDims;
+  return dims && typeof dims.color === 'string' && dims.color
+    ? dims.color : SIM_OBJECT_COLOR_HEX;
+}
+
 // Place a resting sim-object mesh from its base-frame (x, y, yaw). The robot is
 // added with rotation.x = -π/2 (URDF +Z up → viewer +Y up); the object layer
 // mirrors that mapping: base (x, y, z) → viewer (x, z, -y). A box of edge
-// SIM_OBJECT_SIZE_M rests with its bottom on the table (base z=0) at half-edge.
-// A base-z yaw maps to a viewer-y rotation (base +Z axis → viewer +Y axis).
+// height_m (its own resolved dims) rests with its bottom on the table (base z=0)
+// at half-height. A base-z yaw maps to a viewer-y rotation (base +Z → viewer +Y).
 function positionSimObject(mesh, o) {
-  const half = SIM_OBJECT_SIZE_M / 2;
+  const dims = mesh && mesh.userData ? mesh.userData.simDims : null;
+  const height = dims && typeof dims.height === 'number' && dims.height > 0
+    ? dims.height : SIM_OBJECT_FALLBACK_SIZE_M;
+  const half = height / 2;
   const x = typeof o.x === 'number' ? o.x : 0;
   const y = typeof o.y === 'number' ? o.y : 0;
   const yaw = typeof o.yaw === 'number' ? o.yaw : 0;
@@ -769,11 +958,14 @@ function buildZoneObjects(z) {
 }
 
 // On release, the mesh is re-attached to the scene with its carried world
-// transform; snap it straight down so it rests on the table (viewer y=half),
-// keeping its current x/z and yaw.
+// transform; snap it straight down so it rests on the table (viewer y=half of its
+// OWN height), keeping its current x/z and yaw.
 function snapMeshToTable(mesh) {
   if (mesh && mesh.position && typeof mesh.position.y === 'number') {
-    mesh.position.y = SIM_OBJECT_SIZE_M / 2;
+    const dims = mesh.userData && mesh.userData.simDims;
+    const height = dims && typeof dims.height === 'number' && dims.height > 0
+      ? dims.height : SIM_OBJECT_FALLBACK_SIZE_M;
+    mesh.position.y = height / 2;
   }
 }
 

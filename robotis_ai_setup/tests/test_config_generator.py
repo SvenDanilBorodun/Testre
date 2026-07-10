@@ -562,5 +562,142 @@ class TestSingleSceneCamera(unittest.TestCase):
             os.unlink(tmp_path)
 
 
+class TestConfigGeneratorRobotType(unittest.TestCase):
+    """EDUBOTICS_ROBOT_TYPE is the GUI-hardset ArmProfile id (MANAGED). It must
+    be emitted by BOTH generators, DERIVE the initial EDUBOTICS_FOLLOWER_ONLY
+    when follower_only is left None, honour an explicit follower_only override
+    (the RS runtime toggle), and supersede a stale hand-pinned value."""
+
+    def setUp(self):
+        # Pin usb_cam so CAMERA_DEVICE layout is stable cross-platform.
+        self._prev_src = os.environ.get("EDUBOTICS_CAMERA_SOURCE")
+        os.environ["EDUBOTICS_CAMERA_SOURCE"] = "usb_cam"
+
+    def tearDown(self):
+        if self._prev_src is None:
+            os.environ.pop("EDUBOTICS_CAMERA_SOURCE", None)
+        else:
+            os.environ["EDUBOTICS_CAMERA_SOURCE"] = self._prev_src
+
+    def _config(self, with_leader):
+        leader = None
+        if with_leader:
+            leader = ArmDevice(
+                busid="1-3", serial_path="/dev/serial/by-id/leader",
+                role="leader", description="OpenRB-150")
+        return HardwareConfig(
+            leader=leader,
+            follower=ArmDevice(
+                busid="1-4", serial_path="/dev/serial/by-id/follower",
+                role="follower", description="OpenRB-150"),
+        )
+
+    def _tmp(self):
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".env", delete=False) as f:
+            return f.name
+
+    def test_robot_type_emitted_once(self):
+        p = self._tmp()
+        try:
+            content = generate_env_file(
+                self._config(with_leader=True), output_path=p,
+                robot_type="omx_full")
+            self.assertIn("EDUBOTICS_ROBOT_TYPE=omx_full", content)
+            self.assertEqual(content.count("EDUBOTICS_ROBOT_TYPE="), 1)
+        finally:
+            os.unlink(p)
+
+    def test_omx_follower_derives_follower_only_without_leader(self):
+        # THE high-risk item: omx_follower has no leader, so the derive-first
+        # ordering must set follower_only=True BEFORE the leader-null guard —
+        # otherwise this raises ValueError at every start.
+        p = self._tmp()
+        try:
+            content = generate_env_file(
+                self._config(with_leader=False), output_path=p,
+                robot_type="omx_follower")  # follower_only left as None → derive
+            self.assertIn("EDUBOTICS_ROBOT_TYPE=omx_follower", content)
+            self.assertIn("EDUBOTICS_FOLLOWER_ONLY=1", content)
+            self.assertNotIn("LEADER_PORT=", content)
+        finally:
+            os.unlink(p)
+
+    def test_omx_full_derives_both_arms(self):
+        p = self._tmp()
+        try:
+            content = generate_env_file(
+                self._config(with_leader=True), output_path=p,
+                robot_type="omx_full")  # follower_only None → derive False
+            self.assertIn("EDUBOTICS_ROBOT_TYPE=omx_full", content)
+            self.assertNotIn("EDUBOTICS_FOLLOWER_ONLY", content)
+            self.assertIn("LEADER_PORT=", content)
+        finally:
+            os.unlink(p)
+
+    def test_explicit_follower_only_override_wins_over_type(self):
+        # The RS runtime toggle switches an omx_full session to follower-only
+        # WITHOUT changing the type: explicit follower_only=True must win, and
+        # EDUBOTICS_ROBOT_TYPE must stay omx_full.
+        p = self._tmp()
+        try:
+            content = generate_env_file(
+                self._config(with_leader=True), output_path=p,
+                robot_type="omx_full", follower_only=True)
+            self.assertIn("EDUBOTICS_ROBOT_TYPE=omx_full", content)
+            self.assertIn("EDUBOTICS_FOLLOWER_ONLY=1", content)
+            self.assertNotIn("LEADER_PORT=", content)
+        finally:
+            os.unlink(p)
+
+    def test_explicit_follower_only_false_keeps_leader_on_follower_type(self):
+        # And the reverse: explicit follower_only=False re-arms the leader even
+        # when the type is omx_follower (rollback re-derives with prev value).
+        p = self._tmp()
+        try:
+            content = generate_env_file(
+                self._config(with_leader=True), output_path=p,
+                robot_type="omx_follower", follower_only=False)
+            self.assertIn("EDUBOTICS_ROBOT_TYPE=omx_follower", content)
+            self.assertNotIn("EDUBOTICS_FOLLOWER_ONLY", content)
+            self.assertIn("LEADER_PORT=", content)
+        finally:
+            os.unlink(p)
+
+    def test_stale_robot_type_is_superseded(self):
+        # EDUBOTICS_ROBOT_TYPE is MANAGED → a stale hand-pinned value is dropped
+        # and replaced on regenerate (R3 lockstep).
+        p = self._tmp()
+        with open(p, "w") as f:
+            f.write("EDUBOTICS_ROBOT_TYPE=some_old_type\n")
+        try:
+            content = generate_env_file(
+                self._config(with_leader=True), output_path=p,
+                robot_type="omx_full")
+            self.assertNotIn("some_old_type", content)
+            self.assertEqual(content.count("EDUBOTICS_ROBOT_TYPE="), 1)
+            self.assertIn("EDUBOTICS_ROBOT_TYPE=omx_full", content)
+        finally:
+            os.unlink(p)
+
+    def test_cloud_only_emits_robot_type(self):
+        p = self._tmp()
+        try:
+            content = generate_cloud_only_env(
+                output_path=p, robot_type="omx_follower")
+            self.assertIn("EDUBOTICS_ROBOT_TYPE=omx_follower", content)
+            self.assertEqual(content.count("EDUBOTICS_ROBOT_TYPE="), 1)
+        finally:
+            os.unlink(p)
+
+    def test_cloud_only_default_robot_type(self):
+        from gui.app.constants import DEFAULT_ROBOT_PROFILE
+        p = self._tmp()
+        try:
+            content = generate_cloud_only_env(output_path=p)
+            self.assertIn(f"EDUBOTICS_ROBOT_TYPE={DEFAULT_ROBOT_PROFILE}", content)
+        finally:
+            os.unlink(p)
+
+
 if __name__ == "__main__":
     unittest.main()

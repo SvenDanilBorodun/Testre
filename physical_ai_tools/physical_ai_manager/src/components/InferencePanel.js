@@ -14,7 +14,7 @@
 //
 // Author: Kiwoong Park
 
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useState } from 'react';
 import { useSelector, useDispatch } from 'react-redux';
 import clsx from 'clsx';
 import { MdFolderOpen, MdDownload } from 'react-icons/md';
@@ -31,12 +31,13 @@ const InferencePanel = () => {
   const info = useSelector((state) => state.tasks.taskInfo);
   const taskStatus = useSelector((state) => state.tasks.taskStatus);
 
-  const [isTaskStatusPaused, setIsTaskStatusPaused] = useState(false);
-  const [lastTaskStatusUpdate, setLastTaskStatusUpdate] = useState(Date.now());
-
-  // Calculate if the panel should be disabled based on task status
-  const disabled = taskStatus.phase !== TaskPhase.READY || !isTaskStatusPaused;
-  const [isEditable, setIsEditable] = useState(!disabled);
+  // Editable exactly when the node is idle. The former 1 s /task/status SILENCE
+  // detector was only ever a PROXY for "no task running" — valid while
+  // /task/status was silent when idle, but the server now emits a ~0.5 Hz idle
+  // identity tick, so a silence detector would re-LOCK every field for ~1 s per
+  // tick (focus/keystroke loss). The explicit phase/running signal the ticks
+  // now carry is exact and stable (D8 companion #2).
+  const isEditable = taskStatus.phase === TaskPhase.READY && !taskStatus.running;
 
   // File browser modal states
   const [showPolicyPathModal, setShowPolicyPathModal] = useState(false);
@@ -77,33 +78,6 @@ const InferencePanel = () => {
     },
     [handleChange]
   );
-
-  // Update isEditable state when the disabled prop changes
-  useEffect(() => {
-    setIsEditable(!disabled);
-  }, [disabled]);
-
-  // track task status update
-  useEffect(() => {
-    if (taskStatus) {
-      setLastTaskStatusUpdate(Date.now());
-      setIsTaskStatusPaused(false);
-    }
-  }, [taskStatus]);
-
-  // Check if task status updates are paused (considered paused if no updates for 1 second)
-  useEffect(() => {
-    const UPDATE_PAUSE_THRESHOLD = 1000;
-    const timer = setInterval(() => {
-      const timeSinceLastUpdate = Date.now() - lastTaskStatusUpdate;
-      const isPaused = timeSinceLastUpdate >= UPDATE_PAUSE_THRESHOLD;
-      if (isPaused !== isTaskStatusPaused) {
-        setIsTaskStatusPaused(isPaused);
-      }
-    }, 1000);
-
-    return () => clearInterval(timer);
-  }, [lastTaskStatusUpdate, isTaskStatusPaused]);
 
   const classLabel = clsx('text-xs', 'text-gray-600', 'w-[120px]', 'flex-shrink-0', 'font-medium', 'leading-snug', 'break-words');
 

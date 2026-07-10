@@ -187,8 +187,9 @@ def test_no_communicator_distinct_message():
     node = _StubNode(communicator=None)
     resp = _capture_pose(node, _Request('Ablage'), _Response())
     assert resp.success is False
-    # German "pick the robot first" hint, distinct from "position unknown".
-    assert 'auswählen' in resp.message
+    # German degraded-boot hint (robot type is hardset in the .env now; the
+    # only way here is a failed pipeline init), distinct from "position unknown".
+    assert 'neu starten' in resp.message
     _assert_zeros(resp)
     assert node._wfm.get_destinations() == {}
 

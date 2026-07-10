@@ -3,7 +3,7 @@
 Locks the 2026-06-07 fix that moved dataset edits (Daten-tab delete/merge) out
 of the synchronous /dataset/edit ROS callback into a nice'd subprocess so a slow
 AV1 re-encode can no longer CPU-starve the executor and freeze the dashboard
-(/get_robot_types timing out). See
+(node-default service calls timing out). See
 ``docs/plans/2026-06-07-dataset-edit-cpu-isolation.md``.
 
 Runs WITHOUT lerobot/torch/rclpy: data_editor_v3 has no top-level heavy imports

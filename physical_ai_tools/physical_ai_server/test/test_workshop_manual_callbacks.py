@@ -248,7 +248,7 @@ def test_jog_leader_refused():
 def test_jog_no_communicator_refused():
     node = _FakeNode(joints=None)
     resp = _jog(node)
-    assert resp.success is False and 'auswählen' in resp.message
+    assert resp.success is False and 'neu starten' in resp.message
 
 
 def test_jog_torque_on_failure_keeps_session():

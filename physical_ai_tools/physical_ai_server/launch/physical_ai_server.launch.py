@@ -39,10 +39,11 @@ def generate_launch_description():
     # DEAD behind a still-running rosbridge (only web_video_server had respawn),
     # so the React app showed "Getrennt" with no recovery short of a full
     # environment restart. respawn restarts the node in place (rosbridge keeps
-    # its socket, so the browser barely notices); the node's liveness heartbeat
-    # is created in __init__ (decoupled from /set_robot_type), so a respawn
-    # re-establishes the heartbeat immediately and the React app re-issues the
-    # persisted robot type on heartbeat recovery (useRobotTypeRehydrate).
+    # its socket, so the browser barely notices); the robot type is resolved
+    # from EDUBOTICS_ROBOT_TYPE in __init__ (robot_profiles.resolve) and the
+    # data pipeline boot-initializes with it, so a respawn self-heals from env
+    # and the idle identity tick re-delivers robot_type + capabilities to the
+    # browser within ~2-3 s — no client-side re-selection exists anymore.
     # 2 s delay throttles a crash loop (mirrors web_video_server's policy in
     # physical_ai_server_bringup.launch.py).
     physical_ai_server = Node(

@@ -128,6 +128,8 @@ from .constants import (
     PHONE_CAM_ID,
     DOCKER_DIR,
     ENV_FILE,
+    ROBOT_PROFILES,
+    DEFAULT_ROBOT_PROFILE,
     cameras_use_native_bridge,
 )
 
@@ -305,6 +307,30 @@ class EduBoticsApp:
         self._rs_control = None
         self._rs_use_gpu = False
         self._rs_phone_enabled = False
+        # Robot type (ArmProfile) — HARDSET at env start, baked into the MANAGED
+        # .env key EDUBOTICS_ROBOT_TYPE and read by the server at boot. A full
+        # restart changes it; the RS leader-toggle only flips FOLLOWER_ONLY
+        # WITHIN the omx_full type. The saved value (last session's .env) seeds
+        # the selector. _rs_robot_type mirrors the SELECTED profile id: it is set
+        # from the selector at env start and reused by _rs_set_leader_mode so a
+        # runtime regen keeps the type (MANAGED key → stripped-and-re-emitted).
+        self._robot_id_to_label = {
+            pid: prof["display_de"] for pid, prof in ROBOT_PROFILES.items()
+        }
+        self._robot_label_to_id = {
+            label: pid for pid, label in self._robot_id_to_label.items()
+        }
+        _saved_profile = config_generator.read_env_var("EDUBOTICS_ROBOT_TYPE", ENV_FILE)
+        if _saved_profile not in ROBOT_PROFILES:
+            _saved_profile = DEFAULT_ROBOT_PROFILE
+        self.robot_type_var = tk.StringVar(value=self._robot_id_to_label[_saved_profile])
+        # Plain-Python mirror of the selector, updated ONLY on the main thread
+        # (__init__ + the <<ComboboxSelected>> callback). Worker threads
+        # (_do_scan/_run_prerequisite_checks/_do_start via _hardware_ready)
+        # read THIS, never the tk StringVar — a cross-thread StringVar.get()
+        # can raise "main thread is not in main loop" on stricter tk builds.
+        self._robot_profile_selected = _saved_profile
+        self._rs_robot_type = _saved_profile
         # True while THIS GUI is mid-leader-toggle (rewriting the .env +
         # recreating the arm container). The bridge refuses a second switch and
         # _rs_get_status reports the in-flight state instead of the optimistic
@@ -419,12 +445,41 @@ class EduBoticsApp:
             justify=tk.LEFT,
         ).pack(anchor=tk.W, pady=(2, 0))
 
+        # Robot-type (ArmProfile) selection. Hardset for this session and baked
+        # into the .env before "Umgebung starten"; a full restart changes it.
+        robot_row = ttk.Frame(mode_frame)
+        robot_row.pack(fill=tk.X, pady=(8, 0))
+        ttk.Label(robot_row, text="Robotertyp:").pack(side=tk.LEFT)
+        self.robot_type_combo = ttk.Combobox(
+            robot_row,
+            textvariable=self.robot_type_var,
+            values=[self._robot_id_to_label[pid] for pid in ROBOT_PROFILES],
+            state="readonly",
+            width=38,
+        )
+        self.robot_type_combo.pack(side=tk.LEFT, padx=(6, 0))
+        self.robot_type_combo.bind(
+            "<<ComboboxSelected>>", lambda _e: self._on_robot_type_changed()
+        )
+        ttk.Label(
+            mode_frame,
+            text=(
+                "„OMX – Voll“ nutzt beide Arme; „OMX – Roboter Studio (nur "
+                "Follower)“ braucht nur den Follower-Arm. Der Typ wird beim "
+                "Start festgelegt — zum Wechseln die Umgebung neu starten."
+            ),
+            foreground="gray",
+            font=("Segoe UI", 8),
+            wraplength=620,
+            justify=tk.LEFT,
+        ).pack(anchor=tk.W, pady=(2, 0))
+
         ttk.Label(
             mode_frame,
             text=(
                 "Roboter Studio (Greifen & Programmieren) wird direkt in der "
-                "Web-Oberfläche gestartet — dort schaltest du den Leader-Arm bei "
-                "Bedarf ab und wieder zu."
+                "Web-Oberfläche gestartet — bei „OMX – Voll“ schaltest du den "
+                "Leader-Arm dort bei Bedarf ab und wieder zu."
             ),
             foreground="gray",
             font=("Segoe UI", 8),
@@ -437,7 +492,9 @@ class EduBoticsApp:
         leader_frame.pack(fill=tk.X, pady=5)
         self.leader_frame = leader_frame
 
-        ttk.Label(leader_frame, text="Leader-Arm per USB anschließen, dann auf Scannen klicken.").pack(anchor=tk.W)
+        self.leader_hint_label = ttk.Label(
+            leader_frame, text="Leader-Arm per USB anschließen, dann auf Scannen klicken.")
+        self.leader_hint_label.pack(anchor=tk.W)
         leader_row = ttk.Frame(leader_frame)
         leader_row.pack(fill=tk.X, pady=5)
 
@@ -452,7 +509,9 @@ class EduBoticsApp:
         follower_frame.pack(fill=tk.X, pady=5)
         self.follower_frame = follower_frame
 
-        ttk.Label(follower_frame, text="Follower-Arm per USB anschließen (wird zusammen mit Leader gescannt).").pack(anchor=tk.W)
+        self.follower_hint_label = ttk.Label(
+            follower_frame, text="Follower-Arm per USB anschließen (wird zusammen mit Leader gescannt).")
+        self.follower_hint_label.pack(anchor=tk.W)
         follower_row = ttk.Frame(follower_frame)
         follower_row.pack(fill=tk.X, pady=5)
 
@@ -590,6 +649,67 @@ class EduBoticsApp:
         )
         self.log_text.pack(fill=tk.BOTH, expand=True)
 
+        # Apply the saved-default robot type's Schritt A/B wording once the
+        # hint labels exist (they are built above in Schritt A/B).
+        self._apply_robot_type_labels()
+
+    # ── Robot type (ArmProfile) ──────────────────────────────────────
+
+    def _selected_robot_profile(self) -> str:
+        """Profile id currently chosen in the Modus selector.
+
+        Reads the plain-Python mirror (main-thread-maintained), NOT the tk
+        StringVar: this method runs on worker threads (scan / prereq / start
+        paths through _hardware_ready), where a StringVar.get() is not safe."""
+        return self._robot_profile_selected
+
+    def _hardware_ready(self, profile: str | None = None) -> bool:
+        """Whether the scanned hardware satisfies the (given/selected) robot type.
+
+        A both-arms type needs leader+follower (HardwareConfig.is_complete); a
+        follower-only type (Roboter Studio kit, no leader) needs only the
+        follower (HardwareConfig.follower_present)."""
+        if profile is None:
+            profile = self._selected_robot_profile()
+        if ROBOT_PROFILES.get(profile, {}).get("scan_requires_leader", True):
+            return self.hardware.is_complete
+        return self.hardware.follower_present
+
+    def _apply_robot_type_labels(self):
+        """Reword Schritt A/B for the selected robot type. Follower-only types
+        have no leader, so the leader step becomes a hint that it is not needed
+        (the 'Arme scannen' button stays live — it lives in the leader frame)."""
+        profile = self._selected_robot_profile()
+        has_leader = ROBOT_PROFILES.get(profile, {}).get("scan_requires_leader", True)
+        if has_leader:
+            self.leader_frame.configure(text="Schritt A: Leader-Arm")
+            self.leader_hint_label.configure(
+                text="Leader-Arm per USB anschließen, dann auf Scannen klicken.")
+            self.follower_hint_label.configure(
+                text="Follower-Arm per USB anschließen (wird zusammen mit Leader gescannt).")
+        else:
+            self.leader_frame.configure(text="Schritt A: Leader-Arm (für diesen Typ nicht nötig)")
+            self.leader_hint_label.configure(
+                text="Für „Roboter Studio (nur Follower)“ ist kein Leader-Arm nötig — "
+                     "nur den Follower anschließen und auf „Arme scannen“ klicken.")
+            self.follower_hint_label.configure(
+                text="Follower-Arm per USB anschließen, dann auf „Arme scannen“ klicken.")
+
+    def _on_robot_type_changed(self):
+        """Robot-type selector changed — reword Schritt A/B + refresh gating.
+
+        Runs on the main thread (tk <<ComboboxSelected>>) — the ONE place the
+        StringVar is read; everything else consumes the plain mirror."""
+        self._robot_profile_selected = self._robot_label_to_id.get(
+            self.robot_type_var.get(), DEFAULT_ROBOT_PROFILE)
+        self._apply_robot_type_labels()
+        if not self.cloud_only.get():
+            if self._hardware_ready():
+                self._set_status("Bereit — Start klicken.")
+            else:
+                self._set_status("Bereit — Hardware scannen, um zu beginnen")
+        self._update_start_button()
+
     # ── HuggingFace token ────────────────────────────────────────────
 
     def _refresh_hf_token_status(self):
@@ -664,7 +784,7 @@ class EduBoticsApp:
             self.btn_factory_reset.config(state=tk.NORMAL)
             if self.cloud_only.get():
                 self.btn_start.config(state=tk.NORMAL)
-            elif self.hardware.is_complete:
+            elif self._hardware_ready():
                 self.btn_start.config(state=tk.NORMAL)
             else:
                 self.btn_start.config(state=tk.DISABLED)
@@ -680,7 +800,7 @@ class EduBoticsApp:
         if is_cloud_only:
             self._set_status("Cloud-Modus — Start klicken, um die Web-Oberfläche zu starten.")
         else:
-            if self.hardware.is_complete:
+            if self._hardware_ready():
                 self._set_status("Bereit — Start klicken.")
             else:
                 self._set_status("Bereit — Hardware scannen, um zu beginnen")
@@ -1258,6 +1378,10 @@ class EduBoticsApp:
             return
         self._scanning = True
         self.btn_scan_leader.config(state=tk.DISABLED)
+        # Capture the selected profile on the MAIN thread (tk StringVar reads
+        # are not thread-safe) so the worker's success branch is type-aware.
+        scan_requires_leader = ROBOT_PROFILES.get(
+            self._selected_robot_profile(), {}).get("scan_requires_leader", True)
 
         def _do_scan():
             self._set_status("Roboterarme werden gesucht...")
@@ -1310,12 +1434,18 @@ class EduBoticsApp:
             self.root.after(0, lambda: self.progress.stop())
             self.root.after(0, lambda: self.btn_scan_leader.config(state=tk.NORMAL))
 
-            if leader and follower:
-                self._set_status("Beide Arme gefunden! Kamera auswählen und auf Start klicken.")
+            # A follower-only robot type (Roboter Studio kit) has no leader, so a
+            # leader-less scan is SUCCESS — it must NOT route into the failure /
+            # diagnose flow (whose terminal message names leader servo IDs).
+            if follower and (leader or not scan_requires_leader):
+                if scan_requires_leader:
+                    self._set_status("Beide Arme gefunden! Kamera auswählen und auf Start klicken.")
+                else:
+                    self._set_status("Follower-Arm gefunden! Kamera auswählen und auf Start klicken.")
                 return
 
-            # Nothing (or only one) found — run the host→WSL→docker chain
-            # diagnosis so the student sees *why*, not just "Nicht gefunden".
+            # Nothing (or the required arm) not found — run the host→WSL→docker
+            # chain diagnosis so the student sees *why*, not just "Nicht gefunden".
             self._log("Diagnose wird ausgeführt — bitte einen Moment...")
             try:
                 diag = device_manager.diagnose_usb_environment(image=IMAGE_OPEN_MANIPULATOR)
@@ -1776,7 +1906,16 @@ class EduBoticsApp:
         no serial pings). Silent on any mismatch — the student simply scans
         as before. Never runs in cloud-only mode or over an existing scan.
         """
-        if (self.cloud_only.get() or self.hardware.is_complete
+        # The robot type persisted in the .env drives whether the leader is
+        # required. A follower-only (Roboter Studio) .env has no LEADER_PORT, so
+        # requiring it here would permanently no-op fast rehydrate for that type.
+        profile = config_generator.read_env_var("EDUBOTICS_ROBOT_TYPE", ENV_FILE) \
+            or DEFAULT_ROBOT_PROFILE
+        if profile not in ROBOT_PROFILES:
+            profile = DEFAULT_ROBOT_PROFILE
+        requires_leader = ROBOT_PROFILES[profile]["scan_requires_leader"]
+
+        if (self.cloud_only.get() or self._hardware_ready(profile)
                 or self._scanning):
             return
         try:
@@ -1784,19 +1923,21 @@ class EduBoticsApp:
             follower_port = config_generator.read_env_var("FOLLOWER_PORT", ENV_FILE)
         except Exception:  # noqa: BLE001 — missing .env on first run
             return
-        if not leader_port or not follower_port:
+        # Follower always required; leader only for both-arms types.
+        if not follower_port or (requires_leader and not leader_port):
             return
 
         def _do_rehydrate():
             self._log("Prüfe letzte Arm-Konfiguration ...")
             try:
                 leader, follower = device_manager.fast_rehydrate_arms(
-                    leader_port, follower_port
+                    leader_port or "", follower_port,
+                    require_leader=requires_leader,
                 )
             except Exception as exc:  # noqa: BLE001
                 self._log(f"(Schnellprüfung übersprungen: {exc})")
                 return
-            if leader is None or follower is None:
+            if follower is None or (requires_leader and leader is None):
                 self._log(
                     "Letzte Arm-Konfiguration nicht bestätigt — bitte "
                     "'Arme scannen' klicken."
@@ -1805,13 +1946,16 @@ class EduBoticsApp:
             # A manual scan may be running or completed meanwhile — never
             # race or overwrite it (the scan's identify result outranks
             # the rehydrated mapping).
-            if self._scanning or self.hardware.is_complete:
+            if self._scanning or self._hardware_ready(profile):
                 return
-            self.hardware.leader = leader
+            # leader may be None for a follower-only type — only update its
+            # status line when present (guard against AttributeError).
+            if leader is not None:
+                self.hardware.leader = leader
+                self.root.after(0, lambda: self.leader_status_var.set(
+                    f"Wiederhergestellt: {leader.description} ({leader.serial_path})"
+                ))
             self.hardware.follower = follower
-            self.root.after(0, lambda: self.leader_status_var.set(
-                f"Wiederhergestellt: {leader.description} ({leader.serial_path})"
-            ))
             self.root.after(0, lambda: self.follower_status_var.set(
                 f"Wiederhergestellt: {follower.description} ({follower.serial_path})"
             ))
@@ -2097,9 +2241,16 @@ class EduBoticsApp:
         # Phone-as-3rd-camera toggle — captured here for the same thread-safety
         # reason. Only meaningful on the native_bridge (Windows) path.
         phone_enabled = bool(self.phone_camera_enabled.get()) and not is_cloud_only
+        # Robot type is HARDSET at start (MANAGED .env key EDUBOTICS_ROBOT_TYPE).
+        # Read it on the main thread; the worker below, the .env regen, the
+        # webview URL, and the RS leader-toggle all reuse self._rs_robot_type.
+        self._rs_robot_type = self._selected_robot_profile()
 
-        if not is_cloud_only and not self.hardware.is_complete:
-            messagebox.showwarning("Fehlende Hardware", "Bitte beide Arme scannen und identifizieren, bevor du startest.")
+        if not is_cloud_only and not self._hardware_ready(self._rs_robot_type):
+            if ROBOT_PROFILES.get(self._rs_robot_type, {}).get("scan_requires_leader", True):
+                messagebox.showwarning("Fehlende Hardware", "Bitte beide Arme scannen und identifizieren, bevor du startest.")
+            else:
+                messagebox.showwarning("Fehlende Hardware", "Bitte den Follower-Arm scannen und identifizieren, bevor du startest.")
             return
 
         self.btn_start.config(state=tk.DISABLED)
@@ -2166,13 +2317,16 @@ class EduBoticsApp:
                 self._log(".env-Datei wird erstellt...")
                 if is_cloud_only:
                     env_content = config_generator.generate_cloud_only_env(
-                        ENV_FILE, phone_camera=phone_enabled)
+                        ENV_FILE, phone_camera=phone_enabled,
+                        robot_type=self._rs_robot_type)
                 else:
-                    # Always start with BOTH arms (recording/teleop available).
-                    # Roboter Studio switches to follower-only at RUNTIME via the
-                    # React leader toggle (_rs_set_leader_mode), not at start.
+                    # The initial FOLLOWER_ONLY is DERIVED from the robot type
+                    # (omx_full → both arms; omx_follower → follower only). On
+                    # omx_full, Roboter Studio can still switch to follower-only
+                    # at RUNTIME via the React leader toggle (_rs_set_leader_mode).
                     env_content = config_generator.generate_env_file(
-                        self.hardware, ENV_FILE, phone_camera=phone_enabled)
+                        self.hardware, ENV_FILE, phone_camera=phone_enabled,
+                        robot_type=self._rs_robot_type)
                 self._log(f"Konfiguration geschrieben: {ENV_FILE}")
                 for line in env_content.strip().splitlines():
                     self._log(f"  {_redact_secret_env_line(line)}")
@@ -2437,6 +2591,10 @@ class EduBoticsApp:
         params = [f"_v={IMAGE_TAG}"]
         if self.cloud_only.get():
             params.insert(0, "cloud=1")
+        # Instant robot identity/badge for the React app (authoritative
+        # capabilities still arrive from the server via TaskStatus). Uses the
+        # profile id captured at env start, so it stays correct on re-open.
+        params.append(f"robot={self._rs_robot_type}")
         url = f"http://localhost:{PORT_WEB_UI}/?{'&'.join(params)}"
 
         icon = os.path.join(
@@ -2477,6 +2635,14 @@ class EduBoticsApp:
         failure (e.g. port taken) just disables the toggle, never crashes."""
         self._rs_use_gpu = bool(use_gpu)
         self._rs_phone_enabled = bool(phone_enabled)
+        # Follower-only robot types have no leader, so there is nothing to
+        # toggle — the React LeaderToggle self-hides and the :8769 bridge is not
+        # started at all (the endpoint stays closed).
+        if ROBOT_PROFILES.get(self._rs_robot_type, {}).get("follower_only", False):
+            self._log(
+                "Roboter Studio (nur Follower): Leader-Umschaltung nicht nötig — "
+                "Steuerbrücke wird nicht gestartet.")
+            return
         if self._rs_control is not None:
             return
         try:
@@ -2544,6 +2710,12 @@ class EduBoticsApp:
 
         On a restart FAILURE the .env is ROLLED BACK to the previous mode so the
         badge + a later "Umgebung starten" don't lie about a dead arm."""
+        # Belt-and-suspenders: a follower-only robot type never starts the :8769
+        # bridge (see _start_rs_control_server), so this should be unreachable —
+        # refuse loudly rather than silently rewrite the type to omx_full.
+        if ROBOT_PROFILES.get(self._rs_robot_type, {}).get("follower_only", False):
+            return False, ("Umschalten ist für diesen Robotertyp nicht verfügbar — "
+                           "Roboter Studio läuft bereits ohne Leader-Arm.")
         if self.hardware is None or self.hardware.follower is None:
             return False, "Kein Follower-Arm konfiguriert."
         if not follower_only and self.hardware.leader is None:
@@ -2552,9 +2724,13 @@ class EduBoticsApp:
         prev_val = config_generator.read_env_var("EDUBOTICS_FOLLOWER_ONLY", ENV_FILE)
         prev_follower_only = str(prev_val).strip() == "1"
         try:
+            # EDUBOTICS_ROBOT_TYPE is MANAGED (stripped + re-emitted) — pass the
+            # session's type on BOTH the forward regen AND the rollback below, or
+            # a switch would silently rewrite it to the default (omx_full).
             config_generator.generate_env_file(
                 self.hardware, ENV_FILE,
                 phone_camera=self._rs_phone_enabled,
+                robot_type=self._rs_robot_type,
                 follower_only=follower_only,
             )
         except Exception as e:  # noqa: BLE001
@@ -2576,6 +2752,7 @@ class EduBoticsApp:
                 config_generator.generate_env_file(
                     self.hardware, ENV_FILE,
                     phone_camera=self._rs_phone_enabled,
+                    robot_type=self._rs_robot_type,
                     follower_only=prev_follower_only,
                 )
                 log("Moduswechsel fehlgeschlagen — Konfiguration zurückgesetzt.")

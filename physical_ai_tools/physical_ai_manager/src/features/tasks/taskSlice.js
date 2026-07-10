@@ -61,6 +61,13 @@ const initialState = {
   },
   taskStatus: {
     robotType: savedRobotType,
+    // Robot profile id (e.g. 'omx_full' / 'omx_follower') + the server-authored
+    // capability manifest. Both arrive on the /task/status wire (robot_profile,
+    // capabilities_json) and are boot-set on the server, so they self-heal on a
+    // node respawn. `null` caps mean "unknown" — the nav filter hides NOTHING
+    // until an explicit manifest lands.
+    robotProfile: '',
+    capabilities: null,
     taskName: 'idle',
     running: false,
     phase: TaskPhase.READY,
@@ -120,26 +127,28 @@ const taskSlice = createSlice({
       state.taskInfo = initialState.taskInfo;
     },
     setTaskStatus: (state, action) => {
-      // Never let an idle/post-restart /task/status tick (robot_type='') wipe
-      // the student's selected robot type. The server reports an empty
-      // robot_type in several ordinary situations — a node restart that lost
-      // its in-RAM selection, the stale-recording-session notice, the bare
-      // TaskStatus() error branches in the record/inference timer — and there is
-      // NO steady idle status publisher to re-set it, so an unconditional spread
-      // used to clobber taskStatus.robotType to '' permanently: only a manual
-      // re-select or a full reload recovered it, and it silently defeated
-      // useRobotTypeRehydrate (which reads THIS Redux value). Adopt robotType
-      // only when non-empty — the same guard userId already has below.
-      const { robotType, ...rest } = action.payload;
+      // Never let a bare /task/status tick (robot_type='') wipe the settled
+      // robot identity. robot_type is now boot-set on the server and stamped on
+      // every tick incl. the idle identity tick — but the collision monitor
+      // publishes bare TaskStatus() ticks that BYPASS that stamping (empty
+      // fields, up to 5 Hz), and a pre-capability server image sends '' too. An
+      // unconditional spread would clobber taskStatus.robotType/robotProfile/
+      // capabilities to their empty values on those ticks. Adopt each only when
+      // present/truthy — the same guard userId already has below. A cached
+      // capabilities object (D10, one per distinct capabilities_json string) is
+      // re-adopted by the SAME reference, so this stays identity-stable.
+      const { robotType, robotProfile, capabilities, ...rest } = action.payload;
       state.taskStatus = { ...state.taskStatus, ...rest };
       if (robotType) {
         state.taskStatus.robotType = robotType;
         try { localStorage.setItem('edubotics_robotType', robotType); } catch {}
       }
-    },
-    selectRobotType: (state, action) => {
-      state.taskStatus.robotType = action.payload;
-      try { localStorage.setItem('edubotics_robotType', action.payload); } catch {}
+      if (robotProfile) {
+        state.taskStatus.robotProfile = robotProfile;
+      }
+      if (capabilities) {
+        state.taskStatus.capabilities = capabilities;
+      }
     },
     resetTaskStatus: (state) => {
       state.taskStatus = initialState.taskStatus;
@@ -189,7 +198,6 @@ export const {
   setTaskInfo,
   resetTaskInfo,
   setTaskStatus,
-  selectRobotType,
   resetTaskStatus,
   setTaskType,
   setTaskInstruction,

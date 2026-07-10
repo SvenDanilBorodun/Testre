@@ -27,7 +27,6 @@ const initialState = {
   sidebarOpen: false,
   modalOpen: false,
   notifications: [],
-  robotTypeList: [],
   // HuggingFace Benutzer-ID list (account + orgs from whoami). Fetched ONCE
   // on ROS connect (StudentApp) and shared via Redux so it survives tab
   // switches — the dropdown options used to live in per-component useState
@@ -80,9 +79,6 @@ const uiSlice = createSlice({
     clearNotifications: (state) => {
       state.notifications = [];
     },
-    setRobotTypeList: (state, action) => {
-      state.robotTypeList = action.payload;
-    },
     setHfUserList: (state, action) => {
       state.hfUserList = Array.isArray(action.payload) ? action.payload : [];
     },
@@ -106,7 +102,6 @@ export const {
   addNotification,
   removeNotification,
   clearNotifications,
-  setRobotTypeList,
   setHfUserList,
   setIsFirstLoadFalse,
   setIsFirstLoadTrue,

@@ -131,6 +131,11 @@ export default function LeaderToggle({ isActive }) {
   const taskPhase = useSelector((s) => s.tasks?.taskStatus?.phase);
   const taskBusy = TASK_BUSY_PHASES.has(taskPhase);
 
+  // Type-aware hide: an omx_follower rig has NO leader, so the toggle is
+  // meaningless there. `has_leader === false` hides it; omx_full / undefined
+  // (pre-capability image, pre-first-tick) still render (`=== false` only).
+  const caps = useSelector((s) => s.tasks?.taskStatus?.capabilities);
+
   // Mirror local busy into a ref so the background poll can skip ticks while
   // THIS tab is mid-toggle (the poll must not clear our "wird vorbereitet"
   // overlay early on a status race).
@@ -282,7 +287,8 @@ export default function LeaderToggle({ isActive }) {
     };
   }, [preparing, refreshStatus]);
 
-  if (available !== true) return null; // probing, or no GUI bridge (Jetson/cloud)
+  // probing, or no GUI bridge (Jetson/cloud), or a leader-less profile (omx_follower)
+  if (available !== true || caps?.has_leader === false) return null;
 
   return (
     <div className="leader-toggle" style={{ display: 'flex', alignItems: 'center', gap: 10 }}>

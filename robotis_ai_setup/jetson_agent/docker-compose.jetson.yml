@@ -111,6 +111,12 @@ services:
       # Jetson can download trained policies on demand. Provisioned at
       # setup.sh time from the Cloud API's EDUBOTICS_JETSON_HF_TOKEN.
       - HF_TOKEN=${EDUBOTICS_HF_TOKEN}
+      # Robot-type profile id (ArmProfile registry): the classroom Jetson is
+      # follower-only by construction (the leader stays at the student's
+      # desk), so it defaults to omx_follower. React's capability filter is
+      # EXEMPTED in Jetson mode (D9), so this changes no tab visibility —
+      # it exists for identity correctness on /task/status.
+      - EDUBOTICS_ROBOT_TYPE=${EDUBOTICS_ROBOT_TYPE:-omx_follower}
       # No safety envelope, no Roboter Studio invocation paths used here.
     mem_limit: 6g
     pids_limit: 1024

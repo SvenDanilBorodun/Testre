@@ -3,25 +3,24 @@
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 //
-// Locks the robotType-wipe guard in setTaskStatus: an idle / post-restart
-// /task/status tick (robot_type='') must NEVER clobber the student's selected
-// robot type in Redux. Before the fix, the unconditional spread wiped it to ''
-// permanently (no steady idle status re-set it), which forced a manual
-// re-select on the Start page AND silently defeated useRobotTypeRehydrate
-// (which reads this Redux value). Mirrors the adopt-only-when-non-empty guard
-// userId already has.
+// Locks the robotType-wipe guard in setTaskStatus: a bare /task/status tick
+// (robot_type='') — e.g. a collision-monitor bare tick or a pre-capability
+// server image — must NEVER clobber the settled robot identity in Redux. Before
+// the fix, the unconditional spread wiped it to '' permanently. Mirrors the
+// adopt-only-when-non-empty guard userId already has.
 
 import tasksReducer, {
   setTaskStatus,
-  selectRobotType,
 } from '../taskSlice';
 
 function init() {
   return tasksReducer(undefined, { type: '@@INIT' });
 }
 
+// The robot-type picker (and its selectRobotType action) is gone — the type now
+// arrives on the /task/status wire, so seed the fixture through setTaskStatus.
 function withRobot(type = 'omx') {
-  return tasksReducer(init(), selectRobotType(type));
+  return tasksReducer(init(), setTaskStatus({ robotType: type }));
 }
 
 beforeEach(() => {

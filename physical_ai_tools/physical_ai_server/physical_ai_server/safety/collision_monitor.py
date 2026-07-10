@@ -731,6 +731,20 @@ class CollisionMonitorMixin:
             return PHASE_COLLISION_HOMING
         return PHASE_COLLISION
 
+    def _stamp_identity(self, status):
+        """H1: the collision monitor owns its OWN /task/status publisher and
+        BYPASSES communicator.publish_status, so its bare ticks (up to 5 Hz during
+        a trip, via the watchdog) must stamp robot identity too — otherwise they
+        publish empty robot_type / robot_profile / capabilities_json and wipe the
+        React-side identity. hasattr-guarded (pre-rebuild compiled interfaces lack
+        the fields); reads the identity off self (the mixin IS the node)."""
+        if hasattr(status, 'robot_type') and not getattr(status, 'robot_type', ''):
+            status.robot_type = getattr(self, 'robot_type', '') or ''
+        if hasattr(status, 'robot_profile') and not getattr(status, 'robot_profile', ''):
+            status.robot_profile = getattr(self, 'robot_profile', '') or ''
+        if hasattr(status, 'capabilities_json') and not getattr(status, 'capabilities_json', ''):
+            status.capabilities_json = getattr(self, 'capabilities_json', '') or ''
+
     def _publish_collision_status(self):
         status = TaskStatus()
         status.phase = self._collision_phase()
@@ -744,12 +758,19 @@ class CollisionMonitorMixin:
         per_joint = self._dist_to_home_per_joint()
         if per_joint is not None and hasattr(status, 'joint_dist_to_home'):
             status.joint_dist_to_home = [float(d) for d in per_joint]
+        self._stamp_identity(status)
         self._collision_status_pub.publish(status)
+        # D8 belt: keep the idle identity tick's 3 s silence window fed so it
+        # never fires (and flickers READY) while the collision watchdog is
+        # re-asserting COLLISION at 5 Hz.
+        self._last_task_status_mono = time.monotonic()
 
     def _publish_cleared_status(self):
         status = TaskStatus()
         status.phase = TaskStatus.READY
+        self._stamp_identity(status)
         self._collision_status_pub.publish(status)
+        self._last_task_status_mono = time.monotonic()
 
     def _collision_watchdog_cb(self):
         if self._collision_active:

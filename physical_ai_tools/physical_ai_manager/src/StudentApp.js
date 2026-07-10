@@ -32,7 +32,6 @@ import { LogoMark } from './components/EbUI';
 import packageJson from '../package.json';
 import { useRosTopicSubscription } from './hooks/useRosTopicSubscription';
 import { useHfUserList } from './hooks/useHfUserList';
-import { useRobotTypeRehydrate } from './hooks/useRobotTypeRehydrate';
 import { useHeartbeatWatchdog } from './hooks/useHeartbeatWatchdog';
 import rosConnectionManager from './utils/rosConnectionManager';
 import { useDispatch, useSelector } from 'react-redux';
@@ -48,6 +47,7 @@ import {
 import { useMeProfile } from './hooks/useMeProfile';
 import { resetJetsonOnLogout } from './hooks/useJetsonConnection';
 import { isCloudOnlyMode } from './utils/cloudMode';
+import { isCapabilityVisible, robotGateDecision } from './utils/navGating';
 
 function StudentApp() {
   const dispatch = useDispatch();
@@ -95,6 +95,10 @@ function StudentApp() {
 
   const page = useSelector((state) => state.ui.currentPage);
   const robotType = useSelector((state) => state.tasks.taskStatus.robotType);
+  // Server-authored capability manifest (null until the first /task/status tick
+  // carrying it). Drives the sidebar capability filter below. Never seeded from
+  // the `?robot=` URL param — caps are server-authoritative (D4).
+  const caps = useSelector((state) => state.tasks.taskStatus.capabilities);
 
   const isFirstLoad = useRef(true);
 
@@ -117,12 +121,10 @@ function StudentApp() {
   // the rehydrate below never fired and the student had to re-select the robot.
   useHeartbeatWatchdog({ enabled: !cloudOnly });
 
-  // After a physical_ai_server node restart the server loses its in-memory
-  // robot_type; re-issue /set_robot_type from the persisted value on heartbeat
-  // recovery so the student doesn't have to re-select on the Start page.
-  // Disabled in cloud-only and Jetson-routed modes (the local node isn't the
-  // rosbridge target there).
-  useRobotTypeRehydrate({ enabled: !cloudOnly && !jetsonConnected });
+  // The robot type is now GUI-hardset into the container env and boot-set on the
+  // server (respawn self-heals it), then re-published on the idle identity tick
+  // ≤2-3 s after connect — so the old client-side /set_robot_type rehydrate is
+  // gone (useRobotTypeRehydrate deleted with the robot-type picker).
 
   const heartbeatStatus = useSelector((state) => state.tasks.heartbeatStatus);
   const hfUserListLen = useSelector((state) => state.ui.hfUserList.length);
@@ -194,9 +196,12 @@ function StudentApp() {
 
   useEffect(() => {
     if (isFirstLoad.current && page === PageType.HOME && taskStatus.topicReceived) {
-      if (taskInfo?.taskType === PageType.RECORD) {
+      // Auto-rejoin a task that was in flight when the browser (re)loaded — but
+      // respect the capability manifest: a stale in-flight task_type on a
+      // type-switched rig must not jump into a page that type can't do.
+      if (taskInfo?.taskType === PageType.RECORD && caps?.recordable !== false) {
         dispatch(moveToPage(PageType.RECORD));
-      } else if (taskInfo?.taskType === PageType.INFERENCE) {
+      } else if (taskInfo?.taskType === PageType.INFERENCE && caps?.inferable !== false) {
         dispatch(moveToPage(PageType.INFERENCE));
       }
       isFirstLoad.current = false;
@@ -204,26 +209,26 @@ function StudentApp() {
       dispatch(moveToPage(PageType.TRAINING));
       isFirstLoad.current = false;
     }
-  }, [page, taskInfo?.taskType, taskStatus.topicReceived, trainingTopicReceived, dispatch]);
+  }, [page, taskInfo?.taskType, taskStatus.topicReceived, trainingTopicReceived, caps, dispatch]);
 
   const requireRobotOrRedirect = (targetPage) => {
-    if (process.env.REACT_APP_DEBUG === 'true') {
+    const decision = robotGateDecision({
+      debug: process.env.REACT_APP_DEBUG === 'true',
+      cloudOnly,
+      robotType,
+    });
+    if (decision === 'navigate') {
       isFirstLoad.current = false;
       dispatch(moveToPage(targetPage));
       return;
     }
-    if (taskStatus && taskStatus.robotType !== '') {
-      isFirstLoad.current = false;
-      dispatch(moveToPage(targetPage));
-      return;
-    }
-    if (!robotType || robotType.trim() === '') {
-      toast.error('Bitte wähle zuerst einen Robotertyp auf der Startseite', {
-        duration: 4000,
-      });
-      return;
-    }
-    dispatch(moveToPage(targetPage));
+    // 'wait' — identity hasn't arrived yet. It is boot-set on the server and
+    // re-published on the idle identity tick within ~2-3 s of connecting, so
+    // this is a brief wait, not a dead-end. (The old „Robotertyp auf der
+    // Startseite wählen" toast pointed at a picker that no longer exists.)
+    toast.error('Verbindung zum Roboter wird hergestellt – bitte einen Moment warten.', {
+      duration: 4000,
+    });
   };
 
   const handleHomePageNavigation = () => {
@@ -264,16 +269,22 @@ function StudentApp() {
   // page gracefully renders the "Kein Klassen-Jetson in diesem Raum"
   // state when no Jetson is paired, so it's safe to leave the tab
   // visible even in environments with no robot at all.
+  // Each tab carries its `capabilityKey`; the third filter below hides a tab
+  // only when the server capability manifest sets that key to an explicit
+  // `false` (omx_follower hides Aufnahme/Daten/Training). Unknown/null caps
+  // hide NOTHING, and the whole capability filter is SKIPPED in Jetson mode
+  // (D9) — caps describe the LOCAL rig, so Training stays visible on a Jetson.
   const navItems = [
     { key: PageType.HOME, label: 'Start', Icon: MdHome, onClick: handleHomePageNavigation },
-    { key: PageType.RECORD, label: 'Aufnahme', Icon: MdVideocam, onClick: handleRecordPageNavigation, hardwareOnly: true, jetsonIncompatible: true },
-    { key: PageType.TRAINING, label: 'Training', Icon: GoGraph, onClick: handleTrainingPageNavigation },
-    { key: PageType.INFERENCE, label: 'Inferenz', Icon: MdMemory, onClick: handleInferencePageNavigation },
-    { key: PageType.EDIT_DATASET, label: 'Daten', Icon: MdWidgets, onClick: handleEditDatasetPageNavigation, sep: true, jetsonIncompatible: true },
-    { key: PageType.WORKSHOP, label: 'Roboter Studio', Icon: MdConstruction, onClick: handleWorkshopPageNavigation, hardwareOnly: true, jetsonIncompatible: true },
+    { key: PageType.RECORD, label: 'Aufnahme', Icon: MdVideocam, onClick: handleRecordPageNavigation, hardwareOnly: true, jetsonIncompatible: true, capabilityKey: 'recordable' },
+    { key: PageType.TRAINING, label: 'Training', Icon: GoGraph, onClick: handleTrainingPageNavigation, capabilityKey: 'trainable' },
+    { key: PageType.INFERENCE, label: 'Inferenz', Icon: MdMemory, onClick: handleInferencePageNavigation, capabilityKey: 'inferable' },
+    { key: PageType.EDIT_DATASET, label: 'Daten', Icon: MdWidgets, onClick: handleEditDatasetPageNavigation, sep: true, jetsonIncompatible: true, capabilityKey: 'editable' },
+    { key: PageType.WORKSHOP, label: 'Roboter Studio', Icon: MdConstruction, onClick: handleWorkshopPageNavigation, hardwareOnly: true, jetsonIncompatible: true, capabilityKey: 'roboter_studio' },
   ]
     .filter((n) => !cloudOnly || !n.hardwareOnly)
-    .filter((n) => !jetsonConnected || !n.jetsonIncompatible);
+    .filter((n) => !jetsonConnected || !n.jetsonIncompatible)
+    .filter((n) => isCapabilityVisible(n, { jetsonConnected, caps }));
 
   const isDarkPage = page === PageType.RECORD || page === PageType.INFERENCE;
 

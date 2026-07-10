@@ -25,10 +25,12 @@ import { setHeartbeatStatus } from '../features/tasks/taskSlice';
  * the <HeartbeatStatus> pill — which is mounted on Home/Record/Training/
  * Inference but NOT on Roboter Studio (WorkshopPage) or the Daten tab. On those
  * pages a node restart that did NOT close the websocket produced no
- * 'disconnected'->'connected' EDGE, so useRobotTypeRehydrate (which keys off
- * that edge) never re-issued /set_robot_type and the student had to re-select
- * the robot on the Start page. Mounting this watchdog once at the app shell
- * guarantees the recovery edge on EVERY page.
+ * 'disconnected'->'connected' EDGE, so nothing keyed off liveness recovered.
+ * Mounting this watchdog once at the app shell guarantees accurate liveness
+ * state (pill, HomePage bridgeReady gate) on EVERY page. Robot identity no
+ * longer depends on this edge: the server resolves EDUBOTICS_ROBOT_TYPE at
+ * boot and its idle identity tick re-delivers robot_type + capabilities over
+ * /task/status within ~2-3 s of any (re)connect.
  *
  * <HeartbeatStatus> keeps its own equivalent interval for the pages it renders
  * on; both only dispatch on a real status CHANGE (idempotent), so the overlap is

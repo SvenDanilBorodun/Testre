@@ -216,6 +216,25 @@ FOLLOWER_SERVO_IDS = [11, 12, 13, 14, 15, 16]
 # ROS2 config
 ROS_DOMAIN_ID = 30
 
+# --- Robot type (ArmProfile) selection ---
+# The robot type is a GUI-time, HARDSET decision baked into the GUI-managed
+# .env (MANAGED key EDUBOTICS_ROBOT_TYPE) before "Umgebung starten". Only a full
+# restart changes it. This is a THIN descriptor mirroring the server-side
+# ArmProfile registry (physical_ai_server/robot_profiles.py) — the ids and
+# `follower_only` flags MUST equal the server registry (cross-boundary lockstep,
+# tested each side). The server is authoritative for capabilities/kinematics;
+# the GUI only needs the display label + the two scan/leader flags.
+#   - omx_full     → both arms; RS runs via the mid-session LeaderToggle.
+#   - omx_follower → follower only; no leader, LeaderToggle hidden, RS native.
+# `scan_requires_leader` drives the follower-only GUI scan surface (Schritt A/B
+# wording, start-button gating, fast rehydrate). `follower_only` is the INITIAL
+# EDUBOTICS_FOLLOWER_ONLY value the .env generator derives from the type.
+ROBOT_PROFILES = {
+    "omx_full":     {"display_de": "OMX – Voll",                          "follower_only": False, "scan_requires_leader": True},
+    "omx_follower": {"display_de": "OMX – Roboter Studio (nur Follower)", "follower_only": True,  "scan_requires_leader": False},
+}
+DEFAULT_ROBOT_PROFILE = "omx_full"
+
 # Paths — auto-detect dev environment vs installed
 def _resolve_install_dir() -> str:
     """Return the install dir: env override > dev tree > default installed path."""

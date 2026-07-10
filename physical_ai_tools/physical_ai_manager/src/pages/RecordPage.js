@@ -86,7 +86,13 @@ export default function RecordPage({ isActive = true }) {
   }, [toasts]);
 
   useEffect(() => {
-    if (isFirstLoad && taskStatus.robotType !== '' && taskInfo.tags.length === 0) {
+    // Wait for the robot identity before seeding the default tags AND before
+    // consuming first-load — the identity arrives a beat after the page mounts
+    // (server idle identity tick). Consuming first-load early would permanently
+    // skip the robotType + `edubotics` tag seed for the session (the picker's
+    // setIsFirstLoadTrue reset path is gone with the picker).
+    if (taskStatus.robotType === '') return;
+    if (isFirstLoad && taskInfo.tags.length === 0) {
       dispatch(addTag(taskStatus.robotType));
       dispatch(addTag('edubotics'));
     }

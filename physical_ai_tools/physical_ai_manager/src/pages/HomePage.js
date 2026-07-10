@@ -16,12 +16,12 @@
 
 import React from 'react';
 import { useSelector, useDispatch } from 'react-redux';
-import RobotTypeSelector from '../components/RobotTypeSelector';
 import HeartbeatStatus from '../components/HeartbeatStatus';
 import { Card, Pill, Btn, SectionHeader } from '../components/EbUI';
 import packageJson from '../../package.json';
 import PageType from '../constants/pageType';
 import { moveToPage } from '../features/ui/uiSlice';
+import { robotProfileId } from '../utils/robotMode';
 
 function getGreeting() {
   const h = new Date().getHours();
@@ -33,6 +33,8 @@ function getGreeting() {
 export default function HomePage() {
   const dispatch = useDispatch();
   const robotType = useSelector((state) => state.tasks.taskStatus.robotType);
+  const robotProfile = useSelector((state) => state.tasks.taskStatus.robotProfile);
+  const caps = useSelector((state) => state.tasks.taskStatus.capabilities);
   const fullName = useSelector((state) => state.auth.fullName);
   const username = useSelector((state) => state.auth.username);
   const heartbeatStatus = useSelector((state) => state.tasks.heartbeatStatus);
@@ -42,9 +44,18 @@ export default function HomePage() {
 
   const bridgeReady = heartbeatStatus === 'connected';
   const camCount = imageTopicList?.length || 0;
+  // The robot type is GUI-hardset now — the student no longer picks it. Show a
+  // read-only badge, seeded instantly from the `?robot=` URL param before the
+  // first /task/status tick lands, then confirmed by the server's profile id /
+  // data robot_type.
+  const robotBadge = robotProfile || robotType || robotProfileId();
+  // On a follower-only rig recording is disabled; keep the hero „Aufnahme
+  // starten" button in lockstep with the (hidden) Aufnahme tab.
+  const canRecord = caps?.recordable !== false;
 
   const goRecord = () => {
     if (!robotType || robotType.trim() === '') return;
+    if (!canRecord) return;
     dispatch(moveToPage(PageType.RECORD));
   };
 
@@ -54,14 +65,14 @@ export default function HomePage() {
         <SectionHeader
           eyebrow="Startseite"
           title={`${getGreeting()}, ${firstName}.`}
-          description="Wähle deinen Roboter und leg los."
+          description="Dein Roboter wird automatisch erkannt – leg direkt los."
           right={<HeartbeatStatus />}
           className="mb-6 md:mb-8"
         />
 
         <div className="grid grid-cols-12 gap-4 md:gap-6">
           {/* Hero robot card */}
-          <div className="col-span-12 lg:col-span-7 xl:col-span-8">
+          <div className="col-span-12">
             <Card padded={false}>
               <div className="relative h-[280px] sm:h-[340px] md:h-[380px] xl:h-[440px] camera-noise rounded-t-[var(--radius-lg)] overflow-hidden">
                 <svg
@@ -99,7 +110,7 @@ export default function HomePage() {
                       Aktueller Roboter
                     </div>
                     <div className="text-white font-semibold text-xl tracking-tight leading-tight truncate">
-                      {robotType || 'Kein Robotertyp gewählt'}
+                      {robotBadge || 'Roboter wird erkannt …'}
                     </div>
                   </div>
                   <div className="font-mono text-[11px] text-white/60 shrink-0 whitespace-nowrap">
@@ -120,18 +131,13 @@ export default function HomePage() {
                   <Btn
                     variant="primary"
                     onClick={goRecord}
-                    disabled={!robotType || !bridgeReady}
+                    disabled={!robotType || !bridgeReady || !canRecord}
                   >
                     Aufnahme starten
                   </Btn>
                 </div>
               </div>
             </Card>
-          </div>
-
-          {/* Robot type selector */}
-          <div className="col-span-12 lg:col-span-5 xl:col-span-4">
-            <RobotTypeSelector />
           </div>
         </div>
 

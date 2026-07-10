@@ -6,7 +6,9 @@
 // The app-global liveness watchdog drives the heartbeat status transitions on
 // EVERY page (the <HeartbeatStatus> pill — the only other place that did — is
 // absent on Roboter Studio / Daten, so a node restart there produced no
-// 'disconnected'->'connected' EDGE and useRobotTypeRehydrate never fired).
+// 'disconnected'->'connected' EDGE for the recovery-edge consumers).
+// Robot identity itself no longer needs the edge: the server's idle identity
+// tick re-delivers robot_type + capabilities over /task/status by itself.
 
 import React from 'react';
 import { renderHook, act } from '@testing-library/react';
@@ -64,7 +66,8 @@ describe('useHeartbeatWatchdog', () => {
 
     // Node recovers: a new heartbeat arrives (useRosTopicSubscription would do
     // this in production). The watchdog must transition back to 'connected' —
-    // that disconnected->connected edge is what drives useRobotTypeRehydrate.
+    // that disconnected->connected edge drives the UI liveness state (pill,
+    // HomePage bridgeReady gate) on pages without a <HeartbeatStatus> mount.
     act(() => { store.dispatch(setLastHeartbeatTime(Date.now())); });
     act(() => { vi.advanceTimersByTime(1000); });
     expect(store.getState().tasks.heartbeatStatus).toBe('connected');

@@ -33,3 +33,11 @@ float32[] joint_dist_to_home    # per-arm-joint |pos - safe_home| (rad) during t
                                 # safe-home glide (joint1..joint5 order); empty otherwise.
                                 # Publishers set it getattr-safe: pre-rebuild compiled
                                 # interfaces lack the field and must keep publishing.
+string robot_profile            # ArmProfile id resolved from EDUBOTICS_ROBOT_TYPE
+                                # (e.g. "omx_full", "omx_follower"); empty on
+                                # pre-rebuild compiled interfaces.
+string capabilities_json        # compact JSON capability manifest of the resolved
+                                # profile (recordable/editable/trainable/inferable/
+                                # roboter_studio/has_leader). Publishers set both
+                                # fields hasattr-guarded: pre-rebuild compiled
+                                # interfaces lack them and must keep publishing.

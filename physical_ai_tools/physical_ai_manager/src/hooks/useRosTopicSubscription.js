@@ -60,6 +60,17 @@ import rosConnectionManager from '../utils/rosConnectionManager';
 import { registerDataset } from '../services/datasetsApi';
 import { recordInferenceRun } from '../services/jetsonClient';
 
+// Parse `capabilities_json` at most ONCE per distinct string (D10). Every
+// /task/status tick spreads a new taskStatus reference in the reducer, so a
+// per-tick `JSON.parse` would hand `useSelector` a NEW capabilities object
+// identity on every message → the app shell + whole nav re-render at status
+// rate (during recording: every record tick). Caching the last string→object
+// pair keeps the identity stable across identical ticks. MODULE-scope, NOT a
+// `useRef`: this hook is instantiated TWICE (StudentApp + WorkshopPage), both
+// subscribing + dispatching — per-instance caches would alternate two object
+// identities per tick on the Workshop page. One cache serves both instances.
+let _capsCache = { str: '', obj: null };
+
 export function useRosTopicSubscription() {
   const taskStatusTopicRef = useRef(null);
   const heartbeatTopicRef = useRef(null);
@@ -415,31 +426,64 @@ export function useRosTopicSubscription() {
           msg.phase === TaskPhase.INFERENCE_LOADING;
 
         // ROS message to React state
-        dispatch(
-          setTaskStatus({
-            robotType: msg.robot_type || '',
-            taskName: msg.task_info?.task_name || 'idle',
-            running: isRunning,
-            phase: msg.phase || 0,
-            progress: Math.round(progress),
-            totalTime: msg.total_time || 0,
-            proceedTime: msg.proceed_time || 0,
-            currentEpisodeNumber: msg.current_episode_number || 0,
-            currentScenarioNumber: msg.current_scenario_number || 0,
-            currentTaskInstruction: msg.current_task_instruction || '',
-            userId: msg.task_info?.user_id || '',
-            usedStorageSize: msg.used_storage_size || 0,
-            totalStorageSize: msg.total_storage_size || 0,
-            usedCpu: msg.used_cpu || 0,
-            usedRamSize: msg.used_ram_size || 0,
-            totalRamSize: msg.total_ram_size || 0,
-            error: msg.error || '',
-            topicReceived: true,
-          })
-        );
+        const statusPayload = {
+          robotType: msg.robot_type || '',
+          taskName: msg.task_info?.task_name || 'idle',
+          running: isRunning,
+          phase: msg.phase || 0,
+          progress: Math.round(progress),
+          totalTime: msg.total_time || 0,
+          proceedTime: msg.proceed_time || 0,
+          currentEpisodeNumber: msg.current_episode_number || 0,
+          currentScenarioNumber: msg.current_scenario_number || 0,
+          currentTaskInstruction: msg.current_task_instruction || '',
+          userId: msg.task_info?.user_id || '',
+          usedStorageSize: msg.used_storage_size || 0,
+          totalStorageSize: msg.total_storage_size || 0,
+          usedCpu: msg.used_cpu || 0,
+          usedRamSize: msg.used_ram_size || 0,
+          totalRamSize: msg.total_ram_size || 0,
+          error: msg.error || '',
+          topicReceived: true,
+        };
 
-        // Extract TaskInfo from TaskStatus message
-        if (msg.task_info) {
+        // Robot profile id + capability manifest ride the same wire (D2). Add
+        // them ONLY when the wire fields are non-empty — old server images AND
+        // collision-monitor bare ticks send '' and must never wipe a settled
+        // profile/caps. `capabilities_json` is parsed at most once per distinct
+        // string via the module cache (D10); on a parse error we keep the
+        // previous cached object and OMIT the key so a malformed tick can't
+        // null it out.
+        if (msg.robot_profile) {
+          statusPayload.robotProfile = msg.robot_profile;
+        }
+        const capsStr = msg.capabilities_json;
+        if (capsStr) {
+          if (capsStr !== _capsCache.str) {
+            try {
+              _capsCache = { str: capsStr, obj: JSON.parse(capsStr) };
+              statusPayload.capabilities = _capsCache.obj;
+            } catch (e) {
+              // Malformed caps JSON — keep the previous good object (string-key
+              // it so we don't re-parse the same bad string every tick) and
+              // OMIT the key so the reducer keeps the last good value.
+              _capsCache = { str: capsStr, obj: _capsCache.obj };
+            }
+          } else if (_capsCache.obj) {
+            // Same string as last time → reuse the cached object (stable identity).
+            statusPayload.capabilities = _capsCache.obj;
+          }
+        }
+
+        dispatch(setTaskStatus(statusPayload));
+
+        // Extract TaskInfo from TaskStatus message. GATED on a real task
+        // (D8 companion #1): the idle identity tick + collision-monitor bare
+        // ticks carry a default-constructed (all-empty) task_info, and
+        // dispatching it would wipe the student's Record/Inference FORM
+        // (taskName, fps, episodeTime, …) every ~3 s while they type. A real
+        // task always has a non-empty task_name; a bare tick never does.
+        if (msg.task_info && (isRunning || msg.task_info.task_name)) {
           const infoUpdate = {
             taskName: msg.task_info.task_name || '',
             taskType: msg.task_info.task_type || '',
@@ -473,22 +517,22 @@ export function useRosTopicSubscription() {
           }
 
           dispatch(setTaskInfo(infoUpdate));
-        }
 
-        // Set multi-task index safely with null checks and optimized search
-        if (msg.task_info?.task_instruction && msg.current_task_instruction) {
-          const taskIndex = msg.task_info.task_instruction.indexOf(msg.current_task_instruction);
-          if (taskIndex !== -1) {
-            dispatch(setMultiTaskIndex(taskIndex));
-          } else {
-            dispatch(setMultiTaskIndex(undefined));
+          // Set multi-task index safely with null checks and optimized search
+          if (msg.task_info.task_instruction && msg.current_task_instruction) {
+            const taskIndex = msg.task_info.task_instruction.indexOf(msg.current_task_instruction);
+            if (taskIndex !== -1) {
+              dispatch(setMultiTaskIndex(taskIndex));
+            } else {
+              dispatch(setMultiTaskIndex(undefined));
+            }
           }
-        }
 
-        if (msg.task_info?.task_instruction.length > 1) {
-          dispatch(setUseMultiTaskMode(true));
-        } else {
-          dispatch(setUseMultiTaskMode(false));
+          if (msg.task_info.task_instruction.length > 1) {
+            dispatch(setUseMultiTaskMode(true));
+          } else {
+            dispatch(setUseMultiTaskMode(false));
+          }
         }
       });
     } catch (error) {

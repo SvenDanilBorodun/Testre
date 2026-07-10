@@ -7,6 +7,7 @@ import os
 import uuid
 
 from .constants import (
+    DEFAULT_ROBOT_PROFILE,
     ENV_FILE,
     IMAGE_TAG,
     REGISTRY,
@@ -49,6 +50,12 @@ MANAGED_KEYS = frozenset({
     # default (0) SUPERSEDES a stale =1 instead of silently keeping the leader
     # off in a session that needs it.
     "EDUBOTICS_FOLLOWER_ONLY",
+    # EDUBOTICS_ROBOT_TYPE is the GUI-hardset robot profile id (omx_full |
+    # omx_follower). MANAGED so the selector is the single source of truth: a
+    # stale hand-pinned value is superseded on every regenerate, and the initial
+    # EDUBOTICS_FOLLOWER_ONLY is derived from it. The server reads it at boot to
+    # resolve its ArmProfile (capabilities + kinematics seam).
+    "EDUBOTICS_ROBOT_TYPE",
     # CAMERA_DEVICE_N / CAMERA_NAME_N are handled by prefix-match below
     # because the count varies with how many cameras are connected.
 })
@@ -295,7 +302,8 @@ def _phone_camera_names_line() -> str:
 
 def generate_env_file(config: HardwareConfig, output_path: str = ENV_FILE,
                       phone_camera: bool = False,
-                      follower_only: bool = False) -> str:
+                      robot_type: str = DEFAULT_ROBOT_PROFILE,
+                      follower_only: bool | None = None) -> str:
     """Write .env file with hardware paths.
 
     Args:
@@ -306,6 +314,10 @@ def generate_env_file(config: HardwareConfig, output_path: str = ENV_FILE,
             node publishes /phone/image_raw/compressed (cam_id 2). When False the
             line is omitted and compose's default (gripper,scene) wins — and a
             stale 3-name value is superseded because the key is MANAGED.
+        robot_type: The GUI-hardset ArmProfile id (``omx_full``|``omx_follower``)
+            emitted as the managed ``EDUBOTICS_ROBOT_TYPE`` line and read by the
+            server at boot. Also DERIVES the initial ``follower_only`` when that
+            argument is left as None (omx_follower ⇒ True).
         follower_only: When True (Roboter Studio mode), emit the managed
             ``EDUBOTICS_FOLLOWER_ONLY=1`` line and OMIT ``LEADER_PORT`` — the
             entrypoint then never launches the leader, so the follower's
@@ -314,15 +326,25 @@ def generate_env_file(config: HardwareConfig, output_path: str = ENV_FILE,
             leader need not be scanned/configured in this mode. When False a
             recording/teleop session is configured and both arms are required;
             the follower-only line is omitted so compose's default (0)
-            supersedes any stale =1 (the key is MANAGED).
+            supersedes any stale =1 (the key is MANAGED). When None (the
+            default) the value is DERIVED from ``robot_type`` — this keeps the
+            RS runtime leader-toggle able to OVERRIDE it while an omx_follower
+            rig (which never scans a leader) still derives True instead of
+            tripping the leader-required guard below.
 
     Returns:
         The content written to the file.
     """
+    # Derive FIRST (before the leader-null guard): without this an omx_follower
+    # rig — which has no leader — would hit `not follower_only and leader is
+    # None` and raise on every start. An explicit follower_only= (the RS toggle)
+    # still wins.
+    if follower_only is None:
+        follower_only = (robot_type == "omx_follower")
     if config.follower is None:
         raise ValueError("Der Follower-Arm muss konfiguriert sein, bevor die .env erzeugt wird")
     if not follower_only and config.leader is None:
-        raise ValueError("Both leader and follower arms must be configured before generating .env")
+        raise ValueError("Leader- und Follower-Arm müssen konfiguriert sein, bevor die .env erzeugt wird")
 
     from .constants import cameras_use_native_bridge
     native = cameras_use_native_bridge()
@@ -369,6 +391,9 @@ def generate_env_file(config: HardwareConfig, output_path: str = ENV_FILE,
     # line, compose silently runs :latest — drifting past the installer's
     # pinned tag AND re-downloading ~9 GB the installer already pulled.
     lines.append(f"IMAGE_TAG={IMAGE_TAG}")
+    # GUI-hardset robot type — the server resolves its ArmProfile from this at
+    # boot. MANAGED so the selector is authoritative; a full restart changes it.
+    lines.append(f"EDUBOTICS_ROBOT_TYPE={robot_type}")
     # Default camera source. Yields to an operator override already present in
     # the preserved (unmanaged) lines, so EDUBOTICS_CAMERA_SOURCE=usb_cam in a
     # hand-edited .env survives regeneration (one-variable rollback).
@@ -392,7 +417,8 @@ def generate_env_file(config: HardwareConfig, output_path: str = ENV_FILE,
 
 
 def generate_cloud_only_env(output_path: str = ENV_FILE,
-                            phone_camera: bool = False) -> str:
+                            phone_camera: bool = False,
+                            robot_type: str = DEFAULT_ROBOT_PROFILE) -> str:
     """Write a minimal .env for cloud-only mode (no robot hardware).
 
     Docker Compose still reads .env when starting any service, so we provide
@@ -404,6 +430,10 @@ def generate_cloud_only_env(output_path: str = ENV_FILE,
     but is effectively a no-op here: cloud-only never starts open_manipulator,
     so no camera ingest node consumes EDUBOTICS_CAMERA_NAMES. We still honour it
     so a toggled-on value round-trips rather than being dropped.
+
+    ``robot_type`` is emitted for MANAGED-key symmetry (so a stale hand-pinned
+    EDUBOTICS_ROBOT_TYPE is superseded here too, R3) even though cloud-only
+    never starts physical_ai_server.
     """
     domain_id = _resolve_ros_domain_id()
     preserved = _read_unmanaged_lines(output_path)
@@ -419,6 +449,7 @@ def generate_cloud_only_env(output_path: str = ENV_FILE,
         f"REGISTRY={REGISTRY}",
         f"REGISTRY_FALLBACK={REGISTRY_FALLBACK}",
         f"IMAGE_TAG={IMAGE_TAG}",
+        f"EDUBOTICS_ROBOT_TYPE={robot_type}",
     ]
     from .constants import cameras_use_native_bridge
     if cameras_use_native_bridge() and not _has_camera_source(preserved):

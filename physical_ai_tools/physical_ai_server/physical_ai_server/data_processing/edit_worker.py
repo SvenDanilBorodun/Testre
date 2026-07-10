@@ -22,9 +22,10 @@ dataset and RE-ENCODES every camera video. Software SVT-AV1 on a GPU-less studen
 PC takes ~12 min per concatenated file and saturates every CPU core. When that
 ran synchronously inside the ``/dataset/edit`` ROS service callback it (a) sat on
 the node's default MutuallyExclusiveCallbackGroup and serialized out heartbeat /
-status / get_robot_types, and (b) CPU-starved every MultiThreadedExecutor thread
-— so the entire React dashboard went dead (``/get_robot_types`` timed out) until
-the encode finished. See ``docs/plans/2026-06-07-dataset-edit-cpu-isolation.md``.
+status / every node-default service, and (b) CPU-starved every
+MultiThreadedExecutor thread — so the entire React dashboard went dead (every
+service call timed out) until the encode finished. See
+``docs/plans/2026-06-07-dataset-edit-cpu-isolation.md``.
 
 THE FIX: ``communicator.dataset_edit_callback`` spawns this module as a
 ``nice -n 19`` subprocess (payload on stdin). The low priority lets the (nice 0)

@@ -92,5 +92,61 @@ class FastRehydrateArmsTest(unittest.TestCase):
         self.assertIsNone(follower)
 
 
+class FollowerOnlyRehydrateTest(unittest.TestCase):
+    """require_leader=False (a Roboter Studio follower-only .env has no
+    LEADER_PORT): an empty leader path is legal and yields (None, follower);
+    the follower is still mandatory (a follower mismatch → (None, None))."""
+
+    def _run(self, leader_path, follower_path, serial_paths,
+             require_leader, attached=None):
+        with patch.object(device_manager, "self_heal_wsl_serial"), \
+                patch.object(device_manager, "attach_all_robotis_devices",
+                             return_value=attached if attached is not None
+                             else _attached()), \
+                patch.object(device_manager, "find_serial_paths_for_robotis",
+                             return_value=serial_paths), \
+                patch.object(device_manager, "start_scanner_container",
+                             MagicMock()) as scanner, \
+                patch.object(device_manager, "identify_arm_via_docker",
+                             MagicMock()) as identify, \
+                patch("time.sleep"):
+            result = device_manager.fast_rehydrate_arms(
+                leader_path, follower_path, require_leader=require_leader)
+            return result, scanner, identify
+
+    def test_accepts_missing_leader(self):
+        (leader, follower), scanner, identify = self._run(
+            "", FOLLOWER, [FOLLOWER], require_leader=False)
+        self.assertIsNone(leader)
+        self.assertIsNotNone(follower)
+        self.assertEqual(follower.serial_path, FOLLOWER)
+        self.assertEqual(follower.role, "follower")
+        # Still the light path — no scanner container, no serial pings.
+        scanner.assert_not_called()
+        identify.assert_not_called()
+
+    def test_still_fails_on_follower_mismatch(self):
+        # Follower absent from the serial list — mandatory, so (None, None).
+        (leader, follower), *_ = self._run(
+            "", FOLLOWER, [], require_leader=False)
+        self.assertIsNone(leader)
+        self.assertIsNone(follower)
+
+    def test_empty_follower_bails_before_attach(self):
+        with patch.object(device_manager, "attach_all_robotis_devices") as attach:
+            result = device_manager.fast_rehydrate_arms(
+                "", "", require_leader=False)
+        self.assertEqual(result, (None, None))
+        attach.assert_not_called()
+
+    def test_stray_leader_equal_to_follower_bails(self):
+        # A corrupt mapping (leader path == follower path) must still bail.
+        with patch.object(device_manager, "attach_all_robotis_devices") as attach:
+            result = device_manager.fast_rehydrate_arms(
+                FOLLOWER, FOLLOWER, require_leader=False)
+        self.assertEqual(result, (None, None))
+        attach.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

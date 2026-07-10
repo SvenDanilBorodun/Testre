@@ -524,13 +524,14 @@ def scan_and_identify_arms(image: str) -> tuple[Optional[ArmDevice], Optional[Ar
 
 
 def fast_rehydrate_arms(
-    saved_leader_path: str, saved_follower_path: str
+    saved_leader_path: str, saved_follower_path: str,
+    require_leader: bool = True,
 ) -> tuple[Optional[ArmDevice], Optional[ArmDevice]]:
     """Light revalidation of the previous session's arm mapping (PR-4).
 
     Skips the two SLOW stages of scan_and_identify_arms — the throwaway
     scanner container and the per-device serial pings — and only attaches
-    the ROBOTIS USB devices (idempotent) and confirms BOTH saved
+    the ROBOTIS USB devices (idempotent) and confirms the saved
     /dev/serial/by-id paths are present and distinct. The path↔role binding
     is trusted from the saved .env: ROBOTIS arms expose DISTINCT stable
     by-id serials (the identical-serial problem is camera-only, see
@@ -538,27 +539,47 @@ def fast_rehydrate_arms(
     path either reappears as the same physical arm or doesn't appear at
     all. ANY mismatch returns (None, None) and the caller falls back to
     the full scan.
+
+    ``require_leader`` is False for a follower-only robot type (Roboter
+    Studio kit): its .env has no LEADER_PORT, so an empty ``saved_leader_path``
+    is legal and the result is ``(None, follower)``. The follower is ALWAYS
+    required — a follower mismatch still returns ``(None, None)``.
     """
     import time
 
-    if (not saved_leader_path or not saved_follower_path
-            or saved_leader_path == saved_follower_path):
+    # The follower is always mandatory.
+    if not saved_follower_path:
         return None, None
+    if require_leader:
+        if not saved_leader_path or saved_leader_path == saved_follower_path:
+            return None, None
+    elif saved_leader_path and saved_leader_path == saved_follower_path:
+        # A follower-only .env normally has no leader path; a stray one that
+        # collides with the follower is a corrupt mapping — bail to full scan.
+        return None, None
+
+    # Whether we expect (and must confirm) a leader path this call.
+    want_leader = require_leader or bool(saved_leader_path)
 
     self_heal_wsl_serial()
     attached = attach_all_robotis_devices()
     if not attached:
         return None, None
 
+    def _present(paths: list[str]) -> bool:
+        if saved_follower_path not in paths:
+            return False
+        if want_leader and saved_leader_path not in paths:
+            return False
+        return True
+
     serial_paths: list[str] = []
     for _ in range(10):
         serial_paths = find_serial_paths_for_robotis()
-        if (saved_leader_path in serial_paths
-                and saved_follower_path in serial_paths):
+        if _present(serial_paths):
             break
         time.sleep(1)
-    if not (saved_leader_path in serial_paths
-            and saved_follower_path in serial_paths):
+    if not _present(serial_paths):
         return None, None
 
     def _rebuild(path: str, role: str) -> ArmDevice:
@@ -571,10 +592,12 @@ def fast_rehydrate_arms(
                 break
         return ArmDevice(busid=busid, serial_path=path, role=role, description=desc)
 
-    return (
-        _rebuild(saved_leader_path, "leader"),
-        _rebuild(saved_follower_path, "follower"),
+    leader = (
+        _rebuild(saved_leader_path, "leader")
+        if (want_leader and saved_leader_path in serial_paths)
+        else None
     )
+    return leader, _rebuild(saved_follower_path, "follower")
 
 
 def _list_camera_vid_pids_from_wsl() -> set[str]:

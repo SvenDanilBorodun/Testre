@@ -80,6 +80,14 @@ class Communicator:
 
     PUB_QOS_SIZE = 100
 
+    # Rosbag-service probe retry (T2). The Communicator is now constructed at
+    # BOOT (physical_ai_server._init_robot_profile), so the one-shot ctor probe
+    # races the rosbag node starting in the same bringup. On a boot-time miss we
+    # arm a low-rate background retry instead of disabling record_rosbag2 for the
+    # whole session. ~18 attempts × 10 s ≈ 3 min covers a slow bringup.
+    _ROSBAG_PROBE_RETRY_PERIOD_S = 10.0
+    _ROSBAG_PROBE_MAX_ATTEMPTS = 18
+
     # Audit F65: paired-camera capture tolerance + ring depth.
     # 15 ms is the slop budget — at 30 fps the inter-frame interval is
     # 33 ms, so two msgs within 15 ms of each other are reliably from the
@@ -294,9 +302,10 @@ class Communicator:
             self.PUB_QOS_SIZE
         )
 
-        # The 1 Hz liveness heartbeat publisher now lives on the node
-        # (physical_ai_server._init_ros_publisher), decoupled from robot
-        # selection so liveness is reported even before /set_robot_type.
+        # The 1 Hz liveness heartbeat publisher lives on the node
+        # (physical_ai_server._init_ros_publisher), decoupled from the
+        # data-pipeline bring-up so liveness is reported even when boot-init
+        # degrades (communicator=None).
 
     def init_services(self):
         self.image_topic_list_service = self.node.create_service(
@@ -314,8 +323,8 @@ class Communicator:
         # Own callback group: a dataset edit blocks its callback thread for the
         # whole (possibly multi-minute) edit. On the node's default
         # MutuallyExclusiveCallbackGroup that serialized out heartbeat / status /
-        # get_robot_types — the dashboard went dead. A dedicated group lets the
-        # blocking wait run concurrently with the default group.
+        # every node-default service — the dashboard went dead. A dedicated group
+        # lets the blocking wait run concurrently with the default group.
         from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
         self._edit_cb_group = MutuallyExclusiveCallbackGroup()
         self.data_editor_service = self.node.create_service(
@@ -335,15 +344,62 @@ class Communicator:
             SendCommand,
             'rosbag_recorder/send_command')
 
+        # Background retry bookkeeping (armed only on a boot-time probe miss).
+        self._rosbag_probe_timer = None
+        self._rosbag_probe_attempts = 0
+
         if self._check_rosbag_services_available():
             self.rosbag_service_available = True
             self.node.get_logger().info('Rosbag service is available')
         else:
-            self.node.get_logger().error('Failed to connect to rosbag service')
+            # Boot-init constructs the Communicator at STARTUP, racing the rosbag
+            # node in the same bringup — so a miss here is expected on a cold boot,
+            # not a hard failure. Arm a low-rate background retry (own callback
+            # group) so record_rosbag2 comes online once the recorder is up
+            # instead of staying silently disabled for the whole session.
             self.rosbag_service_available = False
+            self.node.get_logger().warning(
+                'Rosbag service not yet available — retrying in the background')
+            self._start_rosbag_probe_retry()
 
     def _check_rosbag_services_available(self):
         return self._rosbag_send_command_client.wait_for_service(timeout_sec=3.0)
+
+    def _start_rosbag_probe_retry(self):
+        from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
+        self._rosbag_probe_timer = self.node.create_timer(
+            self._ROSBAG_PROBE_RETRY_PERIOD_S,
+            self._rosbag_probe_retry_cb,
+            callback_group=MutuallyExclusiveCallbackGroup(),
+        )
+
+    def _rosbag_probe_retry_cb(self):
+        self._rosbag_probe_attempts += 1
+        # Short per-attempt wait — the retry cadence is the timer period.
+        if self._rosbag_send_command_client.wait_for_service(timeout_sec=0.5):
+            self.rosbag_service_available = True
+            self.node.get_logger().info('Rosbag service is available (retry)')
+            self._cancel_rosbag_probe_timer()
+            return
+        if self._rosbag_probe_attempts >= self._ROSBAG_PROBE_MAX_ATTEMPTS:
+            self.node.get_logger().error(
+                'Rosbag service still unavailable after retries — '
+                'record_rosbag2 disabled until restart')
+            self._cancel_rosbag_probe_timer()
+
+    def _cancel_rosbag_probe_timer(self):
+        timer = getattr(self, '_rosbag_probe_timer', None)
+        if timer is None:
+            return
+        try:
+            timer.cancel()
+        except Exception:
+            pass
+        try:
+            self.node.destroy_timer(timer)
+        except Exception:
+            pass
+        self._rosbag_probe_timer = None
 
     def prepare_rosbag(self, topics: List[str]):
         self._send_rosbag_command(
@@ -657,18 +713,30 @@ class Communicator:
             self.joint_publishers[name].publish(joint_msg)
 
     def publish_status(self, status: TaskStatus):
-        # Stamp the selected robot type onto any status that doesn't already
-        # carry one. Several callers build a bare TaskStatus() (the stale-
-        # recording-session notice, the record/inference error branches) which
-        # would otherwise publish robot_type='' WHILE a robot is selected — the
-        # React app treats an empty robot_type as "robot deselected" and there is
-        # no steady idle status to correct it, so a single such tick used to
-        # force the student to re-select the robot. When the node genuinely has
-        # no robot (before /set_robot_type, or after a restart) this stays ''
-        # (correct: the client then rehydrates from its persisted selection).
+        # Stamp robot IDENTITY onto every status that doesn't already carry it.
+        # Several callers build a bare TaskStatus() (the idle identity tick, the
+        # stale-recording-session notice, the record/inference error branches)
+        # which would otherwise publish empty identity and be read as "robot
+        # deselected". The node's robot_type / robot_profile / capabilities_json
+        # are boot-set from EDUBOTICS_ROBOT_TYPE (physical_ai_server.
+        # _init_robot_profile) and self-heal on respawn, so the idle tick (D8)
+        # re-delivers them to any (re)connecting client within ~2-3 s — there is
+        # no separate identity service. They stay empty ONLY on the degraded-boot
+        # path (communicator rebuilt but profile-init failed), which is correct.
         if not getattr(status, 'robot_type', ''):
             status.robot_type = getattr(self.node, 'robot_type', '') or ''
+        # robot_profile / capabilities_json are the NEW TaskStatus string fields.
+        # hasattr-guarded (mirror collision_monitor's joint_dist_to_home pattern):
+        # a container running pre-rebuild COMPILED interfaces lacks the fields, and
+        # a bare setattr would raise on every status publish (__slots__).
+        if hasattr(status, 'robot_profile') and not getattr(status, 'robot_profile', ''):
+            status.robot_profile = getattr(self.node, 'robot_profile', '') or ''
+        if hasattr(status, 'capabilities_json') and not getattr(status, 'capabilities_json', ''):
+            status.capabilities_json = getattr(self.node, 'capabilities_json', '') or ''
         self.status_publisher.publish(status)
+        # D8 belt: record the last /task/status publish so the idle identity tick
+        # only fires after 3 s of genuine silence (never stomping a live tick).
+        self.node._last_task_status_mono = time.monotonic()
 
     def get_image_topic_list_callback(self, request, response):
         camera_topic_list = []
@@ -942,6 +1010,10 @@ class Communicator:
 
     def cleanup(self):
         self.node.get_logger().info('Cleaning up Communicator resources...')
+
+        # Cancel any in-flight rosbag-probe retry so a degraded-boot teardown
+        # (physical_ai_server._init_robot_profile) doesn't leak a live timer.
+        self._cancel_rosbag_probe_timer()
 
         self._cleanup_publishers()
         self._cleanup_subscribers()

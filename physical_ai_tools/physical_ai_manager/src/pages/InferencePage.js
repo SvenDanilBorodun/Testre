@@ -97,15 +97,13 @@ export default function InferencePage({ isActive = true }) {
       .forEach((t) => toast.dismiss(t.id));
   }, [toasts]);
 
-  // Seed default tags once the robot type lands. Harmless when prerequisites
-  // aren't met yet — the conditions inside guard it.
+  // Seed default tags once the robot type lands. Wait for the identity before
+  // consuming first-load — consuming it early (before the robotType tick or the
+  // Jetson connection) would permanently skip the robotType + `edubotics` tag
+  // seed for the session (the picker's setIsFirstLoadTrue reset path is gone).
   useEffect(() => {
-    if (
-      isFirstLoad &&
-      taskStatus.robotType !== '' &&
-      taskInfo.tags.length === 0 &&
-      isConnected
-    ) {
+    if (taskStatus.robotType === '') return;
+    if (isFirstLoad && taskInfo.tags.length === 0 && isConnected) {
       dispatch(addTag(taskStatus.robotType));
       dispatch(addTag('edubotics'));
     }

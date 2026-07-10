@@ -219,42 +219,6 @@ export function useRosServiceCaller() {
     }
   }, [callService]);
 
-  const getRobotTypeList = useCallback(async () => {
-    try {
-      const result = await callService(
-        '/get_robot_types',
-        'physical_ai_interfaces/srv/GetRobotTypeList',
-        {}
-      );
-      return result;
-    } catch (error) {
-      console.error('Failed to get robot type list:', error);
-      throw new Error(`${error.message || error}`);
-    }
-  }, [callService]);
-
-  const setRobotType = useCallback(
-    async (robot_type) => {
-      try {
-        console.log('setRobotType called with:', robot_type);
-        console.log('Calling service /set_robot_type with request:', { robot_type: robot_type });
-
-        const result = await callService(
-          '/set_robot_type',
-          'physical_ai_interfaces/srv/SetRobotType',
-          { robot_type: robot_type }
-        );
-
-        console.log('setRobotType service response:', result);
-        return result;
-      } catch (error) {
-        console.error('Failed to set robot type:', error);
-        throw new Error(`${error.message || error}`);
-      }
-    },
-    [callService]
-  );
-
   const registerHFUser = useCallback(
     async (token) => {
       try {
@@ -890,8 +854,6 @@ export function useRosServiceCaller() {
     resumeTeleop,
     forceResumeTeleop,
     getImageTopicList,
-    getRobotTypeList,
-    setRobotType,
     registerHFUser,
     getRegisteredHFUser,
     getUserList,

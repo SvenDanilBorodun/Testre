@@ -184,7 +184,7 @@ services:
       # Dataset edits (Daten-tab delete/merge) re-encode video and can peg every
       # CPU core for minutes on legacy AV1 datasets. Default '1' runs the edit in
       # a nice-19 subprocess so it can't starve the ROS executor (the dashboard
-      # used to go dead — /get_robot_types timed out — until the encode finished).
+      # used to go dead — every service call timed out — until the encode finished).
       # Read by communicator.py; '0' reverts to the in-process edit (debug only).
       - EDUBOTICS_DATASET_EDIT_SUBPROCESS=${EDUBOTICS_DATASET_EDIT_SUBPROCESS:-1}
       # Roboter Studio calibration dir (ChArUco intrinsics + hand-eye
@@ -230,12 +230,19 @@ services:
       # ≥ this many seconds and then put back is grabbed again. Read by
       # workflow/handlers/perception_blocks.py.
       - EDUBOTICS_RECLAIM_ABSENT_S=${EDUBOTICS_RECLAIM_ABSENT_S:-1.5}
-      # Follower-only (Roboter Studio) flag — ALSO read by physical_ai_server's
-      # leader_appears_active() server-side guard (collision_monitor.py), not
-      # just by open_manipulator's entrypoint, so it must be forwarded here too
-      # (rig-found 2026-06-18: without this the server-side guard's env signal
-      # was inert and silently fell back to the live /leader/joint_states probe).
+      # Follower-only (Roboter Studio) flag. NOTE: the server does NOT read
+      # this env var — leader_appears_active() (collision_monitor.py) keys
+      # SOLELY on /leader/joint_states freshness (the env would be stale after
+      # the mid-session LeaderToggle recreates only open_manipulator). Kept
+      # forwarded for informational parity with open_manipulator only.
       - EDUBOTICS_FOLLOWER_ONLY=${EDUBOTICS_FOLLOWER_ONLY:-0}
+      # Robot-type profile id (ArmProfile registry). Hardset by the Windows
+      # GUI before "Umgebung starten"; read ONCE by physical_ai_server at
+      # __init__ (robot_profiles.resolve) to pick capabilities + the data
+      # robot_type ("omx_f"). omx_full = both arms (default, today's
+      # behavior); omx_follower = Roboter-Studio-only kit. Absent/unknown
+      # values fall back to omx_full (one-variable rollback).
+      - EDUBOTICS_ROBOT_TYPE=${EDUBOTICS_ROBOT_TYPE:-omx_full}
       # WS4 (2026-06-17) scene-cam single-shot extrinsic: the known
       # board-on-table placement (base frame, metres). The student lays the
       # ChArUco flat at this reference; the scene extrinsic + z_table derive

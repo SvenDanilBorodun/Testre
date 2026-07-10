@@ -16,7 +16,6 @@
 #
 # Author: Dongyun Kim, Seongwoo Kim
 
-import glob
 import json
 import logging
 import math
@@ -65,7 +64,6 @@ _BEARER_SCRUBBER = _BearerTokenScrubber()
 for _log_name in ('urllib3', 'urllib3.connectionpool', 'requests', 'http.client'):
     logging.getLogger(_log_name).addFilter(_BEARER_SCRUBBER)
 
-from ament_index_python.packages import get_package_share_directory
 from physical_ai_interfaces.msg import (
     Detection,
     HFOperationStatus,
@@ -87,7 +85,6 @@ from physical_ai_interfaces.srv import (
     GetModelWeightList,
     GetObjectCatalog,
     GetPolicyList,
-    GetRobotTypeList,
     GetSavedPolicyList,
     GetTrainingInfo,
     GetUserList,
@@ -95,7 +92,6 @@ from physical_ai_interfaces.srv import (
     SendCommand,
     SendTrainingCommand,
     SetHFUser,
-    SetRobotType,
     StartCalibration,
     StartWorkflow,
     StopWorkflow,
@@ -111,6 +107,7 @@ from physical_ai_interfaces.srv import (
     WorkshopReplay,
 )
 
+from physical_ai_server import robot_profiles
 from physical_ai_server.communication.communicator import Communicator
 from physical_ai_server.data_processing.data_manager import DataManager
 from physical_ai_server.data_processing.hf_api_worker import HfApiWorker
@@ -320,7 +317,6 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
 
         self.hf_cancel_on_progress = False
 
-        self.robot_type_list = self.get_robot_type_list()
         self.start_recording_time: float = 0.0
 
         # Retained for legacy mode-arbitration in _assert_no_other_active;
@@ -339,12 +335,14 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         # Arms the read-only force monitor + the safe-home/resync orchestration.
         self._init_collision_monitor()
 
-        # Roboter Studio runs FOLLOWER-ONLY (the GUI starts it with
-        # EDUBOTICS_FOLLOWER_ONLY=1 so the leader is never launched). With no
-        # leader there is no joint_trajectory_command_broadcaster flooding
-        # /leader/joint_trajectory, so the workflow/calibration publisher is the
-        # sole writer and no teleop arbitration is needed. (The 2026-06-17
-        # arbiter/bridge stack was removed — see docs/plans/2026-06-18-*.)
+        # Roboter Studio runs with the LEADER OFF: on an omx_follower rig the
+        # leader is never launched (EDUBOTICS_FOLLOWER_ONLY=1 hardset by the
+        # GUI); on omx_full the GUI's LeaderToggle recreates open_manipulator
+        # follower-only before a workflow runs. With no leader there is no
+        # joint_trajectory_command_broadcaster flooding /leader/joint_trajectory,
+        # so the workflow/calibration publisher is the sole writer and no teleop
+        # arbitration is needed. (The 2026-06-17 arbiter/bridge stack was
+        # removed — see docs/plans/2026-06-18-*.)
 
         self._setup_timer_callbacks()
 
@@ -361,12 +359,84 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
 
         self.goal_repo_id = None
 
+        # Robot-type self-init (D1) — LAST statement of __init__. Resolves the
+        # hardset EDUBOTICS_ROBOT_TYPE into an ArmProfile, sets operation_mode
+        # FIRST (the Communicator ctor needs it), and brings up the data pipeline
+        # via init_ros_params at BOOT (was: at React robot-selection time). Never
+        # raises out of __init__ — respawn=True would otherwise crash-loop.
+        self._init_robot_profile()
+
+    def _init_robot_profile(self):
+        """Boot-time robot identity + data-pipeline bring-up (Rule D1).
+
+        Resolves EDUBOTICS_ROBOT_TYPE -> ArmProfile, stamps the node's identity
+        attributes (robot_type/robot_profile/capabilities_json read by
+        communicator.publish_status + collision_monitor), and constructs the
+        Communicator via init_ros_params. On ANY failure it logs a German
+        [FEHLER] and keeps the node ALIVE DEGRADED (communicator=None, heartbeat
+        still running) — a raise here would loop compose restarts every 2 s.
+        """
+        # operation_mode MUST be set before init_ros_params -> Communicator(
+        # operation_mode=self.operation_mode); it is never set elsewhere in
+        # __init__. 'collection' also enables the leader subscriber source.
+        self.operation_mode = 'collection'
+        profile = robot_profiles.resolve(os.environ.get('EDUBOTICS_ROBOT_TYPE'))
+        # The resolved profile object is kept private for the IK factory seam
+        # (_build_ik_solver); the string id + caps JSON ride /task/status.
+        self._arm_profile = profile
+        self.robot_profile = profile.profile_id
+        self.capabilities_json = robot_profiles.capabilities_json(profile)
+        # data_robot_type is 'omx_f' for BOTH OMX profiles — dataset repo naming
+        # ({user}/{robot_type}_{task}) must stay stable.
+        self.robot_type = profile.data_robot_type
+        try:
+            self.init_ros_params(self.robot_type)
+            # A missing/unloaded config YAML does NOT leave these params falsy:
+            # they are declared with default_value=[''] and load_parameters
+            # returns that — a NON-empty list of one empty string. Treat a list
+            # with no non-blank entry as absent too.
+            def _all_blank(key):
+                values = self.params.get(key) or []
+                return not any(str(v).strip() for v in values)
+            if _all_blank('camera_topic_list') or _all_blank('joint_list'):
+                self.get_logger().error(
+                    '[FEHLER] Roboterkonfiguration unvollständig — '
+                    f'Parameter für "{self.robot_type}" fehlen.')
+        except Exception as e:
+            self.get_logger().error(
+                f'[FEHLER] Roboterprofil-Initialisierung fehlgeschlagen: {e}')
+            # init_ros_params assigns self.communicator MID-function; a raise
+            # AFTER that (stale-session block, InferenceManager()) would leave a
+            # half-initialized non-None communicator that every
+            # `if self.communicator is None` guard wrongly reads as "ready".
+            # Tear it down so the degraded state is unambiguous. The stale-
+            # session poll timer may already be armed by then — cancel it too
+            # (its tick is communicator-guarded, but a leaked 5 s timer on a
+            # degraded node is noise).
+            if getattr(self, '_stale_notice_timer', None) is not None:
+                try:
+                    self._stale_notice_timer.cancel()
+                except Exception:
+                    pass
+                self._stale_notice_timer = None
+            if self.communicator is not None:
+                try:
+                    self.communicator.cleanup()
+                except Exception:
+                    pass
+                self.communicator = None
+
     def _init_core_components(self):
+        # D8 — monotonic() of the last /task/status publish, updated after EVERY
+        # publish in BOTH sites (communicator.publish_status AND the collision
+        # monitor's own publisher). The idle identity tick only fires after 3 s
+        # of genuine /task/status silence, so it can never stomp a live tick.
+        self._last_task_status_mono = 0.0
         self.communicator: Optional[Communicator] = None
         self.data_manager: Optional[DataManager] = None
         self.timer_manager: Optional[TimerManager] = None
-        # Liveness heartbeat is node-owned now (see _init_ros_publisher); no
-        # TimerManager-based heartbeat tied to robot selection any more.
+        # Liveness heartbeat is node-owned now (see _init_ros_publisher),
+        # independent of the boot-time data-pipeline bring-up.
         self.training_timer: Optional[TimerManager] = None
         self.inference_manager: Optional[InferenceManager] = None
         # EduBotics v2.5.0: on-device training removed; Modal Cloud handles training.
@@ -432,12 +502,13 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
 
         # Liveness heartbeat — node-owned and started HERE in __init__, NOT in
         # init_ros_params(). It used to live on the Communicator and was created
-        # only when the student selected a robot type (/set_robot_type ->
-        # init_ros_params), which coupled "is the node alive" to "has a robot been
+        # only when the student selected a robot type (via the former
+        # /set_robot_type service, deleted with the picker — init_ros_params now
+        # runs at boot), which coupled "is the node alive" to "has a robot been
         # picked": after ANY node restart (crash/respawn/OOM) the React app showed
         # "Getrennt" until the student re-selected the robot on the Start page, even
         # though the node was already up. Decoupling it here means liveness is
-        # reported the moment the node starts.
+        # reported the moment the node starts — even when boot-init degrades.
         #
         # On its OWN MutuallyExclusiveCallbackGroup so a long-blocking callback on
         # the node's default group (a slow service, a recording-tick decode) can no
@@ -459,11 +530,54 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             callback_group=self._heartbeat_cb_group,
         )
 
+        # D8 — idle identity tick. /task/status has NO periodic publisher (it
+        # fires only during active tasks/errors/collisions), so a client that
+        # connects to an idle stack would learn the robot_type + profile + caps
+        # from NOTHING. This 2 s timer publishes a bare READY TaskStatus (which
+        # publish_status stamps with the identity) ONLY when the node is fully
+        # idle. On its OWN MutuallyExclusiveCallbackGroup (heartbeat pattern) so a
+        # blocking default-group callback can't stall it — and, symmetrically, so
+        # its publish can't queue behind one.
+        self._idle_status_timer = self.create_timer(
+            2.0,
+            self._idle_status_tick,
+            callback_group=MutuallyExclusiveCallbackGroup(),
+        )
+
     def _heartbeat_timer_callback(self):
-        # Node-level liveness beacon (1 Hz). Independent of robot selection /
-        # recording so the React heartbeat watchdog reports "Verbunden" whenever
-        # the node is alive. Publishing Empty() is allocation-cheap and cannot block.
+        # Node-level liveness beacon (1 Hz). Independent of the data-pipeline
+        # state / recording so the React heartbeat watchdog reports "Verbunden"
+        # whenever the node is alive. Publishing Empty() is allocation-cheap and
+        # cannot block.
         self._node_heartbeat_pub.publish(Empty())
+
+    def _idle_status_tick(self):
+        """D8 idle identity tick — deliver robot_type + profile + capabilities to
+        any (re)connecting client within ~2-3 s on a fully idle stack.
+
+        Publishes a bare READY TaskStatus (stamped with the identity by
+        communicator.publish_status) ONLY when the node is genuinely idle, gated
+        FOUR ways so it can never fight a live task, the INFERENCE_LOADING window,
+        or the collision watchdog:
+          1. communicator must be wired (degraded boot -> no tick);
+          2. no active mode (on_inference is claimed BEFORE the ~10-30 s eager
+             policy load, so this covers the silent INFERENCE_LOADING window);
+          3. no active collision (else READY would flicker against the 5 Hz
+             COLLISION watchdog re-assert);
+          4. >= 3 s since the last /task/status publish (covers the one-shot
+             notices; never stomps a live tick).
+        """
+        if self.communicator is None:
+            return
+        if self.on_recording or self.on_inference or self.on_workflow or self.on_manual:
+            return
+        if getattr(self, '_collision_active', False):
+            return
+        if time.monotonic() - self._last_task_status_mono < 3.0:
+            return
+        status = TaskStatus()
+        status.phase = TaskStatus.READY
+        self.communicator.publish_status(status=status)
 
     def _init_ros_service(self):
         self.get_logger().info('Initializing ROS services...')
@@ -487,8 +601,6 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         self._hf_cb_group = ReentrantCallbackGroup()
         service_definitions = [
             ('/task/command', SendCommand, self.user_interaction_callback),
-            ('/get_robot_types', GetRobotTypeList, self.get_robot_types_callback),
-            ('/set_robot_type', SetRobotType, self.set_robot_type_callback),
             ('/register_hf_user', SetHFUser, self.set_hf_user_callback, self._hf_cb_group),
             ('/get_registered_hf_user', GetHFUser, self.get_hf_user_callback, self._hf_cb_group),
             ('/get_policy_list', GetPolicyList, self.get_policy_list_callback),
@@ -703,15 +815,20 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
 
         # NOTE: the 1 Hz liveness heartbeat is no longer created here — it is
         # node-owned and started in _init_ros_publisher (__init__) so it is
-        # independent of robot selection. See the comment there.
+        # independent of the data-pipeline bring-up. See the comment there.
 
         # One-shot stale-session notice (leLab-comparison PR-3): a
         # *.session.json sibling marker means a recording crashed mid-
         # session — the buffered episodes died with the process, so the
         # dataset on disk is incomplete (the finalize() footer never
         # wrote). DETECT + INFORM ONLY, never auto-finalize/delete: the
-        # student decides in the Daten tab. Delayed 5 s so the React
-        # /task/status subscriber is attached when the toast fires.
+        # student decides in the Daten tab.
+        #
+        # init_ros_params now runs at BOOT (D1), when NO browser is attached and
+        # /task/status is VOLATILE — a fixed-delay publish would be silently lost.
+        # So POLL every 5 s and publish ONCE the instant a React client subscribes
+        # (rosbridge creates the ROS-side subscription on connect; the publisher's
+        # subscription count goes > 0), then cancel.
         if not getattr(self, '_stale_session_notice_done', False):
             self._stale_session_notice_done = True
             try:
@@ -727,8 +844,16 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 self.get_logger().warning(
                     f'Stale recording session markers found: {names}')
 
-                def _stale_session_notify():
-                    self._stale_notice_timer.cancel()
+                def _stale_session_poll():
+                    comm = self.communicator
+                    if comm is None:
+                        return
+                    try:
+                        subs = comm.status_publisher.get_subscription_count()
+                    except Exception:
+                        subs = 0
+                    if subs <= 0:
+                        return
                     notice = TaskStatus()
                     notice.phase = TaskStatus.READY
                     notice.error = (
@@ -736,10 +861,11 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                         f'unvollständig: {shown}. Bitte im Daten-Tab prüfen '
                         f'und gegebenenfalls löschen.'
                     )
-                    self.communicator.publish_status(status=notice)
+                    comm.publish_status(status=notice)
+                    self._stale_notice_timer.cancel()
 
                 self._stale_notice_timer = self.create_timer(
-                    5.0, _stale_session_notify)
+                    5.0, _stale_session_poll)
 
         self.inference_manager = InferenceManager()
         self.get_logger().info(
@@ -778,69 +904,6 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         self.timer_manager.start(timer_name=self.operation_mode)
         self.get_logger().info(
             'Robot control parameters initialized successfully')
-
-    def clear_parameters(self):
-        if self.communicator is not None:
-            self.communicator.cleanup()
-            self.communicator = None
-
-        if self.timer_manager is not None:
-            self.timer_manager = None
-
-        # The heartbeat is node-owned (created in __init__) and intentionally
-        # NOT torn down here: a robot-type switch (clear_parameters +
-        # init_ros_params) must not silence liveness even momentarily.
-
-        if self.training_timer is not None:
-            self.training_timer.stop(timer_name='training_status')
-            self.training_timer = None
-
-        # Audit §3.15 — robot-type switch needs to discard the
-        # workflow + calibration managers too, otherwise the next
-        # workflow run uses the previous robot's joint topology / IK
-        # chain / camera-keyed calibration files.
-        if self.workflow_manager is not None:
-            try:
-                self.workflow_manager.stop()
-            except Exception:
-                pass
-            self.workflow_manager = None
-            self.on_workflow = False
-        # Phase-3 sim runtime — discard the parallel manager + virtual arm on a
-        # robot-type switch for the same reason (new robot's IK chain / catalog).
-        if self.sim_workflow_manager is not None:
-            try:
-                self.sim_workflow_manager.stop()
-            except Exception:
-                pass
-            self.sim_workflow_manager = None
-            self._sim_arm = None
-            self.on_workflow = False
-            # LOW-3: clear the cached sim pose + scene so the idle-republish timer
-            # doesn't keep emitting the PREVIOUS robot's last pose on
-            # /sim/joint_states after a robot-type switch (the publisher/timer are
-            # reused and re-seeded on the next sim run; _sim_idle_republish
-            # returns early while _last_sim_joints is None).
-            self._last_sim_joints = None
-            self._sim_objects = []
-        if self.calibration_manager is not None:
-            # If a touch-off session left the follower torqued OFF, re-torque it
-            # before tearing the manager down — a robot-type switch mid-touch-off
-            # would otherwise leak a limp follower (best-effort here: the node is
-            # re-initialising and the new controllers will re-activate torque,
-            # but assert it so the arm holds during the switch window).
-            if getattr(self, '_active_calib_step', None) == 'table_touch':
-                self._set_follower_torque(True)
-                self._active_calib_step = None
-            self.calibration_manager = None
-            # WS1: dropping the session here must also resume teleop, else a
-            # robot-type switch mid-calibration leaks the suspend (broadcaster
-            # stays inactive -> teleop dead).
-            self._set_calibration_active(False)
-
-        self.params = None
-        self.total_joint_order = None
-        self.joint_order = None
 
     def set_hf_user_callback(self, request, response):
         request_hf_token = request.token
@@ -887,22 +950,6 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             response.message = 'Hugging-Face-Benutzer konnte nicht gelesen werden.'
 
         return response
-
-    def get_robot_type_list(self):
-        pkg_dir = get_package_share_directory('physical_ai_server')
-        config_dir = os.path.join(pkg_dir, 'config')
-        config_files = glob.glob(os.path.join(config_dir, '*.yaml'))
-        config_files.sort()
-
-        robot_type_list = []
-        for config_file in config_files:
-            robot_type = os.path.splitext(os.path.basename(config_file))[0]
-            if robot_type.endswith('_config'):
-                robot_type = robot_type[:-7]
-            robot_type_list.append(robot_type)
-
-        self.get_logger().info(f'Available robot types: {robot_type_list}')
-        return robot_type_list
 
     def handle_rosbag_recording(self):
         try:
@@ -1619,20 +1666,6 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             return response
         return response
 
-    def get_robot_types_callback(self, request, response):
-        if self.robot_type_list is None:
-            self.get_logger().error('Robot type list is not set')
-            response.robot_types = []
-            response.success = False
-            response.message = 'Robot type list is not set'
-            return response
-
-        self.get_logger().info(f'Available robot types: {self.robot_type_list}')
-        response.robot_types = self.robot_type_list
-        response.success = True
-        response.message = 'Robot type list retrieved successfully'
-        return response
-
     def get_policy_list_callback(self, request, response):
         policy_list = InferenceManager.get_available_policies()
         if not policy_list:
@@ -1824,24 +1857,6 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             response.message = f'Failed to retrieve training info: {str(e)}'
 
         return response
-
-    def set_robot_type_callback(self, request, response):
-        try:
-            self.get_logger().info(f'Setting robot type to: {request.robot_type}')
-            self.operation_mode = 'collection'
-            self.robot_type = request.robot_type
-            self.clear_parameters()
-            self.init_ros_params(self.robot_type)
-            response.success = True
-            response.message = f'Robot type set to {self.robot_type}'
-            return response
-
-        except Exception as e:
-            self.get_logger().error(f'Failed to set robot type: {str(e)}')
-            response.success = False
-            # Audit §3.21 — sanitize.
-            response.message = 'Roboter-Typ konnte nicht gesetzt werden.'
-            return response
 
     def _init_hf_api_worker(self):
         """Initialize HF API Worker and status monitoring timer."""
@@ -2747,16 +2762,19 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             response.message = 'Ungültiger Ziel-Name.'
             return response
 
-        # No robot selected yet → communicator not wired → a distinct hint so
-        # the student knows to pick the robot first (vs. a transient missing
-        # joint state). Mirrors _get_current_gripper_pose's own None-on-comm
-        # guard, surfaced here as its own message.
+        # communicator not wired → the data pipeline failed to initialize at boot
+        # (the robot type is now hardset in the .env — there is no picker to use).
+        # The degraded-boot path is the only way to reach this; point the student
+        # at a restart + the Protokoll. Mirrors _get_current_gripper_pose's own
+        # None-on-comm guard, surfaced here as its own message.
         if self.communicator is None:
             response.success = False
             response.world_x = 0.0
             response.world_y = 0.0
             response.world_z = 0.0
-            response.message = 'Bitte zuerst den Roboter auswählen.'
+            response.message = (
+                'Roboter-Initialisierung fehlgeschlagen — bitte die Umgebung '
+                'neu starten (Details im Protokoll).')
             return response
 
         # FIX 3 — refuse a capture against a STALE follower readback (a frozen
@@ -3047,7 +3065,9 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 response.message = bmsg
                 return response
             if self.communicator is None:
-                response.message = 'Bitte zuerst den Roboter auswählen.'
+                response.message = (
+                    'Roboter-Initialisierung fehlgeschlagen — bitte die '
+                    'Umgebung neu starten (Details im Protokoll).')
                 return response
 
             acquired = self._manual_lock.acquire(timeout=_MANUAL_LOCK_TIMEOUT_S)
@@ -3418,7 +3438,9 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 with self._mode_lock:
                     self._manual_persistent = was_persistent
                     self._recompute_on_manual_locked()
-                response.message = 'Bitte zuerst den Roboter auswählen.'
+                response.message = (
+                    'Roboter-Initialisierung fehlgeschlagen — bitte die '
+                    'Umgebung neu starten (Details im Protokoll).')
                 return response
             acquired = self._manual_lock.acquire(timeout=_MANUAL_LOCK_TIMEOUT_S)
             if not acquired:
@@ -3690,7 +3712,9 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             response.message = bmsg
             return response
         if self.communicator is None:
-            response.message = 'Bitte zuerst den Roboter auswählen.'
+            response.message = (
+                'Roboter-Initialisierung fehlgeschlagen — bitte die Umgebung '
+                'neu starten (Details im Protokoll).')
             return response
 
         existing = self._manual_replay_thread
@@ -4261,23 +4285,25 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             return None
 
     def _build_ik_solver(self):
-        """Return the closed-form IKSolver, built ONCE per server lifetime.
+        """Return the arm's IK solver, built ONCE per server lifetime.
 
-        The solver is exact analytical geometry with the OMX-F kinematics
-        baked in — it needs NO ``/robot_description`` fetch and is ALWAYS
-        available, so the old "robot_description not available; IK disabled"
-        failure mode (and the spin-from-callback URDF-fetch fragility) is gone.
-        If the URDF parameter happens to be local we pass it so the solver can
-        verify its baked constants; we never block on a cross-node fetch."""
+        Construction goes through the resolved ArmProfile's ``build_ik`` factory
+        (the kinematics seam — a genuinely new arm plugs its solver in there).
+        For OMX this returns the closed-form analytical IKSolver: exact geometry
+        with the OMX-F kinematics baked in, so it needs NO ``/robot_description``
+        fetch and is ALWAYS available (the old "robot_description not available;
+        IK disabled" failure mode is gone). If the URDF parameter happens to be
+        local we pass it so the solver can verify its baked constants; we never
+        block on a cross-node fetch."""
         cached = getattr(self, '_ik_solver', None)
         if cached is not None:
             return cached
         try:
-            from physical_ai_server.workflow.ik_solver import IKSolver
             urdf_string = None
             if self.has_parameter('robot_description'):
                 urdf_string = self.get_parameter('robot_description').value or None
-            self._ik_solver = IKSolver(urdf_string=urdf_string)
+            profile = getattr(self, '_arm_profile', None) or robot_profiles.resolve(None)
+            self._ik_solver = profile.build_ik(urdf_string=urdf_string)
             return self._ik_solver
         except Exception as e:
             self.get_logger().error(f'IKSolver init failed: {e}')
@@ -4538,8 +4564,10 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             # broadcaster also publishing there the two contend and the follower jumps
             # between the two command streams. The GUI flips the arm container into
             # follower-only (EDUBOTICS_FOLLOWER_ONLY=1) BEFORE offering Roboter Studio;
-            # this is the server-side backstop (leader env says both-arms, or leader
-            # joint-states are actively flowing). getattr-guarded so a server built
+            # this is the server-side backstop, keyed SOLELY on /leader/joint_states
+            # freshness (leader_appears_active — the env var is deliberately NOT read
+            # here; it goes stale when the toggle recreates only the arm container).
+            # getattr-guarded so a server built
             # without the collision monitor still starts workflows normally.
             leader_check = getattr(self, 'leader_appears_active', None)
             if callable(leader_check):

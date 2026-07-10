@@ -140,6 +140,41 @@ def test_sim_arm_open_gripper_is_never_held_override():
     assert arm.get_joints()[5] == pytest.approx(GRIPPER_OPEN_RAD)
 
 
+def test_sim_arm_gentle_close_held_clears_per_object_threshold(monkeypatch):
+    # A future gentle per-object close (−0.25): the blocked readback scales with
+    # the command (close + offset), so check_grasp_held's PER-OBJECT threshold
+    # (close + margin) still reads HELD — a fixed −0.1 readback would tie the
+    # −0.10 threshold and falsely report a MISS in sim.
+    monkeypatch.setattr(motion, 'GRASP_SETTLE_S', 0.0)
+    monkeypatch.setattr(motion, '_GRASP_HELD_MAX_ENV_SET', False)
+    gentle_close = -0.25
+    ik = IKSolver()
+    arm_q = ik.solve((OBJ_X, OBJ_Y, WUERFEL_GRASP_Z))
+    arm = SimArm(ik=ik, objects=[
+        {'type': 'wuerfel', 'tag_id': 7, 'x': OBJ_X, 'y': OBJ_Y, 'yaw': OBJ_YAW}])
+    arm.publish([(list(arm_q) + [gentle_close], 1.0)])
+    ctx = types.SimpleNamespace(
+        get_follower_joints=arm.get_joints,
+        last_full_joints=list(arm_q) + [gentle_close])
+    assert motion.check_grasp_held(ctx) is True
+    # And the same gentle close with NOTHING placed is a detected MISS (the old
+    # fixed global threshold read every empty gentle close as held).
+    empty = SimArm(ik=ik, objects=[])
+    empty.publish([(list(arm_q) + [gentle_close], 1.0)])
+    ctx_empty = types.SimpleNamespace(
+        get_follower_joints=empty.get_joints,
+        last_full_joints=list(arm_q) + [gentle_close])
+    assert motion.check_grasp_held(ctx_empty) is False
+
+
+def test_sim_blocked_offset_stays_above_held_margin():
+    # No-drift guard between the two deliberately-unimported plain constants:
+    # the sim's blocked-jaw offset must exceed motion's held margin, or a held
+    # sim grasp at SOME close angle would read as a miss.
+    from physical_ai_server.workflow import sim_arm as sim_arm_mod
+    assert sim_arm_mod._HELD_BLOCK_OFFSET_RAD > motion.GRASP_HELD_MARGIN_RAD
+
+
 def test_sim_arm_fk_xyz_round_trips_via_real_ik():
     ik = IKSolver()
     arm_q = ik.solve((OBJ_X, OBJ_Y, 0.05))

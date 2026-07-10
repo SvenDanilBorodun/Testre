@@ -53,10 +53,15 @@ _SIM_HOME_FULL_JOINTS = [0.0, -math.pi / 2, math.pi / 2, 0.0, 0.0, 0.8]
 _GRIPPER_CLOSE_THRESHOLD_RAD = 0.0
 
 # Reported jaw angle when a held virtual object blocks the gripper. Must stay
-# ABOVE motion.GRASP_HELD_MAX_RAD (default -0.35) so motion.check_grasp_held reads
-# it as HELD (a real ~30 mm object leaves the jaws partway open). Kept as a plain
-# constant here to avoid importing the ROS-coupled motion module.
+# ABOVE motion.check_grasp_held's per-object threshold (commanded close +
+# motion.GRASP_HELD_MARGIN_RAD, 0.15) so a held object reads HELD. The floor
+# -0.1 covers the shipped deep closes (cube -0.5 → threshold -0.35); the offset
+# covers a future GENTLE close (e.g. -0.25 → threshold -0.10, where a fixed
+# -0.1 readback would tie the threshold and read MISS). 0.25 is deliberately
+# above the 0.15 margin. Kept as plain constants here to avoid importing the
+# ROS-coupled motion module.
 _HELD_BLOCKED_GRIPPER_RAD = -0.1
+_HELD_BLOCK_OFFSET_RAD = 0.25
 
 # How close (metres) the virtual end-effector XY must be to a placed object's XY
 # for the close to count as "on the object" for the held simulation. Generous so
@@ -133,7 +138,10 @@ class SimArm:
             q = list(self._last_q)
         if self._simulate_held(q):
             q = list(q)
-            q[5] = _HELD_BLOCKED_GRIPPER_RAD
+            # Blocked angle scales with the commanded close so gentle per-object
+            # closes still clear check_grasp_held's derived threshold (see the
+            # constants above); the floor keeps deep closes at the pinned -0.1.
+            q[5] = max(_HELD_BLOCKED_GRIPPER_RAD, q[5] + _HELD_BLOCK_OFFSET_RAD)
         return q
 
     def fk_xyz(self) -> Optional[tuple[float, float, float]]:

@@ -96,14 +96,27 @@ GRASP_ROLL_RAD = math.radians(_safe_float('EDUBOTICS_GRASP_ROLL_DEG', 90.0))
 WORKSPACE_FLOOR_MARGIN_M = 0.01
 
 # Grasp-success check (#2): after the gripper closes, read the achieved gripper
-# angle (follower joint index 5). A held ~30 mm object stops the jaws partway
-# open (ABOVE GRASP_HELD_MAX_RAD, e.g. ≈ −0.07 rad); an empty close reaches
-# ≈ GRIPPER_CLOSED_RAD (−0.5). Achieved ≤ GRASP_HELD_MAX_RAD ⇒ the grasp MISSED.
+# angle (follower joint index 5). A held object stops the jaws partway open; an
+# empty close reaches ≈ the commanded close angle. The HELD/MISS threshold is
+# PER-OBJECT: commanded close + GRASP_HELD_MARGIN_RAD (see _held_threshold_rad)
+# — a single global threshold silently broke miss-detection for any object whose
+# tuned gripper_close_rad sat ABOVE it (an empty close never crossed it, so a
+# miss read as "held"). The margin 0.15 makes the shipped cube's derived
+# threshold (−0.5 + 0.15 = −0.35) byte-identical to the previously rig-validated
+# global value. Setting EDUBOTICS_GRASP_HELD_MAX_RAD explicitly restores the
+# fixed global threshold everywhere (operator rollback / rig tuning).
 # GRASP_RETRY re-tries the whole detect→select→grasp that many times before the
 # instance is skipped; GRASP_SETTLE_S lets the servo settle before the readback.
-# Rig-tunable; env-forwarding-guard: all three are forwarded in
+# Rig-tunable; env-forwarding-guard: all three envs are forwarded in
 # robotis_ai_setup/docker/docker-compose.yml.
 GRASP_HELD_MAX_RAD = _safe_float('EDUBOTICS_GRASP_HELD_MAX_RAD', -0.35)
+_GRASP_HELD_MAX_ENV_SET = os.environ.get('EDUBOTICS_GRASP_HELD_MAX_RAD') is not None
+# Plain constant (NOT env-tunable — an env name would need compose forwarding;
+# tune per-rig via EDUBOTICS_GRASP_HELD_MAX_RAD instead). An object must stop
+# the jaws at least this far ABOVE its commanded close to count as held, so
+# catalog guidance is: command gripper_close_rad at least ~0.15 rad deeper than
+# the angle where the jaws meet the body.
+GRASP_HELD_MARGIN_RAD = 0.15
 GRASP_RETRY = max(0, int(_safe_float('EDUBOTICS_GRASP_RETRY', 1.0)))
 GRASP_SETTLE_S = _safe_float('EDUBOTICS_GRASP_SETTLE_S', 0.3)
 
@@ -747,16 +760,44 @@ def _execute_pickup(
                 pass
 
 
+def _held_threshold_rad(ctx) -> float:
+    """HELD/MISS gripper-angle threshold for :func:`check_grasp_held`.
+
+    Per-object when possible: the last COMMANDED gripper angle
+    (``ctx.last_full_joints[5]``, which after a close IS the recipe's
+    ``gripper_close_rad``) plus ``GRASP_HELD_MARGIN_RAD`` — an empty close
+    reaches ≈ the commanded angle, a held object stops the jaws at least the
+    margin above it. This is what lets a wide-object recipe with a gentle close
+    (e.g. −0.25) still detect a miss; the old fixed −0.35 read every empty
+    gentle close as "held".
+
+    Falls back to the global ``GRASP_HELD_MAX_RAD`` when (a) the operator set
+    ``EDUBOTICS_GRASP_HELD_MAX_RAD`` explicitly (rig override / rollback wins
+    everywhere), or (b) the last command is unavailable or is not a close
+    (open is +0.8; deriving there would flip the documented open-gripper
+    behaviour of ``grasp_held``/``wait_until_held`` — deliberately preserved)."""
+    if _GRASP_HELD_MAX_ENV_SET:
+        return GRASP_HELD_MAX_RAD
+    last = getattr(ctx, 'last_full_joints', None)
+    try:
+        commanded = float(last[5])
+    except (TypeError, ValueError, IndexError):
+        return GRASP_HELD_MAX_RAD
+    if not math.isfinite(commanded) or commanded >= 0.0:
+        return GRASP_HELD_MAX_RAD
+    return commanded + GRASP_HELD_MARGIN_RAD
+
+
 def check_grasp_held(ctx) -> bool | None:
     """Decide HELD vs EMPTY after a gripper close, from the achieved gripper
     angle (follower joint index 5).
 
     Returns ``True`` (object held), ``False`` (empty close — the grasp missed),
     or ``None`` when the follower-joint readback is unavailable (the caller then
-    falls back to claim-on-completion — no regression). A held ~30 mm object
-    leaves the jaws partway open (ABOVE ``GRASP_HELD_MAX_RAD``); an empty close
-    reaches ≈ ``GRIPPER_CLOSED_RAD``. Settles ``GRASP_SETTLE_S`` so the servo has
-    reached its blocked/closed angle before the readback."""
+    falls back to claim-on-completion — no regression). A held object leaves the
+    jaws partway open (ABOVE the per-object :func:`_held_threshold_rad`); an
+    empty close reaches ≈ the commanded close angle. Settles ``GRASP_SETTLE_S``
+    so the servo has reached its blocked/closed angle before the readback."""
     getter = getattr(ctx, 'get_follower_joints', None)
     if not callable(getter):
         return None
@@ -772,7 +813,7 @@ def check_grasp_held(ctx) -> bool | None:
         gripper = float(joints[5])
     except (TypeError, ValueError):
         return None
-    return gripper > GRASP_HELD_MAX_RAD
+    return gripper > _held_threshold_rad(ctx)
 
 
 def pickup(ctx, args: dict[str, Any]) -> None:

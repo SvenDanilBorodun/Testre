@@ -733,13 +733,14 @@ def wait_until_held(ctx, args: dict[str, Any]) -> bool:
     follower-joint feedback.
 
     LIMITATION (position-only sensing, document-only fix 2026-06-30):
-    ``check_grasp_held`` reads the achieved gripper angle, which is ABOVE
-    ``GRASP_HELD_MAX_RAD`` whenever the gripper is OPEN (the rest state) — so
-    this block returns True immediately if the gripper is open. It is only
+    ``check_grasp_held`` reads the achieved gripper angle, which is ABOVE the
+    held-threshold whenever the gripper is OPEN (the rest state) — so this
+    block returns True immediately if the gripper is open. It is only
     meaningful directly AFTER a close (e.g. „Greifer schließen" or a grasp).
-    The block tooltip states this; tightening the shared ``check_grasp_held``
-    band was deliberately deferred to avoid touching the rig-validated
-    ``grasp_object`` path."""
+    The block tooltip states this. (The threshold itself is per-object since
+    2026-07-10 — commanded close + ``GRASP_HELD_MARGIN_RAD`` — but a
+    non-close last command deliberately keeps the legacy global threshold,
+    preserving exactly this documented open-gripper behaviour.)"""
     timeout_s = float(args.get('timeout', 10))
 
     def _held() -> bool:

@@ -11,21 +11,22 @@ Roboter-Studio-Modul vorzubereiten. Aufbauzeit: ~15 Minuten.
 | Foam-Board / starker Karton, mind. A4 | Schreibwarenladen | 1 |
 | **Ausricht-Winkel (L-Jig)** für die Tafel | 3D-Druck (`tools/` STL) **oder** Papp-Winkel | 1 |
 | **Arbeits-Matte** mit Greifbereich + Tafel-Platz | ausdrucken/zeichnen (siehe unten) | 1 |
-| AprilTag-Bogen (tag36h11, IDs 0–19) | `tools/generate_apriltags.py` → PDF | 1 |
-| Farbige Würfel (rot/grün/blau/gelb), 25–35 mm | Bastelladen oder 3D-Druck | je 2 |
-| Kleine Greif-Objekte (Spielzeug-Banane, Stifte …) | optional | je 1 |
+| AprilTag-Bogen (tag36h11, **exakt die Katalog-IDs**, 24 mm) | `tools/generate_apriltags.py` → PDF (liest den festen Objekt-Katalog) | 1 |
+| Katalog-Objekte (aktuell: Würfel ~30 mm, je 1 Tag oben aufgeklebt) | Bastelladen oder 3D-Druck | je Tag-ID 1 |
 | Eimer/Schüsseln zum Sortieren | Klassenraum | 2–3 |
 
-> **Stand 2026-06-18 — wichtige Änderungen:**
+> **Stand 2026-07-10 — wichtige Änderungen:**
 > - Roboter Studio läuft **nur mit dem Follower-Arm**. In der Web-Oberfläche
 >   schaltest du den **Leader-Arm ab** („Leader abschalten") — der Arm-Container
 >   startet kurz neu (~15–20 s), dann steuert Roboter Studio den Follower allein.
 >   Zum Aufnehmen/Teleoperieren später „Leader verbinden".
 > - Die **Tischhöhe wird gemessen** (Schritt „Tisch vermessen"), nicht
 >   angenommen — der Arm tippt selbst auf den Tisch.
-> - Die **Kamera-Innenwerte** sind voreingestellt; der intrinsische Schritt ist
->   optional (nur zum Verfeinern).
+> - Der **intrinsische Schritt ist Pflicht** (20 Bilder pro Rig) — es gibt
+>   keine voreingestellten Kamera-Innenwerte mehr.
 > - Es wird **nur die Szenen-Kamera** verwendet (kein Greifer-ChArUco-Adapter).
+> - Objekte werden **über AprilTags erkannt** (fester Objekt-Katalog) — es gibt
+>   **kein Farbprofil** mehr; farbige Würfel ohne Tag werden nicht erkannt.
 
 ## Aufbau
 
@@ -80,35 +81,56 @@ Auf eine abwischbare Matte (oder direkt auf den Tisch mit Klebeband):
   `EDUBOTICS_BOARD_ORIGIN_X_M`, `EDUBOTICS_BOARD_ORIGIN_Y_M` und (falls der Jig
   die Tafel gedreht hält) `EDUBOTICS_BOARD_YAW_DEG` anpassbar.
 
-### 4. Beleuchtung
+### 4. AprilTags drucken und aufkleben
 
-Kalibrierung und Farbprofil sind beleuchtungsempfindlich:
+```bash
+cd Testre
+python tools/generate_apriltags.py --out classroom_kit/apriltags.pdf
+```
+
+Der Bogen enthält **genau die Tag-IDs des festen Objekt-Katalogs** in der
+richtigen Größe (Standard **24 mm**; per `EDUBOTICS_TAG_SIZE_M` änderbar —
+Bogen und Rig-Einstellung müssen übereinstimmen). Mit „Tatsächliche Größe"
+drucken und **nachmessen**.
+
+- Beim Ausschneiden den **weißen Rand um das schwarze Quadrat stehen lassen**
+  (die Erkennung braucht ihn).
+- Jeden Tag **flach auf die OBERSEITE** des passenden Objekts kleben (nicht
+  seitlich, nicht gewölbt).
+- Bei nicht-runden/nicht-würfelförmigen Objekten: den Tag auf **jeder Kopie
+  gleich ausgerichtet** aufkleben — der Greifer richtet sich nach dem Tag aus.
+
+### 5. Beleuchtung
+
+Kalibrierung und Marker-Erkennung sind beleuchtungsempfindlich:
 
 - **Diffuses Licht**, KEIN direktes Sonnen-/Spotlicht (Reflexionen auf der
-  Tafel werden sonst als Marker fehlerkannt).
-- Beim Farbprofil: dasselbe Licht wie später beim Spielen. Ändert sich das
-  Licht, das Farbprofil neu erfassen.
+  Tafel oder den Tags stören die Erkennung).
 
-### 5. Erst-Test mit der Lehrkraft
+### 6. Erst-Test mit der Lehrkraft
 
 Bevor die Klasse startet:
 
 1. Umgebung starten, Web-Oberfläche öffnen, **Roboter-Studio-Tab**.
 2. **„Leader abschalten"** klicken — der Arm-Container startet kurz neu.
 3. Die Kalibrier-Schritte durchspielen:
-   - **(Intrinsisch)** — voreingestellt, kann übersprungen werden (nur zum
-     Verfeinern: Tafel aus verschiedenen Winkeln, Reprojektionsfehler < 1 px).
+   - **Intrinsisch** — Pflicht (20 Bilder, Tafel aus verschiedenen Winkeln,
+     Reprojektionsfehler < 1 px).
    - **Extrinsik** — die Tafel in den L-Jig legen, **ein Bild** erfassen →
      „Berechnen & speichern". Der Arm bewegt sich nicht.
    - **Tisch vermessen** — „Starten" (Arm wird weich), Greifer von Hand an
      **≥ 3 verteilten Stellen** auf den Tisch tippen + „Punkt erfassen",
      dann „Berechnen & speichern" (Arm wird wieder fest).
-   - **Farbprofil** — je einen Würfel jeder Farbe mittig erfassen.
-4. **Greif-Ring prüfen:** ein Ziel an den Innen- und Außenrand des markierten
-   Rings legen und greifen lassen; falls „nicht erreichbar", den Ring anpassen.
-   Einen bekannten Punkt pinnen und mit dem Maßband prüfen, dass der Arm
-   wirklich dorthin fährt (sonst Extrinsik/Tisch-Schritt wiederholen).
-5. Mini-Workflow `erkenne Farbe rot → nimm auf → lege ab bei A` testen.
+   - **(Optional) Genauigkeit prüfen** — bekannte Punkte auflegen und die
+     XY-/Dreh-Korrektur speichern.
+4. **Greif-Ring prüfen:** ein Katalog-Objekt an den Innen- und Außenrand des
+   markierten Rings legen und greifen lassen; falls „nicht erreichbar", den
+   Ring anpassen. Einen bekannten Punkt pinnen und mit dem Maßband prüfen,
+   dass der Arm wirklich dorthin fährt (sonst Extrinsik/Tisch-Schritt
+   wiederholen).
+5. Mini-Workflow `Greife Würfel → lege ab bei A` testen — dabei einmal den
+   Würfel **gedreht** hinlegen und prüfen, dass der Greifer die Drehung
+   mitmacht.
 
 Wenn etwas hakt, vor der Stunde lösen — nicht während 24 Schülerinnen zuschauen.
 
@@ -123,12 +145,14 @@ Wenn etwas hakt, vor der Stunde lösen — nicht während 24 Schülerinnen zusch
   Tisch-Messung widersprechen sich — die Extrinsik (Schritt davor) wiederholen.
 - **„… nicht erreichbar / zu nah / zu weit"**: Objekt außerhalb des Greif-Rings.
   In den markierten Ring legen.
-- **Würfel werden an der falschen Stelle gegriffen**: meist die Kamera wurde
+- **Objekte werden an der falschen Stelle gegriffen**: meist die Kamera wurde
   bewegt (Extrinsik ungültig) ODER die Tafel lag nicht im Jig. Extrinsik +
   Tisch vermessen wiederholen. Steilere Kameraposition hilft.
-- **Würfel werden nicht erkannt** trotz Farbprofil: Licht hat sich geändert —
-  Farbprofil neu erfassen.
-- **„Objekt-/Marker-Erkennung ist nicht verfügbar"**: das Erkennungsmodell ist
-  im Image nicht vorhanden — Farb-Erkennung verwenden oder Image neu bauen.
+- **Objekte werden nicht erkannt**: Tag verdeckt/spiegelnd, weißer Rand beim
+  Ausschneiden entfernt, oder falsche Tag-ID (der Bogen muss die Katalog-IDs
+  enthalten — Bogen mit `tools/generate_apriltags.py` neu drucken).
+- **„Ausrichtung konnte nicht bestimmt werden"**: Tag nicht flach auf der
+  Oberseite, gewölbt, oder die gedruckte Tag-Größe passt nicht zur
+  Rig-Einstellung (`EDUBOTICS_TAG_SIZE_M`) — Tag neu drucken/aufkleben.
 
 Issues über das EduBotics-Repository melden.

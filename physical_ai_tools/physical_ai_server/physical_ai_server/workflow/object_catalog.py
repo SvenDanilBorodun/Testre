@@ -52,13 +52,29 @@ Schema accepted by :func:`parse_catalog` (the fixed constant is one instance)::
           "tag_ids": [20, 21, 22, 23, 24], // each copy its own id; all typed 'banane'
           "object_height_m": 0.040,        // tag/top plane above the table
           "grasp_depth_m": 0.015,          // jaws close this far below the top
-          "gripper_close_rad": -0.30,      // tuned to the body width at the grasp band
+          "gripper_close_rad": -0.30,      // command ≥ ~0.15 rad DEEPER than where the
+                                           //   jaws meet the body (motion.GRASP_HELD_MARGIN_RAD)
+                                           //   or grasp verification can't tell miss from hold
           "approach_clear_m": 0.06,        // optional (default 0.06): hover height
           "object_width_m": 0.030,         // optional (default = object_height_m): render footprint width
           "color_hex": "#f59e0b"           // optional (default amber): simulation render colour
         }
       }
     }
+
+Physical tag-mounting convention (per object type, fleet-wide):
+
+* The AprilTag sits FLAT on the object's TOP face — ``object_height_m`` is the
+  tag plane's height and the projection maths assumes a horizontal tag; a
+  side-mounted or tilted tag breaks both position and yaw recovery. Keep the
+  white quiet zone (≥ one tag-edge) around the black square.
+* The wrist roll TRACKS the tag: ``joint5 = base_yaw − tag_yaw + GRASP_ROLL``,
+  so WHERE the jaws close on the body is fixed by the tag's printed orientation
+  on the object. For rotationally symmetric objects (cube) any gluing works;
+  for an ELONGATED object glue the tag so the jaws land across the graspable
+  (narrow) axis — same orientation on EVERY physical copy of the type — and
+  validate the first copy on the rig (there is no runtime guard for this,
+  same as the ``GRASP_ROLL_DEG`` jaw convention).
 
 Pure-Python + stdlib only (``os``/``re``/``dataclasses``) — unit testable
 without a container.
@@ -203,7 +219,13 @@ class ObjectCatalog:
 #
 # „Würfel" numbers are the rig-validated values (2026-06-27). Add more objects by
 # giving each a unique key, its own globally-unique tag id(s) (one per physical
-# copy), and rig-measured object_height_m / grasp_depth_m / gripper_close_rad.
+# copy), and rig-measured object_height_m / grasp_depth_m / gripper_close_rad
+# (commanded ≥ ~0.15 rad deeper than where the jaws meet the body — see the
+# module docstring's schema notes + tag-mounting convention). Print the matching
+# tag sheet with tools/generate_apriltags.py (catalog-driven by default), update
+# the pinned fixed-set tests in test/test_object_catalog.py, and rebuild the
+# image. Everything downstream (Blockly dropdowns, sim palette + placement caps,
+# 2D/3D render dims, cloud persistence) picks the new type up automatically.
 _FIXED_CATALOG: dict = {
     'types': {
         'wuerfel': {

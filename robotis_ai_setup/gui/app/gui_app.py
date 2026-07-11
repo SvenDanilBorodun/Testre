@@ -761,14 +761,48 @@ class EduBoticsApp:
         # Check the EduBotics WSL2 distro is installed and docker engine is up
         self._set_status("EduBotics-Umgebung wird geprüft...")
         if not docker_manager.is_distro_registered():
-            self._log("EduBotics-Umgebung ist noch nicht eingerichtet.")
-            self.root.after(0, lambda: self.progress.stop())
-            # Offer one-click finalize (UAC prompt, runs finalize_install.ps1).
-            self.root.after(0, self._prompt_finalize_install)
-            return
+            # Multi-account PCs: WSL registrations are per-user, but the
+            # installer creates ONE machine-shared VHDX in ProgramData. If it
+            # exists, THIS account only needs a registry-only
+            # `wsl --import-in-place` — no admin, no copy, a few seconds.
+            # Only when the VHDX itself is missing does the elevated finalize
+            # (rootfs import + image pull) still apply.
+            if docker_manager.shared_vhdx_exists():
+                self._set_status("EduBotics-Umgebung wird für dieses Konto registriert...")
+                self._log(
+                    "Gemeinsame EduBotics-Umgebung gefunden — wird für dieses "
+                    "Windows-Konto registriert (einmalig, ohne Admin-Rechte)..."
+                )
+                ok, kind = docker_manager.register_shared_distro()
+                if ok:
+                    self._log("EduBotics-Umgebung für dieses Konto registriert.")
+                else:
+                    self._log(
+                        "Registrierung fehlgeschlagen: "
+                        + docker_manager.WSL_START_ERROR_DE.get(
+                            kind, docker_manager.WSL_START_ERROR_DE["other"])
+                    )
+            if not docker_manager.is_distro_registered():
+                self._log("EduBotics-Umgebung ist noch nicht eingerichtet.")
+                self.root.after(0, lambda: self.progress.stop())
+                # Offer one-click finalize (UAC prompt, runs finalize_install.ps1).
+                self.root.after(0, self._prompt_finalize_install)
+                return
         if not docker_manager.is_docker_running():
             self._log("EduBotics-Umgebung startet...")
-            docker_manager.start_edubotics_distro()
+            # Boot-probe with error classification: on a shared-VHDX machine
+            # the most common start failure is another account's WSL VM still
+            # holding the exclusive VHDX lock (fast user switching). Surface
+            # that as a precise German instruction instead of burning the
+            # full 120 s docker wait on a distro that can never come up.
+            started, kind = docker_manager.probe_distro_start()
+            if not started:
+                msg = docker_manager.WSL_START_ERROR_DE.get(
+                    kind, docker_manager.WSL_START_ERROR_DE["other"])
+                self._log(f"FEHLER: {msg}")
+                self._set_status(msg.split(". ")[0])
+                self.root.after(0, lambda: self.progress.stop())
+                return
             if not docker_manager.wait_for_docker(
                 callback=lambda e, t: self._set_status(f"Warte auf EduBotics-Umgebung... {e}s/{t}s")
             ):
@@ -2676,6 +2710,10 @@ class EduBoticsApp:
                 else:
                     docker_manager.stop_containers(gpu=self.gpu_available)
                 docker_manager.stop_keepalive()
+                # Release the shared VHDX's exclusive lock so the next Windows
+                # account on this PC can start EduBotics immediately instead of
+                # waiting for this account to log off / the VM to idle out.
+                docker_manager.terminate_distro()
                 self.root.destroy()
             # else: user clicked No, don't close
         else:
@@ -2685,6 +2723,11 @@ class EduBoticsApp:
             self._stop_rs_control_server()
             webview_window.destroy_all()
             docker_manager.stop_keepalive()
+            # Same shared-VHDX lock handoff as the running-branch above:
+            # nothing is running (ensure_environment_stopped ran at startup),
+            # so terminating the distro is safe and frees it for the next
+            # Windows account on this PC.
+            docker_manager.terminate_distro()
             self.root.destroy()
 
 

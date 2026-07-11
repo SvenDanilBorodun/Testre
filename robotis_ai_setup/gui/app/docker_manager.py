@@ -105,6 +105,172 @@ def is_distro_registered() -> bool:
         return False
 
 
+# ── Multi-account shared distro (one VHDX per machine) ──────────────────────
+# WSL2 registrations are PER-USER (HKCU\...\Lxss); Microsoft ships no
+# machine-wide install (microsoft/WSL#13983 open/unanswered as of 2026-07).
+# On shared school PCs the installer therefore creates ONE VHDX in
+# %ProgramData%\EduBotics\wsl (with a Users-group Modify ACL, see
+# import_edubotics_wsl.ps1) and every Windows account registers that same
+# file for itself via `wsl --import-in-place` — a registry-only, non-admin,
+# no-copy operation. WSL's exclusive lock on a running VHDX enforces
+# one-account-at-a-time cleanly (a second account's start fails with a
+# sharing violation, no corruption) — acceptable: one robot arm per PC.
+#
+# NEVER "repair" a registration with `wsl --unregister` here: unregister
+# DELETES the VHDX at the registration's BasePath — on the shared file that
+# would destroy the environment for every other account on the machine.
+
+
+def shared_vhdx_path() -> str:
+    """Path of the machine-shared EduBotics VHDX created by the installer.
+
+    Env override EDUBOTICS_SHARED_VHDX (tests / thawed-drive deployments where
+    disk-reset software forces a non-ProgramData location).
+    """
+    override = os.environ.get("EDUBOTICS_SHARED_VHDX")
+    if override:
+        return override
+    program_data = os.environ.get("ProgramData") or r"C:\ProgramData"
+    return os.path.join(program_data, "EduBotics", "wsl", "ext4.vhdx")
+
+
+def shared_vhdx_exists() -> bool:
+    """True iff the machine-shared VHDX is present on disk."""
+    return os.path.isfile(shared_vhdx_path())
+
+
+# WSL start/registration failure classification. wsl.exe error output is often
+# UTF-16LE mis-decoded through text=True (interleaved NULs), so the classifier
+# strips NULs before matching; needles cover both the stable HRESULT codes and
+# the English + German localized message fragments.
+_WSL_ERROR_PATTERNS: dict[str, tuple[str, ...]] = {
+    # Another account's utility VM holds the VHDX (fast user switching).
+    "locked": (
+        "sharing_violation",
+        "0x80070020",
+        "being used by another process",
+        "wird von einem anderen prozess verwendet",
+    ),
+    # NTFS ACLs deny this account (installer's Users-Modify grant missing).
+    "access_denied": (
+        "e_accessdenied",
+        "access_denied",
+        "access is denied",
+        "zugriff verweigert",
+        "0x80070005",
+    ),
+    # Registration points at a missing file / the VHDX is gone.
+    "not_found": (
+        "0x80070002",
+        "0x80070003",
+        "file_not_found",
+        "path_not_found",
+        "cannot find the file",
+        "cannot find the path",
+        "kann die angegebene datei nicht finden",
+        "kann den angegebenen pfad nicht finden",
+    ),
+}
+
+# Student-facing German messages per error kind (GUI logs + status bar).
+WSL_START_ERROR_DE: dict[str, str] = {
+    "locked": (
+        "Die EduBotics-Umgebung wird gerade von einem anderen Windows-Konto "
+        "auf diesem PC verwendet. Bitte das andere Konto vollständig abmelden "
+        "(nicht nur Benutzer wechseln) und es dann erneut versuchen."
+    ),
+    "access_denied": (
+        "Zugriff auf die gemeinsame EduBotics-Umgebung verweigert. Bitte den "
+        "EduBotics-Installer einmal erneut ausführen, um die Berechtigungen "
+        "zu reparieren."
+    ),
+    "not_found": (
+        "Die gemeinsame EduBotics-Umgebung wurde nicht gefunden. Bitte den "
+        "EduBotics-Installer erneut ausführen."
+    ),
+    "other": (
+        "Die EduBotics-Umgebung konnte nicht gestartet werden. Bitte den PC "
+        "neu starten und es erneut versuchen."
+    ),
+}
+
+
+def classify_wsl_error(output: str) -> str:
+    """Map raw wsl.exe output to an error kind ('locked' / 'access_denied' /
+    'not_found' / 'other'). NUL-strips first — wsl.exe writes UTF-16LE."""
+    text = (output or "").replace("\x00", "").lower()
+    for kind, needles in _WSL_ERROR_PATTERNS.items():
+        if any(n in text for n in needles):
+            return kind
+    return "other"
+
+
+def register_shared_distro() -> tuple[bool, str]:
+    """Register the machine-shared VHDX for THIS Windows account.
+
+    `wsl --import-in-place` writes only the per-user Lxss registry entry — no
+    admin, no copy; the file stays in ProgramData. Returns (ok, error_kind);
+    error_kind indexes WSL_START_ERROR_DE on failure.
+    """
+    vhdx = shared_vhdx_path()
+    if not os.path.isfile(vhdx):
+        return False, "not_found"
+    try:
+        result = subprocess.run(
+            ["wsl", "--import-in-place", WSL_DISTRO_NAME, vhdx],
+            capture_output=True, text=True, timeout=60,
+            **_SUBPROCESS_KWARGS,
+        )
+    except FileNotFoundError:
+        return False, "other"
+    except subprocess.TimeoutExpired:
+        return False, "other"
+    if result.returncode == 0 and is_distro_registered():
+        return True, ""
+    combined = (result.stdout or "") + "\n" + (result.stderr or "")
+    return False, classify_wsl_error(combined)
+
+
+def probe_distro_start() -> tuple[bool, str]:
+    """Boot-probe the distro and classify a failure.
+
+    Returns (ok, error_kind). Unlike start_edubotics_distro() this keeps the
+    failure output so the GUI can tell "another account holds the VHDX" apart
+    from a genuinely broken environment. 45 s covers a cold first boot.
+    """
+    if not is_distro_registered():
+        return False, "not_found"
+    try:
+        result = subprocess.run(
+            ["wsl", "-d", WSL_DISTRO_NAME, "--", "echo", "ready"],
+            capture_output=True, text=True, timeout=45,
+            **_SUBPROCESS_KWARGS,
+        )
+    except FileNotFoundError:
+        return False, "other"
+    except subprocess.TimeoutExpired:
+        return False, "other"
+    if result.returncode == 0:
+        return True, ""
+    return False, classify_wsl_error(
+        (result.stdout or "") + "\n" + (result.stderr or ""))
+
+
+def terminate_distro() -> bool:
+    """Stop the EduBotics distro (`wsl --terminate`) to release the shared
+    VHDX's exclusive lock for the next Windows account. Safe no-op when the
+    distro isn't running; never raises."""
+    try:
+        result = subprocess.run(
+            ["wsl", "--terminate", WSL_DISTRO_NAME],
+            capture_output=True, text=True, timeout=15,
+            **_SUBPROCESS_KWARGS,
+        )
+        return result.returncode == 0
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+
+
 def is_docker_running() -> bool:
     """Check if the Docker engine is reachable inside the EduBotics distro."""
     try:

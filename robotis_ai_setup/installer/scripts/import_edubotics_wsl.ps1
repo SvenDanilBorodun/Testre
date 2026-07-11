@@ -127,6 +127,12 @@ if ($existing) {
         wsl --unregister $DistroName *>$null
         if ($LASTEXITCODE -ne 0) {
             Write-FAIL "Konnte existierenden Distro nicht entfernen."
+            # Multi-account PCs: another logged-in Windows account's WSL VM can
+            # hold the shared VHDX's exclusive lock (fast user switching), and
+            # unregister then fails. Tell the operator exactly what to do.
+            Write-Host "   Falls weitere Benutzerkonten angemeldet sind: bitte alle anderen" -ForegroundColor Yellow
+            Write-Host "   Konten vollständig abmelden (WSL sperrt die gemeinsame Umgebung)" -ForegroundColor Yellow
+            Write-Host "   und die Installation erneut starten." -ForegroundColor Yellow
             exit 1
         }
         Write-OK "Existing distro removed"
@@ -225,6 +231,25 @@ if (-not $skipImport) {
         }
     } catch {
         Write-Warn "Rootfs-Versionsstempel konnte nicht gelesen werden."
+    }
+}
+
+# Multi-account PCs: WSL registrations are per-user, but this VHDX is shared
+# machine-wide — every Windows account registers the SAME file via the GUI's
+# non-admin `wsl --import-in-place` (registry-only, no copy). Standard users
+# get READ-ONLY on admin-created ProgramData files by default, so their WSL
+# launch would fail with E_ACCESSDENIED. Grant the built-in Users group
+# Modify. The SID form *S-1-5-32-545 is language-independent (German Windows
+# names the group "Benutzer", so a name-based grant would break there).
+# Idempotent; runs on every invocation (incl. the version-match skip path) so
+# machines installed before this change pick the ACL up on their next upgrade.
+Write-Step "Setze Freigabe-Berechtigungen für alle Benutzerkonten..."
+if (Test-Path $InstallRoot) {
+    icacls "$InstallRoot" /grant "*S-1-5-32-545:(OI)(CI)M" /T *>$null
+    if ($LASTEXITCODE -eq 0) {
+        Write-OK "Benutzer-Gruppe hat Zugriff auf die gemeinsame EduBotics-Umgebung"
+    } else {
+        Write-Warn "Berechtigungen konnten nicht gesetzt werden (icacls exit $LASTEXITCODE) — andere Benutzerkonten benötigen ggf. eine eigene Installation."
     }
 }
 

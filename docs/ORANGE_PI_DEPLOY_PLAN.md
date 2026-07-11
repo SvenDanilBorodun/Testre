@@ -2,7 +2,12 @@
 
 > **Status: APPROVED PLAN, implementation pending** (decisions locked
 > 2026-07-11). Every file:line reference below was verified against the
-> code at v2.12.2 on 2026-07-11. This document is the durable spec for the
+> code at v2.12.2 on 2026-07-11. **Rev. 2 (2026-07-11)**: amended after a
+> full-code + web review — two-tier lifecycle carve-out for the manager
+> (§5), decided `/api/system` proxy mechanics (§5), decided Pi-mode
+> gating + `physical-ai-manager-opi` twin (§4/§6), explicit torch pin +
+> flatten/CI corrections (§4), agent-update cloud fields (§7), and
+> factual fixes throughout. This document is the durable spec for the
 > Orange-Pi workstream; per-phase throwaway plans still go to `docs/plans/`
 > (gitignored) as usual. When implementation lands, fold the durable
 > invariants into `CLAUDE.md` and convert this file into a runbook in the
@@ -35,7 +40,12 @@ GbE, Wi-Fi 5. USB: **1× USB3.1 Gen1 + 3× USB2.0 Type-A, two of which sit
 behind an internal USB2 hub**. Port budget: 2 arms (serial, negligible
 bandwidth → hub ports) + 2 cameras (see §9 for the bandwidth plan).
 
-**OS**: Armbian (recommended — actively maintained for the 5 Pro) or the
+**OS**: Armbian (recommended — **community-maintained** builds for the
+5 Pro, two kernel lines: vendor 6.1.x BSP and a mainline-based "current"
+line. Pin ONE exact known-good image per §12.3 — the vendor 6.1.x line
+has a known PCIe regression in Armbian releases >24.8.1, which matters
+if the golden image boots from NVMe; the mainline line is the
+workaround) or the
 official Orange Pi Ubuntu 22.04 BSP image. The formerly popular
 Joshua-Riek `ubuntu-rockchip` project was **archived April 2026** — do not
 build on it. Host requirements are thin: pinned Docker + compose, udev,
@@ -62,7 +72,9 @@ Key facts the architecture leans on (all verified):
 - **The React app is already host-relative.** `StudentApp.js:88` seeds
   `rosHost` from `window.location.hostname`; `rosSlice.js:31-34` derives
   `ws://<host>:9090`; camera stream URLs derive from the same `rosHost`
-  (`CameraFeedOverlay.jsx:51`). A browser on `http://<pi>/` reaches
+  (`CameraFeedOverlay.jsx:86` and `ImageGridCell.js:172` — the only two
+  stream-URL construction sites in the app, covering Roboter Studio,
+  Aufnahme and Inferenz). A browser on `http://<pi>/` reaches
   rosbridge and camera streams with **zero frontend URL changes** once the
   compose ports are LAN-bound.
 - **The native-Linux camera path already exists.** `entrypoint_omx.sh:103-135`
@@ -74,8 +86,13 @@ Key facts the architecture leans on (all verified):
   Pi; the 100 Hz ros2_control loop, mixed-servo effort fractions,
   leader-gate and two-step recovery are architecture-neutral.
 - **`ROS_DOMAIN_ID`** is derived per-machine from `/etc/machine-id`
-  (hash mod 233) exactly as `jetson_agent/setup.sh:183-184` does — 30 Pis
-  on one LAN cannot DDS-cross-talk.
+  (hash mod 233) exactly as `jetson_agent/setup.sh:183-184` does. Honest
+  rationale: Pis cannot DDS-cross-talk on the LAN **regardless** —
+  `ros_net` is a docker **bridge** network in every compose (no host
+  networking anywhere), so DDS multicast never leaves the host. The
+  derivation is kept for fleet-convention consistency and host-side ROS
+  tooling, NOT as the isolation mechanism (with 30 rigs mod 233 a
+  birthday collision between two Pis is likely anyway — and harmless).
 - **Inference**: the Inferenz tab's existing Jetson flow
   (`useJetsonConnection.js`, `PROXY_PORT = 9091` at `:37`, JWT first-frame
   auth in `rosConnectionManager.js`) is used as-is. While connected to a
@@ -93,9 +110,23 @@ the Jetson AI Lab cu126 pip index (`Dockerfile.arm64:52-53`) — unusable on
 Rockchip. Work items:
 
 1. **New base** `physical_ai_tools/physical_ai_server/Dockerfile.arm64cpu`:
-   - `FROM ros:jazzy-ros-base` (stock arm64), plain PyPI (aarch64 torch
-     wheels on PyPI are CPU-only — no `+cpu` local-tag dance, no SLIM_CUDA
-     step needed because there is no CUDA to strip).
+   - `FROM ros:jazzy-ros-base` (stock arm64), plain PyPI. **Pin
+     `torch==2.7.0` explicitly** (plus its matching torchvision) — the
+     sibling Dockerfiles inherit torch from their BASE images, so "same
+     pins as the siblings" does NOT cover it, and `lerobot==0.5.1`
+     allows `torch<2.11`: an unpinned resolve installs 2.10.x and
+     silently breaks the "one PyTorch surface (torch 2.7.x)" invariant.
+     torch 2.7.0's PyPI aarch64 wheel is genuinely CPU-only (~99 MB,
+     zero `nvidia-*` deps — verified against PyPI metadata; the
+     CUDA-by-default flip for aarch64 PyPI wheels happened in torch
+     2.11.0), so no `+cpu` local-tag dance and no SLIM_CUDA step are
+     needed **at this pin**. Any future torch bump must switch to the
+     `download.pytorch.org/whl/cpu` index (it carries aarch64 `+cpu`
+     wheels) or the image silently grows the full CUDA/SBSA payload.
+   - Video decode: LeRobot 0.5.1 excludes `torchcodec` on Linux aarch64
+     via an environment marker and falls back to PyAV (`av` is an
+     unconditional dep with manylinux aarch64 wheels) — the install
+     works out of the box on plain PyPI; decode-speed caveat in §9.
    - Same pins as the sibling Dockerfiles: `lerobot[pi,smolvla,peft]==0.5.1`,
      `numpy==1.26.4` force-reinstall after lerobot, `scipy>=1.14.0,<1.18`,
      `ros-jazzy-control-msgs` apt (collision e-stop fail-open guard),
@@ -105,30 +136,59 @@ Rockchip. Work items:
      fork only if the L4T base leaks in.
 2. **Thin overlays: no new files.** Both
    `robotis_ai_setup/docker/{physical_ai_server,open_manipulator}/Dockerfile`
-   are `ARG BASE_IMAGE`-parameterized and arch-neutral; the 7-file overlay
-   chain, COPY-wholesale staging, forbidden-file asserts and all four
-   build-time smoke gates apply as-is (Rule §3 intact).
+   are `ARG BASE_IMAGE`-parameterized. The open_manipulator one is
+   arch-neutral; the physical_ai_server one is arch-**safe** rather than
+   arch-neutral — it carries the amd64-only `SLIM_CUDA` torch-swap block
+   (`:263-287`, a no-op at the default `SLIM_CUDA=0`, which is what the
+   opi build passes) and Jetson-base ENV scrubs
+   (`TWINE_*`/`SCP_UPLOAD_*`, `:442-449`, harmless no-ops on other
+   bases). The 7-file overlay chain, COPY-wholesale staging,
+   forbidden-file asserts and all four build-time smoke gates apply
+   as-is (Rule §3 intact; none of the four gates touches CUDA — they
+   run identically on CPU torch).
 3. **`build-images.sh`**: add a `PLATFORM=opi` case beside
    amd64/arm64 (`build-images.sh:52-94`) → bases
    `*-opi-base`, output repos `open-manipulator-opi` /
-   `physical-ai-server-opi`. Run `flatten_amd64_image`'s logic for this
-   flavor too (rename accordingly) — unlike the Jetson image this one
-   *should* be slim (~5-6 GB target).
-4. **Manager for arm64**: `build-images.sh:253` currently skips the
-   manager on arm64. The manager Dockerfile is `node:22` + nginx — both
-   multi-arch official images — so an arm64 build is trivial. Publish as a
-   multi-arch manifest on the existing `physical-ai-manager` repo (or an
-   `-opi` twin; decide at implementation, thread through retag either way).
+   `physical-ai-server-opi`. Reuse `flatten_amd64_image`'s logic for
+   this flavor, but a rename is NOT enough: the function hardcodes
+   `--platform linux/amd64` on BOTH `docker create` and `docker import`
+   (`build-images.sh:161-162`) — generalize it to take the target
+   platform as a parameter (keep the `ROS_DISTRO=jazzy` drift assert
+   and the `--change` config preservation), otherwise the re-imported
+   opi rootfs is mislabeled amd64 — the exact hazard the function's own
+   comment warns about. Unlike the Jetson image this one *should* be
+   slim (~5-6 GB target).
+4. **Manager for the Pi — DECIDED: a `physical-ai-manager-opi` twin,
+   not a multi-arch manifest.** `build-images.sh:253` currently skips
+   the manager on arm64; the build itself is trivial (`node:22` + nginx,
+   both multi-arch official images). A shared multi-arch manifest is off
+   the table because the Pi image's CONTENT differs, not just its arch:
+   nginx.conf is baked at `/etc/nginx/conf.d/default.conf`
+   (`Dockerfile:48`; the manager service declares no volumes), and the
+   Pi needs a `/api/system` reverse-proxy location (§5). Maintaining
+   that as a compose bind-mounted full-file override would create an
+   out-of-image duplicate of the whole SPA config (a drift pair).
+   Instead follow the EXISTING dual-nginx precedent (`nginx.conf` vs
+   `nginx.web.conf` for Railway): add `nginx.opi.conf` + a thin
+   `Dockerfile.opi` in `physical_ai_manager/` — student/web/opi becomes
+   a triple of the established pattern. Thread the new repo through
+   retag and the smoke-test.
 5. **CI (`docker-publish.yml`)**: third matrix entry (`platform: opi`,
    `runner: ubuntu-24.04-arm`) in both `build` (`:134-139`) and
    `smoke-test` (`:495-503`); extend `AMD64_REPOS`/`ARM64_REPOS`
-   (`:274-275`) with the opi repos in `retag`; add an **opi size gate**
-   (the 11 GB amd64 gate at `:549` exists to catch un-slimmed CUDA — the
-   opi image needs its own ceiling, ~7 GB); run
-   `image_source_parity.sh` for the flavor.
-6. **Write the missing `docs/arm64_base/README.md`** — referenced five
-   times by `build-images.sh` (e.g. `:44`, `:382`, `:511`) but absent from
-   the tree; document both the Jetson and the opi base builds.
+   (`:274-275`) with the opi repos in `retag` AND the dual-push
+   integrity `REPOS` list (`:366`) — two hardcoded repo lists, not one;
+   add an **opi size gate** as a NEW step (the existing 11 GB gate —
+   step at `:549`, literal at `:567` — is guarded
+   `if: matrix.platform == 'amd64'` at `:550`, so the opi ceiling,
+   ~7 GB, is its own gate rather than a threshold tweak); run
+   `image_source_parity.sh` for the flavor (verified flavor-neutral —
+   parameterized purely by `<kind> <image-ref>`, no edits needed).
+6. **Write the missing `docs/arm64_base/README.md`** — referenced 3×
+   by `build-images.sh` (`:44`, `:382`, `:511`) and 8× repo-wide (also
+   both thin Dockerfiles at `:4`, `docs/JETSON_DEPLOY.md` ×2, and
+   `docs/deploy/DEPLOY.md:235`) but absent from the tree; document both
+   the Jetson and the opi base builds.
 
 ## 5. Workstream 2 — pi-agent + `docker-compose.opi.yml`
 
@@ -140,14 +200,26 @@ platform-neutral brain. Ports/marks from the verified GUI inventory:
 **Ported nearly verbatim** (from `robotis_ai_setup/gui/app/`):
 `config_generator.py` (managed `.env` model — `MANAGED_KEYS` at `:24`,
 prefixes `:55`, atomic writes, `HF_TOKEN` deliberately unmanaged with
-`upsert_env_var` as sole writer `:249`; env file moves to
-`~/.config/edubotics/.env`), `docker_manager`'s pull/update/digest logic
+`upsert_env_var` as sole writer, def `:245` / sole-writer docstring
+`:249`; env file moves to `~/.config/edubotics/.env`. The module itself
+is platform-neutral — the Windows bits it must shed live in
+`constants.py`: `%LOCALAPPDATA%` path defaults at `:158/:284/:340`, the
+`sys.platform == "win32"` camera fallback at `:206`, and the
+`sys.executable`-relative `versions.env` walk — the port swaps the
+constants module, not the generator), `docker_manager`'s pull/update/digest logic
 (**flip the digest pre-check from `linux/amd64` — `docker_manager.py:336-365`
 — to arm64**; the Jetson agent already has the arm64 variant),
 `factory_reset` (volume-suffix rm of `ai_workspace`/`huggingface_cache`/
-`edubotics_calib`), `ensure_environment_stopped` (still required: the
-Dynamixel bus must be free before every arm scan),
-`roboter_studio_control.py`'s endpoint contract, `phone_camera.py`
+`edubotics_calib`), `ensure_environment_stopped` (**ported TARGETED,
+not verbatim** — robot tier only, see the lifecycle model below; the
+Dynamixel bus must still be free before every arm scan),
+`roboter_studio_control.py`'s endpoint contract (the actual paths carry
+a `/roboter-studio/` prefix: `GET /roboter-studio/status` `:190`,
+`POST /roboter-studio/leader-disable` `:232` / `-enable` `:234` — which
+maps 1:1 onto the proposed `/api/system/roboter-studio/…`; note the
+`.env`-rollback-on-failed-restart logic is NOT in that module, it lives
+in the injected callback `gui_app.py::_rs_set_leader_mode` `:2534-2589`
+and must be ported alongside it), `phone_camera.py`
 (pure-stdlib HTTPS receiver; cert minted with `openssl` instead of
 PowerShell), `update_checker`'s cloud `/version` + SHA-256 gate,
 `identify_arm.py` (runs in a throwaway
@@ -169,19 +241,76 @@ phone-camera toggle, HF token, start/stop environment, update
 (image pull + agent self-update from a SHA-256-verified release tarball),
 factory reset (double-confirm), Protokoll (SSE, with the existing secret
 redaction), and the Roboter-Studio endpoints preserving the exact
-`roboter_studio_control.py` JSON contract (`/status`, `/leader-enable`,
-`/leader-disable`, busy/ready guards, `.env` rollback on failed restart).
+`roboter_studio_control.py` JSON contract (`/roboter-studio/status`,
+`/roboter-studio/leader-enable`, `/roboter-studio/leader-disable`,
+busy/ready guards, `.env` rollback on failed restart).
 
-**Lifecycle model: the GUI-owner model, not the Jetson model.** The Jetson
-is a cloud-lock-driven shared appliance (`restart: unless-stopped`); the
-Pi is a personal rig — the stack comes up only on „Umgebung starten" in
-the System window, compose services stay `restart: "no"`, and the agent
-runs `ensure_environment_stopped` before every arm scan (the serial-bus
-lesson from `docker-compose.yml:6` applies unchanged).
+**Proxy mechanics (decided).** The agent binds `127.0.0.1:8769` AND the
+compose network's gateway IP — never the LAN NIC. `docker-compose.opi.yml`
+pins `ros_net`'s IPAM subnet/gateway (e.g. `172.28.0.0/24`, gateway
+`172.28.0.1`) so `nginx.opi.conf` can `proxy_pass http://172.28.0.1:8769/`
+deterministically, with no `extra_hosts: host-gateway` indirection.
+Boot-ordering caveat: the gateway interface only exists once compose has
+created `ros_net` — the agent binds its gateway listener AFTER its
+boot-time manager `up` (or retries the bind), not at process start. Two
+properties fall out: (1) the agent API is reachable from the browser
+ONLY through the manager's same-origin `/api/system` proxy, so with
+`EDUBOTICS_LAN_OPEN=0` the management surface shrinks with the rest of
+the stack instead of leaking past it; (2) port 8769 keeps its documented
+meaning — the agent's API supersedes and extends the Roboter-Studio
+control server rather than adding a second port.
+
+**Lifecycle model: two tiers — an always-on manager, a student-owned
+robot tier.** The pure GUI-owner model cannot be ported verbatim: on
+Windows the wizard lives in a NATIVE app that exists before any
+container does, but on the Pi the wizard IS the React app served by the
+manager container. With everything `restart: "no"` and "stack comes up
+only on „Umgebung starten"", a freshly booted Pi serves nothing on :80
+and the student can never reach the start button — a chicken-and-egg.
+Resolution:
+
+- **Manager tier (always-on)**: `physical_ai_manager` gets
+  `restart: unless-stopped` in `docker-compose.opi.yml` and is
+  additionally brought up by the pi-agent at boot (the
+  `up -d --no-deps physical_ai_manager` pattern from
+  `docker_manager.start_cloud_only`, `:1163-1188`). This is a
+  deliberate, documented exception to the `restart: "no"` invariant —
+  same category as the Jetson's sanctioned `unless-stopped` — and the
+  opi compose therefore DROPS the manager's `depends_on:
+  physical_ai_server`: the manager must serve the wizard while the
+  server is down (the SPA already tolerates a dead rosbridge via
+  StartupGate/heartbeat). Graduate this exception into CLAUDE.md's
+  lifecycle bullet when the feature lands (see §13).
+- **Robot tier (student-owned)**: `open_manipulator` +
+  `physical_ai_server` stay `restart: "no"` and come up only on
+  „Umgebung starten" — the GUI-owner lesson survives where it matters:
+  the Dynamixel serial bus (`docker-compose.yml:6`).
+- **`ensure_environment_stopped` is ported TARGETED, not verbatim.**
+  The GUI version is a full `compose down` (`docker_manager.py:1262-1296`)
+  — on the Pi that would kill the manager serving the very page the
+  student is clicking in, mid-wizard. The agent's version stops/removes
+  ONLY the two robot-tier containers, using the `stop` + `rm -f`
+  pattern from `stop_cloud_only` (`:1223-1243`, which deliberately
+  avoids `down` so the network survives), preserving the
+  graceful-SIGTERM path so the entrypoint's torque-disable trap still
+  runs. The same carve-out applies to „Stoppen" and the pre-arm-scan
+  teardown.
+- **„Umgebung starten"** = `up -d --force-recreate --no-deps
+  open_manipulator physical_ai_server` — both services named explicitly
+  so the health-gated `depends_on` between THEM still applies, while
+  `--no-deps` keeps compose's dependency resolution away from the
+  running manager.
+- **Updates recreate the manager LAST**, after the robot tier is down
+  and images are pulled. Recreating the manager drops the student's SPA
+  for a few seconds — expected and self-healing: `useVersionCheck`
+  polls `/version.json` and reloads on the new buildId. Document the
+  blip, don't fight it.
 
 **`docker-compose.opi.yml`** — derived from the Jetson compose minus its
-NVIDIA lines (`docker-compose.jetson.yml:24`, `:83`), plus the manager as
-a third service:
+NVIDIA lines (`docker-compose.jetson.yml:24`, `:83` — both
+`runtime: nvidia`), plus the manager as a third service (taken from the
+student compose, with `restart` and `depends_on` adjusted per the
+lifecycle model above):
 
 - Images `${REGISTRY}/…-opi:${IMAGE_TAG}`; same `${REGISTRY}`/fallback
   interpolation and `.env` interface as today.
@@ -194,8 +323,16 @@ a third service:
   ~50-entry `EDUBOTICS_*` `environment:` forwarding lists carried over —
   every new env var must join those lists (`env-forwarding-guard`).
 - **Ports**: `80`, `8080`, `9090` bound to the LAN per the locked
-  decision, behind one managed env switch (see §8). `5557` does not exist
-  (no capture bridge); `8769` is replaced by the same-origin `/api/system`.
+  decision, behind one managed env switch (see §8). Note today's compose
+  hardcodes literal `127.0.0.1:` on every `ports:` line
+  (`:42/:166-167/:352`) — no bind-host variable exists yet; the opi
+  compose introduces it (`${EDUBOTICS_BIND_HOST:-…}:80:80` style, with
+  the agent's `.env` regenerate mapping `EDUBOTICS_LAN_OPEN` onto it).
+  `5557` does not exist (no capture bridge); the browser reaches the
+  agent only via the same-origin `/api/system` proxy — the agent's
+  `:8769` binds loopback + the pinned docker gateway, never the LAN NIC
+  (see proxy mechanics above). Also pin `ros_net`'s IPAM
+  subnet/gateway here (the proxy depends on it).
 
 **React fix required**: `LeaderToggle.jsx:47` and `RunControls.jsx:47`
 hardcode `RS_CONTROL_BASE = 'http://localhost:8769'` — in Pi mode these
@@ -205,21 +342,29 @@ and the toggle silently self-hides today).
 
 ## 6. Workstream 3 — the React „System"-Fenster (the GUI, in the browser)
 
-A new window/tab, visible only in Pi mode (runtime-gated like `?cloud=1` /
-the Jetson connection state; mechanism decided at implementation — URL
-param the manager's Pi nginx config appends, mirroring how the GUI
-appends `?cloud=1` today, or a runtime probe of `/api/system/status`).
-Feature-for-feature parity with `EduBotics.exe`:
+A new window/tab, visible only in Pi mode. **Gating mechanism DECIDED:
+a runtime probe of `/api/system/status`.** The "nginx appends a URL
+param, mirroring `?cloud=1`" idea is dropped as unsound: today the
+NATIVE GUI builds the `?cloud=1&_v=…` query string client-side before
+navigation (`gui_app.py:2437-2440`) — a server cannot "append a param"
+to an SPA load without a 302 redirect (loop-guard, address-bar churn)
+or HTML injection; there is nothing to mirror. The probe instead
+follows the app's EXISTING async precedent: tabs are already gated on
+async Redux state (`jetsonConnected`, `StudentApp.js:275-276`) — a
+one-shot boot probe of `/api/system/status` sets a `piMode` flag, the
+System tab declares `piOnly: true`, and the same `.filter()` chain
+hides it until the probe resolves (progressive reveal, exactly like the
+Jetson-gated tabs). Feature-for-feature parity with `EduBotics.exe`:
 
 | GUI today | System window |
 |---|---|
-| Modus (cloud-only checkbox) | kept (compose up of manager only) |
+| Modus (cloud-only checkbox) | kept — on the Pi the manager is ALWAYS up (§5 lifecycle), so cloud-only reduces to "skip the robot tier + the hardware gate" |
 | Schritt A/B „Arme scannen" + guided repair | scan via scanner container + `identify_arm.py`; repairs = udev/group checks; leader/follower ports persisted as managed keys; fast-rehydrate on revisit |
 | Schritt C Kameras: Scan, Rollen (Greifer/Szene), Vorschau | v4l2 by-id/by-path enumeration incl. identical-serial dedup; MJPEG `<img>` previews from the agent; previews stop before the stack claims devices |
 | Handy als 3. Kamera (:8444) | ported as-is (`0.0.0.0:8444` HTTPS, openssl cert) |
 | Schritt D HF-Token | same upsert, same „✓ Token gespeichert" semantics |
 | „Umgebung starten"/„Stoppen" + start-gate | same gating (prerequisites ∧ both arms identified ∨ cloud-only) |
-| Update-Gate | cloud `/version` check; image pulls via digest pre-check + agent tarball self-update replace the `.exe` download |
+| Update-Gate | cloud `/version` check (needs the new `pi_agent_*` fields, §7); image pulls via digest pre-check + agent tarball self-update replace the `.exe` download; manager recreated last — brief SPA reload, `useVersionCheck` self-heals |
 | „Web-Oberfläche öffnen" | not needed — the user is already in the browser |
 | „Daten zurücksetzen" | identical volume wipe, double-confirm |
 | Protokoll | SSE log panel, secret redaction preserved |
@@ -237,12 +382,30 @@ All student-facing strings in German with literal umlauts (Rule §1;
   print the label/QR for the case.
 - **Phase 2: golden eMMC/NVMe image** („flash → boot → ready"):
   bench-provision one unit, capture, per-unit first boot regenerates
-  machine-id (which re-derives `ROS_DOMAIN_ID`), hostname, and secrets.
-  This is the `.exe`-installer equivalent for fleet rollout.
+  machine-id (which re-derives `ROS_DOMAIN_ID`), hostname, and secrets
+  via a one-shot systemd unit. The `NN` in `edubotics-NN` is DERIVED
+  (from the SoC serial / fresh machine-id), never hand-assigned —
+  duplicate `.local` hostnames are the one failure mDNS cannot survive,
+  so uniqueness must be generated, and the derived name is what gets
+  printed on the label/QR. This is the `.exe`-installer equivalent for
+  fleet rollout.
 - **Updates**: images via the digest-checked auto-pull; agent via
-  SHA-256-verified release tarball (reusing the `update_checker` logic);
-  OS via unattended-upgrades. `release.yml` gains the opi images in W4
-  and the agent tarball as a W5-adjacent release asset.
+  SHA-256-verified release tarball (reusing `update_checker`'s download
+  gates — HEAD-precheck, Content-Length truncation reject, SHA-256
+  verify); OS via unattended-upgrades. **This needs cloud-side work the
+  `.exe` flow does not cover**: `/version` returns exactly
+  `{version, download_url, installer_sha256, commit}`, ALL hard-wired
+  to `EduBotics_Setup.exe` (`routes/version.py:37, :80-83`) — reusing
+  them would point the Pi at the Windows installer. Add OPTIONAL,
+  additive fields `pi_agent_download_url` + `pi_agent_sha256` (old GUIs
+  ignore them), derived the same way as the `.exe` pair (release repo +
+  version + fixed asset name `edubotics-pi-agent.tar.gz`). `release.yml`
+  gains the opi images in W4, the agent tarball as a W5-adjacent
+  release asset, and a W6 extension that hashes the exact attached
+  tarball into a new `PI_AGENT_SHA256` Railway var BEFORE the final
+  `GUI_VERSION` flip — preserving W6's attach-asset-first /
+  advertise-last race-safety and its empty-on-failure (never stale)
+  semantics.
 
 ## 8. Security posture (deliberate, decided)
 
@@ -273,6 +436,12 @@ is ever revisited; nothing in this plan forecloses it.
   transient spikes. No local policy loads (Jetson-only inference) keeps
   the server container's peak well under its cap during recording
   (streaming h264 encode, ~2-3 of 8 cores for 2×640×480@30).
+- **Video decode is PyAV, not torchcodec** (LeRobot 0.5.1 excludes
+  torchcodec on Linux aarch64 by environment marker, §4): recording
+  (encode) is unaffected; dataset EDITS (`delete_episodes` re-encode)
+  run noticeably slower on the Pi — the existing nice'd
+  `edit_worker.py` subprocess design absorbs it (the dashboard stays
+  responsive), edits just take longer.
 - **USB**: one camera on the USB3 port, one on the standalone USB2 port,
   arms on the hub ports. Native default stays **YUYV** —
   `entrypoint_omx.sh`'s own comments (`:79-91`) note `mjpeg2rgb` burns
@@ -285,8 +454,8 @@ is ever revisited; nothing in this plan forecloses it.
 
 | Phase | Scope | Done when |
 |---|---|---|
-| **P1 — Images** | `Dockerfile.arm64cpu`, `PLATFORM=opi`, arm64 manager, CI matrix/retag/parity/size-gate, `docs/arm64_base/README.md` | CI publishes `*-opi:latest` to GHCR+Hub; smoke-test passes arch/size/parity gates; images boot on a bench Pi |
-| **P2 — pi-agent + compose** | Agent port, management API, `docker-compose.opi.yml`, nginx `/api/system` proxy, `EDUBOTICS_LAN_OPEN` | Full wizard→start→record cycle driven purely via `curl` against the API on a bench Pi |
+| **P1 — Images** | `Dockerfile.arm64cpu` (explicit `torch==2.7.0` pin), `PLATFORM=opi` + platform-parameterized flatten, `physical-ai-manager-opi` twin (`nginx.opi.conf` + `Dockerfile.opi`), CI matrix/retag+REPOS/parity/new size-gate, `docs/arm64_base/README.md` | CI publishes `*-opi:latest` to GHCR+Hub; smoke-test passes arch/size/parity gates; images boot on a bench Pi |
+| **P2 — pi-agent + compose** | Agent port, management API, two-tier lifecycle (always-on manager, targeted stop), `docker-compose.opi.yml` (pinned IPAM gateway, bind-host var), nginx `/api/system` proxy, `EDUBOTICS_LAN_OPEN` | Full wizard→start→record cycle driven purely via `curl` against the API on a bench Pi — incl. reboot → manager auto-serves the wizard with the robot tier down |
 | **P3 — System window** | Pi-mode gating, wizard UI, Start/Stopp/Update/Reset/Protokoll, camera previews, host-relative LeaderToggle/RunControls | A student can go from freshly flashed Pi to a recorded + uploaded dataset using only a browser |
 | **P4 — Provisioning + pilot** | `setup.sh` → golden image, labels/QR, teacher docs (VLAN), rig pilot | Pilot checklist in §12 fully green on ≥2 units |
 
@@ -328,6 +497,11 @@ is ever revisited; nothing in this plan forecloses it.
    the student SPA from an HTTPS cloud origin is off the table).
 7. **CI cost**: arm64 runner minutes for a third flavor; acceptable on
    the current plan, monitor after the first releases.
+8. **Power budget**: the 5 Pro is 5 V/5 A USB-C; two UVC cameras + two
+   OpenRB serial boards on a marginal PSU is a classic brown-out source
+   (undervoltage resets mid-recording). Pilot with the official PSU and
+   watch the kernel undervolt/reset logs; arm servo power stays on the
+   arms' own 12 V supplies as today.
 
 ## 13. Repo-rule compliance notes
 
@@ -343,6 +517,12 @@ is ever revisited; nothing in this plan forecloses it.
   numpy/scipy caps replicated.
 - **Rule §6**: all deploys via the existing workflows; opi images ride W4;
   no new manual deploy surfaces.
+- **Lifecycle invariant amendment (sanctioned)**: the always-on manager
+  (`restart: unless-stopped` on `physical_ai_manager` in the **opi
+  compose only**, §5) is a deliberate exception in the same category as
+  the Jetson's — the manager IS the GUI on the Pi. Document it in
+  CLAUDE.md's lifecycle bullet in the landing PR; the robot tier stays
+  `restart: "no"` everywhere, and the student compose is untouched.
 - **CI guards to extend**: `env-forwarding-guard` (new `EDUBOTICS_*` vars
   in compose `environment:` lists), `compose-validate` (validate
   `docker-compose.opi.yml` + its `.s6-keep` mount), `german-strings-lint`

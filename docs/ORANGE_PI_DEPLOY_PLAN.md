@@ -23,7 +23,15 @@
 > `nginx.web.conf.template` / CUDA-gate citation fixes. The
 > **phone-camera-on-usb_cam question REMAINS OPEN** (owner decision
 > pending) — §6 now marks it as such instead of claiming a straight
-> port. This document is the durable spec for the
+> port. **Rev. 4 (2026-07-12)**: school-network permissions worked
+> out — §8 gains the three-tier network model (IT-configured VLAN /
+> own robotics router / kiosk) and the exact IT work order (port
+> table, egress FQDN allowlist, TLS-inspection + proxy exemptions,
+> NAC); product-side: MAC on the case label + blank IP field (§7),
+> LAN IP shown in the System window (§6), a wizard „Netzwerk-Check"
+> agent endpoint (§5/§6), network-aware Pi-mode disconnect wording
+> (§6), and the German IT one-pager as a named P4 deliverable
+> (§7/§10). This document is the durable spec for the
 > Orange-Pi workstream; per-phase throwaway plans still go to `docs/plans/`
 > (gitignored) as usual. When implementation lands, fold the durable
 > invariants into `CLAUDE.md` and convert this file into a runbook in the
@@ -44,7 +52,7 @@ student's Windows PC + WSL2 on the robot side entirely.
 | Decision | Choice |
 |---|---|
 | Discovery of many Pis on one school LAN | **mDNS hostnames + printed labels** (`edubotics-NN.local` via avahi, QR/label on the case). No cloud registry work for Pis. |
-| Student-PC access / control security | **Open LAN binding, no auth.** Ports 80/8080/9090 bound to the LAN. Mitigations: single env switch back to loopback, and deployment docs that require a dedicated robotics VLAN/SSID (see §8). |
+| Student-PC access / control security | **Open LAN binding, no auth.** Ports 80/8080/9090 bound to the LAN. Mitigations: single env switch back to loopback, Host/Origin allowlist on mutating management endpoints, and the §8 three-tier network guide (dedicated VLAN / own robotics router / kiosk) with its IT work order. |
 | Inference | **Classroom Jetson only.** The inference code path is not touched (`inference_manager.py` stays byte-identical; Rule §2 untouched). The Pi records and trains; the existing Jetson connect flow executes policies. |
 
 ## 2. Hardware & OS
@@ -286,11 +294,21 @@ camera-privacy registry check. Guided repairs collapse to udev-rule +
 
 **Management API**, reverse-proxied **same-origin** by the manager's
 nginx at `/api/system/` (works identically on-device and over LAN, no
-CORS/Origin dance): status, scan-arms, camera scan/roles/MJPEG-previews,
+CORS/Origin dance): status (INCLUDING the Pi's LAN IP — reuse the
+Jetson agent's LAN-IP detection, `agent.py:504`; the System window
+displays it, §6), scan-arms, camera scan/roles/MJPEG-previews,
 phone-camera toggle, HF token, start/stop environment, update
 (image pull + agent self-update from a SHA-256-verified release tarball),
 factory reset (double-confirm), Protokoll (SSE, with the existing secret
-redaction), and the Roboter-Studio endpoints preserving the exact
+redaction), a **„Netzwerk-Check"** (tests FROM the Pi the things that
+fail invisibly on school networks: cloud API reachable, GHCR/HF
+reachable, presented TLS certificate chain genuine — a fingerprint
+mismatch means the school's TLS-inspection middlebox is re-signing,
+which breaks pulls/uploads/updater by design — and clock sane/NTP
+synced; each reported as a green/red German line in the wizard, §6.
+This converts the two most baffling field failures — "Updates schlagen
+mit Zertifikatfehler fehl", "Anmeldung läuft ständig ab" — into
+first-glance diagnoses), and the Roboter-Studio endpoints preserving the exact
 `roboter_studio_control.py` JSON contract (`/roboter-studio/status`,
 `/roboter-studio/leader-enable`, `/roboter-studio/leader-disable`,
 busy/ready guards, `.env` rollback on failed restart).
@@ -514,6 +532,17 @@ Feature-for-feature parity with `EduBotics.exe`:
 | „Web-Oberfläche öffnen" | not needed — the user is already in the browser |
 | „Daten zurücksetzen" | identical volume wipe, double-confirm |
 | Protokoll | SSE log panel, secret redaction preserved |
+| — (new, no GUI equivalent) | **Pi-IP-Anzeige**: the System window shows the Pi's current LAN IP prominently (from the status endpoint, §5) — the teacher reads it off the screen during first setup/kiosk and writes it onto the case label's IP field (§7); `http://<ip>/` is the universal fallback on GPO-hardened school PCs |
+| — (new, no GUI equivalent) | **„Netzwerk-Check"**: one button, runs the §5 agent checks, renders green/red German lines (Cloud erreichbar / Registry erreichbar / Zertifikat echt / Uhrzeit synchron) with a one-line German hint per failure (e.g. TLS-Inspektion → „IT: Ausnahme für das Robotik-VLAN nötig, siehe Netzwerk-Anleitung") |
+
+**Network-aware disconnect wording (Pi mode).** The frontend can
+detect one failure signature precisely: robot tier REPORTED RUNNING by
+the agent, but rosbridge (`:9090`) unreachable from the browser —
+that is the port-filtering/VLAN-ACL case, not a crashed stack. In Pi
+mode the StartupGate timeout screen and the heartbeat „Getrennt" state
+must say so („Verbindung zu Port 9090 blockiert? Netzwerk-Anleitung
+prüfen") instead of the Windows-era „Docker prüfen" text, which is
+actively misleading on a Pi.
 
 All student-facing strings in German with literal umlauts (Rule §1;
 `german-strings-lint` covers `[FEHLER]`/`[WARNUNG]`/`[STOPP]` lines).
@@ -529,7 +558,14 @@ All student-facing strings in German with literal umlauts (Rule §1;
   zram, agent + systemd unit (root, `EnvironmentFile=/etc/edubotics/`
   per §5 — the Jetson precedent), the `ip route` overlap check for the
   `ros_net` subnet (§5, records a free range into the `.env`), image
-  pull, print the label/QR for the case.
+  pull, print the label/QR for the case. **The label carries three
+  fields**: the derived hostname (`edubotics-NN.local`), the wired
+  NIC's **MAC address**, and a **blank IP field**. The MAC is the
+  keystone of the IT handoff: with hostname + MAC on the case, the
+  school admin can do DHCP reservations and NAC/802.1X registration
+  (§8) without ever touching a Pi; the teacher fills in the reserved
+  IP once (read off the System window's Pi-IP-Anzeige, §6), and
+  `http://<ip>/` stays true forever.
 - **Phase 2: golden eMMC/NVMe image** („flash → boot → ready"):
   bench-provision one unit, capture, per-unit first boot regenerates
   machine-id (which re-derives `ROS_DOMAIN_ID`), hostname, and secrets
@@ -556,6 +592,13 @@ All student-facing strings in German with literal umlauts (Rule §1;
   `GUI_VERSION` flip — preserving W6's attach-asset-first /
   advertise-last race-safety and its empty-on-failure (never stale)
   semantics.
+- **The German IT one-pager is a NAMED P4 deliverable** (not a
+  footnote of the teacher docs): the exact §8 work order — three-tier
+  model, port table, egress FQDN allowlist, TLS-inspection + proxy
+  exemptions, NAC/MAC registration — formatted so a school admin can
+  execute it as a ticket without a phone call. §8's "docs require a
+  VLAN" is a requirement; this page is the INSTRUCTIONS, and the
+  difference is what makes the ticket succeed on the first pass.
 
 ## 8. Security posture (deliberate, decided)
 
@@ -591,6 +634,79 @@ because they are nearly free:
    `roboter_studio_control.py:209-224` already implements; port it,
    adapted to the mDNS hostname + IP literals (never a `startswith`
    match, per that module's own comment).
+
+### Network setup — three tiers + the exact IT work order
+
+School networks break this deployment in predictable ways (GPO-disabled
+mDNS, Wi-Fi client isolation, inter-VLAN ACLs filtering 8080/9090,
+proxy/PAC interception, NAC/802.1X, TLS inspection, `.local` AD-domain
+collisions). The German IT one-pager (§7, P4 deliverable) ships THREE
+tiers; a pilot must never stall on a slow IT ticket:
+
+**Tier 1 — dedicated robotics VLAN (the recommended permanent
+install).** It is the only variant that fixes every failure class AND
+it is the security boundary the locked no-auth decision already
+requires — the permission fixes come along for free. The literal work
+order for the school admin:
+
+1. New VLAN (e.g. `ROBOTIK`): wired ports for every Pi + the Jetson;
+   a matching SSID mapped into the same VLAN for student PCs (or the
+   ACL of step 3 from the existing student VLAN). **Client/AP
+   isolation OFF** inside it.
+2. **DHCP reservations** for every Pi and the Jetson, keyed to the MAC
+   printed on each case label (§7). The reserved IPs go onto the
+   labels' IP fields.
+3. Inbound (student PCs → robotics VLAN), only if PCs stay on another
+   VLAN — nothing else inbound:
+
+   | Allow | Port | Purpose |
+   |---|---|---|
+   | TCP | 80 | Web app (wizard + UI) |
+   | TCP | 8080 | Camera streams (web_video_server) |
+   | TCP | 9090 | Robot control (rosbridge) |
+   | TCP | 9091 | Jetson inference proxy |
+
+4. Outbound (robotics VLAN → internet), TCP 443 to: `ghcr.io` +
+   `*.githubusercontent.com` + `github.com` (images, agent tarball);
+   `registry-1.docker.io`, `auth.docker.io`,
+   `production.cloudflare.docker.com` (registry fallback);
+   `huggingface.co`, `*.hf.co` (dataset CDN); the Railway cloud-API
+   host; the Supabase project host; OS mirrors (`ports.ubuntu.com` /
+   `armbian.com`) for unattended-upgrades. Plus **NTP** (UDP 123).
+5. **Two exemptions**: NO TLS inspection for this VLAN (re-signed
+   certificates break `docker pull`, HF uploads and the SHA-256
+   updater BY DESIGN — the §5 Netzwerk-Check detects and names this);
+   proxy/PAC bypass on student PCs for the robotics subnet + `*.local`.
+6. If NAC/802.1X is in use: register the Pis'/Jetson's MACs (from the
+   labels) as headless devices.
+7. Optional: mDNS reflector between student VLAN and robotics VLAN
+   (a controller checkbox on UniFi/Aruba/Cisco) so `.local` resolves
+   cross-VLAN — skippable, the IP labels cover discovery.
+
+**Tier 2 — own robotics router (the recommended PILOT setup, and the
+fallback for uncooperative IT).** A dedicated teacher-owned router/AP:
+Pis wired into its LAN ports, student PCs on its SSID, WAN port into
+any school wall jack. On the owned network there is no GPO, no
+isolation, no ACL, no proxy — everything works out of the box, and
+from IT's perspective the entire classroom is ONE outbound-HTTPS
+client (one MAC to register, one TLS-inspection exemption; a 4G/5G
+hotspot on the WAN port removes even that). Caveat: managed student
+PCs may still have `EnableMDNS=0` locally — the IP labels remain the
+universal fallback (trivial DHCP reservations on the owned router).
+P4's pilot SHOULD run on this tier so it is independent of the
+school's ticket queue, then migrate to Tier 1.
+
+**Tier 3 — no network permissions at all (documented emergency
+modes).** (a) Direct ethernet cable PC↔Pi: link-local addressing +
+avahi work on a direct link with zero configuration; recording,
+teleop and Roboter Studio all work, cloud steps wait for an uplink.
+(b) Kiosk: `EDUBOTICS_LAN_OPEN=0` + monitor/keyboard on the Pi —
+exposes nothing to any network, needs only outbound HTTPS for the
+cloud parts (§11's implicit kiosk mode).
+
+What we deliberately do NOT do: fight mDNS on managed student PCs.
+The IP-literal path is first-class (host-relative app, §3; label IP
+field, §7; Pi-IP-Anzeige, §6) and works on every network that routes.
 
 The Jetson JWT proxy (`rosbridge_proxy.py`, `0.0.0.0:9091`, alg-pinned /
 issuer-pinned / owner-matched) remains a proven drop-in if this posture
@@ -629,9 +745,9 @@ is ever revisited; nothing in this plan forecloses it.
 | Phase | Scope | Done when |
 |---|---|---|
 | **P1 — Images** | `Dockerfile.arm64cpu` (explicit `torch==2.7.0` pin), `PLATFORM=opi` + platform-parameterized flatten, `physical-ai-manager-opi` twin (`nginx.opi.conf` + `Dockerfile.opi`, static `/pi-mode.json`, `REACT_APP_BUILD_ID` stamped), CI matrix/retag+REPOS/parity/new size-gate, `docs/arm64_base/README.md` | CI publishes `*-opi:latest` to GHCR+Hub; smoke-test passes arch/size/parity gates; images boot on a bench Pi |
-| **P2 — pi-agent + compose** | Agent port, management API (ACK-early update job, Host/Origin allowlist on mutating endpoints), two-tier lifecycle (always-on manager, targeted stop, no-`down` rule), `docker-compose.opi.yml` (three-way merge checklist, configurable IPAM gateway, bind-host var), nginx `/api/system` proxy (`proxy_buffering off` for SSE/MJPEG), `EDUBOTICS_LAN_OPEN` | Full wizard→start→record cycle driven purely via `curl` against the API on a bench Pi — incl. reboot → manager auto-serves the wizard with the robot tier down |
-| **P3 — System window** | Pi-mode gating (static marker + JSON-guarded probe), **StartupGate carve-out**, wizard UI, Start/Stopp/Update/Reset/Protokoll, camera previews, host-relative LeaderToggle/RunControls | A student can go from freshly flashed Pi to a recorded + uploaded dataset using only a browser — incl. fresh boot: SPA loads, System tab visible, no StartupGate deadlock with the robot tier down |
-| **P4 — Provisioning + pilot** | `setup.sh` → golden image, labels/QR, teacher docs (VLAN), rig pilot | Pilot checklist in §12 fully green on ≥2 units |
+| **P2 — pi-agent + compose** | Agent port, management API (ACK-early update job, Host/Origin allowlist on mutating endpoints, LAN IP in status, „Netzwerk-Check" endpoint), two-tier lifecycle (always-on manager, targeted stop, no-`down` rule), `docker-compose.opi.yml` (three-way merge checklist, configurable IPAM gateway, bind-host var), nginx `/api/system` proxy (`proxy_buffering off` for SSE/MJPEG), `EDUBOTICS_LAN_OPEN` | Full wizard→start→record cycle driven purely via `curl` against the API on a bench Pi — incl. reboot → manager auto-serves the wizard with the robot tier down |
+| **P3 — System window** | Pi-mode gating (static marker + JSON-guarded probe), **StartupGate carve-out**, wizard UI, Start/Stopp/Update/Reset/Protokoll, camera previews, Pi-IP-Anzeige + „Netzwerk-Check" panel, network-aware disconnect wording, host-relative LeaderToggle/RunControls | A student can go from freshly flashed Pi to a recorded + uploaded dataset using only a browser — incl. fresh boot: SPA loads, System tab visible, no StartupGate deadlock with the robot tier down |
+| **P4 — Provisioning + pilot** | `setup.sh` → golden image, labels/QR (hostname + MAC + IP field), teacher docs + the German **IT one-pager** (§8 three tiers + work order), rig pilot (run on Tier-2 own-router per §8, then migrate to Tier 1) | Pilot checklist in §12 fully green on ≥2 units |
 
 ## 11. Non-goals (this round)
 
@@ -665,8 +781,9 @@ is ever revisited; nothing in this plan forecloses it.
 4. **mDNS in the field**: `.local` resolution from managed Windows
    student PCs on the school's actual network — GPO-disabled mDNS
    (`EnableMDNS=0`), client isolation and cross-VLAN are the known
-   failure modes (the VLAN requirement + printed IP-literal fallback
-   in §8 are the mitigations; verify both paths).
+   failure modes (the §8 tier model + printed IP-literal fallback are
+   the mitigations; verify BOTH the `.local` and the `http://<ip>/`
+   path on a managed school PC).
 5. **8 GB headroom**: record a long episode while the manager serves a
    second browser; no OOM kills (watch `pids_limit`/`mem_limit` events).
 6. **Jetson interop**: Pi-served frontend → classroom Jetson `:9091`
@@ -680,6 +797,11 @@ is ever revisited; nothing in this plan forecloses it.
    (undervoltage resets mid-recording). Pilot with the official PSU and
    watch the kernel undervolt/reset logs; arm servo power stays on the
    arms' own 12 V supplies as today.
+9. **Egress on the school's real uplink**: „Netzwerk-Check" (§5/§6)
+   fully green from inside the school network — cloud API, registries,
+   HF CDN reachable; certificate fingerprints genuine (TLS inspection
+   is the silent killer of pulls/uploads/updates); NTP synced. Run it
+   on BOTH the Tier-2 pilot router uplink and the final Tier-1 VLAN.
 
 ## 13. Repo-rule compliance notes
 

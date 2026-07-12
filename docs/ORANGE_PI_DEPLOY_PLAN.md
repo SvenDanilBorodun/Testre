@@ -7,7 +7,23 @@
 > (§5), decided `/api/system` proxy mechanics (§5), decided Pi-mode
 > gating + `physical-ai-manager-opi` twin (§4/§6), explicit torch pin +
 > flatten/CI corrections (§4), agent-update cloud fields (§7), and
-> factual fixes throughout. This document is the durable spec for the
+> factual fixes throughout. **Rev. 3 (2026-07-12)**: second full
+> verification pass (code + PyPI metadata + web, all rev.-2 claims
+> re-checked) — StartupGate carve-out (§6, rev. 2's lifecycle fix was
+> incomplete without it), Pi-mode gating hardened to a baked static
+> marker + JSON-guarded probe (§6), the compose recipe restated as a
+> three-way merge checklist (§5 — the Jetson file is follower-only and
+> would silently drop leader support, the calib volume and the whole
+> recording env surface), `ros_net` subnet made configurable + a
+> provisioning overlap check (§5/§7), SSE/MJPEG proxy-buffering
+> mechanics (§5), update in-flight semantics (§5/§6), agent runtime
+> identity pinned to `/etc/edubotics` (§5/§7), Host/Origin allowlist on
+> mutating endpoints (§8), IP-literal mDNS fallback (§8),
+> `REACT_APP_BUILD_ID` stamping for the opi manager (§4), digest-check /
+> `nginx.web.conf.template` / CUDA-gate citation fixes. The
+> **phone-camera-on-usb_cam question REMAINS OPEN** (owner decision
+> pending) — §6 now marks it as such instead of claiming a straight
+> port. This document is the durable spec for the
 > Orange-Pi workstream; per-phase throwaway plans still go to `docs/plans/`
 > (gitignored) as usual. When implementation lands, fold the durable
 > invariants into `CLAUDE.md` and convert this file into a runbook in the
@@ -88,8 +104,13 @@ Key facts the architecture leans on (all verified):
 - **`ROS_DOMAIN_ID`** is derived per-machine from `/etc/machine-id`
   (hash mod 233) exactly as `jetson_agent/setup.sh:183-184` does. Honest
   rationale: Pis cannot DDS-cross-talk on the LAN **regardless** —
-  `ros_net` is a docker **bridge** network in every compose (no host
-  networking anywhere), so DDS multicast never leaves the host. The
+  `ros_net` is a docker **bridge** network in every DEPLOYMENT compose
+  (student, gpu overlay, Jetson), so DDS multicast never leaves the
+  host. Caveat for precision: the two VENDORED upstream ROBOTIS composes
+  (`open_manipulator/docker/docker-compose.yml:16`,
+  `physical_ai_tools/docker/docker-compose.yml:8,:21`) DO use
+  `network_mode: host` and amd64-tagged images — a Pi bring-up must
+  never start from those files. The
   derivation is kept for fleet-convention consistency and host-side ROS
   tooling, NOT as the isolation mechanism (with 30 rigs mod 233 a
   birthday collision between two Pis is likely anyway — and harmless).
@@ -98,9 +119,15 @@ Key facts the architecture leans on (all verified):
   auth in `rosConnectionManager.js`) is used as-is. While connected to a
   Jetson, `jetsonIncompatible` tabs (Aufnahme/Daten/Roboter Studio,
   `StudentApp.js:269-276`) hide — as today; disconnecting restores them.
-  The CUDA gate at `inference_manager.py:141` (constructed `device='cuda'`
-  at `physical_ai_server.py:744`) is **deliberately left in place** on the
-  Pi: local inference refuses, which matches the decision.
+  The CUDA gate at `inference_manager.py:141` (it lives in
+  `load_policy()`, and the `'cuda'` comes from the DEFAULT parameter at
+  `inference_manager.py:35` — `physical_ai_server.py:744` constructs
+  `InferenceManager()` bare) is **deliberately left in place** on the
+  Pi: local inference refuses, which matches the decision. Side note:
+  `get_available_policies()` also excludes SmolVLA on any aarch64 box
+  (`inference_manager.py:385-386`, written for the Jetson but keyed on
+  `platform.machine()`), which is moot here since inference refuses
+  anyway.
 
 ## 4. Workstream 1 — the `-opi` image flavor
 
@@ -169,13 +196,24 @@ Rockchip. Work items:
    that as a compose bind-mounted full-file override would create an
    out-of-image duplicate of the whole SPA config (a drift pair).
    Instead follow the EXISTING dual-nginx precedent (`nginx.conf` vs
-   `nginx.web.conf` for Railway): add `nginx.opi.conf` + a thin
-   `Dockerfile.opi` in `physical_ai_manager/` — student/web/opi becomes
-   a triple of the established pattern. Thread the new repo through
-   retag and the smoke-test.
+   `nginx.web.conf.template` for Railway — note the Railway file is an
+   envsubst TEMPLATE for `$PORT`; the opi twin mirrors the STATIC
+   `nginx.conf` form, a fixed `:80` needs no template): add
+   `nginx.opi.conf` + a thin `Dockerfile.opi` in
+   `physical_ai_manager/` — student/web/opi becomes a triple of the
+   established pattern. Thread the new repo through retag and the
+   smoke-test. **Two load-bearing details the twin must carry**:
+   (a) stamp a real `REACT_APP_BUILD_ID` — `useVersionCheck`
+   self-disables when the baked buildId is `dev`
+   (`useVersionCheck.js:28,49`) and only `build-images.sh:278-301`
+   injects a real one today; without the same `--build-arg` on the opi
+   build, §5's "SPA self-heals via `/version.json` after an update"
+   story silently never fires; (b) keep the `/version.json` healthcheck
+   (the manager's container health keys on it,
+   `docker-compose.yml:365`).
 5. **CI (`docker-publish.yml`)**: third matrix entry (`platform: opi`,
    `runner: ubuntu-24.04-arm`) in both `build` (`:134-139`) and
-   `smoke-test` (`:495-503`); extend `AMD64_REPOS`/`ARM64_REPOS`
+   `smoke-test` (`:495-507`); extend `AMD64_REPOS`/`ARM64_REPOS`
    (`:274-275`) with the opi repos in `retag` AND the dual-push
    integrity `REPOS` list (`:366`) — two hardcoded repo lists, not one;
    add an **opi size gate** as a NEW step (the existing 11 GB gate —
@@ -201,14 +239,26 @@ platform-neutral brain. Ports/marks from the verified GUI inventory:
 `config_generator.py` (managed `.env` model — `MANAGED_KEYS` at `:24`,
 prefixes `:55`, atomic writes, `HF_TOKEN` deliberately unmanaged with
 `upsert_env_var` as sole writer, def `:245` / sole-writer docstring
-`:249`; env file moves to `~/.config/edubotics/.env`. The module itself
+`:249`; env file moves to **`/etc/edubotics/.env`** — the Jetson
+precedent (`systemd/edubotics-jetson.service` runs as root with
+`EnvironmentFile=/etc/edubotics/jetson.env`), NOT `~/.config`: for a
+root systemd unit `~` is `/root`, and the agent needs the docker
+socket + `/dev` anyway. Pin the identity model with it: the agent runs
+as root like the Jetson agent; the `dialout`/`video` group checks in
+the guided repairs are for interactive debug shells, not the agent.
+The module itself
 is platform-neutral — the Windows bits it must shed live in
 `constants.py`: `%LOCALAPPDATA%` path defaults at `:158/:284/:340`, the
 `sys.platform == "win32"` camera fallback at `:206`, and the
 `sys.executable`-relative `versions.env` walk — the port swaps the
 constants module, not the generator), `docker_manager`'s pull/update/digest logic
-(**flip the digest pre-check from `linux/amd64` — `docker_manager.py:336-365`
-— to arm64**; the Jetson agent already has the arm64 variant),
+(**flip the digest pre-check from `linux/amd64` to arm64 — BOTH code
+paths**: `docker_manager.py:336-380` is only the LEGACY single-digest
+fallback probe; the set-membership machinery is
+`_parse_digest_candidates`/`_get_remote_digest_candidates` at
+`:388-455` with the membership tests at `:560`/`:702`.
+`jetson_agent/agent.py:210-283` already carries the arm64 twins of
+both — reuse those, don't re-port from the GUI),
 `factory_reset` (volume-suffix rm of `ai_workspace`/`huggingface_cache`/
 `edubotics_calib`), `ensure_environment_stopped` (**ported TARGETED,
 not verbatim** — robot tier only, see the lifecycle model below; the
@@ -247,12 +297,30 @@ busy/ready guards, `.env` rollback on failed restart).
 
 **Proxy mechanics (decided).** The agent binds `127.0.0.1:8769` AND the
 compose network's gateway IP — never the LAN NIC. `docker-compose.opi.yml`
-pins `ros_net`'s IPAM subnet/gateway (e.g. `172.28.0.0/24`, gateway
+pins `ros_net`'s IPAM subnet/gateway (default `172.28.0.0/24`, gateway
 `172.28.0.1`) so `nginx.opi.conf` can `proxy_pass http://172.28.0.1:8769/`
 deterministically, with no `extra_hosts: host-gateway` indirection.
+**The subnet is a managed `.env` key** (`${EDUBOTICS_ROS_NET_SUBNET}`
++ derived gateway), not a hardcoded literal: `172.16.0.0/12` is common
+institutional address space, and a school LAN overlapping the pinned
+subnet blackholes container→LAN routing (cloud API unreachable from
+the server container, with baffling symptoms). `setup.sh` (§7) checks
+`ip route` for an overlap at provisioning and records a free range
+into the `.env`. **nginx location details**: the `/api/system/`
+location must set `proxy_buffering off` + a long `proxy_read_timeout`
+— the Protokoll SSE stream and the MJPEG camera previews both ride
+this proxy, and nginx's defaults (buffering on, 60 s read timeout)
+stall the former and freeze the latter.
 Boot-ordering caveat: the gateway interface only exists once compose has
 created `ros_net` — the agent binds its gateway listener AFTER its
-boot-time manager `up` (or retries the bind), not at process start. Two
+boot-time manager `up` (or retries the bind), not at process start.
+The same listener dies whenever `ros_net` is DELETED, so two agent
+rules follow: (a) the agent NEVER runs `compose down` — stop + `rm -f`
+only, for every tier (the robot-tier carve-out below generalizes; the
+network must survive every lifecycle operation, including factory
+reset: stop robot tier → stop+rm manager → volume rm → recreate
+manager, nothing `down`s); (b) interface-gone is a rebind trigger,
+not a fatal error. Two
 properties fall out: (1) the agent API is reachable from the browser
 ONLY through the manager's same-origin `/api/system` proxy, so with
 `EDUBOTICS_LAN_OPEN=0` the management surface shrinks with the rest of
@@ -272,14 +340,17 @@ Resolution:
 - **Manager tier (always-on)**: `physical_ai_manager` gets
   `restart: unless-stopped` in `docker-compose.opi.yml` and is
   additionally brought up by the pi-agent at boot (the
-  `up -d --no-deps physical_ai_manager` pattern from
-  `docker_manager.start_cloud_only`, `:1163-1188`). This is a
+  `up -d --force-recreate --no-deps physical_ai_manager` pattern from
+  `docker_manager.start_cloud_only`, `:1163-1190`, invocation `:1175`). This is a
   deliberate, documented exception to the `restart: "no"` invariant —
   same category as the Jetson's sanctioned `unless-stopped` — and the
   opi compose therefore DROPS the manager's `depends_on:
   physical_ai_server`: the manager must serve the wizard while the
-  server is down (the SPA already tolerates a dead rosbridge via
-  StartupGate/heartbeat). Graduate this exception into CLAUDE.md's
+  server is down. NOTE (rev. 3): serving is only half the story —
+  `StartupGate` currently full-screen-BLOCKS the served SPA until
+  rosbridge connects, so the §6 StartupGate carve-out is a REQUIRED
+  companion to this lifecycle model, not an optional polish item.
+  Graduate this exception into CLAUDE.md's
   lifecycle bullet when the feature lands (see §13).
 - **Robot tier (student-owned)**: `open_manipulator` +
   `physical_ai_server` stay `restart: "no"` and come up only on
@@ -303,14 +374,59 @@ Resolution:
 - **Updates recreate the manager LAST**, after the robot tier is down
   and images are pulled. Recreating the manager drops the student's SPA
   for a few seconds — expected and self-healing: `useVersionCheck`
-  polls `/version.json` and reloads on the new buildId. Document the
-  blip, don't fight it.
+  polls `/version.json` and reloads on the new buildId (which is why
+  §4's `REACT_APP_BUILD_ID` stamping is load-bearing). Document the
+  blip, don't fight it. **In-flight semantics**: the update POST and
+  its SSE progress themselves ride THROUGH the manager being
+  recreated (and the agent's own self-update restart 502s the proxy
+  for a moment) — so the update endpoint ACKs early with a job id and
+  runs asynchronously, and the System window re-attaches by polling
+  job status; a long-lived in-flight response would be severed
+  mid-update and read as a failure.
 
-**`docker-compose.opi.yml`** — derived from the Jetson compose minus its
-NVIDIA lines (`docker-compose.jetson.yml:24`, `:83` — both
-`runtime: nvidia`), plus the manager as a third service (taken from the
-student compose, with `restart` and `depends_on` adjusted per the
-lifecycle model above):
+**`docker-compose.opi.yml`** — a **three-way merge, NOT a Jetson
+derivative**. The Jetson file is an inference-only, follower-only
+stack; taken literally, "Jetson minus NVIDIA" silently drops leader
+support, calibration persistence and the whole recording/Roboter-Studio
+env surface. Explicit merge checklist:
+
+- **From the Jetson compose**: the udev-symlink device style
+  (`/dev/edubotics-*`), the `CMD`/bash healthcheck shape — it is
+  already the pure-`usb_cam` model, whereas the student file's
+  healthcheck inline-branches on the WSL2 `uname`, which a native-Linux
+  Pi never wants. DROP `runtime: nvidia`
+  (`docker-compose.jetson.yml:24`, `:83`) — and note NVIDIA wiring
+  lives in TWO places: those inline lines AND the separate
+  `docker-compose.gpu.yml` overlay, which must simply never be layered
+  on the Pi.
+- **From the student compose**: the ~50-entry `EDUBOTICS_*`
+  `environment:` forwarding lists (the Jetson server forwards ONLY
+  `ROS_DOMAIN_ID` + `HF_TOKEN` — recording/calibration/collision/
+  workflow vars all fail-open without the student lists); the volume
+  set `ai_workspace`/`huggingface_cache`/**`edubotics_calib`** (the
+  Jetson file has `jetson_*` names and NO calib volume — miss it and
+  every container recreate wipes Roboter-Studio calibration, and the
+  factory-reset volume-suffix rm above mismatches); the `.env`-driven
+  reference style (`${ROS_DOMAIN_ID:-30}`, `HF_TOKEN=${HF_TOKEN:-}` —
+  the Jetson file's bare `- ROS_DOMAIN_ID` host-passthrough and its
+  `HF_TOKEN=${EDUBOTICS_HF_TOKEN}` form would silently detach the
+  compose from the agent-managed `.env`; the ported `config_generator`
+  writes the key `HF_TOKEN`); **leader support**:
+  `LEADER_PORT=${LEADER_PORT}` re-added and `EDUBOTICS_FOLLOWER_ONLY`
+  `.env`-driven, never hardcoded — the Jetson file pins `=1` and has
+  no leader device at all, and the Roboter-Studio leader toggle
+  DEPENDS on regenerating exactly that key; tzdata ro-mounts,
+  `.s6-keep` mount, `pids_limit`, `SYS_NICE`/rtprio.
+- **New in this file**: the manager as a third service (per the
+  lifecycle model above), the `${EDUBOTICS_BIND_HOST:-…}` port
+  binding, the pinned-but-configurable `ros_net` IPAM block (proxy
+  mechanics above), and `EDUBOTICS_CAMERA_SOURCE=usb_cam` set
+  EXPLICITLY (don't lean on the entrypoint's non-WSL auto-detect
+  alone) plus the camera tuning vars
+  (`EDUBOTICS_CAMERA_PIXEL_FORMAT/_WIDTH/_HEIGHT/_FRAMERATE` — absent
+  from the Jetson file).
+
+Remaining parameters:
 
 - Images `${REGISTRY}/…-opi:${IMAGE_TAG}`; same `${REGISTRY}`/fallback
   interpolation and `.env` interface as today.
@@ -319,9 +435,9 @@ lifecycle model above):
   board). **memlock cut from 8428281856 (~7.85 GB, present in both
   existing composes) to 2 GB**; keep `SYS_NICE` + rtprio for the 100 Hz
   loop. zram swap is mandatory at provisioning.
-- Healthchecks, tzdata ro-mounts, `.s6-keep` mount, `ros_net`, and the
-  ~50-entry `EDUBOTICS_*` `environment:` forwarding lists carried over —
-  every new env var must join those lists (`env-forwarding-guard`).
+- Every new env var must join the `environment:` forwarding lists
+  (`env-forwarding-guard` — and the opi compose joins the guard's
+  hardcoded compose-file list, §13).
 - **Ports**: `80`, `8080`, `9090` bound to the LAN per the locked
   decision, behind one managed env switch (see §8). Note today's compose
   hardcodes literal `127.0.0.1:` on every `ports:` line
@@ -342,29 +458,59 @@ and the toggle silently self-hides today).
 
 ## 6. Workstream 3 — the React „System"-Fenster (the GUI, in the browser)
 
-A new window/tab, visible only in Pi mode. **Gating mechanism DECIDED:
-a runtime probe of `/api/system/status`.** The "nginx appends a URL
-param, mirroring `?cloud=1`" idea is dropped as unsound: today the
-NATIVE GUI builds the `?cloud=1&_v=…` query string client-side before
-navigation (`gui_app.py:2437-2440`) — a server cannot "append a param"
-to an SPA load without a 302 redirect (loop-guard, address-bar churn)
-or HTML injection; there is nothing to mirror. The probe instead
-follows the app's EXISTING async precedent: tabs are already gated on
-async Redux state (`jetsonConnected`, `StudentApp.js:275-276`) — a
-one-shot boot probe of `/api/system/status` sets a `piMode` flag, the
-System tab declares `piOnly: true`, and the same `.filter()` chain
-hides it until the probe resolves (progressive reveal, exactly like the
-Jetson-gated tabs). Feature-for-feature parity with `EduBotics.exe`:
+A new window/tab, visible only in Pi mode. **Gating mechanism DECIDED
+(hardened in rev. 3): a baked static marker + a live agent probe.**
+The "nginx appends a URL param, mirroring `?cloud=1`" idea is dropped
+as unsound: today the NATIVE GUI builds the `?cloud=1&_v=…` query
+string client-side before navigation (`gui_app.py:2437-2440`) — a
+server cannot "append a param" to an SPA load without a 302 redirect
+(loop-guard, address-bar churn) or HTML injection; there is nothing to
+mirror. Rev. 2's "one-shot probe of `/api/system/status`" had two
+traps: (1) on a NON-Pi rig the probe does NOT cleanly fail —
+`nginx.conf:32-34`'s SPA catch-all (`try_files $uri /index.html`)
+answers `GET /api/system/status` with **200 + index.html**, so a bare
+`res.ok` check would flip Pi mode on every Windows rig; any probe must
+require valid JSON (the exact defensive pattern
+`useVersionCheck.js:16-23` already uses against the same
+fallthrough). (2) The agent binds its gateway listener only AFTER its
+boot-time manager `up` (§5) — a one-shot probe racing that window
+502s, and the System tab would never appear until a manual reload.
+Resolution: `nginx.opi.conf` serves a **static `/pi-mode.json` baked
+into the opi manager image** — the image IS the Pi flavor, so
+"is this a Pi" is deterministic and independent of agent health — and
+that flag gates the System tab (`piOnly: true`); the live
+`/api/system/status` probe (retried with backoff, never one-shot)
+feeds agent-health/readiness INSIDE the System window. Tabs are
+already gated on async Redux state (`jetsonConnected`,
+`StudentApp.js:275-276`) — the same `.filter()` chain hides the tab
+until the marker resolves (progressive reveal, exactly like the
+Jetson-gated tabs).
+
+**StartupGate carve-out (REQUIRED — rev. 2's lifecycle fix is
+incomplete without it).** `StartupGate.js:80-207` renders a
+full-screen blocking overlay (`fixed inset-0 z-50`) until rosbridge
+connects; the only bypass today is `isCloudOnlyMode()`. On a freshly
+booted Pi — manager up, robot tier down BY DESIGN (§5) — the student
+gets a spinner, then the 90 s "check Docker" screen, and can never
+reach the System tab to press „Umgebung starten": the §5
+chicken-and-egg survives one layer up. In Pi mode StartupGate must not
+block globally — let the System tab render and gate only the
+robot-dependent tabs (or lift the overlay whenever Pi mode is set and
+the robot tier is intentionally down). Ordering constraint: the
+Pi-mode flag must resolve BEFORE StartupGate decides to block — the
+static `/pi-mode.json` marker above makes that cheap and race-free.
+
+Feature-for-feature parity with `EduBotics.exe`:
 
 | GUI today | System window |
 |---|---|
 | Modus (cloud-only checkbox) | kept — on the Pi the manager is ALWAYS up (§5 lifecycle), so cloud-only reduces to "skip the robot tier + the hardware gate" |
 | Schritt A/B „Arme scannen" + guided repair | scan via scanner container + `identify_arm.py`; repairs = udev/group checks; leader/follower ports persisted as managed keys; fast-rehydrate on revisit |
 | Schritt C Kameras: Scan, Rollen (Greifer/Szene), Vorschau | v4l2 by-id/by-path enumeration incl. identical-serial dedup; MJPEG `<img>` previews from the agent; previews stop before the stack claims devices |
-| Handy als 3. Kamera (:8444) | ported as-is (`0.0.0.0:8444` HTTPS, openssl cert) |
+| Handy als 3. Kamera (:8444) | **⚠ OFFEN — owner decision pending, do NOT implement in P3 until decided.** The receiver itself ports cleanly (`0.0.0.0:8444` HTTPS, openssl cert), but on the Pi's `usb_cam` path there is NO consumer: `entrypoint_omx.sh` starts `camera_ingest_node.py` only in the `native_bridge` branch (`:528/:535`), so phone frames reach no ROS topic. The ingest node is a TCP SERVER the Windows GUI dials into at `127.0.0.1:5557` — a working Pi port would need an agent-side sender AND the ingest node running beside `usb_cam`. Note the phone is preview-only even on Windows (recording/inference out of scope per `phone_camera.py`'s own docstring). Options when decided: drop from Pi v1, or run the ingest node alongside `usb_cam` with an agent-side sender. |
 | Schritt D HF-Token | same upsert, same „✓ Token gespeichert" semantics |
 | „Umgebung starten"/„Stoppen" + start-gate | same gating (prerequisites ∧ both arms identified ∨ cloud-only) |
-| Update-Gate | cloud `/version` check (needs the new `pi_agent_*` fields, §7); image pulls via digest pre-check + agent tarball self-update replace the `.exe` download; manager recreated last — brief SPA reload, `useVersionCheck` self-heals |
+| Update-Gate | cloud `/version` check (needs the new `pi_agent_*` fields, §7); image pulls via digest pre-check + agent tarball self-update replace the `.exe` download; manager recreated last — brief SPA reload, `useVersionCheck` self-heals (requires the §4 buildId stamp); the update POST/SSE ride through the manager being recreated — agent ACKs early with a job id, UI re-attaches by polling (§5) |
 | „Web-Oberfläche öffnen" | not needed — the user is already in the browser |
 | „Daten zurücksetzen" | identical volume wipe, double-confirm |
 | Protokoll | SSE log panel, secret redaction preserved |
@@ -377,9 +523,13 @@ All student-facing strings in German with literal umlauts (Rule §1;
 - **Phase 1: `pi_agent/setup.sh`**, mirroring `jetson_agent/setup.sh`
   minus its NVIDIA hard-checks (`setup.sh:40-46`): install pinned Docker,
   udev rules (ROBOTIS VID `2F5D` symlinks — reuse
-  `jetson_agent/udev/99-edubotics-robotis.rules`), avahi + hostname
-  assignment (`edubotics-NN`), zram, agent + systemd unit, image pull,
-  print the label/QR for the case.
+  `jetson_agent/udev/99-edubotics-robotis.rules` **extended with a
+  leader symlink**: the Jetson rules map only `edubotics-follower`,
+  the Pi has both arms), avahi + hostname assignment (`edubotics-NN`),
+  zram, agent + systemd unit (root, `EnvironmentFile=/etc/edubotics/`
+  per §5 — the Jetson precedent), the `ip route` overlap check for the
+  `ros_net` subnet (§5, records a free range into the `.env`), image
+  pull, print the label/QR for the case.
 - **Phase 2: golden eMMC/NVMe image** („flash → boot → ready"):
   bench-provision one unit, capture, per-unit first boot regenerates
   machine-id (which re-derives `ROS_DOMAIN_ID`), hostname, and secrets
@@ -412,7 +562,7 @@ All student-facing strings in German with literal umlauts (Rule §1;
 With open LAN binding and no auth, **anyone on the same network segment
 can drive any arm, watch every camera, and call the management API
 (including Stoppen and Daten zurücksetzen) on any rig**. This was an
-explicit product decision (2026-07-11). Two mitigations ship anyway
+explicit product decision (2026-07-11). Three mitigations ship anyway
 because they are nearly free:
 
 1. **One env switch**: `EDUBOTICS_LAN_OPEN` (managed key, default `1` on
@@ -424,7 +574,23 @@ because they are nearly free:
    robotics VLAN/SSID** — which also serves mDNS reliability: `.local`
    resolution across VLANs or client-isolated Wi-Fi is exactly where mDNS
    fails, so the isolation requirement carries both the safety and the
-   discovery story. Wired ethernet for the Pis is recommended.
+   discovery story. Wired ethernet for the Pis is recommended. Because
+   the app is fully host-relative (§3), **`http://<ip-address>/` works
+   as the discovery fallback** wherever mDNS is GPO-disabled
+   (`EnableMDNS=0` is common Windows hardening on managed school PCs)
+   — the teacher docs print the IP-literal path next to the `.local`
+   name.
+3. **Host/Origin allowlist on MUTATING `/api/system` endpoints**
+   (does NOT touch the open-LAN decision): with no auth, any web page
+   a student's browser visits — anywhere on the internet — can fire a
+   drive-by `POST http://edubotics-NN.local/api/system/factory-reset`
+   as a no-cors cross-site request from inside the LAN. Rejecting
+   state-changing requests whose `Host`/`Origin` is not the Pi itself
+   stops hostile WEB PAGES while leaving LAN peers (the accepted risk)
+   untouched — the same exact-host check
+   `roboter_studio_control.py:209-224` already implements; port it,
+   adapted to the mDNS hostname + IP literals (never a `startswith`
+   match, per that module's own comment).
 
 The Jetson JWT proxy (`rosbridge_proxy.py`, `0.0.0.0:9091`, alg-pinned /
 issuer-pinned / owner-matched) remains a proven drop-in if this posture
@@ -445,18 +611,26 @@ is ever revisited; nothing in this plan forecloses it.
 - **USB**: one camera on the USB3 port, one on the standalone USB2 port,
   arms on the hub ports. Native default stays **YUYV** —
   `entrypoint_omx.sh`'s own comments (`:79-91`) note `mjpeg2rgb` burns
-  ~60 % of an ARM core per stream, so it is the *fallback* (existing
+  ~60 % of an ARM core, so it is the *fallback* (existing
   `EDUBOTICS_CAMERA_PIXEL_FORMAT` env knob), not the default, if a rig's
   port layout forces both cameras onto one USB2 bus (2×YUYV@640×480@30
   ≈ 35 MB/s would saturate it).
+- **h264 encode is CPU x264 — by constraint, not choice.** Mainline
+  ffmpeg has NO rkmpp H.264 *encoder* (only RK3588 *decode* was
+  mainlined, 2026-02); hardware encode exists solely via the
+  out-of-tree `nyanmisaka/ffmpeg-rockchip` fork, which needs the BSP
+  kernel plus `/dev/mpp_service`/`/dev/rga` passthrough into the
+  container. That fork is the documented escape hatch if pilot gate
+  §12.2 (thermals under sustained 2-stream encode) fails — not part
+  of this round.
 
 ## 10. Phases & acceptance criteria
 
 | Phase | Scope | Done when |
 |---|---|---|
-| **P1 — Images** | `Dockerfile.arm64cpu` (explicit `torch==2.7.0` pin), `PLATFORM=opi` + platform-parameterized flatten, `physical-ai-manager-opi` twin (`nginx.opi.conf` + `Dockerfile.opi`), CI matrix/retag+REPOS/parity/new size-gate, `docs/arm64_base/README.md` | CI publishes `*-opi:latest` to GHCR+Hub; smoke-test passes arch/size/parity gates; images boot on a bench Pi |
-| **P2 — pi-agent + compose** | Agent port, management API, two-tier lifecycle (always-on manager, targeted stop), `docker-compose.opi.yml` (pinned IPAM gateway, bind-host var), nginx `/api/system` proxy, `EDUBOTICS_LAN_OPEN` | Full wizard→start→record cycle driven purely via `curl` against the API on a bench Pi — incl. reboot → manager auto-serves the wizard with the robot tier down |
-| **P3 — System window** | Pi-mode gating, wizard UI, Start/Stopp/Update/Reset/Protokoll, camera previews, host-relative LeaderToggle/RunControls | A student can go from freshly flashed Pi to a recorded + uploaded dataset using only a browser |
+| **P1 — Images** | `Dockerfile.arm64cpu` (explicit `torch==2.7.0` pin), `PLATFORM=opi` + platform-parameterized flatten, `physical-ai-manager-opi` twin (`nginx.opi.conf` + `Dockerfile.opi`, static `/pi-mode.json`, `REACT_APP_BUILD_ID` stamped), CI matrix/retag+REPOS/parity/new size-gate, `docs/arm64_base/README.md` | CI publishes `*-opi:latest` to GHCR+Hub; smoke-test passes arch/size/parity gates; images boot on a bench Pi |
+| **P2 — pi-agent + compose** | Agent port, management API (ACK-early update job, Host/Origin allowlist on mutating endpoints), two-tier lifecycle (always-on manager, targeted stop, no-`down` rule), `docker-compose.opi.yml` (three-way merge checklist, configurable IPAM gateway, bind-host var), nginx `/api/system` proxy (`proxy_buffering off` for SSE/MJPEG), `EDUBOTICS_LAN_OPEN` | Full wizard→start→record cycle driven purely via `curl` against the API on a bench Pi — incl. reboot → manager auto-serves the wizard with the robot tier down |
+| **P3 — System window** | Pi-mode gating (static marker + JSON-guarded probe), **StartupGate carve-out**, wizard UI, Start/Stopp/Update/Reset/Protokoll, camera previews, host-relative LeaderToggle/RunControls | A student can go from freshly flashed Pi to a recorded + uploaded dataset using only a browser — incl. fresh boot: SPA loads, System tab visible, no StartupGate deadlock with the robot tier down |
 | **P4 — Provisioning + pilot** | `setup.sh` → golden image, labels/QR, teacher docs (VLAN), rig pilot | Pilot checklist in §12 fully green on ≥2 units |
 
 ## 11. Non-goals (this round)
@@ -474,7 +648,9 @@ is ever revisited; nothing in this plan forecloses it.
   `EDUBOTICS_LAN_OPEN=0` + a local browser, but no packaged
   autostart/kiosk config this round).
 - **Phone-camera recording integration** (unchanged from the existing
-  parked item — `camera_topic_list` rework).
+  parked item — `camera_topic_list` rework). Distinct from this
+  non-goal, the phone-PREVIEW-on-Pi question (§6 table) is **OPEN,
+  not decided** — neither committed nor ruled out this round.
 - **Offline installs** — the Pi path is online-only, like the product.
 
 ## 12. Risks & rig-validation checklist (pilot gates)
@@ -487,8 +663,10 @@ is ever revisited; nothing in this plan forecloses it.
 3. **BSP kernel quirks**: uvcvideo timestamping and cdc_acm stability on
    the chosen Armbian/BSP kernel; pin the known-good OS image version.
 4. **mDNS in the field**: `.local` resolution from managed Windows
-   student PCs on the school's actual network (the VLAN requirement in §8
-   is the fallback).
+   student PCs on the school's actual network — GPO-disabled mDNS
+   (`EnableMDNS=0`), client isolation and cross-VLAN are the known
+   failure modes (the VLAN requirement + printed IP-literal fallback
+   in §8 are the mitigations; verify both paths).
 5. **8 GB headroom**: record a long episode while the manager serves a
    second browser; no OOM kills (watch `pids_limit`/`mem_limit` events).
 6. **Jetson interop**: Pi-served frontend → classroom Jetson `:9091`
@@ -523,7 +701,11 @@ is ever revisited; nothing in this plan forecloses it.
   the Jetson's — the manager IS the GUI on the Pi. Document it in
   CLAUDE.md's lifecycle bullet in the landing PR; the robot tier stays
   `restart: "no"` everywhere, and the student compose is untouched.
-- **CI guards to extend**: `env-forwarding-guard` (new `EDUBOTICS_*` vars
-  in compose `environment:` lists), `compose-validate` (validate
-  `docker-compose.opi.yml` + its `.s6-keep` mount), `german-strings-lint`
-  (pi-agent strings), `shell-lint` (`pi_agent/setup.sh`).
+- **CI guards to extend** (all four are HARDCODED path lists, verified
+  — none picks up new dirs/files automatically): `env-forwarding-guard`
+  (add `docker-compose.opi.yml` to its compose-file union; new
+  `EDUBOTICS_*` vars join the `environment:` lists),
+  `compose-validate` (validate `docker-compose.opi.yml` + its
+  `.s6-keep` mount), `german-strings-lint` (add `robotis_ai_setup/pi_agent/`
+  to its 3-directory grep list), `shell-lint` (add `pi_agent/setup.sh`
+  to its 6-script list).

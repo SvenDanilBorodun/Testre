@@ -28,6 +28,7 @@ import EditDatasetPage from './pages/EditDatasetPage';
 import WorkshopPage from './pages/WorkshopPage';
 import SystemPage from './pages/SystemPage';
 import CollisionModal from './components/CollisionModal';
+import PiUpdateGate from './components/PiUpdateGate';
 import StartupGate from './components/StartupGate';
 import { LogoMark } from './components/EbUI';
 import packageJson from '../package.json';
@@ -478,6 +479,11 @@ function StudentApp() {
           })}
         </nav>
       </div>
+      {/* Orange Pi forced-update gate: a non-closable modal shown at startup when
+          the Pi is behind the latest release (parity with the Windows GUI's
+          _check_prerequisites). Self-gates on piMode — renders nothing off a Pi.
+          Mounted before CollisionModal so the safety e-stop always stacks on top. */}
+      <PiUpdateGate />
       {/* Teleop force/collision e-stop: blocking overlay shown whenever the server reports a
           collision-stop (phase=COLLISION). Mounted globally so it covers every page. */}
       <CollisionModal />

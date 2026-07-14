@@ -187,6 +187,15 @@ class TestRouting(_ServerBase):
         self.assertEqual(code, 404)
         self.assertFalse(payload["ok"])
 
+    def test_update_check_routes(self):
+        # GET /update/check reaches handle_update_check (read-only; open GET).
+        with patch.object(agent.update_checker, "check_for_agent_update",
+                          return_value={"version": "9.9.9", "download_url": "u", "sha256": ""}):
+            code, payload = self._get("/update/check")
+        self.assertEqual(code, 200)
+        self.assertTrue(payload["update_available"])
+        self.assertEqual(payload["latest_version"], "9.9.9")
+
     def test_post_cross_site_origin_rejected_before_side_effect(self):
         # A drive-by POST from a hostile page must be refused 403 WITHOUT the
         # lifecycle side effect firing.
@@ -346,6 +355,60 @@ class TestUpdateJob(unittest.TestCase):
         code, payload = self.app.handle_update_status("nope")
         self.assertEqual(code, 404)
         self.assertFalse(payload["ok"])
+
+
+# ── Read-only update-availability probe (/update/check) ──────────────────────
+
+
+class TestUpdateCheck(unittest.TestCase):
+    def setUp(self):
+        self.app = agent.AgentApp()
+
+    def test_available_reports_latest_version(self):
+        upd = {"version": "9.9.9", "download_url": "http://x/agent.tgz", "sha256": "ab" * 32}
+        with patch.object(agent.update_checker, "check_for_agent_update",
+                          return_value=upd):
+            code, payload = self.app.handle_update_check()
+        self.assertEqual(code, 200)
+        self.assertTrue(payload["update_available"])
+        self.assertEqual(payload["latest_version"], "9.9.9")
+        self.assertEqual(payload["current_version"], agent.APP_VERSION)
+
+    def test_not_available_reports_false(self):
+        with patch.object(agent.update_checker, "check_for_agent_update",
+                          return_value=None):
+            code, payload = self.app.handle_update_check()
+        self.assertEqual(code, 200)
+        self.assertFalse(payload["update_available"])
+        self.assertEqual(payload["latest_version"], "")
+
+    def test_cloud_error_reports_false_never_raises(self):
+        # The handler must fail closed (no raise) if the cloud probe errors.
+        with patch.object(agent.update_checker, "check_for_agent_update",
+                          side_effect=RuntimeError("cloud down")):
+            code, payload = self.app.handle_update_check()
+        self.assertEqual(code, 200)
+        self.assertFalse(payload["update_available"])
+
+    def test_result_is_cached_within_ttl(self):
+        # A poll storm must NOT re-hit the 5 s cloud /version fetch: the second
+        # call within the TTL is served from cache (checker called ONCE).
+        upd = {"version": "9.9.9", "download_url": "http://x/agent.tgz", "sha256": ""}
+        with patch.object(agent.update_checker, "check_for_agent_update",
+                          return_value=upd) as chk:
+            first = self.app.handle_update_check()
+            second = self.app.handle_update_check()
+        self.assertEqual(chk.call_count, 1)
+        self.assertEqual(first, second)
+        self.assertTrue(second[1]["update_available"])
+
+    def test_force_bypasses_cache(self):
+        upd = {"version": "9.9.9", "download_url": "http://x/agent.tgz", "sha256": ""}
+        with patch.object(agent.update_checker, "check_for_agent_update",
+                          return_value=upd) as chk:
+            self.app.handle_update_check()          # populates cache
+            self.app.handle_update_check(force=True)  # bypasses it
+        self.assertEqual(chk.call_count, 2)
 
 
 # ── Netzwerk-Check ───────────────────────────────────────────────────────────

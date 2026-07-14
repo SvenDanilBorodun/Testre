@@ -113,6 +113,15 @@ _MAX_BODY_BYTES = 256 * 1024
 # Recent-log ring depth for the Protokoll SSE panel.
 _LOG_RING_MAXLEN = 800
 
+# Cache TTL for the read-only /update/check availability probe. A newly booted
+# Pi serves MANY student browsers, and each one polls this endpoint (the forced
+# PiUpdateGate), so the cloud `/version` call it makes (a 5 s-timeout network
+# fetch) is memoised for this long — a poll storm reads the cache instead of
+# hammering the cloud. Deliberately a plain module constant (an EDUBOTICS_* env
+# NAME would trip ci.yml::env-forwarding-guard); the check is read-only and needs
+# no per-rig override.
+UPDATE_CHECK_TTL_S = 600
+
 # Netzwerk-Check probe hosts. GHCR + Docker Hub break image pulls; huggingface.co
 # breaks dataset upload / model download; the cloud API host breaks login/updates.
 _HF_HOST = "huggingface.co"
@@ -307,6 +316,13 @@ class AgentApp:
         # serializes behind the first on _lifecycle_lock (wasteful) or a 2nd
         # agent-self-update apply. Guarded by _update_lock.
         self._update_busy = False
+
+        # Cached /update/check result (the read-only availability probe the
+        # forced PiUpdateGate polls). `None` or `(monotonic_ts, result_dict)`,
+        # guarded by its own lock so a poll storm can't repeat the 5 s cloud
+        # /version fetch — see handle_update_check + UPDATE_CHECK_TTL_S.
+        self._update_check_lock = threading.Lock()
+        self._update_check_cache: Optional[tuple] = None
 
         # Phone-camera receiver (preview-only backend; OPEN — no ROS republish).
         # _phone_lock guards the check-then-set on _phone_server so two enable
@@ -744,6 +760,51 @@ class AgentApp:
                 # gone; the UI treats 404 as "reconnecting after update".
                 return 404, {"ok": False, "message": "Auftrag nicht gefunden."}
             return 200, dict(job)
+
+    # ── GET: /update/check (read-only availability probe) ────────────────────
+
+    def handle_update_check(self, force: bool = False) -> "tuple[int, dict]":
+        """Report whether the cloud advertises a NEWER pi-agent release.
+
+        This is the Pi's parity for the Windows GUI's ``_check_prerequisites``
+        first step (``update_checker.check_for_update`` → the forced modal): the
+        React ``PiUpdateGate`` polls this and, on ``update_available``, forces
+        the update modal before the student continues.
+
+        Read-ONLY: it NEVER triggers the update (``POST /update`` is the sole
+        trigger) and NEVER raises out of the handler — any error (offline, cloud
+        not advertising the Pi fields yet) reports ``update_available: false``,
+        the same backward-compatible posture the GUI takes. The result is cached
+        for ``UPDATE_CHECK_TTL_S`` so many student browsers polling at once don't
+        each incur the 5 s cloud ``/version`` fetch; ``force`` bypasses the cache
+        (a manual re-check). The cloud call runs OUTSIDE the cache lock so no
+        caller ever blocks waiting on another's network fetch.
+        """
+        now = time.monotonic()
+        with self._update_check_lock:
+            cached = self._update_check_cache
+            if not force and cached is not None and (now - cached[0]) < UPDATE_CHECK_TTL_S:
+                return 200, dict(cached[1])
+
+        update_available = False
+        latest_version = ""
+        try:
+            upd = update_checker.check_for_agent_update(APP_VERSION, UPDATE_API_URL)
+            if upd:
+                update_available = True
+                latest_version = str(upd.get("version") or "")
+        except Exception:  # noqa: BLE001 — the handler must never raise (fail closed)
+            update_available = False
+            latest_version = ""
+
+        result = {
+            "update_available": update_available,
+            "current_version": APP_VERSION,
+            "latest_version": latest_version,
+        }
+        with self._update_check_lock:
+            self._update_check_cache = (time.monotonic(), result)
+        return 200, dict(result)
 
     def _run_update_job(self, job_id: str) -> None:
         """Worker for the async update. Order (deploy plan §5): stop robot tier →
@@ -1280,6 +1341,10 @@ class AgentApp:
                     self._send_json(*app.handle_netzwerk_check())
                 elif path == "/roboter-studio/status":
                     self._send_json(*app.handle_rs_status())
+                elif path == "/update/check":
+                    force = (query.get("force") or query.get("refresh")
+                             or [""])[0] in ("1", "true", "yes")
+                    self._send_json(*app.handle_update_check(force=force))
                 elif path.startswith("/update/status/"):
                     job_id = path[len("/update/status/"):]
                     self._send_json(*app.handle_update_status(job_id))

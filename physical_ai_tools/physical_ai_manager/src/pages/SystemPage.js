@@ -22,6 +22,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import toast from 'react-hot-toast';
 import { Card, Btn, Pill, SectionHeader } from '../components/EbUI';
 import { usePiMode } from '../utils/piMode';
+import { useAgentUpdate } from '../hooks/useAgentUpdate';
 
 // ── same-origin agent fetch helper ───────────────────────────────────────────
 
@@ -85,8 +86,17 @@ export default function SystemPage() {
   const [startingEnv, setStartingEnv] = useState(false);
   const [stoppingEnv, setStoppingEnv] = useState(false);
 
-  const [updating, setUpdating] = useState(false);
-  const [updateJob, setUpdateJob] = useState(null);
+  // Update (ACK-early job + 404-tolerant poll) is driven by a shared hook, so
+  // this System card and the forced PiUpdateGate use one identical driver.
+  const onUpdateSettled = useCallback(
+    (job) => {
+      if (job.status === 'succeeded') toast.success(job.message || 'Aktualisierung abgeschlossen.');
+      else toast.error(job.message || 'Aktualisierung fehlgeschlagen.');
+      refreshAgentStatus();
+    },
+    [refreshAgentStatus]
+  );
+  const { updating, updateJob, startUpdate } = useAgentUpdate({ onSettled: onUpdateSettled });
 
   const [resetStep, setResetStep] = useState(0); // 0 idle · 1 confirm · 2 final
   const [resetting, setResetting] = useState(false);
@@ -98,8 +108,6 @@ export default function SystemPage() {
   const [netChecking, setNetChecking] = useState(false);
 
   const previewRef = useRef(null);
-  const updateTimerRef = useRef(null);
-  const update404Ref = useRef(0);
 
   useEffect(() => {
     previewRef.current = previewDevice;
@@ -112,7 +120,8 @@ export default function SystemPage() {
     return () => clearInterval(id);
   }, [refreshAgentStatus]);
 
-  // Best-effort teardown: release the camera + stop update polling when leaving.
+  // Best-effort teardown: release the camera when leaving. (The update poll
+  // timer is owned + cleaned up by useAgentUpdate.)
   useEffect(() => {
     return () => {
       if (previewRef.current) {
@@ -122,7 +131,6 @@ export default function SystemPage() {
           /* leaving the page anyway */
         }
       }
-      if (updateTimerRef.current) clearTimeout(updateTimerRef.current);
     };
   }, []);
 
@@ -263,76 +271,13 @@ export default function SystemPage() {
     }
   }, [refreshAgentStatus]);
 
-  // ── Update (ACK-early job + poll) ──────────────────────────────────────────
-  const pollUpdate = useCallback(
-    (jobId) => {
-      const poll = async () => {
-        try {
-          const { ok, status, data } = await sysFetch(`/update/status/${jobId}`);
-          if (status === 404) {
-            // Agent self-update restart wiped the in-memory job map. The manager
-            // is recreated last, so the SPA reloads on the new buildId
-            // (useVersionCheck). Show a reconnect note; give up after a while.
-            update404Ref.current += 1;
-            setUpdateJob({
-              status: 'running',
-              phase: 'agent',
-              message:
-                'Agent startet neu — die Seite lädt sich neu, sobald die '
-                + 'Aktualisierung fertig ist.',
-            });
-            if (update404Ref.current <= 8) {
-              updateTimerRef.current = setTimeout(poll, 3000);
-            } else {
-              setUpdating(false);
-            }
-            return;
-          }
-          if (ok) {
-            setUpdateJob(data);
-            if (data.status === 'running') {
-              updateTimerRef.current = setTimeout(poll, 2000);
-            } else {
-              setUpdating(false);
-              if (data.status === 'succeeded') {
-                toast.success(data.message || 'Aktualisierung abgeschlossen.');
-              } else {
-                toast.error(data.message || 'Aktualisierung fehlgeschlagen.');
-              }
-              refreshAgentStatus();
-            }
-          } else {
-            // Transient proxy hiccup (manager being recreated) — retry.
-            updateTimerRef.current = setTimeout(poll, 3000);
-          }
-        } catch {
-          updateTimerRef.current = setTimeout(poll, 3000);
-        }
-      };
-      poll();
-    },
-    [refreshAgentStatus]
-  );
-
+  // ── Update (ACK-early job + poll, via the shared useAgentUpdate hook) ───────
   const handleUpdate = useCallback(async () => {
-    setUpdating(true);
-    update404Ref.current = 0;
-    setUpdateJob({ status: 'running', phase: 'queued', message: 'Aktualisierung wird vorbereitet …' });
-    try {
-      const { ok, data } = await sysFetch('/update', { method: 'POST' });
-      if (ok && data.job_id) {
-        pollUpdate(data.job_id);
-      } else {
-        toast.error(data.message || 'Aktualisierung konnte nicht gestartet werden.');
-        setUpdating(false);
-        setUpdateJob(null);
-      }
-    } catch {
-      toast.error('Der Agent ist nicht erreichbar.');
-      setUpdating(false);
-      setUpdateJob(null);
+    const res = await startUpdate();
+    if (!res.ok) {
+      toast.error(res.message || 'Aktualisierung konnte nicht gestartet werden.');
     }
-  }, [pollUpdate]);
+  }, [startUpdate]);
 
   // ── Factory reset (double confirm) ─────────────────────────────────────────
   const handleReset = useCallback(async () => {

@@ -16,7 +16,7 @@
 // test exercises only the layout swap.
 
 import React from 'react';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import WorkshopPage from '../WorkshopPage';
 
@@ -34,7 +34,8 @@ vi.mock('react-redux', () => ({
 const mockBlockly = vi.hoisted(() => ({ mountCount: 0 }));
 vi.mock('../../components/Workshop/BlocklyWorkspace', () => ({
   __esModule: true,
-  default: () => {
+  // Named + capitalized so react-hooks/rules-of-hooks recognizes it as a component.
+  default: function MockBlocklyWorkspace() {
     React.useEffect(() => {
       mockBlockly.mountCount += 1;
     }, []);
@@ -163,7 +164,7 @@ describe('WorkshopPage — sim toggle swaps only the right region', () => {
 
     // Editor + dock render; SimStage absent initially.
     await screen.findByTestId('blockly-workspace');
-    await waitFor(() => expect(screen.getByTestId('right-dock')).toBeInTheDocument());
+    expect(await screen.findByTestId('right-dock')).toBeInTheDocument();
     expect(screen.queryByTestId('sim-stage')).toBeNull();
 
     // Capture the settled mount count (initial mount + the one editorKey-bump

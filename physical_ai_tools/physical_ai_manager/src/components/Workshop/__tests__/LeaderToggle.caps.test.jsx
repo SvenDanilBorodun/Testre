@@ -70,6 +70,6 @@ describe('LeaderToggle — has_leader capability hide', () => {
     // Let the status probe resolve (proves available would be true).
     await waitFor(() => expect(global.fetch).toHaveBeenCalled());
     expect(screen.queryByText(/Leader abschalten/)).toBeNull();
-    expect(container.firstChild).toBeNull();
+    expect(container).toBeEmptyDOMElement();
   });
 });

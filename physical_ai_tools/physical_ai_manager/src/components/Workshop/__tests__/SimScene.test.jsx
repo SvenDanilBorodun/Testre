@@ -65,7 +65,9 @@ describe('SimScene — sim-stage seam', () => {
       />
     );
     await screen.findByTestId('urdf-twin');
-    // width_m 0.04 × PX_PER_M 500 = 20 px, and the catalog colour.
+    // width_m 0.04 × PX_PER_M 500 = 20 px, and the catalog colour. SVG <rect> has
+    // no ARIA role, so a DOM query is the only way to assert on it.
+    // eslint-disable-next-line testing-library/no-container, testing-library/no-node-access
     const rect = Array.from(container.querySelectorAll('rect')).find(
       (r) => r.getAttribute('fill') === '#00ff00',
     );
@@ -83,6 +85,8 @@ describe('SimScene — sim-stage seam', () => {
       />
     );
     await screen.findByTestId('urdf-twin');
+    // SVG <rect> has no ARIA role, so a DOM query is the only way to assert on it.
+    // eslint-disable-next-line testing-library/no-container, testing-library/no-node-access
     const rect = Array.from(container.querySelectorAll('rect')).find(
       (r) => r.getAttribute('fill') === '#f59e0b',
     );

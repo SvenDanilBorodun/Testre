@@ -24,8 +24,11 @@ import authReducer from '../../features/auth/authSlice';
 import workshopReducer from '../../features/workshop/workshopSlice';
 import jetsonReducer from '../../store/jetsonSlice';
 import TaskPhase from '../../constants/taskPhases';
+import InfoPanel from '../InfoPanel';
+import InferencePanel from '../InferencePanel';
 
 // Heavy data hooks the panels mount — stubbed so the panels render standalone.
+// (vi.mock is hoisted above these imports by vitest, so the stubs still apply.)
 vi.mock('../../hooks/useHfUserList', () => ({
   __esModule: true,
   useHfUserList: () => ({ hfUserList: [], reload: () => Promise.resolve([]) }),
@@ -34,9 +37,6 @@ vi.mock('../../hooks/useSupabaseTrainings', () => ({
   __esModule: true,
   default: () => ({ jobs: [] }),
 }));
-
-import InfoPanel from '../InfoPanel';
-import InferencePanel from '../InferencePanel';
 
 function makeStore() {
   return configureStore({

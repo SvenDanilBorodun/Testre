@@ -86,6 +86,10 @@ RUN set -e && \
 # stripped guard (safety_envelope.py, Rule §2) or the dead on-device-training trees
 # ever re-enter; CI's image-source-parity job re-asserts byte equality after every
 # build, and the build-time node import near the end is the runtime belt.
+#
+# The package's build/ + install/ dirs are purged before the colcon rebuild so a
+# source file DELETED in the repo (e.g. a pruned config/*.yaml) can't survive in
+# the base image's cached colcon SOURCES manifest and fail the setuptools copy.
 COPY pkg_src/ /tmp/pkg_src/
 RUN set -e && \
     mod_dir=$(find /root/ros2_ws/src -type d -path "*/physical_ai_tools/physical_ai_server/physical_ai_server" | head -n1) && \
@@ -101,6 +105,7 @@ RUN set -e && \
     { test ! -e "$pkg_root/physical_ai_server/training/trainers" || { echo "ERROR: dead training/trainers/ present"; exit 1; }; } && \
     { test ! -e "$pkg_root/physical_ai_server/evaluation" || { echo "ERROR: dead evaluation/ present"; exit 1; }; } && \
     cd /root/ros2_ws && \
+    rm -rf build/physical_ai_server install/physical_ai_server && \
     bash -c "source /opt/ros/jazzy/setup.bash && colcon build --packages-select physical_ai_server --symlink-install" && \
     echo "physical_ai_server replaced from repo source of truth + colcon-rebuilt"
 

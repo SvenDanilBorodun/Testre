@@ -269,18 +269,18 @@ jobs:
   # is skipped (no tag), so there's no asset to advertise.
   publish-gui-version:
     name: W6. Publish GUI auto-update gate
-    # Also needs pi-agent-tarball: W6 hashes the EXACT attached Pi tarball into
-    # PI_AGENT_SHA256, so when it IS attached the asset must already be on the
-    # Release. But the gate is `!= 'failure'` (success OR skipped), NOT
-    # `== 'success'`: the mature Windows .exe auto-update advertisement must not
-    # be blocked by a transient Pi-tarball attach hiccup. The PI_AGENT_SHA256
-    # curl below already degrades to empty-on-failure, so a missing Pi tarball
-    # advertises NO Pi hash (never a stale one) instead of blocking the release.
+    # pi-agent-tarball is an ORDERING-ONLY dependency: W6 must run AFTER the Pi
+    # tarball attach attempt so it can hash the EXACT attached asset into
+    # PI_AGENT_SHA256 when it IS present. It is deliberately NOT gated on that
+    # job's result — the mature Windows .exe auto-update advertisement must not
+    # be blocked by a transient Pi-tarball hiccup. The PI_AGENT_SHA256 curl below
+    # already degrades to empty-on-failure, so a missing/failed Pi tarball
+    # advertises NO Pi hash (never a stale one) instead of withholding the whole
+    # release. (Only `installer` success is required — that produces the .exe.)
     needs: [installer, pi-agent-tarball]
     if: >-
       always()
       && needs.installer.result == 'success'
-      && needs.pi-agent-tarball.result != 'failure'
       && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     timeout-minutes: 10

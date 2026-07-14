@@ -146,6 +146,13 @@ jobs:
           # build-images.sh's PLATFORM=opi case handles the divergence.
           - platform: opi
             runner: ubuntu-24.04-arm
+    # opi is a SECONDARY flavor built on a MANUALLY-published CPU base
+    # (BUILD_BASE_OPI). Decouple it from the core release: an opi-leg failure
+    # (missing/stale opi base, Rockchip build hiccup) must NOT fail the build
+    # job and block the amd64/Jetson GHCR publish. The retag + dual-push
+    # integrity + smoke-test steps below all tolerate a missing opi image, so
+    # the core release completes and opi simply lands on the next good build.
+    continue-on-error: ${{ matrix.platform == 'opi' }}
     env:
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
@@ -345,6 +352,19 @@ jobs:
           }
 
           for REPO in $AMD64_REPOS $ARM64_REPOS $OPI_REPOS; do
+            # opi is decoupled (its build leg is continue-on-error): if the opi
+            # base wasn't built this run, build-images.sh never pushed
+            # nettername/<repo>:latest, so SKIP it here instead of failing the
+            # core retag on a missing source. The amd64/Jetson repos are always
+            # present and always retagged.
+            case " $OPI_REPOS " in
+              *" $REPO "*)
+                if ! _tag_exists "$REPO" "$SRC_TAG"; then
+                  echo "::warning::opi image ${REPO} not pushed this run — skipping its retag (opi is decoupled from the core amd64/Jetson release)."
+                  continue
+                fi
+                ;;
+            esac
             HUB_SRC="${HUB}/${REPO}:${SRC_TAG}"     # :latest pushed by build-images.sh
             GHCR_SRC="${GHCR}/${REPO}:${SRC_TAG}"   # :latest seeded on GHCR below
 
@@ -382,6 +402,9 @@ jobs:
           # NOTE: this is the SECOND hardcoded repo list (the retag step above has
           # the first, AMD64_REPOS/ARM64_REPOS/OPI_REPOS) — keep BOTH in sync.
           REPOS="open-manipulator physical-ai-server physical-ai-manager open-manipulator-jetson physical-ai-server-jetson open-manipulator-opi physical-ai-server-opi physical-ai-manager-opi"
+          # opi subset — decoupled from the core release, so a missing opi image
+          # here (opi build leg skipped/failed) is a WARNING, never a fatal.
+          OPI_REPOS="open-manipulator-opi physical-ai-server-opi physical-ai-manager-opi"
           # Top-level manifest digest of a ref (the `Digest:` header line).
           _top() {
             docker buildx imagetools inspect "$1" 2>/dev/null | awk '/^Digest:/{print $2; exit}'
@@ -407,6 +430,11 @@ jobs:
             H=$(_top "${HUB}/${REPO}:latest")
             G_ALL=$(_all "${GHCR}/${REPO}:latest")
             if [ -z "$G_ALL" ]; then
+              case " $OPI_REPOS " in
+                *" $REPO "*)
+                  echo "::warning::opi ${REPO} not on GHCR (opi decoupled / not built this run) — skipping its parity check."
+                  continue ;;
+              esac
               echo "::error::GHCR ${GHCR}/${REPO}:latest not found — dual-push failed (is the package created?)."
               fail=1
             elif printf '%s\n' "$G_ALL" | grep -qx "$H"; then
@@ -430,6 +458,11 @@ jobs:
               GS=$(_top "${GHCR}/${REPO}:${SEMVER}")
               HS=$(_top "${HUB}/${REPO}:${SEMVER}")
               if [ -z "$GS" ]; then
+                case " $OPI_REPOS " in
+                  *" $REPO "*)
+                    echo "::warning::opi ${REPO}:${SEMVER} not on GHCR (opi decoupled / not built this run) — skipping."
+                    continue ;;
+                esac
                 echo "::error::GHCR ${GHCR}/${REPO}:${SEMVER} missing — students would 404 on this release."
                 fail=1
               elif [ "$GS" = "$HS" ]; then
@@ -497,6 +530,10 @@ jobs:
   smoke-test:
     name: Smoke-test (${{ matrix.platform }})
     needs: [retag]
+    # opi is decoupled (see the build job): if the opi image wasn't published
+    # this run its pulls 404 — that must not fail the workflow or block the core
+    # amd64/Jetson release. The opi leg is non-fatal; amd64/Jetson stay strict.
+    continue-on-error: ${{ matrix.platform == 'opi' }}
     # Native per-arch runners so each image is exercised on real silicon —
     # we now actually test arm64 images instead of trusting "build succeeded".
     runs-on: ${{ matrix.runner }}

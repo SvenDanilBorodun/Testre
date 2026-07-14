@@ -16,7 +16,7 @@
 
 import React, { useCallback, useEffect, useRef } from 'react';
 import clsx from 'clsx';
-import { MdHome, MdVideocam, MdMemory, MdWidgets, MdConstruction } from 'react-icons/md';
+import { MdHome, MdVideocam, MdMemory, MdWidgets, MdConstruction, MdSettings } from 'react-icons/md';
 import { GoGraph } from 'react-icons/go';
 import toast from 'react-hot-toast';
 import './App.css';
@@ -26,6 +26,7 @@ import InferencePage from './pages/InferencePage';
 import TrainingPage from './pages/TrainingPage';
 import EditDatasetPage from './pages/EditDatasetPage';
 import WorkshopPage from './pages/WorkshopPage';
+import SystemPage from './pages/SystemPage';
 import CollisionModal from './components/CollisionModal';
 import StartupGate from './components/StartupGate';
 import { LogoMark } from './components/EbUI';
@@ -48,6 +49,7 @@ import { useMeProfile } from './hooks/useMeProfile';
 import { resetJetsonOnLogout } from './hooks/useJetsonConnection';
 import { isCloudOnlyMode } from './utils/cloudMode';
 import { isCapabilityVisible, robotGateDecision } from './utils/navGating';
+import { usePiMode } from './utils/piMode';
 
 function StudentApp() {
   const dispatch = useDispatch();
@@ -76,6 +78,10 @@ function StudentApp() {
     jetsonIdRef.current = jetsonId;
   }, [jetsonId]);
   const cloudOnly = isCloudOnlyMode();
+  // Orange Pi: the System tab (the in-browser setup wizard) is revealed once the
+  // baked /pi-mode.json marker resolves — progressive reveal, exactly like the
+  // Jetson-gated tabs.
+  const { piMode } = usePiMode();
   const currentRosHost = useSelector((state) => state.ros.rosHost);
 
   // Initialise the local rosbridge host ONCE, not on every render. The
@@ -247,6 +253,14 @@ function StudentApp() {
 
   const handleWorkshopPageNavigation = () => requireRobotOrRedirect(PageType.WORKSHOP);
 
+  // The System window is the control panel — it must be reachable even with no
+  // robot scanned/started (that's exactly where the student scans + starts), so
+  // it deliberately does NOT go through requireRobotOrRedirect.
+  const handleSystemPageNavigation = () => {
+    isFirstLoad.current = false;
+    dispatch(moveToPage(PageType.SYSTEM));
+  };
+
   // Audit F27: the previous blunt-force teardown
   // (document.querySelectorAll('img[src*="/stream"]')) was a safety
   // net for ImageGridCell.js's effect race. F26 fixes that race
@@ -281,10 +295,18 @@ function StudentApp() {
     { key: PageType.INFERENCE, label: 'Inferenz', Icon: MdMemory, onClick: handleInferencePageNavigation, capabilityKey: 'inferable' },
     { key: PageType.EDIT_DATASET, label: 'Daten', Icon: MdWidgets, onClick: handleEditDatasetPageNavigation, sep: true, jetsonIncompatible: true, capabilityKey: 'editable' },
     { key: PageType.WORKSHOP, label: 'Roboter Studio', Icon: MdConstruction, onClick: handleWorkshopPageNavigation, hardwareOnly: true, jetsonIncompatible: true, capabilityKey: 'roboter_studio' },
+    // Pi-only: the in-browser setup wizard (arms/cameras/token, Umgebung
+    // starten, Update, Reset, Protokoll, Netzwerk-Check). Not hardwareOnly
+    // (its own „Cloud-Modus" checkbox handles that) and not jetsonIncompatible
+    // (it controls the Pi itself, independent of a Jetson claim). It carries no
+    // capabilityKey, so isCapabilityVisible always keeps it — the piMode filter
+    // is its sole gate.
+    { key: PageType.SYSTEM, label: 'System', Icon: MdSettings, onClick: handleSystemPageNavigation, sep: true, piOnly: true },
   ]
     .filter((n) => !cloudOnly || !n.hardwareOnly)
     .filter((n) => !jetsonConnected || !n.jetsonIncompatible)
-    .filter((n) => isCapabilityVisible(n, { jetsonConnected, caps }));
+    .filter((n) => isCapabilityVisible(n, { jetsonConnected, caps }))
+    .filter((n) => piMode || !n.piOnly);
 
   const isDarkPage = page === PageType.RECORD || page === PageType.INFERENCE;
 
@@ -415,6 +437,8 @@ function StudentApp() {
             <EditDatasetPage isActive={page === PageType.EDIT_DATASET} />
           ) : page === PageType.WORKSHOP ? (
             <WorkshopPage isActive={page === PageType.WORKSHOP} />
+          ) : page === PageType.SYSTEM ? (
+            <SystemPage isActive={page === PageType.SYSTEM} />
           ) : (
             <HomePage />
           )}

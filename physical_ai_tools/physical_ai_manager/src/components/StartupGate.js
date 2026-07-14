@@ -14,8 +14,12 @@
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import clsx from 'clsx';
+import { useSelector, useDispatch } from 'react-redux';
 import rosConnectionManager from '../utils/rosConnectionManager';
 import { isCloudOnlyMode } from '../utils/cloudMode';
+import { usePiMode, PI_PORT_BLOCKED_HINT } from '../utils/piMode';
+import PageType from '../constants/pageType';
+import { moveToPage } from '../features/ui/uiSlice';
 
 const STARTUP_TIMEOUT_MS = 90000;
 const SETTLE_DELAY_MS = 3000;
@@ -84,7 +88,159 @@ export default function StartupGate({ children }) {
   if (isCloudOnlyMode()) {
     return <>{children}</>;
   }
+  return <StartupGateRouter>{children}</StartupGateRouter>;
+}
+
+// Routes to the Windows gate or the Pi carve-out once the static `/pi-mode.json`
+// marker has resolved. Deploy plan §6: the Pi-mode flag MUST resolve before the
+// gate decides whether to block — so while it is still resolving we show a
+// neutral boot splash (a few ms; the marker is a static file) that never times
+// out and never mentions Docker.
+function StartupGateRouter({ children }) {
+  const { piMode, piModeResolved } = usePiMode();
+  if (!piModeResolved) {
+    return <BootSplash />;
+  }
+  if (piMode) {
+    return <PiStartupGate>{children}</PiStartupGate>;
+  }
   return <StartupGateImpl>{children}</StartupGateImpl>;
+}
+
+// Neutral full-screen splash shown only for the brief window while the Pi-mode
+// marker resolves. Visually matches the gate overlays so the hand-off is
+// seamless on a non-Pi rig (splash -> StartupGateImpl).
+function BootSplash() {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-white">
+      <div className="flex flex-col items-center gap-6">
+        <div className="flex flex-col items-center gap-2">
+          <h1 className="text-3xl font-bold text-gray-800">EduBotics</h1>
+          <p className="text-sm text-gray-500">System wird gestartet...</p>
+        </div>
+        <Spinner />
+      </div>
+    </div>
+  );
+}
+
+// ── Pi-mode carve-out (deploy plan §5/§6) ────────────────────────────────────
+//
+// On a freshly booted Pi the manager is up but the robot tier is DOWN BY
+// DESIGN, and the student must reach the System tab to press „Umgebung starten".
+// A global block would trap them (the §5 chicken-and-egg, one layer up). So the
+// Pi gate blocks ONLY while the robot tier is genuinely coming up and rosbridge
+// hasn't connected yet — and it NEVER covers the System tab (where the start
+// button lives). When the robot tier is down, or the student is on the System
+// tab, children render fully interactive. If the wait times out, the screen
+// names the port-9090/network cause (never „Docker prüfen") and offers an escape
+// back to the System window.
+function PiStartupGate({ children }) {
+  const { agentStatus } = usePiMode();
+  const dispatch = useDispatch();
+  const currentPage = useSelector((s) => s.ui.currentPage);
+  const robotTierUp = !!(agentStatus && agentStatus.robot_tier_up);
+
+  const [connected, setConnected] = useState(() => rosConnectionManager.isConnected());
+  const [settled, setSettled] = useState(false);
+  const [timedOut, setTimedOut] = useState(false);
+  const settleRef = useRef(null);
+  const pollRef = useRef(null);
+  const timeoutRef = useRef(null);
+
+  const suppressed = currentPage === PageType.SYSTEM || !robotTierUp;
+  const revealed = connected && settled;
+  const overlayVisible = !suppressed && !revealed;
+
+  // Poll rosbridge liveness only while an overlay could show.
+  useEffect(() => {
+    if (!overlayVisible) return undefined;
+    pollRef.current = setInterval(() => {
+      if (rosConnectionManager.isConnected()) setConnected(true);
+    }, POLL_INTERVAL_MS);
+    return () => clearInterval(pollRef.current);
+  }, [overlayVisible]);
+
+  // Settle once connected so subscriptions establish before revealing.
+  useEffect(() => {
+    if (connected && !settled) {
+      settleRef.current = setTimeout(() => setSettled(true), SETTLE_DELAY_MS);
+    }
+    return () => clearTimeout(settleRef.current);
+  }, [connected, settled]);
+
+  // 90 s of a visible overlay without a connection → offer the network
+  // diagnosis + escape. Reset the flag whenever the overlay isn't showing.
+  useEffect(() => {
+    if (!overlayVisible) {
+      setTimedOut(false);
+      return undefined;
+    }
+    timeoutRef.current = setTimeout(() => setTimedOut(true), STARTUP_TIMEOUT_MS);
+    return () => clearTimeout(timeoutRef.current);
+  }, [overlayVisible]);
+
+  const handleRetry = useCallback(() => {
+    setTimedOut(false);
+    rosConnectionManager.resetReconnectCounter();
+    window.location.reload();
+  }, []);
+
+  const goToSystem = useCallback(() => {
+    dispatch(moveToPage(PageType.SYSTEM));
+  }, [dispatch]);
+
+  return (
+    <>
+      {children}
+      {overlayVisible && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-white">
+          <div className="flex flex-col items-center gap-8">
+            <div className="flex flex-col items-center gap-2">
+              <h1 className="text-3xl font-bold text-gray-800">EduBotics</h1>
+              <p className="text-sm text-gray-500">Roboter wird verbunden...</p>
+            </div>
+
+            <div className="flex flex-col gap-4 bg-gray-50 rounded-2xl px-8 py-6 shadow-lg border border-gray-100 min-w-80">
+              <ProgressStep label="Verbindung zum Roboter (Port 9090)..." done={connected} />
+              <ProgressStep label="Dienste werden initialisiert..." done={settled} />
+            </div>
+
+            {timedOut && !settled && (
+              <div className="flex flex-col items-center gap-3 max-w-sm text-center">
+                {/* Pi-specific: the robot tier is REPORTED running but rosbridge
+                    (:9090) is unreachable from the browser — a port-filter / VLAN
+                    ACL, not a crashed stack. Never the Windows „Docker prüfen". */}
+                <p className="text-sm text-orange-600">{PI_PORT_BLOCKED_HINT}</p>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={goToSystem}
+                    className="px-4 py-2 bg-teal-500 text-white rounded-md text-sm font-medium hover:bg-teal-600 transition-colors"
+                  >
+                    Zum System-Fenster
+                  </button>
+                  <button
+                    onClick={handleRetry}
+                    className="px-4 py-2 bg-white text-teal-600 border border-teal-500 rounded-md text-sm font-medium hover:bg-teal-50 transition-colors"
+                  >
+                    Erneut versuchen
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {!timedOut && !settled && (
+              <div className="flex gap-1.5">
+                <div className="w-2 h-2 bg-teal-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
+                <div className="w-2 h-2 bg-teal-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
+                <div className="w-2 h-2 bg-teal-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </>
+  );
 }
 
 function StartupGateImpl({ children }) {

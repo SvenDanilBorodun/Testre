@@ -1,0 +1,25 @@
+[Unit]
+Description=EduBotics Pi first-boot personalization (unique machine-id, hostname, secrets)
+Documentation=file:///opt/edubotics/pi_agent/systemd/edubotics-pi-firstboot.sh
+# The golden-image fleet-rollout equivalent of the .exe installer's per-machine
+# setup (deploy plan §7 Phase 2). Runs ONCE per freshly flashed clone, BEFORE
+# the agent seeds its .env and BEFORE avahi announces, so the derived
+# edubotics-NN hostname is the one advertised on the LAN.
+After=local-fs.target systemd-machine-id-commit.service
+Before=edubotics-pi.service avahi-daemon.service network-online.target
+# One-shot gate: the script drops this marker at the end, so it never re-runs on
+# a clone. `setup.sh --prepare-golden` removes the marker (and truncates
+# /etc/machine-id) before image capture so each clone fires it exactly once.
+ConditionPathExists=!/opt/edubotics/.first-boot-done
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Root: rewrites /etc/machine-id, /etc/hostname, /etc/ssh host keys and the
+# root-owned /etc/edubotics/.env.
+ExecStart=/opt/edubotics/pi_agent/systemd/edubotics-pi-firstboot.sh
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

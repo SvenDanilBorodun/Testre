@@ -1,0 +1,204 @@
+# EduBotics Orange Pi 5 Pro — Lehrkräfte-Handbuch
+
+> **Für Lehrkräfte und die Schul-IT.** Diese Anleitung bringt eine
+> EduBotics-Roboterstation auf dem Orange Pi 5 Pro von „ausgepackt" bis
+> „Datensatz aufgenommen und hochgeladen" — komplett **im Browser**, ohne
+> Windows-PC und ohne WSL2 auf der Roboterseite. Zeit pro Station nach der
+> ersten Einrichtung: **ca. 10 Minuten**.
+
+## Was das ergibt
+
+Eine vollständige Schüler-Roboterstation: Leader- + Follower-Arm und **beide
+USB-Kameras** stecken direkt am Pi. Der Schüler öffnet im Browser
+`http://edubotics-NN.local/`, durchläuft denselben Einrichtungsassistenten wie
+die Windows-App (jetzt als **System-Fenster** im Browser), nimmt Demos auf,
+trainiert in der Cloud und nutzt optional Roboter Studio. Der Pi ersetzt den
+Windows-PC + WSL2 auf der Roboterseite vollständig.
+
+**Inferenz** (das Ausführen trainierter Modelle) läuft weiterhin **nur auf dem
+Klassen-Jetson** — die Inferenz-Tab-Verbindung ist unverändert (siehe
+[`JETSON_DEPLOY.md`](JETSON_DEPLOY.md)). Der Pi **nimmt auf und trainiert**;
+der Jetson **führt aus**.
+
+## Vor dem Start — Netzwerk klären
+
+Schulnetze sind der häufigste Stolperstein. **Bitte zuerst die
+[Netzwerk-Anleitung für die IT](ORANGE_PI_IT_NETZWERK.md) an die IT geben** —
+sie ist als fertiges Ticket formuliert (VLAN, Ports 80/8080/9090/9091,
+Egress-Liste, TLS-/Proxy-Ausnahmen, MAC-Registrierung).
+
+Für den **Pilot** genügt oft **Tier 2** aus jener Anleitung: ein eigener,
+mitgebrachter Router/Access-Point. Damit läuft alles sofort, unabhängig von
+der Ticket-Warteschlange.
+
+## Hardware-Checkliste
+
+| Teil | Hinweise |
+|---|---|
+| Orange Pi 5 Pro **8 GB** | Die 4-GB-Variante ist zu klein. |
+| Offizielles Netzteil (5 V / 5 A USB-C) | Ein schwaches Netzteil führt zu Unterspannungs-Resets mitten in der Aufnahme. |
+| Aktive Kühlung (Kühlkörper + Lüfter) | Für dauerhaften 2-Kamera-Encode nötig (Throttling sonst). |
+| eMMC-Modul **oder** NVMe-SSD | Schneller + zuverlässiger als microSD. |
+| 1× OpenMANIPULATOR-X **Leader** + 1× **Follower** | Beide OpenRB-150-Boards. |
+| 2× USB-Kameras (Greifer + Szene) | Wie am Schülertisch. |
+| Kabelgebundenes Ethernet | Empfohlen — stabiler als WLAN, und `.local` funktioniert zuverlässiger. |
+
+**USB-Aufteilung** (Bandbreite): eine Kamera an den **USB3**-Port, eine an den
+**eigenständigen USB2**-Port, beide Arme an die **Hub-Ports**.
+
+## Schritt 1 — OS flashen
+
+1. Ein **gepinntes, bekannt-gutes** Armbian-Image für den Orange Pi 5 Pro (oder
+   das offizielle Orange-Pi-Ubuntu-22.04-BSP-Image) auf eMMC/NVMe schreiben
+   (z. B. mit `balenaEtcher` oder `dd`). *Das archivierte
+   `Joshua-Riek/ubuntu-rockchip`-Projekt nicht verwenden.*
+2. Pi einmal booten, Grundeinrichtung (Sprache, Benutzer) durchlaufen,
+   Internetzugang sicherstellen.
+
+> **Golden Image für die Flotte:** Eine einzige Station wie unten
+> provisionieren, dann `sudo ./setup.sh --prepare-golden` ausführen und das
+> Image abziehen. Jeder Klon vergibt sich beim **ersten Boot** automatisch eine
+> **eindeutige** Kennung (Hostname `edubotics-NN`, ROS-Domain, frische
+> Schlüssel) — doppelte `.local`-Namen sind das Einzige, was mDNS nicht
+> übersteht, deshalb wird `NN` **abgeleitet, nie von Hand vergeben**.
+
+## Schritt 2 — Agent installieren (provisionieren)
+
+Mit eingesteckten Armen + Kameras, als root:
+
+```bash
+# Optional: abweichende Cloud-API-URL setzen (sonst Produktions-Standard).
+export EDUBOTICS_UPDATE_API_URL="https://scintillating-empathy-production-1068.up.railway.app"
+
+# Provisionierung als root.
+sudo ./robotis_ai_setup/pi_agent/setup.sh
+```
+
+Das Skript:
+
+1. installiert gepinntes **Docker** + Compose-Plugin,
+2. installiert `jq` / `qrencode` / `v4l-utils` / **avahi** / Python + die
+   Agent-Abhängigkeiten,
+3. legt die **udev-Regel** für die ROBOTIS-Boards an (Rechte-Grundlage — die
+   Leader/Follower-Rolle wird beim Scannen im Assistenten bestimmt, nicht per
+   Symlink),
+4. aktiviert **zram**-Swap (auf dem 8-GB-Board Pflicht),
+5. vergibt den mDNS-Hostnamen **`edubotics-NN`** (aus der Maschinen-ID
+   abgeleitet),
+6. legt den Agenten unter `/opt/edubotics` ab (inkl. Compose-Datei),
+7. wählt ein **freies `ros_net`-Subnetz** (prüft `ip route` auf Überlappung)
+   und schreibt die verwaltete `/etc/edubotics/.env`,
+8. installiert + startet die systemd-Dienste `edubotics-pi` und
+   `edubotics-pi-firstboot`,
+9. zieht die **`-opi`-Container-Images** (GHCR zuerst, Docker Hub als
+   Ausweichweg),
+10. druckt am Ende das **Gehäuse-Etikett**.
+
+## Schritt 3 — Etikett aufs Gehäuse
+
+Das Skript druckt drei Felder plus QR-Code:
+
+```
+============================================================
+  EduBotics Orange Pi — Etikett/QR für das Gehäuse
+============================================================
+
+  Hostname:  edubotics-04823.local
+  MAC (LAN): dc:a6:32:11:22:33
+  IP:        ________________   (von der IT reserviert eintragen)
+
+  Aufruf im Browser:  http://edubotics-04823.local/   (oder http://<IP>/)
+============================================================
+```
+
+- **Hostname** + **MAC** aufs Etikett kleben. Beides genügt der IT für eine
+  **DHCP-Reservierung** und die **NAC/802.1X-Freigabe** — ganz ohne den Pi
+  anzufassen (siehe [Netzwerk-Anleitung](ORANGE_PI_IT_NETZWERK.md)).
+- Das **IP-Feld bleibt zunächst leer**. Sobald die IT eine feste IP reserviert
+  hat, liest sie die Lehrkraft in der **Pi-IP-Anzeige** des System-Fensters ab
+  und trägt sie ins Etikett ein. Danach gilt `http://<IP>/` dauerhaft.
+
+## Schritt 4 — Im Browser verbinden
+
+Vom Schüler-PC im selben (Robotik-)Netz:
+
+1. `http://edubotics-NN.local/` öffnen.
+   - Findet der PC den Namen nicht (verwaltete PCs haben oft `EnableMDNS=0`
+     oder eine VLAN-Grenze): stattdessen **`http://<IP>/`** vom Etikett
+     verwenden. Der **IP-Weg funktioniert immer**, wo das Netz routet.
+2. Der **„Netzwerk-Check"** im System-Fenster prüft von der Station aus die
+   typischen Schulnetz-Fallen (Cloud erreichbar, Registry erreichbar,
+   **Zertifikat echt**, Uhrzeit synchron) und zeigt pro Zeile einen
+   grün/roten Hinweis. Ein rotes „Zertifikat nicht echt" bedeutet:
+   **TLS-Inspektion** aktiv → siehe Netzwerk-Anleitung, Ausnahme.
+
+## Schritt 5 — Einrichtungsassistent (System-Fenster)
+
+Derselbe Ablauf wie in der Windows-App, jetzt im Browser:
+
+| Schritt | Aktion |
+|---|---|
+| **A/B — Arme scannen** | Beide Arme scannen; Leader/Follower werden per Servo-ID erkannt und als stabile Ports gespeichert. |
+| **C — Kameras** | Kameras scannen, Rollen **Greifer/Szene** zuweisen, Vorschau prüfen. |
+| **D — HF-Token** | Hugging-Face-Token einmal eintragen (`✓ Token gespeichert`). Überlebt Regenerate + „Daten zurücksetzen". |
+| **Umgebung starten** | Bringt die Roboter-Container hoch (der Manager/die Web-Oberfläche läuft **immer**). |
+
+> **Zwei-Tier-Lebenszyklus:** Die Web-Oberfläche (Manager) ist **immer an** —
+> sonst gäbe es auf einem frisch gebooteten Pi keine Seite mit dem
+> „Umgebung starten"-Knopf. Die **Roboter-Container** kommen erst mit
+> „Umgebung starten" hoch (der Dynamixel-Bus muss vorher frei sein).
+
+## Schritt 6 — Aufnehmen & trainieren
+
+1. **Aufnahme**-Tab: Demos mit Leader→Follower-Teleop aufnehmen (inkl.
+   Kollisions-Nothalt, unverändert).
+2. **Roboter Studio** (optional): Blockly-Programme, AprilTag-Perzeption,
+   manuelle Armsteuerung.
+3. **Training**: Datensatz in die Cloud hochladen und ein Modell trainieren
+   (bestehender Ablauf, unverändert).
+4. **Inferenz**: den **Follower-Arm + 2 Kameras** an den **Klassen-Jetson**
+   umstecken und über den Inferenz-Tab verbinden (siehe
+   [`JETSON_DEPLOY.md`](JETSON_DEPLOY.md)). Der Pi selbst führt keine Modelle
+   aus.
+
+## Updates
+
+- **Container-Images**: über den digest-geprüften Auto-Pull im „Update"-Gate
+  des System-Fensters (GHCR zuerst, Hub als Ausweichweg). Die Web-Oberfläche
+  lädt danach kurz neu und heilt sich selbst.
+- **Agent**: über ein **SHA-256-geprüftes** Release-Tarball
+  (`edubotics-pi-agent.tar.gz`), das die Cloud über `/version` bekanntgibt
+  (Felder `pi_agent_download_url` / `pi_agent_sha256`).
+- **OS**: über `unattended-upgrades`.
+
+## Protokoll & Status (auf dem Pi)
+
+```bash
+sudo systemctl status edubotics-pi
+sudo journalctl -u edubotics-pi -f            # Live-Agent-Log
+docker compose -f /opt/edubotics/docker-compose.opi.yml ps
+cat /var/lib/edubotics/.last_image_pull.json  # letzter Image-Update
+```
+
+## Fehlerbehebung
+
+| Symptom | Wo nachsehen |
+|---|---|
+| `edubotics-NN.local` nicht erreichbar | `http://<IP>/` vom Etikett verwenden. mDNS ist auf verwalteten PCs oft deaktiviert; siehe [Netzwerk-Anleitung](ORANGE_PI_IT_NETZWERK.md). |
+| Web-App lädt, aber „Verbindung zu Port 9090 blockiert" | Inter-VLAN-ACL filtert 9090 → Portfreigabe (Netzwerk-Anleitung, Schritt 3). Kein Docker-Problem. |
+| „Updates schlagen mit Zertifikatfehler fehl" | TLS-Inspektion → Ausnahme nötig; der „Netzwerk-Check" bestätigt es. |
+| Kamerabild schwarz, UI sonst da | Port 8080 gefiltert **oder** Kamera nicht als Greifer/Szene zugewiesen. |
+| Arme werden nicht erkannt | Beide Arme eingesteckt? Läuft bereits eine Umgebung (belegt den seriellen Bus)? Erst „Stoppen", dann neu scannen. |
+| Unterspannungs-Resets in der Aufnahme | Offizielles 5 V/5 A-Netzteil verwenden; Kernel-Log auf `undervoltage`/`reset` prüfen. |
+| Agent-Dienst startet nicht | `journalctl -u edubotics-pi -n 50`. |
+
+## Sicherheitshinweis (bewusste Entscheidung)
+
+Die Steuer-Ports (80/8080/9090) sind **offen im LAN, ohne Authentifizierung** —
+wer im selben Netzsegment ist, kann jeden Arm steuern und jede Kamera sehen.
+Deshalb ist das **eigene Robotik-VLAN** (oder der eigene Pilot-Router) keine
+Kür, sondern die Sicherheitsgrenze. Mildernde Maßnahmen, die trotzdem
+mitkommen: der **`EDUBOTICS_LAN_OPEN=0`**-Schalter (Kiosk: alle Ports zurück
+auf `127.0.0.1`) und die **Host/Origin-Prüfung** auf zustandsändernden
+Management-Endpunkten (blockt bösartige Web-Seiten, lässt LAN-Nachbarn — das
+akzeptierte Restrisiko — unberührt).

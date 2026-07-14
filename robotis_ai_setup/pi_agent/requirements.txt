@@ -1,0 +1,16 @@
+# EduBotics Pi-Agent runtime dependencies (Orange Pi 5 Pro, arm64).
+#
+# The agent's CORE is stdlib-only (like the Jetson agent): http.server for the
+# management API, urllib for the cloud /version + Netzwerk-Check, ssl for the
+# TLS-inspection probe, subprocess for docker/openssl/timedatectl. Nothing here
+# is imported at module load — a missing optional dep degrades one endpoint, it
+# never stops the agent booting.
+#
+# The ONE optional runtime dependency is OpenCV, used SOLELY by the MJPEG
+# camera-preview endpoint (GET /cameras/preview) — the host-side analogue of the
+# Windows GUI's cv2.imencode preview (the Pi has no win_camera/MSMF module). It
+# is imported LAZILY inside _PreviewCapture.open(); without it the preview
+# endpoint returns a German 503 and every other endpoint works. Pinned to match
+# the server image's opencv-contrib pin (docker/physical_ai_server). arm64
+# manylinux wheels exist on PyPI. Install on the Pi via setup.sh (P4).
+opencv-python-headless==4.10.0.84

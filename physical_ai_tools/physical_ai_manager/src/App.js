@@ -19,10 +19,21 @@ import WebApp from './WebApp';
 import BuildConfigBanner from './components/BuildConfigBanner';
 import { APP_MODE } from './constants/appMode';
 import useVersionCheck from './hooks/useVersionCheck';
+import { PiModeProvider } from './utils/piMode';
 
 function App() {
   useVersionCheck();
-  const inner = APP_MODE === 'web' ? <WebApp /> : <StudentApp />;
+  // The student SPA is also the Orange Pi „System"-Fenster host, so it needs the
+  // Pi-mode context (marker gate + live agent health). The teacher WebApp never
+  // runs on a Pi, so it stays outside the provider (no `/pi-mode.json` probe).
+  const inner =
+    APP_MODE === 'web' ? (
+      <WebApp />
+    ) : (
+      <PiModeProvider>
+        <StudentApp />
+      </PiModeProvider>
+    );
   return (
     <>
       {/* Visible red banner if the Docker build was missing required

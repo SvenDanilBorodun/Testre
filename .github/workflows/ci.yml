@@ -49,6 +49,7 @@ jobs:
           python -m compileall -q \
             robotis_ai_setup/gui \
             robotis_ai_setup/scripts \
+            robotis_ai_setup/pi_agent \
             robotis_ai_setup/cloud_training_api \
             robotis_ai_setup/modal_training \
             physical_ai_tools/physical_ai_server/physical_ai_server \
@@ -86,6 +87,22 @@ jobs:
           cd robotis_ai_setup/jetson_agent
           python -m unittest discover -s tests -v
 
+      - name: Orange Pi agent unit tests (Phase 2 host-side lifecycle)
+        # Cross-platform — every subprocess/docker/socket/HTTP call is
+        # mocked (deps-free), so this runs on the same ubuntu-latest runner
+        # as the rest. Covers the pi_agent port of the GUI config-generator
+        # + docker-manager (ARM64 digest pre-check, targeted robot-tier
+        # lifecycle, no-`compose down` rule) and the management HTTP API
+        # (arm-scan / camera roles / Host+Origin allowlist / netzwerk-check).
+        # pi_agent/tests has NO __init__.py — it follows the GUI-tests
+        # convention (each test file does its own sys.path.insert of
+        # robotis_ai_setup, then imports via the `pi_agent.` package), which is
+        # why `discover` works here without a package marker. (jetson_agent/tests
+        # DOES have __init__.py; pi_agent deliberately does not.)
+        run: |
+          cd robotis_ai_setup/pi_agent
+          python -m unittest discover -s tests -v
+
       - name: Roboter Studio workflow + IK unit tests (pure-Python, no ROS)
         # numpy + opencv only (workflow modules import ROS/onnx/pupil lazily).
         # Covers the closed-form IK round-trip + base_yaw, the AprilTag
@@ -118,6 +135,8 @@ jobs:
             robotis_ai_setup/wsl_rootfs/build_rootfs.sh \
             robotis_ai_setup/wsl_rootfs/start-dockerd.sh \
             robotis_ai_setup/jetson_agent/setup.sh \
+            robotis_ai_setup/pi_agent/setup.sh \
+            robotis_ai_setup/pi_agent/systemd/edubotics-pi-firstboot.sh \
             physical_ai_tools/physical_ai_manager/scripts/railway-deploy.sh
 
   rootfs-version-guard:
@@ -292,6 +311,59 @@ jobs:
           ROS_DOMAIN_ID=42
           EOF
           docker compose --env-file .env -f docker-compose.jetson.yml config > /dev/null
+      - name: docker compose config (Orange Pi)
+        # Phase 2: the Orange Pi 5 Pro agent ships a THIRD compose file — a
+        # three-way merge of the student + Jetson composes plus the always-on
+        # physical-ai-manager-opi service. It lives in the SAME docker/
+        # directory as the student compose, so its ./physical_ai_server/.s6-keep
+        # bind and the .env-driven references resolve exactly as the student
+        # file does. Native ARM64: no `runtime: nvidia`, no GPU layer. Same
+        # kind of validation — parse YAML, expand env, assert service-shape.
+        # Feed a fake .env with the opi-specific keys (BIND_HOST / subnet /
+        # gateway / follower flag) so substitution doesn't warn.
+        run: |
+          cd robotis_ai_setup/docker
+          cat > .env.opi <<'EOF'
+          FOLLOWER_PORT=/dev/ttyACM0
+          LEADER_PORT=/dev/ttyACM1
+          CAMERA_DEVICE_1=/dev/video0
+          CAMERA_NAME_1=gripper
+          CAMERA_DEVICE_2=/dev/video2
+          CAMERA_NAME_2=scene
+          ROS_DOMAIN_ID=30
+          REGISTRY=nettername
+          EDUBOTICS_BIND_HOST=0.0.0.0
+          EDUBOTICS_ROS_NET_SUBNET=172.28.0.0/24
+          EDUBOTICS_ROS_NET_GATEWAY=172.28.0.1
+          EDUBOTICS_FOLLOWER_ONLY=0
+          EOF
+          docker compose --env-file .env.opi -f docker-compose.opi.yml config > /dev/null
+      - name: Assert opi compose binds .s6-keep + manager healthcheck uses 127.0.0.1
+        # The same two structural invariants as the student file, re-asserted
+        # against the opi compose (docker compose config validates shape, not
+        # bind-mount targets or healthcheck semantics):
+        #   (1) the ./physical_ai_server/.s6-keep RO bind must be present, or
+        #       the ROS node never starts while the container reports healthy
+        #       (the TCP 9090 healthcheck passes but rosbridge is dead);
+        #   (2) the physical-ai-manager-opi healthcheck must hit
+        #       127.0.0.1/version.json — busybox wget resolves `localhost` to
+        #       ::1 first and nginx listens IPv4-only → perpetual unhealthy.
+        run: |
+          if ! grep -q '\.s6-keep' \
+               robotis_ai_setup/docker/docker-compose.opi.yml ; then
+            echo "::error::docker-compose.opi.yml must bind ./physical_ai_server/.s6-keep — removing it disables the ROS node inside the container"
+            exit 1
+          fi
+          if ! grep -q '127\.0\.0\.1/version\.json' \
+               robotis_ai_setup/docker/docker-compose.opi.yml ; then
+            echo "::error::physical-ai-manager-opi healthcheck must use 127.0.0.1/version.json, not localhost"
+            exit 1
+          fi
+          if grep -q 'localhost/version\.json' \
+                 robotis_ai_setup/docker/docker-compose.opi.yml ; then
+            echo "::error::physical-ai-manager-opi healthcheck still references localhost — busybox wget AAAA-first regression"
+            exit 1
+          fi
 
   env-forwarding-guard:
     # Every EDUBOTICS_* env var referenced by an entrypoint script
@@ -335,13 +407,15 @@ jobs:
             exit 0
           fi
           # The same names must appear on the LEFT of an `=` inside any
-          # `environment:` list in any compose file we ship. Includes
-          # the Jetson compose so follower-only mode counts as forwarded.
+          # `environment:` list in any compose file we ship. Includes the
+          # Jetson + Orange Pi composes so follower-only mode counts as
+          # forwarded on every target.
           # Uses POSIX [[:space:]] for portability across GNU + BSD sed.
           forwarded=$(
             grep -hoE '^[[:space:]]*-[[:space:]]*EDUBOTICS_[A-Z0-9_]+=' \
                 robotis_ai_setup/docker/docker-compose.yml \
                 robotis_ai_setup/docker/docker-compose.gpu.yml \
+                robotis_ai_setup/docker/docker-compose.opi.yml \
                 robotis_ai_setup/jetson_agent/docker-compose.jetson.yml \
               2>/dev/null \
               | sed -E 's/^[[:space:]]*-[[:space:]]*//;s/=.*//' \
@@ -818,6 +892,23 @@ jobs:
           sudo cp physical_ai_tools/physical_ai_manager/nginx.conf \
             /etc/nginx/sites-enabled/edubotics-student.conf
           sudo nginx -t
+      - name: nginx -t on opi template
+        run: |
+          # The opi (Orange Pi) manager nginx is a template with a single env
+          # placeholder (${EDUBOTICS_ROS_NET_GATEWAY} — the docker gateway the
+          # /api/system reverse proxy targets). Render it the way nginx:alpine's
+          # 20-envsubst-on-templates.sh does — ONLY that one var, so nginx's own
+          # runtime $vars ($host/$uri/$remote_addr/…) survive — then validate.
+          # Catches syntax drift in the /api/system proxy + /pi-mode.json blocks
+          # before they reach the Docker image (mirrors Dockerfile.opi's
+          # NGINX_ENVSUBST_FILTER="^EDUBOTICS_ROS_NET_GATEWAY$").
+          sudo rm -f /etc/nginx/sites-enabled/edubotics-student.conf
+          export EDUBOTICS_ROS_NET_GATEWAY=172.28.0.1
+          envsubst '$EDUBOTICS_ROS_NET_GATEWAY' \
+            < physical_ai_tools/physical_ai_manager/nginx.opi.conf.template \
+            > /tmp/nginx.opi.conf
+          sudo cp /tmp/nginx.opi.conf /etc/nginx/sites-enabled/edubotics-opi.conf
+          sudo nginx -t
 
   german-strings-lint:
     # Audit Tier-6: catch ae/oe/ue/ss transliterations inside any
@@ -842,6 +933,7 @@ jobs:
           #   - overlay layer (logs the user sees in TaskStatus / browser)
           #   - GUI tkinter strings
           #   - installer PowerShell strings
+          #   - Orange Pi agent (API error detail= / wizard-visible messages)
           # Skip code comments and docs (English/maintainer surfaces) by
           # only checking lines that contain a German marker prefix.
           # 'ss' false-positives on words like 'class' / 'pass' / 'less'
@@ -852,6 +944,7 @@ jobs:
             physical_ai_tools/physical_ai_server/physical_ai_server/ \
             robotis_ai_setup/gui/ \
             robotis_ai_setup/installer/ \
+            robotis_ai_setup/pi_agent/ \
             2>/dev/null || true)
           if [ -n "$OFFENDERS" ]; then
             echo "::error::German transliterations found in student-facing strings."

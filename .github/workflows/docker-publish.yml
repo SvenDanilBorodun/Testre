@@ -1,14 +1,19 @@
 name: docker-publish
 
-# Builds and publishes the three production Docker images:
+# Builds and publishes the production Docker images:
 #   - nettername/open-manipulator          (amd64)
 #   - nettername/physical-ai-server        (amd64)
 #   - nettername/physical-ai-manager       (amd64)
 #   - nettername/open-manipulator-jetson   (arm64)
 #   - nettername/physical-ai-server-jetson (arm64)
+#   - nettername/open-manipulator-opi      (arm64 — Orange Pi 5 Pro, CPU)
+#   - nettername/physical-ai-server-opi    (arm64 — Orange Pi 5 Pro, CPU)
+#   - nettername/physical-ai-manager-opi   (arm64 — Orange Pi 5 Pro)
 #
 # nettername/physical-ai-manager-jetson does NOT exist (manager only
-# runs on student PCs, not on Jetson).
+# runs on student PCs, not on Jetson). The Orange Pi (opi) flavor DOES
+# ship a manager — the Pi serves the React SPA itself (see build-images.sh
+# and physical_ai_manager/Dockerfile.opi).
 # nettername/robotis-ai-training is NOT built here — it's owned by
 # Modal now (see build-images.sh:395-397). The stale Docker Hub copy
 # is on the cleanup list in tools/docker-hub-cleanup.sh.
@@ -130,12 +135,16 @@ jobs:
     # native silicon. 60 min absorbs Docker Hub rate-limit retries.
     timeout-minutes: 60
     strategy:
-      fail-fast: false  # arm64 should still build if amd64 fails (or vice versa)
+      fail-fast: false  # each flavor should still build if another fails
       matrix:
         include:
           - platform: amd64
             runner: ubuntu-latest
           - platform: arm64
+            runner: ubuntu-24.04-arm
+          # opi (Orange Pi 5 Pro): arm64 too, but a CPU-only base + a manager.
+          # build-images.sh's PLATFORM=opi case handles the divergence.
+          - platform: opi
             runner: ubuntu-24.04-arm
     env:
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
@@ -159,8 +168,12 @@ jobs:
         # the remaining headroom (these jobs don't rely on the
         # preinstalled node/python tool cache, and we always `--pull`
         # our base images so the cached ones are dead weight).
-        # arm64 builds to 7.4 GB and skips this step.
-        if: matrix.platform == 'amd64'
+        # arm64 (Jetson) builds to 7.4 GB and fits the runner's default free
+        # space, so it SKIPS this step. opi RUNS it too (platform != 'arm64'):
+        # the opi leg builds the manager AND runs flatten_image's
+        # `docker export | import`, a ~15-18 GB transient peak that needs the
+        # same headroom as amd64 — more work than the Jetson arm64 leg.
+        if: matrix.platform != 'arm64'
         uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be  # v1.3.1
         with:
           tool-cache: true         # reclaims ~5 GB (no step needs node/python)
@@ -224,7 +237,8 @@ jobs:
     # 45 (was 15): the Hub-side retags are manifest-only (near-instant), but the
     # GHCR side is a CROSS-REGISTRY blob copy — `imagetools create` streams every
     # layer (~6 GB/repo, blobs deduped per repo so ~once each) from Docker Hub
-    # through the runner up to GHCR. ~30 GB across the 5 repos on the first push.
+    # through the runner up to GHCR. ~40 GB across the 8 repos on the first push
+    # (the 3 opi repos add a ~5-6 GB server + two small thin layers).
     timeout-minutes: 45
     # packages: write is needed to push to GHCR via GITHUB_TOKEN. Per-job (not
     # workflow-level) keeps the grant scoped to the only job that pushes. NOTE
@@ -273,6 +287,8 @@ jobs:
 
           AMD64_REPOS="open-manipulator physical-ai-server physical-ai-manager"
           ARM64_REPOS="open-manipulator-jetson physical-ai-server-jetson"
+          # Orange Pi 5 Pro (arm64, CPU) — includes a manager, unlike the Jetson set.
+          OPI_REPOS="open-manipulator-opi physical-ai-server-opi physical-ai-manager-opi"
 
           # _tag_exists: FREE existence probe via the Docker Hub web API
           # (hub.docker.com), which is NOT the registry pull endpoint and does
@@ -328,7 +344,7 @@ jobs:
             _retag_be "${HUB}/${repo}:${tag}" "$source"
           }
 
-          for REPO in $AMD64_REPOS $ARM64_REPOS; do
+          for REPO in $AMD64_REPOS $ARM64_REPOS $OPI_REPOS; do
             HUB_SRC="${HUB}/${REPO}:${SRC_TAG}"     # :latest pushed by build-images.sh
             GHCR_SRC="${GHCR}/${REPO}:${SRC_TAG}"   # :latest seeded on GHCR below
 
@@ -363,7 +379,9 @@ jobs:
           set -e
           HUB="nettername"
           GHCR="ghcr.io/svendanilborodun"
-          REPOS="open-manipulator physical-ai-server physical-ai-manager open-manipulator-jetson physical-ai-server-jetson"
+          # NOTE: this is the SECOND hardcoded repo list (the retag step above has
+          # the first, AMD64_REPOS/ARM64_REPOS/OPI_REPOS) — keep BOTH in sync.
+          REPOS="open-manipulator physical-ai-server physical-ai-manager open-manipulator-jetson physical-ai-server-jetson open-manipulator-opi physical-ai-server-opi physical-ai-manager-opi"
           # Top-level manifest digest of a ref (the `Digest:` header line).
           _top() {
             docker buildx imagetools inspect "$1" 2>/dev/null | awk '/^Digest:/{print $2; exit}'
@@ -505,6 +523,16 @@ jobs:
             arm_repo: open-manipulator-jetson
             # No manager-jetson repo (manager only ships on student PCs).
             manager_repo: ""
+          # opi (Orange Pi 5 Pro): arm64 CPU flavor, and it DOES ship a manager
+          # (the Pi serves the SPA), so the bundle-grep step runs for opi too.
+          # ROS-jazzy / dynamixel_sdk / arch-sanity / image_source_parity are all
+          # matrix-driven and cover opi automatically. Its size gate is a separate
+          # opi-only step (the amd64 CUDA-slim gate stays amd64-gated).
+          - platform: opi
+            runner: ubuntu-24.04-arm
+            server_repo: physical-ai-server-opi
+            arm_repo: open-manipulator-opi
+            manager_repo: physical-ai-manager-opi
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
@@ -515,7 +543,7 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Pull + grep manager bundle for inlined env (amd64 only)
+      - name: Pull + grep manager bundle for inlined env (amd64 + opi)
         if: matrix.manager_repo != ''
         # Lifts the assertion build-images.sh already does at lines 226-243.
         # If the React build skipped a build-arg, the placeholder won't be in
@@ -571,6 +599,34 @@ jobs:
             exit 1
           fi
           echo "OK: amd64 server image is CUDA-slimmed (${SIZE} bytes)."
+      - name: Assert opi server image size ceiling
+        if: matrix.platform == 'opi'
+        # The opi (Orange Pi) server base is CPU-only from the start (plain PyPI
+        # torch 2.7.0, no CUDA — Dockerfile.arm64cpu), and build-images.sh
+        # FLATTENs the thin image so the layer/whiteout overhead is reclaimed. A
+        # regression that let CUDA/GPU torch or the fat base layers slip in would
+        # blow past this ceiling. Gate on REAL uncompressed bytes (docker image
+        # inspect .Size), not a `find … nvidia`. The image is already pulled by
+        # the ROS-Jazzy step above. Separate from (and lower than) the amd64
+        # CUDA-slim gate — do NOT fold the two. (The arm64 *-jetson image KEEPS
+        # CUDA and has no size gate at all.)
+        run: |
+          set -e
+          SIZE=$(docker image inspect ghcr.io/svendanilborodun/${{ matrix.server_repo }}:latest --format '{{.Size}}')
+          # .Size is UNCOMPRESSED on-disk bytes. The opi CPU-only server targets
+          # ~5-6 GB (ROS + torch-cpu + transformers + opencv, no CUDA). 11 GB is
+          # a PROVISIONAL ceiling (matching the amd64 gate) — the previous 7 GB
+          # left only ~1.2x headroom, so a first real build near 7 GB would
+          # falsely FAIL the release. 11 GB still catches a CUDA/fat-base
+          # regression (a GPU-torch/CUDA server is ~16 GB). Re-calibrate down
+          # once a real opi build's .Size is measured.
+          CEIL=$((11 * 1000 * 1000 * 1000))
+          echo "physical-ai-server-opi image .Size: ${SIZE} bytes (uncompressed; ceiling ${CEIL})"
+          if [ "$SIZE" -ge "$CEIL" ]; then
+            echo "::error::opi physical-ai-server is ${SIZE} bytes (>= ${CEIL}) — CUDA/fat base slipped in or the flatten did not take effect."
+            exit 1
+          fi
+          echo "OK: opi server image is within the size ceiling (${SIZE} bytes)."
       - name: Pull + assert open-manipulator has Dynamixel SDK
         run: |
           docker pull ghcr.io/svendanilborodun/${{ matrix.arm_repo }}:latest
@@ -588,6 +644,7 @@ jobs:
           case "${{ matrix.platform }}" in
             amd64) EXPECTED="x86_64" ;;
             arm64) EXPECTED="aarch64" ;;
+            opi)   EXPECTED="aarch64" ;;
           esac
           if [ "$UNAME_M" != "$EXPECTED" ]; then
             echo "::error::Runner arch mismatch: uname -m = $UNAME_M, expected $EXPECTED"

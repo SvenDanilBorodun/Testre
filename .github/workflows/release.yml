@@ -12,10 +12,13 @@ name: release
 #   W3 railway-deploy-teacher-web
 #       │
 #       ▼
-#   W4 docker-publish
+#   W4 docker-publish        (builds + pushes 3 amd64 + 2 jetson + 3 -opi images)
 #       │
 #       ▼
 #   W5 release-installer
+#       │
+#       ▼
+#   W5b pi-agent-tarball     (attaches edubotics-pi-agent.tar.gz for the Orange Pi)
 #       │
 #       ▼
 #   W6 publish-gui-version
@@ -24,6 +27,16 @@ name: release
 # auto-update poll directs students at the `:vX.Y.Z` image tags that
 # docker-publish pushes, so attaching the .exe before those tags exist
 # causes first-boot pull 404 on every student that picks up the update.
+#
+# pi-agent-tarball (W5b) is W5-adjacent — it packages the Orange Pi agent
+# (robotis_ai_setup/pi_agent/) into edubotics-pi-agent.tar.gz and attaches it
+# to the SAME GH Release, so the Pi's SHA-256-verified self-update
+# (pi_agent/update_checker.py) has an asset to fetch. It runs AFTER the
+# installer created the Release and BEFORE W6, so W6 can hash the exact
+# attached tarball into PI_AGENT_SHA256 (attach-asset-first, advertise-last —
+# the same race-safety the .exe hash already has). The -opi container images
+# ride W4 via docker-publish's existing matrix; W5b handles ONLY the agent
+# tarball, not the images.
 #
 # publish-gui-version (W6) MUST run AFTER release-installer — it flips the
 # Railway GUI_VERSION/GUI_DOWNLOAD_URL env vars that drive the student
@@ -79,6 +92,9 @@ concurrency:
 #   railway-deploy-*.yml   → contents: read
 #   docker-publish.yml     → contents: read + packages: write (GHCR push)
 #   release-installer.yml  → contents: write (GH-Release asset upload)
+# The pi-agent-tarball job (W5b) is an INLINE job (not a `uses:` callee), so the
+# superset rule does not apply to it — it simply grants its own contents: write
+# for the softprops asset upload.
 permissions: {}
 
 jobs:
@@ -153,6 +169,91 @@ jobs:
     uses: ./.github/workflows/release-installer.yml
     secrets: inherit
 
+  # ── W5b: Package + attach the Orange Pi agent tarball (W5-adjacent) ──
+  #
+  # Builds edubotics-pi-agent.tar.gz from robotis_ai_setup/pi_agent/ (the exact
+  # name pi_agent/update_checker.py::AGENT_ASSET_NAME expects) and attaches it
+  # to the SAME GH Release the installer just created. The tarball's top-level
+  # is `pi_agent/`, so the agent's self-update — which unpacks over
+  # /opt/edubotics (agent.py::_apply_agent_update_and_restart) — refreshes
+  # /opt/edubotics/pi_agent/ and keeps `python3 -m pi_agent.agent` working.
+  #
+  # Runs AFTER the installer (the Release must exist) and BEFORE W6 (which
+  # hashes the exact attached tarball into PI_AGENT_SHA256). Tag-push only, for
+  # the same reason as W6: on workflow_dispatch there is no Release to attach to.
+  pi-agent-tarball:
+    name: W5b. Build + attach pi-agent tarball
+    needs: [installer]
+    if: always() && needs.installer.result == 'success' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write  # softprops/action-gh-release: attach the tarball asset
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Build edubotics-pi-agent.tar.gz
+        run: |
+          set -e
+          # VERSION-drift fix: bake the repo-root VERSION into the tarball as
+          # pi_agent/VERSION so the extracted agent knows the exact release it
+          # shipped from (pi_agent/constants.py PREFERS this packaged file over
+          # its baked-in literal fallback). Copied into the package tree just
+          # before tar and removed after, so the checkout tree stays clean.
+          cp VERSION robotis_ai_setup/pi_agent/VERSION
+          # Package the pi_agent/ package as the tarball's top-level directory,
+          # excluding tests + bytecode (they never ship). `-C robotis_ai_setup`
+          # keeps the archive members rooted at `pi_agent/...`.
+          tar \
+            --exclude='pi_agent/tests' \
+            --exclude='pi_agent/tests/*' \
+            --exclude='*/__pycache__/*' \
+            --exclude='*/__pycache__' \
+            --exclude='__pycache__' \
+            --exclude='*.pyc' \
+            -czf edubotics-pi-agent.tar.gz \
+            -C robotis_ai_setup pi_agent
+          rm -f robotis_ai_setup/pi_agent/VERSION
+          echo "Tarball contents (first 20 entries):"
+          tar -tzf edubotics-pi-agent.tar.gz | head -20
+          # Sanity gates: the agent entry-point must be present, tests must not.
+          if ! tar -tzf edubotics-pi-agent.tar.gz | grep -q '^pi_agent/agent\.py$'; then
+            echo "::error::edubotics-pi-agent.tar.gz is missing pi_agent/agent.py"
+            exit 1
+          fi
+          if tar -tzf edubotics-pi-agent.tar.gz | grep -q '^pi_agent/tests/'; then
+            echo "::error::edubotics-pi-agent.tar.gz unexpectedly contains pi_agent/tests/"
+            exit 1
+          fi
+          # VERSION gate: the packaged pi_agent/VERSION must exist AND match the
+          # repo-root VERSION this release built from (guards a silent drift if
+          # the cp above ever regresses).
+          if ! tar -tzf edubotics-pi-agent.tar.gz | grep -q '^pi_agent/VERSION$'; then
+            echo "::error::edubotics-pi-agent.tar.gz is missing pi_agent/VERSION"
+            exit 1
+          fi
+          PKG_VERSION="$(tar -xzOf edubotics-pi-agent.tar.gz pi_agent/VERSION | tr -d '[:space:]')"
+          REPO_VERSION="$(tr -d '[:space:]' < VERSION)"
+          if [ "$PKG_VERSION" != "$REPO_VERSION" ]; then
+            echo "::error::packaged pi_agent/VERSION ($PKG_VERSION) != repo VERSION ($REPO_VERSION)"
+            exit 1
+          fi
+          echo "OK: packaged pi_agent/VERSION = $PKG_VERSION"
+          ls -la edubotics-pi-agent.tar.gz
+
+      - name: Attach pi-agent tarball to GitHub Release (tag pushes only)
+        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda  # v3.0.0
+        with:
+          files: edubotics-pi-agent.tar.gz
+          fail_on_unmatched_files: true
+          # Explicit token — softprops v3.0.0's implicit GITHUB_TOKEN discovery
+          # fails under workflow_call/tag chains (same fix as release-installer.yml).
+          token: ${{ secrets.GITHUB_TOKEN }}
+          draft: false
+          prerelease: false
+
   # ── W6: Flip the student auto-update gate (must run AFTER the installer
   # .exe is attached to the GH Release, so /version never advertises a
   # version whose download asset 404s) ──
@@ -168,8 +269,19 @@ jobs:
   # is skipped (no tag), so there's no asset to advertise.
   publish-gui-version:
     name: W6. Publish GUI auto-update gate
-    needs: [installer]
-    if: always() && needs.installer.result == 'success' && startsWith(github.ref, 'refs/tags/v')
+    # Also needs pi-agent-tarball: W6 hashes the EXACT attached Pi tarball into
+    # PI_AGENT_SHA256, so when it IS attached the asset must already be on the
+    # Release. But the gate is `!= 'failure'` (success OR skipped), NOT
+    # `== 'success'`: the mature Windows .exe auto-update advertisement must not
+    # be blocked by a transient Pi-tarball attach hiccup. The PI_AGENT_SHA256
+    # curl below already degrades to empty-on-failure, so a missing Pi tarball
+    # advertises NO Pi hash (never a stale one) instead of blocking the release.
+    needs: [installer, pi-agent-tarball]
+    if: >-
+      always()
+      && needs.installer.result == 'success'
+      && needs.pi-agent-tarball.result != 'failure'
+      && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions: {}  # talks only to Railway via RAILWAY_TOKEN; no GITHUB_TOKEN use
@@ -207,11 +319,29 @@ jobs:
             echo "::warning::could not download the installer asset to hash it — advertising version without an integrity hash (GUI falls back to the Content-Length guard)"
           fi
 
+          # Hash the EXACT edubotics-pi-agent.tar.gz that W5b just attached, so
+          # /version can advertise a hash the Pi agent verifies before unpacking
+          # the tarball over the running agent (pi_agent/update_checker.py). Same
+          # empty-on-failure / never-stale posture as the installer hash: on a
+          # download failure ADVERTISE NO HASH — a stale one would make every Pi
+          # reject the new tarball against the previous release's checksum.
+          PI_AGENT_URL="https://github.com/${GIT_REPO}/releases/download/${TAG}/edubotics-pi-agent.tar.gz"
+          PI_SHA=""
+          if curl -fsSL --retry 3 -o /tmp/edubotics-pi-agent.tar.gz "$PI_AGENT_URL"; then
+            PI_SHA="$(sha256sum /tmp/edubotics-pi-agent.tar.gz | awk '{print $1}')"
+            echo "  pi-agent sha256=${PI_SHA}"
+          else
+            echo "::warning::could not download the pi-agent tarball to hash it — advertising version without a Pi integrity hash (agent falls back to the Content-Length guard)"
+          fi
+
           # Set the non-triggering vars first with --skip-deploys, then
           # GUI_VERSION WITHOUT it so exactly ONE redeploy fires and picks up
-          # all four atomically (mirrors railway-deploy-cloud-api.yml's
-          # BUILD_COMMIT pattern). GUI_INSTALLER_SHA256 is always set (to $SHA
-          # or empty) so it can never be stale from a prior release.
+          # all of them atomically (mirrors railway-deploy-cloud-api.yml's
+          # BUILD_COMMIT pattern). GUI_INSTALLER_SHA256 + PI_AGENT_SHA256 are
+          # always set (to their hash or empty) so neither can be stale from a
+          # prior release. The Pi's download URL is DERIVED cloud-side from
+          # GUI_RELEASE_REPO + GUI_VERSION (routes/version.py), so there is no
+          # separate PI_AGENT_DOWNLOAD_URL var to set here.
           railway variable set "GUI_RELEASE_REPO=${GIT_REPO}" \
               --service scintillating-empathy --environment production \
               --skip-deploys >/dev/null
@@ -221,9 +351,12 @@ jobs:
           railway variable set "GUI_INSTALLER_SHA256=${SHA}" \
               --service scintillating-empathy --environment production \
               --skip-deploys >/dev/null
+          railway variable set "PI_AGENT_SHA256=${PI_SHA}" \
+              --service scintillating-empathy --environment production \
+              --skip-deploys >/dev/null
           railway variable set "GUI_VERSION=${VERSION}" \
               --service scintillating-empathy --environment production >/dev/null
-          echo "  set GUI_RELEASE_REPO, GUI_DOWNLOAD_URL, GUI_INSTALLER_SHA256, GUI_VERSION (redeploy triggered)"
+          echo "  set GUI_RELEASE_REPO, GUI_DOWNLOAD_URL, GUI_INSTALLER_SHA256, PI_AGENT_SHA256, GUI_VERSION (redeploy triggered)"
       - name: Verify /version advertises the new release
         env:
           GIT_REF_NAME: ${{ github.ref_name }}

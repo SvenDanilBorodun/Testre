@@ -38,6 +38,7 @@ case "$KIND" in
     rm -rf /tmp/parity_repo/test \
            /tmp/parity_repo/Dockerfile.amd64 \
            /tmp/parity_repo/Dockerfile.arm64 \
+           /tmp/parity_repo/Dockerfile.arm64cpu \
            /tmp/parity_repo/CHANGELOG.rst
     strip_pyc /tmp/parity_repo
     extract /root/ros2_ws/src/physical_ai_tools/physical_ai_server /tmp/parity_img

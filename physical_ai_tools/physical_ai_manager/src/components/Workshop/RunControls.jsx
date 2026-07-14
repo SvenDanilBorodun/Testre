@@ -27,6 +27,7 @@ import { useRosServiceCaller } from '../../hooks/useRosServiceCaller';
 import * as workflowApi from '../../services/workflowApi';
 import { collectReplayNames } from './blocks/trajectories';
 import { DE } from './blocks/messages_de';
+import { rsControlBase, usePiMode } from '../../utils/piMode';
 
 const BUTTON_BASE =
   'inline-flex items-center justify-center min-h-[36px] '
@@ -44,7 +45,11 @@ const BUTTON_BASE =
 // the run button until the student has flipped to follower-only via the toggle.
 // When the bridge is ABSENT (Jetson/cloud/old GUI), there is no leader to fight
 // — Roboter Studio there is follower-only by construction — so we never block.
-const RS_CONTROL_BASE = 'http://localhost:8769';
+// The base is Windows-loopback (:8769) OR the Pi's same-origin /api/system proxy
+// (rsControlBase, utils/piMode) — a remote browser can't reach the student PC's
+// localhost. The base is derived from the LIVE `piMode` context value and the
+// first probe waits for `piModeResolved`, so a boot-window probe on a Pi never
+// mis-routes to the loopback base before the marker resolves.
 const RS_STATUS_TIMEOUT_MS = 4000;
 const RS_STATUS_POLL_MS = 8000;
 
@@ -79,11 +84,11 @@ function readStoredTempo(fallback) {
   }
 }
 
-async function probeRsStatus() {
+async function probeRsStatus(base) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), RS_STATUS_TIMEOUT_MS);
   try {
-    const res = await fetch(`${RS_CONTROL_BASE}/roboter-studio/status`, { signal: ctrl.signal });
+    const res = await fetch(`${base}/roboter-studio/status`, { signal: ctrl.signal });
     if (!res.ok) return { available: false, followerOnly: false };
     const body = await res.json().catch(() => ({}));
     return { available: true, followerOnly: !!body.follower_only };
@@ -165,7 +170,7 @@ function RunControls({
   // when present, else the stored localStorage value, else normal (1.0).
   // The seed is INTENTIONALLY one-shot (no reconciling effect on later
   // simScene.tempo changes): localStorage has priority and is the sole owner —
-  // there is no DB/sim_scene writer for tempo (see the RS_CONTROL_BASE block
+  // there is no DB/sim_scene writer for tempo (see the leader-contention block
   // comment), so tracking simScene.tempo would only fight that priority and is
   // inert in practice. Add a reconciling effect only once a real DB writer ships.
   const [tempo, setTempo] = useState(() => {
@@ -186,22 +191,30 @@ function RunControls({
     }
   }, []);
 
-  // Leader-contention gate (see RS_CONTROL_BASE comment above). true ONLY when
+  // Leader-contention gate (see the leader-contention comment above). true ONLY when
   // the bridge is reachable AND the leader is on; false while probing, on any
   // probe error, and on Jetson/cloud (no bridge) — i.e. it fails open.
   const [rsLeaderOn, setRsLeaderOn] = useState(false);
+  // Pi mode from context (never the synchronous module cache): `piMode` selects
+  // the control base and `piModeResolved` gates the FIRST probe so it can't fire
+  // with the loopback default during the boot window on a Pi.
+  const { piMode, piModeResolved } = usePiMode();
 
   const isRunning = runState === 'running' || phase === 'running' || paused;
 
   // Poll the GUI control bridge so the gate tracks the leader toggle live (the
   // student flips it from the same header). Only block on a POSITIVE answer
   // (bridge present AND leader on); any unreachable/error result fails open so a
-  // transient probe hiccup never wedges the run button.
+  // transient probe hiccup never wedges the run button. Held until Pi mode has
+  // resolved (piModeResolved) so rsControlBase(piMode) never routes to the
+  // loopback base during the Pi boot window; a missing provider resolves
+  // immediately (default context), so Windows behaviour is unchanged.
   useEffect(() => {
+    if (!piModeResolved) return undefined;
     let cancelled = false;
     let intervalId = null;
     const tick = async () => {
-      const { available, followerOnly } = await probeRsStatus();
+      const { available, followerOnly } = await probeRsStatus(rsControlBase(piMode));
       if (cancelled) return;
       setRsLeaderOn(available && !followerOnly);
     };
@@ -211,7 +224,7 @@ function RunControls({
       cancelled = true;
       if (intervalId) clearInterval(intervalId);
     };
-  }, []);
+  }, [piMode, piModeResolved]);
 
   // Track the block ids we last warned on so a rerun without warnings
   // clears the previous bubbles. Audit round-3 §K — the prior version

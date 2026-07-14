@@ -30,6 +30,7 @@ import toast from 'react-hot-toast';
 import ROSLIB from 'roslib';
 import TaskPhase from '../../constants/taskPhases';
 import rosConnectionManager from '../../utils/rosConnectionManager';
+import { rsControlBase, usePiMode } from '../../utils/piMode';
 
 // Switching the leader on/off recreates the open_manipulator container, which
 // blips /joint_states + the camera topics. Doing that DURING an active
@@ -41,10 +42,15 @@ const TASK_BUSY_PHASES = new Set([
   TaskPhase.INFERENCE_LOADING,
 ]);
 
-// Fixed loopback port the GUI control bridge binds (roboter_studio_control.py
-// DEFAULT_PORT). The browser runs on the Windows host, so localhost resolves to
-// the GUI process even though this app is served from the container.
-const RS_CONTROL_BASE = 'http://localhost:8769';
+// Where the Roboter-Studio control bridge lives (rsControlBase, utils/piMode):
+//   • Windows: the GUI's loopback bridge http://localhost:8769
+//     (roboter_studio_control.py) — localhost resolves to the GUI process even
+//     though this app is served from the container.
+//   • Orange Pi: the SAME contract served SAME-ORIGIN via /api/system (from a
+//     remote browser localhost:8769 would resolve to the student's own PC).
+// The base is derived from the LIVE `piMode` context value (not the module
+// cache) and the first probe waits for `piModeResolved`, so a boot-window probe
+// on a Pi never mis-routes to the loopback base before the marker resolves.
 // The /status probe is fast; the leader toggle handler runs `docker compose up
 // --force-recreate` SYNCHRONOUSLY on the GUI side (~15-180 s) before replying —
 // so the POST needs a long timeout, else every successful toggle looks failed.
@@ -82,11 +88,11 @@ const PREP_TICK_MS = 500;
 const PREP_SCENE_TOPIC = '/scene/image_raw/compressed';
 const PREP_JOINTS_TOPIC = '/joint_states';
 
-async function rsFetch(path, options = {}, timeoutMs = STATUS_TIMEOUT_MS) {
+async function rsFetch(base, path, options = {}, timeoutMs = STATUS_TIMEOUT_MS) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
-    const res = await fetch(`${RS_CONTROL_BASE}${path}`, { ...options, signal: ctrl.signal });
+    const res = await fetch(`${base}${path}`, { ...options, signal: ctrl.signal });
     const body = await res.json().catch(() => ({}));
     return { ok: res.ok, status: res.status, body };
   } finally {
@@ -105,6 +111,10 @@ const boxStyle = {
 const modalStyle = { ...boxStyle, textAlign: 'left' };
 
 export default function LeaderToggle({ isActive }) {
+  // Pi mode from context (never the synchronous module cache): `piMode` selects
+  // the control base and `piModeResolved` gates the FIRST probe so it can't fire
+  // with the loopback default during the boot window on a Pi.
+  const { piMode, piModeResolved } = usePiMode();
   // available: null = probing, false = no bridge (Jetson/cloud → hidden), true = present
   const [available, setAvailable] = useState(null);
   const [followerOnly, setFollowerOnly] = useState(false);
@@ -149,7 +159,7 @@ export default function LeaderToggle({ isActive }) {
 
   const refreshStatus = useCallback(async () => {
     try {
-      const { ok, body } = await rsFetch('/roboter-studio/status');
+      const { ok, body } = await rsFetch(rsControlBase(piMode), '/roboter-studio/status');
       if (ok) {
         setAvailable(true);
         setFollowerOnly(!!body.follower_only);
@@ -160,10 +170,14 @@ export default function LeaderToggle({ isActive }) {
     } catch (e) {
       setAvailable(false);
     }
-  }, []);
+  }, [piMode]);
 
   useEffect(() => {
-    if (!isActive) return undefined;
+    // Hold the first probe until Pi mode has resolved (piModeResolved), so
+    // rsControlBase(piMode) never routes to the loopback base during the Pi boot
+    // window. A missing provider resolves immediately (default context), so
+    // Windows behaviour is unchanged.
+    if (!isActive || !piModeResolved) return undefined;
     refreshStatus();
     // Light background re-probe so a flip from another tab/surface is reflected
     // here. Skipped while this tab is mid-toggle (busyRef) to protect the
@@ -172,7 +186,7 @@ export default function LeaderToggle({ isActive }) {
       if (!busyRef.current && !preparingRef.current) refreshStatus();
     }, STATUS_POLL_MS);
     return () => clearInterval(intervalId);
-  }, [isActive, refreshStatus]);
+  }, [isActive, piModeResolved, refreshStatus]);
 
   const doToggle = useCallback(async (disable) => {
     setBusy(true);
@@ -182,7 +196,7 @@ export default function LeaderToggle({ isActive }) {
     let enteredPrep = false;
     try {
       const path = disable ? '/roboter-studio/leader-disable' : '/roboter-studio/leader-enable';
-      const { ok, body } = await rsFetch(path, { method: 'POST' }, TOGGLE_TIMEOUT_MS);
+      const { ok, body } = await rsFetch(rsControlBase(piMode), path, { method: 'POST' }, TOGGLE_TIMEOUT_MS);
       if (ok && body.ok) {
         setFollowerOnly(disable);
         toast.success(body.message || (disable ? 'Roboter Studio bereit.' : 'Leader verbunden.'));
@@ -212,7 +226,7 @@ export default function LeaderToggle({ isActive }) {
       // successful one refreshes the badge when the readiness effect clears.
       if (!enteredPrep) setTimeout(refreshStatus, 2000);
     }
-  }, [refreshStatus]);
+  }, [refreshStatus, piMode]);
 
   // Readiness effect (Option A): while „preparing", watch the browser-observed
   // signals that the arm container is back — the scene camera delivering frames

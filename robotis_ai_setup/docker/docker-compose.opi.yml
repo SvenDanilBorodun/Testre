@@ -1,0 +1,472 @@
+# EduBotics compose stack for the Orange Pi 5 Pro (arm64, native Linux) —
+# the `-opi` image flavor. See docs/ORANGE_PI_DEPLOY_PLAN.md §5 for the
+# full rationale. This is a THREE-WAY MERGE, not a Jetson derivative
+# ("Jetson minus NVIDIA" silently drops leader support, calibration
+# persistence and the whole recording/Roboter-Studio env surface):
+#
+#   * FROM the student docker-compose.yml: the full ~50-entry EDUBOTICS_*
+#     `environment:` forwarding surface (recording / calibration /
+#     collision / Roboter-Studio all fail-open without it — the Jetson
+#     file forwards only ROS_DOMAIN_ID + HF_TOKEN), the
+#     ai_workspace / huggingface_cache / edubotics_calib volume set (the
+#     Jetson file has jetson_* names and NO calib volume — miss it and
+#     every container recreate wipes Roboter-Studio calibration AND the
+#     factory-reset volume-suffix rm mismatches), the `.env`-driven
+#     reference style (${ROS_DOMAIN_ID:-30}, HF_TOKEN=${HF_TOKEN:-} — the
+#     Jetson file's bare host-passthrough + HF_TOKEN=${EDUBOTICS_HF_TOKEN}
+#     would detach compose from the agent-managed .env), full LEADER
+#     support (LEADER_PORT + `.env`-driven EDUBOTICS_FOLLOWER_ONLY, never
+#     hardcoded — the Roboter-Studio leader toggle regenerates exactly
+#     that key), the tzdata + .s6-keep read-only mounts, pids_limit,
+#     SYS_NICE + rtprio, and the bare container_names (the pi-agent, like
+#     the GUI, targets both compose service names AND
+#     `docker inspect physical_ai_manager` by container name).
+#   * FROM the Jetson docker-compose.jetson.yml: the pure-usb_cam
+#     healthcheck shape (CMD/bash — NOT the student file's WSL2 `uname`
+#     inline branch, which a native-Linux Pi never wants) and the
+#     always-on manager precedent (restart: unless-stopped). NVIDIA wiring
+#     is DROPPED: no `runtime: nvidia` (the Pi's Mali-G610 has no CUDA),
+#     and docker-compose.gpu.yml must NEVER be layered on the Pi.
+#   * NEW in this file: physical_ai_manager as a THIRD service (the
+#     always-on wizard host), the ${EDUBOTICS_BIND_HOST}-driven port
+#     bindings (the agent's `.env` regenerate maps EDUBOTICS_LAN_OPEN onto
+#     0.0.0.0 vs 127.0.0.1), the pinned-but-configurable ros_net IPAM
+#     block (the /api/system reverse proxy targets the gateway
+#     deterministically), and EDUBOTICS_CAMERA_SOURCE pinned to usb_cam.
+#
+# LIFECYCLE — two tiers (§5):
+#   * MANAGER TIER (always-on): physical_ai_manager is
+#     `restart: unless-stopped` and the pi-agent also brings it up at boot
+#     (`up -d --force-recreate --no-deps physical_ai_manager`). This is a
+#     DELIBERATE, sanctioned exception to the student compose's
+#     "restart: no / the GUI owns the whole lifecycle" invariant — the
+#     SAME category as the Jetson's always-on services. On the Pi the
+#     wizard IS the React app this container serves, so it must be up
+#     before the student can ever press "Umgebung starten" (chicken-and-
+#     egg otherwise). It therefore has NO `depends_on: physical_ai_server`
+#     — it must serve the wizard while the robot tier is down.
+#   * ROBOT TIER (student-owned): open_manipulator + physical_ai_server
+#     stay `restart: "no"` and come up only on "Umgebung starten" — the
+#     Dynamixel-serial-bus lesson (student docker-compose.yml header)
+#     survives where it matters. The pi-agent NEVER runs `compose down`
+#     for ANY operation (that would delete ros_net and kill the manager's
+#     gateway listener); it stops + `rm -f` the robot tier only,
+#     preserving the graceful SIGTERM so the entrypoint's torque-disable
+#     trap still runs.
+#
+# Native-Linux Pi facts: cameras are in-container v4l2 (usb_cam) — the
+# Windows native capture bridge (:5557), usbipd and the WSL keepalive do
+# NOT exist here, so there is no 5557 publish. Both arms plug straight
+# into the Pi; teleop + the collision e-stop run unchanged (Rule §2 paths
+# untouched — this file only wires the host-side lifecycle/ports).
+
+services:
+  open_manipulator:
+    container_name: open_manipulator
+    image: ${REGISTRY:-ghcr.io/svendanilborodun}/open-manipulator-opi:${IMAGE_TAG:-latest}
+    tty: true
+    # Robot tier: GUI/agent owns the lifecycle — never resurrect on its
+    # own (holds the Dynamixel serial bus before an arm scan). Only the
+    # manager below is always-on.
+    restart: "no"
+    cap_add:
+      - SYS_NICE
+    ulimits:
+      rtprio: 99
+      rttime: -1
+      # memlock cut from the student/Jetson 8428281856 (~7.85 GB) to 2 GB:
+      # locking ~7.85 GB on an 8 GB board leaves nothing for the OS. 2 GB
+      # is ample for the 100 Hz ros2_control DDS shared-memory segments.
+      memlock: 2147483648
+    networks:
+      - ros_net
+    # No published ports on the Pi: 5557 (native-bridge camera ingest)
+    # does not exist here (usb_cam captures in-container), and this
+    # service exposes nothing else externally. rosbridge/web_video live on
+    # physical_ai_server, the SPA on physical_ai_manager.
+    environment:
+      - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-30}
+      - FOLLOWER_PORT=${FOLLOWER_PORT}
+      # LEADER support is REAL on the Pi (both arms plugged in). Unlike the
+      # Jetson file (which hardcodes follower-only and has no leader
+      # device), LEADER_PORT stays `.env`-driven: the agent writes it in
+      # the both-arms path and OMITS it (→ empty) when the Roboter-Studio
+      # leader toggle regenerates the `.env` with EDUBOTICS_FOLLOWER_ONLY=1.
+      - LEADER_PORT=${LEADER_PORT}
+      - CAMERA_DEVICE_1=${CAMERA_DEVICE_1:-}
+      - CAMERA_NAME_1=${CAMERA_NAME_1:-gripper}
+      - CAMERA_DEVICE_2=${CAMERA_DEVICE_2:-}
+      # CAMERA_NAME_2 default is EMPTY (not "scene") so a SINGLE-camera
+      # config (the Roboter Studio kit: one scene camera → CAMERA_NAME_1
+      # set, CAMERA_NAME_2 empty) is distinguishable from a 2-camera rig
+      # inside the container. The healthcheck below gates its 2nd-camera
+      # topic probe on CAMERA_DEVICE_2 being non-empty.
+      - CAMERA_NAME_2=${CAMERA_NAME_2:-}
+      # Camera tuning knobs. Without these, entrypoint_omx.sh's `:-yuyv`
+      # etc. defaults always win and any per-rig override in the `.env`
+      # never reaches the container (compose ${VAR} interpolation operates
+      # on the YAML only — the container runtime env is whatever this list
+      # specifies). Native default stays `yuyv`: entrypoint_omx.sh flips to
+      # `mjpeg2rgb` only on the WSL2 kernel (vhci_hcd bandwidth), which a
+      # native Pi is not — but on the Pi `mjpeg2rgb` burns ~60 % of an ARM
+      # core, so it is the operator FALLBACK (set here) if a rig's port
+      # layout forces both cameras onto one USB2 bus, not the default.
+      # `raw_mjpeg` is intentionally unsupported (broken in usb_cam 0.8.1,
+      # ros-drivers/usb_cam#346 — green tiles).
+      - EDUBOTICS_CAMERA_PIXEL_FORMAT=${EDUBOTICS_CAMERA_PIXEL_FORMAT:-yuyv}
+      - EDUBOTICS_CAMERA_WIDTH=${EDUBOTICS_CAMERA_WIDTH:-640}
+      - EDUBOTICS_CAMERA_HEIGHT=${EDUBOTICS_CAMERA_HEIGHT:-480}
+      - EDUBOTICS_CAMERA_FRAMERATE=${EDUBOTICS_CAMERA_FRAMERATE:-30.0}
+      # Host USB-bridge type. Auto-detected inside entrypoint_omx.sh via
+      # `uname -r` (Microsoft kernel ⇒ vhci_hcd, else native — the Pi is
+      # native). Forwarded so an operator can pin it for testing and so the
+      # env-forwarding-guard CI job stays green. Empty default = auto-detect.
+      - EDUBOTICS_HOST_USB_BRIDGE=${EDUBOTICS_HOST_USB_BRIDGE:-}
+      # Follower-only (Roboter Studio) — `.env`-driven, NEVER hardcoded to
+      # 1: the leader toggle regenerates exactly this key (both-arms → 0,
+      # follower-only → 1). The Jetson file pins =1; the Pi must not.
+      - EDUBOTICS_FOLLOWER_ONLY=${EDUBOTICS_FOLLOWER_ONLY:-0}
+      # Camera capture source pinned EXPLICITLY to usb_cam (in-container
+      # V4L2) — NOT left to the entrypoint's non-WSL auto-detect. The
+      # native_bridge path (Windows GUI streaming JPEG over TCP :5557) does
+      # not exist on the Pi; `usb_cam` is the native-Linux path.
+      - EDUBOTICS_CAMERA_SOURCE=usb_cam
+      # camera_ingest_node.py (native_bridge only) reads these two. On the
+      # usb_cam Pi path the entrypoint never starts that node, so both are
+      # INERT here — forwarded purely for parity with the student surface
+      # (and so an accidental EDUBOTICS_CAMERA_SOURCE flip stays coherent).
+      - EDUBOTICS_CAMERA_INGEST_PORT=${EDUBOTICS_CAMERA_INGEST_PORT:-5557}
+      - EDUBOTICS_CAMERA_NAMES=${EDUBOTICS_CAMERA_NAMES:-gripper,scene}
+    volumes:
+      # usb_cam + Dynamixel serial need the raw device tree; /dev/shm for
+      # DDS shared-memory transport between containers.
+      - /dev:/dev
+      - /dev/shm:/dev/shm
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    # The arm container needs privileged + /dev to talk to Dynamixel over
+    # /dev/ttyACM* (character-device nodes created dynamically by udev and
+    # not stably pre-mountable). Same posture as the student/Jetson file.
+    privileged: true
+    # Resource cap tuned for the 8 GB board (student file: 2g). One runaway
+    # ROS node must not OOM the Pi and take the whole stack down.
+    mem_limit: 1.5g
+    pids_limit: 512
+    healthcheck:
+      # Pure-usb_cam shape (Jetson-derived CMD/bash) — the student file's
+      # WSL2 `uname` native_bridge branch is deliberately dropped (a native
+      # Pi is never native_bridge). Two adaptations from the Jetson file:
+      #   1. ROS is SOURCED explicitly, as belt-and-suspenders. open-manipulator-opi
+      #      is built on `open-manipulator-jetson-base:4.1.4` (which itself
+      #      derives from stock `ros:jazzy-ros-base`) — the SAME base as the
+      #      Jetson open-manipulator, which already bakes ROS onto PATH (its
+      #      healthcheck calls `ros2` directly, no source). The explicit
+      #      `source ...setup.bash` here is therefore DEFENSIVE, not required:
+      #      it also picks up the /root/ros2_ws overlay and is harmless when
+      #      ros2 is already on PATH. (Only the SERVER-opi image is FROM stock
+      #      `ros:jazzy-ros-base`, where sourcing genuinely would be required —
+      #      but this is the open_manipulator container.)
+      #   2. Assert /joint_states AND each CONFIGURED camera's compressed
+      #      topic (a dead usb_cam container reported "healthy" → the server
+      #      starts → recording black-frames; audit F7). The
+      #      [ -z "$$CAMERA_DEVICE_*" ] guards let single-camera setups stay
+      #      healthy. ALL variable refs use $$ so they resolve inside the
+      #      container at runtime, not at compose parse time (the host has
+      #      no CAMERA_NAME_1, which would otherwise bake in `gripper`).
+      test:
+        - "CMD"
+        - "bash"
+        - "-c"
+        - >
+          source /opt/ros/jazzy/setup.bash &&
+          source /root/ros2_ws/install/setup.bash &&
+          ros2 topic list 2>/dev/null | grep -q /joint_states &&
+          ([ -z "$$CAMERA_DEVICE_1" ] || ros2 topic list 2>/dev/null | grep -q "/$${CAMERA_NAME_1:-gripper}/image_raw/compressed") &&
+          ([ -z "$$CAMERA_DEVICE_2" ] || ros2 topic list 2>/dev/null | grep -q "/$${CAMERA_NAME_2:-scene}/image_raw/compressed")
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 120s
+
+  physical_ai_server:
+    container_name: physical_ai_server
+    image: ${REGISTRY:-ghcr.io/svendanilborodun}/physical-ai-server-opi:${IMAGE_TAG:-latest}
+    depends_on:
+      open_manipulator:
+        # Wait for /joint_states before starting the inference/recording
+        # node. Both services are named on "Umgebung starten"
+        # (`up ... open_manipulator physical_ai_server`) so this health
+        # gate applies while `--no-deps` keeps the running manager
+        # untouched.
+        condition: service_healthy
+    tty: true
+    restart: "no"
+    cap_add:
+      - SYS_NICE
+    ulimits:
+      rtprio: 99
+      rttime: -1
+      memlock: 2147483648
+    networks:
+      - ros_net
+    ports:
+      # LAN-bindable per the locked Pi decision: EDUBOTICS_BIND_HOST is a
+      # managed `.env` key the agent derives from EDUBOTICS_LAN_OPEN
+      # (1 ⇒ 0.0.0.0, 0 ⇒ 127.0.0.1). The compose default is the SAFE
+      # loopback value; the agent's `.env` always writes an explicit host.
+      # rosbridge :9090 is unauthenticated (anyone reaching it can drive
+      # the arm) — the open-LAN exposure is a deliberate, documented
+      # product decision (§8), mitigated by EDUBOTICS_LAN_OPEN=0, the
+      # Host/Origin allowlist on the agent, and the dedicated-VLAN guide.
+      - "${EDUBOTICS_BIND_HOST:-127.0.0.1}:8080:8080"
+      - "${EDUBOTICS_BIND_HOST:-127.0.0.1}:9090:9090"
+    environment:
+      - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-30}
+      # Student's HuggingFace token, set ONCE via the System window
+      # (Schritt D) and stored as the deliberately-UNMANAGED HF_TOKEN key
+      # in /etc/edubotics/.env (config_generator.upsert_env_var).
+      # huggingface_hub reads $HF_TOKEN automatically. Empty default keeps
+      # cloud-only / no-token starts working without a compose warning.
+      # (The Jetson file's HF_TOKEN=${EDUBOTICS_HF_TOKEN} form is NOT used
+      # — the ported config_generator writes the key HF_TOKEN.)
+      - HF_TOKEN=${HF_TOKEN:-}
+      # Recording video codec (LeRobot v0.5.1). Default 'h264' (software
+      # libx264 — hardware H.264 encode is not available in mainline ffmpeg
+      # on RK3588S; see §9). Read by lerobot_dataset_wrapper.py.
+      - EDUBOTICS_VCODEC=${EDUBOTICS_VCODEC:-h264}
+      # Dataset edits re-encode video and can peg every CPU core. Default
+      # '1' runs the edit in a nice-19 subprocess so it can't starve the
+      # ROS executor (slower on the Pi's PyAV decode, but the dashboard
+      # stays responsive — §9). Read by communicator.py; '0' = in-process.
+      - EDUBOTICS_DATASET_EDIT_SUBPROCESS=${EDUBOTICS_DATASET_EDIT_SUBPROCESS:-1}
+      # Roboter Studio calibration dir (ChArUco intrinsics + hand-eye
+      # transforms). Default lands inside the edubotics_calib named volume
+      # mounted below. Readers: workflow/calibration_manager.py,
+      # physical_ai_server.py.
+      - EDUBOTICS_CALIB_DIR=${EDUBOTICS_CALIB_DIR:-/root/.cache/edubotics}
+      # Roboter Studio named-object grasping: the object set is a FIXED
+      # constant baked into the image (workflow/object_catalog.py::
+      # _FIXED_CATALOG). EDUBOTICS_TAG_SIZE_M is the physical AprilTag edge
+      # length (metres) used for the tag-pose scale + tag-edge sanity gate;
+      # it stays env-tunable so a rig printing a different tag size can be
+      # corrected without a rebuild. MUST stay forwarded (env-forwarding-guard).
+      - EDUBOTICS_TAG_SIZE_M=${EDUBOTICS_TAG_SIZE_M:-0.024}
+      # Tag-edge sanity gate: drop the recovered tag orientation (→ skip the
+      # instance, never grasp with a wrong wrist roll) when the
+      # back-projected tag side deviates from the catalog tag_size_m by more
+      # than this fraction. Read by workflow/handlers/perception_blocks.py.
+      - EDUBOTICS_TAG_EDGE_TOL_FRAC=${EDUBOTICS_TAG_EDGE_TOL_FRAC:-0.5}
+      # Tag-yaw precision: the named grasp circular-means the tag yaw over
+      # FRAMES live scene frames and rejects the reading if the angular
+      # resultant R is below MIN_RESULTANT. Read by perception_blocks.py.
+      - EDUBOTICS_TAG_YAW_FRAMES=${EDUBOTICS_TAG_YAW_FRAMES:-7}
+      - EDUBOTICS_TAG_YAW_MIN_RESULTANT=${EDUBOTICS_TAG_YAW_MIN_RESULTANT:-0.9}
+      # Named-object "Solange <Typ> sichtbar" loop: the observation pose the
+      # arm retreats to between passes (5 comma-separated joint radians,
+      # empty = HOME), and the generous empty-WINDOW. Read by
+      # workflow/handlers/motion.py + workflow/interpreter.py.
+      - EDUBOTICS_OBSERVE_POSE=${EDUBOTICS_OBSERVE_POSE:-}
+      - EDUBOTICS_WHILE_EMPTY_FRAMES=${EDUBOTICS_WHILE_EMPTY_FRAMES:-2}
+      - EDUBOTICS_WHILE_EMPTY_SECONDS=${EDUBOTICS_WHILE_EMPTY_SECONDS:-5.0}
+      # Flicker-spin guard (break after this many no-progress passes),
+      # wall-clock cap (seconds), settle delay after the retreat before
+      # re-detecting. Read by workflow/interpreter.py.
+      - EDUBOTICS_WHILE_STALL_PASSES=${EDUBOTICS_WHILE_STALL_PASSES:-3}
+      - EDUBOTICS_WHILE_MAX_SECONDS=${EDUBOTICS_WHILE_MAX_SECONDS:-120}
+      - EDUBOTICS_WHILE_SETTLE_S=${EDUBOTICS_WHILE_SETTLE_S:-0.2}
+      # Recycled-object reclaim: a claimed/skipped object continuously
+      # ABSENT for ≥ this many seconds and then put back is grabbed again.
+      # Read by workflow/handlers/perception_blocks.py.
+      - EDUBOTICS_RECLAIM_ABSENT_S=${EDUBOTICS_RECLAIM_ABSENT_S:-1.5}
+      # Follower-only flag — ALSO read by physical_ai_server's
+      # leader_appears_active() server-side guard (collision_monitor.py),
+      # not just by open_manipulator's entrypoint, so it must be forwarded
+      # to BOTH containers. `.env`-driven (see open_manipulator above).
+      - EDUBOTICS_FOLLOWER_ONLY=${EDUBOTICS_FOLLOWER_ONLY:-0}
+      # Scene-cam single-shot extrinsic: the known board-on-table placement
+      # (base frame, metres). Read by workflow/calibration_manager.py at
+      # import time — MUST stay forwarded (env-forwarding-guard).
+      - EDUBOTICS_BOARD_ORIGIN_X_M=${EDUBOTICS_BOARD_ORIGIN_X_M:-0.18}
+      - EDUBOTICS_BOARD_ORIGIN_Y_M=${EDUBOTICS_BOARD_ORIGIN_Y_M:-0.075}
+      - EDUBOTICS_BOARD_TABLE_Z_M=${EDUBOTICS_BOARD_TABLE_Z_M:-0.0}
+      # Yaw of the ChArUco board frame about base +Z (0 when the L-jig holds
+      # it square to the base — the default).
+      - EDUBOTICS_BOARD_YAW_DEG=${EDUBOTICS_BOARD_YAW_DEG:-0.0}
+      # Scene-extrinsic orientation sanity gate: the workspace band the
+      # camera's optical axis must hit, so a grossly misplaced board is
+      # rejected. Generous defaults; relax per-rig for an unusual mount.
+      - EDUBOTICS_EXTRINSIC_REGION_X_MIN=${EDUBOTICS_EXTRINSIC_REGION_X_MIN:-0.08}
+      - EDUBOTICS_EXTRINSIC_REGION_X_MAX=${EDUBOTICS_EXTRINSIC_REGION_X_MAX:-0.46}
+      - EDUBOTICS_EXTRINSIC_REGION_Y_ABS=${EDUBOTICS_EXTRINSIC_REGION_Y_ABS:-0.18}
+      # One extrinsic "Bild erfassen" click internally bursts this many
+      # camera reads of the fixed board and averages the solvePnP poses.
+      # =1 reverts to single-shot. INTERVAL spaces the reads past the frame
+      # period. Read by workflow/calibration_manager.py.
+      - EDUBOTICS_EXTRINSIC_BURST_FRAMES=${EDUBOTICS_EXTRINSIC_BURST_FRAMES:-8}
+      - EDUBOTICS_EXTRINSIC_BURST_INTERVAL_S=${EDUBOTICS_EXTRINSIC_BURST_INTERVAL_S:-0.06}
+      # Force a full recalibration on EVERY restart (bench setup changes
+      # constantly). The server reads this ONCE at startup. Set to
+      # 0/false/no/off for the classroom (calibration persists). Read by
+      # physical_ai_server.py — MUST stay forwarded (env-forwarding-guard).
+      - EDUBOTICS_FORCE_RECALIBRATION=${EDUBOTICS_FORCE_RECALIBRATION:-1}
+      # Generic grasp: conservative descend clearance above the measured
+      # table plane. Rig-tunable.
+      - EDUBOTICS_GRASP_CLEARANCE_M=${EDUBOTICS_GRASP_CLEARANCE_M:-0.012}
+      # Release height (m) above the destination surface for `ablegen bei`
+      # so the held object clears a low container rim.
+      - EDUBOTICS_DROP_HEIGHT_M=${EDUBOTICS_DROP_HEIGHT_M:-0.05}
+      # Top-down jaw constant (deg). The OMX-F jaws separate along EE-Y, so
+      # the geometrically-correct value is 90. Rig-validated by the P0
+      # jaw-check. Read by workflow/handlers/motion.py.
+      - EDUBOTICS_GRASP_ROLL_DEG=${EDUBOTICS_GRASP_ROLL_DEG:-90.0}
+      # Grasp-success check (named-object grasp): after the gripper closes,
+      # the achieved angle tells HELD from EMPTY (≤ GRASP_HELD_MAX_RAD =
+      # closed empty). GRASP_RETRY re-tries the detect→grasp; GRASP_SETTLE_S
+      # settles the servo before readback. Read by workflow/handlers/motion.py.
+      - EDUBOTICS_GRASP_HELD_MAX_RAD=${EDUBOTICS_GRASP_HELD_MAX_RAD:--0.35}
+      - EDUBOTICS_GRASP_RETRY=${EDUBOTICS_GRASP_RETRY:-1}
+      - EDUBOTICS_GRASP_SETTLE_S=${EDUBOTICS_GRASP_SETTLE_S:-0.3}
+      # Teleop force/collision e-stop (Rule §2 software guard, teleop-only).
+      # Read by safety/collision_monitor.py + collision_detector.py. The
+      # follower is MIXED-MODEL: dxl11-13 (XL430-W250) expose 'Present
+      # Load', dxl14-15 (XL330-M288) expose 'Present Current' — the monitor
+      # normalizes each to a 0..1 EFFORT fraction, so the thresholds are
+      # fractions (NOT Amps). Defaults conservative + safe even unset;
+      # ENABLED=0 is the one-variable rollback. MUST stay listed here (left
+      # of '=') or ci.yml::env-forwarding-guard fails. This file only
+      # FORWARDS these — the safety logic itself is untouched (Rule §2).
+      - EDUBOTICS_COLLISION_ENABLED=${EDUBOTICS_COLLISION_ENABLED:-1}
+      - EDUBOTICS_COLLISION_EFFORT_J1=${EDUBOTICS_COLLISION_EFFORT_J1:-0.30}
+      - EDUBOTICS_COLLISION_EFFORT_J2=${EDUBOTICS_COLLISION_EFFORT_J2:-0.65}
+      - EDUBOTICS_COLLISION_EFFORT_J3=${EDUBOTICS_COLLISION_EFFORT_J3:-0.40}
+      - EDUBOTICS_COLLISION_EFFORT_J4=${EDUBOTICS_COLLISION_EFFORT_J4:-0.30}
+      - EDUBOTICS_COLLISION_EFFORT_J5=${EDUBOTICS_COLLISION_EFFORT_J5:-0.30}
+      - EDUBOTICS_COLLISION_VELOCITY_GATE=${EDUBOTICS_COLLISION_VELOCITY_GATE:-0.05}
+      - EDUBOTICS_COLLISION_DEBOUNCE_MS=${EDUBOTICS_COLLISION_DEBOUNCE_MS:-150}
+      - EDUBOTICS_COLLISION_RESUME_TOL_RAD=${EDUBOTICS_COLLISION_RESUME_TOL_RAD:-0.30}
+      - EDUBOTICS_COLLISION_GPIO_TOPIC=${EDUBOTICS_COLLISION_GPIO_TOPIC:-/gpio_command_controller/gpio_states}
+      - EDUBOTICS_COLLISION_USE_OVERLOAD_BIT=${EDUBOTICS_COLLISION_USE_OVERLOAD_BIT:-1}
+    volumes:
+      # This container does inference/recording on ROS topics; it does NOT
+      # talk to raw USB. /dev:/dev + privileged are unnecessary attack
+      # surface — dropped (same posture as the student/Jetson file).
+      # /dev/shm is needed for DDS shared-memory transport.
+      - /dev/shm:/dev/shm
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+      # The student volume set (NOT the Jetson jetson_* names, which lack a
+      # calib volume): these three carry the datasets, HF cache and
+      # Roboter-Studio calibration, and are the exact suffixes the agent's
+      # factory-reset volume-rm matches (ai_workspace / huggingface_cache /
+      # edubotics_calib). Declared bare below so compose project-prefixes
+      # them and the suffix match finds them.
+      - ai_workspace:/workspace
+      - huggingface_cache:/root/.cache/huggingface
+      - edubotics_calib:/root/.cache/edubotics
+      # Upstream ROBOTIS agent-socket mount point — nothing in our code
+      # reads it, kept for parity in case the image checks for it. The
+      # student uses a WSL-created host path; on native Linux the simple
+      # /var/run/agent form (the Jetson precedent) is correct.
+      - /var/run/agent:/var/run/agent
+      # .s6-keep is the s6-rc service-enable marker: at image build only
+      # s6-agent is enabled, and THIS 0-byte mount is what starts the ROS
+      # node. Remove it and s6 reports healthy while the node never runs.
+      # This compose lives in robotis_ai_setup/docker/, the SAME relative
+      # path as the student file, so ./physical_ai_server/.s6-keep resolves.
+      # CI compose-validate asserts this mount exists.
+      - ./physical_ai_server/.s6-keep:/etc/s6-overlay/s6-rc.d/user/contents.d/physical_ai_server:ro
+    # Resource cap tuned for the 8 GB board (student file: 6g). No local
+    # policy loads on the Pi (Jetson-only inference), so recording peak
+    # (streaming h264 encode) stays well under 5g — §9.
+    mem_limit: 5g
+    pids_limit: 1024
+    healthcheck:
+      # TCP probe on rosbridge :9090. `bash -c` (not the default dash) so
+      # the /dev/tcp redirect works — same form as the student file.
+      test: ["CMD-SHELL", "bash -c '(echo > /dev/tcp/127.0.0.1/9090) 2>/dev/null' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+
+  physical_ai_manager:
+    container_name: physical_ai_manager
+    image: ${REGISTRY:-ghcr.io/svendanilborodun}/physical-ai-manager-opi:${IMAGE_TAG:-latest}
+    # MANAGER TIER — always-on (sanctioned exception, see the header + §5).
+    # NO `depends_on: physical_ai_server`: this container serves the wizard
+    # (the React SPA) and its /api/system reverse proxy to the pi-agent
+    # while the robot tier is DOWN, so the student can reach the
+    # "Umgebung starten" button on a freshly booted Pi. Same always-on
+    # category as the Jetson's services.
+    restart: unless-stopped
+    networks:
+      - ros_net
+    ports:
+      # LAN-bindable per the locked decision (see physical_ai_server ports).
+      - "${EDUBOTICS_BIND_HOST:-127.0.0.1}:80:80"
+    environment:
+      # The opi manager's nginx reverse-proxies /api/system/ to the pi-agent
+      # at http://${EDUBOTICS_ROS_NET_GATEWAY}:8769/ (rendered by
+      # nginx:alpine envsubst at container start — see Dockerfile.opi /
+      # nginx.opi.conf.template). Override the image's baked default with
+      # the SAME derived gateway pinned in the ros_net IPAM block below, so
+      # the proxy target and the network gateway can never disagree — even
+      # when setup.sh relocates the subnet to dodge a school-LAN overlap.
+      - EDUBOTICS_ROS_NET_GATEWAY=${EDUBOTICS_ROS_NET_GATEWAY:-172.28.0.1}
+    # Resource cap (matches the student manager: 512m — nginx + static SPA).
+    mem_limit: 512m
+    pids_limit: 128
+    healthcheck:
+      # Use 127.0.0.1 explicitly — busybox wget in nginx:alpine resolves
+      # `localhost` to ::1 first and does not fall back to IPv4, while nginx
+      # listens IPv4-only → perpetual "unhealthy". /version.json is the P1
+      # opi nginx's build-id manifest (ci.yml::compose-validate asserts this
+      # target).
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/version.json || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 20s
+
+volumes:
+  # Bare declarations (NO explicit `name:`, unlike the Jetson file): compose
+  # project-prefixes them (e.g. docker_ai_workspace), and the agent's
+  # factory-reset matches by SUFFIX against `docker volume ls`
+  # (name == suffix OR name.endswith("_"+suffix)) — the same design the GUI
+  # uses. Adding an explicit `name:` would still match, but the student-file
+  # bare form is the faithful port.
+  ai_workspace:
+  huggingface_cache:
+    driver: local
+  # Per-machine Roboter Studio calibration (ChArUco intrinsics + hand-eye
+  # transforms). Survives container recreate; only factory reset (or an
+  # explicit `docker volume rm`) wipes it. Absent from the Jetson file — its
+  # omission would wipe calibration on every arm-container recreate.
+  edubotics_calib:
+    driver: local
+
+networks:
+  ros_net:
+    driver: bridge
+    # Pinned-but-configurable IPAM (NEW in this file). The manager's
+    # /api/system nginx proxy targets the gateway IP where the pi-agent
+    # listens (127.0.0.1 + this gateway, never the LAN NIC), so the gateway
+    # must be DETERMINISTIC — hence no `extra_hosts: host-gateway`
+    # indirection.
+    #
+    # DEVIATION from the P2 contract's literal "gateway 172.28.0.1": the
+    # gateway is `.env`-DRIVEN (${EDUBOTICS_ROS_NET_GATEWAY}), not a bare
+    # literal. Rationale (correct-engineering carve-out): the subnet is a
+    # managed key because 172.16.0.0/12 is common institutional space and a
+    # school-LAN overlap blackholes container→LAN routing — setup.sh checks
+    # `ip route` and relocates it. A relocated subnet with a hardcoded
+    # 172.28.0.1 gateway would be REJECTED by docker (gateway outside
+    # subnet). Deriving the gateway (agent computes it = first host of the
+    # subnet, .1) and referencing the SAME var here AND on the manager's
+    # EDUBOTICS_ROS_NET_GATEWAY guarantees the IPAM gateway and the nginx
+    # proxy target are always identical. Default 172.28.0.1 matches the
+    # default subnet's .1.
+    ipam:
+      config:
+        - subnet: ${EDUBOTICS_ROS_NET_SUBNET:-172.28.0.0/24}
+          gateway: ${EDUBOTICS_ROS_NET_GATEWAY:-172.28.0.1}

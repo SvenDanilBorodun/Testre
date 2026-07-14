@@ -1,0 +1,43 @@
+[Unit]
+Description=EduBotics Pi agent (management API + container lifecycle)
+After=network-online.target docker.service
+Wants=network-online.target docker.service
+# Restart if docker goes away — the agent's boot sequence re-brings-up the
+# always-on manager and rebinds the ros_net gateway listener on next start.
+PartOf=docker.service
+
+[Service]
+Type=simple
+# The managed .env is BOTH the compose interface AND this unit's EnvironmentFile
+# (the Jetson precedent runs root with EnvironmentFile=/etc/edubotics/jetson.env;
+# the Pi uses /etc/edubotics/.env — for a root systemd unit ~ is /root, not a
+# user config dir). setup.sh (P4) creates it before the agent first runs.
+EnvironmentFile=/etc/edubotics/.env
+# The agent uses relative imports (from . import config_generator), so it MUST
+# run as a PACKAGE module, not a bare script. WorkingDirectory puts the
+# pi_agent/ package dir on sys.path[0] (python -m adds the cwd). setup.sh lays
+# the tree out under /opt/edubotics accordingly.
+WorkingDirectory=/opt/edubotics
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 -m pi_agent.agent
+Restart=always
+RestartSec=5
+# The agent's teardown only closes its own HTTP listeners + phone/preview
+# receivers (it NEVER runs `compose down` — the ros_net network + the always-on
+# manager + any running robot tier must survive an agent restart), so shutdown
+# is fast. 30s is a generous ceiling for the socket closes.
+TimeoutStopSec=30
+# Run as root: needs the docker socket + /dev (the scanner container mounts
+# /dev; the robot tier runs privileged inside compose, not from here). The
+# dialout/video group checks in the guided repairs are for interactive debug
+# shells, not this root agent.
+User=root
+Group=root
+
+# Journal logging — keeps `journalctl -u edubotics-pi` clean; the Protokoll SSE
+# panel mirrors the same lines (redacted) from the agent's in-memory ring.
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,95 @@
+# Orange Pi 5 Pro nginx config for the `-opi` manager twin.
+#
+# This is a TEMPLATE (rendered by nginx:alpine's envsubst at container
+# start) rather than a static file — unlike the plan's "static
+# nginx.opi.conf" wording. Justification: the ONLY substituted token is
+# ${EDUBOTICS_ROS_NET_GATEWAY}, the docker `ros_net` gateway the pi-agent
+# listens on. That subnet is a managed `.env` key (P2) so a school LAN
+# overlapping the default 172.28.0.0/24 can be relocated
+# (172.16.0.0/12 is common institutional space, and an overlap
+# blackholes container->LAN routing) — the gateway must therefore be
+# injectable at start, not baked. Dockerfile.opi sets
+# NGINX_ENVSUBST_FILTER="^EDUBOTICS_ROS_NET_GATEWAY$" so nginx's own
+# runtime vars ($host, $uri, $remote_addr, $proxy_add_x_forwarded_for,
+# $scheme) — all single-$ — pass through untouched.
+#
+# The server{} block below is byte-for-byte the student nginx.conf
+# (index.html/version.json no-store, /static/ immutable, SPA try_files
+# fallthrough) PLUS two Pi-only locations: the baked /pi-mode.json
+# marker and the /api/system/ reverse proxy to the pi-agent.
+server {
+    listen 80;
+    server_name localhost;
+
+    root /usr/share/nginx/html;
+    index index.html;
+
+    # HTML shell must never be cached — a new image pull needs to reach the
+    # browser immediately so the hashed bundle references update without a
+    # hard refresh.
+    location = /index.html {
+        add_header Cache-Control "no-store, no-cache, must-revalidate, max-age=0" always;
+        add_header Pragma "no-cache" always;
+        expires -1;
+    }
+
+    # Build-id manifest polled by the React app to detect new deployments.
+    # Must never be cached — the whole point is to read the current value.
+    # Also the manager container's healthcheck target (docker-compose.opi.yml).
+    location = /version.json {
+        add_header Cache-Control "no-store, no-cache, must-revalidate, max-age=0" always;
+        add_header Pragma "no-cache" always;
+        expires -1;
+    }
+
+    # Baked Pi-mode marker. The image IS the Pi flavor, so "is this a Pi"
+    # is deterministic and independent of agent health — the P3 React
+    # probe requires a valid JSON parse here to gate Pi-only UI (the
+    # System tab, the StartupGate carve-out). The STUDENT nginx.conf has
+    # NO such location, so on a non-Pi image /pi-mode.json falls through
+    # the SPA catch-all to index.html and the JSON parse fails (Pi mode
+    # stays off) — the same defensive fallthrough guard useVersionCheck
+    # already relies on for /version.json.
+    location = /pi-mode.json {
+        default_type application/json;
+        add_header Cache-Control "no-store" always;
+        return 200 '{"pi":true}';
+    }
+
+    # Same-origin reverse proxy to the pi-agent management API. The
+    # trailing slash on proxy_pass STRIPS the /api/system/ prefix, so the
+    # agent (bound on the docker gateway :8769) sees /status,
+    # /roboter-studio/status, /roboter-studio/leader-enable, etc.
+    # ${EDUBOTICS_ROS_NET_GATEWAY} is substituted by envsubst at start
+    # (default 172.28.0.1, overridden per-rig by the opi compose).
+    #
+    # proxy_buffering off is MANDATORY here: the Protokoll SSE stream and
+    # the MJPEG camera previews both ride this proxy, and nginx's defaults
+    # (buffering on, 60s read timeout) would stall the former and freeze
+    # the latter. chunked_transfer_encoding off + the long read/send
+    # timeouts keep the long-lived streams flowing.
+    location /api/system/ {
+        proxy_pass http://${EDUBOTICS_ROS_NET_GATEWAY}:8769/;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+        chunked_transfer_encoding off;
+    }
+
+    # Hashed JS/CSS bundles from CRA are content-addressed and safe to cache.
+    location /static/ {
+        expires 1y;
+        add_header Cache-Control "public, immutable" always;
+    }
+
+    # SPA routing — all paths fall through to index.html
+    location / {
+        try_files $uri /index.html;
+    }
+}

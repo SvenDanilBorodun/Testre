@@ -149,6 +149,18 @@ class TestGenerateEnvBothArms(_TmpEnvBase):
         generate_env_file(_both_arms(), self.path)
         self.assertFalse(os.path.exists(self.path + ".tmp"))
 
+    def test_env_file_is_0600_on_write_and_regenerate(self):
+        # The .env holds the student's HF_TOKEN. It must be 0600 on the first
+        # write AND stay 0600 after a regenerate — os.replace adopts the tmp
+        # file's mode, so without an explicit chmod a rewrite silently re-widens
+        # the secret to world-readable (the H1 regression this guards).
+        generate_env_file(_both_arms(), self.path)
+        self.assertEqual(os.stat(self.path).st_mode & 0o777, 0o600)
+        # Simulate a pre-existing world-readable file, then regenerate.
+        os.chmod(self.path, 0o644)
+        generate_env_file(_both_arms(), self.path)
+        self.assertEqual(os.stat(self.path).st_mode & 0o777, 0o600)
+
 
 class TestGenerateEnvFollowerOnly(_TmpEnvBase):
     def test_follower_only_omits_leader(self):

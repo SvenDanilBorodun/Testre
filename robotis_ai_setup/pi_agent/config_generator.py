@@ -294,6 +294,11 @@ def _atomic_write(path: str, content: str) -> None:
             os.fsync(f.fileno())
         except OSError:
             pass  # fsync unsupported (e.g. some network filesystems)
+    # The .env holds the student's HF_TOKEN. setup.sh chmods it 600 at seed
+    # time, but os.replace adopts the tmp file's mode (umask 0644 by default),
+    # which would silently re-widen it to world-readable on every regenerate.
+    # Pin 0600 on the tmp inode so the secret never leaks after a rewrite.
+    os.chmod(tmp, 0o600)
     os.replace(tmp, path)
 
 

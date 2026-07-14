@@ -302,6 +302,11 @@ class AgentApp:
         # Async update jobs (ACK-early). job_id -> dict.
         self._update_jobs: dict = {}
         self._update_lock = threading.Lock()
+        # Single-flight guard: a 2nd /update while one runs is rejected (409).
+        # Without it a double-click spawns a redundant stop/pull/recreate that
+        # serializes behind the first on _lifecycle_lock (wasteful) or a 2nd
+        # agent-self-update apply. Guarded by _update_lock.
+        self._update_busy = False
 
         # Phone-camera receiver (preview-only backend; OPEN — no ROS republish).
         # _phone_lock guards the check-then-set on _phone_server so two enable
@@ -719,6 +724,10 @@ class AgentApp:
             "started_at": int(time.time()),
         }
         with self._update_lock:
+            if self._update_busy:
+                return 409, {"ok": False,
+                             "message": "Eine Aktualisierung läuft bereits — bitte warten."}
+            self._update_busy = True
             self._update_jobs[job_id] = job
         threading.Thread(
             target=self._run_update_job, args=(job_id,),
@@ -820,6 +829,12 @@ class AgentApp:
                     j["status"] = "failed"
                     j["message"] = f"Aktualisierung fehlgeschlagen: {e}"
             self._log(f"Update job {job_id} failed: {e}")
+        finally:
+            # Release the single-flight guard so a later /update can run. On a
+            # successful agent self-update the process restarts before this runs
+            # — the flag resets naturally on the fresh boot either way.
+            with self._update_lock:
+                self._update_busy = False
 
     def _apply_agent_update_and_restart(self, tarball_path: str) -> None:
         """Unpack the verified agent tarball over the install root and trigger a
@@ -1089,12 +1104,29 @@ class AgentApp:
         lifecycle op calls ``stop_active_previews``.
         """
         with self._preview_lock:
-            # Stop a prior preview and re-arm the stop event for this one.
-            self._preview_stop.set()
-            time.sleep(0.1)
-            self._preview_stop.clear()
-            cap = _PreviewCapture(device)
-            if not cap.open():
+            # Don't re-grab /dev/video* while a lifecycle op (env-start / update /
+            # scan) is claiming the cameras for usb_cam: a preview landing in that
+            # window would steal the device and break the stack's camera open (the
+            # M2 race — the two paths otherwise use different locks). Probe
+            # _lifecycle_lock WITHOUT blocking so a preview never stalls a
+            # lifecycle op, and hold it only across the device open — env-start's
+            # stop_active_previews() then sets _preview_stop to end this loop and
+            # free the device again.
+            if not self._lifecycle_lock.acquire(blocking=False):
+                self._send_simple(handler, 503,
+                                  "Kameravorschau nicht verfügbar (die Roboter-Umgebung "
+                                  "wird gerade gestartet oder aktualisiert).")
+                return
+            try:
+                # Stop a prior preview and re-arm the stop event for this one.
+                self._preview_stop.set()
+                time.sleep(0.1)
+                self._preview_stop.clear()
+                cap = _PreviewCapture(device)
+                opened = cap.open()
+            finally:
+                self._lifecycle_lock.release()
+            if not opened:
                 self._send_simple(handler, 503,
                                   "Kameravorschau nicht verfügbar (Gerät belegt oder "
                                   "Vorschau-Backend fehlt).")

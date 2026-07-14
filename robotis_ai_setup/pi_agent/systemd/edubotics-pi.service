@@ -19,6 +19,10 @@ EnvironmentFile=/etc/edubotics/.env
 # the tree out under /opt/edubotics accordingly.
 WorkingDirectory=/opt/edubotics
 Environment=PYTHONUNBUFFERED=1
+# The agent writes /etc/edubotics/.env (holds HF_TOKEN). Default-deny group +
+# other on every file this root unit creates so a regenerate can never leave the
+# secret world-readable (belt-and-suspenders alongside the .env's explicit 0600).
+UMask=0077
 ExecStart=/usr/bin/python3 -m pi_agent.agent
 Restart=always
 RestartSec=5

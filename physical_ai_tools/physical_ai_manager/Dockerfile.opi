@@ -1,0 +1,110 @@
+# Orange Pi 5 Pro build for the student manager (the `-opi` image flavor).
+#
+# This is the THIRD member of the established dual-nginx precedent
+# (student `Dockerfile` + `nginx.conf`, Railway `Dockerfile.web` +
+# `nginx.web.conf.template`). It is a byte-for-byte twin of the student
+# `Dockerfile` — SAME node:22 build stage, SAME build args, SAME
+# empty-arg guards, SAME build/version.json write — with exactly two
+# Pi-only divergences in the production stage:
+#
+#   1. nginx config is an envsubst TEMPLATE, not a static file. The Pi
+#      manager reverse-proxies `/api/system/` to the pi-agent on the
+#      docker `ros_net` gateway (see nginx.opi.conf.template). That
+#      gateway IP is per-rig configurable — `ros_net`'s subnet is a
+#      managed `.env` key so a school LAN overlapping the default
+#      172.28.0.0/24 can be relocated (172.16.0.0/12 is common
+#      institutional space) — so it MUST be injectable at container
+#      start, not baked. Hence `/etc/nginx/templates/*.template` +
+#      nginx:alpine's auto-envsubst, exactly like Dockerfile.web does
+#      for $PORT. (Documented deviation from the plan's "static
+#      nginx.opi.conf" wording, §4/§5: a fixed :80 needs no template,
+#      but the configurable gateway does.)
+#
+#   2. a baked `/pi-mode.json` marker location (in the template) that
+#      the P3 React probe reads to gate Pi-only UI — the STUDENT
+#      nginx.conf has no such location, so a non-Pi image answers
+#      /pi-mode.json with the SPA index.html and the JSON-guarded probe
+#      stays off.
+#
+# Everything else — REACT_APP_BUILD_ID self-reload (§4), the
+# /version.json healthcheck target (docker-compose.opi.yml), the
+# white-screen build guards — is preserved so the opi twin never drifts
+# from the student build it mirrors.
+
+# Build stage
+FROM node:22 AS build
+WORKDIR /app
+
+# Cloud training env vars (baked into React build)
+ARG REACT_APP_SUPABASE_URL
+ARG REACT_APP_SUPABASE_ANON_KEY
+ARG REACT_APP_CLOUD_API_URL
+# App mode: the Pi is a student rig — same 'student' mode as the Windows
+# student build (local rosbridge, act-only policy dropdown).
+ARG REACT_APP_MODE=student
+ENV REACT_APP_MODE=${REACT_APP_MODE}
+# Policy allowlist — the Pi student build bakes 'act' only, same as the
+# Windows student build. Enforced again server-side.
+ARG REACT_APP_ALLOWED_POLICIES=act
+ENV REACT_APP_ALLOWED_POLICIES=${REACT_APP_ALLOWED_POLICIES}
+# Build identifier (e.g. short git sha). Baked into the bundle and written to
+# build/version.json so the running app can detect a new image and self-reload.
+# LOAD-BEARING on the Pi: an update recreates the always-on manager container
+# LAST (§5 lifecycle), dropping the student's SPA for a few seconds;
+# useVersionCheck self-heals by polling /version.json and reloading on the new
+# buildId — but it self-DISABLES when the baked id is the literal "dev"
+# (useVersionCheck.js:28,49). build-images.sh must pass a real --build-arg
+# REACT_APP_BUILD_ID for the opi build, exactly as it does for amd64.
+ARG REACT_APP_BUILD_ID=dev
+ENV REACT_APP_BUILD_ID=${REACT_APP_BUILD_ID}
+
+COPY package*.json .npmrc* ./
+# --legacy-peer-deps because react-blockly@9 declares a peer of react@^16-18
+# but we run React 19 (works fine in practice; react-blockly only uses the
+# stable hooks API). The .npmrc copied above sets the same default for any
+# follow-up npm calls inside this layer.
+RUN npm install --legacy-peer-deps
+COPY . .
+# Belt-and-suspenders guard: even though build-images.sh already validates
+# these via `${VAR:?}`, a direct `docker build` that forgets --build-arg
+# would proceed with empty values and ship the white-screen bug. Fail at
+# build time with a named cause so a maintainer never has to bisect a
+# blank page again. CI's smoke-test job ALSO greps the opi bundle for these
+# placeholders, so this guard must accept non-empty values without further
+# validation (no URL-shape check etc.).
+RUN test -n "$REACT_APP_SUPABASE_URL"      || (echo "ERROR: --build-arg REACT_APP_SUPABASE_URL is required (was empty)"      && exit 1) && \
+    test -n "$REACT_APP_SUPABASE_ANON_KEY" || (echo "ERROR: --build-arg REACT_APP_SUPABASE_ANON_KEY is required (was empty)" && exit 1) && \
+    test -n "$REACT_APP_CLOUD_API_URL"     || (echo "ERROR: --build-arg REACT_APP_CLOUD_API_URL is required (was empty)"     && exit 1)
+# Source maps are disabled in vite.config.js (`build.sourcemap: false`) — they
+# expose React source via DevTools and add ~15 MB to the shipped bundle. (This
+# replaces CRA's GENERATE_SOURCEMAP=false env, which Vite does not read.)
+# `npm run build` runs `vite build`.
+RUN npm run build
+RUN printf '{"buildId":"%s","builtAt":"%s"}\n' "${REACT_APP_BUILD_ID}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > build/version.json
+
+# Production stage
+FROM nginx:1.27.5-alpine
+COPY --from=build /app/build /usr/share/nginx/html
+
+# nginx:alpine auto-runs envsubst on /etc/nginx/templates/*.template at startup
+# (20-envsubst-on-templates.sh renders each to /etc/nginx/conf.d/<name>.conf).
+# NGINX_ENVSUBST_FILTER limits substitution to just EDUBOTICS_ROS_NET_GATEWAY,
+# so the ONLY ${...} touched is the proxy_pass upstream — nginx's own runtime
+# vars ($host, $uri, $remote_addr, $proxy_add_x_forwarded_for, $scheme) use
+# single-$ and survive verbatim (they are not env vars, and the filter keeps
+# any inherited container env var from being substituted either).
+#
+# P1<->P2 CONTRACT: docker-compose.opi.yml (P2) overrides
+# EDUBOTICS_ROS_NET_GATEWAY on this service, derived from the pinned ros_net
+# IPAM gateway, so proxy_pass targets the pi-agent deterministically with no
+# `extra_hosts: host-gateway` indirection. The pi-agent binds 127.0.0.1:8769
+# AND that gateway IP; the trailing slash on proxy_pass strips the
+# /api/system/ prefix, so the agent sees /status, /scan-arms,
+# /roboter-studio/status, etc. The default below keeps a bare `docker run`
+# (CI smoke-test) rendering to a valid config that starts nginx.
+COPY nginx.opi.conf.template /etc/nginx/templates/default.conf.template
+ENV EDUBOTICS_ROS_NET_GATEWAY=172.28.0.1 \
+    NGINX_ENVSUBST_FILTER="^EDUBOTICS_ROS_NET_GATEWAY$"
+
+EXPOSE 80
+CMD ["nginx", "-g", "daemon off;"]

@@ -1,0 +1,28 @@
+# EduBotics — ROBOTIS OpenRB-150 arm boards (BOTH arms on the Orange Pi 5 Pro).
+#
+# Unlike the Jetson (ONE arm → a fixed `edubotics-follower` symlink), the Pi has
+# TWO identical OpenRB-150 boards: same VID 2F5D, same PIDs 0103 (default fw) /
+# 2202 (alt fw). A static VID/PID rule CANNOT tell leader from follower, so this
+# file deliberately does NOT create role symlinks — a shared symlink would point
+# both slots at whichever board enumerated last (a silent leader/follower swap).
+#
+# The leader/follower ROLE mapping is resolved at scan time by pi_agent
+# (servo-ID ping via identify_arm.py inside a throwaway scanner container: IDs
+# 1-6 = leader, 11-16 = follower) and PERSISTED as each board's stable
+# /dev/serial/by-id/... path in the managed .env keys FOLLOWER_PORT / LEADER_PORT
+# (deploy plan §5). The by-id path is unique per physical arm and survives
+# replug (the arms have DISTINCT stable serials — identical-serial is a
+# camera-only problem, CLAUDE.md), so no dynamic serial-keyed symlink is needed.
+#
+# This rule's job is therefore only the PERMISSION FLOOR + a stable device tag:
+# group=dialout + mode 0660 so the agent's scanner container and an interactive
+# debug shell (a user in the dialout group) can open the ports. It is the
+# last-resort access rule, NOT the role source. (FTDI is only a legacy udev
+# fallback and is intentionally not matched here.)
+#
+# Reload after editing:
+#   sudo udevadm control --reload-rules
+#   sudo udevadm trigger
+
+SUBSYSTEM=="tty", ATTRS{idVendor}=="2f5d", ATTRS{idProduct}=="0103", GROUP="dialout", MODE="0660", TAG+="edubotics-arm"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="2f5d", ATTRS{idProduct}=="2202", GROUP="dialout", MODE="0660", TAG+="edubotics-arm"

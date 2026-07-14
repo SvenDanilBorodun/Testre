@@ -1,4 +1,5 @@
-"""Version endpoint consumed by the in-tree GUI's update_checker.
+"""Version endpoint consumed by the in-tree GUI's update_checker AND the
+Orange Pi agent's update_checker.
 
 Two changes from the v1 shape:
 
@@ -25,6 +26,16 @@ Two changes from the v1 shape:
      removes GUI_DOWNLOAD_URL as a SEPARATELY-driftable surface. The GH
      Release asset URL is deterministic from the tag:
        https://github.com/<repo>/releases/download/v<version>/EduBotics_Setup.exe
+
+  5. OPTIONAL, ADDITIVE Orange Pi fields `pi_agent_download_url` +
+     `pi_agent_sha256` (deploy plan §7). The Pi agent's self-update
+     (`pi_agent/update_checker.py`) reads these EXACT keys to fetch the
+     `edubotics-pi-agent.tar.gz` release asset. They are derived the SAME
+     way as the `.exe` pair: the download URL from GUI_VERSION +
+     GUI_RELEASE_REPO + the fixed asset name; the hash from PI_AGENT_SHA256
+     (set by release.yml W6 AFTER it hashes the exact attached tarball,
+     empty-on-failure so it is never stale). Old GUIs simply ignore the
+     extra keys — the response stays backward-compatible.
 """
 
 import os
@@ -35,6 +46,11 @@ router = APIRouter()
 
 # Asset filename produced by release-installer.yml's softprops upload.
 _INSTALLER_ASSET = "EduBotics_Setup.exe"
+
+# Asset filename produced by release.yml's pi-agent-tarball job (deploy plan
+# §7). Must match pi_agent/update_checker.py::AGENT_ASSET_NAME byte-for-byte —
+# the agent trusts the download URL the cloud serves and never reconstructs it.
+_PI_AGENT_ASSET = "edubotics-pi-agent.tar.gz"
 
 
 def _resolve_commit() -> str:
@@ -84,6 +100,44 @@ def _resolve_download_url(version: str | None) -> str | None:
     return None
 
 
+def _resolve_pi_agent_sha256() -> str | None:
+    """The SHA-256 of the advertised edubotics-pi-agent.tar.gz, set by
+    release.yml W6 (publish-gui-version) after it hashes the just-attached
+    GH-Release asset.
+
+    Lets pi_agent/update_checker.py verify the tarball before unpacking it over
+    the running agent (corruption / TLS-inspection-tamper guard — the exact
+    failure the §5 Netzwerk-Check names). Optional + backward-compatible: when
+    unset (old deploy, or W6 didn't run) the agent skips the hash check and
+    keeps its Content-Length truncation guard. Normalised to lowercase hex; a
+    malformed value returns None so the agent doesn't reject a valid download
+    against garbage. Mirrors _resolve_installer_sha256's contract exactly.
+    """
+    val = (os.environ.get("PI_AGENT_SHA256") or "").strip().lower()
+    if len(val) == 64 and all(c in "0123456789abcdef" for c in val):
+        return val
+    return None
+
+
+def _resolve_pi_agent_download_url(version: str | None) -> str | None:
+    """Derive the GH Release asset URL for the pi-agent tarball from
+    GUI_VERSION + GUI_RELEASE_REPO (owner/repo). Returns None when either is
+    unavailable so the agent treats it as 'no update'.
+
+    Unlike the .exe there is NO explicit override env var — the tarball's URL
+    is ALWAYS derived (deploy plan §7: "derived the same way as the .exe pair,
+    from release repo + version + fixed asset name"), so the advertised Pi
+    version and its download asset can never disagree.
+    """
+    repo = os.environ.get("GUI_RELEASE_REPO")
+    if version and repo:
+        return (
+            f"https://github.com/{repo}/releases/download/"
+            f"v{version}/{_PI_AGENT_ASSET}"
+        )
+    return None
+
+
 @router.get("/version")
 async def get_latest_version():
     """Return the latest GUI version and download URL.
@@ -107,4 +161,10 @@ async def get_latest_version():
         "download_url": download_url,
         "installer_sha256": _resolve_installer_sha256(),
         "commit": _resolve_commit(),
+        # OPTIONAL, ADDITIVE (deploy plan §7) — the Orange Pi agent's
+        # self-update reads these EXACT keys. Absent-as-None on today's
+        # deploy → the agent reports "no agent update available". Old GUIs
+        # ignore them, so the payload stays backward-compatible.
+        "pi_agent_download_url": _resolve_pi_agent_download_url(version),
+        "pi_agent_sha256": _resolve_pi_agent_sha256(),
     }

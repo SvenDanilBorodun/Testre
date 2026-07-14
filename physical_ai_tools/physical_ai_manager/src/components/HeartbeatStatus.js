@@ -18,6 +18,7 @@ import React, { useRef, useEffect } from 'react';
 import { useSelector, useDispatch } from 'react-redux';
 import clsx from 'clsx';
 import { setHeartbeatStatus } from '../features/tasks/taskSlice';
+import { usePiMode, PI_PORT_BLOCKED_HINT } from '../utils/piMode';
 
 /**
  * HeartbeatStatus Component
@@ -36,6 +37,16 @@ export default function HeartbeatStatus({
   const dispatch = useDispatch();
   const heartbeatStatus = useSelector((state) => state.tasks.heartbeatStatus);
   const lastHeartbeatTime = useSelector((state) => state.tasks.lastHeartbeatTime);
+  // Pi mode: distinguish a crashed stack from a port-filtered network. When the
+  // agent REPORTS the robot tier running but rosbridge (:9090) is unreachable
+  // from the browser, that is the VLAN-ACL / port-filter case — say so, never
+  // the Windows-era „Docker prüfen" text (usePiMode returns a non-Pi default
+  // outside a Pi rig, so this is inert everywhere else).
+  const { piMode, agentStatus } = usePiMode();
+  const portBlocked =
+    piMode &&
+    heartbeatStatus === 'disconnected' &&
+    !!(agentStatus && agentStatus.robot_tier_up);
 
   const intervalRef = useRef(null);
   const lastHeartbeatTimeRef = useRef(lastHeartbeatTime);
@@ -141,8 +152,8 @@ export default function HeartbeatStatus({
     </span>
   );
 
-  return (
-    <div className={containerClasses}>
+  const pill = (
+    <div className={containerClasses} title={portBlocked ? PI_PORT_BLOCKED_HINT : undefined}>
       {dotWrap}
       {showLabel && <span className="whitespace-nowrap">{statusInfo.label}</span>}
       <span
@@ -152,6 +163,19 @@ export default function HeartbeatStatus({
         )}
       >
         {shownLatency}
+      </span>
+    </div>
+  );
+
+  // Non-Pi (and the healthy Pi paths) keep the bare pill — byte-identical.
+  if (!portBlocked) return pill;
+
+  // Pi port-blocked: pair the „Getrennt" pill with the network hint.
+  return (
+    <div className="inline-flex flex-col items-end gap-1">
+      {pill}
+      <span className="text-[10px] font-medium text-[color:var(--danger)] leading-tight text-right max-w-[240px]">
+        {PI_PORT_BLOCKED_HINT}
       </span>
     </div>
   );

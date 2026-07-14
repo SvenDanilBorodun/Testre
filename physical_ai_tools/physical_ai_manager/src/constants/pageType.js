@@ -24,6 +24,10 @@ const PageType = {
   TRAINING: 'training',
   EDIT_DATASET: 'edit_dataset',
   WORKSHOP: 'workshop',
+  // Orange Pi „System"-Fenster — the in-browser re-implementation of the
+  // Windows EduBotics.exe setup wizard. Visible ONLY in Pi mode (piOnly tab,
+  // gated on the baked /pi-mode.json marker; see utils/piMode.js).
+  SYSTEM: 'system',
 };
 
 export default PageType;

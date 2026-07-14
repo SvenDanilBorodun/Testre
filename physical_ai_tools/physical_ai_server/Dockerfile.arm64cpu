@@ -1,0 +1,268 @@
+# Orange Pi 5 Pro (Rockchip RK3588) CPU-only physical_ai_server BASE image.
+#
+# This is the third server base, alongside:
+#   Dockerfile.amd64  -> robotis/ros:...-cuda12.8.0 (ROBOTIS-published, x86 student PCs)
+#   Dockerfile.arm64  -> robotis/ros:jazzy-ros-base-torch2.7.0-cuda12.8.0 (Jetson L4T)
+#   Dockerfile.arm64cpu (THIS FILE) -> stock ros:jazzy-ros-base (Rockchip aarch64)
+#
+# It produces ${REGISTRY}/physical-ai-server-opi-base:0.8.2, built ONCE via
+# `BUILD_BASE_OPI=1 PLATFORM=opi build-images.sh` (see docs/arm64_base/README.md).
+# The thin overlay (robotis_ai_setup/docker/physical_ai_server/Dockerfile) then
+# builds physical-ai-server-opi:latest on top of it — arch-SAFE, not arch-neutral:
+# its amd64-only SLIM_CUDA torch-swap block is a no-op here (opi passes SLIM_CUDA=0),
+# and its TWINE_*/SCP_UPLOAD_* scrubs are harmless (this base sets none of them).
+#
+# KEY DIFFERENCES vs Dockerfile.arm64 (the Jetson base), all documented inline:
+#   1. FROM stock ros:jazzy-ros-base — NO CUDA, NO L4T, plain PyPI (no Jetson AI
+#      Lab cu126 index). The Pi has no NVIDIA GPU: local inference is Jetson-only,
+#      recording never loads a policy, training is Cloud-only.
+#   2. torch is PINNED EXPLICITLY (torch==2.7.0 + torchvision==0.22.0). The sibling
+#      bases INHERIT torch from their base images; this stock base ships none, and
+#      lerobot 0.5.1 allows torch<2.11, so an unpinned resolve would silently pull
+#      2.10.x and break the "one PyTorch surface (torch 2.7.x)" invariant (Rule §5).
+#   3. NO /opt/venv PATH/PYTHONPATH .bashrc block (Dockerfile.arm64:11-14) — that
+#      is specific to the Jetson AI Lab base, whose Python lives in /opt/venv.
+#      Stock ros:jazzy-ros-base uses the system interpreter, so pip goes there.
+#   4. PIP_BREAK_SYSTEM_PACKAGES=1 — see the ENV block below (PEP 668 on Noble).
+#
+# Rule §5 (CLAUDE.md): the LeRobot 0.5.1 / numpy==1.26.4 / scipy<1.18 pins here are
+# the FOURTH lockstep site alongside modal_app.py + Dockerfile.{amd64,arm64}. Bump
+# them together in one PR.
+FROM ros:jazzy-ros-base AS physical-ai-tools
+
+ARG S6_OVERLAY_VERSION=3.2.1.0
+
+# Install s6-overlay (aarch64 tarball — Rockchip is 64-bit ARM, same as Jetson).
+ADD https://github.com/just-containers/s6-overlay/releases/download/v${S6_OVERLAY_VERSION}/s6-overlay-noarch.tar.xz /tmp
+RUN tar -C / -Jxpf /tmp/s6-overlay-noarch.tar.xz
+ADD https://github.com/just-containers/s6-overlay/releases/download/v${S6_OVERLAY_VERSION}/s6-overlay-aarch64.tar.xz /tmp
+RUN tar -C / -Jxpf /tmp/s6-overlay-aarch64.tar.xz
+
+# Set environment variables
+ENV DEBIAN_FRONTEND=noninteractive
+
+# PEP 668: stock ros:jazzy-ros-base is FROM ubuntu:noble, whose python3.12 ships
+# /usr/lib/python3.12/EXTERNALLY-MANAGED, so a system `pip install` refuses with
+# "error: externally-managed-environment". The sibling bases never hit this — the
+# Jetson base installs into /opt/venv (not externally managed) and the ROBOTIS
+# cuda base is not marked — so this is unique to the stock-Ubuntu base. Set the
+# break-system-packages knob as an ENV (equivalent to --break-system-packages on
+# every pip call, incl. transitive/child invocations) rather than a venv: it keeps
+# every RUN below simple AND persists into the arch-SAFE thin overlay, whose plain
+# `python3 -m pip install` lines would otherwise fail on this base. At runtime no
+# pip runs, so a persistent value is a harmless no-op there.
+#
+# Every pip below uses the module form `python3 -m pip` (not bare `pip`): unlike
+# the Jetson/cuda bases the sibling Dockerfiles inherit, the stock python3-pip
+# package on Noble is not guaranteed to place an unversioned `pip` console script
+# on $PATH — the importable module always exists, so the module form is robust.
+ENV PIP_BREAK_SYSTEM_PACKAGES=1
+
+# Install realsense and physical_ai_tools dependencies.
+# ros-jazzy-control-msgs: the teleop collision e-stop subscribes to
+# control_msgs/DynamicInterfaceGroupValues (safety/collision_monitor.py);
+# ros-base does not ship it and the guarded import silently fail-opens without
+# it. Mirrored in the thin overlay Dockerfile (which is what CI actually builds
+# on top of the published base, and where the operative install lives).
+RUN apt-get update && apt-get install -y \
+    xz-utils \
+    ffmpeg \
+    vim \
+    nano \
+    python3-pip \
+    ros-jazzy-control-msgs \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV COLCON_WS=/root/ros2_ws
+WORKDIR ${COLCON_WS}
+
+# v2.5.0: LeRobot is installed from PyPI (see the RUN steps below), not from a
+# submodule. The clone provides only the ROS Python packages (physical_ai_interfaces,
+# physical_ai_server source) that colcon builds below. Stripping the lerobot
+# subdir prevents any v0.2.0 import path from bleeding into the runtime image.
+RUN mkdir -p ${COLCON_WS}/src && \
+    cd ${COLCON_WS}/src && \
+    git clone --depth 1 -b jazzy https://github.com/ROBOTIS-GIT/physical_ai_tools.git && \
+    rm -rf physical_ai_tools/lerobot
+
+RUN cd ${COLCON_WS} && \
+    apt-get update && \
+    rosdep update && \
+    rosdep install -i --from-path src --rosdistro $ROS_DISTRO -y && \
+    rm -rf /var/lib/apt/lists/*
+
+# ── torch PINNED EXPLICITLY (the one place torch is pinned for this flavor) ──
+# Install torch==2.7.0 + torchvision==0.22.0 from PLAIN PyPI, BEFORE lerobot, so
+# lerobot's dependency resolve finds torch 2.7.0 already satisfied (its constraint
+# is torch>=2.7,<2.11) and CANNOT pull the newer 2.10.x. This preserves the
+# "one PyTorch surface (torch 2.7.x)" invariant (Rule §5) that the sibling bases
+# get for free from their base images.
+#
+# WHY no `+cpu` dance / no SLIM_CUDA step here (unlike the amd64 thin overlay):
+# torch 2.7.0's PyPI aarch64 wheel is genuinely CPU-only (~99 MB, zero nvidia-*
+# deps). The CUDA-by-default flip for aarch64 PyPI wheels only landed in torch
+# 2.11.0. So the plain-index install already ships a CPU torch — the torch-is-CPU
+# assert near the end of this file proves it.
+#
+# FUTURE BUMP CAVEAT: any torch bump past 2.10.x MUST switch this to
+# `--index-url https://download.pytorch.org/whl/cpu` (which carries aarch64 +cpu
+# wheels) or the image silently grows the full CUDA/SBSA payload.
+RUN python3 -m pip install --no-cache-dir \
+        torch==2.7.0 \
+        torchvision==0.22.0
+
+# LeRobot v0.5.1 from PLAIN PyPI (no Jetson AI Lab index — this is a Rockchip CPU
+# base). Extras:
+#   [pi]       pulls PI0Policy + PI0FastPolicy deps (the extra is `pi`, not `pi0`)
+#   [smolvla]  pulls transformers==5.3.0 + SmolVLM deps; transitively covers
+#              pi05 (Pi-0.5, new in v0.5.1)
+#   [peft]     pulls PeftConfig/PeftModel for cfg.use_peft branch
+#
+# torch is already pinned above, so this resolve keeps torch 2.7.0 untouched.
+# numpy<2 pin DROPPED: v0.5.1 requires numpy>=2.0,<2.3 — the cross-arch floor
+# below force-pins it back to 1.26.4 for the cv_bridge ABI.
+#
+# IMPORTANT: SmolVLA is broken on aarch64 (upstream bug #3636: pyav vs torchcodec
+# decoder discrepancy produces wrong actions vs x86_64). inference_manager hides
+# SmolVLA from the React dropdown on aarch64 hosts; the dep is installed anyway.
+# scipy is pinned explicitly (v2.5.1 audit): it is otherwise only a transitive of
+# the lerobot[pi] extra and that resolve proved non-deterministic across builds —
+# pi0_fast inference hard-needs scipy.fftpack.idct, so pin it directly.
+# v2.9.3: CAP <1.18. scipy 1.18.0 dropped numpy-1.x support and its
+# scipy.sparse._sputils references np.long (numpy-2-only); against the forced
+# numpy==1.26.4 cv_bridge floor below it raises "module 'numpy' has no attribute
+# 'long'" at the transformers D-FINE-loss import. Do NOT widen back to <2.0.0
+# while numpy is floored at 1.26.4.
+#
+# torchcodec uninstall: LeRobot 0.5.1 already excludes torchcodec on Linux aarch64
+# via an environment marker (falls back to PyAV — 'av' is an unconditional dep with
+# manylinux aarch64 wheels), so this is a defensive no-op mirroring the siblings.
+RUN python3 -m pip uninstall -y torchcodec 2>/dev/null || true && \
+    python3 -m pip install --no-cache-dir \
+        "lerobot[pi,smolvla,peft]==0.5.1" \
+        "accelerate>=1.10.0,<2.0.0" \
+        "scipy>=1.14.0,<1.18"
+
+# Cross-arch package floor — pin safetensors / protobuf / pillow / numpy to a
+# single version on BOTH arches. v0.5.1 resolves these naturally to compatible
+# versions, but we pin explicitly to keep amd64 + arm64 + opi producing
+# byte-identical site-packages for these libs. Versions chosen from Phase 0's
+# verified pip resolve of `lerobot[pi,smolvla,peft]==0.5.1` on Python 3.12.
+#
+#   safetensors==0.7.0   (unchanged; still the LCD across arches)
+#   protobuf==6.33.6     (bumped from 6.31.0; v0.5.1's grpcio-dep wants 6.31+)
+#   pillow==12.2.0       (bumped from 12.1.0; v0.5.1 resolves here)
+#
+# Mirrored in Dockerfile.{amd64,arm64} + the thin-overlay cross-arch floor.
+# numpy==1.26.4: cv_bridge_boost.so is built against NumPy 1.x, so lerobot's
+# numpy>=2 segfaults the recording/inference rgb8 decode path. Pin <2 AFTER
+# lerobot (numpy<2 is unsatisfiable in the same resolve as lerobot's numpy>=2).
+RUN python3 -m pip install --no-cache-dir --force-reinstall \
+        safetensors==0.7.0 \
+        protobuf==6.33.6 \
+        pillow==12.2.0 \
+        numpy==1.26.4 && \
+    python3 -c "import safetensors, google.protobuf, PIL, numpy; \
+                print('cross-arch floor:', safetensors.__version__, \
+                      google.protobuf.__version__, PIL.__version__, numpy.__version__); \
+                assert numpy.__version__.startswith('1.'), 'numpy must be <2 for cv_bridge ABI'"
+
+# v2.5.0: LeRobot is in site-packages, not under physical_ai_tools/lerobot/src.
+# The historic PYTHONPATH entry is no longer needed.
+
+RUN bash -c "source /opt/ros/${ROS_DISTRO}/setup.bash && \
+    cd ${COLCON_WS} && \
+    colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release"
+
+# Build-time policy import smoke test. Catches a LeRobot module-layout drift
+# at `docker buildx build` time instead of at student-bench inference time.
+# Imports every policy modeling module that inference_manager.py lazy-loads,
+# plus the v0.5.1 inference helpers and v3.0 dataset I/O symbols. If any of
+# these fail (a future LeRobot release reorganises modules without bumping
+# our pin via PyPI's preview channel), the image build aborts loudly.
+RUN python3 -c "\
+import lerobot; print(f'lerobot=={lerobot.__version__}'); \
+from lerobot.policies.act.modeling_act import ACTPolicy; \
+from lerobot.policies.diffusion.modeling_diffusion import DiffusionPolicy; \
+from lerobot.policies.tdmpc.modeling_tdmpc import TDMPCPolicy; \
+from lerobot.policies.vqbet.modeling_vqbet import VQBeTPolicy; \
+from lerobot.policies.pi0.modeling_pi0 import PI0Policy; \
+from lerobot.policies.pi0_fast.modeling_pi0_fast import PI0FastPolicy; \
+from lerobot.policies.pi05.modeling_pi05 import PI05Policy; \
+from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy; \
+from lerobot.utils.control_utils import predict_action; \
+from lerobot.policies.factory import make_pre_post_processors; \
+from lerobot.datasets.feature_utils import validate_frame; \
+from lerobot.datasets.io_utils import write_info, write_episodes, write_stats; \
+from lerobot.datasets.dataset_metadata import CODEBASE_VERSION; \
+assert CODEBASE_VERSION == 'v3.0', f'unexpected codebase_version: {CODEBASE_VERSION}'; \
+print('all v0.5.1 imports OK; codebase_version=v3.0')"
+
+RUN echo "source /opt/ros/${ROS_DISTRO}/setup.bash" >> ~/.bashrc  && \
+    echo "source ${COLCON_WS}/install/setup.bash" >> ~/.bashrc  && \
+    echo "alias cb='colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release'" >> ~/.bashrc && \
+    echo "alias ai_server='ros2 launch physical_ai_server physical_ai_server_bringup.launch.py'" >> ~/.bashrc && \
+    echo "export ROS_DOMAIN_ID=30" >> ~/.bashrc
+
+# Create directory for agent Unix Domain Socket
+RUN mkdir -p /var/run/agent && \
+    chmod 777 /var/run/agent
+
+# talos_system_manager — kept here ONLY because its requirements.txt installs
+# shared pip deps into site-packages that other packages reuse. The directory
+# itself + the PYTHONPATH entry are stripped from the production image by the
+# thin-overlay Dockerfile in robotis_ai_setup/docker/physical_ai_server/, so
+# nothing depends on /opt/talos_system_manager existing at runtime.
+#
+# SHA-pinned (commit "BUMP 0.1.2", 2026-02-05) so the requirements.txt list
+# can't shift under us between builds. Only the pip-installed packages persist
+# into the production image (the directory itself is stripped). Bumping this
+# pin is safe as long as the new commit's requirements.txt resolves cleanly
+# alongside the LeRobot deps installed in the layers above.
+ARG TALOS_SYSTEM_MANAGER_REF=40981c6d15a1e0f1cba9e3d424fe292833c1b7f9
+RUN set -e && \
+    git clone https://github.com/ROBOTIS-GIT/talos_system_manager.git /opt/talos_system_manager && \
+    git -C /opt/talos_system_manager checkout "${TALOS_SYSTEM_MANAGER_REF}" && \
+    echo "talos_system_manager pinned to ${TALOS_SYSTEM_MANAGER_REF}"
+
+ENV PYTHONPATH=/opt/talos_system_manager:${PYTHONPATH}
+
+RUN python3 -m pip install --no-cache-dir -r /opt/talos_system_manager/requirements.txt
+
+# Build-time torch-is-CPU gate — the SECOND build smoke gate for this flavor,
+# placed AFTER every pip layer (incl. talos requirements) so it proves torch
+# 2.7.0 survived the full resolve chain and that the plain-PyPI aarch64 wheel is
+# CPU-only (torch.version.cuda is None). A version regression (e.g. an unpinned
+# transitive bumping to 2.10.x) or a CUDA wheel sneaking in fails the build here
+# instead of silently ballooning the image or splitting the torch surface.
+RUN python3 -c "import torch, torchvision; \
+                print('torch', torch.__version__, 'torchvision', torchvision.__version__, 'cuda=', torch.version.cuda); \
+                assert torch.__version__.startswith('2.7'), f'expected torch 2.7.x, got {torch.__version__}'; \
+                assert torch.version.cuda is None, 'expected a CPU-only torch build (no CUDA)'"
+
+# s6-rc services: s6-agent, physical_ai_server (longrun + log pipeline)
+COPY docker/s6-agent /etc/s6-overlay/s6-rc.d/s6-agent
+COPY docker/s6-services /etc/s6-overlay/s6-rc.d/
+RUN rm -rf /etc/s6-overlay/s6-rc.d/common
+RUN chmod +x /etc/s6-overlay/s6-rc.d/s6-agent/run /etc/s6-overlay/s6-rc.d/s6-agent/finish \
+    /etc/s6-overlay/s6-rc.d/physical_ai_server/run /etc/s6-overlay/s6-rc.d/physical_ai_server/finish \
+    /etc/s6-overlay/s6-rc.d/physical_ai_server-log/run
+
+# Copy reusable ROS2 service scripts to a location outside s6-rc.d
+# This prevents s6-rc-compile from treating them as services
+RUN mkdir -p /usr/local/lib/s6-services
+COPY docker/s6-services/common/ros2_service_run.sh /usr/local/lib/s6-services/ros2_service_run.sh
+COPY docker/s6-services/common/ros2_service_finish.sh /usr/local/lib/s6-services/ros2_service_finish.sh
+RUN chmod +x /usr/local/lib/s6-services/ros2_service_run.sh && \
+    chmod +x /usr/local/lib/s6-services/ros2_service_finish.sh
+
+# Create log directory and set permissions
+RUN mkdir -p /var/log/physical_ai_server && \
+    chown nobody:nogroup /var/log/physical_ai_server && \
+    chmod 02755 /var/log/physical_ai_server
+
+RUN mkdir -p /etc/s6-overlay/s6-rc.d/user/contents.d && \
+    touch /etc/s6-overlay/s6-rc.d/user/contents.d/s6-agent
+
+# Set s6-overlay as entrypoint
+ENTRYPOINT ["/init"]

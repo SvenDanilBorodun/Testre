@@ -111,6 +111,15 @@ RUN python3 -m pip install --no-cache-dir \
         torch==2.7.0 \
         torchvision==0.22.0
 
+# Network resilience for the from-source pip installs below: a files.pythonhosted.org
+# read-timeout mid-download has flaked the lerobot resolve. A longer socket timeout
+# + more retries so a slow/stalled mirror retries instead of failing the whole base
+# build. Placed AFTER the torch install so it does NOT invalidate that cached layer;
+# persists into the thin overlay's pip installs too (helpful under CI network jitter,
+# a harmless no-op at runtime where no pip runs).
+ENV PIP_DEFAULT_TIMEOUT=120 \
+    PIP_RETRIES=5
+
 # LeRobot v0.5.1 from PLAIN PyPI (no Jetson AI Lab index — this is a Rockchip CPU
 # base). Extras:
 #   [pi]       pulls PI0Policy + PI0FastPolicy deps (the extra is `pi`, not `pi0`)
@@ -134,6 +143,19 @@ RUN python3 -m pip install --no-cache-dir \
 # 'long'" at the transformers D-FINE-loss import. Do NOT widen back to <2.0.0
 # while numpy is floored at 1.26.4.
 #
+# Ubuntu Noble ships `packaging` AND `numpy` via apt (python3-packaging /
+# python3-numpy, no pip RECORD), so pip cannot uninstall/upgrade them when the
+# lerobot resolve below wants a different version ("Cannot uninstall <pkg>,
+# RECORD file not found. Hint: The package was installed by debian."). Pre-install
+# pip-managed copies first: --ignore-installed skips the failing Debian uninstall
+# and lands them in /usr/local (which shadows the apt copies and carries a
+# RECORD), so the lerobot resolve can manage them cleanly. (numpy is pip-installed
+# to 2.x here to satisfy lerobot, then force-pinned back to 1.26.4 below for the
+# cv_bridge ABI.) The prepared torch bases used by Dockerfile.{amd64,arm64}
+# sidestep this entirely; this CPU base builds from stock ros:jazzy-ros-base, so
+# it must handle it here.
+RUN python3 -m pip install --no-cache-dir --ignore-installed packaging numpy
+
 # torchcodec uninstall: LeRobot 0.5.1 already excludes torchcodec on Linux aarch64
 # via an environment marker (falls back to PyAV — 'av' is an unconditional dep with
 # manylinux aarch64 wheels), so this is a defensive no-op mirroring the siblings.

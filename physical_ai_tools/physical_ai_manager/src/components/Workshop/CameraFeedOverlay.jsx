@@ -16,6 +16,7 @@ import { useRosServiceCaller } from '../../hooks/useRosServiceCaller';
 import { isCloudOnlyMode } from '../../utils/cloudMode';
 import rosConnectionManager from '../../utils/rosConnectionManager';
 import { STREAM_QUALITY } from '../../constants/streamConfig';
+import { usePiMode, videoStreamBase } from '../../utils/piMode';
 
 const CAMERA_TOPICS = {
   scene: '/scene/image_raw/compressed',
@@ -49,6 +50,8 @@ function CameraFeedOverlay({
   // placeholder branches below the hooks (audit §3.7).
   const cloudOnly = isCloudOnlyMode();
   const rosHost = useSelector((s) => s.ros.rosHost) || window.location.hostname;
+  // Orange Pi: MJPEG rides the same-origin /video proxy instead of :8080.
+  const { piMode } = usePiMode();
   const containerRef = useRef(null);
   const imgRef = useRef(null);
   const detections = useSelector((s) => s.workshop.detections);
@@ -83,7 +86,7 @@ function CameraFeedOverlay({
     const streamTopic = topic.endsWith('/compressed')
       ? topic.slice(0, -'/compressed'.length)
       : topic;
-    img.src = `http://${rosHost}:8080/stream?quality=${STREAM_QUALITY}&type=ros_compressed&default_transport=compressed&topic=${streamTopic}&t=${timestamp}`;
+    img.src = `${videoStreamBase(rosHost, piMode)}/stream?quality=${STREAM_QUALITY}&type=ros_compressed&default_transport=compressed&topic=${streamTopic}&t=${timestamp}`;
     img.alt = topic;
     img.className = 'block w-full h-full object-contain rounded-lg bg-black';
     img.onload = () => {
@@ -106,7 +109,7 @@ function CameraFeedOverlay({
       if (img.parentNode) img.parentNode.removeChild(img);
       imgRef.current = null;
     };
-  }, [camera, rosHost, cloudOnly, reloadKey]);
+  }, [camera, rosHost, cloudOnly, reloadKey, piMode]);
 
   // Audit F24: ROS-side liveness ping. Subscribe to the same compressed
   // image topic at 1 Hz throttle so a frozen MJPEG doesn't fool us. If

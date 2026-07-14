@@ -133,8 +133,8 @@ function BootSplash() {
 // hasn't connected yet — and it NEVER covers the System tab (where the start
 // button lives). When the robot tier is down, or the student is on the System
 // tab, children render fully interactive. If the wait times out, the screen
-// names the port-9090/network cause (never „Docker prüfen") and offers an escape
-// back to the System window.
+// names the robot-connection/network cause (never „Docker prüfen") and offers
+// an escape back to the System window.
 function PiStartupGate({ children }) {
   const { agentStatus } = usePiMode();
   const dispatch = useDispatch();
@@ -202,15 +202,16 @@ function PiStartupGate({ children }) {
             </div>
 
             <div className="flex flex-col gap-4 bg-gray-50 rounded-2xl px-8 py-6 shadow-lg border border-gray-100 min-w-80">
-              <ProgressStep label="Verbindung zum Roboter (Port 9090)..." done={connected} />
+              <ProgressStep label="Verbindung zum Roboter..." done={connected} />
               <ProgressStep label="Dienste werden initialisiert..." done={settled} />
             </div>
 
             {timedOut && !settled && (
               <div className="flex flex-col items-center gap-3 max-w-sm text-center">
                 {/* Pi-specific: the robot tier is REPORTED running but rosbridge
-                    (:9090) is unreachable from the browser — a port-filter / VLAN
-                    ACL, not a crashed stack. Never the Windows „Docker prüfen". */}
+                    (same-origin /rosbridge proxy) is unreachable from the browser
+                    — the server container still initialising, or a middlebox
+                    breaking WebSocket upgrades. Never the Windows „Docker prüfen". */}
                 <p className="text-sm text-orange-600">{PI_PORT_BLOCKED_HINT}</p>
                 <div className="flex items-center gap-2">
                   <button

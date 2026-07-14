@@ -15,11 +15,30 @@
 #
 # The server{} block below is byte-for-byte the student nginx.conf
 # (index.html/version.json no-store, /static/ immutable, SPA try_files
-# fallthrough) PLUS two Pi-only locations: the baked /pi-mode.json
-# marker and the /api/system/ reverse proxy to the pi-agent.
+# fallthrough) PLUS four Pi-only locations: the baked /pi-mode.json
+# marker, the /api/system/ reverse proxy to the pi-agent, and the
+# /rosbridge + /video/ same-origin proxies into the physical_ai_server
+# container. The latter two exist so a remote Chrome needs ONLY port 80:
+# school networks routinely filter non-standard ports (9090/8080), and
+# port 80 is the one port guaranteed reachable if the wizard loads at
+# all. The React app routes rosbridge + MJPEG same-origin in Pi mode
+# (utils/piMode.js localRosbridgeUrl/videoStreamBase); the direct host
+# ports stay published in docker-compose.opi.yml as a debug/rollback
+# path only.
 server {
     listen 80;
     server_name localhost;
+
+    # Docker's embedded DNS. The robot tier (physical_ai_server) is DOWN
+    # at manager boot BY DESIGN, so the two proxies below must resolve
+    # the upstream at REQUEST time, not config-load time: a literal
+    # hostname in proxy_pass is resolved once at startup and would make
+    # nginx fail to start (host not found) while the robot tier is down.
+    # Variables (set $... below) defer resolution to per-request, and
+    # valid=10s re-resolves after `--force-recreate` churns the
+    # container IP. While the tier is down a request 502s in ms — the
+    # SPA treats that exactly like "disconnected".
+    resolver 127.0.0.11 valid=10s ipv6=off;
 
     root /usr/share/nginx/html;
     index index.html;
@@ -75,6 +94,55 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+        chunked_transfer_encoding off;
+    }
+
+    # Same-origin WebSocket proxy to rosbridge inside the
+    # physical_ai_server container (service DNS name on ros_net; the
+    # published host port stays a debug fallback). The React app connects
+    # to ws://<host>/rosbridge in Pi mode so the robot connection rides
+    # port 80 — no school-firewall dependency on :9090. proxy_pass
+    # carries an explicit URI ("/"): with a variable upstream nginx
+    # passes that URI as-is, so rosbridge sees the "/" path it serves
+    # its WebSocket handler on. $http_upgrade/$connection_upgrade-style
+    # single-$ vars survive envsubst (filter only matches
+    # EDUBOTICS_ROS_NET_GATEWAY). Long timeouts: an idle-but-alive
+    # WebSocket must not be cut by the 60 s default.
+    location = /rosbridge {
+        set $edubotics_rosbridge physical_ai_server;
+        proxy_pass http://$edubotics_rosbridge:9090/;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+
+    # Same-origin proxy to web_video_server (MJPEG camera streams) in the
+    # physical_ai_server container. The React app requests
+    # /video/stream?topic=… in Pi mode instead of http://<host>:8080/…
+    # — same port-80-only rationale as /rosbridge. The rewrite strips the
+    # /video prefix (query string is preserved automatically) because a
+    # variable proxy_pass cannot do prefix replacement itself.
+    # proxy_buffering off is MANDATORY for multipart/x-mixed-replace —
+    # nginx's default buffering would freeze the stream.
+    location /video/ {
+        set $edubotics_video physical_ai_server;
+        rewrite ^/video/(.*)$ /$1 break;
+        proxy_pass http://$edubotics_video:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_buffering off;
         proxy_cache off;
         proxy_read_timeout 3600s;

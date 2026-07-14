@@ -82,7 +82,7 @@ function StudentApp() {
   // Orange Pi: the System tab (the in-browser setup wizard) is revealed once the
   // baked /pi-mode.json marker resolves — progressive reveal, exactly like the
   // Jetson-gated tabs.
-  const { piMode } = usePiMode();
+  const { piMode, piModeResolved } = usePiMode();
   const currentRosHost = useSelector((state) => state.ros.rosHost);
 
   // Initialise the local rosbridge host ONCE, not on every render. The
@@ -92,13 +92,22 @@ function StudentApp() {
   // Redux state changed. Net result: Jetson connection couldn't survive
   // a single re-render. Now we only seed the local host when it isn't
   // yet set and the student isn't currently routing to a Jetson.
+  //
+  // Gated on piModeResolved: setRosHost derives the rosbridge URL
+  // Pi-aware (same-origin /rosbridge proxy vs direct :9090, rosSlice),
+  // so seeding before the /pi-mode.json marker resolves would connect a
+  // Pi browser to the direct port once, then tear down and reconnect
+  // when the marker flips — the LeaderToggle first-probe rule, applied
+  // to the rosbridge seed. The marker resolves in ms (same-origin
+  // static response).
   const defaultRosHost = window.location.hostname;
   useEffect(() => {
     if (cloudOnly) return;
+    if (!piModeResolved) return;
     if (jetsonConnected) return;
     if (currentRosHost === defaultRosHost) return;
     dispatch(setRosHost(defaultRosHost));
-  }, [cloudOnly, jetsonConnected, currentRosHost, defaultRosHost, dispatch]);
+  }, [cloudOnly, piModeResolved, jetsonConnected, currentRosHost, defaultRosHost, dispatch]);
 
   const page = useSelector((state) => state.ui.currentPage);
   const robotType = useSelector((state) => state.tasks.taskStatus.robotType);

@@ -14,6 +14,8 @@ import {
   fetchAgentStatus,
   getPiModeSync,
   rsControlBase,
+  localRosbridgeUrl,
+  videoStreamBase,
 } from '../piMode';
 
 function res({ ok = true, status = 200, json }) {
@@ -88,5 +90,38 @@ describe('rsControlBase / getPiModeSync defaults', () => {
   it('defaults to non-Pi (loopback :8769) with no provider resolved', () => {
     expect(getPiModeSync()).toBe(false);
     expect(rsControlBase()).toBe('http://localhost:8769');
+  });
+});
+
+// School networks filter non-standard ports; in Pi mode BOTH robot transports
+// must ride the same-origin nginx :80 proxies (ws /rosbridge + /video/), and
+// everywhere else the classic direct ports must stay byte-identical.
+describe('localRosbridgeUrl — same-origin proxy in Pi mode', () => {
+  it('builds the direct ws://<host>:9090 URL outside Pi mode', () => {
+    expect(localRosbridgeUrl('student-pc', false)).toBe('ws://student-pc:9090');
+  });
+
+  it('builds the same-origin /rosbridge proxy URL in Pi mode', () => {
+    expect(localRosbridgeUrl('edubotics-42.local', true)).toBe(
+      `ws://${window.location.host}/rosbridge`
+    );
+  });
+
+  it('defaults to the direct port with no provider resolved (module cache false)', () => {
+    expect(localRosbridgeUrl('student-pc')).toBe('ws://student-pc:9090');
+  });
+});
+
+describe('videoStreamBase — same-origin proxy in Pi mode', () => {
+  it('builds the direct :8080 base outside Pi mode', () => {
+    expect(videoStreamBase('192.168.0.5', false)).toBe('http://192.168.0.5:8080');
+  });
+
+  it('builds the same-origin /video base in Pi mode', () => {
+    expect(videoStreamBase('192.168.0.5', true)).toBe('/video');
+  });
+
+  it('defaults to the direct port with no provider resolved (module cache false)', () => {
+    expect(videoStreamBase('192.168.0.5')).toBe('http://192.168.0.5:8080');
   });
 });

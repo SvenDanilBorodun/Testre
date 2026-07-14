@@ -17,6 +17,7 @@
  */
 
 import { createSlice } from '@reduxjs/toolkit';
+import { localRosbridgeUrl } from '../../utils/piMode';
 
 const initialState = {
   rosHost: '',
@@ -28,9 +29,16 @@ const rosSlice = createSlice({
   name: 'ros',
   initialState,
   reducers: {
+    // The URL derivation is Pi-aware: on the Orange Pi rosbridge rides the
+    // same-origin nginx proxy (ws://<host>/rosbridge, port 80 — school
+    // firewalls filter :9090), everywhere else the classic direct
+    // ws://<host>:9090. localRosbridgeUrl reads the piMode module cache;
+    // both dispatch sites (StudentApp's seed effect, gated on
+    // piModeResolved, and useJetsonConnection's swap-back, which runs long
+    // after boot) only fire once the marker has resolved.
     setRosHost: (state, action) => {
       state.rosHost = action.payload;
-      state.rosbridgeUrl = `ws://${action.payload}:9090`;
+      state.rosbridgeUrl = localRosbridgeUrl(action.payload);
     },
     setRosbridgeUrl: (state, action) => {
       state.rosbridgeUrl = action.payload;

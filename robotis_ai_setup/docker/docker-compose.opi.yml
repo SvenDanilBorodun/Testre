@@ -210,6 +210,14 @@ services:
     networks:
       - ros_net
     ports:
+      # DEBUG/ROLLBACK ONLY since the port-80 consolidation: the React app
+      # reaches rosbridge + web_video_server SAME-ORIGIN through the
+      # manager nginx (/rosbridge + /video/ in nginx.opi.conf.template,
+      # proxied container-to-container over ros_net) so a school firewall
+      # only ever has to pass port 80. These host publishes remain for
+      # operator debugging (ros2 topic echo from a laptop, wscat against
+      # rosbridge) and as the manual fallback if the proxy ever breaks.
+      #
       # LAN-bindable per the locked Pi decision: EDUBOTICS_BIND_HOST is a
       # managed `.env` key the agent derives from EDUBOTICS_LAN_OPEN
       # (1 ⇒ 0.0.0.0, 0 ⇒ 127.0.0.1). The compose default is the SAFE
@@ -218,6 +226,10 @@ services:
       # the arm) — the open-LAN exposure is a deliberate, documented
       # product decision (§8), mitigated by EDUBOTICS_LAN_OPEN=0, the
       # Host/Origin allowlist on the agent, and the dedicated-VLAN guide.
+      # NOTE: the nginx proxy path makes the student UI fully functional
+      # even with EDUBOTICS_LAN_OPEN=0 (the proxy rides the docker
+      # network, not these host publishes) — flipping the default to
+      # loopback is now possible but is a separate, ask-first decision.
       - "${EDUBOTICS_BIND_HOST:-127.0.0.1}:8080:8080"
       - "${EDUBOTICS_BIND_HOST:-127.0.0.1}:9090:9090"
     environment:

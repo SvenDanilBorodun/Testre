@@ -21,6 +21,7 @@ import { useSelector } from 'react-redux';
 import ROSLIB from 'roslib';
 import { STREAM_QUALITY } from '../constants/streamConfig';
 import rosConnectionManager from '../utils/rosConnectionManager';
+import { usePiMode, videoStreamBase } from '../utils/piMode';
 
 // H1: during a classroom-Jetson inference session the Jetson's
 // web_video_server (:8080) is bound to loopback only and there is NO LAN
@@ -83,6 +84,8 @@ export default function ImageGridCell({
   // the Jetson, and rosHost still points at the student's own PC).
   const jetsonConnected = useSelector((state) => state.jetson.status === 'connected');
   const rosbridgeUrl = useSelector((state) => state.ros.rosbridgeUrl);
+  // Orange Pi: MJPEG rides the same-origin /video proxy instead of :8080.
+  const { piMode } = usePiMode();
   const containerRef = useRef(null);
   const currentImgRef = useRef(null);
 
@@ -169,7 +172,9 @@ export default function ImageGridCell({
       } else {
         const timestamp = Date.now();
         // Audit F35: STREAM_QUALITY constant shared with CameraFeedOverlay.
-        img.src = `http://${rosHost}:8080/stream?quality=${STREAM_QUALITY}&type=ros_compressed&default_transport=compressed&topic=${topic}&t=${timestamp}`;
+        // Pi mode rides the same-origin /video nginx proxy (port 80 —
+        // school firewalls filter :8080); otherwise direct web_video_server.
+        img.src = `${videoStreamBase(rosHost, piMode)}/stream?quality=${STREAM_QUALITY}&type=ros_compressed&default_transport=compressed&topic=${topic}&t=${timestamp}`;
         img.onerror = () => {
           if (cancelled) return;
           console.error(`Image stream error for idx ${idx}, topic: ${topic}`);
@@ -190,7 +195,7 @@ export default function ImageGridCell({
       }
       destroyImage();
     };
-  }, [topic, isActive, rosHost, idx, destroyImage, jetsonConnected, rosbridgeUrl]);
+  }, [topic, isActive, rosHost, idx, destroyImage, jetsonConnected, rosbridgeUrl, piMode]);
 
   // Force cleanup on unmount
   useEffect(() => {

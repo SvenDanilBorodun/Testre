@@ -38,7 +38,8 @@ export default function HeartbeatStatus({
   const heartbeatStatus = useSelector((state) => state.tasks.heartbeatStatus);
   const lastHeartbeatTime = useSelector((state) => state.tasks.lastHeartbeatTime);
   // Pi mode: distinguish a crashed stack from a port-filtered network. When the
-  // agent REPORTS the robot tier running but rosbridge (:9090) is unreachable
+  // agent REPORTS the robot tier running but rosbridge (the same-origin
+  // /rosbridge proxy on the Pi) is unreachable
   // from the browser, that is the VLAN-ACL / port-filter case — say so, never
   // the Windows-era „Docker prüfen" text (usePiMode returns a non-Pi default
   // outside a Pi rig, so this is inert everywhere else).

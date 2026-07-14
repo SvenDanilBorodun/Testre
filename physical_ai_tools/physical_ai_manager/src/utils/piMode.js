@@ -70,11 +70,52 @@ export function rsControlBase(piMode) {
   return isPi ? RS_PI_BASE : RS_LOCAL_BASE;
 }
 
+// ── same-origin robot transports (Pi mode) ───────────────────────────────────
+//
+// School networks routinely filter non-standard ports. On the Pi, nginx
+// (nginx.opi.conf.template) reverse-proxies rosbridge (ws /rosbridge) and
+// web_video_server (/video/) same-origin on port 80 — the one port guaranteed
+// reachable if the SPA loaded at all. These two helpers are the single source
+// of the local robot-transport URLs: Pi mode → same-origin proxy; everywhere
+// else → the classic direct ports (Windows rig: browser and stack share the
+// host, so localhost:9090/:8080 never traverse the school network). The direct
+// host ports stay published on the Pi as a debug/rollback path only.
+
+/**
+ * Local rosbridge WebSocket URL for `hostname`. Pi mode rides the nginx
+ * proxy (`ws(s)://<origin-host>/rosbridge`); otherwise the direct
+ * `ws://<hostname>:9090`. `piMode` defaults to the module cache — the only
+ * cache-driven caller is the rosSlice reducer, whose dispatch site
+ * (StudentApp's seed effect) is gated on `piModeResolved`, so the cache is
+ * always settled by the time it is read.
+ */
+export function localRosbridgeUrl(hostname, piMode) {
+  const isPi = piMode === undefined ? _piModeCache : piMode;
+  if (isPi && typeof window !== 'undefined' && window.location) {
+    const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
+    return `${proto}://${window.location.host}/rosbridge`;
+  }
+  return `ws://${hostname}:9090`;
+}
+
+/**
+ * Base URL for web_video_server MJPEG streams (`<base>/stream?topic=…`).
+ * Pi mode → same-origin `/video` (relative URLs are valid in <img src>);
+ * otherwise the direct `http://<rosHost>:8080`.
+ */
+export function videoStreamBase(rosHost, piMode) {
+  const isPi = piMode === undefined ? _piModeCache : piMode;
+  return isPi ? '/video' : `http://${rosHost}:8080`;
+}
+
 // Shared German network-blocked wording (Pi mode). Shown by StartupGate's
 // timeout screen and the heartbeat „Getrennt" state instead of the Windows-era
-// „Docker prüfen" text, which is actively misleading on a Pi.
+// „Docker prüfen" text, which is actively misleading on a Pi. Since rosbridge
+// now rides the same-origin :80 proxy, the old „Port 9090 blockiert" wording
+// is itself misleading — the realistic causes are the robot service still
+// starting, or a middlebox breaking WebSocket upgrades.
 export const PI_PORT_BLOCKED_HINT =
-  'Verbindung zu Port 9090 blockiert? Netzwerk-Anleitung prüfen';
+  'Verbindung zum Roboter blockiert? Netzwerk-Anleitung prüfen';
 
 // ── the static Pi-mode marker ────────────────────────────────────────────────
 

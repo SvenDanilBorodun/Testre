@@ -73,6 +73,7 @@ class _Node:
         self.on_inference = flags.get('on_inference', False)
         self.on_workflow = flags.get('on_workflow', False)
         self.on_manual = flags.get('on_manual', False)
+        self.on_calibration = flags.get('on_calibration', False)
         self._collision_active = flags.get('_collision_active', False)
         self._last_task_status_mono = flags.get('_last_task_status_mono', 0.0)
         self.robot_type = 'omx_f'
@@ -102,10 +103,13 @@ def test_tick_carries_identity_fields():
 
 
 @pytest.mark.parametrize('flag', [
-    'on_recording', 'on_inference', 'on_workflow', 'on_manual', '_collision_active',
+    'on_recording', 'on_inference', 'on_workflow', 'on_manual', 'on_calibration',
+    '_collision_active',
 ])
 def test_suppressed_during_active_mode(flag):
     # on_inference specifically covers the INFERENCE_LOADING silent window;
+    # on_calibration keeps READY out of a touch-off/extrinsic capture (audit
+    # fix 3 — parity with _assert_no_other_active);
     # _collision_active keeps READY from fighting the 5 Hz collision watchdog.
     node = _Node(**{flag: True})
     _tick(node)

@@ -175,9 +175,29 @@ class Communicator:
 
         self.rosbag_service_available = False
 
-        self.init_subscribers()
-        self.init_publishers()
-        self.init_services()
+        # Audit fix 7 — a raise partway through the init_* registration
+        # sequence used to LEAK the already-registered ROS entities:
+        # physical_ai_server binds self.communicator only AFTER this ctor
+        # returns, so the degraded-boot teardown's `if self.communicator is
+        # not None: cleanup()` no-ops on a ctor raise. Clean up the partially
+        # built self here (best-effort — the ORIGINAL exception must
+        # propagate, so the degraded-boot path in _init_robot_profile still
+        # sees the real failure), then re-raise. All the containers cleanup()
+        # touches (camera_topic_msgs, joint_publishers, …) are assigned above
+        # this point, so cleanup() on a partial self is safe; its sub-helpers
+        # are hasattr/getattr-guarded for anything init_* didn't reach.
+        try:
+            self.init_subscribers()
+            self.init_publishers()
+            self.init_services()
+        except Exception:
+            try:
+                self.cleanup()
+            except Exception:
+                # Never mask the original registration failure with a
+                # cleanup failure.
+                pass
+            raise
 
         self.joystick_state = {
             'updated': False,

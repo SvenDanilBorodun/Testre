@@ -167,6 +167,18 @@ _MANUAL_TORQUE_FAIL_LIMIT = 3
 _MANUAL_IDLE_RETORQUE_S = 30.0
 _MANUAL_IDLE_WATCHDOG_PERIOD_S = 5.0
 
+# Audit fix 1 — degraded-boot re-init retry. _init_robot_profile keeps the node
+# ALIVE-but-degraded on a failed boot (communicator=None) so a raise can't crash-
+# loop respawn — but launch respawn only heals process EXITS, so a live-degraded
+# node would otherwise stay dark forever (the idle tick short-circuits on a None
+# communicator, so the rig never publishes /task/status). This bounded low-rate
+# retry (own MutuallyExclusiveCallbackGroup) re-runs the init path a few times;
+# on success the idle tick resumes delivering identity, on exhaustion it tells the
+# student (German) to restart the environment. Not env vars (a new EDUBOTICS_*
+# knob would need a docker-compose forward per env-forwarding-guard).
+_REINIT_RETRY_PERIOD_S = 30.0
+_REINIT_MAX_ATTEMPTS = 3
+
 
 class PhysicalAIServer(CollisionMonitorMixin, Node):
     # Define operation modes (constants taken from Communicator)
@@ -174,6 +186,12 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
     DEFAULT_SAVE_ROOT_PATH = Path.home() / '.cache/huggingface/lerobot'
     DEFAULT_TOPIC_TIMEOUT = 5.0  # seconds
     PUB_QOS_SIZE = 10
+
+    # Audit fix 6 — cap the one-shot stale-session notice poll so its 5 s timer
+    # can't run forever on a node that no browser ever attaches to (mirrors the
+    # Communicator rosbag-probe bounded-attempts pattern). 60 × 5 s = 5 min is
+    # ample for a student to open the browser after a crashed recording.
+    _STALE_NOTICE_POLL_MAX_ATTEMPTS = 60
 
     # Wire int for the policy-loading phase. getattr fallback mirrors the
     # collision constants (collision_monitor.py): a container whose COMPILED
@@ -379,17 +397,22 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         # operation_mode MUST be set before init_ros_params -> Communicator(
         # operation_mode=self.operation_mode); it is never set elsewhere in
         # __init__. 'collection' also enables the leader subscriber source.
+        # It STAYS first and OUTSIDE the try (Rule D1).
         self.operation_mode = 'collection'
-        profile = robot_profiles.resolve(os.environ.get('EDUBOTICS_ROBOT_TYPE'))
-        # The resolved profile object is kept private for the IK factory seam
-        # (_build_ik_solver); the string id + caps JSON ride /task/status.
-        self._arm_profile = profile
-        self.robot_profile = profile.profile_id
-        self.capabilities_json = robot_profiles.capabilities_json(profile)
-        # data_robot_type is 'omx_f' for BOTH OMX profiles — dataset repo naming
-        # ({user}/{robot_type}_{task}) must stay stable.
-        self.robot_type = profile.data_robot_type
         try:
+            # Fix 5 — resolve() + the identity attributes live INSIDE the try
+            # now. Previously they sat above it, so a raising
+            # resolve()/capabilities_json() would escape __init__ (respawn
+            # crash-loop) despite the "never raises out of __init__" contract.
+            profile = robot_profiles.resolve(os.environ.get('EDUBOTICS_ROBOT_TYPE'))
+            # The resolved profile object is kept private for the IK factory seam
+            # (_build_ik_solver); the string id + caps JSON ride /task/status.
+            self._arm_profile = profile
+            self.robot_profile = profile.profile_id
+            self.capabilities_json = robot_profiles.capabilities_json(profile)
+            # data_robot_type is 'omx_f' for BOTH OMX profiles — dataset repo
+            # naming ({user}/{robot_type}_{task}) must stay stable.
+            self.robot_type = profile.data_robot_type
             self.init_ros_params(self.robot_type)
             # A missing/unloaded config YAML does NOT leave these params falsy:
             # they are declared with default_value=[''] and load_parameters
@@ -402,29 +425,154 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 self.get_logger().error(
                     '[FEHLER] Roboterkonfiguration unvollständig — '
                     f'Parameter für "{self.robot_type}" fehlen.')
+                # Fix 4 — a wired-but-DEAD pipeline (blank camera/joint config)
+                # must not advertise READY + full capabilities over nothing.
+                # Tear down to communicator=None so degraded is unambiguous
+                # (mirroring the exception path), then arm the bounded re-init
+                # retry so the node can heal without a full restart.
+                self._teardown_to_degraded()
+                self._schedule_reinit_retry()
+                return
         except Exception as e:
+            # Fix 5 — if resolve()/capabilities_json() itself raised, the
+            # identity attributes would be UNSET (publish_status stamping reads
+            # them via getattr, but /task/status would carry blanks). Fall back
+            # to the DEFAULT profile identity so a degraded node still reports a
+            # valid robot_type/profile/caps. Wrapped so this fallback can never
+            # itself escape __init__.
+            try:
+                default_profile = robot_profiles.resolve(None)
+                self._arm_profile = default_profile
+                self.robot_profile = default_profile.profile_id
+                self.capabilities_json = robot_profiles.capabilities_json(default_profile)
+                self.robot_type = default_profile.data_robot_type
+            except Exception:
+                pass
             self.get_logger().error(
                 f'[FEHLER] Roboterprofil-Initialisierung fehlgeschlagen: {e}')
             # init_ros_params assigns self.communicator MID-function; a raise
             # AFTER that (stale-session block, InferenceManager()) would leave a
             # half-initialized non-None communicator that every
             # `if self.communicator is None` guard wrongly reads as "ready".
-            # Tear it down so the degraded state is unambiguous. The stale-
-            # session poll timer may already be armed by then — cancel it too
-            # (its tick is communicator-guarded, but a leaked 5 s timer on a
-            # degraded node is noise).
-            if getattr(self, '_stale_notice_timer', None) is not None:
-                try:
-                    self._stale_notice_timer.cancel()
-                except Exception:
-                    pass
-                self._stale_notice_timer = None
-            if self.communicator is not None:
-                try:
-                    self.communicator.cleanup()
-                except Exception:
-                    pass
-                self.communicator = None
+            # Tear it down so the degraded state is unambiguous, then arm the
+            # bounded re-init retry (fix 1) so the node can heal.
+            self._teardown_to_degraded()
+            self._schedule_reinit_retry()
+
+    def _teardown_to_degraded(self):
+        """Drop the node to the unambiguous DEGRADED state (audit fixes 4/6).
+
+        Cancels AND destroys the stale-session poll timer (a leaked 5 s timer
+        on a degraded node is noise) and tears down the (possibly
+        half-initialized) Communicator so every ``if self.communicator is None``
+        guard reads 'not ready'. Idempotent; never raises. The bounded re-init
+        retry (``_schedule_reinit_retry``) then attempts to heal it.
+        """
+        self._destroy_stale_notice_timer()
+        if getattr(self, 'communicator', None) is not None:
+            try:
+                self.communicator.cleanup()
+            except Exception:
+                pass
+            self.communicator = None
+
+    def _destroy_stale_notice_timer(self):
+        """Cancel + destroy the stale-session notice poll timer (audit fix 6).
+
+        Idempotent; never raises. cancel() alone leaves the timer registered on
+        the executor — pair it with destroy_timer (the rosbag-probe pattern).
+        Called from the poll itself (publish success / attempts exhausted) and
+        from the degraded-boot teardown.
+        """
+        timer = getattr(self, '_stale_notice_timer', None)
+        if timer is None:
+            return
+        try:
+            timer.cancel()
+        except Exception:
+            pass
+        try:
+            self.destroy_timer(timer)
+        except Exception:
+            pass
+        self._stale_notice_timer = None
+
+    def _schedule_reinit_retry(self):
+        """Arm the bounded degraded-boot re-init retry (audit fix 1; idempotent).
+
+        No-op if a retry is already armed — both degraded paths in
+        ``_init_robot_profile`` call this, and the retry callback re-enters
+        ``_init_robot_profile`` (which calls it again on a repeated failure).
+        Own MutuallyExclusiveCallbackGroup so a re-init (which constructs the
+        Communicator + declares params) never stalls the 1 Hz heartbeat.
+        """
+        if getattr(self, '_reinit_timer', None) is not None:
+            return
+        self._reinit_timer = self.create_timer(
+            _REINIT_RETRY_PERIOD_S,
+            self._reinit_retry_cb,
+            callback_group=MutuallyExclusiveCallbackGroup(),
+        )
+
+    def _reinit_retry_cb(self):
+        """Bounded degraded-boot re-init attempt (audit fix 1).
+
+        NEVER raises — an uncaught exception in a timer callback kills the node
+        (main() catches only KeyboardInterrupt). Self-guarded on a None
+        communicator so it never re-runs init over a LIVE pipeline (which would
+        leak a second Communicator's ROS entities). On success the idle tick
+        resumes delivering identity; on exhaustion it logs one final German
+        [FEHLER] and stops retrying.
+        """
+        try:
+            if getattr(self, 'communicator', None) is not None:
+                # Already healed (a concurrent successful boot / prior retry) —
+                # stop instead of re-running init over the live pipeline.
+                self._cancel_reinit_timer()
+                return
+            self._reinit_attempts = getattr(self, '_reinit_attempts', 0) + 1
+            attempt = self._reinit_attempts
+            self.get_logger().warning(
+                '[WARNUNG] Roboter-Initialisierung wird erneut versucht '
+                f'(Versuch {attempt}/{_REINIT_MAX_ATTEMPTS}) …')
+            self._init_robot_profile()
+            if getattr(self, 'communicator', None) is not None:
+                self.get_logger().info(
+                    'Roboter-Initialisierung erfolgreich wiederhergestellt.')
+                self._cancel_reinit_timer()
+                return
+            if attempt >= _REINIT_MAX_ATTEMPTS:
+                self.get_logger().error(
+                    '[FEHLER] Roboter-Initialisierung endgültig fehlgeschlagen '
+                    '— bitte die Umgebung neu starten (Details im Protokoll).')
+                self._cancel_reinit_timer()
+        except Exception as e:
+            # A retry attempt must never propagate out of the timer callback.
+            try:
+                self.get_logger().error(
+                    '[FEHLER] Erneuter Initialisierungsversuch fehlgeschlagen: '
+                    f'{e}')
+                if getattr(self, '_reinit_attempts', 0) >= _REINIT_MAX_ATTEMPTS:
+                    self._cancel_reinit_timer()
+            except Exception:
+                pass
+
+    def _cancel_reinit_timer(self):
+        """Cancel + destroy the re-init retry timer (audit fix 1). Idempotent;
+        never raises. Mirrors the Communicator rosbag-probe teardown — cancel()
+        alone leaves the timer registered on the executor."""
+        timer = getattr(self, '_reinit_timer', None)
+        if timer is None:
+            return
+        try:
+            timer.cancel()
+        except Exception:
+            pass
+        try:
+            self.destroy_timer(timer)
+        except Exception:
+            pass
+        self._reinit_timer = None
 
     def _init_core_components(self):
         # D8 — monotonic() of the last /task/status publish, updated after EVERY
@@ -569,7 +717,11 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         """
         if self.communicator is None:
             return
-        if self.on_recording or self.on_inference or self.on_workflow or self.on_manual:
+        # Audit fix 3 — on_calibration joins the mode gate (parity with
+        # _assert_no_other_active): a touch-off/extrinsic capture is an active
+        # mode; READY every ~4 s during it was a divergence, not a feature.
+        if (self.on_recording or self.on_inference or self.on_workflow
+                or self.on_manual or self.on_calibration):
             return
         if getattr(self, '_collision_active', False):
             return
@@ -828,7 +980,10 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         # /task/status is VOLATILE — a fixed-delay publish would be silently lost.
         # So POLL every 5 s and publish ONCE the instant a React client subscribes
         # (rosbridge creates the ROS-side subscription on connect; the publisher's
-        # subscription count goes > 0), then cancel.
+        # subscription count goes > 0), then cancel. Audit fix 6: the poll is
+        # BOUNDED (_STALE_NOTICE_POLL_MAX_ATTEMPTS, mirroring the Communicator
+        # rosbag-probe pattern) and the timer is cancel()ed AND destroy_timer()ed
+        # — cancel() alone leaves it registered on the executor forever.
         if not getattr(self, '_stale_session_notice_done', False):
             self._stale_session_notice_done = True
             try:
@@ -843,8 +998,19 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 shown = ', '.join(names[:3]) + (' …' if len(names) > 3 else '')
                 self.get_logger().warning(
                     f'Stale recording session markers found: {names}')
+                self._stale_notice_poll_attempts = 0
 
                 def _stale_session_poll():
+                    self._stale_notice_poll_attempts += 1
+                    if (self._stale_notice_poll_attempts
+                            > self._STALE_NOTICE_POLL_MAX_ATTEMPTS):
+                        # No browser attached within the poll budget — stop
+                        # polling; the boot-time warning above stays in the log.
+                        self.get_logger().info(
+                            'Stale-session notice poll exhausted without a '
+                            'subscriber — giving up')
+                        self._destroy_stale_notice_timer()
+                        return
                     comm = self.communicator
                     if comm is None:
                         return
@@ -862,7 +1028,7 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                         f'und gegebenenfalls löschen.'
                     )
                     comm.publish_status(status=notice)
-                    self._stale_notice_timer.cancel()
+                    self._destroy_stale_notice_timer()
 
                 self._stale_notice_timer = self.create_timer(
                     5.0, _stale_session_poll)
@@ -1365,6 +1531,18 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         return response
 
     def user_interaction_callback(self, request, response):
+        # Audit fix 2 — degraded-boot guard (same pattern as the jog/capture-pose
+        # guards): with communicator=None, START_RECORD would reach
+        # communicator.clear_latest_data and START_INFERENCE
+        # get_publisher_msg_types, and the outer catch would return an ENGLISH
+        # 'Error in user interaction: NoneType…' to the student. Refuse in
+        # German up front instead.
+        if self.communicator is None:
+            response.success = False
+            response.message = (
+                'Roboter-Initialisierung fehlgeschlagen — bitte die '
+                'Umgebung neu starten (Details im Protokoll).')
+            return response
         try:
             if request.command == SendCommand.Request.START_RECORD:
                 if self.on_recording:

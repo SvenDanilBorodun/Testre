@@ -12,6 +12,7 @@ from .constants import (
     IMAGE_TAG,
     REGISTRY,
     REGISTRY_FALLBACK,
+    ROBOT_PROFILES,
     ROS_DOMAIN_FILE,
     ROS_DOMAIN_ID,
 )
@@ -327,20 +328,37 @@ def generate_env_file(config: HardwareConfig, output_path: str = ENV_FILE,
             recording/teleop session is configured and both arms are required;
             the follower-only line is omitted so compose's default (0)
             supersedes any stale =1 (the key is MANAGED). When None (the
-            default) the value is DERIVED from ``robot_type`` — this keeps the
-            RS runtime leader-toggle able to OVERRIDE it while an omx_follower
-            rig (which never scans a leader) still derives True instead of
-            tripping the leader-required guard below.
+            default) the value is DERIVED from ``robot_type`` (via the
+            ``constants.ROBOT_PROFILES`` registry) — this keeps the RS runtime
+            leader-toggle able to OVERRIDE it while an omx_follower rig (which
+            never scans a leader) still derives True instead of tripping the
+            leader-required guard below. Explicitly passing False for a
+            follower-only profile is CONTRADICTORY (the profile has no leader
+            to re-arm) and raises a German ValueError instead of silently
+            emitting a both-arms .env.
 
     Returns:
         The content written to the file.
     """
+    # Resolve the initial follower_only from the ArmProfile registry — NOT a
+    # hardcoded id literal — so a new follower-only profile is honoured without
+    # editing this line (single source of truth: constants.ROBOT_PROFILES).
     # Derive FIRST (before the leader-null guard): without this an omx_follower
     # rig — which has no leader — would hit `not follower_only and leader is
     # None` and raise on every start. An explicit follower_only= (the RS toggle)
-    # still wins.
+    # still wins, EXCEPT that re-arming the leader on a leader-less profile is
+    # contradictory (a follower-only .env has no LEADER_PORT to emit) and is
+    # refused loudly rather than silently writing a both-arms .env for a rig
+    # that never scanned a leader.
+    profile_follower_only = ROBOT_PROFILES.get(robot_type, {}).get(
+        "follower_only", False)
     if follower_only is None:
-        follower_only = (robot_type == "omx_follower")
+        follower_only = profile_follower_only
+    elif profile_follower_only and not follower_only:
+        raise ValueError(
+            f'Robotertyp „{robot_type}" erlaubt keinen Leader-Betrieb '
+            f'(follower_only=False).'
+        )
     if config.follower is None:
         raise ValueError("Der Follower-Arm muss konfiguriert sein, bevor die .env erzeugt wird")
     if not follower_only and config.leader is None:

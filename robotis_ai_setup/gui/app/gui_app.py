@@ -775,6 +775,11 @@ class EduBoticsApp:
         - Voller Modus: prereqs ok, beide Arme gefunden, nicht laufend
         """
         def _update():
+            # The robot type is snapshotted at env start and is meaningless in
+            # cloud-only mode — keep the selector in lockstep with the run/mode
+            # state on every transition that routes through here (stop, factory
+            # reset, failed start, hardware scan).
+            self._update_robot_type_combo_state()
             if not self._prerequisites_done or self.running:
                 self.btn_start.config(state=tk.DISABLED)
                 self.btn_factory_reset.config(state=tk.DISABLED)
@@ -790,13 +795,31 @@ class EduBoticsApp:
                 self.btn_start.config(state=tk.DISABLED)
         self.root.after(0, _update)
 
+    def _update_robot_type_combo_state(self):
+        """Gray the Robotertyp selector whenever it must not change: while the
+        environment RUNS (the type is hardset/snapshotted at "Umgebung starten")
+        and in CLOUD-ONLY mode (no robot, so the type is irrelevant). Restores
+        the readonly (dropdown) state otherwise. Main-thread only; tolerant of a
+        not-yet-built widget so early prereq ticks can't raise."""
+        disabled = self.running or self.cloud_only.get()
+        try:
+            self.robot_type_combo.config(
+                state="disabled" if disabled else "readonly")
+        except (tk.TclError, AttributeError):
+            pass
+
     def _on_mode_changed(self):
         """Cloud-only checkbox toggled — show/hide hardware sections."""
         is_cloud_only = self.cloud_only.get()
         # Disable the hardware frames in cloud-only mode (visually grayed out).
+        # The Robotertyp selector is grayed too (via _update_robot_type_combo_
+        # state below), but NOT by adding the whole Modus frame to this loop —
+        # that would also disable the cloud-only checkbox itself and trap the
+        # student in cloud mode.
         new_state = tk.DISABLED if is_cloud_only else tk.NORMAL
         for frame in (self.leader_frame, self.follower_frame, self.camera_frame):
             self._set_frame_state(frame, new_state)
+        self._update_robot_type_combo_state()
         if is_cloud_only:
             self._set_status("Cloud-Modus — Start klicken, um die Web-Oberfläche zu starten.")
         else:
@@ -2255,6 +2278,11 @@ class EduBoticsApp:
 
         self.btn_start.config(state=tk.DISABLED)
         self.running = True
+        # Freeze the Robotertyp selector for the life of the session — the type
+        # is hardset here (the successful-start path never routes through
+        # _update_start_button, so gray it directly). Re-enabled on stop /
+        # failed start via _update_start_button → _update_robot_type_combo_state.
+        self._update_robot_type_combo_state()
 
         def _do_start():
             # Guarantee that progress spinner / button state / running flag

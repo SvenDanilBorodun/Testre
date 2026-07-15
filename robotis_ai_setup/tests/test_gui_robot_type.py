@@ -16,6 +16,10 @@ Covered:
   * _scan_arms — a follower-only robot type treats a leader-less scan as SUCCESS
     and must NOT drop into the diagnose/repair flow; a both-arms type with only
     the follower found still routes into diagnose.
+  * _try_rehydrate_arms — first-ever direct coverage: the omx_follower
+    leader-less path succeeds without a LEADER_PORT; a mismatch only PROMPTS
+    (never auto-scans); a follower-only rehydrate must not clobber a
+    previously-scanned leader with None.
 """
 
 import os
@@ -23,7 +27,7 @@ import textwrap
 import types
 import unittest
 
-from gui.app.constants import ROBOT_PROFILES
+from gui.app.constants import DEFAULT_ROBOT_PROFILE, ROBOT_PROFILES
 
 _GUI_SRC = os.path.join(os.path.dirname(__file__), "..", "gui", "app", "gui_app.py")
 
@@ -182,6 +186,150 @@ class ScanArmsTypeAwareTest(unittest.TestCase):
             "omx_full", (None, follower))
         # A both-arms type is NOT satisfied by the follower alone → diagnose runs.
         self.assertEqual(diag_calls, ["img"])
+
+
+class TryRehydrateArmsTest(unittest.TestCase):
+    """_try_rehydrate_arms — the launch-time fast rehydrate (first direct
+    coverage). The persisted EDUBOTICS_ROBOT_TYPE drives whether a LEADER_PORT
+    is required; on ANY mismatch the method only PROMPTS the student to rescan
+    (it never triggers the full scan itself); and a follower-only rehydrate
+    result (leader=None) must never overwrite an already-scanned leader."""
+
+    _FOLLOWER_PATH = "/dev/serial/by-id/usb-ROBOTIS_OpenRB-150_BBB2-if00"
+    _LEADER_PATH = "/dev/serial/by-id/usb-ROBOTIS_OpenRB-150_AAA1-if00"
+
+    def _run(self, env, rehydrate_result, hardware=None):
+        """Extract + run _try_rehydrate_arms against an owner of test doubles.
+
+        ``env`` backs the fake config_generator.read_env_var (the persisted
+        .env); ``rehydrate_result`` is what the fake fast_rehydrate_arms
+        returns. Returns (owner, logs, rehydrate_calls, update_calls,
+        follower_status, leader_status)."""
+        rehydrate_calls = []
+
+        def _fake_rehydrate(leader_path, follower_path, require_leader=True):
+            rehydrate_calls.append({
+                "leader": leader_path,
+                "follower": follower_path,
+                "require_leader": require_leader,
+            })
+            return rehydrate_result
+
+        ns = {
+            "config_generator": types.SimpleNamespace(
+                read_env_var=lambda key, path: env.get(key)),
+            "device_manager": types.SimpleNamespace(
+                fast_rehydrate_arms=_fake_rehydrate),
+            "threading": types.SimpleNamespace(Thread=_SyncThread),
+            "ROBOT_PROFILES": ROBOT_PROFILES,
+            "DEFAULT_ROBOT_PROFILE": DEFAULT_ROBOT_PROFILE,
+            "ENV_FILE": "/tmp/edubotics-test.env",
+        }
+        method = _load_method("_try_rehydrate_arms", ns)
+
+        if hardware is None:
+            hardware = types.SimpleNamespace(leader=None, follower=None)
+
+        def _hardware_ready(profile):
+            # Mirrors EduBoticsApp._hardware_ready: a both-arms type needs
+            # leader+follower; a follower-only type needs only the follower.
+            if ROBOT_PROFILES.get(profile, {}).get("scan_requires_leader", True):
+                return (hardware.leader is not None
+                        and hardware.follower is not None)
+            return hardware.follower is not None
+
+        logs, update_calls = [], []
+        leader_status, follower_status = [], []
+        owner = types.SimpleNamespace(
+            cloud_only=types.SimpleNamespace(get=lambda: False),
+            _scanning=False,
+            _hardware_ready=_hardware_ready,
+            hardware=hardware,
+            # Execute after-callbacks synchronously so the status-var sets run.
+            root=types.SimpleNamespace(
+                after=lambda _ms, fn=None: fn() if fn is not None else None),
+            leader_status_var=types.SimpleNamespace(set=leader_status.append),
+            follower_status_var=types.SimpleNamespace(set=follower_status.append),
+            _log=logs.append,
+            _update_start_button=lambda: update_calls.append(True),
+        )
+        method(owner)
+        return (owner, logs, rehydrate_calls, update_calls,
+                follower_status, leader_status)
+
+    def test_omx_follower_leaderless_env_rehydrates_follower_only(self):
+        # (a) An omx_follower .env has NO LEADER_PORT — that is legal: the
+        # rehydrate must run with require_leader=False and adopt the follower.
+        follower = types.SimpleNamespace(
+            description="OpenRB-150 BBB2", serial_path=self._FOLLOWER_PATH)
+        env = {
+            "EDUBOTICS_ROBOT_TYPE": "omx_follower",
+            "FOLLOWER_PORT": self._FOLLOWER_PATH,
+            "LEADER_PORT": None,
+        }
+        owner, logs, calls, update_calls, follower_status, leader_status = \
+            self._run(env, (None, follower))
+        self.assertEqual(len(calls), 1)
+        self.assertFalse(calls[0]["require_leader"])
+        self.assertEqual(calls[0]["leader"], "")  # leader_port or ""
+        self.assertEqual(calls[0]["follower"], self._FOLLOWER_PATH)
+        self.assertIs(owner.hardware.follower, follower)
+        self.assertIsNone(owner.hardware.leader)
+        self.assertTrue(any("Wiederhergestellt" in s for s in follower_status))
+        self.assertEqual(leader_status, [])  # no leader line for this type
+        self.assertTrue(any("wiederhergestellt" in ln for ln in logs))
+        self.assertEqual(update_calls, [True])
+
+    def test_mismatch_prompts_rescan_and_never_auto_scans(self):
+        # (b) fast_rehydrate_arms falls back with (None, None) — the method
+        # must only PROMPT ("Arme scannen") and leave the hardware untouched;
+        # it must NOT adopt anything or claim success.
+        env = {
+            "EDUBOTICS_ROBOT_TYPE": "omx_full",
+            "FOLLOWER_PORT": self._FOLLOWER_PATH,
+            "LEADER_PORT": self._LEADER_PATH,
+        }
+        owner, logs, calls, update_calls, follower_status, leader_status = \
+            self._run(env, (None, None))
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(calls[0]["require_leader"])
+        self.assertIsNone(owner.hardware.leader)
+        self.assertIsNone(owner.hardware.follower)
+        self.assertTrue(
+            any("nicht bestätigt" in ln and "Arme scannen" in ln
+                for ln in logs),
+            logs,
+        )
+        # No status lines set, no start-button refresh, no success message.
+        self.assertEqual(follower_status, [])
+        self.assertEqual(leader_status, [])
+        self.assertEqual(update_calls, [])
+        self.assertFalse(any("wiederhergestellt" in ln for ln in logs))
+
+    def test_follower_only_rehydrate_keeps_previously_scanned_leader(self):
+        # (c) THE `if leader is not None:` guard: a previously-scanned leader
+        # already sits on self.hardware; an omx_follower rehydrate returns
+        # leader=None — the guard must skip the assignment, never clobber the
+        # scanned leader with None.
+        prev_leader = types.SimpleNamespace(
+            description="OpenRB-150 AAA1", serial_path=self._LEADER_PATH)
+        follower = types.SimpleNamespace(
+            description="OpenRB-150 BBB2", serial_path=self._FOLLOWER_PATH)
+        hardware = types.SimpleNamespace(leader=prev_leader, follower=None)
+        env = {
+            "EDUBOTICS_ROBOT_TYPE": "omx_follower",
+            "FOLLOWER_PORT": self._FOLLOWER_PATH,
+            "LEADER_PORT": None,
+        }
+        owner, _logs, calls, _update_calls, follower_status, leader_status = \
+            self._run(env, (None, follower), hardware=hardware)
+        self.assertEqual(len(calls), 1)
+        self.assertIs(owner.hardware.leader, prev_leader)  # NOT overwritten
+        self.assertIs(owner.hardware.follower, follower)
+        # Only the follower status line updates; the leader line stays as the
+        # scan left it.
+        self.assertTrue(any("Wiederhergestellt" in s for s in follower_status))
+        self.assertEqual(leader_status, [])
 
 
 if __name__ == "__main__":

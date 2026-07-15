@@ -558,8 +558,14 @@ def fast_rehydrate_arms(
         # collides with the follower is a corrupt mapping — bail to full scan.
         return None, None
 
-    # Whether we expect (and must confirm) a leader path this call.
-    want_leader = require_leader or bool(saved_leader_path)
+    # Whether we expect (and must confirm) a leader path this call. When the
+    # caller does NOT require a leader (a follower-only robot type), a stray
+    # distinct LEADER_PORT left in a hand-edited .env must be IGNORED — not
+    # waited on. Keying want_leader off saved_leader_path here made such a stray
+    # burn the whole 10×1 s presence-retry loop and then fall back to a full
+    # scan even though the follower was present. The corrupt leader==follower
+    # mapping is already bailed above.
+    want_leader = require_leader
 
     self_heal_wsl_serial()
     attached = attach_all_robotis_devices()

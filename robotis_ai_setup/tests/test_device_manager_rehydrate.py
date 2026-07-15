@@ -147,6 +147,36 @@ class FollowerOnlyRehydrateTest(unittest.TestCase):
         self.assertEqual(result, (None, None))
         attach.assert_not_called()
 
+    def test_stray_distinct_leader_is_ignored_no_retry_loop_burn(self):
+        # A follower-only .env normally has no LEADER_PORT, but a hand-edited one
+        # may carry a stray DISTINCT leader path. With require_leader=False it
+        # must be IGNORED — not waited on: the follower alone succeeds on the
+        # first probe (no 10×1 s retry-loop burn) and leader stays None. Under
+        # the pre-fix `want_leader = require_leader or bool(saved_leader_path)`
+        # this looped 10× then wrongly fell back to (None, None).
+        with patch.object(device_manager, "self_heal_wsl_serial"), \
+                patch.object(device_manager, "attach_all_robotis_devices",
+                             return_value=_attached()), \
+                patch.object(device_manager, "find_serial_paths_for_robotis",
+                             return_value=[FOLLOWER]) as find, \
+                patch.object(device_manager, "start_scanner_container",
+                             MagicMock()) as scanner, \
+                patch.object(device_manager, "identify_arm_via_docker",
+                             MagicMock()) as identify, \
+                patch("time.sleep") as sleep:
+            leader, follower = device_manager.fast_rehydrate_arms(
+                LEADER, FOLLOWER, require_leader=False)
+        self.assertIsNone(leader)
+        self.assertIsNotNone(follower)
+        self.assertEqual(follower.serial_path, FOLLOWER)
+        self.assertEqual(follower.role, "follower")
+        # Present on the FIRST probe → exactly one serial lookup, zero retry
+        # sleeps, and none of the slow stages.
+        find.assert_called_once()
+        sleep.assert_not_called()
+        scanner.assert_not_called()
+        identify.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

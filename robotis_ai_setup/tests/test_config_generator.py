@@ -649,17 +649,20 @@ class TestConfigGeneratorRobotType(unittest.TestCase):
         finally:
             os.unlink(p)
 
-    def test_explicit_follower_only_false_keeps_leader_on_follower_type(self):
-        # And the reverse: explicit follower_only=False re-arms the leader even
-        # when the type is omx_follower (rollback re-derives with prev value).
+    def test_explicit_follower_only_false_on_follower_type_is_refused(self):
+        # A follower-only profile (omx_follower) has NO leader, so explicitly
+        # re-arming one (follower_only=False) is contradictory — it would emit a
+        # both-arms .env demanding a LEADER_PORT the rig never scanned. It must
+        # be refused in German, not silently accepted (audit fix). No live caller
+        # hits this: the GUI passes follower_only=None and _rs_set_leader_mode
+        # refuses an omx_follower type before it ever regenerates the .env.
         p = self._tmp()
         try:
-            content = generate_env_file(
-                self._config(with_leader=True), output_path=p,
-                robot_type="omx_follower", follower_only=False)
-            self.assertIn("EDUBOTICS_ROBOT_TYPE=omx_follower", content)
-            self.assertNotIn("EDUBOTICS_FOLLOWER_ONLY", content)
-            self.assertIn("LEADER_PORT=", content)
+            with self.assertRaises(ValueError) as ctx:
+                generate_env_file(
+                    self._config(with_leader=True), output_path=p,
+                    robot_type="omx_follower", follower_only=False)
+            self.assertIn("omx_follower", str(ctx.exception))
         finally:
             os.unlink(p)
 

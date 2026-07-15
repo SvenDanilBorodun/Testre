@@ -65,13 +65,17 @@ const InfoPanel = () => {
 
   const [showPopup, setShowPopup] = useState(false);
   const [taskInfoList] = useState(taskInfos);
-  // Editable exactly when the node is idle. The former 1 s /task/status SILENCE
-  // detector was only ever a PROXY for "no task running" — valid while
-  // /task/status was silent when idle, but the server now emits a ~0.5 Hz idle
-  // identity tick, so a silence detector would re-LOCK every field for ~1 s per
-  // tick (focus/keystroke loss). The explicit phase/running signal the ticks
-  // now carry is exact and stable (D8 companion #2).
-  const isEditable = taskStatus.phase === TaskPhase.READY && !taskStatus.running;
+  // Editable exactly when the node is REPORTEDLY idle. The former 1 s
+  // /task/status SILENCE detector was only ever a PROXY for "no task running" —
+  // valid while /task/status was silent when idle, but the server now emits a
+  // ~0.5 Hz idle identity tick, so a silence detector would re-LOCK every field
+  // for ~1 s per tick (focus/keystroke loss). The explicit phase/running signal
+  // the ticks now carry is exact and stable (D8 companion #2). Additionally
+  // gated on topicReceived (set by the first real /task/status tick): the
+  // initialState is READY/not-running, so without it a reload MID-TASK would
+  // paint a phantom-editable form until the first tick lands.
+  const isEditable =
+    taskStatus.topicReceived && taskStatus.phase === TaskPhase.READY && !taskStatus.running;
 
   // Benutzer-ID list comes from Redux (fetched once on connect, see
   // useHfUserList) so it survives tab switches — it used to live in local

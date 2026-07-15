@@ -85,7 +85,7 @@ export default function ImageGridCell({
   const jetsonConnected = useSelector((state) => state.jetson.status === 'connected');
   const rosbridgeUrl = useSelector((state) => state.ros.rosbridgeUrl);
   // Orange Pi: MJPEG rides the same-origin /video proxy instead of :8080.
-  const { piMode } = usePiMode();
+  const { piMode, piModeResolved } = usePiMode();
   const containerRef = useRef(null);
   const currentImgRef = useRef(null);
 
@@ -112,6 +112,15 @@ export default function ImageGridCell({
   // `cancelled` flag and its cleanup function flips it before
   // tearing down.
   useEffect(() => {
+    // Wait for the Pi-mode marker to resolve before building the stream URL —
+    // otherwise the first <img> src is computed off the default piMode=false
+    // and, on a Pi, points at the direct :8080 host port instead of the
+    // same-origin /video proxy (broken until an unrelated dep change re-runs).
+    // Mirrors the rest of the codebase, which gates on piModeResolved.
+    if (!piModeResolved) {
+      destroyImage();
+      return undefined;
+    }
     if (!topic || !topic.trim() || !isActive) {
       destroyImage();
       return undefined;
@@ -195,7 +204,7 @@ export default function ImageGridCell({
       }
       destroyImage();
     };
-  }, [topic, isActive, rosHost, idx, destroyImage, jetsonConnected, rosbridgeUrl, piMode]);
+  }, [topic, isActive, rosHost, idx, destroyImage, jetsonConnected, rosbridgeUrl, piMode, piModeResolved]);
 
   // Force cleanup on unmount
   useEffect(() => {

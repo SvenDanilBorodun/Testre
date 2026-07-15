@@ -9,7 +9,7 @@
 // the „Ohne Update fortfahren" skip appears ONLY after a FAILED attempt.
 
 import React from 'react';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, act } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import PiUpdateGate from '../PiUpdateGate';
 
@@ -102,5 +102,105 @@ describe('PiUpdateGate', () => {
     await waitFor(() =>
       expect(screen.queryByText('Ein Update ist verfügbar!')).toBeNull()
     );
+  });
+
+  it('recovers from a 409 (sibling browser updating): button re-enables, skip appears', async () => {
+    // Audit fix 1a: the agent's single-flight guard 409s a second browser's
+    // POST with NO job_id to poll. The non-closable modal must not be left with
+    // a permanently-disabled button and no skip.
+    global.fetch = vi.fn((url, opts = {}) => {
+      const u = String(url);
+      if (u.includes('/update/check')) return jsonRes(checkPayload);
+      if (u.includes('/update') && (opts.method || 'GET') === 'POST') {
+        return jsonRes(
+          { ok: false, message: 'Eine Aktualisierung läuft bereits — bitte warten.' },
+          { ok: false, status: 409 }
+        );
+      }
+      return jsonRes({});
+    });
+    render(<PiUpdateGate />);
+    await screen.findByText('Ein Update ist verfügbar!');
+
+    await userEvent.click(screen.getByRole('button', { name: 'Jetzt aktualisieren' }));
+
+    // Skip route unlocked + primary re-enabled (not stuck on „läuft …" disabled).
+    const skip = await screen.findByRole('button', { name: 'Ohne Update fortfahren' });
+    expect(skip).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Erneut versuchen' })).toBeEnabled();
+    // The sibling's in-progress note shows; the failure banner does NOT (the
+    // job is in flight, not failed).
+    expect(screen.getByText(/läuft bereits/)).toBeInTheDocument();
+    expect(screen.queryByText(/Aktualisierung fehlgeschlagen\./)).toBeNull();
+  });
+
+  it('retries the availability probe through the backoff and arms once the agent answers', async () => {
+    // Audit fix 2: a 502 during the documented agent boot-race must not
+    // silently disarm the forced gate for the whole page load.
+    vi.useFakeTimers();
+    try {
+      let checkCalls = 0;
+      global.fetch = vi.fn((url) => {
+        const u = String(url);
+        if (u.includes('/update/check')) {
+          checkCalls += 1;
+          if (checkCalls <= 2) return jsonRes({}, { ok: false, status: 502 });
+          return jsonRes(checkPayload);
+        }
+        return jsonRes({});
+      });
+      render(<PiUpdateGate />);
+
+      // Initial probe 502s → no gate yet (flush the fetch microtask chain).
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(screen.queryByText('Ein Update ist verfügbar!')).toBeNull();
+
+      // First backoff step (1 s) → second probe 502s too.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1000);
+      });
+      expect(screen.queryByText('Ein Update ist verfügbar!')).toBeNull();
+
+      // Second backoff step (2 s) → the agent answers → the forced gate arms.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2000);
+      });
+      expect(screen.getByText('Ein Update ist verfügbar!')).toBeInTheDocument();
+      expect(checkCalls).toBe(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('gives up permanently after the backoff schedule exhausts (one logical probe)', async () => {
+    vi.useFakeTimers();
+    try {
+      global.fetch = vi.fn((url) => {
+        const u = String(url);
+        if (u.includes('/update/check')) return jsonRes({}, { ok: false, status: 502 });
+        return jsonRes({});
+      });
+      render(<PiUpdateGate />);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      // The full schedule: initial + retries at 1/2/4/8/15 s.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(60000);
+      });
+      const probes = () =>
+        global.fetch.mock.calls.filter((c) => String(c[0]).includes('/update/check')).length;
+      expect(probes()).toBe(6);
+      // No periodic re-check after exhaustion — one logical probe.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(120000);
+      });
+      expect(probes()).toBe(6);
+      expect(screen.queryByText('Ein Update ist verfügbar!')).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

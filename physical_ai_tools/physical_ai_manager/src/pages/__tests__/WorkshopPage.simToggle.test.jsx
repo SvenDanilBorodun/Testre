@@ -44,9 +44,21 @@ vi.mock('../../components/Workshop/BlocklyWorkspace', () => ({
 }));
 
 // ── Right-region components — recognizable stubs so we can assert the swap. ──
+// RightDock additionally renders the control/record tab panels (the JogPanel/
+// RecordPanel mocks below expose trigger buttons) so the sim-entry guard tests
+// can flip the page's recording/hand-guide state through the real callbacks.
+// Other tabs are NOT rendered — the '3d' tab would mount the real lazy UrdfTwin.
 vi.mock('../../components/Workshop/RightDock', () => ({
   __esModule: true,
-  default: () => <div data-testid="right-dock" />,
+  default: ({ tabs }) => (
+    <div data-testid="right-dock">
+      {(tabs || [])
+        .filter((t) => t.id === 'control' || t.id === 'record')
+        .map((t) => (
+          <div key={t.id}>{t.render()}</div>
+        ))}
+    </div>
+  ),
 }));
 vi.mock('../../components/Workshop/SimStage', () => ({
   __esModule: true,
@@ -65,8 +77,37 @@ vi.mock('../../components/Workshop/DebugPanel', () => ({ __esModule: true, defau
 vi.mock('../../components/Workshop/GalleryTab', () => ({ __esModule: true, default: () => <div data-testid="gallery-tab" /> }));
 vi.mock('../../components/Workshop/SkillmapPlayer', () => ({ __esModule: true, default: () => <div data-testid="skillmap" /> }));
 vi.mock('../../components/Workshop/VersionHistoryDropdown', () => ({ __esModule: true, default: () => <div data-testid="version-history" /> }));
-vi.mock('../../components/Workshop/JogPanel', () => ({ __esModule: true, default: () => <div data-testid="jog-panel" /> }));
-vi.mock('../../components/Workshop/RecordPanel', () => ({ __esModule: true, default: () => <div data-testid="record-panel" /> }));
+// JogPanel/RecordPanel stubs expose trigger buttons wired to the REAL page
+// callbacks (onHandGuideChange/onRecordingChange), so the sim-entry guard tests
+// drive the page state exactly like a live panel would.
+vi.mock('../../components/Workshop/JogPanel', () => ({
+  __esModule: true,
+  default: function MockJogPanel({ onHandGuideChange }) {
+    return (
+      <div data-testid="jog-panel">
+        <button
+          type="button"
+          data-testid="jog-hand-guide-on"
+          onClick={() => onHandGuideChange && onHandGuideChange(true)}
+        />
+      </div>
+    );
+  },
+}));
+vi.mock('../../components/Workshop/RecordPanel', () => ({
+  __esModule: true,
+  default: function MockRecordPanel({ onRecordingChange }) {
+    return (
+      <div data-testid="record-panel">
+        <button
+          type="button"
+          data-testid="record-panel-recording-on"
+          onClick={() => onRecordingChange && onRecordingChange(true)}
+        />
+      </div>
+    );
+  },
+}));
 
 // ── Blockly + the block-registration modules (they pull in blockly/core). ──
 vi.mock('blockly/core', () => ({
@@ -195,6 +236,36 @@ describe('WorkshopPage — sim toggle swaps only the right region', () => {
     const btn = screen.getByRole('button', { name: 'Test im Simulator' });
     expect(btn).toBeDisabled();
     // Clicking a disabled button is a no-op → no SimStage.
+    await userEvent.click(btn);
+    expect(screen.queryByTestId('sim-stage')).toBeNull();
+  });
+
+  test('sim entry is BLOCKED while a recording runs (entering sim would unmount RecordPanel and DISCARD the take)', async () => {
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('blockly-workspace');
+    const btn = screen.getByRole('button', { name: 'Test im Simulator' });
+    expect(btn).toBeEnabled();
+
+    // RecordPanel reports a live recording via the real onRecordingChange.
+    await userEvent.click(screen.getByTestId('record-panel-recording-on'));
+
+    expect(btn).toBeDisabled();
+    expect(btn.getAttribute('title')).toContain('Aufnahme');
+    await userEvent.click(btn);
+    expect(screen.queryByTestId('sim-stage')).toBeNull();
+  });
+
+  test('sim entry is BLOCKED while the arm is hand-guided (entering sim would unmount JogPanel mid-session)', async () => {
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('blockly-workspace');
+    const btn = screen.getByRole('button', { name: 'Test im Simulator' });
+    expect(btn).toBeEnabled();
+
+    // JogPanel reports a live hand-guide via the real onHandGuideChange.
+    await userEvent.click(screen.getByTestId('jog-hand-guide-on'));
+
+    expect(btn).toBeDisabled();
+    expect(btn.getAttribute('title')).toContain('freigeschaltet');
     await userEvent.click(btn);
     expect(screen.queryByTestId('sim-stage')).toBeNull();
   });

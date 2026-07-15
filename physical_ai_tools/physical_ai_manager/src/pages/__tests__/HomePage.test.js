@@ -28,6 +28,16 @@ function makeStore() {
   });
 }
 
+// setTaskStatus adopts only COMPLETE six-boolean manifests (audit fix 3), so
+// the fixtures must ship the full server-contract key set.
+function fullCaps(overrides = {}) {
+  return {
+    recordable: true, editable: true, trainable: true,
+    inferable: true, roboter_studio: true, has_leader: true,
+    ...overrides,
+  };
+}
+
 function renderWith({ caps }) {
   const store = makeStore();
   store.dispatch(setHeartbeatStatus('connected'));
@@ -50,17 +60,24 @@ beforeEach(() => {
 
 describe('HomePage — „Aufnahme starten" capability gate', () => {
   it('is ENABLED on omx_full (recordable true) with the bridge connected', () => {
-    renderWith({ caps: { recordable: true, has_leader: true } });
+    renderWith({ caps: fullCaps() });
     expect(recordButton().disabled).toBe(false);
   });
 
   it('is DISABLED on omx_follower (recordable false)', () => {
-    renderWith({ caps: { recordable: false, has_leader: false } });
+    renderWith({ caps: fullCaps({ recordable: false, has_leader: false }) });
     expect(recordButton().disabled).toBe(true);
   });
 
   it('is ENABLED when caps are unknown (null) — recordable only gates on an explicit false', () => {
     renderWith({ caps: null });
+    expect(recordButton().disabled).toBe(false);
+  });
+
+  it('a PARTIAL manifest is not adopted (fail-closed) — button behaves as unknown caps', () => {
+    // setTaskStatus ignores incomplete manifests (audit fix 3): caps stay null,
+    // and null caps gate nothing.
+    renderWith({ caps: { recordable: false } });
     expect(recordButton().disabled).toBe(false);
   });
 });

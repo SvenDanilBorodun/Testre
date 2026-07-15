@@ -1020,11 +1020,18 @@ function WorkshopPage({ isActive }) {
             <button
               type="button"
               onClick={() => {
-                // Belt-and-suspenders (the button is already disabled for both):
-                // never toggle while a sim run is in flight, and never ENTER sim
-                // during an active tutorial (replacing the dock would unmount
-                // SkillmapPlayer + lift the toolbox restriction mid-tutorial).
-                if (simRunActive || (!simMode && !!activeTutorialId)) return;
+                // Belt-and-suspenders (the button is already disabled for all
+                // four): never toggle while a sim run is in flight, and never
+                // ENTER sim during an active tutorial (replacing the dock would
+                // unmount SkillmapPlayer + lift the toolbox restriction
+                // mid-tutorial), during a live recording (the dock swap unmounts
+                // RecordPanel, whose teardown cancels and DISCARDS the take), or
+                // while the arm is hand-guided (unmounting JogPanel re-torques /
+                // resets the live hand-guide session under the student's hand).
+                if (simRunActive
+                    || (!simMode && (!!activeTutorialId || recordPanelRecording || jogHandGuideOn))) {
+                  return;
+                }
                 setSimMode((v) => {
                   const next = !v;
                   // The avoidance trail is a headline sim feature — turn it on
@@ -1035,11 +1042,16 @@ function WorkshopPage({ isActive }) {
                 });
               }}
               aria-pressed={simMode}
-              disabled={simRunActive || (!simMode && !!activeTutorialId)}
+              disabled={simRunActive
+                || (!simMode && (!!activeTutorialId || recordPanelRecording || jogHandGuideOn))}
               title={simRunActive
                 ? 'Während ein Simulationslauf läuft, kann der Simulator nicht beendet werden — bitte zuerst stoppen.'
                 : (!simMode && !!activeTutorialId)
                 ? 'Während ein Lernpfad aktiv ist, kann der Simulator nicht gestartet werden — bitte den Lernpfad zuerst beenden.'
+                : (!simMode && recordPanelRecording)
+                ? 'Während einer Aufnahme kann der Simulator nicht gestartet werden — bitte die Aufnahme zuerst beenden.'
+                : (!simMode && jogHandGuideOn)
+                ? 'Solange der Arm freigeschaltet ist, kann der Simulator nicht gestartet werden — bitte den Arm zuerst festsetzen.'
                 : 'Programm auf einem virtuellen Roboter testen — ohne echten Roboter und ohne Kalibrierung'}
               className={
                 'text-xs px-3 py-1.5 rounded-md border disabled:opacity-50 '

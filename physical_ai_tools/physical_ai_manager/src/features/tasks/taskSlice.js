@@ -33,6 +33,21 @@ const savedUserId = (() => {
   catch { return undefined; }
 })();
 
+// The cross-agent capability contract (server:
+// robot_profiles.capabilities_json → six booleans). A manifest is ADOPTED only
+// when it is a COMPLETE object of these keys, all boolean — a '{}', a partial
+// object, or a non-boolean payload is IGNORED so it can never fail OPEN over a
+// settled restrictive manifest (audit fix 3). Extra keys are tolerated so a
+// future capability addition on the server doesn't break an older client.
+export const CAPABILITY_KEYS = [
+  'recordable', 'editable', 'trainable', 'inferable', 'roboter_studio', 'has_leader',
+];
+
+export function isValidCapabilities(caps) {
+  if (!caps || typeof caps !== 'object' || Array.isArray(caps)) return false;
+  return CAPABILITY_KEYS.every((k) => typeof caps[k] === 'boolean');
+}
+
 const initialState = {
   taskInfo: {
     taskName: '',
@@ -128,15 +143,21 @@ const taskSlice = createSlice({
     },
     setTaskStatus: (state, action) => {
       // Never let a bare /task/status tick (robot_type='') wipe the settled
-      // robot identity. robot_type is now boot-set on the server and stamped on
-      // every tick incl. the idle identity tick — but the collision monitor
-      // publishes bare TaskStatus() ticks that BYPASS that stamping (empty
-      // fields, up to 5 Hz), and a pre-capability server image sends '' too. An
-      // unconditional spread would clobber taskStatus.robotType/robotProfile/
-      // capabilities to their empty values on those ticks. Adopt each only when
-      // present/truthy — the same guard userId already has below. A cached
-      // capabilities object (D10, one per distinct capabilities_json string) is
-      // re-adopted by the SAME reference, so this stays identity-stable.
+      // robot identity. robot_type / robot_profile / capabilities_json are
+      // boot-set on the server and stamped on EVERY tick — incl. the idle
+      // identity tick AND the collision monitor's own publishes (which
+      // self-stamp identity via _stamp_identity, so they no longer emit empty
+      // identity fields). The empty-field guards below still matter for two
+      // cases: a PRE-CAPABILITY / old server image (sends '') and the
+      // degraded-boot path (communicator=None → empty identity). An
+      // unconditional spread would clobber robotType/robotProfile/capabilities
+      // to their empty values on those ticks. Adopt each only when present —
+      // the same guard userId already has below. `capabilities` additionally
+      // must be a COMPLETE manifest (isValidCapabilities): a '{}' or partial
+      // object would otherwise fail OPEN over a settled restrictive manifest.
+      // A cached capabilities object (D10, one per distinct capabilities_json
+      // string) is re-adopted by the SAME reference, so this stays
+      // identity-stable.
       const { robotType, robotProfile, capabilities, ...rest } = action.payload;
       state.taskStatus = { ...state.taskStatus, ...rest };
       if (robotType) {
@@ -146,12 +167,23 @@ const taskSlice = createSlice({
       if (robotProfile) {
         state.taskStatus.robotProfile = robotProfile;
       }
-      if (capabilities) {
+      if (isValidCapabilities(capabilities)) {
         state.taskStatus.capabilities = capabilities;
       }
     },
     resetTaskStatus: (state) => {
       state.taskStatus = initialState.taskStatus;
+    },
+    // Drop the capability manifest + profile (used on classroom-Jetson release /
+    // rosbridge re-point). Resetting caps to null makes the nav capability
+    // filter hide NOTHING until the LOCAL rig re-delivers its manifest on the
+    // next idle identity tick — so a stale Jetson (omx_follower) manifest can't
+    // wrongly hide Aufnahme/Daten/Training the moment the lock is released.
+    // robotType is left intact (it is identical on both rigs and the top-bar
+    // "Roboter" chip reads it).
+    clearCapabilities: (state) => {
+      state.taskStatus.capabilities = null;
+      state.taskStatus.robotProfile = '';
     },
     setTaskType: (state, action) => {
       state.taskInfo.taskType = action.payload;
@@ -199,6 +231,7 @@ export const {
   resetTaskInfo,
   setTaskStatus,
   resetTaskStatus,
+  clearCapabilities,
   setTaskType,
   setTaskInstruction,
   setPolicyPath,

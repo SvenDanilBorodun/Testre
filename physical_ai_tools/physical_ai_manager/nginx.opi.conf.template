@@ -94,6 +94,12 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
+        # Forward Origin EXPLICITLY: the pi-agent's exact-host CSRF allowlist keys
+        # on it, and nginx drops all client request headers the moment ANY
+        # proxy_set_header is added to a location — so a future header addition
+        # here would silently strip Origin and collapse the allowlist to
+        # always-allow. $http_origin is a single-$ runtime var (survives envsubst).
+        proxy_set_header Origin $http_origin;
         proxy_buffering off;
         proxy_cache off;
         proxy_read_timeout 3600s;

@@ -88,6 +88,13 @@ const mockAxesCtor = vi.fn();
 const mockBoxGeometryCtor = vi.fn();
 const mockRingGeometryCtor = vi.fn();
 const mockStandardMaterialCtor = vi.fn(); // captures the opts (incl. color)
+// material.color.set spy shared by every MeshStandardMaterial — the held-release
+// tests assert the release recolor value (grab/release recolors go through
+// setMeshColor → material.color.set).
+const mockColorSet = vi.fn();
+// Every constructed Mesh, so the release tests can find the sim object's mesh
+// (by userData.simId) and assert the snap-to-table height.
+const mockMeshInstances = [];
 // The captured WebGLRenderer instance so the shadow-map flag can be asserted.
 let mockRenderer = null;
 // Path-trail internals: a setDrawRange spy + the captured path BufferGeometry let
@@ -150,7 +157,11 @@ vi.mock('three', () => {
   });
   return {
     __esModule: true,
-    Scene: function Scene() { return noopObj({ background: null, traverse: () => {} }); },
+    // `attach` is what the held-object release path re-parents through
+    // (scene.attach preserves the carried world transform) — a no-op here.
+    Scene: function Scene() {
+      return noopObj({ background: null, traverse: () => {}, attach: () => {} });
+    },
     Color: function Color() {},
     PerspectiveCamera: function PerspectiveCamera() {
       return noopObj({ updateProjectionMatrix: () => {}, aspect: 1, near: 0.1, far: 100 });
@@ -186,10 +197,10 @@ vi.mock('three', () => {
     GridHelper: function GridHelper() { return noopObj(); },
     MeshStandardMaterial: function MeshStandardMaterial(opts) {
       // Capture the opts (incl. the per-type `color`) so the sim-stage tests can
-      // assert an object used its catalog colour; provide color.set for the
-      // grasp-recolor path.
+      // assert an object used its catalog colour; color.set is the shared
+      // mockColorSet spy so the grasp/release recolor values are assertable.
       mockStandardMaterialCtor(opts);
-      return { color: { set: () => {} }, dispose: () => {} };
+      return { color: { set: mockColorSet }, dispose: () => {} };
     },
     MeshPhongMaterial: function MeshPhongMaterial() { return { dispose: () => {} }; },
     MeshBasicMaterial: function MeshBasicMaterial() { return { color: { set: () => {} }, dispose: () => {} }; },
@@ -197,8 +208,9 @@ vi.mock('three', () => {
       // Rich enough for the sim-object/table/ring paths: userData bookkeeping, a
       // settable position (positionSimObject/snapMeshToTable write .y), rotation,
       // and shadow flags. Never constructed by the default-prop tests (objects/
-      // table/zones/ring are all off there).
-      return {
+      // table/zones/ring are all off there). Each instance is recorded so the
+      // held-release tests can find a sim object's mesh via userData.simId.
+      const mesh = {
         geometry,
         material,
         userData: {},
@@ -214,6 +226,8 @@ vi.mock('three', () => {
         add: () => {},
         dispose: () => {},
       };
+      mockMeshInstances.push(mesh);
+      return mesh;
     },
     // Sim-object / zone / table / ring geometries. BoxGeometry + RingGeometry are
     // spied so the sim-stage tests can assert per-type sizes + the reach ring
@@ -293,6 +307,8 @@ beforeEach(() => {
   mockBoxGeometryCtor.mockClear();
   mockRingGeometryCtor.mockClear();
   mockStandardMaterialCtor.mockClear();
+  mockColorSet.mockClear();
+  mockMeshInstances.length = 0;
   mockRenderer = null;
   mockSetDrawRange.mockClear();
   mockPathGeometry = null;
@@ -577,5 +593,56 @@ describe('UrdfTwin — sim-stage catalog objects / reach ring / shadows', () => 
     await waitFor(() => expect(mockSubscribe).toHaveBeenCalledTimes(1));
     expect(mockRingGeometryCtor).toHaveBeenCalledWith(0.1, 0.28, 64);
     expect(mockRenderer.shadowMap.enabled).toBe(true);
+  });
+});
+
+// Held-object RELEASE (heldObjectId set → null): the release branch snaps the
+// mesh to the table and restores its rest colour. The dims/colour must come
+// from the LIVE catalogDims when the map knows the type — the mesh's
+// build-time userData is frozen, and a catalog fetch resolving MID-CARRY (a
+// held mesh is deliberately skipped by the objects-diff rebuild) previously
+// left the release reading stale fallback values.
+describe('UrdfTwin — held-object release snap/recolor', () => {
+  const OBJECTS = [{ type: 'wuerfel', tag_id: 20, x: 0.15, y: 0, yaw: 0 }];
+  const GREEN_DIMS = {
+    wuerfel: { height_m: 0.05, width_m: 0.04, color: '#00ff00', max_instances: 2 },
+  };
+  const findObjectMesh = () =>
+    mockMeshInstances.find((m) => m.userData && m.userData.simId === 20);
+
+  test('release recolors with the object\'s OWN catalog colour — live catalogDims wins over stale build-time userData', async () => {
+    // Build BEFORE the catalog resolves: fallback amber userData.
+    const { rerender } = render(<UrdfTwin objects={OBJECTS} catalogDims={{}} />);
+    await waitFor(() => expect(mockSubscribe).toHaveBeenCalledTimes(1));
+    const mesh = findObjectMesh();
+    expect(mesh).toBeTruthy();
+
+    // Grab, then the catalog resolves MID-CARRY (the held mesh is skipped by
+    // the objects-diff rebuild, so its userData stays amber/fallback-sized).
+    rerender(<UrdfTwin objects={OBJECTS} catalogDims={{}} heldObjectId={20} />);
+    rerender(<UrdfTwin objects={OBJECTS} catalogDims={GREEN_DIMS} heldObjectId={20} />);
+    expect(findObjectMesh()).toBe(mesh); // not rebuilt while held
+    mockColorSet.mockClear();
+
+    // Release → the LIVE catalog colour + height, not the frozen userData.
+    rerender(<UrdfTwin objects={OBJECTS} catalogDims={GREEN_DIMS} heldObjectId={null} />);
+    expect(mockColorSet).toHaveBeenCalledWith('#00ff00');
+    // snap-to-table used the live height (0.05 / 2), not the fallback 0.015.
+    expect(mesh.position.y).toBeCloseTo(0.025, 6);
+  });
+
+  test('release falls back to the amber rest colour for an object without catalogDims', async () => {
+    const { rerender } = render(<UrdfTwin objects={OBJECTS} catalogDims={{}} />);
+    await waitFor(() => expect(mockSubscribe).toHaveBeenCalledTimes(1));
+    const mesh = findObjectMesh();
+    expect(mesh).toBeTruthy();
+
+    rerender(<UrdfTwin objects={OBJECTS} catalogDims={{}} heldObjectId={20} />);
+    mockColorSet.mockClear();
+
+    rerender(<UrdfTwin objects={OBJECTS} catalogDims={{}} heldObjectId={null} />);
+    expect(mockColorSet).toHaveBeenCalledWith('#f59e0b');
+    // Fallback cube height (0.03 / 2).
+    expect(mesh.position.y).toBeCloseTo(0.015, 6);
   });
 });

@@ -60,7 +60,43 @@
     "globals": {
       "vi": "readonly",
       "globalThis": "readonly"
-    }
+    },
+    "overrides": [
+      {
+        "files": [
+          "src/**/*"
+        ],
+        "excludedFiles": [
+          "src/components/UrdfTwin.jsx"
+        ],
+        "rules": {
+          "no-restricted-imports": [
+            "error",
+            {
+              "paths": [
+                {
+                  "name": "three",
+                  "message": "three (~600 KB) must stay out of the entry bundle — only the lazy-loaded src/components/UrdfTwin.jsx may import it (simConstants.js rides the entry chunk and must stay three-free)."
+                },
+                {
+                  "name": "urdf-loader",
+                  "message": "urdf-loader must stay out of the entry bundle — only the lazy-loaded src/components/UrdfTwin.jsx may import it."
+                }
+              ],
+              "patterns": [
+                {
+                  "group": [
+                    "three/*",
+                    "urdf-loader/*"
+                  ],
+                  "message": "three/urdf-loader subpaths must stay out of the entry bundle — only the lazy-loaded src/components/UrdfTwin.jsx may import them."
+                }
+              ]
+            }
+          ]
+        }
+      }
+    ]
   },
   "browserslist": {
     "production": [

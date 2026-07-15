@@ -136,7 +136,7 @@ function BootSplash() {
 // names the robot-connection/network cause (never „Docker prüfen") and offers
 // an escape back to the System window.
 function PiStartupGate({ children }) {
-  const { agentStatus } = usePiMode();
+  const { agentStatus, agentReachable } = usePiMode();
   const dispatch = useDispatch();
   const currentPage = useSelector((s) => s.ui.currentPage);
   const robotTierUp = !!(agentStatus && agentStatus.robot_tier_up);
@@ -148,7 +148,14 @@ function PiStartupGate({ children }) {
   const pollRef = useRef(null);
   const timeoutRef = useRef(null);
 
-  const suppressed = currentPage === PageType.SYSTEM || !robotTierUp;
+  // When the agent is unreachable (crashed / mid-restart / gateway not yet
+  // bound) its last `robot_tier_up` is STALE and unknowable — do not gamble the
+  // full-viewport overlay on it. Treat „unknown" like „tier down": suppress the
+  // block so the student can always reach the System route (the escape hatch +
+  // „Umgebung starten"). The overlay re-arms once /status answers again with the
+  // tier genuinely up but rosbridge still unreachable.
+  const suppressed =
+    currentPage === PageType.SYSTEM || !robotTierUp || !agentReachable;
   const revealed = connected && settled;
   const overlayVisible = !suppressed && !revealed;
 

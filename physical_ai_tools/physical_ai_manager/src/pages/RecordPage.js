@@ -19,7 +19,8 @@ import HeartbeatStatus from '../components/HeartbeatStatus';
 import ImageGrid from '../components/ImageGrid';
 import InfoPanel from '../components/InfoPanel';
 import { addTag } from '../features/tasks/taskSlice';
-import { setIsFirstLoadFalse } from '../features/ui/uiSlice';
+import { setIsFirstLoadFalse, moveToPage } from '../features/ui/uiSlice';
+import PageType from '../constants/pageType';
 
 // The 3D follower twin pulls in three.js (~600 KB) + urdf-loader. Load it as a
 // LAZY chunk so it stays out of the entry bundle the white-screen CI greps, and
@@ -77,6 +78,21 @@ export default function RecordPage({ isActive = true }) {
   }, []);
 
   const isFirstLoad = useSelector((state) => state.ui.isFirstLoad.record);
+
+  // Leave the page when recording is EXPLICITLY not available on this rig
+  // (capabilities.recordable === false — e.g. the rig switched to a
+  // follower-only profile mid-session). The sidebar capability filter removes
+  // the Aufnahme tab, but a page that is already mounted would keep rendering
+  // against a rig that can't record. Null/unknown caps eject nothing —
+  // symmetric with the nav filter. (InferencePage deliberately has NO such
+  // guard: Inferenz is always visible by invariant.)
+  const recordable = useSelector((state) => state.tasks.taskStatus.capabilities?.recordable);
+  useEffect(() => {
+    if (recordable === false) {
+      toast.error('Aufnahme ist auf diesem Roboter nicht verfügbar.');
+      dispatch(moveToPage(PageType.HOME));
+    }
+  }, [recordable, dispatch]);
 
   useEffect(() => {
     toasts

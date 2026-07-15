@@ -51,7 +51,7 @@ function CameraFeedOverlay({
   const cloudOnly = isCloudOnlyMode();
   const rosHost = useSelector((s) => s.ros.rosHost) || window.location.hostname;
   // Orange Pi: MJPEG rides the same-origin /video proxy instead of :8080.
-  const { piMode } = usePiMode();
+  const { piMode, piModeResolved } = usePiMode();
   const containerRef = useRef(null);
   const imgRef = useRef(null);
   const detections = useSelector((s) => s.workshop.detections);
@@ -66,6 +66,11 @@ function CameraFeedOverlay({
 
   useEffect(() => {
     if (cloudOnly) return undefined;
+    // Wait for the Pi-mode marker to resolve before building the stream URL —
+    // an unresolved marker defaults piMode=false and (on a Pi) points the feed
+    // at the direct :8080 host port instead of the same-origin /video proxy.
+    // The effect re-runs when piModeResolved flips true.
+    if (!piModeResolved) return undefined;
     const container = containerRef.current;
     if (!container) return undefined;
 
@@ -109,7 +114,7 @@ function CameraFeedOverlay({
       if (img.parentNode) img.parentNode.removeChild(img);
       imgRef.current = null;
     };
-  }, [camera, rosHost, cloudOnly, reloadKey, piMode]);
+  }, [camera, rosHost, cloudOnly, reloadKey, piMode, piModeResolved]);
 
   // Audit F24: ROS-side liveness ping. Subscribe to the same compressed
   // image topic at 1 Hz throttle so a frozen MJPEG doesn't fool us. If

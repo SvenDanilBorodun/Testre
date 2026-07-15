@@ -29,6 +29,16 @@ vi.mock('react-redux', () => ({
   useSelector: (sel) => sel(mockState),
 }));
 
+// piMode: controllable usePiMode snapshot (defaults to a resolved non-Pi rig,
+// matching the provider-less DEFAULT_CONTEXT the pre-mock tests relied on).
+// videoStreamBase & friends stay REAL via importActual — the tests below assert
+// the actual /video-vs-:8080 URL routing.
+let mockPiState;
+vi.mock('../../utils/piMode', async () => {
+  const actual = await vi.importActual('../../utils/piMode');
+  return { ...actual, usePiMode: () => mockPiState };
+});
+
 // rosbridge connection manager: resolve a dummy ros handle.
 vi.mock('../../utils/rosConnectionManager', () => ({
   __esModule: true,
@@ -62,6 +72,7 @@ beforeEach(() => {
   mockTopicCtor.mockClear();
   mockSubscribe.mockClear();
   mockUnsubscribe.mockClear();
+  mockPiState = { piMode: false, piModeResolved: true };
 });
 
 describe('ImageGridCell — Jetson camera transport (H1)', () => {
@@ -102,5 +113,34 @@ describe('ImageGridCell — Jetson camera transport (H1)', () => {
     expect(img.getAttribute('src')).toContain('http://192.168.0.5:8080/stream');
     expect(img.getAttribute('src')).toContain('topic=/gripper/image_raw');
     expect(mockTopicCtor).not.toHaveBeenCalled();
+  });
+});
+
+describe('ImageGridCell — Pi-mode stream gating (piModeResolved)', () => {
+  test('builds no stream until the marker resolves, then rides the /video proxy on a Pi', async () => {
+    mockState = {
+      ros: { rosHost: '192.168.0.5', rosbridgeUrl: 'ws://192.168.0.5:9090' },
+      jetson: { status: 'available' },
+    };
+    // Marker still resolving → the effect must NOT build a stream URL off the
+    // default piMode=false (on a Pi that's the direct :8080 host port, not the
+    // same-origin /video proxy — audit fix 4).
+    mockPiState = { piMode: false, piModeResolved: false };
+    const { rerender } = renderCell('/gripper/image_raw');
+    // One microtask tick: the unresolved-marker path appends nothing, and the
+    // idx=1 non-Jetson append is fully synchronous — so an <img> here would
+    // mean the gate regressed. (Same bare-flush pattern as the PiUpdateGate
+    // "never probes" test.)
+    await Promise.resolve();
+    expect(screen.queryByRole('img')).toBeNull();
+
+    // Marker resolves to Pi → the stream rides the same-origin /video proxy.
+    mockPiState = { piMode: true, piModeResolved: true };
+    rerender(
+      <ImageGridCell topic="/gripper/image_raw" idx={1} isActive onClose={noop} onPlusClick={noop} />
+    );
+    const img = await screen.findByRole('img');
+    expect(img.getAttribute('src')).toContain('/video/stream');
+    expect(img.getAttribute('src')).not.toContain(':8080');
   });
 });

@@ -6,10 +6,14 @@
 // D8 companion #2: InfoPanel + InferencePanel derive form editability from the
 // EXPLICIT phase/running signal, not the old 1 s /task/status SILENCE detector.
 // With the new ~0.5 Hz idle identity tick, a silence detector would oscillate-
-// lock every field (~1 s per tick, focus/keystroke loss). Contract: a stream of
-// READY / not-running ticks keeps the form EDITABLE; a RECORDING tick LOCKS it.
-// The „✏️ Bearbeitungsmodus" / „🔒 Nur lesen" indicator (present in both
-// panels, keyed on isEditable) is the assertion target.
+// lock every field (~1 s per tick, focus/keystroke loss). Contract (updated by
+// audit fix 5): the form is LOCKED until the FIRST real /task/status tick lands
+// (taskStatus.topicReceived) — the initialState is READY/not-running, so
+// without that gate a reload MID-TASK painted a phantom-editable window; a
+// stream of READY / not-running ticks then keeps the form EDITABLE; a
+// RECORDING tick LOCKS it. The „✏️ Bearbeitungsmodus" / „🔒 Nur lesen"
+// indicator (present in both panels, keyed on isEditable) is the assertion
+// target.
 
 import React from 'react';
 import { render, screen, act } from '@testing-library/react';
@@ -65,7 +69,7 @@ describe.each([
   ['InfoPanel', InfoPanel],
   ['InferencePanel', InferencePanel],
 ])('%s — editability derives from phase/running (D8 companion #2)', (name, Panel) => {
-  it('stays editable through a stream of idle READY ticks, then locks on RECORDING', () => {
+  it('locks before the first tick, stays editable through idle READY ticks, locks on RECORDING', () => {
     const store = makeStore();
     render(
       <Provider store={store}>
@@ -73,8 +77,19 @@ describe.each([
       </Provider>
     );
 
-    // Idle READY on mount → editable immediately (the old silence detector
-    // locked it for the first ~1 s).
+    // PRE-FIRST-TICK: locked (audit fix 5). The initialState is READY/not-
+    // running, so without the topicReceived gate a reload MID-TASK would show a
+    // phantom-editable form until the first /task/status tick lands.
+    expect(editable()).toBe(false);
+    expect(locked()).toBe(true);
+
+    // First real idle READY tick (topicReceived stamped like the production
+    // /task/status handler does) → editable.
+    act(() => {
+      store.dispatch(
+        setTaskStatus({ phase: TaskPhase.READY, running: false, topicReceived: true })
+      );
+    });
     expect(editable()).toBe(true);
     expect(locked()).toBe(false);
 
@@ -82,7 +97,9 @@ describe.each([
     // flip editability off — the oscillation the silence detector caused.
     act(() => {
       for (let i = 0; i < 5; i += 1) {
-        store.dispatch(setTaskStatus({ phase: TaskPhase.READY, running: false, usedCpu: i }));
+        store.dispatch(
+          setTaskStatus({ phase: TaskPhase.READY, running: false, topicReceived: true, usedCpu: i })
+        );
       }
     });
     expect(editable()).toBe(true);
@@ -90,7 +107,31 @@ describe.each([
 
     // A real RECORDING tick locks the form.
     act(() => {
-      store.dispatch(setTaskStatus({ phase: TaskPhase.RECORDING, running: true }));
+      store.dispatch(
+        setTaskStatus({ phase: TaskPhase.RECORDING, running: true, topicReceived: true })
+      );
+    });
+    expect(editable()).toBe(false);
+    expect(locked()).toBe(true);
+  });
+
+  it('a mid-task reload stays LOCKED on the first tick when that tick reports running', () => {
+    // The exact phantom-editable scenario: browser reloads while RECORDING is
+    // in flight. The very first tick already reports the running phase — the
+    // form must go straight from "locked (no tick yet)" to "locked (running)"
+    // with no editable window in between.
+    const store = makeStore();
+    render(
+      <Provider store={store}>
+        <Panel />
+      </Provider>
+    );
+    expect(editable()).toBe(false);
+
+    act(() => {
+      store.dispatch(
+        setTaskStatus({ phase: TaskPhase.RECORDING, running: true, topicReceived: true })
+      );
     });
     expect(editable()).toBe(false);
     expect(locked()).toBe(true);

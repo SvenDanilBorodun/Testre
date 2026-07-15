@@ -38,6 +38,7 @@ import { useHeartbeatWatchdog } from './hooks/useHeartbeatWatchdog';
 import rosConnectionManager from './utils/rosConnectionManager';
 import { useDispatch, useSelector } from 'react-redux';
 import { setRosHost } from './features/ros/rosSlice';
+import { clearCapabilities } from './features/tasks/taskSlice';
 import { moveToPage } from './features/ui/uiSlice';
 import PageType from './constants/pageType';
 import { supabase } from './lib/supabaseClient';
@@ -78,6 +79,23 @@ function StudentApp() {
   useEffect(() => {
     jetsonIdRef.current = jetsonId;
   }, [jetsonId]);
+
+  // On classroom-Jetson RELEASE (connected → not connected) the rosbridge
+  // re-points back to the LOCAL rig. Clear the capability manifest + profile so
+  // the nav capability filter — skipped only WHILE connected, and re-activated
+  // the instant this flag flips false — never runs against the Jetson's stale
+  // omx_follower caps (which would wrongly hide Aufnahme/Daten/Training until the
+  // local idle identity tick re-delivers, ~2-3 s; indefinitely on a degraded
+  // local rig). Null caps hide NOTHING, so every tab stays visible during the
+  // re-handshake window. Belt-and-suspenders with the hook's
+  // do-not-adopt-caps-while-jetson guard.
+  const prevJetsonConnectedRef = useRef(jetsonConnected);
+  useEffect(() => {
+    if (prevJetsonConnectedRef.current && !jetsonConnected) {
+      dispatch(clearCapabilities());
+    }
+    prevJetsonConnectedRef.current = jetsonConnected;
+  }, [jetsonConnected, dispatch]);
   const cloudOnly = isCloudOnlyMode();
   // Orange Pi: the System tab (the in-browser setup wizard) is revealed once the
   // baked /pi-mode.json marker resolves — progressive reveal, exactly like the
@@ -302,7 +320,11 @@ function StudentApp() {
     { key: PageType.HOME, label: 'Start', Icon: MdHome, onClick: handleHomePageNavigation },
     { key: PageType.RECORD, label: 'Aufnahme', Icon: MdVideocam, onClick: handleRecordPageNavigation, hardwareOnly: true, jetsonIncompatible: true, capabilityKey: 'recordable' },
     { key: PageType.TRAINING, label: 'Training', Icon: GoGraph, onClick: handleTrainingPageNavigation, capabilityKey: 'trainable' },
-    { key: PageType.INFERENCE, label: 'Inferenz', Icon: MdMemory, onClick: handleInferencePageNavigation, capabilityKey: 'inferable' },
+    // Inferenz carries NO capabilityKey — it is ALWAYS visible (documented
+    // invariant): both shipped profiles hardcode inferable=true, and hiding it
+    // would also hide the classroom-Jetson claim UI that a cloud/follower-only
+    // student needs. The capability filter must never gate it.
+    { key: PageType.INFERENCE, label: 'Inferenz', Icon: MdMemory, onClick: handleInferencePageNavigation },
     { key: PageType.EDIT_DATASET, label: 'Daten', Icon: MdWidgets, onClick: handleEditDatasetPageNavigation, sep: true, jetsonIncompatible: true, capabilityKey: 'editable' },
     { key: PageType.WORKSHOP, label: 'Roboter Studio', Icon: MdConstruction, onClick: handleWorkshopPageNavigation, hardwareOnly: true, jetsonIncompatible: true, capabilityKey: 'roboter_studio' },
     // Pi-only: the in-browser setup wizard (arms/cameras/token, Umgebung

@@ -38,6 +38,15 @@ async function fetchUpdateCheck() {
   }
 }
 
+// Bounded backoff for the availability probe, mirroring `AGENT_BACKOFF_MS` in
+// utils/piMode.js. The pi-agent binds its gateway listener only AFTER its
+// boot-time manager `up`, so an early probe 502s through the proxy
+// (`fetchUpdateCheck` → null). A one-shot fetch would silently disarm the forced
+// gate for the whole page load, so we retry across this schedule and GIVE UP
+// permanently once it exhausts (unlike piMode.js's steady loop — this is one
+// logical startup probe, never re-checked after it settles).
+const UPDATE_CHECK_BACKOFF_MS = [1000, 2000, 4000, 8000, 15000];
+
 export default function PiUpdateGate() {
   const { piMode, piModeResolved } = usePiMode();
 
@@ -56,19 +65,41 @@ export default function PiUpdateGate() {
   }, []);
   const { updating, updateJob, failed, startUpdate } = useAgentUpdate({ onSettled });
 
-  // One-shot availability probe once Pi mode has resolved (mirrors the GUI's
-  // single startup check). Never runs off a Pi.
+  // One logical availability probe once Pi mode has resolved (mirrors the GUI's
+  // single startup check). Never runs off a Pi. A 502 during the agent boot-race
+  // returns null → we retry through UPDATE_CHECK_BACKOFF_MS instead of silently
+  // disarming the gate for the page load, and settle the instant the agent
+  // answers with valid JSON (update or no update) OR the schedule exhausts.
   useEffect(() => {
     if (!piModeResolved || !piMode) return undefined;
     let cancelled = false;
-    fetchUpdateCheck().then((res) => {
-      if (cancelled || !res || !res.update_available) return;
-      setAvailable(true);
-      setLatestVersion(res.latest_version || '');
-      setCurrentVersion(res.current_version || '');
-    });
+    let timer = null;
+    let attempt = 0;
+
+    const probe = async () => {
+      const res = await fetchUpdateCheck();
+      if (cancelled) return;
+      if (res) {
+        // Agent answered — settle. Arm the gate only if an update is advertised.
+        if (res.update_available) {
+          setAvailable(true);
+          setLatestVersion(res.latest_version || '');
+          setCurrentVersion(res.current_version || '');
+        }
+        return;
+      }
+      // Unreachable (agent gateway not yet bound / proxy 502). Retry until the
+      // backoff schedule is exhausted, then give up permanently.
+      if (attempt >= UPDATE_CHECK_BACKOFF_MS.length) return;
+      const delay = UPDATE_CHECK_BACKOFF_MS[attempt];
+      attempt += 1;
+      timer = setTimeout(probe, delay);
+    };
+    probe();
+
     return () => {
       cancelled = true;
+      if (timer) clearTimeout(timer);
     };
   }, [piMode, piModeResolved]);
 
@@ -140,7 +171,11 @@ export default function PiUpdateGate() {
           )}
         </div>
 
-        {failed && (
+        {/* Suppress the failure banner while a job is still marked running — the
+            409 „another browser is already updating" case sets `failed` (to
+            reveal the skip) but is NOT a failure, so its in-progress note in the
+            box above must not be contradicted by „fehlgeschlagen". */}
+        {failed && !running && (
           <p className="mt-3 text-xs text-orange-600">
             Aktualisierung fehlgeschlagen. Bitte Internetverbindung prüfen und erneut versuchen.
           </p>

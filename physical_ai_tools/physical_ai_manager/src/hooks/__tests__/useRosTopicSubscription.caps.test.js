@@ -12,13 +12,24 @@
 //  - D10 parse-once: the same capabilities_json string across ticks yields ONE
 //    stable object identity; a new string yields a new one.
 //  - omit-when-empty: an empty robot_profile / capabilities_json never appears
-//    in the setTaskStatus payload (so a bare/collision tick can't wipe them).
+//    in the setTaskStatus payload — the pre-capability/old-image and
+//    degraded-boot empty-identity cases must not wipe settled values (collision
+//    ticks now self-stamp identity via _stamp_identity).
+//  - fail-closed manifests (audit fix 3): a '{}' or partial capabilities_json
+//    is never adopted over a settled restrictive manifest.
+//  - Jetson skip (audit fix 1a): while a classroom Jetson is connected, the
+//    Jetson server's caps/profile are NOT adopted — they describe the Jetson,
+//    not the LOCAL rig the manifest is defined to describe.
 //  - D8 companion #1: an idle tick (empty task_info, not running) must NOT
 //    dispatch setTaskInfo (would wipe the Record/Inference form every ~3 s).
 
 import { renderHook, act } from '@testing-library/react';
 import { useRosTopicSubscription } from '../useRosTopicSubscription';
 import TaskPhase from '../../constants/taskPhases';
+// The hook reads the Jetson connection state from the REAL store singleton
+// (store.getState().jetson.status) — drive it with real jetson actions.
+import realStore from '../../store/store';
+import { setJetsonStatus, clearJetson } from '../../store/jetsonSlice';
 
 const mockDispatch = vi.fn();
 vi.mock('react-redux', () => ({
@@ -201,6 +212,66 @@ describe('useRosTopicSubscription — capability delivery', () => {
     expect(() => act(() => cb(status({ capabilities_json: '{not json' })))).not.toThrow();
     const s = dispatchedByType('tasks/setTaskStatus')[0];
     expect('capabilities' in s.payload).toBe(false);
+  });
+
+  it("an empty-but-truthy '{}' manifest is never adopted — fail-closed (audit fix 3)", async () => {
+    const cb = await mountAndGetCallback();
+    mockDispatch.mockClear();
+    const follower = JSON.parse(CAPS_FOLLOWER);
+    act(() => cb(status({ capabilities_json: CAPS_FOLLOWER })));
+    act(() => cb(status({ capabilities_json: '{}' })));
+    act(() => cb(status({ capabilities_json: '{}' })));
+    const statuses = dispatchedByType('tasks/setTaskStatus');
+    expect(statuses[0].payload.capabilities).toEqual(follower);
+    // First '{}' tick: fails validation → the key is OMITTED (the reducer keeps
+    // the settled manifest).
+    expect('capabilities' in statuses[1].payload).toBe(false);
+    // Repeated '{}' tick: cache-hit branch re-delivers the LAST GOOD manifest —
+    // never the empty object that would fail open.
+    expect(statuses[2].payload.capabilities).toEqual(follower);
+  });
+
+  it('a PARTIAL manifest is not adopted at the hook level either', async () => {
+    const cb = await mountAndGetCallback();
+    mockDispatch.mockClear();
+    act(() => cb(status({ capabilities_json: JSON.stringify({ recordable: false }) })));
+    const s = dispatchedByType('tasks/setTaskStatus')[0];
+    expect('capabilities' in s.payload).toBe(false);
+  });
+});
+
+describe('useRosTopicSubscription — Jetson-mode capability skip (audit fix 1a)', () => {
+  afterEach(() => {
+    realStore.dispatch(clearJetson());
+  });
+
+  it('while a classroom Jetson is CONNECTED, robot_profile + capabilities are NOT adopted', async () => {
+    const cb = await mountAndGetCallback();
+    realStore.dispatch(setJetsonStatus('connected'));
+    mockDispatch.mockClear();
+    act(() => cb(status({ robot_profile: 'omx_follower', capabilities_json: CAPS_FOLLOWER })));
+    const s = dispatchedByType('tasks/setTaskStatus')[0];
+    expect(s).toBeTruthy();
+    // The Jetson's omx_follower manifest describes the JETSON, not the LOCAL
+    // rig — adopting it would leave stale caps that wrongly hide
+    // Aufnahme/Daten/Training after release.
+    expect('robotProfile' in s.payload).toBe(false);
+    expect('capabilities' in s.payload).toBe(false);
+    // The rest of the tick still flows.
+    expect(s.payload.robotType).toBe('omx_f');
+    expect(s.payload.topicReceived).toBe(true);
+  });
+
+  it('adoption resumes once the Jetson lock is released', async () => {
+    const cb = await mountAndGetCallback();
+    realStore.dispatch(setJetsonStatus('connected'));
+    act(() => cb(status({ robot_profile: 'omx_follower', capabilities_json: CAPS_FOLLOWER })));
+    realStore.dispatch(clearJetson());
+    mockDispatch.mockClear();
+    act(() => cb(status({ robot_profile: 'omx_full', capabilities_json: CAPS_FULL })));
+    const s = dispatchedByType('tasks/setTaskStatus')[0];
+    expect(s.payload.robotProfile).toBe('omx_full');
+    expect(s.payload.capabilities).toEqual(JSON.parse(CAPS_FULL));
   });
 });
 

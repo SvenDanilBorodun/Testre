@@ -27,6 +27,7 @@ import {
   setUseMultiTaskMode,
   setMultiTaskIndex,
   setCollision,
+  isValidCapabilities,
 } from '../features/tasks/taskSlice';
 import {
   setIsTraining,
@@ -448,30 +449,53 @@ export function useRosTopicSubscription() {
         };
 
         // Robot profile id + capability manifest ride the same wire (D2). Add
-        // them ONLY when the wire fields are non-empty — old server images AND
-        // collision-monitor bare ticks send '' and must never wipe a settled
-        // profile/caps. `capabilities_json` is parsed at most once per distinct
-        // string via the module cache (D10); on a parse error we keep the
-        // previous cached object and OMIT the key so a malformed tick can't
-        // null it out.
-        if (msg.robot_profile) {
-          statusPayload.robotProfile = msg.robot_profile;
-        }
-        const capsStr = msg.capabilities_json;
-        if (capsStr) {
-          if (capsStr !== _capsCache.str) {
-            try {
-              _capsCache = { str: capsStr, obj: JSON.parse(capsStr) };
+        // them ONLY when the wire fields are non-empty. Two reasons a tick
+        // carries no usable identity:
+        //  - PRE-CAPABILITY / old server image (sends ''). The collision monitor
+        //    now self-stamps identity (_stamp_identity), so it no longer emits
+        //    empty identity — but the degraded-boot path (communicator=None)
+        //    still can, and both must never wipe a settled profile/caps.
+        //  - JETSON mode: while the student holds a classroom-Jetson lock the
+        //    rosbridge points at the Jetson's omx_follower server, whose caps
+        //    describe the JETSON, not the LOCAL rig. Adopting them would leave a
+        //    stale omx_follower manifest in Redux that wrongly hides
+        //    Aufnahme/Daten/Training the instant the lock is released (the nav
+        //    capability filter is skipped only WHILE connected). So skip adoption
+        //    entirely here; clearCapabilities on release resets caps to null.
+        // `capabilities_json` is parsed at most once per distinct string via the
+        // module cache (D10); a parse error OR an incomplete manifest ('{}',
+        // partial) keeps the previous cached object and OMITs the key so a
+        // malformed/empty tick can't null it out or fail open.
+        const jetsonConnected = store.getState().jetson?.status === 'connected';
+        if (!jetsonConnected) {
+          if (msg.robot_profile) {
+            statusPayload.robotProfile = msg.robot_profile;
+          }
+          const capsStr = msg.capabilities_json;
+          if (capsStr) {
+            if (capsStr !== _capsCache.str) {
+              try {
+                const parsed = JSON.parse(capsStr);
+                if (isValidCapabilities(parsed)) {
+                  _capsCache = { str: capsStr, obj: parsed };
+                  statusPayload.capabilities = parsed;
+                } else {
+                  // Valid JSON but not a COMPLETE manifest ('{}', partial,
+                  // non-boolean values). Cache the string so we don't re-validate
+                  // it every tick, keep the last good object, and OMIT the key so
+                  // the reducer keeps the settled manifest (no fail-open).
+                  _capsCache = { str: capsStr, obj: _capsCache.obj };
+                }
+              } catch (e) {
+                // Malformed caps JSON — keep the previous good object (string-key
+                // it so we don't re-parse the same bad string every tick) and
+                // OMIT the key so the reducer keeps the last good value.
+                _capsCache = { str: capsStr, obj: _capsCache.obj };
+              }
+            } else if (_capsCache.obj) {
+              // Same string as last time → reuse the cached object (stable identity).
               statusPayload.capabilities = _capsCache.obj;
-            } catch (e) {
-              // Malformed caps JSON — keep the previous good object (string-key
-              // it so we don't re-parse the same bad string every tick) and
-              // OMIT the key so the reducer keeps the last good value.
-              _capsCache = { str: capsStr, obj: _capsCache.obj };
             }
-          } else if (_capsCache.obj) {
-            // Same string as last time → reuse the cached object (stable identity).
-            statusPayload.capabilities = _capsCache.obj;
           }
         }
 

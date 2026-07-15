@@ -20,12 +20,14 @@ const OMX_FOLLOWER = {
   inferable: true, roboter_studio: true, has_leader: false,
 };
 
-// The 6-tab nav map (HOME untagged).
+// The 6-tab nav map (HOME untagged). Inferenz carries NO capabilityKey —
+// mirrors StudentApp: the tab is ALWAYS visible (documented invariant; hiding
+// it would also hide the classroom-Jetson claim UI).
 const NAV = [
   { key: 'home' },
   { key: 'record', capabilityKey: 'recordable' },
   { key: 'training', capabilityKey: 'trainable' },
-  { key: 'inference', capabilityKey: 'inferable' },
+  { key: 'inference' },
   { key: 'edit', capabilityKey: 'editable' },
   { key: 'workshop', capabilityKey: 'roboter_studio' },
 ];
@@ -66,6 +68,17 @@ describe('isCapabilityVisible — capability nav filter', () => {
   it('only an EXPLICIT false hides — a missing/undefined cap key does not', () => {
     expect(
       isCapabilityVisible({ capabilityKey: 'recordable' }, { jetsonConnected: false, caps: {} })
+    ).toBe(true);
+  });
+
+  it('Inferenz (no capabilityKey) stays visible even against inferable:false', () => {
+    // The invariant "Inferenz is always visible": the nav item carries no
+    // capabilityKey, so no manifest — however restrictive — can hide it.
+    expect(
+      isCapabilityVisible({ key: 'inference' }, {
+        jetsonConnected: false,
+        caps: { ...OMX_FOLLOWER, inferable: false },
+      })
     ).toBe(true);
   });
 });

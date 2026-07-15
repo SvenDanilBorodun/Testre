@@ -224,6 +224,14 @@ export default function UrdfTwin({
   const showPathRef = useRef(showPath);
   const showFramesRef = useRef(showFrames);
   const showShadowsRef = useRef(showShadows);
+  // Live catalogDims for the release snap/recolor: the held effect is keyed on
+  // [heldObjectId] ONLY (adding the prop as a dep would re-run the grab/release
+  // logic on every catalog arrival), so it reads the freshest map through this
+  // ref instead of a stale closure.
+  const catalogDimsRef = useRef(catalogDims);
+  useEffect(() => {
+    catalogDimsRef.current = catalogDims;
+  }, [catalogDims]);
   useEffect(() => {
     showPathRef.current = showPath;
   }, [showPath]);
@@ -555,10 +563,21 @@ export default function UrdfTwin({
       const prevMesh = map.get(prev);
       if (prevMesh && scene && typeof scene.attach === 'function') {
         scene.attach(prevMesh);
-        snapMeshToTable(prevMesh);
+        // Snap/recolor from the LIVE catalogDims when the map describes this
+        // type: the mesh's build-time userData.simDims is frozen, and a catalog
+        // fetch resolving MID-CARRY (a held mesh is deliberately skipped by the
+        // objects-diff rebuild) would otherwise snap and recolor with stale
+        // fallback values. userData is NOT overwritten — the geometry was built
+        // with the old dims, and the objects-diff effect must still see the
+        // mismatch to dispose+rebuild the mesh on its next run.
+        const type = prevMesh.userData ? prevMesh.userData.simType : null;
+        const liveMap = catalogDimsRef.current;
+        const live = liveMap && type && liveMap[type]
+          ? resolveDims(liveMap, type) : null;
+        snapMeshToTable(prevMesh, live);
         // Restore the mesh's OWN per-type rest colour (not a global amber — a
         // catalog-coloured object would otherwise turn amber after being carried).
-        setMeshColor(prevMesh, restColorOf(prevMesh));
+        setMeshColor(prevMesh, live ? live.color : restColorOf(prevMesh));
         requestRenderRef.current();
       }
     }
@@ -959,10 +978,13 @@ function buildZoneObjects(z) {
 
 // On release, the mesh is re-attached to the scene with its carried world
 // transform; snap it straight down so it rests on the table (viewer y=half of its
-// OWN height), keeping its current x/z and yaw.
-function snapMeshToTable(mesh) {
+// OWN height), keeping its current x/z and yaw. `liveDims` (optional) carries the
+// freshly resolved catalog dims when the live map knows the type — it wins over
+// the mesh's frozen build-time userData (which can be stale for a mesh grasped
+// before the async catalog fetch resolved).
+function snapMeshToTable(mesh, liveDims = null) {
   if (mesh && mesh.position && typeof mesh.position.y === 'number') {
-    const dims = mesh.userData && mesh.userData.simDims;
+    const dims = liveDims || (mesh.userData && mesh.userData.simDims);
     const height = dims && typeof dims.height === 'number' && dims.height > 0
       ? dims.height : SIM_OBJECT_FALLBACK_SIZE_M;
     mesh.position.y = height / 2;

@@ -700,16 +700,30 @@ def ensure_environment_stopped(log=None) -> bool:
     opens the same /dev/serial ports a live 100 Hz controller holds, so a
     running robot tier makes BOTH arms fail to identify. TARGETED (robot tier
     only) — the always-on manager keeps serving the wizard the student is in.
-    Returns True iff at least one robot-tier container was present."""
+
+    FAIL-SAFE on an unknowable status: a ``docker inspect`` failure/timeout maps
+    a container to "error", and treating that as ABSENT would fail-OPEN this
+    mandatory pre-scan stop (a live controller could keep the bus). The probe is
+    retried once; a persistent "error" triggers the idempotent stop anyway.
+    Returns True iff the stop path ran (a container was present or its status
+    could not be determined)."""
+    log = log or (lambda _m: None)
     status = get_container_status()
+    if any(status.get(name) == "error" for name in _ROBOT_TIER):
+        # Transient daemon hiccup? One retry before assuming the worst.
+        status = get_container_status()
     present = [
         name for name in _ROBOT_TIER
-        if status.get(name, "not found") not in ("not found", "error")
+        if status.get(name, "not found") != "not found"
     ]
     if not present:
         return False
-    log = log or (lambda _m: None)
-    log(f"Vorherige Roboter-Container gefunden ({', '.join(present)}) — werden gestoppt …")
+    errored = [name for name in present if status.get(name) == "error"]
+    if errored:
+        log("Container-Status konnte nicht ermittelt werden — Roboter-Container "
+            "werden vorsorglich gestoppt …")
+    else:
+        log(f"Vorherige Roboter-Container gefunden ({', '.join(present)}) — werden gestoppt …")
     stop_robot_tier(log=log)
     return True
 
@@ -743,8 +757,14 @@ def set_leader_mode(config, follower_only: bool, log=None) -> tuple:
 
     prev_val = config_generator.read_env_var("EDUBOTICS_FOLLOWER_ONLY", ENV_FILE)
     prev_follower_only = str(prev_val).strip() == "1"
+    # Carry the managed robot type through BOTH the forward and the rollback
+    # write — omitting it would silently rewrite EDUBOTICS_ROBOT_TYPE to the
+    # default on every toggle (the GUI's _rs_set_leader_mode scar).
+    robot_type = config_generator.read_env_var(
+        "EDUBOTICS_ROBOT_TYPE", ENV_FILE) or "omx_full"
     try:
-        config_generator.generate_env_file(config, ENV_FILE, follower_only=follower_only)
+        config_generator.generate_env_file(config, ENV_FILE, follower_only=follower_only,
+                                           robot_type=robot_type)
     except Exception as e:  # noqa: BLE001 — surfaced to the student in German
         return False, f"Konfiguration konnte nicht erstellt werden: {e}"
 
@@ -758,7 +778,9 @@ def set_leader_mode(config, follower_only: bool, log=None) -> tuple:
         # Roll the .env back to the mode that was actually running before, so
         # the badge + the next env-start reflect reality.
         try:
-            config_generator.generate_env_file(config, ENV_FILE, follower_only=prev_follower_only)
+            config_generator.generate_env_file(config, ENV_FILE,
+                                               follower_only=prev_follower_only,
+                                               robot_type=robot_type)
             log("Moduswechsel fehlgeschlagen — Konfiguration zurückgesetzt.")
         except Exception as e:  # noqa: BLE001
             log(f"Rücksetzen der Konfiguration fehlgeschlagen: {e}")

@@ -103,35 +103,69 @@ class TestCheckForAgentUpdate(unittest.TestCase):
             self.assertIsNone(update_checker.check_for_agent_update("2.8.0", self.API))
 
     def test_newer_but_asset_404_returns_none(self):
-        payload = {"version": "2.9.0", "pi_agent_download_url": self.URL}
+        payload = {"version": "2.9.0", "pi_agent_download_url": self.URL,
+                   "pi_agent_sha256": "ab" * 32}
         with patch("pi_agent.update_checker.urllib.request.urlopen",
                    side_effect=self._dispatch(payload, 404)):
             self.assertIsNone(update_checker.check_for_agent_update("2.8.0", self.API))
 
     def test_newer_with_head_network_error_still_updates(self):
-        payload = {"version": "2.9.0", "pi_agent_download_url": self.URL}
+        payload = {"version": "2.9.0", "pi_agent_download_url": self.URL,
+                   "pi_agent_sha256": "ab" * 32}
         with patch("pi_agent.update_checker.urllib.request.urlopen",
                    side_effect=self._dispatch(payload, "neterr")):
             self.assertIsNotNone(update_checker.check_for_agent_update("2.8.0", self.API))
 
     def test_prerelease_remote_tag_now_compares(self):
-        payload = {"version": "2.9.0-rc1", "pi_agent_download_url": self.URL}
+        payload = {"version": "2.9.0-rc1", "pi_agent_download_url": self.URL,
+                   "pi_agent_sha256": "ab" * 32}
         with patch("pi_agent.update_checker.urllib.request.urlopen",
                    side_effect=self._dispatch(payload, "ok")):
             self.assertIsNotNone(update_checker.check_for_agent_update("2.8.0", self.API))
 
     def test_not_newer_returns_none(self):
-        payload = {"version": "2.8.0", "pi_agent_download_url": self.URL}
+        payload = {"version": "2.8.0", "pi_agent_download_url": self.URL,
+                   "pi_agent_sha256": "ab" * 32}
         with patch("pi_agent.update_checker.urllib.request.urlopen",
                    side_effect=self._dispatch(payload, "ok")):
             self.assertIsNone(update_checker.check_for_agent_update("2.8.0", self.API))
 
-    def test_sha256_absent_is_empty_string(self):
+    def test_sha256_absent_returns_none(self):
+        # The apply path (agent.py) REFUSES a hash-less tarball, so advertising
+        # it as available would trap every stale Pi in a perpetual, unskippable
+        # forced-update modal. The availability criterion must match the apply
+        # criterion: no pi_agent_sha256 → no update advertised.
         payload = {"version": "2.9.0", "pi_agent_download_url": self.URL}
         with patch("pi_agent.update_checker.urllib.request.urlopen",
                    side_effect=self._dispatch(payload, "ok")):
-            r = update_checker.check_for_agent_update("2.8.0", self.API)
-        self.assertEqual(r["sha256"], "")
+            self.assertIsNone(update_checker.check_for_agent_update("2.8.0", self.API))
+
+    def test_sha256_empty_or_blank_returns_none(self):
+        # W6 publishes PI_AGENT_SHA256 empty-on-failure — an empty/whitespace
+        # hash is the degraded-release state and must not advertise an update.
+        for sha in ("", "   "):
+            payload = {"version": "2.9.0", "pi_agent_download_url": self.URL,
+                       "pi_agent_sha256": sha}
+            with patch("pi_agent.update_checker.urllib.request.urlopen",
+                       side_effect=self._dispatch(payload, "ok")):
+                self.assertIsNone(
+                    update_checker.check_for_agent_update("2.8.0", self.API), sha)
+
+    def test_sha256_missing_skips_head_probe(self):
+        # The hash gate runs BEFORE the HEAD asset probe — a hash-less
+        # advertisement must cost no extra network round-trip. (Recorded and
+        # asserted AFTER the call: a raise inside the mock would be swallowed
+        # by check_for_agent_update's blanket except.)
+        payload = {"version": "2.9.0", "pi_agent_download_url": self.URL}
+        methods = []
+
+        def fake(req, timeout=None):
+            methods.append(req.get_method())
+            return _cm(json.dumps(payload).encode())
+
+        with patch("pi_agent.update_checker.urllib.request.urlopen", side_effect=fake):
+            self.assertIsNone(update_checker.check_for_agent_update("2.8.0", self.API))
+        self.assertNotIn("HEAD", methods)
 
     def test_network_error_on_version_returns_none(self):
         def boom(req, timeout=None):

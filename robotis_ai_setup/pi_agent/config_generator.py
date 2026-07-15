@@ -109,6 +109,12 @@ MANAGED_KEYS = frozenset({
     # The Pi is ALWAYS usb_cam (no capture bridge). MANAGED + always emitted so
     # a stale native_bridge value from a copied .env can never linger.
     "EDUBOTICS_CAMERA_SOURCE",
+    # EDUBOTICS_ROBOT_TYPE is the ArmProfile id (omx_full | omx_follower) the
+    # server resolves at boot (compose forwards it with default omx_full).
+    # MANAGED for parity with the GUI's config_generator; callers preserve the
+    # on-disk value across regenerates (read_env_var → robot_type=…) — the Pi
+    # has no profile selector, so a regenerate must never rewrite it silently.
+    "EDUBOTICS_ROBOT_TYPE",
     # Orange-Pi LAN exposure + docker-network keys. LAN_OPEN + ROS_NET_SUBNET
     # are the sticky inputs (carried forward when the caller passes None);
     # BIND_HOST + ROS_NET_GATEWAY are DERIVED from them and re-emitted so the
@@ -411,10 +417,11 @@ def upsert_env_var(key: str, value: str, path: str = ENV_FILE) -> None:
 
 
 def _opi_managed_lines(output_path: str, lan_open: Optional[bool],
-                       ros_net_subnet: Optional[str]) -> list[str]:
+                       ros_net_subnet: Optional[str],
+                       robot_type: str = "omx_full") -> list[str]:
     """The Orange-Pi managed lines shared by every .env variant: registry pins,
-    the explicit usb_cam source, and the LAN/docker-network block (with the
-    DERIVED bind host + gateway)."""
+    the robot profile id, the explicit usb_cam source, and the LAN/docker-
+    network block (with the DERIVED bind host + gateway)."""
     lan_open_str = _resolve_lan_open(output_path, lan_open)
     bind_host = "0.0.0.0" if lan_open_str == "1" else "127.0.0.1"
     subnet = _resolve_ros_net_subnet(output_path, ros_net_subnet)
@@ -425,6 +432,10 @@ def _opi_managed_lines(output_path: str, lan_open: Optional[bool],
         # Pin compose to the image build this agent ships with. Without the
         # line compose runs :latest, drifting past the pinned tag.
         f"IMAGE_TAG={IMAGE_TAG}",
+        # Robot profile id the server resolves at boot (compose forwards it on
+        # physical_ai_server's environment: list). MANAGED — a stale value is
+        # superseded; agent callers carry the on-disk value forward.
+        f"EDUBOTICS_ROBOT_TYPE={robot_type}",
         # The Pi is always the in-container usb_cam path — set it EXPLICITLY
         # (don't lean on the entrypoint's non-WSL auto-detect alone).
         "EDUBOTICS_CAMERA_SOURCE=usb_cam",
@@ -447,7 +458,8 @@ def _opi_managed_lines(output_path: str, lan_open: Optional[bool],
 def generate_env_file(config: HardwareConfig, output_path: str = ENV_FILE,
                       follower_only: bool = False,
                       lan_open: Optional[bool] = None,
-                      ros_net_subnet: Optional[str] = None) -> str:
+                      ros_net_subnet: Optional[str] = None,
+                      robot_type: str = "omx_full") -> str:
     """Write the managed .env from the scanned hardware.
 
     Args:
@@ -467,6 +479,11 @@ def generate_env_file(config: HardwareConfig, output_path: str = ENV_FILE,
         ros_net_subnet: Explicit docker ros_net subnet (CIDR). ``None`` carries
             the current .env value forward (default ``172.28.0.0/24``), so a
             provisioning-time overlap-avoidance choice survives regenerates.
+        robot_type: ArmProfile id emitted as the managed
+            ``EDUBOTICS_ROBOT_TYPE`` line (compose forwards it to the server).
+            Agent callers must pass the CURRENT on-disk value through
+            (``read_env_var(..) or "omx_full"``) unless explicitly setting it —
+            the key is MANAGED, so an omitted value would silently rewrite it.
 
     Returns:
         The content written to the file.
@@ -508,7 +525,8 @@ def generate_env_file(config: HardwareConfig, output_path: str = ENV_FILE,
             lines.append(f"CAMERA_NAME_{i}={_quote(cam.role)}")
 
     lines.append(f"ROS_DOMAIN_ID={domain_id}")
-    lines.extend(_opi_managed_lines(output_path, lan_open, ros_net_subnet))
+    lines.extend(_opi_managed_lines(output_path, lan_open, ros_net_subnet,
+                                    robot_type=robot_type))
 
     if preserved:
         lines.append("")
@@ -523,7 +541,8 @@ def generate_env_file(config: HardwareConfig, output_path: str = ENV_FILE,
 
 def generate_cloud_only_env(output_path: str = ENV_FILE,
                             lan_open: Optional[bool] = None,
-                            ros_net_subnet: Optional[str] = None) -> str:
+                            ros_net_subnet: Optional[str] = None,
+                            robot_type: str = "omx_full") -> str:
     """Write a minimal .env for manager-only / cloud-only mode (no robot tier).
 
     Used at agent boot to bring the always-on manager up BEFORE any hardware
@@ -532,7 +551,9 @@ def generate_cloud_only_env(output_path: str = ENV_FILE,
     ``${VAR}``, so we provide empty port placeholders plus the full opi managed
     block (the manager service reads ``EDUBOTICS_ROS_NET_GATEWAY`` /
     ``EDUBOTICS_BIND_HOST`` and compose reads ``REGISTRY`` / ``IMAGE_TAG`` /
-    ``EDUBOTICS_ROS_NET_SUBNET``). Operator overrides + HF_TOKEN are preserved.
+    ``EDUBOTICS_ROS_NET_SUBNET``). ``robot_type`` is emitted for MANAGED-key
+    symmetry with :func:`generate_env_file` (a stale hand-pinned value is
+    superseded here too). Operator overrides + HF_TOKEN are preserved.
     """
     domain_id = _resolve_ros_domain_id()
     preserved = _read_unmanaged_lines(output_path)
@@ -547,7 +568,8 @@ def generate_cloud_only_env(output_path: str = ENV_FILE,
         'CAMERA_NAME_2="scene"',
         f"ROS_DOMAIN_ID={domain_id}",
     ]
-    lines.extend(_opi_managed_lines(output_path, lan_open, ros_net_subnet))
+    lines.extend(_opi_managed_lines(output_path, lan_open, ros_net_subnet,
+                                    robot_type=robot_type))
     if preserved:
         lines.append("")
         lines.append(_PRESERVE_MARKER)

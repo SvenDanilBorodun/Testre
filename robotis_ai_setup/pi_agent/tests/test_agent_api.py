@@ -105,6 +105,23 @@ class TestOriginAllowlist(unittest.TestCase):
         self.assertIn("fe80::1", own)  # scope-id stripped, normalized
         self.assertNotIn("not-an-ip", own)
 
+    def test_own_ip_addresses_cached_within_bind_interval(self):
+        # The Origin allowlist consults _own_ip_addresses on every mutating
+        # POST with an IP-literal Origin, and list_interface_ips shells out to
+        # `ip -o addr show` (up to 3 s) — the second call within the TTL must
+        # be served from the cache without re-probing any source.
+        with patch("pi_agent.agent.socket.getaddrinfo",
+                   return_value=[(0, 0, 0, "", ("192.168.5.9", 0))]) as gai, \
+             patch("pi_agent.agent.detect_lan_ip", return_value="192.168.5.9") as lan, \
+             patch("pi_agent.agent.list_interface_ips", return_value=[]) as lii:
+            first = self.app._own_ip_addresses()
+            second = self.app._own_ip_addresses()
+        self.assertEqual(first, second)
+        self.assertIn("192.168.5.9", second)
+        self.assertEqual(gai.call_count, 1)
+        self.assertEqual(lan.call_count, 1)
+        self.assertEqual(lii.call_count, 1)
+
     def test_mdns_hostname_allowed(self):
         with patch("pi_agent.agent.socket.gethostname", return_value="edubotics-05"):
             self.assertTrue(self.app.origin_allowed("http://edubotics-05.local"))
@@ -356,6 +373,131 @@ class TestUpdateJob(unittest.TestCase):
         self.assertEqual(code, 404)
         self.assertFalse(payload["ok"])
 
+    def _join_update_threads(self):
+        """Join the background update worker so its finally-block (the
+        single-flight release/hold decision) has provably run."""
+        for t in threading.enumerate():
+            if t.name.startswith("update-"):
+                t.join(timeout=5)
+
+    def test_single_flight_held_through_pending_restart(self):
+        # A successful agent-tarball apply schedules a deferred SIGTERM ~2 s
+        # out. The single-flight guard must stay HELD through that window — a
+        # second /update must not start stop/pull/recreate work inside a
+        # process about to kill itself. (The flag resets on the fresh boot.)
+        upd = {"version": "9.9.9", "download_url": "http://x/agent.tgz", "sha256": "ab" * 32}
+        with patch.object(agent.docker_manager, "stop_robot_tier", return_value=True), \
+             patch.object(agent.docker_manager, "check_for_updates", return_value=False), \
+             patch.object(agent.docker_manager, "start_manager", return_value=True), \
+             patch.object(agent.update_checker, "check_for_agent_update", return_value=upd), \
+             patch.object(agent.update_checker, "download_agent_tarball",
+                          return_value="/tmp/agent.tgz"), \
+             patch.object(self.app, "_apply_agent_update_and_restart",
+                          return_value=True):
+            code, payload = self.app.handle_update_start()
+            job_id = payload["job_id"]
+            self._join_update_threads()
+            _, job = self.app.handle_update_status(job_id)
+            self.assertEqual(job["status"], "succeeded")
+            self.assertTrue(job["agent_restarting"])
+            # Still busy: a second /update is refused while the restart pends.
+            self.assertTrue(self.app._update_in_flight())
+            code2, payload2 = self.app.handle_update_start()
+        self.assertEqual(code2, 409)
+
+    def test_failed_apply_releases_single_flight_and_clears_restart_flag(self):
+        # A FAILED apply keeps the running agent alive — the guard must be
+        # released (no restart is coming) and agent_restarting cleared so the
+        # UI doesn't wait forever for a restart that never happens.
+        upd = {"version": "9.9.9", "download_url": "http://x/agent.tgz", "sha256": "ab" * 32}
+        with patch.object(agent.docker_manager, "stop_robot_tier", return_value=True), \
+             patch.object(agent.docker_manager, "check_for_updates", return_value=False), \
+             patch.object(agent.docker_manager, "start_manager", return_value=True), \
+             patch.object(agent.update_checker, "check_for_agent_update", return_value=upd), \
+             patch.object(agent.update_checker, "download_agent_tarball",
+                          return_value="/tmp/agent.tgz"), \
+             patch.object(self.app, "_apply_agent_update_and_restart",
+                          return_value=False):
+            code, payload = self.app.handle_update_start()
+            job_id = payload["job_id"]
+            self._join_update_threads()
+            _, job = self.app.handle_update_status(job_id)
+        self.assertEqual(job["status"], "succeeded")
+        self.assertFalse(job["agent_restarting"])
+        self.assertFalse(self.app._update_in_flight())
+
+    def test_terminal_jobs_carry_finished_at(self):
+        with patch.object(agent.docker_manager, "stop_robot_tier", return_value=True), \
+             patch.object(agent.docker_manager, "check_for_updates", return_value=False), \
+             patch.object(agent.docker_manager, "start_manager", return_value=True), \
+             patch.object(agent.update_checker, "check_for_agent_update", return_value=None):
+            _, payload = self.app.handle_update_start()
+            self._join_update_threads()
+            _, job = self.app.handle_update_status(payload["job_id"])
+        self.assertEqual(job["status"], "succeeded")
+        self.assertIn("finished_at", job)  # the TTL eviction anchor
+
+
+# ── update-job map TTL eviction (unbounded-growth guard) ─────────────────────
+
+
+class TestUpdateJobEviction(unittest.TestCase):
+    def setUp(self):
+        self.app = agent.AgentApp()
+
+    def test_stale_terminal_jobs_evicted_newest_always_kept(self):
+        old = time.time() - agent._UPDATE_JOB_TTL_S - 60
+        self.app._update_jobs = {
+            "old-ok": {"id": "old-ok", "status": "succeeded",
+                       "started_at": old, "finished_at": old},
+            "old-bad": {"id": "old-bad", "status": "failed",
+                        "started_at": old + 1, "finished_at": old + 1},
+            "newest": {"id": "newest", "status": "succeeded",
+                       "started_at": old + 2, "finished_at": old + 2},
+        }
+        with self.app._update_lock:
+            self.app._evict_stale_update_jobs_locked()
+        # Stale terminal records go; the most recent job ALWAYS survives so a
+        # late poller can still read the last terminal state.
+        self.assertEqual(set(self.app._update_jobs), {"newest"})
+
+    def test_fresh_and_running_jobs_never_evicted(self):
+        old = time.time() - agent._UPDATE_JOB_TTL_S - 60
+        now = time.time()
+        self.app._update_jobs = {
+            "running-old": {"id": "running-old", "status": "running",
+                            "started_at": old},
+            "fresh": {"id": "fresh", "status": "failed",
+                      "started_at": now, "finished_at": now},
+        }
+        with self.app._update_lock:
+            self.app._evict_stale_update_jobs_locked()
+        self.assertEqual(set(self.app._update_jobs), {"running-old", "fresh"})
+
+    def test_update_start_sweeps_stale_records(self):
+        old = time.time() - agent._UPDATE_JOB_TTL_S - 60
+        self.app._update_jobs = {
+            "stale-1": {"id": "stale-1", "status": "succeeded",
+                        "started_at": old, "finished_at": old},
+            "stale-2": {"id": "stale-2", "status": "failed",
+                        "started_at": old + 1, "finished_at": old + 1},
+        }
+        with patch.object(agent.docker_manager, "stop_robot_tier", return_value=True), \
+             patch.object(agent.docker_manager, "check_for_updates", return_value=False), \
+             patch.object(agent.docker_manager, "start_manager", return_value=True), \
+             patch.object(agent.update_checker, "check_for_agent_update", return_value=None):
+            code, payload = self.app.handle_update_start()
+            job_id = payload["job_id"]
+            for t in threading.enumerate():
+                if t.name.startswith("update-"):
+                    t.join(timeout=5)
+        self.assertEqual(code, 202)
+        # /update is the sole grower of the map — it sweeps first: the older
+        # stale record went, the newest pre-existing record survived.
+        self.assertNotIn("stale-1", self.app._update_jobs)
+        self.assertIn("stale-2", self.app._update_jobs)
+        self.assertIn(job_id, self.app._update_jobs)
+
 
 # ── Read-only update-availability probe (/update/check) ──────────────────────
 
@@ -531,11 +673,221 @@ class TestApplyAgentUpdate(unittest.TestCase):
                 tf.add(src, arcname="not_pi_agent")
             app = agent.AgentApp(compose_file=os.path.join(root, "docker-compose.opi.yml"))
             with patch("pi_agent.agent.os.kill") as kill:
-                app._apply_agent_update_and_restart(tarball)
+                result = app._apply_agent_update_and_restart(tarball)
+            self.assertFalse(result)       # no restart scheduled → guard released
             self.assertFalse(kill.called)  # no restart triggered
         finally:
             shutil.rmtree(root, ignore_errors=True)
             shutil.rmtree(staging, ignore_errors=True)
+
+    # ── pre-PEP-706 extractall fallback (manual member validation) ────────────
+
+    @staticmethod
+    def _tarball_with_members(directory, members):
+        """Build a .tar.gz whose members carry LITERAL names (TarInfo direct —
+        tarfile.add would normalise a traversal arcname)."""
+        import io
+        tarball = os.path.join(directory, "crafted.tar.gz")
+        with tarfile.open(tarball, "w:gz") as tf:
+            for name, data in members:
+                ti = tarfile.TarInfo(name=name)
+                ti.size = len(data)
+                tf.addfile(ti, io.BytesIO(data))
+        return tarball
+
+    @staticmethod
+    def _no_filter_extractall():
+        """An extractall stand-in mimicking a pre-PEP-706 Python: raises
+        TypeError on the `filter=` keyword, otherwise delegates."""
+        orig = tarfile.TarFile.extractall
+
+        def fake(tf_self, *args, **kwargs):
+            if "filter" in kwargs:
+                raise TypeError(
+                    "extractall() got an unexpected keyword argument 'filter'")
+            return orig(tf_self, *args, **kwargs)
+        return fake
+
+    def test_pre_pep706_fallback_refuses_traversal_and_absolute_members(self):
+        # Force the TypeError fallback and prove the manual validation refuses
+        # a `../` traversal entry and an absolute-path entry instead of
+        # extracting them (filter='data' parity for old Pythons).
+        root = tempfile.mkdtemp()
+        workdir = tempfile.mkdtemp()
+        try:
+            app = agent.AgentApp(compose_file=os.path.join(root, "docker-compose.opi.yml"))
+            for bad in ("../evil.txt", "/abs-evil.txt", "pi_agent/../../evil.txt"):
+                tarball = self._tarball_with_members(
+                    workdir, [("pi_agent/agent.py", b"# ok\n"), (bad, b"evil\n")])
+                with patch.object(tarfile.TarFile, "extractall",
+                                  self._no_filter_extractall()), \
+                     patch("pi_agent.agent.os.kill") as kill:
+                    result = app._apply_agent_update_and_restart(tarball)
+                self.assertFalse(result, bad)  # refused, no restart scheduled
+                self.assertFalse(kill.called)
+                # Nothing was applied to the install root.
+                self.assertFalse(os.path.exists(os.path.join(root, "pi_agent")), bad)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+            shutil.rmtree(workdir, ignore_errors=True)
+
+    def test_pre_pep706_fallback_extracts_valid_tarball(self):
+        # The fallback must still WORK for the released (benign) tarball.
+        if shutil.which("rsync") is None:
+            self.skipTest("rsync unavailable")
+        root = tempfile.mkdtemp()
+        workdir = tempfile.mkdtemp()
+        try:
+            src = os.path.join(workdir, "pi_agent")
+            os.makedirs(src)
+            with open(os.path.join(src, "agent.py"), "w") as f:
+                f.write("# new agent\n")
+            tarball = os.path.join(workdir, "edubotics-pi-agent.tar.gz")
+            with tarfile.open(tarball, "w:gz") as tf:
+                tf.add(src, arcname="pi_agent")
+            app = agent.AgentApp(compose_file=os.path.join(root, "docker-compose.opi.yml"))
+            with patch.object(tarfile.TarFile, "extractall",
+                              self._no_filter_extractall()), \
+                 patch("pi_agent.agent.os.kill"):
+                result = app._apply_agent_update_and_restart(tarball)
+                for t in threading.enumerate():
+                    if t.name == "agent-restart":
+                        t.join(timeout=5)
+            self.assertTrue(result)
+            self.assertTrue(os.path.exists(os.path.join(root, "pi_agent", "agent.py")))
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+            shutil.rmtree(workdir, ignore_errors=True)
+
+    def test_validate_tar_member_rules(self):
+        # The pure validator: PEP-706 'data'-filter parity.
+        ok_file = tarfile.TarInfo("pi_agent/agent.py")
+        ok_dir = tarfile.TarInfo("pi_agent")
+        ok_dir.type = tarfile.DIRTYPE
+        agent._validate_tar_member(ok_file)  # no raise
+        agent._validate_tar_member(ok_dir)   # no raise
+        for bad_name in ("/etc/passwd", "../up.txt", "a/../../b", "\\evil"):
+            ti = tarfile.TarInfo(bad_name)
+            with self.assertRaises(ValueError, msg=bad_name):
+                agent._validate_tar_member(ti)
+        link = tarfile.TarInfo("pi_agent/link")
+        link.type = tarfile.SYMTYPE
+        with self.assertRaises(ValueError):
+            agent._validate_tar_member(link)
+
+
+# ── MJPEG preview generation handshake (supersede without a missable window) ─
+
+
+class _FakeStreamHandler:
+    """Minimal stand-in for BaseHTTPRequestHandler as stream_camera_preview
+    uses it: send_response/send_header/end_headers + a wfile sink."""
+
+    def __init__(self):
+        import io
+        self.wfile = io.BytesIO()
+        self.status = None
+        self.header_list = []
+
+    def send_response(self, code):
+        self.status = code
+
+    def send_header(self, key, value):
+        self.header_list.append((key, value))
+
+    def end_headers(self):
+        pass
+
+
+class TestPreviewHandshake(unittest.TestCase):
+    def setUp(self):
+        self.app = agent.AgentApp()
+
+    def test_stop_bumps_generation(self):
+        g0 = self.app._preview_generation()
+        self.app.stop_active_previews()
+        self.assertEqual(self.app._preview_generation(), g0 + 1)
+
+    def test_generation_bump_supersedes_running_loop(self):
+        # The old Event set→sleep(0.1)→clear stop-window could be MISSED by a
+        # loop blocked in a frame read. The generation counter cannot: bump it
+        # and the loop provably exits at its next check, releasing the capture
+        # and deregistering itself.
+        handler = _FakeStreamHandler()
+        caps = []
+
+        class _FakeCap:
+            def __init__(self, device):
+                self.device = device
+                self.released = False
+                caps.append(self)
+
+            def open(self):
+                return True
+
+            def read_jpeg(self):
+                time.sleep(0.01)
+                return b"\xff\xd8jpeg"
+
+            def release(self):
+                self.released = True
+
+        with patch.object(agent, "_PreviewCapture", _FakeCap):
+            t = threading.Thread(target=self.app.stream_camera_preview,
+                                 args=(handler, "/dev/video0"), daemon=True)
+            t.start()
+            self.assertTrue(_wait_for(lambda: self.app._preview_active),
+                            "loop never registered")
+            self.app.stop_active_previews()
+            t.join(timeout=3)
+            self.assertFalse(t.is_alive(), "superseded loop did not exit")
+        self.assertTrue(caps[0].released)          # capture provably released
+        self.assertEqual(self.app._preview_active, {})  # deregistered
+
+    def test_new_preview_waits_for_old_release_then_opens(self):
+        # Handshake: the new preview blocks until the old loop deregisters
+        # (simulated by a helper thread), then opens the device and streams.
+        with self.app._preview_cond:
+            self.app._preview_active["/dev/video0"] = self.app._preview_gen
+
+        def release_soon():
+            time.sleep(0.1)
+            with self.app._preview_cond:
+                self.app._preview_active.clear()
+                self.app._preview_cond.notify_all()
+
+        class _FakeCap:
+            def __init__(self, device):
+                pass
+
+            def open(self):
+                return True
+
+            def read_jpeg(self):
+                return None  # end the stream right after the headers
+
+            def release(self):
+                pass
+
+        handler = _FakeStreamHandler()
+        threading.Thread(target=release_soon, daemon=True).start()
+        with patch.object(agent, "_PreviewCapture", _FakeCap):
+            self.app.stream_camera_preview(handler, "/dev/video0")
+        self.assertEqual(handler.status, 200)          # streamed
+        self.assertEqual(self.app._preview_active, {})  # deregistered on exit
+
+    def test_new_preview_503s_if_old_loop_never_releases(self):
+        # A stuck holder must NOT be raced for the device: the new preview
+        # gives up with a German 503 and never opens a second capture.
+        with self.app._preview_cond:
+            self.app._preview_active["/dev/video0"] = self.app._preview_gen
+        handler = _FakeStreamHandler()
+        with patch.object(agent, "_PREVIEW_HANDOFF_TIMEOUT_S", 0.05), \
+             patch.object(agent, "_PreviewCapture") as cap_cls:
+            self.app.stream_camera_preview(handler, "/dev/video0")
+        self.assertEqual(handler.status, 503)
+        self.assertIn("Vorschau", handler.wfile.getvalue().decode("utf-8"))
+        cap_cls.assert_not_called()  # the held device was never re-opened
 
 
 # ── _tls_genuine against a real self-signed TLS server (#23) ─────────────────

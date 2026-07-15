@@ -113,7 +113,14 @@ else
         2>/dev/null || echo "172.28.0.1")"
     # Registry pins mirror pi_agent/constants.py defaults (emergency path only —
     # the wizard regenerates the .env properly on the first hardware scan).
-    cat > "${ENV_DIR}/.env" <<EOF
+    # EDUBOTICS_LAN_OPEN=1 (and the derived BIND_HOST) is a bash duplicate of
+    # constants.DEFAULT_LAN_OPEN — keep the literal in sync if that default
+    # ever changes. Written ATOMICALLY (tmp + chmod 600 + mv) so a power loss
+    # can't leave a truncated .env and the file — which later carries the
+    # student's HF_TOKEN — never has a world-readable 0644 window.
+    mkdir -p "$ENV_DIR"
+    TMP_ENV="${ENV_DIR}/.env.tmp"
+    cat > "$TMP_ENV" <<EOF
 # Cloud-only / manager-only mode — first-boot fallback (generator unavailable).
 FOLLOWER_PORT=""
 LEADER_PORT=""
@@ -126,12 +133,15 @@ ROS_DOMAIN_ID=30
 REGISTRY=ghcr.io/svendanilborodun
 REGISTRY_FALLBACK=nettername
 IMAGE_TAG=latest
+EDUBOTICS_ROBOT_TYPE=omx_full
 EDUBOTICS_CAMERA_SOURCE=usb_cam
 EDUBOTICS_LAN_OPEN=1
 EDUBOTICS_BIND_HOST=0.0.0.0
 EDUBOTICS_ROS_NET_SUBNET=${SUB}
 EDUBOTICS_ROS_NET_GATEWAY=${GW}
 EOF
+    chmod 600 "$TMP_ENV"
+    mv -f "$TMP_ENV" "${ENV_DIR}/.env"
 fi
 chmod 600 "${ENV_DIR}/.env" 2>/dev/null || true
 chown root:root "${ENV_DIR}/.env" 2>/dev/null || true

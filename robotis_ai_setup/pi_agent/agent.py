@@ -122,6 +122,19 @@ _LOG_RING_MAXLEN = 800
 # no per-rig override.
 UPDATE_CHECK_TTL_S = 600
 
+# TTL for COMPLETED/FAILED update-job records in the in-memory job map — the
+# map would otherwise grow unbounded over a long agent uptime (one dict per
+# /update, never removed). Swept on every new /update (mirroring the
+# cleanup_stale_tarballs pattern); the most recent job is ALWAYS kept so a
+# late status poller can still read the last terminal state. Plain constant
+# (an EDUBOTICS_* env name would trip ci.yml::env-forwarding-guard).
+_UPDATE_JOB_TTL_S = 6 * 3600
+
+# How long a new MJPEG preview waits for the superseded preview loop to release
+# its VideoCapture before giving up with a German 503. The old loop exits
+# within roughly one frame read (~50 ms + camera latency), so this is generous.
+_PREVIEW_HANDOFF_TIMEOUT_S = 2.0
+
 # Netzwerk-Check probe hosts. GHCR + Docker Hub break image pulls; huggingface.co
 # breaks dataset upload / model download; the cloud API host breaks login/updates.
 _HF_HOST = "huggingface.co"
@@ -205,6 +218,28 @@ class _RingLogHandler(logging.Handler):
             self._ring.append(_redact_secret_line(self.format(record)))
         except Exception:  # noqa: BLE001 — logging must never raise
             pass
+
+
+# ── tar-member validation for the pre-PEP-706 extractall fallback ────────────
+
+
+def _validate_tar_member(member: "tarfile.TarInfo") -> None:
+    """Refuse tar members that PEP 706's ``filter='data'`` would refuse:
+    absolute paths, ``..`` traversal, and non-file/dir specials (symlinks,
+    hardlinks, devices, FIFOs). Used ONLY on the fallback path for Pythons
+    whose ``extractall`` lacks ``filter=`` — the SHA-256 gate proves the
+    tarball is the released one, but defense-in-depth costs nothing.
+
+    Raises ``ValueError`` (caught by the apply path's blanket handler, which
+    logs and aborts the self-update) on the first offending member.
+    """
+    name = member.name
+    if name.startswith(("/", "\\")) or (len(name) > 1 and name[1] == ":"):
+        raise ValueError(f"absolute path in tar member: {name!r}")
+    if ".." in name.replace("\\", "/").split("/"):
+        raise ValueError(f"path traversal in tar member: {name!r}")
+    if not (member.isfile() or member.isdir()):
+        raise ValueError(f"unsupported tar member type: {name!r}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -331,10 +366,25 @@ class AgentApp:
         self._phone_server = None
         self._phone_slot = None
 
-        # Live camera preview + a stop event the lifecycle ops set to release the
-        # device BEFORE the stack (usb_cam) claims it.
+        # Live camera preview coordination. A GENERATION counter supersedes
+        # older previews: each streaming loop polls its own generation, so a
+        # bump can never be "missed" the way the old set→sleep(0.1)→clear
+        # Event window could be by a loop blocked in a frame read. The
+        # active-loop registry (device → generation) lets a new preview WAIT
+        # until the superseded loop has provably released its VideoCapture
+        # before re-opening the device (no leaked capture handle).
         self._preview_lock = threading.Lock()
-        self._preview_stop = threading.Event()
+        self._preview_cond = threading.Condition(self._preview_lock)
+        self._preview_gen = 0
+        self._preview_active: dict = {}  # device -> generation of the live loop
+
+        # Cache for _own_ip_addresses(): the Origin allowlist consults it on
+        # EVERY mutating POST with an IP-literal Origin, and the underlying
+        # `ip -o addr show` shell-out costs up to 3 s. Interface addresses
+        # change rarely; the TTL matches the gateway binder cadence.
+        # `None` or `(monotonic_ts, frozenset_of_ips)`, guarded by its lock.
+        self._own_ips_lock = threading.Lock()
+        self._own_ips_cache: Optional[tuple] = None
 
         # Log ring + shutdown signal.
         self._log_ring = _LogRing()
@@ -378,7 +428,17 @@ class AgentApp:
         while rejecting an attacker's ``http://<their-ip>/`` drive-by. A
         best-effort union of independent stdlib sources (each guarded so a
         failure in one never blanks the set), normalised via ``ip_address`` so
-        IPv6 short/long forms compare equal."""
+        IPv6 short/long forms compare equal.
+
+        Cached for ``_GATEWAY_BIND_INTERVAL_S``: ``list_interface_ips`` shells
+        out to ``ip -o addr show`` (up to 3 s), which would otherwise run on
+        every mutating POST carrying an IP-literal Origin."""
+        now = time.monotonic()
+        with self._own_ips_lock:
+            cached = self._own_ips_cache
+            if cached is not None and (now - cached[0]) < _GATEWAY_BIND_INTERVAL_S:
+                return set(cached[1])
+
         addrs: "set[str]" = set()
         # 1. Hostname-mapped addresses (the mDNS / /etc/hosts A record).
         try:
@@ -402,6 +462,8 @@ class AgentApp:
                 normalized.add(str(ip_address(a)))
             except ValueError:
                 continue
+        with self._own_ips_lock:
+            self._own_ips_cache = (time.monotonic(), frozenset(normalized))
         return normalized
 
     def origin_allowed(self, origin: str) -> bool:
@@ -464,6 +526,13 @@ class AgentApp:
             i += 1
         self._hardware = HardwareConfig(leader=leader, follower=follower, cameras=cameras)
 
+    def _current_robot_type(self) -> str:
+        """The CURRENT on-disk managed robot type, defaulting to ``omx_full``.
+        Every regenerate must carry this through — EDUBOTICS_ROBOT_TYPE is a
+        MANAGED key, so a caller that omits it silently rewrites it."""
+        return config_generator.read_env_var(
+            "EDUBOTICS_ROBOT_TYPE", self.env_file) or "omx_full"
+
     def _persist_env_if_ready(self, follower_only: bool = False) -> None:
         """Write the managed .env from ``self._hardware`` when it holds enough to
         generate a valid config (follower present; leader too unless
@@ -475,7 +544,8 @@ class AgentApp:
             return
         if not follower_only and hw.leader is None:
             return
-        config_generator.generate_env_file(hw, self.env_file, follower_only=follower_only)
+        config_generator.generate_env_file(hw, self.env_file, follower_only=follower_only,
+                                           robot_type=self._current_robot_type())
 
     # ── GET: /status ─────────────────────────────────────────────────────────
 
@@ -512,6 +582,23 @@ class AgentApp:
             "images": docker_manager.get_last_pull_status(),
         }
 
+    # ── update-in-flight fast-fail (mutating lifecycle endpoints) ────────────
+
+    def _update_in_flight(self) -> bool:
+        with self._update_lock:
+            return self._update_busy
+
+    @staticmethod
+    def _busy_updating() -> "tuple[int, dict]":
+        """Fast-fail response for mutating lifecycle endpoints while an update
+        job holds ``_lifecycle_lock`` (minutes of stop/pull/recreate): an
+        urgent „Stoppen" must get a distinguishing 503 immediately instead of
+        blocking silently behind the update. Read-only endpoints (status,
+        Protokoll, update status/check) stay available throughout."""
+        return 503, {"ok": False,
+                     "message": "Aktualisierung läuft — bitte warten, bis das "
+                                "Update abgeschlossen ist."}
+
     # ── POST: /scan-arms ─────────────────────────────────────────────────────
 
     def handle_scan_arms(self, body: dict) -> "tuple[int, dict]":
@@ -525,6 +612,8 @@ class AgentApp:
         ``identify_arm.py`` can open the serial ports a live 100 Hz controller
         would otherwise hold.
         """
+        if self._update_in_flight():
+            return self._busy_updating()
         force = bool(body.get("force"))
         with self._lifecycle_lock:
             self.stop_active_previews()
@@ -575,7 +664,12 @@ class AgentApp:
 
     def handle_cameras_scan(self) -> "tuple[int, dict]":
         """Enumerate UVC capture devices (v4l2 by-id/by-path + identical-serial
-        dedup, native — no ``wsl -d`` wrapper). Roles are assigned separately."""
+        dedup, native — no ``wsl -d`` wrapper). Roles are assigned separately.
+
+        DOCUMENTED EXCEPTION to "GETs don't mutate": this stops any live MJPEG
+        preview first — enumeration must probe the very device a preview holds.
+        The React caller depends on the GET method, so the method stays; the
+        state change is confined to the agent's own preview session."""
         self.stop_active_previews()  # release any device the preview holds first
         cams = camera_enum.list_video_devices()
         return 200, {"ok": True, "cameras": cams}
@@ -586,6 +680,8 @@ class AgentApp:
         """Assign gripper/scene roles to enumerated devices and (if arms are
         already identified) persist. Body: ``{"cameras": [{"path": …,
         "role": "gripper"|"scene"}, …]}``."""
+        if self._update_in_flight():
+            return self._busy_updating()
         entries = body.get("cameras")
         if not isinstance(entries, list):
             return 400, {"ok": False, "message": "Ungültige Kamera-Zuordnung."}
@@ -601,8 +697,16 @@ class AgentApp:
             cameras.append(CameraDevice(path=path, role=role, name=str(path).split("/")[-1]))
         with self._lifecycle_lock:
             self._hardware.cameras = cameras
+            # Carry the CURRENT session mode forward (the set_leader_mode
+            # prev_val pattern): a camera-role edit during a live follower-only
+            # Roboter-Studio session must not silently rewrite
+            # EDUBOTICS_FOLLOWER_ONLY=0 and re-arm the leader on the next
+            # container recreate.
+            prev_val = config_generator.read_env_var(
+                "EDUBOTICS_FOLLOWER_ONLY", self.env_file)
+            follower_only = str(prev_val).strip() == "1"
             try:
-                self._persist_env_if_ready(follower_only=False)
+                self._persist_env_if_ready(follower_only=follower_only)
             except Exception as e:  # noqa: BLE001
                 # Not fatal: the roles live in-memory and are written at env
                 # start. Only a genuine write failure (disk) surfaces here.
@@ -660,6 +764,8 @@ class AgentApp:
         """Store (or clear) the Hugging Face token. ``HF_TOKEN`` is deliberately
         UNMANAGED — ``upsert_env_var`` is its sole writer, so it survives every
         .env regenerate and Factory Reset. The token is never echoed back."""
+        if self._update_in_flight():
+            return self._busy_updating()
         token = body.get("token")
         if token is None:
             return 400, {"ok": False, "message": "Kein Token angegeben."}
@@ -682,6 +788,8 @@ class AgentApp:
         always regenerates a BOTH-arms .env (the Roboter-Studio leader toggle is
         the only path that flips to follower-only). Cloud-only start is a no-op —
         the manager is already up."""
+        if self._update_in_flight():
+            return self._busy_updating()
         if bool(body.get("cloud_only")):
             return 200, {"ok": True, "cloud_only": True,
                          "message": "Cloud-Modus aktiv — die Weboberfläche läuft bereits."}
@@ -692,7 +800,8 @@ class AgentApp:
             self.stop_active_previews()  # free /dev/video* before usb_cam claims it
             try:
                 config_generator.generate_env_file(
-                    self._hardware, self.env_file, follower_only=False)
+                    self._hardware, self.env_file, follower_only=False,
+                    robot_type=self._current_robot_type())
             except Exception as e:  # noqa: BLE001
                 return 500, {"ok": False,
                              "message": f"Konfiguration konnte nicht erstellt werden: {e}"}
@@ -708,6 +817,10 @@ class AgentApp:
         """„Stoppen": stop the robot tier ONLY (TARGETED — never ``compose
         down``; the manager keeps serving the wizard). The graceful SIGTERM lets
         the entrypoint's torque-disable trap run (Rule §2)."""
+        if self._update_in_flight():
+            # The update worker stops the robot tier itself as its first step,
+            # so a fast 503 here loses nothing — the tier is already going down.
+            return self._busy_updating()
         with self._lifecycle_lock:
             self.stop_active_previews()
             self._log("Roboter-Umgebung wird gestoppt …")
@@ -719,6 +832,26 @@ class AgentApp:
         }
 
     # ── POST: /update (ACK early) + GET: /update/status/{id} ─────────────────
+
+    def _evict_stale_update_jobs_locked(self) -> None:
+        """Drop terminal (succeeded/failed) job records older than
+        ``_UPDATE_JOB_TTL_S`` from the in-memory map — it would otherwise grow
+        unbounded over a long uptime. Caller MUST hold ``_update_lock``. The
+        most recent job is ALWAYS kept (a late poller may still read its
+        terminal state); running jobs are never evicted."""
+        if not self._update_jobs:
+            return
+        newest_id = max(self._update_jobs,
+                        key=lambda j: self._update_jobs[j].get("started_at", 0))
+        cutoff = time.time() - _UPDATE_JOB_TTL_S
+        for job_id in list(self._update_jobs):
+            if job_id == newest_id:
+                continue
+            job = self._update_jobs[job_id]
+            if job.get("status") not in ("succeeded", "failed"):
+                continue
+            if job.get("finished_at", job.get("started_at", 0)) < cutoff:
+                del self._update_jobs[job_id]
 
     def handle_update_start(self) -> "tuple[int, dict]":
         """Kick off an async update job and ACK immediately with a job id.
@@ -740,6 +873,9 @@ class AgentApp:
             "started_at": int(time.time()),
         }
         with self._update_lock:
+            # Sweep stale terminal records first — /update is the only grower
+            # of the job map, so this is the natural eviction point.
+            self._evict_stale_update_jobs_locked()
             if self._update_busy:
                 return 409, {"ok": False,
                              "message": "Eine Aktualisierung läuft bereits — bitte warten."}
@@ -832,6 +968,7 @@ class AgentApp:
                     j["progress"] = progress
                     j["message"] = message
 
+        restart_scheduled = False
         try:
             with self._lifecycle_lock:
                 setphase("stopping", 10, "Roboter-Umgebung wird gestoppt …")
@@ -873,6 +1010,7 @@ class AgentApp:
                         j["status"] = "succeeded"
                         j["progress"] = 100
                         j["phase"] = "done"
+                        j["finished_at"] = int(time.time())
                         j["message"] = "Aktualisierung abgeschlossen."
                         if staged_tarball:
                             j["agent_restarting"] = True
@@ -882,35 +1020,56 @@ class AgentApp:
                     # Apply + restart AFTER the manager is recreated. The restart
                     # 502s this proxy briefly; the UI already read "succeeded".
                     joblog("Agent-Aktualisierung wird angewendet — der Agent startet neu.")
-                    self._apply_agent_update_and_restart(staged_tarball)
+                    restart_scheduled = self._apply_agent_update_and_restart(staged_tarball)
+                    if not restart_scheduled:
+                        # Failed apply keeps the running agent alive — clear the
+                        # restart flag so the UI doesn't wait for a restart that
+                        # never comes.
+                        joblog("Agent-Aktualisierung nicht angewendet — der Agent läuft "
+                               "unverändert weiter.")
+                        with self._update_lock:
+                            j = self._update_jobs.get(job_id)
+                            if j is not None:
+                                j["agent_restarting"] = False
+                                j["message"] = "Aktualisierung abgeschlossen."
         except Exception as e:  # noqa: BLE001 — report, never crash the thread
             with self._update_lock:
                 j = self._update_jobs.get(job_id)
                 if j is not None:
                     j["status"] = "failed"
+                    j["finished_at"] = int(time.time())
                     j["message"] = f"Aktualisierung fehlgeschlagen: {e}"
             self._log(f"Update job {job_id} failed: {e}")
         finally:
-            # Release the single-flight guard so a later /update can run. On a
-            # successful agent self-update the process restarts before this runs
-            # — the flag resets naturally on the fresh boot either way.
+            # Release the single-flight guard so a later /update can run —
+            # EXCEPT when an agent self-restart is pending: the process SIGTERMs
+            # itself in ~2 s, and releasing here would let a second /update
+            # start stop/pull/recreate work inside a dying process. The flag
+            # then resets naturally when systemd boots the fresh agent.
             with self._update_lock:
-                self._update_busy = False
+                if not restart_scheduled:
+                    self._update_busy = False
 
-    def _apply_agent_update_and_restart(self, tarball_path: str) -> None:
+    def _apply_agent_update_and_restart(self, tarball_path: str) -> bool:
         """Unpack the verified agent tarball over the install root and trigger a
         clean process exit so systemd (``Restart=always``) restarts the new
         agent. Best-effort: a failed apply keeps the running agent alive.
+        Returns True iff the deferred restart was actually scheduled — the
+        caller keeps ``_update_busy`` held through a pending restart (a second
+        /update must not start inside a process about to SIGTERM itself) and
+        releases it on a failed apply.
 
         The install root is the compose file's directory (``/opt/edubotics`` in
         the field, per setup.sh P4). The tarball's top-level dir is ``pi_agent/``
         (agent code only — compose / unit changes need re-provisioning). We
         extract to a TEMP dir (tar ``data`` filter — path-traversal / device-node
-        guard) then ``rsync -a --delete`` it over ``pi_agent/`` so a module
-        REMOVED in a release doesn't linger (``extractall`` alone never deletes;
-        setup.sh installs with the same ``rsync --delete`` semantics). Crash-safe:
-        rsync never empties the tree, and the refreshed ``pi_agent/VERSION``
-        (which the running agent reports) lands with it.
+        guard; the pre-PEP-706 fallback replicates those guards manually via
+        ``_validate_tar_member``) then ``rsync -a --delete`` it over
+        ``pi_agent/`` so a module REMOVED in a release doesn't linger
+        (``extractall`` alone never deletes; setup.sh installs with the same
+        ``rsync --delete`` semantics). Crash-safe: rsync never empties the tree,
+        and the refreshed ``pi_agent/VERSION`` (which the running agent reports)
+        lands with it.
         """
         install_root = os.path.dirname(os.path.abspath(self.compose_file)) or "/opt/edubotics"
         staging = None
@@ -920,11 +1079,17 @@ class AgentApp:
                 try:
                     tf.extractall(staging, filter="data")  # py>=3.12 safe filter
                 except TypeError:
-                    tf.extractall(staging)  # older py — tarball is SHA-256-verified
+                    # Older Python without `filter=`: replicate the data
+                    # filter's traversal/absolute-path/special-member guards
+                    # before extracting (a bad member raises → apply aborts).
+                    members = tf.getmembers()
+                    for m in members:
+                        _validate_tar_member(m)
+                    tf.extractall(staging, members=members)
             src_pkg = os.path.join(staging, "pi_agent")
             if not os.path.isdir(src_pkg):
                 self._log("Agent-Aktualisierung: kein pi_agent/-Verzeichnis im Archiv — abgebrochen.")
-                return
+                return False
             dst_pkg = os.path.join(install_root, "pi_agent")
             # rsync --delete matches setup.sh's install semantics (excludes match
             # too), so orphaned modules go and pi_agent/VERSION is refreshed.
@@ -940,10 +1105,10 @@ class AgentApp:
             if result.returncode != 0:
                 self._log("Agent-Aktualisierung konnte nicht angewendet werden: "
                           f"{(result.stderr or '').strip()[:200]}")
-                return
+                return False
         except Exception as e:  # noqa: BLE001
             self._log(f"Agent-Aktualisierung konnte nicht entpackt werden: {e}")
-            return
+            return False
         finally:
             if staging:
                 shutil.rmtree(staging, ignore_errors=True)
@@ -955,6 +1120,7 @@ class AgentApp:
             self._log("Agent wird neu gestartet, um die Aktualisierung zu übernehmen …")
             os.kill(os.getpid(), signal.SIGTERM)
         threading.Thread(target=_restart, name="agent-restart", daemon=True).start()
+        return True
 
     # ── POST: /factory-reset (double-confirm) ────────────────────────────────
 
@@ -962,6 +1128,8 @@ class AgentApp:
         """Delete the persistent data volumes (datasets, HF cache, Roboter-Studio
         calibration). Requires a DOUBLE confirmation and never ``compose down``
         (that would delete ros_net + drop the manager)."""
+        if self._update_in_flight():
+            return self._busy_updating()
         if not (bool(body.get("confirm")) and bool(body.get("confirm_again"))):
             return 400, {"ok": False,
                          "message": "Doppelte Bestätigung erforderlich (confirm + confirm_again)."}
@@ -1152,39 +1320,69 @@ class AgentApp:
     # ── Live camera preview (MJPEG) ──────────────────────────────────────────
 
     def stop_active_previews(self) -> None:
-        """Signal any in-flight MJPEG preview loop to stop so the device is
-        released BEFORE the stack (usb_cam) or a scan claims it."""
-        self._preview_stop.set()
+        """Supersede any in-flight MJPEG preview loop so the device is released
+        BEFORE the stack (usb_cam) or a scan claims it. Bumping the generation
+        counter (instead of the old set→sleep→clear Event) means a loop blocked
+        in a frame read can never miss the stop window — its next generation
+        check fails and it exits."""
+        with self._preview_cond:
+            self._preview_gen += 1
+            self._preview_cond.notify_all()
+
+    def _preview_generation(self) -> int:
+        with self._preview_cond:
+            return self._preview_gen
 
     def stream_camera_preview(self, handler: BaseHTTPRequestHandler, device: str) -> None:
         """Stream a live MJPEG preview of ``device`` (multipart/x-mixed-replace).
 
-        One preview at a time: a new preview stops the previous one. If OpenCV is
-        unavailable (bare host) or the device can't be opened, a German 503 is
-        sent. The loop ends when the client disconnects, on shutdown, or when a
-        lifecycle op calls ``stop_active_previews``.
+        One preview at a time: a new preview SUPERSEDES the previous one via the
+        generation counter and then waits (bounded) until the old loop has
+        provably released its VideoCapture before re-opening the device — the
+        old fixed ``sleep(0.1)`` stop-window could be missed by a loop blocked
+        in a frame read, leaking the capture handle. If OpenCV is unavailable
+        (bare host) or the device can't be opened, a German 503 is sent. The
+        loop ends when the client disconnects, on shutdown, or when a lifecycle
+        op / newer preview bumps the generation.
         """
-        with self._preview_lock:
+        with self._preview_cond:
             # Don't re-grab /dev/video* while a lifecycle op (env-start / update /
             # scan) is claiming the cameras for usb_cam: a preview landing in that
             # window would steal the device and break the stack's camera open (the
             # M2 race — the two paths otherwise use different locks). Probe
             # _lifecycle_lock WITHOUT blocking so a preview never stalls a
-            # lifecycle op, and hold it only across the device open — env-start's
-            # stop_active_previews() then sets _preview_stop to end this loop and
-            # free the device again.
+            # lifecycle op, and hold it only across the handoff + device open —
+            # env-start's stop_active_previews() then bumps the generation to end
+            # this loop and free the device again.
             if not self._lifecycle_lock.acquire(blocking=False):
                 self._send_simple(handler, 503,
                                   "Kameravorschau nicht verfügbar (die Roboter-Umgebung "
                                   "wird gerade gestartet oder aktualisiert).")
                 return
             try:
-                # Stop a prior preview and re-arm the stop event for this one.
-                self._preview_stop.set()
-                time.sleep(0.1)
-                self._preview_stop.clear()
+                # Supersede any prior preview, then WAIT until its loop has
+                # deregistered (cond.wait releases the lock; the old loop's
+                # finally-block notifies). A newer preview arriving meanwhile
+                # bumps the generation past ours — we yield to it.
+                self._preview_gen += 1
+                my_gen = self._preview_gen
+                self._preview_cond.notify_all()
+                deadline = time.monotonic() + _PREVIEW_HANDOFF_TIMEOUT_S
+                while self._preview_active and self._preview_gen == my_gen:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    self._preview_cond.wait(remaining)
+                if self._preview_gen != my_gen or self._preview_active:
+                    # Superseded while waiting, or the old loop never released.
+                    self._send_simple(handler, 503,
+                                      "Kameravorschau nicht verfügbar (die vorherige "
+                                      "Vorschau wird noch beendet).")
+                    return
                 cap = _PreviewCapture(device)
                 opened = cap.open()
+                if opened:
+                    self._preview_active[device] = my_gen
             finally:
                 self._lifecycle_lock.release()
             if not opened:
@@ -1200,7 +1398,7 @@ class AgentApp:
         handler.send_header("X-Accel-Buffering", "no")
         handler.end_headers()
         try:
-            while not self._shutdown.is_set() and not self._preview_stop.is_set():
+            while not self._shutdown.is_set() and self._preview_generation() == my_gen:
                 jpeg = cap.read_jpeg()
                 if jpeg is None:
                     break
@@ -1213,7 +1411,13 @@ class AgentApp:
         except (BrokenPipeError, ConnectionResetError, OSError):
             pass  # client hung up
         finally:
+            # Release the device FIRST, then deregister + notify so a waiting
+            # successor provably re-opens only after the capture is closed.
             cap.release()
+            with self._preview_cond:
+                if self._preview_active.get(device) == my_gen:
+                    del self._preview_active[device]
+                self._preview_cond.notify_all()
 
     # ── Protokoll SSE ────────────────────────────────────────────────────────
 
@@ -1314,7 +1518,13 @@ class AgentApp:
                 self._cors()
                 self.end_headers()
 
-            # ---- GET routing (open; no state change) ----
+            # ---- GET routing (open; not Origin-gated). Mostly read-only, with
+            # two DELIBERATE documented exceptions: /cameras/scan and
+            # /cameras/preview stop any live preview first (the device must be
+            # released before it can be re-opened). The React callers depend on
+            # the GET method for both, so the method stays — the mutation is
+            # confined to the agent's own preview session, never to the .env,
+            # containers, or hardware config. ----
             def do_GET(self):  # noqa: N802
                 path = urlsplit(self.path).path.rstrip("/") or "/"
                 query = parse_qs(urlsplit(self.path).query)
@@ -1325,6 +1535,9 @@ class AgentApp:
                 elif path == "/cameras/scan":
                     self._send_json(*app.handle_cameras_scan())
                 elif path == "/cameras/preview":
+                    # Documented GET exception: supersedes (stops) the previous
+                    # preview loop before opening the device — see do_GET's
+                    # routing comment and stream_camera_preview.
                     device = (query.get("device") or query.get("path") or [""])[0]
                     if not device:
                         self._send_json(400, {"ok": False, "message": "Kein Kameragerät angegeben."})

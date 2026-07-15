@@ -328,6 +328,42 @@ class TestLifecycleCommands(_LifecycleBase):
             self.assertFalse(dm.ensure_environment_stopped())
         stop.assert_not_called()
 
+    def test_ensure_environment_stopped_error_fails_safe(self):
+        # A docker-inspect failure maps a container to "error". Treating that
+        # as ABSENT would fail-OPEN the mandatory pre-scan stop (Dynamixel bus
+        # exclusivity) — a persistent "error" must retry once, then stop anyway.
+        err = {"open_manipulator": "error",
+               "physical_ai_server": "error",
+               "physical_ai_manager": "running"}
+        with patch.object(dm, "get_container_status", return_value=err) as st, \
+             patch.object(dm, "stop_robot_tier") as stop:
+            self.assertTrue(dm.ensure_environment_stopped())
+        self.assertEqual(st.call_count, 2)  # probed, then retried once
+        stop.assert_called_once()           # fail-SAFE: idempotent stop ran
+
+    def test_ensure_environment_stopped_error_then_recovered_absent(self):
+        # The retry is real: a transient error that resolves to "not found"
+        # on the second probe must NOT trigger the stop.
+        err = {"open_manipulator": "error", "physical_ai_server": "not found",
+               "physical_ai_manager": "running"}
+        gone = {"open_manipulator": "not found", "physical_ai_server": "not found",
+                "physical_ai_manager": "running"}
+        with patch.object(dm, "get_container_status", side_effect=[err, gone]), \
+             patch.object(dm, "stop_robot_tier") as stop:
+            self.assertFalse(dm.ensure_environment_stopped())
+        stop.assert_not_called()
+
+    def test_ensure_environment_stopped_error_then_running_stops(self):
+        # Transient error resolving to a RUNNING container → normal stop path.
+        err = {"open_manipulator": "error", "physical_ai_server": "not found",
+               "physical_ai_manager": "running"}
+        run = {"open_manipulator": "running", "physical_ai_server": "not found",
+               "physical_ai_manager": "running"}
+        with patch.object(dm, "get_container_status", side_effect=[err, run]), \
+             patch.object(dm, "stop_robot_tier") as stop:
+            self.assertTrue(dm.ensure_environment_stopped())
+        stop.assert_called_once()
+
 
 class TestFactoryReset(_LifecycleBase):
     def test_factory_reset_wipes_by_suffix_never_down_manager_survives(self):
@@ -452,6 +488,30 @@ class TestSetLeaderMode(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual(cg.read_env_var("EDUBOTICS_FOLLOWER_ONLY", self.env_path), "0")
         self.assertIn("vorherige Modus", msg)
+
+    def test_switch_preserves_robot_type(self):
+        # The forward write must carry the managed EDUBOTICS_ROBOT_TYPE through
+        # (the GUI's _rs_set_leader_mode scar: omitting it silently rewrites
+        # the type to the default on every toggle).
+        from pi_agent import config_generator as cg
+        cg.generate_env_file(self.cfg, self.env_path, follower_only=False,
+                             robot_type="omx_follower")
+        with patch.object(dm, "restart_open_manipulator", return_value=True):
+            ok, _ = dm.set_leader_mode(self.cfg, follower_only=True)
+        self.assertTrue(ok)
+        self.assertEqual(cg.read_env_var("EDUBOTICS_ROBOT_TYPE", self.env_path),
+                         "omx_follower")
+
+    def test_rollback_preserves_robot_type(self):
+        # And the rollback write must carry it too.
+        from pi_agent import config_generator as cg
+        cg.generate_env_file(self.cfg, self.env_path, follower_only=False,
+                             robot_type="omx_follower")
+        with patch.object(dm, "restart_open_manipulator", return_value=False):
+            ok, _ = dm.set_leader_mode(self.cfg, follower_only=True)
+        self.assertFalse(ok)
+        self.assertEqual(cg.read_env_var("EDUBOTICS_ROBOT_TYPE", self.env_path),
+                         "omx_follower")
 
 
 if __name__ == "__main__":

@@ -194,6 +194,27 @@ class TestEnsureCert(unittest.TestCase):
         self.assertIn("rsa:2048", argv)
         self.assertIn(f"/CN={phone_camera._PHONE_CERT_CN}", argv)
 
+    def test_ensure_cert_key_is_0600_regardless_of_umask(self):
+        # The TLS private key must never rely on the systemd UMask alone: a
+        # manual bench run mints with the ambient umask. ensure_cert must pin
+        # 0600 itself after a successful mint — simulate the worst case by
+        # having the fake openssl write a world-readable key.
+        import os
+        d = tempfile.mkdtemp()
+        cert, key = phone_camera.cert_paths(d)
+
+        def fake_openssl(argv, **kwargs):
+            with open(cert, "w") as f:
+                f.write("-----BEGIN CERTIFICATE-----\nX\n-----END CERTIFICATE-----\n")
+            with open(key, "w") as f:
+                f.write("-----BEGIN PRIVATE KEY-----\nY\n-----END PRIVATE KEY-----\n")  # gitleaks:allow
+            os.chmod(key, 0o644)  # worst-case ambient umask
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with patch("pi_agent.phone_camera.subprocess.run", side_effect=fake_openssl):
+            _, got_key = phone_camera.ensure_cert(d)
+        self.assertEqual(os.stat(got_key).st_mode & 0o777, 0o600)
+
     def test_ensure_cert_raises_german_when_openssl_missing(self):
         d = tempfile.mkdtemp()
         with patch("pi_agent.phone_camera.subprocess.run", side_effect=FileNotFoundError()):

@@ -395,6 +395,17 @@ def ensure_cert(cert_dir: str | None = None) -> tuple[str, str]:
             f"Zertifikat konnte nicht erstellt werden: {tail}"
         )
 
+    # Pin the private key to 0600 regardless of the ambient umask — relying on
+    # the systemd unit's UMask alone leaves the key world-readable when the
+    # agent (or this helper) is run manually on a bench/debug shell. openssl
+    # itself writes the key with the process umask.
+    try:
+        os.chmod(key_path, 0o600)
+    except OSError as exc:
+        raise PhoneCertError(
+            f"Schlüssel-Berechtigungen konnten nicht gesetzt werden: {exc}"
+        ) from exc
+
     return cert_path, key_path
 
 

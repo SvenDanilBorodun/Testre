@@ -89,14 +89,23 @@ def check_for_agent_update(current_version: str, api_url: str) -> dict | None:
     """Check the cloud API for a newer pi-agent tarball.
 
     Returns ``{"version": "x.y.z", "download_url": "...", "sha256": "..."}`` if
-    a newer release advertises a reachable agent tarball, or ``None`` when the
-    agent is current, when the cloud does not advertise the Pi fields yet
-    (pre-P4 deploy), or on ANY error.
+    a newer release advertises a reachable agent tarball WITH a verification
+    hash, or ``None`` when the agent is current, when the cloud does not
+    advertise the Pi fields yet (pre-P4 deploy), when the advertised tarball
+    carries NO ``pi_agent_sha256``, or on ANY error.
 
     The version compared is the product ``version`` string (the agent tarball
     is versioned in lockstep with the release, same as the ``.exe`` — deploy
     plan §7). ``pi_agent_download_url`` / ``pi_agent_sha256`` are read
     defensively: their absence is the ordinary pre-P4 state, not an error.
+
+    A MISSING/EMPTY ``pi_agent_sha256`` reports "no update" on purpose: a root
+    process must never ``extractall`` unverified bytes, so ``agent.py``'s apply
+    path REFUSES a hash-less tarball while still marking the job succeeded.
+    Advertising availability the apply side can never honour produced a
+    perpetual, unskippable forced-update modal (W6 publishes PI_AGENT_SHA256
+    empty-on-failure). Aligning the AVAILABILITY criterion here with the APPLY
+    criterion means a degraded release with no hash advertises no update instead.
     """
     url = f"{api_url.rstrip('/')}/version"
     try:
@@ -110,13 +119,18 @@ def check_for_agent_update(current_version: str, api_url: str) -> dict | None:
         if not remote_version or not download_url:
             return None
         if _parse_version(remote_version) > _parse_version(current_version):
+            # No verification hash → the apply path can never apply it; do not
+            # advertise it as available (checked BEFORE the HEAD probe so a
+            # hash-less advertisement costs no network round-trip).
+            sha256 = (data.get("pi_agent_sha256") or "").strip()
+            if not sha256:
+                return None
             if not _asset_available(download_url):
                 return None
             return {
                 "version": remote_version,
                 "download_url": download_url,
-                # Optional integrity hash (None/"" → skip verify, like the GUI).
-                "sha256": data.get("pi_agent_sha256") or "",
+                "sha256": sha256,
             }
     except Exception:
         return None

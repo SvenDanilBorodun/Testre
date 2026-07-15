@@ -147,6 +147,48 @@ class TestCameraRoles(_EnvTempBase):
             "cameras": [{"path": "/dev/video0", "role": "bogus"}]})
         self.assertEqual(code, 400)
 
+    def test_roles_preserve_live_follower_only_mode(self):
+        # A camera-role edit during a live follower-only (Roboter Studio)
+        # session must NOT silently rewrite EDUBOTICS_FOLLOWER_ONLY=0 — that
+        # would re-arm the never-scanned leader on the next container recreate.
+        cg.generate_env_file(
+            HardwareConfig(follower=ArmDevice(serial_path="/dev/f")),
+            self.env_path, follower_only=True)
+        self.app.rehydrate_hardware()
+        code, _ = self.app.handle_cameras_roles({
+            "cameras": [{"path": "/dev/video0", "role": "scene"}]})
+        self.assertEqual(code, 200)
+        self.assertEqual(cg.read_env_var("EDUBOTICS_FOLLOWER_ONLY", self.env_path), "1")
+        self.assertIsNone(cg.read_env_var("LEADER_PORT", self.env_path))
+        # The roles landed regardless of the preserved mode.
+        self.assertEqual(cg.read_env_var("CAMERA_NAME_1", self.env_path), "scene")
+
+    def test_roles_preserve_both_arms_mode(self):
+        # The inverse: a both-arms .env stays both-arms after a role edit.
+        cg.generate_env_file(
+            HardwareConfig(leader=ArmDevice(serial_path="/dev/l"),
+                           follower=ArmDevice(serial_path="/dev/f")),
+            self.env_path, follower_only=False)
+        self.app.rehydrate_hardware()
+        code, _ = self.app.handle_cameras_roles({
+            "cameras": [{"path": "/dev/video0", "role": "gripper"}]})
+        self.assertEqual(code, 200)
+        self.assertEqual(cg.read_env_var("EDUBOTICS_FOLLOWER_ONLY", self.env_path), "0")
+        self.assertEqual(cg.read_env_var("LEADER_PORT", self.env_path), "/dev/l")
+
+    def test_roles_preserve_robot_type(self):
+        # EDUBOTICS_ROBOT_TYPE is MANAGED — the role-edit regenerate must carry
+        # the on-disk value through instead of resetting it to the default.
+        cg.generate_env_file(
+            HardwareConfig(follower=ArmDevice(serial_path="/dev/f")),
+            self.env_path, follower_only=True, robot_type="omx_follower")
+        self.app.rehydrate_hardware()
+        code, _ = self.app.handle_cameras_roles({
+            "cameras": [{"path": "/dev/video0", "role": "scene"}]})
+        self.assertEqual(code, 200)
+        self.assertEqual(cg.read_env_var("EDUBOTICS_ROBOT_TYPE", self.env_path),
+                         "omx_follower")
+
 
 # ── environment start / stop (targeted, never down) ──────────────────────────
 
@@ -183,6 +225,85 @@ class TestEnvironmentLifecycle(_EnvTempBase):
             code, payload = self.app.handle_environment_stop()
         self.assertEqual(code, 200)
         stop.assert_called_once()
+
+    def test_start_preserves_robot_type(self):
+        # Env-start regenerates the .env — the managed EDUBOTICS_ROBOT_TYPE
+        # must be carried through, not reset to the default.
+        self.app._hardware = HardwareConfig(
+            leader=ArmDevice(serial_path="/dev/l"),
+            follower=ArmDevice(serial_path="/dev/f"))
+        cg.generate_env_file(self.app._hardware, self.env_path,
+                             follower_only=False, robot_type="omx_follower")
+        with patch.object(agent.docker_manager, "start_robot_tier", return_value=True):
+            code, _ = self.app.handle_environment_start({})
+        self.assertEqual(code, 200)
+        self.assertEqual(cg.read_env_var("EDUBOTICS_ROBOT_TYPE", self.env_path),
+                         "omx_follower")
+
+
+# ── update-in-flight fast-fail (503, never a silent block) ───────────────────
+
+
+class TestUpdateBusyFastFail(_EnvTempBase):
+    """While an update job holds _lifecycle_lock for minutes, every mutating
+    lifecycle endpoint must fast-fail 503 with a distinguishing German message
+    instead of silently queueing behind the update."""
+
+    def setUp(self):
+        super().setUp()
+        with self.app._update_lock:
+            self.app._update_busy = True
+
+    def _assert_busy(self, code, payload):
+        self.assertEqual(code, 503)
+        self.assertIn("Aktualisierung läuft", payload["message"])
+
+    def test_scan_arms_fast_fails(self):
+        with patch.object(agent.docker_manager, "ensure_environment_stopped") as ensure, \
+             patch.object(agent.identify_arm, "scan_and_identify_arms") as scan:
+            code, payload = self.app.handle_scan_arms({})
+        self._assert_busy(code, payload)
+        ensure.assert_not_called()
+        scan.assert_not_called()
+
+    def test_environment_start_fast_fails(self):
+        self.app._hardware = HardwareConfig(
+            leader=ArmDevice(serial_path="/dev/l"),
+            follower=ArmDevice(serial_path="/dev/f"))
+        with patch.object(agent.docker_manager, "start_robot_tier") as start:
+            code, payload = self.app.handle_environment_start({})
+        self._assert_busy(code, payload)
+        start.assert_not_called()
+
+    def test_environment_stop_fast_fails(self):
+        with patch.object(agent.docker_manager, "stop_robot_tier") as stop:
+            code, payload = self.app.handle_environment_stop()
+        self._assert_busy(code, payload)
+        stop.assert_not_called()
+
+    def test_factory_reset_fast_fails(self):
+        with patch.object(agent.docker_manager, "factory_reset") as fr:
+            code, payload = self.app.handle_factory_reset(
+                {"confirm": True, "confirm_again": True})
+        self._assert_busy(code, payload)
+        fr.assert_not_called()
+
+    def test_cameras_roles_fast_fails(self):
+        code, payload = self.app.handle_cameras_roles(
+            {"cameras": [{"path": "/dev/video0", "role": "scene"}]})
+        self._assert_busy(code, payload)
+
+    def test_hf_token_fast_fails(self):
+        code, payload = self.app.handle_hf_token({"token": "hf_x"})
+        self._assert_busy(code, payload)
+
+    def test_read_only_endpoints_stay_available(self):
+        # /status and /update/status must keep answering during the update.
+        with patch.object(agent.docker_manager, "get_container_status", return_value={}):
+            code, _ = self.app.handle_status()
+        self.assertEqual(code, 200)
+        code, _ = self.app.handle_update_status("nope")
+        self.assertEqual(code, 404)  # not 503 — read path untouched
 
 
 # ── Roboter-Studio leader toggle ─────────────────────────────────────────────

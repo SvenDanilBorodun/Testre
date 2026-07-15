@@ -334,6 +334,13 @@ seed_env() {
     log "Selected ros_net subnet: ${subnet} (overlap-checked against ip route)."
     if [ -f "$ENV_FILE" ]; then
         log ".env already present at ${ENV_FILE} — leaving it (re-run is non-destructive)."
+        # NOTE: a post-provision EDUBOTICS_ROS_NET_SUBNET change in the .env is
+        # NOT propagated to an already-created docker network — compose applies
+        # IPAM only at network CREATION and silently keeps the old subnet on
+        # every later `up`. To change the subnet after provisioning: stop the
+        # stack (all three containers), `docker network rm ros_net`, then
+        # re-run this setup (or bring the manager up) so ros_net is recreated
+        # with the new subnet + gateway.
         return
     fi
     log "Seeding the managed .env at ${ENV_FILE}..."

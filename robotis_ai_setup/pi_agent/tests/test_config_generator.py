@@ -162,6 +162,53 @@ class TestGenerateEnvBothArms(_TmpEnvBase):
         self.assertEqual(os.stat(self.path).st_mode & 0o777, 0o600)
 
 
+class TestRobotType(_TmpEnvBase):
+    """EDUBOTICS_ROBOT_TYPE is a MANAGED key emitted by BOTH generators; agent
+    callers carry the on-disk value forward (the Pi has no profile selector,
+    so a regenerate must never rewrite an operator-set value silently)."""
+
+    def test_default_robot_type_emitted_once(self):
+        content = generate_env_file(_both_arms(), self.path)
+        self.assertIn("EDUBOTICS_ROBOT_TYPE=omx_full", content)
+        self.assertEqual(content.count("EDUBOTICS_ROBOT_TYPE="), 1)
+
+    def test_explicit_robot_type_emitted(self):
+        content = generate_env_file(_both_arms(), self.path,
+                                    robot_type="omx_follower")
+        self.assertIn("EDUBOTICS_ROBOT_TYPE=omx_follower", content)
+
+    def test_stale_robot_type_superseded(self):
+        # MANAGED → a stale hand-pinned value is dropped, not preserved.
+        with open(self.path, "w") as fh:
+            fh.write("EDUBOTICS_ROBOT_TYPE=some_old_type\n")
+        content = generate_env_file(_both_arms(), self.path,
+                                    robot_type="omx_full")
+        self.assertNotIn("some_old_type", content)
+        self.assertEqual(content.count("EDUBOTICS_ROBOT_TYPE="), 1)
+        self.assertIn("EDUBOTICS_ROBOT_TYPE=omx_full", content)
+
+    def test_cloud_only_emits_robot_type(self):
+        content = generate_cloud_only_env(self.path, robot_type="omx_follower")
+        self.assertIn("EDUBOTICS_ROBOT_TYPE=omx_follower", content)
+        self.assertEqual(content.count("EDUBOTICS_ROBOT_TYPE="), 1)
+
+    def test_cloud_only_default_robot_type(self):
+        content = generate_cloud_only_env(self.path)
+        self.assertIn("EDUBOTICS_ROBOT_TYPE=omx_full", content)
+
+    def test_managed_keys_lockstep_all_emitted(self):
+        # THE lockstep guard: every MANAGED_KEY must be emitted by a both-arms
+        # generate AND by the cloud-only generate — orphaning a key in the set
+        # while dropping its emit line would leak stale values verbatim across
+        # regenerates (the `manifest unknown` scar class).
+        both = generate_env_file(_both_arms(), self.path)
+        for key in cg.MANAGED_KEYS:
+            self.assertIn(f"{key}=", both, f"{key} missing from both-arms .env")
+        cloud = generate_cloud_only_env(self.path)
+        for key in cg.MANAGED_KEYS:
+            self.assertIn(f"{key}=", cloud, f"{key} missing from cloud-only .env")
+
+
 class TestGenerateEnvFollowerOnly(_TmpEnvBase):
     def test_follower_only_omits_leader(self):
         content = generate_env_file(_both_arms(), self.path, follower_only=True)

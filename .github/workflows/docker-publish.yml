@@ -229,6 +229,31 @@ jobs:
         # are added. The script's `${VAR:?}` enforcement still applies.
         run: bash build-images.sh
 
+      # ── opi build-success marker (retag gate) ──
+      # The opi build leg is continue-on-error, so a failed/partial opi build
+      # still lets the retag job run. The retag job used to gate opi purely on
+      # "does nettername/<repo>:latest exist on Docker Hub?" — but a PRIOR
+      # release's opi :latest satisfies that probe, so a failed opi build would
+      # silently promote LAST release's opi image under the NEW semver tags.
+      # These two steps drop a marker containing THIS run's sha, but ONLY when
+      # the opi build actually succeeded (`success() && ... 'opi'` — if
+      # build-images.sh failed above, `success()` is false and no marker is
+      # produced). The retag job downloads it and skips ALL opi retagging unless
+      # the marker's sha == github.sha. amd64/jetson never run these steps.
+      - name: Record opi build-success marker
+        if: success() && matrix.platform == 'opi'
+        env:
+          GIT_SHA: ${{ github.sha }}
+        run: echo "$GIT_SHA" > opi-build-success.txt
+      - name: Upload opi build-success marker
+        if: success() && matrix.platform == 'opi'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: opi-build-success
+          path: opi-build-success.txt
+          if-no-files-found: error
+          retention-days: 5
+
   retag:
     # Apply the canonical tag set to whatever build-images.sh just pushed.
     # build-images.sh tags as :<YYYYMMDD>-<HHMMSS>-<sha> + :latest;
@@ -271,10 +296,33 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Set up Buildx
         uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd  # v4.0.0
+      - name: Download opi build-success marker (if the opi leg produced one)
+        # Present only when THIS run's opi build succeeded (see the build job).
+        # continue-on-error: a missing artifact (opi build failed/skipped) is
+        # the normal decoupled case, not a retag failure. The script below
+        # treats an absent/mismatched marker as "opi did not build this run".
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        continue-on-error: true
+        with:
+          name: opi-build-success
+          path: opi-marker
       - name: Re-tag each image with the canonical set (Docker Hub + GHCR)
         run: |
           set -e
           SHORT=$(echo "${{ github.sha }}" | cut -c1-7)
+
+          # opi built THIS run? True only when the build job's opi leg uploaded
+          # the marker AND it carries the current sha. A prior release's opi
+          # :latest can NO LONGER be promoted under this release's tags: without
+          # a matching marker, every opi repo is skipped below.
+          OPI_OK=0
+          OPI_MARKER="opi-marker/opi-build-success.txt"
+          if [ -f "$OPI_MARKER" ] && [ "$(tr -d '[:space:]' < "$OPI_MARKER")" = "${{ github.sha }}" ]; then
+            OPI_OK=1
+            echo "opi build-success marker present and matches HEAD — opi will be retagged."
+          else
+            echo "opi build-success marker absent or sha mismatch — opi retag will be SKIPPED (decoupled)."
+          fi
           SRC_TAG="latest"   # build-images.sh pushed :latest to Docker Hub as the source
 
           # DUAL-PUSH: every tag is created on BOTH Docker Hub (nettername/*,
@@ -351,16 +399,38 @@ jobs:
             _retag_be "${HUB}/${repo}:${tag}" "$source"
           }
 
+          # _retag_primary: GHCR is the student-facing primary, so a GHCR retag is
+          # normally FATAL under `set -e`. But opi is DECOUPLED from the core
+          # release — a transient opi GHCR hiccup must NOT fail the retag job and
+          # block the amd64/Jetson publish. When IS_OPI=1 the GHCR retag becomes
+          # best-effort (::warning, never a hard fail); amd64/jetson stay fatal
+          # (byte-identical to the prior direct `_retag` behavior).
+          _retag_primary() {
+            local target="$1" source="$2"
+            if [ "${IS_OPI:-0}" = "1" ]; then
+              if ! _retag "$target" "$source"; then
+                echo "::warning::opi GHCR retag of $target failed (best-effort; opi is decoupled from the core release). It lands on the next good opi build."
+              fi
+              return 0
+            fi
+            _retag "$target" "$source"
+          }
+
           for REPO in $AMD64_REPOS $ARM64_REPOS $OPI_REPOS; do
-            # opi is decoupled (its build leg is continue-on-error): if the opi
-            # base wasn't built this run, build-images.sh never pushed
-            # nettername/<repo>:latest, so SKIP it here instead of failing the
-            # core retag on a missing source. The amd64/Jetson repos are always
-            # present and always retagged.
+            # opi is decoupled (its build leg is continue-on-error): gate its
+            # retag on the BUILD-SUCCESS MARKER for THIS run (OPI_OK above), not
+            # on a Hub existence probe. The old `_tag_exists "$REPO" latest`
+            # probe was satisfied by the PRIOR release's opi :latest, so a
+            # failed opi build silently promoted last release's opi image under
+            # the new semver tags — with the integrity check green (stale ==
+            # stale). The amd64/Jetson repos are always present and always
+            # retagged, exactly as before.
+            IS_OPI=0
             case " $OPI_REPOS " in
               *" $REPO "*)
-                if ! _tag_exists "$REPO" "$SRC_TAG"; then
-                  echo "::warning::opi image ${REPO} not pushed this run — skipping its retag (opi is decoupled from the core amd64/Jetson release)."
+                IS_OPI=1
+                if [ "$OPI_OK" != "1" ]; then
+                  echo "::warning::opi image ${REPO} not built this run (no matching build-success marker) — skipping its retag (opi is decoupled from the core amd64/Jetson release)."
                   continue
                 fi
                 ;;
@@ -371,25 +441,29 @@ jobs:
             # ONE cross-registry copy per repo: Hub:latest -> GHCR:latest. EVERY
             # other GHCR tag is then derived from GHCR:latest (intra-GHCR), so we
             # read image manifests FROM Docker Hub at most ONCE per repo. GHCR is
-            # the student-facing primary, so this copy stays FATAL.
-            _retag "$GHCR_SRC" "$HUB_SRC"
+            # the student-facing primary, so this copy stays FATAL for the core
+            # amd64/Jetson repos; for opi repos _retag_primary downgrades a GHCR
+            # failure to a ::warning (opi transients must not block the release).
+            _retag_primary "$GHCR_SRC" "$HUB_SRC"
 
-            # Immutable sha tags: GHCR fatal (primary), Hub best-effort + gated.
+            # Immutable sha tags: GHCR fatal for core repos (best-effort for opi
+            # via _retag_primary), Hub best-effort + gated.
             _maybe_retag_hub "$REPO" "$SHORT" "$HUB_SRC"
-            _retag "${GHCR}/${REPO}:${SHORT}" "$GHCR_SRC"            # sha-short
+            _retag_primary "${GHCR}/${REPO}:${SHORT}" "$GHCR_SRC"            # sha-short
             _maybe_retag_hub "$REPO" "${{ github.sha }}" "$HUB_SRC"
-            _retag "${GHCR}/${REPO}:${{ github.sha }}" "$GHCR_SRC"   # full-sha
+            _retag_primary "${GHCR}/${REPO}:${{ github.sha }}" "$GHCR_SRC"   # full-sha
             if [ -n "$SEMVER" ]; then
               # Semver :X.Y.Z — ALWAYS re-point on BOTH registries (NOT existence-
               # gated). A failed-then-retried release of the SAME version produces a
               # new build; existence-gating Hub:X.Y.Z would freeze it on the OLD
               # build while GHCR re-creates -> exactly the GHCR/Hub :X.Y.Z divergence
               # the audit found. Always re-pointing reconciles both registries to
-              # the final build. GHCR fatal, Hub best-effort.
-              _retag "${GHCR}/${REPO}:${SEMVER}" "$GHCR_SRC"         # e.g. 2.8.2
+              # the final build. GHCR fatal for core repos (opi best-effort), Hub
+              # best-effort.
+              _retag_primary "${GHCR}/${REPO}:${SEMVER}" "$GHCR_SRC"         # e.g. 2.8.2
               _retag_be "${HUB}/${REPO}:${SEMVER}" "$HUB_SRC"
               # Floating minor :X.Y — always re-point, both registries.
-              _retag "${GHCR}/${REPO}:${SEMVER%.*}" "$GHCR_SRC"
+              _retag_primary "${GHCR}/${REPO}:${SEMVER%.*}" "$GHCR_SRC"
               _retag_be "${HUB}/${REPO}:${SEMVER%.*}" "$HUB_SRC"
             fi
           done
@@ -440,6 +514,16 @@ jobs:
             elif printf '%s\n' "$G_ALL" | grep -qx "$H"; then
               echo "OK ${REPO}: Hub manifest ${H} present in GHCR :latest"
             else
+              # opi carve-out: a Hub-vs-GHCR :latest mismatch on an opi repo is
+              # expected whenever the opi retag was skipped/best-effort this run
+              # (build failed, marker absent, or a transient GHCR hiccup on the
+              # decoupled leg) — Hub carries a newer/older opi :latest than
+              # GHCR. That must WARN, never fail the core amd64/Jetson release.
+              case " $OPI_REPOS " in
+                *" $REPO "*)
+                  echo "::warning::opi ${REPO}: Hub top digest ${H} not in GHCR :latest digest set (opi decoupled — retag skipped or best-effort this run). GHCR opi :latest may be stale until the next good opi build."
+                  continue ;;
+              esac
               echo "::error::Parity FAILED for ${REPO}: Hub top digest ${H} not found in GHCR digest set:"
               printf '%s\n' "$G_ALL" | sed 's/^/    /'
               fail=1

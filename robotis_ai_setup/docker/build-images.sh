@@ -170,9 +170,13 @@ export SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-$(git -C "$PROJECT_ROOT" log -1 -
 flatten_image() {
     local img="$1"
     local platform="$2"
-    local orig_id
+    local orig_id cfg_before cfg_after
     orig_id=$(docker image inspect "$img" --format '{{.Id}}')
-    docker image inspect "$img" --format '{{json .Config}}' > /tmp/edb_cfg_before.json
+    # mktemp (not fixed /tmp names): concurrent flavor builds on one host
+    # (amd64 + opi) must not cross-read each other's config snapshots.
+    cfg_before=$(mktemp)
+    cfg_after=$(mktemp)
+    docker image inspect "$img" --format '{{json .Config}}' > "$cfg_before"
 
     # Re-apply the runtime config via `docker import -c` (values quoted so a
     # space-bearing env/label can't be mis-parsed).
@@ -209,12 +213,12 @@ flatten_image() {
 
     # Verify the critical config survived (Entrypoint/Cmd/WorkingDir/User exact;
     # ROS_DISTRO=jazzy + a non-empty PATH present). A drop fails the build here.
-    docker image inspect "$img" --format '{{json .Config}}' > /tmp/edb_cfg_after.json
-    python3 - "$img" <<'PYEOF'
+    docker image inspect "$img" --format '{{json .Config}}' > "$cfg_after"
+    python3 - "$img" "$cfg_before" "$cfg_after" <<'PYEOF'
 import json, sys
 img = sys.argv[1]
-before = json.load(open('/tmp/edb_cfg_before.json'))
-after = json.load(open('/tmp/edb_cfg_after.json'))
+before = json.load(open(sys.argv[2]))
+after = json.load(open(sys.argv[3]))
 def fail(m):
     print(f"ERROR: flatten config drift for {img}: {m}", file=sys.stderr)
     sys.exit(1)
@@ -235,6 +239,22 @@ if not aenv.get('PATH'):
     fail("PATH is empty after flatten")
 print("   OK: flatten preserved config (Entrypoint/Cmd/WorkingDir/User + full Env keys + ROS_DISTRO + PATH)")
 PYEOF
+    rm -f "$cfg_before" "$cfg_after"
+
+    # Arch assertion: `docker import` stamps .Architecture from the --platform
+    # we passed, NOT from the source image — so a wrong/omitted platform arg
+    # would re-import a correct rootfs under the WRONG arch label and break
+    # every student pull. Prove the flattened image carries the arch the
+    # caller's $platform implies; fail the build loudly on a mismatch.
+    local want_arch got_arch
+    want_arch="${platform#linux/}"
+    got_arch=$(docker image inspect "$img" --format '{{.Architecture}}')
+    if [ "$got_arch" != "$want_arch" ]; then
+        echo "ERROR: flatten arch mismatch for $img: .Architecture='$got_arch', expected '$want_arch' (from platform '$platform')." >&2
+        echo "       Pushing this image would break student pulls — aborting." >&2
+        exit 1
+    fi
+    echo "   OK: flattened image .Architecture=$got_arch matches $platform"
 
     # Functional post-flatten smoke: the Dockerfile's node-import gate ran BEFORE
     # the flatten, so prove the FLATTENED image still loads the ROS node — catching
@@ -360,7 +380,10 @@ else
     MANAGER_PLATFORM="linux/amd64"
     MANAGER_DOCKERFILE="${PHYSICAL_AI_TOOLS_DIR}/physical_ai_manager/Dockerfile"
 fi
-MANAGER_IMAGE="${MANAGER_OUT_REPO}:latest"
+# Tag with ${IMAGE_TAG_SUFFIX} (not a hardcoded ':latest') so the manager ref
+# stays in lockstep with the server/OMX images if a flavor ever pins a
+# non-latest suffix — the push loops below already push :${IMAGE_TAG_SUFFIX}.
+MANAGER_IMAGE="${MANAGER_OUT_REPO}:${IMAGE_TAG_SUFFIX}"
 
 # CLAUDE.md §13.4.bis: build to local daemon first with buildx --load so
 # the post-build smoke grep can `docker run` against the image. A separate
@@ -673,8 +696,11 @@ if [ "$PLATFORM" = "amd64" ]; then
     echo ""
     echo ">> Pushing images to ${REGISTRY}..."
     pushed=()
-    # amd64 keeps the legacy ${REGISTRY}/${img} naming.
-    for img in physical-ai-manager physical-ai-server open-manipulator; do
+    # Derive the repo names from the *_OUT_REPO vars (single source of truth,
+    # set in the platform case at the top) instead of re-hardcoding literals —
+    # a renamed output repo can no longer desync the build refs from the push
+    # refs. ${VAR##*/} strips the registry prefix, leaving the bare repo name.
+    for img in "${MANAGER_OUT_REPO##*/}" "${PAS_OUT_REPO##*/}" "${OMX_OUT_REPO##*/}"; do
         if docker push "${REGISTRY}/${img}:${IMAGE_TAG_SUFFIX}"; then
             pushed+=("$img")
             echo "   Pushed: $img"
@@ -694,7 +720,9 @@ elif [ "$PLATFORM" = "opi" ]; then
     # opi built all three thin images with --load (server was flattened), so
     # they live in the local daemon and must be pushed here (the arm64/Jetson
     # path pushes via buildx --push during the build and skips this loop).
-    for img in physical-ai-manager-opi physical-ai-server-opi open-manipulator-opi; do
+    # Repo names derive from the *_OUT_REPO vars (same single-source rule as
+    # the amd64 loop above) — no more hardcoded image-name literals.
+    for img in "${MANAGER_OUT_REPO##*/}" "${PAS_OUT_REPO##*/}" "${OMX_OUT_REPO##*/}"; do
         if docker push "${REGISTRY}/${img}:${IMAGE_TAG_SUFFIX}"; then
             pushed+=("$img")
             echo "   Pushed: $img"

@@ -35,14 +35,24 @@ RUN find /etc/s6-overlay/s6-rc.d -type f \
 # succeeded. ros2_service_run.sh sources ${COLCON_WS}/install/setup.bash,
 # so re-building the package here is enough — no entrypoint change.
 COPY interfaces /tmp/interfaces_src
+# Deletion-propagation (mirrors the physical_ai_server COPY-wholesale block
+# below): the msg/ + srv/ dirs are REPLACED (rm -rf + fresh copy), never
+# merged with `cp -f` — a .srv/.msg DELETED from the repo would otherwise
+# survive as the base image's stale copy and keep generating dead Python
+# bindings. The base image's build/ + install/ trees for the package are
+# purged too, so colcon can't resurrect removed interfaces from its cached
+# manifests (same rationale as the server package purge at the rebuild below).
 RUN set -e && \
     target_pkg=$(find /root/ros2_ws/src -type d -name physical_ai_interfaces | head -n1) && \
     [ -n "$target_pkg" ] || { echo "ERROR: physical_ai_interfaces source not found"; exit 1; } && \
-    cp -f /tmp/interfaces_src/msg/*.msg "$target_pkg/msg/" && \
-    cp -f /tmp/interfaces_src/srv/*.srv "$target_pkg/srv/" && \
+    rm -rf "$target_pkg/msg" "$target_pkg/srv" && \
+    mkdir -p "$target_pkg/msg" "$target_pkg/srv" && \
+    cp /tmp/interfaces_src/msg/*.msg "$target_pkg/msg/" && \
+    cp /tmp/interfaces_src/srv/*.srv "$target_pkg/srv/" && \
     cp -f /tmp/interfaces_src/CMakeLists.txt "$target_pkg/CMakeLists.txt" && \
     cp -f /tmp/interfaces_src/package.xml "$target_pkg/package.xml" && \
     cd /root/ros2_ws && \
+    rm -rf build/physical_ai_interfaces install/physical_ai_interfaces && \
     bash -c "source /opt/ros/jazzy/setup.bash && colcon build --packages-select physical_ai_interfaces --cmake-args -DCMAKE_BUILD_TYPE=Release" && \
     install_root=/root/ros2_ws/install/physical_ai_interfaces/lib/python3.12/site-packages/physical_ai_interfaces && \
     test -f "$install_root/srv/_start_calibration.py" && \

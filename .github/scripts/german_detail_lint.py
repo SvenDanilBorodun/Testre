@@ -1,12 +1,21 @@
 #!/usr/bin/env python3
-"""Rule-§1 lint: student/teacher-facing Cloud-API strings must be German.
+"""Rule-§1 lint: student/teacher-facing Cloud-API + Pi-agent strings must be German.
 
-AST-scans robotis_ai_setup/cloud_training_api/app/**/*.py for strings bound
-to ``detail`` (HTTPException payloads -> React toasts) or ``error_message``
-(trainings-table writes -> rendered RAW to students by MyModels.js /
-TrainingLiveChart.js) in any of the three shapes the codebase uses:
-call keywords (``detail=...``), dict literals (``{"error_message": ...}``)
-and subscript assignments (``update_data["error_message"] = ...``).
+Two scan scopes (see SCAN_SCOPES), same AST mechanics for both:
+
+  1. robotis_ai_setup/cloud_training_api/app/**/*.py — strings bound to
+     ``detail`` (HTTPException payloads -> React toasts) or ``error_message``
+     (trainings-table writes -> rendered RAW to students by MyModels.js /
+     TrainingLiveChart.js).
+  2. robotis_ai_setup/pi_agent/**/*.py — strings bound to ``message``: the
+     Orange-Pi agent's management API answers ``{"ok": ..., "message": ...}``
+     JSON that the React System tab renders RAW to students — a surface the
+     ci.yml grep ([FEHLER]/[WARNUNG]/[STOPP] lines) never covered. tests/ is
+     excluded (fixture strings are maintainer surface, not student-facing).
+
+Each scope checks its keywords in any of the three shapes the codebase uses:
+call keywords (``detail=...``), dict literals (``{"message": ...}``)
+and subscript assignments (``j["message"] = ...``).
 Two violation classes:
 
   ENGLISH          string has English stopwords and no German marker
@@ -32,8 +41,22 @@ import re
 import sys
 from pathlib import Path
 
-APP_DIR = Path("robotis_ai_setup/cloud_training_api/app")
-KEYWORDS = {"detail", "error_message"}
+# (scan root, keywords whose bound strings students read, subdir names to skip).
+# The pi_agent scope skips tests/ — unittest fixtures assert against both
+# German production strings and synthetic English stubs; neither is a surface
+# a student ever reads.
+SCAN_SCOPES: tuple[tuple[Path, frozenset[str], frozenset[str]], ...] = (
+    (
+        Path("robotis_ai_setup/cloud_training_api/app"),
+        frozenset({"detail", "error_message"}),
+        frozenset(),
+    ),
+    (
+        Path("robotis_ai_setup/pi_agent"),
+        frozenset({"message"}),
+        frozenset({"tests"}),
+    ),
+)
 
 GERMAN_CHARS = re.compile(r"[äöüßÄÖÜ]")
 # Unambiguously German tokens only — shared/collision-prone words (in, an,
@@ -83,7 +106,7 @@ def _constant_text(node: ast.AST) -> str:
     return " ".join(parts)
 
 
-def _scan_file(path: Path) -> list[tuple[int, str, str]]:
+def _scan_file(path: Path, keywords: frozenset[str]) -> list[tuple[int, str, str]]:
     source = path.read_text(encoding="utf-8")
     try:
         tree = ast.parse(source, filename=str(path))
@@ -118,13 +141,13 @@ def _scan_file(path: Path) -> list[tuple[int, str, str]]:
         return (
             isinstance(node, ast.Constant)
             and isinstance(node.value, str)
-            and node.value in KEYWORDS
+            and node.value in keywords
         )
 
     for node in ast.walk(tree):
         if isinstance(node, ast.Call):
             for kw in node.keywords:
-                if kw.arg in KEYWORDS:
+                if kw.arg in keywords:
                     _check(kw.value)
         elif isinstance(node, ast.Dict):
             for key, value in zip(node.keys, node.values):
@@ -139,21 +162,25 @@ def _scan_file(path: Path) -> list[tuple[int, str, str]]:
 
 
 def main() -> int:
-    if not APP_DIR.is_dir():
-        print(f"::error::{APP_DIR} not found — run from the repo root", file=sys.stderr)
-        return 2
     total = 0
-    for path in sorted(APP_DIR.rglob("*.py")):
-        for line_no, kind, detail in _scan_file(path):
-            total += 1
-            print(f"{path}:{line_no}: {kind}: {detail}")
+    for scan_dir, keywords, skip_dirs in SCAN_SCOPES:
+        if not scan_dir.is_dir():
+            print(f"::error::{scan_dir} not found — run from the repo root", file=sys.stderr)
+            return 2
+        for path in sorted(scan_dir.rglob("*.py")):
+            rel_parts = path.relative_to(scan_dir).parts[:-1]
+            if skip_dirs and (set(rel_parts) & skip_dirs):
+                continue
+            for line_no, kind, detail in _scan_file(path, keywords):
+                total += 1
+                print(f"{path}:{line_no}: {kind}: {detail}")
     if total:
         print(
-            f"::error::{total} non-German detail/error_message string(s) — "
+            f"::error::{total} non-German detail/error_message/message string(s) — "
             "students read these (Rule §1: German with literal ä/ö/ü/ß)."
         )
         return 1
-    print("cloud-api German strings clean (detail/error_message).")
+    print("cloud-api + pi-agent German strings clean (detail/error_message/message).")
     return 0
 
 

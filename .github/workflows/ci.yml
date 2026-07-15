@@ -710,6 +710,73 @@ jobs:
             'cat /usr/share/nginx/html/version.json' | python3 -c \
             'import json,sys; d=json.load(sys.stdin); assert d["buildId"]=="ci-validate", d; print("version.json OK:", d)'
 
+  manager-opi-build-validate:
+    # The opi (Orange Pi) twin of manager-build-validate: the same
+    # white-screen/secret-inlining guard, but against Dockerfile.opi — the
+    # THIRD manager build (student Dockerfile / Railway Dockerfile.web /
+    # Pi Dockerfile.opi). Dockerfile.opi takes the SAME build args as the
+    # student Dockerfile (REACT_APP_SUPABASE_URL / _ANON_KEY /
+    # _CLOUD_API_URL / _BUILD_ID; MODE + ALLOWED_POLICIES default in-file)
+    # plus its own empty-arg guards, so a dropped ARG or a broken
+    # env-inline ships a blank Pi SPA exactly like the amd64 bug did.
+    # Built WITHOUT --platform: the node build stage + grep assertions are
+    # arch-independent (node:22 and nginx:alpine are multi-arch), so
+    # validating on the native amd64 runner avoids QEMU for no coverage
+    # loss — the real arm64 build is exercised by docker-publish's opi leg.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Build physical_ai_manager via Dockerfile.opi with placeholder secrets
+        run: |
+          docker build \
+            --build-arg REACT_APP_SUPABASE_URL=https://CI_VALIDATE.supabase.co \
+            --build-arg REACT_APP_SUPABASE_ANON_KEY=CI_VALIDATE_ANON_KEY \
+            --build-arg REACT_APP_CLOUD_API_URL=https://CI_VALIDATE.api.example \
+            --build-arg REACT_APP_BUILD_ID=ci-opi-validate \
+            -t edubotics-manager-opi-validate \
+            -f physical_ai_tools/physical_ai_manager/Dockerfile.opi \
+            physical_ai_tools/physical_ai_manager/
+      - name: Assert placeholder secrets reached the React bundle
+        run: |
+          # Path-agnostic: recursively grep the whole nginx html root rather
+          # than a fixed bundle filename (same rationale as the student job —
+          # a bundler/output rename must never silently break this guard).
+          for needle in \
+            'CI_VALIDATE.supabase.co' \
+            'CI_VALIDATE_ANON_KEY' \
+            'CI_VALIDATE.api.example' ; do
+              if ! docker run --rm --entrypoint sh edubotics-manager-opi-validate -c \
+                   "grep -q -r -F '$needle' /usr/share/nginx/html" ; then
+                  echo "FAIL: '$needle' not found in built opi bundle — the bundler did not inline its env var."
+                  echo "      Likely Dockerfile.opi dropped the ARG, or the React app stopped importing the var."
+                  exit 1
+              fi
+              echo "OK: '$needle' found in opi bundle."
+          done
+      - name: Assert version.json is present + well-formed
+        # LOAD-BEARING on the Pi: useVersionCheck polls /version.json to
+        # self-reload the SPA after an image update, and self-disables when
+        # the baked buildId is the literal "dev" (see Dockerfile.opi).
+        run: |
+          docker run --rm --entrypoint sh edubotics-manager-opi-validate -c \
+            'cat /usr/share/nginx/html/version.json' | python3 -c \
+            'import json,sys; d=json.load(sys.stdin); assert d["buildId"]=="ci-opi-validate", d; print("version.json OK:", d)'
+      - name: Assert /pi-mode.json marker is baked into the nginx template
+        # The React PiModeProvider flips Pi mode ONLY on a valid JSON parse of
+        # {"pi": true} from /pi-mode.json (the SPA catch-all otherwise returns
+        # index.html, which must NOT flip it). The marker location lives in the
+        # nginx template Dockerfile.opi bakes — assert the rendered config
+        # would serve it. The template needs its single envsubst var; mirror
+        # nginx:alpine's 20-envsubst-on-templates.sh with the in-image default.
+        run: |
+          docker run --rm --entrypoint sh edubotics-manager-opi-validate -c \
+            'test -f /etc/nginx/templates/default.conf.template && grep -q "pi-mode.json" /etc/nginx/templates/default.conf.template' \
+            || { echo "::error::Dockerfile.opi image is missing the /pi-mode.json nginx location — Pi mode would never activate."; exit 1; }
+          echo "OK: nginx template carries the /pi-mode.json marker location."
+
   tutorials-validate:
     # Walks every public/tutorials/*.json and asserts schema:
     # id/title_de/level/steps present, each step has title/body/
@@ -954,12 +1021,16 @@ jobs:
             exit 1
           fi
           echo "German strings clean."
-      - name: Cloud-API detail/error_message German lint (AST)
+      - name: Cloud-API + Pi-agent German lint (AST)
         # Covers call keywords, dict literals and subscript assignments —
         # HTTPException detail= reaches React toasts; trainings-table
-        # error_message is rendered raw by MyModels.js/TrainingLiveChart.js.
-        # DB-error matchers ('... in msg') are comparisons, not bindings,
-        # so they are structurally excluded and stay English on purpose.
+        # error_message is rendered raw by MyModels.js/TrainingLiveChart.js;
+        # and the Orange-Pi agent's {"ok": ..., "message": ...} JSON payloads
+        # are rendered raw by the React System tab (a student-facing surface
+        # the grep step above never covered — it only matches
+        # [FEHLER]/[WARNUNG]/[STOPP] lines). DB-error matchers ('... in msg')
+        # are comparisons, not bindings, so they are structurally excluded
+        # and stay English on purpose. `# english-ok` is the escape hatch.
         run: python3 .github/scripts/german_detail_lint.py
 
   enum-parity:

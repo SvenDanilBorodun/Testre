@@ -98,6 +98,59 @@ concurrency:
 permissions: {}
 
 jobs:
+  # ── Preflight: the pushed git tag MUST equal the in-tree VERSION file ──
+  #
+  # W6 advertises the auto-update gate off the pushed TAG (VERSION="${TAG#v}"
+  # below), while the pi-agent tarball (W5b) and the installer (.exe, W5) bake
+  # the in-tree VERSION FILE. If someone tags vX.Y.Z WITHOUT bumping the VERSION
+  # file in the same commit, /version advertises a version the attached assets
+  # don't carry: every Orange Pi + Windows GUI then sees a "newer version" it can
+  # never satisfy (the installer/tarball self-reports the OLD file version), i.e.
+  # a permanent, non-closable forced-update loop across the whole fleet.
+  #
+  # Fail the WHOLE release here, before W1 touches the DB, if they disagree.
+  # This job runs on workflow_dispatch too but only ASSERTS on a tag push
+  # (dispatch has no tag to compare) — so its result is ALWAYS 'success' off a
+  # tag, which keeps the needs-graph below intact for the dispatch path. It must
+  # NOT self-skip on dispatch, or every job that needs it would skip too.
+  #
+  # Threaded into the graph via supabase (W1) AND cloud-api (W2): W1 has no
+  # always()/skip tolerance so a preflight FAILURE skips it; W2 tolerates a
+  # SKIPPED supabase (skip_supabase dispatch) so it must gate on the preflight
+  # result explicitly. W3→W6 + pi-agent-tarball each require their parent
+  # == 'success', so a skipped W2 cascades the skip through the rest.
+  version-preflight:
+    name: Preflight. Assert tag == VERSION file
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Inline job (not a `uses:` callee), so the caller-permissions-superset rule
+    # does not apply — it just needs contents: read to check out and read VERSION.
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Assert the pushed tag matches the VERSION file
+        # GITHUB_REF is a built-in runner env var (no ${{ }} → no template
+        # injection surface). On a tag push it is refs/tags/vX.Y.Z.
+        run: |
+          set -e
+          case "$GITHUB_REF" in
+            refs/tags/v*)
+              TAG_VERSION="${GITHUB_REF#refs/tags/v}"
+              FILE_VERSION="$(tr -d '[:space:]' < VERSION)"
+              if [ "$TAG_VERSION" != "$FILE_VERSION" ]; then
+                echo "::error::Release tag v${TAG_VERSION} != in-tree VERSION file (${FILE_VERSION}). Bump VERSION (+ installer/robotis_ai_setup.iss AppVersion + gui/app/constants.py) in the SAME commit you tag — otherwise /version advertises v${TAG_VERSION} while the .exe + pi-agent tarball carry ${FILE_VERSION}, and every Pi + Windows GUI enters a permanent forced-update loop."
+                exit 1
+              fi
+              echo "OK: tag v${TAG_VERSION} == VERSION file ${FILE_VERSION}"
+              ;;
+            *)
+              echo "Not a tag push (ref=${GITHUB_REF}) — skipping the tag/VERSION equality assertion (nothing to compare)."
+              ;;
+          esac
+
   # ── W1: Supabase ──────────────────────────────────────────────────
   supabase:
     name: W1. Apply migrations
@@ -108,6 +161,11 @@ jobs:
     # push. Gate on github.event_name first so the `inputs` access only
     # evaluates on the workflow_dispatch path. The `||` operator in GH
     # Actions short-circuits, so the inputs access is never reached on push.
+    # version-preflight is a hard prerequisite: it runs always (success off a
+    # tag), so on both the tag-push and workflow_dispatch paths this needs is
+    # satisfied — EXCEPT when the tag/VERSION assertion FAILS, which skips W1
+    # (no always() here) so no migrations run against a mismatched release.
+    needs: [version-preflight]
     if: >-
       ${{
         github.event_name != 'workflow_dispatch' ||
@@ -125,8 +183,17 @@ jobs:
   # worker is ready before the FastAPI tries to call it.
   cloud-api:
     name: W2. Deploy cloud_training_api
-    needs: [supabase]
-    if: always() && (needs.supabase.result == 'success' || needs.supabase.result == 'skipped')
+    # W2 uses always() and deliberately tolerates a SKIPPED supabase (the
+    # skip_supabase dispatch path), so a preflight FAILURE — which SKIPS
+    # supabase rather than failing it — would otherwise let W2 (and the whole
+    # chain below it) proceed. Gate on the preflight result explicitly so a
+    # tag/VERSION mismatch blocks W2, and W3→W6 cascade the skip via their
+    # parent == 'success' gates.
+    needs: [version-preflight, supabase]
+    if: >-
+      always()
+      && needs.version-preflight.result == 'success'
+      && (needs.supabase.result == 'success' || needs.supabase.result == 'skipped')
     permissions:
       contents: read
     uses: ./.github/workflows/railway-deploy-cloud-api.yml
@@ -331,8 +398,20 @@ jobs:
             PI_SHA="$(sha256sum /tmp/edubotics-pi-agent.tar.gz | awk '{print $1}')"
             echo "  pi-agent sha256=${PI_SHA}"
           else
-            echo "::warning::could not download the pi-agent tarball to hash it — advertising version without a Pi integrity hash (agent falls back to the Content-Length guard)"
+            # Unlike the .exe path (the GUI falls back to a Content-Length-only
+            # guard on an empty hash), the Pi agent's update_checker treats an
+            # empty pi_agent_sha256 as "no verified update available" and
+            # advertises NO self-update — it refuses to unpack an unverified
+            # tarball over the running agent. So an empty hash here means the Pi
+            # simply won't self-update from this release (safe), not that it
+            # applies the tarball behind only a length check.
+            echo "::warning::could not download the pi-agent tarball to hash it — advertising version without a Pi integrity hash. The Pi agent then advertises NO self-update (it refuses an unverified tarball); it does NOT fall back to a Content-Length-only check like the .exe does."
           fi
+
+          # Hand PI_SHA to the verify step (empty when the tarball couldn't be
+          # hashed). The verify step asserts /version's pi_agent_sha256 matches
+          # this exact value when it is non-empty.
+          echo "PI_SHA=${PI_SHA}" >> "$GITHUB_ENV"
 
           # Set the non-triggering vars first with --skip-deploys, then
           # GUI_VERSION WITHOUT it so exactly ONE redeploy fires and picks up
@@ -364,15 +443,38 @@ jobs:
           set -e
           EXPECTED="${GIT_REF_NAME#v}"
           URL=https://scintillating-empathy-production-1068.up.railway.app/version
+          # PI_SHA arrives from the previous step via $GITHUB_ENV (empty when the
+          # tarball couldn't be hashed). Once `version` matches, the redeploy that
+          # set all five vars atomically is serving, so the Pi fields are final:
+          #   - pi_agent_download_url MUST be present (routes/version.py derives
+          #     it from GUI_RELEASE_REPO + GUI_VERSION, both set above);
+          #   - pi_agent_sha256 MUST equal PI_SHA when PI_SHA is non-empty.
+          # A version-match with a bad Pi field fails immediately (exit 2/3) — it
+          # will not self-correct, so we do not keep polling on it.
           # Railway redeploy + healthcheck on an env-only change is fast, but
           # pad for cold-pod routing. 5-min budget like the cloud-api gate.
           for attempt in $(seq 1 150); do
             BODY=$(curl -fsS --max-time 5 "$URL" 2>/dev/null || true)
             if [ -n "$BODY" ]; then
-              if python3 -c "import json, sys; d = json.loads(sys.argv[1]); sys.exit(0 if d.get('version') == sys.argv[2] else 1)" "$BODY" "$EXPECTED"; then
-                echo "/version now advertises ${EXPECTED}."
+              # Single-line -c (no leading-indent hazard). Exit codes:
+              #   0 = version matches AND Pi fields valid (url present, hash OK)
+              #   1 = version not yet matching (or unparseable) — keep polling
+              #   2 = version matches but pi_agent_download_url missing
+              #   3 = version matches but pi_agent_sha256 != PI_SHA
+              rc=0
+              python3 -c "import json,sys; d=json.loads(sys.argv[1]); v=d.get('version'); u=d.get('pi_agent_download_url'); s=d.get('pi_agent_sha256'); e=sys.argv[2]; p=sys.argv[3]; sys.exit(0 if (v==e and u and (not p or s==p)) else (1 if v!=e else (2 if not u else 3)))" "$BODY" "$EXPECTED" "${PI_SHA:-}" || rc=$?
+              if [ "$rc" = "0" ]; then
+                echo "/version now advertises ${EXPECTED} (+ valid pi_agent_download_url / pi_agent_sha256)."
                 echo "  body: $BODY"
                 exit 0
+              elif [ "$rc" = "2" ]; then
+                echo "::error::/version advertises ${EXPECTED} but pi_agent_download_url is missing (GUI_RELEASE_REPO/GUI_VERSION not applied?)."
+                echo "  body: $BODY"
+                exit 1
+              elif [ "$rc" = "3" ]; then
+                echo "::error::/version advertises ${EXPECTED} but pi_agent_sha256 != the tarball we attached (expected ${PI_SHA})."
+                echo "  body: $BODY"
+                exit 1
               fi
               ACTUAL=$(echo "$BODY" | python3 -c "import json, sys; print(json.loads(sys.stdin.read()).get('version', '<missing>'))" 2>/dev/null || echo "<unparseable>")
               echo "Attempt $attempt: /version=$ACTUAL, expected $EXPECTED"

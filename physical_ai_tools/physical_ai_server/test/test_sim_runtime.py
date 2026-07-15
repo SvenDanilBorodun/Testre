@@ -146,7 +146,9 @@ def test_sim_arm_gentle_close_held_clears_per_object_threshold(monkeypatch):
     # (close + margin) still reads HELD — a fixed −0.1 readback would tie the
     # −0.10 threshold and falsely report a MISS in sim.
     monkeypatch.setattr(motion, 'GRASP_SETTLE_S', 0.0)
-    monkeypatch.setattr(motion, '_GRASP_HELD_MAX_ENV_SET', False)
+    # Env-based (no sentinel monkeypatching): '' is the compose-shipped shape
+    # and must count as UNSET so the per-object threshold is live.
+    monkeypatch.setenv('EDUBOTICS_GRASP_HELD_MAX_RAD', '')
     gentle_close = -0.25
     ik = IKSolver()
     arm_q = ik.solve((OBJ_X, OBJ_Y, WUERFEL_GRASP_Z))
@@ -155,7 +157,7 @@ def test_sim_arm_gentle_close_held_clears_per_object_threshold(monkeypatch):
     arm.publish([(list(arm_q) + [gentle_close], 1.0)])
     ctx = types.SimpleNamespace(
         get_follower_joints=arm.get_joints,
-        last_full_joints=list(arm_q) + [gentle_close])
+        last_commanded_close_rad=gentle_close)
     assert motion.check_grasp_held(ctx) is True
     # And the same gentle close with NOTHING placed is a detected MISS (the old
     # fixed global threshold read every empty gentle close as held).
@@ -163,7 +165,7 @@ def test_sim_arm_gentle_close_held_clears_per_object_threshold(monkeypatch):
     empty.publish([(list(arm_q) + [gentle_close], 1.0)])
     ctx_empty = types.SimpleNamespace(
         get_follower_joints=empty.get_joints,
-        last_full_joints=list(arm_q) + [gentle_close])
+        last_commanded_close_rad=gentle_close)
     assert motion.check_grasp_held(ctx_empty) is False
 
 

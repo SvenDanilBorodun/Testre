@@ -54,6 +54,12 @@ def _safe_float(env_name: str, default: float) -> float:
     raw = os.environ.get(env_name)
     if raw is None:
         return default
+    if not raw.strip():
+        # Empty/whitespace-only counts as UNSET, silently: docker-compose
+        # forwards optional knobs as `${VAR:-}` (EMPTY default), so every
+        # un-tuned rig delivers '' — warning about that would spam the log on
+        # every boot. Only a genuinely malformed value warns below.
+        return default
     try:
         return float(raw)
     except (TypeError, ValueError):
@@ -103,14 +109,30 @@ WORKSPACE_FLOOR_MARGIN_M = 0.01
 # tuned gripper_close_rad sat ABOVE it (an empty close never crossed it, so a
 # miss read as "held"). The margin 0.15 makes the shipped cube's derived
 # threshold (−0.5 + 0.15 = −0.35) byte-identical to the previously rig-validated
-# global value. Setting EDUBOTICS_GRASP_HELD_MAX_RAD explicitly restores the
-# fixed global threshold everywhere (operator rollback / rig tuning).
+# global value. Setting EDUBOTICS_GRASP_HELD_MAX_RAD to a NUMBER restores the
+# fixed global threshold everywhere (operator rollback / rig tuning). Compose
+# forwards the env with an EMPTY default on purpose (`${…:-}`): empty/whitespace
+# counts as UNSET so the per-object threshold is live on every un-tuned rig — a
+# baked compose default would silently disable the per-object path fleet-wide
+# (the v2.12.x dead-code scar; see _grasp_held_env_override_set).
 # GRASP_RETRY re-tries the whole detect→select→grasp that many times before the
 # instance is skipped; GRASP_SETTLE_S lets the servo settle before the readback.
 # Rig-tunable; env-forwarding-guard: all three envs are forwarded in
 # robotis_ai_setup/docker/docker-compose.yml.
 GRASP_HELD_MAX_RAD = _safe_float('EDUBOTICS_GRASP_HELD_MAX_RAD', -0.35)
-_GRASP_HELD_MAX_ENV_SET = os.environ.get('EDUBOTICS_GRASP_HELD_MAX_RAD') is not None
+
+
+def _grasp_held_env_override_set() -> bool:
+    """True when the operator EXPLICITLY set ``EDUBOTICS_GRASP_HELD_MAX_RAD`` to
+    a non-empty value (rig override / one-variable rollback to the fixed global
+    threshold). Empty/whitespace counts as UNSET — compose always FORWARDS the
+    env (`${EDUBOTICS_GRASP_HELD_MAX_RAD:-}` → '' on an un-tuned rig), so bare
+    presence is meaningless (`is not None` shipped the per-object threshold as
+    dead code). The override VALUE itself is parsed once at import into
+    ``GRASP_HELD_MAX_RAD``; only this set/unset check is call-time, so tests can
+    exercise both branches with a plain env monkeypatch instead of poking a
+    module-level sentinel."""
+    return os.environ.get('EDUBOTICS_GRASP_HELD_MAX_RAD', '').strip() != ''
 # Plain constant (NOT env-tunable — an env name would need compose forwarding;
 # tune per-rig via EDUBOTICS_GRASP_HELD_MAX_RAD instead). An object must stop
 # the jaws at least this far ABOVE its commanded close to count as held, so
@@ -653,6 +675,9 @@ def close_gripper(ctx, args: dict[str, Any]) -> None:
     q_end = q_start[:5] + [GRIPPER_CLOSED_RAD]
     _publish_motion(ctx, q_start, q_end, DEFAULT_GRIPPER_DURATION_S)
     ctx.last_full_joints = q_end
+    # Record the COMMANDED close for the per-object grasp-held threshold (only
+    # the close paths write this — see _held_threshold_rad).
+    ctx.last_commanded_close_rad = GRIPPER_CLOSED_RAD
 
 
 def move_to(ctx, args: dict[str, Any]) -> None:
@@ -748,6 +773,9 @@ def _execute_pickup(
         # Gripper-only close — EXEMPT (raw).
         _publish_motion_t(ctx, grasp_q, closed_q, DEFAULT_GRIPPER_DURATION_S, tempo)
         ctx.last_full_joints = closed_q
+        # Record the COMMANDED close (the recipe's gripper_close_rad on the
+        # named-object path) for the per-object grasp-held threshold.
+        ctx.last_commanded_close_rad = close_rad
         # LIFT-OUT (carry up to the hover) — TRANSIT, zone-avoided.
         safe_move(ctx, closed_q, lift_q, DEFAULT_APPROACH_DURATION_S, roll=roll, tempo=tempo)
         ctx.last_arm_joints = lift_arm_q
@@ -763,25 +791,34 @@ def _execute_pickup(
 def _held_threshold_rad(ctx) -> float:
     """HELD/MISS gripper-angle threshold for :func:`check_grasp_held`.
 
-    Per-object when possible: the last COMMANDED gripper angle
-    (``ctx.last_full_joints[5]``, which after a close IS the recipe's
-    ``gripper_close_rad``) plus ``GRASP_HELD_MARGIN_RAD`` — an empty close
-    reaches ≈ the commanded angle, a held object stops the jaws at least the
-    margin above it. This is what lets a wide-object recipe with a gentle close
-    (e.g. −0.25) still detect a miss; the old fixed −0.35 read every empty
-    gentle close as "held".
+    Per-object when possible: the last COMMANDED gripper close
+    (``ctx.last_commanded_close_rad`` — written ONLY by the close paths
+    :func:`_execute_pickup` / :func:`close_gripper` / :func:`close_on_object`,
+    where after a named-object close it IS the recipe's ``gripper_close_rad``)
+    plus ``GRASP_HELD_MARGIN_RAD`` — an empty close reaches ≈ the commanded
+    angle, a held object stops the jaws at least the margin above it. This is
+    what lets a wide-object recipe with a gentle close (e.g. −0.25) still detect
+    a miss; the old fixed −0.35 read every empty gentle close as "held".
+
+    Deliberately NOT derived from ``ctx.last_full_joints[5]``: workflow start
+    boot-seeds that from the MEASURED follower pose, so a still-held gripper
+    (~−0.1 measured) masqueraded as a commanded close and skewed the threshold
+    before any close was commanded this run.
 
     Falls back to the global ``GRASP_HELD_MAX_RAD`` when (a) the operator set
-    ``EDUBOTICS_GRASP_HELD_MAX_RAD`` explicitly (rig override / rollback wins
-    everywhere), or (b) the last command is unavailable or is not a close
-    (open is +0.8; deriving there would flip the documented open-gripper
-    behaviour of ``grasp_held``/``wait_until_held`` — deliberately preserved)."""
-    if _GRASP_HELD_MAX_ENV_SET:
+    ``EDUBOTICS_GRASP_HELD_MAX_RAD`` to a non-empty value (rig override /
+    rollback wins everywhere), or (b) no gripper close has been commanded this
+    run (``last_commanded_close_rad`` is None / malformed) — which also keeps
+    the documented open-gripper behaviour of ``grasp_held``/``wait_until_held``
+    on a fresh run."""
+    if _grasp_held_env_override_set():
         return GRASP_HELD_MAX_RAD
-    last = getattr(ctx, 'last_full_joints', None)
+    commanded = getattr(ctx, 'last_commanded_close_rad', None)
+    if commanded is None:
+        return GRASP_HELD_MAX_RAD
     try:
-        commanded = float(last[5])
-    except (TypeError, ValueError, IndexError):
+        commanded = float(commanded)
+    except (TypeError, ValueError):
         return GRASP_HELD_MAX_RAD
     if not math.isfinite(commanded) or commanded >= 0.0:
         return GRASP_HELD_MAX_RAD
@@ -1016,6 +1053,9 @@ def close_on_object(ctx, args: dict[str, Any]) -> None:
     q_end = q_start[:5] + [close_rad]
     _publish_motion(ctx, q_start, q_end, DEFAULT_GRIPPER_DURATION_S)
     ctx.last_full_joints = q_end
+    # Record the COMMANDED close (the Greifziel's tuned angle) for the
+    # per-object grasp-held threshold.
+    ctx.last_commanded_close_rad = close_rad
 
 
 def lift(ctx, args: dict[str, Any]) -> None:

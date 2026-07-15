@@ -295,6 +295,13 @@ services:
       # not just by open_manipulator's entrypoint, so it must be forwarded
       # to BOTH containers. `.env`-driven (see open_manipulator above).
       - EDUBOTICS_FOLLOWER_ONLY=${EDUBOTICS_FOLLOWER_ONLY:-0}
+      # Robot profile id — read ONCE by physical_ai_server.__init__
+      # (robot_profiles.resolve) and the source of the capabilities the React
+      # nav gates on. Without this forward the server silently resolves
+      # omx_full on every Pi (capability system inert). Kept in parity with
+      # docker-compose.yml (omx_full default; the current Pi kit is
+      # leader-toggle-capable, i.e. omx_full-equivalent).
+      - EDUBOTICS_ROBOT_TYPE=${EDUBOTICS_ROBOT_TYPE:-omx_full}
       # Scene-cam single-shot extrinsic: the known board-on-table placement
       # (base frame, metres). Read by workflow/calibration_manager.py at
       # import time — MUST stay forwarded (env-forwarding-guard).
@@ -332,10 +339,14 @@ services:
       # jaw-check. Read by workflow/handlers/motion.py.
       - EDUBOTICS_GRASP_ROLL_DEG=${EDUBOTICS_GRASP_ROLL_DEG:-90.0}
       # Grasp-success check (named-object grasp): after the gripper closes,
-      # the achieved angle tells HELD from EMPTY (≤ GRASP_HELD_MAX_RAD =
-      # closed empty). GRASP_RETRY re-tries the detect→grasp; GRASP_SETTLE_S
-      # settles the servo before readback. Read by workflow/handlers/motion.py.
-      - EDUBOTICS_GRASP_HELD_MAX_RAD=${EDUBOTICS_GRASP_HELD_MAX_RAD:--0.35}
+      # the achieved angle tells HELD from EMPTY (≤ threshold = closed empty).
+      # EMPTY default on purpose: empty means "unset" to motion.py → per-object
+      # threshold (last commanded close + margin). A literal value (e.g. -0.35)
+      # restores the fixed global threshold (rollback); a baked non-empty
+      # default would disable the per-object path (the v2.12.x dead-code scar).
+      # GRASP_RETRY re-tries the detect→grasp; GRASP_SETTLE_S settles the
+      # servo before readback. Read by workflow/handlers/motion.py.
+      - EDUBOTICS_GRASP_HELD_MAX_RAD=${EDUBOTICS_GRASP_HELD_MAX_RAD:-}
       - EDUBOTICS_GRASP_RETRY=${EDUBOTICS_GRASP_RETRY:-1}
       - EDUBOTICS_GRASP_SETTLE_S=${EDUBOTICS_GRASP_SETTLE_S:-0.3}
       # Teleop force/collision e-stop (Rule §2 software guard, teleop-only).

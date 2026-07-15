@@ -297,11 +297,16 @@ services:
       - EDUBOTICS_GRASP_ROLL_DEG=${EDUBOTICS_GRASP_ROLL_DEG:-90.0}
       # Grasp-success check (named-object grasp): after the gripper closes, the
       # achieved gripper angle (follower joint 5) tells HELD from EMPTY — an
-      # achieved angle ≤ GRASP_HELD_MAX_RAD means the jaws closed empty (missed).
-      # GRASP_RETRY re-tries the detect→grasp that many times before skipping the
-      # instance; GRASP_SETTLE_S settles the servo before the readback. Read by
-      # workflow/handlers/motion.py.
-      - EDUBOTICS_GRASP_HELD_MAX_RAD=${EDUBOTICS_GRASP_HELD_MAX_RAD:--0.35}
+      # achieved angle ≤ the held threshold means the jaws closed empty (missed).
+      # The default is EMPTY on purpose: an empty value means "unset" to
+      # motion.py, which then derives the threshold PER OBJECT (last commanded
+      # close + margin). Setting a literal value here (e.g. -0.35) restores the
+      # fixed global threshold everywhere — that is the documented rollback. A
+      # baked non-empty default would permanently disable the per-object path
+      # (the v2.12.x dead-code scar). GRASP_RETRY re-tries the detect→grasp that
+      # many times before skipping the instance; GRASP_SETTLE_S settles the
+      # servo before the readback. Read by workflow/handlers/motion.py.
+      - EDUBOTICS_GRASP_HELD_MAX_RAD=${EDUBOTICS_GRASP_HELD_MAX_RAD:-}
       - EDUBOTICS_GRASP_RETRY=${EDUBOTICS_GRASP_RETRY:-1}
       - EDUBOTICS_GRASP_SETTLE_S=${EDUBOTICS_GRASP_SETTLE_S:-0.3}
       # Teleop force/collision e-stop (Rule §2 software guard, teleop-only). Read by the

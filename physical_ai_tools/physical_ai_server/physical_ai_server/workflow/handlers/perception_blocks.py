@@ -156,6 +156,34 @@ def _poll_until(ctx, predicate, timeout_s: float, label: str) -> bool:
                 )
 
 
+def _check_grasp_held_locked(ctx):
+    """Run ``motion.check_grasp_held`` under ``ctx.motion_lock`` (when present).
+
+    The hat-side value blocks (``grasp_held`` / ``wait_until_held``) used to
+    read the held threshold + joint readback LOCK-FREE, racing a concurrent
+    close on the main stack (the threshold derives from
+    ``ctx.last_commanded_close_rad``, which the close paths write under the
+    lock). Serializing the whole check shrinks that race to nothing. RLock →
+    nest-safe when the caller (e.g. a hat handler body, or ``grasp_object``)
+    already holds the lock. Mirrors ``_publish_motion``'s bounded acquire: a
+    wedged lock raises a German error instead of blocking forever."""
+    lock = getattr(ctx, 'motion_lock', None)
+    if lock is None:
+        return _motion.check_grasp_held(ctx)
+    if not lock.acquire(timeout=10.0):
+        raise WorkflowError(
+            'Bewegung blockiert — ein anderer Workflow-Teil hält '
+            'die Sperre zu lange. Bitte Workflow neu starten.'
+        )
+    try:
+        return _motion.check_grasp_held(ctx)
+    finally:
+        try:
+            lock.release()
+        except RuntimeError:
+            pass
+
+
 # ------------------------------------------------------------------
 # Named-object detection + grasp (Roboter Studio AprilTag grasping)
 # ------------------------------------------------------------------
@@ -738,13 +766,19 @@ def wait_until_held(ctx, args: dict[str, Any]) -> bool:
     block returns True immediately if the gripper is open. It is only
     meaningful directly AFTER a close (e.g. „Greifer schließen" or a grasp).
     The block tooltip states this. (The threshold itself is per-object since
-    2026-07-10 — commanded close + ``GRASP_HELD_MARGIN_RAD`` — but a
-    non-close last command deliberately keeps the legacy global threshold,
-    preserving exactly this documented open-gripper behaviour.)"""
+    2026-07-10 — the last COMMANDED close, ``ctx.last_commanded_close_rad``,
+    + ``GRASP_HELD_MARGIN_RAD`` — but with no close commanded yet this run it
+    deliberately keeps the legacy global threshold, preserving exactly this
+    documented open-gripper behaviour.)
+
+    The check runs under ``motion_lock`` (``_check_grasp_held_locked``) so a
+    hat-side poll can't read the threshold + joint state mid-close; note
+    ``_poll_until`` releases a caller-held lock around the wait, so the poll
+    still never starves the main stack."""
     timeout_s = float(args.get('timeout', 10))
 
     def _held() -> bool:
-        result = _motion.check_grasp_held(ctx)
+        result = _check_grasp_held_locked(ctx)
         if result is None:
             raise WorkflowError(
                 'Greif-Erfolgskontrolle ist nicht verfügbar (keine Gelenkdaten).'
@@ -845,8 +879,10 @@ def grasp_held(ctx, args: dict[str, Any]) -> bool:
     """„Greifer hält etwas?" — VALUE (Boolean): True when the gripper closed on an
     object, False on an empty close. Raises a German error when the joint readback
     is unavailable — no silent False (that would mis-report on every rig without
-    follower-joint feedback)."""
-    result = _motion.check_grasp_held(ctx)
+    follower-joint feedback). Runs under ``motion_lock``
+    (``_check_grasp_held_locked``) so a hat-side read can't race a concurrent
+    close on the main stack."""
+    result = _check_grasp_held_locked(ctx)
     if result is None:
         raise WorkflowError(
             'Greif-Erfolgskontrolle ist nicht verfügbar (keine Gelenkdaten).'

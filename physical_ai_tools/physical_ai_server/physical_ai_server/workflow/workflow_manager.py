@@ -95,6 +95,15 @@ class WorkflowContext:
     table_plane: tuple[float, float, float] | None = None
     last_arm_joints: list[float] | None = None
     last_full_joints: list[float] = field(default_factory=lambda: [0.0] * 6)
+    # Grasp-held threshold source: the most recent COMMANDED gripper close (rad)
+    # this run — written ONLY by motion's close paths (_execute_pickup,
+    # close_gripper, close_on_object), read by motion._held_threshold_rad.
+    # Deliberately SEPARATE from last_full_joints: start() boot-seeds THAT from
+    # the MEASURED follower pose, so a still-held gripper (~−0.1 measured) would
+    # masquerade as a commanded close and skew the per-object threshold. None
+    # (fresh each run — re-set explicitly in start()) → the global
+    # GRASP_HELD_MAX_RAD fallback.
+    last_commanded_close_rad: float | None = None
     should_stop: Callable[[], bool] = field(default_factory=lambda: (lambda: False))
     log: Callable[[str], None] = field(default_factory=lambda: (lambda _: None))
     # Push the most recent perception detection list to the WorkflowStatus
@@ -516,6 +525,10 @@ class WorkflowManager:
                 # Grasp-success check (#2): read the achieved gripper angle after
                 # a close to confirm the object is actually held.
                 get_follower_joints=self._get_follower_joints,
+                # Fresh per run: no gripper close commanded yet. NEVER seeded
+                # from the measured follower pose (unlike last_full_joints
+                # below) — only motion's close paths write it.
+                last_commanded_close_rad=None,
                 motion_lock=self._motion_lock,
                 var_lock=self._var_lock,
                 breakpoints=self._breakpoints,

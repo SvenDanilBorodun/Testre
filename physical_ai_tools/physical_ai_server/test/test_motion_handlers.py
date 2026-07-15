@@ -122,6 +122,9 @@ def test_pickup_ends_gripper_closed_with_motion_published():
     assert ctx.last_commanded_joints[5] == pytest.approx(GRIPPER_CLOSED_RAD)
     # The ctx end-state mirrors it.
     assert ctx.last_full_joints[5] == pytest.approx(GRIPPER_CLOSED_RAD)
+    # The close path RECORDS the commanded close for the per-object grasp-held
+    # threshold (motion._held_threshold_rad).
+    assert ctx.last_commanded_close_rad == pytest.approx(GRIPPER_CLOSED_RAD)
 
 
 def test_pickup_publishes_at_least_five_segments():
@@ -322,6 +325,25 @@ def test_close_on_object_uses_tuned_close_angle():
     close_on_object(ctx, {'ziel': _greifziel(close=-0.25)})
     assert ctx.last_commanded_joints[5] == pytest.approx(-0.25)
     assert ctx.last_full_joints[5] == pytest.approx(-0.25)
+    # The tuned close is RECORDED for the per-object grasp-held threshold.
+    assert ctx.last_commanded_close_rad == pytest.approx(-0.25)
+
+
+def test_close_gripper_records_commanded_close():
+    # The plain „Greifer schließen" block is a close path too — it must record
+    # the commanded close for the per-object grasp-held threshold.
+    ctx = _ctx()
+    motion.close_gripper(ctx, {})
+    assert ctx.last_full_joints[5] == pytest.approx(GRIPPER_CLOSED_RAD)
+    assert ctx.last_commanded_close_rad == pytest.approx(GRIPPER_CLOSED_RAD)
+
+
+def test_open_gripper_does_not_record_a_close():
+    # Opening is NOT a close path — it must leave the record untouched.
+    ctx = _ctx()
+    motion.close_gripper(ctx, {})
+    motion.open_gripper(ctx, {})
+    assert ctx.last_commanded_close_rad == pytest.approx(GRIPPER_CLOSED_RAD)
 
 
 def test_close_on_object_falls_back_to_full_close():

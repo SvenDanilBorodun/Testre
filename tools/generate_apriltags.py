@@ -11,7 +11,10 @@ _FIXED_CATALOG and re-running this tool yields the matching sheet.
 
 Manual mode (spare/extra tags): pass ``--start-id`` and ``--count`` to render
 an arbitrary id range instead; ``--size-mm`` overrides the tag size in both
-modes.
+modes. A manual range that collides with catalog-reserved ids is REFUSED (an
+unlabelled duplicate of a fleet-object tag in circulation breaks the
+detector's id->type mapping); pass ``--allow-reserved`` to print the
+colliding cells labelled with their owning type instead.
 
 Usage:
     python tools/generate_apriltags.py                       # catalog sheet
@@ -116,6 +119,11 @@ def main() -> None:
         '--size-mm', type=float, default=None,
         help='Tag black-square edge in mm (default: the catalog tag size, '
              'i.e. EDUBOTICS_TAG_SIZE_M * 1000).')
+    parser.add_argument(
+        '--allow-reserved', action='store_true',
+        help='Manual mode: allow ids reserved by the fixed object catalog; '
+             'colliding cells are labelled with the owning type instead of '
+             'the range being refused.')
     args = parser.parse_args()
 
     if (args.start_id is None) != (args.count is None):
@@ -124,13 +132,32 @@ def main() -> None:
     if args.start_id is not None:
         if args.count <= 0:
             parser.error('--count must be positive.')
-        entries = [(args.start_id + i, '') for i in range(args.count)]
+        # Reserved-id guard: the fixed catalog's tag ids are glued to fleet
+        # objects. Printing one of them as an UNLABELLED "spare" puts a second
+        # physical tag with the same id in circulation — the detector's
+        # id->type mapping (and the while-visible loop's claim bookkeeping)
+        # can't tell the copies apart. Refuse the overlap; --allow-reserved
+        # prints the colliding cells labelled with the owning type instead.
+        catalog_entries, catalog_tag_size_m = _catalog_entries()
+        reserved = {tid: label for tid, label in catalog_entries}
+        requested = list(range(args.start_id, args.start_id + args.count))
+        collisions = [i for i in requested if i in reserved]
+        if collisions and not args.allow_reserved:
+            listing = ', '.join(f'#{i} ({reserved[i]})' for i in collisions)
+            parser.error(
+                f'requested id range collides with catalog-reserved tag ids: '
+                f'{listing}. These ids are assigned to fleet objects '
+                '(object_catalog.py::_FIXED_CATALOG). Pick a different '
+                '--start-id/--count, or pass --allow-reserved to print the '
+                'colliding cells labelled with their catalog type.')
+        # No collisions -> every label is ''; with --allow-reserved the
+        # colliding cells carry their owning type (never unlabelled).
+        entries = [(i, reserved.get(i, '')) for i in requested]
         tag_size_mm = args.size_mm
         if tag_size_mm is None:
             # Even in manual mode the physical size should match the fleet
             # expectation unless overridden explicitly.
-            _, tag_size_m = _catalog_entries()
-            tag_size_mm = tag_size_m * 1000.0
+            tag_size_mm = catalog_tag_size_m * 1000.0
     else:
         entries, tag_size_m = _catalog_entries()
         tag_size_mm = args.size_mm if args.size_mm is not None else tag_size_m * 1000.0

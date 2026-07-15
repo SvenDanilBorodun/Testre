@@ -203,6 +203,26 @@ def test_grasp_depth_exceeding_height_fails():
         parse_catalog(data)
 
 
+@pytest.mark.parametrize('bad', [0.0, 0.3])
+def test_non_negative_gripper_close_fails(bad):
+    # motion (grasp-held threshold, close_on_object's clamp band) and SimArm
+    # (close-command detection at < 0) hard-assume negative closes — a
+    # zero/positive value must be refused at parse time, in German.
+    data = _valid_dict()
+    data['types']['banane']['gripper_close_rad'] = bad
+    with pytest.raises(ObjectCatalogError, match='gripper_close_rad'):
+        parse_catalog(data)
+
+
+def test_fixed_catalog_closes_are_negative():
+    # Pinned-set guard: no _FIXED_CATALOG entry may violate the negative-close
+    # convention (the schema check above would refuse it at parse time anyway —
+    # this pins the shipped constant explicitly).
+    cat = fixed_catalog()
+    for name in cat.type_names():
+        assert cat.recipe_for_type(name).gripper_close_rad < 0.0
+
+
 def test_invalid_type_key_fails():
     data = _valid_dict()
     data['types']['blauer würfel'] = data['types'].pop('wuerfel_blau')  # space + umlaut
@@ -380,6 +400,25 @@ def test_build_object_catalog_response_empty_on_failure(monkeypatch):
     )
     resp = build_object_catalog_response()
     assert resp['success'] is False
-    assert resp['message']  # non-empty German reason
+    # The ObjectCatalogError text (German by contract) is forwarded VERBATIM.
+    assert 'label_de' in resp['message']
+    assert 'kaputt' in resp['message']
+    for k in _RESPONSE_ARRAY_KEYS:
+        assert resp[k] == []
+
+
+def test_build_object_catalog_response_german_fallback_on_unexpected_error(monkeypatch):
+    # Only ObjectCatalogError texts are student-safe German; any OTHER exception
+    # (e.g. a TypeError out of a malformed constant) must NOT leak its English
+    # str() to the editor — the fixed German fallback replaces it, and the
+    # six-array parity still holds.
+    def _boom():
+        raise RuntimeError('low-level english reason')
+
+    monkeypatch.setattr(object_catalog_mod, 'fixed_catalog', _boom)
+    resp = build_object_catalog_response()
+    assert resp['success'] is False
+    assert resp['message'] == 'Objekt-Katalog konnte nicht geladen werden.'
+    assert 'english' not in resp['message']
     for k in _RESPONSE_ARRAY_KEYS:
         assert resp[k] == []

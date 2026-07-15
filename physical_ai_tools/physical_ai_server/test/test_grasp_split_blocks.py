@@ -200,6 +200,10 @@ def test_grasp_held_raises_when_readback_unavailable(monkeypatch):
 
 
 # ── per-object grasp-held threshold (motion._held_threshold_rad) ─────────────
+# Env-based setup throughout (no sentinel monkeypatching): compose forwards
+# EDUBOTICS_GRASP_HELD_MAX_RAD with an EMPTY default (`${…:-}`), so '' is the
+# shape EVERY un-tuned rig ships — it must count as UNSET or the per-object
+# threshold is dead code fleet-wide (the v2.12.x scar).
 
 def test_check_grasp_held_gentle_close_detects_miss(monkeypatch):
     # A wide-object recipe closes gently (−0.25, ABOVE the legacy global −0.35):
@@ -207,44 +211,74 @@ def test_check_grasp_held_gentle_close_detects_miss(monkeypatch):
     # (commanded + GRASP_HELD_MARGIN_RAD) reads that as a MISS — the old fixed
     # global threshold silently reported it as held.
     monkeypatch.setattr(motion, 'GRASP_SETTLE_S', 0.0)
-    monkeypatch.setattr(motion, '_GRASP_HELD_MAX_ENV_SET', False)
+    monkeypatch.setenv('EDUBOTICS_GRASP_HELD_MAX_RAD', '')
     ctx = _PCtx([], follower=[0, 0, 0, 0, 0, -0.25])
-    ctx.last_full_joints = list(HOME_JOINTS_RAD) + [-0.25]
+    ctx.last_commanded_close_rad = -0.25
     assert motion.check_grasp_held(ctx) is False
 
 
 def test_check_grasp_held_gentle_close_detects_hold(monkeypatch):
     monkeypatch.setattr(motion, 'GRASP_SETTLE_S', 0.0)
-    monkeypatch.setattr(motion, '_GRASP_HELD_MAX_ENV_SET', False)
+    monkeypatch.setenv('EDUBOTICS_GRASP_HELD_MAX_RAD', '')
     ctx = _PCtx([], follower=[0, 0, 0, 0, 0, -0.05])
-    ctx.last_full_joints = list(HOME_JOINTS_RAD) + [-0.25]
+    ctx.last_commanded_close_rad = -0.25
     assert motion.check_grasp_held(ctx) is True
+
+
+def test_held_threshold_empty_env_derives_per_object(monkeypatch):
+    # THE compose-shipped shape: env present but EMPTY → unset → a −0.25
+    # commanded close derives −0.25 + 0.15 = −0.10. Under the old
+    # `is not None` sentinel this returned the global −0.35 (dead code).
+    monkeypatch.setenv('EDUBOTICS_GRASP_HELD_MAX_RAD', '')
+    ctx = _PCtx([])
+    ctx.last_commanded_close_rad = -0.25
+    assert motion._held_threshold_rad(ctx) == pytest.approx(-0.10)
+
+
+def test_held_threshold_whitespace_env_counts_as_unset(monkeypatch):
+    monkeypatch.setenv('EDUBOTICS_GRASP_HELD_MAX_RAD', '   ')
+    ctx = _PCtx([])
+    ctx.last_commanded_close_rad = -0.25
+    assert motion._held_threshold_rad(ctx) == pytest.approx(-0.10)
 
 
 def test_held_threshold_for_cube_matches_rig_validated_global(monkeypatch):
     # Shipped cube (full close −0.5): derived threshold −0.5 + 0.15 = −0.35,
     # byte-identical to the previously rig-validated global default — the
     # per-object change must not move the validated cube behaviour.
-    monkeypatch.setattr(motion, '_GRASP_HELD_MAX_ENV_SET', False)
+    monkeypatch.delenv('EDUBOTICS_GRASP_HELD_MAX_RAD', raising=False)
     ctx = _PCtx([])
-    ctx.last_full_joints = list(HOME_JOINTS_RAD) + [-0.5]
+    ctx.last_commanded_close_rad = -0.5
     assert motion._held_threshold_rad(ctx) == pytest.approx(-0.35)
 
 
 def test_held_threshold_env_override_wins(monkeypatch):
-    # EDUBOTICS_GRASP_HELD_MAX_RAD explicitly set → the fixed global threshold
+    # EDUBOTICS_GRASP_HELD_MAX_RAD set to a NUMBER → the fixed global threshold
     # applies everywhere (operator rollback), even after a gentle close.
-    monkeypatch.setattr(motion, '_GRASP_HELD_MAX_ENV_SET', True)
+    monkeypatch.setenv('EDUBOTICS_GRASP_HELD_MAX_RAD', '-0.35')
     ctx = _PCtx([])
-    ctx.last_full_joints = list(HOME_JOINTS_RAD) + [-0.25]
+    ctx.last_commanded_close_rad = -0.25
+    assert motion._held_threshold_rad(ctx) == pytest.approx(motion.GRASP_HELD_MAX_RAD)
+    assert motion._held_threshold_rad(ctx) == pytest.approx(-0.35)
+
+
+def test_held_threshold_no_close_commanded_uses_global(monkeypatch):
+    # No close commanded yet this run (last_commanded_close_rad absent/None) →
+    # legacy global threshold, preserving the documented open-gripper behaviour
+    # of grasp_held / wait_until_held on a fresh run.
+    monkeypatch.delenv('EDUBOTICS_GRASP_HELD_MAX_RAD', raising=False)
+    ctx = _PCtx([])  # _PCtx never sets last_commanded_close_rad
     assert motion._held_threshold_rad(ctx) == pytest.approx(motion.GRASP_HELD_MAX_RAD)
 
 
-def test_held_threshold_non_close_command_uses_global(monkeypatch):
-    # Last command OPEN (+0.8) → legacy global threshold, preserving the
-    # documented open-gripper behaviour of grasp_held / wait_until_held.
-    monkeypatch.setattr(motion, '_GRASP_HELD_MAX_ENV_SET', False)
-    ctx = _PCtx([])  # _PCtx seeds last_full_joints with the OPEN gripper
+def test_held_threshold_ignores_boot_seeded_measured_gripper(monkeypatch):
+    # Workflow start boot-seeds last_full_joints from the MEASURED follower
+    # pose — a still-held gripper (~−0.1 measured) must NOT masquerade as a
+    # commanded close. Only the dedicated last_commanded_close_rad (written by
+    # motion's close paths) may derive the per-object threshold.
+    monkeypatch.setenv('EDUBOTICS_GRASP_HELD_MAX_RAD', '')
+    ctx = _PCtx([])
+    ctx.last_full_joints = list(HOME_JOINTS_RAD) + [-0.1]  # measured, NOT commanded
     assert motion._held_threshold_rad(ctx) == pytest.approx(motion.GRASP_HELD_MAX_RAD)
 
 

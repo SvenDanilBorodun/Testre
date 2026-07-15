@@ -52,7 +52,8 @@ Schema accepted by :func:`parse_catalog` (the fixed constant is one instance)::
           "tag_ids": [20, 21, 22, 23, 24], // each copy its own id; all typed 'banane'
           "object_height_m": 0.040,        // tag/top plane above the table
           "grasp_depth_m": 0.015,          // jaws close this far below the top
-          "gripper_close_rad": -0.30,      // command ≥ ~0.15 rad DEEPER than where the
+          "gripper_close_rad": -0.30,      // must be NEGATIVE (motion + sim assume closes < 0);
+                                           //   command ≥ ~0.15 rad DEEPER than where the
                                            //   jaws meet the body (motion.GRASP_HELD_MARGIN_RAD)
                                            //   or grasp verification can't tell miss from hold
           "approach_clear_m": 0.06,        // optional (default 0.06): hover height
@@ -358,6 +359,15 @@ def _parse_type(type_name: str, entry, seen_tags: dict[int, str]) -> GraspRecipe
         )
     gripper_close_rad = _require_number(
         entry.get('gripper_close_rad'), type_name, 'gripper_close_rad')
+    # Motion (check_grasp_held's derived threshold, close_on_object's clamp
+    # band) and SimArm (the close-command detection at < 0) both hard-assume a
+    # NEGATIVE close; a zero/positive value would silently break grasp
+    # verification, so refuse it here.
+    if gripper_close_rad >= 0.0:
+        raise ObjectCatalogError(
+            f'Objekt „{type_name}": Feld „gripper_close_rad" muss negativ sein '
+            '(Schließwinkel in rad — offen ist +0.8, geschlossen z. B. −0.5).'
+        )
 
     # approach_clear_m is optional.
     if 'approach_clear_m' in entry:
@@ -478,12 +488,20 @@ def build_object_catalog_response() -> dict:
     -free so the wire contract can be unit-tested end-to-end. On any error (only
     a developer typo in :data:`_FIXED_CATALOG` can trigger it) ALL SIX arrays are
     emptied together, ``success`` is ``False``, and ``message`` carries the
-    German reason — parity across every array."""
+    German reason — parity across every array. Only an
+    :class:`ObjectCatalogError` text is forwarded verbatim (those are German by
+    contract); any other exception (e.g. a ``TypeError`` from a malformed
+    constant) would leak an English message to the editor, so it is replaced by
+    a fixed German fallback."""
     try:
         fields = catalog_response_fields(fixed_catalog())
         fields['success'] = True
         fields['message'] = ''
     except Exception as e:
+        message = (
+            str(e) if isinstance(e, ObjectCatalogError)
+            else 'Objekt-Katalog konnte nicht geladen werden.'
+        )
         fields = {
             'type_names': [],
             'labels_de': [],
@@ -492,6 +510,6 @@ def build_object_catalog_response() -> dict:
             'color_hex': [],
             'max_instances': [],
             'success': False,
-            'message': str(e),
+            'message': message,
         }
     return fields

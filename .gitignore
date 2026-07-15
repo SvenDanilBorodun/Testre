@@ -14,6 +14,10 @@ robotis_ai_setup/docker/.env.build
 robotis_ai_setup/gui/dist/
 robotis_ai_setup/gui/build/
 robotis_ai_setup/installer/output/
+# build-images.sh staging copies of the server package + interfaces
+# (regenerated next to the thin Dockerfile on every build — never source)
+robotis_ai_setup/docker/physical_ai_server/pkg_src/
+robotis_ai_setup/docker/physical_ai_server/interfaces/
 
 # Bundled WSL2 rootfs tarball — produced by wsl_rootfs/build_rootfs.sh,
 # ~200 MB compressed (exceeds GitHub 100 MB limit). Rebuild locally via:

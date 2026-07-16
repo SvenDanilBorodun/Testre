@@ -50,7 +50,7 @@ def _read_version_file() -> str:
             return candidate.read_text(encoding="utf-8").strip()
         except (OSError, UnicodeDecodeError):
             continue
-    return "2.12.2"
+    return "2.13.0"
 
 
 # Agent/product version — reported by the /status endpoint and used by the
@@ -204,11 +204,30 @@ ROS_DOMAIN_ID = 30
 # EDUBOTICS_LAN_OPEN maps to EDUBOTICS_BIND_HOST: "1" → 0.0.0.0 (published
 # ports reachable from the school LAN, the locked default), "0" → 127.0.0.1
 # (kiosk mode with a local monitor). config_generator derives BIND_HOST.
+# "0" binds the MANAGER's :80 to loopback too, so it is kiosk-only — never a
+# hardening knob (see the docker-compose.opi.yml ports comment). No code path
+# sets it: it is an operator hand-edit of the .env.
 DEFAULT_LAN_OPEN = "1"
-# ros_net IPAM subnet. Configurable per-rig because 172.16.0.0/12 is common
+# ros_net IPAM subnet. Configurable because 172.16.0.0/12 is common
 # institutional space and an overlap blackholes container→LAN routing (cloud
 # API unreachable from the server container). setup.sh (P4) records a free
 # range; the gateway is DERIVED (first host, e.g. .1) by config_generator.
+#
+# SCOPE (measured): the AUTOMATIC check is bench-only. setup.sh probes
+# `ip -4 route` at PROVISIONING time, the choice freezes into the golden image,
+# and every clone's first boot carries it forward verbatim (it cannot re-probe —
+# it runs Before=network-online.target). So this dodges the BENCH's LAN, never
+# the deployment school's.
+#
+# A MANUAL relocation on a deployed rig DOES work — compose re-IPAMs ros_net on
+# `up -d --force-recreate --no-deps physical_ai_manager`, the derived gateway
+# follows, and _gateway_binder_loop rebinds (it re-reads the gateway each tick).
+# But ONLY with the robot tier STOPPED. With it running, that same command stops
+# the manager, fails to remove the network ("has active endpoints"), exits
+# non-zero and leaves the manager `exited` — restart:unless-stopped does not
+# help (explicit stop), and a retry fails differently ("container is not
+# connected to the network") and never recovers. The Pi's only UI is gone until
+# someone intervenes by hand. Stop the robot tier first, or re-provision.
 DEFAULT_ROS_NET_SUBNET = "172.28.0.0/24"
 DEFAULT_ROS_NET_GATEWAY = "172.28.0.1"  # documentation only — derived from subnet
 

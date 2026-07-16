@@ -96,6 +96,18 @@ class TestRegistryHelpers(unittest.TestCase):
              patch.object(dm, "REGISTRY_FALLBACK", "nettername"):
             self.assertIsNone(dm._fallback_ref("nettername/x:latest"))
 
+    def test_ref_tag(self):
+        # The two-segment ghcr.io/<owner> prefix and a registry PORT are the
+        # traps here — a naive split(':') returns "5000/name" for the latter.
+        self.assertEqual(
+            dm._ref_tag("ghcr.io/svendanilborodun/physical-ai-server-opi:2.12.2"),
+            "2.12.2",
+        )
+        self.assertEqual(dm._ref_tag("nettername/physical-ai-server-opi:latest"), "latest")
+        self.assertEqual(dm._ref_tag("localhost:5000/physical-ai-server-opi:1.2.3"), "1.2.3")
+        # No tag at all → docker's own default.
+        self.assertEqual(dm._ref_tag("nettername/physical-ai-server-opi"), "latest")
+
     def test_is_registry_reachable(self):
         with patch.object(dm, "_host_reachable", side_effect=[False, True]):
             self.assertTrue(dm.is_registry_reachable())
@@ -190,9 +202,12 @@ class TestPull(unittest.TestCase):
             self.assertFalse(dm._pull_one_image("img", 0, 1, max_attempts=2))
 
     def test_pull_with_fallback_ghcr_ok(self):
+        # assertEqual, not assertTrue: every outcome is a non-empty string now,
+        # so assertTrue passes for PULL_MISSING too and pins nothing.
         with patch.object(dm, "_host_reachable", return_value=True), \
              patch.object(dm, "_pull_one_image", return_value=True) as pull:
-            self.assertTrue(dm._pull_image_with_fallback("ghcr.io/o/x:latest", 0, 1))
+            self.assertEqual(
+                dm._pull_image_with_fallback("ghcr.io/o/x:latest", 0, 1), dm.PULL_OK)
         pull.assert_called_once()
 
     def test_pull_with_fallback_hub_retag(self):
@@ -201,8 +216,185 @@ class TestPull(unittest.TestCase):
              patch.object(dm, "_host_reachable", return_value=True), \
              patch.object(dm, "_pull_one_image", return_value=False), \
              patch.object(dm, "_pull_fallback_and_retag", return_value=True) as fb:
-            self.assertTrue(dm._pull_image_with_fallback("ghcr.io/o/x:latest", 0, 1))
+            self.assertEqual(
+                dm._pull_image_with_fallback("ghcr.io/o/x:latest", 0, 1), dm.PULL_OK)
         fb.assert_called_once()
+
+    def test_pull_images_reports_failure_when_an_image_cannot_be_pulled(self):
+        """pull_images must compare the outcome against PULL_OK, not truthiness.
+
+        _pull_image_with_fallback used to return a bool; it now returns one of
+        three non-empty strings, and every one of them is truthy. The `not ...`
+        form therefore reported success after a pull that failed outright.
+        setup.sh's step 9 exits on this value, so the bench operator would be
+        told „Images pulled." and would image a golden SD card with no images.
+        """
+        for outcome in (dm.PULL_MISSING, dm.PULL_TRANSIENT):
+            with self.subTest(outcome=outcome):
+                with patch.object(dm, "ALL_IMAGES", ["ghcr.io/o/x:2.13.0"]), \
+                     patch.object(dm, "_image_present_locally", return_value=False), \
+                     patch.object(dm, "_pull_image_with_fallback", return_value=outcome):
+                    self.assertFalse(dm.pull_images())
+
+    def test_pull_images_succeeds_when_every_image_pulls(self):
+        with patch.object(dm, "ALL_IMAGES", ["ghcr.io/o/x:2.13.0"]), \
+             patch.object(dm, "_image_present_locally", return_value=False), \
+             patch.object(dm, "_pull_image_with_fallback", return_value=dm.PULL_OK):
+            self.assertTrue(dm.pull_images())
+
+    def test_pull_both_registries_fail_names_the_version_in_german(self):
+        """A release whose -opi images never published must say so, in German.
+
+        This path became REACHABLE when release.yml started baking
+        pi_agent/docker/versions.env: the agent now asks for `:X.Y.Z` instead of
+        `:latest`, so a skipped opi build (its leg is continue-on-error) means
+        both registries 404. That is the intended trade — before the pin the Pi
+        silently ran main HEAD — but only if the message identifies the VERSION.
+        A bare docker "manifest unknown" reads like a network fault and sends
+        the teacher to the wrong problem.
+        """
+        logs = []
+        with patch.object(dm, "REGISTRY", "ghcr.io/o"), \
+             patch.object(dm, "REGISTRY_FALLBACK", "nettername"), \
+             patch.object(dm, "_host_reachable", return_value=True), \
+             patch.object(dm, "_pull_one_image", return_value=False), \
+             patch.object(dm, "_pull_fallback_and_retag", return_value=False):
+            outcome = dm._pull_image_with_fallback(
+                "ghcr.io/o/physical-ai-server-opi:2.13.0", 0, 1, log=logs.append
+            )
+        # Both registries REACHABLE and both refused it → the tag does not
+        # exist. Classified MISSING (not merely "falsy"), because the update job
+        # fails the whole job on this and must never do so for a transient.
+        self.assertEqual(outcome, dm.PULL_MISSING)
+        blob = "\n".join(logs)
+        self.assertIn("[FEHLER]", blob)
+        # The version must be named — that is the whole point of the message.
+        self.assertIn("2.13.0", blob)
+        # German, with literal umlauts (Rule §1 / ci.yml::german-strings-lint).
+        self.assertIn("für dieses Release nicht veröffentlicht", blob)
+        # And it must NOT be mistaken for a connectivity problem.
+        self.assertIn("kein Netzwerkfehler", blob)
+        # The old text blamed an unreachable GHCR on EVERY fallback, including
+        # this one where GHCR is up and merely lacks the tag. Blaming the
+        # network here contradicts the [FEHLER] verdict two lines later.
+        self.assertNotIn("nicht erreichbar", blob)
+        self.assertIn("bei GHCR nicht gefunden", blob)
+
+    def test_pull_unreachable_registries_classify_transient_not_missing(self):
+        """A Wi-Fi blip must NOT be reported as an unpublished release.
+
+        This is the other half of the classification the update job depends on:
+        TRANSIENT keeps today's graceful degrade onto the images already on
+        disk, MISSING fails the job. Confusing the two either turns a blip into
+        a red error or lets a never-published release report success.
+        """
+        logs = []
+        with patch.object(dm, "REGISTRY", "ghcr.io/o"), \
+             patch.object(dm, "REGISTRY_FALLBACK", "nettername"), \
+             patch.object(dm, "_host_reachable", return_value=False), \
+             patch.object(dm, "_pull_one_image", return_value=False), \
+             patch.object(dm, "_pull_fallback_and_retag", return_value=False):
+            outcome = dm._pull_image_with_fallback(
+                "ghcr.io/o/physical-ai-server-opi:2.13.0", 0, 1, log=logs.append
+            )
+        self.assertEqual(outcome, dm.PULL_TRANSIENT)
+        blob = "\n".join(logs)
+        # Must NOT accuse the release of being unpublished.
+        self.assertNotIn("[FEHLER]", blob)
+        self.assertNotIn("nicht veröffentlicht", blob)
+        self.assertIn("keine Registry erreichbar", blob)
+
+    def test_unreachable_ghcr_plus_hub_404_is_transient_not_missing(self):
+        """GHCR unreachable + Hub lacking the tag must NOT accuse the release.
+
+        MISSING is a claim about GHCR's contents, and GHCR is the only registry
+        that can settle it: docker-publish.yml makes the Hub retag best-effort
+        („the Docker Hub fallback for this tag may be stale until the next
+        release"), so Hub 404s a tag GHCR serves all by itself. With ghcr.io
+        unreachable we never got the authoritative answer — and this is exactly
+        a school that firewalls ghcr.io, the network this product exists for.
+        Blaming the release there is both wrong and self-contradictory: the same
+        log already says „Primär-Registry (GHCR) nicht erreichbar".
+        """
+        logs = []
+        with patch.object(dm, "REGISTRY", "ghcr.io/o"), \
+             patch.object(dm, "REGISTRY_FALLBACK", "nettername"), \
+             patch.object(dm, "_host_reachable",
+                          side_effect=lambda h, *a, **k: h != "ghcr.io"), \
+             patch.object(dm, "_pull_one_image", return_value=False), \
+             patch.object(dm, "_pull_fallback_and_retag", return_value=False):
+            outcome = dm._pull_image_with_fallback(
+                "ghcr.io/o/physical-ai-server-opi:2.13.0", 0, 1, log=logs.append
+            )
+        self.assertEqual(outcome, dm.PULL_TRANSIENT)
+        blob = "\n".join(logs)
+        self.assertNotIn("[FEHLER]", blob)
+        self.assertNotIn("nicht veröffentlicht", blob)
+        # GHCR was never asked, so the log must not claim what GHCR holds.
+        self.assertNotIn("bei GHCR nicht vorhanden", blob)
+        self.assertIn("Primär-Registry (GHCR) nicht erreichbar", blob)
+
+    def test_missing_message_claims_only_what_was_established(self):
+        """With Hub unreachable the message must not assert Hub's contents.
+
+        GHCR answered and lacks the tag → MISSING is right. But the earlier
+        wording („weder bei GHCR noch bei Docker Hub vorhanden") asserted Hub's
+        contents too, which we never learned when Hub was unreachable.
+        """
+        logs = []
+        with patch.object(dm, "REGISTRY", "ghcr.io/o"), \
+             patch.object(dm, "REGISTRY_FALLBACK", "nettername"), \
+             patch.object(dm, "_host_reachable",
+                          side_effect=lambda h, *a, **k: h == "ghcr.io"), \
+             patch.object(dm, "_pull_one_image", return_value=False), \
+             patch.object(dm, "_pull_fallback_and_retag", return_value=False):
+            outcome = dm._pull_image_with_fallback(
+                "ghcr.io/o/physical-ai-server-opi:2.13.0", 0, 1, log=logs.append
+            )
+        self.assertEqual(outcome, dm.PULL_MISSING)
+        blob = "\n".join(logs)
+        self.assertIn("2.13.0", blob)
+        self.assertIn("bei GHCR nicht vorhanden", blob)
+        self.assertNotIn("weder bei GHCR noch bei Docker Hub vorhanden", blob)
+
+    def test_check_for_updates_reports_missing_images_to_caller(self):
+        """check_for_updates must hand PULL_MISSING up via missing_out.
+
+        Its bool return means "did bytes change", which is why the update job
+        could not tell a never-published release from a no-op. missing_out is
+        the seam that lets the caller fail loudly without changing the
+        established non-fatal per-image contract.
+        """
+        missing = []
+        with patch.object(dm, "SKIP_AUTO_PULL", False), \
+             patch.object(dm, "ALL_IMAGES", ["ghcr.io/o/physical-ai-server-opi:2.13.0"]), \
+             patch.object(dm, "is_registry_reachable", return_value=True), \
+             patch.object(dm, "_get_local_repo_digest", return_value=None), \
+             patch.object(dm, "_get_remote_digest_candidates", return_value=set()), \
+             patch.object(dm, "_pull_image_with_fallback", return_value=dm.PULL_MISSING), \
+             patch.object(dm, "_save_last_pull_info"):
+            changed = dm.check_for_updates(missing_out=missing)
+        self.assertEqual(missing, ["physical-ai-server-opi:2.13.0"])
+        # The bool contract is unchanged: nothing was pulled, so nothing changed.
+        self.assertFalse(changed)
+
+    def test_check_for_updates_omits_missing_from_the_kept_version_claim(self):
+        """A MISSING image must not claim the previous version is still in use.
+
+        On a freshly flashed Pi there are no local images, so
+        „aktuelle Version wird weiter verwendet" is false — and it directly
+        contradicts the [FEHLER] logged moments earlier.
+        """
+        logs = []
+        with patch.object(dm, "SKIP_AUTO_PULL", False), \
+             patch.object(dm, "ALL_IMAGES", ["ghcr.io/o/physical-ai-server-opi:2.13.0"]), \
+             patch.object(dm, "is_registry_reachable", return_value=True), \
+             patch.object(dm, "_get_local_repo_digest", return_value=None), \
+             patch.object(dm, "_get_remote_digest_candidates", return_value=set()), \
+             patch.object(dm, "_pull_image_with_fallback", return_value=dm.PULL_MISSING), \
+             patch.object(dm, "_save_last_pull_info"):
+            dm.check_for_updates(log=logs.append, missing_out=[])
+        self.assertNotIn("aktuelle Version wird weiter verwendet", "\n".join(logs))
 
 
 class TestCheckForUpdates(unittest.TestCase):
@@ -229,19 +421,33 @@ class TestCheckForUpdates(unittest.TestCase):
     def test_stale_triggers_pull(self):
         local = "sha256:" + "a" * 64
         remote = {"sha256:" + "b" * 64}
-        # images -q returns different ids before/after → bytes changed.
-        rec = _Recorder(_Proc(0)).when(
-            lambda a: "images" in a, _Proc(0, stdout="oldid"))
+        # `docker images -q` is probed once BEFORE and once AFTER each pull, and
+        # check_for_updates reports "bytes changed" only when the two ids
+        # DIFFER. The previous recorder answered "oldid" to both, so the
+        # comment below described a comparison the mock made impossible and the
+        # test asserted only that a pull was attempted.
+        ids = iter(["oldid", "newid"] * len(dm.ALL_IMAGES))
+
+        def fake_run(argv, *a, **kw):
+            if "images" in argv:
+                return _Proc(0, stdout=next(ids, "newid"))
+            return _Proc(0)
+
+        # PULL_OK, not True: check_for_updates compares `outcome != PULL_OK`, so
+        # a bool mock silently routed this "stale triggers pull" test down the
+        # „Übersprungen" SKIP branch — the opposite of what it documents.
         with patch.object(dm, "SKIP_AUTO_PULL", False), \
              patch.object(dm, "is_registry_reachable", return_value=True), \
              patch.object(dm, "_get_local_repo_digest", side_effect=[local] * 10), \
              patch.object(dm, "_get_remote_digest_candidates", return_value=remote), \
-             patch.object(dm, "_pull_image_with_fallback", return_value=True) as pull, \
+             patch.object(dm, "_pull_image_with_fallback", return_value=dm.PULL_OK) as pull, \
              patch.object(dm, "_save_last_pull_info"), \
-             patch.object(dm.subprocess, "run", rec):
-            dm.check_for_updates()
+             patch.object(dm.subprocess, "run", fake_run):
+            changed = dm.check_for_updates()
         # One pull per image in ALL_IMAGES.
         self.assertEqual(pull.call_count, len(dm.ALL_IMAGES))
+        # And the pull was really taken as an update: old id → new id.
+        self.assertTrue(changed)
 
 
 # ── lifecycle command construction (native, --no-deps, never `down`) ─────────

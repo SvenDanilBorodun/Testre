@@ -695,6 +695,34 @@ jobs:
             exit 1
           fi
           echo "OK: ${{ matrix.server_repo }} has ROS_DISTRO=jazzy"
+      - name: Assert the pulled image is THIS run's build (not a stale retag)
+        # Everything else in this job asserts PROPERTIES of an image (has ROS,
+        # has the bundle env, is under the size ceiling) — none of it asserts
+        # WHICH image. That gap is not theoretical: this job pulls `:latest`,
+        # and GHCR `:latest` is written by the marker-gated retag. When an opi
+        # build fails or partially publishes, no marker is produced, the retag
+        # SKIPS, and GHCR `:latest` keeps pointing at the PREVIOUS release —
+        # whereupon every check below passes, green, against last release's
+        # image. The opi leg is continue-on-error, so nothing else would notice.
+        #
+        # build-images.sh already stamps org.opencontainers.image.revision from
+        # BUILD_ID (set to github.sha by this workflow's build job), and the
+        # amd64/opi flatten round-trips labels through `docker import -c LABEL`,
+        # so the label survives on all three flavors. Comparing it to github.sha
+        # makes "smoke-tested a stale image" structurally impossible rather than
+        # something a reviewer has to remember.
+        env:
+          EXPECT_SHA: ${{ github.sha }}
+          SERVER_IMAGE: ghcr.io/svendanilborodun/${{ matrix.server_repo }}:latest
+        run: |
+          set -e
+          GOT_SHA="$(docker image inspect "$SERVER_IMAGE" \
+                     --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')"
+          if [ "$GOT_SHA" != "$EXPECT_SHA" ]; then
+            echo "::error::${SERVER_IMAGE} carries org.opencontainers.image.revision='${GOT_SHA}' but this run is '${EXPECT_SHA}'. The image on GHCR is NOT the one this run built — every other check in this job is therefore testing the wrong image. For opi this usually means the build leg failed/skipped (no build-success marker) so the retag left the previous release's image in place."
+            exit 1
+          fi
+          echo "OK: ${SERVER_IMAGE} was built from ${GOT_SHA} (== this run's sha)"
       - name: Assert amd64 server image is CUDA-slimmed (real size ceiling)
         if: matrix.platform == 'amd64'
         # The CUDA slim (build-images.sh flatten of the amd64 image) must keep

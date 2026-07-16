@@ -613,9 +613,10 @@ for i in 1 2; do
         echo "[STOPP]   Slot $prev"
         echo "[STOPP]   Slot $i:$name"
         echo "[STOPP] Ursache: Zwei UVC-Kameras mit identischer USB-Seriennummer (häufig bei Innomaker U20CAM-720P)"
-        echo "[STOPP] teilen sich denselben /dev/v4l/by-id/-Symlink. Die GUI sollte beim nächsten"
-        echo "[STOPP] 'Geräte aktualisieren' automatisch by-path verwenden. Bis dahin:"
-        echo "[STOPP]   1. EduBotics neu starten (GUI → 'Hardware neu erkennen')"
+        echo "[STOPP] teilen sich denselben /dev/v4l/by-id/-Symlink. Beim nächsten Kamera-Scan"
+        echo "[STOPP] sollte automatisch by-path verwendet werden. Bis dahin:"
+        echo "[STOPP]   1. Windows-PC: EduBotics neu starten (GUI → 'Hardware neu erkennen')."
+        echo "[STOPP]      Orange Pi: im Reiter 'System' die Kameras neu erkennen lassen."
         echo "[STOPP]   2. Oder CAMERA_DEVICE_2 in .env manuell auf /dev/v4l/by-path/... setzen."
         exit 3
     fi

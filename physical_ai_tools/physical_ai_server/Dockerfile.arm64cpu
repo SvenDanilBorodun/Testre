@@ -64,7 +64,31 @@ ENV PIP_BREAK_SYSTEM_PACKAGES=1
 # ros-base does not ship it and the guarded import silently fail-opens without
 # it. Mirrored in the thin overlay Dockerfile (which is what CI actually builds
 # on top of the published base, and where the operative install lives).
-RUN apt-get update && apt-get install -y \
+#
+# --no-install-recommends: this is a HEADLESS robot controller, so the recommends
+# of ffmpeg/vim/nano are desktop payload it never executes. The thin overlay's own
+# apt call already passes this flag; the base was simply inconsistent with it.
+#
+# What it ACTUALLY buys, measured by building this file both ways on real arm64
+# (do not quote the isolated apt numbers — they mislead): in ISOLATION this call
+# resolves 215 packages vs 148 without recommends, but the `rosdep install` step
+# further down re-pulls most of that set as HARD dependencies of ROS packages. In
+# the finished image the delta is 1187 -> 1174 packages, i.e. only 13 stay gone —
+# but they are the fat ones, so the saving is 152 MB (du 4.91 -> 4.76 GB), ~2.4x
+# what the isolated download figure suggests.
+#
+# Actually dropped: mesa-vulkan-drivers (110 MB), mesa-va-drivers,
+# mesa-vdpau-drivers, va-driver-all, vdpau-driver-all, pocketsphinx-en-us (a
+# 37 MB speech model). NOT dropped — libgl1, libvulkan1, xkb-data, ubuntu-mono,
+# systemd-sysv and networkd-dispatcher all come back via rosdep as hard ROS deps,
+# so do not expect this flag to remove them. Squeezing those out would mean
+# tightening the rosdep step too, which is NOT verified safe and was left alone.
+#
+# VERIFIED SAFE for the recording path: libx264-164 is a hard dependency of
+# ffmpeg (not a recommend), so it is still pulled without recommends and the
+# EDUBOTICS_VCODEC=h264 software encode this flavor relies on is unaffected —
+# checked against the real package tree, not assumed.
+RUN apt-get update && apt-get install -y --no-install-recommends \
     xz-utils \
     ffmpeg \
     vim \
@@ -233,21 +257,58 @@ RUN mkdir -p /var/run/agent && \
 # talos_system_manager — kept here ONLY because its requirements.txt installs
 # shared pip deps into site-packages that other packages reuse. The directory
 # itself + the PYTHONPATH entry are stripped from the production image by the
-# thin-overlay Dockerfile in robotis_ai_setup/docker/physical_ai_server/, so
-# nothing depends on /opt/talos_system_manager existing at runtime.
+# thin-overlay Dockerfile in robotis_ai_setup/docker/physical_ai_server/.
+#
+# That strip is NOT free, and the comment here used to claim it was ("nothing
+# depends on /opt/talos_system_manager existing at runtime"). It is false: the
+# s6-rc service enabled at the bottom of this file (s6-agent) execs
+# `uvicorn talos.agent.s6_agent:app`, so deleting the directory without also
+# disabling the service leaves s6 restarting a ModuleNotFoundError ~once a
+# second, forever. The thin overlay therefore removes the service marker in the
+# SAME layer that removes this directory — see the strip-bloat block there. Keep
+# the two together; neither is correct alone.
 #
 # SHA-pinned (commit "BUMP 0.1.2", 2026-02-05) so the requirements.txt list
 # can't shift under us between builds. Only the pip-installed packages persist
 # into the production image (the directory itself is stripped). Bumping this
 # pin is safe as long as the new commit's requirements.txt resolves cleanly
 # alongside the LeRobot deps installed in the layers above.
+#
+# The clone is deliberately NOT `--depth 1` (unlike the physical_ai_tools clone
+# above, which tracks a BRANCH). A shallow clone only fetches the default
+# branch's tip, and this checkout targets a pinned SHA: it would work only for
+# as long as the pin happens to BE the tip, then fail with "unable to read tree"
+# the first time upstream pushes past it — green in testing, broken later.
+# Measured, the trade buys nothing anyway: the shallow clone is 112 MB vs 113 MB
+# full (this repo's weight is the tip's blobs, not its history), and the thin
+# overlay strips .git entirely.
 ARG TALOS_SYSTEM_MANAGER_REF=40981c6d15a1e0f1cba9e3d424fe292833c1b7f9
 RUN set -e && \
     git clone https://github.com/ROBOTIS-GIT/talos_system_manager.git /opt/talos_system_manager && \
     git -C /opt/talos_system_manager checkout "${TALOS_SYSTEM_MANAGER_REF}" && \
     echo "talos_system_manager pinned to ${TALOS_SYSTEM_MANAGER_REF}"
 
-ENV PYTHONPATH=/opt/talos_system_manager:${PYTHONPATH}
+# ${PYTHONPATH:+:${PYTHONPATH}} — append the inherited PYTHONPATH only when it
+# is actually set. Stock ros:jazzy-ros-base sets NONE (verified against the
+# image config), so the naive `:${PYTHONPATH}` form expanded to a TRAILING
+# COLON. Python reads an empty PYTHONPATH component as the current working
+# directory, so every build step below ran with CWD on sys.path — measured:
+#   :${PYTHONPATH}          -> PYTHONPATH=/opt/talos:  -> sys.path ['/', '/opt/talos', '/']
+#   ${PYTHONPATH:+:...}     -> PYTHONPATH=/opt/talos   -> sys.path ['/', '/opt/talos', ...]
+# Benign in the SHIPPED image (the thin overlay sets ENV PYTHONPATH=); this is
+# about the build not silently importing out of the build context.
+#
+# KNOWN, ACCEPTED: BuildKit still prints `UndefinedVar: Usage of undefined
+# variable '$PYTHONPATH'` here. That lint is a static check — it flags any
+# reference to a variable this Dockerfile never declares and does not model
+# `:+` at all, so the guard cannot satisfy it. The two ways to silence it are
+# to hardcode `ENV PYTHONPATH=/opt/talos_system_manager` (identical TODAY, but
+# `ros:jazzy-ros-base` is a mutable tag — the day upstream sets a PYTHONPATH we
+# would clobber it, silently) or to `ARG PYTHONPATH=` (declares a build arg
+# whose whole purpose is to be overridden). Neither trade is worth a cosmetic
+# warning in a base nothing in CI builds, so the correct-semantics form stays
+# and the warning is expected output.
+ENV PYTHONPATH=/opt/talos_system_manager${PYTHONPATH:+:${PYTHONPATH}}
 
 RUN python3 -m pip install --no-cache-dir -r /opt/talos_system_manager/requirements.txt
 

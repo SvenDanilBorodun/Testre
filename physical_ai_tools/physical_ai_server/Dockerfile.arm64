@@ -54,7 +54,7 @@ ENV PIP_EXTRA_INDEX_URL=https://pypi.org/simple
 
 # LeRobot v0.5.1 from PyPI via the Jetson AI Lab pip index (set as ENV above).
 # Falls through to PyPI for any wheel the Jetson index doesn't carry. Extras:
-#   [pi0]      pulls PI0Policy + PI0FastPolicy deps
+#   [pi]       pulls PI0Policy + PI0FastPolicy deps (the extra is `pi`, not `pi0`)
 #   [smolvla]  pulls transformers==5.3.0 + SmolVLM deps; transitively covers
 #              pi05 (Pi-0.5, new in v0.5.1)
 #   [peft]     pulls PeftConfig/PeftModel for cfg.use_peft branch
@@ -151,8 +151,15 @@ RUN mkdir -p /var/run/agent && \
 # talos_system_manager — kept here ONLY because its requirements.txt installs
 # shared pip deps into site-packages that other packages reuse. The directory
 # itself + the PYTHONPATH entry are stripped from the production image by the
-# thin-overlay Dockerfile in robotis_ai_setup/docker/physical_ai_server/, so
-# nothing depends on /opt/talos_system_manager existing at runtime.
+# thin-overlay Dockerfile in robotis_ai_setup/docker/physical_ai_server/.
+#
+# That strip is NOT free, and this comment used to claim it was ("nothing
+# depends on /opt/talos_system_manager existing at runtime"). It is false: the
+# s6-agent service enabled at the bottom of this file execs
+# `uvicorn talos.agent.s6_agent:app` and crash-loops once a second on a
+# ModuleNotFoundError once the directory is gone. The thin overlay removes the
+# service marker in the same layer that removes this directory — keep them
+# together; neither is correct alone.
 #
 # SHA-pinned (commit "BUMP 0.1.2", 2026-02-05) so the requirements.txt list
 # can't shift under us between builds. Only the pip-installed packages persist

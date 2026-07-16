@@ -86,6 +86,7 @@ from .constants import (
     COMPOSE_FILE,
     ENV_FILE,
     IMAGE_OPEN_MANIPULATOR,
+    IMAGE_TAG,
     PHONE_FRAME_STALE_MAX_AGE_S,
     PORT_AGENT,
     REGISTRY,
@@ -976,7 +977,38 @@ class AgentApp:
                 docker_manager.stop_robot_tier(log=joblog)
 
                 setphase("pulling", 30, "Container-Images werden aktualisiert …")
-                docker_manager.check_for_updates(log=joblog)
+                # Transient pull failures stay non-fatal (they classify
+                # PULL_TRANSIENT inside check_for_updates), so a Wi-Fi blip
+                # still degrades gracefully onto the images already on disk —
+                # that resilience is deliberate and unchanged. A PULL_MISSING
+                # is a different animal: the pinned tag exists on NEITHER
+                # registry, which means this release's `-opi` images were never
+                # published (the opi build leg is continue-on-error in
+                # docker-publish.yml, so it can skip silently while the agent
+                # tarball ships anyway). Waiting cannot fix it, and on a freshly
+                # flashed Pi there are no local images to fall back to — so
+                # reporting „Aktualisierung abgeschlossen" over it is exactly
+                # how a rig ends up on the wrong containers with nobody the
+                # wiser. Fail the job instead; the except below turns this into
+                # the card's German failure message.
+                missing: list = []
+                docker_manager.check_for_updates(log=joblog, missing_out=missing)
+                if missing:
+                    # Plural matters here: the scenario this message exists for
+                    # is a SKIPPED opi build leg, which leaves all three -opi
+                    # images untagged — so „Images … sind" is the common case
+                    # and „Image … ist" the rare one. Mirror docker_manager's
+                    # wording: claim only GHCR's contents (which we established)
+                    # and say of Hub only that it did not yield the image.
+                    noun, verb = (("Image", "ist") if len(missing) == 1
+                                  else ("Images", "sind"))
+                    raise RuntimeError(
+                        f"Version {IMAGE_TAG} ist unvollständig veröffentlicht — "
+                        f"{noun} {', '.join(missing)} {verb} bei GHCR nicht "
+                        "vorhanden und auch über Docker Hub nicht zu beziehen. "
+                        "Das ist kein Netzwerkfehler. Bitte die Version dem "
+                        "EduBotics-Team melden."
+                    )
 
                 setphase("agent", 70, "Agent-Version wird geprüft …")
                 staged_tarball = None
@@ -1699,6 +1731,29 @@ class AgentApp:
                 config_generator.generate_cloud_only_env(self.env_file)
             except Exception as e:  # noqa: BLE001
                 self._log(f"Cloud-.env konnte nicht erstellt werden: {e}")
+        else:
+            # The .env EXISTS but may pin a stale IMAGE_TAG. This matters because
+            # the agent self-updates in place (rsync of the new pi_agent/ tree,
+            # which carries a new docker/versions.env): constants.IMAGE_TAG then
+            # resolves to the NEW release while the .env — the file compose
+            # actually reads via --env-file — still names the OLD one. The
+            # always-on manager would keep running the previous release until
+            # some unrelated regenerate (arm scan, leader toggle, factory reset)
+            # happened to fix it. IMAGE_TAG is a MANAGED key precisely so "a
+            # stale pinned tag is superseded" (config_generator.MANAGED_KEYS) —
+            # but nothing re-asserted it after a self-update, so do it here, on
+            # the one code path every boot goes through. Cheap and idempotent:
+            # a match is a no-op, and upsert is atomic (temp + os.replace, 0600).
+            try:
+                current = config_generator.read_env_var("IMAGE_TAG", self.env_file)
+                if (current or "").strip() != IMAGE_TAG:
+                    self._log(
+                        f"IMAGE_TAG in der .env ({current or 'nicht gesetzt'}) "
+                        f"passt nicht zur Agent-Version ({IMAGE_TAG}) — wird angeglichen."
+                    )
+                    config_generator.upsert_env_var("IMAGE_TAG", IMAGE_TAG, self.env_file)
+            except Exception as e:  # noqa: BLE001 — never block boot on this
+                self._log(f"IMAGE_TAG konnte nicht angeglichen werden: {e}")
 
         self.start_loopback()
 

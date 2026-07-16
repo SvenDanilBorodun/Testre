@@ -47,7 +47,7 @@ RUN cd ${COLCON_WS} && \
 
 
 # LeRobot v0.5.1 from PyPI. Extras:
-#   [pi0]      pulls PI0Policy + PI0FastPolicy deps
+#   [pi]       pulls PI0Policy + PI0FastPolicy deps (the extra is `pi`, not `pi0`)
 #   [smolvla]  pulls transformers==5.3.0 (exact pin from LeRobot's pyproject)
 #              + SmolVLM deps; transitively covers pi05 (Pi-0.5, new in v0.5.1)
 #   [peft]     pulls PeftConfig/PeftModel for make_policy's cfg.use_peft branch

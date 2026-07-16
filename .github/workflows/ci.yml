@@ -176,6 +176,128 @@ jobs:
           fi
           echo "rootfs-version-guard OK"
 
+  base-version-guard:
+    # The self-built server BASE images are NOT built by CI. No workflow sets
+    # BUILD_BASE_ARM64 or BUILD_BASE_OPI — a maintainer hand-builds each base
+    # once (`BUILD_BASE_OPI=1 PLATFORM=opi ./build-images.sh`) and pushes it,
+    # and every CI build thereafter just resolves the already-PUBLISHED tag
+    # pinned in build-images.sh via `docker manifest inspect`.
+    #
+    # So editing Dockerfile.arm64cpu / Dockerfile.arm64 does nothing on its own
+    # — and does it QUIETLY. The release goes green while shipping the previous
+    # base, and the edit looks landed because the file is in git. Rule §5 sends
+    # people into exactly these files to bump LeRobot pins, which is what makes
+    # the trap load-bearing rather than theoretical. It is the same failure
+    # shape rootfs-version-guard fences (a change that can never reach a rig),
+    # so it gets the same fence: if a base Dockerfile changed materially, the
+    # tag identifying its published image must move in the same commit.
+    #
+    # COMMENT-ONLY edits are exempt on purpose. They cannot change the built
+    # image, and demanding a ~30-minute base rebuild + republish to land a
+    # comment fix is how a guard earns a reputation for being worth routing
+    # around. The diff below is filtered to added/removed lines that are
+    # neither blank nor pure `#` comments.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Assert a self-built base tag moves with its base Dockerfile
+        # Env indirection rather than inline ${{ }} in the run block (zizmor
+        # template-injection); all three are runner-provided, not user text.
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            BASE="$PR_BASE_SHA"
+          else
+            BASE="$PUSH_BEFORE_SHA"
+          fi
+          # First push to a branch / rewritten history: fall back to the parent
+          # commit, or the empty tree for a single-commit repo (mirrors
+          # rootfs-version-guard).
+          if [ -z "$BASE" ] || ! git cat-file -e "$BASE" 2>/dev/null; then
+            BASE="$(git rev-parse HEAD~1 2>/dev/null || git hash-object -t tree /dev/null)"
+          fi
+
+          BUILD_SH=robotis_ai_setup/docker/build-images.sh
+
+          # True iff the file has >=1 added/removed line that is neither blank
+          # nor a pure comment. -U0 keeps context lines out of the diff; the
+          # +++/--- headers are dropped explicitly. Results are captured into a
+          # variable rather than piped into `grep -q`: -q exits early, which
+          # SIGPIPEs the upstream sed, which under `pipefail` would return 141
+          # and invert the answer.
+          #
+          # The header filter matches the FULL header shape (`--- a/…`,
+          # `+++ b/…`, `--- /dev/null`), not just a `---`/`+++` prefix. A bare
+          # prefix also eats a real deleted line whose own text begins with
+          # `-- ` at column 0 — git renders that as `--- <text>` — which would
+          # let the guard wave through a Dockerfile edit as "no code change".
+          # No such line exists in either base Dockerfile today; this keeps the
+          # guard from quietly acquiring the blind spot it exists to prevent.
+          has_code_change() {
+            local changed
+            changed="$(git diff -U0 "$BASE" HEAD -- "$1" \
+              | grep -E '^[+-]' \
+              | grep -Ev '^(--- (a/|/dev/null)|\+\+\+ (b/|/dev/null))' \
+              | sed -E 's/^[+-]//' \
+              | grep -Ev '^[[:space:]]*(#.*)?$' || true)"
+            [ -n "$changed" ]
+          }
+
+          # The tag pinned for a base repo, read out of build-images.sh at a
+          # given ref. Empty when the assignment is absent/renamed.
+          pin_tag() {
+            git show "$1:$BUILD_SH" 2>/dev/null \
+              | sed -nE "s|^[[:space:]]*PAS_BASE_IMAGE=.*/$2:([A-Za-z0-9._-]+).*|\1|p" \
+              | head -1
+          }
+
+          # True iff the pinned tag VALUE actually differs between BASE and HEAD.
+          # Comparing the value — not "was the pin line touched" — is deliberate:
+          # a `grep '^+.*PAS_BASE_IMAGE'` is satisfied by any cosmetic edit to
+          # that line (a trailing comment, a reflow), which would wave through the
+          # exact mistake this guard exists to catch. An EMPTY `after` (the
+          # assignment was renamed or deleted) reports as "not moved" so the check
+          # below fails loudly rather than silently passing.
+          pin_moved() {
+            local before after
+            before="$(pin_tag "$BASE" "$1")"
+            after="$(pin_tag HEAD "$1")"
+            [ -n "$after" ] && [ "$before" != "$after" ]
+          }
+
+          rc=0
+          check() {
+            local dockerfile="$1" base_repo="$2" rebuild_cmd="$3"
+            if ! has_code_change "$dockerfile"; then
+              echo "OK: ${dockerfile} — no non-comment changes, nothing to enforce."
+              return 0
+            fi
+            if pin_moved "$base_repo"; then
+              echo "OK: ${dockerfile} changed AND its ${base_repo} pin moved."
+              return 0
+            fi
+            echo "::error file=${dockerfile}::${dockerfile} changed, but the ${base_repo} tag in ${BUILD_SH} did not. This base is NOT built by CI — the build resolves the tag already published in the registry, so your edit would ship NOTHING while the release still goes green. Rebuild and push the base with '${rebuild_cmd}', then bump PAS_BASE_IMAGE to the new tag in this same commit. Comment-only edits are exempt."
+            rc=1
+          }
+
+          check physical_ai_tools/physical_ai_server/Dockerfile.arm64cpu \
+                physical-ai-server-opi-base \
+                'BUILD_BASE_OPI=1 PLATFORM=opi ./build-images.sh'
+          check physical_ai_tools/physical_ai_server/Dockerfile.arm64 \
+                physical-ai-server-jetson-base \
+                'BUILD_BASE_ARM64=1 PLATFORM=arm64 ./build-images.sh'
+
+          [ "$rc" = "0" ] || exit 1
+          echo "base-version-guard OK"
+
   powershell-encoding:
     # Windows PowerShell 5.1 (the default shell on Win10/Win11 used by the
     # installer's [Run] steps) decodes .ps1 files using the system code page

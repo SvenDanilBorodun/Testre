@@ -4,11 +4,33 @@
 # start) rather than a static file — unlike the plan's "static
 # nginx.opi.conf" wording. Justification: the ONLY substituted token is
 # ${EDUBOTICS_ROS_NET_GATEWAY}, the docker `ros_net` gateway the pi-agent
-# listens on. That subnet is a managed `.env` key (P2) so a school LAN
-# overlapping the default 172.28.0.0/24 can be relocated
+# listens on. That subnet is a managed `.env` key (P2) so the default
+# 172.28.0.0/24 can be relocated off a colliding subnet
 # (172.16.0.0/12 is common institutional space, and an overlap
 # blackholes container->LAN routing) — the gateway must therefore be
-# injectable at start, not baked. Dockerfile.opi sets
+# injectable at start, not baked.
+#
+# SCOPE OF THAT RELOCATION (measured, do not overstate it): the AUTOMATIC
+# overlap check is bench-only — setup.sh's choose_ros_net_subnet() probes
+# `ip -4 route` at PROVISIONING time, the choice freezes into the golden
+# image, and every clone's first boot carries it forward verbatim (it cannot
+# re-probe: it runs Before=network-online.target). So the subnet dodges the
+# BENCH's LAN, never the deployment school's.
+#
+# A MANUAL relocation on a deployed rig DOES work, but ONLY with the robot
+# tier stopped — and that caveat is the whole point of this paragraph:
+#   * robot tier DOWN (a Pi's normal idle state): edit EDUBOTICS_ROS_NET_SUBNET
+#     in the .env, then the agent's `up -d --force-recreate --no-deps
+#     physical_ai_manager` recreates ros_net on the new subnet. The derived
+#     gateway and this proxy_pass follow it; _gateway_binder_loop re-reads the
+#     gateway every tick and rebinds. Verified end-to-end: clean exit, no 502.
+#   * robot tier UP: the SAME command stops the manager, then FAILS to remove
+#     the network ("has active endpoints"), exits non-zero, and leaves the
+#     manager `exited` — restart:unless-stopped does not help (an explicit stop).
+#     A retry fails differently ("container is not connected to the network")
+#     and never recovers. The Pi's only UI is then gone until someone manually
+#     intervenes. Always stop the robot tier before relocating the subnet.
+# Dockerfile.opi sets
 # NGINX_ENVSUBST_FILTER="^EDUBOTICS_ROS_NET_GATEWAY$" so nginx's own
 # runtime vars ($host, $uri, $remote_addr, $proxy_add_x_forwarded_for,
 # $scheme) — all single-$ — pass through untouched.
@@ -25,9 +47,50 @@
 # (utils/piMode.js localRosbridgeUrl/videoStreamBase); the direct host
 # ports stay published in docker-compose.opi.yml as a debug/rollback
 # path only.
+# WebSocket Connection-header map. Rendered into /etc/nginx/conf.d/default.conf,
+# which nginx includes from http{} — so a map here is in the right context.
+# Without it the /rosbridge location had to hardcode `Connection: upgrade`, which
+# sent a bogus upgrade token on every NON-WebSocket request to that path. Both
+# vars are single-$ and survive envsubst (NGINX_ENVSUBST_FILTER matches only
+# EDUBOTICS_ROS_NET_GATEWAY).
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+
 server {
     listen 80;
     server_name localhost;
+
+    # ── Security headers ─────────────────────────────────────────────────────
+    # The opi manager is the ONLY one of the three manager builds published on
+    # 0.0.0.0 by default (docker-compose.opi.yml binds ${EDUBOTICS_BIND_HOST}:80
+    # and constants.DEFAULT_LAN_OPEN="1"), i.e. the most exposed and — until
+    # now — the only one with no headers at all. The student nginx.conf omits
+    # them because it is 127.0.0.1-bound; that reasoning does not carry here.
+    # Mirrors nginx.web.conf.template's set, with ONE deliberate omission:
+    #
+    #   NO Strict-Transport-Security. The Pi serves plain HTTP on :80 with no
+    #   TLS anywhere in front of it. RFC 6797 §7.2 requires a UA to IGNORE an
+    #   STS header received over non-secure transport, so it would be a
+    #   guaranteed no-op — and if a rig ever did get a cert, a stale two-year
+    #   includeSubDomains max-age pinned to a LAN IP/.local name is a footgun,
+    #   not a protection. The web dashboard sets it because Railway terminates
+    #   TLS in front of it; nothing terminates TLS in front of a Pi.
+    #
+    # camera=()/microphone=()/geolocation=() are safe: the SPA never calls
+    # getUserMedia (camera feeds are server-side MJPEG via <img>), and the web
+    # build already ships this exact value from the same codebase. DENY is safe:
+    # the app frames nothing of its own.
+    #
+    # `add_header` only inherits into a location that declares NO add_header of
+    # its own, so every location below that sets Cache-Control MUST re-declare
+    # these four. The proxy locations (/api/system/, /rosbridge, /video/) and the
+    # SPA catch-all set none, so they inherit these correctly.
+    add_header X-Frame-Options "DENY" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    add_header Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()" always;
 
     # Docker's embedded DNS. The robot tier (physical_ai_server) is DOWN
     # at manager boot BY DESIGN, so the two proxies below must resolve
@@ -50,6 +113,12 @@ server {
         add_header Cache-Control "no-store, no-cache, must-revalidate, max-age=0" always;
         add_header Pragma "no-cache" always;
         expires -1;
+        # Re-declared: this block has its own add_header, so the server-level
+        # security headers do NOT inherit into it (see the server block).
+        add_header X-Frame-Options "DENY" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+        add_header Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()" always;
     }
 
     # Build-id manifest polled by the React app to detect new deployments.
@@ -59,6 +128,11 @@ server {
         add_header Cache-Control "no-store, no-cache, must-revalidate, max-age=0" always;
         add_header Pragma "no-cache" always;
         expires -1;
+        # Re-declared — see the server block's add_header note.
+        add_header X-Frame-Options "DENY" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+        add_header Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()" always;
     }
 
     # Baked Pi-mode marker. The image IS the Pi flavor, so "is this a Pi"
@@ -72,6 +146,11 @@ server {
     location = /pi-mode.json {
         default_type application/json;
         add_header Cache-Control "no-store" always;
+        # Re-declared — see the server block's add_header note.
+        add_header X-Frame-Options "DENY" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+        add_header Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()" always;
         return 200 '{"pi":true}';
     }
 
@@ -94,11 +173,18 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
-        # Forward Origin EXPLICITLY: the pi-agent's exact-host CSRF allowlist keys
-        # on it, and nginx drops all client request headers the moment ANY
-        # proxy_set_header is added to a location — so a future header addition
-        # here would silently strip Origin and collapse the allowlist to
-        # always-allow. $http_origin is a single-$ runtime var (survives envsubst).
+        # Forward Origin EXPLICITLY. The pi-agent's exact-host CSRF allowlist keys
+        # on this header, so it is load-bearing and worth stating outright — but
+        # note this line is a belt, not a fix: nginx forwards Origin by DEFAULT.
+        # ngx_http_proxy_create_request copies every header in
+        # r->headers_in.headers EXCEPT those in the merged headers.hash (this
+        # location's own proxy_set_header set plus ngx_http_proxy_headers'
+        # defaults). Adding a proxy_set_header does NOT drop the client's other
+        # headers — an earlier revision of this comment claimed it did, which
+        # would lead a maintainer to defensively re-declare every client header as
+        # `proxy_set_header X $http_x`. Do NOT do that: it is how you actually
+        # break things (an empty-valued proxy_set_header removes the header).
+        # $http_origin is a single-$ runtime var (survives envsubst).
         proxy_set_header Origin $http_origin;
         proxy_buffering off;
         proxy_cache off;
@@ -114,16 +200,19 @@ server {
     # port 80 — no school-firewall dependency on :9090. proxy_pass
     # carries an explicit URI ("/"): with a variable upstream nginx
     # passes that URI as-is, so rosbridge sees the "/" path it serves
-    # its WebSocket handler on. $http_upgrade/$connection_upgrade-style
-    # single-$ vars survive envsubst (filter only matches
+    # its WebSocket handler on. $http_upgrade/$connection_upgrade are
+    # single-$ vars and survive envsubst (filter only matches
     # EDUBOTICS_ROS_NET_GATEWAY). Long timeouts: an idle-but-alive
-    # WebSocket must not be cut by the 60 s default.
+    # WebSocket must not be cut by the 60 s default. Connection comes from
+    # the $connection_upgrade map at the top of this file rather than a
+    # hardcoded "upgrade" — the hardcoded form sent a bogus upgrade token on
+    # every non-WebSocket request that reached this path.
     location = /rosbridge {
         set $edubotics_rosbridge physical_ai_server;
         proxy_pass http://$edubotics_rosbridge:9090/;
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
+        proxy_set_header Connection $connection_upgrade;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -160,6 +249,12 @@ server {
     location /static/ {
         expires 1y;
         add_header Cache-Control "public, immutable" always;
+        # Re-declared — see the server block's add_header note. nosniff matters
+        # most here: these are the hashed JS/CSS bundles.
+        add_header X-Frame-Options "DENY" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+        add_header Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()" always;
     }
 
     # SPA routing — all paths fall through to index.html

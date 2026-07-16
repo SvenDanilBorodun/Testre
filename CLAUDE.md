@@ -25,7 +25,7 @@ Single git repo, no submodules. ROBOTIS upstream (`open_manipulator/`, `physical
 | `docs/` | Checked-in docs incl. `CLAUDE-CHANGELOG.md` and `COLLISION_ESTOP_WINDOWS_VALIDATION.md`. `docs/plans/` is **gitignored throwaway** (spec-before-code one-pagers) |
 | `tools/` | Operator utilities: `docker-hub-cleanup.sh`, `modal-cleanup.sh`, URDF export, AprilTag/ChArUco generators, release notes |
 | `classroom_kit/` | Printable calibration assets (ChArUco board PDF/PNG, board-placement diagram) |
-| `.github/` | CI (`ci.yml`, 20 validator jobs) + 6 deploy workflows + lint/parity scripts |
+| `.github/` | CI (`ci.yml`, 21 validator jobs) + 6 deploy workflows + lint/parity scripts |
 
 Build artifacts that must never be treated as source: `robotis_ai_setup/gui/dist/` (stale PyInstaller output — real source is `gui/app/` + `gui/main.py`), `installer/output/`, `installer/assets/edubotics-rootfs.tar.gz(+.sha256)` (gitignored, produced by `wsl_rootfs/build_rootfs.sh`). `docker/versions.env` is CI-generated and absent from the source tree (readers fall back to `latest`). `supabase/_archive/` holds the 21 pre-squash migration files (git-blame reference only, never applied). The parent `C:\Users\svend\cloud\CLAUDE.md` is a 2-line pointer stub to this file — leave it alone.
 
@@ -91,7 +91,9 @@ If you genuinely need to reintroduce any OTHER software safety guard that modifi
 
 LeRobot itself is **not** overlaid — pip-installed from PyPI at `0.5.1` (Rule §5). `patches/fix_server_inference.py` is retained ONLY so CI `overlay-guard` can test the patch harness — it does nothing for the current build.
 
-The server **amd64 BASE image is pulled, never built** — `build-images.sh` resolves `robotis/physical-ai-server:amd64-0.8.2` via `docker manifest inspect`; only the arm64 base has a build trigger (`BUILD_BASE_ARM64=1` → `Dockerfile.arm64`). `Dockerfile.amd64` is forward-compat scaffolding (keep its pins in lockstep anyway, Rule §5).
+The server **amd64 BASE image is pulled, never built** — `build-images.sh` resolves `robotis/physical-ai-server:amd64-0.8.2` via `docker manifest inspect`. `Dockerfile.amd64` is forward-compat scaffolding (keep its pins in lockstep anyway, Rule §5).
+
+**The other TWO server bases are ours, and NO workflow builds them.** There are two build triggers, both hand-run: `BUILD_BASE_ARM64=1 PLATFORM=arm64` → `Dockerfile.arm64` (Jetson) and `BUILD_BASE_OPI=1 PLATFORM=opi` → `Dockerfile.arm64cpu` (Orange Pi CPU base). Grep for `BUILD_BASE_OPI` in `.github/` and you get nothing — every CI build merely *resolves* the tag pinned at `build-images.sh` (`physical-ai-server-opi-base`, `physical-ai-server-jetson-base`, `open-manipulator-jetson-base`). So **editing `Dockerfile.arm64cpu` / `.arm64` ships nothing on its own, silently**: the release goes green on the previously-published base while the edit sits in git looking landed. Rule §5 routes people straight into these files to bump LeRobot pins, which is what makes this load-bearing rather than trivia. Two fences: `ci.yml::base-version-guard` fails any non-comment edit to a base Dockerfile whose `PAS_BASE_IMAGE` tag didn't move in the same commit (comment-only edits are exempt), and `docker/bump-upstream-digests.sh` reports all three self-built pins + their upstream `FROM`s and exits non-zero on a tag that was never pushed. The rebuild itself is a Rule §6 manual step — see there.
 
 ### 4. Service-role key bypasses RLS — authorization is your job
 
@@ -127,13 +129,13 @@ The LeRobot **version pin `0.5.1`** must agree across:
 
 Seven workflows in `.github/workflows/` are the canonical path:
 
-- `ci.yml` — 20 validator jobs on every push/PR to `main` (see CI guardrails).
+- `ci.yml` — 21 validator jobs on every push/PR to `main` (see CI guardrails).
 - `supabase-migrate.yml` — W1. Migrations via `supabase db push --linked --include-all` (password extracted with `urllib.parse`, never sed) against project `fnnbysrjkfugsqzwcksd`. Its concurrency group is PROJECT-scoped (`supabase-migrate-production`) so a tag release and a direct `main` push serialize instead of racing the DB; a `workflow_dispatch` `rollback` job applies `rollback/<name>.sql` via psql in CI (manual `psql -f` is the fallback, not the only path).
 - `railway-deploy-cloud-api.yml` — W2. Read-only schema probe → `railway up` → `/health` gate asserting `body.commit == github.sha` (never a bare 200 — Railway blue-green keeps the old pod serving 200).
 - `railway-deploy-teacher-web.yml` — W3. Placeholder-build validate → `railway up` via `scripts/railway-deploy.sh` → `/version.json` gate asserting buildId contains the SHA.
 - `docker-publish.yml` — W4. Builds + **dual-pushes 8 images** (3 amd64 + 2 `-jetson` arm64 + 3 `-opi` arm64 — Orange Pi 5 Pro CPU flavor, incl. `physical-ai-manager-opi`) to **GHCR primary (`ghcr.io/svendanilborodun/*`) + Docker Hub fallback (`nettername/*`)**. The `-opi` repos are threaded through the build+smoke matrices, both hardcoded retag/dual-push `REPOS` lists, and a separate opi size gate — but opi is DECOUPLED from the core release: its build + smoke-test matrix legs are `continue-on-error: matrix.platform == 'opi'`, the opi build leg uploads an `opi-build-success` marker artifact (containing the run's sha) as its LAST step, and the retag job retags opi ONLY when that marker exists AND matches `github.sha` — never off an existence probe of the mutable `:latest` (a failed/partial opi build must not promote the PRIOR release's opi images under new semver tags). The dual-push-integrity step warns (never fails) for opi repos in BOTH the missing-image and the mismatch branches, and opi GHCR retags are best-effort (`::warning`), so no opi-only transient can block the amd64/Jetson GHCR publish. Fires on `main` pushes (`:latest`), `workflow_call` (W4), and `workflow_dispatch`. **Its standalone tag-push trigger was REMOVED** (2026-06-11) — on a tag, only `release.yml` W4 builds. Build order inside W4: `build-images.sh` pushes to Docker Hub first (`REGISTRY=nettername` in the build job); the `retag` job then creates the GHCR tags FROM Hub via `imagetools create` — GHCR is the consumption primary, not the build primary. A `workflow_dispatch` input `cleanup_dirty_tags` runs `tools/docker-hub-cleanup.sh --execute --only-dirty` as a CI job.
 - `release-installer.yml` — W5. Windows `.exe` build; `workflow_call`-only + `workflow_dispatch` (no tag race).
-- `release.yml` — top-level dispatcher on `vX.Y.Z` tags. A **`version-preflight` job runs FIRST on tag pushes**: it hard-fails the whole release when the tag ≠ the repo `VERSION` file (W6 advertises the TAG while the tarball/installer bake the FILE — a mismatch would put every Pi AND every Windows GUI into an infinite forced-update loop whose skip button never appears, because every update "succeeds" without advancing the anchor). W1 `needs` it; W2 additionally checks its result explicitly (W2's `always()` tolerates a skipped W1). **Golden order W1→W6**: W1 supabase → W2 cloud-api → W3 teacher-web → W4 docker → W5 installer → **W6 `publish-gui-version`** (an inline job, not a separate file: sets Railway `GUI_RELEASE_REPO`/`GUI_DOWNLOAD_URL`/`GUI_INSTALLER_SHA256` then `GUI_VERSION` last, AFTER the `.exe` is attached — race-safe auto-update advertising; tag-push only). A W5-adjacent `pi-agent-tarball` job attaches `edubotics-pi-agent.tar.gz` (built from `robotis_ai_setup/pi_agent/`, top-level `pi_agent/`, with the repo-root `VERSION` baked in as `pi_agent/VERSION` — the anchor the agent self-update reports its version from) to the GitHub Release, and W6 also publishes `PI_AGENT_SHA256` (hash of that exact tarball, empty-on-failure) before the `GUI_VERSION` flip; `pi-agent-tarball` is an ORDERING-only `needs` of W6 (so W6 hashes the exact attached asset) but W6 gates ONLY on `installer` success — a Pi-tarball hiccup never withholds the Windows `.exe` advertisement (`PI_AGENT_SHA256` degrades empty-on-failure, and an empty hash means the Pi agent advertises NO self-update — `update_checker` refuses hash-less updates, aligning the availability criterion with the apply criterion; it does NOT fall back to a Content-Length-only check like the `.exe` path). W6's `/version` verify loop round-trips the Pi fields too: `pi_agent_download_url` present and `pi_agent_sha256 == PI_SHA` when non-empty.
+- `release.yml` — top-level dispatcher on `vX.Y.Z` tags. A **`version-preflight` job runs FIRST on tag pushes**: it hard-fails the whole release when the tag ≠ the repo `VERSION` file (W6 advertises the TAG while the tarball/installer bake the FILE — a mismatch would put every Pi AND every Windows GUI into an infinite forced-update loop whose skip button never appears, because every update "succeeds" without advancing the anchor). W1 `needs` it; W2 additionally checks its result explicitly (W2's `always()` tolerates a skipped W1). **Golden order W1→W6**: W1 supabase → W2 cloud-api → W3 teacher-web → W4 docker → W5 installer → **W6 `publish-gui-version`** (an inline job, not a separate file: sets Railway `GUI_RELEASE_REPO`/`GUI_DOWNLOAD_URL`/`GUI_INSTALLER_SHA256` then `GUI_VERSION` last, AFTER the `.exe` is attached — race-safe auto-update advertising; tag-push only). A W5-adjacent `pi-agent-tarball` job attaches `edubotics-pi-agent.tar.gz` (built from `robotis_ai_setup/pi_agent/`, top-level `pi_agent/`, with the repo-root `VERSION` baked in as `pi_agent/VERSION` — the anchor the agent self-update reports its version from, **plus a generated `pi_agent/docker/versions.env` pinning `IMAGE_TAG=<VERSION>`** — the Pi's equivalent of the `docker/versions.env` the Windows installer payload has always baked; both are gated: the tarball must contain each file AND its value must equal the repo `VERSION`) to the GitHub Release, and W6 also publishes `PI_AGENT_SHA256` (hash of that exact tarball, empty-on-failure) before the `GUI_VERSION` flip; `pi-agent-tarball` is an ORDERING-only `needs` of W6 (so W6 hashes the exact attached asset) but W6 gates ONLY on `installer` success — a Pi-tarball hiccup never withholds the Windows `.exe` advertisement (`PI_AGENT_SHA256` degrades empty-on-failure, and an empty hash means the Pi agent advertises NO self-update — `update_checker` refuses hash-less updates, aligning the availability criterion with the apply criterion; it does NOT fall back to a Content-Length-only check like the `.exe` path). W6's `/version` verify loop round-trips the Pi fields too: `pi_agent_download_url` present and `pi_agent_sha256 == PI_SHA` when non-empty.
 
 **The Modal app (`edubotics-training`) deploys MANUALLY** — the image builds in Modal's infrastructure, and the CI feedback loop is too slow to debug remotely:
 
@@ -143,7 +145,20 @@ modal deploy modal_app.py
 modal run -m modal_app::smoke_test    # optional verification
 ```
 
-Run it BEFORE pushing a tag if the release touches Modal. Manual `railway up`, `psql -f`, and `build-images.sh` are EMERGENCY-only for the other surfaces. CI refuses to build from a dirty tree, so `*-dirty` tags can never reappear.
+Run it BEFORE pushing a tag if the release touches Modal.
+
+**The three self-built Docker BASES also deploy MANUALLY** — the second sanctioned carve-out, and the one most easily missed because it looks like ordinary source. Nothing in CI builds them (see Rule §3): if a release touches `physical_ai_tools/physical_ai_server/Dockerfile.arm64cpu` or `Dockerfile.arm64`, rebuild + push the base and bump its tag in `build-images.sh` BEFORE the tag, or **the release silently ships on the old base**:
+
+```bash
+cd robotis_ai_setup/docker
+BUILD_BASE_OPI=1   PLATFORM=opi   ./build-images.sh   # Dockerfile.arm64cpu → physical-ai-server-opi-base
+BUILD_BASE_ARM64=1 PLATFORM=arm64 ./build-images.sh   # Dockerfile.arm64    → the two Jetson bases
+./bump-upstream-digests.sh                            # verify every pinned base resolves
+```
+
+Both `PLATFORM=opi` and `PLATFORM=arm64` build the manager/thin layers first, so `SUPABASE_URL`, `SUPABASE_ANON_KEY` and `CLOUD_API_URL` must be exported or the script aborts before it ever reaches the base build. `ci.yml::base-version-guard` fences the tag bump at review time; it cannot check that you actually pushed the image — `bump-upstream-digests.sh` (or the release's own manifest resolve) is what catches that.
+
+For the remaining surfaces, manual `railway up`, `psql -f`, and a full `build-images.sh` run are EMERGENCY-only. Note the narrow exception inside that rule: the `BUILD_BASE_*` invocations above are a *workstation push by design*, and the only path that exists for those three images — "never push from a workstation" governs the student-facing thin images (`open-manipulator*`, `physical-ai-server*`, `physical-ai-manager*`), which CI owns. CI refuses to build from a dirty tree, so `*-dirty` tags can never reappear.
 
 **Applying migrations:** `supabase db push` works; Claude's MCP `apply_migration` also works, but MCP re-stamps the version prefix into the ledger — **rename the on-disk file to the MCP-stamped value afterwards** or the next `db push` sees ghost-unapplied migrations (the doubled-prefix filename on migration 026 is this scar, fossilized).
 
@@ -160,6 +175,8 @@ Run it BEFORE pushing a tag if the release touches Modal. Manual `railway up`, `
 - **The GUI-managed `.env` (`%LOCALAPPDATA%\EduBotics\.env`) is the compose interface.** Compose resolves `${REGISTRY}`/`${IMAGE_TAG}`/camera keys ONLY from the `--env-file` the GUI passes (Windows env vars do not cross the `wsl.exe` boundary). `config_generator.MANAGED_KEYS` (`FOLLOWER_PORT, LEADER_PORT, ROS_DOMAIN_ID, REGISTRY, REGISTRY_FALLBACK, IMAGE_TAG, EDUBOTICS_CAMERA_NAMES, EDUBOTICS_FOLLOWER_ONLY` + the `CAMERA_DEVICE_`/`CAMERA_NAME_` prefixes) are re-emitted on every regenerate — a stale hand-pinned value is SUPERSEDED; everything else is preserved verbatim via `_read_unmanaged_lines`. **Keep `MANAGED_KEYS` in lockstep with the emitted lines** — orphaning one leaks stale values (the `manifest unknown` scar). Per-rig overrides go through env vars (`EDUBOTICS_IMAGE_TAG`, `EDUBOTICS_REGISTRY`), never hand-edits of managed lines. Writes are atomic (temp file + `os.replace` + fsync).
 
 - **Registry resolution: env override → `docker/versions.env` → default**, shared by `REGISTRY` (`ghcr.io/svendanilborodun`), `REGISTRY_FALLBACK` (`nettername`), `IMAGE_TAG` (`latest`) in `gui/app/constants.py`. The runtime fallback pulls the digest-identical Hub twin and `docker tag`s it to the GHCR name so compose's single `${REGISTRY}` ref resolves; the fallback ref is computed by **prefix swap**, never `split('/')`. The auto-pull digest pre-check uses **set membership** of the remote candidate set (manifest-list + child digests) because a buildx push makes the local RepoDigest the LIST digest. One-variable rollback to Hub: `EDUBOTICS_REGISTRY=nettername`.
+
+- **Both fleets pin `IMAGE_TAG` via a BAKED `versions.env`; the Pi's is baked by `release.yml`, not CI.** Windows gets `docker/versions.env` from `release-installer.yml`'s payload; the Orange Pi gets `pi_agent/docker/versions.env` from `release.yml::pi-agent-tarball` (`IMAGE_TAG=<repo VERSION>`), which lands at `/opt/edubotics/pi_agent/docker/versions.env` — the FIRST path `pi_agent/constants.py::_read_versions_env`'s upward walk probes, so no agent code knows about it. **Without that file the Pi resolves `latest`, and `docker-publish.yml` pushes `:latest` on every push to `main` — i.e. every Pi silently tracks main HEAD instead of its release** (the systemd unit's `EnvironmentFile` carries `IMAGE_TAG`, which is NOT the `EDUBOTICS_IMAGE_TAG` name `_resolve_setting` reads, so the env override never rescued it either). There is no version handshake anywhere to catch this. The intended consequence of the pin: a release whose `-opi` images never published now fails LOUDLY on the Pi (`:X.Y.Z` resolves nowhere) instead of quietly running main HEAD — `pi_agent/docker_manager.py` names the missing version in German on that path, because a bare docker `manifest unknown` reads like a network fault.
 
 - **HuggingFace token is set ONCE in the GUI (Schritt D) and lives in the host `.env`.** `config_generator.upsert_env_var("HF_TOKEN", …)` is its sole writer; it is deliberately NOT a managed key, so it survives every regenerate AND Factory Reset / volume wipes. Compose forwards `HF_TOKEN=${HF_TOKEN:-}` on `physical_ai_server` (keep it in that `environment:` list). There is NO token UI in React — re-adding one is a regression. The GUI redacts it (and any TOKEN/SECRET/PASSWORD/KEY key) when echoing the `.env` to the Protokoll; the server side has a `_BearerTokenScrubber` logging filter for the same reason.
 
@@ -189,7 +206,9 @@ Run it BEFORE pushing a tag if the release touches Modal. Manual `railway up`, `
 
 - **Roboter Studio is bolted onto `physical_ai_server`, not a separate container.** The thin Dockerfile (a) rebuilds `physical_ai_interfaces` (the base image predates the Workshop srvs), (b) installs `opencv-contrib-python==4.10.0.84` + `pupil-apriltags==1.0.4` (`CMAKE_POLICY_VERSION_MINIMUM=3.5` for CMake 4). The old `onnxruntime`/YOLOX-ONNX install is DELETED (P4). `workflow/` ships inside the COPY-wholesale package.
 
-- **`.s6-keep` is load-bearing.** `physical_ai_server` bind-mounts the **0-byte** `./physical_ai_server/.s6-keep` at `/etc/s6-overlay/s6-rc.d/user/contents.d/physical_ai_server:ro`. At image build only `s6-agent` is enabled; the mount is what starts the ROS node. Remove it and s6 reports healthy while the node never runs. CI `compose-validate` asserts the file exists.
+- **`.s6-keep` is load-bearing.** `physical_ai_server` bind-mounts the **0-byte** `./physical_ai_server/.s6-keep` at `/etc/s6-overlay/s6-rc.d/user/contents.d/physical_ai_server:ro`. The three BASE images each enable exactly one service at build (`touch …/user/contents.d/s6-agent`); the mount is what starts the ROS node. Remove it and s6 reports healthy while the node never runs. CI `compose-validate` asserts the file exists (for the student AND opi composes).
+
+- **The thin overlay DISABLES the s6-agent service, because it deletes that service's app.** The strip-bloat block `rm -rf /opt/talos_system_manager` (~216 MB, dev-only) — and `docker/s6-agent/run` execs `uvicorn talos.agent.s6_agent:app`. The old comments claimed "nothing depends on /opt/talos_system_manager existing at runtime", justified by `grep -rn talos /root/ros2_ws/ → zero hits`; the grep root was simply wrong, since the reference lives in `/etc/s6-overlay`. Measured on a real arm64 boot: `ModuleNotFoundError: No module named 'talos'` at **~1 restart/second forever** — 491 KB of traceback in 100 s (~425 MB/day) drowning the student's Protokoll. So the same `RUN` that removes the directory also `rm -f`s `…/user/contents.d/s6-agent`; **keep the two together, neither is correct alone**. Verified after the fix: 749 B of log, zero tracebacks, rosbridge :9090 up, all four ROS nodes alive. `.s6-keep` is unaffected (it is a runtime mount, not a baked marker).
 
 - **Single uvicorn worker on Railway** (`--workers 1`, explicit in the Dockerfile CMD). The in-process rate limiter AND the three background sweeps (dataset reconciliation, Jetson lock sweeper, training-cancel retry) are process-local. Scaling out requires Redis or Postgres advisory locks for all four.
 
@@ -363,15 +382,25 @@ python -m compileall -q robotis_ai_setup/gui robotis_ai_setup/scripts \
 
 ### Build images
 
-**Default path: GitHub Actions.** Push to `main` with changes under the docker paths and `docker-publish.yml` builds both arches (`:latest`). Local builds are dev-only (never push from a workstation):
+**Default path for the THIN images: GitHub Actions.** Push to `main` with changes under the docker paths and `docker-publish.yml` builds both arches (`:latest`). Local builds of those are dev-only (never push from a workstation):
 
 ```bash
 cd robotis_ai_setup/docker
 SUPABASE_URL=... SUPABASE_ANON_KEY=... CLOUD_API_URL=... ./build-images.sh   # amd64
 PLATFORM=arm64 ./build-images.sh                                             # Jetson repos, skips manager
+PLATFORM=opi   ./build-images.sh                                             # Orange Pi repos, incl. manager
 ```
 
-An **image rebuild is required** whenever you touch: anything under `docker/open_manipulator/` or `docker/physical_ai_server/`, the overlay files, the entrypoint, the `physical_ai_server` package source (COPY-wholesale), `physical_ai_interfaces` msg/srv, or the base Dockerfiles. Hot-deploys into a running container are ephemeral (revert on `--force-recreate`).
+**The three self-built BASES are the exception: a workstation push is their ONLY path** (Rule §6). "Never push from a workstation" above governs the student-facing thin images that CI owns — it has never applied to the bases, because no workflow builds them:
+
+```bash
+BUILD_BASE_OPI=1   PLATFORM=opi   ./build-images.sh   # Dockerfile.arm64cpu → physical-ai-server-opi-base
+BUILD_BASE_ARM64=1 PLATFORM=arm64 ./build-images.sh   # Dockerfile.arm64 → both Jetson bases
+```
+
+All three secrets are required even for a base-only build: every flavor builds the manager FIRST, and `${VAR:?}` aborts the script long before the base build runs.
+
+An **image rebuild is required** whenever you touch: anything under `docker/open_manipulator/` or `docker/physical_ai_server/`, the overlay files, the entrypoint, the `physical_ai_server` package source (COPY-wholesale), or `physical_ai_interfaces` msg/srv — CI does those on a push. Touching a **base Dockerfile** additionally requires the manual base rebuild + a `PAS_BASE_IMAGE` tag bump in the same commit (`ci.yml::base-version-guard`); CI will otherwise build green against the old published base. Hot-deploys into a running container are ephemeral (revert on `--force-recreate`).
 
 ### Deploy
 
@@ -383,7 +412,7 @@ git tag vX.Y.Z && git push --tags     # fires release.yml → golden order W1→
 
 Per-surface pushes to `main` fire the path-filtered workflow alone. **Before every tag: prove the installer builds** — `release-installer.yml` via workflow_dispatch with `version_tag` set to the PREVIOUS release (so the baked `versions.env` points at images that exist); it's the only `.iss` Pascal compile check in CI. For releases touching the upgrade path (installer scripts, `wsl_rootfs/`), install the artifact TWICE on a dev rig (first shows the German consent + re-imports; second logs „Import übersprungen" and preserves volumes).
 
-**Bumping product VERSION = 3 in-tree sites in one commit**: `VERSION` (source of truth), `installer/robotis_ai_setup.iss` `AppVersion`, `gui/app/constants.py` fallback literal (constants reads `VERSION` at runtime; the literal covers PyInstaller dists). W6 then auto-flips the Railway GUI-version vars after the `.exe` is attached — no manual Railway step.
+**Bumping product VERSION = 4 in-tree sites in one commit**: `VERSION` (source of truth), `installer/robotis_ai_setup.iss` `AppVersion`, `gui/app/constants.py` fallback literal, and `pi_agent/constants.py` fallback literal. Both `constants.py` readers resolve the `VERSION` FILE at runtime — the literals are the last-resort fallback when no VERSION file is reachable (PyInstaller dists for the GUI; for the pi_agent the packaged `pi_agent/VERSION` that `release.yml` bakes and the self-update `rsync` refreshes). A stale pi_agent literal is the more dangerous of the two: it is what `APP_VERSION` degrades to if the packaged file ever goes missing, and `update_checker` compares it against the Cloud-API `/version` — a version that reads LOW re-offers the same update forever. `release.yml::version-preflight` hard-fails a tag whose name ≠ the VERSION file, which catches the source-of-truth site but NOT the three literals. W6 then auto-flips the Railway GUI-version vars after the `.exe` is attached — no manual Railway step.
 
 Manual emergency paths (document in a PR): `supabase db push` / `psql -f rollback/NNN_*.sql`; `modal deploy modal_app.py`; `railway up --service scintillating-empathy --environment production --path-as-root . --ci` from `cloud_training_api/`; `build-images.sh` from a clean Linux host.
 
@@ -396,17 +425,18 @@ python scripts/bootstrap_admin.py --username admin --full-name "Sven"
 
 ## CI guardrails
 
-### `ci.yml` — 20 validator jobs on every push/PR to `main`
+### `ci.yml` — 21 validator jobs on every push/PR to `main`
 
 - **python-tests** — compileall + unittest discover (`tests/`, `cloud_training_api/app/tests/`, `jetson_agent/tests/`) + the physical_ai_server pytest suite
 - **shell-lint** — shellcheck `-S error` on the 8 shipped shell scripts (incl. `pi_agent/setup.sh` + `pi_agent/systemd/edubotics-pi-firstboot.sh`)
-- **compose-validate** — `docker compose config` on the student+gpu AND Jetson compose files (fake `.env`s); also asserts `.s6-keep` exists and the manager healthcheck targets `127.0.0.1` (busybox-wget IPv6 regression)
+- **compose-validate** — `docker compose config` on the student+gpu, Jetson AND Orange-Pi compose files (fake `.env`s); asserts `.s6-keep` exists and that BOTH the student and opi composes bind it and target `127.0.0.1` in the manager healthcheck (busybox-wget IPv6 regression)
 - **overlay-guard** — runs `fix_server_inference.py` against a synthetic upstream: asserts non-zero exit on no-op AND that the patch actually applies (H27 — catches an upstream rename sliding the regex off target)
 - **modal-import-validate** — imports `modal_app.py` (NOT `training_handler.py` — container-only deps) + smoke-imports the cloud-API routes that touch the Modal SDK (H28)
 - **teacher-web-build-validate** / **manager-build-validate** / **manager-opi-build-validate** — build the React Dockerfiles (student, web, AND `Dockerfile.opi`) with placeholders; assert each placeholder reached the bundle (white-screen catcher); the opi variant also asserts `version.json` buildId (Pi self-reload is load-bearing) and the `/pi-mode.json` nginx marker location
 - **tutorials-validate** — tutorial JSON + `allowed_blocks` vs the server dispatch tables + `HAT_BLOCK_TYPES` + Blockly built-ins
 - **interfaces-validate** — every `.srv` has exactly one `---`; CMakeLists ↔ on-disk cross-check
-- **nginx-validate** — `envsubst $PORT` then `nginx -t` on both configs
+- **nginx-validate** — `envsubst $PORT` then `nginx -t` on all THREE configs (web, student, opi)
+- **base-version-guard** — a non-comment edit to `Dockerfile.arm64cpu` / `.arm64` must move the matching `PAS_BASE_IMAGE` tag in `build-images.sh` (nothing in CI builds those bases — an un-bumped tag ships the old one, green; comment-only edits exempt)
 - **env-forwarding-guard** — every `EDUBOTICS_*` read by entrypoint/start-dockerd/ingest-node/overlay `.py` must appear in a compose `environment:` list
 - **powershell-encoding** — every shipped `.ps1` carries a UTF-8 BOM (German Windows decodes BOM-less as CP1252)
 - **powershell-native-stderr** — no `.ps1` pairs file-level EAP=Stop with a stderr-capturing native `wsl`/`docker`/`usbipd`/`nvidia-smi` call

@@ -298,8 +298,41 @@ RUN if [ "$SLIM_CUDA" = "1" ]; then \
         [ -z "$rem" ] || { echo "[SLIM] ERROR: GPU wheels survived: $rem"; exit 1; }; \
         [ ! -d /usr/local/cuda ] || { echo "[SLIM] ERROR: /usr/local/cuda still present"; exit 1; }; \
     else \
-        echo "[SLIM] SLIM_CUDA=0 — keeping GPU torch (arm64/Jetson path, untouched)"; \
+        echo "[SLIM] SLIM_CUDA=0 — no torch swap. Covers TWO different flavors: Jetson/arm64 (KEEPS its GPU torch by design) and opi (its CPU base already ships CPU torch, so there is nothing to strip). The TORCH_EXPECT_CPU gate below is what tells them apart."; \
     fi
+
+# ── Rule §5 torch gate — runs on EVERY flavor, not just the SLIM_CUDA=1 swap ──
+# "One PyTorch surface (torch 2.7.x), three CUDA channels" is a Rule §5 invariant,
+# and torch/torchvision are the ONLY Rule §5 pins this thin overlay does not
+# re-install — every flavor INHERITS torch from its base (amd64: the ROBOTIS
+# cuda base, then swapped to +cpu above; arm64: the Jetson AI Lab base; opi:
+# the explicit torch==2.7.0 pin in Dockerfile.arm64cpu). So this file must at
+# least ASSERT what it inherited.
+#
+# It previously did not. The only torch assertion lived INSIDE the
+# `if [ "$SLIM_CUDA" = "1" ]` branch above, i.e. amd64-only — and opi passes
+# SLIM_CUDA=0, so the entire Orange Pi path shipped with no torch check at all.
+# Its base pins torch explicitly precisely BECAUSE lerobot 0.5.1 allows
+# torch<2.11 and an unpinned resolve silently lands 2.10.x; that pin lives in a
+# base image which is hand-rebuilt (not CI-built), so the one layer CI DOES
+# build every push is exactly where the assert belongs.
+#
+# TORCH_EXPECT_CPU is passed IN by build-images.sh (=1 for amd64 + opi, left 0
+# for arm64) rather than re-derived here from SLIM_CUDA: the two are not the
+# same question. SLIM_CUDA asks "should this build strip CUDA?" — opi answers no
+# because there is nothing to strip, while still being a CPU flavor. Deriving
+# one from the other is what made the opi gap invisible in the first place.
+ARG TORCH_EXPECT_CPU=0
+RUN python3 -c "\
+import sys, torch, torchvision; \
+expect_cpu = sys.argv[1] == '1'; \
+print('[TORCH] torch', torch.__version__, '| torchvision', torchvision.__version__, \
+      '| cuda=', torch.version.cuda, '| expect_cpu=', expect_cpu); \
+assert torch.__version__.startswith('2.7'), \
+    f'Rule §5 one-torch-surface violated: expected torch 2.7.x, got {torch.__version__}'; \
+assert (torch.version.cuda is None) or not expect_cpu, \
+    f'expected a CPU-only torch on this flavor, got a CUDA build (cuda={torch.version.cuda})'; \
+print('[TORCH] Rule §5 gate OK')" "$TORCH_EXPECT_CPU"
 
 # Cross-arch package floor — pin safetensors / protobuf / pillow / numpy to a
 # single version on BOTH arches. v0.5.1 resolves these naturally to compatible
@@ -339,7 +372,7 @@ RUN python3 -m pip install --no-cache-dir --force-reinstall \
                       google.protobuf.__version__, PIL.__version__, numpy.__version__); \
                 assert numpy.__version__.startswith('1.'), 'numpy must be <2 for cv_bridge ABI'"
 
-# Strip ~6.75 GB of upstream bloat — see CLAUDE.md image-level audit (2026-05).
+# Strip ~7.2 GB of upstream bloat — see CLAUDE.md image-level audit (2026-05).
 # This MUST come AFTER the package replacement + colcon rebuild. Any earlier
 # and we delete sources the build still needs.
 #
@@ -347,6 +380,7 @@ RUN python3 -m pip install --no-cache-dir --force-reinstall \
 #   /root/.cache       ~5.0 GB  (pip wheel cache + puccinialin 962 MB, inherited from upstream base)
 #   /root/.rustup      ~1.2 GB  (Rust toolchain — never invoked at runtime)
 #   /root/.cargo       ~0.1 GB  (cargo registry cache)
+#   rerun/wandb/cmake  ~415 MB  (dev-only ML deps — see the pip uninstall below)
 #   .git dirs          ~331 MB  (inherited from `git clone --recursive` in upstream Dockerfile)
 #   /opt/talos_system_manager ~216 MB  (Robotis VNC dashboard, dev-only — see comment below)
 #   …/physical_ai_tools/physical_ai_manager  (stale upstream React tree from the base clone —
@@ -356,20 +390,58 @@ RUN python3 -m pip install --no-cache-dir --force-reinstall \
 #   /opt/torch2trt/.git  (NVIDIA leftover in the arm64 Jetson base; path absent on amd64,
 #       where the rm is a harmless no-op)
 #
-# EduBotics does NOT import from talos_system_manager. Verify nothing else references it:
-#   grep -rn 'talos' /root/ros2_ws/   ->  zero hits in EduBotics overlays.
-# The upstream Dockerfile installs talos's pip requirements into site-packages
-# (those stay — they're real deps shared with other packages), AND sets
-# PYTHONPATH=/opt/talos_system_manager. That PYTHONPATH entry will now point
-# at a missing directory; Python silently ignores missing sys.path entries.
+# ── talos_system_manager: the directory goes, and so must its s6 service ─────
+# EduBotics does NOT import from talos_system_manager, so the ~216 MB directory
+# is stripped. The upstream Dockerfile installs talos's pip requirements into
+# site-packages (those STAY — they're real deps shared with other packages) and
+# sets PYTHONPATH=/opt/talos_system_manager, which the ENV scrub near the end of
+# this file empties.
+#
+# But removing the directory is NOT sufficient on its own, and the comment that
+# used to sit here said it was — it justified the rm with
+# `grep -rn 'talos' /root/ros2_ws/  ->  zero hits`, a grep whose ROOT was wrong.
+# The reference that matters lives OUTSIDE /root/ros2_ws: all three base
+# Dockerfiles enable exactly ONE s6 service at build
+# (`touch .../user/contents.d/s6-agent`), and that service's run script execs
+# `uvicorn talos.agent.s6_agent:app`. With talos deleted it dies on
+# `ModuleNotFoundError: No module named 'talos'` and s6 restarts it — measured
+# on a real arm64 boot at ~1 restart/second, FOREVER: 491 KB of traceback in
+# 100 s (~425 MB/day), drowning the student's Protokoll and the support log, and
+# burning a python interpreter start per second on a Pi that has 8 cores to
+# spare for the 100 Hz control loop instead. So DISABLE the service here, in the
+# same layer that removes its app — the two must never drift apart.
+#
+# This does NOT affect the ROS node: `.s6-keep` (the 0-byte compose bind-mount
+# onto .../user/contents.d/physical_ai_server) is what enables physical_ai_server
+# at RUNTIME, and it is mounted, not baked. Removing the s6-agent marker leaves
+# that path untouched — verified on a real boot: rosbridge :9090 up, all four ROS
+# nodes alive, 749 B of log (vs 491,375 B) and zero tracebacks.
+#
+# ── rerun-sdk / wandb / cmake: 415 MB of dev-only ML deps ────────────────────
+# Pulled transitively by lerobot but never reached at runtime: rerun is lerobot's
+# visualisation UI, wandb its training telemetry — and training is CLOUD-only
+# (Modal), so no student image ever logs a run. cmake is a build-time wheel
+# dependency with nothing left to build. Measured: rerun_sdk 162 MB +
+# rerun_bindings 100 MB + cmake 78 MB + wandb 77 MB. Verified with them removed:
+# all 13 policy imports, the ROS node import and LeRobotDataset still load.
+#
+# Deliberately in the THIN OVERLAY, not the bases: CI builds this layer on every
+# push, so the saving lands without the manual base rebuild the base Dockerfiles
+# need (see docs/arm64_base/README.md), and amd64 + opi are FLATTENed afterwards
+# so the bytes are actually reclaimed rather than whiteout-hidden (Jetson is not
+# flattened — the uninstall is a harmless whiteout there). The policy-import gate
+# below runs AFTER this block, so a future lerobot that hard-imports wandb at
+# module scope fails the BUILD instead of a student's inference run.
 RUN set -e && \
     rm -rf /root/.cache /root/.rustup /root/.cargo && \
     find /root/ros2_ws -type d -name ".git" -exec rm -rf {} + 2>/dev/null || true && \
     rm -rf /opt/talos_system_manager && \
+    rm -f /etc/s6-overlay/s6-rc.d/user/contents.d/s6-agent && \
     sed -i '\|/opt/talos_system_manager|d' /root/.bashrc /etc/bash.bashrc 2>/dev/null || true && \
+    python3 -m pip uninstall -y rerun-sdk wandb cmake 2>/dev/null || true && \
     find /root/ros2_ws/src -type d -path "*/physical_ai_tools/physical_ai_manager" -exec rm -rf {} + 2>/dev/null || true && \
     rm -rf /opt/torch2trt/.git && \
-    echo "Stripped upstream bloat (+ stale manager tree, torch2trt/.git whiteouts)"
+    echo "Stripped upstream bloat (+ s6-agent service, dev-only ML deps, stale manager tree)"
 
 # Build-time policy import smoke test. Catches a LeRobot module-layout drift
 # at `docker buildx build` time instead of at student-bench inference time.
@@ -377,7 +449,29 @@ RUN set -e && \
 # plus the v0.5.1 inference helpers and v3.0 dataset I/O symbols. If any of
 # these fail (a future LeRobot release reorganises modules without bumping
 # our pin via PyPI's preview channel), the image build aborts loudly.
+#
+# The last two asserts guard our two LeRobot PRIVATE-API seams. Both are
+# load-bearing, and one of them fails SILENTLY, which is why they belong here
+# rather than in a unit test (no test in this repo can see the real lerobot —
+# the deps-free suites sys.modules-stub it):
+#
+#   1. dataset_tools._copy_and_reindex_videos — upstream's real default is
+#      vcodec='libsvtav1'. data_editor_v3._force_recorder_vcodec scope-patches
+#      that helper to the recorder's h264 for the duration of an edit. On an
+#      upstream RENAME the patch's getattr(..., None) misses, it logs an English
+#      warning and yields anyway (deliberate — an edit must not die because of
+#      it), so every mixed kept/deleted video file silently re-encodes as lossy
+#      AV1 on a software SVT-AV1 encode that pegs every core. That is exactly
+#      the 2026-06-07 scar the scope-patch exists to prevent, restored without
+#      a single failing signal. Fail the BUILD instead.
+#   2. LeRobotDataset.create(streaming_encoding=...) — upstream's real default
+#      is False. lerobot_dataset_wrapper setdefault()s it to True, and that is
+#      the ONLY thing bounding recording RAM since the JPEG-in-RAM valve was
+#      removed. A rename here fails loud (TypeError on unexpected kwarg), so
+#      this assert only moves the failure earlier — but it costs nothing and
+#      documents the seam next to its silent sibling.
 RUN python3 -c "\
+import inspect; \
 import lerobot; print(f'lerobot=={lerobot.__version__}'); \
 from lerobot.policies.act.modeling_act import ACTPolicy; \
 from lerobot.policies.diffusion.modeling_diffusion import DiffusionPolicy; \
@@ -392,8 +486,14 @@ from lerobot.policies.factory import make_pre_post_processors; \
 from lerobot.datasets.feature_utils import validate_frame; \
 from lerobot.datasets.io_utils import write_info, write_episodes, write_stats; \
 from lerobot.datasets.dataset_metadata import CODEBASE_VERSION; \
+from lerobot.datasets import dataset_tools; \
+from lerobot.datasets.lerobot_dataset import LeRobotDataset; \
 assert CODEBASE_VERSION == 'v3.0', f'unexpected codebase_version: {CODEBASE_VERSION}'; \
-print('all v0.5.1 imports OK; codebase_version=v3.0')"
+assert hasattr(dataset_tools, '_copy_and_reindex_videos'), \
+    'lerobot renamed dataset_tools._copy_and_reindex_videos: data_editor_v3._force_recorder_vcodec would SILENTLY fall back to upstream lossy AV1 on every dataset edit'; \
+assert 'streaming_encoding' in inspect.signature(LeRobotDataset.create).parameters, \
+    'lerobot dropped LeRobotDataset.create(streaming_encoding=...): lerobot_dataset_wrapper would lose the recording RAM bound'; \
+print('all v0.5.1 imports OK; codebase_version=v3.0; private-API seams intact')"
 
 # Build-time NODE-import smoke test (v2.5.1 audit). The policy smoke test above
 # imports lerobot.policies.* but NEVER imports physical_ai_server itself, so it

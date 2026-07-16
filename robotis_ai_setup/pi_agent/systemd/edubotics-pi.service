@@ -2,8 +2,18 @@
 Description=EduBotics Pi agent (management API + container lifecycle)
 After=network-online.target docker.service
 Wants=network-online.target docker.service
-# Restart if docker goes away — the agent's boot sequence re-brings-up the
-# always-on manager and rebinds the ros_net gateway listener on next start.
+# Follow docker's lifecycle: PartOf propagates STOP and RESTART from
+# docker.service to this unit, so `systemctl restart docker` restarts the agent
+# too — which is what we want, because the agent's boot sequence re-brings-up the
+# always-on manager and rebinds the ros_net gateway listener.
+#
+# PartOf does NOT propagate START (that is Requires=/Wants=, which we already
+# have above for the boot path). So the one asymmetric case is a bare
+# `systemctl stop docker`: that stops the agent as a systemd-REQUESTED stop, and
+# a requested stop does not trigger Restart=always — the agent stays down until
+# docker is started AND something starts the agent (a reboot, or an explicit
+# `systemctl start edubotics-pi`). `systemctl restart docker` is fine; only the
+# stop-then-start-later sequence strands it, and the System tab 502s meanwhile.
 PartOf=docker.service
 
 [Service]

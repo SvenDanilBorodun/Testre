@@ -174,6 +174,17 @@ def _fallback_ref(image: str) -> Optional[str]:
     return REGISTRY_FALLBACK + "/" + image[len(prefix):]
 
 
+def _ref_tag(image: str) -> str:
+    """The tag of a full image ref (``registry/name:tag``).
+
+    Splits on the LAST path segment first, so neither a registry port
+    (``host:5000/name:tag``) nor the two-segment ``ghcr.io/<owner>`` prefix can
+    be mistaken for the tag — the same class of parsing bug ``_fallback_ref``
+    avoids by prefix-swapping instead of ``split('/')``."""
+    last = image.rsplit("/", 1)[-1]
+    return last.split(":", 1)[1] if ":" in last else "latest"
+
+
 def _get_local_repo_digest(image: str) -> Optional[str]:
     """Return the locally-cached image's RepoDigest (bare ``sha256:…``), or
     None if the image isn't present locally / has no digest attached."""
@@ -383,22 +394,91 @@ def _pull_fallback_and_retag(image: str, idx: int, total: int, log=None) -> bool
         return False
 
 
-def _pull_image_with_fallback(image: str, idx: int, total: int, log=None) -> bool:
+# _pull_image_with_fallback outcomes. Three states, not a bool, because after
+# the agent started pinning IMAGE_TAG to its own release a failed pull stopped
+# having ONE meaning. TRANSIENT (registry unreachable) must stay non-fatal —
+# that is what keeps a Wi-Fi blip from turning into a red error while the
+# student works on the images already on disk. MISSING (both registries answer
+# "not found" while at least one is reachable) is NOT recoverable by waiting:
+# the release's `-opi` images were never published, and on a freshly flashed Pi
+# there are no local images to fall back to, so "keep the existing version" is
+# a lie. Only the caller knows which of those it can tolerate, so classify here
+# and let it decide.
+PULL_OK = "ok"
+PULL_TRANSIENT = "transient"
+PULL_MISSING = "missing"
+
+
+def _pull_image_with_fallback(image: str, idx: int, total: int, log=None) -> str:
     """Pull ``image`` from GHCR; on an unreachable host or a failed pull, fall
     back to the digest-identical Docker Hub twin and re-tag it to the primary
-    name. Returns True iff the primary-named image is present afterwards."""
+    name. Returns PULL_OK / PULL_TRANSIENT / PULL_MISSING (see above)."""
     log = log or (lambda _m: None)
     short = image.split("/")[-1]
-    if _host_reachable(_registry_host(REGISTRY)):
+    primary_up = _host_reachable(_registry_host(REGISTRY))
+    if primary_up:
         if _pull_one_image(image, idx, total, log=log):
-            return True
+            return PULL_OK
     if _fallback_ref(image) is None:
-        return False
+        return PULL_TRANSIENT if not primary_up else PULL_MISSING
+    # Word this by the ACTUAL cause. The old text always blamed an unreachable
+    # GHCR, but the pin makes "GHCR is up, the tag simply is not there" the
+    # common case — and blaming the network sends the teacher to the wrong
+    # problem (and now, with the classification below, contradicts our own
+    # verdict two lines later).
     log(
-        f"  [{idx + 1}/{total}] {short}: Primär-Registry (GHCR) nicht verfügbar "
-        "— wechsle zu Docker Hub …"
+        f"  [{idx + 1}/{total}] {short}: "
+        + ("Primär-Registry (GHCR) nicht erreichbar" if not primary_up
+           else "bei GHCR nicht gefunden")
+        + " — wechsle zu Docker Hub …"
     )
-    return _pull_fallback_and_retag(image, idx, total, log=log)
+    fallback_up = _host_reachable(_registry_host(REGISTRY_FALLBACK))
+    if fallback_up and _pull_fallback_and_retag(image, idx, total, log=log):
+        return PULL_OK
+    # MISSING is a claim about a REGISTRY'S CONTENTS, and only GHCR can settle
+    # it: GHCR is the consumption primary, while the Docker Hub retag is
+    # explicitly best-effort — docker-publish.yml downgrades a failed Hub retag
+    # to a ::warning ("the Docker Hub fallback for this tag may be stale until
+    # the next release"). Hub may therefore legitimately 404 a tag GHCR serves.
+    #
+    # So if GHCR was never reachable we never got the authoritative answer, and
+    # accusing the release of never having published would (a) contradict the
+    # "GHCR nicht erreichbar" line logged three lines above and (b) misfire on
+    # exactly the network this product is built for — a school that blocks
+    # ghcr.io would hit it on any release whose Hub retag happened to 429.
+    # Unreachable primary ⇒ TRANSIENT, whatever Hub said.
+    if not primary_up:
+        reason = ("keine Registry erreichbar" if not fallback_up else
+                  "GHCR nicht erreichbar und über Docker Hub nicht beziehbar")
+        log(
+            f"  [{idx + 1}/{total}] {short}: {reason} — "
+            "vorhandene Images werden weiter verwendet."
+        )
+        return PULL_TRANSIENT
+    # GHCR was reachable and did not serve the tag, and Hub did not provide it
+    # either. Since the agent started pinning IMAGE_TAG to its own release (the
+    # docker/versions.env baked into the tarball by release.yml), the
+    # overwhelmingly likely cause is a release whose `-opi` images never
+    # published: the opi build leg is continue-on-error in docker-publish.yml,
+    # so it can skip silently and leave the `:X.Y.Z` tag non-existent while the
+    # agent tarball ships anyway.
+    #
+    # This failure is NEW and it is the intended trade: before the pin, a Pi in
+    # that situation quietly ran :latest — whatever main HEAD happened to be —
+    # and nobody found out. Failing loudly is better, but only if the message
+    # names the VERSION; a bare "manifest unknown" from docker reads like a
+    # network fault and sends the teacher to the wrong problem entirely.
+    #
+    # The wording claims only what we established: GHCR answered and lacks it,
+    # and Hub did not yield it (refused, or unreachable — either way we asked
+    # and did not get it). It deliberately does not assert Hub's contents.
+    log(
+        f"    [FEHLER] {short}: Version {_ref_tag(image)} ist bei GHCR nicht "
+        "vorhanden und war auch über Docker Hub nicht zu beziehen. Vermutlich "
+        "wurden die Orange-Pi-Images für dieses Release nicht veröffentlicht — "
+        "das ist kein Netzwerkfehler. Bitte die Version dem EduBotics-Team melden."
+    )
+    return PULL_MISSING
 
 
 # ── Last-pull persistence (freshness banner) ─────────────────────────────────
@@ -454,7 +534,7 @@ def get_last_pull_status() -> dict:
     }
 
 
-def check_for_updates(log=None) -> bool:
+def check_for_updates(log=None, missing_out: Optional[list] = None) -> bool:
     """Refresh the opi images to the pinned tag on GHCR (Docker Hub fallback).
 
     Same three-layer defence as the GUI/Jetson: offline short-circuit, arm64
@@ -462,6 +542,14 @@ def check_for_updates(log=None) -> bool:
     RepoDigest is already in the registry's candidate set), and last-pull
     persistence for the freshness banner. Per-image failures are non-fatal.
     Returns True iff at least one image's local bytes changed.
+
+    ``missing_out``: pass a list to collect the short names of images whose
+    PINNED TAG does not exist on either registry (PULL_MISSING). Non-fatal
+    per-image handling is unchanged — this function still never raises and its
+    return value still means "did any bytes change" — but a caller that cannot
+    honestly report success over a non-existent release (the update job) needs
+    to tell that case apart from a transient network failure, and only this
+    loop knows the difference. Left None, behaviour is exactly as before.
 
     Set ``EDUBOTICS_SKIP_AUTO_PULL=1`` to disable entirely.
     """
@@ -508,7 +596,19 @@ def check_for_updates(log=None) -> bool:
         except (FileNotFoundError, subprocess.TimeoutExpired):
             old_id = ""
 
-        if not _pull_image_with_fallback(image, i, total, log=log):
+        outcome = _pull_image_with_fallback(image, i, total, log=log)
+        if outcome != PULL_OK:
+            if outcome == PULL_MISSING:
+                if missing_out is not None:
+                    missing_out.append(short)
+                # Deliberately NOT the "aktuelle Version wird weiter verwendet"
+                # line below: on a freshly flashed Pi local_digest is None, so
+                # there IS no current version to keep — saying so contradicts
+                # the [FEHLER] we just logged. The caller decides what a missing
+                # release means; here we only stop claiming a graceful fallback
+                # that did not happen.
+                pulled_digests[image] = local_digest
+                continue
             log(f"  Übersprungen: {short} (aktuelle Version wird weiter verwendet).")
             pulled_digests[image] = local_digest
             continue
@@ -555,7 +655,14 @@ def pull_images(callback=None, log=None) -> bool:
         if _image_present_locally(image):
             log(f"  [{i + 1}/{total}] {image.split('/')[-1]}: bereits vorhanden, überspringen.")
             continue
-        if not _pull_image_with_fallback(image, i, total, log=log):
+        # Compare against PULL_OK explicitly. `not <outcome>` was correct while
+        # _pull_image_with_fallback returned a bool, but every one of its three
+        # outcomes is now a non-empty (truthy) string — `not PULL_MISSING` is
+        # False, so the bool form reported "all images present" after a pull
+        # that failed outright. setup.sh's step 9 exits on this value: the bench
+        # operator would be told „Images pulled." and image a golden SD card
+        # with no images on it.
+        if _pull_image_with_fallback(image, i, total, log=log) != PULL_OK:
             return False
     return True
 

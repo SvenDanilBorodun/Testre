@@ -47,7 +47,16 @@ fi
 # printed by setup.sh carries the .local name; the teacher reads the reserved IP
 # off the System window, so a wide-but-readable numeric suffix is the tradeoff.
 # (24 bits — 16.7M space — keeps a ~100-rig fleet collision-free where 16 bits
-# was ~7%; the bench operator can still override with EDUBOTICS_HOSTNAME set.)
+# was ~7%.)
+#
+# This rename is UNCONDITIONAL and deliberately does NOT honour EDUBOTICS_HOSTNAME
+# (an earlier revision of this comment claimed it did; the unit has no
+# EnvironmentFile and never read the variable). setup.sh DOES honour it, which is
+# correct there — it names a single bench unit. Honouring it HERE would be a bug:
+# the value would be baked into the golden image and every clone in the fleet
+# would boot with the SAME hostname, which is precisely the collision this
+# per-machine-id derivation exists to prevent. If a rig needs a custom name, set
+# it after first boot; the marker keeps this script from ever re-running.
 NN="$(printf '%s' "$MACHINE_ID" | sha256sum | head -c6 \
       | python3 -c 'import sys; print("%08d" % (int(sys.stdin.read(), 16)))' 2>/dev/null || echo "00000000")"
 NEW_HOST="edubotics-${NN}"
@@ -146,8 +155,20 @@ fi
 chmod 600 "${ENV_DIR}/.env" 2>/dev/null || true
 chown root:root "${ENV_DIR}/.env" 2>/dev/null || true
 
-# ── 5. Re-announce over mDNS with the new hostname ───────────────────────────
-systemctl restart avahi-daemon 2>/dev/null || true
+# ── 5. mDNS: nothing to do — the unit ordering already guarantees it ─────────
+# There is deliberately NO `systemctl restart avahi-daemon` here. The unit
+# declares `Before=avahi-daemon.service`, so avahi has not started (and thus has
+# not announced anything) by the time this script runs — it will read the
+# hostname set in step 2 when it starts. A restart would be redundant AND fatal:
+# `systemctl restart` blocks on avahi's job, avahi's job cannot dispatch while
+# this unit's own start job is live (that is what the Before= ordering means),
+# and Type=oneshot disables TimeoutStartSec by default — so the two would wait on
+# each other forever. `2>/dev/null || true` would NOT save it; the call hangs, it
+# does not fail. Because this unit is also `Before=network-online.target`, that
+# hang would strand network-online → docker.service → the always-on manager
+# container → the whole wizard, on every clone. The bench never sees it: the
+# .first-boot-done marker makes ConditionPathExists skip the unit there, and only
+# `setup.sh --prepare-golden` re-arms it. Do not add a restart back.
 
 # ── 6. Mark done so this one-shot never re-runs on THIS clone ────────────────
 mkdir -p "$INSTALL_DIR"

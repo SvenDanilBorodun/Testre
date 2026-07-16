@@ -98,11 +98,27 @@ PLATFORM=arm64 ./build-images.sh    # bases resolved, thin layers rebuilt + push
 
 ```bash
 cd robotis_ai_setup/docker
-# Builds + pushes physical-ai-server-opi-base:0.8.2 from Dockerfile.arm64cpu
-# (--platform linux/arm64 --push; context = physical_ai_tools/), then continues
-# on to build the thin opi layers (server + open_manipulator + manager).
+# REQUIRED even though you only want the base: PLATFORM=opi builds the MANAGER
+# FIRST (it is the only other flavor besides amd64 that ships one), and those
+# three `${VAR:?}` gates abort the script long before the base build is reached.
+# Omitting them does not "skip the manager" — it kills the run.
+export SUPABASE_URL=https://xxx.supabase.co
+export SUPABASE_ANON_KEY=...
+export CLOUD_API_URL=https://scintillating-empathy-production-1068.up.railway.app
+
+# Build order is: manager -> SERVER BASE (this) -> thin server (+flatten)
+# -> OMX base resolve -> thin OMX -> push all three. The base is NOT first.
+# It builds + pushes physical-ai-server-opi-base:<tag> from Dockerfile.arm64cpu
+# (--platform linux/arm64 --push; context = physical_ai_tools/).
 BUILD_BASE_OPI=1 PLATFORM=opi ./build-images.sh
 ```
+
+The base tag is pinned at `build-images.sh`'s `opi` case (`PAS_BASE_IMAGE`).
+**Bump it whenever you change `Dockerfile.arm64cpu`** and rebuild — nothing in
+CI builds this base, so an unchanged tag means every later build silently
+resolves the OLD published image and your edit ships nowhere.
+`ci.yml::base-version-guard` fails the PR if a non-comment edit to the base
+Dockerfile lands without the tag moving.
 
 `Dockerfile.arm64cpu` is a stock `ros:jazzy-ros-base` build with plain PyPI:
 it pins `torch==2.7.0` + `torchvision==0.22.0` (the aarch64 PyPI 2.7.0 wheel
@@ -139,8 +155,12 @@ label):
   but the flatten still collapses layer overhead **and, critically,
   re-imports the arm64 rootfs with the right `.Architecture` label**
   (`docker import` stamps arch from the `--platform` value, not the source
-  image). Target size **~5-6 GB**, gated at a **~7 GB** ceiling in CI
-  (`docker-publish.yml`'s opi-only size step).
+  image). Target size **~5-6 GB**, gated at an **11 GB** ceiling in CI
+  (`docker-publish.yml`'s opi-only size step). A real arm64 build measures
+  **4.85 GB** uncompressed. (The 7 GB figure this doc used to quote was
+  inherited from the original deploy plan and never matched the code — 7 GB
+  left barely 1.2x headroom over the target, so the first honest build would
+  have failed the release for being the size it was designed to be.)
 - **arm64/Jetson**: NEVER flattened — it deliberately keeps GPU torch and
   the full CUDA/L4T payload.
 

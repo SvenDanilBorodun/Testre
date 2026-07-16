@@ -18,9 +18,12 @@ deliberately UNMANAGED so it survives regenerate/factory-reset with
     ``EDUBOTICS_BIND_HOST`` (0.0.0.0 / 127.0.0.1) and
     ``EDUBOTICS_ROS_NET_GATEWAY`` (first host of the subnet — the
     ``/api/system`` proxy target). LAN_OPEN + SUBNET are "sticky": a caller
-    that passes ``None`` carries the current ``.env`` value forward (so a
-    per-rig subnet chosen at provisioning and a student's kiosk toggle both
-    survive a hardware re-scan) instead of snapping back to the default.
+    that passes ``None`` carries the current ``.env`` value forward (so the
+    per-rig subnet chosen at bench provisioning survives a hardware re-scan)
+    instead of snapping back to the default. NOTE: stickiness is the ONLY way
+    a non-default LAN_OPEN can exist — no caller ever passes ``lan_open``, and
+    there is no UI, agent endpoint or setup.sh flag for it. It is an operator
+    hand-edit of ``/etc/edubotics/.env``, not a student-facing toggle.
 
 The device dataclasses (``ArmDevice`` / ``CameraDevice`` / ``HardwareConfig``)
 are defined HERE rather than imported from a ``device_manager`` module (the
@@ -261,9 +264,16 @@ def _resolve_lan_open(output_path: str, lan_open: Optional[bool]) -> str:
     """Resolve the sticky EDUBOTICS_LAN_OPEN value as a "1"/"0" string.
 
     Explicit caller value wins; otherwise the current ``.env`` value is carried
-    forward (so a student's kiosk toggle survives a hardware re-scan); otherwise
-    the default (open). The key is MANAGED, so the current value is read
-    directly (it is not in the preserved/unmanaged block)."""
+    forward; otherwise the default (open). The key is MANAGED, so the current
+    value is read directly (it is not in the preserved/unmanaged block).
+
+    There is NO "student kiosk toggle" — an earlier revision of this docstring
+    claimed one. NO caller anywhere passes ``lan_open`` (every call site takes
+    the ``None`` default); there is no agent endpoint, no System-window control
+    and no setup.sh flag. The ONLY way a rig runs with "0" is an operator
+    hand-editing ``/etc/edubotics/.env``, and the carry-forward above is what
+    makes that hand-edit survive a regenerate. Keep the parameter: it is the
+    seam a future kiosk control would use, and the tests pin both branches."""
     if lan_open is not None:
         return "1" if lan_open else "0"
     existing = read_env_var("EDUBOTICS_LAN_OPEN", output_path)
@@ -429,8 +439,14 @@ def _opi_managed_lines(output_path: str, lan_open: Optional[bool],
     return [
         f"REGISTRY={REGISTRY}",
         f"REGISTRY_FALLBACK={REGISTRY_FALLBACK}",
-        # Pin compose to the image build this agent ships with. Without the
-        # line compose runs :latest, drifting past the pinned tag.
+        # Pin compose to the image build this agent ships with. IMAGE_TAG is
+        # resolved by constants.py from the docker/versions.env that
+        # release.yml::pi-agent-tarball bakes INTO the agent package — so on a
+        # released Pi this writes the release tag (e.g. 2.12.2). Until that bake
+        # existed the resolve always fell through to the "latest" default, and
+        # this line — correct in intent — pinned compose to :latest, i.e. main
+        # HEAD, on every Pi in every classroom. Without the line at all, compose
+        # applies its own ${IMAGE_TAG:-latest} default and drifts the same way.
         f"IMAGE_TAG={IMAGE_TAG}",
         # Robot profile id the server resolves at boot (compose forwards it on
         # physical_ai_server's environment: list). MANAGED — a stale value is

@@ -36,6 +36,7 @@ SETUP_DIR = Path(__file__).resolve().parents[2]  # robotis_ai_setup/
 sys.path.insert(0, str(SETUP_DIR))
 
 from pi_agent import agent  # noqa: E402
+from pi_agent import config_generator  # noqa: E402
 from pi_agent import phone_camera  # noqa: E402
 
 
@@ -281,12 +282,166 @@ class TestCameraDeviceAllowlist(unittest.TestCase):
             self.assertFalse(agent._is_allowed_camera_device(dev), dev)
 
 
+# ── boot(): IMAGE_TAG re-alignment ───────────────────────────────────────────
+
+
+class TestBootRealignsImageTag(unittest.TestCase):
+    """boot() must re-assert the pinned IMAGE_TAG into the existing .env.
+
+    The agent self-updates in place (rsync of a new pi_agent/ tree carrying a
+    new docker/versions.env), so constants.IMAGE_TAG jumps to the new release
+    while the .env — the file compose actually reads via --env-file — still
+    names the old one. Nothing else re-asserts it on the boot path, so without
+    this the always-on manager keeps running the PREVIOUS release until some
+    unrelated regenerate happens to fix it.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.env = os.path.join(self.dir, ".env")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.app = agent.AgentApp()
+        self.app.env_file = self.env
+        self.app._log = lambda _m: None
+
+    def _boot(self):
+        with patch.object(agent.docker_manager, "start_manager", return_value=True), \
+             patch.object(self.app, "start_loopback"), \
+             patch.object(agent.threading, "Thread"):
+            self.app.boot()
+
+    def _write(self, body):
+        with open(self.env, "w", encoding="utf-8") as f:
+            f.write(body)
+        os.chmod(self.env, 0o600)
+
+    def _read(self):
+        with open(self.env, encoding="utf-8") as f:
+            return f.read()
+
+    def test_stale_tag_is_realigned_and_everything_else_survives(self):
+        self._write(
+            "# EduBotics Orange Pi\n"
+            'REGISTRY="ghcr.io/svendanilborodun"\n'
+            'IMAGE_TAG="0.0.0-stale"\n'
+            'FOLLOWER_PORT="/dev/serial/by-id/xyz"\n'
+            'HF_TOKEN="hf_secret"\n'
+            'EDUBOTICS_VCODEC="h264"\n'
+        )
+        with patch.object(agent, "IMAGE_TAG", "9.9.9"):
+            self._boot()
+        self.assertEqual(
+            config_generator.read_env_var("IMAGE_TAG", self.env), "9.9.9")
+        # The .env is the compose interface AND holds the student's HF token:
+        # an upsert that dropped unmanaged lines would be a silent data loss.
+        self.assertEqual(
+            config_generator.read_env_var("HF_TOKEN", self.env), "hf_secret")
+        self.assertEqual(
+            config_generator.read_env_var("FOLLOWER_PORT", self.env),
+            "/dev/serial/by-id/xyz")
+        self.assertEqual(
+            config_generator.read_env_var("EDUBOTICS_VCODEC", self.env), "h264")
+        self.assertIn("# EduBotics Orange Pi", self._read())
+        # setup.sh chmods the .env 600; a rewrite must not re-widen it.
+        self.assertEqual(os.stat(self.env).st_mode & 0o777, 0o600)
+
+    def test_matching_tag_is_a_byte_identical_no_op(self):
+        self._write('IMAGE_TAG="9.9.9"\nHF_TOKEN="hf_secret"\n')
+        snapshot = self._read()
+        with patch.object(agent, "IMAGE_TAG", "9.9.9"):
+            self._boot()
+        self.assertEqual(self._read(), snapshot)
+
+    def test_env_without_image_tag_gets_one(self):
+        # A hand-seeded .env has no IMAGE_TAG at all; compose would then apply
+        # its own ${IMAGE_TAG:-latest} default and drift to main HEAD.
+        self._write('REGISTRY="ghcr.io/svendanilborodun"\n')
+        with patch.object(agent, "IMAGE_TAG", "9.9.9"):
+            self._boot()
+        self.assertEqual(
+            config_generator.read_env_var("IMAGE_TAG", self.env), "9.9.9")
+
+    def test_unwritable_env_never_blocks_boot(self):
+        # The realign is a convenience, not a precondition: the manager must
+        # still come up (degraded) if the .env cannot be rewritten.
+        self._write('IMAGE_TAG="0.0.0-stale"\n')
+        with patch.object(agent, "IMAGE_TAG", "9.9.9"), \
+             patch.object(agent.config_generator, "upsert_env_var",
+                          side_effect=OSError("read-only fs")), \
+             patch.object(agent.docker_manager, "start_manager",
+                          return_value=True) as mgr, \
+             patch.object(self.app, "start_loopback"), \
+             patch.object(agent.threading, "Thread"):
+            self.app.boot()  # must not raise
+        mgr.assert_called_once()
+
+
 # ── ACK-early async update job ───────────────────────────────────────────────
 
 
 class TestUpdateJob(unittest.TestCase):
     def setUp(self):
         self.app = agent.AgentApp()
+
+    def test_update_fails_when_the_release_images_were_never_published(self):
+        """A never-published release must FAIL the job, not report success.
+
+        Before the IMAGE_TAG pin this could not happen — `:latest` always
+        existed — so check_for_updates' per-image failures were non-fatal and
+        its return meant only "did bytes change". With the pin, a skipped opi
+        build (continue-on-error in docker-publish.yml) leaves `:X.Y.Z`
+        non-existent, and the job used to log [FEHLER] and then report
+        „Aktualisierung abgeschlossen" at 100 %. On a freshly flashed Pi there
+        are no local images at all, so that success is a flat lie.
+        """
+        def fake_pull(log=None, missing_out=None):
+            if missing_out is not None:
+                missing_out.append("physical-ai-server-opi:9.9.9")
+            return False
+
+        with patch.object(agent.docker_manager, "stop_robot_tier", return_value=True), \
+             patch.object(agent.docker_manager, "check_for_updates", side_effect=fake_pull), \
+             patch.object(agent.docker_manager, "start_manager", return_value=True) as start_mgr, \
+             patch.object(agent.update_checker, "check_for_agent_update", return_value=None):
+            code, payload = self.app.handle_update_start()
+            self.assertEqual(code, 202)
+            self._join_update(payload["job_id"])
+            job = self.app._update_jobs[payload["job_id"]]
+
+        self.assertEqual(job["status"], "failed")
+        msg = job["message"]
+        self.assertIn("physical-ai-server-opi:9.9.9", msg)
+        self.assertIn("kein Netzwerkfehler", msg)          # German, names the cause
+        self.assertIn("unvollständig veröffentlicht", msg)  # literal umlauts (Rule §1)
+        self.assertNotIn("abgeschlossen", msg)
+        # The manager must NOT be recreated onto a release that does not exist.
+        start_mgr.assert_not_called()
+
+    def test_update_still_succeeds_when_the_pull_is_only_transient(self):
+        """A Wi-Fi blip must keep degrading gracefully — the resilience is why
+        per-image pull failures are non-fatal in the first place. Only
+        PULL_MISSING populates missing_out, so a transient leaves it empty and
+        the job completes exactly as before this classification existed."""
+        with patch.object(agent.docker_manager, "stop_robot_tier", return_value=True), \
+             patch.object(agent.docker_manager, "check_for_updates", return_value=False), \
+             patch.object(agent.docker_manager, "start_manager", return_value=True), \
+             patch.object(agent.update_checker, "check_for_agent_update", return_value=None):
+            code, payload = self.app.handle_update_start()
+            self.assertEqual(code, 202)
+            self._join_update(payload["job_id"])
+            job = self.app._update_jobs[payload["job_id"]]
+        self.assertEqual(job["status"], "succeeded")
+
+    def _join_update(self, job_id, timeout=10.0):
+        """Wait for the ACK-early background worker to reach a terminal state."""
+        import time as _t
+        deadline = _t.time() + timeout
+        while _t.time() < deadline:
+            j = self.app._update_jobs.get(job_id) or {}
+            if j.get("status") in ("succeeded", "failed"):
+                return
+            _t.sleep(0.02)
+        self.fail(f"update job {job_id} did not finish within {timeout}s")
 
     def test_update_acks_early_and_completes(self):
         with patch.object(agent.docker_manager, "stop_robot_tier", return_value=True), \

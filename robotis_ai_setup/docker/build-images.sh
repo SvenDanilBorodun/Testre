@@ -109,7 +109,17 @@ case "$PLATFORM" in
         # ros:jazzy-ros-base) — so there is NO separate opi OMX base. The SERVER
         # base is a NEW plain-PyPI CPU base built from Dockerfile.arm64cpu.
         OMX_BASE_IMAGE="${REGISTRY}/open-manipulator-jetson-base:4.1.4"
-        PAS_BASE_IMAGE="${REGISTRY}/physical-ai-server-opi-base:0.8.2"
+        # BASE TAG BUMP RULE (enforced by ci.yml::base-version-guard): this tag
+        # MUST move in the same commit as any non-comment edit to
+        # physical_ai_tools/physical_ai_server/Dockerfile.arm64cpu. The opi base
+        # is NOT built by CI — no workflow sets BUILD_BASE_OPI — so an edited
+        # Dockerfile against an unchanged tag resolves the OLD published base and
+        # the release ships green while silently ignoring the edit.
+        # :0.8.2-opi2 = 0.8.2 + `--no-install-recommends` on the apt layer
+        # (-67 packages / -63 MB) + the ${PYTHONPATH:+...} expansion fix.
+        # Rebuild+push it with `BUILD_BASE_OPI=1 PLATFORM=opi ./build-images.sh`
+        # BEFORE the next tag, or every opi build fails its manifest resolve.
+        PAS_BASE_IMAGE="${REGISTRY}/physical-ai-server-opi-base:0.8.2-opi2"
         IMAGE_TAG_SUFFIX="latest"
         OMX_OUT_REPO="${REGISTRY}/open-manipulator-opi"
         PAS_OUT_REPO="${REGISTRY}/physical-ai-server-opi"
@@ -559,10 +569,16 @@ elif [ "$PLATFORM" = "opi" ]; then
     # so there is nothing to strip — but the image still gets FLATTENED so it is
     # re-imported with the correct arm64 arch label (see flatten_image). The
     # opi manager/OMX-thin builds share this --load-then-push shape.
+    # TORCH_EXPECT_CPU=1 with SLIM_CUDA=0 is NOT a contradiction — the two ask
+    # different questions. SLIM_CUDA asks "strip CUDA?" (no: the CPU base never
+    # had any); TORCH_EXPECT_CPU asks "must the result be CPU torch?" (yes: the
+    # Pi has no NVIDIA GPU). Deriving the second from the first is what left the
+    # whole opi path with no torch assertion at all.
     docker buildx build --platform linux/arm64 --load --no-cache --pull \
         "${OCI_LABELS[@]}" \
         --build-arg BASE_IMAGE="${PAS_BASE_IMAGE}" \
         --build-arg SLIM_CUDA=0 \
+        --build-arg TORCH_EXPECT_CPU=1 \
         -t "${PAS_OUT_REPO}:${IMAGE_TAG_SUFFIX}" \
         -f "${SCRIPT_DIR}/physical_ai_server/Dockerfile" \
         "${SCRIPT_DIR}/physical_ai_server/"
@@ -576,10 +592,15 @@ else
     # store. --platform linux/amd64 is still needed on Apple Silicon
     # hosts where the default builder would target arm64; harmless on
     # native Linux/amd64.
+    # TORCH_EXPECT_CPU=1: after the SLIM_CUDA swap this image MUST be on
+    # torch 2.7.0+cpu. arm64/Jetson passes neither arg (both default 0) — it
+    # legitimately keeps its GPU torch, so its gate asserts the 2.7.x version
+    # only, not the channel.
     docker buildx build --platform linux/amd64 --load --no-cache --pull \
         "${OCI_LABELS[@]}" \
         --build-arg BASE_IMAGE="${PAS_BASE_IMAGE}" \
         --build-arg SLIM_CUDA=1 \
+        --build-arg TORCH_EXPECT_CPU=1 \
         -t "${PAS_OUT_REPO}:${IMAGE_TAG_SUFFIX}" \
         -f "${SCRIPT_DIR}/physical_ai_server/Dockerfile" \
         "${SCRIPT_DIR}/physical_ai_server/"

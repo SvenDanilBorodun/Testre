@@ -76,21 +76,36 @@ prepare_golden() {
     # EnvironmentFile is NON-optional); first-boot still recreates it, but a valid
     # golden .env is the belt-and-suspenders. Order matters: this re-persists the
     # ROS_DOMAIN_ID, so the .ros_domain_id removal below MUST follow it.
+    #
+    # We NEVER `rm` the file first — that is the whole point of the paragraph
+    # above, and an earlier revision contradicted it. generate_cloud_only_env is
+    # atomic (temp file + os.replace), so a failed regen leaves the existing .env
+    # intact; with an `rm` first, a failed regen shipped a golden image with NO
+    # /etc/edubotics/.env at all and every clone's agent unit died on its
+    # non-optional EnvironmentFile. The `rm` was only ever there to drop the bench
+    # HF token, which survives a regenerate by design (it is deliberately an
+    # UNMANAGED key). upsert_env_var("HF_TOKEN", "") drops it explicitly instead —
+    # the same mechanism edubotics-pi-firstboot.sh already uses for the same job.
+    # Arm ports need no special handling: they are MANAGED keys, so the cloud-only
+    # regenerate re-emits them empty.
     local golden_subnet=""
     if [ -f "${ENV_FILE}" ] && [ -d "${INSTALL_DIR}/pi_agent" ]; then
         golden_subnet="$(cd "$INSTALL_DIR" && python3 -c \
             'from pi_agent import config_generator as c; print(c.read_env_var("EDUBOTICS_ROS_NET_SUBNET") or "")' \
             2>/dev/null || true)"
     fi
-    rm -f "${ENV_FILE}" 2>/dev/null || true
     if [ -d "${INSTALL_DIR}/pi_agent" ]; then
         if ( cd "$INSTALL_DIR" && SUBNET="$golden_subnet" python3 -c \
-                'import os; from pi_agent import config_generator as c; c.generate_cloud_only_env(ros_net_subnet=(os.environ.get("SUBNET") or None))' \
+                'import os
+from pi_agent import config_generator as c
+if os.path.isfile(c.ENV_FILE): c.upsert_env_var("HF_TOKEN", "")
+c.generate_cloud_only_env(ros_net_subnet=(os.environ.get("SUBNET") or None))' \
                 2>/dev/null ); then
             chmod 600 "${ENV_FILE}" 2>/dev/null || true
             chown root:root "${ENV_FILE}" 2>/dev/null || true
         else
             warn "Could not regenerate a clean golden .env — the clone's first boot will recreate one."
+            warn "IMPORTANT: verify /etc/edubotics/.env carries no HF_TOKEN before capturing the image."
         fi
     fi
     rm -rf "${ENV_DIR}/phone-cert" 2>/dev/null || true

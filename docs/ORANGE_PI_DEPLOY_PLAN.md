@@ -1,8 +1,30 @@
-# EduBotics on Orange Pi 5 Pro — Approved Deployment Plan
+# EduBotics on Orange Pi 5 Pro — Deployment Plan (HISTORICAL)
 
-> **Status: APPROVED PLAN, implementation pending** (decisions locked
-> 2026-07-11). Every file:line reference below was verified against the
-> code at v2.12.2 on 2026-07-11. **Rev. 2 (2026-07-11)**: amended after a
+> ## STATUS: LANDED — historical record only. NOT authoritative.
+>
+> This plan shipped (`ce6a9eb`, `17c77e9`). It is kept for the reasoning
+> behind the decisions, not as a description of the code.
+>
+> **Authoritative sources, in this order:**
+> - `CLAUDE.md` — the present-tense invariants (the durable ones from this
+>   plan were folded in there; if the two disagree, CLAUDE.md wins, and if
+>   CLAUDE.md disagrees with the code, the code wins).
+> - `docs/ORANGE_PI_TEACHER_RUNBOOK.md` — the operator/teacher runbook.
+> - `docs/ORANGE_PI_IT_NETZWERK.md` — the German IT/network one-pager.
+> - `docs/arm64_base/README.md` — the base-image build steps.
+>
+> **Do not trust the file:line references or the numbers below.** They were
+> accurate against v2.12.2 on 2026-07-11 and have since drifted: as landed,
+> `flatten_amd64_image` no longer exists (it is the flavor-neutral
+> `flatten_image`), the opi size ceiling is **11 GB** and not the ~7 GB
+> quoted in §6 (a real build measures 4.85 GB), and the "static
+> nginx.opi.conf" wording is contradicted by the shipped
+> `Dockerfile.opi` (an envsubst-rendered template). Corrections are applied
+> only where a number was actively misleading; the rest stands as written
+> at the time.
+>
+> (Original banner: *Status: APPROVED PLAN, implementation pending* —
+> decisions locked 2026-07-11, references verified against v2.12.2.) **Rev. 2 (2026-07-11)**: amended after a
 > full-code + web review — two-tier lifecycle carve-out for the manager
 > (§5), decided `/api/system` proxy mechanics (§5), decided Pi-mode
 > gating + `physical-ai-manager-opi` twin (§4/§6), explicit torch pin +
@@ -31,11 +53,12 @@
 > LAN IP shown in the System window (§6), a wizard „Netzwerk-Check"
 > agent endpoint (§5/§6), network-aware Pi-mode disconnect wording
 > (§6), and the German IT one-pager as a named P4 deliverable
-> (§7/§10). This document is the durable spec for the
-> Orange-Pi workstream; per-phase throwaway plans still go to `docs/plans/`
-> (gitignored) as usual. When implementation lands, fold the durable
-> invariants into `CLAUDE.md` and convert this file into a runbook in the
-> style of `docs/JETSON_DEPLOY.md`.
+> (§7/§10). Per-phase throwaway plans go to `docs/plans/` (gitignored) as
+> usual. **This document is NOT the durable spec** — that self-declaration
+> was removed when the work landed, because a plan claiming authority is
+> exactly what CLAUDE.md's spec-before-code rule forbids ("the plan never
+> claims to be authoritative"). The durable invariants live in `CLAUDE.md`;
+> the operator steps live in the two runbooks named in the banner above.
 
 ## 1. Goal
 
@@ -226,8 +249,13 @@ Rockchip. Work items:
    integrity `REPOS` list (`:366`) — two hardcoded repo lists, not one;
    add an **opi size gate** as a NEW step (the existing 11 GB gate —
    step at `:549`, literal at `:567` — is guarded
-   `if: matrix.platform == 'amd64'` at `:550`, so the opi ceiling,
-   ~7 GB, is its own gate rather than a threshold tweak); run
+   `if: matrix.platform == 'amd64'` at `:550`, so the opi ceiling is its
+   own gate rather than a threshold tweak). **AS LANDED the opi ceiling is
+   11 GB, not the ~7 GB this plan proposed** — 7 GB left only ~1.2x headroom
+   over the 5-6 GB target, so the first real build would have failed the
+   release for being its designed size. A measured build is 4.85 GB. This
+   line is the origin of the stale 7 GB figure that propagated into
+   `docs/arm64_base/README.md`; both are corrected. Run
    `image_source_parity.sh` for the flavor (verified flavor-neutral —
    parameterized purely by `<kind> <image-ref>`, no edits needed).
 6. **Write the missing `docs/arm64_base/README.md`** — referenced 3×

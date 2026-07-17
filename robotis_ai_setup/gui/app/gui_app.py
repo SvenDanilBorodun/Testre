@@ -172,6 +172,52 @@ def _elevate_and_wait(exe: str, args: str, show: int = 1):
     return int(exit_code.value), False, None
 
 
+def _run_privileged(exe: str, args: str, show: int = 1):
+    """Run `exe args` with admin rights, choosing the path automatically.
+
+    Rationale — "no UAC prompt appears" on an admin account is NOT a failure:
+    it means either UAC is set to "Never notify" (the admin's elevation happens
+    silently) or UAC is off entirely (this GUI process already carries a FULL
+    admin token). In both cases the process is ALREADY elevated, so re-invoking
+    the ``runas`` verb is redundant and can misbehave. Instead, when we already
+    hold an admin token we run the command DIRECTLY with no prompt — this is
+    exactly what makes setup succeed unattended on those accounts. Only when we
+    are NOT elevated do we route through ShellExecuteEx "runas" (which shows the
+    consent dialog on a standard token).
+
+    Returns the SAME (exit_code, cancelled, error_message) contract as
+    _elevate_and_wait: exit_code is an int only when the process actually ran
+    and exited, None on any launch failure; cancelled is True only for a UAC
+    decline (impossible on the direct path). On non-Windows, ('not supported').
+    """
+    if sys.platform != "win32":
+        return None, False, "not supported"
+
+    if not _is_elevated():
+        # Standard token → we need the OS to elevate us via the UAC prompt.
+        return _elevate_and_wait(exe, args, show)
+
+    # Already elevated → run the (already-quoted) command line directly with no
+    # UAC. Build `"exe" args` so powershell's own command-line parsing applies
+    # to the pre-quoted -File/-LogPath/-MarkerPath tokens the callers construct.
+    CREATE_NO_WINDOW = 0x08000000  # no console window flashes at the student
+    cmdline = f'"{exe}" {args}'
+    try:
+        proc = subprocess.run(
+            cmdline,
+            creationflags=CREATE_NO_WINDOW,
+            # No short timeout: finalize (import + image pull) can legitimately
+            # take several minutes and already runs on the caller's daemon
+            # thread. The generous cap only guards a truly wedged child.
+            timeout=1800,
+        )
+        return proc.returncode, False, None
+    except subprocess.TimeoutExpired:
+        return None, False, "Zeitüberschreitung beim direkten Start (30 Minuten)"
+    except Exception as e:  # noqa: BLE001
+        return None, False, f"Direkter Start fehlgeschlagen: {e}"
+
+
 def _ps_single_quote(s: str) -> str:
     """Escape a string for safe embedding inside a single-quoted PowerShell token.
 
@@ -1204,8 +1250,14 @@ class EduBoticsApp:
             self._set_status("usbipd fehlt — Reparatur übersprungen")
             return
 
-        self._set_status("Reparatur läuft (UAC-Zustimmung erforderlich)...")
-        self._log("usbipd-Reparatur wird mit Administrator-Rechten gestartet...")
+        # Already-elevated accounts run the repair directly with no UAC prompt;
+        # word the status accordingly so it isn't misleading.
+        if _is_elevated():
+            self._set_status("Reparatur läuft (Administrator-Rechte vorhanden)...")
+            self._log("usbipd-Reparatur wird automatisch ausgeführt (Administrator-Rechte vorhanden)...")
+        else:
+            self._set_status("Reparatur läuft (UAC-Zustimmung erforderlich)...")
+            self._log("usbipd-Reparatur wird mit Administrator-Rechten gestartet...")
 
         def _run_elevated():
             # We chain both scripts in a single elevated shell so the
@@ -1234,7 +1286,7 @@ class EduBoticsApp:
                 f'else {{ exit 0 }}"'
             )
             self._elevation_prewarn()
-            exit_code, cancelled, err = _elevate_and_wait(
+            exit_code, cancelled, err = _run_privileged(
                 exe="powershell.exe",
                 args=ps_cmd,
             )
@@ -1481,8 +1533,14 @@ class EduBoticsApp:
 
         self._finalize_in_progress = True
         self._log(f"Setup-Skript: {script}")
-        self._set_status("Einrichtung läuft automatisch (UAC-Zustimmung erforderlich)...")
-        self._log("Einrichtung wird automatisch mit Administrator-Rechten gestartet...")
+        # When we already hold an admin token there is NO UAC prompt (UAC off or
+        # "Never notify"), so word the status/log for the actual path taken.
+        if _is_elevated():
+            self._set_status("Einrichtung läuft automatisch (Administrator-Rechte vorhanden)...")
+            self._log("Einrichtung wird automatisch ausgeführt (Administrator-Rechte vorhanden)...")
+        else:
+            self._set_status("Einrichtung läuft automatisch (UAC-Zustimmung erforderlich)...")
+            self._log("Einrichtung wird automatisch mit Administrator-Rechten gestartet...")
 
         def _run_elevated():
             # The elevated finalize_install.ps1 writes:
@@ -1505,7 +1563,7 @@ class EduBoticsApp:
                 f'-LogPath "{log_file}" -MarkerPath "{marker_file}"'
             )
             self._elevation_prewarn()
-            exit_code, cancelled, err = _elevate_and_wait(
+            exit_code, cancelled, err = _run_privileged(
                 exe="powershell.exe",
                 args=ps_args,
             )
@@ -2071,7 +2129,7 @@ class EduBoticsApp:
                 f'-LogPath "{log_file}"'
             )
             self._elevation_prewarn()
-            exit_code, cancelled, err = _elevate_and_wait(
+            exit_code, cancelled, err = _run_privileged(
                 exe="powershell.exe",
                 args=ps_args,
             )

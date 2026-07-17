@@ -89,6 +89,14 @@ def _ps1_exit_codes(path):
     }
 
 
+def _elevate_fn_src():
+    """Source of the module-level `_elevate_and_wait()` from gui_app.py."""
+    src = _read(_GUI_SRC)
+    start = src.index("def _elevate_and_wait(")
+    end = src.index("\ndef ", start + 1)
+    return src[start:end]
+
+
 def _load_method(method_name, ns):
     """Extract `method_name` from gui_app.py and exec it into ``ns``.
 
@@ -309,11 +317,19 @@ class PromptFinalizeInstallTest(unittest.TestCase):
     # Outcome 5/5: the student refused the UAC prompt. Checked FIRST, before any
     # exit code (there is no exit code to read).
     def test_cancelled_reports_abgebrochen(self):
+        # The err string deliberately does NOT contain "abgebrochen". The old
+        # fixture passed "UAC abgebrochen", so the assertion below matched the
+        # generic `UAC-Fehler: {err}` echo rather than the cancelled branch —
+        # deleting that branch entirely kept this test green. Mirror what
+        # _elevate_and_wait actually returns now.
         method, owner, calls = self._make(
-            elevate=(None, True, "UAC abgebrochen"), reboot_pending=True)
+            elevate=(None, True, "UAC-Zustimmung verweigert"), reboot_pending=True)
         self._run(method, owner)
         self.assertEqual(calls["prereq"], 0)
-        self.assertTrue(any("abgebrochen" in m for m in calls["log"]))
+        self.assertTrue(any("abgebrochen" in m for m in calls["log"]),
+                        f"a UAC decline must be reported as abgebrochen: {calls['log']}")
+        self.assertTrue(any("abgebrochen" in s for s in calls["status"]),
+                        f"the status line must say abgebrochen too: {calls['status']}")
         self.assertFalse(any("Neustart erforderlich" in m for m in calls["log"]))
 
     def test_failed_exit_with_flag_clear_reports_fehlgeschlagen(self):
@@ -499,6 +515,59 @@ class ScriptTerminalExitTest(unittest.TestCase):
                     lines and lines[-1] == "exit 0",
                     f"{name} must end with an explicit `exit 0`; last statement "
                     f"is {lines[-1]!r}")
+
+
+class UacCancelDetectionTest(unittest.TestCase):
+    """The UAC-decline DETECTION — which the routing tests structurally cannot see.
+
+    ctypes.get_last_error() reports a Win32 error ONLY for calls made through a
+    handle loaded with use_last_error=True. gui_app used the cached, flag-LESS
+    `ctypes.windll.shell32`, so get_last_error() returned 0 unconditionally, the
+    ERROR_CANCELLED branch was DEAD CODE, and a student who DECLINED the UAC
+    prompt was told "Einrichtung fehlgeschlagen (exit None)" — a crash report for
+    a choice they made themselves.
+
+    Why assert on SOURCE rather than behaviour: `_elevate_and_wait` early-returns
+    off win32, and `ctypes.wintypes` cannot even be imported on Linux — so a
+    behavioural test would SKIP on the Linux CI runner, i.e. exactly where the
+    regression would land unnoticed. The routing tests above mock this function's
+    RETURN value, so they can never catch a detection bug either. Between them,
+    the bug had nowhere to be caught; this class is that place.
+    """
+
+    def test_shell32_is_loaded_with_use_last_error(self):
+        self.assertIn(
+            'ctypes.WinDLL("shell32", use_last_error=True)', _elevate_fn_src(),
+            "shell32 must be loaded with use_last_error=True, or "
+            "ctypes.get_last_error() always returns 0 and the ERROR_CANCELLED "
+            "branch is unreachable")
+
+    def test_flagless_windll_shell32_is_not_used(self):
+        # Strip comments first: the fix's own rationale necessarily NAMES the
+        # old API to explain the bug, and matching that would fail on the
+        # documentation rather than the code.
+        code = "\n".join(ln for ln in _elevate_fn_src().splitlines()
+                         if not ln.lstrip().startswith("#"))
+        self.assertNotIn(
+            "windll.shell32", code,
+            "ctypes.windll.shell32 is the CACHED, flag-less handle — using it "
+            "silently disables ctypes.get_last_error() for ShellExecuteExW")
+
+    def test_error_cancelled_maps_to_cancelled_true(self):
+        self.assertRegex(
+            _elevate_fn_src(),
+            r"if err == ERROR_CANCELLED:\s*\n\s*return None, True,",
+            "ERROR_CANCELLED must map to cancelled=True so the caller can "
+            "report 'abgebrochen' instead of a generic failure")
+
+    def test_cancel_error_text_cannot_fake_the_routing_assertion(self):
+        # Guards the vacuity that hid this bug: the routing test asserts on
+        # "abgebrochen" in the log, and the caller echoes `UAC-Fehler: {err}`.
+        # If this function's cancel text ever contains "abgebrochen" again, that
+        # echo alone satisfies the routing test and the branch can rot away.
+        m = re.search(r"return None, True, \"([^\"]+)\"", _elevate_fn_src())
+        self.assertIsNotNone(m, "cancel return not found")
+        self.assertNotIn("abgebrochen", m.group(1).lower())
 
 
 if __name__ == "__main__":

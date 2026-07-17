@@ -67,7 +67,15 @@ def _elevate_and_wait(exe: str, args: str, show: int = 1):
     info.lpParameters = args
     info.nShow = show
 
-    shell32 = ctypes.windll.shell32
+    # use_last_error=True is LOAD-BEARING. ctypes.get_last_error() below reports
+    # the thread's last Win32 error ONLY for calls made through a handle loaded
+    # with this flag. `ctypes.windll.shell32` is the cached, flag-LESS handle, so
+    # get_last_error() returned 0 unconditionally -> the ERROR_CANCELLED branch
+    # was unreachable -> a student who DECLINED the UAC prompt was told
+    # "Einrichtung fehlgeschlagen (exit None)" instead of "abgebrochen", i.e. the
+    # one outcome they caused themselves read as a crash. (The single-instance
+    # guard further down already gets this right — mirror it here.)
+    shell32 = ctypes.WinDLL("shell32", use_last_error=True)
     kernel32 = ctypes.windll.kernel32
     shell32.ShellExecuteExW.restype = wintypes.BOOL
     shell32.ShellExecuteExW.argtypes = [ctypes.POINTER(SHELLEXECUTEINFOW)]
@@ -76,7 +84,7 @@ def _elevate_and_wait(exe: str, args: str, show: int = 1):
     if not ok:
         err = ctypes.get_last_error()
         if err == ERROR_CANCELLED:
-            return None, True, "UAC abgebrochen"
+            return None, True, "UAC-Zustimmung verweigert"
         return None, False, f"ShellExecuteEx Fehler {err}"
 
     if not info.hProcess:

@@ -517,6 +517,105 @@ class ScriptTerminalExitTest(unittest.TestCase):
                     f"is {lines[-1]!r}")
 
 
+class RootCauseGuardTest(unittest.TestCase):
+    """Guards the three LOAD-BEARING fixes that a final review proved were
+    completely unprotected: deleting any of them left the whole suite green.
+
+    The pattern that made this necessary is worth naming: every SECONDARY fix in
+    this change set got a strong guard, while the PRIMARY one — the actual root
+    cause of the v2.13.0 pilot incident — had none. A regression here reproduces
+    the original outage, silently.
+    """
+
+    @staticmethod
+    def _code(name):
+        """Script source with COMMENT LINES STRIPPED.
+
+        Load-bearing: a fix's own rationale necessarily names the thing it
+        guards against (`dism /enable-feature`, `NTAccount("Users")`, …), so an
+        un-stripped source guard pins the DOCUMENTATION and reports a false
+        ordering. This exact trap produced several vacuous checks while this
+        change set was written."""
+        src = _read(os.path.join(_SCRIPTS, name), encoding="utf-8-sig")
+        return "\n".join(ln for ln in src.splitlines()
+                         if not ln.lstrip().startswith("#"))
+
+    # ── 1. The root cause itself ────────────────────────────────────────────
+    # install_prerequisites.ps1 must STATE-CHECK the WSL/VMP features before
+    # touching dism. Running the enable unconditionally is what produced the
+    # incident: with an unrelated Windows-Update servicing op pending, a no-op
+    # enable of an ALREADY-ENABLED feature returns rc=3010, which was read as
+    # "our feature needs a reboot" -> a spurious .reboot_required -> the .iss
+    # gates skipped the image pull + distro import.
+    def test_dism_is_state_checked_before_enable(self):
+        code = self._code("install_prerequisites.ps1")
+        self.assertIn("Get-WindowsOptionalFeature", code,
+                      "the feature STATE must be probed before dism, or an "
+                      "unrelated pending servicing op resurrects the spurious "
+                      "rc=3010 -> .reboot_required -> skipped pull")
+        self.assertLess(code.index("Get-WindowsOptionalFeature"),
+                        code.index("/enable-feature"),
+                        "the state probe must PRECEDE dism /enable-feature")
+        self.assertRegex(code, r'\$featureState -eq "Enabled"',
+                         "an already-Enabled feature must skip dism entirely")
+
+    def test_unreadable_feature_store_does_not_manufacture_a_reboot(self):
+        # The pilot's exact state: Get-WindowsOptionalFeature throws a
+        # COMException while servicing is pending. That must NOT fall through to
+        # dism (which would 3010) — `wsl --status` is authoritative instead.
+        code = self._code("install_prerequisites.ps1")
+        catch = code.index("Get-WindowsOptionalFeature failed")
+        enable = code.index("/enable-feature")
+        self.assertLess(catch, enable)
+        self.assertIn("continue", code[catch:enable],
+                      "an unreadable feature store must `continue`, never fall "
+                      "through to dism")
+
+    # ── 2. The GUI's reboot-pending routing ─────────────────────────────────
+    def test_gui_routes_reboot_pending_to_finalize_with_latch(self):
+        src = _read(_GUI_SRC)
+        self.assertIn(
+            "if self._reboot_required_pending() and not self._finalize_completed:",
+            src,
+            "the prereq check must route a pending-reboot install to finalize, "
+            "AND honour the _finalize_completed latch — without the latch a "
+            "flag finalize merely failed to delete loops UAC forever")
+
+    # ── 3. The diagnostics ACL ──────────────────────────────────────────────
+    # Two independent ways to break this, BOTH silent (the block is wrapped in
+    # `catch { }`): a localized account name throws on German Windows (the log
+    # then never writes), and dropping NoPropagateInherit lets Users:Modify
+    # inherit onto %ProgramData%\EduBotics\wsl\ext4.vhdx — i.e. every student on
+    # a lab PC could tamper with the distro image.
+    _ACL_SCRIPTS = ("install_prerequisites.ps1", "migrate_from_docker_desktop.ps1",
+                    "verify_system.ps1", "configure_usbipd.ps1", "bind_devices.ps1")
+
+    def test_acl_uses_the_well_known_sid_never_a_localized_name(self):
+        for name in self._ACL_SCRIPTS:
+            code = self._code(name)
+            with self.subTest(script=name):
+                self.assertIn('SecurityIdentifier("S-1-5-32-545")', code,
+                              "must use the well-known Users SID — this ships on "
+                              "German Windows, where NTAccount('Users') throws "
+                              "and the catch{} swallows it, so the log silently "
+                              "never writes")
+                self.assertNotIn('NTAccount("Users")', code)
+                self.assertNotIn("NTAccount('Users')", code)
+
+    def test_acl_cannot_inherit_onto_the_distro_vhdx(self):
+        for name in self._ACL_SCRIPTS:
+            code = self._code(name)
+            with self.subTest(script=name):
+                self.assertIn("NoPropagateInherit", code,
+                              "without NoPropagateInherit the Users:Modify grant "
+                              "inherits onto %ProgramData%\\EduBotics\\wsl\\"
+                              "ext4.vhdx — any standard user could tamper with "
+                              "the distro image")
+                self.assertNotIn("ContainerInherit,ObjectInherit", code,
+                                 "ContainerInherit propagates into wsl\\ — that "
+                                 "was the bug")
+
+
 class UacCancelDetectionTest(unittest.TestCase):
     """The UAC-decline DETECTION — which the routing tests structurally cannot see.
 

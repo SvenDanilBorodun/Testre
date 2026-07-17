@@ -73,16 +73,19 @@ if ($PreserveExistingRebootFlag -and (Test-Path $FlagPath)) {
 #
 # SCOPE IS LOAD-BEARING — "this folder and files", NOT the subtree.
 # The WSL install root is a CHILD of this directory ($env:ProgramData\EduBotics\
-# wsl, see import_edubotics_wsl.ps1 -InstallRoot). The 2026-07 grant used
-# ContainerInherit,ObjectInherit, which propagated Users:Modify down onto the
-# distro's ext4.vhdx — every standard user on a shared lab PC could tamper with
-# the VHDX holding the datasets, HF cache and calibration. ObjectInherit +
+# wsl, see import_edubotics_wsl.ps1 -InstallRoot). An earlier revision OF THIS
+# CHANGE used ContainerInherit,ObjectInherit, which propagated Users:Modify down
+# onto the distro's ext4.vhdx — every standard user on a shared lab PC could
+# have tampered with the VHDX holding the datasets, HF cache and calibration. It
+# was caught in review and NEVER RELEASED (`git log -S ContainerInherit` finds it
+# on no tag) — do not read this as shipped history. ObjectInherit +
 # NoPropagateInherit grants the directory itself + the files directly in it (the
 # log, which is all the GUI needs) and stops there: wsl\ inherits nothing.
 # RemoveAccessRuleAll first — it matches on SID + Allow regardless of rights, so
-# it drops the old over-broad ACE on machines that already ran the previous
-# version, and Windows then recomputes the children's inherited ACEs (verified:
-# an already-inherited Modify on wsl\ext4.vhdx disappears on the next run).
+# it drops ANY pre-existing over-broad ACE whatever put it there (a dev box that
+# ran an intermediate build, a hand-edited ACL), and Windows then recomputes the
+# children's inherited ACEs (verified: an already-inherited Modify on
+# wsl\ext4.vhdx disappears on the next run).
 $DiagDir = Join-Path $env:ProgramData "EduBotics"
 try {
     if (-not (Test-Path $DiagDir)) {

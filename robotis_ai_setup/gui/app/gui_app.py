@@ -195,7 +195,14 @@ def _run_privileged(exe: str, args: str, show: int = 1):
 
     if not _is_elevated():
         # Standard token → we need the OS to elevate us via the UAC prompt.
-        return _elevate_and_wait(exe, args, show)
+        # Exception-guarded so an unexpected ctypes failure surfaces as the
+        # normal launch-failure tuple instead of killing the caller's worker
+        # thread (which would also strand re-entrancy flags like
+        # _finalize_in_progress).
+        try:
+            return _elevate_and_wait(exe, args, show)
+        except Exception as e:  # noqa: BLE001
+            return None, False, f"Elevation fehlgeschlagen: {e}"
 
     # Already elevated → run the (already-quoted) command line directly with no
     # UAC. Build `"exe" args` so powershell's own command-line parsing applies
@@ -206,14 +213,19 @@ def _run_privileged(exe: str, args: str, show: int = 1):
         proc = subprocess.run(
             cmdline,
             creationflags=CREATE_NO_WINDOW,
-            # No short timeout: finalize (import + image pull) can legitimately
-            # take several minutes and already runs on the caller's daemon
-            # thread. The generous cap only guards a truly wedged child.
-            timeout=1800,
+            # NO timeout — deliberately matching the UAC path's INFINITE wait.
+            # finalize (rootfs import + multi-GB image pull) can legitimately
+            # exceed any "generous" cap on slow school internet, and a timeout
+            # kill here is worse than useless: subprocess.run() kills only the
+            # powershell.exe child (no job object), so the wsl.exe/msiexec
+            # grandchildren keep running detached while the GUI reports a
+            # failure — and killing `wsl --import` mid-copy can leave the
+            # corrupt-VHDX state the import script's disk gate exists to
+            # prevent. The child runs on the caller's daemon thread, so a
+            # wedged child never blocks the UI; finalize is idempotent, so a
+            # GUI restart simply resumes.
         )
         return proc.returncode, False, None
-    except subprocess.TimeoutExpired:
-        return None, False, "Zeitüberschreitung beim direkten Start (30 Minuten)"
     except Exception as e:  # noqa: BLE001
         return None, False, f"Direkter Start fehlgeschlagen: {e}"
 
@@ -1069,7 +1081,8 @@ class EduBoticsApp:
         if not docker_manager.is_distro_registered():
             self._log("EduBotics-Umgebung ist noch nicht eingerichtet.")
             self.root.after(0, lambda: self.progress.stop())
-            # Offer one-click finalize (UAC prompt, runs finalize_install.ps1).
+            # Auto-run finalize (finalize_install.ps1) — direct when already
+            # elevated, else via one UAC prompt; re-entrancy-guarded inside.
             self.root.after(0, self._prompt_finalize_install)
             return
         # Pin the distro awake for the lifetime of this GUI session BEFORE the
@@ -1285,6 +1298,22 @@ class EduBoticsApp:
                 f'elseif ($cfg_rc -ne 0) {{ exit $cfg_rc }} '
                 f'else {{ exit 0 }}"'
             )
+            # Paste-safe variant for the manual-fallback dialog. ps_cmd cannot
+            # be pasted into a PowerShell prompt: its double-quoted -Command
+            # string contains $prereq_rc/$cfg_rc/$LASTEXITCODE, which the
+            # OUTER interactive PowerShell interpolates (to empty/stale values)
+            # before the child ever sees them — the child then receives ` = ;`
+            # fragments and fails to parse, so nothing runs. The manual variant
+            # drops the transcript/exit-code plumbing (the student sees the
+            # output directly in their console) and contains no `$` at all, so
+            # it survives both an elevated PowerShell and cmd.exe verbatim. The
+            # powershell.exe -ExecutionPolicy Bypass wrapper stays: a bare
+            # `& 'script.ps1'` would be blocked by the default policy.
+            manual_cmd = (
+                f'powershell.exe -NoProfile -ExecutionPolicy Bypass -Command '
+                f'"& \'{_ps_single_quote(prereq)}\'; '
+                f'& \'{_ps_single_quote(configure)}\'"'
+            )
             self._elevation_prewarn()
             exit_code, cancelled, err = _run_privileged(
                 exe="powershell.exe",
@@ -1329,7 +1358,7 @@ class EduBoticsApp:
                         self._log("Mehrfach abgebrochen — manueller Befehl wird angeboten.")
                         self._show_manual_elevation_fallback(
                             "usbipd-Reparatur manuell ausführen",
-                            f"powershell.exe {ps_cmd}",
+                            manual_cmd,
                         )
                 elif exit_code is None:
                     # Launch failure: the elevated child never ran (distinct
@@ -1342,7 +1371,7 @@ class EduBoticsApp:
                     self._set_status("Reparatur nicht gestartet — manueller Befehl")
                     self._show_manual_elevation_fallback(
                         "usbipd-Reparatur manuell ausführen",
-                        f"powershell.exe {ps_cmd}",
+                        manual_cmd,
                     )
                 else:
                     self._log(
@@ -1377,12 +1406,16 @@ class EduBoticsApp:
         return False
 
     def _show_manual_elevation_fallback(self, title: str, command: str):
-        """Offer the student a manual admin command when auto-elevation FAILED to launch.
+        """Offer the student a manual admin command when auto-elevation is a dead end.
 
-        Shown only on a launch failure (exit_code is None, not a UAC cancel):
-        the elevated child never started, so re-clicking rarely helps. We give
-        the exact command to paste into an elevated PowerShell, with a
-        copy-to-clipboard button. Runs on the Tk main thread.
+        Shown in two cases: a launch failure (exit_code is None — the elevated
+        child never started, so re-clicking rarely helps) and a repeated UAC
+        cancel (>= 2, which also covers a Group-Policy auto-deny that surfaces
+        as ERROR_CANCELLED and would otherwise loop forever). We give the exact
+        command to paste into an elevated PowerShell, with a copy-to-clipboard
+        button. The command MUST be paste-safe for an interactive PowerShell:
+        no `$` inside double quotes (the outer shell would interpolate it
+        before the child sees it). Runs on the Tk main thread.
         """
         def _build():
             win = tk.Toplevel(self.root)
@@ -1480,17 +1513,32 @@ class EduBoticsApp:
             if script is None:
                 return
             # CREATE_NO_WINDOW so the elevated-free preflight never flashes a
-            # console window at the student.
-            creationflags = 0x08000000 if sys.platform == "win32" else 0
+            # console window at the student (win32-only path — guarded above).
+            creationflags = 0x08000000
+            # Encoding: Windows PowerShell 5.1 writes REDIRECTED stdout in the
+            # console's OEM codepage (cp850 on German Windows), while Python's
+            # text=True decodes with the ANSI codepage (cp1252) — umlauts would
+            # garble, and 'ü' (0x81 in cp850, undefined in cp1252) would raise
+            # a UnicodeDecodeError that silently swallows the WHOLE output.
+            # Force the child to emit UTF-8 via [Console]::OutputEncoding (a
+            # -Command wrapper; try/catch-guarded so a console-less edge case
+            # still runs the script) and decode as UTF-8 with errors="replace"
+            # so one bad byte can never blank the diagnosis.
+            ps_wrapper = (
+                "try { [Console]::OutputEncoding = "
+                "[System.Text.Encoding]::UTF8 } catch { }; "
+                f"& '{_ps_single_quote(script)}'"
+            )
             proc = subprocess.run(
                 [
                     "powershell.exe",
                     "-NoProfile",
                     "-ExecutionPolicy", "Bypass",
-                    "-File", script,
+                    "-Command", ps_wrapper,
                 ],
                 capture_output=True,
-                text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=60,
                 creationflags=creationflags,
             )
@@ -1543,6 +1591,18 @@ class EduBoticsApp:
             self._log("Einrichtung wird automatisch mit Administrator-Rechten gestartet...")
 
         def _run_elevated():
+            # Clear the re-entrancy guard only after ALL post-processing
+            # (transcript echo, re-check, fallback dialogs) — clearing it right
+            # after the child exited let a concurrent rescan stack a second
+            # finalize while this one was still reporting. The finally also
+            # guarantees an unexpected exception can't strand the flag, which
+            # would permanently disable setup retries until a GUI restart.
+            try:
+                _finalize_worker()
+            finally:
+                self._finalize_in_progress = False
+
+        def _finalize_worker():
             # The elevated finalize_install.ps1 writes:
             #   - a marker file on startup (proves it launched)
             #   - a transcript file with full stdout/stderr (Start-Transcript)
@@ -1567,10 +1627,6 @@ class EduBoticsApp:
                 exe="powershell.exe",
                 args=ps_args,
             )
-            # The elevated launch has completed (the wait blocks until the child
-            # exits); clear the guard so a later prerequisite scan can retry if
-            # this attempt didn't finish setting the environment up.
-            self._finalize_in_progress = False
             if err:
                 self._log(f"UAC-Fehler: {err}")
 

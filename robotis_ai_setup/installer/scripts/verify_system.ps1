@@ -9,6 +9,19 @@ param(
 
 $ErrorActionPreference = "Continue"
 
+# ── Post-MSI PATH refresh ──────────────────────────────────────────────────
+# verify runs from the same Inno install session that just installed the
+# usbipd-win MSI. This powershell.exe inherited explorer.exe's PATH from BEFORE
+# the MSI landed, so a bare `usbipd` may not resolve yet — which would make the
+# usbipd probe below FAIL on a perfectly good install (false negative). Recompose
+# $env:Path from the machine + user registry first, exactly like
+# configure_usbipd.ps1 / bind_devices.ps1 do, so verify checks reality.
+try {
+    $machinePath = [System.Environment]::GetEnvironmentVariable("Path", "Machine")
+    $userPath    = [System.Environment]::GetEnvironmentVariable("Path", "User")
+    $env:Path = (@($machinePath, $userPath) | Where-Object { $_ }) -join ";"
+} catch { }
+
 # Mirror the diagnostics sink used by install_prerequisites.ps1 + configure_usbipd.ps1
 # so the verify step also leaves evidence behind for support.
 $DiagDir = Join-Path $env:LOCALAPPDATA "EduBotics"
@@ -60,7 +73,7 @@ if ($distroListed) {
 # 3. Docker engine inside the distro
 Write-Host "   Checking Docker engine (inside $DistroName)..." -ForegroundColor White
 if ($distroListed) {
-    wsl -d $DistroName -- docker info *>$null 2>&1
+    wsl -d $DistroName -- docker info *>$null 2>&1  # ps-readiness-retry-lint: allow (one-shot post-install diagnostic, records FAIL not exit 1)
     if ($LASTEXITCODE -eq 0) {
         Write-OK "Docker engine"
     } else {

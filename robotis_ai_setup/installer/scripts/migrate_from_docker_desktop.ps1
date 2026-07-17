@@ -127,7 +127,7 @@ Write-Step "Removing Docker Desktop WSL2 distros..."
 $distros = @("docker-desktop", "docker-desktop-data")
 foreach ($d in $distros) {
     try {
-        $listed = wsl --list --quiet 2>&1 | Where-Object { $_ -replace "`0", "" -eq $d }
+        $listed = wsl --list --quiet 2>&1 | Where-Object { (($_ -replace "`0", "").Trim()) -eq $d }
         if ($listed) {
             wsl --unregister $d *>$null
             if ($LASTEXITCODE -eq 0) {

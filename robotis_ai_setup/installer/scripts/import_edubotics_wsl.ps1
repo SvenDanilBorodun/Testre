@@ -228,7 +228,8 @@ if (-not $skipImport) {
     }
 }
 
-# Boot the distro (triggers systemd via wsl.conf) and wait for dockerd
+# Boot the distro (its wsl.conf [boot] command is /usr/local/bin/start-dockerd.sh,
+# NOT systemd — systemd is unreliable on a custom-imported rootfs) and wait for dockerd.
 Write-Step "Starting EduBotics-Umgebung..."
 # First invocation starts the VM; echo is just a ping to force startup.
 wsl -d $DistroName -- echo ready *>$null
@@ -247,14 +248,19 @@ $lastErr = ""
 # support"); merging that with `2>&1` emits a NativeCommandError record on every
 # poll (harmless under EAP=Continue, but it spams the install log). A file redirect
 # keeps stdout/stderr out of the PowerShell streams entirely.
-$dockerErrFile = Join-Path $env:TEMP "edubotics_dockerinfo.err"
+# GetTempFileName() returns a normalized LONG path. NEVER build this under
+# $env:TEMP: a dotted Windows username yields an 8.3 tilde path that crashes
+# -LiteralPath binding with a terminating PSArgumentException (F2).
+$dockerErrFile = [System.IO.Path]::GetTempFileName()
 while ($elapsed -lt $maxWait) {
     & wsl -d $DistroName -- docker info 1>$null 2>$dockerErrFile
     if ($LASTEXITCODE -eq 0) {
         $dockerReady = $true
         break
     }
-    $lastErr = (Get-Content -LiteralPath $dockerErrFile -Raw -ErrorAction SilentlyContinue)
+    # -ErrorAction cannot suppress a terminating PSArgumentException from binding
+    # a malformed/8.3 path to -LiteralPath; try/catch can.
+    $lastErr = ""; try { $lastErr = Get-Content -LiteralPath $dockerErrFile -Raw -ErrorAction Stop } catch { }
     Start-Sleep -Seconds 2
     $elapsed += 2
     Write-Host "   Warte auf Docker-Engine... ${elapsed}s/${maxWait}s" -ForegroundColor Gray
@@ -273,7 +279,8 @@ if (-not $dockerReady) {
         $extra += 2
         & wsl -d $DistroName -- docker info 1>$null 2>$dockerErrFile
         if ($LASTEXITCODE -eq 0) { $dockerReady = $true; break }
-        $lastErr = (Get-Content -LiteralPath $dockerErrFile -Raw -ErrorAction SilentlyContinue)
+        # try/catch, not -ErrorAction: a malformed -LiteralPath binding throws terminating.
+        $lastErr = ""; try { $lastErr = Get-Content -LiteralPath $dockerErrFile -Raw -ErrorAction Stop } catch { }
     }
     if (-not $dockerReady) {
         Write-FAIL "Docker-Engine konnte nicht gestartet werden."
@@ -282,7 +289,9 @@ if (-not $dockerReady) {
         exit 1
     }
 }
-Remove-Item -LiteralPath $dockerErrFile -Force -ErrorAction SilentlyContinue
+# -ErrorAction cannot suppress a terminating PSArgumentException from binding a
+# malformed/8.3 path to -LiteralPath; wrap in try/catch so cleanup never aborts.
+try { Remove-Item -LiteralPath $dockerErrFile -Force -ErrorAction SilentlyContinue } catch { }
 
 Write-OK "Docker-Engine läuft in $DistroName"
 

@@ -153,7 +153,11 @@ try {
     Write-Step "Schritt 1/2: EduBotics-Umgebung wird eingerichtet..."
     try { & (Join-Path $PSScriptRoot "import_edubotics_wsl.ps1") } catch { Write-Warn "Import meldete einen Fehler, prüfe tatsächlichen Zustand: $_" }
     if (-not (Test-DistroRegistered $DistroName)) {
-        Fail-WithNextAction "Die EduBotics-Umgebung wurde nicht eingerichtet." "Bitte den PC neu starten und EduBotics erneut öffnen."
+        # Next step names the two known NON-transient causes (SHA-mismatch of
+        # the rootfs tarball, low disk) explicitly — a bare "restart the PC"
+        # would mislead when the import failed on one of those; the exact
+        # reason is in the transcript either way.
+        Fail-WithNextAction "Die EduBotics-Umgebung wurde nicht eingerichtet." "Bitte das Protokoll prüfen (häufige Ursachen: zu wenig freier Speicherplatz, beschädigter Download). Danach den PC neu starten und EduBotics erneut öffnen."
     }
     if (-not (Wait-DockerReady -DistroName $DistroName -MaxWaitSeconds 120)) {
         Fail-WithNextAction "Die Docker-Engine ist nicht gestartet." "Diagnose: wsl -d $DistroName -- tail -n 50 /var/log/dockerd.log"

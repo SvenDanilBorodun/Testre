@@ -248,9 +248,11 @@ $lastErr = ""
 # support"); merging that with `2>&1` emits a NativeCommandError record on every
 # poll (harmless under EAP=Continue, but it spams the install log). A file redirect
 # keeps stdout/stderr out of the PowerShell streams entirely.
-# GetTempFileName() returns a normalized LONG path. NEVER build this under
-# $env:TEMP: a dotted Windows username yields an 8.3 tilde path that crashes
-# -LiteralPath binding with a terminating PSArgumentException (F2).
+# GetTempFileName() pre-creates the file (reads can't hit a missing target)
+# and gives one consistent absolute path. NOTE: it reads the same TMP env var
+# as $env:TEMP and does NOT expand the 8.3 tilde path a dotted username
+# produces (F2) — the try/catch around every consumer below is the
+# load-bearing guard against the terminating PSArgumentException.
 $dockerErrFile = [System.IO.Path]::GetTempFileName()
 while ($elapsed -lt $maxWait) {
     & wsl -d $DistroName -- docker info 1>$null 2>$dockerErrFile

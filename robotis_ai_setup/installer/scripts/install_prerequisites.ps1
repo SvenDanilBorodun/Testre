@@ -209,9 +209,11 @@ if (-not $usbipdInstalled) {
 
     Write-Host "   Downloading usbipd-win..." -ForegroundColor White
     Write-Host "   URL: $UsbipdMsiUrl" -ForegroundColor Gray
-    # GetTempPath() returns a normalized long path. Building the MSI path under
-    # $env:TEMP can yield an 8.3 tilde path on a dotted/non-ASCII username
-    # (C:\Users\Müller\...), which msiexec rejects with error 1619.
+    # GetTempPath() gives one consistent absolute temp path (it reads the same
+    # TMP env var as $env:TEMP — it does NOT expand an 8.3 tilde form). The
+    # msiexec-1619 fix is primarily the QUOTED -ArgumentList below, which
+    # delivers a path with spaces/umlauts intact; the download itself is
+    # try/catch-guarded so a failure exits with a clear German message.
     $msiPath = Join-Path ([System.IO.Path]::GetTempPath()) 'usbipd-win.msi'
     try {
         Invoke-WebRequest -Uri $UsbipdMsiUrl -OutFile $msiPath -UseBasicParsing -ErrorAction Stop

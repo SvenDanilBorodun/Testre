@@ -63,10 +63,12 @@ if (-not $Quiet) {
 Write-Diag "preflight_start" "Quiet=$Quiet USERNAME=$env:USERNAME"
 
 # ── 1. Temp path / dotted-username hazard ──────────────────────────────────
-# A username with a dot yields an 8.3 tilde temp path that crashes -LiteralPath
-# binding (F2). Ground truth beats string-matching: actually write + delete a
-# probe file in the temp dir. Build the probe from GetTempPath() (a normalized
-# LONG path), never $env:TEMP.
+# A username with a dot yields an 8.3 tilde temp path that was implicated in a
+# terminating -LiteralPath binding crash (F2). Ground truth beats
+# string-matching: actually write + delete a probe file in the temp dir, inside
+# try/catch (the load-bearing guard). GetTempPath() is the consistent path
+# source — note it reads the same TMP env var and does NOT expand an 8.3 path
+# to its long form; the try/catch is what makes this probe crash-proof.
 $tmp = [System.IO.Path]::GetTempPath()
 $probe = Join-Path $tmp ("edubotics_probe_{0}.tmp" -f $PID)
 $writable = $false
@@ -83,7 +85,7 @@ Write-Diag "temp_check" "tmp=$tmp hazard=$hazard writable=$writable"
 if (-not $writable) {
     Emit FEHLER "Das temporäre Verzeichnis ($tmp) kann nicht beschrieben werden. Bitte prüfen, ob %TEMP% erreichbar ist, und EduBotics als der angemeldete Benutzer ausführen."
 } elseif ($hazard) {
-    Emit WARNUNG "Benutzername enthält einen Punkt/Kurzpfad erkannt - Schreibtest bestanden."
+    Emit WARNUNG "Benutzername mit Punkt oder 8.3-Kurzpfad im temporären Verzeichnis erkannt — der Schreibtest war dennoch erfolgreich."
 } else {
     Emit OK "Temporäres Verzeichnis ist beschreibbar ($tmp)."
 }

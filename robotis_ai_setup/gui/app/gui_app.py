@@ -171,6 +171,36 @@ def _elevate_and_wait(exe: str, args: str, show: int = 1):
         return None, False, f"Exit-Code konnte nicht gelesen werden (Fehler {err})"
     return int(exit_code.value), False, None
 
+
+def _ps_single_quote(s: str) -> str:
+    """Escape a string for safe embedding inside a single-quoted PowerShell token.
+
+    A single quote inside a single-quoted PS string must be doubled (`''`).
+    Without this, a path containing an apostrophe (e.g. a Windows username like
+    `O'Brien`) would terminate the quoted token early and break — or reshape —
+    the elevated command line.
+    """
+    return str(s).replace("'", "''")
+
+
+def _edubotics_diag_dir() -> str:
+    """Return (creating if needed) the EduBotics diagnostics directory.
+
+    Lives under %LOCALAPPDATA%\\EduBotics — the same base install_diagnostics.log
+    uses (see device_manager._diagnostics_log_path). Elevated log/marker files go
+    here rather than %TEMP% so the GUI and its elevated child agree on one path
+    the GUI unambiguously knows, and one that can't contain a foreign temp-dir
+    quirk. Best-effort makedirs — falls back to returning the path regardless.
+    """
+    base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+    d = os.path.join(base, "EduBotics")
+    try:
+        os.makedirs(d, exist_ok=True)
+    except OSError:
+        pass
+    return d
+
+
 def _asset_path(name: str) -> str:
     """Return absolute path to an asset file; works in dev + PyInstaller frozen builds."""
     base = getattr(sys, "_MEIPASS", None) or os.path.dirname(
@@ -934,6 +964,10 @@ class EduBoticsApp:
 
     def _check_prerequisites(self):
         """Auf GUI-Update prüfen, dann EduBotics-Umgebung, WSL2, usbipd beim Start prüfen."""
+        # Fire the informational system preflight once per launch, off on its own
+        # daemon thread so it never blocks or gates the startup checks below.
+        threading.Thread(target=self._run_preflight_diagnostics, daemon=True).start()
+
         def _check():
             self.root.after(0, lambda: self.progress.start(10))
 
@@ -1177,20 +1211,22 @@ class EduBoticsApp:
             # We chain both scripts in a single elevated shell so the
             # student sees one UAC prompt, not two. The combined script
             # writes its transcript so the GUI can show what happened.
-            import tempfile
-            log_file = os.path.join(tempfile.gettempdir(), "edubotics_repair_usbipd.log")
+            log_file = os.path.join(_edubotics_diag_dir(), "edubotics_repair_usbipd.log")
             try:
                 if os.path.isfile(log_file):
                     os.remove(log_file)
             except OSError:
                 pass
 
+            # Every path lands inside a single-quoted PowerShell token, so any
+            # embedded apostrophe (a username like O'Brien reaches these paths)
+            # must be doubled or it terminates the token and reshapes the command.
             ps_cmd = (
                 f'-NoProfile -ExecutionPolicy Bypass -Command '
-                f'"Start-Transcript -Path \'{log_file}\' -Force | Out-Null; '
-                f'& \'{prereq}\'; '
+                f'"Start-Transcript -Path \'{_ps_single_quote(log_file)}\' -Force | Out-Null; '
+                f'& \'{_ps_single_quote(prereq)}\'; '
                 f'$prereq_rc = $LASTEXITCODE; '
-                f'& \'{configure}\'; '
+                f'& \'{_ps_single_quote(configure)}\'; '
                 f'$cfg_rc = $LASTEXITCODE; '
                 f'Stop-Transcript | Out-Null; '
                 f'if ($prereq_rc -ne 0) {{ exit $prereq_rc }} '
@@ -1364,6 +1400,58 @@ class EduBoticsApp:
                 return p
         return None
 
+    def _resolve_preflight_script(self):
+        """Find preflight_system.ps1. Supports both production and dev layouts."""
+        from .constants import INSTALL_DIR
+        candidates = [
+            os.path.join(INSTALL_DIR, "scripts", "preflight_system.ps1"),               # production install
+            os.path.join(INSTALL_DIR, "installer", "scripts", "preflight_system.ps1"),  # dev tree
+        ]
+        for p in candidates:
+            if os.path.isfile(p):
+                return p
+        return None
+
+    def _run_preflight_diagnostics(self):
+        """Run preflight_system.ps1 once at startup and echo its German output.
+
+        Purely informational: the script's findings land in the Protokoll so a
+        student (or support) can see the system's diagnosis. It NEVER gates or
+        blocks any flow — every failure mode (non-Windows, missing script,
+        timeout, subprocess error) is swallowed. Runs in a background daemon
+        thread so it can never block the UI or startup checks.
+        """
+        try:
+            if sys.platform != "win32":
+                return
+            script = self._resolve_preflight_script()
+            if script is None:
+                return
+            # CREATE_NO_WINDOW so the elevated-free preflight never flashes a
+            # console window at the student.
+            creationflags = 0x08000000 if sys.platform == "win32" else 0
+            proc = subprocess.run(
+                [
+                    "powershell.exe",
+                    "-NoProfile",
+                    "-ExecutionPolicy", "Bypass",
+                    "-File", script,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=60,
+                creationflags=creationflags,
+            )
+            output = (proc.stdout or "")
+            lines = [ln for ln in output.splitlines() if ln.strip()]
+            if lines:
+                self._log("Systemdiagnose (Preflight):")
+                for line in lines:
+                    self._log(f"  {line}")
+        except Exception:
+            # Diagnostics are best-effort — never let them raise into startup.
+            pass
+
     def _prompt_finalize_install(self):
         """Finish setup AUTOMATICALLY after a post-reboot continuation.
 
@@ -1397,15 +1485,14 @@ class EduBoticsApp:
         self._log("Einrichtung wird automatisch mit Administrator-Rechten gestartet...")
 
         def _run_elevated():
-            import tempfile
             # The elevated finalize_install.ps1 writes:
             #   - a marker file on startup (proves it launched)
             #   - a transcript file with full stdout/stderr (Start-Transcript)
             # Using ShellExecuteEx directly (not nested Start-Process) so we
             # get a reliable process handle + deterministic wait.
-            temp = tempfile.gettempdir()
-            log_file = os.path.join(temp, "edubotics_finalize.log")
-            marker_file = os.path.join(temp, "edubotics_finalize.marker")
+            diag = _edubotics_diag_dir()
+            log_file = os.path.join(diag, "edubotics_finalize.log")
+            marker_file = os.path.join(diag, "edubotics_finalize.marker")
             for f in (log_file, marker_file):
                 try:
                     if os.path.isfile(f):
@@ -1966,8 +2053,7 @@ class EduBoticsApp:
         self._log("Freigabe wird mit Administrator-Rechten gestartet...")
 
         def _run_elevated():
-            import tempfile
-            log_file = os.path.join(tempfile.gettempdir(), "edubotics_bind_devices.log")
+            log_file = os.path.join(_edubotics_diag_dir(), "edubotics_bind_devices.log")
             try:
                 if os.path.isfile(log_file):
                     os.remove(log_file)

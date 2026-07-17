@@ -10,8 +10,8 @@
 # manually by re-running the Inno Setup installer.
 
 param(
-    [string]$LogPath    = "$env:TEMP\edubotics_finalize.log",
-    [string]$MarkerPath = "$env:TEMP\edubotics_finalize.marker",
+    [string]$LogPath    = (Join-Path ([System.IO.Path]::GetTempPath()) 'edubotics_finalize.log'),
+    [string]$MarkerPath = (Join-Path ([System.IO.Path]::GetTempPath()) 'edubotics_finalize.marker'),
     [string]$DistroName = "EduBotics"
 )
 

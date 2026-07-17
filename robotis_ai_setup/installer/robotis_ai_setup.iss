@@ -123,6 +123,17 @@ Name: "{group}\Installation prüfen"; Filename: "powershell.exe"; Parameters: "-
 [Run]
 ; Post-install steps — run in order (hidden, students only see Inno Setup progress)
 
+; Step 0a: Selbstdiagnose (Pre-flight) — non-fatal, nur Protokoll.
+; Runs EARLY (before migrate/import/verify) so support has evidence of a
+; hostile environment (dotted-username temp path, UAC off, WSL2 missing,
+; dockerd unreachable) even if a later step fails. preflight_system.ps1 always
+; exits 0 and appends every line to install_diagnostics.log — it is a
+; diagnostic, never a gate; Inno already ignores [Run] exit codes here.
+Filename: "powershell.exe"; \
+  Parameters: "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File ""{app}\scripts\preflight_system.ps1"" -Quiet"; \
+  StatusMsg: "System wird geprüft (Selbstdiagnose)..."; \
+  Flags: runhidden waituntilterminated
+
 ; Step 0: Alte Docker-Desktop-Installation entfernen (falls vorhanden)
 Filename: "powershell.exe"; \
   Parameters: "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File ""{app}\scripts\migrate_from_docker_desktop.ps1"""; \

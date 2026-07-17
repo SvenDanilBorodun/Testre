@@ -120,6 +120,25 @@ else
     GW="$(printf '%s' "$SUB" | python3 -c \
         'import sys, ipaddress; print(ipaddress.ip_network(sys.stdin.read().strip(), strict=False).network_address + 1)' \
         2>/dev/null || echo "172.28.0.1")"
+    # Pin IMAGE_TAG to the provisioned release, NOT "latest" (audit shared-H2):
+    # "latest" would make this fallback Pi silently ride main HEAD (docker-publish
+    # pushes :latest on every push to main). Derive the version from the baked
+    # VERSION file — pi_agent/VERSION first (self-update refreshes it, matching
+    # constants._read_version_file's order), then the bench /opt/edubotics/VERSION.
+    # Only if neither is readable do we fall back to "latest" (a truly
+    # identity-less image). The PRIMARY path above already pins correctly via the
+    # golden-image-baked pi_agent/docker/versions.env; this hand-written branch is
+    # the last resort when config_generator itself is unavailable.
+    PIN_TAG="latest"
+    for vf in "${INSTALL_DIR}/pi_agent/VERSION" "${INSTALL_DIR}/VERSION"; do
+        if [ -f "$vf" ]; then
+            v="$(tr -d '[:space:]' < "$vf" 2>/dev/null || true)"
+            if [ -n "$v" ]; then
+                PIN_TAG="$v"
+                break
+            fi
+        fi
+    done
     # Registry pins mirror pi_agent/constants.py defaults (emergency path only —
     # the wizard regenerates the .env properly on the first hardware scan).
     # EDUBOTICS_LAN_OPEN=1 (and the derived BIND_HOST) is a bash duplicate of
@@ -141,7 +160,7 @@ CAMERA_NAME_2="scene"
 ROS_DOMAIN_ID=30
 REGISTRY=ghcr.io/svendanilborodun
 REGISTRY_FALLBACK=nettername
-IMAGE_TAG=latest
+IMAGE_TAG=${PIN_TAG}
 EDUBOTICS_ROBOT_TYPE=omx_full
 EDUBOTICS_CAMERA_SOURCE=usb_cam
 EDUBOTICS_LAN_OPEN=1

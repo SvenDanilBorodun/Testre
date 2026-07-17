@@ -7,7 +7,7 @@
 # so the student only sees a single UAC prompt.
 #
 # The script is also safe to re-run by hand: every step is idempotent and
-# logs to %LOCALAPPDATA%\EduBotics\install_diagnostics.log so support has a
+# logs to %ProgramData%\EduBotics\install_diagnostics.log so support has a
 # transcript of what happened on each PC.
 #
 # Must run elevated (as Administrator).
@@ -27,17 +27,35 @@ param(
 $ErrorActionPreference = "Continue"
 
 # ── Diagnostics sink (matches the install_prerequisites.ps1 layout) ───────
-$DiagDir = Join-Path $env:LOCALAPPDATA "EduBotics"
-if (-not (Test-Path $DiagDir)) {
-    New-Item -ItemType Directory -Path $DiagDir -Force | Out-Null
-}
+# %ProgramData%, not %LOCALAPPDATA% — see the rationale in
+# install_prerequisites.ps1. This script is elevated via the GUI's repair flow,
+# so without the machine-wide path its entries would land in the admin's profile
+# while the GUI's own scan-time entries land in the student's. Scope ("this
+# folder and files", never the subtree) is load-bearing — the WSL install root
+# lives under this directory; see install_prerequisites.ps1 for the full
+# rationale. Keep all five copies of this block identical.
+$DiagDir = Join-Path $env:ProgramData "EduBotics"
+try {
+    if (-not (Test-Path $DiagDir)) {
+        New-Item -ItemType Directory -Path $DiagDir -Force | Out-Null
+    }
+    $DiagAcl = Get-Acl -Path $DiagDir
+    $DiagUsers = New-Object System.Security.Principal.SecurityIdentifier("S-1-5-32-545")
+    $DiagAcl.RemoveAccessRuleAll((New-Object System.Security.AccessControl.FileSystemAccessRule(
+        $DiagUsers, "Modify", "Allow")))
+    $DiagAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+        $DiagUsers, "Modify", "ObjectInherit", "NoPropagateInherit", "Allow")))
+    Set-Acl -Path $DiagDir -AclObject $DiagAcl
+} catch { }
 $DiagLog = Join-Path $DiagDir "install_diagnostics.log"
 
 function Write-Diag {
     param([string]$section, [string]$body)
-    $ts = (Get-Date).ToString("o")
-    Add-Content -Path $DiagLog -Value "`n=== $ts bind_devices::$section ==="
-    Add-Content -Path $DiagLog -Value $body
+    try {
+        $ts = (Get-Date).ToString("o")
+        Add-Content -Path $DiagLog -Value "`n=== $ts bind_devices::$section ==="
+        Add-Content -Path $DiagLog -Value $body
+    } catch { }
 }
 
 function Write-Step { param([string]$msg) Write-Host "`n>> $msg" -ForegroundColor Cyan }

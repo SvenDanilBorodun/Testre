@@ -131,9 +131,15 @@ Filename: "powershell.exe"; \
 
 ; Step 1: Voraussetzungen installieren (WSL2, usbipd)
 ; Pin usbipd-win to the version + SHA256 declared at the top of this
-; .iss. install_prerequisites.ps1 verifies the SHA before msiexec runs.
+; .iss. install_prerequisites.ps1 verifies the SHA before msiexec runs, and
+; persists the pin to {app}\scripts\.usbipd_pin so the GUI-driven
+; finalize_install.ps1 can replay it (it never sees these defines).
+; -PreserveExistingRebootFlag keeps a .reboot_required that Step 0 already
+; wrote (Docker Desktop's uninstaller returning 3010) — without it this script
+; would clear the flag on finding no reboot reason of its OWN, and Steps 4/5
+; would import next to a half-removed Docker Desktop.
 Filename: "powershell.exe"; \
-  Parameters: "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File ""{app}\scripts\install_prerequisites.ps1"" -UsbipdMsiUrl ""https://github.com/dorssel/usbipd-win/releases/download/v{#UsbipdVersion}/usbipd-win_{#UsbipdVersion}_x64.msi"" -UsbipdMsiSha256 ""{#UsbipdSha256}"""; \
+  Parameters: "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File ""{app}\scripts\install_prerequisites.ps1"" -UsbipdMsiUrl ""https://github.com/dorssel/usbipd-win/releases/download/v{#UsbipdVersion}/usbipd-win_{#UsbipdVersion}_x64.msi"" -UsbipdMsiSha256 ""{#UsbipdSha256}"" -PreserveExistingRebootFlag"; \
   StatusMsg: "Voraussetzungen werden installiert (WSL2, usbipd)..."; \
   Flags: runhidden waituntilterminated
 
@@ -151,7 +157,7 @@ Filename: "powershell.exe"; \
 
 ; Step 4: EduBotics WSL2-Distro importieren (skipped if reboot pending)
 Filename: "powershell.exe"; \
-  Parameters: "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File ""{app}\scripts\import_edubotics_wsl.ps1"""; \
+  Parameters: "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File ""{app}\scripts\import_edubotics_wsl.ps1"" -AllowDestructiveReimport"; \
   StatusMsg: "EduBotics-Umgebung wird eingerichtet (kann 1-3 Min. dauern)..."; \
   Flags: runhidden waituntilterminated; \
   Check: ShouldImportDistro
@@ -290,16 +296,67 @@ begin
     Result := Trim(Lines[0]);
 end;
 
-// Import the distro when WSL2 is fully up (no pending reboot) AND either no
-// distro exists yet (fresh install — nothing to lose) or the shipped rootfs
-// differs from the one the existing distro was imported from. A re-import
-// DESTROYS the distro's Docker volumes (recorded datasets, HF cache,
-// Roboter-Studio calibration), so when one is actually needed the student
-// must explicitly confirm. Silent installs with /SUPPRESSMSGBOXES take the
-// default (Yes) — the pre-2026-06 behavior.
-function ShouldImportDistro(): Boolean;
+// True when the EXISTING distro must be re-imported to run the rootfs this
+// installer ships. THE single rootfs policy: ShouldImportDistro (ask for
+// consent) and ShouldPullImages (refuse to pull onto a stale rootfs) both call
+// this, so the two gates cannot classify the same machine differently. They did
+// until 2026-07-17 — an UNREADABLE existing stamp made ShouldImportDistro prompt
+// for a destructive rebuild while this function called the very same distro
+// current, so declining the prompt STILL pulled the new images onto the old
+// rootfs. Reachable on any upgrade from an installer <= 2.6.0.
+//
+// The policy, stated once:
+//   Shipped  = '' -> we cannot know what we ship (dev build without the stamp).
+//                    Fail OPEN: no prompt, no block. This mirrors the GUI's
+//                    _rootfs_rebuild_required.
+//   Existing = '' -> the distro predates the stamp (installers <= 2.6.0), so we
+//                    cannot prove it matches what we ship. Treat as a needed
+//                    re-import: ask, and if declined do not pull. This is the
+//                    "one final re-import" import_edubotics_wsl.ps1 documents.
+//   otherwise     -> a plain string compare.
+//
+// The GUI's _rootfs_rebuild_required deliberately DIVERGES on Existing = '' (it
+// fails open there): it re-evaluates on every launch, where a transient wsl
+// hiccup must never raise a data-loss dialog. This gate runs once, at install
+// time, with the student watching. Do not "align" them without reading both.
+//
+// Deliberately NOT cached — Step 4's import changes the answer, and Step 5 must
+// see the new one.
+function RootfsReimportNeeded(): Boolean;
 var
-  Shipped, Existing: String;
+  Shipped: String;
+begin
+  Result := False;
+  if not IsDistroRegistered() then
+    exit;
+  Shipped := GetShippedRootfsVersion();
+  if Shipped = '' then
+    exit;
+  Result := (GetDistroRootfsVersion() <> Shipped);
+end;
+
+// Import the distro when WSL2 is fully up (no pending reboot) AND either no
+// distro exists yet (fresh install — nothing to lose) or RootfsReimportNeeded()
+// says the existing one must be rebuilt. A re-import DESTROYS the distro's
+// Docker volumes (recorded datasets, HF cache, Roboter-Studio calibration), so
+// when one is actually needed the student must explicitly confirm.
+//
+// MB_DEFBUTTON2 makes "Nein" the default — /SUPPRESSMSGBOXES takes the default
+// button, and a silent classroom mass-redeploy must never wipe every PC's
+// datasets with no human in the loop. Declining merely postpones the rebuild
+// (Step 5's pull is skipped too, so images and rootfs stay consistent, and the
+// GUI re-offers the rebuild with the same consent dialog at runtime); wiping is
+// irreversible. Same reasoning — and now the same default — as
+// ConfirmDistroWipe below, which got this right first.
+//
+// The ANSWER is cached, not the whole result: Inno may evaluate a Check: more
+// than once and the data-loss dialog must not repeat, but the cheap pre-checks
+// around it stay live.
+var
+  RootfsRebuildAsked: Boolean;
+  RootfsRebuildConfirmed: Boolean;
+
+function ShouldImportDistro(): Boolean;
 begin
   if IsRebootRequired() then
   begin
@@ -311,26 +368,33 @@ begin
     Result := True;
     exit;
   end;
-  Shipped := GetShippedRootfsVersion();
-  Existing := GetDistroRootfsVersion();
-  if (Shipped <> '') and (Existing <> '') and (Shipped = Existing) then
+  if not RootfsReimportNeeded() then
   begin
-    Log('EduBotics rootfs unchanged (version ' + Shipped + ') - re-import skipped, Docker volumes preserved.');
+    Log('EduBotics rootfs re-import not needed (shipped stamp "' + GetShippedRootfsVersion() + '") - re-import skipped, Docker volumes preserved.');
     Result := False;
     exit;
   end;
-  Result := MsgBox(
-    'Die EduBotics-Umgebung muss neu aufgebaut werden (System-Update).'
-    + #13#10 + #13#10
-    + 'Dabei werden alle lokal gespeicherten Daten gelöscht:'
-    + #13#10 + '  - aufgenommene Datensätze (falls nicht zu Hugging Face hochgeladen)'
-    + #13#10 + '  - heruntergeladene Modelle'
-    + #13#10 + '  - die Roboter-Studio-Kalibrierung'
-    + #13#10 + #13#10
-    + 'Jetzt fortfahren?',
-    mbConfirmation, MB_YESNO) = IDYES;
-  if not Result then
-    Log('User declined the rootfs re-import - keeping the existing EduBotics distro.');
+  if not RootfsRebuildAsked then
+  begin
+    RootfsRebuildAsked := True;
+    RootfsRebuildConfirmed := MsgBox(
+      'Die EduBotics-Umgebung muss neu aufgebaut werden (System-Update).'
+      + #13#10 + #13#10
+      + 'Dabei werden alle lokal gespeicherten Daten gelöscht:'
+      + #13#10 + '  - aufgenommene Datensätze (falls nicht zu Hugging Face hochgeladen)'
+      + #13#10 + '  - heruntergeladene Modelle'
+      + #13#10 + '  - die Roboter-Studio-Kalibrierung'
+      + #13#10 + #13#10
+      + 'Tipp: Datensätze vorher in der EduBotics-App zu Hugging Face hochladen.'
+      + #13#10 + #13#10
+      + 'Jetzt fortfahren?',
+      mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES;
+    if RootfsRebuildConfirmed then
+      Log('User confirmed the rootfs re-import - Docker volumes will be rebuilt.')
+    else
+      Log('User declined/defaulted the rootfs re-import - keeping the existing EduBotics distro.');
+  end;
+  Result := RootfsRebuildConfirmed;
 end;
 
 // Uninstall consent for the destructive distro wipe. Mirrors the upgrade
@@ -372,10 +436,46 @@ begin
   Result := DistroWipeConfirmed;
 end;
 
-// Pull images only when the distro is ready.
+// Shown at most once even though Inno may evaluate a Check: more than once.
+var
+  StaleRootfsWarned: Boolean;
+
+// Pull images only when the distro is ready AND runs the rootfs this installer
+// ships. Step 4's import is skipped whenever a NEEDED re-import was declined by
+// the student (ShouldImportDistro's data-loss MsgBox — the natural answer is
+// "Nein"), and it can also simply fail; in either case the distro still runs the
+// OLD rootfs. Pulling the new image set into it would put new images on an old
+// rootfs with no runtime handshake to catch the skew — and a rootfs bump exists
+// precisely because an image needs something in it (the dockerd pin, the
+// modprobe list, udev rules, tzdata). Re-reading the stamp here is
+// self-correcting: after a SUCCESSFUL Step 4 the distro reports the shipped
+// version and the pull proceeds normally.
 function ShouldPullImages(): Boolean;
 begin
-  Result := (not IsRebootRequired()) and IsDistroRegistered();
+  if IsRebootRequired() or (not IsDistroRegistered()) then
+  begin
+    Result := False;
+    exit;
+  end;
+  if RootfsReimportNeeded() then
+  begin
+    Log('Rootfs re-import needed but not performed - skipping the image pull (new images must not run on the old rootfs).');
+    if not StaleRootfsWarned then
+    begin
+      StaleRootfsWarned := True;
+      MsgBox(
+        'Die EduBotics-Umgebung wurde nicht neu aufgebaut und ist noch auf dem alten Stand.'
+        + #13#10 + #13#10
+        + 'Die neuen Docker-Images werden deshalb NICHT geladen — sie passen nicht zur alten Umgebung.'
+        + #13#10 + #13#10
+        + 'Bitte laden Sie Ihre Datensätze in der Web-Oberfläche zu Hugging Face hoch und'
+        + #13#10 + 'führen Sie den Installer danach erneut aus, um dem Neuaufbau zuzustimmen.',
+        mbInformation, MB_OK);
+    end;
+    Result := False;
+    exit;
+  end;
+  Result := True;
 end;
 
 // Tell Inno Setup a reboot is needed after install
@@ -392,6 +492,16 @@ var
   LowerSrc: String;
   LowerLocal: String;
 begin
+  // A pending reboot means the install is NOT finished: the distro import and
+  // the image pull are deferred to the post-reboot finalize, and the documented
+  // recovery whenever that path dead-ends is "run the installer again". Deleting
+  // the downloaded .exe here would force a fresh download first — on exactly the
+  // machine that is already in trouble. Keep it; the next successful run cleans up.
+  if IsRebootRequired() then
+  begin
+    Log('Reboot pending - keeping the source installer for the post-reboot retry.');
+    exit;
+  end;
   SrcExe := ExpandConstant('{srcexe}');
   LowerSrc := LowerCase(SrcExe);
   LowerLocal := LowerCase(ExpandConstant('{localappdata}'));

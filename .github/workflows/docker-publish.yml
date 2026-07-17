@@ -35,7 +35,12 @@ on:
     # On a tag push, ONLY release.yml now builds — via the workflow_call below.
     # (This reverses the earlier "keep the dual-fire for faster time-to-image"
     # maintainer decision: with the GHCR cross-registry copy the dual-fire is a
-    # net liability, not a win.) Main-branch pushes still build :latest here.
+    # net liability, not a win.) Main-branch pushes still build :latest here —
+    # and on a RELEASE the commit is pushed to main AND tagged, so this main-push
+    # build AND release.yml's W4 workflow_call BOTH fire on the same sha. They no
+    # longer RACE (the `concurrency` block below keys on github.sha so they
+    # serialize), but the build still runs twice per release — a known, accepted
+    # cost (fully eliminating it would need a `git describe --exact-match` skip).
     branches: [main]
     paths:
       - "robotis_ai_setup/docker/**"
@@ -58,10 +63,17 @@ on:
         type: string
 
 concurrency:
-  # Avoid two builds racing to push :latest. cancel-in-progress=false
-  # because docker push is non-atomic and a half-finished push leaves
-  # the registry in a worse state than waiting for the prior to finish.
-  group: docker-publish-${{ github.ref }}
+  # Serialize on the COMMIT sha, NOT github.ref. A release pushes the commit to
+  # `main` AND pushes the tag; because release commits touch docker paths, BOTH
+  # the on.push(main) trigger (Run A, github.ref=refs/heads/main, builds :latest)
+  # AND release.yml's workflow_call (Run B, github.ref=refs/tags/vX.Y.Z, builds
+  # :latest + :X.Y.Z) fire on the SAME sha. Keying the group on github.ref put
+  # them in DIFFERENT groups, so they RACED — both overwriting the shared mutable
+  # :latest mid-retag, risking a GHCR≠Hub :X.Y.Z divergence (audit A1/A3).
+  # github.sha puts both runs in ONE group so they serialize. cancel-in-progress
+  # stays false: docker push is non-atomic and a half-finished push leaves the
+  # registry worse off than waiting for the prior run to finish.
+  group: docker-publish-${{ github.sha }}
   cancel-in-progress: false
 
 permissions:
@@ -194,8 +206,13 @@ jobs:
         run: df -h /
       - name: Compute SOURCE_DATE_EPOCH from commit
         # SOURCE_DATE_EPOCH makes image timestamps deterministic for a
-        # given commit. Two CI runs on the same SHA produce literally
-        # identical image bytes. Industry-standard for reproducible
+        # given commit — the om/manager images (and the OCI 'created' label,
+        # derived from it in build-images.sh) ARE byte-identical across runs on
+        # the same sha. The amd64/opi SERVER is the exception: build-images.sh
+        # flattens it via `docker export | docker import`, and `docker import`
+        # stamps .Config.created at WALL-CLOCK (ignoring SOURCE_DATE_EPOCH), so
+        # the server manifest digest still differs run-to-run (low impact now the
+        # concurrency block serializes the release's two builds). Reproducible
         # Docker builds (docs.docker.com/build/ci/github-actions/reproducible-builds).
         # Subsequent steps inherit this via $GITHUB_ENV.
         run: echo "SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct)" >> "$GITHUB_ENV"
@@ -658,6 +675,30 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           persist-credentials: false
+      - name: Assert GHCR package is PUBLIC (anonymous pull)
+        # Students pull GHCR ANONYMOUSLY, but every other step here logs in with
+        # GITHUB_TOKEN — so a package that regressed to PRIVATE visibility would
+        # pass all of them yet 401 every student, who then silently falls back to
+        # Docker Hub (audit B1). Run this BEFORE the GHCR login below so the probe
+        # is genuinely anonymous. New GHCR packages default to Private, so this
+        # most affects the newer *-opi repos (opi is continue-on-error, so a
+        # private opi package warns rather than blocking the amd64/Jetson release).
+        env:
+          SERVER_REPO: ${{ matrix.server_repo }}
+          ARM_REPO: ${{ matrix.arm_repo }}
+          MANAGER_REPO: ${{ matrix.manager_repo }}
+        run: |
+          set -e
+          REF="${GITHUB_REF#refs/tags/}"
+          case "$REF" in v*.*.*) TAG="${REF#v}" ;; *) TAG="latest" ;; esac
+          for repo in "$SERVER_REPO" "$ARM_REPO" "$MANAGER_REPO"; do
+            [ -n "$repo" ] || continue
+            if ! docker manifest inspect "ghcr.io/svendanilborodun/${repo}:${TAG}" >/dev/null 2>&1; then
+              echo "::error::Anonymous manifest fetch of ghcr.io/svendanilborodun/${repo}:${TAG} FAILED — the GHCR package is likely PRIVATE. Students pull anonymously and would fall back to Docker Hub. Make it public (Owner > Packages > ${repo} > Package settings > Change visibility, or: gh api -X PATCH /user/packages/container/${repo} -f visibility=public)."
+              exit 1
+            fi
+            echo "OK: ghcr.io/svendanilborodun/${repo}:${TAG} is anonymously reachable (public)."
+          done
       - name: GHCR login
         uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121  # v4.1.0
         with:

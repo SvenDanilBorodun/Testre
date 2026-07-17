@@ -441,8 +441,13 @@ class TestPullWithFallback(unittest.TestCase):
         pulled = [c[0][0] for c in mock_pull.call_args_list]
         self.assertIn("ghcr.io/svendanilborodun/physical-ai-server:latest", pulled)
         self.assertIn("nettername/physical-ai-server:latest", pulled)
-        # A `docker tag nettername/... ghcr.io/...` was issued.
-        self.assertIn("tag", mock_run.call_args[0][0])
+        # A `docker tag nettername/... ghcr.io/...` was issued, then the
+        # redundant fallback tag was removed (de-clutters `docker image ls`).
+        run_cmds = [c[0][0] for c in mock_run.call_args_list]
+        self.assertTrue(any("tag" in cmd for cmd in run_cmds),
+                        f"expected a `docker tag` call, got {run_cmds}")
+        self.assertTrue(any("rm" in cmd for cmd in run_cmds),
+                        f"expected the fallback tag to be removed, got {run_cmds}")
 
     @patch("gui.app.docker_manager.subprocess.run")
     @patch("gui.app.docker_manager._pull_one_image", return_value=False)
@@ -452,6 +457,37 @@ class TestPullWithFallback(unittest.TestCase):
             "ghcr.io/svendanilborodun/physical-ai-server:latest", 0, 1
         )
         self.assertFalse(ok)
+
+
+class TestPruneSupersededTags(unittest.TestCase):
+    """prune_superseded_tags removes local tags != IMAGE_TAG across both
+    registries (the GUI-path equivalent of pull_images.ps1's tag sweep — the
+    disk leak that bloated the v2.13.0 incident VHDX)."""
+
+    def setUp(self):
+        for attr, val in (("REGISTRY", "ghcr.io/svendanilborodun"),
+                          ("REGISTRY_FALLBACK", "nettername"),
+                          ("IMAGE_TAG", "2.13.0"),
+                          ("IMAGE_NAMES", ["open-manipulator"])):
+            p = patch.object(docker_manager, attr, val)
+            p.start()
+            self.addCleanup(p.stop)
+
+    @patch("gui.app.docker_manager.subprocess.run")
+    def test_removes_superseded_keeps_current(self, mock_run):
+        def _run(cmd, *a, **k):
+            if "images" in cmd:  # the `docker images <repo> --format {{.Tag}}` probe
+                return MagicMock(returncode=0, stdout="2.13.0\n2.11.0\n<none>\n")
+            return MagicMock(returncode=0, stdout="")  # the rm calls
+        mock_run.side_effect = _run
+        removed = docker_manager.prune_superseded_tags()
+        rm_targets = [c[0][0][-1] for c in mock_run.call_args_list if "rm" in c[0][0]]
+        # Superseded :2.11.0 removed on BOTH registries; :2.13.0 and <none> kept.
+        self.assertIn("ghcr.io/svendanilborodun/open-manipulator:2.11.0", rm_targets)
+        self.assertIn("nettername/open-manipulator:2.11.0", rm_targets)
+        self.assertNotIn("ghcr.io/svendanilborodun/open-manipulator:2.13.0", rm_targets)
+        self.assertNotIn("ghcr.io/svendanilborodun/open-manipulator:<none>", rm_targets)
+        self.assertEqual(removed, 2)
 
 
 class TestRegistryResolution(unittest.TestCase):

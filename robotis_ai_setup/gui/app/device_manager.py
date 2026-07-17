@@ -31,8 +31,23 @@ from .usbipd_resolver import (
 
 
 def _diagnostics_log_path() -> str:
-    """Where install/runtime diagnostics get appended."""
-    base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+    """Where install/runtime diagnostics get appended.
+
+    Machine-wide %ProgramData%\\EduBotics so the support artifact is ONE file on
+    managed (student != admin) machines. `EduBotics_Setup.exe` is
+    PrivilegesRequired=admin, so the installer + every elevated-repair .ps1 run
+    as the admin account — their %LOCALAPPDATA% differs from the student's, so a
+    per-user path splits the install/prereq/usbipd/migrate evidence into the
+    admin profile while the GUI's own scan-time entries land in the student
+    profile (support then sees only half). ProgramData is the same root the WSL
+    install already uses. The installer creates the dir with a permissive-append
+    ACL (matching PS-side move) so the standard-user GUI can append here too.
+    Falls back to %LOCALAPPDATA% then ~ when ProgramData is unset (dev / non-Windows)."""
+    base = (
+        os.environ.get("PROGRAMDATA")
+        or os.environ.get("LOCALAPPDATA")
+        or os.path.expanduser("~")
+    )
     return os.path.join(base, "EduBotics", "install_diagnostics.log")
 
 

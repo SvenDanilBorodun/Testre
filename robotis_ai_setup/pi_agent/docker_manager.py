@@ -44,9 +44,11 @@ from .constants import (
     DOCKER_STARTUP_TIMEOUT,
     ENV_FILE,
     IMAGE_FRESHNESS_WARN_DAYS,
+    IMAGE_NAMES,
     IMAGE_OPEN_MANIPULATOR,
     IMAGE_PHYSICAL_AI_MANAGER,
     IMAGE_PHYSICAL_AI_SERVER,
+    IMAGE_TAG,
     LAST_PULL_FILE,
     MANIFEST_INSPECT_TIMEOUT,
     NETWORK_PROBE_TIMEOUT,
@@ -415,10 +417,20 @@ def _pull_image_with_fallback(image: str, idx: int, total: int, log=None) -> str
     name. Returns PULL_OK / PULL_TRANSIENT / PULL_MISSING (see above)."""
     log = log or (lambda _m: None)
     short = image.split("/")[-1]
+    # Attempt the GHCR pull UNCONDITIONALLY — no host-reachability pre-gate. The
+    # old `if primary_up:` gate probed ghcr.io:443 from THIS host first and
+    # skipped the pull on any blip, which — behind one classroom NAT — diverts
+    # the WHOLE fleet onto Docker Hub's anonymous rate wall the instant the probe
+    # flaps (the GUI deliberately de-gated this for the same reason, see
+    # gui/app/docker_manager.py). `_pull_one_image` already fails fast on a dead
+    # host (DNS) and retries transient 5xx, so the unconditional attempt is both
+    # faster (no probe on the happy path) and keeps students on GHCR. The
+    # reachability probe is kept ONLY to CLASSIFY a FAILED pull afterwards
+    # (TRANSIENT vs MISSING — the 3-state distinction the GUI does not need but
+    # the opi-decoupled Pi does), so it is computed lazily below.
+    if _pull_one_image(image, idx, total, log=log):
+        return PULL_OK
     primary_up = _host_reachable(_registry_host(REGISTRY))
-    if primary_up:
-        if _pull_one_image(image, idx, total, log=log):
-            return PULL_OK
     if _fallback_ref(image) is None:
         return PULL_TRANSIENT if not primary_up else PULL_MISSING
     # Word this by the ACTUAL cause. The old text always blamed an unreachable
@@ -624,13 +636,27 @@ def check_for_updates(log=None, missing_out: Optional[list] = None) -> bool:
                 capture_output=True, text=True, timeout=10, env=_scrubbed_env(),
             )
             new_id = after.stdout.strip()
-            if old_id and new_id and old_id != new_id:
+            # old_id == "" means the image wasn't present before this run (a
+            # first-time pull) — that IS an update; the old `old_id and …` guard
+            # dropped it, so any_updated stayed False, the prune was skipped, and
+            # the log claimed nothing changed after a real pull. This bites
+            # hardest on the post-self-update boot pull (fix C1): the NEW
+            # `:X.Y.Z` tag is absent before the pull, so EVERY image is a
+            # first-time pull and the superseded-tag prune below would never
+            # fire. Match the GUI (gui/app/docker_manager.py).
+            if new_id and old_id != new_id:
                 log(f"  Aktualisiert: {short} → {(new_digest or '')[7:19]}")
                 any_updated = True
         except (FileNotFoundError, subprocess.TimeoutExpired):
             pass
 
     if any_updated:
+        # Reclaim disk: first drop superseded TAGGED versions (`image prune -f`
+        # is dangling-ONLY, so it can't remove e.g. a leftover :2.12.0 after
+        # :2.13.0 lands — on the Pi's soldered eMMC, which also holds the OS and
+        # the student's datasets, that grows a full ~5-6 GB -opi image set per
+        # release), then dangling layers.
+        prune_superseded_tags(log=log)
         try:
             subprocess.run(
                 _docker("image", "prune", "-f"),
@@ -641,6 +667,59 @@ def check_for_updates(log=None, missing_out: Optional[list] = None) -> bool:
 
     _save_last_pull_info(pulled_digests)
     return any_updated
+
+
+def prune_superseded_tags(log=None) -> int:
+    """Remove local image tags that aren't the current ``IMAGE_TAG``.
+
+    ``docker image prune -f`` is dangling-ONLY, so after an update pulls
+    ``:X.Y.Z`` the previously-installed ``:X.Y-1`` TAGGED images survive. On the
+    Pi that is acute: the compose file itself warns the board runs a soldered
+    8 GB-class eMMC that ALSO holds the OS, the image set AND the student's
+    datasets, so a full ~5-6 GB ``-opi`` server image left per release fills the
+    disk within a few updates and takes dockerd + the always-on manager down
+    with it. Port of the GUI's ``prune_superseded_tags``
+    (gui/app/docker_manager.py): untag every ``{REGISTRY,REGISTRY_FALLBACK}/
+    {name}:tag`` where ``tag != IMAGE_TAG``, across BOTH registries × all short
+    names. Untag-by-tag is layer-safe — only layers NOT shared with the kept
+    ``:IMAGE_TAG`` are dropped — and ``image rm`` (no ``-f``) refuses an image a
+    running container still uses, so the always-on manager / a live robot tier
+    is never yanked out from under itself (a still-in-use OLD tag simply lingers
+    one more cycle). Returns the number of tags removed. Best-effort; never
+    raises.
+    """
+    repos = []
+    for name in IMAGE_NAMES:
+        repos.append(f"{REGISTRY}/{name}")
+        if REGISTRY_FALLBACK and REGISTRY_FALLBACK != REGISTRY:
+            repos.append(f"{REGISTRY_FALLBACK}/{name}")
+    removed = 0
+    for repo in repos:
+        try:
+            listed = subprocess.run(
+                _docker("images", repo, "--format", "{{.Tag}}"),
+                capture_output=True, text=True, timeout=15, env=_scrubbed_env(),
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            continue
+        if listed.returncode != 0:
+            continue
+        for tag in listed.stdout.splitlines():
+            tag = tag.strip()
+            if not tag or tag == "<none>" or tag == IMAGE_TAG:
+                continue
+            try:
+                rm = subprocess.run(
+                    _docker("image", "rm", f"{repo}:{tag}"),
+                    capture_output=True, text=True, timeout=20, env=_scrubbed_env(),
+                )
+                if rm.returncode == 0:
+                    removed += 1
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                pass
+    if removed and log:
+        log(f"  {removed} veraltete Image-Version(en) entfernt (Speicher freigegeben).")
+    return removed
 
 
 def pull_images(callback=None, log=None) -> bool:
@@ -659,11 +738,16 @@ def pull_images(callback=None, log=None) -> bool:
         # _pull_image_with_fallback returned a bool, but every one of its three
         # outcomes is now a non-empty (truthy) string — `not PULL_MISSING` is
         # False, so the bool form reported "all images present" after a pull
-        # that failed outright. setup.sh's step 9 exits on this value: the bench
+        # that failed outright. setup.sh's pull_images step reports on this value: the bench
         # operator would be told „Images pulled." and image a golden SD card
         # with no images on it.
         if _pull_image_with_fallback(image, i, total, log=log) != PULL_OK:
             return False
+    # Reclaim disk from superseded tags a prior version left behind (the GUI's
+    # pull_images + pull_images.ps1 do the same). `image prune -f` is
+    # dangling-only, so without this the pinned per-release tags accumulate on
+    # the eMMC.
+    prune_superseded_tags(log=log)
     return True
 
 
@@ -752,21 +836,108 @@ def _compose_up(*services: str, log=None, timeout: int = 180) -> bool:
         return False
 
 
+def _compose_pull(*services: str, log=None, only_if_missing: bool = False) -> bool:
+    """Resiliently refresh the pinned images for ``services`` BEFORE a bare
+    ``_compose_up`` recreates onto them — the Pi parity of the GUI's
+    ``start_containers`` → ``_compose_pull``.
+
+    ``only_if_missing=True`` narrows the job to ACQUISITION: pull only images
+    that are absent locally, decided by a purely local ``docker images`` lookup
+    with no registry round-trip. That is the boot/manager mode — see
+    ``start_cloud_only``.
+
+    ``_compose_up`` runs ``docker compose up --force-recreate``, whose default
+    ``pull_policy: missing`` only fetches an ABSENT image and does so from
+    ``${REGISTRY}`` (GHCR) ONLY: no Docker Hub twin, no retry/backoff, bounded by
+    the ``up`` wall-clock. On „Umgebung starten" that leaves the ~5-6 GB
+    ``physical-ai-server-opi`` pull GHCR-only inside the ``up`` timeout — a
+    GHCR-degraded / Hub-only school cannot fall back, and a slow link can time
+    out the whole ``up`` with no resumable retry. Pull each service's pinned
+    image through ``_pull_image_with_fallback`` first (GHCR → digest-identical
+    Hub twin → retag) so the recreate lands on a present image.
+
+    Best-effort, mirroring the GUI: a transient failure still lets an offline
+    classroom recreate on the images already on disk, and the return value is
+    advisory (the caller runs ``_compose_up`` regardless). Cheap short-circuits:
+    SKIP_AUTO_PULL, offline, and an all-current arm64 digest pre-check. No prune
+    here — this is a refresh-before-start, not an update (the prune fires from
+    the update/boot pull paths, so it never fights the OLD manager image that is
+    still in use when the robot tier comes up)."""
+    log = log or (lambda _m: None)
+    relevant = [_SERVICE_IMAGE[s] for s in services if s in _SERVICE_IMAGE]
+    if not relevant:
+        return True
+    if only_if_missing:
+        # LOCAL check first, before any network call: on the overwhelmingly
+        # common healthy boot every image is present, so this returns without a
+        # single socket — which is what preserves start_manager's "boot stays
+        # fast" property while still self-healing an absent image.
+        relevant = [img for img in relevant if not _image_present_locally(img)]
+        if not relevant:
+            return True
+    if SKIP_AUTO_PULL:
+        log("  Auto-Pull deaktiviert — vorhandene Images werden verwendet.")
+        return True
+    if not is_registry_reachable():
+        log("  Registry (GHCR/Docker Hub) nicht erreichbar — vorhandene Images "
+            "werden verwendet.")
+        return True
+    if all(_image_is_current(img) for img in relevant):
+        log("  Images bereits aktuell — Aktualisierung übersprungen.")
+        return True
+    ok = True
+    total = len(relevant)
+    for i, image in enumerate(relevant):
+        # A genuinely-current image was filtered out above; pull the rest
+        # resiliently. TRANSIENT/MISSING stay best-effort here — `up` below
+        # self-heals a still-missing image (or fails clearly if offline).
+        if _pull_image_with_fallback(image, i, total, log=log) != PULL_OK:
+            ok = False
+    return ok
+
+
 def start_manager(log=None) -> bool:
     """Bring up the ALWAYS-ON physical_ai_manager (the wizard/SPA + the
     ``/api/system`` proxy). Brought up by the agent at boot so a freshly booted
     Pi serves the wizard with the robot tier intentionally down (the two-tier
     carve-out). The opi compose additionally marks it ``restart: unless-stopped``
     — a sanctioned exception to the ``restart: "no"`` invariant, because the
-    manager IS the GUI on the Pi. No image pull here (boot stays fast on the
-    provisioned image; refresh is the /update path)."""
+    manager IS the GUI on the Pi. Deliberately no image REFRESH here (boot stays
+    fast on the provisioned image; refresh is the /update path) — but an ABSENT
+    manager image is acquired resiliently first, see ``start_cloud_only``."""
     return start_cloud_only(log=log)
 
 
 def start_cloud_only(log=None) -> bool:
     """Alias of ``start_manager`` — the System window's cloud-only mode reduces
     to "manager up, skip the robot tier". Kept under the GUI's name so the
-    agent's cloud-only path reads the same as the Windows GUI's."""
+    agent's cloud-only path reads the same as the Windows GUI's.
+
+    The pre-pull is ``only_if_missing`` — acquisition, not refresh (H3's manager
+    half). The asymmetry with ``start_robot_tier``'s full freshness pull is
+    deliberate and load-bearing in both directions:
+
+    - It must not become a freshness check. This runs on EVERY boot, before the
+      wizard serves; a full check adds a registry probe + a manifest inspect to
+      the path a teacher is watching, and on a school link that flaps it would
+      make the UI's arrival hostage to the network. „Boot stays fast on the
+      provisioned image" is the existing contract, and refresh already has an
+      owner: the /update job and the post-self-update boot pull.
+    - It must not stay a bare ``up`` either. If the image is ABSENT, compose's
+      lazy ``pull_policy: missing`` fetches it from ``${REGISTRY}`` (GHCR) ONLY,
+      inside the ``up`` wall-clock, with no Hub twin and no retry. That is
+      exactly the state a Pi is left in when bench provisioning's ``pull_images``
+      hit a blip (setup.sh warns but ships anyway) — and it is UNRECOVERABLE in
+      the field, because the only repair trigger (/update) lives in the wizard
+      the missing manager image is supposed to serve. Pulling the absent image
+      through ``_pull_image_with_fallback`` breaks that chicken-and-egg: the Pi
+      self-heals on the next boot over Hub if GHCR is blocked, and if the tag
+      genuinely does not exist it says so in German instead of a bare compose
+      ``manifest unknown``.
+
+    The local-presence test costs one ``docker image inspect`` and no socket on
+    the healthy path, so the fast-boot contract survives intact."""
+    _compose_pull(MANAGER_SERVICE, log=log, only_if_missing=True)
     return _compose_up(MANAGER_SERVICE, log=log, timeout=120)
 
 
@@ -775,7 +946,16 @@ def start_robot_tier(log=None) -> bool:
     named explicitly so the health-gated ``depends_on`` between THEM applies,
     while ``--no-deps`` leaves the running manager untouched. ``up -d`` honours
     the ``service_healthy`` gate, so this can block up to open_manipulator's
-    120 s start_period — the generous timeout covers a slow cold boot."""
+    120 s start_period — the generous timeout covers a slow cold boot.
+
+    A resilient pre-pull (``_compose_pull``: GHCR → digest-identical Hub twin →
+    retag) refreshes the pinned robot-tier images FIRST so the
+    ``--force-recreate`` never lands on a stale/absent image via compose's
+    GHCR-only lazy ``pull_policy`` — the ~5-6 GB server image otherwise has no
+    Hub fallback and only the ``up`` wall-clock (H3 parity with the GUI's
+    start_containers). Best-effort: ``_compose_up`` still self-heals / fails
+    clearly on its own."""
+    _compose_pull(*_ROBOT_TIER, log=log)
     return _compose_up(*_ROBOT_TIER, log=log, timeout=DOCKER_STARTUP_TIMEOUT + 180)
 
 

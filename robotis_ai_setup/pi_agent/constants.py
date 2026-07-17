@@ -24,20 +24,31 @@ import os
 from pathlib import Path
 
 
+# Set True by ``_read_version_file`` when APP_VERSION came from an EXPLICIT
+# source (a VERSION file on disk, or the EDUBOTICS_VERSION override) rather than
+# the baked-in last-resort literal below. ``_default_image_tag`` consults it: a
+# version we actually READ is a fact about this install, whereas the literal is
+# only "whatever this source tree was cut from" and must not be promoted into an
+# image pin.
+_VERSION_IS_AUTHORITATIVE = False
+
+
 def _read_version_file() -> str:
     """Load the product version from a ``VERSION`` file.
 
     The FIRST candidate is a ``VERSION`` packaged BESIDE this module (the
     ``pi_agent/`` package dir). This matters for self-update: the agent tarball
-    ships ``pi_agent/VERSION`` and the ``rsync --delete`` apply refreshes it, so
+    ships ``pi_agent/VERSION`` and the apply swaps in a tree carrying it, so
     preferring it means a self-updated agent reports the NEW version instead of
     re-downloading the update forever (the ``/opt/edubotics/VERSION`` copy
     setup.sh lays down for bench installs is never refreshed by self-update).
     Falls back to the in-tree repo-root layout, then the installed
     ``/opt/edubotics/VERSION``, then the baked-in default.
     """
+    global _VERSION_IS_AUTHORITATIVE
     override = os.environ.get("EDUBOTICS_VERSION")
     if override:
+        _VERSION_IS_AUTHORITATIVE = True
         return override.strip()
     here = Path(__file__).resolve()
     for candidate in (
@@ -47,9 +58,17 @@ def _read_version_file() -> str:
         here.parents[1] / "VERSION",     # robotis_ai_setup/VERSION (defensive)
     ):
         try:
-            return candidate.read_text(encoding="utf-8").strip()
+            value = candidate.read_text(encoding="utf-8").strip()
         except (OSError, UnicodeDecodeError):
             continue
+        # An EMPTY/whitespace VERSION file (a truncated write, a half-finished
+        # rsync) used to return "" verbatim and make APP_VERSION empty. Harmless
+        # while the version was only reported, but _default_image_tag now derives
+        # an image PIN from it — an empty tag would resolve `…-opi:` and fail
+        # every pull. Treat a blank file as unreadable and keep walking.
+        if value:
+            _VERSION_IS_AUTHORITATIVE = True
+            return value
     return "2.13.0"
 
 
@@ -121,7 +140,38 @@ REGISTRY = _resolve_setting("EDUBOTICS_REGISTRY", "REGISTRY", "ghcr.io/svendanil
 REGISTRY_FALLBACK = _resolve_setting(
     "EDUBOTICS_REGISTRY_FALLBACK", "REGISTRY_FALLBACK", "nettername"
 )
-IMAGE_TAG = _resolve_setting("EDUBOTICS_IMAGE_TAG", "IMAGE_TAG", "latest")
+
+
+def _default_image_tag() -> str:
+    """Last-resort ``IMAGE_TAG`` when neither the env override nor a baked
+    ``docker/versions.env`` supplies one.
+
+    The Pi deliberately does NOT default to ``latest`` the way the GUI does.
+    ``docker-publish.yml`` pushes ``:latest`` on every push to ``main``, so a Pi
+    that resolves ``latest`` silently tracks main HEAD instead of its release —
+    and there is no version handshake anywhere to catch it. That is exactly the
+    hole ``release.yml::pi-agent-tarball`` closes by baking ``IMAGE_TAG=<VERSION>``
+    into ``pi_agent/docker/versions.env``; this is the defense-in-depth behind
+    it, for the day that file goes missing (a partial tarball, a hand-copied
+    tree, an operator cleaning up "generated" files). Degrading to the agent's
+    OWN product version keeps the pin honest: the images this release ships are
+    tagged with exactly that, so a missing pin file resolves to the same tag the
+    pin file would have named — and if those images were never published the Pi
+    now fails LOUDLY (PULL_MISSING names the version) instead of quietly running
+    main HEAD.
+
+    Only an APP_VERSION we actually READ counts (``_VERSION_IS_AUTHORITATIVE``).
+    Falling back to the baked-in literal would pin every version-file-less tree
+    to whatever release this source was cut from — a confidently WRONG pin, which
+    is worse than ``latest``'s honest "I don't know". With no version source at
+    all, keep the old behaviour.
+    """
+    if _VERSION_IS_AUTHORITATIVE and APP_VERSION:
+        return APP_VERSION
+    return "latest"
+
+
+IMAGE_TAG = _resolve_setting("EDUBOTICS_IMAGE_TAG", "IMAGE_TAG", _default_image_tag())
 
 # Image SHORT names — the Orange Pi (`-opi`) flavour built by P1. Deriving
 # both primary and fallback full refs from one list avoids split('/')
@@ -243,6 +293,45 @@ ENV_FILE = os.environ.get("EDUBOTICS_ENV_FILE", "/etc/edubotics/.env")
 COMPOSE_FILE = os.environ.get(
     "EDUBOTICS_OPI_COMPOSE", "/opt/edubotics/docker-compose.opi.yml"
 )
+
+# Version stamp of the on-disk SYSTEM files (the opi compose, the systemd units,
+# `.s6-keep`) — written by setup.sh at PROVISIONING time, deliberately OUTSIDE
+# `pi_agent/` so a self-update (which rsyncs only `pi_agent/`) cannot advance it.
+#
+# CONTEXT ONLY — it is NOT a drift signal. The release tarball carries agent code
+# ONLY, so a release that adds a forwarded EDUBOTICS_* env, changes a
+# healthcheck, or re-points an image ref updates the images and the agent but
+# leaves the deployed Pi on the OLD compose (the `env-forwarding-guard` fail-open
+# class, defeated because the guard's compose change never ships). It is tempting
+# to read `stamp != APP_VERSION` as "drifted", but that inequality is the NORMAL
+# state of every self-updated Pi — the stamp cannot advance by design and every
+# release bumps APP_VERSION — so it fires on ~100 % of healthy Pis and proves
+# nothing about the files' CONTENT. The agent instead compares the installed
+# systemd units byte-for-byte against the ones it ships (see
+# SYSTEMD_UNIT_DIR/SYSTEMD_UNIT_NAMES) and uses this stamp only to NAME the
+# version the on-disk system files came from once real drift is proven.
+#
+# ABSENT means "provisioned before the stamp existed" — read backward-compatibly.
+SYSTEM_FILES_VERSION_FILE = os.environ.get(
+    "EDUBOTICS_SYSTEM_FILES_VERSION_FILE", "/opt/edubotics/.system-files-version"
+)
+
+# Where setup.sh installs the systemd units, and which units it installs. These
+# are the ONE piece of the "system files" set the agent can prove drift on: they
+# ship INSIDE `pi_agent/systemd/` (so a self-update rsync refreshes the agent's
+# copy) and setup.sh installs them VERBATIM (`install -m 0644`, no templating) to
+# SYSTEMD_UNIT_DIR — which self-update never touches. A byte difference between
+# the two is therefore hard evidence that this agent version expects a unit the
+# Pi is not running, with no false positives to tune out.
+#
+# `docker-compose.opi.yml` deliberately is NOT in this set: it lives outside
+# `pi_agent/` (robotis_ai_setup/docker/), so the tarball carries no reference
+# copy and the agent has nothing to compare against. Proving compose drift needs
+# release.yml to ship a hash manifest (or the compose itself) in the tarball.
+SYSTEMD_UNIT_DIR = os.environ.get(
+    "EDUBOTICS_SYSTEMD_UNIT_DIR", "/etc/systemd/system"
+)
+SYSTEMD_UNIT_NAMES = ("edubotics-pi.service", "edubotics-pi-firstboot.service")
 
 # Persisted auto-pull state: timestamp + per-image RepoDigests, for the
 # freshness banner ("Letzter Image-Update: vor X Tagen").

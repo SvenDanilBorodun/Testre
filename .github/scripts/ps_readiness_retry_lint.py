@@ -11,7 +11,17 @@ proven-safe pattern is a bounded retry loop that polls the exit code
 This guard scans every *.ps1 under robotis_ai_setup/ and flags a readiness probe
 that BOTH:
   (a) has an `exit 1` within the next few lines, AND
-  (b) has NO enclosing `while`/`for`/`foreach`/`do` loop just above it.
+  (b) is NOT lexically inside a still-open `while`/`for`/`foreach`/`do` loop
+      BODY at its position.
+
+Loop detection is BRACE-AWARE, not proximity-based: braces are tracked across
+the whole file and a `{` is marked as a loop brace when its opening line (or the
+dangling keyword on the line above) carries a loop keyword outside comments. A
+loop that already CLOSED above the probe therefore does not count — the original
+F3 bug in pull_images.ps1 sat 9 lines below an unrelated, already-closed
+`foreach`, which a naive lookbehind mistook for an enclosing loop. Comment
+lines are ignored entirely, so prose like "wait for docker" cannot suppress a
+finding.
 
 A one-shot diagnostic that merely records a failure (verify_system:
 `else { Write-FAIL ... }`; uninstall: `if (...) { exit 0 }`) is not flagged
@@ -23,7 +33,6 @@ from __future__ import annotations
 import os
 import pathlib
 import re
-import sys
 
 ROOT = pathlib.Path(os.environ.get("PS_LINT_ROOT") or
                     pathlib.Path(__file__).resolve().parents[2])
@@ -33,11 +42,43 @@ SCAN_DIRS = ["robotis_ai_setup"]
 # `docker --version` (a log-only sanity print) because of the `--`.
 PROBE = re.compile(r'(docker\s+info|wsl\s+--status|docker\s+version)', re.I)
 EXIT1 = re.compile(r'\bexit\s+1\b', re.I)
-LOOP = re.compile(r'\b(while|for|foreach|do)\b', re.I)
+# PS loop keywords. `do` is anchored so `docker`/`dot-source` never match.
+LOOP_KW = re.compile(r'\b(while|for|foreach|do)\b', re.I)
 ALLOW_LINE = "ps-readiness-retry-lint: allow"
 
 LOOKAHEAD_EXIT = 4   # `exit 1` within this many lines after the probe
-LOOKBEHIND_LOOP = 10  # enclosing loop within this many lines above the probe
+
+
+def _strip_inline_comment(line: str) -> str:
+    """Drop a trailing `# ...` comment (best-effort — good enough for the
+    loop-keyword and brace scan; a `#` inside a string is rare on these lines)."""
+    idx = line.find('#')
+    return line if idx == -1 else line[:idx]
+
+
+def _consume_braces(code: str, stack: list[bool], pending_loop: bool) -> bool:
+    """Update the brace stack for one comment-stripped line.
+
+    `stack[k]` is True iff the k-th currently-open brace opened a LOOP body.
+    A `{` is a loop brace when the code segment before it on the same line
+    contains a loop keyword (`while (...) {`, `foreach ($x in $y) {`, `do {`),
+    or when the previous line ended with a dangling loop keyword/condition
+    (`pending_loop`). Returns the new pending_loop flag.
+    """
+    seg_start = 0
+    for i, c in enumerate(code):
+        if c == '{':
+            seg = code[seg_start:i]
+            is_loop = pending_loop or bool(LOOP_KW.search(seg))
+            stack.append(is_loop)
+            pending_loop = False
+            seg_start = i + 1
+        elif c == '}':
+            if stack:
+                stack.pop()
+            seg_start = i + 1
+    tail = code[seg_start:]
+    return bool(LOOP_KW.search(tail))
 
 
 def scan_file(path: pathlib.Path) -> list[tuple[int, str]]:
@@ -45,24 +86,30 @@ def scan_file(path: pathlib.Path) -> list[tuple[int, str]]:
     lines = text.splitlines()
     hits: list[tuple[int, str]] = []
 
+    brace_is_loop: list[bool] = []
+    pending_loop = False
+
     for idx, raw in enumerate(lines):
         stripped = raw.strip()
         if stripped.startswith('#'):
             continue
-        if ALLOW_LINE in raw:
-            continue
-        if not PROBE.search(raw):
-            continue
+        code = _strip_inline_comment(raw)
 
-        ahead = lines[idx + 1: idx + 1 + LOOKAHEAD_EXIT]
-        if not any(EXIT1.search(l) for l in ahead):
-            continue
+        pm = PROBE.search(code)
+        if pm and ALLOW_LINE not in raw:
+            ahead = lines[idx + 1: idx + 1 + LOOKAHEAD_EXIT]
+            if any(EXIT1.search(_strip_inline_comment(l)) for l in ahead):
+                # In-loop-ness is decided at the probe's position: process the
+                # braces opened EARLIER on this same line (a
+                # `while (...) { probe ... }` one-liner opens its loop brace
+                # before the probe) on top of the stack carried from prior
+                # lines. Copies only — the real state advances once, below.
+                local_stack = list(brace_is_loop)
+                _consume_braces(code[:pm.start()], local_stack, pending_loop)
+                if not any(local_stack):
+                    hits.append((idx + 1, stripped))
 
-        behind = lines[max(0, idx - LOOKBEHIND_LOOP): idx]
-        if any(LOOP.search(l) for l in behind):
-            continue
-
-        hits.append((idx + 1, stripped))
+        pending_loop = _consume_braces(code, brace_is_loop, pending_loop)
 
     return hits
 
@@ -79,11 +126,11 @@ def main() -> int:
                 total += 1
                 print(
                     f"::error file={rel},line={lineno}::single-shot readiness "
-                    f"probe followed by `exit 1` with no enclosing retry loop — "
-                    f"a cold dockerd/WSL VM races the first poll (F3). Wrap it in "
-                    f"a bounded retry loop (see wsl_docker_ready.ps1::"
-                    f"Wait-DockerReady) or, for a genuine one-shot diagnostic, "
-                    f"append '# {ALLOW_LINE}'. Offending: {snippet}"
+                    f"probe followed by `exit 1` outside any enclosing retry "
+                    f"loop — a cold dockerd/WSL VM races the first poll (F3). "
+                    f"Wrap it in a bounded retry loop (see wsl_docker_ready.ps1"
+                    f"::Wait-DockerReady) or, for a genuine one-shot "
+                    f"diagnostic, append '# {ALLOW_LINE}'. Offending: {snippet}"
                 )
     if total:
         print(f"\nps-readiness-retry-lint FAILED: {total} un-retried probe(s).")

@@ -10,10 +10,15 @@ Test-Path / …) that operates on a $env:TEMP-derived path OUTSIDE a try/catch c
 hard-abort an installer script mid-run even though EAP is 'Continue' — exactly
 the F2 class of failure.
 
-The proven-safe patterns are (a) wrap the cmdlet in `try { } catch { }`, and/or
-(b) build the path from [System.IO.Path]::GetTempPath() / GetTempFileName(),
-which return normalized LONG paths (see wsl_docker_ready.ps1,
-import_edubotics_wsl.ps1).
+The LOAD-BEARING guard is (a): wrap the cmdlet in `try { } catch { }` — that
+holds regardless of what the temp path looks like. (b) building the path from
+[System.IO.Path]::GetTempPath() / GetTempFileName() is defense-in-depth, NOT a
+substitute: both read the same TMP env var and do NOT expand an 8.3 profile
+path back to its long form (GetTempFileName's added value is that it
+pre-creates the file, so a later Get-Content/Remove-Item can't hit a missing
+target). See wsl_docker_ready.ps1, import_edubotics_wsl.ps1 for both layers
+combined. Until the dotted-username rig test pins down the exact trigger of
+the original PSArgumentException, only the try/catch is treated as proven.
 
 This guard scans every *.ps1 under robotis_ai_setup/ and fails any file cmdlet
 that touches a $env:TEMP/$env:TMP-derived path (the env var directly on the line,
@@ -27,7 +32,6 @@ from __future__ import annotations
 import os
 import pathlib
 import re
-import sys
 
 ROOT = pathlib.Path(os.environ.get("PS_LINT_ROOT") or
                     pathlib.Path(__file__).resolve().parents[2])
@@ -124,8 +128,9 @@ def main() -> int:
                     f"$env:TEMP-derived path outside try/catch — an 8.3/tilde "
                     f"temp path throws a terminating PSArgumentException that "
                     f"-ErrorAction cannot suppress. Wrap the call in try/catch "
-                    f"or build the path from [System.IO.Path]::GetTempPath(). "
-                    f"Offending: {snippet}"
+                    f"(the load-bearing guard); building the path from "
+                    f"[System.IO.Path]::GetTempPath() is additional hygiene, "
+                    f"not a substitute. Offending: {snippet}"
                 )
     if total:
         print(f"\nps-temp-cmdlet-lint FAILED: {total} unguarded temp cmdlet(s).")

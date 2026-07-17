@@ -8,9 +8,14 @@ tilde (C:\\Users\\SVEN~1.D\\AppData\\Local\\Temp). Building a path by string-
 concatenating onto that raw value (`"$env:TEMP\\x"`, `Join-Path $env:TEMP ...`)
 carries the tilde/short form forward, and some downstream cmdlet bindings then
 raise a *terminating* PSArgumentException that -ErrorAction cannot suppress
-(the F2 class of failure — see ps-temp-cmdlet-lint). The proven-safe source of a
-temp path is [System.IO.Path]::GetTempPath() / GetTempFileName() (both return a
-normalized LONG path), optionally through GetFullPath()/Resolve-Path.
+(the F2 class of failure — see ps-temp-cmdlet-lint). The PREFERRED source of a
+temp path is [System.IO.Path]::GetTempPath() / GetTempFileName() — one
+consistent, well-formed absolute path per process, and GetTempFileName
+pre-creates the file so later reads/deletes can't hit a missing target. NOTE:
+both read the same TMP env var and do NOT expand an 8.3 profile path back to
+its long form — the terminating-exception guard is the try/catch that
+ps-temp-cmdlet-lint enforces; this advisory only steers path CONSTRUCTION
+toward the consistent source.
 
 This guard scans every *.ps1 under robotis_ai_setup/ and reports any RAW
 $env:TEMP/$env:TMP path *construction* (env var immediately followed by a path
@@ -30,7 +35,6 @@ from __future__ import annotations
 import os
 import pathlib
 import re
-import sys
 
 ROOT = pathlib.Path(os.environ.get("PS_LINT_ROOT") or
                     pathlib.Path(__file__).resolve().parents[2])
@@ -83,7 +87,9 @@ def main() -> int:
                     f"::warning file={rel},line={lineno}::raw $env:TEMP path "
                     f"construction not normalized in-line — an 8.3/tilde/non-ASCII "
                     f"temp path can propagate forward. Prefer "
-                    f"[System.IO.Path]::GetTempPath() (a normalized LONG path); "
+                    f"[System.IO.Path]::GetTempPath() (one consistent, "
+                    f"well-formed source — but still wrap consuming cmdlets in "
+                    f"try/catch, see ps-temp-cmdlet-lint); "
                     f"append '# {ALLOW_LINE}' to silence. Line: {snippet}"
                 )
     if total:

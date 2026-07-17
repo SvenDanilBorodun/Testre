@@ -23,7 +23,6 @@ from __future__ import annotations
 import os
 import pathlib
 import re
-import sys
 
 ROOT = pathlib.Path(os.environ.get("PS_LINT_ROOT") or
                     pathlib.Path(__file__).resolve().parents[2])

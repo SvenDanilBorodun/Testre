@@ -107,6 +107,33 @@ $flagPath = Join-Path $PSScriptRoot ".reboot_required"
 # back to the caller's `wsl --status` verdict rather than manufacturing a reboot.
 function Test-RebootStillPending {
     param([bool]$WslResponds)
+    # The flag CONTENT names WHY the reboot was requested. "dd-uninstall" is
+    # migrate_from_docker_desktop.ps1's reason (Docker Desktop's uninstaller
+    # returned 3010 — its removal completes on the next boot). The feature-store
+    # probe below is BLIND to that state: WSL/VMP read Enabled throughout a
+    # pending DD removal, so it would declare the reboot done and let the import
+    # run next to a half-removed Docker Desktop — the exact entanglement the
+    # flag was written to prevent. For that reason, discriminate on TIME
+    # instead: a boot AFTER the flag was written means the reboot happened (and
+    # whatever remains of DD will not be fixed by another one — proceed rather
+    # than loop); no boot since the flag means the reboot is genuinely still
+    # outstanding, whatever the student clicked. Falls through to the feature
+    # checks either way a) so a combined reason (DD 3010 + a feature
+    # EnablePending in the same session) still defers, and b) on any read error.
+    try {
+        $flagReason = (Get-Content -Path $flagPath -TotalCount 1 -ErrorAction Stop)
+        if ($null -ne $flagReason -and $flagReason.Trim() -eq "dd-uninstall") {
+            $flagTime = (Get-Item -Path $flagPath -ErrorAction Stop).LastWriteTime
+            $bootTime = (Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop).LastBootUpTime
+            Write-Host "   Docker-Desktop-Entfernung: Markierung $($flagTime.ToString('s')), letzter Start $($bootTime.ToString('s'))"
+            if ($bootTime -le $flagTime) {
+                Write-Host "   Seit der Markierung wurde nicht neu gestartet — die Docker-Desktop-Entfernung ist noch nicht abgeschlossen."
+                return $true
+            }
+        }
+    } catch {
+        Write-Host "   (Neustart-Grund nicht lesbar: $_ — Windows-Features werden geprüft)"
+    }
     $pending = $false
     $unreadable = $false
     foreach ($feature in @("VirtualMachinePlatform", "Microsoft-Windows-Subsystem-Linux")) {

@@ -357,17 +357,17 @@ export default function SystemPage() {
           className="mb-6 md:mb-8"
         />
 
-        {/* Systemdateien-Drift. `system_files_stale` ist NUR dann true, wenn der
-            Agent BEWIESENE Drift gefunden hat: er vergleicht die installierten
-            systemd-Units byteweise mit den ausgelieferten (pi_agent/systemd/).
-            Grund: das Self-Update rsynct ausschließlich pi_agent/ — Units und
-            Compose bleiben auf dem Stand der Provisionierung stehen und fallen
-            sonst still auf (z.B. ein neu geforwardetes EDUBOTICS_*).
-            Ohne dieses Banner lebte die Warnung nur im Protokoll, wo sie
-            niemand liest. Die Behebung ist bewusst ZERSTÖRUNGSFREI: setup.sh
-            ist idempotent, alle Volumes (Datensätze, Modelle, Kalibrierung)
-            bleiben erhalten — hier NIEMALS zum Neu-Bespielen der SD-Karte
-            auffordern (eine frühere Fassung tat das bei ~100 % Fehlalarm). */}
+        {/* System-files drift. `system_files_stale` is true ONLY when the agent
+            found PROVEN drift: it byte-compares the installed systemd units
+            against the ones it ships (pi_agent/systemd/). Reason: the
+            self-update rsyncs pi_agent/ ONLY — units and compose stay frozen at
+            provisioning time and otherwise fail silently (e.g. a newly
+            forwarded EDUBOTICS_* env). Without this banner the warning lived
+            only in the Protokoll, which nobody reads. The remedy is
+            deliberately NON-DESTRUCTIVE: setup.sh is idempotent and every
+            volume (datasets, models, calibration) survives — NEVER tell anyone
+            here to re-flash the SD card (an earlier draft did, at ~100 % false
+            positives). */}
         {agentStatus?.system_files_stale && (
           <div
             role="alert"

@@ -209,7 +209,18 @@ if ($dockerDesktopInstaller) {
             Write-Warn "Docker Desktop benötigt einen Neustart, um die Entfernung abzuschließen."
             Write-Diag "uninstall_installer" "rc=3010 — deferring: reboot flag written, marker withheld."
             try {
-                Set-Content -Path $RebootFlag -Value "1" -Force
+                # "dd-uninstall", not "1": the flag CONTENT names WHY the reboot
+                # is needed. finalize_install.ps1's Test-RebootStillPending can
+                # only interrogate the WSL/VMP feature store, which is blind to a
+                # pending Docker-Desktop removal (the features are already
+                # Enabled) — with a bare "1" it would declare the reboot done and
+                # import the distro next to a half-removed DD, the exact
+                # entanglement this flag exists to prevent. The reason lets
+                # finalize compare the flag's write time against the last boot
+                # time instead. Every other consumer (.iss IsRebootRequired, the
+                # GUI's _reboot_required_pending, verify_system.ps1) tests only
+                # EXISTENCE, so the content change is invisible to them.
+                Set-Content -Path $RebootFlag -Value "dd-uninstall" -Force
             } catch {
                 Write-Warn "Konnte die Neustart-Markierung nicht schreiben: $_"
                 Write-Diag "uninstall_installer" "Could not write $RebootFlag : $_"
@@ -318,24 +329,26 @@ foreach ($c in @(
 }
 if (-not $stillPresent -and (Get-DockerDesktopUninstallEntry)) { $stillPresent = $true }
 
+# The reboot branch runs FIRST. After an uninstaller rc=3010 the Uninstall
+# registry entry (and often the files) legitimately linger until the next boot,
+# so on that path $stillPresent is the EXPECTED state — checking it first sent
+# the student to "remove Docker Desktop manually" when the honest instruction is
+# "reboot, the uninstaller finishes then". Marker withheld on both branches; the
+# reboot flag written above has already stopped the import + pull.
+if ($rebootPending) {
+    Write-Step "NEUSTART ERFORDERLICH: Docker Desktop wird beim Neustart vollständig entfernt."
+    Write-Host "   Bitte den PC neu starten. Die EduBotics-Umgebung wird danach" -ForegroundColor Yellow
+    Write-Host "   automatisch eingerichtet, wenn Sie EduBotics öffnen." -ForegroundColor Yellow
+    Write-Diag "defer_reboot" "Uninstaller returned 3010; marker withheld so the next run re-verifies the removal (stillPresent=$stillPresent is expected pre-reboot)."
+    exit 0
+}
+
 if ($stillPresent) {
     Write-Warn "Docker Desktop is STILL present after the uninstall attempt."
     Write-Host "   EduBotics uses its own WSL2 distro and will still work, but a" -ForegroundColor Yellow
     Write-Host "   leftover Docker Desktop can interfere with WSL/VirtualMachinePlatform." -ForegroundColor Yellow
     Write-Host "   Please remove Docker Desktop manually (Settings > Apps) and reboot." -ForegroundColor Yellow
     Write-Diag "verify" "Docker Desktop STILL PRESENT after uninstall (rc=$uninstallRc). Marker NOT written; migration will retry on the next install."
-    exit 0
-}
-
-# Docker Desktop's removal only completes on the next boot (rc=3010 above). Its
-# files may already look gone, but the marker means "this machine is migrated,
-# never run me again" — writing it now would skip the post-reboot re-verify.
-# The reboot flag written above has already stopped the import + pull.
-if ($rebootPending) {
-    Write-Step "NEUSTART ERFORDERLICH: Docker Desktop wird beim Neustart vollständig entfernt."
-    Write-Host "   Bitte den PC neu starten. Die EduBotics-Umgebung wird danach" -ForegroundColor Yellow
-    Write-Host "   automatisch eingerichtet, wenn Sie EduBotics öffnen." -ForegroundColor Yellow
-    Write-Diag "defer_reboot" "Uninstaller returned 3010; marker withheld so the next run re-verifies the removal."
     exit 0
 }
 

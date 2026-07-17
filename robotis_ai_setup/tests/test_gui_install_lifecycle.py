@@ -616,6 +616,73 @@ class RootCauseGuardTest(unittest.TestCase):
                                  "was the bug")
 
 
+class DockerDesktopRebootReasonTest(unittest.TestCase):
+    """The .reboot_required CONTENT contract between migrate and finalize.
+
+    migrate_from_docker_desktop.ps1 writes the flag when Docker Desktop's
+    uninstaller returns 3010 (removal completes on the next boot). finalize's
+    Test-RebootStillPending can only interrogate the WSL/VMP feature store,
+    which reads Enabled throughout a pending DD removal — so with a bare "1" it
+    declared the reboot done and imported the distro next to a half-removed DD,
+    the exact entanglement the flag exists to prevent. The fix threads a REASON
+    through the flag content ("dd-uninstall") and discriminates on flag-mtime vs
+    last-boot-time. Both halves live in different scripts with no shared symbol;
+    these pin the seam. Comment lines are stripped first (the fixes' own
+    rationale necessarily names "dd-uninstall"), reusing RootCauseGuardTest's
+    helper.
+    """
+
+    _code = staticmethod(RootCauseGuardTest._code)
+
+    def test_migrate_writes_the_dd_reason_not_a_bare_1(self):
+        code = self._code("migrate_from_docker_desktop.ps1")
+        self.assertRegex(
+            code, r'Set-Content -Path \$RebootFlag -Value "dd-uninstall"',
+            "migrate must write the dd-uninstall REASON into the flag — a bare "
+            '"1" makes finalize blind to the pending Docker-Desktop removal '
+            "(the WSL/VMP feature store reads Enabled throughout it)")
+
+    def test_finalize_discriminates_the_dd_reason_by_boot_time(self):
+        code = self._code("finalize_install.ps1")
+        self.assertIn("dd-uninstall", code,
+                      "finalize no longer reads the dd-uninstall reason — the "
+                      "feature-store probe alone cannot see a pending DD removal")
+        self.assertIn("LastBootUpTime", code,
+                      "the dd-uninstall reason must be settled by comparing the "
+                      "flag's write time against the last boot time — any other "
+                      "signal either loops the student (a lingering registry "
+                      "entry) or trusts the honor system (the dialog)")
+        # The dd discrimination must run BEFORE the feature-store loop, so a
+        # not-yet-rebooted DD removal defers even though the features read
+        # Enabled.
+        self.assertLess(code.index("dd-uninstall"),
+                        code.index("Get-WindowsOptionalFeature"))
+
+    def test_prereqs_never_clobber_an_existing_flag_reason(self):
+        # Under -PreserveExistingRebootFlag the flag may carry migrate's
+        # "dd-uninstall"; the Summary re-write with "1" would erase the reason
+        # AND refresh the mtime finalize compares against the last boot.
+        code = self._code("install_prerequisites.ps1")
+        self.assertRegex(
+            code,
+            r'if \(-not \(Test-Path \$FlagPath\)\) \{\s*'
+            r'Set-Content -Path \$FlagPath -Value "1"',
+            "install_prerequisites must write the reboot flag only when ABSENT "
+            "— an existing flag keeps its content (migrate's dd-uninstall "
+            "reason and its write time must survive)")
+
+    def test_migrate_reboot_branch_precedes_the_still_present_branch(self):
+        # After rc=3010 the Uninstall registry entry legitimately lingers until
+        # the next boot, so "still present" is the EXPECTED state on that path.
+        # Checking it first told the student to remove Docker Desktop manually
+        # when the honest instruction is "reboot, the uninstaller finishes then".
+        code = self._code("migrate_from_docker_desktop.ps1")
+        self.assertLess(
+            code.index("if ($rebootPending)"), code.index("if ($stillPresent)"),
+            "migrate must route the rc=3010 case to the reboot message BEFORE "
+            "the still-present manual-removal message")
+
+
 class UacCancelDetectionTest(unittest.TestCase):
     """The UAC-decline DETECTION — which the routing tests structurally cannot see.
 

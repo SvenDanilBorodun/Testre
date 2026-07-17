@@ -395,7 +395,14 @@ try {
 Write-Step "Prerequisites installation complete!"
 if ($needsReboot) {
     # Write flag file so Inno Setup knows a reboot is required before image pull / WSL import.
-    Set-Content -Path $FlagPath -Value "1"
+    # Write ONLY if absent: under -PreserveExistingRebootFlag an existing flag may
+    # carry migrate's "dd-uninstall" REASON, which finalize_install.ps1's
+    # Test-RebootStillPending needs (the WSL/VMP feature store is blind to a
+    # pending Docker-Desktop removal) — overwriting it with "1" would erase the
+    # reason AND refresh the write time finalize compares against the last boot.
+    if (-not (Test-Path $FlagPath)) {
+        Set-Content -Path $FlagPath -Value "1"
+    }
     Write-Host "`nA REBOOT IS REQUIRED to complete WSL2 installation." -ForegroundColor Yellow
 } else {
     # Remove flag if no reboot needed (re-run after reboot). $needsReboot is

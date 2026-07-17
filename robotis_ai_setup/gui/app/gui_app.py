@@ -1365,12 +1365,21 @@ class EduBoticsApp:
         return None
 
     def _prompt_finalize_install(self):
-        """Prompt the student to finalize setup after a post-reboot continuation.
+        """Finish setup AUTOMATICALLY after a post-reboot continuation.
 
-        When WSL2 was installed fresh, the installer defers rootfs import until
-        after reboot. On first GUI launch the distro is missing; we ask the
-        student for admin consent and run finalize_install.ps1 with UAC.
+        When WSL2 was installed fresh, the installer defers the rootfs import
+        until after reboot. On first GUI launch the distro is missing, so we run
+        finalize_install.ps1 elevated WITHOUT asking — the student never clicks a
+        "finish setup" button or opens a terminal. On an admin-capable account the
+        only OS-level interaction is the standard UAC consent; the setup itself
+        (import + image pull) then runs unattended and is idempotent/resumable.
+
+        Re-entrancy is guarded so a repeated prerequisite scan can't stack a
+        second elevated launch on top of one already in flight.
         """
+        if getattr(self, "_finalize_in_progress", False):
+            return
+
         script = self._resolve_finalize_script()
         if script is None:
             messagebox.showerror(
@@ -1382,22 +1391,10 @@ class EduBoticsApp:
             self._set_status("EduBotics-Umgebung fehlt")
             return
 
+        self._finalize_in_progress = True
         self._log(f"Setup-Skript: {script}")
-
-        wants_run = messagebox.askyesno(
-            "Einrichtung abschließen",
-            "Die EduBotics-Umgebung muss noch eingerichtet werden.\n\n"
-            "Dies erfordert einmalig Administrator-Rechte und dauert "
-            "3–10 Minuten (Rootfs-Import + Docker-Images).\n\n"
-            "Jetzt einrichten?",
-        )
-        if not wants_run:
-            self._set_status("EduBotics-Umgebung nicht eingerichtet")
-            self._log("Einrichtung vom Benutzer verschoben.")
-            return
-
-        self._set_status("Einrichtung läuft (UAC-Zustimmung erforderlich)...")
-        self._log("Einrichtung wird mit Administrator-Rechten gestartet...")
+        self._set_status("Einrichtung läuft automatisch (UAC-Zustimmung erforderlich)...")
+        self._log("Einrichtung wird automatisch mit Administrator-Rechten gestartet...")
 
         def _run_elevated():
             import tempfile
@@ -1425,6 +1422,10 @@ class EduBoticsApp:
                 exe="powershell.exe",
                 args=ps_args,
             )
+            # The elevated launch has completed (the wait blocks until the child
+            # exits); clear the guard so a later prerequisite scan can retry if
+            # this attempt didn't finish setting the environment up.
+            self._finalize_in_progress = False
             if err:
                 self._log(f"UAC-Fehler: {err}")
 

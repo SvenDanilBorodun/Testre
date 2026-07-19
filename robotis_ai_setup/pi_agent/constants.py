@@ -89,10 +89,22 @@ def _read_versions_env(key: str) -> str:
     beside the compose file), or ``""`` when the file/key is absent.
 
     Unlike the GUI reader this walks up ONLY from this module's directory
-    (there is no PyInstaller ``sys.executable`` layout on the Pi). In-tree
-    the file resolves at ``robotis_ai_setup/docker/versions.env``; on an
-    installed Pi it is normally absent (CI-generated), so every reader
-    falls back to the hardcoded default — exactly the documented behaviour.
+    (there is no PyInstaller ``sys.executable`` layout on the Pi). The FIRST
+    candidate is ``pi_agent/docker/versions.env`` — the path BOTH writers target
+    (``release.yml::pi-agent-tarball`` bakes it into the self-update tarball,
+    ``setup.sh`` writes it at provision time), so it must stay first in the walk.
+    Further up, in-tree, the file would resolve at
+    ``robotis_ai_setup/docker/versions.env``.
+
+    NEAREST-WINS PER KEY, not per file: the walk continues past a versions.env
+    that does not carry the requested key. Stopping at the first FILE looked
+    equivalent and is not — ``setup.sh`` writes a ``pi_agent/docker/versions.env``
+    containing ONLY ``IMAGE_TAG``, so a future ``REGISTRY`` /
+    ``REGISTRY_FALLBACK`` pin shipped one level up would be permanently
+    invisible on every provisioned Pi, quietly falsifying the "a future registry
+    change ships in the CI-baked versions.env with no agent rebuild" promise in
+    ``_resolve_setting``. A key that IS present still wins over anything farther
+    up, which is the property the original break was reaching for.
     """
     prefix = f"{key}="
     d = Path(__file__).resolve().parent
@@ -108,7 +120,8 @@ def _read_versions_env(key: str) -> str:
                             return val
             except OSError:
                 pass
-            break  # found the file in this root, key absent — stop
+            # Key absent (or blank) in THIS file — keep walking rather than
+            # concluding it is unset everywhere.
         parent = d.parent
         if parent == d:
             break

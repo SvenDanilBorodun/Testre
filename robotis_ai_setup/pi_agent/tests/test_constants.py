@@ -12,9 +12,9 @@ robotis_ai_setup on sys.path, `from pi_agent import ...`).
 
 from __future__ import annotations
 
-import importlib
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -174,6 +174,76 @@ class TestImageTagEndToEnd(unittest.TestCase):
         self.assertEqual(fb, "nettername/physical-ai-server-opi:2.14.0")
 
 
+class TestVersionsEnvWalk(unittest.TestCase):
+    """`_read_versions_env` is the seam the whole fleet's image pin rides on, and
+    NOTHING exercised it: every image-tag test above patches it wholesale.
+
+    Both writers — `setup.sh` (provision time) and `release.yml::pi-agent-tarball`
+    (self-update tarball) — target exactly `pi_agent/docker/versions.env`, which
+    is the FIRST candidate the walk probes. CI gates the tarball's side. A
+    reorder of the walk, or a path typo in setup.sh, would silently drop the pin
+    back to `latest`/`APP_VERSION` — the failure mode that previously killed the
+    robot tier fleet-wide (a Pi quietly tracking main HEAD).
+    """
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.pkg = os.path.join(self.dir, "pi_agent")
+        os.makedirs(self.pkg)
+
+    def _write(self, directory, body):
+        d = os.path.join(directory, "docker")
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "versions.env"), "w", encoding="utf-8") as f:
+            f.write(body)
+
+    def _read(self, key):
+        """Run _read_versions_env as if constants.py lived in the fake package."""
+        with patch.object(constants, "__file__", os.path.join(self.pkg, "constants.py")):
+            return constants._read_versions_env(key)
+
+    def test_the_first_candidate_is_pi_agent_docker_versions_env(self):
+        self._write(self.pkg, "IMAGE_TAG=2.14.0\n")
+        self.assertEqual(self._read("IMAGE_TAG"), "2.14.0")
+
+    def test_the_nearest_file_wins_for_a_key_it_carries(self):
+        # A pin one level up must never override the packaged one.
+        self._write(self.dir, "IMAGE_TAG=0.0.0-outer\n")
+        self._write(self.pkg, "IMAGE_TAG=2.14.0\n")
+        self.assertEqual(self._read("IMAGE_TAG"), "2.14.0")
+
+    def test_a_key_missing_from_the_nearest_file_keeps_walking(self):
+        """IMPROVEMENT 9. The walk used to stop at the first versions.env FOUND,
+        even when it lacked the requested key. setup.sh writes a
+        pi_agent/docker/versions.env carrying ONLY IMAGE_TAG, so a future
+        REGISTRY / REGISTRY_FALLBACK pin shipped one level up would have been
+        permanently invisible on every provisioned Pi — falsifying
+        `_resolve_setting`'s "a future registry change ships in the CI-baked
+        versions.env with no agent rebuild"."""
+        self._write(self.dir, "REGISTRY=ghcr.io/someone-else\n")
+        self._write(self.pkg, "IMAGE_TAG=2.14.0\n")
+        self.assertEqual(self._read("IMAGE_TAG"), "2.14.0")
+        self.assertEqual(self._read("REGISTRY"), "ghcr.io/someone-else")
+
+    def test_a_blank_value_is_treated_as_unset(self):
+        # `IMAGE_TAG=` would resolve the unpullable ref `…-opi:`.
+        self._write(self.pkg, "IMAGE_TAG=\n")
+        self.assertEqual(self._read("IMAGE_TAG"), "")
+
+    def test_absent_everywhere_returns_empty(self):
+        self.assertEqual(self._read("IMAGE_TAG"), "")
+
+    def test_setup_sh_writes_the_exact_path_the_walk_probes(self):
+        """The writer is shell and the reader is Python with no shared symbol.
+        `.system-files-version` has its own seam test; this pins the pin file."""
+        setup_sh = (Path(constants.__file__).parent / "setup.sh").read_text(
+            encoding="utf-8", errors="replace")
+        self.assertIn("pi_agent/docker", setup_sh)
+        self.assertIn("versions.env", setup_sh)
+        self.assertIn("IMAGE_TAG=", setup_sh)
+
+
 class TestSystemFilesVersionFile(unittest.TestCase):
     def test_default_lives_outside_pi_agent(self):
         """Load-bearing: the stamp records the version the COMPOSE + SYSTEMD
@@ -185,12 +255,30 @@ class TestSystemFilesVersionFile(unittest.TestCase):
         self.assertNotIn("pi_agent", constants.SYSTEM_FILES_VERSION_FILE)
 
     def test_is_env_overridable_for_tests(self):
-        importlib.reload(constants)  # pick up a clean baseline
-        with patch.dict(os.environ,
-                        {"EDUBOTICS_SYSTEM_FILES_VERSION_FILE": "/tmp/stamp"}):
-            reloaded = importlib.reload(constants)
-            self.assertEqual(reloaded.SYSTEM_FILES_VERSION_FILE, "/tmp/stamp")
-        importlib.reload(constants)  # restore for the rest of the suite
+        """Resolved in a SUBPROCESS, not via importlib.reload.
+
+        `agent`, `docker_manager` and `config_generator` all do
+        `from .constants import IMAGE_TAG, REGISTRY, ENV_FILE, …`, so reloading
+        `constants` in-process rebinds the module's globals while every importer
+        keeps its ORIGINAL objects — a split-brain that only stayed invisible
+        because the env was restored and the values recomputed identically. One
+        future import-time value that does not round-trip (a timestamp, an
+        os.getpid()) and this test starts corrupting whichever module happens to
+        run after it, in a way that reads as a bug somewhere else entirely. A
+        subprocess exercises the same import-time resolution with no shared
+        state to poison.
+        """
+        env = dict(os.environ, EDUBOTICS_SYSTEM_FILES_VERSION_FILE="/tmp/stamp")
+        out = subprocess.run(
+            [sys.executable, "-c",
+             "import sys; sys.path.insert(0, sys.argv[1]);"
+             " from pi_agent import constants;"
+             " print(constants.SYSTEM_FILES_VERSION_FILE)",
+             str(SETUP_DIR)],
+            capture_output=True, text=True, env=env, timeout=60,
+        )
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(out.stdout.strip(), "/tmp/stamp")
 
     def test_setup_sh_writes_the_path_the_agent_reads(self):
         """The writer (setup.sh) and the reader (constants) are in different

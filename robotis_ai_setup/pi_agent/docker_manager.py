@@ -338,6 +338,7 @@ def _pull_one_image(
     total: int,
     log=None,
     max_attempts: int = 3,
+    retry_gate=None,
 ) -> bool:
     """Pull a single image with per-attempt timeout + exponential backoff.
 
@@ -346,12 +347,21 @@ def _pull_one_image(
     with the always-on manager, so restarting it would drop the wizard the
     student is looking at. Instead we rely on ``docker pull`` resuming from
     cached layers on retry (cheap) — the Jetson agent's proven native approach.
+
+    ``retry_gate``: optional predicate consulted BEFORE every retry (never before
+    the first attempt). Returning False ends the loop immediately — the caller's
+    way of saying "the host is down, the remaining attempts cannot succeed".
+    Checked ahead of the backoff sleep so a dead host costs no wait either.
     """
     log = log or (lambda _m: None)
     short = image.split("/")[-1]
     timeout_s = int(os.environ.get("EDUBOTICS_PULL_ATTEMPT_TIMEOUT_S", _PULL_ATTEMPT_TIMEOUT_S))
     backoff = (0, 5, 15)
+    made = 0  # attempts ACTUALLY made — retry_gate can end the loop early
     for attempt in range(max_attempts):
+        if attempt > 0 and retry_gate is not None and not retry_gate():
+            break
+        made += 1
         delay = backoff[attempt] if attempt < len(backoff) else backoff[-1]
         if delay > 0:
             time.sleep(delay)
@@ -371,20 +381,28 @@ def _pull_one_image(
         except (FileNotFoundError, OSError) as e:
             log(f"    Fehler: {e}")
             return False
-    log(f"    FEHLER: {short} konnte nach {max_attempts} Versuchen nicht geladen werden.")
+    # `made`, not `max_attempts`: when the retry gate cut the loop short, naming
+    # the budget would tell the student we tried three times when we tried once.
+    log(f"    FEHLER: {short} konnte nach {made} Versuch(en) nicht geladen werden.")
     return False
 
 
-def _pull_fallback_and_retag(image: str, idx: int, total: int, log=None) -> bool:
+def _pull_fallback_and_retag(
+    image: str, idx: int, total: int, log=None, attempts: int = 3,
+) -> bool:
     """Pull the Docker Hub twin of ``image`` and re-tag it to the primary name.
 
     The twin is dual-pushed (digest-identical), so re-tagging it to the primary
     ``${REGISTRY}`` ref lets compose find it with no ``manifest unknown``.
-    Returns True iff the primary-named image is present afterwards."""
+    Returns True iff the primary-named image is present afterwards.
+
+    ``attempts`` is the caller's PRIMARY budget; the Hub twin gets one less
+    (min 1) — preserving the historical 3→2 split while letting an interactive
+    caller (``attempts=1``) hold the whole path to one shot per registry."""
     fb = _fallback_ref(image)
     if fb is None:
         return False
-    if not _pull_one_image(fb, idx, total, log=log, max_attempts=2):
+    if not _pull_one_image(fb, idx, total, log=log, max_attempts=max(1, attempts - 1)):
         return False
     try:
         result = subprocess.run(
@@ -411,12 +429,28 @@ PULL_TRANSIENT = "transient"
 PULL_MISSING = "missing"
 
 
-def _pull_image_with_fallback(image: str, idx: int, total: int, log=None) -> str:
+def _pull_image_with_fallback(
+    image: str, idx: int, total: int, log=None, attempts: int = 3,
+) -> str:
     """Pull ``image`` from GHCR; on an unreachable host or a failed pull, fall
     back to the digest-identical Docker Hub twin and re-tag it to the primary
-    name. Returns PULL_OK / PULL_TRANSIENT / PULL_MISSING (see above)."""
+    name. Returns PULL_OK / PULL_TRANSIENT / PULL_MISSING (see above).
+
+    ``attempts`` caps the PRIMARY pull's retries (the Hub twin gets one less).
+    The default 3 is the patient update/boot budget; an interactive caller
+    holding a lock a student is waiting behind passes 1 — see ``_compose_pull``.
+    """
     log = log or (lambda _m: None)
     short = image.split("/")[-1]
+    # Memoised so the ONE TCP probe below serves both jobs (retry gate +
+    # classifier) instead of costing NETWORK_PROBE_TIMEOUT twice per image.
+    reach: dict = {}
+
+    def _primary_up() -> bool:
+        if "up" not in reach:
+            reach["up"] = _host_reachable(_registry_host(REGISTRY))
+        return reach["up"]
+
     # Attempt the GHCR pull UNCONDITIONALLY — no host-reachability pre-gate. The
     # old `if primary_up:` gate probed ghcr.io:443 from THIS host first and
     # skipped the pull on any blip, which — behind one classroom NAT — diverts
@@ -424,13 +458,24 @@ def _pull_image_with_fallback(image: str, idx: int, total: int, log=None) -> str
     # flaps (the GUI deliberately de-gated this for the same reason, see
     # gui/app/docker_manager.py). `_pull_one_image` already fails fast on a dead
     # host (DNS) and retries transient 5xx, so the unconditional attempt is both
-    # faster (no probe on the happy path) and keeps students on GHCR. The
-    # reachability probe is kept ONLY to CLASSIFY a FAILED pull afterwards
-    # (TRANSIENT vs MISSING — the 3-state distinction the GUI does not need but
-    # the opi-decoupled Pi does), so it is computed lazily below.
-    if _pull_one_image(image, idx, total, log=log):
+    # faster (no probe on the happy path) and keeps students on GHCR.
+    #
+    # The probe survives for TWO jobs, both strictly AFTER a failed first
+    # attempt, so the happy path still pays for no probe at all:
+    #   1. As the RETRY GATE. De-gating the first attempt was right; burning
+    #      attempts 2-3 against a host that provably does not answer is not. On a
+    #      school that silently DROPs ghcr.io, docker can hang each attempt to
+    #      the 600 s cap — up to ~30 min per image before the Hub fallback is
+    #      even tried, on every pull path including „Umgebung starten". A
+    #      REACHABILITY failure ends the primary loop immediately; a transient
+    #      failure on a REACHABLE host still gets all `attempts` tries, which is
+    #      the case the de-gating exists to protect.
+    #   2. To CLASSIFY the failure (TRANSIENT vs MISSING — the 3-state
+    #      distinction the GUI does not need but the opi-decoupled Pi does).
+    if _pull_one_image(image, idx, total, log=log,
+                       max_attempts=attempts, retry_gate=_primary_up):
         return PULL_OK
-    primary_up = _host_reachable(_registry_host(REGISTRY))
+    primary_up = _primary_up()
     if _fallback_ref(image) is None:
         return PULL_TRANSIENT if not primary_up else PULL_MISSING
     # Word this by the ACTUAL cause. The old text always blamed an unreachable
@@ -445,7 +490,8 @@ def _pull_image_with_fallback(image: str, idx: int, total: int, log=None) -> str
         + " — wechsle zu Docker Hub …"
     )
     fallback_up = _host_reachable(_registry_host(REGISTRY_FALLBACK))
-    if fallback_up and _pull_fallback_and_retag(image, idx, total, log=log):
+    if fallback_up and _pull_fallback_and_retag(image, idx, total, log=log,
+                                                attempts=attempts):
         return PULL_OK
     # MISSING is a claim about a REGISTRY'S CONTENTS, and only GHCR can settle
     # it: GHCR is the consumption primary, while the Docker Hub retag is
@@ -578,6 +624,11 @@ def check_for_updates(log=None, missing_out: Optional[list] = None) -> bool:
         return False
 
     any_updated = False
+    # Tracks whether ANY image failed to reach the pinned tag this run. It gates
+    # the prune below — see the `any_updated and not any_failed` comment there.
+    # Both non-PULL_OK branches must set it: PULL_MISSING and PULL_TRANSIENT are
+    # different diagnoses but identical here (the new bytes did not arrive).
+    any_failed = False
     pulled_digests: dict = {}
     total = len(ALL_IMAGES)
 
@@ -610,6 +661,7 @@ def check_for_updates(log=None, missing_out: Optional[list] = None) -> bool:
 
         outcome = _pull_image_with_fallback(image, i, total, log=log)
         if outcome != PULL_OK:
+            any_failed = True
             if outcome == PULL_MISSING:
                 if missing_out is not None:
                     missing_out.append(short)
@@ -650,12 +702,24 @@ def check_for_updates(log=None, missing_out: Optional[list] = None) -> bool:
         except (FileNotFoundError, subprocess.TimeoutExpired):
             pass
 
-    if any_updated:
+    if any_updated and not any_failed:
         # Reclaim disk: first drop superseded TAGGED versions (`image prune -f`
         # is dangling-ONLY, so it can't remove e.g. a leftover :2.12.0 after
         # :2.13.0 lands — on the Pi's soldered eMMC, which also holds the OS and
         # the student's datasets, that grows a full ~5-6 GB -opi image set per
         # release), then dangling layers.
+        #
+        # ONLY when EVERY image reached the pinned tag. Pruning after a PARTIAL
+        # upgrade is the C1 hazard, and on the Pi it is worse than on Windows:
+        # _run_update_job's first step is stop_robot_tier (`stop` + `rm -f`), so
+        # NOTHING references the previous physical-ai-server-opi image any more
+        # and `image rm` (which normally refuses an in-use image — the safety net
+        # prune_superseded_tags leans on) succeeds. A 5-6 GB server pull that
+        # times out on a school link would therefore delete the still-working
+        # :2.13.0 AND its layers while the job reports „Aktualisierung
+        # abgeschlossen." — leaving no physical-ai-server image at ANY tag and no
+        # EDUBOTICS_IMAGE_TAG rollback. The superseded tags are reclaimed on the
+        # next fully-successful run. Mirrors gui/app/docker_manager.py.
         prune_superseded_tags(log=log)
         try:
             subprocess.run(
@@ -687,7 +751,17 @@ def prune_superseded_tags(log=None) -> int:
     is never yanked out from under itself (a still-in-use OLD tag simply lingers
     one more cycle). Returns the number of tags removed. Best-effort; never
     raises.
+
+    NO-OP under an explicit ``EDUBOTICS_IMAGE_TAG`` pin: that env var is the
+    one-variable rollback an operator sets in ``/etc/edubotics/.env`` (which is
+    also the unit's ``EnvironmentFile``) to hold a rig on a known-good release.
+    Under a pin, every OTHER tag on disk — including the one the operator is
+    rolling back FROM and will want to roll forward TO — is exactly what must be
+    preserved; untagging it turns a reversible pin into a one-way trip over a
+    5-6 GB re-pull. An operator managing tags by hand owns the disk too.
     """
+    if os.environ.get("EDUBOTICS_IMAGE_TAG", "").strip():
+        return 0
     repos = []
     for name in IMAGE_NAMES:
         repos.append(f"{REGISTRY}/{name}")
@@ -836,7 +910,8 @@ def _compose_up(*services: str, log=None, timeout: int = 180) -> bool:
         return False
 
 
-def _compose_pull(*services: str, log=None, only_if_missing: bool = False) -> bool:
+def _compose_pull(*services: str, log=None, only_if_missing: bool = False,
+                  attempts: int = 3) -> bool:
     """Resiliently refresh the pinned images for ``services`` BEFORE a bare
     ``_compose_up`` recreates onto them — the Pi parity of the GUI's
     ``start_containers`` → ``_compose_pull``.
@@ -862,7 +937,11 @@ def _compose_pull(*services: str, log=None, only_if_missing: bool = False) -> bo
     SKIP_AUTO_PULL, offline, and an all-current arm64 digest pre-check. No prune
     here — this is a refresh-before-start, not an update (the prune fires from
     the update/boot pull paths, so it never fights the OLD manager image that is
-    still in use when the robot tier comes up)."""
+    still in use when the robot tier comes up).
+
+    ``attempts`` is forwarded to ``_pull_image_with_fallback``; ``start_robot_tier``
+    lowers it because that path runs on an HTTP request thread holding
+    ``_lifecycle_lock`` (see there)."""
     log = log or (lambda _m: None)
     relevant = [_SERVICE_IMAGE[s] for s in services if s in _SERVICE_IMAGE]
     if not relevant:
@@ -891,7 +970,8 @@ def _compose_pull(*services: str, log=None, only_if_missing: bool = False) -> bo
         # A genuinely-current image was filtered out above; pull the rest
         # resiliently. TRANSIENT/MISSING stay best-effort here — `up` below
         # self-heals a still-missing image (or fails clearly if offline).
-        if _pull_image_with_fallback(image, i, total, log=log) != PULL_OK:
+        if _pull_image_with_fallback(image, i, total, log=log,
+                                     attempts=attempts) != PULL_OK:
             ok = False
     return ok
 
@@ -954,8 +1034,19 @@ def start_robot_tier(log=None) -> bool:
     GHCR-only lazy ``pull_policy`` — the ~5-6 GB server image otherwise has no
     Hub fallback and only the ``up`` wall-clock (H3 parity with the GUI's
     start_containers). Best-effort: ``_compose_up`` still self-heals / fails
-    clearly on its own."""
-    _compose_pull(*_ROBOT_TIER, log=log)
+    clearly on its own.
+
+    ``attempts=1`` — ONE shot per registry, unlike the patient default the update
+    and boot paths use. This runs on the HTTP request thread of „Umgebung
+    starten", holding ``_lifecycle_lock`` the whole time: at the default budget a
+    GHCR-degraded school could burn 3×600 s on GHCR plus 2×600 s on Hub PER image
+    before ``up`` even starts, i.e. tens of minutes during which „Stoppen" and
+    every other wizard control could only answer 503. A refresh is also the
+    cheapest thing to give up on — the images are usually already current (the
+    digest pre-check returns before any pull), ``_compose_up`` still self-heals a
+    genuinely absent image, and pressing „Umgebung starten" again retries. The
+    UPDATE path keeps the full budget: there, patience is the correct trade."""
+    _compose_pull(*_ROBOT_TIER, log=log, attempts=1)
     return _compose_up(*_ROBOT_TIER, log=log, timeout=DOCKER_STARTUP_TIMEOUT + 180)
 
 

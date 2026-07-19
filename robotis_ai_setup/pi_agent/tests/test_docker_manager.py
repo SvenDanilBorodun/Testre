@@ -229,6 +229,66 @@ class TestPull(unittest.TestCase):
         fb.assert_not_called()      # and never needlessly diverted to Hub
         probe.assert_not_called()   # happy path pays for no probe at all
 
+    def test_an_unreachable_ghcr_does_not_burn_the_remaining_attempts(self):
+        """MINOR 7. De-gating the FIRST attempt was right; burning attempts 2-3
+        against a host that provably does not answer is not.
+
+        On a school that silently DROPs ghcr.io, docker can hang each attempt to
+        the 600 s cap — up to ~30 min per image before the Hub fallback is even
+        tried, on every pull path including „Umgebung starten". One attempt, then
+        the reachability verdict routes straight to Hub.
+        """
+        attempts = {"n": 0}
+
+        def failing_pull(argv, *a, **kw):
+            if "pull" in argv:
+                attempts["n"] += 1
+                return _Proc(1, stderr="i/o timeout")
+            return _Proc(0)
+
+        with patch.object(dm, "REGISTRY", "ghcr.io/o"), \
+             patch.object(dm, "REGISTRY_FALLBACK", "nettername"), \
+             patch.object(dm, "_host_reachable", return_value=False), \
+             patch.object(dm, "_pull_fallback_and_retag", return_value=False), \
+             patch.object(dm.subprocess, "run", side_effect=failing_pull), \
+             patch.object(dm.time, "sleep"):
+            self.assertEqual(
+                dm._pull_image_with_fallback("ghcr.io/o/x:2.13.0", 0, 1), dm.PULL_TRANSIENT)
+        self.assertEqual(attempts["n"], 1, "retries against a dead host are pure wall-clock")
+
+    def test_a_reachable_ghcr_still_gets_every_retry(self):
+        # The case the de-gating exists to protect: a transient 5xx on a host
+        # that IS answering must keep its full budget rather than diverting the
+        # whole classroom onto Docker Hub's anonymous rate wall.
+        attempts = {"n": 0}
+
+        def failing_pull(argv, *a, **kw):
+            if "pull" in argv:
+                attempts["n"] += 1
+                return _Proc(1, stderr="503 Service Unavailable")
+            return _Proc(0)
+
+        with patch.object(dm, "REGISTRY", "ghcr.io/o"), \
+             patch.object(dm, "REGISTRY_FALLBACK", "nettername"), \
+             patch.object(dm, "_host_reachable", return_value=True), \
+             patch.object(dm, "_pull_fallback_and_retag", return_value=False), \
+             patch.object(dm.subprocess, "run", side_effect=failing_pull), \
+             patch.object(dm.time, "sleep"):
+            dm._pull_image_with_fallback("ghcr.io/o/x:2.13.0", 0, 1)
+        self.assertEqual(attempts["n"], 3)
+
+    def test_the_reachability_probe_runs_at_most_once_per_image(self):
+        # It serves BOTH the retry gate and the TRANSIENT/MISSING classifier;
+        # each probe costs up to NETWORK_PROBE_TIMEOUT, so memoise it.
+        with patch.object(dm, "REGISTRY", "ghcr.io/o"), \
+             patch.object(dm, "REGISTRY_FALLBACK", "nettername"), \
+             patch.object(dm, "_host_reachable", return_value=False) as probe, \
+             patch.object(dm, "_pull_one_image", return_value=False), \
+             patch.object(dm, "_pull_fallback_and_retag", return_value=False):
+            dm._pull_image_with_fallback("ghcr.io/o/x:2.13.0", 0, 1)
+        primary_probes = [c for c in probe.call_args_list if c.args and c.args[0] == "ghcr.io"]
+        self.assertEqual(len(primary_probes), 1, probe.call_args_list)
+
     def test_an_unreachable_primary_still_classifies_a_failed_pull_as_transient(self):
         """The probe's remaining job. MISSING is a claim about GHCR's CONTENTS
         and only a reachable GHCR can settle it — the Hub retag is explicitly
@@ -643,6 +703,93 @@ class TestPruneSupersededTags(unittest.TestCase):
             self.assertTrue(_run_check_for_updates(first_time=True))
         prune.assert_called_once()
 
+    def test_check_for_updates_does_not_prune_after_a_PARTIAL_upgrade(self):
+        """C1. THE one that turns a slow link into a dead Pi.
+
+        Scenario: a Pi on :2.13.0 runs the wizard's „Jetzt aktualisieren".
+        _run_update_job's FIRST step is stop_robot_tier (`stop` + `rm -f`), so
+        nothing references physical-ai-server-opi:2.13.0 any more. Two small
+        images pull fine at :2.14.0; the ~5-6 GB server times out three times on
+        the school link → PULL_TRANSIENT (non-fatal by design, so `missing_out`
+        stays empty and the job still reports „Aktualisierung abgeschlossen.").
+
+        With `if any_updated:` alone, that partial success pruned every non-
+        current tag across IMAGE_NAMES × both registries — including the still-
+        working :2.13.0 server image, which `image rm` no longer refuses because
+        its container was just removed. The Pi ends with NO physical-ai-server
+        image at ANY tag: „Umgebung starten" is broken until a full 5-6 GB pull
+        succeeds, and the EDUBOTICS_IMAGE_TAG rollback is gone too. Mirrors the
+        GUI's `any_updated and not any_failed` guard.
+        """
+        first = {"done": False}
+
+        def one_ok_then_transient(image, i, total, log=None, attempts=3):
+            if not first["done"]:
+                first["done"] = True
+                return dm.PULL_OK
+            return dm.PULL_TRANSIENT
+
+        # The successful image is a first-time pull ("" → an id), so any_updated
+        # is genuinely True — this test would be vacuous otherwise.
+        ids = iter(["", "sha256:new"] + ["sha256:same", "sha256:same"] * 8)
+
+        def fake_run(argv, *a, **kw):
+            if "images" in argv and "-q" in argv:
+                return _Proc(0, stdout=next(ids, ""))
+            return _Proc(0)
+
+        with patch.object(dm, "is_registry_reachable", return_value=True), \
+             patch.object(dm, "_get_local_repo_digest", return_value=None), \
+             patch.object(dm, "_get_remote_digest_candidates", return_value=set()), \
+             patch.object(dm, "_pull_image_with_fallback", side_effect=one_ok_then_transient), \
+             patch.object(dm, "prune_superseded_tags") as prune, \
+             patch.object(dm, "_save_last_pull_info"), \
+             patch.object(dm.subprocess, "run", side_effect=fake_run):
+            changed = dm.check_for_updates(log=lambda _m: None)
+        self.assertTrue(changed, "bytes really did change — the guard, not the trigger, is under test")
+        prune.assert_not_called()
+
+    def test_a_missing_release_also_blocks_the_prune(self):
+        # PULL_MISSING and PULL_TRANSIENT are different diagnoses but identical
+        # here: the new bytes did not arrive, so the old ones must stay.
+        def one_ok_then_missing(image, i, total, log=None, attempts=3, _s=[False]):
+            if not _s[0]:
+                _s[0] = True
+                return dm.PULL_OK
+            return dm.PULL_MISSING
+
+        ids = iter(["", "sha256:new"] + ["sha256:same", "sha256:same"] * 8)
+
+        def fake_run(argv, *a, **kw):
+            if "images" in argv and "-q" in argv:
+                return _Proc(0, stdout=next(ids, ""))
+            return _Proc(0)
+
+        with patch.object(dm, "is_registry_reachable", return_value=True), \
+             patch.object(dm, "_get_local_repo_digest", return_value=None), \
+             patch.object(dm, "_get_remote_digest_candidates", return_value=set()), \
+             patch.object(dm, "_pull_image_with_fallback", side_effect=one_ok_then_missing), \
+             patch.object(dm, "prune_superseded_tags") as prune, \
+             patch.object(dm, "_save_last_pull_info"), \
+             patch.object(dm.subprocess, "run", side_effect=fake_run):
+            dm.check_for_updates(log=lambda _m: None, missing_out=[])
+        prune.assert_not_called()
+
+    def test_an_explicit_image_tag_pin_disables_the_prune_entirely(self):
+        """EDUBOTICS_IMAGE_TAG is the operator's one-variable rollback (set in
+        /etc/edubotics/.env, which is also the unit's EnvironmentFile). Under a
+        pin, the tags the prune would remove are exactly the ones the operator
+        needs to roll FORWARD to — untagging them turns a reversible pin into a
+        one-way trip over a 5-6 GB re-pull. Whoever manages tags by hand owns the
+        disk too."""
+        rec = _Recorder(_Proc(0))
+        rec.when(lambda a: "images" in a, _Proc(0, stdout="2.13.0\n2.12.0\n"))
+        with patch.dict(os.environ, {"EDUBOTICS_IMAGE_TAG": "2.13.0"}), \
+             patch.object(dm.subprocess, "run", rec), \
+             patch.object(dm, "IMAGE_TAG", "2.13.0"):
+            self.assertEqual(dm.prune_superseded_tags(), 0)
+        self.assertFalse([a for a in rec.argvs() if "rm" in a])
+
     def test_check_for_updates_does_not_prune_when_nothing_changed(self):
         # Every image already current → no pull, no new tags, nothing
         # superseded. Pruning anyway would be pointless eMMC churn on every
@@ -723,7 +870,8 @@ class TestPrePull(_LifecycleBase):
         seen = []
         with patch.object(dm, "_image_is_current", return_value=False), \
              patch.object(dm, "_pull_image_with_fallback",
-                          side_effect=lambda img, i, t, log=None: seen.append(img) or dm.PULL_OK), \
+                          side_effect=lambda img, i, t, log=None, attempts=3:
+                          seen.append(img) or dm.PULL_OK), \
              patch.object(dm.subprocess, "run", _Recorder(_Proc(0))):
             self.assertTrue(dm.start_robot_tier())
         # Both robot-tier images, through the fallback-capable path...
@@ -731,6 +879,41 @@ class TestPrePull(_LifecycleBase):
         self.assertIn(dm.IMAGE_PHYSICAL_AI_SERVER, seen)
         # ...and never the manager (--no-deps leaves it running).
         self.assertNotIn(dm.IMAGE_PHYSICAL_AI_MANAGER, seen)
+
+    def test_the_interactive_start_path_pulls_with_a_one_shot_budget(self):
+        """M6. „Umgebung starten" runs on the HTTP request thread that holds the
+        agent's _lifecycle_lock, so its pull budget is what bounds how long
+        „Stoppen" (and every other wizard control) can only answer 503. At the
+        patient default a GHCR-degraded school burns 3×600 s on GHCR plus 2×600 s
+        on Hub PER image before `up` even starts. One shot per registry keeps the
+        worst case survivable; `_compose_up` still self-heals an absent image.
+        """
+        budgets = []
+        with patch.object(dm, "_image_is_current", return_value=False), \
+             patch.object(dm, "_pull_image_with_fallback",
+                          side_effect=lambda img, i, t, log=None, attempts=3:
+                          budgets.append(attempts) or dm.PULL_OK), \
+             patch.object(dm.subprocess, "run", _Recorder(_Proc(0))):
+            dm.start_robot_tier()
+        self.assertTrue(budgets)
+        self.assertEqual(set(budgets), {1}, budgets)
+
+    def test_the_update_path_keeps_the_patient_budget(self):
+        """The other half of the trade: on /update nobody is watching a lock, so
+        retrying is the right call — do not let the start-path cap leak here."""
+        budgets = []
+        with patch.object(dm, "is_registry_reachable", return_value=True), \
+             patch.object(dm, "_get_local_repo_digest", return_value=None), \
+             patch.object(dm, "_get_remote_digest_candidates", return_value=set()), \
+             patch.object(dm, "_pull_image_with_fallback",
+                          side_effect=lambda img, i, t, log=None, attempts=3:
+                          budgets.append(attempts) or dm.PULL_OK), \
+             patch.object(dm, "prune_superseded_tags"), \
+             patch.object(dm, "_save_last_pull_info"), \
+             patch.object(dm.subprocess, "run", _Recorder(_Proc(0))):
+            dm.check_for_updates()
+        self.assertTrue(budgets)
+        self.assertEqual(set(budgets), {3}, budgets)
 
     def test_robot_tier_skips_the_pull_when_images_are_current(self):
         with patch.object(dm, "_image_is_current", return_value=True), \
@@ -789,7 +972,8 @@ class TestPrePull(_LifecycleBase):
         with patch.object(dm, "_image_present_locally", return_value=False), \
              patch.object(dm, "_image_is_current", return_value=False), \
              patch.object(dm, "_pull_image_with_fallback",
-                          side_effect=lambda img, i, t, log=None: seen.append(img) or dm.PULL_OK), \
+                          side_effect=lambda img, i, t, log=None, attempts=3:
+                          seen.append(img) or dm.PULL_OK), \
              patch.object(dm.subprocess, "run", _Recorder(_Proc(0))):
             self.assertTrue(dm.start_manager())
         self.assertEqual(seen, [dm.IMAGE_PHYSICAL_AI_MANAGER])

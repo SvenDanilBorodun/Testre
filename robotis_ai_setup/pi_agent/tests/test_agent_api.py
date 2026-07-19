@@ -263,6 +263,107 @@ class TestRouting(_ServerBase):
         self.assertEqual(code, 400)
         self.assertIn("Kein Kameragerät", payload["message"])
 
+    def test_a_foreign_origin_cannot_force_a_cache_bypass(self):
+        """MINOR 8, cheap layer. A no-cors GET carries no Origin, so an ABSENT
+        header proves nothing and stays allowed (the header-less curl path). But
+        a PRESENT, foreign Origin is a cross-site caller with no business
+        bypassing the poll-storm cache: it silently gets the cached answer."""
+        upd = {"version": "9.9.9", "download_url": "u", "sha256": ""}
+        with patch.object(agent.update_checker, "check_for_agent_update",
+                          return_value=upd) as chk:
+            self._get("/update/check")  # populate the cache (allowed, no Origin)
+            req = urllib.request.Request(self._url("/update/check?force=1"))
+            req.add_header("Origin", "http://evil.com")
+            with urllib.request.urlopen(req, timeout=5) as r:
+                self.assertEqual(r.status, 200)
+                # Still answered — only the refresh is suppressed.
+                self.assertTrue(json.loads(r.read().decode())["update_available"])
+        self.assertEqual(chk.call_count, 1)
+
+
+# ── M6: bounded _lifecycle_lock acquire on mutating endpoints ────────────────
+
+
+class TestLifecycleLockIsBounded(_ServerBase):
+    """„Umgebung starten" holds ``_lifecycle_lock`` across a resilient multi-GB
+    image pull on the HTTP request thread. Every OTHER mutating endpoint used to
+    take the same lock with a blocking ``with``, and nginx's proxy_read_timeout
+    is 3600 s — so no 504 rescued them either. The whole wizard simply stopped
+    answering for as long as the pull ran, with only the SSE Protokoll alive.
+    """
+
+    def _hold_lock(self):
+        """Hold _lifecycle_lock for the duration of the test, like a running
+        „Umgebung starten" would. The wait is shortened so the suite does not pay
+        the real 1 s per assertion; the default itself is pinned separately."""
+        p = patch.object(agent, "_LIFECYCLE_LOCK_WAIT_S", 0.05)
+        p.start()
+        self.addCleanup(p.stop)
+        self.assertTrue(self.app._lifecycle_lock.acquire(timeout=1))
+        self.addCleanup(self.app._lifecycle_lock.release)
+
+    def test_the_wait_is_short_enough_that_a_student_sees_an_answer(self):
+        # Bounded AND small: this is the ceiling on how long every wizard control
+        # can appear frozen while another operation holds the lock.
+        self.assertLessEqual(agent._LIFECYCLE_LOCK_WAIT_S, 5.0)
+        self.assertGreater(agent._LIFECYCLE_LOCK_WAIT_S, 0)
+
+    def test_the_wait_outlasts_a_legitimate_preview_handoff(self):
+        """stream_camera_preview holds _lifecycle_lock across its
+        `_preview_cond.wait(...)` while a superseded preview loop releases its
+        VideoCapture — up to _PREVIEW_HANDOFF_TIMEOUT_S. A shorter wait here
+        would turn that ordinary handoff into a spurious 503 on „Stoppen", so
+        the relationship between the two constants is load-bearing.
+
+        (The lock ORDER is unaffected and stays one-directional: a handler takes
+        _lifecycle_lock while holding nothing, then _preview_lock; the preview
+        takes _preview_lock first and only ever tries _lifecycle_lock
+        NON-blockingly — which is what makes the inversion deadlock-free.)"""
+        self.assertGreater(agent._LIFECYCLE_LOCK_WAIT_S,
+                           agent._PREVIEW_HANDOFF_TIMEOUT_S)
+
+    def test_stop_answers_503_instead_of_blocking_behind_a_start(self):
+        # THE case: „Stoppen" is what a student presses when a start is taking
+        # too long. It must never wait behind the operation it interrupts.
+        self._hold_lock()
+        with patch.object(agent.docker_manager, "stop_robot_tier",
+                          return_value=True) as stop:
+            started = time.monotonic()
+            code, payload = self._post("/environment/stop", origin=None)
+        self.assertEqual(code, 503)
+        self.assertLess(time.monotonic() - started, 4.0)
+        stop.assert_not_called()
+        self.assertIn("bitte", payload["message"].lower())
+
+    def test_every_mutating_lifecycle_endpoint_fast_fails(self):
+        self._hold_lock()
+        for path, body in (
+            ("/environment/stop", {}),
+            ("/environment/start", {}),
+            ("/scan-arms", {}),
+            ("/cameras/roles", {"cameras": [{"path": "/dev/video0", "role": "scene"}]}),
+            ("/hf-token", {"token": "hf_x"}),
+            ("/factory-reset", {"confirm": True, "confirm_again": True}),
+        ):
+            with self.subTest(path=path):
+                code, payload = self._post(path, body, origin=None)
+                self.assertEqual(code, 503, payload)
+                self.assertFalse(payload["ok"])
+
+    def test_the_lock_is_released_again_on_every_path(self):
+        # try/finally, not `with` — a handler that returns early (or raises)
+        # inside the guarded block must not strand the lock and wedge the wizard.
+        with patch.object(agent.docker_manager, "stop_robot_tier", return_value=True):
+            self.assertEqual(self._post("/environment/stop", origin=None)[0], 200)
+        # An early return from INSIDE the guarded region (no arms scanned).
+        self.assertEqual(self._post("/environment/start", origin=None)[0], 400)
+        # A raise from inside it.
+        with patch.object(agent.config_generator, "upsert_env_var",
+                          side_effect=RuntimeError("disk full")):
+            self.assertEqual(self._post("/hf-token", {"token": "x"}, origin=None)[0], 500)
+        self.assertTrue(self.app._lifecycle_lock.acquire(timeout=1))
+        self.app._lifecycle_lock.release()
+
 
 # ── camera device allowlist (SSRF guard, pure) ───────────────────────────────
 
@@ -303,6 +404,16 @@ class TestBootRealignsImageTag(unittest.TestCase):
         self.app = agent.AgentApp()
         self.app.env_file = self.env
         self.app._log = lambda _m: None
+        # boot() now RENEWS drifted systemd units (M9) — a root write to
+        # /etc/systemd/system + `systemctl daemon-reload`. Point the unit dir
+        # into the sandbox so `_drifted_units` can never see (and this class can
+        # never overwrite) a real unit if the suite is ever run on a provisioned
+        # Pi. Same reasoning as the prune_superseded_tags note in
+        # test_docker_manager: mocked everywhere it is harmless, destructive
+        # exactly where it is not.
+        p = patch.object(agent, "SYSTEMD_UNIT_DIR", os.path.join(self.dir, "no-units"))
+        p.start()
+        self.addCleanup(p.stop)
 
     def _boot(self):
         # _pull_images_after_self_update is mocked here and exercised on its own
@@ -490,6 +601,54 @@ class TestBootRealignsImageTag(unittest.TestCase):
             self.app.boot()  # must not raise
         mgr.assert_called_once()
 
+    # ── boot-path robustness (a crash here is a 5 s systemd restart loop) ─────
+
+    def test_a_taken_loopback_port_never_crash_loops_the_unit(self):
+        """`ThreadingHTTPServer(...)` raising OSError used to escape boot() and
+        exit the process — which under Restart=always + RestartSec=5 is a 5 s
+        crash-loop whose most likely cause (a stale agent still holding :8769)
+        keeps it going. The loopback listener is also the less load-bearing of
+        the two: the browser reaches the wizard through the ros_net GATEWAY
+        listener, which retries forever on its own."""
+        self._write('IMAGE_TAG="9.9.9"\n')
+        logs = []
+        self.app._log = logs.append
+        with patch.object(agent, "IMAGE_TAG", "9.9.9"), \
+             patch.object(agent, "ThreadingHTTPServer",
+                          side_effect=OSError("[Errno 98] Address already in use")), \
+             patch.object(agent.docker_manager, "start_manager",
+                          return_value=True) as mgr, \
+             patch.object(agent.threading, "Thread"):
+            self.app.boot()  # must not raise
+        text = "\n".join(logs)
+        self.assertIn("[WARNUNG]", text)
+        self.assertIn("8769", text)
+        self.assertIsNone(self.app._loopback_httpd)
+        mgr.assert_called_once()   # boot carried on
+        self.assertTrue(self.app._ready.is_set())
+
+    def test_a_failed_env_seed_is_reported_loudly_and_twice(self):
+        """Without a .env, `_compose` omits --env-file and compose interpolates
+        every ${REGISTRY}/${IMAGE_TAG} to the empty string — the manager `up`
+        then dies on an unpullable ref like `/physical-ai-manager-opi:`, which
+        reads as a registry fault. One unprefixed line 30 lines up in the
+        Protokoll was the only symptom. Say [FEHLER], name the file, and repeat
+        it next to the `up` it dooms."""
+        self.assertFalse(os.path.exists(self.env))  # a freshly flashed Pi
+        logs = []
+        self.app._log = logs.append
+        with patch.object(agent.config_generator, "generate_cloud_only_env",
+                          side_effect=OSError("read-only file system")), \
+             patch.object(agent.docker_manager, "start_manager", return_value=True), \
+             patch.object(self.app, "start_loopback"), \
+             patch.object(agent.threading, "Thread"):
+            self.app.boot()  # must not raise
+        text = "\n".join(logs)
+        self.assertEqual(text.count("[FEHLER]"), 2, text)
+        self.assertIn(self.env, text)
+        # And it must not send the operator to the registry.
+        self.assertIn("KEIN Registry", text)
+
 
 # ── C1: the post-self-update resilient pull itself ───────────────────────────
 
@@ -614,14 +773,29 @@ class TestSystemFilesVersionCheck(unittest.TestCase):
             with open(os.path.join(self.installed, unit), "wb") as f:
                 f.write(data)
 
-    def _check(self, stamp_contents=None, app_version="2.14.0"):
+    def _check(self, stamp_contents=None, app_version="2.14.0", renew=True):
+        """Run the drift check. ``renew=False`` models a Pi where the agent could
+        NOT repair the units itself (read-only /etc, a hand-mounted unit dir) —
+        the only state in which the advisory banner still exists."""
         if stamp_contents is not None:
             with open(self.stamp, "w", encoding="utf-8") as f:
                 f.write(stamp_contents)
-        with patch.object(agent, "SYSTEM_FILES_VERSION_FILE", self.stamp), \
-             patch.object(agent, "SYSTEMD_UNIT_DIR", self.installed), \
-             patch.object(agent, "APP_VERSION", app_version):
+        stack = [
+            patch.object(agent, "SYSTEM_FILES_VERSION_FILE", self.stamp),
+            patch.object(agent, "SYSTEMD_UNIT_DIR", self.installed),
+            patch.object(agent, "APP_VERSION", app_version),
+            # Never let the real `systemctl daemon-reload` reach the test host.
+            patch.object(agent.subprocess, "run", MagicMock()),
+        ]
+        if not renew:
+            stack.append(patch.object(self.app, "_renew_system_units", return_value=False))
+        for p in stack:
+            p.start()
+        try:
             self.app._check_system_files_version()
+        finally:
+            for p in reversed(stack):
+                p.stop()
         return "\n".join(self.logs)
 
     def test_a_self_updated_pi_whose_units_match_is_silent(self):
@@ -636,9 +810,100 @@ class TestSystemFilesVersionCheck(unittest.TestCase):
         self.assertFalse(self.app._system_files_stale)
         self.assertIsNone(self.app._system_files_version)
 
-    def test_drifted_units_warn_in_german_and_name_the_unit(self):
+    def test_drifted_units_are_repaired_in_place_and_no_banner_is_raised(self):
+        """M9. Every fielded Pi was provisioned before this release, and this
+        release CHANGED edubotics-pi.service (EnvironmentFile=-, ExecStartPre) —
+        so the byte-compare drifts 100 % of the fleet the moment it self-updates.
+        A pure banner would therefore be permanent, and its remedy
+        („sudo ./setup.sh aus dem Quellordner") is one a classroom teacher cannot
+        perform. The agent runs as root and already holds the verified bytes, so
+        it installs them itself; only what it CANNOT repair reaches the banner.
+        """
         self._install_units(drift=True)
         text = self._check(stamp_contents="2.13.0\n", app_version="2.14.0")
+        self.assertNotIn("[WARNUNG]", text)
+        self.assertFalse(self.app._system_files_stale)
+        self.assertIn("erneuert", text)          # says what it did
+        self.assertIn("nächsten Start", text)    # and when it takes effect
+        # The installed units are now byte-identical to the shipped ones, so a
+        # re-check on the next boot is silent.
+        with patch.object(agent, "SYSTEMD_UNIT_DIR", self.installed):
+            self.assertEqual(self.app._drifted_units(), [])
+
+    def test_the_repair_writes_the_shipped_bytes_0644_and_keeps_one_backup(self):
+        self._install_units(drift=True)
+        self._check(stamp_contents="2.13.0\n")
+        for unit in agent.SYSTEMD_UNIT_NAMES:
+            dst = os.path.join(self.installed, unit)
+            with open(os.path.join(self.shipped_dir, unit), "rb") as f:
+                shipped = f.read()
+            with open(dst, "rb") as f:
+                self.assertEqual(f.read(), shipped, unit)
+            # setup.sh installs 0644; the unit runs with UMask=0077, so a fresh
+            # file would be 0600 without the explicit chmod.
+            self.assertEqual(os.stat(dst).st_mode & 0o777, 0o644, unit)
+            # A hand-edited unit must be recoverable.
+            self.assertTrue(os.path.isfile(dst + ".edubotics-bak"), unit)
+            # No temp file left behind (systemd would ignore it, but still).
+            self.assertFalse(os.path.exists(dst + ".edubotics-tmp"), unit)
+
+    def test_the_repair_reloads_systemd_but_never_restarts_the_agent(self):
+        """daemon-reload makes systemd re-read the files; the new ExecStartPre
+        takes effect on the NEXT start. Restarting ourselves from inside boot()
+        to adopt a unit change would risk a loop for no gain."""
+        self._install_units(drift=True)
+        run = MagicMock()
+        with patch.object(agent, "SYSTEM_FILES_VERSION_FILE", self.stamp), \
+             patch.object(agent, "SYSTEMD_UNIT_DIR", self.installed), \
+             patch.object(agent.subprocess, "run", run):
+            self.app._check_system_files_version()
+        argvs = [c.args[0] for c in run.call_args_list if c.args]
+        self.assertIn(["systemctl", "daemon-reload"], argvs)
+        for argv in argvs:
+            self.assertNotIn("restart", argv, argv)
+            self.assertNotIn("enable", argv, argv)
+
+    def test_a_failed_daemon_reload_still_counts_as_repaired(self):
+        # The FILES are the durable half — systemd re-parses every unit at boot
+        # anyway. Never re-raise a permanent banner over a reload hiccup.
+        self._install_units(drift=True)
+        with patch.object(agent, "SYSTEM_FILES_VERSION_FILE", self.stamp), \
+             patch.object(agent, "SYSTEMD_UNIT_DIR", self.installed), \
+             patch.object(agent.subprocess, "run",
+                          side_effect=FileNotFoundError("no systemctl")):
+            self.app._check_system_files_version()
+        self.assertFalse(self.app._system_files_stale)
+
+    def test_the_repair_never_installs_a_unit_that_was_not_already_there(self):
+        """`_drifted_units` skips a unit it cannot READ on both sides, so an
+        absent installed unit is never reported and therefore never written.
+        That is what keeps this out of `systemctl enable` territory: the agent
+        only ever REPLACES a file setup.sh already put there."""
+        text = self._check(stamp_contents="2.13.0\n")  # nothing installed
+        self.assertEqual(text, "")
+        for unit in agent.SYSTEMD_UNIT_NAMES:
+            self.assertFalse(os.path.exists(os.path.join(self.installed, unit)), unit)
+
+    def test_an_unwritable_unit_dir_degrades_to_the_banner_not_a_crash(self):
+        """A read-only /etc (or a hand-mounted unit dir) is the one state where
+        the advisory banner still earns its place. It must degrade to that, never
+        raise out of boot() — and it must leave no half-written unit behind."""
+        self._install_units(drift=True)
+        with patch.object(agent, "SYSTEM_FILES_VERSION_FILE", self.stamp), \
+             patch.object(agent, "SYSTEMD_UNIT_DIR", self.installed), \
+             patch.object(agent.subprocess, "run", MagicMock()), \
+             patch.object(agent.os, "replace",
+                          side_effect=OSError("read-only file system")):
+            self.app._check_system_files_version()  # must not raise
+        self.assertTrue(self.app._system_files_stale)
+        self.assertIn("[WARNUNG]", "\n".join(self.logs))
+        for unit in agent.SYSTEMD_UNIT_NAMES:
+            dst = os.path.join(self.installed, unit)
+            self.assertFalse(os.path.exists(dst + ".edubotics-tmp"), unit)
+
+    def test_drifted_units_warn_in_german_and_name_the_unit(self):
+        self._install_units(drift=True)
+        text = self._check(stamp_contents="2.13.0\n", app_version="2.14.0", renew=False)
         self.assertIn("[WARNUNG]", text)
         self.assertIn("edubotics-pi.service", text)  # WHICH file drifted
         self.assertIn("2.13.0", text)  # where the on-disk files came from
@@ -652,7 +917,7 @@ class TestSystemFilesVersionCheck(unittest.TestCase):
         same eMMC, and re-running setup.sh fixes the units while leaving the
         Docker volumes alone. This is the whole reason the banner was reworked."""
         self._install_units(drift=True)
-        text = self._check(stamp_contents="2.13.0\n", app_version="2.14.0")
+        text = self._check(stamp_contents="2.13.0\n", app_version="2.14.0", renew=False)
         for destructive in ("neu aufsetzen", "neu bespielen", "SD-Karte", "eMMC",
                             "formatieren", "löschen"):
             self.assertNotIn(destructive, text, f"destructive remedy in banner: {destructive}")
@@ -662,7 +927,7 @@ class TestSystemFilesVersionCheck(unittest.TestCase):
     def test_german_umlauts_are_literal(self):
         # german-strings-lint scans [WARNUNG] lines for ae/oe/ue transliteration.
         self._install_units(drift=True)
-        text = self._check(stamp_contents="2.13.0\n")
+        text = self._check(stamp_contents="2.13.0\n", renew=False)
         for bad in ("Aenderung", "ueber", "koennen", "ausfuehren", "Datensaetze"):
             self.assertNotIn(bad, text)
         self.assertIn("ausführen", text)
@@ -671,7 +936,7 @@ class TestSystemFilesVersionCheck(unittest.TestCase):
         # A pre-stamp Pi can be genuinely drifted. The evidence is the unit
         # bytes, so the warning stands; it just cannot name an origin version.
         self._install_units(drift=True)
-        text = self._check(stamp_contents=None)
+        text = self._check(stamp_contents=None, renew=False)
         self.assertIn("[WARNUNG]", text)
         self.assertTrue(self.app._system_files_stale)
         self.assertIsNone(self.app._system_files_version)
@@ -680,7 +945,7 @@ class TestSystemFilesVersionCheck(unittest.TestCase):
     def test_blank_stamp_is_treated_as_absent(self):
         # A truncated write must not be read as the literal version "".
         self._install_units(drift=True)
-        self._check(stamp_contents="   \n")
+        self._check(stamp_contents="   \n", renew=False)
         self.assertIsNone(self.app._system_files_version)
 
     def test_uninstalled_units_prove_nothing_and_stay_silent(self):
@@ -699,7 +964,7 @@ class TestSystemFilesVersionCheck(unittest.TestCase):
 
     def test_status_exposes_the_drift_for_the_system_tab(self):
         self._install_units(drift=True)
-        self._check(stamp_contents="2.13.0\n", app_version="2.14.0")
+        self._check(stamp_contents="2.13.0\n", app_version="2.14.0", renew=False)
         with patch.object(agent.docker_manager, "get_container_status",
                           return_value={}), \
              patch.object(agent.config_generator, "read_env_var", return_value=""), \
@@ -1151,6 +1416,46 @@ class TestUpdateCheck(unittest.TestCase):
             self.app.handle_update_check()          # populates cache
             self.app.handle_update_check(force=True)  # bypasses it
         self.assertEqual(chk.call_count, 2)
+
+    def test_a_force_storm_is_rate_floored_to_one_cloud_call(self):
+        """MINOR 8. `?force=1` skipped UPDATE_CHECK_TTL_S entirely with no rate
+        limit, and GETs are not Origin-gated (a no-cors cross-origin GET does not
+        even carry an Origin header). Any page a student opens on the school LAN
+        could therefore loop the endpoint, each request spawning a
+        ThreadingHTTPServer thread that holds a 5 s outbound HTTPS call —
+        defeating the poll-storm cache CLAUDE.md names as the guard and turning
+        the Pi into a small amplifier against the cloud API.
+        """
+        upd = {"version": "9.9.9", "download_url": "http://x/agent.tgz", "sha256": ""}
+        with patch.object(agent.update_checker, "check_for_agent_update",
+                          return_value=upd) as chk:
+            for _ in range(50):
+                code, payload = self.app.handle_update_check(force=True)
+        self.assertEqual(code, 200)
+        # Still a correct answer, just not 50 cloud round-trips.
+        self.assertTrue(payload["update_available"])
+        self.assertEqual(chk.call_count, 1)
+
+    def test_a_manual_recheck_after_the_floor_is_honoured(self):
+        # The floor suppresses the network call, never the feature: once the
+        # interval has passed a human's re-check refreshes for real.
+        upd = {"version": "9.9.9", "download_url": "http://x/agent.tgz", "sha256": ""}
+        with patch.object(agent.update_checker, "check_for_agent_update",
+                          return_value=upd) as chk:
+            self.app.handle_update_check(force=True)
+            self.app._update_check_forced_at -= (
+                agent._UPDATE_CHECK_FORCE_MIN_INTERVAL_S + 1)
+            self.app.handle_update_check(force=True)
+        self.assertEqual(chk.call_count, 2)
+
+    def test_never_raises_under_the_floor(self):
+        # Constraint: handle_update_check must NEVER raise, on any path.
+        with patch.object(agent.update_checker, "check_for_agent_update",
+                          side_effect=RuntimeError("cloud down")):
+            for _ in range(3):
+                code, payload = self.app.handle_update_check(force=True)
+        self.assertEqual(code, 200)
+        self.assertFalse(payload["update_available"])
 
 
 # ── Netzwerk-Check ───────────────────────────────────────────────────────────

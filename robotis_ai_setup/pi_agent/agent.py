@@ -27,10 +27,18 @@ Two lifecycle laws (deploy plan §5) shape everything below:
      HTTP sockets + phone/preview receivers and leaves the containers alone.
 
 Binding (deploy plan §5 proxy mechanics): the API binds ``127.0.0.1:8769`` AND
-the docker ``ros_net`` gateway IP — NEVER the LAN NIC. The gateway interface
-only exists once compose has created ``ros_net``, so the gateway listener is
-bound AFTER the boot-time manager ``up`` and rebound whenever the interface
-comes back (interface-gone is a rebind trigger, not a fatal error).
+the docker ``ros_net`` gateway IP — NEVER the LAN NIC. BOTH listeners start
+BEFORE the boot-time manager ``up`` (and before the post-self-update image pull),
+because nginx proxies ``/api/system`` to the GATEWAY ip — a listener started
+after a multi-GB pull would 502 every browser for the whole download. The gateway
+binder is a LOOP, not a one-shot: it re-reads the gateway ip every
+``_GATEWAY_BIND_INTERVAL_S`` and simply no-ops while ``ros_net`` does not exist
+yet, then binds the moment it appears (immediately on a post-self-update boot,
+where the manager container outlived the agent restart; after ``start_manager``
+on a genuinely first boot). Interface-gone is a rebind trigger, not a fatal
+error. The React side still needs its backoff-retried ``/api/system/status``
+probe because that first-boot window — agent up, ``ros_net`` not yet created —
+is real, so a one-shot probe can land on a 502.
 
 Security (deploy plan §8): with open LAN binding and no auth, LAN peers can
 drive any arm (the accepted risk). The one mitigation here is a Host/Origin
@@ -126,6 +134,21 @@ _LOG_RING_MAXLEN = 800
 # no per-rig override.
 UPDATE_CHECK_TTL_S = 600
 
+# Floor between two FORCED (cache-bypassing) /update/check refreshes. GETs are
+# not Origin-gated by design, and a no-cors cross-origin GET carries no Origin
+# header at all — so the allowlist cannot be the only guard here. Without a
+# floor, `?force=1` skips UPDATE_CHECK_TTL_S entirely: any page a student opens
+# on the school LAN can loop `fetch('http://edubotics-NN.local/api/system/
+# update/check?force=1', {mode:'no-cors'})`, and each request spawns a
+# ThreadingHTTPServer thread holding a 5 s outbound HTTPS call — defeating the
+# poll-storm cache and turning the Pi into a small amplifier against the cloud
+# API. The floor bounds forced refreshes to one per interval no matter who asks,
+# while leaving a human's in-wizard manual re-check instant (nothing in the SPA
+# passes `force` today; PiUpdateGate cache-busts with `?_=<ts>`). Plain constant,
+# like UPDATE_CHECK_TTL_S — an EDUBOTICS_* env NAME would trip
+# ci.yml::env-forwarding-guard.
+_UPDATE_CHECK_FORCE_MIN_INTERVAL_S = 30
+
 # TTL for COMPLETED/FAILED update-job records in the in-memory job map — the
 # map would otherwise grow unbounded over a long agent uptime (one dict per
 # /update, never removed). Swept on every new /update (mirroring the
@@ -138,6 +161,23 @@ _UPDATE_JOB_TTL_S = 6 * 3600
 # its VideoCapture before giving up with a German 503. The old loop exits
 # within roughly one frame read (~50 ms + camera latency), so this is generous.
 _PREVIEW_HANDOFF_TIMEOUT_S = 2.0
+
+# How long a MUTATING wizard request waits for _lifecycle_lock before answering
+# 503. Bounded on purpose: „Umgebung starten" holds the lock across a resilient
+# multi-GB image pull, so a blocking acquire would make „Stoppen", „Arme
+# scannen", the camera roles, the HF token and Factory Reset hang for as long as
+# that pull runs — with nginx's proxy_read_timeout at 3600 s, no 504 rescues
+# them, so every wizard control simply stops answering. A distinguishing 503 is
+# what _busy_updating already gives an urgent request during an update; the same
+# reasoning applies to every other long lock holder. Short enough that the
+# student sees an answer, long enough to ride out the LEGITIMATE brief holders.
+#
+# Derived from _PREVIEW_HANDOFF_TIMEOUT_S, not picked: stream_camera_preview
+# holds _lifecycle_lock across its `_preview_cond.wait(...)` while a superseded
+# preview loop releases its VideoCapture — up to that timeout. A shorter wait
+# here would turn an ordinary preview handoff into a spurious 503 on „Stoppen".
+# Keep this strictly GREATER than the handoff timeout (pinned by a test).
+_LIFECYCLE_LOCK_WAIT_S = _PREVIEW_HANDOFF_TIMEOUT_S + 1.0
 
 # Netzwerk-Check probe hosts. GHCR + Docker Hub break image pulls; huggingface.co
 # breaks dataset upload / model download; the cloud API host breaks login/updates.
@@ -416,6 +456,12 @@ class AgentApp:
         # /version fetch — see handle_update_check + UPDATE_CHECK_TTL_S.
         self._update_check_lock = threading.Lock()
         self._update_check_cache: Optional[tuple] = None
+        # monotonic timestamp of the last honoured FORCED refresh; guarded by
+        # _update_check_lock. -inf, not 0.0: time.monotonic() is time since
+        # SYSTEM boot on Linux, so 0.0 would silently swallow the first forced
+        # re-check whenever the agent starts within the interval of boot.
+        # See _UPDATE_CHECK_FORCE_MIN_INTERVAL_S.
+        self._update_check_forced_at: float = float("-inf")
 
         # Phone-camera receiver (preview-only backend; OPEN — no ROS republish).
         # _phone_lock guards the check-then-set on _phone_server so two enable
@@ -667,6 +713,30 @@ class AgentApp:
                      "message": "Aktualisierung läuft — bitte warten, bis das "
                                 "Update abgeschlossen ist."}
 
+    def _acquire_lifecycle(self) -> bool:
+        """Bounded acquire of ``_lifecycle_lock`` for a wizard REQUEST thread.
+
+        Never block indefinitely on this lock from an HTTP handler. The lock is
+        held across „Umgebung starten"'s resilient image pull and across the
+        whole update job — minutes to tens of minutes — and the manager's nginx
+        gives the browser an hour before it would time out. A blocking acquire
+        therefore does not "queue" the request, it kills the wizard: „Stoppen"
+        (the one control a student reaches for when a start is taking too long)
+        would wait behind the very operation it is meant to interrupt.
+
+        Callers MUST pair a True return with ``try: … finally: release()``.
+        Background workers (``_run_update_job``) keep the blocking ``with`` —
+        nothing is waiting on them and giving up there would abort an update.
+        """
+        return self._lifecycle_lock.acquire(timeout=_LIFECYCLE_LOCK_WAIT_S)
+
+    @staticmethod
+    def _busy_lifecycle() -> "tuple[int, dict]":
+        """503 for a mutating endpoint that could not take ``_lifecycle_lock``."""
+        return 503, {"ok": False,
+                     "message": "Ein anderer Vorgang läuft gerade — bitte kurz "
+                                "warten und erneut versuchen."}
+
     # ── POST: /scan-arms ─────────────────────────────────────────────────────
 
     def handle_scan_arms(self, body: dict) -> "tuple[int, dict]":
@@ -683,7 +753,9 @@ class AgentApp:
         if self._update_in_flight():
             return self._busy_updating()
         force = bool(body.get("force"))
-        with self._lifecycle_lock:
+        if not self._acquire_lifecycle():
+            return self._busy_lifecycle()
+        try:
             self.stop_active_previews()
             docker_manager.ensure_environment_stopped(log=self._log)
 
@@ -727,6 +799,8 @@ class AgentApp:
             return 200, {"ok": True, "leader": leader.serial_path,
                          "follower": follower.serial_path,
                          "message": "Beide Arme erkannt und gespeichert."}
+        finally:
+            self._lifecycle_lock.release()
 
     # ── GET: /cameras/scan ───────────────────────────────────────────────────
 
@@ -763,7 +837,9 @@ class AgentApp:
                 return 400, {"ok": False,
                              "message": f"Ungültige Rolle für {path} (nur Greifer/Szene)."}
             cameras.append(CameraDevice(path=path, role=role, name=str(path).split("/")[-1]))
-        with self._lifecycle_lock:
+        if not self._acquire_lifecycle():
+            return self._busy_lifecycle()
+        try:
             self._hardware.cameras = cameras
             # Carry the CURRENT session mode forward (the set_leader_mode
             # prev_val pattern): a camera-role edit during a live follower-only
@@ -780,6 +856,8 @@ class AgentApp:
                 # start. Only a genuine write failure (disk) surfaces here.
                 return 500, {"ok": False,
                              "message": f"Konfiguration konnte nicht gespeichert werden: {e}"}
+        finally:
+            self._lifecycle_lock.release()
         return 200, {"ok": True, "cameras": [{"path": c.path, "role": c.role} for c in cameras],
                      "message": f"{len(cameras)} Kamera(s) zugeordnet."}
 
@@ -837,14 +915,17 @@ class AgentApp:
         token = body.get("token")
         if token is None:
             return 400, {"ok": False, "message": "Kein Token angegeben."}
+        # Serialize with every other .env writer (scan/roles/start): the atomic
+        # os.replace is safe, but two concurrent writers could still race the
+        # token against a regenerate that carries it forward.
+        if not self._acquire_lifecycle():
+            return self._busy_lifecycle()
         try:
-            # Serialize with every other .env writer (scan/roles/start): the
-            # atomic os.replace is safe, but two concurrent writers could still
-            # race the token against a regenerate that carries it forward.
-            with self._lifecycle_lock:
-                config_generator.upsert_env_var("HF_TOKEN", str(token), self.env_file)
+            config_generator.upsert_env_var("HF_TOKEN", str(token), self.env_file)
         except Exception as e:  # noqa: BLE001
             return 500, {"ok": False, "message": f"Token konnte nicht gespeichert werden: {e}"}
+        finally:
+            self._lifecycle_lock.release()
         if str(token).strip():
             return 200, {"ok": True, "saved": True, "message": "Token gespeichert."}
         return 200, {"ok": True, "saved": False, "message": "Token entfernt."}
@@ -861,7 +942,9 @@ class AgentApp:
         if bool(body.get("cloud_only")):
             return 200, {"ok": True, "cloud_only": True,
                          "message": "Cloud-Modus aktiv — die Weboberfläche läuft bereits."}
-        with self._lifecycle_lock:
+        if not self._acquire_lifecycle():
+            return self._busy_lifecycle()
+        try:
             if self._hardware.follower is None or self._hardware.leader is None:
                 return 400, {"ok": False,
                              "message": "Bitte zuerst beide Arme scannen (Leader und Follower)."}
@@ -875,6 +958,8 @@ class AgentApp:
                              "message": f"Konfiguration konnte nicht erstellt werden: {e}"}
             self._log("Roboter-Umgebung wird gestartet …")
             ok = docker_manager.start_robot_tier(log=self._log)
+        finally:
+            self._lifecycle_lock.release()
         if not ok:
             return 500, {"ok": False,
                          "message": "Die Roboter-Umgebung konnte nicht gestartet werden — "
@@ -889,10 +974,18 @@ class AgentApp:
             # The update worker stops the robot tier itself as its first step,
             # so a fast 503 here loses nothing — the tier is already going down.
             return self._busy_updating()
-        with self._lifecycle_lock:
+        # THE handler the bounded acquire exists for: „Stoppen" is what a student
+        # presses when „Umgebung starten" is taking too long, and that start holds
+        # the lock across its image pull. Blocking here would make the stop button
+        # hang behind the operation it is meant to interrupt.
+        if not self._acquire_lifecycle():
+            return self._busy_lifecycle()
+        try:
             self.stop_active_previews()
             self._log("Roboter-Umgebung wird gestoppt …")
             ok = docker_manager.stop_robot_tier(log=self._log)
+        finally:
+            self._lifecycle_lock.release()
         return (200 if ok else 500), {
             "ok": bool(ok),
             "message": ("Roboter-Umgebung gestoppt." if ok else
@@ -981,11 +1074,20 @@ class AgentApp:
         the same backward-compatible posture the GUI takes. The result is cached
         for ``UPDATE_CHECK_TTL_S`` so many student browsers polling at once don't
         each incur the 5 s cloud ``/version`` fetch; ``force`` bypasses the cache
-        (a manual re-check). The cloud call runs OUTSIDE the cache lock so no
-        caller ever blocks waiting on another's network fetch.
+        (a manual re-check) but no more often than
+        ``_UPDATE_CHECK_FORCE_MIN_INTERVAL_S`` — an unrated ``?force=1`` is an
+        open amplifier, see that constant. The cloud call runs OUTSIDE the cache
+        lock so no caller ever blocks waiting on another's network fetch.
         """
         now = time.monotonic()
         with self._update_check_lock:
+            if force and (now - self._update_check_forced_at) < _UPDATE_CHECK_FORCE_MIN_INTERVAL_S:
+                # Too soon since the last honoured force — degrade to an ordinary
+                # cached read rather than refusing, so a double-click still gets
+                # a correct answer and only the network call is suppressed.
+                force = False
+            elif force:
+                self._update_check_forced_at = now
             cached = self._update_check_cache
             if not force and cached is not None and (now - cached[0]) < UPDATE_CHECK_TTL_S:
                 return 200, dict(cached[1])
@@ -1274,8 +1376,20 @@ class AgentApp:
             # multi-second in-place rsync it replaces) in which pi_agent/ does
             # not exist at all. A crash exactly there is self-healed by the
             # unit's ExecStartPre (restores pi_agent.old when pi_agent/ is
-            # missing) — keep the two in sync. Keep pi_agent.old for ONE cycle
-            # as a rollback (the NEXT apply's rmtree above clears it).
+            # missing) — keep the two in sync.
+            #
+            # DELIVERY, precisely: that ExecStartPre reaches a Pi through
+            # setup.sh (provisioning) or through _renew_system_units, which
+            # installs the shipped units on the FIRST boot after a self-update
+            # that changed them. So a Pi updating INTO the release that added it
+            # runs this very apply under the OLD unit — that one window is
+            # genuinely unprotected (recover by hand: mv pi_agent.old pi_agent)
+            # — and is protected from the next apply onward. It is NOT, as an
+            # earlier version of this comment implied, available to every Pi
+            # running this code the moment the code lands.
+            #
+            # Keep pi_agent.old for ONE cycle as a rollback (the NEXT apply's
+            # rmtree above clears it).
             shutil.rmtree(old_pkg, ignore_errors=True)  # drop the previous cycle's rollback
             try:
                 if os.path.isdir(dst_pkg):
@@ -1325,9 +1439,13 @@ class AgentApp:
         if not (bool(body.get("confirm")) and bool(body.get("confirm_again"))):
             return 400, {"ok": False,
                          "message": "Doppelte Bestätigung erforderlich (confirm + confirm_again)."}
-        with self._lifecycle_lock:
+        if not self._acquire_lifecycle():
+            return self._busy_lifecycle()
+        try:
             self.stop_active_previews()
             ok, msg = docker_manager.factory_reset(log=self._log)
+        finally:
+            self._lifecycle_lock.release()
         return (200 if ok else 500), {"ok": bool(ok), "message": msg}
 
     # ── GET: /netzwerk-check ─────────────────────────────────────────────────
@@ -1747,8 +1865,22 @@ class AgentApp:
                 elif path == "/roboter-studio/status":
                     self._send_json(*app.handle_rs_status())
                 elif path == "/update/check":
+                    # `force` skips the poll-storm cache, so it is the one bit of
+                    # this read-only endpoint worth gating. A browser omits Origin
+                    # on a no-cors GET, so an ABSENT header proves nothing and
+                    # stays allowed (same posture as origin_allowed's empty case,
+                    # and the header-less curl path) — but a PRESENT, foreign
+                    # Origin is a cross-site caller with no business bypassing the
+                    # cache, and it silently gets the cached answer. The real
+                    # bound on the no-cors case is the rate floor inside
+                    # handle_update_check; this is the cheap layer on top.
                     force = (query.get("force") or query.get("refresh")
                              or [""])[0] in ("1", "true", "yes")
+                    if force:
+                        try:
+                            force = app.origin_allowed(self.headers.get("Origin", ""))
+                        except Exception:  # noqa: BLE001 — /update/check never 500s
+                            force = False
                     self._send_json(*app.handle_update_check(force=force))
                 elif path.startswith("/update/status/"):
                     job_id = path[len("/update/status/"):]
@@ -1801,12 +1933,35 @@ class AgentApp:
             self._log(f"HTTP listener stopped: {exc}")
 
     def start_loopback(self) -> None:
-        """Bind the always-available 127.0.0.1 listener."""
+        """Bind the always-available 127.0.0.1 listener. Never raises.
+
+        A bind failure here used to escape ``boot()`` into ``main()``'s bare
+        ``finally`` and exit the process — which under ``Restart=always`` +
+        ``RestartSec=5`` is a 5 s crash-loop, and the most likely cause is
+        precisely the one that makes the loop self-sustaining: :8769 still held
+        by a stale agent process, or by the loopback socket of an agent systemd
+        has not finished reaping. The loopback listener is also the LEAST
+        load-bearing of the two — the browser reaches the wizard through the
+        ros_net-gateway listener (nginx cannot proxy to the Pi's ``localhost``
+        from a remote Chrome), and the gateway binder retries forever on its own.
+        So log it in German and carry on booting; the manager still comes up and
+        the Protokoll still explains what happened.
+        """
         handler = self._make_handler()
-        self._loopback_httpd = ThreadingHTTPServer((_LOOPBACK_HOST, PORT_AGENT), handler)
-        self._loopback_httpd.daemon_threads = True
+        try:
+            httpd = ThreadingHTTPServer((_LOOPBACK_HOST, PORT_AGENT), handler)
+        except OSError as e:
+            self._log(
+                f"[WARNUNG] Management-API konnte nicht an {_LOOPBACK_HOST}:{PORT_AGENT} "
+                f"gebunden werden: {e}. Der Agent läuft weiter; die Weboberfläche "
+                "erreicht ihn über das ros_net-Gateway. Läuft eventuell noch ein "
+                "zweiter Agent-Prozess?"
+            )
+            return
+        self._loopback_httpd = httpd
+        httpd.daemon_threads = True
         threading.Thread(
-            target=self._serve, args=(self._loopback_httpd,),
+            target=self._serve, args=(httpd,),
             name="agent-loopback", daemon=True,
         ).start()
         self._log(f"Management-API gebunden an {_LOOPBACK_HOST}:{PORT_AGENT}.")
@@ -1951,8 +2106,85 @@ class AgentApp:
                 drifted.append(unit)
         return drifted
 
+    def _install_unit_file(self, unit: str) -> bool:
+        """Overwrite ONE installed systemd unit with the copy this agent ships.
+
+        Atomic (temp in the same directory → fsync → chmod 0644 → ``os.replace``)
+        because a torn write to ``edubotics-pi.service`` would leave the fleet
+        with no way to start the agent at all — and the agent IS the only repair
+        surface on a Pi. One rollback copy of whatever was there is kept beside
+        it (``.edubotics-bak``); systemd ignores files without a unit suffix, so
+        neither the backup nor a leftover temp file can ever be loaded.
+
+        The explicit chmod matters: the unit runs with ``UMask=0077``, so a
+        freshly created file would be 0600 while setup.sh installs 0644.
+        """
+        dst = os.path.join(SYSTEMD_UNIT_DIR, unit)
+        src = os.path.join(os.path.dirname(os.path.abspath(__file__)), "systemd", unit)
+        tmp = dst + ".edubotics-tmp"
+        try:
+            with open(src, "rb") as f:
+                shipped = f.read()
+            with open(tmp, "wb") as f:
+                f.write(shipped)
+                f.flush()
+                os.fsync(f.fileno())
+            os.chmod(tmp, 0o644)
+            try:
+                shutil.copyfile(dst, dst + ".edubotics-bak")
+            except OSError:
+                pass  # a backup is a courtesy, never a precondition
+            os.replace(tmp, dst)
+            _fsync_path(SYSTEMD_UNIT_DIR)
+            return True
+        except OSError as e:
+            self._log(f"Systemd-Dienst {unit} konnte nicht erneuert werden: {e}")
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            return False
+
+    def _renew_system_units(self, drifted: "list") -> bool:
+        """Install the shipped systemd units over the drifted installed copies
+        and reload systemd. True iff EVERY named unit was renewed.
+
+        This is what makes the drift signal actionable instead of decorative.
+        The units only ever reach a Pi through ``setup.sh``, which needs a source
+        checkout the classroom does not have — so a release that changes a unit
+        (this one changes ``EnvironmentFile=-`` and adds ``ExecStartPre``) would
+        otherwise pin a permanent banner on 100 % of the fielded fleet asking for
+        a remedy nobody can perform, AND leave the ``ExecStartPre`` self-heal
+        undeliverable to exactly the population running the code that relies on
+        it. The agent already runs as root and already holds the correct bytes
+        (SHA-256-verified and byte-compiled at apply time), so it can simply do
+        the install itself.
+
+        Deliberately NOT a restart. ``daemon-reload`` makes systemd re-read the
+        files; the new ``ExecStartPre`` / ``EnvironmentFile`` take effect the next
+        time the unit STARTS. Restarting ourselves from inside a boot sequence to
+        pick up a cosmetic unit change would risk a loop for no gain — and by the
+        next apply (the only moment the ExecStartPre matters) the renewal is long
+        since in place.
+
+        Only ever REPLACES: ``_drifted_units`` skips a unit whose installed copy
+        cannot be read, so an absent unit is never "installed" here — which is
+        what keeps this out of `systemctl enable` territory.
+        """
+        if not all(self._install_unit_file(unit) for unit in drifted):
+            return False
+        try:
+            subprocess.run(["systemctl", "daemon-reload"],
+                           capture_output=True, text=True, timeout=30)
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            # No systemd (dev box) or a reload hiccup: the FILES are correct,
+            # which is the durable half — systemd re-parses every unit at boot
+            # anyway. Never fail the renewal over the reload.
+            pass
+        return True
+
     def _check_system_files_version(self) -> None:
-        """Report PROVEN system-file drift + record it for the System tab (M1).
+        """Renew drifted systemd units, and report what could not be renewed (M1).
 
         The release tarball carries ``pi_agent/`` ONLY, so a self-update moves
         the agent + (via ``docker/versions.env``) the images while
@@ -1973,33 +2205,63 @@ class AgentApp:
         Comparing the installed units to the ones this agent ships is instead
         decidable: it fires only when the bytes really differ.
 
-        ADVISORY ONLY — never blocks boot or the manager. The remedy is
-        re-running ``setup.sh`` (idempotent; it re-installs the units and compose
-        and leaves the Docker volumes — the student's datasets, HF cache and
-        calibration — untouched). It must NEVER instruct a re-flash: the drift is
-        usually benign, the data is irreplaceable, and a wipe is not the fix.
+        Proven drift is REPAIRED first, not merely announced: ``_renew_system_units``
+        installs the shipped units and reloads systemd. Every fielded Pi was
+        provisioned before this release, so a release that touches a unit drifts
+        100 % of the fleet — a banner alone would therefore be permanent, and its
+        own remedy (``sudo ./setup.sh`` from a source checkout) is one a classroom
+        cannot perform. Only what the agent could NOT repair reaches the banner.
+
+        ADVISORY ONLY — never blocks boot or the manager. The remedy for the
+        unrepairable remainder is re-running ``setup.sh`` (idempotent; it
+        re-installs the units and compose and leaves the Docker volumes — the
+        student's datasets, HF cache and calibration — untouched). It must NEVER
+        instruct a re-flash: the drift is usually benign, the data is
+        irreplaceable, and a wipe is not the fix.
         """
         stamped = self._read_system_files_stamp()
         drifted = self._drifted_units()
         if not drifted:
             return
+        origin = (f" (Stand: Version {stamped})" if stamped else "")
+        if self._renew_system_units(drifted):
+            # Repaired — nothing for the System tab to nag about. Still say so in
+            # the Protokoll: the units are the one thing an update CAN carry, and
+            # a support case wants to see that it happened (and when it takes
+            # effect).
+            self._log(
+                f"Systemd-Dienste ({', '.join(drifted)}){origin} entsprachen nicht "
+                f"der Agent-Version {APP_VERSION} und wurden automatisch erneuert. "
+                "Die Änderung wird beim nächsten Start des Agenten wirksam."
+            )
+            return
         self._system_files_stale = True
         self._system_files_version = stamped
-        origin = (f" (Stand: Version {stamped})" if stamped else "")
         self._log(
             f"[WARNUNG] Systemdateien weichen ab: die installierten Systemd-Dienste "
             f"({', '.join(drifted)}){origin} unterscheiden sich von denen der "
-            f"Agent-Version {APP_VERSION}. Aktualisierungen erneuern nur den Agenten "
-            "und die Images — nicht diese Dateien. Bitte 'sudo ./setup.sh' aus dem "
+            f"Agent-Version {APP_VERSION} und konnten nicht automatisch erneuert "
+            "werden. Aktualisierungen erneuern sonst nur den Agenten und die "
+            "Images — nicht diese Dateien. Bitte 'sudo ./setup.sh' aus dem "
             "EduBotics-Quellordner erneut ausführen; die Datensätze der Schüler "
             "bleiben dabei erhalten."
         )
 
     def boot(self) -> None:
-        """Boot sequence: seed the .env if missing, rehydrate hardware, start the
-        loopback API, bring up the ALWAYS-ON manager (creating ros_net), then
-        start the gateway-binder loop (the gateway interface exists only after
-        the manager ``up``). The robot tier is intentionally left down."""
+        """Boot sequence: rehydrate hardware, renew drifted systemd units, seed
+        or realign the .env, start BOTH listeners (loopback + the ros_net-gateway
+        binder loop), then — only if a self-update just landed — pull the newly
+        pinned images, and finally bring up the ALWAYS-ON manager. The robot tier
+        is intentionally left down.
+
+        The listeners start BEFORE the manager ``up``, not after. The gateway
+        interface does not exist yet on a genuinely first boot, but the binder is
+        a retry LOOP that no-ops until ``ros_net`` appears — whereas starting it
+        afterwards would black out ``/api/system/*`` for the entire duration of
+        the post-self-update image pull (~5-6 GB), which is exactly when the
+        student needs the Protokoll to read what is happening. See the long
+        comment at the call site.
+        """
         self.rehydrate_hardware()
         self._check_system_files_version()
 
@@ -2011,7 +2273,20 @@ class AgentApp:
             try:
                 config_generator.generate_cloud_only_env(self.env_file)
             except Exception as e:  # noqa: BLE001
-                self._log(f"Cloud-.env konnte nicht erstellt werden: {e}")
+                # LOUD, because the consequence is invisible otherwise: with no
+                # .env on disk `_compose` omits --env-file entirely, so compose
+                # interpolates every ${REGISTRY}/${IMAGE_TAG}/${EDUBOTICS_*} to
+                # the empty string. The manager `up` then fails on an unpullable
+                # ref like `/physical-ai-manager-opi:` while the only symptom
+                # used to be one unprefixed line scrolled past in the Protokoll.
+                # Name the file, the cause and the fix.
+                self._log(
+                    f"[FEHLER] Die Konfigurationsdatei {self.env_file} konnte nicht "
+                    f"angelegt werden: {e}. Ohne sie kann Docker Compose keine "
+                    "Image-Namen auflösen und die Weboberfläche startet nicht. "
+                    "Bitte Schreibrechte und freien Speicherplatz auf /etc prüfen "
+                    "und den Agenten neu starten."
+                )
         else:
             # The .env EXISTS but may pin a stale IMAGE_TAG. This matters because
             # the agent self-updates in place (rsync of the new pi_agent/ tree,
@@ -2087,6 +2362,17 @@ class AgentApp:
         # Bring the always-on manager up (up -d --force-recreate --no-deps
         # physical_ai_manager). No image pull here — boot stays fast on the
         # provisioned image; refresh is the /update path.
+        if not os.path.isfile(self.env_file):
+            # Repeat the seed failure HERE, next to the `up` it dooms. The
+            # earlier [FEHLER] is 30+ lines back in the Protokoll by now, and the
+            # compose failure that follows reads as an image problem
+            # („manifest unknown" on an empty ref), sending the operator to the
+            # registry instead of to /etc.
+            self._log(
+                f"[FEHLER] {self.env_file} fehlt — Docker Compose startet ohne "
+                "--env-file, alle Platzhalter bleiben leer und die Weboberfläche "
+                "kann nicht starten. Das ist KEIN Registry- oder Netzwerkfehler."
+            )
         self._log("Weboberfläche (Manager) wird gestartet …")
         if not docker_manager.start_manager(log=self._log):
             self._log("[WARNUNG] Manager konnte nicht gestartet werden — bitte Images/Docker prüfen.")

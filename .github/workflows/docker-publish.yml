@@ -37,10 +37,11 @@ on:
     # maintainer decision: with the GHCR cross-registry copy the dual-fire is a
     # net liability, not a win.) Main-branch pushes still build :latest here —
     # and on a RELEASE the commit is pushed to main AND tagged, so this main-push
-    # build AND release.yml's W4 workflow_call BOTH fire on the same sha. They no
-    # longer RACE (the `concurrency` block below keys on github.sha so they
-    # serialize), but the build still runs twice per release — a known, accepted
-    # cost (fully eliminating it would need a `git describe --exact-match` skip).
+    # build AND release.yml's W4 workflow_call BOTH fire on the same sha. The
+    # build therefore runs twice per release — a known, accepted cost (fully
+    # eliminating it would need a `git describe --exact-match` skip, which races
+    # the tag push itself). See the `concurrency` block below for how the two
+    # lanes are separated and what overlap that deliberately leaves.
     branches: [main]
     paths:
       - "robotis_ai_setup/docker/**"
@@ -63,8 +64,21 @@ on:
         type: string
 
 concurrency:
-  # ONE STATIC group — every docker-publish run serializes, whatever its
-  # trigger. Two race classes both need this:
+  # TWO LANES: a release build (tag ref) gets its own tag-keyed group;
+  # everything else (push to main, workflow_dispatch on main) shares the single
+  # `main` lane.
+  #
+  # The discriminator is github.ref, NOT github.event_name. Inside a called
+  # reusable workflow the `github` context belongs to the CALLER's triggering
+  # event, so `github.event_name` here reads `push` on a release, not
+  # `workflow_call` — an event_name test would silently collapse both lanes back
+  # into one and quietly restore the eviction bug below. github.ref is exact
+  # for this workflow: its standalone tag trigger was removed in 2026-06-11, so
+  # the ONLY way a run carries refs/tags/* is release.yml's workflow_call. (The
+  # smoke-test job already relies on the same inheritance for its
+  # `REF="${GITHUB_REF#refs/tags/}"` tag derivation.)
+  #
+  # Why the `main` lane is ONE STATIC group. Two race classes need it:
   #   (1) same-sha release race: a release pushes the commit to `main` AND
   #       pushes the tag, so the on.push(main) run and release.yml's
   #       workflow_call run fire on the SAME sha; keying on github.ref put
@@ -74,13 +88,33 @@ concurrency:
   #       parallel — both plain-push :latest per-repo and both retag jobs copy
   #       Hub:latest→GHCR:latest at interleaved times, leaving the 8-repo
   #       :latest set mixed across shas (and GHCR≠Hub divergent).
-  # cancel-in-progress stays false: docker push is non-atomic and a
-  # half-finished push leaves the registry worse off than waiting. Side
-  # effect of a static group: GitHub keeps only ONE pending run per group, so
-  # a middle push's run can be superseded by a newer one — acceptable for
-  # :latest semantics (the newest sha is what :latest should be), and tag
-  # builds ride release.yml's own concurrency.
-  group: docker-publish
+  #
+  # Why the release lane must be SEPARATE. GitHub keeps at most ONE *pending*
+  # run per group and a newly-queued run CANCELS the pending one. With a single
+  # static group that made a release cancellable mid-release: tag v2.14.0 pushed
+  # with its commit -> the commit's own main-push run starts (~60 min,
+  # --no-cache) -> W4 queues behind it -> ANY further main push touching
+  # physical_ai_tools/** or robotis_ai_setup/docker/** queues third and EVICTS
+  # W4. release.yml:246 then skips W5/W5b/W6 on `needs.docker.result != success`
+  # — after W1 migrations were applied and W2/W3 were already deployed. Half
+  # released. (`release-${{ github.ref }}` serializes release RUNS, not the
+  # nested called workflow, so it never covered this.)
+  #
+  # Deliberate residual: the same-sha pair from (1) can now overlap — but both
+  # sides build the SAME commit, so :latest lands on one of two builds of
+  # identical source, and the smoke-test's org.opencontainers.image.revision ==
+  # github.sha assertion holds either way. That is strictly less harmful than a
+  # cancelled W4, and race (2) (DIFFERENT shas) stays fully serialized.
+  # Per-tag rather than one shared release lane so a release can never be
+  # evicted by another release either; two tags pushed inside one ~60-min build
+  # window is not a supported workflow. A workflow_dispatch RELEASE (release.yml
+  # dispatched on main) carries refs/heads/main and therefore stays in the
+  # `main` lane — correct, since it writes :latest like any main push and
+  # attaches no release assets to half-publish.
+  #
+  # cancel-in-progress stays false in BOTH lanes: docker push is non-atomic and
+  # a half-finished push leaves the registry worse off than waiting.
+  group: docker-publish-${{ startsWith(github.ref, 'refs/tags/') && github.ref || 'main' }}
   cancel-in-progress: false
 
 permissions:
@@ -690,6 +724,16 @@ jobs:
         # is genuinely anonymous. New GHCR packages default to Private, so this
         # most affects the newer *-opi repos (opi is continue-on-error, so a
         # private opi package warns rather than blocking the amd64/Jetson release).
+        #
+        # RETRIED, because on the amd64/arm64 legs this step is NOT
+        # continue-on-error and it is the last gate before the release proceeds:
+        # a single un-retried GHCR 5xx/429/DNS blip would fail W4 -> W5 skipped
+        # -> the release stops after W1 migrations and both Railway deploys
+        # already landed. Every other GHCR interaction in this pipeline already
+        # retries (_retag: 6 attempts quadratic backoff; pull_images.ps1: 3
+        # GHCR attempts before Hub), so a one-shot probe here was the outlier.
+        # An AUTH refusal is not retried — it is a settled answer, and retrying
+        # it would only delay the (correct) failure.
         env:
           SERVER_REPO: ${{ matrix.server_repo }}
           ARM_REPO: ${{ matrix.arm_repo }}
@@ -698,13 +742,41 @@ jobs:
           set -e
           REF="${GITHUB_REF#refs/tags/}"
           case "$REF" in v*.*.*) TAG="${REF#v}" ;; *) TAG="latest" ;; esac
+          FIX_HINT="Make it public (Owner > Packages > <repo> > Package settings > Change visibility, or: gh api -X PATCH /user/packages/container/<repo> -f visibility=public)."
           for repo in "$SERVER_REPO" "$ARM_REPO" "$MANAGER_REPO"; do
             [ -n "$repo" ] || continue
-            if ! docker manifest inspect "ghcr.io/svendanilborodun/${repo}:${TAG}" >/dev/null 2>&1; then
-              echo "::error::Anonymous manifest fetch of ghcr.io/svendanilborodun/${repo}:${TAG} FAILED — the GHCR package is likely PRIVATE. Students pull anonymously and would fall back to Docker Hub. Make it public (Owner > Packages > ${repo} > Package settings > Change visibility, or: gh api -X PATCH /user/packages/container/${repo} -f visibility=public)."
+            IMG="ghcr.io/svendanilborodun/${repo}:${TAG}"
+            ok=0
+            err=""
+            for attempt in 1 2 3; do
+              if err="$(docker manifest inspect "$IMG" 2>&1 >/dev/null)"; then
+                ok=1
+                break
+              fi
+              # denied/unauthorized/authentication required == a settled "not
+              # anonymously pullable" answer, and manifest-unknown == a settled
+              # "the tag was never pushed". Neither changes on a retry, and each
+              # needs a DIFFERENT operator action, so they get distinct errors
+              # rather than the one-size "likely PRIVATE" message this step used
+              # to print for every non-zero exit.
+              case "$err" in
+                *denied*|*unauthorized*|*[Aa]uthentication\ required*)
+                  echo "::error::Anonymous manifest fetch of ${IMG} was DENIED — the GHCR package is PRIVATE. Students pull anonymously and would silently fall back to Docker Hub. ${FIX_HINT} (registry said: ${err})"
+                  exit 1
+                  ;;
+                *manifest\ unknown*|*[Nn]ot\ [Ff]ound*)
+                  echo "::error::${IMG} does not exist on GHCR (the package is reachable anonymously, the TAG is missing) — the build/retag for this repo did not publish. This is not a visibility problem. (registry said: ${err})"
+                  exit 1
+                  ;;
+              esac
+              echo "  attempt ${attempt}/3 failed for ${IMG}: ${err}"
+              [ "$attempt" = "3" ] || sleep $((attempt * 10))
+            done
+            if [ "$ok" != "1" ]; then
+              echo "::error::Anonymous manifest fetch of ${IMG} FAILED after 3 attempts and the registry never returned an auth refusal — this is EITHER a GHCR outage/rate-limit OR a private package whose error text changed. Re-run the job first; if it reproduces, check visibility. ${FIX_HINT} (last error: ${err})"
               exit 1
             fi
-            echo "OK: ghcr.io/svendanilborodun/${repo}:${TAG} is anonymously reachable (public)."
+            echo "OK: ${IMG} is anonymously reachable (public)."
           done
       - name: GHCR login
         uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121  # v4.1.0

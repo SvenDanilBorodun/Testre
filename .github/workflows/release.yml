@@ -149,13 +149,26 @@ jobs:
               # pi_agent fall back to these literals when the VERSION file isn't
               # reachable — a stale literal that reads LOW re-offers the same
               # forced update forever (CLAUDE.md §"Bumping product VERSION").
+              #
+              # `|| true` on the two grep pipelines is LOAD-BEARING, not noise.
+              # A pipeline's status is its LAST command's, and `grep -oE` exits 1
+              # on no match — so under this step's `set -e` a literal that no
+              # longer matches (e.g. someone refactors the fallback to
+              # `return _FALLBACK_VERSION`, which CLAUDE.md explicitly warns
+              # against) killed the job right there. The `|| { echo ... }`
+              # diagnostic below never printed and the `${...:-<none>}` fallback
+              # was dead code: the release stopped with a bare non-zero exit and
+              # no message naming the file. The .iss check above degrades
+              # correctly already because its pipeline ends in `tr` (always 0) —
+              # that inconsistency was the tell. This preflight gates ALL FOUR
+              # version sites, so it must fail LOUDLY, never silently.
               lit_fail=0
               ISS_VERSION="$(grep -E '^AppVersion=' robotis_ai_setup/installer/robotis_ai_setup.iss | head -1 | cut -d= -f2 | tr -d '[:space:]')"
-              [ "$ISS_VERSION" = "$FILE_VERSION" ] || { echo "::error::installer/robotis_ai_setup.iss AppVersion=${ISS_VERSION:-<none>} != VERSION ${FILE_VERSION}."; lit_fail=1; }
-              GUI_LITERAL="$(grep -oE 'return \"[0-9]+\.[0-9]+\.[0-9]+\"' robotis_ai_setup/gui/app/constants.py | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')"
-              [ "$GUI_LITERAL" = "$FILE_VERSION" ] || { echo "::error::gui/app/constants.py fallback literal ${GUI_LITERAL:-<none>} != VERSION ${FILE_VERSION}."; lit_fail=1; }
-              PI_LITERAL="$(grep -oE 'return \"[0-9]+\.[0-9]+\.[0-9]+\"' robotis_ai_setup/pi_agent/constants.py | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')"
-              [ "$PI_LITERAL" = "$FILE_VERSION" ] || { echo "::error::pi_agent/constants.py fallback literal ${PI_LITERAL:-<none>} != VERSION ${FILE_VERSION}."; lit_fail=1; }
+              [ "$ISS_VERSION" = "$FILE_VERSION" ] || { echo "::error::installer/robotis_ai_setup.iss AppVersion=${ISS_VERSION:-<none>} != VERSION ${FILE_VERSION}. Keep it a plain 'AppVersion=X.Y.Z' line."; lit_fail=1; }
+              GUI_LITERAL="$(grep -oE 'return "[0-9]+\.[0-9]+\.[0-9]+"' robotis_ai_setup/gui/app/constants.py | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || true)"
+              [ "$GUI_LITERAL" = "$FILE_VERSION" ] || { echo "::error::gui/app/constants.py fallback literal ${GUI_LITERAL:-<none>} != VERSION ${FILE_VERSION}. Keep it a plain 'return \"X.Y.Z\"' — this check is a source grep."; lit_fail=1; }
+              PI_LITERAL="$(grep -oE 'return "[0-9]+\.[0-9]+\.[0-9]+"' robotis_ai_setup/pi_agent/constants.py | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || true)"
+              [ "$PI_LITERAL" = "$FILE_VERSION" ] || { echo "::error::pi_agent/constants.py fallback literal ${PI_LITERAL:-<none>} != VERSION ${FILE_VERSION}. Keep it a plain 'return \"X.Y.Z\"' — a literal that reads LOW re-offers the same forced update to every Pi forever."; lit_fail=1; }
               [ "$lit_fail" = "0" ] || exit 1
               echo "OK: tag v${TAG_VERSION} == VERSION file == iss/gui/pi_agent literals (${FILE_VERSION})"
               ;;
@@ -490,58 +503,101 @@ jobs:
           # GHCR gap. The .exe advertisement is unaffected (amd64 images are
           # coupled + fatal in W4). Probe via pull-scoped registry tokens
           # (curl only — no docker dependency in this Railway-focused job).
+          # Every outcome here is a ::warning + withhold — this gate has NO
+          # hard-fail path, by design.
           #
           # Accept BOTH index/list AND single-image manifest media types: a
           # plain `docker push` publishes a bare single-arch manifest, and the
           # OCI dist-spec permits a 404/406 on an Accept mismatch — an
           # index-only Accept could silently withhold the Pi self-update on
           # every release if the pipeline ever stops list-wrapping its retags.
+          # ONE comma-joined Accept header (the canonical HTTP form); four
+          # separate -H Accept: flags happen to work but rely on the registry
+          # iterating r.Header["Accept"] rather than reading the first value.
           #
-          # --retry 2 (not 3) + a SECONDS budget below: this gate must degrade
-          # to "withhold" long before it can eat W6's 10-min job timeout —
-          # timing the job out would ALSO withhold the .exe advertisement,
-          # inverting the "a Pi hiccup never blocks the Windows release" rule.
-          _ACCEPTS='-H Accept:application/vnd.oci.image.index.v1+json -H Accept:application/vnd.docker.distribution.manifest.list.v2+json -H Accept:application/vnd.oci.image.manifest.v1+json -H Accept:application/vnd.docker.distribution.manifest.v2+json'
-          _opi_pullable_ghcr() {
-            local repo="$1" tok code
-            tok="$(curl -fsS --retry 2 --retry-connrefused --max-time 15 \
-              "https://ghcr.io/token?scope=repository:svendanilborodun/${repo}:pull" 2>/dev/null \
-              | sed -E 's/.*"token":"([^"]+)".*/\1/')"
-            [ -n "$tok" ] || return 1
-            # shellcheck disable=SC2086
-            code="$(curl -fsS --retry 2 --retry-connrefused -o /dev/null -w '%{http_code}' --max-time 15 \
-              -H "Authorization: Bearer ${tok}" $_ACCEPTS \
-              "https://ghcr.io/v2/svendanilborodun/${repo}/manifests/${VERSION}" 2>/dev/null)"
-            [ "$code" = "200" ]
+          # TIME BUDGET — measured, not estimated. curl's --max-time is
+          # PER-ATTEMPT, so `--retry 2 --max-time 15` against a blackholed host
+          # costs 3x15 + 1 + 2 = 48 s (curl 8.7.1, timed). Four such curls per
+          # repo (GHCR token + manifest, Hub token + manifest) = 192 s/repo, and
+          # a budget check that only ran BETWEEN repos let repo 1 and repo 2
+          # both finish first: 384 s of a 600 s job, leaving the /version verify
+          # loop ~120 s of its explicit 300 s budget. A slow Railway cold-pod
+          # redeploy then times the job out — RED, with GUI_VERSION already
+          # flipped. So: --retry-max-time 10 + --max-time 8 caps each curl at
+          # ~17 s (timed), and the budget is re-checked before EVERY registry
+          # probe, not every repo. Worst case is now 150 s (budget) + one probe
+          # (2 curls, ~34 s) = ~184 s, leaving the verify loop its full 5 min.
+          _ACCEPT='application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json'
+          # 0 = anonymously pullable
+          # 1 = definitively NOT pullable (404 missing / 401-403 private)
+          # 2 = PROBE FAILED (token fetch died, curl error, 5xx/429) — the
+          #     registry never answered, so this must NOT be reported as "the
+          #     image is missing": that message sends the operator off to
+          #     rebuild opi when the real cause was a network blip.
+          _probe_manifest() {
+            local tok_url="$1" man_url="$2" tok code
+            tok="$(curl -fsS --retry 2 --retry-connrefused --retry-max-time 10 --max-time 8 \
+              "$tok_url" 2>/dev/null | sed -E 's/.*"token":"([^"]+)".*/\1/')"
+            [ -n "$tok" ] || return 2
+            code="$(curl -fsS --retry 2 --retry-connrefused --retry-max-time 10 --max-time 8 \
+              -o /dev/null -w '%{http_code}' \
+              -H "Authorization: Bearer ${tok}" -H "Accept: ${_ACCEPT}" \
+              "$man_url" 2>/dev/null)"
+            case "$code" in
+              200)         return 0 ;;
+              401|403|404) return 1 ;;
+              *)           return 2 ;;
+            esac
           }
-          _opi_pullable_hub() {
-            local repo="$1" tok code
-            tok="$(curl -fsS --retry 2 --retry-connrefused --max-time 15 \
-              "https://auth.docker.io/token?service=registry.docker.io&scope=repository:nettername/${repo}:pull" 2>/dev/null \
-              | sed -E 's/.*"token":"([^"]+)".*/\1/')"
-            [ -n "$tok" ] || return 1
-            # shellcheck disable=SC2086
-            code="$(curl -fsS --retry 2 --retry-connrefused -o /dev/null -w '%{http_code}' --max-time 15 \
-              -H "Authorization: Bearer ${tok}" $_ACCEPTS \
-              "https://registry-1.docker.io/v2/nettername/${repo}/manifests/${VERSION}" 2>/dev/null)"
-            [ "$code" = "200" ]
+          _probe_ghcr() {
+            _probe_manifest \
+              "https://ghcr.io/token?scope=repository:svendanilborodun/$1:pull" \
+              "https://ghcr.io/v2/svendanilborodun/$1/manifests/${VERSION}"
           }
+          _probe_hub() {
+            _probe_manifest \
+              "https://auth.docker.io/token?service=registry.docker.io&scope=repository:nettername/$1:pull" \
+              "https://registry-1.docker.io/v2/nettername/$1/manifests/${VERSION}"
+          }
+          # NOTE (deliberate non-goal): this stays an EXISTENCE probe, not a
+          # provenance check. Comparing the manifest's
+          # org.opencontainers.image.revision to github.sha would not catch the
+          # scenario it looks like it should — a retried release re-tags the
+          # SAME commit, so attempt 1's surviving -opi images carry exactly the
+          # sha we would compare against. The cheap alternative (downloading
+          # W4's `opi-build-success` marker artifact) would force an `actions:
+          # read` GITHUB_TOKEN grant onto a job that deliberately runs with
+          # `permissions: {}`. Neither trade is worth it here; the marker gate
+          # in docker-publish.yml's retag job remains the provenance authority.
           if [ -n "$PI_SHA" ]; then
             _GATE_START=$SECONDS
+            _over_budget() { [ $((SECONDS - _GATE_START)) -gt 150 ]; }
             for repo in physical-ai-server-opi physical-ai-manager-opi open-manipulator-opi; do
-              if [ $((SECONDS - _GATE_START)) -gt 240 ]; then
-                echo "::warning::opi image gate exceeded its 240 s budget — withholding the Pi self-update advertisement (empty pi_agent_sha256) rather than risking the W6 job timeout (which would also withhold the .exe)."
+              if _over_budget; then
+                echo "::warning::opi image gate exceeded its 150 s budget — withholding the Pi self-update advertisement (empty pi_agent_sha256) rather than risking the W6 job timeout (which would also withhold the .exe)."
                 PI_SHA=""
                 break
               fi
-              if _opi_pullable_ghcr "$repo"; then
-                continue
+              if _probe_ghcr "$repo"; then continue; else _g=$?; fi
+              if _over_budget; then
+                echo "::warning::opi image gate exceeded its 150 s budget after the GHCR probe of ${repo} — withholding the Pi self-update advertisement (empty pi_agent_sha256)."
+                PI_SHA=""
+                break
               fi
-              if _opi_pullable_hub "$repo"; then
-                echo "::warning::ghcr.io/svendanilborodun/${repo}:${VERSION} is not anonymously pullable, but the Docker Hub twin nettername/${repo}:${VERSION} is — advertising the Pi self-update (the Pi's own acquisition falls back to Hub). Fix the GHCR side."
+              if _probe_hub "$repo"; then
+                echo "::warning::ghcr.io/svendanilborodun/${repo}:${VERSION} is not anonymously pullable (GHCR probe verdict: $([ "$_g" = 2 ] && echo 'probe FAILED — registry unreachable' || echo 'missing or private')), but the Docker Hub twin nettername/${repo}:${VERSION} is — advertising the Pi self-update (the Pi's own acquisition falls back to Hub). Fix the GHCR side."
                 continue
+              else
+                _h=$?
               fi
-              echo "::warning::${repo}:${VERSION} is anonymously pullable on NEITHER ghcr.io/svendanilborodun nor Docker Hub (nettername) — withholding the Pi self-update advertisement (empty pi_agent_sha256) so no Pi pins a version whose -opi images it cannot pull."
+              # Neither registry said yes. Name WHICH failure it was, because
+              # "image missing" and "registry unreachable" need opposite
+              # operator actions (rebuild opi vs. simply re-run W6).
+              if [ "$_g" = "2" ] || [ "$_h" = "2" ]; then
+                echo "::warning::could not VERIFY ${repo}:${VERSION} on GHCR (verdict ${_g}) or Docker Hub (verdict ${_h}) — at least one probe FAILED rather than answering (verdict 2 = registry unreachable/5xx/rate-limited). Withholding the Pi self-update advertisement (empty pi_agent_sha256) because the availability criterion must equal the apply criterion. This is NOT evidence the -opi images are missing: re-run W6 before rebuilding anything."
+              else
+                echo "::warning::${repo}:${VERSION} is anonymously pullable on NEITHER ghcr.io/svendanilborodun nor Docker Hub (nettername) — both registries answered definitively (missing or private). Withholding the Pi self-update advertisement (empty pi_agent_sha256) so no Pi pins a version whose -opi images it cannot pull. Rebuild/publish the -opi images."
+              fi
               PI_SHA=""
               break
             done

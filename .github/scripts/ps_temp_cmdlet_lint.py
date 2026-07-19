@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""ps-temp-cmdlet-lint — catch a terminating PSArgumentException from a TEMP path.
+r"""ps-temp-cmdlet-lint — catch a terminating PSArgumentException from a TEMP path.
 
 On a Windows account whose username contains a dot (e.g. "sven.d"), $env:TEMP
-resolves to an 8.3 short path with a tilde (C:\\Users\\SVEN~1.D\\AppData\\...).
+resolves to an 8.3 short path with a tilde (C:\Users\SVEN~1.D\AppData\...).
 Binding such a path to a file cmdlet's -LiteralPath/-Path raises a *terminating*
 System.Management.Automation.PSArgumentException that -ErrorAction
 SilentlyContinue does NOT suppress. So a file cmdlet (Remove-Item / Set-Content /
@@ -25,6 +25,22 @@ that touches a $env:TEMP/$env:TMP-derived path (the env var directly on the line
 or a variable previously assigned from it) and is NOT lexically inside a
 `try { }` block.
 
+TWO LEXING MODES, and the split is load-bearing (_ps_lex.preprocess):
+  * "is a cmdlet actually EXECUTED here" + try-brace tracking run on the
+    STRING-BLANKED line. Without that,
+    `Write-Host "Bitte loeschen: Remove-Item $env:TEMP\edubotics.log"` was
+    reported as an unguarded cmdlet, and a `}` inside prose
+    (`Write-Host "closing brace: }"`) popped a real, still-open try-brace and
+    turned a guarded cmdlet into a finding.
+  * "…on a TEMP-derived path" runs on the COMMENT-STRIPPED line with strings
+    KEPT, because the path legitimately lives inside the quotes
+    (`Remove-Item "$env:TEMP\x"`).
+Comment removal is string-aware in both modes, which is what fixes the third
+misfire: `$retries = 3   # one more try` used to leave a dangling `try` in the
+tail scan, marking the NEXT `{` as a try-body and silencing every finding
+inside it — the same "prose cannot suppress a finding" bug 8c36c42 fixed in
+ps_readiness_retry_lint.
+
 Escape hatch: append `# ps-temp-cmdlet-lint: allow` to the flagged line.
 """
 from __future__ import annotations
@@ -32,6 +48,10 @@ from __future__ import annotations
 import os
 import pathlib
 import re
+import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from _ps_lex import consume_braces, preprocess  # noqa: E402
 
 ROOT = pathlib.Path(os.environ.get("PS_LINT_ROOT") or
                     pathlib.Path(__file__).resolve().parents[2])
@@ -50,47 +70,29 @@ ENV_TEMP = re.compile(r'\$env:(TEMP|TMP)\b', re.I)
 # assignments ($x = Join-Path $env:TEMP ...). Deliberately does NOT match a
 # comparison ($x -eq $env:TEMP) because there is no '=' immediately after $x.
 ASSIGN_FROM_TEMP = re.compile(r'\$(\w+)\s*=\s*[^=].*\$env:(TEMP|TMP)\b', re.I)
-# A dangling `try` at end of a line (its `{` opens on the next line).
+# A dangling `try` at end of a code segment (its `{` opens on the next line).
 TRAILING_TRY = re.compile(r'\btry\s*$', re.I)  # PS is case-insensitive: `Try {` is legal
 ALLOW_LINE = "ps-temp-cmdlet-lint: allow"
 
 
-def _consume_braces(line: str, stack: list[bool], pending_try: bool) -> bool:
-    """Update the brace stack for one line, marking each `{` as a try-brace or
-    not. `stack[k]` is True iff the k-th currently-open brace opened a `try`
-    body. Returns the new `pending_try` flag (a `try` whose `{` is on the next
-    line). Full-line comments are handled by the caller."""
-    seg_start = 0
-    for i, c in enumerate(line):
-        if c == '{':
-            seg = line[seg_start:i]
-            is_try = pending_try or bool(TRAILING_TRY.search(seg))
-            stack.append(is_try)
-            pending_try = False
-            seg_start = i + 1
-        elif c == '}':
-            if stack:
-                stack.pop()
-            seg_start = i + 1
-    tail = line[seg_start:]
-    return bool(TRAILING_TRY.search(tail))
-
-
 def scan_file(path: pathlib.Path) -> list[tuple[int, str]]:
     text = path.read_bytes().decode("utf-8-sig", errors="replace")
+    raw_lines = text.splitlines()
+    code_lines = preprocess(text)                        # strings blanked
+    val_lines = preprocess(text, blank_strings=False)    # strings kept
     temp_vars: set[str] = set()
     brace_is_try: list[bool] = []
     pending_try = False
     hits: list[tuple[int, str]] = []
 
-    for lineno, raw in enumerate(text.splitlines(), 1):
-        stripped = raw.strip()
-        is_comment = stripped.startswith('#')
+    for idx, code in enumerate(code_lines):
+        raw = raw_lines[idx]
+        vals = val_lines[idx]
 
-        cm = CMDLETS.search(raw) if not is_comment else None
+        cm = CMDLETS.search(code)
         if cm and ALLOW_LINE not in raw:
-            touches_temp = bool(ENV_TEMP.search(raw)) or any(
-                re.search(r'\$' + re.escape(v) + r'\b', raw, re.I)
+            touches_temp = bool(ENV_TEMP.search(vals)) or any(
+                re.search(r'\$' + re.escape(v) + r'\b', vals, re.I)
                 for v in temp_vars
             )
             if touches_temp:
@@ -100,26 +102,29 @@ def scan_file(path: pathlib.Path) -> list[tuple[int, str]]:
                 # stack carried from prior lines. Use copies so the real state is
                 # only advanced once, for the full line, below.
                 local_stack = list(brace_is_try)
-                _consume_braces(raw[:cm.start()], local_stack, pending_try)
+                consume_braces(code[:cm.start()], local_stack, pending_try,
+                               TRAILING_TRY)
                 if not any(local_stack):
-                    hits.append((lineno, stripped))
+                    hits.append((idx + 1, raw.strip()))
 
-        if not is_comment:
-            m = ASSIGN_FROM_TEMP.search(raw)
-            if m:
-                temp_vars.add(m.group(1))
-            pending_try = _consume_braces(raw, brace_is_try, pending_try)
+        m = ASSIGN_FROM_TEMP.search(vals)
+        if m:
+            temp_vars.add(m.group(1))
+        pending_try = consume_braces(code, brace_is_try, pending_try,
+                                     TRAILING_TRY)
 
     return hits
 
 
 def main() -> int:
     total = 0
+    scanned = 0
     for d in SCAN_DIRS:
         base = ROOT / d
         if not base.exists():
             continue
         for p in sorted(base.rglob("*.ps1")):
+            scanned += 1
             rel = p.relative_to(ROOT).as_posix()
             for lineno, snippet in scan_file(p):
                 total += 1
@@ -132,10 +137,17 @@ def main() -> int:
                     f"[System.IO.Path]::GetTempPath() is additional hygiene, "
                     f"not a substitute. Offending: {snippet}"
                 )
+    # A rename of the scan dir (or a wrong PS_LINT_ROOT) used to make every
+    # guard print OK having read ZERO files — false confidence, not a pass.
+    if scanned == 0:
+        print(f"::error::ps-temp-cmdlet-lint scanned 0 .ps1 files under "
+              f"{ROOT}/{{{','.join(SCAN_DIRS)}}} — the scan root moved or "
+              f"PS_LINT_ROOT is wrong. Refusing to report a green pass.")
+        return 1
     if total:
         print(f"\nps-temp-cmdlet-lint FAILED: {total} unguarded temp cmdlet(s).")
         return 1
-    print("ps-temp-cmdlet-lint OK")
+    print(f"ps-temp-cmdlet-lint OK ({scanned} file(s) scanned)")
     return 0
 
 

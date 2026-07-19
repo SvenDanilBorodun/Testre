@@ -368,6 +368,43 @@ jobs:
       - name: Lint installer .ps1 for native-stderr-under-EAP=Stop
         run: python3 .github/scripts/ps_native_stderr_lint.py
 
+  powershell-install-guards:
+    # The four ps_* install-hardening guards, run DIRECTLY so their
+    # `::error file=…,line=…` / `::warning` annotations land on the diff.
+    #
+    # They are also exercised by python-tests via
+    # tests/test_ps_guard_scripts.py::TestGuardsCleanOnRealTree — but that path
+    # runs them under subprocess.run(capture_output=True), which swallows every
+    # annotation: a failure showed up only as "returncode != 0" inside a unittest
+    # traceback, with no line marked in the PR. And ps_temp_path_normalize_lint
+    # is ADVISORY (exit 0 with ::warning), so before this job its findings
+    # reached nothing at all — no workflow referenced it.
+    #
+    # Both paths are kept on purpose: this job surfaces findings on the real
+    # tree, the unittest pins the guards' BEHAVIOUR against synthetic fixtures
+    # (the true-positive each was written for). A guard that only ever runs
+    # against a green tree is not tested — ps_cleanup_exit_guard silently could
+    # not catch its own documented regression for exactly that reason.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: "3.11"
+      - name: Readiness-probe retry guard (F3)
+        run: python3 .github/scripts/ps_readiness_retry_lint.py
+      - name: TEMP-path cmdlet try/catch guard (F2)
+        run: python3 .github/scripts/ps_temp_cmdlet_lint.py
+      - name: Cleanup exit-code fall-through guard
+        run: python3 .github/scripts/ps_cleanup_exit_guard.py
+      - name: TEMP-path construction advisory (warnings only)
+        # Advisory: exits 0 on findings. Its ONE non-zero path is "scanned 0
+        # .ps1 files", which is a configuration failure, not a finding.
+        run: python3 .github/scripts/ps_temp_path_normalize_lint.py
+
   compose-validate:
     runs-on: ubuntu-latest
     timeout-minutes: 10

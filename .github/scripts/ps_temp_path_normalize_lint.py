@@ -75,11 +75,13 @@ def scan_file(path: pathlib.Path) -> list[tuple[int, str]]:
 
 def main() -> int:
     total = 0
+    scanned = 0
     for d in SCAN_DIRS:
         base = ROOT / d
         if not base.exists():
             continue
         for p in sorted(base.rglob("*.ps1")):
+            scanned += 1
             rel = p.relative_to(ROOT).as_posix()
             for lineno, snippet in scan_file(p):
                 total += 1
@@ -92,12 +94,21 @@ def main() -> int:
                     f"try/catch, see ps-temp-cmdlet-lint); "
                     f"append '# {ALLOW_LINE}' to silence. Line: {snippet}"
                 )
+    # A rename of the scan dir (or a wrong PS_LINT_ROOT) used to make every
+    # guard print OK having read ZERO files — false confidence, not a pass.
+    # This is a CONFIGURATION failure, not an advisory finding, so it is the one
+    # path on which this lint exits non-zero.
+    if scanned == 0:
+        print(f"::error::ps-temp-path-normalize-lint scanned 0 .ps1 files under "
+              f"{ROOT}/{{{','.join(SCAN_DIRS)}}} — the scan root moved or "
+              f"PS_LINT_ROOT is wrong. Refusing to report a green pass.")
+        return 1
     if total:
         print(f"\nps-temp-path-normalize-lint: {total} advisory finding(s) "
               f"(informational — build not failed).")
     else:
-        print("ps-temp-path-normalize-lint OK")
-    # Advisory only — never fail the build.
+        print(f"ps-temp-path-normalize-lint OK ({scanned} file(s) scanned)")
+    # Advisory only — findings never fail the build.
     return 0
 
 

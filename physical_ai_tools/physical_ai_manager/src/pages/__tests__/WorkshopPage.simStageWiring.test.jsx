@@ -183,23 +183,26 @@ describe('WorkshopPage — SimStage wiring (real SimStage, mocked SimScene)', ()
     expect(screen.getByText('Simulator')).toBeInTheDocument();
 
     // ONE assertion inside waitFor (testing-library/no-wait-for-multiple-
-    // assertions): once layout has crossed SimStage → SimScene the same render
-    // delivered every sibling prop, so the rest asserts on a settled snapshot.
+    // assertions), and it MUST be the genuinely async one: catalogDims starts
+    // as useState({}) in WorkshopPage and is filled from the mocked
+    // getObjectCatalog promise, so it needs settling. `layout` is a hardcoded
+    // literal on SimStage — present on SimScene's very first render, which the
+    // findByTestId above already awaited — so waiting on it gates on a constant
+    // and proves nothing about the state-derived props. Once catalogDims has
+    // crossed, the rest asserts on that settled snapshot.
     await waitFor(() => {
-      expect(lastSimSceneProps().layout).toBe('split');
+      expect(lastSimSceneProps().catalogDims).toEqual({
+        wuerfel: { height_m: 0.03, width_m: 0.03, color: '#f59e0b', max_instances: 2 },
+      });
     });
     const props = lastSimSceneProps();
     // SimStage pins the mount-time literals.
+    expect(props.layout).toBe('split');
     expect(props.showShadows).toBe(true);
     expect(props.showReach).toBe(true);
     // Sim entry force-enables the trail; the page's showPath state crossed
-    // SimStage → SimScene…
+    // SimStage → SimScene.
     expect(props.showPath).toBe(true);
-    // …and the page's catalogDims (the REAL buildCatalogDims output over the
-    // service arrays) arrived intact.
-    expect(props.catalogDims).toEqual({
-      wuerfel: { height_m: 0.03, width_m: 0.03, color: '#f59e0b', max_instances: 2 },
-    });
     // The empty scene reached SimScene too.
     expect(props.scene).toEqual(expect.objectContaining({ objects: expect.any(Array) }));
     // The real SimStage's trail toggle mirrors showPath=true.

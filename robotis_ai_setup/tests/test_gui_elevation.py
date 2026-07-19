@@ -95,6 +95,7 @@ def _priv_ns(platform, elevated, run_stub=None, elevate_stub=None):
     """Build a namespace for _run_privileged with controllable doubles."""
     ns = {
         "sys": _FakeSys(platform=platform),
+        "os": os,  # the direct path resolves powershell.exe under %SystemRoot%
         "subprocess": types.SimpleNamespace(run=run_stub),
         "_is_elevated": lambda: elevated,
         "_elevate_and_wait": elevate_stub
@@ -143,7 +144,15 @@ class TestRunPrivileged(unittest.TestCase):
         self.assertEqual(
             ns["_run_privileged"]("powershell.exe", "-File x"), (3, False, None)
         )
-        self.assertEqual(seen["cmdline"], '"powershell.exe" -File x')
+        # The ELEVATED spawn must resolve powershell.exe to its System32 home:
+        # plain CreateProcess includes the process CWD in its search order, so
+        # a bare name could execute a planted binary from a user-writable
+        # directory — with admin rights.
+        expected_exe = os.path.join(
+            os.environ.get("SystemRoot", r"C:\Windows"),
+            "System32", "WindowsPowerShell", "v1.0", "powershell.exe",
+        )
+        self.assertEqual(seen["cmdline"], f'"{expected_exe}" -File x')
         # NO timeout: a kill only reaches powershell.exe, never the wsl.exe
         # grandchild — and killing `wsl --import` mid-copy risks a corrupt
         # VHDX. Deliberately matches the UAC path's INFINITE wait.

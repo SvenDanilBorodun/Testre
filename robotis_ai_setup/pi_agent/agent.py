@@ -1244,6 +1244,23 @@ class AgentApp:
                           f"{(result.stderr or '').strip()[:200]}")
                 shutil.rmtree(new_pkg, ignore_errors=True)
                 return False
+            # Validate the staged tree BEFORE the swap: a tarball that unpacks
+            # but does not even byte-compile (truncated content the hash check
+            # cannot catch — the hash covers the tarball, not the release's
+            # correctness — or a release built for a newer Python) must never
+            # replace a working agent. Post-swap it would crash-loop under
+            # Restart=always with the agent itself being the ONLY repair
+            # surface on the Pi — recovery would need SSH on every fleet rig.
+            check = subprocess.run(
+                [sys.executable, "-m", "compileall", "-q", new_pkg],
+                capture_output=True, text=True, timeout=120,
+            )
+            if check.returncode != 0:
+                detail = (check.stderr or check.stdout or "").strip()[:200]
+                self._log("Agent-Aktualisierung verworfen: die neue Version "
+                          f"besteht die Syntaxprüfung nicht: {detail}")
+                shutil.rmtree(new_pkg, ignore_errors=True)
+                return False
             # Force the staged bytes to stable storage BEFORE the swap. rsync
             # does not fsync, and a directory rename gets no help from ext4's
             # auto_da_alloc (see _fsync_tree) — so without this a power cut can
@@ -1255,11 +1272,10 @@ class AgentApp:
             # filesystem, but the PAIR is not: there is a window of two rename
             # syscalls with no I/O between them (microseconds, vs the
             # multi-second in-place rsync it replaces) in which pi_agent/ does
-            # not exist at all. A crash exactly there leaves the agent unable to
-            # import and systemd Restart=always looping, with the complete tree
-            # sitting in pi_agent.old for a manual `mv` — that window is
-            # accepted, not eliminated. Keep pi_agent.old for ONE cycle as a
-            # rollback (the NEXT apply's rmtree above clears it).
+            # not exist at all. A crash exactly there is self-healed by the
+            # unit's ExecStartPre (restores pi_agent.old when pi_agent/ is
+            # missing) — keep the two in sync. Keep pi_agent.old for ONE cycle
+            # as a rollback (the NEXT apply's rmtree above clears it).
             shutil.rmtree(old_pkg, ignore_errors=True)  # drop the previous cycle's rollback
             try:
                 if os.path.isdir(dst_pkg):

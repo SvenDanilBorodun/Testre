@@ -42,6 +42,13 @@ Environment=PYTHONUNBUFFERED=1
 # other on every file this root unit creates so a regenerate can never leave the
 # secret world-readable (belt-and-suspenders alongside the .env's explicit 0600).
 UMask=0077
+# Self-heal the self-update's accepted power-loss window: the staged swap is
+# two renames (pi_agent -> pi_agent.old, pi_agent.new -> pi_agent), and a crash
+# exactly between them leaves NO pi_agent/ while the complete previous tree
+# sits in pi_agent.old. Restore it instead of crash-looping with no repair
+# surface. The leading `-` makes the probe non-fatal on the normal boot where
+# pi_agent/ exists (the `||` chain exits non-zero when there is nothing to do).
+ExecStartPre=-/bin/sh -c '[ -d /opt/edubotics/pi_agent ] || { [ -d /opt/edubotics/pi_agent.old ] && mv /opt/edubotics/pi_agent.old /opt/edubotics/pi_agent; }'
 ExecStart=/usr/bin/python3 -m pi_agent.agent
 Restart=always
 RestartSec=5

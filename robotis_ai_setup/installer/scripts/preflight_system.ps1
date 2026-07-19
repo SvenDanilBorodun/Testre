@@ -147,7 +147,11 @@ if ($distroPresent) {
         $readyHelper = Join-Path $PSScriptRoot 'wsl_docker_ready.ps1'
         if (Test-Path $readyHelper) {
             . $readyHelper
-            $dockerReady = Wait-DockerReady -DistroName "EduBotics" -MaxWaitSeconds 30
+            # -NoFallback: a DIAGNOSTIC must not mutate the distro (starting
+            # dockerd is the repair paths' job) and must stay inside the small
+            # time budget the .iss [Run] stall and the GUI's capture timeout
+            # assume (~35 s worst case instead of ~65-95 s with the fallback).
+            $dockerReady = Wait-DockerReady -DistroName "EduBotics" -MaxWaitSeconds 30 -NoFallback
         } else {
             Write-Diag "docker" "wsl_docker_ready.ps1 not found next to preflight"
         }

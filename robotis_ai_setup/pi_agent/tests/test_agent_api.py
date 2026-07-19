@@ -1296,6 +1296,14 @@ class TestApplyAgentUpdate(unittest.TestCase):
         anywhere" promise while exercising the real swap code. The
         rsync-semantics test above still uses the real binary on Linux/CI.
         """
+        if list(argv[:3]) == [sys.executable, "-m", "compileall"]:
+            # Emulate the pre-swap syntax validation IN-PROCESS (still no real
+            # subprocess): behavior-accurate, so the broken-tree test below
+            # exercises the same reject decision production makes.
+            import compileall as _compileall
+            ok = _compileall.compile_dir(argv[-1], quiet=2)
+            return type("P", (), {"returncode": 0 if ok else 1, "stdout": "",
+                                  "stderr": "" if ok else "SyntaxError"})()
         if not argv or argv[0] != "rsync":
             raise AssertionError(f"unexpected subprocess in apply: {argv!r}")
         src, dst = argv[-2].rstrip("/"), argv[-1].rstrip("/")
@@ -1323,9 +1331,10 @@ class TestApplyAgentUpdate(unittest.TestCase):
         DIRECTORY of freshly-written files, and rsync does not fsync. So a
         classroom power yank on eMMC could commit the new pi_agent/ directory
         entry while its contents were still unallocated → zero-length modules →
-        ImportError under systemd Restart=always → a crash-loop with no self-heal
-        (there is no ExecStartPre recovery). Calling "atomic" a swap that can
-        surface empty files is the overclaim this pins shut.
+        ImportError under systemd Restart=always → a crash-loop (the unit's
+        ExecStartPre only heals the MISSING-pi_agent window, not a present tree
+        with empty files). Calling "atomic" a swap that can surface empty files
+        is the overclaim this pins shut.
 
         Ordering is the assertion: an fsync AFTER the rename would prove nothing.
         """
@@ -1397,6 +1406,29 @@ class TestApplyAgentUpdate(unittest.TestCase):
         # ...and the previous tree survives one cycle as a rollback.
         with open(os.path.join(pkg + ".old", "agent.py")) as f:
             self.assertEqual(f.read(), "# old\n")
+
+    def test_broken_staged_tree_is_rejected_before_the_swap(self):
+        """A tarball that unpacks but does not byte-compile must NEVER replace
+        the working agent: post-swap it would crash-loop under Restart=always
+        with the agent itself being the Pi's only repair surface. The apply
+        must fail, leave the live tree untouched, and leave no staged debris."""
+        root = tempfile.mkdtemp()
+        staging = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, True)
+        self.addCleanup(shutil.rmtree, staging, True)
+        self._install(root, {"VERSION": "2.0.0\n", "agent.py": "# old\n"})
+        tarball = self._tarball_of(
+            staging, {"VERSION": "2.1.0\n", "agent.py": "def broken(:\n"})
+
+        self.assertFalse(self._apply(root, tarball))
+
+        pkg = os.path.join(root, "pi_agent")
+        with open(os.path.join(pkg, "agent.py")) as f:
+            self.assertEqual(f.read(), "# old\n", "live tree must be untouched")
+        self.assertFalse(os.path.exists(pkg + ".new"),
+                         "rejected staging must not linger as debris")
+        self.assertFalse(os.path.exists(pkg + ".old"),
+                         "no swap happened, so no rollback dir may appear")
 
     def test_a_prior_interrupted_apply_does_not_poison_the_next_one(self):
         """A power cut mid-rsync leaves a partial pi_agent.new. The next apply

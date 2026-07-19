@@ -162,10 +162,9 @@ $flagPath = Join-Path $PSScriptRoot ".reboot_required"
 # whose WSL feature is merely EnablePending, where no distro can be imported
 # yet. Ask the feature store instead: it is the same signal
 # install_prerequisites.ps1 used to write the flag in the first place. An
-# unreadable feature store (COMException while a servicing op is pending) falls
-# back to the caller's `wsl --status` verdict rather than manufacturing a reboot.
+# unreadable feature store (COMException while a servicing op is pending) is
+# settled by flag-mtime vs last-boot-time, mirroring the dd-uninstall branch.
 function Test-RebootStillPending {
-    param([bool]$WslResponds)
     # The flag CONTENT names WHY the reboot was requested. "dd-uninstall" is
     # migrate_from_docker_desktop.ps1's reason (Docker Desktop's uninstaller
     # returned 3010 — its removal completes on the next boot). The feature-store
@@ -206,7 +205,28 @@ function Test-RebootStillPending {
         }
     }
     if ($pending) { return $true }
-    if ($unreadable -and -not $WslResponds) { return $true }
+    if ($unreadable) {
+        # The feature store stays unreadable (COMException) for as long as a
+        # servicing operation is pending — which is EXACTLY the state the flag
+        # was written in, and `wsl --status` exits 0 throughout it, so the
+        # caller's wsl verdict cannot discriminate (we are only ever called
+        # when wsl responded — the old `-not $WslResponds` fallback was dead
+        # code at the single call site). Discriminate on TIME like the
+        # dd-uninstall branch: no boot since the flag was written -> the
+        # reboot is genuinely still outstanding; a boot after it -> proceed
+        # (an eternally-unreadable store must not loop the student through
+        # reboots forever).
+        try {
+            $flagTime = (Get-Item -Path $flagPath -ErrorAction Stop).LastWriteTime
+            $bootTime = (Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop).LastBootUpTime
+            if ($bootTime -le $flagTime) {
+                Write-Host "   Feature-Status nicht lesbar und seit der Markierung wurde nicht neu gestartet — Neustart steht noch aus."
+                return $true
+            }
+        } catch {
+            Write-Host "   (Boot-Zeit nicht lesbar: $_)"
+        }
+    }
     return $false
 }
 
@@ -258,6 +278,17 @@ try {
         }
         & (Join-Path $PSScriptRoot "install_prerequisites.ps1") @prereqArgs
         $prereqRc = $LASTEXITCODE
+        # Exit code FIRST, flag second. A failed prereq run never WRITES the
+        # flag (its Summary block is skipped on every exit-1 path), so a flag
+        # surviving a non-zero exit is by construction pre-existing/stale —
+        # reporting it as $EXIT_REBOOT would loop the student through reboots
+        # that can never fix the real failure (e.g. `wsl --install` with no
+        # internet), which is exactly the masked-failure class this contract
+        # exists to kill.
+        if ($prereqRc -ne 0) {
+            Write-FAIL "Voraussetzungen konnten nicht installiert werden (exit $prereqRc)."
+            exit $EXIT_FAILED
+        }
         # install_prerequisites writes .reboot_required when a fresh WSL2
         # install needs a host reboot before a distro can be imported. Leave the
         # flag exactly where it is (the GUI's entry check re-routes here after
@@ -267,10 +298,6 @@ try {
             Write-Step "NEUSTART ERFORDERLICH: Bitte den PC neu starten und EduBotics erneut öffnen."
             exit $EXIT_REBOOT
         }
-        if ($prereqRc -ne 0) {
-            Write-FAIL "Voraussetzungen konnten nicht installiert werden (exit $prereqRc)."
-            exit $EXIT_FAILED
-        }
         Write-OK "Voraussetzungen installiert"
     }
 
@@ -279,7 +306,7 @@ try {
     # would fail cryptically) and keep the flag set so the GUI can say so.
     if (Test-Path $flagPath) {
         Write-Step "Neustart-Status wird geprüft..."
-        if (Test-RebootStillPending -WslResponds $wslOk) {
+        if (Test-RebootStillPending) {
             Write-Step "NEUSTART ERFORDERLICH: Bitte den PC neu starten und EduBotics erneut öffnen."
             exit $EXIT_REBOOT
         }

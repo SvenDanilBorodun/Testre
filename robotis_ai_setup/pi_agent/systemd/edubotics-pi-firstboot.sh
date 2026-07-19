@@ -88,10 +88,11 @@ rm -rf "${ENV_DIR}/phone-cert" 2>/dev/null || true
 rm -f "${STATE_DIR}/.ros_domain_id" "${STATE_DIR}/.last_image_pull.json" 2>/dev/null || true
 
 # ── 4. Regenerate the managed .env (drop the bench HF token + stale arm ports) ─
-# The agent unit's EnvironmentFile=/etc/edubotics/.env is NON-optional, so the
-# file MUST exist before the agent starts — the agent CANNOT self-seed it (a
-# missing EnvironmentFile fails the unit outright). We therefore regenerate it
-# UNCONDITIONALLY here (whether or not a golden .env survived --prepare-golden).
+# The agent unit's EnvironmentFile is optional (`EnvironmentFile=-`), so a
+# missing .env no longer fails the unit and the agent CAN self-seed one — but
+# we still regenerate UNCONDITIONALLY here (whether or not a golden .env
+# survived --prepare-golden): first boot must drop the bench HF token + stale
+# arm ports even when a stale file exists, which self-seed would not touch.
 # generate_cloud_only_env is atomic (temp file + os.replace), so a failed regen
 # leaves any existing file intact — we never `rm` first. The provisioned
 # ros_net subnet (chosen at bench time to dodge a LAN overlap) is carried

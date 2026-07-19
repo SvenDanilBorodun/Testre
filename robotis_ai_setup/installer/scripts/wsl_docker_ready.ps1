@@ -15,7 +15,12 @@ function Wait-DockerReady {
     param(
         [string]$DistroName          = "EduBotics",
         [int]$MaxWaitSeconds         = 180,
-        [int]$FallbackWaitSeconds    = 30
+        [int]$FallbackWaitSeconds    = 30,
+        # Skip the start-dockerd.sh fallback entirely: for READ-ONLY callers
+        # (preflight diagnostics) that must neither mutate the distro nor blow
+        # past a small time budget. Repair-capable callers (finalize,
+        # pull_images) keep the fallback.
+        [switch]$NoFallback
     )
 
     # Step 1: trigger VM boot. First `wsl -d` invocation starts the lightweight
@@ -43,6 +48,7 @@ function Wait-DockerReady {
         # Fallback: boot-time autostart didn't fire — invoke the dockerd wrapper
         # directly (this distro uses /usr/local/bin/start-dockerd.sh, NOT
         # systemd), then poll again up to $FallbackWaitSeconds.
+        if ($NoFallback) { return $false }
         wsl -d $DistroName -- /usr/local/bin/start-dockerd.sh *>$null
         $extra = 0
         while ($extra -lt $FallbackWaitSeconds) {

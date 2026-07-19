@@ -51,7 +51,7 @@ ENV_TEMP = re.compile(r'\$env:(TEMP|TMP)\b', re.I)
 # comparison ($x -eq $env:TEMP) because there is no '=' immediately after $x.
 ASSIGN_FROM_TEMP = re.compile(r'\$(\w+)\s*=\s*[^=].*\$env:(TEMP|TMP)\b', re.I)
 # A dangling `try` at end of a line (its `{` opens on the next line).
-TRAILING_TRY = re.compile(r'\btry\s*$')
+TRAILING_TRY = re.compile(r'\btry\s*$', re.I)  # PS is case-insensitive: `Try {` is legal
 ALLOW_LINE = "ps-temp-cmdlet-lint: allow"
 
 

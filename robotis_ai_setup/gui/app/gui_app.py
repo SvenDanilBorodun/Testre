@@ -141,6 +141,10 @@ def _elevate_and_wait(exe: str, args: str, show: int = 1):
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     shell32.ShellExecuteExW.restype = wintypes.BOOL
     shell32.ShellExecuteExW.argtypes = [ctypes.POINTER(SHELLEXECUTEINFOW)]
+    # DWORD restype: ctypes' default signed c_int returns WAIT_FAILED as -1,
+    # which never equals the unsigned 0xFFFFFFFF constant -> the failure branch
+    # was dead and a genuine wait failure fell through misdiagnosed.
+    kernel32.WaitForSingleObject.restype = wintypes.DWORD
 
     ok = shell32.ShellExecuteExW(ctypes.byref(info))
     if not ok:
@@ -211,6 +215,15 @@ def _run_privileged(exe: str, args: str, show: int = 1):
     # Already elevated → run the (already-quoted) command line directly with no
     # UAC. Build `"exe" args` so powershell's own command-line parsing applies
     # to the pre-quoted -File/-LogPath/-MarkerPath tokens the callers construct.
+    # Resolve powershell.exe to its System32 path: unlike ShellExecuteEx (App
+    # Paths/System32), a plain CreateProcess search order includes the process
+    # CWD — an ELEVATED spawn must never resolve the binary from a
+    # user-writable directory.
+    if exe.lower() == "powershell.exe":
+        exe = os.path.join(
+            os.environ.get("SystemRoot", r"C:\Windows"),
+            "System32", "WindowsPowerShell", "v1.0", "powershell.exe",
+        )
     CREATE_NO_WINDOW = 0x08000000  # no console window flashes at the student
     cmdline = f'"{exe}" {args}'
     try:
@@ -1362,13 +1375,38 @@ class EduBoticsApp:
             except OSError:
                 pass
 
+            # This repair is the one production flow GUARANTEED to download the
+            # usbipd MSI (it fires precisely when usbipd is missing), so replay
+            # the pin install_prerequisites.ps1 persisted next to itself at
+            # install time (.usbipd_pin: URL line + SHA-256 line) — without it
+            # the elevated MSI install silently skips its integrity check. Also
+            # pass -PreserveExistingRebootFlag: this repair can run in the same
+            # PRE-reboot session as migrate's dd-uninstall .reboot_required, and
+            # prereq's Summary would otherwise delete that flag without any
+            # boot-time proof the reboot happened. Pin content is a GitHub URL
+            # + hex digest — both `$`-free, so the manual fallback below stays
+            # paste-safe.
+            prereq_extra = " -PreserveExistingRebootFlag"
+            pin_path = os.path.join(os.path.dirname(prereq), ".usbipd_pin")
+            try:
+                with open(pin_path, "r", encoding="ascii") as fh:
+                    pin_lines = [ln.strip() for ln in fh.read().splitlines()
+                                 if ln.strip()]
+                if len(pin_lines) >= 2 and "$" not in (pin_lines[0] + pin_lines[1]):
+                    prereq_extra += (
+                        f" -UsbipdMsiUrl '{_ps_single_quote(pin_lines[0])}'"
+                        f" -UsbipdMsiSha256 '{_ps_single_quote(pin_lines[1])}'"
+                    )
+            except (OSError, UnicodeDecodeError):
+                pass
+
             # Every path lands inside a single-quoted PowerShell token, so any
             # embedded apostrophe (a username like O'Brien reaches these paths)
             # must be doubled or it terminates the token and reshapes the command.
             ps_cmd = (
                 f'-NoProfile -ExecutionPolicy Bypass -Command '
                 f'"Start-Transcript -Path \'{_ps_single_quote(log_file)}\' -Force | Out-Null; '
-                f'& \'{_ps_single_quote(prereq)}\'; '
+                f'& \'{_ps_single_quote(prereq)}\'{prereq_extra}; '
                 f'$prereq_rc = $LASTEXITCODE; '
                 f'& \'{_ps_single_quote(configure)}\'; '
                 f'$cfg_rc = $LASTEXITCODE; '
@@ -1390,7 +1428,7 @@ class EduBoticsApp:
             # `& 'script.ps1'` would be blocked by the default policy.
             manual_cmd = (
                 f'powershell.exe -NoProfile -ExecutionPolicy Bypass -Command '
-                f'"& \'{_ps_single_quote(prereq)}\'; '
+                f'"& \'{_ps_single_quote(prereq)}\'{prereq_extra}; '
                 f'& \'{_ps_single_quote(configure)}\'"'
             )
             self._elevation_prewarn()
@@ -1424,7 +1462,8 @@ class EduBoticsApp:
             if new_path:
                 self._log(f"usbipd gefunden: {new_path}")
                 self._log("Reparatur erfolgreich. Systemprüfung wird fortgesetzt...")
-                self.root.after(0, lambda: self._run_prerequisite_checks())
+                self.root.after(0, lambda: threading.Thread(
+                    target=self._run_prerequisite_checks, daemon=True).start())
             else:
                 if cancelled:
                     self._log("Reparatur abgebrochen (UAC-Zustimmung verweigert).")
@@ -1663,7 +1702,11 @@ class EduBoticsApp:
                 capture_output=True,
                 encoding="utf-8",
                 errors="replace",
-                timeout=60,
+                # Above the script's own worst case (~35 s docker probe with
+                # -NoFallback + the other checks): a timeout kill here discards
+                # the ENTIRE captured diagnosis, i.e. exactly the broken-rig
+                # evidence this feature exists to collect.
+                timeout=150,
                 creationflags=creationflags,
             )
             output = (proc.stdout or "")
@@ -1881,7 +1924,8 @@ class EduBoticsApp:
                 # the student through UAC prompts for the rest of the session.
                 self._finalize_completed = True
                 self._log("Einrichtung abgeschlossen. Systemprüfung wird fortgesetzt...")
-                self.root.after(0, lambda: self._run_prerequisite_checks())
+                self.root.after(0, lambda: threading.Thread(
+                    target=self._run_prerequisite_checks, daemon=True).start())
             elif exit_code is None:
                 # Launch failure (never ran) — distinct from a numeric
                 # non-zero exit. The missing marker corroborates it. Offer
@@ -2426,6 +2470,23 @@ class EduBoticsApp:
                 f'-HardwareIds {hw_args} '
                 f'-LogPath "{log_file}"'
             )
+            # Paste-safe variant for the manual-fallback dialog. ps_args cannot
+            # be pasted into an interactive PowerShell: the OUTER shell parses
+            # the bare `-HardwareIds "a","b"` comma list as ITS OWN array and
+            # flattens it into separate child arguments — the second ID then
+            # fails to bind (no positional params) and nothing runs. Wrapping
+            # everything in one double-quoted -Command string survives both
+            # PowerShell and cmd.exe verbatim: the inner tokens are
+            # single-quoted (apostrophes doubled), and nothing here can
+            # contain `$` (VID:PIDs are hex, the log lives under
+            # %ProgramData%\EduBotics).
+            manual_hw = ",".join(f"'{_ps_single_quote(h)}'" for h in hw_ids)
+            manual_cmd = (
+                f'powershell.exe -NoProfile -ExecutionPolicy Bypass -Command '
+                f'"& \'{_ps_single_quote(script)}\' '
+                f'-HardwareIds {manual_hw} '
+                f'-LogPath \'{_ps_single_quote(log_file)}\'"'
+            )
             self._elevation_prewarn()
             exit_code, cancelled, err = _run_privileged(
                 exe="powershell.exe",
@@ -2457,7 +2518,7 @@ class EduBoticsApp:
                     self._log("Mehrfach abgebrochen — manueller Befehl wird angeboten.")
                     self._show_manual_elevation_fallback(
                         "Geräte-Freigabe manuell ausführen",
-                        f"powershell.exe {ps_args}",
+                        manual_cmd,
                     )
                 return
             if exit_code is None:
@@ -2470,7 +2531,7 @@ class EduBoticsApp:
                 self._set_status("Freigabe nicht gestartet — manueller Befehl")
                 self._show_manual_elevation_fallback(
                     "Geräte-Freigabe manuell ausführen",
-                    f"powershell.exe {ps_args}",
+                    manual_cmd,
                 )
                 return
             if exit_code != 0:

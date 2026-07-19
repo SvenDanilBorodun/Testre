@@ -732,6 +732,7 @@ def check_for_updates(log=None) -> bool:
         return False
 
     any_updated = False
+    any_failed = False
     pulled_digests: dict[str, Optional[str]] = {}
     total = len(ALL_IMAGES)
 
@@ -788,6 +789,7 @@ def check_for_updates(log=None) -> bool:
             # Persist whatever we know (the local digest, if any) so the
             # next-run age check still works.
             pulled_digests[image] = local_digest
+            any_failed = True
             continue
 
         # Pull succeeded — record the new digest for last-pull state.
@@ -814,10 +816,19 @@ def check_for_updates(log=None) -> bool:
         except (FileNotFoundError, subprocess.TimeoutExpired):
             pass
 
-    if any_updated:
+    if any_updated and not any_failed:
         # Reclaim disk: first drop superseded TAGGED versions (prune -f is
         # dangling-only, so it can't remove e.g. a leftover :2.11.0 after
         # :2.13.0 lands), then dangling layers.
+        #
+        # ONLY when every image is current. Pruning after a PARTIAL upgrade
+        # (some images pulled, one failed on both registries) would untag the
+        # failed image's still-working previous version and then prune its
+        # now-dangling layers — the student ends with NEITHER the new NOR the
+        # old image, and the EDUBOTICS_IMAGE_TAG rollback is destroyed.
+        # (`compose down` ran earlier in startup, so no container holds a
+        # reference and docker's in-use guard does not protect here.) The
+        # superseded tags are reclaimed on the next fully-successful run.
         prune_superseded_tags(log=log)
         try:
             subprocess.run(

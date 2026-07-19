@@ -199,14 +199,19 @@ class PromptFinalizeInstallTest(unittest.TestCase):
     def _make(self, *, reason=None, consent=True, elevate=(0, False, None),
               reboot_pending=False, distro_registered=True, script="finalize.ps1"):
         calls = {"elevate": [], "log": [], "status": [], "prereq": 0,
-                 "showinfo": [], "showwarning": [], "showerror": []}
+                 "showinfo": [], "showwarning": [], "showerror": [],
+                 "askyesno": [], "fallback": []}
 
-        def _fake_elevate(exe, args):
+        def _fake_elevate(exe, args, show=1):
             calls["elevate"].append(args)
             return elevate
 
+        def _fake_askyesno(*a, **k):
+            calls["askyesno"].append(a)
+            return consent
+
         fake_mb = types.SimpleNamespace(
-            askyesno=lambda *a, **k: consent,
+            askyesno=_fake_askyesno,
             showinfo=lambda *a, **k: calls["showinfo"].append(a),
             showwarning=lambda *a, **k: calls["showwarning"].append(a),
             showerror=lambda *a, **k: calls["showerror"].append(a),
@@ -217,7 +222,14 @@ class PromptFinalizeInstallTest(unittest.TestCase):
         ns = {
             "os": os,
             "messagebox": fake_mb,
+            # The merged elevation surface: _prompt_finalize_install invokes
+            # _run_privileged (direct when already elevated, UAC otherwise);
+            # stub both names to the same recorder so the routing tests keep
+            # exercising the SAME return contract either way.
             "_elevate_and_wait": _fake_elevate,
+            "_run_privileged": _fake_elevate,
+            "_is_elevated": lambda: False,
+            "_edubotics_diag_dir": lambda: tempfile.gettempdir(),
             "docker_manager": fake_dm,
             "threading": types.SimpleNamespace(Thread=_SyncThread),
             "__package__": "gui.app",
@@ -229,6 +241,10 @@ class PromptFinalizeInstallTest(unittest.TestCase):
             _resolve_finalize_script=lambda: script,
             _reboot_required_pending=lambda: reboot_pending,
             _finalize_completed=False,
+            _finalize_in_progress=False,
+            _elevation_prewarn=lambda: False,
+            _show_manual_elevation_fallback=lambda title, cmd: calls[
+                "fallback"].append((title, cmd)),
             _log=calls["log"].append,
             _set_status=calls["status"].append,
             _run_prerequisite_checks=lambda: calls.__setitem__(
@@ -251,11 +267,27 @@ class PromptFinalizeInstallTest(unittest.TestCase):
         self.assertEqual(calls["elevate"], [])
         self.assertTrue(calls["showerror"])
 
-    def test_decline_does_not_elevate(self):
-        method, owner, calls = self._make(consent=False)
+    def test_default_path_auto_runs_without_dialog(self):
+        # The non-destructive path runs AUTOMATICALLY (no consent dialog — the
+        # student never clicks a "finish setup" button). consent=False proves
+        # the outcome cannot depend on a dialog answer: no dialog is shown.
+        method, owner, calls = self._make(consent=False,
+                                          elevate=(0, False, None),
+                                          distro_registered=True)
         self._run(method, owner)
+        self.assertEqual(calls["askyesno"], [], "no dialog on the default path")
+        self.assertEqual(len(calls["elevate"]), 1)
+
+    def test_rootfs_mismatch_decline_logs_verschoben_and_clears_guard(self):
+        # The ONE remaining dialog: destructive rootfs re-import. Decline must
+        # not elevate, must log the German deferral, and must clear the
+        # re-entrancy guard so a later attempt is not locked out.
+        method, owner, calls = self._make(reason="rootfs_mismatch",
+                                          consent=False)
+        self._run(method, owner, reason="rootfs_mismatch")
         self.assertEqual(calls["elevate"], [])
         self.assertTrue(any("verschoben" in m for m in calls["log"]))
+        self.assertFalse(owner._finalize_in_progress)
 
     # ── The five finalize outcomes ──────────────────────────────────────
     # Outcome 1/5: done.

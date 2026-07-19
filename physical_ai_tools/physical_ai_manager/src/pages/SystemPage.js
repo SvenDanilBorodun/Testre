@@ -357,6 +357,40 @@ export default function SystemPage() {
           className="mb-6 md:mb-8"
         />
 
+        {/* System-files drift. `system_files_stale` is true ONLY when the agent
+            found PROVEN drift: it byte-compares the installed systemd units
+            against the ones it ships (pi_agent/systemd/). Reason: the
+            self-update rsyncs pi_agent/ ONLY — units and compose stay frozen at
+            provisioning time and otherwise fail silently (e.g. a newly
+            forwarded EDUBOTICS_* env). Without this banner the warning lived
+            only in the Protokoll, which nobody reads. The remedy is
+            deliberately NON-DESTRUCTIVE: setup.sh is idempotent and every
+            volume (datasets, models, calibration) survives — NEVER tell anyone
+            here to re-flash the SD card (an earlier draft did, at ~100 % false
+            positives). */}
+        {agentStatus?.system_files_stale && (
+          <div
+            role="alert"
+            className="mb-4 rounded-[var(--radius-sm)] border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800"
+          >
+            <div className="font-semibold">Systemdateien sind veraltet</div>
+            <p className="mt-1">
+              Die installierten Systemdateien
+              {agentStatus.system_files_version
+                ? <> (Stand: Version <span className="font-mono">{agentStatus.system_files_version}</span>)</>
+                : null}{' '}
+              unterscheiden sich von denen der Agent-Version{' '}
+              <span className="font-mono">{agentStatus.agent_version || '—'}</span>.
+              Aktualisierungen erneuern nur den Agenten und die Images — nicht diese Dateien.
+            </p>
+            <p className="mt-1">
+              Bitte <span className="font-mono">sudo ./setup.sh</span> aus dem
+              EduBotics-Quellordner erneut ausführen. Die Datensätze der Schüler bleiben
+              dabei erhalten.
+            </p>
+          </div>
+        )}
+
         {/* Pi-IP-Anzeige + Verbindungszustand */}
         <Card className="mb-4">
           <div className="flex flex-wrap items-center justify-between gap-4">

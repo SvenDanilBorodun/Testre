@@ -20,7 +20,19 @@ param(
     [string]$RootfsPath   = "",  # resolved below if empty
     # Restore the pre-2026-06 unconditional unregister+re-import (manual
     # recovery from a corrupted distro; DESTROYS the Docker volumes).
-    [switch]$Force
+    [switch]$Force,
+    # Permit a version-mismatch re-import (which DESTROYS the Docker volumes).
+    # The .iss Step 4 passes this because ShouldImportDistro already obtained the
+    # student's consent via a MsgBox; finalize_install.ps1 does NOT pass it, so a
+    # GUI-driven finalize can never silently wipe data on a rootfs bump.
+    [switch]$AllowDestructiveReimport,
+    # Bypass the .reboot_required deferral guard below. finalize_install.ps1
+    # passes this AFTER it has authoritatively confirmed (via the WSL/VMP
+    # optional-feature state) that the pending reboot already happened — so the
+    # stale flag, which finalize clears only after a FULL success, must not defer
+    # the import here. The installer's Step 4 does NOT pass it (its
+    # ShouldImportDistro Check already gates on IsRebootRequired).
+    [switch]$PostReboot
 )
 
 # EAP=Continue, NOT Stop (load-bearing — mirrors verify_system.ps1). In Windows
@@ -38,9 +50,16 @@ function Write-OK   { param([string]$msg) Write-Host "   OK: $msg" -ForegroundCo
 function Write-Warn { param([string]$msg) Write-Host "   WARN: $msg" -ForegroundColor Yellow }
 function Write-FAIL { param([string]$msg) Write-Host "   FAIL: $msg" -ForegroundColor Red }
 
-# Bail if prerequisites phase still needs a reboot (WSL2 not fully up yet)
+# Bail if prerequisites phase still needs a reboot (WSL2 not fully up yet).
+#
+# -PostReboot bypasses this guard. finalize_install.ps1 keeps .reboot_required
+# set until its FULL success (import + pull), so that a mid-way failure still
+# leaves the GUI the "reboot pending" routing signal it reads BEFORE our exit
+# code. That means the flag is still on disk when finalize calls us on the
+# legitimate post-reboot path — without the switch we would defer forever and
+# finalize would report success over an import that never ran.
 $rebootFlag = Join-Path $PSScriptRoot ".reboot_required"
-if (Test-Path $rebootFlag) {
+if ((Test-Path $rebootFlag) -and (-not $PostReboot)) {
     Write-Warn "Reboot pending from WSL2 install — deferring EduBotics import until next launch."
     exit 0
 }
@@ -118,10 +137,30 @@ if ($existing) {
         Write-Host "   Lokale Daten (Datensätze, Modelle, Kalibrierung) bleiben erhalten." -ForegroundColor Green
         $skipImport = $true
     } else {
+        # Destructive re-import (unregister + re-import) WIPES the distro's
+        # Docker volumes (datasets, HF cache, calibration). Require explicit
+        # consent — -Force (manual recovery) OR -AllowDestructiveReimport (the
+        # .iss Step 4, gated behind the ShouldImportDistro consent MsgBox).
+        # Without either, REFUSE rather than silently wipe: this closes the gap
+        # where finalize_install.ps1 (which passes NEITHER) would have wiped a
+        # student's data on a rootfs bump during a reboot-pending upgrade.
+        if (-not ($Force -or $AllowDestructiveReimport)) {
+            Write-FAIL "Rootfs-Update erfordert eine Neuinstallation über den Installer."
+            Write-Host "   Vorhandene Rootfs-Version '$distroVersion' passt nicht zur neuen Version '$shippedVersion'." -ForegroundColor Yellow
+            Write-Host "   Ein automatischer Neuaufbau würde lokale Daten löschen und wird ohne" -ForegroundColor Yellow
+            Write-Host "   Zustimmung nicht durchgeführt. Bitte den EduBotics-Installer erneut" -ForegroundColor Yellow
+            Write-Host "   ausführen — er fragt vor dem Neuaufbau nach Zustimmung." -ForegroundColor Yellow
+            # 12, not 1: this refusal has ONE specific remedy, and it is the
+            # designed-for outcome rather than a malfunction.
+            # finalize_install.ps1 maps it to the German "Installer erneut
+            # ausführen" instruction instead of a generic failure. Inno's [Run]
+            # Step 4 ignores exit codes, so this code is finalize-only.
+            exit 12
+        }
         if ($Force) {
             Write-Host "   Re-Import erzwungen (-Force)." -ForegroundColor White
         } else {
-            Write-Host "   Rootfs-Version unterschiedlich (vorhanden: '$distroVersion', neu: '$shippedVersion')." -ForegroundColor White
+            Write-Host "   Rootfs-Version unterschiedlich (vorhanden: '$distroVersion', neu: '$shippedVersion') — Neuaufbau mit Zustimmung." -ForegroundColor White
         }
         Write-Host "   Unregistering existing $DistroName (upgrade)..." -ForegroundColor White
         wsl --unregister $DistroName *>$null
@@ -304,3 +343,12 @@ try {
 } catch { }
 
 Write-Step "EduBotics-Umgebung bereit."
+
+# Explicit success — mirrors pull_images.ps1. Without this, the script's exit
+# code falls through to the COSMETIC `docker --version` probe above: under
+# EAP=Continue a non-throwing native failure never enters the catch and never
+# resets $LASTEXITCODE, and Write-Step is a Write-Host (no effect on it). A
+# transient wsl/distro hiccup in that one log line therefore made
+# finalize_install.ps1 report "Rootfs-Import fehlgeschlagen" over an import that
+# actually succeeded.
+exit 0

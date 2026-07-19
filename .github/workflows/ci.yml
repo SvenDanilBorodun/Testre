@@ -167,7 +167,11 @@ jobs:
           if [ -z "$BASE" ] || ! git cat-file -e "$BASE" 2>/dev/null; then
             BASE="$(git rev-parse HEAD~1 2>/dev/null || git hash-object -t tree /dev/null)"
           fi
-          CHANGED="$(git diff --name-only "$BASE" HEAD -- robotis_ai_setup/wsl_rootfs/ | grep -v 'ROOTFS_VERSION$' || true)"
+          # Exclude *.md: docs under wsl_rootfs/ (README.md) are maintainer notes
+          # that do NOT ship in the rootfs tarball, so a doc-only edit must not
+          # force a ROOTFS_VERSION bump (which would trigger a destructive distro
+          # re-import on every student's upgrade). Only rootfs CONTENT needs a bump.
+          CHANGED="$(git diff --name-only "$BASE" HEAD -- robotis_ai_setup/wsl_rootfs/ | grep -v 'ROOTFS_VERSION$' | grep -viE '\.md$' || true)"
           BUMPED="$(git diff --name-only "$BASE" HEAD -- robotis_ai_setup/wsl_rootfs/ROOTFS_VERSION || true)"
           if [ -n "$CHANGED" ] && [ -z "$BUMPED" ]; then
             echo "::error::wsl_rootfs/ changed without bumping ROOTFS_VERSION — the installer upgrade gate would skip shipping the new rootfs:"

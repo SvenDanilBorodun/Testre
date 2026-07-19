@@ -299,8 +299,49 @@ install_agent_tree() {
 
     # VERSION so constants._read_version_file resolves the product version even
     # when the agent tarball is deployed without the source tree beside it.
+    local pinned_version=""
     if [ -n "$REPO_ROOT" ] && [ -f "${REPO_ROOT}/VERSION" ]; then
         install -m 0644 "${REPO_ROOT}/VERSION" "${INSTALL_DIR}/VERSION"
+        pinned_version="$(tr -d '[:space:]' < "${REPO_ROOT}/VERSION" 2>/dev/null || true)"
+    fi
+
+    # Pin IMAGE_TAG to THIS release at provision time (audit shared-H2). The
+    # docker/versions.env pin file is otherwise written ONLY by
+    # release.yml::pi-agent-tarball and baked into the self-update tarball — it is
+    # ABSENT from a source-tree provision (this path). Without it constants.IMAGE_TAG
+    # resolves to the "latest" default, and because docker-publish pushes :latest on
+    # every push to main, every source-provisioned / golden-cloned Pi would silently
+    # ride main HEAD instead of its release (the exact drift the pin exists to kill).
+    # We write it UNDER the installed pi_agent/ tree so it lands on
+    # constants._read_versions_env's FIRST probe (pi_agent/docker/versions.env) AND
+    # inside the self-update rsync scope, so a later release's tarball (which bakes
+    # its own versions.env) carries the pin forward. Written AFTER the rsync above so
+    # its --delete can't drop it. Mirrors exactly what the release tarball bakes.
+    if [ -n "$pinned_version" ]; then
+        mkdir -p "${INSTALL_DIR}/pi_agent/docker"
+        printf 'IMAGE_TAG=%s\n' "$pinned_version" \
+            > "${INSTALL_DIR}/pi_agent/docker/versions.env"
+        chmod 0644 "${INSTALL_DIR}/pi_agent/docker/versions.env" 2>/dev/null || true
+
+        # System-files provenance stamp (audit M1). docker-compose.opi.yml + the
+        # systemd units are installed here from the source checkout but are NOT in
+        # the self-update tarball (which rsyncs pi_agent/ ONLY), so a release that
+        # changes a forwarded EDUBOTICS_* env / a healthcheck / a unit never reaches
+        # a deployed Pi — a silent orchestration fail-open. This stamp records the
+        # version those on-disk system files came from; it lives OUTSIDE pi_agent/
+        # so a self-update (which does not touch compose/units) does NOT advance it.
+        # CONTEXT ONLY: the agent does NOT treat stamp != APP_VERSION as drift —
+        # that inequality is the normal state of every self-updated Pi (the stamp
+        # cannot advance by design) and proves nothing about the files' content.
+        # The agent proves drift by byte-comparing the units it installed below
+        # against the ones it ships, and uses this stamp only to name where the
+        # on-disk system files came from.
+        printf '%s\n' "$pinned_version" > "${INSTALL_DIR}/.system-files-version"
+        chmod 0644 "${INSTALL_DIR}/.system-files-version" 2>/dev/null || true
+        log "Pinned IMAGE_TAG=${pinned_version} + stamped system-files version (release-pinned, not main HEAD)."
+    else
+        warn "No readable repo VERSION — IMAGE_TAG will fall back to 'latest' (this Pi would track main HEAD)."
+        warn "Provision from a full source checkout so the repo-root VERSION file is present."
     fi
 }
 
@@ -366,7 +407,7 @@ seed_env() {
     chown root:root "$ENV_FILE"
 }
 
-# ─── Step 8: systemd units ────────────────────────────────────────────────────
+# ─── Step 9: systemd units (starts the agent; runs AFTER pull_images) ─────────
 install_units() {
     log "Installing systemd units..."
     install -m 0644 "${SCRIPT_DIR}/systemd/edubotics-pi.service" \
@@ -383,7 +424,7 @@ install_units() {
     systemctl restart edubotics-pi.service
 }
 
-# ─── Step 9: pull the -opi images (best-effort, GHCR→Hub fallback) ────────────
+# ─── Step 8: pull the -opi images (GHCR→Hub fallback; runs BEFORE install_units)
 pull_images() {
     log "Pulling the -opi container images (GHCR primary, Docker Hub fallback)..."
     if ( cd "$INSTALL_DIR" && python3 -c \
@@ -451,8 +492,20 @@ enable_zram
 assign_hostname
 install_agent_tree
 seed_env
-install_units
+# pull_images BEFORE install_units, which starts the agent. The agent's boot()
+# brings the manager up via compose, whose lazy `pull_policy: missing` is
+# GHCR-ONLY — no Docker Hub fallback, no retry. On a GHCR-blocked bench (the
+# exact network the dual-registry design exists for) that manager start fails,
+# boot() only logs [WARNUNG] and never retries it. The resilient pull below would
+# then succeed via the Hub twin, but nothing would restart the manager — so the
+# wizard gate at the end of this script polls for ~6 min and blames „der
+# Image-Pull war unvollständig", which is precisely backwards: the pull worked,
+# the start that preceded it did not. Acquiring the images first makes the
+# agent's first manager start find them already on disk, so the gate's diagnosis
+# is only ever reached when it is true. pull_images needs the installed tree
+# (install_agent_tree) but nothing from the units, so this order is safe.
 pull_images
+install_units
 
 # Verify the agent actually came up before we print the label — otherwise a
 # teacher labels a rig whose wizard never serves.
@@ -463,6 +516,36 @@ if ! systemctl is-active --quiet edubotics-pi.service; then
     systemctl status edubotics-pi.service --no-pager 2>/dev/null || true
     exit 1
 fi
+
+# The agent being active is necessary but NOT sufficient (audit M3): Restart=always
+# keeps the agent up even when the physical_ai_manager container — the wizard the
+# student actually opens — never came up (e.g. its image pull was incomplete). A
+# labelled-but-non-serving rig is exactly the hazard this gate closes. The agent's
+# boot() brings the manager up; poll its port-80 UI (the manager healthcheck
+# target) with bounded retries before we declare provisioning done + print a label.
+log "Verifying the manager/wizard actually serves on http://127.0.0.1/ ..."
+wizard_ok=0
+for _ in {1..30}; do
+    if curl -fsS -o /dev/null --max-time 5 http://127.0.0.1/version.json 2>/dev/null \
+       || curl -fsS -o /dev/null --max-time 5 http://127.0.0.1/ 2>/dev/null; then
+        wizard_ok=1
+        break
+    fi
+    sleep 2
+done
+if [ "$wizard_ok" != "1" ]; then
+    # German: the bench operator is a German-speaking teacher/technician, and the
+    # printed case label is already German. (These lines carry no [FEHLER]/[WARNUNG]/
+    # [STOPP] marker, so german-strings-lint does not scan them; real umlauts anyway.)
+    err "Der EduBotics-Assistent (Weboberfläche) wird nicht ausgeliefert — der Manager-Container läuft nicht."
+    err "Wahrscheinliche Ursache: der Image-Pull war unvollständig (kein Netzzugang zu GHCR/Docker Hub)."
+    err "Bitte die Netzverbindung herstellen und 'sudo ./setup.sh' erneut ausführen (idempotent),"
+    err "erst danach das Etikett drucken — kein Etikett für einen Pi ohne funktionierende Weboberfläche."
+    err "Diagnose: docker ps ; docker logs physical_ai_manager ; journalctl -u edubotics-pi -n 50"
+    docker ps --filter 'name=physical_ai_manager' 2>/dev/null || true
+    exit 1
+fi
+log "Manager/wizard is serving on http://127.0.0.1/ (version.json / index reachable)."
 
 log "Agent running. Web wizard: http://$(hostname).local/"
 print_label

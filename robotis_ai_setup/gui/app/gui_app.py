@@ -148,8 +148,12 @@ def _elevate_and_wait(exe: str, args: str, show: int = 1):
         # hInstApp carries the ShellExecute-specific reason (a fake HINSTANCE
         # <= 32) that classifies the failure more precisely than GetLastError.
         h_inst = ctypes.cast(info.hInstApp, ctypes.c_void_p).value or 0
+        # The cancel text deliberately does NOT contain "abgebrochen": the
+        # caller echoes `UAC-Fehler: {err}` into the log, and the routing
+        # regression test asserts on "abgebrochen" — the echo must not be able
+        # to satisfy it (UacCancelDetectionTest pins this).
         if err == ERROR_CANCELLED:
-            return None, True, "UAC abgebrochen"
+            return None, True, "UAC-Zustimmung verweigert"
         reason = _SE_ERR_REASONS.get(h_inst)
         if reason:
             return None, False, f"{reason} (Fehler {err}, hInstApp={h_inst})"
@@ -423,6 +427,19 @@ def _primary_lan_ip() -> str:
     return "127.0.0.1"
 
 
+# ── finalize_install.ps1 exit codes — THE contract, mirrored here ────────────
+# The script's exit code is the AUTHORITY on what happened; `.reboot_required`
+# is NOT a reboot discriminator (it means "the deferred work is not finished",
+# which is true of every non-zero code below) and must never be read as one.
+# Keep in lockstep with the $EXIT_* constants in installer/scripts/
+# finalize_install.ps1 — the whole reason 10 and 12 became dead code and every
+# failure reported "Neustart erforderlich" is that these two halves were owned
+# by different people and only one of them moved.
+FINALIZE_EXIT_DONE = 0      # import + pull succeeded; the flag was cleared
+FINALIZE_EXIT_REBOOT = 10   # host reboot still required; nothing installed yet
+FINALIZE_EXIT_CONSENT = 12  # rootfs rebuild needs consent -> re-run the installer
+
+
 class EduBoticsApp:
     """Hauptfenster der Anwendung."""
 
@@ -454,6 +471,11 @@ class EduBoticsApp:
         # State
         self.hardware = device_manager.HardwareConfig()
         self.cameras: list[device_manager.CameraDevice] = []
+        # Set once finalize_install.ps1 reports FINALIZE_EXIT_DONE, so a
+        # .reboot_required it could not delete can't re-route the rest of the
+        # session back into finalize. Session-scoped on purpose: a next launch
+        # retries the (idempotent) finalize once, which retries the delete.
+        self._finalize_completed = False
         # Native camera capture bridge (Windows student path). Created on
         # environment start, stopped on environment stop / app close.
         self.camera_bridge = None
@@ -1034,7 +1056,7 @@ class EduBoticsApp:
             try:
                 removed = update_checker.cleanup_stale_installers()
                 if removed > 0:
-                    self._log(f"Aufraeumen: {removed} alte Installer-Dateien geloescht.")
+                    self._log(f"Aufräumen: {removed} alte Installer-Dateien gelöscht.")
             except Exception:
                 pass
 
@@ -1076,6 +1098,28 @@ class EduBoticsApp:
         if resolved:
             self._log(f"usbipd: OK ({resolved})")
 
+        # A pending-reboot install deferred the distro import + image pull to a
+        # post-reboot finalize: install_prerequisites.ps1 wrote .reboot_required
+        # (after a DISM rc=3010) and the .iss ShouldImportDistro/ShouldPullImages
+        # gates skipped Steps 4+5. On a FRESH install the distro is missing and
+        # the branch below already routes to finalize; but on an UPGRADE the old
+        # distro survives, so without this the GUI would silently pull images
+        # itself and never complete finalize / clear the flag / prune superseded
+        # tags (the v2.13.0 pilot incident). Route BOTH cases through finalize,
+        # which clears the flag, re-imports ONLY if the rootfs actually changed,
+        # pulls, and prunes.
+        #
+        # The flag means "deferred work outstanding", not "reboot needed" — the
+        # reason only ever comes from finalize's exit code. _finalize_completed
+        # is the override: finalize already reported EXIT_DONE this session, so a
+        # flag it merely failed to delete must not re-route us into an endless
+        # finalize/UAC loop.
+        if self._reboot_required_pending() and not self._finalize_completed:
+            self._log("Ein ausstehender Windows-Neustart hat die Einrichtung unterbrochen.")
+            self.root.after(0, lambda: self.progress.stop())
+            self.root.after(0, self._prompt_finalize_install)
+            return
+
         # Check the EduBotics WSL2 distro is installed and docker engine is up
         self._set_status("EduBotics-Umgebung wird geprüft...")
         if not docker_manager.is_distro_registered():
@@ -1106,6 +1150,29 @@ class EduBoticsApp:
                 return
         self._log("EduBotics-Umgebung: OK")
 
+        # ── Rootfs ↔ image version handshake ──────────────────────────────
+        # A rootfs bump ships new dockerd pins / modprobe list / udev rules that
+        # a new image set may depend on. If the installer's re-import was skipped
+        # or declined (ShouldImportDistro "Nein", or a reboot-pending dead-end),
+        # the OLD distro survives and the GUI would otherwise pull the NEW
+        # :X.Y.Z images straight onto the stale rootfs — the exact silent
+        # version-skew CLAUDE.md warns about ("new images on old rootfs with no
+        # handshake"). Compare the distro's baked /etc/edubotics-rootfs-version
+        # to the shipped wsl_rootfs/ROOTFS_VERSION and, on a POSITIVE mismatch,
+        # refuse to proceed: route to the CONSENTED re-import instead. Fails OPEN
+        # on any unreadable/absent stamp so a hiccup never bricks a classroom.
+        if self._rootfs_rebuild_required():
+            self._log(
+                "[WARNUNG] Die EduBotics-Umgebung muss neu aufgebaut werden — "
+                "das System-Update passt nicht zur installierten Umgebung. "
+                "Es werden KEINE neuen Images auf die alte Umgebung geladen."
+            )
+            self.root.after(0, lambda: self.progress.stop())
+            self.root.after(
+                0, lambda: self._prompt_finalize_install(reason="rootfs_mismatch")
+            )
+            return
+
         # ── Lifecycle: the GUI is the SOLE owner of the container lifecycle ──
         # The robot stack must come up ONLY after the student has scanned both
         # arms and clicked "Umgebung starten" — never before. Two paths can
@@ -1121,6 +1188,18 @@ class EduBoticsApp:
         self._set_status("Vorherige Sitzung wird aufgeräumt...")
         if docker_manager.ensure_environment_stopped(log=self._log):
             self._log("Umgebung gestoppt — sie startet erst, wenn du auf 'Umgebung starten' klickst.")
+
+        # A FROZEN (.exe) build should always resolve IMAGE_TAG from the baked
+        # docker/versions.env. If it resolved to "latest", versions.env was
+        # missing/unreadable and this install will silently track main-HEAD
+        # :latest instead of its pinned release (the Windows analogue of the
+        # documented "Pi tracks main HEAD" hazard) — surface it so a teacher can
+        # spot a mis-baked / half-copied install.
+        if getattr(sys, "frozen", False) and IMAGE_TAG == "latest":
+            self._log(
+                "[WARNUNG] Image-Version nicht bestimmbar (versions.env fehlt) — "
+                "es wird 'latest' verwendet. Bitte EduBotics neu installieren."
+            )
 
         # Check images
         self._set_status("Images werden geprüft...")
@@ -1472,6 +1551,51 @@ class EduBoticsApp:
             ttk.Button(row, text="Schließen", command=win.destroy).pack(side=tk.RIGHT)
 
         self.root.after(0, _build)
+    def _reboot_required_pending(self) -> bool:
+        """True when install_prerequisites.ps1 left a `.reboot_required` flag.
+
+        The installer writes this (under {app}\\scripts) when a Windows feature
+        enable returned DISM rc=3010, and the .iss ShouldImportDistro /
+        ShouldPullImages gates then skip the distro import + image pull until a
+        reboot. On a FRESH install the distro is missing and the prereq check
+        routes to finalize anyway; on an UPGRADE the old distro survives, so
+        without reading this flag the GUI would silently pull images itself and
+        never complete finalize / clear the flag / prune (the v2.13.0 pilot
+        incident). Read-only (the flag lives under Program Files; only the
+        elevated finalize_install.ps1 can clear it)."""
+        from .constants import INSTALL_DIR
+        for p in (
+            os.path.join(INSTALL_DIR, "scripts", ".reboot_required"),              # production
+            os.path.join(INSTALL_DIR, "installer", "scripts", ".reboot_required"),  # dev tree
+        ):
+            if os.path.isfile(p):
+                return True
+        return False
+
+    def _rootfs_rebuild_required(self) -> bool:
+        """True on a POSITIVE rootfs-version mismatch (both stamps known + differ).
+
+        The distro bakes /etc/edubotics-rootfs-version; the shipped expectation
+        is wsl_rootfs/ROOTFS_VERSION under INSTALL_DIR. Returns True ONLY when
+        both are non-empty and unequal — the installer's re-import was skipped or
+        declined and the NEW images would otherwise run on the OLD rootfs. Fails
+        OPEN (returns False) whenever EITHER stamp is unreadable/absent (dev
+        build without wsl_rootfs, a pre-2.6.1 distro predating the marker, or a
+        transient wsl.exe error) so a read hiccup never blocks startup. Mirrors
+        the .iss ShouldImportDistro version comparison (both '' → skip)."""
+        from .constants import INSTALL_DIR
+        version_file = os.path.join(INSTALL_DIR, "wsl_rootfs", "ROOTFS_VERSION")
+        try:
+            with open(version_file, "r", encoding="utf-8") as fh:
+                shipped = fh.read().strip()
+        except (OSError, UnicodeDecodeError):
+            shipped = ""
+        if not shipped:
+            return False  # can't determine what we ship — fail open
+        distro = docker_manager.read_rootfs_version()
+        if not distro:
+            return False  # can't read the distro stamp — fail open
+        return shipped != distro
 
     def _resolve_finalize_script(self):
         """Find finalize_install.ps1. Supports both production and dev layouts."""
@@ -1552,7 +1676,7 @@ class EduBoticsApp:
             # Diagnostics are best-effort — never let them raise into startup.
             pass
 
-    def _prompt_finalize_install(self):
+    def _prompt_finalize_install(self, reason=None):
         """Finish setup AUTOMATICALLY after a post-reboot continuation.
 
         When WSL2 was installed fresh, the installer defers the rootfs import
@@ -1561,6 +1685,15 @@ class EduBoticsApp:
         "finish setup" button or opens a terminal. On an admin-capable account the
         only OS-level interaction is the standard UAC consent; the setup itself
         (import + image pull) then runs unattended and is idempotent/resumable.
+
+        ``reason="rootfs_mismatch"`` is the ONE exception to the no-dialog rule:
+        the runtime rootfs↔image handshake found that the distro EXISTS but its
+        rootfs is older than this release ships, so completing the upgrade
+        re-imports the distro (DESTROYING its Docker volumes). We take the same
+        German data-loss consent the .iss shows and thread
+        ``-AllowDestructiveReimport`` into finalize so import proceeds (finalize
+        forwards it to import_edubotics_wsl.ps1); a decline leaves the stack
+        down rather than pulling new images onto the stale rootfs.
 
         Re-entrancy is guarded so a repeated prerequisite scan can't stack a
         second elevated launch on top of one already in flight.
@@ -1581,6 +1714,37 @@ class EduBoticsApp:
 
         self._finalize_in_progress = True
         self._log(f"Setup-Skript: {script}")
+        # A rootfs rebuild re-imports the distro and DESTROYS its Docker
+        # volumes, so it is the ONE path that still asks: explicit data-loss
+        # consent gates the destructive-import flag. Every other path runs
+        # automatically (see the docstring). The re-entrancy flag is already
+        # set — askyesno pumps the Tk event loop, so a concurrent prerequisite
+        # rescan during the modal must not stack a second finalize — which is
+        # why the decline path clears it explicitly.
+        allow_destructive = False
+        if reason == "rootfs_mismatch":
+            wants_run = messagebox.askyesno(
+                "EduBotics-Umgebung neu aufbauen",
+                "Die EduBotics-Umgebung muss neu aufgebaut werden (System-"
+                "Update).\n\n"
+                "Dabei werden alle lokal gespeicherten Daten gelöscht:\n"
+                "  - aufgenommene Datensätze (falls nicht zu Hugging Face "
+                "hochgeladen)\n"
+                "  - heruntergeladene Modelle\n"
+                "  - die Roboter-Studio-Kalibrierung\n\n"
+                "Tipp: Datensätze vorher in der Web-Oberfläche zu Hugging Face "
+                "hochladen.\n\n"
+                "Jetzt neu aufbauen? Dies erfordert einmalig Administrator-"
+                "Rechte.",
+                default=messagebox.NO,
+            )
+            if not wants_run:
+                self._finalize_in_progress = False
+                self._set_status("EduBotics-Umgebung nicht eingerichtet")
+                self._log("Einrichtung vom Benutzer verschoben.")
+                return
+            allow_destructive = True
+
         # When we already hold an admin token there is NO UAC prompt (UAC off or
         # "Never notify"), so word the status/log for the actual path taken.
         if _is_elevated():
@@ -1623,6 +1787,11 @@ class EduBoticsApp:
                 f'-LogPath "{log_file}" -MarkerPath "{marker_file}"'
             )
             self._elevation_prewarn()
+            # Only the rootfs-mismatch path consents to the destructive
+            # re-import; finalize forwards the switch to import_edubotics_wsl.ps1,
+            # whose guard otherwise REFUSES to wipe an existing distro's volumes.
+            if allow_destructive:
+                ps_args += " -AllowDestructiveReimport"
             exit_code, cancelled, err = _run_privileged(
                 exe="powershell.exe",
                 args=ps_args,
@@ -1651,42 +1820,87 @@ class EduBoticsApp:
             except OSError:
                 pass
 
-            # Re-check.
-            if docker_manager.is_distro_registered():
-                self._log("Einrichtung abgeschlossen. Systemprüfung wird fortgesetzt...")
-                self.root.after(0, lambda: self._run_prerequisite_checks())
-            else:
-                if cancelled:
-                    self._log("Einrichtung abgebrochen (UAC-Zustimmung verweigert).")
-                    self._set_status("Einrichtung abgebrochen — erneut versuchen")
-                    # Group-Policy auto-deny loops on ERROR_CANCELLED; escalate.
-                    n = getattr(self, "_cancel_count_finalize", 0) + 1
-                    setattr(self, "_cancel_count_finalize", n)
-                    if n >= 2:
-                        self._log("Mehrfach abgebrochen — manueller Befehl wird angeboten.")
-                        self._show_manual_elevation_fallback(
-                            "Einrichtung manuell abschließen",
-                            f"powershell.exe {ps_args}",
-                        )
-                elif exit_code is None:
-                    # Launch failure (never ran) — distinct from a numeric
-                    # non-zero exit. The missing marker corroborates it. Offer
-                    # the manual admin command as a fallback.
-                    self._log(
-                        "Einrichtung konnte nicht gestartet werden "
-                        "(kein Prozess). Manueller Befehl wird angeboten."
-                    )
-                    self._set_status("Einrichtung nicht gestartet — manueller Befehl")
+            # Route on finalize's EXIT CODE — it is the authority (see the
+            # FINALIZE_EXIT_* block at module scope). Do NOT route on
+            # .reboot_required: finalize keeps that flag set on EVERY unfinished
+            # outcome (failed pull, failed import, refused consent), so reading
+            # it first collapsed all of them into "Neustart erforderlich" and
+            # looped the student through reboots that could never help.
+            #
+            # exit 0 + is_distro_registered() is still the success gate: on an
+            # UPGRADE the old distro survives, so the registration check alone
+            # would call a mid-pull failure a success.
+            if cancelled:
+                self._log("Einrichtung abgebrochen (UAC-Zustimmung verweigert).")
+                self._set_status("Einrichtung abgebrochen — erneut versuchen")
+                # Group-Policy auto-deny loops on ERROR_CANCELLED; escalate.
+                n = getattr(self, "_cancel_count_finalize", 0) + 1
+                setattr(self, "_cancel_count_finalize", n)
+                if n >= 2:
+                    self._log("Mehrfach abgebrochen — manueller Befehl wird angeboten.")
                     self._show_manual_elevation_fallback(
                         "Einrichtung manuell abschließen",
                         f"powershell.exe {ps_args}",
                     )
-                else:
-                    self._log(
-                        f"Einrichtung fehlgeschlagen (exit {exit_code}). "
-                        "Siehe Protokoll oben."
-                    )
-                    self._set_status("Einrichtung fehlgeschlagen")
+            elif exit_code == FINALIZE_EXIT_REBOOT:
+                self._log(
+                    "Neustart erforderlich: Bitte den PC neu starten und "
+                    "EduBotics danach erneut öffnen, um die Einrichtung "
+                    "abzuschließen."
+                )
+                self._set_status("Neustart erforderlich — danach EduBotics erneut öffnen")
+                self.root.after(0, lambda: messagebox.showinfo(
+                    "Neustart erforderlich",
+                    "Windows muss neu gestartet werden, um die EduBotics-"
+                    "Installation abzuschließen.\n\n"
+                    "Bitte starten Sie den PC neu und öffnen Sie EduBotics "
+                    "danach erneut.",
+                ))
+            elif exit_code == FINALIZE_EXIT_CONSENT:
+                # The rootfs must be rebuilt and nobody consented. Rebooting can
+                # never fix this; the installer is the only path that asks.
+                self._log(
+                    "Die EduBotics-Umgebung muss neu aufgebaut werden. Bitte "
+                    "den Installer erneut ausführen — er fragt vorher nach "
+                    "Ihrer Zustimmung."
+                )
+                self._set_status("Neuaufbau erforderlich — bitte den Installer erneut ausführen")
+                self.root.after(0, lambda: messagebox.showwarning(
+                    "Neuaufbau erforderlich",
+                    "Die EduBotics-Umgebung muss neu aufgebaut werden "
+                    "(System-Update).\n\n"
+                    "Bitte führen Sie den EduBotics-Installer erneut aus. Er "
+                    "fragt vor dem Neuaufbau nach Ihrer Zustimmung.\n\n"
+                    "Tipp: Laden Sie Ihre Datensätze vorher in der "
+                    "Web-Oberfläche zu Hugging Face hoch.",
+                ))
+            elif exit_code == FINALIZE_EXIT_DONE and docker_manager.is_distro_registered():
+                # Latch it: finalize said done, so a .reboot_required it could
+                # not delete (it warns and still exits 0) must not send
+                # _run_prerequisite_checks straight back here — that would loop
+                # the student through UAC prompts for the rest of the session.
+                self._finalize_completed = True
+                self._log("Einrichtung abgeschlossen. Systemprüfung wird fortgesetzt...")
+                self.root.after(0, lambda: self._run_prerequisite_checks())
+            elif exit_code is None:
+                # Launch failure (never ran) — distinct from a numeric
+                # non-zero exit. The missing marker corroborates it. Offer
+                # the manual admin command as a fallback.
+                self._log(
+                    "Einrichtung konnte nicht gestartet werden "
+                    "(kein Prozess). Manueller Befehl wird angeboten."
+                )
+                self._set_status("Einrichtung nicht gestartet — manueller Befehl")
+                self._show_manual_elevation_fallback(
+                    "Einrichtung manuell abschließen",
+                    f"powershell.exe {ps_args}",
+                )
+            else:
+                self._log(
+                    f"Einrichtung fehlgeschlagen (exit {exit_code}). "
+                    "Siehe Protokoll oben."
+                )
+                self._set_status("Einrichtung fehlgeschlagen")
 
         threading.Thread(target=_run_elevated, daemon=True).start()
 
@@ -1803,15 +2017,43 @@ class EduBoticsApp:
         btn_skip.config(command=_on_skip_click)
 
     def _launch_installer_and_exit(self, installer_path: str):
-        """Launch the downloaded installer and exit the GUI."""
+        """Launch the downloaded installer and exit the GUI deterministically.
+
+        Tear down everything holding a handle on {app}\\gui\\EduBotics.exe or a
+        live wsl.exe BEFORE exiting, then os._exit(0). The interactive installer
+        runs `[InstallDelete] {app}\\gui`, which deletes the *running*
+        EduBotics.exe — a lingering GUI process, keepalive wsl.exe, or webview
+        child would cause a sharing violation and a half-updated gui/. The old
+        `sys.exit(0)` only raised SystemExit, which is swallowed inside a Tk
+        `after`-callback on the main thread (this runs via root.after); os._exit
+        is an unconditional, deterministic process exit.
+        """
         self._log("Installer wird gestartet...")
         try:
             os.startfile(installer_path)
         except Exception as e:
             self._log(f"FEHLER: Installer konnte nicht gestartet werden: {e}")
             return
-        import sys
-        sys.exit(0)
+        # Release every handle on gui/ + the distro before the installer deletes
+        # us. Each teardown is best-effort — a raise here must not stop the exit.
+        for teardown in (
+            self._stop_camera_previews,
+            self._stop_camera_bridge,
+            self._stop_phone_server,
+            self._stop_rs_control_server,
+            webview_window.destroy_all,
+            docker_manager.stop_keepalive,
+        ):
+            try:
+                teardown()
+            except Exception:
+                pass
+        try:
+            sys.stdout.flush()
+            sys.stderr.flush()
+        except Exception:
+            pass
+        os._exit(0)
 
     # ── Arm Scanning ─────────────────────────────────────────────────
 
@@ -3335,8 +3577,76 @@ class EduBoticsApp:
             self.root.destroy()
 
 
+_SINGLE_INSTANCE_MUTEX = "Local\\EduBotics_GUI_SingleInstance"
+
+
+def _acquire_single_instance():
+    """Windows named-mutex single-instance guard for the MAIN GUI.
+
+    Returns a handle (keep it referenced for the process lifetime) when this is
+    the first main instance, or None when another main GUI already runs. Prevents
+    a double-launch (desktop shortcut + an auto-update relaunch) from BOTH
+    hitting the forced-update modal and downloading into the SAME fixed installer
+    path — interleaved writes corrupt the .exe that is then launched elevated —
+    or dual-running the elevated installer.
+
+    The `--webview` child is a second EduBotics.exe and must NOT be blocked: it
+    never calls run(), and we also guard on argv so a future direct call can't
+    self-block. Non-Windows or any ctypes failure returns a truthy sentinel — the
+    guard is a convenience, never a correctness dependency, so it fails OPEN.
+    """
+    if sys.platform != "win32":
+        return True
+    if "--webview" in sys.argv[1:]:
+        return True
+    try:
+        import ctypes
+        from ctypes import wintypes
+        ERROR_ALREADY_EXISTS = 183
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateMutexW.restype = wintypes.HANDLE
+        kernel32.CreateMutexW.argtypes = [
+            wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR,
+        ]
+        handle = kernel32.CreateMutexW(None, False, _SINGLE_INSTANCE_MUTEX)
+        last_err = ctypes.get_last_error()
+        if not handle:
+            return True  # couldn't create the mutex — fail open
+        if last_err == ERROR_ALREADY_EXISTS:
+            kernel32.CloseHandle(handle)
+            return None
+        return handle
+    except Exception:
+        return True
+
+
+def _focus_existing_window():
+    """Best-effort: bring an already-running EduBotics GUI to the foreground."""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        user32 = ctypes.windll.user32
+        hwnd = user32.FindWindowW(None, "EduBotics")
+        if hwnd:
+            SW_RESTORE = 9
+            user32.ShowWindow(hwnd, SW_RESTORE)
+            user32.SetForegroundWindow(hwnd)
+    except Exception:
+        pass
+
+
 def run():
     """GUI-Anwendung starten."""
+    instance_lock = _acquire_single_instance()
+    if instance_lock is None:
+        # Another EduBotics GUI is already running — focus it and exit instead
+        # of racing the update download / dual-launching the elevated installer.
+        _focus_existing_window()
+        return
     root = tk.Tk()
     app = EduBoticsApp(root)
+    # Pin the mutex handle to the app for the process lifetime — letting it get
+    # GC'd (and its handle closed) would release the guard while the GUI is up.
+    app._instance_lock = instance_lock
     root.mainloop()

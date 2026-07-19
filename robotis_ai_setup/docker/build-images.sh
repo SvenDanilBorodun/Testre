@@ -145,16 +145,23 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 # registry tag (which Railway / docker-publish re-tag on every deploy).
 # BUILD_ID picks up the GHA SHA when running in CI; falls back to git HEAD.
 _PROV_REV="${BUILD_ID:-$(git -C "$PROJECT_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)}"
-_PROV_CREATED="$(date -u +%FT%TZ)"
+# SOURCE_DATE_EPOCH backs the reproducible-builds claim set in docker-publish.yml.
+# Honour an upstream value if set, else derive from the most recent commit time.
+# Computed BEFORE the OCI 'created' label so that label is DERIVED from it — a
+# wall-clock 'created' made even the (otherwise reproducible) om/manager manifest
+# digests differ across a release's two docker-publish runs (audit A2).
+export SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-$(git -C "$PROJECT_ROOT" log -1 --pretty=%ct 2>/dev/null || echo 0)}"
+if [ -n "${SOURCE_DATE_EPOCH}" ] && [ "${SOURCE_DATE_EPOCH}" != "0" ]; then
+    _PROV_CREATED="$(date -u -d "@${SOURCE_DATE_EPOCH}" +%FT%TZ 2>/dev/null || date -u +%FT%TZ)"
+else
+    _PROV_CREATED="$(date -u +%FT%TZ)"
+fi
 _PROV_SOURCE="https://github.com/SvenDanilBorodun/Testre"
 OCI_LABELS=(
     --label "org.opencontainers.image.revision=${_PROV_REV}"
     --label "org.opencontainers.image.created=${_PROV_CREATED}"
     --label "org.opencontainers.image.source=${_PROV_SOURCE}"
 )
-# SOURCE_DATE_EPOCH backs the reproducible-builds claim set in docker-publish.yml.
-# Honour an upstream value if set, else derive from the most recent commit time.
-export SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-$(git -C "$PROJECT_ROOT" log -1 --pretty=%ct 2>/dev/null || echo 0)}"
 
 # ── layer flatten (whiteout reclaim) ─────────────────────────────────────────
 # The Dockerfile's SLIM_CUDA step removes torch+cu128 / nvidia-* / /usr/local/cuda,

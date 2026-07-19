@@ -37,6 +37,15 @@ ps_scripts = (
     if os.path.isdir(os.path.join('app', 'scripts')) else []
 )
 
+# Bundle the repo-root VERSION file at the dist root so
+# constants._read_version_file() resolves the REAL product version in a frozen
+# .exe (via sys._MEIPASS) instead of falling back to the baked-in literal. A
+# stale fallback reads LOW and re-offers the same forced update forever — this
+# closes that update-loop hazard at the source. This spec runs from
+# robotis_ai_setup/gui/, so the repo root is two levels up.
+_version_src = os.path.join('..', '..', 'VERSION')
+version_datas = [(_version_src, '.')] if os.path.isfile(_version_src) else []
+
 a = Analysis(
     ['main.py'],
     pathex=[],
@@ -44,7 +53,7 @@ a = Analysis(
     datas=([
         ('assets', 'assets'),
     ] if os.path.isdir('assets') and os.listdir('assets') != ['.gitkeep'] else [])
-        + ps_scripts + pywebview_datas,
+        + ps_scripts + pywebview_datas + version_datas,
     hiddenimports=[
         'tkinter',
         'tkinter.ttk',

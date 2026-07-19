@@ -3,7 +3,7 @@
 # Must run elevated (as Administrator)
 #
 # Behavior contract:
-#   1. Always append a transcript to %LOCALAPPDATA%\EduBotics\install_diagnostics.log
+#   1. Always append a transcript to %ProgramData%\EduBotics\install_diagnostics.log
 #      so post-mortems on "Arme scannen findet nichts" have raw evidence.
 #   2. Add policy for known PIDs (0103, 2202) + any VID-2F5D PID that is
 #      currently plugged in. If `--operation AutoBind` is rejected by the
@@ -20,18 +20,34 @@ $ROBOTIS_VID = "2F5D"
 $DistroName  = "EduBotics"
 
 # ── Diagnostics sink ───────────────────────────────────────────────────────
-$DiagDir = Join-Path $env:LOCALAPPDATA "EduBotics"
-if (-not (Test-Path $DiagDir)) {
-    New-Item -ItemType Directory -Path $DiagDir -Force | Out-Null
-}
+# %ProgramData%, not %LOCALAPPDATA% — see the rationale in
+# install_prerequisites.ps1 (the elevating admin is not the student on a managed
+# PC, which split this log across two profiles). Scope ("this folder and files",
+# never the subtree) is load-bearing — the WSL install root lives under this
+# directory; see install_prerequisites.ps1. Keep all five copies identical.
+$DiagDir = Join-Path $env:ProgramData "EduBotics"
+try {
+    if (-not (Test-Path $DiagDir)) {
+        New-Item -ItemType Directory -Path $DiagDir -Force | Out-Null
+    }
+    $DiagAcl = Get-Acl -Path $DiagDir
+    $DiagUsers = New-Object System.Security.Principal.SecurityIdentifier("S-1-5-32-545")
+    $DiagAcl.RemoveAccessRuleAll((New-Object System.Security.AccessControl.FileSystemAccessRule(
+        $DiagUsers, "Modify", "Allow")))
+    $DiagAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+        $DiagUsers, "Modify", "ObjectInherit", "NoPropagateInherit", "Allow")))
+    Set-Acl -Path $DiagDir -AclObject $DiagAcl
+} catch { }
 $DiagLog = Join-Path $DiagDir "install_diagnostics.log"
 
 function Write-Diag {
     param([string]$section, [string]$body)
-    $ts = (Get-Date).ToString("o")
-    $header = "`n=== $ts configure_usbipd::$section ==="
-    Add-Content -Path $DiagLog -Value $header
-    Add-Content -Path $DiagLog -Value $body
+    try {
+        $ts = (Get-Date).ToString("o")
+        $header = "`n=== $ts configure_usbipd::$section ==="
+        Add-Content -Path $DiagLog -Value $header
+        Add-Content -Path $DiagLog -Value $body
+    } catch { }
 }
 
 function Write-Step { param([string]$msg) Write-Host "`n>> $msg" -ForegroundColor Cyan }

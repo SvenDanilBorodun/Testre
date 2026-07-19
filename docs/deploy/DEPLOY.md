@@ -1,5 +1,7 @@
 # EduBotics — Deploy
 
+> ⚠️ **DEPRECATED / HISTORICAL (pre-GHCR, pre-golden-order).** This runbook predates the GHCR-primary migration and the release.yml W1→W6 golden order. Some steps here (e.g. manual `docker push nettername/*:latest`) **contradict CLAUDE.md Rule §6** — CI owns the student-facing images; they are never pushed from a workstation. For the current, authoritative process see **CLAUDE.md → "Six non-negotiable rules → §6 CI/CD deploys"** + `.github/workflows/`. Kept for historical context only.
+
 One-page reference. Pair with `APPLY_MIGRATIONS.sql` / `ROLLBACK_MIGRATIONS.sql` in this folder.
 
 ## The golden order (never reorder)

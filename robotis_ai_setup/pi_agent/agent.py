@@ -90,6 +90,9 @@ from .constants import (
     PHONE_FRAME_STALE_MAX_AGE_S,
     PORT_AGENT,
     REGISTRY,
+    SYSTEM_FILES_VERSION_FILE,
+    SYSTEMD_UNIT_DIR,
+    SYSTEMD_UNIT_NAMES,
     UPDATE_API_URL,
 )
 from .lan_ip import detect_lan_ip, list_interface_ips
@@ -243,6 +246,46 @@ def _validate_tar_member(member: "tarfile.TarInfo") -> None:
         raise ValueError(f"unsupported tar member type: {name!r}")
 
 
+def _fsync_path(path: str) -> None:
+    """fsync a single file or directory. Best-effort: a platform that refuses to
+    open a directory read-only (Windows — the tests' host, never the Pi) or a
+    file that vanished mid-walk is skipped, never raised."""
+    try:
+        fd = os.open(path, getattr(os, "O_RDONLY", 0))
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass  # some filesystems refuse fsync on a directory fd
+    finally:
+        os.close(fd)
+
+
+def _fsync_tree(path: str) -> None:
+    """Flush every file AND directory under ``path`` (and ``path`` itself) to
+    stable storage, so a later rename of ``path`` cannot be committed by the
+    filesystem ahead of the data it names.
+
+    This is what makes the self-update's rename swap crash-safe rather than
+    merely non-mixing. ``rename`` is atomic with respect to concurrent readers,
+    but that is an ORDERING property, not a DURABILITY one: ext4's
+    ``auto_da_alloc`` heuristic force-allocates delayed blocks only when a file
+    is renamed OVER an existing file — it does NOT cover renaming a DIRECTORY of
+    freshly-written files. Without this, a classroom power yank on eMMC can land
+    the new ``pi_agent/`` directory entry while its file contents are still
+    unallocated, i.e. zero-length modules → ImportError under systemd
+    ``Restart=always`` → a crash-loop with no self-heal. rsync does not fsync by
+    default, so nothing else in the apply path does this.
+    """
+    for root, dirs, files in os.walk(path):
+        for name in files:
+            _fsync_path(os.path.join(root, name))
+        for name in dirs:
+            _fsync_path(os.path.join(root, name))
+    _fsync_path(path)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Camera preview (lazy OpenCV) — the MJPEG endpoint's capture backend.
 # ─────────────────────────────────────────────────────────────────────────────
@@ -352,6 +395,20 @@ class AgentApp:
         # serializes behind the first on _lifecycle_lock (wasteful) or a 2nd
         # agent-self-update apply. Guarded by _update_lock.
         self._update_busy = False
+
+        # System-files drift (M1), resolved ONCE in boot() and reported by
+        # /status for a System-tab banner. `None` = no stamp on disk (a Pi
+        # provisioned before the stamp existed — say nothing) or not yet
+        # resolved; a string = the version the on-disk compose/systemd files
+        # came from, which boot() only records when it DISAGREES with
+        # APP_VERSION. Plain attribute: written once on the boot thread before
+        # the listeners start serving, read-only thereafter.
+        # PROVEN system-file drift (installed systemd units != the ones this
+        # agent ships) + the version stamp naming where those files came from.
+        # The stamp is context for the message, never the trigger — see
+        # _check_system_files_version.
+        self._system_files_stale: bool = False
+        self._system_files_version: Optional[str] = None
 
         # Cached /update/check result (the read-only availability probe the
         # forced PiUpdateGate polls). `None` or `(monotonic_ts, result_dict)`,
@@ -565,6 +622,16 @@ class AgentApp:
             "hostname": socket.gethostname(),
             "agent_ready": self._ready.is_set(),
             "agent_version": APP_VERSION,
+            # M1 drift banner. `system_files_stale` is True ONLY on drift proven
+            # by a byte-compare of the installed systemd units against the ones
+            # this agent ships — False on every healthy Pi, on every pre-stamp Pi
+            # and wherever the comparison is impossible. Additive keys: an old
+            # System tab that ignores them is unaffected. `system_files_version`
+            # is the provisioning stamp (may be None even when stale — an old Pi
+            # can be drifted AND unstamped), so a banner should name it only when
+            # present rather than assume the pair.
+            "system_files_stale": self._system_files_stale,
+            "system_files_version": self._system_files_version,
             "manager_up": container.get("physical_ai_manager") == "running",
             "robot_tier_up": all(
                 container.get(n) == "running"
@@ -1036,34 +1103,59 @@ class AgentApp:
                 joblog("Weboberfläche (Manager) wird neu erstellt …")
                 docker_manager.start_manager(log=joblog)
 
-                with self._update_lock:
-                    j = self._update_jobs.get(job_id)
-                    if j is not None:
-                        j["status"] = "succeeded"
-                        j["progress"] = 100
-                        j["phase"] = "done"
-                        j["finished_at"] = int(time.time())
-                        j["message"] = "Aktualisierung abgeschlossen."
-                        if staged_tarball:
-                            j["agent_restarting"] = True
-                            j["message"] = "Aktualisierung abgeschlossen — der Agent startet neu."
-
+                # Apply the staged agent tarball BEFORE publishing any terminal
+                # status. Writing "succeeded" first and correcting it to "failed"
+                # afterwards looks harmless but is not: React's useAgentUpdate
+                # polls every 2 s and STOPS the loop at the first non-"running"
+                # status, so a poll landing anywhere inside the apply window
+                # latches "succeeded" forever — PiUpdateGate calls setDone(),
+                # dismisses the modal, and never reveals „Ohne Update
+                # fortfahren". Measured against this code with a randomized poll
+                # phase: 41 % of runs for a 0.5 s apply, 58 % at 1.5 s, and 100 %
+                # at ≥2 s. Since APP_VERSION is unchanged (no restart happened),
+                # the forced modal then re-arms on every page load — a
+                # persistently-failing apply (full disk, read-only /opt) loops
+                # forever with no way out. That disk-full loop is the exact
+                # scenario this reporting exists to break, so the terminal status
+                # must be written ONCE, after the outcome is known.
+                #
+                # The happy path stays intact: _apply_agent_update_and_restart
+                # defers its SIGTERM by 2.0 s precisely so the poller can read the
+                # terminal state, and we publish "succeeded" inside that window,
+                # immediately on return.
                 if staged_tarball:
-                    # Apply + restart AFTER the manager is recreated. The restart
-                    # 502s this proxy briefly; the UI already read "succeeded".
                     joblog("Agent-Aktualisierung wird angewendet — der Agent startet neu.")
                     restart_scheduled = self._apply_agent_update_and_restart(staged_tarball)
                     if not restart_scheduled:
-                        # Failed apply keeps the running agent alive — clear the
-                        # restart flag so the UI doesn't wait for a restart that
-                        # never comes.
+                        # The apply FAILED (rsync error — /opt read-only, or a
+                        # full disk). The running agent stays alive and the
+                        # images/manager DID update — only the agent self-update
+                        # did not. Report the REAL outcome so useAgentUpdate
+                        # reveals the skip button.
                         joblog("Agent-Aktualisierung nicht angewendet — der Agent läuft "
                                "unverändert weiter.")
-                        with self._update_lock:
-                            j = self._update_jobs.get(job_id)
-                            if j is not None:
-                                j["agent_restarting"] = False
-                                j["message"] = "Aktualisierung abgeschlossen."
+
+                with self._update_lock:
+                    j = self._update_jobs.get(job_id)
+                    if j is not None:
+                        j["finished_at"] = int(time.time())
+                        if staged_tarball and not restart_scheduled:
+                            j["status"] = "failed"
+                            j["agent_restarting"] = False
+                            j["message"] = (
+                                "Agent-Aktualisierung konnte nicht angewendet "
+                                "werden — bitte Speicherplatz und Verbindung "
+                                "prüfen und erneut versuchen."
+                            )
+                        else:
+                            j["status"] = "succeeded"
+                            j["progress"] = 100
+                            j["phase"] = "done"
+                            j["message"] = "Aktualisierung abgeschlossen."
+                            if restart_scheduled:
+                                j["agent_restarting"] = True
+                                j["message"] = (
+                                    "Aktualisierung abgeschlossen — der Agent startet neu.")
         except Exception as e:  # noqa: BLE001 — report, never crash the thread
             with self._update_lock:
                 j = self._update_jobs.get(job_id)
@@ -1096,12 +1188,16 @@ class AgentApp:
         (agent code only — compose / unit changes need re-provisioning). We
         extract to a TEMP dir (tar ``data`` filter — path-traversal / device-node
         guard; the pre-PEP-706 fallback replicates those guards manually via
-        ``_validate_tar_member``) then ``rsync -a --delete`` it over
-        ``pi_agent/`` so a module REMOVED in a release doesn't linger
-        (``extractall`` alone never deletes; setup.sh installs with the same
-        ``rsync --delete`` semantics). Crash-safe: rsync never empties the tree,
-        and the refreshed ``pi_agent/VERSION`` (which the running agent reports)
-        lands with it.
+        ``_validate_tar_member``), rsync it into a SIBLING ``pi_agent.new/`` (a
+        complete fresh tree, so a module REMOVED in a release simply isn't
+        there), ``fsync`` it, then swap it into place by rename. That is
+        crash-safe where an in-place ``rsync --delete`` was not: an interrupt can
+        never leave a mixed old/new tree that ImportErrors into a crash-loop, the
+        fsync stops the rename from committing ahead of the staged data, and the
+        refreshed ``pi_agent/VERSION`` (which the running agent reports) lands
+        together with the rest. One window is accepted rather than closed: a
+        crash BETWEEN the two renames leaves no ``pi_agent/`` at all, recoverable
+        by hand from ``pi_agent.old`` — see the comment at the swap.
         """
         install_root = os.path.dirname(os.path.abspath(self.compose_file)) or "/opt/edubotics"
         staging = None
@@ -1123,20 +1219,68 @@ class AgentApp:
                 self._log("Agent-Aktualisierung: kein pi_agent/-Verzeichnis im Archiv — abgebrochen.")
                 return False
             dst_pkg = os.path.join(install_root, "pi_agent")
-            # rsync --delete matches setup.sh's install semantics (excludes match
-            # too), so orphaned modules go and pi_agent/VERSION is refreshed.
-            # --checksum: a version bump of the SAME byte length (e.g. VERSION
-            # 2.12.2 → 2.12.3) can share size+mtime, which rsync's default
-            # quick-check would skip — checksum comparison forces the update.
+            new_pkg = dst_pkg + ".new"
+            old_pkg = dst_pkg + ".old"
+            # ATOMIC SWAP (M2): build the COMPLETE new tree in a sibling dir and
+            # swap it in by rename, instead of rsync --delete over the LIVE tree.
+            # An in-place --delete is not tree-atomic — a classroom power yank on
+            # eMMC mid-rsync can leave a mixed old/new pi_agent/ (a new agent.py
+            # beside an old constants.py, or a half-deleted module) that
+            # ImportErrors under systemd Restart=always into a crash-loop with no
+            # self-heal. Copying into an EMPTY sibling also means there is nothing
+            # to --delete and no reason to --checksum (that flag guarded against a
+            # same-byte-length VERSION bump being skipped by size+mtime — but the
+            # sibling has no prior file to skip against), removing the eMMC
+            # read+hash of every file the old path did.
+            shutil.rmtree(new_pkg, ignore_errors=True)  # clear a prior interrupted apply
             result = subprocess.run(
-                ["rsync", "-a", "--checksum", "--delete",
+                ["rsync", "-a",
                  "--exclude=tests", "--exclude=__pycache__", "--exclude=*.pyc",
-                 src_pkg + "/", dst_pkg + "/"],
+                 src_pkg + "/", new_pkg + "/"],
                 capture_output=True, text=True, timeout=120,
             )
             if result.returncode != 0:
                 self._log("Agent-Aktualisierung konnte nicht angewendet werden: "
                           f"{(result.stderr or '').strip()[:200]}")
+                shutil.rmtree(new_pkg, ignore_errors=True)
+                return False
+            # Force the staged bytes to stable storage BEFORE the swap. rsync
+            # does not fsync, and a directory rename gets no help from ext4's
+            # auto_da_alloc (see _fsync_tree) — so without this a power cut can
+            # commit the rename over unallocated data and leave zero-length
+            # modules behind. Costs one flush of a small pure-Python tree.
+            _fsync_tree(new_pkg)
+            # Swap by rename: move the live tree aside to pi_agent.old, then move
+            # the staged tree into place. Each rename is atomic on the same
+            # filesystem, but the PAIR is not: there is a window of two rename
+            # syscalls with no I/O between them (microseconds, vs the
+            # multi-second in-place rsync it replaces) in which pi_agent/ does
+            # not exist at all. A crash exactly there leaves the agent unable to
+            # import and systemd Restart=always looping, with the complete tree
+            # sitting in pi_agent.old for a manual `mv` — that window is
+            # accepted, not eliminated. Keep pi_agent.old for ONE cycle as a
+            # rollback (the NEXT apply's rmtree above clears it).
+            shutil.rmtree(old_pkg, ignore_errors=True)  # drop the previous cycle's rollback
+            try:
+                if os.path.isdir(dst_pkg):
+                    os.replace(dst_pkg, old_pkg)
+                os.replace(new_pkg, dst_pkg)
+                # Persist the two directory entries themselves before we go on to
+                # SIGTERM ourselves — otherwise a power cut in the ~2 s restart
+                # window can roll the swap back and the agent silently restarts
+                # on the OLD tree after reporting the update applied.
+                _fsync_path(install_root)
+            except OSError as e:
+                self._log(f"Agent-Aktualisierung: Verzeichnistausch fehlgeschlagen: {e}")
+                # Best-effort recovery: if the live tree was moved aside but the
+                # staged tree failed to land, put the old one back so the agent
+                # still has a complete package to restart into.
+                if not os.path.isdir(dst_pkg) and os.path.isdir(old_pkg):
+                    try:
+                        os.replace(old_pkg, dst_pkg)
+                    except OSError:
+                        pass
+                shutil.rmtree(new_pkg, ignore_errors=True)
                 return False
         except Exception as e:  # noqa: BLE001
             self._log(f"Agent-Aktualisierung konnte nicht entpackt werden: {e}")
@@ -1716,13 +1860,134 @@ class AgentApp:
     # Boot + shutdown.
     # ─────────────────────────────────────────────────────────────────────────
 
+    def _pull_images_after_self_update(self) -> None:
+        """Resiliently pull the NEW pinned `-opi` images right after a
+        self-update landed (a boot-time IMAGE_TAG mismatch is the signal).
+
+        Reuses ``docker_manager.check_for_updates`` so the arm64 digest
+        pre-check, the GHCR→Docker-Hub-twin fallback, the PULL_MISSING
+        classification AND the superseded-tag prune all apply to the exact
+        images an update installs — instead of leaving them to start_manager's
+        GHCR-only lazy compose pull. A PULL_MISSING (the pinned tag exists on
+        NEITHER registry → this release's `-opi` images were never published;
+        the opi build leg is continue-on-error in docker-publish.yml, so it can
+        skip silently while the agent tarball ships anyway) is reported LOUDLY in
+        German naming the version, so the failure is not mistaken for a network
+        fault and the manager is not recreated onto a release that does not
+        exist. Never raises out of boot."""
+        missing: list = []
+        try:
+            docker_manager.check_for_updates(log=self._log, missing_out=missing)
+        except Exception as e:  # noqa: BLE001 — never block boot on the pull
+            self._log(f"Images konnten nach der Aktualisierung nicht geladen werden: {e}")
+            return
+        if missing:
+            # Mirror _run_update_job's wording (plural is the common case — a
+            # skipped opi build leaves all three -opi images untagged): claim
+            # only GHCR's contents and say of Hub only that it did not yield them.
+            noun, verb = (("Image", "ist") if len(missing) == 1
+                          else ("Images", "sind"))
+            self._log(
+                f"[FEHLER] Version {IMAGE_TAG} ist unvollständig veröffentlicht — "
+                f"{noun} {', '.join(missing)} {verb} bei GHCR nicht vorhanden und "
+                "auch über Docker Hub nicht zu beziehen. Das ist kein "
+                "Netzwerkfehler. Bitte die Version dem EduBotics-Team melden."
+            )
+
+    def _read_system_files_stamp(self) -> "Optional[str]":
+        """The version setup.sh recorded for the on-disk system files, or None.
+
+        CONTEXT ONLY — never a trigger (see ``_check_system_files_version``).
+        Absent / unreadable / blank all degrade to None: Pis provisioned before
+        the stamp existed have no file, and a truncated write must not be read
+        as the literal version ''.
+        """
+        try:
+            with open(SYSTEM_FILES_VERSION_FILE, "r", encoding="utf-8") as f:
+                stamped = f.read().strip()
+        except (OSError, UnicodeDecodeError):
+            return None
+        return stamped or None
+
+    def _drifted_units(self) -> "list":
+        """Names of systemd units whose INSTALLED copy differs byte-for-byte from
+        the copy THIS agent version ships. Hard evidence, not inference.
+
+        The units ship inside ``pi_agent/systemd/`` (so a self-update rsync
+        refreshes the agent's copy) while setup.sh installed them VERBATIM into
+        ``SYSTEMD_UNIT_DIR``, which self-update never touches. A byte difference
+        therefore proves the running Pi is on a unit older than this agent
+        expects; equality proves it is not. Either file being absent or
+        unreadable (a dev box, a hand-relocated install, a non-root reader)
+        proves nothing, so it is skipped — this must never guess.
+        """
+        drifted = []
+        shipped_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "systemd")
+        for unit in SYSTEMD_UNIT_NAMES:
+            try:
+                with open(os.path.join(shipped_dir, unit), "rb") as f:
+                    shipped = f.read()
+                with open(os.path.join(SYSTEMD_UNIT_DIR, unit), "rb") as f:
+                    installed = f.read()
+            except OSError:
+                continue  # cannot compare → cannot prove → silent
+            if shipped != installed:
+                drifted.append(unit)
+        return drifted
+
+    def _check_system_files_version(self) -> None:
+        """Report PROVEN system-file drift + record it for the System tab (M1).
+
+        The release tarball carries ``pi_agent/`` ONLY, so a self-update moves
+        the agent + (via ``docker/versions.env``) the images while
+        ``docker-compose.opi.yml``, ``.s6-keep`` and the systemd units stay
+        frozen at whatever ``setup.sh`` laid down. A release that adds a
+        forwarded ``EDUBOTICS_*`` env, changes a healthcheck, or re-points an
+        image ref therefore reaches the field HALF-applied, and the failure is
+        SILENT (the container simply never sees the var; Rule §2's fail-open
+        class).
+
+        This keys on CONTENT, never on ``stamp != APP_VERSION``. That inequality
+        looks like a drift signal and is not one: the stamp cannot advance by
+        design (that is the whole point of writing it outside ``pi_agent/``) and
+        every release bumps APP_VERSION, so it is true on ~100 % of healthy,
+        self-updated Pis while proving nothing about what is actually in the
+        files. An always-on warning is not a signal — it is a thing teachers
+        learn to click past, exactly when the one real occurrence needs them.
+        Comparing the installed units to the ones this agent ships is instead
+        decidable: it fires only when the bytes really differ.
+
+        ADVISORY ONLY — never blocks boot or the manager. The remedy is
+        re-running ``setup.sh`` (idempotent; it re-installs the units and compose
+        and leaves the Docker volumes — the student's datasets, HF cache and
+        calibration — untouched). It must NEVER instruct a re-flash: the drift is
+        usually benign, the data is irreplaceable, and a wipe is not the fix.
+        """
+        stamped = self._read_system_files_stamp()
+        drifted = self._drifted_units()
+        if not drifted:
+            return
+        self._system_files_stale = True
+        self._system_files_version = stamped
+        origin = (f" (Stand: Version {stamped})" if stamped else "")
+        self._log(
+            f"[WARNUNG] Systemdateien weichen ab: die installierten Systemd-Dienste "
+            f"({', '.join(drifted)}){origin} unterscheiden sich von denen der "
+            f"Agent-Version {APP_VERSION}. Aktualisierungen erneuern nur den Agenten "
+            "und die Images — nicht diese Dateien. Bitte 'sudo ./setup.sh' aus dem "
+            "EduBotics-Quellordner erneut ausführen; die Datensätze der Schüler "
+            "bleiben dabei erhalten."
+        )
+
     def boot(self) -> None:
         """Boot sequence: seed the .env if missing, rehydrate hardware, start the
         loopback API, bring up the ALWAYS-ON manager (creating ros_net), then
         start the gateway-binder loop (the gateway interface exists only after
         the manager ``up``). The robot tier is intentionally left down."""
         self.rehydrate_hardware()
+        self._check_system_files_version()
 
+        needs_image_pull = False
         if not os.path.isfile(self.env_file):
             # A freshly flashed Pi has no arms configured yet; seed a cloud-only
             # .env so compose can interpolate every ${VAR} for the manager `up`.
@@ -1752,10 +2017,56 @@ class AgentApp:
                         f"passt nicht zur Agent-Version ({IMAGE_TAG}) — wird angeglichen."
                     )
                     config_generator.upsert_env_var("IMAGE_TAG", IMAGE_TAG, self.env_file)
+                    # A tag mismatch on THIS path means a self-update just landed
+                    # (the rsync'd pi_agent/ carried a new docker/versions.env, so
+                    # constants.IMAGE_TAG jumped to the new release). The OLD
+                    # agent's update job pulled against the OLD, still-present tag,
+                    # so the NEW `-opi:IMAGE_TAG` images have NOT been through the
+                    # resilient acquisition — left to start_manager below they'd be
+                    # fetched only by compose's GHCR-only lazy pull_policy (no Hub
+                    # fallback, no retry, no prune, no loud failure for a
+                    # never-published release, so a Pi that was fine on the prior
+                    # tag would brick its manager on the next reboot). Do the
+                    # resilient pull below, after the listener binds. Runs ONLY on
+                    # a genuine tag change — a plain reboot / crash-restart has no
+                    # mismatch and skips it, keeping boot cheap.
+                    needs_image_pull = True
             except Exception as e:  # noqa: BLE001 — never block boot on this
                 self._log(f"IMAGE_TAG konnte nicht angeglichen werden: {e}")
 
+        # Bind the API BEFORE the pull below. The pull only has to precede
+        # start_manager (so the manager's `up` finds the new images already
+        # acquired resiliently) — it has no relationship to the listener, and
+        # running it first blacks out /api/system/* for the whole download: on a
+        # post-self-update boot every `-opi` image is absent at the new tag, so
+        # that is ~5-6 GB (bounded by _PULL_ATTEMPT_TIMEOUT_S × attempts ×
+        # images, i.e. tens of minutes on a school link). The manager container
+        # survives the agent restart (restart: unless-stopped), so the browser
+        # loads the wizard and every /api/system/* 502s: useAgentUpdate's poll
+        # exhausts and reports a FALSE failure, and — worse — the SSE Protokoll
+        # is unreachable, so the student cannot read the [FEHLER] the pull exists
+        # to surface. That is worst precisely on the slow-link / GHCR-blocked
+        # school this fix's success path targets. Binding first costs nothing:
+        # the wizard reports „Agent bereit" and streams the pull's progress.
+        #
+        # BOTH listeners must be up here — loopback ALONE is not enough. nginx's
+        # /api/system/ reverse proxy targets the ros_net GATEWAY ip
+        # (nginx.opi.conf.template), because a remote Chrome's `localhost` is the
+        # student's OWN laptop, not the Pi. So a loopback-only bind still 502s
+        # every browser for the whole download — the exact blackout the paragraph
+        # above exists to prevent. The binder loop is safe to start this early: it
+        # re-reads the gateway ip every _GATEWAY_BIND_INTERVAL_S and simply
+        # no-ops while the interface is absent. On a post-self-update boot ros_net
+        # already exists (the manager container survives the agent restart), so it
+        # binds immediately; on a first boot it binds once start_manager below
+        # creates ros_net. Keep BOTH starts ahead of the pull.
         self.start_loopback()
+        threading.Thread(
+            target=self._gateway_binder_loop, name="agent-gateway-binder", daemon=True,
+        ).start()
+
+        if needs_image_pull:
+            self._pull_images_after_self_update()
 
         # Bring the always-on manager up (up -d --force-recreate --no-deps
         # physical_ai_manager). No image pull here — boot stays fast on the
@@ -1763,10 +2074,6 @@ class AgentApp:
         self._log("Weboberfläche (Manager) wird gestartet …")
         if not docker_manager.start_manager(log=self._log):
             self._log("[WARNUNG] Manager konnte nicht gestartet werden — bitte Images/Docker prüfen.")
-
-        threading.Thread(
-            target=self._gateway_binder_loop, name="agent-gateway-binder", daemon=True,
-        ).start()
 
         self._ready.set()
         self._log("Pi-Agent bereit.")

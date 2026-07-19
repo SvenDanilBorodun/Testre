@@ -18,7 +18,20 @@ param(
     # mirror serving a malicious MSI. Pin via `EDUBOTICS_USBIPD_SHA256` env
     # var for reproducible offline installs; production builds always pass
     # the known-good value via the .iss [Run] section.
-    [string]$UsbipdMsiSha256 = $env:EDUBOTICS_USBIPD_SHA256
+    [string]$UsbipdMsiSha256 = $env:EDUBOTICS_USBIPD_SHA256,
+    # Set by the .iss [Run] Step 1 (the installer chain), NOT by
+    # finalize_install.ps1. Preserves a .reboot_required flag that an EARLIER
+    # step in the SAME install session already wrote — Step 0's
+    # migrate_from_docker_desktop.ps1 writes it when Docker Desktop's own
+    # uninstaller returns 3010 (reboot to finish the removal). Without this, the
+    # Summary at the bottom clears the flag whenever THIS script alone finds no
+    # reason to reboot, silently dropping migrate's request and letting Step 4
+    # import a distro alongside a half-removed Docker Desktop.
+    #
+    # Deliberately OFF on the post-reboot finalize path: there the flag is stale
+    # by definition, and inheriting it would re-write it after every run, looping
+    # the student through an endless "bitte neu starten".
+    [switch]$PreserveExistingRebootFlag
 )
 
 # EAP=Continue, NOT Stop (load-bearing — mirrors verify_system.ps1). In Windows
@@ -31,21 +44,70 @@ param(
 $ErrorActionPreference = "Continue"
 $needsReboot = $false
 
-# ── Diagnostics sink ───────────────────────────────────────────────────────
-# Every prerequisite step appends to a single log in %LOCALAPPDATA% so that
-# when a student hits a problem later, support has the raw evidence of what
-# the installer saw.
-$DiagDir = Join-Path $env:LOCALAPPDATA "EduBotics"
-if (-not (Test-Path $DiagDir)) {
-    New-Item -ItemType Directory -Path $DiagDir -Force | Out-Null
+$FlagPath = Join-Path $PSScriptRoot ".reboot_required"
+if ($PreserveExistingRebootFlag -and (Test-Path $FlagPath)) {
+    $needsReboot = $true
 }
+
+# ── Diagnostics sink ───────────────────────────────────────────────────────
+# Every prerequisite step appends to a single log so that when a student hits a
+# problem later, support has the raw evidence of what the installer saw.
+#
+# %ProgramData%, NOT %LOCALAPPDATA%: on a managed school PC the student is a
+# standard user, so launching an admin-required installer prompts for a
+# DIFFERENT admin account and every [Run] step here executes as THAT admin —
+# making %LOCALAPPDATA% the admin's profile. The log then split in two: install
+# evidence in the admin's profile, the GUI's own scan-time entries in the
+# student's, and support (reading the student's copy) saw neither the
+# prerequisite nor the migrate history. ProgramData is machine-wide, so both
+# halves land in one file.
+#
+# The Users ACL grant is what makes that work: the un-elevated GUI has to append
+# to this same file, and a directory created under ProgramData by an elevated
+# process is read-only for standard users by default. Re-applied on every run
+# because `wsl --import` may have created %ProgramData%\EduBotics first, with the
+# restrictive inherited ACL. S-1-5-32-545 is the well-known "Users" SID — never
+# the localized name, this ships on German Windows (where the ACE reads back as
+# VORDEFINIERT\Benutzer). Whole block is best-effort: a logging problem must
+# never abort an install step.
+#
+# SCOPE IS LOAD-BEARING — "this folder and files", NOT the subtree.
+# The WSL install root is a CHILD of this directory ($env:ProgramData\EduBotics\
+# wsl, see import_edubotics_wsl.ps1 -InstallRoot). An earlier revision OF THIS
+# CHANGE used ContainerInherit,ObjectInherit, which propagated Users:Modify down
+# onto the distro's ext4.vhdx — every standard user on a shared lab PC could
+# have tampered with the VHDX holding the datasets, HF cache and calibration. It
+# was caught in review and NEVER RELEASED (`git log -S ContainerInherit` finds it
+# on no tag) — do not read this as shipped history. ObjectInherit +
+# NoPropagateInherit grants the directory itself + the files directly in it (the
+# log, which is all the GUI needs) and stops there: wsl\ inherits nothing.
+# RemoveAccessRuleAll first — it matches on SID + Allow regardless of rights, so
+# it drops ANY pre-existing over-broad ACE whatever put it there (a dev box that
+# ran an intermediate build, a hand-edited ACL), and Windows then recomputes the
+# children's inherited ACEs (verified: an already-inherited Modify on
+# wsl\ext4.vhdx disappears on the next run).
+$DiagDir = Join-Path $env:ProgramData "EduBotics"
+try {
+    if (-not (Test-Path $DiagDir)) {
+        New-Item -ItemType Directory -Path $DiagDir -Force | Out-Null
+    }
+    $DiagAcl = Get-Acl -Path $DiagDir
+    $DiagUsers = New-Object System.Security.Principal.SecurityIdentifier("S-1-5-32-545")
+    $DiagAcl.RemoveAccessRuleAll((New-Object System.Security.AccessControl.FileSystemAccessRule(
+        $DiagUsers, "Modify", "Allow")))
+    $DiagAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+        $DiagUsers, "Modify", "ObjectInherit", "NoPropagateInherit", "Allow")))
+    Set-Acl -Path $DiagDir -AclObject $DiagAcl
+} catch { }
 $DiagLog = Join-Path $DiagDir "install_diagnostics.log"
 
 function Write-Diag {
     param([string]$section, [string]$body)
-    $ts = (Get-Date).ToString("o")
-    Add-Content -Path $DiagLog -Value "`n=== $ts install_prerequisites::$section ==="
-    Add-Content -Path $DiagLog -Value $body
+    try {
+        $ts = (Get-Date).ToString("o")
+        Add-Content -Path $DiagLog -Value "`n=== $ts install_prerequisites::$section ==="
+        Add-Content -Path $DiagLog -Value $body
+    } catch { }
 }
 
 function Write-Step { param([string]$msg) Write-Host "`n>> $msg" -ForegroundColor Cyan }
@@ -53,6 +115,29 @@ function Write-OK   { param([string]$msg) Write-Host "   OK: $msg" -ForegroundCo
 function Write-Skip { param([string]$msg) Write-Host "   SKIP: $msg" -ForegroundColor Yellow }
 
 Write-Diag "begin" "PSVersion=$($PSVersionTable.PSVersion); OS=$([System.Environment]::OSVersion.VersionString)"
+
+# ── Persist the usbipd pin for the post-reboot finalize path ───────────────
+# finalize_install.ps1 re-invokes THIS script when it finds WSL absent, but it
+# is launched by the GUI rather than by Inno, so it cannot know the
+# {#UsbipdVersion}/{#UsbipdSha256} values the .iss [Run] Step 1 passes us.
+# Without them the elevated MSI download silently skips its integrity check.
+# Persist what we were handed, next to the .reboot_required flag (machine-wide
+# {app}\scripts, elevated-write only), so finalize can replay it verbatim —
+# the .iss stays the single source of truth instead of the hash being copied
+# into a third file that can drift out of sync.
+#
+# The RELEASE_PIN_NEEDED sentinel is persisted too, on purpose: replaying it
+# makes finalize hard-fail exactly like the installer does, rather than
+# degrading into an unverified download.
+if ($UsbipdMsiUrl -and $UsbipdMsiSha256) {
+    try {
+        Set-Content -Path (Join-Path $PSScriptRoot ".usbipd_pin") `
+                    -Value @($UsbipdMsiUrl, $UsbipdMsiSha256) -Encoding ASCII -Force
+        Write-Diag "usbipd_pin" "Pin persisted for the finalize path (url + sha256)."
+    } catch {
+        Write-Diag "usbipd_pin" "Could not persist the usbipd pin: $_"
+    }
+}
 
 # ── Check Windows version ──
 Write-Step "Checking Windows version..."
@@ -95,10 +180,40 @@ try {
 # WSL2 install step in a workable state.
 Write-Step "Ensuring WSL2 prerequisite Windows features are enabled..."
 foreach ($feature in @("VirtualMachinePlatform", "Microsoft-Windows-Subsystem-Linux")) {
+    # State-check BEFORE touching dism. Running `dism /enable-feature`
+    # UNCONDITIONALLY was the v2.13.0 pilot-incident trigger: on a machine with
+    # an UNRELATED pending servicing transaction (e.g. a pending Windows Update
+    # reboot), a no-op enable of an ALREADY-ENABLED feature still returns
+    # rc=3010, which we then mis-read as "our WSL feature needs a reboot" -> a
+    # spurious .reboot_required that skips the in-installer image pull + distro
+    # import (ShouldPullImages/ShouldImportDistro in the .iss gate on it). Only
+    # invoke dism when the feature is genuinely off. When the feature store is
+    # unreadable — Get-WindowsOptionalFeature throws a COMException while a
+    # servicing op is pending — defer to the authoritative `wsl --status` probe
+    # below rather than manufacturing a reboot from a dism 3010.
+    $featureState = $null
+    try {
+        $featureState = (Get-WindowsOptionalFeature -Online -FeatureName $feature -ErrorAction Stop).State
+        Write-Diag "feature_$feature" "state=$featureState"
+    } catch {
+        Write-Diag "feature_$feature" "Get-WindowsOptionalFeature failed: $_ (skipping dism to avoid a spurious rc=3010; wsl --status is authoritative)"
+        Write-Host "   ($feature state unreadable — deferring to wsl --status)" -ForegroundColor Yellow
+        continue
+    }
+    if ($featureState -eq "Enabled") {
+        Write-OK "$feature already enabled"
+        continue
+    }
+    if ($featureState -eq "EnablePending") {
+        Write-OK "$feature enable is pending a reboot"
+        $needsReboot = $true
+        continue
+    }
+    # Disabled / DisablePending — actually enable it now.
     try {
         $dismOut = dism /online /enable-feature /featurename:$feature /all /norestart 2>&1 | Out-String
         $rc = $LASTEXITCODE
-        Write-Diag "feature_$feature" "rc=$rc`n$dismOut"
+        Write-Diag "feature_$feature" "enable rc=$rc`n$dismOut"
         if ($rc -eq 0) {
             Write-OK "$feature is enabled"
         } elseif ($rc -eq 3010) {
@@ -304,11 +419,26 @@ try {
 Write-Step "Prerequisites installation complete!"
 if ($needsReboot) {
     # Write flag file so Inno Setup knows a reboot is required before image pull / WSL import.
-    $flagPath = Join-Path $PSScriptRoot ".reboot_required"
-    Set-Content -Path $flagPath -Value "1"
+    # Write ONLY if absent: under -PreserveExistingRebootFlag an existing flag may
+    # carry migrate's "dd-uninstall" REASON, which finalize_install.ps1's
+    # Test-RebootStillPending needs (the WSL/VMP feature store is blind to a
+    # pending Docker-Desktop removal) — overwriting it with "1" would erase the
+    # reason AND refresh the write time finalize compares against the last boot.
+    if (-not (Test-Path $FlagPath)) {
+        Set-Content -Path $FlagPath -Value "1"
+    }
     Write-Host "`nA REBOOT IS REQUIRED to complete WSL2 installation." -ForegroundColor Yellow
 } else {
-    # Remove flag if no reboot needed (re-run after reboot)
-    $flagPath = Join-Path $PSScriptRoot ".reboot_required"
-    if (Test-Path $flagPath) { Remove-Item $flagPath -Force }
+    # Remove flag if no reboot needed (re-run after reboot). $needsReboot is
+    # pre-seeded from an existing flag under -PreserveExistingRebootFlag, so an
+    # earlier step's request is never dropped here.
+    if (Test-Path $FlagPath) { Remove-Item $FlagPath -Force }
 }
+
+# Explicit success — mirrors pull_images.ps1. Every genuine failure above exits
+# non-zero on its own; without this line the exit code instead falls through to
+# the last native command, the COSMETIC `usbipd --version` probe (the cmdlets
+# after it don't reset $LASTEXITCODE). That probe's own warning says "a reboot
+# will fix this" — yet its rc made finalize_install.ps1 report "Voraussetzungen
+# konnten nicht installiert werden" over prerequisites that installed fine.
+exit 0

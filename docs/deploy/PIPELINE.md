@@ -1,6 +1,8 @@
 # EduBotics Deploy Pipeline — Operator Runbook
 
-This is the single source of truth for operating the EduBotics CI/CD
+> ⚠️ **DEPRECATED / HISTORICAL (pre-GHCR, pre-golden-order).** Parts of this runbook (e.g. manual `docker push nettername/*:latest`) **contradict CLAUDE.md Rule §6** — CI owns the student-facing images; they are never pushed from a workstation. The authoritative deploy process is **CLAUDE.md → Rule §6** + `.github/workflows/` (release.yml golden order W1→W6). Kept for historical context only.
+
+This was the single source of truth for operating the EduBotics CI/CD
 pipeline. It replaces the manual-deploy ritual documented in earlier
 versions of `CLAUDE.md`.
 

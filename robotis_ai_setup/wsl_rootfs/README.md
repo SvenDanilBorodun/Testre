@@ -5,10 +5,10 @@ Headless Docker Engine bundled as a WSL2 distribution, so students never see Doc
 ## Contents
 
 - Ubuntu 22.04 base
-- systemd (auto-starts dockerd at distro boot)
+- `start-dockerd.sh` auto-starts dockerd at distro boot via wsl.conf's `[boot] command` (systemd is deliberately NOT used — it is unreliable on a custom-imported rootfs)
 - Docker CE + buildx + compose plugin
 - NVIDIA Container Toolkit (for `docker-compose.gpu.yml`)
-- `/etc/wsl.conf` → systemd on, default user root, hostname `edubotics`
+- `/etc/wsl.conf` → `[boot] command=/usr/local/bin/start-dockerd.sh`, `appendWindowsPath=false`, default user root, hostname `edubotics`
 - `/etc/docker/daemon.json` → registers NVIDIA runtime, enables BuildKit, caps logs
 
 Exported rootfs lands at `installer/assets/edubotics-rootfs.tar.gz` (~350-450 MB compressed).
@@ -28,7 +28,7 @@ The Inno Setup installer picks up `installer/assets/edubotics-rootfs.tar.gz` via
 
 ```powershell
 wsl --import EduBotics "$env:ProgramData\EduBotics\wsl" .\edubotics-rootfs.tar.gz --version 2
-wsl -d EduBotics -- systemctl start docker
+wsl -d EduBotics -- /usr/local/bin/start-dockerd.sh   # dockerd also auto-starts at boot via wsl.conf
 wsl -d EduBotics -- docker info
 ```
 
@@ -46,4 +46,4 @@ Rebuild when:
 - NVIDIA container toolkit bumps the API
 - `/etc/wsl.conf` or `daemon.json` changes
 
-Bump `APP_VERSION` in `gui/app/constants.py` when shipping a new rootfs — the installer overwrites the existing distro on upgrade (see `import_edubotics_wsl.ps1`).
+Bump `ROOTFS_VERSION` (in `wsl_rootfs/ROOTFS_VERSION`) when shipping a new rootfs — `ci.yml::rootfs-version-guard` enforces the bump, and the installer's rootfs-version gate re-imports the distro (DESTROYING its Docker volumes: datasets, HF cache, calibration) ONLY when the stamp changes; a matching stamp preserves student data on upgrade (see `import_edubotics_wsl.ps1`).

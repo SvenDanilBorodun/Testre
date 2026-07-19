@@ -22,7 +22,16 @@ Type=simple
 # (the Jetson precedent runs root with EnvironmentFile=/etc/edubotics/jetson.env;
 # the Pi uses /etc/edubotics/.env — for a root systemd unit ~ is /root, not a
 # user config dir). setup.sh (P4) creates it before the agent first runs.
-EnvironmentFile=/etc/edubotics/.env
+#
+# The leading `-` makes it OPTIONAL (audit L2). Without it, a missing or corrupted
+# .env on a DEPLOYED (post-first-boot) Pi fails the unit BEFORE the agent process
+# runs, so the agent's OWN self-seed branch (boot(): generate_cloud_only_env when
+# the .env is absent) can never execute — there is zero self-heal, since
+# first-boot's fallback writer only fires on a fresh golden clone. With `-`, systemd
+# starts the agent even when the file is absent; the agent re-seeds a valid
+# cloud-only .env and the next boot loads it normally. A present .env is loaded
+# exactly as before, so this is a pure add-a-recovery-path change.
+EnvironmentFile=-/etc/edubotics/.env
 # The agent uses relative imports (from . import config_generator), so it MUST
 # run as a PACKAGE module, not a bare script. WorkingDirectory puts the
 # pi_agent/ package dir on sys.path[0] (python -m adds the cwd). setup.sh lays

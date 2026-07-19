@@ -42,9 +42,11 @@ from .constants import (
     DOCKER_STARTUP_TIMEOUT,
     ENV_FILE,
     IMAGE_FRESHNESS_WARN_DAYS,
+    IMAGE_NAMES,
     IMAGE_OPEN_MANIPULATOR,
     IMAGE_PHYSICAL_AI_MANAGER,
     IMAGE_PHYSICAL_AI_SERVER,
+    IMAGE_TAG,
     LAST_PULL_FILE,
     MANIFEST_INSPECT_TIMEOUT,
     NETWORK_PROBE_TIMEOUT,
@@ -116,6 +118,32 @@ def is_docker_running() -> bool:
         return result.returncode == 0
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return False
+
+
+def read_rootfs_version() -> Optional[str]:
+    """Return the rootfs stamp baked into the EduBotics distro, or None.
+
+    Reads ``/etc/edubotics-rootfs-version`` (a single UTF-8 line written by
+    ``wsl_rootfs/Dockerfile``) from inside the distro. Returns the trimmed
+    string, or None when the distro can't be queried or predates the marker
+    (installers <= 2.6.0 shipped no stamp). None means "can't determine" — the
+    caller must fail OPEN on it (a read hiccup must never block startup). Mirrors
+    the .iss GetDistroRootfsVersion() so the GUI's runtime rootfs handshake
+    matches the installer's import gate."""
+    try:
+        result = subprocess.run(
+            ["wsl", "-d", WSL_DISTRO_NAME, "--",
+             "cat", "/etc/edubotics-rootfs-version"],
+            capture_output=True, text=True, timeout=10,
+            **_SUBPROCESS_KWARGS,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    # wsl.exe can emit UTF-16 with stray NULs; strip them before comparing.
+    version = (result.stdout or "").replace("\x00", "").strip()
+    return version or None
 
 
 def start_edubotics_distro() -> bool:
@@ -512,9 +540,24 @@ def _pull_fallback_and_retag(image: str, idx: int, total: int, log=None) -> bool
             capture_output=True, text=True, timeout=15,
             **_SUBPROCESS_KWARGS,
         )
-        return result.returncode == 0
+        if result.returncode != 0:
+            return False
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return False
+    # Drop the redundant fallback (nettername/*) tag — the layers stay, kept by
+    # the primary tag, but leaving the extra tag clutters `docker image ls` (and
+    # is the tell-tale fingerprint that a Hub fallback fired). Mirrors
+    # pull_images.ps1's cleanup. Best-effort; a failure here doesn't undo the
+    # successful retag above.
+    try:
+        subprocess.run(
+            _docker_cmd("image", "rm", fb),
+            capture_output=True, text=True, timeout=15,
+            **_SUBPROCESS_KWARGS,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+    return True
 
 
 def _pull_image_with_fallback(
@@ -523,25 +566,33 @@ def _pull_image_with_fallback(
     total: int,
     log=None,
     stall_timeout: int = 120,
-    max_retries: int = 2,
+    max_retries: int = 3,
 ) -> bool:
-    """Pull ``image`` from the PRIMARY registry (GHCR); on an unreachable host
-    or a failed pull, fall back to the digest-identical Docker Hub twin and
-    re-tag it to the primary name. Returns True iff the primary-named image is
-    present locally afterwards.
+    """Pull ``image`` from the PRIMARY registry (GHCR); only on a FAILED pull
+    fall back to the digest-identical Docker Hub twin and re-tag it to the
+    primary name. Returns True iff the primary-named image is present locally
+    afterwards.
+
+    The PRIMARY pull is attempted UNCONDITIONALLY — no host-reachability
+    pre-gate. The old ``_host_reachable(ghcr.io)`` gate probed the WINDOWS host,
+    but the pull runs inside WSL2 dockerd: a single host-side DNS / IPv6 / proxy
+    blip would divert the WHOLE classroom onto Docker Hub's rate-limited
+    endpoint even when WSL could reach GHCR fine. ``_pull_one_image`` already
+    fails fast on a dead host (DNS) and retries transient GHCR/Fastly 5xx, so an
+    unconditional attempt is both faster (no probe) and keeps students on the
+    primary registry. Docker Hub is the fallback only when GHCR genuinely fails.
     """
     short = image.split("/")[-1]
-    if _host_reachable(_registry_host(REGISTRY)):
-        if _pull_one_image(
-            image, idx, total, log=log,
-            stall_timeout=stall_timeout, max_retries=max_retries,
-        ):
-            return True
+    if _pull_one_image(
+        image, idx, total, log=log,
+        stall_timeout=stall_timeout, max_retries=max_retries,
+    ):
+        return True
     if _fallback_ref(image) is None:
         return False
     if log:
         log(
-            f"  [{idx+1}/{total}] {short}: Primär-Registry (GHCR) nicht verfügbar "
+            f"  [{idx+1}/{total}] {short}: GHCR-Pull fehlgeschlagen "
             "— wechsle zu Docker Hub..."
         )
     return _pull_fallback_and_retag(image, idx, total, log=log)
@@ -730,7 +781,7 @@ def check_for_updates(log=None) -> bool:
         except (FileNotFoundError, subprocess.TimeoutExpired):
             old_id = ""
 
-        ok = _pull_image_with_fallback(image, i, total, log=log, stall_timeout=120, max_retries=2)
+        ok = _pull_image_with_fallback(image, i, total, log=log, stall_timeout=120, max_retries=3)
         if not ok:
             if log:
                 log(f"  Übersprungen: {short} (aktuelle Version wird weiter verwendet).")
@@ -752,7 +803,11 @@ def check_for_updates(log=None) -> bool:
                 **_SUBPROCESS_KWARGS,
             )
             new_id = local_after.stdout.strip()
-            if old_id and new_id and old_id != new_id:
+            # old_id == "" means the image wasn't present before this run (a
+            # first-time pull) — that IS an update; the old `old_id and ...`
+            # guard dropped it, so any_updated stayed False, the disk prune was
+            # skipped, and the log said "aktuell" after a real pull.
+            if new_id and old_id != new_id:
                 if log:
                     log(f"  Aktualisiert: {short} → {(new_digest or '')[7:19]}")
                 any_updated = True
@@ -760,7 +815,10 @@ def check_for_updates(log=None) -> bool:
             pass
 
     if any_updated:
-        # Remove dangling images to free disk space
+        # Reclaim disk: first drop superseded TAGGED versions (prune -f is
+        # dangling-only, so it can't remove e.g. a leftover :2.11.0 after
+        # :2.13.0 lands), then dangling layers.
+        prune_superseded_tags(log=log)
         try:
             subprocess.run(
                 _docker_cmd("image", "prune", "-f"),
@@ -969,6 +1027,55 @@ def _pull_one_image(
     return False
 
 
+def prune_superseded_tags(log=None) -> int:
+    """Remove local image tags that aren't the current ``IMAGE_TAG``.
+
+    ``docker image prune -f`` is dangling-ONLY, so after an upgrade pulls
+    ``:X.Y.Z`` the previously-installed ``:X.Y-1`` TAGGED images survive and the
+    WSL VHDX grows a full image set per release (the v2.13.0 incident bloated it
+    to ~53 GiB). ``pull_images.ps1`` prunes these at install time, but the GUI's
+    own pull paths — the ones that run on a reboot-pending upgrade, when the
+    installer's pull was skipped — never did. Replicate it across BOTH the
+    primary and fallback registries × all short names. Untag-by-tag is
+    layer-safe: only layers NOT shared with the kept ``:IMAGE_TAG`` are dropped.
+    Returns the number of tags removed. Best-effort; never raises.
+    """
+    repos = []
+    for name in IMAGE_NAMES:
+        repos.append(f"{REGISTRY}/{name}")
+        if REGISTRY_FALLBACK and REGISTRY_FALLBACK != REGISTRY:
+            repos.append(f"{REGISTRY_FALLBACK}/{name}")
+    removed = 0
+    for repo in repos:
+        try:
+            listed = subprocess.run(
+                _docker_cmd("images", repo, "--format", "{{.Tag}}"),
+                capture_output=True, text=True, timeout=15,
+                **_SUBPROCESS_KWARGS,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            continue
+        if listed.returncode != 0:
+            continue
+        for tag in listed.stdout.splitlines():
+            tag = tag.strip()
+            if not tag or tag == "<none>" or tag == IMAGE_TAG:
+                continue
+            try:
+                rm = subprocess.run(
+                    _docker_cmd("image", "rm", f"{repo}:{tag}"),
+                    capture_output=True, text=True, timeout=20,
+                    **_SUBPROCESS_KWARGS,
+                )
+                if rm.returncode == 0:
+                    removed += 1
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                pass
+    if removed and log:
+        log(f"  {removed} veraltete Image-Version(en) entfernt (Speicher freigegeben).")
+    return removed
+
+
 def pull_images(callback=None, log=None) -> bool:
     """Pull all required Docker images with stall detection + retry.
 
@@ -985,11 +1092,15 @@ def pull_images(callback=None, log=None) -> bool:
         True if ALL images pulled successfully.
     """
     total = len(ALL_IMAGES)
+    # Snapshot which images are already present ONCE (was re-queried per
+    # iteration → 3 `docker image inspect` for 3 images). Newly-pulled images in
+    # THIS run aren't in the snapshot, but they aren't skipped either — correct.
+    present = images_exist()
     for i, image in enumerate(ALL_IMAGES):
         if callback:
             callback(image, i, total)
         # Skip if already present (covers retries after partial success)
-        if images_exist().get(image):
+        if present.get(image):
             if log:
                 log(f"  [{i+1}/{total}] {image.split('/')[-1]}: bereits vorhanden, überspringen.")
             continue
@@ -999,6 +1110,10 @@ def pull_images(callback=None, log=None) -> bool:
         # is degraded would hard-fail even though the Hub fallback is available.
         if not _pull_image_with_fallback(image, i, total, log=log):
             return False
+    # Reclaim disk from superseded tags left by a prior version. The installer's
+    # pull_images.ps1 does this too, but on a reboot-pending upgrade the GUI is
+    # the one that pulled (Steps 4+5 were skipped) — so prune here as well.
+    prune_superseded_tags(log=log)
     return True
 
 

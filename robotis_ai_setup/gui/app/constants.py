@@ -11,11 +11,23 @@ def _read_version_file() -> str:
     GUI is running from a PyInstaller dist without the source tree beside
     it). This keeps the installer .iss, docker/versions.env, and GUI in
     sync without three manual bumps per release.
+
+    A frozen .exe carries the repo-root VERSION at the dist root (build.spec
+    bundles it), extracted under ``sys._MEIPASS`` — check that FIRST so a shipped
+    build resolves the REAL version instead of the fallback literal. A stale
+    fallback reads LOW and re-offers the same forced update forever (the
+    update-loop hazard the version-preflight gate can't catch for this literal).
     """
-    for candidate in (
+    import sys
+    candidates = []
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        candidates.append(Path(meipass) / "VERSION")  # PyInstaller frozen dist
+    candidates.extend((
         Path(__file__).resolve().parents[3] / "VERSION",  # monorepo layout
         Path(__file__).resolve().parents[2] / "VERSION",  # in-tree builds
-    ):
+    ))
+    for candidate in candidates:
         try:
             return candidate.read_text(encoding="utf-8").strip()
         except (OSError, UnicodeDecodeError):

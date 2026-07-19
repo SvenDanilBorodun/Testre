@@ -23,18 +23,36 @@ try {
 } catch { }
 
 # Mirror the diagnostics sink used by install_prerequisites.ps1 + configure_usbipd.ps1
-# so the verify step also leaves evidence behind for support.
-$DiagDir = Join-Path $env:LOCALAPPDATA "EduBotics"
-if (-not (Test-Path $DiagDir)) {
-    New-Item -ItemType Directory -Path $DiagDir -Force | Out-Null
-}
+# so the verify step also leaves evidence behind for support. %ProgramData%, not
+# %LOCALAPPDATA% — see the rationale in install_prerequisites.ps1. Unlike the
+# other consumers this script also runs UN-elevated (the "Installation prüfen"
+# Start-menu shortcut), so the ACL grant may well fail here; that is fine, an
+# elevated installer step created the directory with the right ACL already.
+# Scope ("this folder and files", never the subtree) is load-bearing — the WSL
+# install root lives under this directory; see install_prerequisites.ps1 for the
+# full rationale. Keep all five copies of this block identical.
+$DiagDir = Join-Path $env:ProgramData "EduBotics"
+try {
+    if (-not (Test-Path $DiagDir)) {
+        New-Item -ItemType Directory -Path $DiagDir -Force | Out-Null
+    }
+    $DiagAcl = Get-Acl -Path $DiagDir
+    $DiagUsers = New-Object System.Security.Principal.SecurityIdentifier("S-1-5-32-545")
+    $DiagAcl.RemoveAccessRuleAll((New-Object System.Security.AccessControl.FileSystemAccessRule(
+        $DiagUsers, "Modify", "Allow")))
+    $DiagAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+        $DiagUsers, "Modify", "ObjectInherit", "NoPropagateInherit", "Allow")))
+    Set-Acl -Path $DiagDir -AclObject $DiagAcl
+} catch { }
 $DiagLog = Join-Path $DiagDir "install_diagnostics.log"
 
 function Write-Diag {
     param([string]$section, [string]$body)
-    $ts = (Get-Date).ToString("o")
-    Add-Content -Path $DiagLog -Value "`n=== $ts verify_system::$section ==="
-    Add-Content -Path $DiagLog -Value $body
+    try {
+        $ts = (Get-Date).ToString("o")
+        Add-Content -Path $DiagLog -Value "`n=== $ts verify_system::$section ==="
+        Add-Content -Path $DiagLog -Value $body
+    } catch { }
 }
 
 function Write-Step  { param([string]$msg) Write-Host "`n>> $msg" -ForegroundColor Cyan }
@@ -43,6 +61,13 @@ function Write-FAIL  { param([string]$msg) Write-Host "   FAIL: $msg" -Foregroun
 function Write-WARN  { param([string]$msg) Write-Host "   WARN: $msg" -ForegroundColor Yellow }
 
 $allOk = $true
+
+# A pending reboot (install_prerequisites.ps1 wrote .reboot_required after a
+# DISM 3010) legitimately defers the distro import + image pull to the
+# post-reboot finalize — so a "distro missing / docker down / images absent"
+# result here is EXPECTED, not a failure. Detect it so the summary reports a
+# benign "reboot pending" instead of the alarming FAIL the pilot user saw.
+$rebootPending = Test-Path (Join-Path $PSScriptRoot ".reboot_required")
 
 Write-Step "Verifying EduBotics installation..."
 Write-Host "   Diagnostics log: $DiagLog" -ForegroundColor Gray
@@ -217,6 +242,15 @@ Write-Step "Verification complete!"
 if ($allOk) {
     Write-Host "   All checks passed. You're ready to go!" -ForegroundColor Green
     Write-Diag "verify_summary" "PASS"
+    exit 0
+} elseif ($rebootPending) {
+    # A reboot is pending (WSL feature enable / a prior servicing op). The distro
+    # import + image pull are deliberately deferred to the post-reboot finalize,
+    # so the failed checks above are EXPECTED — report a benign reboot-pending
+    # state, NOT a FAIL (which read as a broken install to the pilot user).
+    Write-Host "   Ein Windows-Neustart steht noch aus." -ForegroundColor Yellow
+    Write-Host "   Die EduBotics-Umgebung wird nach dem Neustart eingerichtet." -ForegroundColor Yellow
+    Write-Diag "verify_summary" "REBOOT_PENDING (distro import + image pull deferred until after reboot)"
     exit 0
 } else {
     # Audit H23: previously this branch logged a yellow warning and

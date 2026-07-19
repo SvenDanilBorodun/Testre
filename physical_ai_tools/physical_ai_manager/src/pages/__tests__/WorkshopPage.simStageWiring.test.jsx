@@ -182,23 +182,26 @@ describe('WorkshopPage — SimStage wiring (real SimStage, mocked SimScene)', ()
     expect(await screen.findByTestId('sim-scene')).toBeInTheDocument();
     expect(screen.getByText('Simulator')).toBeInTheDocument();
 
+    // ONE assertion inside waitFor (testing-library/no-wait-for-multiple-
+    // assertions): once layout has crossed SimStage → SimScene the same render
+    // delivered every sibling prop, so the rest asserts on a settled snapshot.
     await waitFor(() => {
-      const props = lastSimSceneProps();
-      // SimStage pins the split layout + the mount-time literals.
-      expect(props.layout).toBe('split');
-      expect(props.showShadows).toBe(true);
-      expect(props.showReach).toBe(true);
-      // Sim entry force-enables the trail; the page's showPath state crossed
-      // SimStage → SimScene…
-      expect(props.showPath).toBe(true);
-      // …and the page's catalogDims (the REAL buildCatalogDims output over the
-      // service arrays) arrived intact.
-      expect(props.catalogDims).toEqual({
-        wuerfel: { height_m: 0.03, width_m: 0.03, color: '#f59e0b', max_instances: 2 },
-      });
-      // The empty scene reached SimScene too.
-      expect(props.scene).toEqual(expect.objectContaining({ objects: expect.any(Array) }));
+      expect(lastSimSceneProps().layout).toBe('split');
     });
+    const props = lastSimSceneProps();
+    // SimStage pins the mount-time literals.
+    expect(props.showShadows).toBe(true);
+    expect(props.showReach).toBe(true);
+    // Sim entry force-enables the trail; the page's showPath state crossed
+    // SimStage → SimScene…
+    expect(props.showPath).toBe(true);
+    // …and the page's catalogDims (the REAL buildCatalogDims output over the
+    // service arrays) arrived intact.
+    expect(props.catalogDims).toEqual({
+      wuerfel: { height_m: 0.03, width_m: 0.03, color: '#f59e0b', max_instances: 2 },
+    });
+    // The empty scene reached SimScene too.
+    expect(props.scene).toEqual(expect.objectContaining({ objects: expect.any(Array) }));
     // The real SimStage's trail toggle mirrors showPath=true.
     expect(screen.getByRole('button', { name: 'Bahn verbergen' })).toBeInTheDocument();
   });

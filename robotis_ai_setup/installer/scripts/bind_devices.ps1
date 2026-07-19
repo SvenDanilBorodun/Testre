@@ -21,7 +21,7 @@
 param(
     [Parameter(Mandatory = $true)]
     [string[]]$HardwareIds,
-    [string]$LogPath = "$env:TEMP\edubotics_bind_devices.log"
+    [string]$LogPath = (Join-Path ([System.IO.Path]::GetTempPath()) 'edubotics_bind_devices.log')
 )
 
 $ErrorActionPreference = "Continue"

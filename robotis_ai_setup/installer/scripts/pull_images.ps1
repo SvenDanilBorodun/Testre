@@ -73,9 +73,14 @@ if (-not $listed) {
     exit 1
 }
 
-wsl -d $DistroName -- docker info *>$null 2>&1
-if ($LASTEXITCODE -ne 0) {
-    Write-Host "ERROR: Docker engine not running inside $DistroName. Check: wsl -d $DistroName -- systemctl status docker" -ForegroundColor Red
+# Ensure dockerd is up before pulling (F3: single-shot `docker info` raced the
+# cold-start on a freshly-imported distro). Wait-DockerReady triggers the VM
+# boot, polls by exit code, and runs the start-dockerd.sh wrapper as a fallback.
+# This distro uses start-dockerd.sh (the wsl.conf [boot] command), NOT systemd,
+# so the old "systemctl status docker" hint was wrong.
+. (Join-Path $PSScriptRoot 'wsl_docker_ready.ps1')
+if (-not (Wait-DockerReady -DistroName $DistroName)) {
+    Write-Host "ERROR: Docker-Engine in $DistroName konnte nicht gestartet werden. Diagnose: wsl -d $DistroName -- tail -n 50 /var/log/dockerd.log" -ForegroundColor Red
     exit 1
 }
 

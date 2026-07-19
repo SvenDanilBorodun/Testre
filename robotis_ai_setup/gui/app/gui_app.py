@@ -18,6 +18,61 @@ from tkinter import ttk, scrolledtext, messagebox
 import webbrowser
 
 
+def _is_elevated() -> bool:
+    """Return True if the current process already holds an elevated admin token.
+
+    Non-Windows always returns False. Never raises — an unreadable token is
+    treated as non-elevated (the safe assumption for the UAC-prompt path).
+    """
+    if sys.platform != "win32":
+        return False
+    try:
+        import ctypes
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _uac_enabled() -> bool:
+    """Return True if UAC (EnableLUA) is enabled on this machine.
+
+    With EnableLUA=0 the ``runas`` verb no longer shows a consent dialog and,
+    from a non-admin token, silently fails — so we probe it up front to give
+    the student a clear German instruction instead of a bare error code.
+    Defaults to True (the Windows default) whenever the key can't be read.
+    """
+    if sys.platform != "win32":
+        return True
+    try:
+        import winreg
+        with winreg.OpenKey(
+            winreg.HKEY_LOCAL_MACHINE,
+            r"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System",
+        ) as key:
+            val, _ = winreg.QueryValueEx(key, "EnableLUA")
+            return int(val) != 0
+    except (OSError, ValueError):
+        return True
+
+
+# ShellExecuteExW failure codes returned in hInstApp (a fake HINSTANCE <= 32).
+# Mapped to German so the student sees a cause, not a raw number.
+_SE_ERR_REASONS = {
+    0:  "Nicht genügend Arbeitsspeicher",
+    2:  "Datei nicht gefunden",
+    3:  "Pfad nicht gefunden",
+    5:  "Zugriff verweigert (UAC abgelehnt oder Richtlinie)",
+    8:  "Nicht genügend Arbeitsspeicher",
+    26: "Freigabeverletzung",
+    27: "Unvollständige Dateizuordnung",
+    28: "Zeitüberschreitung",
+    29: "Start fehlgeschlagen",
+    30: "Datei ist belegt",
+    31: "Keine zugeordnete Anwendung",
+    32: "DLL nicht gefunden",
+}
+
+
 def _elevate_and_wait(exe: str, args: str, show: int = 1):
     """Run `exe args` elevated via UAC and wait for exit.
 
@@ -25,8 +80,15 @@ def _elevate_and_wait(exe: str, args: str, show: int = 1):
     `Start-Process -Verb RunAs -Wait`, which has known parameter-set
     conflicts and unreliable wait semantics.
 
-    Returns (exit_code, cancelled, error_message). On non-Windows, returns
-    (None, False, 'not supported').
+    Returns (exit_code, cancelled, error_message):
+      - exit_code is an int ONLY when the elevated process actually ran and
+        exited; it is None on any LAUNCH failure (UAC cancelled, ShellExecuteEx
+        error, no process handle, or a wait/exit-code readback failure). Callers
+        MUST treat ``exit_code is None`` as "never ran", distinct from a numeric
+        non-zero "ran and failed".
+      - cancelled is True only for the UAC-consent-denied case, so callers can
+        offer a retry rather than a manual-command fallback.
+    On non-Windows, returns (None, False, 'not supported').
     """
     if sys.platform != "win32":
         return None, False, "not supported"
@@ -36,9 +98,12 @@ def _elevate_and_wait(exe: str, args: str, show: int = 1):
 
     SEE_MASK_NOCLOSEPROCESS = 0x00000040
     SEE_MASK_NOASYNC        = 0x00000100
-    SEE_MASK_FLAG_NO_UI     = 0x00000400
+    SEE_MASK_FLAG_NO_UI     = 0x00000400  # suppress the OS error dialog (e.g. the
+                                          # policy-block "Einschränkungen" box) so our
+                                          # own actionable German fallback is what shows
     ERROR_CANCELLED         = 1223
     INFINITE                = 0xFFFFFFFF
+    WAIT_FAILED             = 0xFFFFFFFF
 
     class SHELLEXECUTEINFOW(ctypes.Structure):
         _fields_ = [
@@ -61,32 +126,138 @@ def _elevate_and_wait(exe: str, args: str, show: int = 1):
 
     info = SHELLEXECUTEINFOW()
     info.cbSize = ctypes.sizeof(info)
-    info.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC
+    info.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC | SEE_MASK_FLAG_NO_UI
     info.lpVerb = "runas"
     info.lpFile = exe
     info.lpParameters = args
     info.nShow = show
 
-    shell32 = ctypes.windll.shell32
-    kernel32 = ctypes.windll.kernel32
+    # Load with use_last_error=True so ctypes preserves the Win32 last-error
+    # across the call boundary — ctypes.get_last_error() reads the *ctypes*
+    # copy, which is only captured for functions from a use_last_error DLL.
+    # The previous ctypes.windll.* handles did NOT set this, so get_last_error()
+    # returned a stale/zero value and every failure was misreported.
+    shell32 = ctypes.WinDLL("shell32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     shell32.ShellExecuteExW.restype = wintypes.BOOL
     shell32.ShellExecuteExW.argtypes = [ctypes.POINTER(SHELLEXECUTEINFOW)]
 
     ok = shell32.ShellExecuteExW(ctypes.byref(info))
     if not ok:
         err = ctypes.get_last_error()
+        # hInstApp carries the ShellExecute-specific reason (a fake HINSTANCE
+        # <= 32) that classifies the failure more precisely than GetLastError.
+        h_inst = ctypes.cast(info.hInstApp, ctypes.c_void_p).value or 0
         if err == ERROR_CANCELLED:
             return None, True, "UAC abgebrochen"
-        return None, False, f"ShellExecuteEx Fehler {err}"
+        reason = _SE_ERR_REASONS.get(h_inst)
+        if reason:
+            return None, False, f"{reason} (Fehler {err}, hInstApp={h_inst})"
+        return None, False, f"ShellExecuteEx Fehler {err} (hInstApp={h_inst})"
 
     if not info.hProcess:
         return None, False, "Kein Prozess-Handle erhalten"
 
-    kernel32.WaitForSingleObject(info.hProcess, INFINITE)
+    wait_rc = kernel32.WaitForSingleObject(info.hProcess, INFINITE)
+    if wait_rc == WAIT_FAILED:
+        err = ctypes.get_last_error()
+        kernel32.CloseHandle(info.hProcess)
+        return None, False, f"Warten auf den Prozess fehlgeschlagen (Fehler {err})"
     exit_code = wintypes.DWORD(0)
-    kernel32.GetExitCodeProcess(info.hProcess, ctypes.byref(exit_code))
+    got = kernel32.GetExitCodeProcess(info.hProcess, ctypes.byref(exit_code))
     kernel32.CloseHandle(info.hProcess)
+    if not got:
+        err = ctypes.get_last_error()
+        return None, False, f"Exit-Code konnte nicht gelesen werden (Fehler {err})"
     return int(exit_code.value), False, None
+
+
+def _run_privileged(exe: str, args: str, show: int = 1):
+    """Run `exe args` with admin rights, choosing the path automatically.
+
+    Rationale — "no UAC prompt appears" on an admin account is NOT a failure:
+    it means either UAC is set to "Never notify" (the admin's elevation happens
+    silently) or UAC is off entirely (this GUI process already carries a FULL
+    admin token). In both cases the process is ALREADY elevated, so re-invoking
+    the ``runas`` verb is redundant and can misbehave. Instead, when we already
+    hold an admin token we run the command DIRECTLY with no prompt — this is
+    exactly what makes setup succeed unattended on those accounts. Only when we
+    are NOT elevated do we route through ShellExecuteEx "runas" (which shows the
+    consent dialog on a standard token).
+
+    Returns the SAME (exit_code, cancelled, error_message) contract as
+    _elevate_and_wait: exit_code is an int only when the process actually ran
+    and exited, None on any launch failure; cancelled is True only for a UAC
+    decline (impossible on the direct path). On non-Windows, ('not supported').
+    """
+    if sys.platform != "win32":
+        return None, False, "not supported"
+
+    if not _is_elevated():
+        # Standard token → we need the OS to elevate us via the UAC prompt.
+        # Exception-guarded so an unexpected ctypes failure surfaces as the
+        # normal launch-failure tuple instead of killing the caller's worker
+        # thread (which would also strand re-entrancy flags like
+        # _finalize_in_progress).
+        try:
+            return _elevate_and_wait(exe, args, show)
+        except Exception as e:  # noqa: BLE001
+            return None, False, f"Elevation fehlgeschlagen: {e}"
+
+    # Already elevated → run the (already-quoted) command line directly with no
+    # UAC. Build `"exe" args` so powershell's own command-line parsing applies
+    # to the pre-quoted -File/-LogPath/-MarkerPath tokens the callers construct.
+    CREATE_NO_WINDOW = 0x08000000  # no console window flashes at the student
+    cmdline = f'"{exe}" {args}'
+    try:
+        proc = subprocess.run(
+            cmdline,
+            creationflags=CREATE_NO_WINDOW,
+            # NO timeout — deliberately matching the UAC path's INFINITE wait.
+            # finalize (rootfs import + multi-GB image pull) can legitimately
+            # exceed any "generous" cap on slow school internet, and a timeout
+            # kill here is worse than useless: subprocess.run() kills only the
+            # powershell.exe child (no job object), so the wsl.exe/msiexec
+            # grandchildren keep running detached while the GUI reports a
+            # failure — and killing `wsl --import` mid-copy can leave the
+            # corrupt-VHDX state the import script's disk gate exists to
+            # prevent. The child runs on the caller's daemon thread, so a
+            # wedged child never blocks the UI; finalize is idempotent, so a
+            # GUI restart simply resumes.
+        )
+        return proc.returncode, False, None
+    except Exception as e:  # noqa: BLE001
+        return None, False, f"Direkter Start fehlgeschlagen: {e}"
+
+
+def _ps_single_quote(s: str) -> str:
+    """Escape a string for safe embedding inside a single-quoted PowerShell token.
+
+    A single quote inside a single-quoted PS string must be doubled (`''`).
+    Without this, a path containing an apostrophe (e.g. a Windows username like
+    `O'Brien`) would terminate the quoted token early and break — or reshape —
+    the elevated command line.
+    """
+    return str(s).replace("'", "''")
+
+
+def _edubotics_diag_dir() -> str:
+    """Return (creating if needed) the EduBotics diagnostics directory.
+
+    Lives under %LOCALAPPDATA%\\EduBotics — the same base install_diagnostics.log
+    uses (see device_manager._diagnostics_log_path). Elevated log/marker files go
+    here rather than %TEMP% so the GUI and its elevated child agree on one path
+    the GUI unambiguously knows, and one that can't contain a foreign temp-dir
+    quirk. Best-effort makedirs — falls back to returning the path regardless.
+    """
+    base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+    d = os.path.join(base, "EduBotics")
+    try:
+        os.makedirs(d, exist_ok=True)
+    except OSError:
+        pass
+    return d
+
 
 def _asset_path(name: str) -> str:
     """Return absolute path to an asset file; works in dev + PyInstaller frozen builds."""
@@ -851,6 +1022,10 @@ class EduBoticsApp:
 
     def _check_prerequisites(self):
         """Auf GUI-Update prüfen, dann EduBotics-Umgebung, WSL2, usbipd beim Start prüfen."""
+        # Fire the informational system preflight once per launch, off on its own
+        # daemon thread so it never blocks or gates the startup checks below.
+        threading.Thread(target=self._run_preflight_diagnostics, daemon=True).start()
+
         def _check():
             self.root.after(0, lambda: self.progress.start(10))
 
@@ -906,9 +1081,19 @@ class EduBoticsApp:
         if not docker_manager.is_distro_registered():
             self._log("EduBotics-Umgebung ist noch nicht eingerichtet.")
             self.root.after(0, lambda: self.progress.stop())
-            # Offer one-click finalize (UAC prompt, runs finalize_install.ps1).
+            # Auto-run finalize (finalize_install.ps1) — direct when already
+            # elevated, else via one UAC prompt; re-entrancy-guarded inside.
             self.root.after(0, self._prompt_finalize_install)
             return
+        # Pin the distro awake for the lifetime of this GUI session BEFORE the
+        # rest of the prerequisite scan runs. Without this, WSL2's vmIdleTimeout
+        # shuts the distro down ~60s after the last wsl.exe call, killing
+        # dockerd and the manager container — the embedded WebView then loads
+        # http://localhost:80/ into a dead port. Starting it here (not after the
+        # docker-wait below) keeps the distro pinned through the potentially slow
+        # docker start, image checks, and arm scan that follow. Idempotent, and
+        # safe now that is_distro_registered() has confirmed the distro exists.
+        docker_manager.start_keepalive()
         if not docker_manager.is_docker_running():
             self._log("EduBotics-Umgebung startet...")
             docker_manager.start_edubotics_distro()
@@ -919,11 +1104,6 @@ class EduBoticsApp:
                 self._set_status("EduBotics-Umgebung nicht bereit")
                 self.root.after(0, lambda: self.progress.stop())
                 return
-        # Pin the distro awake for the lifetime of this GUI session. Without
-        # this, WSL2's vmIdleTimeout shuts the distro down ~60s after the
-        # last wsl.exe call, killing dockerd and the manager container — the
-        # embedded WebView then loads http://localhost:80/ into a dead port.
-        docker_manager.start_keepalive()
         self._log("EduBotics-Umgebung: OK")
 
         # ── Lifecycle: the GUI is the SOLE owner of the container lifecycle ──
@@ -1083,34 +1263,59 @@ class EduBoticsApp:
             self._set_status("usbipd fehlt — Reparatur übersprungen")
             return
 
-        self._set_status("Reparatur läuft (UAC-Zustimmung erforderlich)...")
-        self._log("usbipd-Reparatur wird mit Administrator-Rechten gestartet...")
+        # Already-elevated accounts run the repair directly with no UAC prompt;
+        # word the status accordingly so it isn't misleading.
+        if _is_elevated():
+            self._set_status("Reparatur läuft (Administrator-Rechte vorhanden)...")
+            self._log("usbipd-Reparatur wird automatisch ausgeführt (Administrator-Rechte vorhanden)...")
+        else:
+            self._set_status("Reparatur läuft (UAC-Zustimmung erforderlich)...")
+            self._log("usbipd-Reparatur wird mit Administrator-Rechten gestartet...")
 
         def _run_elevated():
             # We chain both scripts in a single elevated shell so the
             # student sees one UAC prompt, not two. The combined script
             # writes its transcript so the GUI can show what happened.
-            import tempfile
-            log_file = os.path.join(tempfile.gettempdir(), "edubotics_repair_usbipd.log")
+            log_file = os.path.join(_edubotics_diag_dir(), "edubotics_repair_usbipd.log")
             try:
                 if os.path.isfile(log_file):
                     os.remove(log_file)
             except OSError:
                 pass
 
+            # Every path lands inside a single-quoted PowerShell token, so any
+            # embedded apostrophe (a username like O'Brien reaches these paths)
+            # must be doubled or it terminates the token and reshapes the command.
             ps_cmd = (
                 f'-NoProfile -ExecutionPolicy Bypass -Command '
-                f'"Start-Transcript -Path \'{log_file}\' -Force | Out-Null; '
-                f'& \'{prereq}\'; '
+                f'"Start-Transcript -Path \'{_ps_single_quote(log_file)}\' -Force | Out-Null; '
+                f'& \'{_ps_single_quote(prereq)}\'; '
                 f'$prereq_rc = $LASTEXITCODE; '
-                f'& \'{configure}\'; '
+                f'& \'{_ps_single_quote(configure)}\'; '
                 f'$cfg_rc = $LASTEXITCODE; '
                 f'Stop-Transcript | Out-Null; '
                 f'if ($prereq_rc -ne 0) {{ exit $prereq_rc }} '
                 f'elseif ($cfg_rc -ne 0) {{ exit $cfg_rc }} '
                 f'else {{ exit 0 }}"'
             )
-            exit_code, cancelled, err = _elevate_and_wait(
+            # Paste-safe variant for the manual-fallback dialog. ps_cmd cannot
+            # be pasted into a PowerShell prompt: its double-quoted -Command
+            # string contains $prereq_rc/$cfg_rc/$LASTEXITCODE, which the
+            # OUTER interactive PowerShell interpolates (to empty/stale values)
+            # before the child ever sees them — the child then receives ` = ;`
+            # fragments and fails to parse, so nothing runs. The manual variant
+            # drops the transcript/exit-code plumbing (the student sees the
+            # output directly in their console) and contains no `$` at all, so
+            # it survives both an elevated PowerShell and cmd.exe verbatim. The
+            # powershell.exe -ExecutionPolicy Bypass wrapper stays: a bare
+            # `& 'script.ps1'` would be blocked by the default policy.
+            manual_cmd = (
+                f'powershell.exe -NoProfile -ExecutionPolicy Bypass -Command '
+                f'"& \'{_ps_single_quote(prereq)}\'; '
+                f'& \'{_ps_single_quote(configure)}\'"'
+            )
+            self._elevation_prewarn()
+            exit_code, cancelled, err = _run_privileged(
                 exe="powershell.exe",
                 args=ps_cmd,
             )
@@ -1145,6 +1350,29 @@ class EduBoticsApp:
                 if cancelled:
                     self._log("Reparatur abgebrochen (UAC-Zustimmung verweigert).")
                     self._set_status("Reparatur abgebrochen — erneut versuchen")
+                    # A Group-Policy auto-deny also surfaces as ERROR_CANCELLED and
+                    # would loop forever; after the 2nd cancel offer the manual path.
+                    n = getattr(self, "_cancel_count_usbipd", 0) + 1
+                    setattr(self, "_cancel_count_usbipd", n)
+                    if n >= 2:
+                        self._log("Mehrfach abgebrochen — manueller Befehl wird angeboten.")
+                        self._show_manual_elevation_fallback(
+                            "usbipd-Reparatur manuell ausführen",
+                            manual_cmd,
+                        )
+                elif exit_code is None:
+                    # Launch failure: the elevated child never ran (distinct
+                    # from a numeric non-zero "ran and failed"). Offer the
+                    # manual admin command as a fallback.
+                    self._log(
+                        "Reparatur konnte nicht gestartet werden "
+                        "(kein Prozess). Manueller Befehl wird angeboten."
+                    )
+                    self._set_status("Reparatur nicht gestartet — manueller Befehl")
+                    self._show_manual_elevation_fallback(
+                        "usbipd-Reparatur manuell ausführen",
+                        manual_cmd,
+                    )
                 else:
                     self._log(
                         f"Reparatur fehlgeschlagen (exit {exit_code}). "
@@ -1158,6 +1386,93 @@ class EduBoticsApp:
 
     # ── ShellExecuteEx helper is defined at module scope below. ──────
 
+    def _elevation_prewarn(self):
+        """Log a German warning when UAC is disabled and we're NOT already admin.
+
+        With EnableLUA=0 the `runas` verb won't show a consent dialog and, from a
+        standard token, ShellExecuteEx just fails — this note tells the student
+        why up front. Returns True if a warning was emitted (best-effort only).
+        """
+        if _is_elevated():
+            return False
+        if not _uac_enabled():
+            self._log(
+                "[WARNUNG] Die Benutzerkontensteuerung (UAC) ist deaktiviert. "
+                "Die Administrator-Abfrage erscheint möglicherweise nicht — "
+                "bitte EduBotics als Administrator ausführen, falls die "
+                "Reparatur fehlschlägt."
+            )
+            return True
+        return False
+
+    def _show_manual_elevation_fallback(self, title: str, command: str):
+        """Offer the student a manual admin command when auto-elevation is a dead end.
+
+        Shown in two cases: a launch failure (exit_code is None — the elevated
+        child never started, so re-clicking rarely helps) and a repeated UAC
+        cancel (>= 2, which also covers a Group-Policy auto-deny that surfaces
+        as ERROR_CANCELLED and would otherwise loop forever). We give the exact
+        command to paste into an elevated PowerShell, with a copy-to-clipboard
+        button. The command MUST be paste-safe for an interactive PowerShell:
+        no `$` inside double quotes (the outer shell would interpolate it
+        before the child sees it). Runs on the Tk main thread.
+        """
+        def _build():
+            win = tk.Toplevel(self.root)
+            win.title(title)
+            win.transient(self.root)
+            win.resizable(False, False)
+            _apply_window_icon(win)
+            try:
+                win.grab_set()
+            except tk.TclError:
+                pass
+
+            frame = ttk.Frame(win, padding=16)
+            frame.pack(fill=tk.BOTH, expand=True)
+            ttk.Label(
+                frame,
+                text="Die automatische Administrator-Abfrage konnte nicht "
+                     "gestartet werden.",
+                font=("Segoe UI", 10, "bold"),
+                wraplength=520,
+            ).pack(anchor=tk.W)
+            ttk.Label(
+                frame,
+                text="Bitte öffne 'Windows PowerShell' oder das Terminal als "
+                     "Administrator (Rechtsklick → 'Als Administrator "
+                     "ausführen') und führe folgenden Befehl aus:",
+                font=("Segoe UI", 9),
+                wraplength=520,
+                foreground="gray",
+            ).pack(anchor=tk.W, pady=(4, 8))
+
+            cmd_box = scrolledtext.ScrolledText(
+                frame, height=5, width=68, wrap=tk.WORD, font=("Consolas", 9)
+            )
+            cmd_box.insert(tk.END, command)
+            cmd_box.config(state=tk.DISABLED)
+            cmd_box.pack(fill=tk.X, pady=(0, 8))
+
+            copied_var = tk.StringVar()
+
+            def _copy():
+                try:
+                    self.root.clipboard_clear()
+                    self.root.clipboard_append(command)
+                    copied_var.set("Kopiert!")
+                except tk.TclError:
+                    copied_var.set("Kopieren fehlgeschlagen")
+
+            row = ttk.Frame(frame)
+            row.pack(fill=tk.X)
+            ttk.Button(row, text="Befehl kopieren", command=_copy).pack(side=tk.LEFT)
+            ttk.Label(row, textvariable=copied_var, foreground="gray").pack(
+                side=tk.LEFT, padx=8)
+            ttk.Button(row, text="Schließen", command=win.destroy).pack(side=tk.RIGHT)
+
+        self.root.after(0, _build)
+
     def _resolve_finalize_script(self):
         """Find finalize_install.ps1. Supports both production and dev layouts."""
         from .constants import INSTALL_DIR
@@ -1170,13 +1485,89 @@ class EduBoticsApp:
                 return p
         return None
 
-    def _prompt_finalize_install(self):
-        """Prompt the student to finalize setup after a post-reboot continuation.
+    def _resolve_preflight_script(self):
+        """Find preflight_system.ps1. Supports both production and dev layouts."""
+        from .constants import INSTALL_DIR
+        candidates = [
+            os.path.join(INSTALL_DIR, "scripts", "preflight_system.ps1"),               # production install
+            os.path.join(INSTALL_DIR, "installer", "scripts", "preflight_system.ps1"),  # dev tree
+        ]
+        for p in candidates:
+            if os.path.isfile(p):
+                return p
+        return None
 
-        When WSL2 was installed fresh, the installer defers rootfs import until
-        after reboot. On first GUI launch the distro is missing; we ask the
-        student for admin consent and run finalize_install.ps1 with UAC.
+    def _run_preflight_diagnostics(self):
+        """Run preflight_system.ps1 once at startup and echo its German output.
+
+        Purely informational: the script's findings land in the Protokoll so a
+        student (or support) can see the system's diagnosis. It NEVER gates or
+        blocks any flow — every failure mode (non-Windows, missing script,
+        timeout, subprocess error) is swallowed. Runs in a background daemon
+        thread so it can never block the UI or startup checks.
         """
+        try:
+            if sys.platform != "win32":
+                return
+            script = self._resolve_preflight_script()
+            if script is None:
+                return
+            # CREATE_NO_WINDOW so the elevated-free preflight never flashes a
+            # console window at the student (win32-only path — guarded above).
+            creationflags = 0x08000000
+            # Encoding: Windows PowerShell 5.1 writes REDIRECTED stdout in the
+            # console's OEM codepage (cp850 on German Windows), while Python's
+            # text=True decodes with the ANSI codepage (cp1252) — umlauts would
+            # garble, and 'ü' (0x81 in cp850, undefined in cp1252) would raise
+            # a UnicodeDecodeError that silently swallows the WHOLE output.
+            # Force the child to emit UTF-8 via [Console]::OutputEncoding (a
+            # -Command wrapper; try/catch-guarded so a console-less edge case
+            # still runs the script) and decode as UTF-8 with errors="replace"
+            # so one bad byte can never blank the diagnosis.
+            ps_wrapper = (
+                "try { [Console]::OutputEncoding = "
+                "[System.Text.Encoding]::UTF8 } catch { }; "
+                f"& '{_ps_single_quote(script)}'"
+            )
+            proc = subprocess.run(
+                [
+                    "powershell.exe",
+                    "-NoProfile",
+                    "-ExecutionPolicy", "Bypass",
+                    "-Command", ps_wrapper,
+                ],
+                capture_output=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=60,
+                creationflags=creationflags,
+            )
+            output = (proc.stdout or "")
+            lines = [ln for ln in output.splitlines() if ln.strip()]
+            if lines:
+                self._log("Systemdiagnose (Preflight):")
+                for line in lines:
+                    self._log(f"  {line}")
+        except Exception:
+            # Diagnostics are best-effort — never let them raise into startup.
+            pass
+
+    def _prompt_finalize_install(self):
+        """Finish setup AUTOMATICALLY after a post-reboot continuation.
+
+        When WSL2 was installed fresh, the installer defers the rootfs import
+        until after reboot. On first GUI launch the distro is missing, so we run
+        finalize_install.ps1 elevated WITHOUT asking — the student never clicks a
+        "finish setup" button or opens a terminal. On an admin-capable account the
+        only OS-level interaction is the standard UAC consent; the setup itself
+        (import + image pull) then runs unattended and is idempotent/resumable.
+
+        Re-entrancy is guarded so a repeated prerequisite scan can't stack a
+        second elevated launch on top of one already in flight.
+        """
+        if getattr(self, "_finalize_in_progress", False):
+            return
+
         script = self._resolve_finalize_script()
         if script is None:
             messagebox.showerror(
@@ -1188,33 +1579,38 @@ class EduBoticsApp:
             self._set_status("EduBotics-Umgebung fehlt")
             return
 
+        self._finalize_in_progress = True
         self._log(f"Setup-Skript: {script}")
-
-        wants_run = messagebox.askyesno(
-            "Einrichtung abschließen",
-            "Die EduBotics-Umgebung muss noch eingerichtet werden.\n\n"
-            "Dies erfordert einmalig Administrator-Rechte und dauert "
-            "3–10 Minuten (Rootfs-Import + Docker-Images).\n\n"
-            "Jetzt einrichten?",
-        )
-        if not wants_run:
-            self._set_status("EduBotics-Umgebung nicht eingerichtet")
-            self._log("Einrichtung vom Benutzer verschoben.")
-            return
-
-        self._set_status("Einrichtung läuft (UAC-Zustimmung erforderlich)...")
-        self._log("Einrichtung wird mit Administrator-Rechten gestartet...")
+        # When we already hold an admin token there is NO UAC prompt (UAC off or
+        # "Never notify"), so word the status/log for the actual path taken.
+        if _is_elevated():
+            self._set_status("Einrichtung läuft automatisch (Administrator-Rechte vorhanden)...")
+            self._log("Einrichtung wird automatisch ausgeführt (Administrator-Rechte vorhanden)...")
+        else:
+            self._set_status("Einrichtung läuft automatisch (UAC-Zustimmung erforderlich)...")
+            self._log("Einrichtung wird automatisch mit Administrator-Rechten gestartet...")
 
         def _run_elevated():
-            import tempfile
+            # Clear the re-entrancy guard only after ALL post-processing
+            # (transcript echo, re-check, fallback dialogs) — clearing it right
+            # after the child exited let a concurrent rescan stack a second
+            # finalize while this one was still reporting. The finally also
+            # guarantees an unexpected exception can't strand the flag, which
+            # would permanently disable setup retries until a GUI restart.
+            try:
+                _finalize_worker()
+            finally:
+                self._finalize_in_progress = False
+
+        def _finalize_worker():
             # The elevated finalize_install.ps1 writes:
             #   - a marker file on startup (proves it launched)
             #   - a transcript file with full stdout/stderr (Start-Transcript)
             # Using ShellExecuteEx directly (not nested Start-Process) so we
             # get a reliable process handle + deterministic wait.
-            temp = tempfile.gettempdir()
-            log_file = os.path.join(temp, "edubotics_finalize.log")
-            marker_file = os.path.join(temp, "edubotics_finalize.marker")
+            diag = _edubotics_diag_dir()
+            log_file = os.path.join(diag, "edubotics_finalize.log")
+            marker_file = os.path.join(diag, "edubotics_finalize.marker")
             for f in (log_file, marker_file):
                 try:
                     if os.path.isfile(f):
@@ -1222,12 +1618,14 @@ class EduBoticsApp:
                 except OSError:
                     pass
 
-            exit_code, cancelled, err = _elevate_and_wait(
+            ps_args = (
+                f'-NoProfile -ExecutionPolicy Bypass -File "{script}" '
+                f'-LogPath "{log_file}" -MarkerPath "{marker_file}"'
+            )
+            self._elevation_prewarn()
+            exit_code, cancelled, err = _run_privileged(
                 exe="powershell.exe",
-                args=(
-                    f'-NoProfile -ExecutionPolicy Bypass -File "{script}" '
-                    f'-LogPath "{log_file}" -MarkerPath "{marker_file}"'
-                ),
+                args=ps_args,
             )
             if err:
                 self._log(f"UAC-Fehler: {err}")
@@ -1261,6 +1659,28 @@ class EduBoticsApp:
                 if cancelled:
                     self._log("Einrichtung abgebrochen (UAC-Zustimmung verweigert).")
                     self._set_status("Einrichtung abgebrochen — erneut versuchen")
+                    # Group-Policy auto-deny loops on ERROR_CANCELLED; escalate.
+                    n = getattr(self, "_cancel_count_finalize", 0) + 1
+                    setattr(self, "_cancel_count_finalize", n)
+                    if n >= 2:
+                        self._log("Mehrfach abgebrochen — manueller Befehl wird angeboten.")
+                        self._show_manual_elevation_fallback(
+                            "Einrichtung manuell abschließen",
+                            f"powershell.exe {ps_args}",
+                        )
+                elif exit_code is None:
+                    # Launch failure (never ran) — distinct from a numeric
+                    # non-zero exit. The missing marker corroborates it. Offer
+                    # the manual admin command as a fallback.
+                    self._log(
+                        "Einrichtung konnte nicht gestartet werden "
+                        "(kein Prozess). Manueller Befehl wird angeboten."
+                    )
+                    self._set_status("Einrichtung nicht gestartet — manueller Befehl")
+                    self._show_manual_elevation_fallback(
+                        "Einrichtung manuell abschließen",
+                        f"powershell.exe {ps_args}",
+                    )
                 else:
                     self._log(
                         f"Einrichtung fehlgeschlagen (exit {exit_code}). "
@@ -1747,8 +2167,7 @@ class EduBoticsApp:
         self._log("Freigabe wird mit Administrator-Rechten gestartet...")
 
         def _run_elevated():
-            import tempfile
-            log_file = os.path.join(tempfile.gettempdir(), "edubotics_bind_devices.log")
+            log_file = os.path.join(_edubotics_diag_dir(), "edubotics_bind_devices.log")
             try:
                 if os.path.isfile(log_file):
                     os.remove(log_file)
@@ -1765,7 +2184,8 @@ class EduBoticsApp:
                 f'-HardwareIds {hw_args} '
                 f'-LogPath "{log_file}"'
             )
-            exit_code, cancelled, err = _elevate_and_wait(
+            self._elevation_prewarn()
+            exit_code, cancelled, err = _run_privileged(
                 exe="powershell.exe",
                 args=ps_args,
             )
@@ -1788,8 +2208,30 @@ class EduBoticsApp:
             if cancelled:
                 self._log("Freigabe abgebrochen (UAC-Zustimmung verweigert).")
                 self._set_status("Freigabe abgebrochen — erneut versuchen")
+                # Group-Policy auto-deny loops on ERROR_CANCELLED; escalate.
+                n = getattr(self, "_cancel_count_bind", 0) + 1
+                setattr(self, "_cancel_count_bind", n)
+                if n >= 2:
+                    self._log("Mehrfach abgebrochen — manueller Befehl wird angeboten.")
+                    self._show_manual_elevation_fallback(
+                        "Geräte-Freigabe manuell ausführen",
+                        f"powershell.exe {ps_args}",
+                    )
                 return
-            if exit_code not in (0, None):
+            if exit_code is None:
+                # Launch failure (never ran): offer the manual admin command
+                # instead of silently swallowing it with the numeric branch.
+                self._log(
+                    "Freigabe konnte nicht gestartet werden (kein Prozess). "
+                    "Manueller Befehl wird angeboten."
+                )
+                self._set_status("Freigabe nicht gestartet — manueller Befehl")
+                self._show_manual_elevation_fallback(
+                    "Geräte-Freigabe manuell ausführen",
+                    f"powershell.exe {ps_args}",
+                )
+                return
+            if exit_code != 0:
                 self._log(f"Freigabe-Skript exit={exit_code}. Siehe Protokoll oben.")
 
             if on_done is not None:

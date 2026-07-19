@@ -114,12 +114,23 @@ foreach ($feature in @("VirtualMachinePlatform", "Microsoft-Windows-Subsystem-Li
 }
 
 # ── Check virtualization ──
+# Locale-independent CIM query. The old `systeminfo | Select-String
+# "Hyper-V Requirements"` matched an ENGLISH-ONLY label, so on German Windows
+# it never matched and always printed a spurious "may not be enabled" warning.
+# HypervisorPresent is $true whenever a hypervisor (Hyper-V / WSL2's VMP) is
+# already running; VirtualizationFirmwareEnabled reflects the BIOS/UEFI setting.
 Write-Step "Checking virtualization support..."
-$vmInfo = systeminfo | Select-String "Hyper-V Requirements"
-if ($vmInfo -match "VM Monitor Mode Extensions:\s+Yes") {
-    Write-OK "Virtualization enabled"
-} else {
-    Write-Host "WARNING: Virtualization may not be enabled. If WSL2 fails, enable it in BIOS." -ForegroundColor Yellow
+try {
+    $hv = (Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue).HypervisorPresent
+    $vtFw = $false
+    try { $vtFw = (Get-CimInstance Win32_Processor -ErrorAction SilentlyContinue | Select-Object -First 1).VirtualizationFirmwareEnabled } catch { }
+    if ($hv -eq $true -or $vtFw -eq $true) {
+        Write-OK "Virtualization enabled"
+    } else {
+        Write-Host "   Hinweis: Virtualisierung konnte nicht bestätigt werden. Falls WSL2 fehlschlägt, im BIOS/UEFI aktivieren." -ForegroundColor Gray
+    }
+} catch {
+    Write-Host "   Hinweis: Virtualisierungsprüfung übersprungen ($_)." -ForegroundColor Gray
 }
 
 # ── Controlled Folder Access ──
@@ -198,8 +209,19 @@ if (-not $usbipdInstalled) {
 
     Write-Host "   Downloading usbipd-win..." -ForegroundColor White
     Write-Host "   URL: $UsbipdMsiUrl" -ForegroundColor Gray
-    $msiPath = "$env:TEMP\usbipd-win.msi"
-    Invoke-WebRequest -Uri $UsbipdMsiUrl -OutFile $msiPath -UseBasicParsing
+    # GetTempPath() gives one consistent absolute temp path (it reads the same
+    # TMP env var as $env:TEMP — it does NOT expand an 8.3 tilde form). The
+    # msiexec-1619 fix is primarily the QUOTED -ArgumentList below, which
+    # delivers a path with spaces/umlauts intact; the download itself is
+    # try/catch-guarded so a failure exits with a clear German message.
+    $msiPath = Join-Path ([System.IO.Path]::GetTempPath()) 'usbipd-win.msi'
+    try {
+        Invoke-WebRequest -Uri $UsbipdMsiUrl -OutFile $msiPath -UseBasicParsing -ErrorAction Stop
+    } catch {
+        Write-Host "FEHLER: usbipd-win konnte nicht heruntergeladen werden: $_" -ForegroundColor Red
+        Write-Host "   Bitte Internetverbindung prüfen und Installation erneut starten." -ForegroundColor Red
+        exit 1
+    }
 
     if ($UsbipdMsiSha256) {
         $actual = (Get-FileHash -Path $msiPath -Algorithm SHA256).Hash
@@ -208,7 +230,7 @@ if (-not $usbipdInstalled) {
             Write-Host "   Expected: $UsbipdMsiSha256" -ForegroundColor Red
             Write-Host "   Actual:   $actual" -ForegroundColor Red
             Write-Host "   Refusing to install — possible tampering or updated release." -ForegroundColor Red
-            Remove-Item $msiPath -Force -ErrorAction SilentlyContinue
+            try { Remove-Item $msiPath -Force -ErrorAction SilentlyContinue } catch { }
             exit 1
         }
         Write-Host "   SHA256 verified" -ForegroundColor Green
@@ -217,7 +239,9 @@ if (-not $usbipdInstalled) {
     }
 
     Write-Host "   Installing usbipd-win..." -ForegroundColor White
-    Start-Process msiexec.exe -ArgumentList "/i", $msiPath, "/quiet", "/norestart" -Wait
+    # Pass the MSI path QUOTED as a single arg so a path with spaces or umlauts
+    # is delivered intact to msiexec.
+    Start-Process msiexec.exe -ArgumentList @('/i', "`"$msiPath`"", '/quiet', '/norestart') -Wait
     Write-OK "usbipd-win installed"
 
     # PATH refresh — msiexec updates the system PATH, but the current

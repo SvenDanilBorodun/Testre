@@ -17,13 +17,20 @@ Covered:
     path, False when neither exists.
   * _rootfs_rebuild_required — True ONLY on a positive mismatch (both stamps
     present + differ); fails OPEN (False) on match, missing-shipped,
-    unreadable-distro, and absent-shipped-file.
+    unreadable-distro, empty-distro, and absent-shipped-file.
   * _prompt_finalize_install / _run_elevated — the EXIT-CODE routing for all
-    five finalize outcomes (done / reboot-still-needed / failed / consent-refused
-    / UAC-cancelled), the rootfs-mismatch destructive-consent that threads
-    -AllowDestructiveReimport, and the decline path (no elevation).
+    six finalize outcomes (done / done-but-distro-absent / reboot-still-needed /
+    failed / consent-refused / UAC-cancelled), the rootfs-mismatch destructive
+    consent that threads -AllowDestructiveReimport, and the decline path.
   * FinalizeExitContractTest — the exit codes agree across all three files that
     speak them (import_edubotics_wsl.ps1 -> finalize_install.ps1 -> gui_app.py).
+  * PrerequisiteLifecycleTeardownTest — ensure_environment_stopped (the SOLE
+    lifecycle-enforcement point) runs before EVERY early return that follows a
+    distro boot, the rootfs gate included.
+  * PrerequisiteReentrancyTest — two concurrent prerequisite scans (two 15-30 min
+    pulls + two racing prunes) are refused, and the guard survives a raise.
+  * DiagnosticsSinkTest — the GUI and device_manager resolve the SAME diagnostics
+    directory, and it falls back on UNWRITABILITY, not just an unset var.
 
 The routing tests exist because the 2026-07-17 incident was a SPLIT CONTRACT:
 finalize_install.ps1 correctly started keeping .reboot_required set until full
@@ -36,6 +43,7 @@ deliberately set reboot_pending=True on non-reboot outcomes: that combination is
 the regression guard, and re-introducing a flag-first branch must fail them.
 """
 
+import contextlib
 import os
 import re
 import sys
@@ -50,7 +58,7 @@ _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-from gui.app import constants  # noqa: E402
+from gui.app import constants, device_manager  # noqa: E402
 
 _GUI_SRC = os.path.join(os.path.dirname(__file__), "..", "gui", "app", "gui_app.py")
 _SCRIPTS = os.path.join(os.path.dirname(__file__), "..", "installer", "scripts")
@@ -89,12 +97,39 @@ def _ps1_exit_codes(path):
     }
 
 
-def _elevate_fn_src():
-    """Source of the module-level `_elevate_and_wait()` from gui_app.py."""
+def _module_fn_src(name):
+    """Source of a module-level `def <name>(...)` from gui_app.py."""
     src = _read(_GUI_SRC)
-    start = src.index("def _elevate_and_wait(")
+    start = src.index(f"def {name}(")
     end = src.index("\ndef ", start + 1)
     return src[start:end]
+
+
+def _elevate_fn_src():
+    """Source of the module-level `_elevate_and_wait()` from gui_app.py."""
+    return _module_fn_src("_elevate_and_wait")
+
+
+@contextlib.contextmanager
+def _env(**overrides):
+    """Temporarily set / REMOVE (value None) environment variables."""
+    with patch.dict(os.environ, {}, clear=False):
+        for key, value in overrides.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        yield
+
+
+def _method_src(method_name):
+    """Dedented source of one EduBoticsApp method from gui_app.py."""
+    source = _read(_GUI_SRC)
+    marker = f"    def {method_name}(self"
+    start = source.index(marker)
+    rest = source[start:]
+    end = rest.find("\n    def ", len(marker))
+    return textwrap.dedent(rest[: end if end != -1 else len(rest)])
 
 
 def _load_method(method_name, ns):
@@ -102,13 +137,7 @@ def _load_method(method_name, ns):
 
     ``ns`` becomes the function's globals; set ``ns["__package__"]`` so a local
     ``from .constants import ...`` resolves. Returns the callable."""
-    with open(_GUI_SRC, "r", encoding="utf-8") as fh:
-        source = fh.read()
-    marker = f"    def {method_name}(self"
-    start = source.index(marker)
-    rest = source[start:]
-    end = rest.find("\n    def ", len(marker))
-    snippet = textwrap.dedent(rest[: end if end != -1 else len(rest)])
+    snippet = _method_src(method_name)
     exec(compile(snippet, _GUI_SRC, "exec"), ns)  # noqa: S102 — in-repo source
     return ns[method_name]
 
@@ -153,7 +182,15 @@ class RebootRequiredPendingTest(unittest.TestCase):
 
 class RootfsRebuildRequiredTest(unittest.TestCase):
     """_rootfs_rebuild_required blocks ONLY on a positive stamp mismatch and
-    fails OPEN on every ambiguity (the classroom-hiccup guard)."""
+    fails OPEN on every ambiguity (the classroom-hiccup guard).
+
+    The four cells below are THE contract, and both halves of the handshake must
+    agree on them: the GUI here and the .iss RootfsReimportNeeded(). They
+    diverged once — the .iss treated an unreadable stamp as "needs re-import"
+    (fail CLOSED) while the GUI proceeded (fail OPEN), so on exactly the state a
+    broken rig is in, one half offered a destructive volume-wiping rebuild the
+    other said was unnecessary. Converged on fail-open; do not move one side
+    alone."""
 
     def _run(self, install_dir, shipped, distro):
         """shipped=None -> don't write the file at all; distro=None -> distro
@@ -190,6 +227,30 @@ class RootfsRebuildRequiredTest(unittest.TestCase):
     def test_empty_shipped_stamp_fails_open(self):
         with tempfile.TemporaryDirectory() as d:
             self.assertFalse(self._run(d, shipped="  \n", distro="1"))
+
+    def test_empty_distro_stamp_fails_open(self):
+        # read_rootfs_version() normally returns None, but a "" return (a stamp
+        # file that exists and is blank) must fail open through the same branch
+        # — `not distro` covers both, and an `is None` check would not.
+        with tempfile.TemporaryDirectory() as d:
+            self.assertFalse(self._run(d, shipped="2", distro=""))
+
+    def test_both_stamps_unreadable_fails_open(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.assertFalse(self._run(d, shipped=None, distro=None))
+
+    def test_docstring_no_longer_claims_the_stale_iss_mirror(self):
+        """The docstring is load-bearing here: it is the ONLY place the
+        cross-file contract with the .iss is written down, and it went stale
+        while the two halves silently disagreed. Pin the false claim out."""
+        doc = _method_src("_rootfs_rebuild_required")
+        self.assertNotIn(
+            "ShouldImportDistro version comparison", doc,
+            "the .iss gate this claimed to mirror is RootfsReimportNeeded(), and "
+            "the 'both '' -> skip' equivalence was false — say what the contract "
+            "actually is")
+        self.assertIn("fail", doc.lower())
+        self.assertIn("positive mismatch", doc.lower())
 
 
 class PromptFinalizeInstallTest(unittest.TestCase):
@@ -402,14 +463,28 @@ class PromptFinalizeInstallTest(unittest.TestCase):
                 self._run(method, owner)
                 self.assertFalse(owner._finalize_completed)
 
-    def test_exit0_but_distro_missing_reports_fehlgeschlagen(self):
-        # is_distro_registered() alone must NOT be trusted as success (the W2
-        # upgrade wrinkle): exit 0 with the distro absent is a failure.
+    # Outcome 6/6: exit 0 but the distro is STILL absent. is_distro_registered()
+    # alone must NOT be trusted as success (the W2 upgrade wrinkle), so this is
+    # NOT a success — but it must not fall through to the generic else either,
+    # which printed the self-contradicting "Einrichtung fehlgeschlagen (exit 0)".
+    def test_exit0_but_distro_missing_reports_the_contradiction_honestly(self):
         method, owner, calls = self._make(
             elevate=(0, False, None), distro_registered=False)
         self._run(method, owner)
         self.assertEqual(calls["prereq"], 0)
-        self.assertTrue(any("fehlgeschlagen" in m for m in calls["log"]))
+        self.assertFalse(owner._finalize_completed)
+        self.assertTrue(
+            any("meldet Erfolg" in m and "fehlt weiterhin" in m
+                for m in calls["log"]),
+            f"expected the honest 'reports success but the environment is still "
+            f"missing' message: {calls['log']}")
+        # The old wording is a contradiction the student cannot act on.
+        self.assertFalse(
+            any("(exit 0)" in m for m in calls["log"]),
+            f"'fehlgeschlagen (exit 0)' is self-contradictory: {calls['log']}")
+        # ... and it must carry a concrete next step, not just a diagnosis.
+        self.assertTrue(any("neu starten" in m for m in calls["log"]))
+        self.assertTrue(any("Installer erneut" in m for m in calls["log"]))
 
     def test_rootfs_mismatch_consent_threads_destructive_flag(self):
         method, owner, calls = self._make(
@@ -431,6 +506,258 @@ class PromptFinalizeInstallTest(unittest.TestCase):
         self._run(method, owner)
         self.assertEqual(len(calls["elevate"]), 1)
         self.assertNotIn("-AllowDestructiveReimport", calls["elevate"][0])
+
+
+class PrerequisiteLifecycleTeardownTest(unittest.TestCase):
+    """ensure_environment_stopped() is the SOLE lifecycle-enforcement point, so
+    it must run before every early return that can follow a distro boot.
+
+    THE bug this pins: the prerequisite scan boots the distro, then the rootfs
+    gate `return`s ahead of the teardown. The precondition is positively
+    correlated, not hypothetical — a rootfs mismatch MEANS the distro is old and
+    was never re-imported, i.e. exactly the population whose persisted container
+    configs still carry `restart: unless-stopped`, which dockerd honours the
+    instant the distro boots. The follower then torques up and runs its boot
+    quintic to HOME, holding the Dynamixel bus at 100 Hz, while the GUI shows a
+    destructive-rebuild consent dialog over a live arm — and a consent runs
+    `wsl --unregister` against a live VM."""
+
+    def _make(self, *, rootfs_mismatch, docker_running=True):
+        events = []
+
+        def _teardown(log=None):
+            events.append("teardown")
+            return False
+
+        def _rootfs_gate():
+            events.append("rootfs_gate")
+            return rootfs_mismatch
+
+        fake_dm = types.SimpleNamespace(
+            is_distro_registered=lambda: True,
+            start_keepalive=lambda: True,
+            is_docker_running=lambda: docker_running,
+            start_edubotics_distro=lambda: events.append("distro_boot"),
+            wait_for_docker=lambda callback=None: True,
+            ensure_environment_stopped=_teardown,
+            images_exist=lambda: {"img": True},
+            pull_images=lambda **kw: True,
+            check_for_updates=lambda log=None: False,
+            get_last_pull_status=lambda: {"age_days": 0, "digests": {}},
+            has_gpu=lambda: False,
+        )
+        fake_devm = types.SimpleNamespace(
+            usbipd_reachable=lambda: True,
+            usbipd_path=lambda: r"C:\usbipd.exe",
+        )
+        ns = {
+            "os": os,
+            "sys": types.SimpleNamespace(frozen=False),
+            "device_manager": fake_devm,
+            "docker_manager": fake_dm,
+            "IMAGE_TAG": "2.13.0",
+            "__package__": "gui.app",
+        }
+        method = _load_method("_run_prerequisite_checks_body", ns)
+        owner = types.SimpleNamespace(
+            _log=lambda _m: None,
+            _set_status=lambda _m: None,
+            _reboot_required_pending=lambda: False,
+            _finalize_completed=False,
+            _prompt_finalize_install=lambda reason=None: events.append(
+                f"finalize({reason})"),
+            _rootfs_rebuild_required=_rootfs_gate,
+            _prerequisites_done=False,
+            _update_start_button=lambda: None,
+            _try_rehydrate_arms=lambda: None,
+            progress=types.SimpleNamespace(start=lambda *_a: None,
+                                           stop=lambda *_a: None),
+            root=types.SimpleNamespace(
+                after=lambda _ms, fn=None: fn() if fn is not None else None),
+        )
+        return method, owner, events
+
+    def test_teardown_precedes_the_rootfs_gate(self):
+        method, owner, events = self._make(rootfs_mismatch=True)
+        method(owner)
+        self.assertIn("teardown", events,
+                      "the rootfs gate returned without ever tearing the stack "
+                      "down — a resurrected follower is left driving")
+        self.assertLess(events.index("teardown"), events.index("rootfs_gate"))
+        self.assertEqual(events[-1], "finalize(rootfs_mismatch)")
+
+    def test_teardown_still_runs_on_the_happy_path(self):
+        method, owner, events = self._make(rootfs_mismatch=False)
+        method(owner)
+        self.assertEqual(events[0], "teardown")
+        self.assertTrue(owner._prerequisites_done)
+
+    def test_teardown_is_issued_exactly_once(self):
+        # Hoisting it must MOVE the call, not duplicate it: two `compose down`s
+        # would double the startup wait on every launch.
+        for mismatch in (False, True):
+            with self.subTest(rootfs_mismatch=mismatch):
+                method, owner, events = self._make(rootfs_mismatch=mismatch)
+                method(owner)
+                self.assertEqual(events.count("teardown"), 1, events)
+
+    def test_teardown_follows_the_docker_ready_gate(self):
+        # It has to run at the EARLIEST point dockerd is known reachable —
+        # earlier and `docker ps` fails, so the teardown is a silent no-op.
+        method, owner, events = self._make(rootfs_mismatch=True,
+                                           docker_running=False)
+        method(owner)
+        self.assertLess(events.index("distro_boot"), events.index("teardown"))
+
+
+class PrerequisiteReentrancyTest(unittest.TestCase):
+    """Two concurrent prerequisite scans must be impossible.
+
+    Four call sites re-run the scan on a worker thread; the two post-elevation
+    ones were moved onto workers to fix a UI freeze, which made a SECOND scan
+    reachable while the first is still inside pull_images (press "Einrichtung
+    abschliessen (Administrator)" again once _finalize_in_progress clears).
+    That is two 15-30 min image pulls plus two prune_superseded_tags racing on
+    the same tags."""
+
+    def _make(self, body):
+        calls = {"log": []}
+        method = _load_method("_run_prerequisite_checks", {"__package__": "gui.app"})
+        owner = types.SimpleNamespace(_log=calls["log"].append,
+                                      _run_prerequisite_checks_body=body)
+        return method, owner, calls
+
+    def test_a_reentrant_call_is_refused(self):
+        seen = []
+
+        def _body():
+            seen.append("body")
+            method(owner)  # a second worker arrives mid-pull
+        method, owner, calls = self._make(lambda: _body())
+        method(owner)
+        self.assertEqual(len(seen), 1, "a second concurrent scan ran")
+        self.assertTrue(any("läuft bereits" in m for m in calls["log"]),
+                        calls["log"])
+
+    def test_flag_is_cleared_after_a_normal_run(self):
+        method, owner, _calls = self._make(lambda: None)
+        method(owner)
+        self.assertFalse(owner._prereq_in_progress)
+        method(owner)  # a later, sequential re-check must still be allowed
+        self.assertFalse(owner._prereq_in_progress)
+
+    def test_flag_is_cleared_when_the_body_raises(self):
+        def _boom():
+            raise RuntimeError("docker exploded")
+        method, owner, _calls = self._make(_boom)
+        with self.assertRaises(RuntimeError):
+            method(owner)
+        self.assertFalse(
+            owner._prereq_in_progress,
+            "a stranded flag permanently disables re-checks until a GUI restart "
+            "— the guard needs the same try/finally shape _finalize_in_progress "
+            "has")
+
+
+class DiagnosticsSinkTest(unittest.TestCase):
+    """ONE diagnostics directory, shared by the GUI and device_manager.
+
+    Before this, the sink split three ways: device_manager appended to
+    %ProgramData%\\EduBotics while the GUI wrote its elevated-repair transcripts
+    (finalize / repair_usbipd / bind_devices + the finalize marker) to
+    %LOCALAPPDATA%\\EduBotics — so support asked for install_diagnostics.log, got
+    it, and it was missing exactly the failed-setup evidence they needed.
+
+    The nastier half is the fallback rule. The installer applies the
+    Users:Modify ACL inside a bare `catch { }`; if Set-Acl is refused (GPO-locked
+    ProgramData, AV lock, or `wsl --import` having created the directory first)
+    the leaf stays admin-only. Falling back only on an UNSET %ProgramData% —
+    which never happens on Windows — meant a standard-user student's diagnostics
+    then wrote NOWHERE, silently (the appender swallows OSError), while the GUI
+    still printed a path to a file that does not exist."""
+
+    def test_prefers_the_programdata_logs_leaf(self):
+        with tempfile.TemporaryDirectory() as d, _env(PROGRAMDATA=d):
+            resolved = constants.diagnostics_dir()
+            self.assertEqual(resolved, os.path.join(d, "EduBotics", "logs"))
+            self.assertTrue(os.path.isdir(resolved), "the sink must be created")
+
+    def test_leaf_shape_matches_the_installer_acl_target(self):
+        # The six installer .ps1 grant Users:Modify on this exact LEAF. A grant
+        # on the parent would inherit onto %ProgramData%\EduBotics\wsl\ext4.vhdx.
+        with tempfile.TemporaryDirectory() as d, _env(PROGRAMDATA=d):
+            self.assertTrue(constants.diagnostics_dir().endswith(
+                os.path.join("EduBotics", "logs")))
+
+    def test_falls_back_when_the_leaf_is_unwritable(self):
+        with tempfile.TemporaryDirectory() as pd, \
+                tempfile.TemporaryDirectory() as la, \
+                _env(PROGRAMDATA=pd, LOCALAPPDATA=la):
+            deny = os.path.join(pd, "EduBotics", "logs")
+            with patch.object(constants, "_dir_is_writable",
+                              side_effect=lambda p: p != deny):
+                resolved = constants.diagnostics_dir()
+            self.assertEqual(resolved, os.path.join(la, "EduBotics"),
+                             "a refused ACL must drop to a directory the student "
+                             "always owns, not write nowhere")
+
+    def test_returns_a_path_even_when_nothing_is_writable(self):
+        with tempfile.TemporaryDirectory() as pd, _env(PROGRAMDATA=pd):
+            with patch.object(constants, "_dir_is_writable", return_value=False):
+                resolved = constants.diagnostics_dir()
+        # The GUI PRINTS this path to the student, so it must never be empty.
+        self.assertTrue(resolved)
+        self.assertEqual(resolved, constants._diagnostics_dir_candidates()[-1])
+
+    def test_unset_programdata_uses_localappdata(self):
+        with tempfile.TemporaryDirectory() as la, \
+                _env(PROGRAMDATA=None, LOCALAPPDATA=la):
+            self.assertEqual(constants.diagnostics_dir(),
+                             os.path.join(la, "EduBotics"))
+
+    def test_write_probe_detects_a_real_refusal(self):
+        # os.access(W_OK) reports the read-only ATTRIBUTE on Windows, not the
+        # DACL, so only a real create proves the sink works.
+        self.assertFalse(constants._dir_is_writable(
+            os.path.join(tempfile.gettempdir(), "edubotics_no_such_dir_xyz", "a")))
+
+    def test_write_probe_leaves_nothing_behind(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.assertTrue(constants._dir_is_writable(d))
+            self.assertEqual(os.listdir(d), [], "the probe file was not removed")
+
+    def test_device_manager_resolves_the_shared_sink(self):
+        with tempfile.TemporaryDirectory() as d, _env(PROGRAMDATA=d):
+            self.assertEqual(device_manager._diagnostics_log_path(),
+                             constants.diagnostics_log_path())
+            # And the public accessor the GUI prints to the student is the SAME
+            # resolver — never a literal that can disagree with it.
+            self.assertEqual(device_manager.get_diagnostics_log_path(),
+                             os.path.join(d, "EduBotics", "logs",
+                                          "install_diagnostics.log"))
+
+    def test_gui_diag_dir_delegates_instead_of_re_deriving_a_base(self):
+        # Behavioural coverage is impossible here (importing gui_app needs
+        # tkinter), and re-deriving a base is exactly how the split happened.
+        src = _module_fn_src("_edubotics_diag_dir")
+        self.assertIn("return diagnostics_dir()", src)
+        self.assertNotIn("LOCALAPPDATA", src,
+                         "_edubotics_diag_dir must not resolve a base of its "
+                         "own — that is what split the sink from "
+                         "device_manager._diagnostics_log_path")
+
+    def test_elevated_transcripts_land_in_the_shared_sink(self):
+        src = _read(_GUI_SRC)
+        for artifact in ("edubotics_finalize.log", "edubotics_finalize.marker",
+                         "edubotics_repair_usbipd.log",
+                         "edubotics_bind_devices.log"):
+            self.assertIn(artifact, src)
+        # Each is joined onto _edubotics_diag_dir(), never %TEMP% (the elevated
+        # child runs as ADMIN, whose %TEMP% is not the student's) or a literal.
+        for marker in ('os.path.join(_edubotics_diag_dir(), "edubotics_repair_usbipd.log")',
+                       'os.path.join(_edubotics_diag_dir(), "edubotics_bind_devices.log")',
+                       "diag = _edubotics_diag_dir()"):
+            self.assertIn(marker, src)
 
 
 class FinalizeExitContractTest(unittest.TestCase):
@@ -539,7 +866,7 @@ class ScriptTerminalExitTest(unittest.TestCase):
 
     def test_scripts_end_with_explicit_exit_zero(self):
         for name in ("import_edubotics_wsl.ps1", "install_prerequisites.ps1",
-                     "pull_images.ps1"):
+                     "pull_images.ps1", "migrate_from_docker_desktop.ps1"):
             with self.subTest(script=name):
                 src = _read(os.path.join(_SCRIPTS, name), encoding="utf-8-sig")
                 lines = [ln.strip() for ln in src.splitlines() if ln.strip()]
@@ -618,9 +945,12 @@ class RootCauseGuardTest(unittest.TestCase):
     # `catch { }`): a localized account name throws on German Windows (the log
     # then never writes), and dropping NoPropagateInherit lets Users:Modify
     # inherit onto %ProgramData%\EduBotics\wsl\ext4.vhdx — i.e. every student on
-    # a lab PC could tamper with the distro image.
+    # a lab PC could tamper with the distro image. All SIX scripts that write
+    # the diagnostics log are listed: preflight_system.ps1 joined the ProgramData
+    # sink last (it used to write into %LOCALAPPDATA%, splitting the artifact).
     _ACL_SCRIPTS = ("install_prerequisites.ps1", "migrate_from_docker_desktop.ps1",
-                    "verify_system.ps1", "configure_usbipd.ps1", "bind_devices.ps1")
+                    "verify_system.ps1", "configure_usbipd.ps1", "bind_devices.ps1",
+                    "preflight_system.ps1")
 
     def test_acl_uses_the_well_known_sid_never_a_localized_name(self):
         for name in self._ACL_SCRIPTS:
@@ -646,6 +976,103 @@ class RootCauseGuardTest(unittest.TestCase):
                 self.assertNotIn("ContainerInherit,ObjectInherit", code,
                                  "ContainerInherit propagates into wsl\\ — that "
                                  "was the bug")
+
+    def test_every_script_writes_the_same_leaf_the_gui_resolves(self):
+        """The .ps1 half of the shared diagnostics-sink contract.
+
+        The GUI (constants.diagnostics_dir) and these six scripts must name the
+        SAME directory or the support artifact splits again — and the leaf
+        matters twice over: the ACL grant above must land on
+        %ProgramData%\\EduBotics\\logs, never on the parent, whose subtree
+        contains wsl\\ext4.vhdx."""
+        for name in self._ACL_SCRIPTS:
+            with self.subTest(script=name):
+                self.assertRegex(
+                    self._code(name),
+                    r'\$DiagDir\s*=\s*Join-Path \$env:ProgramData "EduBotics\\logs"',
+                    "must resolve %ProgramData%\\EduBotics\\logs — the same leaf "
+                    "constants.diagnostics_dir() resolves; anything else splits "
+                    "the support artifact or ACLs the wrong directory")
+
+    # ── 4. verify_system's reboot-pending branch ────────────────────────────
+    # verify_system.ps1 has a branch that reports a benign "Neustart steht noch
+    # aus" and exits 0. Routing it on the mere EXISTENCE of .reboot_required is
+    # wrong, because finalize deliberately KEEPS the flag set on every
+    # unfinished outcome — including a hard failure (Fail-WithNextAction /
+    # $EXIT_FAILED). A 14 GB-disk install whose import fails therefore reported
+    # "reboot pending" + exit 0 forever, and Inno's [Run] step read the verify
+    # as successful: the Audit-H23 regression reintroduced one file over. The
+    # flag must be discriminated against last-boot-time, and an unreadable clock
+    # must fall toward FAILED rather than manufacture a benign result.
+    def test_verify_does_not_route_on_the_bare_reboot_flag(self):
+        code = self._code("verify_system.ps1")
+        self.assertNotRegex(
+            code, r"\$rebootPending\s*=\s*Test-Path",
+            "the flag's mere existence must NOT mean 'a reboot is pending' — "
+            "finalize keeps it set on every unfinished outcome, including a "
+            "hard failure, so this branch would exit 0 over a broken install")
+        self.assertIn(
+            "LastBootUpTime", code,
+            "must discriminate flag-mtime vs last-boot-time, not existence")
+        self.assertRegex(
+            code, r"\$rebootPending\s*=\s*\(\$bootTime\s+-le\s+\$flagTime\)",
+            "pending means: no boot has happened since the flag was written")
+
+    def test_verify_unreadable_clock_reports_failed_not_pending(self):
+        code = self._code("verify_system.ps1")
+        init = re.search(r"\$rebootPending\s*=\s*\$false", code)
+        self.assertIsNotNone(
+            init, "$rebootPending must DEFAULT to $false so a throwing "
+                  "Get-CimInstance/Get-Item reports FAILED — the safe "
+                  "direction — instead of a benign pending reboot")
+        self.assertLess(
+            init.start(), code.index("LastBootUpTime"),
+            "the $false default must precede the probe it guards")
+
+    # ── 5. finalize's custody of .reboot_required across the prereq child ────
+    # finalize deliberately calls install_prerequisites.ps1 WITHOUT
+    # -PreserveExistingRebootFlag (a preserved STALE flag re-arms the reboot
+    # loop). But that child deletes the flag whenever IT concludes no reboot is
+    # needed — including a "dd-uninstall" flag whose reboot has NOT happened,
+    # written by migrate_from_docker_desktop.ps1, whose reason the feature-store
+    # probe is blind to. Losing it makes finalize skip Test-RebootStillPending
+    # and import the distro next to a half-removed Docker Desktop: precisely the
+    # entanglement the flag exists to prevent. So finalize takes custody.
+    def test_finalize_takes_custody_of_the_flag_across_the_prereq_child(self):
+        code = self._code("finalize_install.ps1")
+        call = re.search(
+            r"&\s*\(Join-Path \$PSScriptRoot \"install_prerequisites\.ps1\"\)",
+            code)
+        self.assertIsNotNone(call, "prereq child invocation not found")
+        snap = code.index("$flagSnapshot")
+        self.assertLess(
+            snap, call.start(),
+            "the flag must be snapshotted BEFORE the child can delete it")
+        after = code[call.end():]
+        self.assertIn(
+            "Set-Content", after,
+            "a flag the child deleted but did not own must be RESTORED after "
+            "the call, or a pending Docker-Desktop removal is erased into a "
+            "distro import")
+        self.assertRegex(
+            after, r"-not \(Test-Path \$flagPath\)",
+            "the restore must be conditional on the child having deleted it — "
+            "an unconditional rewrite would re-arm the reboot loop")
+
+    def test_finalize_does_not_preserve_a_stale_flag_instead(self):
+        # The tempting one-line 'fix' (always pass -PreserveExistingRebootFlag)
+        # is wrong in the other direction: a STALE flag then survives forever and
+        # every launch dead-ends on "Neustart erforderlich". Custody, not
+        # preservation, is the contract.
+        code = self._code("finalize_install.ps1")
+        call = re.search(
+            r"&\s*\(Join-Path \$PSScriptRoot \"install_prerequisites\.ps1\"\)",
+            code)
+        window = code[max(0, call.start() - 1200):call.start()]
+        self.assertNotIn(
+            "PreserveExistingRebootFlag = $true", window,
+            "finalize must NOT blanket-preserve the flag — a stale flag would "
+            "re-arm the reboot loop it exists to close")
 
 
 class DockerDesktopRebootReasonTest(unittest.TestCase):

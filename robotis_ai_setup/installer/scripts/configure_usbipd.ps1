@@ -22,10 +22,13 @@ $DistroName  = "EduBotics"
 # ── Diagnostics sink ───────────────────────────────────────────────────────
 # %ProgramData%, not %LOCALAPPDATA% — see the rationale in
 # install_prerequisites.ps1 (the elevating admin is not the student on a managed
-# PC, which split this log across two profiles). Scope ("this folder and files",
-# never the subtree) is load-bearing — the WSL install root lives under this
-# directory; see install_prerequisites.ps1. Keep all five copies identical.
-$DiagDir = Join-Path $env:ProgramData "EduBotics"
+# PC, which split this log across two profiles). The `logs` LEAF and the scope
+# ("this folder and files", never the subtree) are both load-bearing:
+# %ProgramData%\EduBotics is the PARENT of the WSL install root and must keep its
+# default admin-only inherited ACL, or a standard user can pre-create
+# …\EduBotics\wsl and own the distro's ext4.vhdx. See install_prerequisites.ps1
+# for the full rationale. Keep all six copies identical.
+$DiagDir = Join-Path $env:ProgramData "EduBotics\logs"
 try {
     if (-not (Test-Path $DiagDir)) {
         New-Item -ItemType Directory -Path $DiagDir -Force | Out-Null

@@ -22,7 +22,7 @@ _CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 _SUBPROCESS_KWARGS = {"creationflags": _CREATE_NO_WINDOW} if sys.platform == "win32" else {}
 
 from . import wsl_bridge
-from .constants import ROBOTIS_VID, WSL_DISTRO_NAME
+from .constants import ROBOTIS_VID, WSL_DISTRO_NAME, diagnostics_log_path
 from .usbipd_resolver import (
     UsbipdNotFoundError,
     find_usbipd,
@@ -33,22 +33,17 @@ from .usbipd_resolver import (
 def _diagnostics_log_path() -> str:
     """Where install/runtime diagnostics get appended.
 
-    Machine-wide %ProgramData%\\EduBotics so the support artifact is ONE file on
-    managed (student != admin) machines. `EduBotics_Setup.exe` is
-    PrivilegesRequired=admin, so the installer + every elevated-repair .ps1 run
-    as the admin account — their %LOCALAPPDATA% differs from the student's, so a
-    per-user path splits the install/prereq/usbipd/migrate evidence into the
-    admin profile while the GUI's own scan-time entries land in the student
-    profile (support then sees only half). ProgramData is the same root the WSL
-    install already uses. The installer creates the dir with a permissive-append
-    ACL (matching PS-side move) so the standard-user GUI can append here too.
-    Falls back to %LOCALAPPDATA% then ~ when ProgramData is unset (dev / non-Windows)."""
-    base = (
-        os.environ.get("PROGRAMDATA")
-        or os.environ.get("LOCALAPPDATA")
-        or os.path.expanduser("~")
-    )
-    return os.path.join(base, "EduBotics", "install_diagnostics.log")
+    Delegates to the ONE shared resolver (constants.diagnostics_log_path ->
+    %ProgramData%\\EduBotics\\logs, with a writability fallback). Machine-wide so
+    the support artifact is a single file on managed (student != admin) machines:
+    `EduBotics_Setup.exe` is PrivilegesRequired=admin, so the installer + every
+    elevated-repair .ps1 run as the admin account, whose %LOCALAPPDATA% differs
+    from the student's — a per-user path split the install/prereq/usbipd/migrate
+    evidence into the admin profile while the GUI's own scan-time entries landed
+    in the student profile (support then saw only half). It must be the SAME
+    resolver gui_app uses for the elevated-child transcripts, or the split simply
+    moves rather than closing."""
+    return diagnostics_log_path()
 
 
 def _append_diag(section: str, body: str) -> None:

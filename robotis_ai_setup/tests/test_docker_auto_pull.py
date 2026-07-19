@@ -6,7 +6,9 @@ Covers the three layers in `docker_manager.check_for_updates`:
   3. Last-pull persistence + freshness banner.
 
 Plus the GHCR→Docker Hub registry fallback (`_pull_image_with_fallback`,
-`_fallback_ref`, `_registry_host`) added in the GHCR migration.
+`_fallback_ref`, `_registry_host`) added in the GHCR migration, the
+`EDUBOTICS_IMAGE_TAG` rollback protection in `prune_superseded_tags`, and
+`pull_images`'s own offline short-circuit.
 
 These tests intentionally don't depend on Windows-specific argv shapes (the
 existing `test_docker_manager_wsl.py` covers that for the Windows runner) so
@@ -480,7 +482,9 @@ class TestPruneSupersededTags(unittest.TestCase):
                 return MagicMock(returncode=0, stdout="2.13.0\n2.11.0\n<none>\n")
             return MagicMock(returncode=0, stdout="")  # the rm calls
         mock_run.side_effect = _run
-        removed = docker_manager.prune_superseded_tags()
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("EDUBOTICS_IMAGE_TAG", None)
+            removed = docker_manager.prune_superseded_tags()
         rm_targets = [c[0][0][-1] for c in mock_run.call_args_list if "rm" in c[0][0]]
         # Superseded :2.11.0 removed on BOTH registries; :2.13.0 and <none> kept.
         self.assertIn("ghcr.io/svendanilborodun/open-manipulator:2.11.0", rm_targets)
@@ -488,6 +492,76 @@ class TestPruneSupersededTags(unittest.TestCase):
         self.assertNotIn("ghcr.io/svendanilborodun/open-manipulator:2.13.0", rm_targets)
         self.assertNotIn("ghcr.io/svendanilborodun/open-manipulator:<none>", rm_targets)
         self.assertEqual(removed, 2)
+
+    @patch("gui.app.docker_manager.subprocess.run")
+    def test_explicit_image_tag_pin_disables_the_prune(self, mock_run):
+        """EDUBOTICS_IMAGE_TAG is the documented per-rig ROLLBACK override.
+
+        A teacher pins a broken rig back to 2.12.1 and launches the GUI: the
+        auto-pull fetches 2.12.1, reports a clean update (any_updated and not
+        any_failed), and the prune would then delete every :2.13.0 tag on BOTH
+        registries — so removing the override later forces a fresh ~6 GB pull
+        (15-30 min on a school link). An explicit pin means the operator is
+        managing tags deliberately; reclaiming disk is not worth destroying
+        their way back."""
+        logs: list[str] = []
+        with patch.dict(os.environ, {"EDUBOTICS_IMAGE_TAG": "2.12.1"}):
+            removed = docker_manager.prune_superseded_tags(log=logs.append)
+        self.assertEqual(removed, 0)
+        mock_run.assert_not_called()
+        self.assertTrue(any("EDUBOTICS_IMAGE_TAG" in line for line in logs), logs)
+
+
+class TestPullImagesOfflineShortCircuit(unittest.TestCase):
+    """pull_images must short-circuit offline like check_for_updates does.
+
+    Without it a first install with no internet burns the full retry ladder per
+    MISSING image: 3 primary attempts + 3 Hub attempts, with _pull_one_image
+    calling _reset_dockerd on every attempt >= 2 — 4 dockerd restarts per image,
+    x3 images. Two 5 s TCP probes settle it instead."""
+
+    @patch("gui.app.docker_manager.prune_superseded_tags")
+    @patch("gui.app.docker_manager._pull_image_with_fallback")
+    @patch("gui.app.docker_manager.is_registry_reachable", return_value=False)
+    @patch("gui.app.docker_manager.images_exist")
+    def test_offline_with_missing_images_fails_fast(
+        self, mock_present, _reach, mock_pull, mock_prune
+    ):
+        mock_present.return_value = {img: False for img in ALL_IMAGES}
+        logs: list[str] = []
+        # False, not True: the caller's German "Internetverbindung prüfen" is
+        # the honest outcome — a silent success over absent images would let
+        # startup continue as if the stack could run.
+        self.assertFalse(docker_manager.pull_images(log=logs.append))
+        mock_pull.assert_not_called()
+        mock_prune.assert_not_called()
+        self.assertTrue(
+            any("nicht erreichbar" in line for line in logs), logs)
+
+    @patch("gui.app.docker_manager.prune_superseded_tags")
+    @patch("gui.app.docker_manager._pull_image_with_fallback")
+    @patch("gui.app.docker_manager.is_registry_reachable", return_value=False)
+    @patch("gui.app.docker_manager.images_exist")
+    def test_offline_with_all_images_present_still_succeeds(
+        self, mock_present, mock_reach, mock_pull, _prune
+    ):
+        # Nothing to pull -> the offline state is irrelevant; returning False
+        # here would fail a perfectly healthy offline classroom at startup.
+        mock_present.return_value = {img: True for img in ALL_IMAGES}
+        self.assertTrue(docker_manager.pull_images())
+        mock_pull.assert_not_called()
+        mock_reach.assert_not_called()
+
+    @patch("gui.app.docker_manager.prune_superseded_tags")
+    @patch("gui.app.docker_manager._pull_image_with_fallback", return_value=True)
+    @patch("gui.app.docker_manager.is_registry_reachable", return_value=True)
+    @patch("gui.app.docker_manager.images_exist")
+    def test_online_still_pulls_the_missing_images(
+        self, mock_present, _reach, mock_pull, _prune
+    ):
+        mock_present.return_value = {img: False for img in ALL_IMAGES}
+        self.assertTrue(docker_manager.pull_images())
+        self.assertEqual(mock_pull.call_count, len(ALL_IMAGES))
 
 
 class TestRegistryResolution(unittest.TestCase):

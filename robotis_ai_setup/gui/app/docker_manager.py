@@ -1050,7 +1050,29 @@ def prune_superseded_tags(log=None) -> int:
     primary and fallback registries × all short names. Untag-by-tag is
     layer-safe: only layers NOT shared with the kept ``:IMAGE_TAG`` are dropped.
     Returns the number of tags removed. Best-effort; never raises.
+
+    SKIPPED ENTIRELY when ``EDUBOTICS_IMAGE_TAG`` is set. That variable is the
+    documented per-rig rollback: a teacher pins a broken rig back to e.g.
+    ``2.12.1``, launches the GUI, the auto-pull fetches 2.12.1 and reports a
+    successful update — and the prune would then delete every ``:2.13.0`` tag on
+    BOTH registries, so removing the override later forces a fresh ~6 GB pull
+    (15-30 min on a school link). An explicit pin means the operator is managing
+    tags deliberately; reclaiming disk is not worth destroying their escape
+    hatch. (The caller ALSO gates on ``any_updated and not any_failed`` — that
+    guards the partial-upgrade case, which is a different failure.)
     """
+    # .strip(): a whitespace-only value is NOT a pin — `_resolve_setting` would
+    # fall through to versions.env/default, so treating it as one here would
+    # silently disable the prune forever on a rig with a stray-space env var.
+    # Kept byte-for-byte in step with the pi_agent twin (pi_agent/docker_manager
+    # .py::prune_superseded_tags), which is the same guard on the same variable.
+    if os.environ.get("EDUBOTICS_IMAGE_TAG", "").strip():
+        if log:
+            log(
+                "  Aufräumen übersprungen: EDUBOTICS_IMAGE_TAG ist gesetzt "
+                "(andere Image-Versionen bleiben für den Rückweg erhalten)."
+            )
+        return 0
     repos = []
     for name in IMAGE_NAMES:
         repos.append(f"{REGISTRY}/{name}")
@@ -1107,6 +1129,24 @@ def pull_images(callback=None, log=None) -> bool:
     # iteration → 3 `docker image inspect` for 3 images). Newly-pulled images in
     # THIS run aren't in the snapshot, but they aren't skipped either — correct.
     present = images_exist()
+
+    # Offline short-circuit, mirroring check_for_updates() / _compose_pull().
+    # Without it, a first install with no internet burns the FULL retry ladder
+    # per missing image: 3 primary attempts + 3 Hub attempts, with _pull_one_image
+    # calling _reset_dockerd on every attempt >= 2 — 4 dockerd restarts per image,
+    # x3 images, before reporting the failure that two 5 s TCP probes settle here.
+    # Only short-circuits when something is actually MISSING: an all-present call
+    # must still return True (it has nothing to pull), and the offline case must
+    # still return False — the caller's German "Internetverbindung prüfen" is the
+    # honest outcome, not a silent success over absent images.
+    if any(not present.get(image) for image in ALL_IMAGES) and not is_registry_reachable():
+        if log:
+            log(
+                "  Registry (GHCR/Docker Hub) nicht erreichbar — fehlende Images "
+                "können nicht geladen werden. Bitte Internetverbindung prüfen."
+            )
+        return False
+
     for i, image in enumerate(ALL_IMAGES):
         if callback:
             callback(image, i, total)

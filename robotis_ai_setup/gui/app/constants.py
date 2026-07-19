@@ -354,6 +354,89 @@ def _resolve_last_pull_file() -> str:
 LAST_PULL_FILE = _resolve_last_pull_file()
 
 
+# --- Diagnostics sink (ONE directory, shared by the GUI and every .ps1) ------
+# Support asks for "the log" and must get the WHOLE setup story: the installer /
+# prereq / usbipd / migrate / verify transcripts AND the GUI's own scan-time
+# entries AND the elevated repair transcripts (finalize / repair_usbipd /
+# bind_devices) plus the finalize marker. Those used to split three ways
+# (%ProgramData%\EduBotics for the .ps1 half, %LOCALAPPDATA%\EduBotics for the
+# GUI's elevated-child logs), so a support bundle was always missing the half
+# that mattered. One LEAF directory now holds all of it, and the six installer
+# .ps1 grant Users:Modify on exactly this leaf (a grant on the PARENT would
+# inherit onto %ProgramData%\EduBotics\wsl\ext4.vhdx — every student could then
+# tamper with the distro image).
+_DIAGNOSTICS_SUBDIR = ("EduBotics", "logs")
+DIAGNOSTICS_LOG_NAME = "install_diagnostics.log"
+
+
+def _diagnostics_dir_candidates() -> list:
+    """Ordered candidate directories for the diagnostics sink, best first."""
+    out = []
+    program_data = os.environ.get("PROGRAMDATA")
+    if program_data:
+        out.append(os.path.join(program_data, *_DIAGNOSTICS_SUBDIR))
+    local = os.environ.get("LOCALAPPDATA")
+    if local:
+        out.append(os.path.join(local, "EduBotics"))
+    out.append(os.path.join(os.path.expanduser("~"), "EduBotics"))
+    return out
+
+
+def _dir_is_writable(path: str) -> bool:
+    """True iff a file can actually be CREATED in ``path``.
+
+    Deliberately not ``os.access(path, os.W_OK)``: on Windows that reports the
+    read-only ATTRIBUTE, not the DACL, so a GPO-locked / AV-locked / wsl-import-
+    created %ProgramData%\\EduBotics reads as writable while every write is
+    refused. The installer applies the Users:Modify ACL inside a bare
+    ``catch { }``, so that refusal is silent — and the diagnostics appender
+    swallows OSError, so a standard-user student's evidence would vanish with no
+    error anywhere. Only a real create proves the sink works."""
+    probe = os.path.join(path, ".edubotics_write_probe")
+    try:
+        with open(probe, "a", encoding="utf-8"):
+            pass
+        return True
+    except OSError:
+        return False
+    finally:
+        try:
+            os.remove(probe)
+        except OSError:
+            pass
+
+
+def diagnostics_dir() -> str:
+    """Return (creating if needed) the directory every diagnostic artifact uses.
+
+    ``%ProgramData%\\EduBotics\\logs`` when it is writable — machine-wide, so the
+    admin-run installer scripts and the standard-user GUI append to the SAME
+    file (their %LOCALAPPDATA% differ, which is what split the evidence before).
+    Falls back to ``%LOCALAPPDATA%\\EduBotics`` then ``~\\EduBotics`` when the
+    ProgramData leaf is missing or NOT WRITABLE — the student always owns those.
+    Falling back only on an UNSET %ProgramData% (which never happens on Windows)
+    would have left the refused-ACL case writing nowhere at all.
+
+    Resolved on every call rather than cached: the ACL can be repaired mid-
+    session by an elevated repair, and the cost is one create+unlink."""
+    candidates = _diagnostics_dir_candidates()
+    for d in candidates:
+        try:
+            os.makedirs(d, exist_ok=True)
+        except OSError:
+            continue
+        if _dir_is_writable(d):
+            return d
+    # Nothing was writable — hand back the last resort anyway so callers still
+    # have a concrete path to name to the student (the appender is best-effort).
+    return candidates[-1]
+
+
+def diagnostics_log_path() -> str:
+    """Full path of the ONE support artifact: <diagnostics_dir>/install_diagnostics.log."""
+    return os.path.join(diagnostics_dir(), DIAGNOSTICS_LOG_NAME)
+
+
 def _resolve_ros_domain_file() -> str:
     """Persisted ROS_DOMAIN_ID for this machine (plain integer, one line).
 

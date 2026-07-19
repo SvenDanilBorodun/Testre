@@ -3,8 +3,8 @@
 #
 # Runs four non-fatal checks and prints German OK/WARNUNG/FEHLER lines, mirroring
 # verify_system.ps1's diagnostics-log style. Every line is also appended to
-# %LOCALAPPDATA%\EduBotics\install_diagnostics.log so support has evidence even
-# when the console is gone.
+# %ProgramData%\EduBotics\logs\install_diagnostics.log so support has evidence
+# even when the console is gone.
 #
 # Checks:
 #   1. Temp path / dotted-username hazard (ground-truth write probe)
@@ -22,17 +22,45 @@ param(
 $ErrorActionPreference = "Continue"
 
 # ── Diagnostics sink (matches verify_system.ps1 / configure_usbipd.ps1) ─────
-$DiagDir = Join-Path $env:LOCALAPPDATA "EduBotics"
-if (-not (Test-Path $DiagDir)) {
-    New-Item -ItemType Directory -Path $DiagDir -Force | Out-Null
-}
+# %ProgramData%, not %LOCALAPPDATA% — this was the LAST holdout, and the most
+# damaging one: preflight is Step 0a, the FIRST diagnostic, and the one that
+# captures the hostile-environment evidence (dotted-username temp path, UAC off,
+# WSL2 missing). Writing it to the elevating ADMIN's profile while every other
+# logger writes machine-wide split the support artifact in two — on a managed
+# school PC the installing admin is not the student, so support reading the
+# student's copy saw the whole install history EXCEPT the self-diagnosis that
+# explains it. The `logs` LEAF and the scope ("this folder and files", never the
+# subtree) are both load-bearing: %ProgramData%\EduBotics is the PARENT of the
+# WSL install root and must keep its default admin-only inherited ACL, or a
+# standard user can pre-create …\EduBotics\wsl and own the distro's ext4.vhdx.
+# See install_prerequisites.ps1 for the full rationale. Keep all six copies of
+# this block identical.
+#
+# try/catch is not decoration here: this script runs -Quiet from the .iss [Run]
+# and from the GUI, where an unhandled Add-Content error record goes to a stream
+# nobody reads. Logging must never be able to abort a diagnostic.
+$DiagDir = Join-Path $env:ProgramData "EduBotics\logs"
+try {
+    if (-not (Test-Path $DiagDir)) {
+        New-Item -ItemType Directory -Path $DiagDir -Force | Out-Null
+    }
+    $DiagAcl = Get-Acl -Path $DiagDir
+    $DiagUsers = New-Object System.Security.Principal.SecurityIdentifier("S-1-5-32-545")
+    $DiagAcl.RemoveAccessRuleAll((New-Object System.Security.AccessControl.FileSystemAccessRule(
+        $DiagUsers, "Modify", "Allow")))
+    $DiagAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+        $DiagUsers, "Modify", "ObjectInherit", "NoPropagateInherit", "Allow")))
+    Set-Acl -Path $DiagDir -AclObject $DiagAcl
+} catch { }
 $DiagLog = Join-Path $DiagDir "install_diagnostics.log"
 
 function Write-Diag {
     param([string]$section, [string]$body)
-    $ts = (Get-Date).ToString("o")
-    Add-Content -Path $DiagLog -Value "`n=== $ts preflight_system::$section ==="
-    Add-Content -Path $DiagLog -Value $body
+    try {
+        $ts = (Get-Date).ToString("o")
+        Add-Content -Path $DiagLog -Value "`n=== $ts preflight_system::$section ==="
+        Add-Content -Path $DiagLog -Value $body
+    } catch { }
 }
 
 # Emit one German status line to the console (unless -Quiet) AND to the log.
@@ -44,7 +72,12 @@ function Emit {
         [string]$Message
     )
     $logLine = "[$Level] $Message"
-    Add-Content -Path $DiagLog -Value "$((Get-Date).ToString('o')) preflight_system:: $logLine"
+    # try/catch: under -Quiet an unhandled Add-Content error record would go to a
+    # stream nobody reads, and a locked/undeletable log must not silently swallow
+    # the console half of the diagnosis too.
+    try {
+        Add-Content -Path $DiagLog -Value "$((Get-Date).ToString('o')) preflight_system:: $logLine"
+    } catch { }
     if (-not $Quiet) {
         $color = switch ($Level) {
             'OK'      { 'Green' }

@@ -78,7 +78,20 @@ if (-not $listed) {
 # boot, polls by exit code, and runs the start-dockerd.sh wrapper as a fallback.
 # This distro uses start-dockerd.sh (the wsl.conf [boot] command), NOT systemd,
 # so the old "systemctl status docker" hint was wrong.
-. (Join-Path $PSScriptRoot 'wsl_docker_ready.ps1')
+#
+# Test-Path FIRST, mirroring preflight_system.ps1 / finalize_install.ps1:
+# install_prerequisites.ps1 warns that Controlled Folder Access "may silently
+# fail to write some files" into %ProgramFiles%, so a partially-copied
+# {app}\scripts is a state this codebase already anticipates — and an unguarded
+# dot-source of a missing file throws, which here surfaces as a bare terminating
+# error instead of the actionable "run the installer again".
+$readyHelper = Join-Path $PSScriptRoot 'wsl_docker_ready.ps1'
+if (-not (Test-Path $readyHelper)) {
+    Write-Host "FEHLER: Die Datei wsl_docker_ready.ps1 fehlt in $PSScriptRoot." -ForegroundColor Red
+    Write-Host "   Die Installation ist unvollständig. Bitte den EduBotics-Installer erneut ausführen." -ForegroundColor Red
+    exit 1
+}
+. $readyHelper
 if (-not (Wait-DockerReady -DistroName $DistroName)) {
     Write-Host "ERROR: Docker-Engine in $DistroName konnte nicht gestartet werden. Diagnose: wsl -d $DistroName -- tail -n 50 /var/log/dockerd.log" -ForegroundColor Red
     exit 1

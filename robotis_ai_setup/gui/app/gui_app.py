@@ -261,19 +261,19 @@ def _ps_single_quote(s: str) -> str:
 def _edubotics_diag_dir() -> str:
     """Return (creating if needed) the EduBotics diagnostics directory.
 
-    Lives under %LOCALAPPDATA%\\EduBotics — the same base install_diagnostics.log
-    uses (see device_manager._diagnostics_log_path). Elevated log/marker files go
-    here rather than %TEMP% so the GUI and its elevated child agree on one path
-    the GUI unambiguously knows, and one that can't contain a foreign temp-dir
-    quirk. Best-effort makedirs — falls back to returning the path regardless.
+    Delegates to the ONE shared resolver (``constants.diagnostics_dir`` ->
+    ``%ProgramData%\\EduBotics\\logs``, with a writability fallback), which is
+    also what ``device_manager._diagnostics_log_path`` uses. That sharing is the
+    whole point: the elevated repair transcripts written here
+    (edubotics_finalize.log / .marker, edubotics_repair_usbipd.log,
+    edubotics_bind_devices.log) must sit NEXT TO install_diagnostics.log, or
+    support asks for "the log", gets it, and it is missing exactly the
+    failed-setup evidence they need. Elevated log/marker files go here rather
+    than %TEMP% so the GUI and its elevated child agree on one path the GUI
+    unambiguously knows; the child receives it as an explicit -LogPath argument,
+    so a fallback resolution stays coherent across the privilege boundary.
     """
-    base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
-    d = os.path.join(base, "EduBotics")
-    try:
-        os.makedirs(d, exist_ok=True)
-    except OSError:
-        pass
-    return d
+    return diagnostics_dir()
 
 
 def _asset_path(name: str) -> str:
@@ -319,6 +319,7 @@ from .constants import (
     ROBOT_PROFILES,
     DEFAULT_ROBOT_PROFILE,
     cameras_use_native_bridge,
+    diagnostics_dir,
 )
 
 
@@ -1090,6 +1091,28 @@ class EduBoticsApp:
         threading.Thread(target=_check, daemon=True).start()
 
     def _run_prerequisite_checks(self):
+        """Re-entrancy guard around the prerequisite scan.
+
+        Four call sites re-run the scan on a worker thread — the update-dialog
+        skip, the usbipd repair, the finalize success path, and the "Einrichtung
+        abschließen (Administrator)" button. The last two were moved onto worker
+        threads to fix a UI freeze, which made a SECOND scan reachable while the
+        first is still inside pull_images: pressing the finalize button again
+        once _finalize_in_progress clears starts two concurrent 15-30 min image
+        pulls AND races two prune_superseded_tags over the same tags (an untag
+        the other run is mid-pull on). Same try/finally shape as
+        _finalize_in_progress — the flag must survive any exception, or a single
+        raise permanently disables re-checks until a GUI restart."""
+        if getattr(self, "_prereq_in_progress", False):
+            self._log("Systemprüfung läuft bereits — doppelter Start übersprungen.")
+            return
+        self._prereq_in_progress = True
+        try:
+            self._run_prerequisite_checks_body()
+        finally:
+            self._prereq_in_progress = False
+
+    def _run_prerequisite_checks_body(self):
         """EduBotics-Umgebung, Images, GPU prüfen (called after update check passes)."""
         self.root.after(0, lambda: self.progress.start(10))
         self._log("Voraussetzungen werden geprüft...")
@@ -1163,6 +1186,32 @@ class EduBoticsApp:
                 return
         self._log("EduBotics-Umgebung: OK")
 
+        # ── Lifecycle: the GUI is the SOLE owner of the container lifecycle ──
+        # The robot stack must come up ONLY after the student has scanned both
+        # arms and clicked "Umgebung starten" — never before. Two paths can
+        # leave it running prematurely: (1) dockerd resurrects containers on
+        # distro boot when they carry a `restart` policy other than "no"
+        # (pre-2.5.3 images used `unless-stopped`), and the distro boots the
+        # moment this GUI first touched WSL above (the startup preflight thread
+        # boots it on EVERY launch, before we get here); (2) a previous session
+        # left the stack up. Either way the arm would be driven — and the
+        # Dynamixel serial bus held — before any scan, which ALSO breaks the
+        # scan itself (identify_arm.py collides with the live controller on the
+        # same /dev/serial port → neither arm is identified). Tear it down now
+        # so the student starts from a clean, deterministic state.
+        #
+        # This runs at the EARLIEST point dockerd is known reachable, and
+        # crucially BEFORE the rootfs gate below: that gate `return`s, and a
+        # rootfs mismatch means the distro is OLD and was never re-imported —
+        # i.e. exactly the population whose persisted container configs still
+        # carry `restart: unless-stopped`. Teardown-after-the-gate left the
+        # follower torqued up and running its boot quintic while the GUI showed
+        # a destructive-rebuild consent dialog over a live arm, and a consent
+        # would then run `wsl --unregister` against a live VM.
+        self._set_status("Vorherige Sitzung wird aufgeräumt...")
+        if docker_manager.ensure_environment_stopped(log=self._log):
+            self._log("Umgebung gestoppt — sie startet erst, wenn du auf 'Umgebung starten' klickst.")
+
         # ── Rootfs ↔ image version handshake ──────────────────────────────
         # A rootfs bump ships new dockerd pins / modprobe list / udev rules that
         # a new image set may depend on. If the installer's re-import was skipped
@@ -1185,22 +1234,6 @@ class EduBoticsApp:
                 0, lambda: self._prompt_finalize_install(reason="rootfs_mismatch")
             )
             return
-
-        # ── Lifecycle: the GUI is the SOLE owner of the container lifecycle ──
-        # The robot stack must come up ONLY after the student has scanned both
-        # arms and clicked "Umgebung starten" — never before. Two paths can
-        # leave it running prematurely: (1) dockerd resurrects containers on
-        # distro boot when they carry a `restart` policy other than "no"
-        # (pre-2.5.3 images used `unless-stopped`), and the distro boots the
-        # moment this GUI first touched WSL above; (2) a previous session left
-        # the stack up. Either way the arm would be driven — and the Dynamixel
-        # serial bus held — before any scan, which ALSO breaks the scan itself
-        # (identify_arm.py collides with the live controller on the same
-        # /dev/serial port → neither arm is identified). Tear it down now so
-        # the student starts from a clean, deterministic state.
-        self._set_status("Vorherige Sitzung wird aufgeräumt...")
-        if docker_manager.ensure_environment_stopped(log=self._log):
-            self._log("Umgebung gestoppt — sie startet erst, wenn du auf 'Umgebung starten' klickst.")
 
         # A FROZEN (.exe) build should always resolve IMAGE_TAG from the baked
         # docker/versions.env. If it resolved to "latest", versions.env was
@@ -1590,6 +1623,7 @@ class EduBoticsApp:
             ttk.Button(row, text="Schließen", command=win.destroy).pack(side=tk.RIGHT)
 
         self.root.after(0, _build)
+
     def _reboot_required_pending(self) -> bool:
         """True when install_prerequisites.ps1 left a `.reboot_required` flag.
 
@@ -1620,8 +1654,16 @@ class EduBoticsApp:
         declined and the NEW images would otherwise run on the OLD rootfs. Fails
         OPEN (returns False) whenever EITHER stamp is unreadable/absent (dev
         build without wsl_rootfs, a pre-2.6.1 distro predating the marker, or a
-        transient wsl.exe error) so a read hiccup never blocks startup. Mirrors
-        the .iss ShouldImportDistro version comparison (both '' → skip)."""
+        transient wsl.exe error) so a read hiccup never blocks startup.
+
+        THE CONTRACT, both halves: positive mismatch only. Any unreadable stamp
+        — on EITHER side, in EITHER component — must PROCEED, never block. The
+        .iss RootfsReimportNeeded() converges on this same fail-open rule; it
+        previously treated an unreadable stamp as "needs re-import" (fail
+        CLOSED), so the two halves disagreed on exactly the state a broken rig
+        is in and one of them would offer a destructive rebuild the other says
+        is unnecessary. Do not "harden" one side to fail closed without moving
+        the other in the same change."""
         from .constants import INSTALL_DIR
         version_file = os.path.join(INSTALL_DIR, "wsl_rootfs", "ROOTFS_VERSION")
         try:
@@ -1926,6 +1968,23 @@ class EduBoticsApp:
                 self._log("Einrichtung abgeschlossen. Systemprüfung wird fortgesetzt...")
                 self.root.after(0, lambda: threading.Thread(
                     target=self._run_prerequisite_checks, daemon=True).start())
+            elif exit_code == FINALIZE_EXIT_DONE:
+                # exit 0 but is_distro_registered() is False. Without this branch
+                # the chain fell through to the generic else and printed
+                # "Einrichtung fehlgeschlagen (exit 0)" — a self-contradiction
+                # that tells the student nothing and reads like a GUI bug. The
+                # honest report is: the script believes it succeeded, the
+                # environment is still absent (a wsl.exe that reported success
+                # while the import silently didn't land — a stale
+                # WSL-service state, or an unregister racing the import).
+                self._log(
+                    "Die Einrichtung meldet Erfolg, aber die EduBotics-Umgebung "
+                    "fehlt weiterhin. Bitte den PC neu starten und EduBotics "
+                    "erneut öffnen — hilft das nicht, bitte den EduBotics-"
+                    "Installer erneut ausführen."
+                )
+                self._set_status(
+                    "Umgebung fehlt trotz erfolgreicher Einrichtung — PC neu starten")
             elif exit_code is None:
                 # Launch failure (never ran) — distinct from a numeric
                 # non-zero exit. The missing marker corroborates it. Offer
@@ -2477,9 +2536,10 @@ class EduBoticsApp:
             # fails to bind (no positional params) and nothing runs. Wrapping
             # everything in one double-quoted -Command string survives both
             # PowerShell and cmd.exe verbatim: the inner tokens are
-            # single-quoted (apostrophes doubled), and nothing here can
-            # contain `$` (VID:PIDs are hex, the log lives under
-            # %ProgramData%\EduBotics).
+            # single-quoted (apostrophes doubled), and nothing in the SOURCE
+            # here contains `$` (VID:PIDs are hex; the log path comes from
+            # _edubotics_diag_dir(), i.e. %ProgramData%\EduBotics\logs, or its
+            # %LOCALAPPDATA% fallback).
             manual_hw = ",".join(f"'{_ps_single_quote(h)}'" for h in hw_ids)
             manual_cmd = (
                 f'powershell.exe -NoProfile -ExecutionPolicy Bypass -Command '

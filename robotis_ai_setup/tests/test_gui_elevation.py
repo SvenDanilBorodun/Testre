@@ -17,13 +17,15 @@ Pinned invariants:
   * _run_privileged wraps the UAC path in try/except so a ctypes failure
     surfaces as a launch-failure tuple instead of killing the worker thread.
   * _SE_ERR_REASONS covers exactly the documented ShellExecute failure codes.
-  * The usbipd manual-fallback command shown to the student contains no `$`
-    (an interactive PowerShell would interpolate it before the child runs) and
-    the $-laden ps_cmd is never handed to the fallback dialog.
+  * EVERY manual-fallback command shown to the student contains no `$` (an
+    interactive PowerShell would interpolate it before the child runs), the
+    $-laden ps_cmd is never handed to the fallback dialog, and the ps_args the
+    finalize fallback DOES hand over is $-free by construction.
 """
 
 import ast
 import os
+import re
 import types
 import unittest
 
@@ -181,19 +183,57 @@ class TestManualFallbackPasteSafety(unittest.TestCase):
     """The command handed to _show_manual_elevation_fallback must survive being
     pasted into an interactive PowerShell: no `$` inside it (the OUTER shell
     interpolates $vars in double quotes before the child parses them — the
-    original ps_cmd handed the child ` = ;` fragments and nothing ran)."""
+    original ps_cmd handed the child ` = ;` fragments and nothing ran).
+
+    Every block is checked, not just the first: gui_app grew a SECOND
+    `manual_cmd = (` (the bind-devices one) precisely to FIX a paste-safety bug,
+    and the old `src.index("manual_cmd = (")` guard pinned only the first — so
+    the block the test existed for was the one block it never looked at."""
+
+    @staticmethod
+    def _assignment_blocks(src, name):
+        """Every ``<name> = (`` ... ``)`` parenthesised assignment, in order."""
+        blocks = []
+        for m in re.finditer(rf"^[ \t]*{re.escape(name)} = \(\n", src, re.M):
+            rest = src[m.end():]
+            blocks.append(rest[: rest.index(")\n")])
+        return blocks
 
     def test_ps_cmd_never_reaches_fallback_dialog(self):
         src = _source()
         self.assertNotIn('f"powershell.exe {ps_cmd}"', src)
 
-    def test_repair_manual_cmd_has_no_dollar(self):
+    def test_finalize_fallback_ps_args_is_dollar_free(self):
+        # The finalize fallback DOES hand `f"powershell.exe {ps_args}"` to the
+        # dialog (two sites), so the ps_cmd absence assertion above says nothing
+        # about the command the student actually gets there. ps_args must
+        # therefore be $-free by construction, exactly like manual_cmd.
         src = _source()
-        marker = "manual_cmd = ("
-        self.assertIn(marker, src)
-        block = src[src.index(marker):]
-        block = block[: block.index(")\n")]
-        self.assertNotIn("$", block.replace("_ps_single_quote", ""))
+        self.assertIn(
+            'f"powershell.exe {ps_args}"', src,
+            "the finalize fallback no longer passes ps_args — re-point this "
+            "guard at whatever it hands the dialog now")
+        blocks = self._assignment_blocks(src, "ps_args")
+        self.assertGreaterEqual(len(blocks), 2, "expected the finalize + "
+                                                "bind-devices ps_args blocks")
+        for block in blocks:
+            self.assertNotIn(
+                "$", block,
+                "a $ in ps_args is interpolated by the interactive PowerShell "
+                f"the student pastes into, before the child parses it:\n{block}")
+        for line in src.splitlines():
+            if line.strip().startswith("ps_args +="):
+                self.assertNotIn("$", line, f"appended $ into ps_args: {line}")
+
+    def test_every_manual_cmd_has_no_dollar(self):
+        src = _source()
+        blocks = self._assignment_blocks(src, "manual_cmd")
+        self.assertGreaterEqual(len(blocks), 2, "expected the usbipd-repair + "
+                                                "bind-devices manual_cmd blocks")
+        for block in blocks:
+            self.assertNotIn(
+                "$", block.replace("_ps_single_quote", ""),
+                f"manual_cmd must be paste-safe (no $):\n{block}")
 
     def test_preflight_decodes_utf8_with_replace(self):
         # PS 5.1 writes redirected stdout in the OEM codepage; the GUI forces

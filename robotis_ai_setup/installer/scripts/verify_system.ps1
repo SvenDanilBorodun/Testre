@@ -28,10 +28,13 @@ try {
 # other consumers this script also runs UN-elevated (the "Installation prüfen"
 # Start-menu shortcut), so the ACL grant may well fail here; that is fine, an
 # elevated installer step created the directory with the right ACL already.
-# Scope ("this folder and files", never the subtree) is load-bearing — the WSL
-# install root lives under this directory; see install_prerequisites.ps1 for the
-# full rationale. Keep all five copies of this block identical.
-$DiagDir = Join-Path $env:ProgramData "EduBotics"
+# The `logs` LEAF and the scope ("this folder and files", never the subtree) are
+# both load-bearing: %ProgramData%\EduBotics is the PARENT of the WSL install
+# root and must keep its default admin-only inherited ACL, or a standard user can
+# pre-create …\EduBotics\wsl and own the distro's ext4.vhdx. See
+# install_prerequisites.ps1 for the full rationale. Keep all six copies of this
+# block identical.
+$DiagDir = Join-Path $env:ProgramData "EduBotics\logs"
 try {
     if (-not (Test-Path $DiagDir)) {
         New-Item -ItemType Directory -Path $DiagDir -Force | Out-Null
@@ -67,7 +70,37 @@ $allOk = $true
 # post-reboot finalize — so a "distro missing / docker down / images absent"
 # result here is EXPECTED, not a failure. Detect it so the summary reports a
 # benign "reboot pending" instead of the alarming FAIL the pilot user saw.
-$rebootPending = Test-Path (Join-Path $PSScriptRoot ".reboot_required")
+#
+# EXISTENCE OF THE FLAG IS NOT THE SIGNAL — finalize_install.ps1's header says it
+# in bold: ".reboot_required is NOT an exit code, it means 'the deferred work is
+# not finished'", which is true of every FAILED outcome too. finalize deliberately
+# KEEPS the flag set on Fail-WithNextAction and on `exit $EXIT_FAILED`, so routing
+# on existence reported "Ein Windows-Neustart steht noch aus" + exit 0 over a
+# genuinely broken install, forever. Concretely: 14 GB free -> dism 3010 -> flag;
+# the student reboots; finalize's Test-RebootStillPending correctly says the boot
+# happened, Phase 1 then hard-fails on import's <20 GB disk precheck and keeps the
+# flag; "Installation prüfen" then printed the reboot line and exited 0, and the
+# real cause (disk space) was never surfaced.
+#
+# Discriminate on TIME, exactly like finalize's Test-RebootStillPending: the flag
+# only means "reboot outstanding" when NO boot has happened since it was written.
+# A read error prefers the SAFE direction (fall through to the exit-1 branch) —
+# manufacturing a benign verdict out of an unreadable state is how this class of
+# bug survives. Note the branch is unreachable for the common benign case anyway
+# (missing images are Write-WARN only and never clear $allOk), so it fires only on
+# genuinely broken states; tightening it costs nothing.
+$rebootPending = $false
+$rebootFlagPath = Join-Path $PSScriptRoot ".reboot_required"
+if (Test-Path $rebootFlagPath) {
+    try {
+        $flagTime = (Get-Item -Path $rebootFlagPath -ErrorAction Stop).LastWriteTime
+        $bootTime = (Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop).LastBootUpTime
+        $rebootPending = ($bootTime -le $flagTime)
+        Write-Diag "reboot_flag" ("flag={0} lastBoot={1} pending={2}" -f $flagTime.ToString("o"), $bootTime.ToString("o"), $rebootPending)
+    } catch {
+        Write-Diag "reboot_flag" "flag present but the boot/flag time was unreadable ($_) — treating the install as FAILED rather than as a benign pending reboot"
+    }
+}
 
 Write-Step "Verifying EduBotics installation..."
 Write-Host "   Diagnostics log: $DiagLog" -ForegroundColor Gray
@@ -244,10 +277,12 @@ if ($allOk) {
     Write-Diag "verify_summary" "PASS"
     exit 0
 } elseif ($rebootPending) {
-    # A reboot is pending (WSL feature enable / a prior servicing op). The distro
-    # import + image pull are deliberately deferred to the post-reboot finalize,
-    # so the failed checks above are EXPECTED — report a benign reboot-pending
-    # state, NOT a FAIL (which read as a broken install to the pilot user).
+    # A reboot is pending (WSL feature enable / a prior servicing op) AND no boot
+    # has happened since the flag was written — see the $rebootPending derivation
+    # above; the flag's mere existence does NOT get here. The distro import +
+    # image pull are deliberately deferred to the post-reboot finalize, so the
+    # failed checks above are EXPECTED — report a benign reboot-pending state,
+    # NOT a FAIL (which read as a broken install to the pilot user).
     Write-Host "   Ein Windows-Neustart steht noch aus." -ForegroundColor Yellow
     Write-Host "   Die EduBotics-Umgebung wird nach dem Neustart eingerichtet." -ForegroundColor Yellow
     Write-Diag "verify_summary" "REBOOT_PENDING (distro import + image pull deferred until after reboot)"

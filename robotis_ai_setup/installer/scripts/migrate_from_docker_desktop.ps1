@@ -33,10 +33,13 @@ function Write-FAIL { param([string]$msg) Write-Host "   FAIL: $msg" -Foreground
 # This script is Step 0 — the FIRST thing the installer runs — so it is also
 # what creates the directory + the Users ACL that lets the un-elevated GUI
 # append to the same log. Best-effort throughout; logging never aborts a step.
-# Scope ("this folder and files", never the subtree) is load-bearing — the WSL
-# install root lives under this directory; see install_prerequisites.ps1 for the
-# full rationale. Keep all five copies of this block identical.
-$DiagDir = Join-Path $env:ProgramData "EduBotics"
+# The `logs` LEAF and the scope ("this folder and files", never the subtree) are
+# both load-bearing: %ProgramData%\EduBotics is the PARENT of the WSL install
+# root and must keep its default admin-only inherited ACL, or a standard user can
+# pre-create …\EduBotics\wsl and own the distro's ext4.vhdx. See
+# install_prerequisites.ps1 for the full rationale. Keep all six copies of this
+# block identical.
+$DiagDir = Join-Path $env:ProgramData "EduBotics\logs"
 try {
     if (-not (Test-Path $DiagDir)) { New-Item -ItemType Directory -Path $DiagDir -Force | Out-Null }
     $DiagAcl = Get-Acl -Path $DiagDir
@@ -68,7 +71,15 @@ function Write-Diag {
 # re-ran the migration and re-armed the exact bug the durable marker was added
 # to fix. Both legacy locations are still READ, so a machine that already
 # migrated is never migrated a second time.
-$MigratedFlag = Join-Path $DiagDir ".migrated"
+#
+# Deliberately anchored to the %ProgramData%\EduBotics ROOT, not to $DiagDir:
+# the diagnostics sink moved down into the `logs` leaf on 2026-07-19 (so the
+# Users:Modify grant stops covering the WSL install root's parent), and following
+# it would have MOVED this marker — re-arming the "migrate re-runs on every
+# upgrade" bug on every already-migrated machine in the field. It also keeps the
+# marker admin-write-only, so a standard user can neither suppress nor force the
+# Docker-Desktop migration.
+$MigratedFlag = Join-Path (Join-Path $env:ProgramData "EduBotics") ".migrated"
 $LegacyMarkers = @(
     (Join-Path $PSScriptRoot ".migrated"),                          # pre-2.13 ({app}\scripts)
     (Join-Path (Join-Path $env:LOCALAPPDATA "EduBotics") ".migrated")  # 2.13 (per-admin profile)
@@ -355,3 +366,13 @@ if ($stillPresent) {
 Set-Content -Path $MigratedFlag -Value "1"
 Write-Diag "complete" "Docker Desktop removed (uninstall rc=$uninstallRc); durable marker written."
 Write-Step "Migration complete. EduBotics will now use its own WSL2 distro."
+
+# Explicit success — same reason as install_prerequisites.ps1 / pull_images.ps1.
+# Write-Step is a Write-Host, so without this the script's exit code falls
+# through to the LAST native command: `wsl --list --quiet` in the distro-removal
+# loop above, which exits NON-ZERO on a machine that has no WSL distros at all
+# (entirely plausible on a Hyper-V-backend Docker Desktop host — the very
+# machines this script exists for). Harmless only because the .iss Step 0
+# ignores [Run] exit codes today; any future caller that checks would read a
+# successful migration as a failure.
+exit 0

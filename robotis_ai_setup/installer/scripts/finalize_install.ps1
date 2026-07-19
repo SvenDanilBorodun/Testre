@@ -41,10 +41,8 @@ param(
 
 $ErrorActionPreference = "Continue"
 
-# Shared dockerd-readiness helper (dot-sourced; caller must keep EAP=Continue).
-. (Join-Path $PSScriptRoot 'wsl_docker_ready.ps1')
-
 # Exit-code constants (see the header). Named so the intent survives a skim.
+# Declared BEFORE the dot-source below so its failure path can use them.
 $EXIT_DONE    = 0
 $EXIT_REBOOT  = 10
 $EXIT_CONSENT = 12
@@ -132,8 +130,26 @@ function Fail-WithNextAction {
     try {
         Set-Content -LiteralPath $MarkerPath -Value ("FAILED {0}`n{1}`n{2}" -f (Get-Date).ToString("o"), $Problem, $NextStep) -Force
     } catch { }
-    exit 1
+    # $EXIT_FAILED, not a bare literal — the exit codes ARE the GUI contract, and
+    # a second spelling of the same number is how the two drift apart.
+    exit $EXIT_FAILED
 }
+
+# ── Shared dockerd-readiness helper (dot-sourced; caller must keep EAP=Continue).
+# Test-Path FIRST, mirroring preflight_system.ps1's guard: install_prerequisites
+# .ps1 warns that Controlled Folder Access "may silently fail to write some files"
+# into %ProgramFiles%, so a partially-copied {app}\scripts is a state this codebase
+# already anticipates — and an unguarded dot-source of a missing file THROWS.
+# Placed here, AFTER the marker + transcript + Fail-WithNextAction rather than at
+# the top of the file: a throw (or an early exit) above those would reach the GUI
+# as "Marker-Datei fehlt" over an EMPTY transcript, i.e. a diagnosed launch
+# failure when the real cause is one missing file. Now it names the file, in
+# German, in the marker AND the transcript.
+$readyHelper = Join-Path $PSScriptRoot 'wsl_docker_ready.ps1'
+if (-not (Test-Path $readyHelper)) {
+    Fail-WithNextAction "Die Datei wsl_docker_ready.ps1 fehlt in $PSScriptRoot." "Die Installation ist unvollständig. Bitte den EduBotics-Installer erneut ausführen."
+}
+. $readyHelper
 
 # ── .reboot_required lifecycle (load-bearing — read before touching) ────────
 # install_prerequisites.ps1 writes this flag under {app}\scripts when a Windows
@@ -276,8 +292,55 @@ try {
         if ($prereqArgs.Count -eq 0) {
             Write-WARN "Kein usbipd-Pin gefunden — die MSI-Integritätsprüfung greift nur bei gesetztem EDUBOTICS_USBIPD_SHA256."
         }
+
+        # ── Custody of .reboot_required across the child call ───────────────
+        # We deliberately do NOT pass -PreserveExistingRebootFlag (read that
+        # param's own comment in install_prerequisites.ps1: a preserved STALE
+        # flag makes the bare Test-Path below announce "Neustart erforderlich"
+        # on every launch, forever). The price is that the child's Summary block
+        # DELETES the flag whenever THAT run finds no reboot reason of its own —
+        # including a flag it never wrote. The one that matters is
+        # migrate_from_docker_desktop.ps1's "dd-uninstall" request, whose reboot
+        # has NOT happened: losing it makes the Test-Path below fall through and
+        # Phase 1 imports the distro next to a half-removed Docker Desktop —
+        # exactly the entanglement the flag exists to prevent. (The GUI's usbipd
+        # repair was fixed for this same class in ae7814a; finalize was not.)
+        #
+        # So take custody instead of choosing one horn: snapshot the flag, and
+        # restore it ONLY when the reboot it asks for is GENUINELY outstanding
+        # (Test-RebootStillPending, the same discriminator used below). A stale
+        # flag stays deleted, which is what keeps the reboot loop closed.
+        $flagSnapshot = $null
+        if (Test-Path $flagPath) {
+            Write-Step "Vorhandene Neustart-Markierung wird geprüft..."
+            if (Test-RebootStillPending) {
+                try {
+                    $flagSnapshot = @{
+                        Content = [string](Get-Content -Path $flagPath -Raw -ErrorAction Stop)
+                        Written = (Get-Item -Path $flagPath -ErrorAction Stop).LastWriteTime
+                    }
+                } catch {
+                    Write-Warn "Neustart-Markierung konnte nicht gesichert werden: $_"
+                }
+            }
+        }
+
         & (Join-Path $PSScriptRoot "install_prerequisites.ps1") @prereqArgs
         $prereqRc = $LASTEXITCODE
+
+        if (($null -ne $flagSnapshot) -and (-not (Test-Path $flagPath))) {
+            # The child dropped a flag it did not write. Put it back verbatim —
+            # CONTENT carries the reason ("dd-uninstall") and the ORIGINAL write
+            # time is what Test-RebootStillPending compares against the last boot.
+            # Re-writing it fresh would reset both and declare the reboot done.
+            try {
+                Set-Content -Path $flagPath -Value $flagSnapshot.Content -NoNewline -Force
+                (Get-Item -Path $flagPath -ErrorAction Stop).LastWriteTime = $flagSnapshot.Written
+                Write-Warn "Neustart-Markierung wiederhergestellt (die Voraussetzungen hatten sie entfernt)."
+            } catch {
+                Write-Warn "Neustart-Markierung konnte nicht wiederhergestellt werden: $_"
+            }
+        }
         # Exit code FIRST, flag second. A failed prereq run never WRITES the
         # flag (its Summary block is skipped on every exit-1 path), so a flag
         # surviving a non-zero exit is by construction pre-existing/stale —
@@ -286,8 +349,16 @@ try {
         # internet), which is exactly the masked-failure class this contract
         # exists to kill.
         if ($prereqRc -ne 0) {
-            Write-FAIL "Voraussetzungen konnten nicht installiert werden (exit $prereqRc)."
-            exit $EXIT_FAILED
+            # Fail-WithNextAction, not a bare Write-FAIL + exit: this is the MOST
+            # likely early failure — install_prerequisites.ps1 exits 1 on a failed
+            # MSI download, a SHA mismatch, the RELEASE_PIN_NEEDED sentinel and a
+            # failed `wsl --install`, i.e. "no internet in the classroom" lands
+            # here. A bare "(exit 1)" gave the student no German next step and
+            # left the marker still reading "started ...", which the GUI reads as
+            # "never finished" rather than "failed for THIS reason" (the file
+            # header at the top of this script says every failure exits via
+            # Fail-WithNextAction; this path was the exception).
+            Fail-WithNextAction "Voraussetzungen konnten nicht installiert werden (exit $prereqRc)." "Internetverbindung prüfen und EduBotics erneut öffnen."
         }
         # install_prerequisites writes .reboot_required when a fresh WSL2
         # install needs a host reboot before a distro can be imported. Leave the

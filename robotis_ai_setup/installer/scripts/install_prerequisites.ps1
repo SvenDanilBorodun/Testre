@@ -65,28 +65,42 @@ if ($PreserveExistingRebootFlag -and (Test-Path $FlagPath)) {
 # The Users ACL grant is what makes that work: the un-elevated GUI has to append
 # to this same file, and a directory created under ProgramData by an elevated
 # process is read-only for standard users by default. Re-applied on every run
-# because `wsl --import` may have created %ProgramData%\EduBotics first, with the
-# restrictive inherited ACL. S-1-5-32-545 is the well-known "Users" SID — never
-# the localized name, this ships on German Windows (where the ACE reads back as
-# VORDEFINIERT\Benutzer). Whole block is best-effort: a logging problem must
-# never abort an install step.
+# because an earlier installer step may have created the directory first, with
+# the restrictive inherited ACL. S-1-5-32-545 is the well-known "Users" SID —
+# never the localized name, this ships on German Windows (where the ACE reads
+# back as VORDEFINIERT\Benutzer). Whole block is best-effort: a logging problem
+# must never abort an install step.
 #
-# SCOPE IS LOAD-BEARING — "this folder and files", NOT the subtree.
-# The WSL install root is a CHILD of this directory ($env:ProgramData\EduBotics\
-# wsl, see import_edubotics_wsl.ps1 -InstallRoot). An earlier revision OF THIS
-# CHANGE used ContainerInherit,ObjectInherit, which propagated Users:Modify down
-# onto the distro's ext4.vhdx — every standard user on a shared lab PC could
-# have tampered with the VHDX holding the datasets, HF cache and calibration. It
-# was caught in review and NEVER RELEASED (`git log -S ContainerInherit` finds it
-# on no tag) — do not read this as shipped history. ObjectInherit +
-# NoPropagateInherit grants the directory itself + the files directly in it (the
-# log, which is all the GUI needs) and stops there: wsl\ inherits nothing.
+# LOCATION AND SCOPE ARE BOTH LOAD-BEARING: the grant sits on the `logs` LEAF,
+# and grants "this folder and files", NOT the subtree.
+# The LOCATION half was wrong until 2026-07-19. The grant used to sit on
+# %ProgramData%\EduBotics itself — the PARENT of the WSL install root
+# (…\EduBotics\wsl, see import_edubotics_wsl.ps1 -InstallRoot). NoPropagateInherit
+# is not InheritOnly, so the ACE applied to that container too, and
+# FileSystemRights.Modify (0x301BF) includes FILE_ADD_SUBDIRECTORY: a standard
+# user could pre-create …\EduBotics\wsl — or a junction pointing anywhere — and
+# the next elevated `wsl --import` would write ext4.vhdx (every dataset, the HF
+# cache, the Roboter-Studio calibration) into a directory they control. import
+# only creates that root `if (-not (Test-Path …))`, so it never re-ACLs a
+# pre-existing one; it now refuses a reparse point outright. Granting the `logs`
+# LEAF keeps the student-writable surface to the log file and leaves
+# %ProgramData%\EduBotics on its default admin-only inherited ACL.
+# The SCOPE half: ObjectInherit + NoPropagateInherit grants the directory itself
+# + the files directly in it (the log, which is all the GUI needs) and stops
+# there. An earlier revision used ContainerInherit,ObjectInherit, which would
+# have propagated Users:Modify onto everything below; it was caught in review and
+# NEVER RELEASED (`git log -S ContainerInherit` finds it on no tag) — do not read
+# it as shipped history.
 # RemoveAccessRuleAll first — it matches on SID + Allow regardless of rights, so
 # it drops ANY pre-existing over-broad ACE whatever put it there (a dev box that
 # ran an intermediate build, a hand-edited ACL), and Windows then recomputes the
-# children's inherited ACEs (verified: an already-inherited Modify on
-# wsl\ext4.vhdx disappears on the next run).
-$DiagDir = Join-Path $env:ProgramData "EduBotics"
+# children's inherited ACEs.
+#
+# Keep all SIX copies of this block byte-identical (install_prerequisites,
+# migrate_from_docker_desktop, verify_system, configure_usbipd, bind_devices,
+# preflight_system) — the un-elevated GUI resolves the same path in
+# device_manager._diagnostics_log_path().
+$DiagDir = Join-Path $env:ProgramData "EduBotics\logs"
 try {
     if (-not (Test-Path $DiagDir)) {
         New-Item -ItemType Directory -Path $DiagDir -Force | Out-Null

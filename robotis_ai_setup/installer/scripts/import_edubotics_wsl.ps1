@@ -173,8 +173,41 @@ if ($existing) {
 }
 
 if (-not $skipImport) {
-    # Ensure install root exists
-    if (-not (Test-Path $InstallRoot)) {
+    # Ensure install root exists.
+    #
+    # A PRE-EXISTING $InstallRoot is not automatically trustworthy. We run
+    # elevated and are about to write ext4.vhdx — every recorded dataset, the HF
+    # cache and the Roboter-Studio calibration — into this path. %ProgramData%
+    # itself carries an inherited `BUILTIN\Users:(CI)(AD)` ACE (create-folder) and
+    # `CREATOR OWNER:(OI)(CI)(IO)(F)`, so a standard user can create a directory
+    # here and OWN it before we ever run; if it is a junction/symlink, the write
+    # lands wherever they pointed it and this becomes an elevated arbitrary-write.
+    # (Until 2026-07-19 the diagnostics ACL made that strictly worse by granting
+    # Users:Modify on the PARENT — that grant now sits on the …\EduBotics\logs
+    # leaf; see install_prerequisites.ps1.) We only CREATE the directory when it
+    # is absent, so we never re-ACL an existing one — refuse the two shapes we can
+    # detect instead of importing into them.
+    if (Test-Path $InstallRoot) {
+        $rootItem = $null
+        try {
+            $rootItem = Get-Item -LiteralPath $InstallRoot -Force -ErrorAction Stop
+        } catch {
+            Write-FAIL "Installationsverzeichnis $InstallRoot konnte nicht geprüft werden: $_"
+            Write-Host "   Bitte das Verzeichnis entfernen und die Installation erneut starten." -ForegroundColor Red
+            exit 1
+        }
+        if ($rootItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+            Write-FAIL "Installationsverzeichnis $InstallRoot ist eine Verknüpfung (Junction) und wird nicht verwendet."
+            Write-Host "   Das kann ein Manipulationsversuch sein. Bitte das Verzeichnis entfernen" -ForegroundColor Red
+            Write-Host "   und die Installation erneut starten." -ForegroundColor Red
+            exit 1
+        }
+        if (-not ($rootItem.Attributes -band [System.IO.FileAttributes]::Directory)) {
+            Write-FAIL "Installationspfad $InstallRoot ist kein Verzeichnis."
+            Write-Host "   Bitte die Datei entfernen und die Installation erneut starten." -ForegroundColor Red
+            exit 1
+        }
+    } else {
         New-Item -ItemType Directory -Path $InstallRoot -Force | Out-Null
     }
 
@@ -269,70 +302,32 @@ if (-not $skipImport) {
 
 # Boot the distro (its wsl.conf [boot] command is /usr/local/bin/start-dockerd.sh,
 # NOT systemd — systemd is unreliable on a custom-imported rootfs) and wait for dockerd.
+#
+# Wait-DockerReady is the SINGLE source of truth for dockerd readiness — VM ping,
+# exit-code-only polling (180 s: 60 s was tight on 5400 RPM HDDs and when
+# Controlled Folder Access added latency), the start-dockerd.sh fallback (30 s),
+# and the stderr->FILE probe that keeps `docker info`'s healthy-daemon warning out
+# of the PowerShell streams. Until 2026-07-19 this script kept a full INLINE COPY
+# of all of it, differing only by its $lastErr reporting path — two divergent
+# implementations of safety-critical readiness logic, one of which nobody would
+# remember to fix. The $lastErr path now lives in the helper as -LastError, and
+# -ShowProgress reproduces the per-poll German progress line this script printed.
+$readyHelper = Join-Path $PSScriptRoot 'wsl_docker_ready.ps1'
+if (-not (Test-Path $readyHelper)) {
+    Write-FAIL "Die Datei wsl_docker_ready.ps1 fehlt in $PSScriptRoot."
+    Write-Host "   Die Installation ist unvollständig. Bitte den EduBotics-Installer erneut ausführen." -ForegroundColor Red
+    exit 1
+}
+. $readyHelper
+
 Write-Step "Starting EduBotics-Umgebung..."
-# First invocation starts the VM; echo is just a ping to force startup.
-wsl -d $DistroName -- echo ready *>$null
-
-# Poll for docker info — dockerd takes a few seconds to bring up even on
-# fast hardware. 60s was tight on 5400 RPM HDDs and when Controlled
-# Folder Access added latency; 180s comfortably covers first-boot rootfs
-# extraction + dockerd start.
-$maxWait = 180
-$elapsed = 0
-$dockerReady = $false
-$lastErr = ""
-# Probe via stderr->FILE (not `2>&1` into the pipeline): readiness is decided by the
-# EXIT CODE alone. `docker info` writes to stderr both while the daemon is still
-# booting ("Cannot connect…") AND on a HEALTHY daemon ("WARNING: No swap limit
-# support"); merging that with `2>&1` emits a NativeCommandError record on every
-# poll (harmless under EAP=Continue, but it spams the install log). A file redirect
-# keeps stdout/stderr out of the PowerShell streams entirely.
-# GetTempFileName() pre-creates the file (reads can't hit a missing target)
-# and gives one consistent absolute path. NOTE: it reads the same TMP env var
-# as $env:TEMP and does NOT expand the 8.3 tilde path a dotted username
-# produces (F2) — the try/catch around every consumer below is the
-# load-bearing guard against the terminating PSArgumentException.
-$dockerErrFile = [System.IO.Path]::GetTempFileName()
-while ($elapsed -lt $maxWait) {
-    & wsl -d $DistroName -- docker info 1>$null 2>$dockerErrFile
-    if ($LASTEXITCODE -eq 0) {
-        $dockerReady = $true
-        break
-    }
-    # -ErrorAction cannot suppress a terminating PSArgumentException from binding
-    # a malformed/8.3 path to -LiteralPath; try/catch can.
-    $lastErr = ""; try { $lastErr = Get-Content -LiteralPath $dockerErrFile -Raw -ErrorAction Stop } catch { }
-    Start-Sleep -Seconds 2
-    $elapsed += 2
-    Write-Host "   Warte auf Docker-Engine... ${elapsed}s/${maxWait}s" -ForegroundColor Gray
+$dockerErr = ""
+if (-not (Wait-DockerReady -DistroName $DistroName -LastError ([ref]$dockerErr) -ShowProgress)) {
+    Write-FAIL "Docker-Engine konnte nicht gestartet werden."
+    Write-Host "   Fehler: $dockerErr" -ForegroundColor Red
+    Write-Host "   Diagnose: wsl -d $DistroName -- tail -n 50 /var/log/dockerd.log" -ForegroundColor Red
+    exit 1
 }
-
-if (-not $dockerReady) {
-    # Boot-time autostart didn't fire — invoke the dockerd wrapper directly, then
-    # give it a few guarded rechecks (a cold dockerd can take >3s to open its socket).
-    Write-Warn "dockerd nicht automatisch gestartet — Wrapper wird manuell ausgeführt"
-    Write-Host "   Last docker-info stderr:" -ForegroundColor Gray
-    Write-Host "   $lastErr" -ForegroundColor Gray
-    wsl -d $DistroName -- /usr/local/bin/start-dockerd.sh *>$null
-    $extra = 0
-    while ($extra -lt 30) {
-        Start-Sleep -Seconds 2
-        $extra += 2
-        & wsl -d $DistroName -- docker info 1>$null 2>$dockerErrFile
-        if ($LASTEXITCODE -eq 0) { $dockerReady = $true; break }
-        # try/catch, not -ErrorAction: a malformed -LiteralPath binding throws terminating.
-        $lastErr = ""; try { $lastErr = Get-Content -LiteralPath $dockerErrFile -Raw -ErrorAction Stop } catch { }
-    }
-    if (-not $dockerReady) {
-        Write-FAIL "Docker-Engine konnte nicht gestartet werden."
-        Write-Host "   Fehler: $lastErr" -ForegroundColor Red
-        Write-Host "   Diagnose: wsl -d $DistroName -- tail -n 50 /var/log/dockerd.log" -ForegroundColor Red
-        exit 1
-    }
-}
-# -ErrorAction cannot suppress a terminating PSArgumentException from binding a
-# malformed/8.3 path to -LiteralPath; wrap in try/catch so cleanup never aborts.
-try { Remove-Item -LiteralPath $dockerErrFile -Force -ErrorAction SilentlyContinue } catch { }
 
 Write-OK "Docker-Engine läuft in $DistroName"
 

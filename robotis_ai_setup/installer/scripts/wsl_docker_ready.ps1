@@ -20,7 +20,18 @@ function Wait-DockerReady {
         # (preflight diagnostics) that must neither mutate the distro nor blow
         # past a small time budget. Repair-capable callers (finalize,
         # pull_images) keep the fallback.
-        [switch]$NoFallback
+        [switch]$NoFallback,
+        # Optional [ref] to a string that receives the LAST `docker info` stderr.
+        # import_edubotics_wsl.ps1 kept a full inline COPY of this function purely
+        # to own this reporting path — two divergent implementations of
+        # safety-critical readiness logic. Folding it in here is what let that
+        # copy go (2026-07-19). $null when the caller does not ask for it.
+        [ref]$LastError,
+        # Emit the German per-poll progress line + the fallback notice. Off by
+        # default so finalize/pull_images keep their terse output; import turns it
+        # on because its wait is the LONGEST (180 s straight after a fresh
+        # `wsl --import`) and a silent transcript there reads as a hang.
+        [switch]$ShowProgress
     )
 
     # Step 1: trigger VM boot. First `wsl -d` invocation starts the lightweight
@@ -41,14 +52,34 @@ function Wait-DockerReady {
         while ($elapsed -lt $MaxWaitSeconds) {
             & wsl -d $DistroName -- docker info 1>$null 2>$errFile
             if ($LASTEXITCODE -eq 0) { return $true }
+            # Keep the daemon's own words for the caller's failure message.
+            # try/catch, not -ErrorAction: binding a malformed/8.3 path to
+            # -LiteralPath raises a TERMINATING PSArgumentException that
+            # -ErrorAction cannot suppress (F2).
+            if ($null -ne $LastError) {
+                try { $LastError.Value = (Get-Content -LiteralPath $errFile -Raw -ErrorAction Stop) } catch { }
+            }
             Start-Sleep -Seconds 2
             $elapsed += 2
+            if ($ShowProgress) {
+                Write-Host "   Warte auf Docker-Engine... ${elapsed}s/${MaxWaitSeconds}s" -ForegroundColor Gray
+            }
         }
 
         # Fallback: boot-time autostart didn't fire — invoke the dockerd wrapper
         # directly (this distro uses /usr/local/bin/start-dockerd.sh, NOT
         # systemd), then poll again up to $FallbackWaitSeconds.
         if ($NoFallback) { return $false }
+        if ($ShowProgress) {
+            # Write-Host only, never a Write-Warn/Write-FAIL helper: those are
+            # defined by the CALLERS and pull_images.ps1 has no Write-Warn, so
+            # calling one from here would blow up in exactly the caller we are
+            # least able to test from this file.
+            Write-Host "   dockerd nicht automatisch gestartet - Wrapper wird manuell ausgeführt" -ForegroundColor Yellow
+            if ($null -ne $LastError) {
+                Write-Host "   Letzte docker-info-Meldung: $($LastError.Value)" -ForegroundColor Gray
+            }
+        }
         wsl -d $DistroName -- /usr/local/bin/start-dockerd.sh *>$null
         $extra = 0
         while ($extra -lt $FallbackWaitSeconds) {
@@ -56,6 +87,9 @@ function Wait-DockerReady {
             $extra += 2
             & wsl -d $DistroName -- docker info 1>$null 2>$errFile
             if ($LASTEXITCODE -eq 0) { return $true }
+            if ($null -ne $LastError) {
+                try { $LastError.Value = (Get-Content -LiteralPath $errFile -Raw -ErrorAction Stop) } catch { }
+            }
         }
     } finally {
         try { Remove-Item -LiteralPath $errFile -Force -ErrorAction SilentlyContinue } catch { }

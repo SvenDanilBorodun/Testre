@@ -307,58 +307,93 @@ begin
     Result := Trim(Lines[0]);
 end;
 
-// True when the EXISTING distro must be re-imported to run the rootfs this
-// installer ships. THE single rootfs policy: ShouldImportDistro (ask for
-// consent) and ShouldPullImages (refuse to pull onto a stale rootfs) both call
-// this, so the two gates cannot classify the same machine differently. They did
-// until 2026-07-17 — an UNREADABLE existing stamp made ShouldImportDistro prompt
-// for a destructive rebuild while this function called the very same distro
-// current, so declining the prompt STILL pulled the new images onto the old
-// rootfs. Reachable on any upgrade from an installer <= 2.6.0.
-//
-// The policy, stated once:
-//   Shipped  = '' -> we cannot know what we ship (dev build without the stamp).
-//                    Fail OPEN: no prompt, no block. This mirrors the GUI's
-//                    _rootfs_rebuild_required.
-//   Existing = '' -> the distro predates the stamp (installers <= 2.6.0), so we
-//                    cannot prove it matches what we ship. Treat as a needed
-//                    re-import: ask, and if declined do not pull. This is the
-//                    "one final re-import" import_edubotics_wsl.ps1 documents.
-//   otherwise     -> a plain string compare.
-//
-// The GUI's _rootfs_rebuild_required deliberately DIVERGES on Existing = '' (it
-// fails open there): it re-evaluates on every launch, where a transient wsl
-// hiccup must never raise a data-loss dialog. This gate runs once, at install
-// time, with the student watching. Do not "align" them without reading both.
-//
-// Deliberately NOT cached — Step 4's import changes the answer, and Step 5 must
-// see the new one.
-function RootfsReimportNeeded(): Boolean;
+// Compare the EXISTING distro's rootfs stamp against the one this installer
+// ships. Returns True ONLY when both stamps are readable and DIFFER — i.e. a
+// re-import is PROVABLE. "Could not read the existing stamp" is reported through
+// the Unreadable var-parameter and is deliberately NEVER folded into the result;
+// see the policy note on RootfsReimportNeeded for why that conflation broke both
+// of the gates that consume it.
+function RootfsStampCompare(var Unreadable: Boolean): Boolean;
 var
   Shipped: String;
+  Existing: String;
 begin
   Result := False;
+  Unreadable := False;
   if not IsDistroRegistered() then
     exit;
   Shipped := GetShippedRootfsVersion();
   if Shipped = '' then
     exit;
-  Result := (GetDistroRootfsVersion() <> Shipped);
+  Existing := GetDistroRootfsVersion();
+  if Existing = '' then
+  begin
+    Unreadable := True;
+    exit;
+  end;
+  Result := (Existing <> Shipped);
+end;
+
+// True when the EXISTING distro must be re-imported to run the rootfs this
+// installer ships — and only when that is PROVABLE. ShouldPullImages calls this
+// to refuse pulling the new image set onto a stale rootfs.
+//
+// The policy, stated once:
+//   Shipped  = '' -> we cannot know what we ship (dev build without the stamp).
+//                    Fail OPEN: no block. Mirrors the GUI's
+//                    _rootfs_rebuild_required.
+//   Existing = '' -> the read FAILED. Fail OPEN here too (2026-07-19).
+//                    GetDistroRootfsVersion returns '' on ANY non-zero
+//                    ResultCode, so counting that as "needs a re-import"
+//                    conflated two very different states and broke both:
+//                    (a) a distro from an installer <= 2.6.0 genuinely carries no
+//                        /etc/edubotics-rootfs-version. Step 4 then prompted for
+//                        a destructive rebuild whose default is Nein
+//                        (MB_DEFBUTTON2, and /SUPPRESSMSGBOXES takes the default),
+//                        and Step 5 refused the image pull behind a German modal
+//                        claiming the new images "do not fit" — while the GUI's
+//                        own _rootfs_rebuild_required fails OPEN on that same
+//                        empty stamp and pulls them minutes later anyway. The
+//                        refusal was cosmetic and its message was false.
+//                    (b) on a HEALTHY machine this re-runs for Step 5 right after
+//                        Step 4's import, when wsl.exe is frequently still busy /
+//                        shutting the distro down. ONE transient non-zero from
+//                        `wsl -d EduBotics -- cat ...` silently skipped the
+//                        in-installer image pull — the exact v2.13.0 pilot
+//                        symptom this change set exists to eliminate.
+//   otherwise     -> a plain string compare.
+//
+// The "one final re-import" for (a) is NOT gone; it now lives in
+// ShouldImportDistro ALONE, where a declined/defaulted prompt costs nothing but a
+// postponed rebuild. An unreadable stamp must never gate the image pull.
+//
+// Deliberately NOT cached — Step 4's import changes the answer, and Step 5 must
+// see the new one.
+function RootfsReimportNeeded(): Boolean;
+var
+  Unreadable: Boolean;
+begin
+  Result := RootfsStampCompare(Unreadable);
+  if Unreadable then
+    Log('EduBotics rootfs stamp could not be read (distro predates the stamp, or a transient wsl failure) - NOT treated as a needed re-import; the image pull is not blocked.');
 end;
 
 // Import the distro when WSL2 is fully up (no pending reboot) AND either no
-// distro exists yet (fresh install — nothing to lose) or RootfsReimportNeeded()
-// says the existing one must be rebuilt. A re-import DESTROYS the distro's
-// Docker volumes (recorded datasets, HF cache, Roboter-Studio calibration), so
-// when one is actually needed the student must explicitly confirm.
+// distro exists yet (fresh install — nothing to lose) or the existing distro's
+// rootfs stamp DIFFERS from ours / cannot be read at all. A re-import DESTROYS
+// the distro's Docker volumes (recorded datasets, HF cache, Roboter-Studio
+// calibration), so the student must explicitly confirm.
 //
 // MB_DEFBUTTON2 makes "Nein" the default — /SUPPRESSMSGBOXES takes the default
 // button, and a silent classroom mass-redeploy must never wipe every PC's
-// datasets with no human in the loop. Declining merely postpones the rebuild
-// (Step 5's pull is skipped too, so images and rootfs stay consistent, and the
-// GUI re-offers the rebuild with the same consent dialog at runtime); wiping is
-// irreversible. Same reasoning — and now the same default — as
-// ConfirmDistroWipe below, which got this right first.
+// datasets with no human in the loop. Declining merely postpones the rebuild:
+// on a PROVABLE mismatch Step 5's pull is skipped too, so images and rootfs stay
+// consistent, and the GUI re-offers the rebuild with the same consent dialog at
+// runtime; wiping is irreversible. (On an UNREADABLE stamp the pull is no longer
+// skipped — see RootfsReimportNeeded; that refusal was cosmetic, because the GUI
+// fails open on the same empty stamp and pulls minutes later regardless.) Same
+// reasoning — and the same default — as ConfirmDistroWipe below, which got this
+// right first.
 //
 // The ANSWER is cached, not the whole result: Inno may evaluate a Check: more
 // than once and the data-loss dialog must not repeat, but the cheap pre-checks
@@ -368,6 +403,9 @@ var
   RootfsRebuildConfirmed: Boolean;
 
 function ShouldImportDistro(): Boolean;
+var
+  NeedsRebuild: Boolean;
+  StampUnreadable: Boolean;
 begin
   if IsRebootRequired() then
   begin
@@ -379,7 +417,18 @@ begin
     Result := True;
     exit;
   end;
-  if not RootfsReimportNeeded() then
+  // This is the ONE gate that may act on an UNREADABLE stamp: offering the
+  // "one final re-import" for a distro from an installer <= 2.6.0 costs nothing
+  // when declined (the rebuild is merely postponed, and since 2026-07-19 the
+  // image pull is no longer gated on it). ShouldPullImages must NOT act on it —
+  // see the policy note on RootfsReimportNeeded.
+  NeedsRebuild := RootfsStampCompare(StampUnreadable);
+  if StampUnreadable then
+  begin
+    Log('EduBotics rootfs stamp unreadable - offering the one-final-re-import (installers <= 2.6.0 shipped no stamp). Declining only postpones it.');
+    NeedsRebuild := True;
+  end;
+  if not NeedsRebuild then
   begin
     Log('EduBotics rootfs re-import not needed (shipped stamp "' + GetShippedRootfsVersion() + '") - re-import skipped, Docker volumes preserved.');
     Result := False;
@@ -461,6 +510,12 @@ var
 // modprobe list, udev rules, tzdata). Re-reading the stamp here is
 // self-correcting: after a SUCCESSFUL Step 4 the distro reports the shipped
 // version and the pull proceeds normally.
+//
+// The refusal fires ONLY on a PROVABLE mismatch (both stamps readable and
+// different). An unreadable stamp does NOT reach it — see RootfsReimportNeeded:
+// gating the pull on a failed read meant one transient `wsl … cat` non-zero
+// straight after Step 4's import skipped the pull on a perfectly healthy machine,
+// and told the student to re-run the installer.
 function ShouldPullImages(): Boolean;
 begin
   if IsRebootRequired() or (not IsDistroRegistered()) then

@@ -482,35 +482,68 @@ jobs:
           # while the -opi images never published. A Pi that self-updates then
           # pins X.Y.Z and 404s on the next "Umgebung starten" → robot tier dead
           # fleet-wide. So if ANY of the three -opi:${VERSION} images is not
-          # anonymously pullable (missing OR private — a Pi pulls anonymously),
-          # advertise NO Pi update (empty hash), exactly as the tarball-download
-          # failure path does. The .exe advertisement is unaffected (amd64 images
-          # are coupled + fatal in W4). Probe via a pull-scoped GHCR token (curl
-          # only — no docker dependency in this Railway-focused job).
-          # --retry 3 on BOTH calls, matching the sibling asset downloads above.
-          # Without it a single transient GHCR/Fastly blip reads as "not
-          # published" and silently withholds the Pi self-update for the WHOLE
-          # release (it fails safe, but only a manual re-run recovers it).
-          _opi_pullable() {
+          # anonymously pullable (missing OR private — a Pi pulls anonymously)
+          # on GHCR *or, failing that, on its Docker Hub twin* — mirroring the
+          # Pi's own GHCR→Hub acquisition order — advertise NO Pi update
+          # (empty hash), exactly as the tarball-download failure path does. A
+          # Hub-only release still advertises, with a ::warning naming the
+          # GHCR gap. The .exe advertisement is unaffected (amd64 images are
+          # coupled + fatal in W4). Probe via pull-scoped registry tokens
+          # (curl only — no docker dependency in this Railway-focused job).
+          #
+          # Accept BOTH index/list AND single-image manifest media types: a
+          # plain `docker push` publishes a bare single-arch manifest, and the
+          # OCI dist-spec permits a 404/406 on an Accept mismatch — an
+          # index-only Accept could silently withhold the Pi self-update on
+          # every release if the pipeline ever stops list-wrapping its retags.
+          #
+          # --retry 2 (not 3) + a SECONDS budget below: this gate must degrade
+          # to "withhold" long before it can eat W6's 10-min job timeout —
+          # timing the job out would ALSO withhold the .exe advertisement,
+          # inverting the "a Pi hiccup never blocks the Windows release" rule.
+          _ACCEPTS='-H Accept:application/vnd.oci.image.index.v1+json -H Accept:application/vnd.docker.distribution.manifest.list.v2+json -H Accept:application/vnd.oci.image.manifest.v1+json -H Accept:application/vnd.docker.distribution.manifest.v2+json'
+          _opi_pullable_ghcr() {
             local repo="$1" tok code
-            tok="$(curl -fsS --retry 3 --retry-connrefused --max-time 20 \
+            tok="$(curl -fsS --retry 2 --retry-connrefused --max-time 15 \
               "https://ghcr.io/token?scope=repository:svendanilborodun/${repo}:pull" 2>/dev/null \
               | sed -E 's/.*"token":"([^"]+)".*/\1/')"
             [ -n "$tok" ] || return 1
-            code="$(curl -fsS --retry 3 --retry-connrefused -o /dev/null -w '%{http_code}' --max-time 20 \
-              -H "Authorization: Bearer ${tok}" \
-              -H 'Accept: application/vnd.oci.image.index.v1+json' \
-              -H 'Accept: application/vnd.docker.distribution.manifest.list.v2+json' \
+            # shellcheck disable=SC2086
+            code="$(curl -fsS --retry 2 --retry-connrefused -o /dev/null -w '%{http_code}' --max-time 15 \
+              -H "Authorization: Bearer ${tok}" $_ACCEPTS \
               "https://ghcr.io/v2/svendanilborodun/${repo}/manifests/${VERSION}" 2>/dev/null)"
             [ "$code" = "200" ]
           }
+          _opi_pullable_hub() {
+            local repo="$1" tok code
+            tok="$(curl -fsS --retry 2 --retry-connrefused --max-time 15 \
+              "https://auth.docker.io/token?service=registry.docker.io&scope=repository:nettername/${repo}:pull" 2>/dev/null \
+              | sed -E 's/.*"token":"([^"]+)".*/\1/')"
+            [ -n "$tok" ] || return 1
+            # shellcheck disable=SC2086
+            code="$(curl -fsS --retry 2 --retry-connrefused -o /dev/null -w '%{http_code}' --max-time 15 \
+              -H "Authorization: Bearer ${tok}" $_ACCEPTS \
+              "https://registry-1.docker.io/v2/nettername/${repo}/manifests/${VERSION}" 2>/dev/null)"
+            [ "$code" = "200" ]
+          }
           if [ -n "$PI_SHA" ]; then
+            _GATE_START=$SECONDS
             for repo in physical-ai-server-opi physical-ai-manager-opi open-manipulator-opi; do
-              if ! _opi_pullable "$repo"; then
-                echo "::warning::ghcr.io/svendanilborodun/${repo}:${VERSION} is not anonymously pullable (missing or private) — withholding the Pi self-update advertisement (empty pi_agent_sha256) so no Pi pins a version whose -opi images it cannot pull."
+              if [ $((SECONDS - _GATE_START)) -gt 240 ]; then
+                echo "::warning::opi image gate exceeded its 240 s budget — withholding the Pi self-update advertisement (empty pi_agent_sha256) rather than risking the W6 job timeout (which would also withhold the .exe)."
                 PI_SHA=""
                 break
               fi
+              if _opi_pullable_ghcr "$repo"; then
+                continue
+              fi
+              if _opi_pullable_hub "$repo"; then
+                echo "::warning::ghcr.io/svendanilborodun/${repo}:${VERSION} is not anonymously pullable, but the Docker Hub twin nettername/${repo}:${VERSION} is — advertising the Pi self-update (the Pi's own acquisition falls back to Hub). Fix the GHCR side."
+                continue
+              fi
+              echo "::warning::${repo}:${VERSION} is anonymously pullable on NEITHER ghcr.io/svendanilborodun nor Docker Hub (nettername) — withholding the Pi self-update advertisement (empty pi_agent_sha256) so no Pi pins a version whose -opi images it cannot pull."
+              PI_SHA=""
+              break
             done
           fi
 

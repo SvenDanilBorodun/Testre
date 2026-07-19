@@ -63,17 +63,24 @@ on:
         type: string
 
 concurrency:
-  # Serialize on the COMMIT sha, NOT github.ref. A release pushes the commit to
-  # `main` AND pushes the tag; because release commits touch docker paths, BOTH
-  # the on.push(main) trigger (Run A, github.ref=refs/heads/main, builds :latest)
-  # AND release.yml's workflow_call (Run B, github.ref=refs/tags/vX.Y.Z, builds
-  # :latest + :X.Y.Z) fire on the SAME sha. Keying the group on github.ref put
-  # them in DIFFERENT groups, so they RACED — both overwriting the shared mutable
-  # :latest mid-retag, risking a GHCR≠Hub :X.Y.Z divergence (audit A1/A3).
-  # github.sha puts both runs in ONE group so they serialize. cancel-in-progress
-  # stays false: docker push is non-atomic and a half-finished push leaves the
-  # registry worse off than waiting for the prior run to finish.
-  group: docker-publish-${{ github.sha }}
+  # ONE STATIC group — every docker-publish run serializes, whatever its
+  # trigger. Two race classes both need this:
+  #   (1) same-sha release race: a release pushes the commit to `main` AND
+  #       pushes the tag, so the on.push(main) run and release.yml's
+  #       workflow_call run fire on the SAME sha; keying on github.ref put
+  #       them in different groups and they raced over :latest (audit A1/A3).
+  #   (2) quick-succession main pushes: keying on github.sha put DIFFERENT
+  #       shas in different groups, so two close pushes built :latest in
+  #       parallel — both plain-push :latest per-repo and both retag jobs copy
+  #       Hub:latest→GHCR:latest at interleaved times, leaving the 8-repo
+  #       :latest set mixed across shas (and GHCR≠Hub divergent).
+  # cancel-in-progress stays false: docker push is non-atomic and a
+  # half-finished push leaves the registry worse off than waiting. Side
+  # effect of a static group: GitHub keeps only ONE pending run per group, so
+  # a middle push's run can be superseded by a newer one — acceptable for
+  # :latest semantics (the newest sha is what :latest should be), and tag
+  # builds ride release.yml's own concurrency.
+  group: docker-publish
   cancel-in-progress: false
 
 permissions:

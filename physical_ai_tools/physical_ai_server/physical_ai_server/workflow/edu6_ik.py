@@ -82,8 +82,8 @@ _J6_RPY = (0.0, 1.5707963267949, 0.0)
 _AXES = ((0, 0, 1), (0, 0, -1), (0, 0, -1), (0, 0, -1), (0, 0, 1), (0, 0, 1))
 
 # Joint-1 axis x offset in the URDF frame; +0.021295 in the WORLD frame.
-_J1_AXIS_X_URDF = _J1_XYZ[0]
-BASE_AXIS_X_WORLD = -_J1_AXIS_X_URDF
+_J1_X_OFFSET_URDF = _J1_XYZ[0]
+BASE_AXIS_X_WORLD = -_J1_X_OFFSET_URDF
 
 # Tool: the wrist-centre → FINGERTIP distance along the tool axis (−z of
 # link6). link6's frame origin sits ON the tool axis (perp < 1e-15), exactly

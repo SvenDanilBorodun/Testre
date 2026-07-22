@@ -220,6 +220,17 @@ def cameras_use_native_bridge() -> bool:
 # USB identifiers
 ROBOTIS_VID = "2F5D"  # ROBOTIS USB Vendor ID (OpenRB-150 boards, PIDs: 0103, 2202)
 
+# Arm-family USB identity table (edu6 §4.4). Keys are the ARM FAMILY (what the
+# scan hardware-matches), not the profile id — both OMX profiles share one
+# family. Values: tuples of (VID, PID-or-None) where None = any PID under the
+# VID. The edu6 bridge is the WCH CH343P on the Waveshare Bus Servo Adapter;
+# identity is still PROVEN by the servos answering (identify_arm.py --protocol
+# feetech), the VID match only scopes the usbipd attach.
+ARM_USB_IDS = {
+    "omx":  (("2F5D", None),),
+    "edu6": (("1A86", "55D3"),),
+}
+
 # Dynamixel servo config
 BAUDRATE = 1_000_000
 LEADER_SERVO_IDS = [1, 2, 3, 4, 5, 6]
@@ -242,9 +253,9 @@ ROS_DOMAIN_ID = 30
 # wording, start-button gating, fast rehydrate). `follower_only` is the INITIAL
 # EDUBOTICS_FOLLOWER_ONLY value the .env generator derives from the type.
 ROBOT_PROFILES = {
-    "omx_full":     {"display_de": "OMX – Voll",                          "follower_only": False, "scan_requires_leader": True},
-    "omx_follower": {"display_de": "OMX – Roboter Studio (nur Follower)", "follower_only": True,  "scan_requires_leader": False},
-    "edu6_studio":  {"display_de": "EduBotics 6-Achs – Roboter Studio",   "follower_only": True,  "scan_requires_leader": False},
+    "omx_full":     {"display_de": "OMX – Voll",                          "follower_only": False, "scan_requires_leader": True,  "arm_family": "omx",  "camera_roles": ("gripper", "scene")},
+    "omx_follower": {"display_de": "OMX – Roboter Studio (nur Follower)", "follower_only": True,  "scan_requires_leader": False, "arm_family": "omx",  "camera_roles": ("gripper", "scene")},
+    "edu6_studio":  {"display_de": "EduBotics 6-Achs – Roboter Studio",   "follower_only": True,  "scan_requires_leader": False, "arm_family": "edu6", "camera_roles": ("scene",)},
 }
 DEFAULT_ROBOT_PROFILE = "omx_full"
 

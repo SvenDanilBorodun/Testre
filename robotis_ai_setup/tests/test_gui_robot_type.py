@@ -134,7 +134,7 @@ class ScanArmsTypeAwareTest(unittest.TestCase):
             ensure_environment_stopped=lambda log=None: False,
         )
         fake_dev = types.SimpleNamespace(
-            scan_and_identify_arms=lambda image: scan_result,
+            scan_and_identify_arms=lambda image, arm_family='omx': scan_result,
             diagnose_usb_environment=_diagnose,
             get_diagnostics_log_path=lambda: "/tmp/diag.log",
         )

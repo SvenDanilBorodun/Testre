@@ -2168,8 +2168,9 @@ class EduBoticsApp:
         self.btn_scan_leader.config(state=tk.DISABLED)
         # Capture the selected profile on the MAIN thread (tk StringVar reads
         # are not thread-safe) so the worker's success branch is type-aware.
-        scan_requires_leader = ROBOT_PROFILES.get(
-            self._selected_robot_profile(), {}).get("scan_requires_leader", True)
+        profile_row = ROBOT_PROFILES.get(self._selected_robot_profile(), {})
+        scan_requires_leader = profile_row.get("scan_requires_leader", True)
+        arm_family = profile_row.get("arm_family", "omx")
 
         def _do_scan():
             self._set_status("Roboterarme werden gesucht...")
@@ -2195,7 +2196,8 @@ class EduBoticsApp:
             # Clear any repair button from a previous failed scan.
             self.root.after(0, self._clear_arm_repair)
 
-            leader, follower = device_manager.scan_and_identify_arms(IMAGE_OPEN_MANIPULATOR)
+            leader, follower = device_manager.scan_and_identify_arms(
+                IMAGE_OPEN_MANIPULATOR, arm_family=arm_family)
 
             if leader:
                 self.hardware.leader = leader
@@ -2230,6 +2232,16 @@ class EduBoticsApp:
                     self._set_status("Beide Arme gefunden! Kamera auswählen und auf Start klicken.")
                 else:
                     self._set_status("Follower-Arm gefunden! Kamera auswählen und auf Start klicken.")
+                return
+
+            # Cross-probe notice (edu6 §5.4): the most likely setup mistake —
+            # the OTHER arm family is plugged in — becomes one clear sentence
+            # instead of a wall of diagnosis.
+            notice = getattr(device_manager, "LAST_SCAN_NOTICE", "")
+            if notice:
+                for line in notice.splitlines():
+                    self._log(line)
+                self._set_status(notice.splitlines()[0])
                 return
 
             # Nothing (or the required arm) not found — run the host→WSL→docker
@@ -2663,11 +2675,19 @@ class EduBoticsApp:
             w.destroy()
 
         if len(selected) == 1:
-            # Single camera — auto-assign as gripper
-            selected[0].role = "gripper"
+            # Single camera — auto-assign the PROFILE's first role (edu6 §4.4):
+            # a Roboter-Studio kit's lone camera is the SCENE camera, not the
+            # gripper cam (perception + the omx_f/edu6 config topics hang off
+            # the role name, so "gripper" here broke every follower-only kit).
+            roles = ROBOT_PROFILES.get(
+                self._selected_robot_profile(), {}).get(
+                    "camera_roles", ("gripper", "scene"))
+            role = roles[0] if roles else "gripper"
+            selected[0].role = role
             self.hardware.cameras = selected
+            label_de = "Szenen-Kamera" if role == "scene" else "Greifer-Kamera"
             ttk.Label(self.camera_role_frame,
-                      text=f"Greifer-Kamera: {selected[0].name}",
+                      text=f"{label_de}: {selected[0].name}",
                       foreground="green").pack(anchor=tk.W)
             self._start_camera_previews(selected)
         elif len(selected) == 2:

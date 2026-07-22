@@ -400,7 +400,7 @@ if (-not $usbipdInstalled) {
 Write-Step "Checking whether Windows already sees ROBOTIS-Geräte (VID 2F5D)..."
 try {
     $pnp = Get-PnpDevice -PresentOnly -ErrorAction Stop |
-           Where-Object { $_.InstanceId -like '*VID_2F5D*' }
+           Where-Object { ($_.InstanceId -like '*VID_2F5D*') -or ($_.InstanceId -like '*VID_1A86&PID_55D3*') }
     if ($pnp) {
         $count = ($pnp | Measure-Object).Count
         Write-OK "$count ROBOTIS device(s) enumerated by Windows"

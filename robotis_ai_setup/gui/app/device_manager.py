@@ -22,7 +22,7 @@ _CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 _SUBPROCESS_KWARGS = {"creationflags": _CREATE_NO_WINDOW} if sys.platform == "win32" else {}
 
 from . import wsl_bridge
-from .constants import ROBOTIS_VID, WSL_DISTRO_NAME, diagnostics_log_path
+from .constants import ARM_USB_IDS, ROBOTIS_VID, WSL_DISTRO_NAME, diagnostics_log_path
 from .usbipd_resolver import (
     UsbipdNotFoundError,
     find_usbipd,
@@ -233,6 +233,29 @@ def list_robotis_devices() -> list[USBDevice]:
     return [d for d in list_usb_devices() if d.vid_pid.upper().startswith(ROBOTIS_VID)]
 
 
+def list_arm_devices(arm_family: str = "omx") -> list[USBDevice]:
+    """Filter USB devices to the given ARM FAMILY's VID/PID set (edu6 §4.4).
+
+    ``omx`` = any 2F5D PID (byte-identical to :func:`list_robotis_devices`);
+    ``edu6`` = the WCH CH343P (1A86:55D3) on the Waveshare bus adapter. The
+    PID matters for edu6 — 1A86 covers every CH34x USB-serial dongle on earth,
+    so an unrelated Arduino clone must not be attached/probed as an arm.
+    """
+    ids = ARM_USB_IDS.get(arm_family, ARM_USB_IDS["omx"])
+    out = []
+    for d in list_usb_devices():
+        vp = d.vid_pid.upper()
+        for vid, pid in ids:
+            if pid is None:
+                if vp.startswith(vid.upper()):
+                    out.append(d)
+                    break
+            elif vp == f"{vid.upper()}:{pid.upper()}":
+                out.append(d)
+                break
+    return out
+
+
 def attach_usb_to_wsl(busid: str, retries: int = 3) -> bool:
     """Attach a USB device to the EduBotics WSL2 distro via usbipd, with retry.
 
@@ -297,9 +320,9 @@ def detach_usb_from_wsl(busid: str) -> bool:
         return False
 
 
-def attach_all_robotis_devices() -> list[USBDevice]:
+def attach_all_robotis_devices(arm_family: str = "omx") -> list[USBDevice]:
     """Attach all EduBotics USB devices to WSL2. Returns list of attached devices."""
-    devices = list_robotis_devices()
+    devices = list_arm_devices(arm_family)
     attached = []
     for dev in devices:
         if dev.state != "Attached":
@@ -399,10 +422,37 @@ def self_heal_wsl_serial() -> dict:
     return diag
 
 
+# /dev/serial/by-id substring markers per arm family. by-id names are built
+# from the USB descriptor strings (usb-<manufacturer>_<product>_<serial>), so
+# the OMX OpenRB-150 shows ROBOTIS/OPENRB; the edu6 CH343P typically shows
+# "1a86_USB_Single_Serial" / WCH strings (rig gate R1 records the exact form —
+# extend this tuple if a board revision differs).
+_EDU6_BYID_MARKERS = ("1A86", "WCH", "CH343", "USB_SINGLE_SERIAL", "USB SINGLE SERIAL",
+                      "USB2.0-SER")
+
+
 def find_serial_paths_for_robotis() -> list[str]:
     """Find /dev/serial/by-id/ paths for EduBotics devices inside WSL2."""
     all_serial = wsl_bridge.list_serial_devices()
     return [p for p in all_serial if "ROBOTIS" in p.upper() or "OPENRB" in p.upper()]
+
+
+def find_serial_paths_for_arms(arm_family: str = "omx") -> list[str]:
+    """Family-aware /dev/serial/by-id discovery (edu6 §4.4). ``omx`` is
+    byte-identical to :func:`find_serial_paths_for_robotis`."""
+    if arm_family != "edu6":
+        return find_serial_paths_for_robotis()
+    all_serial = wsl_bridge.list_serial_devices()
+    hits = [p for p in all_serial
+            if any(m in p.upper() for m in _EDU6_BYID_MARKERS)]
+    if not hits and all_serial:
+        _append_diag(
+            "find_serial_paths_for_arms",
+            f"edu6: no by-id marker matched; candidates were {all_serial!r} — "
+            "record the real CH343 by-id string at rig gate R1 and extend "
+            "_EDU6_BYID_MARKERS.",
+        )
+    return hits
 
 
 def _docker(*args: str) -> list[str]:
@@ -410,15 +460,18 @@ def _docker(*args: str) -> list[str]:
     return ["wsl", "-d", WSL_DISTRO_NAME, "--", "docker", *args]
 
 
-def identify_arm_via_docker(serial_path: str) -> str:
+def identify_arm_via_docker(serial_path: str, protocol: str = "dxl") -> str:
     """Run identify_arm.py inside the open_manipulator container.
 
-    Returns: "leader", "follower", "unknown", or "error:..."
+    Returns: "leader", "follower", "unknown", "edu6", a cross-probe token
+    ("omx_arm_found" / "edu6_arm_found"), or "error:..."
     """
+    extra = ["--protocol=feetech"] if protocol == "feetech" else []
     try:
         result = subprocess.run(
             _docker("exec", "robotis_arm_scanner",
-                    "python3", "/usr/local/bin/identify_arm.py", serial_path),
+                    "python3", "/usr/local/bin/identify_arm.py", serial_path,
+                    *extra),
             capture_output=True, text=True, timeout=15,
             **_SUBPROCESS_KWARGS,
         )
@@ -461,13 +514,23 @@ def stop_scanner_container():
     )
 
 
-def scan_and_identify_arms(image: str) -> tuple[Optional[ArmDevice], Optional[ArmDevice]]:
+# German notice from the LAST scan, set when the cross-probe found the OTHER
+# arm family plugged in (edu6 §5.4) — the GUI surfaces it after a failed scan
+# so the most likely setup mistake becomes one clear sentence.
+LAST_SCAN_NOTICE: str = ""
+
+
+def scan_and_identify_arms(image: str, arm_family: str = "omx") -> tuple[Optional[ArmDevice], Optional[ArmDevice]]:
     """Full scan workflow: attach USB, start scanner, identify arms.
 
-    Returns (leader, follower) — either may be None if not found.
+    Returns (leader, follower) — either may be None if not found. For the
+    single-arm ``edu6`` family the arm lands in the FOLLOWER slot (it drives
+    FOLLOWER_PORT); leader is always None there.
     """
     import time
 
+    global LAST_SCAN_NOTICE
+    LAST_SCAN_NOTICE = ""
     leader = None
     follower = None
 
@@ -479,14 +542,14 @@ def scan_and_identify_arms(image: str) -> tuple[Optional[ArmDevice], Optional[Ar
     self_heal_wsl_serial()
 
     # 1. Attach all EduBotics USB devices to WSL2
-    attached = attach_all_robotis_devices()
+    attached = attach_all_robotis_devices(arm_family)
     if not attached:
         return None, None
 
     # 2. Poll for serial paths (udev can take 1-10s depending on machine)
     serial_paths = []
     for _ in range(10):
-        serial_paths = find_serial_paths_for_robotis()
+        serial_paths = find_serial_paths_for_arms(arm_family)
         if serial_paths:
             break
         time.sleep(1)
@@ -495,7 +558,7 @@ def scan_and_identify_arms(image: str) -> tuple[Optional[ArmDevice], Optional[Ar
         # again now that the USB devices ARE attached — this guarantees
         # symlinks get rebuilt from sysfs as the fallback path.
         self_heal_wsl_serial()
-        serial_paths = find_serial_paths_for_robotis()
+        serial_paths = find_serial_paths_for_arms(arm_family)
     if not serial_paths:
         return None, None
 
@@ -507,13 +570,14 @@ def scan_and_identify_arms(image: str) -> tuple[Optional[ArmDevice], Optional[Ar
         time.sleep(1)
 
         # 4. Identify each serial device (retry once on error/unknown)
+        protocol = "feetech" if arm_family == "edu6" else "dxl"
         for i, path in enumerate(serial_paths):
             if i > 0:
                 time.sleep(1)  # Let USB bus settle between devices
-            role = identify_arm_via_docker(path)
+            role = identify_arm_via_docker(path, protocol)
             if role.startswith("error:") or role == "unknown":
                 time.sleep(2)
-                role = identify_arm_via_docker(path)
+                role = identify_arm_via_docker(path, protocol)
 
             desc = path.split("/")[-1]
             busid = ""
@@ -527,6 +591,26 @@ def scan_and_identify_arms(image: str) -> tuple[Optional[ArmDevice], Optional[Ar
                 leader = ArmDevice(busid=busid, serial_path=path, role="leader", description=desc)
             elif role == "follower":
                 follower = ArmDevice(busid=busid, serial_path=path, role="follower", description=desc)
+            elif role == "edu6":
+                # The single edu6 arm drives FOLLOWER_PORT (there is no leader).
+                follower = ArmDevice(busid=busid, serial_path=path, role="follower", description=desc)
+            elif role == "omx_arm_found":
+                LAST_SCAN_NOTICE = (
+                    'Es wurde ein OMX-Arm gefunden, aber „EduBotics 6-Achs – '
+                    'Roboter Studio" ist als Robotertyp ausgewählt. Bitte den '
+                    'Robotertyp oben passend zum angeschlossenen Arm wählen '
+                    'und erneut scannen.'
+                )
+                _append_diag("scan_and_identify_arms",
+                             f"cross-probe: OMX arm at {path} while family=edu6")
+            elif role == "edu6_arm_found":
+                LAST_SCAN_NOTICE = (
+                    'Es wurde ein „EduBotics 6-Achs"-Arm gefunden, aber ein '
+                    'OMX-Robotertyp ist ausgewählt. Bitte den Robotertyp oben '
+                    'passend zum angeschlossenen Arm wählen und erneut scannen.'
+                )
+                _append_diag("scan_and_identify_arms",
+                             f"cross-probe: edu6 arm at {path} while family=omx")
     finally:
         stop_scanner_container()
 

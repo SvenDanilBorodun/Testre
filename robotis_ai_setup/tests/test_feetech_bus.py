@@ -302,3 +302,89 @@ class TestShippedWiring(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class TestGuiDetectionSeam(unittest.TestCase):
+    """PR-6 GUI detection: the family tables + scan wiring (deps-free)."""
+
+    def test_arm_usb_ids_table(self):
+        sys.path.insert(0, os.path.join(_HERE, '..'))
+        from gui.app.constants import ARM_USB_IDS, ROBOT_PROFILES
+        self.assertEqual(ARM_USB_IDS['omx'], (('2F5D', None),))
+        self.assertEqual(ARM_USB_IDS['edu6'], (('1A86', '55D3'),))
+        for pid, row in ROBOT_PROFILES.items():
+            self.assertIn(row['arm_family'], ARM_USB_IDS, pid)
+            self.assertIn('camera_roles', row, pid)
+        self.assertEqual(ROBOT_PROFILES['edu6_studio']['camera_roles'],
+                         ('scene',))
+        self.assertEqual(ROBOT_PROFILES['edu6_studio']['arm_family'], 'edu6')
+
+    def test_list_arm_devices_filters_by_family(self):
+        from gui.app import device_manager as dm
+
+        class _Dev:
+            def __init__(self, vid_pid):
+                self.vid_pid = vid_pid
+                self.busid = '1-1'
+                self.description = 'x'
+                self.state = 'Not shared'
+
+        devs = [_Dev('2F5D:0103'), _Dev('1A86:55D3'), _Dev('1A86:7523'),
+                _Dev('046D:0825')]
+        orig = dm.list_usb_devices
+        dm.list_usb_devices = lambda: devs
+        try:
+            omx = dm.list_arm_devices('omx')
+            edu6 = dm.list_arm_devices('edu6')
+        finally:
+            dm.list_usb_devices = orig
+        self.assertEqual([d.vid_pid for d in omx], ['2F5D:0103'])
+        # the CH34x PID pin: 1A86:7523 (a generic dongle) must NOT match.
+        self.assertEqual([d.vid_pid for d in edu6], ['1A86:55D3'])
+
+    def test_find_serial_paths_edu6_markers(self):
+        from gui.app import device_manager as dm
+        paths = [
+            '/dev/serial/by-id/usb-ROBOTIS_OpenRB-150_XYZ-if00',
+            '/dev/serial/by-id/usb-1a86_USB_Single_Serial_5AE-if00',
+        ]
+        orig = dm.wsl_bridge.list_serial_devices
+        dm.wsl_bridge.list_serial_devices = lambda: paths
+        try:
+            self.assertEqual(dm.find_serial_paths_for_arms('omx'), [paths[0]])
+            self.assertEqual(dm.find_serial_paths_for_arms('edu6'), [paths[1]])
+        finally:
+            dm.wsl_bridge.list_serial_devices = orig
+
+    def test_ps_allowlists_carry_the_ch343(self):
+        for name in ('configure_usbipd.ps1', 'verify_system.ps1',
+                     'install_prerequisites.ps1'):
+            with open(os.path.join(_HERE, '..', 'installer', 'scripts', name),
+                      encoding='utf-8-sig') as fh:
+                text = fh.read()
+            self.assertTrue('1a86' in text.lower(), name)
+
+    def test_identify_via_docker_protocol_flag(self):
+        from gui.app import device_manager as dm
+        calls = []
+
+        class _Res:
+            returncode = 0
+            stdout = 'edu6\n'
+            stderr = ''
+
+        orig = dm.subprocess.run
+
+        def _fake_run(argv, **kw):
+            calls.append(list(argv))
+            return _Res()
+
+        dm.subprocess.run = _fake_run
+        try:
+            self.assertEqual(dm.identify_arm_via_docker('/dev/x', 'feetech'),
+                             'edu6')
+            self.assertEqual(dm.identify_arm_via_docker('/dev/x'), 'edu6')
+        finally:
+            dm.subprocess.run = orig
+        self.assertIn('--protocol=feetech', calls[0])
+        self.assertNotIn('--protocol=feetech', calls[1])

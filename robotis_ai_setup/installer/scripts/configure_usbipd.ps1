@@ -160,7 +160,14 @@ try {
     Write-Diag "usbipd_list_at_install" "usbipd list raised: $_"
 }
 
-$armConnected = $listOutput -match "($ROBOTIS_VID):"
+# Full hardware-id allowlist: every discovered/known ROBOTIS PID plus the
+# edu6 Feetech arm's WCH CH343P bridge (1a86:55d3, edu6 plan §4.4). The PID is
+# pinned for 1a86 — that VID covers every CH34x dongle on earth.
+$armHardwareIds = @()
+foreach ($productId in $knownPIDs) { $armHardwareIds += "${ROBOTIS_VID}:${productId}" }
+$armHardwareIds += "1a86:55d3"
+
+$armConnected = ($listOutput -match "($ROBOTIS_VID):") -or ($listOutput -match "1[aA]86:55[dD]3")
 
 # ── Add policy entries ────────────────────────────────────────────────────
 $existingPolicies = ""
@@ -170,8 +177,7 @@ try {
 } catch { }
 
 $addedCount = 0
-foreach ($productId in $knownPIDs) {
-    $hwid = "${ROBOTIS_VID}:${productId}"
+foreach ($hwid in $armHardwareIds) {
     if ($existingPolicies -match $hwid) {
         Write-Skip "Policy for $hwid already exists"
         continue
@@ -332,7 +338,7 @@ try {
 if ($addedCount -gt 0) {
     Write-Host "   EduBotics USB-Geräte can now be attached to the EduBotics WSL2 distro without admin rights." -ForegroundColor Green
     Write-Host "   (usage: usbipd attach --wsl EduBotics --busid <BUSID>)" -ForegroundColor Gray
-} elseif ($addedCount -eq 0 -and $existingPolicies -match $ROBOTIS_VID) {
+} elseif ($addedCount -eq 0 -and (($existingPolicies -match $ROBOTIS_VID) -or ($existingPolicies -match "1[aA]86"))) {
     Write-Host "   All EduBotics policies already configured." -ForegroundColor Green
 } else {
     Write-Warn "No policies were added. USB attach may require running as Administrator."
@@ -373,7 +379,7 @@ if (-not $distroReady) {
 # Find the first VID 2F5D BUSID in the list output we already captured.
 $smokeBusid = ""
 foreach ($line in $listOutput -split "`n") {
-    if ($line -match "^\s*(\d+-\d+)\s+$ROBOTIS_VID`:[0-9a-fA-F]{4}") {
+    if ($line -match "^\s*(\d+-\d+)\s+($ROBOTIS_VID`:[0-9a-fA-F]{4}|1[aA]86`:55[dD]3)") {
         $smokeBusid = $Matches[1]
         break
     }

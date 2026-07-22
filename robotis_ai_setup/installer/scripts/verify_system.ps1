@@ -164,7 +164,7 @@ if ($usbipdOk) {
     try {
         $policyOut = usbipd policy list 2>&1 | Out-String
         Write-Diag "usbipd_policy_list" $policyOut
-        if ($policyOut -match "2F5D|2f5d") {
+        if ($policyOut -match "2F5D|2f5d|1[aA]86") {
             Write-OK "usbipd policy contains VID 2F5D rule"
         } else {
             Write-WARN "usbipd policy has no VID 2F5D rule — students may need admin rights to attach"
@@ -180,7 +180,7 @@ if ($usbipdOk) {
     Write-Host "   Checking whether Windows currently sees ROBOTIS-Geräte..." -ForegroundColor White
     try {
         $pnp = Get-PnpDevice -PresentOnly -ErrorAction Stop |
-               Where-Object { $_.InstanceId -like '*VID_2F5D*' }
+               Where-Object { ($_.InstanceId -like '*VID_2F5D*') -or ($_.InstanceId -like '*VID_1A86&PID_55D3*') }
         if ($pnp) {
             $names = ($pnp | ForEach-Object { $_.FriendlyName }) -join ", "
             Write-OK "Windows sees ROBOTIS-Gerät(e): $names"

@@ -182,11 +182,22 @@ _MOVE_TEMPO_PRESETS = {
 }
 
 
+# True iff EDUBOTICS_OBSERVE_POSE was set to a well-formed numeric list (of ANY
+# length). Pre-declared so _observe_joints can read it even when the env is unset
+# (the parse runs at import and only flips it on a well-formed value).
+_OBSERVE_POSE_FROM_ENV = False
+
+
 def _parse_observe_pose() -> list[float]:
-    """Observation pose ("Beobachtungspose") — the 5 arm joints (rad) the
+    """Observation pose ("Beobachtungspose") — the arm joints (rad) the
     named-object loop retreats to between passes so the arm is out of the scene
     camera's view and doesn't occlude the remaining objects during re-detection.
-    ``EDUBOTICS_OBSERVE_POSE`` = comma-separated 5 joint radians; default HOME."""
+    ``EDUBOTICS_OBSERVE_POSE`` = comma-separated joint radians; default HOME.
+
+    Parsed at module IMPORT, where the arm-joint count is unknown (no ctx). The
+    VALUE is validated here (a non-numeric env warns + falls back); the per-profile
+    LENGTH check is deferred to :func:`_observe_joints`, which knows ``_n(ctx)``."""
+    global _OBSERVE_POSE_FROM_ENV
     raw = os.environ.get('EDUBOTICS_OBSERVE_POSE')
     if not raw:
         return list(HOME_JOINTS_RAD)
@@ -194,18 +205,16 @@ def _parse_observe_pose() -> list[float]:
         vals = [float(v) for v in raw.split(',')]
     except (TypeError, ValueError):
         _logger.warning(
-            '[WARNUNG] EDUBOTICS_OBSERVE_POSE=%r is not 5 comma-separated numbers '
-            '— falling back to HOME.', raw)
+            '[WARNUNG] EDUBOTICS_OBSERVE_POSE=%r enthält keine kommagetrennten '
+            'Zahlen — HOME wird verwendet.', raw)
         return list(HOME_JOINTS_RAD)
-    if len(vals) != 5:
-        _logger.warning(
-            '[WARNUNG] EDUBOTICS_OBSERVE_POSE=%r must have exactly 5 values '
-            '— falling back to HOME.', raw)
-        return list(HOME_JOINTS_RAD)
+    _OBSERVE_POSE_FROM_ENV = True
     return vals
 
 
 OBSERVE_POSE_JOINTS = _parse_observe_pose()
+# Latch so the per-profile length-mismatch warning fires at most once per process.
+_OBSERVE_POSE_WARNED = False
 
 
 # ── ArmProfile ctx accessors (§16.4 slice 2b) ────────────────────────────────
@@ -246,12 +255,21 @@ def _home_joints(ctx) -> list[float]:
 
 def _observe_joints(ctx) -> list[float]:
     """Observation pose. A profile-supplied pose wins; else the import-time
-    ``EDUBOTICS_OBSERVE_POSE`` parse (OMX, 5 values); else HOME."""
+    ``EDUBOTICS_OBSERVE_POSE`` parse when its length matches this profile's
+    arm-joint count; else HOME. A set-but-wrong-length env warns ONCE (German,
+    with the expected count) instead of being silently ignored on an n≠5 rig."""
     pose = getattr(ctx, 'observe_pose_joints', None)
     if pose is not None and len(pose) == _n(ctx):
         return [float(v) for v in pose]
-    if _n(ctx) == 5:
-        return list(OBSERVE_POSE_JOINTS)
+    if _OBSERVE_POSE_FROM_ENV:
+        if len(OBSERVE_POSE_JOINTS) == _n(ctx):
+            return list(OBSERVE_POSE_JOINTS)
+        global _OBSERVE_POSE_WARNED
+        if not _OBSERVE_POSE_WARNED:
+            _OBSERVE_POSE_WARNED = True
+            _logger.warning(
+                '[WARNUNG] EDUBOTICS_OBSERVE_POSE hat %d Werte, benötigt werden '
+                '%d — HOME wird verwendet.', len(OBSERVE_POSE_JOINTS), _n(ctx))
     return _home_joints(ctx)
 
 

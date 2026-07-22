@@ -292,24 +292,48 @@ from pathlib import Path  # noqa: E402
 
 
 def test_grep_guard_no_width_literals_in_migrated_modules():
-    """§16.4 permanent rail: hardcoded 5/6-width index literals must not creep
-    back into the DOF-migrated workflow modules. The two allowed survivors are
-    a docstring mention (motion) and the documented OMX dataclass default
-    (WorkflowContext.last_full_joints — overridden width-correct by the
-    manager at construction)."""
+    """§16.4 permanent rail: hardcoded width literals must not creep back into
+    the DOF-migrated modules. Bracket slices/indices ``[:5]/[:6]/[:7]`` &
+    ``[4]/[5]/[6]/[7]``, ``range(5|6|7)``, and list-replication width
+    multiplications ``* 5 / * 6 / * 7``.
+
+    Extended (edu6 audit finding 7) from the original ``[:5]/[:6]/[5]/[6]/[4]/
+    range(5|6)`` to (a) the ``* N`` multiplication family and the ``[:7]/[7]``
+    (edu6 n+1 / n+2) family, and (b) two more migrated modules —
+    ``handlers/perception_blocks.py`` and ``communication/communicator.py``.
+
+    Two allowed survivors, each width-correct-by-construction and documented at
+    its site: a motion docstring mention and the OMX ``WorkflowContext``
+    dataclass default (the manager overrides it width-correct at construction).
+
+    ``physical_ai_server.py`` is DELIBERATELY NOT scanned. Its jog/manual/hand-
+    guide width sites are proven BEHAVIOURALLY (test_golden_jog +
+    test_jog_compute_target_n6_profile ast-extract and run them at n=5 and n=6),
+    and a 5500-line node dense with unrelated numeric literals makes the ``* N``
+    rule brittle — a future unrelated ``* 5`` would false-trip. It currently has
+    zero hits, but the behavioural tests are the real guard there."""
     import re
-    pkg = Path(__file__).resolve().parents[1] / 'physical_ai_server' / 'workflow'
+    root = Path(__file__).resolve().parents[1] / 'physical_ai_server'
     files = [
-        pkg / 'handlers' / 'motion.py',
-        pkg / 'handlers' / 'trajectory.py',
-        pkg / 'path_guard.py',
-        pkg / 'workflow_manager.py',
-        pkg / 'sim_arm.py',
+        root / 'workflow' / 'handlers' / 'motion.py',
+        root / 'workflow' / 'handlers' / 'trajectory.py',
+        root / 'workflow' / 'handlers' / 'perception_blocks.py',
+        root / 'workflow' / 'path_guard.py',
+        root / 'workflow' / 'workflow_manager.py',
+        root / 'workflow' / 'sim_arm.py',
+        root / 'communication' / 'communicator.py',
     ]
-    pattern = re.compile(r'\[:5\]|\[:6\]|\[5\]|\[6\]|\[4\]|range\([56]\)')
+    # \b on the multiply so a multi-digit ``* 50`` / ``* 512`` does not match —
+    # only a bare int width literal (``[0.0] * 6``) trips it.
+    pattern = re.compile(r'\[:[567]\]|\[[4567]\]|range\([567]\)|\*\s*[567]\b')
+    # Regex self-check: the canonical bad literals are caught, benign multi-digit
+    # multiplies are not (guards the pattern itself against a bad edit).
+    assert pattern.search('foo[:5]') and pattern.search('q[7]')
+    assert pattern.search('[0.0] * 6') and pattern.search('range(7)')
+    assert not pattern.search('timeout * 50')
     allowed = (
-        "``ctx.last_full_joints[5]``",              # motion docstring
-        "field(default_factory=lambda: [0.0] * 6)",  # documented OMX default
+        "``ctx.last_full_joints[5]``",                # motion docstring
+        "field(default_factory=lambda: [0.0] * 6)",    # documented OMX default
     )
     offenders = []
     for f in files:
@@ -334,6 +358,42 @@ def test_communicator_follower_joint_order_is_profile_settable():
     assert "self.FOLLOWER_JOINT_ORDER = names" in src
     assert ("FOLLOWER_JOINT_ORDER = ('joint1', 'joint2', 'joint3', 'joint4', "
             "'joint5', 'gripper_joint_1')") in src
+
+
+def test_communicator_reorders_7_joint_message_for_edu6_order():
+    """Behavioral (object.__new__ + module-stub, per test_follower_joint_order_c2):
+    a Communicator carrying a 7-name edu6 follower order reorders a PERMUTED
+    7-joint JointState back to canonical order — returning exactly n+1 = 7 values
+    (the §16.4 width choke point) — and fails LOUD (None) on a partial message.
+    Exercises the real get_latest_follower_joints reorder, not just its source."""
+    from test_follower_joint_order_c2 import _JointStateMsg, _load_communicator
+    Comm = _load_communicator()
+    order = ('joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'joint6',
+             'end_gear_joint')
+
+    # Publish order permuted (gripper-first, joints shuffled); canonical output
+    # is the ascending sentinels 0.1..0.7.
+    perm_names = ['end_gear_joint', 'joint2', 'joint6', 'joint1', 'joint4',
+                  'joint3', 'joint5']
+    perm_pos = [0.7, 0.2, 0.6, 0.1, 0.4, 0.3, 0.5]
+    canonical = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7]
+
+    c = object.__new__(Comm)
+    c.FOLLOWER_JOINT_ORDER = order
+    c.follower_topic_msgs = {'follower': _JointStateMsg(perm_names, perm_pos)}
+    out = c.get_latest_follower_joints()
+    assert out == canonical
+    assert len(out) == N6 + 1
+
+    # Partial message (joint6 absent) → None, never a silent zero-fill.
+    partial_names = ['joint1', 'joint2', 'joint3', 'joint4', 'joint5',
+                     'end_gear_joint']
+    partial_pos = [0.1, 0.2, 0.3, 0.4, 0.5, 0.7]
+    c_partial = object.__new__(Comm)
+    c_partial.FOLLOWER_JOINT_ORDER = order
+    c_partial.follower_topic_msgs = {
+        'follower': _JointStateMsg(partial_names, partial_pos)}
+    assert c_partial.get_latest_follower_joints() is None
 
 
 def test_jog_compute_target_n6_profile():
@@ -391,3 +451,127 @@ def test_jog_compute_target_n6_profile():
                                     target_x=0.0, target_y=0.0, target_z=0.0)
     with pytest.raises(WorkflowError):
         stub._compute_jog_target('joint', req_bad, live)
+
+
+# ── n=6 end-to-end (assembled WorkflowManager.start, golden harness machinery) ─
+
+def test_n6_end_to_end_widths_through_home_move_gripper_replay(monkeypatch):
+    """Modest n=6 END-TO-END on the golden harness machinery (WorkflowManager.
+    start + the real interpreter / handlers / trajectory re-segmentation),
+    driven by a TEST-LOCAL synthetic 6-arm-joint profile through
+    home → move_to → close → open → replay of an 8-wide (n+2) Contract-B
+    recording. Asserts every emitted arm command is n+1 = 7 wide throughout and
+    the recording is n+2 = 8 wide (extract_points accepts it at n=6).
+
+    A minimal fixed 6-DOF fake IK stands in for the geometry (there is no real
+    edu6 solver in the test env until PR 3) — enough for move_to's single solve.
+    The GAP: the grasp corridor / AprilTag perception pipeline is out of scope
+    here because it needs a geometrically-consistent solver (covered separately
+    by the edu6 IK oracle, test_edu6_ik.py); this test's job is the WIDTH
+    plumbing across an assembled multi-block run, not grasp geometry."""
+    import json
+    import time
+
+    from physical_ai_server.workflow.sim_arm import SimArm
+    from physical_ai_server.workflow.workflow_manager import WorkflowManager
+
+    # Instant inter-chunk pacing (published waypoints unchanged) — mirrors
+    # test_dof_golden._fast_chunk_pacing so the assembled run finishes fast.
+    _state = {'t': 0.0}
+
+    def _mono():
+        _state['t'] += 1000.0
+        return _state['t']
+
+    monkeypatch.setattr(trajectory_builder, 'time',
+                        types.SimpleNamespace(monotonic=_mono,
+                                              sleep=lambda _s: None))
+
+    class _IK6:
+        """Fixed 6-DOF IK: just enough surface for move_to's single solve."""
+
+        def num_joints(self):
+            return N6
+
+        def solve(self, target_xyz=None, seed=None, free_yaw=True, roll=None):
+            return list(_EDU6_HOME)          # a reachable fixed 6-joint pose
+
+        def fk(self, joints):
+            import numpy as np
+            assert len(joints) == N6, f'fk got {len(joints)} joints'
+            return np.eye(3), np.array([0.18, 0.0, 0.06])
+
+    profile = types.SimpleNamespace(
+        num_arm_joints=N6,
+        home_joints_rad=_EDU6_HOME,
+        roll_joint_index=5,
+        gripper_open_rad=1.75,
+        gripper_closed_rad=0.0,
+        velocity_limit_rad_s=N6_VLIMIT,
+        observe_pose_joints=None,
+        grasp_held_margin_rad=0.12,
+    )
+
+    captured: list = []
+    home7 = list(_EDU6_HOME) + [1.75]
+    sim_arm = SimArm(joint_state_sink=captured.append, ik=_IK6(),
+                     num_arm_joints=N6, home_full_joints=home7)
+
+    program = {
+        # 8-wide (n+2) Contract-B recording: [j1..j6, grip, t_s].
+        'trajectories': {'T1': {'fps': 25, 'points': [list(r) for r in _B8]}},
+        'blocks': {'blocks': [{
+            'type': 'edubotics_home', 'id': 'h1',
+            'next': {'block': {
+                'type': 'edubotics_move_to', 'id': 'mv1',
+                'inputs': {'DESTINATION': {'block': {
+                    'type': 'edubotics_destination_ref', 'id': 'dr1',
+                    'fields': {'NAME': 'Ablage'},
+                }}},
+                'next': {'block': {
+                    'type': 'edubotics_close_gripper', 'id': 'cg1',
+                    'next': {'block': {
+                        'type': 'edubotics_open_gripper', 'id': 'og1',
+                        'next': {'block': {
+                            'type': 'edubotics_replay_trajectory', 'id': 'rp1',
+                            'fields': {'NAME': 'T1'},
+                        }},
+                    }},
+                }},
+            }},
+        }]},
+    }
+
+    status: list = []
+    mgr = WorkflowManager(
+        publisher=sim_arm.publish,
+        ik_factory=lambda: _IK6(),
+        load_destinations=lambda: {'Ablage': {'x': 0.18, 'y': 0.0, 'z': 0.06,
+                                              'label': 'Ablage'}},
+        load_calibration=lambda: {},
+        emit_status=lambda ev: status.append(ev),
+        on_finished=lambda phase: status.append({'_finished': phase}),
+        get_current_pose_xyz=lambda: sim_arm.fk_xyz(),
+        get_follower_joints=sim_arm.get_joints,
+        arm_profile=profile,
+    )
+    ok, msg, _ = mgr.start(json.dumps(program), 'wf-n6-e2e')
+    assert ok, msg
+    deadline = time.monotonic() + 30.0
+    done = lambda: [e for e in status  # noqa: E731
+                    if isinstance(e, dict) and '_finished' in e]
+    while not done() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    finished = done()
+    assert finished and finished[-1]['_finished'] == 'finished', (
+        f'n6 e2e did not finish cleanly: {status[-3:]}')
+    errors = [e for e in status
+              if isinstance(e, dict) and e.get('phase') == 'error']
+    assert not errors, f'n6 e2e errored: {errors}'
+
+    # Every emitted arm command is n+1 = 7 wide (home, move, both gripper moves,
+    # and the 8-wide recording re-segmented down to 7-wide playback).
+    assert captured, 'no vectors emitted'
+    widths = {len(q) for q in captured}
+    assert widths == {N6 + 1}, f'non-7-wide vectors emitted: widths={widths}'
+    assert len(captured) > 20, 'suspiciously short n6 e2e stream'

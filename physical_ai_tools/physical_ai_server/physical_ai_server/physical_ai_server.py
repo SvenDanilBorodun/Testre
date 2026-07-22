@@ -145,6 +145,9 @@ from std_msgs.msg import Empty
 RECORD_MAX_S = 120.0
 _MANUAL_RECORD_FPS = 25
 _MANUAL_RECORD_MAX_SAMPLES = int(RECORD_MAX_S * _MANUAL_RECORD_FPS) + 100
+# Plan §4.5's per-channel-epsilon concern is SUPERSEDED: the edu6 gripper channel
+# is RADIANS (0…1.75 rad), not metres — 0.003 rad = 0.17 % of the 1.75 rad stroke —
+# so this uniform epsilon dedups correctly on BOTH profiles (no per-channel split).
 _MANUAL_RECORD_MIN_DELTA_RAD = 0.003
 # Timeout (s) for acquiring the manual-control mutex in a driving/torque-switch
 # callback. If a jog/replay drive is holding it, a new manual op is refused in
@@ -355,8 +358,15 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         # and every later __init__ consumer. _init_robot_profile stays the
         # LAST statement (degraded-boot contract, Fix 5) and REUSES this
         # resolved object — hoist NOTHING else (capabilities_json can raise).
-        self._arm_profile = robot_profiles.resolve(
+        # Fix 1 — keep the env-resolution in a SEPARATE stash the degraded-boot
+        # fallback never touches. The fallback may downgrade self._arm_profile to
+        # the omx_full default for reporting; the bounded re-init retry re-enters
+        # _init_robot_profile and MUST recover the env-resolved profile from this
+        # untouched stash, not from a clobbered _arm_profile (env can't change
+        # mid-run).
+        self._resolved_profile_stash = robot_profiles.resolve(
             os.environ.get('EDUBOTICS_ROBOT_TYPE'))
+        self._arm_profile = self._resolved_profile_stash
 
         # EduBotics teleop force/collision e-stop (Rule §2 software guard, teleop-only).
         # Arms the read-only force monitor + the safe-home/resync orchestration.
@@ -411,12 +421,15 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         try:
             # Fix 5 — the identity attributes live INSIDE the try. resolve()
             # itself ran in the __init__ hoist (non-raising); reuse that object
-            # (the re-init retry path re-enters here with the same stash — the
-            # env cannot change mid-run).
-            profile = getattr(self, '_arm_profile', None)
+            # from the SEPARATE stash the fallback never touches (Fix 1: the
+            # re-init retry re-enters here and must recover the env-resolved
+            # profile, not the omx_full default the fallback may have written
+            # into _arm_profile — the env cannot change mid-run).
+            profile = getattr(self, '_resolved_profile_stash', None)
             if profile is None:
                 profile = robot_profiles.resolve(
                     os.environ.get('EDUBOTICS_ROBOT_TYPE'))
+                self._resolved_profile_stash = profile
             # The resolved profile object is kept private for the IK factory seam
             # (_build_ik_solver); the string id + caps JSON ride /task/status.
             self._arm_profile = profile
@@ -3238,6 +3251,7 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         from physical_ai_server.workflow.handlers.motion import WorkflowError
         from physical_ai_server.workflow.trajectory_builder import (
             build_segment, chunked_publish,
+            JOINT_VELOCITY_LIMIT_RAD_S as _VL_DEFAULT,
         )
         response.success = False
         response.joints = []
@@ -3378,7 +3392,14 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 if not (duration > 0.0):
                     duration = 1.0
                 duration = max(0.2, min(4.0, duration))
-                points = build_segment(joints, q_end, duration)
+                # Thread the profile velocity limit into build_segment's floor,
+                # like the workflow-move and replay paths (OMX None → 4.8 default,
+                # bit-identical; edu6 URDF 5.45).
+                _vl = getattr(getattr(self, '_arm_profile', None),
+                              'velocity_limit_rad_s', None)
+                points = build_segment(
+                    joints, q_end, duration,
+                    velocity_limit=float(_vl) if _vl else _VL_DEFAULT)
                 published = chunked_publish(
                     publisher=self._trajectory_publisher,
                     points=points,

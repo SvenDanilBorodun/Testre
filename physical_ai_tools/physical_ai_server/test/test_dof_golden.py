@@ -40,6 +40,7 @@ from physical_ai_server.workflow.handlers.trajectory import (
     extract_points,
     resegment_trajectory,
 )
+from physical_ai_server.workflow.edu6_ik import Edu6IKSolver
 from physical_ai_server.workflow.ik_solver import IKSolver
 from physical_ai_server.workflow.object_catalog import parse_catalog
 from physical_ai_server.workflow.sim_arm import SimArm
@@ -238,10 +239,15 @@ _CONTRACT_B = [
 def test_golden_extract_points():
     rows = extract_points({'fps': 25, 'points': _CONTRACT_B})
     _check('extract_points', rows)
-    # extra-wide rows: pin today's behaviour so the 2b EXACT-width rail is a
-    # DELIBERATE, visible change (extract_points currently truncates).
-    with pytest.raises(Exception):
-        extract_points({'fps': 25, 'points': [[0.0] * 6]})  # short row refuses
+    # extract_points asserts EXACT width (n+2) in BOTH directions (§16.4 rail #2):
+    # a short row was always refused; a WIDE row used to TRUNCATE silently and now
+    # refuses too. Two rows each so the WIDTH guard trips — a single row would refuse
+    # for the wrong reason (the <2-points "keine Bewegung" guard runs first), so the
+    # 'beschädigt' match proves it is the width guard specifically.
+    with pytest.raises(Exception, match='beschädigt'):
+        extract_points({'fps': 25, 'points': [[0.0] * 6, [0.0] * 6]})  # short → refuse
+    with pytest.raises(Exception, match='beschädigt'):
+        extract_points({'fps': 25, 'points': [[0.0] * 8, [0.0] * 8]})  # wide → refuse
 
 
 def test_golden_resegment():
@@ -316,3 +322,48 @@ def test_golden_jog():
         'drive_to', _jog_req('drive_to', tx=0.18, ty=0.04, tz=0.05), live)
     results['drive_to'] = [q, list(world)]
     _check('jog', results)
+
+
+# ── capture-pose FK characterization (finding 10, additive) ──────────────────
+# The golden sim-workflow fixture omits the capture-pose ("Position merken")
+# touch-off, which drives the FULL-vector FK behind touch-off / destination_
+# current. Pin ik.fk() directly on fixed 6- and 7-element full vectors so a
+# geometry regression in either solver surfaces without a fixture regen. The
+# expected numbers were computed at test-writing time and hardcoded as literals
+# here — this test deliberately owns its own numbers and never reads/writes
+# dof_golden.json.
+
+def test_capture_pose_fk_omx_6_element_vector():
+    # OMX fk takes joint1..joint5; the 6th (gripper) entry is IGNORED — the
+    # capture-pose contract passes a full follower vector straight in.
+    ik = IKSolver()
+    full6 = [0.10, -1.20, 1.10, 0.05, 0.30, 0.80]
+    R, t = ik.fk(full6)
+    assert list(t) == pytest.approx(
+        [0.17921821472056176, 0.017574352817596783, 0.19891016125921557],
+        abs=1e-9)
+    assert list(R[0]) == pytest.approx(
+        [0.9937606691655042, -0.11007057243681946, -0.018005596439997214],
+        abs=1e-9)
+    assert list(R[2]) == pytest.approx(
+        [0.04997916927067818, 0.29515088335498707, 0.9541425672790117],
+        abs=1e-9)
+    # Extra gripper entry ignored: the 5-element solve equals the 6-element one.
+    _R5, t5 = ik.fk(full6[:5])
+    assert list(t5) == pytest.approx(list(t), abs=1e-12)
+
+
+def test_capture_pose_fk_edu6_7_element_vector():
+    # edu6 fk takes joint1..joint6; the 7th (gripper) entry is IGNORED. Vector is
+    # edu6 HOME + gripper-open; fk returns the WORLD-frame fingertip TCP.
+    ik = Edu6IKSolver()
+    full7 = [0.0, 0.70, -2.40, 0.0, 0.70, 0.0, 1.75]
+    R, t = ik.fk(full7)
+    assert list(t) == pytest.approx(
+        [0.04990694748239571, 0.0, 0.4545133420264562], abs=1e-9)
+    assert list(R[0]) == pytest.approx(
+        [0.0, -0.8414709848078965, -0.5403023058681398], abs=1e-9)
+    assert list(R[1]) == pytest.approx([-1.0, 0.0, 0.0], abs=1e-9)
+    # Extra gripper entry ignored: the 6-element solve equals the 7-element one.
+    _R6, t6 = ik.fk(full7[:6])
+    assert list(t6) == pytest.approx(list(t), abs=1e-12)

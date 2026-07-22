@@ -1000,7 +1000,15 @@ class CollisionMonitorMixin:
         try:
             from std_srvs.srv import SetBool
             reboot_client = self.create_client(RebootDxl, REBOOT_DXL_SERVICE)
-            torque_client = self.create_client(SetBool, SET_TORQUE_SERVICE)
+            # ArmProfile seam (edu6 §3.4): the torque service name comes from the
+            # resolved profile (OMX default = the Dynamixel HW interface), with the
+            # legacy literal as fallback — mirrors physical_ai_server._set_follower_
+            # torque. This recovery path only runs on a collision-enabled profile
+            # (OMX), whose torque_service equals SET_TORQUE_SERVICE — behaviour-neutral.
+            torque_service = getattr(
+                getattr(self, '_arm_profile', None), 'torque_service',
+                None) or SET_TORQUE_SERVICE
+            torque_client = self.create_client(SetBool, torque_service)
             if reboot_client.wait_for_service(timeout_sec=1.0):
                 for joint in joints:
                     dxl_id = JOINT_TO_DXL_ID.get(joint)

@@ -95,6 +95,18 @@ class WorkflowContext:
     table_plane: tuple[float, float, float] | None = None
     last_arm_joints: list[float] | None = None
     last_full_joints: list[float] = field(default_factory=lambda: [0.0] * 6)
+    # ── ArmProfile geometry (§16.4 slice 2c) ─────────────────────────────────
+    # Consumed by the handlers' ctx accessors (motion._n & friends). The
+    # defaults (5 / None) make every profile-less construction — all existing
+    # tests, every non-Roboter-Studio path — resolve to the OMX module
+    # constants, bit-identical.
+    num_arm_joints: int = 5
+    roll_joint_index: int | None = None
+    home_joints_rad: tuple | None = None
+    observe_pose_joints: tuple | None = None
+    gripper_open_rad: float | None = None
+    gripper_closed_rad: float | None = None
+    velocity_limit_rad_s: float | None = None
     # Grasp-held threshold source: the most recent COMMANDED gripper close (rad)
     # this run — written ONLY by motion's close paths (_execute_pickup,
     # close_gripper, close_on_object), read by motion._held_threshold_rad.
@@ -228,6 +240,7 @@ class WorkflowManager:
         get_current_pose_xyz: Callable[[], tuple[float, float, float] | None] | None = None,
         get_follower_joints: Callable[[], list[float] | None] | None = None,
         load_object_catalog: Callable[[], Any] | None = None,
+        arm_profile: Any | None = None,
     ) -> None:
         self._publisher = publisher
         self._ik_factory = ik_factory
@@ -250,6 +263,22 @@ class WorkflowManager:
         # Roboter Studio named-object catalog loader (may raise on a
         # missing/corrupt catalog — caught at start(), surfaced at the block).
         self._load_object_catalog = load_object_catalog
+        # ArmProfile seam (§16.4 slice 2c): None → OMX geometry, bit-identical.
+        # The node passes the resolved profile (PR 4); n drives every width in
+        # the seed/precheck below and the ctx profile stamps.
+        self._arm_profile = arm_profile
+        n = getattr(arm_profile, 'num_arm_joints', None) if arm_profile else None
+        try:
+            self._num_arm_joints = int(n) if n else 5
+        except (TypeError, ValueError):
+            self._num_arm_joints = 5
+        home = getattr(arm_profile, 'home_joints_rad', None) if arm_profile else None
+        g_open = getattr(arm_profile, 'gripper_open_rad', None) if arm_profile else None
+        if (home is not None and g_open is not None
+                and len(home) == self._num_arm_joints):
+            self._home_full_joints = [float(v) for v in home] + [float(g_open)]
+        else:
+            self._home_full_joints = list(_HOME_FULL_JOINTS)
         self._thread: Optional[threading.Thread] = None
         self._hat_threads: list[threading.Thread] = []
         self._stop_event = threading.Event()
@@ -488,8 +517,9 @@ class WorkflowManager:
             if self._get_follower_joints is not None:
                 try:
                     joints = self._get_follower_joints()
-                    if joints and len(joints) >= 6:
-                        vals = [float(x) for x in joints[:6]]
+                    width = self._num_arm_joints + 1
+                    if joints and len(joints) >= width:
+                        vals = [float(x) for x in joints[:width]]
                         # Non-finite guard: a NaN/Inf joint value would seed the
                         # first commanded pose with garbage (NaN published straight
                         # through the trajectory, or Inf crashing build_segment).
@@ -556,6 +586,26 @@ class WorkflowManager:
                 zones=zones,
                 # Phase-2 Tempo (global speed multiplier; 1.0 → unchanged speed).
                 tempo=tempo,
+                # ArmProfile geometry stamps (motion._n & friends read these;
+                # None → OMX constants). last_full_joints starts as the width-
+                # correct all-zero sentinel (the seeded overwrite follows below).
+                last_full_joints=[0.0] * (self._num_arm_joints + 1),
+                num_arm_joints=self._num_arm_joints,
+                roll_joint_index=getattr(self._arm_profile, 'roll_joint_index', None)
+                if self._arm_profile else None,
+                home_joints_rad=getattr(self._arm_profile, 'home_joints_rad', None)
+                if self._arm_profile else None,
+                observe_pose_joints=getattr(
+                    self._arm_profile, 'observe_pose_joints', None)
+                if self._arm_profile else None,
+                gripper_open_rad=getattr(self._arm_profile, 'gripper_open_rad', None)
+                if self._arm_profile else None,
+                gripper_closed_rad=getattr(
+                    self._arm_profile, 'gripper_closed_rad', None)
+                if self._arm_profile else None,
+                velocity_limit_rad_s=getattr(
+                    self._arm_profile, 'velocity_limit_rad_s', None)
+                if self._arm_profile else None,
             )
 
             # Apply the synchronous seed so hat threads start with a
@@ -834,7 +884,7 @@ class WorkflowManager:
         # last_arm_joints is unset). Audit round-3 §23 — pre-check
         # passing seed=None when runtime seeds from HOME produced
         # false unreachable warnings on reachable destinations.
-        precheck_seed = list(_HOME_FULL_JOINTS[:5])
+        precheck_seed = list(self._home_full_joints[:self._num_arm_joints])
         for target in targets:
             if time.monotonic() > budget_end:
                 break

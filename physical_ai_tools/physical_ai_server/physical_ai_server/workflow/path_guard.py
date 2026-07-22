@@ -203,8 +203,9 @@ def segment_blocked(
     boxes = build_zones(zones, link_radius + margin)
     if not boxes:
         return False
-    qs = np.asarray(list(q_start)[:5], dtype=np.float64)
-    qe = np.asarray(list(q_end)[:5], dtype=np.float64)
+    n = ik.num_joints()
+    qs = np.asarray(list(q_start)[:n], dtype=np.float64)
+    qe = np.asarray(list(q_end)[:n], dtype=np.float64)
     lp_s = ik.link_points(qs, samples_per_link=_LINK_SAMPLES)
     lp_e = ik.link_points(qe, samples_per_link=_LINK_SAMPLES)
     if lp_s is None or lp_e is None:
@@ -292,8 +293,9 @@ def _plan_lift_and_travel(ctx, q_start, q_end, zones, margin, link_radius,
     reachable height (→ base-swing)."""
     from physical_ai_server.workflow.handlers import motion as _m
     ik = ctx.ik
-    start_fk = ik.fk(list(q_start)[:5])
-    end_fk = ik.fk(list(q_end)[:5])
+    n = ik.num_joints()
+    start_fk = ik.fk(list(q_start)[:n])
+    end_fk = ik.fk(list(q_end)[:n])
     if start_fk is None or end_fk is None:
         return None
     sx, sy, _sz = (float(v) for v in start_fk[1])
@@ -373,17 +375,18 @@ def plan_safe_route(ctx, q_start, q_end, zones, duration_s, roll=None,
     on the final leg arriving at ``q_end`` (like the direct path)."""
     from physical_ai_server.workflow.handlers import motion as _m
     ik = ctx.ik
+    n = ik.num_joints()
     link_radius = LINK_RADIUS_M
     if roll is None:
-        roll = float(q_end[4])
+        roll = float(q_end[_m._roll_idx(ctx)])
     # Gripper continuity: outbound/intermediate vias inherit q_START's gripper so
     # the gripper changes ONCE — on the final leg arriving at q_end (which keeps
     # q_end's gripper) — exactly like the direct path. Stamping every via with
     # q_end's gripper would actuate the gripper during the FIRST transit leg if a
     # caller ever passes q_start[5] != q_end[5]. All current callers are
     # gripper-consistent, so this is latent hardening.
-    gripper_via = float(q_start[5]) if len(q_start) > 5 else (
-        float(q_end[5]) if len(q_end) > 5 else 0.0)
+    gripper_via = float(q_start[n]) if len(q_start) > n else (
+        float(q_end[n]) if len(q_end) > n else 0.0)
 
     # 1. Direct.
     if not segment_blocked(ik, q_start, q_end, zones, margin, link_radius):

@@ -197,3 +197,90 @@ def test_resegment_n6_full_stream_is_7_wide():
     assert out
     assert all(len(q) == 7 for q, _t in out)
     assert out[-1][0] == pytest.approx(_B8[-1][:7])
+
+
+# ── slice 2c: path_guard / workflow_manager / sim_arm ────────────────────────
+
+from physical_ai_server.workflow.sim_arm import SimArm  # noqa: E402
+from physical_ai_server.workflow.workflow_manager import (  # noqa: E402
+    WorkflowContext,
+    WorkflowManager,
+)
+
+
+class _FakeIK6:
+    """A 6-joint IK stub for width plumbing (no real edu6 solver until PR 3)."""
+
+    def num_joints(self):
+        return N6
+
+    def fk(self, joints):
+        assert len(joints) == N6, f'fk got {len(joints)} joints'
+        import numpy as np
+        return np.eye(3), np.array([0.2, 0.0, 0.1])
+
+    def link_points(self, joints, samples_per_link=5):
+        assert len(joints) == N6
+        import numpy as np
+        return [np.array([0.0, 0.0, 0.1]), np.array([0.2, 0.0, 0.1])]
+
+
+def test_sim_arm_n6_home_and_gripper_index():
+    home7 = list(_EDU6_HOME) + [1.75]
+    arm = SimArm(num_arm_joints=N6, home_full_joints=home7)
+    assert arm.get_joints() == pytest.approx(home7)
+    # A 7-wide publish caches 7-wide.
+    arm.publish([(list(_EDU6_HOME) + [0.5], 0.5)])
+    assert len(arm.get_joints()) == 7
+
+
+def test_sim_arm_n6_held_override_hits_index_6():
+    ik = _FakeIK6()
+    arm = SimArm(ik=ik, num_arm_joints=N6,
+                 home_full_joints=list(_EDU6_HOME) + [1.75],
+                 objects=[{'type': 'wuerfel', 'tag_id': 7, 'x': 0.2, 'y': 0.0,
+                           'yaw': 0.0}])
+    # A negative close on index 6 with an object at the fk XY → blocked readback
+    # (unit semantics stay OMX-shaped until PR 7 — the INDEX is what 2c fixes).
+    arm.publish([(list(_EDU6_HOME) + [-0.5], 0.5)])
+    q = arm.get_joints()
+    assert len(q) == 7
+    assert q[6] > -0.5  # gripper channel overridden, arm joints untouched
+    assert q[:6] == pytest.approx(list(_EDU6_HOME))
+
+
+def test_path_guard_segment_blocked_slices_n_joints():
+    from physical_ai_server.workflow.path_guard import segment_blocked
+    ik = _FakeIK6()
+    zones = [{'min': [1.0, 1.0, 1.0], 'max': [1.1, 1.1, 1.1]}]  # far away
+    q_a = list(_EDU6_HOME) + [1.75]
+    q_b = [v + 0.05 for v in _EDU6_HOME] + [0.0]
+    # The _FakeIK6 asserts fk/link_points receive EXACTLY 6 joints.
+    assert segment_blocked(ik, q_a, q_b, zones) is False
+
+
+def test_workflow_manager_stamps_profile_onto_ctx():
+    class _Profile:
+        num_arm_joints = N6
+        roll_joint_index = 5
+        home_joints_rad = _EDU6_HOME
+        observe_pose_joints = None
+        gripper_open_rad = 1.75
+        gripper_closed_rad = 0.0
+        velocity_limit_rad_s = N6_VLIMIT
+
+    mgr = WorkflowManager(publisher=lambda chunk: None, arm_profile=_Profile())
+    assert mgr._num_arm_joints == N6
+    assert mgr._home_full_joints == pytest.approx(list(_EDU6_HOME) + [1.75])
+    # Default (no profile) stays OMX.
+    mgr5 = WorkflowManager(publisher=lambda chunk: None)
+    assert mgr5._num_arm_joints == 5
+    assert mgr5._home_full_joints[1] == pytest.approx(-1.5707963267948966)
+
+
+def test_workflow_context_profile_defaults_are_omx():
+    ctx = WorkflowContext(publisher=lambda chunk: None)
+    assert ctx.num_arm_joints == 5
+    assert ctx.roll_joint_index is None
+    assert ctx.home_joints_rad is None
+    assert _n(ctx) == 5 and _roll_idx(ctx) == 4

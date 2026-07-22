@@ -84,13 +84,21 @@ class SimArm:
         joint_state_sink: Optional[Callable[[list[float]], None]] = None,
         ik: Any | None = None,
         objects: Optional[list[dict[str, Any]]] = None,
+        num_arm_joints: int = 5,
+        home_full_joints: Optional[list[float]] = None,
     ) -> None:
         self._sink = joint_state_sink
         self._ik = ik
         self._objects: list[dict[str, Any]] = list(objects or [])
+        # Arm-joint count (gripper index == n). 5 = OMX; an ArmProfile-driven
+        # sim passes its own (edu6: 6) plus the matching HOME vector.
+        self._n = int(num_arm_joints) if int(num_arm_joints) > 0 else 5
         # Seeded to HOME so the very first get_joints() (the start-time seed in
         # WorkflowManager.start) returns a realistic pose, not [0]*6.
-        self._last_q: list[float] = list(_SIM_HOME_FULL_JOINTS)
+        if home_full_joints is not None and len(home_full_joints) == self._n + 1:
+            self._last_q: list[float] = [float(v) for v in home_full_joints]
+        else:
+            self._last_q = list(_SIM_HOME_FULL_JOINTS)
         # publish() runs on the interpreter daemon thread; get_joints()/set_objects
         # may be read from the ROS executor thread — guard the shared cache.
         self._lock = threading.RLock()
@@ -141,7 +149,8 @@ class SimArm:
             # Blocked angle scales with the commanded close so gentle per-object
             # closes still clear check_grasp_held's derived threshold (see the
             # constants above); the floor keeps deep closes at the pinned -0.1.
-            q[5] = max(_HELD_BLOCKED_GRIPPER_RAD, q[5] + _HELD_BLOCK_OFFSET_RAD)
+            q[self._n] = max(_HELD_BLOCKED_GRIPPER_RAD,
+                             q[self._n] + _HELD_BLOCK_OFFSET_RAD)
         return q
 
     def fk_xyz(self) -> Optional[tuple[float, float, float]]:
@@ -155,10 +164,10 @@ class SimArm:
     # Internals
     # ------------------------------------------------------------------
     def _simulate_held(self, q: list[float]) -> bool:
-        if len(q) < 6:
+        if len(q) < self._n + 1:
             return False
         # Only a close command can hold an object.
-        if q[5] >= _GRIPPER_CLOSE_THRESHOLD_RAD:
+        if q[self._n] >= _GRIPPER_CLOSE_THRESHOLD_RAD:
             return False
         xyz = self._fk_xyz(q)
         if xyz is None:
@@ -177,10 +186,10 @@ class SimArm:
         return False
 
     def _fk_xyz(self, q: list[float]) -> Optional[tuple[float, float, float]]:
-        if self._ik is None or len(q) < 5:
+        if self._ik is None or len(q) < self._n:
             return None
         try:
-            pose = self._ik.fk(q[:5])
+            pose = self._ik.fk(q[:self._n])
         except Exception:  # noqa: BLE001 — FK is best-effort in sim
             return None
         if pose is None:

@@ -681,7 +681,8 @@ def grasp_object(ctx, args: dict[str, Any]) -> None:
                     'bestimmt werden — bitte den Tag flach und gut sichtbar aufkleben.'
                 )
             roll = _motion.compute_grasp_roll(ctx, x, y, tag_yaw)
-            close_rad = float(target.extras.get('gripper_close_rad', _motion.GRIPPER_CLOSED_RAD))
+            close_rad = float(target.extras.get('gripper_close_rad',
+                                                _motion._gripper_closed(ctx)))
             _motion._execute_pickup(
                 ctx, (x, y, z), float(recipe.approach_clear_m), roll, close_rad)
             held = _motion.check_grasp_held(ctx)

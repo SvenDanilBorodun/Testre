@@ -208,6 +208,91 @@ def _parse_observe_pose() -> list[float]:
 OBSERVE_POSE_JOINTS = _parse_observe_pose()
 
 
+# ── ArmProfile ctx accessors (§16.4 slice 2b) ────────────────────────────────
+# Every handler reads the arm's DOF/pose/gripper geometry through these instead
+# of the OMX module constants. A ctx that carries no profile fields (every
+# existing caller, every test SimpleNamespace) gets EXACTLY the old constants —
+# OMX behaviour is bit-identical by construction. The node/workflow_manager
+# stamp the fields from the resolved ArmProfile (PR 4).
+
+def _n(ctx) -> int:
+    """Arm-joint count (gripper index == n; full vector width == n + 1)."""
+    try:
+        n = int(getattr(ctx, 'num_arm_joints', None) or 0)
+    except (TypeError, ValueError):
+        n = 0
+    return n if n > 0 else 5
+
+
+def _roll_idx(ctx) -> int:
+    """Index of the tool-roll joint (OMX joint5 → 4; edu6 joint6 → 5). Defaults
+    to the LAST arm joint — true for both shipped geometries."""
+    idx = getattr(ctx, 'roll_joint_index', None)
+    if idx is None:
+        return _n(ctx) - 1
+    try:
+        return int(idx)
+    except (TypeError, ValueError):
+        return _n(ctx) - 1
+
+
+def _home_joints(ctx) -> list[float]:
+    """The profile HOME arm pose (length ``_n(ctx)``); OMX constant fallback."""
+    pose = getattr(ctx, 'home_joints_rad', None)
+    if pose is not None and len(pose) == _n(ctx):
+        return [float(v) for v in pose]
+    return list(HOME_JOINTS_RAD)
+
+
+def _observe_joints(ctx) -> list[float]:
+    """Observation pose. A profile-supplied pose wins; else the import-time
+    ``EDUBOTICS_OBSERVE_POSE`` parse (OMX, 5 values); else HOME."""
+    pose = getattr(ctx, 'observe_pose_joints', None)
+    if pose is not None and len(pose) == _n(ctx):
+        return [float(v) for v in pose]
+    if _n(ctx) == 5:
+        return list(OBSERVE_POSE_JOINTS)
+    return _home_joints(ctx)
+
+
+def _gripper_open(ctx) -> float:
+    val = getattr(ctx, 'gripper_open_rad', None)
+    if val is None:
+        return GRIPPER_OPEN_RAD
+    try:
+        val = float(val)
+    except (TypeError, ValueError):
+        return GRIPPER_OPEN_RAD
+    return val if math.isfinite(val) else GRIPPER_OPEN_RAD
+
+
+def _gripper_closed(ctx) -> float:
+    val = getattr(ctx, 'gripper_closed_rad', None)
+    if val is None:
+        return GRIPPER_CLOSED_RAD
+    try:
+        val = float(val)
+    except (TypeError, ValueError):
+        return GRIPPER_CLOSED_RAD
+    return val if math.isfinite(val) else GRIPPER_CLOSED_RAD
+
+
+def _velocity_limit(ctx) -> float:
+    """Per-profile joint velocity limit for ``build_segment``'s floor (OMX 4.8,
+    edu6 URDF 5.45)."""
+    from physical_ai_server.workflow.trajectory_builder import (
+        JOINT_VELOCITY_LIMIT_RAD_S,
+    )
+    val = getattr(ctx, 'velocity_limit_rad_s', None)
+    if val is None:
+        return JOINT_VELOCITY_LIMIT_RAD_S
+    try:
+        val = float(val)
+    except (TypeError, ValueError):
+        return JOINT_VELOCITY_LIMIT_RAD_S
+    return val if (math.isfinite(val) and val > 0.0) else JOINT_VELOCITY_LIMIT_RAD_S
+
+
 class WorkflowError(Exception):
     """Raised by handlers with a German message ready for the editor's
     log strip and toast."""
@@ -318,7 +403,8 @@ def _publish_motion(ctx, q_start: list[float], q_end: list[float],
     # motion passes through, so the global tempo reaches every transit, gripper,
     # and grasp-corridor move with no per-handler wiring. Rule §2: teaching-only.
     duration_s = _tempo_scaled_duration(ctx, duration_s, tempo)
-    waypoints = build_segment(q_start, q_end, duration_s)
+    waypoints = build_segment(q_start, q_end, duration_s,
+                              velocity_limit=_velocity_limit(ctx))
     # Serialize motion across the main stack and any concurrent hat
     # handler. The hat scheduler holds ctx.motion_lock for its whole
     # body; the main stack acquires it for the publish window so
@@ -457,7 +543,7 @@ def _solve_or_raise(
     floor_z = _floor_z_at(ctx, target_xyz[0], target_xyz[1])
     if floor_z is not None and float(target_xyz[2]) < floor_z - WORKSPACE_FLOOR_MARGIN_M:
         raise WorkflowError('Zielpunkt liegt unter der Tischebene.')
-    seed = ctx.last_arm_joints or HOME_JOINTS_RAD
+    seed = ctx.last_arm_joints or _home_joints(ctx)
     solution = ctx.ik.solve(target_xyz=target_xyz, seed=seed, free_yaw=free_yaw, roll=roll)
     if solution is None:
         raise WorkflowError(
@@ -550,7 +636,7 @@ def _try_solve(
             'Roboter-Beschreibung nicht verfügbar — der Bewegungsrechner (IK) '
             'konnte nicht gestartet werden. Bitte die Umgebung neu starten.'
         )
-    seed = ctx.last_arm_joints or HOME_JOINTS_RAD
+    seed = ctx.last_arm_joints or _home_joints(ctx)
     solution = ctx.ik.solve(target_xyz=target_xyz, seed=seed, roll=roll)
     return None if solution is None else list(solution)
 
@@ -625,7 +711,7 @@ def home(ctx, args: dict[str, Any]) -> None:
     # Every other motion handler already carries last_full_joints[5]; home now
     # matches, so a held object stays held across a home. Use `open_gripper`
     # explicitly to release.
-    q_end = list(HOME_JOINTS_RAD) + [q_start[5]]
+    q_end = _home_joints(ctx) + [q_start[_n(ctx)]]
     # TRANSIT (whole-arm move to the Grundstellung) — route around any no-go
     # zone, exactly like move_to/move_above/lift. With no zones drawn safe_move
     # is a pass-through to raw _publish_motion, so behavior is unchanged. A zone
@@ -634,7 +720,7 @@ def home(ctx, args: dict[str, Any]) -> None:
     # block (handlers/__init__ `edubotics_home`), never an un-catchable
     # recovery/teardown, so raising here is safe.
     safe_move(ctx, q_start, q_end, DEFAULT_HOME_DURATION_S)
-    ctx.last_arm_joints = list(HOME_JOINTS_RAD)
+    ctx.last_arm_joints = _home_joints(ctx)
     ctx.last_full_joints = q_end
 
 
@@ -646,8 +732,8 @@ def go_to_observation_pose(ctx) -> None:
     block."""
     _require_seeded_start_pose(ctx)
     q_start = ctx.last_full_joints
-    arm = list(OBSERVE_POSE_JOINTS)
-    q_end = arm + [q_start[5]]
+    arm = _observe_joints(ctx)
+    q_end = arm + [q_start[_n(ctx)]]
     # TRANSIT (whole-arm retreat out of the scene-cam view) — route around any
     # no-go zone, like the other whole-arm transits. No zones → pass-through, so
     # the named-object loop is unchanged. Both internal call sites (interpreter
@@ -664,7 +750,7 @@ def go_to_observation_pose(ctx) -> None:
 def open_gripper(ctx, args: dict[str, Any]) -> None:
     _require_seeded_start_pose(ctx)
     q_start = ctx.last_full_joints
-    q_end = q_start[:5] + [GRIPPER_OPEN_RAD]
+    q_end = q_start[:_n(ctx)] + [_gripper_open(ctx)]
     _publish_motion(ctx, q_start, q_end, DEFAULT_GRIPPER_DURATION_S)
     ctx.last_full_joints = q_end
 
@@ -672,19 +758,19 @@ def open_gripper(ctx, args: dict[str, Any]) -> None:
 def close_gripper(ctx, args: dict[str, Any]) -> None:
     _require_seeded_start_pose(ctx)
     q_start = ctx.last_full_joints
-    q_end = q_start[:5] + [GRIPPER_CLOSED_RAD]
+    q_end = q_start[:_n(ctx)] + [_gripper_closed(ctx)]
     _publish_motion(ctx, q_start, q_end, DEFAULT_GRIPPER_DURATION_S)
     ctx.last_full_joints = q_end
     # Record the COMMANDED close for the per-object grasp-held threshold (only
     # the close paths write this — see _held_threshold_rad).
-    ctx.last_commanded_close_rad = GRIPPER_CLOSED_RAD
+    ctx.last_commanded_close_rad = _gripper_closed(ctx)
 
 
 def move_to(ctx, args: dict[str, Any]) -> None:
     _require_seeded_start_pose(ctx)
     target = _resolve_target(args.get('destination'), ctx)
     arm_q = _solve_or_raise(ctx, target, roll=GRASP_ROLL_RAD)
-    q_end = arm_q + [ctx.last_full_joints[5]]
+    q_end = arm_q + [ctx.last_full_joints[_n(ctx)]]
     # TRANSIT — route around any no-go zone (raw _publish_motion when none).
     # Optional per-move „mit Tempo" override; None → workflow-global tempo.
     safe_move(ctx, ctx.last_full_joints, q_end, DEFAULT_MOVE_DURATION_S,
@@ -737,9 +823,9 @@ def _execute_pickup(
         ctx, grasp_xyz, approach_height_m, roll=roll)
     lift_arm_q = above_arm_q
 
-    open_q = ctx.last_full_joints[:5] + [GRIPPER_OPEN_RAD]
-    above_q = above_arm_q + [GRIPPER_OPEN_RAD]
-    grasp_q = grasp_arm_q + [GRIPPER_OPEN_RAD]
+    open_q = ctx.last_full_joints[:_n(ctx)] + [_gripper_open(ctx)]
+    above_q = above_arm_q + [_gripper_open(ctx)]
+    grasp_q = grasp_arm_q + [_gripper_open(ctx)]
     closed_q = grasp_arm_q + [close_rad]
     lift_q = lift_arm_q + [close_rad]
 
@@ -844,10 +930,10 @@ def check_grasp_held(ctx) -> bool | None:
         joints = getter()
     except Exception:  # noqa: BLE001 — readback is best-effort
         return None
-    if not joints or len(joints) < 6:
+    if not joints or len(joints) < _n(ctx) + 1:
         return None
     try:
-        gripper = float(joints[5])
+        gripper = float(joints[_n(ctx)])
     except (TypeError, ValueError):
         return None
     return gripper > _held_threshold_rad(ctx)
@@ -860,7 +946,7 @@ def pickup(ctx, args: dict[str, Any]) -> None:
     # fingertips straddle the lower part of a low object, not the table itself.
     grasp_xyz = (target[0], target[1], target[2] + GRASP_CLEARANCE_M)
     _execute_pickup(ctx, grasp_xyz, DEFAULT_APPROACH_HEIGHT_M,
-                    GRASP_ROLL_RAD, GRIPPER_CLOSED_RAD, tempo=_move_tempo(args))
+                    GRASP_ROLL_RAD, _gripper_closed(ctx), tempo=_move_tempo(args))
 
 
 def drop_at(ctx, args: dict[str, Any]) -> None:
@@ -885,10 +971,10 @@ def drop_at(ctx, args: dict[str, Any]) -> None:
     drop_arm_q, above_arm_q = _solve_grasp_and_approach(
         ctx, drop_xyz, DEFAULT_APPROACH_HEIGHT_M, roll=GRASP_ROLL_RAD)
 
-    above_closed_q = above_arm_q + [GRIPPER_CLOSED_RAD]
-    drop_closed_q = drop_arm_q + [GRIPPER_CLOSED_RAD]
-    drop_open_q = drop_arm_q + [GRIPPER_OPEN_RAD]
-    retreat_open_q = above_arm_q + [GRIPPER_OPEN_RAD]
+    above_closed_q = above_arm_q + [_gripper_closed(ctx)]
+    drop_closed_q = drop_arm_q + [_gripper_closed(ctx)]
+    drop_open_q = drop_arm_q + [_gripper_open(ctx)]
+    retreat_open_q = above_arm_q + [_gripper_open(ctx)]
 
     # Audit round-3 §22+§23 — same atomicity argument as pickup.
     lock = getattr(ctx, 'motion_lock', None)
@@ -996,7 +1082,7 @@ def move_above(ctx, args: dict[str, Any]) -> None:
     # annulus — solves the grasp first (raises only if THAT is unreachable) and
     # derives the largest reachable hover.
     _grasp_q, arm_q = _solve_grasp_and_approach(ctx, (x, y, z), approach, roll=roll)
-    q_end = arm_q + [ctx.last_full_joints[5]]
+    q_end = arm_q + [ctx.last_full_joints[_n(ctx)]]
     # TRANSIT (hover above the object) — route around any no-go zone. Optional
     # per-move „mit Tempo" override; None → workflow-global tempo.
     safe_move(ctx, ctx.last_full_joints, q_end, DEFAULT_MOVE_DURATION_S, roll=roll,
@@ -1012,7 +1098,7 @@ def descend_to(ctx, args: dict[str, Any]) -> None:
     _require_seeded_start_pose(ctx)
     x, y, z, roll = _greifziel_xyz_roll(ctx, args.get('ziel'))
     arm_q = _solve_or_raise(ctx, (x, y, z), roll=roll)
-    q_end = arm_q + [ctx.last_full_joints[5]]
+    q_end = arm_q + [ctx.last_full_joints[_n(ctx)]]
     _publish_motion(ctx, ctx.last_full_joints, q_end, DEFAULT_GRASP_DURATION_S)
     ctx.last_arm_joints = arm_q
     ctx.last_full_joints = q_end
@@ -1032,7 +1118,7 @@ def close_on_object(ctx, args: dict[str, Any]) -> None:
             'Variable speichern und mit „falls" prüfen.'
         )
     _require_seeded_start_pose(ctx)
-    close_rad = GRIPPER_CLOSED_RAD
+    close_rad = _gripper_closed(ctx)
     extras = getattr(ziel, 'extras', None)
     if isinstance(extras, dict):
         raw = extras.get('gripper_close_rad')
@@ -1040,17 +1126,17 @@ def close_on_object(ctx, args: dict[str, Any]) -> None:
             try:
                 parsed = float(raw)
             except (TypeError, ValueError):
-                parsed = GRIPPER_CLOSED_RAD
+                parsed = _gripper_closed(ctx)
             # NaN/inf passes float() but would command a garbage gripper angle.
-            close_rad = parsed if math.isfinite(parsed) else GRIPPER_CLOSED_RAD
+            close_rad = parsed if math.isfinite(parsed) else _gripper_closed(ctx)
             # Clamp a corrupt catalog value into the physical gripper band. A value
             # far outside [GRIPPER_CLOSED_RAD, GRIPPER_OPEN_RAD] otherwise makes
             # build_segment's velocity floor stretch this gripper close to tens of
             # seconds (e.g. close_rad=100 → ~65 s) — a wedged run — and commands a
             # servo angle the hardware can't reach.
-            close_rad = max(GRIPPER_CLOSED_RAD, min(GRIPPER_OPEN_RAD, close_rad))
+            close_rad = max(_gripper_closed(ctx), min(_gripper_open(ctx), close_rad))
     q_start = ctx.last_full_joints
-    q_end = q_start[:5] + [close_rad]
+    q_end = q_start[:_n(ctx)] + [close_rad]
     _publish_motion(ctx, q_start, q_end, DEFAULT_GRIPPER_DURATION_S)
     ctx.last_full_joints = q_end
     # Record the COMMANDED close (the Greifziel's tuned angle) for the
@@ -1069,7 +1155,7 @@ def lift(ctx, args: dict[str, Any]) -> None:
             'Roboter-Beschreibung nicht verfügbar — der Bewegungsrechner (IK) '
             'konnte nicht gestartet werden. Bitte die Umgebung neu starten.'
         )
-    pose = ctx.ik.fk(cur[:5])
+    pose = ctx.ik.fk(cur[:_n(ctx)])
     if pose is None:
         raise WorkflowError('Aktuelle Position ist unbekannt.')
     _R, t = pose
@@ -1085,11 +1171,11 @@ def lift(ctx, args: dict[str, Any]) -> None:
     # so overriding j5 after the solve keeps the position to sub-grasp-tolerance
     # while preserving the held object's orientation.
     arm_q = list(above_q)
-    arm_q[4] = cur[4]
-    q_end = arm_q + [cur[5]]
+    arm_q[_roll_idx(ctx)] = cur[_roll_idx(ctx)]
+    q_end = arm_q + [cur[_n(ctx)]]
     # TRANSIT (straight-up lift) — route around any no-go zone. Optional per-move
     # „mit Tempo" override; None → workflow-global tempo.
-    safe_move(ctx, cur, q_end, DEFAULT_APPROACH_DURATION_S, roll=cur[4],
+    safe_move(ctx, cur, q_end, DEFAULT_APPROACH_DURATION_S, roll=cur[_roll_idx(ctx)],
               tempo=_move_tempo(args))
     ctx.last_arm_joints = arm_q
     ctx.last_full_joints = q_end

@@ -44,6 +44,7 @@ from physical_ai_server.workflow.handlers.motion import (
 )
 from physical_ai_server.workflow.trajectory_builder import (
     DEFAULT_FPS,
+    JOINT_VELOCITY_LIMIT_RAD_S,
     build_segment,
     chunked_publish,
 )
@@ -60,7 +61,9 @@ REPLAY_SPEED_MAX = 3.0
 # pose to the first recorded waypoint (build_segment extends it if the arm is far
 # from the recording's start).
 DEFAULT_LEAD_IN_S = 1.5
-# Contract-B point layout: [j1, j2, j3, j4, j5, grip, t_s] — 6 joints then time.
+# Contract-B point layout: [j1..jn, grip, t_s] — (num_arm_joints + 2) floats.
+# 7 is the OMX width (n=5); extract_points/resegment_trajectory take the arm's
+# ``num_arm_joints`` and derive the width, asserting it EXACTLY (§16.4 rail #2).
 _POINT_LEN = 7
 
 
@@ -76,9 +79,14 @@ def clamp_speed(raw: Any) -> float:
     return max(REPLAY_SPEED_MIN, min(REPLAY_SPEED_MAX, val))
 
 
-def extract_points(traj: Any) -> list[list[float]]:
+def extract_points(traj: Any, num_arm_joints: int = 5) -> list[list[float]]:
     """Validate a CONTRACT-B trajectory (``{"fps", "points"}`` dict OR a bare
-    points list) and return the list of ``[j1..j5, grip, t_s]`` rows.
+    points list) and return the list of ``[j1..jn, grip, t_s]`` rows.
+
+    Width is asserted EXACTLY ``num_arm_joints + 2`` (§16.4 permanent rail #2):
+    a short row was always refused; a WIDE row used to be silently TRUNCATED
+    (``p[:_POINT_LEN]``) — an 8-wide edu6 point on a 5-DOF build would narrow
+    silently into a plausible-but-wrong command. Both directions now refuse.
 
     Raises a German ``WorkflowError`` on a malformed/short/corrupt recording so
     replay fails loud instead of driving garbage."""
@@ -88,12 +96,13 @@ def extract_points(traj: Any) -> list[list[float]]:
         points = traj
     if not isinstance(points, (list, tuple)) or len(points) < 2:
         raise WorkflowError('Die Aufnahme enthält keine Bewegung.')
+    point_len = int(num_arm_joints) + 2
     rows: list[list[float]] = []
     for p in points:
-        if not isinstance(p, (list, tuple)) or len(p) < _POINT_LEN:
+        if not isinstance(p, (list, tuple)) or len(p) != point_len:
             raise WorkflowError('Die Aufnahme ist beschädigt.')
         try:
-            row = [float(v) for v in p[:_POINT_LEN]]
+            row = [float(v) for v in p[:point_len]]
         except (TypeError, ValueError):
             raise WorkflowError('Die Aufnahme ist beschädigt.')
         if not all(math.isfinite(v) for v in row):
@@ -143,6 +152,8 @@ def resegment_trajectory(
     lead_in_floor_check=None,
     point_floor_check=None,
     with_velocities: bool = False,
+    num_arm_joints: int = 5,
+    velocity_limit: float = JOINT_VELOCITY_LIMIT_RAD_S,
 ) -> list[tuple[list[float], float]] | list[tuple[list[float], float, list[float]]]:
     """Turn a CONTRACT-B point list into a velocity-safe, monotonic-time waypoint
     stream ready for ``chunked_publish``.
@@ -180,8 +191,9 @@ def resegment_trajectory(
 
     ``points`` MUST already be validated (see :func:`extract_points`)."""
     speed = clamp_speed(speed)
+    width = int(num_arm_joints) + 1  # full joint vector: n arm joints + gripper
     seq: list[tuple[list[float], float]] = [
-        ([float(v) for v in p[:6]], float(p[6])) for p in points
+        ([float(v) for v in p[:width]], float(p[width])) for p in points
     ]
     segmented: list[tuple[list[float], float]] = []
     t_offset = 0.0
@@ -191,12 +203,13 @@ def resegment_trajectory(
     # Inf delta. Drop such a lead-in and fall back to the safe first-pose seed.
     use_lead_in = (
         lead_in_from is not None
-        and len(lead_in_from) >= 6
-        and all(math.isfinite(float(v)) for v in lead_in_from[:6])
+        and len(lead_in_from) >= width
+        and all(math.isfinite(float(v)) for v in lead_in_from[:width])
     )
     if use_lead_in:
-        lead = build_segment([float(v) for v in lead_in_from[:6]], seq[0][0],
-                             max(0.0, float(lead_in_duration)))
+        lead = build_segment([float(v) for v in lead_in_from[:width]], seq[0][0],
+                             max(0.0, float(lead_in_duration)),
+                             velocity_limit=velocity_limit)
         if lead_in_floor_check is not None:
             for q, _t in lead:
                 below = False
@@ -248,7 +261,7 @@ def resegment_trajectory(
             # Coincident/backwards timestamps (should not happen post-validation)
             # → one frame, so the arm still traverses q0→q1 at the velocity floor.
             dt = 1.0 / DEFAULT_FPS
-        seg = build_segment(q0, q1, dt)
+        seg = build_segment(q0, q1, dt, velocity_limit=velocity_limit)
         for q, t in seg:
             segmented.append((q, t_offset + t))
         if seg:
@@ -269,6 +282,10 @@ def replay_trajectory(ctx, args: dict[str, Any]) -> None:
     holds ``ctx.motion_lock`` for the publish (so a hat handler can't interleave),
     and polls ``ctx.should_stop`` between chunks so a Stop halts it. Works in sim
     too (``ctx.publisher`` is the SimArm sink)."""
+    from physical_ai_server.workflow.handlers.motion import (
+        _n as _num_joints,
+        _velocity_limit,
+    )
     name = (str(args.get('name') or '')).strip()
     if not name:
         raise WorkflowError('Kein Aufnahme-Name angegeben.')
@@ -276,7 +293,8 @@ def replay_trajectory(ctx, args: dict[str, Any]) -> None:
     traj = trajectories.get(name)
     if traj is None:
         raise WorkflowError(f'Unbekannte Aufnahme: {name}')
-    points = extract_points(traj)
+    n = _num_joints(ctx)
+    points = extract_points(traj, num_arm_joints=n)
     speed = clamp_speed(args.get('speed'))
 
     # Lead-in from the arm's current pose so the replay never jumps to the
@@ -284,7 +302,7 @@ def replay_trajectory(ctx, args: dict[str, Any]) -> None:
     # motion block).
     _require_seeded_start_pose(ctx)
     current = list(getattr(ctx, 'last_full_joints', None) or [])
-    lead_in = current if len(current) >= 6 else None
+    lead_in = current if len(current) >= n + 1 else None
 
     # Floor guard for the synthetic lead-in (the recorded points are reachable-
     # above-table by construction; the current-pose→start interpolation is not).
@@ -302,7 +320,7 @@ def replay_trajectory(ctx, args: dict[str, Any]) -> None:
         if getattr(ctx, 'z_table', None) is None and getattr(ctx, 'table_plane', None) is None:
             return False
         try:
-            pose = ik.fk([float(v) for v in q6[:5]])
+            pose = ik.fk([float(v) for v in q6[:n]])
         except Exception:  # noqa: BLE001
             return False
         if pose is None:
@@ -315,7 +333,8 @@ def replay_trajectory(ctx, args: dict[str, Any]) -> None:
 
     segmented = resegment_trajectory(
         points, speed, lead_in_from=lead_in, lead_in_floor_check=_lead_floor,
-        point_floor_check=_lead_floor, with_velocities=True)
+        point_floor_check=_lead_floor, with_velocities=True,
+        num_arm_joints=n, velocity_limit=_velocity_limit(ctx))
     if not segmented:
         raise WorkflowError('Die Aufnahme enthält keine Bewegung.')
 
@@ -348,4 +367,4 @@ def replay_trajectory(ctx, args: dict[str, Any]) -> None:
     # Chain subsequent motion from the final replayed pose.
     final_q = list(segmented[-1][0])
     ctx.last_full_joints = final_q
-    ctx.last_arm_joints = final_q[:5]
+    ctx.last_arm_joints = final_q[:n]

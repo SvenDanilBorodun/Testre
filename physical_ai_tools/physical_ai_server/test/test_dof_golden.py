@@ -52,9 +52,51 @@ _FIXTURE = Path(__file__).parent / 'fixtures' / 'dof_golden.json'
 _REGEN = os.environ.get('EDUBOTICS_REGEN_GOLDEN', '').strip() not in ('', '0')
 
 
+# Absolute float tolerance for fixture comparison. The fixture was generated
+# on one platform; BLAS/libm last-ULP divergence across arch/backends
+# (macOS Accelerate vs linux OpenBLAS — observed ~1e-17 in CI) makes exact
+# `==` platform-sensitive. 1e-9 rad/m is ~7 orders below any real OMX
+# behaviour drift (jog steps ~1e-2, velocity-floor effects ≥1e-3), so the
+# guard loses nothing. Structure, ints and strings still compare EXACTLY.
+_FLOAT_TOL = 1e-9
+
+
+def _assert_structurally_equal(key: str, got, want, path: str) -> None:
+    if isinstance(want, float) or isinstance(got, float):
+        assert isinstance(got, (int, float)) and isinstance(want, (int, float)), (
+            f'golden vector {key!r} CHANGED at {path}: type {type(got).__name__} '
+            f'vs {type(want).__name__}')
+        assert abs(float(got) - float(want)) <= _FLOAT_TOL, (
+            f'golden vector {key!r} CHANGED at {path}: {got!r} != {want!r} '
+            f'(|Δ| > {_FLOAT_TOL}) — a DOF slice altered OMX behaviour. Only '
+            'regenerate on an intended, reviewed behaviour change.')
+        return
+    if isinstance(want, list):
+        assert isinstance(got, list) and len(got) == len(want), (
+            f'golden vector {key!r} CHANGED at {path}: length/shape '
+            f'{len(got) if isinstance(got, list) else type(got).__name__} vs '
+            f'{len(want)}')
+        for i, (g, w) in enumerate(zip(got, want)):
+            _assert_structurally_equal(key, g, w, f'{path}[{i}]')
+        return
+    if isinstance(want, dict):
+        assert isinstance(got, dict) and set(got) == set(want), (
+            f'golden vector {key!r} CHANGED at {path}: keys '
+            f'{sorted(got) if isinstance(got, dict) else type(got).__name__} '
+            f'vs {sorted(want)}')
+        for k in want:
+            _assert_structurally_equal(key, got[k], want[k], f'{path}.{k}')
+        return
+    assert got == want, (
+        f'golden vector {key!r} CHANGED at {path}: {got!r} != {want!r} — a '
+        'DOF slice altered OMX behaviour. Only regenerate on an intended, '
+        'reviewed behaviour change.')
+
+
 def _check(key: str, value):
-    """Assert ``value`` equals the committed fixture entry (exact ==), or write
-    it when regenerating. Values must be JSON-serializable (lists/floats)."""
+    """Assert ``value`` matches the committed fixture entry (structure/ints/
+    strings exact, floats within ``_FLOAT_TOL``), or write it when
+    regenerating. Values must be JSON-serializable (lists/floats)."""
     # Round-trip through JSON so the compared object has exactly the types the
     # fixture will load with (tuples → lists, np scalars → floats).
     value = json.loads(json.dumps(value))
@@ -72,10 +114,7 @@ def _check(key: str, value):
         'test/test_dof_golden.py once and commit test/fixtures/dof_golden.json')
     data = json.loads(_FIXTURE.read_text(encoding='utf-8'))
     assert key in data, f'fixture key {key!r} missing — regenerate + review'
-    assert value == data[key], (
-        f'golden vector {key!r} CHANGED — a DOF slice altered OMX behaviour '
-        '(must be bit-identical). Diff the structures; only regenerate on an '
-        'intended, reviewed behaviour change.')
+    _assert_structurally_equal(key, value, data[key], '$')
 
 
 @pytest.fixture(autouse=True)

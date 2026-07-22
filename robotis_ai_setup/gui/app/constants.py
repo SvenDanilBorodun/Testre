@@ -244,6 +244,7 @@ ROS_DOMAIN_ID = 30
 ROBOT_PROFILES = {
     "omx_full":     {"display_de": "OMX – Voll",                          "follower_only": False, "scan_requires_leader": True},
     "omx_follower": {"display_de": "OMX – Roboter Studio (nur Follower)", "follower_only": True,  "scan_requires_leader": False},
+    "edu6_studio":  {"display_de": "EduBotics 6-Achs – Roboter Studio",   "follower_only": True,  "scan_requires_leader": False},
 }
 DEFAULT_ROBOT_PROFILE = "omx_full"
 

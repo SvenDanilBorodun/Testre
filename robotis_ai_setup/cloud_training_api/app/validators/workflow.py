@@ -47,15 +47,24 @@ TEMPO_MIN = 0.5
 TEMPO_MAX = 2.0
 
 # Batch-2b recorded replay trajectories (CONTRACT B):
-#   { "fps": <number>, "points": [ [j1, j2, j3, j4, j5, grip, t_s], ... ] }
+#   { "fps": <number>, "points": [ [j1..jn, grip, t_s], ... ] }
 # validate_trajectory guards the `points` list (a hand-guided recording) before
 # it hits Postgres. 5000 points at 30 fps is ~166 s of motion — far beyond any
 # real hand-guided demo, so it is a hard OOM ceiling, not a UX limit; the JSON
 # byte cap (mirrors the blockly cap) is the binding guard for adversarial input.
 MAX_TRAJECTORY_POINTS = 5000
 MAX_TRAJECTORY_JSON_BYTES = 256 * 1024
-# Each point is exactly [j1..j5, gripper, t_seconds] — 7 finite numbers.
+# Each point is exactly (num_arm_joints + 2) finite numbers: joints + gripper +
+# t_seconds. The width follows the ARM FAMILY the recording was made on — the
+# `robot_profile` column (migration 035): 'omx_f' (5 arm joints → 7-wide, the
+# pre-edu6 default for untagged rows/clients) or 'edu6_studio' (6 → 8-wide).
+# The id set mirrors the server registry's data_robot_type values — duplicated
+# here like TEMPO_MIN/MAX (the cloud cannot import the server package).
 TRAJECTORY_POINT_LEN = 7
+TRAJECTORY_ROBOT_PROFILES: dict = {
+    "omx_f": 7,
+    "edu6_studio": 8,
+}
 # Sanity ceiling on the recording rate. The recorder runs at 20-30 Hz; a value
 # past this is a client bug and would make replay timing nonsensical.
 TRAJECTORY_FPS_MAX = 1000.0
@@ -265,20 +274,25 @@ def validate_trajectory_name(name: Any) -> str:
     return trimmed
 
 
-def validate_trajectory(points: Any, fps: Any = None) -> None:
+def validate_trajectory(points: Any, fps: Any = None,
+                        robot_profile: Any = None) -> None:
     """Defang a malicious or runaway recorded replay trajectory (CONTRACT B)
     before it hits Postgres.
 
     ``points`` must be a non-empty list of ≤ ``MAX_TRAJECTORY_POINTS`` entries,
-    each a list of exactly ``TRAJECTORY_POINT_LEN`` finite numbers
-    (``[j1..j5, gripper, t_s]`` — ``bool`` excluded, it is an ``int`` subclass
-    and never a joint value; ``json.loads`` accepts bare ``NaN``/``Infinity`` so
-    a finite-check is required). The total serialised size is capped at
-    ``MAX_TRAJECTORY_JSON_BYTES`` (mirrors ``validate_blockly_json``). When
-    ``fps`` is supplied it must be a positive finite number ≤ ``TRAJECTORY_FPS_MAX``.
-    German HTTP 400/413 on any violation. Defense-in-depth only — replay is a
-    teaching feature, not a safety envelope; the cloud gate guards shape/size.
+    each a list of exactly ``point_len`` finite numbers — the width for the
+    recording's arm family (``robot_profile``: see
+    ``TRAJECTORY_ROBOT_PROFILES``; ``None``/absent = the 7-wide OMX default,
+    what every pre-edu6 client sends). ``bool`` is excluded (an ``int``
+    subclass, never a joint value); ``json.loads`` accepts bare
+    ``NaN``/``Infinity`` so a finite-check is required. The total serialised
+    size is capped at ``MAX_TRAJECTORY_JSON_BYTES`` (mirrors
+    ``validate_blockly_json``). When ``fps`` is supplied it must be a positive
+    finite number ≤ ``TRAJECTORY_FPS_MAX``. German HTTP 400/413 on any
+    violation. Defense-in-depth only — replay is a teaching feature, not a
+    safety envelope; the cloud gate guards shape/size.
     """
+    point_len = validate_trajectory_robot_profile(robot_profile)
     if not isinstance(points, list):
         raise HTTPException(
             status_code=400, detail="Bewegungsdaten müssen eine Liste von Punkten sein."
@@ -302,20 +316,37 @@ def validate_trajectory(points: Any, fps: Any = None) -> None:
             detail=f"Bewegung ist zu groß (>{MAX_TRAJECTORY_JSON_BYTES // 1024} KB).",
         )
     for point in points:
-        _trajectory_point(point)
+        _trajectory_point(point, point_len)
     if fps is not None:
         _validate_fps(fps)
 
 
-def _trajectory_point(value: Any) -> list[float]:
-    """Validate one recorded sample: exactly ``TRAJECTORY_POINT_LEN`` finite
-    numbers (``bool`` excluded). Raises HTTP 400 in German on any violation.
-    Mirrors ``_corner`` but for the 7-wide ``[j1..j5, grip, t_s]`` point."""
-    if not isinstance(value, list) or len(value) != TRAJECTORY_POINT_LEN:
+def validate_trajectory_robot_profile(robot_profile: Any) -> int:
+    """Validate an optional trajectory ``robot_profile`` tag and return the
+    point width it implies. ``None``/empty → the OMX default width (untagged
+    pre-edu6 rows and clients). An unknown id → German HTTP 400 (the allowlist
+    is the small ``TRAJECTORY_ROBOT_PROFILES`` map)."""
+    if robot_profile is None or (isinstance(robot_profile, str)
+                                 and not robot_profile.strip()):
+        return TRAJECTORY_POINT_LEN
+    if not isinstance(robot_profile, str)             or robot_profile.strip() not in TRAJECTORY_ROBOT_PROFILES:
+        raise HTTPException(
+            status_code=400,
+            detail="Unbekanntes Roboterprofil für diese Bewegung.",
+        )
+    return TRAJECTORY_ROBOT_PROFILES[robot_profile.strip()]
+
+
+def _trajectory_point(value: Any, point_len: int = TRAJECTORY_POINT_LEN) -> list[float]:
+    """Validate one recorded sample: exactly ``point_len`` finite numbers
+    (``bool`` excluded; 7 for OMX recordings, 8 for edu6 — joints + gripper +
+    t_s). Raises HTTP 400 in German on any violation. Mirrors ``_corner`` but
+    for the Contract-B point."""
+    if not isinstance(value, list) or len(value) != point_len:
         raise HTTPException(
             status_code=400,
             detail=(
-                f"Bewegungspunkt ungültig: jeder Punkt muss {TRAJECTORY_POINT_LEN} "
+                f"Bewegungspunkt ungültig: jeder Punkt muss {point_len} "
                 "Zahlen enthalten."
             ),
         )

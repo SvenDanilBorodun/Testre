@@ -277,6 +277,19 @@ def _gripper_closed(ctx) -> float:
     return val if math.isfinite(val) else GRIPPER_CLOSED_RAD
 
 
+def _grasp_held_margin(ctx) -> float:
+    """Per-profile grasp-held margin (rad above the commanded close that a
+    blocked jaw must read to count as HELD). OMX 0.15; edu6 0.12."""
+    val = getattr(ctx, 'grasp_held_margin_rad', None)
+    if val is None:
+        return GRASP_HELD_MARGIN_RAD
+    try:
+        val = float(val)
+    except (TypeError, ValueError):
+        return GRASP_HELD_MARGIN_RAD
+    return val if (math.isfinite(val) and val > 0.0) else GRASP_HELD_MARGIN_RAD
+
+
 def _velocity_limit(ctx) -> float:
     """Per-profile joint velocity limit for ``build_segment``'s floor (OMX 4.8,
     edu6 URDF 5.45)."""
@@ -906,9 +919,19 @@ def _held_threshold_rad(ctx) -> float:
         commanded = float(commanded)
     except (TypeError, ValueError):
         return GRASP_HELD_MAX_RAD
-    if not math.isfinite(commanded) or commanded >= 0.0:
+    if not math.isfinite(commanded):
         return GRASP_HELD_MAX_RAD
-    return commanded + GRASP_HELD_MARGIN_RAD
+    closed = _gripper_closed(ctx)
+    opened = _gripper_open(ctx)
+    if closed < 0.0 and commanded >= 0.0:
+        # OMX rule, verbatim: on a negative-close gripper a non-negative
+        # "commanded close" is garbage — fall back to the fixed threshold.
+        return GRASP_HELD_MAX_RAD
+    if not (min(closed, opened) <= commanded < max(closed, opened)):
+        # Band sanity for a non-negative-close profile (edu6 closes 0..1.75):
+        # a command outside the physical band is equally garbage.
+        return GRASP_HELD_MAX_RAD
+    return commanded + _grasp_held_margin(ctx)
 
 
 def check_grasp_held(ctx) -> bool | None:

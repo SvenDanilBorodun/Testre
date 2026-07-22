@@ -59,16 +59,44 @@ def test_resolve_strips_whitespace():
 
 def test_caps_json_exact_full():
     obj = json.loads(rp.capabilities_json(rp.resolve('omx_full')))
-    assert set(obj.keys()) == set(_CAP_KEYS)
+    # The six booleans are the ORIGINAL React contract (adopt-guard requires
+    # all six); the geometry keys are the edu6-era additive extension.
+    assert set(_CAP_KEYS) <= set(obj.keys())
     assert all(obj[k] is True for k in _CAP_KEYS)
+    assert obj['arm_joints'] == 5
+    assert obj['joint_names'] == list(rp._OMX_JOINT_NAMES)
+    assert obj['urdf_asset_id'] == 'omx_f'
+    assert obj['gripper_open_rad'] == 0.8
+    assert obj['gripper_closed_rad'] == -0.5
+    # None-valued optionals are OMITTED, never sent as null.
+    assert 'reach_inner_m' not in obj and 'gripper_mm_per_rad' not in obj
 
 
 def test_caps_json_exact_follower():
     obj = json.loads(rp.capabilities_json(rp.resolve('omx_follower')))
-    assert obj == {
+    for key, want in {
         'recordable': False, 'editable': False, 'trainable': False,
         'inferable': True, 'roboter_studio': True, 'has_leader': False,
-    }
+    }.items():
+        assert obj[key] is want
+    assert obj['arm_joints'] == 5
+
+
+def test_caps_json_exact_edu6():
+    obj = json.loads(rp.capabilities_json(rp.resolve('edu6_studio')))
+    for key, want in {
+        'recordable': False, 'editable': False, 'trainable': False,
+        'inferable': False, 'roboter_studio': True, 'has_leader': False,
+    }.items():
+        assert obj[key] is want
+    assert obj['arm_joints'] == 6
+    assert obj['joint_names'] == list(rp._EDU6_JOINT_NAMES)
+    assert obj['urdf_asset_id'] == 'edu6'
+    assert obj['reach_inner_m'] == 0.09
+    assert obj['reach_outer_m'] == 0.21
+    assert obj['gripper_open_rad'] == 1.75
+    assert obj['gripper_closed_rad'] == 0.0
+    assert obj['gripper_mm_per_rad'] == 25.2
 
 
 def test_caps_json_is_compact():
@@ -134,3 +162,84 @@ def test_profiles_share_geometry_differ_only_in_identity():
 def test_registry_ids_match_keys():
     for key, prof in rp.ROBOT_PROFILES.items():
         assert prof.profile_id == key
+
+
+# --- edu6_studio profile (docs/plans/edu6-studio-arm.md D1..D8) --------------
+
+def test_resolve_edu6():
+    prof = rp.resolve('edu6_studio')
+    assert prof.profile_id == 'edu6_studio'
+    assert prof.display_name_de == 'EduBotics 6-Achs – Roboter Studio'
+    assert prof.data_robot_type == 'edu6_studio'   # NEW config namespace,
+    #                                                never 'omx_f' (D-rule §4.2)
+    assert prof.follower_only is True
+    assert prof.num_arm_joints == 6
+    assert prof.roll_joint_index == 5
+    assert prof.ik_backend == 'edu6'
+    assert prof.collision_enabled is False
+    assert prof.velocity_limit_rad_s == 5.45
+    assert prof.camera_roles == ('scene',)
+    assert prof.torque_service == '/edu6/set_torque'
+
+
+def test_omx_profiles_keep_default_seam_values():
+    # The OMX rows must be byte-identical to the pre-edu6 behaviour: every new
+    # seam field stays at its OMX default.
+    for pid in ('omx_full', 'omx_follower'):
+        prof = rp.resolve(pid)
+        assert prof.ik_backend == 'omx'
+        assert prof.roll_joint_index is None
+        assert prof.velocity_limit_rad_s is None
+        assert prof.collision_enabled is True
+        assert prof.torque_service == '/dynamixel_hardware_interface/set_dxl_torque'
+        assert prof.camera_roles == ('gripper', 'scene')
+        assert prof.grasp_held_margin_rad is None
+        assert prof.sim_close_threshold_rad is None
+
+
+def test_no_drift_edu6_vs_edu6_ik():
+    # The profile mirrors the solver's authoritative values (edu6_ik is the
+    # geometry source; the profile is the registry mirror — same no-drift
+    # contract as the OMX ↔ motion.py pair).
+    from physical_ai_server.workflow import edu6_ik
+    prof = rp.resolve('edu6_studio')
+    solver = prof.build_ik()
+    assert type(solver).__name__ == 'Edu6IKSolver'
+    assert solver.num_joints() == prof.num_arm_joints
+    assert solver.base_axis_x == edu6_ik.BASE_AXIS_X_WORLD
+    assert prof.tool_length_m == edu6_ik._L_TOOL
+    # HOME is strictly inside the solver's joint limits with ≥0.15 rad margin
+    # and a non-degenerate wrist seed in the relieved branch.
+    for value, (lo, hi) in zip(prof.home_joints_rad, solver.joint_limits):
+        assert lo + 0.15 <= value <= hi - 0.15
+    assert prof.home_joints_rad[4] >= 0.3
+
+
+def test_no_drift_edu6_vs_catalog():
+    # The edu6 catalog close sits inside the profile's gripper band with more
+    # than the grasp-held margin of squeeze headroom against the 30 mm cube.
+    from physical_ai_server.workflow.object_catalog import fixed_catalog
+    prof = rp.resolve('edu6_studio')
+    cat = fixed_catalog('edu6_studio')
+    recipe = cat.recipe_for_type('wuerfel')
+    assert prof.gripper_closed_rad <= recipe.gripper_close_rad < prof.gripper_open_rad
+    # cube blocks at ~object_width / mm_per_rad above closed:
+    block = (recipe.object_width_m * 1000.0) / prof.gripper_mm_per_rad
+    assert block > recipe.gripper_close_rad + prof.grasp_held_margin_rad
+    # sim blocked readback must clear the per-object threshold too:
+    assert prof.sim_held_block_offset_rad > prof.grasp_held_margin_rad
+
+
+def test_registry_wide_invariants():
+    for prof in rp.ROBOT_PROFILES.values():
+        assert len(prof.joint_names) == prof.num_arm_joints + 1
+        assert len(prof.home_joints_rad) == prof.num_arm_joints
+        assert len(prof.safe_home_arm_rad) == prof.num_arm_joints
+        assert prof.gripper_open_rad != prof.gripper_closed_rad
+        roll = (prof.roll_joint_index if prof.roll_joint_index is not None
+                else prof.num_arm_joints - 1)
+        assert 0 <= roll < prof.num_arm_joints
+        assert len(prof.camera_roles) >= 1
+        # 'scene' is mandatory everywhere (Roboter Studio perception).
+        assert 'scene' in prof.camera_roles
+        assert prof.torque_service.startswith('/')

@@ -2491,8 +2491,16 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 client = getattr(self, '_dxl_torque_client', None)
                 if client is None:
                     from rclpy.callback_groups import ReentrantCallbackGroup
+                    # ArmProfile seam (edu6 §3.4): the torque service name comes
+                    # from the resolved profile (OMX default = the Dynamixel HW
+                    # interface; edu6 = its own driver node, which ALSO aliases
+                    # the legacy name so a stale client can never silently fail
+                    # to disable torque).
+                    service_name = getattr(
+                        getattr(self, '_arm_profile', None), 'torque_service',
+                        None) or '/dynamixel_hardware_interface/set_dxl_torque'
                     client = self.create_client(
-                        SetBool, '/dynamixel_hardware_interface/set_dxl_torque',
+                        SetBool, service_name,
                         callback_group=ReentrantCallbackGroup())
                     self._dxl_torque_client = client
                 if not client.wait_for_service(timeout_sec=2.0):
@@ -4484,6 +4492,13 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             home_full_joints=(
                 [float(v) for v in _home] + [float(_g_open)]
                 if _home is not None and _g_open is not None else None),
+            # Per-profile grasp-classifier values (None → OMX module defaults);
+            # a radian-band gripper (edu6 0..1.75, closes DOWNWARD from open)
+            # needs its own close threshold / blocked offsets.
+            close_threshold_rad=getattr(_profile, 'sim_close_threshold_rad', None),
+            held_block_offset_rad=getattr(
+                _profile, 'sim_held_block_offset_rad', None),
+            held_floor_rad=getattr(_profile, 'sim_held_floor_rad', None),
         )
         self._sim_arm = sim_arm
         # 1x1 non-None dummy frame: perception_blocks._scene_frame only checks
@@ -4518,7 +4533,8 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         and user. Re-read each workflow start so an EDUBOTICS_TAG_SIZE_M change
         applies on the next run without an environment restart."""
         from physical_ai_server.workflow.object_catalog import fixed_catalog
-        return fixed_catalog()
+        return fixed_catalog(getattr(
+            getattr(self, '_arm_profile', None), 'profile_id', None))
 
     def _load_object_catalog_tolerant(self):
         """Like ``_load_object_catalog`` but returns ``None`` on a corrupt /

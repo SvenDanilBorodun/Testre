@@ -76,6 +76,18 @@ _OMX_GRIPPER_CLOSED_RAD = -0.5
 _OMX_JOINT_NAMES = ('joint1', 'joint2', 'joint3', 'joint4', 'joint5',
                     'gripper_joint_1')
 
+# edu6_studio geometry (follower_arm_modified_final1.urdf; derivation record in
+# docs/plans/edu6-studio-arm.md). HOME is the compact over-base fold derived
+# 2026-07-22 (tip within 39 mm of the joint-1 axis, min mesh gap 32.3 mm,
+# θ5 = +0.7 — a non-degenerate seed in the working (relieved) branch). The
+# gripper channel is the end_gear servo angle in RADIANS: 0 = jaws closed …
+# 1.75 = open command (physical stop ≈ 1.7857; jaw ≈ 25.2 mm/rad). Joint names
+# are URDF-native so /joint_states, the sim publisher and the web twin (whose
+# <mimic> fingers key off end_gear_joint) agree on one name set.
+_EDU6_HOME_JOINTS_RAD = (0.0, 0.70, -2.40, 0.0, 0.70, 0.0)
+_EDU6_JOINT_NAMES = ('joint1', 'joint2', 'joint3', 'joint4', 'joint5',
+                     'joint6', 'end_gear_joint')
+
 
 @dataclass(frozen=True)
 class Capabilities:
@@ -96,7 +108,7 @@ class Capabilities:
 class ArmProfile:
     profile_id: str            # EDUBOTICS_ROBOT_TYPE value
     display_name_de: str
-    data_robot_type: str       # server config basename ("omx_f") — dataset naming
+    data_robot_type: str       # server config NAMESPACE key + dataset naming
     follower_only: bool        # INITIAL EDUBOTICS_FOLLOWER_ONLY value
     capabilities: Capabilities
     home_joints_rad: tuple     # OMX: (0, -pi/2, pi/2, 0, 0)
@@ -106,15 +118,39 @@ class ArmProfile:
     num_arm_joints: int = 5
     joint_names: tuple = _OMX_JOINT_NAMES
     urdf_asset_id: str = 'omx_f'
+    # ── DOF-generalisation seams (consumed by the §16.4 slices) ─────────────
+    # None → the OMX module-constant fallbacks in the handlers' ctx accessors.
+    ik_backend: str = 'omx'            # build_ik dispatch ('omx' | 'edu6')
+    roll_joint_index: Optional[int] = None   # None → last arm joint (OMX: 4)
+    velocity_limit_rad_s: Optional[float] = None  # None → 4.8 (OMX URDF)
+    collision_enabled: bool = True     # False skips the teleop e-stop wiring
+    #                                    (safe ONLY for a profile that never
+    #                                    publishes /collision_flag — both OMX
+    #                                    profiles stay True FOREVER, §8)
+    tool_length_m: Optional[float] = None    # wrist→TCP (doc/tests; IK bakes it)
+    torque_service: str = '/dynamixel_hardware_interface/set_dxl_torque'
+    camera_roles: tuple = ('gripper', 'scene')   # GUI camera auto-assign order
+    reach_inner_m: Optional[float] = None    # React annulus (None → simConstants)
+    reach_outer_m: Optional[float] = None
+    gripper_mm_per_rad: Optional[float] = None   # jaw-opening display factor
+    grasp_held_margin_rad: Optional[float] = None   # None → motion 0.15
+    # Sim-arm grasp classifier values (None → sim_arm OMX module constants):
+    sim_close_threshold_rad: Optional[float] = None
+    sim_held_block_offset_rad: Optional[float] = None
+    sim_held_floor_rad: Optional[float] = None
 
     def build_ik(self, urdf_string: Optional[str] = None):
         """Return the arm's IK solver — the ``ik_factory`` seam.
 
-        OMX uses the closed-form analytical :class:`IKSolver`. Imported LAZILY so
-        this module stays importable in the deps-free unit-test stubs (the solver
-        pulls in NumPy). ``urdf_string`` is forwarded so the solver can verify its
-        baked OMX constants against a locally-available ``robot_description`` (it
-        never blocks on a cross-node fetch)."""
+        Dispatches on ``ik_backend``: OMX uses the closed-form analytical
+        :class:`IKSolver`; edu6 the closed-form :class:`Edu6IKSolver`. Imported
+        LAZILY so this module stays importable in the deps-free unit-test stubs
+        (both solvers pull in NumPy). ``urdf_string`` is forwarded so the OMX
+        solver can verify its baked constants against a locally-available
+        ``robot_description`` (never blocks on a cross-node fetch)."""
+        if self.ik_backend == 'edu6':
+            from physical_ai_server.workflow.edu6_ik import Edu6IKSolver
+            return Edu6IKSolver(urdf_string=urdf_string)
         from physical_ai_server.workflow.ik_solver import IKSolver
         return IKSolver(urdf_string=urdf_string)
 
@@ -163,12 +199,59 @@ _OMX_FOLLOWER = ArmProfile(
     urdf_asset_id='omx_f',
 )
 
+# edu6_studio — the 6-DOF Feetech follower-only Roboter-Studio arm (D1..D8 in
+# docs/plans/edu6-studio-arm.md). MUST stay a literal-kwarg call: the GUI↔server
+# lockstep test parses this with ast and requires literal profile_id= /
+# follower_only= / capabilities=Capabilities(..., has_leader=<literal>).
+_EDU6_STUDIO = ArmProfile(
+    profile_id='edu6_studio',
+    display_name_de='EduBotics 6-Achs – Roboter Studio',
+    # NEW namespace literal, never 'omx_f': init_ros_params reads the
+    # config-YAML top-level key equal to data_robot_type — leaving it omx_f
+    # silently inherits the OMX camera/joint lists.
+    data_robot_type='edu6_studio',
+    follower_only=True,
+    capabilities=Capabilities(
+        recordable=False,
+        editable=False,
+        trainable=False,
+        inferable=False,
+        roboter_studio=True,
+        has_leader=False,
+    ),
+    home_joints_rad=_EDU6_HOME_JOINTS_RAD,
+    # No separate collision safe-home: the teleop e-stop is disabled by
+    # construction on this arm (collision_enabled=False below), so the field
+    # mirrors HOME as unconsumed seam data.
+    safe_home_arm_rad=_EDU6_HOME_JOINTS_RAD,
+    gripper_open_rad=1.75,
+    gripper_closed_rad=0.0,
+    num_arm_joints=6,
+    joint_names=_EDU6_JOINT_NAMES,
+    urdf_asset_id='edu6',
+    ik_backend='edu6',
+    roll_joint_index=5,
+    velocity_limit_rad_s=5.45,
+    collision_enabled=False,
+    tool_length_m=0.1724,
+    torque_service='/edu6/set_torque',
+    camera_roles=('scene',),
+    reach_inner_m=0.09,
+    reach_outer_m=0.21,
+    gripper_mm_per_rad=25.2,
+    grasp_held_margin_rad=0.12,
+    sim_close_threshold_rad=1.5,
+    sim_held_block_offset_rad=0.19,
+    sim_held_floor_rad=0.05,
+)
+
 # Registry keyed by profile id. Keep ids + follower_only in lockstep with the
 # GUI thin descriptor (gui/app/constants.py::ROBOT_PROFILES) — cross-boundary
 # contract, tested each side.
 ROBOT_PROFILES: dict = {
     _OMX_FULL.profile_id: _OMX_FULL,
     _OMX_FOLLOWER.profile_id: _OMX_FOLLOWER,
+    _EDU6_STUDIO.profile_id: _EDU6_STUDIO,
 }
 
 DEFAULT_PROFILE_ID = 'omx_full'
@@ -193,19 +276,35 @@ def resolve(profile_id: Optional[str]) -> ArmProfile:
 
 
 def capabilities_json(profile: ArmProfile) -> str:
-    """Compact JSON capability manifest of a profile. The key set + names are the
-    cross-agent contract (React parses this string once per distinct value): the
-    six booleans ``recordable``, ``editable``, ``trainable``, ``inferable``,
-    ``roboter_studio``, ``has_leader``."""
+    """Compact JSON capability manifest of a profile.
+
+    The six booleans (``recordable``, ``editable``, ``trainable``,
+    ``inferable``, ``roboter_studio``, ``has_leader``) are the ORIGINAL
+    cross-agent contract — the React adopt-guard requires ALL SIX or the
+    manifest is ignored, and the tab filter reads only them. The additional
+    GEOMETRY keys (edu6, additive) feed the profile-driven React surfaces
+    (jog rows, sim reach annulus, URDF twin asset, gripper display); extras
+    are tolerated by the validator on both old and new clients, and the
+    ``None``-valued optionals are OMITTED rather than sent as null."""
     caps = profile.capabilities
-    return json.dumps(
-        {
-            'recordable': caps.recordable,
-            'editable': caps.editable,
-            'trainable': caps.trainable,
-            'inferable': caps.inferable,
-            'roboter_studio': caps.roboter_studio,
-            'has_leader': caps.has_leader,
-        },
-        separators=(',', ':'),
-    )
+    manifest: dict = {
+        'recordable': caps.recordable,
+        'editable': caps.editable,
+        'trainable': caps.trainable,
+        'inferable': caps.inferable,
+        'roboter_studio': caps.roboter_studio,
+        'has_leader': caps.has_leader,
+        'arm_joints': profile.num_arm_joints,
+        'joint_names': list(profile.joint_names),
+        'urdf_asset_id': profile.urdf_asset_id,
+        'gripper_open_rad': profile.gripper_open_rad,
+        'gripper_closed_rad': profile.gripper_closed_rad,
+    }
+    for key, value in (
+        ('reach_inner_m', profile.reach_inner_m),
+        ('reach_outer_m', profile.reach_outer_m),
+        ('gripper_mm_per_rad', profile.gripper_mm_per_rad),
+    ):
+        if value is not None:
+            manifest[key] = value
+    return json.dumps(manifest, separators=(',', ':'))

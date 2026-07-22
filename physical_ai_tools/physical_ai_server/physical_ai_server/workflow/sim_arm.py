@@ -86,10 +86,25 @@ class SimArm:
         objects: Optional[list[dict[str, Any]]] = None,
         num_arm_joints: int = 5,
         home_full_joints: Optional[list[float]] = None,
+        close_threshold_rad: Optional[float] = None,
+        held_block_offset_rad: Optional[float] = None,
+        held_floor_rad: Optional[float] = None,
     ) -> None:
         self._sink = joint_state_sink
         self._ik = ik
         self._objects: list[dict[str, Any]] = list(objects or [])
+        # Per-profile grasp-classifier values; None → the OMX module constants
+        # (edu6's radian-band gripper 0..1.75 supplies its own: a command below
+        # ~1.5 is a close attempt, a held block reads commanded + 0.19).
+        self._close_threshold = (float(close_threshold_rad)
+                                 if close_threshold_rad is not None
+                                 else _GRIPPER_CLOSE_THRESHOLD_RAD)
+        self._held_block_offset = (float(held_block_offset_rad)
+                                   if held_block_offset_rad is not None
+                                   else _HELD_BLOCK_OFFSET_RAD)
+        self._held_floor = (float(held_floor_rad)
+                            if held_floor_rad is not None
+                            else _HELD_BLOCKED_GRIPPER_RAD)
         # Arm-joint count (gripper index == n). 5 = OMX; an ArmProfile-driven
         # sim passes its own (edu6: 6) plus the matching HOME vector.
         self._n = int(num_arm_joints) if int(num_arm_joints) > 0 else 5
@@ -149,8 +164,8 @@ class SimArm:
             # Blocked angle scales with the commanded close so gentle per-object
             # closes still clear check_grasp_held's derived threshold (see the
             # constants above); the floor keeps deep closes at the pinned -0.1.
-            q[self._n] = max(_HELD_BLOCKED_GRIPPER_RAD,
-                             q[self._n] + _HELD_BLOCK_OFFSET_RAD)
+            q[self._n] = max(self._held_floor,
+                             q[self._n] + self._held_block_offset)
         return q
 
     def fk_xyz(self) -> Optional[tuple[float, float, float]]:
@@ -167,7 +182,7 @@ class SimArm:
         if len(q) < self._n + 1:
             return False
         # Only a close command can hold an object.
-        if q[self._n] >= _GRIPPER_CLOSE_THRESHOLD_RAD:
+        if q[self._n] >= self._close_threshold:
             return False
         xyz = self._fk_xyz(q)
         if xyz is None:

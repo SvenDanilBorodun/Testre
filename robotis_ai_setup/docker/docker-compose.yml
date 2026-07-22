@@ -44,6 +44,10 @@ services:
       - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-30}
       - FOLLOWER_PORT=${FOLLOWER_PORT}
       - LEADER_PORT=${LEADER_PORT}
+      # Robot profile id — entrypoint_omx.sh branches on it (edu6_studio →
+      # the Feetech driver node instead of the OMX bringup; default = today's
+      # OMX phases). The server container has its own copy further down.
+      - EDUBOTICS_ROBOT_TYPE=${EDUBOTICS_ROBOT_TYPE:-omx_full}
       - CAMERA_DEVICE_1=${CAMERA_DEVICE_1:-}
       - CAMERA_NAME_1=${CAMERA_NAME_1:-gripper}
       - CAMERA_DEVICE_2=${CAMERA_DEVICE_2:-}

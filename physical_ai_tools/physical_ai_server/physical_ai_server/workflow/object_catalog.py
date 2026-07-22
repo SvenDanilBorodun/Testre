@@ -242,13 +242,40 @@ _FIXED_CATALOG: dict = {
     },
 }
 
+# edu6_studio variant: the SAME physical objects + tag ids (one printed tag
+# sheet fleet-wide), only the gripper close differs — the edu6 gripper channel
+# is the end_gear servo angle in RADIANS (0 = closed … 1.75 = open command,
+# jaw ≈ 25.2 mm/rad). A 30 mm cube blocks the jaws at ≈ 1.19 rad; commanding
+# 1.0 leaves ≈ 0.19 rad of squeeze — comfortably above the profile's 0.12
+# grasp-held margin (bench-tunable at rig gates R3/R4).
+_FIXED_CATALOG_EDU6: dict = {
+    'types': {
+        'wuerfel': {
+            'label_de': 'Würfel',
+            'tag_ids': [20, 21],
+            'object_height_m': 0.030,
+            'grasp_depth_m': 0.015,
+            'gripper_close_rad': 1.0,
+            'approach_clear_m': 0.06,
+            'object_width_m': 0.030,
+            'color_hex': '#f59e0b',
+        },
+    },
+}
 
-def fixed_catalog() -> ObjectCatalog:
+
+def fixed_catalog(profile_id: Optional[str] = None) -> ObjectCatalog:
     """The single, fleet-wide named-object set — identical on every machine and
-    user. Parses the in-memory :data:`_FIXED_CATALOG` constant (no file I/O, so
-    it can never be missing/corrupt at runtime) and picks up the physical tag
-    size from ``EDUBOTICS_TAG_SIZE_M`` on each call (env-tunable, re-read per
-    workflow start)."""
+    user. Parses the in-memory constant for the arm family (no file I/O, so it
+    can never be missing/corrupt at runtime) and picks up the physical tag size
+    from ``EDUBOTICS_TAG_SIZE_M`` on each call (env-tunable, re-read per
+    workflow start).
+
+    ``profile_id``: ``'edu6_studio'`` selects the edu6 close values (radian
+    gripper band 0…1.75); anything else — both OMX profiles, ``None``, an
+    unknown id — the OMX set, byte-identical to before."""
+    if (profile_id or '').strip() == 'edu6_studio':
+        return parse_catalog(_FIXED_CATALOG_EDU6, gripper_close_range=(0.0, 1.75))
     return parse_catalog(_FIXED_CATALOG)
 
 
@@ -297,7 +324,8 @@ def _require_number(value, type_name: str, field: str, *, positive: bool = False
     return val
 
 
-def _parse_type(type_name: str, entry, seen_tags: dict[int, str]) -> GraspRecipe:
+def _parse_type(type_name: str, entry, seen_tags: dict[int, str],
+                gripper_close_range=None) -> GraspRecipe:
     if not isinstance(type_name, str) or not _TYPE_NAME_RE.match(type_name):
         raise ObjectCatalogError(
             f'Ungültiger Objekt-Schlüssel „{type_name}" — erlaubt sind nur '
@@ -359,15 +387,25 @@ def _parse_type(type_name: str, entry, seen_tags: dict[int, str]) -> GraspRecipe
         )
     gripper_close_rad = _require_number(
         entry.get('gripper_close_rad'), type_name, 'gripper_close_rad')
-    # Motion (check_grasp_held's derived threshold, close_on_object's clamp
-    # band) and SimArm (the close-command detection at < 0) both hard-assume a
-    # NEGATIVE close; a zero/positive value would silently break grasp
-    # verification, so refuse it here.
-    if gripper_close_rad >= 0.0:
-        raise ObjectCatalogError(
-            f'Objekt „{type_name}": Feld „gripper_close_rad" muss negativ sein '
-            '(Schließwinkel in rad — offen ist +0.8, geschlossen z. B. −0.5).'
-        )
+    # Close-value validation is PER ARM FAMILY. Default (None) = the OMX rule,
+    # verbatim: motion's held threshold + close_on_object's clamp band + the
+    # SimArm close-command detection all hard-assume a NEGATIVE close there.
+    # An explicit ``gripper_close_range=(lo, hi)`` (edu6: the radian jaw band
+    # 0…1.75, closes DOWNWARD from open) replaces it with a band check.
+    if gripper_close_range is None:
+        if gripper_close_rad >= 0.0:
+            raise ObjectCatalogError(
+                f'Objekt „{type_name}": Feld „gripper_close_rad" muss negativ sein '
+                '(Schließwinkel in rad — offen ist +0.8, geschlossen z. B. −0.5).'
+            )
+    else:
+        lo, hi = float(gripper_close_range[0]), float(gripper_close_range[1])
+        if not (lo <= gripper_close_rad < hi):
+            raise ObjectCatalogError(
+                f'Objekt „{type_name}": Feld „gripper_close_rad" muss zwischen '
+                f'{lo} und {hi} liegen (Schließwinkel in rad für diesen '
+                'Greifer).'
+            )
 
     # approach_clear_m is optional.
     if 'approach_clear_m' in entry:
@@ -410,12 +448,14 @@ def _parse_type(type_name: str, entry, seen_tags: dict[int, str]) -> GraspRecipe
 
 
 # ── public loader ────────────────────────────────────────────────────────────
-def parse_catalog(data) -> ObjectCatalog:
+def parse_catalog(data, gripper_close_range=None) -> ObjectCatalog:
     """Validate an already-decoded catalog dict and build an
     :class:`ObjectCatalog`. Raises German :class:`ObjectCatalogError` on any
     schema violation. A ``tag_size_m`` in the dict overrides
     ``EDUBOTICS_TAG_SIZE_M``; the env (default :data:`_DEFAULT_TAG_SIZE_M`) is
-    used when the dict omits it — which the fixed set does on purpose."""
+    used when the dict omits it — which the fixed set does on purpose.
+    ``gripper_close_range`` selects the per-arm-family close validation (see
+    :func:`_parse_type`; ``None`` = the OMX negative-close rule)."""
     if not isinstance(data, dict):
         raise ObjectCatalogError(
             'Objekt-Katalog ungültig: die oberste Ebene muss ein JSON-Objekt sein.'
@@ -444,7 +484,8 @@ def parse_catalog(data) -> ObjectCatalog:
     seen_tags: dict[int, str] = {}
     recipes: dict[str, GraspRecipe] = {}
     for type_name, entry in types.items():
-        recipes[type_name] = _parse_type(type_name, entry, seen_tags)
+        recipes[type_name] = _parse_type(type_name, entry, seen_tags,
+                           gripper_close_range=gripper_close_range)
 
     return ObjectCatalog(tag_size_m=tag_size_m, recipes=recipes)
 

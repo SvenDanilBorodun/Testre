@@ -107,6 +107,7 @@ class WorkflowContext:
     gripper_open_rad: float | None = None
     gripper_closed_rad: float | None = None
     velocity_limit_rad_s: float | None = None
+    grasp_held_margin_rad: float | None = None
     # Grasp-held threshold source: the most recent COMMANDED gripper close (rad)
     # this run — written ONLY by motion's close paths (_execute_pickup,
     # close_gripper, close_on_object), read by motion._held_threshold_rad.
@@ -605,6 +606,9 @@ class WorkflowManager:
                 if self._arm_profile else None,
                 velocity_limit_rad_s=getattr(
                     self._arm_profile, 'velocity_limit_rad_s', None)
+                if self._arm_profile else None,
+                grasp_held_margin_rad=getattr(
+                    self._arm_profile, 'grasp_held_margin_rad', None)
                 if self._arm_profile else None,
             )
 

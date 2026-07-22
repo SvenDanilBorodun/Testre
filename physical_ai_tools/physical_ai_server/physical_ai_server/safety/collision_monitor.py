@@ -237,6 +237,27 @@ class CollisionMonitorMixin:
         self._collision_detector = build_detector_from_env(
             os.environ.get, ARM_JOINT_NAMES, update_rate_hz=100.0)
 
+        # ArmProfile gate (edu6 §8): a profile with collision_enabled=False
+        # (edu6_studio — no gpio controller, no leader, nothing publishes
+        # /collision_flag) skips the ENTIRE ROS wiring below: no flag
+        # publisher/latch-clear, no watchdog, no second publisher on the
+        # command rail. The STATE attributes above stay initialized (idle tick
+        # + _assert_no_other_active read _collision_active). This skip is safe
+        # ONLY for such a profile — both OMX profiles ship collision_enabled=
+        # True FOREVER (the startup False latch-clear + the 5 Hz watchdog
+        # re-assert are load-bearing for them, incl. omx_follower).
+        _profile = getattr(self, '_arm_profile', None)
+        if _profile is not None and not getattr(_profile, 'collision_enabled', True):
+            self._collision_flag_pub = None
+            self._collision_leader_traj_pub = None
+            self._collision_status_pub = None
+            self._collision_watchdog = None
+            self.get_logger().info(
+                '[KOLLISION] Teleop collision guard not armed — the resolved '
+                f'ArmProfile ({getattr(_profile, "profile_id", "?")}) disables it '
+                'by construction (no force telemetry on this arm).')
+            return
+
         # Publishers. /collision_flag is RELIABLE + TRANSIENT_LOCAL so a (re)starting leader
         # broadcaster latches the current value; the watchdog re-asserts it regardless.
         # depth=1: with TRANSIENT_LOCAL the history depth is what gets REPLAYED to a

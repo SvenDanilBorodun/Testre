@@ -1,0 +1,33 @@
+physical_ai_server:
+  ros__parameters:
+    # edu6_studio — the 6-DOF Feetech follower-only Roboter-Studio arm.
+    # The TOP-LEVEL KEY equals ArmProfile.data_robot_type ('edu6_studio') —
+    # ALL config/*.yaml are glob-loaded and merged; init_ros_params selects
+    # this namespace by that key (the filename is incidental).
+    edu6_studio:
+      observation_list:
+        - scene
+        - state
+
+      # ONE camera, role 'scene' (D5): the wrist-cam mount is unused this
+      # release. camera_ingest_node publishes cam_id 1 → /scene/... exactly
+      # like the OMX follower-only rig.
+      camera_topic_list:
+        - scene:/scene/image_raw/compressed
+
+      joint_topic_list:
+        - follower:/joint_states
+        - leader:/leader/joint_trajectory
+
+      joint_list:
+        - leader
+
+      joint_order:
+        leader:
+          - joint1
+          - joint2
+          - joint3
+          - joint4
+          - joint5
+          - joint6
+          - end_gear_joint

@@ -444,7 +444,7 @@ def clone_workflow(workflow_id: str, user=Depends(get_current_user)) -> Workflow
     # trajectories is still a valid workflow.
     src_trajectories = (
         supabase.table("workflow_trajectories")
-        .select("name, samples, point_count, duration_s, fps")
+        .select("name, samples, point_count, duration_s, fps, robot_profile")
         .eq("workflow_id", workflow_id)
         .order("created_at", desc=True)
         .limit(16)
@@ -460,6 +460,7 @@ def clone_workflow(workflow_id: str, user=Depends(get_current_user)) -> Workflow
                 "point_count": t.get("point_count"),
                 "duration_s": t.get("duration_s"),
                 "fps": t.get("fps"),
+                "robot_profile": t.get("robot_profile"),
             }
             for t in src_trajectories
         ]
@@ -580,6 +581,12 @@ class TrajectoryCreate(BaseModel):
     # point_count when the client omits it.
     point_count: int | None = None
     duration_s: float | None = None
+    # ARM-FAMILY tag (migration 035): 'omx_f' | 'edu6_studio'. Selects the
+    # per-point width the validator enforces (7 vs 8) and rides the row so a
+    # replay client can refuse a cross-profile recording with a clean German
+    # message instead of a bare width error. None = untagged (pre-edu6 client)
+    # = the 7-wide OMX default.
+    robot_profile: str | None = None
 
 
 class TrajectoryResponse(BaseModel):
@@ -590,6 +597,7 @@ class TrajectoryResponse(BaseModel):
     point_count: int | None = None
     duration_s: float | None = None
     fps: float | None = None
+    robot_profile: str | None = None
     created_at: str
     updated_at: str
     # Full CONTRACT-B samples ({"fps", "points"}). Present on the single-get
@@ -599,10 +607,12 @@ class TrajectoryResponse(BaseModel):
 
 class TrajectorySamples(BaseModel):
     """The run-payload sibling: exactly what „spiele Bewegung ab" needs to
-    replay — CONTRACT B ({"fps", "points"})."""
+    replay — CONTRACT B ({"fps", "points"}) + the arm-family tag so the client
+    can refuse a cross-profile replay cleanly (None = untagged legacy row)."""
 
     fps: float
     points: list
+    robot_profile: str | None = None
 
 
 @router.post("/{workflow_id}/trajectories", response_model=TrajectoryResponse)
@@ -620,7 +630,8 @@ def create_trajectory(
     # The cloud must not store a name no block can reference (dead storage) or one
     # whose `/` breaks the by-name path route. Returns the trimmed name to store.
     name = validate_trajectory_name(payload.name)
-    validate_trajectory(payload.points, payload.fps)
+    validate_trajectory(payload.points, payload.fps,
+                        robot_profile=getattr(payload, 'robot_profile', None))
     # Guard the denormalised metadata too: point_count / duration_s are stored
     # verbatim from the body, so an out-of-int4-range count (500 on INSERT) or a
     # non-finite/negative duration (stored as Infinity) must be rejected here.
@@ -637,6 +648,7 @@ def create_trajectory(
         "point_count": point_count,
         "duration_s": payload.duration_s,
         "fps": payload.fps,
+        "robot_profile": (getattr(payload, 'robot_profile', None) or '').strip() or None,
     }
     result = supabase.table("workflow_trajectories").insert(insert_payload).execute()
     if not result.data:
@@ -662,7 +674,7 @@ def list_trajectories(
         supabase.table("workflow_trajectories")
         .select(
             "id, workflow_id, owner_user_id, name, point_count, duration_s, fps, "
-            "created_at, updated_at"
+            "robot_profile, created_at, updated_at"
         )
         .eq("workflow_id", workflow_id)
         .order("created_at", desc=True)
@@ -691,7 +703,7 @@ def get_trajectory_by_name(
     supabase = get_supabase()
     result = (
         supabase.table("workflow_trajectories")
-        .select("fps, samples")
+        .select("fps, samples, robot_profile")
         .eq("workflow_id", workflow_id)
         .eq("name", name)
         .order("created_at", desc=True)
@@ -711,7 +723,8 @@ def get_trajectory_by_name(
         # the samples blob would otherwise 500 on TrajectorySamples(fps=None). Fall
         # back to the manual-record sampler default (25 Hz) so replay still works.
         fps = 25.0
-    return TrajectorySamples(fps=fps, points=points)
+    return TrajectorySamples(fps=fps, points=points,
+                             robot_profile=row.get("robot_profile"))
 
 
 @router.get(

@@ -927,3 +927,70 @@ class TestWorkflowsRateLimitedPerUser(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ==================================================================
+# edu6 dual width + robot_profile tag (migration 035, plan §14)
+# ==================================================================
+class TestTrajectoryRobotProfile(unittest.TestCase):
+    def _pt8(self, t=0.0):
+        return [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, t]
+
+    def _pt7(self, t=0.0):
+        return [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, t]
+
+    def test_untagged_defaults_to_7_wide(self):
+        validate_trajectory([self._pt7(0.0), self._pt7(0.1)], fps=25.0)
+        with self.assertRaises(HTTPException) as ctx:
+            validate_trajectory([self._pt8(0.0), self._pt8(0.1)], fps=25.0)
+        self.assertEqual(ctx.exception.status_code, 400)
+        self.assertIn("7", ctx.exception.detail)
+
+    def test_omx_tag_is_7_wide(self):
+        validate_trajectory([self._pt7(0.0), self._pt7(0.1)], fps=25.0,
+                            robot_profile="omx_f")
+        with self.assertRaises(HTTPException):
+            validate_trajectory([self._pt8()], fps=25.0, robot_profile="omx_f")
+
+    def test_edu6_tag_is_8_wide_exactly(self):
+        validate_trajectory([self._pt8(0.0), self._pt8(0.1)], fps=25.0,
+                            robot_profile="edu6_studio")
+        # 7-wide on an edu6 tag refuses — no silent truncation/padding, and the
+        # German message names the expected width (8).
+        with self.assertRaises(HTTPException) as ctx:
+            validate_trajectory([self._pt7()], fps=25.0,
+                                robot_profile="edu6_studio")
+        self.assertEqual(ctx.exception.status_code, 400)
+        self.assertIn("8", ctx.exception.detail)
+
+    def test_unknown_profile_refused_in_german(self):
+        with self.assertRaises(HTTPException) as ctx:
+            validate_trajectory([self._pt7()], fps=25.0,
+                                robot_profile="omx_full")
+        self.assertEqual(ctx.exception.status_code, 400)
+        self.assertIn("Roboterprofil", ctx.exception.detail)
+
+    def test_empty_tag_counts_as_untagged(self):
+        validate_trajectory([self._pt7()], fps=25.0, robot_profile="  ")
+
+    def test_create_stores_and_by_name_returns_the_tag(self):
+        db = _FakeDB()
+        with _Ctx(db):
+            created = wf.create_workflow(_create_wf_payload(), user=_OWNER)
+            payload = _traj_payload(
+                points=[self._pt8(0.0), self._pt8(0.1)],
+                robot_profile="edu6_studio",
+            )
+            res = wf.create_trajectory(created.id, payload, user=_OWNER)
+            self.assertEqual(db.trajectories[res.id]["robot_profile"],
+                             "edu6_studio")
+            got = wf.get_trajectory_by_name(created.id, "Bewegung1", user=_OWNER)
+            self.assertEqual(got.robot_profile, "edu6_studio")
+            self.assertEqual(len(got.points[0]), 8)
+
+    def test_untagged_create_stores_null(self):
+        db = _FakeDB()
+        with _Ctx(db):
+            created = wf.create_workflow(_create_wf_payload(), user=_OWNER)
+            res = wf.create_trajectory(created.id, _traj_payload(), user=_OWNER)
+            self.assertIsNone(db.trajectories[res.id]["robot_profile"])

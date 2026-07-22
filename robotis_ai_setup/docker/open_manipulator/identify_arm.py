@@ -85,7 +85,12 @@ def identify_feetech(port_path: str) -> str:
     try:
         alive = [sid for sid in EDU6_IDS if bus.ping(sid)]
         if len(alive) != len(EDU6_IDS):
-            return "unknown" if not alive else f"partial:{len(alive)}"
+            # Port opened but ZERO servos answer: the single most likely student
+            # error is the 12-V supply being off (USB alone enumerates the port
+            # but never powers the servos). Give it a DISTINCT token so the GUI
+            # can say so, instead of a bare "unknown". A PARTIAL bus (some answer)
+            # keeps its own token.
+            return "feetech_silent" if not alive else f"partial:{len(alive)}"
         for sid in EDU6_IDS:
             try:
                 if bus.read_u16(sid, fb.REG_MODEL_NUMBER) != fb.STS3215_MODEL_NUMBER:
@@ -115,8 +120,9 @@ if __name__ == "__main__":
 
     if protocol == "feetech":
         result = identify_feetech(args[0])
-        if result in ("unknown",) or result.startswith("partial"):
-            # cross-probe: is an OMX arm plugged in instead? (§5.4)
+        if result in ("unknown", "feetech_silent") or result.startswith("partial"):
+            # cross-probe: is an OMX arm plugged in instead? (§5.4) — this also
+            # covers the silent bus: an OMX board answers Protocol-2.0 pings.
             other = identify(args[0])
             if other in ("leader", "follower"):
                 result = "omx_arm_found"

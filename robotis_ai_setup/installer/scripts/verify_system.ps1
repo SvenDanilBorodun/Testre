@@ -164,8 +164,8 @@ if ($usbipdOk) {
     try {
         $policyOut = usbipd policy list 2>&1 | Out-String
         Write-Diag "usbipd_policy_list" $policyOut
-        if ($policyOut -match "2F5D|2f5d|1[aA]86") {
-            Write-OK "usbipd policy contains VID 2F5D rule"
+        if ($policyOut -match "2F5D|2f5d|1[aA]86:55[dD]3") {
+            Write-OK "usbipd policy contains an arm VID rule (2F5D / 1A86:55D3)"
         } else {
             Write-WARN "usbipd policy has no VID 2F5D rule — students may need admin rights to attach"
             Write-Host "   (Re-run scripts\configure_usbipd.ps1 as Administrator to fix.)" -ForegroundColor Yellow

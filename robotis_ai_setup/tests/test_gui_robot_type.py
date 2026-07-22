@@ -126,7 +126,7 @@ class ScanArmsTypeAwareTest(unittest.TestCase):
     def _run_scan(self, profile_id, scan_result):
         diag_calls = []
 
-        def _diagnose(image=None):
+        def _diagnose(image=None, arm_family="omx"):
             diag_calls.append(image)
             return types.SimpleNamespace(message_de="Fehler\nDetails", details="x")
 
@@ -207,11 +207,13 @@ class TryRehydrateArmsTest(unittest.TestCase):
         follower_status, leader_status)."""
         rehydrate_calls = []
 
-        def _fake_rehydrate(leader_path, follower_path, require_leader=True):
+        def _fake_rehydrate(leader_path, follower_path, require_leader=True,
+                            arm_family="omx"):
             rehydrate_calls.append({
                 "leader": leader_path,
                 "follower": follower_path,
                 "require_leader": require_leader,
+                "arm_family": arm_family,
             })
             return rehydrate_result
 
@@ -271,6 +273,7 @@ class TryRehydrateArmsTest(unittest.TestCase):
             self._run(env, (None, follower))
         self.assertEqual(len(calls), 1)
         self.assertFalse(calls[0]["require_leader"])
+        self.assertEqual(calls[0]["arm_family"], "omx")  # omx_follower family
         self.assertEqual(calls[0]["leader"], "")  # leader_port or ""
         self.assertEqual(calls[0]["follower"], self._FOLLOWER_PATH)
         self.assertIs(owner.hardware.follower, follower)
@@ -279,6 +282,22 @@ class TryRehydrateArmsTest(unittest.TestCase):
         self.assertEqual(leader_status, [])  # no leader line for this type
         self.assertTrue(any("wiederhergestellt" in ln for ln in logs))
         self.assertEqual(update_calls, [True])
+
+    def test_edu6_env_threads_edu6_arm_family(self):
+        # (a2) An edu6_studio .env fast-rehydrates like a follower-only OMX kit,
+        # but the family must be threaded as "edu6" so the CH343 adapter is
+        # attached + matched (OMX defaults would silently no-op an edu6 rig).
+        follower = types.SimpleNamespace(
+            description="1a86 USB Single Serial", serial_path=self._FOLLOWER_PATH)
+        env = {
+            "EDUBOTICS_ROBOT_TYPE": "edu6_studio",
+            "FOLLOWER_PORT": self._FOLLOWER_PATH,
+            "LEADER_PORT": None,
+        }
+        _owner, _logs, calls, _update, _fs, _ls = self._run(env, (None, follower))
+        self.assertEqual(len(calls), 1)
+        self.assertFalse(calls[0]["require_leader"])
+        self.assertEqual(calls[0]["arm_family"], "edu6")
 
     def test_mismatch_prompts_rescan_and_never_auto_scans(self):
         # (b) fast_rehydrate_arms falls back with (None, None) — the method

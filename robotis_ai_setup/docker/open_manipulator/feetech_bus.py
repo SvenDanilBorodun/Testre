@@ -33,9 +33,11 @@ import time
 from typing import Optional
 
 # ── register map (STS3215; EEPROM unless noted) ──────────────────────────────
+REG_FIRMWARE_MAJOR = 0        # R, firmware major.minor at addr 0/1
 REG_MODEL_NUMBER = 3          # R, 2 bytes — 777 identifies an STS3215
 REG_ID = 5
 REG_BAUD_RATE = 6             # 0 = 1 Mbps (factory default)
+REG_RETURN_DELAY = 7          # status-return delay time (provisioned to 0)
 REG_MIN_POSITION_LIMIT = 9    # 2 bytes
 REG_MAX_POSITION_LIMIT = 11   # 2 bytes
 REG_MAX_TEMPERATURE = 13

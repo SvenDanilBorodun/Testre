@@ -192,9 +192,14 @@ def test_omx_profiles_keep_default_seam_values():
         assert prof.velocity_limit_rad_s is None
         assert prof.collision_enabled is True
         assert prof.torque_service == '/dynamixel_hardware_interface/set_dxl_torque'
-        assert prof.camera_roles == ('gripper', 'scene')
         assert prof.grasp_held_margin_rad is None
         assert prof.sim_close_threshold_rad is None
+    # camera_roles is the ONE seam that diverges between the two OMX profiles:
+    # omx_full is a two-camera kit (gripper first); omx_follower's lone camera is
+    # the SCENE camera (audit fix — 'gripper' first broke every follower-only RS
+    # kit's single-camera auto-assign). 'gripper' stays second for a 2-cam rig.
+    assert rp.resolve('omx_full').camera_roles == ('gripper', 'scene')
+    assert rp.resolve('omx_follower').camera_roles == ('scene', 'gripper')
 
 
 def test_no_drift_edu6_vs_edu6_ik():

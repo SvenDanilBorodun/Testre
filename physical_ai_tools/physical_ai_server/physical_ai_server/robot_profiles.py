@@ -197,6 +197,11 @@ _OMX_FOLLOWER = ArmProfile(
     num_arm_joints=5,
     joint_names=_OMX_JOINT_NAMES,
     urdf_asset_id='omx_f',
+    # A follower-only Roboter-Studio kit's LONE camera is the SCENE camera, not
+    # the gripper cam (perception + the config topics hang off the role name —
+    # 'gripper' first broke every RS kit's single-camera auto-assign). 'gripper'
+    # stays second for a 2-camera follower rig. omx_full keeps ('gripper','scene').
+    camera_roles=('scene', 'gripper'),
 )
 
 # edu6_studio — the 6-DOF Feetech follower-only Roboter-Studio arm (D1..D8 in

@@ -178,5 +178,69 @@ class FollowerOnlyRehydrateTest(unittest.TestCase):
         identify.assert_not_called()
 
 
+class Edu6FamilyRehydrateTest(unittest.TestCase):
+    """arm_family threads through the light rehydrate (edu6 §4.4): the CH343
+    adapter must be attached + matched by FAMILY, not the OMX 2F5D defaults —
+    otherwise an edu6 rig never self-heals on launch (attach/by-id both no-op)."""
+
+    _EDU6_FOLLOWER = "/dev/serial/by-id/usb-1a86_USB_Single_Serial_5AE-if00"
+
+    def test_edu6_family_threaded_to_attach_and_serial_discovery(self):
+        attach_calls, find_calls = [], []
+
+        def _attach(arm_family="omx"):
+            attach_calls.append(arm_family)
+            return _attached()
+
+        def _find(arm_family="omx"):
+            find_calls.append(arm_family)
+            return [self._EDU6_FOLLOWER]
+
+        with patch.object(device_manager, "self_heal_wsl_serial"), \
+                patch.object(device_manager, "attach_all_robotis_devices", _attach), \
+                patch.object(device_manager, "find_serial_paths_for_arms", _find), \
+                patch.object(device_manager, "start_scanner_container",
+                             MagicMock()) as scanner, \
+                patch.object(device_manager, "identify_arm_via_docker",
+                             MagicMock()) as identify, \
+                patch("time.sleep"):
+            leader, follower = device_manager.fast_rehydrate_arms(
+                "", self._EDU6_FOLLOWER, require_leader=False, arm_family="edu6")
+        self.assertIsNone(leader)
+        self.assertIsNotNone(follower)
+        self.assertEqual(follower.serial_path, self._EDU6_FOLLOWER)
+        # THE contract: the edu6 family reached BOTH family-aware helpers.
+        self.assertEqual(attach_calls, ["edu6"])
+        self.assertEqual(find_calls, ["edu6"])
+        # still the light path — no scanner container, no serial pings.
+        scanner.assert_not_called()
+        identify.assert_not_called()
+
+    def test_omx_default_still_uses_omx_family(self):
+        # The default call site is byte-identical: family defaults to "omx",
+        # and find_serial_paths_for_arms("omx") delegates to the OMX discovery.
+        attach_calls, find_calls = [], []
+
+        def _attach(arm_family="omx"):
+            attach_calls.append(arm_family)
+            return _attached()
+
+        def _find(arm_family="omx"):
+            find_calls.append(arm_family)
+            return [LEADER, FOLLOWER]
+
+        with patch.object(device_manager, "self_heal_wsl_serial"), \
+                patch.object(device_manager, "attach_all_robotis_devices", _attach), \
+                patch.object(device_manager, "find_serial_paths_for_arms", _find), \
+                patch.object(device_manager, "start_scanner_container", MagicMock()), \
+                patch.object(device_manager, "identify_arm_via_docker", MagicMock()), \
+                patch("time.sleep"):
+            leader, follower = device_manager.fast_rehydrate_arms(LEADER, FOLLOWER)
+        self.assertIsNotNone(leader)
+        self.assertIsNotNone(follower)
+        self.assertEqual(attach_calls, ["omx"])
+        self.assertEqual(find_calls, ["omx"])
+
+
 if __name__ == "__main__":
     unittest.main()

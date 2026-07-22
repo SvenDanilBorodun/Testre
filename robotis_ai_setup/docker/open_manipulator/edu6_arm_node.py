@@ -36,6 +36,7 @@ through one lock. 50 Hz, not 100: the usbipd/WSL2 tunnel jitters 100 Hz
 
 from __future__ import annotations
 
+import atexit
 import math
 import os
 import signal
@@ -91,13 +92,23 @@ _DEFAULT_SIGNS = (1, 1, 1, 1, 1, 1, 1)
 
 
 def _parse_signs(raw: str | None) -> tuple[int, ...]:
+    # An unset value is not an error (defaults apply silently); a MALFORMED
+    # value is bench-facing operator error — surface it once (English, plain
+    # print like the rest of the pre-rclpy init path) instead of silently
+    # running the wrong direction convention.
     if not raw or not raw.strip():
         return _DEFAULT_SIGNS
     try:
         vals = tuple(int(v) for v in raw.split(','))
     except (TypeError, ValueError):
+        print(f'[WARN] EDUBOTICS_EDU6_JOINT_SIGNS={raw!r} is not a comma-'
+              f'separated integer list — using defaults {_DEFAULT_SIGNS}.',
+              flush=True)
         return _DEFAULT_SIGNS
     if len(vals) != len(SERVO_IDS) or any(v not in (-1, 1) for v in vals):
+        print(f'[WARN] EDUBOTICS_EDU6_JOINT_SIGNS={raw!r} must be '
+              f'{len(SERVO_IDS)} values from {{-1, 1}} — using defaults '
+              f'{_DEFAULT_SIGNS}.', flush=True)
         return _DEFAULT_SIGNS
     return vals
 
@@ -166,6 +177,7 @@ class Edu6ArmNode(Node):
         self._traj_start: float = 0.0
         self._error_log_last: dict[int, float] = {}
         self._read_fail_streak = 0
+        self._shutdown_done = False
 
         # /joint_states — created by main() ONLY after the boot ping succeeded
         # (see the module docstring). Kept here for visibility of the QoS.
@@ -414,7 +426,12 @@ class Edu6ArmNode(Node):
     def shutdown(self) -> None:
         """Torque OFF + stop loops. The STS3215 has no watchdog — it holds its
         last goal energised forever if the host stops talking, so this runs on
-        SIGTERM/SIGINT/atexit (plan §8)."""
+        SIGTERM/SIGINT/atexit (plan §8). Idempotent: guarded so the finally-block
+        call and the atexit call cannot double-run (and cannot fight over the
+        already-closed bus)."""
+        if self._shutdown_done:
+            return
+        self._shutdown_done = True
         self._stop.set()
         try:
             self.set_torque(False)
@@ -455,9 +472,14 @@ def main() -> int:
 
     signal.signal(signal.SIGTERM, _sigterm)
 
-    node.start()
-    node.start_boot_home()
+    # The docstring/CLAUDE.md promise torque-off "on atexit" — make it literally
+    # true. shutdown() is idempotent, so this is a no-op once the finally block
+    # below has already torqued off on the normal SIGTERM→KeyboardInterrupt path.
+    atexit.register(node.shutdown)
+
     try:
+        node.start()
+        node.start_boot_home()
         rclpy.spin(node)
     except KeyboardInterrupt:
         pass

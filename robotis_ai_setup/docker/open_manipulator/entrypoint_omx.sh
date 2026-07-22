@@ -296,6 +296,11 @@ fi
 # Publish trajectory directly to /leader/joint_trajectory (the topic the
 # follower's arm_controller subscribes to via remapping).
 # Uses quintic smoothing over 3s so the follower glides to the leader position.
+# edu6_studio self-homes inside edu6_arm_node.py (quintic boot-home) and has no
+# gripper_joint_1 — the OMX FOLLOWER_ONLY home block below would otherwise wait
+# 10s for a joint that never arrives and log a false '[WARN] No /joint_states for
+# follower'. Skip the whole OMX Phase 3 for it; the OMX path is byte-identical.
+if [ "${EDUBOTICS_ROBOT_TYPE:-omx_full}" != "edu6_studio" ]; then
 if [ -n "$LEADER_POS" ] && [ "$LEADER_POS" != "null" ]; then
     echo "[LAUNCH] Moving follower to match leader (3s smooth trajectory)..."
     python3 -c "
@@ -554,6 +559,7 @@ rclpy.shutdown()
 else
     echo "[WARN] Could not read leader position — skipping sync"
 fi
+fi  # end edu6_studio Phase-3 skip guard
 
 # --- Phase 4: Launch Cameras ---
 if [ "$EDUBOTICS_CAMERA_SOURCE" = "native_bridge" ]; then

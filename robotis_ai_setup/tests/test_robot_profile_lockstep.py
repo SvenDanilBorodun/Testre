@@ -58,6 +58,24 @@ def _parse_gui_registry():
     return profiles, default_id
 
 
+def _armprofile_field_default(tree, field_name):
+    """The literal default of an ``ArmProfile`` dataclass field, parsed from
+    source. Used so a profile that OMITS an optional kwarg (e.g. omx_full's
+    camera_roles) is cross-checked against the value it actually inherits."""
+    for node in tree.body:
+        if isinstance(node, ast.ClassDef) and node.name == "ArmProfile":
+            for stmt in node.body:
+                if (isinstance(stmt, ast.AnnAssign)
+                        and isinstance(stmt.target, ast.Name)
+                        and stmt.target.id == field_name
+                        and stmt.value is not None):
+                    return ast.literal_eval(stmt.value)
+    raise AssertionError(
+        f"ArmProfile has no literal default for {field_name!r} in "
+        f"{_SERVER_PROFILES} — update this parser"
+    )
+
+
 def _parse_server_registry():
     """(registry, default_id) from the server robot_profiles.py SOURCE.
 
@@ -77,6 +95,11 @@ def _parse_server_registry():
     """
     tree = ast.parse(_SERVER_PROFILES.read_text(encoding="utf-8"))
 
+    # The ArmProfile dataclass default for camera_roles — profiles that OMIT the
+    # kwarg (omx_full) inherit it, so the lockstep check must resolve to the same
+    # value the GUI mirror would have to match (not "absent").
+    camera_roles_default = _armprofile_field_default(tree, "camera_roles")
+
     # Pass 1: ArmProfile(...) constructor calls by variable name.
     by_var = {}
     for node in tree.body:
@@ -89,7 +112,7 @@ def _parse_server_registry():
             continue
         info = {}
         for kw in call.keywords:
-            if kw.arg in ("profile_id", "follower_only"):
+            if kw.arg in ("profile_id", "follower_only", "camera_roles"):
                 info[kw.arg] = ast.literal_eval(kw.value)
             elif kw.arg == "capabilities" and isinstance(kw.value, ast.Call):
                 for cap_kw in kw.value.keywords:
@@ -101,6 +124,9 @@ def _parse_server_registry():
                     f"ArmProfile {node.targets[0].id} in {_SERVER_PROFILES} "
                     f"has no literal {key}= keyword — update this parser"
                 )
+        # camera_roles is optional at the call site (dataclass default) — resolve
+        # the omitted case to the class default so every profile carries one.
+        info.setdefault("camera_roles", camera_roles_default)
         by_var[node.targets[0].id] = info
 
     # Pass 2: the registry dict + the default id.
@@ -168,6 +194,31 @@ class RegistryLockstepTest(unittest.TestCase):
                 f"GUI follower_only vs server capabilities.has_leader "
                 f"disagree for {pid!r}",
             )
+
+    def test_camera_roles_agree_per_id(self):
+        # The GUI auto-assigns a single camera the PROFILE's first role and the
+        # server config topics hang off the same role list — the two registries
+        # must encode the SAME tuple per id. Until now nothing checked it, so the
+        # agreement (incl. omx_follower's scene-first fix) was by-value luck.
+        for pid, gui_prof in self.gui.items():
+            self.assertIn("camera_roles", gui_prof, pid)
+            self.assertEqual(
+                tuple(gui_prof["camera_roles"]),
+                tuple(self.server[pid]["camera_roles"]),
+                f"camera_roles for {pid!r} disagree between GUI and server",
+            )
+        # 'scene' is mandatory fleet-wide (Roboter Studio perception) — assert it
+        # on the shared contract so a future profile can't drop it on one side.
+        for pid, gui_prof in self.gui.items():
+            self.assertIn("scene", gui_prof["camera_roles"], pid)
+
+    def test_arm_family_note(self):
+        # arm_family is a GUI-ONLY field (it scopes the usbipd VID/PID attach);
+        # the server ArmProfile has no equivalent, so there is nothing to
+        # cross-check for it here. The GUI-internal arm_family↔ARM_USB_IDS
+        # contract is covered by test_feetech_bus.TestGuiDetectionSeam.
+        for pid, gui_prof in self.gui.items():
+            self.assertIn("arm_family", gui_prof, pid)
 
     def test_default_profile_id_lockstep(self):
         # Both sides fall back to the same id on unknown/absent values —

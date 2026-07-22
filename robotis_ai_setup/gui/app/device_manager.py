@@ -463,8 +463,17 @@ def _docker(*args: str) -> list[str]:
 def identify_arm_via_docker(serial_path: str, protocol: str = "dxl") -> str:
     """Run identify_arm.py inside the open_manipulator container.
 
-    Returns: "leader", "follower", "unknown", "edu6", a cross-probe token
-    ("omx_arm_found" / "edu6_arm_found"), or "error:..."
+    Returns: "leader", "follower", "unknown", "partial:N", "edu6", a cross-probe
+    token ("omx_arm_found" / "edu6_arm_found"), the silent-bus token
+    ("feetech_silent"), or "error:...".
+
+    identify_arm.py PRINTS its verdict to stdout but exits NON-ZERO for every
+    result that is not the expected arm (feetech: anything but "edu6"; dxl:
+    anything but leader/follower) — including the informational cross-probe /
+    silent-bus tokens. Those tokens are the whole point of the diagnosis, so the
+    stdout verdict WINS whenever it is present; the exit code / stderr only
+    matter when stdout is empty (a genuine crash), otherwise the tokens would be
+    swallowed as a bare "error:" and their scan-notice branches would be dead.
     """
     extra = ["--protocol=feetech"] if protocol == "feetech" else []
     try:
@@ -475,7 +484,10 @@ def identify_arm_via_docker(serial_path: str, protocol: str = "dxl") -> str:
             capture_output=True, text=True, timeout=15,
             **_SUBPROCESS_KWARGS,
         )
-        return result.stdout.strip() if result.returncode == 0 else f"error:{result.stderr.strip()}"
+        out = result.stdout.strip()
+        if out:
+            return out
+        return f"error:{result.stderr.strip()}"
     except (FileNotFoundError, subprocess.TimeoutExpired) as e:
         return f"error:{e}"
 
@@ -611,6 +623,19 @@ def scan_and_identify_arms(image: str, arm_family: str = "omx") -> tuple[Optiona
                 )
                 _append_diag("scan_and_identify_arms",
                              f"cross-probe: edu6 arm at {path} while family=omx")
+            elif role == "feetech_silent":
+                # Port opened but no servo answered — the arm is there but its
+                # 12-V supply is almost certainly off (USB alone enumerates the
+                # port; it does NOT power the servos). This is the single most
+                # likely edu6 setup mistake, so name it directly.
+                LAST_SCAN_NOTICE = (
+                    'Der Arm wurde gefunden, aber kein Servo antwortet — ist das '
+                    '12-V-Netzteil des Arms eingesteckt und eingeschaltet? Der '
+                    'USB-Anschluss allein versorgt die Servos nicht.'
+                )
+                _append_diag("scan_and_identify_arms",
+                             f"feetech_silent: port {path} open but no servo "
+                             "answered")
     finally:
         stop_scanner_container()
 
@@ -619,7 +644,7 @@ def scan_and_identify_arms(image: str, arm_family: str = "omx") -> tuple[Optiona
 
 def fast_rehydrate_arms(
     saved_leader_path: str, saved_follower_path: str,
-    require_leader: bool = True,
+    require_leader: bool = True, arm_family: str = "omx",
 ) -> tuple[Optional[ArmDevice], Optional[ArmDevice]]:
     """Light revalidation of the previous session's arm mapping (PR-4).
 
@@ -638,6 +663,11 @@ def fast_rehydrate_arms(
     Studio kit): its .env has no LEADER_PORT, so an empty ``saved_leader_path``
     is legal and the result is ``(None, follower)``. The follower is ALWAYS
     required — a follower mismatch still returns ``(None, None)``.
+
+    ``arm_family`` (edu6 §4.4) scopes the USB attach and the by-id discovery to
+    the right hardware — ``omx`` is byte-identical to before, ``edu6`` attaches
+    the CH343 adapter and matches the CH343 by-id markers so an edu6 rig
+    self-heals on launch exactly like OMX.
     """
     import time
 
@@ -662,7 +692,7 @@ def fast_rehydrate_arms(
     want_leader = require_leader
 
     self_heal_wsl_serial()
-    attached = attach_all_robotis_devices()
+    attached = attach_all_robotis_devices(arm_family)
     if not attached:
         return None, None
 
@@ -675,7 +705,7 @@ def fast_rehydrate_arms(
 
     serial_paths: list[str] = []
     for _ in range(10):
-        serial_paths = find_serial_paths_for_robotis()
+        serial_paths = find_serial_paths_for_arms(arm_family)
         if _present(serial_paths):
             break
         time.sleep(1)
@@ -906,8 +936,25 @@ def _scan_cameras_native() -> list[CameraDevice]:
 # the scan walks and reports the FIRST link that broke.
 
 
-def _windows_sees_robotis_vid() -> Optional[bool]:
-    """Ask Windows itself (not usbipd) whether VID_2F5D is enumerated.
+def _arm_vid_pnp_filter(arm_family: str = "omx") -> str:
+    """Build the Get-PnpDevice ``InstanceId -like`` clause for an arm family's
+    VID/PID set (edu6 §4.4). ``omx`` → ``*VID_2F5D*``; ``edu6`` →
+    ``*VID_1A86&PID_55D3*`` (the PID pin matters — 1A86 covers every CH34x
+    dongle). Pure (no subprocess) so it is testable off-Windows."""
+    ids = ARM_USB_IDS.get(arm_family, ARM_USB_IDS["omx"])
+    clauses = []
+    for vid, pid in ids:
+        if pid:
+            clauses.append(
+                f"$_.InstanceId -like '*VID_{vid.upper()}&PID_{pid.upper()}*'")
+        else:
+            clauses.append(f"$_.InstanceId -like '*VID_{vid.upper()}*'")
+    return " -or ".join(clauses)
+
+
+def _windows_sees_robotis_vid(arm_family: str = "omx") -> Optional[bool]:
+    """Ask Windows itself (not usbipd) whether the arm FAMILY's VID is
+    enumerated (2F5D for OMX, 1A86:55D3 for the edu6 CH343P).
 
     PowerShell's Get-PnpDevice covers devices that exist on the USB bus
     even if usbipd doesn't recognize them yet. Returns True/False, or
@@ -922,7 +969,7 @@ def _windows_sees_robotis_vid() -> Optional[bool]:
                 "-NoProfile",
                 "-Command",
                 "Get-PnpDevice -PresentOnly | "
-                "Where-Object { $_.InstanceId -like '*VID_2F5D*' } | "
+                f"Where-Object {{ {_arm_vid_pnp_filter(arm_family)} }} | "
                 "Select-Object -ExpandProperty InstanceId",
             ],
             capture_output=True, text=True, timeout=15,
@@ -930,7 +977,8 @@ def _windows_sees_robotis_vid() -> Optional[bool]:
         )
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return None
-    _append_diag("pnp_vid_2f5d", f"rc={result.returncode}\n{result.stdout}\n{result.stderr}")
+    _append_diag(f"pnp_vid_{arm_family}",
+                 f"rc={result.returncode}\n{result.stdout}\n{result.stderr}")
     if result.returncode != 0:
         return None
     return bool(result.stdout.strip())
@@ -956,14 +1004,47 @@ class UsbDiagnosis:
     details: str = ""
 
 
-def diagnose_usb_environment(image: Optional[str] = None) -> UsbDiagnosis:
+# Per-family display bits for the German diagnosis (edu6 §4.4): the same chain
+# must name the hardware the student actually plugged in — OpenRB-150 / VID 2F5D
+# for OMX, the CH343 adapter / EduBotics 6-Achs for edu6.
+_FAMILY_DIAG_TEXT = {
+    "omx": {
+        "hw": "ROBOTIS-Gerät",
+        "vid": "VID 2F5D",
+        "bullets": (
+            "  • USB-Kabel ist eingesteckt UND ein Datenkabel (kein Ladekabel)\n"
+            "  • OpenRB-150 ist mit Strom versorgt (Netzteil eingesteckt)\n"
+            "  • Anderen USB-Port am PC versuchen (direkt am Mainboard, keinen Hub)\n"
+            "  • Im Geräte-Manager nach 'OpenRB' oder gelben Warndreiecken suchen"
+        ),
+    },
+    "edu6": {
+        "hw": "EduBotics 6-Achs-Arm (CH343-Adapter)",
+        "vid": "VID 1A86:55D3",
+        "bullets": (
+            "  • USB-Kabel ist eingesteckt UND ein Datenkabel (kein Ladekabel)\n"
+            "  • 12-V-Netzteil des Arms ist eingesteckt und eingeschaltet\n"
+            "  • Anderen USB-Port am PC versuchen (direkt am Mainboard, keinen Hub)\n"
+            "  • Im Geräte-Manager nach 'CH343' / 'USB-Enhanced-SERIAL' oder "
+            "gelben Warndreiecken suchen"
+        ),
+    },
+}
+
+
+def diagnose_usb_environment(image: Optional[str] = None,
+                             arm_family: str = "omx") -> UsbDiagnosis:
     """Walk the host → WSL → docker chain and return the first failure.
 
     Args:
         image: Open-manipulator image used by the scanner container. If
             None, the docker-image check is skipped (caller doesn't care).
+        arm_family: which arm family the scan targeted (``omx`` / ``edu6``) —
+            selects the VID/PID probe and the German hardware naming so an
+            edu6-only rig is never told to check for "VID 2F5D".
     """
     diag = UsbDiagnosis()
+    fam = _FAMILY_DIAG_TEXT.get(arm_family, _FAMILY_DIAG_TEXT["omx"])
 
     # 1. usbipd reachable?
     # The resolver looks in PATH, %ProgramFiles%\usbipd-win, the Uninstall
@@ -1008,29 +1089,29 @@ def diagnose_usb_environment(image: Optional[str] = None) -> UsbDiagnosis:
     # error to the student.
     self_heal_wsl_serial()
 
-    # 3. Does Windows itself see a VID_2F5D device?
-    windows_sees = _windows_sees_robotis_vid()
-    robotis = list_robotis_devices()
+    # 3. Does Windows itself see this family's VID device?
+    windows_sees = _windows_sees_robotis_vid(arm_family)
+    robotis = list_arm_devices(arm_family)
 
     if not robotis:
         if windows_sees is False:
             diag.windows_sees_no_robotis = True
             diag.message_de = (
-                "Windows erkennt kein ROBOTIS-Gerät (VID 2F5D). "
+                f"Windows erkennt kein {fam['hw']} ({fam['vid']}). "
                 "Bitte folgendes prüfen:\n"
-                "  • USB-Kabel ist eingesteckt UND ein Datenkabel (kein Ladekabel)\n"
-                "  • OpenRB-150 ist mit Strom versorgt (Netzteil eingesteckt)\n"
-                "  • Anderen USB-Port am PC versuchen (direkt am Mainboard, keinen Hub)\n"
-                "  • Im Geräte-Manager nach 'OpenRB' oder gelben Warndreiecken suchen"
+                + fam["bullets"]
             )
-            diag.details = "Get-PnpDevice found no InstanceId matching VID_2F5D"
+            diag.details = (
+                f"Get-PnpDevice found no InstanceId matching "
+                f"{_arm_vid_pnp_filter(arm_family)}"
+            )
             return diag
 
         # Windows might be unavailable (Get-PnpDevice failed) OR Windows sees
         # the device but usbipd doesn't yet — both end up here.
         diag.usbipd_sees_no_robotis = True
         diag.message_de = (
-            "usbipd hat keine ROBOTIS-Geräte gefunden. "
+            f"usbipd hat kein {fam['hw']} gefunden. "
             "Bitte USB-Kabel und Stromversorgung der Arme prüfen "
             "und es erneut versuchen."
             + (
@@ -1040,12 +1121,12 @@ def diagnose_usb_environment(image: Optional[str] = None) -> UsbDiagnosis:
             )
         )
         diag.details = (
-            f"usbipd list returned no VID 2F5D rows; "
-            f"Windows Get-PnpDevice saw VID_2F5D = {windows_sees}"
+            f"usbipd list returned no {fam['vid']} rows; "
+            f"Windows Get-PnpDevice saw {fam['vid']} = {windows_sees}"
         )
         return diag
 
-    # 4. Try to attach every visible ROBOTIS device.
+    # 4. Try to attach every visible arm device.
     attached = []
     attach_errors = []
     for dev in robotis:
@@ -1071,7 +1152,7 @@ def diagnose_usb_environment(image: Optional[str] = None) -> UsbDiagnosis:
     import time as _time
     serial_paths: list[str] = []
     for _ in range(10):
-        serial_paths = find_serial_paths_for_robotis()
+        serial_paths = find_serial_paths_for_arms(arm_family)
         if serial_paths:
             break
         _time.sleep(1)
@@ -1109,9 +1190,14 @@ def diagnose_usb_environment(image: Optional[str] = None) -> UsbDiagnosis:
             diag.details = f"docker image inspect raised: {e}"
 
     diag.ok = True
+    _servo_hint = (
+        "Servo-IDs prüfen (1-7) und die 12-V-Versorgung des Arms sicherstellen"
+        if arm_family == "edu6"
+        else "Servo-IDs prüfen (Leader: 1-6, Follower: 11-16)"
+    )
     diag.message_de = (
-        "Alle Systeme einsatzbereit, aber identify_arm.py konnte die Arme nicht zuordnen. "
-        "Bitte Servo-IDs prüfen (Leader: 1-6, Follower: 11-16) und erneut versuchen."
+        "Alle Systeme einsatzbereit, aber identify_arm.py konnte die Arme nicht "
+        f"zuordnen. Bitte {_servo_hint} und erneut versuchen."
     )
     diag.details = (
         f"attached={[d.busid for d in attached]} serial_paths={serial_paths}"
@@ -1164,8 +1250,9 @@ def list_unbound_cameras() -> list[USBDevice]:
     return unbound
 
 
-def list_unbound_robotis() -> list[USBDevice]:
-    """Return ROBOTIS arms Windows/usbipd sees but that are not yet attachable.
+def list_unbound_robotis(arm_family: str = "omx") -> list[USBDevice]:
+    """Return this family's arms Windows/usbipd sees but that are not yet
+    attachable.
 
     Mirrors ``list_unbound_cameras()`` for the arms. A device that is in
     ``Not shared`` (or the relaxed-parse ``Unknown``) state cannot be attached
@@ -1175,9 +1262,13 @@ def list_unbound_robotis() -> list[USBDevice]:
     when ``configure_usbipd.ps1`` failed to bind at install time (the classic
     post-install PATH race), the arms sit here and the student needs one
     elevated ``bind`` to make them attachable.
+
+    Family-aware (edu6 §4.4): the OMX-only 2F5D filter never matched a
+    Not-shared CH343, so the "Arme freigeben" repair could never trigger for an
+    edu6 rig — ``arm_family="edu6"`` fixes that.
     """
     unbound: list[USBDevice] = []
-    for dev in list_robotis_devices():
+    for dev in list_arm_devices(arm_family):
         if dev.state in ("Not shared", "Unknown"):
             unbound.append(dev)
     return unbound

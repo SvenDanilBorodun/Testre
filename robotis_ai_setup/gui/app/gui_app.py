@@ -2248,7 +2248,8 @@ class EduBoticsApp:
             # chain diagnosis so the student sees *why*, not just "Nicht gefunden".
             self._log("Diagnose wird ausgeführt — bitte einen Moment...")
             try:
-                diag = device_manager.diagnose_usb_environment(image=IMAGE_OPEN_MANIPULATOR)
+                diag = device_manager.diagnose_usb_environment(
+                    image=IMAGE_OPEN_MANIPULATOR, arm_family=arm_family)
             except Exception as exc:
                 self._log(f"Diagnose fehlgeschlagen: {exc}")
                 self._set_status("Einige Arme nicht gefunden. Verbindungen prüfen und erneut versuchen.")
@@ -2269,8 +2270,11 @@ class EduBoticsApp:
 
             # Turn the diagnosis into a one-click guided repair button that
             # matches the actual failure, instead of leaving the student to
-            # parse a wall of log text.
-            self.root.after(0, lambda d=diag: self._show_arm_repair(d))
+            # parse a wall of log text. Carry the arm family so the "freigeben"
+            # list scopes to the right VID (an edu6 CH343 never showed up under
+            # the OMX-only 2F5D probe).
+            self.root.after(
+                0, lambda d=diag, f=arm_family: self._show_arm_repair(d, f))
 
         threading.Thread(target=_do_scan, daemon=True).start()
 
@@ -2281,7 +2285,8 @@ class EduBoticsApp:
         for w in self.arm_repair_frame.winfo_children():
             w.destroy()
 
-    def _show_arm_repair(self, diag: "device_manager.UsbDiagnosis"):
+    def _show_arm_repair(self, diag: "device_manager.UsbDiagnosis",
+                         arm_family: str = "omx"):
         """Show the action button that matches the arm-scan failure reason.
 
         Maps each UsbDiagnosis flag to the cheapest fix the student can do
@@ -2317,14 +2322,14 @@ class EduBoticsApp:
         # Offer the same one-UAC bind flow the cameras have.
         if diag.attach_failed or diag.no_serial_after_attach:
             try:
-                unbound = device_manager.list_unbound_robotis()
+                unbound = device_manager.list_unbound_robotis(arm_family)
             except Exception:  # noqa: BLE001
                 unbound = []
             if not unbound:
-                # Fall back to every visible ROBOTIS device — binding an
-                # already-bound one is a cheap no-op in bind_devices.ps1.
+                # Fall back to every visible arm device of this family — binding
+                # an already-bound one is a cheap no-op in bind_devices.ps1.
                 try:
-                    unbound = device_manager.list_robotis_devices()
+                    unbound = device_manager.list_arm_devices(arm_family)
                 except Exception:  # noqa: BLE001
                     unbound = []
             if unbound:
@@ -2762,6 +2767,7 @@ class EduBoticsApp:
         if profile not in ROBOT_PROFILES:
             profile = DEFAULT_ROBOT_PROFILE
         requires_leader = ROBOT_PROFILES[profile]["scan_requires_leader"]
+        arm_family = ROBOT_PROFILES[profile].get("arm_family", "omx")
 
         if (self.cloud_only.get() or self._hardware_ready(profile)
                 or self._scanning):
@@ -2780,7 +2786,7 @@ class EduBoticsApp:
             try:
                 leader, follower = device_manager.fast_rehydrate_arms(
                     leader_port or "", follower_port,
-                    require_leader=requires_leader,
+                    require_leader=requires_leader, arm_family=arm_family,
                 )
             except Exception as exc:  # noqa: BLE001
                 self._log(f"(Schnellprüfung übersprungen: {exc})")
@@ -3133,7 +3139,10 @@ class EduBoticsApp:
 
                         if missing_arms:
                             self._log("USB-Geräte werden erneut verbunden...")
-                            device_manager.attach_all_robotis_devices()
+                            reattach_family = ROBOT_PROFILES.get(
+                                self._rs_robot_type, {}).get("arm_family", "omx")
+                            device_manager.attach_all_robotis_devices(
+                                reattach_family)
                             import time
                             for _ in range(5):
                                 serial_paths = wsl_bridge.list_serial_devices()

@@ -66,13 +66,20 @@ JOINT_LIMITS_RAD = (
     (-1.5708, 1.9199), (-3.1416, 3.1416), (0.0, 1.79),
 )
 
-# Safety EEPROM values (plan §8; the gripper pinch floor is R2/R4-pending —
-# these are the shipping defaults, overridable per bench run).
+# Safety EEPROM values (plan §8; the gripper pinch floor is R2/R4-pending).
+# These are compile-time constants ON PURPOSE — a safety floor must not be a
+# casual command-line argument, so there is NO per-bench-run override flag.
+# Change the value here and re-run the bench provisioning to move the floor.
 ARM_MAX_TORQUE = 800        # arm joints must hold their own weight
 GRIPPER_MAX_TORQUE = 150    # ≈10 N pinch at the assumed 45 mm lever (R4 gate)
 PROTECTION_CURRENT = 150    # ×6.5 mA
 OVERLOAD_TORQUE = 80
 RETURN_DELAY = 0
+
+# The jigged arm must READ its designed tick after the Homing_Offset write.
+# A few ticks of encoder noise is fine; anything larger means the offset (or its
+# sign) is wrong and the whole kinematic model would run skewed.
+JIG_POSE_TOLERANCE_TICKS = 4
 
 
 def designed_zero_tick(_joint_index: int) -> int:
@@ -92,9 +99,13 @@ def limits_to_ticks(joint_index: int, signs) -> tuple[int, int]:
     return max(0, lo), min(TICKS_PER_REV - 1, hi)
 
 
-def record_checksum(entries: list[dict], serial: str) -> str:
-    payload = json.dumps({'serial': serial, 'servos': entries},
-                         sort_keys=True, separators=(',', ':'))
+def record_checksum(entries: list[dict], serial: str, signs) -> str:
+    # `signs` participate in the checksum: the same servo EEPROM under a
+    # different direction convention is a DIFFERENT calibration, so the record
+    # digest must change with it (pre-ship — no backward-compat concern).
+    payload = json.dumps(
+        {'serial': serial, 'signs': list(signs), 'servos': entries},
+        sort_keys=True, separators=(',', ':'))
     return hashlib.sha256(payload.encode('utf-8')).hexdigest()
 
 
@@ -106,7 +117,8 @@ def _write_verify_u8(bus, sid, addr, value, label):
     back = bus.read(sid, addr, 1)[1][0]
     if back != value:
         raise SystemExit(
-            f'[FEHLER] Servo {sid}: {label} verify failed ({back} != {value})')
+            f'[FEHLER] Servo {sid}: {label} stimmt nach dem Schreiben nicht '
+            f'überein ({back} != {value}) — EEPROM-Schreibzugriff prüfen.')
     return True
 
 
@@ -118,7 +130,8 @@ def _write_verify_u16(bus, sid, addr, value, label):
     back = bus.read_u16(sid, addr)
     if back != value:
         raise SystemExit(
-            f'[FEHLER] Servo {sid}: {label} verify failed ({back} != {value})')
+            f'[FEHLER] Servo {sid}: {label} stimmt nach dem Schreiben nicht '
+            f'überein ({back} != {value}) — EEPROM-Schreibzugriff prüfen.')
     return True
 
 
@@ -161,8 +174,26 @@ def provision(bus, serial: str, signs, dry_run: bool = False) -> dict:
             back = fb.decode_sign_magnitude(
                 bus.read_u16(sid, fb.REG_HOMING_OFFSET), 11)
             if back != new_off:
-                raise SystemExit(f'[FEHLER] Servo {sid}: Homing-Offset verify '
-                                 f'failed ({back} != {new_off}).')
+                raise SystemExit(
+                    f'[FEHLER] Servo {sid}: Homing-Offset stimmt nach dem '
+                    f'Schreiben nicht überein ({back} != {new_off}).')
+
+        # Postcondition: on the STILL-JIGGED arm, Present_Position must now READ
+        # the designed tick (Present = Actual − Homing_Offset). The offset
+        # REGISTER read-back above can verify correct while a sign/decode slip
+        # still leaves the produced position DOUBLED — this re-read is the only
+        # check that closes that silent 2×-offset-skew hole.
+        if not dry_run:
+            present_after = fb.decode_sign_magnitude(
+                bus.read_u16(sid, fb.REG_PRESENT_POSITION), 15)
+            designed = designed_zero_tick(i)
+            if abs(present_after - designed) > JIG_POSE_TOLERANCE_TICKS:
+                raise SystemExit(
+                    f'[FEHLER] Servo {sid}: Jig-Position liest nach dem '
+                    f'Offset-Schreiben {present_after} statt {designed} '
+                    f'(Abweichung {present_after - designed} Ticks) — '
+                    'Homing-Offset/Vorzeichen prüfen und erneut '
+                    'provisionieren.')
 
         # 3. designed position limits (AFTER the offset — corrected frame).
         lo, hi = limits_to_ticks(i, signs)
@@ -183,11 +214,12 @@ def provision(bus, serial: str, signs, dry_run: bool = False) -> dict:
             if phase & (1 << 4):
                 _write_verify_u8(bus, sid, fb.REG_PHASE, phase & ~(1 << 4),
                                  'Phase-Bit4')
-            _write_verify_u8(bus, sid, 7, RETURN_DELAY, 'Return_Delay')
+            _write_verify_u8(bus, sid, fb.REG_RETURN_DELAY, RETURN_DELAY,
+                             'Return_Delay')
             # 5. re-lock
             _write_verify_u8(bus, sid, fb.REG_LOCK, 1, 'Lock=1')
 
-        firmware = bus.read(sid, 0, 2)[1]
+        firmware = bus.read(sid, fb.REG_FIRMWARE_MAJOR, 2)[1]
         entries.append({
             'id': sid,
             'homing_offset': new_off,
@@ -205,7 +237,7 @@ def provision(bus, serial: str, signs, dry_run: bool = False) -> dict:
         'profile_id': 'edu6_studio',
         'signs': list(signs),
         'servos': entries,
-        'checksum': record_checksum(entries, serial),
+        'checksum': record_checksum(entries, serial, signs),
         'provisioned_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
     }
     return record

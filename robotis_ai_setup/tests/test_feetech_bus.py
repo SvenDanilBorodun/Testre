@@ -12,6 +12,7 @@ import sys
 import textwrap
 import types
 import unittest
+from unittest.mock import MagicMock, patch
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _DOCKER = os.path.join(_HERE, '..', 'docker', 'open_manipulator')
@@ -140,6 +141,34 @@ class TestBusTransactions(unittest.TestCase):
         self.assertEqual(set(out.keys()), {1, 3})
         self.assertEqual(out[3][0], fb.ERR_OVERLOAD)
         self.assertEqual(fake.written[4], fb.INSTR_SYNC_READ)
+
+    def test_sync_read_request_byte_layout(self):
+        # The FULL SYNC_READ request, not just instruction 0x82. Feetech 0x82:
+        #   params = [addr=56(0x38), length=6(0x06), ids…=01 02 03]
+        #   len byte = n_params + 2 = 5 + 2 = 7 (0x07)
+        #   body = FE 07 82 38 06 01 02 03
+        #   checksum = ~(0xFE+0x07+0x82+0x38+0x06+0x01+0x02+0x03) & 0xFF
+        #            = ~(459 & 0xFF) & 0xFF = ~0xCB & 0xFF = 0x34
+        replies = (_status(1, 0, bytes(6)) + _status(2, 0, bytes(6))
+                   + _status(3, 0, bytes(6)))
+        bus, fake = _bus(replies)
+        bus.sync_read(fb.REG_PRESENT_POSITION, 6, [1, 2, 3])
+        self.assertEqual(
+            fake.written,
+            bytes([0xFF, 0xFF, 0xFE, 0x07, 0x82, 0x38, 0x06,
+                   0x01, 0x02, 0x03, 0x34]))
+
+    def test_write_request_byte_layout(self):
+        # The FULL WRITE request: addr THEN data. WRITE id 4, addr 40 (0x28,
+        # Torque_Enable), data 0x01:
+        #   params = [addr=40(0x28), data=0x01] → len byte = 2 + 2 = 4 (0x04)
+        #   body = 04 04 03 28 01
+        #   checksum = ~(0x04+0x04+0x03+0x28+0x01) & 0xFF = ~0x34 & 0xFF = 0xCB
+        bus, fake = _bus(_status(4, 0))
+        bus.write(4, fb.REG_TORQUE_ENABLE, b'\x01')
+        self.assertEqual(
+            fake.written,
+            bytes([0xFF, 0xFF, 0x04, 0x04, 0x03, 0x28, 0x01, 0xCB]))
 
     def test_sync_write_shared_length_enforced(self):
         bus, _ = _bus()
@@ -300,10 +329,6 @@ class TestShippedWiring(unittest.TestCase):
         self.assertIn('777', ia)
 
 
-if __name__ == '__main__':
-    unittest.main()
-
-
 class TestGuiDetectionSeam(unittest.TestCase):
     """PR-6 GUI detection: the family tables + scan wiring (deps-free)."""
 
@@ -389,6 +414,34 @@ class TestGuiDetectionSeam(unittest.TestCase):
         self.assertIn('--protocol=feetech', calls[0])
         self.assertNotIn('--protocol=feetech', calls[1])
 
+    def test_identify_via_docker_surfaces_nonzero_exit_token(self):
+        # identify_arm.py exits NON-ZERO for every non-expected verdict (incl.
+        # the informational feetech_silent / omx_arm_found tokens) — the stdout
+        # verdict must still WIN, else those scan-notice branches are dead.
+        from gui.app import device_manager as dm
+
+        class _Res:
+            returncode = 1
+            stdout = 'feetech_silent\n'
+            stderr = ''
+
+        class _Crash:
+            returncode = 1
+            stdout = ''
+            stderr = 'Traceback ...'
+
+        orig = dm.subprocess.run
+        try:
+            dm.subprocess.run = lambda argv, **kw: _Res()
+            self.assertEqual(dm.identify_arm_via_docker('/dev/x', 'feetech'),
+                             'feetech_silent')
+            # Empty stdout (a genuine crash) still yields an error token.
+            dm.subprocess.run = lambda argv, **kw: _Crash()
+            self.assertTrue(
+                dm.identify_arm_via_docker('/dev/x').startswith('error:'))
+        finally:
+            dm.subprocess.run = orig
+
 
 class TestProvisionTool(unittest.TestCase):
     """tools/edu6_provision.py pure parts (PR 8)."""
@@ -425,13 +478,20 @@ class TestProvisionTool(unittest.TestCase):
 
     def test_record_checksum_stable_and_sensitive(self):
         entries = [{'id': 1, 'homing_offset': 5}]
-        a = self.prov.record_checksum(entries, 'EDU6-0001')
-        b = self.prov.record_checksum(entries, 'EDU6-0001')
-        c = self.prov.record_checksum(entries, 'EDU6-0002')
-        d = self.prov.record_checksum([{'id': 1, 'homing_offset': 6}], 'EDU6-0001')
+        signs = (1, 1, 1, 1, 1, 1, 1)
+        a = self.prov.record_checksum(entries, 'EDU6-0001', signs)
+        b = self.prov.record_checksum(entries, 'EDU6-0001', signs)
+        c = self.prov.record_checksum(entries, 'EDU6-0002', signs)
+        d = self.prov.record_checksum([{'id': 1, 'homing_offset': 6}],
+                                      'EDU6-0001', signs)
+        # signs are part of the digest: the same EEPROM under a different
+        # direction convention is a DIFFERENT calibration.
+        e = self.prov.record_checksum(entries, 'EDU6-0001',
+                                      (1, 1, 1, 1, -1, 1, 1))
         self.assertEqual(a, b)
         self.assertNotEqual(a, c)
         self.assertNotEqual(a, d)
+        self.assertNotEqual(a, e)
 
     def test_gripper_gets_the_pinch_floor_torque(self):
         self.assertEqual(self.prov.GRIPPER_MAX_TORQUE, 150)  # §8 ≈10 N
@@ -443,3 +503,283 @@ class TestProvisionTool(unittest.TestCase):
         # SAME designed limits.
         self.assertEqual(tuple(self.prov.JOINT_LIMITS_RAD),
                          tuple(_N['JOINT_LIMITS_RAD']))
+
+
+class _ProvFakeBus:
+    """Register-model fake bus for the edu6_provision end-to-end tests.
+
+    Byte-addressable EEPROM/RAM per servo; Present_Position is COMPUTED as
+    (actual − Homing_Offset) on every read, so writing the offset changes what
+    the still-jigged arm reports — which is exactly what the new jig-pose
+    postcondition re-read depends on. Every write is logged so the ordering /
+    endurance-skip / commit-point pins can be asserted."""
+
+    def __init__(self, actual_ticks, phase=0x10, return_delay=250, model=None):
+        self.actual = dict(actual_ticks)
+        self.writes = []          # (sid, addr, bytes) in call order
+        self.closed = False
+        self.mem = {}
+        model = fb.STS3215_MODEL_NUMBER if model is None else model
+        for sid in actual_ticks:
+            m = bytearray(256)
+            m[fb.REG_FIRMWARE_MAJOR] = 3
+            m[fb.REG_FIRMWARE_MAJOR + 1] = 9
+            m[fb.REG_MODEL_NUMBER] = model & 0xFF
+            m[fb.REG_MODEL_NUMBER + 1] = (model >> 8) & 0xFF
+            m[fb.REG_PHASE] = phase              # bit 4 set → provision clears it
+            m[fb.REG_LOCK] = 1                   # protected → provision writes 0
+            m[fb.REG_RETURN_DELAY] = return_delay
+            self.mem[sid] = m
+
+    def ping(self, sid, timeout_s=None):
+        return sid in self.mem
+
+    def _homing_offset(self, sid):
+        return fb.decode_sign_magnitude(
+            fb.from_le16(self.mem[sid][fb.REG_HOMING_OFFSET],
+                         self.mem[sid][fb.REG_HOMING_OFFSET + 1]), 11)
+
+    def _present_raw(self, sid):
+        # Present = Actual − Homing_Offset (correct-sign model).
+        return self.actual[sid] - self._homing_offset(sid)
+
+    def read(self, sid, addr, length):
+        if addr == fb.REG_PRESENT_POSITION:
+            data = fb.le16(fb.encode_sign_magnitude(self._present_raw(sid), 15))
+            return 0, data[:length]
+        return 0, bytes(self.mem[sid][addr:addr + length])
+
+    def read_u16(self, sid, addr):
+        _e, d = self.read(sid, addr, 2)
+        return fb.from_le16(d[0], d[1])
+
+    def write(self, sid, addr, data, await_status=True):
+        self.writes.append((sid, addr, bytes(data)))
+        self.mem[sid][addr:addr + len(data)] = data
+        return 0
+
+    def close(self):
+        self.closed = True
+
+    def writes_for(self, sid):
+        return [(a, d) for s, a, d in self.writes if s == sid]
+
+
+class TestProvisionEndToEnd(unittest.TestCase):
+    """tools/edu6_provision.py::provision against a scripted register bus —
+    the §6 order + endurance + commit-point + jig-pose postcondition (finding
+    9b), using the already-present _FakeSerial scaffolding's register cousin."""
+
+    @classmethod
+    def setUpClass(cls):
+        import importlib.util
+        path = os.path.join(_HERE, '..', '..', 'tools', 'edu6_provision.py')
+        spec = importlib.util.spec_from_file_location('edu6_provision', path)
+        cls.prov = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.prov)
+
+    def test_full_provision_order_and_commit(self):
+        actual = {sid: 2048 + sid for sid in range(1, 8)}  # nonzero offsets
+        bus = _ProvFakeBus(actual)
+        record = self.prov.provision(bus, 'EDU6-0001', (1,) * 7)
+        # Record built ONLY after all 7 servos verified (the commit point).
+        self.assertEqual(len(record['servos']), 7)
+        self.assertEqual(record['arm_serial'], 'EDU6-0001')
+        self.assertEqual(record['signs'], [1] * 7)
+        for sid in range(1, 8):
+            w = bus.writes_for(sid)
+            addrs = [a for a, _ in w]
+            # Torque_Enable=0 then Lock=0 come BEFORE any EEPROM write.
+            self.assertEqual(w[0], (fb.REG_TORQUE_ENABLE, b'\x00'))
+            self.assertEqual(w[1], (fb.REG_LOCK, b'\x00'))
+            # Lock=1 restored as the LAST write (re-lock after verify).
+            self.assertEqual(w[-1], (fb.REG_LOCK, b'\x01'))
+            # EEPROM writes come after the two RAM prep writes.
+            self.assertGreaterEqual(addrs.index(fb.REG_HOMING_OFFSET), 2)
+            self.assertGreaterEqual(addrs.index(fb.REG_MAX_TORQUE_LIMIT), 2)
+            # Phase bit-4 was SET → exactly one read-modify-write cleared it.
+            phase_writes = [d for a, d in w if a == fb.REG_PHASE]
+            self.assertEqual(len(phase_writes), 1)
+            self.assertEqual(phase_writes[0][0] & (1 << 4), 0)
+
+    def test_phase_bit4_not_touched_when_clear(self):
+        # Phase bit-4 read-modify-write is only-when-set.
+        bus = _ProvFakeBus({sid: 2048 + sid for sid in range(1, 8)}, phase=0x00)
+        self.prov.provision(bus, 'EDU6-0002', (1,) * 7)
+        for sid in range(1, 8):
+            self.assertNotIn(fb.REG_PHASE, [a for a, _ in bus.writes_for(sid)])
+
+    def test_write_verify_skips_when_already_correct(self):
+        # Endurance: read-compare-SKIP — a register already holding the target
+        # is NOT rewritten (EEPROM endurance is a five-figure budget).
+        bus = _ProvFakeBus({1: 2048})
+        bus.mem[1][100] = 5
+        self.assertFalse(self.prov._write_verify_u8(bus, 1, 100, 5, 'x'))
+        self.assertEqual(bus.writes, [])
+        self.assertTrue(self.prov._write_verify_u8(bus, 1, 100, 9, 'x'))
+        self.assertIn((1, 100, b'\x09'), bus.writes)
+
+    def test_verify_mismatch_raises_systemexit(self):
+        class _StaleBus(_ProvFakeBus):
+            def write(self, sid, addr, data, await_status=True):
+                self.writes.append((sid, addr, bytes(data)))
+                return 0   # swallow → readback returns the OLD value → mismatch
+        bus = _StaleBus({1: 2048})
+        with self.assertRaises(SystemExit):
+            self.prov._write_verify_u16(bus, 1, fb.REG_MAX_TORQUE_LIMIT, 800, 'x')
+
+    def test_jig_postcondition_catches_offset_skew(self):
+        # The new §8(a) guard: after the offset write, the still-jigged arm must
+        # READ the designed tick. A wrong-sign offset (the silent 2×-skew) passes
+        # the register read-back but doubles Present_Position — caught here.
+        class _SkewBus(_ProvFakeBus):
+            def _present_raw(self, sid):
+                return self.actual[sid] + self._homing_offset(sid)  # WRONG sign
+        bus = _SkewBus({sid: 2148 for sid in range(1, 8)})
+        with self.assertRaises(SystemExit) as ctx:
+            self.prov.provision(bus, 'EDU6-0003', (1,) * 7)
+        self.assertIn('Jig-Position', str(ctx.exception))
+
+    def test_no_record_when_a_servo_fails(self):
+        # A verify mismatch on servo 4 aborts BEFORE servos 5-7 are touched and
+        # returns no record — a half-written arm must fail loudly, not persist.
+        class _FailServo4(_ProvFakeBus):
+            def write(self, sid, addr, data, await_status=True):
+                self.writes.append((sid, addr, bytes(data)))
+                if sid == 4 and addr == fb.REG_MAX_TORQUE_LIMIT:
+                    return 0   # swallow → readback mismatch → SystemExit
+                self.mem[sid][addr:addr + len(data)] = data
+                return 0
+        bus = _FailServo4({sid: 2048 + sid for sid in range(1, 8)})
+        with self.assertRaises(SystemExit):
+            self.prov.provision(bus, 'EDU6-0004', (1,) * 7)
+        touched = {sid for sid, _a, _d in bus.writes}
+        self.assertFalse({5, 6, 7} & touched)
+
+
+class TestIdentifyArmFeetech(unittest.TestCase):
+    """identify_arm.py --protocol feetech token contract (finding 1a): a silent
+    bus (port open, ZERO servos) returns the DISTINCT 'feetech_silent', not a
+    bare 'unknown', so the GUI can name the 12-V-supply cause."""
+
+    @classmethod
+    def setUpClass(cls):
+        # identify_arm.py imports dynamixel_sdk at module top — stub it so the
+        # deps-free suite can import it (only the feetech path is exercised).
+        fake = types.ModuleType('dynamixel_sdk')
+        fake.PacketHandler = object
+        fake.PortHandler = object
+        sys.modules.setdefault('dynamixel_sdk', fake)
+        import importlib.util
+        path = os.path.join(_DOCKER, 'identify_arm.py')
+        spec = importlib.util.spec_from_file_location('identify_arm', path)
+        cls.ia = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.ia)
+
+    def _with_bus(self, bus_cls, port='/dev/fake'):
+        orig = fb.FeetechBus
+        fb.FeetechBus = bus_cls
+        try:
+            return self.ia.identify_feetech(port)
+        finally:
+            fb.FeetechBus = orig
+
+    def test_silent_bus_returns_feetech_silent(self):
+        class _SilentBus:
+            def __init__(self, *a, **k):
+                pass
+
+            def ping(self, sid):
+                return False
+
+            def read_u16(self, sid, addr):
+                raise fb.FeetechBusError('unused')
+
+            def close(self):
+                pass
+        self.assertEqual(self._with_bus(_SilentBus), 'feetech_silent')
+
+    def test_partial_bus_returns_partial_token(self):
+        class _PartialBus:
+            def __init__(self, *a, **k):
+                pass
+
+            def ping(self, sid):
+                return sid in (1, 2, 3)
+
+            def read_u16(self, sid, addr):
+                return fb.STS3215_MODEL_NUMBER
+
+            def close(self):
+                pass
+        self.assertEqual(self._with_bus(_PartialBus), 'partial:3')
+
+    def test_all_servos_model_777_returns_edu6(self):
+        class _GoodBus:
+            def __init__(self, *a, **k):
+                pass
+
+            def ping(self, sid):
+                return True
+
+            def read_u16(self, sid, addr):
+                return fb.STS3215_MODEL_NUMBER
+
+            def close(self):
+                pass
+        self.assertEqual(self._with_bus(_GoodBus), 'edu6')
+
+
+class TestScanFeetechSilentMapping(unittest.TestCase):
+    """device_manager maps the feetech_silent token to the 12-V German notice
+    (finding 1b) — the token contract is only useful if the GUI surfaces it."""
+
+    def test_feetech_silent_sets_scan_notice(self):
+        sys.path.insert(0, os.path.join(_HERE, '..'))
+        from gui.app import device_manager as dm
+
+        dev = types.SimpleNamespace(busid='1-1', description='CH343',
+                                    serial_path='/dev/serial/by-id/x')
+        with patch.object(dm, 'self_heal_wsl_serial'), \
+                patch.object(dm, 'attach_all_robotis_devices',
+                             return_value=[dev]), \
+                patch.object(dm, 'find_serial_paths_for_arms',
+                             return_value=['/dev/serial/by-id/x']), \
+                patch.object(dm, 'start_scanner_container', return_value=True), \
+                patch.object(dm, 'stop_scanner_container'), \
+                patch.object(dm, 'identify_arm_via_docker',
+                             return_value='feetech_silent'), \
+                patch('time.sleep'):
+            leader, follower = dm.scan_and_identify_arms('img', arm_family='edu6')
+        self.assertIsNone(leader)
+        self.assertIsNone(follower)
+        self.assertIn('12-V-Netzteil', dm.LAST_SCAN_NOTICE)
+        self.assertIn('Servo', dm.LAST_SCAN_NOTICE)
+
+
+class TestFamilyVidProbe(unittest.TestCase):
+    """The family-aware Windows VID probe filter (finding 1c) — pure, so it is
+    testable off-Windows without a real Get-PnpDevice call."""
+
+    def test_pnp_filter_per_family(self):
+        sys.path.insert(0, os.path.join(_HERE, '..'))
+        from gui.app import device_manager as dm
+        omx = dm._arm_vid_pnp_filter('omx')
+        edu6 = dm._arm_vid_pnp_filter('edu6')
+        self.assertIn('VID_2F5D', omx)
+        self.assertNotIn('PID_', omx)            # omx = any PID under 2F5D
+        self.assertIn('VID_1A86', edu6)
+        self.assertIn('PID_55D3', edu6)          # edu6 is PID-pinned
+        # An unknown family falls back to omx (never crashes the diagnose flow).
+        self.assertEqual(dm._arm_vid_pnp_filter('nope'), omx)
+
+    def test_diagnose_text_names_family_hardware(self):
+        sys.path.insert(0, os.path.join(_HERE, '..'))
+        from gui.app import device_manager as dm
+        self.assertIn('EduBotics 6-Achs', dm._FAMILY_DIAG_TEXT['edu6']['hw'])
+        self.assertIn('2F5D', dm._FAMILY_DIAG_TEXT['omx']['vid'])
+        self.assertIn('12-V', dm._FAMILY_DIAG_TEXT['edu6']['bullets'])
+
+
+if __name__ == '__main__':
+    unittest.main()

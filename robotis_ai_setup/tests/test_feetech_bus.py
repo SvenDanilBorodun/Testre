@@ -388,3 +388,58 @@ class TestGuiDetectionSeam(unittest.TestCase):
             dm.subprocess.run = orig
         self.assertIn('--protocol=feetech', calls[0])
         self.assertNotIn('--protocol=feetech', calls[1])
+
+
+class TestProvisionTool(unittest.TestCase):
+    """tools/edu6_provision.py pure parts (PR 8)."""
+
+    @classmethod
+    def setUpClass(cls):
+        import importlib.util
+        path = os.path.join(_HERE, '..', '..', 'tools', 'edu6_provision.py')
+        spec = importlib.util.spec_from_file_location('edu6_provision', path)
+        cls.prov = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.prov)
+
+    def test_limits_to_ticks_positive_sign(self):
+        # joint5 (index 4): the ASYMMETRIC −1.5708..1.9199 window.
+        lo, hi = self.prov.limits_to_ticks(4, (1,) * 7)
+        self.assertEqual(lo, 2048 + round(-1.5708 / (2 * 3.141592653589793 / 4096)))
+        self.assertEqual(hi, 2048 + round(1.9199 / (2 * 3.141592653589793 / 4096)))
+        self.assertLess(lo, 2048)
+        self.assertGreater(hi, 2048)
+
+    def test_limits_to_ticks_negative_sign_mirrors(self):
+        lo_p, hi_p = self.prov.limits_to_ticks(4, (1,) * 7)
+        lo_n, hi_n = self.prov.limits_to_ticks(4, (1, 1, 1, 1, -1, 1, 1))
+        # mirrored around the centre AND re-ordered lo<=hi.
+        self.assertEqual(lo_n, 2 * 2048 - hi_p)
+        self.assertEqual(hi_n, 2 * 2048 - lo_p)
+        self.assertLessEqual(lo_n, hi_n)
+
+    def test_limits_clamped_to_register_range(self):
+        for i in range(7):
+            lo, hi = self.prov.limits_to_ticks(i, (1,) * 7)
+            self.assertGreaterEqual(lo, 0)
+            self.assertLessEqual(hi, 4095)
+
+    def test_record_checksum_stable_and_sensitive(self):
+        entries = [{'id': 1, 'homing_offset': 5}]
+        a = self.prov.record_checksum(entries, 'EDU6-0001')
+        b = self.prov.record_checksum(entries, 'EDU6-0001')
+        c = self.prov.record_checksum(entries, 'EDU6-0002')
+        d = self.prov.record_checksum([{'id': 1, 'homing_offset': 6}], 'EDU6-0001')
+        self.assertEqual(a, b)
+        self.assertNotEqual(a, c)
+        self.assertNotEqual(a, d)
+
+    def test_gripper_gets_the_pinch_floor_torque(self):
+        self.assertEqual(self.prov.GRIPPER_MAX_TORQUE, 150)  # §8 ≈10 N
+        self.assertGreater(self.prov.ARM_MAX_TORQUE,
+                           self.prov.GRIPPER_MAX_TORQUE)
+
+    def test_limits_match_the_driver_node(self):
+        # No-drift: the provision tool and edu6_arm_node must write/enforce the
+        # SAME designed limits.
+        self.assertEqual(tuple(self.prov.JOINT_LIMITS_RAD),
+                         tuple(_N['JOINT_LIMITS_RAD']))

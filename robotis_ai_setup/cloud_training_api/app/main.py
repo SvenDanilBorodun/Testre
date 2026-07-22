@@ -254,6 +254,7 @@ def _validate_required_schema() -> None:
         "workflows",
         "workflow_versions",  # 015
         "workflow_trajectories",  # 034 — Roboter Studio Batch-2b replay trajectories
+        "edu6_arm_records",  # 036 — edu6 vendor-bench servo calibration records
         "tutorial_progress",  # 016
         "datasets",
         "progress_entries",

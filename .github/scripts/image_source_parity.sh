@@ -79,6 +79,31 @@ case "$KIND" in
     done
     [ "$fail" = 0 ] || exit 1
     echo "OK: all open-manipulator overlays present in image"
+
+    # edu6 plain COPYs (SECOND extraction root — they land in /usr/local/bin,
+    # not the ros2_ws src tree; previously plain COPYs were verified by
+    # NOTHING, the identify_arm.py precedent).
+    rm -rf /tmp/parity_bin
+    extract /usr/local/bin /tmp/parity_bin
+    for f in edu6_arm_node.py feetech_bus.py identify_arm.py camera_ingest_node.py; do
+        repo="robotis_ai_setup/docker/open_manipulator/$f"
+        img="/tmp/parity_bin/$f"
+        if [ ! -f "$img" ]; then
+            echo "::error::plain COPY $f missing from image /usr/local/bin"
+            fail=1
+            continue
+        fi
+        want=$(sed 's/\r$//' "$repo" | sha256sum | cut -d' ' -f1)
+        got=$(sed 's/\r$//' "$img" | sha256sum | cut -d' ' -f1)
+        if [ "$want" = "$got" ]; then
+            echo "OK: /usr/local/bin/$f byte-identical to repo"
+        else
+            echo "::error::plain COPY $f drifted (repo $want != image $got)"
+            fail=1
+        fi
+    done
+    [ "$fail" = 0 ] || exit 1
+    echo "OK: all plain COPYs byte-identical"
     ;;
 
   *)

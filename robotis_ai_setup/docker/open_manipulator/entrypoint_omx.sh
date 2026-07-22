@@ -183,7 +183,36 @@ wait_for_device() {
 
 wait_for_device "$FOLLOWER_PORT" "Follower arm"
 
-if [ "$FOLLOWER_ONLY" = "1" ]; then
+# --- edu6_studio branch (docs/plans/edu6-studio-arm.md §3.1) ---
+# The Feetech arm replaces phases 1-3 entirely: no ros2_control, no leader,
+# no quintic-sync script — edu6_arm_node.py owns the serial bus, publishes
+# /joint_states, executes /leader/joint_trajectory and self-homes at boot.
+# Phase 4 (cameras) STILL runs below: the compose healthcheck requires BOTH
+# /joint_states AND every configured camera topic, so a branch that skipped
+# the camera phase would never go healthy and physical_ai_server would never
+# start. Torque-off-on-shutdown lives in the NODE (SIGTERM handler + atexit;
+# the servo has no watchdog); cleanup()'s legacy-name torque service call
+# still works as belt-and-suspenders because the node ALIASES
+# /dynamixel_hardware_interface/set_dxl_torque.
+if [ "${EDUBOTICS_ROBOT_TYPE:-omx_full}" = "edu6_studio" ]; then
+    echo "[LAUNCH] edu6_studio — Feetech-Treiber (7x STS3215) wird gestartet..."
+    python3 /usr/local/bin/edu6_arm_node.py &
+    PIDS="$!"
+
+    # Same readiness gate as the OMX follower: /joint_states visible. The
+    # node creates the topic only after the servo bus answered, so this also
+    # waits out a missing 12-V supply (the node logs the German reason).
+    count=0
+    while ! ros2 topic list 2>/dev/null | grep -q "/joint_states" && [ $count -lt 60 ]; do
+        sleep 1
+        count=$((count + 1))
+    done
+    if ros2 topic list 2>/dev/null | grep -q "/joint_states"; then
+        echo "[LAUNCH] edu6-Arm bereit (/joint_states aktiv)."
+    else
+        echo "[WARNUNG] edu6-Arm meldet nach 60 s keine Gelenkdaten — siehe Meldungen oben (12-V-Netzteil? Kabel?). Der Kamera-Start läuft weiter; der Zustand bleibt 'unhealthy', bis der Arm antwortet."
+    fi
+elif [ "$FOLLOWER_ONLY" = "1" ]; then
     echo "[LAUNCH] FOLLOWER_ONLY=1 — skipping leader port wait, leader launch, and quintic sync."
     LEADER_POS=""
 else
@@ -245,7 +274,8 @@ rclpy.shutdown()
     # arbitrate against the leader broadcaster when the leader is present.
 fi
 
-# --- Phase 2: Launch Follower ---
+# --- Phase 2: Launch Follower (OMX only — the edu6 branch already runs its driver) ---
+if [ "${EDUBOTICS_ROBOT_TYPE:-omx_full}" != "edu6_studio" ]; then
 echo "[LAUNCH] Starting follower..."
 ros2 launch open_manipulator_bringup omx_f_follower_ai.launch.py \
     port_name:=${FOLLOWER_PORT} &
@@ -260,6 +290,7 @@ done
 echo "[LAUNCH] Follower ready (/joint_states detected)."
 # Wait for arm_controller to be fully active
 sleep 3
+fi
 
 # --- Phase 3: Move follower to leader position smoothly ---
 # Publish trajectory directly to /leader/joint_trajectory (the topic the

@@ -1,13 +1,27 @@
 #!/usr/bin/env python3
-"""Identify whether a serial port is connected to a leader or follower arm.
+"""Identify what arm a serial port is connected to.
 
-Servo IDs verified from xacro files:
-  - omx_l.ros2_control.xacro: Leader IDs 1-6
-  - omx_f.ros2_control.xacro: Follower IDs 11-16
-Baudrate: 1,000,000 for both arms. Dynamixel Protocol 2.0.
+Two protocols (selected via ``--protocol``, default ``dxl`` = today's
+behaviour, byte-identical):
+
+* ``dxl`` — ROBOTIS OMX arms. Servo IDs verified from xacro files
+  (omx_l: leader 1-6; omx_f: follower 11-16), Dynamixel Protocol 2.0.
+* ``feetech`` — the edu6_studio Feetech STS3215 arm: broadcast-style ping of
+  IDs 1..7 + Model_Number == 777 (identity proven by the SERVOS answering,
+  not the CH343 bridge chip — both arm families enumerate as /dev/ttyACM*).
+
+Cross-probe (edu6 plan §5.4): when the EXPECTED protocol finds nothing, the
+OTHER one is probed and a distinct token returned ("omx_arm_found" /
+"edu6_arm_found") so the GUI can say „Es wurde ein OMX-Arm gefunden, aber
+‚EduBotics 6-Achs' ist ausgewählt." instead of a bare failure.
+
+Baudrate: 1,000,000 for all arms.
 """
+import os
 import signal
 import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from dynamixel_sdk import PacketHandler, PortHandler
 
@@ -55,14 +69,64 @@ def _timeout_handler(signum, frame):
     sys.exit(1)
 
 
+EDU6_IDS = [1, 2, 3, 4, 5, 6, 7]
+
+
+def identify_feetech(port_path: str) -> str:
+    """edu6 probe: every servo 1..7 answers AND reads Model_Number 777."""
+    try:
+        import feetech_bus as fb
+    except ImportError:
+        return "error:feetech_bus_missing"
+    try:
+        bus = fb.FeetechBus(port_path)
+    except Exception:
+        return "error:cannot_open"
+    try:
+        alive = [sid for sid in EDU6_IDS if bus.ping(sid)]
+        if len(alive) != len(EDU6_IDS):
+            return "unknown" if not alive else f"partial:{len(alive)}"
+        for sid in EDU6_IDS:
+            try:
+                if bus.read_u16(sid, fb.REG_MODEL_NUMBER) != fb.STS3215_MODEL_NUMBER:
+                    return "unknown"
+            except fb.FeetechBusError:
+                return "unknown"
+        return "edu6"
+    except Exception as e:
+        return f"error:{e}"
+    finally:
+        bus.close()
+
+
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        print(f"Usage: {sys.argv[0]} <serial_port_path>", file=sys.stderr)
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    protocol = "dxl"
+    for a in sys.argv[1:]:
+        if a.startswith("--protocol"):
+            protocol = a.split("=", 1)[1] if "=" in a else "feetech"
+    if len(args) != 1:
+        print(f"Usage: {sys.argv[0]} <serial_port_path> [--protocol=dxl|feetech]",
+              file=sys.stderr)
         sys.exit(1)
 
     signal.signal(signal.SIGALRM, _timeout_handler)
     signal.alarm(TIMEOUT_SECONDS)
 
-    result = identify(sys.argv[1])
+    if protocol == "feetech":
+        result = identify_feetech(args[0])
+        if result in ("unknown",) or result.startswith("partial"):
+            # cross-probe: is an OMX arm plugged in instead? (§5.4)
+            other = identify(args[0])
+            if other in ("leader", "follower"):
+                result = "omx_arm_found"
+        print(result)
+        sys.exit(0 if result == "edu6" else 1)
+
+    result = identify(args[0])
+    if result == "unknown":
+        # cross-probe: is the edu6 Feetech arm plugged in instead? (§5.4)
+        if identify_feetech(args[0]) == "edu6":
+            result = "edu6_arm_found"
     print(result)
     sys.exit(0 if result in ("leader", "follower") else 1)

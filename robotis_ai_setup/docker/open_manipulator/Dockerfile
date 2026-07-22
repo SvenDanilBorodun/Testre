@@ -42,9 +42,16 @@ COPY camera_ingest_node.py /usr/local/bin/camera_ingest_node.py
 # Teleop collision-threshold calibration helper (operator runs it once per rig). Standalone
 # rclpy script, COPY'd like identify_arm.py / camera_ingest_node.py — NOT an apply_overlay target.
 COPY calibrate_collision_currents.py /usr/local/bin/calibrate_collision_currents.py
+# edu6_studio Feetech driver (docs/plans/edu6-studio-arm.md §3): the clean-room
+# STS3215 bus + the rclpy driver node the entrypoint branches into on
+# EDUBOTICS_ROBOT_TYPE=edu6_studio. Plain COPYs like identify_arm.py (NOT
+# apply_overlay targets — there is no upstream file to overlay); byte-verified
+# by image_source_parity.sh's /usr/local/bin root.
+COPY feetech_bus.py /usr/local/bin/feetech_bus.py
+COPY edu6_arm_node.py /usr/local/bin/edu6_arm_node.py
 # Strip Windows CRLF line endings (Git on Windows may convert LF→CRLF)
-RUN sed -i 's/\r$//' /entrypoint_omx.sh /usr/local/bin/identify_arm.py /usr/local/bin/camera_ingest_node.py /usr/local/bin/calibrate_collision_currents.py \
-    && chmod +x /entrypoint_omx.sh /usr/local/bin/identify_arm.py /usr/local/bin/camera_ingest_node.py /usr/local/bin/calibrate_collision_currents.py
+RUN sed -i 's/\r$//' /entrypoint_omx.sh /usr/local/bin/identify_arm.py /usr/local/bin/camera_ingest_node.py /usr/local/bin/calibrate_collision_currents.py /usr/local/bin/feetech_bus.py /usr/local/bin/edu6_arm_node.py \
+    && chmod +x /entrypoint_omx.sh /usr/local/bin/identify_arm.py /usr/local/bin/camera_ingest_node.py /usr/local/bin/calibrate_collision_currents.py /usr/local/bin/feetech_bus.py /usr/local/bin/edu6_arm_node.py
 
 # Overlay patched ros2_control configs:
 #   - follower (omx_f): joint limits + aligned gripper current limit

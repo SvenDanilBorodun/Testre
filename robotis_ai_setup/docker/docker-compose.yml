@@ -48,6 +48,10 @@ services:
       # the Feetech driver node instead of the OMX bringup; default = today's
       # OMX phases). The server container has its own copy further down.
       - EDUBOTICS_ROBOT_TYPE=${EDUBOTICS_ROBOT_TYPE:-omx_full}
+      # edu6 per-joint direction convention (7 comma-separated ±1) — bench
+      # knob for rig gate R6; empty = the baked default (all +1). Read by
+      # edu6_arm_node.py.
+      - EDUBOTICS_EDU6_JOINT_SIGNS=${EDUBOTICS_EDU6_JOINT_SIGNS:-}
       - CAMERA_DEVICE_1=${CAMERA_DEVICE_1:-}
       - CAMERA_NAME_1=${CAMERA_NAME_1:-gripper}
       - CAMERA_DEVICE_2=${CAMERA_DEVICE_2:-}

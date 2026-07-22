@@ -50,13 +50,16 @@ import React, {
   lazy,
 } from 'react';
 import toast from 'react-hot-toast';
+import { useSelector } from 'react-redux';
 import {
+  reachAnnulus,
   REACH_INNER_M,
   REACH_OUTER_M,
   SIM_OBJECT_FALLBACK_SIZE_M,
   SIM_OBJECT_COLOR_HEX,
   SIM_OBJECT_HELD_COLOR_HEX,
 } from './simConstants';
+import { armGeometry } from '../../utils/armProfile';
 
 const UrdfTwin = lazy(() => import('../UrdfTwin'));
 
@@ -132,12 +135,16 @@ function svgToBase(px, py) {
   };
 }
 // Clamp a base point into the reach annulus so every placement is reachable.
-function clampToAnnulus(x, y) {
+// The annulus is PROFILE-DRIVEN (edu6 §4.5): callers pass reachAnnulus(caps);
+// the default keeps the OMX constants for annulus-less call sites.
+function clampToAnnulus(x, y, annulus) {
+  const inner = annulus && annulus.inner ? annulus.inner : REACH_INNER_M;
+  const outer = annulus && annulus.outer ? annulus.outer : REACH_OUTER_M;
   const r = Math.hypot(x, y);
-  if (r === 0) return { x: REACH_INNER_M, y: 0 };
+  if (r === 0) return { x: inner, y: 0 };
   let rr = r;
-  if (r < REACH_INNER_M) rr = REACH_INNER_M;
-  else if (r > REACH_OUTER_M) rr = REACH_OUTER_M;
+  if (r < inner) rr = inner;
+  else if (r > outer) rr = outer;
   if (rr === r) return { x, y };
   const k = rr / r;
   return { x: x * k, y: y * k };
@@ -166,6 +173,26 @@ function SimScene({
     () => (scene && Array.isArray(scene.objects) ? scene.objects : []),
     [scene],
   );
+  // Profile geometry (edu6 §4.5): annulus radii + the grasp-classifier band.
+  // caps==null / an OMX manifest resolve to the pre-edu6 literals exactly.
+  const caps = useSelector((st) => (st.tasks && st.tasks.taskStatus ? st.tasks.taskStatus.capabilities : null));
+  const annulus = useMemo(() => reachAnnulus(caps), [caps]);
+  const graspBand = useMemo(() => {
+    const geo = armGeometry(caps);
+    if (geo.simCloseThresholdRad === null) {
+      return { close: GRIPPER_CLOSED_RAD, open: GRIPPER_OPEN_RAD };
+    }
+    // Profile-supplied close threshold; re-open hysteresis sits halfway
+    // between it and the profile's full-open command (edu6: 1.5 / 1.625).
+    return {
+      close: geo.simCloseThresholdRad,
+      open: (geo.simCloseThresholdRad + geo.gripperOpenRad) / 2,
+    };
+  }, [caps]);
+  const graspBandRef = useRef(graspBand);
+  useEffect(() => { graspBandRef.current = graspBand; }, [graspBand]);
+  const annulusRef = useRef(annulus);
+  useEffect(() => { annulusRef.current = annulus; }, [annulus]);
   const zones = useMemo(
     () => (scene && Array.isArray(scene.zones) ? scene.zones : []),
     [scene],
@@ -267,7 +294,7 @@ function SimScene({
           return;
         }
       }
-      const { x, y } = clampToAnnulus(base.x, base.y);
+      const { x, y } = clampToAnnulus(base.x, base.y, annulusRef.current);
       const nextTag = objects.length
         ? Math.max(...objects.map((o) => (typeof o.tag_id === 'number' ? o.tag_id : -1))) + 1
         : 0;
@@ -299,7 +326,7 @@ function SimScene({
       if (id === null) return;
       const base = eventToBase(e);
       if (!base) return;
-      const { x, y } = clampToAnnulus(base.x, base.y);
+      const { x, y } = clampToAnnulus(base.x, base.y, annulusRef.current);
       emit({
         objects: objects.map((o) =>
           o.tag_id === id ? { ...o, x: round3(x), y: round3(y) } : o,
@@ -439,7 +466,7 @@ function SimScene({
   const handleEndEffector = useCallback(({ x, y, gripper }) => {
     if (typeof gripper !== 'number' || !Number.isFinite(gripper)) return;
     const g = graspRef.current;
-    if (gripper < GRIPPER_CLOSED_RAD && !g.closed) {
+    if (gripper < graspBandRef.current.close && !g.closed) {
       g.closed = true;
       if (heldRef.current === null) {
         let best = null;
@@ -457,7 +484,7 @@ function SimScene({
           setHeldObjectId(best);
         }
       }
-    } else if (gripper > GRIPPER_OPEN_RAD && g.closed) {
+    } else if (gripper > graspBandRef.current.open && g.closed) {
       g.closed = false;
       if (heldRef.current !== null) {
         heldRef.current = null;
@@ -573,7 +600,7 @@ function SimScene({
           <circle
             cx={ORIGIN_PX}
             cy={ORIGIN_PY}
-            r={REACH_OUTER_M * PX_PER_M}
+            r={annulus.outer * PX_PER_M}
             fill="rgba(34,197,94,0.08)"
             stroke="#22c55e"
             strokeWidth="1"
@@ -582,7 +609,7 @@ function SimScene({
           <circle
             cx={ORIGIN_PX}
             cy={ORIGIN_PY}
-            r={REACH_INNER_M * PX_PER_M}
+            r={annulus.inner * PX_PER_M}
             fill="var(--bg-sunk)"
             stroke="#22c55e"
             strokeWidth="1"

@@ -8,9 +8,11 @@
  *     http://www.apache.org/licenses/LICENSE-2.0
  */
 
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import toast from 'react-hot-toast';
+import { useSelector } from 'react-redux';
 import { useRosServiceCaller } from '../../hooks/useRosServiceCaller';
+import { armGeometry } from '../../utils/armProfile';
 
 // Roboter Studio Batch 2b — „Roboter steuern (Tippbetrieb)". Incremental JOG of
 // the real follower: per-joint − / + nudges (Gelenk 1–5 + Greifer-Drehung),
@@ -31,16 +33,27 @@ const STEP_PRESETS = [
   { id: 'coarse', label: 'grob', jointDeg: 10, cartM: 0.025, rollDeg: 10 },
 ];
 
-// Gelenk 1–5 are joint indices 0–4; the gripper rotation is joint index 5
-// (WorkshopJog contract: index 0-5 = j1..j5, gripper).
-const JOINTS = [
-  { index: 0, label: 'Gelenk 1' },
-  { index: 1, label: 'Gelenk 2' },
-  { index: 2, label: 'Gelenk 3' },
-  { index: 3, label: 'Gelenk 4' },
-  { index: 4, label: 'Gelenk 5' },
-  { index: 5, label: 'Greifer-Drehung' },
-];
+// WorkshopJog contract: index 0..n-1 = the arm joints, index n = the gripper
+// channel. The rows are PROFILE-DRIVEN (edu6 §4.5): n from the capability
+// manifest (OMX 5 → the exact pre-edu6 list incl. the 'Greifer-Drehung'
+// degree row; edu6 6 → 'Gelenk 1..6' + a millimetre 'Greifer öffnen/
+// schließen' row via gripper_mm_per_rad).
+function buildJointRows(geo) {
+  const rows = [];
+  for (let i = 0; i < geo.armJoints; i += 1) {
+    rows.push({ index: i, label: `Gelenk ${i + 1}`, gripperMm: null });
+  }
+  if (geo.gripperMmPerRad) {
+    rows.push({
+      index: geo.armJoints,
+      label: 'Greifer öffnen/schließen',
+      gripperMm: geo.gripperMmPerRad,
+    });
+  } else {
+    rows.push({ index: geo.armJoints, label: 'Greifer-Drehung', gripperMm: null });
+  }
+  return rows;
+}
 
 // Cartesian axes: index 0=X, 1=Y, 2=Z, 3=roll. roll is an angle (deg step),
 // X/Y/Z are translations (metre step). NO pitch/yaw.
@@ -156,8 +169,18 @@ function JogPanel({ disabled = false, onHandGuideChange = null }) {
 
   const jogDisabled = disabled || busy || handGuideOn;
 
+  const caps = useSelector((st) => (st.tasks && st.tasks.taskStatus ? st.tasks.taskStatus.capabilities : null));
+  const geo = useMemo(() => armGeometry(caps), [caps]);
+  const jointRows = useMemo(() => buildJointRows(geo), [geo]);
+
   const doJoint = useCallback(async (index, sign) => {
-    const delta = sign * preset.jointDeg * DEG2RAD;
+    // The gripper row on an mm-mapped profile steps in JAW MILLIMETRES
+    // (preset.cartM metres of jaw travel → rad via mm-per-rad); every other
+    // row keeps the degree step.
+    const mmRow = index === geo.armJoints && geo.gripperMmPerRad;
+    const delta = mmRow
+      ? sign * ((preset.cartM * 1000) / geo.gripperMmPerRad)
+      : sign * preset.jointDeg * DEG2RAD;
     setBusy(true);
     try {
       const res = await jogArm({ mode: 'joint', index, delta });
@@ -169,7 +192,7 @@ function JogPanel({ disabled = false, onHandGuideChange = null }) {
     } finally {
       setBusy(false);
     }
-  }, [jogArm, preset]);
+  }, [jogArm, preset, geo]);
 
   const doCartesian = useCallback(async (axis, sign) => {
     const delta = axis.angular
@@ -282,7 +305,7 @@ function JogPanel({ disabled = false, onHandGuideChange = null }) {
 
       {/* Per-joint nudges */}
       <div className="grid grid-cols-1 gap-1.5 mb-3">
-        {JOINTS.map((j) => (
+        {jointRows.map((j) => (
           <div key={j.index} className="flex items-center gap-2">
             <span className="text-xs text-[var(--ink-3)] w-32 shrink-0">{j.label}</span>
             <button
@@ -291,7 +314,9 @@ function JogPanel({ disabled = false, onHandGuideChange = null }) {
               disabled={jogDisabled}
               onClick={() => doJoint(j.index, -1)}
               aria-label={`${j.label} verringern`}
-              title={`${j.label} −${preset.jointDeg}°`}
+              title={j.gripperMm
+                ? `${j.label} −${(preset.cartM * 1000).toFixed(0)} mm`
+                : `${j.label} −${preset.jointDeg}°`}
             >
               −
             </button>
@@ -301,7 +326,9 @@ function JogPanel({ disabled = false, onHandGuideChange = null }) {
               disabled={jogDisabled}
               onClick={() => doJoint(j.index, +1)}
               aria-label={`${j.label} erhöhen`}
-              title={`${j.label} +${preset.jointDeg}°`}
+              title={j.gripperMm
+                ? `${j.label} +${(preset.cartM * 1000).toFixed(0)} mm`
+                : `${j.label} +${preset.jointDeg}°`}
             >
               +
             </button>

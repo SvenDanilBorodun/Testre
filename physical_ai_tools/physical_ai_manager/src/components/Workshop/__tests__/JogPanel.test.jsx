@@ -13,9 +13,26 @@
 // calls handGuide(true/false) and disables jog while the arm is freigeschaltet.
 
 import React from 'react';
-import { render, screen, waitFor, act, fireEvent } from '@testing-library/react';
+import { render as rtlRender, screen, waitFor, act, fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { Provider } from 'react-redux';
+import { configureStore } from '@reduxjs/toolkit';
 import JogPanel from '../JogPanel';
+
+// JogPanel reads the capability manifest (profile-driven jog rows, edu6 §4.5)
+// via useSelector — wrap every render in a minimal store. null caps = the OMX
+// default rows, keeping every pre-edu6 assertion byte-identical.
+function makeStore(capabilities = null) {
+  return configureStore({
+    reducer: {
+      tasks: () => ({ taskStatus: { capabilities } }),
+    },
+  });
+}
+
+function render(ui, { capabilities = null } = {}) {
+  return rtlRender(<Provider store={makeStore(capabilities)}>{ui}</Provider>);
+}
 
 const DEG2RAD = Math.PI / 180;
 
@@ -143,5 +160,51 @@ describe('JogPanel', () => {
       const calls = onHandGuideChange.mock.calls.map((c) => c[0]);
       expect(calls[calls.length - 1]).toBe(false);
     });
+  });
+});
+
+// ── edu6 profile rows (§4.5/§9) ──────────────────────────────────────────────
+const EDU6_CAPS = {
+  recordable: false, editable: false, trainable: false, inferable: false,
+  roboter_studio: true, has_leader: false,
+  arm_joints: 6,
+  joint_names: ['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'joint6',
+    'end_gear_joint'],
+  urdf_asset_id: 'edu6',
+  gripper_open_rad: 1.75,
+  gripper_closed_rad: 0.0,
+  gripper_mm_per_rad: 25.2,
+};
+
+describe('JogPanel — edu6 profile rows', () => {
+  it('renders Gelenk 1..6 + the millimetre gripper row', () => {
+    render(<JogPanel disabled={false} />, { capabilities: EDU6_CAPS });
+    for (let i = 1; i <= 6; i += 1) {
+      expect(screen.getByText(`Gelenk ${i}`)).toBeInTheDocument();
+    }
+    expect(screen.getByText('Greifer öffnen/schließen')).toBeInTheDocument();
+    expect(screen.queryByText('Greifer-Drehung')).not.toBeInTheDocument();
+  });
+
+  it('the gripper row jogs index 6 with an mm-derived radian delta', async () => {
+    render(<JogPanel disabled={false} />, { capabilities: EDU6_CAPS });
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Greifer öffnen/schließen erhöhen' }),
+    );
+    await waitFor(() => expect(mockRos.jogArm).toHaveBeenCalledTimes(1));
+    const call = mockRos.jogArm.mock.calls[0][0];
+    expect(call.mode).toBe('joint');
+    expect(call.index).toBe(6);
+    // medium preset: 0.01 m of jaw travel → (0.01·1000)/25.2 rad ≈ 0.3968.
+    expect(call.delta).toBeCloseTo((0.01 * 1000) / 25.2, 9);
+  });
+
+  it('OMX (null caps) keeps the exact pre-edu6 rows', () => {
+    render(<JogPanel disabled={false} />);
+    for (let i = 1; i <= 5; i += 1) {
+      expect(screen.getByText(`Gelenk ${i}`)).toBeInTheDocument();
+    }
+    expect(screen.queryByText('Gelenk 6')).not.toBeInTheDocument();
+    expect(screen.getByText('Greifer-Drehung')).toBeInTheDocument();
   });
 });

@@ -13,8 +13,25 @@
 // (jsdom has no WebGL), so these assertions are pure-DOM on the 2D SVG editor.
 
 import React from 'react';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render as rtlRender, screen, fireEvent } from '@testing-library/react';
+import { Provider } from 'react-redux';
+import { configureStore } from '@reduxjs/toolkit';
 import SimScene from '../SimScene';
+
+// SimScene reads the capability manifest (profile-driven reach annulus + grasp
+// band, edu6 §4.5) via useSelector — wrap every render in a minimal store.
+// null caps = the OMX constants, keeping every pre-edu6 assertion identical.
+function makeStore(capabilities = null) {
+  return configureStore({
+    reducer: {
+      tasks: () => ({ taskStatus: { capabilities } }),
+    },
+  });
+}
+
+function render(ui, { capabilities = null } = {}) {
+  return rtlRender(<Provider store={makeStore(capabilities)}>{ui}</Provider>);
+}
 
 // The 2D editor's SVG viewBox (SimScene-internal consts, mirrored here):
 //   SVG_W = PX_PER_M(500) * (VIEW_MAX_Y 0.30 − VIEW_MIN_Y −0.30) = 300

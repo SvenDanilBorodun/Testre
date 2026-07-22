@@ -70,7 +70,7 @@
 //                    ./Workshop/simConstants — not the solver's wrist-centre span).
 //                    Default false → the ring layer builds ZERO primitives.
 
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useMemo, useEffect, useRef, useState } from 'react';
 import { useSelector } from 'react-redux';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls';
@@ -79,12 +79,12 @@ import URDFLoader from 'urdf-loader';
 import ROSLIB from 'roslib';
 import rosConnectionManager from '../utils/rosConnectionManager';
 import {
-  REACH_INNER_M,
-  REACH_OUTER_M,
+  reachAnnulus,
   SIM_OBJECT_FALLBACK_SIZE_M,
   SIM_OBJECT_COLOR_HEX,
   SIM_OBJECT_HELD_COLOR_HEX,
 } from './Workshop/simConstants';
+import { armGeometry } from '../utils/armProfile';
 
 // The 6 follower joints the URDF exposes as drivable revolute joints, in the
 // wire order from omx_f_config.yaml::joint_order.follower. We map by NAME from
@@ -100,16 +100,34 @@ const FOLLOWER_JOINTS = [
 ];
 const FOLLOWER_JOINT_SET = new Set(FOLLOWER_JOINTS);
 
+// Per-URDF-asset render config (edu6 §4.5). The capability manifest's
+// urdf_asset_id picks the row; joint names come from the manifest itself
+// (armGeometry) so /joint_states, the sim publisher and this twin agree.
+// gripperJoint is special-cased in emitEndEffector (the grasp-attach gripper
+// channel); eeLink is the frame a held mesh re-parents to. The edu6 gripper
+// FINGERS are <mimic> joints urdf-loader animates from end_gear_joint itself.
+const URDF_ASSETS = {
+  omx_f: {
+    url: `${process.env.PUBLIC_URL || ''}/omx-urdf/omx_f.urdf`,
+    eeLink: 'end_effector_link',
+    baseLink: 'link0',
+  },
+  edu6: {
+    url: `${process.env.PUBLIC_URL || ''}/edu6-urdf/edu6.urdf`,
+    eeLink: 'End_effector',
+    baseLink: 'base_link',
+  },
+};
+
 // Match ImageGridCell's monitor-view budget: 10 Hz over rosbridge, newest frame
 // only. /joint_states at 100 Hz on the wire would be wasteful for a visual twin.
 const JOINT_THROTTLE_MS = 100;
 const JOINT_QUEUE_LENGTH = 1;
 
-// The follower URDF + its STL meshes are bundled under public/omx-urdf/ (copied
-// there by tools/export_omx_urdf_for_web.py). Fetched relative to PUBLIC_URL so
-// it works offline with NO CDN (classroom requirement) — same idiom as
-// Workshop/tutorialIndex.js.
-const URDF_URL = `${process.env.PUBLIC_URL || ''}/omx-urdf/omx_f.urdf`;
+// The URDFs + their STL meshes are bundled under public/<asset>-urdf/ (the OMX
+// copied there by tools/export_omx_urdf_for_web.py; edu6 by the plan's PR-3
+// asset drop). Fetched relative to PUBLIC_URL so it works offline with NO CDN
+// (classroom requirement) — see URDF_ASSETS above for the per-profile rows.
 
 // Arm link colour (the URDF materials are a flat dark grey; we override for a
 // cleaner, better-lit look in the viewer).
@@ -174,6 +192,18 @@ export default function UrdfTwin({
   showReach = false,
 }) {
   const rosbridgeUrl = useSelector((state) => state.ros.rosbridgeUrl);
+  // Profile geometry (edu6 §4.5): which URDF asset to load, which joint names
+  // to apply, which link is the grasp frame, and the reach-ring radii. A null/
+  // OMX manifest resolves to the pre-edu6 values exactly.
+  const caps = useSelector((state) => (state.tasks && state.tasks.taskStatus ? state.tasks.taskStatus.capabilities : null));
+  const armGeo = useMemo(() => armGeometry(caps), [caps]);
+  const asset = URDF_ASSETS[armGeo.urdfAssetId] || URDF_ASSETS.omx_f;
+  const jointSet = useMemo(() => new Set(armGeo.jointNames), [armGeo]);
+  const annulus = useMemo(() => reachAnnulus(caps), [caps]);
+  const jointSetRef = useRef(jointSet);
+  useEffect(() => { jointSetRef.current = jointSet; }, [jointSet]);
+  const gripperJointRef = useRef(armGeo.gripperJointName);
+  useEffect(() => { gripperJointRef.current = armGeo.gripperJointName; }, [armGeo]);
 
   const mountRef = useRef(null);
   // German hint chip until the first /joint_states message lands. The twin
@@ -343,7 +373,7 @@ export default function UrdfTwin({
     };
 
     loader.load(
-      URDF_URL,
+      asset.url,
       (robot) => {
         if (disposed) {
           // Effect already cleaned up while the URDF was in flight — dispose
@@ -351,6 +381,13 @@ export default function UrdfTwin({
           disposeObject(robot);
           return;
         }
+        // Per-asset link names for every module-level helper (reparent,
+        // triads, path trail, emitEndEffector) — the OMX constants stay the
+        // fallback so a stashless robot behaves exactly as before. (A THREE
+        // Object3D always has userData; the jsdom test mock may not.)
+        if (!robot.userData) robot.userData = {};
+        robot.userData.eeLinkName = asset.eeLink;
+        robot.userData.baseLinkName = asset.baseLink;
         // URDF +Z is "up"; rotate so the arm stands upright in the viewer.
         robot.rotation.x = -Math.PI / 2;
         scene.add(robot);
@@ -449,7 +486,11 @@ export default function UrdfTwin({
       axesBaseRef.current = null;
       axesTcpRef.current = null;
     };
-  }, []);
+    // asset: a profile change (the capability manifest naming a different
+    // urdf_asset_id) rebuilds the whole viewer with the right URDF — rare
+    // (caps normally settle before the twin first opens) and the cleanup
+    // above already disposes everything.
+  }, [asset]);
 
   // ---- Phase-3: sim objects + table layer (built/diffed on demand) ----------
   // Lazily creates a THREE.Group the first time there is something to show, then
@@ -583,7 +624,9 @@ export default function UrdfTwin({
     }
     if (heldObjectId !== null) {
       const mesh = map.get(heldObjectId);
-      const link = robot && robot.links ? robot.links[EE_LINK_NAME] : null;
+      const link = robot && robot.links
+        ? (robot.links[robot.userData?.eeLinkName || EE_LINK_NAME]
+           || robot.links[EE_LINK_NAME]) : null;
       if (mesh && link && typeof link.attach === 'function') {
         link.attach(mesh);
         setMeshColor(mesh, SIM_OBJECT_HELD_COLOR_HEX);
@@ -710,8 +753,17 @@ export default function UrdfTwin({
     if (!showReach && !reachRingRef.current) return;
 
     let ring = reachRingRef.current;
+    // Profile change (annulus radii) → rebuild the ring geometry.
+    if (ring && ring.userData && ring.userData.annulusKey
+        !== `${annulus.inner}:${annulus.outer}`) {
+      sceneRef.current.remove(ring);
+      if (ring.geometry) ring.geometry.dispose();
+      if (ring.material) ring.material.dispose();
+      reachRingRef.current = null;
+      ring = null;
+    }
     if (!ring) {
-      const geo = new THREE.RingGeometry(REACH_INNER_M, REACH_OUTER_M, 64);
+      const geo = new THREE.RingGeometry(annulus.inner, annulus.outer, 64);
       const mat = new THREE.MeshBasicMaterial({
         color: REACH_RING_COLOR,
         transparent: true,
@@ -720,6 +772,7 @@ export default function UrdfTwin({
         depthWrite: false,
       });
       ring = new THREE.Mesh(geo, mat);
+      ring.userData.annulusKey = `${annulus.inner}:${annulus.outer}`;
       ring.rotation.x = -Math.PI / 2; // flat on the table (viewer y=0 plane)
       ring.position.set(0, REACH_RING_Y, 0);
       scene.add(ring);
@@ -727,7 +780,7 @@ export default function UrdfTwin({
     }
     ring.visible = showReach;
     requestRenderRef.current();
-  }, [showReach]);
+  }, [showReach, annulus]);
 
   // ---- rosbridge joint-state subscription (ImageGridCell idiom) ----
   // `jointTopic` defaults to the bare global /joint_states (RecordPage); SimScene
@@ -761,7 +814,7 @@ export default function UrdfTwin({
       subscription.subscribe((msg) => {
         if (cancelled) return;
         const robot = robotRef.current;
-        applyJointState(robot, msg);
+        applyJointState(robot, msg, jointSetRef.current);
         requestRenderRef.current();
         if (!cancelled) setHasJointData(true);
         // Phase-5: accumulate the end-effector world position into the path trail
@@ -782,7 +835,7 @@ export default function UrdfTwin({
         // only when a consumer is wired (RecordPage passes none → zero cost,
         // and the robot.links/getWorldPosition reads never run).
         const cb = onEndEffectorRef.current;
-        if (cb && robot) emitEndEffector(robot, msg, cb);
+        if (cb && robot) emitEndEffector(robot, msg, cb, gripperJointRef.current);
       });
     };
     run().catch((err) => {
@@ -836,7 +889,7 @@ export default function UrdfTwin({
 // follower joints are applied; any other name (e.g. gripper_joint_2, which the
 // URDF mimics automatically) is ignored. Safe when robot is null (the URDF may
 // still be loading) and when name/position arrays are missing/mismatched.
-function applyJointState(robot, msg) {
+function applyJointState(robot, msg, jointSet = FOLLOWER_JOINT_SET) {
   if (!robot || !msg || !Array.isArray(msg.name) || !Array.isArray(msg.position)) {
     return;
   }
@@ -844,7 +897,7 @@ function applyJointState(robot, msg) {
   const n = Math.min(name.length, position.length);
   for (let i = 0; i < n; i += 1) {
     const jointName = name[i];
-    if (FOLLOWER_JOINT_SET.has(jointName)) {
+    if (jointSet.has(jointName)) {
       const value = position[i];
       if (typeof value === 'number' && Number.isFinite(value)) {
         robot.setJointValue(jointName, value);
@@ -1003,13 +1056,15 @@ function setMeshColor(mesh, color) {
 // Read the end-effector link's world position, convert it back to the base (ROS)
 // frame (undo the robot's -π/2 X-rotation: viewer (X,Y,Z) → base (X, -Z, Y)),
 // extract the gripper angle from the message, and hand both to the consumer.
-function emitEndEffector(robot, msg, cb) {
-  const link = robot && robot.links ? robot.links[EE_LINK_NAME] : null;
+function emitEndEffector(robot, msg, cb, gripperJoint = 'gripper_joint_1') {
+  const link = robot && robot.links
+    ? (robot.links[robot.userData?.eeLinkName || EE_LINK_NAME]
+       || robot.links[EE_LINK_NAME]) : null;
   if (!link || typeof link.getWorldPosition !== 'function') return;
   const world = link.getWorldPosition(new THREE.Vector3());
   let gripper = null;
   if (msg && Array.isArray(msg.name) && Array.isArray(msg.position)) {
-    const gi = msg.name.indexOf('gripper_joint_1');
+    const gi = msg.name.indexOf(gripperJoint);
     if (gi >= 0 && gi < msg.position.length) {
       const v = msg.position[gi];
       if (typeof v === 'number' && Number.isFinite(v)) gripper = v;
@@ -1042,7 +1097,9 @@ function frameRobot(camera, controls, robot) {
 // Returns true when a point was added so the caller can request a render. Caps at
 // PATH_MAX_POINTS — once full, further points are dropped (the trail freezes).
 function appendPathPoint(robot, line, positions, state, tmp) {
-  const link = robot && robot.links ? robot.links[EE_LINK_NAME] : null;
+  const link = robot && robot.links
+    ? (robot.links[robot.userData?.eeLinkName || EE_LINK_NAME]
+       || robot.links[EE_LINK_NAME]) : null;
   if (!link || typeof link.getWorldPosition !== 'function' || !line || !positions) {
     return false;
   }
@@ -1082,14 +1139,16 @@ function appendPathPoint(robot, line, positions, state, tmp) {
 function buildFrameTriads(robot, baseRef, tcpRef) {
   if (!robot || !robot.links) return false;
   let built = false;
-  const base = robot.links[BASE_LINK_NAME];
+  const base = robot.links[robot.userData?.baseLinkName || BASE_LINK_NAME]
+    || robot.links[BASE_LINK_NAME];
   if (base && typeof base.add === 'function' && !baseRef.current) {
     const ax = new THREE.AxesHelper(FRAME_AXIS_SIZE_M);
     base.add(ax);
     baseRef.current = ax;
     built = true;
   }
-  const tcp = robot.links[EE_LINK_NAME];
+  const tcp = robot.links[robot.userData?.eeLinkName || EE_LINK_NAME]
+    || robot.links[EE_LINK_NAME];
   if (tcp && typeof tcp.add === 'function' && !tcpRef.current) {
     const ax = new THREE.AxesHelper(FRAME_AXIS_SIZE_M);
     tcp.add(ax);

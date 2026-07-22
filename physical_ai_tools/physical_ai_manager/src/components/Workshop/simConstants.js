@@ -89,3 +89,17 @@ export function buildCatalogDims(res) {
   });
   return out;
 }
+
+// reachAnnulus — profile-driven annulus radii (edu6 §4.5). The server manifest
+// carries reach_inner_m/reach_outer_m for a profile whose ring differs from the
+// OMX (edu6: 0.09/0.21); absent keys (OMX, old server, cloud mode) keep the
+// exported OMX constants so both panes render exactly the pre-edu6 ring.
+export function reachAnnulus(caps) {
+  const inner = caps && typeof caps.reach_inner_m === 'number'
+    && Number.isFinite(caps.reach_inner_m) && caps.reach_inner_m > 0
+    ? caps.reach_inner_m : REACH_INNER_M;
+  const outer = caps && typeof caps.reach_outer_m === 'number'
+    && Number.isFinite(caps.reach_outer_m) && caps.reach_outer_m > inner
+    ? caps.reach_outer_m : REACH_OUTER_M;
+  return { inner, outer };
+}

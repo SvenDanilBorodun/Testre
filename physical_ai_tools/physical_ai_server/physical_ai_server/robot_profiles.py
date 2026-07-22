@@ -304,6 +304,7 @@ def capabilities_json(profile: ArmProfile) -> str:
         ('reach_inner_m', profile.reach_inner_m),
         ('reach_outer_m', profile.reach_outer_m),
         ('gripper_mm_per_rad', profile.gripper_mm_per_rad),
+        ('sim_close_threshold_rad', profile.sim_close_threshold_rad),
     ):
         if value is not None:
             manifest[key] = value

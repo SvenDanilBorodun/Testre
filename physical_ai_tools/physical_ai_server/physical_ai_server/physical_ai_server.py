@@ -3104,7 +3104,6 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         (never silently clamps into a wall) via a German ``motion.WorkflowError``.
         Modes: joint | cartesian | drive_to (see WorkshopJog.srv)."""
         from physical_ai_server.workflow.handlers import motion as _motion
-        from physical_ai_server.workflow.ik_solver import _DXL_JOINT_LIMITS_RAD
         ik = self._build_ik_solver()
         if ik is None:
             raise _motion.WorkflowError(
@@ -3129,7 +3128,7 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 q_end = arm + [new]
             else:
                 new = arm[idx] + delta
-                lo, hi = _DXL_JOINT_LIMITS_RAD[idx]
+                lo, hi = ik.joint_limits[idx]
                 if new < lo or new > hi:
                     raise _motion.WorkflowError(
                         f'Gelenk {idx + 1} außerhalb des zulässigen Bereichs.')
@@ -3155,7 +3154,7 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 q_end = list(arm_q) + [grip]
             elif idx == 3:
                 new_roll = arm[4] + delta
-                lo, hi = _DXL_JOINT_LIMITS_RAD[4]
+                lo, hi = ik.joint_limits[4]
                 if new_roll < lo or new_roll > hi:
                     raise _motion.WorkflowError(
                         'Drehung außerhalb des zulässigen Bereichs.')

@@ -270,3 +270,38 @@ def test_solve_still_returns_finite_for_reachable_target():
     sol = _ik().solve((0.20, 0.0, 0.02))
     assert sol is not None
     assert all(math.isfinite(v) for v in sol)
+
+
+# ── PR-1 seam: public joint_limits / base_axis_x properties ───────────────────
+# ArmProfile.build_ik solvers supply their own limits/axis through these; no
+# module may import the private _DXL_JOINT_LIMITS_RAD / _J1_AXIS_X any more.
+
+def test_joint_limits_property_matches_private_table():
+    from physical_ai_server.workflow import ik_solver as mod
+    ik = _ik()
+    assert isinstance(ik.joint_limits, tuple)
+    assert len(ik.joint_limits) == ik.num_joints()
+    assert ik.joint_limits == tuple(mod._DXL_JOINT_LIMITS_RAD)
+    for lo, hi in ik.joint_limits:
+        assert math.isfinite(lo) and math.isfinite(hi) and lo < hi
+
+
+def test_base_axis_x_property_matches_private_constant():
+    from physical_ai_server.workflow import ik_solver as mod
+    assert _ik().base_axis_x == mod._J1_AXIS_X
+    assert _ik().base_axis_x == pytest.approx(-0.01125)
+
+
+def test_no_module_imports_the_private_ik_constants():
+    # The grep guard: production modules must consume the PUBLIC properties.
+    import pathlib
+    pkg = pathlib.Path(__file__).resolve().parents[1] / 'physical_ai_server'
+    offenders = []
+    for py in pkg.rglob('*.py'):
+        if py.name == 'ik_solver.py':
+            continue
+        text = py.read_text(encoding='utf-8')
+        if '_DXL_JOINT_LIMITS_RAD' in text or '_J1_AXIS_X' in text:
+            offenders.append(str(py))
+    assert offenders == [], (
+        f'private IK constants imported outside ik_solver.py: {offenders}')

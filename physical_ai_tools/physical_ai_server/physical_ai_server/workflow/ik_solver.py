@@ -179,6 +179,25 @@ class IKSolver:
         """Number of arm joints solved (joint1..joint5)."""
         return 5
 
+    @property
+    def joint_limits(self) -> tuple[tuple[float, float], ...]:
+        """Per-arm-joint ``(lower, upper)`` position limits in radians.
+
+        The PUBLIC seam for jog/manual range checks — callers must consume this
+        (length == ``num_joints()``) instead of importing the module-private
+        ``_DXL_JOINT_LIMITS_RAD``, so a different-DOF solver (ArmProfile
+        ``build_ik``) transparently supplies its own limits."""
+        return tuple(self._joint_limits)
+
+    @property
+    def base_axis_x(self) -> float:
+        """Base-frame x offset of the joint-1 (yaw) axis in metres.
+
+        The PUBLIC seam for azimuth geometry (``path_guard`` base-swing via
+        points, ``base_yaw`` consumers) — replaces importing the
+        module-private ``_J1_AXIS_X``."""
+        return _J1_AXIS_X
+
     # ── verification ────────────────────────────────────────────────────────
     def _verify_constants(self, urdf_string: str) -> None:
         """Best-effort: parse the URDF joint origins and warn loudly if they

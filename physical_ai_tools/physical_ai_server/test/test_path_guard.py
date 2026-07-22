@@ -29,7 +29,7 @@ from physical_ai_server.workflow.handlers.motion import (
     GRIPPER_OPEN_RAD,
     WorkflowError,
 )
-from physical_ai_server.workflow.ik_solver import IKSolver, _J1_AXIS_X
+from physical_ai_server.workflow.ik_solver import IKSolver
 from physical_ai_server.workflow.path_guard import (
     NoGoZone,
     build_zones,
@@ -288,7 +288,7 @@ def test_base_swing_via_uses_j1_axis_offset_azimuth():
     # Verify a via solved by the swing reaches base_yaw == its own azimuth.
     ik = IKSolver()
     r, az = 0.20, 0.6
-    vx = _J1_AXIS_X + r * math.cos(az)
+    vx = ik.base_axis_x + r * math.cos(az)
     vy = r * math.sin(az)
     q = ik.solve((vx, vy, 0.10))
     assert q is not None

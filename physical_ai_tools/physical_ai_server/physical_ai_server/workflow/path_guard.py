@@ -46,8 +46,6 @@ from typing import Optional
 
 import numpy as np
 
-from physical_ai_server.workflow.ik_solver import _J1_AXIS_X
-
 
 _logger = logging.getLogger(__name__)
 
@@ -345,7 +343,7 @@ def _plan_base_swing(ctx, q_start, q_end, zones, margin, link_radius,
     for z_swing in _SWING_HEIGHTS:
         for r_swing in _SWING_RADII:
             for az in _candidate_azimuths():
-                vx = _J1_AXIS_X + r_swing * math.cos(az)
+                vx = ik.base_axis_x + r_swing * math.cos(az)
                 vy = r_swing * math.sin(az)
                 via_q = _try_via(ctx, (vx, vy, z_swing), roll)
                 if via_q is None:

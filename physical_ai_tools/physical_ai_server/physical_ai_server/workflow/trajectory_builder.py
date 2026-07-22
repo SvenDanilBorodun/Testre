@@ -51,9 +51,13 @@ def quintic_blend(s: float) -> float:
     return 10 * s ** 3 - 15 * s ** 4 + 6 * s ** 5
 
 
-def _velocity_safe_duration(delta: "np.ndarray", duration_s: float) -> float:
+def _velocity_safe_duration(
+    delta: "np.ndarray",
+    duration_s: float,
+    velocity_limit: float = JOINT_VELOCITY_LIMIT_RAD_S,
+) -> float:
     """Return a duration at least large enough that no joint's peak quintic
-    velocity exceeds ``_VELOCITY_SAFETY_FRACTION`` of the joint limit.
+    velocity exceeds ``_VELOCITY_SAFETY_FRACTION`` of ``velocity_limit``.
 
     A large single-joint swing — most dangerously a joint1 base-yaw that
     sweeps the long way (~2π) when consecutive targets straddle ±π, e.g. a
@@ -62,13 +66,15 @@ def _velocity_safe_duration(delta: "np.ndarray", duration_s: float) -> float:
     4.8 rad/s limit (peak ≈ |delta|·1.875/duration → 6.28·1.875/2.5 ≈
     4.71 rad/s). Scaling the duration with the largest joint delta keeps the
     motion smooth and within limits for ANY swing; small moves keep their
-    requested (faster) duration unchanged."""
+    requested (faster) duration unchanged. ``velocity_limit`` defaults to the
+    OMX URDF limit (4.8 rad/s); an ArmProfile with a different limit passes its
+    own through ``build_segment``."""
     if delta.size == 0:
         return duration_s
     max_delta = float(np.max(np.abs(delta)))
     if max_delta <= 0.0:
         return duration_s
-    v_safe = _VELOCITY_SAFETY_FRACTION * JOINT_VELOCITY_LIMIT_RAD_S
+    v_safe = _VELOCITY_SAFETY_FRACTION * velocity_limit
     min_duration = max_delta * _QUINTIC_PEAK_VELOCITY_FACTOR / v_safe
     return max(duration_s, min_duration)
 
@@ -78,6 +84,7 @@ def build_segment(
     q_end: list[float],
     duration_s: float,
     fps: int = DEFAULT_FPS,
+    velocity_limit: float = JOINT_VELOCITY_LIMIT_RAD_S,
 ) -> list[tuple[list[float], float]]:
     """Return a list of (q, t_from_start_s) waypoints sampled at ``fps``
     Hz over a quintic-blended path from q_start to q_end. The first
@@ -102,7 +109,7 @@ def build_segment(
     q_end_arr = np.asarray(q_end, dtype=np.float64)
     delta = q_end_arr - q_start_arr
 
-    duration_s = _velocity_safe_duration(delta, duration_s)
+    duration_s = _velocity_safe_duration(delta, duration_s, velocity_limit)
 
     num_samples = max(1, int(round(duration_s * fps)))
     dt = duration_s / num_samples

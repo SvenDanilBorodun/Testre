@@ -284,3 +284,110 @@ def test_workflow_context_profile_defaults_are_omx():
     assert ctx.roll_joint_index is None
     assert ctx.home_joints_rad is None
     assert _n(ctx) == 5 and _roll_idx(ctx) == 4
+
+
+# ── slice 2d: node/Communicator + the permanent grep rail ────────────────────
+
+from pathlib import Path  # noqa: E402
+
+
+def test_grep_guard_no_width_literals_in_migrated_modules():
+    """§16.4 permanent rail: hardcoded 5/6-width index literals must not creep
+    back into the DOF-migrated workflow modules. The two allowed survivors are
+    a docstring mention (motion) and the documented OMX dataclass default
+    (WorkflowContext.last_full_joints — overridden width-correct by the
+    manager at construction)."""
+    import re
+    pkg = Path(__file__).resolve().parents[1] / 'physical_ai_server' / 'workflow'
+    files = [
+        pkg / 'handlers' / 'motion.py',
+        pkg / 'handlers' / 'trajectory.py',
+        pkg / 'path_guard.py',
+        pkg / 'workflow_manager.py',
+        pkg / 'sim_arm.py',
+    ]
+    pattern = re.compile(r'\[:5\]|\[:6\]|\[5\]|\[6\]|\[4\]|range\([56]\)')
+    allowed = (
+        "``ctx.last_full_joints[5]``",              # motion docstring
+        "field(default_factory=lambda: [0.0] * 6)",  # documented OMX default
+    )
+    offenders = []
+    for f in files:
+        for i, line in enumerate(f.read_text(encoding='utf-8').splitlines(), 1):
+            stripped = line.strip()
+            if stripped.startswith('#'):
+                continue
+            if pattern.search(line) and not any(a in line for a in allowed):
+                offenders.append(f'{f.name}:{i}: {stripped}')
+    assert offenders == [], (
+        'width literals crept back into DOF-migrated modules:\n'
+        + '\n'.join(offenders))
+
+
+def test_communicator_follower_joint_order_is_profile_settable():
+    # The class default stays the OMX order; a ctor-passed profile order
+    # shadows it on the instance (and empties are ignored). Source-level
+    # assertions — the communicator imports rclpy/geometry_msgs (ROS-only).
+    src = (Path(__file__).resolve().parents[1] / 'physical_ai_server'
+           / 'communication' / 'communicator.py').read_text(encoding='utf-8')
+    assert "follower_joint_order: Optional[tuple] = None" in src
+    assert "self.FOLLOWER_JOINT_ORDER = names" in src
+    assert ("FOLLOWER_JOINT_ORDER = ('joint1', 'joint2', 'joint3', 'joint4', "
+            "'joint5', 'gripper_joint_1')") in src
+
+
+def test_jog_compute_target_n6_profile():
+    """The ast-extracted _compute_jog_target with a 6-arm-joint profile stub:
+    gripper index 6, roll joint index 5, profile gripper band."""
+    import ast as _ast
+    import textwrap
+    src_path = (Path(__file__).resolve().parents[1]
+                / 'physical_ai_server' / 'physical_ai_server.py')
+    source = src_path.read_text(encoding='utf-8')
+    tree = _ast.parse(source)
+    ns: dict = {}
+    for node in _ast.walk(tree):
+        if isinstance(node, _ast.FunctionDef) and node.name in (
+                '_compute_jog_target', '_jog_solve_floor'):
+            exec(compile(textwrap.dedent(_ast.get_source_segment(source, node)),
+                         str(src_path), 'exec'), ns)  # noqa: S102
+
+    class _P:
+        num_arm_joints = N6
+        roll_joint_index = 5
+        gripper_open_rad = 1.75
+        gripper_closed_rad = 0.0
+        home_joints_rad = _EDU6_HOME
+
+    class _Stub:
+        _arm_profile = _P()
+
+        def _build_ik_solver(self):
+            return _FakeIK6()
+
+        def _load_workflow_calibration(self):
+            return {}
+
+    stub = _Stub()
+    stub._compute_jog_target = types.MethodType(ns['_compute_jog_target'], stub)
+    stub._jog_solve_floor = types.MethodType(ns['_jog_solve_floor'], stub)
+    live = list(_EDU6_HOME) + [1.0]  # 7-wide
+
+    req = types.SimpleNamespace(mode='joint', index=6, delta=0.5,
+                                target_x=0.0, target_y=0.0, target_z=0.0)
+    q, _world = stub._compute_jog_target('joint', req, live)
+    assert len(q) == 7
+    assert q[6] == pytest.approx(1.5)          # gripper channel moved
+    assert q[:6] == pytest.approx(list(_EDU6_HOME))
+
+    # Gripper band: profile 0..1.75 — a delta past the top REFUSES.
+    req_over = types.SimpleNamespace(mode='joint', index=6, delta=1.0,
+                                    target_x=0.0, target_y=0.0, target_z=0.0)
+    with pytest.raises(WorkflowError):
+        stub._compute_jog_target('joint', req_over, live)
+
+    # Joint index 6 is the gripper on n=6; index 7 is invalid.
+    req_bad = types.SimpleNamespace(mode='joint', index=7, delta=0.1,
+                                    target_x=0.0, target_y=0.0, target_z=0.0)
+    with pytest.raises(WorkflowError):
+        stub._compute_jog_target('joint', req_bad, live)

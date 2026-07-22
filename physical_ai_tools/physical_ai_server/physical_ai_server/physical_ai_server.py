@@ -349,6 +349,15 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         self._init_ros_publisher()
         self._init_ros_service()
 
+        # Pure identity hoist (edu6 §4.1): resolve() is NON-RAISING by
+        # construction (strip + dict lookup with a default fallback), so the
+        # profile is readable by _init_collision_monitor (collision_enabled)
+        # and every later __init__ consumer. _init_robot_profile stays the
+        # LAST statement (degraded-boot contract, Fix 5) and REUSES this
+        # resolved object — hoist NOTHING else (capabilities_json can raise).
+        self._arm_profile = robot_profiles.resolve(
+            os.environ.get('EDUBOTICS_ROBOT_TYPE'))
+
         # EduBotics teleop force/collision e-stop (Rule §2 software guard, teleop-only).
         # Arms the read-only force monitor + the safe-home/resync orchestration.
         self._init_collision_monitor()
@@ -400,11 +409,14 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         # It STAYS first and OUTSIDE the try (Rule D1).
         self.operation_mode = 'collection'
         try:
-            # Fix 5 — resolve() + the identity attributes live INSIDE the try
-            # now. Previously they sat above it, so a raising
-            # resolve()/capabilities_json() would escape __init__ (respawn
-            # crash-loop) despite the "never raises out of __init__" contract.
-            profile = robot_profiles.resolve(os.environ.get('EDUBOTICS_ROBOT_TYPE'))
+            # Fix 5 — the identity attributes live INSIDE the try. resolve()
+            # itself ran in the __init__ hoist (non-raising); reuse that object
+            # (the re-init retry path re-enters here with the same stash — the
+            # env cannot change mid-run).
+            profile = getattr(self, '_arm_profile', None)
+            if profile is None:
+                profile = robot_profiles.resolve(
+                    os.environ.get('EDUBOTICS_ROBOT_TYPE'))
             # The resolved profile object is kept private for the IK factory seam
             # (_build_ik_solver); the string id + caps JSON ride /task/status.
             self._arm_profile = profile
@@ -962,7 +974,9 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         self.communicator = Communicator(
             node=self,
             operation_mode=self.operation_mode,
-            params=self.params
+            params=self.params,
+            follower_joint_order=getattr(
+                getattr(self, '_arm_profile', None), 'joint_names', None),
         )
 
         # NOTE: the 1 Hz liveness heartbeat is no longer created here — it is
@@ -3064,6 +3078,16 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         self.on_manual = bool(
             self._manual_persistent or self._manual_transient_ops > 0)
 
+    def _profile_n(self) -> int:
+        """Arm-joint count from the resolved ArmProfile (gripper index == n;
+        full vector width == n + 1). 5 when the profile is unavailable (OMX)."""
+        profile = getattr(self, '_arm_profile', None)
+        try:
+            n = int(getattr(profile, 'num_arm_joints', 0) or 0)
+        except (TypeError, ValueError):
+            n = 0
+        return n if n > 0 else 5
+
     def _jog_solve_floor(self, ik, target, roll, require_floor=False):
         """Solve a Cartesian jog target with the workspace-floor refusal + reach
         annulus, reusing ``motion._solve_or_raise`` (its German errors) via a
@@ -3090,11 +3114,15 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 'Tisch noch nicht vermessen — bitte zuerst „Tisch vermessen" in '
                 'der Kalibrierung abschließen, bevor der Arm nach unten oder zu '
                 'einem Ziel gefahren wird.')
+        _profile = getattr(self, '_arm_profile', None)
         shim = SimpleNamespace(
             ik=ik,
             z_table=z_table,
             table_plane=table_plane,
             last_arm_joints=None,
+            num_arm_joints=getattr(_profile, 'num_arm_joints', None),
+            home_joints_rad=getattr(_profile, 'home_joints_rad', None),
+            roll_joint_index=getattr(_profile, 'roll_joint_index', None),
         )
         return _motion._solve_or_raise(shim, target, roll=roll)
 
@@ -3110,18 +3138,29 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 'Roboter-Beschreibung nicht verfügbar — der Bewegungsrechner (IK) '
                 'konnte nicht gestartet werden. Bitte die Umgebung neu starten.'
             )
-        arm = [float(v) for v in joints[:5]]
-        grip = float(joints[5])
+        # ArmProfile geometry (inline getattrs — this function is ast-extracted
+        # onto stub selves in tests, which carry no _arm_profile → OMX values).
+        _profile = getattr(self, '_arm_profile', None)
+        n = int(getattr(_profile, 'num_arm_joints', 0) or 0) or 5
+        roll_idx = getattr(_profile, 'roll_joint_index', None)
+        if roll_idx is None:
+            roll_idx = n - 1
+        g_open = getattr(_profile, 'gripper_open_rad', None)
+        g_open = _motion.GRIPPER_OPEN_RAD if g_open is None else float(g_open)
+        g_closed = getattr(_profile, 'gripper_closed_rad', None)
+        g_closed = _motion.GRIPPER_CLOSED_RAD if g_closed is None else float(g_closed)
+        arm = [float(v) for v in joints[:n]]
+        grip = float(joints[n])
         mode = (mode or '').strip().lower()
 
         if mode == 'joint':
             idx = int(request.index)
             delta = float(request.delta)
-            if idx < 0 or idx > 5:
+            if idx < 0 or idx > n:
                 raise _motion.WorkflowError('Ungültiger Gelenk-Index.')
-            if idx == 5:
+            if idx == n:
                 new = grip + delta
-                lo, hi = _motion.GRIPPER_CLOSED_RAD, _motion.GRIPPER_OPEN_RAD
+                lo, hi = g_closed, g_open
                 if new < lo or new > hi:
                     raise _motion.WorkflowError(
                         'Greifer außerhalb des zulässigen Bereichs.')
@@ -3149,17 +3188,17 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 # A downward Z step (idx 2, delta < 0) needs a known table floor —
                 # refuse it on an uncalibrated rig. X/Y and an upward Z are always safe.
                 arm_q = self._jog_solve_floor(
-                    ik, (target[0], target[1], target[2]), roll=arm[4],
+                    ik, (target[0], target[1], target[2]), roll=arm[roll_idx],
                     require_floor=(idx == 2 and delta < 0.0))
                 q_end = list(arm_q) + [grip]
             elif idx == 3:
-                new_roll = arm[4] + delta
-                lo, hi = ik.joint_limits[4]
+                new_roll = arm[roll_idx] + delta
+                lo, hi = ik.joint_limits[roll_idx]
                 if new_roll < lo or new_roll > hi:
                     raise _motion.WorkflowError(
                         'Drehung außerhalb des zulässigen Bereichs.')
                 arm2 = list(arm)
-                arm2[4] = new_roll
+                arm2[roll_idx] = new_roll
                 q_end = arm2 + [grip]
             else:
                 raise _motion.WorkflowError(
@@ -3176,7 +3215,7 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             raise _motion.WorkflowError('Unbekannter Handbetrieb-Modus.')
 
         world = (0.0, 0.0, 0.0)
-        fk = ik.fk(q_end[:5])
+        fk = ik.fk(q_end[:n])
         if fk is not None:
             _R2, t2 = fk
             world = (float(t2[0]), float(t2[1]), float(t2[2]))
@@ -3307,11 +3346,12 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                     joints = self.communicator.get_latest_follower_joints()
                 except Exception:  # noqa: BLE001 — treat as "pose unknown"
                     joints = None
-                if not joints or len(joints) < 6:
+                width = self._profile_n() + 1
+                if not joints or len(joints) < width:
                     response.message = ('Aktuelle Armstellung ist noch nicht bekannt '
                                         '— bitte kurz warten und erneut versuchen.')
                     return response
-                joints = [float(v) for v in joints[:6]]
+                joints = [float(v) for v in joints[:width]]
                 # Non-finite seed guard: a NaN/Inf readback would publish NaN
                 # (garbage arm command) or crash build_segment on an Inf delta.
                 if not all(math.isfinite(v) for v in joints):
@@ -3705,9 +3745,9 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                     response.sample_count = len(buf)  # report what was captured
                     return response  # keep on_manual True (arm may be limp)
                 duration = float(buf[-1][0]) if buf else 0.0
-                # Buffer sample layout: [t_s, j1..j5, grip]. CONTRACT B point:
-                # [j1..j5, grip, t_s].
-                points = [[s[1], s[2], s[3], s[4], s[5], s[6], s[0]] for s in buf]
+                # Buffer sample layout: [t_s, j1..jn, grip]. CONTRACT B point:
+                # [j1..jn, grip, t_s] — width-agnostic rotation of the row.
+                points = [list(s[1:]) + [s[0]] for s in buf]
                 response.points_json = json.dumps({
                     'fps': _MANUAL_RECORD_FPS, 'points': points,
                 })
@@ -3746,10 +3786,11 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 joints = self.communicator.get_latest_follower_joints()
             except Exception:  # noqa: BLE001
                 joints = None
-        if not joints or len(joints) < 6:
+        width = self._profile_n() + 1
+        if not joints or len(joints) < width:
             return
         t = time.monotonic() - self._manual_record_start_mono
-        sample = [float(t)] + [float(v) for v in joints[:6]]
+        sample = [float(t)] + [float(v) for v in joints[:width]]
         acquired = self._manual_lock.acquire(timeout=0.05)
         if not acquired:
             return  # a stop/jog holds the mutex; drop this frame (bounded loss)
@@ -3761,7 +3802,7 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             if buf:
                 last = buf[-1]
                 if all(abs(sample[1 + i] - last[1 + i]) < _MANUAL_RECORD_MIN_DELTA_RAD
-                       for i in range(6)):
+                       for i in range(len(sample) - 1)):
                     # Still enforce the wall-clock cap while dropping duplicates.
                     if t >= RECORD_MAX_S:
                         self._manual_record_active = False
@@ -3920,8 +3961,9 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             if traj is None:
                 response.message = 'Keine Aufnahme angegeben.'
                 return response
+        n = self._profile_n()
         try:
-            points = extract_points(traj)
+            points = extract_points(traj, num_arm_joints=n)
         except WorkflowError as e:
             response.message = str(e)
             return response
@@ -3932,11 +3974,11 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             current = self.communicator.get_latest_follower_joints()
         except Exception:  # noqa: BLE001
             current = None
-        if not current or len(current) < 6:
+        if not current or len(current) < n + 1:
             response.message = ('Aktuelle Armstellung ist noch nicht bekannt — '
                                 'bitte kurz warten und erneut versuchen.')
             return response
-        current = [float(v) for v in current[:6]]
+        current = [float(v) for v in current[:n + 1]]
         # Non-finite guard: a NaN/Inf readback would publish NaN through the
         # lead-in (garbage arm command) or crash build_segment on an Inf delta.
         if not all(math.isfinite(v) for v in current):
@@ -3949,11 +3991,18 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         # exactly as before.
         lead_floor = self._build_replay_lead_floor_check()
         try:
+            from physical_ai_server.workflow.trajectory_builder import (
+                JOINT_VELOCITY_LIMIT_RAD_S as _VL_DEFAULT,
+            )
+            _vl = getattr(getattr(self, '_arm_profile', None),
+                          'velocity_limit_rad_s', None)
             segmented = resegment_trajectory(
                 points, speed, lead_in_from=current,
                 lead_in_floor_check=lead_floor,
                 point_floor_check=lead_floor,  # FIX 5 — floor-check recorded points
-                with_velocities=True)          # smooth cubic playback (velocities)
+                with_velocities=True,          # smooth cubic playback (velocities)
+                num_arm_joints=n,
+                velocity_limit=float(_vl) if _vl else _VL_DEFAULT)
         except WorkflowError as e:
             response.message = str(e)
             return response
@@ -4033,9 +4082,11 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         from physical_ai_server.workflow.handlers import motion as _motion
         shim = SimpleNamespace(z_table=z_table, table_plane=table_plane)
 
+        _n_fk = self._profile_n()
+
         def _lead_floor(q6):
             try:
-                pose = ik.fk([float(v) for v in q6[:5]])
+                pose = ik.fk([float(v) for v in q6[:_n_fk]])
             except Exception:  # noqa: BLE001
                 return False
             if pose is None:
@@ -4258,7 +4309,10 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         joint_names = (
             self.total_joint_order
             if self.total_joint_order
-            else ['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'gripper_joint_1']
+            else list(getattr(getattr(self, '_arm_profile', None), 'joint_names',
+                              None)
+                      or ['joint1', 'joint2', 'joint3', 'joint4', 'joint5',
+                          'gripper_joint_1'])
         )
         msg = JointTrajectory()
         msg.joint_names = list(joint_names)
@@ -4316,6 +4370,10 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             # which WorkflowManager.start() catches and surfaces at the first
             # named-object block (a workflow with no named blocks is unaffected).
             load_object_catalog=self._load_object_catalog,
+            # ArmProfile geometry (§16.4 2d): stamps n/HOME/gripper/velocity
+            # onto every WorkflowContext so the handlers' ctx accessors read
+            # the profile instead of the OMX module constants.
+            arm_profile=getattr(self, '_arm_profile', None),
         )
         return self.workflow_manager
 
@@ -4324,6 +4382,13 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
     # ------------------------------------------------------------------
     _SIM_JOINT_NAMES = ['joint1', 'joint2', 'joint3', 'joint4', 'joint5',
                         'gripper_joint_1']
+
+    def _sim_joint_names(self) -> list:
+        """Joint-name vector for the sim /sim/joint_states publisher — the
+        profile's names (URDF-native, what the web twin keys off) with the OMX
+        class-attr fallback."""
+        names = getattr(getattr(self, '_arm_profile', None), 'joint_names', None)
+        return list(names) if names else list(self._SIM_JOINT_NAMES)
 
     def _ensure_sim_publisher(self):
         """Lazily create the sim-only /sim/joint_states JointState publisher +
@@ -4370,7 +4435,7 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         except Exception:  # noqa: BLE001 — stamp is advisory
             pass
         positions = [float(v) for v in q]
-        msg.name = list(self._SIM_JOINT_NAMES)
+        msg.name = self._sim_joint_names()
         msg.position = positions
         pub.publish(msg)
         self._last_sim_joints = positions
@@ -4408,10 +4473,17 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             self.get_logger().error(f'Cannot import sim WorkflowManager: {e}')
             return None
         self._ensure_sim_publisher()
+        _profile = getattr(self, '_arm_profile', None)
+        _home = getattr(_profile, 'home_joints_rad', None)
+        _g_open = getattr(_profile, 'gripper_open_rad', None)
         sim_arm = SimArm(
             joint_state_sink=self._publish_sim_joint_state,
             ik=self._build_ik_solver(),
             objects=list(getattr(self, '_sim_objects', []) or []),
+            num_arm_joints=self._profile_n(),
+            home_full_joints=(
+                [float(v) for v in _home] + [float(_g_open)]
+                if _home is not None and _g_open is not None else None),
         )
         self._sim_arm = sim_arm
         # 1x1 non-None dummy frame: perception_blocks._scene_frame only checks
@@ -4436,6 +4508,7 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             get_current_pose_xyz=lambda: sim_arm.fk_xyz(),
             get_follower_joints=sim_arm.get_joints,
             load_object_catalog=self._load_object_catalog,
+            arm_profile=getattr(self, '_arm_profile', None),
         )
         return self.sim_workflow_manager
 
@@ -5238,6 +5311,7 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             msg.header.frame_id = 'workflow'
             # Latest follower joints from the inference manager / data
             # manager — both keep a rolling buffer.
+            _n_ts = self._profile_n()
             joints = []
             try:
                 if (
@@ -5246,13 +5320,14 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 ):
                     js = self.communicator.get_latest_follower_joints()
                     if js is not None:
-                        joints = [float(v) for v in list(js)[:6]]
+                        joints = [float(v) for v in list(js)[:_n_ts + 1]]
             except Exception:
                 joints = []
             if not joints:
-                joints = [0.0] * 6
-            msg.follower_joints = joints[:5]
-            msg.gripper_opening = float(joints[5]) if len(joints) >= 6 else 0.0
+                joints = [0.0] * (_n_ts + 1)
+            msg.follower_joints = joints[:_n_ts]
+            msg.gripper_opening = (float(joints[_n_ts])
+                                   if len(joints) >= _n_ts + 1 else 0.0)
             # Audit O1: derive the perception fields from the last
             # detection list that the workflow runtime pushed via
             # _emit_workflow_status. TTL is 2.0s so a finished detect

@@ -156,6 +156,10 @@ class _FakeNode:
         self._workflow_traj_publisher = object()  # pretend the pub already exists
 
     # --- gates / helpers stubbed ---
+    def _profile_n(self):
+        # ArmProfile arm-joint count (§16.4 2d) — the fake models the OMX rig.
+        return 5
+
     def _assert_no_other_active(self, mode):
         self.last_mode = mode
         return self._gate

@@ -103,11 +103,21 @@ class Communicator:
         self,
         node: Node,
         operation_mode: str,
-        params: Dict[str, Any]
+        params: Dict[str, Any],
+        follower_joint_order: Optional[tuple] = None,
     ):
         self.node = node
         self.operation_mode = operation_mode
         self.params = params
+        # ArmProfile seam (§16.4 2d): the canonical follower joint order becomes
+        # an INSTANCE attribute (shadowing the OMX class default) so a profile
+        # with different joint names/count reorders /joint_states correctly.
+        # get_latest_follower_joints() returns EXACTLY len(order) values by
+        # construction — the §16.4 width rail at this choke point.
+        if follower_joint_order:
+            names = tuple(str(n) for n in follower_joint_order if str(n).strip())
+            if names:
+                self.FOLLOWER_JOINT_ORDER = names
         self.file_browse_utils = FileBrowseUtils(
             max_workers=8,
             logger=self.node.get_logger())

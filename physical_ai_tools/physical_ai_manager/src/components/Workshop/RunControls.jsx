@@ -103,7 +103,10 @@ async function probeRsStatus(base) {
 // CONTRACT C — a fetched trajectory must reduce to { fps, points } for the run
 // payload. The cloud row is expected to expose `points` (array) + `fps`
 // directly (CONTRACT B), but tolerate a stringified `points_json` fallback so a
-// small cloud-shape difference doesn't wedge a replay run.
+// small cloud-shape difference doesn't wedge a replay run. `robot_profile` (the
+// migration-035 arm-family tag) is carried through so the caller can refuse a
+// cross-profile replay BEFORE it reaches the runtime (an OMX 7-wide recording on
+// an edu6 rig otherwise dies later with the misleading „Aufnahme ist beschädigt.").
 function normalizeTrajectory(t) {
   if (!t || typeof t !== 'object') return null;
   let points = Array.isArray(t.points) ? t.points : null;
@@ -118,7 +121,19 @@ function normalizeTrajectory(t) {
     } catch (_) { /* leave points null → caller errors */ }
   }
   if (!points || points.length === 0) return null;
-  return { fps, points };
+  const robotProfile = typeof t.robot_profile === 'string' ? t.robot_profile : null;
+  return { fps, points, robotProfile };
+}
+
+// Canonical arm-family id for a recording tag / rig identity. An absent/NULL tag
+// is a LEGACY (pre-035) recording — always OMX by construction — so it maps to
+// 'omx_f', and an unknown rig identity likewise falls back to 'omx_f' (the
+// pre-edu6 default). A recording is replayable here only when its family matches
+// the current rig's.
+function trajectoryMatchesRig(trajProfile, rigRobotType) {
+  const traj = (typeof trajProfile === 'string' && trajProfile.trim()) || 'omx_f';
+  const rig = (typeof rigRobotType === 'string' && rigRobotType.trim()) || 'omx_f';
+  return traj === rig;
 }
 
 function RunControls({
@@ -144,6 +159,11 @@ function RunControls({
   } = useRosServiceCaller();
   const runState = useSelector((s) => s.workshop.runState);
   const accessToken = useSelector((s) => s.auth?.session?.access_token);
+  // The rig's data-robot-type identity (taskStatus.robotType: 'omx_f' /
+  // 'edu6_studio'), used to refuse replaying a recording made on a different arm
+  // family — its DOF width would break the runtime downstream.
+  const robotType = useSelector((s) => (s.tasks && s.tasks.taskStatus
+    ? s.tasks.taskStatus.robotType : ''));
   const phase = useSelector((s) => s.workshop.phase);
   const currentBlockId = useSelector((s) => s.workshop.currentBlockId);
   const paused = useSelector((s) => s.workshop.paused);
@@ -361,7 +381,19 @@ function RunControls({
             if (!norm) {
               throw new Error(`Bewegung „${name}" wurde nicht gefunden.`);
             }
-            trajectories[name] = norm;
+            // Cross-profile replay refusal: a recording's arm family must match
+            // the current rig, or the DOF width mismatch later surfaces as the
+            // misleading „Aufnahme ist beschädigt.". A clean German refusal here
+            // (outside the load-failure catch so it isn't prefixed) aborts the run.
+            if (!trajectoryMatchesRig(norm.robotProfile, robotType)) {
+              toast.error(
+                'Diese Bewegung wurde mit einem anderen Robotertyp aufgenommen '
+                + 'und kann hier nicht abgespielt werden.');
+              return;
+            }
+            // Inject only the run-payload sibling (Contract C: { fps, points }) —
+            // the arm-family tag was consumed by the refusal check above.
+            trajectories[name] = { fps: norm.fps, points: norm.points };
           }
         } catch (e) {
           toast.error(`Bewegung konnte nicht geladen werden: ${e.message || e}`);
@@ -444,6 +476,7 @@ function RunControls({
     dispatch,
     workflowId,
     accessToken,
+    robotType,
     breakpoints,
     setWorkflowBreakpoints,
   ]);

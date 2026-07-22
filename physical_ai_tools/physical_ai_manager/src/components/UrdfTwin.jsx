@@ -66,9 +66,11 @@
 //                    table as receiver. Default false → NO renderer flags are set
 //                    and nothing casts (RecordPage + jsdom mock untouched).
 //   * showReach    — Sim-stage translucent reach-annulus ring on the 3D table
-//                    (the SAME 0.10/0.28 bounds as the 2D editor, imported from
-//                    ./Workshop/simConstants — not the solver's wrist-centre span).
-//                    Default false → the ring layer builds ZERO primitives.
+//                    (the profile-driven annulus — reachAnnulus(caps), OMX
+//                    fallback 0.10/0.28, edu6 0.09/0.21 — shared with the 2D
+//                    editor via ./Workshop/simConstants, not the solver's
+//                    wrist-centre span). Default false → the ring builds ZERO
+//                    primitives.
 
 import React, { useMemo, useEffect, useRef, useState } from 'react';
 import { useSelector } from 'react-redux';
@@ -86,10 +88,11 @@ import {
 } from './Workshop/simConstants';
 import { armGeometry } from '../utils/armProfile';
 
-// The 6 follower joints the URDF exposes as drivable revolute joints, in the
-// wire order from omx_f_config.yaml::joint_order.follower. We map by NAME from
-// each JointState message, so the order here is only documentation — unknown
-// names in a message are ignored, and a missing name simply isn't updated.
+// The OMX follower joints the URDF exposes as drivable revolute joints. This is
+// the FALLBACK set only — the LIVE joint set is profile-driven (armGeometry from
+// the capability manifest; edu6 uses joint1..joint6 + end_gear_joint). We map by
+// NAME from each JointState message, so the order here is only documentation —
+// unknown names in a message are ignored, and a missing name simply isn't updated.
 const FOLLOWER_JOINTS = [
   'joint1',
   'joint2',
@@ -106,6 +109,15 @@ const FOLLOWER_JOINT_SET = new Set(FOLLOWER_JOINTS);
 // gripperJoint is special-cased in emitEndEffector (the grasp-attach gripper
 // channel); eeLink is the frame a held mesh re-parents to. The edu6 gripper
 // FINGERS are <mimic> joints urdf-loader animates from end_gear_joint itself.
+//
+// `yaw` (radians, default 0) is a per-asset rotation about the URDF +Z axis
+// applied to the robot model BEFORE the -π/2 up-axis fix (with THREE Euler
+// order 'XYZ', rotation.z composes as Rx(-π/2)·Rz(yaw)). edu6's SOFTWARE WORLD
+// frame is the URDF base_link rotated 180° about Z (plan §2.1 / edu6_ik.py:
+// front = +x like the OMX), while /joint_states + the object layer speak WORLD
+// coords — so the URDF-native model must be yawed π to render in the world
+// frame, or the arm appears rotated 180° from the sim objects it grasps. OMX's
+// world frame IS its URDF frame (no yaw key → rotation.z stays 0 → byte-identical).
 const URDF_ASSETS = {
   omx_f: {
     url: `${process.env.PUBLIC_URL || ''}/omx-urdf/omx_f.urdf`,
@@ -116,6 +128,7 @@ const URDF_ASSETS = {
     url: `${process.env.PUBLIC_URL || ''}/edu6-urdf/edu6.urdf`,
     eeLink: 'End_effector',
     baseLink: 'base_link',
+    yaw: Math.PI,
   },
 };
 
@@ -167,10 +180,11 @@ const BASE_LINK_NAME = 'link0';
 const FRAME_AXIS_SIZE_M = 0.07;
 
 // ── Sim-stage reach-annulus ring ("showReach") ───────────────────────────────
-// A translucent green ring on the table marking the graspable annulus, using the
-// SAME 0.10/0.28 bounds as the 2D editor (imported above). Green matches the 2D
-// SVG annulus stroke (#22c55e). Sits just above the table (y=0.001) to avoid
-// z-fighting; rendered only while showReach is true.
+// A translucent green ring on the table marking the graspable annulus. Its radii
+// are the profile-driven annulus (reachAnnulus(caps); OMX fallback 0.10/0.28,
+// edu6 0.09/0.21) shared with the 2D editor via simConstants, so the two panes
+// never desync. Green matches the 2D SVG annulus stroke (#22c55e). Sits just
+// above the table (y=0.001) to avoid z-fighting; rendered only while showReach.
 const REACH_RING_COLOR = 0x22c55e;
 const REACH_RING_Y = 0.001;
 // ── Sim-stage soft-shadow tuning ("showShadows") ─────────────────────────────
@@ -388,8 +402,16 @@ export default function UrdfTwin({
         if (!robot.userData) robot.userData = {};
         robot.userData.eeLinkName = asset.eeLink;
         robot.userData.baseLinkName = asset.baseLink;
-        // URDF +Z is "up"; rotate so the arm stands upright in the viewer.
+        // URDF +Z is "up"; rotate so the arm stands upright in the viewer. A
+        // per-asset `yaw` (about the URDF +Z axis) renders a model whose URDF
+        // frame differs from the software WORLD frame in the world frame — edu6
+        // is URDF·rotZ(π), so its yaw is π; OMX has no yaw key (rotation.z stays
+        // 0 → byte-identical). Order 'XYZ' composes these as Rx(-π/2)·Rz(yaw),
+        // i.e. the yaw is applied in the URDF frame BEFORE the up-axis fix, so
+        // getWorldPosition (and every mesh parented under the robot) now reports
+        // world-frame geometry by construction — see emitEndEffector.
         robot.rotation.x = -Math.PI / 2;
+        robot.rotation.z = asset.yaw || 0;
         scene.add(robot);
         robotRef.current = robot;
         frameRobot(camera, controls, robot);
@@ -1053,9 +1075,15 @@ function setMeshColor(mesh, color) {
   }
 }
 
-// Read the end-effector link's world position, convert it back to the base (ROS)
-// frame (undo the robot's -π/2 X-rotation: viewer (X,Y,Z) → base (X, -Z, Y)),
-// extract the gripper angle from the message, and hand both to the consumer.
+// Read the end-effector link's world position and convert it back out of the
+// viewer frame by undoing the robot's -π/2 X-rotation: viewer (X,Y,Z) →
+// (X, -Z, Y). getWorldPosition already folds in the FULL robot transform, so on
+// a YAWED asset (edu6, rotation.z = π) this undo yields Rz(π)·(URDF TCP) = the
+// software WORLD frame — exactly what the world-space object layer + IK expect,
+// by construction (a URDF TCP at (x, y) surfaces as (-x, -y)). On an un-yawed
+// asset (OMX, rotation.z = 0) it yields the URDF/base frame unchanged. No
+// per-asset branch is needed here — the yaw lives in matrixWorld. Then extract
+// the gripper angle from the message and hand both to the consumer.
 function emitEndEffector(robot, msg, cb, gripperJoint = 'gripper_joint_1') {
   const link = robot && robot.links
     ? (robot.links[robot.userData?.eeLinkName || EE_LINK_NAME]

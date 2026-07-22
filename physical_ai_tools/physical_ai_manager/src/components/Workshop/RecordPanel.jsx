@@ -9,6 +9,7 @@
  */
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { useSelector } from 'react-redux';
 import toast from 'react-hot-toast';
 import { useRosServiceCaller } from '../../hooks/useRosServiceCaller';
 // Namespace import (not named) so this file builds independently of the cloud
@@ -76,6 +77,14 @@ function RecordPanel({
   onRecordingChange = null,
 }) {
   const { recordControl, replayMotion, handGuide } = useRosServiceCaller();
+  // The rig's DATA-robot-type identity (server: profile.data_robot_type, stamped
+  // on /task/status → taskStatus.robotType: 'omx_f' for both OMX profiles,
+  // 'edu6_studio' for the 6-DOF arm). This is the id space the cloud trajectory
+  // validator allowlists (TRAJECTORY_ROBOT_PROFILES) — NOT taskStatus.robotProfile
+  // (omx_full/omx_follower), which would 400. Used to tag a saved recording so the
+  // cloud picks the right point width (edu6 records 8-wide, OMX 7-wide).
+  const robotType = useSelector((s) => (s.tasks && s.tasks.taskStatus
+    ? s.tasks.taskStatus.robotType : ''));
   // 'idle' | 'recording' | 'review' | 'saving'
   const [state, setState] = useState('idle');
   const [busy, setBusy] = useState(false);
@@ -304,13 +313,20 @@ function RecordPanel({
     setState('saving');
     setBusy(true);
     try {
-      await workflowApi.createTrajectory(accessToken, workflowId, {
+      const payload = {
         name,
         fps: recorded.fps,
         points: recorded.points,
         // FIX 6: persist the reviewed duration (the route already accepts it).
         duration_s: recorded.duration,
-      });
+      };
+      // Tag the recording with the rig's data-robot-type so the cloud validator
+      // uses the right point width and a later replay can refuse a cross-profile
+      // fetch. Omit when unknown — the cloud then falls back to legacy untagged
+      // (= OMX 7-wide), which is the pre-edu6 behaviour.
+      const profile = typeof robotType === 'string' ? robotType.trim() : '';
+      if (profile) payload.robot_profile = profile;
+      await workflowApi.createTrajectory(accessToken, workflowId, payload);
       toast.success(
         `Bewegung „${name}" gespeichert. Verwende sie mit „spiele Bewegung ${name} ab".`,
       );
@@ -323,7 +339,7 @@ function RecordPanel({
     } finally {
       setBusy(false);
     }
-  }, [recorded, workflowId, accessToken, closeManualSession]);
+  }, [recorded, workflowId, accessToken, robotType, closeManualSession]);
 
   return (
     <div className="rounded-lg border border-[var(--line)] bg-white p-3">

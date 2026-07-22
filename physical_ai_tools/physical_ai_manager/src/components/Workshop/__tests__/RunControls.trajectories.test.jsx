@@ -151,3 +151,51 @@ describe('RunControls — CONTRACT C trajectories injection', () => {
     expect(mockRos.callService).not.toHaveBeenCalled();
   });
 });
+
+describe('RunControls — cross-profile replay refusal', () => {
+  test('refuses an edu6-tagged recording on an OMX rig with a clean German toast', async () => {
+    mockState.tasks = { taskStatus: { robotType: 'omx_f' } };
+    mockGetTrajectory.mockResolvedValue({
+      fps: 25, points: POINTS, robot_profile: 'edu6_studio',
+    });
+    render(<RunControls workflowId="wf-1" blocklyJson={REPLAY_JSON} simMode={false} simScene={null} />);
+    await userEvent.click(screen.getByRole('button', { name: /Start/ }));
+
+    await waitFor(() =>
+      expect(mockToast.error).toHaveBeenCalledWith(
+        expect.stringContaining('mit einem anderen Robotertyp aufgenommen'),
+      ),
+    );
+    // Refused BEFORE the run — the misleading „Aufnahme ist beschädigt." never fires.
+    expect(mockRos.callService).not.toHaveBeenCalled();
+  });
+
+  test('refuses an untagged (legacy = OMX) recording on an edu6 rig', async () => {
+    mockState.tasks = { taskStatus: { robotType: 'edu6_studio' } };
+    // No robot_profile → legacy recording, treated as omx_f → mismatch on edu6.
+    mockGetTrajectory.mockResolvedValue({ fps: 25, points: POINTS });
+    render(<RunControls workflowId="wf-1" blocklyJson={REPLAY_JSON} simMode={false} simScene={null} />);
+    await userEvent.click(screen.getByRole('button', { name: /Start/ }));
+
+    await waitFor(() =>
+      expect(mockToast.error).toHaveBeenCalledWith(
+        expect.stringContaining('mit einem anderen Robotertyp aufgenommen'),
+      ),
+    );
+    expect(mockRos.callService).not.toHaveBeenCalled();
+  });
+
+  test('allows a matching-profile recording and injects only { fps, points }', async () => {
+    mockState.tasks = { taskStatus: { robotType: 'edu6_studio' } };
+    mockGetTrajectory.mockResolvedValue({
+      fps: 25, points: POINTS, robot_profile: 'edu6_studio',
+    });
+    render(<RunControls workflowId="wf-1" blocklyJson={REPLAY_JSON} simMode={false} simScene={null} />);
+    await userEvent.click(screen.getByRole('button', { name: /Start/ }));
+
+    await waitFor(() => expect(mockRos.callService).toHaveBeenCalled());
+    const parsed = JSON.parse(mockRos.callService.mock.calls[0][2].workflow_json);
+    // The arm-family tag is stripped from the injected Contract-C sibling.
+    expect(parsed.trajectories).toEqual({ 'Bewegung 1': { fps: 25, points: POINTS } });
+  });
+});

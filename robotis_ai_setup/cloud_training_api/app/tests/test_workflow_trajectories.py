@@ -925,10 +925,6 @@ class TestWorkflowsRateLimitedPerUser(unittest.TestCase):
             )
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 # ==================================================================
 # edu6 dual width + robot_profile tag (migration 035, plan §14)
 # ==================================================================
@@ -994,3 +990,7 @@ class TestTrajectoryRobotProfile(unittest.TestCase):
             created = wf.create_workflow(_create_wf_payload(), user=_OWNER)
             res = wf.create_trajectory(created.id, _traj_payload(), user=_OWNER)
             self.assertIsNone(db.trajectories[res.id]["robot_profile"])
+
+
+if __name__ == "__main__":
+    unittest.main()

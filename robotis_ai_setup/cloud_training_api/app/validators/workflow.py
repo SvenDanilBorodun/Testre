@@ -329,7 +329,8 @@ def validate_trajectory_robot_profile(robot_profile: Any) -> int:
     if robot_profile is None or (isinstance(robot_profile, str)
                                  and not robot_profile.strip()):
         return TRAJECTORY_POINT_LEN
-    if not isinstance(robot_profile, str)             or robot_profile.strip() not in TRAJECTORY_ROBOT_PROFILES:
+    if (not isinstance(robot_profile, str)
+            or robot_profile.strip() not in TRAJECTORY_ROBOT_PROFILES):
         raise HTTPException(
             status_code=400,
             detail="Unbekanntes Roboterprofil für diese Bewegung.",

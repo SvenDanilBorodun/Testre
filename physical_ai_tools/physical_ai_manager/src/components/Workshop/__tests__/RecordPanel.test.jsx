@@ -28,6 +28,14 @@ const STOP_OK = {
   points_json: JSON.stringify({ fps: 30, points: POINTS }),
 };
 
+// react-redux: selector-aware stub over a mutable module-level state so the panel
+// can read the rig identity (taskStatus.robotType) it tags a saved recording with.
+let mockState;
+vi.mock('react-redux', () => ({
+  __esModule: true,
+  useSelector: (sel) => sel(mockState),
+}));
+
 const mockRos = vi.hoisted(() => ({
   recordControl: vi.fn(),
   replayMotion: vi.fn(() => Promise.resolve({ success: true })),
@@ -64,6 +72,8 @@ beforeEach(() => {
   mockToast.mockClear();
   mockToast.success.mockClear();
   mockToast.error.mockClear();
+  // Default rig: an OMX follower (data_robot_type 'omx_f').
+  mockState = { tasks: { taskStatus: { robotType: 'omx_f' } } };
   setRecord({ start: { success: true }, stop: STOP_OK, cancel: { success: true } });
 });
 
@@ -92,8 +102,60 @@ describe('RecordPanel', () => {
         fps: 30,
         points: POINTS,
         duration_s: 2.0,
+        // Tagged with the OMX rig identity (the default store).
+        robot_profile: 'omx_f',
       }),
     );
+    promptSpy.mockRestore();
+  });
+
+  test('tags the saved trajectory with the edu6 rig profile', async () => {
+    mockState = { tasks: { taskStatus: { robotType: 'edu6_studio' } } };
+    const promptSpy = vi.spyOn(window, 'prompt').mockReturnValue('Bewegung 1');
+    // edu6 records 8-wide points; the panel forwards whatever the backend sent.
+    setRecord({
+      start: { success: true },
+      stop: {
+        success: true,
+        sample_count: 2,
+        duration_s: 1.0,
+        points_json: JSON.stringify({
+          fps: 25,
+          points: [[0, 0, 0, 0, 0, 0, 0, 0.0], [0.1, 0, 0, 0, 0, 0, 0, 0.04]],
+        }),
+      },
+      cancel: { success: true },
+    });
+    render(<RecordPanel accessToken="jwt-1" workflowId="wf-1" disabled={false} />);
+
+    await userEvent.click(screen.getByRole('button', { name: 'Bewegung aufnehmen' }));
+    await userEvent.click(await screen.findByRole('button', { name: 'Stopp' }));
+    expect(await screen.findByText(/Aufgenommen: 2 Punkte/)).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole('button', { name: 'Speichern' }));
+    await waitFor(() =>
+      expect(mockCreate).toHaveBeenCalledWith(
+        'jwt-1',
+        'wf-1',
+        expect.objectContaining({ robot_profile: 'edu6_studio' }),
+      ),
+    );
+    promptSpy.mockRestore();
+  });
+
+  test('omits robot_profile when the rig identity is unknown (falls back to OMX)', async () => {
+    mockState = { tasks: { taskStatus: { robotType: '' } } };
+    const promptSpy = vi.spyOn(window, 'prompt').mockReturnValue('Bewegung 1');
+    render(<RecordPanel accessToken="jwt-1" workflowId="wf-1" disabled={false} />);
+
+    await userEvent.click(screen.getByRole('button', { name: 'Bewegung aufnehmen' }));
+    await userEvent.click(await screen.findByRole('button', { name: 'Stopp' }));
+    expect(await screen.findByText(/Aufgenommen: 3 Punkte/)).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole('button', { name: 'Speichern' }));
+    await waitFor(() => expect(mockCreate).toHaveBeenCalled());
+    const payload = mockCreate.mock.calls[0][2];
+    expect(payload).not.toHaveProperty('robot_profile');
     promptSpy.mockRestore();
   });
 

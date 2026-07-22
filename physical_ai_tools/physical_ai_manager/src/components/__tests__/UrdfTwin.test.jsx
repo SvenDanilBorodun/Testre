@@ -50,8 +50,16 @@ vi.mock('roslib', () => ({
 // --- urdf-loader: a fake URDFLoader that synchronously "loads" a robot whose
 //     setJointValue records the joints the component applies. ---
 const mockSetJointValue = vi.fn();
+// URDF asset urls the loader was asked for (asserts urdf_asset_id → asset row).
+const mockLoadUrls = [];
+// Optional URDF-frame TCP for the world-frame yaw tests. When set, the mock link's
+// getWorldPosition MODELS matrixWorld — it applies the robot's LIVE rotation (THREE
+// Euler 'XYZ' with y=0 → R = Rx(x)·Rz(z)) to this point, so a yawed asset surfaces
+// world-frame geometry through getWorldPosition exactly as the real link does. Left
+// null by every other test, which keeps the raw mockEEWorld path-trail behaviour.
+let mockTcpUrdf = null;
 const mockRobot = {
-  rotation: { x: 0 },
+  rotation: { x: 0, z: 0 },
   setJointValue: mockSetJointValue,
   // Box3.setFromObject(robot) walks .traverse during framing.
   traverse: () => {},
@@ -67,10 +75,24 @@ const mockRobot = {
       // appendPathPoint / emitEndEffector see real numeric coords (the original
       // `(v) => v` returned a coord-less Vector3, which appendPathPoint rejects,
       // so the path never accumulated). Returns the same vector for the callers
-      // that read .x/.y/.z off it.
+      // that read .x/.y/.z off it. When mockTcpUrdf is set, model matrixWorld by
+      // rotating that URDF-frame point through the robot's live rotation instead.
       getWorldPosition: (v) => {
         if (v && typeof v.set === 'function') {
-          v.set(mockEEWorld.x, mockEEWorld.y, mockEEWorld.z);
+          if (mockTcpUrdf) {
+            const r = mockRobot.rotation;
+            const cx = Math.cos(r.x || 0);
+            const sx = Math.sin(r.x || 0);
+            const cz = Math.cos(r.z || 0);
+            const sz = Math.sin(r.z || 0);
+            // Rz first, then Rx (THREE order 'XYZ' with y=0: R = Rx·Rz).
+            const rx = cz * mockTcpUrdf.x - sz * mockTcpUrdf.y;
+            const ry = sz * mockTcpUrdf.x + cz * mockTcpUrdf.y;
+            const rz = mockTcpUrdf.z;
+            v.set(rx, cx * ry - sx * rz, sx * ry + cx * rz);
+          } else {
+            v.set(mockEEWorld.x, mockEEWorld.y, mockEEWorld.z);
+          }
         }
         return v;
       },
@@ -108,9 +130,11 @@ vi.mock('urdf-loader', () => ({
   __esModule: true,
   default: function URDFLoaderMock() {
     this.loadMeshCb = null;
-    this.load = (_url, onComplete) => {
-      // Invoke the success path with our recording robot (synchronous — no
+    this.load = (url, onComplete) => {
+      // Record which asset url was requested (urdf_asset_id → URDF_ASSETS row),
+      // then invoke the success path with our recording robot (synchronous — no
       // network, no STL parsing in the mock).
+      mockLoadUrls.push(url);
       onComplete(mockRobot);
     };
   },
@@ -316,6 +340,9 @@ beforeEach(() => {
   mockEEWorld.y = 0;
   mockEEWorld.z = 0;
   mockRobot.rotation.x = 0;
+  mockRobot.rotation.z = 0;
+  mockLoadUrls.length = 0;
+  mockTcpUrdf = null;
   mockState = { ros: { rosbridgeUrl: 'ws://student-pc:9090', rosHost: 'student-pc' } };
 });
 
@@ -644,5 +671,83 @@ describe('UrdfTwin — held-object release snap/recolor', () => {
     expect(mockColorSet).toHaveBeenCalledWith('#f59e0b');
     // Fallback cube height (0.03 / 2).
     expect(mesh.position.y).toBeCloseTo(0.015, 6);
+  });
+});
+
+// edu6 profile (§4.5 / plan §9). The capability manifest's urdf_asset_id selects
+// the edu6 URDF row; edu6's software WORLD frame is URDF·rotZ(π) (front = +x like
+// the OMX, per edu6_ik.py), so the URDF-native model is yawed π to render in the
+// world frame the sim objects live in — OMX gets NO yaw. With the yaw baked into
+// getWorldPosition, emitEndEffector surfaces WORLD coords by construction: a URDF
+// TCP (x, y) reads back as (−x, −y).
+describe('UrdfTwin — edu6 profile asset + world-frame yaw', () => {
+  const EDU6_CAPS = {
+    urdf_asset_id: 'edu6',
+    arm_joints: 6,
+    joint_names: ['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'joint6', 'end_gear_joint'],
+  };
+  const edu6State = () => ({
+    ros: { rosbridgeUrl: 'ws://student-pc:9090', rosHost: 'student-pc' },
+    tasks: { taskStatus: { capabilities: EDU6_CAPS } },
+  });
+
+  test('an OMX manifest loads the omx URDF and applies NO yaw (byte-identical)', async () => {
+    render(<UrdfTwin />);
+    await waitFor(() => expect(mockSubscribe).toHaveBeenCalledTimes(1));
+    expect(mockLoadUrls.some((u) => u.includes('/omx-urdf/omx_f.urdf'))).toBe(true);
+    expect(mockRobot.rotation.z).toBe(0);
+    expect(mockRobot.rotation.x).toBeCloseTo(-Math.PI / 2, 12);
+  });
+
+  test('an edu6 manifest selects the edu6 URDF asset and yaws the robot π', async () => {
+    mockState = edu6State();
+    render(<UrdfTwin />);
+    await waitFor(() => expect(mockSubscribe).toHaveBeenCalledTimes(1));
+    expect(mockLoadUrls.some((u) => u.includes('/edu6-urdf/edu6.urdf'))).toBe(true);
+    expect(mockRobot.rotation.z).toBeCloseTo(Math.PI, 12);
+    // The up-axis fix is unchanged; the yaw is ADDITIVE to it.
+    expect(mockRobot.rotation.x).toBeCloseTo(-Math.PI / 2, 12);
+  });
+
+  test('emitEndEffector reports WORLD-frame coords on the yawed edu6 asset (URDF (x,y) → (−x,−y))', async () => {
+    mockState = edu6State();
+    // A known URDF-frame TCP; getWorldPosition models matrixWorld from the live rotation.
+    mockTcpUrdf = { x: 0.15, y: 0.05, z: 0.20 };
+    const onEE = vi.fn();
+    render(<UrdfTwin onEndEffector={onEE} />);
+    await waitFor(() => expect(mockSubscribe).toHaveBeenCalledTimes(1));
+
+    const onMsg = mockSubscribe.mock.calls[0][0];
+    act(() => onMsg({
+      name: ['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'joint6', 'end_gear_joint'],
+      position: [0, 0, 0, 0, 0, 0, 1.0],
+    }));
+
+    expect(onEE).toHaveBeenCalled();
+    const arg = onEE.mock.calls[onEE.mock.calls.length - 1][0];
+    // World frame = URDF·rotZ(π): (x, y) surface negated; z (height) unchanged.
+    expect(arg.x).toBeCloseTo(-0.15, 6);
+    expect(arg.y).toBeCloseTo(-0.05, 6);
+    expect(arg.z).toBeCloseTo(0.20, 6);
+    // The gripper channel is read from the edu6 end_gear_joint index (mimic driver).
+    expect(arg.gripper).toBeCloseTo(1.0, 6);
+    expect(mockSetJointValue).toHaveBeenCalledWith('end_gear_joint', 1.0);
+    expect(mockSetJointValue).toHaveBeenCalledWith('joint6', 0);
+  });
+
+  test('an un-yawed OMX asset emits the URDF/base frame unchanged (control)', async () => {
+    mockTcpUrdf = { x: 0.15, y: 0.05, z: 0.20 };
+    const onEE = vi.fn();
+    render(<UrdfTwin onEndEffector={onEE} />);
+    await waitFor(() => expect(mockSubscribe).toHaveBeenCalledTimes(1));
+
+    const onMsg = mockSubscribe.mock.calls[0][0];
+    act(() => onMsg({ name: ['joint1'], position: [0.1] }));
+
+    const arg = onEE.mock.calls[onEE.mock.calls.length - 1][0];
+    // No yaw → world == URDF: coords pass through unchanged.
+    expect(arg.x).toBeCloseTo(0.15, 6);
+    expect(arg.y).toBeCloseTo(0.05, 6);
+    expect(arg.z).toBeCloseTo(0.20, 6);
   });
 });

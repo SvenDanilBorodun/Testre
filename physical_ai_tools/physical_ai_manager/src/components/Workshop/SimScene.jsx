@@ -66,10 +66,11 @@ const UrdfTwin = lazy(() => import('../UrdfTwin'));
 // Sim-only virtual joint stream (never the bare /joint_states — see plan §C).
 const SIM_JOINT_TOPIC = '/sim/joint_states';
 
-// Strict-vertical reach annulus SHOWN TO THE STUDENT (~0.10–0.28 m table-top
-// radius). Objects must sit inside it to be graspable. Imported from
-// ./simConstants so the 2D SVG ring and the 3D twin's ring never desync — and so
-// this is NOT the solver's wrist-centre span (see the module note).
+// Strict-vertical reach annulus SHOWN TO THE STUDENT (the graspable table-top
+// ring). PROFILE-DRIVEN (edu6 §4.5) via reachAnnulus(caps): OMX fallback
+// 0.10–0.28 m, edu6 0.09–0.21 m. Objects must sit inside it to be graspable.
+// The radii come from ./simConstants so the 2D SVG ring and the 3D twin's ring
+// never desync — and so this is NOT the solver's wrist-centre span (module note).
 
 // Base-frame view window (metres): x = forward (away from base), y = left.
 const VIEW_MAX_X = 0.32;

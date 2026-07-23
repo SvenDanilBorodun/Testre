@@ -531,6 +531,46 @@ def stop_scanner_container():
 # so the most likely setup mistake becomes one clear sentence.
 LAST_SCAN_NOTICE: str = ""
 
+# The two §5.4 cross-family sentences — ONE source for both detection paths
+# (the identify_arm probe tokens below and the presence-based check that the
+# real, family-scoped scan flow actually reaches — audit M4).
+_CROSS_NOTICE_OMX_WHILE_EDU6 = (
+    'Es wurde ein OMX-Arm gefunden, aber „EduBotics 6-Achs – '
+    'Roboter Studio" ist als Robotertyp ausgewählt. Bitte den '
+    'Robotertyp oben passend zum angeschlossenen Arm wählen '
+    'und erneut scannen.'
+)
+_CROSS_NOTICE_EDU6_WHILE_OMX = (
+    'Es wurde ein „EduBotics 6-Achs"-Arm gefunden, aber ein '
+    'OMX-Robotertyp ist ausgewählt. Bitte den Robotertyp oben '
+    'passend zum angeschlossenen Arm wählen und erneut scannen.'
+)
+
+
+def _set_cross_family_presence_notice(arm_family: str) -> None:
+    """Audit M4: the scan attaches ONLY the selected family's VID/PID, so a
+    wrong-family arm never reaches identify_arm.py and the probe-token
+    branches below cannot fire in the real flow. When the family scan found
+    NOTHING, check the OTHER family's adapter by pure Windows-side USB
+    enumeration (no attach, no container) and surface the same one-sentence
+    German hint — the most likely setup mistake becomes visible again."""
+    global LAST_SCAN_NOTICE
+    other = "edu6" if arm_family != "edu6" else "omx"
+    try:
+        present = list_arm_devices(other)
+    except Exception:
+        return
+    if not present:
+        return
+    LAST_SCAN_NOTICE = (
+        _CROSS_NOTICE_OMX_WHILE_EDU6 if arm_family == "edu6"
+        else _CROSS_NOTICE_EDU6_WHILE_OMX
+    )
+    _append_diag(
+        "scan_and_identify_arms",
+        f"cross-family presence: {other} adapter enumerated while "
+        f"family={arm_family} scan found nothing")
+
 
 def scan_and_identify_arms(image: str, arm_family: str = "omx") -> tuple[Optional[ArmDevice], Optional[ArmDevice]]:
     """Full scan workflow: attach USB, start scanner, identify arms.
@@ -556,6 +596,10 @@ def scan_and_identify_arms(image: str, arm_family: str = "omx") -> tuple[Optiona
     # 1. Attach all EduBotics USB devices to WSL2
     attached = attach_all_robotis_devices(arm_family)
     if not attached:
+        # Nothing of THIS family present — if the OTHER family's adapter is
+        # plugged in, say so in one sentence (audit M4: the family-scoped
+        # attach means identify_arm.py can never diagnose this case).
+        _set_cross_family_presence_notice(arm_family)
         return None, None
 
     # 2. Poll for serial paths (udev can take 1-10s depending on machine)
@@ -607,22 +651,25 @@ def scan_and_identify_arms(image: str, arm_family: str = "omx") -> tuple[Optiona
                 # The single edu6 arm drives FOLLOWER_PORT (there is no leader).
                 follower = ArmDevice(busid=busid, serial_path=path, role="follower", description=desc)
             elif role == "omx_arm_found":
-                LAST_SCAN_NOTICE = (
-                    'Es wurde ein OMX-Arm gefunden, aber „EduBotics 6-Achs – '
-                    'Roboter Studio" ist als Robotertyp ausgewählt. Bitte den '
-                    'Robotertyp oben passend zum angeschlossenen Arm wählen '
-                    'und erneut scannen.'
-                )
+                LAST_SCAN_NOTICE = _CROSS_NOTICE_OMX_WHILE_EDU6
                 _append_diag("scan_and_identify_arms",
                              f"cross-probe: OMX arm at {path} while family=edu6")
             elif role == "edu6_arm_found":
-                LAST_SCAN_NOTICE = (
-                    'Es wurde ein „EduBotics 6-Achs"-Arm gefunden, aber ein '
-                    'OMX-Robotertyp ist ausgewählt. Bitte den Robotertyp oben '
-                    'passend zum angeschlossenen Arm wählen und erneut scannen.'
-                )
+                LAST_SCAN_NOTICE = _CROSS_NOTICE_EDU6_WHILE_OMX
                 _append_diag("scan_and_identify_arms",
                              f"cross-probe: edu6 arm at {path} while family=omx")
+            elif role.startswith("partial:") and protocol == "feetech":
+                # Some servos answered, some did not — a mid-chain cable or
+                # power fault, precisely diagnosable (audit L3): name the
+                # count instead of failing into the generic diagnose wall.
+                n = role.split(":", 1)[1]
+                LAST_SCAN_NOTICE = (
+                    f'Nur {n} von 7 Servos antworten — bitte die '
+                    'Steckverbindungen zwischen den Servos am Arm prüfen '
+                    'und erneut scannen.'
+                )
+                _append_diag("scan_and_identify_arms",
+                             f"partial feetech bus at {path}: {role}")
             elif role == "feetech_silent":
                 # Port opened but no servo answered — the arm is there but its
                 # 12-V supply is almost certainly off (USB alone enumerates the

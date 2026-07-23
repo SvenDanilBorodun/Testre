@@ -29,6 +29,7 @@ The error byte of every status reply is free telemetry:
 
 from __future__ import annotations
 
+import math
 import time
 from typing import Optional
 
@@ -38,6 +39,10 @@ REG_MODEL_NUMBER = 3          # R, 2 bytes — 777 identifies an STS3215
 REG_ID = 5
 REG_BAUD_RATE = 6             # 0 = 1 Mbps (factory default)
 REG_RETURN_DELAY = 7          # status-return delay time (provisioned to 0)
+REG_RESPONSE_STATUS_LEVEL = 8  # 1 = ack every instruction (factory); 0 = reply
+#                                only to READ/PING — a 0 makes every awaited
+#                                WRITE time out, so provisioning normalizes it
+#                                to 1 BEFORE the first awaited write.
 REG_MIN_POSITION_LIMIT = 9    # 2 bytes
 REG_MAX_POSITION_LIMIT = 11   # 2 bytes
 REG_MAX_TEMPERATURE = 13
@@ -69,6 +74,11 @@ REG_PRESENT_CURRENT = 69      # R, 2 bytes, ×6.5 mA
 
 STS3215_MODEL_NUMBER = 777
 BROADCAST_ID = 0xFE
+
+# Servo position geometry (single-turn absolute encoder).
+CENTER_TICK = 2048
+TICKS_PER_REV = 4096
+_RAD_PER_TICK = 2.0 * math.pi / TICKS_PER_REV
 
 INSTR_PING = 0x01
 INSTR_READ = 0x02
@@ -125,6 +135,20 @@ def encode_sign_magnitude(value: int, sign_bit: int) -> int:
     return value
 
 
+def position_limit_window(lo_rad: float, hi_rad: float, sign: int) -> tuple[int, int]:
+    """Designed URDF limit pair → the servo's EEPROM ``Min/Max_Position_Limit``
+    window around the designed zero (``CENTER_TICK``), sign-aware: a −1
+    direction convention mirrors the window and re-orders lo ≤ hi. Clamped to
+    the single-turn register range [0, TICKS_PER_REV−1]. ONE shared
+    implementation for the provisioning tool (which WRITES the window) and the
+    driver node's boot probe (which VERIFIES it against the plugged arm) —
+    the two must never drift (audit H1)."""
+    a = CENTER_TICK + int(round(lo_rad * sign / _RAD_PER_TICK))
+    b = CENTER_TICK + int(round(hi_rad * sign / _RAD_PER_TICK))
+    lo, hi = (a, b) if a <= b else (b, a)
+    return max(0, lo), min(TICKS_PER_REV - 1, hi)
+
+
 def describe_error_bits(error: int) -> str:
     """German short list of the set error flags ('' when clean)."""
     names = [name for bit, name in ERROR_BITS_DE if error & bit]
@@ -143,8 +167,12 @@ class FeetechBus:
                  timeout_s: float = 0.02, serial_factory=None) -> None:
         if serial_factory is None:
             import serial  # pyserial ships with dynamixel_sdk in the image
+            # write_timeout: a wedged CDC-ACM endpoint must raise instead of
+            # blocking forever while holding the caller's bus lock (audit L4 —
+            # a hung write would make even the shutdown torque-off unreachable).
             self._ser = serial.Serial(
-                port=port, baudrate=baudrate, timeout=timeout_s)
+                port=port, baudrate=baudrate, timeout=timeout_s,
+                write_timeout=0.1)
         else:
             self._ser = serial_factory(port, baudrate, timeout_s)
         self._timeout_s = timeout_s

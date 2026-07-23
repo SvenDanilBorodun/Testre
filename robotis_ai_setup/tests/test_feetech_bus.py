@@ -76,6 +76,33 @@ class TestFraming(unittest.TestCase):
         self.assertIn('Überhitzung', both)
 
 
+class TestPositionLimitWindow(unittest.TestCase):
+    """fb.position_limit_window — the ONE shared window implementation the
+    provisioning tool writes with and the driver's boot probe verifies with
+    (audit H1 no-drift)."""
+
+    def test_symmetric_and_asymmetric_windows(self):
+        self.assertEqual(fb.position_limit_window(-1.5708, 1.5708, 1),
+                         (1024, 3072))
+        # joint5's relieved asymmetric window.
+        self.assertEqual(fb.position_limit_window(-1.5708, 1.9199, 1),
+                         (1024, 3300))
+
+    def test_negative_sign_mirrors_and_reorders(self):
+        # Mirror identity on an UNCLAMPED window (the ±π ends clamp 4096→4095,
+        # which breaks the naive identity by one tick — that clamp is pinned
+        # separately below).
+        lo_p, hi_p = fb.position_limit_window(-1.5708, 1.9199, 1)
+        lo_n, hi_n = fb.position_limit_window(-1.5708, 1.9199, -1)
+        self.assertEqual(lo_n, 2 * fb.CENTER_TICK - hi_p)
+        self.assertEqual(hi_n, 2 * fb.CENTER_TICK - lo_p)
+        self.assertLessEqual(lo_n, hi_n)
+
+    def test_clamped_to_register_range(self):
+        self.assertEqual(fb.position_limit_window(-3.1416, 3.1416, 1),
+                         (0, 4095))
+
+
 class _FakeSerial:
     """Scripted serial: records writes, serves canned reply bytes."""
 
@@ -191,11 +218,14 @@ def _load_node_functions():
         'math': __import__('math'), 'os': os, 'fb': fb,
         'CENTER_TICK': 2048, 'TICKS_PER_REV': 4096,
     }
+    # Deterministic JOINT_SIGNS regardless of the dev machine's env: the env
+    # parse path itself is pinned by test_parse_signs.
+    env_backup = os.environ.pop('EDUBOTICS_EDU6_JOINT_SIGNS', None)
     wanted = {'rad_to_tick', 'tick_to_rad', 'interpolate_trajectory',
               'build_boot_home', '_parse_signs'}
     consts = {'RAD_PER_TICK', 'HOME_JOINTS_RAD', 'GRIPPER_OPEN_RAD',
               'LOOP_HZ', 'BOOT_HOME_DURATION_S', 'SERVO_IDS', 'JOINT_NAMES',
-              'JOINT_LIMITS_RAD', '_DEFAULT_SIGNS'}
+              'JOINT_LIMITS_RAD', '_DEFAULT_SIGNS', 'JOINT_SIGNS'}
     for node in tree.body:
         if isinstance(node, ast.Assign) and any(
                 isinstance(t, ast.Name) and t.id in consts
@@ -204,6 +234,16 @@ def _load_node_functions():
         if isinstance(node, ast.FunctionDef) and node.name in wanted:
             src = textwrap.dedent(ast.get_source_segment(source, node))
             exec(compile(src, path, 'exec'), ns)  # noqa: S102
+        # probe_bus is a staticmethod on the class — extract it as a plain
+        # function (get_source_segment starts at the `def`, past decorators)
+        # so the H1/H2 provisioning-fingerprint gate is deps-free-testable.
+        if isinstance(node, ast.ClassDef) and node.name == 'Edu6ArmNode':
+            for sub in node.body:
+                if isinstance(sub, ast.FunctionDef) and sub.name == 'probe_bus':
+                    src = textwrap.dedent(ast.get_source_segment(source, sub))
+                    exec(compile(src, path, 'exec'), ns)  # noqa: S102
+    if env_backup is not None:
+        os.environ['EDUBOTICS_EDU6_JOINT_SIGNS'] = env_backup
     return ns
 
 
@@ -268,6 +308,159 @@ class TestNodePureFunctions(unittest.TestCase):
         limits = _N['JOINT_LIMITS_RAD']
         self.assertEqual(limits[4], (-1.5708, 1.9199))  # the asymmetric relief
         self.assertEqual(len(limits), 7)
+
+
+class TestProbeBusGate(unittest.TestCase):
+    """probe_bus provisioning-fingerprint gate (audit H1+H2), extracted
+    deps-free: an unprovisioned / RMA-swapped / wheel-mode / signs-drifted
+    arm must refuse to boot in German instead of boot-homing in a wrong
+    coordinate frame at factory torque."""
+
+    @staticmethod
+    def _probe():
+        pb = _N['probe_bus']
+        return pb.__func__ if isinstance(pb, staticmethod) else pb
+
+    class _RegBus:
+        def __init__(self, windows=None, mode=0, alive=None):
+            self.mode = mode
+            self.alive = set(alive if alive is not None else range(1, 8))
+            if windows is None:
+                windows = {
+                    sid: fb.position_limit_window(
+                        *_N['JOINT_LIMITS_RAD'][i], 1)
+                    for i, sid in enumerate(range(1, 8))
+                }
+            self.windows = windows
+
+        def ping(self, sid, timeout_s=None):
+            return sid in self.alive
+
+        def read(self, sid, addr, length):
+            if addr == fb.REG_OPERATING_MODE:
+                return 0, bytes([self.mode])
+            raise AssertionError(f'unexpected read addr {addr}')
+
+        def read_u16(self, sid, addr):
+            if addr == fb.REG_MODEL_NUMBER:
+                return fb.STS3215_MODEL_NUMBER
+            if addr == fb.REG_MIN_POSITION_LIMIT:
+                return self.windows[sid][0]
+            if addr == fb.REG_MAX_POSITION_LIMIT:
+                return self.windows[sid][1]
+            raise AssertionError(f'unexpected read_u16 addr {addr}')
+
+    def test_provisioned_arm_passes(self):
+        ok, msg = self._probe()(self._RegBus())
+        self.assertTrue(ok)
+        self.assertEqual(msg, '')
+
+    def test_factory_limits_refused_as_unprovisioned(self):
+        bus = self._RegBus()
+        bus.windows[2] = (0, 4095)   # factory window on joint2
+        ok, msg = self._probe()(bus)
+        self.assertFalse(ok)
+        self.assertIn('Servo 2', msg)
+        self.assertIn('rovision', msg)   # provisioniert/Provisionierung
+
+    def test_wheel_mode_refused(self):
+        ok, msg = self._probe()(self._RegBus(mode=1))
+        self.assertFalse(ok)
+        self.assertIn('Betriebsmodus', msg)
+
+    def test_signs_drift_refused_naming_the_env_knob(self):
+        # Provisioned with sign −1 on joint 2 (mirrored EEPROM window) while
+        # the runtime signs say +1 → refuse and name the knob: commanding
+        # through mismatched windows freezes/clamps the joint at hardware
+        # level (CLAUDE.md: a sign flip requires re-provisioning).
+        bus = self._RegBus()
+        bus.windows[2] = fb.position_limit_window(
+            *_N['JOINT_LIMITS_RAD'][1], -1)
+        ok, msg = self._probe()(bus)
+        self.assertFalse(ok)
+        self.assertIn('EDUBOTICS_EDU6_JOINT_SIGNS', msg)
+
+    def test_dead_servos_still_named_first(self):
+        ok, msg = self._probe()(self._RegBus(alive={1, 2, 3}))
+        self.assertFalse(ok)
+        self.assertIn('[4, 5, 6, 7]', msg)
+
+
+class TestNodeAuditRails(unittest.TestCase):
+    """Source-level pins for the driver rails that need threads/rclpy to
+    exercise for real: the write-loop bus-fault gate (M5), the re-torque
+    buffer clear (M2), the non-finite refusal (M3) and the wall-clock miss
+    window (M5). Behavioural cousins live above; these keep the wiring from
+    being 'simplified' away."""
+
+    def setUp(self):
+        self.src = open(os.path.join(_DOCKER, 'edu6_arm_node.py'),
+                        encoding='utf-8').read()
+
+    def test_write_loop_gated_on_bus_fault(self):
+        self.assertIn('and not self._bus_fault', self.src)
+
+    def test_wall_clock_miss_window(self):
+        self.assertIn('READ_FAIL_STOP_S', self.src)
+        self.assertNotIn('_read_fail_streak', self.src)
+
+    def test_trajectory_cb_validates_and_drops(self):
+        cb = self.src.split('def _trajectory_cb', 1)[1].split(
+            '\n    def ', 1)[0]
+        self.assertIn('math.isfinite', cb)          # M3
+        self.assertIn('not self._torque_on', cb)    # M2 limp drop
+        self.assertIn('self._bus_fault', cb)        # M5 fault drop
+
+    def test_torque_enable_clears_buffer(self):
+        cb = self.src.split('def _torque_cb', 1)[1].split('\n    def ', 1)[0]
+        head = cb.split('self.set_torque', 1)[0]
+        self.assertIn('if request.data:', head)
+        self.assertIn('self._traj_points = []', head)
+
+
+class TestUrdfDriverNoDrift(unittest.TestCase):
+    """Audit L1: the driver/provision limit literals and the profile HOME
+    must equal the URDF/profile-side truth — these pairs were previously
+    unpinned across the tree boundary."""
+
+    _URDF = os.path.join(_HERE, '..', '..', 'physical_ai_tools',
+                         'physical_ai_manager', 'public', 'edu6-urdf',
+                         'edu6.urdf')
+    _PROFILES = os.path.join(_HERE, '..', '..', 'physical_ai_tools',
+                             'physical_ai_server', 'physical_ai_server',
+                             'robot_profiles.py')
+
+    def test_arm_joint_limits_match_urdf(self):
+        import xml.etree.ElementTree as ET
+        root = ET.parse(self._URDF).getroot()
+        urdf = {}
+        for j in root.findall('joint'):
+            lim = j.find('limit')
+            if lim is not None:
+                urdf[j.get('name')] = (float(lim.get('lower')),
+                                       float(lim.get('upper')))
+        for i, name in enumerate(['joint1', 'joint2', 'joint3', 'joint4',
+                                  'joint5', 'joint6']):
+            self.assertEqual(tuple(_N['JOINT_LIMITS_RAD'][i]), urdf[name],
+                             name)
+        # The gripper band is DELIBERATELY narrower than the URDF model
+        # artifact (command band 0..1.79 vs model 0..2.0944) — pin the
+        # relation, not equality.
+        lo, hi = _N['JOINT_LIMITS_RAD'][6]
+        self.assertEqual(lo, 0.0)
+        self.assertLess(hi, urdf['end_gear_joint'][1])
+
+    def test_home_matches_server_profile_literal(self):
+        source = open(self._PROFILES, encoding='utf-8').read()
+        home = None
+        for node in ast.walk(ast.parse(source)):
+            if isinstance(node, ast.Assign) and any(
+                    isinstance(t, ast.Name)
+                    and t.id == '_EDU6_HOME_JOINTS_RAD'
+                    for t in node.targets):
+                home = ast.literal_eval(node.value)
+        self.assertIsNotNone(home)
+        self.assertEqual(tuple(home), tuple(_N['HOME_JOINTS_RAD']))
 
 
 class TestShippedWiring(unittest.TestCase):
@@ -514,7 +707,8 @@ class _ProvFakeBus:
     postcondition re-read depends on. Every write is logged so the ordering /
     endurance-skip / commit-point pins can be asserted."""
 
-    def __init__(self, actual_ticks, phase=0x10, return_delay=250, model=None):
+    def __init__(self, actual_ticks, phase=0x10, return_delay=250, model=None,
+                 mode=0, response_level=1, torque=1):
         self.actual = dict(actual_ticks)
         self.writes = []          # (sid, addr, bytes) in call order
         self.closed = False
@@ -529,6 +723,9 @@ class _ProvFakeBus:
             m[fb.REG_PHASE] = phase              # bit 4 set → provision clears it
             m[fb.REG_LOCK] = 1                   # protected → provision writes 0
             m[fb.REG_RETURN_DELAY] = return_delay
+            m[fb.REG_OPERATING_MODE] = mode      # 0 = position (factory)
+            m[fb.REG_RESPONSE_STATUS_LEVEL] = response_level  # 1 = factory
+            m[fb.REG_TORQUE_ENABLE] = torque     # 1 → the verified torque-off writes
             self.mem[sid] = m
 
     def ping(self, sid, timeout_s=None):
@@ -597,10 +794,16 @@ class TestProvisionEndToEnd(unittest.TestCase):
             # EEPROM writes come after the two RAM prep writes.
             self.assertGreaterEqual(addrs.index(fb.REG_HOMING_OFFSET), 2)
             self.assertGreaterEqual(addrs.index(fb.REG_MAX_TORQUE_LIMIT), 2)
-            # Phase bit-4 was SET → exactly one read-modify-write cleared it.
+            # Phase bit-4 was SET → exactly one read-modify-write cleared it,
+            # and it happened BEFORE the offset was baked (audit M1: the jig
+            # read must run under post-clear position-reporting semantics).
             phase_writes = [d for a, d in w if a == fb.REG_PHASE]
             self.assertEqual(len(phase_writes), 1)
             self.assertEqual(phase_writes[0][0] & (1 << 4), 0)
+            self.assertLess(addrs.index(fb.REG_PHASE),
+                            addrs.index(fb.REG_HOMING_OFFSET))
+            # Mode already 0 (factory) → read-compare-SKIP, no EEPROM write.
+            self.assertNotIn(fb.REG_OPERATING_MODE, addrs)
 
     def test_phase_bit4_not_touched_when_clear(self):
         # Phase bit-4 read-modify-write is only-when-set.
@@ -639,6 +842,62 @@ class TestProvisionEndToEnd(unittest.TestCase):
         with self.assertRaises(SystemExit) as ctx:
             self.prov.provision(bus, 'EDU6-0003', (1,) * 7)
         self.assertIn('Jig-Position', str(ctx.exception))
+
+    def test_wheel_mode_is_normalized_to_position(self):
+        # Audit H2: a servo left in wheel mode passes every other check and
+        # turns boot-home into a continuous-rotation runaway — provisioning
+        # must leave it write-verified in position mode.
+        bus = _ProvFakeBus({sid: 2048 for sid in range(1, 8)}, mode=1)
+        self.prov.provision(bus, 'EDU6-0005', (1,) * 7)
+        for sid in range(1, 8):
+            self.assertIn((fb.REG_OPERATING_MODE, b'\x00'),
+                          bus.writes_for(sid))
+            self.assertEqual(bus.mem[sid][fb.REG_OPERATING_MODE], 0)
+
+    def test_response_status_level_normalized_first(self):
+        # Research item 6: a level-0 servo acks no WRITE — the repair (unlock
+        # + level, un-awaited) must be the FIRST write pair, before any
+        # awaited write could time out against a mute servo.
+        bus = _ProvFakeBus({sid: 2048 for sid in range(1, 8)},
+                           response_level=0)
+        self.prov.provision(bus, 'EDU6-0006', (1,) * 7)
+        for sid in range(1, 8):
+            w = bus.writes_for(sid)
+            self.assertEqual(w[0], (fb.REG_LOCK, b'\x00'))
+            self.assertEqual(w[1], (fb.REG_RESPONSE_STATUS_LEVEL, b'\x01'))
+            self.assertEqual(bus.mem[sid][fb.REG_RESPONSE_STATUS_LEVEL], 1)
+
+    def test_final_jig_recheck_catches_late_skew(self):
+        # Audit M1: a position-semantics shift that appears only AFTER the
+        # per-servo offset gate (modelled: every read skews once the LAST
+        # re-lock lands) must fail the run at the final all-servo jig
+        # re-verify — never persist a skewed record.
+        class _LateSkewBus(_ProvFakeBus):
+            skew = False
+
+            def write(self, sid, addr, data, await_status=True):
+                out = super().write(sid, addr, data, await_status)
+                if sid == 7 and addr == fb.REG_LOCK and data == b'\x01':
+                    self.skew = True
+                return out
+
+            def _present_raw(self, sid):
+                raw = super()._present_raw(sid)
+                return raw + 10 if self.skew else raw
+        bus = _LateSkewBus({sid: 2048 for sid in range(1, 8)})
+        with self.assertRaises(SystemExit) as ctx:
+            self.prov.provision(bus, 'EDU6-0007', (1,) * 7)
+        self.assertIn('Jig-Endkontrolle', str(ctx.exception))
+
+    def test_limits_to_ticks_delegates_to_shared_window(self):
+        # Audit H1: provision writes and the driver probe verifies via ONE
+        # implementation — the wrapper must be byte-identical to it.
+        for signs in ((1,) * 7, (1, -1, 1, 1, -1, 1, 1)):
+            for i in range(7):
+                self.assertEqual(
+                    self.prov.limits_to_ticks(i, signs),
+                    fb.position_limit_window(
+                        *self.prov.JOINT_LIMITS_RAD[i], signs[i]))
 
     def test_no_record_when_a_servo_fails(self):
         # A verify mismatch on servo 4 aborts BEFORE servos 5-7 are touched and
@@ -755,6 +1014,77 @@ class TestScanFeetechSilentMapping(unittest.TestCase):
         self.assertIsNone(follower)
         self.assertIn('12-V-Netzteil', dm.LAST_SCAN_NOTICE)
         self.assertIn('Servo', dm.LAST_SCAN_NOTICE)
+
+
+class TestScanCrossFamilyAndPartial(unittest.TestCase):
+    """Audit M4: the family-scoped attach means a wrong-family arm never
+    reaches identify_arm.py — the cross-family hint must therefore fire from
+    pure Windows-side presence when the family scan found nothing. Plus
+    audit L3: partial:N names the answering-servo count."""
+
+    def setUp(self):
+        sys.path.insert(0, os.path.join(_HERE, '..'))
+
+    def test_empty_scan_sets_cross_family_presence_notice(self):
+        from gui.app import device_manager as dm
+        other = types.SimpleNamespace(vid_pid='2F5D:0103', busid='1-2',
+                                      description='OpenRB',
+                                      state='Shared')
+        with patch.object(dm, 'self_heal_wsl_serial'), \
+                patch.object(dm, 'attach_all_robotis_devices',
+                             return_value=[]), \
+                patch.object(dm, 'list_arm_devices',
+                             return_value=[other]) as lad:
+            leader, follower = dm.scan_and_identify_arms(
+                'img', arm_family='edu6')
+        self.assertIsNone(leader)
+        self.assertIsNone(follower)
+        lad.assert_called_once_with('omx')
+        self.assertIn('OMX-Arm', dm.LAST_SCAN_NOTICE)
+
+    def test_empty_scan_other_direction(self):
+        from gui.app import device_manager as dm
+        ch343 = types.SimpleNamespace(vid_pid='1A86:55D3', busid='1-3',
+                                      description='CH343',
+                                      state='Shared')
+        with patch.object(dm, 'self_heal_wsl_serial'), \
+                patch.object(dm, 'attach_all_robotis_devices',
+                             return_value=[]), \
+                patch.object(dm, 'list_arm_devices',
+                             return_value=[ch343]) as lad:
+            dm.scan_and_identify_arms('img', arm_family='omx')
+        lad.assert_called_once_with('edu6')
+        self.assertIn('EduBotics 6-Achs', dm.LAST_SCAN_NOTICE)
+
+    def test_empty_scan_without_other_family_stays_silent(self):
+        from gui.app import device_manager as dm
+        with patch.object(dm, 'self_heal_wsl_serial'), \
+                patch.object(dm, 'attach_all_robotis_devices',
+                             return_value=[]), \
+                patch.object(dm, 'list_arm_devices', return_value=[]):
+            dm.scan_and_identify_arms('img', arm_family='omx')
+        self.assertEqual(dm.LAST_SCAN_NOTICE, '')
+
+    def test_partial_token_names_the_count(self):
+        from gui.app import device_manager as dm
+        dev = types.SimpleNamespace(busid='1-1', description='CH343',
+                                    serial_path='/dev/serial/by-id/x')
+        with patch.object(dm, 'self_heal_wsl_serial'), \
+                patch.object(dm, 'attach_all_robotis_devices',
+                             return_value=[dev]), \
+                patch.object(dm, 'find_serial_paths_for_arms',
+                             return_value=['/dev/serial/by-id/x']), \
+                patch.object(dm, 'start_scanner_container',
+                             return_value=True), \
+                patch.object(dm, 'stop_scanner_container'), \
+                patch.object(dm, 'identify_arm_via_docker',
+                             return_value='partial:3'), \
+                patch('time.sleep'):
+            leader, follower = dm.scan_and_identify_arms(
+                'img', arm_family='edu6')
+        self.assertIsNone(follower)
+        self.assertIn('3 von 7', dm.LAST_SCAN_NOTICE)
+        self.assertIn('Steckverbindungen', dm.LAST_SCAN_NOTICE)
 
 
 class TestFamilyVidProbe(unittest.TestCase):

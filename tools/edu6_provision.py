@@ -7,21 +7,37 @@ reference pose (every joint at its designed zero, gripper fully CLOSED):
     python3 tools/edu6_provision.py --port /dev/ttyACM0 --serial EDU6-0001
 
 What it does, in the §6 order (order matters — limits are interpreted in the
-offset-corrected frame):
+offset-corrected frame, and the offset must be baked under the SAME
+position-reporting semantics the runtime will use):
 
-1. Torque OFF, then **write Lock = 0 EXPLICITLY** (addr 55; 0 = EEPROM writes
-   persist, 1 = protected — the polarity is inverted from intuition, and
-   torque-off does NOT implicitly unlock).
-2. Read the jigged Present_Position of every servo and write ``Homing_Offset``
-   so the reference pose reads its DESIGNED tick value.
-3. Write the DESIGNED ``Min/Max_Position_Limit`` from the URDF (never swept
+1. Normalize ``Response_Status_Level`` (addr 8) to 1 if a servo ships 0 — a
+   level-0 servo answers READ/PING but never acks a WRITE, so every awaited
+   write below would time out. This repair necessarily runs un-awaited
+   (unlock + level write), then read-verifies.
+2. Torque OFF (verified), then **write Lock = 0 EXPLICITLY** (addr 55; 0 =
+   EEPROM writes persist, 1 = protected — the polarity is inverted from
+   intuition, and torque-off does NOT implicitly unlock).
+3. Clear ``Phase`` bit 4 (multi-turn feedback mode) BEFORE the offset step —
+   read-modify-write, only-when-set. The jig read that bakes the offset must
+   happen under post-clear feedback semantics (audit M1), and the other
+   Phase bits are motor-drive configuration that must never be touched.
+4. Read the jigged Present_Position of every servo and write ``Homing_Offset``
+   so the reference pose reads its DESIGNED tick value; re-read and hard-fail
+   unless the jig now reads designed ±4 ticks.
+5. Write the DESIGNED ``Min/Max_Position_Limit`` from the URDF (never swept
    ranges — "how far the human waved it" is too sloppy for a student-facing
-   IK model).
-4. Write the safety EEPROM in the same pass: ``Max_Torque_Limit`` (the §8
+   IK model), via the ONE shared window implementation in ``feetech_bus``
+   (the driver's boot probe verifies the same windows — audit H1).
+6. Write the safety EEPROM in the same pass: ``Max_Torque_Limit`` (the §8
    pinch floor — R2/R4 pending values), ``Protection_Current``,
-   ``Overload_Torque``, clear ``Phase`` bit 4, ``Return_Delay_Time = 0``.
-5. Re-lock (Lock = 1), read EVERY register back and VERIFY.
-6. Emit the per-arm record (7 × {id, homing_offset, range_min, range_max,
+   ``Overload_Torque``, **``Operating_Mode = 0``** (position — a wheel-mode
+   servo would turn boot-home into a continuous-rotation runaway that
+   position limits cannot stop, audit H2), ``Return_Delay_Time = 0``.
+7. Re-lock (Lock = 1), read EVERY register back and VERIFY.
+8. FINAL jig re-verify across all 7 servos (the arm stays jigged for the
+   whole run): every servo must still read designed ±4 ticks — closes any
+   post-offset semantic shift a per-servo gate can miss.
+9. Emit the per-arm record (7 × {id, homing_offset, range_min, range_max,
    model, firmware} + arm serial + sha256 checksum) — **the record is the
    commit point**: all servos written → read back → THEN persisted. A
    half-written arm has no valid record and fails loudly.
@@ -90,13 +106,11 @@ def designed_zero_tick(_joint_index: int) -> int:
 
 def limits_to_ticks(joint_index: int, signs) -> tuple[int, int]:
     """Designed URDF limits → tick window around the designed zero, sign-aware
-    (a −1 sign swaps and mirrors the window)."""
+    (a −1 sign swaps and mirrors the window). Delegates to the ONE shared
+    implementation in ``feetech_bus`` — the driver node's boot probe verifies
+    the exact same windows against the plugged arm (audit H1 no-drift)."""
     lo_rad, hi_rad = JOINT_LIMITS_RAD[joint_index]
-    sign = signs[joint_index]
-    a = CENTER_TICK + int(round(lo_rad * sign / RAD_PER_TICK))
-    b = CENTER_TICK + int(round(hi_rad * sign / RAD_PER_TICK))
-    lo, hi = (a, b) if a <= b else (b, a)
-    return max(0, lo), min(TICKS_PER_REV - 1, hi)
+    return fb.position_limit_window(lo_rad, hi_rad, signs[joint_index])
 
 
 def record_checksum(entries: list[dict], serial: str, signs) -> str:
@@ -151,12 +165,38 @@ def provision(bus, serial: str, signs, dry_run: bool = False) -> dict:
 
     entries = []
     for i, sid in enumerate(SERVO_IDS):
-        # 1. torque off + EXPLICIT unlock
+        # 1. Response_Status_Level normalize — MUST precede the first awaited
+        # write: a level-0 servo never acks a WRITE, so the verified torque-off
+        # below would time out before we could repair the level. The repair
+        # pair (unlock + level) therefore runs un-awaited, then read-verifies.
+        level = bus.read(sid, fb.REG_RESPONSE_STATUS_LEVEL, 1)[1][0]
+        if level != 1 and not dry_run:
+            bus.write(sid, fb.REG_LOCK, b'\x00', await_status=False)
+            bus.write(sid, fb.REG_RESPONSE_STATUS_LEVEL, b'\x01',
+                      await_status=False)
+            back = bus.read(sid, fb.REG_RESPONSE_STATUS_LEVEL, 1)[1][0]
+            if back != 1:
+                raise SystemExit(
+                    f'[FEHLER] Servo {sid}: Response-Status-Level lässt sich '
+                    f'nicht auf 1 setzen (liest {back}) — Servo prüfen.')
+            print(f'[OK] Servo {sid}: Response-Status-Level auf 1 normalisiert.')
+
+        # 2. torque off (verified — audit L5) + EXPLICIT unlock
         if not dry_run:
-            bus.write(sid, fb.REG_TORQUE_ENABLE, b'\x00')
+            _write_verify_u8(bus, sid, fb.REG_TORQUE_ENABLE, 0, 'Torque=0')
             _write_verify_u8(bus, sid, fb.REG_LOCK, 0, 'Lock=0')
 
-        # 2. homing offset: jigged position must READ the designed zero.
+            # 3. Phase bit 4 BEFORE the offset step (audit M1): the jig read
+            # that bakes the offset must happen under the SAME position-
+            # reporting semantics the runtime will use. Read-modify-write and
+            # ONLY when set — the other Phase bits are motor-drive
+            # configuration (a blind write could invert a coil phase).
+            phase = bus.read(sid, fb.REG_PHASE, 1)[1][0]
+            if phase & (1 << 4):
+                _write_verify_u8(bus, sid, fb.REG_PHASE, phase & ~(1 << 4),
+                                 'Phase-Bit4')
+
+        # 4. homing offset: jigged position must READ the designed zero.
         present = bus.read_u16(sid, fb.REG_PRESENT_POSITION)
         present = fb.decode_sign_magnitude(present, 15)
         current_off = fb.decode_sign_magnitude(
@@ -195,13 +235,13 @@ def provision(bus, serial: str, signs, dry_run: bool = False) -> dict:
                     'Homing-Offset/Vorzeichen prüfen und erneut '
                     'provisionieren.')
 
-        # 3. designed position limits (AFTER the offset — corrected frame).
+        # 5. designed position limits (AFTER the offset — corrected frame).
         lo, hi = limits_to_ticks(i, signs)
         if not dry_run:
             _write_verify_u16(bus, sid, fb.REG_MIN_POSITION_LIMIT, lo, 'Min_Position')
             _write_verify_u16(bus, sid, fb.REG_MAX_POSITION_LIMIT, hi, 'Max_Position')
 
-        # 4. safety EEPROM
+        # 6. safety EEPROM
         max_torque = GRIPPER_MAX_TORQUE if sid == SERVO_IDS[-1] else ARM_MAX_TORQUE
         if not dry_run:
             _write_verify_u16(bus, sid, fb.REG_MAX_TORQUE_LIMIT, max_torque,
@@ -210,13 +250,14 @@ def provision(bus, serial: str, signs, dry_run: bool = False) -> dict:
                               PROTECTION_CURRENT, 'Protection_Current')
             _write_verify_u8(bus, sid, fb.REG_OVERLOAD_TORQUE, OVERLOAD_TORQUE,
                              'Overload_Torque')
-            phase = bus.read(sid, fb.REG_PHASE, 1)[1][0]
-            if phase & (1 << 4):
-                _write_verify_u8(bus, sid, fb.REG_PHASE, phase & ~(1 << 4),
-                                 'Phase-Bit4')
+            # Position mode, asserted — a wheel-mode servo passes every other
+            # check and turns the boot-home into a continuous-rotation runaway
+            # that EEPROM position limits cannot stop (audit H2).
+            _write_verify_u8(bus, sid, fb.REG_OPERATING_MODE, 0,
+                             'Mode=Position')
             _write_verify_u8(bus, sid, fb.REG_RETURN_DELAY, RETURN_DELAY,
                              'Return_Delay')
-            # 5. re-lock
+            # 7. re-lock
             _write_verify_u8(bus, sid, fb.REG_LOCK, 1, 'Lock=1')
 
         firmware = bus.read(sid, fb.REG_FIRMWARE_MAJOR, 2)[1]
@@ -231,6 +272,24 @@ def provision(bus, serial: str, signs, dry_run: bool = False) -> dict:
         })
         print(f'[OK] Servo {sid}: offset={new_off} limits=[{lo},{hi}] '
               f'torque={max_torque}')
+
+    # 8. FINAL jig re-verify (audit M1): after EVERY write of the run —
+    # including the Phase-bit-4 clears — the still-jigged arm must read the
+    # designed pose on all 7 servos. A per-servo gate cannot catch a semantic
+    # shift caused by a later write; this one can. The arm must stay jigged
+    # until the tool prints its closing [OK].
+    if not dry_run:
+        for i, sid in enumerate(SERVO_IDS):
+            present = fb.decode_sign_magnitude(
+                bus.read_u16(sid, fb.REG_PRESENT_POSITION), 15)
+            designed = designed_zero_tick(i)
+            if abs(present - designed) > JIG_POSE_TOLERANCE_TICKS:
+                raise SystemExit(
+                    f'[FEHLER] Jig-Endkontrolle: Servo {sid} liest {present} '
+                    f'statt {designed} (Abweichung {present - designed} '
+                    'Ticks) — den Arm im Jig belassen und die '
+                    'Provisionierung erneut ausführen.')
+        print('[OK] Jig-Endkontrolle: alle 7 Servos lesen die Soll-Position.')
 
     record = {
         'arm_serial': serial,

@@ -6,9 +6,10 @@ The ROS contract this node satisfies (edu6 plan §3.2) is exactly what makes
 
 * pub ``/joint_states`` (name + position + velocity, all 7 joints per message,
   URDF-native names, 50 Hz) — ALSO the compose healthcheck gate, so the
-  publisher is created ONLY AFTER the first successful servo ping (the check
-  is topic-existence-only; an eagerly-created publisher would let the
-  container go healthy over a dead bus).
+  publisher is created ONLY AFTER the boot probe succeeded (ping + Model 777
+  + the EEPROM provisioning fingerprint, see ``probe_bus``; the check is
+  topic-existence-only; an eagerly-created publisher would let the container
+  go healthy over a dead or unprovisioned bus).
 * sub ``/leader/joint_trajectory`` — the command rail. QoS VOLATILE+RELIABLE
   (a TRANSIENT_LOCAL subscriber never matches the VOLATILE workflow/jog/replay
   publishers). Multi-point trajectories are executed AS trajectories: a
@@ -24,8 +25,13 @@ Safety posture (plan §8): the servo has NO host watchdog — it holds its last
 goal energised forever if we die — so torque-off runs on SIGTERM/SIGINT/atexit.
 Per-joint ``Min/Max_Position_Limit`` live in servo EEPROM (written at vendor
 provisioning), ``Max_Torque_Limit`` is the hardware pinch floor; this node adds
-NO software safety envelope (Rule §2) beyond refusing to command outside the
-URDF limits.
+NO software safety envelope (Rule §2) beyond input validation and boot gating:
+non-finite trajectory points are rejected (a NaN would otherwise clamp to a
+LIMIT-seeking command — audit M3), commands are clamped to the URDF limits
+(the servo EEPROM window underneath is the hardware floor), trajectories are
+dropped while the arm is limp or the bus is faulted (audits M2/M5), and the
+boot probe refuses an arm whose EEPROM does not carry the expected
+provisioning fingerprint (audits H1/H2).
 
 Bus loops run on their OWN threads (not a ROS executor — the ~35-service
 MultiThreadedExecutor starvation class from the server node does not exist
@@ -77,10 +83,16 @@ JOINT_LIMITS_RAD = (
 
 LOOP_HZ = 50.0
 BOOT_HOME_DURATION_S = 3.0
-# Fixed conservative servo acceleration (unit ≈ 8.7 mrad/s²·LSB per Feetech
-# docs — bench-confirmed at R2/R5) and a Goal_Speed cap as a SECOND,
-# independent speed limit that composes with the trajectory velocity floor
-# (0.8 × the URDF 5.45 rad/s ≈ 2840 steps/s).
+# A fully-missing servo must hard-stop motion within this WALL-CLOCK window.
+# Wall-clock, not loop iterations (audit M5): with an absent servo each
+# sync_read burns its scaled deadline, so an iteration count of LOOP_HZ took
+# ~8 s of real time, not the promised ~1 s.
+READ_FAIL_STOP_S = 1.0
+# Fixed conservative servo acceleration. Official unit (ST3215 memory table
+# V3.7): 100 steps/s² per LSB ≈ 8.79°/s²·LSB — so 50 ⇒ 5000 steps/s²
+# ≈ 7.7 rad/s² (R2/R5 confirm on the bench). Plus a Goal_Speed cap as a
+# SECOND, independent speed limit that composes with the trajectory velocity
+# floor (0.8 × the URDF 5.45 rad/s ≈ 2840 steps/s).
 WRITE_ACCELERATION = 50
 GOAL_SPEED_CAP_STEPS = 2840
 
@@ -176,11 +188,18 @@ class Edu6ArmNode(Node):
         self._traj_points: list[tuple[list[float], float]] = []
         self._traj_start: float = 0.0
         self._error_log_last: dict[int, float] = {}
-        self._read_fail_streak = 0
+        # Wall-clock start of the current read-miss window (audit M5) and the
+        # latched bus-fault flag: once tripped, trajectories are refused and
+        # the write loop is silenced until a FULL read succeeds again.
+        self._read_fail_since: float | None = None
+        self._bus_fault = False
+        self._limp_log_last = 0.0
+        self._fault_log_last = 0.0
         self._shutdown_done = False
 
-        # /joint_states — created by main() ONLY after the boot ping succeeded
-        # (see the module docstring). Kept here for visibility of the QoS.
+        # /joint_states — the node itself is constructed only after
+        # probe_bus() succeeded in main(), so no ROS entity can exist over a
+        # dead/unprovisioned bus. Kept here for visibility of the QoS.
         self._joint_pub = self.create_publisher(JointState, '/joint_states', 10)
 
         traj_qos = QoSProfile(
@@ -234,6 +253,42 @@ class Edu6ArmNode(Node):
             return False, (
                 f'[FEHLER] Unerwartetes Servomodell am Bus: {wrong} — dieser '
                 'Arm ist kein EduBotics 6-Achs.')
+        # Provisioned-state gate (audit H1+H2). Ping + model alone would let a
+        # factory-fresh or RMA-swapped servo boot-home in a WRONG coordinate
+        # frame at factory torque (1000, not the provisioned 800/150), and a
+        # wheel-mode servo would turn boot-home into a continuous-rotation
+        # runaway that EEPROM position limits cannot stop. The EEPROM limit
+        # windows double as the provisioning fingerprint: they must equal the
+        # designed sign-aware windows (fb.position_limit_window — the SAME
+        # implementation the provisioning tool writes with), the mode must be
+        # position. ±1 tick tolerates nothing — the windows are integers both
+        # sides — but keeps a future rounding change from bricking boots.
+        for i, sid in enumerate(SERVO_IDS):
+            try:
+                mode = bus.read(sid, fb.REG_OPERATING_MODE, 1)[1][0]
+                lo = bus.read_u16(sid, fb.REG_MIN_POSITION_LIMIT)
+                hi = bus.read_u16(sid, fb.REG_MAX_POSITION_LIMIT)
+            except fb.FeetechBusError as e:
+                return False, (
+                    f'[FEHLER] Servo {sid}: EEPROM-Kontrolle fehlgeschlagen '
+                    f'({e}) — Verkabelung prüfen und erneut versuchen.')
+            if mode != 0:
+                return False, (
+                    f'[FEHLER] Servo {sid}: Betriebsmodus {mode} statt '
+                    'Positionsmodus — dieser Arm ist nicht provisioniert. '
+                    'Bitte tools/edu6_provision.py auf der Werkbank '
+                    'ausführen.')
+            lo_exp, hi_exp = fb.position_limit_window(
+                *JOINT_LIMITS_RAD[i], JOINT_SIGNS[i])
+            if abs(lo - lo_exp) > 1 or abs(hi - hi_exp) > 1:
+                return False, (
+                    f'[FEHLER] Servo {sid}: EEPROM-Positionsgrenzen '
+                    f'[{lo}, {hi}] passen nicht zur erwarteten '
+                    f'Provisionierung [{lo_exp}, {hi_exp}] — Arm nicht '
+                    'provisioniert oder EDUBOTICS_EDU6_JOINT_SIGNS weicht '
+                    'von der Provisionierung ab? Bitte '
+                    'tools/edu6_provision.py mit den aktuellen Vorzeichen '
+                    'ausführen.')
         return True, ''
 
     # ── torque ───────────────────────────────────────────────────────────────
@@ -250,6 +305,12 @@ class Edu6ArmNode(Node):
             return False
 
     def _torque_cb(self, request, response):
+        if request.data:
+            # Audit M2 (belt): entering torque from limp must never resume a
+            # trajectory stored before or DURING the limp phase — clear before
+            # the first energized write tick can interpolate it.
+            with self._traj_lock:
+                self._traj_points = []
         ok = self.set_torque(bool(request.data))
         response.success = ok
         response.message = 'ok' if ok else 'Torque-Umschaltung fehlgeschlagen.'
@@ -262,6 +323,27 @@ class Edu6ArmNode(Node):
 
     # ── command rail ─────────────────────────────────────────────────────────
     def _trajectory_cb(self, msg: JointTrajectory) -> None:
+        now = time.monotonic()
+        # Audit M2: a trajectory arriving while the arm is LIMP (hand-guide /
+        # pre-boot-home) must not be stored — at re-torque the write loop
+        # would interpolate past its end and glide the arm to a long-stale
+        # target from wherever the student left it.
+        if not self._torque_on:
+            if now - self._limp_log_last > 5.0:
+                self._limp_log_last = now
+                self.get_logger().warning(
+                    '[WARNUNG] Trajektorie verworfen: Drehmoment ist aus '
+                    '(Hand-Führung aktiv?).')
+            return
+        # Audit M5: latched bus fault — no new commands while servos are
+        # missing; the arm would execute them open-loop.
+        if self._bus_fault:
+            if now - self._fault_log_last > 5.0:
+                self._fault_log_last = now
+                self.get_logger().warning(
+                    '[WARNUNG] Trajektorie verworfen: Servobus antwortet '
+                    'nicht (siehe Fehlermeldung oben).')
+            return
         names = list(msg.joint_names)
         index_map: list[int] = []
         for joint in JOINT_NAMES:
@@ -277,11 +359,20 @@ class Edu6ArmNode(Node):
         base = self._last_positions or list(HOME_JOINTS_RAD) + [GRIPPER_OPEN_RAD]
         points: list[tuple[list[float], float]] = []
         for pt in msg.points:
+            t = pt.time_from_start.sec + pt.time_from_start.nanosec * 1e-9
+            # Audit M3: Python's min/max clamp a NaN to the UPPER limit — a
+            # NaN position would become a limit-seeking command. Refuse the
+            # whole message loudly (input validation, not a safety envelope).
+            if not math.isfinite(t) or not all(
+                    math.isfinite(float(v)) for v in pt.positions):
+                self.get_logger().warning(
+                    '[WARNUNG] Trajektorie verworfen: nicht-endliche Werte '
+                    '(NaN/Inf) in den Zielpunkten.')
+                return
             q = list(base)
             for k, src in enumerate(index_map):
                 if src >= 0 and src < len(pt.positions):
                     q[k] = float(pt.positions[src])
-            t = pt.time_from_start.sec + pt.time_from_start.nanosec * 1e-9
             points.append((q, t))
         if not points:
             return
@@ -337,10 +428,17 @@ class Edu6ArmNode(Node):
                 self.get_logger().warning(f'sync_read raised: {e}')
             missing = [sid for sid in SERVO_IDS if sid not in replies]
             if missing:
-                self._read_fail_streak += 1
+                now = time.monotonic()
+                if self._read_fail_since is None:
+                    self._read_fail_since = now
                 # A browned-out servo must NEVER feed a frozen angle into the
-                # IK — publish NOTHING this tick; hard-stop loudly on a streak.
-                if self._read_fail_streak == int(LOOP_HZ):  # ~1 s of misses
+                # IK — publish NOTHING this tick; hard-stop loudly once the
+                # WALL-CLOCK miss window fills (audit M5: an absent servo
+                # stretches each sync_read to its scaled deadline, so an
+                # iteration count silently multiplied the promised ~1 s).
+                if (now - self._read_fail_since >= READ_FAIL_STOP_S
+                        and not self._bus_fault):
+                    self._bus_fault = True
                     self.get_logger().error(
                         f'[FEHLER] Servo(s) {missing} liefern keine Daten mehr '
                         '— Bewegungen sind gestoppt. Bitte Kabel und '
@@ -348,7 +446,13 @@ class Edu6ArmNode(Node):
                     with self._traj_lock:
                         self._traj_points = []
             else:
-                self._read_fail_streak = 0
+                self._read_fail_since = None
+                if self._bus_fault:
+                    # Latched fault clears ONLY on a full 7-servo read.
+                    self._bus_fault = False
+                    self.get_logger().info(
+                        'Servobus wieder erreichbar — Bewegungen sind wieder '
+                        'möglich.')
                 self._publish_joint_state(replies)
             elapsed = time.monotonic() - t0
             time.sleep(max(0.0, period - elapsed))
@@ -397,7 +501,9 @@ class Edu6ArmNode(Node):
                     if (time.monotonic() - self._traj_start
                             > self._traj_points[-1][1] + 1.0):
                         self._traj_points = []
-            if target is not None and self._torque_on:
+            # Bus-fault gate (audit M5): a latched fault silences the write
+            # loop too — never command servos the read loop cannot see.
+            if target is not None and self._torque_on and not self._bus_fault:
                 self._write_targets(target)
             elapsed = time.monotonic() - t0
             time.sleep(max(0.0, period - elapsed))

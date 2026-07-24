@@ -76,10 +76,15 @@ CENTER_TICK = 2048
 TICKS_PER_REV = 4096
 RAD_PER_TICK = 2.0 * math.pi / TICKS_PER_REV
 
-# Designed joint limits (URDF; the gripper band mirrors the driver node).
+# Designed joint limits (the gripper band mirrors the driver node). CONTAINED
+# in the URDF model, not equal to it — the URDF's ±180° ends sit ON the
+# single-turn encoder seam (ticks 0/4095 are one physical position), so the
+# bands are pulled in to ±178°. Changing any of these means RE-PROVISIONING
+# every arm: the driver's probe_bus() refuses to boot an arm whose EEPROM
+# window does not match.
 JOINT_LIMITS_RAD = (
-    (-1.5708, 1.5708), (0.0, 3.1416), (-3.1416, 0.0), (-3.1416, 3.1416),
-    (-1.5708, 1.9199), (-3.1416, 3.1416), (0.0, 1.79),
+    (-1.5708, 1.5708), (0.0, 3.1066), (-3.1066, 0.0), (-3.1066, 3.1066),
+    (-1.5708, 1.9199), (-3.1066, 3.1066), (0.0, 1.79),
 )
 
 # Safety EEPROM values (plan §8; the gripper pinch floor is R2/R4-pending).

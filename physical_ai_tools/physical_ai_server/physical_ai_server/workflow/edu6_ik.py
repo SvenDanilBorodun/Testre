@@ -14,10 +14,10 @@ The edu6 ("EduBotics 6-Achs") is a 6-DOF Feetech STS3215 arm
 
 * ``joint1`` — yaw about base z (±90°)
 * ``joint2/3`` — shoulder / elbow, parallel axes (the 2R planar chain)
-* ``joint4`` — forearm roll (±180°)
+* ``joint4`` — forearm roll (±178°, see the SEAM note below)
 * ``joint5`` — wrist pitch (**asymmetric −90°…+110°** — the relieved housing;
   the working-side vertical grasp uses the POSITIVE, relieved direction)
-* ``joint6`` — tool roll (±180°; the jaw-alignment joint)
+* ``joint6`` — tool roll (±178°; the jaw-alignment joint, see SEAM below)
 * (``end_gear_joint`` is the gripper servo, not a positioning DOF)
 
 Same design rules as the OMX ``IKSolver`` (see its module docstring): pure
@@ -50,6 +50,27 @@ world azimuth at a vertical pose is ``χ = q1 + q6 − π/2``; with the default
 — the identical geometric behaviour, absorbed entirely by this one mapping, so
 ``EDUBOTICS_GRASP_ROLL_DEG`` keeps one fleet-wide default.  (Note the trim
 direction flips vs the OMX: ∂q6/∂GRASP_ROLL = −1.)
+
+ENCODER SEAM — why the limits are ±178° and not the URDF's ±180°.
+The STS servos carry a SINGLE-TURN absolute encoder: 4096 ticks over one
+revolution, so tick 4095 and tick 0 are 0.088° apart physically but 4095 ticks
+apart numerically.  A ±180° band spans exactly one revolution, which means its
+two ends are the SAME physical measurement — +180° and −180° are
+indistinguishable, and one tick of overshoot (or a nudge of the limp wrist
+during hand-guiding) reports a 360° jump that the planner then executes as a
+full-circle sweep.  A 360° span needs 4097 distinguishable positions from a
+4096-position sensor; it cannot be represented.  So every band is pulled 2° in,
+leaving ~23 ticks of guard at each end (``test_feetech_bus`` pins the
+clearance; the three JOINT_LIMITS copies must move together).
+
+This matters most for ``q6``, because ``wrap(π − roll)`` lands on −180° for the
+DEFAULT ``roll = 0`` — i.e. for every position-only solve (``in_workspace``,
+``solve_quat``, the reach precheck) — and for one ordinary tag orientation at
+every placement.  The BOUNDARY UNWIND in :meth:`solve` spends the parallel
+jaw's 180° symmetry (a jaw grasps identically at ``q6`` and ``q6 ± π``) to pull
+exactly those back into the band, leaving the live 1:1 tag tracking
+(∂q6/∂tag_yaw = +1) untouched everywhere else.  Because the band is 356° wide
+and the wrap output lies in [−180°, 180°), one 180° shift ALWAYS lands inside.
 
 Geometry constants are transcribed from
 ``follower_arm_modified_final1.urdf`` (external CAD export; an in-repo copy
@@ -102,11 +123,11 @@ _FK_TOL_M = 1e-6
 # ── URDF joint position limits (radians) — the servo-EEPROM design values ────
 _EDU6_JOINT_LIMITS_RAD: list[tuple[float, float]] = [
     (-1.5708, 1.5708),     # joint1
-    (0.0, 3.1416),         # joint2
-    (-3.1416, 0.0),        # joint3
-    (-3.1416, 3.1416),     # joint4
+    (0.0, 3.1066),         # joint2
+    (-3.1066, 0.0),        # joint3
+    (-3.1066, 3.1066),     # joint4
     (-1.5708, 1.9199),     # joint5 — ASYMMETRIC (relieved to +110°)
-    (-3.1416, 3.1416),     # joint6
+    (-3.1066, 3.1066),     # joint6
 ]
 
 
@@ -361,7 +382,20 @@ class Edu6IKSolver:
             # strict-vertical wrist: q4 = 0, q5 = π − β = π/2 − q2 − q3.
             theta5 = math.pi - beta
             theta4 = 0.0
+            # Tool roll tracks the tag 1:1 (∂q6/∂tag_yaw = +1) across the whole
+            # ±178° band — that live tracking is the intended Roboter-Studio
+            # behaviour. Only where the wrapped value falls OUTSIDE the band do
+            # we spend the jaw's 180° symmetry (a parallel jaw grasps
+            # identically at q6 and q6 ± π) to bring it back in range. This is
+            # what keeps the ±180° encoder seam unreachable without introducing
+            # a dead band of tag orientations — and it is why the default
+            # roll = 0 yields a NEUTRAL wrist (q6 = 0) instead of a half turn.
             theta6 = _wrap(math.pi - roll)
+            lo6, hi6 = self._joint_limits[5]
+            if theta6 > hi6:
+                theta6 -= math.pi
+            elif theta6 < lo6:
+                theta6 += math.pi
             joints = [theta1, theta2, theta3, theta4, theta5, theta6]
             if not all(math.isfinite(v) for v in joints):
                 continue

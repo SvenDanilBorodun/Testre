@@ -451,16 +451,50 @@ class TestUrdfDriverNoDrift(unittest.TestCase):
             if lim is not None:
                 urdf[j.get('name')] = (float(lim.get('lower')),
                                        float(lim.get('upper')))
+        # The arm bands are CONTAINED in the URDF model, not equal to it — the
+        # same "pin the relation, not equality" rule the gripper already uses
+        # below. The URDF's ±180° ends map onto the encoder SEAM (ticks 0 and
+        # 4095 are the same physical position on a single-turn absolute
+        # encoder), so the shipped bands are pulled in to ±178°. What must
+        # never happen is a software limit EXCEEDING the mechanical model.
         for i, name in enumerate(['joint1', 'joint2', 'joint3', 'joint4',
                                   'joint5', 'joint6']):
-            self.assertEqual(tuple(_N['JOINT_LIMITS_RAD'][i]), urdf[name],
-                             name)
+            lo, hi = _N['JOINT_LIMITS_RAD'][i]
+            urdf_lo, urdf_hi = urdf[name]
+            self.assertGreaterEqual(lo, urdf_lo - 1e-9, name)
+            self.assertLessEqual(hi, urdf_hi + 1e-9, name)
         # The gripper band is DELIBERATELY narrower than the URDF model
         # artifact (command band 0..1.79 vs model 0..2.0944) — pin the
         # relation, not equality.
         lo, hi = _N['JOINT_LIMITS_RAD'][6]
         self.assertEqual(lo, 0.0)
         self.assertLess(hi, urdf['end_gear_joint'][1])
+
+    # Hard floor on how close a provisioned window may come to the encoder
+    # boundary. 16 ticks ≈ 1.4°; the shipped ±178° design leaves 22-23.
+    _MIN_SEAM_CLEARANCE_TICKS = 16
+
+    def test_no_joint_window_touches_the_encoder_seam(self):
+        """Ticks 0 and 4095 are ADJACENT on the single-turn absolute encoder —
+        they are 0.088° apart physically but 4095 ticks apart numerically. A
+        window that reaches either end therefore cannot distinguish +180° from
+        −180°, and one tick of overshoot (or a hand-guided nudge while limp)
+        reports a 360° jump that the planner turns into a full-circle sweep.
+        Every provisioned window must clear both ends, under BOTH sign
+        conventions — a −1 sign mirrors the window onto the other boundary."""
+        for signs in ((1,) * 7, (-1,) * 7):
+            for i in range(7):
+                lo, hi = fb.position_limit_window(
+                    *_N['JOINT_LIMITS_RAD'][i], signs[i])
+                self.assertGreaterEqual(
+                    lo, self._MIN_SEAM_CLEARANCE_TICKS,
+                    f'joint index {i} (signs {signs[i]}): window starts at '
+                    f'tick {lo}, too close to the encoder seam at 0')
+                self.assertLessEqual(
+                    hi, (fb.TICKS_PER_REV - 1) - self._MIN_SEAM_CLEARANCE_TICKS,
+                    f'joint index {i} (signs {signs[i]}): window ends at tick '
+                    f'{hi}, too close to the encoder seam at '
+                    f'{fb.TICKS_PER_REV - 1}')
 
     def test_home_matches_server_profile_literal(self):
         source = open(self._PROFILES, encoding='utf-8').read()

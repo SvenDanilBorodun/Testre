@@ -291,12 +291,49 @@ def test_contract_surface_no_drift():
     assert ik.joint_limits == tuple(tuple(p) for p in _EDU6_JOINT_LIMITS_RAD)
     assert ik.base_axis_x == pytest.approx(0.0212954796450086)
     assert BASE_AXIS_X_WORLD == pytest.approx(0.0212954796450086)
-    # limits mirror the URDF (the oracle parsed them independently).
+    # Limits are CONTAINED in the URDF the oracle parsed independently — not
+    # equal to it. The URDF's ±180° ends land on the servo's single-turn
+    # encoder seam (ticks 0/4095 are one physical position), so the shipped
+    # bands are pulled in to ±178°. The invariant that matters is that a
+    # software limit never EXCEEDS the mechanical model.
     urdf_limits = [
         _ORACLE.joints[f'joint{i}']['limits'] for i in range(1, 7)]
     for (lo_s, hi_s), (lo_u, hi_u) in zip(ik.joint_limits, urdf_limits):
-        assert lo_s == pytest.approx(lo_u, abs=1e-9)
-        assert hi_s == pytest.approx(hi_u, abs=1e-9)
+        assert lo_s >= lo_u - 1e-9
+        assert hi_s <= hi_u + 1e-9
+
+
+def test_tool_roll_never_lands_on_the_encoder_seam():
+    """``q6 = wrap(π − roll)`` puts the wrist on exactly ±180° — the servo's
+    single-turn encoder seam — for the DEFAULT roll (0, used by every
+    position-only solve: ``in_workspace``, ``solve_quat``, the reach precheck)
+    AND for one ordinary tag orientation at every placement. The boundary
+    unwind spends the parallel jaw's 180° symmetry to pull those back into the
+    band while leaving 1:1 tag tracking (∂q6/∂tag_yaw = +1) intact everywhere
+    else.
+
+    Guards three things at once: the default is a NEUTRAL wrist, every roll
+    lands inside the band, and the unwind never changes the physical jaw line
+    (q6 is preserved mod π)."""
+    ik = _ik()
+    lo, hi = ik.joint_limits[5]
+    target = (0.15, 0.0, 0.02)
+
+    # 1. position-only solve → neutral wrist, NOT a half turn onto the seam.
+    q = ik.solve(target)
+    assert q is not None, 'default-roll solve must stay reachable'
+    assert q[5] == pytest.approx(0.0, abs=1e-9)
+
+    # 2+3. exhaustive over a full turn of tag-driven roll.
+    for i in range(721):
+        roll = -math.pi + i * (2.0 * math.pi / 720.0)
+        q = ik.solve(target, roll=roll)
+        assert q is not None, f'roll {roll} must stay reachable'
+        assert lo <= q[5] <= hi, f'roll {roll} → q6 {q[5]} outside the band'
+        raw = (math.pi - roll + math.pi) % (2.0 * math.pi) - math.pi
+        delta = abs((q[5] - raw + math.pi) % (2.0 * math.pi) - math.pi)
+        assert min(delta, abs(delta - math.pi)) < 1e-9, (
+            f'roll {roll}: q6 {q[5]} is not the same jaw line as {raw}')
 
 
 def test_base_yaw_equals_solve_theta1():

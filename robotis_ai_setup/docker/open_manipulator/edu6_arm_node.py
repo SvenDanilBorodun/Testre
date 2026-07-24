@@ -73,11 +73,18 @@ TICKS_PER_REV = 4096
 CENTER_TICK = 2048
 RAD_PER_TICK = 2.0 * math.pi / TICKS_PER_REV
 
-# URDF joint limits (the software refuse-band; the servo EEPROM limits are the
-# hardware floor underneath).
+# Joint limits (the software refuse-band; the servo EEPROM window underneath is
+# the hardware floor). CONTAINED in the URDF model, not equal to it: the URDF's
+# ±180° ends map onto the SINGLE-TURN encoder seam — ticks 0 and 4095 are the
+# same physical position, so a ±180° band cannot tell its two ends apart and one
+# tick of overshoot reports a 360° jump. Pulled in to ±178°, leaving ~23 ticks
+# of guard at each end. MUST stay in lockstep with edu6_ik._EDU6_JOINT_LIMITS_RAD
+# and edu6_provision.JOINT_LIMITS_RAD (no-drift-tested), and changing them
+# requires RE-PROVISIONING every arm — probe_bus() verifies the EEPROM window
+# against these values.
 JOINT_LIMITS_RAD = (
-    (-1.5708, 1.5708), (0.0, 3.1416), (-3.1416, 0.0), (-3.1416, 3.1416),
-    (-1.5708, 1.9199), (-3.1416, 3.1416),
+    (-1.5708, 1.5708), (0.0, 3.1066), (-3.1066, 0.0), (-3.1066, 3.1066),
+    (-1.5708, 1.9199), (-3.1066, 3.1066),
     # gripper (end_gear servo): 0 = closed … open command band
     (0.0, 1.79),
 )

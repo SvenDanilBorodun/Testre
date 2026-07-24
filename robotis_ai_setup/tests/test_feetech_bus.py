@@ -476,16 +476,22 @@ class TestUrdfDriverNoDrift(unittest.TestCase):
         that anyone pulling the bands in to ±178° (which closes it properly, at
         the cost of re-provisioning every arm) has to update this test and read
         why it exists."""
-        seam = []
-        for i in range(7):
-            lo, hi = fb.position_limit_window(*_N['JOINT_LIMITS_RAD'][i], 1)
-            if lo == 0 or hi == fb.TICKS_PER_REV - 1:
-                seam.append(i)
-        self.assertEqual(
-            seam, [1, 2, 3, 5],
-            'the set of joints whose window touches the encoder seam changed — '
-            'if you pulled the bands in, update this test; if a NEW joint '
-            'reached the seam, that is a regression')
+        # Checked under BOTH sign conventions, not just the default: a −1 in
+        # EDUBOTICS_EDU6_JOINT_SIGNS mirrors the window onto the OTHER encoder
+        # boundary, so a sign-dependent regression would hide behind a
+        # hardcoded +1. The seam SET is expected to be sign-invariant.
+        for signs in ((1,) * 7, (-1,) * 7):
+            seam = []
+            for i in range(7):
+                lo, hi = fb.position_limit_window(
+                    *_N['JOINT_LIMITS_RAD'][i], signs[i])
+                if lo == 0 or hi == fb.TICKS_PER_REV - 1:
+                    seam.append(i)
+            self.assertEqual(
+                seam, [1, 2, 3, 5],
+                f'(signs {signs[0]}) the set of joints whose window touches the '
+                'encoder seam changed — if you pulled the bands in, update this '
+                'test; if a NEW joint reached the seam, that is a regression')
 
     def test_home_matches_server_profile_literal(self):
         source = open(self._PROFILES, encoding='utf-8').read()

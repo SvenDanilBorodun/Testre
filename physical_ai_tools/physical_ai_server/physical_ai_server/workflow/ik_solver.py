@@ -418,6 +418,17 @@ class IKSolver:
         Used for the workflow IK pre-check / a clean German message."""
         return self.solve(target_xyz) is not None
 
+    def roll_from_joint(self, joint_value: float) -> float:
+        """Inverse of this solver's ``roll`` → tool-roll-joint mapping.
+
+        A caller holding a MEASURED joint value and wanting "solve the same
+        wrist orientation again" must convert it back into the ``roll`` units
+        :meth:`solve` expects. Here that mapping is ``theta5 = roll``, so the
+        inverse is the identity — but call this rather than passing the joint
+        value straight through, because it is NOT the identity on every arm
+        (see :meth:`Edu6IKSolver.roll_from_joint`)."""
+        return float(joint_value)
+
     def base_yaw(self, x: float, y: float) -> float:
         """Base joint (joint1) yaw, in radians, that aims the arm's vertical
         plane at the table point ``(x, y)`` (base frame, metres).

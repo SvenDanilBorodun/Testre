@@ -309,9 +309,13 @@ def test_untagged_default_parks_the_wrist_at_dead_centre():
     and one tick of drift reports a 360° jump. The OMX maps
     ``joint5 = wrap(roll)``, so ITS default roll of 0 parks the wrist at 0° —
     dead centre — which is why it has never hit this. This solver's mapping
-    carries an extra π (``q6 = wrap(π − roll)``), so the same roll of 0 would
-    park it ON the seam for every position-only solve: ``in_workspace``,
-    ``solve_quat`` and the ``_ik_precheck`` reach walk all take this path.
+    carries an extra π (``q6 = wrap(π − roll)``), so the same roll of 0 parks it
+    ON the seam.
+
+    Scope: on its own this is LATENT hardening — the ``roll=None`` paths
+    (``in_workspace``, ``solve_quat``, ``_ik_precheck``) only answer questions
+    and never command a joint. The LIVE exposure was the roll/joint conflation
+    covered by ``test_roll_from_joint_preserves_the_wrist``.
 
     Fails loudly if NEUTRAL_ROLL is ever reset to 0, or if the extra π is
     removed from the mapping without moving NEUTRAL_ROLL with it."""
@@ -322,15 +326,17 @@ def test_untagged_default_parks_the_wrist_at_dead_centre():
     assert q is not None
     assert q[5] == pytest.approx(0.0, abs=1e-9)
 
-    # 2. the position-only entry points every caller actually uses.
+    # 2. solve_quat is position-only and must agree (it forwards roll=None).
     assert ik.solve_quat((0.15, 0.0, 0.02), None)[5] == pytest.approx(
         0.0, abs=1e-9)
-    assert ik.in_workspace((0.15, 0.0, 0.02)) is True
 
-    # 3. NEUTRAL_ROLL is the value that makes it so — pin the relation, so a
-    #    future change to the mapping cannot silently move the default onto
-    #    the seam while this file still reads 'π'.
-    assert _wrap(math.pi - NEUTRAL_ROLL) == pytest.approx(0.0, abs=1e-12)
+    # 3. HOME agrees. This is the arm-intrinsic reason NEUTRAL_ROLL is π, and
+    #    a stronger claim than parity with a different arm: the profile's own
+    #    designed HOME already parks q6 at 0, so the untagged default and HOME
+    #    are the same wrist. (A GRASP_ROLL-aligned +90° default would not be.)
+    from physical_ai_server.robot_profiles import ROBOT_PROFILES
+    assert ROBOT_PROFILES['edu6_studio'].home_joints_rad[5] == pytest.approx(
+        0.0, abs=1e-9)
 
     # 4. KNOWN RESIDUAL, shared with the OMX and deliberately not fixed: live
     #    tag tracking still sweeps the full ±180°, so one tag orientation per
@@ -339,6 +345,33 @@ def test_untagged_default_parks_the_wrist_at_dead_centre():
     on_seam = ik.solve((0.15, 0.0, 0.02), roll=0.0)
     assert on_seam is not None
     assert abs(on_seam[5]) == pytest.approx(math.pi, abs=1e-9)
+
+
+def test_roll_from_joint_preserves_the_wrist():
+    """The "keep the current wrist roll" contract that jog, the `plan_safe_route`
+    reroute fallback and the „hebe an" transit all depend on.
+
+    `roll` and the roll JOINT are the same quantity on the OMX
+    (``theta5 = roll``) but NOT here (``q6 = wrap(π − roll)``, an involution),
+    so a caller passing a MEASURED joint straight in as ``roll`` REFLECTS the
+    wrist about π/2 instead of holding it — and reflects the neutral 0 onto
+    −180°, the encoder seam. `roll_from_joint` is the solver-owned inverse that
+    makes those call sites correct on both arms.
+
+    Fails if the inverse is ever replaced by the identity here."""
+    ik = _ik()
+    target = (0.15, 0.0, 0.02)
+    for q in (0.0, 0.25, -0.6, 1.2003, math.pi / 2, -math.pi / 2, 3.0):
+        again = ik.solve(target, roll=ik.roll_from_joint(q))
+        assert again is not None, q
+        assert again[5] == pytest.approx(q, abs=1e-9), (
+            f'wrist {q} was not preserved (got {again[5]})')
+
+    # The un-converted form is what the three call sites used to do: prove it
+    # reflects, and that the neutral lands exactly on the seam. This is the
+    # bug the conversion exists to prevent, pinned so it cannot come back.
+    reflected = ik.solve(target, roll=0.0)
+    assert abs(reflected[5]) == pytest.approx(math.pi, abs=1e-9)
 
 
 def test_base_yaw_equals_solve_theta1():

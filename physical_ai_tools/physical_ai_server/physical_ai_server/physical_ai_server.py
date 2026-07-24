@@ -3208,8 +3208,14 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 target[idx] += delta
                 # A downward Z step (idx 2, delta < 0) needs a known table floor —
                 # refuse it on an uncalibrated rig. X/Y and an upward Z are always safe.
+                # arm[roll_idx] is a JOINT value; solve() wants ROLL units.
+                # Identity on the OMX, an involution on edu6 — passing it
+                # straight through reflects the wrist on every X/Y/Z jog step
+                # instead of holding it, and reflects the neutral 0 onto the
+                # encoder seam at −180°.
                 arm_q = self._jog_solve_floor(
-                    ik, (target[0], target[1], target[2]), roll=arm[roll_idx],
+                    ik, (target[0], target[1], target[2]),
+                    roll=_motion.roll_from_joint(ik, arm[roll_idx]),
                     require_floor=(idx == 2 and delta < 0.0))
                 q_end = list(arm_q) + [grip]
             elif idx == 3:

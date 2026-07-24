@@ -20,8 +20,10 @@ import pytest
 from physical_ai_server.workflow.edu6_ik import (
     BASE_AXIS_X_WORLD,
     Edu6IKSolver,
+    NEUTRAL_ROLL,
     _EDU6_JOINT_LIMITS_RAD,
     _L_TOOL,
+    _wrap,
 )
 
 _URDF = (Path(__file__).resolve().parents[2]
@@ -291,49 +293,52 @@ def test_contract_surface_no_drift():
     assert ik.joint_limits == tuple(tuple(p) for p in _EDU6_JOINT_LIMITS_RAD)
     assert ik.base_axis_x == pytest.approx(0.0212954796450086)
     assert BASE_AXIS_X_WORLD == pytest.approx(0.0212954796450086)
-    # Limits are CONTAINED in the URDF the oracle parsed independently — not
-    # equal to it. The URDF's ±180° ends land on the servo's single-turn
-    # encoder seam (ticks 0/4095 are one physical position), so the shipped
-    # bands are pulled in to ±178°. The invariant that matters is that a
-    # software limit never EXCEEDS the mechanical model.
+    # limits mirror the URDF (the oracle parsed them independently).
     urdf_limits = [
         _ORACLE.joints[f'joint{i}']['limits'] for i in range(1, 7)]
     for (lo_s, hi_s), (lo_u, hi_u) in zip(ik.joint_limits, urdf_limits):
-        assert lo_s >= lo_u - 1e-9
-        assert hi_s <= hi_u + 1e-9
+        assert lo_s == pytest.approx(lo_u, abs=1e-9)
+        assert hi_s == pytest.approx(hi_u, abs=1e-9)
 
 
-def test_tool_roll_never_lands_on_the_encoder_seam():
-    """``q6 = wrap(π − roll)`` puts the wrist on exactly ±180° — the servo's
-    single-turn encoder seam — for the DEFAULT roll (0, used by every
-    position-only solve: ``in_workspace``, ``solve_quat``, the reach precheck)
-    AND for one ordinary tag orientation at every placement. The boundary
-    unwind spends the parallel jaw's 180° symmetry to pull those back into the
-    band while leaving 1:1 tag tracking (∂q6/∂tag_yaw = +1) intact everywhere
-    else.
+def test_untagged_default_parks_the_wrist_at_dead_centre():
+    """OMX PARITY — the reason :data:`NEUTRAL_ROLL` is π rather than 0.
 
-    Guards three things at once: the default is a NEUTRAL wrist, every roll
-    lands inside the band, and the unwind never changes the physical jaw line
-    (q6 is preserved mod π)."""
+    Ticks 0 and 4095 are the same physical position on the servo's single-turn
+    absolute encoder, so a wrist parked at ±180° cannot tell its two ends apart
+    and one tick of drift reports a 360° jump. The OMX maps
+    ``joint5 = wrap(roll)``, so ITS default roll of 0 parks the wrist at 0° —
+    dead centre — which is why it has never hit this. This solver's mapping
+    carries an extra π (``q6 = wrap(π − roll)``), so the same roll of 0 would
+    park it ON the seam for every position-only solve: ``in_workspace``,
+    ``solve_quat`` and the ``_ik_precheck`` reach walk all take this path.
+
+    Fails loudly if NEUTRAL_ROLL is ever reset to 0, or if the extra π is
+    removed from the mapping without moving NEUTRAL_ROLL with it."""
     ik = _ik()
-    lo, hi = ik.joint_limits[5]
-    target = (0.15, 0.0, 0.02)
 
-    # 1. position-only solve → neutral wrist, NOT a half turn onto the seam.
-    q = ik.solve(target)
-    assert q is not None, 'default-roll solve must stay reachable'
+    # 1. the documented default, via the roll=None path.
+    q = ik.solve((0.15, 0.0, 0.02))
+    assert q is not None
     assert q[5] == pytest.approx(0.0, abs=1e-9)
 
-    # 2+3. exhaustive over a full turn of tag-driven roll.
-    for i in range(721):
-        roll = -math.pi + i * (2.0 * math.pi / 720.0)
-        q = ik.solve(target, roll=roll)
-        assert q is not None, f'roll {roll} must stay reachable'
-        assert lo <= q[5] <= hi, f'roll {roll} → q6 {q[5]} outside the band'
-        raw = (math.pi - roll + math.pi) % (2.0 * math.pi) - math.pi
-        delta = abs((q[5] - raw + math.pi) % (2.0 * math.pi) - math.pi)
-        assert min(delta, abs(delta - math.pi)) < 1e-9, (
-            f'roll {roll}: q6 {q[5]} is not the same jaw line as {raw}')
+    # 2. the position-only entry points every caller actually uses.
+    assert ik.solve_quat((0.15, 0.0, 0.02), None)[5] == pytest.approx(
+        0.0, abs=1e-9)
+    assert ik.in_workspace((0.15, 0.0, 0.02)) is True
+
+    # 3. NEUTRAL_ROLL is the value that makes it so — pin the relation, so a
+    #    future change to the mapping cannot silently move the default onto
+    #    the seam while this file still reads 'π'.
+    assert _wrap(math.pi - NEUTRAL_ROLL) == pytest.approx(0.0, abs=1e-12)
+
+    # 4. KNOWN RESIDUAL, shared with the OMX and deliberately not fixed: live
+    #    tag tracking still sweeps the full ±180°, so one tag orientation per
+    #    placement lands q6 exactly on the seam. Pinned so the trade-off stays
+    #    visible — see the module docstring's RESIDUAL note.
+    on_seam = ik.solve((0.15, 0.0, 0.02), roll=0.0)
+    assert on_seam is not None
+    assert abs(on_seam[5]) == pytest.approx(math.pi, abs=1e-9)
 
 
 def test_base_yaw_equals_solve_theta1():

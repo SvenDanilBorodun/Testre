@@ -374,6 +374,48 @@ def test_roll_from_joint_preserves_the_wrist():
     assert abs(reflected[5]) == pytest.approx(math.pi, abs=1e-9)
 
 
+def test_motion_roll_from_joint_dispatches_to_the_solver():
+    """Pins the DISPATCHER the three call sites actually call, not just the
+    solver primitive underneath it.
+
+    ``physical_ai_server``'s cartesian jog, ``path_guard.plan_safe_route``'s
+    roll=None fallback and motion's „hebe an" transit all reach the inverse
+    through ``motion.roll_from_joint(ik, q)``. Collapsing that helper to the
+    identity is behaviourally identical to reverting the fix at all three
+    sites at once — and the solver-level tests above do NOT catch it, because
+    the collapsed helper simply stops calling the solver. This test is the one
+    that fails on that mutation.
+
+    Also pins the two other halves of the contract: the OMX identity (so the
+    shared call sites stay byte-identical there) and the getattr fallback for
+    solvers predating the method (hundreds of existing test doubles rely on
+    it)."""
+    from physical_ai_server.workflow.handlers.motion import roll_from_joint
+    from physical_ai_server.workflow.ik_solver import IKSolver
+
+    edu6, omx = _ik(), IKSolver()
+
+    for q in (0.0, 0.25, -0.6, 1.2003, -math.pi / 2):
+        # edu6: MUST reflect (i.e. must NOT be the identity) ...
+        got = roll_from_joint(edu6, q)
+        assert got == pytest.approx(_wrap(math.pi - q), abs=1e-12), q
+        # ... and must round-trip the wrist through an actual solve, which is
+        # exactly what the three call sites depend on.
+        again = edu6.solve((0.15, 0.0, 0.02), roll=got)
+        assert again is not None and again[5] == pytest.approx(q, abs=1e-9), q
+        # OMX: MUST be the identity, so its call sites are unchanged.
+        assert roll_from_joint(omx, q) == pytest.approx(q, abs=1e-12), q
+
+    # The neutral wrist is the case that reflects onto the seam, so pin it
+    # explicitly rather than trusting the loop to cover it.
+    assert abs(roll_from_joint(edu6, 0.0)) == pytest.approx(math.pi, abs=1e-12)
+
+    # Solvers predating the method fall back to the identity (test doubles).
+    class _Legacy:
+        pass
+    assert roll_from_joint(_Legacy(), 0.7) == pytest.approx(0.7, abs=1e-12)
+
+
 def test_base_yaw_equals_solve_theta1():
     ik = _ik()
     for x, y in [(0.15, 0.0), (0.12, 0.09), (0.14, -0.11), (0.20, 0.03)]:

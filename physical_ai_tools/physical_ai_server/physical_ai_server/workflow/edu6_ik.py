@@ -162,7 +162,14 @@ NEUTRAL_ROLL = math.pi
 
 
 def _wrap(a: float) -> float:
-    """Wrap an angle to (-pi, pi]."""
+    """Wrap an angle to **[-pi, pi)** — half-open at the POSITIVE end.
+
+    ``(a + pi) % 2pi - pi`` maps an exact +pi to **-pi**, not +pi. Load-bearing
+    here, not pedantry: this module's whole subject is the +-pi encoder seam,
+    and it is why ``roll_from_joint(0.0)`` returns -pi rather than +pi, and why
+    ``NEUTRAL_ROLL = pi`` yields exactly 0 (the subtraction cancels BEFORE the
+    wrap). Both are the same physical wrist, so nothing downstream cares — but
+    read the sign here before reasoning about a boundary case."""
     return (a + math.pi) % (2.0 * math.pi) - math.pi
 
 

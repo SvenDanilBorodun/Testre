@@ -447,5 +447,6 @@ class IKSolver:
 
 
 def _wrap(a: float) -> float:
-    """Wrap an angle to (-pi, pi]."""
+    """Wrap an angle to **[-pi, pi)** — half-open at the POSITIVE end:
+    ``(a + pi) % 2pi - pi`` maps an exact +pi to -pi, not +pi."""
     return (a + math.pi) % (2.0 * math.pi) - math.pi

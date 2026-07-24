@@ -75,6 +75,23 @@ RAD_PER_TICK = 2.0 * math.pi / TICKS_PER_REV
 
 # URDF joint limits (the software refuse-band; the servo EEPROM limits are the
 # hardware floor underneath).
+#
+# ENCODER SEAM — known, accepted, matches the OMX. The ±180° ends of j2(hi),
+# j3(lo), j4 and j6 land on the SINGLE-TURN encoder seam: ticks 0 and 4095 are
+# 0.088° apart physically but 4095 apart numerically, so a joint sitting there
+# cannot tell +180° from −180° and one tick of drift reports a 360° jump. A
+# 360° span needs 4097 distinguishable positions from a 4096-position sensor —
+# it cannot be represented. The OMX carries exactly the same exposure
+# (omx_f.ros2_control.xacro gives dxl14/dxl15 `Min 0 / Max 4095` with ±π
+# limits) and has run fine, because its roll convention parks the DEFAULT
+# wrist at 0° — dead centre — rather than on the seam. edu6 matches that by
+# defaulting the tool roll to π in edu6_ik.solve (its mapping carries an extra
+# π); see the ENCODER SEAM note there for the residual that remains.
+#
+# Keep in lockstep with edu6_ik._EDU6_JOINT_LIMITS_RAD and
+# edu6_provision.JOINT_LIMITS_RAD (no-drift-tested). Changing any of them
+# requires RE-PROVISIONING every arm — probe_bus() verifies the EEPROM window
+# against these values.
 JOINT_LIMITS_RAD = (
     (-1.5708, 1.5708), (0.0, 3.1416), (-3.1416, 0.0), (-3.1416, 3.1416),
     (-1.5708, 1.9199), (-3.1416, 3.1416),

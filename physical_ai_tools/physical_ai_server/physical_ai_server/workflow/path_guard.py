@@ -378,7 +378,11 @@ def plan_safe_route(ctx, q_start, q_end, zones, duration_s, roll=None,
     n = ik.num_joints()
     link_radius = LINK_RADIUS_M
     if roll is None:
-        roll = float(q_end[_m._roll_idx(ctx)])
+        # q_end carries a JOINT value; solve() wants ROLL units. Identity on
+        # the OMX, an involution on edu6 — passing the joint straight through
+        # reflects every via-point's wrist, and reflects the neutral 0 onto the
+        # encoder seam at −180°.
+        roll = _m.roll_from_joint(ik, float(q_end[_m._roll_idx(ctx)]))
     # Gripper continuity: outbound/intermediate vias inherit q_START's gripper so
     # the gripper changes ONCE — on the final leg arriving at q_end (which keeps
     # q_end's gripper) — exactly like the direct path. Stamping every via with

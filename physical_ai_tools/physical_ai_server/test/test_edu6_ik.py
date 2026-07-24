@@ -20,8 +20,10 @@ import pytest
 from physical_ai_server.workflow.edu6_ik import (
     BASE_AXIS_X_WORLD,
     Edu6IKSolver,
+    NEUTRAL_ROLL,
     _EDU6_JOINT_LIMITS_RAD,
     _L_TOOL,
+    _wrap,
 )
 
 _URDF = (Path(__file__).resolve().parents[2]
@@ -297,6 +299,121 @@ def test_contract_surface_no_drift():
     for (lo_s, hi_s), (lo_u, hi_u) in zip(ik.joint_limits, urdf_limits):
         assert lo_s == pytest.approx(lo_u, abs=1e-9)
         assert hi_s == pytest.approx(hi_u, abs=1e-9)
+
+
+def test_untagged_default_parks_the_wrist_at_dead_centre():
+    """OMX PARITY — the reason :data:`NEUTRAL_ROLL` is π rather than 0.
+
+    Ticks 0 and 4095 are the same physical position on the servo's single-turn
+    absolute encoder, so a wrist parked at ±180° cannot tell its two ends apart
+    and one tick of drift reports a 360° jump. The OMX maps
+    ``joint5 = wrap(roll)``, so ITS default roll of 0 parks the wrist at 0° —
+    dead centre — which is why it has never hit this. This solver's mapping
+    carries an extra π (``q6 = wrap(π − roll)``), so the same roll of 0 parks it
+    ON the seam.
+
+    Scope: on its own this is LATENT hardening — the ``roll=None`` paths
+    (``in_workspace``, ``solve_quat``, ``_ik_precheck``) only answer questions
+    and never command a joint. The LIVE exposure was the roll/joint conflation
+    covered by ``test_roll_from_joint_preserves_the_wrist``.
+
+    Fails loudly if NEUTRAL_ROLL is ever reset to 0, or if the extra π is
+    removed from the mapping without moving NEUTRAL_ROLL with it."""
+    ik = _ik()
+
+    # 1. the documented default, via the roll=None path.
+    q = ik.solve((0.15, 0.0, 0.02))
+    assert q is not None
+    assert q[5] == pytest.approx(0.0, abs=1e-9)
+
+    # 2. solve_quat is position-only and must agree (it forwards roll=None).
+    assert ik.solve_quat((0.15, 0.0, 0.02), None)[5] == pytest.approx(
+        0.0, abs=1e-9)
+
+    # 3. HOME agrees. This is the arm-intrinsic reason NEUTRAL_ROLL is π, and
+    #    a stronger claim than parity with a different arm: the profile's own
+    #    designed HOME already parks q6 at 0, so the untagged default and HOME
+    #    are the same wrist. (A GRASP_ROLL-aligned +90° default would not be.)
+    from physical_ai_server.robot_profiles import ROBOT_PROFILES
+    assert ROBOT_PROFILES['edu6_studio'].home_joints_rad[5] == pytest.approx(
+        0.0, abs=1e-9)
+
+    # 4. KNOWN RESIDUAL, shared with the OMX and deliberately not fixed: live
+    #    tag tracking still sweeps the full ±180°, so one tag orientation per
+    #    placement lands q6 exactly on the seam. Pinned so the trade-off stays
+    #    visible — see the module docstring's RESIDUAL note.
+    on_seam = ik.solve((0.15, 0.0, 0.02), roll=0.0)
+    assert on_seam is not None
+    assert abs(on_seam[5]) == pytest.approx(math.pi, abs=1e-9)
+
+
+def test_roll_from_joint_preserves_the_wrist():
+    """The "keep the current wrist roll" contract that jog, the `plan_safe_route`
+    reroute fallback and the „hebe an" transit all depend on.
+
+    `roll` and the roll JOINT are the same quantity on the OMX
+    (``theta5 = roll``) but NOT here (``q6 = wrap(π − roll)``, an involution),
+    so a caller passing a MEASURED joint straight in as ``roll`` REFLECTS the
+    wrist about π/2 instead of holding it — and reflects the neutral 0 onto
+    −180°, the encoder seam. `roll_from_joint` is the solver-owned inverse that
+    makes those call sites correct on both arms.
+
+    Fails if the inverse is ever replaced by the identity here."""
+    ik = _ik()
+    target = (0.15, 0.0, 0.02)
+    for q in (0.0, 0.25, -0.6, 1.2003, math.pi / 2, -math.pi / 2, 3.0):
+        again = ik.solve(target, roll=ik.roll_from_joint(q))
+        assert again is not None, q
+        assert again[5] == pytest.approx(q, abs=1e-9), (
+            f'wrist {q} was not preserved (got {again[5]})')
+
+    # The un-converted form is what the three call sites used to do: prove it
+    # reflects, and that the neutral lands exactly on the seam. This is the
+    # bug the conversion exists to prevent, pinned so it cannot come back.
+    reflected = ik.solve(target, roll=0.0)
+    assert abs(reflected[5]) == pytest.approx(math.pi, abs=1e-9)
+
+
+def test_motion_roll_from_joint_dispatches_to_the_solver():
+    """Pins the DISPATCHER the three call sites actually call, not just the
+    solver primitive underneath it.
+
+    ``physical_ai_server``'s cartesian jog, ``path_guard.plan_safe_route``'s
+    roll=None fallback and motion's „hebe an" transit all reach the inverse
+    through ``motion.roll_from_joint(ik, q)``. Collapsing that helper to the
+    identity is behaviourally identical to reverting the fix at all three
+    sites at once — and the solver-level tests above do NOT catch it, because
+    the collapsed helper simply stops calling the solver. This test is the one
+    that fails on that mutation.
+
+    Also pins the two other halves of the contract: the OMX identity (so the
+    shared call sites stay byte-identical there) and the getattr fallback for
+    solvers predating the method (hundreds of existing test doubles rely on
+    it)."""
+    from physical_ai_server.workflow.handlers.motion import roll_from_joint
+    from physical_ai_server.workflow.ik_solver import IKSolver
+
+    edu6, omx = _ik(), IKSolver()
+
+    for q in (0.0, 0.25, -0.6, 1.2003, -math.pi / 2):
+        # edu6: MUST reflect (i.e. must NOT be the identity) ...
+        got = roll_from_joint(edu6, q)
+        assert got == pytest.approx(_wrap(math.pi - q), abs=1e-12), q
+        # ... and must round-trip the wrist through an actual solve, which is
+        # exactly what the three call sites depend on.
+        again = edu6.solve((0.15, 0.0, 0.02), roll=got)
+        assert again is not None and again[5] == pytest.approx(q, abs=1e-9), q
+        # OMX: MUST be the identity, so its call sites are unchanged.
+        assert roll_from_joint(omx, q) == pytest.approx(q, abs=1e-12), q
+
+    # The neutral wrist is the case that reflects onto the seam, so pin it
+    # explicitly rather than trusting the loop to cover it.
+    assert abs(roll_from_joint(edu6, 0.0)) == pytest.approx(math.pi, abs=1e-12)
+
+    # Solvers predating the method fall back to the identity (test doubles).
+    class _Legacy:
+        pass
+    assert roll_from_joint(_Legacy(), 0.7) == pytest.approx(0.7, abs=1e-12)
 
 
 def test_base_yaw_equals_solve_theta1():

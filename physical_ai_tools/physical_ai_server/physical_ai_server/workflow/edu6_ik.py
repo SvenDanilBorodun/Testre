@@ -17,7 +17,7 @@ The edu6 ("EduBotics 6-Achs") is a 6-DOF Feetech STS3215 arm
 * ``joint4`` — forearm roll (±180°)
 * ``joint5`` — wrist pitch (**asymmetric −90°…+110°** — the relieved housing;
   the working-side vertical grasp uses the POSITIVE, relieved direction)
-* ``joint6`` — tool roll (±180°; the jaw-alignment joint)
+* ``joint6`` — tool roll (±180°; the jaw-alignment joint, see SEAM below)
 * (``end_gear_joint`` is the gripper servo, not a positioning DOF)
 
 Same design rules as the OMX ``IKSolver`` (see its module docstring): pure
@@ -50,6 +50,48 @@ world azimuth at a vertical pose is ``χ = q1 + q6 − π/2``; with the default
 — the identical geometric behaviour, absorbed entirely by this one mapping, so
 ``EDUBOTICS_GRASP_ROLL_DEG`` keeps one fleet-wide default.  (Note the trim
 direction flips vs the OMX: ∂q6/∂GRASP_ROLL = −1.)
+
+ENCODER SEAM — why :data:`NEUTRAL_ROLL` is π and not 0.
+The STS servos carry a SINGLE-TURN absolute encoder: 4096 ticks over one
+revolution, so tick 4095 and tick 0 are 0.088° apart physically but 4095 ticks
+apart numerically.  A ±180° joint band spans exactly one revolution, so its two
+ends are the SAME physical measurement — +180° and −180° are indistinguishable,
+and one tick of drift there reports a 360° jump that the planner then executes
+as a full-circle sweep.  A 360° span would need 4097 distinguishable positions
+from a 4096-position sensor; it cannot be represented.  j2(hi), j3(lo), j4 and
+j6 all end on that seam.
+
+The OMX has carried the identical exposure since launch
+(``omx_f.ros2_control.xacro`` gives dxl14/dxl15 ``Min 0 / Max 4095`` with ±π
+limits, and Dynamixel Position Control Mode wraps 0–4095 exactly like the STS)
+and has run fine — because its mapping is ``joint5 = wrap(roll)``, so its
+default roll of 0 parks the wrist at 0°, DEAD CENTRE of the encoder.  This
+solver's mapping carries an extra π, so the same roll of 0 would park it there
+too.  :data:`NEUTRAL_ROLL` = π is the edu6 spelling of "no rotation".
+
+Two independent reasons it is right, the second stronger than the first: it
+restores OMX parity (and by more than tick equality — from ``χ = q1 + q6 −
+π/2``, OMX ``joint5 = 0`` gives ``χ = q1 + π/2`` while edu6 ``q6 = 0`` gives
+``χ = q1 − π/2``; those differ by π and the jaw is 180°-symmetric, so it is the
+SAME physical jaw line); and it agrees with this arm's own designed HOME, which
+already parks ``q6`` at 0 (``robot_profiles._EDU6_HOME_JOINTS_RAD[5]``).  A
+GRASP_ROLL-aligned +90° default would satisfy neither.
+
+Scope, honestly: on its own the default is LATENT hardening.  The ``roll=None``
+paths (``in_workspace``, ``solve_quat``, the ``_ik_precheck`` reach walk) only
+answer questions — none of them commands a joint, and reachability is exactly
+independent of ``q6`` (it rotates about the tool axis, so the FK translation
+does not contain it).  The LIVE way the wrist reached the seam was the
+roll/joint conflation that :meth:`Edu6IKSolver.roll_from_joint` now fixes —
+see that method.
+
+RESIDUAL, accepted and shared with the OMX: with live tag tracking the wrist
+still sweeps the whole ±180° range, so ONE tag orientation per placement
+(``tag_yaw = base_yaw + 90°`` here; ``base_yaw − 90°`` on the OMX) still lands
+q6 on the seam.  Closing that too means either pulling the bands in to ±178°
+(re-provisioning every arm — ``probe_bus`` verifies the EEPROM window) or
+folding q6 by the jaw's 180° symmetry (which would break the live 1:1 tag
+tracking the Roboter Studio demo depends on).  Deliberately not done.
 
 Geometry constants are transcribed from
 ``follower_arm_modified_final1.urdf`` (external CAD export; an in-repo copy
@@ -110,8 +152,24 @@ _EDU6_JOINT_LIMITS_RAD: list[tuple[float, float]] = [
 ]
 
 
+# Tool roll meaning "no rotation" for THIS arm. π, not 0: the mapping
+# ``q6 = wrap(π − roll)`` carries an extra π versus the OMX's
+# ``joint5 = wrap(roll)``, so a roll of 0 here parks the wrist at −180° — on
+# the single-turn encoder seam — where the OMX's 0 parks it at dead centre.
+# See the ENCODER SEAM section of the module docstring. Changing this to 0
+# re-opens the seam for every position-only solve.
+NEUTRAL_ROLL = math.pi
+
+
 def _wrap(a: float) -> float:
-    """Wrap an angle to (-pi, pi]."""
+    """Wrap an angle to **[-pi, pi)** — half-open at the POSITIVE end.
+
+    ``(a + pi) % 2pi - pi`` maps an exact +pi to **-pi**, not +pi. Load-bearing
+    here, not pedantry: this module's whole subject is the +-pi encoder seam,
+    and it is why ``roll_from_joint(0.0)`` returns -pi rather than +pi, and why
+    ``NEUTRAL_ROLL = pi`` yields exactly 0 (the subtraction cancels BEFORE the
+    wrap). Both are the same physical wrist, so nothing downstream cares — but
+    read the sign here before reasoning about a boundary case."""
     return (a + math.pi) % (2.0 * math.pi) - math.pi
 
 
@@ -308,7 +366,7 @@ class Edu6IKSolver:
     def solve(
         self,
         target_xyz,
-        target_rpy: tuple[float, float, float] = (math.pi, 0.0, 0.0),
+        target_rpy: tuple[float, float, float] = (math.pi, 0.0, NEUTRAL_ROLL),
         seed: Optional[list[float]] = None,
         free_yaw: bool = True,
         roll: Optional[float] = None,
@@ -318,16 +376,20 @@ class Edu6IKSolver:
 
         ``roll`` follows motion's shared jaw formula (``base_yaw − tag_yaw +
         GRASP_ROLL_RAD``) and maps to ``q6 = wrap(π − roll)``; ``None`` falls
-        back to ``target_rpy``'s yaw, else 0. ``seed``/``free_yaw`` are
-        accepted for call-site compatibility and do not change the
-        deterministic elbow-up-first solution. Returns URDF-native joints or
-        ``None`` (unreachable / out of limits)."""
+        back to ``target_rpy``'s yaw, else :data:`NEUTRAL_ROLL` — which is π,
+        NOT 0, because this mapping carries an extra π (see the ENCODER SEAM
+        note in the module docstring: a roll of 0 would park the wrist on the
+        encoder seam at −180° instead of dead centre).
+        ``seed``/``free_yaw`` are accepted for call-site compatibility and do
+        not change the deterministic elbow-up-first solution. Returns
+        URDF-native joints or ``None`` (unreachable / out of limits)."""
         arr = np.asarray(target_xyz, dtype=np.float64).reshape(3)
         x, y, z = (float(v) for v in arr)
         if not all(math.isfinite(v) for v in (x, y, z)):
             return None
         if roll is None:
-            roll = float(target_rpy[2]) if len(target_rpy) >= 3 else 0.0
+            roll = (float(target_rpy[2]) if len(target_rpy) >= 3
+                    else NEUTRAL_ROLL)
         roll = float(roll)
         if not math.isfinite(roll):
             return None
@@ -361,6 +423,11 @@ class Edu6IKSolver:
             # strict-vertical wrist: q4 = 0, q5 = π − β = π/2 − q2 − q3.
             theta5 = math.pi - beta
             theta4 = 0.0
+            # Tool roll tracks the tag 1:1 (∂q6/∂tag_yaw = +1) over the full
+            # ±180° range — the live tracking is the intended Roboter-Studio
+            # behaviour, so no folding happens here. NEUTRAL_ROLL is what keeps
+            # the untagged default off the encoder seam; see the module
+            # docstring.
             theta6 = _wrap(math.pi - roll)
             joints = [theta1, theta2, theta3, theta4, theta5, theta6]
             if not all(math.isfinite(v) for v in joints):
@@ -397,6 +464,23 @@ class Edu6IKSolver:
 
     def in_workspace(self, target_xyz) -> bool:
         return self.solve(target_xyz) is not None
+
+    def roll_from_joint(self, joint_value: float) -> float:
+        """Inverse of this solver's ``roll`` → ``q6`` mapping.
+
+        LOAD-BEARING, and the reason this method exists on both solvers. On the
+        OMX ``theta5 = roll`` is the IDENTITY, so a caller holding a measured
+        joint value can pass it straight in as ``roll`` and get the same wrist
+        back. Here the mapping is ``q6 = wrap(π − roll)`` — an INVOLUTION, not
+        the identity — so passing a joint value in as ``roll`` silently
+        REFLECTS the wrist about π/2 instead of preserving it, and a wrist
+        sitting at the neutral 0 reflects onto −180°: the encoder seam (see the
+        ENCODER SEAM section of the module docstring).
+
+        Every "keep the current wrist roll" call site must route through this.
+        Being an involution, the inverse is the same expression as the forward
+        map — that is a property of this arm, not a coincidence to rely on."""
+        return _wrap(math.pi - float(joint_value))
 
     def base_yaw(self, x: float, y: float) -> float:
         """joint1 yaw aiming the arm plane at WORLD ``(x, y)`` — exactly the

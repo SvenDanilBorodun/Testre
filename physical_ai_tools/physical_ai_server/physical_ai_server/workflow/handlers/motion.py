@@ -245,6 +245,26 @@ def _roll_idx(ctx) -> int:
         return _n(ctx) - 1
 
 
+def roll_from_joint(ik, joint_value: float) -> float:
+    """Convert a MEASURED tool-roll JOINT value into the ``roll`` units
+    :meth:`solve` expects, via the solver's own inverse.
+
+    ``roll`` and the roll JOINT are the same quantity on the OMX
+    (``theta5 = roll``) but NOT on the edu6 (``q6 = wrap(π − roll)``, an
+    involution). Every "keep the wrist where it is" call site therefore has to
+    convert instead of passing the joint straight through — on edu6 the
+    straight-through form REFLECTS the wrist, and reflects the neutral 0 onto
+    −180°, the encoder seam.
+
+    Falls back to the identity when the solver predates the method (test
+    doubles, and any solver whose mapping genuinely IS the identity), which
+    reproduces the previous behaviour exactly for those."""
+    fn = getattr(ik, 'roll_from_joint', None)
+    if callable(fn):
+        return float(fn(joint_value))
+    return float(joint_value)
+
+
 def _home_joints(ctx) -> list[float]:
     """The profile HOME arm pose (length ``_n(ctx)``); OMX constant fallback."""
     pose = getattr(ctx, 'home_joints_rad', None)
@@ -1216,7 +1236,8 @@ def lift(ctx, args: dict[str, Any]) -> None:
     q_end = arm_q + [cur[_n(ctx)]]
     # TRANSIT (straight-up lift) — route around any no-go zone. Optional per-move
     # „mit Tempo" override; None → workflow-global tempo.
-    safe_move(ctx, cur, q_end, DEFAULT_APPROACH_DURATION_S, roll=cur[_roll_idx(ctx)],
+    safe_move(ctx, cur, q_end, DEFAULT_APPROACH_DURATION_S,
+              roll=roll_from_joint(ctx.ik, cur[_roll_idx(ctx)]),
               tempo=_move_tempo(args))
     ctx.last_arm_joints = arm_q
     ctx.last_full_joints = q_end

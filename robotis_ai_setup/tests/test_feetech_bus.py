@@ -462,6 +462,37 @@ class TestUrdfDriverNoDrift(unittest.TestCase):
         self.assertEqual(lo, 0.0)
         self.assertLess(hi, urdf['end_gear_joint'][1])
 
+    def test_full_circle_joint_windows_are_a_known_accepted_seam(self):
+        """j2(hi), j3(lo), j4 and j6 end ON the encoder seam — ticks 0 and 4095
+        are the same physical position on a single-turn absolute encoder, so a
+        joint parked there cannot tell +180° from −180°. This is KNOWN and
+        ACCEPTED: the OMX ships the identical exposure (omx_f.ros2_control.xacro
+        gives dxl14/dxl15 `Min 0 / Max 4095` with ±π limits) and runs fine,
+        because the untagged default parks the wrist at dead centre rather than
+        on the seam — which edu6_ik.NEUTRAL_ROLL reproduces (pinned by
+        test_edu6_ik.test_untagged_default_parks_the_wrist_at_dead_centre).
+
+        Pinned here so the exposure stays VISIBLE rather than forgotten, and so
+        that anyone pulling the bands in to ±178° (which closes it properly, at
+        the cost of re-provisioning every arm) has to update this test and read
+        why it exists."""
+        # Checked under BOTH sign conventions, not just the default: a −1 in
+        # EDUBOTICS_EDU6_JOINT_SIGNS mirrors the window onto the OTHER encoder
+        # boundary, so a sign-dependent regression would hide behind a
+        # hardcoded +1. The seam SET is expected to be sign-invariant.
+        for signs in ((1,) * 7, (-1,) * 7):
+            seam = []
+            for i in range(7):
+                lo, hi = fb.position_limit_window(
+                    *_N['JOINT_LIMITS_RAD'][i], signs[i])
+                if lo == 0 or hi == fb.TICKS_PER_REV - 1:
+                    seam.append(i)
+            self.assertEqual(
+                seam, [1, 2, 3, 5],
+                f'(signs {signs[0]}) the set of joints whose window touches the '
+                'encoder seam changed — if you pulled the bands in, update this '
+                'test; if a NEW joint reached the seam, that is a regression')
+
     def test_home_matches_server_profile_literal(self):
         source = open(self._PROFILES, encoding='utf-8').read()
         home = None

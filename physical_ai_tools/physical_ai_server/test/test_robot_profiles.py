@@ -220,6 +220,41 @@ def test_no_drift_edu6_vs_edu6_ik():
     assert prof.home_joints_rad[4] >= 0.3
 
 
+def test_every_profile_solver_implements_roll_from_joint():
+    """`roll` and the tool-roll JOINT are the same quantity on some arms and
+    not on others (OMX ``theta5 = roll`` is the identity; edu6
+    ``q6 = wrap(π − roll)`` is an involution). Every "keep the current wrist"
+    call site converts through ``motion.roll_from_joint(ik, q)``, which
+    getattr-falls-back to the IDENTITY for solvers predating the method — a
+    fallback that exists for the many test doubles, but which would SILENTLY
+    reintroduce the wrist-reflection bug for a new arm whose solver forgot to
+    implement it (on edu6 that reflection lands the neutral wrist on the ±180°
+    encoder seam).
+
+    So the registry is fenced here: adding a robot type means implementing the
+    inverse on its solver. Also asserts the inverse actually round-trips, so a
+    stub that merely returns its argument cannot satisfy a non-identity arm."""
+    from physical_ai_server.workflow.handlers.motion import roll_from_joint
+    for profile_id in rp.ROBOT_PROFILES:
+        prof = rp.resolve(profile_id)
+        solver = prof.build_ik()
+        assert hasattr(solver, 'roll_from_joint'), (
+            f'{profile_id}: {type(solver).__name__} must implement '
+            'roll_from_joint — motion.roll_from_joint would otherwise fall '
+            'back to the identity and silently reflect the wrist')
+        roll_idx = (prof.roll_joint_index if prof.roll_joint_index is not None
+                    else prof.num_arm_joints - 1)
+        for q in (0.0, 0.4, -0.9):
+            # dispatcher and solver must agree, and the pair must round-trip
+            # through an actual solve at a pose every arm can reach.
+            assert roll_from_joint(solver, q) == solver.roll_from_joint(q)
+            target = (0.15, 0.0, 0.05) if prof.num_arm_joints == 6 else (
+                0.20, 0.0, 0.05)
+            again = solver.solve(target, roll=solver.roll_from_joint(q))
+            assert again is not None, (profile_id, q)
+            assert abs(again[roll_idx] - q) < 1e-9, (profile_id, q)
+
+
 def test_no_drift_edu6_vs_catalog():
     # The edu6 catalog close sits inside the profile's gripper band with more
     # than the grasp-held margin of squeeze headroom against the 30 mm cube.

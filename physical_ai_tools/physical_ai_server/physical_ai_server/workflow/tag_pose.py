@@ -71,7 +71,8 @@ _logger = logging.getLogger(__name__)
 
 
 def _wrap(a: float) -> float:
-    """Wrap an angle to ``(-π, π]`` (matches ik_solver._wrap)."""
+    """Wrap an angle to ``[-π, π)`` — half-open at the POSITIVE end (an exact
+    +π maps to −π). Matches ik_solver._wrap."""
     return (a + math.pi) % (2.0 * math.pi) - math.pi
 
 

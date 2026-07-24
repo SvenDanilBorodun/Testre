@@ -50,3 +50,8 @@ CRITICAL_FIXES.md
 # the 10 layers, deleted after the feature ships. Deliberately untracked —
 # permanent invariants belong in CLAUDE.md, not here.
 docs/plans/
+
+# Per-arm edu6 servo calibration records (tools/edu6_provision.py output).
+# The Supabase edu6_arm_records table is the durable fleet store; these are
+# local bench artifacts and must not accumulate per-arm files in the repo.
+tools/edu6_records/

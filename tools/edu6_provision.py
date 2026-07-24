@@ -88,7 +88,13 @@ JOINT_LIMITS_RAD = (
 # Change the value here and re-run the bench provisioning to move the floor.
 ARM_MAX_TORQUE = 800        # arm joints must hold their own weight
 GRIPPER_MAX_TORQUE = 150    # ≈10 N pinch at the assumed 45 mm lever (R4 gate)
-PROTECTION_CURRENT = 150    # ×6.5 mA
+# Overcurrent trip (addr 28, ×6.5 mA). Bench decision 2026-07-24: keep the
+# factory ~2 A (310) rather than the plan's 975 mA — the STS3250 shoulder/
+# elbow (joints 2/3) draw more than 975 mA holding the arm's weight, so a
+# lower trip nuisance-fires (servo cuts torque → arm sags). The real force
+# safety is Max_Torque + the factory sustained-overload protection (addr
+# 34/35/36, untouched). Finalize from live Present_Current at rig gate R6.
+PROTECTION_CURRENT = 310    # ×6.5 mA ≈ 2015 mA (R6-tune)
 OVERLOAD_TORQUE = 80
 RETURN_DELAY = 0
 
@@ -211,13 +217,21 @@ def provision(bus, serial: str, signs, dry_run: bool = False) -> dict:
         present = fb.decode_sign_magnitude(present, 15)
         current_off = fb.decode_sign_magnitude(
             bus.read_u16(sid, fb.REG_HOMING_OFFSET), 11)
-        # Present = Actual − Homing_Offset  ⇒  new_off = actual − designed.
-        actual = present + current_off
+        # Present = Actual − Homing_Offset  ⇒  Actual = Present + Offset. The
+        # encoder is single-turn absolute (mod 4096), so this reconstruction
+        # MUST wrap: a jig pose whose raw tick sits near the 0/4095 boundary
+        # (bench-observed on J5, raw 23 with a +85 legacy offset) makes the
+        # naive sum exceed 4095 → a phantom > ±2047 offset that false-aborts.
+        # mod-4096 recovers the true raw; new_off = raw − designed is then in
+        # [−2048, 2047] and only raw == 0 (offset −2048) genuinely overflows.
+        actual = (present + current_off) % TICKS_PER_REV
         new_off = actual - designed_zero_tick(i)
         if abs(new_off) >= (1 << 11):
             raise SystemExit(
                 f'[FEHLER] Servo {sid}: Homing-Offset {new_off} außerhalb des '
-                'sign-magnitude-11-Bit-Bereichs — Jig-Position prüfen.')
+                'sign-magnitude-11-Bit-Bereichs — das Gelenk steht genau auf '
+                'der Encoder-Grenze (Rohwert 0); bitte minimal verdrehen und '
+                'erneut provisionieren.')
         if not dry_run and new_off != current_off:
             bus.write(sid, fb.REG_HOMING_OFFSET,
                       fb.le16(fb.encode_sign_magnitude(new_off, 11)))
@@ -356,7 +370,12 @@ def main() -> int:
         print('[FEHLER] --signs braucht 7 Werte aus {1,-1}.', file=sys.stderr)
         return 2
 
-    bus = fb.FeetechBus(args.port)
+    # EEPROM writes (Homing_Offset, limits, torque caps…) trigger real EEPROM
+    # programming (~tens of ms) once Lock=0, far longer than the driver's 20 ms
+    # RAM-reply budget — bench-observed 2026-07-24. A generous reply timeout is
+    # a MAX wait, not a fixed delay: fast reads/RAM writes still return the
+    # instant the reply lands, so this only affects the slow EEPROM commits.
+    bus = fb.FeetechBus(args.port, timeout_s=0.2)
     try:
         record = provision(bus, args.serial.strip(), signs,
                            dry_run=args.dry_run)

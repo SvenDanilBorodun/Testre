@@ -750,8 +750,11 @@ class _ProvFakeBus:
                          self.mem[sid][fb.REG_HOMING_OFFSET + 1]), 11)
 
     def _present_raw(self, sid):
-        # Present = Actual − Homing_Offset (correct-sign model).
-        return self.actual[sid] - self._homing_offset(sid)
+        # Present = (Actual − Homing_Offset) mod 4096 — the real servo clamps
+        # Present into [0, 4095] with Phase bit 4 cleared, so a raw near the
+        # 0/4095 boundary reads WRAPPED. Modelling this is what exercises the
+        # provisioning wrap fix (a jig pose whose raw ≈ 0 under a legacy +off).
+        return (self.actual[sid] - self._homing_offset(sid)) % 4096
 
     def read(self, sid, addr, length):
         if addr == fb.REG_PRESENT_POSITION:
@@ -843,6 +846,26 @@ class TestProvisionEndToEnd(unittest.TestCase):
         bus = _StaleBus({1: 2048})
         with self.assertRaises(SystemExit):
             self.prov._write_verify_u16(bus, 1, fb.REG_MAX_TORQUE_LIMIT, 800, 'x')
+
+    def test_offset_wrap_near_encoder_boundary(self):
+        # Bench 2026-07-24: J5 jigged with raw tick 23 (near the 0 boundary)
+        # under a legacy +85 offset reads Present 4034; the naive
+        # `present + current_off` = 4119 computes a +2071 offset that
+        # false-overflows. The mod-4096 fix must recover raw 23 → offset −2025
+        # and provision cleanly, then re-read the jig pose as the designed tick.
+        bus = _ProvFakeBus({sid: 23 for sid in range(1, 8)})
+        # seed the legacy +85 homing offset the bench arm actually carried
+        for sid in range(1, 8):
+            off = fb.encode_sign_magnitude(85, 11)
+            bus.mem[sid][fb.REG_HOMING_OFFSET] = off & 0xFF
+            bus.mem[sid][fb.REG_HOMING_OFFSET + 1] = (off >> 8) & 0xFF
+        # sanity: the pre-provision Present is the WRAPPED 4034, not 23−85
+        self.assertEqual(bus._present_raw(1), (23 - 85) % 4096)
+        record = self.prov.provision(bus, 'EDU6-WRAP', (1,) * 7)
+        by_id = {e['id']: e for e in record['servos']}
+        self.assertEqual(by_id[1]['homing_offset'], 23 - 2048)   # −2025
+        # After the write the still-jigged pose reads the designed centre tick.
+        self.assertEqual(bus._present_raw(1), 2048)
 
     def test_jig_postcondition_catches_offset_skew(self):
         # The new §8(a) guard: after the offset write, the still-jigged arm must

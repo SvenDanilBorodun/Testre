@@ -322,9 +322,10 @@ class TestProbeBusGate(unittest.TestCase):
         return pb.__func__ if isinstance(pb, staticmethod) else pb
 
     class _RegBus:
-        def __init__(self, windows=None, mode=0, alive=None):
+        def __init__(self, windows=None, mode=0, alive=None, models=None):
             self.mode = mode
             self.alive = set(alive if alive is not None else range(1, 8))
+            self.models = models or {}
             if windows is None:
                 windows = {
                     sid: fb.position_limit_window(
@@ -343,7 +344,7 @@ class TestProbeBusGate(unittest.TestCase):
 
         def read_u16(self, sid, addr):
             if addr == fb.REG_MODEL_NUMBER:
-                return fb.STS3215_MODEL_NUMBER
+                return self.models.get(sid, fb.STS3215_MODEL_NUMBER)
             if addr == fb.REG_MIN_POSITION_LIMIT:
                 return self.windows[sid][0]
             if addr == fb.REG_MAX_POSITION_LIMIT:
@@ -367,6 +368,17 @@ class TestProbeBusGate(unittest.TestCase):
         ok, msg = self._probe()(self._RegBus(mode=1))
         self.assertFalse(ok)
         self.assertIn('Betriebsmodus', msg)
+
+    def test_mixed_sts3250_joints_pass(self):
+        # Joints 2/3 = STS3250 (2825) by design — a provisioned mixed arm boots.
+        models = {2: fb.STS3250_MODEL_NUMBER, 3: fb.STS3250_MODEL_NUMBER}
+        ok, msg = self._probe()(self._RegBus(models=models))
+        self.assertTrue(ok, msg)
+
+    def test_wrong_model_refused_at_boot(self):
+        ok, msg = self._probe()(self._RegBus(models={4: 1234}))
+        self.assertFalse(ok)
+        self.assertIn('Servomodell', msg)
 
     def test_signs_drift_refused_naming_the_env_knob(self):
         # Provisioned with sign −1 on joint 2 (mirrored EEPROM window) while
@@ -708,18 +720,19 @@ class _ProvFakeBus:
     endurance-skip / commit-point pins can be asserted."""
 
     def __init__(self, actual_ticks, phase=0x10, return_delay=250, model=None,
-                 mode=0, response_level=1, torque=1):
+                 mode=0, response_level=1, torque=1, models=None):
         self.actual = dict(actual_ticks)
         self.writes = []          # (sid, addr, bytes) in call order
         self.closed = False
         self.mem = {}
-        model = fb.STS3215_MODEL_NUMBER if model is None else model
+        default_model = fb.STS3215_MODEL_NUMBER if model is None else model
         for sid in actual_ticks:
             m = bytearray(256)
             m[fb.REG_FIRMWARE_MAJOR] = 3
             m[fb.REG_FIRMWARE_MAJOR + 1] = 9
-            m[fb.REG_MODEL_NUMBER] = model & 0xFF
-            m[fb.REG_MODEL_NUMBER + 1] = (model >> 8) & 0xFF
+            sid_model = (models or {}).get(sid, default_model)
+            m[fb.REG_MODEL_NUMBER] = sid_model & 0xFF
+            m[fb.REG_MODEL_NUMBER + 1] = (sid_model >> 8) & 0xFF
             m[fb.REG_PHASE] = phase              # bit 4 set → provision clears it
             m[fb.REG_LOCK] = 1                   # protected → provision writes 0
             m[fb.REG_RETURN_DELAY] = return_delay
@@ -842,6 +855,27 @@ class TestProvisionEndToEnd(unittest.TestCase):
         with self.assertRaises(SystemExit) as ctx:
             self.prov.provision(bus, 'EDU6-0003', (1,) * 7)
         self.assertIn('Jig-Position', str(ctx.exception))
+
+    def test_mixed_sts3250_arm_records_actual_models(self):
+        # The edu6 arm mixes STS3215 (joints 1/4/5/6/7) and STS3250 (joints
+        # 2/3) BY DESIGN — provisioning must ACCEPT both and record each
+        # servo's ACTUAL model (bench-confirmed 2026-07-24), never hardcode 777.
+        models = {sid: (fb.STS3250_MODEL_NUMBER if sid in (2, 3)
+                        else fb.STS3215_MODEL_NUMBER) for sid in range(1, 8)}
+        bus = _ProvFakeBus({sid: 2048 for sid in range(1, 8)}, models=models)
+        record = self.prov.provision(bus, 'EDU6-MIX', (1,) * 7)
+        by_id = {e['id']: e for e in record['servos']}
+        self.assertEqual(by_id[2]['model_number'], fb.STS3250_MODEL_NUMBER)
+        self.assertEqual(by_id[2]['model_name'], 'STS3250')
+        self.assertEqual(by_id[3]['model_number'], fb.STS3250_MODEL_NUMBER)
+        self.assertEqual(by_id[1]['model_number'], fb.STS3215_MODEL_NUMBER)
+        self.assertEqual(by_id[7]['model_name'], 'STS3215')
+
+    def test_unknown_model_refused(self):
+        bus = _ProvFakeBus({sid: 2048 for sid in range(1, 8)}, model=1234)
+        with self.assertRaises(SystemExit) as ctx:
+            self.prov.provision(bus, 'EDU6-BAD', (1,) * 7)
+        self.assertIn('Modell 1234', str(ctx.exception))
 
     def test_wheel_mode_is_normalized_to_position(self):
         # Audit H2: a servo left in wheel mode passes every other check and
@@ -987,6 +1021,39 @@ class TestIdentifyArmFeetech(unittest.TestCase):
             def close(self):
                 pass
         self.assertEqual(self._with_bus(_GoodBus), 'edu6')
+
+    def test_mixed_sts3250_returns_edu6(self):
+        # Joints 2/3 report STS3250 (2825) by design — scan must still identify
+        # the arm as edu6, not reject it as a wrong device.
+        class _MixedBus:
+            def __init__(self, *a, **k):
+                pass
+
+            def ping(self, sid):
+                return True
+
+            def read_u16(self, sid, addr):
+                return (fb.STS3250_MODEL_NUMBER if sid in (2, 3)
+                        else fb.STS3215_MODEL_NUMBER)
+
+            def close(self):
+                pass
+        self.assertEqual(self._with_bus(_MixedBus), 'edu6')
+
+    def test_foreign_model_returns_unknown(self):
+        class _ForeignBus:
+            def __init__(self, *a, **k):
+                pass
+
+            def ping(self, sid):
+                return True
+
+            def read_u16(self, sid, addr):
+                return 1234    # neither STS3215 nor STS3250
+
+            def close(self):
+                pass
+        self.assertEqual(self._with_bus(_ForeignBus), 'unknown')
 
 
 class TestScanFeetechSilentMapping(unittest.TestCase):

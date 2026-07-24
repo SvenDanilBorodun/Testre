@@ -150,16 +150,26 @@ def _write_verify_u16(bus, sid, addr, value, label):
 
 
 def provision(bus, serial: str, signs, dry_run: bool = False) -> dict:
-    # 0. identity gate
+    # 0. identity gate. The edu6 arm mixes STS3215 (joints 1/4/5/6/7) and
+    # STS3250 (joints 2/3) BY DESIGN — accept the STS-series set and record
+    # each servo's ACTUAL model (never hardcode 777).
+    models: dict[int, int] = {}
     for sid in SERVO_IDS:
         if not bus.ping(sid):
             raise SystemExit(f'[FEHLER] Servo {sid} antwortet nicht — 12-V-'
                              'Netzteil / Verkabelung prüfen.')
         model = bus.read_u16(sid, fb.REG_MODEL_NUMBER)
-        if model != fb.STS3215_MODEL_NUMBER:
+        if model not in fb.STS_ACCEPTED_MODELS:
+            accepted = ', '.join(
+                f'{fb.STS_MODEL_NAMES[m]} ({m})'
+                for m in sorted(fb.STS_ACCEPTED_MODELS))
             raise SystemExit(f'[FEHLER] Servo {sid}: Modell {model}, erwartet '
-                             f'{fb.STS3215_MODEL_NUMBER} (STS3215).')
-    print('[OK] Alle 7 Servos gefunden (STS3215).')
+                             f'{accepted} — dieser Arm ist kein '
+                             'EduBotics 6-Achs.')
+        models[sid] = model
+    summary = ', '.join(f'{sid}:{fb.STS_MODEL_NAMES[models[sid]]}'
+                        for sid in SERVO_IDS)
+    print(f'[OK] Alle 7 Servos gefunden ({summary}).')
     if dry_run:
         print('[DRY-RUN] Keine EEPROM-Schreibzugriffe.')
 
@@ -267,7 +277,8 @@ def provision(bus, serial: str, signs, dry_run: bool = False) -> dict:
             'range_min': lo,
             'range_max': hi,
             'max_torque': max_torque,
-            'model_number': fb.STS3215_MODEL_NUMBER,
+            'model_number': models[sid],
+            'model_name': fb.STS_MODEL_NAMES[models[sid]],
             'firmware': f'{firmware[0]}.{firmware[1]}',
         })
         print(f'[OK] Servo {sid}: offset={new_off} limits=[{lo},{hi}] '

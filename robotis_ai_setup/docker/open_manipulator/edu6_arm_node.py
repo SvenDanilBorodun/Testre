@@ -6,8 +6,9 @@ The ROS contract this node satisfies (edu6 plan §3.2) is exactly what makes
 
 * pub ``/joint_states`` (name + position + velocity, all 7 joints per message,
   URDF-native names, 50 Hz) — ALSO the compose healthcheck gate, so the
-  publisher is created ONLY AFTER the boot probe succeeded (ping + Model 777
-  + the EEPROM provisioning fingerprint, see ``probe_bus``; the check is
+  publisher is created ONLY AFTER the boot probe succeeded (ping + accepted
+  STS model 777/2825 + the EEPROM provisioning fingerprint, see ``probe_bus``;
+  the check is
   topic-existence-only; an eagerly-created publisher would let the container
   go healthy over a dead or unprovisioned bus).
 * sub ``/leader/joint_trajectory`` — the command rail. QoS VOLATILE+RELIABLE
@@ -225,10 +226,11 @@ class Edu6ArmNode(Node):
     # ── bus bring-up (called BEFORE the node is constructed) ─────────────────
     @staticmethod
     def probe_bus(bus: fb.FeetechBus, logger=None) -> tuple[bool, str]:
-        """Ping IDs 1..7 + verify Model_Number 777 each. Returns
-        ``(ok, german_message)`` — the message distinguishes the single most
-        likely student error (USB enumerated but 12 V supply off: the port
-        exists, every ping times out) from a partial bus."""
+        """Ping IDs 1..7 + verify each is an accepted STS model (777 STS3215
+        on joints 1/4/5/6/7, 2825 STS3250 on joints 2/3 — mixed by design).
+        Returns ``(ok, german_message)`` — the message distinguishes the
+        single most likely student error (USB enumerated but 12 V supply off:
+        the port exists, every ping times out) from a partial bus."""
         alive = [sid for sid in SERVO_IDS if bus.ping(sid)]
         if not alive:
             return False, (
@@ -247,7 +249,7 @@ class Edu6ArmNode(Node):
             except fb.FeetechBusError:
                 wrong.append((sid, None))
                 continue
-            if model != fb.STS3215_MODEL_NUMBER:
+            if model not in fb.STS_ACCEPTED_MODELS:
                 wrong.append((sid, model))
         if wrong:
             return False, (

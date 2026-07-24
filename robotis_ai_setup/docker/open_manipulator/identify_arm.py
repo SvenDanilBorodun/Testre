@@ -6,9 +6,11 @@ behaviour, byte-identical):
 
 * ``dxl`` — ROBOTIS OMX arms. Servo IDs verified from xacro files
   (omx_l: leader 1-6; omx_f: follower 11-16), Dynamixel Protocol 2.0.
-* ``feetech`` — the edu6_studio Feetech STS3215 arm: broadcast-style ping of
-  IDs 1..7 + Model_Number == 777 (identity proven by the SERVOS answering,
-  not the CH343 bridge chip — both arm families enumerate as /dev/ttyACM*).
+* ``feetech`` — the edu6_studio Feetech arm: broadcast-style ping of IDs 1..7
+  + Model_Number in the accepted STS set (777 STS3215 on joints 1/4/5/6/7,
+  2825 STS3250 on joints 2/3 — mixed by design; identity proven by the SERVOS
+  answering, not the CH343 bridge chip — both arm families enumerate as
+  /dev/ttyACM*).
 
 Cross-probe (edu6 plan §5.4): when the EXPECTED protocol finds nothing, the
 OTHER one is probed and a distinct token returned ("omx_arm_found" /
@@ -73,7 +75,8 @@ EDU6_IDS = [1, 2, 3, 4, 5, 6, 7]
 
 
 def identify_feetech(port_path: str) -> str:
-    """edu6 probe: every servo 1..7 answers AND reads Model_Number 777."""
+    """edu6 probe: every servo 1..7 answers AND reads an accepted STS model
+    (777 STS3215 / 2825 STS3250 — the arm mixes both by design)."""
     try:
         import feetech_bus as fb
     except ImportError:
@@ -93,7 +96,7 @@ def identify_feetech(port_path: str) -> str:
             return "feetech_silent" if not alive else f"partial:{len(alive)}"
         for sid in EDU6_IDS:
             try:
-                if bus.read_u16(sid, fb.REG_MODEL_NUMBER) != fb.STS3215_MODEL_NUMBER:
+                if bus.read_u16(sid, fb.REG_MODEL_NUMBER) not in fb.STS_ACCEPTED_MODELS:
                     return "unknown"
             except fb.FeetechBusError:
                 return "unknown"

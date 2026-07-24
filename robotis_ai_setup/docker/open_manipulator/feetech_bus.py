@@ -35,7 +35,7 @@ from typing import Optional
 
 # ── register map (STS3215; EEPROM unless noted) ──────────────────────────────
 REG_FIRMWARE_MAJOR = 0        # R, firmware major.minor at addr 0/1
-REG_MODEL_NUMBER = 3          # R, 2 bytes — 777 identifies an STS3215
+REG_MODEL_NUMBER = 3          # R, 2 bytes — 777 = STS3215, 2825 = STS3250
 REG_ID = 5
 REG_BAUD_RATE = 6             # 0 = 1 Mbps (factory default)
 REG_RETURN_DELAY = 7          # status-return delay time (provisioned to 0)
@@ -73,6 +73,18 @@ REG_STATUS = 65               # R, 1 byte (error flags)
 REG_PRESENT_CURRENT = 69      # R, 2 bytes, ×6.5 mA
 
 STS3215_MODEL_NUMBER = 777
+STS3250_MODEL_NUMBER = 2825
+# The edu6 arm mixes STS servo models BY DESIGN: joints 1/4/5/6/7 are STS3215
+# (Model 777) and the high-load shoulder + elbow (joints 2/3) are STS3250
+# (Model 2825, bench-confirmed 2026-07-24). Both are STS-series: identical
+# Protocol-1.0 framing, little-endian words, sign-magnitude bits, and 4096-tick
+# single-turn resolution — so every register/tick math in this module is
+# model-independent. Identity checks (provision, boot probe, scan) accept the
+# SET; the exact per-servo model is recorded for traceability. A servo whose
+# model is in NEITHER entry is a genuinely wrong device (or an OMX Dynamixel
+# answering garbage) and is refused. Widen this set only for a real new servo.
+STS_ACCEPTED_MODELS = frozenset({STS3215_MODEL_NUMBER, STS3250_MODEL_NUMBER})
+STS_MODEL_NAMES = {STS3215_MODEL_NUMBER: 'STS3215', STS3250_MODEL_NUMBER: 'STS3250'}
 BROADCAST_ID = 0xFE
 
 # Servo position geometry (single-turn absolute encoder).

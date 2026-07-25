@@ -434,6 +434,25 @@ class IKSolver:
         (numerically ``x + 0.01125``), never ``atan2(y, x)``."""
         return math.atan2(float(y), float(x) - _J1_AXIS_X)
 
+    def roll_from_joints(self, joints) -> Optional[float]:
+        """INVERSE of the ``roll`` → tool-roll-joint mapping: the ``roll`` to
+        hand :meth:`solve` so the wrist comes back where ``joints`` has it.
+
+        Exists so a caller meaning "move the tool, KEEP the current wrist" can
+        never pass the joint value straight into ``roll=``. Here the two happen
+        to be the same number (``theta5 = _wrap(roll)``), but they are NOT on
+        every arm — the edu6 solver maps ``q6 = fold(wrap(π − roll))``, so
+        passing the joint value there mirrored the wrist on every Cartesian jog
+        (found 2026-07-25). Every "keep the wrist" call site must go through
+        this method; ``test_roll_from_joints_round_trips`` pins both solvers.
+
+        ``None`` for a short/non-finite joint vector."""
+        try:
+            value = float(joints[4])
+        except (TypeError, ValueError, IndexError, KeyError):
+            return None
+        return _wrap(value) if math.isfinite(value) else None
+
 
 def _wrap(a: float) -> float:
     """Wrap an angle to (-pi, pi]."""

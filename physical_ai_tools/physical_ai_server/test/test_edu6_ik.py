@@ -11,6 +11,7 @@ itself.
 from __future__ import annotations
 
 import math
+import random
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -325,6 +326,158 @@ def test_roll_contract_aligns_jaws_with_tag_yaw():
         diff = (chi - tag) % math.pi
         diff = min(diff, math.pi - diff)
         assert diff < 1e-9, f'jaw mis-aligned by {diff} at tag={tag}'
+
+
+def test_j6_jaw_fold_bounds_the_wrist_to_the_pm90_window():
+    """The fold is a jaw-symmetry CHOICE, not a limit — joint6 keeps its full
+    ±180° range everywhere else. Because the jaws are symmetric about the roll
+    axis, q6 and q6∓π are the same physical grasp, so folding into [−90°, +90°]
+    costs nothing and buys two things: the worst wrist swing between two grasps
+    halves (build_segment interpolates a straight joint-space delta with NO
+    shortest-path unwrapping, so +179°→−179° would drive 358° the long way), and
+    autonomous grasping never parks joint6 on our ±180° tick↔angle map edge.
+
+    Sweeping the tag yaw over the FULL circle: every q6 stays inside ±90°, and
+    the fold must not change the grasp — the jaw azimuth still ≡ tag_yaw (mod π,
+    parallel-jaw symmetry) and the TCP, which lies on the roll axis, must not
+    move."""
+    ik = _ik()
+    x, y = 0.15, 0.0
+    base = ik.base_yaw(x, y)
+    seen_fold = False
+    for i in range(721):                      # full 360° sweep, 0.5° steps
+        tag = -math.pi + i * (2.0 * math.pi / 720.0)
+        roll = base - tag + math.pi / 2.0
+        q = ik.solve((x, y, 0.02), roll=roll)
+        assert q is not None, tag
+        assert abs(q[5]) <= math.pi / 2.0 + 1e-9, (
+            f'q6={math.degrees(q[5]):.2f} deg outside the ±90° jaw window '
+            f'at tag={tag:.3f}')
+        # Unfolded q6 would be wrap(pi - roll) = wrap(tag - base + pi/2); when
+        # that leaves the window the fold MUST have moved it by exactly ±pi —
+        # sanity that the sweep exercises the fold, not just the safe middle.
+        raw6 = (tag - base + math.pi / 2.0 + math.pi) % (2.0 * math.pi) - math.pi
+        if abs(raw6) > math.pi / 2.0:
+            seen_fold = True
+            assert abs(abs(q[5] - raw6) - math.pi) < 1e-9, (
+                f'fold moved q6 by something other than pi at tag={tag:.3f}')
+        r_world, tcp = ik.fk(q)
+        jaw = r_world @ np.array([1.0, 0.0, 0.0])
+        chi = math.atan2(jaw[1], jaw[0])
+        d = (chi - tag) % math.pi
+        d = min(d, math.pi - d)
+        assert d < 1e-9, f'fold broke jaw alignment (chi vs tag) at tag={tag:.3f}'
+        assert abs(tcp[0] - x) < 1e-9 and abs(tcp[1] - y) < 1e-9, (
+            f'fold moved the TCP at tag={tag:.3f}')
+    assert seen_fold, 'sweep never exercised the fold — test is not testing it'
+
+
+def test_roll_from_joints_round_trips_so_keep_the_wrist_really_keeps_it():
+    """REGRESSION GUARD (2026-07-25). ``roll`` and the roll JOINT are the same
+    number on the OMX (``theta5 = roll``) but NOT here (``q6 = fold(wrap(π −
+    roll))``). Every "move the tool, KEEP the current wrist" call site used to
+    pass the joint value straight into ``roll=``, which on this arm returned
+    ``−q6`` — the Cartesian jog MIRRORED the wrist on every step (up to 178°,
+    rotating a held object with it).
+
+    The contract that makes those call sites correct: feeding
+    ``roll_from_joints(q)`` back into ``solve`` must reproduce q's wrist."""
+    ik = _ik()
+    x, y, z = 0.15, 0.0, 0.02
+    for deg in range(-90, 91, 5):                 # inside the jaw-fold window
+        q = list(_ik().solve((x, y, z), roll=0.0))
+        q[5] = math.radians(deg)
+        back = ik.solve((x, y, z), roll=ik.roll_from_joints(q))
+        assert back is not None, deg
+        assert abs(back[5] - q[5]) < 1e-9, (
+            f'roll round-trip moved the wrist: {deg}° -> '
+            f'{math.degrees(back[5]):.3f}°')
+    # Outside the fold window the solver returns the jaw-IDENTICAL twin — a
+    # different joint value but the SAME physical grasp. Call sites that need
+    # the joint value itself pin it after solving (documented on the method).
+    for deg in (120.0, -150.0, 179.0):
+        q = list(_ik().solve((x, y, z), roll=0.0))
+        q[5] = math.radians(deg)
+        back = ik.solve((x, y, z), roll=ik.roll_from_joints(q))
+        assert back is not None, deg
+        d = abs(back[5] - q[5]) % math.pi
+        assert min(d, math.pi - d) < 1e-9, (
+            f'roll round-trip left the jaw line at {deg}°')
+
+
+def test_j6_fold_ignores_any_seed_and_never_leaves_the_pm90_window():
+    """REGRESSION GUARD (2026-07-25). A seed-relative twin choice was tried and
+    rejected: because the seed handed in is ``ctx.last_arm_joints`` — the
+    PREVIOUS grasp's own answer — the rule feeds its output back in and drifts
+    to exactly ±180°, the tick↔angle map edge that the fold exists to avoid
+    (two grasps from rest suffice). It did not even buy its stated benefit: the
+    worst swing was 178.9° either way; only the mean moved (60°→49°).
+
+    So the fold reference is fixed at 0 and ``solve()``'s documented contract
+    holds — ``seed`` never changes the returned solution. The seeds below
+    deliberately include values OUTSIDE ±90°, which is exactly what the old
+    seed-relative test never tried and therefore could not catch."""
+    ik = _ik()
+    x, y = 0.15, 0.0
+    base = ik.base_yaw(x, y)
+    hostile = (-math.pi + 1e-9, math.radians(-179.0), math.radians(-140.0),
+               -math.pi / 2.0, -0.3, 0.0, 1.0, math.pi / 2.0,
+               math.radians(140.0), math.radians(179.0), math.pi)
+    for i in range(361):
+        tag = -math.pi + i * (2.0 * math.pi / 360.0)
+        roll = base - tag + math.pi / 2.0
+        seedless = ik.solve((x, y, 0.02), roll=roll)
+        assert seedless is not None, tag
+        assert abs(seedless[5]) <= math.pi / 2.0 + 1e-9
+        for ref in hostile:
+            q = ik.solve((x, y, 0.02), roll=roll, seed=[0.0] * 5 + [ref])
+            assert q is not None, (tag, ref)
+            # the seed must not move the answer AT ALL
+            assert q == seedless, (
+                f'seed {math.degrees(ref):.1f}° changed the solution at '
+                f'tag={math.degrees(tag):.1f}°: q6={math.degrees(q[5]):.2f}° '
+                f'vs seedless {math.degrees(seedless[5]):.2f}°')
+            assert abs(q[5]) <= math.pi / 2.0 + 1e-9, (
+                f'q6={math.degrees(q[5]):.2f}° escaped the ±90° window under '
+                f'seed {math.degrees(ref):.1f}°')
+
+
+def test_j6_never_drifts_toward_the_map_edge_over_chained_grasps():
+    """The failure mode the rejected seed-relative fold had: each grasp seeded
+    from the last, walking joint6 out to the ±180° map edge. Chaining real
+    solves must leave |q6| inside the fold window forever — parking joint6 at
+    ±180° is what lets a hand-nudge on a limp arm make the NEXT boot read that
+    joint 360° wrong, undetectably (joint4/joint6 keep full-circle EEPROM
+    windows, so the driver's boot plausibility check is a no-op there)."""
+    ik = _ik()
+    x, y = 0.15, 0.0
+    base = ik.base_yaw(x, y)
+    rng = random.Random(20260725)
+    seed = None
+    worst = 0.0
+    for _ in range(400):
+        tag = rng.uniform(-math.pi, math.pi)
+        q = ik.solve((x, y, 0.02), roll=base - tag + math.pi / 2.0, seed=seed)
+        assert q is not None
+        worst = max(worst, abs(q[5]))
+        seed = q                       # exactly what ctx.last_arm_joints does
+    assert worst <= math.pi / 2.0 + 1e-9, (
+        f'joint6 drifted to {math.degrees(worst):.2f}° over chained grasps')
+
+
+def test_j6_fold_never_blocks_a_tag_orientation():
+    """The fold must not cost REACH: whether a cube is graspable depends only on
+    WHERE it lies, never on how it is turned. Over a spread of table positions,
+    a position must solve for either every tag yaw or none of them."""
+    ik = _ik()
+    for x, y in [(0.10, 0.0), (0.15, 0.0), (0.21, 0.0), (0.12, 0.08),
+                 (0.14, -0.10), (0.05, 0.0), (0.30, 0.0)]:
+        base = ik.base_yaw(x, y)
+        ok = [ik.solve((x, y, 0.02), roll=base - math.radians(t) + math.pi / 2.0)
+              is not None for t in range(-180, 180, 3)]
+        assert all(ok) or not any(ok), (
+            f'({x}, {y}) solves for only SOME tag yaws '
+            f'({sum(ok)}/{len(ok)}) — orientation must never gate reach')
 
 
 def test_vertical_solutions_use_the_relieved_j5_side():

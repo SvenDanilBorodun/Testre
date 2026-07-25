@@ -321,9 +321,11 @@ function StudentApp() {
     { key: PageType.RECORD, label: 'Aufnahme', Icon: MdVideocam, onClick: handleRecordPageNavigation, hardwareOnly: true, jetsonIncompatible: true, capabilityKey: 'recordable' },
     { key: PageType.TRAINING, label: 'Training', Icon: GoGraph, onClick: handleTrainingPageNavigation, capabilityKey: 'trainable' },
     // Inferenz carries NO capabilityKey — it is ALWAYS visible (documented
-    // invariant): both shipped profiles hardcode inferable=true, and hiding it
-    // would also hide the classroom-Jetson claim UI that a cloud/follower-only
-    // student needs. The capability filter must never gate it.
+    // invariant): hiding it would also hide the classroom-Jetson claim UI that a
+    // cloud/follower-only student needs. edu6_studio is inferable=false, yet the
+    // tab MUST stay so that student can still claim a classroom Jetson; its local
+    // inference start is refused downstream (no-GPU gate), not by this nav filter.
+    // The capability filter must never gate it.
     { key: PageType.INFERENCE, label: 'Inferenz', Icon: MdMemory, onClick: handleInferencePageNavigation },
     { key: PageType.EDIT_DATASET, label: 'Daten', Icon: MdWidgets, onClick: handleEditDatasetPageNavigation, sep: true, jetsonIncompatible: true, capabilityKey: 'editable' },
     { key: PageType.WORKSHOP, label: 'Roboter Studio', Icon: MdConstruction, onClick: handleWorkshopPageNavigation, hardwareOnly: true, jetsonIncompatible: true, capabilityKey: 'roboter_studio' },

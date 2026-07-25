@@ -109,6 +109,63 @@ _EDU6_JOINT_LIMITS_RAD: list[tuple[float, float]] = [
     (-3.1416, 3.1416),     # joint6
 ]
 
+# joint6 jaw-symmetry fold (2026-07-25; rationale corrected 2026-07-25 — the
+# original "the reading flickers 4095↔0 so the servo slams the motor" premise is
+# DISPROVEN, see below. The fold survives on different evidence, not that one).
+#
+# This is NOT a limit. joint6 keeps its full ±180° range in servo EEPROM, in jog
+# and in replay. The gripper is a parallel jaw pair symmetric about this very
+# roll axis (the CAD meshes map onto each other under a 180° roll to 0.01 mm —
+# the OMX's do NOT, a fold there would shift its grasp 3.3 mm), so q6 and q6∓π
+# are the SAME physical grasp. The fold merely picks whichever of the two
+# identical options sits nearer the middle. Verified over the full 360° of tag
+# yaw: 0 targets lost, max |q6| exactly 90.0000°, jaw azimuth preserved mod π,
+# TCP shift 4e-12 mm (it lies on the roll axis).
+#
+# What the physical encoder actually does (bench-proven, commit 95848e72: J5 raw
+# 23 under a +85 offset READ Present 4034 = (23−85) mod 4096): the firmware
+# wraps, so the magnet seam never reaches our software and no full-revolution
+# jump can appear in /joint_states. The only discontinuity our code sees is our
+# OWN tick↔angle map, whose edge sits at exactly ±180° from each joint's zero
+# regardless of Homing_Offset. Two consequences make the fold worth keeping:
+#
+# 1. trajectory_builder.build_segment interpolates a STRAIGHT joint-space delta
+#    with no shortest-path unwrapping. Without the fold, two cubes 2° apart in
+#    yaw can give q6 = +179° and −179° and drive the wrist 358° the long way —
+#    which the velocity floor then STRETCHES into ~3.6 s of spinning. The fold
+#    halves the worst swing between any two grasps to 178°.
+# 2. Autonomous grasping then never parks joint6 at ±180°, the one position
+#    where the next boot can read it 360° wrong. This matters because the limit
+#    trim was deliberately NOT taken (2026-07-25): joint4/joint6 keep full-circle
+#    EEPROM windows, so a wrapped reading on them is undetectable at boot. If we
+#    cannot detect it, the next best thing is never creating it.
+#
+# Which twin is chosen: ALWAYS the one nearest ZERO, i.e. the plain
+# [−90°, +90°] window. The reference is deliberately NOT the current wrist
+# angle, even though ``motion._solve_or_raise`` does pass ``ctx.last_arm_joints``
+# here — a seed-relative choice was implemented and MEASURED on 2026-07-25 and
+# rejected, because the seed is the PREVIOUS grasp's own answer, so the rule
+# feeds its output back in and drifts:
+#
+#     grasp 1 (from rest, ref 0°)  twins −90° / +90°  → −90°
+#     grasp 2 (ref now −90°)       twins −180° /  0°  → −180°   ← the map edge
+#
+# Two grasps reach exactly ±180.0°, voiding consequence 2 above — and it does
+# not even buy what it promised. Measured over 20 000 chained grasps:
+#
+#     fold, nearest-zero (this code)  max |q6|  90.0°  worst swing 178.9°
+#     fold, nearest-seed (rejected)   max |q6| 180.0°  worst swing 178.9°
+#     no fold at all                  max |q6| 180.0°  worst swing 358°
+#
+# The worst swing is identical either way; only the MEAN improved (60°→49°),
+# which is not worth trading a bounded joint for. Keeping the reference at 0
+# also keeps solve()'s documented contract true — ``seed`` does not change the
+# returned solution.
+#
+# Residual: JOG and REPLAY bypass this solver and can still reach ±180°
+# (known-accepted with the keep-±180°-limits decision) — re-tested at R6/R10.
+_J6_JAW_FOLD_RAD = math.pi / 2.0
+
 
 def _wrap(a: float) -> float:
     """Wrap an angle to (-pi, pi]."""
@@ -208,8 +265,9 @@ class Edu6IKSolver:
 
     Public surface mirrors the OMX :class:`IKSolver` (``solve`` /
     ``solve_quat`` / ``fk`` / ``link_points`` / ``in_workspace`` /
-    ``base_yaw`` / ``num_joints`` / ``backend`` / ``joint_limits`` /
-    ``base_axis_x``) so ``ArmProfile.build_ik`` swaps it in transparently.
+    ``base_yaw`` / ``roll_from_joints`` / ``num_joints`` / ``backend`` /
+    ``joint_limits`` / ``base_axis_x``) so ``ArmProfile.build_ik`` swaps it in
+    transparently.
     """
 
     def __init__(self, urdf_string: Optional[str] = None) -> None:
@@ -361,7 +419,8 @@ class Edu6IKSolver:
             # strict-vertical wrist: q4 = 0, q5 = π − β = π/2 − q2 − q3.
             theta5 = math.pi - beta
             theta4 = 0.0
-            theta6 = _wrap(math.pi - roll)
+            # Jaw-identical half-turn choice (see the _J6_JAW_FOLD_RAD note).
+            theta6 = self._fold_jaw(_wrap(math.pi - roll))
             joints = [theta1, theta2, theta3, theta4, theta5, theta6]
             if not all(math.isfinite(v) for v in joints):
                 continue
@@ -387,6 +446,23 @@ class Edu6IKSolver:
         call-site-compat contract as the OMX solver."""
         return self.solve(target_xyz, seed=seed, free_yaw=free_yaw)
 
+    def _fold_jaw(self, theta6: float) -> float:
+        """Choose between the jaw-identical wrist angles ``theta6`` and
+        ``theta6 ∓ π`` — all the SAME physical grasp (see
+        :data:`_J6_JAW_FOLD_RAD`) — taking the one nearest ZERO, i.e. folding
+        into the [−90°, +90°] window.
+
+        Takes NO seed on purpose: a seed-relative choice drifts to ±180° within
+        two grasps (measured, see the note above). Twins outside joint6's limits
+        are dropped, and ``min`` keeps the FIRST minimum, so an exact tie
+        (|theta6| == π/2) leaves ``theta6`` unfolded."""
+        lo, hi = self._joint_limits[5]
+        candidates = [theta6]
+        for alt in (theta6 - math.pi, theta6 + math.pi):
+            if lo - 1e-9 <= alt <= hi + 1e-9:
+                candidates.append(alt)
+        return min(candidates, key=abs)
+
     # ── limits / workspace / bearing ─────────────────────────────────────────
     def _within_limits(self, joints, tol: float = 1e-6) -> bool:
         for i in range(min(len(joints), len(self._joint_limits))):
@@ -403,3 +479,30 @@ class Edu6IKSolver:
         ``theta1`` :meth:`solve` computes (bearing from the joint-1 axis at
         world x = +0.021295, never from the origin)."""
         return math.atan2(float(y), float(x) - BASE_AXIS_X_WORLD)
+
+    def roll_from_joints(self, joints) -> Optional[float]:
+        """INVERSE of the ``roll`` → joint6 mapping: the ``roll`` to hand
+        :meth:`solve` so the wrist comes back where ``joints`` has it.
+
+        ``solve`` maps ``q6 = fold(wrap(π − roll))``, so the roll argument and
+        the joint value are DIFFERENT NUMBERS on this arm — unlike the OMX,
+        where ``theta5 = roll`` is the identity. A "move the tool, KEEP the
+        current wrist" caller that passed ``joints[5]`` straight into ``roll=``
+        therefore got ``−q6`` back and MIRRORED the wrist on every Cartesian
+        jog step (up to 178°, and it rotated the held object). Found
+        2026-07-25; both call sites now go through this method.
+
+        Round-trip is exact inside the jaw-fold window (|q6| ≤ 90°); outside it
+        ``solve`` returns the jaw-IDENTICAL twin, i.e. the same physical grasp
+        at the mirrored joint angle. Call sites that must preserve the joint
+        value itself (the Cartesian jog, where a student may have jogged joint6
+        past 90°) additionally pin the joint after solving — free here, because
+        the fingertip TCP lies exactly ON the joint6 axis, so joint6 does not
+        move the tool at all.
+
+        ``None`` for a short/non-finite joint vector."""
+        try:
+            value = float(joints[5])
+        except (TypeError, ValueError, IndexError, KeyError):
+            return None
+        return _wrap(math.pi - value) if math.isfinite(value) else None

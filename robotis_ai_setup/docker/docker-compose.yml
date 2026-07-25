@@ -52,6 +52,13 @@ services:
       # knob for rig gate R6; empty = the baked default (all +1). Read by
       # edu6_arm_node.py.
       - EDUBOTICS_EDU6_JOINT_SIGNS=${EDUBOTICS_EDU6_JOINT_SIGNS:-}
+      # edu6 boot plausibility band, in encoder ticks (empty = 400 ≈ 35°). The
+      # boot probe refuses a joint reading this far outside its designed EEPROM
+      # window — it hunts a hand-turned 360° wrap, which misses by >=795 ticks
+      # on every detectable joint, so the band has 2x headroom. Bench knob for
+      # rig gate R9 (torque-off collapse measures where a LIMP arm rests, i.e.
+      # the false-alarm side); >= 4096 disables. Read by edu6_arm_node.py.
+      - EDUBOTICS_EDU6_BOOT_POS_TOL_TICKS=${EDUBOTICS_EDU6_BOOT_POS_TOL_TICKS:-}
       - CAMERA_DEVICE_1=${CAMERA_DEVICE_1:-}
       - CAMERA_NAME_1=${CAMERA_NAME_1:-gripper}
       - CAMERA_DEVICE_2=${CAMERA_DEVICE_2:-}

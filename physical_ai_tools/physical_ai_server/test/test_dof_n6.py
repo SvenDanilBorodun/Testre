@@ -396,6 +396,104 @@ def test_communicator_reorders_7_joint_message_for_edu6_order():
     assert c_partial.get_latest_follower_joints() is None
 
 
+def test_jog_cartesian_keeps_the_wrist_with_the_REAL_edu6_solver():
+    """REGRESSION GUARD (2026-07-25) — and a deliberate departure from the
+    stub-based n=6 tests around it.
+
+    ``_FakeIK6`` exists to prove WIDTH plumbing; it has no ``solve()`` at all,
+    so nothing here ever exercised a real edu6 CONVENTION. That gap hid a live
+    bug: the Cartesian jog passed the roll JOINT value into ``solve(roll=...)``,
+    which is the identity on the OMX (``theta5 = roll``) but not on edu6
+    (``q6 = fold(wrap(π − roll))``). Every X/Y/Z jog step MIRRORED the wrist —
+    up to 178°, rotating a held object with it.
+
+    So this one drives the ast-extracted jog through the REAL ``Edu6IKSolver``
+    and asserts the contract a Cartesian jog actually owes the student: the tool
+    moves by the requested delta, and the wrist does not move at all."""
+    import ast as _ast
+    import textwrap
+    import numpy as np
+    from physical_ai_server.workflow.edu6_ik import Edu6IKSolver
+
+    src_path = (Path(__file__).resolve().parents[1]
+                / 'physical_ai_server' / 'physical_ai_server.py')
+    source = src_path.read_text(encoding='utf-8')
+    tree = _ast.parse(source)
+    ns: dict = {}
+    for node in _ast.walk(tree):
+        if isinstance(node, _ast.FunctionDef) and node.name in (
+                '_compute_jog_target', '_jog_solve_floor'):
+            exec(compile(textwrap.dedent(_ast.get_source_segment(source, node)),
+                         str(src_path), 'exec'), ns)  # noqa: S102
+
+    real_ik = Edu6IKSolver()
+
+    class _P:
+        num_arm_joints = N6
+        roll_joint_index = 5
+        gripper_open_rad = 1.75
+        gripper_closed_rad = 0.0
+        home_joints_rad = _EDU6_HOME
+
+    class _Stub:
+        _arm_profile = _P()
+
+        def _build_ik_solver(self):
+            return real_ik
+
+        def _load_workflow_calibration(self):
+            return {'z_table': 0.0}
+
+    stub = _Stub()
+    stub._compute_jog_target = types.MethodType(ns['_compute_jog_target'], stub)
+    stub._jog_solve_floor = types.MethodType(ns['_jog_solve_floor'], stub)
+
+    def jaw_azimuth(arm_q):
+        r_world, _t = real_ik.fk(arm_q)
+        v = r_world @ np.array([1.0, 0.0, 0.0])
+        return math.atan2(v[1], v[0])
+
+    # Start from a real grasp pose with a NON-ZERO wrist (zero would hide a
+    # mirror: −0 == +0), including values outside the ±90° jaw-fold window,
+    # which the student can reach with the joint-6 jog.
+    for roll_deg in (50.0, -35.0, 120.0, -150.0):
+        start = list(real_ik.solve((0.15, 0.0, 0.02),
+                                   roll=math.radians(roll_deg)))
+        start[5] = math.radians(roll_deg)      # a jogged wrist, verbatim
+        live = start + [1.0]                   # 7-wide follower readback
+        _R, t0 = real_ik.fk(start)
+        az0 = jaw_azimuth(start)
+
+        for axis, delta in ((0, 0.01), (1, 0.01), (2, 0.01)):
+            req = types.SimpleNamespace(mode='cartesian', index=axis,
+                                        delta=delta, target_x=0.0,
+                                        target_y=0.0, target_z=0.0)
+            q, world = stub._compute_jog_target('cartesian', req, live)
+            assert len(q) == 7
+
+            # 1. the wrist must not move — the whole point of a Cartesian jog
+            assert q[5] == pytest.approx(start[5], abs=1e-9), (
+                f'wrist moved {math.degrees(q[5] - start[5]):.1f}° on a '
+                f'{"xyz"[axis]} jog from q6={roll_deg}°')
+            # 2. the jaw must rotate EXACTLY with the base and not one degree
+            #    more. A Y-jog re-aims joint1, and with the wrist joint held the
+            #    tool swings with the arm (χ = q1 + q6 − π/2) — that is the OMX
+            #    behaviour this jog mirrors, not a bug. So the sharp assertion
+            #    is Δχ == Δq1: the wrist contributed NOTHING. Under the old bug
+            #    q6 flipped sign, adding −2·q6 on top of Δq1.
+            d = abs((jaw_azimuth(q[:6]) - az0) - (q[0] - start[0])) % math.pi
+            assert min(d, math.pi - d) < 1e-9, (
+                'the wrist contributed rotation of its own')
+            # 3. ...and the jog must still actually move the tool
+            _R2, t1 = real_ik.fk(q[:6])
+            moved = np.asarray(t1) - np.asarray(t0)
+            assert moved[axis] == pytest.approx(delta, abs=1e-6), (
+                f'{"xyz"[axis]} step not achieved: {moved}')
+            for other in (0, 1, 2):
+                if other != axis:
+                    assert abs(moved[other]) < 1e-6, 'jog leaked into another axis'
+
+
 def test_jog_compute_target_n6_profile():
     """The ast-extracted _compute_jog_target with a 6-arm-joint profile stub:
     gripper index 6, roll joint index 5, profile gripper band."""

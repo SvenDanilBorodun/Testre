@@ -245,6 +245,26 @@ def _roll_idx(ctx) -> int:
         return _n(ctx) - 1
 
 
+def _roll_arg(ctx, joints) -> float:
+    """The ``roll=`` value that reproduces ``joints``' CURRENT wrist angle.
+
+    NEVER pass ``joints[_roll_idx(ctx)]`` into ``roll=`` directly. The roll
+    argument and the roll JOINT are the same number on the OMX
+    (``theta5 = roll``) but NOT on edu6 (``q6 = fold(wrap(π − roll))``), so the
+    shortcut mirrored the edu6 wrist by up to 178° on every Cartesian move
+    (found 2026-07-25). The solver owns the conversion; this is just the
+    profile-tolerant lookup, falling back to the old behaviour only for a
+    solver/test-double that predates the method (OMX-identical there)."""
+    idx = _roll_idx(ctx)
+    ik = getattr(ctx, 'ik', None)
+    convert = getattr(ik, 'roll_from_joints', None)
+    if convert is not None:
+        value = convert(joints)
+        if value is not None:
+            return float(value)
+    return float(joints[idx])
+
+
 def _home_joints(ctx) -> list[float]:
     """The profile HOME arm pose (length ``_n(ctx)``); OMX constant fallback."""
     pose = getattr(ctx, 'home_joints_rad', None)
@@ -954,7 +974,7 @@ def _held_threshold_rad(ctx) -> float:
 
 def check_grasp_held(ctx) -> bool | None:
     """Decide HELD vs EMPTY after a gripper close, from the achieved gripper
-    angle (follower joint index 5).
+    angle (follower joint index ``_n(ctx)`` — 5 on the OMX, 6 on edu6).
 
     Returns ``True`` (object held), ``False`` (empty close — the grasp missed),
     or ``None`` when the follower-joint readback is unavailable (the caller then
@@ -1216,8 +1236,11 @@ def lift(ctx, args: dict[str, Any]) -> None:
     q_end = arm_q + [cur[_n(ctx)]]
     # TRANSIT (straight-up lift) — route around any no-go zone. Optional per-move
     # „mit Tempo" override; None → workflow-global tempo.
-    safe_move(ctx, cur, q_end, DEFAULT_APPROACH_DURATION_S, roll=cur[_roll_idx(ctx)],
-              tempo=_move_tempo(args))
+    # roll= must be the SOLVER's roll argument, not the joint value (see
+    # _roll_arg): a no-go-zone reroute re-solves its via-points with it, and on
+    # edu6 the raw joint value would mirror the wrist at every one of them.
+    safe_move(ctx, cur, q_end, DEFAULT_APPROACH_DURATION_S,
+              roll=_roll_arg(ctx, cur), tempo=_move_tempo(args))
     ctx.last_arm_joints = arm_q
     ctx.last_full_joints = q_end
 

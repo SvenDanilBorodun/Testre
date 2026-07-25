@@ -3208,9 +3208,30 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 target[idx] += delta
                 # A downward Z step (idx 2, delta < 0) needs a known table floor —
                 # refuse it on an uncalibrated rig. X/Y and an upward Z are always safe.
+                #
+                # roll= is the SOLVER's roll argument, NEVER the raw joint value:
+                # the two are the same number on the OMX (theta5 = roll) but not
+                # on edu6 (q6 = fold(wrap(π − roll))), where passing the joint
+                # mirrored the wrist on EVERY Cartesian step — up to 178°, and it
+                # rotated a held object (found 2026-07-25).
+                jog_roll = arm[roll_idx]
+                _convert = getattr(ik, 'roll_from_joints', None)
+                if _convert is not None:
+                    _converted = _convert(arm)
+                    if _converted is not None:
+                        jog_roll = _converted
                 arm_q = self._jog_solve_floor(
-                    ik, (target[0], target[1], target[2]), roll=arm[roll_idx],
+                    ik, (target[0], target[1], target[2]), roll=jog_roll,
                     require_floor=(idx == 2 and delta < 0.0))
+                # Pin the wrist EXACTLY. Inside the jaw-fold window the solve
+                # already returns it; outside (the student jogged joint6 past
+                # 90°) it returns the jaw-identical twin, which is the same
+                # grasp but a 180° joint swing. Free: the fingertip TCP lies on
+                # the roll axis (edu6 exactly, OMX within ~1.6 mm — the same
+                # licence motion.py's lift already takes), so this cannot move
+                # the tool off the solved Cartesian target.
+                arm_q = list(arm_q)
+                arm_q[roll_idx] = arm[roll_idx]
                 q_end = list(arm_q) + [grip]
             elif idx == 3:
                 new_roll = arm[roll_idx] + delta

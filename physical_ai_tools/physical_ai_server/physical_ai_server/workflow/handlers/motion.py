@@ -610,12 +610,152 @@ def _solve_or_raise(
 # grasp — never an approach that coincides with the grasp.
 _APPROACH_BISECT_TOL_M = 0.002
 
+# Smallest APPROACH clearance that still counts as an approach (metres).
+#
+# The comment above used to be a WISH, not a guarantee: the bisect below can and
+# does converge to exactly 0, and the code then returned ``approach == grasp``
+# and called it a success. Measured 2026-07-26 through the real solvers, grasping
+# the shipped 30 mm cube (requested clearance 0.06):
+#
+#   edu6   19 / 704 radii in [0.030, 0.215] bisect to <= 2 mm  (2.7 %),
+#          in two bands: r ∈ [0.0325, 0.0347] and r ∈ [0.2062, 0.2082]
+#   OMX     2 / 958 radii in [0.020, 0.300]                    (0.2 %),
+#          one band at the very lip of its annulus: r ∈ [0.2800, 0.2802]
+#
+# Three traps in those intervals, all found by re-measuring rather than re-reading:
+#   * the NARROWER edu6 pair r ∈ [0.0325, 0.0335] ∪ [0.2075, 0.2082] (9 radii) is
+#     a DIFFERENT measurement and must not be quoted for the floor. The COUNTS
+#     (19 / 704, 2.7 %) were always exact; the interval labels were not.
+#   * the OMX band holds at grasp z = 0.012 (GRASP_CLEARANCE_M). At z = 0.015 it
+#     shifts to r ∈ [0.2795, 0.2797]. Quote the grasp HEIGHT with any of these
+#     intervals or none of them means anything.
+#   * at grasp z = 0.015 every refused edu6 radius rises exactly 1.875 mm — one
+#     bisect step — NOT zero. "Zero clearance" is the failure MODE, not
+#     universally the measured value; see
+#     test_a_real_but_sub_floor_rise_is_refused_not_just_an_exactly_zero_one.
+#
+# In that state ``above_q == grasp_q`` AND ``lift_q == closed_q``: there is no
+# descend and no lift-out, the TCP stays pinned at grasp height for the whole
+# „Greife", the arm travels SIDEWAYS into the object at grasp height and knocks
+# it over — and ``check_grasp_held`` then reports HELD (the jaws really are
+# blocked, just by an object being shoved rather than grasped) so the German
+# success line prints. A grasp with no clearance to descend through is not a
+# grasp, so we refuse it by name instead of claiming it worked.
+#
+# WHY 2 mm and not a larger, more physical number: the bisect's own resolution
+# is ``_APPROACH_BISECT_TOL_M``, so the smallest non-zero clearance it can even
+# REPORT is ~1.9 mm — at or below that, "some clearance" and "no clearance" are
+# indistinguishable, and accepting the value would be accepting a number we
+# cannot verify. Tying the floor to the tolerance therefore refuses EXACTLY the
+# measured non-grasps and nothing else: every radius that previously produced a
+# real, non-zero clamped approach still produces the identical one, so the
+# reachable band is NOT widened (nor narrowed beyond the non-grasps).
+#
+# The physically ideal threshold is larger — the fingertips only clear the
+# object's top once the clearance reaches ``object_height_m − grasp_depth_m``
+# (15 mm for the shipped cube), which would refuse 12.1 % of the edu6 band
+# (85 of 704 swept radii — a COUNT of radii below that threshold, not a fire
+# rate; see _APPROACH_WARN_FRAC, where the two were once conflated). That is a
+# PRODUCT decision (it removes reach the student can see on the mat), not a
+# correctness fix, so it is left to the rig gate; below that clearance the run
+# now WARNS instead.
+_MIN_APPROACH_CLEARANCE_M = _APPROACH_BISECT_TOL_M
+
+# The clamped-approach warning fires only when the achieved clearance falls below
+# this FRACTION of the requested one.
+#
+# It used to fire on ANY reduction, which on edu6 means every single grasp: the
+# requested 60 mm hover is unreachable at every radius there (max achieved
+# 50.6 mm, at r = 0.120), so the 2026-07-26 sweep logged 936 warnings over 780
+# runs — 100 % of grasps. A warning that always fires is not a warning, it is
+# noise that teaches students to ignore the log strip.
+#
+# 0.25 is not a taste value: the requested clearance is the recipe's
+# ``approach_clear_m`` (0.060 on BOTH shipped catalogs) and the clearance at
+# which the fingertips are exactly level with the object's top is
+# ``object_height_m − grasp_depth_m`` = 0.030 − 0.015 = 0.015 m — precisely
+# 0.25 × 0.060. So the threshold is "the hover no longer clears the object it is
+# about to grasp", expressed relative to the request so it tracks a re-tuned
+# recipe instead of hard-coding metres.
+#
+# Measured NEW fire rates (re-measured independently — do NOT reuse the 12.1 %
+# above, which counts radii BELOW the 15 mm threshold, 85 / 704: 19 of those are
+# refused outright before any warning can fire, so the two numbers count
+# different things and an earlier revision of this comment conflated them):
+#
+#   edu6   9.4 % of attempts  (was 100 %)
+#   OMX    0.8 % — 8 / 965 radii, the outer ~2 mm lip  (was 6.2 %)
+#
+# So the OMX is far quieter, NOT silent — it still warns at the very lip of its
+# annulus, which is correct: that is where its hover really is clamped.
+_APPROACH_WARN_FRAC = 0.25
+
+
+def _max_reachable_rise(
+    ctx,
+    base_xyz: tuple[float, float, float],
+    requested_m: float,
+    roll: float | None = None,
+    fallback_q: list[float] | None = None,
+) -> tuple[float, list[float] | None]:
+    """Largest reachable RISE in ``[0, requested_m]`` straight above
+    ``base_xyz``, as ``(rise_m, arm_q_at_that_rise)``.
+
+    THE single bisect behind all three "go as high as this arm can" callers —
+    the grasp/place approach hover (:func:`_solve_grasp_and_approach`), the
+    release rim clearance (:func:`_reachable_release_clearance`) and „hebe an"
+    (:func:`lift`). They had three copies of the same loop, which is how the
+    approach copy grew a grasp-specific warning that :func:`lift` then emitted
+    about a lift (F2).
+
+    Reachability of a fixed XY column is monotone in height (the strict-vertical
+    annulus shrinks as z rises), so a bisect between 0 (assumed reachable — every
+    caller has already solved its base point) and the requested rise finds the
+    maximum. ``fallback_q`` is returned for a rise of 0, i.e. the base point's
+    own solution.
+
+    The workspace-floor ``WorkflowError`` is SWALLOWED (a below-table candidate
+    is an invalid candidate, not a fatal error — the licence
+    ``path_guard._try_via`` already takes). For the two approach callers that is
+    provably a no-op: their base point passed ``_solve_or_raise``'s floor check,
+    so ``base_z + rise`` with ``rise > 0`` can never be below the floor. For
+    ``_reachable_release_clearance`` it is load-bearing — its target may itself
+    sit under the table, and at ``rise → 0`` the probe reaches that height."""
+    bx, by, bz = (float(v) for v in base_xyz)
+    requested = max(0.0, float(requested_m))
+    if requested <= 0.0:
+        return 0.0, fallback_q
+
+    def _probe(z: float) -> list[float] | None:
+        try:
+            return _try_solve(ctx, (bx, by, z), roll=roll)
+        except WorkflowError:
+            return None
+
+    q = _probe(bz + requested)
+    if q is not None:
+        return requested, q
+    # The annulus shrank at this height — bisect down toward the base point.
+    # ``lo`` is always reachable (the base point, proven by the caller); ``hi``
+    # is the unreachable requested height.
+    lo, hi = 0.0, requested
+    best_q, best_rise = fallback_q, 0.0
+    while hi - lo > _APPROACH_BISECT_TOL_M:
+        mid = 0.5 * (lo + hi)
+        q = _probe(bz + mid)
+        if q is not None:
+            lo, best_q, best_rise = mid, q, mid
+        else:
+            hi = mid
+    return best_rise, best_q
+
 
 def _solve_grasp_and_approach(
     ctx,
     grasp_xyz: tuple[float, float, float],
     approach_height_m: float,
     roll: float | None = None,
+    refuse_without_clearance: bool = True,
 ) -> tuple[list[float], list[float]]:
     """Solve the GRASP first, then the APPROACH derived from the reachable
     envelope. Returns ``(grasp_arm_q, approach_arm_q)``.
@@ -630,39 +770,65 @@ def _solve_grasp_and_approach(
          out of the workspace) — ``_solve_or_raise`` raises the German message.
       2. Try the full requested approach height. If reachable, use it.
       3. Otherwise bisect the lift between the grasp height and the requested
-         approach height down to the MAX reachable lift (never below the grasp),
-         so the arm still approaches from above — just by a smaller, reachable
-         amount — rather than refusing a graspable object.
+         approach height down to the MAX reachable lift, so the arm still
+         approaches from above — just by a smaller, reachable amount — rather
+         than refusing a graspable object.
+      4. But for a GRASP, a clearance at or below ``_MIN_APPROACH_CLEARANCE_M``
+         is NOT an approach: there is nothing to descend through, the whole
+         „Greife" would be a lateral slide into the object at grasp height, and it
+         would report success. That case is refused by name (see the constant for
+         the measurement and for why the floor is the bisect's own resolution).
 
-    Only an unreachable GRASP is refused.
+    An unreachable GRASP, and a grasp with no room to approach from above, are
+    refused. Everything in between is clamped — and only reported to the student
+    when the clamp is consequential (``_APPROACH_WARN_FRAC``).
+
+    ``refuse_without_clearance=False`` keeps step 4 OFF, and ``drop_at`` is the
+    one caller that sets it. A PLACE has neither half of the harm the refusal
+    exists to prevent: the object is already in the jaws (nothing to knock over by
+    arriving sideways) and nothing claims a grasp succeeded. Its clearance is
+    additionally documented as OPTIONAL — the hard requirement is placing the
+    object AT the target — and refusing a place over a missing rim clearance is
+    precisely the regression the 2026-07-26 release-clearance bisect removed
+    (measured: it costs the whole place to save 1.6 mm of clearance at the OMX
+    outer ring, and ~87 % of the pick band on edu6). Re-introducing it here would
+    undo that fix.
     """
     gx, gy, gz = (float(v) for v in grasp_xyz)
     grasp_arm_q = _solve_or_raise(ctx, (gx, gy, gz), roll=roll)
 
-    # Fast path: the full requested approach height is reachable.
-    full_approach = (gx, gy, gz + approach_height_m)
-    approach_arm_q = _try_solve(ctx, full_approach, roll=roll)
-    if approach_arm_q is not None:
-        return grasp_arm_q, approach_arm_q
+    requested = max(0.0, float(approach_height_m))
+    best_lift, best_q = _max_reachable_rise(
+        ctx, (gx, gy, gz), requested, roll=roll, fallback_q=grasp_arm_q)
+    if best_lift >= requested:
+        # Fast path: the full requested approach height was reachable.
+        return grasp_arm_q, best_q
 
-    # The annulus shrank at this height — bisect the lift down toward the grasp
-    # to the largest reachable approach. ``lo`` is always reachable (it's the
-    # grasp height, proven above); ``hi`` is the unreachable requested height.
-    lo, hi = 0.0, approach_height_m
-    best_q = grasp_arm_q          # worst case: approach == grasp (still valid)
-    best_lift = 0.0
-    while hi - lo > _APPROACH_BISECT_TOL_M:
-        mid = 0.5 * (lo + hi)
-        q = _try_solve(ctx, (gx, gy, gz + mid), roll=roll)
-        if q is not None:
-            lo, best_q, best_lift = mid, q, mid
-        else:
-            hi = mid
-    ctx.log(
-        f'[WARNUNG] Anfahrhöhe auf {best_lift * 1000:.0f} mm reduziert '
-        f'(angefordert: {approach_height_m * 1000:.0f} mm) — Ziel liegt am '
-        'Rand des Greifbereichs.'
-    )
+    if (refuse_without_clearance and requested > 0.0
+            and best_lift <= _MIN_APPROACH_CLEARANCE_M):
+        # GraspSkip, not the base WorkflowError: this is POSITIONAL and
+        # per-instance — exactly GraspSkip's documented contract ("the selected
+        # object can't be grasped right now … but OTHER instances may be fine").
+        # The zero-clearance bands are the innermost and outermost rings of the
+        # pick band, and `_select_nearest_reachable` sorts by distance, so a cube
+        # pushed near the base is picked FIRST: a hard abort there would kill a
+        # 3-cube program over one badly-placed cube while a perfectly good one sat
+        # at mid-band. A standalone „Greife" / „fahre über" still fails loud
+        # (GraspSkip IS a WorkflowError) with this exact message.
+        raise GraspSkip(
+            'Kein Platz, um von oben anzufahren — über diesem Punkt ist der Arm '
+            'schon ganz ausgestreckt. Er könnte das Objekt nur von der Seite '
+            'anschieben und würde es umwerfen. Bitte das Objekt etwas weiter in '
+            'die Mitte des markierten Greifbereichs legen.'
+        )
+    if best_lift < _APPROACH_WARN_FRAC * requested:
+        ctx.log(
+            f'[WARNUNG] Anfahrhöhe auf {best_lift * 1000:.0f} mm über dem '
+            f'Greifpunkt verkleinert (gewünscht: {requested * 1000:.0f} mm) — '
+            'höher kommt der Arm über dieser Stelle nicht. Wenn der Greifer das '
+            'Objekt beim Anfahren berührt, das Objekt weiter in die Mitte des '
+            'Greifbereichs legen.'
+        )
     return grasp_arm_q, best_q
 
 
@@ -698,41 +864,25 @@ def _reachable_release_clearance(
     flat surface — only a deep container wants more, and that is what the German
     warning tells the student.
     """
-    tx, ty, tz = (float(v) for v in target_xyz)
     requested = max(0.0, float(requested_m))
     if requested <= 0.0:
         return 0.0
-
-    def _ok(z: float) -> bool:
-        """Reachable AND above the table. A below-table candidate is an invalid
-        candidate here, not a fatal error — the same licence
-        ``path_guard._try_via`` takes. Swallowing it matters: `_try_solve` RAISES
-        the German floor message, and at ``mid → 0`` we probe the target's own
-        height, so a below-table destination would start refusing on a path that
-        previously accepted it at +clearance. Letting the bisect fall through to
-        0 keeps the SINGLE refusal point where it was — the
-        ``_solve_grasp_and_approach`` call below, with its own message."""
-        try:
-            return _try_solve(ctx, (tx, ty, z), roll=roll) is not None
-        except WorkflowError:
-            return False
-
-    if _ok(tz + requested):
+    # Same bisect as the approach hover — ``_max_reachable_rise`` owns it (and
+    # swallows the workspace-floor error, which is load-bearing HERE: the drop
+    # target may itself sit under the table and at ``rise → 0`` the probe reaches
+    # exactly that height, so a raise would start refusing a path that previously
+    # accepted it at +clearance. The single refusal point stays the
+    # ``_solve_grasp_and_approach`` call below, with its own message).
+    clearance, _q = _max_reachable_rise(ctx, target_xyz, requested, roll=roll)
+    if clearance >= requested:
         return requested
-    lo, hi = 0.0, requested
-    while hi - lo > _APPROACH_BISECT_TOL_M:
-        mid = 0.5 * (lo + hi)
-        if _ok(tz + mid):
-            lo = mid
-        else:
-            hi = mid
     ctx.log(
-        f'[WARNUNG] Ablegehöhe auf {lo * 1000:.0f} mm über dem Ziel reduziert '
-        f'(angefordert: {requested * 1000:.0f} mm) — höher ist an dieser Stelle '
-        'nicht erreichbar. Zum Ablegen IN einen Behälter das Ziel näher an den '
-        'Roboter legen.'
+        f'[WARNUNG] Ablegehöhe auf {clearance * 1000:.0f} mm über dem Ziel '
+        f'reduziert (angefordert: {requested * 1000:.0f} mm) — höher ist an '
+        'dieser Stelle nicht erreichbar. Zum Ablegen IN einen Behälter das Ziel '
+        'näher an den Roboter legen.'
     )
-    return lo
+    return clearance
 
 
 def _try_solve(
@@ -1102,8 +1252,12 @@ def drop_at(ctx, args: dict[str, Any]) -> None:
     # HIGH-5 (symmetric with pickup): solve the DROP first; derive the approach
     # from the reachable envelope so an outer-ring destination whose drop is
     # reachable isn't refused because its +approach pose fell outside the annulus.
+    # refuse_without_clearance=False: a place with no room above it still places
+    # (see _solve_grasp_and_approach) — refusing here would undo the release-
+    # clearance bisect two lines above.
     drop_arm_q, above_arm_q = _solve_grasp_and_approach(
-        ctx, drop_xyz, DEFAULT_APPROACH_HEIGHT_M, roll=GRASP_ROLL_RAD)
+        ctx, drop_xyz, DEFAULT_APPROACH_HEIGHT_M, roll=GRASP_ROLL_RAD,
+        refuse_without_clearance=False)
 
     # Carry at the close the GRASP actually commanded, not at the profile's
     # full-closed value. The two are the same number on the OMX
@@ -1172,6 +1326,39 @@ def drop_at(ctx, args: dict[str, Any]) -> None:
 # canned ``Greife`` remains the atomic option (and the loop body in Beginner mode).
 
 
+# The generic „you never ran finde" message — correct ONLY when we have no idea
+# why the Greifziel is missing.
+_NO_GREIFZIEL_MSG = (
+    'Kein Greifziel — bitte „finde …" benutzen, das Ergebnis in einer '
+    'Variable speichern und mit „falls" prüfen.'
+)
+
+
+def _no_greifziel_error(ctx) -> GraspSkip:
+    """The error for a split-grasp block that got no Greifziel.
+
+    ``find_object`` returns ``None`` for FOUR different reasons — nothing of that
+    type visible, visible but out of reach, visible but the orientation could not
+    be read, and (the real one) the student never called „finde". Only the last
+    is what the generic message describes, yet it was raised for all four: a
+    student who did latch „finde" into a variable AND guard it with „falls" was
+    told to do exactly the three things they had just done, while the true reason
+    („außerhalb des Greifbereichs") appeared only as a ``[WARNUNG]`` log line.
+
+    ``perception_blocks.find_object`` now records the reason on
+    ``ctx.last_find_failure`` (a plain attribute, like ``ctx._grasp_check_warned``
+    — the ctx is rebuilt per run, so it can never carry over between runs), and
+    this promotes it to the error the student actually sees. No reason recorded →
+    the generic message, byte-identical to before."""
+    reason = getattr(ctx, 'last_find_failure', None)
+    if not isinstance(reason, str) or not reason.strip():
+        return GraspSkip(_NO_GREIFZIEL_MSG)
+    return GraspSkip(
+        f'{reason.strip()} (Der Block hat deshalb kein Greifziel bekommen — '
+        'mit „falls Ziel" prüfen, bevor der Arm bewegt wird.)'
+    )
+
+
 def _greifziel_xyz_roll(ctx, ziel) -> tuple[float, float, float, float]:
     """Resolve a Greifziel (a ``Detection`` value) into the grasp ``(x, y, z)``
     plus the oriented wrist roll.
@@ -1186,10 +1373,7 @@ def _greifziel_xyz_roll(ctx, ziel) -> tuple[float, float, float, float]:
     commits a blind fixed-roll grasp that would pinch an elongated object on its
     long axis."""
     if ziel is None:
-        raise GraspSkip(
-            'Kein Greifziel — bitte „finde …" benutzen, das Ergebnis in einer '
-            'Variable speichern und mit „falls" prüfen.'
-        )
+        raise _no_greifziel_error(ctx)
     x, y, z = _resolve_target(ziel, ctx)   # Detection.world_xyz_m + precise calib error
     tag_yaw = None
     extras = getattr(ziel, 'extras', None)
@@ -1263,10 +1447,7 @@ def close_on_object(ctx, args: dict[str, Any]) -> None:
     # skip (a loop moves on; standalone fails loud) — NOT a silent full-close,
     # which could over-close (overload) on a wide object.
     if ziel is None:
-        raise GraspSkip(
-            'Kein Greifziel — bitte „finde …" benutzen, das Ergebnis in einer '
-            'Variable speichern und mit „falls" prüfen.'
-        )
+        raise _no_greifziel_error(ctx)
     _require_seeded_start_pose(ctx)
     close_rad = _gripper_closed(ctx)
     extras = getattr(ziel, 'extras', None)
@@ -1297,7 +1478,19 @@ def close_on_object(ctx, args: dict[str, Any]) -> None:
 def lift(ctx, args: dict[str, Any]) -> None:
     """„hebe an" — raise the end-effector straight up by the default approach
     height from its CURRENT position, preserving the wrist roll (j5) so a held
-    object isn't twisted, and the gripper state so a held object stays held."""
+    object isn't twisted, and the gripper state so a held object stays held.
+
+    A lift that cannot rise at all is reported as exactly that and does NOT
+    move the arm. It used to borrow :func:`_solve_grasp_and_approach` wholesale,
+    which meant two wrong things on edu6 (measured 2026-07-26): ``_execute_pickup``
+    already ends AT the hover, which is already clamped at that arm's top-down
+    ceiling (~0.0655 m), so a following „hebe an" bisected to 0 mm at EVERY
+    radius tested (0.06 / 0.10 / 0.13 / 0.16 / 0.19 — the OMX solves the same
+    second +60 mm lift cleanly out to r = 0.20) — and it then blamed „Ziel liegt
+    am Rand des Greifbereichs" at r = 0.13, the sweet spot of the pick band, not
+    an edge. It also cannot raise :func:`_solve_grasp_and_approach`'s new
+    no-clearance refusal: a maxed-out lift is a legitimate no-op, not a failed
+    grasp, and aborting the run there would break „Greife" → „hebe an"."""
     _require_seeded_start_pose(ctx)
     cur = ctx.last_full_joints
     if ctx.ik is None:
@@ -1310,12 +1503,33 @@ def lift(ctx, args: dict[str, Any]) -> None:
         raise WorkflowError('Aktuelle Position ist unbekannt.')
     _R, t = pose
     x, y, z = float(t[0]), float(t[1]), float(t[2])
-    # Clamp the lift to the reachable envelope (reuse the canned path's HIGH-5
-    # bisection) so an outer-ring grasp is never STRANDED at table level by an
-    # unreachable full +approach lift: the current (reachable) pose is the lower
-    # bound, the lift bisects up to the max reachable height.
-    _grasp_q, above_q = _solve_grasp_and_approach(
-        ctx, (x, y, z), DEFAULT_APPROACH_HEIGHT_M)
+    # Step 1 is UNCHANGED from the old _solve_grasp_and_approach call: the CURRENT
+    # pose must itself be re-solvable in the strict-vertical family, and that is
+    # what refuses a lift from a pose the solver cannot reproduce (or one below
+    # the table). Same call, same args (roll=None), same German messages.
+    cur_arm_q = _solve_or_raise(ctx, (x, y, z))
+    # Clamp the lift to the reachable envelope so an outer-ring grasp is never
+    # STRANDED at table level by an unreachable full +approach lift: the current
+    # (reachable) pose is the lower bound, the lift bisects up to the max
+    # reachable height.
+    rise_m, above_q = _max_reachable_rise(
+        ctx, (x, y, z), DEFAULT_APPROACH_HEIGHT_M, fallback_q=cur_arm_q)
+    if rise_m <= _MIN_APPROACH_CLEARANCE_M:
+        # Nothing to gain — say so plainly and publish NOTHING (the old code
+        # published a zero-length move and warned about the wrong thing).
+        ctx.log(
+            '[WARNUNG] „hebe an" hat den Arm nicht bewegt — über dieser Stelle '
+            'ist er schon so hoch, wie er kommt. „Greife" hebt das Objekt '
+            'bereits vom Tisch ab.'
+        )
+        ctx.last_arm_joints = list(cur[:_n(ctx)])
+        return
+    if rise_m < _APPROACH_WARN_FRAC * DEFAULT_APPROACH_HEIGHT_M:
+        ctx.log(
+            f'[WARNUNG] Nur {rise_m * 1000:.0f} mm angehoben (gewünscht: '
+            f'{DEFAULT_APPROACH_HEIGHT_M * 1000:.0f} mm) — höher kommt der Arm '
+            'über dieser Stelle nicht.'
+        )
     # j5 is (very nearly) pure tool roll about the top-down tool axis — the tip
     # sits within ~1.6 mm of that axis (the EE y-offset the IK itself ignores) —
     # so overriding j5 after the solve keeps the position to sub-grasp-tolerance

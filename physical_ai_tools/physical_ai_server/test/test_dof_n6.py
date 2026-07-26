@@ -1092,15 +1092,24 @@ def test_plan_safe_route_roll_none_converts_through_the_solver():
 
     A zone is drawn across the direct transit so the ladder actually reaches its
     via code; whether it ultimately routes or refuses is irrelevant — the
-    assertion is on the roll it asked for."""
+    assertion is on the roll it asked for.
+
+    The ±0.06 m endpoint spread this used originally was WIDENED to ±0.09 m on
+    2026-07-26: zones inflate by 50 mm per face, so a ±20 mm box centred between
+    endpoints only 60 mm out actually SWALLOWS both of them, and the ladder now
+    short-circuits that provably-hopeless case with its own German refusal
+    (``path_guard._static_overlap_refusal``) before any via is solved. ±0.09 m
+    keeps the direct rung blocked with both endpoints clear of the inflated box,
+    which is the scenario this test was always trying to describe."""
     from physical_ai_server.workflow import path_guard
     ctx = _real_edu6_ctx()
     solver = ctx.ik
-    start = solver.solve((solver.base_axis_x + 0.14, -0.06, 0.03),
+    _spread = 0.09
+    start = solver.solve((solver.base_axis_x + 0.14, -_spread, 0.03),
                          roll=motion.GRASP_ROLL_RAD)
     for wrist_deg in (50.0, -35.0):
         end = solver.solve(
-            (solver.base_axis_x + 0.14, 0.06, 0.03),
+            (solver.base_axis_x + 0.14, _spread, 0.03),
             roll=motion.GRASP_ROLL_RAD + math.radians(wrist_deg))
         assert start is not None and end is not None
         assert abs(end[5]) > 1e-3, 'need a NON-zero wrist or a mirror hides'
@@ -1111,6 +1120,11 @@ def test_plan_safe_route_roll_none_converts_through_the_solver():
                   'max': [float(mid[0]) + 0.02, float(mid[1]) + 0.02, 0.10]}]
         assert path_guard.segment_blocked(solver, q_start, q_end, zones), (
             'the scenario must block the DIRECT rung or no via is ever solved')
+        _inf = path_guard.LINK_RADIUS_M + path_guard.ZONE_MARGIN_M
+        assert not path_guard._pose_inside_zone(solver, q_start, zones, _inf), (
+            'neither endpoint may sit inside the INFLATED zone, or the ladder '
+            'refuses on the static-overlap short-circuit before solving a via')
+        assert not path_guard._pose_inside_zone(solver, q_end, zones, _inf)
         rolls: list[float] = []
         original = path_guard._try_via
         try:
@@ -1391,3 +1405,626 @@ def test_release_clearance_never_exceeds_the_request_and_is_omx_identical():
     assert motion._reachable_release_clearance(
         omx, (omx.ik.base_axis_x + 0.15, 0.0, 0.0), -0.01,
         roll=motion.GRASP_ROLL_RAD) == 0.0
+
+
+# ── slice 2g: the 2026-07-26 sim-sweep round-2 fixes (F1/F2/F3/F6/F7) ─────────
+# A ~1,273-run sweep through the real WorkflowManager + the real Edu6IKSolver
+# found the solver CLEAN (0 width/finite/limit violations, worst FK error 4e-15 m)
+# and seven defects in the layers around it. These pin the five that live in
+# motion.py / path_guard.py / robot_profiles.py. Every number below was
+# re-measured through the shipped solvers, not copied from the report.
+
+
+def _edu6_grasp_ctx():
+    """A ctx that can run a full grasp corridor: real solver, real profile,
+    recording publisher, log sink."""
+    ctx = _real_edu6_ctx()
+    ctx.published = []
+    ctx.logs = []
+    ctx.publisher = lambda chunk: ctx.published.extend(chunk)
+    ctx.log = ctx.logs.append
+    ctx.motion_lock = None
+    ctx.should_stop = lambda: False
+    ctx.emit_detections = lambda _d: None
+    ctx.last_commanded_close_rad = None
+    return ctx
+
+
+def _achieved_clearance(ctx, r, grasp_z=0.015, requested=0.06):
+    """(clearance_m, logs) for a grasp at radius ``r``, or ('REFUSED', msg)."""
+    t = (ctx.ik.base_axis_x + r, 0.0, grasp_z)
+    try:
+        _g, approach_q = motion._solve_grasp_and_approach(
+            ctx, t, requested, roll=motion.GRASP_ROLL_RAD)
+    except WorkflowError as e:
+        return 'REFUSED', str(e)
+    return float(ctx.ik.fk(approach_q)[1][2]) - grasp_z, ctx.logs
+
+
+# ── F1: a zero-clearance grasp is a lateral slide, not a grasp ────────────────
+
+def test_zero_clearance_grasp_is_refused_not_reported_as_success():
+    """MEASURED: at r in [0.0325, 0.0335] and r in [0.2075, 0.2082] the approach
+    bisect converges to 0 mm, so ``above_q == grasp_q`` AND ``lift_q == closed_q``
+    — no descend, no lift-out, the TCP pinned at grasp height for the whole
+    „Greife" while the arm travels SIDEWAYS into the cube. ``check_grasp_held``
+    then reads HELD (the jaws ARE blocked — by an object being shoved) and the
+    German success line printed. That must refuse by name instead."""
+    for r in (0.0330, 0.2078):
+        ctx = _edu6_grasp_ctx()
+        got, msg = _achieved_clearance(ctx, r)
+        assert got == 'REFUSED', (
+            f'r={r}: expected a refusal, got {got} of clearance — if the '
+            'geometry moved, re-derive the bands')
+        assert 'Kein Platz' in msg and 'von oben anzufahren' in msg
+        # It must NOT be mistaken for the generic out-of-workspace refusal: the
+        # GRASP itself is perfectly reachable here, and saying otherwise would
+        # send the student to move an object that is inside the band.
+        assert 'außerhalb des Arbeitsbereichs' not in msg
+        assert ctx.ik.solve((ctx.ik.base_axis_x + r, 0.0, 0.015),
+                            roll=motion.GRASP_ROLL_RAD) is not None, (
+            'premise: the grasp point itself IS reachable at this radius')
+
+
+def test_zero_clearance_refusal_does_not_widen_or_narrow_the_useful_band():
+    """The refusal may only take the non-grasps. Everything that previously got a
+    real, non-zero clamped approach must still get the IDENTICAL one."""
+    refused = 0
+    total = 0
+    for r_um in range(33000, 209001, 500):
+        ctx = _edu6_grasp_ctx()
+        got, _ = _achieved_clearance(ctx, r_um / 1e6)
+        total += 1
+        if got == 'REFUSED':
+            refused += 1
+            continue
+        # Anything accepted carries strictly more than the floor. Compared
+        # against the LITERAL, not the symbol: reading the constant here makes
+        # the assertion vacuous under the one mutation it should catch (setting
+        # the floor to 0.0 keeps every `got > floor` true).
+        assert got > 0.002
+        # ...and never more than was asked for.
+        assert got <= 0.06 + 1e-12
+    assert total > 300
+    # Measured 2.7 % of the band at 0.25 mm resolution; keep a generous ceiling so
+    # this fails on a real widening, not on sampling noise.
+    assert refused / total < 0.06, f'refused {refused}/{total} — too much band lost'
+
+
+def test_a_real_but_sub_floor_rise_is_refused_not_just_an_exactly_zero_one():
+    """The gap an adversarial mutation pass found: every other F1 test lands on
+    radii whose rise the bisect reports as unusable, and none of them pinned the
+    FLOOR ITSELF, so setting ``_MIN_APPROACH_CLEARANCE_M`` to 0.0 changed real
+    production behaviour with the whole suite green.
+
+    Measured here (grasp z 0.015, requested 0.06, 0.1 mm sweep over
+    r ∈ [0.032, 0.210]): 23 radii bisect to a rise of EXACTLY 1.875 mm — the
+    bisect's smallest non-zero step, ``0.06 / 32`` — which is strictly positive
+    and strictly below the 2 mm floor. That is the interesting case: a naive
+    "refuse only an exactly-zero rise" implementation ACCEPTS it and calls a
+    1.9 mm hover an approach.
+
+    Note on ``<=`` vs ``<`` at the floor: the bisect can only ever report
+    multiples of 1.875 mm, so no achievable rise equals exactly 0.002 and the two
+    comparisons are provably equivalent AT THE SHIPPED CONSTANT. That mutation is
+    an equivalent mutant rather than a coverage gap — but it stops being one the
+    moment either constant moves, which is why the literal is pinned below."""
+    from physical_ai_server.workflow.handlers import motion as m
+    # The floor IS the bisect tolerance, and both are pinned as literals so a
+    # silent change to either has to come through this test.
+    assert m._MIN_APPROACH_CLEARANCE_M == 0.002
+    assert m._APPROACH_BISECT_TOL_M == 0.002
+    assert m._MIN_APPROACH_CLEARANCE_M == m._APPROACH_BISECT_TOL_M
+
+    ctx = _edu6_grasp_ctx()
+    got, msg = _achieved_clearance(ctx, 0.0340)
+    assert got == 'REFUSED', (
+        f'r=0.0340 rose {got} — this radius must be refused; if the geometry '
+        'moved, re-measure the sub-floor band before relaxing this')
+    assert 'Kein Platz' in msg and 'von oben anzufahren' in msg
+
+    # And prove the premise rather than asserting it: with the floor lifted the
+    # SAME radius yields a real, strictly-positive rise of one bisect step. This
+    # is what makes the test fail when the floor is mutated to 0.0 — without it
+    # the case is indistinguishable from an exactly-zero one.
+    original = m._MIN_APPROACH_CLEARANCE_M
+    m._MIN_APPROACH_CLEARANCE_M = 0.0
+    try:
+        raw, _ = _achieved_clearance(_edu6_grasp_ctx(), 0.0340)
+    finally:
+        m._MIN_APPROACH_CLEARANCE_M = original
+    assert raw != 'REFUSED', 'premise: only the FLOOR refuses this radius'
+    assert 0.0 < raw < 0.002, f'expected a sub-floor rise, got {raw}'
+    assert abs(raw - 0.001875) < 1e-9, (
+        f'expected exactly one bisect step (1.875 mm), got {raw * 1000:.4f} mm')
+
+
+def test_grasp_object_refuses_instead_of_claiming_a_shoved_cube(_fast_place_pacing):
+    """End-to-end through the REAL named-object handler + a virtual arm whose
+    joint readback really does report HELD: the run must fail loud in German and
+    must never print „gegriffen."."""
+    from physical_ai_server.workflow.handlers import perception_blocks as pb
+    from physical_ai_server.workflow.object_catalog import fixed_catalog
+    from physical_ai_server.workflow.sim_arm import SimArm
+    from physical_ai_server.workflow.sim_perception import SimPerception
+    import numpy as np
+    from physical_ai_server import robot_profiles
+
+    p = robot_profiles.resolve(_PROFILE_ID)
+    cat = fixed_catalog(_PROFILE_ID)
+    ctx = _edu6_grasp_ctx()
+    # A cube exactly in the measured zero-clearance outer band.
+    objs = [{'type': 'wuerfel', 'x': ctx.ik.base_axis_x + 0.2078, 'y': 0.0,
+             'yaw': 0.0}]
+    arm = SimArm(ik=ctx.ik, num_arm_joints=6,
+                 home_full_joints=list(p.home_joints_rad) + [p.gripper_open_rad],
+                 objects=objs,
+                 close_threshold_rad=p.sim_close_threshold_rad,
+                 held_block_offset_rad=p.sim_held_block_offset_rad,
+                 held_floor_rad=p.sim_held_floor_rad)
+    ctx.publisher = arm.publish
+    ctx.get_follower_joints = arm.get_joints
+    ctx.perception = SimPerception(objs, cat)
+    ctx.object_catalog = cat
+    ctx.scene_intrinsics = None
+    ctx.scene_extrinsics = None
+    ctx.board_table_z = None
+    ctx.z_table = None
+    ctx.get_scene_frame = lambda: np.zeros((1, 1, 3), dtype=np.uint8)
+    ctx.get_scene_frame_age = lambda: 0.0
+    ctx.claimed_tags = set()
+    ctx.skipped_tags = set()
+    ctx.absent_since = {}
+    ctx.claim_lock = None
+
+    from physical_ai_server.workflow.handlers.motion import GraspSkip
+    with pytest.raises(WorkflowError) as excinfo:
+        pb.grasp_object(ctx, {'object_type': 'wuerfel'})
+    assert 'Kein Platz' in str(excinfo.value)
+    assert not [m for m in ctx.logs if 'gegriffen' in m], (
+        'the run must never claim the cube was grasped')
+    assert not ctx.claimed_tags, 'a refused grasp must not claim its tag'
+    # RECOVERABLE + terminating: a „Solange sichtbar" loop swallows GraspSkip, and
+    # the tag is marked SKIPPED so the loop excludes it next pass instead of
+    # re-selecting it until the 3-pass stall guard trips.
+    assert isinstance(excinfo.value, GraspSkip), (
+        'a positional per-instance failure must not abort a whole multi-cube run')
+    assert ctx.skipped_tags, 'the offending instance must be marked SKIPPED'
+
+
+def test_place_is_NOT_refused_for_a_missing_release_clearance(_fast_place_pacing):
+    """Scope rail for F1: the refusal is a GRASP rule only.
+
+    A place has neither half of the harm — the object is already in the jaws, and
+    nothing claims a grasp worked — and its clearance is documented OPTIONAL. A
+    refusal here would undo the release-clearance bisect (which measured the old
+    behaviour as costing the whole place to save 1.6 mm at the OMX outer ring and
+    ~87 % of the edu6 pick band)."""
+    for r in (0.0330, 0.2078):
+        ctx = _edu6_grasp_ctx()
+        ctx.calibration = {'z_table': 0.0}
+        ctx.last_commanded_close_rad = 1.0
+        motion.drop_at(ctx, {'destination': (ctx.ik.base_axis_x + r, 0.0, 0.015)})
+        assert ctx.published, f'r={r}: the place must still run'
+
+
+def test_omx_zero_clearance_exposure_is_the_annulus_lip_only():
+    """The SHARED-path disclosure, measured rather than asserted.
+
+    The OMX has the same defect, but confined to r in [0.2800, 0.2802] from its
+    joint-1 axis (world x ~ 0.2688-0.2690) — a 0.25 mm-wide sliver at the very lip
+    of its 0.2825 m annulus, immediately before the GRASP itself becomes
+    unreachable. Across the whole practical table radius the OMX takes the fast
+    path, so nothing there changes."""
+    refused = []
+    for x_um in range(150000, 270001, 250):
+        c = _omx_ctx_for_path_guard()
+        c.logs = []
+        c.log = c.logs.append
+        try:
+            motion._solve_grasp_and_approach(
+                c, (x_um / 1e6, 0.0, 0.012), 0.06, roll=0.0)
+        except WorkflowError as e:
+            if 'Kein Platz' in str(e):
+                refused.append(x_um / 1e6)
+    assert refused, 'premise: the OMX does reach this state somewhere'
+    assert max(refused) - min(refused) <= 0.001, (
+        f'the OMX exposure must stay a sliver, got {refused}')
+    assert min(refused) > 0.268, f'expected the annulus lip, got {min(refused)}'
+    # Mid-band is untouched: full clearance, no log, no refusal.
+    mid = _omx_ctx_for_path_guard()
+    mid.logs = []
+    mid.log = mid.logs.append
+    _g, a = motion._solve_grasp_and_approach(mid, (0.20, 0.0, 0.012), 0.06, roll=0.0)
+    assert float(mid.ik.fk(a)[1][2]) == pytest.approx(0.012 + 0.06, abs=1e-9)
+    assert mid.logs == []
+
+
+# ── F2: „hebe an" after „Greife" ──────────────────────────────────────────────
+
+def test_lift_after_a_grasp_is_a_reported_noop_not_a_wrong_warning(_fast_place_pacing):
+    """MEASURED: ``_execute_pickup`` ends AT the hover, which is already clamped
+    at edu6's top-down ceiling, so a following „hebe an" gains 0 mm at every
+    radius tested (0.06 / 0.10 / 0.13 / 0.16 / 0.19). The old code published a
+    zero-length move and blamed „Ziel liegt am Rand des Greifbereichs" — at
+    r = 0.13, the SWEET SPOT of the pick band."""
+    for r in (0.06, 0.10, 0.13, 0.16, 0.19):
+        ctx = _edu6_grasp_ctx()
+        motion._execute_pickup(
+            ctx, (ctx.ik.base_axis_x + r, 0.0, 0.015), 0.06,
+            motion.GRASP_ROLL_RAD, 1.0)
+        before = list(ctx.last_full_joints)
+        # .clear(), NOT a rebind: ctx.log is bound to THIS list's append.
+        ctx.published.clear()
+        ctx.logs.clear()
+        motion.lift(ctx, {})
+        assert ctx.published == [], f'r={r}: a no-op lift must publish nothing'
+        assert ctx.last_full_joints == before, f'r={r}: pose must not change'
+        assert len(ctx.logs) == 1, f'r={r}: expected exactly one line, {ctx.logs}'
+        msg = ctx.logs[0]
+        assert 'hebe an' in msg and 'nicht bewegt' in msg
+        # The old, false reason must be gone.
+        assert 'Rand des Greifbereichs' not in msg
+        assert 'Anfahrhöhe' not in msg
+
+
+def test_lift_still_lifts_on_the_omx_and_keeps_the_wrist(_fast_place_pacing):
+    """The OMX control: the same second +60 mm lift solves cleanly out to r = 0.20,
+    silently, and the wrist joint is preserved (unchanged behaviour)."""
+    for x in (0.14, 0.18, 0.20):
+        ctx = _omx_ctx_for_path_guard()
+        ctx.published = []
+        ctx.logs = []
+        ctx.publisher = lambda chunk: ctx.published.extend(chunk)
+        ctx.log = ctx.logs.append
+        ctx.motion_lock = None
+        ctx.should_stop = lambda: False
+        start = ctx.ik.solve((x, 0.0, 0.012), roll=0.3)
+        assert start is not None
+        ctx.last_full_joints = list(start) + [motion.GRIPPER_CLOSED_RAD]
+        z0 = float(ctx.ik.fk(start)[1][2])
+        motion.lift(ctx, {})
+        assert ctx.published, f'x={x}: the OMX lift must actually move'
+        assert ctx.logs == [], f'x={x}: and say nothing about it: {ctx.logs}'
+        z1 = float(ctx.ik.fk(ctx.last_full_joints[:5])[1][2])
+        assert z1 - z0 == pytest.approx(0.06, abs=1e-6)
+        assert ctx.last_full_joints[4] == pytest.approx(start[4], abs=1e-12)
+        assert ctx.last_full_joints[5] == pytest.approx(motion.GRIPPER_CLOSED_RAD)
+
+
+def test_lift_still_refuses_a_pose_the_solver_cannot_reproduce():
+    """The one piece of the old ``_solve_grasp_and_approach`` call that MUST
+    survive the F2 refactor: step 1 re-solved the CURRENT pose, and that is what
+    refuses a lift from a pose outside the strict-vertical family (a jog or replay
+    can leave the arm in one) or below the table.
+
+    Nothing in the suite covered it before — a mutation run swapping
+    ``_solve_or_raise`` for ``_try_solve`` here survived, so the refusal would have
+    silently become a no-op."""
+    ctx = _edu6_grasp_ctx()
+    # Reached by a jog/replay: a non-vertical pose whose TCP (0.281, 0, 0.110) the
+    # strict-vertical solver cannot reproduce.
+    ctx.last_full_joints = [0.0, 1.0, -1.0, 0.0, 0.5, 0.0, 1.0]
+    assert ctx.ik.solve((0.2814, 0.0, 0.1099)) is None, 'premise'
+    with pytest.raises(WorkflowError) as excinfo:
+        motion.lift(ctx, {})
+    assert 'außerhalb des Arbeitsbereichs' in str(excinfo.value)
+    assert ctx.published == []
+    # ...and the table floor still refuses too.
+    below = _edu6_grasp_ctx()
+    below.z_table = 0.30
+    below.last_full_joints = list(below.ik.solve(
+        (below.ik.base_axis_x + 0.14, 0.0, 0.015),
+        roll=motion.GRASP_ROLL_RAD)) + [1.0]
+    with pytest.raises(WorkflowError) as excinfo:
+        motion.lift(below, {})
+    assert 'Tischebene' in str(excinfo.value)
+
+
+def test_lift_never_raises_the_grasp_clearance_refusal():
+    """A maxed-out lift is a legitimate no-op, not a failed grasp. If ``lift``
+    could raise ``_solve_grasp_and_approach``'s refusal it would ABORT every
+    „Greife" -> „hebe an" program on edu6."""
+    ctx = _edu6_grasp_ctx()
+    top = ctx.ik.solve((ctx.ik.base_axis_x + 0.113, 0.0, 0.0655),
+                       roll=motion.GRASP_ROLL_RAD)
+    assert top is not None, 'premise: the measured ceiling pose is reachable'
+    ctx.last_full_joints = list(top) + [1.0]
+    motion.lift(ctx, {})          # must not raise
+    assert ctx.published == []
+    assert any('nicht bewegt' in m for m in ctx.logs)
+
+
+# ── F6: the hover warning must carry information ──────────────────────────────
+
+def test_hover_warning_no_longer_fires_on_every_grasp():
+    """It fired on 100 % of edu6 grasps (936 warnings / 780 swept runs) because
+    the requested 60 mm hover is unreachable at EVERY radius there (max achieved
+    50.6 mm, at r = 0.120). The threshold is now 0.25 x the request = 15 mm for
+    both shipped catalogs, which is exactly ``object_height_m − grasp_depth_m``
+    (0.030 − 0.015): the clearance at which the fingertips stop being above the
+    object's top."""
+    from physical_ai_server.workflow.object_catalog import fixed_catalog
+    rec = fixed_catalog(_PROFILE_ID).recipe_for_type('wuerfel')
+    # The derivation must actually hold for the shipped recipe, or the threshold
+    # is arbitrary again.
+    assert (motion._APPROACH_WARN_FRAC * rec.approach_clear_m
+            == pytest.approx(rec.object_height_m - rec.grasp_depth_m, abs=1e-12))
+
+    warned = 0
+    total = 0
+    for r_um in range(34000, 206001, 500):
+        ctx = _edu6_grasp_ctx()
+        got, logs = _achieved_clearance(ctx, r_um / 1e6)
+        if got == 'REFUSED':
+            continue
+        total += 1
+        if [m for m in logs if 'Anfahrhöhe' in m]:
+            warned += 1
+    assert total > 300
+    assert warned / total < 0.25, (
+        f'warned on {warned}/{total} = {100.0 * warned / total:.1f}% — the '
+        'whole point is that it is no longer near-universal')
+    assert warned > 0, 'and it must still fire SOMEWHERE or it is dead'
+
+
+def test_hover_warning_is_silent_mid_band_and_loud_at_the_edge():
+    """Both directions, at measured radii."""
+    # Sweet spot: 50.6 mm of 60 asked for — a real clamp, no student impact.
+    mid = _edu6_grasp_ctx()
+    got, logs = _achieved_clearance(mid, 0.120)
+    assert got == pytest.approx(0.0506, abs=0.0005)
+    assert not [m for m in logs if 'Anfahrhöhe' in m]
+    # Near the rim: 11.3 mm — below the cube's own 15 mm top clearance.
+    edge = _edu6_grasp_ctx()
+    got, logs = _achieved_clearance(edge, 0.200)
+    assert got == pytest.approx(0.0113, abs=0.0005)
+    hits = [m for m in logs if 'Anfahrhöhe' in m]
+    assert hits, 'a consequential clamp must be reported'
+    assert 'höher kommt der Arm' in hits[0]
+    assert 'Rand des Greifbereichs' not in hits[0], (
+        'the old reason was FALSE at mid-band radii')
+
+
+# ── F3: no-go zones ───────────────────────────────────────────────────────────
+
+def test_path_guard_inflation_is_not_secretly_shrunk():
+    """The zone inflation MUST NOT be reduced — not globally, not per profile.
+
+    It looks like an over-conservative OMX value a 0.21 m arm should scale down;
+    measured against the edu6 collision meshes it is the opposite. Largest
+    distance from any MOVING-link mesh vertex to the nearest ``link_points``
+    sample — exactly the inflation the Minkowski argument requires — over 326
+    configurations (HOME + 175 strict-vertical grasp poses + 150 random in-limit
+    poses):
+
+        link6 83.6 mm - link2 64.7 mm - link3 48.7 mm - link4 43.3 mm
+        link5 38.7 mm - link1 37.9 mm - End_effector 17.0 mm
+        fingers 44.1 mm at the 1.75 rad command cap (46.6 mm at the URDF limit)
+
+    against a shipped TOTAL of 50 mm. The guard is already 33.6 mm UNDER-covered
+    on the gripper housing, so a shrink widens a real gap. (It is not raised
+    either — see the constant's comment for that trade and its consequence.)
+
+    SCOPE OF THIS TEST, stated honestly because the constant's comment used to
+    overclaim it: this pins the CONSTANTS, the absence of a per-profile override
+    and one source string. It does NOT pin the eight distances — those live in
+    prose here and in the constant's comment, and only a re-measurement against
+    the meshes can falsify them. Two of the numbers above were in fact wrong for
+    a day (fingers, and the earlier 39.7 mm) with this test green throughout."""
+    from physical_ai_server.workflow import path_guard
+    assert path_guard.LINK_RADIUS_M == 0.03
+    assert path_guard.ZONE_MARGIN_M == 0.02
+    assert path_guard.LINK_RADIUS_M + path_guard.ZONE_MARGIN_M == pytest.approx(0.05)
+    # And no ArmProfile may quietly introduce a per-arm override: the ladder must
+    # keep passing the MODULE constant, so there is no seam a "shrink it for the
+    # small arm" change can use without touching this test.
+    from physical_ai_server import robot_profiles
+    import inspect
+    for pid in robot_profiles.ROBOT_PROFILES:
+        prof = robot_profiles.resolve(pid)
+        for field in ('link_radius_m', 'zone_margin_m', 'zone_inflation_m'):
+            assert not hasattr(prof, field), (
+                f'{pid}.{field} exists — shrinking the collision margin per arm '
+                'is a Rule §2-class change and needs the user, not a profile field')
+    src = inspect.getsource(path_guard.plan_safe_route)
+    assert 'link_radius = LINK_RADIUS_M' in src
+
+
+def test_zone_on_the_robot_itself_is_diagnosed_not_blamed_on_the_target():
+    """A small box near the base bricks ALL motion, and the old message
+    („kein sicherer Weg … bitte das Ziel verschieben") sent the student to move a
+    target that was never the problem.
+
+    Cause: ``link_points`` samples the arm's FIXED base column, whose points do
+    not move with the configuration at all — indices 0-5 on edu6 (base ->
+    joint-1 origin) and 0-10 on the OMX (base -> shoulder, on the joint-1 axis).
+    Inflated by 50 mm, a 10 mm box near the base contains an arm point in EVERY
+    pose, so no route can exist."""
+    from physical_ai_server.workflow import path_guard
+    ctx = _real_edu6_ctx()
+    solver = ctx.ik
+    q_start = list(ctx.home_joints_rad) + [ctx.gripper_open_rad]
+    end = solver.solve((solver.base_axis_x + 0.14, 0.0, 0.015),
+                       roll=motion.GRASP_ROLL_RAD)
+    assert end is not None
+    q_end = list(end) + [ctx.gripper_open_rad]
+    zones = [{'min': [0.025, 0.025, 0.0], 'max': [0.035, 0.035, 0.010]}]
+    ctx.zones = zones
+    with pytest.raises(WorkflowError) as excinfo:
+        path_guard.plan_safe_route(ctx, q_start, q_end, zones, 2.5,
+                                   roll=motion.GRASP_ROLL_RAD)
+    msg = str(excinfo.value)
+    assert 'auf dem Roboter selbst' in msg
+    assert '5 cm' in msg, 'the inflation is WHY a 10 mm box swallows the base'
+    assert path_guard._REFUSE_MSG not in msg
+    assert 'das Ziel verschieben' not in msg
+
+
+def test_static_overlap_shortcircuit_never_takes_a_route_the_ladder_could_find():
+    """The correctness rail: the new short-circuit only ever fires where BOTH
+    remaining rungs were already going to fail, so which motions are PERMITTED is
+    bit-identical on both arms — only the diagnosis changed.
+
+    PART A proves the LEMMA the whole argument rests on, over many random
+    geometries on both arms: whenever the short-circuit fires, every segment that
+    touches the offending endpoint is blocked. Since every rung returns legs that
+    start at ``q_start`` and end at ``q_end``, and ``segment_blocked`` samples
+    both endpoints (u = 0 and u = 1), that means every candidate leg list contains
+    a blocked leg — no rung could ever have returned one.
+
+    PART B confirms it end-to-end by calling rungs 2 and 3 DIRECTLY on the
+    canonical base-overlap case (the full 144-candidate base swing, so it is the
+    real rung and not a shrunk stand-in). It is deliberately run ONCE: at ~10 ms
+    per swept ``segment_blocked`` the full rung costs seconds, and repeating it per
+    geometry cost 170 s of a 30 s suite."""
+    from physical_ai_server.workflow import path_guard
+    import random
+    rng = random.Random(20260726)
+    checked = fired = 0
+    for ctx_factory in (_real_edu6_ctx, _omx_ctx_for_path_guard):
+        ctx = ctx_factory()
+        solver = ctx.ik
+        n = solver.num_joints()
+        reach = 0.14 if n == 6 else 0.20
+        grip = 0.0
+        q_start = list(ctx.home_joints_rad or motion.HOME_JOINTS_RAD) + [grip]
+        end = solver.solve((solver.base_axis_x + reach, 0.0,
+                            0.015 if n == 6 else 0.012),
+                           roll=motion.GRASP_ROLL_RAD)
+        assert end is not None
+        q_end = list(end) + [grip]
+        lims = list(solver.joint_limits)
+        for _ in range(40):
+            cx = rng.uniform(-0.05, reach + 0.05)
+            cy = rng.uniform(-0.12, 0.12)
+            half = rng.choice((0.005, 0.01, 0.02, 0.04))
+            top = rng.choice((0.005, 0.02, 0.05, 0.12))
+            zones = [{'min': [cx - half, cy - half, 0.0],
+                      'max': [cx + half, cy + half, top]}]
+            if not path_guard.segment_blocked(solver, q_start, q_end, zones):
+                continue
+            checked += 1
+            msg = path_guard._static_overlap_refusal(
+                solver, q_start, q_end, zones,
+                path_guard.ZONE_MARGIN_M, path_guard.LINK_RADIUS_M)
+            if msg is None:
+                continue
+            fired += 1
+            inf = path_guard.LINK_RADIUS_M + path_guard.ZONE_MARGIN_M
+            start_bad = path_guard._pose_inside_zone(solver, q_start, zones, inf)
+            end_bad = path_guard._pose_inside_zone(solver, q_end, zones, inf)
+            assert start_bad or end_bad
+            # PART A: no leg out of / into the offending endpoint can be clear,
+            # whatever via a rung dreams up.
+            for _k in range(4):
+                via = [rng.uniform(lo, hi) for lo, hi in lims] + [grip]
+                if start_bad:
+                    assert path_guard.segment_blocked(
+                        solver, q_start, via, zones), (
+                        'a leg leaving q_start was NOT blocked — the '
+                        'short-circuit could be discarding a real route')
+                if end_bad:
+                    assert path_guard.segment_blocked(
+                        solver, via, q_end, zones), (
+                        'a leg arriving at q_end was NOT blocked')
+    assert checked > 15, f'only {checked} blocked geometries — weak coverage'
+    assert fired > 5, f'the short-circuit fired only {fired} times — weak coverage'
+
+    # PART B — the canonical case, through the REAL rungs, once.
+    ctx = _real_edu6_ctx()
+    solver = ctx.ik
+    grip = float(ctx.gripper_open_rad)
+    q_start = list(ctx.home_joints_rad) + [grip]
+    end = solver.solve((solver.base_axis_x + 0.14, 0.0, 0.015),
+                       roll=motion.GRASP_ROLL_RAD)
+    assert end is not None
+    q_end = list(end) + [grip]
+    zones = [{'min': [0.025, 0.025, 0.0], 'max': [0.035, 0.035, 0.010]}]
+    assert path_guard._static_overlap_refusal(
+        solver, q_start, q_end, zones, path_guard.ZONE_MARGIN_M,
+        path_guard.LINK_RADIUS_M) is not None, 'premise: the short-circuit fires'
+    assert path_guard._plan_lift_and_travel(
+        ctx, q_start, q_end, zones, path_guard.ZONE_MARGIN_M,
+        path_guard.LINK_RADIUS_M, grip, motion.GRASP_ROLL_RAD, 2.5
+    ) is None, 'lift-and-travel had a route the short-circuit discarded'
+    assert path_guard._plan_base_swing(
+        ctx, q_start, q_end, zones, path_guard.ZONE_MARGIN_M,
+        path_guard.LINK_RADIUS_M, grip, motion.GRASP_ROLL_RAD, 2.5
+    ) is None, 'base-swing had a route the short-circuit discarded'
+
+
+def test_reroute_still_works_when_the_zone_is_only_in_the_way():
+    """The converse: a zone that blocks the PATH but not the ARM still reroutes,
+    so the short-circuit did not swallow the working case.
+
+    Geometry chosen by search, not by taste: on edu6 a reroute needs the INFLATED
+    zone top (drawn height + 50 mm) to sit under a cruise the arm can actually
+    reach, and its ceiling is ~0.0655 m — so the drawn zone must be <= ~10 mm tall
+    (matching the sweep's "every zone >= 10 mm tall hard-refused"). reach 0.09 m /
+    endpoints at y = ±0.08 / a 20 mm box 5 mm tall reroutes in 3 legs, with both
+    endpoints clear of the inflated box."""
+    from physical_ai_server.workflow import path_guard
+    ctx = _real_edu6_ctx()
+    solver = ctx.ik
+    start = solver.solve((solver.base_axis_x + 0.09, -0.08, 0.02),
+                         roll=motion.GRASP_ROLL_RAD)
+    end = solver.solve((solver.base_axis_x + 0.09, 0.08, 0.02),
+                       roll=motion.GRASP_ROLL_RAD)
+    assert start is not None and end is not None
+    q_start = list(start) + [ctx.gripper_open_rad]
+    q_end = list(end) + [ctx.gripper_open_rad]
+    mid = solver.fk([(a + b) / 2.0 for a, b in zip(start, end)])[1]
+    zones = [{'min': [float(mid[0]) - 0.01, float(mid[1]) - 0.01, 0.0],
+              'max': [float(mid[0]) + 0.01, float(mid[1]) + 0.01, 0.005]}]
+    assert path_guard.segment_blocked(solver, q_start, q_end, zones)
+    assert path_guard._static_overlap_refusal(
+        solver, q_start, q_end, zones, path_guard.ZONE_MARGIN_M,
+        path_guard.LINK_RADIUS_M) is None, 'premise: the arm is NOT in the zone'
+    legs = path_guard.plan_safe_route(ctx, q_start, q_end, zones, 2.5,
+                                      roll=motion.GRASP_ROLL_RAD)
+    assert len(legs) >= 2, 'a genuine reroute must still be found'
+
+
+# ── F7: sim_held_floor_rad on edu6 ────────────────────────────────────────────
+
+def test_sim_held_floor_is_inert_for_every_legal_edu6_close():
+    """``sim_held_floor_rad=0.05`` can never win its own ``max()`` on this arm.
+
+    ``sim_arm.get_joints`` reports a blocked jaw as
+    ``max(held_floor, commanded + held_block_offset)`` and only treats a command
+    below ``sim_close_threshold_rad`` as a CLOSE. edu6's legal band is 0.0…1.75
+    and ``close_on_object`` clamps into it, so every value that can reach the
+    max() is in [0.0, 1.5) -> commanded + 0.19 in [0.19, 1.69) > 0.05 always.
+
+    Kept deliberately (see the profile comment): the FIELD is live on the OMX, and
+    dropping edu6's override would inherit the OMX -0.1 — equally inert, but a
+    negative number on a gripper that never goes negative. This test is what makes
+    the claim falsifiable if the band or the threshold ever moves."""
+    from physical_ai_server import robot_profiles
+    from physical_ai_server.workflow.sim_arm import SimArm
+    p = robot_profiles.resolve(_PROFILE_ID)
+    floor = p.sim_held_floor_rad
+    offset = p.sim_held_block_offset_rad
+    lo, hi = p.gripper_closed_rad, p.sim_close_threshold_rad
+    assert floor is not None and offset is not None
+    steps = 200
+    for k in range(steps):
+        c = lo + (hi - lo) * k / steps
+        assert max(floor, c + offset) == pytest.approx(c + offset), (
+            f'the floor became load-bearing at close={c} — it is no longer dead '
+            'config and needs a real, reviewed value')
+    # ...and prove it through the REAL SimArm readback, not just arithmetic.
+    solver = p.build_ik()
+    ox, oy = solver.base_axis_x + 0.14, 0.0
+    grasp = solver.solve((ox, oy, 0.015), roll=motion.GRASP_ROLL_RAD)
+    assert grasp is not None
+    arm = SimArm(ik=solver, num_arm_joints=6,
+                 home_full_joints=list(p.home_joints_rad) + [p.gripper_open_rad],
+                 objects=[{'type': 'wuerfel', 'x': ox, 'y': oy}],
+                 close_threshold_rad=p.sim_close_threshold_rad,
+                 held_block_offset_rad=offset, held_floor_rad=floor)
+    for close in (0.0, 0.2, 1.0, 1.49):
+        arm.publish([(list(grasp) + [close], 0.0)])
+        assert arm.get_joints()[6] == pytest.approx(close + offset), (
+            'the readback must be offset-driven, never floor-driven')

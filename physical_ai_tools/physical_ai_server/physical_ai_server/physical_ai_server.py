@@ -2474,7 +2474,8 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 self._active_calib_step = request.step
                 if not self._set_follower_torque(False):
                     message += (' [Hinweis: Arm konnte nicht automatisch '
-                                'freigeschaltet werden — bitte vorsichtig führen.]')
+                                'freigeschaltet werden — bitte vorsichtig führen.'
+                                + self._last_torque_reason() + ']')
                 self._set_calibration_active(True)
             response.success = success
             response.message = message
@@ -2489,15 +2490,43 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         response.message = message
         return response
 
+    def _last_torque_reason(self) -> str:
+        """The driver's OWN German reason for the most recent FAILED torque
+        switch, as a ready-to-append clause — or '' when there is none.
+
+        ``std_srvs/SetBool`` carries a ``message`` alongside ``success`` and it was
+        thrown away (``ok = bool(getattr(res, 'success', False))``), so a specific
+        refusal reached the container Protokoll (the driver logs it) but never the
+        Roboter-Studio toast, where the student was handed a generic „bitte die
+        Umgebung neu starten" instead. The edu6 driver returns real reasons there
+        (``edu6_arm_node._torque_cb`` → ``self._torque_refusal``), e.g. a joint
+        parked on the position-map edge — which points at a hand-guide habit, not
+        at a cable.
+
+        OMX identity: this returns '' unless ``message`` is a non-empty string, so
+        a Dynamixel response with an empty/absent ``message`` appends NOTHING and
+        every German string on the shared paths is byte-identical. The success
+        message is never stored (the edu6 driver answers a literal 'ok' there, and
+        nothing wants that in a toast)."""
+        reason = getattr(self, '_follower_torque_last_message', '')
+        if not isinstance(reason, str) or not reason.strip():
+            return ''
+        return f' Grund: {reason.strip()}'
+
     def _set_follower_torque(self, enabled: bool) -> bool:
         """Enable/disable follower servo torque via the Dynamixel hardware
         interface (std_srvs/SetBool, ABI-safe). Used by the touch-off step to
         let the student hand-guide the limp arm, then re-torque on finish.
         Returns True on a confirmed switch.
 
+        The BOOL return is deliberately unchanged (five call sites and four test
+        doubles depend on it); the failure REASON is stashed on
+        ``_follower_torque_last_message`` for :meth:`_last_torque_reason`.
+
         Held under _dxl_torque_lock so the lazily-created client and the
         call_async are atomic against a concurrent cancel on the reentrant
         preempt group (see the lock's init comment)."""
+        self._follower_torque_last_message = ''
         with self._dxl_torque_lock:
             try:
                 from std_srvs.srv import SetBool
@@ -2530,6 +2559,14 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                     return False
                 res = future.result()
                 ok = bool(getattr(res, 'success', False)) if res is not None else False
+                if not ok:
+                    # Keep the driver's OWN reason for the toast (see
+                    # _last_torque_reason). Only on FAILURE, and only when it is a
+                    # non-empty string, so an OMX response with no message keeps
+                    # every German string byte-identical.
+                    detail = getattr(res, 'message', None) if res is not None else None
+                    if isinstance(detail, str) and detail.strip():
+                        self._follower_torque_last_message = detail.strip()
                 if ok:
                     # Track the confirmed torque state for the idle watchdog so it
                     # knows whether a limp arm needs re-torquing.
@@ -2574,7 +2611,7 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         response.message = (
             'Arm konnte nicht wieder verriegelt werden — der Greifer ist noch '
             'frei beweglich. Bitte die Umgebung neu starten, bevor du '
-            'fortfährst.'
+            'fortfährst.' + self._last_torque_reason()
         )
         response.success = False
         return False
@@ -3374,14 +3411,16 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                         response.message = (
                             'Arm konnte wiederholt nicht verriegelt werden — der '
                             'Handbetrieb wurde zurückgesetzt. Bitte die Umgebung '
-                            'neu starten, bevor der Arm weiter bewegt wird.')
+                            'neu starten, bevor der Arm weiter bewegt wird.'
+                            + self._last_torque_reason())
                         return response
                     # Keep the ref (protect a possibly-limp arm); retry re-locks on
                     # the next call (bounded by the limit above). The idle watchdog
                     # resets the retained ref if the session is then left idle.
                     keep_session = True
                     response.message = ('Arm konnte nicht verriegelt werden — bitte '
-                                        'die Umgebung neu starten.')
+                                        'die Umgebung neu starten.'
+                                        + self._last_torque_reason())
                     return response
                 self._manual_torque_fail_count = 0  # reset on a successful switch
                 joints = None
@@ -3594,7 +3633,8 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                         self._manual_persistent = was_persistent
                         self._recompute_on_manual_locked()
                     response.message = ('Arm konnte nicht freigeschaltet werden '
-                                        '— bitte die Umgebung neu starten.')
+                                        '— bitte die Umgebung neu starten.'
+                                        + self._last_torque_reason())
                     return response
                 response.success = True
                 response.message = ('Arm ist frei beweglich — du kannst ihn von '
@@ -3731,7 +3771,8 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                         self._manual_persistent = was_persistent
                         self._recompute_on_manual_locked()
                     response.message = ('Arm konnte nicht freigeschaltet werden '
-                                        '— bitte die Umgebung neu starten.')
+                                        '— bitte die Umgebung neu starten.'
+                                        + self._last_torque_reason())
                     return response
                 self._handguide_buffer = []
                 self._manual_record_cap_reached = False  # fresh recording
@@ -4569,6 +4610,55 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         )
         return self.sim_workflow_manager
 
+    def _warn_sim_objects_beyond_tag_capacity(self, objects) -> None:
+        """Tell the STUDENT, in the editor's own log strip, when more virtual
+        objects of a type were placed than the runtime can address.
+
+        ``SimPerception`` caps each type at ``len(recipe.tag_ids)`` (2 for the
+        shipped „Würfel") and assigns tag ids by PLACEMENT ORDER — the caller's
+        ``tag_id`` is ignored entirely, verified 2026-07-26: reversing the sent
+        ids changes nothing about the assignment. Its overflow warning went to
+        ``_logger`` only, i.e. into the container log the student never opens, so
+        a 3rd cube sitting in plain view inside the reach band simply never became
+        a detection — and the student was then told „Kein „Würfel" SICHTBAR —
+        bitte das Objekt in den markierten Greifbereich legen", blaming them for
+        the one thing that was not wrong.
+
+        Emitted on the SAME channel ``ctx.log`` uses (``_emit_workflow_status``'s
+        ``log_message``), so it lands in the Protokoll the editor already renders.
+        Best-effort throughout: a diagnostic must never stop a run from starting.
+        """
+        try:
+            if not objects:
+                return
+            catalog = self._load_object_catalog_tolerant()
+            if catalog is None:
+                return
+            placed: dict = {}
+            for obj in objects:
+                if not isinstance(obj, dict):
+                    continue
+                type_name = obj.get('type')
+                if type_name:
+                    placed[type_name] = placed.get(type_name, 0) + 1
+            for type_name, count in placed.items():
+                try:
+                    recipe = catalog.recipe_for_type(type_name)
+                except Exception:  # noqa: BLE001 — unknown type: not this warning
+                    continue
+                capacity = len(recipe.tag_ids)
+                if count <= capacity:
+                    continue
+                self._emit_workflow_status({'log_message': (
+                    f'[WARNUNG] {count} „{recipe.label_de}" platziert, der '
+                    f'Simulator kann aber nur {capacity} gleichzeitig erkennen '
+                    f'(es gibt nur {capacity} Marker für diesen Typ). Die '
+                    f'{count - capacity} zuletzt platzierten werden nicht '
+                    'erkannt — bitte entfernen, sonst bleiben sie einfach '
+                    'liegen.')})
+        except Exception as e:  # noqa: BLE001 — never block a start on a warning
+            self.get_logger().warning(f'sim capacity warning failed: {e}')
+
     def _load_object_catalog(self):
         """Return the fixed named-object catalog (tag_id → type → grasp recipe):
         a single hardcoded set baked into the image, identical on every machine
@@ -4841,6 +4931,7 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         if sim_enabled:
             raw_objs = sim_cfg.get('objects')
             self._sim_objects = list(raw_objs) if isinstance(raw_objs, list) else []
+            self._warn_sim_objects_beyond_tag_capacity(self._sim_objects)
             manager = self._get_or_create_sim_workflow_manager()
             if manager is None:
                 response.success = False

@@ -455,5 +455,28 @@ class IKSolver:
 
 
 def _wrap(a: float) -> float:
-    """Wrap an angle to (-pi, pi]."""
+    """Wrap an angle to **[-pi, pi)** — note the half-open end, it matters.
+
+    An earlier docstring claimed ``(-pi, pi]``, i.e. that ``-pi`` is NOT in the
+    range. That is backwards, and backwards in the load-bearing direction:
+    verified by execution, ``_wrap(pi)``, ``_wrap(-pi)`` and ``_wrap(3*pi)`` all
+    return exactly ``-3.141592653589793``. On the Dynamixel tick map that is
+    **tick 0, the register floor** — the very edge the old docstring asserted
+    could not be produced, produced for every odd multiple of pi.
+
+    Why that is not merely pedantic: ``solve()`` returns ``_wrap(theta5)`` and
+    ``joint5`` is the live tag-tracking roll (``motion.py``:
+    ``base_yaw - tag_yaw + GRASP_ROLL_RAD``), so a marker angle can legitimately
+    land it on tick 0. The follower's ``dxl14``/``dxl15`` are Operating Mode 3
+    with ``Min/Max Position Limit`` set to the FULL register range (0 / 4095) in
+    ``omx_f.ros2_control.xacro``, i.e. zero clearance from the seam — the same
+    shape that made the edu6 J4/J6 seam-parking hazard (docs
+    ``edu6-hardware-bringup.md`` 3.4). The OMX is saved from a RUNAWAY only by
+    its 100 Hz re-anchored ``ros2_control`` stream, which re-commands a fresh
+    goal every 10 ms; what it is NOT saved from is a ~359 deg wrist DETOUR when
+    two consecutive grasp rolls straddle the seam, because
+    ``trajectory_builder.build_segment`` does a straight joint-space delta with
+    no shortest-path unwrapping. Unmitigated and unmeasured on hardware; the
+    edu6 J6 jaw fold cannot be reused here (asymmetric jaws, 3.3 mm shift).
+    """
     return (a + math.pi) % (2.0 * math.pi) - math.pi

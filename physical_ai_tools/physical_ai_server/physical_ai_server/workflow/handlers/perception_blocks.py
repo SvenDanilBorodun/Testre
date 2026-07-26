@@ -488,6 +488,84 @@ def _detect_named(ctx, type_name, exclude_ids=None, reclaim=False) -> list:
     return _attach_named_world(ctx, kept, recipe)
 
 
+# ── why is it out of reach? (F4) ─────────────────────────────────────────────
+# „außerhalb des Greifbereichs — bitte NÄHER legen" was emitted for every
+# unreachable object, including one that is too NEAR the base (where moving it
+# nearer is the exact opposite of the fix) and one behind/beside the arm (where
+# no radial move helps at all — joint 1 simply cannot aim there). Rather than
+# hard-code per-arm reach bounds (which would then drift from the solver), we ASK
+# the solver: scan the object's OWN bearing at the object's OWN height and see
+# where along that ray the arm can actually go.
+#
+# Cost: <= _REACH_PROBE_MAX_M / _REACH_PROBE_STEP_M closed-form solves (80), once
+# per FAILED find — never on the success path, never per motion step.
+_REACH_PROBE_STEP_M = 0.005
+_REACH_PROBE_MAX_M = 0.40
+
+
+def _out_of_reach_reason(ctx, label_de: str, xyz) -> str:
+    """German sentence naming WHY ``xyz`` is out of reach for THIS arm.
+
+    Distinguishes too-near / too-far / wrong-bearing by probing the real solver
+    along the target's own bearing; falls back to the direction-neutral wording
+    (true in every case) when there is no solver or the ray is unusable."""
+    generic = (
+        f'„{label_de}" gesehen, aber außerhalb des Greifbereichs — bitte das '
+        'Objekt in den markierten Greifbereich legen (nicht zu nah am Roboter, '
+        'nicht zu weit weg).'
+    )
+    ik = getattr(ctx, 'ik', None)
+    if ik is None:
+        return generic
+    try:
+        x, y, z = (float(v) for v in xyz)
+        axis_x = float(getattr(ik, 'base_axis_x', 0.0))
+        dx = x - axis_x
+        r = math.hypot(dx, y)
+        if r <= 1e-9:
+            return generic
+        ux, uy = dx / r, y / r
+        reachable = []
+        steps = int(_REACH_PROBE_MAX_M / _REACH_PROBE_STEP_M)
+        for k in range(1, steps + 1):
+            rr = k * _REACH_PROBE_STEP_M
+            if ik.solve((axis_x + ux * rr, uy * rr, z)) is not None:
+                reachable.append(rr)
+    except Exception:  # noqa: BLE001 — a diagnostic must never break the run
+        return generic
+    if not reachable:
+        # No radius along this bearing solves: joint 1 cannot aim here at all
+        # (behind the arm / too far to the side), or this height is unreachable
+        # everywhere on that ray.
+        return (
+            f'„{label_de}" gesehen, aber der Arm kommt in diese Richtung nicht — '
+            'bitte das Objekt VOR den Roboter in den markierten Greifbereich '
+            'legen.'
+        )
+    if r < min(reachable):
+        return (
+            f'„{label_de}" gesehen, aber zu nah am Roboter — bitte das Objekt '
+            'etwas WEITER WEG in den markierten Greifbereich legen.'
+        )
+    if r > max(reachable):
+        return (
+            f'„{label_de}" gesehen, aber zu weit weg — bitte das Objekt '
+            'NÄHER an den Roboter in den markierten Greifbereich legen.'
+        )
+    return generic
+
+
+def _note_find_failure(ctx, reason) -> None:
+    """Record (or clear, with ``None``) WHY the last „finde" produced no
+    Greifziel, so the split motion blocks can say it instead of the generic
+    „you never ran finde" message (see ``motion._no_greifziel_error``). Plain
+    attribute on the per-run ctx — never raises."""
+    try:
+        ctx.last_find_failure = reason
+    except Exception:  # noqa: BLE001 — a diagnostic must never break the run
+        pass
+
+
 def _select_nearest_reachable(ctx, detections):
     """Nearest (base-frame distance) reachable detection with a known grasp
     point; tie-break by tag id for determinism. Returns the Detection or None."""
@@ -657,10 +735,12 @@ def grasp_object(ctx, args: dict[str, Any]) -> None:
                 # retreat→redetect→fail forever; standalone fails loud.
                 for d in detections:
                     _skip_tag(ctx, d.aruco_id)
-                raise GraspSkip(
-                    f'„{recipe.label_de}" gesehen, aber außerhalb des Greifbereichs — '
-                    'bitte näher in den markierten Bereich legen.'
-                )
+                # Direction-correct reason, shared with find_object (F4): the old
+                # text told the student to move a TOO-NEAR object even nearer.
+                raise GraspSkip(_out_of_reach_reason(
+                    ctx, recipe.label_de,
+                    next((d.world_xyz_m for d in detections
+                          if d.world_xyz_m is not None), (0.0, 0.0, 0.0))))
             _motion._require_seeded_start_pose(ctx)
             x, y, z = target.world_xyz_m
             # Refine the SELECTED target's yaw over N frames (circular mean + R
@@ -683,8 +763,18 @@ def grasp_object(ctx, args: dict[str, Any]) -> None:
             roll = _motion.compute_grasp_roll(ctx, x, y, tag_yaw)
             close_rad = float(target.extras.get('gripper_close_rad',
                                                 _motion._gripper_closed(ctx)))
-            _motion._execute_pickup(
-                ctx, (x, y, z), float(recipe.approach_clear_m), roll, close_rad)
+            try:
+                _motion._execute_pickup(
+                    ctx, (x, y, z), float(recipe.approach_clear_m), roll, close_rad)
+            except GraspSkip:
+                # The ONLY GraspSkip `_execute_pickup` can raise is the
+                # no-approach-clearance refusal (F1): this instance sits at a
+                # radius where the arm cannot come down on it at all. Mark it
+                # SKIPPED before re-raising so a „Solange sichtbar" loop excludes
+                # it next pass and TERMINATES, instead of re-selecting the same
+                # cube until the 3-pass stall guard trips.
+                _skip_tag(ctx, target.aruco_id)
+                raise
             held = _motion.check_grasp_held(ctx)
             if held is False:
                 # The jaws closed empty — the object slipped or was mis-pinched.
@@ -815,6 +905,9 @@ def find_object(ctx, args: dict[str, Any]):
     recipe = _recipe_for(_require_catalog(ctx), type_name)
     detections = _detect_named_unclaimed(ctx, type_name)
     if not detections:
+        _note_find_failure(ctx, (
+            f'Kein „{recipe.label_de}" sichtbar — bitte das Objekt in den '
+            'markierten Greifbereich legen.'))
         return None
     target = _select_nearest_reachable(ctx, detections)
     if target is None:
@@ -831,11 +924,16 @@ def find_object(ctx, args: dict[str, Any]):
         # until the 3-pass stall guard trips with the scary „kein Fortschritt".
         for d in detections:
             _skip_tag(ctx, d.aruco_id)
+        # Direction-correct reason (the old text said „näher legen" even for an
+        # object that was too NEAR), recorded on the ctx so „fahre über" / „senke
+        # auf" / „schließe um" report it instead of „Kein Greifziel".
+        reason = _out_of_reach_reason(
+            ctx, recipe.label_de,
+            next((d.world_xyz_m for d in detections if d.world_xyz_m is not None),
+                 (0.0, 0.0, 0.0)))
+        _note_find_failure(ctx, reason)
         try:
-            ctx.log(
-                f'[WARNUNG] „{recipe.label_de}" gesehen, aber außerhalb des '
-                'Greifbereichs — bitte näher in den markierten Bereich legen.'
-            )
+            ctx.log(f'[WARNUNG] {reason}')
         except Exception:
             pass
         return None
@@ -848,6 +946,9 @@ def find_object(ctx, args: dict[str, Any]):
         # trips and ends the whole loop. Returns None so a standalone „finde"
         # null-checks cleanly.
         _skip_tag(ctx, target.aruco_id)
+        _note_find_failure(ctx, (
+            f'„{recipe.label_de}" erkannt, aber die Ausrichtung konnte nicht '
+            'bestimmt werden — bitte den Tag flach und gut sichtbar aufkleben.'))
         try:
             ctx.log(
                 f'[WARNUNG] „{recipe.label_de}" erkannt, aber die Ausrichtung '
@@ -858,6 +959,7 @@ def find_object(ctx, args: dict[str, Any]):
         return None
     target.extras['tag_yaw'] = tag_yaw
     target.extras['approach_clear_m'] = float(recipe.approach_clear_m)
+    _note_find_failure(ctx, None)   # a real Greifziel — no stale reason survives
     return target
 
 
@@ -899,10 +1001,8 @@ def mark_done(ctx, args: dict[str, Any]) -> None:
     if ziel is None:
         # Recoverable skip (consistent with the split motion blocks) so an
         # unguarded loop body moves on instead of aborting; standalone fails loud.
-        raise GraspSkip(
-            'Kein Greifziel — bitte „finde …" benutzen, das Ergebnis in einer '
-            'Variable speichern und mit „falls" prüfen.'
-        )
+        # Same reason-promotion as the motion blocks (F4).
+        raise _motion._no_greifziel_error(ctx)
     tag_id = getattr(ziel, 'aruco_id', None)
     if tag_id is None:
         raise WorkflowError('Greifziel hat keine Marker-ID.')

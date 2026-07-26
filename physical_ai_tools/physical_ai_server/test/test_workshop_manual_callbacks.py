@@ -65,6 +65,11 @@ _CB = _load([
     'workshop_record_callback', 'workshop_replay_callback',
     '_manual_record_sample', '_run_replay', '_finish_manual_record_on_cap',
     '_manual_idle_watchdog_cb',
+    # F8 (2026-07-26): the German torque-failure messages now append the DRIVER's
+    # own reason through this helper. Extracted (not stubbed) so these tests keep
+    # exercising the literal shipped code — including its "no message → append
+    # NOTHING" branch, which is what keeps the OMX strings byte-identical.
+    '_last_torque_reason',
 ], _G)
 
 
@@ -169,7 +174,17 @@ class _FakeNode:
 
     def _set_follower_torque(self, enabled):
         self.torque_calls.append(enabled)
+        # Mirror the real method's contract: it CLEARS the stashed reason on entry
+        # and only re-stashes one when the service answered with a non-empty
+        # message. A double that never sets it means "the driver gave no reason",
+        # i.e. the OMX-identical path.
+        self._follower_torque_last_message = getattr(
+            self, 'next_torque_reason', '')
         return self._torque_ok
+
+    # The REAL helper (extracted above), so the German strings these tests assert
+    # on are the ones production builds.
+    _last_torque_reason = _CB['_last_torque_reason']
 
     def _retorque_follower_or_keep_locked(self, response):
         self.torque_calls.append('retorque')
@@ -887,3 +902,100 @@ def test_cap_finish_retorque_failure_keeps_session():
 
 if __name__ == '__main__':
     raise SystemExit(pytest.main([__file__, '-q']))
+
+
+# ── F8 (2026-07-26): the torque refusal REASON must reach the student ─────────
+# `_set_follower_torque` did `ok = bool(getattr(res, 'success', False))` and threw
+# `res.message` away, so the driver's own German reason reached the container
+# Protokoll (the driver logs it) but never the Roboter-Studio toast — where the
+# student got a generic „bitte die Umgebung neu starten" instead. The edu6 driver
+# returns real reasons there (`edu6_arm_node._torque_cb` → `_torque_refusal`),
+# e.g. a joint parked on the position-map edge, which points at a hand-guide
+# habit rather than at a cable.
+
+_OMX_HANDGUIDE_REFUSAL = ('Arm konnte nicht freigeschaltet werden '
+                          '— bitte die Umgebung neu starten.')
+
+
+def test_torque_refusal_reason_is_appended_when_the_driver_gives_one():
+    node = _FakeNode(torque_ok=False)
+    node.next_torque_reason = 'Gelenk 6 steht auf der Kartengrenze (±180°).'
+    resp = _hg(node, True)
+    assert resp.success is False
+    # The generic sentence is still there (it is still the right next step)...
+    assert _OMX_HANDGUIDE_REFUSAL in resp.message
+    # ...and the ACTIONABLE part is now too.
+    assert 'Gelenk 6' in resp.message
+    assert 'Grund:' in resp.message
+
+
+def test_torque_refusal_message_is_byte_identical_without_a_driver_reason():
+    """THE OMX rail. The Dynamixel hardware interface may answer with an empty
+    ``message``; then not one character may change on any shared path."""
+    for reason in ('', '   ', None, 0, object()):
+        node = _FakeNode(torque_ok=False)
+        node.next_torque_reason = reason
+        resp = _hg(node, True)
+        assert resp.message == _OMX_HANDGUIDE_REFUSAL, (
+            f'reason={reason!r} changed the shared German string to {resp.message!r}')
+
+
+def test_torque_reason_helper_is_pure_and_defensive():
+    """``_last_torque_reason`` is called on every failure path, so it must never
+    raise and must never leak a non-string."""
+    helper = _CB['_last_torque_reason']
+    blank = types.SimpleNamespace()
+    assert helper(blank) == ''                      # attribute absent entirely
+    for bad in ('', '  \t ', None, 123, [], {'a': 1}):
+        assert helper(types.SimpleNamespace(
+            _follower_torque_last_message=bad)) == '', repr(bad)
+    got = helper(types.SimpleNamespace(
+        _follower_torque_last_message='  Bus antwortet nicht.  '))
+    assert got == ' Grund: Bus antwortet nicht.'
+
+
+def test_record_start_torque_off_failure_also_carries_the_reason():
+    """The second torque-OFF site (Aufnahme) shares the same string."""
+    node = _FakeNode(torque_ok=False)
+    node.next_torque_reason = 'Servo 3 meldet Überlast.'
+    resp = _rec(node, 'start')
+    assert resp.success is False
+    assert _OMX_HANDGUIDE_REFUSAL in resp.message
+    assert 'Servo 3' in resp.message
+
+
+def test_jog_torque_on_failure_carries_the_reason():
+    """And the torque-ON site (jog)."""
+    node = _FakeNode(torque_ok=False)
+    node.next_torque_reason = 'Ziel-Position konnte nicht gelesen werden.'
+    resp = _jog(node, delta=0.1)
+    assert resp.success is False
+    assert 'Arm konnte nicht verriegelt werden' in resp.message
+    assert 'Ziel-Position' in resp.message
+
+
+def test_set_follower_torque_clears_the_stash_on_every_call():
+    """A stale reason from an earlier failure must never be pinned to a later
+    message — the real method assigns '' as its FIRST statement."""
+    source = _SERVER_PY.read_text(encoding='utf-8')
+    tree = ast.parse(source)
+    fn = next(n for n in ast.walk(tree)
+              if isinstance(n, ast.FunctionDef) and n.name == '_set_follower_torque')
+    first = fn.body[0]
+    # (docstrings live in fn.body[0] as an Expr; the assignment is body[1])
+    stmts = [s for s in fn.body if not isinstance(s, ast.Expr)]
+    assert isinstance(stmts[0], ast.Assign), ast.dump(stmts[0])
+    assert ast.unparse(stmts[0]) == "self._follower_torque_last_message = ''", (
+        'the stash must be cleared before the switch is attempted')
+    assert isinstance(first, ast.Expr), 'expected the docstring to still be first'
+
+
+def test_only_a_failed_switch_stores_a_reason():
+    """The edu6 driver answers a literal ``'ok'`` in ``message`` on SUCCESS —
+    that must never end up in a toast, so the stash is written only on failure."""
+    source = _SERVER_PY.read_text(encoding='utf-8')
+    idx = source.index('self._follower_torque_last_message = detail.strip()')
+    window = source[idx - 700:idx]
+    assert 'if not ok:' in window, (
+        'the reason must be captured under a NOT-ok guard, or a successful '
+        "switch's 'ok' message would surface to the student")

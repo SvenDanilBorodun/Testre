@@ -261,6 +261,23 @@ _EDU6_STUDIO = ArmProfile(
     grasp_held_margin_rad=0.12,
     sim_close_threshold_rad=1.5,
     sim_held_block_offset_rad=0.19,
+    # INERT BY CONSTRUCTION on this arm, and kept anyway — deliberately, with the
+    # proof, rather than left looking like a tuned rig value (2026-07-26 audit F7).
+    # ``sim_arm.get_joints`` reports a blocked jaw as
+    #     max(held_floor, commanded + held_block_offset)
+    # and ``_simulate_held`` only treats a command as a CLOSE when it is below
+    # ``sim_close_threshold_rad`` (1.5). This gripper's legal band is 0.0…1.75
+    # (``gripper_closed_rad``…``gripper_open_rad``, and ``close_on_object`` clamps
+    # into exactly that band), so every value that can reach the max() is in
+    # [0.0, 1.5) → commanded + 0.19 ∈ [0.19, 1.69) → strictly greater than 0.05
+    # for EVERY legal close. The floor can therefore never win the max().
+    # It stays because the FIELD is live on the OMX (cube close −0.5 + 0.25 =
+    # −0.25, floored to −0.1) and dropping edu6's override would inherit that
+    # OMX −0.1 — numerically just as inert, but a negative number on a gripper
+    # that never goes negative, i.e. actively misleading to the next reader.
+    # ``test_sim_held_floor_is_inert_for_every_legal_edu6_close`` pins the proof,
+    # so widening the band or lowering the close threshold surfaces it instead of
+    # silently making a never-reviewed number load-bearing.
     sim_held_floor_rad=0.05,
     # Reroute-ladder geometry, MEASURED through the real solver (2026-07-26).
     # Max solvable TCP height is ~0.065 m (at r≈0.10-0.14); joint5's +110° relief

@@ -71,6 +71,9 @@ class _StubNode:
     def _set_follower_torque(self, enabled):
         assert enabled is True, 'the helper only ever re-torques (True)'
         self.calls += 1
+        # Mirrors the real method: the reason stash is (re)written on every call,
+        # and stays EMPTY unless the service answered with a non-empty message.
+        self._follower_torque_last_message = getattr(self, 'next_reason', '')
         return self._results.pop(0) if self._results else False
 
     def get_logger(self):
@@ -78,6 +81,9 @@ class _StubNode:
 
 
 _retorque = _load_method('_retorque_follower_or_keep_locked')
+# F8: the German failure message now appends the DRIVER's own reason via this
+# helper — extracted verbatim so these tests exercise the shipped code.
+_StubNode._last_torque_reason = _load_method('_last_torque_reason')
 
 
 def test_retorque_success_first_try_returns_true():

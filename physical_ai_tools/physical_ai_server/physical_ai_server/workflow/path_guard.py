@@ -54,6 +54,48 @@ _logger = logging.getLogger(__name__)
 # Half-thickness of the arm links, used to inflate every zone box (so a
 # link-CENTRE containment test conservatively covers the link's physical
 # girth). Tuned conservatively; keep zones a little off the table/target.
+#
+# DO NOT SHRINK THIS — not even "per profile for the smaller arm". It looks like
+# an over-conservative OMX-sized value that a 0.21 m-reach arm should scale down,
+# and it is the opposite. Measured 2026-07-26 against the edu6 collision meshes
+# (``physical_ai_manager/public/edu6-urdf/edu6.urdf`` + its STLs), over 326
+# configurations (HOME, 175 strict-vertical grasp poses across the pick band, 150
+# random in-limit poses): the largest distance from ANY moving-link mesh vertex to
+# the NEAREST ``link_points`` sample — which is exactly the inflation the
+# Minkowski "fatten the obstacle, test link centres" argument requires — is
+#
+#     link6  83.6 mm   ← the wrist/gripper housing (80 x 117 x 67 mm), whose body
+#                        spreads far off the tool-axis centreline link_points samples
+#     link2  64.7 mm     link3 48.7 mm    link4 43.3 mm
+#     link5  38.7 mm     link1 37.9 mm    End_effector 17.0 mm
+#     fingers 44.1 mm at the 1.75 rad command cap (46.6 mm at the URDF limit)
+#              ← re-measured; an earlier revision said 39.7 mm. After the two
+#                breaches above this is the figure CLOSEST to the 50 mm total,
+#                i.e. the third thing that would break first if it were shrunk.
+#
+# against a shipped TOTAL inflation of LINK_RADIUS_M + ZONE_MARGIN_M = 50 mm. The
+# guard is therefore already 33.6 mm UNDER-covered on this arm, so shrinking it
+# would widen a real gap on the very link that carries the student's object into
+# the obstacle.
+#
+# It is not RAISED to 83.6 mm either, and that is a deliberate, disclosed trade:
+# a 10 mm drawn box would then inflate to 177 mm across, against a measured pick
+# band of only 176 mm (r ∈ [0.0325, 0.2082]) — every in-band zone would refuse
+# the entire band, i.e. the feature would be gone, and a Sperrzone nobody can
+# draw guards nothing. Widening it is also a Rule §2-class change to a collision
+# margin, so it is the user's call, not this module's. CONSEQUENCE, recorded so
+# it is not rediscovered as a surprise: on edu6 a no-go zone protects the arm's
+# LINKS conservatively but can let the gripper HOUSING clip an obstacle by up to
+# ~34 mm. The physical backstops are the servo current limits (gripper
+# Max_Torque 150, arm 800); rig gate R7 is where this gets a verdict. The real
+# fix is for ``edu6_ik.link_points`` to sample link6's girth instead of only its
+# axis — a solver change, out of scope here.
+#
+# ``test_path_guard_inflation_is_not_secretly_shrunk`` pins the CONSTANTS, the
+# absence of any per-profile override field, and one source string. It does NOT
+# pin the eight distances above — they are prose, and only a re-measurement
+# against the meshes can falsify them (two were wrong for a day with that test
+# green). Re-measure before quoting them; do not treat the test as their guard.
 LINK_RADIUS_M = 0.03
 # Extra user safety margin added to the inflation on top of the link radius.
 ZONE_MARGIN_M = 0.02
@@ -97,6 +139,66 @@ _REFUSE_MSG = (
     'Kein sicherer Weg um die Sperrzone gefunden — bitte die Sperrzone '
     'anpassen oder das Ziel verschieben.'
 )
+
+
+def _pose_inside_zone(ik, q, zones, inflation: float) -> bool:
+    """True when the arm STANDING STILL at ``q`` already has a link point inside
+    an inflated zone. Mirrors ``segment_blocked``'s backward-safe contract: a
+    solver that cannot produce link points reports False (never blocks motion it
+    cannot reason about)."""
+    boxes = build_zones(zones, inflation)
+    if not boxes:
+        return False
+    try:
+        pts = ik.link_points(list(q)[:ik.num_joints()],
+                            samples_per_link=_LINK_SAMPLES)
+    except Exception:  # noqa: BLE001 — diagnosis must never break the guard
+        return False
+    if pts is None:
+        return False
+    return any(box.contains(p) for p in pts for box in boxes)
+
+
+def _static_overlap_refusal(ik, q_start, q_end, zones, margin, link_radius):
+    """The German refusal for a zone that overlaps the ARM rather than its path,
+    or ``None`` when that is not the situation.
+
+    Why this is provably the right diagnosis and not a guess: every rung of the
+    ladder returns legs that START at ``q_start`` and END at ``q_end``, and
+    ``segment_blocked`` samples both endpoints (``u = 0`` and ``u = 1``). So if a
+    link point is inside an inflated zone at either endpoint, EVERY candidate
+    route is blocked and no reroute can ever exist — the search is hopeless
+    before it begins, and the generic „kein sicherer Weg … bitte das Ziel
+    verschieben" sends the student off to move a target that was never the
+    problem.
+
+    This is how a small box near the base bricks all motion: ``link_points``
+    samples the arm's fixed base column, whose points do not move with the
+    configuration at all — indices 0-5 on edu6 (base → joint-1 origin, within
+    26 mm of the origin) and, WORSE, indices 0-10 on the OMX (base → shoulder,
+    out to 98 mm, because they sit on the joint-1 rotation axis). A zone drawn
+    within the inflation of those points contains an arm point in every
+    conceivable pose. The refusal itself is KEPT (the zone genuinely does overlap
+    the robot, and no motion can undo that); only the diagnosis changes, so which
+    motions are permitted is bit-identical on both arms."""
+    inflation = link_radius + margin
+    start_bad = _pose_inside_zone(ik, q_start, zones, inflation)
+    end_bad = _pose_inside_zone(ik, q_end, zones, inflation)
+    if not (start_bad or end_bad):
+        return None
+    if start_bad and end_bad:
+        where = 'in der jetzigen Stellung und in der Zielstellung'
+    elif start_bad:
+        where = 'schon in der jetzigen Stellung des Arms'
+    else:
+        where = 'in der Zielstellung des Arms'
+    return (
+        f'Die Sperrzone liegt {where} auf dem Roboter selbst — deshalb ist '
+        'überhaupt keine Bewegung möglich. Sperrzonen werden zur Sicherheit um '
+        f'{inflation * 100:.0f} cm nach allen Seiten vergrößert, eine kleine Zone '
+        'nahe am Roboterfuß umschließt ihn also mit. Bitte die Sperrzone weiter '
+        'weg vom Roboter zeichnen oder kleiner machen.'
+    )
 
 
 # ── per-arm geometry (the four constants above are OMX-SIZED) ────────────────
@@ -445,6 +547,16 @@ def plan_safe_route(ctx, q_start, q_end, zones, duration_s, roll=None,
     # 1. Direct.
     if not segment_blocked(ik, q_start, q_end, zones, margin, link_radius):
         return [(list(q_start), list(q_end), duration_s)]
+
+    # 1b. Is the zone on the ARM rather than on its path? Then no rung can ever
+    # succeed (see _static_overlap_refusal) — refuse NOW with the true reason
+    # instead of grinding through 2 unreachable rungs and blaming the target.
+    # Deliberately placed AFTER the direct check so the direct fast path is
+    # provably untouched (an endpoint inside a zone always blocks direct anyway).
+    static_msg = _static_overlap_refusal(ik, q_start, q_end, zones, margin,
+                                        link_radius)
+    if static_msg is not None:
+        raise _m.WorkflowError(static_msg)
 
     # 2. Lift-and-travel (over the zones).
     legs = _plan_lift_and_travel(ctx, q_start, q_end, zones, margin,

@@ -418,6 +418,21 @@ def test_outer_ring_grasp_reachable_but_approach_not_is_the_setup():
 
 
 def test_solve_grasp_and_approach_clamps_at_outer_ring():
+    """The clamp itself is unchanged; the WARNING became conditional (F6).
+
+    This assertion used to be „a reduction was logged", which is the contract the
+    2026-07-26 audit retired: on edu6 the requested 60 mm hover is unreachable at
+    EVERY radius, so warn-on-any-reduction fired on 100 % of grasps (936 warnings
+    over 780 swept runs) and taught students to ignore the log strip. The clamp is
+    now reported only when the achieved clearance drops below
+    ``_APPROACH_WARN_FRAC`` (0.25) of the request — for the shipped catalogs that
+    is 15 mm, i.e. exactly ``object_height_m − grasp_depth_m``, the clearance at
+    which the fingertips stop being above the object's top.
+
+    OUTER_RING_XYZ is measured (this run, OMX, grasp z = 0.012) at **35.6 mm** of
+    achieved clearance out of the 60 mm asked for — a real clamp, still comfortably
+    above the cube, so it is now SILENT. The second half drives a radius where the
+    clearance really does collapse and proves the warning still fires there."""
     ctx = _RecordingCtx(z_table=0.0)
     grasp_xyz = (OUTER_RING_XYZ[0], OUTER_RING_XYZ[1], OUTER_RING_XYZ[2] + GRASP_CLEARANCE_M)
     grasp_q, approach_q = _solve_grasp_and_approach(
@@ -425,9 +440,31 @@ def test_solve_grasp_and_approach_clamps_at_outer_ring():
     # Both solutions are valid 5-joint vectors — the grasp was NOT refused.
     assert grasp_q is not None and len(grasp_q) == 5
     assert approach_q is not None and len(approach_q) == 5
-    # The approach was clamped below the requested lift: a German [WARNUNG] was
-    # logged naming the reduced Anfahrhöhe.
-    assert any('Anfahrhöhe' in m for m in ctx.logs)
+    # The clamp HAPPENED (this is the HIGH-5 behaviour, unchanged)...
+    ik = IKSolver()
+    achieved = float(ik.fk(approach_q)[1][2]) - grasp_xyz[2]
+    assert 0.0 < achieved < DEFAULT_APPROACH_HEIGHT_M, 'the approach must be clamped'
+    assert achieved == pytest.approx(0.0356, abs=0.0005), (
+        'measured 35.6 mm — if the solver geometry moved, re-derive the F6 threshold')
+    # ...and it is NOT reported, because 35.6 mm still clears the 30 mm cube.
+    assert not [m for m in ctx.logs if 'Anfahrhöhe' in m], (
+        'a non-consequential clamp must stay silent (F6)')
+
+    # Further out the clearance collapses to 7.5 mm — below the cube's own
+    # 15 mm top clearance — and THAT is worth telling the student about.
+    deep = _RecordingCtx(z_table=0.0)
+    deep_xyz = (0.268, 0.0, GRASP_CLEARANCE_M)
+    _g, deep_q = _solve_grasp_and_approach(
+        deep, deep_xyz, DEFAULT_APPROACH_HEIGHT_M, roll=0.0)
+    deep_achieved = float(ik.fk(deep_q)[1][2]) - deep_xyz[2]
+    assert deep_achieved == pytest.approx(0.0075, abs=0.0005)
+    warned = [m for m in deep.logs if 'Anfahrhöhe' in m]
+    assert warned, 'a consequential clamp MUST be reported'
+    # The reason must be the TRUE one (the arm's height over that point), never
+    # the old „Ziel liegt am Rand des Greifbereichs" — which was flatly wrong at
+    # mid-band radii on edu6.
+    assert 'höher kommt der Arm' in warned[0]
+    assert 'Rand des Greifbereichs' not in warned[0]
 
 
 def test_pickup_outer_ring_does_not_false_refuse(_fast_chunk_pacing):

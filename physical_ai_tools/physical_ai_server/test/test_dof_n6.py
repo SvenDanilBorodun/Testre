@@ -1251,3 +1251,143 @@ def test_workflow_manager_stamps_every_profile_field_onto_the_REAL_ctx(monkeypat
     assert path_guard._tool_clear(omx_ctx) == path_guard._TOOL_CLEAR_M
     assert path_guard._swing_heights(omx_ctx) == path_guard._SWING_HEIGHTS
     assert path_guard._swing_radii(omx_ctx) == path_guard._SWING_RADII
+
+
+# ── slice 2f: the place path on the REAL edu6 arm (2026-07-26 sim-sweep fixes) ─
+
+@pytest.fixture()
+def _fast_place_pacing(monkeypatch):
+    """Fake clock for trajectory_builder so the inter-chunk pacing sleep does not
+    make these end-to-end place tests dominate the suite (they ran 32 s of real
+    sleeps otherwise, on a 27 s suite). Same trick as
+    test_motion_robustness._fast_chunk_pacing; published WAYPOINTS are
+    byte-identical to production."""
+    state = {'t': 0.0}
+
+    def _monotonic():
+        state['t'] += 1000.0
+        return state['t']
+
+    monkeypatch.setattr(trajectory_builder, 'time',
+                        types.SimpleNamespace(monotonic=_monotonic,
+                                              sleep=lambda _s: None))
+    yield
+
+
+def _edu6_place_ctx():
+    """A ctx that can actually run `drop_at`: real solver + real profile, a
+    recording publisher, a measured table, and a log sink."""
+    ctx = _real_edu6_ctx()
+    ctx.published = []
+    ctx.logs = []
+    ctx.publisher = lambda chunk: ctx.published.extend(chunk)
+    ctx.log = ctx.logs.append
+    ctx.motion_lock = None
+    ctx.calibration = {'z_table': 0.0}
+    ctx.last_commanded_close_rad = None
+    ctx.emit_detections = lambda _d: None
+    ctx.should_stop = lambda: False
+    return ctx
+
+
+def test_drop_at_carries_the_COMMANDED_close_not_the_profile_full_closed(_fast_place_pacing):
+    """`drop_at` must carry and descend at the close the GRASP commanded.
+
+    The two are the same number on the OMX (`gripper_closed_rad` −0.5 == the
+    catalog close −0.5), so carrying at "closed" was a no-op there — but on edu6
+    the catalog closes at +1.0 inside a 0…1.75 band while `gripper_closed_rad` is
+    0.0, so the old code demanded 1.0 rad MORE closure than the grasp: 25.2 mm of
+    extra jaw travel into a 30 mm cube already blocking the jaws at ≈1.19 rad,
+    i.e. a hard stall at `Max_Torque 150` for the whole carry + descend, on EVERY
+    place. Found by the 2026-07-26 sim sweep; invisible on the OMX by
+    construction."""
+    from physical_ai_server.workflow.object_catalog import fixed_catalog
+    close_rad = fixed_catalog(_PROFILE_ID).recipe_for_type(
+        'wuerfel').gripper_close_rad
+    ctx = _edu6_place_ctx()
+    ctx.last_commanded_close_rad = close_rad          # as a grasp would leave it
+    target = (ctx.ik.base_axis_x + 0.14, 0.0, 0.015)
+    motion.drop_at(ctx, {'destination': target})
+    grips = [q[N6] for chunk in [ctx.published] for q, *_ in chunk]
+    assert grips, 'nothing was published'
+    # Nothing may ever command MORE closure than the grasp did.
+    assert min(grips) >= close_rad - 1e-9, (
+        f'the place over-closed the gripper to {min(grips):.3f} — the grasp '
+        f'commanded {close_rad:.3f}; anything lower stalls the servo against the '
+        f'held cube')
+    # ...and it must still open to release at the end.
+    assert max(grips) == pytest.approx(ctx.gripper_open_rad)
+    # A `lege ab` with nothing grasped this run keeps the OLD fallback.
+    ctx2 = _edu6_place_ctx()
+    motion.drop_at(ctx2, {'destination': target})
+    g2 = [q[N6] for q, *_ in ctx2.published]
+    assert min(g2) == pytest.approx(ctx2.gripper_closed_rad)
+
+
+def test_drop_at_bisects_the_release_clearance_instead_of_refusing_on_edu6(_fast_place_pacing):
+    """„lege ab bei (Position von X)" must work across the pick band.
+
+    `object_position` returns the GRASP height (0.015 m for a 30 mm cube) and the
+    release stacked a further `DROP_HEIGHT_M` (0.05) on top — landing 0.065 m,
+    i.e. 0.5 mm under edu6's absolute top-down ceiling of 0.0655 m. Measured
+    2026-07-26: the place therefore succeeded only for r ∈ [0.108, 0.133] — about
+    13 % of the pick band — and refused everywhere else, on the most natural
+    program a student writes. The clearance is OPTIONAL, so it is now bisected
+    down to whatever is reachable (13 % → 90 %, i.e. the whole pick band)."""
+    ctx = _edu6_place_ctx()
+    solver = ctx.ik
+    grasp_z = 0.015
+    # The full clearance IS reachable at the sweet spot — do not shrink it there.
+    mid = (solver.base_axis_x + 0.12, 0.0, grasp_z)
+    got = motion._reachable_release_clearance(
+        ctx, mid, motion.DROP_HEIGHT_M, roll=motion.GRASP_ROLL_RAD)
+    assert got == pytest.approx(motion.DROP_HEIGHT_M), (
+        'the mid-band place must keep the FULL rim clearance')
+    assert not [m for m in ctx.logs if 'Ablegehöhe' in m], (
+        'no warning belongs on the fast path')
+
+    # Out near the rim it must SHRINK and still place, never refuse.
+    for r in (0.16, 0.19, 0.205):
+        c = _edu6_place_ctx()
+        t = (c.ik.base_axis_x + r, 0.0, grasp_z)
+        clear = motion._reachable_release_clearance(
+            c, t, motion.DROP_HEIGHT_M, roll=motion.GRASP_ROLL_RAD)
+        assert 0.0 <= clear <= motion.DROP_HEIGHT_M
+        assert c.ik.solve((t[0], t[1], t[2] + clear),
+                          roll=motion.GRASP_ROLL_RAD) is not None, (
+            f'r={r}: the bisected release pose must be reachable')
+        # and the whole place must run end-to-end
+        motion.drop_at(c, {'destination': t})
+        assert c.published, f'r={r}: the place did not run'
+
+    # The old hard behaviour: target+FULL clearance is genuinely unreachable at
+    # r=0.19, which is exactly why the un-bisected code refused there.
+    assert ctx.ik.solve((ctx.ik.base_axis_x + 0.19, 0.0,
+                         grasp_z + motion.DROP_HEIGHT_M),
+                        roll=motion.GRASP_ROLL_RAD) is None, (
+        'if this becomes reachable the arm geometry changed — re-derive the band')
+
+
+def test_release_clearance_never_exceeds_the_request_and_is_omx_identical():
+    """Contract rails: the bisect can only ever return a value in [0, requested],
+    and on the OMX mid-workspace it returns the request unchanged (fast path, no
+    warning) so nothing there moves."""
+    from physical_ai_server.workflow.ik_solver import IKSolver
+    omx = _omx_ctx_for_path_guard()
+    omx.calibration = {'z_table': 0.0}
+    omx.logs = []
+    omx.log = omx.logs.append
+    for r in (0.10, 0.15, 0.20):
+        got = motion._reachable_release_clearance(
+            omx, (omx.ik.base_axis_x + r, 0.0, 0.0), motion.DROP_HEIGHT_M,
+            roll=motion.GRASP_ROLL_RAD)
+        assert got == pytest.approx(motion.DROP_HEIGHT_M), (
+            f'OMX r={r} must keep the full clearance on the fast path')
+    assert omx.logs == [], 'the OMX fast path must log nothing'
+    # A zero/negative request is a no-op, not a bisect.
+    assert motion._reachable_release_clearance(
+        omx, (omx.ik.base_axis_x + 0.15, 0.0, 0.0), 0.0,
+        roll=motion.GRASP_ROLL_RAD) == 0.0
+    assert motion._reachable_release_clearance(
+        omx, (omx.ik.base_axis_x + 0.15, 0.0, 0.0), -0.01,
+        roll=motion.GRASP_ROLL_RAD) == 0.0

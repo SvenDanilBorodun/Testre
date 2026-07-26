@@ -136,20 +136,22 @@ def _shrink_to_solvable(geom, z: float, samples: int) -> float:
 
 
 def resolve_drop_rim(geom, samples: int = 24) -> tuple[float, float]:
-    """The radius out to which the arm can still ABLEGEN (place), and the height
-    that bound is set by.
+    """The radius out to which the FULL release clearance is reachable, and that
+    clearance's height.
 
     ``motion.drop_at`` releases ``DROP_HEIGHT_M`` (0.05 m, env-tunable) ABOVE the
-    surface — deliberately higher than the grasp clearance so the jaws clear a
-    container rim — and it solves that raised point FIRST and raises on failure.
-    Because the strict-vertical annulus shrinks with height, the place rim is
-    strictly INSIDE the pick rim.
+    surface so the jaws clear a container rim. Because the strict-vertical
+    annulus shrinks with height, that raised point is not reachable as far out as
+    the grasp itself.
 
-    On the OMX that difference is ~7 mm and nobody notices. On edu6 it is ~34 mm
-    of a ~118 mm band (measured 2026-07-26): pick 208 mm vs place 174 mm. A mat
-    that printed only the pick rim would invite a student to place a cube where
-    „nimm …" works and „lege ab bei …" then refuses in German — so BOTH rims are
-    drawn."""
+    IMPORTANT — this rim changed MEANING on 2026-07-26. It used to be a hard
+    boundary: the release height was baked into the solved point, so beyond this
+    radius the whole place was REFUSED (which on edu6 cut „lege ab bei (Position
+    von X)" to ~13 % of the band). ``drop_at`` now bisects the clearance down to
+    whatever is reachable, so placing works across the WHOLE pick band. What this
+    rim marks now is where the arm still has the full clearance, i.e. **how far
+    out you can place INTO a container**. Outside it the arm still places, but
+    from progressively lower — fine onto a flat surface, not into a deep tub."""
     from physical_ai_server.workflow.handlers import motion
     z = float(motion.DROP_HEIGHT_M)
     return _shrink_to_solvable(geom, z, samples), z
@@ -334,16 +336,16 @@ def render(geom, margin_mm: float, show_board: bool,
          f'grün = GREIFEN bis r={outer * 100:.1f} cm   |   '
          f'rot = Sperrbereich r < {inner * 100:.1f} cm', 26, _BLACK),
         ((20, 108),
-         (f'orange (gestrichelt) = ABLEGEN nur bis r={drop_rim * 100:.1f} cm — '
-          f'der Greifer öffnet {int(round(drop_z * 1000))} mm über dem Tisch'
+         (f'orange (gestrichelt) = bis r={drop_rim * 100:.1f} cm auch IN einen '
+          f'Behälter ablegen ({int(round(drop_z * 1000))} mm hoch öffnen)'
           if drop_rim is not None and drop_rim < outer - 1e-9 else
           'Greifen und Ablegen reichen hier gleich weit.'), 26, _BLACK),
         ((20, 144),
          f'Fächer {math.degrees(geom["fan_hi"] - geom["fan_lo"]):.0f}° '
          f'(Gelenk 1) — den Arm an die gerade Kante stellen.', 26, _BLACK),
         ((20, h_px - 108),
-         'Objekte nur ZWISCHEN rot und grün platzieren; Ziele zum Ablegen '
-         'innerhalb von orange.', 26, _BLACK),
+         'Objekte nur ZWISCHEN rot und grün platzieren. Ablegen geht überall '
+         'darin — in einen Behälter aber nur innerhalb von orange.', 26, _BLACK),
         ((20, h_px - 68),
          'Im 100%-Maßstab drucken, dann die 100-mm-Marke nachmessen!', 26, _RED),
     ]
@@ -411,13 +413,13 @@ def main() -> None:
     print(f'GREIFEN band : r {geom["inner_m"] * 100:.1f} .. '
           f'{drawn_rim * 100:.1f} cm  (profile advertises '
           f'{geom["outer_m"] * 100:.1f} cm at table level)')
-    print(f'ABLEGEN rim  : r {drop_rim * 100:.1f} cm  (drop_at releases '
-          f'{drop_z * 1000:.0f} mm above the surface, and the annulus shrinks '
-          f'with height)')
+    print(f'FULL-CLEARANCE rim : r {drop_rim * 100:.1f} cm  (the furthest the '
+          f'full {drop_z * 1000:.0f} mm release height is reachable)')
     if drop_rim < drawn_rim - 1e-9:
-        print(f'               -> {(drawn_rim - drop_rim) * 1000:.0f} mm of the '
-              f'band is pick-yes / place-no; both rims are printed so a student '
-              f'cannot place a cube where „lege ab" will refuse')
+        print(f'               -> beyond it drop_at BISECTS the clearance down '
+              f'to what is reachable, so placing still works out to '
+              f'{drawn_rim * 100:.1f} cm — just from lower. The rim marks how far '
+              f'out you can place INTO a container.')
     _verify_bounds(geom, drawn_rim, z_grasp)
 
     img = render(geom, args.margin_mm, not args.no_board,

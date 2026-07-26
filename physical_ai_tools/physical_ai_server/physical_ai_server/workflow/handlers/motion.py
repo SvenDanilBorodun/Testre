@@ -666,6 +666,75 @@ def _solve_grasp_and_approach(
     return grasp_arm_q, best_q
 
 
+def _reachable_release_clearance(
+    ctx,
+    target_xyz: tuple[float, float, float],
+    requested_m: float,
+    roll: float | None = None,
+) -> float:
+    """Largest RELEASE clearance in ``[0, requested_m]`` whose pose is reachable
+    above ``target_xyz``. Same shape as the approach bisect above, and for the
+    same reason.
+
+    ``drop_at`` releases ``DROP_HEIGHT_M`` ABOVE the target so the jaws clear a
+    container rim. That clearance is OPTIONAL — the hard requirement is placing
+    the object AT the target — but the old code baked it into the solved point,
+    so an unreachable +clearance refused an otherwise perfectly placeable target.
+
+    On the OMX that never showed: its ceiling is ~0.25 m, so target+0.05 is
+    reachable everywhere and this returns ``requested_m`` on the fast path,
+    byte-identical to before. On edu6 the top-down ceiling is ~0.0655 m, and
+    „lege ab bei (Position von X)" stacks TWO clearances — `object_position`
+    already returns the GRASP height (0.015 for a 30 mm cube) and the release
+    adds 0.05 on top, landing 0.5 mm under the absolute ceiling. Measured
+    2026-07-26: that worked for r ∈ [0.1075, 0.1335] only — about 15 % of the
+    pick band — and refused everywhere else, on what is the most natural thing a
+    student writes.
+
+    Bisecting keeps the FULL rim clearance wherever it is reachable (so nothing
+    regresses mid-band) and shrinks it only where the geometry forces it. A
+    clearance of 0 is not a failure mode: it releases at exactly the height the
+    object was gripped from, which is precisely right for placing back onto a
+    flat surface — only a deep container wants more, and that is what the German
+    warning tells the student.
+    """
+    tx, ty, tz = (float(v) for v in target_xyz)
+    requested = max(0.0, float(requested_m))
+    if requested <= 0.0:
+        return 0.0
+
+    def _ok(z: float) -> bool:
+        """Reachable AND above the table. A below-table candidate is an invalid
+        candidate here, not a fatal error — the same licence
+        ``path_guard._try_via`` takes. Swallowing it matters: `_try_solve` RAISES
+        the German floor message, and at ``mid → 0`` we probe the target's own
+        height, so a below-table destination would start refusing on a path that
+        previously accepted it at +clearance. Letting the bisect fall through to
+        0 keeps the SINGLE refusal point where it was — the
+        ``_solve_grasp_and_approach`` call below, with its own message."""
+        try:
+            return _try_solve(ctx, (tx, ty, z), roll=roll) is not None
+        except WorkflowError:
+            return False
+
+    if _ok(tz + requested):
+        return requested
+    lo, hi = 0.0, requested
+    while hi - lo > _APPROACH_BISECT_TOL_M:
+        mid = 0.5 * (lo + hi)
+        if _ok(tz + mid):
+            lo = mid
+        else:
+            hi = mid
+    ctx.log(
+        f'[WARNUNG] Ablegehöhe auf {lo * 1000:.0f} mm über dem Ziel reduziert '
+        f'(angefordert: {requested * 1000:.0f} mm) — höher ist an dieser Stelle '
+        'nicht erreichbar. Zum Ablegen IN einen Behälter das Ziel näher an den '
+        'Roboter legen.'
+    )
+    return lo
+
+
 def _try_solve(
     ctx,
     target_xyz: tuple[float, float, float],
@@ -1023,8 +1092,12 @@ def drop_at(ctx, args: dict[str, Any]) -> None:
     # every sub-motion of the place uniformly.
     tempo = _move_tempo(args)
     # Release from a safe height above the surface (clears a low container rim),
-    # not just the grasp clearance — see DROP_HEIGHT_M.
-    drop_xyz = (target[0], target[1], target[2] + DROP_HEIGHT_M)
+    # not just the grasp clearance — see DROP_HEIGHT_M. The clearance is OPTIONAL,
+    # so it is bisected down to whatever is reachable here instead of refusing an
+    # otherwise placeable target (see _reachable_release_clearance).
+    _release_clear = _reachable_release_clearance(
+        ctx, target, DROP_HEIGHT_M, roll=GRASP_ROLL_RAD)
+    drop_xyz = (target[0], target[1], target[2] + _release_clear)
 
     # HIGH-5 (symmetric with pickup): solve the DROP first; derive the approach
     # from the reachable envelope so an outer-ring destination whose drop is
@@ -1032,8 +1105,24 @@ def drop_at(ctx, args: dict[str, Any]) -> None:
     drop_arm_q, above_arm_q = _solve_grasp_and_approach(
         ctx, drop_xyz, DEFAULT_APPROACH_HEIGHT_M, roll=GRASP_ROLL_RAD)
 
-    above_closed_q = above_arm_q + [_gripper_closed(ctx)]
-    drop_closed_q = drop_arm_q + [_gripper_closed(ctx)]
+    # Carry at the close the GRASP actually commanded, not at the profile's
+    # full-closed value. The two are the same number on the OMX
+    # (gripper_closed_rad −0.5 == the catalog close −0.5), so this is a no-op
+    # there — but on edu6 the catalog closes at +1.0 inside a 0…1.75 band while
+    # gripper_closed_rad is 0.0, so carrying at "closed" demanded 1.0 rad MORE
+    # closure than the grasp: 25.2 mm of extra jaw travel into a 30 mm cube that
+    # is already blocking the jaws at ≈1.19 rad. That is a hard stall at
+    # Max_Torque 150 for the whole carry + descend, on EVERY place (found by the
+    # 2026-07-26 sim sweep; invisible on the OMX by construction).
+    #
+    # None (a `lege ab` with nothing ever grasped this run) falls back to the old
+    # value, so that path is unchanged too.
+    _carry_close = getattr(ctx, 'last_commanded_close_rad', None)
+    if _carry_close is None or not math.isfinite(float(_carry_close)):
+        _carry_close = _gripper_closed(ctx)
+    _carry_close = float(_carry_close)
+    above_closed_q = above_arm_q + [_carry_close]
+    drop_closed_q = drop_arm_q + [_carry_close]
     drop_open_q = drop_arm_q + [_gripper_open(ctx)]
     retreat_open_q = above_arm_q + [_gripper_open(ctx)]
 

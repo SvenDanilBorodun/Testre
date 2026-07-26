@@ -102,7 +102,7 @@ echten IK-Löser, bevor es zeichnet. Für Arm EDU6-0001:
 |---|---|---|
 | Fächer | **180°** (±90°) | Grenze von Gelenk 1 |
 | grün — **Greifen** bis | **20,8 cm** | letzter Radius, den der Löser auf **Greifhöhe** (1,5 cm über dem Tisch, bei einem 3-cm-Würfel) noch löst |
-| orange (gestrichelt) — **Ablegen** bis | **17,4 cm** | „lege ab" öffnet den Greifer **5 cm über** dem Tisch (damit die Backen über einen Behälterrand kommen), und der Arbeitsbereich wird mit der Höhe kleiner |
+| orange (gestrichelt) — **in einen Behälter** ablegen bis | **17,4 cm** | „lege ab" öffnet den Greifer **5 cm über** dem Ziel (damit die Backen über einen Behälterrand kommen). So hoch reicht der Arm nur bis hierher — weiter außen legt er trotzdem ab, nur aus geringerer Höhe |
 | rot — innere Grenze | **9,0 cm** | **Sperrbereich** — hier rechnet der Löser noch, aber der Arm faltet sich auf sich selbst (Eigenkollision) |
 | Blattgröße | **43,6 × 21,8 cm** | **passt NICHT auf A3** (A3 quer ist nur 42,0 cm breit) — auf **A2** drucken, oder auf zwei A4/A3-Blättern und an der Mittellinie zusammenkleben |
 | Mittelpunkt des Fächers | **21,3 mm** vor dem Basis-Ursprung | die **Drehachse von Gelenk 1**, nicht die Mitte des Basis-Klotzes |
@@ -110,10 +110,12 @@ echten IK-Löser, bevor es zeichnet. Für Arm EDU6-0001:
 - Den Arm so stellen, dass seine Drehachse auf dem **schwarzen Punkt an der
   geraden Kante** steht.
 - Objekte zum **Greifen** nur zwischen dem **roten und dem grünen** Bogen ablegen.
-- Ziele zum **Ablegen** („lege ab bei …", „Position merken") müssen **innerhalb
-  des orangenen** Bogens liegen. Zwischen orange und grün gilt: **aufnehmen ja,
-  ablegen nein** — der Roboter meldet dort „Position außerhalb des
-  Arbeitsbereichs". Das sind die äußersten ~3,4 cm des Greifbereichs.
+- **Ablegen geht im ganzen Greifbereich** (zwischen rot und grün). Der orangene
+  Bogen sagt nur, wie weit außen der Arm noch **5 cm hoch** öffnen kann — also wie
+  weit außen ein **Behälter** stehen darf. Weiter außen legt er flach auf den Tisch
+  ab und meldet die verringerte Ablegehöhe im Protokoll.
+  *(Bis 2026-07-26 wurde außerhalb des orangenen Bogens komplett verweigert; das
+  war ein Fehler und ist behoben.)*
 - **Im 100-%-Maßstab drucken** („Tatsächliche Größe", nie „an Seite anpassen") und
   danach die aufgedruckte **100-mm-Marke mit einem Lineal nachmessen**. Ein
   skalierter Druck verschiebt jeden Radius und der Sperrbereich passt nicht mehr.

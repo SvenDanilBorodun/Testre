@@ -455,14 +455,50 @@ def test_drop_at_outer_ring_does_not_false_refuse(_fast_chunk_pacing, monkeypatc
     assert ctx.published
 
 
-def test_drop_at_high_release_refuses_outer_ring(_fast_chunk_pacing):
-    """Documents the trade-off: with the default 5 cm release height, a drop at
-    the outer ring is correctly refused (the raised release point is outside the
-    top-down annulus) — a high drop must be pinned closer to the base."""
+def test_drop_at_outer_ring_reduces_the_release_height_instead_of_refusing(
+        _fast_chunk_pacing):
+    """DELIBERATELY REVERSED 2026-07-26 (was
+    ``test_drop_at_high_release_refuses_outer_ring``, which asserted a refusal and
+    called it "correctly refused").
+
+    It is not correct. The release clearance is OPTIONAL — it exists to clear a
+    container rim — while the hard requirement is placing the object AT the
+    target. That is exactly the asymmetry HIGH-5 fixed for the pickup approach,
+    and ``_solve_grasp_and_approach``'s own docstring already says the old code
+    "refused the whole pickup/DROP even though the object was graspable"; the
+    drop POINT was the residual that fix never reached.
+
+    Measured at ``OUTER_RING_XYZ`` (r = 0.2732 m from the joint-1 axis): the
+    target itself IS reachable, target + 50 mm is not, and the bisect lands on
+    **48.4 mm**. So the old behaviour refused an entire place to avoid losing
+    **1.6 mm** of rim clearance. On edu6 the same defect was far worse — it cut
+    „lege ab bei (Position von X)" down to ~13 % of the pick band, because
+    `object_position` returns the GRASP height and the release stacked 50 mm on
+    top, landing 0.5 mm under that arm's absolute ceiling.
+
+    Now: it places, and says so in German."""
+    ctx = _RecordingCtx(z_table=0.0)
+    ctx.last_full_joints = list(HOME_JOINTS_RAD) + [GRIPPER_CLOSED_RAD]
+    drop_at(ctx, {'destination': OUTER_RING_XYZ})
+    assert ctx.published, 'the place must actually run'
+    # the object is released (gripper ends OPEN) at the outer ring
+    assert ctx.last_commanded_joints[5] == pytest.approx(GRIPPER_OPEN_RAD)
+    warn = [m for m in ctx.logs if 'Ablegehöhe' in m]
+    assert warn, (
+        'a reduced release height must be reported to the student in German — '
+        f'logs were {ctx.logs}')
+    assert 'mm' in warn[0]
+
+
+def test_drop_at_truly_unreachable_target_still_refuses():
+    """The clamp must only rescue a reachable TARGET. The invariant the reversed
+    test above must not weaken: a destination whose own point is outside the
+    annulus still raises the German 'Arbeitsbereich' (the drop mirror of
+    ``test_pickup_truly_unreachable_grasp_still_refuses``)."""
     ctx = _RecordingCtx(z_table=0.0)
     ctx.last_full_joints = list(HOME_JOINTS_RAD) + [GRIPPER_CLOSED_RAD]
     with pytest.raises(WorkflowError) as exc:
-        drop_at(ctx, {'destination': OUTER_RING_XYZ})
+        drop_at(ctx, {'destination': (0.50, 0.0, 0.0)})
     assert 'Arbeitsbereich' in str(exc.value)
 
 

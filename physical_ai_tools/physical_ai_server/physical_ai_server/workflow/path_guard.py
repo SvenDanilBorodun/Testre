@@ -99,6 +99,41 @@ _REFUSE_MSG = (
 )
 
 
+# ── per-arm geometry (the four constants above are OMX-SIZED) ────────────────
+# SAFE_TRAVEL_Z, _TOOL_CLEAR_M, _SWING_HEIGHTS and _SWING_RADII are all heights
+# or radii in metres, sized for the OMX's ~0.25 m vertical envelope. On a shorter
+# arm they do not merely become suboptimal, they become UNREACHABLE — and an
+# unreachable via candidate makes its whole rung silently unable to return a
+# route, so every blocked transit falls through to the German refusal.
+#
+# Measured 2026-07-26 through the real solvers: edu6's top-down TCP ceiling is
+# ~0.065 m (joint5's +110° relief binds, not the 2R annulus), so all three OMX
+# swing heights AND the 0.18 m cruise are unreachable — 0/144 base-swing
+# candidates solved vs 144/144 on the OMX. The ArmProfile now carries per-arm
+# values; ``None``/absent resolves to the module constant, so the OMX (and every
+# profile-less construction, i.e. all non-Roboter-Studio paths and the existing
+# tests) is bit-identical.
+def _geom(ctx, attr: str, default):
+    value = getattr(ctx, attr, None)
+    return default if value is None else value
+
+
+def _safe_travel_z(ctx) -> float:
+    return float(_geom(ctx, 'safe_travel_z_m', SAFE_TRAVEL_Z))
+
+
+def _tool_clear(ctx) -> float:
+    return float(_geom(ctx, 'tool_clear_m', _TOOL_CLEAR_M))
+
+
+def _swing_heights(ctx) -> tuple:
+    return tuple(_geom(ctx, 'swing_heights_m', _SWING_HEIGHTS))
+
+
+def _swing_radii(ctx) -> tuple:
+    return tuple(_geom(ctx, 'swing_radii_m', _SWING_RADII))
+
+
 # ── Zone geometry ────────────────────────────────────────────────────────────
 class NoGoZone:
     """Axis-aligned base-frame keep-out box, inflated by ``inflation`` on every
@@ -246,15 +281,20 @@ def _try_via(ctx, xyz, roll):
         return None
 
 
-def _zone_clear_top(zones, margin, link_radius) -> Optional[float]:
+def _zone_clear_top(zones, margin, link_radius,
+                    tool_clear: float = _TOOL_CLEAR_M) -> Optional[float]:
     """Minimum EE cruise height that clears every inflated zone, or ``None`` if
-    there are no valid zones. Adds ``_TOOL_CLEAR_M`` so the down-pointing tool
-    tip (the lowest link point of a top-down cruise pose) also clears the
-    inflated box, not just the EE frame origin."""
+    there are no valid zones. Adds ``tool_clear`` so the down-pointing tool tip
+    (the lowest link point of a top-down cruise pose) also clears the inflated
+    box, not just the EE frame origin.
+
+    ``tool_clear`` is per-arm (``_tool_clear``): it is how far the lowest TOOL
+    sample sits below the EE frame, which is 0.04 m of appended tool-tip samples
+    on the OMX but exactly 0 on edu6, whose EE frame IS the fingertip TCP."""
     boxes = build_zones(zones, link_radius + margin)
     if not boxes:
         return None
-    return max(float(b.max[2]) for b in boxes) + _TOOL_CLEAR_M + _CLEAR_EPS_M
+    return max(float(b.max[2]) for b in boxes) + float(tool_clear) + _CLEAR_EPS_M
 
 
 def _reachable_cruise_z(ctx, columns, clear_z, ceil_z, roll) -> Optional[float]:
@@ -300,11 +340,11 @@ def _plan_lift_and_travel(ctx, q_start, q_end, zones, margin, link_radius,
         return None
     sx, sy, _sz = (float(v) for v in start_fk[1])
     tx, ty, _tz = (float(v) for v in end_fk[1])
-    clear_z = _zone_clear_top(zones, margin, link_radius)
+    clear_z = _zone_clear_top(zones, margin, link_radius, _tool_clear(ctx))
     if clear_z is None:
         return None
     cruise = _reachable_cruise_z(ctx, [(sx, sy), (tx, ty)], clear_z,
-                                 SAFE_TRAVEL_Z, roll)
+                                 _safe_travel_z(ctx), roll)
     if cruise is None:
         return None
     lift_q = _try_via(ctx, (sx, sy, cruise), roll)
@@ -342,8 +382,8 @@ def _plan_base_swing(ctx, q_start, q_end, zones, margin, link_radius,
     from physical_ai_server.workflow.handlers import motion as _m
     ik = ctx.ik
     move_dur = getattr(_m, 'DEFAULT_MOVE_DURATION_S', 2.5)
-    for z_swing in _SWING_HEIGHTS:
-        for r_swing in _SWING_RADII:
+    for z_swing in _swing_heights(ctx):
+        for r_swing in _swing_radii(ctx):
             for az in _candidate_azimuths():
                 vx = ik.base_axis_x + r_swing * math.cos(az)
                 vy = r_swing * math.sin(az)
@@ -378,7 +418,21 @@ def plan_safe_route(ctx, q_start, q_end, zones, duration_s, roll=None,
     n = ik.num_joints()
     link_radius = LINK_RADIUS_M
     if roll is None:
-        roll = float(q_end[_m._roll_idx(ctx)])
+        # NEVER the raw joint value: ``roll`` is the SOLVER's aim-the-gripper
+        # argument, which equals the roll joint on the OMX (theta5 = roll) but not
+        # on edu6 (q6 = fold(wrap(π − roll))). Passing the joint through mirrored
+        # the via wrist by up to 178° — measured 80° for a q_end wrist of 40° —
+        # the same defect class as the Cartesian-jog mirror fixed on 2026-07-25,
+        # in the one site that fix did not reach. ``_roll_arg`` asks the solver.
+        #
+        # Reachable via ``safe_move``'s two roll-less callers, ``motion.home`` and
+        # ``go_to_observation_pose`` (exhaustively enumerated — every other call
+        # site passes a float). Both end at a wrist of 0 on the SHIPPED defaults,
+        # where the buggy and correct rolls happen to coincide, so this was latent
+        # rather than live. It was still CONFIG-reachable: ``_observe_joints``
+        # falls through to ``EDUBOTICS_OBSERVE_POSE``, which IS compose-forwarded,
+        # so a 6-value observe pose with a non-zero wrist made it live.
+        roll = _m._roll_arg(ctx, q_end)
     # Gripper continuity: outbound/intermediate vias inherit q_START's gripper so
     # the gripper changes ONCE — on the final leg arriving at q_end (which keeps
     # q_end's gripper) — exactly like the direct path. Stamping every via with

@@ -108,6 +108,13 @@ class WorkflowContext:
     gripper_closed_rad: float | None = None
     velocity_limit_rad_s: float | None = None
     grasp_held_margin_rad: float | None = None
+    # No-go-zone reroute-ladder geometry (None → path_guard's OMX module
+    # constants). Arm-sized heights/radii in metres — see ArmProfile for why the
+    # OMX values are unreachable on a shorter arm.
+    safe_travel_z_m: float | None = None
+    tool_clear_m: float | None = None
+    swing_heights_m: tuple | None = None
+    swing_radii_m: tuple | None = None
     # Grasp-held threshold source: the most recent COMMANDED gripper close (rad)
     # this run — written ONLY by motion's close paths (_execute_pickup,
     # close_gripper, close_on_object), read by motion._held_threshold_rad.
@@ -609,6 +616,17 @@ class WorkflowManager:
                 if self._arm_profile else None,
                 grasp_held_margin_rad=getattr(
                     self._arm_profile, 'grasp_held_margin_rad', None)
+                if self._arm_profile else None,
+                # Reroute-ladder geometry (path_guard reads these off ctx; None →
+                # its OMX module constants, so every profile-less run is
+                # unchanged).
+                safe_travel_z_m=getattr(self._arm_profile, 'safe_travel_z_m', None)
+                if self._arm_profile else None,
+                tool_clear_m=getattr(self._arm_profile, 'tool_clear_m', None)
+                if self._arm_profile else None,
+                swing_heights_m=getattr(self._arm_profile, 'swing_heights_m', None)
+                if self._arm_profile else None,
+                swing_radii_m=getattr(self._arm_profile, 'swing_radii_m', None)
                 if self._arm_profile else None,
             )
 

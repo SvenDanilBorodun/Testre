@@ -893,7 +893,11 @@ def main() -> int:
     while True:
         ok, message = Edu6ArmNode.probe_bus(bus)
         if ok:
-            print('[INIT] Alle 7 Servos gefunden (STS3215).', flush=True)
+            # Model-neutral wording on purpose: this arm mixes STS3215 (joints
+            # 1/4/5/6/7) and STS3250 (the high-load shoulder + elbow) by design,
+            # so naming one model here reads as a fault on a healthy arm.
+            print('[INIT] Alle 7 Servos gefunden (STS-Serie, provisioniert).',
+                  flush=True)
             break
         print(message, flush=True)
         time.sleep(5.0)

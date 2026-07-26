@@ -81,6 +81,54 @@ Auf eine abwischbare Matte (oder direkt auf den Tisch mit Klebeband):
   `EDUBOTICS_BOARD_ORIGIN_X_M`, `EDUBOTICS_BOARD_ORIGIN_Y_M` und (falls der Jig
   die Tafel gedreht hält) `EDUBOTICS_BOARD_YAW_DEG` anpassbar.
 
+#### 3b. Arbeits-Matte für den **EduBotics 6-Achs** (edu6_studio)
+
+> ⚠️ **Der OMX-Greif-Ring aus Schritt 3 ist für diesen Arm FALSCH.** Der 6-Achs-Arm
+> dreht sich am Gelenk 1 nur **±90°**, sein Arbeitsbereich ist also ein **Halbkreis
+> vor dem Arm**, kein Ring — und er ist deutlich kleiner. Eine Ring-Matte lädt dazu
+> ein, Objekte hinter den Arm zu legen, wo er sie nie erreicht.
+
+Matte drucken (maßstabsgetreu, alle Maße kommen direkt aus dem Code):
+
+```bash
+cd Testre
+python tools/generate_edu6_mat.py --out /tmp/edu6_mat.pdf
+```
+
+Das Werkzeug gibt die Maße aus und prüft die gedruckte Außengrenze gegen den
+echten IK-Löser, bevor es zeichnet. Für Arm EDU6-0001:
+
+| Größe | Wert | warum |
+|---|---|---|
+| Fächer | **180°** (±90°) | Grenze von Gelenk 1 |
+| grün — **Greifen** bis | **20,8 cm** | letzter Radius, den der Löser auf **Greifhöhe** (1,5 cm über dem Tisch, bei einem 3-cm-Würfel) noch löst |
+| orange (gestrichelt) — **Ablegen** bis | **17,4 cm** | „lege ab" öffnet den Greifer **5 cm über** dem Tisch (damit die Backen über einen Behälterrand kommen), und der Arbeitsbereich wird mit der Höhe kleiner |
+| rot — innere Grenze | **9,0 cm** | **Sperrbereich** — hier rechnet der Löser noch, aber der Arm faltet sich auf sich selbst (Eigenkollision) |
+| Blattgröße | **43,6 × 21,8 cm** | **passt NICHT auf A3** (A3 quer ist nur 42,0 cm breit) — auf **A2** drucken, oder auf zwei A4/A3-Blättern und an der Mittellinie zusammenkleben |
+| Mittelpunkt des Fächers | **21,3 mm** vor dem Basis-Ursprung | die **Drehachse von Gelenk 1**, nicht die Mitte des Basis-Klotzes |
+
+- Den Arm so stellen, dass seine Drehachse auf dem **schwarzen Punkt an der
+  geraden Kante** steht.
+- Objekte zum **Greifen** nur zwischen dem **roten und dem grünen** Bogen ablegen.
+- Ziele zum **Ablegen** („lege ab bei …", „Position merken") müssen **innerhalb
+  des orangenen** Bogens liegen. Zwischen orange und grün gilt: **aufnehmen ja,
+  ablegen nein** — der Roboter meldet dort „Position außerhalb des
+  Arbeitsbereichs". Das sind die äußersten ~3,4 cm des Greifbereichs.
+- **Im 100-%-Maßstab drucken** („Tatsächliche Größe", nie „an Seite anpassen") und
+  danach die aufgedruckte **100-mm-Marke mit einem Lineal nachmessen**. Ein
+  skalierter Druck verschiebt jeden Radius und der Sperrbereich passt nicht mehr.
+
+Die **ChArUco-Tafel** liegt wie in Schritt 2/3 beschrieben; ihre Ursprungs-Ecke
+ist auf der Matte als `ChArUco-Ecke` markiert. Die Tafel selbst ist 21 × 15 cm
+und reicht damit **über den Rand der Matte hinaus** — das ist richtig, sie ist
+eine Referenz für die **Kamera**, kein Greifziel.
+
+> **Noch offen (Rig-Test):** die Standard-Tafelposition (`18 cm` vor der Basis)
+> stammt vom OMX. Beim 6-Achs-Arm ist der Arbeitsbereich kleiner, die Tafel liegt
+> also relativ weiter außen. Falls die Szenen-Kamera nicht **beide** gut im Bild
+> hat (Arbeitsbereich *und* Tafel), `EDUBOTICS_BOARD_ORIGIN_X_M` /
+> `EDUBOTICS_BOARD_ORIGIN_Y_M` einmal pro Klassenraum anpassen — kein Code-Umbau.
+
 ### 4. AprilTags drucken und aufkleben
 
 ```bash

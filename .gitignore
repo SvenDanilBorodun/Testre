@@ -55,3 +55,8 @@ docs/plans/
 # The Supabase edu6_arm_records table is the durable fleet store; these are
 # local bench artifacts and must not accumulate per-arm files in the repo.
 tools/edu6_records/
+
+# Generated classroom-kit artefacts (tools/generate_edu6_mat.py etc.) — the
+# printable mat is derived from the code on demand, never checked in.
+edu6_mat.pdf
+edu6_mat.png

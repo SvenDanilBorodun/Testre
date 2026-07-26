@@ -138,6 +138,20 @@ class ArmProfile:
     sim_close_threshold_rad: Optional[float] = None
     sim_held_block_offset_rad: Optional[float] = None
     sim_held_floor_rad: Optional[float] = None
+    # ── no-go-zone reroute-ladder geometry (None → path_guard OMX constants) ──
+    # These are ARM-SIZED, not universal: every one is a HEIGHT or a RADIUS in
+    # metres, and the shipped values were chosen for the OMX's ~0.25 m vertical
+    # envelope. Measured 2026-07-26 on the real solvers: edu6 tops out at
+    # ~0.065 m of TCP height (joint5's +110° relief is the binding limit, not the
+    # 2R annulus), so ALL THREE OMX swing heights and the 0.18 m cruise are
+    # unreachable there — 0/144 base-swing via candidates solved, i.e. both
+    # reroute rungs were structurally dead and every blocked transit fell through
+    # to the German refusal. Sizing them per profile revives base-swing
+    # (64/144) and leaves OMX bit-identical (None → the module constants).
+    safe_travel_z_m: Optional[float] = None
+    tool_clear_m: Optional[float] = None
+    swing_heights_m: Optional[tuple] = None
+    swing_radii_m: Optional[tuple] = None
 
     def build_ik(self, urdf_string: Optional[str] = None):
         """Return the arm's IK solver — the ``ik_factory`` seam.
@@ -248,6 +262,23 @@ _EDU6_STUDIO = ArmProfile(
     sim_close_threshold_rad=1.5,
     sim_held_block_offset_rad=0.19,
     sim_held_floor_rad=0.05,
+    # Reroute-ladder geometry, MEASURED through the real solver (2026-07-26).
+    # Max solvable TCP height is ~0.065 m (at r≈0.10-0.14); joint5's +110° relief
+    # binds long before the 2R annulus does, so the OMX 0.18 m cruise and its
+    # (0.10, 0.14, 0.16) swing heights are ALL unreachable on this arm.
+    safe_travel_z_m=0.06,
+    # 0.0 is exact, not a shortcut: this arm's EE frame IS the fingertip TCP
+    # (_L_TOOL), and edu6_ik.link_points appends NOTHING below it — unlike the OMX
+    # solver, which projects two extra samples _TOOL_TIP_EXT_M (0.04 m) past its
+    # EE along the tool axis, which is what the 0.05 m default models. Measured:
+    # OMX EE→lowest tool point = 40.0 mm, edu6 = 0.0 mm. Keeping the OMX 0.05 here
+    # would demand 50 mm of headroom this arm does not have; the 0.05 m zone
+    # inflation + _CLEAR_EPS_M still provide the clearance margin.
+    tool_clear_m=0.0,
+    # Heights/radii that actually solve (mid / far / near, same intent as the OMX
+    # ordering): 64/144 candidates reachable vs 0/144 with the OMX grid.
+    swing_heights_m=(0.03, 0.05, 0.02),
+    swing_radii_m=(0.14, 0.18, 0.10),
 )
 
 # Registry keyed by profile id. Keep ids + follower_only in lockstep with the

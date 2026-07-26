@@ -42,11 +42,20 @@
 
       allow_partial_joints_goal: true
 
-      # Per-joint limits on commanded velocity and acceleration. Without
-      # these a bad trajectory (e.g. a diverging policy asking for
-      # positions = [3.0] with time_from_start = 0.05s ⇒ ~60 rad/s) is
-      # forwarded to the Dynamixels unchecked and the servos stall /
-      # overheat. Values are conservative and suit typical manipulation.
+      # ⚠️ CORRECTED 2026-07-26 — the paragraph that used to sit here described
+      # a protection that DOES NOT EXIST. It claimed "per-joint limits on
+      # commanded velocity and acceleration, without these a bad trajectory is
+      # forwarded to the Dynamixels unchecked". There is **no `joint_limits`
+      # block anywhere in these overlays** (grep: zero hits) — what follows is
+      # `constraints:`, which are ABORT TOLERANCES, not limits. They do not
+      # bound a commanded velocity; they decide when the controller gives up on
+      # a trajectory it is already executing.
+      #
+      # So a diverging policy asking for positions = [3.0] at
+      # time_from_start = 0.05 s IS still forwarded unchecked. The actual safety
+      # floor is the Dynamixel current limit (see CLAUDE.md Rule §2), NOT
+      # anything in this file. Do not re-add a claim of velocity limiting here
+      # without adding the `joint_limits` block to go with it.
       #
       # 2026-05-18: bumped `trajectory` tolerances aggressively. Initial
       # bump 0.15→0.40 wasn't enough — the gripper trigger joint can sit

@@ -59,6 +59,50 @@ services:
       # rig gate R9 (torque-off collapse measures where a LIMP arm rests, i.e.
       # the false-alarm side); >= 4096 disables. Read by edu6_arm_node.py.
       - EDUBOTICS_EDU6_BOOT_POS_TOL_TICKS=${EDUBOTICS_EDU6_BOOT_POS_TOL_TICKS:-}
+      # edu6 torque-on edge guard, in encoder ticks (empty = 40 ≈ 3.5°). A
+      # torque-ON TRANSITION is refused while ANY joint rests this close to the
+      # tick-0/4095 position-map edge: the STS position loop is not wrap-aware
+      # (measured 2026-07-26), so a goal seeded there drives the long way round.
+      # POLARITY IS THE INVERSE of EDUBOTICS_EDU6_BOOT_POS_TOL_TICKS above: 0
+      # DISABLES this guard (the one-variable rollback) and a LARGER value refuses
+      # MORE poses — 2048+ would refuse every reading, so those fall back to the
+      # default with a [WARN]. Read by edu6_arm_node.py.
+      - EDUBOTICS_EDU6_EDGE_MARGIN_TICKS=${EDUBOTICS_EDU6_EDGE_MARGIN_TICKS:-}
+      # edu6 post-energise wrong-way abort threshold, in encoder ticks (empty =
+      # 2048 = half a revolution). Immediately AFTER switching torque on, the
+      # driver re-reads position once and switches torque back OFF if a servo's
+      # own naive `Goal − Present` error exceeds this AND is longer than the true
+      # short way round — the signature of the non-wrap-aware STS position loop
+      # driving a full turn the wrong way. Unlike the edge margin above this needs
+      # no assumption about timing: it measures what the arm actually did. 0
+      # DISABLES it (the one-variable rollback); values below 401 or above 4095
+      # fall back to the default with a [WARN]. Read by edu6_arm_node.py.
+      - EDUBOTICS_EDU6_TORQUE_ABORT_TICKS=${EDUBOTICS_EDU6_TORQUE_ABORT_TICKS:-}
+      # edu6 commanded-goal edge clamp, in encoder ticks (empty = 128 ≈ 11.25°).
+      # Every tick written as Goal_Position is kept this far clear of the
+      # tick-0/4095 position-map edge. Six of the twelve arm-joint limit bounds map
+      # EXACTLY onto that edge (joint2 hi, joint3 lo, joint4 and joint6 both ends),
+      # so a command at one of them PINNED the goal on the seam and one encoder
+      # sample across the boundary then committed the joint to a full revolution at
+      # 4.36 rad/s — the non-wrap-aware STS position loop again, but with no
+      # torque-on event for the two guards above to hang off. Deliberately WIDER
+      # than EDUBOTICS_EDU6_EDGE_MARGIN_TICKS: that guard judges an arm at rest
+      # (dither only), this one a moving joint arriving at a pinned goal, which
+      # must also survive overshoot — unmeasured on this arm until rig gate R5, so
+      # the default buys headroom where headroom is free. SAME POLARITY as the edge
+      # margin (0 DISABLES this clamp — the one-variable rollback; larger clamps
+      # HARDER), and therefore the INVERSE of EDUBOTICS_EDU6_BOOT_POS_TOL_TICKS.
+      # Above 246 the clamp would start shifting real grasp solutions, so those
+      # fall back to the default with a [WARN]. 246 is one tick under joint3's
+      # ANALYTIC floor of 247 (solve() gives q3 = γ + ALPHA0 − π/2 with γ ≥ 0, so
+      # q3 ≥ −158.33167° for EVERY solution) — a derived bound, deliberately not a
+      # sweep result: this number was wrong three times from grids that could not
+      # resolve full extension. Costs the outer 11.25° of commanded travel at those
+      # six bounds only (jog/replay extremes — hand-guide is torque-off and keeps
+      # the full range); HOME sits 483 ticks from the edge and the closest real
+      # Edu6IKSolver solution over the operating envelope (z ≥ 0) is 253.
+      # Read by edu6_arm_node.py.
+      - EDUBOTICS_EDU6_GOAL_EDGE_MARGIN_TICKS=${EDUBOTICS_EDU6_GOAL_EDGE_MARGIN_TICKS:-}
       - CAMERA_DEVICE_1=${CAMERA_DEVICE_1:-}
       - CAMERA_NAME_1=${CAMERA_NAME_1:-gripper}
       - CAMERA_DEVICE_2=${CAMERA_DEVICE_2:-}

@@ -7,9 +7,12 @@ boot-home) are tested via ast-extraction so importing them needs no rclpy.
 """
 
 import ast
+import math
 import os
+import re
 import sys
 import textwrap
+import threading
 import types
 import unittest
 from unittest.mock import MagicMock, patch
@@ -74,6 +77,82 @@ class TestFraming(unittest.TestCase):
         both = fb.describe_error_bits(fb.ERR_VOLTAGE | fb.ERR_OVERHEAT)
         self.assertIn('Spannungsfehler', both)
         self.assertIn('Überhitzung', both)
+
+
+class TestErrorByteIsNeverSilent(unittest.TestCase):
+    """The error byte is interpolated straight into a student-facing
+    „[WARNUNG] Servo n meldet: {…} (Status 0x..)" line, so a bit the table
+    cannot name used to render as a BLANK accusation. 0x10 was exactly that: an
+    un-mapped bit (the vendor SDK's ERRBIT_* set has a hole there), and 0x12
+    was worse — it named only the 0x02 half and dropped the other fault from a
+    line that still looked complete."""
+
+    def test_every_nonzero_byte_produces_a_non_empty_reason(self):
+        # THE contract, over the whole 8-bit space. Before the fix, 0x10, 0x40,
+        # 0x80 and every combination of only those (0x50, 0xC0, 0x90 …) returned
+        # '' — 68 of the 255 non-zero bytes were silent.
+        silent = [e for e in range(1, 256) if not fb.describe_error_bits(e)]
+        self.assertEqual(silent, [], f'silent error bytes: '
+                                    f'{[hex(e) for e in silent]}')
+
+    def test_a_clean_byte_is_the_only_empty_result(self):
+        self.assertEqual(fb.describe_error_bits(0), '')
+
+    def test_the_0x10_bit_is_reported_even_though_it_is_deliberately_unnamed(self):
+        # The vendor revisions DISAGREE about 0x10 (older per-model table: 角度
+        # "Angle"; current official table: `--` undefined), so it is intentionally
+        # absent from ERROR_BITS_DE. What must NOT happen either way is silence.
+        self.assertNotIn(0x10, [bit for bit, _ in fb.ERROR_BITS_DE])
+        out = fb.describe_error_bits(0x10)
+        self.assertTrue(out)
+        self.assertIn('0x10', out)
+
+    def test_a_mixed_byte_reports_every_set_bit_not_just_the_named_one(self):
+        # 0x12 = the angle-SENSOR bit (0x02) plus the disputed 0x10. Reporting one
+        # and dropping the other is the sneakiest form of the original bug, because
+        # the resulting line is non-empty and looks trustworthy.
+        both = fb.describe_error_bits(fb.ERR_ANGLE_SENSOR | 0x10)
+        self.assertIn('Winkel-Sensorfehler', both)
+        self.assertIn('0x10', both)
+        # …and a named bit alongside an unnamed one keeps both halves too.
+        mixed = fb.describe_error_bits(fb.ERR_OVERLOAD | 0x40)
+        self.assertIn('Überlast', mixed)
+        self.assertIn('0x40', mixed)
+
+    def test_bits_outside_the_table_are_named_by_their_value(self):
+        for raw in (0x10, 0x40, 0x80, 0xC0):
+            out = fb.describe_error_bits(raw)
+            self.assertIn('unbekanntes Statusbit', out)
+            self.assertIn(f'{raw:#04x}', out)
+
+    def test_the_sensor_bit_keeps_its_angle_sensor_wording(self):
+        # 0x02 is the vendor's 传感器/磁编码 bit and the SDK decodes it as
+        # "Angle sen error!" — angle SENSOR. The German must not be narrowed to a
+        # plain „Sensorfehler", nor widened into an out-of-range angle claim.
+        self.assertEqual(fb.ERR_ANGLE_SENSOR, 0x02)
+        self.assertEqual(fb.describe_error_bits(0x02), 'Winkel-Sensorfehler')
+
+    def test_the_known_mask_is_derived_from_the_table_not_hardcoded(self):
+        expected = 0
+        for bit, _name in fb.ERROR_BITS_DE:
+            expected |= bit
+        self.assertEqual(fb.KNOWN_ERROR_BITS_MASK, expected)
+        # A bit inside the mask must never be reported as "unknown".
+        for bit, _name in fb.ERROR_BITS_DE:
+            self.assertNotIn('unbekanntes',
+                             fb.describe_error_bits(bit))
+
+    def test_each_table_entry_is_a_distinct_single_bit(self):
+        bits = [bit for bit, _ in fb.ERROR_BITS_DE]
+        self.assertEqual(len(bits), len(set(bits)))
+        for bit in bits:
+            self.assertEqual(bit & (bit - 1), 0, f'{bit:#04x} is not one bit')
+        # The five originally-mapped vendor values must not have MOVED — 0x10 was
+        # ADDED to the table, nothing was renumbered.
+        self.assertEqual(
+            (fb.ERR_VOLTAGE, fb.ERR_ANGLE_SENSOR, fb.ERR_OVERHEAT,
+             fb.ERR_OVERCURRENT, fb.ERR_OVERLOAD),
+            (0x01, 0x02, 0x04, 0x08, 0x20))
 
 
 class TestPositionLimitWindow(unittest.TestCase):
@@ -208,6 +287,102 @@ class TestBusTransactions(unittest.TestCase):
                          fb.ERR_OVERHEAT)
 
 
+class TestTorqueEnableWriteRail(unittest.TestCase):
+    """Register 40 is NOT a boolean: 128 means "calibrate the current position
+    to 2048", i.e. the servo writes itself a fresh Homing_Offset. It replies no
+    error, needs no EEPROM unlock, and leaves probe_bus's fingerprint (windows,
+    mode, Phase) intact — so a computed value landing there re-datums the arm
+    invisibly. These pin the rail that makes that unreachable."""
+
+    def test_span_finds_the_byte_that_would_land_in_register_40(self):
+        f = fb.torque_enable_byte_in_span
+        # A bare 1-byte write AT the register.
+        self.assertEqual(f(fb.REG_TORQUE_ENABLE, b'\x7f'), 0x7F)
+        # The off-by-one that motivates a SPAN test: a 7-byte contiguous block
+        # starting one register EARLY reaches 40 at payload index 6.
+        self.assertEqual(f(fb.REG_TORQUE_ENABLE - 6, bytes(range(7))), 6)
+        # The driver's REAL goal write starts at 41 — one register PAST 40 — so
+        # it must never be inspected, whatever bytes it carries.
+        self.assertIsNone(f(fb.REG_ACCELERATION, bytes([128] * 7)))
+        # Ends just short / starts just past.
+        self.assertIsNone(f(fb.REG_TORQUE_ENABLE - 1, b'\xff'))
+        self.assertIsNone(f(fb.REG_TORQUE_ENABLE + 1, b'\xff'))
+
+    def test_write_refuses_the_128_midpoint_recalibration(self):
+        bus, fake = _bus(_status(4, 0))
+        with self.assertRaises(ValueError) as ctx:
+            bus.write(4, fb.REG_TORQUE_ENABLE,
+                      bytes([fb.TORQUE_ENABLE_CALIBRATE_MIDPOINT]))
+        # The message must name the consequence, not just "invalid value" — the
+        # whole point is that the failure mode is silent re-datuming. 2048 is the
+        # tick the vendor note („任意当前位置较正为2048") re-datums to.
+        self.assertIn('re-datums', str(ctx.exception))
+        self.assertIn('2048', str(ctx.exception))
+        self.assertIn('128', str(ctx.exception))
+        # …and NOTHING may reach the wire: a refused write that still wrote
+        # would be worse than no guard at all.
+        self.assertEqual(fake.written, b'')
+
+    def test_write_refuses_every_value_outside_the_allowlist(self):
+        for value in (2, 3, 127, 128, 129, 255):
+            bus, fake = _bus(_status(4, 0))
+            with self.assertRaises(ValueError):
+                bus.write(4, fb.REG_TORQUE_ENABLE, bytes([value]))
+            self.assertEqual(fake.written, b'')
+
+    def test_sync_write_refuses_when_any_single_servo_carries_a_bad_byte(self):
+        # SYNC_WRITE is a broadcast with no reply, so one bad byte would be both
+        # undetectable AND applied to the whole arm.
+        payload = {sid: b'\x01' for sid in range(1, 8)}
+        payload[5] = bytes([fb.TORQUE_ENABLE_CALIBRATE_MIDPOINT])
+        bus, fake = _bus()
+        with self.assertRaises(ValueError):
+            bus.sync_write(fb.REG_TORQUE_ENABLE, payload)
+        self.assertEqual(fake.written, b'')
+
+    def test_torque_off_can_never_be_refused(self):
+        # THE dangerous misfire: shutdown()/SIGTERM/atexit torque-off is the only
+        # thing standing between a dead host and a permanently energised arm
+        # (the STS has no watchdog). A raise here would leave it energised.
+        bus, fake = _bus()
+        bus.sync_write(fb.REG_TORQUE_ENABLE,
+                       {sid: b'\x00' for sid in range(1, 8)})
+        self.assertNotEqual(fake.written, b'')
+        for value in (fb.TORQUE_ENABLE_OFF, fb.TORQUE_ENABLE_ON):
+            bus2, fake2 = _bus(_status(4, 0))
+            bus2.write(4, fb.REG_TORQUE_ENABLE, bytes([value]))
+            self.assertNotEqual(fake2.written, b'')
+
+    def test_the_real_goal_write_is_never_refused_even_carrying_a_128_byte(self):
+        # False-positive rail. The 7-byte goal block starts at REG_ACCELERATION
+        # and legitimately contains arbitrary bytes: tick 128 encodes as b'\x80'
+        # and GOAL_SPEED/accel can be anything. If the guard ever widened from a
+        # span test to a value scan, THIS is the test that fails.
+        tick = fb.TORQUE_ENABLE_CALIBRATE_MIDPOINT
+        payload = (bytes([tick]) + fb.le16(tick) + fb.le16(tick)
+                   + fb.le16(tick))
+        bus, fake = _bus()
+        bus.sync_write(fb.REG_ACCELERATION, {sid: payload for sid in range(1, 8)})
+        self.assertNotEqual(fake.written, b'')
+
+    def test_a_contiguous_write_overrunning_into_40_is_refused(self):
+        # The bug class the span test exists for, end to end through the bus.
+        bad = bytes([0, 0, 0, 0, 0, 0, fb.TORQUE_ENABLE_CALIBRATE_MIDPOINT])
+        bus, fake = _bus(_status(1, 0))
+        with self.assertRaises(ValueError):
+            bus.write(1, fb.REG_TORQUE_ENABLE - 6, bad)
+        self.assertEqual(fake.written, b'')
+
+    def test_allowlist_is_exactly_off_and_on(self):
+        self.assertEqual(fb.SAFE_TORQUE_ENABLE_VALUES,
+                         frozenset({fb.TORQUE_ENABLE_OFF, fb.TORQUE_ENABLE_ON}))
+        self.assertEqual(fb.TORQUE_ENABLE_OFF, 0)
+        self.assertEqual(fb.TORQUE_ENABLE_ON, 1)
+        self.assertEqual(fb.TORQUE_ENABLE_CALIBRATE_MIDPOINT, 128)
+        self.assertNotIn(fb.TORQUE_ENABLE_CALIBRATE_MIDPOINT,
+                         fb.SAFE_TORQUE_ENABLE_VALUES)
+
+
 # ── node pure functions (ast-extracted; no rclpy import) ─────────────────────
 
 def _load_node_functions():
@@ -216,23 +391,47 @@ def _load_node_functions():
     tree = ast.parse(source)
     ns = {
         'math': __import__('math'), 'os': os, 'fb': fb,
+        'time': __import__('time'), 'threading': __import__('threading'),
         'CENTER_TICK': 2048, 'TICKS_PER_REV': 4096,
     }
     # Deterministic JOINT_SIGNS regardless of the dev machine's env: the env
     # parse path itself is pinned by test_parse_signs.
     env_backup = os.environ.pop('EDUBOTICS_EDU6_JOINT_SIGNS', None)
     tol_backup = os.environ.pop('EDUBOTICS_EDU6_BOOT_POS_TOL_TICKS', None)
+    edge_backup = os.environ.pop('EDUBOTICS_EDU6_EDGE_MARGIN_TICKS', None)
+    abort_backup = os.environ.pop('EDUBOTICS_EDU6_TORQUE_ABORT_TICKS', None)
+    goal_backup = os.environ.pop('EDUBOTICS_EDU6_GOAL_EDGE_MARGIN_TICKS', None)
     wanted = {'rad_to_tick', 'tick_to_rad', 'interpolate_trajectory',
               'build_boot_home', '_parse_signs', 'boot_home_verify_decision',
-              '_parse_boot_pos_tolerance'}
+              '_parse_boot_pos_tolerance', '_parse_edge_margin',
+              'edge_parked_joints', 'edge_refusal_message',
+              '_parse_torque_abort_ticks', 'wrong_way_joints',
+              'wrong_way_abort_message', 'post_energise_read_failure_message',
+              '_parse_goal_edge_margin', 'rad_to_command_tick',
+              'firmware_fingerprint_notes', 'angular_resolution_note'}
     consts = {'RAD_PER_TICK', 'HOME_JOINTS_RAD', 'GRIPPER_OPEN_RAD',
               'LOOP_HZ', 'BOOT_HOME_DURATION_S', 'SERVO_IDS', 'JOINT_NAMES',
               'JOINT_LIMITS_RAD', '_DEFAULT_SIGNS', 'JOINT_SIGNS',
-              'BOOT_TORQUE_ON_ATTEMPTS', 'SEED_SPEED_STEPS',
-              'PRESENT_LOAD_FULLSCALE',
+              'BOOT_TORQUE_ON_ATTEMPTS', 'BOOT_TORQUE_ON_RETRY_S',
+              'SEED_SPEED_STEPS', 'PRESENT_LOAD_FULLSCALE',
               'GOAL_SPEED_CAP_STEPS', 'WRITE_ACCELERATION',
               '_DEFAULT_BOOT_POSITION_TOLERANCE_TICKS',
-              'BOOT_POSITION_TOLERANCE_TICKS'}
+              'BOOT_POSITION_TOLERANCE_TICKS',
+              '_DEFAULT_EDGE_REFUSE_MARGIN_TICKS', 'EDGE_REFUSE_MARGIN_TICKS',
+              '_EDGE_MARGIN_MAX_TICKS',
+              '_DEFAULT_TORQUE_ABORT_ERROR_TICKS', '_TORQUE_ABORT_MIN_TICKS',
+              '_TORQUE_ABORT_MAX_TICKS', 'TORQUE_ABORT_ERROR_TICKS',
+              'POST_ENERGISE_READ_ATTEMPTS', '_TORQUE_OFF_PAYLOAD',
+              'BOOT_PHYSICAL_REMEDY_DE', 'PHYSICAL_TORQUE_REFUSALS',
+              '_DEFAULT_GOAL_EDGE_MARGIN_TICKS',
+              '_GOAL_EDGE_MARGIN_MAX_TICKS', 'GOAL_EDGE_MARGIN_TICKS',
+              'FIRMWARE_SUSPECT_VERSIONS'}
+    # Instance methods extracted as plain functions and bound onto a stub self
+    # (_TorqueStubNode) — the torque path is BEHAVIOUR, not something a source
+    # grep can prove, and rclpy is not installed here.
+    methods = {'probe_bus', '_seed_goal_from_present_locked', 'set_torque',
+               '_torque_cb', 'start_boot_home',
+               '_verify_after_energise_locked', '_write_targets'}
     for node in tree.body:
         if isinstance(node, ast.Assign) and any(
                 isinstance(t, ast.Name) and t.id in consts
@@ -246,13 +445,19 @@ def _load_node_functions():
         # so the H1/H2 provisioning-fingerprint gate is deps-free-testable.
         if isinstance(node, ast.ClassDef) and node.name == 'Edu6ArmNode':
             for sub in node.body:
-                if isinstance(sub, ast.FunctionDef) and sub.name == 'probe_bus':
+                if isinstance(sub, ast.FunctionDef) and sub.name in methods:
                     src = textwrap.dedent(ast.get_source_segment(source, sub))
                     exec(compile(src, path, 'exec'), ns)  # noqa: S102
     if env_backup is not None:
         os.environ['EDUBOTICS_EDU6_JOINT_SIGNS'] = env_backup
     if tol_backup is not None:
         os.environ['EDUBOTICS_EDU6_BOOT_POS_TOL_TICKS'] = tol_backup
+    if edge_backup is not None:
+        os.environ['EDUBOTICS_EDU6_EDGE_MARGIN_TICKS'] = edge_backup
+    if abort_backup is not None:
+        os.environ['EDUBOTICS_EDU6_TORQUE_ABORT_TICKS'] = abort_backup
+    if goal_backup is not None:
+        os.environ['EDUBOTICS_EDU6_GOAL_EDGE_MARGIN_TICKS'] = goal_backup
     return ns
 
 
@@ -355,11 +560,16 @@ class TestProbeBusGate(unittest.TestCase):
 
     class _RegBus:
         def __init__(self, windows=None, mode=0, alive=None, models=None,
-                     phase=0, present=None):
+                     phase=0, present=None, firmware=None, resolution=None):
             self.mode = mode
             self.phase = phase
             self.alive = set(alive if alive is not None else range(1, 8))
             self.models = models or {}
+            # EDU6-0001 reads 3.10 on all seven and Angular_Resolution is the
+            # factory 1, so the DEFAULT fake is the reference arm and must stay
+            # completely silent.
+            self.firmware = dict(firmware or {})
+            self.resolution = dict(resolution or {})
             if windows is None:
                 windows = {
                     sid: fb.position_limit_window(
@@ -379,6 +589,11 @@ class TestProbeBusGate(unittest.TestCase):
                 return 0, bytes([self.mode])
             if addr == fb.REG_PHASE:
                 return 0, bytes([self.phase])
+            if addr == fb.REG_FIRMWARE_MAJOR and length == 2:
+                return 0, bytes(self.firmware.get(sid, (3, 10)))
+            if addr == fb.REG_ANGULAR_RESOLUTION:
+                return 0, bytes([self.resolution.get(
+                    sid, fb.ANGULAR_RESOLUTION_SINGLE_TURN)])
             raise AssertionError(f'unexpected read addr {addr}')
 
         def read_u16(self, sid, addr):
@@ -392,10 +607,149 @@ class TestProbeBusGate(unittest.TestCase):
                 return self.present.get(sid, 2048)
             raise AssertionError(f'unexpected read_u16 addr {addr}')
 
+    class _CaptureLogger:
+        """probe_bus's long-unused `logger` parameter is the non-fatal channel."""
+
+        def __init__(self):
+            self.warnings = []
+
+        def warning(self, text):
+            self.warnings.append(text)
+
     def test_provisioned_arm_passes(self):
         ok, msg = self._probe()(self._RegBus())
         self.assertTrue(ok)
         self.assertEqual(msg, '')
+
+    def test_the_reference_arm_boots_completely_silently(self):
+        # EDU6-0001: uniform firmware 3.10, Angular_Resolution at the factory 1.
+        # A boot advisory on a healthy arm is log noise that trains operators to
+        # ignore the channel, so silence here is load-bearing.
+        log = self._CaptureLogger()
+        ok, msg = self._probe()(self._RegBus(), logger=log)
+        self.assertTrue(ok)
+        self.assertEqual(msg, '')
+        self.assertEqual(log.warnings, [])
+
+    # ── Angular_Resolution (register 30) — WARN, never refuse ────────────────
+    def test_a_rescaled_angular_resolution_warns_but_STILL_BOOTS(self):
+        # THE brick-avoidance test. EDU6-0001 was provisioned before register 30
+        # was known about, so its live value has never been read; a hard gate on a
+        # value we cannot predict would refuse „Umgebung starten" on the only arm
+        # that exists, with no env knob to escape with. If someone later promotes
+        # this to `return False`, THIS is the test that must be consciously
+        # rewritten rather than quietly deleted.
+        log = self._CaptureLogger()
+        bus = self._RegBus(resolution={3: 2})
+        ok, msg = self._probe()(bus, logger=log)
+        self.assertTrue(ok, msg)
+        self.assertEqual(msg, '')
+        self.assertEqual(len(log.warnings), 1)
+        note = log.warnings[0]
+        self.assertIn('[WARNUNG]', note)
+        self.assertIn('Servo 3', note)
+        self.assertIn('30', note)                 # names the register
+        self.assertIn('edu6_provision', note)     # and the remedy
+
+    def test_the_resolution_note_names_every_offender(self):
+        f = _N['angular_resolution_note']
+        self.assertEqual(f([]), '')
+        both = f([(2, 3), (5, 2)])
+        self.assertIn('Servo 2', both)
+        self.assertIn('Servo 5', both)
+
+    def test_resolution_is_read_from_register_30_not_guessed(self):
+        # A strict fake: _RegBus raises AssertionError on any address it does not
+        # model, so this fails loudly if the probe ever reads a different register.
+        self.assertEqual(fb.REG_ANGULAR_RESOLUTION, 30)
+        self.assertEqual(fb.ANGULAR_RESOLUTION_SINGLE_TURN, 1)
+        # …and 30 must not collide with its neighbours (28-29 protection current,
+        # 31-32 homing offset).
+        self.assertEqual(fb.REG_PROTECTION_CURRENT + 2,
+                         fb.REG_ANGULAR_RESOLUTION)
+        self.assertEqual(fb.REG_ANGULAR_RESOLUTION + 1, fb.REG_HOMING_OFFSET)
+
+    # ── firmware fingerprint — WARN, never refuse ────────────────────────────
+    def test_a_nonuniform_firmware_bus_warns_but_STILL_BOOTS(self):
+        log = self._CaptureLogger()
+        bus = self._RegBus(firmware={4: (3, 7)})
+        ok, msg = self._probe()(bus, logger=log)
+        self.assertTrue(ok, msg)
+        joined = ' | '.join(log.warnings)
+        self.assertIn('[WARNUNG]', joined)
+        self.assertIn('3.7', joined)
+        self.assertIn('3.10', joined)     # the majority version is listed too
+
+    def test_suspect_firmware_warns_but_STILL_BOOTS_and_hedges(self):
+        # Refusing 3.9 was the brief's ask; the evidence (one confounded report)
+        # does not support it — see FIRMWARE_SUSPECT_VERSIONS. So: named, hedged,
+        # never a refusal.
+        log = self._CaptureLogger()
+        bus = self._RegBus(firmware={s: (3, 9) for s in range(1, 8)})
+        ok, msg = self._probe()(bus, logger=log)
+        self.assertTrue(ok, msg)
+        self.assertEqual(msg, '')
+        self.assertEqual(len(log.warnings), 1)   # uniform → only the suspect note
+        note = log.warnings[0]
+        self.assertIn('3.9', note)
+        self.assertIn('unbestätigt', note)       # the hedge is the point
+
+    def test_firmware_notes_are_pure_and_silent_on_a_healthy_bus(self):
+        f = _N['firmware_fingerprint_notes']
+        self.assertEqual(f({}), [])
+        self.assertEqual(f({s: (3, 10) for s in range(1, 8)}), [])
+        # non-uniform AND suspect → BOTH findings, not just the first.
+        mixed = {s: (3, 10) for s in range(1, 8)}
+        mixed[2] = (3, 9)
+        self.assertEqual(len(f(mixed)), 2)
+
+    def test_the_suspect_set_is_a_denylist_not_a_pinned_version(self):
+        # Pinning "must be 3.10" would refuse a legitimately NEWER firmware on an
+        # RMA servo. 3.11 and 4.0 must be unremarkable.
+        f = _N['firmware_fingerprint_notes']
+        self.assertEqual(_N['FIRMWARE_SUSPECT_VERSIONS'], frozenset({(3, 9)}))
+        for ver in ((3, 10), (3, 11), (4, 0)):
+            self.assertEqual(f({s: ver for s in range(1, 8)}), [])
+
+    def test_the_seed_docstring_does_not_revert_to_the_backwards_reg42_promise(self):
+        # A3. An earlier revision promised that reading Goal_Position (42) back
+        # "becomes a free upgrade that closes both residuals at once" once the
+        # raw-vs-clamped question was settled. It was settled — RAW (LeRobot
+        # #3585) — which makes reading 42 the WRONG model for the abort
+        # comparison, not an upgrade. This pins the correction against a
+        # well-meaning revert, since prose has no other guard.
+        src = open(os.path.join(_DOCKER, 'edu6_arm_node.py'),
+                   encoding='utf-8').read()
+        start = src.index('def _seed_goal_from_present_locked')
+        doc = src[start:src.index('replies = self._bus.sync_read', start)]
+        # "free upgrade" may appear ONCE — as the quoted old promise — and only
+        # ahead of its retraction. An unqualified reinstatement would put it after.
+        self.assertLessEqual(doc.count('free upgrade'), 1)
+        if 'free upgrade' in doc:
+            self.assertLess(doc.index('free upgrade'),
+                            doc.index('THAT PROMISE WAS BACKWARDS'))
+        self.assertIn('RAW', doc)
+        self.assertIn('#3585', doc)
+        # The corrective claim itself must be present, not merely the retraction.
+        self.assertIn('COMPUTING THE CLAMP IS THE CORRECT MODEL', doc)
+        # Register 67 must never be asserted as the answer — it is 无定义 in the
+        # current official table and absent from V3.7.
+        self.assertIn('UNSUBSTANTIATED', doc)
+        self.assertIn('71', doc)
+
+    def test_a_dead_bus_still_reports_a_cable_fault_not_a_firmware_fault(self):
+        # The firmware/resolution reads live in the SAME try as the EEPROM reads,
+        # so a read failure must keep its existing „Verkabelung" verdict.
+        class _Dead(TestProbeBusGate._RegBus):
+            def read(self, sid, addr, length):
+                if addr == fb.REG_FIRMWARE_MAJOR:
+                    raise fb.FeetechBusError('no reply')
+                return super().read(sid, addr, length)
+
+        ok, msg = self._probe()(_Dead())
+        self.assertFalse(ok)
+        self.assertIn('Verkabelung', msg)
+        self.assertNotIn('Firmware', msg)
 
     def test_factory_limits_refused_as_unprovisioned(self):
         bus = self._RegBus()
@@ -472,7 +826,14 @@ class TestProbeBusGate(unittest.TestCase):
         # >= 30° of slop: the original 10° band would have refused a limp
         # joint5 settling 11° past its −90° stop (2026-07-25 sizing decision).
         self.assertGreaterEqual(tol, 342)
-        bus = self._RegBus(present={2: 4095 + tol - 1, 3: 2048, 5: 1024 - tol + 1})
+        # Every reading here is a POSSIBLE one, i.e. inside the 12-bit register:
+        # joint2 resting `tol−1` ticks below its 2048 minimum and joint5 the same
+        # distance below its 1024 minimum. (The upper stops of joint2/joint3 sit
+        # AT a register end, so "just past" is unrepresentable there — that is the
+        # known-accepted blindness the edge guard covers, not something the band
+        # can be tested against with an out-of-register tick.)
+        bus = self._RegBus(present={2: 2048 - tol + 1, 3: 2048,
+                                    5: 1024 - tol + 1})
         ok, msg = self._probe()(bus)
         self.assertTrue(ok, msg)
 
@@ -523,18 +884,1134 @@ class TestProbeBusGate(unittest.TestCase):
         self.assertEqual(f('abc'), default)
         self.assertEqual(f('-5'), default)
 
-    def test_full_circle_window_cannot_refuse(self):
+    def test_full_circle_window_band_is_a_no_op_but_the_edge_guard_is_not(self):
         # DOCUMENTED no-op: joint4/joint6 keep [0,4095] under the keep-±180°
-        # decision, so no reading is ever out of range there. Pinning it keeps
-        # the limitation visible instead of implied.
+        # decision, so no reading is ever OUT OF RANGE there and the plausibility
+        # BAND can never fire. Pinning it keeps the limitation visible.
+        #
+        # Since 2026-07-26 those two joints are not unguarded, though: the
+        # torque-on edge guard refuses a reading ON the map edge, because the STS
+        # position loop is not wrap-aware (docs §11.11). Both halves are pinned
+        # together so neither can be lost while the other looks fine.
+        band = _N['BOOT_POSITION_TOLERANCE_TICKS']
         for sid in (4, 6):
             lo, hi = fb.position_limit_window(
                 *_N['JOINT_LIMITS_RAD'][sid - 1], 1)
             self.assertEqual((lo, hi), (0, 4095))
-            ok, msg = self._probe()(self._RegBus(present={sid: 0}))
+            for tick in (0, 2048, 4095):
+                self.assertTrue(lo - band <= tick <= hi + band)  # band inert
+            # A mid-range reading boots (nothing judges these joints there)…
+            ok, msg = self._probe()(self._RegBus(present={sid: 2048}))
             self.assertTrue(ok, msg)
-            ok, msg = self._probe()(self._RegBus(present={sid: 4095}))
-            self.assertTrue(ok, msg)
+            # …while both map-edge readings are now refused, by the edge guard.
+            for tick in (0, 4095):
+                ok, msg = self._probe()(self._RegBus(present={sid: tick}))
+                self.assertFalse(ok, f'servo {sid} @ {tick}')
+                self.assertIn('Positionsbereichs', msg)
+
+
+class _TorqueFakeBus:
+    """Register-light bus fake for the torque path: answers the 2-byte
+    Present_Position sync_read the goal-seed performs and records every
+    sync_write, so a REFUSED torque-on can be proven to have written nothing.
+
+    ``sync_read`` calls are COUNTED, because the torque path makes two kinds:
+    #1 is the goal seed (before Torque_Enable), #2+ are the post-energise
+    verification reads. ``post_ticks`` is served from #2 onward — that is how a
+    joint that MOVED between the seed and the verification (the measured
+    wrong-way runaway) is expressed. ``missing_at`` drops the named servos on one
+    specific read index, so a single dropped CDC-ACM reply can be told apart from
+    a genuinely silent servo."""
+
+    def __init__(self, ticks=None, missing=(), post_ticks=None,
+                 missing_at=None):
+        self.ticks = dict(ticks or {})
+        self.missing = set(missing)
+        self.post_ticks = dict(post_ticks or {})
+        self.missing_at = {int(k): set(v)
+                           for k, v in (missing_at or {}).items()}
+        self.reads = 0
+        self.writes = []                  # [(addr, {sid: bytes})] in call order
+
+    def sync_read(self, addr, length, ids):
+        assert addr == fb.REG_PRESENT_POSITION, addr
+        self.reads += 1
+        table = dict(self.ticks)
+        if self.reads >= 2:
+            table.update(self.post_ticks)
+        gone = self.missing | self.missing_at.get(self.reads, set())
+        out = {}
+        for sid in ids:
+            if sid in gone:
+                continue                  # a silent servo is simply absent
+            raw = fb.encode_sign_magnitude(table.get(sid, 2048), 15)
+            data = (fb.le16(raw) + bytes(6))[:length]
+            out[sid] = (0, data)
+        return out
+
+    def sync_write(self, addr, per_servo):
+        self.writes.append((addr, dict(per_servo)))
+
+    def addrs(self):
+        return [addr for addr, _ in self.writes]
+
+    def torque_writes(self):
+        """[(sid, value)] for every Torque_Enable byte that reached the bus."""
+        return [(sid, payload[0])
+                for addr, per in self.writes if addr == fb.REG_TORQUE_ENABLE
+                for sid, payload in sorted(per.items())]
+
+
+class _TorqueStubNode:
+    """Everything the AST-extracted torque methods touch on ``self`` — no rclpy,
+    no real threads of ours. The methods themselves are the SHIPPED ones."""
+
+    def __init__(self, bus):
+        self._bus = bus
+        self._bus_lock = threading.Lock()
+        self._stop = threading.Event()
+        self._torque_on = False
+        self._bus_fault = False
+        self._torque_refusal = None
+        self.errors, self.warnings, self.infos = [], [], []
+        self.traj_calls = []
+        self.verify_calls = []
+        self.read_positions = [0.0, 0.70, -2.40, 0.0, 0.70, 0.0, 1.75]
+
+    # --- logger seam -------------------------------------------------------
+    def get_logger(self):
+        return self
+
+    def error(self, msg):
+        self.errors.append(msg)
+
+    def warning(self, msg):
+        self.warnings.append(msg)
+
+    def info(self, msg):
+        self.infos.append(msg)
+
+    # --- collaborators the torque path calls --------------------------------
+    def _replace_trajectory(self, points, start_mono=None):
+        self.traj_calls.append((list(points), start_mono))
+        return len(self.traj_calls)
+
+    def _read_positions_once(self):
+        return list(self.read_positions) if self.read_positions else None
+
+    def _boot_home_verify(self, gen):
+        self.verify_calls.append(gen)
+
+
+for _bound in ('_seed_goal_from_present_locked', 'set_torque', '_torque_cb',
+               'start_boot_home', '_verify_after_energise_locked',
+               '_write_targets'):
+    setattr(_TorqueStubNode, _bound, _N[_bound])
+
+
+class _Req:
+    def __init__(self, data):
+        self.data = data
+
+
+class _Resp:
+    success = None
+    message = None
+
+
+class _FakeTime:
+    """time module stand-in: records sleeps instead of taking them."""
+
+    def __init__(self):
+        self.slept = []
+
+    def sleep(self, seconds):
+        self.slept.append(seconds)
+
+    def monotonic(self):
+        return 0.0
+
+
+class _SyncThread:
+    """threading.Thread stand-in that runs the target INLINE on start() — the
+    boot-home verifier is a daemon thread, and asserting on it otherwise races."""
+
+    def __init__(self, target=None, args=(), name=None, daemon=None):
+        self._target, self._args = target, args
+
+    def start(self):
+        self._target(*self._args)
+
+
+class _SyncThreading:
+    Thread = _SyncThread
+    Event = threading.Event
+    Lock = threading.Lock
+
+
+class TestTorqueOnEdgeGuard(unittest.TestCase):
+    """Measured 2026-07-26 on arm EDU6-0001 (docs §11.11): the STS position loop
+    is NOT wrap-aware — it computes `goal − present` naively over 0..4095, so a
+    goal seeded on a joint resting ON the map edge drives a FULL REVOLUTION the
+    wrong way (joint6 at tick 12 with goal 4090 drove upward until the bench tool
+    cut torque). set_torque seeds `Goal = Present` read milliseconds earlier, so
+    one tick of sensor dither at the boundary is enough. The guard refuses EVERY
+    torque-on in that state; torque-OFF is never blocked."""
+
+    def _node(self, ticks=None, missing=(), post_ticks=None, missing_at=None):
+        bus = _TorqueFakeBus(ticks, missing, post_ticks, missing_at)
+        return _TorqueStubNode(bus), bus
+
+    # ── the refusal ────────────────────────────────────────────────────────
+    def test_service_refuses_torque_on_for_a_joint_on_the_map_edge(self):
+        node, bus = self._node({6: 4093})
+        resp = node._torque_cb(_Req(True), _Resp())
+        self.assertFalse(resp.success)
+        self.assertFalse(node._torque_on)
+        # The SetBool reply carries the reason (this is the „Beenden"/hand-guide
+        # exit path — a bare 'fehlgeschlagen' sends the student to the cables).
+        self.assertIn('[FEHLER]', resp.message)
+        self.assertIn('Gelenk 6', resp.message)
+        self.assertIn('Positionsbereichs', resp.message)
+        self.assertIn('zurückdrehen', resp.message)   # actionable + umlauts
+        self.assertNotIn('Kabel', resp.message)
+        self.assertEqual(node._torque_refusal[0], 'edge')
+        # It is also in the Protokoll…
+        self.assertEqual(node.errors, [resp.message])
+        # …and NOTHING reached the bus: no goal seed, no Torque_Enable.
+        self.assertEqual(bus.writes, [])
+
+    def test_both_torque_services_share_the_guarded_callback(self):
+        # /edu6/set_torque and the legacy /dynamixel_hardware_interface/
+        # set_dxl_torque alias must both route through _torque_cb → set_torque,
+        # or one entry point would bypass the guard.
+        src = open(os.path.join(_DOCKER, 'edu6_arm_node.py'),
+                   encoding='utf-8').read()
+        block = src.split('# Torque service', 1)[1].split(
+            'self._read_thread', 1)[0]
+        self.assertIn("'/edu6/set_torque'", block)
+        self.assertIn("'/dynamixel_hardware_interface/set_dxl_torque'", block)
+        self.assertEqual(block.count('self._torque_cb'), 2)
+        cb = src.split('def _torque_cb', 1)[1].split('\n    def ', 1)[0]
+        self.assertIn('self.set_torque(bool(request.data))', cb)
+
+    def test_edge_of_the_band_is_pinned_from_both_sides(self):
+        margin = _N['EDGE_REFUSE_MARGIN_TICKS']
+        # dist == margin → allowed (both ends of the register range)
+        node, _ = self._node({6: margin, 4: (4096 - 1) - margin})
+        self.assertTrue(node.set_torque(True), node.errors)
+        # dist == margin − 1 → refused (both ends)
+        for ticks in ({6: margin - 1}, {4: (4096 - 1) - (margin - 1)}):
+            node, bus = self._node(ticks)
+            self.assertFalse(node.set_torque(True))
+            self.assertEqual(bus.writes, [])
+
+    def test_multiple_offenders_are_all_named_with_correct_grammar(self):
+        msg = _N['edge_refusal_message']([(4, 1), (6, 4095)],
+                                         self_healing=False)
+        self.assertIn('Gelenk 4', msg)
+        self.assertIn('Gelenk 6', msg)
+        self.assertIn('stehen', msg)          # plural verb
+        one = _N['edge_refusal_message']([(6, 4095)], self_healing=False)
+        self.assertIn('steht ', one)
+
+    # ── no nuisance ────────────────────────────────────────────────────────
+    def test_healthy_mid_range_arm_still_torques_on(self):
+        node, bus = self._node()                    # every joint at tick 2048
+        self.assertTrue(node.set_torque(True))
+        self.assertTrue(node._torque_on)
+        self.assertIsNone(node._torque_refusal)
+        self.assertEqual(node.errors, [])
+        # goal seed first, THEN Torque_Enable (the pre-existing ordering rail).
+        self.assertEqual(bus.addrs(),
+                         [fb.REG_ACCELERATION, fb.REG_TORQUE_ENABLE])
+        self.assertEqual(bus.torque_writes(), [(sid, 1) for sid in range(1, 8)])
+
+    def test_the_guard_only_judges_the_OFF_to_ON_transition(self):
+        # The server asserts torque ON defensively on EVERY WorkshopJog call, so
+        # judging an already-locked arm made any jog beyond ±176.5° on
+        # joint4/joint6 — inside the URDF window the jog accepts — fail, and
+        # three of those in a row produce „Arm konnte wiederholt nicht verriegelt
+        # werden … Umgebung neu starten": a misdiagnosis (the arm IS locked)
+        # whose remedy probe_bus then refuses at the same tick.
+        #
+        # It is a false alarm because the wrapped error needs `present` to cross
+        # the 4095/0 seam between the seed read and the write, and a torqued
+        # joint is tracking a monotonic tick goal our own write loop set — it
+        # cannot cross, and the seed it gets is the goal it already holds.
+        node, bus = self._node({6: 4094})
+        node._torque_on = True                    # already locked and holding
+        self.assertTrue(node.set_torque(True), node.errors)
+        self.assertIsNone(node._torque_refusal)
+        self.assertEqual(node.errors, [])
+        self.assertEqual(bus.addrs(),
+                         [fb.REG_ACCELERATION, fb.REG_TORQUE_ENABLE])
+        # The regression sequence end to end: jog #1 runs from mid-range (the
+        # guard passes and leaves the joint at 4094), jog #2 re-asserts torque.
+        node, bus = self._node({6: 2048})
+        self.assertTrue(node.set_torque(True), node.errors)
+        bus.ticks[6] = 4094
+        self.assertTrue(node.set_torque(True), node.errors)
+        # …while the very same reading is still refused from LIMP, which is the
+        # state the measured hazard needs (hand-guide is torque-off by design).
+        node, bus = self._node({6: 4094})
+        self.assertFalse(node.set_torque(True))
+        self.assertEqual(node._torque_refusal[0], 'edge')
+        self.assertEqual(bus.writes, [])
+
+    def test_the_transition_gate_re_arms_under_a_latched_bus_fault(self):
+        # `_torque_on` is our own BELIEF, never a reading: a 12 V brown-out drops
+        # real torque without touching the flag. While the read loop cannot see
+        # the arm — the latched fault — that belief is worth least, so the guard
+        # re-arms there rather than trusting it.
+        node, bus = self._node({4: 2})
+        node._torque_on = True
+        node._bus_fault = True
+        self.assertFalse(node.set_torque(True))
+        self.assertEqual(node._torque_refusal[0], 'edge')
+        self.assertEqual(bus.writes, [])
+        # Clearing the latch (which needs a full 7-servo read) restores the skip.
+        node._bus_fault = False
+        self.assertTrue(node.set_torque(True), node.errors)
+
+    def test_the_refusal_reason_is_cleared_at_the_top_of_every_set_torque(self):
+        # `self._torque_refusal = None` at the top of set_torque is load-bearing,
+        # not tidiness: set_torque's bare `except` records NO reason, so a stale
+        # one would be reported for an unrelated later failure and send the
+        # student to a joint that is no longer the problem.
+        node, bus = self._node({6: 4093})
+        self.assertFalse(node.set_torque(True))
+        self.assertEqual(node._torque_refusal[0], 'edge')
+        bus.ticks[6] = 2048                        # student turns it back
+        self.assertTrue(node.set_torque(True), node.errors)
+        self.assertIsNone(node._torque_refusal)    # not carried past a success
+
+        node, bus = self._node({6: 4093})
+        self.assertFalse(node._torque_cb(_Req(True), _Resp()).success)
+        self.assertEqual(node._torque_refusal[0], 'edge')
+        bus.ticks[6] = 2048
+
+        def _boom(*_a, **_kw):
+            raise fb.FeetechBusError('bus went away mid-write')
+
+        bus.sync_write = _boom
+        resp = node._torque_cb(_Req(True), _Resp())
+        self.assertFalse(resp.success)
+        self.assertIsNone(node._torque_refusal)
+        self.assertEqual(resp.message, 'Torque-Umschaltung fehlgeschlagen.')
+        self.assertNotIn('Positionsbereichs', resp.message)
+
+    def test_guard_covers_EVERY_joint_not_a_full_circle_subset(self):
+        # Re-derived 2026-07-26: the guard judges all 7 servos. The joints whose
+        # designed window is clear of both register ends (joint1, joint5, gripper)
+        # cannot reach a near-edge reading innocently — at the shipped 40-tick
+        # margin such a reading is 756+ ticks OUTSIDE the window, i.e. 66°+ past a
+        # designed limit, against R9's worst innocent excursion of 107 ticks — so
+        # covering them costs nothing and the boot band already refuses them.
+        # joint2 (hi = 4095) and joint3 (lo = 0) are the joints this ADDS at the
+        # service re-torque path: their windows TOUCH a register end, so a
+        # near-edge reading there is IN-window and the band is blind to it.
+        margin = _N['EDGE_REFUSE_MARGIN_TICKS']
+        for sid in _N['SERVO_IDS']:
+            for tick in (0, margin - 1, 4096 - margin, 4095):
+                self.assertEqual(
+                    [s for s, _ in _N['edge_parked_joints']({sid: tick})],
+                    [sid], f'servo {sid} @ tick {tick}')
+        # …and the service path refuses on each of them individually.
+        for sid in _N['SERVO_IDS']:
+            node, bus = self._node({sid: 4094})
+            self.assertFalse(node.set_torque(True), f'servo {sid}')
+            self.assertIn(f'Gelenk {sid}', node.errors[0])
+            self.assertEqual(bus.writes, [])
+        # Redundancy proof for the non-touching windows: every near-edge reading
+        # there lands outside the designed window by more than the boot band, so
+        # nothing the edge guard refuses at BOOT was previously accepted.
+        band = _N['BOOT_POSITION_TOLERANCE_TICKS']
+        for idx, sid in enumerate(_N['SERVO_IDS']):
+            lo, hi = fb.position_limit_window(*_N['JOINT_LIMITS_RAD'][idx], 1)
+            for tick in (margin - 1, 4096 - margin):
+                if lo <= tick <= hi:
+                    # in-window: joint2/joint3/joint4/joint6 — the band CANNOT
+                    # see this, which is exactly why the edge guard exists.
+                    self.assertIn(sid, (2, 3, 4, 6), f'servo {sid} @ {tick}')
+                    continue
+                outside = lo - tick if tick < lo else tick - hi
+                self.assertGreater(outside, band, f'servo {sid} @ {tick}')
+
+    def test_a_trimmed_window_is_NOT_immunised_by_the_eeprom_clamp(self):
+        # The 2026-07-26 correction. The earlier derivation exempted any joint
+        # whose window had been trimmed, arguing the servo's EEPROM clamp keeps
+        # the seeded goal away from the boundary. The clamp bounds the GOAL, not
+        # the PATH — so the wrapped error still forms, and the guard must NOT drop
+        # a trimmed joint. Arithmetic pinned here so the false claim cannot come
+        # back as a "simplification".
+        trimmed = (-2.9671, 2.9671)                          # ±170°
+        lo, hi = fb.position_limit_window(*trimmed, 1)
+        self.assertEqual((lo, hi), (114, 3982))
+        parked, crossed_to = 4095, 2                 # dither across the seam
+        clamped_goal = min(max(parked, lo), hi)
+        self.assertEqual(clamped_goal, 3982)
+        naive_error = clamped_goal - crossed_to
+        self.assertEqual(naive_error, 3980)          # ticks
+        self.assertGreater(naive_error * 360.0 / 4096, 349.0)   # ≈350°
+        # The boot band would not catch the park either: 4095 is only 113 ticks
+        # outside a ±170° window, well inside BOOT_POSITION_TOLERANCE_TICKS.
+        self.assertLess(parked - hi, _N['BOOT_POSITION_TOLERANCE_TICKS'])
+        # So: still refused, with the limits trimmed or not.
+        with patch.dict(_N, {'JOINT_LIMITS_RAD': tuple(
+                trimmed if i in (3, 5) else lim
+                for i, lim in enumerate(_N['JOINT_LIMITS_RAD']))}):
+            for ticks in ({4: 0}, {6: 4095}):
+                node, bus = self._node(ticks)
+                self.assertFalse(node.set_torque(True), ticks)
+                self.assertEqual(bus.writes, [])
+
+    # ── torque-off ─────────────────────────────────────────────────────────
+    def test_torque_off_is_never_blocked(self):
+        for tick in (0, 4095):
+            node, bus = self._node({6: tick})
+            resp = node._torque_cb(_Req(False), _Resp())
+            self.assertTrue(resp.success, f'tick {tick}')
+            self.assertEqual(resp.message, 'ok')
+            self.assertFalse(node._torque_on)
+            # torque-off writes ONLY Torque_Enable=0 — no goal seed on the way
+            # out, so the guard's read never even runs.
+            self.assertEqual(bus.addrs(), [fb.REG_TORQUE_ENABLE])
+            self.assertEqual(bus.torque_writes(),
+                             [(sid, 0) for sid in range(1, 8)])
+
+    # ── fail-safe on a read failure (must not skip the guard) ───────────────
+    def test_read_failure_still_refuses_and_is_not_an_edge_verdict(self):
+        node, bus = self._node(missing=(3,))
+        self.assertFalse(node.set_torque(True))
+        self.assertEqual(node._torque_refusal[0], 'read')
+        self.assertIn('[FEHLER]', node.errors[0])
+        self.assertIn('12-V', node.errors[0])
+        self.assertEqual(bus.writes, [])
+
+    # ── the boot path ──────────────────────────────────────────────────────
+    def test_boot_path_refuses_without_the_cable_misdiagnosis(self):
+        node, bus = self._node({4: 4094})
+        clock = _FakeTime()
+        with patch.dict(_N, {'time': clock}):
+            node.start_boot_home()
+        # No retry burn: an edge park is a physical state, 1 s cannot fix it.
+        self.assertEqual(clock.slept, [])
+        self.assertEqual(len(node.errors), 2)
+        self.assertIn('Gelenk 4', node.errors[0])
+        self.assertIn('Umgebung neu starten', node.errors[1])
+        for msg in node.errors:
+            self.assertNotIn('12-V', msg)         # NOT the cable diagnosis
+            self.assertNotIn('Kabel', msg)
+        # …and the glide never started.
+        self.assertEqual(node.traj_calls, [])
+        self.assertEqual(node.verify_calls, [])
+        self.assertEqual(bus.writes, [])
+        self.assertFalse(node._torque_on)
+
+    def test_boot_path_still_glides_on_a_healthy_arm(self):
+        node, bus = self._node()
+        clock = _FakeTime()
+        with patch.dict(_N, {'time': clock, 'threading': _SyncThreading}):
+            node.start_boot_home()
+        self.assertTrue(node._torque_on)
+        self.assertEqual(node.errors, [])
+        self.assertEqual(len(node.traj_calls), 1)
+        self.assertGreater(len(node.traj_calls[0][0]), 100)   # the quintic glide
+        self.assertEqual(node.verify_calls, [1])              # verifier armed
+        self.assertIn(fb.REG_TORQUE_ENABLE, bus.addrs())
+
+    def test_boot_path_still_retries_a_TRANSIENT_read_failure(self):
+        # The retry rail is for a bus hiccup; the edge branch must not have
+        # short-circuited it.
+        node, bus = self._node(missing=(2,))
+        clock = _FakeTime()
+        with patch.dict(_N, {'time': clock}):
+            node.start_boot_home()
+        self.assertEqual(len(clock.slept), _N['BOOT_TORQUE_ON_ATTEMPTS'] - 1)
+        self.assertEqual(clock.slept[0], _N['BOOT_TORQUE_ON_RETRY_S'])
+        self.assertIn('12-V', node.errors[-1])
+        self.assertEqual(node.traj_calls, [])
+
+    # ── probe_bus half + env knob ──────────────────────────────────────────
+    def test_probe_bus_refuses_at_boot_and_says_it_self_heals(self):
+        # probe_bus runs BEFORE any ROS entity exists and main() retries it every
+        # 5 s, so this is the copy that self-heals — and the copy that keeps the
+        # refusal from surfacing in start_boot_home, which runs exactly once.
+        probe = TestProbeBusGate._probe()
+        # joint4/joint6: full-circle windows — the plausibility band is a
+        # documented no-op there. joint2 (hi = 4095) at its top end and joint3
+        # (lo = 0) at its bottom end: IN-window readings the band also cannot see.
+        # All four are the readings only this guard judges.
+        for sid, tick in ((4, 4095), (6, 3), (2, 4094), (3, 1)):
+            reg = TestProbeBusGate._RegBus(present={sid: tick})
+            lo, hi = reg.windows[sid]
+            self.assertTrue(lo <= tick <= hi,
+                            f'servo {sid} @ {tick} must be IN-window for this '
+                            f'test to prove the band cannot see it')
+            ok, msg = probe(reg)
+            self.assertFalse(ok, f'servo {sid} @ {tick}')
+            self.assertIn(f'Gelenk {sid}', msg)
+            self.assertIn('Positionsbereichs', msg)     # the edge wording…
+            self.assertIn('von selbst weiter', msg)     # …+ the 5 s retry promise
+        # …and the same joints mid-range still boot.
+        ok, msg = probe(TestProbeBusGate._RegBus(
+            present={2: 2504, 3: 1548, 4: 2048, 6: 2048}))
+        self.assertTrue(ok, msg)
+
+    def test_edge_margin_env_parse(self):
+        f = _N['_parse_edge_margin']
+        default = _N['_DEFAULT_EDGE_REFUSE_MARGIN_TICKS']
+        self.assertEqual(default, 40)                 # ≈3.5°, see the comment
+        self.assertEqual(_N['EDGE_REFUSE_MARGIN_TICKS'], default)
+        self.assertEqual(f(None), default)
+        self.assertEqual(f(''), default)
+        self.assertEqual(f('   '), default)
+        self.assertEqual(f(' 12 '), 12)
+        # Malformed / negative → the default, and it SAYS so (bench-facing).
+        for bad in ('abc', '-5', '1,2'):
+            with patch('builtins.print') as printed:
+                self.assertEqual(f(bad), default, bad)
+            self.assertTrue(printed.called, bad)
+            self.assertIn('EDUBOTICS_EDU6_EDGE_MARGIN_TICKS',
+                          printed.call_args[0][0])
+
+    def test_a_too_large_margin_cannot_brick_the_arm(self):
+        # INVERTED POLARITY TRAP. The sibling knob
+        # EDUBOTICS_EDU6_BOOT_POS_TOL_TICKS documents ">= 4096 disables" (large =
+        # permissive); this one is a refusal RADIUS, so large = maximally
+        # restrictive. `min(tick, 4095 − tick)` peaks at 2047, so any margin >=
+        # 2048 refuses all 4096 readings — an operator typing 4096 to "disable"
+        # the guard would leave an arm that can never switch its torque on.
+        f = _N['_parse_edge_margin']
+        default = _N['_DEFAULT_EDGE_REFUSE_MARGIN_TICKS']
+        cap = _N['_EDGE_MARGIN_MAX_TICKS']
+        self.assertEqual(cap, 4096 // 2)
+        # The arithmetic the cap is derived from, pinned rather than asserted in
+        # prose: at the cap NOTHING passes, one tick below it something does.
+        self.assertEqual(
+            [t for t in range(4096) if min(t, 4095 - t) < cap], list(range(4096)))
+        self.assertNotEqual(
+            [t for t in range(4096) if min(t, 4095 - t) < cap - 1],
+            list(range(4096)))
+        for bad in ('2048', '4000', '4096', '999999'):
+            with patch('builtins.print') as printed:
+                self.assertEqual(f(bad), default, bad)
+            self.assertTrue(printed.called, bad)
+            said = printed.call_args[0][0]
+            self.assertIn('EDUBOTICS_EDU6_EDGE_MARGIN_TICKS', said)
+            self.assertIn('0', said)        # names the real disable value
+        # The largest value that still lets a pose through is accepted verbatim.
+        self.assertEqual(f(str(cap - 1)), cap - 1)
+        self.assertEqual(
+            [s for s, _ in _N['edge_parked_joints']({4: 2047}, margin=cap - 1)],
+            [])
+
+    def test_negative_or_over_range_ticks_refuse_rather_than_fold(self):
+        # `min(tick, 4095 − tick)` on a RAW reading, deliberately: a negative or
+        # over-range tick cannot be placed on the map at all (uncleared multi-turn
+        # firmware, a garbled reply), and refusing is the safe direction. Taking
+        # abs() first — or clamping into the register — would ACCEPT such a
+        # reading whenever its magnitude lands mid-range, which is precisely the
+        # unplaceable case. −5 does not discriminate (abs(−5) = 5 still trips);
+        # −100 does.
+        for tick in (-100, -1000, -4055, 4200, 9999):
+            self.assertEqual(
+                [s for s, _ in _N['edge_parked_joints']({6: tick})], [6],
+                f'tick {tick}')
+        node, bus = self._node({6: -100})
+        self.assertFalse(node.set_torque(True))
+        self.assertEqual(node._torque_refusal[0], 'edge')
+        self.assertEqual(bus.writes, [])
+
+    def test_zero_margin_is_the_documented_rollback(self):
+        self.assertEqual(_N['_parse_edge_margin']('0'), 0)
+        self.assertEqual(_N['edge_parked_joints']({6: 0, 4: 4095}, margin=0), [])
+        # "Disables the guard ENTIRELY" has to include the pathological reading:
+        # a negative / over-range tick (uncleared multi-turn firmware, which
+        # probe_bus refuses outright) is nearer than 0 to the edge and would
+        # still trip the distance test, so the explicit early-out is
+        # load-bearing rather than decorative.
+        self.assertEqual(_N['edge_parked_joints']({6: -5}, margin=0), [])
+        self.assertEqual(
+            [sid for sid, _ in _N['edge_parked_joints']({6: -5}, margin=40)],
+            [6])
+        with patch.dict(_N, {'EDGE_REFUSE_MARGIN_TICKS': 0}):
+            node, bus = self._node({6: 4095})
+            self.assertTrue(node.set_torque(True), node.errors)
+            self.assertIn(fb.REG_TORQUE_ENABLE, bus.addrs())
+
+    def test_env_override_is_wired_to_the_constant(self):
+        # The parser is covered above; this pins that the SHIPPED constant is
+        # actually BUILT from the env var. A hardcoded default would leave the
+        # documented one-variable rollback dead while every parser test stayed
+        # green (the harness deliberately pops the var, so it cannot see this).
+        src = open(os.path.join(_DOCKER, 'edu6_arm_node.py'),
+                   encoding='utf-8').read()
+        value = None
+        for node in ast.parse(src).body:
+            if isinstance(node, ast.Assign) and any(
+                    isinstance(t, ast.Name)
+                    and t.id == 'EDGE_REFUSE_MARGIN_TICKS'
+                    for t in node.targets):
+                value = ast.unparse(node.value)
+        self.assertIsNotNone(value)
+        self.assertIn('_parse_edge_margin(', value)
+        self.assertIn('EDUBOTICS_EDU6_EDGE_MARGIN_TICKS', value)
+
+    def test_env_name_is_forwarded_by_compose(self):
+        # ci.yml::env-forwarding-guard fails the build otherwise — and without
+        # the forward the operator's rollback silently does nothing.
+        compose = open(os.path.join(_HERE, '..', 'docker',
+                                    'docker-compose.yml'),
+                       encoding='utf-8').read()
+        self.assertIn('EDUBOTICS_EDU6_EDGE_MARGIN_TICKS=', compose)
+
+
+class TestPostEnergiseWrongWayAbort(unittest.TestCase):
+    """The measured defect (docs §11.11) is that the STS position loop computes
+    `goal − present` NAIVELY over 0..4095, so a goal and a position straddling the
+    seam make it drive a whole revolution the wrong way. The pre-torque edge guard
+    (TestTorqueOnEdgeGuard above) NARROWS that race but cannot close it: the wrap
+    only forms if `present` crosses the boundary between the seed read and the
+    Torque_Enable write, and while pure wire time for that window is 1.570 ms
+    (157 bytes at 1 Mbit/s 8N1 — needing 39.1 rad/s to cover the 40-tick margin), the
+    real window also carries Return_Delay_Time, pyserial's byte-at-a-time header
+    hunt, 1 ms CDC-ACM frames through usbipd/vhci_hcd and GIL/container
+    scheduling — all unbounded. At 20 ms the same margin only needs 3.1 rad/s.
+
+    So torque-on ALSO re-reads position once immediately AFTER energising and drops
+    torque again if the servo is going the long way. That caps a runaway at a few
+    ticks regardless of the timing window and believes no flag — which is why,
+    unlike the edge guard, it is NOT gated on the OFF→ON transition."""
+
+    def _node(self, ticks=None, missing=(), post_ticks=None, missing_at=None):
+        bus = _TorqueFakeBus(ticks, missing, post_ticks, missing_at)
+        return _TorqueStubNode(bus), bus
+
+    # ── the arithmetic the threshold rests on ──────────────────────────────
+    def test_threshold_is_half_a_revolution_and_that_is_definitional(self):
+        # NOT a felt number: `|e| > TICKS_PER_REV/2` is algebraically identical to
+        # `TICKS_PER_REV − |e| < |e|`, i.e. "the naive path the servo is taking is
+        # strictly longer than the true short way round". Pinned over the WHOLE
+        # register so the equivalence cannot be broken by an off-by-one.
+        self.assertEqual(_N['_DEFAULT_TORQUE_ABORT_ERROR_TICKS'], 4096 // 2)
+        self.assertEqual(_N['TORQUE_ABORT_ERROR_TICKS'], 2048)
+        mismatch = [e for e in range(4096)
+                    if (e > 2048) != ((4096 - e) < e)]
+        self.assertEqual(mismatch, [])
+
+    def test_legitimate_clamp_pull_in_can_never_reach_the_threshold(self):
+        # The ONE legitimate non-zero error: the servo clamps Goal_Position into
+        # its EEPROM window, so a joint resting OUTSIDE that window is genuinely
+        # pulled to the window edge. Enumerated over every reading the edge guard
+        # permits, the worst such distance is 2008 ticks; with the edge guard
+        # DISABLED (margin 0 — the documented rollback) the supremum is exactly
+        # 2048, which the STRICT `>` still does not abort. That is what makes the
+        # threshold structurally free of false aborts rather than merely
+        # well-separated.
+        margin = _N['EDGE_REFUSE_MARGIN_TICKS']
+        threshold = _N['TORQUE_ABORT_ERROR_TICKS']
+        worst_guarded = worst_unguarded = 0
+        for idx in range(len(_N['SERVO_IDS'])):
+            lo, hi = fb.position_limit_window(*_N['JOINT_LIMITS_RAD'][idx], 1)
+            for present in range(4096):
+                pull = abs(max(lo, min(hi, present)) - present)
+                worst_unguarded = max(worst_unguarded, pull)
+                if min(present, 4095 - present) >= margin:
+                    worst_guarded = max(worst_guarded, pull)
+        self.assertEqual(worst_guarded, 2008)
+        self.assertEqual(worst_unguarded, 2048)
+        self.assertLess(worst_guarded, threshold)
+        self.assertLessEqual(worst_unguarded, threshold)   # strict `>` saves it
+        # …and the boot band bounds it far tighter than either on the boot path.
+        self.assertLess(_N['BOOT_POSITION_TOLERANCE_TICKS'], threshold)
+
+    def test_a_wrapped_error_is_far_above_the_threshold(self):
+        # |e| = 4095 − (ticks travelled inside the read→write window). Even an
+        # absurd hand — 20 rad/s held for 50 ms, i.e. 30x the speed the 40-tick
+        # margin covers at that duration — leaves 1395 ticks of separation.
+        rad_per_tick = 2 * 3.14159265358979 / 4096
+        travelled = 20.0 / rad_per_tick * 0.050
+        self.assertGreater(4095 - travelled, _N['TORQUE_ABORT_ERROR_TICKS'])
+        self.assertGreater(4095 - travelled, 3400)
+
+    def test_wrong_way_joints_pure_predicate(self):
+        f = _N['wrong_way_joints']
+        # the measured bench datum: joint6 seeded 4090, position dithered to 12
+        out = f({6: 4090}, {6: 12})
+        self.assertEqual([(sid, g, p) for sid, g, p, _e in out],
+                         [(6, 4090, 12)])
+        self.assertEqual(out[0][3], 4078)          # the naive error, signed
+        # …and the mirror image (seeded low, position dithered high).
+        self.assertEqual([s for s, *_ in f({6: 5}, {6: 4090})], [6])
+        # healthy: goal == present
+        self.assertEqual(f({s: 2048 for s in range(1, 8)},
+                           {s: 2048 for s in range(1, 8)}), [])
+        # a legitimate 400-tick clamp pull-in is NOT wrong-way
+        self.assertEqual(f({1: 1024}, {1: 624}), [])
+        # exactly at the threshold: still allowed (strict `>`)
+        self.assertEqual(f({1: 2048}, {1: 0}), [])
+        self.assertEqual([s for s, *_ in f({1: 2049}, {1: 0})], [1])
+        # servos absent from EITHER map are not judged
+        self.assertEqual(f({6: 4090}, {}), [])
+        self.assertEqual(f({}, {6: 12}), [])
+
+    def test_the_wrong_way_half_is_load_bearing_below_the_default_threshold(self):
+        # At the SHIPPED threshold `naive > 2048` and `wrapped < naive` are the
+        # same test, so dropping the second condition changes nothing there — a
+        # "simplification" would look free. It is not: the env knob explicitly
+        # permits lowering the threshold to the 401-tick floor for bench
+        # sensitivity, and below 2048 a plain magnitude test starts flagging
+        # ordinary EEPROM clamp pull-ins, which are by construction already the
+        # SHORT way round. Keeping both conditions means the knob can only ever
+        # add sensitivity to genuine wrong-way motion, never invent it.
+        f = _N['wrong_way_joints']
+        # a legitimate 700-tick pull-in, from either side — never wrong-way
+        self.assertEqual(f({1: 1024}, {1: 324}, threshold=600), [])
+        self.assertEqual(f({1: 1024}, {1: 1724}, threshold=600), [])
+        # …while a genuine wrap is still caught at that lowered threshold
+        self.assertEqual([s for s, *_ in f({6: 4090}, {6: 12}, threshold=600)],
+                         [6])
+        # the exact hinge: half a revolution is a TIE (either way is 2048 ticks),
+        # so it is not "the wrong way"; one tick further it is.
+        self.assertEqual(f({1: 2048}, {1: 0}, threshold=600), [])
+        self.assertEqual([s for s, *_ in f({1: 2049}, {1: 0}, threshold=600)],
+                         [1])
+
+    def test_unplaceable_ticks_abort_rather_than_fold(self):
+        # A negative / over-range present (uncleared multi-turn firmware, a
+        # garbled reply) makes `wrapped` negative, so it aborts — the same stance
+        # edge_parked_joints takes. Folding or abs()-ing first would ACCEPT it
+        # whenever the magnitude happened to land mid-range.
+        f = _N['wrong_way_joints']
+        for present in (-2500, 6000):
+            self.assertEqual([s for s, *_ in f({6: 2048}, {6: present})], [6],
+                             f'present {present}')
+
+    # ── the abort itself ───────────────────────────────────────────────────
+    def test_a_wrapped_error_after_energising_de_energises_the_arm(self):
+        # Tick 4055 is the INNERMOST high reading the pre-torque edge guard
+        # permits (4095 − 4055 = 40 = the margin), so this scenario is exactly the
+        # one the edge guard cannot see: it passes the park, and the joint then
+        # crosses the seam to tick 12 inside the read→write window. That is the
+        # measured runaway signature, and only the post-energise check catches it.
+        node, bus = self._node({6: 4055}, post_ticks={6: 12})
+        self.assertFalse(node.set_torque(True))
+        # Torque_Enable really was written 1 and then 0 — the abort reached the
+        # BUS, it is not just a return value.
+        self.assertEqual(bus.addrs(), [fb.REG_ACCELERATION,
+                                       fb.REG_TORQUE_ENABLE,
+                                       fb.REG_TORQUE_ENABLE])
+        self.assertEqual(bus.torque_writes(),
+                         [(sid, 1) for sid in range(1, 8)]
+                         + [(sid, 0) for sid in range(1, 8)])
+        # …and our belief followed the hardware, so the write loop is gated off
+        # and _trajectory_cb will refuse new commands.
+        self.assertFalse(node._torque_on)
+        self.assertEqual(node._torque_refusal[0], 'wrongway')
+        # the in-flight trajectory is dropped (audit M2: a later torque-on must
+        # not interpolate it from wherever the limp arm sagged to)
+        self.assertEqual(node.traj_calls, [([], None)])
+
+    def test_the_abort_message_names_the_joint_in_german(self):
+        node, _ = self._node({4: 40}, post_ticks={4: 4090})
+        resp = node._torque_cb(_Req(True), _Resp())
+        self.assertFalse(resp.success)
+        # The SetBool reply carries the REASON — this is the „Beenden"
+        # (hand-guide exit) path, where a bare 'fehlgeschlagen' sends the student
+        # to the cables.
+        self.assertIn('[FEHLER]', resp.message)
+        self.assertIn('Gelenk 4', resp.message)
+        self.assertIn('Ziel 40', resp.message)          # the evidence
+        self.assertIn('Ist 4090', resp.message)
+        self.assertIn('falsche Richtung', resp.message)
+        self.assertIn('ausgeschaltet', resp.message)    # says what it DID
+        self.assertIn('weich', resp.message)            # …and the consequence
+        self.assertIn('Richtung Mitte', resp.message)   # …and the remedy
+        self.assertIn('genügen', resp.message)          # literal umlauts
+        self.assertNotIn('Kabel', resp.message)         # NOT a cable diagnosis
+        # it is in the Protokoll too, exactly once
+        self.assertEqual(node.errors, [resp.message])
+
+    def test_abort_message_grammar_and_the_failed_torque_off_branch(self):
+        f = _N['wrong_way_abort_message']
+        one = f([(6, 4090, 12, 4078)], True)
+        self.assertIn('wäre in die falsche Richtung', one)
+        many = f([(4, 1, 4090, -4089), (6, 4090, 12, 4078)], True)
+        self.assertIn('wären in die falsche Richtung', many)
+        self.assertIn('Gelenk 4', many)
+        self.assertIn('Gelenk 6', many)
+        # If the torque-OFF write itself failed there is nothing software can do
+        # — say so, and name the only remaining action.
+        broken = f([(6, 4090, 12, 4078)], False)
+        self.assertIn('FEHLGESCHLAGEN', broken)
+        self.assertIn('12-V-Netzteil', broken)
+        self.assertIn('ausschalten', broken)
+
+    def test_a_failed_torque_off_write_still_reports_instead_of_raising(self):
+        # The abort must not turn a broken bus into an unhandled exception that
+        # loses the diagnosis (set_torque's bare `except` records no reason).
+        node, bus = self._node({6: 4055}, post_ticks={6: 12})
+        real = bus.sync_write
+        calls = {'n': 0}
+
+        def _flaky(addr, per_servo):
+            calls['n'] += 1
+            if calls['n'] == 3:            # the torque-OFF write of the abort
+                raise fb.FeetechBusError('bus went away during the abort')
+            real(addr, per_servo)
+
+        bus.sync_write = _flaky
+        self.assertFalse(node.set_torque(True))
+        self.assertEqual(node._torque_refusal[0], 'wrongway')
+        self.assertIn('FEHLGESCHLAGEN', node.errors[0])
+        self.assertFalse(node._torque_on)
+
+    # ── no nuisance: the legitimate populations must not abort ─────────────
+    def test_a_healthy_arm_is_not_aborted_and_pays_exactly_one_extra_read(self):
+        node, bus = self._node()                    # every joint at tick 2048
+        self.assertTrue(node.set_torque(True), node.errors)
+        self.assertTrue(node._torque_on)
+        self.assertIsNone(node._torque_refusal)
+        self.assertEqual(node.errors, [])
+        self.assertEqual(node.traj_calls, [])
+        # ONE seed read + ONE verification read; the retry budget is not spent on
+        # a healthy arm (~0.71 ms of wire time, the stated budget).
+        self.assertEqual(bus.reads, 2)
+        self.assertEqual(bus.addrs(), [fb.REG_ACCELERATION,
+                                       fb.REG_TORQUE_ENABLE])
+
+    def test_the_legitimate_eeprom_clamp_pull_in_does_NOT_abort(self):
+        # A limp joint resting OUTSIDE its EEPROM window is genuinely pulled to
+        # the window edge at torque-on (the documented gentle SEED_SPEED_STEPS
+        # creep). joint1's window is [1024, 3072]; resting `band − 1` ticks below
+        # it is exactly the state the BOOT probe deliberately ACCEPTS, so the
+        # abort must accept it too or „Umgebung starten" would refuse a healthy
+        # arm every time it collapsed a little past a stop.
+        band = _N['BOOT_POSITION_TOLERANCE_TICKS']
+        lo, _hi = fb.position_limit_window(*_N['JOINT_LIMITS_RAD'][0], 1)
+        parked = lo - (band - 1)
+        node, bus = self._node({1: parked})
+        self.assertTrue(node.set_torque(True), node.errors)
+        self.assertIsNone(node._torque_refusal)
+        # …and the pull-in it will perform really is the clamp distance, i.e. the
+        # naive error the abort just chose not to fire on.
+        self.assertEqual(band - 1, lo - parked)
+        # Even the WORST software-reachable pull-in (joint2 / the gripper at the
+        # innermost tick the edge guard permits) stays under the threshold.
+        margin = _N['EDGE_REFUSE_MARGIN_TICKS']
+        for sid in (2, 7):
+            node, _ = self._node({sid: margin})
+            self.assertTrue(node.set_torque(True), f'servo {sid}')
+            self.assertIsNone(node._torque_refusal)
+
+    def test_an_already_torqued_joint_parked_on_the_seam_still_torques_on(self):
+        # The jogging regression the edge guard's OFF→ON gate exists for must not
+        # come back through this check. It does not, and NOT because of a gate:
+        # this one judges MEASURED motion, and a torqued joint holding at tick
+        # 4094 reports goal − present ≈ 0. Both jogs pass.
+        node, bus = self._node({6: 4094})
+        node._torque_on = True
+        self.assertTrue(node.set_torque(True), node.errors)
+        self.assertTrue(node._torque_on)
+        self.assertEqual(bus.torque_writes(), [(sid, 1) for sid in range(1, 8)])
+
+    def test_the_check_is_NOT_gated_on_the_transition_flag(self):
+        # …which is the whole point: `_torque_on` is a BELIEF. A brown-out shorter
+        # than READ_FAIL_STOP_S drops real torque without touching the flag and
+        # without latching _bus_fault, so the edge guard's gate skips over an arm
+        # that is really limp. The post-energise abort still fires there.
+        node, bus = self._node({6: 4094}, post_ticks={6: 5})
+        node._torque_on = True
+        node._bus_fault = False           # no latch: the edge guard is skipped…
+        self.assertFalse(node.set_torque(True))
+        self.assertEqual(node._torque_refusal[0], 'wrongway')   # …this is not
+        self.assertFalse(node._torque_on)
+        self.assertIn((fb.REG_TORQUE_ENABLE, {s: b'\x00' for s in range(1, 8)}),
+                      bus.writes)
+
+    def test_torque_off_never_runs_the_check(self):
+        for tick in (0, 4095):
+            node, bus = self._node({6: tick}, post_ticks={6: 2048})
+            resp = node._torque_cb(_Req(False), _Resp())
+            self.assertTrue(resp.success, f'tick {tick}')
+            self.assertEqual(resp.message, 'ok')
+            self.assertFalse(node._torque_on)
+            self.assertEqual(bus.reads, 0)        # no seed read, no verify read
+            self.assertEqual(bus.addrs(), [fb.REG_TORQUE_ENABLE])
+
+    # ── the post-read's own failure modes ──────────────────────────────────
+    def test_one_dropped_reply_is_retried_and_does_not_de_energise(self):
+        # A dropped CDC-ACM reply is common on WSL2 (it is why READ_FAIL_STOP_S
+        # exists). De-energising on one would collapse a BACKDRIVING arm, so the
+        # verification read gets exactly one retry.
+        node, bus = self._node(missing_at={2: {5}})
+        self.assertTrue(node.set_torque(True), node.errors)
+        self.assertTrue(node._torque_on)
+        self.assertIsNone(node._torque_refusal)
+        self.assertEqual(bus.reads, 3)            # seed + verify + one retry
+        self.assertEqual(_N['POST_ENERGISE_READ_ATTEMPTS'], 2)
+
+    def test_a_persistently_silent_servo_de_energises_and_stays_retryable(self):
+        # An arm we cannot read is an arm we must not drive — the same stance the
+        # goal-seed read already takes. But this is a BUS problem, not a physical
+        # park, so the kind stays 'read': the boot path must keep retrying it.
+        node, bus = self._node(missing_at={2: {5}, 3: {5}})
+        self.assertFalse(node.set_torque(True))
+        self.assertEqual(node._torque_refusal[0], 'read')
+        self.assertFalse(node._torque_on)
+        self.assertEqual(bus.torque_writes(),
+                         [(sid, 1) for sid in range(1, 8)]
+                         + [(sid, 0) for sid in range(1, 8)])
+        msg = node.errors[0]
+        self.assertIn('[FEHLER]', msg)
+        self.assertIn('[5]', msg)
+        self.assertIn('12-V', msg)
+        self.assertIn('prüfen', msg)
+
+    def test_a_raising_verification_read_de_energises_rather_than_escaping(self):
+        # If the sync_read itself raises, falling through to set_torque's bare
+        # `except` would leave the arm ENERGISED with no diagnosis. The abort
+        # swallows the raise and treats it as an unreadable arm.
+        node, bus = self._node()
+        real = bus.sync_read
+
+        def _boom(addr, length, ids):
+            bus.reads += 1
+            if bus.reads >= 2:
+                raise fb.FeetechBusError('bus went away after energising')
+            return real(addr, length, ids)
+
+        bus.sync_read = _boom
+        self.assertFalse(node.set_torque(True))
+        self.assertEqual(node._torque_refusal[0], 'read')
+        self.assertFalse(node._torque_on)
+        self.assertEqual(bus.torque_writes()[-7:],
+                         [(sid, 0) for sid in range(1, 8)])
+
+    def test_a_malformed_reply_de_energises_rather_than_escaping(self):
+        # Same class one layer in: the DECODE must be inside the same guard as the
+        # read. A short/garbled reply that survives sync_read's own length filter
+        # would raise IndexError here, escape to set_torque's bare `except`, and
+        # leave the arm ENERGISED with no diagnosis — the one outcome this method
+        # exists to prevent.
+        node, bus = self._node()
+
+        def _garbled(addr, length, ids):
+            bus.reads += 1
+            if bus.reads == 1:
+                return {sid: (0, fb.le16(2048)) for sid in ids}   # the seed read
+            return {sid: (0, b'') for sid in ids}                 # 0-byte params
+        bus.sync_read = _garbled
+        self.assertFalse(node.set_torque(True))
+        self.assertEqual(node._torque_refusal[0], 'read')
+        self.assertFalse(node._torque_on)
+        self.assertEqual(bus.torque_writes()[-7:],
+                         [(sid, 0) for sid in range(1, 8)])
+
+    def test_a_wrong_way_verdict_wins_over_a_partial_read(self):
+        # Both verdicts need the same torque-off; the actionable one must be the
+        # one reported.
+        node, _ = self._node({6: 4055}, post_ticks={6: 12},
+                             missing_at={2: {3}, 3: {3}})
+        self.assertFalse(node.set_torque(True))
+        self.assertEqual(node._torque_refusal[0], 'wrongway')
+        self.assertIn('Gelenk 6', node.errors[0])
+
+    # ── the boot path ──────────────────────────────────────────────────────
+    def test_boot_path_reports_the_abort_without_burning_retries(self):
+        node, bus = self._node({4: 4055}, post_ticks={4: 20})
+        clock = _FakeTime()
+        with patch.dict(_N, {'time': clock}):
+            node.start_boot_home()
+        # A wrong-way abort is a PHYSICAL state: 1 s of sleeping cannot fix it.
+        self.assertEqual(clock.slept, [])
+        self.assertEqual(len(node.errors), 2)
+        self.assertIn('Gelenk 4', node.errors[0])
+        self.assertIn('Grundstellungs-Fahrt entfällt', node.errors[1])
+        self.assertIn('falsche Richtung', node.errors[1])
+        self.assertIn('Umgebung neu starten', node.errors[1])
+        for msg in node.errors:
+            self.assertNotIn('12-V-Versorgung', msg)   # NOT a cable diagnosis
+            self.assertNotIn('Kabel', msg)
+        # …the glide never started, and the arm was left de-energised.
+        self.assertEqual(node.verify_calls, [])
+        self.assertFalse(node._torque_on)
+        self.assertEqual(bus.torque_writes()[-7:],
+                         [(sid, 0) for sid in range(1, 8)])
+
+    def test_the_physical_refusal_kinds_are_declared_in_one_place(self):
+        # 'edge' and 'wrongway' must both be routed to a boot remedy that omits
+        # the cable wording and skips the retry rail. One constant says which
+        # kinds those are, so the boot branch and the messages cannot drift.
+        self.assertEqual(set(_N['PHYSICAL_TORQUE_REFUSALS']),
+                         {'edge', 'wrongway'})
+        self.assertEqual(set(_N['BOOT_PHYSICAL_REMEDY_DE']),
+                         set(_N['PHYSICAL_TORQUE_REFUSALS']))
+        for kind, msg in _N['BOOT_PHYSICAL_REMEDY_DE'].items():
+            self.assertIn('[FEHLER]', msg, kind)
+            self.assertIn('Umgebung neu starten', msg, kind)
+            self.assertNotIn('Kabel', msg, kind)
+            self.assertNotIn('12-V', msg, kind)
+        src = open(os.path.join(_DOCKER, 'edu6_arm_node.py'),
+                   encoding='utf-8').read()
+        sb = src.split('def start_boot_home', 1)[1].split('\n    def ', 1)[0]
+        self.assertIn('in PHYSICAL_TORQUE_REFUSALS', sb)
+        self.assertIn('BOOT_PHYSICAL_REMEDY_DE[kind]', sb)
+        # the physical branch must come BEFORE the sleep/retry, or it burns them
+        self.assertLess(sb.index('PHYSICAL_TORQUE_REFUSALS'),
+                        sb.index('BOOT_TORQUE_ON_RETRY_S'))
+
+    def test_boot_path_still_glides_when_the_verification_passes(self):
+        node, bus = self._node()
+        clock = _FakeTime()
+        with patch.dict(_N, {'time': clock, 'threading': _SyncThreading}):
+            node.start_boot_home()
+        self.assertTrue(node._torque_on)
+        self.assertEqual(node.errors, [])
+        self.assertEqual(node.verify_calls, [1])
+        self.assertEqual(bus.torque_writes(), [(sid, 1) for sid in range(1, 8)])
+
+    # ── ordering + wiring ──────────────────────────────────────────────────
+    def test_the_check_runs_AFTER_torque_enable_and_de_energises_first(self):
+        src = open(os.path.join(_DOCKER, 'edu6_arm_node.py'),
+                   encoding='utf-8').read()
+        st = src.split('def set_torque', 1)[1].split('\n    def ', 1)[0]
+        # seed → Torque_Enable → verify. A verify BEFORE the write would measure
+        # nothing (the servo is not energised yet).
+        self.assertLess(st.index('_seed_goal_from_present_locked'),
+                        st.index('REG_TORQUE_ENABLE'))
+        self.assertLess(st.index('REG_TORQUE_ENABLE'),
+                        st.index('_verify_after_energise_locked'))
+        # …and it runs INSIDE the bus lock, so no read/write tick can interleave
+        # between energising and the verdict.
+        self.assertLess(st.index('with self._bus_lock'),
+                        st.index('_verify_after_energise_locked'))
+        vb = src.split('def _verify_after_energise_locked', 1)[1].split(
+            '\n    def ', 1)[0]
+        # The de-energise write must precede EVERYTHING else: no logging, no
+        # message building, no allocation (the payload is a module constant).
+        off = vb.index('_TORQUE_OFF_PAYLOAD')
+        self.assertLess(off, vb.index('wrong_way_abort_message'))
+        self.assertLess(off, vb.index('post_energise_read_failure_message'))
+        self.assertLess(off, vb.index('self._torque_on = False'))
+        self.assertNotIn('get_logger', vb)
+        self.assertNotIn('_replace_trajectory', vb)   # no _traj_lock under the
+        #                                               bus lock (lock order)
+        # …and the trajectory drop happens OUTSIDE the bus lock, in set_torque.
+        self.assertIn('_replace_trajectory([])', st)
+        self.assertLess(st.index('_verify_after_energise_locked'),
+                        st.index('_replace_trajectory([])'))
+
+    def test_the_effective_goal_is_the_eeprom_clamped_one(self):
+        # The servo clamps Goal_Position into its EEPROM window, so the number its
+        # naive error is computed from is NOT the tick we wrote. Computing the
+        # clamp is safe only because probe_bus hard-gates the EEPROM windows
+        # against fb.position_limit_window — the same call used here.
+        src = open(os.path.join(_DOCKER, 'edu6_arm_node.py'),
+                   encoding='utf-8').read()
+        seed = src.split('def _seed_goal_from_present_locked', 1)[1].split(
+            '\n    def ', 1)[0]
+        self.assertIn('fb.position_limit_window(', seed)
+        probe = src.split('def probe_bus', 1)[1].split('\n    def ', 1)[0]
+        self.assertIn('fb.position_limit_window(', probe)
+        # Behaviour: the gripper's window is [2048, 3215]. A gripper reading of
+        # 2000 is BELOW it, so the servo will hold 2048 — a 48-tick pull-in, not
+        # the 0 a "goal == what we wrote" model would compute.
+        node, _ = self._node({7: 2000})
+        goals = None
+        with node._bus_lock:
+            goals = node._seed_goal_from_present_locked()
+        self.assertEqual(goals[7], 2048)
+        self.assertEqual(goals[1], 2048)             # in-window: unchanged
+        lo, hi = fb.position_limit_window(*_N['JOINT_LIMITS_RAD'][6], 1)
+        self.assertEqual((lo, hi), (2048, 3215))
+
+    # ── env knob ───────────────────────────────────────────────────────────
+    def test_abort_threshold_env_parse(self):
+        f = _N['_parse_torque_abort_ticks']
+        default = _N['_DEFAULT_TORQUE_ABORT_ERROR_TICKS']
+        self.assertEqual(f(None), default)
+        self.assertEqual(f(''), default)
+        self.assertEqual(f('   '), default)
+        self.assertEqual(f(' 1500 '), 1500)
+        self.assertEqual(f('0'), 0)                  # the documented rollback
+        for bad in ('abc', '-5', '1,2'):
+            with patch('builtins.print') as printed:
+                self.assertEqual(f(bad), default, bad)
+            self.assertTrue(printed.called, bad)
+            self.assertIn('EDUBOTICS_EDU6_TORQUE_ABORT_TICKS',
+                          printed.call_args[0][0])
+
+    def test_both_ends_of_the_knob_are_fenced(self):
+        # BOTH extremes brick something, so both are refused by name.
+        f = _N['_parse_torque_abort_ticks']
+        default = _N['_DEFAULT_TORQUE_ABORT_ERROR_TICKS']
+        floor = _N['_TORQUE_ABORT_MIN_TICKS']
+        ceiling = _N['_TORQUE_ABORT_MAX_TICKS']
+        # The floor is DERIVED from the default boot band. NOTE: its original
+        # rationale ("below this it would abort the pull-in the boot probe
+        # accepts") is FALSE — wrong_way_joints requires the wrapped distance to
+        # be SHORTER than the naive one, and a clamp pull-in is already the short
+        # way round, so it is excluded at every threshold. The floor is kept as
+        # belt-and-braces against a magnitude-only refactor; see the constant.
+        self.assertEqual(floor, _N['_DEFAULT_BOOT_POSITION_TOLERANCE_TICKS'] + 1)
+        # The ceiling is the largest error a 12-bit register can express; above
+        # it the check is silently dead — the sibling knob's ">= 4096 disables"
+        # habit must not land there.
+        self.assertEqual(ceiling, 4096 - 1)
+        for bad in ('1', '100', str(floor - 1)):
+            with patch('builtins.print') as printed:
+                self.assertEqual(f(bad), default, bad)
+            said = printed.call_args[0][0]
+            self.assertIn('EDUBOTICS_EDU6_TORQUE_ABORT_TICKS', said)
+            self.assertIn('0', said)          # names the real disable value
+        for bad in ('4096', '999999'):
+            with patch('builtins.print') as printed:
+                self.assertEqual(f(bad), default, bad)
+            said = printed.call_args[0][0]
+            self.assertIn('EDUBOTICS_EDU6_TORQUE_ABORT_TICKS', said)
+            self.assertIn('0', said)
+        # the extremes that ARE legal are taken verbatim
+        self.assertEqual(f(str(floor)), floor)
+        self.assertEqual(f(str(ceiling)), ceiling)
+
+    def test_zero_threshold_is_the_documented_rollback(self):
+        self.assertEqual(_N['wrong_way_joints']({6: 4090}, {6: 12},
+                                                threshold=0), [])
+        with patch.dict(_N, {'TORQUE_ABORT_ERROR_TICKS': 0}):
+            node, bus = self._node({6: 4055}, post_ticks={6: 12})
+            self.assertTrue(node.set_torque(True), node.errors)
+            self.assertTrue(node._torque_on)
+            # the arm stays energised: only ONE Torque_Enable write, value 1
+            self.assertEqual(bus.torque_writes(),
+                             [(sid, 1) for sid in range(1, 8)])
+
+    def test_env_override_is_wired_to_the_constant(self):
+        # The parser is covered above; this pins that the SHIPPED constant is
+        # actually BUILT from the env var (the harness pops the var, so it cannot
+        # see a hardcoded default that leaves the rollback dead).
+        src = open(os.path.join(_DOCKER, 'edu6_arm_node.py'),
+                   encoding='utf-8').read()
+        value = None
+        for node in ast.parse(src).body:
+            if isinstance(node, ast.Assign) and any(
+                    isinstance(t, ast.Name)
+                    and t.id == 'TORQUE_ABORT_ERROR_TICKS'
+                    for t in node.targets):
+                value = ast.unparse(node.value)
+        self.assertIsNotNone(value)
+        self.assertIn('_parse_torque_abort_ticks(', value)
+        self.assertIn('EDUBOTICS_EDU6_TORQUE_ABORT_TICKS', value)
+
+    def test_env_name_is_forwarded_by_compose(self):
+        # ci.yml::env-forwarding-guard fails the build otherwise — and without
+        # the forward the operator's rollback silently does nothing.
+        compose = open(os.path.join(_HERE, '..', 'docker',
+                                    'docker-compose.yml'),
+                       encoding='utf-8').read()
+        self.assertIn('EDUBOTICS_EDU6_TORQUE_ABORT_TICKS=', compose)
 
 
 class TestNodeAuditRails(unittest.TestCase):
@@ -577,7 +2054,13 @@ class TestNodeAuditRails(unittest.TestCase):
         seed = self.src.split('def _seed_goal_from_present_locked', 1)[1].split(
             '\n    def ', 1)[0]
         self.assertIn('REG_PRESENT_POSITION', seed)
-        self.assertIn('return False', seed)          # failed read aborts
+        # A failed read / refused edge park ABORTS the torque-on. Since
+        # 2026-07-26 the success return is the EFFECTIVE per-servo goal dict the
+        # post-energise abort compares against, so the refusal sentinel is None
+        # (both are falsy — set_torque's `if not goal_ticks` covers either).
+        self.assertIn('return None', seed)
+        self.assertNotIn('return True', seed)
+        self.assertIn('return goals', seed)
         # The seed must carry acceleration + a speed cap, i.e. the SAME 7-byte
         # contiguous block _write_targets uses — not a bare 2-byte goal. A limp
         # joint that sagged outside its EEPROM window is PULLED to the window
@@ -1101,6 +2584,46 @@ class TestProvisionEndToEnd(unittest.TestCase):
             # Mode already 0 (factory) → read-compare-SKIP, no EEPROM write.
             self.assertNotIn(fb.REG_OPERATING_MODE, addrs)
 
+    def test_angular_resolution_is_normalized_BEFORE_the_offset_is_baked(self):
+        # B1. Register 30 is the OTHER register the vendor documents as rescaling
+        # the tick↔angle map, so audit M1's argument for the Phase bit-4 clear
+        # applies verbatim: the jig read that bakes Homing_Offset must run under
+        # the same map the runtime uses. Writing it AFTER the offset would bake the
+        # offset under one scale and run under another.
+        bus = _ProvFakeBus({sid: 2048 + sid for sid in range(1, 8)})
+        self.prov.provision(bus, 'EDU6-0001', (1,) * 7)
+        for sid in range(1, 8):
+            addrs = [a for a, _ in bus.writes_for(sid)]
+            self.assertIn(fb.REG_ANGULAR_RESOLUTION, addrs)
+            self.assertLess(addrs.index(fb.REG_ANGULAR_RESOLUTION),
+                            addrs.index(fb.REG_HOMING_OFFSET))
+            # …and it must land as the single-turn value, not just "some write".
+            written = [d for a, d in bus.writes_for(sid)
+                       if a == fb.REG_ANGULAR_RESOLUTION]
+            self.assertEqual(written, [bytes([1])])
+
+    def test_angular_resolution_already_correct_is_not_rewritten(self):
+        # Endurance: read-compare-SKIP. EEPROM is a five-figure budget and every
+        # provisioned arm re-run would otherwise burn a cycle on all 7 servos.
+        bus = _ProvFakeBus({sid: 2048 for sid in range(1, 8)})
+        for sid in range(1, 8):
+            bus.mem[sid][fb.REG_ANGULAR_RESOLUTION] = \
+                fb.ANGULAR_RESOLUTION_SINGLE_TURN
+        self.prov.provision(bus, 'EDU6-0002', (1,) * 7)
+        for sid in range(1, 8):
+            self.assertNotIn(fb.REG_ANGULAR_RESOLUTION,
+                             [a for a, _ in bus.writes_for(sid)])
+
+    def test_the_record_carries_resolution_and_the_shared_firmware_spelling(self):
+        bus = _ProvFakeBus({sid: 2048 for sid in range(1, 8)})
+        record = self.prov.provision(bus, 'EDU6-0003', (1,) * 7)
+        for entry in record['servos']:
+            self.assertEqual(entry['angular_resolution'], 1)
+            # _ProvFakeBus seeds firmware 3.9; the ONE shared formatter must keep
+            # producing the same spelling the record has always used.
+            self.assertEqual(entry['firmware'], '3.9')
+            self.assertEqual(entry['firmware'], fb.format_firmware(3, 9))
+
     def test_phase_bit4_not_touched_when_clear(self):
         # Phase bit-4 read-modify-write is only-when-set.
         bus = _ProvFakeBus({sid: 2048 + sid for sid in range(1, 8)}, phase=0x00)
@@ -1479,6 +3002,372 @@ class TestFamilyVidProbe(unittest.TestCase):
         self.assertIn('EduBotics 6-Achs', dm._FAMILY_DIAG_TEXT['edu6']['hw'])
         self.assertIn('2F5D', dm._FAMILY_DIAG_TEXT['omx']['vid'])
         self.assertIn('12-V', dm._FAMILY_DIAG_TEXT['edu6']['bullets'])
+
+
+class TestCommandedGoalEdgeClamp(unittest.TestCase):
+    """The commanded-goal edge clamp (Rule §2 sign-off, 2026-07-26): every tick
+    written as ``Goal_Position`` is kept clear of the tick-0/4095 position-map
+    edge, because the STS position loop is NOT wrap-aware and six of the twelve
+    arm-joint limit bounds land EXACTLY on that edge — so a command AT one of them
+    pinned the goal on the seam, where one encoder sample across the boundary
+    commits the joint to a full revolution and NEITHER torque-on guard fires."""
+
+    # ── the premise: which bounds are actually on the seam ─────────────────
+    def test_six_of_the_twelve_arm_bounds_land_exactly_on_a_register_end(self):
+        # The whole reason this clamp exists. Derived from the SHIPPED limits +
+        # signs, not restated — a limits edit that moved a bound off the seam (or
+        # onto one) has to update this list consciously.
+        on_edge = []
+        for i, (lo, hi) in enumerate(_N['JOINT_LIMITS_RAD']):
+            for which, rad in (('lo', lo), ('hi', hi)):
+                tick = _N['rad_to_tick'](rad, _N['JOINT_SIGNS'][i])
+                if tick in (0, 4095):
+                    on_edge.append((i + 1, which, tick))
+        self.assertEqual(on_edge, [
+            (2, 'hi', 4095),                       # shoulder at +180°
+            (3, 'lo', 0),                          # elbow at −180°
+            (4, 'lo', 0), (4, 'hi', 4095),         # roll: BOTH ends
+            (6, 'lo', 0), (6, 'hi', 4095),         # roll: BOTH ends
+        ])
+        # …and the gripper's two bounds are the 13th/14th: "six of twelve" counts
+        # ARM joints. Nothing about the gripper is near the seam.
+        g_lo, g_hi = _N['JOINT_LIMITS_RAD'][6]
+        self.assertEqual((_N['rad_to_tick'](g_lo, 1), _N['rad_to_tick'](g_hi, 1)),
+                         (2048, 3215))
+
+    def test_a_full_circle_joint_subset_would_have_missed_two_of_them(self):
+        # Guard against re-deriving a `full_circle_joint_indexes()`-style
+        # predicate: joint2's hi and joint3's lo are exactly as pinned as
+        # joint4/joint6 despite their windows NOT being the full register. This is
+        # the same false premise the original predicate was deleted for.
+        full_circle = [i + 1 for i, (lo, hi) in enumerate(_N['JOINT_LIMITS_RAD'])
+                       if fb.position_limit_window(lo, hi, 1) == (0, 4095)]
+        self.assertEqual(full_circle, [4, 6])
+        for jid, rad in ((2, 3.1416), (3, -3.1416)):
+            self.assertNotIn(jid, full_circle)
+            self.assertIn(_N['rad_to_tick'](rad, 1), (0, 4095))
+
+    # ── the clamp itself ───────────────────────────────────────────────────
+    def test_clamp_moves_every_seam_bound_and_touches_nothing_else(self):
+        m = _N['GOAL_EDGE_MARGIN_TICKS']
+        moved, kept = [], []
+        for i, (lo, hi) in enumerate(_N['JOINT_LIMITS_RAD']):
+            sign = _N['JOINT_SIGNS'][i]
+            for which, rad in (('lo', lo), ('hi', hi)):
+                plain = _N['rad_to_tick'](rad, sign)
+                cmd = _N['rad_to_command_tick'](rad, sign)
+                # THE invariant: no commanded tick is ever within `m` of an end.
+                self.assertGreaterEqual(cmd, m, (i + 1, which))
+                self.assertLessEqual(cmd, 4095 - m, (i + 1, which))
+                (moved if cmd != plain else kept).append((i + 1, which))
+        # It bites exactly the six seam bounds and nothing else.
+        self.assertEqual(moved, [(2, 'hi'), (3, 'lo'),
+                                 (4, 'lo'), (4, 'hi'),
+                                 (6, 'lo'), (6, 'hi')])
+        self.assertEqual(len(kept), 8)
+
+    def test_clamp_is_a_noop_across_every_joints_ordinary_travel(self):
+        # The COST bound. A margin wide enough to touch joint1/joint5/the gripper
+        # anywhere in their designed travel, or to touch the ±90° joint6 fold, or
+        # HOME, would fail here — that is what pins the default's blast radius.
+        m = _N['GOAL_EDGE_MARGIN_TICKS']
+        for i, (lo, hi) in enumerate(_N['JOINT_LIMITS_RAD']):
+            if i in (1, 2, 3, 5):
+                continue                   # the four joints with a seam bound
+            steps = 400
+            for k in range(steps + 1):
+                rad = lo + (hi - lo) * k / steps
+                self.assertEqual(_N['rad_to_command_tick'](rad, _N['JOINT_SIGNS'][i]),
+                                 _N['rad_to_tick'](rad, _N['JOINT_SIGNS'][i]),
+                                 (i + 1, rad))
+        # joint6 folded into ±90° (autonomous grasping) — ticks 1024…3072.
+        for k in range(-90, 91):
+            rad = math.radians(k)
+            self.assertEqual(_N['rad_to_command_tick'](rad, 1),
+                             _N['rad_to_tick'](rad, 1), k)
+        # HOME + open gripper, and the fenced-maximum margin still misses it.
+        home = list(_N['HOME_JOINTS_RAD']) + [_N['GRIPPER_OPEN_RAD']]
+        worst = min(min(t, 4095 - t) for t in
+                    (_N['rad_to_tick'](r, 1) for r in home))
+        self.assertEqual(worst, 483)                     # joint3 at −2.40 rad
+        self.assertGreater(worst, _N['_GOAL_EDGE_MARGIN_MAX_TICKS'])
+        self.assertGreater(worst, m)
+
+    def test_autonomous_grasping_is_untouched_at_any_legal_margin(self):
+        """THIS TEST CANNOT VALIDATE THE CEILING'S INPUT NUMBER — read on.
+
+        The ceiling exists to keep every real ``Edu6IKSolver`` solution outside
+        the clamp band, so the number it must sit under is a property of the
+        SOLVER. The solver needs numpy and lives in
+        ``physical_ai_tools/physical_ai_server/``; this suite is deliberately
+        deps-free, which is why the previous version of this test recomputed the
+        bound from a HARDCODED joint angle (``157.52°``) and asserted the
+        constant matched. That made it a constant-drift detector only: when the
+        input number turned out to be the third successive sweep artifact
+        (367 → 263 → 256, all from grids that under-resolve full extension), this
+        test stayed green through all of it.
+
+        The number is now derived analytically and guarded where the solver
+        lives:
+        ``physical_ai_tools/physical_ai_server/test/test_edu6_goal_edge_ceiling.py``
+        ast-extracts THIS constant, derives joint3's floor from the solver's own
+        ``_ALPHA0``, and bisects the reach boundary with the real ``solve()``.
+        What is pinned HERE is the literal and the clamp's BEHAVIOUR at it."""
+        ceiling = _N['_GOAL_EDGE_MARGIN_MAX_TICKS']
+        # One tick under the 247-tick analytic floor of q3 = γ + ALPHA0 − π/2.
+        self.assertEqual(ceiling, 246)
+        f = _N['rad_to_command_tick']
+        floor_tick = ceiling + 1
+        rad = _N['tick_to_rad'](floor_tick, 1)
+        # At the ceiling — and at the shipped default — the tightest tick a real
+        # solution can carry is commanded unchanged, and STRICTLY inside the band
+        # (that strictness is why the ceiling is 246 and not 247: at margin 247
+        # the tick would still survive, but only because the band boundary is
+        # inclusive, and a fence should not lean on that).
+        for margin in (_N['GOAL_EDGE_MARGIN_TICKS'], ceiling):
+            self.assertLessEqual(margin, ceiling, margin)
+            self.assertEqual(f(rad, 1, margin), floor_tick, margin)
+            self.assertGreater(floor_tick, margin, margin)
+        # The first margin that actually SHIFTS the floor tick is floor + 1 —
+        # two above the ceiling. That headroom is the point of the fence.
+        self.assertEqual(f(rad, 1, floor_tick), floor_tick)
+        self.assertEqual(f(rad, 1, floor_tick + 1), floor_tick + 1)
+
+    def test_clamp_survives_a_sign_flip_without_a_per_joint_predicate(self):
+        # EDUBOTICS_EDU6_JOINT_SIGNS=−1 on joint2 mirrors its window to (0, 2048),
+        # moving the pinned bound from hi to lo. The blanket clamp follows for
+        # free; a per-joint table would have to be re-derived.
+        lo, hi = _N['JOINT_LIMITS_RAD'][1]
+        self.assertEqual(fb.position_limit_window(lo, hi, -1), (0, 2048))
+        self.assertEqual(_N['rad_to_tick'](hi, -1), 0)          # now the lo end
+        m = _N['GOAL_EDGE_MARGIN_TICKS']
+        self.assertEqual(_N['rad_to_command_tick'](hi, -1), m)
+
+    def test_margin_zero_is_the_documented_rollback(self):
+        for rad, sign in ((3.1416, 1), (-3.1416, 1), (3.1416, -1), (10.0, 1)):
+            self.assertEqual(_N['rad_to_command_tick'](rad, sign, 0),
+                             _N['rad_to_tick'](rad, sign))
+
+    def test_rad_to_tick_itself_is_still_only_register_clamped(self):
+        # rad_to_tick must stay a plain coordinate map: fb.le16 of an out-of-range
+        # tick would silently encode a different number, so that clamp is its own
+        # unconditional invariant — and a future NON-command caller must not
+        # inherit a safety clamp meant for commands.
+        self.assertEqual(_N['rad_to_tick'](10.0, 1), 4095)
+        self.assertEqual(_N['rad_to_tick'](-10.0, 1), 0)
+        self.assertEqual(_N['rad_to_tick'](3.1416, 1), 4095)
+
+    # ── the residual, measured against the SHIPPED wrong-way predicate ─────
+    def test_the_clamp_raises_the_forced_displacement_from_one_tick_to_margin_plus_one(self):
+        """THE correctness claim. With the goal pinned ON the seam a single tick of
+        motion across the boundary makes the servo's own naive error take the long
+        way round; with the goal clamped it takes margin + 1 ticks of displacement
+        PAST the goal. Driven through the shipped wrong_way_joints, not a
+        re-derivation of it."""
+        wrong = _N['wrong_way_joints']
+
+        def min_forced(goal):
+            """Smallest wrapped displacement from ``goal`` that trips the abort."""
+            for d in range(1, 2049):
+                for p in ((goal + d) % 4096, (goal - d) % 4096):
+                    if wrong({1: goal}, {1: p}):
+                        return d
+            return None
+
+        # Today's pinned goals — a hair trigger at both ends of the register.
+        self.assertEqual(min_forced(4095), 1)
+        self.assertEqual(min_forced(0), 1)
+        # The clamped band's extremes, derived from the clamp itself over the real
+        # limits (NOT hardcoded), are what the arm can actually command.
+        m = _N['GOAL_EDGE_MARGIN_TICKS']
+        commandable = set()
+        for i, (lo, hi) in enumerate(_N['JOINT_LIMITS_RAD']):
+            sign = _N['JOINT_SIGNS'][i]
+            for k in range(801):
+                commandable.add(_N['rad_to_command_tick'](
+                    lo + (hi - lo) * k / 800, sign))
+        self.assertEqual(min(commandable), m)
+        self.assertEqual(max(commandable), 4095 - m)
+        self.assertEqual(min_forced(min(commandable)), m + 1)
+        self.assertEqual(min_forced(max(commandable)), m + 1)
+        # No commandable goal is worse than those two extremes: nothing within
+        # `m` ticks of ANY commandable goal can trip the abort. (Sampled with a
+        # stride through the interior, exhaustive over the outer bands where the
+        # bound actually binds.)
+        probes = (list(range(m, m + 200)) + list(range(4095 - m - 199, 4096 - m))
+                  + list(range(m, 4096 - m, 97)))
+        for goal in probes:
+            for d in range(1, m + 1):
+                for p in ((goal + d) % 4096, (goal - d) % 4096):
+                    self.assertFalse(wrong({1: goal}, {1: p}), (goal, d, p))
+
+    def test_the_eeprom_window_cannot_substitute_for_the_clamp(self):
+        # Asked directly at review: does Min/Max_Position_Limit bound this? No —
+        # every joint carrying a seam bound has a window that TOUCHES a register
+        # end, so there is no headroom to clamp into even if the register limit
+        # bounded the physical path (it does not; it bounds the GOAL).
+        for idx in (1, 2, 3, 5):
+            lo, hi = fb.position_limit_window(*_N['JOINT_LIMITS_RAD'][idx], 1)
+            self.assertTrue(lo == 0 or hi == 4095, (idx + 1, lo, hi))
+
+    # ── the call site ──────────────────────────────────────────────────────
+    def _written_ticks(self, q):
+        bus = _TorqueFakeBus()
+        node = _TorqueStubNode(bus)
+        node._write_targets(q)
+        addr, per = bus.writes[-1]
+        self.assertEqual(addr, fb.REG_ACCELERATION)
+        # 7-byte contiguous write: accel, goal(2), time(2), speed(2).
+        return {sid: fb.from_le16(p[1], p[2]) for sid, p in per.items()}
+
+    def test_write_targets_never_commands_a_seam_tick(self):
+        # BEHAVIOUR at the call site — this is what catches a bare rad_to_tick
+        # there. Command every joint to BOTH of its URDF limits at once.
+        m = _N['GOAL_EDGE_MARGIN_TICKS']
+        for pick_hi in (False, True):
+            q = [(hi if pick_hi else lo)
+                 for lo, hi in _N['JOINT_LIMITS_RAD']]
+            ticks = self._written_ticks(q)
+            self.assertEqual(len(ticks), 7)
+            for sid, tick in ticks.items():
+                self.assertGreaterEqual(tick, m, (pick_hi, sid, tick))
+                self.assertLessEqual(tick, 4095 - m, (pick_hi, sid, tick))
+        # …and the radian clamp above it still holds: a wildly out-of-limit
+        # request lands on the clamped LIMIT, not somewhere arbitrary.
+        ticks = self._written_ticks([99.0] * 7)
+        self.assertEqual(ticks[4], 4095 - m)             # joint4 hi = +π
+        self.assertEqual(ticks[7], 3215)                 # gripper hi: unclamped
+        ticks = self._written_ticks([-99.0] * 7)
+        self.assertEqual(ticks[6], m)                    # joint6 lo = −π
+        self.assertEqual(ticks[7], 2048)                 # gripper lo: unclamped
+
+    def test_write_targets_passes_ordinary_targets_through_bit_identically(self):
+        home = list(_N['HOME_JOINTS_RAD']) + [_N['GRIPPER_OPEN_RAD']]
+        ticks = self._written_ticks(home)
+        self.assertEqual(
+            ticks,
+            {sid: _N['rad_to_tick'](home[i], _N['JOINT_SIGNS'][i])
+             for i, sid in enumerate(_N['SERVO_IDS'])})
+        self.assertEqual(ticks[3], 483)                  # joint3 at HOME
+
+    def test_every_boot_home_point_is_commanded_unchanged(self):
+        # The boot-home glide's HOME endpoint is 483 ticks clear, so a glide from
+        # any pose the plausibility band admits arrives unclamped. (Its FIRST
+        # points can be clamped when a joint was hand-parked inside the band —
+        # that is the documented, direction-safe jerk, not a silent failure.)
+        for start_tick in (2048, 1024, 3072, 600, 3500):
+            rad = _N['tick_to_rad'](start_tick, 1)
+            pts = _N['build_boot_home']([rad] * 7)
+            for q, _t in pts:
+                for i, sign in enumerate(_N['JOINT_SIGNS']):
+                    plain = _N['rad_to_tick'](q[i], sign)
+                    self.assertEqual(_N['rad_to_command_tick'](q[i], sign),
+                                     plain, (start_tick, i))
+
+    def test_the_goal_seed_is_deliberately_not_edge_clamped(self):
+        # A software guard must not CREATE motion. The seed writes Goal = Present
+        # to hold a limp arm still, so clamping it would command a real move at the
+        # instant torque arrives — and the two torque-on guards already own that
+        # state. Present tick 4090 on joint6, judged on an already-torqued arm so
+        # the OFF→ON-gated edge guard does not refuse first.
+        bus = _TorqueFakeBus({6: 4090})
+        node = _TorqueStubNode(bus)
+        node._torque_on = True                    # skip the edge guard's gate
+        with node._bus_lock:
+            goals = node._seed_goal_from_present_locked()
+        self.assertIsNotNone(goals)
+        self.assertEqual(goals[6], 4090)          # NOT 4095 − margin
+        addr, per = bus.writes[-1]
+        self.assertEqual(addr, fb.REG_ACCELERATION)
+        self.assertEqual(fb.from_le16(per[6][1], per[6][2]), 4090)
+        # …and the seed keeps its own gentle speed, not the motion cap.
+        self.assertEqual(fb.from_le16(per[6][5], per[6][6]),
+                         _N['SEED_SPEED_STEPS'])
+
+    def test_only_the_command_writer_converts_radians_to_a_goal_tick(self):
+        # Structural belt for the behaviour above: rad_to_tick has exactly ONE
+        # caller besides rad_to_command_tick's own body, and it is not a goal
+        # writer. A future command path that reached for the bare converter would
+        # break this.
+        path = os.path.join(_DOCKER, 'edu6_arm_node.py')
+        source = open(path, encoding='utf-8').read()
+        tree = ast.parse(source)
+        callers = {}
+        for parent in ast.walk(tree):
+            if not isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for sub in ast.walk(parent):
+                if (isinstance(sub, ast.Call)
+                        and isinstance(sub.func, ast.Name)
+                        and sub.func.id in ('rad_to_tick',
+                                            'rad_to_command_tick')):
+                    callers.setdefault(sub.func.id, set()).add(parent.name)
+        self.assertEqual(callers['rad_to_tick'], {'rad_to_command_tick'})
+        self.assertEqual(callers['rad_to_command_tick'], {'_write_targets'})
+        # The seed must not acquire the clamp by a later edit. (Split on the
+        # INDENTED def so a mention of the method's name in a module-level
+        # docstring cannot be mistaken for its body.)
+        seed = source.split('\n    def _seed_goal_from_present_locked', 1)[1]
+        seed = seed.split('\n    def ', 1)[0]
+        self.assertIn('sync_write', seed)                 # we really got the body
+        # A CALL, not a mention: the seed's own comment legitimately discusses
+        # rad_to_tick when explaining why commanded travel is monotonic.
+        self.assertNotIn('rad_to_command_tick(', seed)
+        self.assertNotIn('= rad_to_tick(', seed)
+
+    # ── env knob ───────────────────────────────────────────────────────────
+    def test_goal_edge_margin_env_parse(self):
+        f = _N['_parse_goal_edge_margin']
+        default = _N['_DEFAULT_GOAL_EDGE_MARGIN_TICKS']
+        ceiling = _N['_GOAL_EDGE_MARGIN_MAX_TICKS']
+        self.assertEqual(default, 128)
+        self.assertEqual(f(None), default)
+        self.assertEqual(f(''), default)
+        self.assertEqual(f('   '), default)
+        self.assertEqual(f(' 200 '), 200)
+        self.assertEqual(f(str(ceiling)), ceiling)      # the ceiling is INCLUSIVE
+        self.assertEqual(f('0'), 0)                     # the documented rollback
+        # BOTH ends fenced, each with a [WARN] naming 0 as the real disable value.
+        for bad in ('abc', '-1', '1,2', str(ceiling + 1), '2048', '4096'):
+            with patch('builtins.print') as printed:
+                self.assertEqual(f(bad), default, bad)
+            self.assertTrue(printed.called, bad)
+            msg = printed.call_args[0][0]
+            self.assertIn('EDUBOTICS_EDU6_GOAL_EDGE_MARGIN_TICKS', msg)
+        with patch('builtins.print') as printed:
+            f(str(ceiling + 1))
+        self.assertIn('0 to DISABLE', printed.call_args[0][0])
+
+    def test_the_two_edge_knobs_are_independent_and_the_wider_one_is_the_clamp(self):
+        # They are separate mechanisms with separate rollbacks, and the clamp is
+        # deliberately the wider of the two: the edge guard judges an arm AT REST
+        # (dither only), the clamp a MOVING joint arriving at a pinned goal, which
+        # must also survive an overshoot nobody has measured yet (rig gate R5).
+        self.assertGreater(_N['GOAL_EDGE_MARGIN_TICKS'],
+                           _N['EDGE_REFUSE_MARGIN_TICKS'])
+        # Disabling one must not disable the other.
+        self.assertEqual(_N['edge_parked_joints']({6: 4093}, 0), [])
+        self.assertEqual(_N['rad_to_command_tick'](3.1416, 1, 0), 4095)
+        self.assertTrue(_N['edge_parked_joints']({6: 4093}))
+        self.assertNotEqual(_N['rad_to_command_tick'](3.1416, 1), 4095)
+
+    def test_the_knob_is_forwarded_on_a_compose_environment_list(self):
+        # ci.yml::env-forwarding-guard in miniature: an EDUBOTICS_* the driver
+        # reads but compose never injects is an .env override that silently does
+        # nothing.
+        compose = open(os.path.join(_DOCKER, '..', 'docker-compose.yml'),
+                       encoding='utf-8').read()
+        # Mirror the guard's own regex: LINE-ANCHORED with only whitespace before
+        # the dash, so a commented-out or prose mention cannot satisfy it.
+        forwarded = re.findall(r'(?m)^[ \t]*-[ \t]*(EDUBOTICS_[A-Z0-9_]+)=',
+                               compose)
+        self.assertIn('EDUBOTICS_EDU6_GOAL_EDGE_MARGIN_TICKS', forwarded)
+        # …and it really is the name the driver reads.
+        driver = open(os.path.join(_DOCKER, 'edu6_arm_node.py'),
+                      encoding='utf-8').read()
+        read = set(re.findall(r'EDUBOTICS_[A-Z0-9_]+', driver))
+        self.assertIn('EDUBOTICS_EDU6_GOAL_EDGE_MARGIN_TICKS', read)
+        self.assertEqual(read - set(forwarded), set())
 
 
 if __name__ == '__main__':

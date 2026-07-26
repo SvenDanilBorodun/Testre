@@ -17,9 +17,12 @@ position-reporting semantics the runtime will use):
 2. Torque OFF (verified), then **write Lock = 0 EXPLICITLY** (addr 55; 0 =
    EEPROM writes persist, 1 = protected — the polarity is inverted from
    intuition, and torque-off does NOT implicitly unlock).
-3. Clear ``Phase`` bit 4 (multi-turn feedback mode) BEFORE the offset step —
-   read-modify-write, only-when-set. The jig read that bakes the offset must
-   happen under post-clear feedback semantics (audit M1), and the other
+3. Clear ``Phase`` bit 4 (multi-turn feedback mode) and normalize
+   ``Angular_Resolution`` (addr 30) to 1, both BEFORE the offset step —
+   read-modify-write / read-compare-write, only-when-needed. These are the TWO
+   registers the vendor documents as changing the tick↔angle map, and the jig
+   read that bakes the offset must happen under the SAME map the runtime will
+   use (audit M1, which applies verbatim to the resolution). The other
    Phase bits are motor-drive configuration that must never be touched.
 4. Read the jigged Present_Position of every servo and write ``Homing_Offset``
    so the reference pose reads its DESIGNED tick value; re-read and hard-fail
@@ -212,6 +215,19 @@ def provision(bus, serial: str, signs, dry_run: bool = False) -> dict:
                 _write_verify_u8(bus, sid, fb.REG_PHASE, phase & ~(1 << 4),
                                  'Phase-Bit4')
 
+            # Angular_Resolution (addr 30) is the OTHER register the vendor
+            # documents as rescaling the tick↔angle map (factory 1, range 1..3;
+            # „对传感器最小分辨角度（度/步）的放大系数"). It sits here, next to the
+            # Phase bit-4 clear and BEFORE the offset, for exactly the audit-M1
+            # reason: the jig read that bakes Homing_Offset must run under the
+            # same map the runtime uses. read-compare-write, so a factory-default
+            # servo costs no EEPROM cycle. The driver's boot probe reports a
+            # deviation (as a WARNING — see Edu6ArmNode.probe_bus for why it is
+            # not a refusal); this is the write that makes the arm match.
+            _write_verify_u8(bus, sid, fb.REG_ANGULAR_RESOLUTION,
+                             fb.ANGULAR_RESOLUTION_SINGLE_TURN,
+                             'Winkelauflösung')
+
         # 4. homing offset: jigged position must READ the designed zero.
         present = bus.read_u16(sid, fb.REG_PRESENT_POSITION)
         present = fb.decode_sign_magnitude(present, 15)
@@ -293,7 +309,14 @@ def provision(bus, serial: str, signs, dry_run: bool = False) -> dict:
             'max_torque': max_torque,
             'model_number': models[sid],
             'model_name': fb.STS_MODEL_NAMES[models[sid]],
-            'firmware': f'{firmware[0]}.{firmware[1]}',
+            # ONE shared formatter with the driver's boot fingerprint, so a
+            # stored record and a bench log are string-comparable.
+            'firmware': fb.format_firmware(firmware[0], firmware[1]),
+            # Recorded so a future arm's map scaling is auditable from the record
+            # alone — EDU6-0001 predates this field, which is exactly why the
+            # driver's boot check WARNS instead of refusing.
+            'angular_resolution': bus.read(
+                sid, fb.REG_ANGULAR_RESOLUTION, 1)[1][0],
         })
         print(f'[OK] Servo {sid}: offset={new_off} limits=[{lo},{hi}] '
               f'torque={max_torque}')

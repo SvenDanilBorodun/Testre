@@ -16,7 +16,30 @@ import urllib.request
 
 REPO_DIR = r"C:\Users\svend\newaarm\Testre"
 NS = "svendanilborodun"
-REV = "b8f3c71d67797a22cb4dc815ad276ba0f5b35bac"
+
+# The git revision the image is expected to have been built from.
+#
+# This used to be a HARDCODED sha, which is a trap: after the next push the tool
+# compares a correct image against a stale baseline and reports MISMATCH on
+# bytes that are in fact right. That happened on 2026-07-26 — the image carried
+# exactly the pushed hashes and the tool still failed, because REV still named
+# the previous commit. A stale baseline in a verification tool is worse than no
+# tool, because it trains you to ignore its output.
+#
+# Default is now the current origin/main, resolved at run time. Pass an explicit
+# ref as argv[1] to check an older image.
+def _default_rev() -> str:
+    for ref in ("origin/main", "HEAD"):
+        try:
+            return subprocess.run(
+                ["git", "-C", REPO_DIR, "rev-parse", ref],
+                capture_output=True, text=True, check=True).stdout.strip()
+        except Exception:  # noqa: BLE001 - fall through to the next candidate
+            continue
+    raise SystemExit("[FAIL] cannot resolve a git revision to compare against")
+
+
+REV = sys.argv[1] if len(sys.argv) > 1 else _default_rev()
 
 TARGETS = {
     "open-manipulator": {

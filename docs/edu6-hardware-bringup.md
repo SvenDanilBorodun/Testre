@@ -4,7 +4,8 @@
 Joints 2 & 3 are STS3250 (model 2825); the other five are STS3215 (model 777) — **mixed by design**.
 **Machine:** Windows 11 bench PC, repo at `C:\Users\svend\newaarm\Testre`.
 **Last rewritten:** 2026-07-26 (session 7).
-**Branch:** `main`. Pushed through `5427a3be`. **Session-7 work is UNCOMMITTED** (§5.2).
+**Branch:** `main`, pushed through **`6cce3da0`**. **Session 7 is LANDED, CI green, images
+rebuilt and BYTE-VERIFIED.** The desk work is finished; everything remaining is physical (§6).
 
 > **This file is rewritten each session, never appended to.** Earlier revisions had
 > accumulated layered self-corrections in which sections contradicted the ones above them —
@@ -21,10 +22,11 @@ Joints 2 & 3 are STS3250 (model 2825); the other five are STS3215 (model 777) �
 |---|---|
 | Sessions 1–5 code | ✅ pushed, CI green (`9cd43c23`) |
 | Session 6 code (dead reroute ladder, roll landmine, place path) | ✅ pushed (`b8f3c71d`, `5427a3be`) |
-| **Session 7 code** (edge-guard scope, post-energise abort, 8 sim defects) | ⚠️ **UNCOMMITTED. Independently verified — nothing ships broken (§5.2).** Suites: 768 server / 694 deps-free / 230 cloud / 30 jetson, all validators green |
-| **⚠️ SEAM-PARKING hazard** | **OPEN, needs a decision before the next powered session — §8.0.** Pre-existing, not introduced by session 7. A J4/J6 command at ±π pins the goal on the seam with the FAST speed installed; one encoder sample across it commits a full revolution at 1.44 s/rev, and NEITHER shipped guard fires. Reachable with no external force: hand-guide J6 past +180°, record, replay |
+| **Session 7 code** (guards 3-7, 8 sim defects, 6 vendor-research fixes) | ✅ **PUSHED — `6cce3da0`. CI + docker-publish both green.** Suites: **741** deps-free / **776**+4 server / **230** cloud / **30** jetson |
+| **Docker `:latest` ×3** | ✅ **REBUILT from `5edb7979` and BYTE-VERIFIED** — `revision label MATCH`, `edu6_arm_node.py` `31dbc542…`, `feetech_bus.py` `241b1dc6…`. **The pre-powered gate is CLEARED** |
+| **Guard stack** | ✅ **7 guards** — fingerprint, boot band 400, torque-on edge refusal 40, post-energise abort 2048, commanded-goal clamp 128, `Torque_Enable` write rail, fingerprint extras (§3). Seam-parking CLOSED |
+| **⚠️ A12 — "a goal write can energise a limp arm"** | **OPEN, and it touches the hand-guide safety assumption.** Bench question, first thing at R5 — see §8.4 |
 | Cloud (Supabase 035/036, dual-width Contract-B) | ✅ live |
-| Docker `:latest` ×3 | ⚠️ built from `9cd43c23`; **stale — rebuild required** (§5.3) |
 | R1 USB enumeration | ✅ COM5, `1A86:55D3`, serial `5A68010132` |
 | R2 register dump + provisioning (all 7) | ✅ done, re-verified live |
 | R6 joint direction signs | ✅ **CLEARED — all default (+1). No re-provision.** (§2.5) |
@@ -783,30 +785,42 @@ b8f3c71d  the no-go-zone reroute ladder was structurally dead on edu6
 
 `.gitignore` excludes `tools/edu6_records/` (Supabase `edu6_arm_records` is the fleet store).
 
-### 5.2 UNCOMMITTED session-7 work
+### 5.2 Session-7 work — LANDED on `main`
 
-14 modified + 2 untracked, plus `tools/edu6_bench/`.
+Six commits, 29 files, +4,900 lines. All pushed; working tree clean.
 
-**An independent adversarial verification pass over all three work packages is COMPLETE.
-Verdict: nothing ships broken.** It confirmed the load-bearing claims (F1's three
-must-be-zero counts really are zero on both arms over 5 runs; F2 on all four sub-claims; the
-2008 / 2048 / 3443 threshold enumeration; the 83.6 mm / 33.6 mm mesh measurement, re-measured
-independently with FK cross-checked to 0.0; J2/J3 coverage exactly as claimed) and ran 32
-mutations, **28 killed, 4 survived** — two of them provably *equivalent* mutants, two a real
-test gap since fixed (§5.2.1). What it found otherwise was **one under-described pre-existing
-hazard (§3.4 item 1 → §8.0)** and a set of **wrong numbers in comments**, all now corrected:
+```
+6cce3da0  fix(tools): verify_image_bytes compared against a HARDCODED stale revision
+5edb7979  tools(edu6): bench tools for the powered gates
+86ad92f8  docs(edu6): session-7 invariants, the dated story, and a rewritten handoff
+33f7dd42  fix(edu6): workflow layer — a false grasp success, dead reroutes, a mirrored wrist
+e8fa214c  fix(edu6): driver guard stack — seam hazards, write rails, fingerprint extras
+5427a3be  fix(edu6): the place path — gripper over-close, and a baked release clearance
+```
 
-| corrected | was | is |
-|---|---|---|
-| closest solver approach to a register edge | 367 ticks, 9× | **256 ticks, 6.4×** (977,808 solutions; the old figure was a sparse-sweep artifact) |
-| the ≤2 mm refusal bands (edu6) | `[0.0325,0.0335] ∪ [0.2075,0.2082]` | **`[0.0325,0.0347] ∪ [0.2062,0.2082]`** — the old pair is a *different* measurement; the counts (19/704) were always exact |
-| OMX refusal band's grasp height | z = 0.015 | **z = 0.012**; at 0.015 it shifts to `[0.2795,0.2797]` |
-| F6 fire rates | edu6 12.1 %, OMX silent | **edu6 9.4 %, OMX 0.8 %** (12.1 % counts radii below the 15 mm threshold — not a fire rate) |
-| finger-mesh distance | 39.7 mm | **44.1 mm** at the command cap (46.6 at the URDF limit) — after the two breaches, the closest to the 50 mm total |
-| speed needed to defeat the 40-tick margin in 1.6 ms | 38 rad/s | **39.1 rad/s** |
-| why the effective goal is computed, not read | "7 round trips / undocumented registers 50-54" | **false** — `REG_GOAL_POSITION` is 42, 2 bytes, documented; one `sync_read` = 0.710 ms. The real reason is the unmeasured raw-vs-clamped question (A9) |
-| `_TORQUE_ABORT_MIN_TICKS = 401`'s rationale | "would abort the pull-in the probe accepts" | **false** — `wrapped < naive` excludes pull-ins at *every* threshold (0 flagged, 1→4095). Kept as belt-and-braces |
-| the inflation test "pins the measurement" | — | it pins the **constants** only; the eight distances are prose |
+**CI: `CI` and `docker-publish` both `completed / success` on `5edb7979`.**
+
+**Independently verified before landing — verdict: nothing ships broken.** Four adversarial
+passes ran over the round; between them they killed **~100 mutations**, and what they found was
+one under-described pre-existing hazard (seam-parking, now guard 5) plus a long list of **wrong
+numbers in comments**, all corrected. Two implementer agents also refused instructions of mine
+that were wrong — see §11.
+
+What shipped, by work package:
+
+| pkg | contents |
+|---|---|
+| **A** | guard 3 scope: judge EVERY joint (`full_circle_joint_indexes` deleted — its premise was false), OFF→ON transition gate (the unconditional version broke jogging) |
+| **B** | guard 4, the post-energise wrong-way abort |
+| **C** | eight sim defects F1–F8 — headline: a grasp with no approach room was reported as SUCCESS |
+| **D** | guard 5, the commanded-goal edge clamp (seam-parking) |
+| **E** | six vendor-research fixes: the error-byte fallback, the `Torque_Enable` write rail (guard 6), `Angular_Resolution` + firmware fingerprinting (guard 7), and two docstring corrections |
+
+Two items in package E were deliberately **NOT** done, and the reasoning matters more than the
+code: **C1** (read `Torque_Enable` back) was SKIPPED because guard 4 already covers the only
+harmful case *by measurement*, and in the benign case a read-back would have refused the
+torque-on and dropped a held object; **B2** was DOWNGRADED from a refusal to a hedged warning
+because the „FW 3.9 corrupts SYNC_READ" claim traced to a single confounded, unconfirmed report.
 
 ### 5.2.1 The two real test gaps — fixed and mutation-verified
 
@@ -913,106 +927,153 @@ this session without knowing it existed. Verdict:
 independent sessions reached the same three fixes, which is mild evidence the diagnosis is right.
 Pruning the remote branches is a `push --delete` — ask first.
 
-### 5.3 Image rebuild — REQUIRED before anything powered
+### 5.3 Image rebuild — ✅ DONE and BYTE-VERIFIED (2026-07-26)
 
-Session 7 touched both an image-relevant plain COPY (`edu6_arm_node.py`) and the COPY-wholesale
-server package, so all three `:latest` images are stale. One push to `main` rebuilds them —
-`docker-publish.yml` path-filters match both `physical_ai_tools/**` and
-`robotis_ai_setup/docker/**`.
+`docker-publish` rebuilt all three `:latest` images from `5edb7979` and the bytes were verified
+straight from GHCR:
 
-Re-verify from the registry afterwards without a multi-GB pull —
-`tools/edu6_bench/verify_image_bytes.py` does the anonymous-token → manifest → small-COPY-layer
-walk. Or by hand:
-
-```bash
-wsl -d EduBotics -- docker pull ghcr.io/svendanilborodun/open-manipulator:latest
-wsl -d EduBotics -- docker run --rm --entrypoint sha256sum \
-  ghcr.io/svendanilborodun/open-manipulator:latest \
-  /usr/local/bin/edu6_arm_node.py /usr/local/bin/feetech_bus.py
+```
+=== open-manipulator:latest ===
+  revision label: 5edb79790cd9  MATCH
+  OK   usr/local/bin/edu6_arm_node.py   31dbc542540428d0645bc6e5b97f7531…  119510 B
+  OK   usr/local/bin/feetech_bus.py     241b1dc6bd3c79c86a3c2ad6ba25eb20…   24068 B
 ```
 
-> ⚠️ **CRLF TRAP.** `.gitattributes` pins the two driver files `eol=lf`, so THEIR worktree
-> hashes match the image — but `edu6_ik.py` is plain `text=auto`, so a Windows checkout
-> materializes CRLF while the Linux CI build carries LF. **Always take the expected hash from
-> `git show HEAD:<path> | sha256sum`, never from `sha256sum <path>` on Windows.** An earlier
-> revision of this file listed the CRLF hash and would have reported a false mismatch on a
-> correct image.
+**The pre-powered gate is CLEARED.** The container now runs exactly the driver in git.
+
+Re-run it after ANY future push that touches the driver — one command, anonymous GHCR token,
+no multi-GB pull:
+
+```bash
+python tools/edu6_bench/verify_image_bytes.py            # compares against origin/main
+python tools/edu6_bench/verify_image_bytes.py <git-ref>  # or an older image
+```
+
+> ⚠️ **A trap this tool itself fell into, fixed in `6cce3da0`.** It carried its baseline
+> revision as a HARDCODED sha, so the first run after a push reported **MISMATCH on bytes that
+> were correct** — the image genuinely carried the pushed hashes and the tool still failed,
+> because its baseline named the previous commit. A stale baseline inside a verification tool is
+> worse than no tool: it trains you to ignore the one thing that gates powered work. It now
+> resolves `origin/main` at run time.
+
+> ⚠️ **CRLF TRAP, still live for other files.** `.gitattributes` pins the two driver files
+> `eol=lf`, so THEIR worktree hashes match the image — but `edu6_ik.py` is plain `text=auto`, so a
+> Windows checkout materializes CRLF while the Linux CI build carries LF. **Take any expected hash
+> from `git show HEAD:<path> | sha256sum`, never from `sha256sum <path>` on Windows.**
 
 ---
 
 ## 6. REMAINING WORK — end to end
 
-### Step 1 — land session 7
-1. ✅ Verification pass complete; its number corrections and the two test gaps are landed (§5.2).
-2. **Resolve §8.0 (the seam clamp — gates the next powered session), §8.1 (zone inflation) and
-   §10 (bench-tool promotion).** All three need Sven.
-3. **Commit + push** → CI rebuilds all three images.
-4. **Re-verify the image bytes** (§5.3) before anything powered.
+**Everything from here is PHYSICAL.** The desk work is finished: code landed, CI green, images
+rebuilt and byte-verified (§5.3). Start the next session at step 1 — nothing needs to be
+re-derived first.
 
-### Step 2 — powered bench gates, in this order
-Everything here needs the rebuilt image in the container.
+### Step 0 — sanity, 2 minutes
+```bash
+git -C C:/Users/svend/newaarm/Testre log -1 --oneline     # expect 6cce3da0 or later
+python tools/edu6_bench/verify_image_bytes.py             # expect: revision MATCH, 2× OK
+```
+If the second command does NOT say MATCH, stop — the container is running a different driver
+than git, and every guard below is unverified.
 
-- **Re-check the guard stack, three ways.** (1) Park J6 within a few ticks of ±180° by hand,
-  then „Umgebung starten": expect the German „am Rand des Positionsbereichs" refusal, no
-  refusal mid-range, and **self-healing after a nudge** (the 5 s retry). (2) Same for J2 near
-  +180° / J3 near −180°. (3) **Jog PAST ±176.5° on J4/J6 and keep jogging** — the transition
-  gate means a second jog from that pose must NOT refuse (that regression produced „Arm konnte
-  wiederholt nicht verriegelt werden"). Then hand-guide → „Beenden" from an edge park: expect
-  the refusal. The post-energise abort has **never fired on a real arm** — only the bench
-  tool's equivalent has.
-- **R5** — 50 Hz loop through usbipd; optionally 100 Hz. Read the position P/I/D gains, which
-  have **never** been read or written (not even defined in `feetech_bus.py`; the OMX sets them
-  explicitly). A tune would be Rule §2.
-- **R4** — pinch force at `Max_Torque 150` → final overcurrent floor. Readable live now:
-  `ros2 topic echo /joint_states --field effort`.
-- **R3** — cube seating → confirm the 0.1724 m fingertip tool length.
-- **R7** — self-collision: harmless stall vs damage. **Now decides two things**: the deferred
-  jog swept-refusal guard (13/160 random in-limit configs self-collide), *and* §8.1's zone
-  inflation (does a ~34 mm gripper-housing overhang produce damage or a harmless stall?). Also
-  covers base-swing via poses, whose near radius (0.10) sits 10 mm outside `reach_inner_m`.
-- **J6 sign + `GRASP_ROLL` jaw check** — one observation (§2.5).
+### Step 1 — ⚠️ A12 FIRST: can a goal write energise a limp arm?
 
-### Step 3 — R8 + R10
-**R8** 3D-twin browser smoke: π-yaw reaches toward the cube, fingers animate, „Bahn" trail on
-the object side.
+**Do this before trusting hand-guide, and before R4/R7.** LeRobot #3585 reports the firmware
+setting `Torque_Enable = 1` **by itself** on the next PID tick after an out-of-window goal write.
+`_seed_goal_from_present_locked` writes the measured tick clamped only into the REGISTER range,
+not the EEPROM window — so on a joint resting outside its window (R9 measured up to **107 ticks**
+on joint5) that IS an out-of-window goal write, issued while torque is off.
 
-**R10** end-to-end, source-run GUI: scan (Modus „EduBotics 6-Achs – Roboter Studio") →
-Umgebung starten (boot-home) → camera calibration (20-frame intrinsics → extrinsic → „Tisch
-vermessen") → Blockly „finde Würfel → greife → lege ab" → „Bewegung aufnehmen" (limp
-hand-guide) → replay → save to cloud (auto-tagged `edu6_studio`); cross-check that an OMX rig
-refuses it with „anderer Robotertyp". Sanity: only Roboter Studio + (always-visible) Inferenz
-tabs; lone camera = Szenen-Kamera; jog shows Gelenk 1–6 + „Greifer öffnen/schließen"; second
-GUI launch fast-rehydrates.
+Why it is first: **hand-guide is torque-off by design and the student is holding the arm.** If a
+goal write can energise it, that assumption is wrong. The pull-in is already budgeted and
+`SEED_SPEED_STEPS` rides the same packet, so it looks bounded — but "looks bounded" is not a
+safety argument.
 
-**Expected, not a fault:** roughly the outer 2 mm and inner 2 mm of the pick band now refuse a
-grasp — „Kein Platz, um von oben anzufahren" (F1; 19 of 704 swept radii, r ∈ [0.0325, 0.0347]
-∪ [0.2062, 0.2082]). r ∈ [0.05, 0.19] is silent.
+**Test:** torque off, hand a joint to rest outside its designed window (joint5 does this on its
+own — R9), then issue the seed write alone and read `Torque_Enable` back. Watch for motion.
 
-### Step 4 — physicals (Sven)
-Print the edu6 mat via `tools/generate_edu6_mat.py` — half-fan, **43.6 × 21.8 cm**, so it does
-**NOT fit A3** (42.0 cm long edge) and the sheet forbids scaling: **use A2 or two sheets**. It
-draws **both rims**: greifen to 20.8 cm, ablegen only to 17.4 cm (§7), keep-out inside 9.0 cm,
-arm at the flat edge. The OMX ring mat is wrong for this arm.
+### Step 2 — D1: does a position command clear the overload/overcurrent protection?
 
-**The AprilTag sheet does NOT need reprinting** — `generate_apriltags.py` reads only
-`type_names()`, `tag_ids_for_type()` and `tag_size_m`, and all three are identical between
-`omx_full` and `edu6_studio` (`wuerfel`, ids (20, 21), 24 mm), so the same physical tags can be
-shared between an OMX and an edu6 station. ChArUco unchanged.
+**Three decisions rest on the answer**, so it also comes before R4/R7: §8.1's zone-inflation
+verdict, R4's pinch-force floor, and R7's stall-vs-damage question all assume *"the servo current
+limits are the physical backstop"*. Our write loop sends a position command every **20 ms** — if
+that clears the protection flag, it can never latch and the premise fails.
 
-### Step 5 — release
-VERSION bump **2.13.0 → 2.14.0 across 4 sites in one commit**: `VERSION`,
-`installer/robotis_ai_setup.iss` AppVersion, `gui/app/constants.py` literal,
-`pi_agent/constants.py` literal (`release.yml::version-preflight` hard-fails a tag that
-disagrees with any of them). Prove the installer builds first —
-`release-installer.yml` via workflow_dispatch with the **PREVIOUS** tag, the only `.iss` Pascal
-compile check in CI. **Needs `gh auth login` first.** Then `git tag v2.14.0 && git push --tags`
-→ W1–W6. Modal untouched; migrations 035/036 already applied.
+### Step 3 — the guard stack on real hardware
 
-### Step 6 — cleanup
-Graduate any remaining durable invariants into `CLAUDE.md`, put the dated narrative in
-`docs/CLAUDE-CHANGELOG.md`, and **delete this file**.
+Three checks, all of which should now behave (the image carries them):
 
----
+1. Park joint6 within a few ticks of ±180° by hand → „Umgebung starten": expect the German
+   „am Rand des Positionsbereichs" refusal, **self-healing after a nudge** (the 5 s retry), and
+   **no** refusal mid-range.
+2. Same for joint2 near +180° / joint3 near −180° (the coverage the 2026-07-26 correction added).
+3. **Jog PAST ±176.5° on joint4/joint6 and keep jogging** — a second jog from that pose must NOT
+   refuse. That regression produced „Arm konnte wiederholt nicht verriegelt werden".
+
+Then hand-guide → „Beenden" from an edge park: expect the refusal. **Guard 4 (the post-energise
+abort) and guard 5 (the clamp) have NEVER fired on a real arm** — only the bench tool's
+equivalent has.
+
+Expected, not a fault: commanded J4/J6 now stop at **±168.66°** (guard 5), and a replay holding a
+recorded value beyond that is trimmed by up to 11.3°.
+
+### Step 4 — R5: loop rate, gains, overshoot
+
+50 Hz through usbipd; optionally 100 Hz. **Read the position P/I/D gains — never read on this
+arm**, not even present in the register map. Vendor default is P=32/D=32/I=0; LeRobot ships P=16
+and measured the cost: P=16 → 63 ticks from target, P=32 → 26.7 ticks. So lowering P to cut
+overshoot roughly **doubles** the static-friction dead-band.
+
+**Also measure OVERSHOOT past a pinned goal at `GOAL_SPEED_CAP_STEPS`** (A10). That single number
+turns guard 5's provisional **128** into a derived one: under ~20 ticks, 40–80 would do and the
+replay trim shrinks to 3.6°; over ~100, revisit the ceiling and/or lower the speed cap (Q6).
+
+### Step 5 — R4, R3, R7
+
+- **R4** pinch force at `Max_Torque 150` → the final overcurrent floor. Readable live:
+  `ros2 topic echo /joint_states --field effort`. **Depends on step 2.**
+- **R3** cube seating → confirm the 0.1724 m fingertip tool length.
+- **R7** self-collision: harmless stall or damage? **Decides three things** — the deferred jog
+  swept-refusal guard (13/160 random in-limit configs self-collide), §8.1's zone inflation (does a
+  ~34 mm gripper-housing overhang do damage?), and base-swing via poses, whose near radius (0.10)
+  sits 10 mm outside `reach_inner_m` with nothing enforcing it server-side.
+
+### Step 6 — J6 sign + `GRASP_ROLL`, then R8, R10
+
+One observation settles both (§2.5): a wrong J6 sign rotates the jaws the wrong way against a
+rotated cube. Free to flip — symmetric window, `.env` only, no re-provision.
+
+**R8** 3D-twin browser smoke (π-yaw, finger animation, „Bahn" trail). **R10** end-to-end: scan →
+Umgebung starten → calibrate (20-frame intrinsics → extrinsic → „Tisch vermessen") → Blockly
+„finde Würfel → greife → lege ab" → „Bewegung aufnehmen" → replay → cloud save (auto-tagged
+`edu6_studio`; cross-check an OMX rig refuses it). Sanity: only Roboter Studio + Inferenz tabs,
+lone camera = Szenen-Kamera, jog shows Gelenk 1–6, second launch fast-rehydrates.
+
+**Also reproduce A11 at R10:** hand-guide joint6 *through* ±180°, record, replay — expect a
+deliberate ~337° wrist rotation over ~3.4 s. Pre-existing, shared with the OMX, fix is unwrapping
+in `resegment_trajectory`. See it before touching it.
+
+### Step 7 — physicals (Sven)
+
+Print the mat via `tools/generate_edu6_mat.py` — **43.6 × 21.8 cm, does NOT fit A3** (42.0 cm long
+edge) and the sheet forbids scaling: **A2 or two sheets.** It draws both rims: greifen to 20.8 cm,
+ablegen only to 17.4 cm. The **AprilTag sheet needs no reprint** — ids (20, 21) at 24 mm are
+identical to `omx_full`, so the same physical tags work on both stations.
+
+### Step 8 — release 2.14.0
+
+`gh auth login` first (stale — it blocks the installer proof). Bump **4 sites in one commit**:
+`VERSION`, `installer/robotis_ai_setup.iss` AppVersion, `gui/app/constants.py`,
+`pi_agent/constants.py` — `release.yml::version-preflight` hard-fails a tag that disagrees with
+any of them. Prove the installer builds via `release-installer.yml` workflow_dispatch with the
+**PREVIOUS** tag (the only `.iss` Pascal compile check in CI). Then `git tag v2.14.0 && git push
+--tags` → W1–W6. Modal untouched; migrations 035/036 already applied.
+
+### Step 9 — cleanup
+
+Delete this file. Graduate anything durable left in it into `CLAUDE.md` first, and put the dated
+story in `docs/CLAUDE-CHANGELOG.md`.
 
 ## 7. KNOWN-ACCEPTED (documented, no action)
 

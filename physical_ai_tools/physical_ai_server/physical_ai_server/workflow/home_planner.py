@@ -183,14 +183,24 @@ def _floor_fn(ctx):
 
 def _leg_ok(geom, ctx, q_from, q_to, floor_fn, allowance: float) -> bool:
     """True when the straight line ``q_from → q_to`` clears the floor allowance
-    AND no Sperrzone. Geometry the model cannot judge (``None``) is treated as
-    NOT-OK: an unknown is never silently an approval on a safety check."""
+    AND is acceptable to the Sperrzone guard. Geometry the model cannot judge
+    (``None``) is treated as NOT-OK: an unknown is never silently an approval on
+    a safety check.
+
+    The zone test is the MONOTONE-ESCAPE one, not ``segment_blocked``. Going
+    home is the one motion that must not be a dead end, and an arm standing
+    inside an inflated zone fails ``segment_blocked`` at ``u = 0`` no matter
+    where it goes — measured, that traps 32/42 scenarios on edu6 and 28/42 on
+    the OMX with a message telling the student to redraw a zone that was never
+    the problem. For an arm OUTSIDE every zone the two tests are identical, so
+    this is strictly weaker only where the strong test had no useful opinion.
+    """
     from physical_ai_server.workflow import path_guard as _pg
     clearance = geom.swept_floor_clearance(q_from, q_to, floor_fn)
     if clearance is None or clearance < allowance:
         return False
     zones = getattr(ctx, 'zones', None)
-    if zones and _pg.segment_blocked(ctx.ik, q_from, q_to, zones):
+    if zones and not _pg.escape_leg_ok(ctx.ik, q_from, q_to, zones):
         return False
     return True
 

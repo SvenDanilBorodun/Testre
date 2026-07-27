@@ -4,8 +4,10 @@
 Joints 2 & 3 are STS3250 (model 2825); the other five are STS3215 (model 777) — **mixed by design**.
 **Machine:** Windows 11 bench PC, repo at `C:\Users\svend\newaarm\Testre`.
 **Last rewritten:** 2026-07-26 (session 7).
-**Branch:** `main`, pushed through **`6cce3da0`**. **Session 7 is LANDED, CI green, images
-rebuilt and BYTE-VERIFIED.** The desk work is finished; everything remaining is physical (§6).
+**Branch:** `main` — **session 7 is LANDED and pushed, CI green, images rebuilt and
+BYTE-VERIFIED.** The desk work is finished; everything remaining is physical (§6). Commit list
+in §5.2 — deliberately not repeated here, because a doc cannot name its own commit and a sha in
+a header is stale the moment the header changes. `git log --oneline -8` is the source of truth.
 
 > **This file is rewritten each session, never appended to.** Earlier revisions had
 > accumulated layered self-corrections in which sections contradicted the ones above them —
@@ -797,6 +799,8 @@ Six commits, 29 files, +4,900 lines. All pushed; working tree clean.
 e8fa214c  fix(edu6): driver guard stack — seam hazards, write rails, fingerprint extras
 5427a3be  fix(edu6): the place path — gripper over-close, and a baked release clearance
 ```
+
+(Plus the doc commit that necessarily follows this list — `git log` is authoritative.)
 
 **CI: `CI` and `docker-publish` both `completed / success` on `5edb7979`.**
 

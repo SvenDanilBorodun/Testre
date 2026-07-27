@@ -366,6 +366,15 @@ services:
       # Release height (m) above the destination surface for `ablegen bei`
       # so the held object clears a low container rim.
       - EDUBOTICS_DROP_HEIGHT_M=${EDUBOTICS_DROP_HEIGHT_M:-0.05}
+      # ── safe Grundstellung (workflow/home_planner.py) ───────────────────
+      # Forwarded HERE TOO, deliberately. ci.yml::env-forwarding-guard builds
+      # its `forwarded` set as a UNION over the four compose files, so a knob
+      # present only in the student compose passes the guard while being
+      # silently ABSENT on the Pi — where it would run at its default with no
+      # rollback available. Keep both files in step.
+      # See docker-compose.yml for the derivation of the two defaults.
+      - EDUBOTICS_HOME_FLOOR_TOL_M=${EDUBOTICS_HOME_FLOOR_TOL_M:-}
+      - EDUBOTICS_HOME_SELFCOLL_WARN_M=${EDUBOTICS_HOME_SELFCOLL_WARN_M:-}
       # Top-down jaw constant (deg). The OMX-F jaws separate along EE-Y, so
       # the geometrically-correct value is 90. Rig-validated by the P0
       # jaw-check. Read by workflow/handlers/motion.py.

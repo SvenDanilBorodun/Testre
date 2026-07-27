@@ -348,6 +348,23 @@ services:
       # so the held object is dropped from a safe height that clears a low
       # container rim instead of pressing the gripper down to ~table level.
       - EDUBOTICS_DROP_HEIGHT_M=${EDUBOTICS_DROP_HEIGHT_M:-0.05}
+      # ── safe Grundstellung (workflow/home_planner.py) ───────────────────
+      # How far BELOW the table the whole-link BOX MODEL may read before the
+      # route to the Grundstellung is rejected. NOT the same quantity as the
+      # Cartesian WORKSPACE_FLOOR_MARGIN_M (0.01): that is a margin on a
+      # fingertip TARGET, this is an allowance for the box model's own
+      # conservatism on whole-link geometry (median 0.0 mm, p95 45.9 mm).
+      # Measured over 800 attainable starts: 20 mm catches 12/12 real table
+      # presses with 4 false positives; 50 mm starts MISSING presses (11/12).
+      # 0 DISABLES the floor rung entirely — the one-variable rollback.
+      # Inert on every arm without a link-box table (i.e. both OMX profiles).
+      - EDUBOTICS_HOME_FLOOR_TOL_M=${EDUBOTICS_HOME_FLOOR_TOL_M:-}
+      # Self-collision WARNING threshold (m) on the way to the Grundstellung.
+      # WARN-ONLY by design — it never changes or blocks a route. Measured
+      # 0/200 mesh self-collisions among random in-limit configs and 0 over a
+      # directed 21,175-config search, so a refusal here would be all cost;
+      # promoting it is a Rule §2 change. 0 disables the warning.
+      - EDUBOTICS_HOME_SELFCOLL_WARN_M=${EDUBOTICS_HOME_SELFCOLL_WARN_M:-}
       # Top-down jaw constant (deg). The OMX-F jaws separate along EE-Y, so the
       # geometrically-correct value is 90 (0 would pinch the perpendicular axis);
       # it is the additive const in the live named-object grasp roll AND the fixed

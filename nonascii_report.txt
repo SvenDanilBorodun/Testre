@@ -1,0 +1,26 @@
+lines containing non-ASCII: 23
+  L2           ['0xb0']  """Drive the edu6 arm to its URDF-ZERO pose (all arm joints 0?), safely.
+  L10          ['0xb0']  all-zeros. Observed rest poses during R9 were within ~13? of zero on every
+  L11          ['0x2212', '0xb0']  collision-relevant joint (e.g. J2 ?1.4?, J3 +6.2?, J5 +3.5?). So the arm has
+  L12          ['0x2014']  been resting in essentially this pose, unpowered and undamaged, for hours ?
+  L25          ['0xa7']  Today's measurement (bringup doc ?11.11) proved the STS loop computes error
+  L26          ['0x2212']  as a naive `goal ? present`, so a wrapped error drives the LONG way round.
+  L27          ['0x2212']  Any joint whose |goal ? present| is within WRAP_GUARD_TICKS of the 2048
+  L29          ['0x2014']  first ? no reliance on a thin margin.
+  L32          ['0x2192']  * one joint at a time, in a fixed distal?proximal order;
+  L34          ['0x2248']  ? 0.31 rad/s), the same gentle rate the driver uses for its torque-on seed;
+  L95          ['0xb0']  ARRIVE_TOL_TICKS = 12          # ~1.05?
+  L97          ['0xb0']  WRONG_WAY_TICKS = 30           # ~2.6? against the commanded direction = abort
+  L158  PRINT  ['0x2014']  print(f"[WARN] torque-off failed on servo {sid} ? CUT THE 12 V.")
+  L168  PRINT  ['0x2014']  print(f"[FAIL] only {alive} answered ? check the 12 V and the chain.")
+  L183         ['0xb0']  f"{d:>+9.2f}?{-d:>+9.2f}?{err:>+8d}{tag}")
+  L188  PRINT  ['0xb0']  print(f"[STOP] servo(s) {blockers} would need a move of ~180?, which is "
+  L190         ['0xa7']  f"measurement (bringup ?11.11) showed the servo loop is NOT "
+  L192         ['0xb0']  f"round. Hand-turn those joints to within ~150? of zero first "
+  L226         ['0xb0']  f"({naive:+d} ticks, {naive * DEG_PER_TICK:+.2f}?)")
+  L232  PRINT  ['0x2014']  print(f"[FAIL] goal read back {rb}, wanted {goal} ? not energising.")
+  L262  PRINT  ['0xb0']  print(f"   arrived: tick {tick} ({deg_of(sid, tick):+.2f}?), "
+  L285         ['0xb0']  f"{JOINT_NAMES[SERVO_IDS.index(s)][:6]}={deg_of(s, b[s][0]):+6.2f}?"
+  L295  PRINT  ['0x2014']  print("\n[DONE] arm de-energised. It will sag ? that is expected (the STS gear "
+
+non-ASCII inside a print() call on lines: [158, 168, 188, 232, 262, 295]

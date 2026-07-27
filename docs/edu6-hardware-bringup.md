@@ -1415,9 +1415,57 @@ All-zeros is a **jig** pose, not a drivable target:
 
 If zero must ever be reached under power: hand-guide toward it **limp** and watch whether the
 meshes touch (that answers R7 for this pose for free), gripper excluded, one joint at a time at
-`SEED_SPEED_STEPS`, hand on the 12 V. `tools/edu6_bench/edu6_goto_zero.py` carries a
-link-clearance pre-flight for exactly this — note that a **distal-first drive order would put
-links 14 mm below the table**; elbow-first gives 67.4 mm.
+`SEED_SPEED_STEPS`, hand on the 12 V.
+
+> ⚠️ **CORRECTED 2026-07-27 — the previous version of this paragraph was wrong in BOTH halves, and
+> in the direction that makes the tool sound safer than it is.**
+>
+> 1. **`edu6_goto_zero.py` does NOT carry a link-clearance pre-flight.** It has none — the file
+>    contains zero references to `link_points`, table height or clearance of any kind. Its guards
+>    are all SERVO-level: `WRAP_GUARD_TICKS` 300 (refuses a joint needing a ~180° move),
+>    `WRONG_WAY_TICKS` 30, `ARRIVE_TOL_TICKS` 12, plus torque-off in `finally` AND `atexit`.
+>    **Nothing in it checks geometry.** Do not run it believing otherwise.
+> 2. **The tool SHIPS the distal-first order this paragraph warns about** —
+>    `DRIVE_ORDER = (6, 5, 4, 3, 2, 1)`.
+>
+> Re-measured against the real solver (`link_points`, `samples_per_link=5`, min z over the whole
+> one-joint-at-a-time path). **The start pose is what decides it, not the order alone:**
+>
+> | start pose | min link z, shipped distal-first order |
+> |---|---|
+> | **HOME** (i.e. straight after boot-home) | **−11.3 mm — BELOW the table** |
+> | limp collapse (R9's measured rest pose) | +0.0 mm — safe |
+> | typical post-grasp, mid-band | +0.0 mm — safe |
+>
+> So the hazard is specifically **from HOME**, which is exactly where the arm sits after
+> „Umgebung starten". From a limp arm the move is small and clean — and R9 showed a limp edu6
+> collapses to within ~7° of zero on its own, so it is nearly there already.
+>
+> **Where the 14 mm / 67.4 mm figures actually come from — they were re-attributed, not invented.**
+> They are `edu6_goto.py`'s, recorded in its own header, and they describe a **flat-forward
+> extended** start: from there, driving J5 or J2 before the elbow J3 is folded pushes links to
+> −14 mm and −36 mm, while folding the elbow FIRST lifts and compacts the arm and inter-link
+> clearance goes 30.7 → **67.4 mm**. So 67.4 mm is an inter-LINK clearance after an elbow-fold, not
+> a table clearance, and not a HOME number. §9.2 imported both figures into a paragraph about the
+> ZERO tool, where neither the start pose nor the tool matches.
+>
+> **The safe order therefore depends on the START POSE, and there is no single right answer:**
+>
+> | start | elbow-first | distal-first | proximal-first |
+> |---|---|---|---|
+> | flat-forward extended (`edu6_goto.py`'s case) | **best** (67.4 mm, never under z=0) | −14 mm | — |
+> | **HOME** (`edu6_goto_zero.py`'s realistic case) | **−70.2 mm, the WORST** | −11.3 mm | **+0.0 mm, clean** |
+>
+> **The two sibling tools are inconsistent, and the zero one is on the wrong side of both counts:**
+> `edu6_goto.py` ships `DRIVE_ORDER = (3,2,5,6,4,1,7)` (elbow-first) AND a real
+> `_preflight_sequence()` that refuses a bad order for ANY start/target. `edu6_goto_zero.py` ships
+> `(6,5,4,3,2,1)` (distal-first) and **no geometric check at all**. Whoever wrote the §9.2 sentence
+> appears to have assumed the zero variant inherited its sibling's pre-flight. It does not.
+>
+> Also fixed that day: the tool had non-ASCII in six `print()` calls, one of them the
+> `[WARN] torque-off failed … CUT THE 12 V` line — and that `print` sits INSIDE an `except` with no
+> protection of its own, so on a cp1252 stdout (any redirected run) the `UnicodeEncodeError`
+> propagated out of `_off_all()` and **abandoned torque-off for every remaining servo**. Now ASCII.
 
 ### 9.3 Q4 — can one servo be swapped on the assembled chain? (analysis; the harness decision is Sven's)
 
@@ -1460,7 +1508,7 @@ The four hardware tools import the repo's `feetech_bus` and **AST-extract every 
 | tool | what it does |
 |---|---|
 | `edu6_goto.py` | drives the arm to a pose, with a **link-clearance pre-flight** and live `Present_Current` logging. **This is what closes R4.** Its wrap guard refuses a goal within 30 ticks of the map edge. ⚠️ It carries its **OWN local, UNCLAMPED `rad_to_tick`** and writes goals directly, so it does NOT inherit guard 5 — an operator bench run can still pin a goal on the seam. It is the tool that MEASURED the defect, so that is by design, but treat its 30-tick guard as the only protection on that path |
-| `edu6_goto_zero.py` | the URDF-zero variant, with the §9.2 clearance checks |
+| `edu6_goto_zero.py` | the URDF-zero variant. ⚠️ **It does NOT carry its sibling's clearance pre-flight** — no `link_points`, no table check, nothing geometric; its guards are servo-level only (wrap 300, wrong-way 30, arrive 12, torque-off in `finally`+`atexit`). It also ships **distal-first** `(6,5,4,3,2,1)`, which from HOME drives links to **−11.3 mm, under the table**. Safe from a LIMP/collapsed or post-grasp start (+0.0 mm); unsafe straight after boot-home. Made ASCII-safe 2026-07-27 — see §9.2 |
 | `edu6_r9_collapse.py` | **READ-ONLY** collapse probe (`write`/`sync_write` replaced with raisers; refuses to run if any servo reports `Torque_Enable = 1`). Produced §2.4 |
 | `edu6_wrap_test.py` | the cross-seam test with auto-abort. Produced §2.3. See the methodology trap in §11 |
 | `verify_image_bytes.py` | anonymous GHCR token → manifest → small COPY layer; byte-verifies the shipped driver without a multi-GB pull, **judges** each image's revision label against the paths that image is built from, and covers all three images (server/manager at revision level — see §6 Step 0). Ends in a single `VERDICT: GREEN/RED` line; exit code matches |

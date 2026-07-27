@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Drive the edu6 arm to its URDF-ZERO pose (all arm joints 0°), safely.
+"""Drive the edu6 arm to its URDF-ZERO pose (all arm joints 0 deg), safely.
 
 WHY THIS IS NOW CONSIDERED SAFE (it was refused earlier, on weaker evidence)
     URDF zero is a FOLDED pose: at all-zeros the forearm passes within ~39.7 mm
@@ -7,9 +7,9 @@ WHY THIS IS NOW CONSIDERED SAFE (it was refused earlier, on weaker evidence)
     stall-vs-damage) is still an open rig gate. That was the basis for refusing.
 
     R9 then measured what a LIMP arm actually does: it collapses to approximately
-    all-zeros. Observed rest poses during R9 were within ~13° of zero on every
-    collision-relevant joint (e.g. J2 −1.4°, J3 +6.2°, J5 +3.5°). So the arm has
-    been resting in essentially this pose, unpowered and undamaged, for hours —
+    all-zeros. Observed rest poses during R9 were within ~13 deg of zero on every
+    collision-relevant joint (e.g. J2 -1.4 deg, J3 +6.2 deg, J5 +3.5 deg). So the arm has
+    been resting in essentially this pose, unpowered and undamaged, for hours -
     which is empirical evidence the pose is mechanically fine, not merely
     theoretically tolerable.
 
@@ -22,16 +22,16 @@ TWO HARD CONSTRAINTS, ENFORCED HERE
        mechanical stop, i.e. a sustained stall at Max_Torque 150 with nothing
        between them. `--include-gripper` exists but is deliberately awkward.
     2. Every commanded move is checked to be NON-WRAPPED before it is written.
-       Today's measurement (bringup doc §11.11) proved the STS loop computes error
-       as a naive `goal − present`, so a wrapped error drives the LONG way round.
-       Any joint whose |goal − present| is within WRAP_GUARD_TICKS of the 2048
+       Today's measurement (bringup doc sec.11.11) proved the STS loop computes error
+       as a naive `goal - present`, so a wrapped error drives the LONG way round.
+       Any joint whose |goal - present| is within WRAP_GUARD_TICKS of the 2048
        half-turn boundary is REFUSED with an instruction to hand-turn it closer
-       first — no reliance on a thin margin.
+       first - no reliance on a thin margin.
 
 SAFETY MECHANICS
-    * one joint at a time, in a fixed distal→proximal order;
+    * one joint at a time, in a fixed distal->proximal order;
     * the servo's own speed cap does the limiting: SEED_SPEED_STEPS (200 steps/s
-      ≈ 0.31 rad/s), the same gentle rate the driver uses for its torque-on seed;
+      ~ 0.31 rad/s), the same gentle rate the driver uses for its torque-on seed;
     * a per-joint WATCHDOG samples position and aborts + de-energises if the joint
       moves the WRONG way, stalls, or reports an error bit;
     * torque-off in `finally` AND `atexit`; Ctrl-C de-energises everything;
@@ -92,9 +92,9 @@ DRIVE_ORDER = (6, 5, 4, 3, 2, 1)
 # is refused. Today's finding: at exactly 2048 the naive error's SIGN is ambiguous
 # and beyond it the servo goes the long way round.
 WRAP_GUARD_TICKS = 300
-ARRIVE_TOL_TICKS = 12          # ~1.05°
+ARRIVE_TOL_TICKS = 12          # ~1.05 deg
 STALL_SAMPLES = 20             # ~1 s at 20 Hz with no progress = stalled
-WRONG_WAY_TICKS = 30           # ~2.6° against the commanded direction = abort
+WRONG_WAY_TICKS = 30           # ~2.6 deg against the commanded direction = abort
 
 
 def read_block(bus):
@@ -155,7 +155,7 @@ def main() -> int:
             try:
                 bus.write(sid, fb.REG_TORQUE_ENABLE, bytes([0]))
             except Exception:  # noqa: BLE001
-                print(f"[WARN] torque-off failed on servo {sid} — CUT THE 12 V.")
+                print(f"[WARN] torque-off failed on servo {sid} - CUT THE 12 V.")
         if live:
             print(f"[SAFE] torque OFF on {sorted(live)}.")
         live.clear()
@@ -165,7 +165,7 @@ def main() -> int:
     try:
         alive = [s for s in SERVO_IDS if bus.ping(s)]
         if len(alive) != len(SERVO_IDS):
-            print(f"[FAIL] only {alive} answered — check the 12 V and the chain.")
+            print(f"[FAIL] only {alive} answered - check the 12 V and the chain.")
             return 1
         st = read_block(bus)
         print(f"[STATE] {args.port}, all {len(alive)} servos answering\n")
@@ -180,16 +180,16 @@ def main() -> int:
             safe = naive < (TICKS // 2 - WRAP_GUARD_TICKS)
             tag = "" if sid not in order else ("  yes" if safe else "  NO <-- hand-turn closer first")
             print(f"  {JOINT_NAMES[SERVO_IDS.index(sid)]:<16}{tick:>6}"
-                  f"{d:>+9.2f}°{-d:>+9.2f}°{err:>+8d}{tag}")
+                  f"{d:>+9.2f} deg{-d:>+9.2f} deg{err:>+8d}{tag}")
             if sid in order and not safe:
                 blockers.append(sid)
         print()
         if blockers:
-            print(f"[STOP] servo(s) {blockers} would need a move of ~180°, which is "
+            print(f"[STOP] servo(s) {blockers} would need a move of ~180 deg, which is "
                   f"too close to the 2048-tick half-turn boundary. Today's "
-                  f"measurement (bringup §11.11) showed the servo loop is NOT "
+                  f"measurement (bringup sec.11.11) showed the servo loop is NOT "
                   f"wrap-aware, so a marginal error can send it the LONG way "
-                  f"round. Hand-turn those joints to within ~150° of zero first "
+                  f"round. Hand-turn those joints to within ~150 deg of zero first "
                   f"(they are free-spinning), then re-run.")
             return 2
         if args.check:
@@ -223,13 +223,13 @@ def main() -> int:
                 continue
             direction = 1 if naive > 0 else -1
             print(f"\n[MOVE] {nm}: tick {start} -> {goal} "
-                  f"({naive:+d} ticks, {naive * DEG_PER_TICK:+.2f}°)")
+                  f"({naive:+d} ticks, {naive * DEG_PER_TICK:+.2f} deg)")
             payload = (bytes([WRITE_ACCEL]) + fb.le16(goal)
                        + fb.le16(0) + fb.le16(SEED_SPEED))
             bus.sync_write(fb.REG_ACCELERATION, {sid: payload})
             rb = bus.read_u16(sid, fb.REG_GOAL_POSITION)
             if abs(rb - goal) > 2:
-                print(f"[FAIL] goal read back {rb}, wanted {goal} — not energising.")
+                print(f"[FAIL] goal read back {rb}, wanted {goal} - not energising.")
                 return 1
             bus.write(sid, fb.REG_TORQUE_ENABLE, bytes([1]))
             live.add(sid)
@@ -259,7 +259,7 @@ def main() -> int:
                     _off_all()
                     return 1
                 if abs(rem) <= ARRIVE_TOL_TICKS:
-                    print(f"   arrived: tick {tick} ({deg_of(sid, tick):+.2f}°), "
+                    print(f"   arrived: tick {tick} ({deg_of(sid, tick):+.2f} deg), "
                           f"load {load}")
                     break
                 if abs(rem) < best - 1:
@@ -282,7 +282,7 @@ def main() -> int:
         while time.monotonic() < end:
             b = read_block(bus)
             row = "  ".join(
-                f"{JOINT_NAMES[SERVO_IDS.index(s)][:6]}={deg_of(s, b[s][0]):+6.2f}°"
+                f"{JOINT_NAMES[SERVO_IDS.index(s)][:6]}={deg_of(s, b[s][0]):+6.2f} deg"
                 f"/L{b[s][2]:+4d}" for s in order if b.get(s))
             print("   " + row)
             time.sleep(0.5)
@@ -292,7 +292,7 @@ def main() -> int:
             bus.close()
         except Exception:  # noqa: BLE001
             pass
-    print("\n[DONE] arm de-energised. It will sag — that is expected (the STS gear "
+    print("\n[DONE] arm de-energised. It will sag - that is expected (the STS gear "
           "train backdrives).")
     return 0
 

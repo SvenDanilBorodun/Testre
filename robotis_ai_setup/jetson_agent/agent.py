@@ -87,7 +87,12 @@ MANIFEST_INSPECT_TIMEOUT = 30
 REGISTRY = os.environ.get("REGISTRY", "ghcr.io/svendanilborodun")
 REGISTRY_FALLBACK = os.environ.get("REGISTRY_FALLBACK", "nettername")
 
-# Safe-home pose for v1 — matches the workflow HOME pose in CLAUDE.md §16.
+# Safe-home pose for v1. It does NOT match the workflow HOME pose, despite
+# what this comment said until 2026-07-27: this is the deliberately
+# more-folded ±pi/4 recovery family (shared with collision_monitor.py's
+# SAFE_HOME_ARM), while motion.HOME_JOINTS_RAD and entrypoint_omx.sh drive
+# ±pi/2. The divergence is intentional and preserved; only the claim that
+# they are the same was wrong.
 # Moves follower to this configuration on every claim so the previous
 # student's last pose isn't where the new student starts.
 SAFE_HOME_JOINTS = [0.0, -0.785398, 0.785398, 0.0, 0.0, 0.8]

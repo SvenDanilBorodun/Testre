@@ -103,6 +103,16 @@ services:
       # Edu6IKSolver solution over the operating envelope (z ≥ 0) is 253.
       # Read by edu6_arm_node.py.
       - EDUBOTICS_EDU6_GOAL_EDGE_MARGIN_TICKS=${EDUBOTICS_EDU6_GOAL_EDGE_MARGIN_TICKS:-}
+      # ── safe Grundstellung: boot-home table-floor pre-check ─────────────
+      # SAME knob and SAME derivation as on physical_ai_server below — one knob
+      # for one concept. Read by edu6_arm_node.py, which refuses the boot-home
+      # glide (and LEAVES THE ARM TORQUED) when the whole-link box model says
+      # the straight line to HOME would drive a link into the table. Measured:
+      # that happens from ~1 in 100 attainable start poses, up to -167.9 mm,
+      # and the failing family is exactly what a LIMP arm collapses into — so
+      # boot-home is the highest-exposure home path in the system.
+      # 0 DISABLES the check — the one-variable rollback.
+      - EDUBOTICS_HOME_FLOOR_TOL_M=${EDUBOTICS_HOME_FLOOR_TOL_M:-}
       - CAMERA_DEVICE_1=${CAMERA_DEVICE_1:-}
       - CAMERA_NAME_1=${CAMERA_NAME_1:-gripper}
       - CAMERA_DEVICE_2=${CAMERA_DEVICE_2:-}

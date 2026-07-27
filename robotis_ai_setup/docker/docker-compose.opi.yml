@@ -131,6 +131,16 @@ services:
       # native_bridge path (Windows GUI streaming JPEG over TCP :5557) does
       # not exist on the Pi; `usb_cam` is the native-Linux path.
       - EDUBOTICS_CAMERA_SOURCE=usb_cam
+      # ── safe Grundstellung: boot-home table-floor pre-check ─────────────
+      # Read by edu6_arm_node.py; forwarded HERE TOO because
+      # ci.yml::env-forwarding-guard builds `forwarded` as a UNION over the four
+      # compose files, so a knob present only in the student compose passes the
+      # guard while being silently ABSENT on the Pi. See docker-compose.yml for
+      # the derivation. 0 DISABLES the check — the one-variable rollback.
+      # (NOTE: this service still forwards neither EDUBOTICS_ROBOT_TYPE nor the
+      # five EDUBOTICS_EDU6_* knobs, so an edu6 rig is not actually supported on
+      # the Pi yet — a separate, larger parity gap.)
+      - EDUBOTICS_HOME_FLOOR_TOL_M=${EDUBOTICS_HOME_FLOOR_TOL_M:-}
       # camera_ingest_node.py (native_bridge only) reads these two. On the
       # usb_cam Pi path the entrypoint never starts that node, so both are
       # INERT here — forwarded purely for parity with the student surface

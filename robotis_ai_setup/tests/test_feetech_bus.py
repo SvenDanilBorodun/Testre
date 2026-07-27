@@ -385,12 +385,29 @@ class TestTorqueEnableWriteRail(unittest.TestCase):
 
 # ── node pure functions (ast-extracted; no rclpy import) ─────────────────────
 
+def _load_edu6_geometry():
+    """Import the driver's edu6_geometry.py directly — it is pure Python with
+    no ROS or NumPy, precisely so this deps-free suite can use the real thing."""
+    import importlib.util
+    path = os.path.join(_DOCKER, 'edu6_geometry.py')
+    spec = importlib.util.spec_from_file_location('edu6_geometry_for_tests',
+                                                  path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
 def _load_node_functions():
     path = os.path.join(_DOCKER, 'edu6_arm_node.py')
     source = open(path, encoding='utf-8').read()
     tree = ast.parse(source)
     ns = {
         'math': __import__('math'), 'os': os, 'fb': fb,
+        # The driver's whole-link box model, imported by edu6_arm_node as `eg`
+        # and consumed by the boot-home table-floor pre-check. Pure Python, so
+        # this deps-free suite can hold the REAL module rather than a stub —
+        # which is what lets the boot-path tests below exercise the real gate.
+        'eg': _load_edu6_geometry(),
         'time': __import__('time'), 'threading': __import__('threading'),
         'CENTER_TICK': 2048, 'TICKS_PER_REV': 4096,
     }
@@ -401,6 +418,7 @@ def _load_node_functions():
     edge_backup = os.environ.pop('EDUBOTICS_EDU6_EDGE_MARGIN_TICKS', None)
     abort_backup = os.environ.pop('EDUBOTICS_EDU6_TORQUE_ABORT_TICKS', None)
     goal_backup = os.environ.pop('EDUBOTICS_EDU6_GOAL_EDGE_MARGIN_TICKS', None)
+    home_tol_backup = os.environ.pop('EDUBOTICS_HOME_FLOOR_TOL_M', None)
     wanted = {'rad_to_tick', 'tick_to_rad', 'interpolate_trajectory',
               'build_boot_home', '_parse_signs', 'boot_home_verify_decision',
               '_parse_boot_pos_tolerance', '_parse_edge_margin',
@@ -408,7 +426,8 @@ def _load_node_functions():
               '_parse_torque_abort_ticks', 'wrong_way_joints',
               'wrong_way_abort_message', 'post_energise_read_failure_message',
               '_parse_goal_edge_margin', 'rad_to_command_tick',
-              'firmware_fingerprint_notes', 'angular_resolution_note'}
+              'firmware_fingerprint_notes', 'angular_resolution_note',
+              '_parse_home_floor_tol', 'boot_home_floor_decision'}
     consts = {'RAD_PER_TICK', 'HOME_JOINTS_RAD', 'GRIPPER_OPEN_RAD',
               'LOOP_HZ', 'BOOT_HOME_DURATION_S', 'SERVO_IDS', 'JOINT_NAMES',
               'JOINT_LIMITS_RAD', '_DEFAULT_SIGNS', 'JOINT_SIGNS',
@@ -423,6 +442,8 @@ def _load_node_functions():
               '_TORQUE_ABORT_MAX_TICKS', 'TORQUE_ABORT_ERROR_TICKS',
               'POST_ENERGISE_READ_ATTEMPTS', '_TORQUE_OFF_PAYLOAD',
               'BOOT_PHYSICAL_REMEDY_DE', 'PHYSICAL_TORQUE_REFUSALS',
+              '_DEFAULT_BOOT_HOME_FLOOR_TOL_M', 'BOOT_HOME_FLOOR_TOL_M',
+              'BOOT_HOME_FLOOR_REFUSAL_DE',
               '_DEFAULT_GOAL_EDGE_MARGIN_TICKS',
               '_GOAL_EDGE_MARGIN_MAX_TICKS', 'GOAL_EDGE_MARGIN_TICKS',
               'FIRMWARE_SUSPECT_VERSIONS'}
@@ -458,6 +479,8 @@ def _load_node_functions():
         os.environ['EDUBOTICS_EDU6_TORQUE_ABORT_TICKS'] = abort_backup
     if goal_backup is not None:
         os.environ['EDUBOTICS_EDU6_GOAL_EDGE_MARGIN_TICKS'] = goal_backup
+    if home_tol_backup is not None:
+        os.environ['EDUBOTICS_HOME_FLOOR_TOL_M'] = home_tol_backup
     return ns
 
 
@@ -1313,6 +1336,48 @@ class TestTorqueOnEdgeGuard(unittest.TestCase):
         self.assertEqual(node.verify_calls, [])
         self.assertEqual(bus.writes, [])
         self.assertFalse(node._torque_on)
+
+    # ── the boot-home table-floor pre-check (Rule §2, 2026-07-27) ──────────
+    def test_boot_path_refuses_to_glide_into_the_table_but_keeps_torque_ON(self):
+        """The measured worst press: from this pose the straight glide to HOME
+        drives a link 176 mm below the table on the collision meshes.
+
+        The gate must skip the glide — and it must LEAVE THE ARM TORQUED. A
+        refusal that de-energises a BACKDRIVING arm turns a guard into a
+        collapse, which is strictly worse than the defect it guards. That is the
+        single most dangerous way to get this feature wrong, so it is asserted
+        here on the real node path, not only in the AST structure tests.
+        """
+        node, bus = self._node()
+        # the stub's default read_positions IS home; make it the measured press
+        node.read_positions = [-0.131, 2.997, -0.020, 1.964, -0.391, 1.898, 1.75]
+        clock = _FakeTime()
+        with patch.dict(_N, {'time': clock, 'threading': _SyncThreading}):
+            node.start_boot_home()
+        # the glide never started and the verifier was never armed
+        self.assertEqual(node.traj_calls, [])
+        self.assertEqual(node.verify_calls, [])
+        # …but the arm is HELD, not dropped
+        self.assertTrue(node._torque_on)
+        self.assertNotIn((1, 0), bus.torque_writes())
+        # …and the student is told why, in German, with a remedy
+        self.assertTrue(node.errors)
+        self.assertIn('Tischplatte', node.errors[0])
+        self.assertIn('NICHT weich', node.errors[0])
+        self.assertIn('Handführung', node.errors[0])
+
+    def test_the_floor_precheck_can_be_switched_off_with_one_variable(self):
+        """EDUBOTICS_HOME_FLOOR_TOL_M=0 must restore the old behaviour exactly,
+        even for the worst measured press."""
+        node, bus = self._node()
+        node.read_positions = [-0.131, 2.997, -0.020, 1.964, -0.391, 1.898, 1.75]
+        clock = _FakeTime()
+        with patch.dict(_N, {'time': clock, 'threading': _SyncThreading,
+                             'BOOT_HOME_FLOOR_TOL_M': 0.0}):
+            node.start_boot_home()
+        self.assertEqual(len(node.traj_calls), 1)
+        self.assertEqual(node.verify_calls, [1])
+        self.assertEqual(node.errors, [])
 
     def test_boot_path_still_glides_on_a_healthy_arm(self):
         node, bus = self._node()

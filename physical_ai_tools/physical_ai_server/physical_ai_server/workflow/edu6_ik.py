@@ -333,6 +333,44 @@ class Edu6IKSolver:
         t = self._fk_matrix(joints)
         return None if t is None else (_RZ_PI @ t[:3, 3]).copy()
 
+    # ── per-link frames for the whole-link geometry model (WORLD frame) ──────
+    def link_frames(self, joints) -> Optional[list[np.ndarray]]:
+        """Per-link 4×4 WORLD-frame transforms:
+        ``[base_link, link1, link2, link3, link4, link5, link6]``.
+
+        Consumed by :mod:`physical_ai_server.workflow.arm_geometry`, which
+        carries one axis-aligned box per link in that link's OWN frame — the
+        table-floor and self-collision model. ``link_points`` samples the
+        kinematic CENTRELINE and cannot express a link's girth or its
+        orientation; these frames can, which is why the geometry model needs
+        them and the no-go-zone check does not.
+
+        A PUBLIC method on purpose. ``arm_geometry`` must not reach into
+        ``_fk_chain`` across a module boundary, and it must not compose the
+        world rotation itself: doing exactly that (comparing WORLD-frame
+        ``link_points`` against URDF-frame mesh data, which differ by
+        ``_RZ_PI``) is a real bug that was hit and caught during the derivation
+        of those boxes. One owner for the frame convention.
+
+        The OMX :class:`~physical_ai_server.workflow.ik_solver.IKSolver`
+        deliberately does NOT get this method: its absence is what makes
+        ``arm_geometry.resolve_geometry`` return ``None`` for every OMX profile,
+        which is the mechanism that keeps OMX behaviour bit-identical.
+
+        ``None`` for fewer than 6 joints (matching :meth:`fk`)."""
+        frames = self._fk_chain(joints)
+        if frames is None:
+            return None
+        base = np.eye(4, dtype=np.float64)
+        base[:3, :3] = _RZ_PI
+        out = [base]
+        for t in frames:
+            world = np.eye(4, dtype=np.float64)
+            world[:3, :3] = _RZ_PI @ t[:3, :3]
+            world[:3, 3] = _RZ_PI @ t[:3, 3]
+            out.append(world)
+        return out
+
     # ── link sampling for the swept no-go-zone check (WORLD frame) ───────────
     def link_points(self, joints, samples_per_link: int = 5) -> Optional[list[np.ndarray]]:
         """WORLD-frame points along base → shoulder → elbow → wrist → link6 →

@@ -559,6 +559,12 @@ J3 (0, 2048), J4 and J6 (0, 4095).
 | **128 (default)** | **11.25°** | **11.34°** | **±168.66°** |
 | 246 (ceiling) | 21.62° | 21.71° | ±158.29° |
 
+> The `±` in that last column is a **one-tick rounding**, quoted from the positive side, exactly as
+> the edge guard's own band is asymmetric (−176.57° / +176.48°) — because the map is. Executed
+> against the shipped `rad_to_command_tick` at m = 128 the true range is ticks **128…3967** =
+> **−168.750° … +168.662°**. Immaterial physically (0.088°), recorded because every other number in
+> this file is exact and a reader re-deriving the negative bound would not reproduce `−168.66`.
+
 Ceiling **246** = joint3's ANALYTIC floor (247) − 1, so every commandable solver tick is
 STRICTLY interior. Derived from `q3 = γ + ALPHA0 − π/2` with `γ ≥ 0` (elbow-down is never
 in-limit — 0 of 8.0 M cells) and `ALPHA0 = −68.33167°`. **No sweep can invalidate an analytic
@@ -975,13 +981,45 @@ re-derived first.
 
 ### Step 0 — sanity, 2 minutes
 ```bash
-git -C C:/Users/svend/newaarm/Testre log -1 --oneline     # expect 6cce3da0 or later
-python tools/edu6_bench/verify_image_bytes.py             # expect: revision MATCH, 2× OK
+git -C C:/Users/svend/newaarm/Testre log -1 --oneline
+python tools/edu6_bench/verify_image_bytes.py             # read the VERDICT line
 ```
-If the second command does NOT say MATCH, stop — the container is running a different driver
-than git, and every guard below is unverified.
+**Go / no-go is the tool's own `VERDICT:` line, and its exit code.** GREEN → proceed. RED → stop:
+at least one image is not provably built from the current source, so the guards below are
+unverified.
 
-### Step 1 — ⚠️ A12 FIRST: can a goal write energise a limp arm?
+> ⚠️ **Do NOT gate on the words "revision MATCH" as this file used to instruct.** That was itself
+> the trap it warned about one level up. Images are rebuilt only when image-relevant paths change,
+> so *every* docs-only or tools-only push leaves a perfectly current image advertising an older
+> revision — and on 2026-07-27 that instruction produced a RED on a completely healthy stack, which
+> is exactly how a safety gate gets trained out of usefulness. The tool now **judges** the label
+> (`git diff <label>..<HEAD> -- <the paths that image is built from>`) instead of comparing shas,
+> and it also covers `physical-ai-server` + `physical-ai-manager` at revision level — the workflow
+> layer that R7/R8/R10 exercise, which the byte check never touched (it only ever covered the
+> driver's 2 files, while session 7 changed ~8 more that ship in the server image). Those two are
+> revision-only for principled reasons: the server image is flattened into ONE ~5 GB layer, and the
+> manager ships a built JS bundle with no source bytes to compare against.
+
+### Step 1 — A12: can a goal write energise a limp arm? — **SKIPPED (Sven, 2026-07-27)**
+
+> **DECISION: not run, and the "A12 FIRST" framing below is WRONG — kept only for the reasoning.**
+> This file said A12 gated hand-guide because *"hand-guide is torque-off by design and the student
+> is holding the arm."* That was never checked against the code. It does not survive checking:
+> `_trajectory_cb` REFUSES every trajectory while `not self._torque_on`
+> („Trajektorie verworfen: Drehmoment ist aus"), the write loop calls `_write_targets` only under
+> `self._torque_on`, and the WHOLE driver contains just four bus writes — of which only two are
+> goal writes. **So nothing writes a goal to a limp arm during hand-guide at all**; the firmware
+> has nothing to react to. Hand-guide is protected by that gate, not by A12's answer.
+>
+> The only goal write to a limp arm is the seed, issued ~1 ms before a DELIBERATE torque-on with
+> `goal = present` at the gentle `SEED_SPEED_STEPS`. If A12 is true the arm energises a moment
+> early, to the pose it is already in. The one case that mattered was `set_torque`'s bare
+> `except`: seed lands → the `Torque_Enable` write RAISES → we return False and every caller
+> reports the arm limp while it may be live. **That is now closed UNCONDITIONALLY** by a
+> best-effort explicit de-energise on that path (+ German „12-V-Netzteil ausschalten" if the drop
+> itself fails), so the hazard is gone whether or not A12 is ever measured. 11 regression tests.
+>
+> The tool below is kept and committed. Running it is now pure curiosity, not a gate.
 
 **Do this before trusting hand-guide, and before R4/R7.** LeRobot #3585 reports the firmware
 setting `Torque_Enable = 1` **by itself** on the next PID tick after an out-of-window goal write.
@@ -997,12 +1035,105 @@ safety argument.
 **Test:** torque off, hand a joint to rest outside its designed window (joint5 does this on its
 own — R9), then issue the seed write alone and read `Torque_Enable` back. Watch for motion.
 
-### Step 2 — D1: does a position command clear the overload/overcurrent protection?
+**Tool (2026-07-27): `tools/edu6_bench/edu6_a12_seed_selfenable.py`.** Written, adversarially
+verified, six defects fixed. Bench order:
+
+```bash
+python tools/edu6_bench/edu6_a12_seed_selfenable.py --list            # read-only
+python tools/edu6_bench/edu6_a12_seed_selfenable.py --joint 5 --park  # coach J5 out of its window
+python tools/edu6_bench/edu6_a12_seed_selfenable.py --joint 5         # the test
+python tools/edu6_bench/edu6_a12_seed_selfenable.py --joint 3
+python tools/edu6_bench/edu6_a12_seed_selfenable.py --all-servos       # the driver's exact 7-servo packet
+```
+
+Exit **0** NOT REPRODUCED · **3** CONFIRMED · **2** INCONCLUSIVE · **1** bus error. **Anything
+other than 0 or 3 means repeat — never record an INCONCLUSIVE as a pass.** It writes exactly two
+things: the driver's byte-identical seed block at reg 41 (goal clamped ONLY into `[0,4095]` —
+sanitising it would delete the experiment) and `Torque_Enable = 0` on every exit path. It never
+writes 1 to register 40.
+
+**J4 and J6 are refused by design** — their designed window IS the whole register, so the excursion
+gate can never pass. That is the same definitional-zero trap R9 hit on exactly those two joints
+(§2.4 result 2); a tool that "ran" on them would be measuring nothing.
+
+> ⚠️ **The one residual, and it is the operator's job.** A slow sag of ~**1.4 ticks/s** passes the
+> baseline gate and clears the 4-tick motion threshold inside a 3 s watch → a **false CONFIRMED**;
+> so does a 25-tick knock on the target alone. `Present_Speed`/`Present_Load` are the right
+> discriminators and are captured in the CSV, but they deliberately do NOT feed the verdict —
+> the auto-abort can end the watch before a speed sample lands, and a guard that can suppress a
+> true positive is worse than none. **So: a CONFIRMED with no register-40 hit must be checked
+> against the CSV speed/load columns before you believe it** — a real self-enable pulls at
+> ~200 steps/s (`SEED_SPEED_STEPS`) under load; a sag does neither. Run `--baseline-s 5` on any
+> joint that creeps.
+
+**Two free measurements — record both.** (1) The `[NOTE]` line naming which read path answered:
+nothing in this tree has ever `sync_read` register 40 (the driver only writes it), so the tool
+probes it once and falls back to individual reads. (2) The **register-42 readback value** — guard
+4's entire clamp model rests on reg 42 returning the RAW written goal (§8.4 A9), never measured on
+this arm. The tool accepts raw or clamped so it cannot false-alarm; the number itself is the datum.
+
+### Step 2 — D1: does a position command clear the overload protection? — **SKIPPED (Sven, 2026-07-27)**
+
+> **DECISION: not run. The framing below overstates it, and the correction is the reason.**
+> „The servo current limits are the physical backstop" conflates TWO mechanisms and only one is at
+> stake. **`Max_Torque` (150 gripper / 800 arm) is a continuous CAP on output — not a trip.** It
+> cannot latch, nothing can clear it, and it is what actually bounds the force the arm applies.
+> `Overload_Torque` is the SECONDARY „stop cooking yourself" trip, and D1 tests only that. So a
+> FALSE verdict would not mean the arm pushes harder; it would mean the servo never gives up —
+> a longevity risk on a sustained unattended stall, not a force-safety one.
+>
+> R4 and R7 also give DIRECT physical evidence (what force, damage or not), which decides those
+> questions better than a register-level test. `Present_Load` already ships on
+> `/joint_states.effort` if anyone wants to build a stall detector later.
+>
+> **The tool is fixed and committed anyway** — it had four defects that manufactured the headline
+> `BACKSTOP FALSE` from a single dropped serial reply, plus a 16-tick (1.4°) mechanical slip read
+> as a defeated protection. Committing it broken would have laid a trap for whoever picks up R7.
+> Verified exhaustively after the fix: 752 states, FALSE reachable in 72, **zero** of them on
+> unknown evidence. Reachability note below still stands if it is ever revived.
 
 **Three decisions rest on the answer**, so it also comes before R4/R7: §8.1's zone-inflation
 verdict, R4's pinch-force floor, and R7's stall-vs-damage question all assume *"the servo current
 limits are the physical backstop"*. Our write loop sends a position command every **20 ms** — if
 that clears the protection flag, it can never latch and the premise fails.
+
+**Tool (2026-07-27): `tools/edu6_bench/edu6_d1_overload_latch.py`.** Adversarial verdict:
+*"physically safe to run as-is, NOT safe to believe"* — the protection layer held under 14/14
+mutations and torque reaches 0 on every exit path, but four evidence defects could manufacture the
+headline **BACKSTOP FALSE** from a single dropped serial reply, and a **16-tick (1.4°) mechanical
+slip** of the obstruction read as a defeated protection. Being fixed; do not run it before that
+lands. Run `--dry-run` (opens no port) and then `--watch` (read-only) first.
+
+**Asymmetry worth keeping in mind:** all 14 guards in that tool protect against manufacturing
+`HOLDS`. There is no equivalent guard against manufacturing `FALSE` — which is exactly where every
+critical defect lived. Treat a FALSE verdict with more suspicion than a HOLDS.
+
+#### Target: the GRIPPER first (decision, Sven, 2026-07-27)
+
+The gripper as provisioned **cannot reach overload** — and that is arithmetic, not opinion:
+
+| register | gripper | consequence |
+|---|---|---|
+| `Max_Torque_Limit` (16) | **150** → output capped at **15 % PWM** | |
+| `Overload_Torque` (36) | **80 %** | 15 % can never exceed 80 % → overload unreachable |
+| `Protection_Current` (28) | 310 → **2015 mA** | 15 % duty into a locked rotor ≈ 0.4 A → unreachable |
+| `Max_Temperature` (13) | 70 | a few watts for 3 s → unreachable |
+
+**…IF** `Overload_Torque` is measured against FULL SCALE. If it is measured against
+`Torque_Limit`, the gripper reaches 100 % of its own limit and **does** trip. The two candidate
+mechanisms make OPPOSITE predictions here, which is exactly why the gripper run is not wasted: it
+discriminates them at ~5 W with no arm mass, and shakes the tool down on real hardware before
+anything heavier. **An INCONCLUSIVE here is itself a measurement** (⇒ full-scale-relative).
+
+Escalation, only with that evidence in hand:
+- **an arm joint** (`Max_Torque 800`) — overcurrent becomes genuinely reachable (~2.0–2.4 A vs the
+  2015 mA trip); overload sits EXACTLY marginal (800/10 = 80 vs threshold 80). Carries the real
+  thermal exposure: measured **30 s continuously at 2200 mA** with verdict `HOLDS` and no abort,
+  because phases 3+4 both run once the bit latches.
+- **temporarily raising the gripper's `Torque_Limit` (reg 48)** — RAM, volatile, restored from
+  reg 16 at power-on, so provisioning stays byte-identical and a power cycle is the undo. Blocked
+  today by the tool's own write allowlist (`{40, 41–47}`), and widening it to raise a torque limit
+  in order to force a stall is a **Rule §2 decision — ask first.**
 
 ### Step 3 — the guard stack on real hardware
 
@@ -1019,7 +1150,8 @@ Then hand-guide → „Beenden" from an edge park: expect the refusal. **Guard 4
 abort) and guard 5 (the clamp) have NEVER fired on a real arm** — only the bench tool's
 equivalent has.
 
-Expected, not a fault: commanded J4/J6 now stop at **±168.66°** (guard 5), and a replay holding a
+Expected, not a fault: commanded J4/J6 now stop at **−168.75° / +168.66°** (guard 5, ticks
+128…3967 — asymmetric by one tick, see §3.5), and a replay holding a
 recorded value beyond that is trimmed by up to 11.3°.
 
 ### Step 4 — R5: loop rate, gains, overshoot
@@ -1318,9 +1450,9 @@ convenience (it cannot remove the jig requirement, because the offset is jig-der
 
 ## 10. BENCH TOOLS
 
-Copied out of the session scratchpad into **`tools/edu6_bench/`** so they survive Temp cleanup.
-**They are UNTRACKED — whether to commit them is a decision for Sven.** Committing is
-recommended: three more powered gates need them, and a future arm will too.
+Live in **`tools/edu6_bench/`**. **They are COMMITTED** — landed in `5edb7979`, so the earlier
+"untracked, a decision for Sven" note is resolved and gone. (`edu6_goto.py`'s own docstring still
+says "throwaway, never committed"; that line is stale, harmless, and fixed when next touched.)
 
 The four hardware tools import the repo's `feetech_bus` and **AST-extract every constant from
 `edu6_arm_node.py`** rather than duplicating it, so they cannot drift from the driver.
@@ -1331,7 +1463,7 @@ The four hardware tools import the repo's `feetech_bus` and **AST-extract every 
 | `edu6_goto_zero.py` | the URDF-zero variant, with the §9.2 clearance checks |
 | `edu6_r9_collapse.py` | **READ-ONLY** collapse probe (`write`/`sync_write` replaced with raisers; refuses to run if any servo reports `Torque_Enable = 1`). Produced §2.4 |
 | `edu6_wrap_test.py` | the cross-seam test with auto-abort. Produced §2.3. See the methodology trap in §11 |
-| `verify_image_bytes.py` | anonymous GHCR token → manifest → small COPY layer; byte-verifies the shipped driver without a multi-GB pull |
+| `verify_image_bytes.py` | anonymous GHCR token → manifest → small COPY layer; byte-verifies the shipped driver without a multi-GB pull, **judges** each image's revision label against the paths that image is built from, and covers all three images (server/manager at revision level — see §6 Step 0). Ends in a single `VERDICT: GREEN/RED` line; exit code matches |
 | `verify_urdf.py` | vendor URDF ↔ baked solver constants ↔ mesh sha256 cross-check |
 | `verify_ik_contracts.py` | edu6 + OMX solver contract checks (`roll_from_joints` round-trip, fold bounds, OMX identity) |
 
@@ -1409,8 +1541,8 @@ The ~60 other scratchpad scripts (`m*.py`, `v*.py`, `w*.py`, `slice*.py`, `mutat
 | Q6 | Lower `GOAL_SPEED_CAP_STEPS`? | after R5/R6, Rule §2 (§8.4) |
 | Q7 | Test 100 Hz? | at R5 |
 | Q8 | OMX `dxl11`/`dxl16` power-on turn counter | **parked** — shared OMX path (§8.3) |
-| — | **Clamp commanded ticks off the ±180° seam?** | **OPEN, needs Sven — gates the next powered session** (§8.0) |
-| — | Zone inflation direction | **open, needs Sven** (§8.1) |
+| — | **Clamp commanded ticks off the ±180° seam?** | ✅ **RESOLVED — shipped as guard 5 at 128 ticks** (§3.5, §8.0) |
+| — | Zone inflation direction | **open, needs Sven** (§8.1) — R7 gives the verdict |
 | — | Continuous wrong-way watchdog | **open, needs Sven** (§8.2) |
-| — | Promote `tools/edu6_bench/`? | **open, needs Sven** (§10) |
+| — | Promote `tools/edu6_bench/`? | ✅ **RESOLVED — committed in `5edb7979`** (§10) |
 | — | HOME = URDF zero? | **deferred by Sven** (§9.1) |

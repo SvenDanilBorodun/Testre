@@ -1595,9 +1595,14 @@ class Edu6ArmNode(Node):
         # is never guarded — dropping torque is always allowed.
         self._torque_refusal = None
         refusal: tuple[str, str] | None = None
+        # Hoisted OUT of the try on purpose: the handler at the bottom reads it
+        # to decide whether a seed already reached the wire. Assigned inside,
+        # any raise before that assignment would turn that read into a
+        # NameError — a crash on the one path whose whole job is to leave the
+        # arm in a known state.
+        goal_ticks: dict[int, int] | None = None
         try:
             with self._bus_lock:
-                goal_ticks = None
                 if enabled:
                     # Hold-where-you-are before energizing (never after: the goal
                     # must already be correct when the servo first sees torque).
@@ -1622,6 +1627,74 @@ class Edu6ArmNode(Node):
             return True
         except Exception as e:  # noqa: BLE001
             self.get_logger().error(f'torque switch failed: {e}')
+            # A raise anywhere AFTER the seed landed leaves us BELIEVING the arm
+            # is limp — `_torque_on` was never set, so every caller reports it
+            # limp — while it may already be ENERGISED. The seed is written
+            # BEFORE Torque_Enable by design (the goal must be correct the
+            # instant the servo first sees torque), and LeRobot #3585 reports the
+            # STS firmware setting `Torque_Enable = 1` BY ITSELF on the next PID
+            # tick after an out-of-window goal write, regardless of the host
+            # having disabled torque. That report is unmeasured on this arm (A12,
+            # bench), so this closes the state UNCONDITIONALLY rather than
+            # resting on the answer: „we believe limp, the arm is live" is the
+            # one state a student may reach into.
+            #
+            # ONLY this path needs it, and the other two failure exits above are
+            # already covered — neither of them even reaches this handler:
+            #   * the `not goal_ticks` early return — BOTH of the seed's
+            #     refusals (failed position read, edge guard) happen BEFORE the
+            #     seed sync_write, so no register was touched at all;
+            #   * the `refusal is not None` path — reachable only through
+            #     _verify_after_energise_locked, whose FIRST action is this same
+            #     torque-off write.
+            # What `goal_ticks` therefore actually discriminates HERE is the one
+            # remaining shape: a raise from the SEED write itself, where nothing
+            # is known to have landed (measured — replacing this with a bare
+            # `if enabled:` changes exactly that case). `enabled` excludes a
+            # failed torque-OFF: there the arm may legitimately still be torqued
+            # and forcing the belief to False would be the same wrong belief
+            # inverted.
+            #
+            # RESIDUAL, recorded rather than papered over: a seed packet that was
+            # PARTIALLY transmitted before the raise is indistinguishable from
+            # one never sent, so that sliver stays uncovered. It is the same
+            # fire-and-forget blind spot SYNC_WRITE has everywhere in this driver
+            # (see _seed_goal_from_present_locked on the lost-write residual).
+            #
+            # Re-acquiring `_bus_lock` cannot deadlock: it is a plain
+            # (non-reentrant) threading.Lock and the `with` above already
+            # released it while the exception propagated out of the block.
+            if enabled and goal_ticks:
+                try:
+                    with self._bus_lock:
+                        self._bus.sync_write(fb.REG_TORQUE_ENABLE,
+                                             _TORQUE_OFF_PAYLOAD)
+                    # Belief follows the HARDWARE, and only on a write that
+                    # actually landed — claiming limp after a FAILED drop is the
+                    # same wrong belief in the other direction: on a REDUNDANT
+                    # torque-on over an arm that really is holding (possibly
+                    # holding an object), it would make _trajectory_cb start
+                    # refusing trajectories with „Drehmoment ist aus" for an arm
+                    # that is not.
+                    #
+                    # DELIBERATELY UNLIKE _verify_after_energise_locked, which
+                    # sets the flag False even when its own drop failed — do not
+                    # "harmonise" the two. There, the Torque_Enable=1 write is
+                    # KNOWN to have landed, so silencing our own command paths on
+                    # a runaway is the safe direction. Here the write RAISED, so
+                    # torque state is genuinely unknown and the prior belief is
+                    # the least-wrong thing to keep. Neither flag can express
+                    # "unknown"; the German line below is the real mitigation.
+                    self._torque_on = False
+                except Exception:  # noqa: BLE001 — best-effort
+                    # The bus is already failing, so there is nothing left that
+                    # software can do: name the one PHYSICAL action instead.
+                    self.get_logger().error(
+                        '[FEHLER] Das Abschalten des Drehmoments ist '
+                        'FEHLGESCHLAGEN — der Arm kann unter Strom stehen und '
+                        'sich jederzeit bewegen. Bitte sofort das '
+                        '12-V-Netzteil des Arms ausschalten, bevor Sie den Arm '
+                        'anfassen!')
             return False
 
     def _torque_cb(self, request, response):

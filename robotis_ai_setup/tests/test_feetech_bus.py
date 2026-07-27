@@ -969,6 +969,11 @@ class _TorqueStubNode:
     def __init__(self, bus):
         self._bus = bus
         self._bus_lock = threading.Lock()
+        # Unused by the stubbed _replace_trajectory below, but present because
+        # the REAL node has it: without it a mutation that swaps the bus lock for
+        # the trajectory lock would die of AttributeError instead of the wrong
+        # lock semantics, i.e. the guard would pass for the wrong reason.
+        self._traj_lock = threading.Lock()
         self._stop = threading.Event()
         self._torque_on = False
         self._bus_fault = False
@@ -2012,6 +2017,255 @@ class TestPostEnergiseWrongWayAbort(unittest.TestCase):
                                     'docker-compose.yml'),
                        encoding='utf-8').read()
         self.assertIn('EDUBOTICS_EDU6_TORQUE_ABORT_TICKS=', compose)
+
+
+class TestTorqueSwitchRaiseDeEnergises(unittest.TestCase):
+    """A RAISE out of the Torque_Enable write used to leave the arm in the one
+    state a student may reach into: we believe LIMP, the arm may be LIVE.
+
+    The goal seed is written BEFORE Torque_Enable by design, so by the time that
+    write can fail the seed is already on the wire — and LeRobot #3585 reports
+    the STS firmware setting `Torque_Enable = 1` BY ITSELF on the next PID tick
+    after an out-of-window goal write, regardless of host torque-off (A12,
+    unmeasured on this arm). The old handler logged and returned False without
+    de-energising, and `_torque_on` was never set, so every caller reported the
+    arm limp. The fix closes the state UNCONDITIONALLY — it does not rest on how
+    A12 turns out."""
+
+    def _node(self, ticks=None, missing=(), post_ticks=None, missing_at=None):
+        bus = _TorqueFakeBus(ticks, missing, post_ticks, missing_at)
+        return _TorqueStubNode(bus), bus
+
+    @staticmethod
+    def _raise_on_torque_writes(bus, only_nth=None):
+        """Make the Torque_Enable sync_write raise; everything else lands.
+        ``only_nth`` counts Torque_Enable writes (1 = the energise, 2 = the
+        de-energise), so a failing energise and a failing DROP can be separated."""
+        real = bus.sync_write
+        seen = {'n': 0}
+
+        def _flaky(addr, per_servo):
+            if addr == fb.REG_TORQUE_ENABLE:
+                seen['n'] += 1
+                if only_nth is None or seen['n'] == only_nth:
+                    real(addr, per_servo)     # record the ATTEMPT, then fail
+                    raise fb.FeetechBusError('bus went away mid-torque-write')
+            real(addr, per_servo)
+
+        bus.sync_write = _flaky
+        return seen
+
+    @staticmethod
+    def _off_writes(bus):
+        return [per for addr, per in bus.writes
+                if addr == fb.REG_TORQUE_ENABLE
+                and all(v == b'\x00' for v in per.values())]
+
+    # ── case 1: the defect itself ──────────────────────────────────────────
+    def test_a_raising_torque_enable_write_still_de_energises_the_arm(self):
+        node, bus = self._node()
+        self._raise_on_torque_writes(bus, only_nth=1)
+        self.assertFalse(node.set_torque(True))
+        # the seed DID land (that is why a drop is owed at all) …
+        self.assertEqual(bus.addrs()[0], fb.REG_ACCELERATION)
+        # … and an explicit all-servo Torque_Enable = 0 followed the failure.
+        self.assertEqual(len(self._off_writes(bus)), 1)
+        self.assertEqual(self._off_writes(bus)[0],
+                         {sid: b'\x00' for sid in range(1, 8)})
+        self.assertFalse(node._torque_on)
+        # the drop is the module constant, not a rebuilt dict on the hot path
+        self.assertEqual(self._off_writes(bus)[0], _N['_TORQUE_OFF_PAYLOAD'])
+
+    def test_the_belief_follows_the_hardware_when_the_drop_lands(self):
+        # A REDUNDANT torque-on over an arm we already believed torqued: the
+        # energise write fails, the drop succeeds, so `_torque_on` must move to
+        # False. Left True, the write loop would keep commanding a limp arm and
+        # _trajectory_cb would keep accepting trajectories for it.
+        node, bus = self._node()
+        node._torque_on = True
+        self._raise_on_torque_writes(bus, only_nth=1)
+        self.assertFalse(node.set_torque(True))
+        self.assertFalse(node._torque_on)
+
+    # ── case 2: the drop itself fails ──────────────────────────────────────
+    def test_a_failed_drop_says_so_in_German_and_never_claims_limp(self):
+        node, bus = self._node()
+        node._torque_on = True
+        self._raise_on_torque_writes(bus)          # EVERY torque write raises
+        self.assertFalse(node.set_torque(True))    # no exception escapes
+        # Claiming limp after a FAILED drop is the same wrong belief inverted.
+        self.assertTrue(node._torque_on)
+        said = [e for e in node.errors if 'FEHLGESCHLAGEN' in e]
+        self.assertEqual(len(said), 1, node.errors)
+        self.assertIn('[FEHLER]', said[0])
+        # It must name the ONE remaining action, and it is a PHYSICAL one:
+        # software has just proven it cannot reach the servos.
+        self.assertIn('12-V-Netzteil', said[0])
+        self.assertIn('ausschalten', said[0])
+        # …and it must never imply the arm ended up safe. Both sibling messages
+        # (wrong_way_abort_message / post_energise_read_failure_message) switch
+        # to exactly this wording on a failed drop for the same reason.
+        self.assertNotIn('ist jetzt weich', said[0])
+        self.assertNotIn('wurde sofort wieder ausgeschaltet', said[0])
+
+    def test_no_German_marker_line_in_the_driver_is_transliterated(self):
+        # Rule §1 wants literal ä/ö/ü/ß. ci.yml::german-strings-lint enforces
+        # that for physical_ai_server/, gui/, installer/ and pi_agent/ — it does
+        # NOT scan robotis_ai_setup/docker/open_manipulator/ (docs §8.4 A8), so
+        # every German string in this driver, including the one added above, is
+        # CI-unguarded. Same marker prefixes and the same word list the CI job
+        # greps for, so this cannot drift away from it silently.
+        src = open(os.path.join(_DOCKER, 'edu6_arm_node.py'),
+                   encoding='utf-8').read().splitlines()
+        bad = re.compile(
+            r'(\[FEHLER\]|\[WARNUNG\]|\[STOPP\]).*\b('
+            r'frueh|kuerzer|schliessen|Zeitluecken|Groesste|Luecken|Moegliche|'
+            r'ueber[a-z]|laeuft|haengt|pruefen|Pruefung|ueberschritten|'
+            r'Schueler|benoetigen|Oberflaeche|uebersprungen|enthaelt|'
+            r'zusaetzliche|Verfuegbar|geaendert|beschaedigt|koennte|faehige|'
+            r'Bildaufloesung)\b')
+        self.assertEqual([ln for ln in src if bad.search(ln)], [])
+
+    # ── case 3: the two exits that need NOTHING ────────────────────────────
+    def test_a_refused_seed_writes_nothing_and_therefore_drops_nothing(self):
+        # BOTH seed refusals happen BEFORE the seed sync_write, so no register
+        # was touched: issuing a torque-off there would be bus traffic (and, on
+        # a genuinely dead bus, another failure) for a state that cannot exist.
+        for label, kw in (('read failure', {'missing': (5,)}),
+                          ('edge refusal', {'ticks': {6: 4093}})):
+            node, bus = self._node(**kw)
+            self.assertFalse(node.set_torque(True), label)
+            self.assertEqual(bus.writes, [], label)      # nothing at all
+            self.assertEqual(self._off_writes(bus), [], label)
+            self.assertIn(node._torque_refusal[0], ('read', 'edge'), label)
+
+    def test_a_raising_SEED_write_drops_nothing_because_nothing_is_known_landed(
+            self):
+        # goal_ticks is only bound once the seed RETURNED, so a seed that raised
+        # leaves it None and the handler stays out of the way. (Recorded
+        # residual: a partially transmitted seed packet is indistinguishable
+        # from none — the same fire-and-forget blind spot SYNC_WRITE has
+        # everywhere in this driver.)
+        node, bus = self._node()
+        real = bus.sync_write
+
+        def _boom(addr, per_servo):
+            if addr == fb.REG_ACCELERATION:
+                raise fb.FeetechBusError('bus went away during the seed')
+            real(addr, per_servo)
+
+        bus.sync_write = _boom
+        self.assertFalse(node.set_torque(True))
+        self.assertEqual(self._off_writes(bus), [])
+        self.assertFalse(node._torque_on)
+
+    # ── case 4: the verifier already owns its own drop ─────────────────────
+    def test_the_post_energise_abort_still_drops_exactly_once(self):
+        # _verify_after_energise_locked writes Torque_Enable = 0 as its FIRST
+        # action, and it returns through the `refusal is not None` path, not the
+        # exception handler — so there must be exactly ONE drop, not two.
+        node, bus = self._node({6: 4055}, post_ticks={6: 12})
+        self.assertFalse(node.set_torque(True))
+        self.assertEqual(node._torque_refusal[0], 'wrongway')
+        self.assertEqual(len(self._off_writes(bus)), 1)
+        self.assertFalse(node._torque_on)
+
+    # ── case 5: the inverted bug ───────────────────────────────────────────
+    def test_a_failed_torque_OFF_never_forces_the_belief_to_limp(self):
+        # The arm may still be torqued — that is exactly why the write was
+        # requested. Recording it as limp would let _trajectory_cb drop incoming
+        # trajectories with „Drehmoment ist aus" for an arm that is holding, and
+        # would hide a live arm behind a limp label. `enabled` is what excludes
+        # this path from the de-energise above.
+        node, bus = self._node()
+        node._torque_on = True
+        self._raise_on_torque_writes(bus)
+        self.assertFalse(node.set_torque(False))
+        self.assertTrue(node._torque_on)
+        # exactly the ONE attempted write set_torque always makes — the handler
+        # added nothing here
+        self.assertEqual(len(self._off_writes(bus)), 1)
+        self.assertEqual(node.errors, [e for e in node.errors
+                                       if 'FEHLGESCHLAGEN' not in e])
+
+    # ── case 6: the success paths are untouched ────────────────────────────
+    def test_every_success_path_is_byte_identical(self):
+        # A healthy enable, a healthy disable, and a redundant enable over a
+        # joint parked on the seam — the handler must be unreachable on all of
+        # them, so the bus traffic is exactly what it was before it existed.
+        node, bus = self._node()
+        self.assertTrue(node.set_torque(True), node.errors)
+        self.assertEqual(bus.addrs(), [fb.REG_ACCELERATION,
+                                       fb.REG_TORQUE_ENABLE])
+        self.assertEqual(bus.torque_writes(), [(s, 1) for s in range(1, 8)])
+        self.assertEqual(node.errors, [])
+
+        node, bus = self._node()
+        node._torque_on = True
+        self.assertTrue(node.set_torque(False), node.errors)
+        self.assertEqual(bus.addrs(), [fb.REG_TORQUE_ENABLE])
+        self.assertEqual(bus.torque_writes(), [(s, 0) for s in range(1, 8)])
+        self.assertFalse(node._torque_on)
+        self.assertEqual(node.errors, [])
+
+        node, bus = self._node({6: 4094})
+        node._torque_on = True
+        self.assertTrue(node.set_torque(True), node.errors)
+        self.assertEqual(bus.addrs(), [fb.REG_ACCELERATION,
+                                       fb.REG_TORQUE_ENABLE])
+        self.assertEqual(node.errors, [])
+
+    # ── the lock discipline the handler rests on ───────────────────────────
+    def test_the_drop_re_takes_the_bus_lock_and_cannot_deadlock_doing_it(self):
+        # `_bus_lock` is a plain, NON-reentrant threading.Lock, so this is only
+        # safe because the `with` block already released it while the exception
+        # propagated out. Assert BOTH halves: the call completes (no deadlock),
+        # and the lock really is held while the drop is on the wire (the read
+        # and write loops share that bus).
+        node, bus = self._node()
+        held = []
+        real = bus.sync_write
+
+        def _watch(addr, per_servo):
+            held.append((addr, node._bus_lock.locked()))
+            real(addr, per_servo)
+            if addr == fb.REG_TORQUE_ENABLE and len(held) == 2:
+                raise fb.FeetechBusError('bus went away mid-torque-write')
+
+        bus.sync_write = _watch
+        self.assertFalse(node.set_torque(True))
+        self.assertEqual([addr for addr, _ in held],
+                         [fb.REG_ACCELERATION, fb.REG_TORQUE_ENABLE,
+                          fb.REG_TORQUE_ENABLE])
+        self.assertEqual([locked for _a, locked in held], [True, True, True])
+        # and it is free again afterwards — the handler cannot leak it
+        self.assertFalse(node._bus_lock.locked())
+
+    def test_goal_ticks_is_hoisted_above_the_try(self):
+        # Assigned INSIDE the try, a raise before that assignment makes the
+        # handler's own read a NameError — a crash on the one path whose whole
+        # job is to leave the arm in a known state. Source-pinned because no
+        # runtime path can reach the raise that early (the `with` acquire is the
+        # only statement before it).
+        src = textwrap.dedent(ast.get_source_segment(
+            open(os.path.join(_DOCKER, 'edu6_arm_node.py'),
+                 encoding='utf-8').read(),
+            _set_torque_ast()))
+        head, _sep, _tail = src.partition('        try:')
+        self.assertIn('goal_ticks', head)
+        body = src[src.index('        try:'):]
+        self.assertNotIn('goal_ticks = None', body)
+
+
+def _set_torque_ast():
+    src = open(os.path.join(_DOCKER, 'edu6_arm_node.py'),
+               encoding='utf-8').read()
+    for node in ast.parse(src).body:
+        if isinstance(node, ast.ClassDef) and node.name == 'Edu6ArmNode':
+            for sub in node.body:
+                if isinstance(sub, ast.FunctionDef) and sub.name == 'set_torque':
+                    return sub
+    raise AssertionError('Edu6ArmNode.set_torque not found')
 
 
 class TestNodeAuditRails(unittest.TestCase):

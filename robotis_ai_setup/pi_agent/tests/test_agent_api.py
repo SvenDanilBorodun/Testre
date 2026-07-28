@@ -21,6 +21,7 @@ import json
 import os
 import shutil
 import socket
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -414,6 +415,16 @@ class TestBootRealignsImageTag(unittest.TestCase):
         p = patch.object(agent, "SYSTEMD_UNIT_DIR", os.path.join(self.dir, "no-units"))
         p.start()
         self.addCleanup(p.stop)
+        # boot() also RENEWS a drifted opi compose (WP-0), which is a root write
+        # to constants.COMPOSE_FILE (/opt/edubotics/docker-compose.opi.yml).
+        # Same reasoning as the unit dir above: point it into the sandbox so this
+        # class can never overwrite — nor make its verdict depend on — a REAL
+        # provisioned compose if the suite is ever run on a Pi. The sandbox path
+        # does not exist, so `_compose_drifted` skips (absent proves nothing).
+        pc = patch.object(agent, "COMPOSE_FILE",
+                          os.path.join(self.dir, "no-compose", "docker-compose.opi.yml"))
+        pc.start()
+        self.addCleanup(pc.stop)
 
     def _boot(self):
         # _pull_images_after_self_update is mocked here and exercised on its own
@@ -753,6 +764,17 @@ class TestSystemFilesVersionCheck(unittest.TestCase):
         self.stamp = os.path.join(self.dir, ".system-files-version")
         self.installed = os.path.join(self.dir, "systemd-system")
         os.makedirs(self.installed)
+        # The INSTALLED opi compose (/opt/edubotics/docker-compose.opi.yml on a
+        # real Pi). Sandboxed for the whole class — without this the compose leg
+        # would read the host's real path, so the suite would be green on CI
+        # (where it is absent) and red on a dev Pi (where it is not).
+        self.installed_compose_dir = os.path.join(self.dir, "opt-edubotics")
+        os.makedirs(self.installed_compose_dir)
+        self.installed_compose = os.path.join(self.installed_compose_dir,
+                                              "docker-compose.opi.yml")
+        pc = patch.object(agent, "COMPOSE_FILE", self.installed_compose)
+        pc.start()
+        self.addCleanup(pc.stop)
         self.addCleanup(shutil.rmtree, self.dir, True)
         self.app = agent.AgentApp()
         self.logs = []
@@ -760,6 +782,8 @@ class TestSystemFilesVersionCheck(unittest.TestCase):
         # The units this agent version ships (the real files in pi_agent/systemd/).
         self.shipped_dir = os.path.join(os.path.dirname(os.path.abspath(agent.__file__)),
                                         "systemd")
+        # …and the compose twin it ships (the real pi_agent/docker/ copy).
+        self.shipped_compose = self.app._shipped_compose_path()
 
     def _install_units(self, drift=False):
         """Lay down /etc/systemd/system copies of the shipped units. `drift=True`
@@ -773,19 +797,48 @@ class TestSystemFilesVersionCheck(unittest.TestCase):
             with open(os.path.join(self.installed, unit), "wb") as f:
                 f.write(data)
 
-    def _check(self, stamp_contents=None, app_version="2.14.0", renew=True):
+    def _install_compose(self, drift=False):
+        """Lay down the /opt/edubotics copy of the shipped opi compose.
+
+        `drift=True` models the WP-0 failure the twin exists to close: setup.sh
+        installed the compose of an OLDER release and every self-update since
+        rsync'd `pi_agent/` only, so the container orchestration never moved."""
+        with open(self.shipped_compose, "rb") as f:
+            data = f.read()
+        if drift:
+            data += b"\n# provisioned by an older release\n"
+        with open(self.installed_compose, "wb") as f:
+            f.write(data)
+
+    def _check(self, stamp_contents=None, app_version="2.14.0", renew=True,
+               compose_valid=True):
         """Run the drift check. ``renew=False`` models a Pi where the agent could
         NOT repair the units itself (read-only /etc, a hand-mounted unit dir) —
-        the only state in which the advisory banner still exists."""
+        the only state in which the advisory banner still exists.
+
+        ``subprocess.run`` stands in for BOTH `systemctl daemon-reload` and the
+        `docker compose config -q` gate, so it must answer with a real
+        CompletedProcess: a bare MagicMock's `.returncode` is a MagicMock, which
+        compares unequal to 0 and would silently make every compose repair look
+        refused. ``compose_valid=False`` is how a test asks for the refusal."""
         if stamp_contents is not None:
             with open(self.stamp, "w", encoding="utf-8") as f:
                 f.write(stamp_contents)
+
+        def _run(argv, *_a, **_kw):
+            if "config" in argv:  # the docker compose validate gate
+                return subprocess.CompletedProcess(
+                    argv, 0 if compose_valid else 1, "",
+                    "" if compose_valid else "yaml: did not find expected node content")
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
         stack = [
             patch.object(agent, "SYSTEM_FILES_VERSION_FILE", self.stamp),
             patch.object(agent, "SYSTEMD_UNIT_DIR", self.installed),
             patch.object(agent, "APP_VERSION", app_version),
-            # Never let the real `systemctl daemon-reload` reach the test host.
-            patch.object(agent.subprocess, "run", MagicMock()),
+            # Never let the real `systemctl daemon-reload` / `docker compose`
+            # reach the test host.
+            patch.object(agent.subprocess, "run", MagicMock(side_effect=_run)),
         ]
         if not renew:
             stack.append(patch.object(self.app, "_renew_system_units", return_value=False))
@@ -985,6 +1038,248 @@ class TestSystemFilesVersionCheck(unittest.TestCase):
             _, payload = self.app.handle_status()
         self.assertFalse(payload["system_files_stale"])
         self.assertIsNone(payload["system_files_version"])
+
+    # ── WP-0: the opi compose joins the repairable system-file set ───────────
+
+    def test_the_shipped_compose_is_byte_identical_to_the_docker_dir_copy(self):
+        """The twin guard, mirrored by `ci.yml::pi-compose-twin-guard`.
+
+        `robotis_ai_setup/docker/docker-compose.opi.yml` is the source of truth
+        (it is what `compose-validate` validates and what `setup.sh` installs
+        from a source checkout); `pi_agent/docker/docker-compose.opi.yml` is the
+        copy that rides the release tarball to a fielded Pi. If they diverge the
+        agent would "repair" a fielded Pi ONTO a stale file — strictly worse
+        than today's do-nothing, because it would look like it worked."""
+        source_of_truth = SETUP_DIR / "docker" / "docker-compose.opi.yml"
+        self.assertEqual(
+            Path(self.shipped_compose).read_bytes(),
+            source_of_truth.read_bytes(),
+            "pi_agent/docker/docker-compose.opi.yml has drifted from "
+            "robotis_ai_setup/docker/docker-compose.opi.yml",
+        )
+
+    def test_a_drifted_compose_is_renewed_atomically(self):
+        """WP-0's whole point. A release that adds a forwarded EDUBOTICS_* env,
+        changes a healthcheck or re-points an image ref used to reach the field
+        HALF-applied: the tarball rsyncs `pi_agent/` only, so the compose stayed
+        frozen at whatever setup.sh laid down, silently."""
+        self._install_compose(drift=True)
+        text = self._check(stamp_contents="2.13.0\n", app_version="2.14.0")
+        self.assertNotIn("[WARNUNG]", text)
+        self.assertFalse(self.app._system_files_stale)
+        self.assertIn("erneuert", text)
+        self.assertIn("docker-compose.opi.yml", text)
+        # The installed file now IS the shipped one, so the next boot is silent.
+        with open(self.installed_compose, "rb") as f:
+            installed = f.read()
+        with open(self.shipped_compose, "rb") as f:
+            self.assertEqual(installed, f.read())
+        self.assertFalse(self.app._compose_drifted())
+        # setup.sh installs 0644; the unit runs UMask=0077, so a freshly created
+        # file would be 0600 without the explicit chmod.
+        self.assertEqual(os.stat(self.installed_compose).st_mode & 0o777, 0o644)
+        # One rollback copy of the drifted file, and no temp left behind.
+        self.assertTrue(os.path.isfile(self.installed_compose + ".edubotics-bak"))
+        self.assertFalse(os.path.exists(self.installed_compose + ".edubotics-tmp"))
+
+    def test_the_compose_repair_writes_a_temp_then_fsyncs_then_replaces(self):
+        """Pin the ATOMIC SEQUENCE itself, not just its outcome.
+
+        A non-atomic write is indistinguishable from an atomic one on a healthy
+        box and catastrophic on a power cut: a truncated docker-compose.opi.yml
+        means `docker compose -f` refuses everything, so the always-on manager
+        never comes up — and the manager IS the wizard, i.e. the Pi's only
+        repair surface. Order matters as much as the parts: fsync before the
+        rename, chmod before the rename, rename last."""
+        self._install_compose(drift=True)
+        events = []
+        real_fsync, real_chmod, real_replace = os.fsync, os.chmod, os.replace
+
+        def _fsync(fd):
+            events.append("fsync")
+            return real_fsync(fd)
+
+        def _chmod(p, mode):
+            if str(p).endswith(".edubotics-tmp"):
+                events.append(f"chmod:{oct(mode)}")
+            return real_chmod(p, mode)
+
+        def _replace(src, dst):
+            events.append("replace")
+            # The destination must still hold the OLD bytes at this instant —
+            # i.e. nothing wrote the installed file in place.
+            with open(dst, "rb") as f:
+                self.assertIn(b"provisioned by an older release", f.read())
+            return real_replace(src, dst)
+
+        with patch.object(agent.os, "fsync", _fsync), \
+             patch.object(agent.os, "chmod", _chmod), \
+             patch.object(agent.os, "replace", _replace):
+            self._check(stamp_contents="2.13.0\n")
+        self.assertIn("fsync", events)
+        self.assertIn("chmod:0o644", events)
+        self.assertIn("replace", events)
+        self.assertLess(events.index("fsync"), events.index("replace"))
+        self.assertLess(events.index("chmod:0o644"), events.index("replace"))
+
+    def test_an_unparseable_shipped_compose_is_refused_and_the_working_file_survives(self):
+        """VALIDATE-THEN-SWAP — the one deliberate asymmetry with the systemd
+        path. A systemd unit that fails to parse is inert (systemd logs it and
+        moves on), but `docker compose -f` refuses to do ANYTHING with a broken
+        file: the always-on manager would stop coming up and the Pi would lose
+        the wizard it reports problems through. So on a failed
+        `docker compose config -q` the swap is REFUSED and the working compose
+        is left exactly as it was."""
+        self._install_compose(drift=True)
+        with open(self.installed_compose, "rb") as f:
+            before = f.read()
+        text = self._check(stamp_contents="2.13.0\n", app_version="2.14.0",
+                           compose_valid=False)
+        # The working file is untouched, byte for byte.
+        with open(self.installed_compose, "rb") as f:
+            self.assertEqual(f.read(), before)
+        self.assertFalse(os.path.exists(self.installed_compose + ".edubotics-tmp"))
+        # …and the refusal is visible: the reason, then the banner.
+        self.assertIn("NICHT erneuert", text)
+        self.assertIn("[WARNUNG]", text)
+        self.assertIn("docker-compose.opi.yml", text)
+        self.assertTrue(self.app._system_files_stale)
+        self.assertEqual(self.app._system_files_version, "2.13.0")
+
+    def test_the_validate_gate_runs_docker_compose_config_on_the_staged_file(self):
+        """The gate must judge the STAGED bytes, never the installed file — and
+        never the student's .env (an unrelated local edit must not be able to
+        veto a release's orchestration fix, so no --env-file)."""
+        self._install_compose(drift=True)
+        argvs = []
+        real_run = agent.subprocess.run
+
+        def _run(argv, *a, **kw):
+            argvs.append(list(argv))
+            if "config" in argv:
+                return subprocess.CompletedProcess(argv, 0, "", "")
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        with patch.object(agent, "SYSTEM_FILES_VERSION_FILE", self.stamp), \
+             patch.object(agent, "SYSTEMD_UNIT_DIR", self.installed), \
+             patch.object(agent.subprocess, "run", _run):
+            self.app._check_system_files_version()
+        self.assertIs(agent.subprocess.run, real_run)  # patch really unwound
+        gate = [a for a in argvs if "config" in a]
+        self.assertEqual(len(gate), 1, argvs)
+        self.assertEqual(gate[0][:3], ["docker", "compose", "-f"])
+        self.assertEqual(gate[0][3], self.installed_compose + ".edubotics-tmp")
+        self.assertIn("-q", gate[0])
+        self.assertNotIn("--env-file", gate[0])
+
+    def test_an_unrepairable_compose_sets_the_banner(self):
+        """A read-only /opt (or a hand-mounted compose) is the state where the
+        advisory banner still earns its place. Degrade to it, never raise out of
+        boot(), and leave no half-written file behind."""
+        self._install_compose(drift=True)
+        with patch.object(agent, "SYSTEM_FILES_VERSION_FILE", self.stamp), \
+             patch.object(agent, "SYSTEMD_UNIT_DIR", self.installed), \
+             patch.object(agent.subprocess, "run",
+                          MagicMock(return_value=subprocess.CompletedProcess([], 0, "", ""))), \
+             patch.object(agent.os, "replace",
+                          side_effect=OSError("read-only file system")):
+            self.app._check_system_files_version()  # must not raise
+        self.assertTrue(self.app._system_files_stale)
+        text = "\n".join(self.logs)
+        self.assertIn("[WARNUNG]", text)
+        self.assertIn("docker-compose.opi.yml", text)
+        self.assertFalse(os.path.exists(self.installed_compose + ".edubotics-tmp"))
+
+    def test_an_absent_installed_compose_is_skipped_not_installed(self):
+        """`_compose_drifted` skips a file it cannot READ on either side, so a
+        Pi with no installed compose (a dev box, a relocated
+        EDUBOTICS_OPI_COMPOSE, a pre-twin provision) is never written to and
+        never bannered. Absent evidence is not evidence of drift."""
+        self.assertFalse(os.path.exists(self.installed_compose))
+        text = self._check(stamp_contents="2.13.0\n")
+        self.assertEqual(text, "")
+        self.assertFalse(self.app._system_files_stale)
+        self.assertFalse(os.path.exists(self.installed_compose))
+
+    def test_an_unreadable_installed_compose_proves_nothing(self):
+        self._install_compose(drift=True)
+        with patch.object(agent, "open", create=True,
+                          side_effect=OSError("permission denied")):
+            self.assertFalse(self.app._compose_drifted())
+
+    def test_a_matching_compose_is_silent(self):
+        self._install_compose(drift=False)
+        text = self._check(stamp_contents="2.13.0\n", app_version="2.14.0")
+        self.assertEqual(text, "")
+        self.assertFalse(self.app._system_files_stale)
+
+    def test_the_compose_repair_never_starts_or_restarts_a_container(self):
+        """The repair installs a FILE. It must never `up`, `restart`, `stop` or
+        `pull` anything: boot() owns the manager lifecycle a few steps later,
+        and a compose command from inside a drift check would be an unannounced
+        container action on a Pi that may be mid-lesson."""
+        self._install_compose(drift=True)
+        self._install_units(drift=True)
+        argvs = []
+
+        def _run(argv, *a, **kw):
+            argvs.append(list(argv))
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        with patch.object(agent, "SYSTEM_FILES_VERSION_FILE", self.stamp), \
+             patch.object(agent, "SYSTEMD_UNIT_DIR", self.installed), \
+             patch.object(agent.subprocess, "run", _run):
+            self.app._check_system_files_version()
+        self.assertTrue(argvs)
+        for argv in argvs:
+            for forbidden in ("up", "restart", "start", "stop", "rm", "pull",
+                              "enable", "create"):
+                self.assertNotIn(forbidden, argv, argv)
+
+    def test_the_compose_repair_reports_when_it_takes_effect_truthfully(self):
+        """boot() calls this BEFORE `docker_manager.start_manager`, which is an
+        `up -d --force-recreate --no-deps physical_ai_manager` — so the manager
+        tier really does adopt the renewed compose in the SAME boot. Only the
+        robot tier waits for „Umgebung starten". The Protokoll line must not
+        claim otherwise (an operator who reads „erst beim nächsten Start" would
+        mis-attribute a manager change to something else)."""
+        self._install_compose(drift=True)
+        text = self._check(stamp_contents="2.13.0\n")
+        self.assertIn("Weboberfläche", text)
+        self.assertIn("Startvorgang", text)
+        self.assertIn("Umgebung starten", text)
+
+    def test_compose_german_umlauts_are_literal(self):
+        # german-strings-lint scans [WARNUNG] lines for ae/oe/ue transliteration.
+        self._install_compose(drift=True)
+        text = self._check(stamp_contents="2.13.0\n", compose_valid=False)
+        for bad in ("Weboberflaeche", "ueber", "koennen", "ausfuehren",
+                    "Datensaetze", "pruefen", "unveraendert"):
+            self.assertNotIn(bad, text)
+        self.assertIn("unverändert", text)
+
+    def test_a_drifted_compose_and_drifted_units_share_ONE_banner(self):
+        """"Only what could NOT be repaired reaches the banner" — and there is
+        at most one banner line, naming exactly those files."""
+        self._install_units(drift=True)
+        self._install_compose(drift=True)
+        text = self._check(stamp_contents="2.13.0\n", app_version="2.14.0",
+                           renew=False, compose_valid=False)
+        self.assertEqual(text.count("[WARNUNG]"), 1, text)
+        for name in ("edubotics-pi.service", "edubotics-pi-firstboot.service",
+                     "docker-compose.opi.yml"):
+            self.assertIn(name, text)
+
+    def test_a_repaired_compose_beside_unrepairable_units_banners_only_the_units(self):
+        self._install_units(drift=True)
+        self._install_compose(drift=True)
+        text = self._check(stamp_contents="2.13.0\n", renew=False)
+        banner = [ln for ln in text.splitlines() if "[WARNUNG]" in ln]
+        self.assertEqual(len(banner), 1, text)
+        self.assertIn("edubotics-pi.service", banner[0])
+        self.assertNotIn("docker-compose.opi.yml", banner[0])
+        # …and the compose really was repaired.
+        self.assertFalse(self.app._compose_drifted())
 
 
 # ── ACK-early async update job ───────────────────────────────────────────────

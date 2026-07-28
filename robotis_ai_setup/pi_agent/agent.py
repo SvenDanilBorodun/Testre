@@ -98,6 +98,7 @@ from .constants import (
     PHONE_FRAME_STALE_MAX_AGE_S,
     PORT_AGENT,
     REGISTRY,
+    SHIPPED_COMPOSE_RELPATH,
     SYSTEM_FILES_VERSION_FILE,
     SYSTEMD_UNIT_DIR,
     SYSTEMD_UNIT_NAMES,
@@ -185,6 +186,12 @@ _HF_HOST = "huggingface.co"
 _NETCHECK_TCP_TIMEOUT = 5
 _NETCHECK_HTTP_TIMEOUT = 6
 _CLOCK_SKEW_WARN_S = 120  # a skew past this breaks JWT/TLS — the „Anmeldung läuft ab" case
+
+# Budget for the `docker compose config -q` gate that gates the compose repair
+# (_validate_compose_file). Client-side YAML parse + interpolation only, no
+# daemon round-trip — measured in tens of milliseconds; generous so a loaded Pi
+# cannot turn a healthy release into a refused repair.
+_COMPOSE_VALIDATE_TIMEOUT_S = 60
 
 
 # ── Secret redaction (ported from gui_app._redact_secret_env_line) ───────────
@@ -2106,21 +2113,29 @@ class AgentApp:
                 drifted.append(unit)
         return drifted
 
-    def _install_unit_file(self, unit: str) -> bool:
-        """Overwrite ONE installed systemd unit with the copy this agent ships.
+    def _install_system_file(self, src: str, dst: str, what_de: str,
+                             validate=None) -> bool:
+        """Overwrite ONE installed system file with the copy this agent ships.
 
         Atomic (temp in the same directory → fsync → chmod 0644 → ``os.replace``)
         because a torn write to ``edubotics-pi.service`` would leave the fleet
         with no way to start the agent at all — and the agent IS the only repair
-        surface on a Pi. One rollback copy of whatever was there is kept beside
-        it (``.edubotics-bak``); systemd ignores files without a unit suffix, so
+        surface on a Pi. The compose file has the same property one level up: a
+        truncated ``docker-compose.opi.yml`` means no manager container, i.e. no
+        wizard, i.e. no way in. One rollback copy of whatever was there is kept
+        beside it (``.edubotics-bak``); systemd ignores files without a unit
+        suffix and the agent only ever passes ``COMPOSE_FILE`` to ``-f``, so
         neither the backup nor a leftover temp file can ever be loaded.
 
         The explicit chmod matters: the unit runs with ``UMask=0077``, so a
         freshly created file would be 0600 while setup.sh installs 0644.
+
+        ``validate`` is an optional ``(tmp_path) -> Optional[str]`` gate run on
+        the STAGED bytes after the chmod and BEFORE anything mutating: return a
+        German reason to refuse the swap (the installed file is then left
+        untouched and this returns False), or None to accept. The systemd path
+        passes none — see ``_renew_compose`` for why the compose does.
         """
-        dst = os.path.join(SYSTEMD_UNIT_DIR, unit)
-        src = os.path.join(os.path.dirname(os.path.abspath(__file__)), "systemd", unit)
         tmp = dst + ".edubotics-tmp"
         try:
             with open(src, "rb") as f:
@@ -2130,20 +2145,43 @@ class AgentApp:
                 f.flush()
                 os.fsync(f.fileno())
             os.chmod(tmp, 0o644)
+            if validate is not None:
+                refusal = validate(tmp)
+                if refusal:
+                    self._log(f"{what_de} wurde NICHT erneuert: {refusal} Die "
+                              "bisherige, funktionierende Datei bleibt unverändert.")
+                    try:
+                        os.unlink(tmp)
+                    except OSError:
+                        pass
+                    return False
             try:
                 shutil.copyfile(dst, dst + ".edubotics-bak")
             except OSError:
                 pass  # a backup is a courtesy, never a precondition
             os.replace(tmp, dst)
-            _fsync_path(SYSTEMD_UNIT_DIR)
+            _fsync_path(os.path.dirname(dst))
             return True
         except OSError as e:
-            self._log(f"Systemd-Dienst {unit} konnte nicht erneuert werden: {e}")
+            self._log(f"{what_de} konnte nicht erneuert werden: {e}")
             try:
                 os.unlink(tmp)
             except OSError:
                 pass
             return False
+
+    def _install_unit_file(self, unit: str) -> bool:
+        """Overwrite ONE installed systemd unit with the copy this agent ships.
+
+        Thin wrapper over ``_install_system_file`` — the atomic sequence lives
+        there once, so the compose repair cannot drift away from the unit
+        repair it is modelled on.
+        """
+        return self._install_system_file(
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "systemd", unit),
+            os.path.join(SYSTEMD_UNIT_DIR, unit),
+            f"Systemd-Dienst {unit}",
+        )
 
     def _renew_system_units(self, drifted: "list") -> bool:
         """Install the shipped systemd units over the drifted installed copies
@@ -2183,17 +2221,105 @@ class AgentApp:
             pass
         return True
 
+    def _shipped_compose_path(self) -> str:
+        """Absolute path to the opi compose file THIS agent version ships.
+
+        Resolved off ``__file__`` exactly like the systemd units, so it follows
+        the package through the self-update swap (rsync into ``pi_agent.new`` →
+        rename over ``pi_agent``) with no path knowledge anywhere else.
+        """
+        return os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            SHIPPED_COMPOSE_RELPATH)
+
+    def _compose_drifted(self) -> bool:
+        """True iff the INSTALLED opi compose differs byte-for-byte from the one
+        THIS agent version ships. The compose half of ``_drifted_units``.
+
+        Same evidence rule, deliberately: either file being absent or unreadable
+        (a dev box, a hand-relocated install, a non-root reader, a Pi
+        provisioned before the twin shipped) proves nothing, so it is skipped —
+        never repaired, never bannered. This must never guess: the alternative
+        reading, "the installed file is missing, so install ours", would turn a
+        relocated ``EDUBOTICS_OPI_COMPOSE`` into a surprise write.
+        """
+        try:
+            with open(self._shipped_compose_path(), "rb") as f:
+                shipped = f.read()
+            with open(COMPOSE_FILE, "rb") as f:
+                installed = f.read()
+        except OSError:
+            return False  # cannot compare → cannot prove → silent
+        return shipped != installed
+
+    def _validate_compose_file(self, path: str) -> "Optional[str]":
+        """None if ``docker compose -f <path> config -q`` accepts the staged
+        file, otherwise a German reason to refuse the swap.
+
+        Deliberately runs WITHOUT ``--env-file``: the question here is whether
+        the shipped bytes are a valid compose file, and answering it against the
+        student's ``.env`` would let an unrelated local edit veto a release's
+        orchestration fix. Unset ``${VAR}`` interpolation is a warning, not an
+        error, so the file validates on its own (measured); the opi compose uses
+        no ``${VAR:?}`` required-variable form.
+
+        Any inability to run the check (no docker binary, a timeout) is ALSO a
+        refusal. Refusing keeps the working compose in place, which is the safe
+        direction — and on a real Pi docker is always present, while a box
+        without it has no installed compose to drift from in the first place.
+        """
+        try:
+            res = subprocess.run(
+                ["docker", "compose", "-f", path, "config", "-q"],
+                capture_output=True, text=True, timeout=_COMPOSE_VALIDATE_TIMEOUT_S,
+            )
+        except (OSError, subprocess.SubprocessError) as e:
+            return f"Docker Compose konnte die Datei nicht prüfen ({e})."
+        if res.returncode != 0:
+            lines = [ln for ln in (res.stderr or res.stdout or "").splitlines()
+                     if ln.strip()]
+            detail = lines[-1].strip()[:200] if lines else f"Exit-Code {res.returncode}"
+            return f"Docker Compose lehnt sie ab ({detail})."
+        return None
+
+    def _renew_compose(self) -> bool:
+        """Install the shipped opi compose over the drifted installed copy.
+
+        VALIDATE-THEN-SWAP — the one deliberate asymmetry with the systemd path.
+        A systemd unit that fails to parse is inert (systemd logs and ignores
+        it), but ``docker compose -f`` refuses to do ANYTHING with an unparseable
+        file: the always-on manager would stop coming up, and the manager IS the
+        wizard, so the Pi would have no UI left to report the problem through.
+        The shipped bytes are gated in CI (``pi-compose-twin-guard`` +
+        ``compose-validate`` on both copies), so this is a belt against a
+        corrupt/truncated extraction rather than against a bad release — which
+        is exactly the failure the banner's ``sudo ./setup.sh`` remedy fixes.
+
+        Deliberately NOT a compose ``up``/``restart`` here. Note nonetheless
+        what boot() does a few steps later: ``start_manager`` runs
+        ``up -d --force-recreate --no-deps physical_ai_manager``, so the
+        always-on manager tier DOES adopt the newly installed compose within the
+        same boot. The robot tier is the half that waits for „Umgebung starten".
+        Say exactly that in German and nothing more optimistic.
+        """
+        return self._install_system_file(
+            self._shipped_compose_path(), COMPOSE_FILE,
+            f"Compose-Datei {os.path.basename(COMPOSE_FILE)}",
+            validate=self._validate_compose_file,
+        )
+
     def _check_system_files_version(self) -> None:
-        """Renew drifted systemd units, and report what could not be renewed (M1).
+        """Renew drifted system files, and report what could not be renewed (M1).
 
         The release tarball carries ``pi_agent/`` ONLY, so a self-update moves
-        the agent + (via ``docker/versions.env``) the images while
-        ``docker-compose.opi.yml``, ``.s6-keep`` and the systemd units stay
-        frozen at whatever ``setup.sh`` laid down. A release that adds a
-        forwarded ``EDUBOTICS_*`` env, changes a healthcheck, or re-points an
-        image ref therefore reaches the field HALF-applied, and the failure is
-        SILENT (the container simply never sees the var; Rule §2's fail-open
-        class).
+        the agent + (via ``docker/versions.env``) the images while everything
+        ``setup.sh`` laid down OUTSIDE that tree stays frozen. That used to
+        include ``docker-compose.opi.yml``: a release that added a forwarded
+        ``EDUBOTICS_*`` env, changed a healthcheck, or re-pointed an image ref
+        reached the field HALF-applied, and the failure was SILENT (the
+        container simply never saw the var; Rule §2's fail-open class). The
+        compose now ships INSIDE the package as a byte-identical twin
+        (``SHIPPED_COMPOSE_RELPATH``), so it is repairable here exactly like the
+        units. ``.s6-keep`` is still not — it is a 0-byte marker.
 
         This keys on CONTENT, never on ``stamp != APP_VERSION``. That inequality
         looks like a drift signal and is not one: the stamp cannot advance by
@@ -2202,15 +2328,18 @@ class AgentApp:
         self-updated Pis while proving nothing about what is actually in the
         files. An always-on warning is not a signal — it is a thing teachers
         learn to click past, exactly when the one real occurrence needs them.
-        Comparing the installed units to the ones this agent ships is instead
+        Comparing the installed files to the ones this agent ships is instead
         decidable: it fires only when the bytes really differ.
 
         Proven drift is REPAIRED first, not merely announced: ``_renew_system_units``
-        installs the shipped units and reloads systemd. Every fielded Pi was
-        provisioned before this release, so a release that touches a unit drifts
-        100 % of the fleet — a banner alone would therefore be permanent, and its
-        own remedy (``sudo ./setup.sh`` from a source checkout) is one a classroom
-        cannot perform. Only what the agent could NOT repair reaches the banner.
+        installs the shipped units and reloads systemd; ``_renew_compose``
+        installs the shipped compose behind a ``docker compose config`` gate.
+        Every fielded Pi was provisioned before this release, so a release that
+        touches either drifts 100 % of the fleet — a banner alone would therefore
+        be permanent, and its own remedy (``sudo ./setup.sh`` from a source
+        checkout) is one a classroom cannot perform. Only what the agent could
+        NOT repair reaches the banner, and there is at most ONE banner line
+        naming exactly those files.
 
         ADVISORY ONLY — never blocks boot or the manager. The remedy for the
         unrepairable remainder is re-running ``setup.sh`` (idempotent; it
@@ -2221,25 +2350,46 @@ class AgentApp:
         """
         stamped = self._read_system_files_stamp()
         drifted = self._drifted_units()
-        if not drifted:
+        compose_drifted = self._compose_drifted()
+        if not drifted and not compose_drifted:
             return
         origin = (f" (Stand: Version {stamped})" if stamped else "")
-        if self._renew_system_units(drifted):
-            # Repaired — nothing for the System tab to nag about. Still say so in
-            # the Protokoll: the units are the one thing an update CAN carry, and
-            # a support case wants to see that it happened (and when it takes
-            # effect).
-            self._log(
-                f"Systemd-Dienste ({', '.join(drifted)}){origin} entsprachen nicht "
-                f"der Agent-Version {APP_VERSION} und wurden automatisch erneuert. "
-                "Die Änderung wird beim nächsten Start des Agenten wirksam."
-            )
+        unrepaired: list = []
+        if drifted:
+            if self._renew_system_units(drifted):
+                # Repaired — nothing for the System tab to nag about. Still say
+                # so in the Protokoll: a support case wants to see that it
+                # happened (and when it takes effect).
+                self._log(
+                    f"Systemd-Dienste ({', '.join(drifted)}){origin} entsprachen nicht "
+                    f"der Agent-Version {APP_VERSION} und wurden automatisch erneuert. "
+                    "Die Änderung wird beim nächsten Start des Agenten wirksam."
+                )
+            else:
+                unrepaired.extend(drifted)
+        if compose_drifted:
+            compose_name = os.path.basename(COMPOSE_FILE)
+            if self._renew_compose():
+                # WHEN it takes effect is split, and the honest wording says so:
+                # boot() reaches ``start_manager`` a few steps below and that is
+                # an ``up -d --force-recreate --no-deps physical_ai_manager``, so
+                # the always-on manager adopts the new file in THIS boot. Only
+                # the robot tier waits for the student's „Umgebung starten".
+                self._log(
+                    f"Die Compose-Datei ({compose_name}){origin} entsprach nicht der "
+                    f"Agent-Version {APP_VERSION} und wurde automatisch erneuert. Die "
+                    "Weboberfläche wird noch in diesem Startvorgang darauf umgestellt; "
+                    "für den Roboter gilt sie ab dem nächsten „Umgebung starten\"."
+                )
+            else:
+                unrepaired.append(compose_name)
+        if not unrepaired:
             return
         self._system_files_stale = True
         self._system_files_version = stamped
         self._log(
-            f"[WARNUNG] Systemdateien weichen ab: die installierten Systemd-Dienste "
-            f"({', '.join(drifted)}){origin} unterscheiden sich von denen der "
+            f"[WARNUNG] Systemdateien weichen ab: die installierten Dateien "
+            f"({', '.join(unrepaired)}){origin} unterscheiden sich von denen der "
             f"Agent-Version {APP_VERSION} und konnten nicht automatisch erneuert "
             "werden. Aktualisierungen erneuern sonst nur den Agenten und die "
             "Images — nicht diese Dateien. Bitte 'sudo ./setup.sh' aus dem "
@@ -2248,11 +2398,19 @@ class AgentApp:
         )
 
     def boot(self) -> None:
-        """Boot sequence: rehydrate hardware, renew drifted systemd units, seed
-        or realign the .env, start BOTH listeners (loopback + the ros_net-gateway
-        binder loop), then — only if a self-update just landed — pull the newly
-        pinned images, and finally bring up the ALWAYS-ON manager. The robot tier
-        is intentionally left down.
+        """Boot sequence: rehydrate hardware, renew drifted system files (the
+        systemd units + the opi compose), seed or realign the .env, start BOTH
+        listeners (loopback + the ros_net-gateway binder loop), then — only if a
+        self-update just landed — pull the newly pinned images, and finally bring
+        up the ALWAYS-ON manager. The robot tier is intentionally left down.
+
+        Note the ordering consequence of the compose repair: it runs FIRST, and
+        ``start_manager`` below is an ``up -d --force-recreate --no-deps
+        physical_ai_manager``, so a compose the agent just renewed is adopted by
+        the always-on manager tier in THIS boot — not merely at the next
+        „Umgebung starten", which is only true of the robot tier. That is
+        deliberate (the manager IS the wizard, so it should be the release's
+        manager) and it is what the German Protokoll line says.
 
         The listeners start BEFORE the manager ``up``, not after. The gateway
         interface does not exist yet on a genuinely first boot, but the binder is

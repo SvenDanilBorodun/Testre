@@ -320,31 +320,46 @@ COMPOSE_FILE = os.environ.get(
 # state of every self-updated Pi — the stamp cannot advance by design and every
 # release bumps APP_VERSION — so it fires on ~100 % of healthy Pis and proves
 # nothing about the files' CONTENT. The agent instead compares the installed
-# systemd units byte-for-byte against the ones it ships (see
-# SYSTEMD_UNIT_DIR/SYSTEMD_UNIT_NAMES) and uses this stamp only to NAME the
-# version the on-disk system files came from once real drift is proven.
+# system files byte-for-byte against the ones it ships (see
+# SYSTEMD_UNIT_DIR/SYSTEMD_UNIT_NAMES and SHIPPED_COMPOSE_RELPATH) and uses this
+# stamp only to NAME the version the on-disk system files came from once real
+# drift is proven.
 #
 # ABSENT means "provisioned before the stamp existed" — read backward-compatibly.
 SYSTEM_FILES_VERSION_FILE = os.environ.get(
     "EDUBOTICS_SYSTEM_FILES_VERSION_FILE", "/opt/edubotics/.system-files-version"
 )
 
-# Where setup.sh installs the systemd units, and which units it installs. These
-# are the ONE piece of the "system files" set the agent can prove drift on: they
+# Where setup.sh installs the systemd units, and which units it installs. They
 # ship INSIDE `pi_agent/systemd/` (so a self-update rsync refreshes the agent's
 # copy) and setup.sh installs them VERBATIM (`install -m 0644`, no templating) to
 # SYSTEMD_UNIT_DIR — which self-update never touches. A byte difference between
 # the two is therefore hard evidence that this agent version expects a unit the
 # Pi is not running, with no false positives to tune out.
-#
-# `docker-compose.opi.yml` deliberately is NOT in this set: it lives outside
-# `pi_agent/` (robotis_ai_setup/docker/), so the tarball carries no reference
-# copy and the agent has nothing to compare against. Proving compose drift needs
-# release.yml to ship a hash manifest (or the compose itself) in the tarball.
 SYSTEMD_UNIT_DIR = os.environ.get(
     "EDUBOTICS_SYSTEMD_UNIT_DIR", "/etc/systemd/system"
 )
 SYSTEMD_UNIT_NAMES = ("edubotics-pi.service", "edubotics-pi-firstboot.service")
+
+# The opi compose file THIS agent version ships, relative to the `pi_agent`
+# package directory — the compose's half of the same repair mechanism.
+#
+# It used to be true that the compose could not be in the repairable set,
+# because it lived only in `robotis_ai_setup/docker/` and the release tarball
+# (`-C robotis_ai_setup pi_agent`) therefore carried no reference copy: a
+# release that added a forwarded EDUBOTICS_* env, changed a healthcheck or
+# re-pointed an image ref updated the images and the agent but left every
+# fielded Pi on the compose setup.sh laid down at provisioning time — silently.
+# A byte-identical TWIN now ships inside the package at this path, fenced
+# against the source of truth by `ci.yml::pi-compose-twin-guard` (`cmp -s`) and
+# `docker compose config`-validated on both copies by `ci.yml::compose-validate`,
+# so the agent holds the bytes it needs to prove drift and repair it (see
+# agent.py::_compose_drifted / _renew_compose).
+#
+# `.s6-keep` is deliberately still NOT in the repairable set: it is a 0-byte
+# marker whose content has never changed, so there is nothing for a byte
+# compare to find.
+SHIPPED_COMPOSE_RELPATH = os.path.join("docker", "docker-compose.opi.yml")
 
 # Persisted auto-pull state: timestamp + per-image RepoDigests, for the
 # freshness banner ("Letzter Image-Update: vor X Tagen").

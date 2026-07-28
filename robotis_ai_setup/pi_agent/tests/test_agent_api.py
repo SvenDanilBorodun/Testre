@@ -1031,6 +1031,55 @@ class TestSystemFilesVersionCheck(unittest.TestCase):
         self._check(stamp_contents="   \n", renew=False)
         self.assertIsNone(self.app._system_files_version)
 
+    def test_a_stamp_equal_to_the_agent_version_names_no_origin(self):
+        """The origin suffix exists to name a version DIFFERENT from this
+        agent's. When the stamp EQUALS APP_VERSION it printed the same number
+        twice and the sentence contradicted itself:
+
+            „(Stand: Version 2.13.0) entsprachen nicht der Agent-Version 2.13.0"
+
+        That state is reachable, not theoretical — it is every Pi whose
+        setup.sh last ran at the version now running (a bench re-provision, or a
+        source-checkout install that has not self-updated since), which is also
+        exactly where the likeliest real drift lives: a hand-edited udev rule.
+        Assert all three repaired legs at once; they share one `origin`."""
+        self._install_units(drift=True)
+        self._install_udev(drift=True)
+        self._install_compose(drift=True)
+        text = self._check(stamp_contents="2.13.0\n", app_version="2.13.0")
+        self.assertNotIn("Stand: Version", text)
+        # The drift is still REPORTED — suppressing the suffix must not
+        # suppress the finding, on any of the three legs.
+        self.assertIn("Systemd-Dienste", text)
+        self.assertIn("Udev-Regeln", text)
+        self.assertIn("Compose-Datei", text)
+        self.assertIn("der Agent-Version 2.13.0", text)
+
+    def test_a_stamp_that_differs_still_names_the_origin(self):
+        """The other half of the same rule, and the reason it is a separate
+        test: "never emit the suffix" would satisfy the assertion above and
+        silently delete the feature. Where the stamp carries information it
+        must still be printed."""
+        self._install_units(drift=True)
+        self._install_udev(drift=True)
+        self._install_compose(drift=True)
+        text = self._check(stamp_contents="2.12.0\n", app_version="2.13.0")
+        self.assertIn("(Stand: Version 2.12.0)", text)
+        self.assertIn("der Agent-Version 2.13.0", text)
+
+    def test_the_unrepairable_banner_obeys_the_same_origin_rule(self):
+        """The FOURTH site. `origin` is built once and interpolated into the
+        three repaired-leg lines AND the [WARNUNG] banner, so the contradiction
+        reached the one message a teacher actually sees in the System tab."""
+        self._install_units(drift=True)
+        text = self._check(stamp_contents="2.13.0\n", app_version="2.13.0",
+                           renew=False)
+        self.assertIn("[WARNUNG]", text)
+        self.assertNotIn("Stand: Version", text)
+        # …and the banner still fires, with the agent version still named.
+        self.assertTrue(self.app._system_files_stale)
+        self.assertIn("der Agent-Version 2.13.0", text)
+
     def test_uninstalled_units_prove_nothing_and_stay_silent(self):
         # A dev box / relocated install / non-root reader cannot compare. Absent
         # evidence is not evidence of drift — never guess.

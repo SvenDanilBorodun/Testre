@@ -278,7 +278,11 @@ def _set_cross_family_presence_notice(arm_family: str) -> None:
     other = "edu6" if arm_family != "edu6" else "omx"
     try:
         present = find_serial_paths_for_arms(other)
-    except OSError:
+    except Exception:  # noqa: BLE001 — a diagnostic must never fail a scan
+        # Same breadth as the Windows twin. The scan has already decided its
+        # answer by the time we get here; this only decides how to WORD the
+        # failure, so it degrades to the generic message rather than turning a
+        # clean 404 into a 500.
         return
     if not present:
         return

@@ -421,6 +421,17 @@ class TestCrossFamilyPresenceNotice(unittest.TestCase):
         self._empty_scan("omx", ["/dev/serial/by-id/usb-Some_GPS_0001-if00"])
         self.assertEqual(identify_arm.LAST_SCAN_NOTICE, "")
 
+    def test_a_raising_enumeration_degrades_instead_of_failing_the_scan(self):
+        """The scan has already decided its answer by then — this only decides
+        how to WORD the failure, so it must never turn a clean „kein Arm
+        gefunden" into a 500."""
+        with patch.object(identify_arm, "_poll_serial_paths", return_value=[]), \
+                patch.object(identify_arm, "find_serial_paths_for_arms",
+                             side_effect=RuntimeError("udev exploded")):
+            self.assertEqual(identify_arm.scan_and_identify_arms("img", arm_family="edu6"),
+                             (None, None))
+        self.assertEqual(identify_arm.LAST_SCAN_NOTICE, "")
+
 
 class TestFastRehydrateArms(unittest.TestCase):
     def setUp(self):

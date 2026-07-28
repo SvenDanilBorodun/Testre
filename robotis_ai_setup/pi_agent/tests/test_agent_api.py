@@ -667,6 +667,84 @@ class TestBootRealignsImageTag(unittest.TestCase):
         self.assertIn("KEIN Registry", text)
 
 
+# ── WP-0: boot() is the ONLY caller of the system-file repair ────────────────
+
+
+class TestBootRunsTheSystemFileRepair(unittest.TestCase):
+    """`boot()` calling `_check_system_files_version()` IS the delivery path.
+
+    Every other test in this file exercises the repair by calling it directly,
+    so the one line that ever runs it in the field was unguarded: MEASURED
+    2026-07-28, deleting the call from `boot()` left the whole pi_agent suite
+    green (387 passed), and so did moving it below `start_manager`. Without that
+    line the compose twin, the systemd units and the udev rules all ship
+    correctly and are never compared to anything — the fleet stays on whatever
+    `setup.sh` laid down, silently, which is precisely the fail-open WP-0 closed.
+
+    The ORDERING is load-bearing too, and equally unguarded. `start_manager` is
+    `up -d --force-recreate --no-deps physical_ai_manager`, so a compose renewed
+    BEFORE it is adopted by the always-on manager tier in the same boot — which
+    is exactly what the German Protokoll line promises the student („Die
+    Weboberfläche wird noch in diesem Startvorgang darauf umgestellt"). Renewed
+    after, the manager would come up on the OLD file and the promise would be
+    false until the next reboot.
+
+    `TestBootRealignsImageTag` cannot cover either property: it sandboxes all
+    three repair destinations to directories that do not exist, so the repair is
+    a guaranteed no-op there whether it runs or not.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.env = os.path.join(self.dir, ".env")
+        with open(self.env, "w", encoding="utf-8") as f:
+            f.write(f'IMAGE_TAG="{agent.IMAGE_TAG}"\n')  # matching = no pull
+        self.app = agent.AgentApp()
+        self.app.env_file = self.env
+        self.app._log = lambda _m: None
+
+    def _boot_recording_order(self):
+        """Boot with the repair and the manager start replaced by recorders.
+
+        The repair is stubbed rather than sandboxed on purpose: this class asks
+        WHETHER and WHEN boot() calls it, never what it does — and stubbing it
+        also keeps a suite run on a provisioned Pi from touching /etc.
+        """
+        order = []
+        with patch.object(self.app, "_check_system_files_version",
+                          side_effect=lambda: order.append("repair")), \
+             patch.object(agent.docker_manager, "start_manager",
+                          side_effect=lambda **kw: order.append("manager") or True), \
+             patch.object(self.app, "_pull_images_after_self_update",
+                          side_effect=lambda: order.append("pull")), \
+             patch.object(self.app, "start_loopback"), \
+             patch.object(agent.threading, "Thread"):
+            self.app.boot()
+        return order
+
+    def test_boot_runs_the_system_file_repair_at_all(self):
+        order = self._boot_recording_order()
+        self.assertIn(
+            "repair", order,
+            "boot() never called _check_system_files_version — the compose "
+            "twin, the systemd units and the udev rules would ship to every Pi "
+            "and never be compared to anything",
+        )
+
+    def test_the_repair_runs_BEFORE_the_manager_is_started(self):
+        order = self._boot_recording_order()
+        self.assertLess(
+            order.index("repair"), order.index("manager"),
+            "a compose renewed after start_manager is not adopted until the "
+            "NEXT boot, so the Protokoll's „noch in diesem Startvorgang\" "
+            "would be false",
+        )
+        # Nothing was pulled (the .env pins the running tag), so the whole
+        # observable boot is exactly these two steps in exactly this order.
+        self.assertEqual(order, ["repair", "manager"])
+
+
 # ── C1: the post-self-update resilient pull itself ───────────────────────────
 
 
@@ -1376,6 +1454,71 @@ class TestSystemFilesVersionCheck(unittest.TestCase):
             "robotis_ai_setup/docker/docker-compose.opi.yml",
         )
 
+    def test_the_shipped_compose_is_resolved_INSIDE_the_agent_package(self):
+        """The accessor's resolution itself, which byte-identity hides.
+
+        The test above reads the path FROM the accessor, so it cannot see WHERE
+        the accessor looked; and in a source checkout both copies exist and are
+        byte-identical (that is exactly what the twin guard enforces), so every
+        other assertion in this class passes just as happily against the
+        `robotis_ai_setup/docker/` copy. MEASURED 2026-07-28: repointing
+        `_shipped_compose_path` one directory up left the whole pi_agent suite
+        green — 387 passed, control and mutant alike.
+
+        A fielded Pi has ONLY the package copy (`/opt/edubotics/pi_agent/`), so
+        that mutant resolves to a path that does not exist, `_compose_drifted`
+        returns False under its skip-on-OSError rule, and the entire delivery
+        mechanism is silently dead: no repair, no banner, no log line. Pin the
+        package-relative property directly, since nothing observable does.
+
+        `SHIPPED_COMPOSE_RELPATH` is the constant `release.yml`'s tarball gate
+        and `setup.sh` both name; before this test nothing referenced it."""
+        pkg = os.path.dirname(os.path.abspath(agent.__file__))
+        resolved = self.app._shipped_compose_path()
+        self.assertTrue(os.path.isabs(resolved), resolved)
+        self.assertEqual(resolved,
+                         os.path.join(pkg, agent.SHIPPED_COMPOSE_RELPATH))
+        # Said twice on purpose: the equality above pins the whole path, these
+        # two pin the two halves that matter on their own — inside the package
+        # (so the self-update rsync carries it) and at the relpath the release
+        # gate asserts (so the tarball member and the reader agree).
+        self.assertEqual(os.path.commonpath([resolved, pkg]), pkg)
+        self.assertTrue(resolved.endswith(agent.SHIPPED_COMPOSE_RELPATH),
+                        resolved)
+
+    def test_the_compose_repair_works_on_a_pi_with_NO_source_checkout(self):
+        """The same property as an OBSERVABLE, in the layout a Pi actually has.
+
+        `/opt/edubotics/pi_agent/` is the whole install — `setup.sh` needs a
+        source checkout no classroom has, and the release tarball packages
+        `pi_agent/` alone. So the sibling `robotis_ai_setup/docker/` this repo
+        keeps beside the package simply is not there, and any resolution that
+        leans on it degrades to the silent do-nothing WP-0 exists to end.
+
+        Modelled by pointing the module's `__file__` at a package tree that has
+        the twin and nothing outside it. The systemd/udev legs go quiet for free
+        (their shipped dirs are absent there, and absent proves nothing), which
+        leaves exactly the compose leg under test."""
+        field = os.path.join(self.dir, "opt", "edubotics")
+        pkg = os.path.join(field, "pi_agent")
+        os.makedirs(os.path.join(pkg, "docker"))
+        shutil.copyfile(self.shipped_compose,
+                        os.path.join(pkg, agent.SHIPPED_COMPOSE_RELPATH))
+        # The point of the fixture: nothing above the package.
+        self.assertFalse(os.path.exists(os.path.join(field, "docker")))
+        self._install_compose(drift=True)
+        with patch.object(agent, "__file__", os.path.join(pkg, "agent.py")):
+            self.assertTrue(self.app._compose_drifted(),
+                            "a Pi with only the packaged twin must still be "
+                            "able to PROVE its installed compose drifted")
+            text = self._check(stamp_contents="2.13.0\n", app_version="2.14.0")
+            self.assertFalse(self.app._compose_drifted())
+        self.assertIn("erneuert", text)
+        self.assertNotIn("[WARNUNG]", text)
+        self.assertFalse(self.app._system_files_stale)
+        with open(self.installed_compose, "rb") as f:
+            self.assertEqual(f.read(), Path(self.shipped_compose).read_bytes())
+
     def test_a_drifted_compose_is_renewed_atomically(self):
         """WP-0's whole point. A release that adds a forwarded EDUBOTICS_* env,
         changes a healthcheck or re-points an image ref used to reach the field
@@ -1490,6 +1633,65 @@ class TestSystemFilesVersionCheck(unittest.TestCase):
         self.assertIn("docker-compose.opi.yml", text)
         self.assertTrue(self.app._system_files_stale)
         self.assertEqual(self.app._system_files_version, "2.13.0")
+
+    def test_a_validate_gate_that_cannot_RUN_refuses_the_swap(self):
+        """An UNRUNNABLE check is a refusal too — the gate's documented „safe
+        direction", and until 2026-07-28 nothing tested it: `_validate_compose_file`
+        appeared in no test that made `subprocess.run` raise, so replacing its
+        except branch with `return None` left the suite green (MEASURED, 387
+        passed) while turning validate-then-swap into swap-and-hope.
+
+        Both raising causes are real. `FileNotFoundError` is what a missing
+        `docker` binary produces, and it is also what a scrubbed PATH would
+        produce — the gate deliberately runs under `docker_manager._scrubbed_env()`,
+        so a regression there arrives here first. `TimeoutExpired` is a wedged
+        or unresponsive dockerd, the case where accepting is worst: the answer
+        is not "the file is fine", it is "nobody looked", and the file being
+        swapped in is the one the always-on manager — i.e. the wizard, i.e. the
+        Pi's only repair surface — has to parse to come up at all.
+
+        Refusing costs nothing by comparison: the Pi keeps running the compose
+        it already had, says so in German, and retries on the next boot."""
+        for exc, cause in (
+            (FileNotFoundError(2, "No such file or directory: 'docker'"),
+             "no docker binary"),
+            (subprocess.TimeoutExpired(["docker", "compose", "config"], 20),
+             "a wedged dockerd"),
+        ):
+            with self.subTest(cause=cause):
+                self.logs.clear()
+                self.app._system_files_stale = False
+                self.app._system_files_version = None
+                self._install_compose(drift=True)
+                with open(self.installed_compose, "rb") as f:
+                    before = f.read()
+
+                def _run(argv, *_a, _exc=exc, **_kw):
+                    if "config" in argv:  # only the gate is unrunnable
+                        raise _exc
+                    return subprocess.CompletedProcess(argv, 0, "", "")
+
+                with patch.object(agent, "SYSTEM_FILES_VERSION_FILE", self.stamp), \
+                     patch.object(agent, "SYSTEMD_UNIT_DIR", self.installed), \
+                     patch.object(agent, "APP_VERSION", "2.14.0"), \
+                     patch.object(agent.subprocess, "run", _run):
+                    self.app._check_system_files_version()
+                text = "\n".join(self.logs)
+                # THE assertion: the working file survived byte for byte.
+                with open(self.installed_compose, "rb") as f:
+                    self.assertEqual(f.read(), before,
+                                     "an unrunnable check must never swap")
+                self.assertTrue(self.app._compose_drifted())
+                # Nothing mutating ran at all — the gate sits above the backup.
+                self.assertFalse(
+                    os.path.exists(self.installed_compose + ".edubotics-bak"))
+                self.assertFalse(
+                    os.path.exists(self.installed_compose + ".edubotics-tmp"))
+                # …and the refusal is legible: the German reason, then the banner.
+                self.assertIn("NICHT erneuert", text)
+                self.assertIn("[WARNUNG]", text)
+                self.assertIn("docker-compose.opi.yml", text)
+                self.assertTrue(self.app._system_files_stale)
 
     def test_the_validate_gate_runs_docker_compose_config_on_the_staged_file(self):
         """The gate must judge the STAGED bytes, never the installed file — and

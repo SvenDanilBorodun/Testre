@@ -261,14 +261,33 @@ def test_a_malformed_or_negative_env_falls_back_to_the_default(monkeypatch):
 
 def test_self_collision_never_blocks_a_route(monkeypatch):
     """Rule §2: shipping a REFUSAL on self-collision is out of scope this round.
-    A route whose self-clearance is zero must still be returned."""
+    A route whose self-clearance is zero must still be returned — and, with the
+    knob explicitly ON, must warn rather than refuse."""
     from physical_ai_server.workflow import arm_geometry as AG
     monkeypatch.setattr(AG.ArmGeometry, 'swept_self_clearance',
                         lambda *_a, **_k: 0.0)
+    monkeypatch.setattr(HP, 'SELFCOLL_WARN_M', 0.010)   # ships DISABLED; opt in
     ctx = _edu6()
     legs = HP.plan_home_route(ctx, _HOME_FULL, _HOME_FULL, 3.0)
     assert len(legs) == 1
     assert any('sehr nahe' in m for m in ctx.logs)
+
+
+def test_the_self_collision_warning_ships_DISABLED(monkeypatch):
+    """The default is 0.0 — see the derivation on SELFCOLL_WARN_M. The bound is
+    a separating-axis LOWER bound whose pessimism (19.1 mm at HOME) exceeds its
+    own maximum on this motion (12.30 mm), so every positive threshold fires on
+    model error: 40.5 % of home glides at the previously shipped 10 mm, against
+    0/200 real mesh self-collisions. Pin the default so it cannot drift back on
+    without the derivation being revisited."""
+    assert HP.SELFCOLL_WARN_M == 0.0
+    from physical_ai_server.workflow import arm_geometry as AG
+    monkeypatch.setattr(AG.ArmGeometry, 'swept_self_clearance',
+                        lambda *_a, **_k: 0.0)
+    ctx = _edu6()
+    HP.plan_home_route(ctx, _HOME_FULL, _HOME_FULL, 3.0)
+    assert not any('sehr nahe' in m for m in ctx.logs), (
+        'a zero bound must be SILENT at the shipped default')
 
 
 def test_the_self_collision_warning_is_silent_when_the_route_is_clear():

@@ -120,13 +120,37 @@ def _env_float(name: str, default: float, minimum: float = 0.0) -> float:
 # special-cased explicitly below rather than left to arithmetic.)
 FLOOR_TOL_M = _env_float('EDUBOTICS_HOME_FLOOR_TOL_M', 0.020)
 
-# Self-collision is WARN-ONLY this round and never gates a rung. Measured
-# 0/200 mesh self-collisions among random in-limit configs, and 0/200 on home
-# glides; a directed 21,175-config search re-checked all 7,410 candidates whose
-# conservative bound reached 0 and found no penetration (tightest +0.062 mm).
-# A refusal built on a rate measured as ZERO would be all cost and no benefit,
-# and promoting it is a Rule §2 change needing sign-off. 0 disables the warning.
-SELFCOLL_WARN_M = _env_float('EDUBOTICS_HOME_SELFCOLL_WARN_M', 0.010)
+# Self-collision is WARN-ONLY, never gates a rung, and ships DISABLED (0.0).
+#
+# WHY THE DEFAULT IS 0. ``swept_self_clearance`` is a separating-axis LOWER
+# BOUND, not a distance: a non-positive result means "could not certify
+# separation", NOT "the parts touch". Shipping 0.010 compared a real threshold
+# against a pessimistic quantity, and the pessimism is larger than the whole
+# range the quantity occupies on this motion:
+#
+#   * at HOME the bound reads 12.30 mm against a MEASURED 31.4 mm mesh gap
+#     (CLAUDE.md's own figure) — 19.1 mm of pessimism at the one pose where
+#     both numbers exist;
+#   * 12.30 mm is also the bound's MAXIMUM over 351 home glides from
+#     solver-reachable start poses (the HOME endpoint dominates every swept
+#     minimum), so the pessimism EXCEEDS the entire positive range;
+#   * consequently no positive threshold separates model error from real
+#     proximity. Measured fire rates over those 351 glides:
+#         10 mm 40.5 %   5 mm 28.8 %   2 mm 25.1 %   0 mm 23.9 %
+#     against 0/200 real mesh self-collisions on home glides, and a directed
+#     21,175-config search in which every one of the 7,410 candidates whose
+#     bound reached 0 still had a real gap (tightest +0.062 mm).
+#
+# So the shipped 10 mm fired on two of every five „Grundstellung" presses and
+# had never once corresponded to contact — the same warning-fatigue defect
+# ``_APPROACH_WARN_FRAC`` was derived to fix (685/685 → 66/685). It also cost
+# 96 % of the planner: 375.5 ms → 14.6 ms mean per home block with it off.
+#
+# The knob and the code path are KEPT so a properly calibrated self-collision
+# model can switch it on with one variable; re-deriving the threshold against
+# real mesh distances is the prerequisite, not picking a smaller number.
+# Promoting it to a REFUSAL remains a Rule §2 change needing sign-off.
+SELFCOLL_WARN_M = _env_float('EDUBOTICS_HOME_SELFCOLL_WARN_M', 0.0)
 
 # Via-search shape. Plain constants, NOT env vars: a knob nobody will turn
 # should not become a name that needs a compose forward (the

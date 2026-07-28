@@ -527,6 +527,90 @@ jobs:
             echo "::error::physical-ai-manager-opi healthcheck still references localhost — busybox wget AAAA-first regression"
             exit 1
           fi
+      - name: docker compose config (Orange Pi — the copy that SHIPS)
+        # WP-0: robotis_ai_setup/pi_agent/docker/docker-compose.opi.yml is a
+        # byte-identical twin of the file validated above, and it is the copy
+        # that actually reaches a fielded Pi — the release tarball packages
+        # `pi_agent/` alone and the agent's self-update rsyncs `pi_agent/`
+        # alone, so before the twin existed a compose change could never leave
+        # the repo. The agent byte-compares the installed copy against this one
+        # and repairs it (agent.py::_compose_drifted / _renew_compose), behind
+        # its own `docker compose config -q` gate — a file that fails to parse
+        # is REFUSED on the Pi, which would leave the fleet permanently
+        # bannered on an un-appliable release. So validate the shipped copy
+        # here too: pi-compose-twin-guard proves the two are equal, this proves
+        # the one that ships is valid on its own terms. Relative bind-mount
+        # targets are not resolved by `config`, so the twin's directory needing
+        # no physical_ai_server/ sibling is fine (measured).
+        #
+        # The fake .env is written OUTSIDE the twin's directory, unlike the
+        # steps above: that directory is packaged verbatim into the release
+        # tarball, so nothing may ever be created inside it — a step that failed
+        # between the write and a cleanup would leave a stray file in a shipped
+        # tree.
+        run: |
+          envfile="$(mktemp)"
+          cat > "$envfile" <<'EOF'
+          FOLLOWER_PORT=/dev/ttyACM0
+          LEADER_PORT=/dev/ttyACM1
+          CAMERA_DEVICE_1=/dev/video0
+          CAMERA_NAME_1=gripper
+          CAMERA_DEVICE_2=/dev/video2
+          CAMERA_NAME_2=scene
+          ROS_DOMAIN_ID=30
+          REGISTRY=nettername
+          EDUBOTICS_BIND_HOST=0.0.0.0
+          EDUBOTICS_ROS_NET_SUBNET=172.28.0.0/24
+          EDUBOTICS_ROS_NET_GATEWAY=172.28.0.1
+          EDUBOTICS_FOLLOWER_ONLY=0
+          EOF
+          docker compose --env-file "$envfile" \
+            -f robotis_ai_setup/pi_agent/docker/docker-compose.opi.yml config > /dev/null
+          rm -f "$envfile"
+
+  pi-compose-twin-guard:
+    # WP-0. `robotis_ai_setup/docker/docker-compose.opi.yml` is the SOURCE OF
+    # TRUTH (what compose-validate validates, what setup.sh installs from a
+    # source checkout, what every doc points at).
+    # `robotis_ai_setup/pi_agent/docker/docker-compose.opi.yml` is the twin that
+    # rides the release tarball, because the tarball packages `pi_agent/` alone
+    # and the agent self-update rsyncs `pi_agent/` alone — it is the ONLY route
+    # a compose change has to a fielded Orange Pi.
+    #
+    # A divergence is worse than the bug it replaced. Today a stale fielded
+    # compose at least fails loudly at „Umgebung starten"; a drifted twin would
+    # have the agent CONFIRM in German that it renewed the compose, having
+    # written the wrong file. Nothing downstream could catch it: the agent's own
+    # `docker compose config -q` gate proves the twin is VALID, not that it is
+    # CURRENT. So the equality is fenced here, on every push, and again on the
+    # built artifact in release.yml::pi-agent-tarball.
+    #
+    # A twin is used rather than a symlink because the delivery path is `tar`
+    # (which would package the link, not the bytes) and `install -m 0644`, and
+    # rather than a release-time copy because the versions.env precedent shows
+    # generated files are easy to forget and impossible for a source reader to
+    # see. `cmp` is what makes the duplication safe.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Assert the shipped pi_agent compose twin is byte-identical
+        run: |
+          src=robotis_ai_setup/docker/docker-compose.opi.yml
+          twin=robotis_ai_setup/pi_agent/docker/docker-compose.opi.yml
+          test -f "$twin" || {
+            echo "::error file=${twin}::missing — without it no compose change in this release can reach a fielded Orange Pi (the release tarball and the agent self-update both carry pi_agent/ only)"
+            exit 1
+          }
+          if ! cmp -s "$src" "$twin"; then
+            echo "::error file=${twin}::differs from ${src} — the agent would repair every fielded Pi ONTO this file, so a stale twin silently ships stale orchestration while reporting success. Copy the source of truth over it:"
+            echo "    cp ${src} ${twin}"
+            diff -u "$src" "$twin" | head -60 || true
+            exit 1
+          fi
+          echo "OK: ${twin} is byte-identical to ${src}"
 
   env-forwarding-guard:
     # Every EDUBOTICS_* env var referenced by an entrypoint script

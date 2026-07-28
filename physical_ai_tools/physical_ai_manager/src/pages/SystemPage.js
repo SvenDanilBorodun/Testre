@@ -358,12 +358,18 @@ export default function SystemPage() {
         />
 
         {/* System-files drift. `system_files_stale` is true ONLY when the agent
-            found PROVEN drift: it byte-compares the installed systemd units
-            against the ones it ships (pi_agent/systemd/). Reason: the
-            self-update rsyncs pi_agent/ ONLY — units and compose stay frozen at
-            provisioning time and otherwise fail silently (e.g. a newly
-            forwarded EDUBOTICS_* env). Without this banner the warning lived
-            only in the Protokoll, which nobody reads. The remedy is
+            found PROVEN drift AND could not repair it itself: it byte-compares
+            the installed systemd units against the ones it ships
+            (pi_agent/systemd/) and the installed docker-compose.opi.yml against
+            its shipped twin (pi_agent/docker/), then installs the shipped bytes
+            atomically — so this banner names the remainder only. Reason: the
+            self-update rsyncs pi_agent/ ONLY, so anything setup.sh laid down
+            outside that tree stays frozen at provisioning time and otherwise
+            fails silently (e.g. a newly forwarded EDUBOTICS_* env). The compose
+            repair is additionally gated on `docker compose config` and REFUSES
+            a file that will not parse, which is one way to land here. Without
+            this banner the warning lived only in the Protokoll, which nobody
+            reads. The text below is deliberately file-agnostic. The remedy is
             deliberately NON-DESTRUCTIVE: setup.sh is idempotent and every
             volume (datasets, models, calibration) survives — NEVER tell anyone
             here to re-flash the SD card (an earlier draft did, at ~100 % false

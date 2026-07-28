@@ -425,6 +425,12 @@ class TestBootRealignsImageTag(unittest.TestCase):
                           os.path.join(self.dir, "no-compose", "docker-compose.opi.yml"))
         pc.start()
         self.addCleanup(pc.stop)
+        # …and the udev rules, for the third time and the same reason: a root
+        # write to /etc/udev/rules.d + `udevadm control --reload-rules`. The
+        # sandbox dir does not exist, so `_drifted_udev_rules` skips.
+        pu = patch.object(agent, "UDEV_RULES_DIR", os.path.join(self.dir, "no-udev"))
+        pu.start()
+        self.addCleanup(pu.stop)
 
     def _boot(self):
         # _pull_images_after_self_update is mocked here and exercised on its own
@@ -775,6 +781,14 @@ class TestSystemFilesVersionCheck(unittest.TestCase):
         pc = patch.object(agent, "COMPOSE_FILE", self.installed_compose)
         pc.start()
         self.addCleanup(pc.stop)
+        # The INSTALLED udev rules (/etc/udev/rules.d on a real Pi), sandboxed
+        # for the same reason: on a dev Pi the real rule exists and the class's
+        # verdicts would depend on whether it happened to match.
+        self.installed_udev = os.path.join(self.dir, "udev-rules.d")
+        os.makedirs(self.installed_udev)
+        pu = patch.object(agent, "UDEV_RULES_DIR", self.installed_udev)
+        pu.start()
+        self.addCleanup(pu.stop)
         self.addCleanup(shutil.rmtree, self.dir, True)
         self.app = agent.AgentApp()
         self.logs = []
@@ -784,6 +798,22 @@ class TestSystemFilesVersionCheck(unittest.TestCase):
                                         "systemd")
         # …and the compose twin it ships (the real pi_agent/docker/ copy).
         self.shipped_compose = self.app._shipped_compose_path()
+        # …and the udev rules it ships (the real pi_agent/udev/ copies).
+        self.shipped_udev_dir = self.app._shipped_dir("udev")
+
+    def _install_udev(self, drift=False):
+        """Lay down the /etc/udev/rules.d copies of the shipped rules.
+
+        `drift=True` models the fail-open the udev leg closes: setup.sh
+        installed the rule of an OLDER release (one VID/PID line short) and no
+        self-update since has ever touched /etc/udev/rules.d."""
+        for rule in agent.UDEV_RULE_NAMES:
+            with open(os.path.join(self.shipped_udev_dir, rule), "rb") as f:
+                data = f.read()
+            if drift:
+                data += b'\n# provisioned by an older release (no CH343P line)\n'
+            with open(os.path.join(self.installed_udev, rule), "wb") as f:
+                f.write(data)
 
     def _install_units(self, drift=False):
         """Lay down /etc/systemd/system copies of the shipped units. `drift=True`
@@ -1263,6 +1293,161 @@ class TestSystemFilesVersionCheck(unittest.TestCase):
         self.assertEqual(env, expected_env)
         # …and the repair still went through with the poison present.
         self.assertFalse(self.app._compose_drifted())
+
+    # ── the udev rules join the same repairable set ──────────────────────────
+
+    def test_every_shipped_udev_rule_named_in_the_constant_exists(self):
+        """A guard against a DEAD guard. `_drifted_in` skips a name it cannot
+        read on EITHER side, so a rule renamed on disk without updating
+        UDEV_RULE_NAMES (or vice versa) would make the whole udev repair a
+        permanent silent no-op — green suite, unrepaired fleet. Same failure
+        shape the twin guard exists for, one directory over."""
+        self.assertTrue(agent.UDEV_RULE_NAMES)
+        for rule in agent.UDEV_RULE_NAMES:
+            self.assertTrue(
+                os.path.isfile(os.path.join(self.shipped_udev_dir, rule)),
+                f"{rule} is named in UDEV_RULE_NAMES but not shipped in pi_agent/udev/",
+            )
+        # …and setup.sh installs from the same directory, so the two halves of
+        # the delivery path cannot drift apart unnoticed.
+        setup_sh = (SETUP_DIR / "pi_agent" / "setup.sh").read_text(encoding="utf-8")
+        for rule in agent.UDEV_RULE_NAMES:
+            self.assertIn(rule, setup_sh)
+
+    def test_a_drifted_udev_rule_is_renewed_and_udev_is_reloaded(self):
+        """The fail-open this closes: the rules always rode the tarball (and the
+        self-update rsync), but nothing ever COMPARED them, so a release adding a
+        VID/PID line — the planned CH343P line for the edu6 arm is exactly that —
+        shipped an agent that scans for an arm whose /dev node its scanner
+        container may not be permitted to open, on 100 % of the fielded fleet."""
+        self._install_udev(drift=True)
+        argvs = []
+
+        def _run(argv, *a, **kw):
+            argvs.append(list(argv))
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        with patch.object(agent, "SYSTEM_FILES_VERSION_FILE", self.stamp), \
+             patch.object(agent, "SYSTEMD_UNIT_DIR", self.installed), \
+             patch.object(agent, "APP_VERSION", "2.14.0"), \
+             patch.object(agent.subprocess, "run", _run):
+            self.app._check_system_files_version()
+        text = "\n".join(self.logs)
+        self.assertNotIn("[WARNUNG]", text)
+        self.assertFalse(self.app._system_files_stale)
+        self.assertIn("Udev-Regeln", text)
+        self.assertIn("99-edubotics-robotis.rules", text)
+        self.assertEqual(self.app._drifted_udev_rules(), [])
+        for rule in agent.UDEV_RULE_NAMES:
+            installed = os.path.join(self.installed_udev, rule)
+            self.assertEqual(os.stat(installed).st_mode & 0o777, 0o644)
+            self.assertTrue(os.path.isfile(installed + ".edubotics-bak"))
+            self.assertFalse(os.path.exists(installed + ".edubotics-tmp"))
+        self.assertIn(["udevadm", "control", "--reload-rules"], argvs, argvs)
+
+    def test_the_udev_repair_reloads_the_rules_but_never_TRIGGERS_them(self):
+        """The load-bearing asymmetry, and the exact analogue of
+        „daemon-reload, never restart".
+
+        `udevadm control --reload-rules` only makes the new rule set known.
+        `udevadm trigger` REPLAYS add/change events for devices that are already
+        enumerated — on a Pi mid-lesson that re-fires events for the very tty
+        nodes an open serial connection holds. A drift check is advisory; it must
+        not be able to disturb a running session. setup.sh may trigger (nothing
+        is live yet) and does — that difference is deliberate."""
+        self._install_udev(drift=True)
+        self._install_units(drift=True)
+        self._install_compose(drift=True)
+        argvs = []
+
+        def _run(argv, *a, **kw):
+            argvs.append(list(argv))
+            if "config" in argv:
+                return subprocess.CompletedProcess(argv, 0, "", "")
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        with patch.object(agent, "SYSTEM_FILES_VERSION_FILE", self.stamp), \
+             patch.object(agent, "SYSTEMD_UNIT_DIR", self.installed), \
+             patch.object(agent.subprocess, "run", _run):
+            self.app._check_system_files_version()
+        self.assertTrue(argvs)
+        for argv in argvs:
+            for forbidden in ("trigger", "settle", "restart", "up", "start",
+                              "stop", "rm", "pull", "enable", "add"):
+                self.assertNotIn(forbidden, argv, argv)
+
+    def test_a_failed_udevadm_reload_still_counts_as_repaired(self):
+        """No udev on the box (a dev laptop) or a reload hiccup: the FILES are
+        correct, which is the durable half — udev re-reads /etc/udev/rules.d at
+        boot regardless. Never banner over the reload, exactly as the systemd
+        path never banners over a failed daemon-reload."""
+        self._install_udev(drift=True)
+        with patch.object(agent, "SYSTEM_FILES_VERSION_FILE", self.stamp), \
+             patch.object(agent, "SYSTEMD_UNIT_DIR", self.installed), \
+             patch.object(agent.subprocess, "run",
+                          side_effect=FileNotFoundError("udevadm")):
+            self.app._check_system_files_version()
+        self.assertFalse(self.app._system_files_stale)
+        self.assertEqual(self.app._drifted_udev_rules(), [])
+
+    def test_an_absent_installed_udev_rule_is_skipped_not_installed(self):
+        """Absent evidence is not evidence of drift — the same rule the compose
+        and unit legs follow. A box that never had the rule (a dev machine, a
+        hand-managed install) must not be silently written to."""
+        for rule in agent.UDEV_RULE_NAMES:
+            self.assertFalse(os.path.exists(os.path.join(self.installed_udev, rule)))
+        text = self._check(stamp_contents="2.13.0\n")
+        self.assertEqual(text, "")
+        self.assertFalse(self.app._system_files_stale)
+        for rule in agent.UDEV_RULE_NAMES:
+            self.assertFalse(os.path.exists(os.path.join(self.installed_udev, rule)))
+
+    def test_an_unrepairable_udev_rule_sets_the_banner(self):
+        """A read-only /etc is the state where the advisory banner still earns
+        its place. Degrade to it, never raise out of boot()."""
+        self._install_udev(drift=True)
+        with patch.object(agent, "SYSTEM_FILES_VERSION_FILE", self.stamp), \
+             patch.object(agent, "SYSTEMD_UNIT_DIR", self.installed), \
+             patch.object(agent, "APP_VERSION", "2.14.0"), \
+             patch.object(agent.subprocess, "run",
+                          MagicMock(return_value=subprocess.CompletedProcess([], 0, "", ""))), \
+             patch.object(agent.os, "replace",
+                          side_effect=OSError("read-only file system")):
+            self.app._check_system_files_version()  # must not raise
+        self.assertTrue(self.app._system_files_stale)
+        text = "\n".join(self.logs)
+        self.assertEqual(text.count("[WARNUNG]"), 1, text)
+        self.assertIn("99-edubotics-robotis.rules", text)
+        for rule in agent.UDEV_RULE_NAMES:
+            self.assertFalse(os.path.exists(
+                os.path.join(self.installed_udev, rule) + ".edubotics-tmp"))
+
+    def test_a_matching_udev_rule_is_silent(self):
+        self._install_udev(drift=False)
+        text = self._check(stamp_contents="2.13.0\n", app_version="2.14.0")
+        self.assertEqual(text, "")
+        self.assertFalse(self.app._system_files_stale)
+
+    def test_all_three_file_kinds_share_ONE_banner(self):
+        """"Only what could NOT be repaired reaches the banner" — still at most
+        one line, now naming units, udev rules and the compose together."""
+        self._install_units(drift=True)
+        self._install_udev(drift=True)
+        self._install_compose(drift=True)
+        with patch.object(agent, "SYSTEM_FILES_VERSION_FILE", self.stamp), \
+             patch.object(agent, "SYSTEMD_UNIT_DIR", self.installed), \
+             patch.object(agent, "APP_VERSION", "2.14.0"), \
+             patch.object(self.app, "_renew_system_units", return_value=False), \
+             patch.object(self.app, "_renew_udev_rules", return_value=False), \
+             patch.object(agent.subprocess, "run",
+                          MagicMock(side_effect=lambda argv, *a, **kw:
+                                    subprocess.CompletedProcess(argv, 1, "", "boom"))):
+            self.app._check_system_files_version()
+        text = "\n".join(self.logs)
+        self.assertEqual(text.count("[WARNUNG]"), 1, text)
+        for name in ("edubotics-pi.service", "edubotics-pi-firstboot.service",
+                     "99-edubotics-robotis.rules", "docker-compose.opi.yml"):
+            self.assertIn(name, text)
 
     def test_an_unrepairable_compose_sets_the_banner(self):
         """A read-only /opt (or a hand-mounted compose) is the state where the

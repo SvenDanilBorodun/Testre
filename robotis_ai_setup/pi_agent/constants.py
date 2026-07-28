@@ -341,6 +341,21 @@ SYSTEMD_UNIT_DIR = os.environ.get(
 )
 SYSTEMD_UNIT_NAMES = ("edubotics-pi.service", "edubotics-pi-firstboot.service")
 
+# Where setup.sh installs the udev rule(s), and which ones it installs — the
+# same shape as the systemd pair above, for the same reason.
+#
+# The rules ship INSIDE `pi_agent/udev/` (so the release tar and the self-update
+# rsync both carry them, verified) and setup.sh::install_udev copies them
+# VERBATIM (`install -m 0644`, no templating) into UDEV_RULES_DIR, which
+# self-update never touches. Until 2026-07-28 nothing then compared the two, so
+# the udev rule was structurally the SAME fail-open the compose just closed: a
+# release that adds a VID/PID line (the planned CH343P/edu6 rule is exactly
+# that) would ship an agent that scans for an arm whose /dev node it has no
+# permission to open, on 100 % of the fielded fleet, with the only remedy being
+# a `setup.sh` re-run from a source checkout no classroom has.
+UDEV_RULES_DIR = os.environ.get("EDUBOTICS_UDEV_RULES_DIR", "/etc/udev/rules.d")
+UDEV_RULE_NAMES = ("99-edubotics-robotis.rules",)
+
 # The opi compose file THIS agent version ships, relative to the `pi_agent`
 # package directory — the compose's half of the same repair mechanism.
 #

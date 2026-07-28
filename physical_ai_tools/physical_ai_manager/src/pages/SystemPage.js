@@ -360,9 +360,10 @@ export default function SystemPage() {
         {/* System-files drift. `system_files_stale` is true ONLY when the agent
             found PROVEN drift AND could not repair it itself: it byte-compares
             the installed systemd units against the ones it ships
-            (pi_agent/systemd/) and the installed docker-compose.opi.yml against
-            its shipped twin (pi_agent/docker/), then installs the shipped bytes
-            atomically — so this banner names the remainder only. Reason: the
+            (pi_agent/systemd/), the installed udev rules against pi_agent/udev/,
+            and the installed docker-compose.opi.yml against its shipped twin
+            (pi_agent/docker/), then installs the shipped bytes atomically — so
+            this banner names the remainder only. Reason: the
             self-update rsyncs pi_agent/ ONLY, so anything setup.sh laid down
             outside that tree stays frozen at provisioning time and otherwise
             fails silently (e.g. a newly forwarded EDUBOTICS_* env). The compose

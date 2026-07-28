@@ -102,6 +102,8 @@ from .constants import (
     SYSTEM_FILES_VERSION_FILE,
     SYSTEMD_UNIT_DIR,
     SYSTEMD_UNIT_NAMES,
+    UDEV_RULE_NAMES,
+    UDEV_RULES_DIR,
     UPDATE_API_URL,
 )
 from .lan_ip import detect_lan_ip, list_interface_ips
@@ -2087,31 +2089,71 @@ class AgentApp:
             return None
         return stamped or None
 
-    def _drifted_units(self) -> "list":
-        """Names of systemd units whose INSTALLED copy differs byte-for-byte from
-        the copy THIS agent version ships. Hard evidence, not inference.
+    def _shipped_dir(self, subdir: str) -> str:
+        """Absolute path to a subdirectory of the `pi_agent` package THIS agent
+        version ships from. Resolved off ``__file__`` so it follows the package
+        through the self-update swap (rsync into ``pi_agent.new`` → rename over
+        ``pi_agent``) with no path knowledge anywhere else."""
+        return os.path.join(os.path.dirname(os.path.abspath(__file__)), subdir)
 
-        The units ship inside ``pi_agent/systemd/`` (so a self-update rsync
-        refreshes the agent's copy) while setup.sh installed them VERBATIM into
-        ``SYSTEMD_UNIT_DIR``, which self-update never touches. A byte difference
-        therefore proves the running Pi is on a unit older than this agent
-        expects; equality proves it is not. Either file being absent or
-        unreadable (a dev box, a hand-relocated install, a non-root reader)
-        proves nothing, so it is skipped — this must never guess.
+    def _drifted_in(self, shipped_dir: str, installed_dir: str,
+                    names: "tuple") -> "list":
+        """Names whose INSTALLED copy differs byte-for-byte from the copy THIS
+        agent version ships. Hard evidence, not inference.
+
+        These files ship inside the ``pi_agent`` package (so a self-update rsync
+        refreshes the agent's copy) while setup.sh installed them VERBATIM into a
+        system directory self-update never touches. A byte difference therefore
+        proves the running Pi is on a file older than this agent expects;
+        equality proves it is not. Either side being absent or unreadable (a dev
+        box, a hand-relocated install, a non-root reader) proves nothing, so it
+        is skipped — this must never guess.
         """
         drifted = []
-        shipped_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "systemd")
-        for unit in SYSTEMD_UNIT_NAMES:
+        for name in names:
             try:
-                with open(os.path.join(shipped_dir, unit), "rb") as f:
+                with open(os.path.join(shipped_dir, name), "rb") as f:
                     shipped = f.read()
-                with open(os.path.join(SYSTEMD_UNIT_DIR, unit), "rb") as f:
+                with open(os.path.join(installed_dir, name), "rb") as f:
                     installed = f.read()
             except OSError:
                 continue  # cannot compare → cannot prove → silent
             if shipped != installed:
-                drifted.append(unit)
+                drifted.append(name)
         return drifted
+
+    def _drifted_units(self) -> "list":
+        """Systemd units whose INSTALLED copy differs from the one this agent
+        ships. A unit the Pi does not have at all is NOT in here (see
+        ``_drifted_in``) — absent is not drift."""
+        return self._drifted_in(self._shipped_dir("systemd"), SYSTEMD_UNIT_DIR,
+                                SYSTEMD_UNIT_NAMES)
+
+    def _drifted_udev_rules(self) -> "list":
+        """Udev rules whose INSTALLED copy differs from the one this agent
+        ships. Like the units: a rule the Pi does not have installed at all is
+        skipped, never "helpfully" created.
+
+        The same fail-open the compose had, one layer down and easier to miss
+        because a udev rule looks inert: it only sets a permission floor
+        (group=dialout, mode 0660) plus a stable ``TAG+="edubotics-arm"`` on the
+        arm boards' tty nodes — it is explicitly NOT the leader/follower role
+        source. A release that adds a VID/PID line — the planned CH343P line for
+        the edu6 arm is precisely that — would otherwise ship an agent that
+        knows how to scan for an arm whose ``/dev`` node its scanner container
+        cannot open, and the drift would be invisible because nothing compared
+        the files.
+
+        Consequence worth naming, shared with the systemd leg: a locally
+        hand-added rule LINE is drift, so it is reverted (with a German
+        Protokoll line and one ``.edubotics-bak``) on the next agent boot. That
+        is the intended semantics — the shipped bytes are the definition — but a
+        udev rule is a far more plausible thing for an admin to hand-edit than a
+        systemd unit, so the local workaround for a not-yet-shipped board is to
+        add a SEPARATE rules file, not to edit this one.
+        """
+        return self._drifted_in(self._shipped_dir("udev"), UDEV_RULES_DIR,
+                                UDEV_RULE_NAMES)
 
     def _install_system_file(self, src: str, dst: str, what_de: str,
                              validate=None) -> bool:
@@ -2123,9 +2165,13 @@ class AgentApp:
         surface on a Pi. The compose file has the same property one level up: a
         truncated ``docker-compose.opi.yml`` means no manager container, i.e. no
         wizard, i.e. no way in. One rollback copy of whatever was there is kept
-        beside it (``.edubotics-bak``); systemd ignores files without a unit
-        suffix and the agent only ever passes ``COMPOSE_FILE`` to ``-f``, so
-        neither the backup nor a leftover temp file can ever be loaded.
+        beside it (``.edubotics-bak``); neither the backup nor a leftover temp
+        file can ever be LOADED, and that has to hold separately for each of the
+        three destinations: systemd ignores files without a unit suffix, udev
+        only reads files ending in ``.rules`` (so a stale ``…rules.edubotics-bak``
+        — which would otherwise sort AFTER the real rule and win — is invisible
+        to it), and the agent only ever passes ``COMPOSE_FILE`` to ``-f``.
+        A fourth destination must re-establish this before it is added.
 
         The explicit chmod matters: the unit runs with ``UMask=0077``, so a
         freshly created file would be 0600 while setup.sh installs 0644.
@@ -2178,9 +2224,23 @@ class AgentApp:
         repair it is modelled on.
         """
         return self._install_system_file(
-            os.path.join(os.path.dirname(os.path.abspath(__file__)), "systemd", unit),
+            os.path.join(self._shipped_dir("systemd"), unit),
             os.path.join(SYSTEMD_UNIT_DIR, unit),
             f"Systemd-Dienst {unit}",
+        )
+
+    def _install_udev_rule(self, rule: str) -> bool:
+        """Overwrite ONE installed udev rule with the copy this agent ships.
+
+        Same atomic sequence as the unit path, deliberately: a torn write here
+        is a rule file udev parses PARTIALLY (it reads line by line and skips
+        what it cannot parse), i.e. a silent, partial permission floor — the
+        failure mode hardest to diagnose from a classroom.
+        """
+        return self._install_system_file(
+            os.path.join(self._shipped_dir("udev"), rule),
+            os.path.join(UDEV_RULES_DIR, rule),
+            f"Udev-Regel {rule}",
         )
 
     def _renew_system_units(self, drifted: "list") -> bool:
@@ -2219,6 +2279,41 @@ class AgentApp:
             # which is the durable half — systemd re-parses every unit at boot
             # anyway. Never fail the renewal over the reload.
             pass
+        return True
+
+    def _renew_udev_rules(self, drifted: "list") -> bool:
+        """Install the shipped udev rules over the drifted installed copies and
+        make udev re-read them. True iff EVERY named rule was renewed.
+
+        RELOAD, NEVER TRIGGER — the one thing to get right here, and the exact
+        analogue of the systemd path's "``daemon-reload``, never ``restart``".
+        ``udevadm control --reload-rules`` only makes the new rule set KNOWN to
+        udevd; it changes nothing about devices that are already enumerated.
+        ``udevadm trigger`` would additionally REPLAY add/change events for live
+        devices, which on a Pi mid-lesson means re-firing events for the very
+        tty nodes an open serial connection is holding — an unannounced
+        disturbance to a running session, from a repair that is supposed to be
+        advisory. The new floor therefore applies from the next replug or the
+        next boot, which is when it can matter (a rule that grants access to an
+        arm the running session already opened has nothing to fix).
+
+        setup.sh, which runs before anything is live, is free to trigger — and
+        does. That asymmetry is intentional, not an oversight.
+
+        A failed reload is NON-fatal, exactly like a failed ``daemon-reload``:
+        the FILES are correct, which is the durable half, and udev re-reads
+        ``/etc/udev/rules.d`` at boot regardless. Never fail the renewal over it.
+
+        Only ever REPLACES: ``_drifted_udev_rules`` skips a rule whose installed
+        copy cannot be read, so a rule the Pi never had is never installed here.
+        """
+        if not all(self._install_udev_rule(rule) for rule in drifted):
+            return False
+        try:
+            subprocess.run(["udevadm", "control", "--reload-rules"],
+                           capture_output=True, text=True, timeout=30)
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            pass  # no udev (dev box) or a reload hiccup — the files are correct
         return True
 
     def _shipped_compose_path(self) -> str:
@@ -2345,7 +2440,17 @@ class AgentApp:
         container simply never saw the var; Rule §2's fail-open class). The
         compose now ships INSIDE the package as a byte-identical twin
         (``SHIPPED_COMPOSE_RELPATH``), so it is repairable here exactly like the
-        units. ``.s6-keep`` is still not — it is a 0-byte marker.
+        units.
+
+        The udev rules were the same fail-open one layer down, and easier to
+        miss because a rule file looks inert: they already shipped inside
+        ``pi_agent/udev/`` (so the tar and the rsync always carried them) but
+        NOTHING compared them, so a release adding a VID/PID line would put an
+        agent that scans for an arm on a fleet whose ``/dev`` node it may not be
+        allowed to open. They are in the set now (``UDEV_RULE_NAMES``).
+
+        ``.s6-keep`` is still not, and cannot be: it is a 0-byte marker whose
+        content has never changed, so a byte compare has nothing to find.
 
         This keys on CONTENT, never on ``stamp != APP_VERSION``. That inequality
         looks like a drift signal and is not one: the stamp cannot advance by
@@ -2359,25 +2464,33 @@ class AgentApp:
 
         Proven drift is REPAIRED first, not merely announced: ``_renew_system_units``
         installs the shipped units and reloads systemd; ``_renew_compose``
-        installs the shipped compose behind a ``docker compose config`` gate.
+        installs the shipped compose behind a ``docker compose config`` gate;
+        ``_renew_udev_rules`` installs the shipped rules and reloads udev.
         Every fielded Pi was provisioned before this release, so a release that
-        touches either drifts 100 % of the fleet — a banner alone would therefore
-        be permanent, and its own remedy (``sudo ./setup.sh`` from a source
-        checkout) is one a classroom cannot perform. Only what the agent could
-        NOT repair reaches the banner, and there is at most ONE banner line
+        touches any of them drifts 100 % of the fleet — a banner alone would
+        therefore be permanent, and its own remedy (``sudo ./setup.sh`` from a
+        source checkout) is one a classroom cannot perform. Only what the agent
+        could NOT repair reaches the banner, and there is at most ONE banner line
         naming exactly those files.
+
+        Each renewal makes its new definition KNOWN and nothing more —
+        ``daemon-reload`` / ``--reload-rules``, never ``restart``, never
+        ``trigger``, never a compose ``up``. A drift check must not be able to
+        disturb a Pi that is mid-lesson.
 
         ADVISORY ONLY — never blocks boot or the manager. The remedy for the
         unrepairable remainder is re-running ``setup.sh`` (idempotent; it
-        re-installs the units and compose and leaves the Docker volumes — the
-        student's datasets, HF cache and calibration — untouched). It must NEVER
+        re-installs the units, the udev rules and the compose and leaves the
+        Docker volumes — the student's datasets, HF cache and calibration —
+        untouched). It must NEVER
         instruct a re-flash: the drift is usually benign, the data is
         irreplaceable, and a wipe is not the fix.
         """
         stamped = self._read_system_files_stamp()
         drifted = self._drifted_units()
+        drifted_udev = self._drifted_udev_rules()
         compose_drifted = self._compose_drifted()
-        if not drifted and not compose_drifted:
+        if not drifted and not drifted_udev and not compose_drifted:
             return
         origin = (f" (Stand: Version {stamped})" if stamped else "")
         unrepaired: list = []
@@ -2393,6 +2506,20 @@ class AgentApp:
                 )
             else:
                 unrepaired.extend(drifted)
+        if drifted_udev:
+            if self._renew_udev_rules(drifted_udev):
+                # Says exactly when it applies. A reload makes udev KNOW the
+                # rule; it does not re-evaluate devices that are already
+                # enumerated (that would be `udevadm trigger`, which this
+                # deliberately does not run — see _renew_udev_rules).
+                self._log(
+                    f"Udev-Regeln ({', '.join(drifted_udev)}){origin} entsprachen nicht "
+                    f"der Agent-Version {APP_VERSION} und wurden automatisch erneuert. "
+                    "Sie gelten für Geräte, die danach neu eingesteckt werden, "
+                    "spätestens ab dem nächsten Neustart."
+                )
+            else:
+                unrepaired.extend(drifted_udev)
         if compose_drifted:
             compose_name = os.path.basename(COMPOSE_FILE)
             if self._renew_compose():
@@ -2425,7 +2552,8 @@ class AgentApp:
 
     def boot(self) -> None:
         """Boot sequence: rehydrate hardware, renew drifted system files (the
-        systemd units + the opi compose), seed or realign the .env, start BOTH
+        systemd units, the udev rules and the opi compose), seed or realign the
+        .env, start BOTH
         listeners (loopback + the ros_net-gateway binder loop), then — only if a
         self-update just landed — pull the newly pinned images, and finally bring
         up the ALWAYS-ON manager. The robot tier is intentionally left down.

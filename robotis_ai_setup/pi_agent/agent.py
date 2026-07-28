@@ -105,6 +105,7 @@ from .constants import (
     UDEV_RULE_NAMES,
     UDEV_RULES_DIR,
     UPDATE_API_URL,
+    arm_family_for_robot_type,
 )
 from .lan_ip import detect_lan_ip, list_interface_ips
 
@@ -758,6 +759,15 @@ class AgentApp:
         tears down any running robot tier (TARGETED, never ``compose down``) so
         ``identify_arm.py`` can open the serial ports a live 100 Hz controller
         would otherwise hold.
+
+        The ARM FAMILY comes from the on-disk managed ``EDUBOTICS_ROBOT_TYPE``
+        (edu6 §4.4): it scopes the /dev/serial/by-id filter AND selects the
+        in-container prober's protocol, so an edu6 rig is probed with
+        ``--protocol=feetech`` and its single arm is slotted as the FOLLOWER.
+        A failed scan can carry a one-sentence German ``notice`` naming the most
+        likely setup mistake (wrong family plugged in, partial servo chain, 12-V
+        supply off); when present it REPLACES the generic message, exactly as
+        the GUI replaces its status line.
         """
         if self._update_in_flight():
             return self._busy_updating()
@@ -768,34 +778,45 @@ class AgentApp:
             self.stop_active_previews()
             docker_manager.ensure_environment_stopped(log=self._log)
 
+            arm_family = arm_family_for_robot_type(self._current_robot_type())
+            notice = ""
             leader = follower = None
             if not force:
                 saved_leader = config_generator.read_env_var("LEADER_PORT", self.env_file)
                 saved_follower = config_generator.read_env_var("FOLLOWER_PORT", self.env_file)
                 if saved_leader and saved_follower:
                     self._log("Arme werden schnell überprüft (vorherige Zuordnung) …")
-                    leader, follower = identify_arm.fast_rehydrate_arms(saved_leader, saved_follower)
+                    leader, follower = identify_arm.fast_rehydrate_arms(
+                        saved_leader, saved_follower, arm_family=arm_family)
 
             if leader is None or follower is None:
                 self._log("Arme werden gescannt (Leader/Follower werden bestimmt) …")
-                leader, follower = identify_arm.scan_and_identify_arms(IMAGE_OPEN_MANIPULATOR)
+                leader, follower = identify_arm.scan_and_identify_arms(
+                    IMAGE_OPEN_MANIPULATOR, arm_family=arm_family)
+                # Only meaningful for the run that just happened — never read it
+                # off a fast-rehydrate path, where it would be a stale sentence
+                # from some earlier scan.
+                notice = identify_arm.LAST_SCAN_NOTICE
+                if notice:
+                    self._log(notice)
 
             # Keep whatever we found in the in-memory config for the status view.
             self._hardware.leader = leader
             self._hardware.follower = follower
 
             if follower is None and leader is None:
-                return 404, {"ok": False,
-                             "message": "Kein Arm gefunden — USB-Verbindung und "
+                return 404, {"ok": False, "notice": notice,
+                             "message": notice or
+                                        "Kein Arm gefunden — USB-Verbindung und "
                                         "Stromversorgung der Arme prüfen."}
             if follower is None:
                 return 409, {"ok": False, "leader": leader.serial_path if leader else None,
-                             "follower": None,
+                             "follower": None, "notice": notice,
                              "message": "Nur der Leader-Arm wurde erkannt — der "
                                         "Follower-Arm fehlt. Bitte USB prüfen."}
             if leader is None:
                 return 409, {"ok": False, "leader": None,
-                             "follower": follower.serial_path,
+                             "follower": follower.serial_path, "notice": notice,
                              "message": "Nur der Follower-Arm wurde erkannt — der "
                                         "Leader-Arm fehlt. Bitte USB prüfen."}
 
@@ -806,7 +827,7 @@ class AgentApp:
                 return 500, {"ok": False,
                              "message": f"Konfiguration konnte nicht gespeichert werden: {e}"}
             return 200, {"ok": True, "leader": leader.serial_path,
-                         "follower": follower.serial_path,
+                         "follower": follower.serial_path, "notice": notice,
                          "message": "Beide Arme erkannt und gespeichert."}
         finally:
             self._lifecycle_lock.release()

@@ -127,6 +127,126 @@ class TestScanArms(_EnvTempBase):
         self.assertEqual(code, 404)
 
 
+class TestScanArmFamily(_EnvTempBase):
+    """The scan's arm family comes from the on-disk managed EDUBOTICS_ROBOT_TYPE
+    (the WP-3 bridge). It scopes the /dev/serial/by-id filter AND selects the
+    in-container prober's protocol — an edu6 rig scanned as `omx` is invisible.
+    """
+
+    def _edu6_arm(self):
+        return ArmDevice(
+            serial_path="/dev/serial/by-id/usb-1a86_USB_Single_Serial_5A68010132-if00",
+            role="follower")
+
+    def _scan_with_robot_type(self, robot_type, result=(None, None)):
+        if robot_type is not None:
+            cg.upsert_env_var("EDUBOTICS_ROBOT_TYPE", robot_type, self.env_path)
+        with patch.object(agent.docker_manager, "ensure_environment_stopped"), \
+             patch.object(agent.identify_arm, "scan_and_identify_arms",
+                          return_value=result) as scan:
+            code, payload = self.app.handle_scan_arms({})
+        return code, payload, scan
+
+    def test_an_edu6_env_scans_the_edu6_family(self):
+        _, _, scan = self._scan_with_robot_type("edu6_studio")
+        self.assertEqual(scan.call_args.kwargs.get("arm_family"), "edu6")
+
+    def test_a_default_env_scans_the_omx_family(self):
+        _, _, scan = self._scan_with_robot_type(None)
+        self.assertEqual(scan.call_args.kwargs.get("arm_family"), "omx")
+
+    def test_omx_follower_still_scans_the_omx_family(self):
+        _, _, scan = self._scan_with_robot_type("omx_follower")
+        self.assertEqual(scan.call_args.kwargs.get("arm_family"), "omx")
+
+    def test_an_unknown_robot_type_keeps_scanning_for_omx(self):
+        _, _, scan = self._scan_with_robot_type("kein_solcher_typ")
+        self.assertEqual(scan.call_args.kwargs.get("arm_family"), "omx")
+
+    def test_the_single_edu6_arm_is_reported_in_the_follower_slot(self):
+        arm = self._edu6_arm()
+        code, payload, _ = self._scan_with_robot_type("edu6_studio", (None, arm))
+        # WP-2 stops here on purpose: the leader-less scan is still a 409 and
+        # „Umgebung starten" still demands both arms — that is WP-3/WP-5.
+        self.assertEqual(code, 409)
+        self.assertEqual(payload["follower"], arm.serial_path)
+        self.assertIsNone(payload["leader"])
+        self.assertIs(self.app._hardware.follower, arm)
+        self.assertIsNone(self.app._hardware.leader)
+
+    def test_the_rehydrate_path_carries_the_family_too(self):
+        cg.generate_env_file(
+            HardwareConfig(
+                leader=ArmDevice(serial_path="/dev/serial/by-id/usb-A", role="leader"),
+                follower=ArmDevice(serial_path="/dev/serial/by-id/usb-B", role="follower")),
+            self.env_path, follower_only=False, robot_type="edu6_studio")
+        with patch.object(agent.docker_manager, "ensure_environment_stopped"), \
+             patch.object(agent.identify_arm, "fast_rehydrate_arms",
+                          return_value=(None, None)) as fast, \
+             patch.object(agent.identify_arm, "scan_and_identify_arms",
+                          return_value=(None, None)):
+            self.app.handle_scan_arms({})
+        self.assertEqual(fast.call_args.kwargs.get("arm_family"), "edu6")
+
+
+class TestScanNotice(_EnvTempBase):
+    """A failed scan carries the one-sentence German diagnosis of the most
+    likely setup mistake instead of the generic „Kein Arm gefunden"."""
+
+    def _scan_leaving_notice(self, notice, result=(None, None)):
+        def _fake_scan(image, arm_family="omx"):
+            agent.identify_arm.LAST_SCAN_NOTICE = notice
+            return result
+
+        prev = agent.identify_arm.LAST_SCAN_NOTICE
+        self.addCleanup(setattr, agent.identify_arm, "LAST_SCAN_NOTICE", prev)
+        with patch.object(agent.docker_manager, "ensure_environment_stopped"), \
+             patch.object(agent.identify_arm, "scan_and_identify_arms",
+                          side_effect=_fake_scan):
+            return self.app.handle_scan_arms({})
+
+    def test_the_notice_replaces_the_generic_message(self):
+        text = ("Der Arm wurde gefunden, aber kein Servo antwortet — ist das "
+                "12-V-Netzteil des Arms eingesteckt und eingeschaltet?")
+        code, payload = self._scan_leaving_notice(text)
+        self.assertEqual(code, 404)
+        self.assertEqual(payload["notice"], text)
+        self.assertEqual(payload["message"], text)
+        self.assertNotIn("Kein Arm gefunden", payload["message"])
+
+    def test_no_notice_keeps_the_generic_message(self):
+        code, payload = self._scan_leaving_notice("")
+        self.assertEqual(code, 404)
+        self.assertEqual(payload["notice"], "")
+        self.assertIn("Kein Arm gefunden", payload["message"])
+
+    def test_the_notice_is_written_to_the_protokoll(self):
+        """`_log` feeds the redacted Protokoll ring the System tab streams — the
+        diagnosis must survive there even if the caller drops the response."""
+        text = "Nur 3 von 7 Servos antworten — bitte die Steckverbindungen prüfen."
+        with patch.object(agent, "logger") as log:
+            self._scan_leaving_notice(text)
+        self.assertIn(text, [c.args[0] for c in log.info.call_args_list])
+
+    def test_a_stale_notice_never_rides_a_fast_rehydrate(self):
+        """fast_rehydrate does not run a scan, so LAST_SCAN_NOTICE there is a
+        sentence about some EARLIER attempt — reporting it would blame a rig
+        that just succeeded."""
+        leader = ArmDevice(serial_path="/dev/serial/by-id/usb-ROBOTIS_L", role="leader")
+        follower = ArmDevice(serial_path="/dev/serial/by-id/usb-ROBOTIS_F", role="follower")
+        cg.generate_env_file(HardwareConfig(leader=leader, follower=follower),
+                             self.env_path, follower_only=False)
+        prev = agent.identify_arm.LAST_SCAN_NOTICE
+        self.addCleanup(setattr, agent.identify_arm, "LAST_SCAN_NOTICE", prev)
+        agent.identify_arm.LAST_SCAN_NOTICE = "eine alte Meldung"
+        with patch.object(agent.docker_manager, "ensure_environment_stopped"), \
+             patch.object(agent.identify_arm, "fast_rehydrate_arms",
+                          return_value=(leader, follower)):
+            code, payload = self.app.handle_scan_arms({})
+        self.assertEqual(code, 200)
+        self.assertEqual(payload["notice"], "")
+
+
 # ── camera roles ─────────────────────────────────────────────────────────────
 
 

@@ -420,6 +420,143 @@ jobs:
             exit 1
           fi
           echo "OK: packaged pi_agent/docker/docker-compose.opi.yml matches the source of truth"
+          # Systemd-unit + udev-rule gates (the compose gate's shape, one layer
+          # over). The agent's boot-time drift repair byte-compares the INSTALLED
+          # units and rules against the copies inside THIS tarball and re-installs
+          # the shipped bytes on a difference (agent.py::_drifted_in →
+          # _renew_system_units / _renew_udev_rules). `_drifted_in` skips any name
+          # it cannot read on EITHER side, because absent proves nothing — which
+          # is exactly right for the agent and exactly wrong for the artifact: a
+          # tarball that lost pi_agent/systemd/ or pi_agent/udev/ would not fail
+          # loudly, it would silently stop repairing, banner nothing, and leave
+          # the fleet on whatever setup.sh laid down years earlier. Every name the
+          # agent claims to repair must therefore be IN here.
+          #
+          # The names are DERIVED from the tarball's own pi_agent/constants.py
+          # (SYSTEMD_UNIT_NAMES / UDEV_RULE_NAMES), never restated: a second
+          # hardcoded list is a second thing to keep in sync, and a name drifting
+          # out of sync is precisely the failure this gate exists to catch.
+          # `ast.literal_eval` rather than an import — no VERSION walk, no env
+          # lookup, no way for the runner's environment to change the answer.
+          #
+          # pi_agent/systemd/ also holds a SCRIPT (edubotics-pi-firstboot.sh) that
+          # is NOT in the repair set and never installed into /etc — the firstboot
+          # unit ExecStarts it IN PLACE out of /opt/edubotics/pi_agent/systemd/.
+          # It is gated anyway, because that makes its absence WORSE than a
+          # missing unit, not better: the self-update builds a COMPLETE fresh
+          # pi_agent/ tree and renames it over the live one, so a file missing
+          # from the tarball is DELETED from every Pi that self-updates, and the
+          # unit then ExecStarts nothing. It is found by reading the units' own
+          # ExecStart lines, so renaming or relocating the script cannot silently
+          # un-gate it.
+          #
+          # The python writes the member list to a FILE, not to a command
+          # substitution. Two reasons, both learned the hard way here:
+          #   1. A quoted heredoc nested inside `$( )` is mis-parsed by bash 3.2
+          #      (still the /bin/bash on macOS) the moment its body contains a
+          #      lone apostrophe — "unexpected EOF while looking for matching `''".
+          #      GH runners are bash 5 and cope, so CI would stay green while the
+          #      block became unrunnable for anyone reproducing a release locally,
+          #      and neither actionlint nor shellcheck flags it.
+          #   2. stdout is then free for the diagnosis: a `::error::` printed
+          #      inside a command substitution is CAPTURED, so the step would die
+          #      with a bare non-zero and no reason.
+          MEMBERS_FILE="${RUNNER_TEMP:-/tmp}/edubotics-required-members.txt"
+          if ! python3 - edubotics-pi-agent.tar.gz > "$MEMBERS_FILE" <<'PY'
+          import ast, sys, tarfile
+
+          def die(msg):
+              print(f"::error::{msg}", file=sys.stderr)
+              sys.exit(1)
+
+
+          with tarfile.open(sys.argv[1], "r:gz") as tf:
+              def member_bytes(name):
+                  try:
+                      f = tf.extractfile(name)
+                  except KeyError:
+                      f = None
+                  if f is None:
+                      die(f"edubotics-pi-agent.tar.gz is missing {name}")
+                  return f.read()
+
+              source = member_bytes("pi_agent/constants.py").decode("utf-8")
+              tuples = {}
+              for node in ast.parse(source).body:
+                  if not isinstance(node, ast.Assign):
+                      continue
+                  for target in node.targets:
+                      if isinstance(target, ast.Name) and target.id in (
+                              "SYSTEMD_UNIT_NAMES", "UDEV_RULE_NAMES"):
+                          try:
+                              tuples[target.id] = ast.literal_eval(node.value)
+                          except ValueError:
+                              die(f"{target.id} in pi_agent/constants.py is no longer a "
+                                  "literal tuple — this gate reads it with ast.literal_eval")
+
+              required = []
+              for const, subdir in (("SYSTEMD_UNIT_NAMES", "systemd"),
+                                    ("UDEV_RULE_NAMES", "udev")):
+                  names = tuples.get(const)
+                  if not names:
+                      die(f"{const} not found (or empty) in the packaged "
+                          "pi_agent/constants.py — the drift repair would have "
+                          "nothing to compare and this gate nothing to assert")
+                  required += [f"pi_agent/{subdir}/{n}" for n in names]
+
+              # Whatever the units themselves ExecStart out of the install root.
+              # Derived from the units rather than named here, so relocating or
+              # renaming a script cannot silently un-gate it. Three outcomes per
+              # target: inside pi_agent/ -> gate it; elsewhere under
+              # /opt/edubotics/ -> refuse (the self-update rsyncs pi_agent/ ONLY,
+              # so it would never be delivered or refreshed); anything else (a
+              # system interpreter such as /usr/bin/python3) -> not ours, ignore.
+              root, pkg = "/opt/edubotics/", "/opt/edubotics/pi_agent/"
+              exec_targets = []
+              for unit in [u for u in required if u.startswith("pi_agent/systemd/")]:
+                  for line in member_bytes(unit).decode("utf-8").splitlines():
+                      if not line.startswith("ExecStart="):
+                          continue
+                      value = line.split("=", 1)[1].strip()
+                      if not value:
+                          exec_targets = []  # a bare `ExecStart=` RESETS the list
+                          continue
+                      # Strip systemd's argv[0] prefix characters (@ - : + !).
+                      argv0 = value.split()[0].lstrip("-@+!:")
+                      if argv0.startswith(pkg):
+                          exec_targets.append(argv0[len(root):])
+                      elif argv0.startswith(root):
+                          die(f"{unit} ExecStart={value} points into {root} but OUTSIDE "
+                              f"{pkg} — the self-update rsyncs pi_agent/ only, so that file "
+                              "would never be delivered to, or refreshed on, a fielded Pi")
+              if not exec_targets:
+                  die("no packaged systemd unit ExecStarts a file out of "
+                      f"{pkg} — that has been the firstboot script since this gate was "
+                      "written, and a gate that scans nothing is worse than no gate. If "
+                      "the unit genuinely no longer runs a shipped file, retire this check "
+                      "deliberately rather than letting it pass empty")
+              required += exec_targets
+
+              print("\n".join(required))
+          PY
+          then
+            echo "::error::could not derive the repairable-system-file list from the packaged pi_agent/constants.py — see the diagnostic above"
+            exit 1
+          fi
+          if [ ! -s "$MEMBERS_FILE" ]; then
+            echo "::error::derived an EMPTY required-member list — a gate that scans nothing is worse than no gate"
+            exit 1
+          fi
+          tar -tzf edubotics-pi-agent.tar.gz > "${MEMBERS_FILE}.actual"
+          while IFS= read -r member; do
+            [ -n "$member" ] || continue
+            if ! grep -qxF "$member" "${MEMBERS_FILE}.actual"; then
+              echo "::error::edubotics-pi-agent.tar.gz is missing ${member} — the agent names it as a file it repairs (or ExecStarts), and a missing one is SILENT: the drift check skips what it cannot read, so the fleet would simply never be repaired"
+              exit 1
+            fi
+            echo "OK: packaged ${member}"
+          done < "$MEMBERS_FILE"
+          rm -f "$MEMBERS_FILE" "${MEMBERS_FILE}.actual"
           ls -la edubotics-pi-agent.tar.gz
 
       - name: Attach pi-agent tarball to GitHub Release (tag pushes only)

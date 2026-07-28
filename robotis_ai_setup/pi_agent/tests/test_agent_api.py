@@ -1094,6 +1094,11 @@ class TestSystemFilesVersionCheck(unittest.TestCase):
         self._install_compose(drift=True)
         events = []
         real_fsync, real_chmod, real_replace = os.fsync, os.chmod, os.replace
+        real_fsync_path = agent._fsync_path
+
+        def _fsync_path(p):
+            events.append(f"fsync_path:{p}")
+            return real_fsync_path(p)
 
         def _fsync(fd):
             events.append("fsync")
@@ -1114,13 +1119,27 @@ class TestSystemFilesVersionCheck(unittest.TestCase):
 
         with patch.object(agent.os, "fsync", _fsync), \
              patch.object(agent.os, "chmod", _chmod), \
-             patch.object(agent.os, "replace", _replace):
+             patch.object(agent.os, "replace", _replace), \
+             patch.object(agent, "_fsync_path", _fsync_path):
             self._check(stamp_contents="2.13.0\n")
         self.assertIn("fsync", events)
         self.assertIn("chmod:0o644", events)
         self.assertIn("replace", events)
         self.assertLess(events.index("fsync"), events.index("replace"))
         self.assertLess(events.index("chmod:0o644"), events.index("replace"))
+        # …and the DIRECTORY fsync AFTER the rename — the durability half of the
+        # atomicity argument, and the half that was unguarded until 2026-07-28
+        # (a mutant deleting it survived the whole suite). `rename` is atomic
+        # with respect to concurrent readers, which is an ORDERING property, not
+        # a DURABILITY one: without this fsync a classroom power yank on eMMC can
+        # lose the directory entry and leave the OLD compose (or, if the entry
+        # landed but its data did not, a zero-length one) — precisely the
+        # unparseable-compose state the validate gate exists to prevent, arrived
+        # at from the other side. Pinned by PATH, not just by count, so fsyncing
+        # the wrong thing fails too.
+        dir_ev = f"fsync_path:{self.installed_compose_dir}"
+        self.assertIn(dir_ev, events, events)
+        self.assertGreater(events.index(dir_ev), events.index("replace"), events)
 
     def test_an_unparseable_shipped_compose_is_refused_and_the_working_file_survives(self):
         """VALIDATE-THEN-SWAP — the one deliberate asymmetry with the systemd
@@ -1139,6 +1158,14 @@ class TestSystemFilesVersionCheck(unittest.TestCase):
         with open(self.installed_compose, "rb") as f:
             self.assertEqual(f.read(), before)
         self.assertFalse(os.path.exists(self.installed_compose + ".edubotics-tmp"))
+        # No .edubotics-bak either — i.e. the gate runs BEFORE anything mutating,
+        # not merely before the rename. Unguarded until 2026-07-28: a mutant that
+        # hoisted the backup copy above the validate call survived the whole
+        # suite. It would leave a rollback copy beside a file that was never
+        # replaced: a support artefact that says a swap happened when none did,
+        # on the one path where the operator most needs to know that the
+        # installed file is still the original.
+        self.assertFalse(os.path.exists(self.installed_compose + ".edubotics-bak"))
         # …and the refusal is visible: the reason, then the banner.
         self.assertIn("NICHT erneuert", text)
         self.assertIn("[WARNUNG]", text)

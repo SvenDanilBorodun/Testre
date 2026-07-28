@@ -662,10 +662,16 @@ jobs:
     #
     # Per-TARGET, per-SERVICE completeness is `compose-env-parity`'s job,
     # below. Neither replaces the other: this one is keyed off what the
-    # SOURCES read (so a brand-new env name cannot be forgotten anywhere),
-    # that one is keyed off what the student compose FORWARDS (so no target
-    # falls behind). Widening this one to per-file would demand a Jetson
-    # parity audit nobody has scoped — hence the split.
+    # SOURCES read (so a new env name cannot be forgotten by every compose at
+    # once), that one is keyed off what the student compose FORWARDS (so the
+    # Pi cannot fall behind Windows). Widening this one to per-file would
+    # demand a Jetson parity audit nobody has scoped — hence the split.
+    #
+    # KNOWN RESIDUAL of that split, measured: a name forwarded ONLY by the
+    # Jetson or gpu compose satisfies this job (it is in the union) AND
+    # compose-env-parity (absent from student and opi alike, so they agree).
+    # Such a key reaches neither Windows nor the Pi. Nothing today is in that
+    # state; closing it means gating the Jetson, i.e. that audit.
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

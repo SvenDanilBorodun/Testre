@@ -161,12 +161,95 @@ class TestParserRefusesRatherThanSkips(unittest.TestCase):
         self.assertEqual(rc, 1, out)
         self.assertIn("no services parsed at all", out)
 
-    def test_a_renamed_service_is_loud(self):
+    def test_a_renamed_required_service_is_loud(self):
         opi = _compose(_STUDENT_ARM_KEYS).replace(
             "  physical_ai_server:\n", "  physical_ai_server_v2:\n", 1)
         rc, out = _run(_compose(_STUDENT_ARM_KEYS), opi)
         self.assertEqual(rc, 1, out)
-        self.assertIn("physical_ai_server", out)
+        self.assertIn("required service 'physical_ai_server' not found", out)
+
+    def test_a_renamed_NON_required_service_is_loud(self):
+        """`REQUIRED_ENV_SERVICES` cannot see this one — only service-set
+        equality can. Asserted on the equality message specifically, because
+        an earlier version of this test passed on a substring the required-set
+        fence emits anyway, and so never exercised the loop it was named for."""
+        opi = _compose(_STUDENT_ARM_KEYS).replace(
+            "  physical_ai_manager:\n", "  physical_ai_manager_v2:\n", 1)
+        rc, out = _run(_compose(_STUDENT_ARM_KEYS), opi)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("exists in", out)
+        self.assertIn("physical_ai_manager_v2", out)
+
+    def test_a_flush_indent_sequence_is_READ_not_skipped(self):
+        """`environment:` followed by `- KEY=v` at the SAME indent is valid YAML
+        and compose injects it. The first version of this parser closed the
+        block on `indent <= env_indent` and dropped every such entry silently —
+        a key genuinely missing on the Pi came back GREEN (adversarial review,
+        2026-07-28). The miss landed on `physical_ai_manager`, i.e. outside the
+        REQUIRED_ENV_SERVICES fence, which is why that fence is not enough."""
+        student = _compose(_STUDENT_ARM_KEYS).replace(
+            "  physical_ai_manager:\n    image: example\n",
+            "  physical_ai_manager:\n    image: example\n"
+            "    environment:\n    - EDUBOTICS_MANAGER_KNOB=1\n", 1)
+        opi = _compose(_STUDENT_ARM_KEYS)
+        rc, out = _run(student, opi)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("EDUBOTICS_MANAGER_KNOB", out)
+        self.assertIn("'physical_ai_manager'", out)
+
+    def test_a_flush_indent_sequence_at_parity_still_passes(self):
+        """The other direction: reading the shape must not invent a diff."""
+        text = _compose(_STUDENT_ARM_KEYS).replace(
+            "  physical_ai_manager:\n    image: example\n",
+            "  physical_ai_manager:\n    image: example\n"
+            "    environment:\n    - EDUBOTICS_MANAGER_KNOB=1\n", 1)
+        rc, out = _run(text, text)
+        self.assertEqual(rc, 0, out)
+
+    def test_a_second_environment_block_in_one_service_is_refused(self):
+        """The realistic shape: two `environment:` keys separated by another
+        property. Tracking "am I currently inside one" missed it and merged
+        both blocks; tracking "has this service had one" catches it."""
+        opi = _compose(_STUDENT_ARM_KEYS).replace(
+            "  physical_ai_server:\n    image: example\n",
+            "  physical_ai_server:\n    image: example\n"
+            "    environment:\n      - EDUBOTICS_FIRST=1\n"
+            "    volumes:\n      - /dev:/dev\n", 1)
+        rc, out = _run(_compose(_STUDENT_ARM_KEYS), opi)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("a second `environment:`", out)
+
+    def test_an_inline_or_flow_style_environment_is_refused(self):
+        opi = _compose(_STUDENT_ARM_KEYS).replace(
+            "    environment:\n", "    environment: [EDUBOTICS_A=1]\n", 1)
+        rc, out = _run(_compose(_STUDENT_ARM_KEYS), opi)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("inline", out)
+
+    def test_env_file_extends_and_merge_keys_are_refused(self):
+        """Three compose mechanisms that carry environment past this parser.
+        Refusing beats comparing an incomplete picture and calling it parity."""
+        for injected in ("env_file: .env.extra", "extends: other", "<<: *common"):
+            with self.subTest(injected=injected):
+                opi = _compose(_STUDENT_ARM_KEYS).replace(
+                    "  open_manipulator:\n    image: example\n",
+                    f"  open_manipulator:\n    image: example\n    {injected}\n", 1)
+                rc, out = _run(_compose(_STUDENT_ARM_KEYS), opi)
+                self.assertEqual(rc, 1, out)
+                self.assertIn("cannot see", out)
+
+    def test_an_alias_that_cannot_carry_env_is_left_alone(self):
+        """`logging: *opi_logging` is real, in the shipped opi compose. A
+        blanket alias refusal would have failed the very file this gate exists
+        to check."""
+        text = _compose(_STUDENT_ARM_KEYS).replace(
+            "  open_manipulator:\n    image: example\n",
+            "  open_manipulator:\n    image: example\n"
+            "    logging: &L\n      driver: json-file\n", 1).replace(
+            "  physical_ai_server:\n    image: example\n",
+            "  physical_ai_server:\n    image: example\n    logging: *L\n", 1)
+        rc, out = _run(text, text)
+        self.assertEqual(rc, 0, out)
 
     def test_an_opi_only_service_is_loud(self):
         opi = _compose(_STUDENT_ARM_KEYS) + (
@@ -175,6 +258,18 @@ class TestParserRefusesRatherThanSkips(unittest.TestCase):
         rc, out = _run(_compose(_STUDENT_ARM_KEYS), opi)
         self.assertEqual(rc, 1, out)
         self.assertIn("sidecar", out)
+
+    def test_a_service_MISSING_from_the_opi_compose_is_loud(self):
+        """The other and more serious direction: a whole service the Pi does not
+        have. It needs its own test — a rename satisfies the opi-only branch
+        too, so mutation testing showed this branch surviving until now."""
+        student = _compose(_STUDENT_ARM_KEYS, manager_keys=("EDUBOTICS_X=1",))
+        opi = _compose(_STUDENT_ARM_KEYS).replace(
+            "  physical_ai_manager:\n    image: example\n", "", 1)
+        rc, out = _run(student, opi)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("exists in", out)
+        self.assertIn("its 1 env keys are unchecked on the Pi", out)
 
 
 class TestValueDiffsAreInformationalOnly(unittest.TestCase):

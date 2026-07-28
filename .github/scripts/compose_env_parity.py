@@ -93,6 +93,14 @@ INTENTIONAL: "dict" = {
 _ENTRY_RE = re.compile(r"^-\s*([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
 _INTERPOLATED_RE = re.compile(r"\$\{[A-Za-z_]")
 
+# Compose mechanisms that inject environment WITHOUT an `environment:` block.
+# None is used by either file today (measured). Each is refused rather than
+# ignored: this gate's whole premise is that it can see every forward, and a
+# service pulling env from a file, a parent service or a YAML merge would make
+# the comparison quietly incomplete. `logging: *opi_logging` is untouched — an
+# alias only matters where it could carry env.
+_HIDDEN_ENV_KEYS = ("env_file:", "extends:", "<<:")
+
 _errors: "list" = []
 
 
@@ -117,10 +125,24 @@ def parse_compose(path: Path, rel: str) -> "dict":
 
     A deliberately small indentation-aware scanner rather than PyYAML: no CI job
     outside `python-tests` installs pyyaml, and every other `.github/scripts/*.py`
-    is stdlib-only. The trade is that this parser understands ONE shape, so it
-    DIES on anything else instead of guessing — a scanner that silently skips
-    what it does not recognise is precisely the failure mode this whole job
-    exists to prevent.
+    is stdlib-only.
+
+    The trade is that it reads ONE shape — a block sequence of `- KEY=value`
+    under `environment:`, at or below that key's indent. Everything a compose
+    file could otherwise use to carry environment is REFUSED rather than
+    skipped, because a scanner that silently ignores what it does not recognise
+    fails exactly the way the union guard this job supplements does: an
+    unreadable `environment:` would make a service read as env-less and its
+    missing keys as nothing to report. Refused: an inline/flow/aliased
+    `environment:`, a second `environment:` in one service, `env_file:`,
+    `extends:`, a `<<:` merge, an entry that is not `- KEY=value`, a duplicate
+    key, and a file with no services. Aliases elsewhere are none of this gate's
+    business — the opi compose really does use `logging: *opi_logging`.
+
+    Two structural fences catch what a line scanner cannot reason about:
+    `REQUIRED_ENV_SERVICES` (a required service that parses to zero env entries
+    is a failure, not an empty comparison) and service-set equality (a renamed
+    or extra service is reported, never skipped).
     """
     try:
         text = path.read_text(encoding="utf-8")
@@ -128,6 +150,7 @@ def parse_compose(path: Path, rel: str) -> "dict":
         die(f"cannot read {rel}: {e}")
 
     services: "dict" = {}
+    seen_env_block: "set" = set()
     in_services = False
     service = None
     service_indent = None
@@ -161,15 +184,40 @@ def parse_compose(path: Path, rel: str) -> "dict":
         if service is None:
             continue
 
-        if in_env and indent <= env_indent:
+        # A block sequence may sit at the SAME indent as its key — `environment:`
+        # followed by `- KEY=v` also at indent 4 is valid YAML and compose reads
+        # it. Closing the block on `indent <= env_indent` alone dropped every
+        # such entry silently, which is the exact failure class this gate
+        # exists to prevent (found by adversarial review, 2026-07-28: a
+        # flush-style key genuinely missing on the Pi came back green). Only a
+        # non-sequence line at or above the block's indent ends it, and a
+        # mapping key can never begin with `-`.
+        if in_env and indent <= env_indent and not stripped.startswith("-"):
             in_env = False
-        if stripped == "environment:":
-            if in_env:
+
+        if stripped.startswith("environment:"):
+            if stripped != "environment:":
+                # Flow style (`environment: [A=1]`), an alias (`*env`), or an
+                # inline empty list. All valid compose; none is the shape this
+                # parser reads, and skipping the line would leave the service
+                # looking env-less.
+                die(f"{rel}:{lineno}: `{stripped}` in service {service!r} puts "
+                    "the environment inline. This gate reads only a block "
+                    "sequence of `- KEY=value`; teach it the new shape rather "
+                    "than letting the service read as env-less.")
+            if service in seen_env_block:
                 die(f"{rel}:{lineno}: a second `environment:` inside "
                     f"{service!r} — refusing to merge them silently")
+            seen_env_block.add(service)
             in_env, env_indent = True, indent
             continue
+
         if not in_env:
+            if any(stripped.startswith(k) for k in _HIDDEN_ENV_KEYS):
+                die(f"{rel}:{lineno}: `{stripped}` in service {service!r} can "
+                    "inject environment this gate cannot see. Refusing rather "
+                    "than comparing an incomplete picture — if the shape is "
+                    "wanted, teach this parser to follow it.")
             continue
 
         match = _ENTRY_RE.match(stripped)

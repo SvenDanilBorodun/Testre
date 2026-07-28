@@ -24,6 +24,7 @@ from typing import Any, Optional
 
 import numpy as np
 
+from physical_ai_server.workflow import claims as _claims
 from physical_ai_server.workflow.handlers import motion as _motion
 from physical_ai_server.workflow.handlers.motion import GraspSkip, WorkflowError
 
@@ -229,53 +230,13 @@ def label_for(ctx, type_name) -> str:
         return str(type_name or 'Objekt')
 
 
-def _excluded_ids(ctx) -> set:
-    """The set of tag ids to skip in detection: CLAIMED (already grasped) ∪
-    SKIPPED (confirmed-failed, future heuristic). Read under claim_lock so a
-    concurrent grasp in a hat thread can't tear the set (§24.3)."""
-    lock = getattr(ctx, 'claim_lock', None)
-    claimed = getattr(ctx, 'claimed_tags', None) or set()
-    skipped = getattr(ctx, 'skipped_tags', None) or set()
-    if lock is not None:
-        with lock:
-            return set(claimed) | set(skipped)
-    return set(claimed) | set(skipped)
-
-
-def _claim_tag(ctx, tag_id) -> None:
-    """Mark a tag id CLAIMED after a successful grasp so the loop never
-    re-grabs a placed object and terminates. No-op if claim state is absent
-    (e.g. a unit-test ctx without the sets)."""
-    if tag_id is None:
-        return
-    claimed = getattr(ctx, 'claimed_tags', None)
-    if claimed is None:
-        return
-    lock = getattr(ctx, 'claim_lock', None)
-    if lock is not None:
-        with lock:
-            claimed.add(int(tag_id))
-    else:
-        claimed.add(int(tag_id))
-
-
-def _skip_tag(ctx, tag_id) -> None:
-    """Mark a tag id SKIPPED — a confirmed per-instance failure (out of reach,
-    orientation unreadable) that must NOT be retried, so the „Solange sichtbar"
-    loop makes progress and terminates instead of retreat→redetect→fail forever.
-    Excluded from future detection alongside claimed ids (``_excluded_ids``).
-    No-op if skip state is absent (e.g. a unit-test ctx without the sets)."""
-    if tag_id is None:
-        return
-    skipped = getattr(ctx, 'skipped_tags', None)
-    if skipped is None:
-        return
-    lock = getattr(ctx, 'claim_lock', None)
-    if lock is not None:
-        with lock:
-            skipped.add(int(tag_id))
-    else:
-        skipped.add(int(tag_id))
+# Per-run claim/skip bookkeeping lives in workflow.claims so handlers.motion can
+# reach it without a circular import (perception_blocks imports motion at module
+# scope, so the reverse edge cannot exist). Re-exported under the original private
+# names: ~10 internal call sites and several tests import them from here.
+_excluded_ids = _claims.excluded_ids
+_claim_tag = _claims.claim_tag
+_skip_tag = _claims.skip_tag
 
 
 def _reclaim_recycled(ctx, recipe, visible_type_ids) -> None:

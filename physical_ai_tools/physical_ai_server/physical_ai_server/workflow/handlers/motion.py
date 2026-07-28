@@ -1415,7 +1415,19 @@ def move_above(ctx, args: dict[str, Any]) -> None:
     # already accepted but whose +approach pose is just outside the shrinking
     # annulus — solves the grasp first (raises only if THAT is unreachable) and
     # derives the largest reachable hover.
-    _grasp_q, arm_q = _solve_grasp_and_approach(ctx, (x, y, z), approach, roll=roll)
+    try:
+        _grasp_q, arm_q = _solve_grasp_and_approach(ctx, (x, y, z), approach, roll=roll)
+    except GraspSkip:
+        # The only GraspSkip this can raise is the no-approach-clearance refusal:
+        # this instance sits at a radius where the arm cannot come down on it at
+        # all. Mark it SKIPPED before re-raising, exactly as grasp_object does, so
+        # a „Solange sichtbar" loop excludes it next pass and TERMINATES. Without
+        # this the loop swallowed the GraspSkip, nothing grew the claim/skip
+        # count, and it burned its three stall passes before ending on the
+        # alarming „kein Fortschritt" instead of simply moving on.
+        from physical_ai_server.workflow import claims as _claims
+        _claims.skip_tag(ctx, getattr(ziel, 'aruco_id', None))
+        raise
     q_end = arm_q + [ctx.last_full_joints[_n(ctx)]]
     # TRANSIT (hover above the object) — route around any no-go zone. Optional
     # per-move „mit Tempo" override; None → workflow-global tempo.

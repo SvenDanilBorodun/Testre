@@ -896,15 +896,24 @@ jobs:
             exit 1
           fi
           echo "OK: opi server image is within the size ceiling (${SIZE} bytes)."
-      - name: Pull + assert open-manipulator has Dynamixel SDK
+      - name: Pull + assert open-manipulator has Dynamixel SDK + pyserial
+        # `serial` is asserted EXPLICITLY, not left to ride on dynamixel_sdk.
+        # It is the edu6 driver's only third-party dependency: `feetech_bus.py`
+        # imports it LAZILY inside FeetechBus.__init__, so nothing at image
+        # build or node import time proves it is installed — an absence would
+        # surface as a German bus error on a real arm, not in CI. Nothing pip-
+        # installs pyserial by name either; it arrives only as dynamixel_sdk's
+        # dependency (its Linux PortHandler imports `serial`), which is exactly
+        # the kind of transitive proof that evaporates on an upstream repackage.
+        # One extra module name, and the assumption stops being an assumption.
         run: |
           docker pull ghcr.io/svendanilborodun/${{ matrix.arm_repo }}:latest
           if ! docker run --rm --entrypoint sh ghcr.io/svendanilborodun/${{ matrix.arm_repo }}:latest \
-               -c 'python3 -c "import dynamixel_sdk"'; then
-            echo "::error::${{ matrix.arm_repo }} missing dynamixel_sdk"
+               -c 'python3 -c "import dynamixel_sdk, serial"'; then
+            echo "::error::${{ matrix.arm_repo }} missing dynamixel_sdk or pyserial (serial)"
             exit 1
           fi
-          echo "OK: ${{ matrix.arm_repo }} has dynamixel_sdk"
+          echo "OK: ${{ matrix.arm_repo }} has dynamixel_sdk + pyserial"
       - name: Architecture sanity (assert running on native arch)
         # Belt-and-suspenders: if a runner is mis-provisioned we want to
         # catch it here. uname should match the matrix arch.

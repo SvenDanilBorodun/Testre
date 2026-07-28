@@ -291,9 +291,34 @@ install_agent_tree() {
     # Compose file + the s6-keep marker it bind-mounts. The compose references
     # ./physical_ai_server/.s6-keep RELATIVE to its own directory, so both land
     # under /opt/edubotics (constants.COMPOSE_FILE = /opt/edubotics/docker-compose.opi.yml).
-    [ -n "$DOCKER_DIR" ] || die "Cannot locate the docker/ dir (expected ${SCRIPT_DIR}/../docker)."
-    install -m 0644 "${DOCKER_DIR}/docker-compose.opi.yml" \
-        "${INSTALL_DIR}/docker-compose.opi.yml"
+    #
+    # TWO sources for the compose, in priority order. The source checkout
+    # (${DOCKER_DIR}) is the source of truth and stays first. The fallback is the
+    # byte-identical twin that ships INSIDE the agent package
+    # (pi_agent/docker/docker-compose.opi.yml, fenced by
+    # ci.yml::pi-compose-twin-guard and re-fenced on the release artifact by
+    # release.yml::pi-agent-tarball) — the same copy the agent's own drift repair
+    # installs, so a tree that has the package but no docker/ dir beside it gets
+    # exactly the file it would have been repaired onto anyway, rather than
+    # dying with "cannot locate the docker/ dir" while holding a perfectly good
+    # compose one directory down. The rsync above already placed that twin under
+    # ${INSTALL_DIR}/pi_agent/docker/; it is read here from ${SCRIPT_DIR} so the
+    # source of the install is the tree being provisioned FROM in both branches.
+    local compose_src=""
+    if [ -n "$DOCKER_DIR" ] && [ -f "${DOCKER_DIR}/docker-compose.opi.yml" ]; then
+        compose_src="${DOCKER_DIR}/docker-compose.opi.yml"
+    elif [ -f "${SCRIPT_DIR}/docker/docker-compose.opi.yml" ]; then
+        compose_src="${SCRIPT_DIR}/docker/docker-compose.opi.yml"
+        log "No source docker/ dir — installing the compose from the agent's shipped copy."
+    else
+        die "Cannot locate docker-compose.opi.yml (looked in ${SCRIPT_DIR}/../docker and ${SCRIPT_DIR}/docker)."
+    fi
+    install -m 0644 "$compose_src" "${INSTALL_DIR}/docker-compose.opi.yml"
+
+    # .s6-keep is a 0-byte marker whose content has never changed, so it is
+    # deliberately NOT twinned into the agent package (there is nothing a byte
+    # compare could find) and still needs the source checkout.
+    [ -n "$DOCKER_DIR" ] || die "Cannot locate the docker/ dir (expected ${SCRIPT_DIR}/../docker) — needed for physical_ai_server/.s6-keep."
     install -m 0644 "${DOCKER_DIR}/physical_ai_server/.s6-keep" \
         "${INSTALL_DIR}/physical_ai_server/.s6-keep"
 

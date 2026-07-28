@@ -598,8 +598,33 @@ jobs:
           persist-credentials: false
       - name: Assert the shipped pi_agent compose twin is byte-identical
         run: |
+          set -euo pipefail
+          pkg=robotis_ai_setup/pi_agent
           src=robotis_ai_setup/docker/docker-compose.opi.yml
-          twin=robotis_ai_setup/pi_agent/docker/docker-compose.opi.yml
+          # The twin's path is DERIVED from the agent's own
+          # SHIPPED_COMPOSE_RELPATH, never restated here. Same rule
+          # release.yml::pi-agent-tarball already follows for SYSTEMD_UNIT_NAMES
+          # / UDEV_RULE_NAMES, and its comment gives the reason verbatim: "a
+          # second hardcoded list is a second thing to keep in sync, and a name
+          # drifting out of sync is precisely the failure this gate exists to
+          # catch." It bites harder here than it looks: the agent RESOLVES the
+          # twin off that constant (agent.py::_shipped_compose_path), so a gate
+          # pinned to a stale literal would fence a file nothing reads — green,
+          # while the file every fielded Pi is repaired ONTO ships unchecked.
+          #
+          # Written to a FILE rather than captured in $( ): an ::error:: printed
+          # inside a command substitution is CAPTURED, so the step would die with
+          # a bare non-zero and no reason (the same lesson release.yml's derived
+          # member list records).
+          relfile="$(mktemp)"
+          if ! python3 .github/scripts/pi_shipped_compose_relpath.py \
+                 "${pkg}/constants.py" > "$relfile"; then
+            echo "::error file=${pkg}/constants.py::could not derive SHIPPED_COMPOSE_RELPATH — see the diagnostic above"
+            exit 1
+          fi
+          twin="${pkg}/$(cat "$relfile")"
+          rm -f "$relfile"
+          echo "Twin path derived from ${pkg}/constants.py: ${twin}"
           test -f "$twin" || {
             echo "::error file=${twin}::missing — without it no compose change in this release can reach a fielded Orange Pi (the release tarball and the agent self-update both carry pi_agent/ only)"
             exit 1

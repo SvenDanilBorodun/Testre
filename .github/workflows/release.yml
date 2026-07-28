@@ -410,16 +410,36 @@ jobs:
           # bytes CI validated. Assert both, at the only moment either is
           # observable. `ci.yml::pi-compose-twin-guard` fences the same equality
           # on every push; this fences the ARTIFACT, which is what ships.
-          if ! tar -tzf edubotics-pi-agent.tar.gz | grep -q '^pi_agent/docker/docker-compose\.opi\.yml$'; then
-            echo "::error::edubotics-pi-agent.tar.gz is missing pi_agent/docker/docker-compose.opi.yml — no compose change in this release could ever reach a fielded Orange Pi"
+          #
+          # The member's path is DERIVED from the TARBALL'S OWN
+          # pi_agent/constants.py (SHIPPED_COMPOSE_RELPATH), never restated —
+          # the same rule the systemd/udev block below follows for its two
+          # tuples, for the reason spelled out there. Deriving it from the
+          # ARTIFACT rather than from this file is what makes it assert the path
+          # the SHIPPED agent will actually read (agent.py::_shipped_compose_path
+          # resolves the twin off that constant): a rename that moved the file
+          # but not the gate, or moved the gate but not the file, fails here
+          # either way instead of quietly fencing nothing.
+          COMPOSE_RELPATH_FILE="${RUNNER_TEMP:-/tmp}/edubotics-compose-relpath.txt"
+          if ! tar -xzOf edubotics-pi-agent.tar.gz pi_agent/constants.py \
+               | python3 .github/scripts/pi_shipped_compose_relpath.py - \
+               > "$COMPOSE_RELPATH_FILE"; then
+            echo "::error::could not derive SHIPPED_COMPOSE_RELPATH from the packaged pi_agent/constants.py — see the diagnostic above"
             exit 1
           fi
-          if ! tar -xzOf edubotics-pi-agent.tar.gz pi_agent/docker/docker-compose.opi.yml \
+          COMPOSE_MEMBER="pi_agent/$(cat "$COMPOSE_RELPATH_FILE")"
+          rm -f "$COMPOSE_RELPATH_FILE"
+          echo "Compose member derived from the packaged pi_agent/constants.py: ${COMPOSE_MEMBER}"
+          if ! tar -tzf edubotics-pi-agent.tar.gz | grep -qxF "$COMPOSE_MEMBER"; then
+            echo "::error::edubotics-pi-agent.tar.gz is missing ${COMPOSE_MEMBER} — no compose change in this release could ever reach a fielded Orange Pi"
+            exit 1
+          fi
+          if ! tar -xzOf edubotics-pi-agent.tar.gz "$COMPOSE_MEMBER" \
                | cmp -s - robotis_ai_setup/docker/docker-compose.opi.yml; then
-            echo "::error file=robotis_ai_setup/pi_agent/docker/docker-compose.opi.yml::packaged pi_agent/docker/docker-compose.opi.yml differs from robotis_ai_setup/docker/docker-compose.opi.yml — a fielded Pi would be repaired ONTO the wrong compose"
+            echo "::error file=robotis_ai_setup/${COMPOSE_MEMBER}::packaged ${COMPOSE_MEMBER} differs from robotis_ai_setup/docker/docker-compose.opi.yml — a fielded Pi would be repaired ONTO the wrong compose"
             exit 1
           fi
-          echo "OK: packaged pi_agent/docker/docker-compose.opi.yml matches the source of truth"
+          echo "OK: packaged ${COMPOSE_MEMBER} matches the source of truth"
           # Systemd-unit + udev-rule gates (the compose gate's shape, one layer
           # over). The agent's boot-time drift repair byte-compares the INSTALLED
           # units and rules against the copies inside THIS tarball and re-installs

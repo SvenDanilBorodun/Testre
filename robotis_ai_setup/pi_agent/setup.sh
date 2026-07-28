@@ -378,19 +378,34 @@ install_agent_tree() {
             > "${INSTALL_DIR}/pi_agent/docker/versions.env"
         chmod 0644 "${INSTALL_DIR}/pi_agent/docker/versions.env" 2>/dev/null || true
 
-        # System-files provenance stamp (audit M1). docker-compose.opi.yml + the
-        # systemd units are installed here from the source checkout but are NOT in
-        # the self-update tarball (which rsyncs pi_agent/ ONLY), so a release that
-        # changes a forwarded EDUBOTICS_* env / a healthcheck / a unit never reaches
-        # a deployed Pi — a silent orchestration fail-open. This stamp records the
-        # version those on-disk system files came from; it lives OUTSIDE pi_agent/
-        # so a self-update (which does not touch compose/units) does NOT advance it.
+        # System-files provenance stamp (audit M1). The three "system files" this
+        # script installs OUTSIDE pi_agent/ — docker-compose.opi.yml (above), the
+        # udev rule (install_udev) and the systemd units (install_units) — land on
+        # paths a self-update's rsync never touches, so this stamp records the
+        # version the on-disk copies came from. It lives outside pi_agent/ too, so
+        # a self-update cannot advance it.
+        #
+        # Until 2026-07-28 this comment went on to say those files "never reach a
+        # deployed Pi — a silent orchestration fail-open". That was true then and
+        # is FALSE now; closing it is what this work package did. All three now
+        # SHIP inside the agent package: the units in pi_agent/systemd/ and the
+        # rule in pi_agent/udev/ (both installed from ${SCRIPT_DIR} above/below,
+        # i.e. from exactly those copies), and the compose as a byte-identical
+        # TWIN at constants.SHIPPED_COMPOSE_RELPATH — that one still prefers
+        # ${DOCKER_DIR} when a source checkout exists, which is the same bytes by
+        # construction (ci.yml::pi-compose-twin-guard `cmp -s`). So the release
+        # tar and the self-update rsync both carry each new definition onto the
+        # Pi, where agent.py::_check_system_files_version byte-compares the
+        # installed copies against them at boot and installs the shipped bytes
+        # atomically on drift. A refused or failed repair leaves the previous,
+        # working file byte-intact and is the only thing that reaches the System
+        # tab's banner.
+        #
         # CONTEXT ONLY: the agent does NOT treat stamp != APP_VERSION as drift —
         # that inequality is the normal state of every self-updated Pi (the stamp
         # cannot advance by design) and proves nothing about the files' content.
-        # The agent proves drift by byte-comparing the units it installed below
-        # against the ones it ships, and uses this stamp only to name where the
-        # on-disk system files came from.
+        # Drift is proven by that byte compare; this stamp only NAMES the version
+        # the on-disk system files came from, and only once drift is proven.
         printf '%s\n' "$pinned_version" > "${INSTALL_DIR}/.system-files-version"
         chmod 0644 "${INSTALL_DIR}/.system-files-version" 2>/dev/null || true
         log "Pinned IMAGE_TAG=${pinned_version} + stamped system-files version (release-pinned, not main HEAD)."

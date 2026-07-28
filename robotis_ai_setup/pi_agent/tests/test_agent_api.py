@@ -1485,6 +1485,16 @@ class TestSystemFilesVersionCheck(unittest.TestCase):
         self.assertEqual(os.path.commonpath([resolved, pkg]), pkg)
         self.assertTrue(resolved.endswith(agent.SHIPPED_COMPOSE_RELPATH),
                         resolved)
+        # …and it READS the constant rather than restating its value. Today the
+        # two are identical strings, so every assertion above passes just as
+        # well against a hardcoded "docker/docker-compose.opi.yml" — and that
+        # mutant is the one the CI/release gates cannot catch either, since they
+        # derive the path FROM this constant: a rename would move the gates and
+        # the shipped file together while the agent kept opening the old path.
+        with patch.object(agent, "SHIPPED_COMPOSE_RELPATH",
+                          os.path.join("compose", "opi.yml")):
+            self.assertEqual(self.app._shipped_compose_path(),
+                             os.path.join(pkg, "compose", "opi.yml"))
 
     def test_the_compose_repair_works_on_a_pi_with_NO_source_checkout(self):
         """The same property as an OBSERVABLE, in the layout a Pi actually has.

@@ -496,7 +496,11 @@ def generate_env_file(config: HardwareConfig, output_path: str = ENV_FILE,
             the current .env value forward (default ``172.28.0.0/24``), so a
             provisioning-time overlap-avoidance choice survives regenerates.
         robot_type: ArmProfile id emitted as the managed
-            ``EDUBOTICS_ROBOT_TYPE`` line (compose forwards it to the server).
+            ``EDUBOTICS_ROBOT_TYPE`` line. The opi compose forwards it to BOTH
+            robot-tier services — the server resolves the ArmProfile from it and
+            ``entrypoint_omx.sh`` branches on it INSIDE the arm container. It
+            reached the server alone until 2026-07-28, which is why an
+            ``edu6_studio`` value used to leave the two containers disagreeing.
             Agent callers must pass the CURRENT on-disk value through
             (``read_env_var(..) or "omx_full"``) unless explicitly setting it —
             the key is MANAGED, so an omitted value would silently rewrite it.

@@ -2264,9 +2264,43 @@ class AgentApp:
             f"Udev-Regel {rule}",
         )
 
-    def _renew_system_units(self, drifted: "list") -> bool:
+    def _install_each(self, names: "list", install) -> "tuple":
+        """Attempt EVERY name and return ``(repaired, failed)``. Never
+        short-circuits, and never reports a file it did not actually touch.
+
+        This replaces ``all(install(n) for n in names)``, which was wrong twice
+        over on a set with more than one entry — and both halves were MEASURED
+        against the real code with the second unit's ``os.replace`` raising
+        EPERM:
+
+        * ``all()`` over a GENERATOR stops at the first False, so a failure on
+          the FIRST file left every later file unattempted
+          (``edubotics-pi-firstboot.service swapped=False``, no
+          ``.edubotics-bak``) even where it would have succeeded. The agent
+          silently repaired less than it could.
+        * The single bool then made the caller name the WHOLE drifted set as
+          unrepaired, so a file that HAD been swapped was still reported to the
+          operator as broken and got no success line — while the System-tab
+          banner's „mit der zuletzt funktionierenden Konfiguration" was false
+          for exactly that file.
+
+        Returning the two lists is what lets the caller say only what is true of
+        each file. A mixed outcome stays possible — there is no transaction
+        across several ``os.replace`` calls, and rolling the successes back
+        would mean re-installing bytes we just proved stale — but it is now
+        REPORTED as mixed instead of flattened into one verdict, and every file
+        named in the banner really is byte-intact at its previous version.
+        """
+        repaired: list = []
+        failed: list = []
+        for name in names:
+            (repaired if install(name) else failed).append(name)
+        return repaired, failed
+
+    def _renew_system_units(self, drifted: "list") -> "tuple":
         """Install the shipped systemd units over the drifted installed copies
-        and reload systemd. True iff EVERY named unit was renewed.
+        and reload systemd. Returns ``(repaired, failed)`` — see
+        ``_install_each`` for why this is not one bool.
 
         This is what makes the drift signal actionable instead of decorative.
         The units only ever reach a Pi through ``setup.sh``, which needs a source
@@ -2290,21 +2324,34 @@ class AgentApp:
         cannot be read, so an absent unit is never "installed" here — which is
         what keeps this out of `systemctl enable` territory.
         """
-        if not all(self._install_unit_file(unit) for unit in drifted):
-            return False
-        try:
-            subprocess.run(["systemctl", "daemon-reload"],
-                           capture_output=True, text=True, timeout=30)
-        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-            # No systemd (dev box) or a reload hiccup: the FILES are correct,
-            # which is the durable half — systemd re-parses every unit at boot
-            # anyway. Never fail the renewal over the reload.
-            pass
-        return True
+        repaired, failed = self._install_each(drifted, self._install_unit_file)
+        if repaired:
+            # Reload iff something actually changed on disk. Identical to the
+            # previous all-or-nothing behaviour on the all-succeed path; the
+            # difference is only that a PARTIAL repair now also gets its reload,
+            # which it must — systemd would otherwise keep serving the old
+            # definition of a unit whose file we just replaced.
+            try:
+                subprocess.run(["systemctl", "daemon-reload"],
+                               capture_output=True, text=True, timeout=30)
+            except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+                # No systemd (dev box) or a reload hiccup: the FILES are
+                # correct, which is the durable half — systemd re-parses every
+                # unit at boot anyway. Never fail the renewal over the reload.
+                pass
+        return repaired, failed
 
-    def _renew_udev_rules(self, drifted: "list") -> bool:
+    def _renew_udev_rules(self, drifted: "list") -> "tuple":
         """Install the shipped udev rules over the drifted installed copies and
-        make udev re-read them. True iff EVERY named rule was renewed.
+        make udev re-read them. Returns ``(repaired, failed)``, exactly like the
+        systemd leg — see ``_install_each``.
+
+        ``UDEV_RULE_NAMES`` carries one entry today, so the short-circuit this
+        shares the fix for is currently inert here. It is fixed anyway because
+        the set is about to grow: the planned CH343P line for the edu6 arm
+        arrives as a rule change, and a second rule file is the obvious next
+        step. A latent bug in a repair path is not worth keeping until it has
+        something to bite.
 
         RELOAD, NEVER TRIGGER — the one thing to get right here, and the exact
         analogue of the systemd path's "``daemon-reload``, never ``restart``".
@@ -2328,14 +2375,14 @@ class AgentApp:
         Only ever REPLACES: ``_drifted_udev_rules`` skips a rule whose installed
         copy cannot be read, so a rule the Pi never had is never installed here.
         """
-        if not all(self._install_udev_rule(rule) for rule in drifted):
-            return False
-        try:
-            subprocess.run(["udevadm", "control", "--reload-rules"],
-                           capture_output=True, text=True, timeout=30)
-        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-            pass  # no udev (dev box) or a reload hiccup — the files are correct
-        return True
+        repaired, failed = self._install_each(drifted, self._install_udev_rule)
+        if repaired:
+            try:
+                subprocess.run(["udevadm", "control", "--reload-rules"],
+                               capture_output=True, text=True, timeout=30)
+            except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+                pass  # no udev (dev box) or a hiccup — the files are correct
+        return repaired, failed
 
     def _shipped_compose_path(self) -> str:
         """Absolute path to the opi compose file THIS agent version ships.
@@ -2526,32 +2573,38 @@ class AgentApp:
         origin = (f" (Stand: Version {stamped})"
                   if stamped and stamped != APP_VERSION else "")
         unrepaired: list = []
+        # Each leg reports per FILE, not per leg. A partial outcome therefore
+        # produces BOTH lines — the success sentence naming exactly what was
+        # renewed, and the banner naming exactly what was not — instead of one
+        # verdict that is wrong about half the set. No extra German string was
+        # needed for that: the existing sentence already reads correctly over a
+        # subset, so scoping it to `repaired` is the whole change.
         if drifted:
-            if self._renew_system_units(drifted):
+            repaired, failed = self._renew_system_units(drifted)
+            if repaired:
                 # Repaired — nothing for the System tab to nag about. Still say
                 # so in the Protokoll: a support case wants to see that it
                 # happened (and when it takes effect).
                 self._log(
-                    f"Systemd-Dienste ({', '.join(drifted)}){origin} entsprachen nicht "
+                    f"Systemd-Dienste ({', '.join(repaired)}){origin} entsprachen nicht "
                     f"der Agent-Version {APP_VERSION} und wurden automatisch erneuert. "
                     "Die Änderung wird beim nächsten Start des Agenten wirksam."
                 )
-            else:
-                unrepaired.extend(drifted)
+            unrepaired.extend(failed)
         if drifted_udev:
-            if self._renew_udev_rules(drifted_udev):
+            repaired_udev, failed_udev = self._renew_udev_rules(drifted_udev)
+            if repaired_udev:
                 # Says exactly when it applies. A reload makes udev KNOW the
                 # rule; it does not re-evaluate devices that are already
                 # enumerated (that would be `udevadm trigger`, which this
                 # deliberately does not run — see _renew_udev_rules).
                 self._log(
-                    f"Udev-Regeln ({', '.join(drifted_udev)}){origin} entsprachen nicht "
+                    f"Udev-Regeln ({', '.join(repaired_udev)}){origin} entsprachen nicht "
                     f"der Agent-Version {APP_VERSION} und wurden automatisch erneuert. "
                     "Sie gelten für Geräte, die danach neu eingesteckt werden, "
                     "spätestens ab dem nächsten Neustart."
                 )
-            else:
-                unrepaired.extend(drifted_udev)
+            unrepaired.extend(failed_udev)
         if compose_drifted:
             compose_name = os.path.basename(COMPOSE_FILE)
             if self._renew_compose():

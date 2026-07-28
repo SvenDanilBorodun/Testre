@@ -871,7 +871,13 @@ class TestSystemFilesVersionCheck(unittest.TestCase):
             patch.object(agent.subprocess, "run", MagicMock(side_effect=_run)),
         ]
         if not renew:
-            stack.append(patch.object(self.app, "_renew_system_units", return_value=False))
+            # `(repaired, failed)`, not a bool: the renewal reports per FILE so
+            # a partial outcome can name the two halves separately. This double
+            # is the total-failure end of that range — nothing repaired, every
+            # drifted unit still drifted.
+            stack.append(patch.object(
+                self.app, "_renew_system_units",
+                side_effect=lambda units: ([], list(units))))
         for p in stack:
             p.start()
         try:
@@ -983,6 +989,220 @@ class TestSystemFilesVersionCheck(unittest.TestCase):
         for unit in agent.SYSTEMD_UNIT_NAMES:
             dst = os.path.join(self.installed, unit)
             self.assertFalse(os.path.exists(dst + ".edubotics-tmp"), unit)
+
+    # ── partial repairs: attempt every file, report only what really failed ──
+
+    def _two_unit_names(self):
+        """The first two installed unit names, in the order the repair walks
+        them. SKIP rather than fail if the constant ever carries fewer than two:
+        with a single-entry set the short-circuit these tests are about is
+        inert, so there would be nothing to assert (the shape itself stays
+        pinned by `test_the_systemd_leg_has_the_same_no_short_circuit_shape`,
+        which supplies its own names)."""
+        if len(agent.SYSTEMD_UNIT_NAMES) < 2:
+            self.skipTest("needs at least two shipped units to show ordering")
+        return agent.SYSTEMD_UNIT_NAMES[0], agent.SYSTEMD_UNIT_NAMES[1]
+
+    def _check_with_one_unit_failing(self, failing: str):
+        """Run the drift check with all units drifted and ``os.replace`` raising
+        EPERM for exactly ONE of them. Models the realistic field case (one
+        immutable / hand-bind-mounted unit file), which is the only way the
+        difference between "attempt every file" and "stop at the first failure"
+        can show itself."""
+        self._install_units(drift=True)
+        real_replace = os.replace
+
+        def _replace(src, dst):
+            if os.path.basename(str(dst)) == failing:
+                raise OSError(1, "Operation not permitted")
+            return real_replace(src, dst)
+
+        with patch.object(agent, "SYSTEM_FILES_VERSION_FILE", self.stamp), \
+             patch.object(agent, "SYSTEMD_UNIT_DIR", self.installed), \
+             patch.object(agent, "APP_VERSION", "2.14.0"), \
+             patch.object(agent.subprocess, "run", MagicMock(
+                 side_effect=lambda argv, *a, **kw:
+                 subprocess.CompletedProcess(argv, 0, "", ""))), \
+             patch.object(agent.os, "replace", _replace):
+            self.app._check_system_files_version()
+        return "\n".join(self.logs)
+
+    def _unit_swapped(self, unit: str) -> bool:
+        with open(os.path.join(self.shipped_dir, unit), "rb") as f:
+            shipped = f.read()
+        with open(os.path.join(self.installed, unit), "rb") as f:
+            return f.read() == shipped
+
+    def test_a_failure_on_the_FIRST_file_still_repairs_every_later_one(self):
+        """THE short-circuit guard. `all(install(u) for u in drifted)` evaluates
+        a GENERATOR, so it stopped at the first False and never attempted the
+        rest.
+
+        MEASURED against the pre-fix code with the FIRST unit's os.replace
+        raising EPERM: `edubotics-pi-firstboot.service swapped=False` and no
+        `.edubotics-bak` beside it — it was never even tried, on a Pi where it
+        would have succeeded. The agent silently repaired less than it could,
+        and the repair path is the only one a classroom has."""
+        first, second = self._two_unit_names()
+        self._check_with_one_unit_failing(first)
+        self.assertFalse(self._unit_swapped(first), "the failing unit must be intact")
+        self.assertTrue(self._unit_swapped(second),
+                        "a later file must be attempted even after an earlier failure")
+        # …and its backup proves it was actually attempted, not merely equal.
+        self.assertTrue(os.path.isfile(
+            os.path.join(self.installed, second) + ".edubotics-bak"))
+
+    def test_the_banner_names_only_the_files_that_actually_failed(self):
+        """The other half: one bool made the caller report the WHOLE drifted set
+        as unrepaired, so a unit that HAD been swapped was still named to the
+        operator as broken and got no success line — while the System-tab
+        banner's „mit der zuletzt funktionierenden Konfiguration" was false for
+        exactly that file (it was on the NEW one). MEASURED pre-fix: with the
+        second unit failing, `edubotics-pi.service swapped=True` and the banner
+        named both."""
+        first, second = self._two_unit_names()
+        text = self._check_with_one_unit_failing(second)
+        self.assertTrue(self._unit_swapped(first))
+        self.assertFalse(self._unit_swapped(second))
+        banner = [ln for ln in self.logs if ln.startswith("[WARNUNG]")]
+        self.assertEqual(len(banner), 1, self.logs)
+        self.assertIn(second, banner[0])
+        self.assertNotIn(first, banner[0])
+        # …and the repaired one is REPORTED as repaired, naming only itself.
+        renewed = [ln for ln in self.logs if "wurden automatisch erneuert" in ln]
+        self.assertEqual(len(renewed), 1, self.logs)
+        self.assertIn(first, renewed[0])
+        self.assertNotIn(second, renewed[0])
+        self.assertTrue(self.app._system_files_stale)
+
+    def test_a_partial_repair_still_reloads_systemd(self):
+        """systemd would otherwise keep serving the OLD definition of a unit
+        whose file was just replaced. The reload is gated on „something actually
+        changed", not on „everything succeeded"."""
+        first, _second = self._two_unit_names()
+        self._install_units(drift=True)
+        argvs = []
+        real_replace = os.replace
+
+        def _replace(src, dst):
+            if os.path.basename(str(dst)) == first:
+                raise OSError(1, "Operation not permitted")
+            return real_replace(src, dst)
+
+        def _run(argv, *a, **kw):
+            argvs.append(list(argv))
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        with patch.object(agent, "SYSTEM_FILES_VERSION_FILE", self.stamp), \
+             patch.object(agent, "SYSTEMD_UNIT_DIR", self.installed), \
+             patch.object(agent.subprocess, "run", _run), \
+             patch.object(agent.os, "replace", _replace):
+            self.app._check_system_files_version()
+        self.assertIn(["systemctl", "daemon-reload"], argvs, argvs)
+
+    def test_nothing_repaired_means_no_reload_is_attempted(self):
+        """The converse, and what stops „reload whenever we tried" from creeping
+        back in: with every install refused there is no new definition to make
+        known, so the agent runs no subprocess at all on that leg."""
+        self._install_units(drift=True)
+        argvs = []
+
+        def _run(argv, *a, **kw):
+            argvs.append(list(argv))
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        with patch.object(agent, "SYSTEM_FILES_VERSION_FILE", self.stamp), \
+             patch.object(agent, "SYSTEMD_UNIT_DIR", self.installed), \
+             patch.object(agent.subprocess, "run", _run), \
+             patch.object(agent.os, "replace",
+                          side_effect=OSError("read-only file system")):
+            self.app._check_system_files_version()
+        self.assertNotIn(["systemctl", "daemon-reload"], argvs, argvs)
+        self.assertTrue(self.app._system_files_stale)
+
+    def test_the_udev_leg_has_the_same_no_short_circuit_shape(self):
+        """UDEV_RULE_NAMES carries ONE entry today, so the short-circuit is
+        currently inert there — which is exactly why it has to be pinned now.
+        The set grows with the planned CH343P line for the edu6 arm, and a
+        latent bug in the only repair path a classroom has is not worth keeping
+        until it has something to bite. Driven with a synthetic two-name list so
+        the guard does not depend on a second real rule existing yet."""
+        seen = []
+
+        def _install(rule):
+            seen.append(rule)
+            return rule != "a.rules"          # the FIRST one fails
+
+        with patch.object(self.app, "_install_udev_rule", _install), \
+             patch.object(agent.subprocess, "run", MagicMock(
+                 return_value=subprocess.CompletedProcess([], 0, "", ""))):
+            repaired, failed = self.app._renew_udev_rules(["a.rules", "b.rules"])
+        self.assertEqual(seen, ["a.rules", "b.rules"], "b.rules was never attempted")
+        self.assertEqual(repaired, ["b.rules"])
+        self.assertEqual(failed, ["a.rules"])
+
+    def test_the_systemd_leg_has_the_same_no_short_circuit_shape(self):
+        """The twin of the udev guard, driven through the same synthetic list so
+        both legs are pinned by shape rather than by however many names their
+        constants happen to carry."""
+        seen = []
+
+        def _install(unit):
+            seen.append(unit)
+            return unit != "a.service"        # the FIRST one fails
+
+        with patch.object(self.app, "_install_unit_file", _install), \
+             patch.object(agent.subprocess, "run", MagicMock(
+                 return_value=subprocess.CompletedProcess([], 0, "", ""))):
+            repaired, failed = self.app._renew_system_units(["a.service", "b.service"])
+        self.assertEqual(seen, ["a.service", "b.service"])
+        self.assertEqual(repaired, ["b.service"])
+        self.assertEqual(failed, ["a.service"])
+
+    def test_every_unrepairable_file_is_preceded_by_its_german_reason(self):
+        """The banner PROMISES „der Grund steht in den Zeilen oberhalb", so the
+        promise has to be code, not prose. Every path that appends to
+        `unrepaired` runs through `_install_system_file`, whose only two False
+        returns each log a German reason first — the OSError branch (here) and
+        the validate refusal (the compose test below). Assert the ORDER, not
+        just the presence: a reason logged after the banner is a pointer to
+        nothing."""
+        self._install_units(drift=True)
+        self._install_udev(drift=True)
+        self._install_compose(drift=True)
+        with patch.object(agent, "SYSTEM_FILES_VERSION_FILE", self.stamp), \
+             patch.object(agent, "SYSTEMD_UNIT_DIR", self.installed), \
+             patch.object(agent.subprocess, "run", MagicMock(
+                 side_effect=lambda argv, *a, **kw:
+                 subprocess.CompletedProcess(argv, 0, "", ""))), \
+             patch.object(agent.os, "replace",
+                          side_effect=OSError(30, "Read-only file system")):
+            self.app._check_system_files_version()
+        banner_at = [i for i, ln in enumerate(self.logs)
+                     if ln.startswith("[WARNUNG]")]
+        self.assertEqual(len(banner_at), 1, self.logs)
+        for name in (list(agent.SYSTEMD_UNIT_NAMES) + list(agent.UDEV_RULE_NAMES)
+                     + [os.path.basename(agent.COMPOSE_FILE)]):
+            reasons = [i for i, ln in enumerate(self.logs)
+                       if name in ln and "konnte nicht erneuert werden" in ln]
+            self.assertTrue(reasons, f"no German reason logged for {name}: {self.logs}")
+            self.assertLess(min(reasons), banner_at[0],
+                            f"the reason for {name} must come BEFORE the banner")
+
+    def test_a_refused_compose_swap_also_states_its_reason_before_the_banner(self):
+        """The validate-gate half of the same promise: `_install_system_file`'s
+        OTHER False return. A refusal is not an error, so it logs „wurde NICHT
+        erneuert: …" rather than „konnte nicht erneuert werden" — and it too has
+        to land above the banner that points at it."""
+        self._install_compose(drift=True)
+        self._check(stamp_contents="2.13.0\n", compose_valid=False)
+        banner_at = [i for i, ln in enumerate(self.logs)
+                     if ln.startswith("[WARNUNG]")]
+        reason_at = [i for i, ln in enumerate(self.logs)
+                     if "NICHT erneuert" in ln]
+        self.assertEqual(len(banner_at), 1, self.logs)
+        self.assertTrue(reason_at, self.logs)
+        self.assertLess(min(reason_at), banner_at[0], self.logs)
 
     def test_drifted_units_warn_in_german_and_name_the_unit(self):
         self._install_units(drift=True)
@@ -1486,8 +1706,10 @@ class TestSystemFilesVersionCheck(unittest.TestCase):
         with patch.object(agent, "SYSTEM_FILES_VERSION_FILE", self.stamp), \
              patch.object(agent, "SYSTEMD_UNIT_DIR", self.installed), \
              patch.object(agent, "APP_VERSION", "2.14.0"), \
-             patch.object(self.app, "_renew_system_units", return_value=False), \
-             patch.object(self.app, "_renew_udev_rules", return_value=False), \
+             patch.object(self.app, "_renew_system_units",
+                          side_effect=lambda units: ([], list(units))), \
+             patch.object(self.app, "_renew_udev_rules",
+                          side_effect=lambda rules: ([], list(rules))), \
              patch.object(agent.subprocess, "run",
                           MagicMock(side_effect=lambda argv, *a, **kw:
                                     subprocess.CompletedProcess(argv, 1, "", "boom"))):

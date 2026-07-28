@@ -343,6 +343,29 @@ export default function SystemPage() {
   const lanIp = agentStatus?.lan_ip || null;
   const hostname = agentStatus?.hostname || null;
 
+  // Origin version for the system-files drift banner below, or null to omit it.
+  // Derived rather than inlined so the JSX cannot leak: `{value && <p/>}` renders
+  // a BARE `0` or `NaN` (measured), and a non-string throws „Objects are not
+  // valid as a React child", which white-screens the System tab — the Pi's ONLY
+  // repair surface, i.e. the one page that must survive a malformed payload.
+  // The agent's stamp is `Optional[str]` (agent.py::_read_system_files_stamp
+  // degrades blank/unreadable to None), so anything else is a contract
+  // violation and is simply not shown. Suppressed when it equals the agent
+  // version too: naming the same number twice reads as a contradiction — the
+  // same rule agent.py applies to its Protokoll lines.
+  //
+  // The contract is non-empty-string-or-null, and the consumer below tests
+  // `!== null` rather than truthiness ON PURPOSE. Truthiness would make the
+  // empty-string clause here redundant — i.e. a clause no mutation can kill,
+  // which this repo treats as worse than no clause — and would silently start
+  // rendering „… stammen aus Version ." the day someone tightens the JSX.
+  const driftOriginVersion =
+    typeof agentStatus?.system_files_version === 'string'
+    && agentStatus.system_files_version !== ''
+    && agentStatus.system_files_version !== agentStatus.agent_version
+      ? agentStatus.system_files_version
+      : null;
+
   const previewSrc = previewDevice
     ? `/api/system/cameras/preview?device=${encodeURIComponent(previewDevice)}`
     : null;
@@ -357,44 +380,58 @@ export default function SystemPage() {
           className="mb-6 md:mb-8"
         />
 
-        {/* System-files drift. `system_files_stale` is true ONLY when the agent
-            found PROVEN drift AND could not repair it itself: it byte-compares
-            the installed systemd units against the ones it ships
-            (pi_agent/systemd/), the installed udev rules against pi_agent/udev/,
-            and the installed docker-compose.opi.yml against its shipped twin
-            (pi_agent/docker/), then installs the shipped bytes atomically — so
-            this banner names the remainder only. Reason: the
-            self-update rsyncs pi_agent/ ONLY, so anything setup.sh laid down
-            outside that tree stays frozen at provisioning time and otherwise
-            fails silently (e.g. a newly forwarded EDUBOTICS_* env). The compose
-            repair is additionally gated on `docker compose config` and REFUSES
-            a file that will not parse, which is one way to land here. Without
-            this banner the warning lived only in the Protokoll, which nobody
-            reads. The text below is deliberately file-agnostic. The remedy is
-            deliberately NON-DESTRUCTIVE: setup.sh is idempotent and every
-            volume (datasets, models, calibration) survives — NEVER tell anyone
-            here to re-flash the SD card (an earlier draft did, at ~100 % false
-            positives). */}
+        {/* System-files drift the agent could NOT repair. `system_files_stale`
+            is set at exactly ONE place in agent.py — the branch where a repair
+            FAILED. At boot the agent byte-compares the installed systemd units,
+            udev rules and docker-compose.opi.yml against the copies it ships
+            inside pi_agent/, and installs the shipped bytes atomically on
+            drift; this banner is therefore the REMAINDER only (a read-only
+            filesystem, missing permissions, or a shipped compose the
+            `docker compose config` gate refused).
+
+            It is deliberately INFORMATIONAL, not an alarm, and that is a
+            correctness point rather than a style preference: a refused or
+            failed repair leaves the previous, working file byte-intact, so the
+            Pi keeps running on its last-known-good configuration and the agent
+            retries on the next boot. Telling a teacher something is broken
+            while the rig works is the warning-fatigue pattern this repo has
+            been burned by twice (`_APPROACH_WARN_FRAC`,
+            `EDUBOTICS_HOME_SELFCOLL_WARN_M`). Hence `role="status"` (polite
+            live region) over `role="alert"` (assertive), and the file's own
+            neutral --bg-sunk treatment over amber.
+
+            Two sentences that used to be here are GONE on purpose.
+            „Aktualisierungen erneuern nur den Agenten und die Images — nicht
+            diese Dateien" became FALSE when the units/udev/compose joined the
+            self-updated set. And „sudo ./setup.sh aus dem EduBotics-Quellordner"
+            is a remedy no classroom can perform (it needs a source checkout) and
+            is no longer the primary one — the agent's own retry is. NEVER tell
+            anyone here to re-flash the SD card (an earlier draft did, at ~100 %
+            false positives).
+
+            The origin version is resolved by `driftOriginVersion` above (null
+            = omit): suppressed when it equals `agent_version` or is absent, and
+            type-gated so a malformed payload cannot leak or throw. */}
         {agentStatus?.system_files_stale && (
           <div
-            role="alert"
-            className="mb-4 rounded-[var(--radius-sm)] border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800"
+            role="status"
+            className="mb-4 rounded-[var(--radius-sm)] bg-[var(--bg-sunk)] p-3 text-sm text-[var(--ink-2)]"
           >
-            <div className="font-semibold">Systemdateien sind veraltet</div>
+            <div className="font-semibold">
+              Eine Systemdatei-Aktualisierung wurde nicht übernommen
+            </div>
             <p className="mt-1">
-              Die installierten Systemdateien
-              {agentStatus.system_files_version
-                ? <> (Stand: Version <span className="font-mono">{agentStatus.system_files_version}</span>)</>
-                : null}{' '}
-              unterscheiden sich von denen der Agent-Version{' '}
-              <span className="font-mono">{agentStatus.agent_version || '—'}</span>.
-              Aktualisierungen erneuern nur den Agenten und die Images — nicht diese Dateien.
+              Der Pi läuft normal weiter — mit der zuletzt funktionierenden
+              Konfiguration. Eine Änderung aus einer neueren Version konnte nicht
+              übernommen werden; den Grund nennt das Protokoll. Beim nächsten
+              Neustart versucht der Pi es automatisch erneut.
             </p>
-            <p className="mt-1">
-              Bitte <span className="font-mono">sudo ./setup.sh</span> aus dem
-              EduBotics-Quellordner erneut ausführen. Die Datensätze der Schüler bleiben
-              dabei erhalten.
-            </p>
+            {driftOriginVersion !== null && (
+              <p className="mt-1 text-xs text-[var(--ink-3)]">
+                Die installierten Systemdateien stammen aus Version{' '}
+                <span className="font-mono">{driftOriginVersion}</span>.
+              </p>
+            )}
           </div>
         )}
 

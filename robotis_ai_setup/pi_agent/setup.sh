@@ -315,12 +315,42 @@ install_agent_tree() {
     fi
     install -m 0644 "$compose_src" "${INSTALL_DIR}/docker-compose.opi.yml"
 
-    # .s6-keep is a 0-byte marker whose content has never changed, so it is
-    # deliberately NOT twinned into the agent package (there is nothing a byte
-    # compare could find) and still needs the source checkout.
-    [ -n "$DOCKER_DIR" ] || die "Cannot locate the docker/ dir (expected ${SCRIPT_DIR}/../docker) — needed for physical_ai_server/.s6-keep."
-    install -m 0644 "${DOCKER_DIR}/physical_ai_server/.s6-keep" \
-        "${INSTALL_DIR}/physical_ai_server/.s6-keep"
+    # .s6-keep is a 0-byte marker whose content has never changed (git blob
+    # e69de29 = the empty blob; ONE commit in its entire history, b0b601f, the
+    # repo's second), so it is deliberately NOT twinned into the agent package —
+    # there is nothing a byte compare could find, i.e. nothing the agent's own
+    # drift repair could ever do with it.
+    #
+    # It is still REQUIRED on disk: the compose bind-mounts it read-only, and
+    # Docker auto-creates a missing mount target as a DIRECTORY, which refuses
+    # every physical_ai_server start (the tzdata scar, CLAUDE.md). So when there
+    # is no source checkout to copy it from, create it — for a file whose whole
+    # definition is "exists, empty", creating it and copying it are the same
+    # act, and `install` from a source checkout stays first only because that is
+    # provably the same bytes.
+    #
+    # Dying here instead (as this did until 2026-07-28) was worse than it looked:
+    # install_agent_tree is step 6 of 10 under `set -euo pipefail`, so a
+    # tarball-only provision logged SUCCESS for the compose install one statement
+    # earlier and then aborted before .env seeding, the image pull and the unit
+    # install — leaving the Pi with no agent at all.
+    if [ -n "$DOCKER_DIR" ] && [ -f "${DOCKER_DIR}/physical_ai_server/.s6-keep" ]; then
+        install -m 0644 "${DOCKER_DIR}/physical_ai_server/.s6-keep" \
+            "${INSTALL_DIR}/physical_ai_server/.s6-keep"
+    else
+        # Refuse a target that exists but is not a regular file rather than let
+        # `:` fail with a bare bash error under `set -e`. That state is REAL and
+        # is precisely what this marker prevents: docker auto-created it as a
+        # DIRECTORY on some earlier container start. Only a human can decide to
+        # remove it, so say what to do instead of guessing.
+        if [ -e "${INSTALL_DIR}/physical_ai_server/.s6-keep" ] \
+           && [ ! -f "${INSTALL_DIR}/physical_ai_server/.s6-keep" ]; then
+            die "${INSTALL_DIR}/physical_ai_server/.s6-keep exists but is not a regular file (docker creates a DIRECTORY there when the mount target is missing). Remove it and re-run."
+        fi
+        log "No source docker/ dir — creating the 0-byte .s6-keep marker."
+        : > "${INSTALL_DIR}/physical_ai_server/.s6-keep"
+        chmod 0644 "${INSTALL_DIR}/physical_ai_server/.s6-keep"
+    fi
 
     # VERSION so constants._read_version_file resolves the product version even
     # when the agent tarball is deployed without the source tree beside it.

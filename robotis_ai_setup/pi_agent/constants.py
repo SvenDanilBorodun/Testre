@@ -253,6 +253,56 @@ CAMERA_BRIDGE_ROLES = ("gripper", "scene")
 # USB identifiers — both OpenMANIPULATOR arms are OpenRB-150 boards.
 ROBOTIS_VID = "2F5D"  # ROBOTIS USB Vendor ID (OpenRB-150; PIDs 0103, 2202)
 
+# Arm-family USB identity table — the Pi twin of `gui/app/constants.py`'s
+# ARM_USB_IDS (edu6 §4.4), kept equal by tests/test_constants.py. Keys are the
+# ARM FAMILY (what the scan hardware-matches), NOT the profile id — both OMX
+# profiles share one family. Values: (VID, PID-or-None) tuples, None = any PID
+# under that VID. The edu6 bridge is the WCH CH343P on the Waveshare Bus Servo
+# Adapter; identity is still PROVEN by the SERVOS answering
+# (`identify_arm.py --protocol=feetech`), never by the bridge chip.
+#
+# WHERE IT IS CONSUMED DIFFERS FROM WINDOWS, deliberately. There the table
+# scopes the usbipd attach (`usbipd attach --busid ...`). A Pi has no attach
+# step at all — every arm is already linked under /dev/serial/by-id by native
+# udev — so the Pi's family scoping is purely the by-id substring filter in
+# `identify_arm._ARM_MARKERS`. This table is therefore the shared IDENTITY
+# statement of what hardware each family is: the authority the udev
+# permission-floor rule mirrors (`udev/99-edubotics-robotis.rules`) and the
+# anchor that stops the two platforms drifting apart.
+ARM_USB_IDS = {
+    "omx":  (("2F5D", None),),
+    "edu6": (("1A86", "55D3"),),
+}
+DEFAULT_ARM_FAMILY = "omx"
+
+# --- Robot type → arm family (WP-3 BRIDGE — ONE site, on purpose) ---
+# The arm family a scan must look for is a property of the selected robot
+# PROFILE. The Pi has no profile registry yet: `ROBOT_PROFILES` (with its
+# display_de / follower_only / scan_requires_leader / arm_family / camera_roles
+# rows, mirroring `gui/app/constants.py`) is WP-3. Until it lands the family is
+# derived from the on-disk MANAGED key EDUBOTICS_ROBOT_TYPE through this single
+# mapping, so WP-3 replaces exactly one function body with
+# ``ROBOT_PROFILES[robot_type]["arm_family"]`` and no call site moves. The ids
+# and families here MUST equal `gui/app/constants.py::ROBOT_PROFILES`;
+# tests/test_constants.py asserts that.
+_ROBOT_TYPE_ARM_FAMILY = {
+    "omx_full":     "omx",
+    "omx_follower": "omx",
+    "edu6_studio":  "edu6",
+}
+
+
+def arm_family_for_robot_type(robot_type) -> str:
+    """Arm family for a managed ``EDUBOTICS_ROBOT_TYPE`` value.
+
+    Unknown / absent / blank → ``DEFAULT_ARM_FAMILY``, matching the server
+    registry's ``robot_profiles.resolve`` fallback: an unrecognised .env value
+    keeps today's OMX behaviour rather than making every arm unscannable.
+    """
+    return _ROBOT_TYPE_ARM_FAMILY.get(
+        (robot_type or "").strip(), DEFAULT_ARM_FAMILY)
+
+
 # Dynamixel servo config.
 BAUDRATE = 1_000_000
 LEADER_SERVO_IDS = [1, 2, 3, 4, 5, 6]

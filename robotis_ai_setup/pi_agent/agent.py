@@ -1296,8 +1296,29 @@ class AgentApp:
 
         The install root is the compose file's directory (``/opt/edubotics`` in
         the field, per setup.sh P4). The tarball's top-level dir is ``pi_agent/``
-        (agent code only — compose / unit changes need re-provisioning). We
-        extract to a TEMP dir (tar ``data`` filter — path-traversal / device-node
+        — which is NO LONGER "agent code only". That tree now also carries the
+        REFERENCE copies of the system files this agent version expects: the opi
+        compose twin (``SHIPPED_COMPOSE_RELPATH``), ``systemd/*.service``,
+        ``udev/*.rules``, the CI-baked image pin ``docker/versions.env``, and the
+        first-boot script the firstboot unit ``ExecStart``s IN PLACE out of this
+        very tree (so that one moves with the swap directly, no repair needed).
+        This apply installs none of them into ``/etc`` or the install root — it
+        swaps in the new reference bytes, and the NEXT boot's
+        ``_check_system_files_version`` byte-compares those against what is
+        installed and repairs the difference. Net effect: a release that changes
+        the compose, a systemd unit or a udev rule DOES reach a fielded Pi
+        through this path. It did not until 2026-07-28, and this docstring
+        asserting the opposite is a large part of why six compose changes
+        shipped without anyone noticing they stopped at the tarball.
+
+        What still requires re-running ``setup.sh`` is exactly what has no
+        shipped reference copy to compare against: ``physical_ai_server/.s6-keep``
+        (0 bytes — nothing a byte compare could ever find), the
+        ``/opt/edubotics/VERSION`` convenience copy (superseded on this path by
+        the packaged ``pi_agent/VERSION``), and the ``.system-files-version``
+        stamp (deliberately frozen — see ``SYSTEM_FILES_VERSION_FILE``).
+
+        We extract to a TEMP dir (tar ``data`` filter — path-traversal / device-node
         guard; the pre-PEP-706 fallback replicates those guards manually via
         ``_validate_tar_member``), rsync it into a SIBLING ``pi_agent.new/`` (a
         complete fresh tree, so a module REMOVED in a release simply isn't
@@ -2492,7 +2513,18 @@ class AgentApp:
         compose_drifted = self._compose_drifted()
         if not drifted and not drifted_udev and not compose_drifted:
             return
-        origin = (f" (Stand: Version {stamped})" if stamped else "")
+        # The origin suffix exists to name a version DIFFERENT from this
+        # agent's, so the reader can see how far the on-disk files lag. When
+        # the stamp equals APP_VERSION it names the same number twice and the
+        # sentence contradicts itself: „(Stand: Version 2.13.0) entsprachen
+        # nicht der Agent-Version 2.13.0". Drop it there — the drift is real
+        # (proven by the bytes, and a hand-edited udev rule is the likeliest
+        # cause), the origin version just says nothing about it. Reachable
+        # whenever setup.sh last ran at the version now running: a bench
+        # re-provision, or a source-checkout install that has not self-updated
+        # since.
+        origin = (f" (Stand: Version {stamped})"
+                  if stamped and stamped != APP_VERSION else "")
         unrepaired: list = []
         if drifted:
             if self._renew_system_units(drifted):

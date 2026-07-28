@@ -48,6 +48,14 @@ import threading
 from typing import Any, Optional
 
 
+# Defense-in-depth cap on placed sim objects (the cloud validator already bounds the
+# scene at 64 KB ≈ hundreds of entries). Defined HERE and imported by
+# ``sim_perception`` so the world and the detector can never disagree about which
+# placements exist — a world entry with no detection would be capturable but
+# invisible.
+MAX_SIM_OBJECTS = 64
+
+
 class SimWorld:
     """Live positions of the placed virtual objects for one simulation run."""
 
@@ -71,14 +79,16 @@ class SimWorld:
         second run never starts with a mesh still parked at the previous run's drop
         point (or still coloured as held).
 
-        Malformed entries are dropped exactly as ``SimPerception._resolve_objects``
-        drops them, so both halves agree on which placements exist. Non-finite
-        coordinates are rejected here too: ``/workflow/start`` is an untrusted boundary
-        and ``json.loads`` accepts the literal ``NaN``.
+        Malformed entries — and everything past :data:`MAX_SIM_OBJECTS` — are dropped
+        exactly as ``SimPerception._resolve_objects`` drops them, so both halves agree
+        on which placements exist; a world entry with no detection would be capturable
+        but invisible. Non-finite coordinates are rejected here too:
+        ``/workflow/start`` is an untrusted boundary and ``json.loads`` accepts the
+        literal ``NaN``.
         """
         with self._lock:
             self._objects = []
-            for i, obj in enumerate(objects or []):
+            for i, obj in enumerate((objects or [])[:MAX_SIM_OBJECTS]):
                 if not isinstance(obj, dict):
                     continue
                 try:
@@ -139,6 +149,16 @@ class SimWorld:
         Nearest-wins rather than any-match, so two adjacent cubes are never confused.
         A no-op (returning the current holder) when something is already held — a
         second close while carrying must not swap objects.
+
+        Only objects ``SimPerception`` actually RESOLVED are graspable, i.e. those
+        with a bound ``tag_id``. The scene deliberately keeps the others — an unknown
+        type, or a placement past the type's ``len(tag_ids)`` cap — because the student
+        did place them and the twin should draw them; but the detector never emits
+        them, so letting the arm pick one up would re-create the ghost bug in a new
+        form: the jaws would report HELD on an invisible object while the intended
+        cube stayed detectable at its original position. It also matches what the
+        overflow warning already promises the student — „die zuletzt platzierten
+        werden nicht erkannt … sonst bleiben sie einfach liegen".
         """
         try:
             x = float(x)
@@ -154,6 +174,8 @@ class SimWorld:
             best: Optional[int] = None
             best_d = radius_m
             for o in self._objects:
+                if o['tag_id'] is None:
+                    continue        # not resolved by perception => not graspable
                 d = math.hypot(o['x'] - x, o['y'] - y)
                 if d <= best_d:
                     best_d = d

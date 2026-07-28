@@ -42,6 +42,18 @@ def _cube(x, y, yaw=0.0):
     return {'type': 'wuerfel', 'tag_id': 0, 'x': x, 'y': y, 'yaw': yaw}
 
 
+def _resolved_world(objects):
+    """A world whose objects perception has already RESOLVED (tags bound).
+
+    Only a tag-bound object is graspable — an unresolved one is drawn but inert — so
+    these arm-level tests bind by hand rather than standing up a SimPerception.
+    """
+    w = SimWorld(objects)
+    for i, o in enumerate(w.objects()):
+        w.bind_tag(o['key'], 20 + i)
+    return w
+
+
 def _omx_arm(objects, world=None):
     return SimArm(ik=IKSolver(), objects=objects, world=world)
 
@@ -59,7 +71,7 @@ def test_sim_arm_holds_by_identity_all_the_way_to_the_drop_point(monkeypatch):
     (the object stayed frozen at its placement) and HELD after the release."""
     monkeypatch.setattr(motion, 'GRASP_SETTLE_S', 0.0)
     ik = IKSolver()
-    world = SimWorld([_cube(0.20, 0.0)])
+    world = _resolved_world([_cube(0.20, 0.0)])
     arm = _omx_arm([_cube(0.20, 0.0)], world=world)
     ctx = type('C', (), {'get_follower_joints': staticmethod(arm.get_joints),
                          'last_commanded_close_rad': GRIPPER_CLOSED_RAD})()
@@ -104,7 +116,7 @@ def test_open_gripper_still_reads_held_exactly_like_the_real_rig(monkeypatch):
     needs sign-off, not a test edit.
     """
     monkeypatch.setattr(motion, 'GRASP_SETTLE_S', 0.0)
-    world = SimWorld([_cube(0.20, 0.0)])
+    world = _resolved_world([_cube(0.20, 0.0)])
     arm = _omx_arm(world.objects(), world=world)
     arm.publish([([0.0] * 5 + [GRIPPER_OPEN_RAD], 1.0)])
     ctx = type('C', (), {'get_follower_joints': staticmethod(arm.get_joints),
@@ -116,7 +128,7 @@ def test_open_gripper_still_reads_held_exactly_like_the_real_rig(monkeypatch):
 def test_sim_arm_capture_takes_the_nearest_cube_of_two():
     ik = IKSolver()
     # 0.26 is ~60 mm from the close point, 0.22 is ~20 mm — nearest listed LAST.
-    world = SimWorld([_cube(0.26, 0.0), _cube(0.22, 0.0)])
+    world = _resolved_world([_cube(0.26, 0.0), _cube(0.22, 0.0)])
     arm = _omx_arm(world.objects(), world=world)
     arm.publish([(_pose(ik, (0.20, 0.0, WUERFEL_GRASP_Z), GRIPPER_CLOSED_RAD), 1.0)])
     assert world.held_key() == 1
@@ -124,7 +136,7 @@ def test_sim_arm_capture_takes_the_nearest_cube_of_two():
 
 def test_sim_arm_release_leaves_the_cube_at_the_drop_xy():
     ik = IKSolver()
-    world = SimWorld([_cube(0.20, 0.0)])
+    world = _resolved_world([_cube(0.20, 0.0)])
     arm = _omx_arm(world.objects(), world=world)
     arm.publish([(_pose(ik, (0.20, 0.0, WUERFEL_GRASP_Z), GRIPPER_CLOSED_RAD), 1.0)])
     arm.publish([(_pose(ik, (0.14, 0.12, 0.065), GRIPPER_CLOSED_RAD), 1.0)])
@@ -135,7 +147,7 @@ def test_sim_arm_release_leaves_the_cube_at_the_drop_xy():
 
 def test_sim_arm_never_captures_when_the_jaws_close_too_far_away():
     ik = IKSolver()
-    world = SimWorld([_cube(0.28, 0.0)])
+    world = _resolved_world([_cube(0.28, 0.0)])
     arm = _omx_arm(world.objects(), world=world)
     # ~80 mm short of the cube — beyond the 60 mm capture radius.
     arm.publish([(_pose(ik, (0.20, 0.0, WUERFEL_GRASP_Z), GRIPPER_CLOSED_RAD), 1.0)])
@@ -154,7 +166,7 @@ def test_set_objects_reseeds_the_arm_to_home_and_clears_the_hold():
     """The node caches ONE SimArm for the process lifetime. Before this, run N+1
     started at run N's final pose with the FAKE held-override gripper value."""
     ik = IKSolver()
-    world = SimWorld([_cube(0.20, 0.0)])
+    world = _resolved_world([_cube(0.20, 0.0)])
     arm = _omx_arm(world.objects(), world=world)
     arm.publish([(_pose(ik, (0.20, 0.0, WUERFEL_GRASP_Z), GRIPPER_CLOSED_RAD), 1.0)])
     arm.publish([(_pose(ik, (0.14, 0.12, 0.065), GRIPPER_CLOSED_RAD), 1.0)])
@@ -172,7 +184,7 @@ def test_set_objects_reseeds_the_arm_to_home_and_clears_the_hold():
 def test_set_objects_reseeds_to_the_PROFILE_home_on_edu6():
     prof = robot_profiles.resolve('edu6_studio')
     home = [float(v) for v in prof.home_joints_rad] + [float(prof.gripper_open_rad)]
-    world = SimWorld([_cube(0.13, 0.0)])
+    world = _resolved_world([_cube(0.13, 0.0)])
     arm = SimArm(
         ik=prof.build_ik(), objects=world.objects(),
         num_arm_joints=prof.num_arm_joints, home_full_joints=home,
@@ -193,7 +205,7 @@ def test_edu6_capture_and_release_use_the_profile_close_threshold():
     prof = robot_profiles.resolve('edu6_studio')
     ik = prof.build_ik()
     home = [float(v) for v in prof.home_joints_rad] + [float(prof.gripper_open_rad)]
-    world = SimWorld([_cube(0.13, 0.0)])
+    world = _resolved_world([_cube(0.13, 0.0)])
     arm = SimArm(
         ik=ik, objects=world.objects(), num_arm_joints=prof.num_arm_joints,
         home_full_joints=home, close_threshold_rad=prof.sim_close_threshold_rad,
@@ -273,7 +285,7 @@ def test_a_raising_world_never_kills_the_run():
 
 
 def test_publish_of_an_empty_chunk_touches_nothing():
-    world = SimWorld([_cube(0.20, 0.0)])
+    world = _resolved_world([_cube(0.20, 0.0)])
     arm = _omx_arm(world.objects(), world=world)
     arm.publish([])
     assert arm.get_joints() == pytest.approx(_SIM_HOME_FULL_JOINTS)

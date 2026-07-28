@@ -35,6 +35,7 @@ import math
 from typing import Any, Optional
 
 from physical_ai_server.workflow.perception import Detection
+from physical_ai_server.workflow.sim_world import MAX_SIM_OBJECTS
 
 
 _logger = logging.getLogger(__name__)
@@ -42,7 +43,10 @@ _logger = logging.getLogger(__name__)
 # Defense-in-depth cap on placed sim objects (the cloud validator already bounds
 # the scene at 64 KB ≈ hundreds of entries; this bounds the one-time resolve loop
 # and the per-object skip-warning volume regardless of payload source).
-_MAX_SIM_OBJECTS = 64
+# Single-sourced from sim_world so the mutable scene and the detector can never
+# disagree about which placements exist — a world entry the detector never emits
+# would be capturable but invisible.
+_MAX_SIM_OBJECTS = MAX_SIM_OBJECTS
 
 
 class SimPerception:
@@ -55,8 +59,14 @@ class SimPerception:
     (logged), exactly as an unrecognised real tag would be ignored.
     """
 
-    def __init__(self, objects: Optional[list[dict[str, Any]]], catalog: Any) -> None:
+    def __init__(self, objects: Optional[list[dict[str, Any]]], catalog: Any,
+                 world: Any | None = None) -> None:
         self._catalog = catalog
+        # The MUTABLE virtual scene (workflow.sim_world.SimWorld) when the node
+        # supplies one: detect() then reports where an object IS, not where it was
+        # placed. None keeps the frozen-snapshot behaviour verbatim, which is what
+        # every pre-SimWorld construction (unit tests, the golden fixture) gets.
+        self._world = world
         # Resolve the placed objects ONCE (objects are fixed for the run — the
         # sim WorkflowManager is rebuilt per start). Each placed object is keyed
         # by TYPE; the SERVER assigns its AprilTag id from the type's recipe
@@ -85,19 +95,38 @@ class SimPerception:
         all-calibration-absent ``_attach_named_world`` preserves them verbatim."""
         if mode != 'apriltag':
             return []
+        # LIVE positions when a SimWorld is bound — a grasped-and-placed object is
+        # reported where it now lies, not where the student originally put it.
+        # Without a world this dict stays empty and every detection falls back to
+        # the frozen resolve-time tuple.
+        live: dict[int, dict[str, Any]] = {}
+        world = self._world
+        if world is not None:
+            try:
+                for o in world.objects():
+                    live[o['key']] = o
+            except Exception:  # noqa: BLE001 — perception must not die on the scene
+                live = {}
         out: list[Detection] = []
         for r in self._resolved:
             if aruco_id is not None and r['aruco_id'] != aruco_id:
                 continue
+            cur = live.get(r['key'])
+            extras = dict(r['extras'])
+            if cur is not None:
+                world_xyz = (cur['x'], cur['y'], r['grasp_z'])
+                extras['tag_yaw'] = cur['yaw']
+            else:
+                world_xyz = r['world']
             out.append(Detection(
                 centroid_px=(0, 0),
                 bbox_px=(0, 0, 0, 0),
                 confidence=1.0,
                 label=r['label'],
                 aruco_id=r['aruco_id'],
-                world_xyz_m=r['world'],
+                world_xyz_m=world_xyz,
                 corners_px=None,
-                extras=dict(r['extras']),
+                extras=extras,
             ))
         return out
 
@@ -125,7 +154,7 @@ class SimPerception:
             _logger.warning(
                 '[WARNUNG] %d Sim-Objekte platziert — nur die ersten %d werden '
                 'verwendet.', len(objects), _MAX_SIM_OBJECTS)
-        for obj in objects[:_MAX_SIM_OBJECTS]:
+        for slot, obj in enumerate(objects[:_MAX_SIM_OBJECTS]):
             if not isinstance(obj, dict):
                 continue
             type_name = obj.get('type')
@@ -174,13 +203,27 @@ class SimPerception:
             # z_table + object_height − grasp_depth with z_table = 0).
             grasp_z = float(recipe.object_height_m) - float(recipe.grasp_depth_m)
             resolved.append({
+                # Index in the list the editor SENT — the join key with SimWorld.
+                'key': slot,
                 'aruco_id': tag_ids[idx],
-                'label': str(recipe.type_name),
+                # 'tag<id>', not the bare type name: the node's sensor snapshot
+                # parses visible_apriltag_ids out of exactly this shape, so a
+                # type-named label left Debug → Sensoren showing „—" for every sim
+                # run — the one surface that would have exposed a tag/position
+                # mismatch to a teacher. Nothing reads `label` for behaviour;
+                # `extras['object_type']` carries the type name.
+                'label': f'tag{tag_ids[idx]}',
                 'world': (x, y, grasp_z),
+                'grasp_z': grasp_z,
                 'extras': {
                     'tag_yaw': yaw,
                     'gripper_close_rad': float(recipe.gripper_close_rad),
                     'object_type': recipe.type_name,
                 },
             })
+            if self._world is not None:
+                try:
+                    self._world.bind_tag(slot, tag_ids[idx])
+                except Exception:  # noqa: BLE001 — binding is best-effort telemetry
+                    pass
         return resolved

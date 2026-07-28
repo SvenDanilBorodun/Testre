@@ -23,12 +23,25 @@ def _cube(x, y, yaw=0.0, type_name='wuerfel'):
     return {'type': type_name, 'tag_id': 0, 'x': x, 'y': y, 'yaw': yaw}
 
 
+def _resolved_world(objects):
+    """A world whose objects have all been RESOLVED by perception.
+
+    Only an object with a bound tag id is graspable (see capture_nearest), so a bare
+    SimWorld is deliberately inert until SimPerception has bound the catalog tags.
+    These unit tests bind them by hand to isolate SimWorld from the catalog.
+    """
+    w = SimWorld(objects)
+    for i, o in enumerate(w.objects()):
+        w.bind_tag(o['key'], 20 + i)
+    return w
+
+
 # ── reset ────────────────────────────────────────────────────────────────────
 
 def test_reset_restores_placed_coords_and_bumps_epoch():
     # A second run must start from the PLACEMENT, not from wherever run 1 left the
     # object — otherwise the student's scene silently mutates between runs.
-    w = SimWorld([_cube(0.20, 0.0)])
+    w = _resolved_world([_cube(0.20, 0.0)])
     epoch0 = w.epoch()
     w.capture_nearest(0.20, 0.0, 0.06)
     w.carry_to(0.10, 0.15)
@@ -68,28 +81,28 @@ def test_reset_with_none_empties_the_scene():
 def test_capture_picks_the_nearest_not_the_first():
     # Listed NEAREST-LAST on purpose: a first-match or any-match implementation
     # passes a "two cubes" test by accident unless the near one is last.
-    w = SimWorld([_cube(0.25, 0.0), _cube(0.22, 0.0)])   # 50 mm away, then 20 mm
+    w = _resolved_world([_cube(0.25, 0.0), _cube(0.22, 0.0)])   # 50 mm away, then 20 mm
     key = w.capture_nearest(0.20, 0.0, 0.06)
     assert key == 1, 'capture must be NEAREST-wins, not first-match'
     assert w.objects()[1]['key'] == 1
 
 
 def test_capture_outside_radius_returns_none_and_holds_nothing():
-    w = SimWorld([_cube(0.30, 0.0)])
+    w = _resolved_world([_cube(0.30, 0.0)])
     assert w.capture_nearest(0.20, 0.0, 0.06) is None
     assert w.is_held() is False
 
 
 def test_capture_is_a_noop_while_something_is_held():
     # A second close while carrying must never swap objects.
-    w = SimWorld([_cube(0.20, 0.0), _cube(0.10, 0.0)])
+    w = _resolved_world([_cube(0.20, 0.0), _cube(0.10, 0.0)])
     first = w.capture_nearest(0.20, 0.0, 0.06)
     again = w.capture_nearest(0.10, 0.0, 0.06)
     assert first == again == 0
 
 
 def test_capture_rejects_nonfinite_without_holding():
-    w = SimWorld([_cube(0.20, 0.0)])
+    w = _resolved_world([_cube(0.20, 0.0)])
     assert w.capture_nearest(float('nan'), 0.0, 0.06) is None
     assert w.is_held() is False
 
@@ -97,7 +110,7 @@ def test_capture_rejects_nonfinite_without_holding():
 # ── carry / release ──────────────────────────────────────────────────────────
 
 def test_carry_then_release_leaves_the_object_at_the_release_point():
-    w = SimWorld([_cube(0.20, 0.0)])
+    w = _resolved_world([_cube(0.20, 0.0)])
     w.capture_nearest(0.20, 0.0, 0.06)
     w.carry_to(0.14, 0.12)
     assert w.is_held() is True
@@ -111,13 +124,13 @@ def test_carry_then_release_leaves_the_object_at_the_release_point():
 
 
 def test_carry_without_a_hold_moves_nothing():
-    w = SimWorld([_cube(0.20, 0.0)])
+    w = _resolved_world([_cube(0.20, 0.0)])
     w.carry_to(0.05, 0.05)
     assert (w.objects()[0]['x'], w.objects()[0]['y']) == pytest.approx((0.20, 0.0))
 
 
 def test_release_with_nothing_held_is_none():
-    assert SimWorld([_cube(0.20, 0.0)]).release() is None
+    assert _resolved_world([_cube(0.20, 0.0)]).release() is None
 
 
 # ── tag binding + wire ───────────────────────────────────────────────────────

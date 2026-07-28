@@ -14,7 +14,11 @@
 // invalid field is OMITTED so the consumer's own fallbacks kick in; a type with
 // no valid field at all is skipped entirely (old server → {}).
 
-import { buildCatalogDims } from '../simConstants';
+import {
+  buildCatalogDims,
+  resolveMaxInstances,
+  DEFAULT_MAX_INSTANCES,
+} from '../simConstants';
 
 describe('buildCatalogDims', () => {
   test('happy path: all arrays present → full per-type entries', () => {
@@ -112,5 +116,43 @@ describe('buildCatalogDims', () => {
     const b = buildCatalogDims(res);
     expect(a).not.toBe(b);
     expect(a).toEqual(b);
+  });
+});
+
+// resolveMaxInstances — the per-type placement cap, including the DEGRADED path.
+//
+// This fallback shipped DEAD: DEFAULT_MAX_INSTANCES was imported by SimScene and
+// never read, so the cap evaluated to `null` (= no cap) exactly when the catalog
+// map was missing. A student could then place a third „Würfel" that the server
+// silently never detects (SimPerception skips everything past the type's tag
+// count) and be told „Kein „Würfel" SICHTBAR".
+
+describe('resolveMaxInstances', () => {
+  test('a real max_instances from the service wins', () => {
+    expect(resolveMaxInstances({ wuerfel: { max_instances: 5 } }, 'wuerfel')).toBe(5);
+  });
+
+  test('1 is honoured and never confused with a falsy "missing"', () => {
+    expect(resolveMaxInstances({ banane: { max_instances: 1 } }, 'banane')).toBe(1);
+  });
+
+  test('0 is honoured — a type with no tags caps at zero, not at the default', () => {
+    expect(resolveMaxInstances({ leer: { max_instances: 0 } }, 'leer')).toBe(0);
+  });
+
+  test.each([
+    ['empty map (old server / failed fetch)', {}, 'wuerfel'],
+    ['null map', null, 'wuerfel'],
+    ['undefined map', undefined, 'wuerfel'],
+    ['type absent from the map', { andere: { max_instances: 4 } }, 'wuerfel'],
+    ['entry without max_instances', { wuerfel: { height_m: 0.03 } }, 'wuerfel'],
+    ['non-numeric max_instances', { wuerfel: { max_instances: '2' } }, 'wuerfel'],
+    ['NaN max_instances', { wuerfel: { max_instances: NaN } }, 'wuerfel'],
+    ['Infinity max_instances', { wuerfel: { max_instances: Infinity } }, 'wuerfel'],
+  ])('degraded: %s → DEFAULT_MAX_INSTANCES (never uncapped)', (_label, dims, type) => {
+    const max = resolveMaxInstances(dims, type);
+    expect(max).toBe(DEFAULT_MAX_INSTANCES);
+    // The regression itself: the cap must be a FINITE number, never null.
+    expect(Number.isFinite(max)).toBe(true);
   });
 });

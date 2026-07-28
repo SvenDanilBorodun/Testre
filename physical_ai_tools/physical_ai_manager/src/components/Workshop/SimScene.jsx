@@ -58,7 +58,7 @@ import {
   SIM_OBJECT_FALLBACK_SIZE_M,
   SIM_OBJECT_COLOR_HEX,
   SIM_OBJECT_HELD_COLOR_HEX,
-  DEFAULT_MAX_INSTANCES,
+  resolveMaxInstances,
 } from './simConstants';
 import { armGeometry } from '../../utils/armProfile';
 import useSimObjects from '../../hooks/useSimObjects';
@@ -328,11 +328,16 @@ function SimScene({
       // Placement cap: the sim can only detect as many objects of a type as it
       // has tag_ids (catalogDims[type].max_instances); placing more would render
       // objects the program silently never finds (the server skips extras with a
-      // container-log-only warning). Refuse in German instead. No cap when the
-      // map/type/max is absent (today's behaviour).
-      const dims = catalogDims && catalogDims[selectedType];
-      const max = dims && Number.isFinite(dims.max_instances) ? dims.max_instances : null;
-      if (max !== null) {
+      // container-log-only warning). Refuse in German instead.
+      //
+      // DEFAULT_MAX_INSTANCES is the floor for the DEGRADED path — an old server
+      // image, or a GetObjectCatalog that failed, leaves catalogDims empty, and
+      // that is precisely when the cap is needed most. A real max_instances from
+      // the service always wins. (This fell back to `null` = no cap at all until
+      // 2026-07-28, which made the constant dead and the guard absent exactly
+      // when the information it needed was missing.)
+      const max = resolveMaxInstances(catalogDims, selectedType);
+      if (Number.isFinite(max)) {
         const count = objects.filter((o) => o.type === selectedType).length;
         if (count >= max) {
           toast.error(

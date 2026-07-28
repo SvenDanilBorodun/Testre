@@ -118,3 +118,17 @@ export function reachAnnulus(caps) {
 // tag_ids=[20, 21]). It is a FLOOR for the degraded path only -- a real
 // max_instances from the service always wins.
 export const DEFAULT_MAX_INSTANCES = 2;
+
+// Resolve the placement cap for one type. Pure + exported so the degraded path
+// is actually testable — the live call site is a useCallback inside SimScene,
+// and this fallback shipped DEAD (the constant was imported and never read)
+// precisely because nothing could see it.
+//
+// A real, finite max_instances from the service always wins; anything missing,
+// short, non-numeric or NaN degrades to DEFAULT_MAX_INSTANCES rather than to
+// "no cap".
+export function resolveMaxInstances(catalogDims, type) {
+  const dims = catalogDims && catalogDims[type];
+  const max = dims && dims.max_instances;
+  return Number.isFinite(max) ? max : DEFAULT_MAX_INSTANCES;
+}

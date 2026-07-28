@@ -977,6 +977,15 @@ class WorkflowManager:
         # to clear (object leaves frame / counter drops back to ≤ N).
         _EDGE_HATS = ('edubotics_when_object_seen', 'edubotics_when_counter_gt')
         edge_armed = True
+        # For the object hat the trigger is a SET of unclaimed-visible tag ids, not
+        # a bare bool, and the edge is on that set CHANGING. Truthiness alone was
+        # not enough: with two cubes placed, grasping the first leaves the second
+        # visible, so the condition never went false, so edge_armed never re-armed
+        # and the hat fired exactly ONCE per run — one cube grasped, one ignored,
+        # green „Workflow abgeschlossen". Keying on the set fires once PER OBJECT
+        # while keeping the original anti-spin property intact: a static object
+        # nobody consumes yields an unchanging set and still fires exactly once.
+        last_fired_ids: frozenset | None = None
         try:
             while not ctx.should_stop():
                 triggered = self._wait_for_hat_trigger(hat, ctx)
@@ -993,10 +1002,16 @@ class WorkflowManager:
                 # Edge-trigger gate. Skip body execution while we wait
                 # for the condition to clear and re-arm.
                 if btype in _EDGE_HATS:
+                    if isinstance(triggered, frozenset) and triggered != last_fired_ids:
+                        # A DIFFERENT object is waiting than the one we last acted
+                        # on — that is a fresh edge, not the same one held open.
+                        edge_armed = True
                     if not edge_armed:
                         time.sleep(0.1)
                         continue
                     edge_armed = False
+                    if isinstance(triggered, frozenset):
+                        last_fired_ids = triggered
                 # Acquire the motion lock for the entire handler body.
                 # This is conservative — even a perception-only handler
                 # holds the lock — but it keeps the safety story simple.
@@ -1009,7 +1024,17 @@ class WorkflowManager:
                             ctx,
                             self._on_block_change,
                         )
-                    except WorkflowError:
+                    except WorkflowError as e:
+                        # Say so. This used to return silently, which was survivable
+                        # only because the perception hat could never fire twice —
+                        # now that it re-arms, the LAST object legitimately ends in
+                        # a GraspSkip ("Kein Würfel sichtbar"), and a handler thread
+                        # that just disappears at that point is exactly the class of
+                        # bug this round exists to remove.
+                        self._emit_status({
+                            'workflow_id': self._workflow_id or '',
+                            'log_message': f'Ereignis-Block „{btype}": {e}',
+                        })
                         return
                     except InterpreterError as e:
                         self._emit_status({
@@ -1084,12 +1109,19 @@ class WorkflowManager:
             time.sleep(0.2)
         return False
 
-    def _wait_object_visible(self, type_name: str, ctx: WorkflowContext) -> bool:
-        """Edge-trigger poll for ``edubotics_when_object_seen``: True when any
-        catalog tag of ``type_name`` is visible. Resolves the type's tag ids from
-        the object catalog and polls AprilTag perception. Catalog/perception
-        errors are swallowed (the hat simply doesn't fire) — a named block on the
-        MAIN stack surfaces the German catalog error loudly instead."""
+    def _wait_object_visible(self, type_name: str, ctx: WorkflowContext):
+        """Edge-trigger poll for ``edubotics_when_object_seen``.
+
+        Returns the ``frozenset`` of currently-visible UNCLAIMED tag ids of
+        ``type_name`` (empty / ``False`` when nothing qualifies). Non-empty is
+        truthy, so every ``if not triggered`` caller behaves as it did when this
+        returned a bare bool — but ``_run_hat_handler`` edges on the SET changing,
+        which is what makes the hat fire once per OBJECT instead of once per RUN.
+
+        Resolves the type's tag ids from the object catalog and polls AprilTag
+        perception. Catalog/perception errors are swallowed (the hat simply
+        doesn't fire) — a named block on the MAIN stack surfaces the German
+        catalog error loudly instead."""
         if not type_name:
             return False
         for _ in range(2):  # 2 × ~0.5 s budget, matching the other hats
@@ -1102,7 +1134,31 @@ class WorkflowManager:
                     time.sleep(0.5)
                     return False
                 recipe = catalog.recipe_for_type(type_name)  # ObjectCatalogError on unknown
-                wanted = set(recipe.tag_ids)
+                # Claim-aware, exactly like every MAIN-stack path (which reaches
+                # the same view through _detect_named_unclaimed). A tag already
+                # grasped (claimed) or confirmed-failed (skipped) must not keep
+                # this level condition true: _run_hat_handler only re-arms
+                # edge_armed on an UNtriggered poll, so a permanently-true
+                # condition made the hat fire exactly ONCE per run and then never
+                # again. On the rig that hid, because the object is physically
+                # carried out of frame; in sim the virtual tag never leaves, so
+                # „Wenn Würfel gesehen: Greife" grabbed one cube of two and
+                # reported a green „Workflow abgeschlossen".
+                #
+                # Deliberately INLINE rather than calling _detect_named_unclaimed:
+                # that helper emits ctx.emit_detections (a ~5 Hz /workflow/status
+                # flood from this poll) and runs the recycled-object reclaim from a
+                # second thread, neither of which belongs in a trigger check.
+                from physical_ai_server.workflow.handlers.perception_blocks import (
+                    _excluded_ids,
+                )
+                wanted = ({int(i) for i in recipe.tag_ids}
+                          - {int(i) for i in _excluded_ids(ctx)})
+                if not wanted:
+                    # Every instance of this type is done — stay un-triggered so
+                    # the handler re-arms instead of spinning.
+                    time.sleep(0.2)
+                    return False
                 frame = ctx.get_scene_frame()
                 if frame is None:
                     time.sleep(0.2)
@@ -1110,12 +1166,19 @@ class WorkflowManager:
                 detections = ctx.perception.detect(
                     frame, camera='scene', mode='apriltag', aruco_id=None,
                 )
-                if any(getattr(d, 'aruco_id', None) in wanted for d in (detections or [])):
-                    return True
+                seen = frozenset(
+                    getattr(d, 'aruco_id', None) for d in (detections or [])
+                ) & wanted
+                if seen:
+                    # The SET, not just True: _run_hat_handler edges on it changing
+                    # so the hat fires once per object rather than once per run.
+                    # Non-empty => truthy, so every existing `if not triggered`
+                    # check behaves exactly as it did with a bool.
+                    return seen
             except Exception:
                 pass
             time.sleep(0.2)
-        return False
+        return frozenset()
 
     def _run(self, interpreter: Interpreter, ctx: WorkflowContext) -> None:
         terminal_phase = 'error'

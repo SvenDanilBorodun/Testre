@@ -2255,12 +2255,37 @@ class AgentApp:
         """None if ``docker compose -f <path> config -q`` accepts the staged
         file, otherwise a German reason to refuse the swap.
 
-        Deliberately runs WITHOUT ``--env-file``: the question here is whether
-        the shipped bytes are a valid compose file, and answering it against the
-        student's ``.env`` would let an unrelated local edit veto a release's
-        orchestration fix. Unset ``${VAR}`` interpolation is a warning, not an
-        error, so the file validates on its own (measured); the opi compose uses
-        no ``${VAR:?}`` required-variable form.
+        The question here is whether the SHIPPED BYTES are a valid compose file,
+        so the student's ``.env`` must not be able to answer it — an unrelated
+        local edit vetoing a release's orchestration fix would banner the Pi
+        permanently, with the wrong remedy. That takes BOTH of:
+
+        * no ``--env-file`` — the obvious half, and
+        * ``env=docker_manager._scrubbed_env()`` — the half an earlier version of
+          this docstring wrongly claimed was unnecessary. Compose interpolates
+          from the PROCESS environment as well as from ``--env-file``, and the
+          systemd unit is ``EnvironmentFile=-/etc/edubotics/.env``, so the whole
+          managed ``.env`` is already in this process's ``os.environ``.
+          MEASURED: with no ``.env`` file anywhere, a bare
+          ``EDUBOTICS_BIND_HOST='a b'`` in the process env alone makes
+          ``docker compose config -q`` exit 1 (``invalid IP address: a b``);
+          scrubbed, the same file exits 0.
+
+        Reusing ``docker_manager``'s allowlist rather than writing a second one
+        is deliberate: it is the module that owns "what a docker subprocess may
+        see" (it keeps EDUBOTICS_AGENT_TOKEN and any Supabase JWT out of every
+        other docker call), and a duplicate here could only drift. It gives the
+        gate the same PROCESS ENVIRONMENT ``_compose_up`` runs under — and
+        nothing more than that: ``_compose_up`` also passes ``--env-file``
+        (``_compose`` adds it whenever the .env exists), which this deliberately
+        does not. Do NOT "align" the two by adding it; that difference IS the
+        fix.
+
+        Unset ``${VAR}`` interpolation is a warning, not an error, so the file
+        validates on its own (MEASURED); the opi compose uses no ``${VAR:?}``
+        required-variable form, and none of its interpolated names is ``DOCKER_*``
+        (the one prefix the scrub keeps), so nothing in the student's ``.env``
+        can reach it.
 
         Any inability to run the check (no docker binary, a timeout) is ALSO a
         refusal. Refusing keeps the working compose in place, which is the safe
@@ -2271,6 +2296,7 @@ class AgentApp:
             res = subprocess.run(
                 ["docker", "compose", "-f", path, "config", "-q"],
                 capture_output=True, text=True, timeout=_COMPOSE_VALIDATE_TIMEOUT_S,
+                env=docker_manager._scrubbed_env(),
             )
         except (OSError, subprocess.SubprocessError) as e:
             return f"Docker Compose konnte die Datei nicht prüfen ({e})."

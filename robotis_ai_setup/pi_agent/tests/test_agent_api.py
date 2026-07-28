@@ -1172,6 +1172,71 @@ class TestSystemFilesVersionCheck(unittest.TestCase):
         self.assertIn("-q", gate[0])
         self.assertNotIn("--env-file", gate[0])
 
+    def test_the_validate_gate_runs_with_a_SCRUBBED_process_environment(self):
+        """Omitting --env-file is only HALF of isolating the gate from the
+        student's .env, and the missing half was a live defect.
+
+        The unit is `EnvironmentFile=-/etc/edubotics/.env`, so the entire managed
+        .env is already in the agent's os.environ — and compose interpolates from
+        the process environment too. MEASURED against real docker 29.4.3 /
+        compose v5.1.3, with NO .env file anywhere: a bare
+        EDUBOTICS_BIND_HOST='a b' in the process env makes
+        `docker compose -f <twin> config -q` exit 1 ("invalid IP address: a b"),
+        and the same file with the same variable scrubbed exits 0. Unscrubbed,
+        one malformed local value therefore refuses the compose repair for good
+        and banners the Pi with a remedy that does not address the cause.
+
+        It also matters that this is docker_manager's ONE allowlist rather than a
+        second copy: it is what keeps EDUBOTICS_AGENT_TOKEN out of every other
+        docker subprocess, and _compose_up — the real run this gate predicts —
+        has always used it."""
+        self._install_compose(drift=True)
+        seen = {}
+
+        def _run(argv, *a, **kw):
+            if "config" in argv:
+                seen["env"] = kw.get("env", "MISSING")
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        poison = {
+            "EDUBOTICS_BIND_HOST": "a b",          # the measured false refusal
+            "EDUBOTICS_ROS_NET_SUBNET": "not/a/cidr",
+            "EDUBOTICS_AGENT_TOKEN": "s3cret-token",  # the security half
+            "HF_TOKEN": "hf_dead",
+            "PATH": os.environ.get("PATH", "/usr/bin"),
+            # A DOCKER_* var must be PRESENT for the equality assertion below to
+            # have teeth: without one, a hand-written {PATH,HOME,LANG,LC_ALL}
+            # lookalike that silently drops the DOCKER_* passthrough compares
+            # equal on a clean CI environment. Dropping it is not cosmetic — a
+            # Pi with a non-default socket/context would then have its gate
+            # unable to reach dockerd, i.e. every repair refused.
+            "DOCKER_CONFIG": "/tmp/edubotics-test-docker-config",
+        }
+        with patch.dict(os.environ, poison, clear=False), \
+             patch.object(agent, "SYSTEM_FILES_VERSION_FILE", self.stamp), \
+             patch.object(agent, "SYSTEMD_UNIT_DIR", self.installed), \
+             patch.object(agent.subprocess, "run", _run):
+            self.app._check_system_files_version()
+            # Snapshot the allowlist's answer WHILE the poison is in os.environ —
+            # patch.dict restores it on exit, and comparing against the restored
+            # environment is how this assertion was vacuous in the first place.
+            expected_env = agent.docker_manager._scrubbed_env()
+        env = seen.get("env")
+        self.assertIsInstance(env, dict, "the gate must pass an explicit env=")
+        for leaked in ("EDUBOTICS_BIND_HOST", "EDUBOTICS_ROS_NET_SUBNET",
+                       "EDUBOTICS_AGENT_TOKEN", "HF_TOKEN"):
+            self.assertNotIn(leaked, env, env.keys())
+        # …but still runnable: PATH has to survive or `docker` is unfindable and
+        # every repair degrades to the OSError refusal branch, and DOCKER_* has
+        # to survive or a non-default socket/context is unreachable.
+        self.assertIn("PATH", env)
+        self.assertEqual(env.get("DOCKER_CONFIG"),
+                         "/tmp/edubotics-test-docker-config")
+        # Exactly docker_manager's allowlist, not a lookalike written here.
+        self.assertEqual(env, expected_env)
+        # …and the repair still went through with the poison present.
+        self.assertFalse(self.app._compose_drifted())
+
     def test_an_unrepairable_compose_sets_the_banner(self):
         """A read-only /opt (or a hand-mounted compose) is the state where the
         advisory banner still earns its place. Degrade to it, never raise out of

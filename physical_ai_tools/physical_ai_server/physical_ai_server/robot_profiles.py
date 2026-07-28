@@ -77,9 +77,19 @@ _OMX_JOINT_NAMES = ('joint1', 'joint2', 'joint3', 'joint4', 'joint5',
                     'gripper_joint_1')
 
 # edu6_studio geometry (follower_arm_modified_final1.urdf; derivation record in
-# docs/plans/edu6-studio-arm.md). HOME is the compact over-base fold derived
-# 2026-07-22 (tip within 39 mm of the joint-1 axis, min mesh gap 32.3 mm,
-# θ5 = +0.7 — a non-degenerate seed in the working (relieved) branch). The
+# docs/plans/edu6-studio-arm.md). HOME stands the arm UP over its own base:
+# re-measured 2026-07-27, the fingertip TCP sits at world (+0.0499, 0, +0.4545),
+# i.e. 28.6 mm from the joint-1 axis but 0.4545 m TALL — 91.8 % of the maximum
+# straight-up reach, with the 2R chain 98.4 % extended. It is compact in PLAN,
+# not in ELEVATION; the older "compact over-base fold" wording invited the wrong
+# mental picture, and "tip within 39 mm" / "min mesh gap 32.3 mm" measure 28.6 mm
+# and 31.4 mm against the shipped meshes. Lowest link point +10.1 mm over the
+# table; θ5 = +0.7 is a non-degenerate seed in the working (relieved) branch.
+# CONSEQUENCE worth knowing: HOME is OUTSIDE the solver's image (solve() only
+# emits strict-vertical poses and HOME would need q5 = 3.2708 rad), so no
+# Cartesian machinery — reach check, workspace floor, reroute vias — can reason
+# about it. That is why the table-floor guard on the way to it is joint-space
+# (workflow/arm_geometry.py + workflow/home_planner.py). The
 # gripper channel is the end_gear servo angle in RADIANS: 0 = jaws closed …
 # 1.75 = open command (physical stop ≈ 1.7857; jaw ≈ 25.2 mm/rad). Joint names
 # are URDF-native so /joint_states, the sim publisher and the web twin (whose

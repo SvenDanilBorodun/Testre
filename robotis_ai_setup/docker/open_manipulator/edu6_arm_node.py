@@ -62,6 +62,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import feetech_bus as fb  # noqa: E402  (COPY'd next to this file in the image)
+import edu6_geometry as eg  # noqa: E402  (ditto — the whole-link box model)
 
 import rclpy  # noqa: E402
 from rclpy.node import Node  # noqa: E402
@@ -1069,6 +1070,101 @@ def interpolate_trajectory(points: list[tuple[list[float], float]],
     return list(points[-1][0])
 
 
+# ── boot-home table-floor pre-check (Rule §2 sign-off, Sven 2026-07-27) ──────
+# How far BELOW the mounting plane the whole-link BOX MODEL may read before the
+# boot-home glide is REFUSED. z = 0 is the table for this arm — base_link's own
+# mesh spans z ∈ [0.0000, 0.0625] m — so this needs no calibration, which is the
+# only reason a check like this can live in the driver at all.
+#
+# THE HAZARD. start_boot_home runs on EVERY container boot, from whatever pose a
+# LIMP arm collapsed into, and glides a straight joint-space line to HOME with
+# nothing judging it. Measured on the collision meshes: that line drives a link
+# up to 167.9 mm BELOW the table from about 1 in 100 attainable start poses, and
+# the failing family — elbow essentially straight, shoulder rotated back,
+# gripper already near the table — is exactly what a limp arm collapses into.
+# So this is the highest-exposure home path in the system, not the Blockly block.
+#
+# WHY 20 mm: the box model is SOUND but conservative by a median 0.0 mm / mean
+# 10.1 mm / p95 45.9 mm. Measured over 800 attainable starts, a 20 mm allowance
+# catches 12/12 real table presses with four false positives; 50 mm starts
+# MISSING real presses (11/12). Same number and same derivation as the server's
+# EDUBOTICS_HOME_FLOOR_TOL_M — deliberately ONE knob for ONE concept, forwarded
+# on BOTH the open_manipulator and physical_ai_server services.
+#
+# WHAT A REFUSAL DOES, and the part that must never change: it SKIPS THE GLIDE
+# AND LEAVES THE ARM TORQUED at its measured pose (set_torque already seeded
+# Goal = Present, so it holds). Dropping torque here would let a backdriving arm
+# FALL — turning a guard into a collapse, i.e. strictly worse than the defect
+# being guarded. The arm ends up healthy, energised and not in HOME, and the
+# German message names hand-guiding, which needs no calibration.
+#
+# NO VIA SEARCH HERE, deliberately. The server's planner can lift over a via and
+# rescues about a third of these; replicating that search in the driver would
+# double this module for a rescue rate that a restart-after-hand-guide already
+# covers. The driver's job is to not press the table.
+#
+# 0 DISABLES the check entirely — the one-variable rollback. Values above
+# TICKS-equivalent nonsense are not a concern here (it is a length, not a tick
+# count); a malformed or negative value falls back to the default with a [WARN].
+_DEFAULT_BOOT_HOME_FLOOR_TOL_M = 0.020
+
+
+def _parse_home_floor_tol(raw: str | None) -> float:
+    # Unset/empty is not an error: compose forwards optional knobs as
+    # `${VAR:-}`, so every un-tuned rig delivers ''. A MALFORMED value is
+    # bench-facing operator error — surface it once (English, plain print like
+    # the rest of the pre-rclpy init path).
+    if raw is None or not raw.strip():
+        return _DEFAULT_BOOT_HOME_FLOOR_TOL_M
+    try:
+        value = float(raw.strip())
+    except (TypeError, ValueError):
+        print(f'[WARN] EDUBOTICS_HOME_FLOOR_TOL_M={raw!r} is not a number — '
+              f'using the default {_DEFAULT_BOOT_HOME_FLOOR_TOL_M}.', flush=True)
+        return _DEFAULT_BOOT_HOME_FLOOR_TOL_M
+    if not math.isfinite(value) or value < 0.0:
+        print(f'[WARN] EDUBOTICS_HOME_FLOOR_TOL_M={raw!r} must be >= 0 '
+              f'(0 disables the check) — using the default '
+              f'{_DEFAULT_BOOT_HOME_FLOOR_TOL_M}.', flush=True)
+        return _DEFAULT_BOOT_HOME_FLOOR_TOL_M
+    return value
+
+
+BOOT_HOME_FLOOR_TOL_M = _parse_home_floor_tol(
+    os.environ.get('EDUBOTICS_HOME_FLOOR_TOL_M'))
+
+BOOT_HOME_FLOOR_REFUSAL_DE = (
+    '[FEHLER] Grundstellungs-Fahrt entfällt: aus der jetzigen Stellung würde '
+    'der Arm dabei in die Tischplatte fahren. Der Arm wird jetzt in seiner '
+    'Stellung gehalten (er ist NICHT weich). Bitte den Arm mit der Handführung '
+    'ein Stück anheben und die Umgebung neu starten.'
+)
+
+
+def boot_home_floor_decision(current, tol: float = None):
+    """Pure: may the boot-home glide from ``current`` be driven?
+
+    Returns ``(ok, depth)`` where ``depth`` is the model's lowest reading over
+    the whole glide (metres above the mounting plane, negative = into the
+    table), or ``None`` when the pose could not be evaluated.
+
+    A pose the model CANNOT evaluate is allowed through (``ok=True``,
+    ``depth=None``). That is deliberate and is the safe direction here: the
+    alternative is refusing to home an arm whose geometry we simply failed to
+    compute, which would strand a healthy rig — and every OTHER boot guard
+    (the probe, the edge refusal, the post-energise abort) has already passed by
+    this point.
+    """
+    if tol is None:
+        tol = BOOT_HOME_FLOOR_TOL_M
+    if tol <= 0.0:
+        return True, None
+    depth = eg.swept_lowest_z(list(current)[:6], list(HOME_JOINTS_RAD))
+    if depth is None:
+        return True, None
+    return depth >= -tol, depth
+
+
 def build_boot_home(current: list[float], duration_s: float = BOOT_HOME_DURATION_S,
                     hz: float = LOOP_HZ) -> list[tuple[list[float], float]]:
     """Quintic glide from the power-up pose to HOME + open gripper (the same
@@ -1835,6 +1931,20 @@ class Edu6ArmNode(Node):
         fresh = self._read_positions_once()
         if fresh is not None:
             current = fresh
+        # TABLE-FLOOR PRE-CHECK (Rule §2, see BOOT_HOME_FLOOR_TOL_M). The glide
+        # is a straight joint-space line and nothing else judges it; from the
+        # pose a limp arm collapses into it can drive a link 16 cm into the
+        # table. On a refusal we SKIP THE GLIDE and leave the arm TORQUED where
+        # it stands — set_torque already seeded Goal = Present, so it holds.
+        # De-energising here would let a backdriving arm FALL, i.e. turn this
+        # guard into the worse failure.
+        ok, depth = boot_home_floor_decision(current)
+        if not ok:
+            self.get_logger().error(BOOT_HOME_FLOOR_REFUSAL_DE)
+            self.get_logger().info(
+                f'(Grundstellungs-Vorprüfung: tiefster Punkt {depth * 1000:.0f} '
+                f'mm, Grenze {-BOOT_HOME_FLOOR_TOL_M * 1000:.0f} mm.)')
+            return
         gen = self._replace_trajectory(build_boot_home(current), time.monotonic())
         self.get_logger().info(
             'Grundstellungs-Fahrt gestartet (3 s sanfte Bewegung).')

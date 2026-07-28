@@ -483,8 +483,12 @@ elif [ "$FOLLOWER_ONLY" = "1" ]; then
     # would sit at its power-up pose and the first Roboter Studio command would
     # jump from there. HOME must match workflow/handlers/motion.py
     # HOME_JOINTS_RAD + gripper open. Soft: a failed home never kills boot.
-    # (On the Jetson the agent also moves the follower home afterwards — a
-    # harmless idempotent confirm.)
+    # (On the Jetson the agent also moves the follower home afterwards. That is
+    # NOT an idempotent confirm, despite what this comment said until
+    # 2026-07-27: the agent drives SAFE_HOME_JOINTS, the deliberately
+    # more-folded +-pi/4 recovery pose, so the student sees two DIFFERENT 3 s
+    # moves. The divergence is intentional and preserved; only the claim that
+    # they are the same was wrong.)
     echo "[LAUNCH] FOLLOWER_ONLY=1 — moving follower to safe HOME (3s smooth trajectory)..."
     python3 -c "
 import rclpy, sys, math

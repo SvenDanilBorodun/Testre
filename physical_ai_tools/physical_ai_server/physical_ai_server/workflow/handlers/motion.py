@@ -502,6 +502,7 @@ def safe_move(
     duration_s: float,
     roll: float | None = None,
     tempo: float | None = None,
+    allow_monotone_escape: bool = False,
 ) -> None:
     """Issue a TRANSIT move with no-go-zone (Sperrzone) avoidance.
 
@@ -532,10 +533,17 @@ def safe_move(
     if not segment_blocked(ik, q_start, q_end, zones, ZONE_MARGIN_M):
         _publish_motion_t(ctx, q_start, q_end, duration_s, tempo)
         return
-    # Direct path crosses a zone — plan a reroute (lift-and-travel → base-swing
-    # → refuse). plan_safe_route raises a German WorkflowError when no safe
-    # route exists (→ red banner + stop).
-    legs = plan_safe_route(ctx, q_start, q_end, zones, duration_s, roll=roll)
+    # Direct path crosses a zone — plan a reroute (escape → lift-and-travel →
+    # base-swing → refuse). plan_safe_route raises a German WorkflowError when
+    # no safe route exists (→ red banner + stop).
+    #
+    # ``allow_monotone_escape`` is passed through for the RETREAT callers only
+    # (home / the observation pose). They are the motions that must never be a
+    # dead end, and they are the ones for which "the arm is standing inside the
+    # zone" is a reason to LEAVE rather than a reason to refuse. Every transit
+    # caller leaves it False and is byte-identical.
+    legs = plan_safe_route(ctx, q_start, q_end, zones, duration_s, roll=roll,
+                           allow_monotone_escape=allow_monotone_escape)
     log = getattr(ctx, 'log', None)
     if callable(log):
         log('[WARNUNG] Sperrzone auf dem Weg — Ausweichroute wird gefahren.')
@@ -971,6 +979,48 @@ def _resolve_target(value: Any, ctx) -> tuple[float, float, float]:
     raise WorkflowError('Ziel-Wert konnte nicht ausgewertet werden.')
 
 
+# Arrival tolerance for the workflow-side Grundstellung check. Deliberately the
+# SAME 0.30 rad the edu6 driver's boot-home verifier uses
+# (edu6_arm_node.BOOT_HOME_VERIFY_TOL_RAD) and the same value the OMX
+# entrypoint's Phase-3 verifier uses — one number for "did the arm actually get
+# where it was told", not three.
+HOME_ARRIVAL_TOL_RAD = 0.30
+
+
+def _warn_if_home_not_reached(ctx) -> None:
+    """Emit ONE German [WARNUNG] if the arm did not actually arrive at HOME.
+
+    WARN-ONLY, and never re-sends. The driver already owns the re-send (its
+    boot-home verifier retries once from the MEASURED pose); duplicating that
+    here would mean two writers racing the same rail. And a workflow may be
+    stopping legitimately, in which case not arriving is correct — raising would
+    turn a clean stop into an error.
+
+    Best-effort throughout: no joint source, a short readback or a raising
+    getter all mean "cannot tell", and a diagnostic must never break a home.
+    """
+    getter = getattr(ctx, 'get_follower_joints', None)
+    log = getattr(ctx, 'log', None)
+    if not callable(getter) or not callable(log):
+        return
+    try:
+        actual = getter()
+    except Exception:  # noqa: BLE001 — a diagnostic never breaks the move
+        return
+    n = _n(ctx)
+    if not actual or len(actual) < n:
+        return
+    target = _home_joints(ctx)
+    try:
+        worst = max(abs(float(actual[i]) - float(target[i])) for i in range(n))
+    except (TypeError, ValueError):
+        return
+    if not math.isfinite(worst) or worst <= HOME_ARRIVAL_TOL_RAD:
+        return
+    log('[WARNUNG] Der Arm hat die Grundstellung nicht ganz erreicht '
+        f'(Abweichung {worst:.2f} rad). Bitte prüfen, ob etwas im Weg steht.')
+
+
 def home(ctx, args: dict[str, Any]) -> None:
     _require_seeded_start_pose(ctx)
     q_start = ctx.last_full_joints
@@ -982,16 +1032,32 @@ def home(ctx, args: dict[str, Any]) -> None:
     # matches, so a held object stays held across a home. Use `open_gripper`
     # explicitly to release.
     q_end = _home_joints(ctx) + [q_start[_n(ctx)]]
-    # TRANSIT (whole-arm move to the Grundstellung) — route around any no-go
-    # zone, exactly like move_to/move_above/lift. With no zones drawn safe_move
-    # is a pass-through to raw _publish_motion, so behavior is unchanged. A zone
-    # that traps the home transit → clean German Sperrzone refusal (correct: the
-    # student drew a zone the arm can't get out of). `home` is a pure Blockly
-    # block (handlers/__init__ `edubotics_home`), never an un-catchable
-    # recovery/teardown, so raising here is safe.
-    safe_move(ctx, q_start, q_end, DEFAULT_HOME_DURATION_S)
+    # TRANSIT (whole-arm move to the Grundstellung).
+    #
+    # The route is PLANNED first (home_planner), then each leg published through
+    # safe_move so it still gets the Sperrzone reroute, the velocity floor and
+    # the global Tempo exactly as before. Straight to safe_move was NOT enough:
+    # with no zones drawn safe_move is a pass-through, so the joint-space line
+    # was judged by nothing — and HOME is outside the solver's image, so the
+    # Cartesian workspace floor in _solve_or_raise can never see it either.
+    # Measured: that line drove a link up to 167.9 mm BELOW the table in roughly
+    # 1 in 100 attainable start poses.
+    #
+    # An arm with no link-box table (both OMX profiles, every profile-less ctx)
+    # gets exactly one leg back, byte-identical to the old call.
+    #
+    # `home` is a pure Blockly block (handlers/__init__ `edubotics_home`), never
+    # an un-catchable recovery/teardown, so the planner's German refusal is safe
+    # to raise here.
+    from physical_ai_server.workflow import home_planner
+    legs = home_planner.plan_home_route(ctx, q_start, q_end,
+                                        DEFAULT_HOME_DURATION_S)
+    for leg_start, leg_end, leg_dur in legs:
+        safe_move(ctx, leg_start, leg_end, leg_dur,
+                  allow_monotone_escape=True)
     ctx.last_arm_joints = _home_joints(ctx)
     ctx.last_full_joints = q_end
+    _warn_if_home_not_reached(ctx)
 
 
 def go_to_observation_pose(ctx) -> None:
@@ -1004,15 +1070,25 @@ def go_to_observation_pose(ctx) -> None:
     q_start = ctx.last_full_joints
     arm = _observe_joints(ctx)
     q_end = arm + [q_start[_n(ctx)]]
-    # TRANSIT (whole-arm retreat out of the scene-cam view) — route around any
-    # no-go zone, like the other whole-arm transits. No zones → pass-through, so
-    # the named-object loop is unchanged. Both internal call sites (interpreter
-    # `edubotics_while_visible` loop body at interpreter.py and the grasp_object
-    # retry branch in perception_blocks.py) run on paths where a WorkflowError
-    # propagates as a normal German error — NEITHER is a `finally`/un-catchable
-    # teardown — so a Sperrzone refusal here is safe (it ends the run/loop
-    # cleanly, the intended "trapped arm" behavior).
-    safe_move(ctx, q_start, q_end, DEFAULT_MOVE_DURATION_S)
+    # TRANSIT (whole-arm retreat out of the scene-cam view) — same class of move
+    # as `home`, and by default the same TARGET (`_observe_joints` falls back to
+    # HOME), so it gets the same treatment: plan the route, then publish each leg
+    # through safe_move for the Sperrzone reroute + velocity floor + Tempo.
+    # Without this the retreat is the identical unjudged joint-space line `home`
+    # was, and it runs on every pass of a „Solange … sichtbar" loop.
+    # No zones and no link-box table → one leg, byte-identical to before.
+    #
+    # Both internal call sites (interpreter `edubotics_while_visible` loop body
+    # and the grasp_object retry branch in perception_blocks.py) run on paths
+    # where a WorkflowError propagates as a normal German error — NEITHER is a
+    # `finally`/un-catchable teardown — so a refusal here is safe (it ends the
+    # run/loop cleanly, the intended "trapped arm" behavior).
+    from physical_ai_server.workflow import home_planner
+    legs = home_planner.plan_home_route(ctx, q_start, q_end,
+                                        DEFAULT_MOVE_DURATION_S)
+    for leg_start, leg_end, leg_dur in legs:
+        safe_move(ctx, leg_start, leg_end, leg_dur,
+                  allow_monotone_escape=True)
     ctx.last_arm_joints = arm
     ctx.last_full_joints = q_end
 

@@ -502,7 +502,6 @@ def safe_move(
     duration_s: float,
     roll: float | None = None,
     tempo: float | None = None,
-    allow_monotone_escape: bool = False,
 ) -> None:
     """Issue a TRANSIT move with no-go-zone (Sperrzone) avoidance.
 
@@ -533,17 +532,10 @@ def safe_move(
     if not segment_blocked(ik, q_start, q_end, zones, ZONE_MARGIN_M):
         _publish_motion_t(ctx, q_start, q_end, duration_s, tempo)
         return
-    # Direct path crosses a zone — plan a reroute (escape → lift-and-travel →
-    # base-swing → refuse). plan_safe_route raises a German WorkflowError when
-    # no safe route exists (→ red banner + stop).
-    #
-    # ``allow_monotone_escape`` is passed through for the RETREAT callers only
-    # (home / the observation pose). They are the motions that must never be a
-    # dead end, and they are the ones for which "the arm is standing inside the
-    # zone" is a reason to LEAVE rather than a reason to refuse. Every transit
-    # caller leaves it False and is byte-identical.
-    legs = plan_safe_route(ctx, q_start, q_end, zones, duration_s, roll=roll,
-                           allow_monotone_escape=allow_monotone_escape)
+    # Direct path crosses a zone — plan a reroute (lift-and-travel → base-swing
+    # → refuse). plan_safe_route raises a German WorkflowError when no safe
+    # route exists (→ red banner + stop).
+    legs = plan_safe_route(ctx, q_start, q_end, zones, duration_s, roll=roll)
     log = getattr(ctx, 'log', None)
     if callable(log):
         log('[WARNUNG] Sperrzone auf dem Weg — Ausweichroute wird gefahren.')
@@ -1053,8 +1045,7 @@ def home(ctx, args: dict[str, Any]) -> None:
     legs = home_planner.plan_home_route(ctx, q_start, q_end,
                                         DEFAULT_HOME_DURATION_S)
     for leg_start, leg_end, leg_dur in legs:
-        safe_move(ctx, leg_start, leg_end, leg_dur,
-                  allow_monotone_escape=True)
+        safe_move(ctx, leg_start, leg_end, leg_dur)
     ctx.last_arm_joints = _home_joints(ctx)
     ctx.last_full_joints = q_end
     _warn_if_home_not_reached(ctx)
@@ -1087,8 +1078,7 @@ def go_to_observation_pose(ctx) -> None:
     legs = home_planner.plan_home_route(ctx, q_start, q_end,
                                         DEFAULT_MOVE_DURATION_S)
     for leg_start, leg_end, leg_dur in legs:
-        safe_move(ctx, leg_start, leg_end, leg_dur,
-                  allow_monotone_escape=True)
+        safe_move(ctx, leg_start, leg_end, leg_dur)
     ctx.last_arm_joints = arm
     ctx.last_full_joints = q_end
 

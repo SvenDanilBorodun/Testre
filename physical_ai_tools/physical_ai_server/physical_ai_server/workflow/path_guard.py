@@ -141,41 +141,6 @@ _REFUSE_MSG = (
 )
 
 
-def zone_penetration(ik, q, zones, inflation: float) -> float:
-    """How deep the arm at ``q`` reaches INTO the inflated zones, in metres.
-
-    ``0.0`` when no link point is inside any box; otherwise the largest distance
-    from a contained link point to the nearest face of the box containing it —
-    i.e. how far it would have to move to get out the shortest way.
-
-    This is the quantity :func:`plan_safe_route`'s ``allow_monotone_escape``
-    rung keeps NON-INCREASING, so an arm standing inside a zone may leave it but
-    can never go deeper. Backward-safe like every other predicate here: a solver
-    that cannot produce link points reports ``0.0`` (never blocks motion it
-    cannot reason about).
-    """
-    boxes = build_zones(zones, inflation)
-    if not boxes:
-        return 0.0
-    try:
-        pts = ik.link_points(list(q)[:ik.num_joints()],
-                             samples_per_link=_LINK_SAMPLES)
-    except Exception:  # noqa: BLE001 — diagnosis must never break the guard
-        return 0.0
-    if pts is None:
-        return 0.0
-    worst = 0.0
-    for p in pts:
-        for box in boxes:
-            if not box.contains(p):
-                continue
-            depth = min(min(float(p[i] - box.min[i]), float(box.max[i] - p[i]))
-                        for i in range(3))
-            if depth > worst:
-                worst = depth
-    return worst
-
-
 def _pose_inside_zone(ik, q, zones, inflation: float) -> bool:
     """True when the arm STANDING STILL at ``q`` already has a link point inside
     an inflated zone. Mirrors ``segment_blocked``'s backward-safe contract: a
@@ -538,69 +503,8 @@ def _plan_base_swing(ctx, q_start, q_end, zones, margin, link_radius,
     return None
 
 
-def escape_leg_ok(ik, q_start, q_end, zones, margin: float = ZONE_MARGIN_M,
-                  link_radius: float = LINK_RADIUS_M,
-                  step_m: float = STEP_M) -> bool:
-    """True when ``q_start → q_end`` never takes the arm DEEPER into a zone.
-
-    The monotone-escape admissibility test. ``segment_blocked`` asks "does this
-    leg touch a zone at all", which is the right question for a TRANSIT and the
-    wrong one for getting OUT: an arm already standing inside an inflated zone
-    fails it at ``u = 0`` no matter where it goes, so no route can exist and the
-    student is told to redraw a zone while the arm sits trapped. Measured over
-    42 (start, zone) scenarios: 32/42 on edu6 and 28/42 on the OMX ended in that
-    refusal — it is a shared dead end, not an edu6 quirk.
-
-    This asks the weaker, sufficient question instead: penetration depth must be
-    non-increasing along the whole leg (within ``_ESCAPE_EPS_M`` of float
-    noise). An arm outside every zone has depth 0 throughout, so for that case
-    this is EXACTLY ``not segment_blocked`` — the two agree wherever the strong
-    test has an opinion worth having.
-
-    Samples the segment's own straight joint-space line with the same arc-aware
-    rule ``segment_blocked`` uses, so the tunneling argument is unchanged.
-    """
-    boxes = build_zones(zones, link_radius + margin)
-    if not boxes:
-        return True
-    inflation = link_radius + margin
-    n_joints = ik.num_joints()
-    qs = np.asarray(list(q_start)[:n_joints], dtype=np.float64)
-    qe = np.asarray(list(q_end)[:n_joints], dtype=np.float64)
-    lp_s = ik.link_points(qs, samples_per_link=_LINK_SAMPLES)
-    lp_e = ik.link_points(qe, samples_per_link=_LINK_SAMPLES)
-    if lp_s is None or lp_e is None:
-        return True
-    max_disp = 0.0
-    for a, b in zip(lp_s, lp_e):
-        max_disp = max(max_disp,
-                       float(np.linalg.norm(np.asarray(a) - np.asarray(b))))
-    n_chord = int(math.ceil(max_disp / max(step_m, 1e-6)))
-    max_joint_delta = float(np.max(np.abs(qe - qs)))
-    n_angular = int(math.ceil(_R_MAX_M * max_joint_delta / max(step_m, 1e-6)))
-    n = min(_MAX_SEGMENT_SAMPLES, max(1, n_chord, n_angular))
-    delta = qe - qs
-    ceiling = zone_penetration(ik, qs, zones, inflation) + _ESCAPE_EPS_M
-    for i in range(1, n + 1):
-        depth = zone_penetration(ik, qs + delta * (i / n), zones, inflation)
-        if depth > ceiling:
-            return False
-        # Ratchet: once the arm is shallower it may not go back down.
-        ceiling = min(ceiling, depth + _ESCAPE_EPS_M)
-    return True
-
-
-# Float-noise slack for the monotone ratchet above. Small enough that it cannot
-# accumulate into a real descent over the ~256-sample cap (256 × 0.1 mm = 26 mm
-# worst case is not reachable in practice because the ratchet only ever LOWERS
-# the ceiling), large enough that FK round-off does not spuriously refuse a leg
-# that is genuinely flat.
-_ESCAPE_EPS_M = 0.0001
-
-
 def plan_safe_route(ctx, q_start, q_end, zones, duration_s, roll=None,
-                    margin: float = ZONE_MARGIN_M,
-                    allow_monotone_escape: bool = False):
+                    margin: float = ZONE_MARGIN_M):
     """Return a list of ``(q_start, q_end, duration)`` legs that get the arm
     from ``q_start`` to ``q_end`` without sweeping a zone.
 
@@ -642,25 +546,6 @@ def plan_safe_route(ctx, q_start, q_end, zones, duration_s, roll=None,
 
     # 1. Direct.
     if not segment_blocked(ik, q_start, q_end, zones, margin, link_radius):
-        return [(list(q_start), list(q_end), duration_s)]
-
-    # 1a. ESCAPE rung — opt-in, and ONLY for a caller that is trying to get the
-    # arm OUT (today: the Grundstellung planner). The arm may leave a zone it is
-    # already standing in, but may never go deeper into one.
-    #
-    # Why this exists: `_static_overlap_refusal` below is correct for a TRANSIT
-    # and a dead end for a retreat. Measured over 42 (start, zone) scenarios,
-    # 32/42 on edu6 and 28/42 on the OMX ended in it — a student who draws a
-    # 4 cm box within ~9 cm of where the arm stands makes the arm's own link
-    # points fall inside the 5 cm inflation, and from then on NO motion is
-    # permitted at all, including going home, while the message tells them to
-    # redraw a zone that was never the problem.
-    #
-    # Default False keeps every existing caller byte-identical: `segment_blocked`
-    # already said this leg touches a zone, so without the opt-in we fall
-    # straight through to the refusal exactly as before.
-    if allow_monotone_escape and escape_leg_ok(ik, q_start, q_end, zones,
-                                               margin, link_radius):
         return [(list(q_start), list(q_end), duration_s)]
 
     # 1b. Is the zone on the ARM rather than on its path? Then no rung can ever

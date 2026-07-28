@@ -77,6 +77,13 @@ class SimArm:
     FK in the held simulation + ``fk_xyz``), and the current placed ``objects``
     (the sim-scene list, each ``{type, tag_id, x, y, yaw}``). ``set_objects``
     refreshes the placed set on each workflow start.
+
+    Pass ``world=`` a :class:`~workflow.sim_world.SimWorld` to get the MUTABLE
+    scene: the arm then actually picks objects up, carries them and puts them
+    down, and its held report becomes identity-based. Omit it (``None``) and the
+    class behaves exactly as it did before SimWorld existed — a frozen object
+    list plus a proximity-based held guess — which is what keeps every
+    pre-SimWorld construction (unit tests, the golden fixture) byte-identical.
     """
 
     def __init__(
@@ -89,10 +96,16 @@ class SimArm:
         close_threshold_rad: Optional[float] = None,
         held_block_offset_rad: Optional[float] = None,
         held_floor_rad: Optional[float] = None,
+        world: Any | None = None,
     ) -> None:
         self._sink = joint_state_sink
         self._ik = ik
         self._objects: list[dict[str, Any]] = list(objects or [])
+        # The MUTABLE virtual scene (workflow.sim_world.SimWorld) when the node
+        # supplies one. None keeps the legacy frozen-list behaviour verbatim —
+        # every construction that predates SimWorld (unit tests, the golden
+        # fixture) therefore behaves byte-identically.
+        self._world = world
         # Per-profile grasp-classifier values; None → the OMX module constants
         # (edu6's radian-band gripper 0..1.75 supplies its own: a command below
         # ~1.5 is a close attempt, a held block reads commanded + 0.19).
@@ -111,9 +124,13 @@ class SimArm:
         # Seeded to HOME so the very first get_joints() (the start-time seed in
         # WorkflowManager.start) returns a realistic pose, not [0]*6.
         if home_full_joints is not None and len(home_full_joints) == self._n + 1:
-            self._last_q: list[float] = [float(v) for v in home_full_joints]
+            self._home_full_joints: list[float] = [float(v) for v in home_full_joints]
         else:
-            self._last_q = list(_SIM_HOME_FULL_JOINTS)
+            self._home_full_joints = list(_SIM_HOME_FULL_JOINTS)
+        # Kept so set_objects() can re-seed a NEW run: the node caches ONE SimArm
+        # for the whole process lifetime (see physical_ai_server._sim_arm), so
+        # without the re-seed run N+1 started wherever run N stopped.
+        self._last_q: list[float] = list(self._home_full_joints)
         # publish() runs on the interpreter daemon thread; get_joints()/set_objects
         # may be read from the ROS executor thread — guard the shared cache.
         self._lock = threading.RLock()
@@ -122,9 +139,21 @@ class SimArm:
     # Scene
     # ------------------------------------------------------------------
     def set_objects(self, objects: Optional[list[dict[str, Any]]]) -> None:
-        """Replace the placed virtual objects (called on each workflow start)."""
+        """Replace the placed virtual objects AND re-seed the arm for a NEW run.
+
+        The node caches ONE ``SimArm`` for the whole process lifetime while it
+        rebuilds ``SimPerception`` per run, so the two halves disagreed about what
+        "a new run" meant: run N+1 started at run N's FINAL pose, and — worse — its
+        ``ctx.last_full_joints`` gripper seed was the FAKE held-override readback
+        (e.g. −0.0986), a value no motion had ever commanded. The real rig re-seeds
+        from live ``/joint_states`` every run; this is the sim's equivalent.
+        """
         with self._lock:
             self._objects = list(objects or [])
+            self._last_q = list(self._home_full_joints)
+        world = self._world
+        if world is not None:
+            world.reset(objects)
 
     # ------------------------------------------------------------------
     # Publisher (ctx.publisher contract)
@@ -132,13 +161,22 @@ class SimArm:
     def publish(self, chunk: list[tuple[list[float], float]]) -> None:
         """Forward one chunk of ``(q, t)`` waypoints to the virtual joint-state
         sink and cache the last commanded vector. NO sleep — pacing lives in
-        ``chunked_publish._pace``."""
+        ``chunked_publish._pace``.
+
+        Also drives the ``SimWorld`` when one is bound: the gripper crossing the
+        profile's close threshold CAPTURES the nearest object, a still-closed
+        gripper CARRIES it, and crossing back open RELEASES it where it was let
+        go. The crossing is judged against the PREVIOUS cached pose, so the first
+        close of a run (arriving as an already-closed chunk from a HOME-seeded
+        arm) still registers."""
         if not chunk:
             return
         last = chunk[-1][0]
         cached = [float(v) for v in last]
         with self._lock:
+            prev = list(self._last_q)
             self._last_q = cached
+        self._update_world(prev, cached)
         sink = self._sink
         if sink is None:
             return
@@ -148,6 +186,39 @@ class SimArm:
                 sink([float(v) for v in q])
             except Exception:  # noqa: BLE001 — a publish hiccup must not kill the run
                 pass
+
+    def _update_world(self, prev: list[float], cur: list[float]) -> None:
+        """Apply ONE commanded pose to the virtual scene. No-op without a world.
+
+        Three transitions, judged on the gripper channel against the previous
+        commanded pose:
+
+        * open → closed: capture the nearest object within the capture radius;
+        * closed → closed: carry it to the new end-effector XY;
+        * closed → open: release it where it is.
+
+        Wrapped whole: a sim-world hiccup must never kill a running workflow (the
+        publisher already treats a sink failure the same way).
+        """
+        world = self._world
+        if world is None or len(cur) < self._n + 1:
+            return
+        was_closed = (len(prev) > self._n
+                      and prev[self._n] < self._close_threshold)
+        is_closed = cur[self._n] < self._close_threshold
+        try:
+            if is_closed:
+                xyz = self._fk_xyz(cur)
+                if xyz is None:
+                    return
+                if was_closed:
+                    world.carry_to(xyz[0], xyz[1])
+                else:
+                    world.capture_nearest(xyz[0], xyz[1], _GRASP_CAPTURE_RADIUS_M)
+            elif was_closed:
+                world.release()
+        except Exception:  # noqa: BLE001 — the sim world must never kill a run
+            pass
 
     # ------------------------------------------------------------------
     # Joint readback (ctx.get_follower_joints contract)
@@ -184,6 +255,15 @@ class SimArm:
         # Only a close command can hold an object.
         if q[self._n] >= self._close_threshold:
             return False
+        world = self._world
+        if world is not None:
+            # IDENTITY, not proximity. The legacy test below asks "is the jaw
+            # currently NEAR some placed object", which was wrong in both
+            # directions once the object could move: it read MISS for the whole
+            # carry (the frozen object stayed behind at its placement) and HELD
+            # right after a release (the arm is still standing over the object it
+            # just let go). A grasp is a relationship, not a distance.
+            return bool(world.is_held())
         xyz = self._fk_xyz(q)
         if xyz is None:
             return False

@@ -60,6 +60,7 @@ import {
   SIM_OBJECT_HELD_COLOR_HEX,
 } from './simConstants';
 import { armGeometry } from '../../utils/armProfile';
+import useSimObjects from '../../hooks/useSimObjects';
 
 const UrdfTwin = lazy(() => import('../UrdfTwin'));
 
@@ -177,6 +178,9 @@ function SimScene({
   // Profile geometry (edu6 §4.5): annulus radii + the grasp-classifier band.
   // caps==null / an OMX manifest resolve to the pre-edu6 literals exactly.
   const caps = useSelector((st) => (st.tasks && st.tasks.taskStatus ? st.tasks.taskStatus.capabilities : null));
+  // Defensive like the caps selector above: several tests mount SimScene with a
+  // partial store, and an absent slice must degrade to "no subscription", not throw.
+  const rosbridgeUrl = useSelector((st) => (st.ros ? st.ros.rosbridgeUrl : null));
   const annulus = useMemo(() => reachAnnulus(caps), [caps]);
   const graspBand = useMemo(() => {
     const geo = armGeometry(caps);
@@ -211,6 +215,10 @@ function SimScene({
   const [selectedType, setSelectedType] = useState(cat[0][1]);
   const [selectedId, setSelectedId] = useState(null);
   const [heldObjectId, setHeldObjectId] = useState(null);
+  // The SERVER's live scene (/sim/objects). Null until the first message — and
+  // null forever on an older server image that does not publish it, which is why
+  // the local grasp guess below is KEPT as a fallback rather than deleted.
+  const simScene = useSimObjects(rosbridgeUrl, true);
   // Editor mode: place objects, or draw a no-go Sperrzone rectangle.
   const [mode, setMode] = useState('object'); // 'object' | 'zone'
   // Live drag-rectangle while drawing a zone, in base coords {x0,y0,x1,y1}.
@@ -225,6 +233,8 @@ function SimScene({
   const graspRef = useRef({ closed: false });
   const heldRef = useRef(null);
   const objectsRef = useRef(objects);
+  // Latest server scene, read by the stable onEndEffector callback.
+  const simSceneRef = useRef(null);
 
   // Keep the selected type valid as the catalog arrives/changes.
   useEffect(() => {
@@ -242,6 +252,42 @@ function SimScene({
       setHeldObjectId(null);
     }
   }, [objects, heldObjectId]);
+
+  // Mirror the server scene for the (stable) grasp callback below.
+  useEffect(() => {
+    simSceneRef.current = simScene;
+  }, [simScene]);
+
+  // THE SERVER'S GRASP WINS whenever /sim/objects is live. The local geometric
+  // guess cannot know which object the runtime actually captured — the radius and
+  // the nearest-wins rule are the server's — and a disagreement between the two is
+  // precisely what let the twin and the editor tell two different stories.
+  // `held` is the object's KEY, i.e. its index in the list the editor sent.
+  useEffect(() => {
+    if (!simScene) return;
+    const key = simScene.held;
+    let id = null;
+    if (key !== null && key !== undefined) {
+      const o = objects[key];
+      id = o && o.tag_id !== undefined && o.tag_id !== null ? o.tag_id : null;
+    }
+    heldRef.current = id;
+    setHeldObjectId(id);
+  }, [simScene, objects]);
+
+  // Server positions keyed by the EDITOR's tag_id, which is what UrdfTwin keys its
+  // mesh map on. Null while the topic is silent, so the twin falls back to the
+  // placement coordinates exactly as before.
+  const simPositions = useMemo(() => {
+    if (!simScene) return null;
+    const out = {};
+    simScene.objects.forEach((o) => {
+      const editor = objects[o.key];
+      if (!editor || editor.tag_id === undefined || editor.tag_id === null) return;
+      out[editor.tag_id] = { x: o.x, y: o.y, yaw: o.yaw };
+    });
+    return out;
+  }, [simScene, objects]);
 
   // Emit a MERGED scene: keep the current objects + zones and apply only the
   // given patch (`{objects}` or `{zones}`). Merging is required so an object edit
@@ -465,6 +511,10 @@ function SimScene({
   // Grasp-attach geometry. Stable callback (reads refs) so UrdfTwin's
   // onEndEffector prop identity never churns.
   const handleEndEffector = useCallback(({ x, y, gripper }) => {
+    // FALLBACK ONLY. Once /sim/objects is live the server owns the grasp (see the
+    // effect above); running both would let a local guess fight the runtime's
+    // actual capture. Kept for an older server image that does not publish it.
+    if (simSceneRef.current) return;
     if (typeof gripper !== 'number' || !Number.isFinite(gripper)) return;
     const g = graspRef.current;
     if (gripper < graspBandRef.current.close && !g.closed) {
@@ -840,6 +890,8 @@ function SimScene({
           zones={zones}
           showTable
           heldObjectId={heldObjectId}
+          simPositions={simPositions}
+          simEpoch={simScene ? simScene.epoch : 0}
           onEndEffector={handleEndEffector}
           catalogDims={catalogDims}
           showPath={showPath}

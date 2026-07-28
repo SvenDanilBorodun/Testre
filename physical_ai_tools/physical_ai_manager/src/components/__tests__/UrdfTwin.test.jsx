@@ -71,6 +71,14 @@ const mockRobot = {
     link0: { add: () => {} },
     end_effector_link: {
       add: () => {},
+      // The grab path re-parents the held mesh here. Real three.js `attach`
+      // preserves the world transform (no move), so the stub records and does
+      // not touch .position -- a test asserting the mesh sits on the jaws can
+      // only pass if the component positioned it.
+      attach(child) {
+        attachLog.push({ parent: 'ee', child });
+        if (child) child.__parent = 'ee';
+      },
       // Write the test-controlled TCP world position into the target vector so
       // appendPathPoint / emitEndEffector see real numeric coords (the original
       // `(v) => v` returned a coord-less Vector3, which appendPathPoint rejects,
@@ -119,6 +127,11 @@ const mockColorSet = vi.fn();
 const mockMeshInstances = [];
 // The captured WebGLRenderer instance so the shadow-map flag can be asserted.
 let mockRenderer = null;
+// Every scene.attach / link.attach re-parent, in order. Real three.js `attach`
+// PRESERVES the world transform (it does not move the object), so these tests can
+// only pass if the component itself positions the mesh — which is exactly the
+// property the old no-op stub could not check.
+const attachLog = [];
 // Path-trail internals: a setDrawRange spy + the captured path BufferGeometry let
 // the extended tests assert the draw range advances (append) and resets (clear).
 const mockSetDrawRange = vi.fn();
@@ -181,10 +194,22 @@ vi.mock('three', () => {
   });
   return {
     __esModule: true,
-    // `attach` is what the held-object release path re-parents through
-    // (scene.attach preserves the carried world transform) — a no-op here.
+    // `attach` is what the held-object grab/release paths re-parent through.
+    // It used to be a NO-OP here, which is precisely why the release bug hid: the
+    // only thing a test could observe was mesh.position.y (snapMeshToTable), so a
+    // mesh left at the carry's x/z looked identical to one landed correctly. The
+    // stub now records the re-parent and, like real three.js, PRESERVES the world
+    // transform — i.e. it deliberately does NOT move the mesh — so a test that
+    // wants the mesh in the right place has to prove the component put it there.
     Scene: function Scene() {
-      return noopObj({ background: null, traverse: () => {}, attach: () => {} });
+      return noopObj({
+        background: null,
+        traverse: () => {},
+        attach(child) {
+          attachLog.push({ parent: 'scene', child });
+          if (child) child.__parent = 'scene';
+        },
+      });
     },
     Color: function Color() {},
     PerspectiveCamera: function PerspectiveCamera() {
@@ -334,6 +359,7 @@ beforeEach(() => {
   mockColorSet.mockClear();
   mockMeshInstances.length = 0;
   mockRenderer = null;
+  attachLog.length = 0;
   mockSetDrawRange.mockClear();
   mockPathGeometry = null;
   mockEEWorld.x = 0;
@@ -749,5 +775,84 @@ describe('UrdfTwin — edu6 profile asset + world-frame yaw', () => {
     expect(arg.x).toBeCloseTo(0.15, 6);
     expect(arg.y).toBeCloseTo(0.05, 6);
     expect(arg.z).toBeCloseTo(0.20, 6);
+  });
+});
+
+// ── Server-authoritative sim scene (/sim/objects) ───────────────────────────
+// The twin used to run its OWN object model: SimScene guessed the grasp from a
+// distance test and UrdfTwin then moved meshes the server never learned about,
+// so after one pick-and-place the 3D pane and the 2D editor disagreed and the
+// arm followed the editor. `simPositions` / `simEpoch` make the server the
+// single source of truth.
+//
+// These tests are only meaningful because the three mock's `attach` PRESERVES
+// the world transform, exactly like the real one — a no-op stub made a mesh
+// stranded at the carry position indistinguishable from a correctly landed one.
+describe('UrdfTwin — the server owns where sim objects are', () => {
+  const OBJECTS = [{ type: 'wuerfel', tag_id: 20, x: 0.15, y: 0, yaw: 0 }];
+  const findObjectMesh = () =>
+    mockMeshInstances.find((m) => m.userData && m.userData.simId === 20);
+
+  test('a released mesh lands on the SERVER\'s coordinates, not just snapped in Y', async () => {
+    const { rerender } = render(<UrdfTwin objects={OBJECTS} />);
+    await waitFor(() => expect(mockSubscribe).toHaveBeenCalledTimes(1));
+    const mesh = findObjectMesh();
+    expect(mesh).toBeTruthy();
+
+    // Grab, carry (the server reports the object moving with the gripper), release.
+    rerender(<UrdfTwin objects={OBJECTS} heldObjectId={20}
+      simPositions={{ 20: { x: 0.15, y: 0, yaw: 0 } }} />);
+    rerender(<UrdfTwin objects={OBJECTS} heldObjectId={20}
+      simPositions={{ 20: { x: 0.12, y: 0.10, yaw: 0 } }} />);
+    rerender(<UrdfTwin objects={OBJECTS} heldObjectId={null}
+      simPositions={{ 20: { x: 0.12, y: 0.10, yaw: 0 } }} />);
+
+    // base (x, y) -> viewer (x, ·, -y). The editor still says x=0.15,y=0; if the
+    // component read THAT the cube would be back at its placement.
+    expect(mesh.position.x).toBeCloseTo(0.12, 6);
+    expect(mesh.position.z).toBeCloseTo(-0.10, 6);
+    expect(mesh.__parent).toBe('scene');
+  });
+
+  test('a re-grasp re-seats the mesh on the jaws instead of inheriting a stale offset', async () => {
+    const { rerender } = render(<UrdfTwin objects={OBJECTS} />);
+    await waitFor(() => expect(mockSubscribe).toHaveBeenCalledTimes(1));
+    const mesh = findObjectMesh();
+
+    // First pick-and-place leaves the cube away from its placement.
+    rerender(<UrdfTwin objects={OBJECTS} heldObjectId={20}
+      simPositions={{ 20: { x: 0.15, y: 0, yaw: 0 } }} />);
+    rerender(<UrdfTwin objects={OBJECTS} heldObjectId={null}
+      simPositions={{ 20: { x: 0.12, y: 0.10, yaw: 0 } }} />);
+    // Second grasp, at the cube's CURRENT place.
+    rerender(<UrdfTwin objects={OBJECTS} heldObjectId={20}
+      simPositions={{ 20: { x: 0.12, y: 0.10, yaw: 0 } }} />);
+
+    expect(mesh.__parent).toBe('ee');
+    expect(mesh.position.x).toBeCloseTo(0.12, 6);
+    expect(mesh.position.z).toBeCloseTo(-0.10, 6);
+    expect(attachLog.filter((a) => a.parent === 'ee')).toHaveLength(2);
+  });
+
+  test('a simEpoch bump repositions every mesh from the server scene', async () => {
+    const { rerender } = render(<UrdfTwin objects={OBJECTS} simEpoch={1}
+      simPositions={{ 20: { x: 0.12, y: 0.10, yaw: 0 } }} />);
+    await waitFor(() => expect(mockSubscribe).toHaveBeenCalledTimes(1));
+    const mesh = findObjectMesh();
+    expect(mesh.position.x).toBeCloseTo(0.12, 6);
+
+    // A new run: the server resets the scene to the placement and bumps the epoch.
+    rerender(<UrdfTwin objects={OBJECTS} simEpoch={2}
+      simPositions={{ 20: { x: 0.15, y: 0, yaw: 0 } }} />);
+    expect(mesh.position.x).toBeCloseTo(0.15, 6);
+    expect(mesh.position.z).toBeCloseTo(0, 6);
+  });
+
+  test('without simPositions the placement coordinates are used, exactly as before', async () => {
+    render(<UrdfTwin objects={OBJECTS} />);
+    await waitFor(() => expect(mockSubscribe).toHaveBeenCalledTimes(1));
+    const mesh = findObjectMesh();
+    expect(mesh.position.x).toBeCloseTo(0.15, 6);
+    expect(mesh.position.z).toBeCloseTo(0, 6);
   });
 });

@@ -196,6 +196,15 @@ export default function UrdfTwin({
   objects = [],
   showTable = false,
   heldObjectId = null,
+  // Live positions from the SERVER's virtual scene (/sim/objects), keyed by the
+  // editor's tag_id: { [tag_id]: {x, y, yaw} }. Null while the topic is silent
+  // (or on an older server image), in which case the placement coordinates from
+  // `objects` are used exactly as before.
+  simPositions = null,
+  // Bumped by the server at every sim run start. A change force-resets every mesh
+  // to the scene's current truth, so run N+1 never inherits run N's drop points
+  // or a stale held colour.
+  simEpoch = 0,
   onEndEffector = null,
   zones = [],
   showPath = false,
@@ -206,6 +215,10 @@ export default function UrdfTwin({
   showReach = false,
 }) {
   const rosbridgeUrl = useSelector((state) => state.ros.rosbridgeUrl);
+  // Read by the release handler, which must land a mesh on the SERVER's released
+  // coordinates rather than wherever the carry happened to leave it.
+  const simPositionsRef = useRef(simPositions);
+  useEffect(() => { simPositionsRef.current = simPositions; }, [simPositions]);
   // Profile geometry (edu6 §4.5): which URDF asset to load, which joint names
   // to apply, which link is the grasp frame, and the reach-ring radii. A null/
   // OMX manifest resolves to the pre-edu6 values exactly.
@@ -591,7 +604,10 @@ export default function UrdfTwin({
       }
       // A held mesh follows the gripper (held effect owns it) — don't yank it
       // back to the table while the objects list is edited mid-carry.
-      if (id !== heldObjectId) positionSimObject(mesh, o);
+      // Prefer the SERVER's live position: after a pick-and-place the placement
+      // coordinates in `o` are stale, and rendering them is what made the twin
+      // and the 2D editor disagree.
+      if (id !== heldObjectId) positionSimObject(mesh, simPosOf(simPositions, id, o));
     });
     // Remove meshes whose object is gone.
     Array.from(map.keys()).forEach((id) => {
@@ -610,7 +626,7 @@ export default function UrdfTwin({
     // the held effect re-parents on its own; re-running this on every grab would
     // be wasteful. One-shot/diff effect idiom.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [objects, showTable, catalogDims]);
+  }, [objects, showTable, catalogDims, simPositions, simEpoch]);
 
   // ---- Phase-3: grasp re-parenting (mesh follows the gripper) ---------------
   // On grab, re-parent the matching mesh under the end-effector link (attach()
@@ -638,6 +654,11 @@ export default function UrdfTwin({
         const live = liveMap && type && liveMap[type]
           ? resolveDims(liveMap, type) : null;
         snapMeshToTable(prevMesh, live);
+        // S-2: snapMeshToTable only fixes the HEIGHT. Without this the mesh kept
+        // whatever x/z the carry left it at — a position the server never knew
+        // about — so the twin and the 2D editor told two different stories from
+        // the first place onwards. Land it on the server's released coordinates.
+        positionSimObjectXZ(prevMesh, simPositionsRef.current, prev);
         // Restore the mesh's OWN per-type rest colour (not a global amber — a
         // catalog-coloured object would otherwise turn amber after being carried).
         setMeshColor(prevMesh, live ? live.color : restColorOf(prevMesh));
@@ -650,6 +671,11 @@ export default function UrdfTwin({
         ? (robot.links[robot.userData?.eeLinkName || EE_LINK_NAME]
            || robot.links[EE_LINK_NAME]) : null;
       if (mesh && link && typeof link.attach === 'function') {
+        // S-2b: attach() PRESERVES the world transform and the grab path writes no
+        // position, so a RE-grasp inherited whatever offset the mesh happened to
+        // carry — the cube visibly flew ~10 cm off the jaws. Re-seat it on the
+        // server's current position first; the attach then locks in a sane offset.
+        positionSimObjectXZ(mesh, simPositionsRef.current, heldObjectId);
         link.attach(mesh);
         setMeshColor(mesh, SIM_OBJECT_HELD_COLOR_HEX);
         requestRenderRef.current();
@@ -993,6 +1019,35 @@ function restColorOf(mesh) {
 // mirrors that mapping: base (x, y, z) → viewer (x, z, -y). A box of edge
 // height_m (its own resolved dims) rests with its bottom on the table (base z=0)
 // at half-height. A base-z yaw maps to a viewer-y rotation (base +Z → viewer +Y).
+// Merge the SERVER's live position for one object over the editor's placement.
+// `simPositions` is null while /sim/objects is silent (or on an older server
+// image), in which case the placement is returned untouched — the pre-existing
+// behaviour, byte-identical.
+function simPosOf(simPositions, id, o) {
+  if (!simPositions || id === null || id === undefined) return o;
+  const live = simPositions[id];
+  if (!live) return o;
+  return {
+    ...o,
+    x: live.x,
+    y: live.y,
+    yaw: typeof live.yaw === 'number' ? live.yaw : o.yaw,
+  };
+}
+
+// Move a mesh's TABLE-PLANE position (x/z in viewer space) to the server's live
+// coordinates for `id`, leaving its height alone (snapMeshToTable owns that).
+// A no-op without a server scene, so the pre-/sim/objects behaviour is unchanged.
+function positionSimObjectXZ(mesh, simPositions, id) {
+  if (!mesh || !mesh.position || !simPositions) return;
+  if (id === null || id === undefined) return;
+  const live = simPositions[id];
+  if (!live || !Number.isFinite(live.x) || !Number.isFinite(live.y)) return;
+  mesh.position.x = live.x;
+  mesh.position.z = -live.y;
+  if (typeof live.yaw === 'number' && mesh.rotation) mesh.rotation.y = live.yaw;
+}
+
 function positionSimObject(mesh, o) {
   const dims = mesh && mesh.userData ? mesh.userData.simDims : null;
   const height = dims && typeof dims.height === 'number' && dims.height > 0

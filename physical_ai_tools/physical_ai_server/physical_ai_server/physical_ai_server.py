@@ -630,6 +630,11 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         # sibling key in workflow_json) — no .srv change.
         self.sim_workflow_manager = None
         self._sim_arm = None
+        # The MUTABLE virtual scene shared by SimArm (writes) and SimPerception
+        # (reads), plus the /sim/objects publisher the React twin renders from.
+        self._sim_world = None
+        self._sim_objects_publisher = None
+        self._last_sim_objects_json = None
         self._sim_objects = []
         self._sim_joint_state_publisher = None
         self._sim_idle_timer = None
@@ -4497,6 +4502,20 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         self._sim_joint_state_publisher = self.create_publisher(
             JointState, '/sim/joint_states', 10,
         )
+        # Companion topic carrying the virtual SCENE (where every object is, and
+        # which one is in the jaws). std_msgs/String + JSON reuses an existing
+        # message type, so NO interfaces rebuild — the same trick /sim/joint_states
+        # plays with JointState. Without it the React twin has to guess the grasp
+        # from the joint stream alone, and its guess and the server's truth drift
+        # apart the moment anything is carried.
+        try:
+            from std_msgs.msg import String as _SimString
+            self._sim_objects_publisher = self.create_publisher(
+                _SimString, '/sim/objects', 10,
+            )
+        except Exception as e:  # noqa: BLE001 — the twin degrades to its local guess
+            self.get_logger().warning(f'/sim/objects publisher create failed: {e}')
+            self._sim_objects_publisher = None
         if self._sim_idle_timer is None:
             try:
                 # Low-rate republish of the last commanded pose so a freshly
@@ -4530,6 +4549,35 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         msg.position = positions
         pub.publish(msg)
         self._last_sim_joints = positions
+        # The scene rides alongside the pose: SimArm may have just captured,
+        # carried or released. Deduplicated inside, so an unchanged scene is a
+        # string compare rather than a message.
+        self._publish_sim_objects()
+
+    def _publish_sim_objects(self, force: bool = False):
+        """Publish the live virtual scene so the React twin renders the SERVER's
+        truth instead of its own private grasp guess.
+
+        Deduplicated against the last payload: ``_publish_sim_joint_state`` calls
+        this on every commanded waypoint, but the scene only actually changes on a
+        capture, a carry step, or a release, so an unchanged snapshot costs one
+        string compare and no message. ``force=True`` re-sends anyway (used by the
+        idle republish, so a twin that mounts mid-idle gets the scene)."""
+        pub = self._sim_objects_publisher
+        world = self._sim_world
+        if pub is None or world is None:
+            return
+        try:
+            from std_msgs.msg import String as _SimString
+            payload = json.dumps(world.snapshot(), separators=(',', ':'))
+            if not force and payload == self._last_sim_objects_json:
+                return
+            msg = _SimString()
+            msg.data = payload
+            pub.publish(msg)
+            self._last_sim_objects_json = payload
+        except Exception as e:  # noqa: BLE001 — a diagnostic must never stop a run
+            self.get_logger().warning(f'/sim/objects publish failed: {e}')
 
     def _sim_idle_republish(self):
         """Timer callback: republish the last commanded sim pose at a low rate
@@ -4538,6 +4586,9 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         run (the daemon thread is already streaming frames)."""
         if getattr(self, 'on_workflow', False):
             return
+        # force=True: a twin mounting mid-idle (or after a page reload) must get the
+        # scene even though nothing has changed since the run ended.
+        self._publish_sim_objects(force=True)
         q = self._last_sim_joints
         if q is None:
             return
@@ -4564,6 +4615,12 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             self.get_logger().error(f'Cannot import sim WorkflowManager: {e}')
             return None
         self._ensure_sim_publisher()
+        # ONE mutable scene, shared by the virtual arm (writes) and the virtual
+        # perception (reads). Created here rather than per-run because SimArm is
+        # cached with it; set_objects() resets it at every start.
+        from physical_ai_server.workflow.sim_world import SimWorld
+        if self._sim_world is None:
+            self._sim_world = SimWorld(list(getattr(self, '_sim_objects', []) or []))
         _profile = getattr(self, '_arm_profile', None)
         _home = getattr(_profile, 'home_joints_rad', None)
         _g_open = getattr(_profile, 'gripper_open_rad', None)
@@ -4582,6 +4639,7 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             held_block_offset_rad=getattr(
                 _profile, 'sim_held_block_offset_rad', None),
             held_floor_rad=getattr(_profile, 'sim_held_floor_rad', None),
+            world=self._sim_world,
         )
         self._sim_arm = sim_arm
         # 1x1 non-None dummy frame: perception_blocks._scene_frame only checks
@@ -4593,12 +4651,29 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             perception_factory=lambda: SimPerception(
                 list(getattr(self, '_sim_objects', []) or []),
                 self._load_object_catalog_tolerant(),
+                self._sim_world,
             ),
             load_destinations=lambda: {},
-            # The critical bypass: no calibration in sim, so _attach_named_world
-            # early-returns and preserves SimPerception's preset world_xyz_m, and
-            # the workspace floor (z_table/table_plane both None) is disabled.
-            load_calibration=lambda: {},
+            # The critical bypass is INTACT: _attach_named_world early-returns on
+            # `scene_intrinsics is None or scene_extrinsics is None or board_z is
+            # None or z_table is None` — an OR chain — so supplying z_table alone
+            # still short-circuits on the FIRST clause and SimPerception's preset
+            # world_xyz_m is preserved verbatim.
+            #
+            # What z_table=0.0 turns ON is the workspace floor. It was disabled in
+            # sim, so `bewege zu` a target 30 mm BELOW the table ran happily here
+            # and then refused on a calibrated rig with „Zielpunkt liegt unter der
+            # Tischebene." — a simulator being MORE permissive than the hardware it
+            # models, which is backwards.
+            #
+            # This is NOT the `z_table=0.0` fallback CLAUDE-CHANGELOG forbids. That
+            # rule guards the REAL calibration path, where an absent z_table means
+            # the table was never MEASURED and mark_destination/grasp must refuse
+            # rather than guess. Here the table is not measured but DEFINED: the
+            # virtual table is the z=0 plane by construction, which is the same
+            # assumption sim_perception already bakes into every grasp height
+            # ("Virtual table at z = 0 → grasp z is object_height − grasp_depth").
+            load_calibration=lambda: {'z_table': 0.0},
             emit_status=self._emit_workflow_status,
             on_finished=self._on_workflow_finished,
             get_scene_frame=lambda: sim_dummy_frame,
@@ -4943,7 +5018,12 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             # simulation sees the objects placed for THIS run.
             try:
                 if self._sim_arm is not None:
+                    # Also re-seeds the arm to HOME and resets the world (the arm
+                    # owns the world reset so the two can never drift apart).
                     self._sim_arm.set_objects(self._sim_objects)
+                elif self._sim_world is not None:
+                    self._sim_world.reset(self._sim_objects)
+                self._publish_sim_objects(force=True)
             except Exception as e:  # noqa: BLE001 — scene refresh is best-effort
                 self.get_logger().warning(f'sim scene refresh failed: {e}')
             # B2: RunControls sends breakpoints BEFORE /workflow/start (the BP-r1

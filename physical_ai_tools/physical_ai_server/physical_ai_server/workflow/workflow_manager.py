@@ -229,6 +229,21 @@ MAX_WORKFLOW_JSON_BYTES = 256 * 1024  # 256 KiB; see plan §2.5
 # classroom — the largest pre-existing tutorial uses 3.
 MAX_HAT_HANDLERS = 16
 
+# How long a tag must be CONTINUOUSLY unseen before the object hat believes it
+# is really gone (see WorkflowManager._debounce_absence). Imported, not
+# redefined: perception_blocks._RECLAIM_ABSENT_S (env EDUBOTICS_RECLAIM_ABSENT_S,
+# default 1.5 s) is this codebase's already-tuned answer to exactly this
+# question, and two constants for one concept is how they drift apart.
+# Imported lazily-at-module-load with a literal fallback so an import-order
+# change can never leave the hat un-debounced (0 would restore the raw-set
+# flicker bug wholesale).
+try:
+    from physical_ai_server.workflow.handlers.perception_blocks import (
+        _RECLAIM_ABSENT_S as _HAT_ABSENT_GRACE_S,
+    )
+except Exception:  # noqa: BLE001 — never let an import shape safety behaviour
+    _HAT_ABSENT_GRACE_S = 1.5
+
 
 class WorkflowManager:
     """Public API used by physical_ai_server.py service callbacks."""
@@ -949,6 +964,29 @@ class WorkflowManager:
                 })
         return out
 
+    @staticmethod
+    def _debounce_absence(raw: frozenset, seen_at: dict) -> frozenset:
+        """Hold a tag in the trigger set until it has been unseen for
+        ``_HAT_ABSENT_GRACE_S``.
+
+        Appearances are instant, disappearances are debounced — the asymmetry
+        is deliberate. A new object must still fire the hat promptly, while a
+        tag the detector merely BLINKED must not read as "gone" and re-arm the
+        edge. ``seen_at`` is the caller's per-handler state (one dict per hat
+        thread, never shared), mapping tag id → last monotonic time seen.
+
+        A tag that is genuinely consumed (claimed by the body) simply stops
+        appearing and ages out of the set after the grace, which is what lets
+        „Wenn … gesehen" still fire once per object.
+        """
+        now = time.monotonic()
+        for tag in raw:
+            seen_at[tag] = now
+        for tag in [t for t, ts in seen_at.items()
+                    if now - ts > _HAT_ABSENT_GRACE_S]:
+            del seen_at[tag]
+        return frozenset(seen_at)
+
     # ------------------------------------------------------------------
     # Main loop
     # ------------------------------------------------------------------
@@ -985,10 +1023,32 @@ class WorkflowManager:
         # green „Workflow abgeschlossen". Keying on the set fires once PER OBJECT
         # while keeping the original anti-spin property intact: a static object
         # nobody consumes yields an unchanging set and still fires exactly once.
+        # The set compared here is the DEBOUNCED one (see _debounce_absence) —
+        # edging on the raw per-poll detections made ordinary AprilTag flicker
+        # look like an object leaving and re-entering the scene.
         last_fired_ids: frozenset | None = None
+        # ABSENCE DEBOUNCE for the object hat. The raw per-poll detection set
+        # flickers: AprilTag detection drops a tag for a frame or two under
+        # motion blur, glare or partial occlusion all the time. Edging on the
+        # RAW set therefore re-armed on noise — measured, one tag of two missed
+        # on alternate polls fired a non-consuming body 30 times in 30 polls,
+        # where the invariant is exactly once.
+        #
+        # A tag is treated as PRESENT until it has been continuously unseen for
+        # _HAT_ABSENT_GRACE_S. Appearances count immediately (a new object must
+        # still trigger fast); only disappearance is debounced. That asymmetry
+        # is the whole fix.
+        #
+        # The grace is the SAME EDUBOTICS_RECLAIM_ABSENT_S (1.5 s) that
+        # perception_blocks._reclaim_recycled already uses to answer exactly
+        # this question — "how long until an absent tag is really absent" — so
+        # the two agree by construction instead of drifting apart.
+        _seen_at: dict[int, float] = {}
         try:
             while not ctx.should_stop():
                 triggered = self._wait_for_hat_trigger(hat, ctx)
+                if isinstance(triggered, frozenset):
+                    triggered = self._debounce_absence(triggered, _seen_at)
                 if not triggered:
                     # For the level-triggered hats, an un-triggered poll cycle
                     # means the condition is currently false; re-arm. MUST list

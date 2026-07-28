@@ -181,6 +181,91 @@ def test_a_static_object_with_a_non_consuming_body_still_fires_exactly_ONCE():
     assert len(hits) == 1, f'expected exactly one firing, got {len(hits)}'
 
 
+@pytest.mark.parametrize('miss_every, label', [
+    (2, 'one tag of two missed on ALTERNATE polls'),
+    (6, 'one tag of two missed 1 poll in 6'),
+    (0, 'a TOTAL detection dropout every 6th poll'),
+])
+def test_detection_flicker_does_not_re_arm_the_edge(miss_every, label):
+    """THE flicker guard, and it must be able to fail.
+
+    ``test_a_static_object_...ONCE`` above places ONE cube, and a single-element
+    set cannot oscillate — so it is structurally incapable of catching this. Two
+    cubes CAN: real AprilTag detection drops a tag for a frame or two under
+    motion blur, glare or partial occlusion constantly, and edging on the RAW
+    per-poll set read that as the object leaving and re-entering the scene.
+
+    Measured before the fix, driving the real ``_run_hat_handler``: a
+    non-consuming body fired 30 times in 30 polls at ``miss_every=2`` and 10 at
+    ``miss_every=6``. The invariant is EXACTLY ONCE.
+
+    Mutation-checked: neutering ``_debounce_absence`` (returning ``raw``) turns
+    all three cases red.
+    """
+    import threading
+
+    mgr = WorkflowManager(publisher=lambda _c: None, load_calibration=lambda: {})
+    fires = {'n': 0}
+    state = {'i': 0}
+    polls = 30
+
+    def fake_trigger(_hat, _ctx):
+        i = state['i']
+        state['i'] += 1
+        if i >= polls:
+            ctx.stop = True
+            return frozenset()
+        if miss_every == 0:                       # total dropout
+            return frozenset() if i % 6 == 5 else frozenset({20, 21})
+        return (frozenset({20}) if i % miss_every == miss_every - 1
+                else frozenset({20, 21}))
+
+    class _Interp:
+        @staticmethod
+        def execute_chain(_h, _c, _cb):
+            fires['n'] += 1                       # body claims NOTHING
+
+    ctx = types.SimpleNamespace(motion_lock=threading.RLock(), stop=False)
+    ctx.should_stop = lambda: ctx.stop
+    mgr._wait_for_hat_trigger = fake_trigger
+    mgr._emit_status = lambda *_a, **_k: None
+    mgr._on_block_change = None
+    mgr._workflow_id = 'w'
+    mgr._run_hat_handler({'type': 'edubotics_when_object_seen'}, _Interp(), ctx)
+
+    assert fires['n'] == 1, (
+        f'{label}: fired {fires["n"]}x in {polls} polls — flicker re-armed the '
+        f'edge; a body that claims nothing must fire exactly once')
+
+
+def test_the_absence_debounce_still_lets_a_consumed_tag_age_out(monkeypatch):
+    """The debounce must not become a way to never notice progress.
+
+    Holding a tag forever would wedge the hat after its first firing — the very
+    bug this file exists for. A tag the body CLAIMED stops appearing and must
+    leave the set once the grace elapses, which is what makes „Wenn … gesehen"
+    fire once per OBJECT rather than once per run.
+    """
+    from physical_ai_server.workflow import workflow_manager as WM
+
+    clock = {'t': 1000.0}
+    monkeypatch.setattr(WM.time, 'monotonic', lambda: clock['t'])
+    seen: dict = {}
+    assert WM.WorkflowManager._debounce_absence(frozenset({20, 21}), seen) == \
+        frozenset({20, 21})
+    # 20 gets claimed and stops appearing; inside the grace it is still held.
+    clock['t'] += WM._HAT_ABSENT_GRACE_S * 0.5
+    assert WM.WorkflowManager._debounce_absence(frozenset({21}), seen) == \
+        frozenset({20, 21}), 'a blink must not read as gone'
+    # Past the grace it ages out, so the set CHANGES and the edge re-arms.
+    clock['t'] += WM._HAT_ABSENT_GRACE_S
+    assert WM.WorkflowManager._debounce_absence(frozenset({21}), seen) == \
+        frozenset({21}), 'a genuinely consumed tag must age out'
+    # A brand-new tag is admitted IMMEDIATELY (appearances are not debounced).
+    assert WM.WorkflowManager._debounce_absence(frozenset({21, 22}), seen) == \
+        frozenset({21, 22})
+
+
 def test_the_trigger_reads_the_claimed_set_not_raw_perception():
     """Unit-level: with every tag claimed the poll must report NOT triggered, so the
     handler re-arms instead of wedging."""

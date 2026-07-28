@@ -395,8 +395,47 @@ install_agent_tree() {
         chmod 0644 "${INSTALL_DIR}/.system-files-version" 2>/dev/null || true
         log "Pinned IMAGE_TAG=${pinned_version} + stamped system-files version (release-pinned, not main HEAD)."
     else
-        warn "No readable repo VERSION — IMAGE_TAG will fall back to 'latest' (this Pi would track main HEAD)."
-        warn "Provision from a full source checkout so the repo-root VERSION file is present."
+        # No repo-root VERSION. Until 2026-07-28 this branch flatly warned that
+        # IMAGE_TAG "will fall back to 'latest'". That is FALSE on the path that
+        # now reaches it, and that path only became reachable in this same work
+        # package: on main a tarball-only provision aborted at the top of this
+        # function (`[ -n "$DOCKER_DIR" ] || die`), then — once the shipped
+        # compose twin fixed that — at .s6-keep. So this branch had never once
+        # judged a tarball install when its wording was written.
+        #
+        # The reachable path is a TARBALL provision: the release archive's top
+        # level is pi_agent/, so ${SCRIPT_DIR}/../.. is wherever it was unpacked,
+        # never a repo — hence no ${REPO_ROOT}/VERSION. But release.yml's
+        # pi-agent-tarball job BAKES both pi_agent/docker/versions.env
+        # (IMAGE_TAG=<release>) and pi_agent/VERSION into that archive, and the
+        # rsync at the top of this function has ALREADY placed both under
+        # ${INSTALL_DIR}/pi_agent/ — which is the FIRST path
+        # constants._read_versions_env probes. So the pin is on disk and correct
+        # before we get here, and telling the operator to re-provision from a
+        # source checkout would send them to fix a problem they do not have.
+        #
+        # Measure what actually landed rather than asserting a fallback. The
+        # three states mirror constants.py's real resolution order exactly:
+        #   versions.env present            -> pinned by the packaged file
+        #   only pi_agent/VERSION present   -> _default_image_tag() -> APP_VERSION
+        #   neither                         -> "latest" (the original warning)
+        local packaged_tag=""
+        local packaged_version=""
+        if [ -f "${INSTALL_DIR}/pi_agent/docker/versions.env" ]; then
+            packaged_tag="$(sed -n 's/^IMAGE_TAG=//p' "${INSTALL_DIR}/pi_agent/docker/versions.env" 2>/dev/null | tr -d '[:space:]')"
+        fi
+        if [ -f "${INSTALL_DIR}/pi_agent/VERSION" ]; then
+            packaged_version="$(tr -d '[:space:]' < "${INSTALL_DIR}/pi_agent/VERSION" 2>/dev/null || true)"
+        fi
+        if [ -n "$packaged_tag" ]; then
+            log "No repo VERSION (tarball provision) — IMAGE_TAG=${packaged_tag} already comes from the packaged pi_agent/docker/versions.env. Nothing to pin here."
+            log "Not written on this path: ${INSTALL_DIR}/VERSION (the packaged pi_agent/VERSION supersedes it) and .system-files-version (so a later drift report names no origin version). Neither affects which images this Pi pulls."
+        elif [ -n "$packaged_version" ]; then
+            warn "No repo VERSION and no packaged pi_agent/docker/versions.env — IMAGE_TAG degrades to this agent's own version (${packaged_version}), not 'latest'. Expected only for a hand-assembled tree."
+        else
+            warn "No repo VERSION, no packaged pi_agent/docker/versions.env and no packaged pi_agent/VERSION — IMAGE_TAG will fall back to 'latest' (this Pi would track main HEAD)."
+            warn "Provision from a full source checkout or from the release tarball (edubotics-pi-agent.tar.gz), either of which carries a pin."
+        fi
     fi
 }
 

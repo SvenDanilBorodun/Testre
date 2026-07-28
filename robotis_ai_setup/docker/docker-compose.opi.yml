@@ -198,9 +198,15 @@ services:
       # the derivation. 0 DISABLES the check — the one-variable rollback.
       # (EDUBOTICS_ROBOT_TYPE and the five EDUBOTICS_EDU6_* knobs are forwarded
       # ABOVE, next to LEADER_PORT, mirroring the student compose's order. That
-      # closes the CONTAINER-env half of edu6-on-Pi only: the Pi's arm scan does
-      # not yet recognise the CH343 bus and its `.env` generator still requires a
-      # leader, so an edu6 rig is not usable on a Pi yet.)
+      # closes the CONTAINER-env half of edu6-on-Pi only, and an edu6 rig is
+      # still not usable on a Pi: the arm scan does not recognise the CH343 bus
+      # (pi_agent/identify_arm.py probes ROBOTIS/OPENRB by-id markers and never
+      # passes --protocol=feetech), and „Umgebung starten" refuses unless BOTH
+      # arms are scanned, then regenerates with follower_only=False
+      # (pi_agent/agent.py). A leaderless `.env` IS generatable — the guard in
+      # config_generator is conditional on follower_only — but only the
+      # Roboter-Studio leader toggle asks for one, and that needs a leader the
+      # rig already scanned.)
       - EDUBOTICS_HOME_FLOOR_TOL_M=${EDUBOTICS_HOME_FLOOR_TOL_M:-}
       # camera_ingest_node.py (native_bridge only) reads these two. On the
       # usb_cam Pi path the entrypoint never starts that node, so both are

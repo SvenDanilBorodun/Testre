@@ -92,6 +92,9 @@ class TestFamilyScopedSerialFilter(unittest.TestCase):
                          win_dm._EDU6_BYID_MARKERS)
         self.assertEqual(identify_arm._ARM_MARKERS["omx"], ("ROBOTIS", "OPENRB"))
 
+    def setUp(self):
+        identify_arm._LAST_DIAG_CANDIDATES = None
+
     def test_unmatched_edu6_scan_logs_the_candidates_for_rig_gate_r1(self):
         """The escape hatch: the real CH343P by-id string can only be recorded
         from hardware, so an unmatched edu6 scan must dump what it DID see."""
@@ -101,6 +104,30 @@ class TestFamilyScopedSerialFilter(unittest.TestCase):
             self.assertEqual(identify_arm.find_serial_paths_for_arms("edu6"), [])
         self.assertTrue(warn.called)
         self.assertIn("Mystery_Board_0001", str(warn.call_args))
+
+    def test_the_candidate_dump_is_not_repeated_once_per_poll(self):
+        """This logger feeds the 800-line Protokoll ring a student reads, and the
+        scan polls ten times — one dump per call put eleven identical lines in
+        front of them for every failed edu6 scan."""
+        others = ["/dev/serial/by-id/usb-Mystery_Board_0001-if00"]
+        with patch.object(identify_arm, "list_serial_by_id", return_value=others), \
+                patch.object(identify_arm.logger, "warning") as warn:
+            for _ in range(identify_arm._SERIAL_POLL_ATTEMPTS):
+                identify_arm.find_serial_paths_for_arms("edu6")
+        self.assertEqual(warn.call_count, 1)
+
+    def test_a_changed_bus_is_reported_again(self):
+        """Keyed on the candidate SET, not a bool: a student who plugs something
+        in mid-poll must still produce the observation rig gate R1 needs."""
+        first = ["/dev/serial/by-id/usb-Mystery_Board_0001-if00"]
+        then = first + ["/dev/serial/by-id/usb-Another_Board_0002-if00"]
+        with patch.object(identify_arm.logger, "warning") as warn:
+            with patch.object(identify_arm, "list_serial_by_id", return_value=first):
+                identify_arm.find_serial_paths_for_arms("edu6")
+            with patch.object(identify_arm, "list_serial_by_id", return_value=then):
+                identify_arm.find_serial_paths_for_arms("edu6")
+        self.assertEqual(warn.call_count, 2)
+        self.assertIn("Another_Board_0002", str(warn.call_args))
 
     def test_no_candidate_dump_when_nothing_is_plugged_in(self):
         with patch.object(identify_arm, "list_serial_by_id", return_value=[]), \

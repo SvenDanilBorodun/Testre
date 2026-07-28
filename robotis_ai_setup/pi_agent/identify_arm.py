@@ -85,6 +85,10 @@ _ARM_MARKERS = {
     "edu6": _EDU6_BYID_MARKERS,
 }
 
+# Candidate list the edu6 diagnostic last reported, so a ten-iteration poll does
+# not print the same line ten times into the student-visible Protokoll ring.
+_LAST_DIAG_CANDIDATES: "list[str] | None" = None
+
 # Serial-path polling: native udev usually links a plugged arm within ~1 s, but
 # a replug right before a scan can lag. Poll a few times before giving up.
 _SERIAL_POLL_ATTEMPTS = 10
@@ -133,16 +137,25 @@ def find_serial_paths_for_arms(arm_family: str = "omx") -> list[str]:
     only way the real CH343P by-id string gets recorded from a classroom Pi —
     without it the failure is indistinguishable from "no arm connected".
     """
+    global _LAST_DIAG_CANDIDATES
     all_serial = list_serial_by_id()
     markers = _ARM_MARKERS.get(arm_family, _ARM_MARKERS["omx"])
     hits = [p for p in all_serial if any(m in p.upper() for m in markers)]
     if arm_family == "edu6" and not hits and all_serial:
-        logger.warning(
-            "edu6: no by-id marker matched; candidates were %r — record the "
-            "real CH343 by-id string at rig gate R1 and extend "
-            "_EDU6_BYID_MARKERS (keep it in lockstep with gui/app/device_manager.py).",
-            all_serial,
-        )
+        # ONCE per distinct candidate set. This logger feeds the agent's
+        # 800-line Protokoll ring the System tab streams, and the caller polls
+        # us ten times per scan — logging per call put eleven identical lines in
+        # front of a student for every failed edu6 scan. Keying on the set (not
+        # a bool) means a student who plugs something in mid-poll still gets the
+        # new list, which is exactly the observation rig gate R1 needs.
+        if all_serial != _LAST_DIAG_CANDIDATES:
+            _LAST_DIAG_CANDIDATES = list(all_serial)
+            logger.warning(
+                "edu6: no by-id marker matched; candidates were %r — record the "
+                "real CH343 by-id string at rig gate R1 and extend "
+                "_EDU6_BYID_MARKERS (keep it in lockstep with gui/app/device_manager.py).",
+                all_serial,
+            )
     return hits
 
 

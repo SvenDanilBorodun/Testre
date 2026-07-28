@@ -126,6 +126,14 @@ const URDF_ASSETS = {
   },
   edu6: {
     url: `${process.env.PUBLIC_URL || ''}/edu6-urdf/edu6.urdf`,
+    // NOTE this link is NOT the solver's TCP. `End_effector` sits 45.45 mm from
+    // link6 (edu6.urdf end_gear_joint) while edu6_ik's TCP is 104.95 mm from it
+    // (_LINK6_TO_TCP) -- a 59.5 mm axial gap. Harmless today: the shipped grasp
+    // family is strictly vertical (q4 == 0), so the offset is along the tool axis
+    // and the XY this frame reports equals the TCP's. It stops being harmless the
+    // moment any non-vertical pose exists, and a held mesh only looks right
+    // because attach() preserves the world transform rather than snapping to the
+    // link. Re-derive before adding a tilted grasp.
     eeLink: 'End_effector',
     baseLink: 'base_link',
     yaw: Math.PI,

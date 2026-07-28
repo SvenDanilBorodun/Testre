@@ -194,6 +194,7 @@ def test_omx_profiles_keep_default_seam_values():
         assert prof.torque_service == '/dynamixel_hardware_interface/set_dxl_torque'
         assert prof.grasp_held_margin_rad is None
         assert prof.sim_close_threshold_rad is None
+        assert prof.observe_pose_joints is None
     # camera_roles is the ONE seam that diverges between the two OMX profiles:
     # omx_full is a two-camera kit (gripper first); omx_follower's lone camera is
     # the SCENE camera (audit fix — 'gripper' first broke every follower-only RS

@@ -103,3 +103,18 @@ export function reachAnnulus(caps) {
     ? caps.reach_outer_m : REACH_OUTER_M;
   return { inner, outer };
 }
+
+// Fallback per-type placement cap when the GetObjectCatalog map is unavailable.
+//
+// The cap normally comes from catalogDims[type].max_instances (= len(tag_ids) in
+// the server's FIXED catalog). WorkshopPage installs `{}` on a failed or empty
+// catalog fetch, and the cap then evaluated to `null` -- meaning NO CAP -- so a
+// student could place a third cube that the server silently never detects
+// (SimPerception skips everything past the type's tag count). The guard that
+// exists to prevent an invisible object disappeared exactly when the information
+// it needed was missing.
+//
+// 2 is the shipped „Würfel" tag count (object_catalog.py::_FIXED_CATALOG,
+// tag_ids=[20, 21]). It is a FLOOR for the degraded path only -- a real
+// max_instances from the service always wins.
+export const DEFAULT_MAX_INSTANCES = 2;

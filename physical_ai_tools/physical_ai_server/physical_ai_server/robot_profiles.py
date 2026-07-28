@@ -134,6 +134,13 @@ class ArmProfile:
     reach_outer_m: Optional[float] = None
     gripper_mm_per_rad: Optional[float] = None   # jaw-opening display factor
     grasp_held_margin_rad: Optional[float] = None   # None → motion 0.15
+    # Observation pose the „Solange sichtbar" loop retreats to between passes.
+    # WorkflowContext has ALWAYS stamped this onto ctx via getattr(profile,
+    # 'observe_pose_joints', None) — but the field did not exist, so the stamp was
+    # a dead getattr and motion._observe_joints always fell through to HOME.
+    # Declared here so the seam is real; every profile deliberately leaves it None,
+    # which is byte-identical to the previous behaviour.
+    observe_pose_joints: Optional[tuple] = None
     # Sim-arm grasp classifier values (None → sim_arm OMX module constants):
     sim_close_threshold_rad: Optional[float] = None
     sim_held_block_offset_rad: Optional[float] = None

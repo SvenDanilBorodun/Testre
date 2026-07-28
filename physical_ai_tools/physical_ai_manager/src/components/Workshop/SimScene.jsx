@@ -58,6 +58,7 @@ import {
   SIM_OBJECT_FALLBACK_SIZE_M,
   SIM_OBJECT_COLOR_HEX,
   SIM_OBJECT_HELD_COLOR_HEX,
+  DEFAULT_MAX_INSTANCES,
 } from './simConstants';
 import { armGeometry } from '../../utils/armProfile';
 import useSimObjects from '../../hooks/useSimObjects';
@@ -342,6 +343,13 @@ function SimScene({
         }
       }
       const { x, y } = clampToAnnulus(base.x, base.y, annulusRef.current);
+      // The clamp SNAPS an out-of-ring tap onto the ring boundary instead of
+      // refusing it, which silently relocates the object the student aimed at --
+      // and the boundary is exactly where the server's approach-clearance floor
+      // refuses to grasp. Say it happened.
+      if (Math.abs(x - base.x) > 1e-6 || Math.abs(y - base.y) > 1e-6) {
+        toast('Objekt in den Greifbereich verschoben.', { icon: 'ℹ️' });
+      }
       const nextTag = objects.length
         ? Math.max(...objects.map((o) => (typeof o.tag_id === 'number' ? o.tag_id : -1))) + 1
         : 0;
@@ -724,6 +732,12 @@ function SimScene({
           {objects.map((o) => {
             const { px, py } = baseToSvg(o.x || 0, o.y || 0);
             const isSel = o.tag_id === selectedId;
+            // Skip a row the 3D twin cannot key (UrdfTwin.simObjectKey returns
+            // null without a tag_id, so it renders no mesh) -- otherwise the two
+            // panes disagree about what exists AND React sees duplicate
+            // `undefined` keys. Only reachable via a hand-edited/foreign
+            // sim_scene: the cloud validator checks size and type, never shape.
+            if (o.tag_id === undefined || o.tag_id === null) return null;
             const isHeld = o.tag_id === heldObjectId;
             // yaw direction in SVG: base dir (cosθ,sinθ) → svg (-sinθ,-cosθ).
             const yaw = o.yaw || 0;

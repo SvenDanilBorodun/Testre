@@ -2625,14 +2625,31 @@ class AgentApp:
             return
         self._system_files_stale = True
         self._system_files_version = stamped
+        # Says the same thing the System-tab banner says, because it is the line
+        # that banner points at („den Grund nennt das Protokoll"). Two claims it
+        # used to make are gone: „Aktualisierungen erneuern sonst nur den
+        # Agenten und die Images — nicht diese Dateien" became FALSE the moment
+        # the units, the udev rules and the compose joined the self-repaired
+        # set, and „sudo ./setup.sh aus dem EduBotics-Quellordner" is no longer
+        # the PRIMARY remedy — it needs a source checkout no classroom has,
+        # while the agent's own retry on the next boot needs nothing. It stays
+        # as the fallback for the case the retry cannot fix (a genuinely
+        # read-only /etc, a corrupt extraction), and it still says the students'
+        # data survives, because that is what stops anyone reaching for a
+        # re-flash.
+        #
+        # „der Grund steht in den Zeilen oberhalb" is a promise the code keeps:
+        # every path that appends to `unrepaired` runs through
+        # `_install_system_file`, whose only two False returns each log a German
+        # reason first (the validate refusal and the OSError branch).
         self._log(
-            f"[WARNUNG] Systemdateien weichen ab: die installierten Dateien "
-            f"({', '.join(unrepaired)}){origin} unterscheiden sich von denen der "
-            f"Agent-Version {APP_VERSION} und konnten nicht automatisch erneuert "
-            "werden. Aktualisierungen erneuern sonst nur den Agenten und die "
-            "Images — nicht diese Dateien. Bitte 'sudo ./setup.sh' aus dem "
-            "EduBotics-Quellordner erneut ausführen; die Datensätze der Schüler "
-            "bleiben dabei erhalten."
+            f"[WARNUNG] Systemdateien konnten nicht automatisch erneuert werden: "
+            f"{', '.join(unrepaired)}{origin}. Der Pi läuft mit den bisherigen, "
+            "funktionierenden Dateien weiter — der Grund steht in den Zeilen "
+            "oberhalb. Beim nächsten Neustart versucht der Pi es erneut. Bleibt "
+            "die Meldung bestehen, hilft 'sudo ./setup.sh' aus dem "
+            "EduBotics-Quellordner; die Datensätze der Schüler bleiben dabei "
+            "erhalten."
         )
 
     def boot(self) -> None:

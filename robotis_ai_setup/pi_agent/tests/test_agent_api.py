@@ -1210,7 +1210,16 @@ class TestSystemFilesVersionCheck(unittest.TestCase):
         self.assertIn("[WARNUNG]", text)
         self.assertIn("edubotics-pi.service", text)  # WHICH file drifted
         self.assertIn("2.13.0", text)  # where the on-disk files came from
-        self.assertIn("2.14.0", text)  # what the agent is
+        # The banner no longer names the AGENT version. That is deliberate: it
+        # is the line the System-tab banner points at („den Grund nennt das
+        # Protokoll"), so it has to answer „what went wrong and what now", not
+        # restate a version the Protokoll already carries — `main()` logs
+        # „EduBotics Pi-Agent starting (version=…)" through the same ring
+        # handler on every boot, and the repaired-leg lines still name it.
+        self.assertNotIn("2.14.0", text)
+        # …and it says the two things the banner promises it says.
+        self.assertIn("läuft mit den bisherigen, funktionierenden Dateien weiter", text)
+        self.assertIn("nächsten Neustart", text)  # the retry, i.e. the remedy
         self.assertTrue(self.app._system_files_stale)
         self.assertEqual(self.app._system_files_version, "2.13.0")
 
@@ -1229,11 +1238,16 @@ class TestSystemFilesVersionCheck(unittest.TestCase):
 
     def test_german_umlauts_are_literal(self):
         # german-strings-lint scans [WARNUNG] lines for ae/oe/ue transliteration.
+        # Every token below is drawn from the CURRENT wording, both directions:
+        # a transliteration list whose words are no longer in the message is a
+        # vacuous guard, and so is a positive assertion on a word that left.
         self._install_units(drift=True)
         text = self._check(stamp_contents="2.13.0\n", renew=False)
-        for bad in ("Aenderung", "ueber", "koennen", "ausfuehren", "Datensaetze"):
+        for bad in ("Aenderung", "ueber", "koennen", "laeuft", "naechsten",
+                    "Datensaetze", "Schueler"):
             self.assertNotIn(bad, text)
-        self.assertIn("ausführen", text)
+        for good in ("läuft", "nächsten", "Datensätze", "Schüler"):
+            self.assertIn(good, text)
 
     def test_drift_without_a_stamp_still_warns_but_names_no_version(self):
         # A pre-stamp Pi can be genuinely drifted. The evidence is the unit
@@ -1296,9 +1310,14 @@ class TestSystemFilesVersionCheck(unittest.TestCase):
                            renew=False)
         self.assertIn("[WARNUNG]", text)
         self.assertNotIn("Stand: Version", text)
-        # …and the banner still fires, with the agent version still named.
+        # …and the banner still fires, still naming the files. "Never emit the
+        # suffix" would satisfy the assertion above while deleting the finding;
+        # the file names are what stop that. (The agent version is deliberately
+        # no longer restated here — see
+        # test_drifted_units_warn_in_german_and_name_the_unit.)
         self.assertTrue(self.app._system_files_stale)
-        self.assertIn("der Agent-Version 2.13.0", text)
+        self.assertIn("edubotics-pi.service", text)
+        self.assertNotIn("2.13.0", text)  # the suffix really is gone
 
     def test_uninstalled_units_prove_nothing_and_stay_silent(self):
         # A dev box / relocated install / non-root reader cannot compare. Absent

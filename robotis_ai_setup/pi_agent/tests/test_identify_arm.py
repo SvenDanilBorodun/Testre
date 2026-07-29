@@ -566,16 +566,84 @@ class TestCrossFamilyPresenceNotice(unittest.TestCase):
                 self.assertEqual(identify_arm.find_arm_devices_by_usb_id("omx"),
                                  [LEADER], pid)
 
-    def test_a_raising_enumeration_degrades_instead_of_failing_the_scan(self):
-        """The scan has already decided its answer by then — this only decides
-        how to WORD the failure, so it must never turn a clean „kein Arm
-        gefunden" into a 500."""
-        with patch.object(identify_arm, "_poll_serial_paths", return_value=[]), \
-                patch.object(identify_arm, "find_serial_paths_for_arms",
-                             side_effect=RuntimeError("udev exploded")):
-            self.assertEqual(identify_arm.scan_and_identify_arms("img", arm_family="edu6"),
-                             (None, None))
+    def test_a_non_ascii_sysfs_byte_degrades_instead_of_failing_the_scan(self):
+        """The REAL escape this `except Exception` exists for, driven end to end.
+
+        `usb_ids_for_serial_path` opens `idVendor`/`idProduct` with
+        `encoding="ascii"` and catches only `OSError` — but a decode failure
+        raises `UnicodeDecodeError`, which is a `ValueError`, NOT an `OSError`.
+        So it escapes that helper, escapes `find_arm_devices_by_usb_id` (which
+        has no handler at all), and lands in
+        `_set_cross_family_presence_notice`, whose broad `except` is the ONLY
+        thing between a corrupt sysfs byte and a 500 on a scan that had already
+        correctly decided „kein Arm gefunden".
+
+        Built on a REAL temporary sysfs tree, like TestUsbIdsFromSysfs: the
+        previous version of this test patched `find_serial_paths_for_arms` —
+        which is not on this code path at all — AND patched `_poll_serial_paths`
+        over it, so it asserted nothing. Neutering the try/except left all 548
+        pi_agent tests green.
+        """
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, True)
+        dev = os.path.join(root, "dev")
+        os.makedirs(dev)
+        node = os.path.join(dev, "ttyACM0")
+        open(node, "w").close()
+        # An edu6-marker by-id name, so the OTHER-family lookup enumerates it
+        # while the selected `omx` family's markers do not match.
+        by_id = os.path.join(dev, "usb-1a86_USB_Single_Serial_5A68010132-if00")
+        os.symlink(node, by_id)
+        sysroot = os.path.join(root, "sys")
+        usbdev = os.path.join(sysroot, "usb1", "1-1")
+        iface = os.path.join(usbdev, "lvl0")
+        os.makedirs(iface)
+        # The corrupt byte. 0xFF is not valid ASCII and not valid UTF-8 either.
+        with open(os.path.join(usbdev, "idVendor"), "wb") as f:
+            f.write(b"\xff\xfe1a86\n")
+        with open(os.path.join(usbdev, "idProduct"), "wb") as f:
+            f.write(b"55d3\n")
+        ttydir = os.path.join(sysroot, "class", "tty", "ttyACM0")
+        os.makedirs(ttydir)
+        os.symlink(iface, os.path.join(ttydir, "device"))
+
+        with patch.object(identify_arm, "_SYS_TTY_DIR",
+                          os.path.join(sysroot, "class", "tty")), \
+                patch.object(identify_arm, "list_serial_by_id", return_value=[by_id]), \
+                patch.object(identify_arm, "start_scanner_container") as start:
+            # Sanity: the raise is REAL and reaches the guarded call unhandled.
+            # Without this the test could pass on a tree where the decode was
+            # quietly fixed upstream and the guard had become decorative.
+            with self.assertRaises(UnicodeDecodeError):
+                identify_arm.find_arm_devices_by_usb_id("edu6")
+            self.assertEqual(
+                identify_arm.scan_and_identify_arms("img", arm_family="omx"),
+                (None, None))
+        start.assert_not_called()
         self.assertEqual(identify_arm.LAST_SCAN_NOTICE, "")
+
+    def test_the_notice_guard_is_broad_enough_for_a_non_oserror(self):
+        """Belt for the breadth of the handler, independent of today's decode.
+
+        Narrowing it to `except OSError` would still pass every other test in
+        this class — every one of them supplies ids that decode. The class of
+        exception a diagnostic must survive is „anything", because it runs
+        AFTER the scan has decided and can only change the WORDING.
+        """
+        for exc in (ValueError("not an OSError"),
+                    RuntimeError("udev exploded"),
+                    KeyError("missing")):
+            with self.subTest(type(exc).__name__):
+                identify_arm.LAST_SCAN_NOTICE = "stale"
+                with patch.object(identify_arm, "_poll_serial_paths", return_value=[]), \
+                        patch.object(identify_arm, "find_arm_devices_by_usb_id",
+                                     side_effect=exc):
+                    self.assertEqual(
+                        identify_arm.scan_and_identify_arms("img", arm_family="edu6"),
+                        (None, None))
+                # `scan_and_identify_arms` clears the notice on entry, so the
+                # degraded path leaves the generic „kein Arm gefunden" wording.
+                self.assertEqual(identify_arm.LAST_SCAN_NOTICE, "")
 
 
 class TestUsbIdsFromSysfs(unittest.TestCase):

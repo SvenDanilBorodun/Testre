@@ -368,6 +368,28 @@ describe('SystemPage — an agent without the profile keys', () => {
     }
   });
 
+  it('survives a malformed robot_type SCALAR of every shape', () => {
+    // Sibling of the robot_profiles case above, and until now the only one of
+    // the pair that was not mutation-verified: removing the
+    // `typeof … === 'string'` guard left the whole suite green.
+    //
+    // The crash is specific. `selectedRobotType` is rendered as a React CHILD
+    // in the disabled placeholder <option> (`{selectedRobotType || '— … —'}`),
+    // so a truthy non-string throws „Objects are not valid as a React child"
+    // and white-screens the System tab — the Pi's ONLY repair surface, and the
+    // one page a student reaches when nothing else works.
+    for (const bad of [{}, { id: 'omx_full' }, ['omx_full'], 42, true]) {
+      const status = statusFixture({ robot_type: bad });
+      mockPi.agentStatus = status;
+      expect(() => render(<SystemPage />)).not.toThrow();
+      // The selector still renders (robot_profiles is fine) and reports „no
+      // type" rather than a stale or invented one.
+      expect(screen.getByLabelText('Robotertyp')).toHaveValue('');
+      expect(screen.getByText('— Robotertyp —')).toBeInTheDocument();
+      cleanup();
+    }
+  });
+
   it('treats a row with NO scan_requires_leader as needing a leader', () => {
     // Only an EXPLICIT false may hide the Leader tile — the same doctrine the
     // nav's capability gating uses. An agent that grows the list but omits the
@@ -702,5 +724,68 @@ describe('camera roles are only ever sent with an explicit role', () => {
     );
     await scanThenSave();
     expect(rolesBody().cameras).toEqual([]);
+  });
+
+  it('sends a lone „scene" camera — the only camera a follower-only kit has', async () => {
+    // The filter is an ALLOWLIST, and until this test it was fenced in one
+    // direction only: every case above supplies `gripper`, so narrowing it to
+    // `r === 'gripper'` left the whole 46-file suite green. On an edu6 /
+    // omx_follower kit `scene` is the ONLY role there is (a follower-only rig
+    // has no gripper camera), so that narrowing would POST `{"cameras": []}`,
+    // the agent would answer 200, the toast would say „Kameras zugeordnet."
+    // — and the rig would then start with no camera at all.
+    renderWith(
+      statusFixture({
+        robot_type: 'edu6_studio',
+        cameras: [{ path: '/dev/v4l/by-id/usb-CAM-A', role: 'scene' }],
+      })
+    );
+    await scanThenSave();
+    expect(rolesBody().cameras).toEqual([
+      { path: '/dev/v4l/by-id/usb-CAM-A', role: 'scene' },
+    ]);
+  });
+
+  it('drops a role the agent reported that is not one of the two', async () => {
+    // The other direction, and it is reachable rather than theoretical:
+    // `agent.py::rehydrate_hardware` reads `CAMERA_NAME_i` VERBATIM out of the
+    // .env with no validation, so one hand-edited line puts an arbitrary role
+    // into /status.cameras, which seeds this map. `handle_cameras_roles` then
+    // answers a German 400 („Ungültige Rolle für … (nur Greifer/Szene)") — the
+    // exact 400 this filter's own comment, and the handler's docstring, say it
+    // exists to keep off an ordinary save. Relaxing the allowlist to a
+    // truthiness test would surface it.
+    renderWith(
+      statusFixture({
+        robot_type: 'omx_full',
+        cameras: [
+          { path: '/dev/v4l/by-id/usb-CAM-A', role: 'wrist' },
+          { path: '/dev/v4l/by-id/usb-CAM-B', role: 'scene' },
+        ],
+      })
+    );
+    await scanThenSave();
+    expect(rolesBody().cameras).toEqual([
+      { path: '/dev/v4l/by-id/usb-CAM-B', role: 'scene' },
+    ]);
+  });
+
+  it('keeps both roles when a two-camera rig assigns both', async () => {
+    // Belt against the opposite narrowing (`r === 'scene'`), and against a
+    // filter that silently keeps only the first match.
+    renderWith(
+      statusFixture({
+        robot_type: 'omx_full',
+        cameras: [
+          { path: '/dev/v4l/by-id/usb-CAM-A', role: 'gripper' },
+          { path: '/dev/v4l/by-id/usb-CAM-B', role: 'scene' },
+        ],
+      })
+    );
+    await scanThenSave();
+    expect(rolesBody().cameras).toEqual([
+      { path: '/dev/v4l/by-id/usb-CAM-A', role: 'gripper' },
+      { path: '/dev/v4l/by-id/usb-CAM-B', role: 'scene' },
+    ]);
   });
 });

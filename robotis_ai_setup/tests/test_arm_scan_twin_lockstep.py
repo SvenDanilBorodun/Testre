@@ -125,27 +125,61 @@ class TestFastRehydrateArmsTwinSignature(unittest.TestCase):
             "no fast_rehydrate_arms call sites found — the caller guard below "
             "would be vacuously green")
 
+    @staticmethod
+    def _is_test_module(path: Path) -> bool:
+        return path.name.startswith("test_") or "tests" in path.parts
+
     def test_no_caller_passes_a_third_argument_positionally(self):
         """The trap this file exists for only fires through a positional call.
 
         Both defaults are keyword-friendly and every call site uses keywords
         today; this keeps it that way, so a future signature drift stays a
         review question rather than a silent behaviour swap.
+
+        `f(*something)` is ONE `ast.Starred` in `node.args` but an unknown
+        number at runtime, so a plain length test cannot judge it. The previous
+        version waived it whenever it was the SOLE argument — which is a total
+        bypass, not a narrow one: rewriting the real Pi caller as
+        `fast_rehydrate_arms(*(a, b, arm_family))` left all 787 tests in this
+        suite green while the third positional bound to `require_leader`, the
+        exact swap this file exists to prevent. Two rules replace it, and
+        between them they leave no unjudged form:
+
+        * an INLINE tuple/list literal is countable, so count it;
+        * a `*name` whose contents AST cannot see is refused in production and
+          permitted only in a test module, where the in-tree precedent lives
+          (`test_device_manager_rehydrate.py` loops over 2-tuples of saved
+          paths — a legitimate parametrisation, and its own assertions pin the
+          arity).
         """
         sites, _ = self._call_sites()
         for path, node in sites:
             with self.subTest(f"{path.name}:{node.lineno}"):
-                # `f(*args)` is ONE ast.Starred in node.args but an unknown
-                # number at runtime, so a length test cannot judge it — the
-                # unpacked tuple could carry a third element. Refuse it
-                # outright unless it is the ONLY argument form used, which no
-                # production caller does.
                 starred = [a for a in node.args if isinstance(a, ast.Starred)]
                 if starred:
                     self.assertEqual(
                         len(node.args), 1,
                         "a *args unpack mixed with positionals hides how many "
                         "arguments actually arrive — spell them out")
+                    inner = starred[0].value
+                    if isinstance(inner, (ast.Tuple, ast.List)):
+                        self.assertFalse(
+                            any(isinstance(e, ast.Starred) for e in inner.elts),
+                            "a nested unpack inside the tuple is unjudgeable — "
+                            "spell the arguments out")
+                        self.assertLessEqual(
+                            len(inner.elts), 2,
+                            "an unpacked literal carrying a third element is a "
+                            "positional third argument wearing a disguise — "
+                            "pass require_leader / arm_family by KEYWORD")
+                        continue
+                    self.assertTrue(
+                        self._is_test_module(path),
+                        "a *unpack whose length AST cannot see is refused in "
+                        "production code: it could carry a third element and "
+                        "nothing here would know. Spell the arguments out "
+                        "(the one sanctioned form is a test looping over "
+                        "2-tuples).")
                     continue
                 self.assertLessEqual(
                     len(node.args), 2,
@@ -153,6 +187,24 @@ class TestFastRehydrateArmsTwinSignature(unittest.TestCase):
                     "two platform twins must agree on their order, and "
                     "a positional third arg is how they stopped doing "
                     "so once already")
+
+    def test_the_starred_rule_is_exercised_by_at_least_one_real_call_site(self):
+        """The `*unpack` branch above is the one that went vacuous. If no call
+        site in the tree uses that form any more, the branch is dead code that
+        would quietly stop being tested — say so rather than pass silently."""
+        sites, _ = self._call_sites()
+        starred_sites = [(p, n) for p, n in sites
+                         if any(isinstance(a, ast.Starred) for a in n.args)]
+        self.assertGreaterEqual(
+            len(starred_sites), 1,
+            "no call site uses *unpack any more — either delete the branch in "
+            "test_no_caller_passes_a_third_argument_positionally or restore a "
+            "case that exercises it")
+        for path, node in starred_sites:
+            self.assertTrue(
+                self._is_test_module(path),
+                f"{path}:{node.lineno} unpacks into the twin from production "
+                "code")
 
 
 if __name__ == "__main__":

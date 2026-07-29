@@ -294,8 +294,21 @@ ARM_USB_IDS = {
 # label). `scan_requires_leader` drives the follower-only scan surface;
 # `follower_only` is the INITIAL EDUBOTICS_FOLLOWER_ONLY the .env generator
 # DERIVES from the type. `arm_family` scopes the /dev/serial/by-id filter and the
-# in-container prober protocol (`identify_arm`); `camera_roles` gives a lone
-# camera its default role (first entry).
+# in-container prober protocol (`identify_arm`).
+#
+# `camera_roles` has NO runtime consumer on the Pi — it is INERT here, carried
+# only so the three-way lockstep has something to compare (the GUI twin's row,
+# the server's ArmProfile field, and this one, all fenced by
+# tests/test_robot_profile_lockstep.py::test_camera_roles_agree_per_id). Do not
+# delete it to "clean up": dropping the key fails that fence, and the value is
+# the record of what a re-added default would have to be. It once fed a
+# lone-camera auto-assign like the GUI's (`gui_app._on_cameras_changed` still
+# reads `camera_roles[0]`); that default was deleted on 2026-07-28 because the
+# Pi's only client, `SystemPage.js::handleSaveRoles`, filters its payload to
+# `r === 'gripper' || r === 'scene'`, so a role-less camera never reaches the
+# agent and `handle_cameras_roles` answers a German 400 instead — see that
+# handler's docstring for the measured differential and for why `scene`, not
+# `gripper`, is the right value if anyone re-adds one.
 #
 # Values are COPIED VERBATIM from gui/app/constants.py — never re-derived.
 ROBOT_PROFILES = {

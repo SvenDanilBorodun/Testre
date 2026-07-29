@@ -585,9 +585,15 @@ export default function SystemPage() {
                 value={selectedRobotType}
                 disabled={robotTierUp || cloudOnly || savingRobotType}
                 onChange={(e) => handleRobotTypeChange(e.target.value)}
+                // Every disabled reason gets its own sentence. The help text
+                // below explains the tier case only, so in Cloud-Modus the
+                // control was grey while the one explanation on screen named a
+                // condition that was already satisfied — a contradiction.
                 title={
                   robotTierUp
                     ? 'Zum Wechseln zuerst die Roboter-Umgebung stoppen.'
+                    : cloudOnly
+                    ? 'Im Cloud-Modus wird kein Roboter verwendet — der Robotertyp spielt keine Rolle.'
                     : undefined
                 }
                 className="mt-1 h-10 w-full max-w-md rounded-[var(--radius-sm)] border border-[var(--line)] bg-white px-2 text-sm disabled:opacity-60"
@@ -613,7 +619,7 @@ export default function SystemPage() {
                 Wähle, welcher Roboter an diesem Pi angeschlossen ist.{' '}
                 {scanRequiresLeader
                   ? 'Dieser Typ braucht beide Arme — Leader und Follower.'
-                  : 'Dieser Typ braucht nur einen Arm — es wird kein Leader-Arm angeschlossen.'}{' '}
+                  : 'Dieser Typ braucht nur einen Arm — ein Leader-Arm wird nicht benötigt.'}{' '}
                 Der Typ lässt sich nur ändern, solange die Roboter-Umgebung
                 gestoppt ist.
               </p>

@@ -485,8 +485,15 @@ def scan_and_identify_arms(
     # no Feetech ping and sets the 12-V sentence while the real arm identifies
     # fine two ports later — and the dongle sorts first, so that is the common
     # order. The GUI sidesteps this by returning from its success branch before
-    # it ever reads the notice; here the scanner clears it at the source, which
-    # is the only place that knows whether this family even has a leader.
+    # it ever reads the notice; here the scanner clears it at the source, the
+    # only place that knows whether this FAMILY has a leader.
+    #
+    # That is a family test, and it is deliberately NOT the whole story:
+    # `omx_follower` is a leader-less PROFILE inside the two-arm `omx` family,
+    # so a successful one-arm scan there is NOT cleared here and the agent
+    # clears it a second time against the profile
+    # (`agent.py::handle_scan_arms`). The two are meant to disagree — this one
+    # cannot see the profile and must not try to.
     if follower is not None and (leader is not None
                                  or not _FAMILY_HAS_LEADER.get(arm_family, True)):
         LAST_SCAN_NOTICE = ""

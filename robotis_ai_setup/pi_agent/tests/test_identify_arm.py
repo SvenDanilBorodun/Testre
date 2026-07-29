@@ -741,9 +741,26 @@ class TestFastRehydrateLeaderLess(unittest.TestCase):
         self.assertEqual(find.call_count, 1)
 
     def test_a_leader_equal_to_the_follower_is_still_a_corrupt_mapping(self):
-        self.assertEqual(
-            identify_arm.fast_rehydrate_arms(FOLLOWER, FOLLOWER, require_leader=False),
-            (None, None))
+        # The device MUST be patched present. Without it the real discovery
+        # returns [] on any dev host and the call bails at the later
+        # `expected.issubset(...)` check instead — so the test passed with the
+        # guard deleted (MEASURED), while on a REAL Pi a hand-edited
+        # LEADER_PORT == FOLLOWER_PORT would have been TRUSTED as a binding.
+        with patch.object(identify_arm, "find_serial_paths_for_arms",
+                          return_value=[FOLLOWER]) as find:
+            self.assertEqual(
+                identify_arm.fast_rehydrate_arms(FOLLOWER, FOLLOWER,
+                                                 require_leader=False),
+                (None, None))
+        # Bails at the guard, before any device is polled.
+        find.assert_not_called()
+
+    def test_a_leader_equal_to_the_follower_is_corrupt_on_a_both_arms_rig_too(self):
+        with patch.object(identify_arm, "find_serial_paths_for_arms",
+                          return_value=[FOLLOWER]) as find:
+            self.assertEqual(
+                identify_arm.fast_rehydrate_arms(FOLLOWER, FOLLOWER), (None, None))
+        find.assert_not_called()
 
     def test_require_leader_defaults_true_so_omx_is_unchanged(self):
         # The default must keep the both-arms contract: an empty saved leader

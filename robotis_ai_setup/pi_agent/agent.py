@@ -822,8 +822,10 @@ class AgentApp:
         ``--protocol=feetech`` and its single arm is slotted as the FOLLOWER.
         A failed scan can carry a one-sentence German ``notice`` naming the most
         likely setup mistake (wrong family plugged in, partial servo chain, 12-V
-        supply off); when present it REPLACES the generic message, exactly as
-        the GUI replaces its status line.
+        supply off). In the 404 branch it REPLACES the generic message, exactly
+        as the GUI replaces its status line; the two 409 branches keep their own
+        specific wording and return the notice as a SEPARATE key (which no
+        client renders today — it is the Protokoll that carries it there).
 
         A LEADER-LESS PROFILE SUCCEEDS WITH ONE ARM. ``scan_requires_leader``
         (the profile registry, not the arm family — ``omx_follower`` shares the

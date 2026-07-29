@@ -181,6 +181,28 @@ describe('SystemPage — Robotertyp selector', () => {
     expect(screen.getByLabelText('Robotertyp')).toBeDisabled();
   });
 
+  it('gives every disabled reason its OWN sentence', async () => {
+    // The help paragraph explains the tier case only. Without a second title
+    // the control is grey in Cloud-Modus while the one explanation on screen
+    // names a condition that is already satisfied — a contradiction a teacher
+    // reads as a bug.
+    renderWith(statusFixture());
+    await userEvent.click(screen.getByRole('checkbox'));
+    expect(screen.getByLabelText('Robotertyp')).toHaveAttribute(
+      'title',
+      'Im Cloud-Modus wird kein Roboter verwendet — der Robotertyp spielt keine Rolle.'
+    );
+    cleanup();
+    // The tier reason wins when both hold — it is the one the student can act on.
+    mockPi.agentStatus = statusFixture({ robot_tier_up: true });
+    render(<SystemPage />);
+    await userEvent.click(screen.getByRole('checkbox'));
+    expect(screen.getByLabelText('Robotertyp')).toHaveAttribute(
+      'title',
+      'Zum Wechseln zuerst die Roboter-Umgebung stoppen.'
+    );
+  });
+
   it('is frozen while its own POST is in flight', async () => {
     let release;
     robotTypeResponse = () =>
@@ -235,6 +257,30 @@ describe('SystemPage — Robotertyp selector', () => {
       expect(mockToast.error).toHaveBeenCalledWith('Der Agent ist nicht erreichbar.')
     );
     await waitFor(() => expect(screen.getByLabelText('Robotertyp')).toHaveValue('omx_full'));
+  });
+
+  it('clears the optimistic value only AFTER the refresh, never before it', async () => {
+    // The ORDER inside the finally block is the whole point and nothing else
+    // fenced it: clearing first makes both setStates flush before the await, so
+    // the <select> visibly snaps back to the old id for one /status round-trip
+    // on a change that SUCCEEDED. Held open by gating the refresh on a promise
+    // this test resolves, so the window is observable rather than a race.
+    let releaseRefresh;
+    const refreshHeld = new Promise((r) => { releaseRefresh = r; });
+    refreshAgentStatus
+      .mockImplementationOnce(() => Promise.resolve(null))          // mount
+      .mockImplementationOnce(() => refreshHeld.then(() => {        // the finally
+        mockPi.agentStatus = statusFixture({ robot_type: 'edu6_studio' });
+        return mockPi.agentStatus;
+      }));
+    renderWith(statusFixture());
+    await userEvent.selectOptions(screen.getByLabelText('Robotertyp'), 'edu6_studio');
+    await waitFor(() => expect(refreshAgentStatus.mock.calls.length).toBeGreaterThan(1));
+    // The refresh has NOT returned yet — the agent still says omx_full, so only
+    // the optimistic value can be holding the display here.
+    expect(screen.getByLabelText('Robotertyp')).toHaveValue('edu6_studio');
+    releaseRefresh();
+    await waitFor(() => expect(screen.getByLabelText('Robotertyp')).toBeEnabled());
   });
 
   it('still clears the optimistic value when the status refresh itself throws', async () => {

@@ -712,6 +712,7 @@ class AgentApp:
         follower_only_raw = config_generator.read_env_var("EDUBOTICS_FOLLOWER_ONLY", self.env_file)
         hw = self._hardware
         cameras = [{"path": c.path, "role": c.role, "name": c.name} for c in hw.cameras]
+        robot_type = self._current_robot_type()
         return 200, {
             "lan_ip": detect_lan_ip(),
             "hostname": socket.gethostname(),
@@ -739,6 +740,22 @@ class AgentApp:
                 "follower": hw.follower.serial_path if hw.follower else None,
                 "both": hw.leader is not None and hw.follower is not None,
             },
+            # Robot profile surface (additive — an old System tab ignores these).
+            # `robot_type` is the VALIDATED on-disk id; `robot_profiles` is the
+            # selectable list (the wizard renders `display_de`, and hides the
+            # Leader tile when `scan_requires_leader` is false);
+            # `hardware_ready` is the PROFILE-AWARE gate — `arms_identified.both`
+            # stays as it is, because it answers a different question (are two
+            # arms present) and a follower-only rig can be fully ready with
+            # `both` false.
+            "robot_type": robot_type,
+            "robot_profiles": [
+                {"id": pid,
+                 "display_de": row["display_de"],
+                 "scan_requires_leader": row["scan_requires_leader"]}
+                for pid, row in ROBOT_PROFILES.items()
+            ],
+            "hardware_ready": self._hardware_ready(robot_type),
             "cameras": cameras,
             "follower_only": str(follower_only_raw).strip() == "1",
             "hf_token_saved": bool(config_generator.read_env_var("HF_TOKEN", self.env_file)),
@@ -1008,6 +1025,70 @@ class AgentApp:
         if str(token).strip():
             return 200, {"ok": True, "saved": True, "message": "Token gespeichert."}
         return 200, {"ok": True, "saved": False, "message": "Token entfernt."}
+
+    # ── POST: /robot-type ────────────────────────────────────────────────────
+
+    def handle_set_robot_type(self, body: dict) -> "tuple[int, dict]":
+        """Select the rig's ArmProfile. Body: ``{"robot_type": "<id>"}``.
+
+        The robot type is a HARDSET decision — the arm container branches on it
+        at start (``entrypoint_omx.sh``) and the server resolves its ArmProfile
+        from it once at boot — so it is REFUSED while the robot tier is running,
+        mirroring the GUI graying its Robotertyp combobox whenever the
+        environment runs (``gui_app.py::_update_robot_type_combo_state``). It
+        must be settable BEFORE any hardware exists, because the scan reads the
+        arm FAMILY back off this key: the id is therefore persisted
+        unconditionally (in place, unquoted), and the full .env is regenerated on
+        top only once the scanned hardware satisfies the new profile.
+
+        An unknown id is a 400 rather than a silent fallback: the wizard offers
+        only registry ids, so an unknown one is a client bug worth surfacing.
+        (The read path keeps the forgiving fallback — see ``_current_robot_type``
+        — which is where the documented one-variable rollback lives.)
+        """
+        if self._update_in_flight():
+            return self._busy_updating()
+        requested = body.get("robot_type")
+        if not isinstance(requested, str) or not requested.strip():
+            return 400, {"ok": False, "message": "Kein Robotertyp angegeben."}
+        requested = requested.strip()
+        if requested not in ROBOT_PROFILES:
+            return 400, {"ok": False,
+                         "message": f'Unbekannter Robotertyp „{requested}".'}
+        if not self._acquire_lifecycle():
+            return self._busy_lifecycle()
+        try:
+            try:
+                container = docker_manager.get_container_status()
+            except Exception:  # noqa: BLE001 — a status probe must not block
+                container = {}
+            if any(container.get(n) == "running"
+                   for n in ("open_manipulator", "physical_ai_server")):
+                return 409, {"ok": False,
+                             "message": "Der Robotertyp kann nur geändert werden, "
+                                        "wenn die Roboter-Umgebung gestoppt ist."}
+            try:
+                # Unquoted: entrypoint_omx.sh compares this value literally.
+                config_generator.upsert_env_var(
+                    "EDUBOTICS_ROBOT_TYPE", requested, self.env_file, quote=False)
+                # Best effort on top: once the scanned hardware fits the new
+                # profile, rewrite the whole managed .env so EDUBOTICS_
+                # FOLLOWER_ONLY (and LEADER_PORT) follow the derive immediately
+                # instead of at the next „Umgebung starten". A rig that is not
+                # ready yet keeps only the id — which is all the scan needs.
+                self._persist_env_if_ready()
+            except Exception as e:  # noqa: BLE001 — surfaced in German
+                return 500, {"ok": False,
+                             "message": f"Robotertyp konnte nicht gespeichert werden: {e}"}
+        finally:
+            self._lifecycle_lock.release()
+        row = ROBOT_PROFILES[requested]
+        self._log(f"Robotertyp gewählt: {row['display_de']}")
+        return 200, {"ok": True, "robot_type": requested,
+                     "display_de": row["display_de"],
+                     "scan_requires_leader": row["scan_requires_leader"],
+                     "hardware_ready": self._hardware_ready(requested),
+                     "message": f"Robotertyp gesetzt: {row['display_de']}."}
 
     # ── POST: /environment/start + /environment/stop ─────────────────────────
 
@@ -2020,6 +2101,8 @@ class AgentApp:
                     self._send_json(*app.handle_phone_toggle(body))
                 elif path == "/hf-token":
                     self._send_json(*app.handle_hf_token(body))
+                elif path == "/robot-type":
+                    self._send_json(*app.handle_set_robot_type(body))
                 elif path == "/environment/start":
                     self._send_json(*app.handle_environment_start(body))
                 elif path == "/environment/stop":

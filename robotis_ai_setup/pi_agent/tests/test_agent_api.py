@@ -344,6 +344,7 @@ class TestLifecycleLockIsBounded(_ServerBase):
             ("/scan-arms", {}),
             ("/cameras/roles", {"cameras": [{"path": "/dev/video0", "role": "scene"}]}),
             ("/hf-token", {"token": "hf_x"}),
+            ("/robot-type", {"robot_type": "omx_full"}),
             ("/factory-reset", {"confirm": True, "confirm_again": True}),
         ):
             with self.subTest(path=path):
@@ -3171,6 +3172,314 @@ class TestTlsGenuine(unittest.TestCase):
             if listener is not None:
                 listener.close()
             shutil.rmtree(d, ignore_errors=True)
+
+
+# ── robot-profile selection (WP-3) ───────────────────────────────────────────
+
+
+class _RobotTypeBase(_ServerBase):
+    """A server-backed AgentApp with a sandboxed .env and a stopped robot tier."""
+
+    def setUp(self):
+        super().setUp()
+        self._prev_domain = os.environ.get("EDUBOTICS_ROS_DOMAIN")
+        os.environ["EDUBOTICS_ROS_DOMAIN"] = "42"
+        self._d = tempfile.mkdtemp()
+        self.env = os.path.join(self._d, ".env")
+        self.app.env_file = self.env
+        # Nothing is running unless a test says so.
+        self._status = {}
+        p = patch.object(agent.docker_manager, "get_container_status",
+                         side_effect=lambda *a, **k: dict(self._status))
+        p.start()
+        self.addCleanup(p.stop)
+
+    def tearDown(self):
+        if self._prev_domain is None:
+            os.environ.pop("EDUBOTICS_ROS_DOMAIN", None)
+        else:
+            os.environ["EDUBOTICS_ROS_DOMAIN"] = self._prev_domain
+        shutil.rmtree(self._d, ignore_errors=True)
+        super().tearDown()
+
+    def _tier_running(self):
+        self._status = {"open_manipulator": "running",
+                        "physical_ai_server": "running",
+                        "physical_ai_manager": "running"}
+
+    def _seed_arms(self, leader=True):
+        cg = agent.config_generator
+        self.app._hardware = cg.HardwareConfig(
+            leader=(cg.ArmDevice(serial_path="/dev/serial/by-id/L", role="leader")
+                    if leader else None),
+            follower=cg.ArmDevice(serial_path="/dev/serial/by-id/F", role="follower"),
+            cameras=[cg.CameraDevice(path="/dev/video0", role="scene")],
+        )
+
+
+class TestRobotTypeEndpoint(_RobotTypeBase):
+    """POST /robot-type — the Pi's counterpart of the GUI Modus combobox. The Pi
+    had NO writer at all: the only way to change the robot type was to SSH in and
+    hand-edit the .env."""
+
+    def test_origin_gate_rejects_a_cross_site_post_before_any_side_effect(self):
+        code, payload = self._post("/robot-type", {"robot_type": "edu6_studio"},
+                                   origin="http://evil.com")
+        self.assertEqual(code, 403)
+        self.assertIn("Origin", payload["message"])
+        # Nothing was written: a drive-by must not be able to re-type the rig.
+        self.assertIsNone(agent.config_generator.read_env_var(
+            "EDUBOTICS_ROBOT_TYPE", self.env))
+
+    def test_a_valid_id_is_persisted_and_read_back(self):
+        code, payload = self._post("/robot-type", {"robot_type": "edu6_studio"},
+                                   origin=None)
+        self.assertEqual(code, 200, payload)
+        self.assertEqual(payload["robot_type"], "edu6_studio")
+        self.assertEqual(self.app._current_robot_type(), "edu6_studio")
+
+    def test_the_id_is_written_UNQUOTED(self):
+        """entrypoint_omx.sh compares this value literally
+        (`[ "$EDUBOTICS_ROBOT_TYPE" = "edu6_studio" ]`), so a surviving pair of
+        quotes would silently take the OMX path on an edu6 rig — the split brain
+        WP-1 closed. The managed emitters write it unquoted; this writer must
+        match them byte for byte."""
+        self._post("/robot-type", {"robot_type": "edu6_studio"}, origin=None)
+        raw = open(self.env, encoding="utf-8").read()
+        self.assertIn("EDUBOTICS_ROBOT_TYPE=edu6_studio", raw)
+        self.assertNotIn('EDUBOTICS_ROBOT_TYPE="', raw)
+
+    def test_it_is_settable_before_any_hardware_exists(self):
+        """The scan reads the arm FAMILY back off this key, so the type must be
+        persistable on a rig with nothing scanned yet — otherwise selecting
+        edu6 could never lead to an edu6 scan."""
+        self.assertIsNone(self.app._hardware.follower)
+        code, _ = self._post("/robot-type", {"robot_type": "edu6_studio"},
+                             origin=None)
+        self.assertEqual(code, 200)
+        self.assertEqual(
+            agent.arm_family_for_robot_type(self.app._current_robot_type()),
+            "edu6")
+
+    def test_a_ready_rig_gets_the_derived_follower_only_immediately(self):
+        self._seed_arms(leader=False)
+        code, _ = self._post("/robot-type", {"robot_type": "edu6_studio"},
+                             origin=None)
+        self.assertEqual(code, 200)
+        raw = open(self.env, encoding="utf-8").read()
+        self.assertIn("EDUBOTICS_FOLLOWER_ONLY=1", raw)
+        self.assertNotIn("LEADER_PORT=", raw)
+
+    def test_switching_back_to_omx_full_restores_the_both_arms_env(self):
+        self._seed_arms(leader=True)
+        self._post("/robot-type", {"robot_type": "omx_follower"}, origin=None)
+        self.assertIn("EDUBOTICS_FOLLOWER_ONLY=1",
+                      open(self.env, encoding="utf-8").read())
+        self._post("/robot-type", {"robot_type": "omx_full"}, origin=None)
+        raw = open(self.env, encoding="utf-8").read()
+        self.assertIn("EDUBOTICS_FOLLOWER_ONLY=0", raw)
+        self.assertIn("LEADER_PORT=", raw)
+
+    def test_an_unknown_id_is_a_german_400_and_changes_nothing(self):
+        self._post("/robot-type", {"robot_type": "omx_full"}, origin=None)
+        code, payload = self._post("/robot-type", {"robot_type": "hovercraft"},
+                                   origin=None)
+        self.assertEqual(code, 400)
+        self.assertIn("Unbekannter Robotertyp", payload["message"])
+        self.assertEqual(self.app._current_robot_type(), "omx_full")
+
+    def test_a_missing_or_blank_id_is_a_german_400(self):
+        for body in ({}, {"robot_type": ""}, {"robot_type": "   "},
+                     {"robot_type": 7}):
+            with self.subTest(body=body):
+                code, payload = self._post("/robot-type", body, origin=None)
+                self.assertEqual(code, 400, payload)
+                self.assertIn("Robotertyp", payload["message"])
+
+    def test_it_is_REFUSED_while_the_robot_tier_is_up(self):
+        """The type is HARDSET — the arm container branches on it at start and
+        the server resolves its ArmProfile once at boot, so changing it under a
+        live stack would leave the .env and the running containers disagreeing.
+        The GUI grays its combobox for the same reason."""
+        self._post("/robot-type", {"robot_type": "omx_full"}, origin=None)
+        self._tier_running()
+        code, payload = self._post("/robot-type", {"robot_type": "edu6_studio"},
+                                   origin=None)
+        self.assertEqual(code, 409)
+        self.assertIn("gestoppt", payload["message"])
+        self.assertEqual(self.app._current_robot_type(), "omx_full")
+
+    def test_a_manager_only_pi_can_still_choose(self):
+        # Only the ROBOT tier blocks; the always-on manager must not.
+        self._status = {"physical_ai_manager": "running"}
+        code, _ = self._post("/robot-type", {"robot_type": "edu6_studio"},
+                             origin=None)
+        self.assertEqual(code, 200)
+
+    def test_it_answers_503_instead_of_blocking_on_the_lifecycle_lock(self):
+        p = patch.object(agent, "_LIFECYCLE_LOCK_WAIT_S", 0.05)
+        p.start()
+        self.addCleanup(p.stop)
+        self.assertTrue(self.app._lifecycle_lock.acquire(timeout=1))
+        self.addCleanup(self.app._lifecycle_lock.release)
+        started = time.monotonic()
+        code, payload = self._post("/robot-type", {"robot_type": "edu6_studio"},
+                                   origin=None)
+        self.assertEqual(code, 503, payload)
+        self.assertLess(time.monotonic() - started, 4.0)
+        self.assertIsNone(agent.config_generator.read_env_var(
+            "EDUBOTICS_ROBOT_TYPE", self.env))
+
+    def test_the_lock_is_released_again_on_every_path(self):
+        for body in ({"robot_type": "edu6_studio"},   # success
+                     {"robot_type": "hovercraft"}):   # 400 before the acquire
+            self._post("/robot-type", body, origin=None)
+        self._tier_running()
+        self._post("/robot-type", {"robot_type": "omx_full"}, origin=None)  # 409
+        self._status = {}
+        with patch.object(agent.config_generator, "upsert_env_var",
+                          side_effect=RuntimeError("disk full")):
+            code, _ = self._post("/robot-type", {"robot_type": "omx_full"},
+                                 origin=None)
+            self.assertEqual(code, 500)
+        self.assertTrue(self.app._lifecycle_lock.acquire(timeout=1))
+        self.app._lifecycle_lock.release()
+
+
+class TestStatusCarriesTheProfileSurface(_RobotTypeBase):
+    def test_status_reports_the_selected_type_and_the_selectable_list(self):
+        self._post("/robot-type", {"robot_type": "edu6_studio"}, origin=None)
+        code, payload = self._get("/status")
+        self.assertEqual(code, 200)
+        self.assertEqual(payload["robot_type"], "edu6_studio")
+        rows = {r["id"]: r for r in payload["robot_profiles"]}
+        self.assertEqual(set(rows), set(agent.ROBOT_PROFILES))
+        for pid, row in rows.items():
+            self.assertTrue(row["display_de"].strip(), pid)
+            self.assertEqual(row["scan_requires_leader"],
+                             agent.ROBOT_PROFILES[pid]["scan_requires_leader"])
+
+    def test_hardware_ready_is_profile_aware(self):
+        # A lone follower: not ready for omx_full, ready for a follower-only kit.
+        self._seed_arms(leader=False)
+        self._post("/robot-type", {"robot_type": "omx_full"}, origin=None)
+        self.assertFalse(self._get("/status")[1]["hardware_ready"])
+        self._post("/robot-type", {"robot_type": "edu6_studio"}, origin=None)
+        self.assertTrue(self._get("/status")[1]["hardware_ready"])
+
+    def test_both_arms_still_answers_its_own_question(self):
+        # `arms_identified.both` is NOT redefined: a follower-only rig is ready
+        # with both=False, and the two keys must not be conflated.
+        self._seed_arms(leader=False)
+        self._post("/robot-type", {"robot_type": "edu6_studio"}, origin=None)
+        payload = self._get("/status")[1]
+        self.assertFalse(payload["arms_identified"]["both"])
+        self.assertTrue(payload["hardware_ready"])
+
+    def test_an_unknown_on_disk_id_degrades_to_the_default(self):
+        # A hand-edited typo must not propagate into the scan family, the
+        # readiness gate or the next .env — it reads back as the default.
+        agent.config_generator.upsert_env_var(
+            "EDUBOTICS_ROBOT_TYPE", "typo_profile", self.env, quote=False)
+        self.assertEqual(self.app._current_robot_type(),
+                         agent.resolve_robot_type(None))
+        self.assertEqual(self._get("/status")[1]["robot_type"], "omx_full")
+
+
+class TestPersistCarriesTheSessionModeWithoutContradicting(_RobotTypeBase):
+    """`_persist_env_if_ready` resolves the mode: derive when the caller has no
+    live session mode, and let the PROFILE win on a follower-only rig. Without
+    the second half, a stale `EDUBOTICS_FOLLOWER_ONLY=0` (hand-edit, or a .env
+    written before the type was chosen) reaches generate_env_file's contradiction
+    guard and turns an ordinary camera-role edit into a German 500."""
+
+    def test_a_camera_edit_on_a_follower_only_rig_does_not_500(self):
+        self._seed_arms(leader=False)
+        self._post("/robot-type", {"robot_type": "edu6_studio"}, origin=None)
+        # Simulate the stale/contradictory value.
+        agent.config_generator.upsert_env_var(
+            "EDUBOTICS_FOLLOWER_ONLY", "0", self.env, quote=False)
+        code, payload = self._post(
+            "/cameras/roles",
+            {"cameras": [{"path": "/dev/video0", "role": "scene"}]}, origin=None)
+        self.assertEqual(code, 200, payload)
+        self.assertIn("EDUBOTICS_FOLLOWER_ONLY=1",
+                      open(self.env, encoding="utf-8").read())
+
+    def test_a_live_roboter_studio_session_is_still_carried_forward(self):
+        # omx_full mid-LeaderToggle: FOLLOWER_ONLY=1 must NOT be reset to 0 by a
+        # camera edit (the pre-existing prev_val behaviour, unchanged).
+        self._seed_arms(leader=True)
+        self._post("/robot-type", {"robot_type": "omx_full"}, origin=None)
+        agent.config_generator.upsert_env_var(
+            "EDUBOTICS_FOLLOWER_ONLY", "1", self.env, quote=False)
+        code, _ = self._post(
+            "/cameras/roles",
+            {"cameras": [{"path": "/dev/video0", "role": "scene"}]}, origin=None)
+        self.assertEqual(code, 200)
+        raw = open(self.env, encoding="utf-8").read()
+        self.assertIn("EDUBOTICS_FOLLOWER_ONLY=1", raw)
+        self.assertNotIn("LEADER_PORT=", raw)
+
+    def test_a_both_arms_session_stays_both_arms(self):
+        self._seed_arms(leader=True)
+        self._post("/robot-type", {"robot_type": "omx_full"}, origin=None)
+        code, _ = self._post(
+            "/cameras/roles",
+            {"cameras": [{"path": "/dev/video0", "role": "scene"}]}, origin=None)
+        self.assertEqual(code, 200)
+        raw = open(self.env, encoding="utf-8").read()
+        self.assertIn("EDUBOTICS_FOLLOWER_ONLY=0", raw)
+        self.assertIn("LEADER_PORT=", raw)
+
+
+class TestEnvironmentStartIsProfileAware(_RobotTypeBase):
+    """„Umgebung starten" hard-required BOTH arms, which is why omx_follower —
+    shipping on Windows since the robot-type system landed — was unreachable on
+    a Pi, edu6 aside."""
+
+    def test_a_follower_only_rig_can_start_with_no_leader(self):
+        self._seed_arms(leader=False)
+        self._post("/robot-type", {"robot_type": "edu6_studio"}, origin=None)
+        with patch.object(agent.docker_manager, "start_robot_tier",
+                          return_value=True) as start:
+            code, payload = self._post("/environment/start", {}, origin=None)
+        self.assertEqual(code, 200, payload)
+        start.assert_called_once()
+        raw = open(self.env, encoding="utf-8").read()
+        self.assertIn("EDUBOTICS_FOLLOWER_ONLY=1", raw)
+        self.assertIn("EDUBOTICS_ROBOT_TYPE=edu6_studio", raw)
+
+    def test_omx_full_still_demands_both_arms(self):
+        self._seed_arms(leader=False)
+        self._post("/robot-type", {"robot_type": "omx_full"}, origin=None)
+        with patch.object(agent.docker_manager, "start_robot_tier",
+                          return_value=True) as start:
+            code, payload = self._post("/environment/start", {}, origin=None)
+        self.assertEqual(code, 400)
+        self.assertIn("beide Arme", payload["message"])
+        start.assert_not_called()
+
+    def test_omx_full_with_both_arms_is_unchanged(self):
+        self._seed_arms(leader=True)
+        self._post("/robot-type", {"robot_type": "omx_full"}, origin=None)
+        with patch.object(agent.docker_manager, "start_robot_tier",
+                          return_value=True) as start:
+            code, _ = self._post("/environment/start", {}, origin=None)
+        self.assertEqual(code, 200)
+        start.assert_called_once()
+        raw = open(self.env, encoding="utf-8").read()
+        self.assertIn("EDUBOTICS_FOLLOWER_ONLY=0", raw)
+        self.assertIn("LEADER_PORT=", raw)
+
+    def test_the_follower_only_refusal_does_not_mention_a_leader(self):
+        # A follower-only kit HAS no leader; telling the student to scan one is
+        # the misdiagnosis this gate exists to remove.
+        self._post("/robot-type", {"robot_type": "edu6_studio"}, origin=None)
+        code, payload = self._post("/environment/start", {}, origin=None)
+        self.assertEqual(code, 400)
+        self.assertNotIn("Leader", payload["message"])
+        self.assertIn("scannen", payload["message"])
 
 
 if __name__ == "__main__":

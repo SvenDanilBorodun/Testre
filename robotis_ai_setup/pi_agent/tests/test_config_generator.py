@@ -164,8 +164,8 @@ class TestGenerateEnvBothArms(_TmpEnvBase):
 
 class TestRobotType(_TmpEnvBase):
     """EDUBOTICS_ROBOT_TYPE is a MANAGED key emitted by BOTH generators; agent
-    callers carry the on-disk value forward (the Pi has no profile selector,
-    so a regenerate must never rewrite an operator-set value silently)."""
+    callers carry the on-disk value forward (a regenerate must never rewrite the
+    selected profile silently — the wizard's POST /robot-type owns it)."""
 
     def test_default_robot_type_emitted_once(self):
         content = generate_env_file(_both_arms(), self.path)
@@ -207,6 +207,163 @@ class TestRobotType(_TmpEnvBase):
         cloud = generate_cloud_only_env(self.path)
         for key in cg.MANAGED_KEYS:
             self.assertIn(f"{key}=", cloud, f"{key} missing from cloud-only .env")
+
+
+class TestFollowerOnlyDerivedFromProfile(_TmpEnvBase):
+    """`follower_only=None` (the new default) DERIVES from the robot profile.
+
+    Without the derive a follower-only rig — which by definition never scans a
+    leader — hit the leader-null guard and raised „Der Leader-Arm muss
+    konfiguriert sein" on every single .env write, which is why neither
+    omx_follower nor edu6_studio could be provisioned on a Pi at all.
+    """
+
+    def _follower_only_rig(self):
+        cfg = _both_arms()
+        cfg.leader = None  # a follower-only kit HAS no leader
+        return cfg
+
+    def test_omx_full_derives_both_arms(self):
+        content = generate_env_file(_both_arms(), self.path, robot_type="omx_full")
+        self.assertIn("EDUBOTICS_FOLLOWER_ONLY=0", content)
+        self.assertIn("LEADER_PORT=", content)
+
+    def test_each_follower_only_profile_derives_follower_only(self):
+        for profile in ("omx_follower", "edu6_studio"):
+            with self.subTest(profile=profile):
+                content = generate_env_file(self._follower_only_rig(), self.path,
+                                            robot_type=profile)
+                self.assertIn("EDUBOTICS_FOLLOWER_ONLY=1", content)
+                self.assertNotIn("LEADER_PORT=", content)
+                self.assertIn(f"EDUBOTICS_ROBOT_TYPE={profile}", content)
+
+    def test_the_derive_runs_BEFORE_the_leader_null_guard(self):
+        """THE ordering assertion. A leaderless rig on a follower-only profile
+        must generate cleanly. Move the derive below the `not follower_only and
+        config.leader is None` guard and this raises instead."""
+        for profile in ("omx_follower", "edu6_studio"):
+            with self.subTest(profile=profile):
+                content = generate_env_file(self._follower_only_rig(), self.path,
+                                            robot_type=profile)
+                self.assertIn("EDUBOTICS_FOLLOWER_ONLY=1", content)
+
+    def test_the_leader_guard_still_bites_on_a_both_arms_profile(self):
+        # The ordering fix must not have DISABLED the guard: omx_full with no
+        # leader is still a refusal, in German.
+        cfg = self._follower_only_rig()
+        with self.assertRaises(ValueError) as ctx:
+            generate_env_file(cfg, self.path, robot_type="omx_full")
+        self.assertIn("Leader-Arm", str(ctx.exception))
+
+    def test_explicit_true_still_overrides_on_a_both_arms_profile(self):
+        # The Roboter-Studio leader toggle: omx_full + explicit True.
+        content = generate_env_file(_both_arms(), self.path, robot_type="omx_full",
+                                    follower_only=True)
+        self.assertIn("EDUBOTICS_FOLLOWER_ONLY=1", content)
+        self.assertNotIn("LEADER_PORT=", content)
+
+    def test_explicit_false_on_a_follower_only_profile_is_a_german_refusal(self):
+        # Contradiction: the profile has no leader to re-arm. Refuse loudly
+        # rather than silently write a both-arms .env (GUI twin).
+        for profile in ("omx_follower", "edu6_studio"):
+            with self.subTest(profile=profile):
+                with self.assertRaises(ValueError) as ctx:
+                    generate_env_file(_both_arms(), self.path,
+                                      robot_type=profile, follower_only=False)
+                msg = str(ctx.exception)
+                self.assertIn("Robotertyp", msg)
+                self.assertIn(profile, msg)
+                self.assertIn("Leader-Betrieb", msg)
+
+    def test_the_refusal_message_matches_the_windows_twin(self):
+        # Same wording on both platforms — a student comparing a Pi rig with a
+        # Windows rig must not get two different explanations of one refusal.
+        from gui.app import config_generator as win_cg
+        from gui.app.device_manager import (
+            ArmDevice as WinArm, CameraDevice as WinCam, HardwareConfig as WinHW,
+        )
+        win_hw = WinHW(
+            leader=WinArm(busid="1-1", serial_path="COM3", role="leader",
+                          description="leader"),
+            follower=WinArm(busid="1-2", serial_path="COM4", role="follower",
+                            description="follower"),
+            cameras=[WinCam(path="0", name="cam", role="scene")],
+        )
+        with self.assertRaises(ValueError) as pi_ctx:
+            generate_env_file(_both_arms(), self.path,
+                              robot_type="edu6_studio", follower_only=False)
+        with self.assertRaises(ValueError) as win_ctx:
+            win_cg.generate_env_file(win_hw, self.path,
+                                     robot_type="edu6_studio", follower_only=False)
+        self.assertEqual(str(pi_ctx.exception), str(win_ctx.exception))
+
+    def test_an_unknown_robot_type_falls_back_to_the_default_profile(self):
+        # The documented one-variable rollback: a typo'd/hand-edited id must
+        # keep today's OMX behaviour, never raise and never write itself back.
+        content = generate_env_file(_both_arms(), self.path,
+                                    robot_type="nonsense_profile")
+        self.assertIn(
+            f"EDUBOTICS_ROBOT_TYPE={constants.DEFAULT_ROBOT_PROFILE}", content)
+        self.assertNotIn("nonsense_profile", content)
+        self.assertIn("EDUBOTICS_FOLLOWER_ONLY=0", content)
+
+    def test_an_unknown_robot_type_is_sanitised_in_the_cloud_only_env_too(self):
+        content = generate_cloud_only_env(self.path, robot_type="nonsense_profile")
+        self.assertNotIn("nonsense_profile", content)
+        self.assertIn(
+            f"EDUBOTICS_ROBOT_TYPE={constants.DEFAULT_ROBOT_PROFILE}", content)
+
+    def test_surrounding_whitespace_on_the_id_is_tolerated(self):
+        content = generate_env_file(self._follower_only_rig(), self.path,
+                                    robot_type=" edu6_studio ")
+        self.assertIn("EDUBOTICS_ROBOT_TYPE=edu6_studio", content)
+        self.assertIn("EDUBOTICS_FOLLOWER_ONLY=1", content)
+
+    def test_the_derive_reads_the_registry_not_a_hardcoded_id_list(self):
+        """Every follower-only profile in the registry must derive True — a new
+        one added to constants.ROBOT_PROFILES has to work with no edit here."""
+        for pid, row in constants.ROBOT_PROFILES.items():
+            with self.subTest(profile=pid):
+                cfg = _both_arms() if not row["follower_only"] else self._follower_only_rig()
+                content = generate_env_file(cfg, self.path, robot_type=pid)
+                expected = "1" if row["follower_only"] else "0"
+                self.assertIn(f"EDUBOTICS_FOLLOWER_ONLY={expected}", content)
+
+
+class TestExplicitFollowerOnlyZeroEmitIsDeliberate(_TmpEnvBase):
+    """The Pi emits `EDUBOTICS_FOLLOWER_ONLY=0` EXPLICITLY where Windows omits
+    the key. That divergence is load-bearing, not an oversight: the Roboter-
+    Studio leader toggle regenerates exactly this key and reads it back as its
+    rollback `prev_val`, and handle_cameras_roles reads it to carry the live
+    session mode forward — an absent key reads as None there, not as 0."""
+
+    def test_the_pi_emits_the_zero_and_windows_omits_it(self):
+        from gui.app import config_generator as win_cg
+        from gui.app.device_manager import (
+            ArmDevice as WinArm, CameraDevice as WinCam, HardwareConfig as WinHW,
+        )
+        pi_content = generate_env_file(_both_arms(), self.path,
+                                       robot_type="omx_full")
+        self.assertIn("EDUBOTICS_FOLLOWER_ONLY=0", pi_content)
+
+        win_path = self.path + ".win"
+        self.addCleanup(lambda: os.path.exists(win_path) and os.unlink(win_path))
+        win_content = win_cg.generate_env_file(
+            WinHW(leader=WinArm(busid="1-1", serial_path="COM3", role="leader",
+                                description="leader"),
+                  follower=WinArm(busid="1-2", serial_path="COM4",
+                                  role="follower", description="follower"),
+                  cameras=[WinCam(path="0", name="cam", role="scene")]),
+            win_path, robot_type="omx_full")
+        self.assertNotIn("EDUBOTICS_FOLLOWER_ONLY", win_content)
+
+    def test_it_survives_the_derive(self):
+        # The derive path (follower_only=None) must reach the same emit as the
+        # old explicit False did — otherwise the toggle loses its anchor key.
+        content = generate_env_file(_both_arms(), self.path, robot_type="omx_full",
+                                    follower_only=None)
+        self.assertIn("EDUBOTICS_FOLLOWER_ONLY=0", content)
+        self.assertEqual(content.count("EDUBOTICS_FOLLOWER_ONLY="), 1)
 
 
 class TestGenerateEnvFollowerOnly(_TmpEnvBase):

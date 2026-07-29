@@ -175,11 +175,19 @@ class TestScanArmFamily(_EnvTempBase):
         self.assertIsNone(self.app._hardware.leader)
 
     def test_the_rehydrate_path_carries_the_family_too(self):
+        # Seed a BOTH-ports .env (the fast-rehydrate path only runs when both
+        # LEADER_PORT and FOLLOWER_PORT are saved), then re-type the rig — the
+        # shape a rig has right after POST /robot-type but before a rescan.
+        # Generating directly with robot_type='edu6_studio' would derive
+        # follower_only=True and omit LEADER_PORT, so the rehydrate would never
+        # be reached.
         cg.generate_env_file(
             HardwareConfig(
                 leader=ArmDevice(serial_path="/dev/serial/by-id/usb-A", role="leader"),
                 follower=ArmDevice(serial_path="/dev/serial/by-id/usb-B", role="follower")),
-            self.env_path, follower_only=False, robot_type="edu6_studio")
+            self.env_path, robot_type="omx_full")
+        cg.upsert_env_var("EDUBOTICS_ROBOT_TYPE", "edu6_studio", self.env_path,
+                          quote=False)
         with patch.object(agent.docker_manager, "ensure_environment_stopped"), \
              patch.object(agent.identify_arm, "fast_rehydrate_arms",
                           return_value=(None, None)) as fast, \
@@ -394,8 +402,11 @@ class TestEnvironmentLifecycle(_EnvTempBase):
         self.app._hardware = HardwareConfig(
             leader=ArmDevice(serial_path="/dev/l"),
             follower=ArmDevice(serial_path="/dev/f"))
+        # Seed via the DERIVE: omx_follower is the only non-default id (so the
+        # only one that can prove "carried, not defaulted") and it is
+        # follower-only, which an explicit follower_only=False now contradicts.
         cg.generate_env_file(self.app._hardware, self.env_path,
-                             follower_only=False, robot_type="omx_follower")
+                             robot_type="omx_follower")
         with patch.object(agent.docker_manager, "start_robot_tier", return_value=True):
             code, _ = self.app.handle_environment_start({})
         self.assertEqual(code, 200)

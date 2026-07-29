@@ -44,6 +44,7 @@ from typing import Optional
 
 from .constants import (
     DEFAULT_LAN_OPEN,
+    DEFAULT_ROBOT_PROFILE,
     DEFAULT_ROS_NET_GATEWAY,
     DEFAULT_ROS_NET_SUBNET,
     ENV_FILE,
@@ -51,8 +52,10 @@ from .constants import (
     MACHINE_ID_FILE,
     REGISTRY,
     REGISTRY_FALLBACK,
+    ROBOT_PROFILES,
     ROS_DOMAIN_FILE,
     ROS_DOMAIN_ID,
+    resolve_robot_type,
 )
 
 
@@ -382,7 +385,8 @@ def read_env_var(key: str, path: str = ENV_FILE) -> Optional[str]:
     return None
 
 
-def upsert_env_var(key: str, value: str, path: str = ENV_FILE) -> None:
+def upsert_env_var(key: str, value: str, path: str = ENV_FILE,
+                   quote: bool = True) -> None:
     """Insert or replace ``key=value`` in the .env at ``path``, preserving every
     other line (managed keys, comments, operator overrides) verbatim.
 
@@ -391,6 +395,17 @@ def upsert_env_var(key: str, value: str, path: str = ENV_FILE) -> None:
     via _read_unmanaged_lines(), and this helper is how the agent sets it once
     (Schritt D). An empty ``value`` removes the key (token clear). The value is
     quoted via _quote() so a token with shell-special chars is safe.
+
+    ``quote=False`` writes the value RAW, matching the unquoted form the managed
+    emitters use. It exists for EDUBOTICS_ROBOT_TYPE, which the wizard must be
+    able to persist before any hardware is scanned (the scan reads the family
+    back off this key). Representation matters there and nowhere else: the arm
+    container branches on a literal string compare
+    (``[ "$EDUBOTICS_ROBOT_TYPE" = "edu6_studio" ]`` in entrypoint_omx.sh), so a
+    stray pair of quotes surviving into the container would silently take the
+    OMX path on an edu6 rig — the exact split brain WP-1 closed. Callers passing
+    quote=False MUST pass a value from a fixed, validated set (constants.
+    resolve_robot_type); it is not an escape hatch for free text.
     """
     try:
         with open(path, encoding="utf-8") as f:
@@ -398,7 +413,7 @@ def upsert_env_var(key: str, value: str, path: str = ENV_FILE) -> None:
     except (OSError, UnicodeDecodeError):
         raw = []
 
-    new_line = f"{key}={_quote(value)}"
+    new_line = f"{key}={_quote(value) if quote else value}"
     out: list[str] = []
     replaced = False
     for line in raw:
@@ -428,10 +443,18 @@ def upsert_env_var(key: str, value: str, path: str = ENV_FILE) -> None:
 
 def _opi_managed_lines(output_path: str, lan_open: Optional[bool],
                        ros_net_subnet: Optional[str],
-                       robot_type: str = "omx_full") -> list[str]:
+                       robot_type: str = DEFAULT_ROBOT_PROFILE) -> list[str]:
     """The Orange-Pi managed lines shared by every .env variant: registry pins,
     the robot profile id, the explicit usb_cam source, and the LAN/docker-
-    network block (with the DERIVED bind host + gateway)."""
+    network block (with the DERIVED bind host + gateway).
+
+    ``robot_type`` is VALIDATED against ``constants.ROBOT_PROFILES`` here — the
+    single emit site for the key, so an unknown id can never be written into the
+    .env from any generator. Unknown → ``DEFAULT_ROBOT_PROFILE`` (the documented
+    one-variable rollback), never a raise: the server's own ``robot_profiles.
+    resolve`` degrades the same way, and a hand-edited typo must not make the
+    rig unstartable."""
+    robot_type = resolve_robot_type(robot_type)
     lan_open_str = _resolve_lan_open(output_path, lan_open)
     bind_host = "0.0.0.0" if lan_open_str == "1" else "127.0.0.1"
     subnet = _resolve_ros_net_subnet(output_path, ros_net_subnet)
@@ -472,10 +495,10 @@ def _opi_managed_lines(output_path: str, lan_open: Optional[bool],
 
 
 def generate_env_file(config: HardwareConfig, output_path: str = ENV_FILE,
-                      follower_only: bool = False,
+                      follower_only: Optional[bool] = None,
                       lan_open: Optional[bool] = None,
                       ros_net_subnet: Optional[str] = None,
-                      robot_type: str = "omx_full") -> str:
+                      robot_type: str = DEFAULT_ROBOT_PROFILE) -> str:
     """Write the managed .env from the scanned hardware.
 
     Args:
@@ -489,6 +512,14 @@ def generate_env_file(config: HardwareConfig, output_path: str = ENV_FILE,
             When False a both-arms recording/teleop session is configured:
             ``LEADER_PORT`` is emitted and ``EDUBOTICS_FOLLOWER_ONLY=0`` is
             emitted explicitly (the leader toggle regenerates exactly that key).
+            When None (the default) the value is DERIVED from ``robot_type``
+            via the ``constants.ROBOT_PROFILES`` registry — this keeps the
+            Roboter-Studio leader toggle able to OVERRIDE it on a both-arms
+            profile while a follower-only profile (which never scans a leader)
+            still derives True instead of tripping the leader-required guard
+            below. Explicitly passing False for a follower-only profile is
+            CONTRADICTORY (the profile has no leader to re-arm) and raises a
+            German ValueError instead of silently emitting a both-arms .env.
         lan_open: Explicit LAN-exposure override (True → 0.0.0.0, False →
             127.0.0.1). ``None`` carries the current .env value forward
             (default open on a fresh file).
@@ -508,6 +539,28 @@ def generate_env_file(config: HardwareConfig, output_path: str = ENV_FILE,
     Returns:
         The content written to the file.
     """
+    # Resolve the initial follower_only from the ArmProfile registry — NOT a
+    # hardcoded id literal — so a new follower-only profile is honoured without
+    # editing this line (single source of truth: constants.ROBOT_PROFILES).
+    #
+    # ORDER IS LOAD-BEARING: this MUST run before the leader-null guard below.
+    # A follower-only rig (omx_follower, edu6_studio) has no leader at all, so
+    # with the derive after the guard it would hit `not follower_only and
+    # config.leader is None` and raise „Der Leader-Arm muss konfiguriert sein"
+    # on every single start — the exact reason the Pi could not run either
+    # follower-only profile. An explicit follower_only= (the RS leader toggle)
+    # still wins, EXCEPT that re-arming the leader on a leader-less profile is
+    # contradictory and is refused loudly rather than silently writing a
+    # both-arms .env for a rig that never scanned a leader.
+    robot_type = resolve_robot_type(robot_type)
+    profile_follower_only = ROBOT_PROFILES[robot_type]["follower_only"]
+    if follower_only is None:
+        follower_only = profile_follower_only
+    elif profile_follower_only and not follower_only:
+        raise ValueError(
+            f'Robotertyp „{robot_type}" erlaubt keinen Leader-Betrieb '
+            f'(follower_only=False).'
+        )
     if config.follower is None:
         raise ValueError("Der Follower-Arm muss konfiguriert sein, bevor die .env erzeugt wird")
     if not follower_only and config.leader is None:
@@ -523,9 +576,13 @@ def generate_env_file(config: HardwareConfig, output_path: str = ENV_FILE,
         lines.append("EDUBOTICS_FOLLOWER_ONLY=1")
     else:
         lines.append(f"LEADER_PORT={_quote(config.leader.serial_path)}")
-        # Emit =0 EXPLICITLY (unlike the GUI, which omits it): the Pi compose
-        # reads ${EDUBOTICS_FOLLOWER_ONLY:-0} and the leader toggle expects to
-        # find and flip this exact key.
+        # DELIBERATE DIVERGENCE FROM WINDOWS — do NOT "harmonise" this away.
+        # The GUI OMITS the key here and leans on compose's
+        # ${EDUBOTICS_FOLLOWER_ONLY:-0} default. The Pi emits =0 EXPLICITLY
+        # because the Roboter-Studio leader toggle regenerates exactly this key
+        # (docker_manager.set_leader_mode reads it back as `prev_val` for its
+        # rollback, and handle_cameras_roles reads it to carry the live session
+        # mode forward) — an absent key there reads as None, not as "both arms".
         lines.append("EDUBOTICS_FOLLOWER_ONLY=0")
 
     if config.cameras:
@@ -562,7 +619,7 @@ def generate_env_file(config: HardwareConfig, output_path: str = ENV_FILE,
 def generate_cloud_only_env(output_path: str = ENV_FILE,
                             lan_open: Optional[bool] = None,
                             ros_net_subnet: Optional[str] = None,
-                            robot_type: str = "omx_full") -> str:
+                            robot_type: str = DEFAULT_ROBOT_PROFILE) -> str:
     """Write a minimal .env for manager-only / cloud-only mode (no robot tier).
 
     Used at agent boot to bring the always-on manager up BEFORE any hardware

@@ -98,6 +98,7 @@ from .constants import (
     PHONE_FRAME_STALE_MAX_AGE_S,
     PORT_AGENT,
     REGISTRY,
+    ROBOT_PROFILES,
     SHIPPED_COMPOSE_RELPATH,
     SYSTEM_FILES_VERSION_FILE,
     SYSTEMD_UNIT_DIR,
@@ -106,6 +107,8 @@ from .constants import (
     UDEV_RULES_DIR,
     UPDATE_API_URL,
     arm_family_for_robot_type,
+    resolve_robot_type,
+    robot_profile,
 )
 from .lan_ip import detect_lan_ip, list_interface_ips
 
@@ -641,25 +644,61 @@ class AgentApp:
         self._hardware = HardwareConfig(leader=leader, follower=follower, cameras=cameras)
 
     def _current_robot_type(self) -> str:
-        """The CURRENT on-disk managed robot type, defaulting to ``omx_full``.
-        Every regenerate must carry this through — EDUBOTICS_ROBOT_TYPE is a
-        MANAGED key, so a caller that omits it silently rewrites it."""
-        return config_generator.read_env_var(
-            "EDUBOTICS_ROBOT_TYPE", self.env_file) or "omx_full"
+        """The CURRENT on-disk managed robot type, VALIDATED against the profile
+        registry (unknown / absent / blank → ``DEFAULT_ROBOT_PROFILE``).
 
-    def _persist_env_if_ready(self, follower_only: bool = False) -> None:
+        Every regenerate must carry this through — EDUBOTICS_ROBOT_TYPE is a
+        MANAGED key, so a caller that omits it silently rewrites it. Validating
+        here rather than trusting the raw value means one bad hand-edit cannot
+        propagate an unknown id into the scan family, the readiness gate or the
+        next .env: it degrades to today's OMX behaviour, exactly as the server's
+        ``robot_profiles.resolve`` does at boot."""
+        return resolve_robot_type(config_generator.read_env_var(
+            "EDUBOTICS_ROBOT_TYPE", self.env_file))
+
+    def _hardware_ready(self, profile: "str | None" = None) -> bool:
+        """Whether the scanned hardware satisfies the (given/selected) robot type.
+
+        Twin of ``gui_app.py::_hardware_ready``: a both-arms type needs
+        leader+follower, a follower-only type (Roboter Studio kit, edu6) needs
+        only the follower. The Pi's ``HardwareConfig`` has no ``is_complete`` /
+        ``follower_present`` properties, so the two cases are spelled out."""
+        row = robot_profile(profile if profile is not None
+                            else self._current_robot_type())
+        hw = self._hardware
+        if hw.follower is None:
+            return False
+        return hw.leader is not None if row["scan_requires_leader"] else True
+
+    def _persist_env_if_ready(self, follower_only: "bool | None" = None) -> None:
         """Write the managed .env from ``self._hardware`` when it holds enough to
         generate a valid config (follower present; leader too unless
         ``follower_only``). Otherwise the in-memory state stays authoritative
         until „Umgebung starten" regenerates it — ``generate_env_file`` refuses a
-        partial config, so we never write a half-formed both-arms .env."""
+        partial config, so we never write a half-formed both-arms .env.
+
+        ``follower_only=None`` DERIVES the value from the selected profile, which
+        is what every caller that is not carrying a live session mode forward
+        should pass. For a follower-only PROFILE the profile wins outright: it
+        has no leader at all, so a stale ``EDUBOTICS_FOLLOWER_ONLY=0`` in a
+        hand-edited .env is state to correct, not a session override — and
+        forwarding it would hit ``generate_env_file``'s contradiction guard and
+        turn an ordinary camera-role edit into a 500. On a both-arms profile
+        nothing is clamped, so an explicit True (the Roboter-Studio toggle) is
+        honoured unchanged."""
+        robot_type = self._current_robot_type()
+        profile_follower_only = ROBOT_PROFILES[robot_type]["follower_only"]
+        if follower_only is None:
+            follower_only = profile_follower_only
+        elif profile_follower_only:
+            follower_only = True
         hw = self._hardware
         if hw.follower is None:
             return
         if not follower_only and hw.leader is None:
             return
         config_generator.generate_env_file(hw, self.env_file, follower_only=follower_only,
-                                           robot_type=self._current_robot_type())
+                                           robot_type=robot_type)
 
     # ── GET: /status ─────────────────────────────────────────────────────────
 
@@ -822,9 +861,12 @@ class AgentApp:
                              "message": "Nur der Follower-Arm wurde erkannt — der "
                                         "Leader-Arm fehlt. Bitte USB prüfen."}
 
-            # Both arms found — persist the canonical both-arms .env.
+            # Both arms found — persist the .env for the SELECTED profile. The
+            # mode is derived, not hardcoded False: on a follower-only profile
+            # (whose scan can still see two OMX arms plugged in) a both-arms
+            # write would contradict the profile and refuse.
             try:
-                self._persist_env_if_ready(follower_only=False)
+                self._persist_env_if_ready()
             except Exception as e:  # noqa: BLE001 — surfaced in German
                 return 500, {"ok": False,
                              "message": f"Konfiguration konnte nicht gespeichert werden: {e}"}
@@ -880,7 +922,12 @@ class AgentApp:
             # container recreate.
             prev_val = config_generator.read_env_var(
                 "EDUBOTICS_FOLLOWER_ONLY", self.env_file)
-            follower_only = str(prev_val).strip() == "1"
+            # An ABSENT key is not "both arms" — it is "no session mode
+            # recorded yet" (a fresh .env, or one written before the key
+            # existed). Deriving from the profile there is what stops a
+            # follower-only rig writing a both-arms .env behind a camera edit.
+            follower_only = (None if prev_val is None
+                             else str(prev_val).strip() == "1")
             try:
                 self._persist_env_if_ready(follower_only=follower_only)
             except Exception as e:  # noqa: BLE001
@@ -966,9 +1013,10 @@ class AgentApp:
 
     def handle_environment_start(self, body: dict) -> "tuple[int, dict]":
         """„Umgebung starten": bring up the student-owned robot tier. Env-start
-        always regenerates a BOTH-arms .env (the Roboter-Studio leader toggle is
-        the only path that flips to follower-only). Cloud-only start is a no-op —
-        the manager is already up."""
+        regenerates the .env for the SELECTED robot profile — both-arms on
+        ``omx_full`` (where the Roboter-Studio leader toggle is the only path
+        that flips to follower-only), follower-only on a profile that has no
+        leader at all. Cloud-only start is a no-op — the manager is already up."""
         if self._update_in_flight():
             return self._busy_updating()
         if bool(body.get("cloud_only")):
@@ -977,14 +1025,24 @@ class AgentApp:
         if not self._acquire_lifecycle():
             return self._busy_lifecycle()
         try:
-            if self._hardware.follower is None or self._hardware.leader is None:
-                return 400, {"ok": False,
-                             "message": "Bitte zuerst beide Arme scannen (Leader und Follower)."}
+            # PROFILE-AWARE readiness, not "both arms": a follower-only kit has
+            # no leader to scan, so demanding one made both omx_follower and
+            # edu6_studio unstartable on a Pi.
+            robot_type = self._current_robot_type()
+            if not self._hardware_ready(robot_type):
+                return 400, {
+                    "ok": False,
+                    "message": (
+                        "Bitte zuerst beide Arme scannen (Leader und Follower)."
+                        if ROBOT_PROFILES[robot_type]["scan_requires_leader"]
+                        else "Bitte zuerst den Roboterarm scannen."
+                    ),
+                }
             self.stop_active_previews()  # free /dev/video* before usb_cam claims it
             try:
                 config_generator.generate_env_file(
-                    self._hardware, self.env_file, follower_only=False,
-                    robot_type=self._current_robot_type())
+                    self._hardware, self.env_file, follower_only=None,
+                    robot_type=robot_type)
             except Exception as e:  # noqa: BLE001
                 return 500, {"ok": False,
                              "message": f"Konfiguration konnte nicht erstellt werden: {e}"}

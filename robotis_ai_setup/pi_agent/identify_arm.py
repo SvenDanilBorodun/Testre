@@ -496,13 +496,13 @@ def scan_and_identify_arms(
 
 def fast_rehydrate_arms(
     saved_leader_path: str, saved_follower_path: str,
-    arm_family: str = "omx",
+    arm_family: str = "omx", require_leader: bool = True,
 ) -> tuple[Optional[ArmDevice], Optional[ArmDevice]]:
     """Light revalidation of the previous session's arm mapping.
 
     Native port of ``device_manager.fast_rehydrate_arms``: skips the two SLOW
     stages (the throwaway scanner container and the per-device serial pings) and
-    only confirms BOTH saved ``/dev/serial/by-id`` paths are present and
+    only confirms the saved ``/dev/serial/by-id`` paths are present and
     distinct. The path↔role binding is trusted from the saved ``.env``: ROBOTIS
     arms expose DISTINCT stable by-id serials (identical-serial is camera-only,
     CLAUDE.md), so a binding cannot silently swap between sessions — the path
@@ -511,16 +511,32 @@ def fast_rehydrate_arms(
     scan.
 
     ``arm_family`` scopes the by-id discovery to the right hardware (edu6 §4.4);
-    ``omx`` is byte-identical to before. It is inert for ``edu6`` today: this
-    fast path needs BOTH saved paths and an edu6 rig's .env has no LEADER_PORT,
-    so the agent never reaches it — the parameter exists so the module is not
-    half family-aware. (Leader-less rehydration is WP-5's ``require_leader``.)
+    ``omx`` is byte-identical to before.
+
+    ``require_leader`` is False for a follower-only robot type (Roboter-Studio
+    kit, edu6): its .env has no ``LEADER_PORT`` at all, so an empty
+    ``saved_leader_path`` is LEGAL and the result is ``(None, follower)``. The
+    follower is ALWAYS mandatory — a follower mismatch still returns
+    ``(None, None)``. A stray leader path left in a hand-edited follower-only
+    .env is IGNORED rather than waited on (mirroring the Windows twin's
+    ``want_leader`` note): making its presence a precondition would burn the
+    whole presence-retry budget and then fall back to a full scan even though
+    the follower was right there. The one exception is a leader path EQUAL to
+    the follower's — that is a corrupt mapping on either profile, so it bails.
     """
-    if (not saved_leader_path or not saved_follower_path
-            or saved_leader_path == saved_follower_path):
+    # The follower is always mandatory.
+    if not saved_follower_path:
+        return None, None
+    if require_leader:
+        if not saved_leader_path or saved_leader_path == saved_follower_path:
+            return None, None
+    elif saved_leader_path and saved_leader_path == saved_follower_path:
         return None, None
 
-    expected = {saved_leader_path, saved_follower_path}
+    want_leader = require_leader
+    expected = {saved_follower_path}
+    if want_leader:
+        expected.add(saved_leader_path)
     serial_paths = set(_poll_serial_paths(expected=expected, arm_family=arm_family))
     if not expected.issubset(serial_paths):
         return None, None
@@ -529,6 +545,6 @@ def fast_rehydrate_arms(
         return ArmDevice(serial_path=path, role=role, description=path.split("/")[-1])
 
     return (
-        _rebuild(saved_leader_path, "leader"),
+        _rebuild(saved_leader_path, "leader") if want_leader else None,
         _rebuild(saved_follower_path, "follower"),
     )

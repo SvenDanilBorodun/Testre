@@ -690,5 +690,70 @@ class TestFastRehydrateArms(unittest.TestCase):
         self.assertEqual(find.call_args[0][0], "omx")
 
 
+class TestFastRehydrateLeaderLess(unittest.TestCase):
+    """A follower-only profile (Roboter-Studio kit, edu6) has NO ``LEADER_PORT``
+    in its .env at all, so requiring one sent every such rig down the slow
+    scanner-container path on every revisit. ``require_leader=False`` makes the
+    saved follower alone sufficient — the follower stays mandatory."""
+
+    def setUp(self):
+        p = patch("pi_agent.identify_arm.time.sleep")
+        self.addCleanup(p.stop)
+        p.start()
+
+    def test_an_empty_saved_leader_is_legal_and_yields_none_plus_follower(self):
+        with patch.object(identify_arm, "find_serial_paths_for_arms",
+                          return_value=[FOLLOWER]):
+            leader, follower = identify_arm.fast_rehydrate_arms(
+                "", FOLLOWER, require_leader=False)
+        self.assertIsNone(leader)
+        self.assertEqual(follower.serial_path, FOLLOWER)
+        self.assertEqual(follower.role, "follower")
+
+    def test_the_follower_is_still_mandatory(self):
+        # Bails BEFORE any device poll — an empty follower path is not a thing
+        # to go looking for, and polling for it would burn the retry budget.
+        with patch.object(identify_arm, "find_serial_paths_for_arms",
+                          return_value=[LEADER]) as find:
+            self.assertEqual(
+                identify_arm.fast_rehydrate_arms("", "", require_leader=False),
+                (None, None))
+        find.assert_not_called()
+
+    def test_a_missing_follower_still_falls_back_to_the_full_scan(self):
+        with patch.object(identify_arm, "find_serial_paths_for_arms",
+                          return_value=[LEADER]):
+            self.assertEqual(
+                identify_arm.fast_rehydrate_arms("", FOLLOWER, require_leader=False),
+                (None, None))
+
+    def test_a_stray_saved_leader_is_ignored_not_waited_on(self):
+        # A hand-edited follower-only .env can still carry a LEADER_PORT. The
+        # Windows twin's `want_leader` note: keying on the SAVED path would burn
+        # the whole presence-retry budget on an arm this profile never uses.
+        with patch.object(identify_arm, "find_serial_paths_for_arms",
+                          return_value=[FOLLOWER]) as find:
+            leader, follower = identify_arm.fast_rehydrate_arms(
+                LEADER, FOLLOWER, require_leader=False)
+        self.assertIsNone(leader)
+        self.assertEqual(follower.serial_path, FOLLOWER)
+        # Only the follower was ever expected — one poll, no retry loop.
+        self.assertEqual(find.call_count, 1)
+
+    def test_a_leader_equal_to_the_follower_is_still_a_corrupt_mapping(self):
+        self.assertEqual(
+            identify_arm.fast_rehydrate_arms(FOLLOWER, FOLLOWER, require_leader=False),
+            (None, None))
+
+    def test_require_leader_defaults_true_so_omx_is_unchanged(self):
+        # The default must keep the both-arms contract: an empty saved leader
+        # bails before any device is polled.
+        with patch.object(identify_arm, "find_serial_paths_for_arms",
+                          return_value=[LEADER, FOLLOWER]) as find:
+            self.assertEqual(
+                identify_arm.fast_rehydrate_arms("", FOLLOWER), (None, None))
+        find.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

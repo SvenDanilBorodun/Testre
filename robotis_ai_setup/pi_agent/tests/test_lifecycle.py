@@ -166,9 +166,9 @@ class TestScanArmFamily(_EnvTempBase):
     def test_the_single_edu6_arm_is_reported_in_the_follower_slot(self):
         arm = self._edu6_arm()
         code, payload, _ = self._scan_with_robot_type("edu6_studio", (None, arm))
-        # WP-2 stops here on purpose: the leader-less scan is still a 409 and
-        # „Umgebung starten" still demands both arms — that is WP-3/WP-5.
-        self.assertEqual(code, 409)
+        # WP-5: a leader-less profile SUCCEEDS with one arm. Until then this was
+        # a 409 whose German named a Leader-Arm the rig does not have.
+        self.assertEqual(code, 200)
         self.assertEqual(payload["follower"], arm.serial_path)
         self.assertIsNone(payload["leader"])
         self.assertIs(self.app._hardware.follower, arm)
@@ -195,6 +195,220 @@ class TestScanArmFamily(_EnvTempBase):
                           return_value=(None, None)):
             self.app.handle_scan_arms({})
         self.assertEqual(fast.call_args.kwargs.get("arm_family"), "edu6")
+
+
+class TestLeaderLessScanGating(_EnvTempBase):
+    """WP-5 — a profile with ``scan_requires_leader=False`` succeeds with ONE
+    arm, and never mentions a Leader-Arm it does not have.
+
+    The gate is the PROFILE, not the arm family: ``omx_follower`` shares the
+    two-arm ``omx`` family, and it was unreachable on a Pi for exactly this
+    reason long before edu6 existed.
+    """
+
+    LEADER = "/dev/serial/by-id/usb-ROBOTIS_LEADER"
+    FOLLOWER = "/dev/serial/by-id/usb-ROBOTIS_FOLLOWER"
+
+    def _arm(self, path, role):
+        return ArmDevice(serial_path=path, role=role)
+
+    def _scan(self, robot_type, result, **kw):
+        cg.upsert_env_var("EDUBOTICS_ROBOT_TYPE", robot_type, self.env_path,
+                          quote=False)
+        with patch.object(agent.docker_manager, "ensure_environment_stopped"), \
+             patch.object(agent.identify_arm, "scan_and_identify_arms",
+                          return_value=result):
+            return self.app.handle_scan_arms(kw)
+
+    # ── the leader-less success path ────────────────────────────────────────
+
+    def test_edu6_succeeds_with_one_arm(self):
+        arm = self._arm("/dev/serial/by-id/usb-1a86_x", "follower")
+        code, payload = self._scan("edu6_studio", (None, arm))
+        self.assertEqual(code, 200)
+        self.assertTrue(payload["ok"])
+
+    def test_omx_follower_succeeds_with_one_arm_too(self):
+        # The pre-existing parity gap, independent of edu6.
+        arm = self._arm(self.FOLLOWER, "follower")
+        code, payload = self._scan("omx_follower", (None, arm))
+        self.assertEqual(code, 200)
+        self.assertTrue(payload["ok"])
+
+    def test_the_success_message_never_promises_both_arms(self):
+        arm = self._arm(self.FOLLOWER, "follower")
+        _, payload = self._scan("omx_follower", (None, arm))
+        self.assertEqual(payload["message"], "Roboterarm erkannt und gespeichert.")
+        self.assertNotIn("Beide Arme", payload["message"])
+
+    def test_a_stray_second_arm_does_not_resurrect_the_both_arms_wording(self):
+        # An omx_follower rig can physically have two arms plugged in; the
+        # generated .env still has no LEADER_PORT, so the message must not
+        # claim otherwise.
+        code, payload = self._scan(
+            "omx_follower",
+            (self._arm(self.LEADER, "leader"), self._arm(self.FOLLOWER, "follower")))
+        self.assertEqual(code, 200)
+        self.assertEqual(payload["message"], "Roboterarm erkannt und gespeichert.")
+
+    def test_the_persisted_env_is_leader_less_and_follower_only(self):
+        arm = self._arm(self.FOLLOWER, "follower")
+        self._scan("omx_follower", (None, arm))
+        self.assertEqual(cg.read_env_var("FOLLOWER_PORT", self.env_path), self.FOLLOWER)
+        self.assertIsNone(cg.read_env_var("LEADER_PORT", self.env_path))
+        self.assertEqual(cg.read_env_var("EDUBOTICS_FOLLOWER_ONLY", self.env_path), "1")
+
+    # ── the 409 wording this closes ─────────────────────────────────────────
+
+    def test_a_missing_follower_never_names_a_leader_step_on_a_leader_less_rig(self):
+        code, payload = self._scan(
+            "edu6_studio", (self._arm(self.LEADER, "leader"), None))
+        self.assertEqual(code, 409)
+        self.assertNotIn("Leader", payload["message"])
+        self.assertEqual(payload["message"],
+                         "Der Roboterarm wurde nicht erkannt — bitte USB prüfen.")
+
+    # ── omx_full is untouched ───────────────────────────────────────────────
+
+    def test_omx_full_still_409s_on_a_missing_leader(self):
+        arm = self._arm(self.FOLLOWER, "follower")
+        code, payload = self._scan("omx_full", (None, arm))
+        self.assertEqual(code, 409)
+        self.assertEqual(payload["message"],
+                         "Nur der Follower-Arm wurde erkannt — der Leader-Arm "
+                         "fehlt. Bitte USB prüfen.")
+
+    def test_omx_full_still_409s_on_a_missing_follower(self):
+        code, payload = self._scan(
+            "omx_full", (self._arm(self.LEADER, "leader"), None))
+        self.assertEqual(code, 409)
+        self.assertEqual(payload["message"],
+                         "Nur der Leader-Arm wurde erkannt — der Follower-Arm "
+                         "fehlt. Bitte USB prüfen.")
+
+    def test_omx_full_still_says_beide_Arme_on_success(self):
+        code, payload = self._scan(
+            "omx_full",
+            (self._arm(self.LEADER, "leader"), self._arm(self.FOLLOWER, "follower")))
+        self.assertEqual(code, 200)
+        self.assertEqual(payload["message"], "Beide Arme erkannt und gespeichert.")
+
+    def test_no_arms_at_all_is_still_404_on_every_profile(self):
+        for pid in ("omx_full", "omx_follower", "edu6_studio"):
+            with self.subTest(pid):
+                code, _ = self._scan(pid, (None, None))
+                self.assertEqual(code, 404)
+
+    # ── the fast-rehydrate gate ─────────────────────────────────────────────
+
+    def _rehydrate(self, robot_type, saved_leader, saved_follower, fast_result):
+        if saved_leader:
+            cg.upsert_env_var("LEADER_PORT", saved_leader, self.env_path)
+        cg.upsert_env_var("FOLLOWER_PORT", saved_follower, self.env_path)
+        cg.upsert_env_var("EDUBOTICS_ROBOT_TYPE", robot_type, self.env_path,
+                          quote=False)
+        with patch.object(agent.docker_manager, "ensure_environment_stopped"), \
+             patch.object(agent.identify_arm, "fast_rehydrate_arms",
+                          return_value=fast_result) as fast, \
+             patch.object(agent.identify_arm, "scan_and_identify_arms",
+                          return_value=(None, None)) as full:
+            code, payload = self.app.handle_scan_arms({})
+        return code, payload, fast, full
+
+    def test_a_leader_less_rig_takes_the_fast_path_without_a_saved_leader(self):
+        arm = self._arm(self.FOLLOWER, "follower")
+        code, _, fast, full = self._rehydrate(
+            "edu6_studio", None, self.FOLLOWER, (None, arm))
+        self.assertEqual(code, 200)
+        fast.assert_called_once()
+        self.assertIs(fast.call_args.kwargs.get("require_leader"), False)
+        # …and does NOT fall through to the slow scanner container.
+        full.assert_not_called()
+
+    def test_a_both_arms_rig_still_needs_a_saved_leader_for_the_fast_path(self):
+        _, _, fast, full = self._rehydrate(
+            "omx_full", None, self.FOLLOWER, (None, None))
+        fast.assert_not_called()
+        full.assert_called_once()
+
+    def test_the_both_arms_fast_path_still_requires_a_leader(self):
+        _, _, fast, _ = self._rehydrate(
+            "omx_full", self.LEADER, self.FOLLOWER,
+            (self._arm(self.LEADER, "leader"), self._arm(self.FOLLOWER, "follower")))
+        self.assertIs(fast.call_args.kwargs.get("require_leader"), True)
+
+
+class TestLoneCameraDefaultRole(_EnvTempBase):
+    """A LONE camera with no role takes the PROFILE's first ``camera_roles``
+    entry — the twin of the Windows GUI's single-camera auto-assign. The value
+    is load-bearing: perception and the config topics hang off the role NAME, so
+    `gripper` on a Roboter-Studio kit broke every such rig (CLAUDE.md)."""
+
+    def _roles(self, robot_type, cameras):
+        cg.upsert_env_var("EDUBOTICS_ROBOT_TYPE", robot_type, self.env_path,
+                          quote=False)
+        return self.app.handle_cameras_roles({"cameras": cameras})
+
+    def test_the_default_is_scene_on_both_follower_only_profiles(self):
+        for pid in ("omx_follower", "edu6_studio"):
+            with self.subTest(pid):
+                code, payload = self._roles(pid, [{"path": "/dev/video0"}])
+                self.assertEqual(code, 200)
+                self.assertEqual(payload["cameras"], [{"path": "/dev/video0",
+                                                       "role": "scene"}])
+
+    def test_the_default_is_gripper_on_omx_full(self):
+        code, payload = self._roles("omx_full", [{"path": "/dev/video0"}])
+        self.assertEqual(code, 200)
+        self.assertEqual(payload["cameras"], [{"path": "/dev/video0",
+                                               "role": "gripper"}])
+
+    def test_an_empty_string_role_is_treated_as_absent(self):
+        code, payload = self._roles(
+            "edu6_studio", [{"path": "/dev/video0", "role": ""}])
+        self.assertEqual(code, 200)
+        self.assertEqual(payload["cameras"][0]["role"], "scene")
+
+    def test_an_explicit_role_always_wins(self):
+        # The student looked at the preview — never override that.
+        code, payload = self._roles(
+            "edu6_studio", [{"path": "/dev/video0", "role": "gripper"}])
+        self.assertEqual(code, 200)
+        self.assertEqual(payload["cameras"][0]["role"], "gripper")
+
+    def test_two_role_less_cameras_are_still_a_german_400(self):
+        # Identical-serial Innomakers: only the live preview tells them apart,
+        # so guessing which is which would silently corrupt every dataset.
+        code, payload = self._roles(
+            "omx_full", [{"path": "/dev/video0"}, {"path": "/dev/video1"}])
+        self.assertEqual(code, 400)
+        self.assertIn("Ungültige Rolle", payload["message"])
+
+    def test_an_invalid_non_empty_role_is_still_a_400_even_when_alone(self):
+        code, payload = self._roles(
+            "edu6_studio", [{"path": "/dev/video0", "role": "phone"}])
+        self.assertEqual(code, 400)
+        self.assertIn("Ungültige Rolle", payload["message"])
+
+    def test_two_explicitly_assigned_cameras_are_unchanged(self):
+        code, payload = self._roles("omx_full", [
+            {"path": "/dev/video0", "role": "gripper"},
+            {"path": "/dev/video1", "role": "scene"},
+        ])
+        self.assertEqual(code, 200)
+        self.assertEqual(payload["cameras"], [
+            {"path": "/dev/video0", "role": "gripper"},
+            {"path": "/dev/video1", "role": "scene"},
+        ])
+
+    def test_a_path_less_entry_still_does_not_count_as_the_lone_camera(self):
+        # `{"path": ""}` rows are dropped before the count, so a real lone
+        # camera beside one still auto-assigns.
+        code, payload = self._roles(
+            "edu6_studio", [{"path": ""}, {"path": "/dev/video0"}])
+        self.assertEqual(code, 200)
+        self.assertEqual(payload["cameras"], [{"path": "/dev/video0",
+                                               "role": "scene"}])
 
 
 class TestScanNotice(_EnvTempBase):
@@ -514,6 +728,98 @@ class TestRoboterStudio(_EnvTempBase):
         self.assertTrue(payload["follower_only"])
         self.assertIn("busy", payload)
         self.assertIn("ready", payload)
+
+
+class TestRoboterStudioLeaderLess(_EnvTempBase):
+    """WP-5 — the leader toggle is REFUSED on a profile that has no leader.
+
+    On Windows a follower-only rig never constructs the :8769 bridge at all, so
+    the toggle simply cannot be reached. The Pi serves the same contract from
+    the always-on agent, so the lockout has to be a German 4xx belt here, behind
+    the React hide."""
+
+    def _set_type(self, robot_type):
+        cg.upsert_env_var("EDUBOTICS_ROBOT_TYPE", robot_type, self.env_path,
+                          quote=False)
+
+    def test_both_directions_are_refused_on_every_leader_less_profile(self):
+        for pid in ("omx_follower", "edu6_studio"):
+            for follower_only in (True, False):
+                with self.subTest(profile=pid, follower_only=follower_only):
+                    self._set_type(pid)
+                    with patch.object(agent.docker_manager,
+                                      "set_leader_mode") as slm:
+                        code, payload = self.app.handle_rs_set_mode(follower_only)
+                    self.assertEqual(code, 409)
+                    self.assertFalse(payload["ok"])
+                    self.assertEqual(
+                        payload["message"],
+                        "Dieser Robotertyp hat keinen Leader-Arm — Roboter "
+                        "Studio ist hier dauerhaft aktiv.")
+                    # Never recreates the arm container for a no-op switch.
+                    slm.assert_not_called()
+
+    def test_the_refusal_reports_the_rigs_true_mode_not_the_request(self):
+        self._set_type("edu6_studio")
+        with patch.object(agent.docker_manager, "set_leader_mode"):
+            _, payload = self.app.handle_rs_set_mode(False)
+        self.assertTrue(payload["follower_only"])
+
+    def test_the_refusal_does_not_leave_the_busy_flag_set(self):
+        # It returns BEFORE taking _rs_busy_lock, so a refused click must not
+        # wedge the toggle into „Ein Moduswechsel läuft bereits".
+        self._set_type("edu6_studio")
+        with patch.object(agent.docker_manager, "set_leader_mode"):
+            self.app.handle_rs_set_mode(True)
+        self.assertFalse(self.app._rs_busy)
+        self.assertFalse(self.app._rs_switch_in_flight)
+
+    def test_omx_full_still_delegates_in_both_directions(self):
+        self._set_type("omx_full")
+        self.app._hardware = HardwareConfig(
+            leader=ArmDevice(serial_path="/dev/l"),
+            follower=ArmDevice(serial_path="/dev/f"))
+        for follower_only in (True, False):
+            with self.subTest(follower_only=follower_only):
+                with patch.object(agent.docker_manager, "set_leader_mode",
+                                  return_value=(True, "ok")) as slm:
+                    code, _ = self.app.handle_rs_set_mode(follower_only)
+                self.assertEqual(code, 200)
+                slm.assert_called_once()
+
+    def test_an_unknown_robot_type_keeps_the_omx_toggle(self):
+        # `_current_robot_type` degrades an unknown id to omx_full — the
+        # documented one-variable rollback must not lock the toggle out.
+        self._set_type("kein_solcher_typ")
+        self.app._hardware = HardwareConfig(
+            leader=ArmDevice(serial_path="/dev/l"),
+            follower=ArmDevice(serial_path="/dev/f"))
+        with patch.object(agent.docker_manager, "set_leader_mode",
+                          return_value=(True, "ok")) as slm:
+            code, _ = self.app.handle_rs_set_mode(True)
+        self.assertEqual(code, 200)
+        slm.assert_called_once()
+
+    def test_rs_status_reports_has_leader_per_profile(self):
+        for pid, expected in (("omx_full", True), ("omx_follower", False),
+                              ("edu6_studio", False)):
+            with self.subTest(pid):
+                self._set_type(pid)
+                with patch.object(agent.docker_manager, "get_container_status",
+                                  return_value={"open_manipulator": "running"}):
+                    code, payload = self.app.handle_rs_status()
+                self.assertEqual(code, 200)
+                self.assertIs(payload["has_leader"], expected)
+
+    def test_has_leader_is_reported_on_the_busy_short_circuit_too(self):
+        # The busy branch returns early; a toggle that hides on has_leader
+        # must not un-hide itself just because another switch is in flight.
+        self._set_type("edu6_studio")
+        self.app._rs_busy = True
+        code, payload = self.app.handle_rs_status()
+        self.assertEqual(code, 200)
+        self.assertTrue(payload["busy"])
+        self.assertIs(payload["has_leader"], False)
 
 
 # ── factory reset (double-confirm) ───────────────────────────────────────────

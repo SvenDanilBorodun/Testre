@@ -824,6 +824,14 @@ class AgentApp:
         likely setup mistake (wrong family plugged in, partial servo chain, 12-V
         supply off); when present it REPLACES the generic message, exactly as
         the GUI replaces its status line.
+
+        A LEADER-LESS PROFILE SUCCEEDS WITH ONE ARM. ``scan_requires_leader``
+        (the profile registry, not the arm family — ``omx_follower`` shares the
+        two-arm ``omx`` family) decides three things: whether the fast-rehydrate
+        path may run without a saved ``LEADER_PORT``, whether a missing leader
+        is a failure at all, and which German sentence a result gets. Reporting
+        „Nur der Follower-Arm wurde erkannt — der Leader-Arm fehlt" to a
+        Roboter-Studio kit that HAS no leader is the misleading 409 this closes.
         """
         if self._update_in_flight():
             return self._busy_updating()
@@ -834,18 +842,24 @@ class AgentApp:
             self.stop_active_previews()
             docker_manager.ensure_environment_stopped(log=self._log)
 
-            arm_family = arm_family_for_robot_type(self._current_robot_type())
+            robot_type = self._current_robot_type()
+            requires_leader = ROBOT_PROFILES[robot_type]["scan_requires_leader"]
+            arm_family = arm_family_for_robot_type(robot_type)
             notice = ""
             leader = follower = None
             if not force:
                 saved_leader = config_generator.read_env_var("LEADER_PORT", self.env_file)
                 saved_follower = config_generator.read_env_var("FOLLOWER_PORT", self.env_file)
-                if saved_leader and saved_follower:
+                # A follower-only .env has no LEADER_PORT by construction, so
+                # demanding one here would send every such rig down the slow
+                # scanner-container path on every single revisit.
+                if saved_follower and (saved_leader or not requires_leader):
                     self._log("Arme werden schnell überprüft (vorherige Zuordnung) …")
                     leader, follower = identify_arm.fast_rehydrate_arms(
-                        saved_leader, saved_follower, arm_family=arm_family)
+                        saved_leader, saved_follower, arm_family=arm_family,
+                        require_leader=requires_leader)
 
-            if leader is None or follower is None:
+            if follower is None or (requires_leader and leader is None):
                 self._log("Arme werden gescannt (Leader/Follower werden bestimmt) …")
                 leader, follower = identify_arm.scan_and_identify_arms(
                     IMAGE_OPEN_MANIPULATOR, arm_family=arm_family)
@@ -868,28 +882,41 @@ class AgentApp:
                                         "Kein Arm gefunden — USB-Verbindung und "
                                         "Stromversorgung der Arme prüfen."}
             if follower is None:
+                # Reachable on a leader-less profile too: the omx family scan
+                # can find an OMX leader while the follower is unplugged. The
+                # follower is the arm this rig actually drives, so it is named
+                # WITHOUT promising a leader step the profile does not have.
                 return 409, {"ok": False, "leader": leader.serial_path if leader else None,
                              "follower": None, "notice": notice,
-                             "message": "Nur der Leader-Arm wurde erkannt — der "
-                                        "Follower-Arm fehlt. Bitte USB prüfen."}
-            if leader is None:
+                             "message": ("Nur der Leader-Arm wurde erkannt — der "
+                                         "Follower-Arm fehlt. Bitte USB prüfen."
+                                         if requires_leader else
+                                         "Der Roboterarm wurde nicht erkannt — "
+                                         "bitte USB prüfen.")}
+            if leader is None and requires_leader:
                 return 409, {"ok": False, "leader": None,
                              "follower": follower.serial_path, "notice": notice,
                              "message": "Nur der Follower-Arm wurde erkannt — der "
                                         "Leader-Arm fehlt. Bitte USB prüfen."}
 
-            # Both arms found — persist the .env for the SELECTED profile. The
-            # mode is derived, not hardcoded False: on a follower-only profile
-            # (whose scan can still see two OMX arms plugged in) a both-arms
+            # Enough hardware for this profile — persist the .env. The mode is
+            # derived, not hardcoded False: on a follower-only profile (whose
+            # omx-family scan can still see two arms plugged in) a both-arms
             # write would contradict the profile and refuse.
             try:
                 self._persist_env_if_ready()
             except Exception as e:  # noqa: BLE001 — surfaced in German
                 return 500, {"ok": False,
                              "message": f"Konfiguration konnte nicht gespeichert werden: {e}"}
-            return 200, {"ok": True, "leader": leader.serial_path,
+            return 200, {"ok": True,
+                         "leader": leader.serial_path if leader else None,
                          "follower": follower.serial_path, "notice": notice,
-                         "message": "Beide Arme erkannt und gespeichert."}
+                         # A leader-less profile never speaks of „beide Arme" —
+                         # even when a stray second arm happened to be found,
+                         # because the generated .env has no LEADER_PORT.
+                         "message": ("Beide Arme erkannt und gespeichert."
+                                     if requires_leader else
+                                     "Roboterarm erkannt und gespeichert.")}
         finally:
             self._lifecycle_lock.release()
 
@@ -912,18 +939,32 @@ class AgentApp:
     def handle_cameras_roles(self, body: dict) -> "tuple[int, dict]":
         """Assign gripper/scene roles to enumerated devices and (if arms are
         already identified) persist. Body: ``{"cameras": [{"path": …,
-        "role": "gripper"|"scene"}, …]}``."""
+        "role": "gripper"|"scene"}, …]}``.
+
+        A LONE camera may arrive with an EMPTY/absent role — the PROFILE then
+        decides, taking the first entry of its ``camera_roles``: ``scene`` on
+        both follower-only profiles, ``gripper`` on ``omx_full``. This is the
+        twin of the Windows GUI's single-camera auto-assign
+        (``gui_app._on_cameras_changed``), and the value matters: perception and
+        the ``omx_f``/edu6 config topics hang off the role NAME, so defaulting a
+        Roboter-Studio kit's only camera to ``gripper`` broke every such rig
+        (CLAUDE.md). With TWO cameras the student must choose — the two
+        Innomakers are identical-serial, so only the live preview tells them
+        apart — and a blank role there stays a German 400.
+        """
         if self._update_in_flight():
             return self._busy_updating()
         entries = body.get("cameras")
         if not isinstance(entries, list):
             return 400, {"ok": False, "message": "Ungültige Kamera-Zuordnung."}
+        named = [e for e in entries if (e or {}).get("path")]
+        # Resolved once (it reads the .env), and only where it can be used.
+        default_role = (robot_profile(self._current_robot_type())["camera_roles"][0]
+                        if len(named) == 1 else "")
         cameras: list = []
-        for e in entries:
-            path = (e or {}).get("path")
-            role = (e or {}).get("role")
-            if not path:
-                continue
+        for e in named:
+            path = e.get("path")
+            role = e.get("role") or default_role
             if role not in ("gripper", "scene"):
                 return 400, {"ok": False,
                              "message": f"Ungültige Rolle für {path} (nur Greifer/Szene)."}
@@ -1797,25 +1838,55 @@ class AgentApp:
 
     def handle_rs_status(self) -> "tuple[int, dict]":
         """GET /roboter-studio/status → the exact ``roboter_studio_control`` JSON
-        contract, plus ``ready`` (arm container running) like the GUI badge."""
+        contract, plus ``ready`` (arm container running) like the GUI badge and
+        ``has_leader`` (this rig's profile has a leader arm at all).
+
+        ``has_leader`` is ADDITIVE and Pi-only: on Windows the toggle self-hides
+        because the ``:8769`` bridge is NEVER CONSTRUCTED for a follower-only
+        rig, but on a Pi the same contract is served by the always-on agent, so
+        the bridge probe always succeeds. The React toggle therefore also hides
+        on an explicit ``has_leader === false`` — closing the window between
+        mount and the first ROS capability tick, where `caps` is still undefined
+        and the toggle would otherwise render on a rig that has no leader. The
+        Windows bridge simply omits the key (undefined ≠ false), so its
+        behaviour is unchanged. ``handle_rs_set_mode`` is the belt behind it.
+        """
         follower_only = str(
             config_generator.read_env_var("EDUBOTICS_FOLLOWER_ONLY", self.env_file)).strip() == "1"
+        has_leader = not ROBOT_PROFILES[self._current_robot_type()]["follower_only"]
         with self._rs_busy_lock:
             busy = self._rs_busy or self._rs_switch_in_flight
         if busy:
-            return 200, {"follower_only": follower_only, "ready": False, "busy": True}
+            return 200, {"follower_only": follower_only, "ready": False, "busy": True,
+                         "has_leader": has_leader}
         try:
             arm = docker_manager.get_container_status().get("open_manipulator", "not found")
         except Exception:  # noqa: BLE001
             arm = "error"
-        return 200, {"follower_only": follower_only, "ready": arm == "running", "busy": False}
+        return 200, {"follower_only": follower_only, "ready": arm == "running", "busy": False,
+                     "has_leader": has_leader}
 
     def handle_rs_set_mode(self, follower_only: bool) -> "tuple[int, dict]":
         """POST /roboter-studio/leader-disable|enable → switch the arm mode and
         recreate ONLY open_manipulator. Busy-locked so a second click can't race
         two ``compose up`` calls on the same container. The .env rollback on a
         failed restart lives in ``docker_manager.set_leader_mode`` (the ported
-        ``gui_app._rs_set_leader_mode`` callback)."""
+        ``gui_app._rs_set_leader_mode`` callback).
+
+        REFUSED OUTRIGHT ON A LEADER-LESS PROFILE, in BOTH directions. This is
+        the belt behind the React hide: on Windows a follower-only rig never
+        constructs the ``:8769`` bridge at all (``gui_app._start_rs_control_
+        server``), but the Pi's bridge is the always-on agent, so the lockout
+        has to live here. „Leader verbinden" would ask ``generate_env_file`` for
+        a both-arms .env on a rig that has no leader and hit its contradiction
+        guard as an opaque 500; „Leader abschalten" would recreate the arm
+        container — a ~20 s outage — to reach the mode it is already in.
+        """
+        robot_type = self._current_robot_type()
+        if ROBOT_PROFILES[robot_type]["follower_only"]:
+            return 409, {"ok": False, "follower_only": True,
+                         "message": "Dieser Robotertyp hat keinen Leader-Arm — "
+                                    "Roboter Studio ist hier dauerhaft aktiv."}
         with self._rs_busy_lock:
             if self._rs_busy:
                 return 409, {"ok": False, "message": "Ein Moduswechsel läuft bereits."}

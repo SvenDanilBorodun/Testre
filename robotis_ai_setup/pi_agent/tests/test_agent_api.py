@@ -3330,6 +3330,34 @@ class TestRobotTypeEndpoint(_RobotTypeBase):
         self.assertIsNone(agent.config_generator.read_env_var(
             "EDUBOTICS_ROBOT_TYPE", self.env))
 
+    def test_a_failed_regenerate_does_not_claim_the_type_was_not_saved(self):
+        """The id write is the contract; the .env regenerate on top is a
+        convenience. Once the id is on disk, answering „konnte nicht gespeichert
+        werden" would be false — and the one reachable cause (a hand-edited
+        CAMERA_NAME_n that rehydrate carried in verbatim) has nothing to do with
+        the robot type."""
+        self._seed_arms(leader=True)
+        self.app._hardware.cameras = [
+            agent.config_generator.CameraDevice(path="/dev/video0", role="kaputt")]
+        with self.assertLogs("edubotics-pi-agent", level="INFO") as cap:
+            code, payload = self._post("/robot-type", {"robot_type": "omx_full"},
+                                       origin=None)
+        self.assertEqual(code, 200, payload)
+        self.assertEqual(self.app._current_robot_type(), "omx_full")
+        # …and only the rewrite is reported as failed, in the Protokoll (the
+        # _RingLogHandler mirrors this logger into the SSE stream).
+        self.assertTrue(any("Robotertyp gesetzt" in t and "WARNUNG" in t
+                            for t in cap.output), cap.output)
+
+    def test_a_failed_ID_write_IS_a_500(self):
+        with patch.object(agent.config_generator, "upsert_env_var",
+                          side_effect=RuntimeError("disk full")):
+            code, payload = self._post("/robot-type", {"robot_type": "omx_full"},
+                                       origin=None)
+        self.assertEqual(code, 500)
+        self.assertIn("Robotertyp konnte nicht gespeichert werden",
+                      payload["message"])
+
     def test_the_lock_is_released_again_on_every_path(self):
         for body in ({"robot_type": "edu6_studio"},   # success
                      {"robot_type": "hovercraft"}):   # 400 before the acquire

@@ -1060,7 +1060,12 @@ class AgentApp:
         try:
             try:
                 container = docker_manager.get_container_status()
-            except Exception:  # noqa: BLE001 — a status probe must not block
+            except Exception:  # noqa: BLE001
+                # Deliberately FAIL-OPEN, same posture as handle_status: an
+                # unreadable docker state must not wedge the wizard's only way
+                # to choose a robot. The consequence of a change slipping past
+                # a live tier is bounded — the .env and the containers disagree
+                # until the next „Umgebung starten", which regenerates anyway.
                 container = {}
             if any(container.get(n) == "running"
                    for n in ("open_manipulator", "physical_ai_server")):
@@ -1071,15 +1076,23 @@ class AgentApp:
                 # Unquoted: entrypoint_omx.sh compares this value literally.
                 config_generator.upsert_env_var(
                     "EDUBOTICS_ROBOT_TYPE", requested, self.env_file, quote=False)
-                # Best effort on top: once the scanned hardware fits the new
-                # profile, rewrite the whole managed .env so EDUBOTICS_
-                # FOLLOWER_ONLY (and LEADER_PORT) follow the derive immediately
-                # instead of at the next „Umgebung starten". A rig that is not
-                # ready yet keeps only the id — which is all the scan needs.
-                self._persist_env_if_ready()
             except Exception as e:  # noqa: BLE001 — surfaced in German
                 return 500, {"ok": False,
                              "message": f"Robotertyp konnte nicht gespeichert werden: {e}"}
+            try:
+                # Convenience on top, NOT part of the contract: once the scanned
+                # hardware fits the new profile, rewrite the whole managed .env
+                # so EDUBOTICS_FOLLOWER_ONLY (and LEADER_PORT) follow the derive
+                # immediately rather than at the next „Umgebung starten". A rig
+                # that is not ready yet keeps only the id — which is all the scan
+                # needs. This must NOT fail the request: the type IS saved by
+                # then, so reporting „konnte nicht gespeichert werden" would be a
+                # lie, and the one reachable cause is unrelated (a hand-edited
+                # CAMERA_NAME_n that rehydrate carried in verbatim).
+                self._persist_env_if_ready()
+            except Exception as e:  # noqa: BLE001 — logged, never fatal
+                self._log("[WARNUNG] Robotertyp gesetzt, aber die Konfiguration "
+                          f"konnte nicht neu erzeugt werden: {e}")
         finally:
             self._lifecycle_lock.release()
         row = ROBOT_PROFILES[requested]

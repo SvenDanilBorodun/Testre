@@ -69,6 +69,15 @@ export default function SystemPage() {
   // ── local UI state ─────────────────────────────────────────────────────────
   const [cloudOnly, setCloudOnly] = useState(false);
 
+  // Robot type (ArmProfile). The AGENT's /status is the authority — this pair
+  // only holds the optimistic value across the POST so the <select> does not
+  // snap back to the old id while the round-trip is in flight, and (crucially)
+  // so a REFUSED change (409 „nur wenn die Umgebung gestoppt ist") reverts to
+  // what the rig actually is instead of leaving the wizard showing a type the
+  // Pi never adopted.
+  const [savingRobotType, setSavingRobotType] = useState(false);
+  const [pendingRobotType, setPendingRobotType] = useState(null);
+
   const [scanning, setScanning] = useState(false);
   const [scanMsg, setScanMsg] = useState('');
   const [scanFailed, setScanFailed] = useState(false);
@@ -109,6 +118,42 @@ export default function SystemPage() {
 
   const previewRef = useRef(null);
 
+  // ── robot profile (declared HERE, above the callbacks that close over it) ───
+  //
+  // Every profile-shaped question the wizard asks is answered from the AGENT's
+  // /status: the selectable list, which id is live, and whether that id needs a
+  // leader arm. Nothing is derived from an id LITERAL — a new profile in
+  // `pi_agent/constants.py::ROBOT_PROFILES` reaches this page with no edit here.
+  //
+  // GRACEFUL DEGRADE is the load-bearing property: an agent from before WP-3
+  // sends none of these keys, and that Pi must keep behaving EXACTLY as it did.
+  // Hence an absent/malformed `robot_profiles` yields [] (selector hidden, not
+  // crashed), an absent `hardware_ready` falls back to `arms.both` (the old
+  // gate), and `scan_requires_leader` is read as `!== false` so only an
+  // EXPLICIT false hides the Leader tile — the same doctrine the nav's
+  // capability gating uses.
+  //
+  // Rows are filtered rather than trusted: `{row.display_de}` on a non-string
+  // throws „Objects are not valid as a React child", which white-screens the
+  // Pi's ONLY repair surface.
+  const robotProfiles = Array.isArray(agentStatus?.robot_profiles)
+    ? agentStatus.robot_profiles.filter(
+        (p) =>
+          p
+          && typeof p.id === 'string'
+          && p.id !== ''
+          && typeof p.display_de === 'string'
+          && p.display_de !== ''
+      )
+    : [];
+  const selectedRobotType =
+    pendingRobotType
+    ?? (typeof agentStatus?.robot_type === 'string' ? agentStatus.robot_type : '');
+  const selectedProfile = robotProfiles.find((p) => p.id === selectedRobotType) || null;
+  const scanRequiresLeader = selectedProfile
+    ? selectedProfile.scan_requires_leader !== false
+    : true;
+
   useEffect(() => {
     previewRef.current = previewDevice;
   }, [previewDevice]);
@@ -144,6 +189,37 @@ export default function SystemPage() {
     }
   }, []);
 
+  // ── Modus — Robotertyp ─────────────────────────────────────────────────────
+  const handleRobotTypeChange = useCallback(
+    async (next) => {
+      setPendingRobotType(next);
+      setSavingRobotType(true);
+      try {
+        const { ok, data } = await sysFetch('/robot-type', {
+          method: 'POST',
+          body: { robot_type: next },
+        });
+        if (ok) toast.success(data.message || 'Robotertyp gespeichert.');
+        else toast.error(data.message || 'Robotertyp konnte nicht gespeichert werden.');
+      } catch {
+        toast.error('Der Agent ist nicht erreichbar.');
+      } finally {
+        setSavingRobotType(false);
+        // Drop the optimistic value only AFTER the refreshed truth has landed:
+        // clearing it first would flash the old id on a successful change, and
+        // keeping it would leave a refused change showing a type this Pi is
+        // not. Either outcome then renders the agent's own answer.
+        try {
+          await refreshAgentStatus();
+        } catch {
+          /* the 5 s poll retries — the agent stays the authority */
+        }
+        setPendingRobotType(null);
+      }
+    },
+    [refreshAgentStatus]
+  );
+
   // ── Schritt A/B — Arme scannen ─────────────────────────────────────────────
   const handleScanArms = useCallback(
     async (force) => {
@@ -151,14 +227,15 @@ export default function SystemPage() {
       setScanMsg('');
       setScanFailed(false);
       await stopPreview();
+      const foundMsg = scanRequiresLeader ? 'Beide Arme erkannt.' : 'Roboterarm erkannt.';
       try {
         const { ok, data } = await sysFetch('/scan-arms', {
           method: 'POST',
           body: force ? { force: true } : {},
         });
-        setScanMsg(data.message || (ok ? 'Beide Arme erkannt.' : 'Arm-Scan fehlgeschlagen.'));
+        setScanMsg(data.message || (ok ? foundMsg : 'Arm-Scan fehlgeschlagen.'));
         setScanFailed(!ok);
-        if (ok) toast.success(data.message || 'Beide Arme erkannt.');
+        if (ok) toast.success(data.message || foundMsg);
         else toast.error(data.message || 'Arm-Scan fehlgeschlagen.');
       } catch {
         setScanMsg('Der Agent ist nicht erreichbar. Bitte kurz warten und erneut versuchen.');
@@ -169,7 +246,7 @@ export default function SystemPage() {
         refreshAgentStatus();
       }
     },
-    [stopPreview, refreshAgentStatus]
+    [stopPreview, refreshAgentStatus, scanRequiresLeader]
   );
 
   // ── Schritt C — Kameras ────────────────────────────────────────────────────
@@ -339,7 +416,15 @@ export default function SystemPage() {
   const robotTierUp = !!agentStatus?.robot_tier_up;
   const managerUp = !!agentStatus?.manager_up;
   const tokenSaved = hfJustSaved || !!agentStatus?.hf_token_saved;
-  const canStart = cloudOnly || (armsBoth && !!agentStatus?.agent_ready);
+  // PROFILE-AWARE readiness, computed by the agent against the selected
+  // ArmProfile (`agent.py::_hardware_ready`). `arms_identified.both` answers a
+  // DIFFERENT question — are two arms present — and a follower-only rig is
+  // fully ready with it false, which is why omx_follower and edu6_studio were
+  // both unstartable on a Pi. Falls back to the old both-arms gate when the
+  // agent predates the key, so an un-updated Pi is byte-unchanged.
+  const hardwareReady =
+    typeof agentStatus?.hardware_ready === 'boolean' ? agentStatus.hardware_ready : armsBoth;
+  const canStart = cloudOnly || (hardwareReady && !!agentStatus?.agent_ready);
   const lanIp = agentStatus?.lan_ip || null;
   const hostname = agentStatus?.hostname || null;
 
@@ -473,8 +558,67 @@ export default function SystemPage() {
           </div>
         </Card>
 
-        {/* Modus */}
+        {/* Modus — Robotertyp + Cloud-Modus.
+            ONE card, deliberately: the Windows twin puts both in a single
+            „Modus" LabelFrame (gui_app.py::mode_frame), and a second card
+            called Modus would read as two competing mode switches.
+
+            The selector sits ABOVE the cloud checkbox because it is the
+            decision the rest of the wizard depends on — the arm family the scan
+            looks for, whether a Leader tile exists at all, and what
+            „Umgebung starten" requires. It renders only when the agent offers a
+            list (an older agent → no selector, no crash), and is frozen exactly
+            where the GUI grays its combobox: while the robot tier RUNS (the
+            type is hardset at start and the arm container branches on it) and
+            in cloud-only mode (no robot, so the type is irrelevant). */}
         <Step title="Modus">
+          {robotProfiles.length > 0 && (
+            <div className="mb-4">
+              <label
+                htmlFor="eb-robot-type"
+                className="block text-sm font-medium text-[var(--ink)]"
+              >
+                Robotertyp
+              </label>
+              <select
+                id="eb-robot-type"
+                value={selectedRobotType}
+                disabled={robotTierUp || cloudOnly || savingRobotType}
+                onChange={(e) => handleRobotTypeChange(e.target.value)}
+                title={
+                  robotTierUp
+                    ? 'Zum Wechseln zuerst die Roboter-Umgebung stoppen.'
+                    : undefined
+                }
+                className="mt-1 h-10 w-full max-w-md rounded-[var(--radius-sm)] border border-[var(--line)] bg-white px-2 text-sm disabled:opacity-60"
+              >
+                {/* Only while the agent's id is not (yet) in the list — a
+                    hand-edited .env, or a status that has not landed. Without
+                    it the <select> would silently display the FIRST profile
+                    while the rig runs another. `disabled` because it is a
+                    REPORT of the current state, not an offer: choosing it would
+                    POST an id the agent must reject. */}
+                {selectedProfile === null && (
+                  <option value={selectedRobotType} disabled>
+                    {selectedRobotType || '— Robotertyp —'}
+                  </option>
+                )}
+                {robotProfiles.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.display_de}
+                  </option>
+                ))}
+              </select>
+              <p className="mt-2 text-xs text-[var(--ink-3)]">
+                Wähle, welcher Roboter an diesem Pi angeschlossen ist.{' '}
+                {scanRequiresLeader
+                  ? 'Dieser Typ braucht beide Arme — Leader und Follower.'
+                  : 'Dieser Typ braucht nur einen Arm — es wird kein Leader-Arm angeschlossen.'}{' '}
+                Der Typ lässt sich nur ändern, solange die Roboter-Umgebung
+                gestoppt ist.
+              </p>
+            </div>
+          )}
           <label className="flex items-start gap-3 cursor-pointer">
             <input
               type="checkbox"
@@ -498,20 +642,31 @@ export default function SystemPage() {
               n="A"
               title="Arme scannen"
               right={
-                <Pill tone={armsBoth ? 'success' : 'neutral'}>
-                  {armsBoth ? 'Beide Arme erkannt' : 'Nicht erkannt'}
+                <Pill tone={hardwareReady ? 'success' : 'neutral'}>
+                  {hardwareReady
+                    ? (scanRequiresLeader ? 'Beide Arme erkannt' : 'Arm erkannt')
+                    : 'Nicht erkannt'}
                 </Pill>
               }
             >
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
-                <div className="rounded-[var(--radius-sm)] bg-[var(--bg-sunk)] p-3">
-                  <div className="text-[11px] uppercase tracking-wide text-[var(--ink-3)]">Leader</div>
-                  <div className="font-mono text-sm text-[var(--ink)] break-all">
-                    {arms.leader || '—'}
+              {/* The Leader tile is HIDDEN, not disabled, on a profile that has
+                  no leader: showing a permanently empty „Leader —" is what made
+                  a Roboter-Studio kit look half-broken. The remaining tile is
+                  then named „Roboterarm" (the agent's own German for it), since
+                  „Follower" only means anything opposite a leader. */}
+              <div className={`grid grid-cols-1 ${scanRequiresLeader ? 'sm:grid-cols-2' : ''} gap-3 mb-3`}>
+                {scanRequiresLeader && (
+                  <div className="rounded-[var(--radius-sm)] bg-[var(--bg-sunk)] p-3">
+                    <div className="text-[11px] uppercase tracking-wide text-[var(--ink-3)]">Leader</div>
+                    <div className="font-mono text-sm text-[var(--ink)] break-all">
+                      {arms.leader || '—'}
+                    </div>
                   </div>
-                </div>
+                )}
                 <div className="rounded-[var(--radius-sm)] bg-[var(--bg-sunk)] p-3">
-                  <div className="text-[11px] uppercase tracking-wide text-[var(--ink-3)]">Follower</div>
+                  <div className="text-[11px] uppercase tracking-wide text-[var(--ink-3)]">
+                    {scanRequiresLeader ? 'Follower' : 'Roboterarm'}
+                  </div>
                   <div className="font-mono text-sm text-[var(--ink)] break-all">
                     {arms.follower || '—'}
                   </div>
@@ -534,7 +689,11 @@ export default function SystemPage() {
                 <div className="mt-3 rounded-[var(--radius-sm)] border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
                   <div className="font-medium mb-1">Hilfe bei Problemen</div>
                   <ul className="list-disc pl-5 space-y-1">
-                    <li>Beide Arme über USB anschließen und einschalten (12-V-Netzteil).</li>
+                    <li>
+                      {scanRequiresLeader
+                        ? 'Beide Arme über USB anschließen und einschalten (12-V-Netzteil).'
+                        : 'Den Roboterarm über USB anschließen und einschalten (12-V-Netzteil).'}
+                    </li>
                     <li>
                       Rechte fehlen? Der Benutzer muss in den Gruppen
                       {' '}<span className="font-mono">dialout</span> und
@@ -654,7 +813,9 @@ export default function SystemPage() {
               ? 'Im Cloud-Modus läuft die Weboberfläche bereits — Roboter-Start nicht nötig.'
               : robotTierUp
               ? 'Die Roboter-Umgebung läuft. Zum Aufnehmen wechsle zur Aufnahme.'
-              : 'Startet Arme und Kameras. Voraussetzung: beide Arme erkannt.'}
+              : scanRequiresLeader
+              ? 'Startet Arme und Kameras. Voraussetzung: beide Arme erkannt.'
+              : 'Startet den Roboterarm und die Kameras. Voraussetzung: Arm erkannt.'}
           </p>
           <div className="flex flex-wrap items-center gap-2">
             <Btn
@@ -663,7 +824,9 @@ export default function SystemPage() {
               disabled={startingEnv || (!cloudOnly && robotTierUp) || !canStart}
               title={
                 !canStart
-                  ? 'Bitte zuerst beide Arme scannen (oder Cloud-Modus wählen).'
+                  ? (scanRequiresLeader
+                      ? 'Bitte zuerst beide Arme scannen (oder Cloud-Modus wählen).'
+                      : 'Bitte zuerst den Roboterarm scannen (oder Cloud-Modus wählen).')
                   : undefined
               }
             >
@@ -679,7 +842,9 @@ export default function SystemPage() {
           </div>
           {!cloudOnly && !canStart && (
             <p className="mt-2 text-xs text-[var(--ink-3)]">
-              Bitte zuerst beide Arme scannen (Schritt A) oder oben „Cloud-Modus" wählen.
+              {scanRequiresLeader
+                ? 'Bitte zuerst beide Arme scannen (Schritt A) oder oben „Cloud-Modus" wählen.'
+                : 'Bitte zuerst den Roboterarm scannen (Schritt A) oder oben „Cloud-Modus" wählen.'}
             </p>
           )}
         </Card>

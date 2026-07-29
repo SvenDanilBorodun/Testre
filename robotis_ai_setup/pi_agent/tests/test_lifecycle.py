@@ -260,13 +260,60 @@ class TestLeaderLessScanGating(_EnvTempBase):
 
     # ── the 409 wording this closes ─────────────────────────────────────────
 
-    def test_a_missing_follower_never_names_a_leader_step_on_a_leader_less_rig(self):
+    # The 409 message that fires here DIAGNOSES the wrong arm; it must never
+    # collapse into the „nothing found" wording, because the scan SUCCEEDED —
+    # sending that student to check a USB cable is a false lead.
+    WRONG_ARM = ("Es wurde der Leader-Arm erkannt — dieser Robotertyp braucht "
+                 "den Follower-Arm. Bitte den Follower-Arm anschließen.")
+    NOTHING_FOUND = ("Kein Arm gefunden — USB-Verbindung und Stromversorgung "
+                     "der Arme prüfen.")
+
+    def test_a_wrong_arm_on_a_leader_less_rig_is_diagnosed_not_blamed_on_usb(self):
+        # THE reachable state: `omx_follower` shares the two-arm `omx` family,
+        # so its dxl scan really can identify a leader while the follower is
+        # unplugged. `leader is not None` is guaranteed here — the both-None
+        # case returns 404 one branch earlier.
+        code, payload = self._scan(
+            "omx_follower", (self._arm(self.LEADER, "leader"), None))
+        self.assertEqual(code, 409)
+        self.assertEqual(payload["message"], self.WRONG_ARM)
+
+    def test_the_wrong_arm_message_is_not_the_nothing_found_message(self):
+        # The two states are distinct and must stay distinct: one means „you
+        # plugged in the wrong arm", the other „no arm answered at all".
+        _, wrong = self._scan(
+            "omx_follower", (self._arm(self.LEADER, "leader"), None))
+        _, nothing = self._scan("omx_follower", (None, None))
+        self.assertEqual(wrong["message"], self.WRONG_ARM)
+        self.assertEqual(nothing["message"], self.NOTHING_FOUND)
+        self.assertNotEqual(wrong["message"], nothing["message"])
+
+    def test_the_wrong_arm_message_never_asks_for_a_leader_arm(self):
+        # It NAMES the leader (accurate — one was found) but must not send a
+        # leader-less rig off to connect one: the ask is the FOLLOWER.
+        _, payload = self._scan(
+            "omx_follower", (self._arm(self.LEADER, "leader"), None))
+        self.assertIn("Follower-Arm anschließen", payload["message"])
+        self.assertNotIn("Leader-Arm anschließen", payload["message"])
+        self.assertNotIn("Leader-Arm fehlt", payload["message"])
+
+    def test_the_wrong_arm_message_does_not_claim_nothing_was_detected(self):
+        # The exact regression: an arm WAS detected, so „wurde nicht erkannt"
+        # (and any bare „USB prüfen" hunt) is a false lead.
+        _, payload = self._scan(
+            "omx_follower", (self._arm(self.LEADER, "leader"), None))
+        self.assertNotIn("nicht erkannt", payload["message"])
+        self.assertNotIn("USB prüfen", payload["message"])
+
+    def test_edu6_takes_the_same_branch_defensively(self):
+        # NOT physically reachable: the edu6 family scans with protocol
+        # 'feetech', whose prober can never return the role 'leader'
+        # (identify_arm.scan_and_identify_arms), so a real edu6 rig with no
+        # follower hits the 404 above. Pinned anyway — the branch is shared.
         code, payload = self._scan(
             "edu6_studio", (self._arm(self.LEADER, "leader"), None))
         self.assertEqual(code, 409)
-        self.assertNotIn("Leader", payload["message"])
-        self.assertEqual(payload["message"],
-                         "Der Roboterarm wurde nicht erkannt — bitte USB prüfen.")
+        self.assertEqual(payload["message"], self.WRONG_ARM)
 
     # ── omx_full is untouched ───────────────────────────────────────────────
 

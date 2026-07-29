@@ -896,17 +896,25 @@ class AgentApp:
                                         "Kein Arm gefunden — USB-Verbindung und "
                                         "Stromversorgung der Arme prüfen."}
             if follower is None:
+                # `leader` is non-None here by construction — the both-None case
+                # returned 404 above. So an arm WAS found and it is the wrong
+                # one, on either profile shape.
+                #
                 # Reachable on a leader-less profile too: the omx family scan
                 # can find an OMX leader while the follower is unplugged. The
-                # follower is the arm this rig actually drives, so it is named
-                # WITHOUT promising a leader step the profile does not have.
+                # message must not send that student hunting a cable — the scan
+                # succeeded, they plugged in the wrong arm. („Leader"/„Follower"
+                # are the German terms this product already uses throughout, so
+                # naming the arm is consistency, not new jargon.) Genuinely
+                # nothing found keeps its own „Kein Arm gefunden" 404 above.
                 return 409, {"ok": False, "leader": leader.serial_path if leader else None,
                              "follower": None, "notice": notice,
                              "message": ("Nur der Leader-Arm wurde erkannt — der "
                                          "Follower-Arm fehlt. Bitte USB prüfen."
                                          if requires_leader else
-                                         "Der Roboterarm wurde nicht erkannt — "
-                                         "bitte USB prüfen.")}
+                                         "Es wurde der Leader-Arm erkannt — dieser "
+                                         "Robotertyp braucht den Follower-Arm. Bitte "
+                                         "den Follower-Arm anschließen.")}
             if leader is None and requires_leader:
                 return 409, {"ok": False, "leader": None,
                              "follower": follower.serial_path, "notice": notice,

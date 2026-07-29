@@ -385,43 +385,45 @@ class TestLeaderLessScanGating(_EnvTempBase):
         self.assertIs(fast.call_args.kwargs.get("require_leader"), True)
 
 
-class TestLoneCameraDefaultRole(_EnvTempBase):
-    """A LONE camera with no role takes the PROFILE's first ``camera_roles``
-    entry — the twin of the Windows GUI's single-camera auto-assign. The value
-    is load-bearing: perception and the config topics hang off the role NAME, so
-    `gripper` on a Roboter-Studio kit broke every such rig (CLAUDE.md)."""
+class TestCameraRolesRequireAnExplicitRole(_EnvTempBase):
+    """EVERY camera must carry an explicit ``gripper``/``scene`` role — there is
+    deliberately no lone-camera auto-assign, because the only client
+    (``SystemPage.js::handleSaveRoles``) filters role-less cameras OUT of the
+    request, so such a default was unreachable code pretending to work.
+
+    ``PROFILES`` is swept everywhere a default would have differed between them
+    (``camera_roles[0]`` is ``gripper`` on ``omx_full`` and ``scene`` on both
+    follower-only profiles), so re-introducing one makes these diverge."""
+
+    PROFILES = ("omx_full", "omx_follower", "edu6_studio")
 
     def _roles(self, robot_type, cameras):
         cg.upsert_env_var("EDUBOTICS_ROBOT_TYPE", robot_type, self.env_path,
                           quote=False)
         return self.app.handle_cameras_roles({"cameras": cameras})
 
-    def test_the_default_is_scene_on_both_follower_only_profiles(self):
-        for pid in ("omx_follower", "edu6_studio"):
+    def test_a_role_less_lone_camera_is_a_german_400_on_every_profile(self):
+        for pid in self.PROFILES:
             with self.subTest(pid):
                 code, payload = self._roles(pid, [{"path": "/dev/video0"}])
-                self.assertEqual(code, 200)
-                self.assertEqual(payload["cameras"], [{"path": "/dev/video0",
-                                                       "role": "scene"}])
+                self.assertEqual(code, 400)
+                self.assertIn("Ungültige Rolle", payload["message"])
 
-    def test_the_default_is_gripper_on_omx_full(self):
-        code, payload = self._roles("omx_full", [{"path": "/dev/video0"}])
-        self.assertEqual(code, 200)
-        self.assertEqual(payload["cameras"], [{"path": "/dev/video0",
-                                               "role": "gripper"}])
+    def test_an_empty_string_role_is_a_400_on_every_profile(self):
+        for pid in self.PROFILES:
+            with self.subTest(pid):
+                code, payload = self._roles(
+                    pid, [{"path": "/dev/video0", "role": ""}])
+                self.assertEqual(code, 400)
+                self.assertIn("Ungültige Rolle", payload["message"])
 
-    def test_an_empty_string_role_is_treated_as_absent(self):
-        code, payload = self._roles(
-            "edu6_studio", [{"path": "/dev/video0", "role": ""}])
-        self.assertEqual(code, 200)
-        self.assertEqual(payload["cameras"][0]["role"], "scene")
-
-    def test_an_explicit_role_always_wins(self):
-        # The student looked at the preview — never override that.
-        code, payload = self._roles(
-            "edu6_studio", [{"path": "/dev/video0", "role": "gripper"}])
-        self.assertEqual(code, 200)
-        self.assertEqual(payload["cameras"][0]["role"], "gripper")
+    def test_no_profile_supplies_a_default_role(self):
+        # The sharp form: a role-less camera produces the IDENTICAL answer on
+        # all three profiles. Any profile-derived default (`camera_roles[0]`)
+        # would make omx_full and the follower-only pair disagree here.
+        answers = {pid: self._roles(pid, [{"path": "/dev/video0"}])
+                   for pid in self.PROFILES}
+        self.assertEqual(len(set(map(repr, answers.values()))), 1, answers)
 
     def test_two_role_less_cameras_are_still_a_german_400(self):
         # Identical-serial Innomakers: only the live preview tells them apart,
@@ -437,6 +439,18 @@ class TestLoneCameraDefaultRole(_EnvTempBase):
         self.assertEqual(code, 400)
         self.assertIn("Ungültige Rolle", payload["message"])
 
+    def test_an_explicit_role_is_accepted_verbatim_on_every_profile(self):
+        # The whole UI-producible surface: `handleSaveRoles` only ever sends
+        # explicit gripper/scene rows, and those are byte-unchanged.
+        for pid in self.PROFILES:
+            for role in ("gripper", "scene"):
+                with self.subTest(pid=pid, role=role):
+                    code, payload = self._roles(
+                        pid, [{"path": "/dev/video0", "role": role}])
+                    self.assertEqual(code, 200)
+                    self.assertEqual(payload["cameras"],
+                                     [{"path": "/dev/video0", "role": role}])
+
     def test_two_explicitly_assigned_cameras_are_unchanged(self):
         code, payload = self._roles("omx_full", [
             {"path": "/dev/video0", "role": "gripper"},
@@ -448,14 +462,23 @@ class TestLoneCameraDefaultRole(_EnvTempBase):
             {"path": "/dev/video1", "role": "scene"},
         ])
 
-    def test_a_path_less_entry_still_does_not_count_as_the_lone_camera(self):
-        # `{"path": ""}` rows are dropped before the count, so a real lone
-        # camera beside one still auto-assigns.
+    def test_a_path_less_entry_is_still_dropped_before_validation(self):
+        # `{"path": ""}` rows never reach the role check, so a well-formed
+        # camera beside one is still accepted.
         code, payload = self._roles(
-            "edu6_studio", [{"path": ""}, {"path": "/dev/video0"}])
+            "edu6_studio", [{"path": ""},
+                            {"path": "/dev/video0", "role": "scene"}])
         self.assertEqual(code, 200)
         self.assertEqual(payload["cameras"], [{"path": "/dev/video0",
                                                "role": "scene"}])
+
+    def test_an_empty_camera_list_is_still_an_accepted_no_op(self):
+        # What the UI actually POSTs when nothing is assigned — unchanged.
+        for pid in self.PROFILES:
+            with self.subTest(pid):
+                code, payload = self._roles(pid, [])
+                self.assertEqual(code, 200)
+                self.assertEqual(payload["cameras"], [])
 
 
 class TestScanNotice(_EnvTempBase):

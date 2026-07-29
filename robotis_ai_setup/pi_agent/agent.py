@@ -963,16 +963,27 @@ class AgentApp:
         already identified) persist. Body: ``{"cameras": [{"path": …,
         "role": "gripper"|"scene"}, …]}``.
 
-        A LONE camera may arrive with an EMPTY/absent role — the PROFILE then
-        decides, taking the first entry of its ``camera_roles``: ``scene`` on
-        both follower-only profiles, ``gripper`` on ``omx_full``. This is the
-        twin of the Windows GUI's single-camera auto-assign
-        (``gui_app._on_cameras_changed``), and the value matters: perception and
-        the ``omx_f``/edu6 config topics hang off the role NAME, so defaulting a
-        Roboter-Studio kit's only camera to ``gripper`` broke every such rig
-        (CLAUDE.md). With TWO cameras the student must choose — the two
+        EVERY camera must carry an explicit ``gripper``/``scene`` role; a blank
+        or absent one is a German 400 regardless of how many cameras were sent.
+
+        There is deliberately NO lone-camera auto-assign here, unlike the
+        Windows GUI's ``gui_app._on_cameras_changed``. The Pi's only client is
+        ``SystemPage.js::handleSaveRoles``, which filters its payload to
+        ``r === 'gripper' || r === 'scene'`` — so a camera the student left
+        unassigned is DROPPED from the request and never arrives role-less. A
+        default here could therefore only ever be reached by a hand-crafted
+        request, i.e. it was code that pretended to work (MEASURED: the branch
+        was unreachable across all 405 UI-producible request bodies).
+
+        Recorded because the value is not obvious if anyone re-adds it: the
+        right default on a FOLLOWER-ONLY rig is ``scene``, not ``gripper`` —
+        ``config/edu6_studio_config.yaml`` declares exactly one camera topic
+        (``scene:/scene/image_raw/compressed``) and the server's perception /
+        calibration entry points default to the ``scene`` camera, so defaulting
+        a Roboter-Studio kit's single camera to ``gripper`` broke every such rig
+        (CLAUDE.md). With TWO cameras nothing may be guessed at all: the two
         Innomakers are identical-serial, so only the live preview tells them
-        apart — and a blank role there stays a German 400.
+        apart.
         """
         if self._update_in_flight():
             return self._busy_updating()
@@ -980,13 +991,10 @@ class AgentApp:
         if not isinstance(entries, list):
             return 400, {"ok": False, "message": "Ungültige Kamera-Zuordnung."}
         named = [e for e in entries if (e or {}).get("path")]
-        # Resolved once (it reads the .env), and only where it can be used.
-        default_role = (robot_profile(self._current_robot_type())["camera_roles"][0]
-                        if len(named) == 1 else "")
         cameras: list = []
         for e in named:
             path = e.get("path")
-            role = e.get("role") or default_role
+            role = e.get("role")
             if role not in ("gripper", "scene"):
                 return 400, {"ok": False,
                              "message": f"Ungültige Rolle für {path} (nur Greifer/Szene)."}

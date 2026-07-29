@@ -429,6 +429,22 @@ class TestEdu6Scan(unittest.TestCase):
         self._scan("edu6")
         self.assertEqual(identify_arm.LAST_SCAN_NOTICE, "")
 
+    def test_a_FAILED_scan_never_reports_the_PREVIOUS_scan_s_notice(self):
+        """The end-of-scan clear only fires on success, so the entry clear is
+        what stops a failure inheriting an older diagnosis: the student unplugs
+        the OMX arm, plugs in the edu6 one, rescans, gets nothing — and must not
+        be told about the OMX arm that is no longer there."""
+        identify_arm.LAST_SCAN_NOTICE = identify_arm._CROSS_NOTICE_OMX_WHILE_EDU6
+        with patch.object(identify_arm, "_poll_serial_paths", return_value=[EDU6]), \
+                patch.object(identify_arm, "start_scanner_container", return_value=True), \
+                patch.object(identify_arm, "stop_scanner_container"), \
+                patch.object(identify_arm, "identify_arm_via_docker",
+                             return_value="unknown"):
+            leader, follower = identify_arm.scan_and_identify_arms(
+                "img", arm_family="edu6")
+        self.assertIsNone(follower)
+        self.assertEqual(identify_arm.LAST_SCAN_NOTICE, "")
+
     def test_a_dongle_that_sorts_first_does_not_poison_a_found_arm(self):
         """A stray CH34x dongle matches the by-id markers, answers no Feetech
         ping, and sorts BEFORE the real arm — so it sets the 12-V sentence and

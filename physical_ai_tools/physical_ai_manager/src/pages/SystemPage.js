@@ -643,10 +643,17 @@ export default function SystemPage() {
 
         {!cloudOnly && (
           <>
-            {/* Schritt A/B — Arme */}
+            {/* Schritt A/B — Arme.
+                DELIBERATE DIVERGENCE from the Windows GUI, whose Schritt-A
+                frame says „Arme scannen" on every profile. On the Pi this card
+                sits beside labels the Windows card does not have — a
+                „Roboterarm" tile and an „Arm erkannt" pill — so on a
+                follower-only profile, where there is exactly ONE arm, the
+                plural read as a bug. Heading + button go singular there;
+                `omx_full` is unchanged. Do not "re-sync" this with the GUI. */}
             <Step
               n="A"
-              title="Arme scannen"
+              title={scanRequiresLeader ? 'Arme scannen' : 'Arm scannen'}
               right={
                 <Pill tone={hardwareReady ? 'success' : 'neutral'}>
                   {hardwareReady
@@ -680,7 +687,9 @@ export default function SystemPage() {
               </div>
               <div className="flex flex-wrap items-center gap-2">
                 <Btn variant="primary" onClick={() => handleScanArms(false)} disabled={scanning}>
-                  {scanning ? 'Wird gescannt …' : 'Arme scannen'}
+                  {scanning
+                    ? 'Wird gescannt …'
+                    : (scanRequiresLeader ? 'Arme scannen' : 'Arm scannen')}
                 </Btn>
                 <Btn variant="secondary" onClick={() => handleScanArms(true)} disabled={scanning}>
                   Vollständig neu scannen

@@ -480,19 +480,20 @@ describe('SystemPage — follower-only start gating', () => {
   });
 
   it('tells a leader-less rig to power ONE arm when a scan fails', async () => {
+    // The mocked body is the agent's REAL wrong-arm 409 (agent.py
+    // handle_scan_arms): an arm was found and it is the leader.
+    const wrongArm =
+      'Es wurde der Leader-Arm erkannt — dieser Robotertyp braucht den Follower-Arm. '
+      + 'Bitte den Follower-Arm anschließen.';
     global.fetch = vi.fn((url) => {
       const u = String(url);
       if (u.includes('/scan-arms')) {
-        return jsonRes(
-          { ok: false, message: 'Der Roboterarm wurde nicht erkannt — bitte USB prüfen.' },
-          false,
-          409
-        );
+        return jsonRes({ ok: false, message: wrongArm }, false, 409);
       }
       return jsonRes({});
     });
     renderWith(statusFixture({ robot_type: 'edu6_studio', hardware_ready: false }));
-    await userEvent.click(screen.getByRole('button', { name: 'Arme scannen' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Arm scannen' }));
     expect(
       await screen.findByText('Den Roboterarm über USB anschließen und einschalten (12-V-Netzteil).')
     ).toBeInTheDocument();
@@ -500,9 +501,7 @@ describe('SystemPage — follower-only start gating', () => {
       screen.queryByText('Beide Arme über USB anschließen und einschalten (12-V-Netzteil).')
     ).toBeNull();
     // The agent's own German wins over any generic fallback.
-    expect(
-      screen.getByText('Der Roboterarm wurde nicht erkannt — bitte USB prüfen.')
-    ).toBeInTheDocument();
+    expect(screen.getByText(wrongArm)).toBeInTheDocument();
   });
 
   it('gates on the PROFILE, not on „two arms are plugged in"', () => {
@@ -559,5 +558,141 @@ describe('SystemPage — an omx_full Pi is unchanged', () => {
     expect(
       await screen.findByText('Beide Arme über USB anschließen und einschalten (12-V-Netzteil).')
     ).toBeInTheDocument();
+  });
+});
+
+// ── the scan card's singular/plural ─────────────────────────────────────────
+
+describe('Schritt A wording matches how many arms the profile has', () => {
+  // DELIBERATE DIVERGENCE from the Windows GUI, which says „Arme scannen" on
+  // every profile. The Pi card carries singular labels the GUI does not (a
+  // „Roboterarm" tile, an „Arm erkannt" pill), so the plural read as a bug
+  // beside them on a one-arm rig. `omx_full` must stay plural.
+
+  const FOLLOWER_ONLY = ['omx_follower', 'edu6_studio'];
+
+  it('is plural on omx_full — heading and button', () => {
+    renderWith(statusFixture({ robot_type: 'omx_full' }));
+    expect(screen.getByText('Schritt A — Arme scannen')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Arme scannen' })).toBeInTheDocument();
+    expect(screen.queryByText('Schritt A — Arm scannen')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Arm scannen' })).toBeNull();
+  });
+
+  it.each(FOLLOWER_ONLY)('is singular on %s — heading and button', (robotType) => {
+    renderWith(statusFixture({ robot_type: robotType }));
+    expect(screen.getByText('Schritt A — Arm scannen')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Arm scannen' })).toBeInTheDocument();
+    expect(screen.queryByText('Schritt A — Arme scannen')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Arme scannen' })).toBeNull();
+  });
+
+  it.each(FOLLOWER_ONLY)('agrees with the tile and pill it sits beside on %s', (robotType) => {
+    // The three labels that made the plural look wrong are all singular now.
+    renderWith(readyFixture(robotType));
+    expect(screen.getByText('Schritt A — Arm scannen')).toBeInTheDocument();
+    expect(screen.getByText('Roboterarm')).toBeInTheDocument();
+    expect(screen.getByText('Arm erkannt')).toBeInTheDocument();
+  });
+
+  it('keeps the tile and pill untouched on omx_full', () => {
+    renderWith(readyFixture('omx_full'));
+    expect(screen.getByText('Leader')).toBeInTheDocument();
+    expect(screen.getByText('Follower')).toBeInTheDocument();
+    expect(screen.getByText('Beide Arme erkannt')).toBeInTheDocument();
+    expect(screen.queryByText('Roboterarm')).toBeNull();
+  });
+
+  it('says „Wird gescannt …" on every profile while a scan runs', async () => {
+    let release;
+    global.fetch = vi.fn((url) =>
+      String(url).includes('/scan-arms')
+        ? new Promise((r) => {
+            release = () => r({ ok: true, status: 200, json: () => Promise.resolve({ ok: true }) });
+          })
+        : jsonRes({})
+    );
+    renderWith(statusFixture({ robot_type: 'edu6_studio' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Arm scannen' }));
+    expect(await screen.findByRole('button', { name: 'Wird gescannt …' })).toBeInTheDocument();
+    release();
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Arm scannen' })).toBeInTheDocument()
+    );
+  });
+});
+
+// ── Schritt C: what the camera-role save actually POSTs ─────────────────────
+
+describe('camera roles are only ever sent with an explicit role', () => {
+  // LOAD-BEARING for the agent: handle_cameras_roles has NO lone-camera
+  // default (it was unreachable code), so a role-less camera is a German 400
+  // there. This filter is what guarantees the student never sees that 400 —
+  // relaxing it would surface one on an ordinary save.
+
+  function camFixture() {
+    return statusFixture({
+      robot_type: 'omx_full',
+      cameras: [
+        { path: '/dev/v4l/by-id/usb-CAM-A', role: 'gripper' },
+        { path: '/dev/v4l/by-id/usb-CAM-B', role: '' },
+      ],
+    });
+  }
+
+  function rolesBody() {
+    const call = global.fetch.mock.calls.find((c) => String(c[0]).includes('/cameras/roles'));
+    expect(call).toBeTruthy();
+    return JSON.parse(call[1].body);
+  }
+
+  async function scanThenSave() {
+    await userEvent.click(screen.getByRole('button', { name: 'Kameras suchen' }));
+    await screen.findByRole('button', { name: 'Zuordnung speichern' });
+    await userEvent.click(screen.getByRole('button', { name: 'Zuordnung speichern' }));
+    await waitFor(() =>
+      expect(
+        global.fetch.mock.calls.some((c) => String(c[0]).includes('/cameras/roles'))
+      ).toBe(true)
+    );
+  }
+
+  beforeEach(() => {
+    global.fetch = vi.fn((url) => {
+      const u = String(url);
+      if (u.includes('/cameras/scan')) {
+        return jsonRes({
+          ok: true,
+          cameras: [
+            { path: '/dev/v4l/by-id/usb-CAM-A', name: 'CAM-A' },
+            { path: '/dev/v4l/by-id/usb-CAM-B', name: 'CAM-B' },
+          ],
+        });
+      }
+      if (u.includes('/cameras/roles')) return jsonRes({ ok: true, message: 'ok' });
+      return jsonRes({});
+    });
+  });
+
+  it('drops a camera the student left unassigned', async () => {
+    renderWith(camFixture());
+    await scanThenSave();
+    expect(rolesBody().cameras).toEqual([
+      { path: '/dev/v4l/by-id/usb-CAM-A', role: 'gripper' },
+    ]);
+  });
+
+  it('never sends a blank or absent role', async () => {
+    renderWith(camFixture());
+    await scanThenSave();
+    rolesBody().cameras.forEach((c) => {
+      expect(['gripper', 'scene']).toContain(c.role);
+    });
+  });
+
+  it('sends an empty list rather than a role-less camera', async () => {
+    renderWith(statusFixture({ robot_type: 'edu6_studio', cameras: [] }));
+    await scanThenSave();
+    expect(rolesBody().cameras).toEqual([]);
   });
 });

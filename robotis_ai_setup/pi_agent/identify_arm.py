@@ -496,9 +496,17 @@ def scan_and_identify_arms(
 
 def fast_rehydrate_arms(
     saved_leader_path: str, saved_follower_path: str,
-    arm_family: str = "omx", require_leader: bool = True,
+    require_leader: bool = True, arm_family: str = "omx",
 ) -> tuple[Optional[ArmDevice], Optional[ArmDevice]]:
     """Light revalidation of the previous session's arm mapping.
+
+    THE PARAMETER ORDER IS A TWIN CONTRACT, not a preference: this signature
+    must stay identical to ``gui/app/device_manager.py::fast_rehydrate_arms``,
+    down to the order of ``require_leader`` and ``arm_family``. They were
+    briefly swapped here, which makes a third POSITIONAL argument mean opposite
+    things on the two platforms — a bug no type checker and no test on either
+    side alone can see. ``tests/test_arm_scan_twin_lockstep.py`` is what fences
+    it; every caller passes them by keyword regardless.
 
     Native port of ``device_manager.fast_rehydrate_arms``: skips the two SLOW
     stages (the throwaway scanner container and the per-device serial pings) and

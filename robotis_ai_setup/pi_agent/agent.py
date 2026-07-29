@@ -199,6 +199,19 @@ _CLOCK_SKEW_WARN_S = 120  # a skew past this breaks JWT/TLS — the „Anmeldung
 # cannot turn a healthy release into a refused repair.
 _COMPOSE_VALIDATE_TIMEOUT_S = 60
 
+# Said in ONE place because it is said twice: once into the Protokoll the
+# moment a robot-type change invalidates the scan (the only signal a student
+# actually sees — the wizard's own reaction is a pill going grey beside a
+# serial path that is still on screen), and once as the start refusal, which a
+# direct POST or a stale /status can still reach. The generic „bitte zuerst …
+# scannen" wordings are wrong here: the arms ARE scanned, they are the wrong
+# ones, and a student re-reading a green „Arm erkannt" from a minute ago needs
+# to be told which of the two facts changed.
+_ARM_FAMILY_MISMATCH_DE = (
+    "Die gescannten Arme gehören zu einem anderen Robotertyp. "
+    "Bitte die Arme für den gewählten Robotertyp neu scannen."
+)
+
 
 # ── Secret redaction (ported from gui_app._redact_secret_env_line) ───────────
 
@@ -656,19 +669,57 @@ class AgentApp:
         return resolve_robot_type(config_generator.read_env_var(
             "EDUBOTICS_ROBOT_TYPE", self.env_file))
 
+    def _arms_used_by(self, row: dict) -> list:
+        """The recorded arms a profile actually USES — the follower always, the
+        leader only where the profile scans one.
+
+        A follower-only profile never launches a leader, so a leftover leader
+        in ``self._hardware`` is not part of the question "does the scanned
+        hardware satisfy this type". Judging it would refuse a rig for a
+        record nothing reads."""
+        arms = [self._hardware.follower]
+        if row["scan_requires_leader"]:
+            arms.append(self._hardware.leader)
+        return [a for a in arms if a is not None]
+
+    def _arms_conflict_with(self, row: dict) -> bool:
+        """Whether any arm this profile uses is provably of ANOTHER family."""
+        family = row["arm_family"]
+        return any(identify_arm.serial_path_family_conflict(a.serial_path, family)
+                   for a in self._arms_used_by(row))
+
     def _hardware_ready(self, profile: "str | None" = None) -> bool:
         """Whether the scanned hardware satisfies the (given/selected) robot type.
 
         Twin of ``gui_app.py::_hardware_ready``: a both-arms type needs
         leader+follower, a follower-only type (Roboter Studio kit, edu6) needs
         only the follower. The Pi's ``HardwareConfig`` has no ``is_complete`` /
-        ``follower_present`` properties, so the two cases are spelled out."""
+        ``follower_present`` properties, so the two cases are spelled out.
+
+        PRESENCE IS NOT ENOUGH — the arms must also be of this profile's ARM
+        FAMILY. Measured before this check existed: a Pi scanned as ``omx_full``
+        and then switched to ``edu6_studio`` answered
+        ``200 {'hardware_ready': True}``, wrote a ``.env`` naming a ROBOTIS
+        OpenRB-150 as the FOLLOWER_PORT of a Feetech rig, and let „Umgebung
+        starten" through — where it blocked ~300 s on ``service_healthy`` while
+        the entrypoint drove the edu6 branch against a Dynamixel bus, and the
+        student got the generic „konnte nicht gestartet werden — bitte das
+        Protokoll prüfen". The driver's specific German reason is in the
+        CONTAINER's stdout, which the agent's Protokoll ring does not carry, so
+        nothing on screen named the cause.
+
+        Crossing arm families therefore INVALIDATES the scan (user decision,
+        2026-07-29). ``arms_identified`` deliberately keeps reporting what was
+        scanned — it answers a different question — so the change is confined
+        to this gate and to the start refusal that reads it."""
         row = robot_profile(profile if profile is not None
                             else self._current_robot_type())
         hw = self._hardware
         if hw.follower is None:
             return False
-        return hw.leader is not None if row["scan_requires_leader"] else True
+        if row["scan_requires_leader"] and hw.leader is None:
+            return False
+        return not self._arms_conflict_with(row)
 
     def _persist_env_if_ready(self, follower_only: "bool | None" = None) -> None:
         """Write the managed .env from ``self._hardware`` when it holds enough to
@@ -685,9 +736,24 @@ class AgentApp:
         forwarding it would hit ``generate_env_file``'s contradiction guard and
         turn an ordinary camera-role edit into a 500. On a both-arms profile
         nothing is clamped, so an explicit True (the Roboter-Studio toggle) is
-        honoured unchanged."""
+        honoured unchanged.
+
+        It also refuses to write a port from ANOTHER arm family. This method is
+        the Pi's eager convenience — Windows defers the whole .env to „Umgebung
+        starten" — and it runs at robot-type-selection time, so before this
+        guard a switch to ``edu6_studio`` rewrote the managed block to name a
+        ROBOTIS OpenRB-150 as ``FOLLOWER_PORT`` with
+        ``EDUBOTICS_FOLLOWER_ONLY=1``: a configuration that never corresponded
+        to any rig, and one nothing would later notice, since the arms are
+        re-read from the .env only at agent boot. Skipping the rewrite leaves
+        the LAST COHERENT scan in place, which is exactly what this method's
+        own contract already does for a rig that is not ready yet („keeps only
+        the id — which is all the scan needs"). CLEARING the ports was
+        rejected: it would destroy a valid OMX scan the moment a student merely
+        LOOKED at the other entry in the dropdown."""
         robot_type = self._current_robot_type()
-        profile_follower_only = ROBOT_PROFILES[robot_type]["follower_only"]
+        row = ROBOT_PROFILES[robot_type]
+        profile_follower_only = row["follower_only"]
         if follower_only is None:
             follower_only = profile_follower_only
         elif profile_follower_only:
@@ -696,6 +762,14 @@ class AgentApp:
         if hw.follower is None:
             return
         if not follower_only and hw.leader is None:
+            return
+        # Exactly the arms this write would EMIT — the follower always, the
+        # leader only when it is not being suppressed.
+        emitted = [hw.follower] + ([] if follower_only else [hw.leader])
+        family = row["arm_family"]
+        if any(a is not None
+               and identify_arm.serial_path_family_conflict(a.serial_path, family)
+               for a in emitted):
             return
         config_generator.generate_env_file(hw, self.env_file, follower_only=follower_only,
                                            robot_type=robot_type)
@@ -1175,6 +1249,12 @@ class AgentApp:
             self._lifecycle_lock.release()
         row = ROBOT_PROFILES[requested]
         self._log(f"Robotertyp gewählt: {row['display_de']}")
+        # The one place a student is actually TOLD that the previous scan no
+        # longer counts. The wizard's own reaction is a pill turning grey next
+        # to the serial path it has been showing all along, which reads as a
+        # glitch rather than as a consequence of what they just clicked.
+        if self._arms_conflict_with(row):
+            self._log(f"[WARNUNG] {_ARM_FAMILY_MISMATCH_DE}")
         return 200, {"ok": True, "robot_type": requested,
                      "display_de": row["display_de"],
                      "scan_requires_leader": row["scan_requires_leader"],
@@ -1202,11 +1282,18 @@ class AgentApp:
             # edu6_studio unstartable on a Pi.
             robot_type = self._current_robot_type()
             if not self._hardware_ready(robot_type):
+                row = ROBOT_PROFILES[robot_type]
+                # A wrong-FAMILY scan and a MISSING scan both land here, and
+                # they need different sentences: telling a student who has just
+                # scanned an arm to „zuerst den Roboterarm scannen" reads as a
+                # bug, and is what would send them looking at cables instead of
+                # at the Robotertyp they just changed.
                 return 400, {
                     "ok": False,
                     "message": (
-                        "Bitte zuerst beide Arme scannen (Leader und Follower)."
-                        if ROBOT_PROFILES[robot_type]["scan_requires_leader"]
+                        _ARM_FAMILY_MISMATCH_DE if self._arms_conflict_with(row)
+                        else "Bitte zuerst beide Arme scannen (Leader und Follower)."
+                        if row["scan_requires_leader"]
                         else "Bitte zuerst den Roboterarm scannen."
                     ),
                 }

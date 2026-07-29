@@ -123,6 +123,55 @@ def list_serial_by_id() -> list[str]:
     return [f"{_SERIAL_BY_ID_DIR}/{e}" for e in entries]
 
 
+def serial_path_family_conflict(serial_path: str, arm_family: str) -> bool:
+    """POSITIVE evidence that ``serial_path`` is an arm of a DIFFERENT family.
+
+    Twin of ``gui/app/device_manager.py::serial_path_family_conflict`` — same
+    body over the same markers, kept in lockstep by
+    ``test_arm_family_conflict_twin_lockstep.py``.
+
+    This exists so a robot-type change can INVALIDATE a scan that was made for
+    the other family. The evidence is the recorded by-id path itself: the scan
+    only ever stores a path that matched ``_ARM_MARKERS[family]``, so the name
+    is a durable record of which family it was scanned for. Nothing new has to
+    be persisted, and it survives an agent restart for free — the port IS the
+    tag, and ``rehydrate_hardware`` reads it straight back out of the ``.env``.
+
+    THREE-VALUED ON PURPOSE, collapsed to a refusal only on proof:
+
+    * matches the family we need            → no conflict (whatever else it
+      also matches — an ambiguous name is not evidence AGAINST it);
+    * matches some OTHER family and not ours → CONFLICT, the one True;
+    * matches nothing at all                 → no conflict.
+
+    That last case is the one worth stating. ``_EDU6_BYID_MARKERS`` is a
+    six-way guess pending rig gate R1, and a hand-edited ``.env`` can name
+    anything, so "this path matches no family I know" means the markers are
+    incomplete — not that the arm is wrong. Refusing there would brick a rig
+    on the strength of a marker list this file's own comments call a guess.
+    Same doctrine as ``usb_ids_for_serial_path`` ("``None`` means cannot
+    prove, never no match") and as the nav's capability gating (only an
+    EXPLICIT false hides anything).
+    """
+    up = (serial_path or "").upper()
+    wanted = _ARM_MARKERS.get(arm_family, ())
+    if not up or not wanted:
+        # No markers for the family being ASKED about means we cannot prove
+        # anything, only observe that the path resembles something else. A new
+        # ``ROBOT_PROFILES`` entry whose family is not in this table would
+        # otherwise conflict with EVERY arm and make that profile permanently
+        # unstartable — turning one forgotten line in an "adding a robot type"
+        # checklist into a bricked rig, which is strictly worse than the gap
+        # this predicate closes. Fail open at runtime; the gap is caught loudly
+        # in CI instead (``test_arm_family_conflict_twin_lockstep.py`` asserts
+        # every registry family has markers on BOTH platforms).
+        return False
+    if any(m in up for m in wanted):
+        return False
+    return any(any(m in up for m in markers)
+               for fam, markers in _ARM_MARKERS.items() if fam != arm_family)
+
+
 def find_robotis_serial_paths() -> list[str]:
     """Find ``/dev/serial/by-id/`` paths for OMX arms (ROBOTIS/OpenRB).
 

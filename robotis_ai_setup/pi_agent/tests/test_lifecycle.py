@@ -746,6 +746,218 @@ class TestEnvironmentLifecycle(_EnvTempBase):
                          "omx_follower")
 
 
+class TestCrossFamilyInvalidatesTheScan(_EnvTempBase):
+    """Changing the robot type ACROSS arm families invalidates the scan.
+
+    MEASURED before this landed, on a real AgentApp: scan an OMX pair, then
+    ``POST /robot-type {"robot_type": "edu6_studio"}`` answered
+    ``200 {'hardware_ready': True}``; the .env then named a ROBOTIS OpenRB-150
+    as the FOLLOWER_PORT of a Feetech rig with EDUBOTICS_FOLLOWER_ONLY=1, while
+    /status still reported a leader on a profile that has none; and „Umgebung
+    starten" went straight through into a ~300 s ``service_healthy`` block
+    whose only student-visible outcome was the generic „Die Roboter-Umgebung
+    konnte nicht gestartet werden — bitte das Protokoll prüfen" (the driver's
+    real reason is in the CONTAINER's stdout, which the Protokoll ring does not
+    carry).
+
+    ``arms_identified`` deliberately keeps reporting what was scanned — it
+    answers a different question — so the change is confined to
+    ``hardware_ready`` and the start gate.
+    """
+
+    OMX_L = "/dev/serial/by-id/usb-ROBOTIS_OpenRB-150_LEADER-if00"
+    OMX_F = "/dev/serial/by-id/usb-ROBOTIS_OpenRB-150_FOLLOWER-if00"
+    EDU6 = "/dev/serial/by-id/usb-1a86_USB_Single_Serial_5A68010132-if00"
+
+    def _seed_omx_pair(self):
+        with patch.object(agent.docker_manager, "ensure_environment_stopped"), \
+             patch.object(agent.identify_arm, "scan_and_identify_arms",
+                          return_value=(ArmDevice(serial_path=self.OMX_L, role="leader"),
+                                        ArmDevice(serial_path=self.OMX_F, role="follower"))):
+            self.app.handle_scan_arms({})
+
+    def _seed_edu6(self):
+        cg.upsert_env_var("EDUBOTICS_ROBOT_TYPE", "edu6_studio", self.env_path,
+                          quote=False)
+        with patch.object(agent.docker_manager, "ensure_environment_stopped"), \
+             patch.object(agent.identify_arm, "scan_and_identify_arms",
+                          return_value=(None, ArmDevice(serial_path=self.EDU6,
+                                                        role="follower"))):
+            self.app.handle_scan_arms({})
+
+    def _set_type(self, robot_type):
+        with patch.object(agent.docker_manager, "get_container_status", return_value={}):
+            return self.app.handle_set_robot_type({"robot_type": robot_type})
+
+    def _status(self):
+        with patch.object(agent.docker_manager, "get_container_status", return_value={}), \
+             patch.object(agent.docker_manager, "get_last_pull_status", return_value={}):
+            return self.app.handle_status()[1]
+
+    # ── the defect, both directions ─────────────────────────────────────────
+
+    def test_omx_scan_then_edu6_is_not_ready(self):
+        self._seed_omx_pair()
+        code, payload = self._set_type("edu6_studio")
+        self.assertEqual(code, 200)
+        self.assertFalse(payload["hardware_ready"])
+        self.assertFalse(self._status()["hardware_ready"])
+
+    def test_edu6_scan_then_omx_follower_is_not_ready(self):
+        # The reverse, and the one a leader-less OMX profile makes reachable:
+        # omx_follower needs only a follower, so PRESENCE alone said ready.
+        self._seed_edu6()
+        code, payload = self._set_type("omx_follower")
+        self.assertEqual(code, 200)
+        self.assertFalse(payload["hardware_ready"])
+
+    def test_the_start_gate_refuses_and_never_reaches_docker(self):
+        self._seed_omx_pair()
+        self._set_type("edu6_studio")
+        with patch.object(agent.docker_manager, "start_robot_tier") as start:
+            code, payload = self.app.handle_environment_start({})
+        self.assertEqual(code, 400)
+        start.assert_not_called()
+        # NOT the generic „bitte zuerst … scannen": the arms ARE scanned.
+        self.assertEqual(payload["message"], agent._ARM_FAMILY_MISMATCH_DE)
+        self.assertIn("anderen Robotertyp", payload["message"])
+
+    def test_the_student_is_told_in_the_protokoll_at_the_moment_it_happens(self):
+        # The wizard's own reaction is a pill going grey beside a serial path
+        # that is still on screen — indistinguishable from a glitch.
+        self._seed_omx_pair()
+        with patch.object(self.app, "_log") as log:
+            self._set_type("edu6_studio")
+        lines = [str(c[0][0]) for c in log.call_args_list]
+        self.assertTrue(any(agent._ARM_FAMILY_MISMATCH_DE in ln for ln in lines), lines)
+
+    def test_the_eager_env_write_never_names_a_wrong_family_port(self):
+        # The Pi writes the .env at SELECTOR time (Windows defers to start), so
+        # this is the one platform that could persist the chimera.
+        self._seed_omx_pair()
+        self._set_type("edu6_studio")
+        self.assertEqual(cg.read_env_var("EDUBOTICS_ROBOT_TYPE", self.env_path),
+                         "edu6_studio")
+        # The LAST COHERENT scan survives untouched — clearing it would destroy
+        # a valid OMX scan just because a student looked at the dropdown.
+        self.assertEqual(cg.read_env_var("FOLLOWER_PORT", self.env_path), self.OMX_F)
+        self.assertEqual(cg.read_env_var("LEADER_PORT", self.env_path), self.OMX_L)
+        self.assertEqual(cg.read_env_var("EDUBOTICS_FOLLOWER_ONLY", self.env_path), "0")
+
+    def test_the_eager_write_judges_the_LEADER_it_emits_too(self):
+        """The other half of the write guard, and it survived a mutation round:
+        narrowing ``emitted`` to ``[hw.follower]`` left both suites green.
+
+        Reachable only through a hand-edited .env that mixes families (a scan
+        is family-scoped, so it cannot produce this) — but the guard's claim is
+        "never write a port from another family", and half a guard is the
+        failure mode this branch keeps being audited for.
+        """
+        cg.upsert_env_var("EDUBOTICS_ROBOT_TYPE", "omx_full", self.env_path,
+                          quote=False)
+        self.app._hardware = HardwareConfig(
+            leader=ArmDevice(serial_path=self.EDU6, role="leader"),
+            follower=ArmDevice(serial_path=self.OMX_F, role="follower"))
+        self.app._persist_env_if_ready()
+        self.assertIsNone(cg.read_env_var("LEADER_PORT", self.env_path))
+        self.assertIsNone(cg.read_env_var("FOLLOWER_PORT", self.env_path))
+        # …and the same rig is not startable, for the same reason.
+        self.assertFalse(self.app._hardware_ready())
+
+    def test_a_follower_only_write_ignores_a_wrong_family_leader_it_omits(self):
+        """The complement: ``follower_only`` drops LEADER_PORT from the output,
+        so a leftover wrong-family leader is not part of what gets written and
+        must not block the write."""
+        cg.upsert_env_var("EDUBOTICS_ROBOT_TYPE", "omx_follower", self.env_path,
+                          quote=False)
+        self.app._hardware = HardwareConfig(
+            leader=ArmDevice(serial_path=self.EDU6, role="leader"),
+            follower=ArmDevice(serial_path=self.OMX_F, role="follower"))
+        self.app._persist_env_if_ready()
+        self.assertEqual(cg.read_env_var("FOLLOWER_PORT", self.env_path), self.OMX_F)
+        self.assertIsNone(cg.read_env_var("LEADER_PORT", self.env_path))
+
+    def test_arms_identified_still_reports_what_was_scanned(self):
+        self._seed_omx_pair()
+        self._set_type("edu6_studio")
+        arms = self._status()["arms_identified"]
+        self.assertEqual(arms["follower"], self.OMX_F)
+        self.assertEqual(arms["leader"], self.OMX_L)
+        self.assertTrue(arms["both"])
+
+    def test_a_restart_re_derives_the_verdict_from_the_env_alone(self):
+        # No new persisted state: the recorded PORT is the family tag, so a
+        # fresh AgentApp over the same .env must reach the same verdict.
+        self._seed_omx_pair()
+        self._set_type("edu6_studio")
+        fresh = agent.AgentApp(env_file=self.env_path)
+        fresh.rehydrate_hardware()  # what the boot path does (agent.py: start())
+        self.assertEqual(fresh._current_robot_type(), "edu6_studio")
+        self.assertEqual(fresh._hardware.follower.serial_path, self.OMX_F)
+        self.assertFalse(fresh._hardware_ready())
+
+    # ── what must NOT change ────────────────────────────────────────────────
+
+    def test_a_same_family_switch_stays_ready(self):
+        # omx_full -> omx_follower shares the omx family: no rescan, and the
+        # eager write still runs (LEADER_PORT dropped, FOLLOWER_ONLY=1).
+        self._seed_omx_pair()
+        code, payload = self._set_type("omx_follower")
+        self.assertEqual(code, 200)
+        self.assertTrue(payload["hardware_ready"])
+        self.assertIsNone(cg.read_env_var("LEADER_PORT", self.env_path))
+        self.assertEqual(cg.read_env_var("EDUBOTICS_FOLLOWER_ONLY", self.env_path), "1")
+
+    def test_an_ordinary_omx_rig_is_completely_unaffected(self):
+        self._seed_omx_pair()
+        self.assertTrue(self._status()["hardware_ready"])
+        with patch.object(agent.docker_manager, "start_robot_tier", return_value=True) as start:
+            code, _ = self.app.handle_environment_start({})
+        self.assertEqual(code, 200)
+        start.assert_called_once()
+
+    def test_an_ordinary_edu6_rig_is_completely_unaffected(self):
+        self._seed_edu6()
+        self.assertTrue(self._status()["hardware_ready"])
+        with patch.object(agent.docker_manager, "start_robot_tier", return_value=True) as start:
+            code, _ = self.app.handle_environment_start({})
+        self.assertEqual(code, 200)
+        start.assert_called_once()
+
+    def test_an_unattributable_port_is_not_refused(self):
+        # A hand-edited .env, or an edu6 board revision _EDU6_BYID_MARKERS has
+        # not caught up with (it is a guess pending rig gate R1). "Cannot
+        # prove" must not become "wrong" — that would brick the rig the
+        # markers were meant to find.
+        cg.upsert_env_var("EDUBOTICS_ROBOT_TYPE", "edu6_studio", self.env_path,
+                          quote=False)
+        self.app._hardware = HardwareConfig(
+            follower=ArmDevice(serial_path="/dev/serial/by-id/usb-Mystery_Board-if00"))
+        self.assertTrue(self.app._hardware_ready())
+
+    def test_a_missing_scan_still_gets_the_missing_scan_wording(self):
+        # The two 400s must stay distinguishable: nothing scanned is not the
+        # same problem as the wrong thing scanned.
+        cg.upsert_env_var("EDUBOTICS_ROBOT_TYPE", "edu6_studio", self.env_path,
+                          quote=False)
+        self.app._hardware = HardwareConfig()
+        with patch.object(agent.docker_manager, "start_robot_tier") as start:
+            code, payload = self.app.handle_environment_start({})
+        self.assertEqual(code, 400)
+        start.assert_not_called()
+        self.assertEqual(payload["message"], "Bitte zuerst den Roboterarm scannen.")
+
+    def test_a_leftover_wrong_family_leader_does_not_refuse_a_follower_only_rig(self):
+        # omx_follower never launches a leader, so judging one would refuse a
+        # rig over a record nothing reads.
+        cg.upsert_env_var("EDUBOTICS_ROBOT_TYPE", "omx_follower", self.env_path,
+                          quote=False)
+        self.app._hardware = HardwareConfig(
+            leader=ArmDevice(serial_path=self.EDU6, role="leader"),
+            follower=ArmDevice(serial_path=self.OMX_F, role="follower"))
+        self.assertTrue(self.app._hardware_ready())
+
+
 # ── update-in-flight fast-fail (503, never a silent block) ───────────────────
 
 

@@ -198,9 +198,9 @@ services:
       # the derivation. 0 DISABLES the check — the one-variable rollback.
       # (EDUBOTICS_ROBOT_TYPE and the five EDUBOTICS_EDU6_* knobs are forwarded
       # ABOVE, next to LEADER_PORT, mirroring the student compose's order. That
-      # closed the CONTAINER-env half of edu6-on-Pi; the three HOST halves this
-      # comment used to list as blockers have since landed, so it no longer
-      # records one:
+      # closed the CONTAINER-env half of edu6-on-Pi; the HOST halves have since
+      # landed too — the two this comment used to list as blockers, plus a
+      # writer for the type it never mentioned — so it no longer records one:
       #   * the scan is FAMILY-AWARE — identify_arm.find_serial_paths_for_arms
       #     filters /dev/serial/by-id per family, and scan_and_identify_arms
       #     sends --protocol=feetech for edu6, with the family derived from the
@@ -214,9 +214,10 @@ services:
       #     follower-only profile writes BY DEFAULT — not something only the
       #     Roboter-Studio leader toggle can ask for.
       # What is still UNPROVEN, recorded here because a green suite does not say
-      # it: no rig gate has a Pi-side result (R1/R2/R6/R9 were measured on a
-      # Windows bench — see the COM5 port in CLAUDE.md), nobody has plugged an
-      # edu6 arm into a Pi at all, and identify_arm._EDU6_BYID_MARKERS is still
+      # it: no rig gate has a Pi-side result (the four that ARE done — R1/R2/R6/
+      # R9 — ran on a Windows bench; CLAUDE.md records R1's port as COM5),
+      # nobody has plugged an edu6 arm into a Pi at all, and
+      # identify_arm._EDU6_BYID_MARKERS is still
       # the Windows twin's six-way GUESS at the CH343P's by-id NAME (R1 measured
       # the VID/PID 1A86:55D3, which is a different string). DISCOVERY rides
       # that guess; only IDENTITY is proven downstream, by the servos answering

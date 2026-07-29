@@ -56,6 +56,7 @@ from typing import Optional
 # Importing it here (rather than redefining) keeps ONE dataclass shape so
 # generate_env_file reads .serial_path off exactly the object we produced.
 from .config_generator import ArmDevice
+from .constants import ARM_USB_IDS
 
 logger = logging.getLogger("edubotics-pi-agent")
 
@@ -84,6 +85,13 @@ _ARM_MARKERS = {
     "omx":  ("ROBOTIS", "OPENRB"),
     "edu6": _EDU6_BYID_MARKERS,
 }
+
+# Whether a family's rig has a leader arm at all. NOT the profile-level
+# `scan_requires_leader` (that is WP-5's, and it drives start-gating and UI) —
+# this is the scanner's own already-implicit fact, stated once: the single edu6
+# arm lands in the FOLLOWER slot and `leader` stays None there. It is used only
+# to decide whether a diagnostic sentence is still relevant.
+_FAMILY_HAS_LEADER = {"omx": True, "edu6": False}
 
 # Candidate list the edu6 diagnostic last reported, so a ten-iteration poll does
 # not print the same line ten times into the student-visible Protokoll ring.
@@ -150,12 +158,82 @@ def find_serial_paths_for_arms(arm_family: str = "omx") -> list[str]:
         # new list, which is exactly the observation rig gate R1 needs.
         if all_serial != _LAST_DIAG_CANDIDATES:
             _LAST_DIAG_CANDIDATES = list(all_serial)
-            logger.warning(
-                "edu6: no by-id marker matched; candidates were %r — record the "
-                "real CH343 by-id string at rig gate R1 and extend "
-                "_EDU6_BYID_MARKERS (keep it in lockstep with gui/app/device_manager.py).",
-                all_serial,
-            )
+            # Short and factual: this handler is attached to the ROOT logger, so
+            # every line here lands in the Protokoll a student reads (the Windows
+            # twin writes the same observation to a diagnostics FILE instead).
+            # The candidate list IS the whole payload rig gate R1 needs; the
+            # symbol names and the lockstep instruction belong in this comment,
+            # not in front of a classroom.
+            logger.warning("edu6: no arm matched; serial devices present: %r",
+                           all_serial)
+    return hits
+
+
+# ── USB VID/PID identity (sysfs) ─────────────────────────────────────────────
+# The by-id NAME is what the scan discovers with, deliberately broadly: a port
+# that merely looks plausible costs one Feetech ping, and the SERVOS then prove
+# identity. A claim made to the student has no such downstream proof, so the
+# cross-family presence notice must be as strict as the Windows twin, which is
+# PID-pinned through ARM_USB_IDS and says why in its own words: „1A86 covers
+# every CH34x USB-serial dongle on earth, so an unrelated Arduino clone must not
+# be attached/probed as an arm" (gui/app/device_manager.py::list_arm_devices).
+# Measured: a plain CH340 (1a86:7523), a CH341 (1a86:5523) and a CH9102 ESP32
+# board all match the edu6 by-id markers; none matches the PID.
+#
+# Windows reads VID/PID from Windows PnP enumeration; the Pi reads it from
+# sysfs, which needs no dependency and no elevation.
+_SYS_TTY_DIR = "/sys/class/tty"
+_USB_ID_WALK_LEVELS = 4
+
+
+def usb_ids_for_serial_path(by_id_path: str) -> "Optional[tuple[str, str]]":
+    """``(VID, PID)`` as uppercase hex for a ``/dev/serial/by-id`` entry.
+
+    ``/sys/class/tty/<tty>/device`` is the USB *interface* for a cdc_acm node;
+    ``idVendor``/``idProduct`` live on a parent, so walk up a few levels. Returns
+    ``None`` when anything is unreadable — this must never guess, and every
+    caller treats ``None`` as "cannot prove", not as "no match".
+    """
+    try:
+        tty = os.path.basename(os.path.realpath(by_id_path))
+        base = os.path.join(_SYS_TTY_DIR, tty, "device")
+        for _ in range(_USB_ID_WALK_LEVELS):
+            vid_f = os.path.join(base, "idVendor")
+            pid_f = os.path.join(base, "idProduct")
+            if os.path.exists(vid_f) and os.path.exists(pid_f):
+                with open(vid_f, encoding="ascii") as f:
+                    vid = f.read().strip()
+                with open(pid_f, encoding="ascii") as f:
+                    pid = f.read().strip()
+                if vid and pid:
+                    return vid.upper(), pid.upper()
+                return None
+            base = os.path.join(base, "..")
+    except OSError:
+        return None
+    return None
+
+
+def find_arm_devices_by_usb_id(arm_family: str) -> list[str]:
+    """by-id paths whose USB VID/PID is in ``ARM_USB_IDS[arm_family]``.
+
+    Pi twin of ``gui/app/device_manager.py::list_arm_devices``. A ``None`` PID in
+    the table means "any PID under this VID" (the OMX OpenRB-150 ships two).
+    A path whose ids cannot be read is SKIPPED, so an unreadable sysfs degrades
+    to "no evidence" rather than to a false claim.
+    """
+    wanted = ARM_USB_IDS.get(arm_family, ())
+    hits = []
+    for path in list_serial_by_id():
+        ids = usb_ids_for_serial_path(path)
+        if ids is None:
+            continue
+        vid, pid = ids
+        for want_vid, want_pid in wanted:
+            if vid == want_vid.upper() and (want_pid is None
+                                            or pid == want_pid.upper()):
+                hits.append(path)
+                break
     return hits
 
 
@@ -281,16 +359,17 @@ def _set_cross_family_presence_notice(arm_family: str) -> None:
     selected family matched NOTHING, check whether the OTHER family's markers
     match something that IS plugged in and surface the same one-sentence hint.
 
-    The Windows twin needs a separate Windows-side USB enumeration here because
-    its scan usbipd-ATTACHES only the selected family's VID/PID. The Pi has no
-    attach step — every serial device is already under /dev/serial/by-id — so
-    the presence check is simply the other family's marker filter over the very
-    same list.
+    It asserts a fact to the student („an arm of the OTHER type is plugged in"),
+    so it is PID-PINNED through ``ARM_USB_IDS`` — NOT the broad by-id markers the
+    discovery path uses. Those markers match every CH34x dongle in a school
+    cupboard, and telling a student to change the robot type because an Arduino
+    clone is plugged in is worse than the generic message it replaces. Windows
+    reaches the same pinning through its PnP enumeration; here it is sysfs.
     """
     global LAST_SCAN_NOTICE
     other = "edu6" if arm_family != "edu6" else "omx"
     try:
-        present = find_serial_paths_for_arms(other)
+        present = find_arm_devices_by_usb_id(other)
     except Exception:  # noqa: BLE001 — a diagnostic must never fail a scan
         # Same breadth as the Windows twin. The scan has already decided its
         # answer by the time we get here; this only decides how to WORD the
@@ -303,8 +382,8 @@ def _set_cross_family_presence_notice(arm_family: str) -> None:
         _CROSS_NOTICE_OMX_WHILE_EDU6 if arm_family == "edu6"
         else _CROSS_NOTICE_EDU6_WHILE_OMX
     )
-    logger.info("cross-family presence: %s arm enumerated (%r) while "
-                "family=%s scan found nothing", other, present, arm_family)
+    logger.info("cross-family presence: %s arm at %r while family=%s found none",
+                other, present, arm_family)
 
 
 def scan_and_identify_arms(
@@ -400,6 +479,17 @@ def scan_and_identify_arms(
                 logger.info("serial %s did not identify as an arm (%s)", desc, role)
     finally:
         stop_scanner_container()
+
+    # A notice diagnoses a PORT that did not yield an arm, so it is noise once
+    # the scan produced everything this family HAS: a stray CH34x dongle answers
+    # no Feetech ping and sets the 12-V sentence while the real arm identifies
+    # fine two ports later — and the dongle sorts first, so that is the common
+    # order. The GUI sidesteps this by returning from its success branch before
+    # it ever reads the notice; here the scanner clears it at the source, which
+    # is the only place that knows whether this family even has a leader.
+    if follower is not None and (leader is not None
+                                 or not _FAMILY_HAS_LEADER.get(arm_family, True)):
+        LAST_SCAN_NOTICE = ""
 
     return leader, follower
 

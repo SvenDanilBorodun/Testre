@@ -228,6 +228,48 @@ class TestScanNotice(_EnvTempBase):
             self._scan_leaving_notice(text)
         self.assertIn(text, [c.args[0] for c in log.info.call_args_list])
 
+    def test_a_notice_about_some_other_port_never_rides_a_SUCCESS(self):
+        """Drives the REAL scanner, not a stub — the clearing lives inside
+        `scan_and_identify_arms` (only it knows whether a family has a leader),
+        and this is the seam that proves the agent surfaces the result of that
+        decision rather than a value of its own.
+
+        Scenario: a stray CH34x dongle sorts before the real edu6 arm, answers
+        no Feetech ping and sets the 12-V sentence; the arm then identifies
+        fine. Reporting that sends the student hunting a working power supply.
+        """
+        DONGLE = "/dev/serial/by-id/usb-1a86_USB2.0-Serial-if00"
+        ARM = "/dev/serial/by-id/usb-1a86_USB_Single_Serial_5A68-if00"
+        cg.upsert_env_var("EDUBOTICS_ROBOT_TYPE", "edu6_studio", self.env_path)
+
+        def run(argv, **kw):
+            if argv[:2] == ["docker", "exec"]:
+                silent = DONGLE in argv[5]
+                return MagicMock(stdout="feetech_silent\n" if silent else "edu6\n",
+                                 stderr="", returncode=1 if silent else 0)
+            return MagicMock(stdout="cid", stderr="", returncode=0)
+
+        ia = agent.identify_arm
+        prev = ia.LAST_SCAN_NOTICE
+        self.addCleanup(setattr, ia, "LAST_SCAN_NOTICE", prev)
+        with patch.object(agent.docker_manager, "ensure_environment_stopped"), \
+             patch.object(ia, "list_serial_by_id", return_value=[DONGLE, ARM]), \
+             patch.object(ia.subprocess, "run", side_effect=run), \
+             patch.object(ia.time, "sleep"):
+            code, payload = self.app.handle_scan_arms({"force": True})
+
+        self.assertEqual(payload["follower"], ARM)
+        self.assertEqual(payload["notice"], "")
+        self.assertNotIn("12-V", payload["message"])
+
+    def test_the_notice_is_kept_on_a_partial_scan(self):
+        """A half-found rig is exactly where the diagnosis is still relevant."""
+        follower = ArmDevice(serial_path="/dev/serial/by-id/usb-ROBOTIS_F", role="follower")
+        text = "Nur 3 von 7 Servos antworten — bitte die Steckverbindungen prüfen."
+        code, payload = self._scan_leaving_notice(text, result=(None, follower))
+        self.assertEqual(code, 409)
+        self.assertEqual(payload["notice"], text)
+
     def test_a_stale_notice_never_rides_a_fast_rehydrate(self):
         """fast_rehydrate does not run a scan, so LAST_SCAN_NOTICE there is a
         sentence about some EARLIER attempt — reporting it would blame a rig

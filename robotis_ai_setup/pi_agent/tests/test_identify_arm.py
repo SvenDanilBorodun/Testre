@@ -10,7 +10,10 @@ and the serial-anchored persistence contract the agent relies on.
 
 from __future__ import annotations
 
+import os
+import shutil
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -134,6 +137,19 @@ class TestFamilyScopedSerialFilter(unittest.TestCase):
                 patch.object(identify_arm.logger, "warning") as warn:
             self.assertEqual(identify_arm.find_serial_paths_for_arms("edu6"), [])
         warn.assert_not_called()
+
+    def test_the_candidate_dump_carries_no_maintainer_jargon(self):
+        """This logger is attached to the ROOT logger, so every line lands in
+        the Protokoll a student reads (the Windows twin writes to a file). The
+        candidate list is the payload; symbol names and file paths are not."""
+        with patch.object(identify_arm, "list_serial_by_id",
+                          return_value=["/dev/serial/by-id/usb-Mystery-if00"]), \
+                patch.object(identify_arm.logger, "warning") as warn:
+            identify_arm.find_serial_paths_for_arms("edu6")
+        line = warn.call_args[0][0]
+        for jargon in ("_EDU6_BYID_MARKERS", "gui/app", "rig gate", "lockstep"):
+            self.assertNotIn(jargon, line)
+        self.assertLess(len(line), 80, line)
 
     def test_omx_scan_never_dumps_candidates(self):
         """OMX must stay byte-identical to the pre-edu6 behaviour."""
@@ -413,6 +429,45 @@ class TestEdu6Scan(unittest.TestCase):
         self._scan("edu6")
         self.assertEqual(identify_arm.LAST_SCAN_NOTICE, "")
 
+    def test_a_dongle_that_sorts_first_does_not_poison_a_found_arm(self):
+        """A stray CH34x dongle matches the by-id markers, answers no Feetech
+        ping, and sorts BEFORE the real arm — so it sets the 12-V sentence and
+        the arm then identifies fine. Reporting that would send the student
+        hunting a power supply that is working."""
+        dongle = "/dev/serial/by-id/usb-1a86_USB2.0-Serial-if00"
+        seq = {dongle: "feetech_silent", EDU6: "edu6"}
+        with patch.object(identify_arm, "_poll_serial_paths",
+                          return_value=[dongle, EDU6]), \
+                patch.object(identify_arm, "start_scanner_container", return_value=True), \
+                patch.object(identify_arm, "stop_scanner_container"), \
+                patch.object(identify_arm, "identify_arm_via_docker",
+                             side_effect=lambda p, *_: seq[p]):
+            leader, follower = identify_arm.scan_and_identify_arms(
+                "img", arm_family="edu6")
+        self.assertEqual(follower.serial_path, EDU6)
+        self.assertEqual(identify_arm.LAST_SCAN_NOTICE, "")
+
+    def test_a_failed_edu6_scan_still_keeps_its_notice(self):
+        """The clear is conditional on the arm being FOUND — the whole point of
+        the notice is the case where it was not."""
+        self._scan("feetech_silent")
+        self.assertIn("12-V-Netzteil", identify_arm.LAST_SCAN_NOTICE)
+
+    def test_a_half_found_omx_rig_keeps_its_notice(self):
+        """omx HAS a leader, so follower-only is not success there and the
+        diagnosis of the other port stays relevant."""
+        seq = {LEADER: "edu6_arm_found", FOLLOWER: "follower"}
+        with patch.object(identify_arm, "_poll_serial_paths",
+                          return_value=[LEADER, FOLLOWER]), \
+                patch.object(identify_arm, "start_scanner_container", return_value=True), \
+                patch.object(identify_arm, "stop_scanner_container"), \
+                patch.object(identify_arm, "identify_arm_via_docker",
+                             side_effect=lambda p, *_: seq[p]):
+            leader, follower = identify_arm.scan_and_identify_arms("img")
+        self.assertIsNone(leader)
+        self.assertIsNotNone(follower)
+        self.assertIn("EduBotics 6-Achs", identify_arm.LAST_SCAN_NOTICE)
+
 
 class TestCrossFamilyPresenceNotice(unittest.TestCase):
     """The by-id filter is family-scoped, so a wrong-family arm never reaches
@@ -425,28 +480,75 @@ class TestCrossFamilyPresenceNotice(unittest.TestCase):
         p.start()
         identify_arm.LAST_SCAN_NOTICE = ""
 
-    def _empty_scan(self, arm_family, plugged_in):
-        with patch.object(identify_arm, "list_serial_by_id", return_value=plugged_in), \
+    # The presence check is PID-pinned via sysfs, so a fake bus is a
+    # {by-id path: (VID, PID)} map. `usb_ids_for_serial_path` returns UPPERCASE
+    # (sysfs itself is lowercase) — see TestUsbIdsFromSysfs for that seam.
+    OPENRB = ("2F5D", "0103")
+    CH343P = ("1A86", "55D3")
+    CH340 = ("1A86", "7523")
+
+    def _empty_scan(self, arm_family, bus):
+        with patch.object(identify_arm, "list_serial_by_id", return_value=list(bus)), \
+                patch.object(identify_arm, "usb_ids_for_serial_path",
+                             side_effect=lambda p: bus.get(p)), \
                 patch.object(identify_arm, "start_scanner_container") as start:
             result = identify_arm.scan_and_identify_arms("img", arm_family=arm_family)
         start.assert_not_called()
         return result
 
     def test_edu6_selected_but_an_omx_arm_is_plugged_in(self):
-        self._empty_scan("edu6", [LEADER])
+        self._empty_scan("edu6", {LEADER: self.OPENRB})
         self.assertIn("OMX-Arm", identify_arm.LAST_SCAN_NOTICE)
 
     def test_omx_selected_but_the_edu6_arm_is_plugged_in(self):
-        self._empty_scan("omx", [EDU6])
+        self._empty_scan("omx", {EDU6: self.CH343P})
         self.assertIn("EduBotics 6-Achs", identify_arm.LAST_SCAN_NOTICE)
 
     def test_nothing_plugged_in_says_nothing_extra(self):
-        self._empty_scan("edu6", [])
+        self._empty_scan("edu6", {})
         self.assertEqual(identify_arm.LAST_SCAN_NOTICE, "")
 
     def test_an_unrelated_serial_device_is_not_an_arm(self):
-        self._empty_scan("omx", ["/dev/serial/by-id/usb-Some_GPS_0001-if00"])
+        self._empty_scan("omx", {"/dev/serial/by-id/usb-Some_GPS_0001-if00":
+                                 ("0403", "6001")})
         self.assertEqual(identify_arm.LAST_SCAN_NOTICE, "")
+
+    def test_a_ch34x_dongle_next_to_a_real_arm_does_not_mask_it(self):
+        """PID-pinning must not become so strict it misses the arm when a dongle
+        shares the bus — the notice is about the ARM being present."""
+        self._empty_scan("omx", {"/dev/serial/by-id/usb-1a86_USB2.0-Serial-if00":
+                                 self.CH340,
+                                 EDU6: self.CH343P})
+        self.assertIn("EduBotics 6-Achs", identify_arm.LAST_SCAN_NOTICE)
+
+    def test_a_commodity_ch34x_dongle_is_not_reported_as_an_edu6_arm(self):
+        """The by-id markers include a bare "1A86", which matches every CH340 /
+        CH341 / CH9102 dongle in a school cupboard. The presence check ASSERTS a
+        fact to the student, so it is PID-pinned — telling someone to change the
+        robot type because an Arduino clone is plugged in is worse than the
+        generic „Kein Arm gefunden" it replaces."""
+        dongle = "/dev/serial/by-id/usb-1a86_USB2.0-Serial-if00"
+        # It DOES match the by-id markers — that is the whole point.
+        with patch.object(identify_arm, "list_serial_by_id", return_value=[dongle]):
+            self.assertEqual(identify_arm.find_serial_paths_for_arms("edu6"), [dongle])
+        self._empty_scan("omx", {dongle: self.CH340})
+        self.assertEqual(identify_arm.LAST_SCAN_NOTICE, "")
+
+    def test_unreadable_sysfs_claims_nothing(self):
+        """`None` means "cannot prove", never "no match" — and never a claim.
+        An unreadable sysfs degrades to the generic „Kein Arm gefunden"."""
+        self._empty_scan("omx", {EDU6: None})
+        self.assertEqual(identify_arm.LAST_SCAN_NOTICE, "")
+
+    def test_an_omx_board_matches_any_pid_under_its_vid(self):
+        """ARM_USB_IDS["omx"] is (("2F5D", None),) — the OpenRB ships 0103 and
+        2202 firmware, and both must count."""
+        for pid in ("0103", "2202", "9999"):
+            with patch.object(identify_arm, "list_serial_by_id", return_value=[LEADER]), \
+                    patch.object(identify_arm, "usb_ids_for_serial_path",
+                                 return_value=("2F5D", pid)):
+                self.assertEqual(identify_arm.find_arm_devices_by_usb_id("omx"),
+                                 [LEADER], pid)
 
     def test_a_raising_enumeration_degrades_instead_of_failing_the_scan(self):
         """The scan has already decided its answer by then — this only decides
@@ -458,6 +560,75 @@ class TestCrossFamilyPresenceNotice(unittest.TestCase):
             self.assertEqual(identify_arm.scan_and_identify_arms("img", arm_family="edu6"),
                              (None, None))
         self.assertEqual(identify_arm.LAST_SCAN_NOTICE, "")
+
+
+class TestUsbIdsFromSysfs(unittest.TestCase):
+    """The one genuinely new hardware-facing primitive. Built against a REAL
+    temporary directory tree rather than mocks, so the two things that would
+    actually bite on a Pi are exercised: the walk up from the cdc_acm interface
+    to the USB device that carries the ids, and sysfs's lowercase hex."""
+
+    def _fake_bus(self, vid, pid, depth=2, write_ids=True):
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, True)
+        dev = os.path.join(root, "dev")
+        os.makedirs(dev)
+        node = os.path.join(dev, "ttyACM0")
+        open(node, "w").close()
+        by_id = os.path.join(dev, "usb-Some_Arm_0001-if00")
+        os.symlink(node, by_id)
+
+        sysroot = os.path.join(root, "sys")
+        usbdev = os.path.join(sysroot, "usb1", "1-1")
+        iface = os.path.join(usbdev, *[f"lvl{i}" for i in range(depth)])
+        os.makedirs(iface)
+        if write_ids:
+            for name, val in (("idVendor", vid), ("idProduct", pid)):
+                with open(os.path.join(usbdev, name), "w") as f:
+                    f.write(val + "\n")
+        ttydir = os.path.join(sysroot, "class", "tty", "ttyACM0")
+        os.makedirs(ttydir)
+        os.symlink(iface, os.path.join(ttydir, "device"))
+
+        p = patch.object(identify_arm, "_SYS_TTY_DIR",
+                         os.path.join(sysroot, "class", "tty"))
+        self.addCleanup(p.stop)
+        p.start()
+        return by_id
+
+    def test_reads_the_ids_and_uppercases_them(self):
+        """sysfs writes `1a86`; ARM_USB_IDS holds `1A86`. A case mismatch here
+        would silently make every PID comparison fail."""
+        by_id = self._fake_bus("1a86", "55d3")
+        self.assertEqual(identify_arm.usb_ids_for_serial_path(by_id), ("1A86", "55D3"))
+
+    def test_walks_up_from_the_interface_to_the_usb_device(self):
+        """/sys/class/tty/<tty>/device is the cdc_acm INTERFACE; the ids live on
+        a parent, and how many levels up depends on the topology."""
+        for depth in (0, 1, 2, 3):
+            with self.subTest(depth=depth):
+                by_id = self._fake_bus("2f5d", "0103", depth=depth)
+                self.assertEqual(identify_arm.usb_ids_for_serial_path(by_id),
+                                 ("2F5D", "0103"))
+
+    def test_gives_up_rather_than_guessing_when_the_ids_are_too_far_up(self):
+        by_id = self._fake_bus("2f5d", "0103", depth=identify_arm._USB_ID_WALK_LEVELS + 2)
+        self.assertIsNone(identify_arm.usb_ids_for_serial_path(by_id))
+
+    def test_missing_id_files_are_none_not_an_exception(self):
+        by_id = self._fake_bus("", "", write_ids=False)
+        self.assertIsNone(identify_arm.usb_ids_for_serial_path(by_id))
+
+    def test_a_path_that_does_not_exist_is_none(self):
+        self._fake_bus("1a86", "55d3")
+        self.assertIsNone(
+            identify_arm.usb_ids_for_serial_path("/dev/serial/by-id/usb-nope-if00"))
+
+    def test_no_sysfs_at_all_is_none(self):
+        """A dev box or a container without /sys/class/tty must degrade, not
+        raise — the caller treats None as 'cannot prove'."""
+        with patch.object(identify_arm, "_SYS_TTY_DIR", "/nonexistent/class/tty"):
+            self.assertIsNone(identify_arm.usb_ids_for_serial_path("/dev/ttyACM0"))
 
 
 class TestFastRehydrateArms(unittest.TestCase):

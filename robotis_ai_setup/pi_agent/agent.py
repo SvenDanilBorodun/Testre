@@ -796,6 +796,8 @@ class AgentApp:
                 # Only meaningful for the run that just happened — never read it
                 # off a fast-rehydrate path, where it would be a stale sentence
                 # from some earlier scan.
+                # The scanner clears it at the source once the family's arms were
+                # actually found, so anything left here is a live diagnosis.
                 notice = identify_arm.LAST_SCAN_NOTICE
                 if notice:
                     self._log(notice)

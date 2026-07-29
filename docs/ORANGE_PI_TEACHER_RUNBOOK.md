@@ -138,8 +138,9 @@ Derselbe Ablauf wie in der Windows-App, jetzt im Browser:
 
 | Schritt | Aktion |
 |---|---|
-| **A/B — Arme scannen** | Beide Arme scannen; Leader/Follower werden per Servo-ID erkannt und als stabile Ports gespeichert. |
-| **C — Kameras** | Kameras scannen, Rollen **Greifer/Szene** zuweisen, Vorschau prüfen. |
+| **Modus — Robotertyp** | Auswählen, **welcher Roboter** an diesem Pi hängt: „OMX – Voll" (beide Arme), „OMX – Roboter Studio (nur Follower)" oder „EduBotics 6-Achs – Roboter Studio". Diese Wahl bestimmt alles Weitere — nach welcher Arm-Familie der Scan sucht, ob es überhaupt einen Leader-Arm gibt und was „Umgebung starten" verlangt. Änderbar **nur bei gestoppter** Roboter-Umgebung. |
+| **A/B — Arm(e) scannen** | „OMX – Voll": **beide** Arme scannen, Leader/Follower werden per Servo-ID erkannt. Bei den beiden Follower-only-Typen heißt der Schritt „**Arm scannen**" und es gibt **keine Leader-Kachel** — ein Arm genügt. Die Ports werden in jedem Fall stabil gespeichert. |
+| **C — Kameras** | Kameras scannen, Rollen **Greifer/Szene** zuweisen, Vorschau prüfen. Auf einem Roboter-Studio-Kit mit **nur einer** Kamera ist **Szene** die richtige Rolle (die Perzeption hängt am Rollen-Namen). Der Pi rät hier nichts: eine Kamera **ohne** zugewiesene Rolle wird nicht gespeichert. |
 | **D — HF-Token** | Hugging-Face-Token einmal eintragen (`✓ Token gespeichert`). Überlebt Regenerate + „Daten zurücksetzen". |
 | **Umgebung starten** | Bringt die Roboter-Container hoch (der Manager/die Web-Oberfläche läuft **immer**). |
 
@@ -149,6 +150,13 @@ Derselbe Ablauf wie in der Windows-App, jetzt im Browser:
 > „Umgebung starten" hoch (der Dynamixel-Bus muss vorher frei sein).
 
 ## Schritt 6 — Aufnehmen & trainieren
+
+> Dieser Schritt gilt für **„OMX – Voll"**. Auf den Follower-only-Typen blendet
+> die Web-Oberfläche **Aufnahme, Daten und Training** aus (es gibt keinen
+> Leader-Arm zum Teleoperieren) — dort bleiben **Roboter Studio** und, bei
+> „OMX – Roboter Studio", **Inferenz**. Der **EduBotics 6-Achs**-Typ kann
+> ausschließlich Roboter Studio: der Inferenz-Tab ist sichtbar, ein Start wird
+> aber auf Deutsch abgelehnt.
 
 1. **Aufnahme**-Tab: Demos mit Leader→Follower-Teleop aufnehmen (inkl.
    Kollisions-Nothalt, unverändert).

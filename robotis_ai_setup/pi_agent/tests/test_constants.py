@@ -333,9 +333,11 @@ class TestArmUsbIdsLockstep(unittest.TestCase):
 
 
 class TestArmFamilyForRobotType(unittest.TestCase):
-    """The WP-3 bridge: until `ROBOT_PROFILES` lands on the Pi, this ONE mapping
-    is how a managed EDUBOTICS_ROBOT_TYPE picks the arm family the scan looks
-    for."""
+    """How a managed EDUBOTICS_ROBOT_TYPE picks the arm family the scan looks
+    for. This used to be a standalone `_ROBOT_TYPE_ARM_FAMILY` mapping (the WP-2
+    bridge); it now reads straight off `ROBOT_PROFILES`, so there is exactly ONE
+    id→family statement on the Pi. The behaviour asserted here is unchanged —
+    that is the point of keeping these cases after the absorb."""
 
     def test_each_profile_maps_to_its_family(self):
         self.assertEqual(constants.arm_family_for_robot_type("omx_full"), "omx")
@@ -356,18 +358,28 @@ class TestArmFamilyForRobotType(unittest.TestCase):
         self.assertEqual(constants.arm_family_for_robot_type(" edu6_studio "), "edu6")
 
     def test_ids_and_families_match_the_windows_registry(self):
-        """WP-3 replaces this mapping's body with
-        ROBOT_PROFILES[robot_type]["arm_family"] — so it must already agree with
-        the authoritative descriptor, or WP-3 becomes a behaviour change."""
+        """The absorb must not have changed a single verdict: the family this
+        accessor returns still equals the Windows descriptor's, id for id.
+        (The full three-way registry contract — Windows, Pi, server — lives in
+        tests/test_robot_profile_lockstep.py.)"""
         from gui.app import constants as win
 
-        self.assertEqual(set(constants._ROBOT_TYPE_ARM_FAMILY),
-                         set(win.ROBOT_PROFILES))
+        self.assertEqual(set(constants.ROBOT_PROFILES), set(win.ROBOT_PROFILES))
         for rid, row in win.ROBOT_PROFILES.items():
             self.assertEqual(constants.arm_family_for_robot_type(rid),
                              row["arm_family"], rid)
         self.assertEqual(constants.DEFAULT_ARM_FAMILY,
                          win.ROBOT_PROFILES[win.DEFAULT_ROBOT_PROFILE]["arm_family"])
+
+    def test_there_is_only_one_id_to_family_statement_left(self):
+        """The WP-2 bridge mapping is GONE, not shadowed. Two sources of truth
+        for the same fact is how the platforms drift apart — the whole reason
+        the bridge carried a "WP-3 replaces this" note."""
+        self.assertFalse(hasattr(constants, "_ROBOT_TYPE_ARM_FAMILY"))
+        # DEFAULT_ARM_FAMILY is DERIVED from the registry, not restated.
+        self.assertEqual(
+            constants.DEFAULT_ARM_FAMILY,
+            constants.ROBOT_PROFILES[constants.DEFAULT_ROBOT_PROFILE]["arm_family"])
 
 
 if __name__ == "__main__":

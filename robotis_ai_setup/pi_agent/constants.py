@@ -273,23 +273,59 @@ ARM_USB_IDS = {
     "omx":  (("2F5D", None),),
     "edu6": (("1A86", "55D3"),),
 }
-DEFAULT_ARM_FAMILY = "omx"
 
-# --- Robot type → arm family (WP-3 BRIDGE — ONE site, on purpose) ---
-# The arm family a scan must look for is a property of the selected robot
-# PROFILE. The Pi has no profile registry yet: `ROBOT_PROFILES` (with its
-# display_de / follower_only / scan_requires_leader / arm_family / camera_roles
-# rows, mirroring `gui/app/constants.py`) is WP-3. Until it lands the family is
-# derived from the on-disk MANAGED key EDUBOTICS_ROBOT_TYPE through this single
-# mapping, so WP-3 replaces exactly one function body with
-# ``ROBOT_PROFILES[robot_type]["arm_family"]`` and no call site moves. The ids
-# and families here MUST equal `gui/app/constants.py::ROBOT_PROFILES`;
-# tests/test_constants.py asserts that.
-_ROBOT_TYPE_ARM_FAMILY = {
-    "omx_full":     "omx",
-    "omx_follower": "omx",
-    "edu6_studio":  "edu6",
+# --- Robot type (ArmProfile) registry — the Pi's THIN descriptor ---
+# The robot type is a wizard-time, HARDSET decision baked into the managed .env
+# (MANAGED key EDUBOTICS_ROBOT_TYPE) before „Umgebung starten"; only a full
+# restart of the robot tier changes it. This mirrors the Windows thin descriptor
+# (`gui/app/constants.py::ROBOT_PROFILES`) row for row, and both mirror the
+# AUTHORITATIVE server registry (physical_ai_server/robot_profiles.py) — ids,
+# `follower_only`, `arm_family` and `camera_roles` are one cross-boundary
+# contract, enforced by tests/test_robot_profile_lockstep.py over all THREE
+# copies. The server owns capabilities/kinematics; the Pi (like the GUI) needs
+# only the display label plus the scan/leader/camera flags.
+#
+#   - omx_full     → both arms; Roboter Studio via the mid-session LeaderToggle.
+#   - omx_follower → follower only; no leader, LeaderToggle hidden, RS native.
+#   - edu6_studio  → the 6-DOF Feetech arm; follower-only, RS only.
+#
+# `display_de` is HARD-mandatory (it is direct-subscripted when the wizard's
+# profile list is built — an absent key must fail loudly, not degrade to a blank
+# label). `scan_requires_leader` drives the follower-only scan surface;
+# `follower_only` is the INITIAL EDUBOTICS_FOLLOWER_ONLY the .env generator
+# DERIVES from the type. `arm_family` scopes the /dev/serial/by-id filter and the
+# in-container prober protocol (`identify_arm`); `camera_roles` gives a lone
+# camera its default role (first entry).
+#
+# Values are COPIED VERBATIM from gui/app/constants.py — never re-derived.
+ROBOT_PROFILES = {
+    "omx_full":     {"display_de": "OMX – Voll",                          "follower_only": False, "scan_requires_leader": True,  "arm_family": "omx",  "camera_roles": ("gripper", "scene")},
+    "omx_follower": {"display_de": "OMX – Roboter Studio (nur Follower)", "follower_only": True,  "scan_requires_leader": False, "arm_family": "omx",  "camera_roles": ("scene", "gripper")},
+    "edu6_studio":  {"display_de": "EduBotics 6-Achs – Roboter Studio",   "follower_only": True,  "scan_requires_leader": False, "arm_family": "edu6", "camera_roles": ("scene",)},
 }
+DEFAULT_ROBOT_PROFILE = "omx_full"
+
+# DERIVED, not restated: the default profile's family is the family an
+# unknown/absent EDUBOTICS_ROBOT_TYPE falls back to.
+DEFAULT_ARM_FAMILY = ROBOT_PROFILES[DEFAULT_ROBOT_PROFILE]["arm_family"]
+
+
+def resolve_robot_type(robot_type) -> str:
+    """Validate a managed ``EDUBOTICS_ROBOT_TYPE`` value against the registry.
+
+    Unknown / absent / blank / mis-cased → :data:`DEFAULT_ROBOT_PROFILE`,
+    matching the server registry's ``robot_profiles.resolve``: a bad .env value
+    must keep today's OMX behaviour rather than make the rig unusable. That
+    fallback IS the documented one-variable rollback — it never raises.
+    """
+    key = (robot_type or "").strip()
+    return key if key in ROBOT_PROFILES else DEFAULT_ROBOT_PROFILE
+
+
+def robot_profile(robot_type) -> dict:
+    """The registry row for a managed ``EDUBOTICS_ROBOT_TYPE`` value (validated
+    through :func:`resolve_robot_type`, so this never raises KeyError)."""
+    return ROBOT_PROFILES[resolve_robot_type(robot_type)]
 
 
 def arm_family_for_robot_type(robot_type) -> str:
@@ -299,8 +335,7 @@ def arm_family_for_robot_type(robot_type) -> str:
     registry's ``robot_profiles.resolve`` fallback: an unrecognised .env value
     keeps today's OMX behaviour rather than making every arm unscannable.
     """
-    return _ROBOT_TYPE_ARM_FAMILY.get(
-        (robot_type or "").strip(), DEFAULT_ARM_FAMILY)
+    return robot_profile(robot_type)["arm_family"]
 
 
 # Dynamixel servo config.

@@ -866,15 +866,27 @@ class AgentApp:
                 # Only meaningful for the run that just happened — never read it
                 # off a fast-rehydrate path, where it would be a stale sentence
                 # from some earlier scan.
-                # The scanner clears it at the source once the family's arms were
-                # actually found, so anything left here is a live diagnosis.
                 notice = identify_arm.LAST_SCAN_NOTICE
-                if notice:
-                    self._log(notice)
 
             # Keep whatever we found in the in-memory config for the status view.
             self._hardware.leader = leader
             self._hardware.follower = follower
+
+            # A notice DIAGNOSES a port that did not become this profile's arm,
+            # so it is neither logged nor returned once the scan produced what
+            # the profile needs. The scanner clears it at the source, but only
+            # against the arm FAMILY — and `omx_follower` shares the two-arm
+            # `omx` family, so a successful ONE-arm scan there kept a sentence
+            # ending „… und erneut scannen" attached to a success (MEASURED,
+            # with a stray CH34x device plugged in). No notice is informative on
+            # a success: `partial:N` and `feetech_silent` both mean the arm did
+            # NOT identify, and the two cross-family ones only fire when the
+            # wrong family is attached. Byte-identical on `omx_full` and
+            # `edu6_studio`, where the scanner's own clear already fired.
+            if follower is not None and (leader is not None or not requires_leader):
+                notice = ""
+            elif notice:
+                self._log(notice)
 
             if follower is None and leader is None:
                 return 404, {"ok": False, "notice": notice,

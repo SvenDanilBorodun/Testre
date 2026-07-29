@@ -492,6 +492,41 @@ class TestScanNotice(_EnvTempBase):
         self.assertEqual(code, 409)
         self.assertEqual(payload["notice"], text)
 
+    def test_a_leader_less_success_drops_a_notice_the_family_clear_cannot_see(self):
+        """The scanner clears the notice against the arm FAMILY, and
+        `omx_follower` shares the two-arm `omx` family — so a successful ONE-arm
+        scan there kept a sentence ending „… und erneut scannen" attached to a
+        SUCCESS (MEASURED with a stray CH34x device plugged in). The 409 this
+        used to be was the only thing hiding it.
+
+        Not logged either: the Protokoll is what a teacher reads when a rig
+        misbehaves, and „Robotertyp wählen und erneut scannen" printed under a
+        green scan is the same contradiction one line lower.
+        """
+        follower = ArmDevice(serial_path="/dev/serial/by-id/usb-ROBOTIS_F", role="follower")
+        text = ('Es wurde ein „EduBotics 6-Achs"-Arm gefunden, aber ein '
+                'OMX-Robotertyp ist ausgewählt. Bitte den Robotertyp oben '
+                'passend zum angeschlossenen Arm wählen und erneut scannen.')
+        cg.upsert_env_var("EDUBOTICS_ROBOT_TYPE", "omx_follower", self.env_path,
+                          quote=False)
+        with patch.object(agent, "logger") as log:
+            code, payload = self._scan_leaving_notice(text, result=(None, follower))
+        self.assertEqual(code, 200)
+        self.assertEqual(payload["notice"], "")
+        self.assertEqual(payload["message"], "Roboterarm erkannt und gespeichert.")
+        self.assertNotIn(text, [c.args[0] for c in log.info.call_args_list])
+
+    def test_a_both_arms_success_drops_it_too(self):
+        # Byte-identical in effect on omx_full — the scanner's own clear already
+        # fired there — but pinned so the agent-side rule cannot be dropped as
+        # "redundant" and quietly re-open the omx_follower case above.
+        leader = ArmDevice(serial_path="/dev/serial/by-id/usb-ROBOTIS_L", role="leader")
+        follower = ArmDevice(serial_path="/dev/serial/by-id/usb-ROBOTIS_F", role="follower")
+        code, payload = self._scan_leaving_notice("irgendeine Meldung",
+                                                  result=(leader, follower))
+        self.assertEqual(code, 200)
+        self.assertEqual(payload["notice"], "")
+
     def test_a_stale_notice_never_rides_a_fast_rehydrate(self):
         """fast_rehydrate does not run a scan, so LAST_SCAN_NOTICE there is a
         sentence about some EARLIER attempt — reporting it would blame a rig

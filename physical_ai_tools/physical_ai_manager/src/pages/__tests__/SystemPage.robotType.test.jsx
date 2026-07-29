@@ -690,8 +690,18 @@ describe('camera roles are only ever sent with an explicit role', () => {
     });
   });
 
-  it('sends an empty list rather than a role-less camera', async () => {
-    renderWith(statusFixture({ robot_type: 'edu6_studio', cameras: [] }));
+  it('sends an empty list rather than a lone role-less camera', async () => {
+    // The camera MUST be seeded role-less into agentStatus.cameras, not merely
+    // left out: with `cameras: []` the seed is {} and `roles` stays empty, so
+    // the empty payload would come from there being nothing in the role map at
+    // all — and the test would pass with the filter deleted. (It did; an
+    // independent review caught it.) Seeded this way it fences the filter.
+    renderWith(
+      statusFixture({
+        robot_type: 'edu6_studio',
+        cameras: [{ path: '/dev/v4l/by-id/usb-CAM-A', role: '' }],
+      })
+    );
     await scanThenSave();
     expect(rolesBody().cameras).toEqual([]);
   });

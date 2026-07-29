@@ -215,6 +215,15 @@ class TestLeaderLessScanGating(_EnvTempBase):
     def _scan(self, robot_type, result, **kw):
         cg.upsert_env_var("EDUBOTICS_ROBOT_TYPE", robot_type, self.env_path,
                           quote=False)
+        # Patching out scan_and_identify_arms also removes the ONE place that
+        # clears the module-global LAST_SCAN_NOTICE (identify_arm.py: `global
+        # LAST_SCAN_NOTICE; LAST_SCAN_NOTICE = ""` on entry). The 404 message
+        # is `notice or "Kein Arm gefunden …"`, so a notice left behind by ANY
+        # earlier test in the process would silently become the message these
+        # tests assert on — an order-dependent failure that whole-suite
+        # collection order happens to hide today. Reproduce the real function's
+        # side effect instead of inheriting whoever ran last.
+        agent.identify_arm.LAST_SCAN_NOTICE = ""
         with patch.object(agent.docker_manager, "ensure_environment_stopped"), \
              patch.object(agent.identify_arm, "scan_and_identify_arms",
                           return_value=result):
@@ -393,7 +402,11 @@ class TestCameraRolesRequireAnExplicitRole(_EnvTempBase):
 
     ``PROFILES`` is swept everywhere a default would have differed between them
     (``camera_roles[0]`` is ``gripper`` on ``omx_full`` and ``scene`` on both
-    follower-only profiles), so re-introducing one makes these diverge."""
+    follower-only profiles). Note what catches what: a PROFILE-DERIVED default
+    is caught by ``test_no_profile_supplies_a_default_role`` (the three answers
+    stop agreeing); a CONSTANT default agrees across profiles and slips past
+    that one, so it is the two ``…is_a_400_on_every_profile`` sweeps that catch
+    it. Both kinds are covered — but only by different tests."""
 
     PROFILES = ("omx_full", "omx_follower", "edu6_studio")
 

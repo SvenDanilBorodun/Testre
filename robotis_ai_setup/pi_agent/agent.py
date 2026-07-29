@@ -967,13 +967,20 @@ class AgentApp:
         or absent one is a German 400 regardless of how many cameras were sent.
 
         There is deliberately NO lone-camera auto-assign here, unlike the
-        Windows GUI's ``gui_app._on_cameras_changed``. The Pi's only client is
-        ``SystemPage.js::handleSaveRoles``, which filters its payload to
-        ``r === 'gripper' || r === 'scene'`` — so a camera the student left
-        unassigned is DROPPED from the request and never arrives role-less. A
-        default here could therefore only ever be reached by a hand-crafted
-        request, i.e. it was code that pretended to work (MEASURED: the branch
-        was unreachable across all 405 UI-producible request bodies).
+        Windows GUI's ``gui_app._on_cameras_changed`` (a real, unguarded twin
+        divergence — no lockstep test covers camera roles in either direction).
+        The Pi's only client is ``SystemPage.js::handleSaveRoles``, which
+        filters its payload to ``r === 'gripper' || r === 'scene'`` — so a
+        camera the student left unassigned is DROPPED from the request and
+        never arrives role-less. A default here was therefore reachable only by
+        a header-less/hand-crafted caller (the agent deliberately accepts an
+        empty ``Origin`` for the curl acceptance path), never by the wizard.
+
+        MEASURED over the request space the SPA can construct — 0..3 cameras x
+        every gripper/scene assignment, x 3 profiles x 3 hardware states x 3
+        seeded session modes = 405 bodies — status, payload and resulting .env
+        are byte-identical with the default present or absent, and remain so
+        when it is re-added with a DIFFERENT value.
 
         Recorded because the value is not obvious if anyone re-adds it: the
         right default on a FOLLOWER-ONLY rig is ``scene``, not ``gripper`` —

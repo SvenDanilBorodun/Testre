@@ -398,7 +398,12 @@ python -m unittest discover -s app/tests -v
 # runs eslint only, and grepping .github/ for `npm test`/`vitest` returns nothing.
 # Every React test cited elsewhere in this file is a LOCAL guard; run it yourself.
 cd physical_ai_tools/physical_ai_manager && npm test
-npx eslint --max-warnings 0 src/
+# `--ext .js,.jsx` is NOT optional — it is what `ci.yml::react-lint` runs, and
+# without it eslint lints only `.js`. Every `.jsx` file (all the newer tests)
+# goes UNREAD, so the weaker form exits 0 on a tree CI fails. Measured: six
+# consecutive verification rounds ran the bare form, all reported clean, and
+# `react-lint` was red the whole time on one `.jsx` error.
+npx eslint --ext .js,.jsx --max-warnings 0 src/
 
 # Jetson agent (what CI runs; this dir HAS __init__.py, so pytest works too)
 cd robotis_ai_setup/jetson_agent && python -m unittest discover -s tests -v
@@ -496,7 +501,7 @@ python scripts/bootstrap_admin.py --username admin --full-name "Sven"
 - **rootfs-version-guard** — any `wsl_rootfs/` change EXCEPT `*.md` must bump `ROOTFS_VERSION` (docs don't ship in the rootfs; a bump forces a destructive re-import)
 - **enum-parity** — wire-int cross-check (`.srv`/`.msg` ↔ `taskCommand.js`/`taskPhases.js` ↔ getattr fallbacks ↔ hardcoded test ints; `NAME_ALIASES` covers legitimate name divergence)
 - **secret-scan** — gitleaks (pinned binary, sha256-verified) over full history; benign fingerprints in `.gitleaksignore`
-- **react-lint** — `npx eslint --max-warnings 0 src/` (the stale-closure bug class is `react-hooks/exhaustive-deps`)
+- **react-lint** — `npx eslint --ext .js,.jsx --max-warnings 0 src/` (the stale-closure bug class is `react-hooks/exhaustive-deps`). **Quote the `--ext` form or don't quote it at all**: dropping it lints `.js` only, which silently skips every `.jsx` test file and turns a red job green locally
 - **actions-security** — zizmor (pinned) at `--min-severity low`, baseline zero; the one accepted deviation (`release.yml secrets: inherit`) is documented in `.github/zizmor.yml`
 
 (`image_source_parity.sh` runs in `docker-publish.yml::smoke-test`, not ci.yml.)

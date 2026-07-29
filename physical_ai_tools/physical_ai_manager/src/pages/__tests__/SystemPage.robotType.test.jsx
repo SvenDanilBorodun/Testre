@@ -616,9 +616,7 @@ describe('Schritt A wording matches how many arms the profile has', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Arm scannen' }));
     expect(await screen.findByRole('button', { name: 'Wird gescannt …' })).toBeInTheDocument();
     release();
-    await waitFor(() =>
-      expect(screen.getByRole('button', { name: 'Arm scannen' })).toBeInTheDocument()
-    );
+    expect(await screen.findByRole('button', { name: 'Arm scannen' })).toBeInTheDocument();
   });
 });
 

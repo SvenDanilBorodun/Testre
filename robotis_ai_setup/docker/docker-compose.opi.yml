@@ -208,7 +208,10 @@ services:
       #   * the type has a WRITER other than an SSH hand-edit — POST /robot-type
       #     (agent.handle_set_robot_type), behind the System-tab selector; and
       #   * „Umgebung starten" gates on the PROFILE, not on "both arms"
-      #     (agent._hardware_ready wants a leader only when scan_requires_leader)
+      #     (agent._hardware_ready wants a leader only when scan_requires_leader
+      #     — AND, since 2026-07-29, every arm the profile uses being of that
+      #     profile's own ARM FAMILY, so crossing OMX <-> edu6 INVALIDATES a
+      #     scan rather than starting the wrong entrypoint branch against it)
       #     and regenerates with follower_only=None, which generate_env_file
       #     DERIVES from the type. A leaderless `.env` is therefore what a
       #     follower-only profile writes BY DEFAULT — not something only the

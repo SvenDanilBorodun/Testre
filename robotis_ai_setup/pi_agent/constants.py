@@ -279,11 +279,21 @@ ARM_USB_IDS = {
 # (MANAGED key EDUBOTICS_ROBOT_TYPE) before „Umgebung starten"; only a full
 # restart of the robot tier changes it. This mirrors the Windows thin descriptor
 # (`gui/app/constants.py::ROBOT_PROFILES`) row for row, and both mirror the
-# AUTHORITATIVE server registry (physical_ai_server/robot_profiles.py) — ids,
-# `follower_only`, `arm_family` and `camera_roles` are one cross-boundary
-# contract, enforced by tests/test_robot_profile_lockstep.py over all THREE
-# copies. The server owns capabilities/kinematics; the Pi (like the GUI) needs
-# only the display label plus the scan/leader/camera flags.
+# AUTHORITATIVE server registry (physical_ai_server/robot_profiles.py). The
+# cross-boundary contract is enforced by tests/test_robot_profile_lockstep.py,
+# but NOT every field spans the same number of copies — do not say "all three"
+# of a field that has only two:
+#   THREE copies (gui ↔ server AND gui ↔ pi): the profile-id SET,
+#     `follower_only`, `camera_roles`, and the default profile id.
+#   TWO copies (the thin descriptors only): `arm_family` — the server has NO
+#     such field (`grep -c arm_family robot_profiles.py` → 0), because it never
+#     scans USB; the field scopes the usbipd VID/PID attach on Windows and the
+#     /dev/serial/by-id filter + prober protocol here. Its test says so in its
+#     own name: `test_arm_family_agrees_across_the_two_thin_descriptors`.
+#     `display_de` is also two-copy, and only checked non-empty — the two
+#     platforms are free to word a label differently.
+# The server owns capabilities/kinematics; the Pi (like the GUI) needs only the
+# display label plus the scan/leader/camera flags.
 #
 #   - omx_full     → both arms; Roboter Studio via the mid-session LeaderToggle.
 #   - omx_follower → follower only; no leader, LeaderToggle hidden, RS native.

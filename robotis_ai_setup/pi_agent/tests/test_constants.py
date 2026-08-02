@@ -289,5 +289,98 @@ class TestSystemFilesVersionFile(unittest.TestCase):
         self.assertIn(".system-files-version", setup_sh)
 
 
+class TestArmUsbIdsLockstep(unittest.TestCase):
+    """`ARM_USB_IDS` is duplicated on Windows and the Pi because pi_agent ships
+    as a standalone tarball with no import path to gui/app. A lockstep test is
+    the coupling (the deliberate WP-7 decision); without it the two tables drift
+    and an arm scannable on one platform is invisible on the other."""
+
+    def test_table_equals_the_windows_one(self):
+        from gui.app import constants as win
+
+        self.assertEqual(constants.ARM_USB_IDS, win.ARM_USB_IDS)
+
+    def test_the_edu6_row_is_the_ch343p(self):
+        self.assertEqual(constants.ARM_USB_IDS["edu6"], (("1A86", "55D3"),))
+
+    def test_the_omx_row_is_any_pid_under_the_robotis_vid(self):
+        self.assertEqual(constants.ARM_USB_IDS["omx"],
+                         ((constants.ROBOTIS_VID, None),))
+
+    def test_the_udev_rule_grants_every_table_entry_a_permission_floor(self):
+        """The rule file and the table are two independent transcriptions of the
+        same hardware fact. A VID/PID in one and not the other is exactly the
+        gap that made the CH343P unopenable outside a privileged container."""
+        rules = (Path(constants.__file__).parent / "udev"
+                 / constants.UDEV_RULE_NAMES[0]).read_text(encoding="utf-8")
+        lines = [ln for ln in rules.splitlines()
+                 if ln.strip() and not ln.lstrip().startswith("#")]
+        for family, ids in constants.ARM_USB_IDS.items():
+            for vid, pid in ids:
+                if pid is None:
+                    continue  # any-PID families are covered per known board
+                self.assertTrue(
+                    any(f'idVendor}}=="{vid.lower()}"' in ln
+                        and f'idProduct}}=="{pid.lower()}"' in ln
+                        for ln in lines),
+                    f"{family}: no udev line for {vid}:{pid}")
+
+    def test_the_robotis_boards_keep_their_udev_lines(self):
+        rules = (Path(constants.__file__).parent / "udev"
+                 / constants.UDEV_RULE_NAMES[0]).read_text(encoding="utf-8")
+        for pid in ("0103", "2202"):
+            self.assertIn(f'idProduct}}=="{pid}"', rules)
+
+
+class TestArmFamilyForRobotType(unittest.TestCase):
+    """How a managed EDUBOTICS_ROBOT_TYPE picks the arm family the scan looks
+    for. This used to be a standalone `_ROBOT_TYPE_ARM_FAMILY` mapping (the WP-2
+    bridge); it now reads straight off `ROBOT_PROFILES`, so there is exactly ONE
+    id→family statement on the Pi. The behaviour asserted here is unchanged —
+    that is the point of keeping these cases after the absorb."""
+
+    def test_each_profile_maps_to_its_family(self):
+        self.assertEqual(constants.arm_family_for_robot_type("omx_full"), "omx")
+        self.assertEqual(constants.arm_family_for_robot_type("omx_follower"), "omx")
+        self.assertEqual(constants.arm_family_for_robot_type("edu6_studio"), "edu6")
+
+    def test_unknown_absent_and_blank_fall_back_to_omx(self):
+        """Matches robot_profiles.resolve: an unrecognised .env value keeps
+        today's OMX behaviour instead of making every arm unscannable."""
+        for value in (None, "", "   ", "nonsense", "EDU6_STUDIO"):
+            self.assertEqual(constants.arm_family_for_robot_type(value),
+                             constants.DEFAULT_ARM_FAMILY, repr(value))
+        self.assertEqual(constants.DEFAULT_ARM_FAMILY, "omx")
+
+    def test_surrounding_whitespace_is_tolerated(self):
+        """`.env` values reach us via read_env_var; a stray space must not
+        silently demote an edu6 rig to an OMX scan."""
+        self.assertEqual(constants.arm_family_for_robot_type(" edu6_studio "), "edu6")
+
+    def test_ids_and_families_match_the_windows_registry(self):
+        """The absorb must not have changed a single verdict: the family this
+        accessor returns still equals the Windows descriptor's, id for id.
+        (The full three-way registry contract — Windows, Pi, server — lives in
+        tests/test_robot_profile_lockstep.py.)"""
+        from gui.app import constants as win
+
+        self.assertEqual(set(constants.ROBOT_PROFILES), set(win.ROBOT_PROFILES))
+        for rid, row in win.ROBOT_PROFILES.items():
+            self.assertEqual(constants.arm_family_for_robot_type(rid),
+                             row["arm_family"], rid)
+        self.assertEqual(constants.DEFAULT_ARM_FAMILY,
+                         win.ROBOT_PROFILES[win.DEFAULT_ROBOT_PROFILE]["arm_family"])
+
+    def test_there_is_only_one_id_to_family_statement_left(self):
+        """The WP-2 bridge mapping is GONE, not shadowed. Two sources of truth
+        for the same fact is how the platforms drift apart — the whole reason
+        the bridge carried a "WP-3 replaces this" note."""
+        self.assertFalse(hasattr(constants, "_ROBOT_TYPE_ARM_FAMILY"))
+        # DEFAULT_ARM_FAMILY is DERIVED from the registry, not restated.
+        self.assertEqual(
+            constants.DEFAULT_ARM_FAMILY,
+            constants.ROBOT_PROFILES[constants.DEFAULT_ROBOT_PROFILE]["arm_family"])
+
+
 if __name__ == "__main__":
     unittest.main()

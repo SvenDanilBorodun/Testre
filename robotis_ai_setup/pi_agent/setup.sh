@@ -291,11 +291,66 @@ install_agent_tree() {
     # Compose file + the s6-keep marker it bind-mounts. The compose references
     # ./physical_ai_server/.s6-keep RELATIVE to its own directory, so both land
     # under /opt/edubotics (constants.COMPOSE_FILE = /opt/edubotics/docker-compose.opi.yml).
-    [ -n "$DOCKER_DIR" ] || die "Cannot locate the docker/ dir (expected ${SCRIPT_DIR}/../docker)."
-    install -m 0644 "${DOCKER_DIR}/docker-compose.opi.yml" \
-        "${INSTALL_DIR}/docker-compose.opi.yml"
-    install -m 0644 "${DOCKER_DIR}/physical_ai_server/.s6-keep" \
-        "${INSTALL_DIR}/physical_ai_server/.s6-keep"
+    #
+    # TWO sources for the compose, in priority order. The source checkout
+    # (${DOCKER_DIR}) is the source of truth and stays first. The fallback is the
+    # byte-identical twin that ships INSIDE the agent package
+    # (pi_agent/docker/docker-compose.opi.yml, fenced by
+    # ci.yml::pi-compose-twin-guard and re-fenced on the release artifact by
+    # release.yml::pi-agent-tarball) — the same copy the agent's own drift repair
+    # installs, so a tree that has the package but no docker/ dir beside it gets
+    # exactly the file it would have been repaired onto anyway, rather than
+    # dying with "cannot locate the docker/ dir" while holding a perfectly good
+    # compose one directory down. The rsync above already placed that twin under
+    # ${INSTALL_DIR}/pi_agent/docker/; it is read here from ${SCRIPT_DIR} so the
+    # source of the install is the tree being provisioned FROM in both branches.
+    local compose_src=""
+    if [ -n "$DOCKER_DIR" ] && [ -f "${DOCKER_DIR}/docker-compose.opi.yml" ]; then
+        compose_src="${DOCKER_DIR}/docker-compose.opi.yml"
+    elif [ -f "${SCRIPT_DIR}/docker/docker-compose.opi.yml" ]; then
+        compose_src="${SCRIPT_DIR}/docker/docker-compose.opi.yml"
+        log "No source docker/ dir — installing the compose from the agent's shipped copy."
+    else
+        die "Cannot locate docker-compose.opi.yml (looked in ${SCRIPT_DIR}/../docker and ${SCRIPT_DIR}/docker)."
+    fi
+    install -m 0644 "$compose_src" "${INSTALL_DIR}/docker-compose.opi.yml"
+
+    # .s6-keep is a 0-byte marker whose content has never changed (git blob
+    # e69de29 = the empty blob; ONE commit in its entire history, b0b601f, the
+    # repo's second), so it is deliberately NOT twinned into the agent package —
+    # there is nothing a byte compare could find, i.e. nothing the agent's own
+    # drift repair could ever do with it.
+    #
+    # It is still REQUIRED on disk: the compose bind-mounts it read-only, and
+    # Docker auto-creates a missing mount target as a DIRECTORY, which refuses
+    # every physical_ai_server start (the tzdata scar, CLAUDE.md). So when there
+    # is no source checkout to copy it from, create it — for a file whose whole
+    # definition is "exists, empty", creating it and copying it are the same
+    # act, and `install` from a source checkout stays first only because that is
+    # provably the same bytes.
+    #
+    # Dying here instead (as this did until 2026-07-28) was worse than it looked:
+    # install_agent_tree is step 6 of 10 under `set -euo pipefail`, so a
+    # tarball-only provision logged SUCCESS for the compose install one statement
+    # earlier and then aborted before .env seeding, the image pull and the unit
+    # install — leaving the Pi with no agent at all.
+    if [ -n "$DOCKER_DIR" ] && [ -f "${DOCKER_DIR}/physical_ai_server/.s6-keep" ]; then
+        install -m 0644 "${DOCKER_DIR}/physical_ai_server/.s6-keep" \
+            "${INSTALL_DIR}/physical_ai_server/.s6-keep"
+    else
+        # Refuse a target that exists but is not a regular file rather than let
+        # `:` fail with a bare bash error under `set -e`. That state is REAL and
+        # is precisely what this marker prevents: docker auto-created it as a
+        # DIRECTORY on some earlier container start. Only a human can decide to
+        # remove it, so say what to do instead of guessing.
+        if [ -e "${INSTALL_DIR}/physical_ai_server/.s6-keep" ] \
+           && [ ! -f "${INSTALL_DIR}/physical_ai_server/.s6-keep" ]; then
+            die "${INSTALL_DIR}/physical_ai_server/.s6-keep exists but is not a regular file (docker creates a DIRECTORY there when the mount target is missing). Remove it and re-run."
+        fi
+        log "No source docker/ dir — creating the 0-byte .s6-keep marker."
+        : > "${INSTALL_DIR}/physical_ai_server/.s6-keep"
+        chmod 0644 "${INSTALL_DIR}/physical_ai_server/.s6-keep"
+    fi
 
     # VERSION so constants._read_version_file resolves the product version even
     # when the agent tarball is deployed without the source tree beside it.
@@ -323,25 +378,79 @@ install_agent_tree() {
             > "${INSTALL_DIR}/pi_agent/docker/versions.env"
         chmod 0644 "${INSTALL_DIR}/pi_agent/docker/versions.env" 2>/dev/null || true
 
-        # System-files provenance stamp (audit M1). docker-compose.opi.yml + the
-        # systemd units are installed here from the source checkout but are NOT in
-        # the self-update tarball (which rsyncs pi_agent/ ONLY), so a release that
-        # changes a forwarded EDUBOTICS_* env / a healthcheck / a unit never reaches
-        # a deployed Pi — a silent orchestration fail-open. This stamp records the
-        # version those on-disk system files came from; it lives OUTSIDE pi_agent/
-        # so a self-update (which does not touch compose/units) does NOT advance it.
+        # System-files provenance stamp (audit M1). The three "system files" this
+        # script installs OUTSIDE pi_agent/ — docker-compose.opi.yml (above), the
+        # udev rule (install_udev) and the systemd units (install_units) — land on
+        # paths a self-update's rsync never touches, so this stamp records the
+        # version the on-disk copies came from. It lives outside pi_agent/ too, so
+        # a self-update cannot advance it.
+        #
+        # Until 2026-07-28 this comment went on to say those files "never reach a
+        # deployed Pi — a silent orchestration fail-open". That was true then and
+        # is FALSE now; closing it is what this work package did. All three now
+        # SHIP inside the agent package: the units in pi_agent/systemd/ and the
+        # rule in pi_agent/udev/ (both installed from ${SCRIPT_DIR} above/below,
+        # i.e. from exactly those copies), and the compose as a byte-identical
+        # TWIN at constants.SHIPPED_COMPOSE_RELPATH — that one still prefers
+        # ${DOCKER_DIR} when a source checkout exists, which is the same bytes by
+        # construction (ci.yml::pi-compose-twin-guard `cmp -s`). So the release
+        # tar and the self-update rsync both carry each new definition onto the
+        # Pi, where agent.py::_check_system_files_version byte-compares the
+        # installed copies against them at boot and installs the shipped bytes
+        # atomically on drift. A refused or failed repair leaves the previous,
+        # working file byte-intact and is the only thing that reaches the System
+        # tab's banner.
+        #
         # CONTEXT ONLY: the agent does NOT treat stamp != APP_VERSION as drift —
         # that inequality is the normal state of every self-updated Pi (the stamp
         # cannot advance by design) and proves nothing about the files' content.
-        # The agent proves drift by byte-comparing the units it installed below
-        # against the ones it ships, and uses this stamp only to name where the
-        # on-disk system files came from.
+        # Drift is proven by that byte compare; this stamp only NAMES the version
+        # the on-disk system files came from, and only once drift is proven.
         printf '%s\n' "$pinned_version" > "${INSTALL_DIR}/.system-files-version"
         chmod 0644 "${INSTALL_DIR}/.system-files-version" 2>/dev/null || true
         log "Pinned IMAGE_TAG=${pinned_version} + stamped system-files version (release-pinned, not main HEAD)."
     else
-        warn "No readable repo VERSION — IMAGE_TAG will fall back to 'latest' (this Pi would track main HEAD)."
-        warn "Provision from a full source checkout so the repo-root VERSION file is present."
+        # No repo-root VERSION. Until 2026-07-28 this branch flatly warned that
+        # IMAGE_TAG "will fall back to 'latest'". That is FALSE on the path that
+        # now reaches it, and that path only became reachable in this same work
+        # package: on main a tarball-only provision aborted at the top of this
+        # function (`[ -n "$DOCKER_DIR" ] || die`), then — once the shipped
+        # compose twin fixed that — at .s6-keep. So this branch had never once
+        # judged a tarball install when its wording was written.
+        #
+        # The reachable path is a TARBALL provision: the release archive's top
+        # level is pi_agent/, so ${SCRIPT_DIR}/../.. is wherever it was unpacked,
+        # never a repo — hence no ${REPO_ROOT}/VERSION. But release.yml's
+        # pi-agent-tarball job BAKES both pi_agent/docker/versions.env
+        # (IMAGE_TAG=<release>) and pi_agent/VERSION into that archive, and the
+        # rsync at the top of this function has ALREADY placed both under
+        # ${INSTALL_DIR}/pi_agent/ — which is the FIRST path
+        # constants._read_versions_env probes. So the pin is on disk and correct
+        # before we get here, and telling the operator to re-provision from a
+        # source checkout would send them to fix a problem they do not have.
+        #
+        # Measure what actually landed rather than asserting a fallback. The
+        # three states mirror constants.py's real resolution order exactly:
+        #   versions.env present            -> pinned by the packaged file
+        #   only pi_agent/VERSION present   -> _default_image_tag() -> APP_VERSION
+        #   neither                         -> "latest" (the original warning)
+        local packaged_tag=""
+        local packaged_version=""
+        if [ -f "${INSTALL_DIR}/pi_agent/docker/versions.env" ]; then
+            packaged_tag="$(sed -n 's/^IMAGE_TAG=//p' "${INSTALL_DIR}/pi_agent/docker/versions.env" 2>/dev/null | tr -d '[:space:]')"
+        fi
+        if [ -f "${INSTALL_DIR}/pi_agent/VERSION" ]; then
+            packaged_version="$(tr -d '[:space:]' < "${INSTALL_DIR}/pi_agent/VERSION" 2>/dev/null || true)"
+        fi
+        if [ -n "$packaged_tag" ]; then
+            log "No repo VERSION (tarball provision) — IMAGE_TAG=${packaged_tag} already comes from the packaged pi_agent/docker/versions.env. Nothing to pin here."
+            log "Not written on this path: ${INSTALL_DIR}/VERSION (the packaged pi_agent/VERSION supersedes it) and .system-files-version (so a later drift report names no origin version). Neither affects which images this Pi pulls."
+        elif [ -n "$packaged_version" ]; then
+            warn "No repo VERSION and no packaged pi_agent/docker/versions.env — IMAGE_TAG degrades to this agent's own version (${packaged_version}), not 'latest'. Expected only for a hand-assembled tree."
+        else
+            warn "No repo VERSION, no packaged pi_agent/docker/versions.env and no packaged pi_agent/VERSION — IMAGE_TAG will fall back to 'latest' (this Pi would track main HEAD)."
+            warn "Provision from a full source checkout or from the release tarball (edubotics-pi-agent.tar.gz), either of which carries a pin."
+        fi
     fi
 }
 

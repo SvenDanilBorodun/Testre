@@ -253,6 +253,134 @@ CAMERA_BRIDGE_ROLES = ("gripper", "scene")
 # USB identifiers — both OpenMANIPULATOR arms are OpenRB-150 boards.
 ROBOTIS_VID = "2F5D"  # ROBOTIS USB Vendor ID (OpenRB-150; PIDs 0103, 2202)
 
+# Arm-family USB identity table — the Pi twin of `gui/app/constants.py`'s
+# ARM_USB_IDS (edu6 §4.4), kept equal by tests/test_constants.py. Keys are the
+# ARM FAMILY (what the scan hardware-matches), NOT the profile id — both OMX
+# profiles share one family. Values: (VID, PID-or-None) tuples, None = any PID
+# under that VID. The edu6 bridge is the WCH CH343P on the Waveshare Bus Servo
+# Adapter; identity is still PROVEN by the SERVOS answering
+# (`identify_arm.py --protocol=feetech`), never by the bridge chip.
+#
+# WHERE IT IS CONSUMED DIFFERS FROM WINDOWS, deliberately. There the table
+# scopes the usbipd attach (`usbipd attach --busid ...`). A Pi has no attach
+# step at all — every arm is already linked under /dev/serial/by-id by native
+# udev — so the Pi's family scoping is purely the by-id substring filter in
+# `identify_arm._ARM_MARKERS`. This table is therefore the shared IDENTITY
+# statement of what hardware each family is: the authority the udev
+# permission-floor rule mirrors (`udev/99-edubotics-robotis.rules`) and the
+# anchor that stops the two platforms drifting apart.
+ARM_USB_IDS = {
+    "omx":  (("2F5D", None),),
+    "edu6": (("1A86", "55D3"),),
+}
+
+# --- Robot type (ArmProfile) registry — the Pi's THIN descriptor ---
+# The robot type is a wizard-time, HARDSET decision baked into the managed .env
+# (MANAGED key EDUBOTICS_ROBOT_TYPE) before „Umgebung starten"; only a full
+# restart of the robot tier changes it. This mirrors the Windows thin descriptor
+# (`gui/app/constants.py::ROBOT_PROFILES`) row for row, and both mirror the
+# AUTHORITATIVE server registry (physical_ai_server/robot_profiles.py). The
+# cross-boundary contract is enforced by tests/test_robot_profile_lockstep.py,
+# but NOT every field spans the same number of copies — do not say "all three"
+# of a field that has only two:
+#   THREE copies (gui ↔ server AND gui ↔ pi): the profile-id SET,
+#     `follower_only`, `camera_roles`, and the default profile id.
+#   TWO copies (the thin descriptors only): `arm_family` — the server has NO
+#     such field (`grep -c arm_family robot_profiles.py` → 0), because it never
+#     scans USB; the field scopes the usbipd VID/PID attach on Windows and the
+#     /dev/serial/by-id filter + prober protocol here. Its test says so in its
+#     own name: `test_arm_family_agrees_across_the_two_thin_descriptors`.
+#     `display_de` is also two-copy, and only checked non-empty — the two
+#     platforms are free to word a label differently.
+# The server owns capabilities/kinematics; the Pi (like the GUI) needs only the
+# display label plus the scan/leader/camera flags.
+#
+#   - omx_full     → both arms; Roboter Studio via the mid-session LeaderToggle.
+#   - omx_follower → follower only; no leader, LeaderToggle hidden, RS native.
+#   - edu6_studio  → the 6-DOF Feetech arm; follower-only, RS only.
+#
+# `display_de` is HARD-mandatory (it is direct-subscripted when the wizard's
+# profile list is built — an absent key must fail loudly, not degrade to a blank
+# label). `scan_requires_leader` drives the follower-only scan surface;
+# `follower_only` is the INITIAL EDUBOTICS_FOLLOWER_ONLY the .env generator
+# DERIVES from the type. `arm_family` scopes the /dev/serial/by-id filter and the
+# in-container prober protocol (`identify_arm`).
+#
+# `camera_roles` is the profile's ALLOWLIST of camera roles, and on the Pi it is
+# live in two places: it rides `/status.robot_profiles[].camera_roles` (which is
+# how `SystemPage.js` knows which `<option>`s to offer) and it is the set
+# `agent.handle_cameras_roles` validates an incoming role against. Both halves
+# exist because either alone is bypassable — a stale cached bundle would still
+# offer the wrong role, and a hand-crafted POST would still be accepted.
+#
+# Why it must be an allowlist and not a hint: the server's per-profile
+# `config/<type>_config.yaml` declares the camera TOPICS by role name, and
+# `edu6_studio` declares exactly one (`scene:/scene/image_raw/compressed`).
+# Naming that camera `gripper` publishes `/gripper/image_raw/compressed`, which
+# no consumer subscribes to — while the opi compose healthcheck greps the very
+# topic the student just named, so it goes GREEN, „Umgebung starten" reports
+# success in German, and Roboter Studio then shows nothing with no diagnosis
+# pointing back here. It also feeds the GUI's lone-camera auto-assign
+# (`gui_app._on_cameras_changed` reads `camera_roles[0]`), where „gripper" on a
+# follower-only kit was the original scar (CLAUDE.md). The Pi has NO such
+# auto-assign — a role-less camera is a German 400, never a guess (the two
+# Innomakers are identical-serial, so only the live preview tells them apart).
+#
+# ORDER is meaningful to the GUI (`[0]` is the lone-camera default) and NOT to
+# the Pi (which tests membership), which is why `omx_full` and `omx_follower`
+# carry the same two roles in opposite order and both accept both.
+# The three-way lockstep (server ArmProfile, GUI twin, this row) is fenced by
+# tests/test_robot_profile_lockstep.py::test_camera_roles_agree_per_id.
+#
+# Values are COPIED VERBATIM from gui/app/constants.py — never re-derived.
+ROBOT_PROFILES = {
+    "omx_full":     {"display_de": "OMX – Voll",                          "follower_only": False, "scan_requires_leader": True,  "arm_family": "omx",  "camera_roles": ("gripper", "scene")},
+    "omx_follower": {"display_de": "OMX – Roboter Studio (nur Follower)", "follower_only": True,  "scan_requires_leader": False, "arm_family": "omx",  "camera_roles": ("scene", "gripper")},
+    "edu6_studio":  {"display_de": "EduBotics 6-Achs – Roboter Studio",   "follower_only": True,  "scan_requires_leader": False, "arm_family": "edu6", "camera_roles": ("scene",)},
+}
+DEFAULT_ROBOT_PROFILE = "omx_full"
+
+# The German label for each camera role, in the words the wizard's own dropdown
+# uses — so a refusal names the role the student just picked, not its wire id.
+# Every profile's `camera_roles` must be a subset of these keys (fenced by
+# tests/test_camera_role_allowlist.py): a role outside them could be offered by
+# the SPA yet never accepted by `handle_cameras_roles`, which rejects unknown
+# roles before it ever consults the profile.
+CAMERA_ROLE_LABELS_DE = {"gripper": "Greifer", "scene": "Szene"}
+
+# DERIVED, not restated: the default profile's family is the family an
+# unknown/absent EDUBOTICS_ROBOT_TYPE falls back to.
+DEFAULT_ARM_FAMILY = ROBOT_PROFILES[DEFAULT_ROBOT_PROFILE]["arm_family"]
+
+
+def resolve_robot_type(robot_type) -> str:
+    """Validate a managed ``EDUBOTICS_ROBOT_TYPE`` value against the registry.
+
+    Unknown / absent / blank / mis-cased → :data:`DEFAULT_ROBOT_PROFILE`,
+    matching the server registry's ``robot_profiles.resolve``: a bad .env value
+    must keep today's OMX behaviour rather than make the rig unusable. That
+    fallback IS the documented one-variable rollback — it never raises.
+    """
+    key = (robot_type or "").strip()
+    return key if key in ROBOT_PROFILES else DEFAULT_ROBOT_PROFILE
+
+
+def robot_profile(robot_type) -> dict:
+    """The registry row for a managed ``EDUBOTICS_ROBOT_TYPE`` value (validated
+    through :func:`resolve_robot_type`, so this never raises KeyError)."""
+    return ROBOT_PROFILES[resolve_robot_type(robot_type)]
+
+
+def arm_family_for_robot_type(robot_type) -> str:
+    """Arm family for a managed ``EDUBOTICS_ROBOT_TYPE`` value.
+
+    Unknown / absent / blank → ``DEFAULT_ARM_FAMILY``, matching the server
+    registry's ``robot_profiles.resolve`` fallback: an unrecognised .env value
+    keeps today's OMX behaviour rather than making every arm unscannable.
+    """
+    return robot_profile(robot_type)["arm_family"]
+
+
 # Dynamixel servo config.
 BAUDRATE = 1_000_000
 LEADER_SERVO_IDS = [1, 2, 3, 4, 5, 6]
@@ -320,31 +448,61 @@ COMPOSE_FILE = os.environ.get(
 # state of every self-updated Pi — the stamp cannot advance by design and every
 # release bumps APP_VERSION — so it fires on ~100 % of healthy Pis and proves
 # nothing about the files' CONTENT. The agent instead compares the installed
-# systemd units byte-for-byte against the ones it ships (see
-# SYSTEMD_UNIT_DIR/SYSTEMD_UNIT_NAMES) and uses this stamp only to NAME the
-# version the on-disk system files came from once real drift is proven.
+# system files byte-for-byte against the ones it ships (see
+# SYSTEMD_UNIT_DIR/SYSTEMD_UNIT_NAMES and SHIPPED_COMPOSE_RELPATH) and uses this
+# stamp only to NAME the version the on-disk system files came from once real
+# drift is proven.
 #
 # ABSENT means "provisioned before the stamp existed" — read backward-compatibly.
 SYSTEM_FILES_VERSION_FILE = os.environ.get(
     "EDUBOTICS_SYSTEM_FILES_VERSION_FILE", "/opt/edubotics/.system-files-version"
 )
 
-# Where setup.sh installs the systemd units, and which units it installs. These
-# are the ONE piece of the "system files" set the agent can prove drift on: they
+# Where setup.sh installs the systemd units, and which units it installs. They
 # ship INSIDE `pi_agent/systemd/` (so a self-update rsync refreshes the agent's
 # copy) and setup.sh installs them VERBATIM (`install -m 0644`, no templating) to
 # SYSTEMD_UNIT_DIR — which self-update never touches. A byte difference between
 # the two is therefore hard evidence that this agent version expects a unit the
 # Pi is not running, with no false positives to tune out.
-#
-# `docker-compose.opi.yml` deliberately is NOT in this set: it lives outside
-# `pi_agent/` (robotis_ai_setup/docker/), so the tarball carries no reference
-# copy and the agent has nothing to compare against. Proving compose drift needs
-# release.yml to ship a hash manifest (or the compose itself) in the tarball.
 SYSTEMD_UNIT_DIR = os.environ.get(
     "EDUBOTICS_SYSTEMD_UNIT_DIR", "/etc/systemd/system"
 )
 SYSTEMD_UNIT_NAMES = ("edubotics-pi.service", "edubotics-pi-firstboot.service")
+
+# Where setup.sh installs the udev rule(s), and which ones it installs — the
+# same shape as the systemd pair above, for the same reason.
+#
+# The rules ship INSIDE `pi_agent/udev/` (so the release tar and the self-update
+# rsync both carry them, verified) and setup.sh::install_udev copies them
+# VERBATIM (`install -m 0644`, no templating) into UDEV_RULES_DIR, which
+# self-update never touches. Until 2026-07-28 nothing then compared the two, so
+# the udev rule was structurally the SAME fail-open the compose just closed: a
+# release that adds a VID/PID line (the planned CH343P/edu6 rule is exactly
+# that) would ship an agent that scans for an arm whose /dev node it has no
+# permission to open, on 100 % of the fielded fleet, with the only remedy being
+# a `setup.sh` re-run from a source checkout no classroom has.
+UDEV_RULES_DIR = os.environ.get("EDUBOTICS_UDEV_RULES_DIR", "/etc/udev/rules.d")
+UDEV_RULE_NAMES = ("99-edubotics-robotis.rules",)
+
+# The opi compose file THIS agent version ships, relative to the `pi_agent`
+# package directory — the compose's half of the same repair mechanism.
+#
+# It used to be true that the compose could not be in the repairable set,
+# because it lived only in `robotis_ai_setup/docker/` and the release tarball
+# (`-C robotis_ai_setup pi_agent`) therefore carried no reference copy: a
+# release that added a forwarded EDUBOTICS_* env, changed a healthcheck or
+# re-pointed an image ref updated the images and the agent but left every
+# fielded Pi on the compose setup.sh laid down at provisioning time — silently.
+# A byte-identical TWIN now ships inside the package at this path, fenced
+# against the source of truth by `ci.yml::pi-compose-twin-guard` (`cmp -s`) and
+# `docker compose config`-validated on both copies by `ci.yml::compose-validate`,
+# so the agent holds the bytes it needs to prove drift and repair it (see
+# agent.py::_compose_drifted / _renew_compose).
+#
+# `.s6-keep` is deliberately still NOT in the repairable set: it is a 0-byte
+# marker whose content has never changed, so there is nothing for a byte
+# compare to find.
+SHIPPED_COMPOSE_RELPATH = os.path.join("docker", "docker-compose.opi.yml")
 
 # Persisted auto-pull state: timestamp + per-image RepoDigests, for the
 # freshness banner ("Letzter Image-Update: vor X Tagen").

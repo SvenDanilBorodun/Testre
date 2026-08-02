@@ -104,6 +104,14 @@ def _scrubbed_env() -> dict:
     exfiltrate them. Compose reads every ${VAR} it needs from `--env-file`, so
     keep only the shell essentials + any DOCKER_* (non-default socket/context/
     auth config) passthrough.
+
+    NOT module-local despite the underscore: `agent.py::_validate_compose_file`
+    (the `docker compose config -q` gate in front of the compose self-repair)
+    calls it too, module-qualified. It has to — the unit's
+    `EnvironmentFile=-/etc/edubotics/.env` puts the whole managed .env in the
+    agent's os.environ, so an unscrubbed gate interpolates from it and one
+    malformed local value (measured: EDUBOTICS_BIND_HOST='a b') refuses the
+    repair for good. Keep this the ONE allowlist; a second copy could only drift.
     """
     keep = ("PATH", "HOME", "LANG", "LC_ALL")
     return {

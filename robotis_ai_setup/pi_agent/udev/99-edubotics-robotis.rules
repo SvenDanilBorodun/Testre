@@ -1,4 +1,8 @@
-# EduBotics — ROBOTIS OpenRB-150 arm boards (BOTH arms on the Orange Pi 5 Pro).
+# EduBotics — arm-board permission floor on the Orange Pi 5 Pro.
+# Covers BOTH arm families: the ROBOTIS OpenRB-150 boards (both OMX arms) and
+# the edu6_studio Feetech arm's CH343P bridge. The filename keeps its historical
+# "robotis" spelling on purpose — it is referenced by name from setup.sh and
+# from pi_agent/constants.py::UDEV_RULE_NAMES (the agent's self-repair set).
 #
 # Unlike the Jetson (ONE arm → a fixed `edubotics-follower` symlink), the Pi has
 # TWO identical OpenRB-150 boards: same VID 2F5D, same PIDs 0103 (default fw) /
@@ -20,9 +24,31 @@
 # last-resort access rule, NOT the role source. (FTDI is only a legacy udev
 # fallback and is intentionally not matched here.)
 #
+# The edu6_studio arm family (edu6 §4.4) is the THIRD line below: ONE Feetech
+# STS arm behind a Waveshare Bus Servo Adapter, whose bridge chip is a WCH
+# CH343P (1a86:55d3, in-tree cdc_acm -> /dev/ttyACM*). Same doctrine: the line
+# grants the permission floor only. The edu6 rig has no leader/follower pair to
+# tell apart at all (its single arm always drives FOLLOWER_PORT), and its
+# identity is PROVEN by the SERVOS answering a Feetech ping
+# (`identify_arm.py --protocol=feetech`), never by the bridge chip — a CH343P is
+# a generic USB-serial adapter and this rule must not be read as claiming
+# otherwise. The VID/PID mirrors pi_agent/constants.py::ARM_USB_IDS["edu6"].
+#
+# Mitigating context for the whole file: docker-compose.opi.yml runs
+# open_manipulator `privileged: true` with `/dev:/dev`, so the CONTAINER can
+# open these nodes regardless. The floor matters for a non-root host-side
+# debug shell and for any future non-privileged path.
+#
 # Reload after editing:
 #   sudo udevadm control --reload-rules
 #   sudo udevadm trigger
+#
+# NOTE: the running agent byte-compares the INSTALLED copy of this file against
+# the one it ships and re-installs on drift (agent.py::_drifted_udev_rules), so
+# an edit here reaches a fielded Pi via the normal self-update. A LOCAL
+# workaround for a not-yet-shipped board must therefore go in a SEPARATE rules
+# file — a hand-added line here counts as drift and is reverted.
 
 SUBSYSTEM=="tty", ATTRS{idVendor}=="2f5d", ATTRS{idProduct}=="0103", GROUP="dialout", MODE="0660", TAG+="edubotics-arm"
 SUBSYSTEM=="tty", ATTRS{idVendor}=="2f5d", ATTRS{idProduct}=="2202", GROUP="dialout", MODE="0660", TAG+="edubotics-arm"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d3", GROUP="dialout", MODE="0660", TAG+="edubotics-arm"

@@ -91,6 +91,7 @@ from . import (
 from .config_generator import ArmDevice, CameraDevice, HardwareConfig
 from .constants import (
     APP_VERSION,
+    CAMERA_ROLE_LABELS_DE,
     COMPOSE_FILE,
     ENV_FILE,
     IMAGE_OPEN_MANIPULATOR,
@@ -98,10 +99,17 @@ from .constants import (
     PHONE_FRAME_STALE_MAX_AGE_S,
     PORT_AGENT,
     REGISTRY,
+    ROBOT_PROFILES,
+    SHIPPED_COMPOSE_RELPATH,
     SYSTEM_FILES_VERSION_FILE,
     SYSTEMD_UNIT_DIR,
     SYSTEMD_UNIT_NAMES,
+    UDEV_RULE_NAMES,
+    UDEV_RULES_DIR,
     UPDATE_API_URL,
+    arm_family_for_robot_type,
+    resolve_robot_type,
+    robot_profile,
 )
 from .lan_ip import detect_lan_ip, list_interface_ips
 
@@ -185,6 +193,25 @@ _HF_HOST = "huggingface.co"
 _NETCHECK_TCP_TIMEOUT = 5
 _NETCHECK_HTTP_TIMEOUT = 6
 _CLOCK_SKEW_WARN_S = 120  # a skew past this breaks JWT/TLS — the „Anmeldung läuft ab" case
+
+# Budget for the `docker compose config -q` gate that gates the compose repair
+# (_validate_compose_file). Client-side YAML parse + interpolation only, no
+# daemon round-trip — measured in tens of milliseconds; generous so a loaded Pi
+# cannot turn a healthy release into a refused repair.
+_COMPOSE_VALIDATE_TIMEOUT_S = 60
+
+# Said in ONE place because it is said twice: once into the Protokoll the
+# moment a robot-type change invalidates the scan (the only signal a student
+# actually sees — the wizard's own reaction is a pill going grey beside a
+# serial path that is still on screen), and once as the start refusal, which a
+# direct POST or a stale /status can still reach. The generic „bitte zuerst …
+# scannen" wordings are wrong here: the arms ARE scanned, they are the wrong
+# ones, and a student re-reading a green „Arm erkannt" from a minute ago needs
+# to be told which of the two facts changed.
+_ARM_FAMILY_MISMATCH_DE = (
+    "Die gescannten Arme gehören zu einem anderen Robotertyp. "
+    "Bitte die Arme für den gewählten Robotertyp neu scannen."
+)
 
 
 # ── Secret redaction (ported from gui_app._redact_secret_env_line) ───────────
@@ -631,25 +658,122 @@ class AgentApp:
         self._hardware = HardwareConfig(leader=leader, follower=follower, cameras=cameras)
 
     def _current_robot_type(self) -> str:
-        """The CURRENT on-disk managed robot type, defaulting to ``omx_full``.
-        Every regenerate must carry this through — EDUBOTICS_ROBOT_TYPE is a
-        MANAGED key, so a caller that omits it silently rewrites it."""
-        return config_generator.read_env_var(
-            "EDUBOTICS_ROBOT_TYPE", self.env_file) or "omx_full"
+        """The CURRENT on-disk managed robot type, VALIDATED against the profile
+        registry (unknown / absent / blank → ``DEFAULT_ROBOT_PROFILE``).
 
-    def _persist_env_if_ready(self, follower_only: bool = False) -> None:
+        Every regenerate must carry this through — EDUBOTICS_ROBOT_TYPE is a
+        MANAGED key, so a caller that omits it silently rewrites it. Validating
+        here rather than trusting the raw value means one bad hand-edit cannot
+        propagate an unknown id into the scan family, the readiness gate or the
+        next .env: it degrades to today's OMX behaviour, exactly as the server's
+        ``robot_profiles.resolve`` does at boot."""
+        return resolve_robot_type(config_generator.read_env_var(
+            "EDUBOTICS_ROBOT_TYPE", self.env_file))
+
+    def _arms_used_by(self, row: dict) -> list:
+        """The recorded arms a profile actually USES — the follower always, the
+        leader only where the profile scans one.
+
+        A follower-only profile never launches a leader, so a leftover leader
+        in ``self._hardware`` is not part of the question "does the scanned
+        hardware satisfy this type". Judging it would refuse a rig for a
+        record nothing reads."""
+        arms = [self._hardware.follower]
+        if row["scan_requires_leader"]:
+            arms.append(self._hardware.leader)
+        return [a for a in arms if a is not None]
+
+    def _arms_conflict_with(self, row: dict) -> bool:
+        """Whether any arm this profile uses is provably of ANOTHER family."""
+        family = row["arm_family"]
+        return any(identify_arm.serial_path_family_conflict(a.serial_path, family)
+                   for a in self._arms_used_by(row))
+
+    def _hardware_ready(self, profile: "str | None" = None) -> bool:
+        """Whether the scanned hardware satisfies the (given/selected) robot type.
+
+        Twin of ``gui_app.py::_hardware_ready``: a both-arms type needs
+        leader+follower, a follower-only type (Roboter Studio kit, edu6) needs
+        only the follower. The Pi's ``HardwareConfig`` has no ``is_complete`` /
+        ``follower_present`` properties, so the two cases are spelled out.
+
+        PRESENCE IS NOT ENOUGH — the arms must also be of this profile's ARM
+        FAMILY. Measured before this check existed: a Pi scanned as ``omx_full``
+        and then switched to ``edu6_studio`` answered
+        ``200 {'hardware_ready': True}``, wrote a ``.env`` naming a ROBOTIS
+        OpenRB-150 as the FOLLOWER_PORT of a Feetech rig, and let „Umgebung
+        starten" through — where it blocked ~300 s on ``service_healthy`` while
+        the entrypoint drove the edu6 branch against a Dynamixel bus, and the
+        student got the generic „konnte nicht gestartet werden — bitte das
+        Protokoll prüfen". The driver's specific German reason is in the
+        CONTAINER's stdout, which the agent's Protokoll ring does not carry, so
+        nothing on screen named the cause.
+
+        Crossing arm families therefore INVALIDATES the scan (user decision,
+        2026-07-29). ``arms_identified`` deliberately keeps reporting what was
+        scanned — it answers a different question — so the change is confined
+        to this gate and to the start refusal that reads it."""
+        row = robot_profile(profile if profile is not None
+                            else self._current_robot_type())
+        hw = self._hardware
+        if hw.follower is None:
+            return False
+        if row["scan_requires_leader"] and hw.leader is None:
+            return False
+        return not self._arms_conflict_with(row)
+
+    def _persist_env_if_ready(self, follower_only: "bool | None" = None) -> None:
         """Write the managed .env from ``self._hardware`` when it holds enough to
         generate a valid config (follower present; leader too unless
         ``follower_only``). Otherwise the in-memory state stays authoritative
         until „Umgebung starten" regenerates it — ``generate_env_file`` refuses a
-        partial config, so we never write a half-formed both-arms .env."""
+        partial config, so we never write a half-formed both-arms .env.
+
+        ``follower_only=None`` DERIVES the value from the selected profile, which
+        is what every caller that is not carrying a live session mode forward
+        should pass. For a follower-only PROFILE the profile wins outright: it
+        has no leader at all, so a stale ``EDUBOTICS_FOLLOWER_ONLY=0`` in a
+        hand-edited .env is state to correct, not a session override — and
+        forwarding it would hit ``generate_env_file``'s contradiction guard and
+        turn an ordinary camera-role edit into a 500. On a both-arms profile
+        nothing is clamped, so an explicit True (the Roboter-Studio toggle) is
+        honoured unchanged.
+
+        It also refuses to write a port from ANOTHER arm family. This method is
+        the Pi's eager convenience — Windows defers the whole .env to „Umgebung
+        starten" — and it runs at robot-type-selection time, so before this
+        guard a switch to ``edu6_studio`` rewrote the managed block to name a
+        ROBOTIS OpenRB-150 as ``FOLLOWER_PORT`` with
+        ``EDUBOTICS_FOLLOWER_ONLY=1``: a configuration that never corresponded
+        to any rig, and one nothing would later notice, since the arms are
+        re-read from the .env only at agent boot. Skipping the rewrite leaves
+        the LAST COHERENT scan in place, which is exactly what this method's
+        own contract already does for a rig that is not ready yet („keeps only
+        the id — which is all the scan needs"). CLEARING the ports was
+        rejected: it would destroy a valid OMX scan the moment a student merely
+        LOOKED at the other entry in the dropdown."""
+        robot_type = self._current_robot_type()
+        row = ROBOT_PROFILES[robot_type]
+        profile_follower_only = row["follower_only"]
+        if follower_only is None:
+            follower_only = profile_follower_only
+        elif profile_follower_only:
+            follower_only = True
         hw = self._hardware
         if hw.follower is None:
             return
         if not follower_only and hw.leader is None:
             return
+        # Exactly the arms this write would EMIT — the follower always, the
+        # leader only when it is not being suppressed.
+        emitted = [hw.follower] + ([] if follower_only else [hw.leader])
+        family = row["arm_family"]
+        if any(a is not None
+               and identify_arm.serial_path_family_conflict(a.serial_path, family)
+               for a in emitted):
+            return
         config_generator.generate_env_file(hw, self.env_file, follower_only=follower_only,
-                                           robot_type=self._current_robot_type())
+                                           robot_type=robot_type)
 
     # ── GET: /status ─────────────────────────────────────────────────────────
 
@@ -663,6 +787,7 @@ class AgentApp:
         follower_only_raw = config_generator.read_env_var("EDUBOTICS_FOLLOWER_ONLY", self.env_file)
         hw = self._hardware
         cameras = [{"path": c.path, "role": c.role, "name": c.name} for c in hw.cameras]
+        robot_type = self._current_robot_type()
         return 200, {
             "lan_ip": detect_lan_ip(),
             "hostname": socket.gethostname(),
@@ -690,6 +815,31 @@ class AgentApp:
                 "follower": hw.follower.serial_path if hw.follower else None,
                 "both": hw.leader is not None and hw.follower is not None,
             },
+            # Robot profile surface (additive — an old System tab ignores these).
+            # `robot_type` is the VALIDATED on-disk id; `robot_profiles` is the
+            # selectable list (the wizard renders `display_de`, hides the Leader
+            # tile when `scan_requires_leader` is false, and offers exactly the
+            # `camera_roles` a profile allows); `hardware_ready` is the
+            # PROFILE-AWARE gate — `arms_identified.both` stays as it is, because
+            # it answers a different question (are two arms present) and a
+            # follower-only rig can be fully ready with `both` false.
+            #
+            # `camera_roles` is a LIST, not the registry's tuple: this dict is
+            # json-serialised, and a tuple would land as a list on the wire
+            # anyway — spelling it here keeps the payload's type honest at the
+            # boundary rather than at json.dumps. It is the same allowlist
+            # `handle_cameras_roles` enforces; shipping it is what lets the SPA
+            # stop OFFERING a role the agent would refuse, and the two halves
+            # are deliberately redundant (see that handler's docstring).
+            "robot_type": robot_type,
+            "robot_profiles": [
+                {"id": pid,
+                 "display_de": row["display_de"],
+                 "scan_requires_leader": row["scan_requires_leader"],
+                 "camera_roles": list(row["camera_roles"])}
+                for pid, row in ROBOT_PROFILES.items()
+            ],
+            "hardware_ready": self._hardware_ready(robot_type),
             "cameras": cameras,
             "follower_only": str(follower_only_raw).strip() == "1",
             "hf_token_saved": bool(config_generator.read_env_var("HF_TOKEN", self.env_file)),
@@ -749,6 +899,25 @@ class AgentApp:
         tears down any running robot tier (TARGETED, never ``compose down``) so
         ``identify_arm.py`` can open the serial ports a live 100 Hz controller
         would otherwise hold.
+
+        The ARM FAMILY comes from the on-disk managed ``EDUBOTICS_ROBOT_TYPE``
+        (edu6 §4.4): it scopes the /dev/serial/by-id filter AND selects the
+        in-container prober's protocol, so an edu6 rig is probed with
+        ``--protocol=feetech`` and its single arm is slotted as the FOLLOWER.
+        A failed scan can carry a one-sentence German ``notice`` naming the most
+        likely setup mistake (wrong family plugged in, partial servo chain, 12-V
+        supply off). In the 404 branch it REPLACES the generic message, exactly
+        as the GUI replaces its status line; the two 409 branches keep their own
+        specific wording and return the notice as a SEPARATE key (which no
+        client renders today — it is the Protokoll that carries it there).
+
+        A LEADER-LESS PROFILE SUCCEEDS WITH ONE ARM. ``scan_requires_leader``
+        (the profile registry, not the arm family — ``omx_follower`` shares the
+        two-arm ``omx`` family) decides three things: whether the fast-rehydrate
+        path may run without a saved ``LEADER_PORT``, whether a missing leader
+        is a failure at all, and which German sentence a result gets. Reporting
+        „Nur der Follower-Arm wurde erkannt — der Leader-Arm fehlt" to a
+        Roboter-Studio kit that HAS no leader is the misleading 409 this closes.
         """
         if self._update_in_flight():
             return self._busy_updating()
@@ -759,46 +928,101 @@ class AgentApp:
             self.stop_active_previews()
             docker_manager.ensure_environment_stopped(log=self._log)
 
+            robot_type = self._current_robot_type()
+            requires_leader = ROBOT_PROFILES[robot_type]["scan_requires_leader"]
+            arm_family = arm_family_for_robot_type(robot_type)
+            notice = ""
             leader = follower = None
             if not force:
                 saved_leader = config_generator.read_env_var("LEADER_PORT", self.env_file)
                 saved_follower = config_generator.read_env_var("FOLLOWER_PORT", self.env_file)
-                if saved_leader and saved_follower:
+                # A follower-only .env has no LEADER_PORT by construction, so
+                # demanding one here would send every such rig down the slow
+                # scanner-container path on every single revisit.
+                if saved_follower and (saved_leader or not requires_leader):
                     self._log("Arme werden schnell überprüft (vorherige Zuordnung) …")
-                    leader, follower = identify_arm.fast_rehydrate_arms(saved_leader, saved_follower)
+                    leader, follower = identify_arm.fast_rehydrate_arms(
+                        saved_leader, saved_follower, arm_family=arm_family,
+                        require_leader=requires_leader)
 
-            if leader is None or follower is None:
+            if follower is None or (requires_leader and leader is None):
                 self._log("Arme werden gescannt (Leader/Follower werden bestimmt) …")
-                leader, follower = identify_arm.scan_and_identify_arms(IMAGE_OPEN_MANIPULATOR)
+                leader, follower = identify_arm.scan_and_identify_arms(
+                    IMAGE_OPEN_MANIPULATOR, arm_family=arm_family)
+                # Only meaningful for the run that just happened — never read it
+                # off a fast-rehydrate path, where it would be a stale sentence
+                # from some earlier scan.
+                notice = identify_arm.LAST_SCAN_NOTICE
 
             # Keep whatever we found in the in-memory config for the status view.
             self._hardware.leader = leader
             self._hardware.follower = follower
 
+            # A notice DIAGNOSES a port that did not become this profile's arm,
+            # so it is neither logged nor returned once the scan produced what
+            # the profile needs. The scanner clears it at the source, but only
+            # against the arm FAMILY — and `omx_follower` shares the two-arm
+            # `omx` family, so a successful ONE-arm scan there kept a sentence
+            # ending „… und erneut scannen" attached to a success (MEASURED,
+            # with a stray CH34x device plugged in). No notice is informative on
+            # a success: `partial:N` and `feetech_silent` both mean the arm did
+            # NOT identify, and the two cross-family ones only fire when the
+            # wrong family is attached. Byte-identical on `omx_full` and
+            # `edu6_studio`, where the scanner's own clear already fired.
+            if follower is not None and (leader is not None or not requires_leader):
+                notice = ""
+            elif notice:
+                self._log(notice)
+
             if follower is None and leader is None:
-                return 404, {"ok": False,
-                             "message": "Kein Arm gefunden — USB-Verbindung und "
+                return 404, {"ok": False, "notice": notice,
+                             "message": notice or
+                                        "Kein Arm gefunden — USB-Verbindung und "
                                         "Stromversorgung der Arme prüfen."}
             if follower is None:
+                # `leader` is non-None here by construction — the both-None case
+                # returned 404 above. So an arm WAS found and it is the wrong
+                # one, on either profile shape.
+                #
+                # Reachable on a leader-less profile too: the omx family scan
+                # can find an OMX leader while the follower is unplugged. The
+                # message must not send that student hunting a cable — the scan
+                # succeeded, they plugged in the wrong arm. („Leader"/„Follower"
+                # are the German terms this product already uses throughout, so
+                # naming the arm is consistency, not new jargon.) Genuinely
+                # nothing found keeps its own „Kein Arm gefunden" 404 above.
                 return 409, {"ok": False, "leader": leader.serial_path if leader else None,
-                             "follower": None,
-                             "message": "Nur der Leader-Arm wurde erkannt — der "
-                                        "Follower-Arm fehlt. Bitte USB prüfen."}
-            if leader is None:
+                             "follower": None, "notice": notice,
+                             "message": ("Nur der Leader-Arm wurde erkannt — der "
+                                         "Follower-Arm fehlt. Bitte USB prüfen."
+                                         if requires_leader else
+                                         "Es wurde der Leader-Arm erkannt — dieser "
+                                         "Robotertyp braucht den Follower-Arm. Bitte "
+                                         "den Follower-Arm anschließen.")}
+            if leader is None and requires_leader:
                 return 409, {"ok": False, "leader": None,
-                             "follower": follower.serial_path,
+                             "follower": follower.serial_path, "notice": notice,
                              "message": "Nur der Follower-Arm wurde erkannt — der "
                                         "Leader-Arm fehlt. Bitte USB prüfen."}
 
-            # Both arms found — persist the canonical both-arms .env.
+            # Enough hardware for this profile — persist the .env. The mode is
+            # derived, not hardcoded False: on a follower-only profile (whose
+            # omx-family scan can still see two arms plugged in) a both-arms
+            # write would contradict the profile and refuse.
             try:
-                self._persist_env_if_ready(follower_only=False)
+                self._persist_env_if_ready()
             except Exception as e:  # noqa: BLE001 — surfaced in German
                 return 500, {"ok": False,
                              "message": f"Konfiguration konnte nicht gespeichert werden: {e}"}
-            return 200, {"ok": True, "leader": leader.serial_path,
-                         "follower": follower.serial_path,
-                         "message": "Beide Arme erkannt und gespeichert."}
+            return 200, {"ok": True,
+                         "leader": leader.serial_path if leader else None,
+                         "follower": follower.serial_path, "notice": notice,
+                         # A leader-less profile never speaks of „beide Arme" —
+                         # even when a stray second arm happened to be found,
+                         # because the generated .env has no LEADER_PORT.
+                         "message": ("Beide Arme erkannt und gespeichert."
+                                     if requires_leader else
+                                     "Roboterarm erkannt und gespeichert.")}
         finally:
             self._lifecycle_lock.release()
 
@@ -818,24 +1042,107 @@ class AgentApp:
 
     # ── POST: /cameras/roles ─────────────────────────────────────────────────
 
+    @staticmethod
+    def _role_not_in_profile_de(path, role, robot_type, allowed) -> str:
+        """German refusal for a well-formed role the SELECTED profile forbids.
+
+        Names all three things a student needs: the role they picked, the robot
+        type that rules it out, and what to pick instead — in the same words the
+        wizard's own dropdown uses (``CAMERA_ROLE_LABELS_DE``), so the sentence
+        matches the UI rather than the wire ids.
+
+        The remedy is built from ``allowed`` rather than hardcoded: today only
+        ``edu6_studio`` narrows, to a single role, but a future profile allowing
+        two of three must not produce a sentence naming one. An allowlist that
+        is somehow empty degrades to naming no remedy rather than raising — a
+        confusing message beats a 500 on a config surface.
+        """
+        labels = [CAMERA_ROLE_LABELS_DE[r] for r in allowed
+                  if r in CAMERA_ROLE_LABELS_DE]
+        remedy = (f" Bitte für {path} " + " oder ".join(f'„{la}"' for la in labels)
+                  + " wählen.") if labels else ""
+        return (f'Die Rolle „{CAMERA_ROLE_LABELS_DE.get(role, role)}" passt nicht '
+                f'zum Robotertyp „{ROBOT_PROFILES[robot_type]["display_de"]}".'
+                + remedy)
+
     def handle_cameras_roles(self, body: dict) -> "tuple[int, dict]":
         """Assign gripper/scene roles to enumerated devices and (if arms are
         already identified) persist. Body: ``{"cameras": [{"path": …,
-        "role": "gripper"|"scene"}, …]}``."""
+        "role": "gripper"|"scene"}, …]}``.
+
+        EVERY camera must carry an explicit ``gripper``/``scene`` role; a blank
+        or absent one is a German 400 regardless of how many cameras were sent.
+
+        A well-formed role is then checked against the SELECTED PROFILE's
+        ``camera_roles`` allowlist, which is narrower than gripper/scene on
+        ``edu6_studio`` (``scene`` only). Both OMX profiles carry both roles, so
+        this second gate is a no-op there — the whole behavioural delta is
+        „gripper on an edu6 rig", which used to be accepted and is now a 400.
+
+        Why it is refused rather than silently corrected: the server's
+        ``config/edu6_studio_config.yaml`` declares exactly one camera topic
+        (``scene:/scene/image_raw/compressed``), so a camera named ``gripper``
+        publishes ``/gripper/image_raw/compressed``, which nothing subscribes
+        to — and the opi compose healthcheck greps
+        ``/$${CAMERA_NAME_1:-gripper}/image_raw/compressed``, i.e. the very
+        topic the student just named. It therefore goes GREEN, „Umgebung
+        starten" reports success in German, and the failure only surfaces later
+        as an empty Roboter Studio with no diagnosis pointing back here.
+
+        This is the SERVER half of a deliberately redundant pair. The SPA
+        already offers only the allowed roles (``SystemPage.js`` filters its
+        ``<option>`` set off ``/status.robot_profiles[].camera_roles``), but a
+        stale cached bundle or a hand-crafted caller — the agent accepts an
+        empty ``Origin`` for the curl acceptance path — reaches this handler
+        regardless, so neither half is sufficient alone.
+
+        There is deliberately NO lone-camera auto-assign here, unlike the
+        Windows GUI's ``gui_app._on_cameras_changed`` (a real, unguarded twin
+        divergence — no lockstep test covers camera roles in either direction).
+        The Pi's only client is ``SystemPage.js::handleSaveRoles``, which
+        filters its payload to the allowed roles — so a camera the student left
+        unassigned, or one holding a role the profile lost when the type
+        changed, is DROPPED from the request and never arrives role-less.
+
+        MEASURED over the request space the SPA can construct — 0..3 cameras x
+        every gripper/scene assignment, x 3 profiles x 3 hardware states x 3
+        seeded session modes = 405 bodies — status, payload and resulting .env
+        are byte-identical with the default present or absent, and remain so
+        when it is re-added with a DIFFERENT value.
+
+        Recorded because the value is not obvious if anyone re-adds a default:
+        the right one on a FOLLOWER-ONLY rig is ``scene``, not ``gripper``
+        (the config-topic reason above). With TWO cameras nothing may be
+        guessed at all: the two Innomakers are identical-serial, so only the
+        live preview tells them apart.
+
+        The profile is read OUTSIDE ``_lifecycle_lock``, so a robot-type change
+        landing between this read and the persist below is not serialised
+        against. That race is deliberate and bounded: taking the lock before
+        validating would turn today's fast 400 on a malformed body into a 503
+        whenever an update holds the lock, and the consequence of losing the
+        race is one stale role in the .env, which the next ``/robot-type`` POST
+        regenerates away via ``_persist_env_if_ready``.
+        """
         if self._update_in_flight():
             return self._busy_updating()
         entries = body.get("cameras")
         if not isinstance(entries, list):
             return 400, {"ok": False, "message": "Ungültige Kamera-Zuordnung."}
+        robot_type = self._current_robot_type()
+        allowed = ROBOT_PROFILES[robot_type]["camera_roles"]
+        named = [e for e in entries if (e or {}).get("path")]
         cameras: list = []
-        for e in entries:
-            path = (e or {}).get("path")
-            role = (e or {}).get("role")
-            if not path:
-                continue
+        for e in named:
+            path = e.get("path")
+            role = e.get("role")
             if role not in ("gripper", "scene"):
                 return 400, {"ok": False,
                              "message": f"Ungültige Rolle für {path} (nur Greifer/Szene)."}
+            if role not in allowed:
+                return 400, {"ok": False,
+                             "message": self._role_not_in_profile_de(
+                                 path, role, robot_type, allowed)}
             cameras.append(CameraDevice(path=path, role=role, name=str(path).split("/")[-1]))
         if not self._acquire_lifecycle():
             return self._busy_lifecycle()
@@ -848,7 +1155,12 @@ class AgentApp:
             # container recreate.
             prev_val = config_generator.read_env_var(
                 "EDUBOTICS_FOLLOWER_ONLY", self.env_file)
-            follower_only = str(prev_val).strip() == "1"
+            # An ABSENT key is not "both arms" — it is "no session mode
+            # recorded yet" (a fresh .env, or one written before the key
+            # existed). Deriving from the profile there is what stops a
+            # follower-only rig writing a both-arms .env behind a camera edit.
+            follower_only = (None if prev_val is None
+                             else str(prev_val).strip() == "1")
             try:
                 self._persist_env_if_ready(follower_only=follower_only)
             except Exception as e:  # noqa: BLE001
@@ -930,13 +1242,97 @@ class AgentApp:
             return 200, {"ok": True, "saved": True, "message": "Token gespeichert."}
         return 200, {"ok": True, "saved": False, "message": "Token entfernt."}
 
+    # ── POST: /robot-type ────────────────────────────────────────────────────
+
+    def handle_set_robot_type(self, body: dict) -> "tuple[int, dict]":
+        """Select the rig's ArmProfile. Body: ``{"robot_type": "<id>"}``.
+
+        The robot type is a HARDSET decision — the arm container branches on it
+        at start (``entrypoint_omx.sh``) and the server resolves its ArmProfile
+        from it once at boot — so it is REFUSED while the robot tier is running,
+        mirroring the GUI graying its Robotertyp combobox whenever the
+        environment runs (``gui_app.py::_update_robot_type_combo_state``). It
+        must be settable BEFORE any hardware exists, because the scan reads the
+        arm FAMILY back off this key: the id is therefore persisted
+        unconditionally (in place, unquoted), and the full .env is regenerated on
+        top only once the scanned hardware satisfies the new profile.
+
+        An unknown id is a 400 rather than a silent fallback: the wizard offers
+        only registry ids, so an unknown one is a client bug worth surfacing.
+        (The read path keeps the forgiving fallback — see ``_current_robot_type``
+        — which is where the documented one-variable rollback lives.)
+        """
+        if self._update_in_flight():
+            return self._busy_updating()
+        requested = body.get("robot_type")
+        if not isinstance(requested, str) or not requested.strip():
+            return 400, {"ok": False, "message": "Kein Robotertyp angegeben."}
+        requested = requested.strip()
+        if requested not in ROBOT_PROFILES:
+            return 400, {"ok": False,
+                         "message": f'Unbekannter Robotertyp „{requested}".'}
+        if not self._acquire_lifecycle():
+            return self._busy_lifecycle()
+        try:
+            try:
+                container = docker_manager.get_container_status()
+            except Exception:  # noqa: BLE001
+                # Deliberately FAIL-OPEN, same posture as handle_status: an
+                # unreadable docker state must not wedge the wizard's only way
+                # to choose a robot. The consequence of a change slipping past
+                # a live tier is bounded — the .env and the containers disagree
+                # until the next „Umgebung starten", which regenerates anyway.
+                container = {}
+            if any(container.get(n) == "running"
+                   for n in ("open_manipulator", "physical_ai_server")):
+                return 409, {"ok": False,
+                             "message": "Der Robotertyp kann nur geändert werden, "
+                                        "wenn die Roboter-Umgebung gestoppt ist."}
+            try:
+                # Unquoted: entrypoint_omx.sh compares this value literally.
+                config_generator.upsert_env_var(
+                    "EDUBOTICS_ROBOT_TYPE", requested, self.env_file, quote=False)
+            except Exception as e:  # noqa: BLE001 — surfaced in German
+                return 500, {"ok": False,
+                             "message": f"Robotertyp konnte nicht gespeichert werden: {e}"}
+            try:
+                # Convenience on top, NOT part of the contract: once the scanned
+                # hardware fits the new profile, rewrite the whole managed .env
+                # so EDUBOTICS_FOLLOWER_ONLY (and LEADER_PORT) follow the derive
+                # immediately rather than at the next „Umgebung starten". A rig
+                # that is not ready yet keeps only the id — which is all the scan
+                # needs. This must NOT fail the request: the type IS saved by
+                # then, so reporting „konnte nicht gespeichert werden" would be a
+                # lie, and the one reachable cause is unrelated (a hand-edited
+                # CAMERA_NAME_n that rehydrate carried in verbatim).
+                self._persist_env_if_ready()
+            except Exception as e:  # noqa: BLE001 — logged, never fatal
+                self._log("[WARNUNG] Robotertyp gesetzt, aber die Konfiguration "
+                          f"konnte nicht neu erzeugt werden: {e}")
+        finally:
+            self._lifecycle_lock.release()
+        row = ROBOT_PROFILES[requested]
+        self._log(f"Robotertyp gewählt: {row['display_de']}")
+        # The one place a student is actually TOLD that the previous scan no
+        # longer counts. The wizard's own reaction is a pill turning grey next
+        # to the serial path it has been showing all along, which reads as a
+        # glitch rather than as a consequence of what they just clicked.
+        if self._arms_conflict_with(row):
+            self._log(f"[WARNUNG] {_ARM_FAMILY_MISMATCH_DE}")
+        return 200, {"ok": True, "robot_type": requested,
+                     "display_de": row["display_de"],
+                     "scan_requires_leader": row["scan_requires_leader"],
+                     "hardware_ready": self._hardware_ready(requested),
+                     "message": f"Robotertyp gesetzt: {row['display_de']}."}
+
     # ── POST: /environment/start + /environment/stop ─────────────────────────
 
     def handle_environment_start(self, body: dict) -> "tuple[int, dict]":
         """„Umgebung starten": bring up the student-owned robot tier. Env-start
-        always regenerates a BOTH-arms .env (the Roboter-Studio leader toggle is
-        the only path that flips to follower-only). Cloud-only start is a no-op —
-        the manager is already up."""
+        regenerates the .env for the SELECTED robot profile — both-arms on
+        ``omx_full`` (where the Roboter-Studio leader toggle is the only path
+        that flips to follower-only), follower-only on a profile that has no
+        leader at all. Cloud-only start is a no-op — the manager is already up."""
         if self._update_in_flight():
             return self._busy_updating()
         if bool(body.get("cloud_only")):
@@ -945,14 +1341,31 @@ class AgentApp:
         if not self._acquire_lifecycle():
             return self._busy_lifecycle()
         try:
-            if self._hardware.follower is None or self._hardware.leader is None:
-                return 400, {"ok": False,
-                             "message": "Bitte zuerst beide Arme scannen (Leader und Follower)."}
+            # PROFILE-AWARE readiness, not "both arms": a follower-only kit has
+            # no leader to scan, so demanding one made both omx_follower and
+            # edu6_studio unstartable on a Pi.
+            robot_type = self._current_robot_type()
+            if not self._hardware_ready(robot_type):
+                row = ROBOT_PROFILES[robot_type]
+                # A wrong-FAMILY scan and a MISSING scan both land here, and
+                # they need different sentences: telling a student who has just
+                # scanned an arm to „zuerst den Roboterarm scannen" reads as a
+                # bug, and is what would send them looking at cables instead of
+                # at the Robotertyp they just changed.
+                return 400, {
+                    "ok": False,
+                    "message": (
+                        _ARM_FAMILY_MISMATCH_DE if self._arms_conflict_with(row)
+                        else "Bitte zuerst beide Arme scannen (Leader und Follower)."
+                        if row["scan_requires_leader"]
+                        else "Bitte zuerst den Roboterarm scannen."
+                    ),
+                }
             self.stop_active_previews()  # free /dev/video* before usb_cam claims it
             try:
                 config_generator.generate_env_file(
-                    self._hardware, self.env_file, follower_only=False,
-                    robot_type=self._current_robot_type())
+                    self._hardware, self.env_file, follower_only=None,
+                    robot_type=robot_type)
             except Exception as e:  # noqa: BLE001
                 return 500, {"ok": False,
                              "message": f"Konfiguration konnte nicht erstellt werden: {e}"}
@@ -1287,8 +1700,29 @@ class AgentApp:
 
         The install root is the compose file's directory (``/opt/edubotics`` in
         the field, per setup.sh P4). The tarball's top-level dir is ``pi_agent/``
-        (agent code only — compose / unit changes need re-provisioning). We
-        extract to a TEMP dir (tar ``data`` filter — path-traversal / device-node
+        — which is NO LONGER "agent code only". That tree now also carries the
+        REFERENCE copies of the system files this agent version expects: the opi
+        compose twin (``SHIPPED_COMPOSE_RELPATH``), ``systemd/*.service``,
+        ``udev/*.rules``, the CI-baked image pin ``docker/versions.env``, and the
+        first-boot script the firstboot unit ``ExecStart``s IN PLACE out of this
+        very tree (so that one moves with the swap directly, no repair needed).
+        This apply installs none of them into ``/etc`` or the install root — it
+        swaps in the new reference bytes, and the NEXT boot's
+        ``_check_system_files_version`` byte-compares those against what is
+        installed and repairs the difference. Net effect: a release that changes
+        the compose, a systemd unit or a udev rule DOES reach a fielded Pi
+        through this path. It did not until 2026-07-28, and this docstring
+        asserting the opposite is a large part of why six compose changes
+        shipped without anyone noticing they stopped at the tarball.
+
+        What still requires re-running ``setup.sh`` is exactly what has no
+        shipped reference copy to compare against: ``physical_ai_server/.s6-keep``
+        (0 bytes — nothing a byte compare could ever find), the
+        ``/opt/edubotics/VERSION`` convenience copy (superseded on this path by
+        the packaged ``pi_agent/VERSION``), and the ``.system-files-version``
+        stamp (deliberately frozen — see ``SYSTEM_FILES_VERSION_FILE``).
+
+        We extract to a TEMP dir (tar ``data`` filter — path-traversal / device-node
         guard; the pre-PEP-706 fallback replicates those guards manually via
         ``_validate_tar_member``), rsync it into a SIBLING ``pi_agent.new/`` (a
         complete fresh tree, so a module REMOVED in a release simply isn't
@@ -1592,25 +2026,55 @@ class AgentApp:
 
     def handle_rs_status(self) -> "tuple[int, dict]":
         """GET /roboter-studio/status → the exact ``roboter_studio_control`` JSON
-        contract, plus ``ready`` (arm container running) like the GUI badge."""
+        contract, plus ``ready`` (arm container running) like the GUI badge and
+        ``has_leader`` (this rig's profile has a leader arm at all).
+
+        ``has_leader`` is ADDITIVE and Pi-only: on Windows the toggle self-hides
+        because the ``:8769`` bridge is NEVER CONSTRUCTED for a follower-only
+        rig, but on a Pi the same contract is served by the always-on agent, so
+        the bridge probe always succeeds. The React toggle therefore also hides
+        on an explicit ``has_leader === false`` — closing the window between
+        mount and the first ROS capability tick, where `caps` is still undefined
+        and the toggle would otherwise render on a rig that has no leader. The
+        Windows bridge simply omits the key (undefined ≠ false), so its
+        behaviour is unchanged. ``handle_rs_set_mode`` is the belt behind it.
+        """
         follower_only = str(
             config_generator.read_env_var("EDUBOTICS_FOLLOWER_ONLY", self.env_file)).strip() == "1"
+        has_leader = not ROBOT_PROFILES[self._current_robot_type()]["follower_only"]
         with self._rs_busy_lock:
             busy = self._rs_busy or self._rs_switch_in_flight
         if busy:
-            return 200, {"follower_only": follower_only, "ready": False, "busy": True}
+            return 200, {"follower_only": follower_only, "ready": False, "busy": True,
+                         "has_leader": has_leader}
         try:
             arm = docker_manager.get_container_status().get("open_manipulator", "not found")
         except Exception:  # noqa: BLE001
             arm = "error"
-        return 200, {"follower_only": follower_only, "ready": arm == "running", "busy": False}
+        return 200, {"follower_only": follower_only, "ready": arm == "running", "busy": False,
+                     "has_leader": has_leader}
 
     def handle_rs_set_mode(self, follower_only: bool) -> "tuple[int, dict]":
         """POST /roboter-studio/leader-disable|enable → switch the arm mode and
         recreate ONLY open_manipulator. Busy-locked so a second click can't race
         two ``compose up`` calls on the same container. The .env rollback on a
         failed restart lives in ``docker_manager.set_leader_mode`` (the ported
-        ``gui_app._rs_set_leader_mode`` callback)."""
+        ``gui_app._rs_set_leader_mode`` callback).
+
+        REFUSED OUTRIGHT ON A LEADER-LESS PROFILE, in BOTH directions. This is
+        the belt behind the React hide: on Windows a follower-only rig never
+        constructs the ``:8769`` bridge at all (``gui_app._start_rs_control_
+        server``), but the Pi's bridge is the always-on agent, so the lockout
+        has to live here. „Leader verbinden" would ask ``generate_env_file`` for
+        a both-arms .env on a rig that has no leader and hit its contradiction
+        guard as an opaque 500; „Leader abschalten" would recreate the arm
+        container — a ~20 s outage — to reach the mode it is already in.
+        """
+        robot_type = self._current_robot_type()
+        if ROBOT_PROFILES[robot_type]["follower_only"]:
+            return 409, {"ok": False, "follower_only": True,
+                         "message": "Dieser Robotertyp hat keinen Leader-Arm — "
+                                    "Roboter Studio ist hier dauerhaft aktiv."}
         with self._rs_busy_lock:
             if self._rs_busy:
                 return 409, {"ok": False, "message": "Ein Moduswechsel läuft bereits."}
@@ -1909,6 +2373,8 @@ class AgentApp:
                     self._send_json(*app.handle_phone_toggle(body))
                 elif path == "/hf-token":
                     self._send_json(*app.handle_hf_token(body))
+                elif path == "/robot-type":
+                    self._send_json(*app.handle_set_robot_type(body))
                 elif path == "/environment/start":
                     self._send_json(*app.handle_environment_start(body))
                 elif path == "/environment/stop":
@@ -2080,47 +2546,99 @@ class AgentApp:
             return None
         return stamped or None
 
-    def _drifted_units(self) -> "list":
-        """Names of systemd units whose INSTALLED copy differs byte-for-byte from
-        the copy THIS agent version ships. Hard evidence, not inference.
+    def _shipped_dir(self, subdir: str) -> str:
+        """Absolute path to a subdirectory of the `pi_agent` package THIS agent
+        version ships from. Resolved off ``__file__`` so it follows the package
+        through the self-update swap (rsync into ``pi_agent.new`` → rename over
+        ``pi_agent``) with no path knowledge anywhere else."""
+        return os.path.join(os.path.dirname(os.path.abspath(__file__)), subdir)
 
-        The units ship inside ``pi_agent/systemd/`` (so a self-update rsync
-        refreshes the agent's copy) while setup.sh installed them VERBATIM into
-        ``SYSTEMD_UNIT_DIR``, which self-update never touches. A byte difference
-        therefore proves the running Pi is on a unit older than this agent
-        expects; equality proves it is not. Either file being absent or
-        unreadable (a dev box, a hand-relocated install, a non-root reader)
-        proves nothing, so it is skipped — this must never guess.
+    def _drifted_in(self, shipped_dir: str, installed_dir: str,
+                    names: "tuple") -> "list":
+        """Names whose INSTALLED copy differs byte-for-byte from the copy THIS
+        agent version ships. Hard evidence, not inference.
+
+        These files ship inside the ``pi_agent`` package (so a self-update rsync
+        refreshes the agent's copy) while setup.sh installed them VERBATIM into a
+        system directory self-update never touches. A byte difference therefore
+        proves the running Pi is on a file older than this agent expects;
+        equality proves it is not. Either side being absent or unreadable (a dev
+        box, a hand-relocated install, a non-root reader) proves nothing, so it
+        is skipped — this must never guess.
         """
         drifted = []
-        shipped_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "systemd")
-        for unit in SYSTEMD_UNIT_NAMES:
+        for name in names:
             try:
-                with open(os.path.join(shipped_dir, unit), "rb") as f:
+                with open(os.path.join(shipped_dir, name), "rb") as f:
                     shipped = f.read()
-                with open(os.path.join(SYSTEMD_UNIT_DIR, unit), "rb") as f:
+                with open(os.path.join(installed_dir, name), "rb") as f:
                     installed = f.read()
             except OSError:
                 continue  # cannot compare → cannot prove → silent
             if shipped != installed:
-                drifted.append(unit)
+                drifted.append(name)
         return drifted
 
-    def _install_unit_file(self, unit: str) -> bool:
-        """Overwrite ONE installed systemd unit with the copy this agent ships.
+    def _drifted_units(self) -> "list":
+        """Systemd units whose INSTALLED copy differs from the one this agent
+        ships. A unit the Pi does not have at all is NOT in here (see
+        ``_drifted_in``) — absent is not drift."""
+        return self._drifted_in(self._shipped_dir("systemd"), SYSTEMD_UNIT_DIR,
+                                SYSTEMD_UNIT_NAMES)
+
+    def _drifted_udev_rules(self) -> "list":
+        """Udev rules whose INSTALLED copy differs from the one this agent
+        ships. Like the units: a rule the Pi does not have installed at all is
+        skipped, never "helpfully" created.
+
+        The same fail-open the compose had, one layer down and easier to miss
+        because a udev rule looks inert: it only sets a permission floor
+        (group=dialout, mode 0660) plus a stable ``TAG+="edubotics-arm"`` on the
+        arm boards' tty nodes — it is explicitly NOT the leader/follower role
+        source. A release that adds a VID/PID line — the planned CH343P line for
+        the edu6 arm is precisely that — would otherwise ship an agent that
+        knows how to scan for an arm whose ``/dev`` node its scanner container
+        cannot open, and the drift would be invisible because nothing compared
+        the files.
+
+        Consequence worth naming, shared with the systemd leg: a locally
+        hand-added rule LINE is drift, so it is reverted (with a German
+        Protokoll line and one ``.edubotics-bak``) on the next agent boot. That
+        is the intended semantics — the shipped bytes are the definition — but a
+        udev rule is a far more plausible thing for an admin to hand-edit than a
+        systemd unit, so the local workaround for a not-yet-shipped board is to
+        add a SEPARATE rules file, not to edit this one.
+        """
+        return self._drifted_in(self._shipped_dir("udev"), UDEV_RULES_DIR,
+                                UDEV_RULE_NAMES)
+
+    def _install_system_file(self, src: str, dst: str, what_de: str,
+                             validate=None) -> bool:
+        """Overwrite ONE installed system file with the copy this agent ships.
 
         Atomic (temp in the same directory → fsync → chmod 0644 → ``os.replace``)
         because a torn write to ``edubotics-pi.service`` would leave the fleet
         with no way to start the agent at all — and the agent IS the only repair
-        surface on a Pi. One rollback copy of whatever was there is kept beside
-        it (``.edubotics-bak``); systemd ignores files without a unit suffix, so
-        neither the backup nor a leftover temp file can ever be loaded.
+        surface on a Pi. The compose file has the same property one level up: a
+        truncated ``docker-compose.opi.yml`` means no manager container, i.e. no
+        wizard, i.e. no way in. One rollback copy of whatever was there is kept
+        beside it (``.edubotics-bak``); neither the backup nor a leftover temp
+        file can ever be LOADED, and that has to hold separately for each of the
+        three destinations: systemd ignores files without a unit suffix, udev
+        only reads files ending in ``.rules`` (so a stale ``…rules.edubotics-bak``
+        — which would otherwise sort AFTER the real rule and win — is invisible
+        to it), and the agent only ever passes ``COMPOSE_FILE`` to ``-f``.
+        A fourth destination must re-establish this before it is added.
 
         The explicit chmod matters: the unit runs with ``UMask=0077``, so a
         freshly created file would be 0600 while setup.sh installs 0644.
+
+        ``validate`` is an optional ``(tmp_path) -> Optional[str]`` gate run on
+        the STAGED bytes after the chmod and BEFORE anything mutating: return a
+        German reason to refuse the swap (the installed file is then left
+        untouched and this returns False), or None to accept. The systemd path
+        passes none — see ``_renew_compose`` for why the compose does.
         """
-        dst = os.path.join(SYSTEMD_UNIT_DIR, unit)
-        src = os.path.join(os.path.dirname(os.path.abspath(__file__)), "systemd", unit)
         tmp = dst + ".edubotics-tmp"
         try:
             with open(src, "rb") as f:
@@ -2130,24 +2648,95 @@ class AgentApp:
                 f.flush()
                 os.fsync(f.fileno())
             os.chmod(tmp, 0o644)
+            if validate is not None:
+                refusal = validate(tmp)
+                if refusal:
+                    self._log(f"{what_de} wurde NICHT erneuert: {refusal} Die "
+                              "bisherige, funktionierende Datei bleibt unverändert.")
+                    try:
+                        os.unlink(tmp)
+                    except OSError:
+                        pass
+                    return False
             try:
                 shutil.copyfile(dst, dst + ".edubotics-bak")
             except OSError:
                 pass  # a backup is a courtesy, never a precondition
             os.replace(tmp, dst)
-            _fsync_path(SYSTEMD_UNIT_DIR)
+            _fsync_path(os.path.dirname(dst))
             return True
         except OSError as e:
-            self._log(f"Systemd-Dienst {unit} konnte nicht erneuert werden: {e}")
+            self._log(f"{what_de} konnte nicht erneuert werden: {e}")
             try:
                 os.unlink(tmp)
             except OSError:
                 pass
             return False
 
-    def _renew_system_units(self, drifted: "list") -> bool:
+    def _install_unit_file(self, unit: str) -> bool:
+        """Overwrite ONE installed systemd unit with the copy this agent ships.
+
+        Thin wrapper over ``_install_system_file`` — the atomic sequence lives
+        there once, so the compose repair cannot drift away from the unit
+        repair it is modelled on.
+        """
+        return self._install_system_file(
+            os.path.join(self._shipped_dir("systemd"), unit),
+            os.path.join(SYSTEMD_UNIT_DIR, unit),
+            f"Systemd-Dienst {unit}",
+        )
+
+    def _install_udev_rule(self, rule: str) -> bool:
+        """Overwrite ONE installed udev rule with the copy this agent ships.
+
+        Same atomic sequence as the unit path, deliberately: a torn write here
+        is a rule file udev parses PARTIALLY (it reads line by line and skips
+        what it cannot parse), i.e. a silent, partial permission floor — the
+        failure mode hardest to diagnose from a classroom.
+        """
+        return self._install_system_file(
+            os.path.join(self._shipped_dir("udev"), rule),
+            os.path.join(UDEV_RULES_DIR, rule),
+            f"Udev-Regel {rule}",
+        )
+
+    def _install_each(self, names: "list", install) -> "tuple":
+        """Attempt EVERY name and return ``(repaired, failed)``. Never
+        short-circuits, and never reports a file it did not actually touch.
+
+        This replaces ``all(install(n) for n in names)``, which was wrong twice
+        over on a set with more than one entry — and both halves were MEASURED
+        against the real code with the second unit's ``os.replace`` raising
+        EPERM:
+
+        * ``all()`` over a GENERATOR stops at the first False, so a failure on
+          the FIRST file left every later file unattempted
+          (``edubotics-pi-firstboot.service swapped=False``, no
+          ``.edubotics-bak``) even where it would have succeeded. The agent
+          silently repaired less than it could.
+        * The single bool then made the caller name the WHOLE drifted set as
+          unrepaired, so a file that HAD been swapped was still reported to the
+          operator as broken and got no success line — while the System-tab
+          banner's „mit der zuletzt funktionierenden Konfiguration" was false
+          for exactly that file.
+
+        Returning the two lists is what lets the caller say only what is true of
+        each file. A mixed outcome stays possible — there is no transaction
+        across several ``os.replace`` calls, and rolling the successes back
+        would mean re-installing bytes we just proved stale — but it is now
+        REPORTED as mixed instead of flattened into one verdict, and every file
+        named in the banner really is byte-intact at its previous version.
+        """
+        repaired: list = []
+        failed: list = []
+        for name in names:
+            (repaired if install(name) else failed).append(name)
+        return repaired, failed
+
+    def _renew_system_units(self, drifted: "list") -> "tuple":
         """Install the shipped systemd units over the drifted installed copies
-        and reload systemd. True iff EVERY named unit was renewed.
+        and reload systemd. Returns ``(repaired, failed)`` — see
+        ``_install_each`` for why this is not one bool.
 
         This is what makes the drift signal actionable instead of decorative.
         The units only ever reach a Pi through ``setup.sh``, which needs a source
@@ -2171,29 +2760,201 @@ class AgentApp:
         cannot be read, so an absent unit is never "installed" here — which is
         what keeps this out of `systemctl enable` territory.
         """
-        if not all(self._install_unit_file(unit) for unit in drifted):
-            return False
+        repaired, failed = self._install_each(drifted, self._install_unit_file)
+        if repaired:
+            # Reload iff something actually changed on disk. Identical to the
+            # previous all-or-nothing behaviour on the all-succeed path; the
+            # difference is only that a PARTIAL repair now also gets its reload,
+            # which it must — systemd would otherwise keep serving the old
+            # definition of a unit whose file we just replaced.
+            try:
+                subprocess.run(["systemctl", "daemon-reload"],
+                               capture_output=True, text=True, timeout=30)
+            except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+                # No systemd (dev box) or a reload hiccup: the FILES are
+                # correct, which is the durable half — systemd re-parses every
+                # unit at boot anyway. Never fail the renewal over the reload.
+                pass
+        return repaired, failed
+
+    def _renew_udev_rules(self, drifted: "list") -> "tuple":
+        """Install the shipped udev rules over the drifted installed copies and
+        make udev re-read them. Returns ``(repaired, failed)``, exactly like the
+        systemd leg — see ``_install_each``.
+
+        ``UDEV_RULE_NAMES`` carries one entry today, so the short-circuit this
+        shares the fix for is currently inert here. It is fixed anyway because
+        the set is about to grow: the planned CH343P line for the edu6 arm
+        arrives as a rule change, and a second rule file is the obvious next
+        step. A latent bug in a repair path is not worth keeping until it has
+        something to bite.
+
+        RELOAD, NEVER TRIGGER — the one thing to get right here, and the exact
+        analogue of the systemd path's "``daemon-reload``, never ``restart``".
+        ``udevadm control --reload-rules`` only makes the new rule set KNOWN to
+        udevd; it changes nothing about devices that are already enumerated.
+        ``udevadm trigger`` would additionally REPLAY add/change events for live
+        devices, which on a Pi mid-lesson means re-firing events for the very
+        tty nodes an open serial connection is holding — an unannounced
+        disturbance to a running session, from a repair that is supposed to be
+        advisory. The new floor therefore applies from the next replug or the
+        next boot, which is when it can matter (a rule that grants access to an
+        arm the running session already opened has nothing to fix).
+
+        setup.sh, which runs before anything is live, is free to trigger — and
+        does. That asymmetry is intentional, not an oversight.
+
+        A failed reload is NON-fatal, exactly like a failed ``daemon-reload``:
+        the FILES are correct, which is the durable half, and udev re-reads
+        ``/etc/udev/rules.d`` at boot regardless. Never fail the renewal over it.
+
+        Only ever REPLACES: ``_drifted_udev_rules`` skips a rule whose installed
+        copy cannot be read, so a rule the Pi never had is never installed here.
+        """
+        repaired, failed = self._install_each(drifted, self._install_udev_rule)
+        if repaired:
+            try:
+                subprocess.run(["udevadm", "control", "--reload-rules"],
+                               capture_output=True, text=True, timeout=30)
+            except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+                pass  # no udev (dev box) or a hiccup — the files are correct
+        return repaired, failed
+
+    def _shipped_compose_path(self) -> str:
+        """Absolute path to the opi compose file THIS agent version ships.
+
+        Resolved off ``__file__`` exactly like the systemd units, so it follows
+        the package through the self-update swap (rsync into ``pi_agent.new`` →
+        rename over ``pi_agent``) with no path knowledge anywhere else.
+        """
+        return os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            SHIPPED_COMPOSE_RELPATH)
+
+    def _compose_drifted(self) -> bool:
+        """True iff the INSTALLED opi compose differs byte-for-byte from the one
+        THIS agent version ships. The compose half of ``_drifted_units``.
+
+        Same evidence rule, deliberately: either file being absent or unreadable
+        (a dev box, a hand-relocated install, a non-root reader, a Pi
+        provisioned before the twin shipped) proves nothing, so it is skipped —
+        never repaired, never bannered. This must never guess: the alternative
+        reading, "the installed file is missing, so install ours", would turn a
+        relocated ``EDUBOTICS_OPI_COMPOSE`` into a surprise write.
+        """
         try:
-            subprocess.run(["systemctl", "daemon-reload"],
-                           capture_output=True, text=True, timeout=30)
-        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-            # No systemd (dev box) or a reload hiccup: the FILES are correct,
-            # which is the durable half — systemd re-parses every unit at boot
-            # anyway. Never fail the renewal over the reload.
-            pass
-        return True
+            with open(self._shipped_compose_path(), "rb") as f:
+                shipped = f.read()
+            with open(COMPOSE_FILE, "rb") as f:
+                installed = f.read()
+        except OSError:
+            return False  # cannot compare → cannot prove → silent
+        return shipped != installed
+
+    def _validate_compose_file(self, path: str) -> "Optional[str]":
+        """None if ``docker compose -f <path> config -q`` accepts the staged
+        file, otherwise a German reason to refuse the swap.
+
+        The question here is whether the SHIPPED BYTES are a valid compose file,
+        so the student's ``.env`` must not be able to answer it — an unrelated
+        local edit vetoing a release's orchestration fix would banner the Pi
+        permanently, with the wrong remedy. That takes BOTH of:
+
+        * no ``--env-file`` — the obvious half, and
+        * ``env=docker_manager._scrubbed_env()`` — the half an earlier version of
+          this docstring wrongly claimed was unnecessary. Compose interpolates
+          from the PROCESS environment as well as from ``--env-file``, and the
+          systemd unit is ``EnvironmentFile=-/etc/edubotics/.env``, so the whole
+          managed ``.env`` is already in this process's ``os.environ``.
+          MEASURED: with no ``.env`` file anywhere, a bare
+          ``EDUBOTICS_BIND_HOST='a b'`` in the process env alone makes
+          ``docker compose config -q`` exit 1 (``invalid IP address: a b``);
+          scrubbed, the same file exits 0.
+
+        Reusing ``docker_manager``'s allowlist rather than writing a second one
+        is deliberate: it is the module that owns "what a docker subprocess may
+        see" (it keeps EDUBOTICS_AGENT_TOKEN and any Supabase JWT out of every
+        other docker call), and a duplicate here could only drift. It gives the
+        gate the same PROCESS ENVIRONMENT ``_compose_up`` runs under — and
+        nothing more than that: ``_compose_up`` also passes ``--env-file``
+        (``_compose`` adds it whenever the .env exists), which this deliberately
+        does not. Do NOT "align" the two by adding it; that difference IS the
+        fix.
+
+        Unset ``${VAR}`` interpolation is a warning, not an error, so the file
+        validates on its own (MEASURED); the opi compose uses no ``${VAR:?}``
+        required-variable form, and none of its interpolated names is ``DOCKER_*``
+        (the one prefix the scrub keeps), so nothing in the student's ``.env``
+        can reach it.
+
+        Any inability to run the check (no docker binary, a timeout) is ALSO a
+        refusal. Refusing keeps the working compose in place, which is the safe
+        direction — and on a real Pi docker is always present, while a box
+        without it has no installed compose to drift from in the first place.
+        """
+        try:
+            res = subprocess.run(
+                ["docker", "compose", "-f", path, "config", "-q"],
+                capture_output=True, text=True, timeout=_COMPOSE_VALIDATE_TIMEOUT_S,
+                env=docker_manager._scrubbed_env(),
+            )
+        except (OSError, subprocess.SubprocessError) as e:
+            return f"Docker Compose konnte die Datei nicht prüfen ({e})."
+        if res.returncode != 0:
+            lines = [ln for ln in (res.stderr or res.stdout or "").splitlines()
+                     if ln.strip()]
+            detail = lines[-1].strip()[:200] if lines else f"Exit-Code {res.returncode}"
+            return f"Docker Compose lehnt sie ab ({detail})."
+        return None
+
+    def _renew_compose(self) -> bool:
+        """Install the shipped opi compose over the drifted installed copy.
+
+        VALIDATE-THEN-SWAP — the one deliberate asymmetry with the systemd path.
+        A systemd unit that fails to parse is inert (systemd logs and ignores
+        it), but ``docker compose -f`` refuses to do ANYTHING with an unparseable
+        file: the always-on manager would stop coming up, and the manager IS the
+        wizard, so the Pi would have no UI left to report the problem through.
+        The shipped bytes are gated in CI (``pi-compose-twin-guard`` +
+        ``compose-validate`` on both copies), so this is a belt against a
+        corrupt/truncated extraction rather than against a bad release — which
+        is exactly the failure the banner's ``sudo ./setup.sh`` remedy fixes.
+
+        Deliberately NOT a compose ``up``/``restart`` here. Note nonetheless
+        what boot() does a few steps later: ``start_manager`` runs
+        ``up -d --force-recreate --no-deps physical_ai_manager``, so the
+        always-on manager tier DOES adopt the newly installed compose within the
+        same boot. The robot tier is the half that waits for „Umgebung starten".
+        Say exactly that in German and nothing more optimistic.
+        """
+        return self._install_system_file(
+            self._shipped_compose_path(), COMPOSE_FILE,
+            f"Compose-Datei {os.path.basename(COMPOSE_FILE)}",
+            validate=self._validate_compose_file,
+        )
 
     def _check_system_files_version(self) -> None:
-        """Renew drifted systemd units, and report what could not be renewed (M1).
+        """Renew drifted system files, and report what could not be renewed (M1).
 
         The release tarball carries ``pi_agent/`` ONLY, so a self-update moves
-        the agent + (via ``docker/versions.env``) the images while
-        ``docker-compose.opi.yml``, ``.s6-keep`` and the systemd units stay
-        frozen at whatever ``setup.sh`` laid down. A release that adds a
-        forwarded ``EDUBOTICS_*`` env, changes a healthcheck, or re-points an
-        image ref therefore reaches the field HALF-applied, and the failure is
-        SILENT (the container simply never sees the var; Rule §2's fail-open
-        class).
+        the agent + (via ``docker/versions.env``) the images while everything
+        ``setup.sh`` laid down OUTSIDE that tree stays frozen. That used to
+        include ``docker-compose.opi.yml``: a release that added a forwarded
+        ``EDUBOTICS_*`` env, changed a healthcheck, or re-pointed an image ref
+        reached the field HALF-applied, and the failure was SILENT (the
+        container simply never saw the var; Rule §2's fail-open class). The
+        compose now ships INSIDE the package as a byte-identical twin
+        (``SHIPPED_COMPOSE_RELPATH``), so it is repairable here exactly like the
+        units.
+
+        The udev rules were the same fail-open one layer down, and easier to
+        miss because a rule file looks inert: they already shipped inside
+        ``pi_agent/udev/`` (so the tar and the rsync always carried them) but
+        NOTHING compared them, so a release adding a VID/PID line would put an
+        agent that scans for an arm on a fleet whose ``/dev`` node it may not be
+        allowed to open. They are in the set now (``UDEV_RULE_NAMES``).
+
+        ``.s6-keep`` is still not, and cannot be: it is a 0-byte marker whose
+        content has never changed, so a byte compare has nothing to find.
 
         This keys on CONTENT, never on ``stamp != APP_VERSION``. That inequality
         looks like a drift signal and is not one: the stamp cannot advance by
@@ -2202,57 +2963,146 @@ class AgentApp:
         self-updated Pis while proving nothing about what is actually in the
         files. An always-on warning is not a signal — it is a thing teachers
         learn to click past, exactly when the one real occurrence needs them.
-        Comparing the installed units to the ones this agent ships is instead
+        Comparing the installed files to the ones this agent ships is instead
         decidable: it fires only when the bytes really differ.
 
         Proven drift is REPAIRED first, not merely announced: ``_renew_system_units``
-        installs the shipped units and reloads systemd. Every fielded Pi was
-        provisioned before this release, so a release that touches a unit drifts
-        100 % of the fleet — a banner alone would therefore be permanent, and its
-        own remedy (``sudo ./setup.sh`` from a source checkout) is one a classroom
-        cannot perform. Only what the agent could NOT repair reaches the banner.
+        installs the shipped units and reloads systemd; ``_renew_compose``
+        installs the shipped compose behind a ``docker compose config`` gate;
+        ``_renew_udev_rules`` installs the shipped rules and reloads udev.
+        Every fielded Pi was provisioned before this release, so a release that
+        touches any of them drifts 100 % of the fleet — a banner alone would
+        therefore be permanent, and its own remedy (``sudo ./setup.sh`` from a
+        source checkout) is one a classroom cannot perform. Only what the agent
+        could NOT repair reaches the banner, and there is at most ONE banner line
+        naming exactly those files.
+
+        Each renewal makes its new definition KNOWN and nothing more —
+        ``daemon-reload`` / ``--reload-rules``, never ``restart``, never
+        ``trigger``, never a compose ``up``. A drift check must not be able to
+        disturb a Pi that is mid-lesson.
 
         ADVISORY ONLY — never blocks boot or the manager. The remedy for the
         unrepairable remainder is re-running ``setup.sh`` (idempotent; it
-        re-installs the units and compose and leaves the Docker volumes — the
-        student's datasets, HF cache and calibration — untouched). It must NEVER
+        re-installs the units, the udev rules and the compose and leaves the
+        Docker volumes — the student's datasets, HF cache and calibration —
+        untouched). It must NEVER
         instruct a re-flash: the drift is usually benign, the data is
         irreplaceable, and a wipe is not the fix.
         """
         stamped = self._read_system_files_stamp()
         drifted = self._drifted_units()
-        if not drifted:
+        drifted_udev = self._drifted_udev_rules()
+        compose_drifted = self._compose_drifted()
+        if not drifted and not drifted_udev and not compose_drifted:
             return
-        origin = (f" (Stand: Version {stamped})" if stamped else "")
-        if self._renew_system_units(drifted):
-            # Repaired — nothing for the System tab to nag about. Still say so in
-            # the Protokoll: the units are the one thing an update CAN carry, and
-            # a support case wants to see that it happened (and when it takes
-            # effect).
-            self._log(
-                f"Systemd-Dienste ({', '.join(drifted)}){origin} entsprachen nicht "
-                f"der Agent-Version {APP_VERSION} und wurden automatisch erneuert. "
-                "Die Änderung wird beim nächsten Start des Agenten wirksam."
-            )
+        # The origin suffix exists to name a version DIFFERENT from this
+        # agent's, so the reader can see how far the on-disk files lag. When
+        # the stamp equals APP_VERSION it names the same number twice and the
+        # sentence contradicts itself: „(Stand: Version 2.13.0) entsprachen
+        # nicht der Agent-Version 2.13.0". Drop it there — the drift is real
+        # (proven by the bytes, and a hand-edited udev rule is the likeliest
+        # cause), the origin version just says nothing about it. Reachable
+        # whenever setup.sh last ran at the version now running: a bench
+        # re-provision, or a source-checkout install that has not self-updated
+        # since.
+        origin = (f" (Stand: Version {stamped})"
+                  if stamped and stamped != APP_VERSION else "")
+        unrepaired: list = []
+        # Each leg reports per FILE, not per leg. A partial outcome therefore
+        # produces BOTH lines — the success sentence naming exactly what was
+        # renewed, and the banner naming exactly what was not — instead of one
+        # verdict that is wrong about half the set. No extra German string was
+        # needed for that: the existing sentence already reads correctly over a
+        # subset, so scoping it to `repaired` is the whole change.
+        if drifted:
+            repaired, failed = self._renew_system_units(drifted)
+            if repaired:
+                # Repaired — nothing for the System tab to nag about. Still say
+                # so in the Protokoll: a support case wants to see that it
+                # happened (and when it takes effect).
+                self._log(
+                    f"Systemd-Dienste ({', '.join(repaired)}){origin} entsprachen nicht "
+                    f"der Agent-Version {APP_VERSION} und wurden automatisch erneuert. "
+                    "Die Änderung wird beim nächsten Start des Agenten wirksam."
+                )
+            unrepaired.extend(failed)
+        if drifted_udev:
+            repaired_udev, failed_udev = self._renew_udev_rules(drifted_udev)
+            if repaired_udev:
+                # Says exactly when it applies. A reload makes udev KNOW the
+                # rule; it does not re-evaluate devices that are already
+                # enumerated (that would be `udevadm trigger`, which this
+                # deliberately does not run — see _renew_udev_rules).
+                self._log(
+                    f"Udev-Regeln ({', '.join(repaired_udev)}){origin} entsprachen nicht "
+                    f"der Agent-Version {APP_VERSION} und wurden automatisch erneuert. "
+                    "Sie gelten für Geräte, die danach neu eingesteckt werden, "
+                    "spätestens ab dem nächsten Neustart."
+                )
+            unrepaired.extend(failed_udev)
+        if compose_drifted:
+            compose_name = os.path.basename(COMPOSE_FILE)
+            if self._renew_compose():
+                # WHEN it takes effect is split, and the honest wording says so:
+                # boot() reaches ``start_manager`` a few steps below and that is
+                # an ``up -d --force-recreate --no-deps physical_ai_manager``, so
+                # the always-on manager adopts the new file in THIS boot. Only
+                # the robot tier waits for the student's „Umgebung starten".
+                self._log(
+                    f"Die Compose-Datei ({compose_name}){origin} entsprach nicht der "
+                    f"Agent-Version {APP_VERSION} und wurde automatisch erneuert. Die "
+                    "Weboberfläche wird noch in diesem Startvorgang darauf umgestellt; "
+                    "für den Roboter gilt sie ab dem nächsten „Umgebung starten\"."
+                )
+            else:
+                unrepaired.append(compose_name)
+        if not unrepaired:
             return
         self._system_files_stale = True
         self._system_files_version = stamped
+        # Says the same thing the System-tab banner says, because it is the line
+        # that banner points at („den Grund nennt das Protokoll"). Two claims it
+        # used to make are gone: „Aktualisierungen erneuern sonst nur den
+        # Agenten und die Images — nicht diese Dateien" became FALSE the moment
+        # the units, the udev rules and the compose joined the self-repaired
+        # set, and „sudo ./setup.sh aus dem EduBotics-Quellordner" is no longer
+        # the PRIMARY remedy — it needs a source checkout no classroom has,
+        # while the agent's own retry on the next boot needs nothing. It stays
+        # as the fallback for the case the retry cannot fix (a genuinely
+        # read-only /etc, a corrupt extraction), and it still says the students'
+        # data survives, because that is what stops anyone reaching for a
+        # re-flash.
+        #
+        # „der Grund steht in den Zeilen oberhalb" is a promise the code keeps:
+        # every path that appends to `unrepaired` runs through
+        # `_install_system_file`, whose only two False returns each log a German
+        # reason first (the validate refusal and the OSError branch).
         self._log(
-            f"[WARNUNG] Systemdateien weichen ab: die installierten Systemd-Dienste "
-            f"({', '.join(drifted)}){origin} unterscheiden sich von denen der "
-            f"Agent-Version {APP_VERSION} und konnten nicht automatisch erneuert "
-            "werden. Aktualisierungen erneuern sonst nur den Agenten und die "
-            "Images — nicht diese Dateien. Bitte 'sudo ./setup.sh' aus dem "
-            "EduBotics-Quellordner erneut ausführen; die Datensätze der Schüler "
-            "bleiben dabei erhalten."
+            f"[WARNUNG] Systemdateien konnten nicht automatisch erneuert werden: "
+            f"{', '.join(unrepaired)}{origin}. Der Pi läuft mit den bisherigen, "
+            "funktionierenden Dateien weiter — der Grund steht in den Zeilen "
+            "oberhalb. Beim nächsten Neustart versucht der Pi es erneut. Bleibt "
+            "die Meldung bestehen, hilft 'sudo ./setup.sh' aus dem "
+            "EduBotics-Quellordner; die Datensätze der Schüler bleiben dabei "
+            "erhalten."
         )
 
     def boot(self) -> None:
-        """Boot sequence: rehydrate hardware, renew drifted systemd units, seed
-        or realign the .env, start BOTH listeners (loopback + the ros_net-gateway
-        binder loop), then — only if a self-update just landed — pull the newly
-        pinned images, and finally bring up the ALWAYS-ON manager. The robot tier
-        is intentionally left down.
+        """Boot sequence: rehydrate hardware, renew drifted system files (the
+        systemd units, the udev rules and the opi compose), seed or realign the
+        .env, start BOTH
+        listeners (loopback + the ros_net-gateway binder loop), then — only if a
+        self-update just landed — pull the newly pinned images, and finally bring
+        up the ALWAYS-ON manager. The robot tier is intentionally left down.
+
+        Note the ordering consequence of the compose repair: it runs FIRST, and
+        ``start_manager`` below is an ``up -d --force-recreate --no-deps
+        physical_ai_manager``, so a compose the agent just renewed is adopted by
+        the always-on manager tier in THIS boot — not merely at the next
+        „Umgebung starten", which is only true of the robot tier. That is
+        deliberate (the manager IS the wizard, so it should be the release's
+        manager) and it is what the German Protokoll line says.
 
         The listeners start BEFORE the manager ``up``, not after. The gateway
         interface does not exist yet on a genuinely first boot, but the binder is

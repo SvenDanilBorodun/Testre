@@ -430,6 +430,48 @@ def self_heal_wsl_serial() -> dict:
 _EDU6_BYID_MARKERS = ("1A86", "WCH", "CH343", "USB_SINGLE_SERIAL", "USB SINGLE SERIAL",
                       "USB2.0-SER")
 
+# The same markers as a family table, so a caller can ask "which family does
+# this path look like" instead of only "does it match THIS family". Kept
+# beside the literals `find_serial_paths_for_robotis` uses rather than
+# rewiring that function: it is the pre-edu6 discovery path and must stay
+# byte-identical. `test_arm_family_conflict_twin_lockstep.py` asserts the
+# table and the function still select the same paths, so the duplication
+# cannot drift.
+_ARM_MARKERS = {
+    "omx":  ("ROBOTIS", "OPENRB"),
+    "edu6": _EDU6_BYID_MARKERS,
+}
+
+
+def serial_path_family_conflict(serial_path: str, arm_family: str) -> bool:
+    """POSITIVE evidence that ``serial_path`` is an arm of a DIFFERENT family.
+
+    Twin of ``pi_agent/identify_arm.py::serial_path_family_conflict`` — same
+    body over the same markers, kept in lockstep by
+    ``tests/test_arm_family_conflict_twin_lockstep.py``. See that copy's
+    docstring for the full reasoning; the short version is that the recorded
+    by-id path IS the record of which family it was scanned for (the scan only
+    ever stores a path that matched that family's markers), so a robot-type
+    change can invalidate a stale scan with no new persisted state.
+
+    Three-valued on purpose, collapsed to a refusal only on proof: a path that
+    matches the family we need is fine whatever else it also matches; a path
+    that matches NO family is "the marker list is incomplete", not "the arm is
+    wrong" (``_EDU6_BYID_MARKERS`` is a guess pending rig gate R1), and must
+    not brick a rig. For the same reason a family with no markers AT ALL — a
+    future ``ROBOT_PROFILES`` entry this table has not caught up with — is
+    unjudgeable rather than universally conflicting; CI asserts the table
+    covers every registry family, so the gap is loud instead of silent.
+    """
+    up = (serial_path or "").upper()
+    wanted = _ARM_MARKERS.get(arm_family, ())
+    if not up or not wanted:
+        return False
+    if any(m in up for m in wanted):
+        return False
+    return any(any(m in up for m in markers)
+               for fam, markers in _ARM_MARKERS.items() if fam != arm_family)
+
 
 def find_serial_paths_for_robotis() -> list[str]:
     """Find /dev/serial/by-id/ paths for EduBotics devices inside WSL2."""

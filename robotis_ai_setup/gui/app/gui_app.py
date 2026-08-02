@@ -453,6 +453,17 @@ FINALIZE_EXIT_DONE = 0      # import + pull succeeded; the flag was cleared
 FINALIZE_EXIT_REBOOT = 10   # host reboot still required; nothing installed yet
 FINALIZE_EXIT_CONSENT = 12  # rootfs rebuild needs consent -> re-run the installer
 
+# Crossing arm families invalidates a scan (see _hardware_ready). Two sentences
+# because the two surfaces differ: the status bar carries one short line, the
+# start warning has room to say what to do. Deliberately near-identical to the
+# Pi's _ARM_FAMILY_MISMATCH_DE — the two wizards are twins and a student may
+# meet either.
+ARM_FAMILY_MISMATCH_DE = (
+    "Die gescannten Arme gehören zu einem anderen Robotertyp. "
+    "Bitte die Arme für den gewählten Robotertyp neu scannen."
+)
+ARM_FAMILY_MISMATCH_STATUS_DE = "Robotertyp gewechselt — bitte die Arme neu scannen."
+
 
 class EduBoticsApp:
     """Hauptfenster der Anwendung."""
@@ -870,17 +881,49 @@ class EduBoticsApp:
         paths through _hardware_ready), where a StringVar.get() is not safe."""
         return self._robot_profile_selected
 
+    def _arms_conflict_with_family(self, profile: str) -> bool:
+        """Whether any arm this profile USES is provably of another arm family.
+
+        Follower always, leader only where the profile scans one: a leftover
+        leader on a follower-only profile is never launched, so judging it
+        would refuse a rig over a record nothing reads.
+
+        Twin of ``pi_agent/agent.py::_arms_conflict_with``."""
+        arms = [self.hardware.follower]
+        if ROBOT_PROFILES.get(profile, {}).get("scan_requires_leader", True):
+            arms.append(self.hardware.leader)
+        family = ROBOT_PROFILES.get(profile, {}).get("arm_family", "omx")
+        return any(device_manager.serial_path_family_conflict(a.serial_path, family)
+                   for a in arms if a is not None)
+
     def _hardware_ready(self, profile: str | None = None) -> bool:
         """Whether the scanned hardware satisfies the (given/selected) robot type.
 
         A both-arms type needs leader+follower (HardwareConfig.is_complete); a
         follower-only type (Roboter Studio kit, no leader) needs only the
-        follower (HardwareConfig.follower_present)."""
+        follower (HardwareConfig.follower_present).
+
+        PRESENCE IS NOT ENOUGH — the arms must also be of this profile's ARM
+        FAMILY. Measured headless before this check existed: with an OMX pair
+        scanned, `_hardware_ready('edu6_studio')` returned True, and with a
+        single edu6 arm scanned `_hardware_ready('omx_follower')` returned True
+        — so the Modus dropdown alone could arm „Umgebung starten" for a
+        Feetech bringup over a Dynamixel bus, or the reverse. Same hole the Pi
+        had (see ``pi_agent/agent.py::_hardware_ready`` for the measured
+        consequence); crossing arm families INVALIDATES the scan on both
+        platforms (user decision, 2026-07-29).
+
+        The .env path was already protected here — ``_try_rehydrate_arms``
+        passes ``arm_family=`` into ``fast_rehydrate_arms``, which filters — so
+        the hole was purely in-session: scan, then change the dropdown."""
         if profile is None:
             profile = self._selected_robot_profile()
         if ROBOT_PROFILES.get(profile, {}).get("scan_requires_leader", True):
-            return self.hardware.is_complete
-        return self.hardware.follower_present
+            if not self.hardware.is_complete:
+                return False
+        elif not self.hardware.follower_present:
+            return False
+        return not self._arms_conflict_with_family(profile)
 
     def _apply_robot_type_labels(self):
         """Reword Schritt A/B for the selected robot type. Follower-only types
@@ -913,6 +956,13 @@ class EduBoticsApp:
         if not self.cloud_only.get():
             if self._hardware_ready():
                 self._set_status("Bereit — Start klicken.")
+            elif self._arms_conflict_with_family(self._robot_profile_selected):
+                # A wrong-FAMILY scan is not the same as no scan, and this is
+                # the moment it happens — the student changed the dropdown and
+                # a green „Arme erkannt" went grey with the serial paths still
+                # on screen. „Hardware scannen, um zu beginnen" would send them
+                # looking at cables instead of at what they just clicked.
+                self._set_status(ARM_FAMILY_MISMATCH_STATUS_DE)
             else:
                 self._set_status("Bereit — Hardware scannen, um zu beginnen")
         self._update_start_button()
@@ -3101,7 +3151,11 @@ class EduBoticsApp:
         self._rs_robot_type = self._selected_robot_profile()
 
         if not is_cloud_only and not self._hardware_ready(self._rs_robot_type):
-            if ROBOT_PROFILES.get(self._rs_robot_type, {}).get("scan_requires_leader", True):
+            # „Fehlende Hardware" is the wrong title for a wrong-FAMILY scan:
+            # the hardware is not missing, it belongs to the other robot type.
+            if self._arms_conflict_with_family(self._rs_robot_type):
+                messagebox.showwarning("Falscher Robotertyp", ARM_FAMILY_MISMATCH_DE)
+            elif ROBOT_PROFILES.get(self._rs_robot_type, {}).get("scan_requires_leader", True):
                 messagebox.showwarning("Fehlende Hardware", "Bitte beide Arme scannen und identifizieren, bevor du startest.")
             else:
                 messagebox.showwarning("Fehlende Hardware", "Bitte den Follower-Arm scannen und identifizieren, bevor du startest.")

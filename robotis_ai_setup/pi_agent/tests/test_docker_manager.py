@@ -1216,9 +1216,13 @@ class TestSetLeaderMode(unittest.TestCase):
         # The forward write must carry the managed EDUBOTICS_ROBOT_TYPE through
         # (the GUI's _rs_set_leader_mode scar: omitting it silently rewrites
         # the type to the default on every toggle).
+        #
+        # The seed leaves follower_only to the DERIVE. omx_follower is the only
+        # non-default id available to prove "carried, not defaulted", and it is
+        # follower-only — so pairing it with an explicit follower_only=False is
+        # a contradiction generate_env_file now refuses outright.
         from pi_agent import config_generator as cg
-        cg.generate_env_file(self.cfg, self.env_path, follower_only=False,
-                             robot_type="omx_follower")
+        cg.generate_env_file(self.cfg, self.env_path, robot_type="omx_follower")
         with patch.object(dm, "restart_open_manipulator", return_value=True):
             ok, _ = dm.set_leader_mode(self.cfg, follower_only=True)
         self.assertTrue(ok)
@@ -1226,10 +1230,10 @@ class TestSetLeaderMode(unittest.TestCase):
                          "omx_follower")
 
     def test_rollback_preserves_robot_type(self):
-        # And the rollback write must carry it too.
+        # And the rollback write must carry it too. (Seed via the derive — see
+        # test_switch_preserves_robot_type.)
         from pi_agent import config_generator as cg
-        cg.generate_env_file(self.cfg, self.env_path, follower_only=False,
-                             robot_type="omx_follower")
+        cg.generate_env_file(self.cfg, self.env_path, robot_type="omx_follower")
         with patch.object(dm, "restart_open_manipulator", return_value=False):
             ok, _ = dm.set_leader_mode(self.cfg, follower_only=True)
         self.assertFalse(ok)

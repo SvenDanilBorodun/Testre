@@ -1,38 +1,61 @@
-"""Cross-boundary lockstep for the two ROBOT_PROFILES registries (audit fix).
+"""Cross-boundary lockstep for the THREE ROBOT_PROFILES registries (audit fix).
 
-The GUI thin descriptor (gui/app/constants.py::ROBOT_PROFILES) and the server
-ArmProfile registry (physical_ai_tools/physical_ai_server/physical_ai_server/
-robot_profiles.py::ROBOT_PROFILES) encode ONE cross-agent contract: the profile
-ids must be identical, and per id the GUI ``follower_only`` flag must agree with
-the server's ``follower_only`` / ``capabilities.has_leader`` semantics (a
-follower-only profile has NO leader). Both files carry "keep in lockstep"
-comments; until now nothing enforced them together.
+Three copies of one contract exist, and none can import the others:
 
-Both registries are parsed from SOURCE via ``ast`` — the server package pulls
-in rclpy/NumPy at runtime and must NEVER be imported here (the suite stays
-deps-free stdlib; the same technique as the server-side
+  1. the Windows GUI thin descriptor  — ``gui/app/constants.py::ROBOT_PROFILES``
+  2. the Orange-Pi thin descriptor    — ``pi_agent/constants.py::ROBOT_PROFILES``
+  3. the AUTHORITATIVE server registry — ``physical_ai_tools/physical_ai_server/
+     physical_ai_server/robot_profiles.py::ROBOT_PROFILES``
+
+The profile ids must be identical everywhere, and per id ``follower_only`` must
+agree with the server's ``follower_only`` / ``capabilities.has_leader``
+semantics (a follower-only profile has NO leader). ``camera_roles`` must agree
+across all three (it decides a lone camera's role AND the server's config
+topics), and ``arm_family`` across the two THIN descriptors (the server has no
+such field — it never scans USB). Every file carries a "keep in lockstep"
+comment; this is what enforces them together.
+
+Deliberate decision (PLAN WP-7.1): the three copies are NOT hoisted into one
+shared module. ``pi_agent/`` ships as a standalone tarball with no import path
+to ``gui/app/``, and the server registry is COPY-wholesale into the container —
+a shared module would need a new packaging story. A lockstep test is the correct
+coupling, and it must stay ONE test: a third independent file would let two of
+the three agree while the odd one out stayed green.
+
+The server registry is parsed from SOURCE via ``ast`` — that package pulls in
+rclpy/NumPy at runtime and must NEVER be imported here (the suite stays
+deps-free stdlib; same technique as the server-side
 test/test_robot_profiles.py::_extract_literal). The GUI side is additionally
 cross-checked against the imported ``gui.app.constants`` so the AST extraction
-itself can't silently drift from what the GUI actually runs.
+itself can't silently drift from what the GUI actually runs. The Pi side is
+imported directly (``pi_agent.constants`` is deps-free stdlib, like the GUI's).
 
-Also locks the GUI-internal invariant that leader-need is encoded ONCE:
+Also locks the thin-descriptor invariant that leader-need is encoded ONCE:
 ``scan_requires_leader == not follower_only`` for every profile (the two keys
 have opposite defaults — a new profile setting only one of them would silently
 disagree with itself).
 """
 
 import ast
+import sys
 import unittest
 from pathlib import Path
 
 from gui.app.constants import DEFAULT_ROBOT_PROFILE, ROBOT_PROFILES
 
 _TESTS_DIR = Path(__file__).resolve().parent
-_GUI_CONSTANTS = _TESTS_DIR.parent / "gui" / "app" / "constants.py"
+_SETUP_DIR = _TESTS_DIR.parent  # robotis_ai_setup/
+_GUI_CONSTANTS = _SETUP_DIR / "gui" / "app" / "constants.py"
 _SERVER_PROFILES = (
     _TESTS_DIR.parents[1] / "physical_ai_tools" / "physical_ai_server"
     / "physical_ai_server" / "robot_profiles.py"
 )
+
+# The pi_agent package is a sibling of gui/ under robotis_ai_setup/ and ships as
+# its own tarball; mirror the import convention its own tests use.
+if str(_SETUP_DIR) not in sys.path:
+    sys.path.insert(0, str(_SETUP_DIR))
+from pi_agent import constants as pi_constants  # noqa: E402
 
 
 def _parse_gui_registry():
@@ -158,12 +181,14 @@ def _parse_server_registry():
 
 
 class RegistryLockstepTest(unittest.TestCase):
-    """GUI ↔ server ROBOT_PROFILES cross-boundary contract."""
+    """GUI ↔ Pi ↔ server ROBOT_PROFILES cross-boundary contract."""
 
     @classmethod
     def setUpClass(cls):
         cls.gui, cls.gui_default = _parse_gui_registry()
         cls.server, cls.server_default = _parse_server_registry()
+        cls.pi = pi_constants.ROBOT_PROFILES
+        cls.pi_default = pi_constants.DEFAULT_ROBOT_PROFILE
 
     def test_gui_source_parse_matches_imported_constants(self):
         # Guards the AST technique itself: what we parsed from source must be
@@ -173,14 +198,23 @@ class RegistryLockstepTest(unittest.TestCase):
 
     def test_profile_id_sets_identical(self):
         self.assertEqual(set(self.gui), set(self.server))
-        # Not vacuous: the two shipped profiles must actually be present.
-        self.assertLessEqual({"omx_full", "omx_follower"}, set(self.gui))
+        # The Pi is the third party to the SAME contract: an id that exists on
+        # two platforms and not the third is a rig that cannot be provisioned
+        # there (which is exactly how omx_follower stayed unreachable on a Pi).
+        self.assertEqual(set(self.gui), set(self.pi))
+        # Not vacuous: the shipped profiles must actually be present.
+        self.assertLessEqual({"omx_full", "omx_follower", "edu6_studio"},
+                             set(self.gui))
 
     def test_follower_only_agrees_per_id(self):
         for pid, gui_prof in self.gui.items():
             self.assertEqual(
                 gui_prof["follower_only"], self.server[pid]["follower_only"],
                 f"follower_only for {pid!r} disagrees between GUI and server",
+            )
+            self.assertEqual(
+                gui_prof["follower_only"], self.pi[pid]["follower_only"],
+                f"follower_only for {pid!r} disagrees between GUI and pi_agent",
             )
 
     def test_follower_only_matches_server_has_leader(self):
@@ -207,41 +241,74 @@ class RegistryLockstepTest(unittest.TestCase):
                 tuple(self.server[pid]["camera_roles"]),
                 f"camera_roles for {pid!r} disagree between GUI and server",
             )
+            self.assertEqual(
+                tuple(gui_prof["camera_roles"]),
+                tuple(self.pi[pid]["camera_roles"]),
+                f"camera_roles for {pid!r} disagree between GUI and pi_agent",
+            )
         # 'scene' is mandatory fleet-wide (Roboter Studio perception) — assert it
         # on the shared contract so a future profile can't drop it on one side.
         for pid, gui_prof in self.gui.items():
             self.assertIn("scene", gui_prof["camera_roles"], pid)
 
-    def test_arm_family_note(self):
-        # arm_family is a GUI-ONLY field (it scopes the usbipd VID/PID attach);
-        # the server ArmProfile has no equivalent, so there is nothing to
-        # cross-check for it here. The GUI-internal arm_family↔ARM_USB_IDS
-        # contract is covered by test_feetech_bus.TestGuiDetectionSeam.
+    def test_arm_family_agrees_across_the_two_thin_descriptors(self):
+        # arm_family is a THIN-DESCRIPTOR-only field (it scopes the hardware
+        # scan: the usbipd VID/PID attach on Windows, the /dev/serial/by-id
+        # filter + prober protocol on the Pi); the server ArmProfile has no
+        # equivalent, so there is nothing to cross-check against IT. Between the
+        # two scanning platforms it must agree exactly — a disagreement means
+        # one of them probes the wrong bus and reports "kein Arm gefunden".
+        # The GUI-internal arm_family↔ARM_USB_IDS contract is covered by
+        # test_feetech_bus.TestGuiDetectionSeam; the Pi's by pi_agent's
+        # tests/test_constants.py.
         for pid, gui_prof in self.gui.items():
             self.assertIn("arm_family", gui_prof, pid)
+            self.assertIn("arm_family", self.pi[pid], pid)
+            self.assertEqual(
+                gui_prof["arm_family"], self.pi[pid]["arm_family"],
+                f"arm_family for {pid!r} disagrees between GUI and pi_agent",
+            )
+
+    def test_display_de_is_a_non_empty_string_in_both_thin_descriptors(self):
+        # display_de is HARD-mandatory on both platforms: the GUI subscripts it
+        # directly when building the Robotertyp combobox and the Pi agent when
+        # building /status's robot_profiles list, so an absent key is an
+        # immediate crash, not a blank label. (It is deliberately NOT required
+        # to be equal across platforms — the wording is per-surface — but it
+        # must exist and be a real string on both.)
+        for pid in self.gui:
+            for name, reg in (("GUI", self.gui), ("pi_agent", self.pi)):
+                label = reg[pid].get("display_de")
+                self.assertIsInstance(label, str, f"{name} {pid}")
+                self.assertTrue(label.strip(), f"{name} {pid}: display_de empty")
 
     def test_default_profile_id_lockstep(self):
-        # Both sides fall back to the same id on unknown/absent values —
+        # All three sides fall back to the same id on unknown/absent values —
         # a diverged default would boot the server with a different profile
-        # than the GUI advertises.
+        # than the GUI (or the Pi wizard) advertises.
         self.assertEqual(self.gui_default, self.server_default)
+        self.assertEqual(self.gui_default, self.pi_default)
         self.assertIn(self.gui_default, self.gui)
+        self.assertIn(self.pi_default, self.pi)
 
 
 class ScanRequiresLeaderConsistencyTest(unittest.TestCase):
-    """GUI-internal: leader-need is encoded twice (follower_only vs
-    scan_requires_leader, opposite defaults) — they must never disagree."""
+    """Thin-descriptor-internal: leader-need is encoded twice (follower_only vs
+    scan_requires_leader, opposite defaults) — they must never disagree, on
+    EITHER platform."""
 
     def test_scan_requires_leader_is_not_follower_only(self):
-        self.assertTrue(ROBOT_PROFILES)
-        for pid, prof in ROBOT_PROFILES.items():
-            self.assertIn("follower_only", prof, pid)
-            self.assertIn("scan_requires_leader", prof, pid)
-            self.assertEqual(
-                prof["scan_requires_leader"], not prof["follower_only"],
-                f"Profile {pid!r}: scan_requires_leader must equal "
-                f"NOT follower_only",
-            )
+        for platform, registry in (("GUI", ROBOT_PROFILES),
+                                   ("pi_agent", pi_constants.ROBOT_PROFILES)):
+            self.assertTrue(registry, platform)
+            for pid, prof in registry.items():
+                self.assertIn("follower_only", prof, pid)
+                self.assertIn("scan_requires_leader", prof, pid)
+                self.assertEqual(
+                    prof["scan_requires_leader"], not prof["follower_only"],
+                    f"{platform} profile {pid!r}: scan_requires_leader must "
+                    f"equal NOT follower_only",
+                )
 
 
 if __name__ == "__main__":

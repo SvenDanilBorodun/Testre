@@ -2588,12 +2588,50 @@ class TestShippedWiring(unittest.TestCase):
         phase2 = ep[ep.index('Phase 2'):ep.index('Phase 3')]
         self.assertIn('edu6_studio', phase2)
 
+    # Every name the driver reads that must reach the ARM container. The
+    # entrypoint branches on EDUBOTICS_ROBOT_TYPE inside that container, and
+    # each EDUBOTICS_EDU6_* knob is a documented one-variable rollback that
+    # does nothing at all unless compose injects it.
+    _NODE_ENVS = (
+        'EDUBOTICS_ROBOT_TYPE',
+        'EDUBOTICS_EDU6_JOINT_SIGNS',
+        'EDUBOTICS_EDU6_BOOT_POS_TOL_TICKS',
+        'EDUBOTICS_EDU6_EDGE_MARGIN_TICKS',
+        'EDUBOTICS_EDU6_TORQUE_ABORT_TICKS',
+        'EDUBOTICS_EDU6_GOAL_EDGE_MARGIN_TICKS',
+    )
+
     def test_compose_forwards_the_node_envs(self):
-        compose = self._read('docker', 'docker-compose.yml')
-        self.assertIn('EDUBOTICS_EDU6_JOINT_SIGNS=', compose)
-        # EDUBOTICS_ROBOT_TYPE now reaches the open_manipulator service too.
-        om = compose[compose.index('open_manipulator:'):compose.index('physical_ai_server:')]
-        self.assertIn('EDUBOTICS_ROBOT_TYPE=', om)
+        """Per SERVICE and per COMPOSE — neither qualifier is redundant.
+
+        `ci.yml::env-forwarding-guard` unions all four compose files and never
+        looks at services, so it stays green when a key sits on the wrong
+        service of the right file, or on the student compose alone. Both
+        happened at once: EDUBOTICS_ROBOT_TYPE was on the opi compose but only
+        for physical_ai_server, so an Orange Pi ran the OMX Dynamixel bringup
+        against a Feetech bus, and none of the five rollback knobs reached a Pi
+        at all. The student-only assertion this test used to make could not see
+        either half. Same lesson as
+        test_edu6_geometry.py::test_the_knob_is_forwarded_on_both_composes.
+
+        The shipped `pi_agent/docker/` twin needs no row here: it is fenced
+        byte-identical by ci.yml::pi-compose-twin-guard and by
+        test_agent_api.py::test_the_shipped_compose_is_byte_identical_to_the_docker_dir_copy.
+        """
+        for name in ('docker-compose.yml', 'docker-compose.opi.yml'):
+            compose = self._read('docker', name)
+            arm = compose[compose.index('open_manipulator:'):
+                          compose.index('physical_ai_server:')]
+            # Match the LIST ENTRY, not the bare name: every one of these is
+            # also mentioned in the surrounding prose, so a substring test
+            # against the whole block passes on the comment alone.
+            forwarded = {ln.strip()[2:].split('=', 1)[0]
+                         for ln in arm.splitlines()
+                         if ln.strip().startswith('- ')}
+            missing = [e for e in self._NODE_ENVS if e not in forwarded]
+            self.assertEqual(
+                [], missing,
+                f'{name}: open_manipulator does not forward {missing}')
 
     def test_ci_env_guard_scans_the_node(self):
         ci = open(os.path.join(_HERE, '..', '..', '.github', 'workflows',

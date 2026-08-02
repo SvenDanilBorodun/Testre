@@ -117,6 +117,14 @@ export default function LeaderToggle({ isActive }) {
   const { piMode, piModeResolved } = usePiMode();
   // available: null = probing, false = no bridge (Jetson/cloud → hidden), true = present
   const [available, setAvailable] = useState(null);
+  // The bridge's own answer to „does this rig HAVE a leader arm?" — additive
+  // and Pi-only. On Windows a follower-only rig never constructs the :8769
+  // bridge at all, so the probe fails and this component is already hidden; on
+  // a Pi the same contract is served by the always-on agent, so the probe
+  // ALWAYS succeeds and only this key can tell the two rigs apart before the
+  // first ROS capability tick arrives. The Windows bridge omits the key
+  // (undefined), which is why the hide below tests `=== false`.
+  const [bridgeHasLeader, setBridgeHasLeader] = useState(undefined);
   const [followerOnly, setFollowerOnly] = useState(false);
   const [busy, setBusy] = useState(false);
   const [busyMsg, setBusyMsg] = useState('');
@@ -164,6 +172,7 @@ export default function LeaderToggle({ isActive }) {
         setAvailable(true);
         setFollowerOnly(!!body.follower_only);
         setBusy(!!body.busy);
+        setBridgeHasLeader(body.has_leader);
       } else {
         setAvailable(false);
       }
@@ -301,8 +310,16 @@ export default function LeaderToggle({ isActive }) {
     };
   }, [preparing, refreshStatus]);
 
-  // probing, or no GUI bridge (Jetson/cloud), or a leader-less profile (omx_follower)
-  if (available !== true || caps?.has_leader === false) return null;
+  // Hidden when: still probing, no control bridge at all (Jetson / cloud), the
+  // ROS capabilities say this profile has no leader (omx_follower, edu6_studio),
+  // OR the control bridge itself says so. The last clause is what covers the Pi
+  // between mount and the first `/task/status` tick, where `caps` is undefined
+  // and the always-on agent answers every probe. Both are `=== false` tests, so
+  // an undefined from either source (Windows bridge, pre-capability image,
+  // pre-first-tick) still renders exactly as before.
+  if (available !== true || caps?.has_leader === false || bridgeHasLeader === false) {
+    return null;
+  }
 
   return (
     <div className="leader-toggle" style={{ display: 'flex', alignItems: 'center', gap: 10 }}>

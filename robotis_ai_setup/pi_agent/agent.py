@@ -2596,10 +2596,10 @@ class AgentApp:
         (group=dialout, mode 0660) plus a stable ``TAG+="edubotics-arm"`` on the
         arm boards' tty nodes — it is explicitly NOT the leader/follower role
         source. A release that adds a VID/PID line — the CH343P line for the
-        edu6 arm, shipped since ``2951b87``, was precisely that — would otherwise ship an agent that
-        knows how to scan for an arm whose ``/dev`` node its scanner container
-        cannot open, and the drift would be invisible because nothing compared
-        the files.
+        edu6 arm, shipped since ``2951b87``, was precisely that — would
+        otherwise ship an agent that knows how to scan for an arm whose
+        ``/dev`` node its scanner container cannot open, and the drift would be
+        invisible because nothing compared the files.
 
         Consequence worth naming, shared with the systemd leg: a locally
         hand-added rule LINE is drift, so it is reverted (with a German

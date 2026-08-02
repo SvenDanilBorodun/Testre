@@ -2595,8 +2595,8 @@ class AgentApp:
         because a udev rule looks inert: it only sets a permission floor
         (group=dialout, mode 0660) plus a stable ``TAG+="edubotics-arm"`` on the
         arm boards' tty nodes — it is explicitly NOT the leader/follower role
-        source. A release that adds a VID/PID line — the planned CH343P line for
-        the edu6 arm is precisely that — would otherwise ship an agent that
+        source. A release that adds a VID/PID line — the CH343P line for the
+        edu6 arm, shipped since ``2951b87``, was precisely that — would otherwise ship an agent that
         knows how to scan for an arm whose ``/dev`` node its scanner container
         cannot open, and the drift would be invisible because nothing compared
         the files.
@@ -2782,12 +2782,16 @@ class AgentApp:
         make udev re-read them. Returns ``(repaired, failed)``, exactly like the
         systemd leg — see ``_install_each``.
 
-        ``UDEV_RULE_NAMES`` carries one entry today, so the short-circuit this
-        shares the fix for is currently inert here. It is fixed anyway because
-        the set is about to grow: the planned CH343P line for the edu6 arm
-        arrives as a rule change, and a second rule file is the obvious next
-        step. A latent bug in a repair path is not worth keeping until it has
-        something to bite.
+        ``UDEV_RULE_NAMES`` carries one entry, so the short-circuit this shares
+        the fix for is inert here. It is fixed anyway, on the reasoning that a
+        latent bug in a repair path is not worth keeping until it has something
+        to bite — and note the growth this once anticipated did NOT happen: the
+        CH343P/edu6 rule landed as a LINE inside the existing
+        ``99-edubotics-robotis.rules`` (``2951b87``), not as a second file, so
+        the set stayed at one. That is also why it reached the fielded fleet at
+        all — the repair REPLACES and never CREATES, so a genuinely NEW rule
+        file remains both the case that would exercise this leg and the case
+        that cannot be delivered to an already-provisioned Pi.
 
         RELOAD, NEVER TRIGGER — the one thing to get right here, and the exact
         analogue of the systemd path's "``daemon-reload``, never ``restart``".

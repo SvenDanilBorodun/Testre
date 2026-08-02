@@ -482,8 +482,8 @@ SYSTEMD_UNIT_NAMES = ("edubotics-pi.service", "edubotics-pi-firstboot.service")
 # VERBATIM (`install -m 0644`, no templating) into UDEV_RULES_DIR, which
 # self-update never touches. Until 2026-07-28 nothing then compared the two, so
 # the udev rule was structurally the SAME fail-open the compose just closed: a
-# release that adds a VID/PID line (the planned CH343P/edu6 rule is exactly
-# that) would ship an agent that scans for an arm whose /dev node it has no
+# release that adds a VID/PID line (the CH343P/edu6 rule, SHIPPED since
+# `2951b87`, was exactly that) would ship an agent that scans for an arm whose /dev node it has no
 # permission to open, on 100 % of the fielded fleet, with the only remedy being
 # a `setup.sh` re-run from a source checkout no classroom has.
 UDEV_RULES_DIR = os.environ.get("EDUBOTICS_UDEV_RULES_DIR", "/etc/udev/rules.d")

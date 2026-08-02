@@ -1202,7 +1202,10 @@ class TestSystemFilesVersionCheck(unittest.TestCase):
     def test_the_udev_leg_has_the_same_no_short_circuit_shape(self):
         """UDEV_RULE_NAMES carries ONE entry today, so the short-circuit is
         currently inert there — which is exactly why it has to be pinned now.
-        The set grows with the planned CH343P line for the edu6 arm, and a
+        The CH343P line for the edu6 arm landed INSIDE that one file, so the
+        set did not grow and the short-circuit is still untested in anger. It
+        grows the day a second rules FILE ships — which is also the day the
+        replace-only repair stops being able to deliver it. A
         latent bug in the only repair path a classroom has is not worth keeping
         until it has something to bite. Driven with a synthetic two-name list so
         the guard does not depend on a second real rule existing yet."""
@@ -1818,8 +1821,9 @@ class TestSystemFilesVersionCheck(unittest.TestCase):
     def test_a_drifted_udev_rule_is_renewed_and_udev_is_reloaded(self):
         """The fail-open this closes: the rules always rode the tarball (and the
         self-update rsync), but nothing ever COMPARED them, so a release adding a
-        VID/PID line — the planned CH343P line for the edu6 arm is exactly that —
-        shipped an agent that scans for an arm whose /dev node its scanner
+        VID/PID line — the CH343P line for the edu6 arm was exactly that, and it
+        shipped through this comparison — left an agent that scans for an arm
+        whose /dev node its scanner
         container may not be permitted to open, on 100 % of the fielded fleet."""
         self._install_udev(drift=True)
         argvs = []

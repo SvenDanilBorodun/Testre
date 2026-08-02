@@ -318,7 +318,13 @@ class TestArmUsbIdsLockstep(unittest.TestCase):
         for family, ids in constants.ARM_USB_IDS.items():
             for vid, pid in ids:
                 if pid is None:
-                    continue  # any-PID families are covered per known board
+                    # Any-PID families are covered per known board instead, by
+                    # test_the_robotis_boards_keep_their_udev_lines. KNOWN GAP:
+                    # that pins the two literal OpenRB PIDs, so adding a third
+                    # OpenRB PID to ARM_USB_IDS["omx"] would NOT be caught here
+                    # — the VID reaching the rules file is only ever asserted
+                    # through a literal-PID row.
+                    continue
                 self.assertTrue(
                     any(f'idVendor}}=="{vid.lower()}"' in ln
                         and f'idProduct}}=="{pid.lower()}"' in ln

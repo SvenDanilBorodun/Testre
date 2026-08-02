@@ -43,18 +43,28 @@ function jsonRes(body, ok = true, status = 200) {
 }
 
 // The exact `robot_profiles` list agent.py::handle_status builds from
-// pi_agent/constants.py::ROBOT_PROFILES (id + display_de + scan_requires_leader).
+// pi_agent/constants.py::ROBOT_PROFILES (id + display_de + scan_requires_leader
+// + camera_roles). `camera_roles` is carried verbatim, ORDER included — the two
+// OMX rows deliberately disagree on order, which is what proves the dropdown
+// takes its order from the SPA and not from the wire.
 const PROFILES = [
-  { id: 'omx_full', display_de: 'OMX – Voll', scan_requires_leader: true },
+  {
+    id: 'omx_full',
+    display_de: 'OMX – Voll',
+    scan_requires_leader: true,
+    camera_roles: ['gripper', 'scene'],
+  },
   {
     id: 'omx_follower',
     display_de: 'OMX – Roboter Studio (nur Follower)',
     scan_requires_leader: false,
+    camera_roles: ['scene', 'gripper'],
   },
   {
     id: 'edu6_studio',
     display_de: 'EduBotics 6-Achs – Roboter Studio',
     scan_requires_leader: false,
+    camera_roles: ['scene'],
   },
 ];
 

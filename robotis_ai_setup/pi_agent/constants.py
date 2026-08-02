@@ -296,19 +296,31 @@ ARM_USB_IDS = {
 # DERIVES from the type. `arm_family` scopes the /dev/serial/by-id filter and the
 # in-container prober protocol (`identify_arm`).
 #
-# `camera_roles` has NO runtime consumer on the Pi — it is INERT here, carried
-# only so the three-way lockstep has something to compare (the GUI twin's row,
-# the server's ArmProfile field, and this one, all fenced by
-# tests/test_robot_profile_lockstep.py::test_camera_roles_agree_per_id). Do not
-# delete it to "clean up": dropping the key fails that fence, and the value is
-# the record of what a re-added default would have to be. It once fed a
-# lone-camera auto-assign like the GUI's (`gui_app._on_cameras_changed` still
-# reads `camera_roles[0]`); that default was deleted on 2026-07-28 because the
-# Pi's only client, `SystemPage.js::handleSaveRoles`, filters its payload to
-# `r === 'gripper' || r === 'scene'`, so a role-less camera never reaches the
-# agent and `handle_cameras_roles` answers a German 400 instead — see that
-# handler's docstring for the measured differential and for why `scene`, not
-# `gripper`, is the right value if anyone re-adds one.
+# `camera_roles` is the profile's ALLOWLIST of camera roles, and on the Pi it is
+# live in two places: it rides `/status.robot_profiles[].camera_roles` (which is
+# how `SystemPage.js` knows which `<option>`s to offer) and it is the set
+# `agent.handle_cameras_roles` validates an incoming role against. Both halves
+# exist because either alone is bypassable — a stale cached bundle would still
+# offer the wrong role, and a hand-crafted POST would still be accepted.
+#
+# Why it must be an allowlist and not a hint: the server's per-profile
+# `config/<type>_config.yaml` declares the camera TOPICS by role name, and
+# `edu6_studio` declares exactly one (`scene:/scene/image_raw/compressed`).
+# Naming that camera `gripper` publishes `/gripper/image_raw/compressed`, which
+# no consumer subscribes to — while the opi compose healthcheck greps the very
+# topic the student just named, so it goes GREEN, „Umgebung starten" reports
+# success in German, and Roboter Studio then shows nothing with no diagnosis
+# pointing back here. It also feeds the GUI's lone-camera auto-assign
+# (`gui_app._on_cameras_changed` reads `camera_roles[0]`), where „gripper" on a
+# follower-only kit was the original scar (CLAUDE.md). The Pi has NO such
+# auto-assign — a role-less camera is a German 400, never a guess (the two
+# Innomakers are identical-serial, so only the live preview tells them apart).
+#
+# ORDER is meaningful to the GUI (`[0]` is the lone-camera default) and NOT to
+# the Pi (which tests membership), which is why `omx_full` and `omx_follower`
+# carry the same two roles in opposite order and both accept both.
+# The three-way lockstep (server ArmProfile, GUI twin, this row) is fenced by
+# tests/test_robot_profile_lockstep.py::test_camera_roles_agree_per_id.
 #
 # Values are COPIED VERBATIM from gui/app/constants.py — never re-derived.
 ROBOT_PROFILES = {
@@ -317,6 +329,14 @@ ROBOT_PROFILES = {
     "edu6_studio":  {"display_de": "EduBotics 6-Achs – Roboter Studio",   "follower_only": True,  "scan_requires_leader": False, "arm_family": "edu6", "camera_roles": ("scene",)},
 }
 DEFAULT_ROBOT_PROFILE = "omx_full"
+
+# The German label for each camera role, in the words the wizard's own dropdown
+# uses — so a refusal names the role the student just picked, not its wire id.
+# Every profile's `camera_roles` must be a subset of these keys (fenced by
+# tests/test_camera_role_allowlist.py): a role outside them could be offered by
+# the SPA yet never accepted by `handle_cameras_roles`, which rejects unknown
+# roles before it ever consults the profile.
+CAMERA_ROLE_LABELS_DE = {"gripper": "Greifer", "scene": "Szene"}
 
 # DERIVED, not restated: the default profile's family is the family an
 # unknown/absent EDUBOTICS_ROBOT_TYPE falls back to.

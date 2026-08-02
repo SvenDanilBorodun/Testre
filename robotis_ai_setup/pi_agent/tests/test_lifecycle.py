@@ -31,6 +31,10 @@ sys.path.insert(0, str(SETUP_DIR))
 from pi_agent import agent  # noqa: E402
 from pi_agent import config_generator as cg  # noqa: E402
 from pi_agent.config_generator import ArmDevice, CameraDevice, HardwareConfig  # noqa: E402
+from pi_agent.constants import (  # noqa: E402
+    CAMERA_ROLE_LABELS_DE,
+    ROBOT_PROFILES,
+)
 
 
 class _EnvTempBase(unittest.TestCase):
@@ -452,11 +456,11 @@ class TestCameraRolesRequireAnExplicitRole(_EnvTempBase):
         self.assertEqual(code, 400)
         self.assertIn("Ungültige Rolle", payload["message"])
 
-    def test_an_explicit_role_is_accepted_verbatim_on_every_profile(self):
+    def test_every_role_a_profile_declares_is_accepted_verbatim(self):
         # The whole UI-producible surface: `handleSaveRoles` only ever sends
-        # explicit gripper/scene rows, and those are byte-unchanged.
+        # roles the profile declares, and those are byte-unchanged.
         for pid in self.PROFILES:
-            for role in ("gripper", "scene"):
+            for role in ROBOT_PROFILES[pid]["camera_roles"]:
                 with self.subTest(pid=pid, role=role):
                     code, payload = self._roles(
                         pid, [{"path": "/dev/video0", "role": role}])
@@ -492,6 +496,171 @@ class TestCameraRolesRequireAnExplicitRole(_EnvTempBase):
                 code, payload = self._roles(pid, [])
                 self.assertEqual(code, 200)
                 self.assertEqual(payload["cameras"], [])
+
+
+class TestCameraRoleMustSuitTheProfile(_EnvTempBase):
+    """A well-formed role the SELECTED profile does not declare is a German 400.
+
+    The scar: ``edu6_studio`` declares ONE camera topic server-side
+    (``scene:/scene/image_raw/compressed``), so naming its only camera
+    ``gripper`` publishes a topic nothing subscribes to — while the opi compose
+    healthcheck greps ``/$${CAMERA_NAME_1:-gripper}/image_raw/compressed``,
+    i.e. the topic the STUDENT just named. It therefore goes green and
+    „Umgebung starten" succeeds, with the failure surfacing much later as an
+    empty Roboter Studio.
+
+    This is the SERVER half of a redundant pair (the SPA also stops offering
+    the role). Neither half is sufficient: a stale cached bundle offers it
+    anyway, and a hand-crafted POST bypasses the SPA entirely.
+
+    The behavioural delta is EXACTLY one cell of the profile x role grid —
+    ``test_the_delta_is_exactly_one_cell_of_the_grid`` asserts that shape
+    directly, so widening or narrowing the allowlist anywhere fails here.
+    """
+
+    PROFILES = ("omx_full", "omx_follower", "edu6_studio")
+    ROLES = ("gripper", "scene")
+
+    def _roles(self, robot_type, cameras):
+        cg.upsert_env_var("EDUBOTICS_ROBOT_TYPE", robot_type, self.env_path,
+                          quote=False)
+        return self.app.handle_cameras_roles({"cameras": cameras})
+
+    def test_the_delta_is_exactly_one_cell_of_the_grid(self):
+        # The sharp form. Accepted iff the profile declares the role — computed
+        # from the registry, never restated, so a registry edit moves this test
+        # with it instead of silently disagreeing.
+        accepted = {
+            (pid, role): self._roles(
+                pid, [{"path": "/dev/video0", "role": role}])[0] == 200
+            for pid in self.PROFILES for role in self.ROLES
+        }
+        self.assertEqual(
+            accepted,
+            {(pid, role): role in ROBOT_PROFILES[pid]["camera_roles"]
+             for pid in self.PROFILES for role in self.ROLES})
+        # …and stated absolutely, so a registry that drifted the other way
+        # cannot make the comparison above vacuously true.
+        self.assertEqual([k for k, v in accepted.items() if not v],
+                         [("edu6_studio", "gripper")])
+
+    def test_gripper_on_edu6_is_refused_in_german_naming_role_type_and_remedy(self):
+        code, payload = self._roles(
+            "edu6_studio", [{"path": "/dev/video0", "role": "gripper"}])
+        self.assertEqual(code, 400)
+        msg = payload["message"]
+        self.assertIn("Greifer", msg)          # the role they picked
+        self.assertIn("EduBotics 6-Achs", msg)  # the type that rules it out
+        self.assertIn("Szene", msg)             # what to pick instead
+        self.assertIn("/dev/video0", msg)       # which camera
+        self.assertFalse(payload["ok"])
+        # Distinct from the shape refusal — a student who picked a REAL role
+        # from a REAL dropdown must not be told it is „ungültig".
+        self.assertNotIn("Ungültige Rolle", msg)
+
+    def test_a_role_of_the_wrong_shape_still_gets_the_shape_message(self):
+        # Byte-unchanged: the profile gate is reached only by well-formed
+        # roles, so an unknown one keeps its original wording on every profile.
+        for pid in self.PROFILES:
+            for role in ("phone", "", None, 0, "Scene"):
+                with self.subTest(pid=pid, role=role):
+                    code, payload = self._roles(
+                        pid, [{"path": "/dev/video0", "role": role}])
+                    self.assertEqual(code, 400)
+                    self.assertEqual(
+                        payload["message"],
+                        "Ungültige Rolle für /dev/video0 (nur Greifer/Szene).")
+
+    def test_nothing_is_persisted_when_a_role_is_refused(self):
+        # The refusal returns BEFORE `_hardware.cameras` is replaced and before
+        # the .env regenerate — a rejected save must not half-apply.
+        self.app._hardware = HardwareConfig(
+            follower=ArmDevice(serial_path="/dev/f"))
+        code, _ = self._roles("edu6_studio", [
+            {"path": "/dev/video0", "role": "scene"},
+            {"path": "/dev/video2", "role": "gripper"},
+        ])
+        self.assertEqual(code, 400)
+        self.assertEqual(self.app._hardware.cameras, [])
+        self.assertIsNone(cg.read_env_var("CAMERA_NAME_1", self.env_path))
+
+    def test_an_unreadable_robot_type_falls_back_to_the_permissive_default(self):
+        # `_current_robot_type` is forgiving by design (the documented
+        # one-variable rollback). A rig with no/garbage type must keep the
+        # pre-change dropdown, not lose a role it was using.
+        for raw in ("", "   ", "totally_unknown", "OMX_FULL"):
+            with self.subTest(raw):
+                cg.upsert_env_var("EDUBOTICS_ROBOT_TYPE", raw, self.env_path,
+                                  quote=False)
+                for role in self.ROLES:
+                    code, _ = self.app.handle_cameras_roles(
+                        {"cameras": [{"path": "/dev/video0", "role": role}]})
+                    self.assertEqual(code, 200, (raw, role))
+
+    def test_the_first_offending_camera_decides_and_it_is_not_reordered(self):
+        # Two bad rows, different reasons: the SHAPE check runs per-camera in
+        # order, so the first row's message wins even though the second row is
+        # the profile-specific one.
+        code, payload = self._roles("edu6_studio", [
+            {"path": "/dev/videoA", "role": "phone"},
+            {"path": "/dev/videoB", "role": "gripper"},
+        ])
+        self.assertEqual(code, 400)
+        self.assertIn("/dev/videoA", payload["message"])
+        self.assertNotIn("/dev/videoB", payload["message"])
+
+    def test_every_profiles_allowlist_is_a_subset_of_the_known_roles(self):
+        # A registry role outside CAMERA_ROLE_LABELS_DE could be OFFERED by the
+        # SPA yet never accepted here (the shape check runs first), and would
+        # render label-less in the refusal message.
+        for pid, row in ROBOT_PROFILES.items():
+            with self.subTest(pid):
+                self.assertTrue(row["camera_roles"])
+                self.assertLessEqual(set(row["camera_roles"]),
+                                     set(CAMERA_ROLE_LABELS_DE))
+
+
+class TestStatusShipsTheCameraRoleAllowlist(_EnvTempBase):
+    """`/status.robot_profiles[].camera_roles` is what lets the SPA stop
+    OFFERING a role the agent would refuse. Without it on the wire the
+    dropdown structurally cannot narrow, which is how the defect survived
+    three work packages: every layer was locally right."""
+
+    def _profiles(self):
+        with patch.object(agent.docker_manager, "get_container_status",
+                          return_value={}):
+            _, payload = self.app.handle_status()
+        return {p["id"]: p for p in payload["robot_profiles"]}
+
+    def test_every_profile_carries_its_allowlist_verbatim(self):
+        rows = self._profiles()
+        self.assertEqual(set(rows), set(ROBOT_PROFILES))
+        for pid, row in ROBOT_PROFILES.items():
+            with self.subTest(pid):
+                self.assertEqual(rows[pid]["camera_roles"],
+                                 list(row["camera_roles"]))
+
+    def test_the_allowlist_is_a_json_list_not_a_tuple(self):
+        # The payload is json-serialised; spelling the conversion at the
+        # boundary keeps the dict honest for every in-process consumer too
+        # (the tests here, and any future one that compares payloads).
+        for row in self._profiles().values():
+            self.assertIsInstance(row["camera_roles"], list)
+
+    def test_order_is_carried_through_unchanged(self):
+        # The GUI's lone-camera default is `camera_roles[0]`, so ORDER is not
+        # decorative even though the Pi tests membership. omx_follower's
+        # reversed tuple is the one that would show a silent re-sort.
+        self.assertEqual(self._profiles()["omx_follower"]["camera_roles"],
+                         ["scene", "gripper"])
+
+    def test_the_pre_existing_profile_keys_are_untouched(self):
+        rows = self._profiles()
+        for pid, row in ROBOT_PROFILES.items():
+            with self.subTest(pid):
+                self.assertEqual(rows[pid]["display_de"], row["display_de"])
+                self.assertEqual(rows[pid]["scan_requires_leader"],
+                                 row["scan_requires_leader"])
 
 
 class TestScanNotice(_EnvTempBase):

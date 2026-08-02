@@ -18,7 +18,7 @@
 // so /api/system/scan-arms reaches the agent's /scan-arms). All student-facing
 // strings are German with literal umlauts (Rule §1); code/comments are English.
 
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import toast from 'react-hot-toast';
 import { Card, Btn, Pill, SectionHeader } from '../components/EbUI';
 import { usePiMode } from '../utils/piMode';
@@ -49,6 +49,20 @@ function fmtAge(images) {
   const days = Math.round(d);
   return `Vor ${days} Tag${days === 1 ? '' : 'en'} aktualisiert`;
 }
+
+// Every camera role the wizard knows how to render, in DISPLAY order. The
+// agent's per-profile allowlist decides which of these are offered; it never
+// decides their order, because `pi_agent/constants.py::ROBOT_PROFILES` orders
+// `camera_roles` for the WINDOWS GUI's lone-camera default (`camera_roles[0]`)
+// — `omx_follower` carries ('scene', 'gripper') — and rendering in registry
+// order would flip the dropdown between two profiles that offer the same two
+// roles. `value` is the wire role; `label` is the student's word for it and
+// must stay in step with `pi_agent/constants.py::CAMERA_ROLE_LABELS_DE`, which
+// is what the agent's refusal message says back.
+const CAMERA_ROLE_OPTIONS = [
+  { value: 'gripper', label: 'Greifer' },
+  { value: 'scene', label: 'Szene' },
+];
 
 // A labelled step card so the wizard reads top-to-bottom like the .exe.
 function Step({ n, title, children, right }) {
@@ -153,6 +167,26 @@ export default function SystemPage() {
   const scanRequiresLeader = selectedProfile
     ? selectedProfile.scan_requires_leader !== false
     : true;
+
+  // Which camera roles this rig may use. `edu6_studio` allows „Szene" ONLY —
+  // its server config declares a single `scene:` topic, so a camera named
+  // `gripper` publishes a topic nothing subscribes to while the opi compose
+  // healthcheck (which greps the STUDENT-NAMED topic) still goes green. The
+  // agent refuses such a role with a German 400; this filter is the other half
+  // of that pair, so the wizard stops OFFERING it in the first place.
+  //
+  // GRACEFUL DEGRADE, same doctrine as `robotProfiles` above: an agent from
+  // before this key — or a malformed/unknown/empty list — yields BOTH roles,
+  // i.e. exactly the pre-change dropdown. Never an empty <select>: the roles
+  // step would become unusable, and on a Pi this page is the only repair
+  // surface there is.
+  const allowedCameraRoles = useMemo(() => {
+    const known = CAMERA_ROLE_OPTIONS.map((o) => o.value);
+    const declared = Array.isArray(selectedProfile?.camera_roles)
+      ? selectedProfile.camera_roles.filter((r) => known.includes(r))
+      : [];
+    return declared.length > 0 ? declared : known;
+  }, [selectedProfile]);
 
   useEffect(() => {
     previewRef.current = previewDevice;
@@ -275,8 +309,14 @@ export default function SystemPage() {
   }, [stopPreview, agentStatus]);
 
   const handleSaveRoles = useCallback(async () => {
+    // Drop anything the profile does not allow, which on a both-role profile is
+    // the identical `r === 'gripper' || r === 'scene'` filter this replaced. It
+    // matters when the student changes Robotertyp AFTER assigning roles: the
+    // now-invalid selection is dropped exactly like an unassigned camera (and
+    // the <select> below already shows it as unassigned), rather than being
+    // POSTed for the agent to refuse.
     const cameras = Object.entries(roles)
-      .filter(([, r]) => r === 'gripper' || r === 'scene')
+      .filter(([, r]) => allowedCameraRoles.includes(r))
       .map(([path, role]) => ({ path, role }));
     setSavingRoles(true);
     await stopPreview();
@@ -290,7 +330,7 @@ export default function SystemPage() {
       setSavingRoles(false);
       refreshAgentStatus();
     }
-  }, [roles, stopPreview, refreshAgentStatus]);
+  }, [roles, allowedCameraRoles, stopPreview, refreshAgentStatus]);
 
   // ── Schritt D — HF-Token ───────────────────────────────────────────────────
   const handleSaveToken = useCallback(async () => {
@@ -751,6 +791,16 @@ export default function SystemPage() {
                       </div>
                       <select
                         aria-label={`Rolle für ${cam.name || cam.path}`}
+                        // Deliberately NOT narrowed to `allowedCameraRoles`. A
+                        // role the profile lost (change Robotertyp after
+                        // assigning) leaves a value with no matching <option>,
+                        // and HTML's own selectedness algorithm then selects
+                        // the first one — „— Rolle —" — so the box already
+                        // reads UNASSIGNED. MEASURED: a normalising expression
+                        // here is indistinguishable from this one (both give
+                        // value '' / selectedIndex 0), i.e. it would be an
+                        // unfenceable no-op. `handleSaveRoles` is the real
+                        // fence, and it drops the stale role.
                         value={roles[cam.path] || ''}
                         onChange={(e) =>
                           setRoles((prev) => ({ ...prev, [cam.path]: e.target.value }))
@@ -758,8 +808,13 @@ export default function SystemPage() {
                         className="h-9 rounded-[var(--radius-sm)] border border-[var(--line)] bg-white px-2 text-sm"
                       >
                         <option value="">— Rolle —</option>
-                        <option value="gripper">Greifer</option>
-                        <option value="scene">Szene</option>
+                        {CAMERA_ROLE_OPTIONS.filter((o) =>
+                          allowedCameraRoles.includes(o.value)
+                        ).map((o) => (
+                          <option key={o.value} value={o.value}>
+                            {o.label}
+                          </option>
+                        ))}
                       </select>
                       <Btn
                         size="sm"

@@ -91,6 +91,7 @@ from . import (
 from .config_generator import ArmDevice, CameraDevice, HardwareConfig
 from .constants import (
     APP_VERSION,
+    CAMERA_ROLE_LABELS_DE,
     COMPOSE_FILE,
     ENV_FILE,
     IMAGE_OPEN_MANIPULATOR,
@@ -816,17 +817,26 @@ class AgentApp:
             },
             # Robot profile surface (additive — an old System tab ignores these).
             # `robot_type` is the VALIDATED on-disk id; `robot_profiles` is the
-            # selectable list (the wizard renders `display_de`, and hides the
-            # Leader tile when `scan_requires_leader` is false);
-            # `hardware_ready` is the PROFILE-AWARE gate — `arms_identified.both`
-            # stays as it is, because it answers a different question (are two
-            # arms present) and a follower-only rig can be fully ready with
-            # `both` false.
+            # selectable list (the wizard renders `display_de`, hides the Leader
+            # tile when `scan_requires_leader` is false, and offers exactly the
+            # `camera_roles` a profile allows); `hardware_ready` is the
+            # PROFILE-AWARE gate — `arms_identified.both` stays as it is, because
+            # it answers a different question (are two arms present) and a
+            # follower-only rig can be fully ready with `both` false.
+            #
+            # `camera_roles` is a LIST, not the registry's tuple: this dict is
+            # json-serialised, and a tuple would land as a list on the wire
+            # anyway — spelling it here keeps the payload's type honest at the
+            # boundary rather than at json.dumps. It is the same allowlist
+            # `handle_cameras_roles` enforces; shipping it is what lets the SPA
+            # stop OFFERING a role the agent would refuse, and the two halves
+            # are deliberately redundant (see that handler's docstring).
             "robot_type": robot_type,
             "robot_profiles": [
                 {"id": pid,
                  "display_de": row["display_de"],
-                 "scan_requires_leader": row["scan_requires_leader"]}
+                 "scan_requires_leader": row["scan_requires_leader"],
+                 "camera_roles": list(row["camera_roles"])}
                 for pid, row in ROBOT_PROFILES.items()
             ],
             "hardware_ready": self._hardware_ready(robot_type),
@@ -1032,6 +1042,29 @@ class AgentApp:
 
     # ── POST: /cameras/roles ─────────────────────────────────────────────────
 
+    @staticmethod
+    def _role_not_in_profile_de(path, role, robot_type, allowed) -> str:
+        """German refusal for a well-formed role the SELECTED profile forbids.
+
+        Names all three things a student needs: the role they picked, the robot
+        type that rules it out, and what to pick instead — in the same words the
+        wizard's own dropdown uses (``CAMERA_ROLE_LABELS_DE``), so the sentence
+        matches the UI rather than the wire ids.
+
+        The remedy is built from ``allowed`` rather than hardcoded: today only
+        ``edu6_studio`` narrows, to a single role, but a future profile allowing
+        two of three must not produce a sentence naming one. An allowlist that
+        is somehow empty degrades to naming no remedy rather than raising — a
+        confusing message beats a 500 on a config surface.
+        """
+        labels = [CAMERA_ROLE_LABELS_DE[r] for r in allowed
+                  if r in CAMERA_ROLE_LABELS_DE]
+        remedy = (f" Bitte für {path} " + " oder ".join(f'„{la}"' for la in labels)
+                  + " wählen.") if labels else ""
+        return (f'Die Rolle „{CAMERA_ROLE_LABELS_DE.get(role, role)}" passt nicht '
+                f'zum Robotertyp „{ROBOT_PROFILES[robot_type]["display_de"]}".'
+                + remedy)
+
     def handle_cameras_roles(self, body: dict) -> "tuple[int, dict]":
         """Assign gripper/scene roles to enumerated devices and (if arms are
         already identified) persist. Body: ``{"cameras": [{"path": …,
@@ -1040,15 +1073,36 @@ class AgentApp:
         EVERY camera must carry an explicit ``gripper``/``scene`` role; a blank
         or absent one is a German 400 regardless of how many cameras were sent.
 
+        A well-formed role is then checked against the SELECTED PROFILE's
+        ``camera_roles`` allowlist, which is narrower than gripper/scene on
+        ``edu6_studio`` (``scene`` only). Both OMX profiles carry both roles, so
+        this second gate is a no-op there — the whole behavioural delta is
+        „gripper on an edu6 rig", which used to be accepted and is now a 400.
+
+        Why it is refused rather than silently corrected: the server's
+        ``config/edu6_studio_config.yaml`` declares exactly one camera topic
+        (``scene:/scene/image_raw/compressed``), so a camera named ``gripper``
+        publishes ``/gripper/image_raw/compressed``, which nothing subscribes
+        to — and the opi compose healthcheck greps
+        ``/$${CAMERA_NAME_1:-gripper}/image_raw/compressed``, i.e. the very
+        topic the student just named. It therefore goes GREEN, „Umgebung
+        starten" reports success in German, and the failure only surfaces later
+        as an empty Roboter Studio with no diagnosis pointing back here.
+
+        This is the SERVER half of a deliberately redundant pair. The SPA
+        already offers only the allowed roles (``SystemPage.js`` filters its
+        ``<option>`` set off ``/status.robot_profiles[].camera_roles``), but a
+        stale cached bundle or a hand-crafted caller — the agent accepts an
+        empty ``Origin`` for the curl acceptance path — reaches this handler
+        regardless, so neither half is sufficient alone.
+
         There is deliberately NO lone-camera auto-assign here, unlike the
         Windows GUI's ``gui_app._on_cameras_changed`` (a real, unguarded twin
         divergence — no lockstep test covers camera roles in either direction).
         The Pi's only client is ``SystemPage.js::handleSaveRoles``, which
-        filters its payload to ``r === 'gripper' || r === 'scene'`` — so a
-        camera the student left unassigned is DROPPED from the request and
-        never arrives role-less. A default here was therefore reachable only by
-        a header-less/hand-crafted caller (the agent deliberately accepts an
-        empty ``Origin`` for the curl acceptance path), never by the wizard.
+        filters its payload to the allowed roles — so a camera the student left
+        unassigned, or one holding a role the profile lost when the type
+        changed, is DROPPED from the request and never arrives role-less.
 
         MEASURED over the request space the SPA can construct — 0..3 cameras x
         every gripper/scene assignment, x 3 profiles x 3 hardware states x 3
@@ -1056,21 +1110,27 @@ class AgentApp:
         are byte-identical with the default present or absent, and remain so
         when it is re-added with a DIFFERENT value.
 
-        Recorded because the value is not obvious if anyone re-adds it: the
-        right default on a FOLLOWER-ONLY rig is ``scene``, not ``gripper`` —
-        ``config/edu6_studio_config.yaml`` declares exactly one camera topic
-        (``scene:/scene/image_raw/compressed``) and the server's perception /
-        calibration entry points default to the ``scene`` camera, so defaulting
-        a Roboter-Studio kit's single camera to ``gripper`` broke every such rig
-        (CLAUDE.md). With TWO cameras nothing may be guessed at all: the two
-        Innomakers are identical-serial, so only the live preview tells them
-        apart.
+        Recorded because the value is not obvious if anyone re-adds a default:
+        the right one on a FOLLOWER-ONLY rig is ``scene``, not ``gripper``
+        (the config-topic reason above). With TWO cameras nothing may be
+        guessed at all: the two Innomakers are identical-serial, so only the
+        live preview tells them apart.
+
+        The profile is read OUTSIDE ``_lifecycle_lock``, so a robot-type change
+        landing between this read and the persist below is not serialised
+        against. That race is deliberate and bounded: taking the lock before
+        validating would turn today's fast 400 on a malformed body into a 503
+        whenever an update holds the lock, and the consequence of losing the
+        race is one stale role in the .env, which the next ``/robot-type`` POST
+        regenerates away via ``_persist_env_if_ready``.
         """
         if self._update_in_flight():
             return self._busy_updating()
         entries = body.get("cameras")
         if not isinstance(entries, list):
             return 400, {"ok": False, "message": "Ungültige Kamera-Zuordnung."}
+        robot_type = self._current_robot_type()
+        allowed = ROBOT_PROFILES[robot_type]["camera_roles"]
         named = [e for e in entries if (e or {}).get("path")]
         cameras: list = []
         for e in named:
@@ -1079,6 +1139,10 @@ class AgentApp:
             if role not in ("gripper", "scene"):
                 return 400, {"ok": False,
                              "message": f"Ungültige Rolle für {path} (nur Greifer/Szene)."}
+            if role not in allowed:
+                return 400, {"ok": False,
+                             "message": self._role_not_in_profile_de(
+                                 path, role, robot_type, allowed)}
             cameras.append(CameraDevice(path=path, role=role, name=str(path).split("/")[-1]))
         if not self._acquire_lifecycle():
             return self._busy_lifecycle()

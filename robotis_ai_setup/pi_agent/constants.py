@@ -342,10 +342,15 @@ DEFAULT_ROBOT_PROFILE = "omx_full"
 
 # The German label for each camera role, in the words the wizard's own dropdown
 # uses — so a refusal names the role the student just picked, not its wire id.
-# Every profile's `camera_roles` must be a subset of these keys (fenced by
-# tests/test_camera_role_allowlist.py): a role outside them could be offered by
-# the SPA yet never accepted by `handle_cameras_roles`, which rejects unknown
-# roles before it ever consults the profile.
+# Every profile's `camera_roles` must be a subset of these keys: a role outside
+# them could be offered by the SPA yet never accepted by `handle_cameras_roles`,
+# which rejects unknown roles before it ever consults the profile.
+# Fenced by tests/test_lifecycle.py::TestCameraRoleMustSuitTheProfile
+# ::test_every_profiles_allowlist_is_a_subset_of_the_known_roles. Cited by
+# SYMBOL, not by line: an earlier revision of this comment cited a
+# `tests/test_camera_role_allowlist.py` that has never existed in the tree, and
+# a dead citation reads as "this invariant is unfenced" — strictly worse than
+# no citation, because it stops the next reader looking for the real guard.
 CAMERA_ROLE_LABELS_DE = {"gripper": "Greifer", "scene": "Szene"}
 
 # DERIVED, not restated: the default profile's family is the family an

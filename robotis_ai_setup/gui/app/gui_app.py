@@ -913,9 +913,25 @@ class EduBoticsApp:
         consequence); crossing arm families INVALIDATES the scan on both
         platforms (user decision, 2026-07-29).
 
-        The .env path was already protected here — ``_try_rehydrate_arms``
-        passes ``arm_family=`` into ``fast_rehydrate_arms``, which filters — so
-        the hole was purely in-session: scan, then change the dropdown."""
+        The hole THIS check closes is in-session: scan, then change the
+        dropdown. The rehydrate path restores only family-matching PORTS,
+        because ``_try_rehydrate_arms`` passes ``arm_family=`` into
+        ``fast_rehydrate_arms``, which filters.
+
+        Do NOT read that as "the .env path is protected" — an earlier revision
+        of this docstring did, and it is wrong in a way this very function
+        causes. ``_try_rehydrate_arms`` derives BOTH its ``arm_family`` and its
+        two "never overwrite a scan" guards from the profile in the **.env**
+        (a previous session's), and each guard asks ``_hardware_ready(<.env
+        profile>)``. After a cross-family switch a fresh scan can never satisfy
+        that profile — precisely what the family check above guarantees — so
+        the guard is structurally unable to fire in the one case it is for, and
+        the rehydrate silently restores the OLD family's ports over the new
+        scan. Never UNSAFE (``_update_start_button`` and ``_start_environment``
+        both re-gate on the SELECTED profile, so the arm cannot start); the cost
+        is a discarded scan the student is not told about. Logged as a known
+        issue in CLAUDE.md; the fix is to key both guards on the selected
+        profile rather than the .env one."""
         if profile is None:
             profile = self._selected_robot_profile()
         if ROBOT_PROFILES.get(profile, {}).get("scan_requires_leader", True):

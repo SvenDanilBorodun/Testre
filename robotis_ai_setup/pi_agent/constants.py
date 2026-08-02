@@ -342,10 +342,15 @@ DEFAULT_ROBOT_PROFILE = "omx_full"
 
 # The German label for each camera role, in the words the wizard's own dropdown
 # uses — so a refusal names the role the student just picked, not its wire id.
-# Every profile's `camera_roles` must be a subset of these keys (fenced by
-# tests/test_camera_role_allowlist.py): a role outside them could be offered by
-# the SPA yet never accepted by `handle_cameras_roles`, which rejects unknown
-# roles before it ever consults the profile.
+# Every profile's `camera_roles` must be a subset of these keys: a role outside
+# them could be offered by the SPA yet never accepted by `handle_cameras_roles`,
+# which rejects unknown roles before it ever consults the profile.
+# Fenced by tests/test_lifecycle.py::TestCameraRoleMustSuitTheProfile
+# ::test_every_profiles_allowlist_is_a_subset_of_the_known_roles. Cited by
+# SYMBOL, not by line: an earlier revision of this comment cited a
+# `tests/test_camera_role_allowlist.py` that has never existed in the tree, and
+# a dead citation reads as "this invariant is unfenced" — strictly worse than
+# no citation, because it stops the next reader looking for the real guard.
 CAMERA_ROLE_LABELS_DE = {"gripper": "Greifer", "scene": "Szene"}
 
 # DERIVED, not restated: the default profile's family is the family an
@@ -477,10 +482,11 @@ SYSTEMD_UNIT_NAMES = ("edubotics-pi.service", "edubotics-pi-firstboot.service")
 # VERBATIM (`install -m 0644`, no templating) into UDEV_RULES_DIR, which
 # self-update never touches. Until 2026-07-28 nothing then compared the two, so
 # the udev rule was structurally the SAME fail-open the compose just closed: a
-# release that adds a VID/PID line (the planned CH343P/edu6 rule is exactly
-# that) would ship an agent that scans for an arm whose /dev node it has no
-# permission to open, on 100 % of the fielded fleet, with the only remedy being
-# a `setup.sh` re-run from a source checkout no classroom has.
+# release that adds a VID/PID line (the CH343P/edu6 rule, SHIPPED since
+# `2951b87`, was exactly that) would ship an agent that scans for an arm whose
+# /dev node it has no permission to open, on 100 % of the fielded fleet, with
+# the only remedy being a `setup.sh` re-run from a source checkout no
+# classroom has.
 UDEV_RULES_DIR = os.environ.get("EDUBOTICS_UDEV_RULES_DIR", "/etc/udev/rules.d")
 UDEV_RULE_NAMES = ("99-edubotics-robotis.rules",)
 

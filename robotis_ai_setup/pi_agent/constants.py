@@ -69,7 +69,7 @@ def _read_version_file() -> str:
         if value:
             _VERSION_IS_AUTHORITATIVE = True
             return value
-    return "2.13.0"
+    return "2.14.0"
 
 
 # Agent/product version — reported by the /status endpoint and used by the

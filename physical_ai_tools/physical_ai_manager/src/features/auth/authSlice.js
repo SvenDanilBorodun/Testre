@@ -1,4 +1,5 @@
 import { createSlice } from '@reduxjs/toolkit';
+import { signedOut } from '../session/sessionActions';
 
 const initialState = {
   session: null,
@@ -42,6 +43,27 @@ const initialState = {
   groupCreditsTotal: null,
 };
 
+/** Every profile field derived from /me. Shared by the two paths that drop a
+ *  session — `setSession(null)` (supabase's own auth-state change) and the
+ *  `session/signedOut` broadcast — so the two can never drift apart. */
+function clearProfileFields(state) {
+  state.role = null;
+  state.username = null;
+  state.fullName = null;
+  state.classroomId = null;
+  state.workgroupId = null;
+  state.workgroupName = null;
+  state.hfUsername = null;
+  state.profileLoaded = false;
+  state.profileError = null;
+  state.poolTotal = null;
+  state.allocatedTotal = null;
+  state.poolAvailable = null;
+  state.studentCount = null;
+  state.groupCount = null;
+  state.groupCreditsTotal = null;
+}
+
 const authSlice = createSlice({
   name: 'auth',
   initialState,
@@ -50,43 +72,8 @@ const authSlice = createSlice({
       state.session = action.payload;
       state.isAuthenticated = !!action.payload;
       if (!action.payload) {
-        state.role = null;
-        state.username = null;
-        state.fullName = null;
-        state.classroomId = null;
-        state.workgroupId = null;
-        state.workgroupName = null;
-        state.hfUsername = null;
-        state.profileLoaded = false;
-        state.profileError = null;
-        state.poolTotal = null;
-        state.allocatedTotal = null;
-        state.poolAvailable = null;
-        state.studentCount = null;
-        state.groupCount = null;
-        state.groupCreditsTotal = null;
+        clearProfileFields(state);
       }
-    },
-    clearSession: (state) => {
-      state.session = null;
-      state.isAuthenticated = false;
-      state.trainingCredits = 0;
-      state.trainingsUsed = 0;
-      state.role = null;
-      state.username = null;
-      state.fullName = null;
-      state.classroomId = null;
-      state.workgroupId = null;
-      state.workgroupName = null;
-      state.hfUsername = null;
-      state.profileLoaded = false;
-      state.profileError = null;
-      state.poolTotal = null;
-      state.allocatedTotal = null;
-      state.poolAvailable = null;
-      state.studentCount = null;
-      state.groupCount = null;
-      state.groupCreditsTotal = null;
     },
     setIsLoading: (state, action) => {
       state.isLoading = action.payload;
@@ -143,11 +130,25 @@ const authSlice = createSlice({
       if (p.group_credits_total !== undefined) state.groupCreditsTotal = p.group_credits_total;
     },
   },
+  extraReducers: (builder) => {
+    // The session itself. This used to be a separate `clearSession` action the
+    // sign-out helper dispatched next to the four slice resets; folding it into
+    // the broadcast leaves exactly one way to end a session.
+    builder.addCase(signedOut, (state) => {
+      state.session = null;
+      state.isAuthenticated = false;
+      // The credit balance is the STUDENT's, not the machine's — and unlike the
+      // fields above it is not reset by `setSession(null)`, which is why the
+      // two paths are not the same function.
+      state.trainingCredits = 0;
+      state.trainingsUsed = 0;
+      clearProfileFields(state);
+    });
+  },
 });
 
 export const {
   setSession,
-  clearSession,
   setIsLoading,
   setQuota,
   setProfile,

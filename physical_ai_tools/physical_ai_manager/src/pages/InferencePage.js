@@ -10,7 +10,6 @@ import toast, { useToasterStore } from 'react-hot-toast';
 import {
   MdKeyboardDoubleArrowLeft,
   MdKeyboardDoubleArrowRight,
-  MdLogout,
   MdMemory,
   MdLink,
   MdLinkOff,
@@ -25,9 +24,7 @@ import InferencePanel from '../components/InferencePanel';
 import LoginForm from '../components/LoginForm';
 import { addTag } from '../features/tasks/taskSlice';
 import { setIsFirstLoadFalse } from '../features/ui/uiSlice';
-import { clearSession } from '../features/auth/authSlice';
-import { supabase } from '../lib/supabaseClient';
-import { useJetsonConnection, resetJetsonOnLogout } from '../hooks/useJetsonConnection';
+import { useJetsonConnection } from '../hooks/useJetsonConnection';
 import { useCameraLiveness } from '../hooks/useCameraLiveness';
 
 const TOAST_LIMIT = 3;
@@ -48,13 +45,11 @@ export default function InferencePage({ isActive = true }) {
   const isAuthenticated = useSelector((s) => s.auth.isAuthenticated);
   const isAuthLoading = useSelector((s) => s.auth.isLoading);
   const profileLoaded = useSelector((s) => s.auth.profileLoaded);
-  const session = useSelector((s) => s.auth.session);
   const username = useSelector((s) => s.auth.username);
   const fullName = useSelector((s) => s.auth.fullName);
   const classroomId = useSelector((s) => s.auth.classroomId);
 
   const jetsonStatus = useSelector((s) => s.jetson.status);
-  const jetsonId = useSelector((s) => s.jetson.jetsonId);
   const jetsonOnline = useSelector((s) => s.jetson.online);
   const jetsonOwnerFullName = useSelector((s) => s.jetson.ownerFullName);
   const jetsonOwnerUsername = useSelector((s) => s.jetson.ownerUsername);
@@ -110,16 +105,11 @@ export default function InferencePage({ isActive = true }) {
     dispatch(setIsFirstLoadFalse('inference'));
   }, [taskInfo.tags, taskStatus.robotType, dispatch, isFirstLoad, isConnected]);
 
-  const handleLogout = async () => {
-    // Mirror the TrainingPage / StudentApp sign-out path: release the
-    // Jetson lock with the still-valid JWT BEFORE invalidating the
-    // session, otherwise the beacon-style release fails server-side and
-    // the lock leaks for the full 5-min sweeper window.
-    resetJetsonOnLogout(dispatch, session?.access_token, jetsonId);
-    await supabase.auth.signOut();
-    dispatch(clearSession());
-    toast.success('Abgemeldet');
-  };
+  // NO page-level "Abmelden" here any more. StudentApp's own chrome — the
+  // desktop rail and the mobile header, both rendered on EVERY page including
+  // behind these full-page StateScreens — carries one now. StateScreen keeps
+  // its "Angemeldet als <Name>" line: that names the student by full name,
+  // which the rail does not, and it is a label rather than a second control.
 
   // ────────────────────────────────────────────────────────────────────
   // GATING — decide which screen to render
@@ -160,7 +150,6 @@ export default function InferencePage({ isActive = true }) {
           </>
         }
         identity={{ username, fullName }}
-        onLogout={handleLogout}
       />
     );
   }
@@ -191,7 +180,6 @@ export default function InferencePage({ isActive = true }) {
           </>
         }
         identity={{ username, fullName }}
-        onLogout={handleLogout}
       />
     );
   }
@@ -213,7 +201,6 @@ export default function InferencePage({ isActive = true }) {
           </>
         }
         identity={{ username, fullName }}
-        onLogout={handleLogout}
         primaryAction={{ label: 'Erneut versuchen', onClick: () => window.location.reload(), icon: <MdRefresh /> }}
       />
     );
@@ -237,7 +224,6 @@ export default function InferencePage({ isActive = true }) {
           </>
         }
         identity={{ username, fullName }}
-        onLogout={handleLogout}
       />
     );
   }
@@ -275,7 +261,6 @@ export default function InferencePage({ isActive = true }) {
           )
         }
         identity={{ username, fullName }}
-        onLogout={handleLogout}
         primaryAction={
           jetsonOnline
             ? {
@@ -449,7 +434,7 @@ function CenteredSpinner({ label, sublabel }) {
   );
 }
 
-function StateScreen({ icon, title, body, identity, onLogout, primaryAction }) {
+function StateScreen({ icon, title, body, identity, primaryAction }) {
   return (
     <div className="h-full w-full overflow-y-auto" style={{ background: 'var(--bg)' }}>
       <div className="min-h-full w-full flex items-center justify-center px-4 py-8">
@@ -473,21 +458,13 @@ function StateScreen({ icon, title, body, identity, onLogout, primaryAction }) {
             </button>
           )}
           {identity && (
-            <div className="mt-6 pt-5 border-t border-[var(--line)] w-full flex flex-col sm:flex-row items-center justify-between gap-3 text-sm">
+            <div className="mt-6 pt-5 border-t border-[var(--line)] w-full text-center text-sm">
               <div className="text-[var(--ink-3)]">
                 Angemeldet als{' '}
                 <span className="text-[var(--ink)] font-medium">
                   {identity.fullName || identity.username || '—'}
                 </span>
               </div>
-              <button
-                type="button"
-                onClick={onLogout}
-                className="inline-flex items-center gap-1.5 text-[var(--ink-3)] hover:text-[var(--ink)] px-3 py-1.5 rounded-[var(--radius-sm)] hover:bg-[var(--bg-sunk)] transition"
-              >
-                <MdLogout size={16} />
-                <span>Abmelden</span>
-              </button>
             </div>
           )}
         </div>

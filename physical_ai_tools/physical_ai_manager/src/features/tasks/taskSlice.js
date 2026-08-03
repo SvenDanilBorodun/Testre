@@ -18,6 +18,7 @@
 
 import { createSlice } from '@reduxjs/toolkit';
 import TaskPhase from '../../constants/taskPhases';
+import { signedOut } from '../session/sessionActions';
 
 const savedRobotType = (() => {
   try { return localStorage.getItem('edubotics_robotType') || ''; }
@@ -48,32 +49,41 @@ export function isValidCapabilities(caps) {
   return CAPABILITY_KEYS.every((k) => typeof caps[k] === 'boolean');
 }
 
+// The recording form with NO localStorage in it. `initialState.taskInfo` is
+// this object HYDRATED with the persisted Benutzer-ID, so the two must stay
+// separate: a reset to `initialState` would hand back the id of whoever was
+// signed in when the module loaded, i.e. restore the exact value a sign-out
+// just scrubbed from storage. Every reset path below rebuilds from HERE.
+const defaultTaskInfo = {
+  taskName: '',
+  taskType: '',
+  taskInstruction: [],
+  policyPath: '',
+  recordInferenceMode: false,
+  // `undefined`, not '': InfoPanel's auto-select tests for it, so the next
+  // student gets the first Benutzer-ID offered rather than a blank field.
+  userId: undefined,
+  fps: 30,
+  tags: [],
+  warmupTime: 5,
+  episodeTime: 20,
+  resetTime: 5,
+  numEpisodes: 5,
+  token: '',
+  pushToHub: true,
+  // User-selectable via the "Privater Modus" toggle (InfoPanel.js /
+  // InferencePanel.js). Sent on the wire as TaskInfo.private_mode and
+  // threaded through the server-side data_manager overlay →
+  // HfApiWorker → create_repo(private=…). Defaults true so the
+  // privacy-safe option is pre-selected and a fresh recording without
+  // a deliberate toggle still uploads private (faces / classroom audio).
+  privateMode: true,
+  useOptimizedSave: true,
+  recordRosBag2: false,
+};
+
 const initialState = {
-  taskInfo: {
-    taskName: '',
-    taskType: '',
-    taskInstruction: [],
-    policyPath: '',
-    recordInferenceMode: false,
-    userId: savedUserId,
-    fps: 30,
-    tags: [],
-    warmupTime: 5,
-    episodeTime: 20,
-    resetTime: 5,
-    numEpisodes: 5,
-    token: '',
-    pushToHub: true,
-    // User-selectable via the "Privater Modus" toggle (InfoPanel.js /
-    // InferencePanel.js). Sent on the wire as TaskInfo.private_mode and
-    // threaded through the server-side data_manager overlay →
-    // HfApiWorker → create_repo(private=…). Defaults true so the
-    // privacy-safe option is pre-selected and a fresh recording without
-    // a deliberate toggle still uploads private (faces / classroom audio).
-    privateMode: true,
-    useOptimizedSave: true,
-    recordRosBag2: false,
-  },
+  taskInfo: { ...defaultTaskInfo, userId: savedUserId },
   taskStatus: {
     robotType: savedRobotType,
     // Robot profile id (e.g. 'omx_full' / 'omx_follower') + the server-authored
@@ -137,9 +147,6 @@ const taskSlice = createSlice({
       if (action.payload.userId) {
         try { localStorage.setItem('edubotics_userId', action.payload.userId); } catch {}
       }
-    },
-    resetTaskInfo: (state) => {
-      state.taskInfo = initialState.taskInfo;
     },
     setTaskStatus: (state, action) => {
       // Never let a bare /task/status tick (robot_type='') wipe the settled
@@ -224,11 +231,21 @@ const taskSlice = createSlice({
       state.collision = { ...state.collision, ...action.payload };
     },
   },
+  extraReducers: (builder) => {
+    builder.addCase(signedOut, (state) => {
+      // The recording FORM is the student's. `taskStatus` is the RIG's —
+      // robotType / robotProfile / capabilities are server-authored and drive
+      // the nav filter, so wiping them here would hide tabs until the next idle
+      // identity tick (the Redux-wipe scar). Its one student-scoped field is
+      // `userId`, a mirror of the running task's owner.
+      state.taskInfo = { ...defaultTaskInfo };
+      state.taskStatus.userId = '';
+    });
+  },
 });
 
 export const {
   setTaskInfo,
-  resetTaskInfo,
   setTaskStatus,
   resetTaskStatus,
   clearCapabilities,

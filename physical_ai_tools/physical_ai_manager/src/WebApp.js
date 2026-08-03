@@ -8,14 +8,13 @@ import { supabase } from './lib/supabaseClient';
 import {
   setSession,
   setIsLoading,
-  clearSession,
   requestProfileRefetch,
 } from './features/auth/authSlice';
 import { useMeProfile } from './hooks/useMeProfile';
 import LoginForm from './components/LoginForm';
 import TeacherDashboard from './pages/teacher/TeacherDashboard';
 import AdminDashboard from './pages/admin/AdminDashboard';
-import { resetJetsonOnLogout } from './hooks/useJetsonConnection';
+import { signOutStudent } from './utils/signOut';
 
 function WebApp() {
   const dispatch = useDispatch();
@@ -57,27 +56,18 @@ function WebApp() {
           'Schüler-Konten können die Web-App nicht nutzen. Bitte öffne die Desktop-App.',
           { duration: 6000 }
         );
-        // v2.3.0: teacher web doesn't claim Jetsons (only the student app
-        // does), so the beacon-release-on-logout step is a no-op here — but
-        // we still clear the slice for symmetry and reset the rosbridge auth.
-        resetJetsonOnLogout(dispatch);
-        supabase.auth.signOut();
-        dispatch(clearSession());
+        // reload:false — a reload would destroy the toast above, and a student
+        // who opened the teacher URL would be bounced with no explanation.
+        // (The teacher web never claims a Jetson, so the thunk's beacon step
+        // finds no jetsonId in the store and skips.)
+        dispatch(signOutStudent({ reload: false }));
       }
     },
     [dispatch]
   );
   useMeProfile({ onProfile: handleProfile });
 
-  const handleLogout = async () => {
-    // v2.3.0: clear Jetson-side state on the way out so a re-login in
-    // the same tab starts cleanly. Teacher app doesn't hold Jetson
-    // locks (students do), so no beacon release is needed.
-    resetJetsonOnLogout(dispatch);
-    await supabase.auth.signOut();
-    dispatch(clearSession());
-    toast.success('Abgemeldet');
-  };
+  const handleLogout = () => dispatch(signOutStudent());
 
   if (isLoading) {
     return (

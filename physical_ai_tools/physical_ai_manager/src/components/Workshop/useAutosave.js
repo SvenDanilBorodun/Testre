@@ -15,6 +15,10 @@ import toast from 'react-hot-toast';
 import { DE } from './blocks/messages_de';
 
 const STORAGE_KEY = 'edubotics:workshop:autosave';
+// Names the BROWSER SESSION, so the un-signed-in autosave bucket is per-session
+// instead of one bucket shared by everyone who ever sat at the PC. See
+// autosaveSessionScope.
+const SESSION_SCOPE_KEY = 'edubotics_workshop_autosave_session';
 const SAVE_INTERVAL_MS = 15_000;
 const DEBOUNCE_MS = 750;
 // Mirror the server-side validate_blockly_json byte ceiling so we
@@ -41,6 +45,59 @@ function debounce(fn, wait) {
 
 function nowMs() {
   return Date.now();
+}
+
+// Last resort for a browser that throws on the bare sessionStorage property
+// access (a WebView2 with storage disabled — the codebase's standing assumption
+// for every storage touch). Per DOCUMENT rather than per session: a reload then
+// loses crash recovery, which is strictly better than sharing one bucket.
+let memoryScopeId = null;
+
+function newScopeId() {
+  try {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+      return crypto.randomUUID();
+    }
+  } catch (e) {
+    /* no crypto — fall through to the time+random form below */
+  }
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+/**
+ * An opaque id naming THIS browser session, minted once and kept in
+ * sessionStorage.
+ *
+ * WHY. A German school runs EduBotics on Windows student PCs under ONE shared
+ * Windows account: one WebView2 profile, one IndexedDB, many students. The
+ * student app is fully usable without a cloud login — only Training and Inferenz
+ * gate on one — so `scopeKey` (the Supabase user id) is frequently null, and the
+ * old `scopeKey ? … : STORAGE_KEY` fallback put EVERY such session into the SAME
+ * bucket. The next student's Roboter Studio then restored the previous one's
+ * workspace on mount.
+ *
+ * sessionStorage is the carrier because of what has to survive and what must
+ * not. Crash recovery — the entire point of autosave — has to survive a RELOAD,
+ * which a module-level variable would not; and the bucket must not survive the
+ * WINDOW, which localStorage would. sessionStorage is scoped to exactly the tab,
+ * which for the student surface is the WebView2 window `EduBotics.exe --webview`
+ * spawns, so closing the app ends the session and the next student starts clean.
+ *
+ * RESIDUAL, stated because it is inherent to "per session" and not to this
+ * implementation: two students who hand the PC over WITHOUT closing that window
+ * share the session, hence the bucket. Recorded in docs/KNOWN-ISSUES.md.
+ */
+export function autosaveSessionScope() {
+  try {
+    const existing = sessionStorage.getItem(SESSION_SCOPE_KEY);
+    if (existing) return existing;
+    const minted = newScopeId();
+    sessionStorage.setItem(SESSION_SCOPE_KEY, minted);
+    return minted;
+  } catch (e) {
+    if (!memoryScopeId) memoryScopeId = newScopeId();
+    return memoryScopeId;
+  }
 }
 
 /**
@@ -77,8 +134,10 @@ export function formatAutosaveAge(ts) {
  * @param {boolean} options.enabled - false on cloud-only mode if you
  *   want to disable autosave (we still enable on cloud-only since the
  *   workflow JSON is the same shape).
- * @param {string|null} options.scopeKey - extra namespace (e.g. user id)
- *   so two students sharing a browser don't see each other's autosave.
+ * @param {string|null} options.scopeKey - extra namespace (the Supabase user
+ *   id) so two students sharing a browser don't see each other's autosave. When
+ *   null — the never-signed-in student, a fully supported path — the bucket is
+ *   namespaced by `autosaveSessionScope()` instead, never shared.
  * @param {(json: object) => void} options.onRestore - called once on
  *   mount with the restored payload (caller can decide to apply it).
  */
@@ -93,7 +152,14 @@ export function useAutosave({
   const restoreCalledRef = useRef(false);
   const loadingFlagRef = useRef(false);
 
-  const storageKey = scopeKey ? `${STORAGE_KEY}:${scopeKey}` : STORAGE_KEY;
+  // ALWAYS namespaced. The signed-in path is byte-identical to before
+  // (`${STORAGE_KEY}:${supabase user id}`); the un-scoped case falls back to the
+  // browser-session id rather than to the bare key, which every signed-out
+  // session used to share. Kept on one line and mentioning STORAGE_KEY on
+  // purpose: sessionScope.test.js's coverage scan resolves a namespaced key by
+  // reading the literal consts its SINGLE-LINE initializer names, and refuses —
+  // rather than silently skips — an initializer it cannot resolve.
+  const storageKey = `${STORAGE_KEY}:${scopeKey || autosaveSessionScope()}`;
 
   // Save current workspace state. Called by debounced listener,
   // periodic timer, and manual save action.
@@ -148,6 +214,17 @@ export function useAutosave({
     if (!enabled || !workspace) return;
     if (restoreCalledRef.current) return;
     restoreCalledRef.current = true;
+
+    // Reclaim the PRE-namespacing bucket. Fielded machines carry a bare
+    // `edubotics:workshop:autosave` written by every signed-out session that
+    // ever ran here, and `storageKey` above can no longer produce that name — so
+    // it is unreachable work, not live state, and deleting it removes the
+    // disclosure instead of destroying anything a student can still get to.
+    // Exactly the ONE legacy name, deliberately not an `idb-keyval` keys()
+    // enumeration: a pattern sweep over this namespace could match a real
+    // `:<user id>` bucket and destroy work. Fire-and-forget so it cannot delay
+    // the restore below.
+    idbDel(STORAGE_KEY).catch(() => undefined);
 
     let cancelled = false;
     (async () => {

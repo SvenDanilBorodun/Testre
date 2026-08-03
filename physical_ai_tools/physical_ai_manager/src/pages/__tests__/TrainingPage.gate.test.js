@@ -53,10 +53,6 @@ vi.mock('../../hooks/useRefetchOnFocus', () => ({
   __esModule: true,
   default: () => {},
 }));
-vi.mock('../../hooks/useJetsonConnection', () => ({
-  __esModule: true,
-  resetJetsonOnLogout: vi.fn(),
-}));
 
 // Recognizable LoginForm stub.
 vi.mock('../../components/LoginForm', () => ({

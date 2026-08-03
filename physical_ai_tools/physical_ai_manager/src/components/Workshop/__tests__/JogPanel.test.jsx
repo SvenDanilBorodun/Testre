@@ -100,12 +100,19 @@ describe('JogPanel', () => {
     render(<JogPanel disabled={false} />);
     await userEvent.click(screen.getByRole('button', { name: 'Arm freischalten' }));
     await waitFor(() => expect(mockRos.handGuide).toHaveBeenCalledWith(true));
+    // The mock records at CALL time: `toggleHandGuide` invokes handGuide(enabled)
+    // and only AWAITS it before `setHandGuideOn(enabled)`, so the assertion above
+    // is satisfied strictly BEFORE the state that flips the button label commits.
+    // The synchronous `getByRole('Arm festsetzen')` this used to end on therefore
+    // raced that commit and failed ~0.5 % of runs. `findByRole` retries, which is
+    // all this call site needs — unlike the pagehide test below, nothing here
+    // depends on a PASSIVE EFFECT having run, only on the rendered DOM.
+    const festsetzen = await screen.findByRole('button', { name: 'Arm festsetzen' });
 
     // While freigeschaltet a jog nudge is disabled → no jogArm call.
-    const jointBtn = screen.getByRole('button', { name: 'Gelenk 1 erhöhen' });
-    expect(jointBtn).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Gelenk 1 erhöhen' })).toBeDisabled();
 
-    await userEvent.click(screen.getByRole('button', { name: 'Arm festsetzen' }));
+    await userEvent.click(festsetzen);
     await waitFor(() => expect(mockRos.handGuide).toHaveBeenCalledWith(false));
   });
 
@@ -117,11 +124,24 @@ describe('JogPanel', () => {
   });
 
   test('a pagehide while freigeschaltet re-fixes the arm (limp-arm safety)', async () => {
-    render(<JogPanel disabled={false} />);
+    // Waiting for the BUTTON to flip is not enough, and that mistake made this
+    // test flake ~1.8 % of suite runs (measured over 220): `findByRole`'s
+    // MutationObserver resolves on a DOM mutation produced at React's COMMIT,
+    // while `handGuideOnRef.current` is written by a `useEffect` in the
+    // PASSIVE-EFFECT phase scheduled AFTER that commit. When the observer's
+    // microtask won, `refixArm` read a stale `false`, returned early, and the
+    // `waitFor` below expired with zero calls.
+    //
+    // So gate on something the EFFECT PHASE itself produces. `onHandGuideChange`
+    // is called from a second `useEffect` declared AFTER the ref-writing one in
+    // JogPanel, and React runs a commit's effects in declaration order — so
+    // observing `true` here proves the ref assignment already ran in the same
+    // flush. (`await act(async () => {})` would also flush them, but it asserts
+    // nothing about which one ran; this way the ordering is the assertion.)
+    const onHandGuideChange = vi.fn();
+    render(<JogPanel disabled={false} onHandGuideChange={onHandGuideChange} />);
     await userEvent.click(screen.getByRole('button', { name: 'Arm freischalten' }));
-    // Wait until the arm is actually freigeschaltet (button flips) so the
-    // handGuideOn state the listener reads has committed + its ref flushed.
-    await screen.findByRole('button', { name: 'Arm festsetzen' });
+    await waitFor(() => expect(onHandGuideChange).toHaveBeenCalledWith(true));
     mockRos.handGuide.mockClear();
     // Tab-close / navigation fires pagehide, but NOT a React unmount cleanup —
     // the listener must still re-torque the follower.

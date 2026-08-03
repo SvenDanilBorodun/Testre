@@ -30,6 +30,8 @@ import TaskPhase from '../../constants/taskPhases';
 // (store.getState().jetson.status) — drive it with real jetson actions.
 import realStore from '../../store/store';
 import { setJetsonStatus, clearJetson } from '../../store/jetsonSlice';
+import { setSession, setProfile } from '../../features/auth/authSlice';
+import { signedOut } from '../../features/session/sessionActions';
 
 const mockDispatch = vi.fn();
 vi.mock('react-redux', () => ({
@@ -292,5 +294,105 @@ describe('useRosTopicSubscription — idle-tick taskInfo gate (D8 companion #1)'
       task_info: { ...status().task_info, task_name: 'Wuerfel greifen', task_instruction: ['x'] },
     })));
     expect(dispatchedByType('tasks/setTaskInfo').length).toBe(1);
+  });
+});
+
+describe('useRosTopicSubscription — the robot may only name the student it belongs to', () => {
+  // The ROS node keeps `task_info.user_id` for the life of a task, so it
+  // survives BOTH a sign-out and a change of student. Nothing unsubscribes and
+  // nothing can — the browser still has to show the running task — so the ADOPT
+  // is what is gated, and it is gated on IDENTITY, not on "is anybody signed
+  // in?". Two executed leaks:
+  //   * after a sign-out, ONE tick put the previous student's id back into Redux
+  //     AND (via setTaskInfo's re-persist) into localStorage, with no user
+  //     action at all;
+  //   * student B signing in while the node still held A's id inherited it — and
+  //     a session check cannot see that, because somebody IS signed in.
+  //
+  // `auth.hfUsername` is the comparand and it is the SAME id space: useMeProfile
+  // PATCHes /me with the selected Benutzer-ID, i.e. the value the recorder sends.
+  const running = (userId = 'schule-A') => status({
+    phase: TaskPhase.RECORDING,
+    task_info: {
+      ...status().task_info,
+      task_name: 'Wuerfel greifen',
+      task_instruction: ['x'],
+      user_id: userId,
+    },
+  });
+
+  const signIn = (hfUsername) => {
+    realStore.dispatch(setSession({ access_token: 'jwt-1' }));
+    realStore.dispatch(setProfile({ role: 'student', hf_username: hfUsername }));
+  };
+
+  afterEach(() => {
+    realStore.dispatch(signedOut());
+  });
+
+  it('adopts the user_id when it NAMES the signed-in student', async () => {
+    const cb = await mountAndGetCallback();
+    signIn('schule-A');
+    mockDispatch.mockClear();
+    act(() => cb(running()));
+    expect(dispatchedByType('tasks/setTaskInfo')[0].payload.userId).toBe('schule-A');
+    expect(dispatchedByType('tasks/setTaskStatus')[0].payload.userId).toBe('schule-A');
+  });
+
+  it('does NOT adopt another student\'s id into a live session', async () => {
+    // Student B is signed in; the node still holds A's task. A session-only gate
+    // adopts here, because a session exists — it is just not A's.
+    const cb = await mountAndGetCallback();
+    signIn('schule-B');
+    mockDispatch.mockClear();
+    act(() => cb(running('schule-A')));
+
+    const info = dispatchedByType('tasks/setTaskInfo')[0];
+    expect(info.payload.taskName).toBe('Wuerfel greifen');
+    expect('userId' in info.payload).toBe(false);
+    expect(dispatchedByType('tasks/setTaskStatus')[0].payload.userId).toBe('');
+  });
+
+  it('does NOT adopt it after a sign-out — the leak a single tick re-established', async () => {
+    const cb = await mountAndGetCallback();
+    signIn('schule-A');
+    realStore.dispatch(signedOut());
+    mockDispatch.mockClear();
+    act(() => cb(running()));
+
+    const info = dispatchedByType('tasks/setTaskInfo')[0];
+    // The rest of the task still flows — the student must see the running task.
+    expect(info.payload.taskName).toBe('Wuerfel greifen');
+    // ... but NOT who it belongs to. `setTaskInfo` re-persists a truthy userId,
+    // so an adopted key here lands straight back in localStorage.
+    expect('userId' in info.payload).toBe(false);
+    expect(dispatchedByType('tasks/setTaskStatus')[0].payload.userId).toBe('');
+  });
+
+  it('adopts nothing while the identity is UNKNOWN — fail-safe', async () => {
+    // A valid session whose /me has not resolved yet: hfUsername is still null,
+    // so there is nothing to compare against and nothing is adopted. Same for a
+    // student who never signs in at all (recording needs no cloud login).
+    const cb = await mountAndGetCallback();
+    realStore.dispatch(setSession({ access_token: 'jwt-1' }));
+    mockDispatch.mockClear();
+    act(() => cb(running()));
+    expect('userId' in dispatchedByType('tasks/setTaskInfo')[0].payload).toBe(false);
+    expect(dispatchedByType('tasks/setTaskStatus')[0].payload.userId).toBe('');
+  });
+
+  it('leaves the RIG identity flowing on the very same tick', async () => {
+    // Only the student-scoped field is gated. robot_type / robot_profile /
+    // capabilities are server-authored rig facts that drive the nav filter, and
+    // the idle identity tick must keep delivering them to a signed-out browser.
+    const cb = await mountAndGetCallback();
+    realStore.dispatch(signedOut());
+    mockDispatch.mockClear();
+    act(() => cb(status({ robot_profile: 'omx_full', capabilities_json: CAPS_FULL })));
+    const s = dispatchedByType('tasks/setTaskStatus')[0];
+    expect(s.payload.robotType).toBe('omx_f');
+    expect(s.payload.robotProfile).toBe('omx_full');
+    expect(s.payload.capabilities).toEqual(JSON.parse(CAPS_FULL));
+    expect(s.payload.topicReceived).toBe(true);
   });
 });

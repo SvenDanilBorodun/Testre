@@ -258,13 +258,38 @@ class PromptFinalizeInstallTest(unittest.TestCase):
     flag/exit-code success discrimination, and the rootfs destructive consent."""
 
     def _make(self, *, reason=None, consent=True, elevate=(0, False, None),
-              reboot_pending=False, distro_registered=True, script="finalize.ps1"):
+              reboot_pending=False, distro_registered=True, script="finalize.ps1",
+              marker=None, marker_encoding="utf-8-sig", marker_as_dir=False):
         calls = {"elevate": [], "log": [], "status": [], "prereq": 0,
                  "showinfo": [], "showwarning": [], "showerror": [],
                  "askyesno": [], "fallback": []}
 
         def _fake_elevate(exe, args, show=1):
             calls["elevate"].append(args)
+            # Stand in for finalize_install.ps1 writing its marker. The path is
+            # taken out of the command line the GUI actually built, so a rename
+            # of -MarkerPath breaks the fixture instead of silently making every
+            # marker-reading test read nothing. `marker=None` = never launched /
+            # marker deleted, which is what _run_elevated leaves behind.
+            #
+            # The DEFAULT encoding is utf-8-sig because that is the byte shape
+            # PS 5.1's `Set-Content -Encoding UTF8` produces (it emits a BOM).
+            # `marker_encoding="cp1252"` reproduces the pre-fix ANSI write.
+            #
+            # `marker_as_dir=True` puts a DIRECTORY where the marker belongs —
+            # the cheapest reproduction of an OSError that is NOT
+            # FileNotFoundError (IsADirectoryError on POSIX, PermissionError on
+            # Windows). See test_an_unreadable_marker_path_cannot_raise.
+            if marker_as_dir:
+                m = re.search(r'-MarkerPath "([^"]+)"', args)
+                assert m, f"no -MarkerPath in the built args: {args}"
+                os.makedirs(m.group(1), exist_ok=True)
+            elif marker is not None:
+                m = re.search(r'-MarkerPath "([^"]+)"', args)
+                assert m, f"no -MarkerPath in the built args: {args}"
+                with open(m.group(1), "w", encoding=marker_encoding,
+                          errors="replace") as fh:
+                    fh.write(marker)
             return elevate
 
         def _fake_askyesno(*a, **k):
@@ -485,6 +510,207 @@ class PromptFinalizeInstallTest(unittest.TestCase):
         # ... and it must carry a concrete next step, not just a diagnosis.
         self.assertTrue(any("neu starten" in m for m in calls["log"]))
         self.assertTrue(any("Installer erneut" in m for m in calls["log"]))
+
+    # ── exit 0 + distro invisible: WHICH of the two causes? ─────────────
+    # WSL2 registers distros PER WINDOWS USER (HKCU\...\Lxss) and the installer
+    # is PrivilegesRequired=admin, so on a managed school PC where a DIFFERENT
+    # admin elevates, the import lands in the admin's hive and the student's
+    # un-elevated GUI cannot see it. FINALIZE_EXIT_DONE proves finalize's own
+    # Test-DistroRegistered PASSED (every other outcome exits through
+    # Fail-WithNextAction), so exit 0 + invisible + a different `user=` in the
+    # marker IS the per-account split — and rebooting, which the generic message
+    # advises, can never fix it. Same user / no marker keeps the old message.
+    _SUCCESS_MARKER = "SUCCESS 2026-08-02T10:00:00.0000000+02:00 user={0} distro=EduBotics"
+
+    def _run_exit0_invisible(self, *, marker, username,
+                             marker_encoding="utf-8-sig"):
+        method, owner, calls = self._make(
+            elevate=(0, False, None), distro_registered=False, marker=marker,
+            marker_encoding=marker_encoding)
+        with _env(USERNAME=username):
+            self._run(method, owner)
+        return calls
+
+    @staticmethod
+    def _said_wrong_account(calls):
+        return any("Windows-Konto" in m for m in calls["log"])
+
+    @staticmethod
+    def _said_generic(calls):
+        return any("meldet Erfolg" in m and "fehlt weiterhin" in m
+                   for m in calls["log"])
+
+    def test_marker_user_matching_current_user_keeps_the_old_message(self):
+        calls = self._run_exit0_invisible(
+            marker=self._SUCCESS_MARKER.format("student"), username="student")
+        self.assertTrue(self._said_generic(calls), calls["log"])
+        self.assertFalse(self._said_wrong_account(calls), calls["log"])
+
+    def test_marker_user_differing_reports_the_per_account_cause(self):
+        calls = self._run_exit0_invisible(
+            marker=self._SUCCESS_MARKER.format("schuladmin"), username="student")
+        self.assertFalse(self._said_generic(calls), calls["log"])
+        self.assertTrue(self._said_wrong_account(calls), calls["log"])
+        # It must NAME both accounts — "wrong account" without saying WHICH one
+        # is not actionable on a PC the student did not set up.
+        self.assertTrue(any("schuladmin" in m and "student" in m
+                            for m in calls["log"]), calls["log"])
+        # ... and must not repeat the reboot advice, which cannot help here.
+        self.assertFalse(any("neu starten" in m for m in calls["log"]),
+                         calls["log"])
+        self.assertTrue(any("Windows-Konto" in s for s in calls["status"]),
+                        calls["status"])
+
+    def test_account_names_are_compared_case_insensitively(self):
+        # Windows account names are case-insensitive; a case difference is the
+        # SAME account and must not be reported as a mismatch.
+        calls = self._run_exit0_invisible(
+            marker=self._SUCCESS_MARKER.format("Student"), username="student")
+        self.assertTrue(self._said_generic(calls), calls["log"])
+        self.assertFalse(self._said_wrong_account(calls), calls["log"])
+
+    def test_a_username_with_spaces_survives_the_distro_suffix(self):
+        # %USERNAME% can contain spaces and `user=` is NOT last on the SUCCESS
+        # line, so the parse has to cut at " distro=" rather than at whitespace.
+        calls = self._run_exit0_invisible(
+            marker=self._SUCCESS_MARKER.format("Max Muster"), username="student")
+        self.assertTrue(any("Max Muster" in m for m in calls["log"]),
+                        calls["log"])
+        self.assertFalse(any("distro=" in m for m in calls["log"]),
+                         calls["log"])
+
+    # ── the ENCODING pairing: -Encoding UTF8 written, utf-8-sig read ────
+    # The target population is German schools, so an umlaut in %USERNAME% is
+    # ordinary. Both halves are pinned: the .ps1 must write UTF-8, and the
+    # reader must refuse a name that came back with a replacement character
+    # rather than treat it as "a different account".
+    def test_an_umlaut_username_round_trips_and_is_named_verbatim(self):
+        calls = self._run_exit0_invisible(
+            marker=self._SUCCESS_MARKER.format("Jörg Müller"),
+            username="student")
+        self.assertTrue(self._said_wrong_account(calls), calls["log"])
+        self.assertTrue(any("Jörg Müller" in m for m in calls["log"]),
+                        calls["log"])
+        self.assertFalse(any("�" in m for m in calls["log"]),
+                         "a replacement character reached the student")
+
+    def test_the_same_umlaut_account_is_not_reported_as_a_mismatch(self):
+        # The bug in its purest form: one account, written and read as itself.
+        calls = self._run_exit0_invisible(
+            marker=self._SUCCESS_MARKER.format("Müller"), username="Müller")
+        self.assertTrue(self._said_generic(calls), calls["log"])
+        self.assertFalse(self._said_wrong_account(calls), calls["log"])
+
+    def test_an_ansi_written_marker_falls_back_instead_of_accusing(self):
+        """A cp1252 „Müller" decodes to „M�ller" — which casefold-compares
+        UNEQUAL to every real %USERNAME%, so the per-account branch fired on the
+        SAME account and replaced correct reboot advice with advice that cannot
+        help. A U+FFFD anywhere in the parsed name means "unparseable", never
+        "someone else": accusing a student of the wrong Windows login on a PC
+        they did not set up is worse than the generic message."""
+        calls = self._run_exit0_invisible(
+            marker=self._SUCCESS_MARKER.format("Müller"), username="Müller",
+            marker_encoding="cp1252")
+        self.assertTrue(self._said_generic(calls), calls["log"])
+        self.assertFalse(self._said_wrong_account(calls), calls["log"])
+
+    def test_finalize_writes_every_marker_as_utf8(self):
+        """The .ps1 half. PS 5.1's Set-Content default is the system ANSI
+        codepage, so an explicit -Encoding is the only thing that makes the
+        GUI's UTF-8 read correct. All THREE writes, not just the one the GUI
+        parses today — one file, one reader, one encoding."""
+        src = _read(_FINALIZE_PS1, encoding="utf-8-sig")
+        writes = [ln.strip() for ln in src.splitlines()
+                  if "Set-Content" in ln and "$MarkerPath" in ln]
+        self.assertEqual(len(writes), 3,
+                         f"expected the started/FAILED/SUCCESS writes, got "
+                         f"{writes}")
+        for ln in writes:
+            self.assertIn("-Encoding UTF8", ln,
+                          f"marker write without an explicit encoding: {ln}")
+
+    def test_the_legacy_started_marker_shape_is_still_parsed(self):
+        # An install that has not yet taken the new finalize_install.ps1 leaves
+        # the startup stamp behind: "started <iso> pid=<n> user=<name>", where
+        # user= runs to end-of-line. It carries the same fact.
+        calls = self._run_exit0_invisible(
+            marker="started 2026-08-02T10:00:00Z pid=4711 user=schuladmin",
+            username="student")
+        self.assertTrue(self._said_wrong_account(calls), calls["log"])
+
+    def test_missing_marker_keeps_the_old_message(self):
+        calls = self._run_exit0_invisible(marker=None, username="student")
+        self.assertTrue(self._said_generic(calls), calls["log"])
+        self.assertFalse(self._said_wrong_account(calls), calls["log"])
+
+    def test_an_unreadable_marker_path_cannot_raise(self):
+        """_marker_user's docstring says it NEVER raises, and that is a promise
+        about the whole finalize report, not about the parse.
+
+        It is called from `_finalize_worker`, whose only wrapper is
+        `_run_elevated`'s try/FINALLY — there is no `except`. So an escaping
+        exception skips the German verdict, the transcript echo and the
+        re-check, and on a synchronous path takes the caller with it: the
+        student gets nothing at all instead of a diagnosis.
+        `except FileNotFoundError` looks like the same thing and is not — a
+        PermissionError (AV lock, a GPO-tightened ProgramData leaf) or an
+        IsADirectoryError (`wsl --import` created the name as a directory, the
+        way Docker auto-creates a missing mount target) both escape it. A
+        directory at the marker path is the cheapest way to produce exactly
+        that: IsADirectoryError on POSIX, PermissionError on Windows, and
+        neither is a FileNotFoundError."""
+        method, owner, calls = self._make(
+            elevate=(0, False, None), distro_registered=False,
+            marker_as_dir=True)
+        with _env(USERNAME="student"):
+            self._run(method, owner)
+        # Unreadable is not "somebody else" — it must fall through to the
+        # generic message, exactly like an absent marker.
+        self.assertTrue(self._said_generic(calls), calls["log"])
+        self.assertFalse(self._said_wrong_account(calls), calls["log"])
+
+    def test_garbage_marker_keeps_the_old_message_without_raising(self):
+        for junk in ("", "\x00\x01\x02", "FAILED 2026-08-02\nirgendwas\n",
+                     "user=", "started pid=1 user=   "):
+            with self.subTest(junk=junk):
+                calls = self._run_exit0_invisible(marker=junk,
+                                                  username="student")
+                self.assertTrue(self._said_generic(calls), calls["log"])
+                self.assertFalse(self._said_wrong_account(calls), calls["log"])
+
+    def test_an_unreadable_username_env_keeps_the_old_message(self):
+        # No %USERNAME% (non-Windows, or a stripped environment) means there is
+        # nothing to compare against — never accuse the student's account then.
+        calls = self._run_exit0_invisible(
+            marker=self._SUCCESS_MARKER.format("schuladmin"), username=None)
+        self.assertTrue(self._said_generic(calls), calls["log"])
+        self.assertFalse(self._said_wrong_account(calls), calls["log"])
+
+    def test_the_per_account_branch_never_fires_on_the_success_path(self):
+        # exit 0 AND the distro visible is a plain success. A differing marker
+        # user there is ordinary (the admin ran finalize once, correctly), so it
+        # must not produce a warning.
+        method, owner, calls = self._make(
+            elevate=(0, False, None), distro_registered=True,
+            marker=self._SUCCESS_MARKER.format("schuladmin"))
+        with _env(USERNAME="student"):
+            self._run(method, owner)
+        self.assertEqual(calls["prereq"], 1)
+        self.assertFalse(self._said_wrong_account(calls), calls["log"])
+
+    def test_finalize_stamps_the_success_marker_it_is_parsed_from(self):
+        """The GUI half above is useless if the .ps1 stops writing the field.
+
+        finalize_install.ps1 used to leave the marker reading "started …" on the
+        success path, which is exactly why this branch could not exist before."""
+        src = _read(_FINALIZE_PS1, encoding="utf-8-sig")
+        self.assertIn("SUCCESS {0} user={1} distro={2}", src,
+                      "the success path no longer stamps the marker — the GUI's "
+                      "per-account diagnosis has nothing to read")
+        # It must be the LAST write before the successful exit, not somewhere a
+        # later failure path could overwrite with a stale verdict.
+        self.assertLess(src.index("SUCCESS {0} user={1} distro={2}"),
+                        src.rindex("exit $EXIT_DONE"))
 
     def test_rootfs_mismatch_consent_threads_destructive_flag(self):
         method, owner, calls = self._make(
@@ -874,6 +1100,450 @@ class ScriptTerminalExitTest(unittest.TestCase):
                     lines and lines[-1] == "exit 0",
                     f"{name} must end with an explicit `exit 0`; last statement "
                     f"is {lines[-1]!r}")
+
+
+class PreflightAccountScopeTest(unittest.TestCase):
+    """preflight_system.ps1 check 5: the distro IMAGE is on disk but the distro
+    is not registered for THIS Windows account.
+
+    WSL2 registers distros per Windows user (HKCU\\...\\Lxss) while the installer
+    is PrivilegesRequired=admin, so on a managed school PC a different admin's
+    `wsl --import` is invisible to the student. Disk-yes / list-no is the
+    SYMPTOM of that split — but not proof of it: the importer's post-failure
+    `Remove-Item ext4.vhdx` runs -ErrorAction SilentlyContinue and commonly
+    fails while the WSL service or an AV scanner holds the handle, leaving the
+    identical signature with no account problem at all. So the check must
+    DISCRIMINATE before it accuses, and these pin that it still does.
+
+    Source-level checks because the file is PowerShell: the tests that can RUN
+    it live on a Windows rig, and what rots silently is the cross-file wiring."""
+
+    _PREFLIGHT = os.path.join(_SCRIPTS, "preflight_system.ps1")
+
+    def _src(self):
+        return _read(self._PREFLIGHT, encoding="utf-8-sig")
+
+    def test_the_check_exists_and_tests_both_halves_of_the_split(self):
+        src = self._src()
+        self.assertIn("$vhdxPresent -and (-not $distroPresent)", src,
+                      "check 5 must fire on disk-YES + registered-NO; either "
+                      "half alone is a normal state (a fresh PC, or a healthy "
+                      "install) and would false-positive on every rig")
+
+    def test_it_reuses_the_check4_enumeration_instead_of_re_running_wsl(self):
+        src = self._src()
+        # Real INVOCATIONS only — `wsl --list` also appears in comments, and
+        # counting those would make this test unable to fail for the reason it
+        # exists.
+        invocations = re.findall(r"^\s*(?:\$\w+\s*=\s*)?wsl --list", src, re.M)
+        self.assertEqual(
+            len(invocations), 1,
+            "check 5 must reuse $distroPresent from check 4 — a second "
+            "enumeration can disagree with the first and costs a wsl.exe spawn "
+            f"on the GUI's startup path (found {invocations})")
+
+    def test_neither_probe_can_abort_the_diagnostic(self):
+        src = self._src()
+        for anchor, label in (
+            (r"\$vhdxPresent = \$false\n(.*?)\n\n", "the Test-Path probe"),
+            (r"\$markerUser = \"\"\n(.*?)\nif \(\$markerUser\.IndexOf",
+             "the marker read"),
+        ):
+            m = re.search(anchor, src, re.S)
+            self.assertIsNotNone(m, f"{label} block moved or vanished")
+            self.assertIn("try {", m.group(1), label)
+            self.assertIn("} catch {", m.group(1), label)
+        # This script is a DIAGNOSTIC. It runs -Quiet from the .iss [Run] and
+        # from the GUI, and always exits 0.
+        lines = [ln.strip() for ln in src.splitlines() if ln.strip()]
+        self.assertEqual(lines[-1], "exit 0",
+                         "preflight must still be non-fatal")
+        self.assertIn('$ErrorActionPreference = "Continue"', src)
+
+    def test_the_vhdx_path_matches_the_importers_default_install_root(self):
+        """THE cross-file contract, and the one that can rot silently.
+
+        The check's signal is only a signal while it looks at the file
+        `import_edubotics_wsl.ps1` actually writes. Change -InstallRoot's default
+        and this probe starts answering "no image on disk" on every rig — the
+        check would go quiet rather than wrong, which is worse."""
+        importer = _read(_IMPORT_PS1, encoding="utf-8-sig")
+        m = re.search(r'\$InstallRoot\s*=\s*"([^"]+)"', importer)
+        self.assertIsNotNone(m, "import_edubotics_wsl.ps1 has no -InstallRoot default")
+        # PowerShell path, e.g. "$env:ProgramData\EduBotics\wsl" -> the leaf the
+        # preflight Join-Path reproduces.
+        leaf = m.group(1).split("ProgramData", 1)[-1].lstrip("\\")
+        self.assertTrue(leaf, f"unexpected -InstallRoot shape: {m.group(1)!r}")
+        src = self._src()
+        self.assertIn(f'Join-Path $env:ProgramData "{leaf}\\ext4.vhdx"', src,
+                      f"check 5 probes a different path than the importer "
+                      f"writes ({m.group(1)}\\ext4.vhdx)")
+
+    # ── the discriminator ────────────────────────────────────────────────
+    def test_the_per_account_verdict_requires_a_differing_marker_user(self):
+        """Only a marker `user=` that DIFFERS from %USERNAME% may produce the
+        FEHLER. Without that gate the leftover-VHDX case (a failed import whose
+        cleanup could not delete the file) tells a student on a managed PC to
+        log in as somebody else — advice they cannot act on and that would not
+        help if they could."""
+        src = self._src()
+        self.assertIn('$accountSplit = ($markerUser -ne "") -and '
+                      '($env:USERNAME) -and ($markerUser -ine $env:USERNAME)',
+                      src,
+                      "the split predicate must require a marker user, a "
+                      "current user, and that the two DIFFER (case-insensitively "
+                      "— Windows account names are)")
+        # The FEHLER is inside the $accountSplit branch; the ambiguous case gets
+        # a WARNUNG naming both causes.
+        m = re.search(r"if \(\$accountSplit\) \{\n(.*?)\n    \} else \{\n(.*?)\n    \}",
+                      src, re.S)
+        self.assertIsNotNone(m, "the accountSplit if/else moved or vanished")
+        self.assertIn("Emit FEHLER", m.group(1))
+        self.assertIn("Emit WARNUNG", m.group(2),
+                      "the ambiguous case must WARN, not accuse")
+        for cause in ("anderen Windows-Konto", "abgebrochen"):
+            self.assertIn(cause, m.group(2),
+                          "the WARNUNG must name BOTH possible causes")
+
+    # ── the two properties of the READ itself ────────────────────────────
+    # Both are asserted in this script's own comments and in CLAUDE.md, and
+    # until now BOTH were fenced by nothing: a mutation violating either left
+    # the whole deps-free suite green while producing the exact bug check 5
+    # exists to eliminate — a wrong-account accusation on a healthy machine.
+    # Simulated against the real bytes finalize_install.ps1 writes (UTF-8 with
+    # BOM, `user=Müller distro=EduBotics`):
+    #     shipped                  -> 'Müller'                  fail-safe
+    #     no -Encoding UTF8        -> 'MÃ¼ller'                 FEHLER, wrong
+    #     no " distro=" cut        -> 'Müller distro=EduBotics'  FEHLER, wrong
+    # The U+FFFD refusal cannot catch either: a cp1252 decode of UTF-8 yields
+    # VALID characters, not replacement characters, so the guard that protects
+    # the Python side is structurally blind to the PowerShell side's failure
+    # mode. Same class as the KEY_WOW64_64KEY hole fenced in
+    # tests/test_config_generator.py.
+    #
+    # Source-level, because there is no PowerShell on the CI runner. Both are
+    # phrased as a property of the CALL rather than as an exact substring, so a
+    # differently-spelled violation (`-Encoding Default`, `.IndexOf(" ")`) fails
+    # too — pinning the literal text would only catch deletion.
+    _MARKER_CUT_DELIMITER = " distro="
+
+    def _marker_read_block(self):
+        """Check 5's marker read, COMMENT LINES STRIPPED.
+
+        Stripping is load-bearing for the same reason RootCauseGuardTest._code
+        strips: the block's own rationale necessarily names both
+        ``-Encoding UTF8`` and ``" distro="`` to explain why they are there, so
+        an un-stripped guard would pin the DOCUMENTATION and pass over a read
+        that no longer does either."""
+        src = self._src()
+        m = re.search(
+            r'^\$MarkerPath\s*=\s*Join-Path \$DiagDir '
+            r'"edubotics_finalize\.marker"(.*?)^\$accountSplit',
+            src, re.S | re.M)
+        self.assertIsNotNone(
+            m, "check 5's marker-read block moved or vanished — every "
+               "assertion below would pass vacuously")
+        block = "\n".join(ln for ln in m.group(1).splitlines()
+                          if not ln.lstrip().startswith("#"))
+        self.assertIn("$markerUser", block,
+                      "the stripped block contains no marker parse at all")
+        return block
+
+    def test_the_marker_read_names_a_utf8_encoding(self):
+        """finalize writes the marker ``-Encoding UTF8``; this side must decode
+        it as UTF-8 or a German name comes back mojibake.
+
+        The failure is silent AND wrong-way-round: „Müller" read as cp1252 is
+        „MÃ¼ller", which contains no U+FFFD (so the unparseable-marker refusal
+        never fires) and can never ``-ine``-match %USERNAME% (so the per-account
+        FEHLER fires on the SAME account, replacing correct advice with advice
+        that cannot help). Asserted on the encoding ARGUMENT, so dropping the
+        parameter and naming a non-UTF-8 codepage both fail."""
+        block = self._marker_read_block()
+        reads = [ln.strip() for ln in block.splitlines()
+                 if re.search(r"Get-Content|StreamReader|ReadAll(?:Text|Lines|Bytes)",
+                              ln)]
+        self.assertEqual(
+            len(reads), 1,
+            f"expected exactly ONE file read in the marker block, got {reads}")
+        read = reads[0]
+        self.assertIn(
+            "Get-Content", read,
+            f"the marker read switched API to {read!r} — this guard can only "
+            f"reason about Get-Content's -Encoding contract")
+        enc = re.search(r"-Encoding\s+([A-Za-z0-9]+)", read)
+        self.assertIsNotNone(
+            enc,
+            f"the marker read declares no -Encoding: {read!r}. PS 5.1's "
+            f"default is the system ANSI codepage, and finalize_install.ps1 "
+            f"writes UTF-8")
+        # Any UTF-8 spelling is accepted: the property is "decodes as UTF-8",
+        # not a literal. PS 5.1 only has `UTF8`; the PS 7 aliases are listed so a
+        # future toolchain move is not a false positive.
+        self.assertIn(
+            enc.group(1).lower(), {"utf8", "utf8bom", "utf8nobom"},
+            f"the marker read decodes as {enc.group(1)!r}, not UTF-8 — "
+            f"finalize_install.ps1 writes it -Encoding UTF8")
+
+    def test_the_marker_user_value_is_bounded_by_the_distro_delimiter(self):
+        """``user=`` is NOT last on the SUCCESS line, so the value has to be cut
+        at ``" distro="``.
+
+        Without the cut the parsed name is „Müller distro=EduBotics", which
+        again carries no U+FFFD and again can never match %USERNAME% — the same
+        wrong accusation by a different route. %USERNAME% may contain spaces, so
+        cutting at whitespace is not an alternative; the delimiter is the only
+        bound, and the Python reader has to use the SAME one."""
+        block = self._marker_read_block()
+        searched = re.findall(
+            r'(?:IndexOf|Split|-split)\s*\(?\s*"([^"]*)"', block)
+        self.assertIn(
+            self._MARKER_CUT_DELIMITER, searched,
+            f"nothing in the marker read searches for "
+            f"{self._MARKER_CUT_DELIMITER!r} (found {searched}) — the extracted "
+            f"name would carry the distro suffix")
+        self.assertRegex(
+            block, r"Substring\(\s*0\s*,|-split|\.Split\(",
+            "the delimiter's index must reach a TRUNCATION — merely locating "
+            "it leaves the whole rest of the line in $markerUser")
+        # Cross-language: the Python reader cuts on the same literal. The two
+        # parses are independent implementations (recorded in
+        # docs/KNOWN-ISSUES.md), so the delimiter is the one piece of their
+        # semantics cheap enough to compare directly.
+        self.assertIn(
+            f'find("{self._MARKER_CUT_DELIMITER}")', _read(_GUI_SRC),
+            "gui_app.py::_marker_user cuts on a different delimiter than the "
+            "preflight does — one reader would name an account the other does "
+            "not")
+
+    def test_the_marker_path_is_the_one_the_gui_writes_and_parses(self):
+        """Cross-file: the preflight and gui_app must read the SAME marker.
+
+        Both resolve it inside the machine-wide diagnostics leaf — the .ps1 as
+        `$DiagDir`, the GUI as `_edubotics_diag_dir()`. A rename on either side
+        makes the preflight silently stop discriminating (every case becomes the
+        ambiguous WARNUNG) rather than fail."""
+        src = self._src()
+        self.assertIn('$MarkerPath = Join-Path $DiagDir "edubotics_finalize.marker"',
+                      src)
+        gui = _read(_GUI_SRC)
+        self.assertIn('os.path.join(diag, "edubotics_finalize.marker")', gui)
+        # ... and the same U+FFFD refusal, for the same reason.
+        self.assertIn("[char]0xFFFD", src,
+                      "an ANSI-written (mojibake) marker must be treated as "
+                      "unparseable, never as a different account")
+
+    def test_the_two_readers_agree_on_the_primary_dir_and_diverge_below_it(self):
+        """The DIRECTORY resolution is the twin half this file can still reach.
+
+        Both sides name the same PRIMARY leaf. Below it they diverge on purpose
+        and that divergence is asserted positively, the way the other twin
+        lockstep tests in this repo assert theirs: ``constants.diagnostics_dir``
+        falls back (%LOCALAPPDATA% then ~) on an unwritable ProgramData, while
+        the .ps1 hard-codes ProgramData with none. Consequence, recorded in
+        docs/KNOWN-ISSUES.md: on an unwritable leaf the GUI writes the marker
+        where the preflight never looks and check 5 degrades to its ambiguous —
+        and therefore fail-safe — WARNUNG. Giving the PS side the same probe
+        would duplicate a resolver in a second language, which is the drift class
+        the marker already suffers from.
+        """
+        src = self._src()
+        self.assertIn('$DiagDir = Join-Path $env:ProgramData "EduBotics\\logs"', src)
+        # No fallback on the PS side, and the shape of that assertion matters.
+        # The previous form was `^\$DiagDir\s*=` (anchored at column 0) plus a
+        # `$env:LOCALAPPDATA` name check — and the natural PowerShell fallback is
+        # an INDENTED reassignment inside `if (-not (Test-Path …)) { … }` under
+        # any env var, which passed both. Mutation-proven: an indented
+        # `$DiagDir = Join-Path $env:TEMP "EduBotics"` survived. So: count
+        # assignments at ANY indentation, and allowlist the env vars the script
+        # may read at all. Comments stripped first — the sink block names
+        # %LOCALAPPDATA% precisely to say the sink is NOT there.
+        code = "\n".join(ln for ln in src.splitlines()
+                         if not ln.lstrip().startswith("#"))
+        assignments = re.findall(r"^\s*\$DiagDir\s*=", code, re.M)
+        self.assertEqual(
+            1, len(assignments),
+            f"found {len(assignments)} assignments to $DiagDir — one assignment "
+            f"means one resolution, i.e. no fallback, at ANY indentation")
+        self.assertEqual(
+            sorted({m for m in re.findall(r"\$env:(\w+)", code)}),
+            ["ProgramData", "USERNAME"],
+            "the preflight may read only %ProgramData% (the machine-wide sink "
+            "and the VHDX probe) and %USERNAME% (the account discriminator). A "
+            "third environment variable is a fallback base by any other name")
+        consts = _read(os.path.join(
+            os.path.dirname(__file__), "..", "gui", "app", "constants.py"))
+        self.assertIn('_DIAGNOSTICS_SUBDIR = ("EduBotics", "logs")', consts)
+        # ... and the GUI's fallback chain is real, not aspirational.
+        self.assertIn("LOCALAPPDATA", consts)
+        self.assertIn("_dir_is_writable", consts)
+
+    def test_the_german_messages_use_literal_umlauts(self):
+        """The unittest is the ONLY guard on this. It does NOT mirror
+        ci.yml::german-strings-lint: that grep step needs a LITERAL
+        [FEHLER]/[WARNUNG]/[STOPP] token in the source line, and `Emit` builds
+        the tag at runtime from its -Level parameter, so not one line in this
+        file is in the grep's scope (measured: the whole installer tree has a
+        single file with a literal tag, and it is a comment)."""
+        src = self._src()
+        emits = [ln for ln in src.splitlines()
+                 if re.search(r"Emit (FEHLER|WARNUNG)\b", ln)
+                 and "Windows-Konto" in ln]
+        self.assertEqual(len(emits), 2,
+                         "expected check 5's FEHLER + WARNUNG lines")
+        for line in emits:
+            for bad in ("fuer", "gehoert", "waehrend", "ausfuehren",
+                        "durchgefuehrt", "pruefen", "zurueck", "Faelle",
+                        "Datentraeger"):
+                self.assertNotIn(bad, line,
+                                 f"use literal ä/ö/ü/ß, not {bad!r}")
+            self.assertTrue(any(ch in line for ch in "äöüß"),
+                            "a German student-facing line with no umlaut at "
+                            "all is almost certainly transliterated")
+
+
+class HfTokenBindingWiringTest(unittest.TestCase):
+    """gui_app's half of the machine-bound HuggingFace token.
+
+    The DECISION and the deletion are ``config_generator``'s and are covered by
+    ``tests/test_config_generator.py::TestHfTokenMachineBinding``. What can only
+    be pinned here is the WIRING, and all three parts of it rot silently:
+
+      * ``_bind_hf_token`` runs BEFORE ``_build_ui``, or Schritt D's status label
+        reads a .env the purge has not touched yet and reports a deleted token as
+        saved — i.e. no re-prompt;
+      * removing a credential the student entered is REPORTED in German, because
+        a silent deletion is indistinguishable from a bug;
+      * the two GUI writers go through ``write_hf_token``, so a stored token can
+        never exist without its HF_TOKEN_MACHINE stamp.
+    """
+
+    _NS_KEYS = ("config_generator", "ENV_FILE")
+
+    def _make(self, verdict=None, raises=None, env_file="/tmp/x/.env"):
+        """`_bind_hf_token` bound to a stub owner, with a stubbed generator."""
+        calls = {"log": [], "paths": []}
+
+        def _bind(path):
+            calls["paths"].append(path)
+            if raises is not None:
+                raise raises
+            return verdict
+
+        cg = types.SimpleNamespace(
+            bind_hf_token_to_this_machine=_bind,
+            HF_TOKEN_OK="ok", HF_TOKEN_ADOPTED="adopted",
+            HF_TOKEN_FOREIGN="foreign",
+        )
+        ns = {"config_generator": cg, "ENV_FILE": env_file,
+              "__package__": "gui.app"}
+        method = _load_method("_bind_hf_token", ns)
+        owner = types.SimpleNamespace(_log=calls["log"].append)
+        return method, owner, calls
+
+    def test_a_foreign_token_deletion_is_reported_in_german(self):
+        method, owner, calls = self._make(verdict="foreign")
+        method(owner)
+        self.assertEqual(len(calls["log"]), 1, calls["log"])
+        line = calls["log"][0]
+        self.assertIn("[WARNUNG]", line)
+        # It must say what happened AND what to do — a student who is not told to
+        # re-enter the token just sees recordings stop uploading.
+        for phrase in ("anderen PC", "gelöscht", "Schritt D"):
+            self.assertIn(phrase, line)
+        # ...and it must not be transliterated (CLAUDE.md §1). This is also the
+        # only guard: ci.yml::german-strings-lint's grep sees this line (it
+        # carries a literal [WARNUNG]) but only for its own word denylist.
+        for bad in ("geloescht", "fuer", "gehoert", "pruefen", "ueber "):
+            self.assertNotIn(bad, line)
+        self.assertTrue(any(ch in line for ch in "äöüß"))
+
+    def test_a_legacy_adoption_is_reported_without_alarming_anyone(self):
+        """Once per install, on the first launch after the upgrade. It explains a
+        new .env key — but nothing was lost, so it must not be a warning."""
+        method, owner, calls = self._make(verdict="adopted")
+        method(owner)
+        self.assertEqual(len(calls["log"]), 1, calls["log"])
+        line = calls["log"][0]
+        self.assertNotIn("[WARNUNG]", line)
+        self.assertIn("HuggingFace-Token", line)
+        self.assertTrue(any(ch in line for ch in "äöüß"))
+
+    def test_the_ordinary_case_says_nothing(self):
+        """Every launch on the student's own PC takes this path. A line here
+        would be noise on 100 % of starts."""
+        method, owner, calls = self._make(verdict="ok")
+        method(owner)
+        self.assertEqual(calls["log"], [])
+        self.assertEqual(calls["paths"], ["/tmp/x/.env"])
+
+    def test_a_raising_check_cannot_block_the_launch(self):
+        """It runs from ``__init__`` with no wrapper of its own: an escaping
+        exception would take the whole window with it, so an unreadable or
+        unwritable .env has to degrade to a German line."""
+        method, owner, calls = self._make(raises=OSError("kein Zugriff"))
+        method(owner)   # must not raise
+        self.assertEqual(len(calls["log"]), 1, calls["log"])
+        self.assertIn("[WARNUNG]", calls["log"][0])
+        self.assertIn("kein Zugriff", calls["log"][0])
+
+    def test_it_runs_before_the_ui_that_reads_the_token_status(self):
+        """Statement ORDER inside ``__init__``, via AST — never a string index.
+        ``ast`` drops comments, and the comment above the call names ``_build_ui``
+        precisely to explain the ordering, so an ``index()`` comparison would be
+        asserting something about the prose (the trap
+        test_ros_domain_twin_lockstep documents)."""
+        import ast
+        tree = ast.parse(_read(_GUI_SRC))
+        init = next(
+            fn for cls in tree.body
+            if isinstance(cls, ast.ClassDef) and cls.name == "EduBoticsApp"
+            for fn in cls.body
+            if isinstance(fn, ast.FunctionDef) and fn.name == "__init__")
+        order = {}
+        for i, stmt in enumerate(init.body):
+            text = ast.unparse(stmt)
+            for name in ("self._bind_hf_token()", "self._build_ui()"):
+                if name in text:
+                    order.setdefault(name, i)
+        self.assertEqual(sorted(order), ["self._bind_hf_token()",
+                                         "self._build_ui()"],
+                         f"__init__ no longer calls both: {order}")
+        self.assertLess(
+            order["self._bind_hf_token()"], order["self._build_ui()"],
+            "Schritt D's status label is built inside _build_ui and reads the "
+            ".env — the token must already be judged, or a deleted token is "
+            "still reported as saved and the student is never re-prompted")
+
+    def test_no_gui_writer_stores_the_token_without_its_stamp(self):
+        """``upsert_env_var("HF_TOKEN", …)`` is the underlying writer, but a GUI
+        call site using it directly leaves an UNSTAMPED token — which reads as
+        legacy on every machine that copies the profile, i.e. the whole binding
+        silently off. AST over the whole file, so a comment mentioning either
+        name (there is one) cannot satisfy or break it."""
+        import ast
+        tree = ast.parse(_read(_GUI_SRC))
+        raw_writes, stamped_writes = [], []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            name = (node.func.attr if isinstance(node.func, ast.Attribute)
+                    else getattr(node.func, "id", None))
+            if name == "write_hf_token":
+                stamped_writes.append(node.lineno)
+            elif name == "upsert_env_var" and node.args:
+                first = node.args[0]
+                if isinstance(first, ast.Constant) and first.value == "HF_TOKEN":
+                    raw_writes.append(node.lineno)
+        self.assertEqual(raw_writes, [],
+                         "gui_app writes HF_TOKEN through upsert_env_var — use "
+                         "config_generator.write_hf_token, which stamps "
+                         "HF_TOKEN_MACHINE in the same breath")
+        self.assertGreaterEqual(
+            len(stamped_writes), 2,
+            'expected both GUI token writers (Schritt D\'s „Token speichern" '
+            'and the „Umgebung starten" persist) to call write_hf_token; found '
+            f"{stamped_writes}")
 
 
 class RootCauseGuardTest(unittest.TestCase):

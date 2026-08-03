@@ -17,6 +17,7 @@
  */
 
 import { createSlice } from '@reduxjs/toolkit';
+import { signedOut } from '../session/sessionActions';
 
 const savedTrainingInfo = (() => {
   try {
@@ -44,7 +45,11 @@ const defaultTrainingInfo = {
   saveFreq: 10000,
 };
 
-const initialState = {
+// The slice with NO localStorage in it — `initialState` below is this object
+// with `trainingInfo` HYDRATED from the persisted copy. Keeping the two apart
+// is what lets the sign-out handler rebuild without handing back the snapshot
+// the storage scrub just deleted (same trap as taskSlice's defaultTaskInfo).
+const defaultTrainingState = {
   userList: [],
   datasetList: [],
   selectedUser: undefined,
@@ -71,6 +76,11 @@ const initialState = {
   // specific id here.
   selectedTrainingId: null,
 
+  trainingInfo: defaultTrainingInfo,
+};
+
+const initialState = {
+  ...defaultTrainingState,
   trainingInfo: savedTrainingInfo || defaultTrainingInfo,
 };
 
@@ -175,6 +185,30 @@ const trainingSlice = createSlice({
     setSelectedTrainingId: (state, action) => {
       state.selectedTrainingId = action.payload;
     },
+  },
+  extraReducers: (builder) => {
+    // Written as a KEEP-LIST, not a reset-list. Everything here was fetched
+    // for, typed by, or about the signed-in student — their job, their dataset
+    // and model lists, their hyper-parameters — so the default is "goes", and
+    // the interesting half is the three fields that STAY. Enumerating the 13
+    // fields to clear said nothing about the 3 it silently retained.
+    builder.addCase(signedOut, (state) => ({
+      ...defaultTrainingState,
+      trainingInfo: { ...defaultTrainingInfo },
+      // KEEP — describes the ROS training-status topic on THIS RIG, not a
+      // person. StudentApp's first-load auto-jump reads it; clearing it would
+      // claim the rig went away.
+      topicReceived: state.topicReceived,
+      // KEEP — timestamp of the last ROS training tick. Same rig fact.
+      lastUpdate: state.lastUpdate,
+      // KEEP — a monotonic nonce. `pages/TrainingPage.js` selects it and
+      // compares against a `prevRefreshCounterRef`, calling the
+      // useSupabaseTrainings `refetch()` when the two differ (MyModels never
+      // reads the counter; it receives `refetch` as a prop). Resetting it moves
+      // a counter backwards, which either misses a refetch or fires a spurious
+      // one. Nonces are never reset.
+      cloudJobsRefreshCounter: state.cloudJobsRefreshCounter,
+    }));
   },
 });
 

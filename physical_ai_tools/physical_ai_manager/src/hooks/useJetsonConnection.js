@@ -16,8 +16,12 @@ import {
   setJetsonStatus,
   setJetsonError,
   setHeartbeatTransient,
-  clearJetson,
 } from '../store/jetsonSlice';
+import {
+  readReconnectMarker,
+  writeReconnectMarker,
+  clearReconnectMarker,
+} from '../features/jetson/sessionReset';
 import { setRosbridgeUrl, setRosHost, setImageTopicList } from '../features/ros/rosSlice';
 import { moveToPage } from '../features/ui/uiSlice';
 import PageType from '../constants/pageType';
@@ -36,14 +40,9 @@ const HEARTBEAT_INTERVAL_MS = 30_000;
 // :9091 directly.
 const PROXY_PORT = 9091;
 
-// Refresh-vs-close discriminator (M4). On unload while connected we drop
-// this sessionStorage marker and then fire the release beacon.
-// sessionStorage survives a same-tab refresh but is wiped on a real tab
-// close, so on the next mount the discovery effect can tell a refresh
-// (→ auto-reclaim the lock the beacon just freed) from a genuine close
-// (→ leave the lock freed for the next student). The grace window bounds
-// how long a stale marker can trigger an auto-reclaim.
-const RECONNECT_MARKER_KEY = 'edubotics.jetson.reconnect';
+// How long a refresh marker (see features/jetson/sessionReset) may still
+// trigger an auto-reclaim. A discovery-policy number, so it stays here with
+// planJetsonDiscoveryAction rather than travelling with the marker helpers.
 const RECONNECT_GRACE_MS = 30_000;
 
 /**
@@ -111,12 +110,12 @@ export function useJetsonConnection() {
         const action = planJetsonDiscoveryAction({
           owner: info.current_owner_user_id,
           userId,
-          marker: _readReconnectMarker(),
+          marker: readReconnectMarker(),
           classroomId,
           now: Date.now(),
         });
         if (action !== 'reclaim') {
-          _clearReconnectMarker();  // one-shot; only the refresh path consumes it
+          clearReconnectMarker();  // one-shot; only the refresh path consumes it
         }
         if (action === 'resume') {
           // We still hold the lock server-side (the unload beacon didn't
@@ -127,7 +126,7 @@ export function useJetsonConnection() {
         } else if (action === 'reclaim') {
           // Page was refreshed and our unload beacon freed the lock.
           // Re-claim it so an F5 doesn't drop the student's session.
-          _clearReconnectMarker();
+          clearReconnectMarker();
           dispatch(setJetsonStatus('claiming'));
           try {
             const claimed = await claimJetson(accessToken, info.jetson_id);
@@ -259,7 +258,7 @@ export function useJetsonConnection() {
   useEffect(() => {
     const onUnload = () => {
       if (statusRef.current === 'connected' && tokenRef.current && jetsonIdRef.current) {
-        _writeReconnectMarker(classroomIdRef.current);
+        writeReconnectMarker(classroomIdRef.current);
         releaseJetsonBeacon(tokenRef.current, jetsonIdRef.current);
       }
     };
@@ -268,36 +267,6 @@ export function useJetsonConnection() {
   }, []);
 
   return { connect, disconnect, status };
-}
-
-// ---- Refresh-vs-close marker helpers (M4) ----
-
-function _readReconnectMarker() {
-  try {
-    const raw = window.sessionStorage.getItem(RECONNECT_MARKER_KEY);
-    return raw ? JSON.parse(raw) : null;
-  } catch (_) {
-    return null;  // sessionStorage unavailable / malformed — treat as no marker
-  }
-}
-
-function _writeReconnectMarker(classroomId) {
-  try {
-    window.sessionStorage.setItem(
-      RECONNECT_MARKER_KEY,
-      JSON.stringify({ classroomId, at: Date.now() })
-    );
-  } catch (_) {
-    /* best-effort: sessionStorage unavailable / full */
-  }
-}
-
-function _clearReconnectMarker() {
-  try {
-    window.sessionStorage.removeItem(RECONNECT_MARKER_KEY);
-  } catch (_) {
-    /* best-effort */
-  }
 }
 
 /**
@@ -361,33 +330,4 @@ function _swapRosbridgeBackToLocal(localRosHost, dispatch) {
   dispatch(setImageTopicList([]));
   rosConnectionManager.disconnect();
   rosConnectionManager.resetReconnectCounter();
-}
-
-/**
- * Reset everything on logout. MUST be called from every signOut path
- * BEFORE supabase.auth.signOut() invalidates the JWT, otherwise the
- * release call cannot authenticate and the lock leaks for the full
- * 5-min sweeper window.
- *
- * Optional jetsonId + accessToken let us do a best-effort beacon
- * release on the way out (matches the tab-close path). Callers that
- * don't have those handy can omit them — the slice clear still happens.
- *
- * Always called from React event handlers, not from the heartbeat
- * loop, so we can read state lazily via the closure rather than
- * needing refs.
- */
-export function resetJetsonOnLogout(dispatch, accessToken = null, jetsonId = null) {
-  // Best-effort beacon release so the lock frees immediately on
-  // explicit logout instead of waiting 5 min for the sweeper. The
-  // beacon path revalidates the JWT server-side, so a slightly-stale
-  // token still works as long as it hasn't expired.
-  if (accessToken && jetsonId) {
-    try { releaseJetsonBeacon(accessToken, jetsonId); } catch (_) { /* swallow */ }
-  }
-  // Drop any pending refresh-reconnect marker so a later sign-in to the
-  // same classroom doesn't auto-reclaim on a stale marker.
-  _clearReconnectMarker();
-  rosConnectionManager.setAuthToken(null);
-  dispatch(clearJetson());
 }

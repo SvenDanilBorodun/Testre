@@ -18,7 +18,7 @@ import React, { useCallback, useEffect, useMemo, useRef } from 'react';
 import { useSelector, useDispatch } from 'react-redux';
 import clsx from 'clsx';
 import toast, { useToasterStore } from 'react-hot-toast';
-import { MdLogout, MdRefresh } from 'react-icons/md';
+import { MdRefresh } from 'react-icons/md';
 import DatasetSelector from '../components/DatasetSelector';
 import PolicySelector from '../components/PolicySelector';
 import TrainingOutputFolderInput from '../components/TrainingOutputFolderInput';
@@ -29,16 +29,13 @@ import MyModels from '../components/MyModels';
 import LoginForm from '../components/LoginForm';
 import HeartbeatStatus from '../components/HeartbeatStatus';
 import { Card, Pill, Btn, SectionHeader } from '../components/EbUI';
-import { supabase } from '../lib/supabaseClient';
 import {
-  clearSession,
   setQuota,
   requestProfileRefetch,
 } from '../features/auth/authSlice';
 import { getQuota } from '../services/cloudTrainingApi';
 import useSupabaseTrainings from '../hooks/useSupabaseTrainings';
 import useRefetchOnFocus from '../hooks/useRefetchOnFocus';
-import { resetJetsonOnLogout } from '../hooks/useJetsonConnection';
 
 function statusSubtitle(status) {
   switch (status) {
@@ -85,7 +82,6 @@ export default function TrainingPage() {
   const trainingCredits = useSelector((state) => state.auth.trainingCredits);
   const trainingsUsed = useSelector((state) => state.auth.trainingsUsed);
   const selectedTrainingId = useSelector((state) => state.training.selectedTrainingId);
-  const jetsonId = useSelector((state) => state.jetson.jetsonId);
   const cloudJobsRefreshCounter = useSelector((state) => state.training.cloudJobsRefreshCounter);
 
   const { jobs, loading, refetch, isRealtime } = useSupabaseTrainings();
@@ -124,16 +120,10 @@ export default function TrainingPage() {
 
   useRefetchOnFocus(refetchQuota);
 
-  const handleLogout = async () => {
-    // Release any held Jetson lock BEFORE invalidating the session so the
-    // beacon path still authenticates. Without this, logging out from the
-    // Training tab while connected leaks the lock for the full 5-min
-    // sweeper window. Mirrors the wiring in StudentApp + WebApp.
-    resetJetsonOnLogout(dispatch, session?.access_token, jetsonId);
-    await supabase.auth.signOut();
-    dispatch(clearSession());
-    toast.success('Abgemeldet');
-  };
+  // NO page-level "Abmelden" here any more. StudentApp's own chrome — the
+  // desktop rail and the mobile header, both rendered on EVERY page — carries
+  // one now, so a second control on this page (plus the e-mail the rail already
+  // identifies the student with) meant two buttons and the identity twice.
 
   const selectedJob = useMemo(
     () => pickSelectedJob(jobs, selectedTrainingId),
@@ -166,9 +156,6 @@ export default function TrainingPage() {
           <div className="flex items-center justify-center gap-3">
             <Btn variant="primary" onClick={() => dispatch(requestProfileRefetch())}>
               <MdRefresh /> Erneut versuchen
-            </Btn>
-            <Btn variant="ghost" onClick={handleLogout}>
-              <MdLogout /> Abmelden
             </Btn>
           </div>
         </Card>
@@ -206,7 +193,6 @@ export default function TrainingPage() {
             <div className="flex items-center gap-3 flex-wrap justify-end">
               <HeartbeatStatus />
               <div className="text-right">
-                <div className="text-xs text-[var(--ink-3)]">{session?.user?.email}</div>
                 <Pill tone={creditTone} dot>
                   <span className="font-mono">
                     {remaining} / {trainingCredits}
@@ -214,9 +200,6 @@ export default function TrainingPage() {
                   Trainingsguthaben{trainingsUsed > 0 ? ` · ${trainingsUsed} verbraucht` : ''}
                 </Pill>
               </div>
-              <Btn variant="ghost" size="sm" onClick={handleLogout}>
-                <MdLogout /> Abmelden
-              </Btn>
             </div>
           }
         />
@@ -236,7 +219,7 @@ export default function TrainingPage() {
         >
           <p>
             Cloud-Training läuft über deine <strong>Cloud-Anmeldung</strong>{' '}
-            (oben angemeldet als {session?.user?.email || 'dein Konto'}) — das
+            (angemeldet als {session?.user?.email || 'dein Konto'}) — das
             ist getrennt vom HuggingFace-Token, den du im Setup („Schritt D")
             für Aufnahme-Uploads eingegeben hast.
           </p>

@@ -24,6 +24,17 @@ globalThis.jest = vi;
 // persistence + useRosTopicSubscription's „Ton"-toggle read). Install a minimal
 // in-memory Storage with REAL persistence (set-then-get must round-trip) on both
 // globalThis and the jsdom window so those suites reach their actual assertions.
+//
+// ONE object per storage name, installed on BOTH targets. Under vitest 4's
+// jsdom environment `globalThis === globalThis.window`, so today the second
+// target is the same object and the distinction is moot — but the previous form
+// called the factory once PER TARGET inside the loop, so on any environment
+// where the two ever diverge (or where one of them already carries a real
+// Storage and the other does not) the bare `localStorage` and
+// `window.localStorage` a test and its subject reach for would be two
+// independent Maps that never see each other's writes. Building the object
+// first removes that possibility instead of relying on an equality that is not
+// ours to guarantee.
 function _createStorageMock() {
   const store = new Map();
   return {
@@ -35,14 +46,18 @@ function _createStorageMock() {
     get length() { return store.size; },
   };
 }
-for (const target of [globalThis, globalThis.window].filter(Boolean)) {
-  for (const name of ['localStorage', 'sessionStorage']) {
-    if (!target[name] || typeof target[name].getItem !== 'function') {
-      try {
-        Object.defineProperty(target, name, {
-          value: _createStorageMock(), writable: true, configurable: true,
-        });
-      } catch { /* non-configurable getter already present — leave it */ }
-    }
+const _targets = [...new Set([globalThis, globalThis.window].filter(Boolean))];
+for (const name of ['localStorage', 'sessionStorage']) {
+  const needsMock = _targets.some(
+    (t) => !t[name] || typeof t[name].getItem !== 'function'
+  );
+  if (!needsMock) continue;
+  const shared = _createStorageMock();
+  for (const target of _targets) {
+    try {
+      Object.defineProperty(target, name, {
+        value: shared, writable: true, configurable: true,
+      });
+    } catch { /* non-configurable getter already present — leave it */ }
   }
 }

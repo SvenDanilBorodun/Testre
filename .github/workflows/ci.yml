@@ -45,15 +45,37 @@ jobs:
           # avoids GUI libs on the runner).
           python -m pip install pyyaml pytest numpy opencv-contrib-python-headless
       - name: Syntax-check Python modules
+        # ZERO-FILE FLOOR, the repo's standing rule for scan-based guards (the
+        # four ps_* guards and the three lockstep tests all carry one).
+        # `compileall` prints "Can't list <dir>" and still exits 0, so a renamed
+        # or moved root made this step vacuously green — it would report success
+        # having compiled nothing. Every root is asserted to exist and to hold at
+        # least one .py BEFORE compileall runs, so the failure names the root
+        # instead of appearing as a later, unrelated import error.
         run: |
-          python -m compileall -q \
-            robotis_ai_setup/gui \
-            robotis_ai_setup/scripts \
-            robotis_ai_setup/pi_agent \
-            robotis_ai_setup/cloud_training_api \
-            robotis_ai_setup/modal_training \
-            physical_ai_tools/physical_ai_server/physical_ai_server \
+          set -euo pipefail
+          ROOTS=(
+            robotis_ai_setup/gui
+            robotis_ai_setup/scripts
+            robotis_ai_setup/pi_agent
+            robotis_ai_setup/cloud_training_api
+            robotis_ai_setup/modal_training
+            physical_ai_tools/physical_ai_server/physical_ai_server
             robotis_ai_setup/docker/physical_ai_server/patches
+          )
+          for root in "${ROOTS[@]}"; do
+            if [ ! -d "$root" ]; then
+              echo "::error::compileall root '$root' does not exist — renamed or moved?"
+              exit 1
+            fi
+            n=$(find "$root" -name '*.py' -type f | wc -l)
+            if [ "$n" -eq 0 ]; then
+              echo "::error::compileall root '$root' contains no .py files"
+              exit 1
+            fi
+            echo "$root: $n .py files"
+          done
+          python -m compileall -q "${ROOTS[@]}"
       - name: Unit tests
         run: |
           cd robotis_ai_setup
@@ -1443,6 +1465,38 @@ jobs:
       - name: ESLint (errors AND warnings fail)
         working-directory: physical_ai_tools/physical_ai_manager
         run: npx eslint --ext .js,.jsx --max-warnings 0 src/
+
+  react-tests:
+    # The vitest suite. Until this job NO workflow ran it: react-lint is
+    # eslint-only, so every React guard in the tree was a local check a push
+    # could not fail on — including the ones CLAUDE.md cites as invariants (the
+    # toolbox↔block-definition consistency scan, the enum mirrors, the
+    # storage-key STUDENT/MACHINE coverage scan and the "exactly one
+    # supabase.auth.signOut()" glob). 47 test files were orphaned that way.
+    #
+    # The WHOLE suite, never a subset — un-orphaning is the entire point, and a
+    # curated list is a second place to forget a file.
+    #
+    # Node setup, action pins and `npm ci` are copied from react-lint above so
+    # the two React jobs cannot drift on toolchain: same node 22, same npm cache
+    # keyed on the same lockfile.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@395ad3262231945c25e8478fd5baf05154b1d79f  # v6.1.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: physical_ai_tools/physical_ai_manager/package-lock.json
+      - name: npm ci
+        working-directory: physical_ai_tools/physical_ai_manager
+        run: npm ci --no-audit --no-fund
+      - name: vitest (whole suite)
+        working-directory: physical_ai_tools/physical_ai_manager
+        run: npm test
 
   actions-security:
     # zizmor lints the workflows themselves: unpinned actions, checkout

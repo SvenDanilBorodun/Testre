@@ -37,7 +37,7 @@ vi.mock('../../lib/supabaseClient', () => ({
 }));
 
 const mockResetJetson = vi.fn();
-vi.mock('../../hooks/useJetsonConnection', () => ({
+vi.mock('../../features/jetson/sessionReset', () => ({
   __esModule: true,
   resetJetsonOnLogout: (...a) => mockResetJetson(...a),
 }));
@@ -112,7 +112,7 @@ describe('useMeProfile — load + error branches', () => {
     expect(mockSignOut).not.toHaveBeenCalled();
   });
 
-  test('401 signs out (resetJetson + signOut + clearSession), no profileError', async () => {
+  test('401 signs out (resetJetson + signOut + session/signedOut), no profileError', async () => {
     const store = makeStore();
     const err = new Error('expired');
     err.status = 401;
@@ -122,7 +122,7 @@ describe('useMeProfile — load + error branches', () => {
 
     await waitFor(() => expect(mockSignOut).toHaveBeenCalledTimes(1));
     expect(mockResetJetson).toHaveBeenCalled();
-    expect(store.getState().auth.session).toBeNull(); // clearSession ran
+    expect(store.getState().auth.session).toBeNull(); // the broadcast reached authSlice
     expect(store.getState().auth.profileError).toBeNull();
   });
 

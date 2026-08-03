@@ -17,6 +17,7 @@
  */
 
 import { createSlice } from '@reduxjs/toolkit';
+import { signedOut } from '../session/sessionActions';
 
 const initialState = {
   mergeDatasetList: [],
@@ -95,6 +96,14 @@ const editDatasetSlice = createSlice({
     setDownloadStatus: (state, action) => {
       state.downloadStatus = action.payload;
     },
+  },
+  extraReducers: (builder) => {
+    // Nothing here is persisted, so `initialState` carries no storage snapshot
+    // and a whole-slice reset is safe. It is needed because `hfUserId` /
+    // `hfRepoIdUpload` / `hfRepoIdDownload` name the PREVIOUS student's Hugging
+    // Face account and repos, which the Daten tab offers as pre-filled
+    // defaults.
+    builder.addCase(signedOut, () => initialState);
   },
 });
 

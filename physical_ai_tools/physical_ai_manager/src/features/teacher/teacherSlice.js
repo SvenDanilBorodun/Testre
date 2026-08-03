@@ -1,4 +1,5 @@
 import { createSlice } from '@reduxjs/toolkit';
+import { signedOut } from '../session/sessionActions';
 
 const initialState = {
   classrooms: [],
@@ -114,7 +115,12 @@ const teacherSlice = createSlice({
         lastPairingCode: null,
       };
     },
-    resetTeacher: () => initialState,
+  },
+  extraReducers: (builder) => {
+    // The teacher web signs out through the same primitive, on the same
+    // classroom PCs. Everything here is one teacher's roster — their
+    // classrooms, their students' training history, their Jetson pairing codes.
+    builder.addCase(signedOut, () => initialState);
   },
 });
 
@@ -132,7 +138,6 @@ export const {
   setJetsonError,
   setJetsonLastPairingCode,
   clearJetsonForClassroom,
-  resetTeacher,
 } = teacherSlice.actions;
 
 export default teacherSlice.reducer;

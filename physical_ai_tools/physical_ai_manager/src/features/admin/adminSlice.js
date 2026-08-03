@@ -1,4 +1,5 @@
 import { createSlice } from '@reduxjs/toolkit';
+import { signedOut } from '../session/sessionActions';
 
 const initialState = {
   teachers: [],
@@ -24,11 +25,14 @@ const adminSlice = createSlice({
     removeTeacher: (state, action) => {
       state.teachers = state.teachers.filter((t) => t.id !== action.payload);
     },
-    resetAdmin: () => initialState,
+  },
+  extraReducers: (builder) => {
+    // The admin roster is one admin's view of every teacher account.
+    builder.addCase(signedOut, () => initialState);
   },
 });
 
-export const { setTeachers, setLoading, upsertTeacher, removeTeacher, resetAdmin } =
+export const { setTeachers, setLoading, upsertTeacher, removeTeacher } =
   adminSlice.actions;
 
 export default adminSlice.reducer;

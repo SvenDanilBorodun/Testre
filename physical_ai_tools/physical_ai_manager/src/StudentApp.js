@@ -16,7 +16,15 @@
 
 import React, { useCallback, useEffect, useRef } from 'react';
 import clsx from 'clsx';
-import { MdHome, MdVideocam, MdMemory, MdWidgets, MdConstruction, MdSettings } from 'react-icons/md';
+import {
+  MdHome,
+  MdVideocam,
+  MdMemory,
+  MdWidgets,
+  MdConstruction,
+  MdSettings,
+  MdLogout,
+} from 'react-icons/md';
 import { GoGraph } from 'react-icons/go';
 import toast from 'react-hot-toast';
 import './App.css';
@@ -30,7 +38,7 @@ import SystemPage from './pages/SystemPage';
 import CollisionModal from './components/CollisionModal';
 import PiUpdateGate from './components/PiUpdateGate';
 import StartupGate from './components/StartupGate';
-import { LogoMark } from './components/EbUI';
+import { Avatar, LogoMark } from './components/EbUI';
 import packageJson from '../package.json';
 import { useRosTopicSubscription } from './hooks/useRosTopicSubscription';
 import { useHfUserList } from './hooks/useHfUserList';
@@ -42,14 +50,18 @@ import { clearCapabilities } from './features/tasks/taskSlice';
 import { moveToPage } from './features/ui/uiSlice';
 import PageType from './constants/pageType';
 import { supabase } from './lib/supabaseClient';
-import {
-  setSession,
-  setIsLoading,
-  clearSession,
-} from './features/auth/authSlice';
+import { setSession, setIsLoading } from './features/auth/authSlice';
 import { useMeProfile } from './hooks/useMeProfile';
-import { resetJetsonOnLogout } from './hooks/useJetsonConnection';
 import { isCloudOnlyMode } from './utils/cloudMode';
+import {
+  signOutStudent,
+  logoutBlockReason,
+  LOGOUT_BLOCK_TITLES_DE,
+} from './utils/signOut';
+import {
+  selectWorkflowRunning,
+  selectCalibrationHasUnsolvedCaptures,
+} from './features/workshop/workshopSlice';
 import { isCapabilityVisible, robotGateDecision } from './utils/navGating';
 import { usePiMode } from './utils/piMode';
 
@@ -67,18 +79,6 @@ function StudentApp() {
   // those tabs need the LOCAL rosbridge — which the Jetson connection has
   // overridden.
   const jetsonConnected = useSelector((state) => state.jetson.status === 'connected');
-  // v2.3.0: needed so the signOut handlers below can fire a beacon
-  // release with the still-valid JWT before the session goes away.
-  // Mirrored into a ref so the profile-fetch effect (keyed on the access
-  // token only) reads the CURRENT jetsonId at fire time without listing it
-  // as a dep — re-running getMe on every Jetson connect/disconnect would
-  // spuriously re-fetch the profile and re-toast. Same latest-value-by-ref
-  // pattern as useJetsonConnection's beacon refs.
-  const jetsonId = useSelector((state) => state.jetson.jetsonId);
-  const jetsonIdRef = useRef(jetsonId);
-  useEffect(() => {
-    jetsonIdRef.current = jetsonId;
-  }, [jetsonId]);
 
   // On classroom-Jetson RELEASE (connected → not connected) the rosbridge
   // re-points back to the LOCAL rig. Clear the capability manifest + profile so
@@ -133,6 +133,10 @@ function StudentApp() {
   // carrying it). Drives the sidebar capability filter below. Never seeded from
   // the `?robot=` URL param — caps are server-authoritative (D4).
   const caps = useSelector((state) => state.tasks.taskStatus.capabilities);
+  // Roboter Studio activity — a SECOND surface the „Abmelden" gate has to ask
+  // about, because it never appears in `tasks.taskStatus`.
+  const workflowRunning = useSelector(selectWorkflowRunning);
+  const calibrationCapturing = useSelector(selectCalibrationHasUnsolvedCaptures);
 
   const isFirstLoad = useRef(true);
 
@@ -215,18 +219,41 @@ function StudentApp() {
           'Dieses Konto ist für die Web-App. Bitte nutze die Lehrer-URL.',
           { duration: 6000 }
         );
-        // v2.3.0: release the Jetson lock BEFORE signOut so the JWT is still
-        // valid for the beacon-style release call. Without this, the lock
-        // leaks for the full 5-min sweeper window every time a wrong-role
-        // account hits the student app.
-        resetJetsonOnLogout(dispatch, session?.access_token, jetsonIdRef.current);
-        supabase.auth.signOut();
-        dispatch(clearSession());
+        // reload:false — a reload would destroy the toast above, and without
+        // it a teacher who opened the student URL is bounced to a login form
+        // with no idea why and simply tries again. This is not a handover.
+        dispatch(signOutStudent({ reload: false }));
       }
     },
-    [dispatch, session?.access_token]
+    [dispatch]
   );
   useMeProfile({ onProfile: handleProfile, enableHfLink: true });
+
+  // Student-initiated sign-out. Until now the ONLY "Abmelden" controls in the
+  // student app lived on the Training and Inferenz pages, so a student sitting
+  // on Start / Aufnahme / Roboter Studio had no way to hand the PC over — which
+  // matters because a shared Windows account means a shared browser profile and
+  // therefore a shared localStorage. The whole sequence (and the reload that
+  // makes the handover complete) is utils/signOut::signOutStudent.
+  //
+  // `handoverStarted` keeps the control on screen after the session is gone.
+  // The default sign-out ends in a reload, so normally this flag dies with the
+  // document — but two routes end with the session null and no reload, and then
+  // `identity` is '' and the button that is their only way to finish the
+  // handover would vanish under them:
+  //   * `taskStatus.running` flips true between the click and the reload — the
+  //     click read it false, one `/task/status` tick later `beforeunload`'s own
+  //     `if (taskStatus.running)` guard is armed and prompts;
+  //   * after a rosbridge drop `logoutBlocked` is deliberately false while
+  //     `running` is still stale-true (see logoutBlockReason), so the click goes
+  //     through — and `beforeunload` is NOT liveness-gated, because the
+  //     server-side recorder is running whether or not the browser can see it.
+  // Either way the student can DECLINE the browser's "leave site?" prompt.
+  const [handoverStarted, setHandoverStarted] = React.useState(false);
+  const handleLogout = () => {
+    setHandoverStarted(true);
+    dispatch(signOutStudent());
+  };
 
   useEffect(() => {
     if (isFirstLoad.current && page === PageType.HOME && taskStatus.topicReceived) {
@@ -344,6 +371,32 @@ function StudentApp() {
 
   const isDarkPage = page === PageType.RECORD || page === PageType.INFERENCE;
 
+  // Who is signed in. On a shared Windows account this is the only answer to
+  // "am I signed in as me?", so it is rendered as TEXT beside the control and
+  // not only as its tooltip. Empty until the session resolves — the control is
+  // then hidden rather than offering a logout to nobody, EXCEPT once a handover
+  // has been started (see `handoverStarted`).
+  const identity = session?.user?.email || '';
+  const showLogout = Boolean(identity) || handoverStarted;
+  // Signing out mid-activity would wipe the local form while the SERVER-side
+  // recorder / program keeps going, so the control is disabled exactly where
+  // LeaderToggle is. The decision (including why every branch needs a live
+  // rosbridge) and the German wording are utils/signOut::logoutBlockReason.
+  const blockReason = logoutBlockReason({
+    robotLinkLive: heartbeatStatus === 'connected',
+    taskRunning: Boolean(taskStatus.running),
+    workflowRunning,
+    // The wizard is the only thing that captures frames and it lives on this
+    // page alone; see the selector for why the count is stale everywhere else.
+    calibrationCapturing: page === PageType.WORKSHOP && calibrationCapturing,
+  });
+  const logoutBlocked = blockReason !== null;
+  const logoutTitle = logoutBlocked
+    ? LOGOUT_BLOCK_TITLES_DE[blockReason]
+    : identity
+    ? `Abmelden (${identity})`
+    : 'Abmelden';
+
   const blockRoleMismatch = profileLoaded && role && role !== 'student';
 
   return (
@@ -410,6 +463,52 @@ function StudentApp() {
             );
           })}
           <div className="flex-1" />
+          {/* WHO is signed in, as readable text and not only as a tooltip. On a
+              shared Windows account „bin ich als ich angemeldet?" has to be
+              answerable at a glance, and this rail plus the mobile header below
+              are the only chrome rendered on EVERY page. No page header carries
+              the e-mail any more — the single surviving mention is inside a prose
+              sentence on the Training tab. Outside the button on purpose: the
+              button greys out while an activity blocks the sign-out, which is
+              exactly when a student checks who they are. Truncated with the full
+              address in the title, the same way the nav labels behave.
+              Rendered wherever the rail itself is (`sm:flex`) and NOT gated on
+              `md:` like the nav LABELS are: the mobile header below is
+              `sm:hidden`, so a `hidden md:block` here left the 640–767 px band
+              — rail visible, header gone — with the e-mail as a tooltip only,
+              which is exactly what this is asserted not to be. Width tracks the
+              rail (`w-[64px] md:w-[88px]`) so the truncation stays inside it. */}
+          {showLogout && identity && (
+            <div
+              title={identity}
+              className={clsx(
+                'w-[60px] md:w-[68px] px-1 mb-0.5 text-[9px] leading-tight text-center truncate',
+                isDarkPage ? 'text-white/50' : 'text-[var(--ink-4)]'
+              )}
+            >
+              {identity}
+            </div>
+          )}
+          {showLogout && (
+            <button
+              onClick={handleLogout}
+              disabled={logoutBlocked}
+              title={logoutTitle}
+              aria-label="Abmelden"
+              className={clsx(
+                'w-12 md:w-[68px] py-2 mb-1 rounded-[var(--radius)] flex flex-col items-center gap-1 transition',
+                logoutBlocked && 'opacity-40 cursor-not-allowed',
+                isDarkPage
+                  ? 'text-white/60 hover:bg-white/[0.05]'
+                  : 'text-[var(--ink-3)] hover:bg-[var(--bg-sunk)]'
+              )}
+            >
+              <Avatar name={identity} size={26} />
+              <span className="hidden md:flex items-center gap-1 text-[11px] font-medium">
+                <MdLogout size={13} /> Abmelden
+              </span>
+            </button>
+          )}
           <div
             className={clsx(
               'text-[10px] font-mono',
@@ -440,13 +539,45 @@ function StudentApp() {
               EduBotics
             </span>
           </div>
-          <div
-            className={clsx(
-              'text-[10px] font-mono',
-              isDarkPage ? 'text-white/40' : 'text-[var(--ink-4)]'
+          <div className="flex items-center gap-2 min-w-0">
+            <div
+              className={clsx(
+                'text-[10px] font-mono shrink-0',
+                isDarkPage ? 'text-white/40' : 'text-[var(--ink-4)]'
+              )}
+            >
+              v{packageJson.version}
+            </div>
+            {/* The narrow-viewport half of the identity line above. */}
+            {showLogout && identity && (
+              <span
+                title={identity}
+                className={clsx(
+                  'text-[10px] truncate min-w-0',
+                  isDarkPage ? 'text-white/50' : 'text-[var(--ink-4)]'
+                )}
+              >
+                {identity}
+              </span>
             )}
-          >
-            v{packageJson.version}
+            {showLogout && (
+              <button
+                onClick={handleLogout}
+                disabled={logoutBlocked}
+                title={logoutTitle}
+                aria-label="Abmelden"
+                className={clsx(
+                  'flex items-center gap-1 h-8 px-2 rounded-[var(--radius-sm)] text-sm transition',
+                  logoutBlocked && 'opacity-40 cursor-not-allowed',
+                  isDarkPage
+                    ? 'text-white/70 hover:bg-white/[0.08]'
+                    : 'text-[var(--ink-2)] hover:bg-[var(--bg-sunk)]'
+                )}
+              >
+                <MdLogout size={16} />
+                <span className="text-xs">Abmelden</span>
+              </button>
+            )}
           </div>
         </header>
 

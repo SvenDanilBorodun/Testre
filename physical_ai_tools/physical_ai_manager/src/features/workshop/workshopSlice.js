@@ -9,6 +9,7 @@
  */
 
 import { createSlice } from '@reduxjs/toolkit';
+import { signedOut } from '../session/sessionActions';
 
 const initialState = {
   // Calibration wizard state
@@ -407,6 +408,44 @@ const workshopSlice = createSlice({
         : null;
     },
   },
+  extraReducers: (builder) => {
+    // This slice is HALF rig and half student, so it is the one place the
+    // sign-out reset has to be selective.
+    //
+    // KEPT: everything calibration (`calibState`, the per-step has* flags, the
+    // coverage mosaic, the history). A calibration describes the CAMERA and the
+    // TABLE, it is persisted server-side in the edubotics_calib volume, and
+    // clearing it here would send the next student through a 20-frame ChArUco
+    // capture they do not need.
+    //
+    // CLEARED: the student's PROGRAM and everything derived from running it.
+    // `unsavedBlocklyJson` is the one that made this necessary — WorkshopPage
+    // seeds the editor from it when the cloud fetch fails, so on a
+    // `reload: false` sign-out the next student opened Roboter Studio holding
+    // the previous student's blocks. (Their WRITES fail safe: the cloud's
+    // `_assert_workflow_owned` answers 404. It is disclosure, not corruption.)
+    builder.addCase(signedOut, (state) => {
+      state.selectedWorkflowId = null;
+      state.unsavedBlocklyJson = null;
+      state.lastSavedAt = null;
+      // A half-finished tutorial AND the toolbox restriction it imposes.
+      // `setActiveTutorial({id:null})` alone does NOT clear restrictedBlocks,
+      // which is how the previous enumeration left the next student's toolbox
+      // locked to someone else's lesson.
+      state.activeTutorialId = null;
+      state.activeTutorialStep = 0;
+      state.restrictedBlocks = null;
+      // Output of the student's own run: the German log lines, the inspector
+      // variables, the breakpoints they set in their blocks, the per-block IK
+      // warnings about their destinations.
+      state.log = [];
+      state.variables = {};
+      state.breakpoints = [];
+      state.debuggerWarnings = [];
+      state.workflowError = null;
+      state.currentBlockId = null;
+    });
+  },
 });
 
 export const {
@@ -446,5 +485,51 @@ export const {
   advanceTutorialStep,
   setRestrictedBlocks,
 } = workshopSlice.actions;
+
+// ── Activity selectors ──────────────────────────────────────────────────────
+// Roboter Studio activity lives in THIS slice, not in `tasks.taskStatus`, so a
+// guard about "is the student busy" has to ask here as well. Both predicates are
+// spelled out where the fields are declared rather than in the component that
+// consumes them, because both need a field-level reason to be correct.
+
+/**
+ * Is a Blockly program executing? `paused` counts: a debugger breakpoint still
+ * holds the server's `on_workflow` claim, so the arm is mid-program with the
+ * next segment already queued.
+ *
+ * Deliberately NOT read: `calibState`. `setCalibState` has no dispatcher
+ * anywhere in `src/`, so that field never leaves `'idle'` and a guard keyed on
+ * it would be inert.
+ */
+export const selectWorkflowRunning = (state) =>
+  state.workshop.runState === 'running' || state.workshop.paused === true;
+
+/**
+ * Are there captured calibration frames that abandoning the wizard would throw
+ * away? `framesCaptured` alone is not that question — it LATCHES. Nothing
+ * resets it on leaving a step or the page; only the NEXT step's mount does
+ * (`resetCalibProgress` / `setCalibProgress({framesCaptured: 0})`). So after the
+ * touch-off it stays at 3 for the rest of the session.
+ *
+ * `!calibrated` is what makes it a live question: it is the same three-flag
+ * conjunction `WorkshopPage` gates its editor on, and once it holds the required
+ * steps are done and the latched count describes finished work. The OPTIONAL
+ * „Genauigkeit prüfen" step therefore does not block — it runs after those
+ * three, and losing it costs a re-run of one measurement.
+ *
+ * `recalibrating` is deliberately NOT a trigger. Nothing clears it but
+ * completing all three steps, so a student who pressed „Kalibrierung neu
+ * starten" and changed their mind would be unable to hand the PC over at all.
+ *
+ * The caller must ALSO establish that the wizard is on screen — the wizard is
+ * the only thing that captures frames, and its unmount cancels the server-side
+ * buffer, so off the Roboter-Studio page the latched count is stale for the same
+ * reason.
+ */
+export const selectCalibrationHasUnsolvedCaptures = (state) => {
+  const w = state.workshop;
+  const calibrated = w.hasIntrinsicScene && w.hasHandeyeScene && w.hasTableTouch;
+  return w.framesCaptured > 0 && !calibrated;
+};
 
 export default workshopSlice.reducer;

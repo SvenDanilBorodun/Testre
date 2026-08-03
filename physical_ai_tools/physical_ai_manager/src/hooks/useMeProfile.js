@@ -15,15 +15,13 @@
 import { useCallback, useEffect, useRef } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import toast from 'react-hot-toast';
-import { supabase } from '../lib/supabaseClient';
 import { getMe, patchMyHfUsername } from '../services/meApi';
 import {
   setProfile,
   setProfileError,
   setHfUsername,
-  clearSession,
 } from '../features/auth/authSlice';
-import { resetJetsonOnLogout } from './useJetsonConnection';
+import { signOutStudent } from '../utils/signOut';
 
 // Transient-error retry budget. A 5xx / network blip self-heals; the user
 // should not be bounced to a dead "Server nicht erreichbar" card on the
@@ -133,12 +131,13 @@ export function useMeProfile({ onProfile, enableHfLink = false } = {}) {
           console.error('getMe failed', err);
           const status = err?.status ?? err?.response?.status;
           if (status === 401 || status === 403) {
-            // JWT dead → the beacon release would fail server-side anyway.
-            // Clear local Redux + rosbridge auth so the next session is clean.
+            // reload:false so the German reason above survives — the login form
+            // alone does not say WHY they were bounced. (The thunk still
+            // attempts the Jetson beacon with the now-dead JWT; the server
+            // rejects it and the lock waits for the 5-min sweeper, exactly as
+            // before. A dead token is not worth a second code path.)
             toast.error('Sitzung abgelaufen — bitte erneut anmelden.');
-            resetJetsonOnLogout(dispatch);
-            supabase.auth.signOut();
-            dispatch(clearSession());
+            dispatch(signOutStudent({ reload: false }));
             return;
           }
           if (status === 404) {

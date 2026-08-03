@@ -426,6 +426,38 @@ export function useRosTopicSubscription() {
           msg.phase === TaskPhase.INFERENCING ||
           msg.phase === TaskPhase.INFERENCE_LOADING;
 
+        // May the ROBOT tell this browser who the student is?
+        //
+        // `task_info.user_id` is the Hugging Face account a recording uploads
+        // under — the one genuinely person-scoped field on this wire. The ROS
+        // node keeps its own copy for the life of a task, so it survives BOTH a
+        // sign-out and a change of student: nothing unsubscribes and nothing
+        // can, because the browser still has to show the running task. Two
+        // executed leaks, one adopt:
+        //   * after `signOutStudent`, ONE tick put the previous student's id
+        //     back into Redux AND into storage (`setTaskInfo` re-persists a
+        //     truthy userId), with no user action at all;
+        //   * student B signing in while the node still holds A's `user_id`
+        //     inherited it the same way — for which "is anybody signed in?" is
+        //     no answer at all, since somebody is.
+        //
+        // So the gate is an IDENTITY comparison, not a session check. The one
+        // student-scoped identity in the store is `auth.hfUsername`, and it is
+        // the SAME id space as `task_info.user_id`: `useMeProfile`'s auto-link
+        // PATCHes `/me` with the selected Benutzer-ID, i.e. with the very value
+        // the recorder sends. Fail-safe by construction — `hfUsername` is null
+        // until `/me` resolves and is cleared by `signedOut`, and a null never
+        // equals a non-empty id, so an unknown identity adopts nothing.
+        //
+        // Accepted cost: a student who never signs in at all (recording works
+        // without a cloud login) no longer inherits the id of a task started
+        // elsewhere — they keep their own persisted Benutzer-ID in a field that
+        // is read-only while a task runs anyway. Nothing else reads
+        // `taskStatus.userId`, so blanking that half is free.
+        const myHfUsername = store.getState().auth?.hfUsername || '';
+        const robotUserId = msg.task_info?.user_id || '';
+        const robotNamesMe = Boolean(myHfUsername) && robotUserId === myHfUsername;
+
         // ROS message to React state
         const statusPayload = {
           robotType: msg.robot_type || '',
@@ -438,7 +470,7 @@ export function useRosTopicSubscription() {
           currentEpisodeNumber: msg.current_episode_number || 0,
           currentScenarioNumber: msg.current_scenario_number || 0,
           currentTaskInstruction: msg.current_task_instruction || '',
-          userId: msg.task_info?.user_id || '',
+          userId: robotNamesMe ? robotUserId : '',
           usedStorageSize: msg.used_storage_size || 0,
           totalStorageSize: msg.total_storage_size || 0,
           usedCpu: msg.used_cpu || 0,
@@ -536,8 +568,9 @@ export function useRosTopicSubscription() {
 
           // Adopt the server's user_id only when non-empty (e.g. resuming a
           // task started elsewhere); never overwrite a saved selection with ''.
-          if (msg.task_info.user_id) {
-            infoUpdate.userId = msg.task_info.user_id;
+          // And only when it NAMES the signed-in student — see robotNamesMe.
+          if (robotNamesMe) {
+            infoUpdate.userId = robotUserId;
           }
 
           dispatch(setTaskInfo(infoUpdate));

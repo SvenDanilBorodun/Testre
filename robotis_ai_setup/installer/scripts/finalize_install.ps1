@@ -10,7 +10,7 @@
 # manually by re-running the Inno Setup installer.
 #
 # Exit codes — THE contract with the GUI. Our exit code is the AUTHORITY on what
-# happened here; the GUI routes on it and on nothing else (gui_app.py
+# happened here; it is the ONLY thing the GUI branches on (gui_app.py
 # ::_prompt_finalize_install::_run_elevated). Keep these stable, and keep the
 # GUI's EXIT_* mirror in lockstep:
 #    0  = done — import + pull both succeeded, .reboot_required cleared
@@ -25,6 +25,27 @@
 # finished", which is true of EVERY non-zero exit above. Routing on the flag
 # instead of on the exit code is what made 10 and 12 dead code and reported
 # "Neustart erforderlich" over a failed pull, forever (2026-07-17).
+#
+# The MARKER file is a second, NARROWER channel. The EXIT CODE still decides
+# WHAT happened — the marker never overrides it and never picks a branch of the
+# chain above. In exactly ONE cell it disambiguates WHICH German remedy to show:
+# exit 0 (so finalize's own Test-DistroRegistered passed) while the un-elevated
+# GUI still cannot see the distro. It is written "started <iso> pid=<n>
+# user=<name>" the moment this script executes any code (proof it launched), and
+# BOTH terminal paths overwrite it: Fail-WithNextAction with "FAILED
+# <iso>\n<problem>\n<next step>", and the success path at the bottom with
+# "SUCCESS <iso> user=<name> distro=<name>". The success stamp exists because
+# that path used to leave the marker reading "started ...", so the GUI could not
+# tell what the elevated side had observed — nor, on a managed PC where a
+# DIFFERENT admin account elevates, AS WHOM. gui_app.py compares that `user=`
+# against %USERNAME% to tell a per-Windows-account WSL registration split from a
+# genuine stale-WSL-state failure.
+#
+# EVERY marker write carries -Encoding UTF8, and gui_app.py reads it back as
+# utf-8-sig. PS 5.1's Set-Content default is the system ANSI codepage: on a
+# German PC "Müller" was written cp1252 and decoded as "M<U+FFFD>ller", which
+# can never casefold-match %USERNAME% — so the per-account branch fired on the
+# SAME account and replaced correct reboot advice with advice that cannot help.
 
 param(
     [string]$LogPath    = (Join-Path ([System.IO.Path]::GetTempPath()) 'edubotics_finalize.log'),
@@ -57,7 +78,7 @@ try {
     if ($markerDir -and -not (Test-Path $markerDir)) {
         New-Item -ItemType Directory -Path $markerDir -Force | Out-Null
     }
-    Set-Content -Path $MarkerPath -Value ("started {0} pid={1} user={2}" -f (Get-Date).ToString("o"), $PID, $env:USERNAME) -Force
+    Set-Content -Path $MarkerPath -Value ("started {0} pid={1} user={2}" -f (Get-Date).ToString("o"), $PID, $env:USERNAME) -Encoding UTF8 -Force
 } catch { }
 
 # ── Transcript: Captures all stdout/stderr to $LogPath so the GUI can show
@@ -128,7 +149,7 @@ function Fail-WithNextAction {
     Write-Host "   Nächster Schritt: $NextStep" -ForegroundColor Yellow
     Write-Host "   Protokoll: $LogPath"
     try {
-        Set-Content -LiteralPath $MarkerPath -Value ("FAILED {0}`n{1}`n{2}" -f (Get-Date).ToString("o"), $Problem, $NextStep) -Force
+        Set-Content -LiteralPath $MarkerPath -Value ("FAILED {0}`n{1}`n{2}" -f (Get-Date).ToString("o"), $Problem, $NextStep) -Encoding UTF8 -Force
     } catch { }
     # $EXIT_FAILED, not a bare literal — the exit codes ARE the GUI contract, and
     # a second spelling of the same number is how the two drift apart.
@@ -467,6 +488,18 @@ try {
     }
 
     Write-Step "Fertig! Sie können EduBotics jetzt nutzen."
+    # Stamp the OUTCOME, mirroring Fail-WithNextAction's FAILED shape (see the
+    # marker paragraph in the header). Deliberately the LAST thing before the
+    # exit, so it can only ever be written on a genuinely complete run. `user=`
+    # is not last on the line, so a reader must cut at " distro=" — %USERNAME%
+    # can contain spaces. -Encoding UTF8 because the GUI decodes UTF-8 and a
+    # German name written in the ANSI codepage comes back with a replacement
+    # character (see the marker paragraph in the header). try/catch like every
+    # other marker write: the marker is diagnostic, and failing to stamp it must
+    # never turn a finished install into a failed one.
+    try {
+        Set-Content -LiteralPath $MarkerPath -Value ("SUCCESS {0} user={1} distro={2}" -f (Get-Date).ToString("o"), $env:USERNAME, $DistroName) -Encoding UTF8 -Force
+    } catch { }
     exit $EXIT_DONE
 } finally {
     if ($transcriptActive) {

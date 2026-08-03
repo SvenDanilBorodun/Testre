@@ -555,6 +555,15 @@ class EduBoticsApp:
         # .env value, so the badge never claims "ready" during the restart.
         self._rs_switch_in_flight = False
 
+        # BEFORE _build_ui, because Schritt D's status label is built inside it
+        # and reads the .env: a token this PC can prove belongs to another one
+        # has to be gone from the file by then, so the label says „Kein Token
+        # gespeichert" and the student is re-prompted exactly as on a fresh
+        # install. Safe to log from here — _log defers through root.after(0),
+        # which cannot fire before mainloop() and therefore not before
+        # self.log_text exists.
+        self._bind_hf_token()
+
         self._build_ui()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self._check_prerequisites()
@@ -985,6 +994,46 @@ class EduBoticsApp:
 
     # ── HuggingFace token ────────────────────────────────────────────
 
+    def _bind_hf_token(self):
+        """Judge the stored HuggingFace token against THIS PC, and say so.
+
+        %LOCALAPPDATA%\\EduBotics\\.env travels — roaming profile, FSLogix
+        container, AppData redirection, or a golden image captured after a first
+        launch — and it carries HF_TOKEN, which compose forwards into
+        physical_ai_server. So a copied profile would upload one student's
+        recordings under another's HuggingFace account. The decision and the
+        deletion live in ``config_generator.bind_hf_token_to_this_machine``; this
+        method exists to put the outcome in the Protokoll, because removing a
+        credential the student entered must not happen silently.
+
+        Never raises: an unreadable/unwritable .env is reported and the launch
+        continues. The regenerate-side filter in
+        ``config_generator._read_unmanaged_lines`` still keeps a foreign token out
+        of the .env compose reads, so a failure here costs the report and the
+        early deletion, not the protection.
+        """
+        try:
+            verdict = config_generator.bind_hf_token_to_this_machine(ENV_FILE)
+        except Exception as e:  # noqa: BLE001 — a diagnostic must not block startup
+            self._log(
+                f"[WARNUNG] Das gespeicherte HuggingFace-Token konnte nicht "
+                f"geprüft werden: {e}"
+            )
+            return
+        if verdict == config_generator.HF_TOKEN_FOREIGN:
+            self._log(
+                "[WARNUNG] Das gespeicherte HuggingFace-Token stammt von einem "
+                "anderen PC — die EduBotics-Konfiguration wurde offenbar "
+                "mitkopiert. Das Token wurde von diesem PC gelöscht, damit "
+                "Aufnahmen nicht unter einem fremden HuggingFace-Konto landen. "
+                "Bitte in Schritt D dein eigenes Token eingeben."
+            )
+        elif verdict == config_generator.HF_TOKEN_ADOPTED:
+            self._log(
+                "HuggingFace-Token wurde diesem PC zugeordnet und bleibt "
+                "gespeichert — eine erneute Eingabe ist nicht nötig."
+            )
+
     def _refresh_hf_token_status(self):
         """Reflect whether a token is already saved on this PC — without
         revealing the secret. Read from the .env each time so it stays
@@ -1012,7 +1061,10 @@ class EduBoticsApp:
             )
             return
         try:
-            config_generator.upsert_env_var("HF_TOKEN", token, ENV_FILE)
+            # write_hf_token, not upsert_env_var: it stamps HF_TOKEN_MACHINE in
+            # the same breath, so a stored token can never exist unstamped and
+            # be mistaken for a legacy one on a machine that copied this .env.
+            config_generator.write_hf_token(token, ENV_FILE)
         except Exception as e:
             messagebox.showerror(
                 "Fehler", f"Token konnte nicht gespeichert werden: {e}"
@@ -1958,6 +2010,49 @@ class EduBoticsApp:
                     "(Marker-Datei fehlt)."
                 )
 
+            def _marker_user():
+                """The Windows account finalize_install.ps1 ran AS, or "".
+
+                finalize writes THREE marker shapes and two of them carry the
+                field: the startup stamp ``started <iso> pid=<n> user=<name>``
+                and the success stamp ``SUCCESS <iso> user=<name>
+                distro=<name>``. The third, ``FAILED <iso>\\n<problem>\\n<next
+                step>``, carries no ``user=`` and correctly yields "" — it is
+                also unreachable here, because this branch only runs on
+                FINALIZE_EXIT_DONE. %USERNAME% may
+                contain spaces, so the value runs to the end of the line —
+                except in the SUCCESS shape, where " distro=" follows it; cut
+                there. Never raises and never guesses: a missing, truncated or
+                garbage marker yields "", which routes to the generic message.
+
+                ENCODING IS LOAD-BEARING, and this cost a wrong accusation.
+                finalize_install.ps1 writes the marker ``-Encoding UTF8`` (PS
+                5.1 emits a BOM for that), so the read is ``utf-8-sig``. Before
+                that pairing the .ps1 used Set-Content's default — the system
+                ANSI codepage — and a German „Müller" came back as
+                „M�ller", which can never casefold-match %USERNAME%: the
+                per-account branch below then fired on the SAME account and
+                replaced correct reboot advice with advice that cannot help.
+                A U+FFFD ANYWHERE in the parsed name is therefore treated as
+                unparseable rather than as a different account — accusing the
+                student of the wrong Windows login is worse than the generic
+                message, so a mojibake marker must fall back, not route.
+                """
+                try:
+                    with open(marker_file, "r", encoding="utf-8-sig",
+                              errors="replace") as fh:
+                        body = fh.read()
+                except OSError:
+                    return ""
+                for line in body.splitlines():
+                    _, sep, rest = line.partition("user=")
+                    if not sep:
+                        continue
+                    cut = rest.find(" distro=")
+                    name = (rest[:cut] if cut != -1 else rest).strip()
+                    return "" if "�" in name else name
+                return ""
+
             # Surface the elevated script's transcript (last ~30 lines).
             try:
                 if os.path.isfile(log_file) and os.path.getsize(log_file) > 0:
@@ -2038,19 +2133,56 @@ class EduBoticsApp:
                 # exit 0 but is_distro_registered() is False. Without this branch
                 # the chain fell through to the generic else and printed
                 # "Einrichtung fehlgeschlagen (exit 0)" — a self-contradiction
-                # that tells the student nothing and reads like a GUI bug. The
-                # honest report is: the script believes it succeeded, the
-                # environment is still absent (a wsl.exe that reported success
-                # while the import silently didn't land — a stale
-                # WSL-service state, or an unregister racing the import).
-                self._log(
-                    "Die Einrichtung meldet Erfolg, aber die EduBotics-Umgebung "
-                    "fehlt weiterhin. Bitte den PC neu starten und EduBotics "
-                    "erneut öffnen — hilft das nicht, bitte den EduBotics-"
-                    "Installer erneut ausführen."
-                )
-                self._set_status(
-                    "Umgebung fehlt trotz erfolgreicher Einrichtung — PC neu starten")
+                # that tells the student nothing and reads like a GUI bug.
+                #
+                # There are TWO causes and they need different remedies, so
+                # discriminate before reporting. FINALIZE_EXIT_DONE implies
+                # finalize ran Test-DistroRegistered and it PASSED — every other
+                # outcome leaves through Fail-WithNextAction — so "the elevated
+                # side saw the distro, we cannot" plus "it ran as a DIFFERENT
+                # Windows account" is an inference from the contract, not a
+                # guess. WSL2 registers distros PER WINDOWS USER
+                # (HKCU\...\Lxss) while the installer is
+                # PrivilegesRequired=admin: on a managed school PC where a
+                # different admin elevates, `wsl --import` lands the
+                # registration in the ADMIN's hive and the student's
+                # un-elevated GUI cannot see it. Rebooting can never fix that,
+                # which is exactly what the generic message below advises.
+                #
+                # Same account, or no readable marker -> fall through to that
+                # generic message BYTE-FOR-BYTE: its stated causes (a wsl.exe
+                # that reported success while the import silently didn't land —
+                # a stale WSL-service state, or an unregister racing the import)
+                # remain correct for the same-account case.
+                elevated_user = _marker_user()
+                current_user = (os.environ.get("USERNAME") or "").strip()
+                if (elevated_user and current_user
+                        and elevated_user.casefold() != current_user.casefold()):
+                    # Windows account names are case-insensitive, so compare
+                    # casefolded — a case difference is the same account.
+                    self._log(
+                        f"Die Einrichtung wurde mit dem Windows-Konto "
+                        f"„{elevated_user}“ abgeschlossen, angemeldet sind Sie "
+                        f"aber als „{current_user}“. Eine WSL-Umgebung gehört "
+                        f"immer genau dem Windows-Konto, unter dem sie "
+                        f"eingerichtet wurde — deshalb ist sie hier nicht "
+                        f"sichtbar. Bitte EduBotics mit dem Konto "
+                        f"„{elevated_user}“ starten, oder den EduBotics-"
+                        f"Installer erneut ausführen, während Sie mit Ihrem "
+                        f"eigenen Konto angemeldet sind."
+                    )
+                    self._set_status(
+                        "Umgebung gehört einem anderen Windows-Konto — mit "
+                        "diesem Konto anmelden")
+                else:
+                    self._log(
+                        "Die Einrichtung meldet Erfolg, aber die EduBotics-Umgebung "
+                        "fehlt weiterhin. Bitte den PC neu starten und EduBotics "
+                        "erneut öffnen — hilft das nicht, bitte den EduBotics-"
+                        "Installer erneut ausführen."
+                    )
+                    self._set_status(
+                        "Umgebung fehlt trotz erfolgreicher Einrichtung — PC neu starten")
             elif exit_code is None:
                 # Launch failure (never ran) — distinct from a numeric
                 # non-zero exit. The missing marker corroborates it. Offer
@@ -3234,10 +3366,14 @@ class EduBoticsApp:
                 # 0.5 Persist a freshly-typed HF token (if any) BEFORE the .env
                 # is regenerated, so generate_env_file() carries it through as
                 # an unmanaged key. An already-saved token (empty field) is
-                # left untouched and preserved by the regenerate.
+                # left untouched and preserved by the regenerate. write_hf_token
+                # stamps HF_TOKEN_MACHINE with it, so the token the student just
+                # typed is bound to THIS PC before the .env can be copied
+                # anywhere — writing it here unstamped would make it look like a
+                # legacy token on every clone.
                 if hf_token:
                     try:
-                        config_generator.upsert_env_var("HF_TOKEN", hf_token, ENV_FILE)
+                        config_generator.write_hf_token(hf_token, ENV_FILE)
                         self._log("HuggingFace-Token gespeichert.")
                         self.root.after(0, lambda: self.hf_token_var.set(""))
                         self.root.after(0, self._refresh_hf_token_status)

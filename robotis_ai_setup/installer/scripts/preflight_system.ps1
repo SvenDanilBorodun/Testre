@@ -1,7 +1,7 @@
 ﻿# preflight_system.ps1 — Pre-flight self-diagnosis (German) before the student
 #                        hits an install/runtime failure.
 #
-# Runs four non-fatal checks and prints German OK/WARNUNG/FEHLER lines, mirroring
+# Runs five non-fatal checks and prints German OK/WARNUNG/FEHLER lines, mirroring
 # verify_system.ps1's diagnostics-log style. Every line is also appended to
 # %ProgramData%\EduBotics\logs\install_diagnostics.log so support has evidence
 # even when the console is gone.
@@ -11,6 +11,7 @@
 #   2. UAC / self-elevation feasibility
 #   3. WSL2 availability
 #   4. dockerd reachability (only if the EduBotics distro already exists)
+#   5. Distro image on disk but NOT registered for THIS Windows account
 #
 # Always exits 0 — this is a diagnostic, never a gate. Pass -Quiet for GUI use
 # (suppresses the console, still writes the log).
@@ -198,6 +199,80 @@ if ($distroPresent) {
     }
 } else {
     Emit INFO "EduBotics-Distro noch nicht vorhanden - wird bei der Einrichtung importiert."
+}
+
+# ── 5. Distro image on disk, but not registered for THIS Windows account ────
+# WSL2 distros are registered PER WINDOWS USER (HKCU\...\Lxss), but the distro
+# IMAGE is machine-wide: import_edubotics_wsl.ps1's default -InstallRoot puts
+# ext4.vhdx under %ProgramData%\EduBotics\wsl. The installer is
+# PrivilegesRequired=admin, so on a managed school PC where the student is a
+# standard user and a DIFFERENT admin account elevates, `wsl --import` writes
+# the registration into the ADMIN's hive and the student's un-elevated GUI
+# cannot see the distro at all. The GUI reports that state as a stale
+# WSL-service condition - the wrong diagnosis, and one no amount of rebooting
+# can fix, because the environment is not missing, it is invisible to this user.
+#
+# Disk-yes / list-no is the SYMPTOM, not the cause, and it has a second
+# producer: after a failed `wsl --import` the importer removes the partial
+# ext4.vhdx under -ErrorAction SilentlyContinue, and that removal commonly
+# fails because the WSL service or an AV scanner still holds the handle. The
+# leftover file then reproduces this signature with no account problem at all -
+# and telling a student to switch Windows accounts sends them somewhere they
+# cannot go on a managed PC.
+#
+# The DISCRIMINATOR is the finalize marker's `user=` field - the same field
+# gui_app.py parses, recording the account the elevated finalize actually ran
+# as. Only a name that DIFFERS from $env:USERNAME proves the split and earns a
+# FEHLER that names one cause; no marker, an unparseable one, or the same
+# account gets a WARNUNG that names BOTH possibilities and a remedy that fixes
+# either. $distroPresent is REUSED from check 4 rather than re-running
+# `wsl --list`: one enumeration, one verdict.
+$VhdxPath = Join-Path $env:ProgramData "EduBotics\wsl\ext4.vhdx"
+$vhdxPresent = $false
+try {
+    $vhdxPresent = Test-Path -LiteralPath $VhdxPath
+} catch {
+    # This script's own convention: a diagnostic must never be able to abort.
+    Write-Diag "account_scope" "Test-Path raised: $_"
+}
+
+# finalize_install.ps1 writes the marker into this same diagnostics leaf, and
+# writes it -Encoding UTF8 - so read it as UTF8. A U+FFFD in the parsed name
+# means an OLD (ANSI-written) marker was decoded: unparseable, never "a
+# different account", because a wrong accusation is worse than the generic
+# advice below.
+$MarkerPath = Join-Path $DiagDir "edubotics_finalize.marker"
+$markerUser = ""
+try {
+    if (Test-Path -LiteralPath $MarkerPath) {
+        foreach ($line in (Get-Content -LiteralPath $MarkerPath -Encoding UTF8)) {
+            $at = $line.IndexOf("user=")
+            if ($at -lt 0) { continue }
+            $rest = $line.Substring($at + 5)
+            # %USERNAME% may contain spaces, so the value runs to end-of-line -
+            # except in the SUCCESS shape, where " distro=" follows it.
+            $cut = $rest.IndexOf(" distro=")
+            if ($cut -ge 0) { $rest = $rest.Substring(0, $cut) }
+            $markerUser = $rest.Trim()
+            break
+        }
+    }
+} catch {
+    Write-Diag "account_scope" "marker read raised: $_"
+}
+if ($markerUser.IndexOf([char]0xFFFD) -ge 0) { $markerUser = "" }
+
+# -ine, not -ne: Windows account names are case-insensitive, so a case
+# difference is the SAME account. (PowerShell's -ne is already case-insensitive;
+# spelling it out keeps the intent from reading like an oversight.)
+$accountSplit = ($markerUser -ne "") -and ($env:USERNAME) -and ($markerUser -ine $env:USERNAME)
+Write-Diag "account_scope" "vhdx=$VhdxPath present=$vhdxPresent distroRegistered=$distroPresent USERNAME=$env:USERNAME markerUser=$markerUser split=$accountSplit"
+if ($vhdxPresent -and (-not $distroPresent)) {
+    if ($accountSplit) {
+        Emit FEHLER "Die EduBotics-Umgebung wurde mit dem Windows-Konto ($markerUser) eingerichtet, angemeldet sind Sie aber als ($env:USERNAME). Eine WSL-Umgebung gehört immer genau einem Windows-Konto und ist für jedes andere Konto unsichtbar. Bitte EduBotics mit dem Konto ($markerUser) starten - oder den EduBotics-Installer erneut ausführen, während Sie mit Ihrem eigenen Konto angemeldet sind."
+    } else {
+        Emit WARNUNG "Auf diesem PC liegt bereits eine EduBotics-Datenträgerdatei, für das angemeldete Windows-Konto ($env:USERNAME) ist aber keine WSL-Umgebung registriert. Dafür gibt es zwei Ursachen: Die Einrichtung lief unter einem anderen Windows-Konto, oder ein früherer Einrichtungsversuch ist abgebrochen und hat eine unvollständige Datei zurückgelassen. Bitte den EduBotics-Installer erneut ausführen, während Sie mit Ihrem eigenen Konto angemeldet sind - das behebt beide Fälle."
+    }
 }
 
 if (-not $Quiet) {

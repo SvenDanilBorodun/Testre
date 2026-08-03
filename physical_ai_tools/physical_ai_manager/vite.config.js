@@ -148,5 +148,17 @@ export default defineConfig(({ mode }) => ({
     environment: 'jsdom',
     globals: true,
     setupFiles: path.resolve(srcDir, 'setupTests.js'),
+    // The suite is `src/` and NOTHING else. Without an explicit include,
+    // vitest's default glob covers the whole PACKAGE, so any stray test file
+    // outside src/ — a scratch probe, a vendored fixture, a copied example —
+    // silently joins `ci.yml::react-tests`, which is a BLOCKING gate.
+    // Measured: one probe file took the suite from 49 files / 488 tests to
+    // 50 / 497 and passed, unreviewed. It is also invisible to
+    // sessionScope.test.js's storage-key coverage scan, whose walk starts at
+    // src/ — so such a file would be EXECUTED by the gate while contributing
+    // nothing the gate can see. Covers all 49 current files (`*.test.js` /
+    // `*.test.jsx`, including the dotted `SystemPage.cameraRoles.test.jsx`
+    // shape); `spec` is carried for symmetry with vitest's own default.
+    include: ['src/**/*.{test,spec}.{js,jsx}'],
   },
 }));

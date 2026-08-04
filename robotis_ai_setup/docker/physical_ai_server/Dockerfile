@@ -266,7 +266,9 @@ RUN echo "AGPL audit: relies on explicit dependency manifest, see Dockerfile com
 # loads a policy, and on-device training is Cloud-only. Swap to torch 2.7.0+cpu
 # (SAME version — still satisfies LeRobot 0.5.1's torch>=2.7,<2.11, so Rule §5 is
 # unchanged), drop the CUDA runtime wheels (nvidia-*-cu12 / triton / torchaudio)
-# and /usr/local/cuda.
+# and /usr/local/cuda — plus the two large NVIDIA DEVELOPER trees that sit
+# outside that prefix and so survived this step for its first year
+# (nsight-compute + libnccl, ~1.97 GB; rationale at the deletions themselves).
 #
 # These rm/uninstalls write WHITEOUTS over the immutable base layers, so
 # `docker save` would still ship the bytes — build-images.sh FLATTENs the amd64
@@ -291,6 +293,76 @@ RUN if [ "$SLIM_CUDA" = "1" ]; then \
         nv="$(python3 -m pip list --format=freeze 2>/dev/null | grep -iE '^(nvidia-|triton)' | cut -d= -f1 || true)"; \
         if [ -n "$nv" ]; then echo "$nv" | xargs -r python3 -m pip uninstall -y || true; fi; \
         rm -rf /usr/local/cuda* /usr/local/nvidia 2>/dev/null || true; \
+        # ── The two NVIDIA developer trees the glob above CANNOT reach ───────
+        # `/usr/local/cuda*` + `/usr/local/nvidia` is where the CUDA TOOLKIT
+        # lives, but the nvidia/cuda:12.8.0-devel base also drops two large
+        # payloads OUTSIDE that prefix. They therefore survived every slim so
+        # far and shipped in every student download (measured on the released
+        # physical-ai-server:2.13.0):
+        #
+        #   /opt/nvidia/nsight-compute                    1192.1 MB
+        #       the GPU kernel profiler (incl. a 180 MB libQt6WebEngineCore.so)
+        #   /usr/lib/x86_64-linux-gnu/libnccl.so.2.25.1    383.6 MB
+        #   /usr/lib/x86_64-linux-gnu/libnccl_static.a     390.2 MB
+        #       multi-GPU collective communication
+        #
+        # They are provably DEAD on this flavor, not merely unused. By the time
+        # this runs the image is on torch-2.7.0+cpu (torch.version.cuda is None,
+        # torch.distributed.is_nccl_available() False), there is no
+        # libtorch_cuda.so and no site-packages/nvidia/. The load-bearing fact is
+        # that NOTHING DECLARES OR dlopens either soname: a DT_NEEDED sweep over
+        # /opt/ros, /usr/lib and /usr/local/lib returns zero hits for nccl. The
+        # only FUNCTIONAL reference is torch/__init__.py's `cuda_libs` dict,
+        # reached solely from _load_global_deps()'s `except OSError` fallback via
+        # _preload_cuda_deps -> _get_cuda_dep_paths, which globs only
+        # <sys.path entry>/nvidia/<folder>/lib — the pip wheels this very block
+        # already uninstalled — and sys.path contains no /usr/lib/x86_64-linux-gnu.
+        # Deliberately NOT claimed: that the strings appear nowhere else. The
+        # base image's NV_LIBNCCL_PACKAGE_NAME / NCCL_VERSION env vars survive in
+        # captured colcon *.sh.env files and build logs, and PATH aside,
+        # /usr/lib/x86_64-linux-gnu IS listed in /etc/ld.so.conf.d because it is
+        # the default system lib dir. Both are inert: a name in a stale env
+        # capture or a directory on the loader search path is not a dependency.
+        # Validated by building the candidate against the released 2.14.0 image,
+        # flattening it, and passing all four build-time smoke gates plus a full
+        # container boot (all four ROS nodes alive, 66 services, rosbridge :9090
+        # and web_video_server :8080 both serving — the latter matters because it
+        # fails SILENTLY on a missing library — zero errors in the logs).
+        # Measured effect on the amd64 image: .Size 7.53 GB -> 5.56 GB, and
+        # 2.626 GB -> 1.592 GB compressed — i.e. -39 % on what a student on a
+        # school connection actually downloads.
+        #
+        # This MUST stay inside the SLIM_CUDA=1 branch, and "consolidating" it
+        # out is a regression in two different directions: Jetson/arm64 KEEPS
+        # its GPU torch (where NCCL is a legitimate dependency) and is never
+        # flattened, so running it there would buy zero download bytes for real
+        # runtime risk; opi has neither path at all (measured 0 MB), so it is a
+        # no-op there regardless.
+        #
+        # Every removal is nonexistence-tolerant on purpose, because this block
+        # runs under `set -eux`: `rm -f`/`rm -rf` treat a missing operand as
+        # success, and an unmatched glob is passed through literally by POSIX sh
+        # (no nullglob), so `libnccl.so*` degrades into exactly such a missing
+        # operand. The trailing `|| true` mirrors the /usr/local/cuda line above
+        # and makes all of that belt-and-braces.
+        #
+        # The `rmdir` is a FAIL-SAFE THAT NEVER FIRES ON TODAY'S BASE, and that
+        # is the intended outcome — do not "fix" it into an `rm -rf`. This base
+        # also keeps /opt/nvidia/entrypoint.d/ + nvidia_entrypoint.sh there, so
+        # the directory is never empty and the rmdir always fails into `|| true`,
+        # leaving /opt/nvidia at ~2.5 KB. It exists so that a FUTURE base which
+        # ships nsight as the only tenant gets the empty parent cleaned up, while
+        # a future base that adds a SECOND tool there can never be silently swept
+        # away. Verified in a real build trace: `+ rmdir /opt/nvidia` -> `+ true`.
+        rm -rf /opt/nvidia/nsight-compute 2>/dev/null || true; \
+        rmdir /opt/nvidia 2>/dev/null || true; \
+        rm -f /usr/lib/x86_64-linux-gnu/libnccl.so* \
+              /usr/lib/x86_64-linux-gnu/libnccl_static.a 2>/dev/null || true; \
+        rm -f /usr/share/applications/nsight-compute-*.desktop 2>/dev/null || true; \
+        # Drop the deleted sonames from the loader cache. Hygiene only —
+        # nothing resolves them (see the sweep above) — so it is guarded: a
+        # cache refresh must never be able to fail a release build.
+        ldconfig 2>/dev/null || true; \
         python3 -c "import torch, torchvision; print('[SLIM] torch', torch.__version__, 'torchvision', torchvision.__version__, 'cuda=', torch.version.cuda); assert torch.version.cuda is None, 'expected a CPU-only torch build'"; \
         # Hard-fail on incomplete CUDA removal so a maintainer-local build catches
         # it too (not only the docker-publish size gate in CI).

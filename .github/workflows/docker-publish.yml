@@ -847,27 +847,50 @@ jobs:
         if: matrix.platform == 'amd64'
         # The CUDA slim (build-images.sh flatten of the amd64 image) must keep
         # CUDA out of the shipped bytes. A fat (CUDA-back) physical-ai-server is
-        # ~16 GB; the slimmed CPU image is ~5-6 GB. Gate on REAL bytes
-        # (docker image inspect .Size), NOT a `find … nvidia` that a base-layer
-        # whiteout would false-pass. The image is already pulled by the step
-        # above. (The arm64 *-jetson image KEEPS CUDA and is intentionally
-        # exempt.)
+        # ~16 GB; the slimmed CPU image measures 5.56 GB. Gate on REAL bytes,
+        # NOT a `find … nvidia` that a base-layer whiteout would false-pass. The
+        # image is already pulled by the step above. (The arm64 *-jetson image
+        # KEEPS CUDA and is intentionally exempt.)
         run: |
           set -e
-          SIZE=$(docker image inspect ghcr.io/svendanilborodun/${{ matrix.server_repo }}:latest --format '{{.Size}}')
-          # .Size is UNCOMPRESSED on-disk bytes. The fat (CUDA-back) image is ~16 GB;
-          # the CPU-slimmed image is much smaller but its exact uncompressed size is
-          # build-dependent (ROS + torch-cpu + transformers + opencv). 11 GB sits
-          # safely between: catches a CUDA-back regression while never blocking a
-          # correctly-slimmed build. Re-calibrate down once a real build's .Size is
-          # recorded in docs/plans/2026-06-09-amd64-cuda-slim.md.
-          CEIL=$((11 * 1000 * 1000 * 1000))
-          echo "physical-ai-server amd64 image .Size: ${SIZE} bytes (uncompressed; ceiling ${CEIL})"
+          # UNITS — measured with `docker image history`, NOT `docker image
+          # inspect .Size`, and that choice is load-bearing. `.Size` is not
+          # unconditionally uncompressed: on a classic (overlay2) image store it
+          # is the sum of the UNCOMPRESSED layer diffs, but on a daemon with the
+          # containerd snapshotter enabled it returns the COMPRESSED size
+          # instead — reproduced on Docker 29.4.3, where this released image
+          # reports 2.626 GB rather than its true 7.53 GB of layer bytes.
+          #
+          # Under that compressed reading the gate would be INERT: a CUDA-back
+          # image compresses to roughly 5.6 GB (this image's own ratio is ~2.9x)
+          # and would sail under any ceiling calibrated on uncompressed bytes.
+          # It would not fail — it simply would not catch anything, which is the
+          # worse failure because it is silent. `docker image history` sums the
+          # uncompressed layer diffs on BOTH stores, so this gate means the same
+          # thing wherever it runs and no longer depends on the runner's image
+          # store. `--human=false` is what makes the values raw integers rather
+          # than strings like "1.19GB"; keep it.
+          SIZE=$(docker image history --human=false --format '{{.Size}}' \
+                   ghcr.io/svendanilborodun/${{ matrix.server_repo }}:latest \
+                 | awk '{s+=$1} END {print s+0}')
+          [ "${SIZE:-0}" -gt 0 ] || { echo "::error::could not measure image size (docker image history returned nothing)"; exit 1; }
+          # Calibration (measured, not estimated): the released 2.13.0/2.14.0
+          # amd64 server was 7.53 GB uncompressed / 2.626 GB compressed. Dropping
+          # the two NVIDIA developer trees the SLIM_CUDA glob could not reach
+          # (nsight-compute + libnccl, see docker/physical_ai_server/Dockerfile)
+          # takes that to 5.56 GB / 1.592 GB. 7 GB therefore leaves ~1.26x
+          # headroom over the real build while still catching the regression this
+          # gate exists for — a CUDA-back image is ~16 GB, and even silently
+          # losing BOTH deletions again would land at 7.53 GB and fail here.
+          # Deliberately not tighter: a false failure blocks a release, which is
+          # far worse than a slightly loose ceiling.
+          CEIL=$((7 * 1000 * 1000 * 1000))
+          echo "physical-ai-server amd64 uncompressed layer bytes: ${SIZE} (ceiling ${CEIL})"
           if [ "$SIZE" -ge "$CEIL" ]; then
-            echo "::error::amd64 physical-ai-server is ${SIZE} bytes (>= ${CEIL}) — the CUDA slim/flatten did not take effect."
+            echo "::error::amd64 physical-ai-server is ${SIZE} uncompressed bytes (>= ${CEIL}) — the CUDA slim/flatten did not take effect."
             exit 1
           fi
-          echo "OK: amd64 server image is CUDA-slimmed (${SIZE} bytes)."
+          echo "OK: amd64 server image is CUDA-slimmed (${SIZE} uncompressed bytes)."
       - name: Assert opi server image size ceiling
         if: matrix.platform == 'opi'
         # The opi (Orange Pi) server base is CPU-only from the start (plain PyPI
@@ -882,13 +905,26 @@ jobs:
         run: |
           set -e
           SIZE=$(docker image inspect ghcr.io/svendanilborodun/${{ matrix.server_repo }}:latest --format '{{.Size}}')
-          # .Size is UNCOMPRESSED on-disk bytes. The opi CPU-only server targets
-          # ~5-6 GB (ROS + torch-cpu + transformers + opencv, no CUDA). 11 GB is
-          # a PROVISIONAL ceiling (matching the amd64 gate) — the previous 7 GB
-          # left only ~1.2x headroom, so a first real build near 7 GB would
-          # falsely FAIL the release. 11 GB still catches a CUDA/fat-base
-          # regression (a GPU-torch/CUDA server is ~16 GB). Re-calibrate down
-          # once a real opi build's .Size is measured.
+          # 11 GB is a PROVISIONAL ceiling and is deliberately NOT kept in step
+          # with the amd64 gate above (which is now 7 GB, measured). The two
+          # differ because amd64 is calibrated against a real build and opi is
+          # not — do not "sync" them on the assumption that matching numbers are
+          # tidier. 11 GB still catches a CUDA/fat-base regression (a
+          # GPU-torch/CUDA server is ~16 GB), which is all this gate claims to do.
+          #
+          # Reference point for whoever recalibrates: the released 2.13.0 opi
+          # server measures 4.58 GB uncompressed / 1.242 GB compressed, so 11 GB
+          # is ~2.4x headroom. That figure is one tag old and was read locally,
+          # not from a CI run — confirm against a real run before tightening.
+          #
+          # Note this step still reads `docker image inspect .Size`, which the
+          # amd64 gate above deliberately moved away from: `.Size` is compressed
+          # on a containerd-snapshotter daemon and uncompressed on overlay2, so
+          # its units depend on the runner. At 11 GB against a 4.58 GB image the
+          # gate survives either reading, so this is not urgent — but tightening
+          # this ceiling without also switching to `docker image history`
+          # (uncompressed on both stores) would make it silently store-dependent.
+          # See the UNITS block in the amd64 step for the full reasoning.
           CEIL=$((11 * 1000 * 1000 * 1000))
           echo "physical-ai-server-opi image .Size: ${SIZE} bytes (uncompressed; ceiling ${CEIL})"
           if [ "$SIZE" -ge "$CEIL" ]; then

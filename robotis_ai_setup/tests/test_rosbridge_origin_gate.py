@@ -212,6 +212,27 @@ class NginxCarriesTheOriginGate(unittest.TestCase):
         video_body = self.text.split("location /video/")[1]
         self.assertNotIn("$edubotics_origin_ok", video_body)
 
+    def test_the_upstream_wildcard_cors_header_is_hidden_on_video(self):
+        """web_video_server sends `Access-Control-Allow-Origin: *` itself.
+
+        Verified in upstream `MultipartStream::send_initial_header()`
+        (src/multipart_stream.cpp — the multipart/x-mixed-replace path this app
+        uses) and again in the snapshot streamers. nginx FORWARDS an upstream
+        header it does not explicitly hide, so left alone that wildcard lets any
+        page fetch() a camera frame and READ the pixels. Since /video/ is
+        deliberately not Origin-gated (an <img> carries no Origin), this
+        proxy_hide_header is the ONLY thing standing between a third-party page
+        and the classroom camera. It costs the app nothing — <img> needs no
+        CORS header.
+        """
+        video_body = self.text.split("location /video/")[1].split("location ")[0]
+        self.assertRegex(
+            video_body,
+            r"proxy_hide_header\s+Access-Control-Allow-Origin\s*;",
+            "the upstream wildcard CORS header is no longer stripped from "
+            "/video/ — cross-origin JavaScript can now read the camera",
+        )
+
 
 class _Handler(http.server.BaseHTTPRequestHandler):
     """Serves whatever status the test class asks for."""

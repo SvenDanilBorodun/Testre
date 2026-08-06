@@ -34,6 +34,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 PKG_ROOT = REPO_ROOT / 'physical_ai_tools' / 'physical_ai_server' / 'physical_ai_server'
 V3_PATH = PKG_ROOT / 'data_processing' / 'data_editor_v3.py'
 WORKER_PATH = PKG_ROOT / 'data_processing' / 'edit_worker.py'
+DATASET_PATHS_PATH = PKG_ROOT / 'data_processing' / 'dataset_paths.py'
 COMMUNICATOR_PATH = PKG_ROOT / 'communication' / 'communicator.py'
 
 
@@ -104,6 +105,28 @@ def _install_lerobot_stubs():
     )
 
 
+def _exec_or_unregister(spec, module, canonical):
+    """exec_module, but never leave a half-built husk in sys.modules.
+
+    `sys.modules` is process-global for a whole `unittest discover` run, and
+    every loader here short-circuits on `if canonical in sys.modules`. So a
+    module whose exec RAISED used to stay registered and be handed to every
+    LATER test module as if it were fine — turning ONE honest ImportError into
+    ~30 misleading `AttributeError`s in `setUp`, and making the offending file
+    GREEN standalone but RED under `discover` (the authoritative runner: this
+    directory has no `__init__.py`).
+
+    BaseException, not Exception: a KeyboardInterrupt mid-exec leaves exactly
+    the same poisoned husk.
+    """
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        sys.modules.pop(canonical, None)
+        raise
+    return module
+
+
 def _load_v3_module():
     """Load data_editor_v3 ONCE under its canonical dotted name.
 
@@ -118,8 +141,30 @@ def _load_v3_module():
     spec = importlib.util.spec_from_file_location(canonical, str(V3_PATH))
     module = importlib.util.module_from_spec(spec)
     sys.modules[canonical] = module
-    spec.loader.exec_module(module)
+    _exec_or_unregister(spec, module, canonical)
     sys.modules['physical_ai_server.data_processing'].data_editor_v3 = module
+    return module
+
+
+def _load_dataset_paths_module():
+    """Load dataset_paths + attach it to the data_processing stub.
+
+    edit_worker imports it at top (`from …data_processing import
+    dataset_paths`) for the 2026-08-06 path confinement, and the stub package
+    has no __path__ — so, exactly like edit_worker itself below, the submodule
+    must exist as an ATTRIBUTE before edit_worker is exec'd.
+    """
+    canonical = 'physical_ai_server.data_processing.dataset_paths'
+    _stub('physical_ai_server')
+    _stub('physical_ai_server.data_processing')
+    if canonical not in sys.modules:
+        spec = importlib.util.spec_from_file_location(
+            canonical, str(DATASET_PATHS_PATH))
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[canonical] = module
+        _exec_or_unregister(spec, module, canonical)
+    module = sys.modules[canonical]
+    sys.modules['physical_ai_server.data_processing'].dataset_paths = module
     return module
 
 
@@ -131,12 +176,13 @@ def _load_worker_module():
     must be present as an attribute before communicator is exec'd.
     """
     canonical = 'physical_ai_server.data_processing.edit_worker'
+    _load_dataset_paths_module()
     if canonical in sys.modules:
         return sys.modules[canonical]
     spec = importlib.util.spec_from_file_location(canonical, str(WORKER_PATH))
     module = importlib.util.module_from_spec(spec)
     sys.modules[canonical] = module
-    spec.loader.exec_module(module)
+    _exec_or_unregister(spec, module, canonical)
     sys.modules['physical_ai_server.data_processing'].edit_worker = module
     return module
 
@@ -561,8 +607,22 @@ class DatasetEditCallbackRoutingTest(unittest.TestCase):
         TOOLS.merge_calls.clear()
         TOOLS.on_delete = None
         TOOLS.on_merge = None
-        self.tmpdir = Path(tempfile.mkdtemp(prefix='v3route_'))
+        # .resolve() because confinement returns RESOLVED paths and macOS maps
+        # /var -> /private/var; without it the asserted path and the delivered
+        # one differ by that symlink alone.
+        self.tmpdir = Path(tempfile.mkdtemp(prefix='v3route_')).resolve()
         self.addCleanup(shutil.rmtree, self.tmpdir, ignore_errors=True)
+        # Dataset paths are ROOT-CONFINED since 2026-08-06 and these fixtures
+        # live in a temp dir, so point the root at it for the duration.
+        #
+        # Patching `dataset_root` rather than threading a `root=` kwarg is
+        # deliberate: these tests drive the REAL production call chain
+        # (dataset_edit_callback -> run_edit with no root), so the default
+        # branch — the one that ships — is what gets exercised.
+        dp = _load_dataset_paths_module()
+        original_root = dp.dataset_root
+        dp.dataset_root = lambda: self.tmpdir
+        self.addCleanup(setattr, dp, 'dataset_root', original_root)
         # Bypass __init__ (it wires real ROS services); set just the attrs the
         # callback touches. _edit_use_subprocess=False runs edit_worker.run_edit
         # in-process so the routing hits the stubbed v3 module + legacy editor.

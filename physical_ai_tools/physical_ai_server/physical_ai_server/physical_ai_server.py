@@ -109,6 +109,7 @@ from physical_ai_interfaces.srv import (
 
 from physical_ai_server import robot_profiles
 from physical_ai_server.communication.communicator import Communicator
+from physical_ai_server.data_processing import dataset_paths
 from physical_ai_server.data_processing.data_manager import DataManager
 from physical_ai_server.data_processing.hf_api_worker import HfApiWorker
 from physical_ai_server.inference.inference_manager import InferenceManager
@@ -186,7 +187,10 @@ _REINIT_MAX_ATTEMPTS = 3
 class PhysicalAIServer(CollisionMonitorMixin, Node):
     # Define operation modes (constants taken from Communicator)
 
-    DEFAULT_SAVE_ROOT_PATH = Path.home() / '.cache/huggingface/lerobot'
+    # Derived from dataset_paths so the node, the edit subprocess and the file
+    # browser can never disagree about what "inside the dataset area" means —
+    # that disagreement would silently open the confinement back up.
+    DEFAULT_SAVE_ROOT_PATH = dataset_paths.dataset_root()
     DEFAULT_TOPIC_TIMEOUT = 5.0  # seconds
     PUB_QOS_SIZE = 10
 
@@ -1921,7 +1925,22 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
 
     def get_dataset_list_callback(self, request, response):
         user_id = request.user_id
-        user_path = self.DEFAULT_SAVE_ROOT_PATH / user_id
+        # `user_id` is client-supplied and this service is reachable from the
+        # unauthenticated rosbridge, so the naive `root / user_id` was a
+        # directory-listing traversal: pathlib DISCARDS the root when the
+        # right-hand side is ABSOLUTE (`root / '/etc'` is `/etc`), and `..`
+        # walks out. safe_child refuses both, plus any separator at all — a
+        # legitimate HF user id is one path component.
+        try:
+            user_path = dataset_paths.safe_child(
+                self.DEFAULT_SAVE_ROOT_PATH, user_id)
+        except dataset_paths.DatasetPathError as e:
+            self.get_logger().error(
+                f'get_dataset_list REFUSED (user_id outside root): {user_id!r}')
+            response.dataset_list = []
+            response.success = False
+            response.message = str(e)
+            return response
 
         try:
             if not user_path.exists() or not user_path.is_dir():

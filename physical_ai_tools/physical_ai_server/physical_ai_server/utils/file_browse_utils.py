@@ -44,39 +44,61 @@ from physical_ai_server.data_processing import dataset_paths
 class FileBrowseUtils:
     """Utility class for file browsing operations."""
 
-    def __init__(self, max_workers: int = 4, logger=None, root=None):
+    def __init__(self, max_workers: int = 4, logger=None, root=None, roots=None):
         """Initialize the FileBrowseUtils instance.
 
-        ``root`` is a parameter (tests relocate it) and is never taken from a
-        request — see ``dataset_paths``.
+        The browser legitimately serves TWO areas, so confinement is a LIST:
+        recorded datasets, and the downloaded model checkpoints under lerobot's
+        ``outputs/train`` (React opens it with both — ``DATASET_PATH`` and
+        ``POLICY_MODEL_PATH``). Confining to the dataset root alone made
+        „Modellpfad auswählen" refuse every path it was ever opened with.
+
+        ``root``/``roots`` are parameters (tests relocate them, the node passes
+        the model root) and are never taken from a request — see
+        ``dataset_paths``. ``root`` is kept as the single-root spelling.
         """
         self.max_workers = max_workers
         self.logger = logger
-        self.root = str(
-            dataset_paths.dataset_root() if root is None else root)
+        if roots:
+            self.roots = [str(r) for r in roots if r]
+        elif root is not None:
+            self.roots = [str(root)]
+        else:
+            self.roots = [str(r) for r in dataset_paths.browsable_roots()]
+        # First root is the default landing place (the datasets).
+        self.root = self.roots[0]
 
     # ── confinement ─────────────────────────────────────────────────────────
 
     def _confine(self, path):
-        """Resolve a client path inside the root, or raise DatasetPathError.
+        """Resolve a client path inside ANY allowed root, or raise.
 
-        An empty/None path means "start where the datasets are" — the root —
-        which replaces the old ``expanduser('~')`` default. That default was
-        itself part of the problem: it handed the browser the container's whole
-        home directory as a starting point.
+        An empty/None path means "start where the datasets are" — the first
+        root — which replaces the old ``expanduser('~')`` default. That default
+        was itself part of the problem: it handed the browser the container's
+        whole home directory as a starting point.
         """
         if not path:
-            return str(dataset_paths.confine(self.root, self.root, allow_root=True))
-        return str(dataset_paths.confine(path, self.root, allow_root=True))
+            path = self.root
+        return str(dataset_paths.confine_any(path, self.roots, allow_root=True))
 
     def _clamp_parent(self, path):
-        """Parent of ``path``, never above the root."""
+        """Parent of ``path``, never above whichever root contains it."""
         parent = os.path.dirname(path)
         try:
-            return str(dataset_paths.confine(parent, self.root, allow_root=True))
+            return str(
+                dataset_paths.confine_any(parent, self.roots, allow_root=True))
         except dataset_paths.DatasetPathError:
-            # Already at the top of the browsable area.
-            return str(dataset_paths.confine(self.root, self.root, allow_root=True))
+            # Already at the top of the browsable area. Clamp to the root that
+            # actually contains `path`, so a model-tree parent does not jump
+            # the student back to the dataset tree.
+            for root in self.roots:
+                try:
+                    dataset_paths.confine(path, root, allow_root=True)
+                    return str(root)
+                except dataset_paths.DatasetPathError:
+                    continue
+            return str(self.root)
 
     def _refusal(self, message):
         """Error result in the shape every handler here returns."""
@@ -204,8 +226,20 @@ class FileBrowseUtils:
 
         if target_name:
             # Handle target selection (navigate to specific item)
-            # with parallel target checking
-            target_path = os.path.join(current_path, target_name)
+            # with parallel target checking.
+            #
+            # This join is the SAME footgun as _handle_target_selection's and
+            # was missed in the first pass: os.path.join(cur, '/etc') == '/etc',
+            # so a client-supplied absolute target_name discarded the confined
+            # current_path entirely. It is the more exposed of the two twins —
+            # useRosServiceCaller.js always sends target_files/target_folders,
+            # so browse_file_callback routes `action='browse'` HERE, not to the
+            # sibling. Found by an adversarial review after the first fix.
+            try:
+                target_path = str(dataset_paths.safe_child(
+                    current_path, target_name, allow_root=True))
+            except dataset_paths.DatasetPathError as e:
+                return self._refusal(str(e))
 
             if os.path.exists(target_path) and os.path.isdir(target_path):
                 # Navigate into directory and check for target files/folders
@@ -244,7 +278,10 @@ class FileBrowseUtils:
                     'success': True,
                     'message': 'Directory browsed successfully with target check',
                     'current_path': current_path,
-                    'parent_path': self._get_parent_path(current_path),
+                    # _clamp_parent, not the raw _get_parent_path: the
+                    # latter leaked one directory level ABOVE the root
+                    # as a string while every sibling handler clamped.
+                    'parent_path': self._clamp_parent(current_path),
                     'selected_path': '',
                     'items': items
                 }

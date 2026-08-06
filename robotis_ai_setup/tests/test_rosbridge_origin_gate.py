@@ -200,8 +200,58 @@ class NginxCarriesTheOriginGate(unittest.TestCase):
         )
 
     def test_video_is_proxied_so_img_streams_still_work(self):
-        self.assertRegex(self.text, r"location\s+/video/\s*\{")
+        # EXACT match on /video/stream, not a /video/ prefix — see the next
+        # test for why the prefix was a same-origin XSS surface.
+        self.assertRegex(self.text, r"location\s*=\s*/video/stream\s*\{")
         self.assertIn(":8080", self.text)
+
+    def test_only_the_stream_endpoint_is_exposed_on_our_origin(self):
+        """A /video/ PREFIX put upstream's whole endpoint set same-origin.
+
+        web_video_server's `handle_stream_viewer` reflects its `topic` query
+        parameter RAW into a text/html response (it validates `type`, never the
+        topic), so /video/stream_viewer?topic=<script> was a reflected XSS on
+        http://localhost — exactly the Origin the /rosbridge gate trusts, i.e.
+        a full rosbridge session and the ability to drive the arm.
+
+        The app only ever requests `<base>/stream`, so an exact-match location
+        keeps the cameras working with none of that surface.
+        """
+        self.assertNotRegex(
+            self.text, r"location\s+/video/\s*\{",
+            "the /video/ PREFIX location is back — that re-exposes "
+            "web_video_server's HTML-reflecting stream_viewer on our own origin")
+
+    def test_the_student_config_carries_the_same_security_headers_as_the_opi_one(self):
+        """This file cites nginx.opi.conf.template as its model.
+
+        It shipped without any of that template's four headers, i.e. a strictly
+        weaker copy of the config it names. Now that both robot transports are
+        same-origin, nosniff and DENY are what keep a reflected upstream
+        response from being sniffed or framed into script on the trusted origin.
+        """
+        for header in ("X-Frame-Options", "X-Content-Type-Options",
+                       "Referrer-Policy", "Permissions-Policy"):
+            self.assertRegex(
+                self.text, r"add_header\s+%s\s" % re.escape(header),
+                f"missing an add_header for {header}")
+        # Deliberately NOT HSTS: nothing terminates TLS in front of a rig, and
+        # RFC 6797 makes a UA ignore it over plain HTTP. Matched as a
+        # DIRECTIVE — the name legitimately appears in the comment that
+        # explains the omission.
+        self.assertNotRegex(self.text, r"add_header\s+Strict-Transport-Security")
+
+    def test_locations_with_their_own_add_header_redeclare_the_security_set(self):
+        """nginx add_header does NOT inherit into a location that sets one.
+
+        So every Cache-Control location must repeat the four, or it silently
+        serves them bare — the trap the opi template documents at its top.
+        """
+        import re as _re
+        for block in _re.findall(r"location[^{]*\{(.*?)\n    \}", self.text, _re.S):
+            if "Cache-Control" in block:
+                self.assertIn("X-Content-Type-Options", block,
+                              "a Cache-Control location lost the security headers")
 
     def test_video_is_deliberately_not_origin_gated(self):
         """<img> loads send no Origin; gating /video/ could blank the cameras.
@@ -209,7 +259,7 @@ class NginxCarriesTheOriginGate(unittest.TestCase):
         Pinned so re-adding the gate there is a conscious decision (and so the
         reasoning is discoverable from the test, not only from a comment).
         """
-        video_body = self.text.split("location /video/")[1]
+        video_body = self.text.split("location = /video/stream")[1]
         self.assertNotIn("$edubotics_origin_ok", video_body)
 
     def test_the_upstream_wildcard_cors_header_is_hidden_on_video(self):
@@ -225,7 +275,7 @@ class NginxCarriesTheOriginGate(unittest.TestCase):
         and the classroom camera. It costs the app nothing — <img> needs no
         CORS header.
         """
-        video_body = self.text.split("location /video/")[1].split("location ")[0]
+        video_body = self.text.split("location = /video/stream")[1].split("location ")[0]
         self.assertRegex(
             video_body,
             r"proxy_hide_header\s+Access-Control-Allow-Origin\s*;",

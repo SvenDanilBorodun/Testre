@@ -87,6 +87,40 @@ def dataset_root() -> Path:
     return Path.home() / DATASET_ROOT_RELATIVE
 
 
+def model_root() -> Optional[Path]:
+    """Downloaded-checkpoint root, or None when it cannot be resolved.
+
+    ``TrainingManager.get_weight_save_root_path()`` derives it from lerobot's
+    install location, so the import is FUNCTION-LOCAL: this module must stay
+    stdlib-only at import time (``edit_worker`` runs as a bare subprocess and
+    the deps-free unit tests import it without lerobot).
+
+    None simply drops it from the browsable set — never widens it.
+    """
+    try:
+        from physical_ai_server.training.training_manager import TrainingManager
+        path = TrainingManager.get_weight_save_root_path()
+    except Exception:  # noqa: BLE001 — lerobot absent (tests) / unresolvable
+        return None
+    return Path(path) if path else None
+
+
+def browsable_roots():
+    """Roots the FILE BROWSER may show: datasets, plus model checkpoints.
+
+    Deliberately WIDER than the edit/delete confinement, which stays
+    dataset-only: browsing is read-only, and React opens this browser with
+    BOTH ``DEFAULT_PATHS.DATASET_PATH`` and ``DEFAULT_PATHS.POLICY_MODEL_PATH``
+    („Modellpfad auswählen"). Confining it to the dataset root alone refused
+    every path that second entry point was ever opened with.
+    """
+    roots = [dataset_root()]
+    checkpoints = model_root()
+    if checkpoints:
+        roots.append(checkpoints)
+    return roots
+
+
 def confine(
     candidate: Optional[Union[str, Path]],
     root: Optional[Union[str, Path]] = None,
@@ -137,6 +171,36 @@ def confine(
     if resolved_root not in resolved.parents:
         raise DatasetPathError(OUTSIDE_ROOT_DE)
     return resolved
+
+
+def confine_any(
+    candidate: Optional[Union[str, Path]],
+    roots,
+    *,
+    allow_root: bool = False,
+) -> Path:
+    """Like :func:`confine`, but accept the path if it is under ANY root.
+
+    The file BROWSER legitimately serves two areas — recorded datasets under
+    ``~/.cache/huggingface/lerobot`` and downloaded model checkpoints under
+    lerobot's ``outputs/train`` (React seeds it with both:
+    ``DEFAULT_PATHS.DATASET_PATH`` and ``DEFAULT_PATHS.POLICY_MODEL_PATH``).
+    Confining it to the dataset root alone made „Modellpfad auswählen" refuse
+    every path it was ever opened with.
+
+    Refuses when ``roots`` is empty rather than accepting everything — an empty
+    allowlist must never mean "allow all".
+    """
+    roots = [r for r in (roots or []) if r]
+    if not roots:
+        raise DatasetPathError(OUTSIDE_ROOT_DE)
+    last = None
+    for root in roots:
+        try:
+            return confine(candidate, root, allow_root=allow_root)
+        except DatasetPathError as exc:
+            last = exc
+    raise last
 
 
 def is_inside(

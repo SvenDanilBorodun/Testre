@@ -24,6 +24,7 @@ function-local, so this rides the existing robotis_ai_setup suite.
 import importlib.util
 from pathlib import Path
 import os
+import pathlib
 import shutil
 import sys
 import tempfile
@@ -410,9 +411,111 @@ class FileBrowserIsConfined(_Rig):
         res = self.fb.handle_go_parent_with_target_check('/etc', None, None)
         self.assertFalse(res['success'])
 
-    def test_browse_with_target_check_is_confined_too(self):
+    def test_browse_with_target_check_confines_its_CURRENT_PATH(self):
         res = self.fb.handle_browse_with_target_check('/etc', None, None, None)
         self.assertFalse(res['success'])
+
+    # ── the target-check twin's own join (found by adversarial review) ──────
+    #
+    # The first pass confined `_handle_target_selection` but MISSED the
+    # near-identical join inside `handle_browse_with_target_check`. That twin is
+    # the MORE exposed one: useRosServiceCaller.js always sends
+    # target_files/target_folders, so browse_file_callback routes
+    # `action='browse'` here rather than to the sibling.
+    #
+    # The original test passed target_name=None, so it never entered the
+    # vulnerable branch — it asserted the current_path confinement and was
+    # NAMED as though it covered both. These cases pass a real target_name.
+
+    def test_an_ABSOLUTE_target_name_in_the_target_check_twin_is_refused(self):
+        res = self.fb.handle_browse_with_target_check(
+            str(self.root), '/etc', {'hosts'}, None)
+        self.assertFalse(
+            res['success'],
+            'absolute target_name escaped the target-check twin — this is the '
+            'wire-reachable path the React client actually uses')
+        self.assertEqual(res['items'], [])
+
+    def test_a_dotdot_target_name_in_the_target_check_twin_is_refused(self):
+        res = self.fb.handle_browse_with_target_check(
+            str(self.root / 'alice'), '../..', {'x'}, None)
+        self.assertFalse(res['success'])
+
+    def test_an_absolute_target_name_cannot_reach_the_HF_TOKEN_directory(self):
+        """The concrete harm: `.cache/huggingface` holds the login token."""
+        token_dir = self.outside / 'huggingface'
+        token_dir.mkdir()
+        (token_dir / 'token').write_text('hf_secret')
+        res = self.fb.handle_browse_with_target_check(
+            str(self.root), str(token_dir), {'token'}, None)
+        self.assertFalse(res['success'])
+        listed = {i['name'] for i in res['items']}
+        self.assertNotIn('token', listed)
+
+    def test_a_legitimate_target_name_still_navigates(self):
+        res = self.fb.handle_browse_with_target_check(
+            str(self.root), 'alice', None, None)
+        self.assertTrue(res['success'], res)
+        self.assertEqual(pathlib.Path(res['current_path']), self.root / 'alice')
+
+    def test_no_handler_reports_a_parent_above_the_root(self):
+        """A raw os.path.dirname leaked one level above the root as a string."""
+        for res in (
+            self.fb.handle_get_path_action(str(self.root)),
+            self.fb.handle_browse_action(str(self.root)),
+            self.fb.handle_go_parent_action(str(self.root)),
+            self.fb.handle_browse_with_target_check(str(self.root), None, {'x'}, None),
+            self.fb.handle_go_parent_with_target_check(str(self.root), {'x'}, None),
+        ):
+            parent = res.get('parent_path') or str(self.root)
+            self.assertTrue(
+                pathlib.Path(parent) == self.root
+                or self.root in pathlib.Path(parent).parents,
+                f'a handler reported {parent!r}, above the root')
+
+
+class TheBrowserAlsoServesTheModelCheckpointRoot(_Rig):
+    """Availability: confining to the DATASET root alone broke „Modellpfad".
+
+    React opens this browser from two entry points with two different seeds —
+    `DEFAULT_PATHS.DATASET_PATH` and `DEFAULT_PATHS.POLICY_MODEL_PATH`, the
+    latter being lerobot's `outputs/train`, which is NOT under the dataset
+    root. Found by an adversarial review of the first pass.
+    """
+
+    def setUp(self):
+        super().setUp()
+        browse = _load(_BROWSE_PRIVATE_NAME, BROWSE_PATH)
+        self.models = pathlib.Path(tempfile.mkdtemp(prefix='models_')).resolve()
+        self.addCleanup(shutil.rmtree, self.models, ignore_errors=True)
+        (self.models / 'act_run1').mkdir()
+        self.fb = browse.FileBrowseUtils(roots=[self.root, self.models])
+
+    def test_the_dataset_root_is_still_browsable(self):
+        res = self.fb.handle_browse_action(str(self.root))
+        self.assertTrue(res['success'], res)
+
+    def test_the_model_root_is_browsable_too(self):
+        res = self.fb.handle_browse_action(str(self.models))
+        self.assertTrue(res['success'], res)
+        self.assertIn('act_run1', {i['name'] for i in res['items']})
+
+    def test_a_path_under_NEITHER_root_is_still_refused(self):
+        res = self.fb.handle_browse_action(str(self.outside))
+        self.assertFalse(res['success'])
+
+    def test_go_parent_clamps_to_the_root_that_contains_the_path(self):
+        """Not back to the dataset tree — that would be a confusing jump."""
+        res = self.fb.handle_go_parent_action(str(self.models / 'act_run1'))
+        self.assertEqual(pathlib.Path(res['current_path']), self.models)
+        again = self.fb.handle_go_parent_action(str(self.models))
+        self.assertEqual(pathlib.Path(again['current_path']), self.models)
+
+    def test_an_EMPTY_root_list_refuses_everything_rather_than_allowing_all(self):
+        with self.assertRaises(self.dp.DatasetPathError):
+            self.dp.confine_any(str(self.root / 'alice' / 'ds1'), [])
+        with self.assertRaises(self.dp.DatasetPathError):
+            self.dp.confine_any(str(self.root / 'alice' / 'ds1'), None)
 
 
 if __name__ == '__main__':

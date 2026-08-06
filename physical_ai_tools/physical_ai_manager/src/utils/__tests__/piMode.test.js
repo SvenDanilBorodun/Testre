@@ -93,35 +93,65 @@ describe('rsControlBase / getPiModeSync defaults', () => {
   });
 });
 
-// School networks filter non-standard ports; in Pi mode BOTH robot transports
-// must ride the same-origin nginx :80 proxies (ws /rosbridge + /video/), and
-// everywhere else the classic direct ports must stay byte-identical.
-describe('localRosbridgeUrl — same-origin proxy in Pi mode', () => {
-  it('builds the direct ws://<host>:9090 URL outside Pi mode', () => {
-    expect(localRosbridgeUrl('student-pc', false)).toBe('ws://student-pc:9090');
-  });
-
-  it('builds the same-origin /rosbridge proxy URL in Pi mode', () => {
+// BOTH robot transports must ride the same-origin nginx :80 proxies
+// (ws /rosbridge + /video/) on EVERY local rig — Orange Pi AND the Windows
+// student PC. Two independent reasons converge on the same answer:
+//
+//   * Pi: school networks filter non-standard ports.
+//   * Windows: SECURITY. rosbridge is unauthenticated, so a page served from
+//     :80 connecting to :9090 was a CROSS-ORIGIN WebSocket handshake — and a
+//     WS handshake has no CORS preflight, so any site open in the student's
+//     browser could complete it and publish to /leader/joint_trajectory.
+//     docker-compose.yml no longer publishes :9090/:8080 at all, so a URL
+//     naming either port does not merely bypass the nginx Origin allowlist —
+//     it points at nothing and bricks the rig.
+//
+// The `piMode` argument is retained at the call sites but no longer selects
+// behaviour; these tests pin that BOTH values give the same same-origin answer.
+describe('localRosbridgeUrl — same-origin proxy on every local rig', () => {
+  it('builds the same-origin /rosbridge proxy URL on a Pi', () => {
     expect(localRosbridgeUrl('edubotics-42.local', true)).toBe(
       `ws://${window.location.host}/rosbridge`
     );
   });
 
-  it('defaults to the direct port with no provider resolved (module cache false)', () => {
-    expect(localRosbridgeUrl('student-pc')).toBe('ws://student-pc:9090');
+  it('builds the SAME same-origin URL on a Windows student rig', () => {
+    expect(localRosbridgeUrl('student-pc', false)).toBe(
+      `ws://${window.location.host}/rosbridge`
+    );
+  });
+
+  it('builds the same-origin URL with no piMode argument at all', () => {
+    expect(localRosbridgeUrl('student-pc')).toBe(
+      `ws://${window.location.host}/rosbridge`
+    );
+  });
+
+  it('never names the direct rosbridge port — it is no longer published', () => {
+    for (const piMode of [true, false, undefined]) {
+      expect(localRosbridgeUrl('student-pc', piMode)).not.toContain('9090');
+    }
   });
 });
 
-describe('videoStreamBase — same-origin proxy in Pi mode', () => {
-  it('builds the direct :8080 base outside Pi mode', () => {
-    expect(videoStreamBase('192.168.0.5', false)).toBe('http://192.168.0.5:8080');
-  });
-
-  it('builds the same-origin /video base in Pi mode', () => {
+describe('videoStreamBase — same-origin proxy on every local rig', () => {
+  it('builds the same-origin /video base on a Pi', () => {
     expect(videoStreamBase('192.168.0.5', true)).toBe('/video');
   });
 
-  it('defaults to the direct port with no provider resolved (module cache false)', () => {
-    expect(videoStreamBase('192.168.0.5')).toBe('http://192.168.0.5:8080');
+  it('builds the SAME /video base on a Windows student rig', () => {
+    expect(videoStreamBase('192.168.0.5', false)).toBe('/video');
+  });
+
+  it('builds the /video base with no piMode argument at all', () => {
+    expect(videoStreamBase('192.168.0.5')).toBe('/video');
+  });
+
+  it('stays RELATIVE, which is what keeps <img> requests Origin-less', () => {
+    // nginx.conf deliberately does NOT Origin-gate /video/ because an <img>
+    // load sends no Origin. An absolute URL here would still work, but the
+    // relative form is what makes "same-origin" true by construction.
+    expect(videoStreamBase('192.168.0.5', false).startsWith('/')).toBe(true);
+    expect(videoStreamBase('192.168.0.5', false)).not.toContain('8080');
   });
 });

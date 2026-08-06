@@ -228,12 +228,26 @@ services:
       memlock: 8428281856
     networks:
       - ros_net
-    ports:
-      # Loopback-bind so rosbridge (unauthenticated — anyone who can reach
-      # :9090 can drive the arm or steal datasets) isn't exposed to the
-      # school LAN if Windows Firewall is misconfigured.
-      - "127.0.0.1:8080:8080"
-      - "127.0.0.1:9090:9090"
+    # NO host port publishes. rosbridge (:9090) and web_video_server (:8080)
+    # are reachable ONLY from inside ros_net, via the physical_ai_manager
+    # nginx same-origin proxy (`/rosbridge` + `/video/`).
+    #
+    # These used to be published as `127.0.0.1:9090:9090` + `127.0.0.1:8080:8080`,
+    # justified as "loopback-bind so rosbridge (unauthenticated — anyone who can
+    # reach :9090 can drive the arm or steal datasets) isn't exposed to the
+    # school LAN". That reasoning only ever covered a REMOTE attacker. The
+    # actual exposure was local: the SPA is served from :80 and connected to
+    # :9090, i.e. cross-origin, and a WebSocket handshake gets no CORS
+    # preflight — so any page open in the student's browser could complete that
+    # handshake and publish to /leader/joint_trajectory, driving a physical arm
+    # standing beside children, and read every recorded dataset. Loopback is
+    # not a boundary against a page running ON that PC.
+    #
+    # Removing the publishes is what makes the nginx Origin allowlist
+    # non-bypassable — with the ports still open the proxy would be theatre.
+    # nginx.conf carries the allowlist; utils/piMode.js routes the SPA
+    # same-origin; gui/app/health_checker.py probes through the proxy.
+    # The `-opi` compose deliberately KEEPS its publishes (debug/rollback).
     environment:
       - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-30}
       # Student's HuggingFace token, set ONCE in the Windows GUI (Schritt D)

@@ -35,6 +35,7 @@ _REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 _STUDENT_COMPOSE = _REPO_ROOT / "robotis_ai_setup/docker/docker-compose.yml"
 _OPI_COMPOSE = _REPO_ROOT / "robotis_ai_setup/docker/docker-compose.opi.yml"
 _NGINX_CONF = _REPO_ROOT / "physical_ai_tools/physical_ai_manager/nginx.conf"
+_OPI_NGINX = _REPO_ROOT / "physical_ai_tools/physical_ai_manager/nginx.opi.conf.template"
 
 
 def _service_block(compose_path, service):
@@ -434,6 +435,201 @@ class TheOriginMapDefaultIsDeny(unittest.TestCase):
             match.group(1), "0",
             "the origin map defaults to ALLOW: every Origin is now accepted "
             "and the rosbridge gate is off")
+
+
+class TheOrangePiCarriesTheSameGate(unittest.TestCase):
+    """Parity, on the ONLY manager published on 0.0.0.0 by default.
+
+    The 2026-08-06 pass closed all three holes on Windows and left the Pi with
+    none of them: no Origin check on /rosbridge at all, a `/video/` PREFIX (so
+    upstream's HTML-reflecting `stream_viewer` stayed same-origin), and no
+    `proxy_hide_header`, so the `Access-Control-Allow-Origin: *` the Windows
+    side had just stripped still rode the Pi's proxy.
+
+    THE POLICY DIFFERS AND MUST. The student config names `localhost` /
+    `127.0.0.1` because gui_app opens exactly that URL; a Pi is reached at
+    whatever LAN IP or hostname the school gave it, so a fixed allowlist would
+    lock every Pi out. The Pi rule is HOST-RELATIVE — the Origin must name the
+    same AUTHORITY the request was addressed to — which is why this is a
+    separate class and not an extension of the map assertions above.
+
+    Driven against a real nginx 1.27.5-alpine (the base Dockerfile.opi ships)
+    with the template rendered by nginx:alpine's own envsubst and a fake
+    upstream aliased `physical_ai_server` on a user-defined network, so
+    `resolver 127.0.0.11` resolves. Measured, with `Host: pi.local`:
+
+        no Origin                          -> 101 (reached the upstream)
+        http://pi.local                    -> 101
+        https://pi.local                   -> 101
+        http://pi.local:8080               -> 403
+        http://evil.example                -> 403
+        null                               -> 403
+        http://pi.local.evil.com           -> 403
+        http://evil.com/#http://pi.local   -> 403
+        http://pi.localX                   -> 403
+
+    ...and with `Host: 192.168.1.50`, `http://192.168.1.50` -> 101 while
+    `http://192.168.1.51` -> 403; with `Host: pi.local:8080`,
+    `http://pi.local:8080` -> 101 and `http://pi.local` -> 403; `Host: [::1]`
+    with `http://[::1]` -> 101. The allowed cases reached the upstream with
+    `Upgrade: websocket` and `Connection: upgrade` intact, i.e. the `if` blocks
+    do not break proxy_pass.
+
+    Mutation-verified on that same rig: flipping the initial
+    `set $edubotics_origin_ok 0` to 1, deleting the `return 403` block, and
+    removing the gate entirely each turned `http://evil.example` from 403 into
+    200. Restoring the `/video/` prefix let `/video/stream_viewer` reach the
+    upstream again; removing `proxy_hide_header` put the wildcard ACAO back on
+    `/video/stream`.
+    """
+
+    def setUp(self):
+        self.assertTrue(_OPI_NGINX.is_file(), _OPI_NGINX)
+        self.text = _OPI_NGINX.read_text(encoding="utf-8")
+        self.assertIn(
+            "location = /rosbridge", self.text,
+            "the opi /rosbridge location is gone — nothing below is compared")
+        self.gate = self.text.split("location = /rosbridge")[1].split("proxy_pass")[0]
+
+    def test_the_rosbridge_location_is_origin_gated_at_all(self):
+        self.assertIn(
+            "$edubotics_origin_ok", self.gate,
+            "the Pi's rosbridge proxy has NO Origin gate: any page a student "
+            "has open can drive the arm and read every dataset")
+        self.assertRegex(self.gate, r"return\s+403\s*;")
+
+    def test_the_gate_starts_from_DENY(self):
+        """The one-character way to turn the whole thing off.
+
+        Same class of defect as the student map's `default 0`, in the shape
+        this file uses instead of a map.
+        """
+        match = re.search(r"set\s+\$edubotics_origin_ok\s+(\S+?)\s*;", self.gate)
+        self.assertIsNotNone(match, "the gate has no initial `set`")
+        self.assertEqual(
+            match.group(1), "0",
+            "the Pi gate starts from ALLOW — every Origin is accepted and the "
+            "gate is theatre")
+
+    def test_the_refusal_is_the_LAST_decision_not_an_earlier_one(self):
+        """Order matters: the `return 403` must follow every accepting `set`.
+
+        nginx executes sibling `if` blocks in order (verified on 1.27.5), so a
+        `return` placed above an accepting `set` refuses a legitimate Origin.
+        """
+        accepts = [m.start() for m in re.finditer(
+            r"set\s+\$edubotics_origin_ok\s+1\s*;", self.gate)]
+        refusal = self.gate.index("return 403")
+        self.assertTrue(accepts, "nothing ever sets the gate to allow")
+        self.assertLess(max(accepts), refusal)
+
+    def test_the_rule_is_HOST_RELATIVE_not_a_fixed_allowlist(self):
+        """A fixed localhost set would lock out every Pi in the field."""
+        self.assertRegex(self.gate, r'"https?://\$http_host"')
+        for fixed in ("localhost", "127.0.0.1"):
+            self.assertNotIn(
+                f"//{fixed}", self.gate,
+                f"the Pi gate hardcodes {fixed} — a Pi is reached at a LAN IP "
+                f"or hostname, so that refuses every real browser")
+
+    def test_it_compares_against_http_host_and_not_host(self):
+        """$host drops the port AND is taken from an absolute request line.
+
+        Measured on nginx 1.27.5, the two differ in exactly two places:
+        with `Host: pi.local:8080` the $host form ACCEPTS a page on
+        `http://pi.local` (a different origin — 200) while REFUSING the
+        legitimate `http://pi.local:8080` (403); and `GET
+        http://evil.com/rosbridge` with `Host: pi.local` +
+        `Origin: http://evil.com` is ACCEPTED under $host (200) and refused
+        under $http_host. On a Pi served on :80 they otherwise agree.
+        """
+        self.assertNotRegex(
+            self.gate, r'"https?://\$host"',
+            "the gate compares against $host, which drops the port and is "
+            "taken from an absolute-form request line")
+
+    def test_both_schemes_are_accepted_for_the_same_authority(self):
+        self.assertIn('"http://$http_host"', self.gate)
+        self.assertIn('"https://$http_host"', self.gate)
+
+    def test_an_ABSENT_origin_is_allowed_exactly_as_on_windows(self):
+        """A browser cannot omit Origin on a WebSocket handshake.
+
+        So a blank Origin provably did not come from the attack this gate
+        exists to stop, while denying it would break roslibpy / wscat
+        diagnostics and buy nothing — anything that can forge a header can also
+        talk to the still-published :9090 directly.
+        """
+        self.assertRegex(
+            self.gate,
+            r'if\s*\(\s*\$http_origin\s*=\s*""\s*\)\s*\{\s*set\s+\$edubotics_origin_ok\s+1',
+            "the Pi gate refuses an absent Origin, diverging from the student "
+            "config for no stated reason")
+
+    def test_only_the_stream_endpoint_is_exposed_on_the_pi_origin(self):
+        """The /video/ PREFIX was still there, so the reflected XSS still was.
+
+        `handle_stream_viewer` echoes its `topic` query parameter RAW into a
+        text/html response on the manager's OWN origin — which is precisely the
+        origin the host-relative gate above trusts. Nothing on a Pi requests a
+        /video/ path other than `/stream`: piMode.js::videoStreamBase returns
+        the bare `/video` and its only callers are ImageGridCell.js and
+        CameraFeedOverlay.jsx; no compose healthcheck and no pi-agent probe
+        touches it (the wizard's camera preview rides /api/system/).
+        """
+        self.assertRegex(self.text, r"location\s*=\s*/video/stream\s*\{")
+        self.assertNotRegex(
+            self.text, r"location\s+/video/\s*\{",
+            "the /video/ PREFIX is back on the Pi — that re-exposes "
+            "web_video_server's HTML-reflecting stream_viewer on the very "
+            "origin the rosbridge gate trusts")
+
+    def test_the_upstream_wildcard_cors_header_is_hidden_on_the_pi_too(self):
+        """The parity gap the P0 pass left, on the most exposed manager.
+
+        The opi compose binds the manager on ${EDUBOTICS_BIND_HOST} with
+        constants.DEFAULT_LAN_OPEN="1", i.e. 0.0.0.0 — so this is the one build
+        where any page on the school LAN can fetch() a camera frame if the
+        wildcard is forwarded.
+        """
+        video = self.text.split("location = /video/stream")[1].split("\n    location ")[0]
+        self.assertRegex(
+            video, r"proxy_hide_header\s+Access-Control-Allow-Origin\s*;",
+            "the Pi still forwards web_video_server's "
+            "`Access-Control-Allow-Origin: *`, so cross-origin JavaScript can "
+            "read the classroom camera")
+
+    def test_video_is_deliberately_not_origin_gated_on_the_pi_either(self):
+        """<img> loads send no Origin; gating /video/ could blank the cameras."""
+        video = self.text.split("location = /video/stream")[1].split("\n    location ")[0]
+        self.assertNotIn("$edubotics_origin_ok", video)
+
+    def test_the_gate_is_scoped_to_rosbridge_alone(self):
+        """/api/system/ and the SPA must not inherit it.
+
+        The pi-agent has its own exact-host CSRF allowlist and the SPA is
+        static; measured on the real rig, `Origin: http://evil.example` reaches
+        both unchanged while /rosbridge answers 403.
+        """
+        for other in ("location /api/system/", "location /static/", "location / {"):
+            self.assertIn(other, self.text)
+        api = self.text.split("location /api/system/")[1].split("\n    location ")[0]
+        self.assertNotIn("$edubotics_origin_ok", api)
+
+    def test_the_new_variables_survive_envsubst(self):
+        """Dockerfile.opi renders this with NGINX_ENVSUBST_FILTER.
+
+        Only `EDUBOTICS_ROS_NET_GATEWAY` is substituted; every nginx runtime
+        variable must therefore be single-`$`. A `${...}` spelling would be
+        replaced with an empty string at container start and the gate would
+        compare against nothing.
+        """
+        for var in ("$http_origin", "$http_host", "$edubotics_origin_ok"):
+            self.assertIn(var, self.text)
+            self.assertNotIn(
+                "${%s}" % var[1:], self.text,
+                f"{var} is written in ${{...}} form, which envsubst would "
+                f"blank out at container start")
 
 
 if __name__ == "__main__":

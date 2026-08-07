@@ -26,8 +26,23 @@ def check_web_ui(host: str = "localhost", port: int = PORT_WEB_UI) -> bool:
 # the ONLY route in, and nginx gates /rosbridge on an Origin allowlist that
 # deliberately admits an ABSENT Origin (a browser cannot omit it on a WS
 # handshake) — which is exactly why these two non-browser probes still work.
+#
+# BOTH constants must name a path an nginx `location` actually PROXIES. This
+# is not a formality: `/video/` was correct only while nginx carried a
+# `location /video/` PREFIX. Narrowing that to `location = /video/stream`
+# (to keep web_video_server's HTML-reflecting `stream_viewer` off our origin)
+# left this probe matching nothing but the SPA catch-all
+# `location / { try_files $uri /index.html; }` — which answers 200 from
+# nginx itself. `check_video_server` therefore returned True even with the
+# robot container stopped: a health check that could never fail. The paths
+# are now fenced against nginx.conf by
+# tests/test_rosbridge_origin_gate.py::ProbePathsActuallyRouteToTheUpstream.
 _PROXY_ROSBRIDGE_PATH = "/rosbridge"
-_PROXY_VIDEO_PATH = "/video/"
+# The exact path the app itself requests (`<base>/stream?…`), so the probe
+# rides the same location the cameras do. Any answer that is not one of
+# nginx's own gateway errors proves web_video_server replied — a 4xx to a
+# topic-less GET is a liveness signal, exactly as for rosbridge's 400.
+_PROXY_VIDEO_PATH = "/video/stream"
 
 # An nginx 502/503/504 means "the upstream did not answer" — the robot
 # container is down. ANY other HTTP status is proof the upstream replied and

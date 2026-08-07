@@ -349,12 +349,91 @@ class HealthChecksStayRealAfterTheProxyMove(unittest.TestCase):
 
     def test_the_probes_target_the_proxy_paths_not_the_raw_ports(self):
         self.assertEqual(health_checker._PROXY_ROSBRIDGE_PATH, "/rosbridge")
-        self.assertEqual(health_checker._PROXY_VIDEO_PATH, "/video/")
+        self.assertEqual(health_checker._PROXY_VIDEO_PATH, "/video/stream")
         # Default port is the manager's :80, not the retired 9090/8080.
         import inspect
         for fn in (health_checker.check_rosbridge, health_checker.check_video_server):
             default = inspect.signature(fn).parameters["port"].default
             self.assertNotIn(default, (9090, 8080), f"{fn.__name__} still defaults to a retired port")
+
+
+class ProbePathsActuallyRouteToTheUpstream(unittest.TestCase):
+    """A probe path that matches no proxy location is a health check that
+    CANNOT FAIL — and nothing above notices, because the stub server in
+    `HealthChecksStayRealAfterTheProxyMove` answers every path identically.
+
+    That is not hypothetical. `_PROXY_VIDEO_PATH` was `/video/` while nginx
+    carried a `location /video/` PREFIX. Narrowing it to
+    `location = /video/stream` (so web_video_server's HTML-reflecting
+    `stream_viewer` stopped being same-origin) left the probe matching only the
+    SPA catch-all `location / { try_files $uri /index.html; }`, which nginx
+    answers 200 from disk. Measured against a real nginx + a stopped upstream:
+    `check_rosbridge()` went False while `check_video_server()` stayed True.
+
+    So this asserts the CROSS-FILE contract the two commits broke between
+    them: every probe path must be served by a location that proxies, never by
+    the SPA fallback.
+    """
+
+    def setUp(self):
+        self.assertTrue(_NGINX_CONF.is_file(), _NGINX_CONF)
+        self.text = _NGINX_CONF.read_text(encoding="utf-8")
+
+    def _proxying_locations(self):
+        """Map of exact-match location path -> its body, for bodies that proxy.
+
+        Only `location = <path>` is considered: a probe must match a location
+        DETERMINISTICALLY. nginx picks an exact match before any prefix, so an
+        exact hit cannot be stolen by the SPA catch-all.
+        """
+        found = {}
+        for match in re.finditer(r"location\s*=\s*(\S+)\s*\{", self.text):
+            body = self.text[match.end():].split("\n    }")[0]
+            if "proxy_pass" in body:
+                found[match.group(1)] = body
+        return found
+
+    def test_every_probe_path_is_served_by_a_proxying_location(self):
+        proxied = self._proxying_locations()
+        self.assertTrue(proxied, "no proxying exact-match locations found at all")
+        for name, path in (
+            ("_PROXY_ROSBRIDGE_PATH", health_checker._PROXY_ROSBRIDGE_PATH),
+            ("_PROXY_VIDEO_PATH", health_checker._PROXY_VIDEO_PATH),
+        ):
+            self.assertIn(
+                path, proxied,
+                f"{name}={path!r} matches no proxying `location = …` in "
+                f"nginx.conf, so the probe is answered by the SPA catch-all "
+                f"and the health check can never report a dead upstream. "
+                f"Proxying locations present: {sorted(proxied)}",
+            )
+
+
+class TheOriginMapDefaultIsDeny(unittest.TestCase):
+    """`default 0` is the entire gate; every allowlist entry is an exception.
+
+    Flipping it to `1` allows EVERY origin — the one-character way to turn the
+    whole control-plane gate off — and it was invisible to every other test
+    here, all of which inspect only the allowlist REGEXES. Measured against a
+    real nginx with that single character changed: `http://evil.example`,
+    `http://localhost.evil.com` and `null` all completed the WebSocket upgrade
+    (101) instead of being refused.
+    """
+
+    def setUp(self):
+        self.assertTrue(_NGINX_CONF.is_file(), _NGINX_CONF)
+        text = _NGINX_CONF.read_text(encoding="utf-8")
+        self.map_block = text.split("map $http_origin $edubotics_origin_ok")[1].split("}")[0]
+
+    def test_the_map_default_denies(self):
+        match = re.search(r"^\s*default\s+(\S+?)\s*;", self.map_block, re.MULTILINE)
+        self.assertIsNotNone(
+            match, "the origin map has no explicit `default` — an unmatched "
+                   "Origin would fall through to an empty value")
+        self.assertEqual(
+            match.group(1), "0",
+            "the origin map defaults to ALLOW: every Origin is now accepted "
+            "and the rosbridge gate is off")
 
 
 if __name__ == "__main__":

@@ -1210,13 +1210,18 @@ class DataManager:
         repo_id,
         repo_type='dataset'
     ):
+        # Both roots come from dataset_paths, which is the single source of
+        # truth the browse confinement, TrainingManager and React's
+        # POLICY_MODEL_PATH all read. They used to be spelled out here, and the
+        # model one drifted from every reader of it — see MODEL_ROOT_RELATIVE.
+        #
+        # (The 'model' value keeps its v2.5.0 meaning: the LeRobot install is
+        # pip-managed from PyPI and the vendored
+        # ros2_ws/src/physical_ai_tools/lerobot tree is stripped by the image
+        # build, so model downloads must NOT target a path under it.)
         download_path = {
-            'dataset': Path.home() / '.cache/huggingface/lerobot',
-            # v2.5.0: the LeRobot install is pip-managed from PyPI and the
-            # vendored ros2_ws/src/physical_ai_tools/lerobot tree is stripped
-            # by the image build, so model downloads must NOT target a path
-            # under it. Use a stable outputs dir outside the stripped tree.
-            'model': Path.home() / 'ros2_ws/outputs/train/'
+            'dataset': dataset_paths.dataset_root(),
+            'model': dataset_paths.model_root(),
         }
 
         save_path = download_path.get(repo_type)

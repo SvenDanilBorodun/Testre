@@ -18,23 +18,40 @@
  * Default paths configuration for file browser modals
  */
 
-// Environment-based path configuration
-const BASE_WORKSPACE_PATH =
-  process.env.REACT_APP_BASE_WORKSPACE_PATH || '/root/ros2_ws/src/physical_ai_tools';
+// These are paths INSIDE the physical_ai_server container, which runs as root
+// (the image declares no USER), so `~` is `/root`. They are literals rather
+// than `process.env.REACT_APP_*` reads because no Dockerfile ever set those
+// variables — the indirection was decoration, and it is what hid the defect
+// below behind a plausible-looking default.
+const CONTAINER_HOME = '/root';
 
-const LEROBOT_OUTPUTS_PATH =
-  process.env.REACT_APP_LEROBOT_OUTPUTS_PATH || `${BASE_WORKSPACE_PATH}/lerobot/outputs`;
+// MUST equal `dataset_paths.model_root()` on the server —
+// `<home>/ros2_ws/outputs/train`. Fenced by
+// physical_ai_server/test/test_model_root_agreement.py.
+//
+// This used to be `/root/ros2_ws/src/physical_ai_tools/lerobot/outputs/train/`,
+// derived from a REACT_APP_LEROBOT_OUTPUTS_PATH nothing sets — i.e. a path
+// inside the vendored lerobot tree that the image build `rm -rf`s, and which
+// therefore could never coincide with where the server downloads checkpoints.
+// Before the 2026-08-06 browse confinement that was merely useless (the modal
+// opened empty and the student navigated UP to find the checkpoint);
+// afterwards „Modellpfad auswählen" opened on a path outside every browsable
+// root and got a German security refusal with nowhere to navigate.
+//
+// InferencePanel also builds a downloaded model's local path as
+// `POLICY_MODEL_PATH + repoId`, which is exactly where
+// `download_huggingface_repo(repo_type='model')` writes it — so that
+// construction was wrong for the same reason and is fixed by the same change.
+const MODEL_OUTPUTS_TRAIN_PATH = `${CONTAINER_HOME}/ros2_ws/outputs/train`;
 
-const DOT_CACHE_PATH = '/root/.cache';
+// MUST equal `dataset_paths.dataset_root()` — `<home>/.cache/huggingface/lerobot`.
+const DATASET_ROOT_PATH = `${CONTAINER_HOME}/.cache/huggingface/lerobot`;
 
 export const DEFAULT_PATHS = {
-  // Base paths
-  BASE_WORKSPACE: BASE_WORKSPACE_PATH,
-  LEROBOT_OUTPUTS: LEROBOT_OUTPUTS_PATH,
-
-  // File browser defaults
-  POLICY_MODEL_PATH: `${LEROBOT_OUTPUTS_PATH}/train/`,
-  DATASET_PATH: `${DOT_CACHE_PATH}/huggingface/lerobot/`,
+  // File browser defaults. Trailing slashes are load-bearing for the callers
+  // that concatenate a name onto them (InferencePanel, LocalDatasetQuickPick).
+  POLICY_MODEL_PATH: `${MODEL_OUTPUTS_TRAIN_PATH}/`,
+  DATASET_PATH: `${DATASET_ROOT_PATH}/`,
 };
 
 /**

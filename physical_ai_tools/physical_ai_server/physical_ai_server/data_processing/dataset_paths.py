@@ -64,6 +64,31 @@ from typing import Optional, Union
 # cannot be done at the volume level.)
 DATASET_ROOT_RELATIVE = '.cache/huggingface/lerobot'
 
+# Where DOWNLOADED model checkpoints live: <root>/<hf-repo-id>.
+#
+# THREE PLACES USED TO DISAGREE ABOUT THIS, and the browse confinement turned
+# the disagreement into a hard refusal (2026-08-07):
+#
+#   * ``data_manager.download_huggingface_repo(repo_type='model')`` WRITES here,
+#     and its own comment says why — the vendored
+#     ``ros2_ws/src/physical_ai_tools/lerobot`` tree is ``rm -rf``'d by the image
+#     build, so downloads must land outside it;
+#   * ``TrainingManager.get_weight_save_root_path()`` derived a DIFFERENT path
+#     from ``lerobot.__file__``, i.e. the pip site-packages install, which
+#     nothing ever writes to;
+#   * React's ``constants/paths.js`` ``POLICY_MODEL_PATH`` named a THIRD path,
+#     ``/root/ros2_ws/src/physical_ai_tools/lerobot/outputs/train/`` — inside
+#     the very tree the build deletes.
+#
+# Before confinement the mismatch was merely useless (the modal opened on an
+# empty directory and the student navigated UP). Afterwards
+# „Modellpfad auswählen" opened on a path outside every browsable root and got
+# a German security refusal with nowhere to go. This constant is now the single
+# source of truth all three read, and
+# ``physical_ai_server/test/test_model_root_agreement.py`` fences the
+# cross-language half.
+MODEL_ROOT_RELATIVE = 'ros2_ws/outputs/train'
+
 # Student-facing German (Rule §1). Deliberately does NOT echo the offending
 # path back: the message is surfaced in the browser, and reflecting an
 # arbitrary caller-supplied string into the UI is its own small problem.
@@ -87,22 +112,20 @@ def dataset_root() -> Path:
     return Path.home() / DATASET_ROOT_RELATIVE
 
 
-def model_root() -> Optional[Path]:
-    """Downloaded-checkpoint root, or None when it cannot be resolved.
+def model_root() -> Path:
+    """The one directory downloaded model checkpoints live under.
 
-    ``TrainingManager.get_weight_save_root_path()`` derives it from lerobot's
-    install location, so the import is FUNCTION-LOCAL: this module must stay
-    stdlib-only at import time (``edit_worker`` runs as a bare subprocess and
-    the deps-free unit tests import it without lerobot).
+    Derived from :data:`MODEL_ROOT_RELATIVE` and NOT from ``lerobot.__file__``.
+    The lerobot-derived form was the defect: it named the pip install's
+    ``outputs/train``, which nothing writes to, while the downloader wrote to
+    ``~/ros2_ws/outputs/train`` and React browsed a third path inside the tree
+    the image build deletes.
 
-    None simply drops it from the browsable set — never widens it.
+    Stdlib-only, like the rest of this module — ``edit_worker`` runs as a bare
+    subprocess and the deps-free unit tests import it without lerobot. That is
+    also why it can no longer fail: there is nothing left to resolve.
     """
-    try:
-        from physical_ai_server.training.training_manager import TrainingManager
-        path = TrainingManager.get_weight_save_root_path()
-    except Exception:  # noqa: BLE001 — lerobot absent (tests) / unresolvable
-        return None
-    return Path(path) if path else None
+    return Path.home() / MODEL_ROOT_RELATIVE
 
 
 def browsable_roots():
@@ -113,12 +136,12 @@ def browsable_roots():
     BOTH ``DEFAULT_PATHS.DATASET_PATH`` and ``DEFAULT_PATHS.POLICY_MODEL_PATH``
     („Modellpfad auswählen"). Confining it to the dataset root alone refused
     every path that second entry point was ever opened with.
+
+    The falsy filter is kept although :func:`model_root` can no longer return
+    None: an empty allowlist must never reach ``confine_any``, which is the one
+    place that would then have to decide what "no roots" means.
     """
-    roots = [dataset_root()]
-    checkpoints = model_root()
-    if checkpoints:
-        roots.append(checkpoints)
-    return roots
+    return [r for r in (dataset_root(), model_root()) if r]
 
 
 def confine(

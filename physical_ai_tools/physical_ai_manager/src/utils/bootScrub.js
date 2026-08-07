@@ -104,7 +104,25 @@ export function bootScrubOnce() {
   try {
     sessionStorage.setItem(BOOT_SCRUB_KEY, nonce);
   } catch (_) {
-    // Same direction: an unrecorded scrub re-runs, it does not leak.
+    // Same DIRECTION — an unrecorded scrub re-runs, it does not leak — but the
+    // availability cost is worth stating plainly rather than waving at, because
+    // it is not one extra scrub: with the latch permanently unwritable, EVERY
+    // `useVersionCheck` reload carries the same `?fresh=` and re-scrubs, so a
+    // student who signs in gets signed out again at the next image update, for
+    // the life of that install.
+    //
+    // Left as is, deliberately, because every alternative is worse:
+    //   * a localStorage latch SURVIVES THE WINDOW, so it would suppress the
+    //     scrub for the NEXT student — fail-unsafe, which is the one direction
+    //     this module may never fail in;
+    //   * a module-level variable dies with the document, so it cannot span the
+    //     reload that is the whole problem;
+    //   * `window.name` spans reloads and dies with the window, but it is a new
+    //     persistence surface outside the sessionScope registry, added to
+    //     protect against a state that needs localStorage WORKING while
+    //     sessionStorage FAILS — both are Web Storage and normally fail
+    //     together, so the state may not be reachable at all.
+    // Recorded in docs/KNOWN-ISSUES.md with the rig check that would settle it.
   }
   return 'scrubbed';
 }

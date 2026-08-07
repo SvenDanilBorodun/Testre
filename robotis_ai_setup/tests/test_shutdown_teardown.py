@@ -395,6 +395,77 @@ class TheCloseIsAuthoritativeAboutTheStack(unittest.TestCase):
         self.assertIn('docker_manager.stop_keepalive()', self.code)
 
 
+class StoppingTheEnvironmentAlsoClosesTheBrowserWindow(unittest.TestCase):
+    """The handover hole on the PRIMARY lifecycle path.
+
+    „Umgebung stoppen" then „Umgebung starten" is how the product is operated,
+    and `_do_start` ends in `_open_webview()`. `_stop_environment` tore down the
+    camera bridge, the phone server, the `:8769` bridge, the containers and the
+    keepalive — and left the WEBVIEW CHILD alive. So the next start hit
+    `open_student_window`'s live-child short-circuit, which DISCARDS the freshly
+    minted `?fresh=<nonce>` URL and returns True: the GUI logged that a window
+    had been opened while the next student was looking at the previous one's
+    window, with their live self-refreshing Supabase session, and no document
+    ever loaded so the boot scrub never ran.
+
+    PRE-EXISTING, not caused by the scrub: the profile `rmtree` that preceded it
+    sat BELOW the very same short-circuit, so it never ran on this path either.
+    Found by an adversarial review of the follow-up.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        tree = ast.parse(_GUI_APP_SRC.read_text(encoding='utf-8'))
+        cls.tree = tree
+        cls.fn = None
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == '_stop_environment':
+                cls.fn = node
+        if cls.fn is None:
+            raise AssertionError('_stop_environment not found — this test is stale')
+        cls.code = ast.unparse(cls.fn)
+
+    def test_it_closes_the_webview_child(self):
+        self.assertIn(
+            'webview_window.destroy_all()', self.code,
+            '„Umgebung stoppen" leaves the browser window alive, so the next '
+            '„Umgebung starten" short-circuits and hands the next student the '
+            'previous one\'s window and session')
+
+    def test_it_still_stops_everything_it_did_before(self):
+        for call in ('self._stop_camera_bridge()', 'self._stop_phone_server()',
+                     'self._stop_rs_control_server()',
+                     'docker_manager.stop_keepalive()'):
+            self.assertIn(call, self.code)
+
+    def test_the_close_happens_BEFORE_the_containers_go_down(self):
+        """Ordering, so the graceful close still has a live rosbridge.
+
+        `destroy_all` posts WM_CLOSE and gives the DOM a moment; JogPanel's
+        unmount re-torque is a rosbridge service call, and the Jetson release
+        beacon is an HTTPS POST. Tearing the containers down first would make
+        the re-torque unreachable — the exact teardown the graceful close
+        exists to deliver.
+        """
+        close = self.code.index('webview_window.destroy_all()')
+        stop = min(
+            self.code.index('docker_manager.stop_containers'),
+            self.code.index('docker_manager.stop_cloud_only'),
+        )
+        self.assertLess(close, stop)
+
+    def test_every_path_that_ends_a_session_closes_the_child(self):
+        """Enumerated: a third one must be a decision, not an oversight."""
+        callers = set()
+        for node in ast.walk(self.tree):
+            if not isinstance(node, ast.FunctionDef):
+                continue
+            if 'webview_window.destroy_all()' in ast.unparse(node):
+                callers.add(node.name)
+        self.assertIn('_on_close', callers)
+        self.assertIn('_stop_environment', callers)
+
+
 class TheStackProbeIsBoundedAndFailsClosed(unittest.TestCase):
     """`any_container_running` runs on the Tk main thread inside `_on_close`."""
 

@@ -3865,6 +3865,29 @@ class EduBoticsApp:
             self._stop_camera_bridge()
             self._stop_phone_server()
             self._stop_rs_control_server()
+            # CLOSE THE BROWSER WINDOW TOO. Two reasons, and the second is the
+            # load-bearing one:
+            #
+            #   * it is pointing at a stack that is about to be torn down —
+            #     rosbridge dies with the containers, so the window can only
+            #     show „Getrennt" from here on;
+            #   * STUDENT HANDOVER. „Umgebung stoppen" then „Umgebung starten"
+            #     is the primary documented lifecycle — the two buttons the
+            #     product is operated with — and `_do_start` calls
+            #     `_open_webview()` at the end of it. With the old window still
+            #     alive, `webview_window.open_student_window` hits its
+            #     live-child short-circuit, DISCARDS the freshly minted
+            #     `?fresh=<nonce>` URL and returns True, so the GUI logs
+            #     „Web-Oberfläche wird im EduBotics-Fenster geöffnet." while the
+            #     next student is looking at the previous one's window — with
+            #     their live, self-refreshing Supabase session. The boot scrub
+            #     never runs, because no document ever loads.
+            #
+            # This was equally true of the profile `rmtree` that preceded the
+            # scrub: it sat BELOW the same short-circuit, so it never ran on
+            # this path either. Closing the child here is what makes the next
+            # „Umgebung starten" spawn a real new window.
+            webview_window.destroy_all()
             if self.cloud_only.get():
                 docker_manager.stop_cloud_only(log=self._log)
             else:

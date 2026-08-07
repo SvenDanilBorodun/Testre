@@ -74,6 +74,29 @@ export const STUDENT_SCOPED_KEYS = Object.freeze([
   // (Colon-delimited: the one key an `edubotics_workshop_` prefix match would
   // miss, which is one more reason this list is explicit.)
   'edubotics:workshop:theme',
+  // Blockly's CROSS-TAB CLIPBOARD — the blocks the student last copied, i.e.
+  // their program, in plain text. Written by
+  // `@mit-app-inventor/blockly-plugin-workspace-multiselect`'s
+  // `dataCopyToStorage`, and READ by Ctrl+V, so without these three a new
+  // student could paste the previous one's blocks.
+  //
+  // THREE THINGS MAKE THESE THE EASIEST KEYS IN THIS FILE TO MISS, which is why
+  // they get the longest comment:
+  //   1. they are written by a DEPENDENCY, not by `src/`, and
+  //      `sessionScope.test.js`'s coverage scan walks `src/` with node_modules
+  //      excluded — so the scan structurally cannot see them;
+  //   2. they do not start with `edubotics`, and that scan's `isEdubotics`
+  //      filter judges only keys that do;
+  //   3. the feature is on by DEFAULT — `Multiselect`'s constructor sets
+  //      `useCopyPasteCrossTab_ = true` and only an explicit
+  //      `multiselectCopyPaste.crossTab === false` turns it off, which
+  //      `BlocklyWorkspace.jsx`'s `ms.init({})` never provides.
+  // `bootScrub.crossTab.test.js` therefore asserts the plugin still writes
+  // exactly these names, so a dependency bump that renames them fails loudly
+  // instead of silently reopening the leak.
+  'blocklyStashMulti',
+  'blocklyStashConnection',
+  'blocklyStashTime',
 ]);
 
 /**

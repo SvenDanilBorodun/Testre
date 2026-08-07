@@ -1,3 +1,13 @@
+// FIRST, and it has to stay first. Student handover on a shared Windows
+// account: a freshly spawned window carries `?fresh=<nonce>` and this import
+// scrubs the previous student's identity out of browser storage. Both of the
+// imports below it read localStorage while they are being EVALUATED —
+// `./store/store` through taskSlice/trainingSlice's initialState, and (via
+// `./App`) lib/supabaseClient through `auth.getSession()` — so a scrub placed
+// anywhere after them would run against state that had already been handed to
+// Redux and to supabase-js. Import order is the whole mechanism; a call in this
+// file's BODY would be too late, because imports are hoisted.
+import './utils/bootScrubOnLoad';
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import './index.css';

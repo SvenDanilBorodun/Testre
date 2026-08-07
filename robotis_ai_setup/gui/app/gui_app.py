@@ -9,6 +9,7 @@ Bietet eine schrittweise Oberfläche für:
 
 import base64
 import os
+import secrets
 import subprocess
 import sys
 import threading
@@ -3663,6 +3664,24 @@ class EduBoticsApp:
         # capabilities still arrive from the server via TaskStatus). Uses the
         # profile id captured at env start, so it stays correct on re-open.
         params.append(f"robot={self._rs_robot_type}")
+        # STUDENT HANDOVER. One shared Windows account = one WebView2 profile =
+        # ONE localStorage for every student who ever sits at this PC, and the
+        # student who walks away without clicking „Abmelden" leaves a durable,
+        # self-renewing Supabase session behind. This nonce tells the SPA that
+        # the window it is booting in is FRESHLY SPAWNED, and
+        # `src/utils/bootScrub.js` scrubs the previous student's identity out of
+        # storage before Redux or supabase-js can read it.
+        #
+        # A NONCE and not a bare flag, for two independent reasons:
+        #   * useVersionCheck reloads the page on every image update and
+        #     `location.reload()` KEEPS the query string, so a constant flag
+        #     would re-fire the scrub and sign a student out mid-lesson. The SPA
+        #     latches the nonce in sessionStorage, which survives a reload;
+        #   * that latch must not be able to fail CLOSED. A new spawn always
+        #     carries a new nonce, so it scrubs even if the latch somehow
+        #     outlived the window.
+        # Not a secret — it identifies a window, it does not authorise anything.
+        params.append(f"fresh={secrets.token_hex(8)}")
         url = f"http://localhost:{PORT_WEB_UI}/?{'&'.join(params)}"
 
         icon = os.path.join(

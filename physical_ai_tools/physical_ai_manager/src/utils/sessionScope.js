@@ -129,6 +129,15 @@ export const IGNORED_STORAGE_KEYS = Object.freeze({
   __edubotics_version_reload_at:
     'sessionStorage, the loop guard for useVersionCheck’s self-reload. Not '
     + 'student state: clearing it would defeat the guard it exists to be.',
+  edubotics_boot_scrub:
+    'sessionStorage, owned by utils/bootScrub. It holds the `?fresh=<nonce>` a '
+    + 'freshly spawned window carried, so the boot scrub runs once per WINDOW '
+    + 'instead of once per document load — useVersionCheck reloads the page on '
+    + 'an image update, and a re-fired scrub would sign a student out '
+    + 'mid-lesson. Same category as __edubotics_version_reload_at: it is the '
+    + 'guard, not student state, and clearing it would defeat what it exists to '
+    + 'be. It is also unreachable from clearStudentScopedStorage, which is a '
+    + 'localStorage loop.',
   'edubotics:workshop:autosave':
     'IndexedDB (idb-keyval), not Web Storage, so clearStudentScopedStorage — a '
     + 'synchronous localStorage loop — structurally cannot clear it. It is '

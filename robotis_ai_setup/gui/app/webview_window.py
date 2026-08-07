@@ -25,14 +25,13 @@ from __future__ import annotations
 
 import logging
 import os
-import shutil
 import subprocess
 import sys
 import threading
 from pathlib import Path
 from typing import List, Optional
 
-from .constants import WEBVIEW_PROFILE_DIR, WEBVIEW_PROFILE_LEAF
+from .constants import WEBVIEW_PROFILE_DIR
 
 log = logging.getLogger(__name__)
 
@@ -63,63 +62,6 @@ def is_available() -> bool:
 def runtime_missing() -> bool:
     """Signal set when the webview subprocess crashed (missing runtime, etc.)."""
     return _runtime_missing.is_set()
-
-
-def wipe_browser_profile(profile_dir: str = WEBVIEW_PROFILE_DIR) -> bool:
-    """Delete the WebView2 profile so a new student inherits nothing.
-
-    WHY AT SPAWN, not at close. `destroy_all` uses `Popen.terminate()`, which
-    on Windows is `TerminateProcess` — it delivers neither WinForms'
-    `FormClosed` nor the DOM's `pagehide`/`beforeunload`, so no close hook can
-    be made to run. A close can also be a crash or a power cut. Spawn always
-    runs, so that is where the guarantee has to live.
-
-    WHAT IT FIXES. The profile is a persistent disk store (`private_mode=False`,
-    deliberately kept — see run_in_process). It holds the student's Supabase
-    session, which auth-js creates with BOTH `persistSession` and
-    `autoRefreshToken` — a durable, self-renewing credential rather than an
-    expiring JWT. On one shared Windows account, student A closing the window
-    without clicking „Abmelden" (the path students actually take) left that
-    credential for student B, authorising `/me/export`, `POST /me/delete` and
-    `/trainings/start` against A's workgroup credits.
-
-    SAFETY. This is an rmtree, and its sibling `%LOCALAPPDATA%\\EduBotics`
-    holds `.env` — the HuggingFace token and the arm ports — plus
-    `phone-cert/`. So it REFUSES any directory whose basename is not the
-    dedicated leaf, and refuses a filesystem root outright. Best-effort by
-    design: a locked file must not stop the student's browser from opening.
-
-    Returns True when the profile is gone (or was never there).
-    """
-    try:
-        target = os.path.abspath(profile_dir)
-    except (OSError, ValueError):
-        log.warning("WebView-Profilpfad ist ungültig — Wipe übersprungen.")
-        return False
-
-    # Refuse anything that is not our dedicated leaf. A misconfigured override
-    # pointing at %LOCALAPPDATA%\EduBotics would otherwise delete the .env.
-    if os.path.basename(target.rstrip("\\/")) != WEBVIEW_PROFILE_LEAF:
-        log.error(
-            "WebView-Profil wird NICHT geloescht: %r ist nicht der dafuer "
-            "vorgesehene Ordner %r.", target, WEBVIEW_PROFILE_LEAF)
-        return False
-    if os.path.dirname(target.rstrip("\\/")) in ("", os.path.sep):
-        log.error("WebView-Profil wird NICHT geloescht: Pfad liegt zu weit oben.")
-        return False
-
-    if not os.path.exists(target):
-        return True
-    try:
-        shutil.rmtree(target, ignore_errors=False)
-        log.info("WebView-Profil geloescht (Schuelerwechsel): %s", target)
-        return True
-    except Exception as exc:  # noqa: BLE001
-        # Best-effort: never block the browser from opening. A partial wipe is
-        # still better than none, and the next launch retries.
-        shutil.rmtree(target, ignore_errors=True)
-        log.warning("WebView-Profil konnte nicht vollstaendig geloescht werden: %s", exc)
-        return not os.path.exists(target)
 
 
 def _build_launch_cmd(url: str, icon_path: Optional[str]) -> List[str]:
@@ -163,14 +105,6 @@ def open_student_window(url: str, icon_path: Optional[Path] = None) -> bool:
             # Accept this limitation: the existing window stays foremost.
             log.info("WebView-Subprozess läuft bereits (PID %d).", _process.pid)
             return True
-
-        # Student handover: wipe the persistent browser profile before the new
-        # window exists. Placed immediately after the live-child short-circuit
-        # so re-clicking „Web-Oberfläche öffnen" while a window is OPEN never
-        # yanks the profile out from under the student currently using it —
-        # that path returned above. See wipe_browser_profile for why this
-        # cannot be a close-time hook.
-        wipe_browser_profile()
 
         _runtime_missing.clear()
         _deliberate_stop.clear()
@@ -264,17 +198,25 @@ def run_in_process(url: str, icon_path: str = "", debug: bool = False) -> int:
             debug=bool(debug),
             # private_mode=False is DELIBERATELY kept: the profile must persist
             # WITHIN a session (WebView2 needs a writable user-data dir, and
-            # the app's own reload/version-check flow depends on it). What
-            # changed in 2026-08-06 is WHERE it persists and that it is wiped
-            # BETWEEN students — see wipe_browser_profile.
+            # the app's own reload/version-check flow depends on it).
             private_mode=False,
-            # Explicit, and the SAME constant open_student_window wipes. The
-            # default would be %APPDATA%\pywebview, which ROAMS: on a school PC
-            # with roaming profiles / FSLogix / AppData redirection the
-            # student's live Supabase session followed them to every other PC.
-            # Drift between this argument and the wipe target is SILENT — a
-            # wiped directory nobody uses — so it is fenced by an AST test
-            # (tests/test_webview_profile_wipe.py).
+            # EXPLICIT and non-roaming, and that is the half of the 2026-08-06
+            # handover fix that lives here. pywebview's default is
+            # %APPDATA%\pywebview, which ROAMS: on a school PC with roaming
+            # profiles / FSLogix / AppData redirection the student's live
+            # Supabase session followed them to every other PC in the building.
+            #
+            # What is NOT here any more is an rmtree of this directory. It held
+            # localStorage AND IndexedDB, so deleting it destroyed the Blockly
+            # crash-recovery autosave and every machine-scoped key — including
+            # `edubotics_robotType`, whose loss costs the next student an arm
+            # re-scan — and it fired for a student who merely closed the window
+            # and re-opened it mid-lesson. The handover scrub is now done by the
+            # SPA at boot, against the STUDENT/MACHINE partition
+            # `src/utils/sessionScope.js` exists to express: the GUI stamps
+            # `?fresh=<nonce>` onto a freshly spawned window
+            # (gui_app.py::_open_webview) and `src/utils/bootScrub.js` answers
+            # it. See tests/test_webview_handover.py.
             storage_path=WEBVIEW_PROFILE_DIR,
             icon=icon_path if icon_path else None,
         )

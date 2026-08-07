@@ -590,13 +590,25 @@ describe('sign-out lives in exactly one place', () => {
   });
 
   it('clears the Supabase session key only through the pattern sweep', () => {
-    // The sweep is reachable ONLY from a revoke that reported failure — see
-    // sessionScope's comment on why hand-deleting the key would otherwise skip
-    // the server-side revoke. Nothing else in src/ may touch it.
+    // The sweep has exactly TWO callers and each is named with its reason —
+    // hand-deleting the key anywhere else would skip the server-side revoke
+    // (see sessionScope's comment). Enumerated, not counted: a third caller
+    // must be a decision, not an accident.
+    //
+    //   utils/signOut.js    — a revoke that RESOLVED but reported failure;
+    //                         auth-js skips _removeSession() for most statuses.
+    //   utils/bootScrub.js  — student handover. The previous student is gone,
+    //                         so there is no session object to revoke on their
+    //                         behalf and no network call may block boot; the
+    //                         persisted credential is the one thing reachable.
     const owners = SOURCE_FILES.filter(({ text }) =>
       /clearSupabaseSessionKeys\s*\(/.test(stripComments(text))
     ).map(({ rel }) => rel).sort();
-    expect(owners).toEqual(['utils/sessionScope.js', SIGN_OUT_MODULE]);
+    expect(owners).toEqual([
+      'utils/bootScrub.js',
+      'utils/sessionScope.js',
+      SIGN_OUT_MODULE,
+    ]);
     const src = stripComments(
       SOURCE_FILES.find((f) => f.rel === SIGN_OUT_MODULE).text
     );

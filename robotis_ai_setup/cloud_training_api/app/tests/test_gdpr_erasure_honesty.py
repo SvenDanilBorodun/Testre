@@ -140,6 +140,168 @@ class ErasureEnumeratesRecordingsNotJustTrainings(unittest.TestCase):
         self.assertEqual(api.deleted.count(('alice/ds', 'dataset')), 1)
 
 
+class AlreadyGoneIsSuccessNotFailure(unittest.TestCase):
+    """`RepositoryNotFoundError` is the DESIRED END STATE, not an error.
+
+    D6 — this distinction was written into the code and fenced by nothing:
+    collapsing the `except RepositoryNotFoundError: continue` into the generic
+    `except Exception` handler below it left the whole suite green, while
+    turning every already-erased repo into a reported failure. A teacher
+    exercising the SAME Art. 17 request twice would then be told, in German,
+    that data still sits on HuggingFace when it does not — the exact
+    dishonesty this file exists to prevent, only inverted.
+
+    It is a REAL possibility, not a hypothetical: `delete_repo` is called with
+    `missing_ok=True`, `trainings` and `datasets` can name the same repo, and a
+    teacher can re-run a deletion.
+    """
+
+    def setUp(self):
+        _ensure_stubs()
+        from app.routes import teacher
+        self.teacher = teacher
+        from huggingface_hub.utils import RepositoryNotFoundError
+        self.NotFound = RepositoryNotFoundError
+
+    def _run(self, store, missing=()):
+        outer = self
+
+        class _MissingApi(_Api):
+            def delete_repo(self, repo_id, repo_type, missing_ok=False):
+                if repo_id in missing:
+                    raise outer.NotFound(f'404 Repo not found: {repo_id}')
+                return super().delete_repo(repo_id, repo_type, missing_ok)
+
+        api = _MissingApi()
+        sb = _Supabase(store)
+        with patch.dict('os.environ', {'HF_TOKEN': 'hf_platform'}), \
+                patch.object(self.teacher, 'get_supabase', lambda: sb), \
+                patch.object(self.teacher, 'HfApi', lambda **k: api):
+            failures = self.teacher._delete_student_hf_artifacts('stu1')
+        return api, failures
+
+    def test_an_already_deleted_repo_is_not_reported_as_a_failure(self):
+        store = {
+            'trainings': [],
+            'datasets': [{'hf_repo_id': 'alice/gone',
+                          'owner_user_id': 'stu1', 'workgroup_id': None}],
+        }
+        api, failures = self._run(store, missing={'alice/gone'})
+        self.assertEqual(
+            failures, [],
+            'a repo that is already gone was reported as NOT erased, so the '
+            'teacher is told data remains that does not')
+        self.assertEqual(api.deleted, [])
+
+    def test_a_real_403_beside_it_is_STILL_reported(self):
+        """Not vacuous: the two outcomes must stay distinguishable."""
+        store = {
+            'trainings': [],
+            'datasets': [
+                {'hf_repo_id': 'alice/gone',
+                 'owner_user_id': 'stu1', 'workgroup_id': None},
+                {'hf_repo_id': 'bob/forbidden',
+                 'owner_user_id': 'stu1', 'workgroup_id': None},
+            ],
+        }
+        outer = self
+
+        class _MixedApi(_Api):
+            def delete_repo(self, repo_id, repo_type, missing_ok=False):
+                if repo_id == 'alice/gone':
+                    raise outer.NotFound('404')
+                if repo_id == 'bob/forbidden':
+                    raise RuntimeError('403 Forbidden')
+                self.deleted.append((repo_id, repo_type))
+
+        api = _MixedApi()
+        sb = _Supabase(store)
+        with patch.dict('os.environ', {'HF_TOKEN': 'hf_platform'}), \
+                patch.object(self.teacher, 'get_supabase', lambda: sb), \
+                patch.object(self.teacher, 'HfApi', lambda **k: api):
+            failures = self.teacher._delete_student_hf_artifacts('stu1')
+        self.assertEqual([f['repo_id'] for f in failures], ['bob/forbidden'])
+
+    def test_a_not_found_does_not_abort_the_repos_after_it(self):
+        store = {
+            'trainings': [],
+            'datasets': [
+                {'hf_repo_id': 'alice/gone',
+                 'owner_user_id': 'stu1', 'workgroup_id': None},
+                {'hf_repo_id': 'alice/present',
+                 'owner_user_id': 'stu1', 'workgroup_id': None},
+            ],
+        }
+        api, failures = self._run(store, missing={'alice/gone'})
+        self.assertIn(('alice/present', 'dataset'), api.deleted)
+        self.assertEqual(failures, [])
+
+
+class ARegistryQueryFailureIsReportedNotSwallowed(unittest.TestCase):
+    """D6 — the second unfenced behaviour.
+
+    The `datasets` registry is now BOTH the shared-repo skip list and a source
+    of repos to erase. If that query fails, two things are true at once and
+    only one of them is obvious: we cannot enumerate the student's recordings,
+    AND we cannot tell which repos are workgroup-shared. So the failure has to
+    reach the teacher; deleting the `failures.append(...)` in that `except`
+    left the whole suite green while the endpoint answered
+    `hf_erasure_complete: true` on a run that had enumerated nothing.
+    """
+
+    def setUp(self):
+        _ensure_stubs()
+        from app.routes import teacher
+        self.teacher = teacher
+
+    def _run_with_broken_registry(self, store):
+        class _BrokenSupabase(_Supabase):
+            def table(self, name):
+                if name == 'datasets':
+                    raise RuntimeError('PostgREST 503')
+                return super().table(name)
+
+        api = _Api()
+        sb = _BrokenSupabase(store)
+        with patch.dict('os.environ', {'HF_TOKEN': 'hf_platform'}), \
+                patch.object(self.teacher, 'get_supabase', lambda: sb), \
+                patch.object(self.teacher, 'HfApi', lambda **k: api):
+            return api, self.teacher._delete_student_hf_artifacts('stu1')
+
+    def test_the_failure_is_reported(self):
+        store = {'trainings': [{'dataset_name': 'alice/ds', 'model_name': None,
+                                'workgroup_id': None}]}
+        _, failures = self._run_with_broken_registry(store)
+        self.assertTrue(
+            failures,
+            'the registry query failed and nothing was reported — the teacher '
+            'is told the erasure completed on a run that enumerated nothing')
+        self.assertEqual(failures[0]['repo_type'], 'dataset')
+
+    def test_the_reason_is_German(self):
+        store = {'trainings': []}
+        _, failures = self._run_with_broken_registry(store)
+        self.assertIn('Datensatz-Register', failures[0]['reason'])
+
+    def test_it_still_erases_what_the_trainings_table_DID_name(self):
+        """Best-effort: a broken registry must not abort the whole pass."""
+        store = {'trainings': [{'dataset_name': 'alice/ds',
+                                'model_name': 'org/mdl',
+                                'workgroup_id': None}]}
+        api, _ = self._run_with_broken_registry(store)
+        self.assertIn(('alice/ds', 'dataset'), api.deleted)
+        self.assertIn(('org/mdl', 'model'), api.deleted)
+
+    def test_it_reports_even_when_there_is_nothing_else_to_erase(self):
+        """The early `if not rows and not registry_repos: return failures`.
+
+        Returning a BARE `[]` there would drop the registry failure on exactly
+        the run where it is the only thing there is to say.
+        """
+        _, failures = self._run_with_broken_registry({'trainings': []})
+        self.assertTrue(failures)
+
+
 class ErasureFailuresAreReportedNotSwallowed(unittest.TestCase):
 
     def setUp(self):

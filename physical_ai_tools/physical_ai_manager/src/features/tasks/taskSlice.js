@@ -71,13 +71,27 @@ const defaultTaskInfo = {
   numEpisodes: 5,
   token: '',
   pushToHub: true,
-  // User-selectable via the "Privater Modus" toggle (InfoPanel.js /
-  // InferencePanel.js). Sent on the wire as TaskInfo.private_mode and
-  // threaded through the server-side data_manager overlay →
-  // HfApiWorker → create_repo(private=…). Defaults true so the
-  // privacy-safe option is pre-selected and a fresh recording without
-  // a deliberate toggle still uploads private (faces / classroom audio).
-  privateMode: true,
+  // User-selectable via the "Privater Modus" toggle, which is rendered ONLY
+  // by InfoPanel.js (the recording form) — an earlier version of this comment
+  // also named InferencePanel.js, which has never referenced privateMode.
+  // Sent on the wire as TaskInfo.private_mode and threaded through the
+  // server-side data_manager overlay → HfApiWorker → create_repo(private=…).
+  //
+  // Starts UNCHECKED (owner decision, 2026-08-07): the student makes the
+  // visibility call themselves rather than inheriting a pre-selected one.
+  // The toggle still labels private „Privat (empfohlen)" and its tooltip
+  // still recommends it for recordings containing people, so the guidance
+  // survives the default change.
+  //
+  // This is NOT the same knob as TaskInfo.msg's `bool private_mode true`,
+  // and the two are deliberately opposite. This value is what React SENDS,
+  // always explicitly (useRosServiceCaller sends Boolean(taskInfo.privateMode)
+  // on every start). The .msg default only applies to a client that OMITS
+  // the field, which React never does — it exists so a hand-crafted
+  // rosbridge call cannot publish a classroom recording to a public repo by
+  // saying nothing. Do not "harmonise" them: flipping the .msg default to
+  // match this one re-opens that hole.
+  privateMode: false,
   useOptimizedSave: true,
   recordRosBag2: false,
 };

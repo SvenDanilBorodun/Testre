@@ -518,5 +518,176 @@ class TheBrowserAlsoServesTheModelCheckpointRoot(_Rig):
             self.dp.confine_any(str(self.root / 'alice' / 'ds1'), None)
 
 
+class SafeUnderPrimitive(_Rig):
+    """The `root / <multi-component client string>` shape.
+
+    ``get_training_info_callback`` builds
+    ``get_weight_save_root_path() / request.train_config_path`` and ``open()``s
+    the result. The commit that confined "EVERY client-supplied dataset path"
+    edited that same file and MISSED it — it is not a dataset path, it is a
+    model path, so it fell outside the sweep.
+
+    :func:`safe_child` is the wrong primitive here: a legitimate value is
+    ``<model>/pretrained_model/train_config.json``, and safe_child refuses every
+    separator. Hence a sibling with the same guarantees and one fewer rule.
+    """
+
+    def test_a_plain_relative_path_is_accepted(self):
+        self.assertEqual(
+            self.dp.safe_under(self.root, 'act_run1/train_config.json'),
+            self.root / 'act_run1' / 'train_config.json')
+
+    def test_a_deep_relative_path_is_accepted(self):
+        """The real shape — safe_child would refuse this."""
+        rel = 'act_run1/pretrained_model/train_config.json'
+        self.assertEqual(
+            self.dp.safe_under(self.root, rel), self.root / rel)
+        with self.assertRaises(self.dp.DatasetPathError):
+            self.dp.safe_child(self.root, rel)
+
+    def test_an_absolute_path_cannot_discard_the_root(self):
+        """THE bug: `Path(root) / '/etc/passwd'` == `/etc/passwd`."""
+        self.assertEqual(
+            Path(self.root) / '/etc/passwd', Path('/etc/passwd'))  # the footgun
+        for bad in ('/etc/passwd', '/root/.env', '/'):
+            with self.assertRaises(self.dp.DatasetPathError):
+                self.dp.safe_under(self.root, bad)
+
+    def test_an_absolute_path_INSIDE_the_root_is_accepted(self):
+        """Deliberate, and the R2 lesson: judge where it LANDS, not its spelling.
+
+        The file browser hands back absolute paths, so refusing them for being
+        absolute is how a confinement turns into a self-inflicted refusal —
+        exactly what „Modellpfad auswählen" did when the browsable set and
+        React's seed named different directories. An earlier draft of
+        safe_under had an explicit `os.path.isabs` refusal; it was removed
+        because it is redundant against `confine` for every ESCAPING input and
+        adds a new refusal for a legitimate one.
+        """
+        target = self.root / 'act_run1' / 'train_config.json'
+        self.assertEqual(self.dp.safe_under(self.root, str(target)), target)
+
+    def test_dotdot_walks_out_and_is_refused(self):
+        for bad in ('..', '../../etc/passwd', 'a/../../../etc/passwd',
+                    'a/b/../../..'):
+            with self.assertRaises(self.dp.DatasetPathError):
+                self.dp.safe_under(self.root, bad)
+
+    def test_a_symlink_out_of_the_root_is_refused(self):
+        link = self.root / 'escape'
+        try:
+            os.symlink(str(self.outside), str(link))
+        except (OSError, NotImplementedError):
+            self.skipTest('symlinks unavailable on this host')
+        with self.assertRaises(self.dp.DatasetPathError):
+            self.dp.safe_under(self.root, 'escape/secret.json')
+
+    def test_the_root_itself_is_refused(self):
+        # It is a directory; `open()` on it raises IsADirectoryError, and a
+        # config file is never the root.
+        with self.assertRaises(self.dp.DatasetPathError):
+            self.dp.safe_under(self.root, '.')
+
+    def test_empty_none_non_str_and_NUL_are_refused(self):
+        for bad in (None, '', '   ', 7, ['a'], 'a\x00b'):
+            with self.assertRaises(self.dp.DatasetPathError):
+                self.dp.safe_under(self.root, bad)
+
+    def test_the_refusal_never_echoes_the_offending_path(self):
+        # It is surfaced in the browser; reflecting an arbitrary caller string
+        # into the UI is its own small problem.
+        try:
+            self.dp.safe_under(self.root, '/etc/passwd')
+        except self.dp.DatasetPathError as e:
+            self.assertNotIn('/etc/passwd', str(e))
+
+    def test_a_sibling_sharing_a_string_prefix_is_refused(self):
+        # `startswith` on the string form would accept this; the component-wise
+        # ancestor test does not.
+        sibling = self.root.parent / (self.root.name + '-evil')
+        sibling.mkdir(exist_ok=True)
+        self.addCleanup(shutil.rmtree, sibling, ignore_errors=True)
+        with self.assertRaises(self.dp.DatasetPathError):
+            self.dp.safe_under(self.root, f'../{sibling.name}/x.json')
+
+
+class TheTrainingInfoCallbackRoutesItsPathThroughDatasetPaths(unittest.TestCase):
+    """The CALL SITE, asserted structurally.
+
+    ``get_training_info_callback`` lives on ``PhysicalAIServer``, which needs
+    rclpy and the compiled interfaces — neither is available in this deps-free
+    suite, and neither is available to CI's python-tests job either. So the
+    primitive is tested behaviourally above and the WIRING is read off the AST:
+    the value handed to ``open()`` must come from ``dataset_paths``, and the
+    naive join must not survive anywhere in the function.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import ast
+        cls.ast = ast
+        src = (PKG_ROOT / 'physical_ai_server.py').read_text(encoding='utf-8')
+        tree = ast.parse(src)
+        cls.fn = None
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.FunctionDef)
+                    and node.name == 'get_training_info_callback'):
+                cls.fn = node
+        if cls.fn is None:
+            raise AssertionError(
+                'get_training_info_callback not found — either it was renamed '
+                'or this test is stale, and both mean nothing is checked')
+
+    def _body(self):
+        # Docstring dropped: ast.unparse keeps it, and this function's comments
+        # and docstring describe the very expression the assertions ban.
+        body = list(self.fn.body)
+        if (body and isinstance(body[0], self.ast.Expr)
+                and isinstance(body[0].value, self.ast.Constant)):
+            body = body[1:]
+        return '\n'.join(self.ast.unparse(s) for s in body)
+
+    def test_the_opened_path_is_produced_by_dataset_paths(self):
+        body = self._body()
+        self.assertIn('dataset_paths.safe_under(', body)
+        self.assertIn('DatasetPathError', body)
+
+    def test_the_naive_join_is_gone(self):
+        body = self._body()
+        for naive in (
+            'weight_save_root_path / train_config_path',
+            'weight_save_root_path / request.train_config_path',
+        ):
+            self.assertNotIn(
+                naive, body,
+                'the client path is joined onto the model root without '
+                'confinement — pathlib DISCARDS the root when the right-hand '
+                'side is absolute, so open() reads any file in the container')
+
+    def test_open_is_called_on_the_confined_variable(self):
+        """Not on `request.…` directly, and not on a re-derived join."""
+        opened = []
+        for node in self.ast.walk(self.fn):
+            if (isinstance(node, self.ast.Call)
+                    and isinstance(node.func, self.ast.Name)
+                    and node.func.id == 'open'):
+                opened.append(self.ast.unparse(node.args[0]))
+        self.assertTrue(opened, 'nothing is opened any more — test is stale')
+        for arg in opened:
+            self.assertNotIn('request.', arg)
+        # And the variable it opens is the one assigned from safe_under.
+        assigned = set()
+        for node in self.ast.walk(self.fn):
+            if isinstance(node, self.ast.Assign) and 'safe_under' in self.ast.unparse(node.value):
+                assigned.update(
+                    t.id for t in node.targets if isinstance(t, self.ast.Name))
+        self.assertTrue(
+            assigned, 'nothing is assigned from dataset_paths.safe_under')
+        self.assertTrue(
+            set(opened) & assigned,
+            f'open() is called on {opened}, none of which is the confined '
+            f'{sorted(assigned)}')
+
+
 if __name__ == '__main__':
     unittest.main()

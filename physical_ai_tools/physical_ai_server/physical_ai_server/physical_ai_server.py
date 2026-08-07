@@ -2015,16 +2015,27 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         Loads configuration from train_config.json and populates TrainingInfo message.
         """
         try:
-            # Validate request
-            if not request.train_config_path:
-                response.success = False
-                response.message = 'train_config_path is required'
-                return response
-
-            # Clean up path (remove leading/trailing whitespace)
-            train_config_path = request.train_config_path.strip()
+            # `train_config_path` is CLIENT-SUPPLIED and this service is
+            # reachable from the unauthenticated rosbridge, so the naive
+            # `weight_save_root_path / train_config_path` that used to be here
+            # was an unconfined read of any file the container can open:
+            # pathlib DISCARDS the root when the right-hand side is ABSOLUTE
+            # (`root / '/etc/passwd'` is `/etc/passwd`), and `..` walks out.
+            # safe_under refuses both. It is the MULTI-component sibling of
+            # safe_child — this argument is legitimately
+            # `<model>/pretrained_model/train_config.json`, so the
+            # single-component form would refuse every real request.
             weight_save_root_path = TrainingManager.get_weight_save_root_path()
-            config_path = weight_save_root_path / train_config_path
+            try:
+                config_path = dataset_paths.safe_under(
+                    weight_save_root_path, request.train_config_path)
+            except dataset_paths.DatasetPathError as e:
+                self.get_logger().error(
+                    'get_training_info REFUSED (path outside the model root): '
+                    f'{request.train_config_path!r}')
+                response.success = False
+                response.message = str(e)
+                return response
 
             # Check if config file exists
             if not config_path.exists():

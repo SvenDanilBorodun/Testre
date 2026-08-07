@@ -240,6 +240,38 @@ def is_inside(
         return False
 
 
+def safe_under(
+    root: Union[str, Path],
+    candidate: Optional[str],
+    *,
+    allow_root: bool = False,
+) -> Path:
+    """Resolve a client-supplied MULTI-component path against ``root``.
+
+    The ``get_training_info_callback`` shape: a trusted root plus something like
+    ``<model>/pretrained_model/train_config.json``, which is then ``open()``ed.
+    The naive ``root / candidate`` is the bug — pathlib DISCARDS ``root`` when
+    the right-hand side is ABSOLUTE, so ``root / '/etc/passwd'`` is
+    ``/etc/passwd``.
+
+    :func:`safe_child` is the wrong primitive here: it refuses EVERY separator,
+    because an HF user id is one component, and these values legitimately have
+    three.
+
+    An ABSOLUTE argument that lands inside ``root`` is deliberately ACCEPTED
+    rather than refused for being absolute. Both spellings name the same file,
+    the confinement is what makes either safe, and the file BROWSER hands back
+    absolute paths — refusing them would be the same self-inflicted refusal
+    that made „Modellpfad auswählen" unusable when the browsable set and
+    React's seed disagreed. What is refused is where a path LANDS, never how it
+    is spelled; :func:`confine` decides that, including ``..``, symlinks and
+    NUL bytes.
+    """
+    if candidate is None or not isinstance(candidate, str) or not candidate.strip():
+        raise DatasetPathError(EMPTY_PATH_DE)
+    return confine(Path(root) / candidate.strip(), root, allow_root=allow_root)
+
+
 def safe_child(
     root: Union[str, Path],
     name: Optional[str],

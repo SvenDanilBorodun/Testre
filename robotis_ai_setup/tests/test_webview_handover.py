@@ -123,7 +123,7 @@ class TheProfileIsPersistentExplicitAndNonRoaming(unittest.TestCase):
         imports = _module_imports(_WEBVIEW_SRC)
         allowed = {
             '__future__', 'logging', 'os', 'subprocess', 'sys',
-            'threading', 'pathlib', 'typing',
+            'threading', 'time', 'pathlib', 'typing',
         }
         self.assertTrue(
             imports <= allowed,

@@ -1575,6 +1575,46 @@ def all_containers_running() -> bool:
     return all(s == "running" for s in status.values())
 
 
+# The three project containers, in one place so the probe below and
+# get_container_status cannot disagree about what "the stack" is.
+PROJECT_CONTAINERS = ("open_manipulator", "physical_ai_server", "physical_ai_manager")
+
+
+def any_container_running() -> bool:
+    """True if ANY project container is up — the „is a stack live?" question.
+
+    `all_containers_running()` answers a different one and is the wrong tool
+    for a shutdown decision: a PARTIAL stack is exactly the state that leaks.
+    `gui_app.self.running` is not an answer either — `_do_start`'s `finally`
+    clears it on any failure occurring AFTER `start_containers` succeeded, so
+    the flag reads False over a live stack.
+
+    ONE `docker ps` rather than get_container_status's three `docker inspect`
+    calls, deliberately: this runs on the Tk main thread inside `_on_close`,
+    and three 10 s timeouts against a wedged dockerd would freeze the close for
+    half a minute. Names are re-checked against PROJECT_CONTAINERS because
+    docker's `--filter name=` is a SUBSTRING match.
+
+    Fails CLOSED for the caller's purposes — anything unexpected returns False,
+    so a broken probe can never turn closing the GUI into a modal the student
+    cannot get past. A leaked container is recoverable (the next launch's
+    `ensure_environment_stopped` tears it down); an unclosable window is not.
+    """
+    try:
+        result = subprocess.run(
+            _docker_cmd(
+                "ps", "--filter", "status=running", "--format", "{{.Names}}"),
+            capture_output=True, text=True, timeout=10,
+            **_SUBPROCESS_KWARGS,
+        )
+        if result.returncode != 0:
+            return False
+        names = {line.strip() for line in result.stdout.splitlines() if line.strip()}
+        return bool(names & set(PROJECT_CONTAINERS))
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return False
+
+
 def get_container_logs(container_name: str, lines: int = 50) -> str:
     """Get recent logs from a container."""
     try:

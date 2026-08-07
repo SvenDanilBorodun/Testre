@@ -28,6 +28,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import List, Optional
 
@@ -148,18 +149,116 @@ def _watch_subprocess(proc: subprocess.Popen) -> None:
         _runtime_missing.set()
 
 
+# How long the child gets to close itself after WM_CLOSE before we terminate it.
+# The work being waited for is short by construction — `navigator.sendBeacon`
+# hands the Jetson release to the browser's own delivery queue and returns, and
+# JogPanel's re-torque is a single rosbridge service call — but a WinForms
+# FormClosed -> WebView2 teardown -> DOM pagehide chain is several hops. 2.5 s
+# is a compromise: long enough for that chain on a busy classroom PC, short
+# enough that closing EduBotics still feels immediate. The wait ENDS the moment
+# the child exits, so a healthy close costs a few hundred milliseconds.
+GRACEFUL_CLOSE_TIMEOUT_S = 2.5
+_GRACEFUL_POLL_S = 0.05
+
+
+def _post_close_to_pid(pid: int) -> int:
+    """Post WM_CLOSE to every top-level window owned by `pid`. Windows only.
+
+    MATCHED BY PID, NEVER BY TITLE, and that is the load-bearing part.
+    `gui_app.py`'s tkinter root and this pywebview child are BOTH titled
+    exactly "EduBotics" — `_focus_existing_window`'s `FindWindowW(None,
+    "EduBotics")` is already ambiguous today — so a close-by-title could shut
+    the setup GUI instead of the browser. `EnumWindows` yields only top-level
+    windows and `GetWindowThreadProcessId` names their owner, so the parent's
+    windows are structurally out of reach.
+
+    Returns the number of windows posted to; 0 off Windows, and 0 when the
+    child has no window yet (a crash during startup), which lets the caller
+    skip the grace period entirely.
+    """
+    if sys.platform != "win32":
+        return 0
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        WNDENUMPROC = ctypes.WINFUNCTYPE(
+            wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+        user32.EnumWindows.argtypes = [WNDENUMPROC, wintypes.LPARAM]
+        user32.GetWindowThreadProcessId.argtypes = [
+            wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+        user32.PostMessageW.argtypes = [
+            wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+
+        hwnds = []
+
+        def _collect(hwnd, _lparam):
+            owner = wintypes.DWORD()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
+            if owner.value == pid:
+                hwnds.append(hwnd)
+            return True
+
+        # The callback must stay referenced for the whole EnumWindows call.
+        cb = WNDENUMPROC(_collect)
+        user32.EnumWindows(cb, 0)
+
+        WM_CLOSE = 0x0010
+        for hwnd in hwnds:
+            user32.PostMessageW(hwnd, WM_CLOSE, 0, 0)
+        return len(hwnds)
+    except Exception as exc:  # noqa: BLE001
+        # Best-effort by design: the terminate below is the backstop, so a
+        # ctypes/user32 problem must never stop the GUI from closing.
+        log.warning("WM_CLOSE an das WebView-Fenster fehlgeschlagen: %s", exc)
+        return 0
+
+
 def destroy_all() -> None:
-    """Kill the webview subprocess if running. Safe to call from any thread."""
+    """Close the webview subprocess if running. Safe to call from any thread.
+
+    GRACEFUL FIRST, then terminate. `Popen.terminate()` alone is
+    `TerminateProcess` on Windows, which delivers neither WinForms'
+    `FormClosed` nor the DOM's `pagehide`/`beforeunload` — so EVERY
+    browser-side teardown hook was dead, with three shipped consequences:
+
+      * `useJetsonConnection`'s release beacon never fired, so the exclusive
+        claim leaked for the full 5-minute sweeper window and THE NEXT STUDENT
+        WAS REFUSED THE JETSON;
+      * `JogPanel`'s unmount re-torque never ran, leaving the follower limp
+        until the 30 s `_manual_idle_watchdog` caught it;
+      * `RecordPanel`'s teardown never ran.
+
+    The handlers already existed and were correct — only delivery was broken.
+    `create_window(confirm_close=False)` means WM_CLOSE is not answered by a
+    dialog, so nothing can wedge on the grace window.
+
+    The terminate path is KEPT, unchanged, as the backstop: off Windows there
+    is no WM_CLOSE at all, a child that crashed before creating a window has
+    nothing to post to, and a hung renderer must not keep the GUI open.
+    """
     global _process
     with _lock:
-        if _process and _process.poll() is None:
+        proc = _process
+        if proc and proc.poll() is None:
             _deliberate_stop.set()
             try:
-                _process.terminate()
-                _process.wait(timeout=3)
+                if _post_close_to_pid(proc.pid) > 0:
+                    deadline = time.monotonic() + GRACEFUL_CLOSE_TIMEOUT_S
+                    while time.monotonic() < deadline:
+                        if proc.poll() is not None:
+                            break
+                        time.sleep(_GRACEFUL_POLL_S)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("Sanftes Schließen fehlgeschlagen: %s", exc)
+        if proc and proc.poll() is None:
+            try:
+                proc.terminate()
+                proc.wait(timeout=3)
             except Exception:
                 try:
-                    _process.kill()
+                    proc.kill()
                 except Exception:
                     pass
         _process = None

@@ -3923,33 +3923,56 @@ class EduBoticsApp:
         threading.Thread(target=_do_reset, daemon=True).start()
 
     def _on_close(self):
-        """Fenster-Schließen abfangen — Container stoppen, wenn nötig."""
+        """Fenster-Schließen abfangen — Container stoppen, wenn nötig.
+
+        `self.running` IS NOT A RELIABLE "the stack is up" SIGNAL. `_do_start`'s
+        `finally` clears it on any failure occurring AFTER `start_containers`
+        succeeded, so the flag reads False over a live stack — and the old
+        `running == False` branch then skipped the container stop, the camera
+        bridge and the phone server, leaving all three behind. So the close ASKS
+        DOCKER instead, and only falls back to the flag as the fast path.
+
+        The probe is one bounded `docker ps` and fails CLOSED (see
+        `docker_manager.any_container_running`): a broken probe must never turn
+        closing the GUI into a modal the student cannot get past.
+        """
         self._stop_camera_previews()
-        if self.running:
-            if messagebox.askyesno(
+
+        # Fast path first: if the flag already says yes there is nothing to
+        # probe, and we keep the close instant in the common case.
+        stack_up = bool(self.running) or docker_manager.any_container_running()
+
+        if stack_up:
+            if not messagebox.askyesno(
                 "EduBotics beenden",
                 "Die Umgebung läuft noch.\nContainer stoppen und beenden?",
             ):
-                self._log("Beende — Container werden gestoppt...")
-                self._stop_camera_bridge()
-                self._stop_phone_server()
-                self._stop_rs_control_server()
-                webview_window.destroy_all()
-                if self.cloud_only.get():
-                    docker_manager.stop_cloud_only()
-                else:
-                    docker_manager.stop_containers(gpu=self.gpu_available)
-                docker_manager.stop_keepalive()
-                self.root.destroy()
-            # else: user clicked No, don't close
-        else:
-            # Not "running", but the control bridge may still be up from a
-            # partial start (it starts before _open_webview, which can fail) —
-            # don't leak the :8769 socket + thread past the GUI's exit.
-            self._stop_rs_control_server()
-            webview_window.destroy_all()
-            docker_manager.stop_keepalive()
-            self.root.destroy()
+                return  # user clicked No — don't close
+            self._log("Beende — Container werden gestoppt...")
+
+        # UNCONDITIONAL from here. Every one of these is a resource THIS GUI
+        # process owns, and each is idempotent and independently guarded, so
+        # there was never a reason to tie them to the container state:
+        #   * the camera bridge holds both USB cameras via MSMF,
+        #   * the phone receiver holds 0.0.0.0:8444,
+        #   * the Roboter-Studio bridge holds 127.0.0.1:8769 and a thread — it
+        #     starts BEFORE _open_webview, so a partial start leaves it up,
+        #   * the webview child is now closed GRACEFULLY (WM_CLOSE first) so the
+        #     browser's teardown hooks — the Jetson release beacon, JogPanel's
+        #     re-torque — actually run.
+        self._stop_camera_bridge()
+        self._stop_phone_server()
+        self._stop_rs_control_server()
+        webview_window.destroy_all()
+
+        if stack_up:
+            if self.cloud_only.get():
+                docker_manager.stop_cloud_only()
+            else:
+                docker_manager.stop_containers(gpu=self.gpu_available)
+
+        docker_manager.stop_keepalive()
+        self.root.destroy()
 
 
 _SINGLE_INSTANCE_MUTEX = "Local\\EduBotics_GUI_SingleInstance"

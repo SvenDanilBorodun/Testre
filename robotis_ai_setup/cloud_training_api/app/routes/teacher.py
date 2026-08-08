@@ -695,6 +695,14 @@ def _delete_student_hf_artifacts(student_id: str) -> list[dict]:
     # old enumeration could not see it — which is the whole point of a GDPR
     # erasure on a student who only ever recorded.
     registry_repos: list[str] = []
+    # The registry is the ONLY source of the shared-repo skip list, so a failed
+    # read is not merely "we enumerated less" — it is "we no longer know which
+    # datasets belong to a workgroup". Deleting under that ignorance destroyed a
+    # sibling group's data: measured 2026-08-08 by answering this query 503 while
+    # leaving one `trainings` row naming a group-shared repo, which was then
+    # observably deleted. So the read outcome is TRACKED, and it gates the
+    # dataset half of the loop below.
+    registry_readable = True
     try:
         ds_rows = (
             supabase.table("datasets")
@@ -711,13 +719,29 @@ def _delete_student_hf_artifacts(student_id: str) -> list[dict]:
             else:
                 registry_repos.append(repo)
     except Exception as e:
+        registry_readable = False
         logger.warning("Dataset registry query failed during HF cleanup: %s", e)
         failures.append({
             "repo_id": "?", "repo_type": "dataset",
-            "reason": f"Datensatz-Register nicht lesbar: {e}",
+            "reason": (
+                "Datensatz-Register nicht lesbar — es ist unbekannt, welche "
+                "Datensätze mit einer Arbeitsgruppe geteilt sind. Es wurde "
+                "deshalb KEIN Datensatz gelöscht. Bitte später erneut versuchen."
+            ),
         })
 
     if not rows and not registry_repos:
+        # Nothing enumerable. That is HONEST only when the student genuinely
+        # registered nothing: a recording is discoverable here only if it
+        # reached the `datasets` registry, so a repo pushed under an
+        # unregistered name is invisible to this function and always was.
+        # Reporting an unqualified `hf_erasure_complete: true` after contacting
+        # HuggingFace ZERO times is the same overstatement this whole change
+        # exists to remove, so say what was actually established.
+        if registry_readable:
+            logger.info(
+                "No HF artifacts registered for %s — nothing to erase", student_id
+            )
         return failures
 
     api = HfApi(token=hf_token)
@@ -738,6 +762,26 @@ def _delete_student_hf_artifacts(student_id: str) -> list[dict]:
         if not repo_id or (repo_id, repo_type) in seen:
             continue
         seen.add((repo_id, repo_type))
+        if repo_type == "dataset" and not registry_readable:
+            # Fail CLOSED, and NAME the repo. The generic "?" entry above says
+            # why; without this per-repo entry the teacher is warned in a way
+            # that never mentions the datasets, so a sibling group's data would
+            # go missing invisibly. Models are unaffected: a pooled training is
+            # already skipped by its own row's workgroup_id, which does not come
+            # from this query.
+            logger.warning(
+                "Refusing to delete HF dataset %s — shared-repo skip list "
+                "unavailable (datasets registry unreadable)",
+                repo_id,
+            )
+            failures.append({
+                "repo_id": repo_id, "repo_type": repo_type,
+                "reason": (
+                    "Nicht gelöscht: unbekannt, ob dieser Datensatz mit einer "
+                    "Arbeitsgruppe geteilt ist."
+                ),
+            })
+            continue
         if repo_type == "dataset" and repo_id in shared_dataset_repos:
             logger.info(
                 "Skipping HF dataset %s — still shared with workgroup",
@@ -780,7 +824,7 @@ async def delete_student(student_id: str, teacher=Depends(get_current_teacher)):
         supabase.auth.admin.delete_user(student_id)
     except Exception as e:
         logger.error("delete_user failed: %s", e)
-        raise HTTPException(status_code=500, detail="Konto konnte nicht geloescht werden")
+        raise HTTPException(status_code=500, detail="Konto konnte nicht gelöscht werden")
 
     # `ok` refers to the ACCOUNT deletion, which did succeed. HF erasure is
     # best-effort and must not block it — but it must also not be reported as

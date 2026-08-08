@@ -283,14 +283,65 @@ class ARegistryQueryFailureIsReportedNotSwallowed(unittest.TestCase):
         _, failures = self._run_with_broken_registry(store)
         self.assertIn('Datensatz-Register', failures[0]['reason'])
 
-    def test_it_still_erases_what_the_trainings_table_DID_name(self):
-        """Best-effort: a broken registry must not abort the whole pass."""
-        store = {'trainings': [{'dataset_name': 'alice/ds',
+    def test_a_broken_registry_never_deletes_a_DATASET(self):
+        """The measured P0: a 503 turned "skip shared repos" into "delete them".
+
+        This test REPLACES `test_it_still_erases_what_the_trainings_table_DID_name`,
+        which asserted the opposite and therefore pinned the defect open. That
+        test read as a best-effort virtue ("a broken registry must not abort the
+        whole pass") while the registry is the ONLY source of the shared-repo
+        skip list — so with it unreadable, `shared_dataset_repos` is empty and
+        every dataset named by a surviving `trainings` row looks unshared.
+
+        Measured 2026-08-08 against the real route: with the datasets query
+        answering 503, a workgroup-shared repo was observably passed to
+        `delete_repo`. The sibling group's data is gone and unrecoverable, so
+        this half must fail CLOSED.
+        """
+        store = {'trainings': [{'dataset_name': 'group/shared-ds',
                                 'model_name': 'org/mdl',
                                 'workgroup_id': None}]}
         api, _ = self._run_with_broken_registry(store)
-        self.assertIn(('alice/ds', 'dataset'), api.deleted)
+        self.assertNotIn(
+            ('group/shared-ds', 'dataset'), api.deleted,
+            'a dataset was deleted while the shared-repo skip list was '
+            'unavailable — this is the workgroup-data-destruction path')
+
+    def test_a_broken_registry_still_erases_MODELS(self):
+        """Fail-closed is scoped to datasets, deliberately.
+
+        A pooled training is already skipped by its own row's `workgroup_id`,
+        which does not come from the failed query — so model erasure loses no
+        safety here, and widening the refusal would stop erasing data we can
+        prove is unshared.
+        """
+        store = {'trainings': [{'dataset_name': 'group/shared-ds',
+                                'model_name': 'org/mdl',
+                                'workgroup_id': None}]}
+        api, _ = self._run_with_broken_registry(store)
         self.assertIn(('org/mdl', 'model'), api.deleted)
+
+    def test_every_undeleted_dataset_is_NAMED_to_the_teacher(self):
+        """The generic '?' entry alone makes the data loss invisible.
+
+        The teacher is warned either way, but a warning that never mentions the
+        datasets reads as "a registry hiccup" rather than "these recordings were
+        not erased" — so each refused repo gets its own entry.
+        """
+        store = {'trainings': [{'dataset_name': 'group/shared-ds',
+                                'model_name': None,
+                                'workgroup_id': None}]}
+        _, failures = self._run_with_broken_registry(store)
+        named = [f['repo_id'] for f in failures]
+        self.assertIn('group/shared-ds', named)
+
+    def test_the_registry_failure_reason_does_not_leak_the_raw_exception(self):
+        """`f'...: {e}'` put raw English PostgREST text in a German field."""
+        _, failures = self._run_with_broken_registry({'trainings': []})
+        generic = [f for f in failures if f['repo_id'] == '?']
+        self.assertTrue(generic)
+        self.assertNotIn('PostgREST', generic[0]['reason'])
+        self.assertNotIn('503', generic[0]['reason'])
 
     def test_it_reports_even_when_there_is_nothing_else_to_erase(self):
         """The early `if not rows and not registry_repos: return failures`.
@@ -467,6 +518,75 @@ class SelfServiceDeletionDoesNotOverstateWhatHappened(unittest.TestCase):
                         self.assertIs(value.value, False)
                         found = True
         self.assertTrue(found, 'no deletion_performed flag in the response')
+
+
+class TheDestructiveEndpointIsOwnershipGated(unittest.TestCase):
+    """Rule §4, on the single most destructive route in the API.
+
+    Service-role bypasses RLS, so `_assert_student_owned` is the ONLY thing
+    standing between teacher A and teacher B's student. It was live in
+    production the whole time — but fenced by nothing: measured 2026-08-08,
+    DELETING the assert and MOVING it after the destructive calls each left all
+    253 tests green. Every other test in this file patches the assert out, so
+    they are structurally incapable of noticing.
+
+    Both properties are asserted, because they fail differently: an absent
+    assert is a cross-tenant IDOR, and a late one still erases HuggingFace repos
+    and deletes the auth user before raising 404.
+    """
+
+    def setUp(self):
+        _ensure_stubs()
+        from app.routes import teacher
+        self.teacher = teacher
+
+    def test_a_foreign_student_is_refused_before_anything_is_destroyed(self):
+        import asyncio
+        touched = []
+
+        def _refuse(_tid, _sid):
+            raise self.teacher.HTTPException(status_code=404,
+                                             detail='Schüler nicht gefunden')
+
+        sb = _Supabase({})
+        with patch.object(self.teacher, '_assert_student_owned', _refuse), \
+                patch.object(self.teacher, '_delete_student_hf_artifacts',
+                             lambda sid: touched.append(sid) or []), \
+                patch.object(self.teacher, 'get_supabase', lambda: sb):
+            with self.assertRaises(self.teacher.HTTPException) as caught:
+                asyncio.run(self.teacher.delete_student(
+                    'not-mine', teacher={'id': 't1'}))
+        self.assertEqual(caught.exception.status_code, 404)
+        self.assertEqual(
+            touched, [],
+            'HF erasure ran for a student this teacher does not own')
+        self.assertIsNone(
+            sb.deleted_user,
+            'the auth user was deleted for a student this teacher does not own')
+
+    def test_the_assert_is_the_FIRST_statement_of_the_handler(self):
+        """Ordering, read structurally.
+
+        The behavioural test above catches a DELETED assert. It cannot catch a
+        MISPLACED one on its own — a raising assert short-circuits either way —
+        so the position is pinned too. Docstring stripped: `ast.unparse` keeps
+        it and it names the symbol being asserted on.
+        """
+        import ast
+        import inspect
+        tree = ast.parse(inspect.getsource(self.teacher.delete_student).lstrip())
+        fn = tree.body[0]
+        body = list(fn.body)
+        if (body and isinstance(body[0], ast.Expr)
+                and isinstance(body[0].value, ast.Constant)):
+            body = body[1:]
+        self.assertTrue(body, 'delete_student has an empty body — test is stale')
+        first = ast.unparse(body[0])
+        self.assertIn(
+            '_assert_student_owned', first,
+            f'the ownership assert is no longer the first statement of '
+            f'delete_student (found {first!r}) — anything above it runs for a '
+            f'student the caller may not own')
 
 
 if __name__ == '__main__':

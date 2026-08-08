@@ -30,6 +30,7 @@ import sys
 import tempfile
 import types
 import unittest
+from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PKG_ROOT = REPO_ROOT / 'physical_ai_tools' / 'physical_ai_server' / 'physical_ai_server'
@@ -687,6 +688,192 @@ class TheTrainingInfoCallbackRoutesItsPathThroughDatasetPaths(unittest.TestCase)
             set(opened) & assigned,
             f'open() is called on {opened}, none of which is the confined '
             f'{sorted(assigned)}')
+
+
+def _fn_body_src(path, name):
+    """AST body of a function, docstring stripped.
+
+    Same technique as the training-info fence above and for the same reason:
+    these callbacks live on classes needing rclpy + the compiled interfaces,
+    which neither this deps-free suite nor CI's python-tests job can import. The
+    docstring is dropped because ``ast.unparse`` keeps it and several of these
+    comments name the very expressions the assertions ban.
+    """
+    import ast
+    tree = ast.parse(path.read_text(encoding='utf-8'))
+    fn = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            fn = node
+    if fn is None:
+        raise AssertionError(
+            f'{name} not found in {path.name} — either it was renamed or this '
+            f'test is stale, and both mean nothing is checked')
+    body = list(fn.body)
+    if (body and isinstance(body[0], ast.Expr)
+            and isinstance(body[0].value, ast.Constant)):
+        body = body[1:]
+    return '\n'.join(ast.unparse(s) for s in body)
+
+
+class TheThreeRemainingClientPathsAreConfined(unittest.TestCase):
+    """The paths the 2026-08-06 sweep framed itself out of seeing.
+
+    That sweep was scoped to "every client-supplied DATASET path", so three
+    values on the same unauthenticated rosbridge fell outside its own framing —
+    the identical blind spot that already cost `get_training_info_callback` one
+    round. Each was proven reachable by execution on 2026-08-08:
+
+      * ``ControlHfServer.local_dir`` — `upload_huggingface_repo` opens with an
+        ``shutil.rmtree`` of ``<local_dir>/.cache``. Run in the SHIPPED image,
+        ``local_dir='/root'`` deleted every recorded dataset and the
+        huggingface-cli token, surfacing only an unrelated German sync error.
+      * ``GetDatasetInfo.dataset_path`` — arbitrary ``<dir>/meta/info.json``
+        read plus a directory-existence oracle.
+      * ``TaskInfo.policy_path`` — arbitrary ``<dir>/config.json`` read, with
+        an attacker-planted field echoed into a student toast.
+    """
+
+    def test_the_hf_upload_local_dir_is_confined(self):
+        body = _fn_body_src(PKG_ROOT / 'physical_ai_server.py',
+                            'control_hf_server_callback')
+        self.assertIn('dataset_paths.confine_any(', body)
+        self.assertIn('DatasetPathError', body)
+
+    def test_the_local_dir_confine_is_scoped_to_the_upload_mode(self):
+        """Availability half: only 'upload' reads local_dir.
+
+        `hf_api_worker` passes just repo_id/repo_type to download, delete and
+        both list modes, so those senders leave local_dir EMPTY. An
+        unconditional confine refuses them all — the same self-inflicted
+        regression that broke „Modellpfad auswählen" twice.
+        """
+        body = _fn_body_src(PKG_ROOT / 'physical_ai_server.py',
+                            'control_hf_server_callback')
+        guard = "if mode == 'upload':"
+        self.assertIn(guard, body)
+        after_guard = body.split(guard, 1)[1]
+        self.assertIn('confine_any(', after_guard,
+                      'the confine escaped its upload-only guard')
+
+    def test_the_worker_receives_the_confined_value_not_the_request(self):
+        import ast
+        src = (PKG_ROOT / 'physical_ai_server.py').read_text(encoding='utf-8')
+        tree = ast.parse(src)
+        fn = next(n for n in ast.walk(tree)
+                  if isinstance(n, ast.FunctionDef)
+                  and n.name == 'control_hf_server_callback')
+        # The dict handed to the worker must carry the local NAME, which the
+        # confine reassigns — never `request.local_dir` read a second time.
+        for node in ast.walk(fn):
+            if isinstance(node, ast.Dict):
+                for k, v in zip(node.keys, node.values):
+                    if isinstance(k, ast.Constant) and k.value == 'local_dir':
+                        self.assertNotIn('request.', ast.unparse(v))
+
+    def test_the_dataset_info_path_is_confined(self):
+        body = _fn_body_src(PKG_ROOT / 'communication' / 'communicator.py',
+                            'get_dataset_info_callback')
+        self.assertIn('dataset_paths.confine(', body)
+        self.assertIn('DatasetPathError', body)
+
+    def test_the_dataset_info_path_never_reaches_the_editor_raw(self):
+        import ast
+        src = (PKG_ROOT / 'communication' / 'communicator.py').read_text(
+            encoding='utf-8')
+        tree = ast.parse(src)
+        fn = next(n for n in ast.walk(tree)
+                  if isinstance(n, ast.FunctionDef)
+                  and n.name == 'get_dataset_info_callback')
+        for node in ast.walk(fn):
+            if (isinstance(node, ast.Call)
+                    and 'get_dataset_info' in ast.unparse(node.func)):
+                for arg in node.args:
+                    self.assertNotIn('request.', ast.unparse(arg))
+
+    def test_the_policy_path_is_confined_to_the_policy_roots(self):
+        body = _fn_body_src(PKG_ROOT / 'inference' / 'inference_manager.py',
+                            'validate_policy')
+        self.assertIn('dataset_paths.confine_any(', body)
+        self.assertIn('dataset_paths.policy_roots()', body)
+        self.assertNotIn('browsable_roots', body)
+
+    def test_the_policy_confine_runs_before_any_filesystem_call(self):
+        """Order is the property: a later confine still leaks the oracle."""
+        body = _fn_body_src(PKG_ROOT / 'inference' / 'inference_manager.py',
+                            'validate_policy')
+        confine_at = body.index('confine_any(')
+        first_fs = min(
+            (body.index(tok) for tok in ('os.path.exists', 'os.path.isdir')
+             if tok in body),
+            default=-1)
+        self.assertGreater(first_fs, -1, 'no filesystem call left — test stale')
+        self.assertLess(confine_at, first_fs)
+
+    def test_the_policy_refusals_no_longer_echo_the_caller_path(self):
+        body = _fn_body_src(PKG_ROOT / 'inference' / 'inference_manager.py',
+                            'validate_policy')
+        for echo in ('{policy_path}', '{self.policy_path}'):
+            self.assertNotIn(
+                echo, body,
+                'a refusal interpolates the caller-supplied path back into a '
+                'student-facing German toast')
+
+
+class ThePolicyRootsAreTheOnesPoliciesActuallyLiveIn(unittest.TestCase):
+    """`policy_roots` is not `browsable_roots`, and that is load-bearing.
+
+    `inference_manager.get_saved_policies` enumerates
+    ``~/.cache/huggingface/hub/models--*/snapshots/*/pretrained_model`` and
+    feeds those exact strings to the React dropdown. Confining `policy_path` to
+    the browsable pair would refuse every policy a student has — a security fix
+    that bricks inference is not a fix.
+    """
+
+    def setUp(self):
+        self.dp = _load_dataset_paths()
+
+    def test_the_hub_cache_is_a_policy_root(self):
+        roots = [str(r) for r in self.dp.policy_roots()]
+        self.assertTrue(any(r.endswith('.cache/huggingface/hub') for r in roots),
+                        roots)
+
+    def test_the_model_root_is_a_policy_root(self):
+        roots = [str(r) for r in self.dp.policy_roots()]
+        self.assertIn(str(self.dp.model_root()), roots)
+
+    def test_a_real_saved_policy_shape_is_accepted(self):
+        # The exact shape get_saved_policies hands back.
+        with tempfile.TemporaryDirectory() as td:
+            home = pathlib.Path(td).resolve()
+            with mock.patch.object(pathlib.Path, 'home', staticmethod(lambda: home)):
+                good = (home / self.dp.HF_HUB_CACHE_RELATIVE
+                        / 'models--acme--act' / 'snapshots' / 'abc123'
+                        / 'pretrained_model')
+                good.mkdir(parents=True)
+                self.assertEqual(
+                    self.dp.confine_any(str(good), self.dp.policy_roots()),
+                    good.resolve())
+
+    def test_a_path_outside_every_policy_root_is_refused(self):
+        with tempfile.TemporaryDirectory() as td:
+            home = pathlib.Path(td).resolve()
+            with mock.patch.object(pathlib.Path, 'home', staticmethod(lambda: home)):
+                with self.assertRaises(self.dp.DatasetPathError):
+                    self.dp.confine_any('/etc/ssh', self.dp.policy_roots())
+
+    def test_the_dataset_root_is_NOT_a_policy_root(self):
+        # A policy is never a recorded dataset; a wider allowlist buys nothing.
+        roots = [str(r) for r in self.dp.policy_roots()]
+        self.assertNotIn(str(self.dp.dataset_root()), roots)
+
+    def test_the_hub_cache_and_dataset_root_are_siblings_not_nested(self):
+        # If one contained the other, confining to one would silently grant the
+        # other — the two constants must stay independent.
+        hub = str(self.dp.hf_hub_cache_root())
+        data = str(self.dp.dataset_root())
+        self.assertFalse(hub.startswith(data + os.sep))
+        self.assertFalse(data.startswith(hub + os.sep))
 
 
 if __name__ == '__main__':

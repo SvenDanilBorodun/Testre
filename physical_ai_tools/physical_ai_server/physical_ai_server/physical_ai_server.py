@@ -2314,6 +2314,36 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 response.success = False
                 response.message = 'HF API Worker is currently busy with another task'
                 return response
+            # CONFINE local_dir before it reaches the worker. This is the
+            # highest-blast-radius client path on the whole rosbridge surface
+            # and it is NOT a "dataset path", which is exactly why the
+            # confinement sweep walked past it: DataManager.upload_huggingface_repo
+            # opens with `_delete_dot_cache_folder_before_upload`, an
+            # `shutil.rmtree` of `<local_dir>/.cache`. Measured 2026-08-08 in the
+            # shipped image: `local_dir='/root'` deleted every student's recorded
+            # datasets AND the huggingface-cli token, while the student saw only
+            # an unrelated German tag-sync error.
+            #
+            # confine_any (not safe_under): React sends an ABSOLUTE path the file
+            # browser produced, and both browsable roots are legitimate upload
+            # sources. allow_root stays False — a repo is ONE dataset, never the
+            # whole root.
+            #
+            # SCOPED TO 'upload', deliberately. It is the ONLY mode that reads
+            # local_dir (hf_api_worker passes just repo_id/repo_type to download,
+            # delete and both list modes), so those callers send it EMPTY and an
+            # unconditional confine would refuse every download — the same
+            # self-inflicted availability regression that broke
+            # „Modellpfad auswählen" twice on this branch.
+            if mode == 'upload':
+                try:
+                    local_dir = str(dataset_paths.confine_any(
+                        local_dir, dataset_paths.browsable_roots()))
+                except dataset_paths.DatasetPathError as e:
+                    self.get_logger().error(f'Refused HF local_dir: {e}')
+                    response.success = False
+                    response.message = str(e)
+                    return response
             # Prepare request data for the worker
             request_data = {
                 'mode': mode,

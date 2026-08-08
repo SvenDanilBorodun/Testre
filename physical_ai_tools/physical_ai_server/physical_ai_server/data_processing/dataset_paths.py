@@ -89,6 +89,12 @@ DATASET_ROOT_RELATIVE = '.cache/huggingface/lerobot'
 # cross-language half.
 MODEL_ROOT_RELATIVE = 'ros2_ws/outputs/train'
 
+# huggingface_hub's own download cache — where ``from_pretrained`` puts a model
+# and therefore where ``inference_manager.get_saved_policies`` finds every
+# policy it offers the student. A SIBLING of DATASET_ROOT_RELATIVE under
+# ``~/.cache/huggingface``, never a parent or child of it.
+HF_HUB_CACHE_RELATIVE = '.cache/huggingface/hub'
+
 # Student-facing German (Rule §1). Deliberately does NOT echo the offending
 # path back: the message is surfaced in the browser, and reflecting an
 # arbitrary caller-supplied string into the UI is its own small problem.
@@ -142,6 +148,33 @@ def browsable_roots():
     place that would then have to decide what "no roots" means.
     """
     return [r for r in (dataset_root(), model_root()) if r]
+
+
+def hf_hub_cache_root() -> Path:
+    """Where ``from_pretrained`` caches downloaded models.
+
+    A THIRD legitimate location, and the reason :func:`policy_roots` is not
+    just :func:`browsable_roots`: ``inference_manager.get_saved_policies``
+    enumerates ``~/.cache/huggingface/hub/models--*/snapshots/*/pretrained_model``
+    and hands those exact paths to the React dropdown, so confining
+    ``TaskInfo.policy_path`` to the browsable pair would refuse every policy a
+    student actually has. It is a sibling of :func:`dataset_root` under
+    ``~/.cache/huggingface`` but NOT inside it — ``lerobot`` and ``hub`` are two
+    directories, so neither root implies the other.
+    """
+    return Path.home() / HF_HUB_CACHE_RELATIVE
+
+
+def policy_roots():
+    """Roots a client-supplied INFERENCE policy path may live under.
+
+    Two entries, both real: ``model_root()`` is where
+    ``download_huggingface_repo(repo_type='model')`` writes, and
+    :func:`hf_hub_cache_root` is where ``from_pretrained`` caches. The dataset
+    root is deliberately NOT here — a policy is never a recorded dataset, and a
+    wider allowlist buys nothing.
+    """
+    return [r for r in (model_root(), hf_hub_cache_root()) if r]
 
 
 def confine(

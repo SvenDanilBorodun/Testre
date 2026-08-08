@@ -79,8 +79,20 @@ ENGLISH_WORDS = re.compile(
 )
 # Transliteration patterns inside German-classified strings (superset of the
 # grep list in ci.yml's first lint step, stemmed for inflections).
+# The leading boundary is `\b\w*?`, NOT a bare `\b`. A bare `\b` cannot match
+# inside an inflected form: in `geloescht` the character before `l` is `e`, so
+# `\bloesch\w*` never fires and `detail="Konto konnte nicht geloescht werden"`
+# sat in a fully-covered position while this script exited clean (measured
+# 2026-08-08). The same hole applied to every stem here that takes a German
+# participle or verb prefix — `geprueft`, `angezeigt`, `ausgewaehlt` — and
+# `gewaehlt`/`geaendert`/`beschaedigt` are in the list only because someone hit
+# them one at a time. `\w*?` closes the class rather than the instance.
+#
+# False positives are implausible by construction: every stem carries an
+# ae/oe/ue transliteration digraph, which correct German spells with an umlaut
+# and English does not produce. Verified against the whole tree after the fix.
 TRANSLITERATIONS = re.compile(
-    r"\b(frueh\w*|kuerzer|schliess\w*|luecke\w*|moeglich\w*|ueber\w*"
+    r"\b\w*?(frueh\w*|kuerzer|schliess\w*|luecke\w*|moeglich\w*|ueber\w*"
     r"|laeuft|haeng\w*|pruef\w*|schueler\w*|benoetig\w*|oberflaeche\w*"
     r"|uebersprungen|enthaelt|zusaetzlich\w*|verfuegbar|geaendert"
     r"|beschaedigt|koennte|faehig\w*|aufloesung|loesch\w*|gewaehlt"

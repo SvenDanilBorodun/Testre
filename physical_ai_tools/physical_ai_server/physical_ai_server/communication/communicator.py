@@ -40,6 +40,7 @@ from physical_ai_interfaces.srv import (
     GetImageTopicList
 )
 from physical_ai_server.communication.multi_subscriber import MultiSubscriber
+from physical_ai_server.data_processing import dataset_paths
 from physical_ai_server.data_processing import edit_worker
 from physical_ai_server.data_processing.data_editor import DataEditor
 from physical_ai_server.utils.file_browse_utils import FileBrowseUtils
@@ -984,7 +985,21 @@ class Communicator:
 
     def get_dataset_info_callback(self, request, response):
         try:
-            dataset_path = request.dataset_path
+            # Client-supplied and reachable from the unauthenticated rosbridge.
+            # Unconfined it read any `<dir>/meta/info.json` on the container and
+            # doubled as a directory-existence oracle (measured 2026-08-08:
+            # five fields returned from a planted file outside every root, and
+            # `/etc/ssh` distinguishable from a nonexistent path by the message
+            # alone). Read-only, so the dataset root is the right confinement —
+            # narrower than `browsable_roots`, which exists for the BROWSER.
+            try:
+                dataset_path = str(dataset_paths.confine(
+                    request.dataset_path, dataset_paths.dataset_root()))
+            except dataset_paths.DatasetPathError as e:
+                self.node.get_logger().warning(f'Refused dataset_path: {e}')
+                response.success = False
+                response.message = str(e)
+                return response
             dataset_info = self.data_editor.get_dataset_info(dataset_path)
 
             info = DatasetInfo()

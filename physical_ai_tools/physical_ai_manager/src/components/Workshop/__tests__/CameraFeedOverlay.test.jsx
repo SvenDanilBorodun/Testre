@@ -69,9 +69,15 @@ describe('CameraFeedOverlay — Pi-mode stream gating (piModeResolved)', () => {
     expect(img.getAttribute('src')).toContain('topic=/scene/image_raw&');
   });
 
-  it('keeps the direct web_video_server :8080 URL on a resolved non-Pi rig', async () => {
+  it('rides the SAME same-origin /video proxy on a resolved non-Pi rig', async () => {
+    // Changed 2026-08-06: the Windows student rig no longer publishes :8080
+    // (nor :9090) to the host at all — both robot transports go through the
+    // manager's nginx proxy so the unauthenticated rosbridge stops being
+    // reachable cross-origin from any page in the student's browser. A URL
+    // naming :8080 here would now point at a closed port.
     render(<CameraFeedOverlay camera="scene" />);
     const img = await screen.findByRole('img');
-    expect(img.getAttribute('src')).toContain('http://192.168.0.5:8080/stream');
+    expect(img.getAttribute('src')).toContain('/video/stream');
+    expect(img.getAttribute('src')).not.toContain(':8080');
   });
 });

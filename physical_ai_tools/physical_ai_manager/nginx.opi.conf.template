@@ -58,6 +58,43 @@ map $http_upgrade $connection_upgrade {
     ''      close;
 }
 
+# DNS-REBINDING GUARD for the /rosbridge gate below.
+#
+# That gate is HOST-RELATIVE — it accepts an Origin naming the same authority
+# the request was addressed to — which is the only shape that works when a Pi
+# is reached at whatever LAN IP or hostname the school gave it. But it accepts
+# any authority the CLIENT chose: an attacker page on `http://attacker.example`
+# whose DNS is rebound to the Pi's LAN IP sends `Host: attacker.example` AND
+# `Origin: http://attacker.example`, the two match, and the gate opens.
+# Measured 2026-08-08 against real rosbridge behind this template: 101, and the
+# subsequent advertise of /leader/joint_trajectory took effect.
+#
+# So the HOST itself is constrained to shapes a Pi is actually reached at. This
+# is deliberately GENEROUS — a fixed allowlist locks every Pi out, which is the
+# standing rule for this file:
+#   * `localhost` / IPv4 literal / bracketed IPv6 literal (a rebind cannot
+#     produce these: an IP host is not a DNS name),
+#   * a SINGLE-LABEL name (`edubotics`, `pi`) — a public DNS name always has a
+#     dot, so single-label cannot be rebound from the internet,
+#   * anything under `.local` — mDNS, which is link-local by definition.
+# All with an optional :port.
+#
+# WHAT THIS REFUSES, and it is the one availability risk worth knowing: a
+# multi-label name that is not `.local`, e.g. a school-managed
+# `pi.schule.intern`. Such a rig answers 421 on /rosbridge only — the wizard,
+# /api/system/ and the SPA are untouched, so the Pi is still reachable and
+# repairable. Add the school's suffix as another entry here if that happens.
+#
+# Case-insensitive (~*) because $http_host preserves the case the client sent.
+map $http_host $edubotics_host_is_own {
+    default                                          0;
+    "~*^localhost(:[0-9]+)?$"                        1;
+    "~*^[0-9]{1,3}(\.[0-9]{1,3}){3}(:[0-9]+)?$"      1;
+    "~*^\[[0-9a-f:.]+\](:[0-9]+)?$"                  1;
+    "~*^[a-z0-9-]+(:[0-9]+)?$"                       1;
+    "~*^[a-z0-9-]+(\.[a-z0-9-]+)*\.local(:[0-9]+)?$" 1;
+}
+
 server {
     listen 80;
     server_name localhost;
@@ -186,6 +223,23 @@ server {
         # break things (an empty-valued proxy_set_header removes the header).
         # $http_origin is a single-$ runtime var (survives envsubst).
         proxy_set_header Origin $http_origin;
+        # STRIP the agent's wildcard CORS header, for the same reason the
+        # /video/stream block below strips web_video_server's.
+        # `pi_agent/agent.py::Handler._cors` sets `Access-Control-Allow-Origin: *`
+        # on EVERY JSON response, and GETs here are deliberately not
+        # Origin-gated (only mutating routes are), so without this line any page
+        # on the LAN could `fetch()` and READ /status, /protokoll,
+        # /netzwerk-check and the /cameras/* preview cross-origin. Measured
+        # 2026-08-08 against the real agent handler behind this template: lan_ip,
+        # hostname, container_status and arms_identified all readable from
+        # `Origin: http://evil.example`, while /video/stream on the same server
+        # correctly stripped it.
+        #
+        # This does NOT weaken the agent: same-origin requests from our own SPA
+        # never needed the header, since a same-origin fetch is not CORS.
+        proxy_hide_header Access-Control-Allow-Origin;
+        proxy_hide_header Access-Control-Allow-Methods;
+        proxy_hide_header Access-Control-Allow-Headers;
         proxy_buffering off;
         proxy_cache off;
         proxy_read_timeout 3600s;
@@ -207,7 +261,83 @@ server {
     # the $connection_upgrade map at the top of this file rather than a
     # hardcoded "upgrade" — the hardcoded form sent a bogus upgrade token on
     # every non-WebSocket request that reached this path.
+    #
+    # ── Origin gate (2026-08-07) ────────────────────────────────────────────
+    # THE control plane: anything speaking rosbridge here can drive a physical
+    # arm standing beside children and read every recorded dataset. rosbridge
+    # is UNAUTHENTICATED and `rosbridge_server` 2.7.0 OVERRIDES tornado's
+    # same-origin default (`def check_origin(self, origin): return True`), so
+    # without this gate any web page the student has open could open a session
+    # and publish /leader/joint_trajectory. A WebSocket handshake has no CORS
+    # preflight to stop it.
+    #
+    # HOST-RELATIVE, not an allowlist. The student nginx.conf names
+    # `localhost`/`127.0.0.1` because gui_app opens exactly that URL; a Pi is
+    # reached at whatever LAN IP or hostname the school gave it, so a fixed set
+    # would lock every Pi out. The rule is instead: the Origin must name the
+    # same AUTHORITY the request itself was addressed to.
+    #
+    # $http_host, NOT $host. Both were driven on nginx 1.27.5 and they differ in
+    # exactly two places — neither of which is the one you would guess. On a Pi
+    # served on :80 (the shipped layout) they agree, including on refusing
+    # `Origin: http://<pi>:8080`. What separates them:
+    #
+    #   * A rig reached on a NON-DEFAULT port. With `Host: pi.local:8080`,
+    #     $host is `pi.local`, so a page on `http://pi.local` — port 80, a
+    #     DIFFERENT origin — is ACCEPTED, while the legitimate
+    #     `http://pi.local:8080` is REFUSED. Measured: 200 and 403 respectively.
+    #     $http_host gets both right (403 / 200).
+    #   * An ABSOLUTE-FORM request line. $host is taken from the request line
+    #     when there is one, so `GET http://evil.com/rosbridge` with
+    #     `Host: pi.local` and `Origin: http://evil.com` is ACCEPTED under
+    #     $host (measured 200) and refused under $http_host. No browser emits
+    #     absolute-form, so this is not reachable from the attack this gate
+    #     exists to stop — but it is a real bypass of the $host spelling and
+    #     there is no reason to carry it.
+    #
+    # Both schemes are accepted for the same authority. Nothing terminates TLS
+    # in front of a Pi today, and the property being enforced is host identity;
+    # a page on the same authority is same-origin-enough for this gate whatever
+    # scheme it was served over.
+    #
+    # EMPTY / ABSENT Origin is ALLOWED, deliberately and identically to the
+    # student config: a browser cannot omit Origin on a WebSocket handshake —
+    # it is set by the user agent, not by script — so a blank Origin provably
+    # did not come from the attack this gate exists to stop, while denying it
+    # would break roslibpy/wscat diagnostics. A `file://` page sends the
+    # literal `null`, which is non-empty and therefore refused. This closes the
+    # BROWSER path; a header-less LAN curl straight at the published :9090 is a
+    # separate, accepted residual answered by the dedicated-VLAN guide.
+    #
+    # `if` here is the documented-safe shape: several `set`s feeding one
+    # `return`, with proxy_pass OUTSIDE every `if`. Verified on nginx 1.27.5
+    # (the base this image ships) that sibling `if` blocks each execute, that a
+    # variable interpolates on the RIGHT of the `=` comparison, and that the
+    # allowed case still proxies with Upgrade/Connection intact.
+    #
+    # KNOWN, DELIBERATE, AND FAIL-CLOSED: an uppercase `Host:` header with a
+    # lowercase Origin (`Host: PI.LOCAL` + `Origin: http://pi.local`) is
+    # REFUSED, because $http_host preserves case while browsers lowercase both.
+    # No browser can produce that pair — the URL Standard lowercases the host
+    # during parsing — and the failure is a loud 403 rather than a silent hole.
+    # Using the lowercased $host to fix it would give up the port
+    # discrimination above, which is the half that matters.
     location = /rosbridge {
+        set $edubotics_origin_ok 0;
+        if ($http_origin = "")                   { set $edubotics_origin_ok 1; }
+        if ($http_origin = "http://$http_host")  { set $edubotics_origin_ok 1; }
+        if ($http_origin = "https://$http_host") { set $edubotics_origin_ok 1; }
+        # Host constrained FIRST in intent but LAST in placement, so the
+        # `return 403` still follows every accepting `set` (that ordering is
+        # itself fenced). A rebound Host answers 421 Misdirected Request, which
+        # is both semantically right and distinguishable in a log from the 403
+        # an ordinary cross-origin page gets.
+        if ($edubotics_host_is_own = 0) {
+            return 421;
+        }
+        if ($edubotics_origin_ok = 0) {
+            return 403;
+        }
         set $edubotics_rosbridge physical_ai_server;
         proxy_pass http://$edubotics_rosbridge:9090/;
         proxy_http_version 1.1;
@@ -230,10 +360,50 @@ server {
     # variable proxy_pass cannot do prefix replacement itself.
     # proxy_buffering off is MANDATORY for multipart/x-mixed-replace —
     # nginx's default buffering would freeze the stream.
-    location /video/ {
+    #
+    # EXACT match on /video/stream (2026-08-07), deliberately — NOT a `/video/`
+    # prefix, which is what this was.
+    #
+    # Putting web_video_server on the SPA's OWN origin makes every endpoint it
+    # serves same-origin too, and upstream's `handle_stream_viewer` reflects its
+    # `topic` query parameter RAW into a text/html response:
+    #
+    #     ss << "<html><head><title>" << topic << "</title></head><body>";
+    #
+    # It validates `type` (the streamer factory) but never that the topic
+    # exists, so /video/stream_viewer?type=mjpeg&topic=<script>… was a reflected
+    # XSS on the Pi's OWN origin — precisely the Origin the /rosbridge gate
+    # above now trusts. That would hand any such link a full rosbridge session
+    # and the ability to publish /leader/joint_trajectory.
+    #
+    # The app only ever requests `<base>/stream?…` (piMode.js::videoStreamBase
+    # returns the bare `/video`; ImageGridCell.js and CameraFeedOverlay.jsx are
+    # its only callers), and nothing else on a Pi asks for a /video/ path — no
+    # compose healthcheck, no pi-agent probe (the wizard's camera preview rides
+    # /api/system/). So an exact-match location keeps the cameras working while
+    # removing stream_viewer, the HTML index and every other upstream endpoint
+    # from our origin. Adding a path back is a one-line change — but do it
+    # deliberately, and check what that endpoint reflects.
+    #
+    # DELIBERATELY NOT Origin-gated, unlike /rosbridge, and that is not an
+    # oversight. The app consumes these streams as `<img src=…>` and an image
+    # load sends NO Origin header, so the gate could only ever fire on requests
+    # the app does not make. What protects the pixels from cross-origin
+    # JAVASCRIPT is the proxy_hide_header below, and it is REQUIRED, not
+    # belt-and-braces: web_video_server sets `Access-Control-Allow-Origin: *` on
+    # the very MultipartStream path this app uses, and nginx forwards an
+    # upstream header it does not explicitly hide (ACAO is not in its default
+    # hidden set). Left through, that wildcard lets any page `fetch()` a camera
+    # frame and READ it — strictly worse than the `<img>` embed an Origin gate
+    # also could not have stopped. Hiding it costs the app nothing: `<img>`
+    # needs no CORS header at all. The Windows nginx.conf gained this on
+    # 2026-08-06; the Pi — the only manager published on 0.0.0.0 by default —
+    # did not, which is the parity gap this closes.
+    location = /video/stream {
         set $edubotics_video physical_ai_server;
         rewrite ^/video/(.*)$ /$1 break;
         proxy_pass http://$edubotics_video:8080;
+        proxy_hide_header Access-Control-Allow-Origin;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;

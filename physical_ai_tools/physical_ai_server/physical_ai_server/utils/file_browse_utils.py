@@ -17,47 +17,132 @@
 # Author: Kiwoong Park
 
 
-"""File browser utility class for handling file system operations."""
+"""File browser utility class for handling file system operations.
+
+CONFINED to the dataset root since 2026-08-06. This class is reachable from
+``communicator.browse_file_callback`` over the UNAUTHENTICATED rosbridge, from
+the Daten tab, which has no auth gate — and it had no root confinement at all:
+``handle_go_parent_action`` walked to ``/`` one call at a time and
+``handle_browse_action`` accepted any absolute path, so the whole container
+filesystem was enumerable (it even un-hid ``.cache`` specifically, which is
+where the HuggingFace login token lives).
+
+Every public entry point now routes its client-supplied path through
+``_confine``. The root itself IS browsable — listing the per-student folders is
+the feature — but nothing above it is, and ``go_parent`` CLAMPS at the root
+rather than erroring, which is also the natural "you are at the top" behaviour.
+"""
 
 from concurrent.futures import as_completed, ThreadPoolExecutor
 import datetime
 import os
 from typing import Dict, List, Optional, Set
 
+from physical_ai_server.data_processing import dataset_paths
+
 
 class FileBrowseUtils:
     """Utility class for file browsing operations."""
 
-    def __init__(self, max_workers: int = 4, logger=None):
-        """Initialize the FileBrowseUtils instance."""
+    def __init__(self, max_workers: int = 4, logger=None, root=None, roots=None):
+        """Initialize the FileBrowseUtils instance.
+
+        The browser legitimately serves TWO areas, so confinement is a LIST:
+        recorded datasets, and the downloaded model checkpoints under lerobot's
+        ``outputs/train`` (React opens it with both — ``DATASET_PATH`` and
+        ``POLICY_MODEL_PATH``). Confining to the dataset root alone made
+        „Modellpfad auswählen" refuse every path it was ever opened with.
+
+        ``root``/``roots`` are parameters (tests relocate them, the node passes
+        the model root) and are never taken from a request — see
+        ``dataset_paths``. ``root`` is kept as the single-root spelling.
+        """
         self.max_workers = max_workers
         self.logger = logger
+        if roots:
+            self.roots = [str(r) for r in roots if r]
+        elif root is not None:
+            self.roots = [str(root)]
+        else:
+            self.roots = [str(r) for r in dataset_paths.browsable_roots()]
+        # First root is the default landing place (the datasets).
+        self.root = self.roots[0]
+
+    # ── confinement ─────────────────────────────────────────────────────────
+
+    def _confine(self, path):
+        """Resolve a client path inside ANY allowed root, or raise.
+
+        An empty/None path means "start where the datasets are" — the first
+        root — which replaces the old ``expanduser('~')`` default. That default
+        was itself part of the problem: it handed the browser the container's
+        whole home directory as a starting point.
+        """
+        if not path:
+            path = self.root
+        return str(dataset_paths.confine_any(path, self.roots, allow_root=True))
+
+    def _clamp_parent(self, path):
+        """Parent of ``path``, never above whichever root contains it."""
+        parent = os.path.dirname(path)
+        try:
+            return str(
+                dataset_paths.confine_any(parent, self.roots, allow_root=True))
+        except dataset_paths.DatasetPathError:
+            # Already at the top of the browsable area. Clamp to the root that
+            # actually contains `path`, so a model-tree parent does not jump
+            # the student back to the dataset tree.
+            for root in self.roots:
+                try:
+                    dataset_paths.confine(path, root, allow_root=True)
+                    return str(root)
+                except dataset_paths.DatasetPathError:
+                    continue
+            return str(self.root)
+
+    def _refusal(self, message):
+        """Error result in the shape every handler here returns."""
+        if self.logger:
+            self.logger.error(f'file browse REFUSED (outside dataset root): {message}')
+        return {
+            'success': False,
+            'message': message,
+            'current_path': '',
+            'parent_path': '',
+            'selected_path': '',
+            'items': []
+        }
 
     def handle_get_path_action(self, current_path):
         """Handle get_path action and return path information."""
-        current_path = current_path or os.path.expanduser('~')
-        current_path = os.path.abspath(current_path)
+        try:
+            current_path = self._confine(current_path)
+        except dataset_paths.DatasetPathError as e:
+            return self._refusal(str(e))
 
         return {
             'success': True,
             'message': 'Current path retrieved successfully',
             'current_path': current_path,
-            'parent_path': os.path.dirname(current_path),
+            'parent_path': self._clamp_parent(current_path),
             'selected_path': '',
             'items': []
         }
 
     def handle_go_parent_action(self, current_path):
         """Handle go_parent action and return parent directory information."""
-        current_path = current_path or os.path.expanduser('~')
-        parent_path = os.path.dirname(os.path.abspath(current_path))
+        try:
+            current_path = self._confine(current_path)
+        except dataset_paths.DatasetPathError as e:
+            return self._refusal(str(e))
+        parent_path = self._clamp_parent(current_path)
 
         if os.path.exists(parent_path) and os.path.isdir(parent_path):
             return {
                 'success': True,
                 'message': 'Navigated to parent directory',
                 'current_path': parent_path,
-                'parent_path': os.path.dirname(parent_path),
+                'parent_path': self._clamp_parent(parent_path),
                 'selected_path': '',
                 'items': self._get_directory_items(parent_path)
             }
@@ -76,10 +161,12 @@ class FileBrowseUtils:
                                            target_files: Set[str] = None,
                                            target_folders: Set[str] = None) -> Dict:
         """Handle go_parent action with parallel checking for target files/folders."""
-        if current_path is None or current_path == '':
-            current_path = os.path.expanduser('~')
+        try:
+            current_path = self._confine(current_path)
+        except dataset_paths.DatasetPathError as e:
+            return self._refusal(str(e))
 
-        parent_path = os.path.dirname(os.path.abspath(current_path))
+        parent_path = self._clamp_parent(current_path)
 
         if os.path.exists(parent_path) and os.path.isdir(parent_path):
             try:
@@ -90,7 +177,7 @@ class FileBrowseUtils:
                     'success': True,
                     'message': 'Navigated to parent directory with target check',
                     'current_path': parent_path,
-                    'parent_path': os.path.dirname(parent_path),
+                    'parent_path': self._clamp_parent(parent_path),
                     'selected_path': '',
                     'items': items
                 }
@@ -116,8 +203,10 @@ class FileBrowseUtils:
 
     def handle_browse_action(self, current_path, target_name=None):
         """Handle browse action for directory or file selection."""
-        current_path = current_path or os.path.expanduser('~')
-        current_path = os.path.abspath(current_path)
+        try:
+            current_path = self._confine(current_path)
+        except dataset_paths.DatasetPathError as e:
+            return self._refusal(str(e))
 
         if target_name:
             return self._handle_target_selection(current_path, target_name)
@@ -130,13 +219,27 @@ class FileBrowseUtils:
                                         target_files: Set[str] = None,
                                         target_folders: Set[str] = None) -> Dict:
         """Handle browse action with parallel checking for target files/folders."""
-        if current_path is None or current_path == '':
-            current_path = os.path.expanduser('~')
+        try:
+            current_path = self._confine(current_path)
+        except dataset_paths.DatasetPathError as e:
+            return self._refusal(str(e))
 
         if target_name:
             # Handle target selection (navigate to specific item)
-            # with parallel target checking
-            target_path = os.path.join(current_path, target_name)
+            # with parallel target checking.
+            #
+            # This join is the SAME footgun as _handle_target_selection's and
+            # was missed in the first pass: os.path.join(cur, '/etc') == '/etc',
+            # so a client-supplied absolute target_name discarded the confined
+            # current_path entirely. It is the more exposed of the two twins —
+            # useRosServiceCaller.js always sends target_files/target_folders,
+            # so browse_file_callback routes `action='browse'` HERE, not to the
+            # sibling. Found by an adversarial review after the first fix.
+            try:
+                target_path = str(dataset_paths.safe_child(
+                    current_path, target_name, allow_root=True))
+            except dataset_paths.DatasetPathError as e:
+                return self._refusal(str(e))
 
             if os.path.exists(target_path) and os.path.isdir(target_path):
                 # Navigate into directory and check for target files/folders
@@ -175,7 +278,10 @@ class FileBrowseUtils:
                     'success': True,
                     'message': 'Directory browsed successfully with target check',
                     'current_path': current_path,
-                    'parent_path': self._get_parent_path(current_path),
+                    # _clamp_parent, not the raw _get_parent_path: the
+                    # latter leaked one directory level ABOVE the root
+                    # as a string while every sibling handler clamped.
+                    'parent_path': self._clamp_parent(current_path),
                     'selected_path': '',
                     'items': items
                 }
@@ -190,8 +296,19 @@ class FileBrowseUtils:
                 }
 
     def _handle_target_selection(self, current_path, target_name):
-        """Handle target file/directory selection."""
-        target_path = os.path.join(current_path, target_name)
+        """Handle target file/directory selection.
+
+        ``target_name`` is client-supplied, and ``os.path.join`` DISCARDS its
+        left operand when the right one is absolute — ``join(cur, '/etc')`` is
+        ``/etc`` — so this join was an escape even though ``current_path`` was
+        already confined. ``safe_child`` refuses an absolute name, any
+        separator and ``..``.
+        """
+        try:
+            target_path = str(
+                dataset_paths.safe_child(current_path, target_name, allow_root=True))
+        except dataset_paths.DatasetPathError as e:
+            return self._refusal(str(e))
 
         if os.path.exists(target_path):
             if os.path.isdir(target_path):
@@ -210,7 +327,7 @@ class FileBrowseUtils:
                     'success': True,
                     'message': f'Selected file {target_name}',
                     'current_path': current_path,
-                    'parent_path': os.path.dirname(current_path),
+                    'parent_path': self._clamp_parent(current_path),
                     'selected_path': target_path,
                     'items': self._get_directory_items(current_path)
                 }
@@ -219,7 +336,7 @@ class FileBrowseUtils:
                 'success': False,
                 'message': f'Item {target_name} not found',
                 'current_path': current_path,
-                'parent_path': os.path.dirname(current_path),
+                'parent_path': self._clamp_parent(current_path),
                 'selected_path': '',
                 'items': self._get_directory_items(current_path)
             }
@@ -231,7 +348,7 @@ class FileBrowseUtils:
                 'success': True,
                 'message': 'Directory browsed successfully',
                 'current_path': current_path,
-                'parent_path': os.path.dirname(current_path),
+                'parent_path': self._clamp_parent(current_path),
                 'selected_path': '',
                 'items': self._get_directory_items(current_path)
             }
@@ -350,8 +467,14 @@ class FileBrowseUtils:
                 for entry in it:
                     try:
                         name = entry.name
-                        # Skip hidden files and directories except .cache
-                        if name.startswith('.') and name != '.cache':
+                        # Skip hidden files and directories. The old
+                        # `and name != '.cache'` exception existed solely so a
+                        # student could navigate INTO ~/.cache to reach the
+                        # datasets; the browser now STARTS inside
+                        # ~/.cache/huggingface/lerobot and cannot leave it, so
+                        # the exception is dead — and it was also what exposed
+                        # the directory holding the huggingface-cli token.
+                        if name.startswith('.'):
                             continue
 
                         is_directory = entry.is_dir(follow_symlinks=False)

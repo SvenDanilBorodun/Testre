@@ -74,6 +74,29 @@ export const STUDENT_SCOPED_KEYS = Object.freeze([
   // (Colon-delimited: the one key an `edubotics_workshop_` prefix match would
   // miss, which is one more reason this list is explicit.)
   'edubotics:workshop:theme',
+  // Blockly's CROSS-TAB CLIPBOARD — the blocks the student last copied, i.e.
+  // their program, in plain text. Written by
+  // `@mit-app-inventor/blockly-plugin-workspace-multiselect`'s
+  // `dataCopyToStorage`, and READ by Ctrl+V, so without these three a new
+  // student could paste the previous one's blocks.
+  //
+  // THREE THINGS MAKE THESE THE EASIEST KEYS IN THIS FILE TO MISS, which is why
+  // they get the longest comment:
+  //   1. they are written by a DEPENDENCY, not by `src/`, and
+  //      `sessionScope.test.js`'s coverage scan walks `src/` with node_modules
+  //      excluded — so the scan structurally cannot see them;
+  //   2. they do not start with `edubotics`, and that scan's `isEdubotics`
+  //      filter judges only keys that do;
+  //   3. the feature is on by DEFAULT — `Multiselect`'s constructor sets
+  //      `useCopyPasteCrossTab_ = true` and only an explicit
+  //      `multiselectCopyPaste.crossTab === false` turns it off, which
+  //      `BlocklyWorkspace.jsx`'s `ms.init({})` never provides.
+  // `bootScrub.crossTab.test.js` therefore asserts the plugin still writes
+  // exactly these names, so a dependency bump that renames them fails loudly
+  // instead of silently reopening the leak.
+  'blocklyStashMulti',
+  'blocklyStashConnection',
+  'blocklyStashTime',
 ]);
 
 /**
@@ -129,6 +152,15 @@ export const IGNORED_STORAGE_KEYS = Object.freeze({
   __edubotics_version_reload_at:
     'sessionStorage, the loop guard for useVersionCheck’s self-reload. Not '
     + 'student state: clearing it would defeat the guard it exists to be.',
+  edubotics_boot_scrub:
+    'sessionStorage, owned by utils/bootScrub. It holds the `?fresh=<nonce>` a '
+    + 'freshly spawned window carried, so the boot scrub runs once per WINDOW '
+    + 'instead of once per document load — useVersionCheck reloads the page on '
+    + 'an image update, and a re-fired scrub would sign a student out '
+    + 'mid-lesson. Same category as __edubotics_version_reload_at: it is the '
+    + 'guard, not student state, and clearing it would defeat what it exists to '
+    + 'be. It is also unreachable from clearStudentScopedStorage, which is a '
+    + 'localStorage loop.',
   'edubotics:workshop:autosave':
     'IndexedDB (idb-keyval), not Web Storage, so clearStudentScopedStorage — a '
     + 'synchronous localStorage loop — structurally cannot clear it. It is '
@@ -206,7 +238,12 @@ export function clearSupabaseSessionKeys() {
     const names = [];
     for (let i = 0; i < localStorage.length; i += 1) {
       const key = localStorage.key(i);
-      if (typeof key === 'string' && /^sb-.+-auth-token(-code-verifier)?$/.test(key)) {
+      // `-user` joins the pattern: @supabase/auth-js writes `sb-<ref>-auth-token-user`
+      // (id, email, user_metadata) from `_saveSession` when `settings.userStorage`
+      // is set. We pass no options today so it is not written — but this sweep
+      // exists precisely for the path where `_removeSession()` was SKIPPED, which
+      // is the path that would leave it behind, and matching it is free.
+      if (typeof key === 'string' && /^sb-.+-auth-token(-code-verifier|-user)?$/.test(key)) {
         names.push(key);
       }
     }

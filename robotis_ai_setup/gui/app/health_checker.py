@@ -18,26 +18,82 @@ def check_web_ui(host: str = "localhost", port: int = PORT_WEB_UI) -> bool:
         return False
 
 
-def check_rosbridge(host: str = "localhost", port: int = 9090) -> bool:
-    """Check if rosbridge websocket port is accepting connections."""
-    import socket
-    try:
-        sock = socket.create_connection((host, port), timeout=3)
-        sock.close()
-        return True
-    except (OSError, TimeoutError):
-        return False
+# Both robot transports are probed THROUGH the physical_ai_manager nginx
+# same-origin proxy, because as of 2026-08-06 they have no host port publish
+# at all (see docker-compose.yml): rosbridge is unauthenticated, and a
+# cross-origin WebSocket handshake gets no CORS preflight, so any page open in
+# the student's browser could have driven the arm. The proxy paths below are
+# the ONLY route in, and nginx gates /rosbridge on an Origin allowlist that
+# deliberately admits an ABSENT Origin (a browser cannot omit it on a WS
+# handshake) — which is exactly why these two non-browser probes still work.
+#
+# BOTH constants must name a path an nginx `location` actually PROXIES. This
+# is not a formality: `/video/` was correct only while nginx carried a
+# `location /video/` PREFIX. Narrowing that to `location = /video/stream`
+# (to keep web_video_server's HTML-reflecting `stream_viewer` off our origin)
+# left this probe matching nothing but the SPA catch-all
+# `location / { try_files $uri /index.html; }` — which answers 200 from
+# nginx itself. `check_video_server` therefore returned True even with the
+# robot container stopped: a health check that could never fail. The paths
+# are now fenced against nginx.conf by
+# tests/test_rosbridge_origin_gate.py::ProbePathsActuallyRouteToTheUpstream.
+_PROXY_ROSBRIDGE_PATH = "/rosbridge"
+# The exact path the app itself requests (`<base>/stream?…`), so the probe
+# rides the same location the cameras do. Any answer that is not one of
+# nginx's own gateway errors proves web_video_server replied — a 4xx to a
+# topic-less GET is a liveness signal, exactly as for rosbridge's 400.
+_PROXY_VIDEO_PATH = "/video/stream"
+
+# An nginx 502/503/504 means "the upstream did not answer" — the robot
+# container is down. ANY other HTTP status is proof the upstream replied and
+# is therefore alive, including 4xx: a plain GET to rosbridge's WebSocket
+# endpoint answers 400 ('Can "Upgrade" only to "WebSocket".'), which is a
+# LIVENESS signal, not a failure.
+_UPSTREAM_DOWN_STATUSES = frozenset({502, 503, 504})
 
 
-def check_video_server(host: str = "localhost", port: int = 8080) -> bool:
-    """Check if web_video_server is responding."""
+def _upstream_alive(path: str, host: str, port: int, timeout: int = 3) -> bool:
+    """True when the proxied upstream itself answered.
+
+    Deliberately NOT `status == 200`: this must never become a stub that
+    always returns True, and it must not report a live robot as dead just
+    because the endpoint answers 4xx to a non-WebSocket GET.
+    """
+    url = f"http://{host}:{port}{path}"
+    req = urllib.request.Request(url, method="GET")
     try:
-        url = f"http://{host}:{port}/"
-        req = urllib.request.Request(url, method="GET")
-        with urllib.request.urlopen(req, timeout=3) as resp:
-            return resp.status == 200
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.status not in _UPSTREAM_DOWN_STATUSES
+    except urllib.error.HTTPError as exc:
+        # urllib raises on >=400, so the rosbridge 400 lands here — that is
+        # the alive case. Only nginx's own gateway errors mean down.
+        # HTTPError IS a response object and holds an open socket; these
+        # probes run in a poll loop, so close it explicitly rather than
+        # leaving it to the GC.
+        try:
+            exc.close()
+        except Exception:  # noqa: BLE001
+            pass
+        return exc.code not in _UPSTREAM_DOWN_STATUSES
     except (urllib.error.URLError, OSError, TimeoutError):
+        # nginx itself unreachable (manager container down / port closed).
         return False
+
+
+def check_rosbridge(host: str = "localhost", port: int = PORT_WEB_UI) -> bool:
+    """Check if rosbridge is alive behind the manager's same-origin proxy.
+
+    Stronger than the old raw TCP connect to the published :9090: a docker
+    port-publish accepts a TCP connection as soon as docker-proxy binds, even
+    when the process inside the container is dead. Going through the proxy
+    means only an answer FROM ROSBRIDGE counts.
+    """
+    return _upstream_alive(_PROXY_ROSBRIDGE_PATH, host, port)
+
+
+def check_video_server(host: str = "localhost", port: int = PORT_WEB_UI) -> bool:
+    """Check if web_video_server is alive behind the manager's proxy."""
+    return _upstream_alive(_PROXY_VIDEO_PATH, host, port)
 
 
 def wait_for_web_ui(

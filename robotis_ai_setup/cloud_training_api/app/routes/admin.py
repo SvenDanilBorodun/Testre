@@ -249,5 +249,5 @@ async def delete_teacher(teacher_id: str, admin=Depends(get_current_admin)):
         supabase.auth.admin.delete_user(teacher_id)
     except Exception as e:
         logger.error("delete_user failed: %s", e)
-        raise HTTPException(status_code=500, detail="Konto konnte nicht geloescht werden")
+        raise HTTPException(status_code=500, detail="Konto konnte nicht gelöscht werden")
     return {"ok": True}

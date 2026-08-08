@@ -25,7 +25,9 @@ import importlib.util
 import io
 import json
 from pathlib import Path
+import shutil
 import sys
+import tempfile
 import types
 import unittest
 from unittest import mock
@@ -34,6 +36,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 PKG_ROOT = REPO_ROOT / 'physical_ai_tools' / 'physical_ai_server' / 'physical_ai_server'
 V3_PATH = PKG_ROOT / 'data_processing' / 'data_editor_v3.py'
 WORKER_PATH = PKG_ROOT / 'data_processing' / 'edit_worker.py'
+DATASET_PATHS_PATH = PKG_ROOT / 'data_processing' / 'dataset_paths.py'
 
 
 def _stub(name, **attrs):
@@ -50,7 +53,17 @@ def _load_module(canonical, path):
     spec = importlib.util.spec_from_file_location(canonical, str(path))
     module = importlib.util.module_from_spec(spec)
     sys.modules[canonical] = module
-    spec.loader.exec_module(module)
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        # Never leave a half-built husk registered: `sys.modules` is global
+        # for the whole `discover` run and the short-circuit above would hand
+        # this husk to every LATER test module, turning ONE honest ImportError
+        # into ~30 misleading AttributeErrors in setUp — and making the file
+        # GREEN standalone but RED under `discover`. See the twin note in
+        # test_data_editor_v3_gate.py::_exec_or_unregister.
+        sys.modules.pop(canonical, None)
+        raise
     return module
 
 
@@ -81,11 +94,30 @@ class EditWorkerTest(unittest.TestCase):
         # Legacy editor module the worker imports lazily on the v2.1 path.
         _stub('physical_ai_server.data_processing.data_editor',
               DataEditor=_FakeDataEditor)
+        # edit_worker imports dataset_paths at module level for the 2026-08-06
+        # path confinement; the stub package has no __path__, so it must be an
+        # ATTRIBUTE before edit_worker is exec'd.
+        cls.dataset_paths = _load_module(
+            'physical_ai_server.data_processing.dataset_paths', DATASET_PATHS_PATH)
+        sys.modules['physical_ai_server.data_processing'].dataset_paths = (
+            cls.dataset_paths)
         cls.worker = _load_module(
             'physical_ai_server.data_processing.edit_worker', WORKER_PATH)
 
     def setUp(self):
         _FakeDataEditor.calls.clear()
+        # Dataset paths are now ROOT-CONFINED (2026-08-06), so these fixtures
+        # live under a throwaway root passed explicitly. `root` is a parameter
+        # rather than an env var precisely so tests can relocate it while
+        # nothing reachable from the wire can — see dataset_paths.
+        self.root = Path(tempfile.mkdtemp(prefix='editworker_')).resolve()
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        self.DS = str(self.root / 'u' / 'ds')
+        self.OLD = str(self.root / 'u' / 'old')
+        self.GONE = str(self.root / 'u' / 'gone')
+        self.A = str(self.root / 'u' / 'a')
+        self.B = str(self.root / 'u' / 'b')
+        self.OUT = str(self.root / 'u' / 'out')
         # Reset routing hooks to inert defaults each test. The legacy editor is
         # reached ONLY when is_v21_dataset is positively True; everything else
         # (v3 / missing / corrupt) routes to the v3 module.
@@ -95,11 +127,15 @@ class EditWorkerTest(unittest.TestCase):
         self.v3.delete_episodes_v3 = mock.Mock(name='delete_episodes_v3')
         self.v3.merge_datasets_v3 = mock.Mock(name='merge_datasets_v3')
 
+    def _run(self, payload):
+        """run_edit against this test's confined root."""
+        return self.worker.run_edit(payload, root=self.root)
+
     # ---- run_edit routing -------------------------------------------------------------
 
     def test_delete_empty_is_german_and_skips_upstream(self):
         self.v3.is_v3_dataset = lambda p: True
-        res = self.worker.run_edit(
+        res = self._run(
             {'mode': 'delete', 'delete_dataset_path': 'x', 'delete_episode_num': []})
         self.assertFalse(res['success'])
         self.assertIn('Keine Episoden', res['message'])
@@ -107,12 +143,12 @@ class EditWorkerTest(unittest.TestCase):
 
     def test_delete_v3_routes_to_v3_editor(self):
         self.v3.is_v3_dataset = lambda p: True
-        res = self.worker.run_edit(
-            {'mode': 'delete', 'delete_dataset_path': '/ds', 'delete_episode_num': [1]})
+        res = self._run(
+            {'mode': 'delete', 'delete_dataset_path': self.DS, 'delete_episode_num': [1]})
         self.assertTrue(res['success'])
         self.v3.delete_episodes_v3.assert_called_once()
         args, _ = self.v3.delete_episodes_v3.call_args
-        self.assertEqual(args[0], '/ds')
+        self.assertEqual(args[0], self.DS)
         self.assertEqual(args[1], [1])
         self.assertEqual(_FakeDataEditor.calls, [])
 
@@ -120,24 +156,24 @@ class EditWorkerTest(unittest.TestCase):
         # A missing path is not positively v2.1 (is_v21=False), so it routes to
         # the v3 module, which raises the German 'nicht gefunden' DataEditError.
         self.v3.is_v21_dataset = lambda p: False
-        self.worker.run_edit(
-            {'mode': 'delete', 'delete_dataset_path': '/gone', 'delete_episode_num': [0]})
+        self._run(
+            {'mode': 'delete', 'delete_dataset_path': self.GONE, 'delete_episode_num': [0]})
         self.v3.delete_episodes_v3.assert_called_once()
         self.assertEqual(_FakeDataEditor.calls, [])
 
     def test_delete_v21_single_routes_to_legacy(self):
         self.v3.is_v21_dataset = lambda p: True
-        res = self.worker.run_edit(
-            {'mode': 'delete', 'delete_dataset_path': '/old', 'delete_episode_num': [2]})
+        res = self._run(
+            {'mode': 'delete', 'delete_dataset_path': self.OLD, 'delete_episode_num': [2]})
         self.assertTrue(res['success'])
-        self.assertEqual(_FakeDataEditor.calls, [('delete_single', '/old', 2)])
+        self.assertEqual(_FakeDataEditor.calls, [('delete_single', self.OLD, 2)])
         self.v3.delete_episodes_v3.assert_not_called()
 
     def test_delete_v21_batch_routes_to_legacy_batch(self):
         self.v3.is_v21_dataset = lambda p: True
-        self.worker.run_edit(
-            {'mode': 'delete', 'delete_dataset_path': '/old', 'delete_episode_num': [1, 2]})
-        self.assertEqual(_FakeDataEditor.calls, [('delete_batch', '/old', [1, 2])])
+        self._run(
+            {'mode': 'delete', 'delete_dataset_path': self.OLD, 'delete_episode_num': [1, 2]})
+        self.assertEqual(_FakeDataEditor.calls, [('delete_batch', self.OLD, [1, 2])])
         self.v3.delete_episodes_v3.assert_not_called()
 
     def test_delete_non_v21_batch_never_routes_to_legacy(self):
@@ -146,23 +182,23 @@ class EditWorkerTest(unittest.TestCase):
         # routes to v3 even for a multi-episode delete — the old code sent these
         # to the silent-no-op + info.json-clobbering legacy batch path.
         self.v3.is_v21_dataset = lambda p: False
-        self.worker.run_edit(
-            {'mode': 'delete', 'delete_dataset_path': '/ds', 'delete_episode_num': [1, 2]})
+        self._run(
+            {'mode': 'delete', 'delete_dataset_path': self.DS, 'delete_episode_num': [1, 2]})
         self.v3.delete_episodes_v3.assert_called_once()
         self.assertEqual(_FakeDataEditor.calls, [])
 
     def test_merge_all_v3_routes_to_v3(self):
         self.v3.is_v3_dataset = lambda p: True
-        res = self.worker.run_edit(
-            {'mode': 'merge', 'merge_dataset_list': ['/a', '/b'], 'output_path': '/out'})
+        res = self._run(
+            {'mode': 'merge', 'merge_dataset_list': [self.A, self.B], 'output_path': self.OUT})
         self.assertTrue(res['success'])
         self.v3.merge_datasets_v3.assert_called_once()
 
     def test_merge_mixed_versions_refused_in_german(self):
-        flags = {'/a': True, '/b': False}
+        flags = {self.A: True, self.B: False}
         self.v3.is_v3_dataset = lambda p: flags[p]
-        res = self.worker.run_edit(
-            {'mode': 'merge', 'merge_dataset_list': ['/a', '/b'], 'output_path': '/out'})
+        res = self._run(
+            {'mode': 'merge', 'merge_dataset_list': [self.A, self.B], 'output_path': self.OUT})
         self.assertFalse(res['success'])
         self.assertIn('unterschiedliche', res['message'])
         self.v3.merge_datasets_v3.assert_not_called()
@@ -170,17 +206,17 @@ class EditWorkerTest(unittest.TestCase):
 
     def test_merge_all_v21_routes_to_legacy(self):
         self.v3.is_v21_dataset = lambda p: True
-        res = self.worker.run_edit(
-            {'mode': 'merge', 'merge_dataset_list': ['/a', '/b'], 'output_path': '/out'})
+        res = self._run(
+            {'mode': 'merge', 'merge_dataset_list': [self.A, self.B], 'output_path': self.OUT})
         self.assertTrue(res['success'])
-        self.assertEqual(_FakeDataEditor.calls, [('merge', ['/a', '/b'], '/out')])
+        self.assertEqual(_FakeDataEditor.calls, [('merge', [self.A, self.B], self.OUT)])
 
     def test_merge_all_corrupt_refused_not_legacy(self):
         # All members unreadable -> neither positively v3 nor positively v2.1.
         # Must be refused in German, never silently legacy-merged into a broken
         # output reported as success.
-        res = self.worker.run_edit(
-            {'mode': 'merge', 'merge_dataset_list': ['/a', '/b'], 'output_path': '/out'})
+        res = self._run(
+            {'mode': 'merge', 'merge_dataset_list': [self.A, self.B], 'output_path': self.OUT})
         self.assertFalse(res['success'])
         self.assertIn('beschädigt', res['message'])
         self.v3.merge_datasets_v3.assert_not_called()
@@ -190,21 +226,21 @@ class EditWorkerTest(unittest.TestCase):
         self.v3.is_v3_dataset = lambda p: True
         self.v3.delete_episodes_v3 = mock.Mock(
             side_effect=self.v3.DataEditError('Deutsche Fehlermeldung'))
-        res = self.worker.run_edit(
-            {'mode': 'delete', 'delete_dataset_path': '/ds', 'delete_episode_num': [0]})
+        res = self._run(
+            {'mode': 'delete', 'delete_dataset_path': self.DS, 'delete_episode_num': [0]})
         self.assertFalse(res['success'])
         self.assertEqual(res['message'], 'Deutsche Fehlermeldung')
 
     def test_unexpected_error_is_caught(self):
         self.v3.is_v3_dataset = lambda p: True
         self.v3.delete_episodes_v3 = mock.Mock(side_effect=ValueError('boom'))
-        res = self.worker.run_edit(
-            {'mode': 'delete', 'delete_dataset_path': '/ds', 'delete_episode_num': [0]})
+        res = self._run(
+            {'mode': 'delete', 'delete_dataset_path': self.DS, 'delete_episode_num': [0]})
         self.assertFalse(res['success'])
         self.assertIn('boom', res['message'])
 
     def test_unknown_mode(self):
-        res = self.worker.run_edit({'mode': 'frobnicate'})
+        res = self._run({'mode': 'frobnicate'})
         self.assertFalse(res['success'])
         self.assertIn('Unknown edit mode', res['message'])
 

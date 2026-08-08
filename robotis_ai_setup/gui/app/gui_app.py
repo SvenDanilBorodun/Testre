@@ -9,6 +9,7 @@ Bietet eine schrittweise Oberfläche für:
 
 import base64
 import os
+import secrets
 import subprocess
 import sys
 import threading
@@ -3663,6 +3664,24 @@ class EduBoticsApp:
         # capabilities still arrive from the server via TaskStatus). Uses the
         # profile id captured at env start, so it stays correct on re-open.
         params.append(f"robot={self._rs_robot_type}")
+        # STUDENT HANDOVER. One shared Windows account = one WebView2 profile =
+        # ONE localStorage for every student who ever sits at this PC, and the
+        # student who walks away without clicking „Abmelden" leaves a durable,
+        # self-renewing Supabase session behind. This nonce tells the SPA that
+        # the window it is booting in is FRESHLY SPAWNED, and
+        # `src/utils/bootScrub.js` scrubs the previous student's identity out of
+        # storage before Redux or supabase-js can read it.
+        #
+        # A NONCE and not a bare flag, for two independent reasons:
+        #   * useVersionCheck reloads the page on every image update and
+        #     `location.reload()` KEEPS the query string, so a constant flag
+        #     would re-fire the scrub and sign a student out mid-lesson. The SPA
+        #     latches the nonce in sessionStorage, which survives a reload;
+        #   * that latch must not be able to fail CLOSED. A new spawn always
+        #     carries a new nonce, so it scrubs even if the latch somehow
+        #     outlived the window.
+        # Not a secret — it identifies a window, it does not authorise anything.
+        params.append(f"fresh={secrets.token_hex(8)}")
         url = f"http://localhost:{PORT_WEB_UI}/?{'&'.join(params)}"
 
         icon = os.path.join(
@@ -3846,6 +3865,29 @@ class EduBoticsApp:
             self._stop_camera_bridge()
             self._stop_phone_server()
             self._stop_rs_control_server()
+            # CLOSE THE BROWSER WINDOW TOO. Two reasons, and the second is the
+            # load-bearing one:
+            #
+            #   * it is pointing at a stack that is about to be torn down —
+            #     rosbridge dies with the containers, so the window can only
+            #     show „Getrennt" from here on;
+            #   * STUDENT HANDOVER. „Umgebung stoppen" then „Umgebung starten"
+            #     is the primary documented lifecycle — the two buttons the
+            #     product is operated with — and `_do_start` calls
+            #     `_open_webview()` at the end of it. With the old window still
+            #     alive, `webview_window.open_student_window` hits its
+            #     live-child short-circuit, DISCARDS the freshly minted
+            #     `?fresh=<nonce>` URL and returns True, so the GUI logs
+            #     „Web-Oberfläche wird im EduBotics-Fenster geöffnet." while the
+            #     next student is looking at the previous one's window — with
+            #     their live, self-refreshing Supabase session. The boot scrub
+            #     never runs, because no document ever loads.
+            #
+            # This was equally true of the profile `rmtree` that preceded the
+            # scrub: it sat BELOW the same short-circuit, so it never ran on
+            # this path either. Closing the child here is what makes the next
+            # „Umgebung starten" spawn a real new window.
+            webview_window.destroy_all()
             if self.cloud_only.get():
                 docker_manager.stop_cloud_only(log=self._log)
             else:
@@ -3904,33 +3946,56 @@ class EduBoticsApp:
         threading.Thread(target=_do_reset, daemon=True).start()
 
     def _on_close(self):
-        """Fenster-Schließen abfangen — Container stoppen, wenn nötig."""
+        """Fenster-Schließen abfangen — Container stoppen, wenn nötig.
+
+        `self.running` IS NOT A RELIABLE "the stack is up" SIGNAL. `_do_start`'s
+        `finally` clears it on any failure occurring AFTER `start_containers`
+        succeeded, so the flag reads False over a live stack — and the old
+        `running == False` branch then skipped the container stop, the camera
+        bridge and the phone server, leaving all three behind. So the close ASKS
+        DOCKER instead, and only falls back to the flag as the fast path.
+
+        The probe is one bounded `docker ps` and fails CLOSED (see
+        `docker_manager.any_container_running`): a broken probe must never turn
+        closing the GUI into a modal the student cannot get past.
+        """
         self._stop_camera_previews()
-        if self.running:
-            if messagebox.askyesno(
+
+        # Fast path first: if the flag already says yes there is nothing to
+        # probe, and we keep the close instant in the common case.
+        stack_up = bool(self.running) or docker_manager.any_container_running()
+
+        if stack_up:
+            if not messagebox.askyesno(
                 "EduBotics beenden",
                 "Die Umgebung läuft noch.\nContainer stoppen und beenden?",
             ):
-                self._log("Beende — Container werden gestoppt...")
-                self._stop_camera_bridge()
-                self._stop_phone_server()
-                self._stop_rs_control_server()
-                webview_window.destroy_all()
-                if self.cloud_only.get():
-                    docker_manager.stop_cloud_only()
-                else:
-                    docker_manager.stop_containers(gpu=self.gpu_available)
-                docker_manager.stop_keepalive()
-                self.root.destroy()
-            # else: user clicked No, don't close
-        else:
-            # Not "running", but the control bridge may still be up from a
-            # partial start (it starts before _open_webview, which can fail) —
-            # don't leak the :8769 socket + thread past the GUI's exit.
-            self._stop_rs_control_server()
-            webview_window.destroy_all()
-            docker_manager.stop_keepalive()
-            self.root.destroy()
+                return  # user clicked No — don't close
+            self._log("Beende — Container werden gestoppt...")
+
+        # UNCONDITIONAL from here. Every one of these is a resource THIS GUI
+        # process owns, and each is idempotent and independently guarded, so
+        # there was never a reason to tie them to the container state:
+        #   * the camera bridge holds both USB cameras via MSMF,
+        #   * the phone receiver holds 0.0.0.0:8444,
+        #   * the Roboter-Studio bridge holds 127.0.0.1:8769 and a thread — it
+        #     starts BEFORE _open_webview, so a partial start leaves it up,
+        #   * the webview child is now closed GRACEFULLY (WM_CLOSE first) so the
+        #     browser's teardown hooks — the Jetson release beacon, JogPanel's
+        #     re-torque — actually run.
+        self._stop_camera_bridge()
+        self._stop_phone_server()
+        self._stop_rs_control_server()
+        webview_window.destroy_all()
+
+        if stack_up:
+            if self.cloud_only.get():
+                docker_manager.stop_cloud_only()
+            else:
+                docker_manager.stop_containers(gpu=self.gpu_available)
+
+        docker_manager.stop_keepalive()
+        self.root.destroy()
 
 
 _SINGLE_INSTANCE_MUTEX = "Local\\EduBotics_GUI_SingleInstance"

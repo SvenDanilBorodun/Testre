@@ -32,7 +32,7 @@ def _read_version_file() -> str:
             return candidate.read_text(encoding="utf-8").strip()
         except (OSError, UnicodeDecodeError):
             continue
-    return "2.14.1"
+    return "2.15.0"
 
 
 # GUI version — read from repo-root VERSION file (single source of truth).
@@ -172,6 +172,36 @@ def _resolve_phone_cert_dir() -> str:
 
 
 PHONE_CERT_DIR = _resolve_phone_cert_dir()
+
+# --- Embedded WebView2 browser profile (student handover) ---
+# The leaf name is referenced by the wipe guard in webview_window.py, which
+# REFUSES to delete a directory not ending in it. Keep them together: the wipe
+# is an rmtree, and the sibling directory it must never reach is
+# %LOCALAPPDATA%\EduBotics itself, which holds .env (the HuggingFace token and
+# the arm ports) and phone-cert/.
+WEBVIEW_PROFILE_LEAF = "webview-profile"
+
+
+def _resolve_webview_profile_dir() -> str:
+    """Directory WebView2 keeps the student's browser profile in.
+
+    Explicit so that (a) it is a DEDICATED leaf we may safely wipe between
+    students, and (b) it lives under %LOCALAPPDATA% rather than pywebview's
+    default %APPDATA%\\pywebview — which ROAMS, so on a school PC with roaming
+    profiles / FSLogix / AppData redirection one student's live Supabase
+    session followed them to every other PC in the building.
+
+    Same shape as PHONE_CERT_DIR / ENV_FILE: an env override, else
+    %LOCALAPPDATA%\\EduBotics\\<leaf>.
+    """
+    override = os.environ.get("EDUBOTICS_WEBVIEW_PROFILE_DIR")
+    if override:
+        return override
+    base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+    return os.path.join(base, "EduBotics", WEBVIEW_PROFILE_LEAF)
+
+
+WEBVIEW_PROFILE_DIR = _resolve_webview_profile_dir()
 
 # --- Native camera bridge (WSL2/Windows student path) ---
 # The two USB cameras are captured NATIVELY on Windows (the WSL2 usbipd bridge

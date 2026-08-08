@@ -47,7 +47,9 @@ import sys
 from typing import List, Optional
 
 from physical_ai_server.data_processing import data_editor_v3
+from physical_ai_server.data_processing import dataset_paths
 from physical_ai_server.data_processing.data_editor_v3 import DataEditError
+from physical_ai_server.data_processing.dataset_paths import DatasetPathError
 
 # Sentinel prefixing the single machine-readable result line the parent parses
 # out of this process' stdout (which is otherwise full of lerobot/ffmpeg/SVT
@@ -71,13 +73,31 @@ def _default_logger() -> logging.Logger:
     return logger
 
 
-def run_edit(payload: dict, logger: Optional[logging.Logger] = None) -> dict:
+def run_edit(
+    payload: dict,
+    logger: Optional[logging.Logger] = None,
+    root=None,
+) -> dict:
     """Execute one dataset edit. Returns ``{'success': bool, 'message': str}``.
 
     ``message`` is the student-facing GERMAN string (Rule §1) for the common
     paths; the technical cause is logged. This is the verbatim routing that used
     to live inline in ``communicator.dataset_edit_callback`` — moved here so the
     subprocess and the in-process rollback share ONE implementation.
+
+    PATH CONFINEMENT (2026-08-06). Every path below arrives from the wire:
+    ``communicator._build_edit_payload`` copies ``delete_dataset_path``,
+    ``merge_dataset_list`` and ``output_path`` verbatim out of the ROS request,
+    the Daten tab has no auth gate, and rosbridge is unauthenticated — so an
+    unconfined delete let any student destroy any other's episodes. Confining
+    HERE rather than in the callback is deliberate: this function is the single
+    choke point shared by the subprocess path AND the
+    ``EDUBOTICS_DATASET_EDIT_SUBPROCESS=0`` in-process rollback, so neither can
+    be left behind.
+
+    ``root`` is a PARAMETER, not an environment variable, and is never read
+    from ``payload``: tests must be able to relocate the root, but nothing
+    reachable from the wire may. Production always leaves it None.
     """
     logger = logger or _default_logger()
     mode = payload.get('mode')
@@ -86,6 +106,13 @@ def run_edit(payload: dict, logger: Optional[logging.Logger] = None) -> dict:
         if mode == MODE_MERGE:
             merge_dataset_list: List[str] = list(payload.get('merge_dataset_list') or [])
             output_path = payload.get('output_path') or ''
+            # EVERY input is confined, not just the first: a merge reads them
+            # all, and an escaping member would leak another student's episodes
+            # into the output. The OUTPUT is confined too — it is WRITTEN to.
+            merge_dataset_list = [
+                str(dataset_paths.confine(p, root)) for p in merge_dataset_list
+            ]
+            output_path = str(dataset_paths.confine(output_path, root))
             # Classify by POSITIVE detection on BOTH sides so an unreadable /
             # corrupt info.json (neither positively v3 nor positively v2.1) can
             # NEVER fall through to the legacy merge. The old else-is-legacy
@@ -118,6 +145,10 @@ def run_edit(payload: dict, logger: Optional[logging.Logger] = None) -> dict:
                     'success': False,
                     'message': 'Keine Episoden zum Löschen ausgewählt.',
                 }
+            # The destructive path. Confine BEFORE the version probe: an
+            # escaping path must never even be stat'd for routing.
+            delete_dataset_path = str(
+                dataset_paths.confine(delete_dataset_path, root))
 
             # Route to the DESTRUCTIVE legacy v2.1 in-place editor ONLY when the
             # dataset POSITIVELY declares a v2.x codebase_version. A v3.0
@@ -161,6 +192,14 @@ def run_edit(payload: dict, logger: Optional[logging.Logger] = None) -> dict:
                 ),
             }
         return {'success': True, 'message': 'Bearbeitung abgeschlossen.'}
+
+    except DatasetPathError as e:
+        # A path escaping the dataset root. Logged as a REFUSAL with the
+        # offending value so an operator can see what was attempted; the
+        # student sees only the German sentence (never the path back — it is
+        # rendered in the browser).
+        logger.error(f'dataset edit REFUSED (path outside dataset root): {e}')
+        return {'success': False, 'message': str(e)}
 
     except DataEditError as e:
         # Student-facing German message; technical cause already logged by

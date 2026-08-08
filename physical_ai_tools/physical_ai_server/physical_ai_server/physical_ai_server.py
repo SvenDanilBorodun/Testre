@@ -109,6 +109,7 @@ from physical_ai_interfaces.srv import (
 
 from physical_ai_server import robot_profiles
 from physical_ai_server.communication.communicator import Communicator
+from physical_ai_server.data_processing import dataset_paths
 from physical_ai_server.data_processing.data_manager import DataManager
 from physical_ai_server.data_processing.hf_api_worker import HfApiWorker
 from physical_ai_server.inference.inference_manager import InferenceManager
@@ -186,7 +187,10 @@ _REINIT_MAX_ATTEMPTS = 3
 class PhysicalAIServer(CollisionMonitorMixin, Node):
     # Define operation modes (constants taken from Communicator)
 
-    DEFAULT_SAVE_ROOT_PATH = Path.home() / '.cache/huggingface/lerobot'
+    # Derived from dataset_paths so the node, the edit subprocess and the file
+    # browser can never disagree about what "inside the dataset area" means —
+    # that disagreement would silently open the confinement back up.
+    DEFAULT_SAVE_ROOT_PATH = dataset_paths.dataset_root()
     DEFAULT_TOPIC_TIMEOUT = 5.0  # seconds
     PUB_QOS_SIZE = 10
 
@@ -1921,7 +1925,22 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
 
     def get_dataset_list_callback(self, request, response):
         user_id = request.user_id
-        user_path = self.DEFAULT_SAVE_ROOT_PATH / user_id
+        # `user_id` is client-supplied and this service is reachable from the
+        # unauthenticated rosbridge, so the naive `root / user_id` was a
+        # directory-listing traversal: pathlib DISCARDS the root when the
+        # right-hand side is ABSOLUTE (`root / '/etc'` is `/etc`), and `..`
+        # walks out. safe_child refuses both, plus any separator at all — a
+        # legitimate HF user id is one path component.
+        try:
+            user_path = dataset_paths.safe_child(
+                self.DEFAULT_SAVE_ROOT_PATH, user_id)
+        except dataset_paths.DatasetPathError as e:
+            self.get_logger().error(
+                f'get_dataset_list REFUSED (user_id outside root): {user_id!r}')
+            response.dataset_list = []
+            response.success = False
+            response.message = str(e)
+            return response
 
         try:
             if not user_path.exists() or not user_path.is_dir():
@@ -1996,16 +2015,27 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         Loads configuration from train_config.json and populates TrainingInfo message.
         """
         try:
-            # Validate request
-            if not request.train_config_path:
-                response.success = False
-                response.message = 'train_config_path is required'
-                return response
-
-            # Clean up path (remove leading/trailing whitespace)
-            train_config_path = request.train_config_path.strip()
+            # `train_config_path` is CLIENT-SUPPLIED and this service is
+            # reachable from the unauthenticated rosbridge, so the naive
+            # `weight_save_root_path / train_config_path` that used to be here
+            # was an unconfined read of any file the container can open:
+            # pathlib DISCARDS the root when the right-hand side is ABSOLUTE
+            # (`root / '/etc/passwd'` is `/etc/passwd`), and `..` walks out.
+            # safe_under refuses both. It is the MULTI-component sibling of
+            # safe_child — this argument is legitimately
+            # `<model>/pretrained_model/train_config.json`, so the
+            # single-component form would refuse every real request.
             weight_save_root_path = TrainingManager.get_weight_save_root_path()
-            config_path = weight_save_root_path / train_config_path
+            try:
+                config_path = dataset_paths.safe_under(
+                    weight_save_root_path, request.train_config_path)
+            except dataset_paths.DatasetPathError as e:
+                self.get_logger().error(
+                    'get_training_info REFUSED (path outside the model root): '
+                    f'{request.train_config_path!r}')
+                response.success = False
+                response.message = str(e)
+                return response
 
             # Check if config file exists
             if not config_path.exists():
@@ -2284,6 +2314,36 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 response.success = False
                 response.message = 'HF API Worker is currently busy with another task'
                 return response
+            # CONFINE local_dir before it reaches the worker. This is the
+            # highest-blast-radius client path on the whole rosbridge surface
+            # and it is NOT a "dataset path", which is exactly why the
+            # confinement sweep walked past it: DataManager.upload_huggingface_repo
+            # opens with `_delete_dot_cache_folder_before_upload`, an
+            # `shutil.rmtree` of `<local_dir>/.cache`. Measured 2026-08-08 in the
+            # shipped image: `local_dir='/root'` deleted every student's recorded
+            # datasets AND the huggingface-cli token, while the student saw only
+            # an unrelated German tag-sync error.
+            #
+            # confine_any (not safe_under): React sends an ABSOLUTE path the file
+            # browser produced, and both browsable roots are legitimate upload
+            # sources. allow_root stays False — a repo is ONE dataset, never the
+            # whole root.
+            #
+            # SCOPED TO 'upload', deliberately. It is the ONLY mode that reads
+            # local_dir (hf_api_worker passes just repo_id/repo_type to download,
+            # delete and both list modes), so those callers send it EMPTY and an
+            # unconditional confine would refuse every download — the same
+            # self-inflicted availability regression that broke
+            # „Modellpfad auswählen" twice on this branch.
+            if mode == 'upload':
+                try:
+                    local_dir = str(dataset_paths.confine_any(
+                        local_dir, dataset_paths.browsable_roots()))
+                except dataset_paths.DatasetPathError as e:
+                    self.get_logger().error(f'Refused HF local_dir: {e}')
+                    response.success = False
+                    response.message = str(e)
+                    return response
             # Prepare request data for the worker
             request_data = {
                 'mode': mode,

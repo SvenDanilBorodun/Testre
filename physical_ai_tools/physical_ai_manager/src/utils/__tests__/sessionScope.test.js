@@ -208,6 +208,12 @@ describe('clearStudentScopedStorage', () => {
     // expectation from these collections, so without this one they could be
     // emptied and the suite would still pass.
     expect([...STUDENT_SCOPED_KEYS].sort()).toEqual([
+      // Written by a DEPENDENCY, not by src/ — see the note in sessionScope.js.
+      // The coverage scan below structurally cannot discover these, so this
+      // literal pin is the ONLY thing holding them.
+      'blocklyStashConnection',
+      'blocklyStashMulti',
+      'blocklyStashTime',
       'edubotics:workshop:theme',
       'edubotics_trainingInfo',
       'edubotics_userId',
@@ -412,7 +418,24 @@ describe('every edubotics persistence key in src/ is classified', () => {
     // Two-way: an UNCLASSIFIED key is the leak this module exists to prevent,
     // and a classified key nothing uses any more is a stale entry that makes
     // the lists lie about what the app stores.
-    expect(discovered).toEqual(classifiedKeys().sort());
+    //
+    // BOTH sides are filtered by isEdubotics, and that is a real limit rather
+    // than a convenience. This scan walks `src/` with node_modules excluded, so
+    // a key written by a DEPENDENCY is invisible to it — comparing an
+    // unfiltered classified list against a scan that cannot see such keys would
+    // fail the moment one is (correctly) classified. The three
+    // `blocklyStash*` keys are exactly that case; they are held by the literal
+    // pin above and by bootScrub.crossTab.test.js, which reads the DEPENDENCY.
+    expect(discovered).toEqual(classifiedKeys().filter(isEdubotics).sort());
+  });
+
+  it('the third-party keys are classified even though the scan cannot see them', () => {
+    // Guards the filter above from becoming an excuse: a non-edubotics key may
+    // be dropped from the lists without any other test noticing.
+    for (const k of ['blocklyStashMulti', 'blocklyStashConnection', 'blocklyStashTime']) {
+      expect(classifiedKeys()).toContain(k);
+    }
+    expect([...scanStorageKeys().keys]).not.toContain('blocklyStashMulti');
   });
 });
 
@@ -590,13 +613,25 @@ describe('sign-out lives in exactly one place', () => {
   });
 
   it('clears the Supabase session key only through the pattern sweep', () => {
-    // The sweep is reachable ONLY from a revoke that reported failure — see
-    // sessionScope's comment on why hand-deleting the key would otherwise skip
-    // the server-side revoke. Nothing else in src/ may touch it.
+    // The sweep has exactly TWO callers and each is named with its reason —
+    // hand-deleting the key anywhere else would skip the server-side revoke
+    // (see sessionScope's comment). Enumerated, not counted: a third caller
+    // must be a decision, not an accident.
+    //
+    //   utils/signOut.js    — a revoke that RESOLVED but reported failure;
+    //                         auth-js skips _removeSession() for most statuses.
+    //   utils/bootScrub.js  — student handover. The previous student is gone,
+    //                         so there is no session object to revoke on their
+    //                         behalf and no network call may block boot; the
+    //                         persisted credential is the one thing reachable.
     const owners = SOURCE_FILES.filter(({ text }) =>
       /clearSupabaseSessionKeys\s*\(/.test(stripComments(text))
     ).map(({ rel }) => rel).sort();
-    expect(owners).toEqual(['utils/sessionScope.js', SIGN_OUT_MODULE]);
+    expect(owners).toEqual([
+      'utils/bootScrub.js',
+      'utils/sessionScope.js',
+      SIGN_OUT_MODULE,
+    ]);
     const src = stripComments(
       SOURCE_FILES.find((f) => f.rel === SIGN_OUT_MODULE).text
     );

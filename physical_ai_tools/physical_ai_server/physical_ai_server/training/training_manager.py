@@ -26,7 +26,7 @@ The full Trainer / draccus / TrainPipelineConfig machinery is gone.
 
 from pathlib import Path
 
-import lerobot
+from physical_ai_server.data_processing import dataset_paths
 
 
 class TrainingManager:
@@ -53,14 +53,20 @@ class TrainingManager:
 
     @staticmethod
     def get_weight_save_root_path() -> Path:
-        """Return ``<lerobot_install_dir>/outputs/train`` resolved absolutely.
+        """Return the directory downloaded model checkpoints actually land in.
 
-        This is the local directory where downloaded model checkpoints land.
-        Inference / model-list callbacks consume it; training no longer writes here
-        (Modal Cloud uploads checkpoints to HF Hub, students download via the
-        HfApiWorker into the standard HuggingFace cache).
+        DELEGATES to ``dataset_paths.model_root()``, which is the single source
+        of truth shared with the downloader and with React's
+        ``POLICY_MODEL_PATH``.
+
+        It used to derive ``<lerobot_install_dir>/outputs/train`` from
+        ``lerobot.__file__``. That named the pip site-packages install, which
+        NOTHING writes to — ``data_manager.download_huggingface_repo`` has
+        written to ``~/ros2_ws/outputs/train`` since v2.5.0, precisely because
+        the image build ``rm -rf``'s the vendored lerobot tree. Both readers
+        here (``get_model_weight_list_callback`` and
+        ``get_training_info_callback``) were therefore looking in an empty
+        directory, and once the browse confinement derived its model root from
+        this function too, „Modellpfad auswählen" started refusing outright.
         """
-        lerobot_file_path = Path(lerobot.__file__).resolve()
-        lerobot_dirs = [p for p in lerobot_file_path.parents if p.name == 'lerobot']
-        base = lerobot_dirs[-1] if lerobot_dirs else lerobot_file_path.parent.parent
-        return (base / 'outputs' / 'train').resolve()
+        return dataset_paths.model_root()

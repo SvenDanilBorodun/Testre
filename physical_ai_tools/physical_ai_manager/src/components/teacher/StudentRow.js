@@ -231,9 +231,41 @@ export default function StudentRow({ student, classrooms, onShowHistory, onShowP
     if (!window.confirm(`Schüler ${student.full_name} wirklich löschen?`)) return;
     setBusy(true);
     try {
-      await apiDeleteStudent(token, student.id);
+      // The RESPONSE is read, not discarded. DELETE /teacher/students/{id}
+      // answers 200 with `hf_erasure_complete` + `hf_failures` + a German
+      // `detail` whenever the ACCOUNT was deleted but the student's
+      // HuggingFace repos were not — which is the ORDINARY outcome, not an
+      // edge case: the platform token does not own a student-namespace repo,
+      // so `delete_repo` 403s on essentially every deletion. This branch used
+      // to be thrown away and an unconditional „Schüler gelöscht" shown, i.e.
+      // a teacher discharging a GDPR Art. 17 request was told the data was
+      // erased when it was still on the Hub.
+      const res = await apiDeleteStudent(token, student.id);
       dispatch(removeStudentFromSelected(student.id));
       await refreshTeacherPool();
+
+      // The account deletion SUCCEEDED — 200, and the row is already gone from
+      // the roster above. So this is a warning about what remains, never a
+      // failed request, and the local state must not be rolled back.
+      //
+      // Gated on an EXPLICIT `false`: an older Cloud API answers a bare
+      // `{ok: true}`, and `undefined === false` is false, so it keeps the
+      // previous message byte-for-byte instead of inventing a warning about a
+      // field it never sent.
+      if (res?.hf_erasure_complete === false) {
+        const remaining = Array.isArray(res.hf_failures) ? res.hf_failures.length : 0;
+        toast.error(
+          res.detail
+            || `Das Konto wurde gelöscht, aber ${remaining} HuggingFace-`
+               + 'Repository/-s konnten NICHT gelöscht werden — die Daten '
+               + 'liegen noch dort. Bitte im HuggingFace-Konto der '
+               + 'Schülerin/des Schülers manuell löschen.',
+          // Longer than the 6 s error default: this is an instruction to go
+          // and do something on another site, not a status line.
+          { duration: 15000 }
+        );
+        return;
+      }
       toast.success('Schüler gelöscht');
     } catch (err) {
       toast.error(err.message || 'Fehler');

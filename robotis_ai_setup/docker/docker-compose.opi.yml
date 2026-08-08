@@ -30,7 +30,10 @@
 #   * NEW in this file: physical_ai_manager as a THIRD service (the
 #     always-on wizard host), the ${EDUBOTICS_BIND_HOST}-driven port
 #     bindings (the agent's `.env` regenerate maps EDUBOTICS_LAN_OPEN onto
-#     0.0.0.0 vs 127.0.0.1), the pinned-but-configurable ros_net IPAM
+#     0.0.0.0 vs 127.0.0.1) — with ONE deliberate exception, the debug
+#     :9090/:8080 publishes, which are loopback-PINNED because rosbridge is
+#     unauthenticated (see the physical_ai_server ports block) — the
+#     pinned-but-configurable ros_net IPAM
 #     block (the /api/system reverse proxy targets the gateway
 #     deterministically), and EDUBOTICS_CAMERA_SOURCE pinned to usb_cam.
 #
@@ -319,46 +322,45 @@ services:
     networks:
       - ros_net
     ports:
-      # DEBUG/ROLLBACK ONLY since the port-80 consolidation: the React app
-      # reaches rosbridge + web_video_server SAME-ORIGIN through the
-      # manager nginx (/rosbridge + /video/ in nginx.opi.conf.template,
-      # proxied container-to-container over ros_net) so a school firewall
-      # only ever has to pass port 80. These host publishes remain for
-      # operator debugging (ros2 topic echo from a laptop, wscat against
-      # rosbridge) and as the manual fallback if the proxy ever breaks.
+      # DEBUG ONLY since the port-80 consolidation: the React app reaches
+      # rosbridge + web_video_server SAME-ORIGIN through the manager nginx
+      # (/rosbridge + /video/ in nginx.opi.conf.template, proxied
+      # container-to-container over ros_net) so a school firewall only ever
+      # has to pass port 80. Nothing the student uses reads these publishes.
       #
-      # LAN-bindable per the locked Pi decision: EDUBOTICS_BIND_HOST is a
-      # managed `.env` key the agent derives from EDUBOTICS_LAN_OPEN
-      # (1 ⇒ 0.0.0.0, 0 ⇒ 127.0.0.1). The compose default is the SAFE
-      # loopback value; the agent's `.env` always writes an explicit host.
-      # rosbridge :9090 is unauthenticated (anyone reaching it can drive
-      # the arm) — the open-LAN exposure is a deliberate, documented
-      # product decision (§8).
+      # LOOPBACK-PINNED, DELIBERATELY NOT ${EDUBOTICS_BIND_HOST}. This is the
+      # ONE ports entry on the Pi that does not follow that variable, and the
+      # divergence is the security property — do not "harmonise" it with the
+      # manager block below.
       #
-      # DO NOT read EDUBOTICS_LAN_OPEN=0 as a mitigation for that exposure,
-      # and DO NOT "flip the default to loopback" — an earlier revision of
-      # this comment suggested both, and acting on either would make every Pi
-      # in the fleet unreachable. Two reasons:
-      #   1. LAN_OPEN drives the MANAGER's own :80 publish too (see the
-      #      physical_ai_manager ports block). =0 ⇒ BIND_HOST=127.0.0.1 ⇒
-      #      port 80 is loopback ⇒ no remote browser can load the SPA at all.
-      #      constants.py defines "0" as kiosk mode with a local monitor —
-      #      that is its ONLY intended use, not a hardening knob.
-      #   2. Since the port-80 consolidation, /rosbridge and /api/system/ are
-      #      reachable from the LAN through the manager nginx over ros_net,
-      #      INDEPENDENTLY of these host publishes. The agent's "bind the
-      #      gateway, never the LAN NIC" posture is now nominal — the proxy is
-      #      the LAN NIC. Unpublishing 8080/9090 hardens nothing.
-      # The real remaining defense is the agent's exact-host Origin allowlist,
-      # which blocks browser CSRF and DNS-rebinding (a cross-origin POST still
-      # carries Origin) but by design allows a header-less LAN `curl`. That is
-      # the documented accepted risk; the dedicated-VLAN guide is the answer.
+      # An earlier revision of this comment claimed "Unpublishing 8080/9090
+      # hardens nothing" because the proxy already carries the LAN. That was
+      # REFUTED BY EXECUTION (2026-08-08): rosbridge_server 2.7.0's
+      # `check_origin` is literally `return True`, so with these ports on
+      # 0.0.0.0 a handshake carrying `Origin: http://evil.example` straight to
+      # :9090 returns 101 and yields a working session — measured by
+      # publishing to /leader/joint_trajectory from that session and reading
+      # the move back with `ros2 topic echo` inside this container. Any web
+      # page a student had open could drive the arm. That made the manager's
+      # own `location = /rosbridge` Origin gate unreachable by an attacker who
+      # simply skips it, i.e. the same "the proxy would be theatre" reasoning
+      # the student compose records for its own removed publishes.
       #
-      # These host publishes are DEBUG/ROLLBACK ONLY (ros2 topic echo from a
-      # laptop, wscat against rosbridge, or a manual fallback if the proxy
-      # breaks) — the student UI never uses them.
-      - "${EDUBOTICS_BIND_HOST:-127.0.0.1}:8080:8080"
-      - "${EDUBOTICS_BIND_HOST:-127.0.0.1}:9090:9090"
+      # LAN_OPEN still drives the MANAGER's :80 (see its ports block) and MUST
+      # keep doing so — =0 is kiosk mode with a local monitor, never a
+      # hardening knob, and forcing it would make every Pi unreachable.
+      #
+      # DEBUG SURVIVES, over the transport it should always have used: `ssh
+      # -L 9090:127.0.0.1:9090 <pi>` then wscat/ros2 from the laptop. What is
+      # gone is the un-tunnelled LAN fallback if the nginx proxy ever breaks;
+      # the repair surface for that is the always-on manager wizard plus ssh,
+      # not an unauthenticated arm-command port on the school network.
+      #
+      # The healthcheck below is unaffected — it probes 127.0.0.1:9090 from
+      # INSIDE this container, and nginx reaches rosbridge as
+      # `physical_ai_server:9090` over ros_net. Neither reads a host publish.
+      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:9090:9090"
     environment:
       - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-30}
       # Student's HuggingFace token, set ONCE via the System window

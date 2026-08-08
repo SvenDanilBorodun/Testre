@@ -45,6 +45,7 @@ from lerobot.datasets.utils import DEFAULT_FEATURES
 from nav_msgs.msg import Odometry
 import numpy as np
 from physical_ai_interfaces.msg import TaskStatus
+from physical_ai_server.data_processing import dataset_paths
 from physical_ai_server.data_processing.data_converter import DataConverter
 from physical_ai_server.data_processing.lerobot_dataset_wrapper import (
     LeRobotDatasetWrapper,
@@ -77,8 +78,26 @@ class DataManager:
         self._robot_type = robot_type
         import re
         safe_task_name = re.sub(r'[^a-zA-Z0-9._-]', '-', task_info.task_name).strip('-')
-        self._save_repo_name = f'{task_info.user_id}/{robot_type}_{safe_task_name}'
+        # `user_id` is CLIENT-SUPPLIED and was the ONE component here that was
+        # never sanitised, while `task_name` beside it always was. That matters
+        # because `_save_path` reaches a `shutil.rmtree` in
+        # `_check_dataset_exists` (an incomplete dataset is deleted and
+        # re-created), and `save_root_path / '<abs>/x'` DISCARDS the root —
+        # pathlib's absolute-segment rule again. So an absolute or `..`-bearing
+        # user_id turned a per-frame recording check into an arbitrary
+        # directory delete. Same sanitiser as task_name, then `..`-collapse,
+        # then a confine() that PROVES the result stayed under the root.
+        safe_user_id = re.sub(r'[^a-zA-Z0-9._-]', '-', str(task_info.user_id or '')).strip('-')
+        # `-` and `.` survive the sanitiser above, so `..` does too. HF user
+        # ids cannot be dot-only; anything that is becomes a safe placeholder
+        # rather than a traversal.
+        if not safe_user_id or set(safe_user_id) <= {'.'}:
+            safe_user_id = 'unknown-user'
+        self._save_repo_name = f'{safe_user_id}/{robot_type}_{safe_task_name}'
         self._save_path = save_root_path / self._save_repo_name
+        # Belt as well as braces: prove it, rather than trusting the sanitiser.
+        # A raise here is correct — refusing to record beats deleting a tree.
+        self._save_path = dataset_paths.confine(self._save_path, save_root_path)
         self._save_rosbag_path = '/workspace/rosbag2/' + self._save_repo_name
         self._on_saving = False
         self._single_task = len(task_info.task_instruction) == 1
@@ -935,7 +954,7 @@ class DataManager:
                 use_videos=True
             )
 
-    def _upload_dataset(self, tags, private=False):
+    def _upload_dataset(self, tags, private=True):
         """Auto-push the recorded dataset to HuggingFace.
 
         Prefers the HfApiWorker callback (wired by the node) so the
@@ -954,12 +973,42 @@ class DataManager:
         children's faces / audio. A student may opt a repo public at
         record time; teachers can also flip individual repos later from
         the HF dashboard.
+
+        The signature said ``private=False`` until 2026-08-06, flatly
+        contradicting the paragraph above. That default is only ONE of the two
+        layers: the operative one is ``TaskInfo.msg``, where ``bool
+        private_mode`` carried NO default and ROS 2 booleans default to FALSE —
+        so any rosbridge client that simply OMITTED the field got a PUBLIC repo
+        of children's faces. React always sends ``private_mode: true``, which is
+        what kept this latent. Both layers now default to private; keep them
+        in lockstep (fenced by test_upload_privacy_fails_safe.py).
         """
         private = bool(private)
         if self._upload_enqueued:
             # Already kicked off; subsequent state-machine ticks are no-ops.
             return
         self._upload_enqueued = True
+
+        # Never upload into a namespace the rig's own HF token does not own.
+        # _save_repo_name is built from the CLIENT-SUPPLIED task_info.user_id,
+        # so without this an unauthenticated rosbridge client could name any
+        # namespace at all — and after a student handover the previous
+        # student's id was still in play. Marked enqueued ABOVE first, so a
+        # refusal cannot spin the state machine re-attempting every tick.
+        allowed = self._rig_hf_namespaces()
+        namespace = (self._save_repo_name or '').split('/')[0]
+        if allowed is not None and namespace not in allowed:
+            self._last_warning_message = (
+                f'Upload abgelehnt: Der Roboter darf nicht in das '
+                f'HuggingFace-Konto „{namespace}" hochladen. Bitte die '
+                f'Benutzer-ID prüfen und erneut anmelden.'
+            )
+            print(
+                f'[FEHLER] Upload REFUSED: repo namespace {namespace!r} is not '
+                f'owned by this rig\'s HuggingFace token (owns: {sorted(allowed)})',
+                file=sys.stderr, flush=True,
+            )
+            return
         if self._upload_callback is not None:
             try:
                 self._upload_callback(
@@ -1006,6 +1055,46 @@ class DataManager:
         if not self._single_task:
             self._task_info.num_episodes = 1_000_000
             self._task_info.episode_time_s = 1_000_000
+
+    # Namespaces the rig's own HF token may write to (its account + orgs).
+    # Cached at CLASS level because it is a property of the RIG's token, not of
+    # a recording: whoami is an 8 s-bounded network call and _upload_dataset
+    # runs on the end-of-recording save path, which is already busy.
+    # Invalidated by register_huggingface_token.
+    _hf_namespace_cache = None
+
+    @classmethod
+    def invalidate_hf_namespace_cache(cls):
+        cls._hf_namespace_cache = None
+
+    @classmethod
+    def _rig_hf_namespaces(cls):
+        """Namespaces this rig's token owns, or None when unknowable.
+
+        None means "cannot judge" — no token registered, whoami timed out, the
+        school network is down. The caller then ALLOWS the upload, deliberately:
+
+          * recording with no cloud login is a fully supported path (only
+            Training and Inferenz gate on a session), so a hard gate here would
+            break it;
+          * with no token the upload fails on its own anyway, so nothing is
+            actually published;
+          * and turning a transient network blip into a destroyed upload is a
+            worse outcome than the case this guard exists for.
+
+        This is a REFUSE-ON-PROOF gate, matching hf_token_is_foreign's
+        treatment of an absent stamp.
+        """
+        if cls._hf_namespace_cache is not None:
+            return cls._hf_namespace_cache
+        try:
+            ids = cls.get_huggingface_user_id()
+        except Exception:  # noqa: BLE001 — no token / network / HF outage
+            return None
+        if not ids:
+            return None
+        cls._hf_namespace_cache = frozenset(ids)
+        return cls._hf_namespace_cache
 
     @staticmethod
     def get_robot_type_from_info_json(info_json_path):
@@ -1100,6 +1189,11 @@ class DataManager:
                 'huggingface-cli', 'login', '--token', hf_token
             ], capture_output=True, text=True, check=True)
 
+            # The rig's identity just changed, so the cached namespace
+            # allowlist in _rig_hf_namespaces is stale. Without this a token
+            # swap would keep refusing (or keep permitting) against the old
+            # account for the life of the node.
+            DataManager.invalidate_hf_namespace_cache()
             print('Successfully logged in to HuggingFace Hub')
             return result
 
@@ -1116,13 +1210,18 @@ class DataManager:
         repo_id,
         repo_type='dataset'
     ):
+        # Both roots come from dataset_paths, which is the single source of
+        # truth the browse confinement, TrainingManager and React's
+        # POLICY_MODEL_PATH all read. They used to be spelled out here, and the
+        # model one drifted from every reader of it — see MODEL_ROOT_RELATIVE.
+        #
+        # (The 'model' value keeps its v2.5.0 meaning: the LeRobot install is
+        # pip-managed from PyPI and the vendored
+        # ros2_ws/src/physical_ai_tools/lerobot tree is stripped by the image
+        # build, so model downloads must NOT target a path under it.)
         download_path = {
-            'dataset': Path.home() / '.cache/huggingface/lerobot',
-            # v2.5.0: the LeRobot install is pip-managed from PyPI and the
-            # vendored ros2_ws/src/physical_ai_tools/lerobot tree is stripped
-            # by the image build, so model downloads must NOT target a path
-            # under it. Use a stable outputs dir outside the stripped tree.
-            'model': Path.home() / 'ros2_ws/outputs/train/'
+            'dataset': dataset_paths.dataset_root(),
+            'model': dataset_paths.model_root(),
         }
 
         save_path = download_path.get(repo_type)

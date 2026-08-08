@@ -3,38 +3,42 @@
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 //
-// setRosHost derives the rosbridge URL Pi-aware (utils/piMode
-// localRosbridgeUrl): same-origin /rosbridge proxy on the Orange Pi, classic
-// direct ws://<host>:9090 everywhere else. The non-Pi shape is load-bearing —
-// the Windows rig and the Jetson swap-back both depend on it.
+// setRosHost derives the LOCAL rosbridge URL through utils/piMode
+// localRosbridgeUrl, which since 2026-08-06 is the same-origin /rosbridge
+// nginx proxy on EVERY local rig (Orange Pi and Windows student PC alike) —
+// see that module for the two reasons. What is load-bearing HERE is the split
+// between the two reducers: setRosHost DERIVES, setRosbridgeUrl is a verbatim
+// PASSTHROUGH, and the Jetson's JWT-gated ws://<ip>:9091 rides the latter. So
+// the security change to the derivation provably cannot reach the Jetson path.
 
 import reducer, { setRosHost, setRosbridgeUrl } from '../rosSlice';
 
-let mockPi = false;
 vi.mock('../../../utils/piMode', () => ({
   __esModule: true,
-  localRosbridgeUrl: (host, piMode) => {
-    const isPi = piMode === undefined ? mockPi : piMode;
-    return isPi ? `ws://${window.location.host}/rosbridge` : `ws://${host}:9090`;
-  },
+  // Same-origin on every local rig now, so the mock takes no arguments —
+  // there is no Pi/non-Pi branch left to simulate.
+  localRosbridgeUrl: () => `ws://${window.location.host}/rosbridge`,
 }));
 
-beforeEach(() => {
-  mockPi = false;
-});
-
-describe('rosSlice — Pi-aware rosbridge URL derivation', () => {
-  it('setRosHost builds the classic direct :9090 URL outside Pi mode', () => {
+describe('rosSlice — same-origin rosbridge URL derivation', () => {
+  it('setRosHost builds the same-origin /rosbridge proxy URL', () => {
     const state = reducer(undefined, setRosHost('student-pc'));
     expect(state.rosHost).toBe('student-pc');
-    expect(state.rosbridgeUrl).toBe('ws://student-pc:9090');
+    expect(state.rosbridgeUrl).toBe(`ws://${window.location.host}/rosbridge`);
   });
 
-  it('setRosHost builds the same-origin /rosbridge proxy URL in Pi mode', () => {
-    mockPi = true;
+  it('setRosHost is Pi-agnostic — the same URL on a Pi hostname', () => {
     const state = reducer(undefined, setRosHost('edubotics-42.local'));
     expect(state.rosHost).toBe('edubotics-42.local');
     expect(state.rosbridgeUrl).toBe(`ws://${window.location.host}/rosbridge`);
+  });
+
+  it('setRosHost never derives a URL naming the unpublished :9090', () => {
+    // The direct port is gone from docker-compose.yml. A derivation that
+    // re-introduced it would both bypass the nginx Origin allowlist and
+    // point at a closed port.
+    const state = reducer(undefined, setRosHost('student-pc'));
+    expect(state.rosbridgeUrl).not.toContain('9090');
   });
 
   it('setRosbridgeUrl still overrides the URL verbatim (Jetson :9091 swap)', () => {

@@ -69,6 +69,26 @@ def _install_stubs():
     _stub('physical_ai_interfaces.msg', TaskStatus=_placeholder)
     _stub('physical_ai_server')
     _stub('physical_ai_server.data_processing')
+    # data_manager imports dataset_paths at module level (2026-08-06 path
+    # confinement) and the stub package has no __path__, so the submodule must
+    # be present as an ATTRIBUTE. Loaded for REAL rather than stubbed: it is
+    # stdlib-only, so it costs nothing, and a stub without `confine` would
+    # AttributeError the moment anything exercised __init__. Doing this in
+    # every installer (not just the first to run) keeps it order-independent —
+    # sys.modules is process-global across a `discover` run.
+    _dsp_name = 'physical_ai_server.data_processing.dataset_paths'
+    if _dsp_name not in sys.modules:
+        _dsp_spec = importlib.util.spec_from_file_location(
+            _dsp_name, str(DATA_MANAGER_PATH.parent / 'dataset_paths.py'))
+        _dsp = importlib.util.module_from_spec(_dsp_spec)
+        sys.modules[_dsp_name] = _dsp
+        try:
+            _dsp_spec.loader.exec_module(_dsp)
+        except BaseException:
+            sys.modules.pop(_dsp_name, None)
+            raise
+    sys.modules['physical_ai_server.data_processing'].dataset_paths = (
+        sys.modules[_dsp_name])
     _stub('physical_ai_server.data_processing.data_converter', DataConverter=_placeholder)
     _stub('physical_ai_server.data_processing.lerobot_dataset_wrapper',
           LeRobotDatasetWrapper=_placeholder)

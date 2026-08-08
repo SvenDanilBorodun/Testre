@@ -436,11 +436,28 @@ async def delete_my_account(profile=Depends(get_current_profile)):
     return {
         "status": "requested",
         "canceled_trainings": cancelled_ids,
+        # German (Rule §1 — this is read by a student) and HONEST about what
+        # just happened. The previous English text said an administrator "will
+        # process it within 30 days", which overstated the mechanism twice
+        # over: nothing here deletes anything, and NOTHING DRAINS THIS QUEUE
+        # — there is no sweeper, no cron, no admin surface that lists
+        # `deletion_requested_at`. Only a manual `DELETE /teacher/students/{id}`
+        # erases data, and even that cannot reach repos in the student's own
+        # HuggingFace namespace (the platform token does not own them; see
+        # teacher.py::_delete_student_hf_artifacts). Telling a minor their data
+        # is scheduled for erasure when it is not is the worst version of this
+        # defect, so the wording now describes a REQUEST and names the actions
+        # that actually took effect.
+        "deletion_performed": False,
         "message": (
-            "Your deletion request was recorded. An administrator will "
-            "process it within 30 days per GDPR Art. 17. Your data will "
-            "remain accessible until then — use /me/export to download "
-            "a copy before deletion completes."
+            "Die Löschanfrage wurde gespeichert. Wichtig: Es wurden noch "
+            "KEINE Daten gelöscht — die Anfrage muss von einer Lehrkraft oder "
+            "einem Administrator manuell ausgeführt werden. Sofort wirksam "
+            f"sind: {len(cancelled_ids)} laufende Training(s) wurden "
+            "abgebrochen und die Arbeitsgruppen-Zuordnung wurde aufgehoben. "
+            "Aufnahmen im eigenen HuggingFace-Konto müssen dort selbst "
+            "gelöscht werden. Über „Meine Daten exportieren“ kann jederzeit "
+            "eine Kopie heruntergeladen werden."
         ),
     }
 

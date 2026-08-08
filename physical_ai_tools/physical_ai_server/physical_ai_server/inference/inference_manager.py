@@ -24,6 +24,7 @@ from lerobot.policies.factory import make_pre_post_processors
 from lerobot.policies.pretrained import PreTrainedPolicy
 from lerobot.utils.control_utils import predict_action
 import numpy as np
+from physical_ai_server.data_processing import dataset_paths
 from physical_ai_server.utils.file_utils import read_json_file
 import torch
 
@@ -96,18 +97,36 @@ class InferenceManager:
         # Failure strings are student-facing (they ride response.message
         # into a React toast) — German per Rule §1.
         result_message = ''
+
+        # CONFINE FIRST, before any os.path call touches the value. policy_path
+        # arrives on TaskInfo over the unauthenticated rosbridge; unconfined it
+        # read an arbitrary `<dir>/config.json` and, because every refusal below
+        # interpolates the path, answered three distinguishable oracle responses
+        # (measured 2026-08-08: `/etc/ssh` "exists but no config.json" vs
+        # `/root/.ssh` "does not exist", plus a planted `type` field echoed
+        # verbatim into the student toast).
+        #
+        # policy_roots(), NOT browsable_roots(): a real policy lives in the HF
+        # hub cache (`get_saved_policies` enumerates it and feeds the dropdown)
+        # or under model_root() where the downloader writes. Confining to the
+        # browsable pair would refuse every policy a student actually has.
+        try:
+            policy_path = str(dataset_paths.confine_any(
+                policy_path, dataset_paths.policy_roots()))
+        except dataset_paths.DatasetPathError as e:
+            return False, str(e)
+
         if not os.path.exists(policy_path) or not os.path.isdir(policy_path):
             result_message = (
-                f'Der Modellpfad {policy_path} existiert nicht oder ist '
-                f'kein Ordner.'
+                'Der Modellpfad existiert nicht oder ist kein Ordner.'
             )
             return False, result_message
 
         config_path = os.path.join(policy_path, 'config.json')
         if not os.path.exists(config_path):
             result_message = (
-                f'Im Modellordner {policy_path} fehlt die config.json — '
-                f'ist das Modell vollständig heruntergeladen?'
+                'Im Modellordner fehlt die config.json — '
+                'ist das Modell vollständig heruntergeladen?'
             )
             return False, result_message
 
@@ -115,8 +134,8 @@ class InferenceManager:
         if (config is None or
                 ('type' not in config and 'model_type' not in config)):
             result_message = (
-                f'Die config.json in {policy_path} ist beschädigt oder '
-                f'unvollständig.'
+                'Die config.json des Modells ist beschädigt oder '
+                'unvollständig.'
             )
             return False, result_message
 

@@ -70,42 +70,57 @@ export function rsControlBase(piMode) {
   return isPi ? RS_PI_BASE : RS_LOCAL_BASE;
 }
 
-// ── same-origin robot transports (Pi mode) ───────────────────────────────────
+// ── same-origin robot transports (ALL local rigs) ────────────────────────────
 //
-// School networks routinely filter non-standard ports. On the Pi, nginx
-// (nginx.opi.conf.template) reverse-proxies rosbridge (ws /rosbridge) and
-// web_video_server (/video/) same-origin on port 80 — the one port guaranteed
-// reachable if the SPA loaded at all. These two helpers are the single source
-// of the local robot-transport URLs: Pi mode → same-origin proxy; everywhere
-// else → the classic direct ports (Windows rig: browser and stack share the
-// host, so localhost:9090/:8080 never traverse the school network). The direct
-// host ports stay published on the Pi as a debug/rollback path only.
+// These two helpers are the single source of the LOCAL robot-transport URLs,
+// and since 2026-08-06 they are same-origin on EVERY platform, for two
+// independent reasons that happen to want the same answer:
+//
+//   * Orange Pi — school networks routinely filter non-standard ports, and
+//     port 80 is the one port guaranteed reachable if the SPA loaded at all.
+//   * Windows student rig — SECURITY. rosbridge is unauthenticated, so anyone
+//     who can open the socket can publish to /leader/joint_trajectory and drive
+//     a physical arm. Serving the page from :80 while connecting to :9090 made
+//     that a CROSS-ORIGIN connection, and a WebSocket handshake has no CORS
+//     preflight to stop one — so any site open in the student's browser could
+//     reach it. The loopback bind was never a boundary against a page running
+//     ON that PC. Both host port-publishes are now REMOVED from
+//     docker-compose.yml and nginx.conf carries an Origin allowlist on
+//     /rosbridge, so the only route in is same-origin from our own page.
+//
+// The `-opi` compose deliberately KEEPS its :9090/:8080 publishes as a
+// debug/rollback path; the student compose does not.
+//
+// Both functions keep their `piMode` parameter purely so the four call sites
+// and their tests need no churn — it no longer selects behaviour. The Jetson
+// path is untouched by either: `useJetsonConnection` dispatches an explicit
+// `ws://<ip>:9091` through `setRosbridgeUrl` (a passthrough reducer) and
+// ImageGridCell renders Jetson frames from a rosbridge topic subscription
+// rather than from `videoStreamBase`.
 
 /**
- * Local rosbridge WebSocket URL for `hostname`. Pi mode rides the nginx
- * proxy (`ws(s)://<origin-host>/rosbridge`); otherwise the direct
- * `ws://<hostname>:9090`. `piMode` defaults to the module cache — the only
- * cache-driven caller is the rosSlice reducer, whose dispatch site
- * (StudentApp's seed effect) is gated on `piModeResolved`, so the cache is
- * always settled by the time it is read.
+ * Local rosbridge WebSocket URL — always the same-origin nginx proxy
+ * (`ws(s)://<origin-host>/rosbridge`). `hostname` is used only as the
+ * fallback when there is no DOM (jsdom without a location, SSR); it keeps
+ * the same-origin SHAPE rather than naming a port, because :9090 is no
+ * longer published on any student rig. `piMode` is vestigial (see above).
  */
-export function localRosbridgeUrl(hostname, piMode) {
-  const isPi = piMode === undefined ? _piModeCache : piMode;
-  if (isPi && typeof window !== 'undefined' && window.location) {
+export function localRosbridgeUrl(hostname, piMode) {  // eslint-disable-line no-unused-vars
+  if (typeof window !== 'undefined' && window.location) {
     const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
     return `${proto}://${window.location.host}/rosbridge`;
   }
-  return `ws://${hostname}:9090`;
+  return `ws://${hostname}/rosbridge`;
 }
 
 /**
  * Base URL for web_video_server MJPEG streams (`<base>/stream?topic=…`).
- * Pi mode → same-origin `/video` (relative URLs are valid in <img src>);
- * otherwise the direct `http://<rosHost>:8080`.
+ * Always the same-origin `/video` proxy — a relative URL, which is valid in
+ * `<img src>` and is what keeps those requests Origin-less (and therefore
+ * deliberately ungated in nginx.conf). `rosHost`/`piMode` are vestigial.
  */
-export function videoStreamBase(rosHost, piMode) {
-  const isPi = piMode === undefined ? _piModeCache : piMode;
-  return isPi ? '/video' : `http://${rosHost}:8080`;
+export function videoStreamBase(rosHost, piMode) {  // eslint-disable-line no-unused-vars
+  return '/video';
 }
 
 // Shared German network-blocked wording (Pi mode). Shown by StartupGate's

@@ -115,20 +115,69 @@ class StudentComposeMustNotPublishTheRobotTransports(unittest.TestCase):
         )
 
 
-class OpiComposeKeepsItsPublishesDeliberately(unittest.TestCase):
-    """The opi divergence is intentional (CLAUDE.md: debug/rollback path).
+class OpiDebugPublishesAreLoopbackPinned(unittest.TestCase):
+    """The opi debug ports keep existing, but ONLY on 127.0.0.1.
 
-    Asserted POSITIVELY so a future 'harmonisation' of the two composes is a
-    conscious act rather than a silent one.
+    This class replaces `OpiComposeKeepsItsPublishesDeliberately`, which
+    asserted merely that :9090/:8080 appear in the block and therefore stayed
+    green while they were bound to 0.0.0.0 — i.e. it pinned the hole open.
+
+    Measured 2026-08-08 against rosbridge_server 2.7.0: `check_origin` is
+    `return True`, so with a LAN-bound publish an `Origin: http://evil.example`
+    handshake straight to :9090 returns 101 and can publish to
+    /leader/joint_trajectory. The manager's `location = /rosbridge` Origin gate
+    is then simply skipped rather than defeated. Loopback-pinning is what makes
+    that gate the only browser-reachable route, exactly as the student compose
+    records for its own removed publishes.
+
+    The bind host is asserted LITERALLY: `${EDUBOTICS_BIND_HOST}` resolves to
+    0.0.0.0 on any Pi with the shipped `DEFAULT_LAN_OPEN = "1"`, so accepting
+    an interpolation here would accept the defect.
     """
 
-    def test_opi_still_publishes_the_direct_ports(self):
+    def setUp(self):
         self.assertTrue(_OPI_COMPOSE.is_file(), _OPI_COMPOSE)
         block = _service_block(_OPI_COMPOSE, "physical_ai_server")
         self.assertTrue(block, "opi physical_ai_server block not found")
-        joined = " ".join(_published_ports(block))
-        self.assertIn("9090", joined, "opi keeps :9090 as a debug/rollback path")
-        self.assertIn("8080", joined, "opi keeps :8080 as a debug/rollback path")
+        self.published = _published_ports(block)
+        self.assertTrue(self.published, "opi physical_ai_server publishes nothing at all")
+
+    def test_the_debug_ports_are_still_published_for_ssh_tunnelled_debugging(self):
+        joined = " ".join(self.published)
+        self.assertIn("9090", joined, "opi keeps :9090 for `ssh -L`-tunnelled debugging")
+        self.assertIn("8080", joined, "opi keeps :8080 for `ssh -L`-tunnelled debugging")
+
+    def test_every_debug_publish_is_pinned_to_loopback(self):
+        for entry in self.published:
+            if "9090" not in entry and "8080" not in entry:
+                continue
+            self.assertTrue(
+                entry.startswith("127.0.0.1:"),
+                "opi debug publish %r must be pinned to 127.0.0.1 — rosbridge is "
+                "unauthenticated and accepts every Origin, so a LAN-bound publish "
+                "lets any web page skip the nginx gate and drive the arm" % (entry,),
+            )
+
+    def test_the_bind_host_variable_never_reaches_a_debug_publish(self):
+        # The whole defect was one `${EDUBOTICS_BIND_HOST}` here: the agent
+        # writes 0.0.0.0 into it whenever EDUBOTICS_LAN_OPEN=1, which is the
+        # shipped default. The manager's :80 publish MUST keep using it.
+        for entry in self.published:
+            if "9090" in entry or "8080" in entry:
+                self.assertNotIn(
+                    "EDUBOTICS_BIND_HOST", entry,
+                    "the debug publish %r follows EDUBOTICS_BIND_HOST again; that "
+                    "resolves to 0.0.0.0 on every Pi with DEFAULT_LAN_OPEN='1'" % (entry,),
+                )
+
+    def test_the_manager_port_80_still_follows_the_bind_host(self):
+        # The counterpart the fix must NOT break: LAN_OPEN drives :80, and
+        # pinning that to loopback would make every Pi unreachable.
+        mgr = _service_block(_OPI_COMPOSE, "physical_ai_manager")
+        self.assertTrue(mgr, "opi physical_ai_manager block not found")
+        joined = " ".join(_published_ports(mgr))
+        self.assertIn("EDUBOTICS_BIND_HOST", joined)
+        self.assertIn(":80:80", joined)
 
 
 class NginxCarriesTheOriginGate(unittest.TestCase):
@@ -491,12 +540,83 @@ class TheOrangePiCarriesTheSameGate(unittest.TestCase):
             "the opi /rosbridge location is gone — nothing below is compared")
         self.gate = self.text.split("location = /rosbridge")[1].split("proxy_pass")[0]
 
+    def _host_map_body(self):
+        """Body of the $edubotics_host_is_own map.
+
+        Terminated on a LINE-INITIAL `}`, never on the first `}` in the text:
+        the map's own regexes contain `{1,3}` and `(:[0-9]+)?`, so a naive
+        `split('}')` cuts inside the first entry and the assertions below go
+        vacuously green on a truncated string.
+        """
+        match = re.search(
+            r"map \$http_host \$edubotics_host_is_own \{(.*?)\n\}",
+            self.text, re.S)
+        self.assertIsNotNone(
+            match, "the $edubotics_host_is_own map is gone — the Pi gate has "
+                   "no DNS-rebinding constraint left")
+        return match.group(1)
+
     def test_the_rosbridge_location_is_origin_gated_at_all(self):
         self.assertIn(
             "$edubotics_origin_ok", self.gate,
             "the Pi's rosbridge proxy has NO Origin gate: any page a student "
             "has open can drive the arm and read every dataset")
         self.assertRegex(self.gate, r"return\s+403\s*;")
+
+    def test_the_host_is_constrained_against_dns_rebinding(self):
+        """The host-relative rule's own blind spot.
+
+        A host-relative gate accepts whatever authority the CLIENT chose, so an
+        attacker page whose DNS is rebound to the Pi's LAN IP sends a matching
+        Host and Origin and the gate opens. Measured 2026-08-08 against real
+        rosbridge behind this template: 101, and the subsequent advertise of
+        /leader/joint_trajectory took effect.
+        """
+        self.assertIn(
+            "$edubotics_host_is_own", self.gate,
+            "the Pi gate has no Host constraint — a DNS-rebound page satisfies "
+            "the host-relative Origin rule by construction")
+        self.assertRegex(self.gate, r"return\s+421\s*;")
+
+    def test_the_host_map_starts_from_DENY(self):
+        block = self._host_map_body()
+        match = re.search(r"default\s+(\S+?)\s*;", block)
+        self.assertIsNotNone(match, "the host map has no default")
+        self.assertEqual(
+            match.group(1), "0",
+            "the host map defaults to ALLOW, so every rebound name passes")
+
+    def test_the_host_map_accepts_every_shape_a_pi_is_really_reached_at(self):
+        """Availability half. A fixed allowlist locks every Pi out.
+
+        Verified against real nginx 1.27.5: each of these returned 101 with a
+        matching Origin, while `attacker.example` and `evil.com` returned 421.
+        """
+        block = self._host_map_body()
+        for shape, why in (
+            ("localhost", "kiosk mode with a local monitor"),
+            ("[0-9]{1,3}", "a LAN IPv4 literal — the common case"),
+            (r"\[[0-9a-f:.]+\]", "a bracketed IPv6 literal"),
+            (".local", "mDNS, how a Pi advertises itself"),
+        ):
+            self.assertIn(
+                shape, block,
+                f"the host map no longer accepts {why}; every Pi reached that "
+                f"way answers 421 on /rosbridge")
+
+    def test_the_agent_api_does_not_leak_the_wildcard_cors_header(self):
+        """`/video/stream` strips it; `/api/system/` was one location up.
+
+        `pi_agent/agent.py::Handler._cors` sets `Access-Control-Allow-Origin: *`
+        on EVERY JSON response and GETs there are deliberately not Origin-gated,
+        so without a strip any LAN page could read /status, /protokoll and the
+        /cameras/* preview cross-origin. Measured 2026-08-08 against the real
+        agent handler behind this template.
+        """
+        block = self.text.split("location /api/system/")[1].split("\n    }")[0]
+        self.assertIn(
+            "proxy_hide_header Access-Control-Allow-Origin", block,
+            "the pi-agent's wildcard CORS header rides the same-origin proxy")
 
     def test_the_gate_starts_from_DENY(self):
         """The one-character way to turn the whole thing off.

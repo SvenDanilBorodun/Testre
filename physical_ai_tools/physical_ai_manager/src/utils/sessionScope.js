@@ -238,7 +238,12 @@ export function clearSupabaseSessionKeys() {
     const names = [];
     for (let i = 0; i < localStorage.length; i += 1) {
       const key = localStorage.key(i);
-      if (typeof key === 'string' && /^sb-.+-auth-token(-code-verifier)?$/.test(key)) {
+      // `-user` joins the pattern: @supabase/auth-js writes `sb-<ref>-auth-token-user`
+      // (id, email, user_metadata) from `_saveSession` when `settings.userStorage`
+      // is set. We pass no options today so it is not written — but this sweep
+      // exists precisely for the path where `_removeSession()` was SKIPPED, which
+      // is the path that would leave it behind, and matching it is free.
+      if (typeof key === 'string' && /^sb-.+-auth-token(-code-verifier|-user)?$/.test(key)) {
         names.push(key);
       }
     }

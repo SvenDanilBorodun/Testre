@@ -1,8 +1,10 @@
 """Client-supplied dataset paths are confined to the dataset root (2026-08-06).
 
-The Daten tab has NO auth gate (only Training and Inferenz do) and reaches the
-robot over an unauthenticated rosbridge, so every path below arrives from an
-untrusted caller. Three surfaces used one verbatim:
+The Daten tab reaches the robot over an UNAUTHENTICATED rosbridge, so every path
+below arrives from an untrusted caller. (The SPA's student login gate,
+physical_ai_manager/src/utils/authGate.js, now asks for a Supabase session
+before that tab renders — a BROWSER-side gate on one client, which leaves the
+wire exactly as open as it was.) Three surfaces used one verbatim:
 
   * ``edit_worker.run_edit`` — ``delete_dataset_path`` drove the DESTRUCTIVE
     episode delete, so any student could destroy any other's episodes;
@@ -158,11 +160,46 @@ class ConfinePrimitive(_Rig):
                 self.dp.confine(bad, self.root)
 
     def test_a_non_path_type_is_refused_rather_than_coerced(self):
-        # str(['/etc']) is a path-shaped string; a malformed payload must not
-        # be silently stringified into one.
+        """The TYPE check — deliberately NOT reachable through the location one.
+
+        This test used to pass `['/etc']`, `42` and `{'p': '/etc'}` only, and
+        it was VACUOUS: every one of those `str()`s to something that resolves
+        RELATIVE TO CWD, i.e. outside the root, so `confine`'s LOCATION check
+        refused them and the `isinstance(candidate, (str, Path))` guard was
+        never exercised at all. Measured: deleting that guard left this entire
+        file green.
+
+        A discriminating case must be a non-str/Path whose `str()` lands INSIDE
+        the root, so that removing the guard would make it ACCEPTED. The three
+        malformed-payload shapes stay below — they are the realistic wire
+        values — but they are no longer what proves anything.
+        """
+        inside = self.root / 'alice' / 'omx_f_pick'
+        root = self.root
+
+        class _StringifiesToAPathInsideTheRoot:
+            # No __fspath__ on purpose: with one, Path() would accept it and
+            # this would be testing os.PathLike support rather than the guard.
+            def __str__(self):
+                return str(inside)
+
+        # Not vacuous, and this is the load-bearing half: the SAME path handed
+        # in as a real str IS accepted. So the refusal below cannot be the
+        # location check — only the type check can produce it.
+        self.assertEqual(self.dp.confine(str(inside), root), inside)
+        with self.assertRaises(self.dp.DatasetPathError):
+            self.dp.confine(_StringifiesToAPathInsideTheRoot(), root)
+
+        # A bytes path is the same class of defect and the one a malformed
+        # rosbridge payload can actually produce: str(b'/x') is "b'/x'", which
+        # is path-shaped nonsense rather than the path it looks like.
+        with self.assertRaises(self.dp.DatasetPathError):
+            self.dp.confine(bytes(str(inside), 'utf-8'), root)
+
         for bad in (['/etc'], 42, {'p': '/etc'}):
-            with self.assertRaises(self.dp.DatasetPathError):
-                self.dp.confine(bad, self.root)
+            with self.subTest(bad=bad):
+                with self.assertRaises(self.dp.DatasetPathError):
+                    self.dp.confine(bad, root)
 
     def test_a_nul_byte_is_refused(self):
         with self.assertRaises(self.dp.DatasetPathError):
@@ -732,6 +769,13 @@ class TheThreeRemainingClientPathsAreConfined(unittest.TestCase):
         read plus a directory-existence oracle.
       * ``TaskInfo.policy_path`` — arbitrary ``<dir>/config.json`` read, with
         an attacker-planted field echoed into a student toast.
+
+    THESE FENCES COVER ``local_dir`` ONLY, and the same callback carried a
+    FOURTH unvalidated client value: ``ControlHfServer.repo_id``, read verbatim
+    on every mode and reaching ``HfApi().delete_repo`` on ``mode='delete'``.
+    That one is not a path and no confine applies to it — it is refused by MODE
+    instead, and the fences for that live in ``test_hf_control_callback.py``.
+    Do not read a green run here as "this callback is fully covered".
     """
 
     def test_the_hf_upload_local_dir_is_confined(self):
@@ -743,10 +787,21 @@ class TheThreeRemainingClientPathsAreConfined(unittest.TestCase):
     def test_the_local_dir_confine_is_scoped_to_the_upload_mode(self):
         """Availability half: only 'upload' reads local_dir.
 
-        `hf_api_worker` passes just repo_id/repo_type to download, delete and
+        `hf_api_worker` passes just repo_id/repo_type to download, cancel and
         both list modes, so those senders leave local_dir EMPTY. An
         unconditional confine refuses them all — the same self-inflicted
         regression that broke „Modellpfad auswählen" twice.
+
+        The 'delete' mode used to be on that list too. It is now refused
+        outright before this guard is ever reached (see
+        ``test_hf_control_callback.py``), so it can no longer be an example of
+        a mode this confine must not break — a green run here says nothing
+        about it either way.
+
+        This is a TEXT fence over the guard's placement. The behavioural half —
+        an in-root local_dir dispatches, an escaping one is refused — is
+        ``TheOtherModesStillDispatch`` in ``test_hf_control_callback.py``, which
+        drives the real callback.
         """
         body = _fn_body_src(PKG_ROOT / 'physical_ai_server.py',
                             'control_hf_server_callback')

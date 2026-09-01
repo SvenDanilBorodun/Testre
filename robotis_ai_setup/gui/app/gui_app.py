@@ -513,6 +513,12 @@ class EduBoticsApp:
         self.gpu_available = False
         self.running = False
         self._scanning = False
+        # Set only while „Arme scannen"'s confirmation dialog is on screen.
+        # `askyesno` pumps the Tk event loop, so `_scan_arms` can be re-entered
+        # from a pending `root.after` while the student is still reading the
+        # first dialog — and `_scanning` is not set yet at that point. See
+        # `_confirm_arm_scan_closes_window`.
+        self._scan_confirm_open = False
         self._prerequisites_done = False
         # Cloud-only mode: skip arm/camera scan, only start physical_ai_manager
         # so the user can open the Cloud tab without any robot hardware.
@@ -1328,6 +1334,25 @@ class EduBoticsApp:
         # a destructive-rebuild consent dialog over a live arm, and a consent
         # would then run `wsl --unregister` against a live VM.
         self._set_status("Vorherige Sitzung wird aufgeräumt...")
+        # Close a browser window this GUI process left open, for the same
+        # reason `_stop_environment` and the arm scan do: while the child is
+        # alive, `open_student_window` short-circuits and DISCARDS the fresh
+        # `?fresh=<nonce>` URL, so the SPA boot scrub never runs and the next
+        # student inherits the previous one's Supabase session.
+        #
+        # NOT nested in the `if` below — a stale window outlives a stopped
+        # environment — and BEFORE the container teardown, so the graceful
+        # close still has a live rosbridge.
+        #
+        # SCOPE, deliberately understated: `destroy_all` is PROCESS-LOCAL, so
+        # despite the status text above this does NOT reach a window left by a
+        # PREVIOUS GUI process. On a re-check within one session it does. An
+        # orphan from a crashed GUI needs a kill-by-cmdline mechanism that does
+        # not exist; see docs/KNOWN-ISSUES.md.
+        try:
+            webview_window.destroy_all()
+        except Exception:
+            pass
         if docker_manager.ensure_environment_stopped(log=self._log):
             self._log("Umgebung gestoppt — sie startet erst, wenn du auf 'Umgebung starten' klickst.")
 
@@ -2359,9 +2384,72 @@ class EduBoticsApp:
 
     # ── Arm Scanning ─────────────────────────────────────────────────
 
+    def _confirm_arm_scan_closes_window(self) -> bool:
+        """Ask before „Arme scannen" ends a session that is still running.
+
+        Returns True when the scan may proceed — including, silently, in the
+        case where there is nothing to warn about.
+
+        ONLY ASKS WHEN THERE IS SOMETHING TO LOSE. `_scan_arms._do_scan`
+        closes the student's EduBotics window unconditionally, and that stays:
+        a stale window outlives a stopped environment, and leaving it alive
+        hands the next student the previous one's window with their live,
+        self-renewing Supabase session. With no window up — the handover case,
+        and the common one — that close is invisible, so a dialog there would
+        be pure noise in front of every fresh student's first scan. With a
+        window up the same click is a silent logout plus lost unsaved Blockly
+        work in the middle of a lesson, which is what this asks about.
+
+        MAIN THREAD ONLY, and that is why it is called from `_scan_arms` and
+        not from `_do_scan`: a Tk dialog must run on the thread that owns the
+        mainloop. `_scan_arms` is the button's `command`, so Tk calls it there
+        — it already reads tk StringVars for precisely that reason — while
+        `_do_scan` runs on the worker `_scan_arms` spawns.
+
+        RE-ENTRANCY, and it is not hypothetical. `askyesno` pumps the Tk event
+        loop (the same hazard `_prompt_finalize_install` records), so a
+        `root.after` callback scheduled elsewhere fires while this dialog is up —
+        `_prompt_bind_arms` schedules `root.after(200, self._scan_arms)` after
+        an elevated bind, and „Erneut scannen" is wired to the same method. At
+        that moment `self._scanning` is still False and the button is still
+        enabled, so nothing else would stop a SECOND dialog stacking on this
+        one and, on two confirms, two workers racing each other onto the same
+        /dev/serial ports. `_scan_confirm_open` is that guard, read by
+        `_scan_arms` next to `_scanning`. The `finally` clears it so a DECLINE
+        leaves every flag exactly as it found them — nothing to strand the
+        button in a disabled or permanently-guarded state.
+
+        THE ANSWER IS A SNAPSHOT and deliberately not re-checked: if the
+        student closes the window themselves while the dialog is up, confirming
+        runs a scan whose `destroy_all` is a harmless no-op, and declining does
+        nothing at all. Both outcomes are already correct, so there is nothing
+        to synchronise.
+        """
+        if not webview_window.has_live_window():
+            return True
+
+        self._scan_confirm_open = True
+        try:
+            return bool(messagebox.askyesno(
+                "Arme scannen",
+                "Beim Scannen wird das EduBotics-Fenster geschlossen und du "
+                "wirst abgemeldet. Nicht gespeicherte Änderungen gehen "
+                "verloren.\n\n"
+                "Trotzdem scannen?",
+                default=messagebox.NO,
+            ))
+        finally:
+            self._scan_confirm_open = False
+
     def _scan_arms(self):
         """Nach Roboterarmen scannen — läuft im Hintergrund."""
-        if self._scanning:
+        if self._scanning or self._scan_confirm_open:
+            return
+        # BEFORE any state changes: a declined scan must leave the GUI exactly
+        # as it found it — button live, `_scanning` false, no status, no log,
+        # no teardown. Everything below this line is the scan the student
+        # confirmed (or never needed to confirm).
+        if not self._confirm_arm_scan_closes_window():
             return
         self._scanning = True
         self.btn_scan_leader.config(state=tk.DISABLED)
@@ -2375,6 +2463,37 @@ class EduBoticsApp:
             self._set_status("Roboterarme werden gesucht...")
             self.root.after(0, lambda: self.progress.start(10))
             self._log("USB-Geräte werden nach Roboterarmen durchsucht...")
+
+            # Close the student's browser window BEFORE anything else in this
+            # teardown. „Arme scannen" ends the previous student's session just
+            # as surely as „Umgebung stoppen" does, and it left the WebView2
+            # child alive: the next „Umgebung starten" then hit
+            # `open_student_window`'s live-child short-circuit, which DISCARDS
+            # the freshly minted `?fresh=<nonce>` URL and returns True — so no
+            # document ever loaded, `bootScrub` never ran, and the next student
+            # got the previous one's window with their live, self-refreshing
+            # Supabase session and their Blockly program.
+            #
+            # DELIBERATELY NOT nested in the `if ensure_environment_stopped(…)`
+            # below: a stale window outlives a stopped environment, so the case
+            # that needs this most — a student who clicked „Umgebung stoppen"
+            # and walked away with the window still up — is exactly the one
+            # where that condition is False.
+            #
+            # FIRST, so the graceful close still has a live rosbridge for
+            # JogPanel's unmount re-torque and the Jetson release beacon, the
+            # same ordering `_stop_environment` keeps. Best-effort: a failure
+            # here must never stop the scan the student asked for.
+            #
+            # KNOWN LIMIT: `destroy_all` is PROCESS-LOCAL (`webview_window.
+            # _process` is set only by THIS process's `open_student_window`),
+            # so it cannot reach a child orphaned by a crashed or
+            # Task-Manager-killed GUI. It covers the same-process path, which
+            # is the one this button is on.
+            try:
+                webview_window.destroy_all()
+            except Exception:
+                pass
 
             # The arm identification opens the SAME /dev/serial ports the
             # running stack uses. If open_manipulator is up it holds those

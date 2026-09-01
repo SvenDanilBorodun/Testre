@@ -138,6 +138,11 @@ export default function TrainingPage() {
     );
   }
 
+  // Since the student login gate (utils/authGate) StudentApp's <main> asks for
+  // a login before this page renders, so this is no longer the PRIMARY gate —
+  // it is the second line of defence for the one path that gets past it, „Ohne
+  // Anmeldung fortfahren". KEEP IT: that path is exactly what it now guards,
+  // and the teacher web (WebApp) has no StudentApp gate at all.
   if (!isAuthenticated) {
     return <LoginForm />;
   }

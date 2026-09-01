@@ -11,12 +11,18 @@
 // The autosave bucket's NAMESPACE, and only that.
 //
 // A German school runs EduBotics on Windows student PCs under ONE shared Windows
-// account: one WebView2 profile, one IndexedDB, many students. The student app is
-// fully usable without a cloud login — only Training and Inferenz gate on one —
-// so `scopeKey` (the Supabase user id) is frequently null, and the old
-// `scopeKey ? `${STORAGE_KEY}:${scopeKey}` : STORAGE_KEY` fallback put EVERY such
-// session into the SAME bucket. The next student's Roboter Studio restored the
-// previous one's workspace on mount.
+// account: one WebView2 profile, one IndexedDB, many students. The student app
+// used to be fully usable without a cloud login — only Training and Inferenz
+// gated on one — so `scopeKey` (the Supabase user id) was frequently null, and
+// the old `scopeKey ? `${STORAGE_KEY}:${scopeKey}` : STORAGE_KEY` fallback put
+// EVERY such session into the SAME bucket. The next student's Roboter Studio
+// restored the previous one's workspace on mount.
+//
+// The student login gate (utils/authGate) NARROWED that population without
+// removing it: since the gate, `scopeKey` is null only for a student on the
+// „Ohne Anmeldung fortfahren" offline escape, which appears after a login
+// attempt has PROVEN the auth service unreachable. Rarer, still live — so every
+// `scopeKey: null` case below is still a real path and none of them is deleted.
 //
 // Four properties are pinned, and they fail for different reasons:
 //   1. the SIGNED-IN path is unchanged — the fix must not cost a student who does
@@ -97,7 +103,10 @@ describe('autosave bucket namespace', () => {
   it('gives the next browser session a DIFFERENT bucket', async () => {
     // THE regression: student A works without signing in, closes the window,
     // student B opens it. A new window is a new sessionStorage, so B must not be
-    // able to name A's bucket.
+    // able to name A's bucket. Since the login gate, "without signing in" means
+    // A took the „Ohne Anmeldung fortfahren" offline escape — narrower, but the
+    // shared-PC exposure it creates is identical, so the fallback must keep
+    // namespacing per session.
     const first = await freshModule();
     const keyA = await mountedKey(first.useAutosave, null);
     sessionStorage.clear();          // window closed -> session gone

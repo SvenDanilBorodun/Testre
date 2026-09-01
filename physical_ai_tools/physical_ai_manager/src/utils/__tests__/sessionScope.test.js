@@ -324,11 +324,12 @@ describe('clearStudentScopedStorage', () => {
   it('sweeps the Supabase session by pattern, and only that', () => {
     // The project ref is not known at this layer, so the session key can only be
     // matched by shape — the one place the literal-allowlist rule cannot apply,
-    // and it applies to keys this app does not own. Both members are swept: the
-    // token and the PKCE `-code-verifier` sibling auth-js skips in the same
-    // early return.
+    // and it applies to keys this app does not own. All THREE members are swept:
+    // the token, the PKCE `-code-verifier` sibling auth-js skips in the same
+    // early return, and the `-user` sibling (see the next test).
     localStorage.setItem('sb-fnnbysrjkfugsqzwcksd-auth-token', '{"access_token":"x"}');
     localStorage.setItem('sb-fnnbysrjkfugsqzwcksd-auth-token-code-verifier', 'pkce');
+    localStorage.setItem('sb-fnnbysrjkfugsqzwcksd-auth-token-user', '{"email":"a@b"}');
     localStorage.setItem('sb-something-else', 'keep-me');
     localStorage.setItem('edubotics_robotType', 'keep-me');
     clearSupabaseSessionKeys();
@@ -336,17 +337,47 @@ describe('clearStudentScopedStorage', () => {
     expect(
       localStorage.getItem('sb-fnnbysrjkfugsqzwcksd-auth-token-code-verifier')
     ).toBeNull();
+    expect(
+      localStorage.getItem('sb-fnnbysrjkfugsqzwcksd-auth-token-user')
+    ).toBeNull();
     expect(localStorage.getItem('sb-something-else')).toBe('keep-me');
     expect(localStorage.getItem('edubotics_robotType')).toBe('keep-me');
   });
 
+  it('sweeps the `-user` sibling — the member nothing used to name', () => {
+    // @supabase/auth-js writes `sb-<ref>-auth-token-user` (id, email,
+    // user_metadata) from `_saveSession` when `settings.userStorage` is set. We
+    // pass no options today, so it is not written — which is exactly why this
+    // needs its own test: measured 2026-08-31, DELETING `-user` from the pattern
+    // left all 53 files / 535 tests green. The alternative could be removed by a
+    // reader who saw no fixture for it, and the sweep exists precisely for the
+    // path where auth-js SKIPPED `_removeSession()`, which is the path that
+    // would leave it behind.
+    //
+    // Not vacuous: the two other members are swept in the same call, so a sweep
+    // that stopped working entirely would not pass this by default.
+    localStorage.setItem('sb-ref-auth-token-user', '{"email":"anna@schule"}');
+    localStorage.setItem('sb-ref-auth-token', 'go');
+    localStorage.setItem('sb-ref-auth-token-code-verifier', 'go');
+    clearSupabaseSessionKeys();
+    expect(localStorage.getItem('sb-ref-auth-token-user')).toBeNull();
+    expect(localStorage.getItem('sb-ref-auth-token')).toBeNull();
+    expect(localStorage.getItem('sb-ref-auth-token-code-verifier')).toBeNull();
+  });
+
   it('anchors the session pattern at BOTH ends', () => {
-    // `^sb-.+-auth-token(-code-verifier)?$` is the ONE pattern in this module —
-    // the project ref is not knowable at this layer, so the allowlist doctrine
-    // cannot apply and the ANCHORS are the entire bound. Measured: dropping both
-    // left 488/488 green, because every fixture in the tree was a real session
-    // key. An unanchored sweep deletes any key that merely CONTAINS the shape,
-    // and this module's whole point is that it removes only what it means to.
+    // `^sb-.+-auth-token(-code-verifier|-user)?$` is the ONE pattern in this
+    // module — the project ref is not knowable at this layer, so the allowlist
+    // doctrine cannot apply and the ANCHORS are the entire bound. Measured:
+    // dropping both left 488/488 green, because every fixture in the tree was a
+    // real session key. An unanchored sweep deletes any key that merely CONTAINS
+    // the shape, and this module's whole point is that it removes only what it
+    // means to.
+    //
+    // `-something-else` is the `$` probe and nothing more: the three suffixes
+    // auth-js actually writes ('' / `-code-verifier` / `-user`) are ALL in the
+    // pattern and all swept — see the two tests above. Read it as „an unknown
+    // suffix is kept", never as „a suffix is out of scope".
     localStorage.setItem('not-really-sb-ref-auth-token', 'keep-me');       // ^
     localStorage.setItem('sb-ref-auth-token-something-else', 'keep-me');   // $
     localStorage.setItem('sb-ref-auth-token', 'go');
@@ -668,9 +699,12 @@ const SIGNED_OUT_EXEMPT = Object.freeze({
     'Which tab is open, plus ui.hfUserList — and the list is the giveaway. It is '
     + 'the accounts and orgs reachable with THIS RIG\'s $HF_TOKEN, fetched once '
     + 'per ROS connect, so it describes the machine and not the person. It is '
-    + 'also what keeps the never-signed-in recording path working: recording '
-    + 'needs a Benutzer-ID and no cloud login, so clearing the list on sign-out '
-    + 'would empty the selector for a student who never signs in at all.',
+    + 'also what keeps the signed-out recording path working: recording needs a '
+    + 'Benutzer-ID and no cloud login, so clearing the list on sign-out would '
+    + 'empty the selector for a student working without a session. Since the '
+    + 'student login gate (utils/authGate) that population is narrower — only '
+    + 'the „Ohne Anmeldung fortfahren" offline escape reaches it — but the '
+    + 'primary ground above is untouched by the gate and the entry STAYS.',
 });
 
 describe('every slice in the real store answers session/signedOut', () => {

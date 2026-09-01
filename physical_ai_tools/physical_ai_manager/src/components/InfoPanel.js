@@ -457,9 +457,16 @@ const InfoPanel = () => {
                 the wire as TaskInfo.private_mode and threaded through the
                 server-side data_manager overlay → HfApiWorker →
                 create_repo(private=…), so the HF repo is created with the
-                chosen visibility. Defaults to private for data protection
-                (faces, voices); teachers can also flip visibility later
-                from the HF dashboard. */}
+                chosen visibility.
+
+                Defaults to PRIVATE for data protection (faces, voices) —
+                true since 2026-08-31; before that this comment said so while
+                taskSlice's `privateMode` shipped `false`, i.e. a student who
+                pressed record without touching this box published the
+                recording. The default itself lives in
+                features/tasks/taskSlice.js (`defaultTaskInfo.privateMode`),
+                not here; this box only reflects it. Teachers can still flip
+                visibility later from the HF dashboard. */}
             <input
               className={classCheckbox}
               type="checkbox"

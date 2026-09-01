@@ -493,7 +493,7 @@ def update_dataset(
     if payload.description is not None:
         update_fields["description"] = payload.description
     if not update_fields:
-        raise HTTPException(status_code=400, detail="Keine Aenderungen")
+        raise HTTPException(status_code=400, detail="Keine Änderungen")
 
     result = (
         supabase.table("datasets")

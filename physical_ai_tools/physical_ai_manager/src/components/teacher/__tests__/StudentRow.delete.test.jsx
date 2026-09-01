@@ -168,6 +168,36 @@ describe('deleting a student reports what actually happened', () => {
     expect(msg).not.toMatch(/geloescht|Schueler/);
   });
 
+  it('renders the zero-attempt body: account gone, HuggingFace never asked', async () => {
+    // The 2026-08-31 server branch, verbatim. `_delete_student_hf_artifacts`
+    // returned `attempted == 0`, so the API deliberately does NOT claim an
+    // erasure it never performed — `hf_erasure_complete: false` with an EMPTY
+    // `hf_failures`. That combination did not exist before, and the SPA must
+    // not read the empty list as „nothing went wrong, say success".
+    deleteResponse = {
+      ok: true,
+      hf_erasure_complete: false,
+      hf_failures: [],
+      detail:
+        'Das Konto wurde gelöscht. Für diese Schülerin/diesen Schüler waren '
+        + 'keine HuggingFace-Datensätze registriert, die hier gelöscht werden '
+        + 'können — es wurde deshalb nicht bei HuggingFace nachgefragt und '
+        + 'nicht geprüft, ob dort noch Daten liegen. Bitte im '
+        + 'HuggingFace-Konto der Schülerin/des Schülers nachsehen.',
+    };
+    const { store } = renderRow();
+    await clickDelete();
+    await waitFor(() => expect(toastCalls.error.length).toBe(1));
+    // The server's sentence, not the count fallback — with `hf_failures: []`
+    // that fallback would read „0 HuggingFace-Repository/-s".
+    expect(toastCalls.error[0][0]).toBe(deleteResponse.detail);
+    expect(toastCalls.error[0][0]).not.toContain('0 HuggingFace-');
+    // Never both, and never the unconditional success line.
+    expect(toastCalls.success).toEqual([]);
+    // The ACCOUNT deletion still succeeded — the row must leave the roster.
+    expect(store.getState().teacher.selectedClassroom.students).toEqual([]);
+  });
+
   it('gives the warning long enough to act on', async () => {
     deleteResponse = { ok: true, hf_erasure_complete: false, hf_failures: [] };
     renderRow();

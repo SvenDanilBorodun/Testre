@@ -174,6 +174,84 @@ class TheProfileIsNeverDeleted(unittest.TestCase):
                 banned, body,
                 f'open_student_window mentions {banned!r} again')
 
+    def test_NOTHING_in_the_whole_gui_package_removes_a_tree(self):
+        """Widened from `webview_window` to `gui/`, because the invitation was
+        never in `webview_window` — it was in `constants.py`.
+
+        `WEBVIEW_PROFILE_LEAF`'s comment described the leaf as the guard of an
+        rmtree that "REFUSES to delete a directory not ending in it", for
+        months after ae9a3aa deleted that rmtree. A comment claiming a wipe
+        guard exists is how a wipe comes back: the next author reads it, finds
+        the guard missing, and restores what the comment documents. The class
+        above fences only `webview_window.py`, so a wipe written into
+        `gui_app.py` — where the teardown paths that would call it live —
+        walked straight past it.
+
+        `shutil.which` is not a delete; `usbipd_resolver.py` uses it to resolve
+        usbipd's absolute path and is the ONE legitimate `import shutil` here.
+        """
+        gui_app_dir = pathlib.Path(webview_window.__file__).parent
+        sources = sorted(gui_app_dir.glob('*.py'))
+        # Zero-file floor: a package rename would otherwise make this vacuous.
+        self.assertGreaterEqual(
+            len(sources), 10, f'read only {len(sources)} modules in '
+                              f'{gui_app_dir} — this scan is stale')
+
+        # TREE removal only. Single-file deletes are legitimate and present
+        # (`os.remove` of a downloaded installer, of a rotated Protokoll, of a
+        # write-probe) — banning those would be a different, unrelated rule.
+        # It is the recursive form that takes the whole WebView2 profile.
+        tree_removal = {'rmtree', 'rmdir', 'removedirs'}
+        # ...and, at any depth of delete, the profile must never be the target.
+        deletes = tree_removal | {'remove', 'unlink'}
+        profile_names = {'WEBVIEW_PROFILE_DIR', 'WEBVIEW_PROFILE_LEAF'}
+
+        offenders = []
+        for src in sources:
+            tree = ast.parse(src.read_text(encoding='utf-8'))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                fn = node.func
+                name = fn.attr if isinstance(fn, ast.Attribute) else (
+                    fn.id if isinstance(fn, ast.Name) else None)
+                if name is None:
+                    continue
+                if name in tree_removal:
+                    offenders.append(
+                        f'{src.name}: tree removal — {ast.unparse(node)}')
+                elif name in deletes:
+                    rendered = ast.unparse(node)
+                    if any(pn in rendered for pn in profile_names):
+                        offenders.append(
+                            f'{src.name}: deletes the profile — {rendered}')
+        self.assertEqual(
+            offenders, [],
+            'something in gui/ removes a directory tree, or deletes the '
+            'WebView2 profile. That profile holds localStorage AND IndexedDB, '
+            'so it takes the Blockly crash-recovery autosave and every '
+            'machine-scoped key with it, and it fires for a student who merely '
+            'reopened the window mid-lesson. The handover scrub is the SPA\'s '
+            'job (bootScrub.js, keyed on ?fresh=).')
+
+    def test_the_profile_leaf_comment_states_what_the_constant_IS_for(self):
+        """It must document `storage_path`, not a deletion guard.
+
+        The old text named only the wipe, so the constant's REAL job — being an
+        explicit non-roaming `storage_path` instead of pywebview's roaming
+        %APPDATA%\\pywebview default — was written down nowhere.
+        """
+        src = (pathlib.Path(webview_window.__file__).parent
+               / 'constants.py').read_text(encoding='utf-8')
+        block = src.split('WEBVIEW_PROFILE_LEAF =')[0].rsplit(
+            '# --- Embedded WebView2 browser profile', 1)[-1]
+        self.assertIn('storage_path', block,
+                      'the leaf constant no longer says it is pywebview\'s '
+                      'storage_path')
+        self.assertIn('ROAM', block.upper(),
+                      'the reason the path is pinned at all — %APPDATA% roams '
+                      '— is no longer stated')
+
 
 class TheGuiStampsAFreshWindowMarker(unittest.TestCase):
     """`?fresh=<nonce>` is what tells the SPA the window is newly spawned."""
@@ -302,6 +380,265 @@ class TheTwoLanguagesAgreeOnTheParameterName(unittest.TestCase):
         # The rmtree's other victim. sessionScope owns that list; bootScrub must
         # not grow a second opinion about it.
         self.assertNotIn('MACHINE_SCOPED_KEYS', self._js_code())
+
+
+class ClosingTheChildIsWhatLetsTheNextNonceThrough(unittest.TestCase):
+    """The two halves of the handover hole, driven end to end.
+
+    `open_student_window`'s live-child short-circuit returns True and DISCARDS
+    the URL it was handed. `_open_webview` mints a new `?fresh=<nonce>` on
+    EVERY call, so with a child alive the fresh nonce never reaches a document
+    and `bootScrub` never runs — while the GUI logs that a window was opened.
+
+    So the nonce is only half the fix; the other half is that every path which
+    ends a student's session must CLOSE the child first. This exercises that
+    causally: same module, same seam, once without the close and once with it.
+
+    THE SHORT-CIRCUIT ITSELF STAYS. `gui_app.py`'s „Web-Oberfläche öffnen"
+    button calls straight into `open_student_window`, and its documented
+    behaviour is to be a no-op while a window is up. Making it relaunch on a
+    differing URL would fire on EVERY click (the nonce differs every time) and
+    would destroy a live student's window and unsaved Blockly work on one
+    click. `test_the_button_is_still_a_no_op_with_a_live_child` is the fence
+    against that "fix".
+    """
+
+    def setUp(self):
+        self.spawned = []
+
+        class _FakeProc:
+            pid = 4242
+
+            def __init__(self):
+                self.alive = True
+
+            def poll(self):
+                return None if self.alive else 0
+
+            def terminate(self):
+                self.alive = False
+
+            def kill(self):
+                self.alive = False
+
+            def wait(self, timeout=None):
+                # Deliberately does NOT mark the child dead: the real
+                # `_watch_subprocess` thread calls `wait()` on every spawn, so
+                # a `wait` that killed the fake would silently un-do the
+                # live-child state these tests are about, and every assertion
+                # below would pass for the wrong reason.
+                return 0
+
+        def _fake_popen(cmd, **_kw):
+            self.spawned.append(cmd)
+            return _FakeProc()
+
+        self._real_available = webview_window.is_available
+        webview_window.is_available = lambda: True
+        self.addCleanup(
+            setattr, webview_window, 'is_available', self._real_available)
+
+        self._real_popen = webview_window.subprocess.Popen
+        webview_window.subprocess.Popen = _fake_popen
+        self.addCleanup(
+            setattr, webview_window.subprocess, 'Popen', self._real_popen)
+
+        # Off Windows `_post_close_to_pid` returns 0, so `destroy_all` skips the
+        # grace window entirely and goes straight to terminate. Stubbed anyway
+        # so this does not depend on which platform the suite runs on.
+        self._real_post = webview_window._post_close_to_pid
+        webview_window._post_close_to_pid = lambda _pid: 0
+        self.addCleanup(
+            setattr, webview_window, '_post_close_to_pid', self._real_post)
+
+        webview_window._process = None
+        self.addCleanup(setattr, webview_window, '_process', None)
+
+    def _urls(self):
+        return [cmd[cmd.index('--url') + 1] for cmd in self.spawned]
+
+    def test_the_button_is_still_a_no_op_with_a_live_child(self):
+        """„Web-Oberfläche öffnen" mid-lesson must not restart the window."""
+        self.assertTrue(webview_window.open_student_window(
+            'http://localhost/?robot=omx_full&fresh=aaaaaaaaaaaaaaaa'))
+        self.assertTrue(webview_window.open_student_window(
+            'http://localhost/?robot=omx_full&fresh=bbbbbbbbbbbbbbbb'))
+        self.assertEqual(
+            len(self.spawned), 1,
+            'the second call relaunched — a differing URL must NOT respawn, or '
+            'every click of „Web-Oberfläche öffnen" destroys the student\'s '
+            'live window and unsaved Blockly work (the nonce differs every '
+            'time, so "relaunch when the URL differs" fires always)')
+
+    def test_without_the_close_the_second_nonce_never_reaches_a_document(self):
+        """The shipped bug, stated as a test: this is what „Arme scannen" did."""
+        webview_window.open_student_window('http://localhost/?fresh=STUDENT_A')
+        webview_window.open_student_window('http://localhost/?fresh=STUDENT_B')
+        self.assertNotIn(
+            'http://localhost/?fresh=STUDENT_B', self._urls(),
+            'the second URL was spawned — the short-circuit is gone, see the '
+            'test above for why that is worse')
+
+    def test_destroy_all_first_and_the_next_spawn_carries_the_fresh_nonce(self):
+        """The fix, stated as a test: what the scan/prereq paths now do."""
+        webview_window.open_student_window('http://localhost/?fresh=STUDENT_A')
+        webview_window.destroy_all()
+        webview_window.open_student_window('http://localhost/?fresh=STUDENT_B')
+        self.assertEqual(
+            self._urls(),
+            ['http://localhost/?fresh=STUDENT_A',
+             'http://localhost/?fresh=STUDENT_B'],
+            'closing the child did not free the next spawn — student B is '
+            'still on student A\'s window, so bootScrub never runs and A\'s '
+            'live Supabase session survives the handover')
+
+    def test_destroy_all_is_safe_with_no_child_at_all(self):
+        """The scan/prereq paths call it unconditionally, including at startup."""
+        webview_window.destroy_all()   # must not raise
+        webview_window.destroy_all()
+        self.assertEqual(self.spawned, [])
+
+
+class TheModuleCanBeAskedWhetherAWindowIsUp(unittest.TestCase):
+    """`has_live_window` — the read that decides whether „Arme scannen" asks.
+
+    „Arme scannen" closes the student's window and logs them out. That close
+    STAYS (the class above is the whole reason it exists), but a student who
+    clicks it mid-lesson — their arm dropped out — was signed out with no
+    warning and lost unsaved Blockly work. So the click now confirms FIRST,
+    and only when there is a window to lose: at handover there is none, and a
+    dialog in front of every fresh student's first scan would be noise.
+
+    This is that predicate, driven against the REAL module through the same
+    fake-Popen seam the class above uses — `gui_app` must never reach into
+    `webview_window._process` itself, because `open_student_window` and
+    `destroy_all` swap it under `_lock`.
+
+    The answer must track the child's ACTUAL liveness, not merely whether a
+    handle was ever stored: a student who closed the window themselves has no
+    session left to warn about.
+    """
+
+    def setUp(self):
+        self.spawned = []
+
+        class _FakeProc:
+            pid = 4242
+
+            def __init__(self):
+                self.alive = True
+
+            def poll(self):
+                return None if self.alive else 0
+
+            def terminate(self):
+                self.alive = False
+
+            def kill(self):
+                self.alive = False
+
+            def wait(self, timeout=None):
+                # Same reason as the class above: `_watch_subprocess` calls
+                # `wait()` on every spawn, so a `wait` that killed the fake
+                # would un-do the live-child state these tests are about.
+                return 0
+
+        self.procs = []
+
+        def _fake_popen(cmd, **_kw):
+            self.spawned.append(cmd)
+            proc = _FakeProc()
+            self.procs.append(proc)
+            return proc
+
+        self._real_available = webview_window.is_available
+        webview_window.is_available = lambda: True
+        self.addCleanup(
+            setattr, webview_window, 'is_available', self._real_available)
+
+        self._real_popen = webview_window.subprocess.Popen
+        webview_window.subprocess.Popen = _fake_popen
+        self.addCleanup(
+            setattr, webview_window.subprocess, 'Popen', self._real_popen)
+
+        self._real_post = webview_window._post_close_to_pid
+        webview_window._post_close_to_pid = lambda _pid: 0
+        self.addCleanup(
+            setattr, webview_window, '_post_close_to_pid', self._real_post)
+
+        webview_window._process = None
+        self.addCleanup(setattr, webview_window, '_process', None)
+
+    def test_no_child_at_all_means_no_window(self):
+        """The handover case, and the common one — no dialog must be shown."""
+        self.assertFalse(webview_window.has_live_window())
+
+    def test_a_spawned_child_means_a_window_is_up(self):
+        webview_window.open_student_window('http://localhost/?fresh=STUDENT_A')
+        self.assertTrue(
+            webview_window.has_live_window(),
+            'a live student window reads as absent — „Arme scannen" would '
+            'close it and sign the student out with no warning, which is the '
+            'whole defect this predicate exists to fix')
+
+    def test_a_closed_child_means_no_window_again(self):
+        """After the scan's own `destroy_all` the next question must say no."""
+        webview_window.open_student_window('http://localhost/?fresh=STUDENT_A')
+        webview_window.destroy_all()
+        self.assertFalse(webview_window.has_live_window())
+
+    def test_a_child_that_EXITED_ON_ITS_OWN_is_not_a_window(self):
+        """The student closed the window themselves; the handle is still set.
+
+        `_process` is only cleared by `destroy_all`, so a stored handle proves
+        nothing. Asking `poll()` is what separates „there is a session to lose"
+        from „there is a stale Popen object", and getting this wrong would put
+        a data-loss dialog in front of a student with nothing to lose.
+        """
+        webview_window.open_student_window('http://localhost/?fresh=STUDENT_A')
+        self.procs[0].alive = False
+        self.assertIsNotNone(
+            webview_window._process,
+            'the handle was cleared by something else — this test no longer '
+            'exercises the exited-child case')
+        self.assertFalse(webview_window.has_live_window())
+
+    @staticmethod
+    def _code():
+        """`has_live_window`'s body, docstring dropped.
+
+        The docstring explains the very mechanics the assertions below fence,
+        so unparsing it too would let a function that does none of them pass on
+        its own prose.
+        """
+        tree = ast.parse(_WEBVIEW_SRC.read_text(encoding='utf-8'))
+        body = list(_func(tree, 'has_live_window').body)
+        if (body and isinstance(body[0], ast.Expr)
+                and isinstance(body[0].value, ast.Constant)
+                and isinstance(body[0].value.value, str)):
+            body = body[1:]
+        return '\n'.join(ast.unparse(stmt) for stmt in body)
+
+    def test_it_asks_the_process_and_does_not_just_test_the_handle(self):
+        """Source fence for the test above, so a rewrite cannot lose it."""
+        self.assertIn('poll()', self._code(),
+                      'has_live_window trusts the stored handle instead of '
+                      'asking whether the child is still alive')
+
+    def test_it_takes_the_lock_the_way_destroy_all_does(self):
+        """`_process` is swapped under `_lock`; a bare read can see a mid-swap
+        value, and the whole point of adding a public accessor was that no
+        caller has to know that."""
+        self.assertIn('with _lock:', self._code())
+
+    def test_it_never_closes_anything(self):
+        """A predicate, not an action: asking must never end a session."""
+        webview_window.open_student_window('http://localhost/?fresh=STUDENT_A')
+        for _ in range(3):
+            webview_window.has_live_window()
+        self.assertTrue(self.procs[0].alive,
+                        'has_live_window killed the child it was asked about')
+        self.assertEqual(len(self.spawned), 1)
 
 
 class TheProfileLivesUnderLocalAppDataNotRoaming(unittest.TestCase):

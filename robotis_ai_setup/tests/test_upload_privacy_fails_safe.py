@@ -6,10 +6,12 @@ and until 2026-08-06 both failed OPEN:
 
   1. ``TaskInfo.msg``'s ``bool private_mode`` carried NO default. ROS 2
      booleans default to FALSE, so any rosbridge client that simply OMITTED the
-     field got a PUBLIC repo. This is the OPERATIVE defect — the Daten/Aufnahme
-     surface has no auth gate and rosbridge is unauthenticated, so "any client"
-     is not hypothetical. React always sends ``private_mode: true``, which is
-     the only reason it stayed latent.
+     field got a PUBLIC repo. This is the OPERATIVE defect — rosbridge is
+     unauthenticated, so "any client" is not hypothetical. (The SPA's student
+     login gate, physical_ai_manager/src/utils/authGate.js, gates the
+     Daten/Aufnahme surface in the BROWSER; the wire has no gate at all, which
+     is the level this defect lived at.) React always sends
+     ``private_mode: true``, which is the only reason it stayed latent.
   2. ``data_manager._upload_dataset(self, tags, private=False)`` — which
      contradicted its OWN docstring ("It defaults to True so a missing/garbled
      flag fails safe to private").

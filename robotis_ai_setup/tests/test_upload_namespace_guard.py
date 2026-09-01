@@ -9,17 +9,27 @@ WHY THE GUARD EXISTS. ``DataManager.__init__`` builds ``_save_repo_name`` from
 the CLIENT-SUPPLIED ``task_info.user_id``, not from the rig's token, while
 ``InfoPanel`` auto-selects ``hfUserList[0]``. On one shared Windows account,
 student B's recordings therefore uploaded into student A's namespace — and
-SUCCEEDED, because the rig token has no idea whose id was typed. The Aufnahme
-surface has no auth gate and rosbridge is unauthenticated, so "any client" is
-not hypothetical either.
+SUCCEEDED, because the rig token has no idea whose id was typed. And rosbridge
+is unauthenticated, so "any client" is not hypothetical either — the SPA's
+student login gate is a BROWSER-side gate on one client and the wire still has
+none.
 
-WHY IT MUST FAIL OPEN, and this is the half that is easy to get wrong. Recording
-with NO cloud login is a fully supported path (only Training and Inferenz gate
-on a session). So "cannot judge" — no token, whoami timed out, HF down, a
-malformed reply — must ALLOW: with no token the upload fails on its own and
-nothing is published, whereas turning a network blip into a destroyed upload is
-a worse outcome than the case the guard exists for. It is a REFUSE-ON-PROOF
-gate, the same stance ``hf_token_is_foreign`` takes on an absent stamp.
+WHY IT MUST FAIL OPEN, and this is the half that is easy to get wrong. "Cannot
+judge" — no token, whoami timed out, HF down, a malformed reply — must ALLOW,
+on TWO grounds: with no token the upload fails on its own and nothing is
+published, and turning a network blip into a destroyed upload is a worse outcome
+than the case the guard exists for. It is a REFUSE-ON-PROOF gate, the same
+stance ``hf_token_is_foreign`` takes on an absent stamp.
+
+A THIRD ground used to head that list — "recording with NO cloud login is a
+fully supported path (only Training and Inferenz gate on a session)" — and it is
+no longer true: the student SPA now requires a Supabase login on every page
+except the Orange Pi's „System" tab (physical_ai_manager/src/utils/authGate.js),
+and the one remaining way to record signed out is the „Ohne Anmeldung
+fortfahren" escape, offered only after a login attempt has PROVEN the auth
+service unreachable. The two grounds above are untouched by that, so the
+fail-open stays exactly as correct as it was and the guard's LOGIC is unchanged
+— which is why every assertion below is unchanged too.
 
 ``data_manager`` imports a large ROS/cv2/HF/lerobot tree at module level, none
 of which this logic needs, so those are stubbed in ``sys.modules`` before the
@@ -225,11 +235,51 @@ class TheGuardRefusesAForeignNamespace(_Rig):
         dm._upload_dataset(tags=[], private=True)
         msg = dm._last_warning_message
         self.assertTrue(msg, 'the refusal is silent — the student is told nothing')
-        self.assertIn('bob', msg)
+        self.assertIn('Upload abgelehnt', msg)
         # Rule §1: literal umlauts, never ae/oe/ue transliterations.
         self.assertIn('prüfen', msg)
         self.assertNotIn('pruefen', msg)
-        self.assertNotIn('abgelehnt: Der Roboter darf nicht in das HuggingFace-Konto "', msg)
+
+    def test_the_refusal_does_not_echo_the_clients_namespace_back(self):
+        """The student-facing text names neither the namespace nor the repo id.
+
+        `namespace` is split off `_save_repo_name`, which is built from the
+        CLIENT-SUPPLIED `task_info.user_id`, and this string is rendered as a
+        German toast in the browser — the same reflect-the-caller's-input shape
+        the path-confinement refusals were fixed for. This assertion USED to be
+        `assertIn('bob', msg)`, i.e. it pinned the echo open; it was inverted
+        deliberately, not dropped.
+
+        The operator still gets the exact value: the stderr `[FEHLER]` line
+        beside the assignment prints `namespace` and the owned set verbatim.
+        """
+        self._whoami(['alice'])
+        dm = self._make(user_id='bob')
+        dm._upload_dataset(tags=[], private=True)
+        msg = dm._last_warning_message
+        # Not vacuous: a message that said nothing at all would pass the
+        # assertNotIns below, so pin that the refusal is really worded.
+        self.assertIn('Upload abgelehnt', msg)
+        self.assertNotIn('bob', msg)
+        self.assertNotIn(dm._save_repo_name, msg)
+
+    def test_the_refusal_uses_typographic_quotes_not_straight_ones(self):
+        """Rule §1's other half — „…“, never `"…"`.
+
+        The shipped string closed its German quote with a straight `"`
+        (`…HuggingFace-Konto „{namespace}" hochladen…`), so it opened
+        typographically and closed ASCII. The two assertions below both fail on
+        that exact string.
+        """
+        self._whoami(['alice'])
+        dm = self._make(user_id='bob')
+        dm._upload_dataset(tags=[], private=True)
+        msg = dm._last_warning_message
+        self.assertTrue(msg)
+        self.assertNotIn('"', msg)
+        self.assertEqual(
+            msg.count('„'), msg.count('“'),
+            'a German quote was opened with „ and not closed with “')
 
     def test_an_ORG_the_token_belongs_to_is_accepted(self):
         # whoami returns the account name plus every org; a school org account
@@ -276,7 +326,11 @@ class TheGuardRefusesAForeignNamespace(_Rig):
 
 
 class ItFailsOPENWhenItCannotJudge(_Rig):
-    """Recording with no cloud login is FULLY SUPPORTED — do not break it."""
+    """Cannot judge ⇒ ALLOW. The two surviving grounds — see the module
+    docstring — are that a tokenless upload fails on its own, and that a network
+    blip must not destroy an upload. Neither depends on recording-without-login
+    being common, so the student login gate does not weaken any of this.
+    """
 
     def _assert_allowed(self, whoami_result, why):
         self._whoami(whoami_result)

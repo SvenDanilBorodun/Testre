@@ -602,7 +602,7 @@ async def patch_student(
         _assert_classroom_owned(teacher["id"], req.classroom_id)
         updates["classroom_id"] = req.classroom_id
     if not updates:
-        raise HTTPException(status_code=400, detail="Keine Aenderungen")
+        raise HTTPException(status_code=400, detail="Keine Änderungen")
 
     try:
         supabase.table("users").update(updates).eq("id", student_id).execute()
@@ -623,7 +623,99 @@ async def patch_student(
     return _student_summary(row)
 
 
-def _delete_student_hf_artifacts(student_id: str) -> list[dict]:
+def _enumerate_student_hf_artifacts(
+    student_id: str,
+) -> tuple[list[tuple[str, str]], bool]:
+    """READ-ONLY: which HF repos would an erasure delete, and can we tell?
+
+    Split out of ``_delete_student_hf_artifacts`` on 2026-08-31 so that
+    ``delete_student`` can ask the question BEFORE it deletes the auth user.
+    This touches ``trainings`` and ``datasets`` and nothing else — no
+    HuggingFace call, no write — so running it first is free, and running it
+    on a student who then turns out not to be deletable costs nothing.
+
+    Returns ``(candidates, registry_readable)``.
+
+    ``candidates`` are deduplicated ``(repo_id, repo_type)`` pairs in erasure
+    order — registry datasets FIRST, because those are the ones the old
+    trainings-only enumeration could never see (a recording never used for
+    training has no ``trainings`` row at all, which is the whole point of a
+    GDPR erasure on a student who only ever recorded). Workgroup-shared
+    datasets are already removed (migration 011: siblings still depend on
+    them, and the teacher can delete those by hand from HF Hub).
+
+    ``registry_readable`` is False when the ``datasets`` query failed. That is
+    not merely "we enumerated less" — the registry is the ONLY source of the
+    shared-repo skip list, so with it unreadable every dataset named by a
+    surviving ``trainings`` row looks unshared. Measured 2026-08-08: answering
+    that query 503 made a group-shared repo observably reach ``delete_repo``.
+    Both callers fail closed on it — ``delete_student`` refuses the whole
+    request with 503 while the student still exists, and
+    ``_delete_student_hf_artifacts`` refuses the dataset half and names each
+    repo it refused.
+    """
+    supabase = get_supabase()
+    rows = (
+        supabase.table("trainings")
+        .select("dataset_name, model_name, workgroup_id")
+        .eq("user_id", student_id)
+        .execute()
+    ).data or []
+
+    # Build the set of HF repos that are shared with a group. We must
+    # NOT delete these because group siblings still need them.
+    shared_dataset_repos: set[str] = set()
+    registry_repos: list[str] = []
+    registry_readable = True
+    try:
+        ds_rows = (
+            supabase.table("datasets")
+            .select("hf_repo_id, owner_user_id, workgroup_id")
+            .eq("owner_user_id", student_id)
+            .execute()
+        ).data or []
+        for d in ds_rows:
+            repo = d.get("hf_repo_id")
+            if not repo:
+                continue
+            if d.get("workgroup_id"):
+                shared_dataset_repos.add(repo)
+            else:
+                registry_repos.append(repo)
+    except Exception as e:
+        registry_readable = False
+        logger.warning("Dataset registry query failed during HF cleanup: %s", e)
+
+    ordered: list[tuple[str, str]] = [
+        (repo, "dataset") for repo in registry_repos
+    ]
+    for row in rows:
+        # Skip trainings that are part of a shared workgroup pool.
+        if row.get("workgroup_id"):
+            continue
+        ordered.append((row.get("model_name"), "model"))
+        ordered.append((row.get("dataset_name"), "dataset"))
+
+    candidates: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for repo_id, repo_type in ordered:
+        if not repo_id or (repo_id, repo_type) in seen:
+            continue
+        seen.add((repo_id, repo_type))
+        if repo_type == "dataset" and repo_id in shared_dataset_repos:
+            logger.info(
+                "Skipping HF dataset %s — still shared with workgroup",
+                repo_id,
+            )
+            continue
+        candidates.append((repo_id, repo_type))
+    return candidates, registry_readable
+
+
+def _delete_student_hf_artifacts(
+    student_id: str,
+    enumeration: tuple[list[tuple[str, str]], bool] | None = None,
+) -> tuple[list[dict], int]:
     """Best-effort deletion of HuggingFace repos owned by the student.
 
     GDPR Art. 17: when a student account is deleted, the personal data
@@ -665,8 +757,18 @@ def _delete_student_hf_artifacts(student_id: str) -> list[dict]:
     ``register_dataset_safe`` HF-author anchor and ``datasets.py::sync_datasets``).
 
     Returns:
-        A list of ``{"repo_id", "repo_type", "reason"}`` for every repo that
-        was NOT erased. Empty means everything found was erased.
+        ``(failures, attempted)``.
+
+        ``failures`` is a ``{"repo_id", "repo_type", "reason"}`` entry for every
+        repo that was NOT erased. ``attempted`` is how many repos were actually
+        handed to ``delete_repo`` — see the note on the caller below.
+
+    2026-08-31 — WHY ``attempted`` EXISTS. It used to return the failure list
+    alone, and the caller read an empty list as "erasure complete". Those are
+    different claims: a student who registered nothing produces an empty list
+    after contacting HuggingFace ZERO times, and the endpoint then answered
+    ``hf_erasure_complete: true`` — a positive assertion about a service it had
+    never called. ``attempted == 0`` lets the caller say what actually happened.
     """
     failures: list[dict] = []
     hf_token = os.environ.get("HF_TOKEN", "")
@@ -677,50 +779,17 @@ def _delete_student_hf_artifacts(student_id: str) -> list[dict]:
         return [{
             "repo_id": "*", "repo_type": "*",
             "reason": "HF_TOKEN ist nicht gesetzt — es wurde nichts gelöscht.",
-        }]
-    supabase = get_supabase()
-    rows = (
-        supabase.table("trainings")
-        .select("dataset_name, model_name, workgroup_id")
-        .eq("user_id", student_id)
-        .execute()
-    ).data or []
+        }], 0
 
-    # Build the set of HF repos that are shared with a group. We must
-    # NOT delete these because group siblings still need them.
-    shared_dataset_repos: set[str] = set()
-    # The datasets registry is enumerated for TWO reasons now: the shared-repo
-    # skip list it always provided, AND as a source of repos to erase. A
-    # recording that was never trained on has no `trainings` row at all, so the
-    # old enumeration could not see it — which is the whole point of a GDPR
-    # erasure on a student who only ever recorded.
-    registry_repos: list[str] = []
-    # The registry is the ONLY source of the shared-repo skip list, so a failed
-    # read is not merely "we enumerated less" — it is "we no longer know which
-    # datasets belong to a workgroup". Deleting under that ignorance destroyed a
-    # sibling group's data: measured 2026-08-08 by answering this query 503 while
-    # leaving one `trainings` row naming a group-shared repo, which was then
-    # observably deleted. So the read outcome is TRACKED, and it gates the
-    # dataset half of the loop below.
-    registry_readable = True
-    try:
-        ds_rows = (
-            supabase.table("datasets")
-            .select("hf_repo_id, owner_user_id, workgroup_id")
-            .eq("owner_user_id", student_id)
-            .execute()
-        ).data or []
-        for d in ds_rows:
-            repo = d.get("hf_repo_id")
-            if not repo:
-                continue
-            if d.get("workgroup_id"):
-                shared_dataset_repos.add(repo)
-            else:
-                registry_repos.append(repo)
-    except Exception as e:
-        registry_readable = False
-        logger.warning("Dataset registry query failed during HF cleanup: %s", e)
+    # The enumeration is normally handed in by `delete_student`, which runs it
+    # BEFORE the auth user is deleted (see there). Enumerating here when it is
+    # not is what keeps this function callable on its own.
+    candidates, registry_readable = (
+        enumeration if enumeration is not None
+        else _enumerate_student_hf_artifacts(student_id)
+    )
+
+    if not registry_readable:
         failures.append({
             "repo_id": "?", "repo_type": "dataset",
             "reason": (
@@ -730,45 +799,31 @@ def _delete_student_hf_artifacts(student_id: str) -> list[dict]:
             ),
         })
 
-    if not rows and not registry_repos:
+    if not candidates:
         # Nothing enumerable. That is HONEST only when the student genuinely
         # registered nothing: a recording is discoverable here only if it
         # reached the `datasets` registry, so a repo pushed under an
         # unregistered name is invisible to this function and always was.
         # Reporting an unqualified `hf_erasure_complete: true` after contacting
         # HuggingFace ZERO times is the same overstatement this whole change
-        # exists to remove, so say what was actually established.
+        # exists to remove — which is why `attempted` (0 here) is returned and
+        # the caller says what was actually established.
         if registry_readable:
             logger.info(
                 "No HF artifacts registered for %s — nothing to erase", student_id
             )
-        return failures
+        return failures, 0
 
     api = HfApi(token=hf_token)
-    seen: set[tuple[str, str]] = set()
-    # Registry datasets FIRST — these are the ones the old trainings-only
-    # enumeration could never see (a recording never used for training).
-    candidates: list[tuple[str, str]] = [
-        (repo, "dataset") for repo in registry_repos
-    ]
-    for row in rows:
-        # Skip trainings that are part of a shared workgroup pool.
-        if row.get("workgroup_id"):
-            continue
-        candidates.append((row.get("model_name"), "model"))
-        candidates.append((row.get("dataset_name"), "dataset"))
-
+    attempted = 0
     for repo_id, repo_type in candidates:
-        if not repo_id or (repo_id, repo_type) in seen:
-            continue
-        seen.add((repo_id, repo_type))
         if repo_type == "dataset" and not registry_readable:
             # Fail CLOSED, and NAME the repo. The generic "?" entry above says
             # why; without this per-repo entry the teacher is warned in a way
             # that never mentions the datasets, so a sibling group's data would
             # go missing invisibly. Models are unaffected: a pooled training is
             # already skipped by its own row's workgroup_id, which does not come
-            # from this query.
+            # from the datasets query.
             logger.warning(
                 "Refusing to delete HF dataset %s — shared-repo skip list "
                 "unavailable (datasets registry unreadable)",
@@ -782,12 +837,10 @@ def _delete_student_hf_artifacts(student_id: str) -> list[dict]:
                 ),
             })
             continue
-        if repo_type == "dataset" and repo_id in shared_dataset_repos:
-            logger.info(
-                "Skipping HF dataset %s — still shared with workgroup",
-                repo_id,
-            )
-            continue
+        # Counted BEFORE the call: a repo that was already gone
+        # (RepositoryNotFoundError) and a repo that 403s were both genuinely
+        # asked about, which is exactly what `attempted` claims.
+        attempted += 1
         try:
             api.delete_repo(repo_id=repo_id, repo_type=repo_type, missing_ok=True)
             logger.info("Deleted HF %s repo %s", repo_type, repo_id)
@@ -809,22 +862,58 @@ def _delete_student_hf_artifacts(student_id: str) -> list[dict]:
                 "reason": str(e)[:300],
             })
 
-    return failures
+    return failures, attempted
 
 
 @router.delete("/students/{student_id}")
 async def delete_student(student_id: str, teacher=Depends(get_current_teacher)):
     _assert_student_owned(teacher["id"], student_id)
-    # Erase HF datasets/models BEFORE the auth user is deleted — once
-    # the student row is gone we'd have to keep a separate record of
-    # what to clean up, which becomes a GDPR liability of its own.
-    hf_failures = _delete_student_hf_artifacts(student_id)
+
+    # ORDER MATTERS HERE, and until 2026-08-31 it was wrong in a way that made
+    # a lawful Art. 17 request destructive AND unfinishable:
+    #
+    #   * HF erasure ran FIRST and `auth.admin.delete_user` second. Migration
+    #     038 exists because `trainings.user_id` had no ON DELETE clause, so
+    #     for any student who had ever started ONE training the delete raised
+    #     23503 and this handler answered 500 — AFTER the student's HuggingFace
+    #     repos were already gone. The teacher was told only that the account
+    #     could not be deleted, and no retry could ever succeed.
+    #   * A registry outage deleted the account anyway. `public.users` cascades,
+    #     the `datasets` rows go with it, and the retry then hits
+    #     `_assert_student_owned` → 404. The request could never be completed.
+    #
+    # So: enumerate (read-only) → refuse retryably if we cannot see straight →
+    # delete the account (if this fails, nothing has been erased) → erase HF.
+    # Enumerating first is safe: `_enumerate_student_hf_artifacts` reads
+    # `trainings` and `datasets`, both of which the account delete cascades
+    # away, and it takes its HF token from the environment, not from a row.
+    candidates, registry_readable = _enumerate_student_hf_artifacts(student_id)
+
+    if not registry_readable:
+        # 503, not 500: this is transient and the student is STILL THERE, so
+        # the teacher can simply try again. Nothing has been deleted.
+        logger.error(
+            "Refusing to delete student %s: dataset registry unreadable, so "
+            "the workgroup-shared skip list is unknown", student_id,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Das Datensatz-Register ist zurzeit nicht erreichbar. Es wurde "
+                "nichts gelöscht — bitte in einigen Minuten erneut versuchen."
+            ),
+        )
+
     supabase = get_supabase()
     try:
         supabase.auth.admin.delete_user(student_id)
     except Exception as e:
         logger.error("delete_user failed: %s", e)
         raise HTTPException(status_code=500, detail="Konto konnte nicht gelöscht werden")
+
+    hf_failures, hf_attempted = _delete_student_hf_artifacts(
+        student_id, (candidates, registry_readable)
+    )
 
     # `ok` refers to the ACCOUNT deletion, which did succeed. HF erasure is
     # best-effort and must not block it — but it must also not be reported as
@@ -850,6 +939,32 @@ async def delete_student(student_id: str, teacher=Depends(get_current_teacher)):
                 "HuggingFace-Konto der Schülerin/des Schülers manuell löschen."
             ),
         }
+
+    if hf_attempted == 0:
+        # Nothing failed — but nothing was tried either, because this student
+        # had no registered HuggingFace dataset we are allowed to delete. That
+        # is NOT the same as "erasure complete", and saying so would repeat the
+        # exact overstatement this endpoint was fixed to stop making: recordings
+        # pushed under a name that never reached the `datasets` registry are
+        # invisible here and always were.
+        logger.info(
+            "Student %s deleted; no HF repos were enumerable, so HuggingFace "
+            "was never contacted", student_id,
+        )
+        return {
+            "ok": True,
+            "hf_erasure_complete": False,
+            "hf_failures": [],
+            "detail": (
+                "Das Konto wurde gelöscht. Für diese Schülerin/diesen Schüler "
+                "waren keine HuggingFace-Datensätze registriert, die hier "
+                "gelöscht werden können — es wurde deshalb nicht bei "
+                "HuggingFace nachgefragt und nicht geprüft, ob dort noch Daten "
+                "liegen. Bitte im HuggingFace-Konto der Schülerin/des Schülers "
+                "nachsehen."
+            ),
+        }
+
     return {"ok": True, "hf_erasure_complete": True}
 
 

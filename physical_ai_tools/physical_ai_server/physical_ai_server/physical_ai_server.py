@@ -2037,10 +2037,22 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 response.message = str(e)
                 return response
 
-            # Check if config file exists
+            # Check if config file exists.
+            #
+            # The message is a CONSTANT. `config_path` is the confined,
+            # ABSOLUTE path built from the caller's own `train_config_path`,
+            # and this branch is reached for a path that does NOT exist — so
+            # echoing it back both leaks the container's model root and turns
+            # the not-found branch into an existence oracle over everything
+            # under it. The refusal branch above was already constant-message
+            # (it forwards dataset_paths' own German text); this one was the
+            # remaining echo.
             if not config_path.exists():
                 response.success = False
-                response.message = f'Model config file not found: {config_path}'
+                response.message = (
+                    'Die Trainingskonfiguration wurde nicht gefunden. Bitte '
+                    'das Modell erneut auswählen.'
+                )
                 return response
 
             # Load and parse configuration
@@ -2079,8 +2091,17 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 training_info.save_freq = config_data.get('save_freq', 1000)
 
                 response.success = True
-                response.message = \
-                    f'Training configuration loaded successfully from {train_config_path}'
+                # `request.train_config_path`, not a bare `train_config_path`:
+                # the bare name is NEVER bound in this function (only
+                # `request.train_config_path` is, at the confine above), so
+                # this line raised NameError immediately after setting
+                # success=True. The outer handler at the bottom swallowed it
+                # and flipped the response to success=False — meaning this
+                # service could never report success at all. Invisible only
+                # because it has no UI call site.
+                response.message = (
+                    'Training configuration loaded successfully from '
+                    f'{request.train_config_path}')
 
             except json.JSONDecodeError as e:
                 response.success = False
@@ -2286,13 +2307,55 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             repo_type = request.repo_type
             author = request.author
 
+            # REPOSITORY DELETION IS REFUSED AT THE WIRE, unconditionally and
+            # first. `repo_id` is read verbatim off the unauthenticated
+            # rosbridge and nothing on any mode validates it, so this reached
+            # `DataManager.delete_huggingface_repo` -> `HfApi().delete_repo()`
+            # for ANY repository the rig's token can touch. A wrong delete is
+            # irreversible.
+            #
+            # Refusing outright (rather than building a namespace-ownership
+            # check) costs nothing: `ControlHfServer` mode='delete' has ZERO
+            # callers anywhere in the repo — the only `controlHfServer` call
+            # sites are DatasetHuggingfaceSection (upload/download/cancel),
+            # MyModels (download) and PolicyDownloadModal (download/cancel).
+            # `hf_api_worker`'s delete branch is left in place deliberately;
+            # it is simply unreachable from here now.
+            #
+            # NOT the same 'delete' as `edit_worker.MODE_DELETE`, which is
+            # EPISODE deletion in the Daten tab and a live student feature.
+            # This gate is scoped to ControlHfServer's own `mode` field only.
+            #
+            # Placed BEFORE the cancel-in-progress check so the refusal is
+            # unconditional: no state of the worker may turn it into a
+            # dispatch, and the student always gets the same German sentence.
+            if mode == 'delete':
+                self.get_logger().error(
+                    'ControlHfServer REFUSED: repository deletion is not '
+                    'reachable from the app')
+                response.success = False
+                response.message = (
+                    'Das Löschen von HuggingFace-Repositories ist in der App '
+                    'nicht verfügbar. Bitte im HuggingFace-Konto im Browser '
+                    'löschen.'
+                )
+                return response
+
             if self.hf_cancel_on_progress:
                 response.success = False
                 response.message = 'HF API Worker is currently canceling'
                 return response
 
             if mode == 'cancel':
-                # Immediate cleanup - force stop the worker
+                # Immediate cleanup - force stop the worker.
+                #
+                # `return response` used to sit INSIDE the `finally`, which
+                # swallows any exception raised while unwinding (including one
+                # raised by the except handler itself) and made the response
+                # whatever the defaults happened to be. The finally now resets
+                # the flag ONLY; the return is after the try/finally, and a
+                # cancel that raises reports a German failure instead of a
+                # silent empty success.
                 try:
                     self.hf_cancel_on_progress = True
                     self._cleanup_hf_api_worker_with_threading()
@@ -2300,9 +2363,13 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                     response.message = 'Cancellation started.'
                 except Exception as e:
                     self.get_logger().error(f'Error during cancel: {e}')
+                    response.success = False
+                    response.message = (
+                        'Abbrechen fehlgeschlagen. Bitte erneut versuchen.'
+                    )
                 finally:
                     self.hf_cancel_on_progress = False
-                    return response
+                return response
 
             # Restart HF API Worker if it does not exist or is not running
             if self.hf_api_worker is None or not self.hf_api_worker.is_alive():

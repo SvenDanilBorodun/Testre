@@ -166,16 +166,20 @@ export const IGNORED_STORAGE_KEYS = Object.freeze({
     + 'synchronous localStorage loop — structurally cannot clear it. It is '
     + 'student work, but it is already per-student: components/Workshop/'
     + 'useAutosave namespaces EVERY bucket, with `:<supabase user id>` when '
-    + 'signed in and `:<browser-session id>` when not, so one student never '
-    + 'reads another’s, and deleting a student’s crash-recovery cache on '
+    + 'signed in and `:<browser-session id>` when not — the latter narrowed by '
+    + 'the student login gate (utils/authGate) to the „Ohne Anmeldung '
+    + 'fortfahren" offline escape alone, but still reachable — so one student '
+    + 'never reads another’s, and deleting a student’s crash-recovery cache on '
     + 'sign-out would destroy work to prevent a disclosure the namespacing '
     + 'already prevents. The bare name itself is written by nothing any more; '
     + 'useAutosave deletes a pre-namespacing leftover once on mount.',
   edubotics_workshop_autosave_session:
     'sessionStorage, owned by components/Workshop/useAutosave::'
     + 'autosaveSessionScope. It is the ANONYMOUS half of the identity that '
-    + '`edubotics_userId` carries when a student IS signed in, so by the '
-    + 'operative rule it is student-scoped — but it cannot go in '
+    + '`edubotics_userId` carries when a student IS signed in — since the '
+    + 'student login gate reachable only via the „Ohne Anmeldung fortfahren" '
+    + 'offline escape, which is rarer but not gone, so this entry STAYS — so '
+    + 'by the operative rule it is student-scoped, but it cannot go in '
     + 'STUDENT_SCOPED_KEYS, because clearStudentScopedStorage is a '
     + 'localStorage loop and would silently no-op on it while the test that '
     + 'seeds keys into localStorage passed. Same reason '
@@ -243,6 +247,12 @@ export function clearSupabaseSessionKeys() {
       // is set. We pass no options today so it is not written — but this sweep
       // exists precisely for the path where `_removeSession()` was SKIPPED, which
       // is the path that would leave it behind, and matching it is free.
+      //
+      // Because it is unwritten today, no ordinary fixture exercises it: deleting
+      // the `-user` alternative left the whole React suite green (measured
+      // 2026-08-31). It is therefore fenced BY NAME in
+      // `__tests__/sessionScope.test.js` — if you remove it here, that test is
+      // the one that goes red, and it is not stale.
       if (typeof key === 'string' && /^sb-.+-auth-token(-code-verifier|-user)?$/.test(key)) {
         names.push(key);
       }

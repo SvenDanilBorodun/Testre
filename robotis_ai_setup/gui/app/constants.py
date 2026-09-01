@@ -174,22 +174,44 @@ def _resolve_phone_cert_dir() -> str:
 PHONE_CERT_DIR = _resolve_phone_cert_dir()
 
 # --- Embedded WebView2 browser profile (student handover) ---
-# The leaf name is referenced by the wipe guard in webview_window.py, which
-# REFUSES to delete a directory not ending in it. Keep them together: the wipe
-# is an rmtree, and the sibling directory it must never reach is
-# %LOCALAPPDATA%\EduBotics itself, which holds .env (the HuggingFace token and
-# the arm ports) and phone-cert/.
+# The leaf of the directory pywebview is handed as `storage_path`. Its ONLY
+# job is to be an explicit, NON-ROAMING location: without it pywebview falls
+# back to %APPDATA%\pywebview, and %APPDATA% ROAMS — under roaming profiles /
+# FSLogix / AppData redirection that carried one student's live Supabase
+# session to every PC in the building.
+#
+# THERE IS NO WIPE. This comment used to describe an rmtree guard ("REFUSES to
+# delete a directory not ending in it"); the rmtree was removed by ae9a3aa and
+# replaced by the SPA-side `?fresh=` boot scrub. There is no `rmtree` anywhere
+# in gui/ any more — the one surviving `import shutil`, in usbipd_resolver.py,
+# is `shutil.which`. Do not re-add a delete on the strength of this constant:
+# the WebView2 profile holds localStorage AND IndexedDB, so deleting it
+# destroys the Blockly crash-recovery autosave and every MACHINE-scoped key
+# (`edubotics_robotType`, the dock keys, …), and it would fire for a student
+# who merely reopened the window mid-lesson.
+# `test_webview_handover.py::TheProfileIsNeverDeleted` forbids exactly that.
+#
+# It is pinned to webview_window.py by AST fences in the same file
+# (`TheProfileIsPersistentExplicitAndNonRoaming` requires `webview.start` to
+# pass `storage_path=WEBVIEW_PROFILE_DIR` as the shared NAME, never a literal),
+# so renaming either side without the other fails the suite.
 WEBVIEW_PROFILE_LEAF = "webview-profile"
 
 
 def _resolve_webview_profile_dir() -> str:
     """Directory WebView2 keeps the student's browser profile in.
 
-    Explicit so that (a) it is a DEDICATED leaf we may safely wipe between
-    students, and (b) it lives under %LOCALAPPDATA% rather than pywebview's
-    default %APPDATA%\\pywebview — which ROAMS, so on a school PC with roaming
-    profiles / FSLogix / AppData redirection one student's live Supabase
-    session followed them to every other PC in the building.
+    Explicit so that (a) it is a DEDICATED leaf, kept out of
+    %LOCALAPPDATA%\\EduBotics itself (which holds .env with the HuggingFace
+    token and the arm ports, plus phone-cert/), and (b) it lives under
+    %LOCALAPPDATA% rather than pywebview's default %APPDATA%\\pywebview —
+    which ROAMS, so on a school PC with roaming profiles / FSLogix / AppData
+    redirection one student's live Supabase session followed them to every
+    other PC in the building.
+
+    NOT a directory anything deletes. Handover cleanliness is the SPA's
+    `bootScrub`, keyed on the `?fresh=<nonce>` the GUI stamps on a freshly
+    spawned window; see WEBVIEW_PROFILE_LEAF above.
 
     Same shape as PHONE_CERT_DIR / ENV_FILE: an env override, else
     %LOCALAPPDATA%\\EduBotics\\<leaf>.

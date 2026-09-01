@@ -20,8 +20,10 @@
 """File browser utility class for handling file system operations.
 
 CONFINED to the dataset root since 2026-08-06. This class is reachable from
-``communicator.browse_file_callback`` over the UNAUTHENTICATED rosbridge, from
-the Daten tab, which has no auth gate — and it had no root confinement at all:
+``communicator.browse_file_callback`` over the UNAUTHENTICATED rosbridge — the
+SPA's student login gate (physical_ai_manager/src/utils/authGate.js) now asks
+for a session before the Daten tab renders, but that gate is in the BROWSER and
+the wire has none — and it had no root confinement at all:
 ``handle_go_parent_action`` walked to ``/`` one call at a time and
 ``handle_browse_action`` accepted any absolute path, so the whole container
 filesystem was enumerable (it even un-hid ``.cache`` specifically, which is

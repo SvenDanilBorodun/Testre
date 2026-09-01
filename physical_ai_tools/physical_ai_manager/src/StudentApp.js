@@ -35,6 +35,7 @@ import TrainingPage from './pages/TrainingPage';
 import EditDatasetPage from './pages/EditDatasetPage';
 import WorkshopPage from './pages/WorkshopPage';
 import SystemPage from './pages/SystemPage';
+import LoginForm from './components/LoginForm';
 import CollisionModal from './components/CollisionModal';
 import PiUpdateGate from './components/PiUpdateGate';
 import StartupGate from './components/StartupGate';
@@ -63,6 +64,7 @@ import {
   selectCalibrationHasUnsolvedCaptures,
 } from './features/workshop/workshopSlice';
 import { isCapabilityVisible, robotGateDecision } from './utils/navGating';
+import { studentAuthGateDecision } from './utils/authGate';
 import { usePiMode } from './utils/piMode';
 
 function StudentApp() {
@@ -73,6 +75,14 @@ function StudentApp() {
   const session = useSelector((state) => state.auth.session);
   const role = useSelector((state) => state.auth.role);
   const profileLoaded = useSelector((state) => state.auth.profileLoaded);
+  // The login gate (utils/authGate) keys on these two and on NOTHING else —
+  // deliberately not on profileLoaded/profileError/role. `useMeProfile` fetches
+  // GET /me from the Railway cloud API, a SECOND independent network
+  // dependency; a rig with a live Supabase session but a 5xx from Railway must
+  // still work. The wrong-role case is already handled by blockRoleMismatch
+  // below, which only fires once the profile actually loaded.
+  const isAuthenticated = useSelector((state) => state.auth.isAuthenticated);
+  const isAuthLoading = useSelector((state) => state.auth.isLoading);
   // True iff the student currently holds the lock on the classroom Jetson
   // (state.jetson.status === 'connected'). When set, Aufnahme + Roboter
   // Studio are filtered out of the sidebar (see navItems below) because
@@ -111,13 +121,18 @@ function StudentApp() {
   // a single re-render. Now we only seed the local host when it isn't
   // yet set and the student isn't currently routing to a Jetson.
   //
-  // Gated on piModeResolved: setRosHost derives the rosbridge URL
-  // Pi-aware (same-origin /rosbridge proxy vs direct :9090, rosSlice),
-  // so seeding before the /pi-mode.json marker resolves would connect a
-  // Pi browser to the direct port once, then tear down and reconnect
-  // when the marker flips — the LeaderToggle first-probe rule, applied
-  // to the rosbridge seed. The marker resolves in ms (same-origin
-  // static response).
+  // Gated on piModeResolved. This gate was added when setRosHost derived
+  // the rosbridge URL Pi-aware (same-origin /rosbridge proxy vs direct
+  // :9090): seeding before the /pi-mode.json marker resolved would connect
+  // a Pi browser to the direct port once, then tear down and reconnect when
+  // the marker flipped — the LeaderToggle first-probe rule, applied to the
+  // rosbridge seed. That reason EXPIRED with the 2026-08-06 rosbridge move:
+  // `localRosbridgeUrl` is same-origin on every local rig now and rosSlice
+  // does not pass it `piMode` at all, so the marker can no longer change the
+  // URL that is seeded. The gate is KEPT deliberately: the marker resolves in
+  // ms (same-origin static response) so it costs nothing, and dropping it
+  // would move the seed one render earlier — a behaviour change, not a
+  // comment fix.
   const defaultRosHost = window.location.hostname;
   useEffect(() => {
     if (cloudOnly) return;
@@ -194,18 +209,38 @@ function StudentApp() {
   }, [taskStatus.running]);
 
   useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      dispatch(setSession(session));
+    let subscription = null;
+    try {
+      supabase.auth
+        .getSession()
+        // setSession stays in .then, NOT in .finally — it must not run on the
+        // error path, where there is no session object to speak of.
+        .then(({ data: { session } }) => dispatch(setSession(session)))
+        .catch((err) => {
+          // eslint-disable-next-line no-console
+          console.error('supabase.getSession failed', err);
+        })
+        // The gate below renders „Laden…" while isLoading is true (authSlice
+        // starts it true), so this MUST fire on every path. A spinner that can
+        // never clear is a worse defect than the one the gate fixes.
+        .finally(() => dispatch(setIsLoading(false)));
+
+      subscription = supabase.auth.onAuthStateChange((_event, session) => {
+        dispatch(setSession(session));
+      }).data.subscription;
+    } catch (err) {
+      // An image built with no Supabase build args gets lib/supabaseClient's
+      // stub proxy, whose every property THROWS synchronously. Without this the
+      // effect's throw is uncaught (there is no ErrorBoundary) and the app
+      // white-screens instead of showing the gate + BuildConfigBanner.
+      // eslint-disable-next-line no-console
+      console.error('supabase auth bootstrap failed', err);
       dispatch(setIsLoading(false));
-    });
+    }
 
-    const {
-      data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event, session) => {
-      dispatch(setSession(session));
-    });
-
-    return () => subscription.unsubscribe();
+    return () => {
+      if (subscription) subscription.unsubscribe();
+    };
   }, [dispatch]);
 
   // Robust /me load (retry/backoff + 401/403 sign-out + 404/5xx error state)
@@ -250,6 +285,21 @@ function StudentApp() {
   //     server-side recorder is running whether or not the browser can see it.
   // Either way the student can DECLINE the browser's "leave site?" prompt.
   const [handoverStarted, setHandoverStarted] = React.useState(false);
+
+  // „Ohne Anmeldung fortfahren" — set only after a login attempt PROVED the
+  // auth service unreachable (LoginForm gates the button on
+  // isCloudUnreachableAuthError, so a wrong password never reveals it). Plain
+  // React state on purpose: a persisted latch would be a new storage key, and
+  // sessionScope.test.js's coverage scan then demands an IGNORED_STORAGE_KEYS
+  // entry with a written reason — more machinery than the residual is worth.
+  // The residual: a reload re-shows the gate for an offline student. Offline,
+  // /version.json is served by the local nginx out of the already-running image
+  // and cannot advertise a new buildId, so the useVersionCheck reload that
+  // would trigger it essentially cannot occur; the other two reload paths are
+  // student-initiated; and the cost is one more login attempt, not lost work
+  // (the Roboter-Studio autosave lives in IndexedDB, which nothing scrubs).
+  const [offlineOverride, setOfflineOverride] = React.useState(false);
+
   const handleLogout = () => {
     setHandoverStarted(true);
     dispatch(signOutStudent());
@@ -398,6 +448,14 @@ function StudentApp() {
     : 'Abmelden';
 
   const blockRoleMismatch = profileLoaded && role && role !== 'student';
+
+  const authGate = studentAuthGateDecision({
+    isAuthLoading,
+    isAuthenticated,
+    offlineOverride,
+    piMode,
+    page,
+  });
 
   return (
     <StartupGate>
@@ -581,8 +639,31 @@ function StudentApp() {
           </div>
         </header>
 
+        {/* The login gate lives INSIDE <main>, not as a top-level early return.
+            Three reasons, each sufficient on its own:
+              * CollisionModal (the teleop force/collision e-stop) and
+                PiUpdateGate are siblings of this layout div, i.e. OUTSIDE
+                <main>. The ROS node keeps an in-flight task across a window
+                handover, so a recording CAN be running when a fresh window
+                opens — a full-screen return would hide the e-stop behind a
+                login form;
+              * the nav rail stays on screen, which is what carries an Orange Pi
+                student to the System tab the gate deliberately never covers;
+              * it disturbs no existing fence — every structural fact
+                sessionScope.test.js pins by exact count lives in the rail or
+                the mobile header, both outside <main>. */}
         <main className="flex-1 flex flex-col min-h-0 min-w-0 relative overflow-hidden">
-          {blockRoleMismatch ? (
+          {authGate === 'loading' ? (
+            <div className="flex items-center justify-center h-full">
+              <div className="text-[var(--ink-3)] text-lg">Laden…</div>
+            </div>
+          ) : authGate === 'login' ? (
+            <LoginForm
+              subtitle="Anmelden, um mit deinem Roboter zu arbeiten"
+              footerHint="Noch kein Konto? Bitte frag deine Lehrkraft."
+              onOfflineContinue={() => setOfflineOverride(true)}
+            />
+          ) : blockRoleMismatch ? (
             <div className="flex flex-col items-center justify-center h-full p-10 text-center">
               <h2 className="text-xl font-bold text-[var(--ink)] mb-2">Falsches Konto</h2>
               <p className="text-[var(--ink-3)] max-w-md">

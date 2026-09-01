@@ -449,10 +449,11 @@ export function useRosTopicSubscription() {
         // until `/me` resolves and is cleared by `signedOut`, and a null never
         // equals a non-empty id, so an unknown identity adopts nothing.
         //
-        // Accepted cost: a student who never signs in at all (recording works
-        // without a cloud login) no longer inherits the id of a task started
-        // elsewhere — they keep their own persisted Benutzer-ID in a field that
-        // is read-only while a task runs anyway. Nothing else reads
+        // Accepted cost: a student on the „Ohne Anmeldung fortfahren" offline
+        // escape — since the student login gate (utils/authGate) the only way
+        // to reach these pages signed out — no longer inherits the id of a task
+        // started elsewhere; they keep their own persisted Benutzer-ID in a
+        // field that is read-only while a task runs anyway. Nothing else reads
         // `taskStatus.userId`, so blanking that half is free.
         const myHfUsername = store.getState().auth?.hfUsername || '';
         const robotUserId = msg.task_info?.user_id || '';
@@ -554,7 +555,10 @@ export function useRosTopicSubscription() {
             resetTime: msg.task_info.reset_time_s || 0,
             numEpisodes: msg.task_info.num_episodes || 0,
             pushToHub: msg.task_info.push_to_hub || false,
-            privateMode: msg.task_info.private_mode || false,
+            // privateMode intentionally NOT set here — see the robotNamesMe
+            // gate below. Adopting it unconditionally let a task left behind
+            // by the PREVIOUS student silently un-tick the next student's
+            // private-by-default box.
             useOptimizedSave: msg.task_info.use_optimized_save_mode || false,
             recordRosBag2: msg.task_info.record_rosbag2 || false,
           };
@@ -571,6 +575,23 @@ export function useRosTopicSubscription() {
           // And only when it NAMES the signed-in student — see robotNamesMe.
           if (robotNamesMe) {
             infoUpdate.userId = robotUserId;
+            // `private_mode` is gated on the SAME identity comparison, and for
+            // a stronger reason than user_id: the visibility of a recording is
+            // a data-protection decision about OTHER people (classmates' faces
+            // and voices), taken once, irreversibly, at upload time.
+            //
+            // The ROS node keeps `task_info` for the life of a task, so it
+            // survives a handover exactly like user_id does (see the block
+            // above). With this ungated, one tick carrying the previous
+            // student's finished PUBLIC task overwrote the new student's
+            // private-by-default value — in a form field that is read-only
+            // while a task runs, so they could not even see it change before
+            // pressing record.
+            //
+            // `!== false`, not `|| false`: an absent or garbled flag keeps the
+            // private default instead of failing open to public. That matches
+            // TaskInfo.msg's own `bool private_mode true`.
+            infoUpdate.privateMode = msg.task_info.private_mode !== false;
           }
 
           dispatch(setTaskInfo(infoUpdate));
@@ -734,8 +755,14 @@ export function useRosTopicSubscription() {
   const registerUploadedDataset = useCallback((repoId) => {
     const accessToken = store.getState().auth.session?.access_token;
     if (!accessToken) {
-      // No cloud session (e.g. recording before login). The student can
-      // sync later from the Training tab; nothing to warn about here.
+      // No cloud session. Since the student login gate (utils/authGate) this
+      // branch is reachable ONLY through the „Ohne Anmeldung fortfahren"
+      // offline escape — which is also the behaviour change worth stating: with
+      // a login enforced, EVERY ordinary recording now auto-registers in the
+      // cloud dataset registry, where before this skip was the common case.
+      // (That registry is what makes GDPR erasure enumerable, so the change is
+      // a good one.) The student can still sync later from the Training tab;
+      // nothing to warn about here.
       console.warn('[datasets] skip auto-register: not signed in');
       return;
     }

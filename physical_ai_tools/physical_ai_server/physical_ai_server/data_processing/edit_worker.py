@@ -88,10 +88,12 @@ def run_edit(
     PATH CONFINEMENT (2026-08-06). Every path below arrives from the wire:
     ``communicator._build_edit_payload`` copies ``delete_dataset_path``,
     ``merge_dataset_list`` and ``output_path`` verbatim out of the ROS request,
-    the Daten tab has no auth gate, and rosbridge is unauthenticated — so an
-    unconfined delete let any student destroy any other's episodes. Confining
-    HERE rather than in the callback is deliberate: this function is the single
-    choke point shared by the subprocess path AND the
+    and rosbridge is unauthenticated — so an unconfined delete let any student
+    destroy any other's episodes. (The SPA's student login gate,
+    physical_ai_manager/src/utils/authGate.js, now gates the Daten tab in the
+    BROWSER; it changes nothing here, because the wire has no gate at all.)
+    Confining HERE rather than in the callback is deliberate: this function is
+    the single choke point shared by the subprocess path AND the
     ``EDUBOTICS_DATASET_EDIT_SUBPROCESS=0`` in-process rollback, so neither can
     be left behind.
 

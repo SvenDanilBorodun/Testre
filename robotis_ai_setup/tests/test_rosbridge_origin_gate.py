@@ -29,7 +29,10 @@ import threading
 import unittest
 
 from gui.app import health_checker
-from gui.app.roboter_studio_control import _ALLOWED_ORIGIN_HOSTS
+from gui.app.roboter_studio_control import (
+    _ALLOWED_ORIGIN_HOSTS,
+    _ALLOWED_ORIGIN_PORTS,
+)
 
 _REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 _STUDENT_COMPOSE = _REPO_ROOT / "robotis_ai_setup/docker/docker-compose.yml"
@@ -113,6 +116,88 @@ class StudentComposeMustNotPublishTheRobotTransports(unittest.TestCase):
             any("80:80" in entry for entry in _published_ports(mgr)),
             "the manager must still publish :80 — it now carries both transports",
         )
+
+
+class NothingStillDocumentsTheOpiPortsAsLanOpenOrARollback(unittest.TestCase):
+    """A prose lockstep against the class below.
+
+    `OpiDebugPublishesAreLoopbackPinned` fences the COMPOSE. Nothing fenced
+    what the rest of the tree SAYS about it, and four sites went on describing
+    the pre-4d1b046 world for weeks after the pin landed:
+
+      * `pi_agent/constants.py` — `PORT_ROSBRIDGE = 9090  # rosbridge
+        (unauthenticated — LAN-open by decision)`, the exact opposite of the
+        truth and of CLAUDE.md;
+      * `nginx.opi.conf.template` — "the direct host ports stay published …
+        as a debug/rollback path only";
+      * `src/utils/piMode.js` — "KEEPS its :9090/:8080 publishes as a
+        debug/rollback path";
+      * `src/features/ros/rosSlice.js` — "everywhere else the classic direct
+        ws://<host>:9090", which stopped being true when the student compose
+        dropped its publishes and `localRosbridgeUrl` went same-origin on every
+        platform.
+
+    Two of those are the reasoning a future author would use to justify
+    un-pinning the publish or re-adding the direct URL, so they are not
+    cosmetic: this is the doc half of a security decision. The ROLLBACK half is
+    gone specifically — an operator who reads "rollback path" and unpins
+    :9090 restores the bypass, because rosbridge_server 2.7.0's `check_origin`
+    is `return True`.
+
+    Scanned as PHRASES, not as a ban on the digits: the files legitimately name
+    :9090 many times (the ssh-tunnel instructions, the container-internal
+    proxy_pass, the history of the fix).
+    """
+
+    _SITES = (
+        'robotis_ai_setup/pi_agent/constants.py',
+        'physical_ai_tools/physical_ai_manager/nginx.opi.conf.template',
+        'physical_ai_tools/physical_ai_manager/src/utils/piMode.js',
+        'physical_ai_tools/physical_ai_manager/src/features/ros/rosSlice.js',
+        'physical_ai_tools/physical_ai_manager/src/StudentApp.js',
+    )
+
+    # Each phrase, and what believing it would cost.
+    _RETIRED_CLAIMS = (
+        ('LAN-open by decision',
+         'the opi debug publishes are pinned to 127.0.0.1 — calling them '
+         'LAN-open invites un-pinning them, which restores the rosbridge '
+         'bypass'),
+        ('debug/rollback path',
+         'the un-tunnelled LAN ROLLBACK half was deleted in 4d1b046; only the '
+         '`ssh -L` DEBUG half remains'),
+        ('everywhere else the classic direct',
+         'there is no direct ws://<host>:9090 branch left — localRosbridgeUrl '
+         'is same-origin on every local rig'),
+    )
+
+    def setUp(self):
+        self.sources = {}
+        for rel in self._SITES:
+            path = _REPO_ROOT / rel
+            self.assertTrue(path.is_file(), f'{rel} moved — this scan is stale')
+            self.sources[rel] = path.read_text(encoding='utf-8')
+
+    def test_no_site_still_makes_a_retired_claim(self):
+        for rel, text in self.sources.items():
+            for phrase, why in self._RETIRED_CLAIMS:
+                with self.subTest(site=rel, phrase=phrase):
+                    self.assertNotIn(phrase, text, f'{rel}: {why}')
+
+    def test_the_premise_of_this_scan_is_still_true(self):
+        """Not vacuous: the compose really is loopback-pinned.
+
+        If someone un-pins it, the prose above becomes correct again and this
+        whole class would be asserting the wrong thing. Fail loudly instead.
+        """
+        block = _service_block(_OPI_COMPOSE, 'physical_ai_server')
+        published = _published_ports(block)
+        debug = [e for e in published if '9090' in e or '8080' in e]
+        self.assertTrue(debug, 'the opi debug publishes are gone entirely — '
+                               'the comments this scan polices are now stale '
+                               'in the other direction')
+        for entry in debug:
+            self.assertTrue(entry.startswith('127.0.0.1:'), entry)
 
 
 class OpiDebugPublishesAreLoopbackPinned(unittest.TestCase):
@@ -248,6 +333,63 @@ class NginxCarriesTheOriginGate(unittest.TestCase):
             unescaped, set(_ALLOWED_ORIGIN_HOSTS),
             "nginx origin allowlist drifted from the GUI bridge's policy",
         )
+
+    def test_the_PORT_group_is_narrowed_and_the_lockstep_above_cannot_see_it(self):
+        """The half `…matches_the_gui_bridges_reviewed_policy` structurally misses.
+
+        That test's capture is `\^https\?://([A-Za-z0-9\\.]+)\(` — the `\(`
+        terminator puts the PORT group outside the capture BY CONSTRUCTION, so
+        it compares host names and nothing else. Measured: widening `(:80)?`
+        back to `(:[0-9]+)?` — reverting the whole content of 82144d0 — left
+        the full 1085-test suite green.
+
+        `(:[0-9]+)?` accepted EVERY localhost port, so any other HTML-serving
+        surface on the machine became a pivot into the origin this gate trusts
+        to drive the arm; the phone receiver on 0.0.0.0:8444 is the nearest
+        candidate and was measured returning 200 before the narrowing.
+
+        `_ALLOWED_ORIGIN_PORTS` is the GUI bridge's half of the same policy, so
+        this is a twin lockstep like the one above, on the axis it cannot see.
+        """
+        map_block = self.text.split("map $http_origin $edubotics_origin_ok")[1]
+        map_block = map_block.split("}")[0]
+
+        # Zero-find floor: without it a renamed map variable would make every
+        # assertion below pass having read nothing.
+        alternatives = re.findall(r"'~\*\^https\?://[^']*'", map_block)
+        self.assertEqual(
+            len(alternatives), len(_ALLOWED_ORIGIN_HOSTS),
+            f"expected one regex alternative per allowed host, read "
+            f"{alternatives!r} out of:\n{map_block}")
+
+        expected_port_group = "(:80)?"
+        for alt in alternatives:
+            # Everything between the host literal and the closing `$'`.
+            m = re.search(r"\((.*)\)\?\$'$", alt)
+            self.assertIsNotNone(
+                m, f"origin alternative has no optional trailing group: {alt}")
+            self.assertEqual(
+                f"({m.group(1)})?", expected_port_group,
+                f"the port group in {alt} is not {expected_port_group} — the "
+                f"gate trusts a port the app is not served on")
+
+        self.assertNotIn(
+            "(:[0-9]+)?", map_block,
+            "the ANY-PORT group is back in the origin map: every localhost "
+            "port on the machine is trusted to drive the arm again")
+
+        # Twin lockstep on the PORT axis. `None` is the elided default port a
+        # browser sends (`Origin: http://localhost`), which the `?` covers; the
+        # spelled-out numbers must be exactly what the regex admits.
+        spelled = {p for p in _ALLOWED_ORIGIN_PORTS if p is not None}
+        self.assertEqual(
+            spelled, {80},
+            "roboter_studio_control._ALLOWED_ORIGIN_PORTS drifted from the "
+            "nginx map's (:80)? group")
+        self.assertIn(
+            None, _ALLOWED_ORIGIN_PORTS,
+            "the `?` in (:80)? makes the port OPTIONAL — a browser elides the "
+            "default port from Origin, so the GUI bridge must accept None too")
 
     def test_video_is_proxied_so_img_streams_still_work(self):
         # EXACT match on /video/stream, not a /video/ prefix — see the next

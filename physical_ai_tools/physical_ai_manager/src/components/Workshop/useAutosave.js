@@ -16,8 +16,10 @@ import { DE } from './blocks/messages_de';
 
 const STORAGE_KEY = 'edubotics:workshop:autosave';
 // Names the BROWSER SESSION, so the un-signed-in autosave bucket is per-session
-// instead of one bucket shared by everyone who ever sat at the PC. See
-// autosaveSessionScope.
+// instead of one bucket shared by everyone who ever sat at the PC. Since the
+// student login gate (utils/authGate) that bucket is reached by ONE path only —
+// the „Ohne Anmeldung fortfahren" offline escape — but it is still reachable,
+// so the fallback stays. See autosaveSessionScope.
 const SESSION_SCOPE_KEY = 'edubotics_workshop_autosave_session';
 const SAVE_INTERVAL_MS = 15_000;
 const DEBOUNCE_MS = 750;
@@ -70,11 +72,17 @@ function newScopeId() {
  *
  * WHY. A German school runs EduBotics on Windows student PCs under ONE shared
  * Windows account: one WebView2 profile, one IndexedDB, many students. The
- * student app is fully usable without a cloud login — only Training and Inferenz
- * gate on one — so `scopeKey` (the Supabase user id) is frequently null, and the
- * old `scopeKey ? … : STORAGE_KEY` fallback put EVERY such session into the SAME
- * bucket. The next student's Roboter Studio then restored the previous one's
- * workspace on mount.
+ * student app used to be fully usable without a cloud login — only Training and
+ * Inferenz gated on one — so `scopeKey` (the Supabase user id) was frequently
+ * null, and the old `scopeKey ? … : STORAGE_KEY` fallback put EVERY such session
+ * into the SAME bucket. The next student's Roboter Studio then restored the
+ * previous one's workspace on mount.
+ *
+ * The student login gate (utils/authGate) NARROWED that population without
+ * removing it: `scopeKey` is null only on the „Ohne Anmeldung fortfahren"
+ * offline escape now, which a student reaches after a login attempt has proven
+ * the auth service unreachable. Rarer, still live — do not delete the
+ * fallback.
  *
  * sessionStorage is the carrier because of what has to survive and what must
  * not. Crash recovery — the entire point of autosave — has to survive a RELOAD,
@@ -136,8 +144,9 @@ export function formatAutosaveAge(ts) {
  *   workflow JSON is the same shape).
  * @param {string|null} options.scopeKey - extra namespace (the Supabase user
  *   id) so two students sharing a browser don't see each other's autosave. When
- *   null — the never-signed-in student, a fully supported path — the bucket is
- *   namespaced by `autosaveSessionScope()` instead, never shared.
+ *   null — since the login gate, only a student on the „Ohne Anmeldung
+ *   fortfahren" offline escape — the bucket is namespaced by
+ *   `autosaveSessionScope()` instead, never shared.
  * @param {(json: object) => void} options.onRestore - called once on
  *   mount with the restored payload (caller can decide to apply it).
  */

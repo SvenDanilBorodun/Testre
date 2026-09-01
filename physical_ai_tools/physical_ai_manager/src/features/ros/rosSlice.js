@@ -29,13 +29,20 @@ const rosSlice = createSlice({
   name: 'ros',
   initialState,
   reducers: {
-    // The URL derivation is Pi-aware: on the Orange Pi rosbridge rides the
-    // same-origin nginx proxy (ws://<host>/rosbridge, port 80 — school
-    // firewalls filter :9090), everywhere else the classic direct
-    // ws://<host>:9090. localRosbridgeUrl reads the piMode module cache;
-    // both dispatch sites (StudentApp's seed effect, gated on
-    // piModeResolved, and useJetsonConnection's swap-back, which runs long
-    // after boot) only fire once the marker has resolved.
+    // The URL is SAME-ORIGIN on every local rig — ws://<host>/rosbridge via
+    // the nginx proxy — and has been since the 2026-08-06 rosbridge move.
+    // There is no longer a non-Pi branch handing out a direct
+    // ws://<host>:9090 URL: `localRosbridgeUrl`'s `piMode` parameter is
+    // vestigial (see utils/piMode.js) and this call does not even pass it.
+    // Two independent reasons converge on the same answer — school networks
+    // filter :9090, and on Windows a page served from :80 talking to :9090 was
+    // a CROSS-ORIGIN connection to an unauthenticated socket that can drive
+    // the arm, with no CORS preflight to stop it.
+    //
+    // Both dispatch sites (StudentApp's seed effect, gated on piModeResolved,
+    // and useJetsonConnection's swap-back, which runs long after boot) still
+    // fire only once the marker has resolved. That gate no longer changes the
+    // URL this reducer derives; it is kept as ordering, not as a selector.
     setRosHost: (state, action) => {
       state.rosHost = action.payload;
       state.rosbridgeUrl = localRosbridgeUrl(action.payload);

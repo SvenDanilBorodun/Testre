@@ -4,14 +4,33 @@ import { useDispatch } from 'react-redux';
 import { supabase } from '../lib/supabaseClient';
 import { setSession, setIsLoading } from '../features/auth/authSlice';
 import { usernameToEmail } from '../constants/appMode';
+import { isCloudUnreachableAuthError } from '../utils/authGate';
 import { Btn, LogoMark } from './EbUI';
 import packageJson from '../../package.json';
 
-export default function LoginForm({ subtitle = 'Anmelden für Cloud-GPU-Training' }) {
+/**
+ * @param {object} props
+ * @param {string} props.subtitle
+ * @param {(() => void)|null} props.onOfflineContinue - when supplied, a login
+ *   attempt that PROVES the auth service unreachable reveals „Ohne Anmeldung
+ *   fortfahren" below the form. Only the student rig's StudentApp gate passes
+ *   it: the teacher web (WebApp) and the Training/Inferenz page gates must
+ *   never grow a bypass, and they get the default null.
+ * @param {string|null} props.footerHint - static prose under the button, e.g.
+ *   who to ask for an account.
+ */
+export default function LoginForm({
+  subtitle = 'Anmelden für Cloud-GPU-Training',
+  onOfflineContinue = null,
+  footerHint = null,
+}) {
   const dispatch = useDispatch();
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
+  // Never reset. Once an attempt has PROVEN the cloud is down, hiding the
+  // escape again on the next attempt would be a trap.
+  const [cloudUnreachable, setCloudUnreachable] = useState(false);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -39,7 +58,14 @@ export default function LoginForm({ subtitle = 'Anmelden für Cloud-GPU-Training
       toast.success('Erfolgreich angemeldet!');
     } catch (error) {
       const msg = error?.message || '';
-      if (msg.toLowerCase().includes('invalid login')) {
+      if (isCloudUnreachableAuthError(error)) {
+        // NEVER echo supabase-js's own message here — it is English and
+        // technical („fetch failed" / „Failed to fetch", MEASURED against an
+        // unreachable host) and to a student it is indistinguishable from a
+        // wrong password.
+        setCloudUnreachable(true);
+        toast.error('Anmeldedienst nicht erreichbar — bitte Internetverbindung prüfen.');
+      } else if (msg.toLowerCase().includes('invalid login')) {
         toast.error('Benutzername oder Passwort falsch');
       } else {
         toast.error(msg || 'Anmeldung fehlgeschlagen');
@@ -111,6 +137,34 @@ export default function LoginForm({ subtitle = 'Anmelden für Cloud-GPU-Training
             >
               {loading ? 'Bitte warten…' : 'Anmelden'}
             </Btn>
+
+            {footerHint && (
+              <p className="mt-3 text-xs text-[var(--ink-3)]">{footerHint}</p>
+            )}
+
+            {onOfflineContinue && cloudUnreachable && (
+              <div className="mt-4 pt-4 border-t border-[var(--line)] flex flex-col gap-2">
+                <p className="text-xs text-[var(--ink-3)]">
+                  Der Anmeldedienst ist nicht erreichbar. Du kannst vorerst ohne
+                  Anmeldung weiterarbeiten — Training und Inferenz bleiben dann
+                  gesperrt.
+                </p>
+                {/* type="button" is LOAD-BEARING. This sits INSIDE the <form>,
+                    where a bare <button> defaults to type="submit": clicking
+                    „Ohne Anmeldung fortfahren" would re-fire the ~10 s login
+                    the student just escaped from, on the one path where the
+                    auth service is known to be unreachable. */}
+                <Btn
+                  variant="secondary"
+                  size="md"
+                  type="button"
+                  className="w-full justify-center"
+                  onClick={onOfflineContinue}
+                >
+                  Ohne Anmeldung fortfahren
+                </Btn>
+              </div>
+            )}
           </form>
 
           <div className="mt-5 pt-4 border-t border-[var(--line)] flex items-center justify-end text-xs text-[var(--ink-3)]">

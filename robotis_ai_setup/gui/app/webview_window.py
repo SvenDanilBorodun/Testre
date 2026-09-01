@@ -65,6 +65,36 @@ def runtime_missing() -> bool:
     return _runtime_missing.is_set()
 
 
+def has_live_window() -> bool:
+    """True while THIS process has a student window (the webview child) up.
+
+    The one public read of `_process`, added so a caller can ASK before it
+    closes. „Arme scannen" ends the student's session and destroys the window
+    unconditionally; the confirmation that guards it must appear only when
+    there is actually a window to lose. At handover — the common case, and the
+    one every fresh student walks — there is none, and a prompt there would be
+    noise to dismiss before the very first scan.
+
+    Callers must not reach into `_process` themselves: it is swapped under
+    `_lock` by `open_student_window` and `destroy_all`, so this takes the lock
+    exactly the way `destroy_all` does rather than reading a global mid-swap.
+
+    PROCESS-LOCAL, the same limit `destroy_all` documents: `_process` is
+    written only by THIS process's `open_student_window`, so a child orphaned
+    by a crashed or Task-Manager-killed GUI reads as absent. That fails in the
+    harmless direction — the answer is False, no dialog, and the scan proceeds
+    exactly as it did before there was a dialog at all.
+
+    A SNAPSHOT, not a lease. The child can exit the instant after this returns
+    True (the student closes the window while the confirmation is up). Nothing
+    is built on top of the answer: `destroy_all` is a no-op on a dead child, so
+    the worst outcome is a dialog the student did not strictly need.
+    """
+    with _lock:
+        proc = _process
+        return proc is not None and proc.poll() is None
+
+
 def _build_launch_cmd(url: str, icon_path: Optional[str]) -> List[str]:
     """Build the command used to spawn the webview subprocess."""
     debug = "1" if os.environ.get("EDUBOTICS_DEBUG") else "0"

@@ -16,9 +16,13 @@
 
 """Root confinement for every client-supplied dataset path (2026-08-06).
 
-WHY THIS EXISTS. The Daten tab has no auth gate (only Training and Inferenz
-do), and it reaches the robot over an unauthenticated rosbridge. Three
-surfaces took a path straight off the wire and used it verbatim:
+WHY THIS EXISTS. Every path below arrives over an UNAUTHENTICATED rosbridge,
+which is the whole of the claim — the SPA's own student login gate
+(physical_ai_manager/src/utils/authGate.js) now asks for a Supabase session
+before the Daten tab renders, but that is a BROWSER-side gate on one client;
+rosbridge itself authenticates nobody and any client that reaches it speaks
+this protocol directly. Three surfaces took a path straight off the wire and
+used it verbatim:
 
   * ``edit_worker.run_edit`` — ``delete_dataset_path`` fed the DESTRUCTIVE
     episode delete, so any student could destroy any other's episodes (and,

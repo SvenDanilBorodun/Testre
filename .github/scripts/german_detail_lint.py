@@ -18,8 +18,12 @@ call keywords (``detail=...``), dict literals (``{"message": ...}``)
 and subscript assignments (``j["message"] = ...``).
 Two violation classes:
 
+  TRANSLITERATION  string uses ae/oe/ue/ss instead of literal ä/ö/ü/ß.
+                   Checked on EVERY string, not only ones that classify as
+                   German: „Lehrer hat noch Klassenzimmer - erst loeschen"
+                   has no umlaut and no GERMAN_WORDS token, so gating this
+                   on the classifier meant it was never checked at all.
   ENGLISH          string has English stopwords and no German marker
-  TRANSLITERATION  German string uses ae/oe/ue/ss instead of literal ä/ö/ü/ß
 
 Why AST instead of grep: the strings span implicit concatenation,
 parenthesized multiline blocks and f-strings; and DB-error MATCHERS like
@@ -77,7 +81,7 @@ ENGLISH_WORDS = re.compile(
     r"|the|this|your|does|doesn't|been|have|must be|too many|try again)\b",
     re.IGNORECASE,
 )
-# Transliteration patterns inside German-classified strings (superset of the
+# Transliteration patterns, checked on EVERY scanned string (superset of the
 # grep list in ci.yml's first lint step, stemmed for inflections).
 # The leading boundary is `\b\w*?`, NOT a bare `\b`. A bare `\b` cannot match
 # inside an inflected form: in `geloescht` the character before `l` is `e`, so
@@ -85,8 +89,11 @@ ENGLISH_WORDS = re.compile(
 # sat in a fully-covered position while this script exited clean (measured
 # 2026-08-08). The same hole applied to every stem here that takes a German
 # participle or verb prefix — `geprueft`, `angezeigt`, `ausgewaehlt` — and
-# `gewaehlt`/`geaendert`/`beschaedigt` are in the list only because someone hit
-# them one at a time. `\w*?` closes the class rather than the instance.
+# `gewaehlt`/`beschaedigt` are in the list only because someone hit them one at
+# a time. `\w*?` closes the class rather than the instance. `geaendert` was one
+# of those instance entries and is now the STEM `aender\w*`, so „Keine
+# Aenderungen" (2026-08-31, two call sites) is covered too — the prefix makes
+# `geaendert` still match.
 #
 # False positives are implausible by construction: every stem carries an
 # ae/oe/ue transliteration digraph, which correct German spells with an umlaut
@@ -94,7 +101,7 @@ ENGLISH_WORDS = re.compile(
 TRANSLITERATIONS = re.compile(
     r"\b\w*?(frueh\w*|kuerzer|schliess\w*|luecke\w*|moeglich\w*|ueber\w*"
     r"|laeuft|haeng\w*|pruef\w*|schueler\w*|benoetig\w*|oberflaeche\w*"
-    r"|uebersprungen|enthaelt|zusaetzlich\w*|verfuegbar|geaendert"
+    r"|uebersprungen|enthaelt|zusaetzlich\w*|verfuegbar|aender\w*"
     r"|beschaedigt|koennte|faehig\w*|aufloesung|loesch\w*|gewaehlt"
     r"|waehl\w*|fuer|zurueck\w*|gueltig\w*|ungueltig\w*|koennen|muessen"
     r"|duerfen|groesse\w*|laenge\w*)\b",
@@ -138,15 +145,29 @@ def _scan_file(path: Path, keywords: frozenset[str]) -> list[tuple[int, str, str
         src_line = lines[line_no - 1] if 0 < line_no <= len(lines) else ""
         if "# english-ok" in src_line:
             return
+        # TRANSLITERATIONS runs UNCONDITIONALLY, not inside the `is_german`
+        # branch. Gating it there is why `detail="Lehrer hat noch Klassenzimmer
+        # - erst loeschen"` sat in a fully-covered position while this script
+        # exited 0 (measured 2026-08-31): the string carries no umlaut, and not
+        # one of its words is in GERMAN_WORDS, so it classified as NEITHER
+        # German nor English and no check ran at all. `loesch\w*` was already in
+        # the stem list — the gap was the classifier, not the list.
+        #
+        # Every stem carries an ae/oe/ue digraph that correct German spells with
+        # an umlaut and English does not produce, so running it on an
+        # unclassified (or even English) string cannot fire on real English.
+        # Checked first and returning: a transliterated German string that also
+        # trips an English stopword is one finding with the actionable message,
+        # not two.
+        m = TRANSLITERATIONS.search(text)
+        if m:
+            findings.append(
+                (line_no, "TRANSLITERATION",
+                 f"{text!r} (use literal ä/ö/ü/ß: {m.group(0)!r})")
+            )
+            return
         is_german = bool(GERMAN_CHARS.search(text) or GERMAN_WORDS.search(text))
-        if is_german:
-            m = TRANSLITERATIONS.search(text)
-            if m:
-                findings.append(
-                    (line_no, "TRANSLITERATION",
-                     f"{text!r} (use literal ä/ö/ü/ß: {m.group(0)!r})")
-                )
-        elif ENGLISH_WORDS.search(text):
+        if not is_german and ENGLISH_WORDS.search(text):
             findings.append((line_no, "ENGLISH", repr(text)))
 
     def _is_key(node: ast.AST) -> bool:

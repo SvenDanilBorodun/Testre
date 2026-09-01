@@ -141,15 +141,75 @@ class TestOriginCheck(unittest.TestCase):
         self.assertTrue(self._origin_allowed(""))
 
     def test_localhost_allowed(self):
-        self.assertTrue(self._origin_allowed("http://localhost:8769"))
+        # The origins the app really sends. The SPA is served from
+        # http://localhost:80 and browsers ELIDE the default port from the
+        # Origin serialization, so LeaderToggle.jsx / RunControls.jsx reach
+        # http://localhost:8769 carrying `Origin: http://localhost` — the
+        # port-less spelling below, not the :8769 one.
+        self.assertTrue(self._origin_allowed("http://localhost"))
+        self.assertTrue(self._origin_allowed("http://localhost:80"))
         self.assertTrue(self._origin_allowed("http://127.0.0.1"))
+        self.assertTrue(self._origin_allowed("http://127.0.0.1:80"))
         self.assertTrue(self._origin_allowed("https://localhost"))
+        # `~*` on the nginx side is case-insensitive; urlsplit lower-cases the
+        # scheme and host, so both sides agree here.
+        self.assertTrue(self._origin_allowed("HTTP://LOCALHOST"))
 
     def test_lookalike_host_rejected(self):
         self.assertFalse(self._origin_allowed("http://localhost.evil.com"))
         self.assertFalse(self._origin_allowed("http://127.0.0.1.evil.com"))
         self.assertFalse(self._origin_allowed("http://evil.com"))
         self.assertFalse(self._origin_allowed("http://notlocalhost"))
+
+    def test_a_NON_DEFAULT_loopback_port_is_rejected(self):
+        """Any other HTML-serving surface on this machine is not this origin.
+
+        nginx.conf's map is `~*^https?://localhost(:80)?$` and nginx returns
+        403 for every one of these (measured on 1.27.5), while this handler
+        used to ALLOW them all — it read `urlsplit(origin).hostname` and
+        nothing else. That is not academic: the phone receiver binds
+        0.0.0.0:8444 on this very host, so a page it served carried
+        `Origin: http://localhost:8444` and could POST the arm into a restart.
+
+        `http://localhost:8769` — the bridge's OWN port — belongs in this list
+        too. Nothing is ever served as HTML from :8769 (every handler answers
+        application/json), so no page can carry that Origin; the assertion that
+        used to accept it pinned the old permissive behaviour, not a real flow.
+        """
+        for origin in ("http://localhost:8444", "http://localhost:3000",
+                       "http://localhost:8769", "https://localhost:8443",
+                       "http://127.0.0.1:3000", "http://127.0.0.1:8444"):
+            with self.subTest(origin=origin):
+                self.assertFalse(self._origin_allowed(origin))
+
+    def test_a_NON_HTTP_scheme_is_rejected(self):
+        """`https?` in the nginx map is a scheme allowlist, not decoration."""
+        for origin in ("ftp://localhost", "ws://localhost", "wss://localhost",
+                       "file://localhost", "chrome-extension://localhost"):
+            with self.subTest(origin=origin):
+                self.assertFalse(self._origin_allowed(origin))
+
+    def test_the_null_origin_is_rejected(self):
+        # A `file://` page sends the literal string `null`, which is non-empty
+        # and must therefore NOT take the empty-Origin allowance.
+        self.assertFalse(self._origin_allowed("null"))
+
+    def test_a_malformed_origin_is_refused_not_raised(self):
+        # urlsplit defers the port parse, so an unparseable port raises
+        # ValueError out of `.port` — inside the try, and fail-closed.
+        for origin in ("http://localhost:notaport", "http://localhost:99999",
+                       "http://[::1", "://localhost"):
+            with self.subTest(origin=origin):
+                self.assertFalse(self._origin_allowed(origin))
+
+    def test_the_policy_constants_are_the_ones_the_nginx_map_spells(self):
+        """Twin lockstep, Python side. `test_rosbridge_origin_gate.py` reads
+        these same three constants back out of nginx.conf's map."""
+        from gui.app import roboter_studio_control as rsc
+        self.assertEqual(set(rsc._ALLOWED_ORIGIN_HOSTS),
+                         {"localhost", "127.0.0.1"})
+        self.assertEqual(set(rsc._ALLOWED_ORIGIN_SCHEMES), {"http", "https"})
+        self.assertEqual(set(rsc._ALLOWED_ORIGIN_PORTS), {None, 80})
 
 
 if __name__ == "__main__":

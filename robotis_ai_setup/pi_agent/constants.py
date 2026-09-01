@@ -212,8 +212,24 @@ ALL_IMAGES = [image_ref(n) for n in IMAGE_NAMES]
 
 # --- Network ports (all native; no usbipd, no WSL localhost forwarder) ---
 PORT_WEB_UI = 80            # physical_ai_manager (nginx, serves the SPA)
-PORT_VIDEO_SERVER = 8080    # web_video_server (camera streams)
-PORT_ROSBRIDGE = 9090       # rosbridge (unauthenticated — LAN-open by decision)
+# :8080 and :9090 are the CONTAINER-side ports of web_video_server and
+# rosbridge. Since 4d1b046 the opi compose publishes them as
+# `127.0.0.1:8080:8080` / `127.0.0.1:9090:9090` — LOOPBACK-PINNED, reachable
+# only through `ssh -L 9090:127.0.0.1:9090 <pi>`, not from the LAN.
+#
+# The old comment here called this port LAN-open "by decision" — true until
+# that commit, and now the opposite of the truth. It mattered: rosbridge is
+# UNAUTHENTICATED and rosbridge_server 2.7.0's `check_origin` is literally
+# `return True`, so while the publish was LAN-bound the manager's /rosbridge
+# Origin gate was skippable rather than defeatable — a handshake straight at
+# the published :9090 returned 101 and could publish /leader/joint_trajectory
+# (measured). The browser reaches both transports same-origin through the
+# manager on :80 instead (nginx.opi.conf.template).
+#
+# Like PORT_CAMERA_INGEST below, these two have NO non-test consumer; they are
+# kept so this port map stays complete and readable.
+PORT_VIDEO_SERVER = 8080    # web_video_server (container-internal; :80 proxy)
+PORT_ROSBRIDGE = 9090       # rosbridge (container-internal; :80 proxy)
 # camera-ingest TCP server (camera_ingest_node.py) — UNUSED on the Pi. The Pi
 # runs the in-container usb_cam path, so there is no native capture bridge
 # feeding :5557. Kept documented only so the port map is complete.

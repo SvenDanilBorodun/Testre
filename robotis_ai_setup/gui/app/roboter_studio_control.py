@@ -41,6 +41,22 @@ from urllib.parse import urlsplit
 # Hosts a browser Origin may legitimately carry when the React app (served from
 # the localhost container) POSTs to this bridge. Anything else is rejected.
 _ALLOWED_ORIGIN_HOSTS = frozenset({"localhost", "127.0.0.1"})
+# ...and the scheme + port halves of the SAME policy. These exist because the
+# host check alone was NOT the policy nginx.conf's `$edubotics_origin_ok` map
+# enforces, while nginx.conf:28-30 claims the two are "deliberately IDENTICAL":
+# the map is `~*^https?://localhost(:80)?$`, so nginx answers 403 to
+# `http://localhost:8444`, `http://localhost:3000`, `ftp://localhost` and
+# `ws://localhost` — all four of which this handler used to ALLOW, because it
+# read only `urlsplit(origin).hostname`. That gap mattered: the phone receiver
+# binds 0.0.0.0:8444 on this very machine, so any other HTML-serving surface on
+# a localhost port was a pivot into the origin trusted to restart the arm.
+#
+# `None` is in the port set because a browser ELIDES the default port from the
+# Origin serialization: the SPA is served from http://localhost:80, so the
+# header it sends is `Origin: http://localhost`. `80` is spelled out as well
+# because a non-browser client may include it — exactly the `(:80)?` group.
+_ALLOWED_ORIGIN_SCHEMES = frozenset({"http", "https"})
+_ALLOWED_ORIGIN_PORTS = frozenset({None, 80})
 # Cap the request body we drain so a malicious/oversized POST can't make us read
 # an unbounded amount into memory. The legitimate body is a few bytes of JSON.
 _MAX_BODY_BYTES = 64 * 1024
@@ -214,14 +230,28 @@ class RoboterStudioControlServer:
                 # Parse the URL and require the HOST to be EXACTLY localhost /
                 # 127.0.0.1 — a `startswith` check is bypassable by an attacker
                 # origin like http://localhost.evil.com.
+                #
+                # Scheme and PORT are checked too, so this is the same policy
+                # nginx.conf's `~*^https?://localhost(:80)?$` map enforces for
+                # /rosbridge. Checking the host alone let `http://localhost:8444`
+                # (the phone receiver's own port) through here while nginx
+                # returned 403 for it — one product with two different answers.
+                # `.port` is inside the try: urlsplit defers the port parse, so
+                # `http://localhost:notaport` raises ValueError only here.
                 origin = self.headers.get("Origin", "")
                 if origin == "":
                     return True
                 try:
-                    host = urlsplit(origin).hostname
+                    parts = urlsplit(origin)
+                    host = parts.hostname
+                    port = parts.port
                 except ValueError:
                     return False
-                return host in _ALLOWED_ORIGIN_HOSTS
+                return (
+                    parts.scheme in _ALLOWED_ORIGIN_SCHEMES
+                    and host in _ALLOWED_ORIGIN_HOSTS
+                    and port in _ALLOWED_ORIGIN_PORTS
+                )
 
             def do_POST(self):  # noqa: N802
                 self._drain_body()

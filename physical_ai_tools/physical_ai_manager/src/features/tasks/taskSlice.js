@@ -77,21 +77,33 @@ const defaultTaskInfo = {
   // Sent on the wire as TaskInfo.private_mode and threaded through the
   // server-side data_manager overlay → HfApiWorker → create_repo(private=…).
   //
-  // Starts UNCHECKED (owner decision, 2026-08-07): the student makes the
-  // visibility call themselves rather than inheriting a pre-selected one.
-  // The toggle still labels private „Privat (empfohlen)" and its tooltip
-  // still recommends it for recordings containing people, so the guidance
-  // survives the default change.
+  // Starts CHECKED (private) since 2026-08-31. This REVERSES the 2026-08-07
+  // owner decision to ship it unchecked, and the reason is the default
+  // ACTION rather than the default opinion: a 13-year-old who presses record
+  // and touches nothing else would publish their classmates' faces and voices
+  // to a world-readable HuggingFace repo. Nothing about the classroom setup
+  // makes that recoverable — the upload has happened by the time anyone
+  // notices, and the people in the video did not choose it. Public stays one
+  // click away and the toggle still labels the two states „Privat
+  // (empfohlen)“ / „Öffentlich“, so the student still makes the call; they
+  // just have to make it on purpose.
   //
-  // This is NOT the same knob as TaskInfo.msg's `bool private_mode true`,
-  // and the two are deliberately opposite. This value is what React SENDS,
-  // always explicitly (useRosServiceCaller sends Boolean(taskInfo.privateMode)
-  // on every start). The .msg default only applies to a client that OMITS
-  // the field, which React never does — it exists so a hand-crafted
-  // rosbridge call cannot publish a classroom recording to a public repo by
-  // saying nothing. Do not "harmonise" them: flipping the .msg default to
-  // match this one re-opens that hole.
-  privateMode: false,
+  // This is NOT the same knob as TaskInfo.msg's `bool private_mode true`, and
+  // they now AGREE rather than being deliberately opposite. This value is
+  // what React SENDS, always explicitly (useRosServiceCaller sends
+  // Boolean(taskInfo.privateMode) on every start). The .msg default only
+  // applies to a client that OMITS the field, which React never does — it
+  // exists so a hand-crafted rosbridge call cannot publish a classroom
+  // recording to a public repo by saying nothing. Leave the .msg default
+  // alone: it guards a different caller and is already `true`.
+  //
+  // The other half of this default lives in useRosTopicSubscription. The ROS
+  // node holds `task_info` for the life of a task, so it survives a handover
+  // — an incoming /task/status tick from the PREVIOUS student's task would
+  // otherwise silently un-tick this box before the next student ever presses
+  // record. Adoption of `private_mode` is therefore gated on `robotNamesMe`,
+  // exactly like `user_id`.
+  privateMode: true,
   useOptimizedSave: true,
   recordRosBag2: false,
 };

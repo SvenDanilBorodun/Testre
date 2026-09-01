@@ -88,8 +88,13 @@ export function rsControlBase(piMode) {
 //     docker-compose.yml and nginx.conf carries an Origin allowlist on
 //     /rosbridge, so the only route in is same-origin from our own page.
 //
-// The `-opi` compose deliberately KEEPS its :9090/:8080 publishes as a
-// debug/rollback path; the student compose does not.
+// The `-opi` compose still declares :9090/:8080, but as a LOOPBACK-PINNED
+// DEBUG path only (`127.0.0.1:9090:9090`) — reachable via
+// `ssh -L 9090:127.0.0.1:9090 <pi>` and not from the LAN. The un-tunnelled LAN
+// ROLLBACK half was deleted in 4d1b046: while those publishes were LAN-bound,
+// rosbridge_server 2.7.0's `check_origin` (literally `return True`) made the
+// nginx Origin gate skippable rather than defeatable. The student compose
+// publishes neither port at all.
 //
 // Both functions keep their `piMode` parameter purely so the four call sites
 // and their tests need no churn — it no longer selects behaviour. The Jetson

@@ -243,7 +243,7 @@ async def delete_teacher(teacher_id: str, admin=Depends(get_current_admin)):
     if (classroom_count_res.count or 0) > 0:
         raise HTTPException(
             status_code=409,
-            detail="Lehrer hat noch Klassenzimmer - erst loeschen",
+            detail="Lehrer hat noch Klassenzimmer — bitte diese zuerst löschen",
         )
     try:
         supabase.auth.admin.delete_user(teacher_id)

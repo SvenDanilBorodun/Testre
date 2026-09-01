@@ -29,6 +29,9 @@ import TaskPhase from '../../constants/taskPhases';
 // The hook reads the Jetson connection state from the REAL store singleton
 // (store.getState().jetson.status) — drive it with real jetson actions.
 import realStore from '../../store/store';
+// The recording form's own default, asserted next to the gate that
+// protects it — the gate is meaningless without knowing what it defends.
+import tasksReducer from '../../features/tasks/taskSlice';
 import { setJetsonStatus, clearJetson } from '../../store/jetsonSlice';
 import { setSession, setProfile } from '../../features/auth/authSlice';
 import { signedOut } from '../../features/session/sessionActions';
@@ -112,7 +115,11 @@ function status(overrides = {}) {
       reset_time_s: 0,
       num_episodes: 0,
       push_to_hub: false,
-      private_mode: false,
+      // `true`, matching both TaskInfo.msg's field default and the SPA's
+      // private-by-default. A `false` here is a PUBLIC recording, and a
+      // fixture that ships one quietly pins the old default into every test
+      // that reuses this builder.
+      private_mode: true,
       use_optimized_save_mode: false,
       record_rosbag2: false,
       tags: [],
@@ -372,7 +379,9 @@ describe('useRosTopicSubscription — the robot may only name the student it bel
   it('adopts nothing while the identity is UNKNOWN — fail-safe', async () => {
     // A valid session whose /me has not resolved yet: hfUsername is still null,
     // so there is nothing to compare against and nothing is adopted. Same for a
-    // student who never signs in at all (recording needs no cloud login).
+    // student working signed out — since the student login gate
+    // (utils/authGate) that means the „Ohne Anmeldung fortfahren" offline
+    // escape, the one path that still reaches these pages with no session.
     const cb = await mountAndGetCallback();
     realStore.dispatch(setSession({ access_token: 'jwt-1' }));
     mockDispatch.mockClear();
@@ -394,5 +403,102 @@ describe('useRosTopicSubscription — the robot may only name the student it bel
     expect(s.payload.robotProfile).toBe('omx_full');
     expect(s.payload.capabilities).toEqual(JSON.parse(CAPS_FULL));
     expect(s.payload.topicReceived).toBe(true);
+  });
+});
+
+describe('useRosTopicSubscription — a recording is PRIVATE unless the student says otherwise', () => {
+  // Two halves of one property: pressing record and touching nothing else must
+  // not publish classmates' faces and voices to a world-readable HF repo.
+  //
+  //   1. the form STARTS private (taskSlice.defaultTaskInfo.privateMode);
+  //   2. no /task/status tick may quietly take that back.
+  //
+  // (2) is not hypothetical: the ROS node keeps `task_info` for the life of a
+  // task, so it survives a handover exactly like `user_id` does. The previous
+  // student's finished PUBLIC task would arrive on the next tick and un-tick
+  // the new student's box — in a field that is read-only while a task runs, so
+  // they could not see it happen.
+  const runningWith = (userId, taskInfo = {}) => status({
+    phase: TaskPhase.RECORDING,
+    task_info: {
+      ...status().task_info,
+      task_name: 'Wuerfel greifen',
+      task_instruction: ['x'],
+      user_id: userId,
+      ...taskInfo,
+    },
+  });
+
+  const signIn = (hfUsername) => {
+    realStore.dispatch(setSession({ access_token: 'jwt-1' }));
+    realStore.dispatch(setProfile({ role: 'student', hf_username: hfUsername }));
+  };
+
+  afterEach(() => {
+    realStore.dispatch(signedOut());
+  });
+
+  it('the recording form starts PRIVATE', async () => {
+    const state = tasksReducer(undefined, { type: '@@INIT' });
+    expect(state.taskInfo.privateMode).toBe(true);
+  });
+
+  it('a task the robot does NOT attribute to this student cannot un-tick it', async () => {
+    // Student B is signed in; the node still holds A's finished public task.
+    const cb = await mountAndGetCallback();
+    signIn('schule-B');
+    mockDispatch.mockClear();
+    act(() => cb(runningWith('schule-A', { private_mode: false })));
+
+    const info = dispatchedByType('tasks/setTaskInfo')[0];
+    // The task itself still reaches the UI — the student must see what runs.
+    expect(info.payload.taskName).toBe('Wuerfel greifen');
+    // ... but its visibility choice does not become B's.
+    expect('privateMode' in info.payload).toBe(false);
+  });
+
+  it('a tick after a sign-out cannot un-tick it either', async () => {
+    const cb = await mountAndGetCallback();
+    signIn('schule-A');
+    realStore.dispatch(signedOut());
+    mockDispatch.mockClear();
+    act(() => cb(runningWith('schule-A', { private_mode: false })));
+    expect('privateMode' in dispatchedByType('tasks/setTaskInfo')[0].payload)
+      .toBe(false);
+  });
+
+  it('nor can one while the identity is still UNKNOWN — fail-safe', async () => {
+    // A valid session whose /me has not resolved: hfUsername is null, so there
+    // is nothing to compare against. Same for a student working signed out —
+    // since the student login gate (utils/authGate), only the „Ohne Anmeldung
+    // fortfahren" offline escape gets there.
+    const cb = await mountAndGetCallback();
+    realStore.dispatch(setSession({ access_token: 'jwt-1' }));
+    mockDispatch.mockClear();
+    act(() => cb(runningWith('schule-A', { private_mode: false })));
+    expect('privateMode' in dispatchedByType('tasks/setTaskInfo')[0].payload)
+      .toBe(false);
+  });
+
+  it('the student\'s OWN task still carries its visibility back', async () => {
+    // Not vacuous: resuming a task you started elsewhere must show the choice
+    // you actually made, public included.
+    const cb = await mountAndGetCallback();
+    signIn('schule-A');
+    mockDispatch.mockClear();
+    act(() => cb(runningWith('schule-A', { private_mode: false })));
+    expect(dispatchedByType('tasks/setTaskInfo')[0].payload.privateMode)
+      .toBe(false);
+  });
+
+  it('an absent private_mode on an OWN task fails safe to private', async () => {
+    // `!== false`, not `|| false`: a garbled or pre-field tick must not read as
+    // „public". Matches TaskInfo.msg's own `bool private_mode true`.
+    const cb = await mountAndGetCallback();
+    signIn('schule-A');
+    mockDispatch.mockClear();
+    act(() => cb(runningWith('schule-A', { private_mode: undefined })));
+    expect(dispatchedByType('tasks/setTaskInfo')[0].payload.privateMode)
+      .toBe(true);
   });
 });

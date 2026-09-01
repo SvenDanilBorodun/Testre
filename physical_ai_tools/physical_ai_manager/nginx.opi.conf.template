@@ -45,8 +45,13 @@
 # port 80 is the one port guaranteed reachable if the wizard loads at
 # all. The React app routes rosbridge + MJPEG same-origin in Pi mode
 # (utils/piMode.js localRosbridgeUrl/videoStreamBase); the direct host
-# ports stay published in docker-compose.opi.yml as a debug/rollback
-# path only.
+# ports stay published in docker-compose.opi.yml as a LOOPBACK-PINNED
+# DEBUG path only — `127.0.0.1:9090:9090` / `127.0.0.1:8080:8080`,
+# reached with `ssh -L 9090:127.0.0.1:9090 <pi>`. The un-tunnelled LAN
+# ROLLBACK half is gone (4d1b046): while those publishes were LAN-bound,
+# rosbridge_server 2.7.0's `check_origin` — literally `return True` —
+# made the /rosbridge Origin gate below SKIPPABLE rather than defeatable,
+# measured at 101 with a working /leader/joint_trajectory session.
 # WebSocket Connection-header map. Rendered into /etc/nginx/conf.d/default.conf,
 # which nginx includes from http{} — so a map here is in the right context.
 # Without it the /rosbridge location had to hardcode `Connection: upgrade`, which
@@ -306,8 +311,23 @@ server {
     # did not come from the attack this gate exists to stop, while denying it
     # would break roslibpy/wscat diagnostics. A `file://` page sends the
     # literal `null`, which is non-empty and therefore refused. This closes the
-    # BROWSER path; a header-less LAN curl straight at the published :9090 is a
-    # separate, accepted residual answered by the dedicated-VLAN guide.
+    # BROWSER path.
+    #
+    # THE RESIDUAL MOVED, and the old wording pointed at a port that is no
+    # longer LAN-reachable. It used to read "a header-less LAN curl straight at
+    # the published :9090"; 4d1b046 pinned the opi compose's :9090/:8080
+    # publishes to `127.0.0.1:`, so that route is gone. The residual now lives
+    # on THIS port: :80 is LAN-open by necessity (it is how a school reaches
+    # the wizard at all), so a non-browser client on the LAN — curl, wscat,
+    # roslibpy — can send whatever Origin it likes to /rosbridge here and drive
+    # the arm.
+    #
+    # An Origin gate provably cannot stop that, and removing the empty-Origin
+    # allowance does not change it: measured, `curl -H 'Host: <pi-ip>'
+    # -H 'Origin: http://<pi-ip>' …/rosbridge` is still proxied, because Origin
+    # is a BROWSER control set by the user agent and anything that can forge a
+    # header can forge that one too. Accepted residual; the answer is the
+    # dedicated-VLAN guide, not a tighter regex here.
     #
     # `if` here is the documented-safe shape: several `set`s feeding one
     # `return`, with proxy_pass OUTSIDE every `if`. Verified on nginx 1.27.5

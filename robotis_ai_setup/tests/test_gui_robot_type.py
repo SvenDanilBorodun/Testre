@@ -150,6 +150,14 @@ class ScanArmsTypeAwareTest(unittest.TestCase):
         statuses = []
         owner = types.SimpleNamespace(
             _scanning=False,
+            # The „Arme scannen" confirmation gate, stubbed to the answer these
+            # tests are not about: with no student window up the real
+            # `_confirm_arm_scan_closes_window` returns True without asking
+            # anything, which is the path a scan-behaviour test wants. Its own
+            # coverage (asks only with a live window, a decline does nothing)
+            # lives in test_shutdown_teardown.py.
+            _scan_confirm_open=False,
+            _confirm_arm_scan_closes_window=lambda: True,
             btn_scan_leader=types.SimpleNamespace(config=lambda **kw: None),
             _selected_robot_profile=lambda: profile_id,
             root=types.SimpleNamespace(after=lambda *a, **k: None),

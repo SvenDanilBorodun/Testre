@@ -979,9 +979,18 @@ class DataManager:
         layers: the operative one is ``TaskInfo.msg``, where ``bool
         private_mode`` carried NO default and ROS 2 booleans default to FALSE —
         so any rosbridge client that simply OMITTED the field got a PUBLIC repo
-        of children's faces. React always sends ``private_mode: true``, which is
-        what kept this latent. Both layers now default to private; keep them
+        of children's faces. Both layers now default to private; keep them
         in lockstep (fenced by test_upload_privacy_fails_safe.py).
+
+        WHAT THE ``.msg`` DEFAULT ACTUALLY COVERS: only a client that OMITS the
+        field. React never omits it — ``useRosServiceCaller`` sends
+        ``private_mode: Boolean(taskInfo.privateMode)`` EXPLICITLY on every
+        recording — so the UI path never reads the ``.msg`` default at all and
+        gets ``taskSlice.defaultTaskInfo.privateMode`` instead. That UI default
+        is now ``true`` as well. The old wording here ("React always sends
+        ``private_mode: true``") described the UI's value, not its behaviour,
+        and was false the moment the checkbox default moved; the durable fact
+        is that React always sends the field EXPLICITLY.
         """
         private = bool(private)
         if self._upload_enqueued:
@@ -998,10 +1007,18 @@ class DataManager:
         allowed = self._rig_hf_namespaces()
         namespace = (self._save_repo_name or '').split('/')[0]
         if allowed is not None and namespace not in allowed:
+            # The student-facing text names NEITHER the namespace nor the repo
+            # id. `namespace` is derived from the CLIENT-SUPPLIED
+            # task_info.user_id, and this string is rendered as a German toast
+            # in the browser — echoing caller-supplied text into a refusal is
+            # the same shape the path-confinement refusals were fixed for. The
+            # operator still gets the exact value on stderr below.
+            # Quotes are typographic („…“), never straight, per the German
+            # string rules.
             self._last_warning_message = (
-                f'Upload abgelehnt: Der Roboter darf nicht in das '
-                f'HuggingFace-Konto „{namespace}" hochladen. Bitte die '
-                f'Benutzer-ID prüfen und erneut anmelden.'
+                'Upload abgelehnt: Der Roboter darf nicht in dieses '
+                'HuggingFace-Konto hochladen. Bitte die „Benutzer-ID“ prüfen '
+                'und erneut anmelden.'
             )
             print(
                 f'[FEHLER] Upload REFUSED: repo namespace {namespace!r} is not '
@@ -1074,13 +1091,20 @@ class DataManager:
         None means "cannot judge" — no token registered, whoami timed out, the
         school network is down. The caller then ALLOWS the upload, deliberately:
 
-          * recording with no cloud login is a fully supported path (only
-            Training and Inferenz gate on a session), so a hard gate here would
-            break it;
           * with no token the upload fails on its own anyway, so nothing is
             actually published;
           * and turning a transient network blip into a destroyed upload is a
             worse outcome than the case this guard exists for.
+
+        A THIRD reason used to head that list — "recording with no cloud login
+        is a fully supported path (only Training and Inferenz gate on a
+        session)" — and it is no longer true. The student SPA now requires a
+        Supabase login on every page except the Orange Pi's „System" tab
+        (physical_ai_manager/src/utils/authGate.js), and the one remaining way
+        to record signed out is the „Ohne Anmeldung fortfahren" escape, offered
+        only after a login attempt has PROVEN the auth service unreachable. The
+        two reasons above are untouched by that, so the fail-open stays exactly
+        as correct as it was — and the guard's LOGIC is deliberately unchanged.
 
         This is a REFUSE-ON-PROOF gate, matching hf_token_is_foreign's
         treatment of an absent stamp.

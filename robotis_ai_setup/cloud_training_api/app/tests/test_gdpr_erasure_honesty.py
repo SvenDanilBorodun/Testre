@@ -25,6 +25,7 @@ from __future__ import annotations
 import sys
 import types
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -91,7 +92,7 @@ class ErasureEnumeratesRecordingsNotJustTrainings(unittest.TestCase):
         with patch.dict('os.environ', {'HF_TOKEN': 'hf_platform'}), \
                 patch.object(self.teacher, 'get_supabase', lambda: sb), \
                 patch.object(self.teacher, 'HfApi', lambda **k: api):
-            failures = self.teacher._delete_student_hf_artifacts('stu1')
+            failures, _attempted = self.teacher._delete_student_hf_artifacts('stu1')
         return api, failures
 
     def test_a_recording_never_used_for_training_is_now_found(self):
@@ -177,7 +178,7 @@ class AlreadyGoneIsSuccessNotFailure(unittest.TestCase):
         with patch.dict('os.environ', {'HF_TOKEN': 'hf_platform'}), \
                 patch.object(self.teacher, 'get_supabase', lambda: sb), \
                 patch.object(self.teacher, 'HfApi', lambda **k: api):
-            failures = self.teacher._delete_student_hf_artifacts('stu1')
+            failures, _attempted = self.teacher._delete_student_hf_artifacts('stu1')
         return api, failures
 
     def test_an_already_deleted_repo_is_not_reported_as_a_failure(self):
@@ -219,7 +220,7 @@ class AlreadyGoneIsSuccessNotFailure(unittest.TestCase):
         with patch.dict('os.environ', {'HF_TOKEN': 'hf_platform'}), \
                 patch.object(self.teacher, 'get_supabase', lambda: sb), \
                 patch.object(self.teacher, 'HfApi', lambda **k: api):
-            failures = self.teacher._delete_student_hf_artifacts('stu1')
+            failures, _attempted = self.teacher._delete_student_hf_artifacts('stu1')
         self.assertEqual([f['repo_id'] for f in failures], ['bob/forbidden'])
 
     def test_a_not_found_does_not_abort_the_repos_after_it(self):
@@ -266,7 +267,8 @@ class ARegistryQueryFailureIsReportedNotSwallowed(unittest.TestCase):
         with patch.dict('os.environ', {'HF_TOKEN': 'hf_platform'}), \
                 patch.object(self.teacher, 'get_supabase', lambda: sb), \
                 patch.object(self.teacher, 'HfApi', lambda **k: api):
-            return api, self.teacher._delete_student_hf_artifacts('stu1')
+            failures, _attempted = self.teacher._delete_student_hf_artifacts('stu1')
+        return api, failures
 
     def test_the_failure_is_reported(self):
         store = {'trainings': [{'dataset_name': 'alice/ds', 'model_name': None,
@@ -366,7 +368,7 @@ class ErasureFailuresAreReportedNotSwallowed(unittest.TestCase):
         with patch.dict('os.environ', {'HF_TOKEN': 'hf_platform'}), \
                 patch.object(self.teacher, 'get_supabase', lambda: sb), \
                 patch.object(self.teacher, 'HfApi', lambda **k: api):
-            failures = self.teacher._delete_student_hf_artifacts('stu1')
+            failures, _attempted = self.teacher._delete_student_hf_artifacts('stu1')
         return api, failures
 
     def test_a_403_on_a_student_namespace_is_REPORTED(self):
@@ -383,7 +385,7 @@ class ErasureFailuresAreReportedNotSwallowed(unittest.TestCase):
 
     def test_a_missing_HF_TOKEN_is_reported_rather_than_a_silent_noop(self):
         with patch.dict('os.environ', {'HF_TOKEN': ''}):
-            failures = self.teacher._delete_student_hf_artifacts('stu1')
+            failures, _attempted = self.teacher._delete_student_hf_artifacts('stu1')
         self.assertTrue(failures, 'no token used to mean a silent no-op')
 
     def test_one_failure_does_not_abort_the_others(self):
@@ -412,18 +414,32 @@ class DeleteStudentTellsTheTeacherTheTruth(unittest.TestCase):
         from app.routes import teacher
         self.teacher = teacher
 
-    def _delete(self, failures):
+    def _delete(self, failures, attempted=1):
+        """`attempted` defaults to 1 = "HuggingFace WAS contacted".
+
+        It is a parameter because the erasure helper now returns
+        `(failures, attempted)` and the two carry different claims: an empty
+        failure list after ZERO attempts is not a completed erasure. Tests that
+        are about the failure wording pass the default; the honesty of the
+        zero-attempt case has its own class below.
+        """
         import asyncio
         sb = _Supabase({})
         with patch.object(self.teacher, '_assert_student_owned', lambda *a: {}), \
                 patch.object(self.teacher, '_delete_student_hf_artifacts',
-                             lambda _sid: failures), \
+                             lambda _sid, _enum=None: (failures, attempted)), \
                 patch.object(self.teacher, 'get_supabase', lambda: sb):
             return asyncio.run(
                 self.teacher.delete_student('stu1', teacher={'id': 't1'})), sb
 
     def test_a_clean_erasure_says_so_explicitly(self):
-        res, sb = self._delete([])
+        """Only when something was actually erased — see `attempted=1`.
+
+        Before 2026-08-31 this passed with NOTHING attempted, which is how the
+        endpoint came to answer `hf_erasure_complete: true` on a run that never
+        called HuggingFace at all.
+        """
+        res, sb = self._delete([], attempted=1)
         self.assertTrue(res['ok'])
         self.assertIs(res['hf_erasure_complete'], True)
         self.assertEqual(sb.deleted_user, 'stu1')
@@ -551,15 +567,21 @@ class TheDestructiveEndpointIsOwnershipGated(unittest.TestCase):
         sb = _Supabase({})
         with patch.object(self.teacher, '_assert_student_owned', _refuse), \
                 patch.object(self.teacher, '_delete_student_hf_artifacts',
-                             lambda sid: touched.append(sid) or []), \
+                             lambda sid, _enum=None: (touched.append(sid) or [], 0)), \
+                patch.object(self.teacher, '_enumerate_student_hf_artifacts',
+                             lambda sid: (touched.append(sid) or [], True)), \
                 patch.object(self.teacher, 'get_supabase', lambda: sb):
             with self.assertRaises(self.teacher.HTTPException) as caught:
                 asyncio.run(self.teacher.delete_student(
                     'not-mine', teacher={'id': 't1'}))
         self.assertEqual(caught.exception.status_code, 404)
+        # Enumeration is tracked too, not just erasure: it reads the `datasets`
+        # and `trainings` rows of the named student, so running it above the
+        # ownership assert is a cross-tenant READ even though it destroys
+        # nothing.
         self.assertEqual(
             touched, [],
-            'HF erasure ran for a student this teacher does not own')
+            'HF enumeration/erasure ran for a student this teacher does not own')
         self.assertIsNone(
             sb.deleted_user,
             'the auth user was deleted for a student this teacher does not own')
@@ -587,6 +609,380 @@ class TheDestructiveEndpointIsOwnershipGated(unittest.TestCase):
             f'the ownership assert is no longer the first statement of '
             f'delete_student (found {first!r}) — anything above it runs for a '
             f'student the caller may not own')
+
+
+
+class TheRouteIsWiredEndToEnd(unittest.TestCase):
+    """Route-level harness: the REAL enumerate + erase helpers, stubbed edges.
+
+    Every other `delete_student` test in this file patches the erasure helper
+    out, which is what let the ORDER of the handler's steps go unfenced for so
+    long. These drive `delete_student` with only `get_supabase` and `HfApi`
+    replaced, so enumeration, the 503 gate, the account delete and the HF loop
+    all really run, in the order the handler puts them in.
+    """
+
+    def setUp(self):
+        _ensure_stubs()
+        from app.routes import teacher
+        self.teacher = teacher
+
+    def _route(self, store, broken_registry=False, delete_user_raises=False,
+               fail_on=(), token='hf_platform'):
+        import asyncio
+
+        class _Sb(_Supabase):
+            def table(self, name):
+                if broken_registry and name == 'datasets':
+                    raise RuntimeError('PostgREST 503')
+                return super().table(name)
+
+            def _delete_user(self, uid):
+                if delete_user_raises:
+                    # The measured production shape: migration 038 exists
+                    # because `trainings.user_id` had no ON DELETE clause, so
+                    # Postgres raised 23503 here for any student who had ever
+                    # trained.
+                    raise RuntimeError(
+                        'foreign key violation 23503 trainings_user_id_fkey')
+                return super()._delete_user(uid)
+
+        api = _Api(fail_on=fail_on)
+        sb = _Sb(store)
+        with patch.dict('os.environ', {'HF_TOKEN': token}), \
+                patch.object(self.teacher, '_assert_student_owned', lambda *a: {}), \
+                patch.object(self.teacher, 'get_supabase', lambda: sb), \
+                patch.object(self.teacher, 'HfApi', lambda **k: api):
+            try:
+                res = asyncio.run(
+                    self.teacher.delete_student('stu1', teacher={'id': 't1'}))
+            except self.teacher.HTTPException as exc:
+                return exc, sb, api
+        return res, sb, api
+
+    # ---- the registry outage is now RETRYABLE ---------------------------
+
+    def test_a_registry_outage_refuses_with_503_and_deletes_nothing(self):
+        """The unfinishable-request path.
+
+        Before 2026-08-31 an unreadable `datasets` registry deleted the account
+        anyway. `public.users` cascades, the `datasets` rows go with it, and the
+        retry then hits `_assert_student_owned` -> 404: a lawful Art. 17 request
+        that met a registry outage could NEVER be completed. Refusing while the
+        student is still there is the whole fix, so all three properties are
+        asserted together.
+        """
+        store = {'trainings': [{'dataset_name': 'group/shared-ds',
+                                'model_name': 'org/mdl',
+                                'workgroup_id': None}]}
+        res, sb, api = self._route(store, broken_registry=True)
+        self.assertIsInstance(res, self.teacher.HTTPException)
+        self.assertEqual(res.status_code, 503)
+        self.assertIsNone(
+            sb.deleted_user,
+            'the account was deleted during a registry outage — the retry '
+            'now 404s and the erasure can never be completed')
+        self.assertEqual(
+            api.deleted, [],
+            'HuggingFace repos were erased during a registry outage')
+
+    def test_the_503_detail_is_german_and_tells_the_teacher_to_retry(self):
+        res, _, _ = self._route({'trainings': []}, broken_registry=True)
+        detail = res.detail
+        self.assertIn('gelöscht', detail)
+        self.assertNotIn('geloescht', detail)
+        # It must say BOTH halves: nothing happened, and trying again helps.
+        self.assertIn('nichts', detail)
+        self.assertIn('erneut', detail)
+        # Rule §6 — no repo id / path / raw driver text echoed back.
+        self.assertNotIn('PostgREST', detail)
+        self.assertNotIn('stu1', detail)
+
+    # ---- nothing irreversible happens before the reversible step --------
+
+    def test_an_account_delete_failure_erases_no_huggingface_data(self):
+        """THE ordering defect that migration 038 made routine.
+
+        HF erasure used to run FIRST. With `trainings.user_id` at NO ACTION,
+        every student who had ever trained hit 23503 on the account delete —
+        AFTER their datasets were already gone from the Hub. The teacher was
+        told only „Konto konnte nicht gelöscht werden", and no retry could
+        succeed. Erasure must now be unreachable unless the account delete won.
+        """
+        store = {
+            'trainings': [],
+            'datasets': [{'hf_repo_id': 'alice/omx_f_pick',
+                          'owner_user_id': 'stu1', 'workgroup_id': None}],
+        }
+        res, sb, api = self._route(store, delete_user_raises=True)
+        self.assertIsInstance(res, self.teacher.HTTPException)
+        self.assertEqual(res.status_code, 500)
+        self.assertEqual(
+            api.deleted, [],
+            'the student\'s HuggingFace data was erased on a request that then '
+            'failed to delete the account — irreversible loss on a failed call')
+
+    def test_the_account_delete_failure_message_is_unchanged_german(self):
+        res, _, _ = self._route({'trainings': []}, delete_user_raises=True)
+        self.assertEqual(res.detail, 'Konto konnte nicht gelöscht werden')
+
+    # ---- zero attempts is not a completed erasure ------------------------
+
+    def test_a_student_with_nothing_registered_is_NOT_told_erasure_completed(self):
+        """The one place this pass had REGRESSED honesty.
+
+        `{"ok": true, "hf_erasure_complete": true}` after contacting
+        HuggingFace zero times is a positive claim about a service that was
+        never called — and a recording pushed under a name that never reached
+        the `datasets` registry is invisible here, so the claim is not even
+        conservative.
+        """
+        res, sb, api = self._route({'trainings': [], 'datasets': []})
+        self.assertEqual(sb.deleted_user, 'stu1')
+        self.assertEqual(api.deleted, [])
+        self.assertTrue(res['ok'])
+        self.assertIs(res['hf_erasure_complete'], False)
+        self.assertEqual(res['hf_failures'], [])
+
+    def test_that_detail_is_german_and_says_what_was_and_was_not_established(self):
+        res, _, _ = self._route({'trainings': [], 'datasets': []})
+        detail = res['detail']
+        self.assertIn('gelöscht', detail)          # the account WAS
+        self.assertIn('nicht', detail)             # HF was NOT contacted
+        self.assertIn('HuggingFace', detail)
+        for bad in ('geloescht', 'ueberprueft', 'geprueft', 'Schueler'):
+            self.assertNotIn(bad, detail)
+
+    def test_hf_failures_is_present_and_empty_so_the_SPA_renders_sensibly(self):
+        """`StudentRow.handleDelete` reads `hf_failures` only for `.length`.
+
+        The field must exist in EVERY `hf_erasure_complete: false` branch, or
+        the SPA's `Array.isArray(res.hf_failures) ? ... : 0` fallback silently
+        becomes the load-bearing path.
+        """
+        res, _, _ = self._route({'trainings': [], 'datasets': []})
+        self.assertIn('hf_failures', res)
+        self.assertIsInstance(res['hf_failures'], list)
+
+    def test_a_workgroup_only_student_is_also_not_told_erasure_completed(self):
+        """Nothing DELETABLE was found either — same honest answer.
+
+        The one shared dataset is deliberately kept for the surviving group
+        members, so HuggingFace is never contacted and the wording („keine …
+        die hier gelöscht werden können") has to be true for this case too.
+        """
+        store = {
+            'trainings': [],
+            'datasets': [{'hf_repo_id': 'alice/shared',
+                          'owner_user_id': 'stu1', 'workgroup_id': 'wg1'}],
+        }
+        res, sb, api = self._route(store)
+        self.assertEqual(sb.deleted_user, 'stu1')
+        self.assertEqual(api.deleted, [])
+        self.assertIs(res['hf_erasure_complete'], False)
+
+    # ---- the ordinary flows are unchanged --------------------------------
+
+    def test_a_real_erasure_still_reports_complete(self):
+        store = {
+            'trainings': [],
+            'datasets': [{'hf_repo_id': 'alice/omx_f_pick',
+                          'owner_user_id': 'stu1', 'workgroup_id': None}],
+        }
+        res, sb, api = self._route(store)
+        self.assertEqual(api.deleted, [('alice/omx_f_pick', 'dataset')])
+        self.assertEqual(sb.deleted_user, 'stu1')
+        self.assertIs(res['hf_erasure_complete'], True)
+        self.assertNotIn('hf_failures', res)
+
+    def test_a_403_still_reports_the_partial_outcome(self):
+        store = {
+            'trainings': [],
+            'datasets': [{'hf_repo_id': 'alice/omx_f_pick',
+                          'owner_user_id': 'stu1', 'workgroup_id': None}],
+        }
+        res, sb, _ = self._route(store, fail_on={'alice/omx_f_pick'})
+        self.assertEqual(sb.deleted_user, 'stu1')
+        self.assertIs(res['hf_erasure_complete'], False)
+        self.assertEqual([f['repo_id'] for f in res['hf_failures']],
+                         ['alice/omx_f_pick'])
+
+    def test_the_enumeration_is_not_run_twice(self):
+        """One read, handed down — not a second query after the cascade.
+
+        The handler enumerates BEFORE `auth.admin.delete_user`, which cascades
+        `public.users` and takes the `trainings` + `datasets` rows with it. A
+        second enumeration inside the erasure helper would therefore run
+        against rows that no longer exist and quietly erase nothing.
+        """
+        store = {
+            'trainings': [],
+            'datasets': [{'hf_repo_id': 'alice/omx_f_pick',
+                          'owner_user_id': 'stu1', 'workgroup_id': None}],
+        }
+        reads = []
+
+        class _CountingSb(_Supabase):
+            def table(self, name):
+                reads.append(name)
+                return super().table(name)
+
+        import asyncio
+        api = _Api()
+        sb = _CountingSb(store)
+        with patch.dict('os.environ', {'HF_TOKEN': 'hf_platform'}), \
+                patch.object(self.teacher, '_assert_student_owned', lambda *a: {}), \
+                patch.object(self.teacher, 'get_supabase', lambda: sb), \
+                patch.object(self.teacher, 'HfApi', lambda **k: api):
+            asyncio.run(self.teacher.delete_student('stu1', teacher={'id': 't1'}))
+        self.assertEqual(reads.count('datasets'), 1, reads)
+        self.assertEqual(reads.count('trainings'), 1, reads)
+        self.assertEqual(api.deleted, [('alice/omx_f_pick', 'dataset')])
+
+
+class AttemptedCountsWhatHuggingFaceWasActuallyAsked(unittest.TestCase):
+    """The new second return value, fenced on its own.
+
+    `attempted` is the only thing separating „nothing failed" from „erasure
+    complete", so a version of it that is always 0 or always len(candidates)
+    would re-open the exact overstatement. Both edges are pinned.
+    """
+
+    def setUp(self):
+        _ensure_stubs()
+        from app.routes import teacher
+        self.teacher = teacher
+
+    def _run(self, store, fail_on=(), broken_registry=False):
+        class _Sb(_Supabase):
+            def table(self, name):
+                if broken_registry and name == 'datasets':
+                    raise RuntimeError('PostgREST 503')
+                return super().table(name)
+
+        api = _Api(fail_on=fail_on)
+        sb = _Sb(store)
+        with patch.dict('os.environ', {'HF_TOKEN': 'hf_platform'}), \
+                patch.object(self.teacher, 'get_supabase', lambda: sb), \
+                patch.object(self.teacher, 'HfApi', lambda **k: api):
+            return self.teacher._delete_student_hf_artifacts('stu1')
+
+    def test_nothing_registered_means_zero_attempts(self):
+        _, attempted = self._run({'trainings': [], 'datasets': []})
+        self.assertEqual(attempted, 0)
+
+    def test_a_deleted_repo_counts_as_one_attempt(self):
+        store = {'trainings': [],
+                 'datasets': [{'hf_repo_id': 'alice/a',
+                               'owner_user_id': 'stu1', 'workgroup_id': None}]}
+        _, attempted = self._run(store)
+        self.assertEqual(attempted, 1)
+
+    def test_a_403_still_counts_as_an_attempt(self):
+        """We DID ask HuggingFace — it said no. That is a different claim from
+        never asking, and the failure list already carries the refusal."""
+        store = {'trainings': [],
+                 'datasets': [{'hf_repo_id': 'alice/a',
+                               'owner_user_id': 'stu1', 'workgroup_id': None}]}
+        failures, attempted = self._run(store, fail_on={'alice/a'})
+        self.assertEqual(attempted, 1)
+        self.assertEqual(len(failures), 1)
+
+    def test_a_missing_token_is_zero_attempts(self):
+        with patch.dict('os.environ', {'HF_TOKEN': ''}):
+            failures, attempted = self.teacher._delete_student_hf_artifacts('stu1')
+        self.assertEqual(attempted, 0)
+        self.assertTrue(failures)
+
+    def test_a_fail_closed_dataset_is_NOT_counted_as_attempted(self):
+        """It was refused locally; HuggingFace never heard about it."""
+        store = {'trainings': [{'dataset_name': 'group/shared-ds',
+                                'model_name': 'org/mdl',
+                                'workgroup_id': None}]}
+        _, attempted = self._run(store, broken_registry=True)
+        self.assertEqual(attempted, 1, 'only the model should have been tried')
+
+    def test_a_workgroup_shared_dataset_is_NOT_counted_as_attempted(self):
+        store = {'trainings': [],
+                 'datasets': [{'hf_repo_id': 'alice/shared',
+                               'owner_user_id': 'stu1', 'workgroup_id': 'wg1'}]}
+        _, attempted = self._run(store)
+        self.assertEqual(attempted, 0)
+
+    def test_the_caller_hands_its_enumeration_down_unchanged(self):
+        """The `enumeration` parameter is what makes enumerate-then-delete
+        possible; a version that ignored it would silently re-query after the
+        account (and its rows) were gone."""
+        api = _Api()
+        with patch.dict('os.environ', {'HF_TOKEN': 'hf_platform'}), \
+                patch.object(self.teacher, 'HfApi', lambda **k: api), \
+                patch.object(self.teacher, 'get_supabase',
+                             lambda: self.fail('the enumeration was re-queried')):
+            failures, attempted = self.teacher._delete_student_hf_artifacts(
+                'stu1', ([('alice/handed-in', 'dataset')], True))
+        self.assertEqual(api.deleted, [('alice/handed-in', 'dataset')])
+        self.assertEqual((failures, attempted), ([], 1))
+
+
+class TheTrainingsForeignKeyNoLongerBlocksAnErasure(unittest.TestCase):
+    """Migration 038, fenced as a file-level invariant.
+
+    `public.trainings.user_id` was the ONLY foreign key to `public.users` in
+    the schema with no ON DELETE clause (baseline.sql:62), so Postgres defaulted
+    it to NO ACTION and a student who had ever started one training could not be
+    deleted AT ALL: `auth.admin.delete_user` cascaded `auth.users` ->
+    `public.users` and then raised 23503.
+
+    Verified against a real `postgres:16-alpine` on 2026-08-31: constraint name
+    `trainings_user_id_fkey`, `confdeltype='a'` before, `'c'` after, DELETE
+    blocked before and cascading after. That verification cannot live in this
+    suite (no database), so what IS pinned here is that the migration and its
+    rollback twin exist and say the right thing — deleting either file turns
+    this red.
+    """
+
+    MIGRATIONS = Path(__file__).resolve().parents[3] / 'supabase' / 'migrations'
+    ROLLBACK = Path(__file__).resolve().parents[3] / 'supabase' / 'rollback'
+    CONSTRAINT = 'trainings_user_id_fkey'
+
+    def _forward_files(self):
+        return [p for p in sorted(self.MIGRATIONS.glob('*.sql'))
+                if p.name != '00000000000000_baseline.sql'
+                and self.CONSTRAINT in p.read_text(encoding='utf-8')]
+
+    def test_a_migration_gives_the_constraint_ON_DELETE_CASCADE(self):
+        files = self._forward_files()
+        self.assertEqual(
+            len(files), 1,
+            f'expected exactly one migration touching {self.CONSTRAINT}, '
+            f'found {[p.name for p in files]}')
+        text = files[0].read_text(encoding='utf-8')
+        self.assertIn(f'DROP CONSTRAINT {self.CONSTRAINT}', text)
+        self.assertRegex(
+            text,
+            r'ADD CONSTRAINT trainings_user_id_fkey\s+FOREIGN KEY \(user_id\)\s+'
+            r'REFERENCES public\.users\(id\) ON DELETE CASCADE')
+
+    def test_the_baseline_is_left_alone(self):
+        """The delta is a migration, not an edit to already-applied SQL.
+
+        `baseline.sql` describes what production ALREADY has. "Fixing" the FK
+        there would make the repo disagree with the live schema and the new
+        constraint would never actually be applied anywhere.
+        """
+        baseline = (self.MIGRATIONS / '00000000000000_baseline.sql').read_text(
+            encoding='utf-8')
+        self.assertIn('user_id UUID NOT NULL REFERENCES public.users(id),',
+                      baseline)
+
+    def test_the_migration_has_a_rollback_twin(self):
+        stem = self._forward_files()[0].stem
+        twin = self.ROLLBACK / f'{stem}_rollback.sql'
+        self.assertTrue(twin.is_file(), f'no rollback twin at {twin}')
+        text = twin.read_text(encoding='utf-8')
+        self.assertIn(f'DROP CONSTRAINT {self.CONSTRAINT}', text)
+        # It must restore the NO ACTION spelling, i.e. NOT re-add the cascade.
+        self.assertNotIn('ON DELETE CASCADE', text)
 
 
 if __name__ == '__main__':

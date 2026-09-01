@@ -304,6 +304,7 @@ def _apply_window_icon(root: tk.Tk) -> None:
 
 from . import device_manager, docker_manager, health_checker, config_generator, wsl_bridge, update_checker, webview_window
 from .roboter_studio_control import RoboterStudioControlServer
+from . import theme as theme_mod
 from . import camera_bridge as camera_bridge_mod
 from . import phone_camera as phone_camera_mod
 from . import phone_cert as phone_cert_mod
@@ -465,6 +466,40 @@ ARM_FAMILY_MISMATCH_DE = (
 )
 ARM_FAMILY_MISMATCH_STATUS_DE = "Robotertyp gewechselt — bitte die Arme neu scannen."
 
+# Protokoll buffer cap. Insert-only and unbounded before this, the pane grew for
+# the whole classroom day. Generous enough that no real diagnosis is truncated.
+LOG_MAX_LINES = 5000
+
+# How often the GUI asks the camera bridge how it is doing. Read-only, and it
+# logs only on a CHANGE — see `_poll_camera_health`.
+CAMERA_HEALTH_POLL_MS = 3000
+
+# Starting wrap width for the grey helper paragraphs, in PIXELS. `wraplength` is
+# a fixed pixel value, so a 620 px paragraph inside a container that can be
+# 501 px wide at `minsize` is CLIPPED — and the only scrollbar is vertical, so
+# the cut-off text is unreachable. `_build_scrollable_container`'s canvas
+# <Configure> handler re-wraps every registered label to the real width; this is
+# only the value they are born with, before the first configure event.
+HINT_WRAP_DEFAULT_PX = 620
+# Never wrap narrower than this, however small the window gets.
+HINT_WRAP_MIN_PX = 220
+# Left inset assumed for a helper paragraph while the widget tree is not yet
+# realized (the first <Configure>, where every winfo_* answer is meaningless).
+# 20 px reproduces the flat `canvas.width - 40` this used to apply to every
+# paragraph regardless of depth; once realized, the inset is MEASURED per label.
+HINT_WRAP_FALLBACK_INSET_PX = 20
+
+# The four severity markers, and the ONLY four. Same set
+# installer/scripts/preflight_system.ps1::Emit writes, whose lines
+# `_run_preflight_diagnostics` echoes straight into this pane — adopting them is
+# convergence, not invention. (colour, tag name) per marker.
+LOG_LEVEL_COLORS = {
+    "fehler": "#c0392b",
+    "warnung": "#b9770e",
+    "ok": "#1e8449",
+    "info": "#2471a3",
+}
+
 
 class EduBoticsApp:
     """Hauptfenster der Anwendung."""
@@ -490,8 +525,19 @@ class EduBoticsApp:
         # Place the top edge near the top of the screen so the window grows
         # downward into the available space rather than off either edge.
         self.root.geometry("+60+20")
-        self.root.minsize(560, 480)
+        self.root.minsize(640, 520)
         self.root.resizable(True, True)
+        # Every grey helper paragraph, re-wrapped to the real container width by
+        # `_build_scrollable_container`'s canvas <Configure> handler. Populated
+        # by `_hint_label`; initialised HERE because `_build_ui` (and the
+        # scroll container inside it) runs below.
+        self._wrapping_labels = []
+        # One ttk.Style for the whole window, installed BEFORE `_build_ui`
+        # because every widget below names a style from it. There was no
+        # `ttk.Style()` anywhere in this GUI before — fonts were inline
+        # literals in three shapes and the destructive „Daten zurücksetzen"
+        # was visually identical to „Umgebung starten".
+        theme_mod.apply_theme(self.root)
         _apply_window_icon(self.root)
 
         # State
@@ -505,6 +551,11 @@ class EduBoticsApp:
         # Native camera capture bridge (Windows student path). Created on
         # environment start, stopped on environment stop / app close.
         self.camera_bridge = None
+        # Camera-health poll (see `_poll_camera_health`): the scheduled
+        # `root.after` id, and the last error string seen per role so the log
+        # fires on a CHANGE and never on every tick.
+        self._camera_health_after_id = None
+        self._camera_health_last = {}
         # Phone-as-3rd-camera HTTPS receiver (optional). Created on environment
         # start when the toggle is on; the slot is shared with the camera
         # bridge's external sender (cam_id 2).
@@ -618,6 +669,33 @@ class EduBoticsApp:
             # Keep the inner frame as wide as the canvas (so wraplength/fill=X
             # widgets behave exactly as they did when packed straight into root).
             canvas.itemconfigure(window_id, width=event.width)
+            # `wraplength` is a FIXED pixel value, so the helper paragraphs
+            # asked for ~620 px inside a container that is 501 px wide at
+            # `minsize` — and the only scrollbar here is VERTICAL, so the
+            # clipped text had no way to be reached at all. Re-wrap to the
+            # width the container actually has.
+            #
+            # PER LABEL, not one width for all of them. The paragraphs sit at
+            # different NESTING DEPTHS: some directly in this scroll container,
+            # others inside a `ttk.LabelFrame(padding=10)` that costs them its
+            # padding and border on top of the inner frame's. A single flat
+            # `event.width - 40` is therefore correct for the shallow ones and
+            # too generous for the nested ones — measured at `minsize`, the
+            # Schritt-D HuggingFace paragraph asked for 589 px in a 581 px
+            # container, i.e. 8 px of text no scrollbar could reach. Tuning the
+            # constant only moves which depth is wrong; measuring the actual
+            # inset is right at every depth, including any added later.
+            survivors = []
+            for lbl in getattr(self, "_wrapping_labels", ()):
+                try:
+                    if not lbl.winfo_exists():
+                        continue  # destroyed with a rebuilt frame
+                    lbl.configure(
+                        wraplength=self._hint_wrap_width(lbl, canvas, event.width))
+                    survivors.append(lbl)
+                except tk.TclError:
+                    continue
+            self._wrapping_labels = survivors
             _sync_height()
 
         inner.bind("<Configure>", _on_inner_configure)
@@ -640,16 +718,100 @@ class EduBoticsApp:
 
         return inner
 
+    @staticmethod
+    def _hint_wrap_width(label, canvas, canvas_width):
+        """Text width available to one registered helper paragraph.
+
+        The label's LEFT INSET relative to the canvas — its padding and borders,
+        summed over however many frames it is nested in — is what a flat margin
+        cannot know. Doubling it accounts for the symmetric inset on the right.
+
+        Reading it from the CURRENT layout while handling the <Configure> for the
+        NEW one is sound because the inset is WIDTH-INDEPENDENT: padding and
+        border thicknesses do not change when the window resizes, and these
+        labels are packed `anchor=W`, so the label's x is its container's left
+        edge plus that padding either way. What the resize changes is the space
+        to the RIGHT of the label, which is exactly what is being recomputed.
+
+        Falls back to `HINT_WRAP_FALLBACK_INSET_PX` whenever the measurement
+        cannot be trusted — an unrealized widget answers 0 or the parent's
+        position, and an implausible inset (negative, or a third of the window)
+        means the tree is mid-layout rather than genuinely deeply nested.
+        """
+        try:
+            inset = label.winfo_rootx() - canvas.winfo_rootx()
+        except tk.TclError:
+            inset = -1
+        if not 0 < inset < max(1, canvas_width // 3):
+            inset = HINT_WRAP_FALLBACK_INSET_PX
+        return max(HINT_WRAP_MIN_PX, canvas_width - 2 * inset)
+
+    def _hint_label(self, parent, text=None, textvariable=None, pady=(2, 0)):
+        """A grey helper paragraph that RE-WRAPS with the window.
+
+        One place for the three literals these six paragraphs used to repeat
+        (`foreground="gray"`, `font=(theme_mod.FONT_FAMILY, 8)`, `wraplength=620`), and the
+        registration that makes the re-wrap work: a fixed `wraplength` clipped
+        them at `minsize` with only a vertical scrollbar to reach the rest.
+        """
+        kwargs = {
+            "style": "Hint.TLabel",
+            "wraplength": HINT_WRAP_DEFAULT_PX,
+            "justify": tk.LEFT,
+        }
+        if textvariable is not None:
+            kwargs["textvariable"] = textvariable
+        else:
+            kwargs["text"] = text
+        label = ttk.Label(parent, **kwargs)
+        label.pack(anchor=tk.W, pady=pady)
+        self._wrapping_labels.append(label)
+        return label
+
+    def _bind_step_state(self, var, label):
+        """Colour a Schritt status label from the text its StringVar carries.
+
+        A TRACE, not a call at each write site, and that is the load-bearing
+        part: the three status vars are written from `_scan_arms._do_scan`,
+        `_try_rehydrate_arms` and `_refresh_hf_token_status`, and the first two
+        are SOURCE-EXTRACTED by the test suite against owners built from
+        `types.SimpleNamespace` — a new `self.<anything>` reference in either is
+        an AttributeError there, with nothing about the scan actually changed.
+        Tracing the variable covers every writer, including future ones, and
+        changes neither method by a byte.
+
+        Schritt A-D were uniformly grey before this whether they said „Nicht
+        gescannt", „Gefunden: …" or „Nicht gefunden" (17 greys, one green and
+        one #0A6 in the whole file), so nothing on screen said which steps were
+        done and which had failed."""
+        def _apply(*_args):
+            try:
+                label.configure(style=theme_mod.step_style_for(var.get()))
+            except tk.TclError:  # pragma: no cover — label already destroyed
+                pass
+        var.trace_add("write", _apply)
+        _apply()
+        return label
+
     def _build_ui(self):
         main = self._build_scrollable_container()
 
         # Title
-        title = ttk.Label(main, text="EduBotics", font=("Segoe UI", 18, "bold"))
-        title.pack(pady=(0, 5))
+        title = ttk.Label(main, text="EduBotics", style="Title.TLabel")
+        title.pack(pady=(0, 2))
+
+        # THE WINDOW TITLE STAYS „EduBotics" — `_focus_existing_window` matches
+        # it with an EXACT `FindWindowW(None, "EduBotics")`, and the WebView2
+        # child is titled „EduBotics" too, so a prefix match could focus the
+        # wrong window. Support still needs the version, so it goes here.
+        # `tests/test_gui_theme.py` ties the two literals together.
+        ttk.Label(main, text=f"Version {APP_VERSION}",
+                  style="Hint.TLabel").pack(pady=(0, 6))
 
         # Status bar
         self.status_var = tk.StringVar(value="System wird geprüft...")
-        status_label = ttk.Label(main, textvariable=self.status_var, font=("Segoe UI", 10))
+        status_label = ttk.Label(main, textvariable=self.status_var,
+                                 style="Status.TLabel")
         status_label.pack(pady=(0, 10))
 
         # Progress bar
@@ -667,17 +829,10 @@ class EduBoticsApp:
             command=self._on_mode_changed,
         )
         self.cloud_only_check.pack(anchor=tk.W)
-        ttk.Label(
+        self._hint_label(
             mode_frame,
-            text=(
-                "Aktivieren, um nur die Cloud-Lehrer/Schüler-Anmeldung zu starten — "
-                "Aufnahme und Inferenz benötigen weiterhin Roboter-Hardware."
-            ),
-            foreground="gray",
-            font=("Segoe UI", 8),
-            wraplength=620,
-            justify=tk.LEFT,
-        ).pack(anchor=tk.W, pady=(2, 0))
+            "Aktivieren, um nur die Cloud-Lehrer/Schüler-Anmeldung zu starten — "
+            "Aufnahme und Inferenz benötigen weiterhin Roboter-Hardware.")
 
         # Robot-type (ArmProfile) selection. Hardset for this session and baked
         # into the .env before "Umgebung starten"; a full restart changes it.
@@ -695,31 +850,21 @@ class EduBoticsApp:
         self.robot_type_combo.bind(
             "<<ComboboxSelected>>", lambda _e: self._on_robot_type_changed()
         )
-        ttk.Label(
-            mode_frame,
-            text=(
-                "„OMX – Voll“ nutzt beide Arme; „OMX – Roboter Studio (nur "
-                "Follower)“ braucht nur den Follower-Arm. Der Typ wird beim "
-                "Start festgelegt — zum Wechseln die Umgebung neu starten."
-            ),
-            foreground="gray",
-            font=("Segoe UI", 8),
-            wraplength=620,
-            justify=tk.LEFT,
-        ).pack(anchor=tk.W, pady=(2, 0))
+        # ONE paragraph, driven by the SELECTED profile's `help_de`. The two
+        # static paragraphs this replaced named „OMX – Voll" and „OMX – Roboter
+        # Studio (nur Follower)" on every profile — including edu6_studio, a
+        # different robot with neither name — and the second one described a
+        # leader toggle that `_start_rs_control_server` never even constructs on
+        # a follower-only profile.
+        self.robot_help_var = tk.StringVar(value="")
+        self._hint_label(mode_frame, textvariable=self.robot_help_var)
 
-        ttk.Label(
+        # Profile-independent, so it stays static: true of every robot type.
+        self._hint_label(
             mode_frame,
-            text=(
-                "Roboter Studio (Greifen & Programmieren) wird direkt in der "
-                "Web-Oberfläche gestartet — bei „OMX – Voll“ schaltest du den "
-                "Leader-Arm dort bei Bedarf ab und wieder zu."
-            ),
-            foreground="gray",
-            font=("Segoe UI", 8),
-            wraplength=620,
-            justify=tk.LEFT,
-        ).pack(anchor=tk.W, pady=(6, 0))
+            "Der Robotertyp wird beim Start festgelegt — zum Wechseln die "
+            "Umgebung stoppen und neu starten.",
+            pady=(6, 0))
 
         # ── Schritt A: Leader-Arm ──
         leader_frame = ttk.LabelFrame(main, text="Schritt A: Leader-Arm", padding=10)
@@ -736,7 +881,10 @@ class EduBoticsApp:
         self.btn_scan_leader.pack(side=tk.LEFT)
 
         self.leader_status_var = tk.StringVar(value="Nicht gescannt")
-        ttk.Label(leader_row, textvariable=self.leader_status_var, foreground="gray").pack(side=tk.LEFT, padx=10)
+        self.leader_status_label = ttk.Label(
+            leader_row, textvariable=self.leader_status_var)
+        self.leader_status_label.pack(side=tk.LEFT, padx=10)
+        self._bind_step_state(self.leader_status_var, self.leader_status_label)
 
         # ── Schritt B: Follower-Arm ──
         follower_frame = ttk.LabelFrame(main, text="Schritt B: Follower-Arm", padding=10)
@@ -749,8 +897,23 @@ class EduBoticsApp:
         follower_row = ttk.Frame(follower_frame)
         follower_row.pack(fill=tk.X, pady=5)
 
+        # The SECOND scan button, and it exists because a tkinter widget cannot
+        # be re-parented: on a leader-less robot type Schritt A is hidden
+        # entirely, so the one button the student MUST press cannot stay inside
+        # it. Exactly one of the two is packed at a time (see
+        # `_apply_robot_type_labels`), both run `_scan_arms`, and `_scan_arms`
+        # disables/re-enables BOTH — a stale enabled twin would let a second
+        # worker race the first onto the same /dev/serial ports. Singular
+        # wording, matching the Pi's card („Arm scannen").
+        self.btn_scan_arm = ttk.Button(
+            follower_row, text="Arm scannen", command=self._scan_arms)
+
         self.follower_status_var = tk.StringVar(value="Nicht gescannt")
-        ttk.Label(follower_row, textvariable=self.follower_status_var, foreground="gray").pack(side=tk.LEFT, padx=10)
+        self.follower_status_label = ttk.Label(
+            follower_row, textvariable=self.follower_status_var)
+        self.follower_status_label.pack(side=tk.LEFT, padx=10)
+        self._bind_step_state(self.follower_status_var,
+                              self.follower_status_label)
 
         # Guided repair area for the arms — populated by _show_arm_repair()
         # after a failed scan with the action button that matches the actual
@@ -763,7 +926,10 @@ class EduBoticsApp:
         camera_frame.pack(fill=tk.X, pady=5)
         self.camera_frame = camera_frame
 
-        ttk.Label(camera_frame, text="Kameras anschließen, scannen, und per Checkbox auswählen.").pack(anchor=tk.W)
+        self.camera_hint_label = ttk.Label(
+            camera_frame,
+            text="Kameras anschließen, scannen, und per Checkbox auswählen.")
+        self.camera_hint_label.pack(anchor=tk.W)
         camera_row = ttk.Frame(camera_frame)
         camera_row.pack(fill=tk.X, pady=5)
 
@@ -793,16 +959,12 @@ class EduBoticsApp:
             variable=self.phone_camera_enabled,
         )
         self.phone_cam_check.pack(anchor=tk.W, pady=(6, 0))
-        ttk.Label(
+        self._hint_label(
             camera_frame,
-            text=(
-                "Beim Start zeigt EduBotics eine Web-Adresse an, die du am Handy "
-                "im Browser öffnest. Das Handybild erscheint dann als zusätzliche "
-                "Kamera /phone (für Roboter-Studio und die Vorschau). Das Handy "
-                "muss im selben WLAN sein."
-            ),
-            foreground="gray", font=("Segoe UI", 8), wraplength=620, justify=tk.LEFT,
-        ).pack(anchor=tk.W, pady=(2, 0))
+            "Beim Start zeigt EduBotics eine Web-Adresse an, die du am Handy "
+            "im Browser öffnest. Das Handybild erscheint dann als zusätzliche "
+            "Kamera /phone (für Roboter-Studio und die Vorschau). Das Handy "
+            "muss im selben WLAN sein.")
 
         # ── Schritt D: HuggingFace Token ──
         # One-time token entry. Stored on THIS PC in %LOCALAPPDATA%\EduBotics\.env
@@ -812,15 +974,12 @@ class EduBoticsApp:
         hf_frame = ttk.LabelFrame(main, text="Schritt D: HuggingFace Token", padding=10)
         hf_frame.pack(fill=tk.X, pady=5)
         self.hf_frame = hf_frame
-        ttk.Label(
+        self._hint_label(
             hf_frame,
-            text=(
-                "Einmalig dein HuggingFace-Token eingeben. Es wird auf diesem PC "
-                "gespeichert und für Aufnahme, Training und Inferenz verwendet — "
-                "du musst es später nirgends erneut eingeben."
-            ),
-            foreground="gray", font=("Segoe UI", 8), wraplength=620, justify=tk.LEFT,
-        ).pack(anchor=tk.W)
+            "Einmalig dein HuggingFace-Token eingeben. Es wird auf diesem PC "
+            "gespeichert und für Aufnahme, Training und Inferenz verwendet — "
+            "du musst es später nirgends erneut eingeben.",
+            pady=(0, 0))
         hf_row = ttk.Frame(hf_frame)
         hf_row.pack(fill=tk.X, pady=5)
         self.hf_token_var = tk.StringVar()
@@ -833,18 +992,21 @@ class EduBoticsApp:
         )
         self.btn_save_token.pack(side=tk.LEFT, padx=8)
         self.hf_token_status_var = tk.StringVar()
-        ttk.Label(
-            hf_row, textvariable=self.hf_token_status_var, foreground="gray",
-        ).pack(side=tk.LEFT, padx=4)
+        self.hf_token_status_label = ttk.Label(
+            hf_row, textvariable=self.hf_token_status_var)
+        self.hf_token_status_label.pack(side=tk.LEFT, padx=4)
+        self._bind_step_state(self.hf_token_status_var,
+                              self.hf_token_status_label)
         self._refresh_hf_token_status()
 
         # ── Start-Button ──
         btn_frame = ttk.Frame(main)
-        btn_frame.pack(fill=tk.X, pady=15)
+        btn_frame.pack(fill=tk.X, pady=10)
 
         self.btn_start = ttk.Button(
             btn_frame, text="Umgebung starten",
             command=self._start_environment,
+            style="Primary.TButton",
             state=tk.DISABLED,
         )
         self.btn_start.pack(side=tk.LEFT, padx=5)
@@ -869,6 +1031,7 @@ class EduBoticsApp:
         self.btn_factory_reset = ttk.Button(
             btn_frame, text="Daten zurücksetzen",
             command=self._factory_reset,
+            style="Danger.TButton",
             state=tk.DISABLED,
         )
         self.btn_factory_reset.pack(side=tk.RIGHT, padx=5)
@@ -878,9 +1041,31 @@ class EduBoticsApp:
         log_frame.pack(fill=tk.BOTH, expand=True, pady=5)
 
         self.log_text = scrolledtext.ScrolledText(
-            log_frame, height=12, state=tk.DISABLED,
-            font=("Consolas", 9), wrap=tk.WORD,
+            log_frame, height=8, state=tk.DISABLED,
+            font=theme_mod.LOG_FONT, wrap=tk.WORD,
         )
+        # Severity colouring. `_tag_for_line` reads the marker out of the text,
+        # so lines echoed verbatim from preflight_system.ps1 colour too.
+        for tag, color in LOG_LEVEL_COLORS.items():
+            self.log_text.tag_configure(tag, foreground=color)
+
+        # Getting the log OUT of the pane. „Reparatur fehlgeschlagen — siehe
+        # Protokoll" / „Siehe Protokoll oben." send the student here repeatedly,
+        # and there was no copy, no save and no cap. The clipboard pattern is
+        # the one `_show_manual_elevation_fallback` and `_show_phone_url_dialog`
+        # already use in this file.
+        #
+        # PACKED BEFORE THE TEXT, and `side=BOTTOM`: the whole form is taller
+        # than the window, so pack runs out of height inside this frame and
+        # squeezes whatever it allocates LAST. Measured with the row packed
+        # after the text: both buttons collapsed to 1x1 px and were
+        # unreachable. Reserving the row first gives the text the remainder.
+        log_btn_row = ttk.Frame(log_frame)
+        log_btn_row.pack(side=tk.BOTTOM, fill=tk.X, pady=(4, 0))
+        ttk.Button(log_btn_row, text="Protokoll kopieren",
+                   command=self._copy_log).pack(side=tk.LEFT)
+        ttk.Button(log_btn_row, text="Protokoll speichern",
+                   command=self._save_log).pack(side=tk.LEFT, padx=(6, 0))
         self.log_text.pack(fill=tk.BOTH, expand=True)
 
         # Apply the saved-default robot type's Schritt A/B wording once the
@@ -958,24 +1143,54 @@ class EduBoticsApp:
         return not self._arms_conflict_with_family(profile)
 
     def _apply_robot_type_labels(self):
-        """Reword Schritt A/B for the selected robot type. Follower-only types
-        have no leader, so the leader step becomes a hint that it is not needed
-        (the 'Arme scannen' button stays live — it lives in the leader frame)."""
+        """Reword the whole hardware section for the selected robot type.
+
+        A leader-less robot type gets a SINGULAR, single-step scan card: Schritt
+        A is hidden outright and Schritt B becomes „Schritt A: Roboterarm" with
+        the scan button in it. The frame used to stay on screen titled
+        „Schritt A: Leader-Arm (für diesen Typ nicht nötig)" — wrapped around
+        the only button the student must press — and it rendered identically on
+        `edu6_studio`, a 6-axis Feetech arm with no leader CONCEPT, while naming
+        `omx_follower`'s display label. A permanently empty „Leader —" makes a
+        Roboter-Studio kit look half-broken; the Pi's card went singular for
+        exactly that reason and Windows now agrees with it.
+
+        `omx_full` is untouched: both frames, both plural wordings, the button
+        in Schritt A.
+        """
         profile = self._selected_robot_profile()
-        has_leader = ROBOT_PROFILES.get(profile, {}).get("scan_requires_leader", True)
+        row = ROBOT_PROFILES.get(profile, {})
+        has_leader = row.get("scan_requires_leader", True)
+        self.robot_help_var.set(row.get("help_de", ""))
+        # Schritt C follows the profile's camera_roles — a kit that can carry
+        # only a scene camera must not advertise „bis zu 2".
+        max_cams = len(row.get("camera_roles", ("gripper", "scene"))) or 1
+        self.camera_frame.configure(
+            text=("Schritt C: Kamera" if max_cams == 1
+                  else f"Schritt C: Kameras (bis zu {max_cams})"))
+        self.camera_hint_label.configure(
+            text=("Kamera anschließen, scannen, und per Checkbox auswählen."
+                  if max_cams == 1 else
+                  "Kameras anschließen, scannen, und per Checkbox auswählen."))
+        self.btn_scan_camera.configure(
+            text="Kamera scannen" if max_cams == 1 else "Kameras scannen")
         if has_leader:
+            self.leader_frame.pack(fill=tk.X, pady=5, before=self.follower_frame)
+            self.btn_scan_arm.pack_forget()
+            self.btn_scan_leader.pack(side=tk.LEFT)
             self.leader_frame.configure(text="Schritt A: Leader-Arm")
             self.leader_hint_label.configure(
                 text="Leader-Arm per USB anschließen, dann auf Scannen klicken.")
+            self.follower_frame.configure(text="Schritt B: Follower-Arm")
             self.follower_hint_label.configure(
                 text="Follower-Arm per USB anschließen (wird zusammen mit Leader gescannt).")
         else:
-            self.leader_frame.configure(text="Schritt A: Leader-Arm (für diesen Typ nicht nötig)")
-            self.leader_hint_label.configure(
-                text="Für „Roboter Studio (nur Follower)“ ist kein Leader-Arm nötig — "
-                     "nur den Follower anschließen und auf „Arme scannen“ klicken.")
+            self.leader_frame.pack_forget()
+            self.btn_scan_leader.pack_forget()
+            self.btn_scan_arm.pack(side=tk.LEFT, before=self.follower_status_label)
+            self.follower_frame.configure(text="Schritt A: Roboterarm")
             self.follower_hint_label.configure(
-                text="Follower-Arm per USB anschließen, dann auf „Arme scannen“ klicken.")
+                text="Roboterarm per USB anschließen, dann auf „Arm scannen“ klicken.")
 
     def _on_robot_type_changed(self):
         """Robot-type selector changed — reword Schritt A/B + refresh gating.
@@ -985,6 +1200,15 @@ class EduBoticsApp:
         self._robot_profile_selected = self._robot_label_to_id.get(
             self.robot_type_var.get(), DEFAULT_ROBOT_PROFILE)
         self._apply_robot_type_labels()
+        # The profile decides the camera ROLES, so a type change must re-derive
+        # them. Measured: pick a camera under omx_full (role „gripper", green
+        # „Greifer-Kamera: Cam0"), switch the dropdown to edu6_studio — the role
+        # stayed „gripper" and the label stayed „Greifer-Kamera", and „Umgebung
+        # starten" then wrote CAMERA_NAME_1="gripper" on a rig whose server
+        # subscribes only to /scene/…. That is the likeliest real-world route
+        # into the silent misconfiguration, since changing your mind about the
+        # robot type after picking a camera is an ordinary thing to do.
+        self._on_cameras_changed()
         if not self.cloud_only.get():
             if self._hardware_ready():
                 self._set_status("Bereit — Start klicken.")
@@ -1083,19 +1307,96 @@ class EduBoticsApp:
         messagebox.showinfo(
             "Gespeichert",
             "HuggingFace-Token wurde gespeichert. Es wird beim nächsten "
-            "'Umgebung starten' aktiv.",
+            "„Umgebung starten“ aktiv.",
         )
 
     # ── Logging ──────────────────────────────────────────────────────
 
     def _log(self, msg: str):
-        """Nachricht an die Protokoll-Ausgabe anhängen (thread-sicher)."""
+        """Append a line to the Protokoll (thread-safe).
+
+        SEVERITY IS AN INLINE MARKER, deliberately, not a `level=` parameter:
+        `[OK]` / `[INFO]` / `[WARNUNG]` / `[FEHLER]` — the SAME four
+        `installer/scripts/preflight_system.ps1::Emit` writes, and those lines
+        already land in this very pane via `_run_preflight_diagnostics`. So the
+        two producers finally agree instead of the student reading `[OK]`
+        interleaved with `WARNUNG:`, `ACHTUNG:`, `Tipp:` and `⚠️`.
+
+        A `level=` keyword was considered and rejected: FIVE methods containing
+        `_log` calls are source-extracted by the test suite against a
+        `list.append` double, so a keyword argument there is a TypeError waiting
+        for whoever adds the next log line. An inline marker has exactly one
+        call convention everywhere, and `_tag_for_line` recovers the severity
+        from the text — which also colours the PowerShell-produced lines, which
+        no parameter ever could. `tests/test_gui_log_levels.py` is what keeps
+        the vocabulary closed.
+        """
         def _append():
             self.log_text.config(state=tk.NORMAL)
-            self.log_text.insert(tk.END, msg + "\n")
+            # PER LINE, not per call: `_run_preflight_diagnostics` deliberately
+            # emits its whole block in ONE call (so it cannot interleave with
+            # the prerequisite chain running on another thread), and those are
+            # exactly the lines that already carry their own markers.
+            for line in msg.split("\n"):
+                self.log_text.insert(
+                    tk.END, line + "\n", self._tag_for_line(line) or ())
+            # Bound the buffer. Insert-only and unbounded, this grew for the
+            # whole classroom day (the prerequisite chain alone writes dozens
+            # of lines per launch, and „Arme scannen" re-runs it).
+            try:
+                lines = int(self.log_text.index("end-1c").split(".")[0])
+                if lines > LOG_MAX_LINES:
+                    self.log_text.delete(
+                        "1.0", f"{lines - LOG_MAX_LINES + 1}.0")
+            except (tk.TclError, ValueError):
+                pass
             self.log_text.see(tk.END)
             self.log_text.config(state=tk.DISABLED)
         self.root.after(0, _append)
+
+    @staticmethod
+    def _tag_for_line(line: str) -> str:
+        """The colour tag for a Protokoll line, from its leading marker.
+
+        Reads the marker out of the TEXT rather than taking it from the caller,
+        so lines echoed verbatim from `preflight_system.ps1` colour identically
+        to the ones this file writes. Anything else is untagged (default fg) —
+        never guessed."""
+        for marker, tag in (("[FEHLER]", "fehler"), ("[WARNUNG]", "warnung"),
+                            ("[OK]", "ok"), ("[INFO]", "info")):
+            if line.lstrip().startswith(marker):
+                return tag
+        return ""
+
+    def _copy_log(self):
+        """„Protokoll kopieren" — the pane the student is repeatedly told to
+        consult („siehe Protokoll") had no way to get its text OUT of it."""
+        try:
+            text = self.log_text.get("1.0", tk.END)
+            self.root.clipboard_clear()
+            self.root.clipboard_append(text)
+            self.root.update()
+        except tk.TclError as exc:
+            self._log(f"[WARNUNG] Das Protokoll konnte nicht kopiert werden: {exc}")
+            return
+        self._log("[OK] Protokoll in die Zwischenablage kopiert.")
+
+    def _save_log(self):
+        """„Protokoll speichern" — into the machine-wide diagnostics leaf
+        support already asks for, so one folder holds every artefact."""
+        try:
+            target_dir = _edubotics_diag_dir()
+            os.makedirs(target_dir, exist_ok=True)
+            path = os.path.join(
+                target_dir,
+                time.strftime("edubotics_protokoll_%Y%m%d_%H%M%S.txt"))
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(self.log_text.get("1.0", tk.END))
+        except Exception as exc:  # noqa: BLE001 — a diagnostic must never raise
+            self._log(f"[WARNUNG] Das Protokoll konnte nicht gespeichert "
+                      f"werden: {exc}")
+            return
+        self._log(f"[OK] Protokoll gespeichert: {path}")
 
     def _set_status(self, msg: str):
         """Statusleiste aktualisieren (thread-sicher)."""
@@ -1305,11 +1606,11 @@ class EduBoticsApp:
             if not docker_manager.wait_for_docker(
                 callback=lambda e, t: self._set_status(f"Warte auf EduBotics-Umgebung... {e}s/{t}s")
             ):
-                self._log("FEHLER: EduBotics-Umgebung konnte nicht gestartet werden.")
+                self._log("[FEHLER] EduBotics-Umgebung konnte nicht gestartet werden.")
                 self._set_status("EduBotics-Umgebung nicht bereit")
                 self.root.after(0, lambda: self.progress.stop())
                 return
-        self._log("EduBotics-Umgebung: OK")
+        self._log("[OK] EduBotics-Umgebung bereit.")
 
         # ── Lifecycle: the GUI is the SOLE owner of the container lifecycle ──
         # The robot stack must come up ONLY after the student has scanned both
@@ -1354,7 +1655,8 @@ class EduBoticsApp:
         except Exception:
             pass
         if docker_manager.ensure_environment_stopped(log=self._log):
-            self._log("Umgebung gestoppt — sie startet erst, wenn du auf 'Umgebung starten' klickst.")
+            self._log("[INFO] Umgebung gestoppt — sie startet erst, wenn du auf "
+                  "„Umgebung starten“ klickst.")
 
         # ── Rootfs ↔ image version handshake ──────────────────────────────
         # A rootfs bump ships new dockerd pins / modprobe list / udev rules that
@@ -1403,11 +1705,11 @@ class EduBoticsApp:
                 callback=lambda img, i, t: self._set_status(f"Lade Image {i+1}/{t}: {img.split('/')[-1]}"),
                 log=self._log,
             ):
-                self._log("FEHLER: Images konnten nicht heruntergeladen werden. Internetverbindung prüfen.")
+                self._log("[FEHLER] Images konnten nicht heruntergeladen werden. Internetverbindung prüfen.")
                 self._set_status("Image-Download fehlgeschlagen")
                 self.root.after(0, lambda: self.progress.stop())
                 return
-            self._log("Alle Images erfolgreich heruntergeladen.")
+            self._log("[OK] Alle Images erfolgreich heruntergeladen.")
 
         # Check for image updates. The function pre-checks network reachability
         # and per-image manifest digests so an offline classroom returns in ~5s
@@ -1416,9 +1718,9 @@ class EduBoticsApp:
         self._set_status("Auf Updates prüfen...")
         self._log("Prüfe auf Image-Updates...")
         if docker_manager.check_for_updates(log=self._log):
-            self._log("Images auf neueste Version aktualisiert.")
+            self._log("[OK] Images auf neueste Version aktualisiert.")
         else:
-            self._log("Images sind aktuell.")
+            self._log("[OK] Images sind aktuell.")
 
         # Surface the persisted last-pull state so a teacher can see at a
         # glance which classroom PCs have been offline too long to refresh.
@@ -1437,7 +1739,7 @@ class EduBoticsApp:
                 age_int = int(age)
                 if pull_status.get("is_stale"):
                     self._log(
-                        f"  ⚠️ Image-Frische: letzter erfolgreicher Update vor "
+                        f"[WARNUNG] Image-Frische: letzter erfolgreicher Update vor "
                         f"{age_int} Tagen — bitte Internetverbindung prüfen."
                     )
                 else:
@@ -1729,7 +2031,7 @@ class EduBoticsApp:
                 frame,
                 text="Die automatische Administrator-Abfrage konnte nicht "
                      "gestartet werden.",
-                font=("Segoe UI", 10, "bold"),
+                font=(theme_mod.FONT_FAMILY, 10, "bold"),
                 wraplength=520,
             ).pack(anchor=tk.W)
             ttk.Label(
@@ -1737,13 +2039,13 @@ class EduBoticsApp:
                 text="Bitte öffne 'Windows PowerShell' oder das Terminal als "
                      "Administrator (Rechtsklick → 'Als Administrator "
                      "ausführen') und führe folgenden Befehl aus:",
-                font=("Segoe UI", 9),
+                font=(theme_mod.FONT_FAMILY, 9),
                 wraplength=520,
                 foreground="gray",
             ).pack(anchor=tk.W, pady=(4, 8))
 
             cmd_box = scrolledtext.ScrolledText(
-                frame, height=5, width=68, wrap=tk.WORD, font=("Consolas", 9)
+                frame, height=5, width=68, wrap=tk.WORD, font=theme_mod.LOG_FONT
             )
             cmd_box.insert(tk.END, command)
             cmd_box.config(state=tk.DISABLED)
@@ -1898,9 +2200,15 @@ class EduBoticsApp:
             output = (proc.stdout or "")
             lines = [ln for ln in output.splitlines() if ln.strip()]
             if lines:
-                self._log("Systemdiagnose (Preflight):")
-                for line in lines:
-                    self._log(f"  {line}")
+                # ONE `_log` call, not one per line. `_check_prerequisites`
+                # starts this on a daemon thread and then runs the prerequisite
+                # chain on ANOTHER, and `_log` marshals through
+                # `root.after(0, …)` — so the lines were serialised but the
+                # BLOCK was not atomic, and a multi-line diagnosis could land
+                # split across the prerequisite chain's own output.
+                self._log("\n".join(
+                    ["[INFO] Systemdiagnose (Preflight):"]
+                    + [f"  {line}" for line in lines]))
         except Exception:
             # Diagnostics are best-effort — never let them raise into startup.
             pass
@@ -2258,19 +2566,19 @@ class EduBoticsApp:
         ttk.Label(
             frame,
             text="Ein Update ist verfügbar!",
-            font=("Segoe UI", 14, "bold"),
+            font=(theme_mod.FONT_FAMILY, 14, "bold"),
         ).pack(pady=(0, 5))
 
         ttk.Label(
             frame,
             text=f"Neue Version: {update_info['version']}  (aktuell: {APP_VERSION})",
-            font=("Segoe UI", 10),
+            font=(theme_mod.FONT_FAMILY, 10),
         ).pack(pady=(0, 5))
 
         ttk.Label(
             frame,
             text="Bitte aktualisiere EduBotics, bevor du fortfährst.",
-            font=("Segoe UI", 9),
+            font=(theme_mod.FONT_FAMILY, 9),
             foreground="gray",
         ).pack(pady=(0, 10))
 
@@ -2279,7 +2587,7 @@ class EduBoticsApp:
         progress_bar.pack(pady=(0, 5))
 
         status_var = tk.StringVar(value="")
-        status_label = ttk.Label(frame, textvariable=status_var, font=("Segoe UI", 8))
+        status_label = ttk.Label(frame, textvariable=status_var, font=(theme_mod.FONT_FAMILY, 8))
         status_label.pack(pady=(0, 10))
 
         btn_frame = ttk.Frame(frame)
@@ -2302,10 +2610,17 @@ class EduBoticsApp:
                         f"{mb_down:.1f} / {mb_total:.1f} MB"
                     ))
 
+            # A 404, a truncated transfer, a checksum mismatch, a full disk and
+            # a timeout all returned a bare None, so this modal — which the
+            # student CANNOT CLOSE until an attempt has failed — said „bitte
+            # Internetverbindung prüfen" for every one of them, including the
+            # two cases where the connection is fine and the release is broken.
+            reasons = []
             path = update_checker.download_installer(
                 update_info["download_url"],
                 progress_callback=_progress,
                 expected_sha256=update_info.get("sha256"),
+                reason_callback=reasons.append,
             )
 
             if path:
@@ -2313,10 +2628,11 @@ class EduBoticsApp:
                 self.root.after(500, lambda: self._launch_installer_and_exit(path))
             else:
                 self._update_fail_count += 1
+                reason = reasons[0] if reasons else (
+                    "Download fehlgeschlagen. Bitte Internetverbindung prüfen.")
+                self._log(f"[FEHLER] Update-Download fehlgeschlagen: {reason}")
                 self.root.after(0, lambda: progress_var.set(0))
-                self.root.after(0, lambda: status_var.set(
-                    "Download fehlgeschlagen. Bitte Internetverbindung prüfen."
-                ))
+                self.root.after(0, lambda r=reason: status_var.set(r))
                 self.root.after(0, lambda: btn_update.config(
                     state=tk.NORMAL, text="Erneut versuchen"
                 ))
@@ -2336,7 +2652,7 @@ class EduBoticsApp:
 
         def _on_skip_click():
             dialog.destroy()
-            self._log("WARNUNG: Update übersprungen. Einige Funktionen funktionieren möglicherweise nicht korrekt.")
+            self._log("[WARNUNG] Update übersprungen. Einige Funktionen funktionieren möglicherweise nicht korrekt.")
             self._set_status("System wird geprüft...")
             threading.Thread(target=self._run_prerequisite_checks, daemon=True).start()
 
@@ -2359,7 +2675,7 @@ class EduBoticsApp:
         try:
             os.startfile(installer_path)
         except Exception as e:
-            self._log(f"FEHLER: Installer konnte nicht gestartet werden: {e}")
+            self._log(f"[FEHLER] Installer konnte nicht gestartet werden: {e}")
             return
         # Release every handle on gui/ + the distro before the installer deletes
         # us. Each teardown is best-effort — a raise here must not stop the exit.
@@ -2453,6 +2769,10 @@ class EduBoticsApp:
             return
         self._scanning = True
         self.btn_scan_leader.config(state=tk.DISABLED)
+        # BOTH scan buttons: only one is packed at a time, but the hidden twin
+        # keeps its own state, and a re-pack (a robot-type switch mid-scan)
+        # would put a live button back on screen over a running worker.
+        self.btn_scan_arm.config(state=tk.DISABLED)
         # Capture the selected profile on the MAIN thread (tk StringVar reads
         # are not thread-safe) so the worker's success branch is type-aware.
         profile_row = ROBOT_PROFILES.get(self._selected_robot_profile(), {})
@@ -2523,9 +2843,21 @@ class EduBoticsApp:
                     f"Gefunden: {leader.description} ({leader.serial_path})"
                 ))
                 self._log(f"Leader gefunden: {leader.serial_path}")
-            else:
+            elif scan_requires_leader:
                 self.root.after(0, lambda: self.leader_status_var.set("Nicht gefunden"))
                 self._log("Leader-Arm nicht gefunden.")
+            else:
+                # A follower-only robot type has no leader, so „not found" is
+                # the correct outcome, not a fault — reporting it as one made a
+                # fully successful scan read „Nicht gefunden" in Schritt A while
+                # the status bar said „Follower-Arm gefunden!". No log line: the
+                # follower's own line already reports the success.
+                #
+                # INLINE STRING ON PURPOSE: this method is source-extracted by
+                # tests/test_gui_robot_type.py with a hand-built globals dict,
+                # so a new module-level constant would raise NameError there.
+                self.root.after(0, lambda: self.leader_status_var.set(
+                    "Für diesen Robotertyp nicht nötig"))
 
             if follower:
                 self.hardware.follower = follower
@@ -2537,10 +2869,12 @@ class EduBoticsApp:
                 self.root.after(0, lambda: self.follower_status_var.set("Nicht gefunden"))
                 self._log("Follower-Arm nicht gefunden.")
 
-            self._scanning = False
+            # The flag/spinner/button reset lives in `_do_scan_guarded`'s
+            # `finally` below — NOT here. `_do_scan` has early `return`s and
+            # un-guarded calls, so a raise anywhere in it used to leave
+            # `_scanning` True and the scan button disabled for the rest of the
+            # session, with the spinner running.
             self._update_start_button()
-            self.root.after(0, lambda: self.progress.stop())
-            self.root.after(0, lambda: self.btn_scan_leader.config(state=tk.NORMAL))
 
             # A follower-only robot type (Roboter Studio kit) has no leader, so a
             # leader-less scan is SUCCESS — it must NOT route into the failure /
@@ -2549,7 +2883,11 @@ class EduBoticsApp:
                 if scan_requires_leader:
                     self._set_status("Beide Arme gefunden! Kamera auswählen und auf Start klicken.")
                 else:
-                    self._set_status("Follower-Arm gefunden! Kamera auswählen und auf Start klicken.")
+                    # SINGULAR, matching the single-step scan card this profile
+                    # renders („Schritt A: Roboterarm" / „Arm scannen"). The
+                    # leader/follower distinction does not exist on a
+                    # follower-only kit and is meaningless on edu6_studio.
+                    self._set_status("Roboterarm gefunden! Kamera auswählen und auf Start klicken.")
                 return
 
             # Cross-probe notice (edu6 §5.4): the most likely setup mistake —
@@ -2578,7 +2916,12 @@ class EduBoticsApp:
             for line in diag.message_de.splitlines():
                 self._log(line)
             if diag.details:
-                self._log(f"(Technisch: {diag.details})")
+                # `UsbDiagnosis.details` is ENGLISH and often raw PowerShell
+                # („Get-PnpDevice found no InstanceId matching …"). It is not
+                # addressed to a 13-year-old, so it is labelled as what it is
+                # rather than dressed up as a German sentence with „(Technisch:".
+                self._log(f"[INFO] Technische Details für den Support: "
+                          f"{diag.details}")
             self._log(f"Vollständiges Diagnose-Log: {device_manager.get_diagnostics_log_path()}")
 
             short_status = diag.message_de.splitlines()[0] if diag.message_de else (
@@ -2594,7 +2937,33 @@ class EduBoticsApp:
             self.root.after(
                 0, lambda d=diag, f=arm_family: self._show_arm_repair(d, f))
 
-        threading.Thread(target=_do_scan, daemon=True).start()
+        def _do_scan_guarded():
+            # WRAP THE TARGET, NEVER `_do_scan`'s BODY, and keep the reset trio
+            # HERE rather than duplicating it:
+            #   * test_shutdown_teardown requires the webview close to be a
+            #     TOP-LEVEL `ast.Try` of `_do_scan` WITH handlers, so
+            #     re-indenting `_do_scan`'s body into a try pushes it one level
+            #     down and drops it out of that check;
+            #   * `test_confirming_scans_byte_for_byte_as_it_did_before` pins
+            #     the scan button to exactly ['disabled', 'normal'], so a
+            #     `finally` that re-enables it IN ADDITION to an in-body call
+            #     produces a third transition.
+            # Four other shapes were tried and all failed for one of those two
+            # reasons; this one is the measured-green shape.
+            try:
+                _do_scan()
+            except Exception as exc:  # noqa: BLE001 — a worker must never strand the UI
+                self._log(f"[FEHLER] Der Arm-Scan wurde abgebrochen: {exc}")
+                self._set_status("Arm-Scan fehlgeschlagen — siehe Protokoll")
+            finally:
+                self._scanning = False
+                self.root.after(0, lambda: self.progress.stop())
+                self.root.after(
+                    0, lambda: self.btn_scan_leader.config(state=tk.NORMAL))
+                self.root.after(
+                    0, lambda: self.btn_scan_arm.config(state=tk.NORMAL))
+
+        threading.Thread(target=_do_scan_guarded, daemon=True).start()
 
     # ── Guided arm repair ────────────────────────────────────────────────
 
@@ -2708,6 +3077,16 @@ class EduBoticsApp:
     def _scan_cameras(self):
         """Nach Webcams scannen — läuft im Hintergrund."""
         if self._scanning:
+            # `_scanning` is SHARED with the arm scan, but only that path's own
+            # button is disabled — „Kameras scannen" stayed visibly enabled and
+            # this `return` was completely silent: no status, no log, no cursor
+            # change. The button looked alive and did nothing.
+            #
+            # Deliberately NOT mirrored into `_scan_arms`'s combined early
+            # return: `test_declining_does_ABSOLUTELY_NOTHING` requires a
+            # declined confirmation to write no status and no log, and that
+            # decline shares the guard clause with `_scan_confirm_open`.
+            self._set_status("Ein Scan läuft bereits — bitte warten.")
             return
         self._scanning = True
         # Rescanning probes the devices — release previews first (PR-4).
@@ -2716,6 +3095,10 @@ class EduBoticsApp:
 
         def _do_scan():
             self._set_status("Kameras werden gesucht...")
+            # The arm scan spins the progress bar and the camera scan did not,
+            # so a camera scan (which can take seconds per device) gave no
+            # motion cue at all.
+            self.root.after(0, lambda: self.progress.start(10))
             self._log("Video-Geräte werden gescannt...")
 
             self.cameras = device_manager.scan_cameras()
@@ -2770,9 +3153,15 @@ class EduBoticsApp:
                             blocked = win_camera.camera_privacy_blocked()
                         except Exception:  # noqa: BLE001
                             blocked = None
-                        if blocked:
+                        # TRI-STATE: `camera_privacy_blocked()` answers True /
+                        # False / None, where None means „could not determine"
+                        # (registry unreadable, key absent, non-Windows). A
+                        # truthiness test folded None into the False branch and
+                        # handed the student a confident „Tipp: … Geräte-Manager"
+                        # on a machine where the check simply failed.
+                        if blocked is True:
                             self._log(
-                                "ACHTUNG: Windows blockiert den Kamera-Zugriff für "
+                                "[WARNUNG] Windows blockiert den Kamera-Zugriff für "
                                 "Desktop-Apps. Einstellungen → Datenschutz und "
                                 "Sicherheit → Kamera → 'Desktop-Apps den Zugriff "
                                 "auf Ihre Kamera erlauben' EINSCHALTEN, dann erneut scannen."
@@ -2782,11 +3171,19 @@ class EduBoticsApp:
                                 text="Windows-Kamera-Einstellungen öffnen",
                                 command=self._open_camera_privacy_settings,
                             ).pack(anchor=tk.W, pady=(4, 0))
+                        elif blocked is False:
+                            self._log(
+                                "[INFO] Kamera per USB anschließen und prüfen, ob sie im "
+                                "Windows Geräte-Manager als „Kamera“ erscheint. "
+                                "Bei Bedarf USB-Port wechseln, dann erneut scannen."
+                            )
                         else:
                             self._log(
-                                "Tipp: Kamera per USB anschließen und prüfen, ob sie im "
-                                "Windows Geräte-Manager als 'Kamera' erscheint. "
-                                "Bei Bedarf USB-Port wechseln, dann erneut scannen."
+                                "[INFO] Die Windows-Kamera-Einstellungen konnten "
+                                "nicht geprüft werden. Bitte in den Einstellungen "
+                                "kontrollieren, ob Desktop-Apps auf die Kamera "
+                                "zugreifen dürfen, und die Kamera per USB "
+                                "anschließen."
                             )
 
                 # Unbound-cameras hint + repair button. Shows even when SOME
@@ -2797,7 +3194,7 @@ class EduBoticsApp:
                         f"{d.description or d.vid_pid}" for d in unbound
                     )
                     self._log(
-                        f"Hinweis: {len(unbound)} Kamera(s) sichtbar aber nicht freigegeben: {summary}"
+                        f"[INFO] {len(unbound)} Kamera(s) sichtbar aber nicht freigegeben: {summary}"
                     )
                     btn = ttk.Button(
                         self.camera_checks_frame,
@@ -2806,13 +3203,26 @@ class EduBoticsApp:
                     )
                     btn.pack(anchor=tk.W, pady=(5, 0))
 
-                self.btn_scan_camera.config(state=tk.NORMAL)
-
-            self._scanning = False
+            # The button reset moved OUT of `_update_checkbuttons` and into
+            # `_do_scan_guarded`'s `finally`: this closure runs only if
+            # `_do_scan` reached its `root.after`, so any raise above it left
+            # „Kameras scannen" disabled for the rest of the session.
             self.root.after(0, _update_checkbuttons)
             self._set_status("Kamera-Scan abgeschlossen.")
 
-        threading.Thread(target=_do_scan, daemon=True).start()
+        def _do_scan_guarded():
+            try:
+                _do_scan()
+            except Exception as exc:  # noqa: BLE001 — a worker must never strand the UI
+                self._log(f"[FEHLER] Der Kamera-Scan wurde abgebrochen: {exc}")
+                self._set_status("Kamera-Scan fehlgeschlagen — siehe Protokoll")
+            finally:
+                self._scanning = False
+                self.root.after(0, lambda: self.progress.stop())
+                self.root.after(
+                    0, lambda: self.btn_scan_camera.config(state=tk.NORMAL))
+
+        threading.Thread(target=_do_scan_guarded, daemon=True).start()
 
     def _resolve_bind_script(self):
         """Locate bind_devices.ps1 in either the production or dev layout."""
@@ -2983,11 +3393,21 @@ class EduBoticsApp:
 
     def _on_cameras_changed(self):
         """Ausgewählte Kameras in HardwareConfig speichern und Rollenzuweisung anzeigen."""
+        # The PROFILE decides which roles exist and therefore how many cameras
+        # this rig can use: edu6_studio declares camera_roles=('scene',) and its
+        # server config subscribes to exactly one topic, so a second camera
+        # would publish a topic nothing reads. The cap used to be a flat 2.
+        roles = ROBOT_PROFILES.get(
+            self._selected_robot_profile(), {}).get(
+                "camera_roles", ("gripper", "scene")) or ("gripper", "scene")
+        max_cams = min(2, len(roles))
+
         selected = []
         for i, var in enumerate(self.camera_check_vars):
             if var.get() and i < len(self.cameras):
                 selected.append(self.cameras[i])
-        selected = selected[:2]  # Max 2 cameras
+        dropped = len(selected) - max_cams
+        selected = selected[:max_cams]
 
         # Release any running previews BEFORE the role frame (which hosts
         # them) is rebuilt — and before captures could double-open.
@@ -2997,15 +3417,23 @@ class EduBoticsApp:
         for w in self.camera_role_frame.winfo_children():
             w.destroy()
 
+        if dropped > 0:
+            # Say so rather than silently ignoring a ticked box.
+            ttk.Label(
+                self.camera_role_frame,
+                text=("Dieser Robotertyp nutzt nur eine Kamera — die erste "
+                      "ausgewählte wird verwendet."
+                      if max_cams == 1 else
+                      f"Es werden höchstens {max_cams} Kameras verwendet."),
+                foreground="gray", wraplength=620, justify=tk.LEFT,
+            ).pack(anchor=tk.W, pady=(0, 4))
+
         if len(selected) == 1:
             # Single camera — auto-assign the PROFILE's first role (edu6 §4.4):
             # a Roboter-Studio kit's lone camera is the SCENE camera, not the
             # gripper cam (perception + the omx_f/edu6 config topics hang off
             # the role name, so "gripper" here broke every follower-only kit).
-            roles = ROBOT_PROFILES.get(
-                self._selected_robot_profile(), {}).get(
-                    "camera_roles", ("gripper", "scene"))
-            role = roles[0] if roles else "gripper"
+            role = roles[0]
             selected[0].role = role
             self.hardware.cameras = selected
             label_de = "Szenen-Kamera" if role == "scene" else "Greifer-Kamera"
@@ -3020,7 +3448,7 @@ class EduBoticsApp:
             # in the preview holders built by _start_camera_previews.
             ttk.Label(self.camera_role_frame,
                       text="Kamera-Rollen zuweisen:",
-                      font=("", 9, "bold")).pack(anchor=tk.W, pady=(5, 2))
+                      style="Bold.TLabel").pack(anchor=tk.W, pady=(5, 2))
             ttk.Label(self.camera_role_frame,
                       text="Schau in die beiden Live-Vorschauen und wähle "
                            "darunter die passende Rolle — Greifer = Kamera am "
@@ -3028,10 +3456,16 @@ class EduBoticsApp:
                       foreground="gray", wraplength=620,
                       justify=tk.LEFT).pack(anchor=tk.W, pady=(0, 2))
             # Sensible default (corrected via the per-preview selectors): first
-            # camera = Greifer, second = Szene. Keep hardware.cameras gripper-
-            # first — the order config_generator / _start_camera_bridge expect.
-            selected[0].role = "gripper"
-            selected[1].role = "scene"
+            # camera = Greifer, second = Szene. Taken from the PROFILE now, but
+            # filtered through the FIXED wire order („gripper" then „scene")
+            # rather than the registry's own tuple order — `omx_follower` lists
+            # ('scene', 'gripper'), and that ordering is there to pick a LONE
+            # camera's role, not to reorder a pair. hardware.cameras must stay
+            # gripper-first: config_generator writes CAMERA_NAME_1/_2 in list
+            # order and camera_ingest_node maps gripper→cam_id 0, scene→1.
+            pair = [r for r in ("gripper", "scene") if r in roles]
+            selected[0].role = pair[0]
+            selected[1].role = pair[1]
             self.hardware.cameras = [selected[0], selected[1]]
             self._start_camera_previews(selected)
         else:
@@ -3112,7 +3546,7 @@ class EduBoticsApp:
             if follower is None or (requires_leader and leader is None):
                 self._log(
                     "Letzte Arm-Konfiguration nicht bestätigt — bitte "
-                    "'Arme scannen' klicken."
+                    "„Arme scannen“ klicken."
                 )
                 return
             # A manual scan may be running or completed meanwhile — never
@@ -3133,7 +3567,7 @@ class EduBoticsApp:
             ))
             self._log(
                 "Letzte Arm-Konfiguration wiederhergestellt — bei Probleme"
-                "n mit den Armen bitte erneut 'Arme scannen' klicken."
+                "n mit den Armen bitte erneut „Arme scannen“ klicken."
             )
             self._update_start_button()
 
@@ -3216,6 +3650,18 @@ class EduBoticsApp:
         two_cams = len(cameras) >= 2
         self._preview_role_vars = []
 
+        # The role picker is an ALLOWLIST, not a hint: a role this robot type
+        # has no topic for must not be OFFERABLE. Same rule the Pi's
+        # SystemPage.js applies to its <option> set, and the display ORDER
+        # comes from this fixed list rather than the registry tuple (which
+        # orders for the lone-camera default).
+        allowed_roles = ROBOT_PROFILES.get(
+            self._selected_robot_profile(), {}).get(
+                "camera_roles", ("gripper", "scene")) or ("gripper", "scene")
+        role_values = [de for wire, de in (("gripper", "Greifer"),
+                                           ("scene", "Szene"))
+                       if wire in allowed_roles]
+
         preview_row = ttk.Frame(self.camera_role_frame)
         preview_row.pack(fill=tk.X, pady=(6, 2))
         targets = []
@@ -3231,30 +3677,37 @@ class EduBoticsApp:
             holder.pack(side=tk.LEFT, padx=8)
             tk.Label(
                 holder, text=cam_label, bg=color, fg="white",
-                font=("", 9, "bold"), padx=8, pady=2).pack(fill=tk.X)
+                font=theme_mod.BADGE_FONT, padx=8, pady=2).pack(fill=tk.X)
             label = ttk.Label(
                 holder, text="Vorschau lädt ...", anchor=tk.CENTER)
             label.pack(padx=4, pady=4)
-            if two_cams:
+            if two_cams and len(role_values) > 1:
                 role_var = tk.StringVar(
-                    value="Greifer" if position == 0 else "Szene")
+                    value="Szene" if getattr(cam, "role", "") == "scene"
+                    else "Greifer")
                 self._preview_role_vars.append(role_var)
                 role_row = ttk.Frame(holder)
                 role_row.pack(fill=tk.X, padx=4, pady=(0, 4))
                 ttk.Label(role_row, text="Rolle:").pack(side=tk.LEFT)
                 combo = ttk.Combobox(
                     role_row, textvariable=role_var,
-                    values=["Greifer", "Szene"], state="readonly", width=10)
+                    values=role_values, state="readonly", width=10)
                 combo.pack(side=tk.LEFT, padx=4)
                 combo.bind(
                     "<<ComboboxSelected>>",
                     lambda e, p=position: self._on_preview_role_changed(
                         cameras, p))
             else:
-                # Single camera — role is fixed (Greifer); no selector needed.
+                # No selector: either a single camera, or a robot type that
+                # declares only ONE camera role. Report the role
+                # `_on_cameras_changed` ACTUALLY assigned from the profile —
+                # this used to be hardcoded „Rolle: Greifer" and sat three rows
+                # under a green „Szenen-Kamera: <name>" saying the opposite.
                 self._preview_role_vars.append(None)
+                role_de = ("Szene" if getattr(cam, "role", "") == "scene"
+                           else "Greifer")
                 ttk.Label(
-                    holder, text="Rolle: Greifer", foreground="gray").pack(
+                    holder, text=f"Rolle: {role_de}", foreground="gray").pack(
                     padx=4, pady=(0, 4))
             if cam.win_index < 0:
                 # usb_cam rollback path — no native index to open (the
@@ -3343,7 +3796,7 @@ class EduBoticsApp:
                 ok, frame = _read_freshest_frame(cap)
             except Exception as exc:  # noqa: BLE001 — preview is best-effort
                 label.config(
-                    text="Kamera liefert kein Bild – evtl. belegt oder "
+                    text="Kamera liefert kein Bild — evtl. belegt oder "
                          "Treiberproblem")
                 _log_once(
                     f"Kamera-Vorschau Lesefehler ({name}, Index "
@@ -3360,7 +3813,7 @@ class EduBoticsApp:
                         and self._preview_empty_reads[win_index]
                         >= give_up_ticks):
                     label.config(
-                        text="Kamera liefert kein Bild – evtl. belegt oder "
+                        text="Kamera liefert kein Bild — evtl. belegt oder "
                              "Treiberproblem")
                     _log_once(
                         f"Kamera-Vorschau liefert kein Bild ({name}, Index "
@@ -3370,7 +3823,7 @@ class EduBoticsApp:
             data = _frame_to_photo_data(frame)
             if data is None:
                 label.config(
-                    text="Kamera liefert kein Bild – evtl. belegt oder "
+                    text="Kamera liefert kein Bild — evtl. belegt oder "
                          "Treiberproblem")
                 _log_once(
                     f"Kamera-Vorschau konnte das Bild nicht kodieren "
@@ -3380,7 +3833,7 @@ class EduBoticsApp:
                 photo = tk.PhotoImage(data=data)
             except Exception as exc:  # noqa: BLE001 — preview is best-effort
                 label.config(
-                    text="Kamera liefert kein Bild – evtl. belegt oder "
+                    text="Kamera liefert kein Bild — evtl. belegt oder "
                          "Treiberproblem")
                 _log_once(
                     f"Kamera-Vorschau Anzeigefehler ({name}, Index "
@@ -3474,13 +3927,13 @@ class EduBoticsApp:
 
                             for arm_name, arm in missing_arms:
                                 if arm.serial_path not in serial_paths:
-                                    self._log(f"FEHLER: {arm_name}-Arm ({arm.serial_path}) nicht erreichbar!")
+                                    self._log(f"[FEHLER] {arm_name}-Arm ({arm.serial_path}) nicht erreichbar!")
                                     self._log("USB-Verbindung prüfen und erneut scannen.")
                                     self._set_status(f"{arm_name}-Arm getrennt")
                                     return
                             self._log("USB-Geräte erfolgreich neu verbunden.")
                     except Exception as e:
-                        self._log(f"WARNUNG: Serielle Ports konnten nicht validiert werden: {e}")
+                        self._log(f"[WARNUNG] Serielle Ports konnten nicht validiert werden: {e}")
                         self._log("Fahre trotzdem fort — Container versuchen erneut auf Geräte zuzugreifen.")
 
                 # 0.5 Persist a freshly-typed HF token (if any) BEFORE the .env
@@ -3498,7 +3951,7 @@ class EduBoticsApp:
                         self.root.after(0, lambda: self.hf_token_var.set(""))
                         self.root.after(0, self._refresh_hf_token_status)
                     except Exception as e:
-                        self._log(f"WARNUNG: HF-Token konnte nicht gespeichert werden: {e}")
+                        self._log(f"[WARNUNG] HF-Token konnte nicht gespeichert werden: {e}")
 
                 # 1. .env generieren
                 self._set_status("Konfiguration wird erstellt...")
@@ -3530,7 +3983,7 @@ class EduBoticsApp:
                     ok = docker_manager.start_containers(gpu=use_gpu, log=self._log)
 
                 if not ok:
-                    self._log("FEHLER: Container konnten nicht gestartet werden. EduBotics-Umgebung prüfen.")
+                    self._log("[FEHLER] Container konnten nicht gestartet werden. EduBotics-Umgebung prüfen.")
                     self._set_status("Start fehlgeschlagen")
                     return
 
@@ -3541,7 +3994,7 @@ class EduBoticsApp:
                 if not health_checker.wait_for_web_ui(
                     callback=lambda e, t: self._set_status(f"Warte auf Web-Oberfläche... {e}s/{t}s")
                 ):
-                    self._log("WARNUNG: Web-Oberfläche antwortet noch nicht. Container starten möglicherweise noch.")
+                    self._log("[WARNUNG] Web-Oberfläche antwortet noch nicht. Container starten möglicherweise noch.")
                     self._log("Du kannst die Web-Oberfläche manuell über die Schaltfläche öffnen.")
                 else:
                     self._log("Web-Oberfläche ist bereit!")
@@ -3573,7 +4026,7 @@ class EduBoticsApp:
                 startup_ok = True
 
             except Exception as e:
-                self._log(f"FEHLER: Unerwarteter Fehler beim Starten: {e}")
+                self._log(f"[FEHLER] Unerwarteter Fehler beim Starten: {e}")
                 import traceback
                 self._log(traceback.format_exc())
             finally:
@@ -3630,13 +4083,18 @@ class EduBoticsApp:
                 # register_external_source MUST precede start().
                 self.camera_bridge.register_external_source(PHONE_CAM_ID, phone_slot)
             self.camera_bridge.start()
+            # Now that the bridge exists, watch it: its per-camera German
+            # diagnostics had no reader at all before this.
+            self._stop_camera_health_poll()
+            self._camera_health_after_id = self.root.after(
+                CAMERA_HEALTH_POLL_MS, self._poll_camera_health)
             roles = ", ".join(sorted(role_to_index)) or "keine USB-Kamera"
             phone_note = " + Handy" if phone_slot is not None else ""
             self._log(f"Kamera-Bridge gestartet (nativ, {roles}{phone_note}) — streamt mit "
                       f"{int(camera_bridge_mod.constants.CAMERA_FRAMERATE)} fps in den Container.")
         except Exception as e:  # noqa: BLE001
             self.camera_bridge = None
-            self._log(f"WARNUNG: Kamera-Bridge konnte nicht gestartet werden: {e}")
+            self._log(f"[WARNUNG] Kamera-Bridge konnte nicht gestartet werden: {e}")
 
     def _start_phone_server(self):
         """Ensure the cert, start the phone HTTPS receiver, show the URL.
@@ -3647,7 +4105,7 @@ class EduBoticsApp:
         try:
             cert_path, key_path = phone_cert_mod.ensure_cert()
         except phone_cert_mod.PhoneCertError as exc:
-            self._log(f"WARNUNG: Handy-Kamera konnte nicht aktiviert werden: {exc}")
+            self._log(f"[WARNUNG] Handy-Kamera konnte nicht aktiviert werden: {exc}")
             return None
         slot = phone_camera_mod.LatestFrameSlot()
         try:
@@ -3658,18 +4116,18 @@ class EduBoticsApp:
             server.start()
         except OSError as exc:
             self._log(
-                f"WARNUNG: Handy-Empfänger konnte Port {PORT_PHONE_HTTPS} nicht "
+                f"[WARNUNG] Handy-Empfänger konnte Port {PORT_PHONE_HTTPS} nicht "
                 f"öffnen ({exc}) — Handy-Kamera deaktiviert.")
             return None
         except Exception as exc:  # noqa: BLE001
-            self._log(f"WARNUNG: Handy-Empfänger konnte nicht starten: {exc}")
+            self._log(f"[WARNUNG] Handy-Empfänger konnte nicht starten: {exc}")
             return None
         self.phone_server = server
         self.phone_frame_slot = slot
         url = f"https://{_primary_lan_ip()}:{PORT_PHONE_HTTPS}"
         self._log(f"Handy-Kamera aktiv — am Handy im Browser öffnen: {url}")
         self._log(
-            "Hinweis: Beim ersten Öffnen zeigt das Handy eine Sicherheitswarnung "
+            "[INFO] Beim ersten Öffnen zeigt das Handy eine Sicherheitswarnung "
             "(selbst signiertes Zertifikat) — „Erweitert“ → „Trotzdem fortfahren“.")
         # Windows-Firewall: do NOT auto-add a rule (needs elevation). Log the
         # exact manual command the teacher can run once if the phone can't reach
@@ -3697,10 +4155,10 @@ class EduBoticsApp:
             ttk.Label(
                 frame,
                 text="Diese Adresse am Handy im Browser öffnen:",
-                font=("Segoe UI", 10),
+                font=(theme_mod.FONT_FAMILY, 10),
             ).pack(anchor=tk.W)
             ttk.Label(
-                frame, text=url, font=("Segoe UI", 14, "bold"), foreground="#0A6",
+                frame, text=url, font=(theme_mod.FONT_FAMILY, 14, "bold"), foreground="#0A6",
             ).pack(anchor=tk.W, pady=(6, 10))
 
             def _copy():
@@ -3725,7 +4183,7 @@ class EduBoticsApp:
                     "Sicherheitswarnung bestätigen („Erweitert“ → „Trotzdem "
                     "fortfahren“)."
                 ),
-                foreground="gray", font=("Segoe UI", 8), wraplength=360,
+                foreground="gray", font=(theme_mod.FONT_FAMILY, 8), wraplength=360,
                 justify=tk.LEFT,
             ).pack(anchor=tk.W, pady=(10, 0))
         except tk.TclError:
@@ -3742,8 +4200,66 @@ class EduBoticsApp:
             self.phone_server = None
         self.phone_frame_slot = None
 
+    def _poll_camera_health(self):
+        """Surface the camera bridge's own diagnostics — LOG-ONLY, READ-ONLY.
+
+        `CameraBridge.status()`'s docstring says „Per-camera health for the GUI
+        status line" and, until this existed, had ZERO production callers: five
+        authored German diagnostics were computed every capture tick and
+        displayed NOWHERE, so a camera that died mid-lesson was completely
+        silent in the GUI and the student met it as a missing image in the
+        browser minutes later.
+
+        Deliberately the smallest possible thing that closes that:
+
+          * it only READS `status()` — it never opens a device, never touches a
+            container, never restarts anything (the bridge already re-opens a
+            dead camera by itself);
+          * it logs ONCE PER TRANSITION, never per tick. A camera that stays
+            broken says so once, and says so once more when it recovers;
+          * it tolerates `self.camera_bridge` being None mid-teardown, and any
+            raise out of `status()` ends the loop rather than repeating into
+            the Protokoll;
+          * `_stop_camera_bridge` cancels it, so it cannot outlive the bridge.
+        """
+        self._camera_health_after_id = None
+        bridge = self.camera_bridge
+        if bridge is None:
+            return
+        try:
+            status = bridge.status() or {}
+            cameras = status.get("cameras") or {}
+        except Exception as exc:  # noqa: BLE001 — a diagnostic must not loop on its own failure
+            self._log(f"[WARNUNG] Kamera-Status konnte nicht gelesen werden: {exc}")
+            return
+        previous = getattr(self, "_camera_health_last", {})
+        current = {}
+        for role, info in cameras.items():
+            current[role] = (info or {}).get("error", "") or ""
+        for role, message in current.items():
+            was = previous.get(role, "")
+            if message and message != was:
+                self._log(f"[WARNUNG] {message}")
+            elif was and not message:
+                self._log(f"[OK] Kamera „{role}“ liefert wieder Bilder.")
+        self._camera_health_last = current
+        self._camera_health_after_id = self.root.after(
+            CAMERA_HEALTH_POLL_MS, self._poll_camera_health)
+
+    def _stop_camera_health_poll(self):
+        """Cancel the health loop. Idempotent; safe before it ever started."""
+        after_id = getattr(self, "_camera_health_after_id", None)
+        if after_id is not None:
+            try:
+                self.root.after_cancel(after_id)
+            except Exception:  # noqa: BLE001
+                pass
+        self._camera_health_after_id = None
+        self._camera_health_last = {}
+
     def _stop_camera_bridge(self):
         """Stop the native camera bridge if running. Best-effort."""
+        self._stop_camera_health_poll()
         if self.camera_bridge is not None:
             try:
                 self.camera_bridge.stop()
@@ -3809,6 +4325,19 @@ class EduBoticsApp:
         )
         icon_path = icon if os.path.isfile(icon) else None
 
+        # `open_student_window` SHORT-CIRCUITS `return True` when a child is
+        # already alive — deliberately, because relaunching would destroy the
+        # student's unsaved Blockly work. The behaviour is right; the message
+        # was a claim about something that did not happen: nothing opened,
+        # nothing came to the foreground, and the freshly minted
+        # `?fresh=<nonce>` was discarded. `has_live_window()` is the sanctioned
+        # read of that state (PROCESS-LOCAL, like `destroy_all`), so say the
+        # true thing instead. The short-circuit inside `open_student_window`
+        # STAYS — this only replaces a false success message with an honest one.
+        if webview_window.has_live_window():
+            self._log("[INFO] Das EduBotics-Fenster ist bereits geöffnet.")
+            return
+
         if webview_window.open_student_window(url, icon_path=icon_path):
             self._log("Web-Oberfläche wird im EduBotics-Fenster geöffnet.")
             # Give the worker thread a moment to fail fast if WebView2
@@ -3825,7 +4354,7 @@ class EduBoticsApp:
 
     def _webview_fallback(self, url: str):
         """Open the system browser as a last-resort fallback."""
-        self._log("WARNUNG: WebView2 nicht verfügbar – System-Browser wird geöffnet.")
+        self._log("[WARNUNG] WebView2 nicht verfügbar — System-Browser wird geöffnet.")
         messagebox.showwarning(
             "WebView2 nicht verfügbar",
             "Das Microsoft Edge WebView2-Runtime wurde nicht gefunden.\n"
@@ -4015,11 +4544,28 @@ class EduBoticsApp:
 
             self._log("Alle Container gestoppt.")
             self._set_status("Gestoppt")
-            self.running = False
-            self._update_start_button()
-            self.root.after(0, lambda: self.progress.stop())
+            # `self.running`, the spinner and the button refresh are reset in
+            # `_do_stop_guarded`'s `finally`.
 
-        threading.Thread(target=_do_stop, daemon=True).start()
+        def _do_stop_guarded():
+            # `_do_stop`'s BODY is deliberately untouched: test_shutdown_
+            # teardown pins `webview_window.destroy_all()` inside it, ordered
+            # before the container stop, under the qualified name
+            # `_stop_environment._do_stop`. A raise in any of the six teardown
+            # calls used to leave `self.running` True with „Stoppen" and
+            # „Umgebung starten" both dead for the rest of the session.
+            try:
+                _do_stop()
+            except Exception as exc:  # noqa: BLE001 — a worker must never strand the UI
+                self._log(f"[FEHLER] Das Stoppen der Umgebung wurde "
+                          f"abgebrochen: {exc}")
+                self._set_status("Stoppen fehlgeschlagen — siehe Protokoll")
+            finally:
+                self.running = False
+                self._update_start_button()
+                self.root.after(0, lambda: self.progress.stop())
+
+        threading.Thread(target=_do_stop_guarded, daemon=True).start()
 
     def _factory_reset(self):
         """Daten-Volumes löschen (Datensätze, Modelle, Kalibrierung).
@@ -4053,16 +4599,31 @@ class EduBoticsApp:
             self._log(("" if ok else "[FEHLER] ") + msg)
             if ok:
                 self._log(
-                    "Beim nächsten 'Umgebung starten' werden die Daten-Volumes "
+                    "Beim nächsten „Umgebung starten“ werden die Daten-Volumes "
                     "leer neu angelegt."
                 )
                 self._set_status("Daten zurückgesetzt")
             else:
                 self._set_status("Daten zurücksetzen fehlgeschlagen")
-            self.root.after(0, lambda: self.progress.stop())
-            self._update_start_button()
+            # Spinner + button refresh live in `_do_reset_guarded`'s `finally`.
 
-        threading.Thread(target=_do_reset, daemon=True).start()
+        def _do_reset_guarded():
+            # `_factory_reset` disables BOTH „Daten zurücksetzen" and
+            # „Umgebung starten" before spawning this, and only
+            # `_update_start_button` re-enables them — so a raise out of
+            # `docker_manager.factory_reset` left the student with no way to
+            # start the environment again short of restarting the GUI.
+            try:
+                _do_reset()
+            except Exception as exc:  # noqa: BLE001 — a worker must never strand the UI
+                self._log(f"[FEHLER] Das Zurücksetzen der Daten wurde "
+                          f"abgebrochen: {exc}")
+                self._set_status("Daten zurücksetzen fehlgeschlagen — siehe Protokoll")
+            finally:
+                self.root.after(0, lambda: self.progress.stop())
+                self._update_start_button()
+
+        threading.Thread(target=_do_reset_guarded, daemon=True).start()
 
     def _on_close(self):
         """Fenster-Schließen abfangen — Container stoppen, wenn nötig.
@@ -4185,6 +4746,10 @@ def run():
         _focus_existing_window()
         return
     root = tk.Tk()
+    # Match Tk's layout scale to the monitor DPI, but ONLY on a process Windows
+    # is already treating as DPI-aware — see `theme.apply_scaling`. A no-op
+    # everywhere else, including every non-Windows host.
+    theme_mod.apply_scaling(root)
     app = EduBoticsApp(root)
     # Pin the mutex handle to the app for the process lifetime — letting it get
     # GC'd (and its handle closed) would release the guard while the GUI is up.

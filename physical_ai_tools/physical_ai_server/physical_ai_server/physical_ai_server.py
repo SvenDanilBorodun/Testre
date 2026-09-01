@@ -400,6 +400,29 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
 
         self.goal_repo_id = None
 
+        # Roboter Studio simulator: bring the sim-only /sim/joint_states publisher
+        # up at BOOT and seed it with the profile's Grundstellung.
+        #
+        # It used to appear only when the FIRST simulation run constructed the sim
+        # WorkflowManager (_ensure_sim_publisher has exactly one other caller), and
+        # _last_sim_joints started None so the idle republish returned early. So
+        # before a student's first run the topic did not exist, the React twin sat
+        # on „Wartet auf Gelenkdaten …" — correctly, there was none — and, because
+        # that twin paints ON DEMAND, it had no render pump at all: the 3D pane
+        # stayed black until the student happened to drag it. Publishing the rest
+        # pose from boot makes the virtual arm show up standing at HOME, which is
+        # both the honest picture and the twin's heartbeat.
+        #
+        # Safe here: _arm_profile is already resolved (the pure identity hoist
+        # above), this runs on the same thread as every other create_publisher in
+        # __init__, and the whole thing is best-effort — a simulator convenience
+        # must never stop the node coming up.
+        try:
+            self._ensure_sim_publisher()
+            self._seed_sim_rest_pose()
+        except Exception as e:  # noqa: BLE001 — cosmetic; never fatal at boot
+            self.get_logger().warning(f'sim rest-pose seed failed: {e}')
+
         # Robot-type self-init (D1) — LAST statement of __init__. Resolves the
         # hardset EDUBOTICS_ROBOT_TYPE into an ArmProfile, sets operation_mode
         # FIRST (the Communicator ctor needs it), and brings up the data pipeline
@@ -4672,7 +4695,20 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         except Exception:  # noqa: BLE001 — stamp is advisory
             pass
         positions = [float(v) for v in q]
-        msg.name = self._sim_joint_names()
+        names = self._sim_joint_names()
+        # Refuse a name/position mismatch instead of publishing a malformed
+        # JointState. Reachable since the boot seed: the seed runs BEFORE
+        # `_init_robot_profile`, whose exception path DOWNGRADES `_arm_profile`
+        # to the omx_full default — so an edu6 rig that boots degraded seeds a
+        # 7-vector and then resolves 6 OMX names, and `_sim_idle_republish` would
+        # re-emit that mismatch at 2 Hz forever. Dropping the pose is the honest
+        # outcome on a degraded node; the twin simply keeps saying it is waiting.
+        if len(names) != len(positions):
+            self.get_logger().warning(
+                f'/sim/joint_states skipped: {len(names)} joint names vs '
+                f'{len(positions)} positions (degraded profile?)')
+            return
+        msg.name = names
         msg.position = positions
         pub.publish(msg)
         self._last_sim_joints = positions
@@ -4705,6 +4741,91 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             self._last_sim_objects_json = payload
         except Exception as e:  # noqa: BLE001 — a diagnostic must never stop a run
             self.get_logger().warning(f'/sim/objects publish failed: {e}')
+
+    def _sim_home_full_joints(self):
+        """The virtual arm's rest vector — the profile's HOME arm joints plus an
+        OPEN gripper — matching ``_sim_joint_names()`` in length, or None when the
+        profile declares no HOME (nothing to seed, so nothing is published).
+
+        Single source for both the boot seed and the reset, and deliberately
+        built the same way ``_get_or_create_sim_workflow_manager`` builds
+        ``SimArm(home_full_joints=...)``: the two must agree or a reset would
+        park the twin somewhere the next run does not start from.
+        """
+        profile = getattr(self, '_arm_profile', None)
+        home = getattr(profile, 'home_joints_rad', None)
+        grip = getattr(profile, 'gripper_open_rad', None)
+        if home is None or grip is None:
+            return None
+        try:
+            return [float(v) for v in home] + [float(grip)]
+        except (TypeError, ValueError):
+            return None
+
+    def _seed_sim_rest_pose(self):
+        """Publish the virtual arm's Grundstellung ONCE so the React twin has a
+        pose to draw — and a render pump — before the first simulation run.
+
+        No-op once anything has been published (``_last_sim_joints`` non-None), so
+        it can never overwrite a live run's pose.
+        """
+        if self._last_sim_joints is not None:
+            return
+        q = self._sim_home_full_joints()
+        if q is None:
+            return
+        self._publish_sim_joint_state(q)
+
+    def _reset_sim_scene(self):
+        """Put the simulator back to its start state: objects at the coordinates
+        the editor placed them, nothing in the jaws, arm at the Grundstellung.
+
+        WHY THIS EXISTS. ``SimWorld`` is mutated by a run (capture / carry /
+        release) and was only ever reset at the NEXT run start, while
+        ``_sim_idle_republish`` re-broadcast it with force=True every 0.5 s in the
+        meantime — so after „Stopp" the twin was pinned to wherever the run left
+        the cubes and a cube stopped mid-carry stayed attached to the gripper. The
+        React side no longer BELIEVES that scene between runs, but the server must
+        still return to a defined state or the next run inherits the previous
+        one's world and the virtual arm starts from wherever it was abandoned.
+
+        Called on every sim-run exit (stop / finish / error) via
+        `_on_sim_workflow_finished`, and by the explicit „Simulator zurücksetzen"
+        button, which reaches it through /workflow/stop's no-run-in-flight branch.
+        TWO consequences of riding that branch, both deliberate: it must be SAFE
+        AS A NO-OP on a rig that has never opened the simulator (it is — both
+        handles stay None until the first sim run), and on a rig that HAS used the
+        simulator a REAL-arm `/workflow/stop` issued while nothing is running also
+        resets the virtual scene. That is harmless — it touches only /sim/* — but
+        the branch is wider than "the reset button".
+
+        Best-effort throughout: a reset is a convenience and must never turn a
+        Stop into a failed service call.
+        """
+        try:
+            objects = list(getattr(self, '_sim_objects', []) or [])
+            q = None
+            if self._sim_arm is not None:
+                # set_objects owns the world reset too, so the arm's HOME seed and
+                # the world can never drift apart.
+                self._sim_arm.set_objects(objects)
+                # Read the pose back off the ARM rather than re-deriving it: the
+                # two agree today, but SimArm carries its OWN fallback HOME for a
+                # profile that declares none, and a twin parked somewhere the next
+                # run does not start from is the whole class of bug being fixed.
+                # Safe right after set_objects — nothing is held, so get_joints'
+                # blocked-gripper override cannot fire.
+                q = self._sim_arm.get_joints()
+            elif self._sim_world is not None:
+                self._sim_world.reset(objects)
+                q = self._sim_home_full_joints()
+            else:
+                return  # no simulator has ever run here — nothing to reset
+            if q is not None:
+                self._publish_sim_joint_state(q)
+            self._publish_sim_objects(force=True)
+        except Exception as e:  # noqa: BLE001 — never break Stop over a reset
+            self.get_logger().warning(f'sim scene reset failed: {e}')
 
     def _sim_idle_republish(self):
         """Timer callback: republish the last commanded sim pose at a low rate
@@ -4802,7 +4923,7 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             # ("Virtual table at z = 0 → grasp z is object_height − grasp_depth").
             load_calibration=lambda: {'z_table': 0.0},
             emit_status=self._emit_workflow_status,
-            on_finished=self._on_workflow_finished,
+            on_finished=self._on_sim_workflow_finished,
             get_scene_frame=lambda: sim_dummy_frame,
             get_scene_frame_age=lambda: 0.0,
             get_current_pose_xyz=lambda: sim_arm.fk_xyz(),
@@ -5238,6 +5359,30 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             pass
         self.on_workflow = False
 
+    def _on_sim_workflow_finished(self, terminal_phase: str) -> None:
+        """The SIM manager's exit hook: the shared release, then put the virtual
+        world back to the start state.
+
+        A separate callback rather than a branch inside _on_workflow_finished
+        because that one is also the REAL manager's and is handed only a phase —
+        it cannot tell which runtime just exited, and resetting the simulator off
+        a real arm's run would be wrong.
+
+        Fires on EVERY terminal phase, stop / finish / error alike, and that is
+        deliberate: a simulator whose end state depends on HOW the program ended
+        is one the student has to reason about. „Run over" means „back at the
+        start", every time. The Protokoll keeps what happened.
+
+        Runs on the workflow DAEMON thread, as SimArm.publish does. The other two
+        /sim/* publishers — the boot seed and `_sim_idle_republish` — run on the
+        ROS EXECUTOR thread instead, so do not read this as "all sim publishing is
+        on the daemon". They never overlap in practice: the idle republish
+        early-returns while `on_workflow` is set, and `_on_workflow_finished`
+        above clears that flag only after this hook's caller has finished.
+        """
+        self._on_workflow_finished(terminal_phase)
+        self._reset_sim_scene()
+
     def _active_workflow_manager(self):
         """The currently-running workflow manager — the Phase-3 SIM manager takes
         precedence (``on_workflow`` serialises sim vs real, so at most one runs at
@@ -5255,9 +5400,34 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
     def workflow_stop_callback(self, request, response):
         manager = self._active_workflow_manager()
         if manager is None:
+            # Nothing is running. This is ALSO the „Simulation zurücksetzen"
+            # path: the React button reuses this service so the reset needs no new
+            # .srv (no interfaces rebuild, no enum-parity churn), and a stop with
+            # no run in flight has no other meaning. On a rig that has never
+            # opened the simulator _reset_sim_scene is a no-op, and the German
+            # message below is unchanged for every existing caller.
+            self._reset_sim_scene()
             response.success = True
             response.message = 'Es läuft kein Workflow.'
             return response
+        # NO reset here, deliberately. `_on_sim_workflow_finished` — the daemon's
+        # OWN exit hook — owns it, and a second reset on this thread is worse than
+        # redundant. An earlier draft ran one, guarded by `not manager.is_running`,
+        # with a comment claiming stop() had joined every thread so nothing could
+        # still be publishing. Both halves were false, measured on a real node:
+        #   * `is_running` returns False the instant `_stop_event.is_set()`
+        #     (workflow_manager.py::is_running), which stop() sets BEFORE it joins
+        #     — so the guard was a tautology that could never be False;
+        #   * the joins are TIMEOUT-BOUNDED (5.0 s daemon, 2.0 s per hat thread)
+        #     and stop() can return with the daemon still alive — the file's own
+        #     zombie-hat [WARNUNG] exists for exactly that. So in the one case the
+        #     guard was supposed to cover, it let a reset race a live publisher:
+        #     the zombie's next waypoint drove the virtual arm straight back off
+        #     HOME and the idle republish then pinned that pose at 2 Hz.
+        # Letting the daemon's own exit hook do it is both correct and sufficient:
+        # it runs in `_run`'s finally, so it happens whenever the thread actually
+        # ends, however long that takes. In the normal path this also removes a
+        # duplicate reset (measured: epoch bumped twice per stop).
         success, message = manager.stop()
         self.on_workflow = manager.is_running
         response.success = success

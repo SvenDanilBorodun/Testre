@@ -17,6 +17,7 @@ import {
   clearWorkflowLog,
   toggleDebugger,
   clearVariables,
+  clearWorkflowError,
   setDebuggerWarnings,
 } from '../../features/workshop/workshopSlice';
 import { useRosServiceCaller } from '../../hooks/useRosServiceCaller';
@@ -331,6 +332,15 @@ function RunControls({
     try {
       dispatch(clearWorkflowLog());
       dispatch(clearVariables());
+      // The previous run's red „Fehler" alert. It belongs with the three clears
+      // around it and was the only one missing: the server sends no status after
+      // a terminal `error` phase, so nothing else clears it until the NEW run's
+      // first tick — and if this start aborts below (empty program, missing
+      // trajectory, a refused service call) that tick never comes and the dead
+      // run's alert stays over the live editor. Cleared HERE rather than on
+      // setRunState('running') at the bottom, because every one of those abort
+      // paths returns before it.
+      dispatch(clearWorkflowError());
       // Clear stale unreachable warnings from a previous run before
       // dispatching the new ones; the effect above handles the actual
       // block-level setWarningText(null) calls.

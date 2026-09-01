@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import re
+import socket
 import tempfile
 import time
 import urllib.request
@@ -122,9 +123,21 @@ def cleanup_stale_installers(max_age_hours: int = 24) -> int:
     return removed
 
 
+class DownloadVerificationError(IOError):
+    """An integrity gate refused the download, with an AUTHORED German reason.
+
+    A distinct type because `IOError` IS `OSError` in Python 3, so „is this
+    message already German prose or is it `[Errno 28] No space left`?" cannot
+    be answered by `isinstance(exc, IOError)` — the first draft of
+    `_download_failure_reason_de` got that wrong and would have put an English
+    errno string on the non-closable update modal.
+    """
+
+
 def download_installer(url: str, dest_dir: str = None,
                        progress_callback=None,
-                       expected_sha256: str = None) -> str | None:
+                       expected_sha256: str = None,
+                       reason_callback=None) -> str | None:
     """Download the installer .exe to a temporary directory, verifying integrity.
 
     Args:
@@ -132,6 +145,17 @@ def download_installer(url: str, dest_dir: str = None,
         dest_dir: Directory to save the file (defaults to system temp).
         progress_callback: Optional callable(bytes_downloaded, total_bytes).
         expected_sha256: Optional lowercase-hex SHA-256 the download must match.
+        reason_callback: Optional callable(str) invoked ONCE with a German
+            reason when the download fails. The two authored diagnoses below —
+            „unvollständiger Download (n/m Bytes)" and „Prüfsumme stimmt nicht
+            (beschädigter Download)" — used to be raised as IOError and then
+            swallowed by this function's own `except Exception`, so a 404, a
+            truncated transfer, a checksum mismatch, a full disk and a timeout
+            were all indistinguishable to the caller: `None`. On
+            `_show_update_dialog`'s NON-CLOSABLE modal that is the difference
+            between an actionable message and a dead end. The RETURN CONTRACT
+            is deliberately unchanged (`str | None`) — a tuple would break
+            every existing caller and test for no gain.
 
     Two integrity gates before the file is handed back to be launched as admin:
       (A) Content-Length — a short/truncated download (server closed the
@@ -171,18 +195,54 @@ def download_installer(url: str, dest_dir: str = None,
 
         # (A) reject a truncated download
         if total > 0 and downloaded != total:
-            raise IOError(
-                f"unvollständiger Download ({downloaded}/{total} Bytes)"
+            raise DownloadVerificationError(
+                f"Unvollständiger Download ({downloaded}/{total} Bytes) — "
+                f"die Verbindung wurde vorzeitig getrennt."
             )
         # (B) reject a corrupted download against the advertised hash
         if expected and hasher.hexdigest().lower() != expected:
-            raise IOError("Prüfsumme stimmt nicht (beschädigter Download)")
+            raise DownloadVerificationError(
+                "Prüfsumme stimmt nicht — die heruntergeladene Datei ist "
+                "beschädigt.")
 
         return dest_path
-    except Exception:
+    except Exception as exc:  # noqa: BLE001 — every failure yields a clean None
+        # Report BEFORE cleaning up, so a failure in the cleanup cannot swallow
+        # the reason the caller is about to show the student.
+        if reason_callback is not None:
+            try:
+                reason_callback(_download_failure_reason_de(exc))
+            except Exception:  # noqa: BLE001 — a diagnostic must not mask the failure
+                pass
         # Clean up partial / failed-verification download
         try:
             os.remove(dest_path)
         except OSError:
             pass
         return None
+
+
+def _download_failure_reason_de(exc: BaseException) -> str:
+    """A German sentence for a failed installer download.
+
+    The two IOErrors raised above already carry an authored German reason, so
+    they are passed through verbatim. Everything else is classified by type
+    rather than by its (English, often stringified-URL) message, because that
+    text goes on a modal a student cannot close.
+    """
+    if isinstance(exc, DownloadVerificationError):
+        text = str(exc).strip()
+        if text:
+            return text
+    if isinstance(exc, urllib.error.HTTPError):
+        return (f"Der Server hat die Datei nicht geliefert (Fehler "
+                f"{exc.code}). Bitte später erneut versuchen.")
+    if isinstance(exc, urllib.error.URLError):
+        return ("Keine Verbindung zum Update-Server. Bitte die "
+                "Internetverbindung prüfen.")
+    if isinstance(exc, TimeoutError) or isinstance(exc, socket.timeout):
+        return "Zeitüberschreitung beim Download. Bitte erneut versuchen."
+    if isinstance(exc, OSError):
+        return ("Die Datei konnte nicht gespeichert werden — bitte "
+                "freien Speicherplatz prüfen.")
+    return "Der Download ist fehlgeschlagen. Bitte erneut versuchen."

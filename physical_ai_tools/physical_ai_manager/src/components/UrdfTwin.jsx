@@ -144,6 +144,17 @@ const URDF_ASSETS = {
 // only. /joint_states at 100 Hz on the wire would be wasteful for a visual twin.
 const JOINT_THROTTLE_MS = 100;
 const JOINT_QUEUE_LENGTH = 1;
+// How long without a JointState before the twin admits it is no longer live.
+// `hasJointData` used to be a ONE-WAY latch — `setHasJointData(true)` was its
+// only setter, with no false path and no timer — so when the feed died (rosbridge
+// drop, node respawn, „Umgebung stoppen", the arm container recreated by the
+// LeaderToggle) the mesh froze at its last pose while the header chip stayed
+// GREEN. The pane positively asserted liveness over a stale picture, which is the
+// same "state that only ever advances" shape as the black-pane and stale-sim
+// bugs. 3 s clears every real cadence with room to spare: the real /joint_states
+// is throttled to 100 ms and the sim idle republish runs at 500 ms.
+const JOINT_STALE_MS = 3000;
+const JOINT_STALE_CHECK_MS = 1000;
 
 // The URDFs + their STL meshes are bundled under public/<asset>-urdf/ (the OMX
 // copied there by tools/export_omx_urdf_for_web.py; edu6 by the plan's PR-3
@@ -245,6 +256,9 @@ export default function UrdfTwin({
   // still renders the static URDF rest pose immediately (works with NO arm
   // powered), so this is a "is the data flowing yet?" indicator, not a blocker.
   const [hasJointData, setHasJointData] = useState(false);
+  // Wall-clock of the last JointState, for the staleness watchdog below. 0 means
+  // "none yet", which the watchdog treats as nothing to expire.
+  const lastJointAtRef = useRef(0);
   const [loadError, setLoadError] = useState(false);
 
   // ---- three.js scene lifecycle (independent of the rosbridge effect) ----
@@ -380,6 +394,16 @@ export default function UrdfTwin({
     controls.dampingFactor = 0.12;
     controls.target.set(0, 0.12, 0);
     controls.addEventListener('change', () => { needsRender = true; });
+    // Has the student taken the camera themselves? OrbitControls fires 'start'
+    // on pointer-down, i.e. only on a real gesture — 'change' is no good here
+    // because frameRobot's own controls.update() dispatches one. With the arm
+    // now painting progressively DURING the load (see loadMeshCb), there is a
+    // real window in which a student on a slow link can orbit before the last
+    // STL lands, and the onLoad re-frame would yank their view back. Measured:
+    // hold the STLs at the network layer, orbit, release — the student's view is
+    // replaced. So the re-frame yields to them.
+    let userTookTheCamera = false;
+    controls.addEventListener('start', () => { userTookTheCamera = true; });
 
     const requestRender = () => { needsRender = true; };
     requestRenderRef.current = requestRender;
@@ -387,24 +411,91 @@ export default function UrdfTwin({
     // Mesh loader: urdf-loader hands us each resolved STL path; we load it with
     // three's STLLoader and wrap the geometry in a lit Mesh (urdf-loader does
     // not ship a mesh loader of its own — STL support is supplied here).
-    const stlLoader = new STLLoader();
+    //
+    // BOTH loaders share ONE LoadingManager, and that is load-bearing, not
+    // tidiness. URDFLoader.load() calls its onComplete the instant `parse()`
+    // returns — i.e. right after the XML is read, while every <mesh> is still an
+    // in-flight STL fetch. (Mesh COUNT is not tag count: urdf-loader ships
+    // `parseCollision = false` and we never set it, so only <visual> meshes are
+    // fetched — 8 for the OMX, and 10 for edu6, whose 20 <mesh> tags are 10
+    // visual + 10 collision over 10 files. 5.4 MB and 6.2 MB respectively.)
+    // So the robot handed to onComplete below has NO mesh geometry, and three
+    // things that used to run there ran against a robot that was not there yet.
+    // All three were MEASURED against a real Chromium + real WebGL, and the
+    // first two are not what you would guess:
+    //   1. `needsRender = true` was consumed by the very next animation frame.
+    //      The meshes then landed with NOTHING marking the frame dirty again,
+    //      and this renderer paints ON DEMAND (OrbitControls.update() returns
+    //      false at rest), so the draw count froze ~1.3 s in and stayed frozen
+    //      until the student dragged the canvas or pressed a toolbar button
+    //      whose effect calls requestRenderRef. On the SIM twin that is
+    //      terminal: /sim/joint_states does not exist until the first simulation
+    //      run, so there is no other render pump at all.
+    //   2. frameRobot() did NOT simply early-return. It does on edu6 (all
+    //      geometry is meshes, so the Box3 really is empty) — but omx_f.urdf
+    //      declares a 1 cm red <box> on end_effector_link, a PRIMITIVE that
+    //      exists from parse time. So on the OMX the Box3 was non-empty and
+    //      frameRobot framed THAT: maxDim 0.0100 instead of the true 0.3779, a
+    //      37.8x over-zoom. The measured pre-fix OMX pane is not a black pane,
+    //      it is a giant red cube. Hence the frameRobot call was REMOVED from
+    //      onComplete rather than left as harmless: framing before the geometry
+    //      exists is not a no-op, it is the bug.
+    //   3. the showShadows traverse found no meshes, so the robot never cast a
+    //      shadow even with the sim stage's literal showShadows.
+    // The manager's onLoad fires once every tracked item (the URDF + every STL)
+    // has ended, which is the first moment all three are meaningful. It can fire
+    // only ONCE: every itemStart (the URDF, each STL via FileLoader, the texture
+    // loader) happens inside the synchronous parse(), strictly before the URDF's
+    // own itemEnd, so the count cannot reach zero early.
+    const loadingManager = new THREE.LoadingManager();
+    const stlLoader = new STLLoader(loadingManager);
     const material = new THREE.MeshStandardMaterial({
       color: LINK_COLOR,
       metalness: 0.25,
       roughness: 0.6,
     });
 
-    const loader = new URDFLoader();
+    const loader = new URDFLoader(loadingManager);
     loader.loadMeshCb = (path, _manager, done) => {
       stlLoader.load(
         path,
         (geometry) => {
           const mesh = new THREE.Mesh(geometry, material);
+          // Per-mesh, because the onComplete traverse below cannot see a mesh
+          // that does not exist yet. Read through the ref for the same reason
+          // the mount effect does (a [] -deps effect must not list the prop).
+          if (showShadowsRef.current) mesh.castShadow = true;
           done(mesh);
+          // THE fix for (1): mark the frame dirty as each link lands, so the arm
+          // also paints PROGRESSIVELY instead of all at once. Belt as well as
+          // braces — manager.onLoad below is the same guarantee for the whole
+          // batch, and this line still holds if a mesh loader is ever swapped in
+          // that the manager does not track.
+          needsRender = true;
         },
         undefined,
         (err) => done(null, err),
       );
+    };
+
+    // Everything tracked by the manager has finished (the URDF text AND every
+    // STL, success or error). Only NOW does the robot have geometry.
+    loadingManager.onLoad = () => {
+      if (disposed) return;
+      const robot = robotRef.current;
+      if (robot) {
+        // The ONLY framing pass. Skipped once the student has grabbed the
+        // camera — their view wins over ours, and on the OMX the pre-load view
+        // they would be stuck with is now the sane default rather than the 1 cm
+        // over-zoom, because onComplete no longer frames anything.
+        if (!userTookTheCamera) frameRobot(camera, controls, robot);
+        if (showShadowsRef.current && typeof robot.traverse === 'function') {
+          robot.traverse((obj) => {
+            if (obj && obj.isMesh) obj.castShadow = true;
+          });
+        }
+      }
+      needsRender = true;
     };
 
     loader.load(
@@ -435,15 +526,11 @@ export default function UrdfTwin({
         robot.rotation.z = asset.yaw || 0;
         scene.add(robot);
         robotRef.current = robot;
-        frameRobot(camera, controls, robot);
-        // Sim-stage shadows: mark every robot mesh as a shadow caster once the
-        // URDF is in (the mount effect already enabled the renderer shadow map +
-        // key light). Guarded by the ref so RecordPage's default call skips it.
-        if (showShadowsRef.current && typeof robot.traverse === 'function') {
-          robot.traverse((obj) => {
-            if (obj && obj.isMesh) obj.castShadow = true;
-          });
-        }
+        // NO framing and NO shadow traverse here: at this instant the robot has
+        // no mesh geometry, so framing measures whatever PRIMITIVE the URDF
+        // happens to declare (the OMX's 1 cm end-effector box → a 37.8x
+        // over-zoom, measured) and the traverse visits nothing.
+        // loadingManager.onLoad owns both, once the STLs have landed.
         // Phase-5: if the „Achsen" toggle was already on before the URDF
         // finished loading, attach the base/TCP triads now (the frames effect
         // bailed earlier because robotRef was still null).
@@ -847,6 +934,17 @@ export default function UrdfTwin({
 
     let cancelled = false;
     let subscription = null;
+    // The staleness watchdog. Deliberately a plain interval rather than a
+    // per-message timeout: at 10 Hz that would re-arm a timer ten times a second
+    // for the life of the session.
+    const staleTimer = window.setInterval(() => {
+      if (cancelled) return;
+      const last = lastJointAtRef.current;
+      if (last && Date.now() - last > JOINT_STALE_MS) {
+        lastJointAtRef.current = 0;
+        setHasJointData(false);
+      }
+    }, JOINT_STALE_CHECK_MS);
 
     const run = async () => {
       let ros;
@@ -872,7 +970,10 @@ export default function UrdfTwin({
         const robot = robotRef.current;
         applyJointState(robot, msg, jointSetRef.current);
         requestRenderRef.current();
-        if (!cancelled) setHasJointData(true);
+        if (!cancelled) {
+          lastJointAtRef.current = Date.now();
+          setHasJointData(true);
+        }
         // Phase-5: accumulate the end-effector world position into the path trail
         // — only while „Bahn anzeigen" is on (showPathRef). RecordPage's default
         // showPath=false skips this entirely (no getWorldPosition, no allocation).
@@ -900,6 +1001,7 @@ export default function UrdfTwin({
 
     return () => {
       cancelled = true;
+      window.clearInterval(staleTimer);
       if (subscription) {
         try { subscription.unsubscribe(); } catch (_) { /* swallow */ }
         subscription = null;

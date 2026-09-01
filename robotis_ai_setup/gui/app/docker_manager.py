@@ -1034,7 +1034,7 @@ def _pull_one_image(
             time.sleep(min(4 * (2 ** (attempt - 1)), 30))
 
     if log:
-        log(f"    FEHLER: {short} konnte nach {max_retries} Versuchen nicht geladen werden.")
+        log(f"[FEHLER] {short} konnte nach {max_retries} Versuchen nicht geladen werden.")
     return False
 
 
@@ -1271,13 +1271,13 @@ def _compose_pull(gpu: bool = False, service: Optional[str] = None, log=None) ->
             detail = (result.stderr or "").strip().splitlines()
             tail = detail[-1][:140] if detail else ""
             log(
-                "Hinweis: Image-Aktualisierung übersprungen — vorhandene Images "
+                "[INFO] Image-Aktualisierung übersprungen — vorhandene Images "
                 f"werden verwendet.{(' (' + tail + ')') if tail else ''}"
             )
     except (FileNotFoundError, subprocess.TimeoutExpired) as e:
         if log:
             log(
-                "Hinweis: Image-Aktualisierung übersprungen — vorhandene Images "
+                "[INFO] Image-Aktualisierung übersprungen — vorhandene Images "
                 f"werden verwendet. ({e})"
             )
 

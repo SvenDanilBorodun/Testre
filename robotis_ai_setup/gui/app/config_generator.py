@@ -729,6 +729,34 @@ def generate_env_file(config: HardwareConfig, output_path: str = ENV_FILE,
                 raise ValueError(
                     f"Kamera ohne gültige Rolle (gripper/scene): {cam.path}"
                 )
+            # SECOND fence: a role this ROBOT TYPE has no topic for. The
+            # generic check above only knows the two names that exist at all;
+            # `edu6_studio` declares camera_roles=('scene',) and its
+            # config/edu6_studio_config.yaml subscribes to exactly
+            # /scene/image_raw/compressed, so CAMERA_NAME_1="gripper" there
+            # publishes a topic nothing reads — and the failure is SILENT AND
+            # GREEN, because the compose healthcheck greps
+            # /${CAMERA_NAME_1}/image_raw/compressed, i.e. the very topic the
+            # student's own role name causes the bridge to publish. „Umgebung
+            # starten" reports success and Roboter Studio is empty.
+            #
+            # This is the server-side half of the picker filter in
+            # `gui_app.py::_start_camera_previews` — a stale in-memory
+            # selection or a programmatic caller bypasses the UI. It mirrors
+            # the Pi's `handle_cameras_roles` German 400, closing the twin
+            # divergence CLAUDE.md named as "known, accepted, unguarded".
+            # AFTER the generic check on purpose: a bogus role must still get
+            # the „ohne gültige Rolle" message that names what a role IS.
+            allowed_roles = ROBOT_PROFILES.get(robot_type, {}).get(
+                "camera_roles", ('gripper', 'scene'))
+            if allowed_roles and cam.role not in allowed_roles:
+                label = ROBOT_PROFILES.get(robot_type, {}).get(
+                    "display_de", robot_type)
+                role_de = "Szene" if cam.role == "scene" else "Greifer"
+                raise ValueError(
+                    f'Für den Robotertyp „{label}“ ist die Kamera-Rolle '
+                    f'„{role_de}“ nicht vorgesehen.'
+                )
             # In native_bridge mode the container does NOT capture from
             # /dev/video* (the Windows GUI streams JPEG frames into
             # camera_ingest_node.py). CAMERA_DEVICE stays empty so the

@@ -1284,9 +1284,17 @@ def diagnose_usb_environment(image: Optional[str] = None,
         if arm_family == "edu6"
         else "Servo-IDs prüfen (Leader: 1-6, Follower: 11-16)"
     )
+    # Two things were wrong with the sentence this replaces. It opened with
+    # „Alle Systeme einsatzbereit" on a FAILURE path — contradicting itself
+    # inside its own first clause — and it named a Python file (`identify_arm.py`)
+    # to a 13-year-old. The GUI puts `message_de.splitlines()[0]` into the
+    # status bar, and the old text had no newline, so the filename went there
+    # too; the newline below keeps the status bar to the short half while the
+    # Protokoll still shows both lines.
     diag.message_de = (
-        "Alle Systeme einsatzbereit, aber identify_arm.py konnte die Arme nicht "
-        f"zuordnen. Bitte {_servo_hint} und erneut versuchen."
+        "USB, Umgebung und Image sind in Ordnung, aber die Arme konnten nicht "
+        "zugeordnet werden.\n"
+        f"Bitte {_servo_hint} und erneut versuchen."
     )
     diag.details = (
         f"attached={[d.busid for d in attached]} serial_paths={serial_paths}"

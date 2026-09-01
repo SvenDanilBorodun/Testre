@@ -922,7 +922,7 @@ class TheScanAsksFirstWhenThereIsASessionToLose(unittest.TestCase):
         """
         rec = types.SimpleNamespace(
             asked=[], destroyed=0, threads=0, scans=0, env_stops=0,
-            statuses=[], logs=[], button=[], scheduled=[])
+            statuses=[], logs=[], button=[], button_arm=[], scheduled=[])
 
         class _SyncThread:
             """threading.Thread stand-in — runs target() inline on start()."""
@@ -1001,6 +1001,14 @@ class TheScanAsksFirstWhenThereIsASessionToLose(unittest.TestCase):
             _scan_confirm_open=False,
             btn_scan_leader=types.SimpleNamespace(
                 config=lambda **kw: rec.button.append(kw.get('state'))),
+            # The SECOND scan button. A leader-less robot type hides Schritt A
+            # outright, so the button the student presses lives in the arm
+            # frame instead; `_scan_arms` must disable and re-enable BOTH, or a
+            # re-pack mid-scan puts a live button back over a running worker.
+            # Recorded SEPARATELY so `rec.button` keeps pinning exactly the
+            # transitions it always pinned.
+            btn_scan_arm=types.SimpleNamespace(
+                config=lambda **kw: rec.button_arm.append(kw.get('state'))),
             btn_stop=types.SimpleNamespace(config=lambda **kw: None),
             btn_open_browser=types.SimpleNamespace(config=lambda **kw: None),
             _selected_robot_profile=lambda: 'omx_full',
@@ -1071,6 +1079,10 @@ class TheScanAsksFirstWhenThereIsASessionToLose(unittest.TestCase):
         self.assertEqual(
             rec.button, ['disabled', 'normal'],
             'the button was not disabled for the scan and re-enabled after it')
+        self.assertEqual(
+            rec.button_arm, ['disabled', 'normal'],
+            'the leader-less profiles\' scan button was left out of the '
+            'disable/re-enable pair — it is the ONLY button on those profiles')
         self.assertTrue(any('Roboterarme werden gesucht' in s
                             for s in rec.statuses))
 
@@ -1091,6 +1103,8 @@ class TheScanAsksFirstWhenThereIsASessionToLose(unittest.TestCase):
         self.assertEqual(rec.logs, [], 'a declined scan wrote to the log')
         self.assertEqual(rec.button, [],
                          'a declined scan touched the scan button')
+        self.assertEqual(rec.button_arm, [],
+                         'a declined scan touched the arm scan button')
         self.assertEqual(rec.scheduled, [],
                          'a declined scan scheduled UI work (progress bar)')
         self.assertIsNone(owner.hardware.leader)

@@ -32,7 +32,7 @@ def _read_version_file() -> str:
             return candidate.read_text(encoding="utf-8").strip()
         except (OSError, UnicodeDecodeError):
             continue
-    return "2.15.0"
+    return "2.16.0"
 
 
 # GUI version — read from repo-root VERSION file (single source of truth).
@@ -304,10 +304,45 @@ ROS_DOMAIN_ID = 30
 # `scan_requires_leader` drives the follower-only GUI scan surface (Schritt A/B
 # wording, start-button gating, fast rehydrate). `follower_only` is the INITIAL
 # EDUBOTICS_FOLLOWER_ONLY value the .env generator derives from the type.
+#
+# `help_de` is GUI-ONLY (the Modus helper paragraph under the selector) and is
+# deliberately NOT mirrored into the Pi or server registries — nothing outside
+# this GUI reads it and no lockstep compares it. It lives HERE rather than in a
+# gui_app-local map so „every robot type has help text" is a testable invariant
+# (tests/test_gui_profile_help.py); a GUI-local dict can silently miss a new
+# profile. The two static paragraphs it replaced named „OMX – Roboter Studio
+# (nur Follower)" on every profile, including edu6_studio, which is a different
+# robot. KEEP THIS ASSIGNMENT A PLAIN literal_eval-able DICT LITERAL — the
+# cross-boundary lockstep test parses it with ast.literal_eval.
 ROBOT_PROFILES = {
-    "omx_full":     {"display_de": "OMX – Voll",                          "follower_only": False, "scan_requires_leader": True,  "arm_family": "omx",  "camera_roles": ("gripper", "scene")},
-    "omx_follower": {"display_de": "OMX – Roboter Studio (nur Follower)", "follower_only": True,  "scan_requires_leader": False, "arm_family": "omx",  "camera_roles": ("scene", "gripper")},
-    "edu6_studio":  {"display_de": "EduBotics 6-Achs – Roboter Studio",   "follower_only": True,  "scan_requires_leader": False, "arm_family": "edu6", "camera_roles": ("scene",)},
+    "omx_full": {
+        "display_de": "OMX – Voll",
+        "follower_only": False, "scan_requires_leader": True,
+        "arm_family": "omx", "camera_roles": ("gripper", "scene"),
+        "help_de": (
+            "Beide Arme: mit dem Leader-Arm führst du, der Follower-Arm fährt "
+            "nach. Aufnahme, Training, Inferenz und Roboter Studio. Im Roboter "
+            "Studio schaltest du den Leader-Arm bei Bedarf ab und wieder zu."
+        ),
+    },
+    "omx_follower": {
+        "display_de": "OMX – Roboter Studio (nur Follower)",
+        "follower_only": True, "scan_requires_leader": False,
+        "arm_family": "omx", "camera_roles": ("scene", "gripper"),
+        "help_de": (
+            "Nur der Follower-Arm — kein Leader-Arm nötig. Für Roboter Studio "
+            "(Greifen & Programmieren) und Inferenz."
+        ),
+    },
+    "edu6_studio": {
+        "display_de": "EduBotics 6-Achs – Roboter Studio",
+        "follower_only": True, "scan_requires_leader": False,
+        "arm_family": "edu6", "camera_roles": ("scene",),
+        "help_de": (
+            "Der 6-Achs-Arm von EduBotics mit einer Szenen-Kamera. Nur für "
+            "Roboter Studio (Greifen & Programmieren)."
+        ),
+    },
 }
 DEFAULT_ROBOT_PROFILE = "omx_full"
 

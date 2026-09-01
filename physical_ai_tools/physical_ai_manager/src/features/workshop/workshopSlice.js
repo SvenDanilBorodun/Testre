@@ -11,6 +11,21 @@
 import { createSlice } from '@reduxjs/toolkit';
 import { signedOut } from '../session/sessionActions';
 
+// The "no sensor data" snapshot, spelled ONCE so initialState and every reset
+// path cannot drift. A FACTORY, not a shared frozen literal: `setSensorSnapshot`
+// spreads into a fresh object today, but a future reducer that mutated in place
+// would otherwise corrupt initialState itself. `ts: 0` is load-bearing — it is
+// what SensorPanel reads as "nothing has arrived yet" (`ageMs` null), so a reset
+// shows „–" rather than a freshly-stamped staleness clock over empty values.
+function emptySensorSnapshot() {
+  return {
+    follower_joints: [],
+    gripper_opening: 0,
+    visible_apriltag_ids: [],
+    ts: 0,
+  };
+}
+
 const initialState = {
   // Calibration wizard state
   // WS4 (2026-06-17): scene-cam-only calibration. The wizard starts on the
@@ -82,12 +97,7 @@ const initialState = {
   debuggerVisible: false,
   debuggerWarnings: [], // per-block IK pre-check warnings: [{block_id, message}]
   // SensorSnapshot.msg payload, refreshed @ 5 Hz
-  sensorSnapshot: {
-    follower_joints: [],
-    gripper_opening: 0,
-    visible_apriltag_ids: [],
-    ts: 0,
-  },
+  sensorSnapshot: emptySensorSnapshot(),
   // Variable inspector — Map-like {name: {value, ts}}
   variables: {},
 
@@ -264,6 +274,16 @@ const workshopSlice = createSlice({
         state.runState = 'idle';
         state.phase = '';
         state.currentBlockId = null;
+        // Detections are an artifact OF the run: the server publishes
+        // `active_detections` only on /workflow/status, and the whole point of
+        // dispatching the empty list mid-run is that a finished perception block
+        // must stop painting boxes. A run that ENDS is the same event one step
+        // later — and without this the last box set stayed on screen over a
+        // camera feed that keeps streaming from web_video_server independently
+        // of ROS, so the boxes look live. CameraFeedOverlay is also mounted by
+        // BOTH calibration steps, so the stale boxes outlived Roboter Studio
+        // entirely and reappeared in the calibration wizard.
+        state.detections = [];
       } else if (next === 'running') {
         state.paused = false;
         // Clear the previous run's highlighted block ONLY on the transition
@@ -310,6 +330,17 @@ const workshopSlice = createSlice({
     },
     clearWorkflowLog: (state) => {
       state.log = [];
+    },
+    // The fourth sibling of clearWorkflowLog / clearVariables /
+    // setDebuggerWarnings([]) — the three things RunControls.handleStart already
+    // wiped before a new run. `workflowError` was skipped, and it is the only
+    // one of the four the student SEES as a red alert (it also force-opens the
+    // Protokoll drawer). Nothing else could clear it in time: the server emits
+    // no further status after the terminal `error` phase, so the banner
+    // describing the previous run rendered over the new one until that run's
+    // first tick arrived — or forever, if the new run failed to start.
+    clearWorkflowError: (state) => {
+      state.workflowError = null;
     },
 
     // Phase-2 debugger reducers
@@ -383,7 +414,28 @@ const workshopSlice = createSlice({
     },
 
     setSelectedWorkflowId: (state, action) => {
-      state.selectedWorkflowId = action.payload;
+      const next = action.payload;
+      // Breakpoints are Blockly block IDs, so they are meaningful ONLY inside
+      // the document that minted them. Switching workflows left the previous
+      // program's ids in place: BreakpointList renders them as raw UUIDs (its
+      // `blockLabel` falls back to the id when `getBlockById` misses) that
+      // cannot be alt-clicked off, and handleStart pushes them to
+      // /workflow/set_breakpoints before every run.
+      //
+      // The guard is `prev && prev !== next`, and both halves matter. Requiring
+      // a PREVIOUS id is what keeps the save-a-new-workflow path (null → id,
+      // WorkshopPage.handleSave / GalleryTab) from throwing away breakpoints the
+      // student just set on the very blocks they saved — the document is
+      // unchanged there, only its identity is. Requiring a DIFFERENT id keeps
+      // re-picking the open workflow a no-op. Every other switch — picking
+      // another workflow, or creating one while holding one — does change the
+      // document and does clear.
+      //
+      // Deliberately here and not in WorkshopPage.handlePickWorkflow: that is
+      // one of three dispatchers, and a fourth added later would silently miss.
+      const prev = state.selectedWorkflowId;
+      if (prev && prev !== next) state.breakpoints = [];
+      state.selectedWorkflowId = next;
     },
     setUnsavedBlocklyJson: (state, action) => {
       state.unsavedBlocklyJson = action.payload;
@@ -444,6 +496,26 @@ const workshopSlice = createSlice({
       state.debuggerWarnings = [];
       state.workflowError = null;
       state.currentBlockId = null;
+      // The RUN itself, not just its output. These are written ONLY by a
+      // /workflow/status tick or a RunControls button, and nothing clears them
+      // when the socket dies — which is exactly when „Abmelden" becomes
+      // reachable, because utils/signOut::logoutBlockReason opens the gate on a
+      // dead rosbridge link. So the sign-out that a dropped link permits was the
+      // one path that could hand the next student `runState: 'running'`. They
+      // then get selectWorkflowRunning() true (their OWN sign-out blocked,
+      // citing a program they never started), RunControls showing Stop instead
+      // of Start, and SimScene gated as though a run were in flight.
+      state.runState = 'idle';
+      state.phase = '';
+      state.progress = 0;
+      state.paused = false;
+      // The previous student's perception boxes and their arm's joint angles.
+      // Both are pushed by ROS and neither has any other clear that survives the
+      // stream stopping, so without this they are readable by the next student —
+      // and `sensorSnapshot` is a SHALLOW MERGE, so no action could shrink
+      // `follower_joints` back to [] even in principle.
+      state.detections = [];
+      state.sensorSnapshot = emptySensorSnapshot();
     });
   },
 });
@@ -477,6 +549,7 @@ export const {
   addBreakpoint,
   removeBreakpoint,
   clearBreakpoints,
+  clearWorkflowError,
   setDebuggerWarnings,
   setSelectedWorkflowId,
   setUnsavedBlocklyJson,

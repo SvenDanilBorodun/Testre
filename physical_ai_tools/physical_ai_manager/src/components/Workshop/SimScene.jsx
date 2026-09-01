@@ -51,6 +51,7 @@ import React, {
 } from 'react';
 import toast from 'react-hot-toast';
 import { useSelector } from 'react-redux';
+import ROSLIB from 'roslib';
 import {
   reachAnnulus,
   REACH_INNER_M,
@@ -62,6 +63,7 @@ import {
 } from './simConstants';
 import { armGeometry } from '../../utils/armProfile';
 import useSimObjects from '../../hooks/useSimObjects';
+import rosConnectionManager from '../../utils/rosConnectionManager';
 
 const UrdfTwin = lazy(() => import('../UrdfTwin'));
 
@@ -103,6 +105,53 @@ const OBJECT_PX = SIM_OBJECT_FALLBACK_SIZE_M * PX_PER_M;
 const GRIPPER_CLOSED_RAD = 0.2;
 const GRIPPER_OPEN_RAD = 0.5;
 const CAPTURE_RADIUS_M = 0.06;
+
+// „Simulator zurücksetzen" rides the EXISTING /workflow/stop service — no new
+// .srv, no interfaces rebuild, no enum churn. The server treats a stop with NO
+// RUN IN FLIGHT as the explicit reset request: it puts the virtual world back to
+// the placed objects and the virtual arm back to the Grundstellung (see
+// physical_ai_server.py::_reset_sim_scene). An older server image simply answers
+// „Es läuft kein Workflow." and changes nothing — the LOCAL half of the reset
+// below still runs, which is the half the student actually sees.
+//
+// Riding that branch is exactly why the button is DISABLED while a program runs.
+// /workflow/stop resolves the ACTIVE manager, and on this page that can be the
+// REAL one: a student who starts a normal program and then presses „Test im
+// Simulator" gets the sim editor while the physical arm is still executing
+// (WorkshopPage's simMode toggle does not gate on a running REAL workflow — it
+// never had to, because nothing in the sim editor could reach the running
+// program until this button existed). Enabled, the button would halt that arm
+// and then report „Simulator zurückgesetzt." — a true action described by a
+// false sentence. „Stopp" is the control for stopping; this one only resets.
+const SIM_RESET_SERVICE = '/workflow/stop';
+const SIM_RESET_SERVICE_TYPE = 'physical_ai_interfaces/srv/StopWorkflow';
+const SIM_RESET_TIMEOUT_MS = 6000;
+
+// Ask the server to put its virtual scene back to the start state. Resolves with
+// the service response; rejects on a dead connection or a timeout. Deliberately
+// NOT routed through useRosServiceCaller: that hook reads state.tasks/.training/
+// .ui/.ros unguarded, and SimScene is mounted (in tests and in the split stage)
+// against stores that carry only some of those. useSimObjects reaches rosbridge
+// the same direct way for the same reason.
+function callSimReset(rosbridgeUrl) {
+  return rosConnectionManager.getConnection(rosbridgeUrl).then(
+    (ros) => new Promise((resolve, reject) => {
+      const service = new ROSLIB.Service({
+        ros,
+        name: SIM_RESET_SERVICE,
+        serviceType: SIM_RESET_SERVICE_TYPE,
+      });
+      const timer = setTimeout(
+        () => reject(new Error('Zeitüberschreitung')), SIM_RESET_TIMEOUT_MS,
+      );
+      service.callService(
+        new ROSLIB.ServiceRequest({}),
+        (res) => { clearTimeout(timer); resolve(res); },
+        (err) => { clearTimeout(timer); reject(new Error(String(err))); },
+      );
+    }),
+  );
+}
 
 // No-go ("Sperrzone") keep-out boxes (Phase-4). The editor draws an axis-aligned
 // table rectangle and assigns a base-frame height band z0..z1 (metres). Rendered
@@ -182,6 +231,26 @@ function SimScene({
   // Defensive like the caps selector above: several tests mount SimScene with a
   // partial store, and an absent slice must degrade to "no subscription", not throw.
   const rosbridgeUrl = useSelector((st) => (st.ros ? st.ros.rosbridgeUrl : null));
+  // IS A PROGRAM ACTUALLY DRIVING THE VIRTUAL ARM RIGHT NOW? This is the
+  // authority question, and getting it wrong is what made the simulator go
+  // stale after „Stopp": the server's SimWorld is only MEANINGFUL while a run is
+  // moving things in it, but `_sim_idle_republish` re-broadcasts the last world
+  // with force=True every 0.5 s FOREVER, and the world is only ever reset at the
+  // NEXT run start (SimArm.set_objects). /workflow/stop did not touch it at all.
+  // So after a run the twin was pinned to wherever the run left the cubes, and a
+  // drag in the 2D editor moved the square while the 3D mesh snapped back within
+  // half a second — two panes telling two stories, which is exactly the failure
+  // /sim/objects was introduced to end.
+  //
+  // Between runs the EDITOR is the truth. Mirrors selectWorkflowRunning
+  // (features/workshop/workshopSlice) — inlined rather than imported so a store
+  // without the workshop slice degrades to "not running" instead of throwing;
+  // `paused` counts, because a debugger breakpoint still holds the run.
+  const workflowRunning = useSelector((st) => (
+    st.workshop
+      ? (st.workshop.runState === 'running' || st.workshop.paused === true)
+      : false
+  ));
   const annulus = useMemo(() => reachAnnulus(caps), [caps]);
   const graspBand = useMemo(() => {
     const geo = armGeometry(caps);
@@ -220,8 +289,19 @@ function SimScene({
   // null forever on an older server image that does not publish it, which is why
   // the local grasp guess below is KEPT as a fallback rather than deleted.
   const simScene = useSimObjects(rosbridgeUrl, true);
+  // The server scene, but ONLY while it is authoritative. Null between runs →
+  // `simPositions` is null → UrdfTwin's simPosOf falls back to the editor's own
+  // placement coordinates, byte-identically to the pre-/sim/objects behaviour.
+  const serverScene = workflowRunning ? simScene : null;
+  // Read by the STABLE onEndEffector callback, which must not re-create itself
+  // every time the run state flips.
+  const runningRef = useRef(workflowRunning);
+  useEffect(() => { runningRef.current = workflowRunning; }, [workflowRunning]);
   // Editor mode: place objects, or draw a no-go Sperrzone rectangle.
   const [mode, setMode] = useState('object'); // 'object' | 'zone'
+  // „Simulation zurücksetzen" in flight (the service call can take a moment when
+  // it has to stop a running program first).
+  const [resetting, setResetting] = useState(false);
   // Live drag-rectangle while drawing a zone, in base coords {x0,y0,x1,y1}.
   const [zoneDraft, setZoneDraft] = useState(null);
 
@@ -254,19 +334,48 @@ function SimScene({
     }
   }, [objects, heldObjectId]);
 
-  // Mirror the server scene for the (stable) grasp callback below.
+  // Mirror the server scene for the (stable) grasp callback below. This mirrors
+  // the RAW `simScene`, NOT the run-gated `serverScene`: the callback reads it to
+  // answer a CAPABILITY question — "does this server image publish /sim/objects
+  // at all?" — which is a property of the IMAGE, not of whether a run is in
+  // flight. Whether the scene is AUTHORITATIVE is `runningRef`'s job, one line
+  // earlier in that callback.
+  //
+  // Being precise about the ordering, because an earlier draft of this comment
+  // was not: gating this ref too would NOT re-enable the local fallback between
+  // runs, since `runningRef` already returns first. The two are belt and braces,
+  // and raw is simply the honest answer to the question actually being asked.
   useEffect(() => {
     simSceneRef.current = simScene;
   }, [simScene]);
 
-  // THE SERVER'S GRASP WINS whenever /sim/objects is live. The local geometric
-  // guess cannot know which object the runtime actually captured — the radius and
-  // the nearest-wins rule are the server's — and a disagreement between the two is
-  // precisely what let the twin and the editor tell two different stories.
-  // `held` is the object's KEY, i.e. its index in the list the editor sent.
+  // THE SERVER'S GRASP WINS whenever /sim/objects is live AND a run is actually
+  // in flight. The local geometric guess cannot know which object the runtime
+  // actually captured — the radius and the nearest-wins rule are the server's —
+  // and a disagreement between the two is precisely what let the twin and the
+  // editor tell two different stories. `held` is the object's KEY, i.e. its index
+  // in the list the editor sent.
+  //
+  // The three branches are NOT interchangeable:
+  //   * NOT RUNNING → drop the grasp. The server keeps re-broadcasting `held`
+  //     from the run that just ended, so without this a cube the student stopped
+  //     mid-carry stayed glued to the gripper and could never be repositioned.
+  //     `graspRef` is reset too, so the next run starts from a known state.
+  //   * RUNNING, no server scene → LEAVE the local guess alone. That is the
+  //     older-server-image path (no /sim/objects at all); clearing here would
+  //     delete the only grasp signal it has.
+  //   * RUNNING with a server scene → the server wins, as before.
   useEffect(() => {
-    if (!simScene) return;
-    const key = simScene.held;
+    if (!workflowRunning) {
+      if (heldRef.current !== null) {
+        heldRef.current = null;
+        setHeldObjectId(null);
+      }
+      graspRef.current.closed = false;
+      return;
+    }
+    if (!serverScene) return;
+    const key = serverScene.held;
     let id = null;
     if (key !== null && key !== undefined) {
       const o = objects[key];
@@ -274,21 +383,21 @@ function SimScene({
     }
     heldRef.current = id;
     setHeldObjectId(id);
-  }, [simScene, objects]);
+  }, [workflowRunning, serverScene, objects]);
 
   // Server positions keyed by the EDITOR's tag_id, which is what UrdfTwin keys its
   // mesh map on. Null while the topic is silent, so the twin falls back to the
   // placement coordinates exactly as before.
   const simPositions = useMemo(() => {
-    if (!simScene) return null;
+    if (!serverScene) return null;
     const out = {};
-    simScene.objects.forEach((o) => {
+    serverScene.objects.forEach((o) => {
       const editor = objects[o.key];
       if (!editor || editor.tag_id === undefined || editor.tag_id === null) return;
       out[editor.tag_id] = { x: o.x, y: o.y, yaw: o.yaw };
     });
     return out;
-  }, [simScene, objects]);
+  }, [serverScene, objects]);
 
   // Emit a MERGED scene: keep the current objects + zones and apply only the
   // given patch (`{objects}` or `{zones}`). Merging is required so an object edit
@@ -425,6 +534,50 @@ function SimScene({
     setSelectedId(null);
   }, [objects, emit]);
 
+  // „Simulator zurücksetzen" — put the simulator back to its start state.
+  //
+  // TWO HALVES, and the LOCAL one runs FIRST and unconditionally. It is the half
+  // the student actually sees (the grasp latch that keeps a cube glued to the
+  // gripper), it cannot fail, and it must not be hostage to a service call that
+  // an older server image, a dead rosbridge or a mid-pull container will not
+  // answer. The REMOTE half asks the node to reset its own SimWorld + park the
+  // virtual arm at the Grundstellung; on an image without that behaviour the
+  // service still exists (it is /workflow/stop) and simply reports that nothing
+  // was running, which is a no-op, not an error.
+  //
+  // It never stops anything: the button is disabled while a program runs (see
+  // the service note at the top of this file for why that is not merely tidy).
+  // The refusal is therefore structural, not a check inside the handler — but
+  // the guard is repeated here anyway, because a disabled button is a UI fact
+  // and this function is also the one a future caller would reuse.
+  const handleSimReset = useCallback(async () => {
+    if (resetting || workflowRunning) return;
+    setResetting(true);
+    heldRef.current = null;
+    setHeldObjectId(null);
+    graspRef.current.closed = false;
+    try {
+      if (!rosbridgeUrl) throw new Error('Keine Verbindung');
+      const res = await callSimReset(rosbridgeUrl);
+      // The service ANSWERED, so its verdict is the truth — never report a reset
+      // the server declined. (WorkflowManager.stop currently always reports
+      // success; reading it costs nothing and stops this becoming a lie if that
+      // changes.)
+      if (res && res.success === false) {
+        toast.error(res.message || 'Zurücksetzen fehlgeschlagen.');
+        return;
+      }
+      toast.success('Simulator zurückgesetzt.');
+    } catch (_) {
+      // The visible half already happened — say that, rather than an error that
+      // implies nothing did.
+      toast('Simulator lokal zurückgesetzt — der Roboter-Dienst hat nicht geantwortet.',
+        { icon: 'ℹ️' });
+    } finally {
+      setResetting(false);
+    }
+  }, [resetting, workflowRunning, rosbridgeUrl]);
+
   // ---- No-go zone editing (Phase-4) ----------------------------------------
   // Leaving zone mode (or losing the start corner) drops any in-progress draft.
   useEffect(() => {
@@ -524,6 +677,18 @@ function SimScene({
   // Grasp-attach geometry. Stable callback (reads refs) so UrdfTwin's
   // onEndEffector prop identity never churns.
   const handleEndEffector = useCallback(({ x, y, gripper }) => {
+    // Only a RUNNING program may grab anything. /sim/joint_states keeps ticking
+    // at 2 Hz between runs (the idle republish of the last commanded pose), so
+    // without this an arm parked with a closed gripper could re-capture a cube
+    // the student had just dragged somewhere else — a phantom grasp with no
+    // program behind it. The held effect above clears graspRef on the same edge.
+    //
+    // Its REACHABLE window is narrow and worth stating plainly: the next line
+    // hands the grasp to the server whenever /sim/objects has ever been heard,
+    // so this gate only bites on an image that does not publish that topic, or
+    // before the first sim run on one that does. It is cheap, and it is the
+    // difference between "cannot happen" and "does not happen today".
+    if (!runningRef.current) return;
     // FALLBACK ONLY. Once /sim/objects is live the server owns the grasp (see the
     // effect above); running both would let a local guess fight the runtime's
     // actual capture. Kept for an older server image that does not publish it.
@@ -827,15 +992,32 @@ function SimScene({
         </p>
       )}
 
-      {objects.length > 0 && (
+      <div className="flex flex-wrap items-center gap-1.5">
+        {/* Always available — the state it clears (a latched grasp, a virtual arm
+            parked mid-program) exists precisely when the table is NOT empty of
+            meaning, and after a page reload there may be no objects yet. */}
         <button
           type="button"
-          onClick={handleClear}
-          className="self-start text-xs px-2 py-1 rounded-md border border-[var(--line)] text-[var(--ink-3)] hover:bg-[var(--bg-sunk)]"
+          onClick={handleSimReset}
+          disabled={resetting || workflowRunning}
+          title={workflowRunning
+            ? 'Das Programm läuft noch — zuerst auf „Stopp" drücken.'
+            : 'Stellt die Objekte an ihre Plätze zurück und fährt den virtuellen '
+              + 'Arm in die Grundstellung.'}
+          className="text-xs px-2 py-1 rounded-md border border-[var(--line)] text-[var(--ink-3)] hover:bg-[var(--bg-sunk)] disabled:opacity-50 disabled:cursor-not-allowed"
         >
-          Tisch leeren
+          {resetting ? 'Wird zurückgesetzt …' : 'Simulator zurücksetzen'}
         </button>
-      )}
+        {objects.length > 0 && (
+          <button
+            type="button"
+            onClick={handleClear}
+            className="text-xs px-2 py-1 rounded-md border border-[var(--line)] text-[var(--ink-3)] hover:bg-[var(--bg-sunk)]"
+          >
+            Tisch leeren
+          </button>
+        )}
+      </div>
 
       {/* No-go zone list — per-zone height band + delete. */}
       {zones.length > 0 && (
@@ -910,7 +1092,7 @@ function SimScene({
           showTable
           heldObjectId={heldObjectId}
           simPositions={simPositions}
-          simEpoch={simScene ? simScene.epoch : 0}
+          simEpoch={serverScene ? serverScene.epoch : 0}
           onEndEffector={handleEndEffector}
           catalogDims={catalogDims}
           showPath={showPath}

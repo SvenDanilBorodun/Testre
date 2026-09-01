@@ -147,7 +147,16 @@ class ScanArmsTypeAwareTest(unittest.TestCase):
             "tk": types.SimpleNamespace(DISABLED="disabled", NORMAL="normal"),
         }
         method = _load_method("_scan_arms", ns)
-        statuses = []
+        statuses, logs = [], []
+        leader_status, follower_status = [], []
+
+        def _after(_delay, fn=None, *a):
+            # Execute inline. `_do_scan` marshals almost every UI write back
+            # through `root.after`, so swallowing them would hide exactly the
+            # thing the leader-label assertions below are about.
+            if fn is not None:
+                return fn(*a)
+
         owner = types.SimpleNamespace(
             _scanning=False,
             # The „Arme scannen" confirmation gate, stubbed to the answer these
@@ -159,22 +168,29 @@ class ScanArmsTypeAwareTest(unittest.TestCase):
             _scan_confirm_open=False,
             _confirm_arm_scan_closes_window=lambda: True,
             btn_scan_leader=types.SimpleNamespace(config=lambda **kw: None),
+            # The SECOND scan button: on a leader-less robot type Schritt A is
+            # hidden and this is the one the student presses. `_scan_arms`
+            # disables/re-enables both, so a double missing it errors.
+            btn_scan_arm=types.SimpleNamespace(config=lambda **kw: None),
             _selected_robot_profile=lambda: profile_id,
-            root=types.SimpleNamespace(after=lambda *a, **k: None),
+            root=types.SimpleNamespace(after=_after),
             progress=types.SimpleNamespace(start=lambda *a: None, stop=lambda *a: None),
             hardware=types.SimpleNamespace(leader=None, follower=None),
-            leader_status_var=types.SimpleNamespace(set=lambda *a: None),
-            follower_status_var=types.SimpleNamespace(set=lambda *a: None),
+            leader_status_var=types.SimpleNamespace(set=leader_status.append),
+            follower_status_var=types.SimpleNamespace(set=follower_status.append),
             _set_status=statuses.append,
-            _log=lambda *a: None,
+            _log=logs.append,
             _clear_arm_repair=lambda: None,
             _stop_camera_bridge=lambda: None,
             _stop_rs_control_server=lambda: None,
             _update_start_button=lambda: None,
-            _show_arm_repair=lambda d: None,
+            _show_arm_repair=lambda *a, **k: None,
             running=False,
         )
         method(owner)
+        self._logs = logs
+        self._leader_status = leader_status
+        self._follower_status = follower_status
         return owner, statuses, diag_calls
 
     def test_follower_only_leaderless_scan_is_success_no_diagnose(self):
@@ -185,7 +201,12 @@ class ScanArmsTypeAwareTest(unittest.TestCase):
         # SUCCESS: follower adopted, diagnose NEVER run.
         self.assertIs(owner.hardware.follower, follower)
         self.assertEqual(diag_calls, [])
-        self.assertTrue(any("Follower-Arm gefunden" in s for s in statuses))
+        # SINGULAR since the leader-less scan card went singular (OD-1):
+        # the card says „Schritt A: Roboterarm" / „Arm scannen", so the
+        # status bar must not answer with a leader/follower distinction
+        # this rig does not have.
+        self.assertTrue(any("Roboterarm gefunden" in s for s in statuses),
+                        statuses)
 
     def test_both_arms_type_with_only_follower_routes_to_diagnose(self):
         follower = types.SimpleNamespace(
@@ -194,6 +215,49 @@ class ScanArmsTypeAwareTest(unittest.TestCase):
             "omx_full", (None, follower))
         # A both-arms type is NOT satisfied by the follower alone → diagnose runs.
         self.assertEqual(diag_calls, ["img"])
+
+    # ── the leader LABEL, not just the routing ───────────────────────────────
+
+    def _follower(self):
+        return types.SimpleNamespace(
+            description="OpenRB-150", serial_path="/dev/serial/by-id/follower")
+
+    def test_a_leaderless_profile_does_not_report_a_missing_arm(self):
+        """A successful scan must not say „Nicht gefunden" anywhere.
+
+        Measured on the shipped code before this landed: on omx_follower /
+        edu6_studio a scan that found everything the rig HAS set Schritt A to
+        „Nicht gefunden" and logged „Leader-Arm nicht gefunden." while the
+        status bar simultaneously said „Follower-Arm gefunden!". The routing
+        was already type-aware; only the leader if/else was not.
+        """
+        for profile in ("omx_follower", "edu6_studio"):
+            with self.subTest(profile):
+                self._run_scan(profile, (None, self._follower()))
+                self.assertEqual(
+                    self._leader_status, ["Für diesen Robotertyp nicht nötig"],
+                    "the leader step still reports a fault on a robot type "
+                    "that has no leader")
+                self.assertFalse(
+                    any("nicht gefunden" in ln.lower() for ln in self._logs),
+                    f"a fully successful scan logged a missing arm: "
+                    f"{self._logs}")
+
+    def test_a_both_arms_profile_still_reports_a_missing_leader_verbatim(self):
+        """omx_full is untouched — a missing leader is a real fault there."""
+        self._run_scan("omx_full", (None, self._follower()))
+        self.assertIn("Nicht gefunden", self._leader_status)
+        self.assertIn("Leader-Arm nicht gefunden.", self._logs)
+
+    def test_the_leaderless_wording_uses_literal_umlauts(self):
+        """Rule §1: ä/ö/ü/ß, never ae/oe/ue/ss. No CI lint reaches this line —
+        `german-strings-lint` only scans [FEHLER]/[WARNUNG]/[STOPP] lines."""
+        self._run_scan("edu6_studio", (None, self._follower()))
+        text = self._leader_status[0]
+        self.assertIn("Für", text)
+        self.assertIn("nötig", text)
+        for bad in ("Fuer", "noetig", "fuer"):
+            self.assertNotIn(bad, text)
 
 
 class TryRehydrateArmsTest(unittest.TestCase):
@@ -499,6 +563,11 @@ class ArmFamilyMismatchWordingTest(unittest.TestCase):
                 robot_type_var=types.SimpleNamespace(
                     get=lambda: "EduBotics 6-Achs – Roboter Studio"),
                 _apply_robot_type_labels=lambda: None,
+                # `_on_robot_type_changed` now re-derives the camera roles too:
+                # the profile decides them, so a type switch must not leave a
+                # camera picked under omx_full holding role="gripper" on
+                # edu6_studio. Test-double completion, not a weakening.
+                _on_cameras_changed=lambda: None,
                 cloud_only=types.SimpleNamespace(get=lambda: False),
                 _hardware_ready=lambda *a: ready,
                 _arms_conflict_with_family=lambda p: conflict,

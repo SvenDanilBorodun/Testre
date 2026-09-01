@@ -215,6 +215,61 @@ describe('signOutStudent — no trace of the previous student', () => {
     expect(s.workshop.selectedWorkflowId).toBeNull();
   });
 
+  it('resets the Roboter-Studio RUN, not only the program', async () => {
+    // The sign-out that a DEAD rosbridge permits is the one that could hand the
+    // next student a run: logoutBlockReason opens the gate on `!robotLinkLive`
+    // precisely because nothing clears these when the socket dies. Left set,
+    // selectWorkflowRunning() stays true and blocks the NEXT student's own
+    // „Abmelden" over a program they never started, while RunControls shows
+    // Stop instead of Start.
+    const { store, signOutStudent, workshop } = await freshStore();
+    store.dispatch(workshop.setRunState('running'));
+    store.dispatch(workshop.setWorkflowStatus({
+      current_block_id: 'blk-7', phase: 'running', progress: 55, error: 'kaputt',
+    }));
+    store.dispatch(workshop.setPaused(true));
+    expect(store.getState().workshop.runState).toBe('running');
+
+    await store.dispatch(signOutStudent({ reload: false }));
+
+    const s = store.getState().workshop;
+    expect(s.runState).toBe('idle');
+    expect(s.phase).toBe('');
+    expect(s.progress).toBe(0);
+    expect(s.paused).toBe(false);
+    expect(s.currentBlockId).toBeNull();
+    expect(s.workflowError).toBeNull();
+  });
+
+  it('clears what the robot PUSHED about the previous student', async () => {
+    // Neither is storage-backed, so the sessionScope key scan is blind to both.
+    // `detections` are the boxes their program last saw; `sensorSnapshot` is
+    // their arm's joint angles at 5 Hz — and it is a SHALLOW MERGE, so no action
+    // could shrink follower_joints back to [] even in principle.
+    const { store, signOutStudent, workshop } = await freshStore();
+    store.dispatch(workshop.setDetections({
+      detections: [{ cx: 1, cy: 2, w: 3, h: 4, label: 'wuerfel', confidence: 0.9 }],
+    }));
+    store.dispatch(workshop.setSensorSnapshot({
+      follower_joints: [0.11, 0.22, 0.33, 0.44, 0.55],
+      gripper_opening: 0.66,
+      visible_apriltag_ids: [20, 21],
+    }));
+    expect(store.getState().workshop.sensorSnapshot.follower_joints).toHaveLength(5);
+
+    await store.dispatch(signOutStudent({ reload: false }));
+
+    const s = store.getState().workshop;
+    expect(s.detections).toEqual([]);
+    expect(s.sensorSnapshot.follower_joints).toEqual([]);
+    expect(s.sensorSnapshot.gripper_opening).toBe(0);
+    expect(s.sensorSnapshot.visible_apriltag_ids).toEqual([]);
+    // ts 0, never a fresh Date.now(): SensorPanel reads a non-zero ts as "data
+    // arrived", so stamping one here would put a live staleness clock over an
+    // empty snapshot.
+    expect(s.sensorSnapshot.ts).toBe(0);
+  });
+
   it('keeps the rig calibration the workshop slice also holds', async () => {
     // The same slice is half student, half rig. A calibration describes the
     // CAMERA and the TABLE and is persisted server-side; clearing it would send

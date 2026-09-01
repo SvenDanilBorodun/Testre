@@ -16,7 +16,7 @@
 // and the `mock*`-prefixed factory vars are exempt from the TDZ guard.
 
 import React from 'react';
-import { render, screen, waitFor, act } from '@testing-library/react';
+import { render, screen, waitFor, act, cleanup } from '@testing-library/react';
 import UrdfTwin from '../UrdfTwin';
 
 // --- react-redux: selector-aware stub over a mutable module-level state. ---
@@ -139,16 +139,48 @@ let mockPathGeometry = null;
 // Test-controlled end-effector world position, written into the target vector by
 // the mock robot's getWorldPosition so appendPathPoint sees real numeric coords.
 const mockEEWorld = { x: 0, y: 0, z: 0 };
+// Every STLLoader.load() the component issued, each with a finish() that lands
+// the geometry — the async-mesh arrival the render-invalidation fix hangs off.
+const mockStlLoads = [];
+// Whatever loadMeshCb handed back to urdf-loader's `done` (one entry per mesh).
+const mockMeshDone = [];
+// renderer.render calls — the render-on-demand loop's only observable output.
+const mockRender = vi.fn();
+// camera.position.set calls — frameRobot's observable output.
+const mockCameraPositionSet = vi.fn();
+// OrbitControls listeners by event type, so a test can fire 'start' (= the
+// student grabbed the camera).
+const mockControlListeners = {};
+// How many <mesh> elements the fake URDF declares. The real assets have 8 (OMX)
+// and 10 (edu6). TWO is the minimum that separates the two invalidation paths:
+// with one mesh, finishing it also closes the last LoadingManager item, so
+// `manager.onLoad` alone satisfied every assertion and the per-mesh
+// `needsRender` could be deleted with the whole suite still green (measured).
+const MOCK_URDF_MESH_COUNT = 2;
 vi.mock('urdf-loader', () => ({
   __esModule: true,
-  default: function URDFLoaderMock() {
+  default: function URDFLoaderMock(manager) {
+    this.manager = manager || null;
     this.loadMeshCb = null;
     this.load = (url, onComplete) => {
-      // Record which asset url was requested (urdf_asset_id → URDF_ASSETS row),
-      // then invoke the success path with our recording robot (synchronous — no
-      // network, no STL parsing in the mock).
+      // Record which asset url was requested (urdf_asset_id → URDF_ASSETS row).
       mockLoadUrls.push(url);
+      // MODEL THE REAL LOADER'S ORDER, which is the defect this file exists to
+      // fence (URDFLoader.js:113-116): onComplete fires the instant parse()
+      // returns, and parse() only KICKS OFF an async fetch per mesh. So the
+      // robot handed to onComplete has no geometry, and the meshes land later —
+      // through loadMeshCb, which the old mock never called at all, leaving the
+      // entire async-mesh path untested.
+      if (this.manager) this.manager.itemStart(url);
       onComplete(mockRobot);
+      for (let i = 0; i < MOCK_URDF_MESH_COUNT; i += 1) {
+        if (typeof this.loadMeshCb === 'function') {
+          this.loadMeshCb(`mesh${i}.stl`, this.manager, (obj) => {
+            mockMeshDone.push(obj);
+          });
+        }
+      }
+      if (this.manager) this.manager.itemEnd(url);
     };
   },
 }));
@@ -213,7 +245,17 @@ vi.mock('three', () => {
     },
     Color: function Color() {},
     PerspectiveCamera: function PerspectiveCamera() {
-      return noopObj({ updateProjectionMatrix: () => {}, aspect: 1, near: 0.1, far: 100 });
+      // position.set is spied so the async-mesh tests can assert that frameRobot
+      // runs AGAIN once real geometry exists (in production the onComplete call
+      // hits an empty Box3 and early-returns, so it is the manager.onLoad repeat
+      // that actually frames the arm).
+      return noopObj({
+        updateProjectionMatrix: () => {},
+        aspect: 1,
+        near: 0.1,
+        far: 100,
+        position: { set: mockCameraPositionSet },
+      });
     },
     WebGLRenderer: function WebGLRenderer() {
       // Capture the instance + a shadowMap object so the sim-stage shadow test can
@@ -222,7 +264,7 @@ vi.mock('three', () => {
       mockRenderer = {
         setPixelRatio: () => {},
         setSize: () => {},
-        render: () => {},
+        render: mockRender,
         dispose: () => {},
         shadowMap: { enabled: false, type: null },
         domElement: document.createElement('canvas'),
@@ -321,6 +363,24 @@ vi.mock('three', () => {
       return { geometry, material, frustumCulled: true, visible: true };
     },
     AxesHelper: function AxesHelper() { mockAxesCtor(); return noopObj(); },
+    // Faithful enough to be meaningful: real item counting, so onLoad fires at
+    // the same moment three's does — when every tracked item (the URDF text AND
+    // every STL) has ended. A no-op stub here would have let the fix's
+    // frameRobot/shadow re-run go untested.
+    LoadingManager: function LoadingManager() {
+      this.itemsTotal = 0;
+      this.itemsLoaded = 0;
+      this.onLoad = null;
+      this.itemStart = () => { this.itemsTotal += 1; };
+      this.itemEnd = () => {
+        this.itemsLoaded += 1;
+        if (this.itemsLoaded === this.itemsTotal && typeof this.onLoad === 'function') {
+          this.onLoad();
+        }
+      };
+      this.itemError = () => {};
+      this.resolveURL = (u) => u;
+    },
     Box3,
     Vector3,
   };
@@ -332,7 +392,13 @@ vi.mock('three/examples/jsm/controls/OrbitControls', () => ({
       enableDamping: false,
       dampingFactor: 0,
       target: { set: () => {}, copy: () => {} },
-      addEventListener: () => {},
+      // Records handlers so a test can fire the real 'start' event (pointer-down
+      // on the canvas) and assert the camera latch. `update: () => false` is the
+      // at-rest return of the real control, which is what makes the render loop
+      // idle and therefore what makes these tests mean anything.
+      addEventListener: (type, fn) => {
+        (mockControlListeners[type] || (mockControlListeners[type] = [])).push(fn);
+      },
       update: () => false,
       dispose: () => {},
     };
@@ -340,8 +406,25 @@ vi.mock('three/examples/jsm/controls/OrbitControls', () => ({
 }));
 vi.mock('three/examples/jsm/loaders/STLLoader', () => ({
   __esModule: true,
-  STLLoader: function STLLoader() {
-    this.load = () => {};
+  STLLoader: function STLLoader(manager) {
+    this.manager = manager || null;
+    // Record instead of resolving. `finish()` replays what three's FileLoader
+    // really does: run the onLoad callback, then close the manager item — which
+    // is what makes LoadingManager.onLoad fire. Nothing resolves on its own, so
+    // every test controls exactly when (and whether) geometry exists.
+    this.load = (path, onLoad, onProgress, onError) => {
+      if (this.manager) this.manager.itemStart(path);
+      const entry = {
+        path,
+        onLoad,
+        onError,
+        finish: (geometry = { dispose: () => {} }) => {
+          if (typeof onLoad === 'function') onLoad(geometry);
+          if (this.manager) this.manager.itemEnd(path);
+        },
+      };
+      mockStlLoads.push(entry);
+    };
   },
 }));
 
@@ -368,6 +451,11 @@ beforeEach(() => {
   mockRobot.rotation.x = 0;
   mockRobot.rotation.z = 0;
   mockLoadUrls.length = 0;
+  mockStlLoads.length = 0;
+  mockMeshDone.length = 0;
+  mockRender.mockClear();
+  mockCameraPositionSet.mockClear();
+  Object.keys(mockControlListeners).forEach((k) => delete mockControlListeners[k]);
   mockTcpUrdf = null;
   mockState = { ros: { rosbridgeUrl: 'ws://student-pc:9090', rosHost: 'student-pc' } };
 });
@@ -854,5 +942,204 @@ describe('UrdfTwin — the server owns where sim objects are', () => {
     const mesh = findObjectMesh();
     expect(mesh.position.x).toBeCloseTo(0.15, 6);
     expect(mesh.position.z).toBeCloseTo(0, 6);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Async STL arrival — the render-on-demand invalidation contract.
+//
+// urdf-loader calls its onComplete the instant the URDF XML is parsed, while
+// every <mesh> is still an in-flight fetch (URDFLoader.js:113-116). This
+// renderer paints ON DEMAND, so the frame that onComplete dirtied paints an
+// EMPTY robot, and unless something marks the frame dirty again when the meshes
+// land, the pane stays black until the student drags the canvas. On the SIM twin
+// there IS nothing else: /sim/joint_states does not exist until the first run.
+//
+// These tests are the fence. The mocks above deliberately do NOT resolve an STL
+// on their own — each test lands the geometry itself, so the ordering is exact.
+// ---------------------------------------------------------------------------
+
+const nextFrame = () =>
+  new Promise((resolve) => window.requestAnimationFrame(() => resolve()));
+
+// Let the render-on-demand loop run a few frames and go quiet.
+async function settleFrames(n = 4) {
+  for (let i = 0; i < n; i += 1) {
+    // eslint-disable-next-line no-await-in-loop
+    await act(async () => { await nextFrame(); });
+  }
+}
+
+describe('UrdfTwin — meshes that arrive AFTER the URDF callback', () => {
+  async function mountAndWaitForMeshRequests(ui = <UrdfTwin />) {
+    const utils = render(ui);
+    await waitFor(() => expect(mockStlLoads.length).toBe(MOCK_URDF_MESH_COUNT));
+    await waitFor(() => expect(mockRender).toHaveBeenCalled());
+    return utils;
+  }
+
+  // Prove the loop is genuinely idle, and return the settled draw count. Without
+  // this, "a render happened after the mesh landed" would also pass against a
+  // loop that paints every frame regardless — i.e. against the bug.
+  async function settledDrawCount() {
+    await settleFrames();
+    const idle = mockRender.mock.calls.length;
+    await settleFrames();
+    expect(mockRender.mock.calls.length).toBe(idle);
+    return idle;
+  }
+
+  test('the FIRST mesh landing already re-paints — the arm appears progressively', async () => {
+    await mountAndWaitForMeshRequests();
+    const idle = await settledDrawCount();
+
+    // Only ONE of the two meshes lands. The LoadingManager still has an open
+    // item, so `manager.onLoad` has NOT fired: the only thing that can dirty the
+    // frame here is the per-mesh invalidation inside loadMeshCb.
+    await act(async () => { mockStlLoads[0].finish(); });
+    await waitFor(() =>
+      expect(mockRender.mock.calls.length).toBeGreaterThan(idle));
+    expect(mockCameraPositionSet.mock.calls.length).toBe(1); // no framing yet
+  });
+
+  test('the LAST mesh landing re-paints too — manager.onLoad', async () => {
+    await mountAndWaitForMeshRequests();
+    await act(async () => { mockStlLoads[0].finish(); });
+    const idle = await settledDrawCount();
+
+    await act(async () => { mockStlLoads[1].finish(); });
+    await waitFor(() =>
+      expect(mockRender.mock.calls.length).toBeGreaterThan(idle));
+  });
+
+  test('every mesh reaches urdf-loader (the invalidation did not replace done())', async () => {
+    await mountAndWaitForMeshRequests();
+    await act(async () => { mockStlLoads.forEach((l) => l.finish()); });
+
+    expect(mockMeshDone).toHaveLength(MOCK_URDF_MESH_COUNT);
+    expect(mockMeshDone).toEqual(mockMeshInstances);
+  });
+
+  test('the camera is framed ONCE, and only after every mesh has landed', async () => {
+    // Framing before the geometry exists is not a harmless no-op: on omx_f it
+    // measures the 1 cm end-effector <box> primitive and over-zooms 37.8x, which
+    // is why onComplete no longer frames at all. The baseline below is the mount
+    // effect's own camera.position.set and nothing else.
+    await mountAndWaitForMeshRequests();
+    expect(mockCameraPositionSet.mock.calls.length).toBe(1);
+
+    await act(async () => { mockStlLoads[0].finish(); });
+    expect(mockCameraPositionSet.mock.calls.length).toBe(1);
+
+    await act(async () => { mockStlLoads[1].finish(); });
+    expect(mockCameraPositionSet.mock.calls.length).toBe(2);
+  });
+
+  test('a student who grabs the camera mid-load KEEPS their view', async () => {
+    // The arm now paints progressively, so there is a real window in which a
+    // student on a slow link can orbit before the last STL lands. OrbitControls
+    // fires 'start' on pointer-down; the re-frame must yield to it.
+    await mountAndWaitForMeshRequests();
+    await act(async () => { mockStlLoads[0].finish(); });
+    const framedBefore = mockCameraPositionSet.mock.calls.length;
+
+    act(() => { (mockControlListeners.start || []).forEach((fn) => fn()); });
+    await act(async () => { mockStlLoads[1].finish(); });
+
+    expect(mockCameraPositionSet.mock.calls.length).toBe(framedBefore);
+  });
+
+  test('showShadows marks EVERY link mesh as a caster — none exist at onComplete', async () => {
+    await mountAndWaitForMeshRequests(<UrdfTwin showShadows />);
+    await act(async () => { mockStlLoads.forEach((l) => l.finish()); });
+
+    expect(mockMeshInstances).toHaveLength(MOCK_URDF_MESH_COUNT);
+    mockMeshInstances.forEach((m) => expect(m.castShadow).toBe(true));
+  });
+
+  test('without showShadows a link mesh casts nothing (control)', async () => {
+    await mountAndWaitForMeshRequests();
+    await act(async () => { mockStlLoads.forEach((l) => l.finish()); });
+
+    expect(mockMeshInstances).toHaveLength(MOCK_URDF_MESH_COUNT);
+    mockMeshInstances.forEach((m) => expect(m.castShadow).toBe(false));
+  });
+
+  test('a mesh that resolves after unmount neither paints nor throws', async () => {
+    const { unmount } = await mountAndWaitForMeshRequests();
+    unmount();
+    const after = mockRender.mock.calls.length;
+
+    await act(async () => { mockStlLoads.forEach((l) => l.finish()); });
+    await settleFrames();
+    expect(mockRender.mock.calls.length).toBe(after);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// „Wartet auf Gelenkdaten …" must be able to come BACK.
+//
+// `hasJointData` was a one-way latch — one setter, no false path, no timer — so
+// a feed that died (rosbridge drop, node respawn, „Umgebung stoppen", the arm
+// container recreated by the LeaderToggle) left the mesh frozen at its last pose
+// under a GREEN liveness dot. The pane asserted liveness over a stale picture.
+// ---------------------------------------------------------------------------
+
+describe('UrdfTwin — the liveness chip is not a latch', () => {
+  const WAITING = 'Wartet auf Gelenkdaten …';
+
+  // The watchdog interval is created by the subscription effect at MOUNT, so the
+  // fake clock has to be installed BEFORE render or the real timer is the one
+  // that runs. That rules out `waitFor` here — it polls on setInterval, which is
+  // faked — so the subscribe handshake is awaited by flushing microtasks
+  // instead. `getConnection` resolves immediately (mocked above), and setTimeout
+  // is deliberately NOT faked, so nothing else in the harness changes behaviour.
+  async function mountWithFakeClock() {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'] });
+    vi.setSystemTime(new Date('2026-09-01T12:00:00Z'));
+    render(<UrdfTwin />);
+    for (let i = 0; i < 8 && mockSubscribe.mock.calls.length === 0; i += 1) {
+      // eslint-disable-next-line no-await-in-loop
+      await act(async () => { await Promise.resolve(); });
+    }
+    expect(mockSubscribe).toHaveBeenCalledTimes(1);
+    return mockSubscribe.mock.calls[0][0];
+  }
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  test('a silent feed returns the twin to „Wartet auf Gelenkdaten …"', async () => {
+    const onMsg = await mountWithFakeClock();
+    expect(screen.getByText(WAITING)).toBeInTheDocument();
+
+    act(() => onMsg({ name: ['joint1'], position: [0.1] }));
+    expect(screen.queryByText(WAITING)).not.toBeInTheDocument();
+
+    act(() => { vi.advanceTimersByTime(4000); });
+    expect(screen.getByText(WAITING)).toBeInTheDocument();
+  });
+
+  test('a feed that keeps ticking never trips the watchdog', async () => {
+    const onMsg = await mountWithFakeClock();
+    act(() => onMsg({ name: ['joint1'], position: [0.1] }));
+
+    // 10 s of a 2 Hz feed — the sim idle republish cadence, the slowest real one.
+    for (let i = 0; i < 20; i += 1) {
+      act(() => { vi.advanceTimersByTime(500); });
+      act(() => onMsg({ name: ['joint1'], position: [0.1 + i] }));
+    }
+    expect(screen.queryByText(WAITING)).not.toBeInTheDocument();
+  });
+
+  test('the watchdog is torn down with the component', async () => {
+    const onMsg = await mountWithFakeClock();
+    act(() => onMsg({ name: ['joint1'], position: [0.1] }));
+    const before = vi.getTimerCount();
+
+    act(() => { cleanup(); });
+
+    expect(vi.getTimerCount()).toBeLessThan(before);
   });
 });

@@ -185,6 +185,77 @@ describe('RunControls — cross-profile replay refusal', () => {
     expect(mockRos.callService).not.toHaveBeenCalled();
   });
 
+  // ── migration 039: the pair the width check CANNOT catch ─────────────────
+  //
+  // Every test above uses tags whose Contract-B WIDTHS differ (omx_f 7,
+  // edu6_studio 8), so they would still pass with `trajectoryMatchesRig`
+  // deleted — the runtime's own width check would refuse the payload, just
+  // later and with the misleading „Aufnahme ist beschädigt.". The Edu:1 has 5
+  // arm joints, so its width is 5 + 2 = 7, the SAME as omx_f: for THIS pair the
+  // tag is the only separator, and a deleted gate means an OMX recording drives
+  // an Edu:1 (or the reverse) all the way to the servos.
+  test('refuses an edu1-tagged recording on an OMX rig — SAME width, tag only', async () => {
+    mockState.tasks = { taskStatus: { robotType: 'omx_f' } };
+    mockGetTrajectory.mockResolvedValue({
+      fps: 25, points: POINTS, robot_profile: 'edu1_studio',
+    });
+    render(<RunControls workflowId="wf-1" blocklyJson={REPLAY_JSON} simMode={false} simScene={null} />);
+    await userEvent.click(screen.getByRole('button', { name: /Start/ }));
+
+    await waitFor(() =>
+      expect(mockToast.error).toHaveBeenCalledWith(
+        expect.stringContaining('mit einem anderen Robotertyp aufgenommen'),
+      ),
+    );
+    expect(mockRos.callService).not.toHaveBeenCalled();
+  });
+
+  test('refuses an OMX-tagged recording on an Edu:1 rig — SAME width, tag only', async () => {
+    mockState.tasks = { taskStatus: { robotType: 'edu1_studio' } };
+    mockGetTrajectory.mockResolvedValue({
+      fps: 25, points: POINTS, robot_profile: 'omx_f',
+    });
+    render(<RunControls workflowId="wf-1" blocklyJson={REPLAY_JSON} simMode={false} simScene={null} />);
+    await userEvent.click(screen.getByRole('button', { name: /Start/ }));
+
+    await waitFor(() =>
+      expect(mockToast.error).toHaveBeenCalledWith(
+        expect.stringContaining('mit einem anderen Robotertyp aufgenommen'),
+      ),
+    );
+    expect(mockRos.callService).not.toHaveBeenCalled();
+  });
+
+  test('refuses an UNTAGGED (legacy = OMX) recording on an Edu:1 rig', async () => {
+    // The most dangerous shape of all: a legacy row carries no tag, is 7-wide,
+    // and an Edu:1 recording is 7-wide too — nothing but the legacy→omx_f
+    // reading stops it.
+    mockState.tasks = { taskStatus: { robotType: 'edu1_studio' } };
+    mockGetTrajectory.mockResolvedValue({ fps: 25, points: POINTS });
+    render(<RunControls workflowId="wf-1" blocklyJson={REPLAY_JSON} simMode={false} simScene={null} />);
+    await userEvent.click(screen.getByRole('button', { name: /Start/ }));
+
+    await waitFor(() =>
+      expect(mockToast.error).toHaveBeenCalledWith(
+        expect.stringContaining('mit einem anderen Robotertyp aufgenommen'),
+      ),
+    );
+    expect(mockRos.callService).not.toHaveBeenCalled();
+  });
+
+  test('allows a matching edu1 recording on an Edu:1 rig', async () => {
+    mockState.tasks = { taskStatus: { robotType: 'edu1_studio' } };
+    mockGetTrajectory.mockResolvedValue({
+      fps: 25, points: POINTS, robot_profile: 'edu1_studio',
+    });
+    render(<RunControls workflowId="wf-1" blocklyJson={REPLAY_JSON} simMode={false} simScene={null} />);
+    await userEvent.click(screen.getByRole('button', { name: /Start/ }));
+
+    await waitFor(() => expect(mockRos.callService).toHaveBeenCalled());
+    const parsed = JSON.parse(mockRos.callService.mock.calls[0][2].workflow_json);
+    expect(parsed.trajectories).toEqual({ 'Bewegung 1': { fps: 25, points: POINTS } });
+  });
+
   test('allows a matching-profile recording and injects only { fps, points }', async () => {
     mockState.tasks = { taskStatus: { robotType: 'edu6_studio' } };
     mockGetTrajectory.mockResolvedValue({

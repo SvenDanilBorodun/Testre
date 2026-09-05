@@ -866,6 +866,52 @@ describe('UrdfTwin — edu6 profile asset + world-frame yaw', () => {
   });
 });
 
+// edu1 profile ("Edu:1", the 5-DOF Feetech claw arm). Same seam as edu6, but it
+// is the case that proves the seam is keyed on the ASSET ID and not on the joint
+// COUNT: edu1 has 5 arm joints exactly like the OMX, so a count-based selector
+// would silently load the OMX meshes for it.
+describe('UrdfTwin — edu1 profile asset', () => {
+  const EDU1_CAPS = {
+    urdf_asset_id: 'edu1',
+    arm_joints: 5,
+    joint_names: ['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'RL_joint'],
+  };
+  const edu1State = () => ({
+    ros: { rosbridgeUrl: 'ws://student-pc:9090', rosHost: 'student-pc' },
+    tasks: { taskStatus: { capabilities: EDU1_CAPS } },
+  });
+
+  test('an edu1 manifest selects the edu1 URDF asset and yaws the robot π', async () => {
+    mockState = edu1State();
+    render(<UrdfTwin />);
+    await waitFor(() => expect(mockSubscribe).toHaveBeenCalledTimes(1));
+    expect(mockLoadUrls.some((u) => u.includes('/edu1-urdf/edu1.urdf'))).toBe(true);
+    // Its reachable half-disc is on URDF −x too, so it is yawed like the edu6.
+    expect(mockRobot.rotation.z).toBeCloseTo(Math.PI, 12);
+    expect(mockRobot.rotation.x).toBeCloseTo(-Math.PI / 2, 12);
+  });
+
+  test('the claw channel is read from RL_joint, not from a hardcoded name', async () => {
+    mockState = edu1State();
+    const onEE = vi.fn();
+    render(<UrdfTwin onEndEffector={onEE} />);
+    await waitFor(() => expect(mockSubscribe).toHaveBeenCalledTimes(1));
+
+    const onMsg = mockSubscribe.mock.calls[0][0];
+    act(() => onMsg({
+      name: ['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'RL_joint'],
+      position: [0, 0.64, 1.48, 0.90, 0, 0.9],
+    }));
+
+    const arg = onEE.mock.calls[onEE.mock.calls.length - 1][0];
+    expect(arg.gripper).toBeCloseTo(0.9, 6);
+    expect(mockSetJointValue).toHaveBeenCalledWith('RL_joint', 0.9);
+    expect(mockSetJointValue).toHaveBeenCalledWith('joint4', 0.90);
+    // …and never the OMX gripper name, which the count-shaped bug would use.
+    expect(mockSetJointValue).not.toHaveBeenCalledWith('gripper_joint_1', 0.9);
+  });
+});
+
 // ── Server-authoritative sim scene (/sim/objects) ───────────────────────────
 // The twin used to run its OWN object model: SimScene guessed the grasp from a
 // distance test and UrdfTwin then moved meshes the server never learned about,

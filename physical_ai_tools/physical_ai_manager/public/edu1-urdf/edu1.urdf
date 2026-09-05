@@ -1,0 +1,591 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- This URDF was automatically created by SolidWorks to URDF Exporter! Originally created by Stephen Brawner (brawner@gmail.com) 
+     Commit Version: 1.6.0-4-g7f85cfe  Build Version: 1.6.7995.38578
+     For more information, please see http://wiki.ros.org/sw_urdf_exporter -->
+<!-- EduBotics in-repo copy of the Edu:1 (5dof_assembly_urdf2) SolidWorks export.
+     Loaded by the React 3D twin (components/UrdfTwin.jsx, URDF_ASSETS.edu1) and
+     parsed by the INDEPENDENT FK oracle in
+     physical_ai_server/test/test_edu1_ik.py, so a transcription error in
+     workflow/edu1_ik.py's baked constants cannot verify itself.
+
+     FOUR deliberate SEMANTIC differences from the raw CAD export. There are
+     three further differences that are not semantic and are listed after them,
+     because "and nothing else" was wrong and the line-ending one in particular
+     defeats the clean-diff hope this header ends on:
+
+     1. robot name "5dof_assembly_urdf2" -> "edu1_studio" (the CAD name starts
+        with a digit and means nothing outside SolidWorks; nothing reads it).
+     2. mesh filenames "package://5dof_assembly_urdf2/meshes/X" -> "./meshes/X",
+        so the browser fetches them relative to this file with no ROS resolver
+        and no CDN (classroom offline requirement) — same shape as
+        public/edu6-urdf/edu6.urdf.
+     3. Every joint LIMIT that is a right angle is written to the same
+        precision the rest of this file already uses: 1.57 -> 1.5708 and
+        3.14 -> 3.1416. The exporter wrote the ORIGINS at four decimals
+        ("rpy=-1.5708 0 1.5708") and the LIMITS at two, which is a rounding of
+        the designer's 90 deg / 180 deg, not a different intent — the edu6
+        export writes both at four. It is not cosmetic: joint5 is the jaw-roll
+        axis and its window IS the jaw-fold window, so at +-1.57 a required
+        roll of exactly +-90 deg (a cube sitting square-on to the arm's own
+        bearing, not a corner case) fell 0.0008 rad OUTSIDE both folded
+        twins and the grasp was refused with „Arbeitsbereich". 0.0008 rad is
+        half a servo tick, so nothing physical changes; only the arithmetic
+        stops rejecting its own design intent.
+     4. RL_joint and its LF_joint <mimic> have their axes FLIPPED, turning the
+        claw band from 0 -> -1.57 into 0 -> +1.57. Zero is the same physical
+        pose (jaws closed) either way; this makes OPEN the numerically LARGER
+        value, which every shared code path assumes:
+          * motion.check_grasp_held reads HELD as an achieved angle ABOVE the
+            commanded close,
+          * object_catalog validates gripper_close_rad inside a [closed, open)
+            band,
+          * SimArm classifies a command BELOW its close threshold as a close.
+        The driver carries the same flip through its per-joint sign vector, so
+        /joint_states, this twin and the servo agree. Kept as a URDF edit rather
+        than a rename so a future CAD re-export still diffs cleanly against it.
+
+     NON-SEMANTIC differences, i.e. the rest of the answer to "what else":
+
+     5. LINE ENDINGS. The raw export is CRLF (509 of them, pure ASCII); this
+        copy is LF. That is why an un-normalised `diff` against the export
+        reports 1065 changed lines (every line of both files) where the real
+        figure is 113. A future CAD re-export will therefore NOT "diff cleanly"
+        against this file unless it is normalised first — do that.
+     6. This header comment.
+     7. Two inline "AXIS FLIPPED" comments inside RL_joint and LF_joint.
+     Consequence of 6: this copy carries 12 non-ASCII bytes (German quotes and
+     dashes) where the export is pure ASCII. Neither file has a BOM and neither
+     ends with a newline.
+
+     Verified: 184 elements each, identical tag sequence, identical element
+     text, exactly 28 elements with differing attributes — 1 robot name,
+     18 mesh filenames, and 9 accounted for by differences 3 and 4.
+
+     The meshes beside this file are vertex-clustering DECIMATIONS of the CAD
+     STLs (15.007 MB -> 3.420 MB, 4.39x). Deviation on the worst mesh
+     (base_link, worst on every metric), re-measured 2026-09-05 with exact
+     point-to-triangle distances — SAY WHICH METRIC, because the three differ
+     by 3x and this header used to quote a fourth number (0.58 mm) that
+     reproduces under none of nine variants tried:
+       * decimated vertex -> nearest RAW VERTEX          0.479 mm
+       * decimated vertex -> nearest raw TRIANGLE        0.473 mm
+       * raw vertex -> nearest decimated TRIANGLE        0.675 mm  <- the
+         symmetric point-to-surface figure, i.e. the honest worst case
+       * raw vertex -> nearest DECIMATED VERTEX          1.579 mm  (a
+         cluster-representative distance; NOT a surface error)
+     Bounding boxes are preserved to 0.0133 mm and every deviation is INWARD
+     (link2 z-max, link3 z-min, right_finger z-min/z-max; the other 6 meshes
+     are bit-identical), so a box derived from these meshes is never smaller
+     than the raw geometry. They are a VISUAL asset — the collision model is
+     workflow/arm_geometry.py::EDU1_LINK_BOXES, which is derived from the
+     full-resolution meshes and rounded OUTWARD by 0.1 mm; that rounding
+     absorbs the 0.0133 mm with >= 0.089 mm to spare. -->
+<robot
+  name="edu1_studio">
+  <link
+    name="base_link">
+    <inertial>
+      <origin
+        xyz="0.0065972 0.00046455 0.020192"
+        rpy="0 0 0" />
+      <mass
+        value="0.45324" />
+      <inertia
+        ixx="0.00045611"
+        ixy="-1.0237E-08"
+        ixz="-7.2245E-06"
+        iyy="0.00026488"
+        iyz="1.1427E-08"
+        izz="0.00065821" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="./meshes/base_link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="1 1 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="./meshes/base_link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <link
+    name="link1">
+    <inertial>
+      <origin
+        xyz="0.00142430926928561 3.25480290053193E-06 0.0266430814148018"
+        rpy="0 0 0" />
+      <mass
+        value="0.252637849046075" />
+      <inertia
+        ixx="5.3693845955723E-05"
+        ixy="1.15634872332915E-08"
+        ixz="8.8484925785268E-07"
+        iyy="6.1470223114311E-05"
+        iyz="1.01571588804574E-08"
+        izz="3.40673925591872E-05" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="./meshes/link1.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.866666666666667 0.909803921568627 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="./meshes/link1.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="joint1"
+    type="revolute">
+    <origin
+      xyz="0 0 0.0492"
+      rpy="0 0 -1.5708" />
+    <parent
+      link="base_link" />
+    <child
+      link="link1" />
+    <axis
+      xyz="0 0 -1" />
+    <limit
+      lower="-1.5708"
+      upper="1.5708"
+      effort="1.91"
+      velocity="4.72" />
+  </joint>
+  <link
+    name="link2">
+    <inertial>
+      <origin
+        xyz="0.128108080126568 -0.0115134450598436 -0.000203428923559734"
+        rpy="0 0 0" />
+      <mass
+        value="0.388456094388029" />
+      <inertia
+        ixx="9.43621325451633E-05"
+        ixy="-1.07780984365286E-06"
+        ixz="3.53950745758829E-07"
+        iyy="0.000144675146577539"
+        iyz="7.91549641506225E-07"
+        izz="0.00015406164353272" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="./meshes/link2.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.866666666666667 0.909803921568627 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="./meshes/link2.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="joint2"
+    type="revolute">
+    <origin
+      xyz="0 0 0.04075"
+      rpy="-1.5708 0 1.5708" />
+    <parent
+      link="link1" />
+    <child
+      link="link2" />
+    <axis
+      xyz="0 0 -1" />
+    <limit
+      lower="0"
+      upper="3.1416"
+      effort="4.9"
+      velocity="7.87" />
+  </joint>
+  <link
+    name="link3">
+    <inertial>
+      <origin
+        xyz="1.91680735539546E-06 0.163370228162452 0.00086363600842243"
+        rpy="0 0 0" />
+      <mass
+        value="0.409101114406431" />
+      <inertia
+        ixx="0.00031921092527826"
+        ixy="1.01571493526515E-08"
+        ixz="1.34023747823371E-08"
+        iyy="6.66357072929691E-05"
+        iyz="1.07387375576627E-06"
+        izz="0.000303228216774095" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="./meshes/link3.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.866666666666667 0.909803921568627 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="./meshes/link3.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="joint3"
+    type="revolute">
+    <origin
+      xyz="0.1555 -0.032 0"
+      rpy="3.1416 0 -1.5708" />
+    <parent
+      link="link2" />
+    <child
+      link="link3" />
+    <axis
+      xyz="0 0 -1" />
+    <limit
+      lower="0"
+      upper="3.1416"
+      effort="4.9"
+      velocity="7.87" />
+  </joint>
+  <link
+    name="link4">
+    <inertial>
+      <origin
+        xyz="0.0123255960436137 0.0405887356992345 -1.26289878600305E-05"
+        rpy="0 0 0" />
+      <mass
+        value="0.253583085402849" />
+      <inertia
+        ixx="3.38535209378082E-05"
+        ixy="-1.00560041377723E-06"
+        ixz="-2.72927783971259E-08"
+        iyy="5.59497901844944E-05"
+        iyz="-1.11160218023545E-07"
+        izz="6.09372386595058E-05" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="./meshes/link4.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.866666666666667 0.909803921568627 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="./meshes/link4.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="joint4"
+    type="revolute">
+    <origin
+      xyz="0 0.222499999999999 0"
+      rpy="0 0 0" />
+    <parent
+      link="link3" />
+    <child
+      link="link4" />
+    <axis
+      xyz="0 0 -1" />
+    <limit
+      lower="-1.5708"
+      upper="1.5708"
+      effort="1.91"
+      velocity="4.72" />
+  </joint>
+  <link
+    name="link5">
+    <inertial>
+      <origin
+        xyz="1.85518267414864E-12 -1.00919272938427E-13 -0.00160250191702316"
+        rpy="0 0 0" />
+      <mass
+        value="0.00204505697080932" />
+      <inertia
+        ixx="4.67240251871496E-08"
+        ixy="2.88395125623845E-19"
+        ixz="5.96602318417442E-18"
+        iyy="4.67240251853844E-08"
+        iyz="-3.73372144122675E-19"
+        izz="8.85697744469466E-08" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="./meshes/link5.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.866666666666667 0.909803921568627 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="./meshes/link5.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="joint5"
+    type="revolute">
+    <origin
+      xyz="0 0.0609499999999672 0"
+      rpy="-1.5707963267949 0 0" />
+    <parent
+      link="link4" />
+    <child
+      link="link5" />
+    <axis
+      xyz="0 0 -1" />
+    <limit
+      lower="-1.5708"
+      upper="1.5708"
+      effort="1.91"
+      velocity="4.72" />
+  </joint>
+  <link
+    name="end_effector">
+    <inertial>
+      <origin
+        xyz="0.00184770542311241 0.00368714904057166 0.0202859621596632"
+        rpy="0 0 0" />
+      <mass
+        value="0.263495955462809" />
+      <inertia
+        ixx="5.65732039386392E-05"
+        ixy="-6.51744510066231E-07"
+        ixz="-4.56169377746318E-08"
+        iyy="3.64790391198839E-05"
+        iyz="-4.84477391924387E-07"
+        izz="6.65216935692438E-05" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="./meshes/end_effector.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="1 1 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="./meshes/end_effector.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="end_joint"
+    type="fixed">
+    <origin
+      xyz="0 0 0"
+      rpy="0 0 0" />
+    <parent
+      link="link5" />
+    <child
+      link="end_effector" />
+    <axis
+      xyz="0 0 0" />
+  </joint>
+  <link
+    name="right_finger">
+    <inertial>
+      <origin
+        xyz="0.00120941049347534 -0.0157453546915447 -0.0202369802381945"
+        rpy="0 0 0" />
+      <mass
+        value="0.0116231522327918" />
+      <inertia
+        ixx="5.37517873028709E-06"
+        ixy="-2.06035480311998E-07"
+        ixz="1.80835131713326E-08"
+        iyy="2.54401930752065E-06"
+        iyz="-6.56348521459518E-08"
+        izz="3.35112468874519E-06" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="./meshes/right_finger.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="1 1 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="./meshes/right_finger.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="RL_joint"
+    type="revolute">
+    <origin
+      xyz="0.0202 -0.00925 0.02125"
+      rpy="-1.5708 0 -1.5708" />
+    <parent
+      link="end_effector" />
+    <child
+      link="right_finger" />
+    <!-- AXIS FLIPPED vs the CAD export (was "0 0 -1", limits -1.57..0). -->
+    <axis
+      xyz="0 0 1" />
+    <limit
+      lower="0"
+      upper="1.5708"
+      effort="1.91"
+      velocity="4.72" />
+  </joint>
+  <link
+    name="left_finger">
+    <inertial>
+      <origin
+        xyz="-0.00170205180125527 -0.0235313626310218 -0.0200395864040611"
+        rpy="0 0 0" />
+      <mass
+        value="0.00782108816549615" />
+      <inertia
+        ixx="5.28614829995171E-06"
+        ixy="2.02379819056173E-07"
+        ixz="-1.42160103549834E-08"
+        iyy="2.47091121868132E-06"
+        iyz="-5.77415071366321E-08"
+        izz="3.17759842532108E-06" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="./meshes/left_finger.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="1 1 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="./meshes/left_finger.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="LF_joint"
+    type="revolute">
+    <origin
+      xyz="0.0195 0.00925 0.02125"
+      rpy="-1.5708 0 -1.5708" />
+    <parent
+      link="end_effector" />
+    <child
+      link="left_finger" />
+    <!-- AXIS FLIPPED with RL_joint (was "0 0 1"): both signs invert together,
+         so the fingers still counter-rotate and the <mimic> is unchanged. -->
+    <axis
+      xyz="0 0 -1" />
+    <limit
+      lower="0"
+      upper="1.5708"
+      effort="1.91"
+      velocity="4.72" />
+    <mimic
+      joint="RL_joint"
+      multiplier="1"
+      offset="0" />
+  </joint>
+</robot>

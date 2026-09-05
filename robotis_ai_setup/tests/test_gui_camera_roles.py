@@ -227,6 +227,32 @@ class TheGeneratorRefusesARoleTheProfileDoesNotDeclare(unittest.TestCase):
         finally:
             os.unlink(p)
 
+    def test_edu1_refuses_a_gripper_camera_and_names_ITS_OWN_label(self):
+        """The second scene-only arm. The check is a per-profile ALLOWLIST, so
+        the refusal must name the profile the student actually picked — a
+        message hardcoded to the first such arm would send them to the wrong
+        dropdown entry."""
+        p = self._tmp()
+        try:
+            with self.assertRaises(ValueError) as ctx:
+                generate_env_file(self._config("gripper"), output_path=p,
+                                  robot_type="edu1_studio")
+            msg = str(ctx.exception)
+            self.assertIn("Greifer", msg)
+            self.assertIn(ROBOT_PROFILES["edu1_studio"]["display_de"], msg)
+            self.assertNotIn(ROBOT_PROFILES["edu6_studio"]["display_de"], msg)
+        finally:
+            os.unlink(p)
+
+    def test_edu1_accepts_its_own_scene_camera(self):
+        p = self._tmp()
+        try:
+            content = generate_env_file(self._config("scene"), output_path=p,
+                                        robot_type="edu1_studio")
+            self.assertIn('CAMERA_NAME_1="scene"', content)
+        finally:
+            os.unlink(p)
+
     def test_both_omx_profiles_still_accept_both_roles(self):
         for profile in ("omx_full", "omx_follower"):
             for role in ("gripper", "scene"):

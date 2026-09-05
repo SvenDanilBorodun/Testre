@@ -215,8 +215,15 @@ TABLE_TOUCH_VS_CAMERA_MAX_M = 0.12
 # different height than a vertical grasp would reach (a 15° tilt biases z by
 # ~4 mm and grows with arm extension), and the fingertip↔EE-link offset stops
 # being purely vertical. So reject a tap whose gripper approach axis deviates
-# more than this from straight-down. The approach axis is the EE-link local +x
-# (the forearm/tool pointing direction) in base frame = FK ``R[:, 0]``.
+# more than this from straight-down.
+#
+# WHICH axis that is comes from the SOLVER (``ik.approach_axis_local``), not
+# from a fixed column. This used to hardcode ``R[:, 0]``, which is the OMX
+# answer and 90° wrong on both Feetech arms (their FK frames point the tool
+# along −z and +z respectively) — so on those arms EVERY correct vertical tap
+# was rejected with „Greifer steht schräg (90°)" and the touch-off could not be
+# completed at all. Measured 2026-09-05 on all three solvers; with the axis
+# asked for rather than assumed, all three read 0.0° at a vertical pose.
 TABLE_TOUCH_MAX_TILT_DEG = 12.0
 
 
@@ -289,9 +296,14 @@ class CalibrationManager:
         self,
         get_frame: Callable[[str], np.ndarray | None] | None = None,
         get_gripper_pose: Callable[[], tuple[np.ndarray, np.ndarray] | None] | None = None,
+        get_approach_axis: Callable[[], tuple[float, float, float] | None] | None = None,
     ) -> None:
         self._get_frame = get_frame
         self._get_gripper_pose = get_gripper_pose
+        # Optional, and its absence resolves to the OMX axis — so a bare
+        # ``CalibrationManager()`` (the capability probe builds one) and every
+        # pre-existing caller behave exactly as before.
+        self._get_approach_axis = get_approach_axis
         self._lock = threading.Lock()
         self._board, self._dict = _build_charuco_board()
         self._detector_params = cv2.aruco.DetectorParameters()
@@ -1132,7 +1144,7 @@ class CalibrationManager:
             # bias z_table. The approach axis is the EE-link local +x (forearm/
             # tool pointing direction) in base frame = R[:, 0]; reject taps that
             # deviate more than TABLE_TOUCH_MAX_TILT_DEG from straight-down.
-            tilt_deg = self._approach_tilt_deg(R)
+            tilt_deg = self._approach_tilt_deg(R, self._approach_axis_local())
             if tilt_deg is None:
                 return False, len(buf.points), TABLE_TOUCH_POINTS_REQUIRED, (
                     'Greiferausrichtung unbekannt — bitte erneut erfassen.'
@@ -1149,16 +1161,40 @@ class CalibrationManager:
                 f'Punkt {n}/{TABLE_TOUCH_POINTS_REQUIRED} erfasst.'
             )
 
+    def _approach_axis_local(self) -> tuple[float, float, float]:
+        """The tool direction in the frame ``get_gripper_pose`` reports, asked
+        of the solver. Falls back to the OMX ``+x`` whenever the provider is
+        absent or answers with anything unusable — the SAFE direction, because
+        it is what this gate did for its whole life before the Feetech arms."""
+        provider = self._get_approach_axis
+        if provider is None:
+            return (1.0, 0.0, 0.0)
+        try:
+            axis = provider()
+        except Exception:  # noqa: BLE001 — a provider must never fail a capture
+            return (1.0, 0.0, 0.0)
+        try:
+            values = tuple(float(v) for v in axis)
+        except (TypeError, ValueError):
+            return (1.0, 0.0, 0.0)
+        if len(values) != 3 or not all(math.isfinite(v) for v in values):
+            return (1.0, 0.0, 0.0)
+        return values
+
     @staticmethod
-    def _approach_tilt_deg(R: np.ndarray) -> float | None:
+    def _approach_tilt_deg(R: np.ndarray,
+                           axis_local: tuple[float, float, float] = (1.0, 0.0, 0.0)
+                           ) -> float | None:
         """Angle (deg) between the gripper approach axis and straight-down.
 
-        The approach axis is the EE-link local +x (forearm/tool pointing
-        direction) expressed in base frame, i.e. the first column of the FK
-        rotation ``R``. Straight-down is base ``(0, 0, -1)``. Returns ``None``
-        when ``R`` is malformed / the axis is degenerate."""
+        ``axis_local`` is the tool direction in the frame the FK rotation ``R``
+        is expressed in — the OMX's is local ``+x`` (hence the default, which
+        keeps every old caller identical), the edu6's is ``−z`` and the edu1's
+        is ``+z``. Straight-down is base ``(0, 0, -1)``. Returns ``None`` when
+        ``R`` is malformed / the axis is degenerate."""
         try:
-            axis = np.asarray(R, dtype=np.float64).reshape(3, 3)[:, 0]
+            rot = np.asarray(R, dtype=np.float64).reshape(3, 3)
+            axis = rot @ np.asarray(axis_local, dtype=np.float64).reshape(3)
         except (ValueError, TypeError):
             return None
         norm = float(np.linalg.norm(axis))

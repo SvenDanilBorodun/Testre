@@ -56,14 +56,23 @@ MAX_TRAJECTORY_POINTS = 5000
 MAX_TRAJECTORY_JSON_BYTES = 256 * 1024
 # Each point is exactly (num_arm_joints + 2) finite numbers: joints + gripper +
 # t_seconds. The width follows the ARM FAMILY the recording was made on — the
-# `robot_profile` column (migration 035): 'omx_f' (5 arm joints → 7-wide, the
-# pre-edu6 default for untagged rows/clients) or 'edu6_studio' (6 → 8-wide).
+# `robot_profile` column (migrations 035 + 039): 'omx_f' (5 arm joints →
+# 7-wide, the pre-edu6 default for untagged rows/clients), 'edu6_studio'
+# (6 → 8-wide) or 'edu1_studio' (5 → 7-wide).
+#
+# NOTE 'edu1_studio' and 'omx_f' share a WIDTH and are different arms. The
+# width check therefore cannot separate them and was never meant to: it stops a
+# structurally wrong payload, while the TAG is what stops a cross-arm replay
+# (React's RunControls refuses a mismatched tag before it reaches the runtime).
+# Do not "simplify" this map to a width lookup keyed on point length.
+#
 # The id set mirrors the server registry's data_robot_type values — duplicated
 # here like TEMPO_MIN/MAX (the cloud cannot import the server package).
 TRAJECTORY_POINT_LEN = 7
 TRAJECTORY_ROBOT_PROFILES: dict = {
     "omx_f": 7,
     "edu6_studio": 8,
+    "edu1_studio": 7,
 }
 # Sanity ceiling on the recording rate. The recorder runs at 20-30 Hz; a value
 # past this is a client bug and would make replay timing nonsensical.
@@ -340,8 +349,8 @@ def validate_trajectory_robot_profile(robot_profile: Any) -> int:
 
 def _trajectory_point(value: Any, point_len: int = TRAJECTORY_POINT_LEN) -> list[float]:
     """Validate one recorded sample: exactly ``point_len`` finite numbers
-    (``bool`` excluded; 7 for OMX recordings, 8 for edu6 — joints + gripper +
-    t_s). Raises HTTP 400 in German on any violation. Mirrors ``_corner`` but
+    (``bool`` excluded; 7 for OMX and Edu:1 recordings, 8 for edu6 — joints +
+    gripper + t_s). Raises HTTP 400 in German on any violation. Mirrors ``_corner`` but
     for the Contract-B point."""
     if not isinstance(value, list) or len(value) != point_len:
         raise HTTPException(

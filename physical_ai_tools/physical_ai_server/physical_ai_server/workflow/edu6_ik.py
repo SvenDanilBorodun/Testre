@@ -512,6 +512,12 @@ class Edu6IKSolver:
     def in_workspace(self, target_xyz) -> bool:
         return self.solve(target_xyz) is not None
 
+    @property
+    def approach_axis_local(self) -> tuple[float, float, float]:
+        """The TOOL/approach direction in the frame :meth:`fk` returns — here
+        link6 −z (see :meth:`_fk_matrix`, which places the TCP along it). See the OMX solver's copy for why this is per-solver."""
+        return (0.0, 0.0, -1.0)
+
     def base_yaw(self, x: float, y: float) -> float:
         """joint1 yaw aiming the arm plane at WORLD ``(x, y)`` — exactly the
         ``theta1`` :meth:`solve` computes (bearing from the joint-1 axis at

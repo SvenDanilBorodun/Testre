@@ -91,9 +91,18 @@ class TestFamilyScopedSerialFilter(unittest.TestCase):
         gate R1 will replace with the measured string. Both platforms must widen
         together or a board revision that works on Windows stays invisible here."""
         from gui.app import device_manager as win_dm
-        self.assertEqual(identify_arm._EDU6_BYID_MARKERS,
-                         win_dm._EDU6_BYID_MARKERS)
+        self.assertEqual(identify_arm._FEETECH_BYID_MARKERS,
+                         win_dm._FEETECH_BYID_MARKERS)
         self.assertEqual(identify_arm._ARM_MARKERS["omx"], ("ROBOTIS", "OPENRB"))
+
+    def test_both_feetech_families_share_one_marker_tuple(self):
+        """edu6 and edu1 sit on the SAME Waveshare adapter, so their by-id
+        strings are indistinguishable. Sharing the tuple is the honest encoding
+        of that; the servo COUNT is what actually separates them."""
+        self.assertIs(identify_arm._ARM_MARKERS["edu6"],
+                      identify_arm._ARM_MARKERS["edu1"])
+        self.assertEqual(identify_arm._FAMILY_SERVO_COUNT,
+                         {"edu6": 7, "edu1": 6})
 
     def setUp(self):
         identify_arm._LAST_DIAG_CANDIDATES = None
@@ -147,7 +156,8 @@ class TestFamilyScopedSerialFilter(unittest.TestCase):
                 patch.object(identify_arm.logger, "warning") as warn:
             identify_arm.find_serial_paths_for_arms("edu6")
         line = warn.call_args[0][0]
-        for jargon in ("_EDU6_BYID_MARKERS", "gui/app", "rig gate", "lockstep"):
+        for jargon in ("_FEETECH_BYID_MARKERS", "gui/app", "rig gate",
+                       "lockstep"):
             self.assertNotIn(jargon, line)
         self.assertLess(len(line), 80, line)
 
@@ -383,6 +393,83 @@ class TestEdu6Scan(unittest.TestCase):
         self.assertIn("Nur 3 von 7 Servos", identify_arm.LAST_SCAN_NOTICE)
         self.assertIn("Steckverbindungen", identify_arm.LAST_SCAN_NOTICE)
 
+    def _scan_family(self, verdict, arm_family):
+        identify_arm.LAST_SCAN_NOTICE = ""
+        with patch.object(identify_arm, "_poll_serial_paths",
+                          return_value=[EDU6]), \
+                patch.object(identify_arm, "start_scanner_container",
+                             return_value=True), \
+                patch.object(identify_arm, "stop_scanner_container"), \
+                patch.object(identify_arm, "identify_arm_via_docker",
+                             return_value=verdict):
+            return identify_arm.scan_and_identify_arms("img",
+                                                       arm_family=arm_family)
+
+    # ── A1: a bus LONGER than any supported arm ─────────────────────────────
+    def test_an_overlong_bus_never_says_more_of_fewer(self):
+        """`feetech_bus_length` walks one id PAST the longest arm, so the count
+        can EXCEED the selected family's length. As a `partial:` it rendered
+        „Nur 8 von 7 Servos antworten" — a fraction greater than one, sending
+        the student to the cable checklist for the OPPOSITE fault."""
+        for family, count in (("edu6", 7), ("edu1", 6)):
+            with self.subTest(family):
+                leader, follower = self._scan_family("bus_too_long:8", family)
+                self.assertIsNone(follower)
+                note = identify_arm.LAST_SCAN_NOTICE
+                self.assertNotIn(f"Nur 8 von {count}", note)
+                self.assertIn("mindestens 8", note)
+                self.assertNotIn("Steckverbindungen", note)
+
+    def test_a_partial_that_meets_the_selected_length_reads_as_a_stale_image(self):
+        leader, follower = self._scan_family("partial:6", "edu1")
+        self.assertIsNone(follower)
+        note = identify_arm.LAST_SCAN_NOTICE
+        self.assertNotIn("Nur 6 von 6", note)
+        self.assertIn("Abbild", note)
+
+    def test_a_genuine_partial_names_the_selected_arms_length(self):
+        self._scan_family("partial:3", "edu1")
+        self.assertIn("Nur 3 von 6 Servos", identify_arm.LAST_SCAN_NOTICE)
+
+    def test_bus_length_notice_is_byte_identical_to_the_windows_twin(self):
+        from gui.app import device_manager as win_dm
+        for role in ("partial:3", "partial:6", "partial:7", "bus_too_long:8",
+                     "partial:x", "edu6"):
+            for servos in (6, 7, None):
+                with self.subTest(role=role, servos=servos):
+                    self.assertEqual(
+                        identify_arm.feetech_bus_length_notice(role, servos),
+                        win_dm.feetech_bus_length_notice(role, servos))
+        for name in ("_TOO_LONG_NOTICE_DE", "_STALE_PROBER_NOTICE_DE",
+                     "_PARTIAL_NOTICE_DE"):
+            self.assertEqual(getattr(identify_arm, name),
+                             getattr(win_dm, name), name)
+            # Rule §1: literal umlauts, never transliterations.
+            for bad in ("ue", "ae", "oe"):
+                self.assertNotIn(bad, getattr(identify_arm, name))
+
+    # ── A9: the host must not accept the WRONG family's success token ───────
+    def test_the_other_familys_success_token_is_refused(self):
+        """Not reachable through the CURRENT prober, but pinning IMAGE_TAG is a
+        documented rollback and the stdout-verdict-wins contract lets a stale
+        prober's bare family name land here."""
+        for selected, reported, needle in (("edu1", "edu6", "EduBotics 6-Achs"),
+                                           ("edu6", "edu1", "Edu:1")):
+            with self.subTest(selected=selected, reported=reported):
+                leader, follower = self._scan_family(reported, selected)
+                self.assertIsNone(follower)
+                self.assertIsNone(leader)
+                self.assertIn(needle, identify_arm.LAST_SCAN_NOTICE)
+
+    def test_the_selected_familys_own_token_is_still_the_follower(self):
+        for family in ("edu6", "edu1"):
+            with self.subTest(family):
+                leader, follower = self._scan_family(family, family)
+                self.assertIsNotNone(follower)
+                self.assertEqual(follower.role, "follower")
+                self.assertIsNone(leader)
+                self.assertEqual(identify_arm.LAST_SCAN_NOTICE, "")
+
     def test_partial_token_is_ignored_on_the_dxl_path(self):
         """`partial:N` is a Feetech-only diagnosis; the dxl prober never emits
         it, so an OMX scan must not grow a Feetech sentence."""
@@ -399,26 +486,59 @@ class TestEdu6Scan(unittest.TestCase):
         self.assertIn("OMX-Arm", identify_arm.LAST_SCAN_NOTICE)
         self.assertIn("Robotertyp", identify_arm.LAST_SCAN_NOTICE)
 
-    def test_cross_probe_edu6_arm_while_omx_selected(self):
+    def test_cross_probe_feetech_arm_while_omx_selected(self):
         with patch.object(identify_arm, "_poll_serial_paths", return_value=[LEADER]), \
                 patch.object(identify_arm, "start_scanner_container", return_value=True), \
                 patch.object(identify_arm, "stop_scanner_container"), \
                 patch.object(identify_arm, "identify_arm_via_docker",
                              return_value="edu6_arm_found"):
             identify_arm.scan_and_identify_arms("img")
-        self.assertIn("EduBotics 6-Achs", identify_arm.LAST_SCAN_NOTICE)
+        self.assertIn("EduBotics-Arm", identify_arm.LAST_SCAN_NOTICE)
+        self.assertIn("OMX-Robotertyp", identify_arm.LAST_SCAN_NOTICE)
+
+    def test_cross_probe_names_the_feetech_family_the_prober_found(self):
+        """The probe CAN tell the two Feetech arms apart (it counts servos), so
+        its sentence names them — unlike the USB-presence path, which cannot."""
+        for token, needle in (("edu1_arm_found", "Edu:1"),
+                              ("edu6_arm_found", "EduBotics 6-Achs")):
+            with self.subTest(token):
+                selected = "edu6" if token.startswith("edu1") else "edu1"
+                with patch.object(identify_arm, "_poll_serial_paths",
+                                  return_value=[EDU6]), \
+                        patch.object(identify_arm, "start_scanner_container",
+                                     return_value=True), \
+                        patch.object(identify_arm, "stop_scanner_container"), \
+                        patch.object(identify_arm, "identify_arm_via_docker",
+                                     return_value=token):
+                    identify_arm.scan_and_identify_arms("img",
+                                                        arm_family=selected)
+                self.assertIn(needle, identify_arm.LAST_SCAN_NOTICE)
+
+    def test_six_answering_servos_owns_its_ambiguity(self):
+        """A healthy Edu:1 and a 6-axis arm whose gripper servo dropped off the
+        chain are THE SAME six servos. The sentence must offer both readings —
+        naming only the likelier one strands the student when it is wrong."""
+        text = identify_arm._CROSS_NOTICE_EDU1_WHILE_EDU6
+        self.assertIn("Edu:1", text)
+        self.assertIn("EduBotics 6-Achs", text)
+        self.assertIn("siebte Servo", text)
+        # …and it must OFFER the two readings, not ASSERT one and walk it back.
+        # The old wording opened „das ist ein Edu:1-Arm" and only afterwards
+        # said „falls es doch der 6-Achs-Arm ist", which reads as a verdict.
+        self.assertIn("Zwei Möglichkeiten", text)
+        self.assertNotIn("das ist ein", text)
+        self.assertLess(text.index("entweder"), text.index("Edu:1"))
 
     def test_notices_are_copied_verbatim_from_the_windows_twin(self):
         from gui.app import device_manager as win_dm
-        self.assertEqual(identify_arm._CROSS_NOTICE_OMX_WHILE_EDU6,
-                         win_dm._CROSS_NOTICE_OMX_WHILE_EDU6)
-        self.assertEqual(identify_arm._CROSS_NOTICE_EDU6_WHILE_OMX,
-                         win_dm._CROSS_NOTICE_EDU6_WHILE_OMX)
+        self.assertEqual(identify_arm._CROSS_NOTICES, win_dm._CROSS_NOTICES)
+        self.assertEqual(identify_arm.cross_family_notice("omx", "edu1"),
+                         win_dm.cross_family_notice("omx", "edu1"))
+        self.assertEqual(identify_arm.cross_family_notice("x", "y"), "")
 
     def test_notices_use_literal_umlauts_never_transliterations(self):
         """Rule §1 — the notice reaches the System tab verbatim."""
-        for text in (identify_arm._CROSS_NOTICE_OMX_WHILE_EDU6,
-                     identify_arm._CROSS_NOTICE_EDU6_WHILE_OMX):
+        for text in identify_arm._CROSS_NOTICES.values():
             for bad in ("ue", "ae", "oe", "ss "):
                 self.assertNotIn(bad, text.replace("EduBotics", ""))
         self._scan("feetech_silent")
@@ -434,7 +554,7 @@ class TestEdu6Scan(unittest.TestCase):
         what stops a failure inheriting an older diagnosis: the student unplugs
         the OMX arm, plugs in the edu6 one, rescans, gets nothing — and must not
         be told about the OMX arm that is no longer there."""
-        identify_arm.LAST_SCAN_NOTICE = identify_arm._CROSS_NOTICE_OMX_WHILE_EDU6
+        identify_arm.LAST_SCAN_NOTICE = identify_arm._CROSS_NOTICE_OMX_WHILE_FEETECH
         with patch.object(identify_arm, "_poll_serial_paths", return_value=[EDU6]), \
                 patch.object(identify_arm, "start_scanner_container", return_value=True), \
                 patch.object(identify_arm, "stop_scanner_container"), \
@@ -482,7 +602,7 @@ class TestEdu6Scan(unittest.TestCase):
             leader, follower = identify_arm.scan_and_identify_arms("img")
         self.assertIsNone(leader)
         self.assertIsNotNone(follower)
-        self.assertIn("EduBotics 6-Achs", identify_arm.LAST_SCAN_NOTICE)
+        self.assertIn("EduBotics-Arm", identify_arm.LAST_SCAN_NOTICE)
 
 
 class TestCrossFamilyPresenceNotice(unittest.TestCase):
@@ -516,9 +636,16 @@ class TestCrossFamilyPresenceNotice(unittest.TestCase):
         self._empty_scan("edu6", {LEADER: self.OPENRB})
         self.assertIn("OMX-Arm", identify_arm.LAST_SCAN_NOTICE)
 
-    def test_omx_selected_but_the_edu6_arm_is_plugged_in(self):
+    def test_omx_selected_but_a_feetech_arm_is_plugged_in(self):
         self._empty_scan("omx", {EDU6: self.CH343P})
-        self.assertIn("EduBotics 6-Achs", identify_arm.LAST_SCAN_NOTICE)
+        # GENERIC about which EduBotics arm: this path only sees the USB ids,
+        # and edu6 and edu1 share one adapter.
+        self.assertIn("EduBotics-Arm", identify_arm.LAST_SCAN_NOTICE)
+        self.assertNotIn("6-Achs", identify_arm.LAST_SCAN_NOTICE)
+
+    def test_edu1_selected_but_an_omx_arm_is_plugged_in(self):
+        self._empty_scan("edu1", {LEADER: self.OPENRB})
+        self.assertIn("OMX-Arm", identify_arm.LAST_SCAN_NOTICE)
 
     def test_nothing_plugged_in_says_nothing_extra(self):
         self._empty_scan("edu6", {})
@@ -535,7 +662,7 @@ class TestCrossFamilyPresenceNotice(unittest.TestCase):
         self._empty_scan("omx", {"/dev/serial/by-id/usb-1a86_USB2.0-Serial-if00":
                                  self.CH340,
                                  EDU6: self.CH343P})
-        self.assertIn("EduBotics 6-Achs", identify_arm.LAST_SCAN_NOTICE)
+        self.assertIn("EduBotics-Arm", identify_arm.LAST_SCAN_NOTICE)
 
     def test_a_commodity_ch34x_dongle_is_not_reported_as_an_edu6_arm(self):
         """The by-id markers include a bare "1A86", which matches every CH340 /

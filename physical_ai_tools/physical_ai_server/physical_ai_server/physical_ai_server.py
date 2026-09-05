@@ -2521,6 +2521,7 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         self.calibration_manager = CalibrationManager(
             get_frame=self._get_latest_camera_frame,
             get_gripper_pose=self._get_current_gripper_pose,
+            get_approach_axis=self._get_approach_axis_local,
         )
         return self.calibration_manager
 
@@ -2588,6 +2589,19 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         except Exception as e:
             self.get_logger().warning(f'FK call failed: {e}')
             return None
+
+    def _get_approach_axis_local(self):
+        """Provider hook: the tool direction in the frame
+        :meth:`_get_current_gripper_pose` reports, taken from the SOLVER.
+
+        The touch-off verticality gate needs it, and it is a per-arm frame
+        convention — the OMX's FK points the tool along local +x, the edu6's
+        along −z and the edu1's along +z. ``None`` (no solver yet) leaves the
+        manager on its OMX default, which is what it did before this existed."""
+        ik = self._build_ik_solver()
+        if ik is None:
+            return None
+        return getattr(ik, 'approach_axis_local', None)
 
     def calibration_start_callback(self, request, response):
         ok, msg = self._assert_no_other_active('calibration')

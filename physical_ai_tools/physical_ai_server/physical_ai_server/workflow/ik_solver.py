@@ -418,6 +418,21 @@ class IKSolver:
         Used for the workflow IK pre-check / a clean German message."""
         return self.solve(target_xyz) is not None
 
+    @property
+    def approach_axis_local(self) -> tuple[float, float, float]:
+        """The TOOL/approach direction in the frame :meth:`fk` returns, as a
+        unit vector. ``R @ approach_axis_local`` is where the gripper points.
+
+        Declared per SOLVER because it is a frame convention, and the three arms
+        do not share one: this OMX FK returns a frame whose local **+x** is the
+        tool axis, ``Edu6IKSolver``'s is **−z** and ``Edu1IKSolver``'s is **+z**.
+        The touch-off verticality gate used to hardcode column 0, which is
+        exactly this arm's answer and 90° wrong on both Feetech arms — it
+        rejected every correct vertical tap with „Greifer steht schräg (90°)".
+        One owner for the convention, like ``link_frames`` and
+        ``roll_from_joints``."""
+        return (1.0, 0.0, 0.0)
+
     def base_yaw(self, x: float, y: float) -> float:
         """Base joint (joint1) yaw, in radians, that aims the arm's vertical
         plane at the table point ``(x, y)`` (base frame, metres).

@@ -223,6 +223,46 @@ def test_fixed_catalog_closes_are_negative():
         assert cat.recipe_for_type(name).gripper_close_rad < 0.0
 
 
+def test_the_profile_catalog_table_covers_every_feetech_arm():
+    """``fixed_catalog(profile_id)`` routes through a TABLE, and a profile
+    missing from it silently falls back to the OMX set — whose close value is
+    NEGATIVE and therefore outside a Feetech gripper's band entirely, so every
+    grasp on that arm would command a nonsense angle."""
+    from physical_ai_server.workflow.object_catalog import _CATALOG_BY_PROFILE
+    from physical_ai_server.robot_profiles import ROBOT_PROFILES
+    for pid, profile in ROBOT_PROFILES.items():
+        if profile.gripper_closed_rad < 0.0:
+            continue                       # OMX convention: the default path
+        assert pid in _CATALOG_BY_PROFILE, pid
+        _catalog, (lo, hi) = _CATALOG_BY_PROFILE[pid]
+        # The band the catalog is validated against IS the profile's band.
+        assert (lo, hi) == (profile.gripper_closed_rad, profile.gripper_open_rad)
+
+
+@pytest.mark.parametrize('pid,close', [('edu6_studio', 1.0), ('edu1_studio', 0.10)])
+def test_feetech_catalogs_share_the_objects_and_differ_only_in_the_close(pid, close):
+    """ONE printed tag sheet fleet-wide: the physical objects, their tag ids and
+    every dimension are identical on all three arms. Only the gripper command
+    differs, because only the gripper differs."""
+    omx = fixed_catalog().recipe_for_type('wuerfel')
+    arm = fixed_catalog(pid).recipe_for_type('wuerfel')
+    assert arm.tag_ids == omx.tag_ids
+    assert arm.object_height_m == omx.object_height_m
+    assert arm.grasp_depth_m == omx.grasp_depth_m
+    assert arm.approach_clear_m == omx.approach_clear_m
+    assert arm.object_width_m == omx.object_width_m
+    assert arm.label_de == omx.label_de
+    assert arm.gripper_close_rad == pytest.approx(close)
+
+
+def test_an_unknown_profile_gets_the_omx_set():
+    """Fail-safe direction: an id nobody taught this module falls back to the
+    behaviour that existed before any of them, byte-identical."""
+    for pid in (None, '', '   ', 'omx_full', 'omx_follower', 'garbage'):
+        assert (fixed_catalog(pid).recipe_for_type('wuerfel').gripper_close_rad
+                == pytest.approx(-0.5))
+
+
 def test_invalid_type_key_fails():
     data = _valid_dict()
     data['types']['blauer würfel'] = data['types'].pop('wuerfel_blau')  # space + umlaut

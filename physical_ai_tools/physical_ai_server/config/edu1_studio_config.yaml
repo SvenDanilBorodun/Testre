@@ -1,0 +1,36 @@
+physical_ai_server:
+  ros__parameters:
+    # edu1_studio — the 5-DOF Feetech follower-only Roboter-Studio arm („Edu:1").
+    # The TOP-LEVEL KEY equals ArmProfile.data_robot_type ('edu1_studio') —
+    # ALL config/*.yaml are glob-loaded and merged; init_ros_params selects
+    # this namespace by that key (the filename is incidental).
+    edu1_studio:
+      observation_list:
+        - scene
+        - state
+
+      # ONE camera, role 'scene' (plan non-goal 2): the CAD carries a camera on
+      # the end effector, but Roboter Studio calibrates a STATIC scene extrinsic
+      # — a wrist camera needs a hand-eye pipeline that does not exist here.
+      # camera_ingest_node publishes cam_id 1 → /scene/... exactly like the
+      # OMX follower-only rig and the edu6.
+      camera_topic_list:
+        - scene:/scene/image_raw/compressed
+
+      joint_topic_list:
+        - follower:/joint_states
+        - leader:/leader/joint_trajectory
+
+      joint_list:
+        - leader
+
+      # URDF-native names. RL_joint is the CAD's own name for the driven claw
+      # finger (LF_joint rides its <mimic> and is NOT commanded).
+      joint_order:
+        leader:
+          - joint1
+          - joint2
+          - joint3
+          - joint4
+          - joint5
+          - RL_joint

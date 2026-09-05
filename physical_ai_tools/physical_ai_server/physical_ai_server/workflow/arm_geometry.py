@@ -7,8 +7,9 @@
 # You may obtain a copy of the License at
 #
 #     http://www.apache.org/licenses/LICENSE-2.0
-"""Whole-link geometry for the edu6_studio arm — the table floor and
-self-collision, on a model small enough to live in the server image.
+"""Whole-link geometry for the Feetech Roboter-Studio arms (edu6_studio,
+edu1_studio) — the table floor and self-collision, on a model small enough to
+live in the server image.
 
 WHY THIS EXISTS. ``handlers/motion.py``'s ``WORKSPACE_FLOOR_MARGIN_M`` refusal
 lives inside ``_solve_or_raise`` / ``_try_solve``, i.e. it only ever judges a
@@ -94,15 +95,49 @@ EDU6_LINK_BOXES: tuple = (
     ((-0.0400, -0.0353, -0.1050), (+0.0400, +0.0820, +0.0095)),   # 6 link6
 )
 
+# edu1_studio box table — same derivation, same rounding-OUTWARD-to-0.1 mm rule,
+# from ``physical_ai_manager/public/edu1-urdf/`` (the in-repo copy of the
+# ``5dof_assembly_urdf2`` export) and its nine binary STLs. Index i is the frame
+# ``Edu1IKSolver.link_frames()`` returns at position i: 0 = base_link (the fixed
+# root), 1..5 = link1..link5.
+#
+# Index 5 (link5) is the UNION over the whole claw band [0, 1.57] of link5 +
+# end_effector + both fingers, so the box is valid at every jaw opening — the
+# fingers ride ``RL_joint`` and its ``LF_joint`` <mimic> and are not on the arm's
+# own FK chain. Its 96 × 149 × 91 mm extent IS the open claw, which is why the
+# box form matters here even more than on the edu6: an isotropic radius over a
+# 149 mm-wide open claw would refuse essentially every table-level grasp.
+#
+# base_link spans z ∈ [0.0000, 0.0481] m, i.e. it is bolted to the table, so
+# z = 0 IS the table surface for this arm too and the model needs no
+# calibration to judge a boot glide.
+EDU1_LINK_BOXES: tuple = (
+    ((-0.0708, -0.0751, +0.0000), (+0.0493, +0.0751, +0.0481)),   # 0 base_link
+    ((-0.0200, -0.0153, -0.0055), (+0.0200, +0.0153, +0.0508)),   # 1 link1
+    ((-0.0097, -0.0420, -0.0244), (+0.1708, +0.0150, +0.0244)),   # 2 link2
+    ((-0.0150, -0.0096, -0.0244), (+0.0150, +0.2326, +0.0244)),   # 3 link3
+    ((-0.0126, -0.0097, -0.0244), (+0.0351, +0.0595, +0.0244)),   # 4 link4
+    ((-0.0279, -0.0744, -0.0045), (+0.0678, +0.0744, +0.0869)),   # 5 link5+claw
+)
+
+
 # Which link pairs are worth testing for self-collision. Links one joint apart
 # share that joint and their meshes interpenetrate there by construction, so
-# only |i − j| ≥ 2 is meaningful. End_effector and the fingers are folded into
-# index 6, so the gripper cluster is one rigid body and is never tested against
-# itself.
-_SELF_PAIRS: tuple = tuple(
-    (i, j) for i, j in itertools.combinations(range(len(EDU6_LINK_BOXES)), 2)
-    if j - i >= 2
-)
+# only |i − j| ≥ 2 is meaningful. The end effector and the fingers are folded
+# into the LAST index, so the gripper cluster is one rigid body and is never
+# tested against itself.
+#
+# A FUNCTION of the table length, not a module constant: the two supported box
+# tables have different lengths (7 links on the edu6, 6 on the edu1), and a
+# single constant sized off one of them would silently test the wrong pair set
+# for the other — over-testing (an index error) or under-testing (a missed
+# self-collision), depending on which way it was sized.
+def _self_pairs(n_links: int) -> tuple:
+    return tuple((i, j) for i, j in itertools.combinations(range(n_links), 2)
+                 if j - i >= 2)
+
+
+_SELF_PAIRS: tuple = _self_pairs(len(EDU6_LINK_BOXES))
 
 # The eight corners of a unit cube, used to expand a (min, max) pair.
 _UNIT_CORNERS = np.array(list(itertools.product([0.0, 1.0], repeat=3)),
@@ -119,6 +154,7 @@ _UNIT_CORNERS = np.array(list(itertools.product([0.0, 1.0], repeat=3)),
 # short-circuit.
 _BOXES_BY_BACKEND: dict = {
     'closed-form-edu6': EDU6_LINK_BOXES,
+    'closed-form-edu1': EDU1_LINK_BOXES,
 }
 
 
@@ -158,11 +194,14 @@ class ArmGeometry:
     "blocked".
     """
 
-    __slots__ = ('_ik', '_corners')
+    __slots__ = ('_ik', '_corners', '_pairs')
 
     def __init__(self, ik, boxes=EDU6_LINK_BOXES) -> None:
         self._ik = ik
         self._corners = _corner_sets(boxes)
+        # Sized off THIS arm's table, never the module default (see
+        # :func:`_self_pairs`).
+        self._pairs = _self_pairs(len(self._corners))
 
     @property
     def num_links(self) -> int:
@@ -250,7 +289,7 @@ class ArmGeometry:
         frames = self._ik.link_frames(joints)
         axes = [np.asarray(t[:3, :3], dtype=np.float64) for t in frames]
         worst = None
-        for i, j in _SELF_PAIRS:
+        for i, j in self._pairs:
             gap = _box_gap(corners[i], corners[j], axes[i], axes[j])
             if worst is None or gap < worst:
                 worst = gap
@@ -297,11 +336,12 @@ def resolve_geometry(source) -> Optional[ArmGeometry]:
 
     * there is no IK solver on the object;
     * it does not expose ``link_frames`` (only
-      :class:`~physical_ai_server.workflow.edu6_ik.Edu6IKSolver` does; the OMX
+      :class:`~physical_ai_server.workflow.edu6_ik.Edu6IKSolver` and
+      :class:`~physical_ai_server.workflow.edu1_ik.Edu1IKSolver` do; the OMX
       solver deliberately does not, and that absence is load-bearing);
-    * its ``backend`` has no box table — i.e. every arm except edu6_studio,
-      including every test double and every ctx built before this module
-      existed.
+    * its ``backend`` has no box table — i.e. every arm except the Feetech
+      Roboter-Studio pair (edu6_studio, edu1_studio), including every test
+      double and every ctx built before this module existed.
 
     Callers must treat ``None`` as "run the old path unchanged". Never raises:
     a solver whose ``backend`` property itself throws resolves to ``None``

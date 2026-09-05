@@ -46,5 +46,11 @@ export function armGeometry(caps) {
     reachOuterM: num(c.reach_outer_m, null),
     // Sim grasp-classifier close threshold; null → the OMX SimScene literals.
     simCloseThresholdRad: num(c.sim_close_threshold_rad, null),
+    // True only for a ROTATING claw, whose fingertip swings back as the jaws
+    // open — so the TCP's height below the tool frame depends on the gripper
+    // command. `=== true` and no fallback: the server omits the key entirely on
+    // every parallel-jaw arm, and an OLD server omits it for all of them, which
+    // is exactly the pre-Edu:1 behaviour.
+    toolTipTracksGripper: c.tool_tip_tracks_gripper === true,
   };
 }

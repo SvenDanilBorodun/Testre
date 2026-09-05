@@ -92,6 +92,102 @@ class TestBoxesAndChainDoNotDrift(unittest.TestCase):
         self.assertEqual(tuple(_HOME), tuple(server))
 
 
+class TestEdu1BoxesAndChainDoNotDrift(unittest.TestCase):
+    """The SECOND arm the driver serves. Same duplication, same guard.
+
+    The edu1 chain is not a re-ordering of the edu6's: joint1 carries a fixed
+    rpy here and joint4 carries none, so an eyeball comparison of the two
+    tables proves nothing and this AST comparison is the whole safety net.
+    """
+
+    def test_link_boxes_match_the_server(self):
+        server = _module_literal(
+            os.path.join(_SERVER, 'workflow', 'arm_geometry.py'),
+            'EDU1_LINK_BOXES')
+        self.assertEqual(tuple(eg.EDU1_LINK_BOXES), tuple(server))
+
+    def test_kinematic_constants_match_the_server(self):
+        ik = os.path.join(_SERVER, 'workflow', 'edu1_ik.py')
+        geo = os.path.join(_DRIVER_DIR, 'edu6_geometry.py')
+        for driver_name, server_name in (
+                ('_E1_J1_XYZ', '_J1_XYZ'), ('_E1_J1_RPY', '_J1_RPY'),
+                ('_E1_J2_XYZ', '_J2_XYZ'), ('_E1_J2_RPY', '_J2_RPY'),
+                ('_E1_J3_XYZ', '_J3_XYZ'), ('_E1_J3_RPY', '_J3_RPY'),
+                ('_E1_J4_XYZ', '_J4_XYZ'),
+                ('_E1_J5_XYZ', '_J5_XYZ'), ('_E1_J5_RPY', '_J5_RPY'),
+                ('_E1_AXES', '_AXES')):
+            self.assertEqual(
+                _module_literal(geo, driver_name),
+                _module_literal(ik, server_name),
+                f'{driver_name} drifted between the driver and the server')
+
+    def test_the_edu1_spec_has_one_box_per_joint_plus_the_base(self):
+        self.assertEqual(eg.EDU1.n_joints, 5)
+        self.assertEqual(len(eg.EDU1.boxes), 6)
+        self.assertEqual(len(eg.EDU6.boxes), eg.EDU6.n_joints + 1)
+
+    def test_the_spec_lookup_falls_back_to_edu6(self):
+        """An unknown / absent robot type must resolve to the arm every
+        pre-edu1 caller got, not to nothing."""
+        self.assertIs(eg.spec_for('edu1_studio'), eg.EDU1)
+        self.assertIs(eg.spec_for('edu6_studio'), eg.EDU6)
+        for bad in (None, '', '   ', 'omx_full', 'garbage'):
+            self.assertIs(eg.spec_for(bad), eg.EDU6)
+
+    def test_every_public_function_defaults_to_the_edu6_spec(self):
+        """The default is what keeps every pre-edu1 caller and test
+        byte-identical — including the driver's own boot gate when the env is
+        unset."""
+        home = list(_HOME)
+        self.assertEqual(eg.lowest_z(home), eg.lowest_z(home, eg.EDU6))
+        self.assertEqual(eg.swept_lowest_z(home, home),
+                         eg.swept_lowest_z(home, home, eg.EDU6))
+        self.assertEqual(eg.link_frames(home), eg.link_frames(home, eg.EDU6))
+
+    def test_a_short_joint_vector_is_unevaluable_per_spec(self):
+        """5 joints is a full pose on the edu1 and a SHORT one on the edu6 —
+        the length check has to follow the spec, not a hardcoded 6."""
+        five = [0.0] * 5
+        self.assertIsNone(eg.lowest_z(five, eg.EDU6))
+        self.assertIsNotNone(eg.lowest_z(five, eg.EDU1))
+        self.assertIsNone(eg.lowest_z([0.0] * 4, eg.EDU1))
+
+
+class TestEdu1LowestZ(unittest.TestCase):
+
+    _EDU1_HOME = _module_literal(_NODE, '_EDU1_HOME_JOINTS_RAD')
+
+    def test_home_clears_the_table_by_the_structural_maximum(self):
+        """43.7 mm is link1's own box floor (0.0492 m joint origin minus its
+        5.5 mm underhang) — it does not depend on the pose at all, so HOME is
+        as clear as this arm can be. A different number means the boxes or the
+        chain moved."""
+        self.assertAlmostEqual(eg.lowest_z(list(self._EDU1_HOME), eg.EDU1),
+                               0.0437, places=4)
+
+    def test_a_pose_that_presses_into_the_table_reads_negative(self):
+        # Shoulder leaned back with the forearm swung down and forward — the
+        # family a limp arm collapses into.
+        depth = eg.lowest_z([0.0, 2.6, 0.4, 0.0, 0.0], eg.EDU1)
+        self.assertIsNotNone(depth)
+        self.assertLess(depth, 0.0)
+
+    def test_the_swept_check_catches_a_dip_the_endpoints_miss(self):
+        """The whole reason the glide is judged SWEPT rather than at its ends.
+
+        This start pose (shoulder folded right back, elbow nearly straight) is
+        one a LIMP arm collapses into, and it is above the table — as is HOME —
+        yet the straight joint-space line between them drives a link ~196 mm
+        UNDER it. Found by sampling: about 1 in 1200 attainable start poses does
+        this, which is the same order the edu6's own measurement found.
+        """
+        start = [0.039, 3.023, 0.019, -1.356, 0.554]
+        end = list(self._EDU1_HOME)
+        self.assertGreater(eg.lowest_z(start, eg.EDU1), 0.0)
+        self.assertGreater(eg.lowest_z(end, eg.EDU1), 0.0)
+        self.assertLess(eg.swept_lowest_z(start, end, eg.EDU1), -0.15)
+
+
 class TestLowestZ(unittest.TestCase):
 
     def test_home_is_ten_millimetres_above_the_table(self):
@@ -164,6 +260,12 @@ _DECIDE_NS = {
     'HOME_JOINTS_RAD': _HOME,
     'BOOT_HOME_FLOOR_TOL_M': _module_literal(
         _NODE, '_DEFAULT_BOOT_HOME_FLOOR_TOL_M'),
+    # The driver serves BOTH Feetech arms, so its floor pre-check slices by the
+    # active arm's joint count and passes that arm's box-model spec. Pinned to
+    # the edu6 values here, which is what every case below asserts against; the
+    # edu1 pair is exercised in TestEdu1BootHomeFloorDecision.
+    'N_ARM_JOINTS': len(_HOME),
+    'GEOMETRY_SPEC': eg.EDU6,
 }
 _boot_home_floor_decision = _extract_function(
     _NODE, 'boot_home_floor_decision', _DECIDE_NS)

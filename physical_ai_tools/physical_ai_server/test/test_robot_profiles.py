@@ -236,6 +236,140 @@ def test_no_drift_edu6_vs_catalog():
     assert prof.sim_held_block_offset_rad > prof.grasp_held_margin_rad
 
 
+# --- edu1_studio profile (docs/plans/edu1-studio-arm.md) --------------------
+
+def test_resolve_edu1():
+    prof = rp.resolve('edu1_studio')
+    assert prof.profile_id == 'edu1_studio'
+    assert prof.display_name_de == 'Edu:1 – Roboter Studio'
+    assert prof.data_robot_type == 'edu1_studio'   # NEW config namespace
+    assert prof.follower_only is True
+    assert prof.num_arm_joints == 5
+    assert prof.roll_joint_index == 4
+    assert prof.ik_backend == 'edu1'
+    assert prof.collision_enabled is False
+    assert prof.velocity_limit_rad_s == 4.72
+    assert prof.camera_roles == ('scene',)
+    assert prof.torque_service == '/edu1/set_torque'
+    assert prof.urdf_asset_id == 'edu1'
+
+
+def test_edu1_is_roboter_studio_only():
+    caps = rp.resolve('edu1_studio').capabilities
+    assert caps.roboter_studio is True
+    assert caps.has_leader is False
+    # No leader this round, so nothing that needs teleop is offered — and
+    # `inferable` is False too: there is no trained policy for this arm.
+    assert (caps.recordable, caps.editable, caps.trainable, caps.inferable) == \
+        (False, False, False, False)
+
+
+def test_edu1_shares_a_point_width_with_omx_and_is_still_distinguishable():
+    """The one genuinely new hazard this arm introduces. Contract-B width is
+    num_arm_joints + 2, so edu1 and omx_f are BOTH 7-wide — width alone can no
+    longer identify a recording, which is why the trajectory tag (migration 039)
+    is load-bearing and why data_robot_type must not be reused."""
+    edu1 = rp.resolve('edu1_studio')
+    omx = rp.resolve('omx_full')
+    assert edu1.num_arm_joints + 2 == omx.num_arm_joints + 2 == 7
+    assert edu1.data_robot_type != omx.data_robot_type
+
+
+def test_edu1_velocity_limit_is_the_slowest_joints(): 
+    """The arm mixes STS3215 (4.72 rad/s) and STS3250 (7.87). The velocity floor
+    must hold for EVERY joint on a segment, so the profile carries the slower."""
+    assert rp.resolve('edu1_studio').velocity_limit_rad_s == 4.72
+
+
+def test_no_drift_edu1_vs_edu1_ik():
+    from physical_ai_server.workflow import edu1_ik
+    prof = rp.resolve('edu1_studio')
+    solver = prof.build_ik()
+    assert type(solver).__name__ == 'Edu1IKSolver'
+    assert solver.num_joints() == prof.num_arm_joints
+    assert solver.base_axis_x == edu1_ik.BASE_AXIS_X_WORLD
+    # approx: the module derives _L_TOOL as 0.02125 + 0.065 (pivot + blade,
+    # two different source files), which is not bit-equal to the literal.
+    assert prof.tool_length_m == pytest.approx(edu1_ik._L_TOOL, abs=1e-12)
+    # HOME sits comfortably inside every joint limit — it was CHOSEN by
+    # maximising exactly this margin (see the profile's derivation note).
+    for value, (lo, hi) in zip(prof.home_joints_rad, solver.joint_limits):
+        assert lo + 0.5 <= value <= hi - 0.5
+
+
+def test_only_the_rotating_claw_advertises_tool_tip_tracks_gripper():
+    """The key gates a student-facing German instruction in the touch-off
+    wizard („Greifer ganz schließen"), and it is sent ONLY when true — so every
+    parallel-jaw arm's manifest stays byte-identical to before and the React
+    reader's `=== true` needs no fallback of its own."""
+    # Stated as a SET over the whole registry rather than a hardcoded list of
+    # the others: a fifth profile is then either in the set on purpose or fails
+    # here, instead of quietly escaping a list nobody remembered to extend.
+    declaring = {pid for pid, prof in rp.ROBOT_PROFILES.items()
+                 if prof.tool_tip_tracks_gripper}
+    assert declaring == {'edu1_studio'}
+    assert 'tool_tip_tracks_gripper' in rp.capabilities_json(rp.resolve('edu1_studio'))
+    for pid, prof in rp.ROBOT_PROFILES.items():
+        if pid in declaring:
+            continue
+        assert prof.tool_tip_tracks_gripper is False, pid
+        assert 'tool_tip_tracks_gripper' not in rp.capabilities_json(prof), pid
+
+
+def test_edu1_reach_ring_is_inside_what_the_solver_reaches():
+    """The ring is drawn to the STUDENT; promising a radius the solver then
+    refuses is worse than drawing a slightly small ring."""
+    prof = rp.resolve('edu1_studio')
+    ik = prof.build_ik()
+    assert ik.solve((prof.reach_inner_m, 0.0, 0.015)) is not None
+    assert ik.solve((prof.reach_outer_m, 0.0, 0.015)) is not None
+
+
+def test_no_drift_edu1_vs_catalog():
+    """The catalog close must sit inside the profile band with enough squeeze
+    left that a HELD grasp reads above the per-object threshold. Measured on the
+    shipped claw meshes: a 30 mm cube blocks the jaws at ~0.25 rad."""
+    from physical_ai_server.workflow.object_catalog import fixed_catalog
+    prof = rp.resolve('edu1_studio')
+    recipe = fixed_catalog('edu1_studio').recipe_for_type('wuerfel')
+    assert prof.gripper_closed_rad <= recipe.gripper_close_rad < prof.gripper_open_rad
+    blocked_at = 0.25
+    assert blocked_at > recipe.gripper_close_rad + prof.grasp_held_margin_rad
+    # A close command must also register as a CLOSE in the simulator, and the
+    # open command must NOT.
+    assert recipe.gripper_close_rad < prof.sim_close_threshold_rad
+    assert prof.gripper_open_rad > prof.sim_close_threshold_rad
+    # …and the sim's blocked readback clears the per-object threshold.
+    assert prof.sim_held_block_offset_rad > prof.grasp_held_margin_rad
+
+
+def test_edu1_sim_held_floor_is_inert_for_every_legal_close():
+    """Same proof the edu6 override carries: the floor can never win the max()
+    inside sim_arm.get_joints, so it is documentation rather than a tuned
+    value. If the band or the close threshold ever moves, this fails instead of
+    quietly making a never-reviewed number load-bearing."""
+    prof = rp.resolve('edu1_studio')
+    lo = prof.gripper_closed_rad
+    hi = prof.sim_close_threshold_rad
+    assert lo + prof.sim_held_block_offset_rad > prof.sim_held_floor_rad
+    assert hi + prof.sim_held_block_offset_rad > prof.sim_held_floor_rad
+
+
+def test_edu1_reroute_geometry_is_reachable_on_this_arm():
+    """The OMX ladder constants are structurally DEAD here (measured: 0/72
+    base-swing candidates solve). These must not be."""
+    prof = rp.resolve('edu1_studio')
+    ik = prof.build_ik()
+    assert prof.tool_clear_m == 0.0
+    # NO DEAD ROWS: the annulus narrows with height, so a radius picked off the
+    # lowest swing height alone can be unreachable at the highest one — and an
+    # unreachable via candidate is a silently wasted rung.
+    dead = [(z, r) for z in prof.swing_heights_m for r in prof.swing_radii_m
+            if ik.solve((r, 0.0, z)) is None]
+    assert dead == []
+    assert ik.solve((0.20, 0.0, prof.safe_travel_z_m)) is not None
+
+
 def test_registry_wide_invariants():
     for prof in rp.ROBOT_PROFILES.values():
         assert len(prof.joint_names) == prof.num_arm_joints + 1

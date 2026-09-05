@@ -98,6 +98,46 @@ _EDU6_HOME_JOINTS_RAD = (0.0, 0.70, -2.40, 0.0, 0.70, 0.0)
 _EDU6_JOINT_NAMES = ('joint1', 'joint2', 'joint3', 'joint4', 'joint5',
                      'joint6', 'end_gear_joint')
 
+# edu1_studio geometry (5dof_assembly_urdf2.urdf; derivation record in
+# docs/plans/edu1-studio-arm.md). HOME stands the arm UP over its own base with
+# the claw pointing up — the same intent as the edu6 HOME and chosen the same
+# way, by measurement rather than by eye. Searched over the whole joint box for
+# the pose that maximises the distance of EVERY joint from its own limit subject
+# to |TCP radius| <= 20 mm, TCP height in [0.38, 0.52] m, table clearance
+# >= 40 mm and self-clearance >= 20 mm; the winner sits 0.640 rad clear of the
+# nearest limit (vs 0.049 rad for the best tool-down candidate), keeps the whole
+# arm inside a 148 mm plan radius so it does not stand in the scene camera's
+# view, and refuses the fewest boot-home glides: 1/1200 random limp-collapse
+# start poses drive a link below the table on the straight line to it, against
+# 5/1200 for a tool-down home (the edu6's own measured rate was ~1 in 100).
+# Fingertip TCP at world (+0.018, 0, +0.519); lowest moving-link point +43.7 mm,
+# which is link1's structural floor, i.e. the best this arm can do.
+#
+# CONSEQUENCE worth knowing, identical to the edu6's: the tool at HOME points 9.7
+# degrees off straight UP, so HOME is OUTSIDE the solver's image (solve() only
+# emits strict-vertical poses) and no Cartesian machinery — reach check,
+# workspace floor, reroute vias — can reason about it. That is why the
+# table-floor guard on the way to it is joint-space (workflow/arm_geometry.py +
+# workflow/home_planner.py).
+#
+# The gripper channel is the claw servo angle in RADIANS, 0 = jaws closed …
+# 0.90 = open. NOTE this is the OPPOSITE SIGN to the raw SolidWorks export,
+# whose RL_joint runs 0 → −1.57: the shipped URDF copy flips that joint's axis
+# (and its mimicking twin's) so that open > closed numerically, which every
+# shared code path assumes — motion.check_grasp_held reads "held" as an achieved
+# angle ABOVE the commanded close, object_catalog validates the close inside a
+# [closed, open) band, and SimArm classifies a command BELOW its close threshold
+# as a close. It is a pure relabelling: identical physical poses, and the
+# driver's per-joint sign vector carries the flip through to the servo.
+#
+# Joint names are URDF-native so /joint_states, the sim publisher and the web
+# twin agree on one name set. ``RL_joint`` is the CAD's own name for the driven
+# claw finger (the other rides an <mimic>) — it is "Right-finger L joint", not
+# reinforcement learning.
+_EDU1_HOME_JOINTS_RAD = (0.0, 0.64, 1.48, 0.90, 0.0)
+_EDU1_JOINT_NAMES = ('joint1', 'joint2', 'joint3', 'joint4', 'joint5',
+                     'RL_joint')
+
 
 @dataclass(frozen=True)
 class Capabilities:
@@ -143,6 +183,13 @@ class ArmProfile:
     reach_inner_m: Optional[float] = None    # React annulus (None → simConstants)
     reach_outer_m: Optional[float] = None
     gripper_mm_per_rad: Optional[float] = None   # jaw-opening display factor
+    # True when the TCP's HEIGHT below the tool frame depends on the gripper
+    # command — a ROTATING claw, where the fingertip swings back as the jaws
+    # open. The TCP is defined at the CLOSED tip, so „Tisch vermessen" measures
+    # the table too low unless the student closes the claw first, and that is a
+    # student-facing INSTRUCTION, not something any guard can enforce. False on
+    # every parallel-jaw arm (OMX, edu6), where the tip height is constant.
+    tool_tip_tracks_gripper: bool = False
     grasp_held_margin_rad: Optional[float] = None   # None → motion 0.15
     # Observation pose the „Solange sichtbar" loop retreats to between passes.
     # WorkflowContext has ALWAYS stamped this onto ctx via getattr(profile,
@@ -174,7 +221,8 @@ class ArmProfile:
         """Return the arm's IK solver — the ``ik_factory`` seam.
 
         Dispatches on ``ik_backend``: OMX uses the closed-form analytical
-        :class:`IKSolver`; edu6 the closed-form :class:`Edu6IKSolver`. Imported
+        :class:`IKSolver`; edu6 the closed-form :class:`Edu6IKSolver`; edu1
+        the closed-form :class:`Edu1IKSolver`. Imported
         LAZILY so this module stays importable in the deps-free unit-test stubs
         (both solvers pull in NumPy). ``urdf_string`` is forwarded so the OMX
         solver can verify its baked constants against a locally-available
@@ -182,6 +230,9 @@ class ArmProfile:
         if self.ik_backend == 'edu6':
             from physical_ai_server.workflow.edu6_ik import Edu6IKSolver
             return Edu6IKSolver(urdf_string=urdf_string)
+        if self.ik_backend == 'edu1':
+            from physical_ai_server.workflow.edu1_ik import Edu1IKSolver
+            return Edu1IKSolver(urdf_string=urdf_string)
         from physical_ai_server.workflow.ik_solver import IKSolver
         return IKSolver(urdf_string=urdf_string)
 
@@ -315,6 +366,112 @@ _EDU6_STUDIO = ArmProfile(
     swing_radii_m=(0.14, 0.18, 0.10),
 )
 
+# edu1_studio — the 5-DOF Feetech follower-only Roboter-Studio arm ("Edu:1",
+# docs/plans/edu1-studio-arm.md). MUST stay a literal-kwarg call: the GUI↔server
+# lockstep test parses this with ast and requires literal profile_id= /
+# follower_only= / capabilities=Capabilities(..., has_leader=<literal>).
+_EDU1_STUDIO = ArmProfile(
+    profile_id='edu1_studio',
+    display_name_de='Edu:1 – Roboter Studio',
+    # NEW namespace literal, never 'omx_f': init_ros_params reads the
+    # config-YAML top-level key equal to data_robot_type. It is ALSO the id the
+    # cloud stamps on a saved „Bewegung" (workflow_trajectories.robot_profile,
+    # migration 039) — and on this arm that tag is doing MORE work than it does
+    # for the edu6: edu1 has 5 arm joints, so its Contract-B point width is 7,
+    # the SAME width omx_f uses. Width alone therefore cannot tell an Edu:1
+    # recording from an OMX one; only this id can.
+    data_robot_type='edu1_studio',
+    follower_only=True,
+    capabilities=Capabilities(
+        recordable=False,
+        editable=False,
+        trainable=False,
+        inferable=False,
+        roboter_studio=True,
+        has_leader=False,
+    ),
+    home_joints_rad=_EDU1_HOME_JOINTS_RAD,
+    # No separate collision safe-home: the teleop e-stop is disabled by
+    # construction on this arm (collision_enabled=False below), so the field
+    # mirrors HOME as unconsumed seam data.
+    safe_home_arm_rad=_EDU1_HOME_JOINTS_RAD,
+    # Claw servo band. 0.90 rad of opening is a ~99 mm jaw gap at the blades'
+    # widest point, comfortably past the 30 mm shipped cube while keeping the
+    # open→close swing short; the physical stop is 1.57.
+    gripper_open_rad=0.90,
+    gripper_closed_rad=0.0,
+    num_arm_joints=5,
+    joint_names=_EDU1_JOINT_NAMES,
+    urdf_asset_id='edu1',
+    ik_backend='edu1',
+    # joint5 is the tool roll and the LAST arm joint, so this equals the
+    # ``None`` default. Stated anyway: on this arm the roll joint is also the
+    # jaw-fold joint, and a reader checking "which index does the fold touch"
+    # should not have to re-derive it from num_arm_joints.
+    roll_joint_index=4,
+    # The SLOWEST joint's URDF limit, not the fastest: joint1/4/5 are STS3215 at
+    # 4.72 rad/s while joint2/3 are STS3250 at 7.87, and the velocity floor must
+    # hold for every joint on the segment.
+    velocity_limit_rad_s=4.72,
+    collision_enabled=False,
+    tool_length_m=0.08625,
+    torque_service='/edu1/set_torque',
+    camera_roles=('scene',),
+    # Student-facing table ring, measured through the real solver at the grasp
+    # plane z = 0.015 m: r ∈ [0.082, 0.363]. Rounded INWARD on both ends so the
+    # drawn ring never promises a placement the solver then refuses.
+    reach_inner_m=0.09,
+    reach_outer_m=0.35,
+    # gripper_mm_per_rad is deliberately OMITTED (→ the jog row keeps its degree
+    # display). This is a ROTATING claw: the jaw gap is affine in the servo
+    # angle, ≈21 mm already at 0 rad plus ≈85 mm/rad, so a pure mm/rad factor
+    # would print a number that is wrong by the whole 21 mm offset at every
+    # opening. A degree read-out is honest; a fabricated millimetre is not.
+    # The claw ROTATES: its tip sits 86.25 mm below the tool frame closed but
+    # 68.8 mm at 0.9 rad open. The touch-off must therefore be taught with the
+    # claw CLOSED (rig gate E8) — this flag is what puts that sentence in front
+    # of the student, and only on the arm it is true for.
+    tool_tip_tracks_gripper=True,
+    grasp_held_margin_rad=0.10,
+    # Sim grasp classifier. A close command is anything below 0.5, which sits
+    # between the catalog close (0.10) and open (0.90); a 30 mm cube blocks the
+    # real jaws at ≈0.25 rad, so commanded 0.10 + 0.15 reproduces that.
+    sim_close_threshold_rad=0.5,
+    sim_held_block_offset_rad=0.15,
+    # INERT BY CONSTRUCTION here, exactly as on the edu6, and kept for the same
+    # reason. ``sim_arm.get_joints`` reports a blocked jaw as
+    #     max(held_floor, commanded + held_block_offset)
+    # and only a command below ``sim_close_threshold_rad`` (0.5) counts as a
+    # close, so every value that can reach the max() lies in [0.0, 0.5) →
+    # commanded + 0.15 ∈ [0.15, 0.65) → always above 0.05. Dropping the override
+    # would inherit the OMX −0.1: numerically just as inert, but a NEGATIVE
+    # number on a gripper that never goes negative, i.e. actively misleading.
+    sim_held_floor_rad=0.05,
+    # Reroute-ladder geometry, MEASURED through the real solver (2026-09-05).
+    # This arm's strict-vertical TCP ceiling is ~0.100 m (joint4's ±90° window
+    # binds through q4 = q2 − q3 − π/2, not the 2R annulus), so the OMX 0.18 m
+    # cruise and its (0.10, 0.14, 0.16) swing heights are ALL unreachable:
+    # 0/72 base-swing candidates solve with the OMX grid. The values below give
+    # 32/72 — the same fraction the edu6 grid achieves, and the ceiling here is
+    # the ±90° base yaw (only 4 of the 8 candidate azimuths are in FRONT of the
+    # arm), not the height/radius choice.
+    safe_travel_z_m=0.075,
+    # 0.0 is exact, not a shortcut: ``edu1_ik.link_points`` ends AT the
+    # fingertip TCP and appends nothing below it, unlike the OMX solver, which
+    # projects two extra samples 0.04 m past its EE along the tool axis — which
+    # is what the 0.05 m module default models.
+    tool_clear_m=0.0,
+    # Mid / high / low and mid / far / near, the same ordering intent as the OMX
+    # and edu6 grids. Every one of the nine (height, radius) pairs is inside the
+    # annulus at its own height — the annulus NARROWS with height (r ∈ [0.090,
+    # 0.354] at z = 0.03 but only [0.128, 0.316] at z = 0.07), so a radius chosen
+    # off the low row alone leaves a dead row in the grid. 36/72 candidates
+    # solve; the ceiling is joint1's ±90° (only 4 of the 8 candidate azimuths
+    # are in FRONT of the arm), not this choice.
+    swing_heights_m=(0.05, 0.07, 0.03),
+    swing_radii_m=(0.18, 0.28, 0.14),
+)
+
 # Registry keyed by profile id. Keep ids + follower_only in lockstep with the
 # GUI thin descriptor (gui/app/constants.py::ROBOT_PROFILES) — cross-boundary
 # contract, tested each side.
@@ -322,6 +479,7 @@ ROBOT_PROFILES: dict = {
     _OMX_FULL.profile_id: _OMX_FULL,
     _OMX_FOLLOWER.profile_id: _OMX_FOLLOWER,
     _EDU6_STUDIO.profile_id: _EDU6_STUDIO,
+    _EDU1_STUDIO.profile_id: _EDU1_STUDIO,
 }
 
 DEFAULT_PROFILE_ID = 'omx_full'
@@ -378,4 +536,9 @@ def capabilities_json(profile: ArmProfile) -> str:
     ):
         if value is not None:
             manifest[key] = value
+    # Sent ONLY when true, so the manifest of every parallel-jaw arm is
+    # byte-identical to before and the React reader's `=== true` test needs no
+    # fallback of its own.
+    if profile.tool_tip_tracks_gripper:
+        manifest['tool_tip_tracks_gripper'] = True
     return json.dumps(manifest, separators=(',', ':'))

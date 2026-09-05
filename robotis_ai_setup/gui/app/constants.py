@@ -32,7 +32,7 @@ def _read_version_file() -> str:
             return candidate.read_text(encoding="utf-8").strip()
         except (OSError, UnicodeDecodeError):
             continue
-    return "2.16.0"
+    return "2.17.0"
 
 
 # GUI version — read from repo-root VERSION file (single source of truth).
@@ -278,9 +278,16 @@ ROBOTIS_VID = "2F5D"  # ROBOTIS USB Vendor ID (OpenRB-150 boards, PIDs: 0103, 22
 # VID. The edu6 bridge is the WCH CH343P on the Waveshare Bus Servo Adapter;
 # identity is still PROVEN by the servos answering (identify_arm.py --protocol
 # feetech), the VID match only scopes the usbipd attach.
+# NOTE the two Feetech rows are IDENTICAL and must stay so: edu6 and edu1 ship
+# on the same Waveshare Bus Servo Adapter, so nothing at the USB layer separates
+# them. The separation happens one layer down, at the servo count the prober
+# asserts (`device_manager._FAMILY_SERVO_COUNT`). Two rows rather than one
+# shared key because every consumer looks up by FAMILY, and a family missing
+# from this table silently attaches nothing.
 ARM_USB_IDS = {
     "omx":  (("2F5D", None),),
     "edu6": (("1A86", "55D3"),),
+    "edu1": (("1A86", "55D3"),),
 }
 
 # Dynamixel servo config
@@ -301,6 +308,8 @@ ROS_DOMAIN_ID = 30
 # the GUI only needs the display label + the two scan/leader flags.
 #   - omx_full     → both arms; RS runs via the mid-session LeaderToggle.
 #   - omx_follower → follower only; no leader, LeaderToggle hidden, RS native.
+#   - edu6_studio  → the 6-DOF Feetech arm; follower-only, RS only.
+#   - edu1_studio  → the 5-DOF Feetech „Edu:1"; follower-only, RS only.
 # `scan_requires_leader` drives the follower-only GUI scan surface (Schritt A/B
 # wording, start-button gating, fast rehydrate). `follower_only` is the INITIAL
 # EDUBOTICS_FOLLOWER_ONLY value the .env generator derives from the type.
@@ -341,6 +350,15 @@ ROBOT_PROFILES = {
         "help_de": (
             "Der 6-Achs-Arm von EduBotics mit einer Szenen-Kamera. Nur für "
             "Roboter Studio (Greifen & Programmieren)."
+        ),
+    },
+    "edu1_studio": {
+        "display_de": "Edu:1 – Roboter Studio",
+        "follower_only": True, "scan_requires_leader": False,
+        "arm_family": "edu1", "camera_roles": ("scene",),
+        "help_de": (
+            "Der 5-Achs-Arm Edu:1 von EduBotics mit einer Szenen-Kamera. Nur "
+            "für Roboter Studio (Greifen & Programmieren)."
         ),
     },
 }

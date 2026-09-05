@@ -371,6 +371,23 @@ class TryRehydrateArmsTest(unittest.TestCase):
         self.assertFalse(calls[0]["require_leader"])
         self.assertEqual(calls[0]["arm_family"], "edu6")
 
+    def test_edu1_env_threads_its_OWN_arm_family(self):
+        """edu1 and edu6 share an adapter, so the by-id path a rehydrate sees is
+        indistinguishable — but the family is what selects the prober's SERVO
+        COUNT downstream, and threading "edu6" here would probe a 5-DOF arm for
+        seven servos."""
+        follower = types.SimpleNamespace(
+            description="1a86 USB Single Serial", serial_path=self._FOLLOWER_PATH)
+        env = {
+            "EDUBOTICS_ROBOT_TYPE": "edu1_studio",
+            "FOLLOWER_PORT": self._FOLLOWER_PATH,
+            "LEADER_PORT": None,
+        }
+        _owner, _logs, calls, _update, _fs, _ls = self._run(env, (None, follower))
+        self.assertEqual(len(calls), 1)
+        self.assertFalse(calls[0]["require_leader"])
+        self.assertEqual(calls[0]["arm_family"], "edu1")
+
     def test_mismatch_prompts_rescan_and_never_auto_scans(self):
         # (b) fast_rehydrate_arms falls back with (None, None) — the method
         # must only PROMPT ("Arme scannen") and leave the hardware untouched;

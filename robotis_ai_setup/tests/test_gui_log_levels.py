@@ -237,7 +237,7 @@ class TheProtokollIsUsable(unittest.TestCase):
 class TypographyIsConsistent(unittest.TestCase):
     """255 em-dashes vs 8 en-dashes, and mixed quote styles, in one window."""
 
-    _ALLOWED_EN_DASH_CONTEXTS = ("OMX – ", "6-Achs – ")
+    _ALLOWED_EN_DASH_CONTEXTS = ("OMX – ", "6-Achs – ", "Edu:1 – ")
 
     def test_student_visible_text_uses_em_dashes(self):
         offenders = []

@@ -69,7 +69,17 @@ const PROFILES = [
     scan_requires_leader: false,
     camera_roles: ['scene'],
   },
+  {
+    id: 'edu1_studio',
+    display_de: 'Edu:1 – Roboter Studio',
+    scan_requires_leader: false,
+    camera_roles: ['scene'],
+  },
 ];
+
+// Derived, never restated: the degrade sweep below was a hardcoded triple and
+// stopped covering `edu1_studio` the day it was added, silently.
+const ALL_PROFILE_IDS = PROFILES.map((p) => [p.id]);
 
 const CAM = { path: '/dev/video0', name: 'Innomaker' };
 const CAM2 = { path: '/dev/video2', name: 'Innomaker 2' };
@@ -145,13 +155,16 @@ function roleOptions(camName = CAM.name) {
     .map((o) => o.textContent);
 }
 
-// ── the behavioural delta: edu6_studio ──────────────────────────────────────
+// ── the behavioural delta: BOTH Feetech arms ────────────────────────────────
 
 describe('Schritt C offers only the roles the profile declares', () => {
-  it('offers „Szene" alone on edu6_studio — never „Greifer"', async () => {
-    await renderWithCameras(statusFixture({ robot_type: 'edu6_studio' }));
-    expect(roleOptions()).toEqual(['— Rolle —', 'Szene']);
-  });
+  it.each([['edu6_studio'], ['edu1_studio']])(
+    'offers „Szene" alone on %s — never „Greifer"',
+    async (id) => {
+      await renderWithCameras(statusFixture({ robot_type: id }));
+      expect(roleOptions()).toEqual(['— Rolle —', 'Szene']);
+    }
+  );
 
   it('cannot POST „gripper" on edu6_studio even if the state still holds it', async () => {
     // The reachable sequence: assign Greifer on omx_full, THEN switch type.
@@ -239,7 +252,7 @@ describe('an OMX Pi renders and posts exactly as it did', () => {
 describe('an agent that sends no camera_roles degrades to both roles', () => {
   const stripped = PROFILES.map(({ camera_roles, ...rest }) => rest); // eslint-disable-line no-unused-vars
 
-  it.each([['omx_full'], ['omx_follower'], ['edu6_studio']])(
+  it.each(ALL_PROFILE_IDS)(
     'offers both roles on %s when the key is absent entirely',
     async (id) => {
       await renderWithCameras(

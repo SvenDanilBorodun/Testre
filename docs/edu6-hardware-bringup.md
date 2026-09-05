@@ -4,6 +4,8 @@
 Joints 2 & 3 are STS3250 (model 2825); the other five are STS3215 (model 777) — **mixed by design**.
 **Machine:** Windows 11 bench PC, repo at `C:\Users\svend\newaarm\Testre`.
 **Last rewritten:** 2026-07-26 (session 7).
+**Sibling doc:** `docs/edu1-hardware-bringup.md` — the Edu:1 (5-axis) bring-up sheet. The two
+arms share ONE driver, so §3's guard stack applies to both; only the arm spec differs.
 **Branch:** `main` — **session 7 is LANDED and pushed, CI green, images rebuilt and
 BYTE-VERIFIED.** The desk work is finished; everything remaining is physical (§6). Commit list
 in §5.2 — deliberately not repeated here, because a doc cannot name its own commit and a sha in

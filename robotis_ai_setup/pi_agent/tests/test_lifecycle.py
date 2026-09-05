@@ -354,7 +354,11 @@ class TestLeaderLessScanGating(_EnvTempBase):
         self.assertEqual(payload["message"], "Beide Arme erkannt und gespeichert.")
 
     def test_no_arms_at_all_is_still_404_on_every_profile(self):
-        for pid in ("omx_full", "omx_follower", "edu6_studio"):
+        # From the REGISTRY, never a restated list: three separate hardcoded
+        # profile tuples in this file silently stopped covering `edu1_studio`
+        # the day it was added, while their own docstrings still claimed to
+        # cover every profile.
+        for pid in ROBOT_PROFILES:
             with self.subTest(pid):
                 code, _ = self._scan(pid, (None, None))
                 self.assertEqual(code, 404)
@@ -412,7 +416,9 @@ class TestCameraRolesRequireAnExplicitRole(_EnvTempBase):
     that one, so it is the two ``…is_a_400_on_every_profile`` sweeps that catch
     it. Both kinds are covered — but only by different tests."""
 
-    PROFILES = ("omx_full", "omx_follower", "edu6_studio")
+    # From the registry: a restated tuple stops covering a new profile the
+    # moment one is added, and says nothing when it does.
+    PROFILES = tuple(ROBOT_PROFILES)
 
     def _roles(self, robot_type, cameras):
         cg.upsert_env_var("EDUBOTICS_ROBOT_TYPE", robot_type, self.env_path,
@@ -513,12 +519,15 @@ class TestCameraRoleMustSuitTheProfile(_EnvTempBase):
     the role). Neither half is sufficient: a stale cached bundle offers it
     anyway, and a hand-crafted POST bypasses the SPA entirely.
 
-    The behavioural delta is EXACTLY one cell of the profile x role grid —
-    ``test_the_delta_is_exactly_one_cell_of_the_grid`` asserts that shape
-    directly, so widening or narrowing the allowlist anywhere fails here.
+    The behavioural delta is exactly the ROBOTER-STUDIO cells of the profile x
+    role grid: both Feetech arms declare ``camera_roles = ('scene',)`` and both
+    ship a config YAML with one camera topic, so „gripper" is refused on each.
+    ``test_the_delta_is_exactly_the_feetech_cells`` asserts that set directly
+    (and derives it from the registry), so widening or narrowing the allowlist
+    anywhere fails here.
     """
 
-    PROFILES = ("omx_full", "omx_follower", "edu6_studio")
+    PROFILES = tuple(ROBOT_PROFILES)
     ROLES = ("gripper", "scene")
 
     def _roles(self, robot_type, cameras):
@@ -526,7 +535,7 @@ class TestCameraRoleMustSuitTheProfile(_EnvTempBase):
                           quote=False)
         return self.app.handle_cameras_roles({"cameras": cameras})
 
-    def test_the_delta_is_exactly_one_cell_of_the_grid(self):
+    def test_the_delta_is_exactly_the_feetech_cells(self):
         # The sharp form. Accepted iff the profile declares the role — computed
         # from the registry, never restated, so a registry edit moves this test
         # with it instead of silently disagreeing.
@@ -540,9 +549,12 @@ class TestCameraRoleMustSuitTheProfile(_EnvTempBase):
             {(pid, role): role in ROBOT_PROFILES[pid]["camera_roles"]
              for pid in self.PROFILES for role in self.ROLES})
         # …and stated absolutely, so a registry that drifted the other way
-        # cannot make the comparison above vacuously true.
-        self.assertEqual([k for k, v in accepted.items() if not v],
-                         [("edu6_studio", "gripper")])
+        # cannot make the comparison above vacuously true. Sorted, because the
+        # grid's order follows the registry's insertion order and a new profile
+        # must move this list for a REASON, not for a position.
+        self.assertEqual(sorted(k for k, v in accepted.items() if not v),
+                         [("edu1_studio", "gripper"),
+                          ("edu6_studio", "gripper")])
 
     def test_gripper_on_edu6_is_refused_in_german_naming_role_type_and_remedy(self):
         code, payload = self._roles(
@@ -557,6 +569,35 @@ class TestCameraRoleMustSuitTheProfile(_EnvTempBase):
         # Distinct from the shape refusal — a student who picked a REAL role
         # from a REAL dropdown must not be told it is „ungültig".
         self.assertNotIn("Ungültige Rolle", msg)
+
+    def test_gripper_on_edu1_is_refused_in_german_naming_role_type_and_remedy(self):
+        """The Edu:1 half of the same scar, and it had NO test at all.
+
+        `config/edu1_studio_config.yaml` declares exactly one camera topic, so
+        naming this arm's only camera „gripper" publishes a topic nothing
+        subscribes to — while the opi healthcheck greps the topic the STUDENT
+        named, reports success, and leaves the failure to surface much later as
+        an empty Roboter Studio."""
+        code, payload = self._roles(
+            "edu1_studio", [{"path": "/dev/video0", "role": "gripper"}])
+        self.assertEqual(code, 400)
+        msg = payload["message"]
+        self.assertIn("Greifer", msg)      # the role they picked
+        self.assertIn("Edu:1", msg)        # the type that rules it out
+        self.assertNotIn("6-Achs", msg)    # …and NOT the other Feetech arm
+        self.assertIn("Szene", msg)        # what to pick instead
+        self.assertIn("/dev/video0", msg)  # which camera
+        self.assertFalse(payload["ok"])
+        self.assertNotIn("Ungültige Rolle", msg)
+
+    def test_scene_on_edu1_is_accepted(self):
+        # The other half of the cell: the refusal must be role-scoped, not a
+        # blanket "this profile cannot have cameras".
+        self.app._hardware = HardwareConfig(
+            follower=ArmDevice(serial_path="/dev/f"))
+        code, _payload = self._roles(
+            "edu1_studio", [{"path": "/dev/video0", "role": "scene"}])
+        self.assertEqual(code, 200)
 
     def test_a_role_of_the_wrong_shape_still_gets_the_shape_message(self):
         # Byte-unchanged: the profile gate is reached only by well-formed

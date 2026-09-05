@@ -7,6 +7,7 @@ boot-home) are tested via ast-extraction so importing them needs no rclpy.
 """
 
 import ast
+import io
 import math
 import os
 import re
@@ -446,7 +447,17 @@ def _load_node_functions():
               'BOOT_HOME_FLOOR_REFUSAL_DE',
               '_DEFAULT_GOAL_EDGE_MARGIN_TICKS',
               '_GOAL_EDGE_MARGIN_MAX_TICKS', 'GOAL_EDGE_MARGIN_TICKS',
-              'FIRMWARE_SUSPECT_VERSIONS'}
+              'FIRMWARE_SUSPECT_VERSIONS',
+              # Arm-selection constants. The `if IS_EDU1:` override block is an
+              # ast.If, not an Assign, so this loader never executes it and every
+              # constant above stays at its edu6 literal — which is exactly what
+              # this suite asserts. The edu1 literals are read by name in
+              # TestEdu1ArmSpec instead.
+              'ROBOT_TYPE', 'IS_EDU1', 'TORQUE_SERVICE', 'GEOMETRY_SPEC',
+              'N_ARM_JOINTS',
+              '_EDU1_SERVO_IDS', '_EDU1_JOINT_NAMES', '_EDU1_HOME_JOINTS_RAD',
+              '_EDU1_GRIPPER_OPEN_RAD', '_EDU1_JOINT_LIMITS_RAD',
+              '_EDU1_DEFAULT_SIGNS', '_EDU1_TORQUE_SERVICE'}
     # Instance methods extracted as plain functions and bound onto a stub self
     # (_TorqueStubNode) — the torque path is BEHAVIOUR, not something a source
     # grep can prove, and rclpy is not installed here.
@@ -2557,6 +2568,186 @@ class TestUrdfDriverNoDrift(unittest.TestCase):
         self.assertEqual(tuple(home), tuple(_N['HOME_JOINTS_RAD']))
 
 
+class TestEdu1ArmSpec(unittest.TestCase):
+    """The edu1 override block in the driver, against the server profile.
+
+    ONE driver serves both Feetech arms; everything below the override block
+    iterates SERVO_IDS / JOINT_LIMITS_RAD / JOINT_SIGNS and is arm-agnostic, so
+    these literals are the entire arm-specific surface. They are read by NAME
+    here: the deps-free loader executes module-level assignments in file order
+    and deliberately does NOT execute the `if IS_EDU1:` block, so `_N` still
+    carries the edu6 values (which every other test in this file asserts).
+    """
+
+    _URDF = os.path.join(_HERE, '..', '..', 'physical_ai_tools',
+                         'physical_ai_manager', 'public', 'edu1-urdf',
+                         'edu1.urdf')
+    _PROFILES = os.path.join(_HERE, '..', '..', 'physical_ai_tools',
+                             'physical_ai_server', 'physical_ai_server',
+                             'robot_profiles.py')
+
+    def _profile_literal(self, name):
+        source = open(self._PROFILES, encoding='utf-8').read()
+        for node in ast.walk(ast.parse(source)):
+            if isinstance(node, ast.Assign) and any(
+                    isinstance(t, ast.Name) and t.id == name
+                    for t in node.targets):
+                return ast.literal_eval(node.value)
+        raise AssertionError(f'{name} is not a module-level literal')
+
+    def test_the_default_spec_is_still_the_edu6_one(self):
+        """The override is an `if`, so an unset / OMX / edu6 robot type leaves
+        every constant at the value it has always had. That is what makes this
+        a purely additive change to a hardware-validated driver."""
+        self.assertEqual(_N['SERVO_IDS'], (1, 2, 3, 4, 5, 6, 7))
+        self.assertEqual(_N['GRIPPER_OPEN_RAD'], 1.75)
+        self.assertEqual(_N['TORQUE_SERVICE'], '/edu6/set_torque')
+        self.assertEqual(_N['N_ARM_JOINTS'], 6)
+        self.assertFalse(_N['IS_EDU1'])
+
+    def test_arm_joints_is_derived_not_restated(self):
+        """A hardcoded 6 was exactly what made the boot-home slice arm-specific.
+        It must follow the joint-name list on BOTH arms."""
+        self.assertEqual(_N['N_ARM_JOINTS'], len(_N['JOINT_NAMES']) - 1)
+        self.assertEqual(len(_N['_EDU1_JOINT_NAMES']) - 1, 5)
+
+    def test_edu1_servo_ids_are_contiguous_and_one_per_joint(self):
+        ids = _N['_EDU1_SERVO_IDS']
+        self.assertEqual(ids, tuple(range(1, len(ids) + 1)))
+        self.assertEqual(len(ids), len(_N['_EDU1_JOINT_NAMES']))
+        self.assertEqual(len(ids), len(_N['_EDU1_JOINT_LIMITS_RAD']))
+        self.assertEqual(len(ids), len(_N['_EDU1_DEFAULT_SIGNS']))
+
+    def test_edu1_home_matches_the_server_profile_literal(self):
+        self.assertEqual(tuple(self._profile_literal('_EDU1_HOME_JOINTS_RAD')),
+                         tuple(_N['_EDU1_HOME_JOINTS_RAD']))
+
+    def test_edu1_joint_names_match_the_server_profile_literal(self):
+        """The names ride /joint_states, the sim publisher and the web twin —
+        one name set or the twin silently animates nothing."""
+        self.assertEqual(tuple(self._profile_literal('_EDU1_JOINT_NAMES')),
+                         tuple(_N['_EDU1_JOINT_NAMES']))
+
+    def test_edu1_arm_limits_match_the_shipped_urdf(self):
+        import xml.etree.ElementTree as ET
+        root = ET.parse(self._URDF).getroot()
+        urdf = {}
+        for j in root.findall('joint'):
+            lim = j.find('limit')
+            if lim is not None:
+                urdf[j.get('name')] = (float(lim.get('lower')),
+                                       float(lim.get('upper')))
+        limits = _N['_EDU1_JOINT_LIMITS_RAD']
+        for i, name in enumerate(['joint1', 'joint2', 'joint3', 'joint4',
+                                  'joint5']):
+            self.assertEqual(tuple(limits[i]), urdf[name], name)
+        # The claw band is the mechanical stop, and it must be at least as wide
+        # as the PROFILE's open command or a jog could not reach it.
+        self.assertEqual(tuple(limits[5]), urdf['RL_joint'])
+        self.assertEqual(limits[5][0], 0.0)
+
+    def test_edu1_claw_open_command_is_inside_the_driver_band(self):
+        lo, hi = _N['_EDU1_JOINT_LIMITS_RAD'][5]
+        self.assertLessEqual(lo, _N['_EDU1_GRIPPER_OPEN_RAD'])
+        self.assertLessEqual(_N['_EDU1_GRIPPER_OPEN_RAD'], hi)
+        # Open is the LARGER value — every shared consumer assumes it.
+        self.assertGreater(_N['_EDU1_GRIPPER_OPEN_RAD'], lo)
+
+    def test_edu1_torque_service_is_its_own_and_matches_the_profile(self):
+        """The SERVER calls this name (ArmProfile.torque_service) and the DRIVER
+        creates it. They are in different containers and different packages, so
+        nothing but this comparison couples them — a mismatch is a hand-guide
+        „Beenden" that silently never re-torques the arm."""
+        self.assertEqual(_N['_EDU1_TORQUE_SERVICE'], '/edu1/set_torque')
+        self.assertNotEqual(_N['_EDU1_TORQUE_SERVICE'], _N['TORQUE_SERVICE'])
+        source = open(self._PROFILES, encoding='utf-8').read()
+        self.assertIn(f"torque_service='{_N['_EDU1_TORQUE_SERVICE']}'", source)
+
+    def test_no_arm_constant_is_READ_at_module_level_before_the_override(self):
+        """Generalises the JOINT_SIGNS ordering rule to every arm constant.
+
+        The module builds derived values at import (`JOINT_SIGNS`,
+        `_TORQUE_OFF_PAYLOAD`, `N_ARM_JOINTS`), and any of them computed ABOVE
+        the `if IS_EDU1:` block would silently freeze at the edu6 value on an
+        Edu:1 — a 7-entry torque-off payload on a 6-servo bus, say, which fails
+        only at shutdown.
+        """
+        source = open(os.path.join(_DOCKER, 'edu6_arm_node.py'),
+                      encoding='utf-8').read()
+        tree = ast.parse(source)
+        names = {'SERVO_IDS', 'JOINT_NAMES', 'HOME_JOINTS_RAD',
+                 'GRIPPER_OPEN_RAD', 'JOINT_LIMITS_RAD', '_DEFAULT_SIGNS',
+                 'TORQUE_SERVICE', 'GEOMETRY_SPEC'}
+        override = next(n.lineno for n in tree.body
+                        if isinstance(n, ast.If) and isinstance(n.test, ast.Name)
+                        and n.test.id == 'IS_EDU1')
+        early = []
+        for node in tree.body:
+            if getattr(node, 'lineno', 0) >= override:
+                continue
+            if isinstance(node, ast.Assign) and any(
+                    isinstance(t, ast.Name) and t.id in names
+                    for t in node.targets):
+                continue          # the edu6 definitions themselves
+            for sub in ast.walk(node):
+                if (isinstance(sub, ast.Name) and sub.id in names
+                        and isinstance(sub.ctx, ast.Load)):
+                    early.append((node.lineno, sub.id))
+        self.assertEqual(sorted(set(early)), [])
+
+    def test_the_override_rebinds_exactly_the_arm_specific_names(self):
+        """Read the `if IS_EDU1:` block with ast: a name that is DEFINED for
+        edu1 but never rebound would leave the driver running that constant at
+        its edu6 value on an Edu:1 — the silent half-migration this whole
+        structure exists to make impossible."""
+        source = open(os.path.join(_DOCKER, 'edu6_arm_node.py'),
+                      encoding='utf-8').read()
+        block = None
+        for node in ast.parse(source).body:
+            if (isinstance(node, ast.If) and isinstance(node.test, ast.Name)
+                    and node.test.id == 'IS_EDU1'):
+                block = node
+        self.assertIsNotNone(block, 'the edu1 override block disappeared')
+        rebound = {t.id for stmt in block.body
+                   if isinstance(stmt, ast.Assign)
+                   for t in stmt.targets if isinstance(t, ast.Name)}
+        self.assertEqual(rebound, {
+            'SERVO_IDS', 'JOINT_NAMES', 'HOME_JOINTS_RAD', 'GRIPPER_OPEN_RAD',
+            'JOINT_LIMITS_RAD', '_DEFAULT_SIGNS', 'TORQUE_SERVICE',
+            'GEOMETRY_SPEC',
+        })
+
+    def test_the_override_runs_before_the_signs_are_parsed(self):
+        """`_parse_signs` validates against len(SERVO_IDS) and falls back to
+        `_DEFAULT_SIGNS`, both read at CALL time — so JOINT_SIGNS must be
+        computed AFTER the rebind or an Edu:1 would validate a 6-value setting
+        against 7 and silently use the edu6 defaults."""
+        source = open(os.path.join(_DOCKER, 'edu6_arm_node.py'),
+                      encoding='utf-8').read()
+        body = ast.parse(source).body
+        override = next(i for i, n in enumerate(body)
+                        if isinstance(n, ast.If) and isinstance(n.test, ast.Name)
+                        and n.test.id == 'IS_EDU1')
+        signs = next(i for i, n in enumerate(body)
+                     if isinstance(n, ast.Assign) and any(
+                         isinstance(t, ast.Name) and t.id == 'JOINT_SIGNS'
+                         for t in n.targets))
+        self.assertLess(override, signs)
+
+    def test_the_boot_home_floor_check_is_arm_agnostic(self):
+        """It used to slice `[:6]` and call the geometry module with no spec —
+        both of which are edu6 facts."""
+        source = open(os.path.join(_DOCKER, 'edu6_arm_node.py'),
+                      encoding='utf-8').read()
+        fn = next(n for n in ast.parse(source).body
+                  if isinstance(n, ast.FunctionDef)
+                  and n.name == 'boot_home_floor_decision')
+        code = ast.unparse(fn)
+        self.assertIn('N_ARM_JOINTS', code)
+        self.assertIn('GEOMETRY_SPEC', code)
+        self.assertNotIn('[:6]', code)
+
+
 class TestShippedWiring(unittest.TestCase):
     """The load-bearing packaging assertions (Dockerfile lists, entrypoint
     branch, compose forward, env-guard list) — the ✎/✎✎ items of plan §4.3/§9."""
@@ -2579,14 +2770,28 @@ class TestShippedWiring(unittest.TestCase):
 
     def test_entrypoint_branches_and_keeps_cameras(self):
         ep = self._read('docker', 'open_manipulator', 'entrypoint_omx.sh')
-        self.assertIn('edu6_studio', ep)
+        # ONE family decision, made once and reused — the three sites used to
+        # spell it as three separate string comparisons, which is exactly the
+        # shape that drifts when a family is added.
+        self.assertIn('edu6_studio|edu1_studio) FEETECH_ARM=1', ep)
+        self.assertEqual(ep.count('FEETECH_ARM=1 ;;'), 1)
         self.assertIn('edu6_arm_node.py', ep)
-        # Phase 4 must still run on the edu6 branch: the branch head sits
+        # Anchor on the SECTION HEADERS, not on the bare words: "Phase 4" also
+        # appears in the branch comment far above its own section, so slicing on
+        # the word yields an empty (silently passing) range.
+        h2 = ep.index('# --- Phase 2')
+        h3 = ep.index('# --- Phase 3')
+        h4 = ep.index('# --- Phase 4')
+        # Phase 4 must still run on the Feetech branch: the driver launch sits
         # BEFORE the camera phase in the file (shared tail).
-        self.assertLess(ep.index('edu6_arm_node.py'), ep.index('Phase 4'))
-        # Phase 2 (OMX follower launch) is guarded off for edu6.
-        phase2 = ep[ep.index('Phase 2'):ep.index('Phase 3')]
-        self.assertIn('edu6_studio', phase2)
+        self.assertLess(ep.index('python3 /usr/local/bin/edu6_arm_node.py'), h4)
+        # Phases 2 and 3 (the OMX follower launch + quintic sync) are guarded
+        # off for EVERY Feetech arm, not just the one that existed first.
+        self.assertIn('if [ "$FEETECH_ARM" != "1" ]; then', ep[h2:h3])
+        self.assertIn('if [ "$FEETECH_ARM" != "1" ]; then', ep[h3:h4])
+        # …and the decision is made BEFORE its first use.
+        self.assertLess(ep.index('FEETECH_ARM=1 ;;'),
+                        ep.index('if [ "$FEETECH_ARM" = "1" ]; then'))
 
     # Every name the driver reads that must reach the ARM container. The
     # entrypoint branches on EDUBOTICS_ROBOT_TYPE inside that container, and
@@ -2662,12 +2867,57 @@ class TestGuiDetectionSeam(unittest.TestCase):
         from gui.app.constants import ARM_USB_IDS, ROBOT_PROFILES
         self.assertEqual(ARM_USB_IDS['omx'], (('2F5D', None),))
         self.assertEqual(ARM_USB_IDS['edu6'], (('1A86', '55D3'),))
+        # The two Feetech families are USB-IDENTICAL — one Waveshare adapter.
+        # They still need SEPARATE rows: every consumer looks the table up by
+        # family, and a missing family attaches nothing at all.
+        self.assertEqual(ARM_USB_IDS['edu1'], ARM_USB_IDS['edu6'])
         for pid, row in ROBOT_PROFILES.items():
             self.assertIn(row['arm_family'], ARM_USB_IDS, pid)
             self.assertIn('camera_roles', row, pid)
-        self.assertEqual(ROBOT_PROFILES['edu6_studio']['camera_roles'],
-                         ('scene',))
-        self.assertEqual(ROBOT_PROFILES['edu6_studio']['arm_family'], 'edu6')
+        for pid, family in (('edu6_studio', 'edu6'), ('edu1_studio', 'edu1')):
+            self.assertEqual(ROBOT_PROFILES[pid]['camera_roles'], ('scene',))
+            self.assertEqual(ROBOT_PROFILES[pid]['arm_family'], family)
+
+    def test_the_feetech_family_tables_are_complete_and_agree(self):
+        """Three family-keyed tables decide how an arm is scanned: the markers
+        (by-id discovery), the protocol (which prober speaks) and the servo
+        count (which Feetech arm). A family present in one and missing from
+        another scans as something it is not."""
+        from gui.app import device_manager as dm
+        from gui.app.constants import ROBOT_PROFILES
+        families = {row['arm_family'] for row in ROBOT_PROFILES.values()}
+        for family in families:
+            self.assertIn(family, dm._ARM_MARKERS, family)
+            self.assertIn(family, dm._FAMILY_PROTOCOL, family)
+        feetech = {f for f in families
+                   if dm._FAMILY_PROTOCOL[f] == 'feetech'}
+        self.assertEqual(feetech, set(dm._FAMILY_SERVO_COUNT))
+        self.assertEqual(dm._family_servo_count('omx'), None)
+        # An unknown family must read as the pre-edu6 default, never as a
+        # Feetech bus: a Dynamixel ping on a Feetech arm is simply unanswered,
+        # whereas the reverse would probe the wrong protocol on real hardware.
+        self.assertEqual(dm._family_protocol('nonsense'), 'dxl')
+
+    def test_the_provisioning_tool_knows_both_arms(self):
+        """The boot probe VERIFIES the EEPROM window this tool writes, so an arm
+        provisioned with the wrong spec refuses to boot with „nicht
+        provisioniert" and no hint as to why."""
+        import importlib.util
+        path = os.path.join(_HERE, '..', '..', 'tools', 'edu6_provision.py')
+        spec = importlib.util.spec_from_file_location('edu1_prov_spec', path)
+        prov = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(prov)
+        # Default = edu6, byte-identical to every existing bench command line.
+        self.assertEqual(prov.SERVO_IDS, _N['SERVO_IDS'])
+        self.assertEqual(tuple(prov.JOINT_LIMITS_RAD),
+                         tuple(_N['JOINT_LIMITS_RAD']))
+        prov.apply_arm_spec('edu1')
+        self.assertEqual(prov.SERVO_IDS, _N['_EDU1_SERVO_IDS'])
+        self.assertEqual(tuple(prov.JOINT_LIMITS_RAD),
+                         tuple(_N['_EDU1_JOINT_LIMITS_RAD']))
+        # …and back, so the rebind is not one-way.
+        prov.apply_arm_spec('edu6')
+        self.assertEqual(prov.SERVO_IDS, _N['SERVO_IDS'])
 
     def test_list_arm_devices_filters_by_family(self):
         from gui.app import device_manager as dm
@@ -2910,11 +3160,20 @@ class TestProvisionEndToEnd(unittest.TestCase):
         spec = importlib.util.spec_from_file_location('edu6_provision', path)
         cls.prov = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(cls.prov)
+        # `provision` REQUIRES the arm spec — a default would be exactly the
+        # hole that stamped every Edu:1 record 'edu6_studio'.
+        cls.EDU6_SPEC = cls.prov._ARM_SPECS['edu6']
+
+    def setUp(self):
+        # The module-level SERVO_IDS / JOINT_LIMITS_RAD are rebound by
+        # apply_arm_spec; every test in this class provisions an edu6, and
+        # provision() now refuses a spec that disagrees with them.
+        self.prov.apply_arm_spec('edu6')
 
     def test_full_provision_order_and_commit(self):
         actual = {sid: 2048 + sid for sid in range(1, 8)}  # nonzero offsets
         bus = _ProvFakeBus(actual)
-        record = self.prov.provision(bus, 'EDU6-0001', (1,) * 7)
+        record = self.prov.provision(bus, 'EDU6-0001', (1,) * 7, self.EDU6_SPEC)
         # Record built ONLY after all 7 servos verified (the commit point).
         self.assertEqual(len(record['servos']), 7)
         self.assertEqual(record['arm_serial'], 'EDU6-0001')
@@ -2948,7 +3207,7 @@ class TestProvisionEndToEnd(unittest.TestCase):
         # the same map the runtime uses. Writing it AFTER the offset would bake the
         # offset under one scale and run under another.
         bus = _ProvFakeBus({sid: 2048 + sid for sid in range(1, 8)})
-        self.prov.provision(bus, 'EDU6-0001', (1,) * 7)
+        self.prov.provision(bus, 'EDU6-0001', (1,) * 7, self.EDU6_SPEC)
         for sid in range(1, 8):
             addrs = [a for a, _ in bus.writes_for(sid)]
             self.assertIn(fb.REG_ANGULAR_RESOLUTION, addrs)
@@ -2966,14 +3225,14 @@ class TestProvisionEndToEnd(unittest.TestCase):
         for sid in range(1, 8):
             bus.mem[sid][fb.REG_ANGULAR_RESOLUTION] = \
                 fb.ANGULAR_RESOLUTION_SINGLE_TURN
-        self.prov.provision(bus, 'EDU6-0002', (1,) * 7)
+        self.prov.provision(bus, 'EDU6-0002', (1,) * 7, self.EDU6_SPEC)
         for sid in range(1, 8):
             self.assertNotIn(fb.REG_ANGULAR_RESOLUTION,
                              [a for a, _ in bus.writes_for(sid)])
 
     def test_the_record_carries_resolution_and_the_shared_firmware_spelling(self):
         bus = _ProvFakeBus({sid: 2048 for sid in range(1, 8)})
-        record = self.prov.provision(bus, 'EDU6-0003', (1,) * 7)
+        record = self.prov.provision(bus, 'EDU6-0003', (1,) * 7, self.EDU6_SPEC)
         for entry in record['servos']:
             self.assertEqual(entry['angular_resolution'], 1)
             # _ProvFakeBus seeds firmware 3.9; the ONE shared formatter must keep
@@ -2984,7 +3243,7 @@ class TestProvisionEndToEnd(unittest.TestCase):
     def test_phase_bit4_not_touched_when_clear(self):
         # Phase bit-4 read-modify-write is only-when-set.
         bus = _ProvFakeBus({sid: 2048 + sid for sid in range(1, 8)}, phase=0x00)
-        self.prov.provision(bus, 'EDU6-0002', (1,) * 7)
+        self.prov.provision(bus, 'EDU6-0002', (1,) * 7, self.EDU6_SPEC)
         for sid in range(1, 8):
             self.assertNotIn(fb.REG_PHASE, [a for a, _ in bus.writes_for(sid)])
 
@@ -3021,7 +3280,7 @@ class TestProvisionEndToEnd(unittest.TestCase):
             bus.mem[sid][fb.REG_HOMING_OFFSET + 1] = (off >> 8) & 0xFF
         # sanity: the pre-provision Present is the WRAPPED 4034, not 23−85
         self.assertEqual(bus._present_raw(1), (23 - 85) % 4096)
-        record = self.prov.provision(bus, 'EDU6-WRAP', (1,) * 7)
+        record = self.prov.provision(bus, 'EDU6-WRAP', (1,) * 7, self.EDU6_SPEC)
         by_id = {e['id']: e for e in record['servos']}
         self.assertEqual(by_id[1]['homing_offset'], 23 - 2048)   # −2025
         # After the write the still-jigged pose reads the designed centre tick.
@@ -3036,7 +3295,7 @@ class TestProvisionEndToEnd(unittest.TestCase):
                 return self.actual[sid] + self._homing_offset(sid)  # WRONG sign
         bus = _SkewBus({sid: 2148 for sid in range(1, 8)})
         with self.assertRaises(SystemExit) as ctx:
-            self.prov.provision(bus, 'EDU6-0003', (1,) * 7)
+            self.prov.provision(bus, 'EDU6-0003', (1,) * 7, self.EDU6_SPEC)
         self.assertIn('Jig-Position', str(ctx.exception))
 
     def test_mixed_sts3250_arm_records_actual_models(self):
@@ -3046,7 +3305,7 @@ class TestProvisionEndToEnd(unittest.TestCase):
         models = {sid: (fb.STS3250_MODEL_NUMBER if sid in (2, 3)
                         else fb.STS3215_MODEL_NUMBER) for sid in range(1, 8)}
         bus = _ProvFakeBus({sid: 2048 for sid in range(1, 8)}, models=models)
-        record = self.prov.provision(bus, 'EDU6-MIX', (1,) * 7)
+        record = self.prov.provision(bus, 'EDU6-MIX', (1,) * 7, self.EDU6_SPEC)
         by_id = {e['id']: e for e in record['servos']}
         self.assertEqual(by_id[2]['model_number'], fb.STS3250_MODEL_NUMBER)
         self.assertEqual(by_id[2]['model_name'], 'STS3250')
@@ -3057,7 +3316,7 @@ class TestProvisionEndToEnd(unittest.TestCase):
     def test_unknown_model_refused(self):
         bus = _ProvFakeBus({sid: 2048 for sid in range(1, 8)}, model=1234)
         with self.assertRaises(SystemExit) as ctx:
-            self.prov.provision(bus, 'EDU6-BAD', (1,) * 7)
+            self.prov.provision(bus, 'EDU6-BAD', (1,) * 7, self.EDU6_SPEC)
         self.assertIn('Modell 1234', str(ctx.exception))
 
     def test_wheel_mode_is_normalized_to_position(self):
@@ -3065,7 +3324,7 @@ class TestProvisionEndToEnd(unittest.TestCase):
         # turns boot-home into a continuous-rotation runaway — provisioning
         # must leave it write-verified in position mode.
         bus = _ProvFakeBus({sid: 2048 for sid in range(1, 8)}, mode=1)
-        self.prov.provision(bus, 'EDU6-0005', (1,) * 7)
+        self.prov.provision(bus, 'EDU6-0005', (1,) * 7, self.EDU6_SPEC)
         for sid in range(1, 8):
             self.assertIn((fb.REG_OPERATING_MODE, b'\x00'),
                           bus.writes_for(sid))
@@ -3077,7 +3336,7 @@ class TestProvisionEndToEnd(unittest.TestCase):
         # awaited write could time out against a mute servo.
         bus = _ProvFakeBus({sid: 2048 for sid in range(1, 8)},
                            response_level=0)
-        self.prov.provision(bus, 'EDU6-0006', (1,) * 7)
+        self.prov.provision(bus, 'EDU6-0006', (1,) * 7, self.EDU6_SPEC)
         for sid in range(1, 8):
             w = bus.writes_for(sid)
             self.assertEqual(w[0], (fb.REG_LOCK, b'\x00'))
@@ -3103,7 +3362,7 @@ class TestProvisionEndToEnd(unittest.TestCase):
                 return raw + 10 if self.skew else raw
         bus = _LateSkewBus({sid: 2048 for sid in range(1, 8)})
         with self.assertRaises(SystemExit) as ctx:
-            self.prov.provision(bus, 'EDU6-0007', (1,) * 7)
+            self.prov.provision(bus, 'EDU6-0007', (1,) * 7, self.EDU6_SPEC)
         self.assertIn('Jig-Endkontrolle', str(ctx.exception))
 
     def test_limits_to_ticks_delegates_to_shared_window(self):
@@ -3128,9 +3387,53 @@ class TestProvisionEndToEnd(unittest.TestCase):
                 return 0
         bus = _FailServo4({sid: 2048 + sid for sid in range(1, 8)})
         with self.assertRaises(SystemExit):
-            self.prov.provision(bus, 'EDU6-0004', (1,) * 7)
+            self.prov.provision(bus, 'EDU6-0004', (1,) * 7, self.EDU6_SPEC)
         touched = {sid for sid, _a, _d in bus.writes}
         self.assertFalse({5, 6, 7} & touched)
+
+
+def _feetech_bus_of(length, model=None):
+    """A FeetechBus double whose bus is exactly ``length`` servos long.
+
+    Module-level, not a staticmethod shared between classes: attribute access
+    unwraps a staticmethod into a plain function, so copying one onto a second
+    class turns it back into an instance method and `self` lands in the first
+    parameter.
+    """
+    class _Bus:
+        def __init__(self, *a, **k):
+            pass
+
+        def ping(self, sid):
+            return sid <= length
+
+        def read_u16(self, sid, addr):
+            return model if model is not None else fb.STS3215_MODEL_NUMBER
+
+        def close(self):
+            pass
+    return _Bus
+
+
+def _load_identify_arm():
+    """Import the in-image prober into the deps-free suite.
+
+    identify_arm.py imports dynamixel_sdk at module top — stub it so this suite
+    can import the module at all (only the feetech path is exercised here).
+    Module-level so more than one TestCase can share it; a `setUpClass` copied
+    onto a second class binds `cls` to the FIRST one and silently leaves the
+    second without the attribute.
+    """
+    fake = types.ModuleType('dynamixel_sdk')
+    fake.PacketHandler = object
+    fake.PortHandler = object
+    sys.modules.setdefault('dynamixel_sdk', fake)
+    import importlib.util
+    path = os.path.join(_DOCKER, 'identify_arm.py')
+    spec = importlib.util.spec_from_file_location('identify_arm', path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 class TestIdentifyArmFeetech(unittest.TestCase):
@@ -3140,25 +3443,18 @@ class TestIdentifyArmFeetech(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        # identify_arm.py imports dynamixel_sdk at module top — stub it so the
-        # deps-free suite can import it (only the feetech path is exercised).
-        fake = types.ModuleType('dynamixel_sdk')
-        fake.PacketHandler = object
-        fake.PortHandler = object
-        sys.modules.setdefault('dynamixel_sdk', fake)
-        import importlib.util
-        path = os.path.join(_DOCKER, 'identify_arm.py')
-        spec = importlib.util.spec_from_file_location('identify_arm', path)
-        cls.ia = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(cls.ia)
+        cls.ia = _load_identify_arm()
 
-    def _with_bus(self, bus_cls, port='/dev/fake'):
+    def _with_bus(self, bus_cls, port='/dev/fake', expected=None):
         orig = fb.FeetechBus
         fb.FeetechBus = bus_cls
         try:
-            return self.ia.identify_feetech(port)
+            if expected is None:
+                return self.ia.identify_feetech(port)
+            return self.ia.identify_feetech(port, expected)
         finally:
             fb.FeetechBus = orig
+
 
     def test_silent_bus_returns_feetech_silent(self):
         class _SilentBus:
@@ -3191,12 +3487,15 @@ class TestIdentifyArmFeetech(unittest.TestCase):
         self.assertEqual(self._with_bus(_PartialBus), 'partial:3')
 
     def test_all_servos_model_777_returns_edu6(self):
+        # ping() is id-SCOPED, not "always True": the prober proves the bus
+        # LENGTH by pinging one id past the longest supported arm, so an
+        # answers-everything double reports an 8-servo bus and no family.
         class _GoodBus:
             def __init__(self, *a, **k):
                 pass
 
             def ping(self, sid):
-                return True
+                return sid <= 7
 
             def read_u16(self, sid, addr):
                 return fb.STS3215_MODEL_NUMBER
@@ -3213,7 +3512,7 @@ class TestIdentifyArmFeetech(unittest.TestCase):
                 pass
 
             def ping(self, sid):
-                return True
+                return sid <= 7
 
             def read_u16(self, sid, addr):
                 return (fb.STS3250_MODEL_NUMBER if sid in (2, 3)
@@ -3229,7 +3528,7 @@ class TestIdentifyArmFeetech(unittest.TestCase):
                 pass
 
             def ping(self, sid):
-                return True
+                return sid <= 7
 
             def read_u16(self, sid, addr):
                 return 1234    # neither STS3215 nor STS3250
@@ -3237,6 +3536,120 @@ class TestIdentifyArmFeetech(unittest.TestCase):
             def close(self):
                 pass
         self.assertEqual(self._with_bus(_ForeignBus), 'unknown')
+
+
+class TestFeetechBusLengthDiscriminatesTheTwoArms(unittest.TestCase):
+    """edu6 and edu1 are USB-INDISTINGUISHABLE — one Waveshare adapter, one
+    VID:PID, one by-id string, and the same servo models on ids 1..6. The bus
+    LENGTH is the only fact that separates them, so the prober asserts it
+    EXACTLY: every id up to N must answer AND id N+1 must not.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.ia = _load_identify_arm()
+
+    _with_bus = TestIdentifyArmFeetech._with_bus
+
+    def test_the_count_table_is_the_discriminator(self):
+        self.assertEqual(self.ia.FEETECH_SERVO_COUNT, {'edu6': 7, 'edu1': 6})
+        self.assertEqual(self.ia.FEETECH_FAMILY_BY_COUNT, {7: 'edu6', 6: 'edu1'})
+        # One id PAST the longest arm, or "exactly N" is unprovable.
+        self.assertEqual(self.ia.FEETECH_MAX_ID, 8)
+        # The default keeps every pre-edu1 caller byte-identical.
+        self.assertEqual(self.ia.DEFAULT_FEETECH_SERVOS, 7)
+
+    def test_each_arm_identifies_itself(self):
+        self.assertEqual(self._with_bus(_feetech_bus_of(7), expected=7), 'edu6')
+        self.assertEqual(self._with_bus(_feetech_bus_of(6), expected=6), 'edu1')
+
+    def test_a_six_servo_bus_is_not_accepted_as_the_seven_servo_arm(self):
+        """The defect the exact-count rule exists for: ids 1..6 answer on BOTH
+        arms with the SAME models, so a subset check would call an Edu:1 an
+        edu6 and boot the wrong joint names, limits and HOME against it."""
+        self.assertEqual(self._with_bus(_feetech_bus_of(6), expected=7),
+                         'edu1_arm_found')
+
+    def test_a_seven_servo_bus_is_not_accepted_as_the_six_servo_arm(self):
+        self.assertEqual(self._with_bus(_feetech_bus_of(7), expected=6),
+                         'edu6_arm_found')
+
+    def test_a_bus_of_no_supported_length_is_a_partial_not_a_family(self):
+        self.assertEqual(self._with_bus(_feetech_bus_of(3), expected=7), 'partial:3')
+        self.assertEqual(self._with_bus(_feetech_bus_of(3), expected=6), 'partial:3')
+
+    def test_a_silent_bus_still_names_the_twelve_volt_cause(self):
+        self.assertEqual(self._with_bus(_feetech_bus_of(0), expected=6),
+                         'feetech_silent')
+
+    def test_a_gap_stops_the_count(self):
+        """Contiguity is deliberate: the arms number their servos 1..N in joint
+        order, so a hole is a mid-chain cable fault and everything past it is
+        unreachable anyway."""
+        class _Gap:
+            def __init__(self, *a, **k):
+                pass
+
+            def ping(self, sid):
+                return sid in (1, 2, 4, 5, 6, 7)   # 3 missing
+
+            def read_u16(self, sid, addr):
+                return fb.STS3215_MODEL_NUMBER
+
+            def close(self):
+                pass
+        self.assertEqual(self._with_bus(_Gap, expected=7), 'partial:2')
+
+    def test_a_wrong_model_on_a_right_length_bus_is_unknown(self):
+        self.assertEqual(self._with_bus(_feetech_bus_of(6, model=1234), expected=6),
+                         'unknown')
+
+    # ── A1: a bus LONGER than any supported arm ────────────────────────────
+    def test_an_overlong_bus_is_its_own_token_not_a_partial(self):
+        """`feetech_bus_length` walks to FEETECH_MAX_ID, so `alive` can EXCEED
+        `expected`. Reported as `partial:8` the host rendered it as
+        „Nur 8 von 7 Servos antworten" — a fraction greater than one, telling
+        the student to re-seat cables on a bus that has too MANY devices.
+        Rejecting the bus is right; the diagnosis was not."""
+        self.assertEqual(self._with_bus(_feetech_bus_of(8), expected=7),
+                         'bus_too_long:8')
+        self.assertEqual(self._with_bus(_feetech_bus_of(8), expected=6),
+                         'bus_too_long:8')
+        # …and a bus longer still is capped at the walk ceiling, so the token
+        # carries a FLOOR. The German wording says „mindestens" for this reason.
+        self.assertEqual(self._with_bus(_feetech_bus_of(40), expected=7),
+                         'bus_too_long:8')
+
+    def test_the_overlong_threshold_is_derived_from_the_family_table(self):
+        self.assertEqual(self.ia.FEETECH_MAX_SERVOS,
+                         max(self.ia.FEETECH_SERVO_COUNT.values()))
+        self.assertEqual(self.ia.FEETECH_MAX_ID, self.ia.FEETECH_MAX_SERVOS + 1)
+
+    def test_no_supported_length_can_ever_be_reported_as_partial_of_itself(self):
+        """The invariant the host's stale-image branch leans on: for the
+        CURRENT prober, `partial:N` implies N is strictly below the selected
+        arm's own length."""
+        for expected in self.ia.FEETECH_SERVO_COUNT.values():
+            for alive in range(0, self.ia.FEETECH_MAX_ID + 1):
+                verdict = self._with_bus(_feetech_bus_of(alive),
+                                         expected=expected)
+                if verdict.startswith('partial:'):
+                    self.assertLess(int(verdict.split(':')[1]), expected,
+                                    f'{alive=} {expected=} -> {verdict}')
+
+    def test_an_overlong_bus_is_not_cross_probed_for_an_omx(self):
+        """Source-level: the Feetech bus already answered, so it is definitely
+        not an OMX board — a cross-probe would replace a precise diagnosis
+        with a vaguer one."""
+        src = open(os.path.join(_DOCKER, 'identify_arm.py'),
+                   encoding='utf-8').read()
+        guard = src.split('if protocol == "feetech":', 1)[1]
+        guard = guard.split('print(result)', 1)[0]
+        # Comments in that block DISCUSS the token; only the code matters.
+        code = '\n'.join(ln for ln in guard.splitlines()
+                         if not ln.lstrip().startswith('#'))
+        self.assertIn('result.startswith("partial")', code)
+        self.assertNotIn('bus_too_long', code)
 
 
 class TestScanFeetechSilentMapping(unittest.TestCase):
@@ -3304,7 +3717,15 @@ class TestScanCrossFamilyAndPartial(unittest.TestCase):
                              return_value=[ch343]) as lad:
             dm.scan_and_identify_arms('img', arm_family='omx')
         lad.assert_called_once_with('edu6')
-        self.assertIn('EduBotics 6-Achs', dm.LAST_SCAN_NOTICE)
+        # Deliberately GENERIC about which EduBotics arm. This path is pure
+        # Windows-side USB enumeration, and edu6 and edu1 share one adapter and
+        # one VID:PID — naming the 6-axis arm here (as this assertion did while
+        # it was the only Feetech arm) would be a coin flip stated as a fact.
+        # `lad` is still called with 'edu6' because that key STANDS FOR the
+        # shared adapter in ARM_USB_IDS, not for the 6-axis arm specifically.
+        self.assertIn('EduBotics-Arm', dm.LAST_SCAN_NOTICE)
+        self.assertIn('OMX-Robotertyp', dm.LAST_SCAN_NOTICE)
+        self.assertNotIn('6-Achs', dm.LAST_SCAN_NOTICE)
 
     def test_empty_scan_without_other_family_stays_silent(self):
         from gui.app import device_manager as dm
@@ -3335,6 +3756,90 @@ class TestScanCrossFamilyAndPartial(unittest.TestCase):
         self.assertIsNone(follower)
         self.assertIn('3 von 7', dm.LAST_SCAN_NOTICE)
         self.assertIn('Steckverbindungen', dm.LAST_SCAN_NOTICE)
+
+    # ── A1: the host must never print a fraction greater than one ──────────
+    def _scan_with(self, verdict, arm_family):
+        from gui.app import device_manager as dm
+        dm.LAST_SCAN_NOTICE = ''
+        dev = types.SimpleNamespace(busid='1-1', description='CH343',
+                                    serial_path='/dev/serial/by-id/x')
+        with patch.object(dm, 'self_heal_wsl_serial'), \
+                patch.object(dm, 'attach_all_robotis_devices',
+                             return_value=[dev]), \
+                patch.object(dm, 'find_serial_paths_for_arms',
+                             return_value=['/dev/serial/by-id/x']), \
+                patch.object(dm, 'start_scanner_container', return_value=True), \
+                patch.object(dm, 'stop_scanner_container'), \
+                patch.object(dm, 'identify_arm_via_docker',
+                             return_value=verdict), \
+                patch('time.sleep'):
+            leader, follower = dm.scan_and_identify_arms(
+                'img', arm_family=arm_family)
+        return dm, leader, follower
+
+    def test_an_overlong_bus_never_says_more_of_fewer(self):
+        for family, count in (('edu6', 7), ('edu1', 6)):
+            with self.subTest(family):
+                dm, _leader, follower = self._scan_with('bus_too_long:8', family)
+                self.assertIsNone(follower)
+                note = dm.LAST_SCAN_NOTICE
+                self.assertNotIn(f'Nur 8 von {count}', note)
+                self.assertIn('mindestens 8', note)
+                self.assertIn('dieselbe ID', note)
+                # …and it must not send the student to the CABLE checklist,
+                # which is the remedy for the opposite fault.
+                self.assertNotIn('Steckverbindungen', note)
+
+    def test_a_partial_that_meets_the_selected_length_reads_as_a_stale_image(self):
+        """A pinned EDUBOTICS_IMAGE_TAG is a documented rollback, and an old
+        in-container prober silently drops `--servos=`: a healthy 6-servo
+        Edu:1 then comes back as `partial:6` and the old wording said
+        „Nur 6 von 6 Servos antworten" — every servo answered, and the student
+        is told to check the cabling."""
+        dm, _leader, follower = self._scan_with('partial:6', 'edu1')
+        self.assertIsNone(follower)
+        note = dm.LAST_SCAN_NOTICE
+        self.assertNotIn('Nur 6 von 6', note)
+        self.assertIn('Abbild', note)
+        self.assertIn('aktualisieren', note)
+
+    def test_a_genuine_partial_still_names_the_selected_arm_s_length(self):
+        dm, _leader, follower = self._scan_with('partial:3', 'edu1')
+        self.assertIsNone(follower)
+        self.assertIn('Nur 3 von 6', dm.LAST_SCAN_NOTICE)
+        self.assertIn('Steckverbindungen', dm.LAST_SCAN_NOTICE)
+
+    def test_the_bus_length_notice_is_pure_and_total(self):
+        from gui.app import device_manager as dm
+        self.assertEqual(dm.feetech_bus_length_notice('edu6', 7), '')
+        self.assertEqual(dm.feetech_bus_length_notice('partial:x', 7), '')
+        # No selected length (a non-Feetech family) → say nothing rather than
+        # frame a count against None.
+        self.assertEqual(dm.feetech_bus_length_notice('partial:3', None), '')
+
+    # ── A9: the host must not accept the WRONG family's success token ──────
+    def test_the_other_familys_success_token_is_refused(self):
+        """Not reachable through the CURRENT prober (it is handed --servos= and
+        answers `<other>_arm_found`), but an image pin is a documented rollback
+        and the stdout-verdict-wins contract makes a stale prober's bare
+        family name land here. Slotting it as the follower would bring the
+        stack up against the wrong servo bus."""
+        for selected, reported, needle in (('edu1', 'edu6', 'EduBotics 6-Achs'),
+                                           ('edu6', 'edu1', 'Edu:1')):
+            with self.subTest(selected=selected, reported=reported):
+                dm, leader, follower = self._scan_with(reported, selected)
+                self.assertIsNone(follower)
+                self.assertIsNone(leader)
+                self.assertIn(needle, dm.LAST_SCAN_NOTICE)
+
+    def test_the_selected_familys_own_token_is_still_the_follower(self):
+        for family in ('edu6', 'edu1'):
+            with self.subTest(family):
+                dm, leader, follower = self._scan_with(family, family)
+                self.assertIsNotNone(follower)
+                self.assertEqual(follower.role, 'follower')
+                self.assertIsNone(leader)
+                self.assertEqual(dm.LAST_SCAN_NOTICE, '')
 
 
 class TestFamilyVidProbe(unittest.TestCase):
@@ -3725,6 +4230,178 @@ class TestCommandedGoalEdgeClamp(unittest.TestCase):
         read = set(re.findall(r'EDUBOTICS_[A-Z0-9_]+', driver))
         self.assertIn('EDUBOTICS_EDU6_GOAL_EDGE_MARGIN_TICKS', read)
         self.assertEqual(read - set(forwarded), set())
+
+
+class TestProvisionArmIdentityIsThreadedNotAssumed(unittest.TestCase):
+    """`tools/edu6_provision.py` under ``--arm edu1``.
+
+    Until 2026-09-05 ``apply_arm_spec`` rebound only ``SERVO_IDS`` and
+    ``JOINT_LIMITS_RAD``; everything else in ``provision`` was an edu6 literal.
+    Nothing tested it, which is why four separate places kept saying "edu6" on
+    an Edu:1 bench run — the worst of them the record's ``profile_id``, which is
+    the ONLY machine-readable family tag in the whole artifact (``persist``
+    upserts the record as one jsonb blob into a table whose schema is
+    ``(arm_serial, record, timestamps)``).
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import importlib.util
+        path = os.path.join(_HERE, '..', '..', 'tools', 'edu6_provision.py')
+        spec = importlib.util.spec_from_file_location('edu1_prov_e2e', path)
+        cls.prov = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.prov)
+
+    def tearDown(self):
+        # The module keeps its arm constants as globals; leave them on edu6 so
+        # test ORDER inside the file cannot matter.
+        self.prov.apply_arm_spec('edu6')
+
+    def _edu1(self, **kw):
+        spec = self.prov.apply_arm_spec('edu1')
+        bus = _ProvFakeBus({sid: 2048 for sid in range(1, 7)}, **kw)
+        return spec, bus
+
+    # ── A2: the record's family tag ─────────────────────────────────────────
+    def test_edu1_record_is_tagged_edu1_studio(self):
+        spec, bus = self._edu1()
+        record = self.prov.provision(bus, 'EDU1-0001', (1,) * 6, spec)
+        self.assertEqual(record['profile_id'], 'edu1_studio')
+        self.assertEqual(len(record['servos']), 6)
+        self.assertEqual([e['id'] for e in record['servos']], [1, 2, 3, 4, 5, 6])
+
+    def test_edu6_record_tag_is_unchanged(self):
+        spec = self.prov.apply_arm_spec('edu6')
+        bus = _ProvFakeBus({sid: 2048 for sid in range(1, 8)})
+        record = self.prov.provision(bus, 'EDU6-0001', (1,) * 7, spec)
+        self.assertEqual(record['profile_id'], 'edu6_studio')
+
+    def test_the_tag_does_not_move_the_checksum(self):
+        # `record_checksum` hashes serial+signs+servos and NOT profile_id, so
+        # fixing the tag must not re-digest a fielded edu6 record.
+        spec = self.prov.apply_arm_spec('edu6')
+        bus = _ProvFakeBus({sid: 2048 for sid in range(1, 8)})
+        record = self.prov.provision(bus, 'EDU6-0001', (1,) * 7, spec)
+        self.assertEqual(
+            record['checksum'],
+            self.prov.record_checksum(record['servos'], 'EDU6-0001', (1,) * 7))
+
+    # ── A3: the identity gate names the arm on the bench ────────────────────
+    def test_foreign_servo_on_an_edu1_names_the_edu1(self):
+        spec, bus = self._edu1(model=1234)
+        with self.assertRaises(SystemExit) as ctx:
+            self.prov.provision(bus, 'EDU1-BAD', (1,) * 6, spec)
+        msg = str(ctx.exception)
+        self.assertIn('Edu:1', msg)
+        self.assertNotIn('6-Achs', msg)
+
+    def test_foreign_servo_on_an_edu6_still_names_the_edu6(self):
+        spec = self.prov.apply_arm_spec('edu6')
+        bus = _ProvFakeBus({sid: 2048 for sid in range(1, 8)}, model=1234)
+        with self.assertRaises(SystemExit) as ctx:
+            self.prov.provision(bus, 'EDU6-BAD', (1,) * 7, spec)
+        self.assertIn('EduBotics 6-Achs', str(ctx.exception))
+
+    # ── A4/A5: the two COUNTS follow the spec ───────────────────────────────
+    def test_found_and_verified_counts_follow_the_spec(self):
+        import contextlib
+        spec, bus = self._edu1()
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            self.prov.provision(bus, 'EDU1-0002', (1,) * 6, spec)
+        out = buf.getvalue()
+        self.assertIn('Alle 6 Servos gefunden', out)
+        self.assertIn('alle 6 Servos lesen', out)
+        # …and the old literal is gone from BOTH lines on this arm.
+        self.assertNotIn('Alle 7 Servos', out)
+        self.assertNotIn('alle 7 Servos', out)
+
+    def test_edu6_counts_are_byte_identical(self):
+        import contextlib
+        spec = self.prov.apply_arm_spec('edu6')
+        bus = _ProvFakeBus({sid: 2048 for sid in range(1, 8)})
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            self.prov.provision(bus, 'EDU6-0002', (1,) * 7, spec)
+        out = buf.getvalue()
+        self.assertIn('Alle 7 Servos gefunden', out)
+        self.assertIn('alle 7 Servos lesen die Soll-Position.', out)
+
+    # ── the half-migration guard the threading buys ─────────────────────────
+    def test_spec_that_disagrees_with_the_bound_globals_is_refused(self):
+        # The one failure mode a REBIND cannot rule out: globals on one arm,
+        # spec on the other → one family's EEPROM window under the other
+        # family's tag, a record that verifies against nothing.
+        self.prov.apply_arm_spec('edu6')
+        bus = _ProvFakeBus({sid: 2048 for sid in range(1, 8)})
+        with self.assertRaises(SystemExit) as ctx:
+            self.prov.provision(bus, 'EDU6-0003', (1,) * 7,
+                                self.prov._ARM_SPECS['edu1'])
+        self.assertIn('apply_arm_spec', str(ctx.exception))
+
+    def test_provision_requires_a_spec_at_all(self):
+        # A defaulted spec argument would re-open the exact hole this fixes.
+        import inspect
+        sig = inspect.signature(self.prov.provision)
+        self.assertIs(sig.parameters['spec'].default, inspect.Parameter.empty)
+
+    def test_every_arm_spec_carries_both_new_keys(self):
+        for arm, spec in self.prov._ARM_SPECS.items():
+            for key in ('profile_id', 'display_de', 'servo_ids',
+                        'joint_limits_rad', 'records_dir'):
+                self.assertIn(key, spec, f'{arm}.{key}')
+            self.assertEqual(len(spec['servo_ids']),
+                             len(spec['joint_limits_rad']), arm)
+        ids = [s['profile_id'] for s in self.prov._ARM_SPECS.values()]
+        self.assertEqual(len(ids), len(set(ids)))
+
+    def test_record_directory_is_per_arm(self):
+        self.assertEqual(self.prov._ARM_SPECS['edu1']['records_dir'],
+                         'edu1_records')
+        self.assertEqual(self.prov._ARM_SPECS['edu6']['records_dir'],
+                         'edu6_records')
+
+    def test_german_bench_strings_use_literal_umlauts(self):
+        """Rule §1 on a surface NOTHING else lints.
+
+        `ci.yml::german-strings-lint` greps only physical_ai_server/ + gui/ +
+        installer/ + pi_agent/, and `german_detail_lint.py`'s AST scopes are
+        cloud_training_api/app + pi_agent — so `tools/` is unlinted on BOTH
+        halves, which is how four edu6-only sentences survived in a file that
+        had just grown a second arm. This borrows the shipped lint's own
+        TRANSLITERATIONS pattern and runs it over EVERY string literal in the
+        file (an AST walk, not a line grep: these messages wrap across implicit
+        concatenations, which a line-anchored grep steps straight over).
+
+        Widening the workflow's own path list would cover it in CI too; that is
+        an owner call, since CLAUDE.md lists CI config under "ask first".
+        """
+        import importlib.util
+        path = os.path.join(_HERE, '..', '..', '.github', 'scripts',
+                            'german_detail_lint.py')
+        spec = importlib.util.spec_from_file_location('gdl', path)
+        gdl = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(gdl)
+
+        src = open(os.path.join(_HERE, '..', '..', 'tools',
+                                'edu6_provision.py'), encoding='utf-8').read()
+        offenders = []
+        for node in ast.walk(ast.parse(src)):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                hit = gdl.TRANSLITERATIONS.search(node.value)
+                if hit:
+                    offenders.append((node.lineno, hit.group(0),
+                                      node.value[:60]))
+        self.assertEqual(offenders, [])
+
+    def test_supabase_line_does_not_call_the_artifact_edu6_only(self):
+        # The TABLE name is shared and deliberate; the SENTENCE must not read
+        # as "your Edu:1 went into a 6-axis-only record".
+        src = open(os.path.join(_HERE, '..', '..', 'tools',
+                                'edu6_provision.py'), encoding='utf-8').read()
+        self.assertNotIn("print('[OK] Supabase edu6_arm_records aktualisiert.')",
+                         src)
+        self.assertIn('Arm-Datenbank', src)
 
 
 if __name__ == '__main__':

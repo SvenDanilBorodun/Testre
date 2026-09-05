@@ -66,7 +66,20 @@ const PROFILES = [
     scan_requires_leader: false,
     camera_roles: ['scene'],
   },
+  {
+    id: 'edu1_studio',
+    display_de: 'Edu:1 – Roboter Studio',
+    scan_requires_leader: false,
+    camera_roles: ['scene'],
+  },
 ];
+
+// Every profile the agent can send. Derived from PROFILES rather than restated:
+// the follower-only sweeps below were hardcoded triples and stopped covering
+// `edu1_studio` the day it was added, without saying so.
+const ALL_PROFILE_IDS = PROFILES.map((p) => p.id);
+const FOLLOWER_ONLY_IDS = PROFILES.filter((p) => p.scan_requires_leader === false)
+  .map((p) => p.id);
 
 function statusFixture(overrides = {}) {
   return {
@@ -145,11 +158,13 @@ describe('SystemPage — Robotertyp selector', () => {
     const labels = within(select)
       .getAllByRole('option')
       .map((o) => o.textContent);
-    expect(labels).toEqual([
-      'OMX – Voll',
-      'OMX – Roboter Studio (nur Follower)',
-      'EduBotics 6-Achs – Roboter Studio',
-    ]);
+    // Derived from PROFILES, never restated: this list was a hardcoded triple
+    // and silently stopped covering `edu1_studio` the day it was added. The
+    // selector is the Pi's whole entry point — a profile the agent knows but
+    // the dropdown never lists is unreachable on the one repair surface a
+    // student can get to.
+    expect(labels).toEqual(PROFILES.map((p) => p.display_de));
+    expect(labels).toContain('Edu:1 – Roboter Studio');
     expect(select).toHaveValue('omx_full');
   });
 
@@ -433,8 +448,8 @@ describe('SystemPage — an agent without the profile keys', () => {
 // ── WP-5: profile-aware start gating ────────────────────────────────────────
 
 describe('SystemPage — follower-only start gating', () => {
-  it.each(['omx_follower', 'edu6_studio'])(
-    'starts %s with ONE arm — the gate that made both unreachable',
+  it.each(FOLLOWER_ONLY_IDS)(
+    'starts %s with ONE arm — the gate that made these unreachable',
     (pid) => {
       renderWith(readyFixture(pid));
       expect(screen.getByRole('button', { name: 'Umgebung starten' })).toBeEnabled();
@@ -447,20 +462,24 @@ describe('SystemPage — follower-only start gating', () => {
   });
 
   it('refuses while the agent is not ready, on every profile', () => {
-    for (const pid of ['omx_full', 'omx_follower', 'edu6_studio']) {
+    for (const pid of ALL_PROFILE_IDS) {
       renderWith(readyFixture(pid, { agent_ready: false }));
       expect(screen.getByRole('button', { name: 'Umgebung starten' })).toBeDisabled();
       cleanup();
     }
   });
 
-  it('hides the Leader tile on a leader-less profile and renames the other', () => {
-    renderWith(readyFixture('edu6_studio'));
-    expect(screen.queryByText('Leader')).toBeNull();
-    expect(screen.queryByText('Follower')).toBeNull();
-    expect(screen.getByText('Roboterarm')).toBeInTheDocument();
-    expect(screen.getByText('/dev/serial/by-id/usb-FOLLOWER')).toBeInTheDocument();
-  });
+  it.each(FOLLOWER_ONLY_IDS)(
+    'hides the Leader tile on %s and renames the other',
+    (pid) => {
+      renderWith(readyFixture(pid));
+      expect(screen.queryByText('Leader')).toBeNull();
+      expect(screen.queryByText('Follower')).toBeNull();
+      expect(screen.getByText('Roboterarm')).toBeInTheDocument();
+      expect(screen.getByText('/dev/serial/by-id/usb-FOLLOWER')).toBeInTheDocument();
+    }
+  );
+
 
   it('says „Arm erkannt", never „Beide Arme erkannt", on a leader-less rig', () => {
     renderWith(readyFixture('omx_follower'));

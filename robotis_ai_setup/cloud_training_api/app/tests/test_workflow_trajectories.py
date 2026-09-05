@@ -114,9 +114,12 @@ from app.validators.workflow import (  # noqa: E402
     MAX_TRAJECTORY_JSON_BYTES,
     MAX_TRAJECTORY_POINTS,
     TRAJECTORY_FPS_MAX,
+    TRAJECTORY_POINT_LEN,
+    TRAJECTORY_ROBOT_PROFILES,
     validate_trajectory,
     validate_trajectory_metadata,
     validate_trajectory_name,
+    validate_trajectory_robot_profile,
 )
 
 
@@ -929,6 +932,16 @@ class TestWorkflowsRateLimitedPerUser(unittest.TestCase):
 # edu6 dual width + robot_profile tag (migration 035, plan §14)
 # ==================================================================
 class TestTrajectoryRobotProfile(unittest.TestCase):
+    """The arm-family tag (migration 035, widened by 039).
+
+    Until 039 width and arm were in BIJECTION (omx_f 7, edu6_studio 8), so
+    every test below could have passed with `trajectoryMatchesRig`/the tag
+    deleted — the width check alone would have caught the cross-arm case. The
+    Edu:1 ends that: 5 arm joints → 5 + 2 = 7, the SAME width omx_f uses, so
+    this column is now the ONLY thing separating an OMX recording from an Edu:1
+    one. `test_the_width_gate_cannot_separate_edu1_from_omx` states that
+    directly so nobody is reassured by the width check again."""
+
     def _pt8(self, t=0.0):
         return [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, t]
 
@@ -990,6 +1003,134 @@ class TestTrajectoryRobotProfile(unittest.TestCase):
             created = wf.create_workflow(_create_wf_payload(), user=_OWNER)
             res = wf.create_trajectory(created.id, _traj_payload(), user=_OWNER)
             self.assertIsNone(db.trajectories[res.id]["robot_profile"])
+
+    # ── migration 039: the Edu:1, which SHARES a width with the OMX ─────────
+    def test_the_map_is_the_registry_id_space(self):
+        # `TRAJECTORY_ROBOT_PROFILES` was referenced by NO test at all, so a
+        # dropped or mistyped row was invisible on this side.
+        self.assertEqual(TRAJECTORY_ROBOT_PROFILES,
+                         {"omx_f": 7, "edu6_studio": 8, "edu1_studio": 7})
+        self.assertEqual(TRAJECTORY_POINT_LEN,
+                         TRAJECTORY_ROBOT_PROFILES["omx_f"])
+
+    def test_edu1_tag_is_7_wide_exactly(self):
+        validate_trajectory([self._pt7(0.0), self._pt7(0.1)], fps=25.0,
+                            robot_profile="edu1_studio")
+        with self.assertRaises(HTTPException) as ctx:
+            validate_trajectory([self._pt8()], fps=25.0,
+                                robot_profile="edu1_studio")
+        self.assertEqual(ctx.exception.status_code, 400)
+        self.assertIn("7", ctx.exception.detail)
+
+    def test_the_width_gate_cannot_separate_edu1_from_omx(self):
+        """Stated as a PROPERTY: the SAME payload validates under both tags, so
+        the width check provably cannot tell these two arms apart. This is
+        migration 039's whole reason for existing."""
+        payload = [self._pt7(0.0), self._pt7(0.04)]
+        validate_trajectory(payload, fps=25.0, robot_profile="omx_f")
+        validate_trajectory(payload, fps=25.0, robot_profile="edu1_studio")
+        self.assertEqual(TRAJECTORY_ROBOT_PROFILES["edu1_studio"],
+                         TRAJECTORY_ROBOT_PROFILES["omx_f"])
+
+    def test_every_known_id_returns_its_own_width(self):
+        for pid, width in TRAJECTORY_ROBOT_PROFILES.items():
+            with self.subTest(pid):
+                self.assertEqual(validate_trajectory_robot_profile(pid), width)
+                # …and tolerates the whitespace the route strips before storing.
+                self.assertEqual(validate_trajectory_robot_profile(f" {pid} "),
+                                 width)
+
+    def test_near_miss_ids_are_refused_not_coerced(self):
+        # The GUI/registry id space ('edu1_studio') is NOT the family name
+        # ('edu1') nor the GUI profile id ('omx_full'); each must 400 rather
+        # than fall back to the OMX width.
+        for bad in ("edu1", "EDU1_STUDIO", "omx_full", "edu2_studio"):
+            with self.subTest(bad):
+                with self.assertRaises(HTTPException) as ctx:
+                    validate_trajectory([self._pt7()], fps=25.0,
+                                        robot_profile=bad)
+                self.assertEqual(ctx.exception.status_code, 400)
+                self.assertIn("Roboterprofil", ctx.exception.detail)
+
+    def test_non_string_tag_is_a_german_400(self):
+        for bad in (7, 7.0, True, [], {}, ["omx_f"]):
+            with self.subTest(repr(bad)):
+                with self.assertRaises(HTTPException) as ctx:
+                    validate_trajectory_robot_profile(bad)
+                self.assertEqual(ctx.exception.status_code, 400)
+
+    def test_edu1_create_round_trips_the_tag(self):
+        # The end-to-end shape the React replay gate reads back: a 7-wide
+        # payload stored under the Edu:1 tag must come back tagged, or the
+        # client sees a legacy (= OMX) recording and happily replays it.
+        db = _FakeDB()
+        with _Ctx(db):
+            created = wf.create_workflow(_create_wf_payload(), user=_OWNER)
+            payload = _traj_payload(
+                points=[self._pt7(0.0), self._pt7(0.1)],
+                robot_profile="edu1_studio",
+            )
+            res = wf.create_trajectory(created.id, payload, user=_OWNER)
+            self.assertEqual(db.trajectories[res.id]["robot_profile"],
+                             "edu1_studio")
+            got = wf.get_trajectory_by_name(created.id, "Bewegung1", user=_OWNER)
+            self.assertEqual(got.robot_profile, "edu1_studio")
+            self.assertEqual(len(got.points[0]), 7)
+
+    def test_the_migration_allows_exactly_the_validator_s_id_set(self):
+        # 039 widens the CHECK; a validator that knows an id the constraint
+        # refuses is a 500 on save, and the reverse is dead capacity.
+        import glob as _glob
+        import os as _os
+        import re as _re
+        here = _os.path.dirname(_os.path.abspath(__file__))
+        # Globbed on the NNN label, not the timestamp prefix: applying a
+        # migration through the Supabase MCP re-stamps that prefix, and
+        # CLAUDE.md's remedy is to rename the file to match.
+        hits = _glob.glob(_os.path.join(
+            here, "..", "..", "..", "supabase", "migrations",
+            "*_039_*.sql"))
+        self.assertEqual(len(hits), 1, hits)
+        sql = open(hits[0], encoding="utf-8").read()
+        body = sql.split("ADD CONSTRAINT", 1)[1]
+        ids = set(_re.findall(r"'([a-z0-9_]+)'", body.split("NOT VALID", 1)[0]))
+        self.assertEqual(ids, set(TRAJECTORY_ROBOT_PROFILES))
+
+    def test_the_039_rollback_cannot_half_apply_under_a_bare_psql(self):
+        """CLAUDE.md sanctions `psql -f rollback/NNN_*.sql` as an emergency
+        path, and a bare psql has NO `ON_ERROR_STOP`: it PRINTS a `RAISE` and
+        carries on to the next statement. 039 is the first rollback whose
+        refusal GATE depends on abort semantics, so as four statements it
+        dropped the constraint, re-added the narrowed one NOT VALID, failed the
+        VALIDATE, and left an unvalidated narrowed constraint that rejects every
+        new edu1 write — the exact half-applied state the refusal exists to
+        prevent. VERIFIED on postgres:15 both ways.
+
+        The fix is structural: everything the rollback DOES lives inside the
+        same single `DO` block as the gate, so the RAISE rolls it all back. This
+        test therefore asserts the SHAPE, not the wording."""
+        import glob as _glob
+        import os as _os
+        import re as _re
+        here = _os.path.dirname(_os.path.abspath(__file__))
+        root = _os.path.join(here, "..", "..", "..", "supabase", "rollback")
+        hits = _glob.glob(_os.path.join(root, "*_039_*.sql"))
+        self.assertEqual(len(hits), 1, hits)
+        sql = open(hits[0], encoding="utf-8").read()
+        # Strip line comments so the prose above the code cannot satisfy or
+        # trip any assertion below.
+        code = "\n".join(ln for ln in sql.splitlines()
+                          if not ln.lstrip().startswith("--"))
+        self.assertIn("RAISE EXCEPTION", code)
+        # Remove the ONE dollar-quoted DO block; nothing DDL may remain.
+        outside = _re.sub(r"DO \$\$.*?\$\$\s*;", "", code, flags=_re.S)
+        for kw in ("ALTER TABLE", "COMMENT ON", "DROP CONSTRAINT",
+                   "VALIDATE CONSTRAINT", "CREATE "):
+            self.assertNotIn(kw, outside,
+                             f"{kw} sits OUTSIDE the refusal gate's DO block — "
+                             "a bare psql would run it after the RAISE")
+        # …and the gate is not defeated by a second DO block either.
+        self.assertEqual(code.count("DO $$"), 1)
 
 
 if __name__ == "__main__":

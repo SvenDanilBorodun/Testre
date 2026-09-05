@@ -176,7 +176,10 @@ def _sim_stack(profile, objects):
 
 # ── the rest pose that gives the twin something to draw before run #1 ────────
 
-@pytest.mark.parametrize('profile_id', ['omx_full', 'omx_follower', 'edu6_studio'])
+# From the REGISTRY, never a restated list: a hardcoded triple stopped
+# covering `edu1_studio` the day it was added, silently.
+@pytest.mark.parametrize('profile_id',
+                         sorted(robot_profiles.ROBOT_PROFILES))
 def test_rest_pose_vector_matches_the_published_joint_names(profile_id):
     """`_publish_sim_joint_state` sets msg.name from the profile's joint_names and
     msg.position from this vector — a length mismatch is a malformed JointState."""
@@ -445,7 +448,10 @@ def test_a_name_position_mismatch_is_refused_not_published():
     assert node._logger.warnings and 'joint names' in node._logger.warnings[-1]
 
 
-@pytest.mark.parametrize('profile_id', ['omx_full', 'omx_follower', 'edu6_studio'])
+# From the REGISTRY, never a restated list: a hardcoded triple stopped
+# covering `edu1_studio` the day it was added, silently.
+@pytest.mark.parametrize('profile_id',
+                         sorted(robot_profiles.ROBOT_PROFILES))
 def test_the_matching_case_still_publishes_every_profile(profile_id):
     profile = _profile(profile_id)
     node = _PublishStubNode(profile=profile)

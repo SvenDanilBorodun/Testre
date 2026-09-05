@@ -581,11 +581,14 @@ class TrajectoryCreate(BaseModel):
     # point_count when the client omits it.
     point_count: int | None = None
     duration_s: float | None = None
-    # ARM-FAMILY tag (migration 035): 'omx_f' | 'edu6_studio'. Selects the
-    # per-point width the validator enforces (7 vs 8) and rides the row so a
-    # replay client can refuse a cross-profile recording with a clean German
-    # message instead of a bare width error. None = untagged (pre-edu6 client)
-    # = the 7-wide OMX default.
+    # ARM-FAMILY tag (migration 035, widened by 039):
+    # 'omx_f' | 'edu6_studio' | 'edu1_studio'. Selects the per-point width the
+    # validator enforces (7 | 8 | 7) and rides the row so a replay client can
+    # refuse a cross-profile recording with a clean German message instead of a
+    # bare width error. None = untagged (pre-edu6 client) = the 7-wide OMX
+    # default. NOTE 'edu1_studio' and 'omx_f' SHARE a width, so from 039 on this
+    # tag is the ONLY thing separating those two recordings — the width check
+    # cannot, and was never meant to.
     robot_profile: str | None = None
 
 

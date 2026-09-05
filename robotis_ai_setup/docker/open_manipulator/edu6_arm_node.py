@@ -1,10 +1,21 @@
 #!/usr/bin/env python3
-"""edu6_studio driver node — 7 × Feetech STS3215 on one serial bus.
+"""Feetech STS driver node — the ONE driver for both Roboter-Studio arms.
+
+Serves ``edu6_studio`` (7 servos: joint1..joint6 + end_gear) and
+``edu1_studio`` (6 servos: joint1..joint5 + the claw). The FILE keeps its edu6
+name because it is a plain ``COPY`` into the image referenced by the Dockerfile,
+``entrypoint_omx.sh``, ``.github/scripts/image_source_parity.sh``, ``ci.yml``
+and ``docs/edu6-hardware-bringup.md``; renaming it is a five-site change to a
+path that is still mid rig-validation, and the alternative — a second copy of
+2200 lines including all three torque-on wrap guards — is worse than a
+misleading filename. The arm-specific values are ALL in the override block
+below; everything after it iterates ``SERVO_IDS`` / ``JOINT_LIMITS_RAD`` /
+``JOINT_SIGNS`` and is arm-agnostic by construction.
 
 The ROS contract this node satisfies (edu6 plan §3.2) is exactly what makes
 ``physical_ai_server`` work untouched:
 
-* pub ``/joint_states`` (name + position + velocity, all 7 joints per message,
+* pub ``/joint_states`` (name + position + velocity, EVERY joint per message,
   URDF-native names, 50 Hz) — ALSO the compose healthcheck gate, so the
   publisher is created ONLY AFTER the boot probe succeeded (ping + accepted
   STS model 777/2825 + the EEPROM provisioning fingerprint, see ``probe_bus``;
@@ -15,10 +26,11 @@ The ROS contract this node satisfies (edu6 plan §3.2) is exactly what makes
   (a TRANSIENT_LOCAL subscriber never matches the VOLATILE workflow/jog/replay
   publishers). Multi-point trajectories are executed AS trajectories: a
   50 Hz write loop interpolates the active trajectory by ``time_from_start``
-  and SYNC_WRITEs acceleration+goal to all 7 servos (``Goal_Time`` is a
+  and SYNC_WRITEs acceleration+goal to every servo (``Goal_Time`` is a
   documented no-op on STS — streaming is the only correct execution, the same
   conclusion LeRobot and feetech_ros2_driver reached).
-* srv ``/edu6/set_torque`` (std_srvs/SetBool) + the LEGACY ALIAS
+* srv :data:`TORQUE_SERVICE` (``/edu6/set_torque`` / ``/edu1/set_torque``,
+  std_srvs/SetBool) + the LEGACY ALIAS
   ``/dynamixel_hardware_interface/set_dxl_torque`` — so a stale client (incl.
   the entrypoint's shutdown trap) can never silently fail to disable torque.
 
@@ -72,7 +84,12 @@ from std_srvs.srv import SetBool  # noqa: E402
 from trajectory_msgs.msg import JointTrajectory  # noqa: E402
 
 
-# ── arm constants (mirror robot_profiles._EDU6_*; no-drift-tested) ───────────
+# ── arm constants — edu6_studio DEFAULTS (mirror robot_profiles._EDU6_*;
+# no-drift-tested). REBOUND below when EDUBOTICS_ROBOT_TYPE=edu1_studio.
+# They stay plain literals under their historic names on purpose: the deps-free
+# suites AST-read exactly these names (tests/test_feetech_bus.py executes each
+# module-level assignment in order, tests/test_edu6_geometry.py literal_evals
+# HOME_JOINTS_RAD), and neither can evaluate a table lookup.
 SERVO_IDS = (1, 2, 3, 4, 5, 6, 7)
 JOINT_NAMES = ('joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'joint6',
                'end_gear_joint')
@@ -155,6 +172,71 @@ PRESENT_LOAD_FULLSCALE = 1000.0
 # signs are the remaining convention, bench-set at rig gate R6 and overridable
 # per rig without an image rebuild.
 _DEFAULT_SIGNS = (1, 1, 1, 1, 1, 1, 1)
+
+# Torque service name and whole-link geometry spec for the DEFAULT (edu6) arm.
+TORQUE_SERVICE = '/edu6/set_torque'
+GEOMETRY_SPEC = eg.EDU6
+
+# ── edu1_studio overrides ────────────────────────────────────────────────────
+# The Edu:1 is the same Feetech STS bus with one fewer joint: 5 arm joints
+# (joint1 yaw, joint2/3/4 parallel pitch, joint5 tool roll) plus the claw servo,
+# IDs 1..6 in joint order. Models are the same mixed set the probe already
+# accepts (STS3215 on 1/4/5/6, STS3250 on the high-load shoulder + elbow 2/3),
+# so NOTHING below the override needs to know which arm it is driving.
+#
+# ``RL_joint`` is the CAD's name for the driven claw finger (``LF_joint`` rides
+# its <mimic> and is never commanded). Its band is 0 = jaws CLOSED … 1.57 = full
+# open, which is the OPPOSITE sign to the raw SolidWorks export — the shipped
+# URDF copy flips that joint's axis so open is numerically LARGER, because every
+# shared consumer assumes it (motion.check_grasp_held, object_catalog's band
+# check, SimArm's close classifier). See robot_profiles._EDU1_HOME_JOINTS_RAD.
+#
+# The per-rig knobs are the EXISTING EDU6-prefixed env vars, not a parallel
+# EDU1-prefixed set: they are Feetech-DRIVER knobs (joint signs, boot
+# plausibility band, the three tick-edge guards) and exactly one arm runs per
+# rig, so a second set would double a surface that has to stay in lockstep
+# across two composes and two CI guards for no behavioural gain.
+# ``_parse_signs`` validates against ``len(SERVO_IDS)``, so a 7-value setting
+# left over from an edu6 rig is REJECTED with a [WARN] rather than silently
+# mis-applied.
+#
+# (Written WITHOUT the literal prefix on purpose: ci.yml::env-forwarding-guard
+# greps this file for /EDUBOTICS_[A-Z0-9_]+/ and treats every hit as a name that
+# must appear on a compose environment list, so a prose "PREFIX_*" would fail the
+# build on a variable that does not exist.)
+_EDU1_SERVO_IDS = (1, 2, 3, 4, 5, 6)
+_EDU1_JOINT_NAMES = ('joint1', 'joint2', 'joint3', 'joint4', 'joint5',
+                     'RL_joint')
+_EDU1_HOME_JOINTS_RAD = (0.0, 0.64, 1.48, 0.90, 0.0)
+_EDU1_GRIPPER_OPEN_RAD = 0.90
+_EDU1_JOINT_LIMITS_RAD = (
+    (-1.5708, 1.5708), (0.0, 3.1416), (0.0, 3.1416),
+    (-1.5708, 1.5708), (-1.5708, 1.5708),
+    # claw (RL_joint): 0 = closed … the full physical band. The PROFILE's open
+    # command is 0.90; the driver band is the mechanical stop, so a jog can
+    # still open the claw the whole way.
+    (0.0, 1.5708),
+)
+_EDU1_DEFAULT_SIGNS = (1, 1, 1, 1, 1, 1)
+_EDU1_TORQUE_SERVICE = '/edu1/set_torque'
+
+ROBOT_TYPE = (os.environ.get('EDUBOTICS_ROBOT_TYPE') or '').strip()
+IS_EDU1 = ROBOT_TYPE == 'edu1_studio'
+if IS_EDU1:
+    SERVO_IDS = _EDU1_SERVO_IDS
+    JOINT_NAMES = _EDU1_JOINT_NAMES
+    HOME_JOINTS_RAD = _EDU1_HOME_JOINTS_RAD
+    GRIPPER_OPEN_RAD = _EDU1_GRIPPER_OPEN_RAD
+    JOINT_LIMITS_RAD = _EDU1_JOINT_LIMITS_RAD
+    _DEFAULT_SIGNS = _EDU1_DEFAULT_SIGNS
+    TORQUE_SERVICE = _EDU1_TORQUE_SERVICE
+    GEOMETRY_SPEC = eg.EDU1
+
+# Arm joints = every joint but the gripper, which is ALWAYS the last channel.
+# Derived, never restated: the boot-home glide, the arrival verifier and the
+# table-floor pre-check all slice by it, and a hardcoded 6 was what made the
+# pre-edu1 code arm-specific.
+N_ARM_JOINTS = len(JOINT_NAMES) - 1
 
 
 def _parse_signs(raw: str | None) -> tuple[int, ...]:
@@ -846,7 +928,7 @@ PHYSICAL_TORQUE_REFUSALS = tuple(BOOT_PHYSICAL_REMEDY_DE)
 # guard permits a park at tick 40 (its test is `distance < margin`, so distance
 # exactly 40 passes), the seed then writes Goal = Present = 40, and the
 # post-energise abort cannot see it either (goal ≈ present ⇒ error ≈ 0). After a
-# bare /edu6/set_torque(True) — which is what hand-guide's „Beenden" calls — that
+# bare TORQUE_SERVICE(True) — which is what hand-guide's „Beenden" calls — that
 # goal SITS there until a trajectory arrives. So the true SYSTEM-WIDE minimum
 # forced displacement is 41 ticks (3.60°), not 129. Still 41× today's 1-tick hair
 # trigger, and the exemption is deliberate (a guard must not CREATE motion).
@@ -1159,7 +1241,8 @@ def boot_home_floor_decision(current, tol: float = None):
         tol = BOOT_HOME_FLOOR_TOL_M
     if tol <= 0.0:
         return True, None
-    depth = eg.swept_lowest_z(list(current)[:6], list(HOME_JOINTS_RAD))
+    depth = eg.swept_lowest_z(list(current)[:N_ARM_JOINTS],
+                              list(HOME_JOINTS_RAD), GEOMETRY_SPEC)
     if depth is None:
         return True, None
     return depth >= -tol, depth
@@ -1248,7 +1331,7 @@ class Edu6ArmNode(Node):
             self._trajectory_cb, traj_qos)
 
         # Torque service + the legacy alias (both must exist — §3.4).
-        self.create_service(SetBool, '/edu6/set_torque', self._torque_cb)
+        self.create_service(SetBool, TORQUE_SERVICE, self._torque_cb)
         self.create_service(
             SetBool, '/dynamixel_hardware_interface/set_dxl_torque',
             self._torque_cb)
@@ -1261,8 +1344,9 @@ class Edu6ArmNode(Node):
     # ── bus bring-up (called BEFORE the node is constructed) ─────────────────
     @staticmethod
     def probe_bus(bus: fb.FeetechBus, logger=None) -> tuple[bool, str]:
-        """Ping IDs 1..7 + verify each is an accepted STS model (777 STS3215
-        on joints 1/4/5/6/7, 2825 STS3250 on joints 2/3 — mixed by design).
+        """Ping every id in ``SERVO_IDS`` + verify each is an accepted STS
+        model (777 STS3215, 2825 STS3250 — both arms mix the two by design, the
+        high-load shoulder + elbow being the 3250s).
         Returns ``(ok, german_message)`` — the message distinguishes the
         single most likely student error (USB enumerated but 12 V supply off:
         the port exists, every ping times out) from a partial bus.
@@ -1440,7 +1524,7 @@ class Edu6ArmNode(Node):
 
     # ── torque ───────────────────────────────────────────────────────────────
     def _seed_goal_from_present_locked(self) -> dict[int, int] | None:
-        """Write ``Goal_Position = Present_Position`` on all 7 servos. Caller
+        """Write ``Goal_Position = Present_Position`` on every servo. Caller
         MUST hold ``self._bus_lock``; runs immediately BEFORE torque is enabled.
         Returns ``{servo_id: EFFECTIVE goal tick}`` on success (see below) or
         ``None`` when the torque-on must be refused.
@@ -1682,7 +1766,7 @@ class Edu6ArmNode(Node):
         return 'read', post_energise_read_failure_message(missing, torque_off_ok)
 
     def set_torque(self, enabled: bool) -> bool:
-        # THE single torque choke point: /edu6/set_torque, its legacy alias and
+        # THE single torque choke point: TORQUE_SERVICE, its legacy alias and
         # start_boot_home all come through here, so the edge guard inside the
         # seed below covers every torque-ON TRANSITION there is (it self-gates on
         # `_torque_on`, so a redundant torque-on over an already-locked arm is a
@@ -1961,7 +2045,7 @@ class Edu6ArmNode(Node):
         from the ACTUAL pose on a stall (bounded; the Feetech current caps make a
         re-send non-destructive), then soft-warns. NEVER hard-fails — the arm
         stays usable."""
-        target = list(HOME_JOINTS_RAD)              # 6 arm joints (gripper excl.)
+        target = list(HOME_JOINTS_RAD)              # arm joints, gripper excl.
         for attempt in range(BOOT_HOME_VERIFY_MAX_SENDS + 1):
             deadline = (time.monotonic() + BOOT_HOME_DURATION_S
                         + BOOT_HOME_VERIFY_SETTLE_S)
@@ -2078,7 +2162,7 @@ class Edu6ArmNode(Node):
             self._read_fail_since = None
             self._publish_joint_state(replies)
             if self._bus_fault:
-                # Latched fault clears ONLY after a full 7-servo read that ALSO
+                # Latched fault clears ONLY after a full-bus read that ALSO
                 # published cleanly. Clearing before the publish would let a
                 # persistently-raising publish flip the latch off at the top of
                 # every tick and re-latch at the bottom — re-opening the write
@@ -2205,8 +2289,8 @@ class Edu6ArmNode(Node):
 
 def main() -> int:
     port = os.environ.get('FOLLOWER_PORT', '/dev/ttyACM0')
-    print(f'[INIT] edu6_arm_node: Feetech-Bus auf {port} (1 Mbit/s) …',
-          flush=True)
+    print(f'[INIT] Feetech-Treiber ({ROBOT_TYPE or "edu6_studio"}, '
+          f'{len(SERVO_IDS)} Servos): Bus auf {port} (1 Mbit/s) …', flush=True)
     try:
         bus = fb.FeetechBus(port)
     except Exception as e:  # noqa: BLE001
@@ -2221,11 +2305,11 @@ def main() -> int:
     while True:
         ok, message = Edu6ArmNode.probe_bus(bus)
         if ok:
-            # Model-neutral wording on purpose: this arm mixes STS3215 (joints
-            # 1/4/5/6/7) and STS3250 (the high-load shoulder + elbow) by design,
-            # so naming one model here reads as a fault on a healthy arm.
-            print('[INIT] Alle 7 Servos gefunden (STS-Serie, provisioniert).',
-                  flush=True)
+            # Model-neutral wording on purpose: both arms mix STS3215 and
+            # STS3250 (the high-load shoulder + elbow) by design, so naming one
+            # model here reads as a fault on a healthy arm.
+            print(f'[INIT] Alle {len(SERVO_IDS)} Servos gefunden '
+                  f'(STS-Serie, provisioniert).', flush=True)
             break
         print(message, flush=True)
         time.sleep(5.0)

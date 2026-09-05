@@ -22,6 +22,7 @@ import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import toast from 'react-hot-toast';
 import { useRosServiceCaller } from '../../hooks/useRosServiceCaller';
+import { armGeometry } from '../../utils/armProfile';
 import {
   markStepComplete,
   setCalibProgress,
@@ -34,6 +35,15 @@ function TableTouchStep() {
   const {
     startCalibration, calibrationCaptureFrame, calibrationSolve, cancelCalibration,
   } = useRosServiceCaller();
+  // A ROTATING claw's fingertip swings BACK as the jaws open, so the point the
+  // FK model calls the TCP is only under the student's finger when the claw is
+  // CLOSED. Touching off with it open measures the table too low by the whole
+  // difference (~17 mm on the Edu:1) and every later grasp inherits the error.
+  // No guard can catch this — the readback is a legal pose — so it has to be an
+  // instruction, and it is shown ONLY on an arm it is true for.
+  const caps = useSelector((s) => (s.tasks && s.tasks.taskStatus
+    ? s.tasks.taskStatus.capabilities : null));
+  const closeClawFirst = armGeometry(caps).toolTipTracksGripper;
   const framesCaptured = useSelector((s) => s.workshop.framesCaptured);
   const framesRequired = useSelector((s) => s.workshop.framesRequired);
   const calibError = useSelector((s) => s.workshop.calibError);
@@ -119,6 +129,14 @@ function TableTouchStep() {
 
       <ol className="text-sm text-[var(--ink-3)] mb-4 list-decimal pl-5 space-y-1">
         <li>„Tischvermessung starten" drücken — der Arm wird freigeschaltet.</li>
+        {closeClawFirst && (
+          <li>
+            <strong>Greifer ganz schließen</strong>, bevor du den Tisch
+            berührst — bei diesem Arm wandert die Greiferspitze nach hinten,
+            wenn der Greifer offen ist. Mit offenem Greifer misst du den Tisch
+            zu tief.
+          </li>
+        )}
         <li>
           Führe den Greifer von Hand, bis die <strong>Spitze den Tisch
           berührt</strong>. Halte den Greifer dabei <strong>senkrecht nach

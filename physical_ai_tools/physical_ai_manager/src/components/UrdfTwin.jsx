@@ -138,6 +138,23 @@ const URDF_ASSETS = {
     baseLink: 'base_link',
     yaw: Math.PI,
   },
+  edu1: {
+    url: `${process.env.PUBLIC_URL || ''}/edu1-urdf/edu1.urdf`,
+    // Same caveat as edu6's row, with different numbers: `end_effector` is
+    // FIXED to link5 at zero offset, while edu1_ik's TCP is the CLOSED FINGERTIP
+    // 86.25 mm along that frame's +z (`_L_TOOL`). Harmless today for the same
+    // reason -- the shipped grasp family is strictly vertical, so the offset is
+    // along the tool axis and the XY this frame reports equals the TCP's -- and
+    // a held mesh only looks right because attach() preserves the world
+    // transform rather than snapping to the link. Re-derive before adding a
+    // tilted grasp. NOTE this arm's claw ROTATES, so the fingertip's HEIGHT
+    // below this frame also varies with the jaw opening (86.25 mm closed,
+    // 68.8 mm at 0.9 rad open); the constant is the CLOSED value.
+    eeLink: 'end_effector',
+    baseLink: 'base_link',
+    // URDF·rotZ(pi), same as edu6: this export's reachable half-disc is on -x.
+    yaw: Math.PI,
+  },
 };
 
 // Match ImageGridCell's monitor-view budget: 10 Hz over rosbridge, newest frame
@@ -417,8 +434,9 @@ export default function UrdfTwin({
     // returns — i.e. right after the XML is read, while every <mesh> is still an
     // in-flight STL fetch. (Mesh COUNT is not tag count: urdf-loader ships
     // `parseCollision = false` and we never set it, so only <visual> meshes are
-    // fetched — 8 for the OMX, and 10 for edu6, whose 20 <mesh> tags are 10
-    // visual + 10 collision over 10 files. 5.4 MB and 6.2 MB respectively.)
+    // fetched — 8 for the OMX, 10 for edu6 (whose 20 <mesh> tags are 10 visual +
+    // 10 collision over 10 files) and 9 for edu1 (18 tags over 9 files).
+    // 5.4 MB, 6.2 MB and 3.3 MB respectively.)
     // So the robot handed to onComplete below has NO mesh geometry, and three
     // things that used to run there ran against a robot that was not there yet.
     // All three were MEASURED against a real Chromium + real WebGL, and the

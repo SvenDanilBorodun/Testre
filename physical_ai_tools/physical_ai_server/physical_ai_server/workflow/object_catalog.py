@@ -264,6 +264,44 @@ _FIXED_CATALOG_EDU6: dict = {
 }
 
 
+# edu1_studio variant: again the SAME physical objects + tag ids, again only the
+# gripper close differs. The edu1 channel is the claw servo angle in RADIANS
+# (0 = jaws closed … 0.90 = open command) — the SAME polarity as the edu6 and
+# the OPPOSITE of the raw CAD export, which the shipped URDF copy flips (see
+# robot_profiles._EDU1_HOME_JOINTS_RAD).
+#
+# Where 0.10 comes from: simulated against the shipped claw STLs, a 30 mm cube
+# standing on the table blocks the blades at ≈0.25 rad with the end-effector
+# origin 0.090–0.115 m above the table. Commanding 0.10 leaves ≈0.15 rad of
+# squeeze — comfortably above the profile's 0.10 grasp-held margin, so a HELD
+# grasp reads 0.25 against a 0.20 threshold while a MISS closes to the commanded
+# 0.10 and reads below it (bench-tunable at rig gate E5).
+_FIXED_CATALOG_EDU1: dict = {
+    'types': {
+        'wuerfel': {
+            'label_de': 'Würfel',
+            'tag_ids': [20, 21],
+            'object_height_m': 0.030,
+            'grasp_depth_m': 0.015,
+            'gripper_close_rad': 0.10,
+            'approach_clear_m': 0.06,
+            'object_width_m': 0.030,
+            'color_hex': '#f59e0b',
+        },
+    },
+}
+
+# profile id → (catalog constant, gripper close band). A TABLE rather than a
+# chain of ``==`` tests: adding an arm is one row, and the band is stated right
+# next to the catalog whose close value it validates. An id that is not in here
+# — both OMX profiles, ``None``, an unknown id — gets the OMX set on the
+# default (negative-close) rule, byte-identical to before.
+_CATALOG_BY_PROFILE: dict = {
+    'edu6_studio': (_FIXED_CATALOG_EDU6, (0.0, 1.75)),
+    'edu1_studio': (_FIXED_CATALOG_EDU1, (0.0, 0.90)),
+}
+
+
 def fixed_catalog(profile_id: Optional[str] = None) -> ObjectCatalog:
     """The single, fleet-wide named-object set — identical on every machine and
     user. Parses the in-memory constant for the arm family (no file I/O, so it
@@ -271,11 +309,14 @@ def fixed_catalog(profile_id: Optional[str] = None) -> ObjectCatalog:
     from ``EDUBOTICS_TAG_SIZE_M`` on each call (env-tunable, re-read per
     workflow start).
 
-    ``profile_id``: ``'edu6_studio'`` selects the edu6 close values (radian
-    gripper band 0…1.75); anything else — both OMX profiles, ``None``, an
-    unknown id — the OMX set, byte-identical to before."""
-    if (profile_id or '').strip() == 'edu6_studio':
-        return parse_catalog(_FIXED_CATALOG_EDU6, gripper_close_range=(0.0, 1.75))
+    ``profile_id`` selects through :data:`_CATALOG_BY_PROFILE`: the Feetech arms
+    have radian gripper bands that close UPWARD from zero, everything else —
+    both OMX profiles, ``None``, an unknown id — gets the OMX set with its
+    negative-close rule, byte-identical to before."""
+    entry = _CATALOG_BY_PROFILE.get((profile_id or '').strip())
+    if entry is not None:
+        catalog, close_range = entry
+        return parse_catalog(catalog, gripper_close_range=close_range)
     return parse_catalog(_FIXED_CATALOG)
 
 

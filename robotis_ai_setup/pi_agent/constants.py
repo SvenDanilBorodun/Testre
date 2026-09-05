@@ -69,7 +69,7 @@ def _read_version_file() -> str:
         if value:
             _VERSION_IS_AUTHORITATIVE = True
             return value
-    return "2.16.0"
+    return "2.17.0"
 
 
 # Agent/product version — reported by the /status endpoint and used by the
@@ -285,9 +285,14 @@ ROBOTIS_VID = "2F5D"  # ROBOTIS USB Vendor ID (OpenRB-150; PIDs 0103, 2202)
 # statement of what hardware each family is: the authority the udev
 # permission-floor rule mirrors (`udev/99-edubotics-robotis.rules`) and the
 # anchor that stops the two platforms drifting apart.
+# The two Feetech rows are IDENTICAL and must stay so: edu6 and edu1 ship on the
+# same Waveshare Bus Servo Adapter, so nothing at the USB layer separates them —
+# the separation is the servo count the in-container prober asserts
+# (`identify_arm._FAMILY_SERVO_COUNT`).
 ARM_USB_IDS = {
     "omx":  (("2F5D", None),),
     "edu6": (("1A86", "55D3"),),
+    "edu1": (("1A86", "55D3"),),
 }
 
 # --- Robot type (ArmProfile) registry — the Pi's THIN descriptor ---
@@ -314,6 +319,7 @@ ARM_USB_IDS = {
 #   - omx_full     → both arms; Roboter Studio via the mid-session LeaderToggle.
 #   - omx_follower → follower only; no leader, LeaderToggle hidden, RS native.
 #   - edu6_studio  → the 6-DOF Feetech arm; follower-only, RS only.
+#   - edu1_studio  → the 5-DOF Feetech „Edu:1"; follower-only, RS only.
 #
 # `display_de` is HARD-mandatory (it is direct-subscripted when the wizard's
 # profile list is built — an absent key must fail loudly, not degrade to a blank
@@ -353,6 +359,7 @@ ROBOT_PROFILES = {
     "omx_full":     {"display_de": "OMX – Voll",                          "follower_only": False, "scan_requires_leader": True,  "arm_family": "omx",  "camera_roles": ("gripper", "scene")},
     "omx_follower": {"display_de": "OMX – Roboter Studio (nur Follower)", "follower_only": True,  "scan_requires_leader": False, "arm_family": "omx",  "camera_roles": ("scene", "gripper")},
     "edu6_studio":  {"display_de": "EduBotics 6-Achs – Roboter Studio",   "follower_only": True,  "scan_requires_leader": False, "arm_family": "edu6", "camera_roles": ("scene",)},
+    "edu1_studio":  {"display_de": "Edu:1 – Roboter Studio",               "follower_only": True,  "scan_requires_leader": False, "arm_family": "edu1", "camera_roles": ("scene",)},
 }
 DEFAULT_ROBOT_PROFILE = "omx_full"
 

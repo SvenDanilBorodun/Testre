@@ -1051,9 +1051,9 @@ class AgentApp:
         wizard's own dropdown uses (``CAMERA_ROLE_LABELS_DE``), so the sentence
         matches the UI rather than the wire ids.
 
-        The remedy is built from ``allowed`` rather than hardcoded: today only
-        ``edu6_studio`` narrows, to a single role, but a future profile allowing
-        two of three must not produce a sentence naming one. An allowlist that
+        The remedy is built from ``allowed`` rather than hardcoded: today the two
+        Feetech profiles narrow, each to a single role, but a future profile
+        allowing two of three must not produce a sentence naming one. An allowlist that
         is somehow empty degrades to naming no remedy rather than raising — a
         confusing message beats a 500 on a config surface.
         """
@@ -1074,15 +1074,16 @@ class AgentApp:
         or absent one is a German 400 regardless of how many cameras were sent.
 
         A well-formed role is then checked against the SELECTED PROFILE's
-        ``camera_roles`` allowlist, which is narrower than gripper/scene on
-        ``edu6_studio`` (``scene`` only). Both OMX profiles carry both roles, so
-        this second gate is a no-op there — the whole behavioural delta is
-        „gripper on an edu6 rig", which used to be accepted and is now a 400.
+        ``camera_roles`` allowlist, which is narrower than gripper/scene on BOTH
+        Feetech arms (``edu6_studio`` and ``edu1_studio``: ``scene`` only). Both
+        OMX profiles carry both roles, so this second gate is a no-op there —
+        the whole behavioural delta is „gripper on a Roboter-Studio rig", which
+        used to be accepted and is now a 400 on each of the two.
 
         Why it is refused rather than silently corrected: the server's
-        ``config/edu6_studio_config.yaml`` declares exactly one camera topic
-        (``scene:/scene/image_raw/compressed``), so a camera named ``gripper``
-        publishes ``/gripper/image_raw/compressed``, which nothing subscribes
+        ``config/<type>_config.yaml`` declares exactly one camera topic on those
+        arms (``scene:/scene/image_raw/compressed``), so a camera named
+        ``gripper`` publishes ``/gripper/image_raw/compressed``, which nothing subscribes
         to — and the opi compose healthcheck greps
         ``/$${CAMERA_NAME_1:-gripper}/image_raw/compressed``, i.e. the very
         topic the student just named. It therefore goes GREEN, „Umgebung

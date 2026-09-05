@@ -1,10 +1,19 @@
 #!/usr/bin/env python3
-"""edu6 vendor-bench provisioning — calibrate once, forever (plan §6).
+"""Feetech vendor-bench provisioning — calibrate once, forever (plan §6).
+
+Serves BOTH Roboter-Studio arms; ``--arm`` selects which, and it defaults to
+``edu6`` so every existing bench command line is byte-identical.
 
 Run ONCE per arm on the assembly bench, with the arm jigged to the mechanical
 reference pose (every joint at its designed zero, gripper fully CLOSED):
 
     python3 tools/edu6_provision.py --port /dev/ttyACM0 --serial EDU6-0001
+    python3 tools/edu6_provision.py --arm edu1 --port /dev/ttyACM0 \
+        --serial EDU1-0001 --signs 1,1,1,1,1,1
+
+The FILE keeps its edu6 name for the same reason the driver does: it is cited
+by the bench runbook and by the tests, and a rename buys a nicer name at the
+cost of every operator's muscle memory during a bring-up that is still open.
 
 What it does, in the §6 order (order matters — limits are interpreted in the
 offset-corrected frame, and the offset must be baked under the SAME
@@ -37,24 +46,29 @@ position-reporting semantics the runtime will use):
    servo would turn boot-home into a continuous-rotation runaway that
    position limits cannot stop, audit H2), ``Return_Delay_Time = 0``.
 7. Re-lock (Lock = 1), read EVERY register back and VERIFY.
-8. FINAL jig re-verify across all 7 servos (the arm stays jigged for the
+8. FINAL jig re-verify across EVERY servo (the arm stays jigged for the
    whole run): every servo must still read designed ±4 ticks — closes any
    post-offset semantic shift a per-servo gate can miss.
-9. Emit the per-arm record (7 × {id, homing_offset, range_min, range_max,
-   model, firmware} + arm serial + sha256 checksum) — **the record is the
-   commit point**: all servos written → read back → THEN persisted. A
-   half-written arm has no valid record and fails loudly.
-   Stored locally (``edu6_records/<serial>.json``) and, when SUPABASE_URL +
+9. Emit the per-arm record (``profile_id`` + one entry per servo: {id,
+   homing_offset, range_min, range_max, model, firmware} + arm serial + sha256
+   checksum) — **the record is the commit point**: all servos written → read
+   back → THEN persisted. A half-written arm has no valid record and fails
+   loudly.
+   Stored locally (``<arm>_records/<serial>.json``) and, when SUPABASE_URL +
    SUPABASE_SERVICE_ROLE_KEY are exported, upserted into the
    ``edu6_arm_records`` table (migration 036) keyed by the arm serial
-   (the vendor STICKER serial — decision Q3).
+   (the vendor STICKER serial — decision Q3). That table is SHARED by both
+   Feetech arms — it was named before there was a second one, and renaming a
+   fielded table is worse than a name that reads narrow — so ``profile_id`` is
+   the ONLY thing in the artifact that says which arm a record describes.
 
 NEVER write EEPROM unconditionally: every write path is read-compare-write.
 EEPROM endurance is unverified — treat it as a five-figure budget.
 
-The gripper servo (id 7) is jigged CLOSED (jaws touching) = its designed zero.
-Servo direction signs are the ``--signs`` option (R6 fixes the convention;
-the same values ship as EDUBOTICS_EDU6_JOINT_SIGNS).
+The gripper servo (the LAST id — 7 on edu6, 6 on edu1) is jigged CLOSED (jaws
+touching) = its designed zero. Servo direction signs are the ``--signs`` option
+(R6 / E3 fix the convention; the same values ship as the driver's joint-signs
+env knob).
 """
 
 from __future__ import annotations
@@ -74,6 +88,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]
 import feetech_bus as fb  # noqa: E402
 
 
+# ── arm spec (edu6 DEFAULTS; `--arm edu1` rebinds them in main) ──────────────
+# Kept as plain module-level literals under their historic names: the deps-free
+# suite compares them against the driver node's own literals, and a table
+# lookup would break that AST comparison for no gain.
 SERVO_IDS = (1, 2, 3, 4, 5, 6, 7)
 CENTER_TICK = 2048
 TICKS_PER_REV = 4096
@@ -84,6 +102,59 @@ JOINT_LIMITS_RAD = (
     (-1.5708, 1.5708), (0.0, 3.1416), (-3.1416, 0.0), (-3.1416, 3.1416),
     (-1.5708, 1.9199), (-3.1416, 3.1416), (0.0, 1.79),
 )
+
+# Per-arm overrides. Values MIRROR the driver node's `_EDU1_*` literals
+# (docker/open_manipulator/edu6_arm_node.py) — the boot probe verifies the
+# EEPROM window this tool writes, so a divergence here makes every provisioned
+# Edu:1 refuse to boot with „nicht provisioniert".
+_ARM_SPECS = {
+    'edu6': {
+        'servo_ids': (1, 2, 3, 4, 5, 6, 7),
+        'joint_limits_rad': JOINT_LIMITS_RAD,
+        'records_dir': 'edu6_records',
+        'serial_example': 'EDU6-0001',
+        # THE machine-readable family tag on the emitted record, and the only
+        # one: `persist` upserts the whole record as a single jsonb blob into a
+        # table whose schema is (arm_serial, record, timestamps), so nothing
+        # else in the artifact says which arm it describes. It was an
+        # unconditional 'edu6_studio' literal until 2026-09-05, which stamped
+        # every Edu:1 record as a 6-axis arm both locally and in Supabase.
+        # It is deliberately NOT in `record_checksum` (which hashes
+        # serial+signs+servos), so adding it re-digests nothing.
+        'profile_id': 'edu6_studio',
+        # Product name for the German identity-gate refusal. Naming the wrong
+        # product at the moment a foreign servo is found is worse than saying
+        # nothing: the operator reaches for the wrong arm's checklist.
+        'display_de': 'EduBotics 6-Achs',
+    },
+    'edu1': {
+        'servo_ids': (1, 2, 3, 4, 5, 6),
+        'joint_limits_rad': (
+            (-1.5708, 1.5708), (0.0, 3.1416), (0.0, 3.1416),
+            (-1.5708, 1.5708), (-1.5708, 1.5708),
+            (0.0, 1.5708),      # claw: 0 = jaws closed
+        ),
+        'records_dir': 'edu1_records',
+        'serial_example': 'EDU1-0001',
+        'profile_id': 'edu1_studio',
+        'display_de': 'Edu:1',
+    },
+}
+
+
+def apply_arm_spec(arm: str) -> dict:
+    """Rebind the module-level arm constants for ``arm`` and return its spec.
+
+    A REBIND rather than threading the spec through every helper: `provision`
+    and its callees read these as module globals, and the alternative is a
+    dozen signature changes to a bench tool whose edu6 path is already
+    validated. Called ONCE from main(), before any bus I/O.
+    """
+    global SERVO_IDS, JOINT_LIMITS_RAD
+    spec = _ARM_SPECS[arm]
+    SERVO_IDS = spec['servo_ids']
+    JOINT_LIMITS_RAD = spec['joint_limits_rad']
+    return spec
 
 # Safety EEPROM values (plan §8; the gripper pinch floor is R2/R4-pending).
 # These are compile-time constants ON PURPOSE — a safety floor must not be a
@@ -158,10 +229,32 @@ def _write_verify_u16(bus, sid, addr, value, label):
     return True
 
 
-def provision(bus, serial: str, signs, dry_run: bool = False) -> dict:
-    # 0. identity gate. The edu6 arm mixes STS3215 (joints 1/4/5/6/7) and
-    # STS3250 (joints 2/3) BY DESIGN — accept the STS-series set and record
-    # each servo's ACTUAL model (never hardcode 777).
+def provision(bus, serial: str, signs, spec: dict,
+              dry_run: bool = False) -> dict:
+    """Provision one jigged arm and return its record.
+
+    ``spec`` is REQUIRED and is the arm's row from :data:`_ARM_SPECS`. It is
+    threaded in rather than read off the module globals for one reason: the
+    record's ``profile_id`` and the identity-gate wording are the two things a
+    per-arm rebind kept missing, and a caller that forgets an argument fails at
+    once, where a caller that forgets a rebind silently stamps the wrong arm.
+    ``SERVO_IDS`` / ``JOINT_LIMITS_RAD`` stay module-level (the deps-free suite
+    ast-compares them against the driver node's literals), so the two halves
+    must AGREE — asserted below rather than assumed.
+    """
+    if tuple(spec['servo_ids']) != tuple(SERVO_IDS):
+        # Half-migration guard: `apply_arm_spec` rebinds the globals every
+        # helper reads, `spec` carries what lands in the record. If they ever
+        # disagree the arm gets one family's EEPROM window under the other
+        # family's tag — a record that verifies against nothing.
+        raise SystemExit(
+            '[FEHLER] Interner Fehler: Arm-Spezifikation und geladene '
+            'Servo-Liste passen nicht zusammen — apply_arm_spec() wurde nicht '
+            'für denselben Arm aufgerufen.')
+    display = spec['display_de']
+    # 0. identity gate. Both arms MIX STS3215 with STS3250 on the high-load
+    # shoulder + elbow BY DESIGN — accept the STS-series set and record each
+    # servo's ACTUAL model (never hardcode 777).
     models: dict[int, int] = {}
     for sid in SERVO_IDS:
         if not bus.ping(sid):
@@ -174,11 +267,11 @@ def provision(bus, serial: str, signs, dry_run: bool = False) -> dict:
                 for m in sorted(fb.STS_ACCEPTED_MODELS))
             raise SystemExit(f'[FEHLER] Servo {sid}: Modell {model}, erwartet '
                              f'{accepted} — dieser Arm ist kein '
-                             'EduBotics 6-Achs.')
+                             f'{display}.')
         models[sid] = model
     summary = ', '.join(f'{sid}:{fb.STS_MODEL_NAMES[models[sid]]}'
                         for sid in SERVO_IDS)
-    print(f'[OK] Alle 7 Servos gefunden ({summary}).')
+    print(f'[OK] Alle {len(SERVO_IDS)} Servos gefunden ({summary}).')
     if dry_run:
         print('[DRY-RUN] Keine EEPROM-Schreibzugriffe.')
 
@@ -323,7 +416,7 @@ def provision(bus, serial: str, signs, dry_run: bool = False) -> dict:
 
     # 8. FINAL jig re-verify (audit M1): after EVERY write of the run —
     # including the Phase-bit-4 clears — the still-jigged arm must read the
-    # designed pose on all 7 servos. A per-servo gate cannot catch a semantic
+    # designed pose on EVERY servo of this arm. A per-servo gate cannot catch a semantic
     # shift caused by a later write; this one can. The arm must stay jigged
     # until the tool prints its closing [OK].
     if not dry_run:
@@ -337,11 +430,15 @@ def provision(bus, serial: str, signs, dry_run: bool = False) -> dict:
                     f'statt {designed} (Abweichung {present - designed} '
                     'Ticks) — den Arm im Jig belassen und die '
                     'Provisionierung erneut ausführen.')
-        print('[OK] Jig-Endkontrolle: alle 7 Servos lesen die Soll-Position.')
+        print(f'[OK] Jig-Endkontrolle: alle {len(SERVO_IDS)} Servos lesen '
+              'die Soll-Position.')
 
     record = {
         'arm_serial': serial,
-        'profile_id': 'edu6_studio',
+        # From the SPEC, never a literal: this is the only field in the whole
+        # artifact — local json and the shared `edu6_arm_records` table alike —
+        # that says which arm the record describes.
+        'profile_id': spec['profile_id'],
         'signs': list(signs),
         'servos': entries,
         'checksum': record_checksum(entries, serial, signs),
@@ -366,7 +463,12 @@ def persist(record: dict, out_dir: Path) -> Path:
                 'arm_serial': record['arm_serial'],
                 'record': record,
             }).execute()
-            print('[OK] Supabase edu6_arm_records aktualisiert.')
+            # The TABLE is shared by every Feetech arm (migration 036 named
+            # it before there was a second one); the record's profile_id is
+            # what separates them. Say "Arm-Datenbank" so an Edu:1 operator is
+            # not told their arm went into a 6-axis-only artifact.
+            print('[OK] Supabase-Arm-Datenbank (edu6_arm_records) '
+                  'aktualisiert.')
         except Exception as e:  # noqa: BLE001 — the local file is the commit
             print(f'[WARNUNG] Supabase-Upload fehlgeschlagen (lokale Datei '
                   f'bleibt gültig): {e}')
@@ -378,19 +480,33 @@ def persist(record: dict, out_dir: Path) -> Path:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument('--arm', default='edu6', choices=sorted(_ARM_SPECS),
+                    help='which Feetech arm is on the bench (default: edu6)')
     ap.add_argument('--port', required=True)
     ap.add_argument('--serial', required=True,
-                    help='vendor sticker serial, e.g. EDU6-0001')
-    ap.add_argument('--signs', default='1,1,1,1,1,1,1',
-                    help='7 comma-separated ±1 joint direction signs (R6)')
-    ap.add_argument('--out', default=str(Path(__file__).parent / 'edu6_records'))
+                    help='vendor sticker serial, e.g. EDU6-0001 / EDU1-0001')
+    ap.add_argument('--signs', default=None,
+                    help='comma-separated ±1 joint direction signs, one per '
+                         'servo (default: all +1)')
+    ap.add_argument('--out', default=None,
+                    help='record directory (default: <arm>_records beside this '
+                         'script)')
     ap.add_argument('--dry-run', action='store_true',
                     help='read + report only; no EEPROM writes')
     args = ap.parse_args()
 
-    signs = tuple(int(v) for v in args.signs.split(','))
-    if len(signs) != 7 or any(v not in (-1, 1) for v in signs):
-        print('[FEHLER] --signs braucht 7 Werte aus {1,-1}.', file=sys.stderr)
+    spec = apply_arm_spec(args.arm)
+    n_servos = len(SERVO_IDS)
+    out_dir = args.out or str(Path(__file__).parent / spec['records_dir'])
+
+    raw_signs = args.signs if args.signs is not None else ','.join(['1'] * n_servos)
+    try:
+        signs = tuple(int(v) for v in raw_signs.split(','))
+    except ValueError:
+        signs = ()
+    if len(signs) != n_servos or any(v not in (-1, 1) for v in signs):
+        print(f'[FEHLER] --signs braucht {n_servos} Werte aus '
+              '{1,-1}.', file=sys.stderr)
         return 2
 
     # EEPROM writes (Homing_Offset, limits, torque caps…) trigger real EEPROM
@@ -400,14 +516,14 @@ def main() -> int:
     # instant the reply lands, so this only affects the slow EEPROM commits.
     bus = fb.FeetechBus(args.port, timeout_s=0.2)
     try:
-        record = provision(bus, args.serial.strip(), signs,
+        record = provision(bus, args.serial.strip(), signs, spec,
                            dry_run=args.dry_run)
     finally:
         bus.close()
     if args.dry_run:
         print(json.dumps(record, indent=2, sort_keys=True))
         return 0
-    persist(record, Path(args.out))
+    persist(record, Path(out_dir))
     print('[OK] Provisionierung abgeschlossen — Arm ist dauerhaft kalibriert.')
     return 0
 

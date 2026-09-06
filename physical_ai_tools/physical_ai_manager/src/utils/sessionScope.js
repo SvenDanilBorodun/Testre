@@ -70,6 +70,13 @@ export const STUDENT_SCOPED_KEYS = Object.freeze([
   // program, not of the rig — a beginner who never asked for generated code
   // should not inherit it from the previous student's lesson.
   'edubotics_workshop_code_open',
+  // Startseite hero view — „3D-Modell" or „Kamera". A personal choice about
+  // their own workspace, same class as the editor theme below: the student
+  // sets it for themselves, not a teacher for the room. Also the reason it
+  // is not machine-scoped despite looking like window furniture — it costs
+  // the next student nothing to lose, and inheriting someone else's camera
+  // view silently opens a 5-8 Mbps stream they did not ask for.
+  'edubotics_home_view',
   // Blockly editor theme — a personal choice about their own workspace.
   // (Colon-delimited: the one key an `edubotics_workshop_` prefix match would
   // miss, which is one more reason this list is explicit.)

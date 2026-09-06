@@ -168,6 +168,13 @@ class ArmProfile:
     num_arm_joints: int = 5
     joint_names: tuple = _OMX_JOINT_NAMES
     urdf_asset_id: str = 'omx_f'
+    # One-sentence German explanation of THIS robot, shown on the student
+    # Start page under the profile name. Kept verbatim in lockstep with the
+    # `help_de` strings in gui/app/constants.py::ROBOT_PROFILES and the Pi
+    # twin — those two are the ones a student meets during setup, this is
+    # the same sentence once the stack is running. Empty string means "no
+    # sentence", which the React side renders as nothing rather than a gap.
+    help_de: str = ''
     # ── DOF-generalisation seams (consumed by the §16.4 slices) ─────────────
     # None → the OMX module-constant fallbacks in the handlers' ctx accessors.
     ik_backend: str = 'omx'            # build_ik dispatch ('omx' | 'edu6')
@@ -240,6 +247,12 @@ class ArmProfile:
 _OMX_FULL = ArmProfile(
     profile_id='omx_full',
     display_name_de='OMX – Voll',
+    help_de=(
+        'Beide Arme: mit dem Leader-Arm führst du, der Follower-Arm '
+        'fährt nach. Aufnahme, Training, Inferenz und Roboter Studio. '
+        'Im Roboter Studio schaltest du den Leader-Arm bei Bedarf ab '
+        'und wieder zu.'
+    ),
     data_robot_type='omx_f',
     follower_only=False,
     capabilities=Capabilities(
@@ -262,6 +275,10 @@ _OMX_FULL = ArmProfile(
 _OMX_FOLLOWER = ArmProfile(
     profile_id='omx_follower',
     display_name_de='OMX – Roboter Studio (nur Follower)',
+    help_de=(
+        'Nur der Follower-Arm — kein Leader-Arm nötig. Für Roboter '
+        'Studio (Greifen & Programmieren) und Inferenz.'
+    ),
     data_robot_type='omx_f',
     follower_only=True,
     capabilities=Capabilities(
@@ -293,6 +310,10 @@ _OMX_FOLLOWER = ArmProfile(
 _EDU6_STUDIO = ArmProfile(
     profile_id='edu6_studio',
     display_name_de='EduBotics 6-Achs – Roboter Studio',
+    help_de=(
+        'Der 6-Achs-Arm von EduBotics mit einer Szenen-Kamera. Nur für '
+        'Roboter Studio (Greifen & Programmieren).'
+    ),
     # NEW namespace literal, never 'omx_f': init_ros_params reads the
     # config-YAML top-level key equal to data_robot_type — leaving it omx_f
     # silently inherits the OMX camera/joint lists.
@@ -373,6 +394,10 @@ _EDU6_STUDIO = ArmProfile(
 _EDU1_STUDIO = ArmProfile(
     profile_id='edu1_studio',
     display_name_de='Edu:1 – Roboter Studio',
+    help_de=(
+        'Der 5-Achs-Arm Edu:1 von EduBotics mit einer Szenen-Kamera. '
+        'Nur für Roboter Studio (Greifen & Programmieren).'
+    ),
     # NEW namespace literal, never 'omx_f': init_ros_params reads the
     # config-YAML top-level key equal to data_robot_type. It is ALSO the id the
     # cloud stamps on a saved „Bewegung" (workflow_trajectories.robot_profile,
@@ -527,6 +552,19 @@ def capabilities_json(profile: ArmProfile) -> str:
         'urdf_asset_id': profile.urdf_asset_id,
         'gripper_open_rad': profile.gripper_open_rad,
         'gripper_closed_rad': profile.gripper_closed_rad,
+        # IDENTITY keys (additive). React had no German name for a robot and
+        # rendered the raw profile id — a student read 'omx_full'. The GUI and
+        # the Pi agent have carried `display_de`/`help_de` all along; putting
+        # them on the manifest that already rides /task/status is what reaches
+        # the running app without a FOURTH copy of the profile registry in
+        # JS. Safe on an OLD client by the validator's own contract: it checks
+        # only that the six booleans are present and boolean, and tolerates
+        # extras by design.
+        'display_de': profile.display_name_de,
+        # The camera ROLES this profile actually uses, so the student surface
+        # can say "2 von 2 Kameras" instead of counting topics blind. Same
+        # allowlist the GUI/Pi wizards enforce at setup time.
+        'camera_roles': list(profile.camera_roles),
     }
     for key, value in (
         ('reach_inner_m', profile.reach_inner_m),
@@ -541,4 +579,9 @@ def capabilities_json(profile: ArmProfile) -> str:
     # fallback of its own.
     if profile.tool_tip_tracks_gripper:
         manifest['tool_tip_tracks_gripper'] = True
+    # Omitted rather than sent as '' — same rule as the None-valued optionals
+    # above, so a profile without a sentence costs the wire nothing and the
+    # React side renders no empty paragraph.
+    if profile.help_de:
+        manifest['help_de'] = profile.help_de
     return json.dumps(manifest, separators=(',', ':'))

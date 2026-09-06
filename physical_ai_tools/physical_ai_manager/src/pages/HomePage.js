@@ -13,15 +13,43 @@
 // limitations under the License.
 //
 // Author: Kiwoong Park
+//
+// ── Startseite ───────────────────────────────────────────────────────────────
+//
+// Lagebericht und nichts weiter: der Roboter, sein Zustand, die eigene Arbeit.
+// Navigation macht die Leiste links — diese Seite berichtet, sie dirigiert
+// nicht. (English notes below for the maintainer, per Rule §1.)
+//
+// WHAT THIS PAGE IS FOR, in one line: answer „ist mein Roboter bereit, und was
+// habe ich schon gemacht?" without the student having to open another tab.
+//
+// THE ONE RULE EVERYTHING ELSE FOLLOWS: every value shown traces to a real
+// source, or is not shown. What this replaced claimed three things it could
+// not back up — a hardcoded „LIVE" pill that rendered identically while the
+// bridge was down, a drawn SVG arm matching none of the four shipped robots,
+// and `packageJson.version` (0.9.0) labelled as the EduBotics version when the
+// product was at 2.17.0. Unknown now renders „—", never 0 and never a guess.
+//
+// NOT LIVE, ON PURPOSE. One fetch on mount plus `useRefetchOnFocus`; no
+// Realtime channel and no interval anywhere. Start is where every session
+// begins and where idle browsers sit for a whole lesson, and the cloud API is
+// a single uvicorn worker with an in-process rate limiter. The two exceptions
+// are subscriptions the app already runs: the /task/status heartbeat, and one
+// 1 Hz /joint_states liveness probe (hooks/useJointLiveness), which is the
+// difference between "the arm is silent" and "we never looked".
 
-import React from 'react';
-import { useSelector, useDispatch } from 'react-redux';
+import React, { useState } from 'react';
+import { useSelector } from 'react-redux';
+
 import HeartbeatStatus from '../components/HeartbeatStatus';
-import { Card, Pill, Btn, SectionHeader } from '../components/EbUI';
-import packageJson from '../../package.json';
-import PageType from '../constants/pageType';
-import { moveToPage } from '../features/ui/uiSlice';
-import { robotProfileId } from '../utils/robotMode';
+import { Pill, SectionHeader } from '../components/EbUI';
+import RobotHero from '../components/Home/RobotHero';
+import HealthCard from '../components/Home/HealthCard';
+import WorkCard from '../components/Home/WorkCard';
+import useJointLiveness from '../hooks/useJointLiveness';
+import useStudentWork from '../hooks/useStudentWork';
+import { isCloudOnlyMode } from '../utils/cloudMode';
+import { productVersion, buildId } from '../utils/productVersion';
 
 function getGreeting() {
   const h = new Date().getHours();
@@ -31,33 +59,26 @@ function getGreeting() {
 }
 
 export default function HomePage() {
-  const dispatch = useDispatch();
-  const robotType = useSelector((state) => state.tasks.taskStatus.robotType);
-  const robotProfile = useSelector((state) => state.tasks.taskStatus.robotProfile);
-  const caps = useSelector((state) => state.tasks.taskStatus.capabilities);
   const fullName = useSelector((state) => state.auth.fullName);
   const username = useSelector((state) => state.auth.username);
-  const heartbeatStatus = useSelector((state) => state.tasks.heartbeatStatus);
-  const imageTopicList = useSelector((state) => state.ros.imageTopicList);
+  const workgroupName = useSelector((state) => state.auth.workgroupName);
+  const robotProfile = useSelector((state) => state.tasks.taskStatus.robotProfile);
+  const robotType = useSelector((state) => state.tasks.taskStatus.robotType);
 
-  const firstName = (fullName && fullName.split(' ')[0]) || username || 'Schüler';
+  const cloudOnly = isCloudOnlyMode();
+  // Held here rather than in either consumer: the hero's dot and the
+  // Health-Check's „Arm antwortet" row must be the same fact. Disabled in
+  // cloud mode, where there is no bridge to subscribe to.
+  const jointsLive = useJointLiveness({ enabled: !cloudOnly });
+  const { work, loading } = useStudentWork();
 
-  const bridgeReady = heartbeatStatus === 'connected';
-  const camCount = imageTopicList?.length || 0;
-  // The robot type is GUI-hardset now — the student no longer picks it. Show a
-  // read-only badge, seeded instantly from the `?robot=` URL param before the
-  // first /task/status tick lands, then confirmed by the server's profile id /
-  // data robot_type.
-  const robotBadge = robotProfile || robotType || robotProfileId();
-  // On a follower-only rig recording is disabled; keep the hero „Aufnahme
-  // starten" button in lockstep with the (hidden) Aufnahme tab.
-  const canRecord = caps?.recordable !== false;
+  // Purely cosmetic, and deliberately not a Redux value: nothing else cares.
+  const [firstName] = useState(
+    () => (fullName && fullName.split(' ')[0]) || username || 'Schüler',
+  );
 
-  const goRecord = () => {
-    if (!robotType || robotType.trim() === '') return;
-    if (!canRecord) return;
-    dispatch(moveToPage(PageType.RECORD));
-  };
+  const version = productVersion();
+  const build = buildId();
 
   return (
     <div className="h-full w-full overflow-y-auto">
@@ -65,84 +86,46 @@ export default function HomePage() {
         <SectionHeader
           eyebrow="Startseite"
           title={`${getGreeting()}, ${firstName}.`}
-          description="Dein Roboter wird automatisch erkannt – leg direkt los."
-          right={<HeartbeatStatus />}
-          className="mb-6 md:mb-8"
+          right={!cloudOnly ? <HeartbeatStatus /> : <Pill tone="neutral">Cloud-Modus</Pill>}
+          className="mb-5 md:mb-6"
         />
 
+        {/* Identity chips. Rendered only when the profile actually supplied
+            them — an empty chip is furniture, not information. */}
+        {workgroupName && (
+          <div className="flex flex-wrap items-center gap-2 mb-5 md:mb-6 -mt-2">
+            <Pill tone="accent">Gruppe {workgroupName}</Pill>
+          </div>
+        )}
+
         <div className="grid grid-cols-12 gap-4 md:gap-6">
-          {/* Hero robot card */}
+          {/* In cloud mode there is no robot to show, so the hero would be a
+              picture of nothing. The health card carries the mode instead and
+              „Deine Arbeit" — which is cloud data — takes the full width. */}
+          {!cloudOnly && (
+            <div className="col-span-12 lg:col-span-8">
+              <RobotHero jointsLive={jointsLive} />
+            </div>
+          )}
+
+          <div className="col-span-12 lg:col-span-4">
+            <HealthCard jointsLive={jointsLive} cloudOnly={cloudOnly} />
+          </div>
+
           <div className="col-span-12">
-            <Card padded={false}>
-              <div className="relative h-[280px] sm:h-[340px] md:h-[380px] xl:h-[440px] camera-noise rounded-t-[var(--radius-lg)] overflow-hidden">
-                <svg
-                  viewBox="0 0 600 400"
-                  className="absolute inset-0 w-full h-full opacity-80"
-                  preserveAspectRatio="xMidYMid meet"
-                >
-                  <defs>
-                    <linearGradient id="armg" x1="0" x2="0" y1="0" y2="1">
-                      <stop offset="0" stopColor="#E8EBEC" />
-                      <stop offset="1" stopColor="#9CA1A6" />
-                    </linearGradient>
-                  </defs>
-                  <rect x="220" y="320" width="160" height="50" rx="6" fill="#24292B" />
-                  <rect x="270" y="200" width="60" height="130" rx="4" fill="url(#armg)" />
-                  <rect x="260" y="170" width="80" height="40" rx="6" fill="#3B4145" />
-                  <rect x="290" y="110" width="20" height="70" rx="4" fill="url(#armg)" />
-                  <circle cx="300" cy="105" r="18" fill="#3B4145" />
-                  <rect x="288" y="80" width="24" height="22" rx="3" fill="url(#armg)" />
-                  <rect x="285" y="60" width="12" height="26" rx="2" fill="#9CA1A6" />
-                  <rect x="303" y="60" width="12" height="26" rx="2" fill="#9CA1A6" />
-                  <circle cx="300" cy="105" r="3" fill="var(--accent)" />
-                </svg>
-                <div className="absolute top-4 left-4 flex items-center gap-2">
-                  <Pill tone="glass" dot>
-                    LIVE
-                  </Pill>
-                  <Pill tone="glass">
-                    <span className="font-mono">ros_bridge</span>
-                  </Pill>
-                </div>
-                <div className="absolute bottom-4 left-4 right-4 flex items-end justify-between gap-4">
-                  <div className="min-w-0">
-                    <div className="text-white/60 font-mono text-[10px] uppercase tracking-wider">
-                      Aktueller Roboter
-                    </div>
-                    <div className="text-white font-semibold text-xl tracking-tight leading-tight truncate">
-                      {robotBadge || 'Roboter wird erkannt …'}
-                    </div>
-                  </div>
-                  <div className="font-mono text-[11px] text-white/60 shrink-0 whitespace-nowrap">
-                    EduBotics v{packageJson.version}
-                  </div>
-                </div>
-              </div>
-              <div className="p-5 flex flex-wrap items-center justify-between gap-3">
-                <div className="text-sm text-[var(--ink-3)]">
-                  <span className="text-[var(--ink)] font-semibold">
-                    {bridgeReady ? 'Bereit.' : 'Warte auf Roboter.'}
-                  </span>{' '}
-                  {bridgeReady
-                    ? `ROS-Bridge läuft, ${camCount} Kamera${camCount === 1 ? '' : 's'} erkannt.`
-                    : 'Prüfe die Verbindung zum Roboter.'}
-                </div>
-                <div className="flex items-center gap-2">
-                  <Btn
-                    variant="primary"
-                    onClick={goRecord}
-                    disabled={!robotType || !bridgeReady || !canRecord}
-                  >
-                    Aufnahme starten
-                  </Btn>
-                </div>
-              </div>
-            </Card>
+            <WorkCard work={work} loading={loading} />
           </div>
         </div>
 
-        <div className="mt-6 md:mt-8 text-[11px] font-mono text-[var(--ink-4)]">
-          {packageJson.description} · v{packageJson.version}
+        {/* The footer names the release and the bundle so a support call can
+            quote both. `productVersion()` returns null on a rig that genuinely
+            does not know (an unpinned `?_v=latest`, Pi mode, the teacher web
+            app) — in which case it says nothing rather than the SPA's own
+            package version, which is what it used to print. */}
+        <div className="mt-6 md:mt-8 flex flex-wrap gap-x-5 gap-y-1 text-[11px] font-mono text-[var(--ink-4)]">
+          {version && <span>EduBotics {version}</span>}
+          {(robotProfile || robotType) && <span>{robotProfile || robotType}</span>}
+          {build && build !== 'dev' && <span>Build {build}</span>}
         </div>
       </div>
     </div>

@@ -100,8 +100,89 @@ def test_caps_json_exact_edu6():
 
 
 def test_caps_json_is_compact():
-    # separators=(',', ':') -> no whitespace between tokens
-    assert ' ' not in rp.capabilities_json(rp.resolve('omx_full'))
+    # separators=(',', ':') -> no whitespace BETWEEN TOKENS. Asserted by
+    # round-tripping rather than by `' ' not in ...`: since the manifest gained
+    # `display_de`/`help_de`, the payload legitimately contains spaces INSIDE
+    # string values ('OMX – Voll'), and the old spelling would have failed on
+    # correct output. Re-serialising the parsed object with the same separators
+    # and comparing byte-for-byte tests exactly the property the comment claims.
+    raw = rp.capabilities_json(rp.resolve('omx_full'))
+    assert raw == json.dumps(json.loads(raw), separators=(',', ':'))
+    # `ensure_ascii` stays at its default True, so the German text travels as
+    # escapes and the wire payload is pure ASCII; JSON.parse restores it in the
+    # browser. Asserted rather than assumed: an umlaut surviving the round trip
+    # is the whole point of putting German on this wire.
+    assert raw.isascii()
+    assert json.loads(raw)['display_de'] == 'OMX – Voll'
+    assert 'führst' in json.loads(raw)['help_de']
+
+
+# --- identity keys (Start-page hero) ---------------------------------------
+
+@pytest.mark.parametrize('pid', ['omx_full', 'omx_follower',
+                                 'edu6_studio', 'edu1_studio'])
+def test_caps_json_carries_german_identity(pid):
+    """Every profile puts a German NAME and camera roles on the wire.
+
+    React renders `display_de` in the Start-page hero; without it the student
+    reads the raw profile id. `help_de` is optional by design (omitted when
+    empty), but every shipped profile has one today.
+    """
+    profile = rp.resolve(pid)
+    obj = json.loads(rp.capabilities_json(profile))
+    assert obj['display_de'] == profile.display_name_de
+    assert obj['display_de'].strip()
+    assert obj['camera_roles'] == list(profile.camera_roles)
+    assert obj['help_de'] == profile.help_de
+    assert obj['help_de'].strip()
+
+
+def test_caps_json_omits_empty_help():
+    """An empty `help_de` is OMITTED, not sent as ''. Same rule as the
+    None-valued geometry optionals, so the React side never renders a blank
+    paragraph and the manifest of a future terse profile stays tight."""
+    import dataclasses
+    bare = dataclasses.replace(rp.resolve('omx_full'), help_de='')
+    assert 'help_de' not in json.loads(rp.capabilities_json(bare))
+
+
+def test_german_identity_matches_the_gui_registry():
+    """The server, the Windows GUI and the Pi agent must name a robot the same.
+
+    A student meets `display_de` twice — in the setup wizard (GUI/Pi) and now
+    on the Start page (server -> React). Two spellings of one robot is exactly
+    the confusion this key exists to remove, so the three registries are held
+    together here rather than by review. Parsed with `ast.literal_eval` for the
+    same reason the GUI file says to keep it literal-parseable.
+    """
+    import ast
+    import pathlib
+    repo = pathlib.Path(__file__).resolve().parents[3]
+    gui_path = repo / 'robotis_ai_setup' / 'gui' / 'app' / 'constants.py'
+    if not gui_path.exists():
+        # Only reachable outside a full checkout (the shipped image carries the
+        # server package without robotis_ai_setup). Skipping there is right;
+        # skipping because the CONTENTS drifted would not be, which is why the
+        # assertions below are hard failures.
+        pytest.skip('not a full repo checkout — GUI registry unavailable')
+    gui = gui_path.read_text(encoding='utf-8')
+    start = gui.index('ROBOT_PROFILES = {')
+    literal = gui[start + len('ROBOT_PROFILES = '):]
+    depth, end = 0, None
+    for i, ch in enumerate(literal):
+        if ch == '{':
+            depth += 1
+        elif ch == '}':
+            depth -= 1
+            if depth == 0:
+                end = i + 1
+                break
+    gui_profiles = ast.literal_eval(literal[:end])
+    for pid, row in gui_profiles.items():
+        profile = rp.resolve(pid)
+        assert profile.profile_id == pid, f'{pid} unknown to the server registry'
+        assert profile.display_name_de == row['display_de'], pid
+        assert profile.help_de == row['help_de'], pid
 
 
 # --- dataset naming anchor -------------------------------------------------

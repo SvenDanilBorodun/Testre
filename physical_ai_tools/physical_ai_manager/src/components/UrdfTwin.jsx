@@ -249,6 +249,17 @@ export default function UrdfTwin({
   catalogDims = {},
   showShadows = false,
   showReach = false,
+  // Start-page hero seam. `showChrome = false` suppresses this component's
+  // own header chip and „Wartet auf Gelenkdaten …" hint so a parent can
+  // draw its own overlay; the default keeps RecordPage and SimScene
+  // byte-for-byte unchanged. The load-error card is deliberately NOT
+  // suppressed — a missing URDF asset must stay visible wherever the twin
+  // is mounted, and no parent can render it (loadError is internal state).
+  //
+  // Liveness is NOT exposed here on purpose: the Start page needs it even
+  // while this component is unmounted (the student switched to the camera
+  // view), so it owns hooks/useJointLiveness instead. See that file.
+  showChrome = true,
 }) {
   const rosbridgeUrl = useSelector((state) => state.ros.rosbridgeUrl);
   // Read by the release handler, which must land a mesh on the SERVER's released
@@ -1032,6 +1043,7 @@ export default function UrdfTwin({
       <div ref={mountRef} className="absolute inset-0" />
 
       {/* Header chip */}
+      {showChrome && (
       <div className="absolute top-2 left-2 z-10 h-7 px-2.5 rounded-full bg-white/[0.08] border border-white/15 backdrop-blur-md flex items-center gap-1.5 text-[11px] text-white/80 font-mono">
         <span
           className="w-1.5 h-1.5 rounded-full"
@@ -1039,9 +1051,10 @@ export default function UrdfTwin({
         />
         Follower-Modell
       </div>
+      )}
 
       {/* German "waiting for joint data" hint until the first message. */}
-      {!hasJointData && !loadError && (
+      {showChrome && !hasJointData && !loadError && (
         <div className="absolute bottom-2 left-2 right-2 z-10 flex justify-center">
           <div className="px-3 py-1.5 rounded-full bg-black/55 border border-white/15 backdrop-blur-md text-[12px] text-white/85">
             Wartet auf Gelenkdaten …

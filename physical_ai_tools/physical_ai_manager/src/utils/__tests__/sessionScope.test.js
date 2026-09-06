@@ -215,6 +215,12 @@ describe('clearStudentScopedStorage', () => {
       'blocklyStashMulti',
       'blocklyStashTime',
       'edubotics:workshop:theme',
+      // Startseite hero view („3D-Modell" / „Kamera"). Student-scoped by the
+      // WHO-sets-it tie-break: a student picks it for themselves, the way they
+      // pick an editor theme. It also has a cost the other view toggles do not
+      // — inheriting „Kamera" silently opens a 5-8 Mbps MJPEG stream the next
+      // student never asked for.
+      'edubotics_home_view',
       'edubotics_trainingInfo',
       'edubotics_userId',
       'edubotics_workshop_code_open',

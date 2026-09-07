@@ -32,6 +32,14 @@ services:
       # Only the follower is physically connected on the classroom
       # Jetson; the leader stays at the student's desk for recording.
       - EDUBOTICS_FOLLOWER_ONLY=1
+      # Explicit student activation. The default is 1 with or without this line,
+      # but stating it here is what gives a Jetson operator the same
+      # one-variable rollback the student and Pi fleets have — and makes it
+      # visible that this rig's boot home is gone. Nothing is lost: the
+      # agent already drives SAFE_HOME_JOINTS on every CLAIM, which is
+      # itself a logged-in student's action, and a Jetson has no leader arm
+      # so there is no teleop to hold off.
+      - EDUBOTICS_REQUIRE_ACTIVATION=${EDUBOTICS_REQUIRE_ACTIVATION:-1}
       # Stable USB symlinks set up by setup.sh via /etc/udev/rules.d.
       - FOLLOWER_PORT=/dev/edubotics-follower
       - CAMERA_DEVICE_1=/dev/edubotics-gripper-cam

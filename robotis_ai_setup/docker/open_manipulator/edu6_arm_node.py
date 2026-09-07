@@ -29,6 +29,9 @@ The ROS contract this node satisfies (edu6 plan §3.2) is exactly what makes
   and SYNC_WRITEs acceleration+goal to every servo (``Goal_Time`` is a
   documented no-op on STS — streaming is the only correct execution, the same
   conclusion LeRobot and feetech_ros2_driver reached).
+* srv :data:`HOME_SERVICE` (``/edu6/home`` / ``/edu1/home``, std_srvs/Trigger)
+  + the family-neutral alias ``/edubotics/home_arm`` — the home-on-demand rail
+  activation_agent.py pulls. Boot itself only energises; see main().
 * srv :data:`TORQUE_SERVICE` (``/edu6/set_torque`` / ``/edu1/set_torque``,
   std_srvs/SetBool) + the LEGACY ALIAS
   ``/dynamixel_hardware_interface/set_dxl_torque`` — so a stale client (incl.
@@ -81,6 +84,7 @@ from rclpy.node import Node  # noqa: E402
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy  # noqa: E402
 from sensor_msgs.msg import JointState  # noqa: E402
 from std_srvs.srv import SetBool  # noqa: E402
+from std_srvs.srv import Trigger  # noqa: E402
 from trajectory_msgs.msg import JointTrajectory  # noqa: E402
 
 
@@ -175,6 +179,12 @@ _DEFAULT_SIGNS = (1, 1, 1, 1, 1, 1, 1)
 
 # Torque service name and whole-link geometry spec for the DEFAULT (edu6) arm.
 TORQUE_SERVICE = '/edu6/set_torque'
+#: Home-on-demand. Family-scoped like TORQUE_SERVICE, plus a family-NEUTRAL
+#: alias so activation_agent.py has ONE name to call on either Feetech arm
+#: instead of re-deriving the family. Same two-names-one-callback shape as the
+#: torque service and its legacy alias.
+HOME_SERVICE = '/edu6/home'
+HOME_SERVICE_ALIAS = '/edubotics/home_arm'
 GEOMETRY_SPEC = eg.EDU6
 
 # ── edu1_studio overrides ────────────────────────────────────────────────────
@@ -219,6 +229,7 @@ _EDU1_JOINT_LIMITS_RAD = (
 )
 _EDU1_DEFAULT_SIGNS = (1, 1, 1, 1, 1, 1)
 _EDU1_TORQUE_SERVICE = '/edu1/set_torque'
+_EDU1_HOME_SERVICE = '/edu1/home'
 
 ROBOT_TYPE = (os.environ.get('EDUBOTICS_ROBOT_TYPE') or '').strip()
 IS_EDU1 = ROBOT_TYPE == 'edu1_studio'
@@ -230,6 +241,7 @@ if IS_EDU1:
     JOINT_LIMITS_RAD = _EDU1_JOINT_LIMITS_RAD
     _DEFAULT_SIGNS = _EDU1_DEFAULT_SIGNS
     TORQUE_SERVICE = _EDU1_TORQUE_SERVICE
+    HOME_SERVICE = _EDU1_HOME_SERVICE
     GEOMETRY_SPEC = eg.EDU1
 
 # Arm joints = every joint but the gripper, which is ALWAYS the last channel.
@@ -1336,6 +1348,16 @@ class Edu6ArmNode(Node):
             SetBool, '/dynamixel_hardware_interface/set_dxl_torque',
             self._torque_cb)
 
+        # Home ON DEMAND (2026-09-07). Boot no longer homes: main() only
+        # energises, and this is the rail activation_agent.py pulls once a
+        # logged-in student presses „Roboter aktivieren" on the Startseite.
+        # The DRIVER keeps ownership of the motion — the floor pre-check, the
+        # torque-on ladder and the single-writer trajectory rail all live in
+        # run_home() and would all be bypassed by an outside publisher putting
+        # a home trajectory on /leader/joint_trajectory.
+        self.create_service(Trigger, HOME_SERVICE, self._home_cb)
+        self.create_service(Trigger, HOME_SERVICE_ALIAS, self._home_cb)
+
         self._read_thread = threading.Thread(
             target=self._read_loop, name='edu6-read', daemon=True)
         self._write_thread = threading.Thread(
@@ -1971,15 +1993,25 @@ class Edu6ArmNode(Node):
             return
         self._replace_trajectory(points, time.monotonic())
 
-    def start_boot_home(self) -> None:
-        """Quintic-glide to HOME from the measured power-up pose (torque on
-        first). Mirrors the OMX entrypoint Phase 3 UX."""
+    def boot_energise(self) -> tuple[bool, str, list | None]:
+        """Torque ON at boot — and nothing else. Returns ``(ok, german, pose)``.
+
+        SPLIT OUT OF start_boot_home 2026-09-07. Boot no longer homes, but it
+        still must ENERGISE: this arm backdrives, so an un-torqued arm does not
+        wait politely for a student to log in, it sags. Energising is itself
+        motionless — set_torque(True) seeds ``Goal = Present`` from a measured
+        tick before writing ``Torque_Enable``, which is the whole reason that
+        seed exists.
+
+        The returned pose is the PRE-torque read, handed to run_home() as its
+        fallback so the composite start_boot_home() keeps its exact old
+        behaviour when the post-torque re-read fails."""
         current = self._read_positions_once()
         if current is None:
-            self.get_logger().error(
-                '[FEHLER] Startpose konnte nicht gelesen werden — die '
-                'Grundstellungs-Fahrt entfällt.')
-            return
+            message = ('[FEHLER] Startpose konnte nicht gelesen werden — die '
+                       'Grundstellungs-Fahrt entfällt.')
+            self.get_logger().error(message)
+            return False, message, None
         # Bounded retry: set_torque refuses (correctly) when the goal-seed read
         # fails, but nothing else ever retries boot torque-on, so a single bus
         # hiccup used to leave the arm LIMP — and therefore collapsing — for the
@@ -1999,22 +2031,50 @@ class Edu6ArmNode(Node):
                 # 5 s-retrying BEFORE this point, so reaching here means the joint
                 # moved after it passed; 'wrongway' has no probe-side twin at all
                 # (nothing is energised at probe time), so this is its only report.
-                self.get_logger().error(BOOT_PHYSICAL_REMEDY_DE[kind])
-                return
+                message = BOOT_PHYSICAL_REMEDY_DE[kind]
+                self.get_logger().error(message)
+                return False, message, current
             if attempt + 1 < BOOT_TORQUE_ON_ATTEMPTS:
                 time.sleep(BOOT_TORQUE_ON_RETRY_S)
         else:
-            self.get_logger().error(
+            message = (
                 f'[FEHLER] Drehmoment konnte nach {BOOT_TORQUE_ON_ATTEMPTS} '
                 'Versuchen nicht eingeschaltet werden — der Arm bleibt weich '
                 'und sackt zusammen. Bitte Kabel und 12-V-Versorgung prüfen, '
                 'dann die Umgebung neu starten.')
-            return
+            self.get_logger().error(message)
+            return False, message, None
+        return True, '', current
+
+    def run_home(self, fallback_pose: list | None = None) -> tuple[bool, str]:
+        """Quintic-glide to HOME from the measured pose. ``(ok, german)``.
+
+        Called at boot ONLY when EDUBOTICS_REQUIRE_ACTIVATION=0 (the rollback);
+        otherwise it is the /edu6/home + /edubotics/home_arm service body, i.e.
+        what the Startseite's „Roboter aktivieren" button ultimately runs.
+
+        Re-torques first when the arm is limp — hand-guide's „Beenden" is not
+        the only way a student gets here with torque off, and gliding a limp arm
+        is a no-op that would report success."""
+        if not self._torque_on:
+            ok, message, pose = self.boot_energise()
+            if not ok:
+                return False, message
+            if fallback_pose is None:
+                fallback_pose = pose
         # Re-read AFTER torque-on: a retry costs seconds during which the limp
         # arm keeps sagging, and the glide must start from where it actually is.
+        # A failed re-read falls back to the pre-torque pose boot_energise
+        # already measured, which is exactly what the pre-split code did.
+        current = fallback_pose
         fresh = self._read_positions_once()
         if fresh is not None:
             current = fresh
+        if current is None:
+            message = ('[FEHLER] Die aktuelle Armstellung konnte nicht gelesen '
+                       'werden — die Grundstellungs-Fahrt entfällt.')
+            self.get_logger().error(message)
+            return False, message
         # TABLE-FLOOR PRE-CHECK (Rule §2, see BOOT_HOME_FLOOR_TOL_M). The glide
         # is a straight joint-space line and nothing else judges it; from the
         # pose a limp arm collapses into it can drive a link 16 cm into the
@@ -2028,7 +2088,7 @@ class Edu6ArmNode(Node):
             self.get_logger().info(
                 f'(Grundstellungs-Vorprüfung: tiefster Punkt {depth * 1000:.0f} '
                 f'mm, Grenze {-BOOT_HOME_FLOOR_TOL_M * 1000:.0f} mm.)')
-            return
+            return False, BOOT_HOME_FLOOR_REFUSAL_DE
         gen = self._replace_trajectory(build_boot_home(current), time.monotonic())
         self.get_logger().info(
             'Grundstellungs-Fahrt gestartet (3 s sanfte Bewegung).')
@@ -2037,6 +2097,28 @@ class Edu6ArmNode(Node):
         # it never blocks spin/shutdown.
         threading.Thread(target=self._boot_home_verify, args=(gen,),
                          name='edu6-boothome-verify', daemon=True).start()
+        return True, ''
+
+    def _home_cb(self, _request, response):
+        """/edu6/home + /edubotics/home_arm — Trigger, one callback for both.
+
+        Returns as soon as the glide is ON the rail; the verifier runs on its
+        own thread exactly as at boot, and the caller (activation_agent.py)
+        waits out the motion itself. A refusal carries the DRIVER's German
+        reason — cable, 12 V, an edge-parked joint, a floor refusal — because
+        nothing upstream can diagnose those."""
+        ok, message = self.run_home()
+        response.success = bool(ok)
+        response.message = message or 'ok'
+        return response
+
+    def start_boot_home(self) -> None:
+        """Energise, then glide to HOME. The pre-gate boot behaviour, kept
+        whole as the EDUBOTICS_REQUIRE_ACTIVATION=0 rollback path."""
+        ok, _message, pose = self.boot_energise()
+        if not ok:
+            return
+        self.run_home(fallback_pose=pose)
 
     def _boot_home_verify(self, gen: int) -> None:
         """Verify the boot-home glide reached HOME (Decision A — mirror the OMX
@@ -2329,7 +2411,21 @@ def main() -> int:
 
     try:
         node.start()
-        node.start_boot_home()
+        # ACTIVATION GATE (2026-09-07). Bringing the container up is no longer
+        # a powered motion: by default we only ENERGISE (the arm backdrives, so
+        # leaving it limp until a student logs in would drop it) and the home
+        # glide waits for /edubotics/home_arm, which activation_agent.py calls
+        # when a logged-in student presses „Roboter aktivieren". Read at CALL
+        # time, not import time, so the deps-free suite's module-level exec of
+        # this file is unaffected either way.
+        if os.environ.get('EDUBOTICS_REQUIRE_ACTIVATION', '1').strip() == '0':
+            node.start_boot_home()
+        else:
+            node.boot_energise()
+            print('[INIT] Der Arm ist bestromt und steht still. Die '
+                  'Grundstellungs-Fahrt startet erst, wenn ein angemeldeter '
+                  'Schüler auf der Startseite auf „Roboter aktivieren" '
+                  'drückt.', flush=True)
         rclpy.spin(node)
     except KeyboardInterrupt:
         pass

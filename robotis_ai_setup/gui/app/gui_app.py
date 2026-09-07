@@ -4440,7 +4440,9 @@ class EduBoticsApp:
         Reuses the scanned hardware + the gpu/phone settings captured at env
         start, so the regenerated .env is identical except FOLLOWER_ONLY /
         LEADER_PORT. physical_ai_server (rosbridge + the React app) stays up via
-        --no-deps, so the student's session only sees the arm blip + re-home;
+        --no-deps, so the student's session only sees the arm blip (the
+        re-home is gone since the activation gate — the student re-activates
+        from the Startseite);
         the native camera bridge auto-reconnects to the recreated ingest node.
 
         On a restart FAILURE the .env is ROLLED BACK to the previous mode so the

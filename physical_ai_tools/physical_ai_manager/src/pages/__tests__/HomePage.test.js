@@ -28,6 +28,7 @@ import tasksReducer, { setTaskStatus, setHeartbeatStatus } from '../../features/
 import authReducer, { setProfile } from '../../features/auth/authSlice';
 import rosReducer from '../../features/ros/rosSlice';
 import uiReducer from '../../features/ui/uiSlice';
+import workshopReducer from '../../features/workshop/workshopSlice';
 import HomePage from '../HomePage';
 
 // three.js has no WebGL in jsdom, and the twin has its own suite. The hero
@@ -89,7 +90,12 @@ vi.mock('../../services/cloudTrainingApi', () => ({
 
 function makeStore() {
   return configureStore({
-    reducer: { tasks: tasksReducer, auth: authReducer, ros: rosReducer, ui: uiReducer },
+    reducer: {
+      tasks: tasksReducer, auth: authReducer, ros: rosReducer, ui: uiReducer,
+      // ActivationCard refuses to move the arm while a Roboter-Studio program
+      // runs, so the page now reads this slice too.
+      workshop: workshopReducer,
+    },
   });
 }
 
@@ -142,6 +148,37 @@ describe('HomePage — no recording entry point, on any profile', () => {
     // against `capabilities.recordable`, which is the point of keeping this.
     expect(screen.queryByRole('button', { name: /Aufnahme starten/ })).toBeNull();
     expect(screen.queryByText(/Aufnahme starten/)).toBeNull();
+  });
+});
+
+describe('HomePage — the activation button, on every profile', () => {
+  // The page documents having no CTA, and the block above pins that. This
+  // button is not that: it navigates nowhere and is gated on NO capability.
+  // Bringing the environment up no longer moves the arm — nothing else in the
+  // product can start it — so a rig where this button were hidden would be a
+  // rig a student cannot use. It must therefore render on all four fixtures,
+  // including the ones where `recordable` is false.
+  const cases = [
+    ['omx_full', fullCaps()],
+    ['omx_follower (recordable false)', fullCaps({ recordable: false, has_leader: false })],
+    ['unknown capabilities (null)', null],
+    ['a PARTIAL manifest, which is never adopted', { recordable: false }],
+  ];
+
+  it.each(cases)('offers „Roboter aktivieren" on %s', (_label, caps) => {
+    renderHome({ caps });
+    expect(screen.getByRole('button', { name: 'Roboter aktivieren' }))
+      .toBeInTheDocument();
+  });
+
+  it('says what will happen before it happens', () => {
+    renderHome({});
+    expect(screen.getByText(/Beim Start bewegt sich nichts/)).toBeInTheDocument();
+  });
+
+  it('is not offered when the bridge is down', () => {
+    renderHome({ connected: false });
+    expect(screen.getByRole('button', { name: 'Roboter aktivieren' })).toBeDisabled();
   });
 });
 

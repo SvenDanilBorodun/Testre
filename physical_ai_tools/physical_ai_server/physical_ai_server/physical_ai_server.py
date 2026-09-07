@@ -5308,6 +5308,11 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             # this is the server-side backstop, keyed SOLELY on /leader/joint_states
             # freshness (leader_appears_active — the env var is deliberately NOT read
             # here; it goes stale when the toggle recreates only the arm container).
+            # NOTE (2026-09-07, activation gate): that predicate is now STRICTLY
+            # CONSERVATIVE — a live leader no longer implies the trajectory
+            # broadcaster is loaded, so this can refuse while there is provably no
+            # contention. Refusing too readily is the safe direction, so the gate is
+            # left as-is; see collision_monitor.leader_appears_active.
             # getattr-guarded so a server built
             # without the collision monitor still starts workflows normally.
             leader_check = getattr(self, 'leader_appears_active', None)

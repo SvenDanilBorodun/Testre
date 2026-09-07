@@ -293,10 +293,22 @@ The one open joint (J6) is in the free column.
   elbow were energised against gravity. No errors, no error bits, no sag.
 - **The ±180° wrap test** (§2.3) — the first powered act, run with an auto-abort at 3.7°.
 
-**Bringing the stack up IS a powered motion.** `edu6_arm_node.main()` calls `start_boot_home()`
-unconditionally: torque-on with the goal seed, then a 3 s quintic glide to HOME. There is no
-"connect and look" — the first powered act is already chosen by the code, and HOME is the right
-choice (verified arrival, 0.30 rad tolerance, bounded re-send).
+**Bringing the stack up is a powered STATE, no longer a powered MOTION** (changed 2026-09-07 by
+the activation gate). `edu6_arm_node.main()` now calls `boot_energise()` — torque-on with the goal
+seed, and nothing else — so the arm comes up holding whatever pose it powered on in. It still
+energises at boot because this arm backdrives: leaving it limp until a student logs in would drop
+it, not park it.
+
+The 3 s quintic glide to HOME moved into `run_home()`, reachable two ways: the
+`/edu6/home` + `/edubotics/home_arm` services (what `activation_agent.py` calls when a logged-in
+student presses „Roboter aktivieren" on the Startseite), and `start_boot_home()`, which is still
+exactly energise-then-glide and is what boot runs under the
+`EDUBOTICS_REQUIRE_ACTIVATION=0` rollback. Every guard is unchanged and still gates the glide:
+verified arrival at 0.30 rad, bounded re-send, and the table-floor pre-check whose refusal LEAVES
+THE ARM TORQUED.
+
+For a bring-up session that means the first powered motion is now yours to trigger, not the
+container's — connect, watch `/joint_states`, and call `/edubotics/home_arm` when you are ready.
 
 ---
 
@@ -367,7 +379,8 @@ Four properties, each of which was got wrong once and corrected:
    i.e. the „Beenden" hand-guide exit, which is the most likely way a joint is left on the edge.
    A guard only in `probe_bus` would have missed that path entirely. **Torque-OFF is never
    guarded.** `probe_bus` carries the same check deliberately, because it self-heals through
-   `main()`'s 5 s retry whereas `start_boot_home` runs exactly once.
+   `main()`'s 5 s retry whereas the boot torque-on (`boot_energise`, since 2026-09-07 the
+   whole of what boot does) runs exactly once.
 4. **The env knob's polarity is the INVERSE of the band's** and is now stated at the knob: the
    band is a tolerance where large = permissive and ≥4096 disables; this is a refusal RADIUS
    where **0 disables** and larger refuses MORE. Anything ≥ `TICKS_PER_REV // 2` would refuse

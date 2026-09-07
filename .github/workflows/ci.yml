@@ -718,6 +718,7 @@ jobs:
                 robotis_ai_setup/docker/open_manipulator/entrypoint_omx.sh \
                 robotis_ai_setup/docker/open_manipulator/camera_ingest_node.py \
                 robotis_ai_setup/docker/open_manipulator/edu6_arm_node.py \
+                robotis_ai_setup/docker/open_manipulator/activation_agent.py \
                 robotis_ai_setup/docker/open_manipulator/feetech_bus.py \
                 robotis_ai_setup/wsl_rootfs/start-dockerd.sh \
                 physical_ai_tools/physical_ai_server/physical_ai_server \
@@ -1364,6 +1365,7 @@ jobs:
           OFFENDERS=$(grep -rnE \
             "(\[FEHLER\]|\[WARNUNG\]|\[STOPP\]).*\b(frueh|kuerzer|schliessen|Zeitluecken|Groesste|Luecken|Moegliche|ueber[a-z]|laeuft|haengt|pruefen|Pruefung|ueberschritten|Schueler|benoetigen|Oberflaeche|uebersprungen|enthaelt|zusaetzliche|Verfuegbar|geaendert|beschaedigt|koennte|faehige|Bildaufloesung)\b" \
             physical_ai_tools/physical_ai_server/physical_ai_server/ \
+            robotis_ai_setup/docker/ \
             robotis_ai_setup/gui/ \
             robotis_ai_setup/installer/ \
             robotis_ai_setup/pi_agent/ \

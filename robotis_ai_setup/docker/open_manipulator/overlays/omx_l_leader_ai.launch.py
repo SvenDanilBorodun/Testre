@@ -16,6 +16,8 @@
 #
 # Author: Wonho Yun, Sungho Woo, Woojin Wie, Junha Cha
 
+import os
+
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.actions import ExecuteProcess
@@ -124,14 +126,37 @@ def generate_launch_description():
     # Gravity compensation was intentionally removed — the leader arm runs
     # with no effort writer on joints 1-5, so it goes limp on boot. The
     # operator must support the arm by hand during teleop.
+    #
+    # TELEOP GATE (2026-09-07). `joint_trajectory_command_broadcaster` is what
+    # republishes the leader's live pose onto /leader/joint_trajectory at
+    # 100 Hz — i.e. it IS teleoperation, and while it is spawned the follower
+    # mirrors the leader. Spawning it here meant teleop was live from container
+    # boot: before a browser was open, before anyone had logged in, and with
+    # the follower snapping onto whatever pose gravity had left the limp leader
+    # in. So with EDUBOTICS_REQUIRE_ACTIVATION on (the default) it is LEFT OUT
+    # of this spawner and started later by
+    # /usr/local/bin/activation_agent.py::_start_teleop, after that agent has
+    # homed the follower and glided it onto the leader pose.
+    #
+    # Read straight from the environment rather than a launch argument: the
+    # entrypoint does not pass arguments to this launch file, and the same env
+    # var is the single rollback for all four layers that honour the gate.
+    # Leaving the controller out of the spawner means /leader/joint_trajectory
+    # has NO PUBLISHER until activation — a structural gate, not a flag some
+    # code path can forget to consult. The trigger_position_controller and its
+    # 50 Hz -0.7 rad publish below STAY: they simulate the spring on the
+    # leader's OWN trigger under a 300 mA cap and move no follower joint, and a
+    # JointGroupPositionController left with no command is its own hazard.
+    _require_activation = (
+        os.environ.get('EDUBOTICS_REQUIRE_ACTIVATION', '1').strip() != '0')
+    _boot_controllers = ['joint_state_broadcaster', 'trigger_position_controller']
+    if not _require_activation:
+        _boot_controllers.append('joint_trajectory_command_broadcaster')
+
     robot_controller_spawner = Node(
         package='controller_manager',
         executable='spawner',
-        arguments=[
-            'joint_state_broadcaster',
-            'trigger_position_controller',
-            'joint_trajectory_command_broadcaster',
-        ],
+        arguments=_boot_controllers,
         parameters=[{'robot_description': urdf_file}],
     )
 

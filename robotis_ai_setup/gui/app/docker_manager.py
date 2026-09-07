@@ -1364,7 +1364,10 @@ def restart_open_manipulator(gpu: bool = False, log=None) -> bool:
     the new mode. ``--no-deps`` leaves physical_ai_server (rosbridge + the React
     app's connection + the camera ingest) running, so the student's session
     stays connected — only the arm topics blip for ~15-20 s while the arm
-    re-homes. Compose reads the freshly-written .env via --env-file, so the new
+    container restarts. It no longer RE-HOMES on the way back: since the
+    activation gate nothing moves the arm at container start, so the student
+    re-activates from the Startseite (LeaderToggle says so in its overlay and
+    in a toast). Compose reads the freshly-written .env via --env-file, so the new
     FOLLOWER_ONLY value takes effect on this recreate. No image pull (the image
     is already local; we are only recreating with a new env)."""
     cmd = _docker_cmd(

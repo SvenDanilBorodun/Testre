@@ -17,7 +17,7 @@
  * off — autonomous picking, no teleop contention) and BOTH-ARMS (leader on —
  * teleop / recording). Recreating only the open_manipulator container keeps
  * rosbridge + this app connected, so the student just sees the arm blip + a
- * "wird vorbereitet" overlay while it re-homes (~15-20 s); the native camera
+ * "wird vorbereitet" overlay while it comes back (~15-20 s); the native camera
  * bridge reconnects on its own.
  *
  * Self-hiding: on Jetson / cloud there is no GUI bridge, so the status probe
@@ -77,6 +77,13 @@ const PREP_CAM_LIVE_MS = 3000;     // a scene frame within this window = live
 const PREP_JOINT_LIVE_MS = 3000;   // a /joint_states within this window = flowing
 const PREP_SETTLE_DELTA_RAD = 0.01; // per-joint step below this = "not moving"
 const PREP_SETTLE_SAMPLES = 4;     // consecutive still samples → re-home done
+// 2026-09-07: since the activation gate, a mode switch no longer re-homes at
+// all — the arm comes up torqued and still — so `movedRef` stays false and the
+// TIME FLOOR below is the path every toggle now takes. Both halves stay: the
+// floor is what the „already at HOME and barely moves" case always used, and
+// EDUBOTICS_REQUIRE_ACTIVATION=0 puts the re-home (and with it the motion
+// branch) straight back.
+//
 // „settled" alone is not enough: /joint_states starts publishing the STATIC
 // power-on pose a beat BEFORE the re-home quintic begins, so a naive settle can
 // clear the overlay just before the arm lurches. We require the arm to have been
@@ -209,6 +216,12 @@ export default function LeaderToggle({ isActive }) {
       if (ok && body.ok) {
         setFollowerOnly(disable);
         toast.success(body.message || (disable ? 'Roboter Studio bereit.' : 'Leader verbunden.'));
+        // The arm container was RECREATED, so the activation gate is back at
+        // idle: it holds its power-up pose and, on a leader rig, teleop is not
+        // running. Nothing here may activate it — that has to be a student's
+        // own press on the Startseite — so say so once, where they are.
+        toast('Aktiviere den Roboter auf der Startseite, bevor du ihn bewegst.',
+          { icon: 'ℹ️' });
         // The POST returns when the arm container STARTS, not when it is ready
         // (it still re-homes + the camera reconnects). Enter the „preparing"
         // phase and HOLD the blocking overlay until the arm is genuinely back
@@ -367,8 +380,9 @@ export default function LeaderToggle({ isActive }) {
               {preparing
                 ? (prepTimedOut
                     ? 'Der Roboter braucht länger als erwartet. Du kannst weiter warten oder trotzdem fortfahren.'
-                    : 'Roboter Studio wird vorbereitet — der Arm fährt in die Grundstellung und die '
-                      + 'Kamera verbindet sich neu. Bitte warten …')
+                    : 'Roboter Studio wird vorbereitet — der Arm startet neu und die '
+                      + 'Kamera verbindet sich neu. Danach musst du den Roboter auf der '
+                      + 'Startseite wieder aktivieren. Bitte warten …')
                 : (busyMsg || 'Bitte warten …')}
             </p>
             {preparing && prepTimedOut && (

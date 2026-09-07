@@ -461,8 +461,14 @@ def _load_node_functions():
     # Instance methods extracted as plain functions and bound onto a stub self
     # (_TorqueStubNode) — the torque path is BEHAVIOUR, not something a source
     # grep can prove, and rclpy is not installed here.
+    # start_boot_home was split 2026-09-07 into boot_energise (torque on, no
+    # motion — what boot now does) + run_home (the glide, what /edu6/home and
+    # therefore the Startseite's activation button runs). It still exists and
+    # still does both, so every assertion below is unchanged; the two halves
+    # must be extracted too or the composite dies on AttributeError.
     methods = {'probe_bus', '_seed_goal_from_present_locked', 'set_torque',
-               '_torque_cb', 'start_boot_home',
+               '_torque_cb', 'start_boot_home', 'boot_energise', 'run_home',
+               '_home_cb',
                '_verify_after_energise_locked', '_write_targets'}
     for node in tree.body:
         if isinstance(node, ast.Assign) and any(
@@ -1043,9 +1049,25 @@ class _TorqueStubNode:
 
 
 for _bound in ('_seed_goal_from_present_locked', 'set_torque', '_torque_cb',
-               'start_boot_home', '_verify_after_energise_locked',
-               '_write_targets'):
+               'start_boot_home', 'boot_energise', 'run_home', '_home_cb',
+               '_verify_after_energise_locked', '_write_targets'):
     setattr(_TorqueStubNode, _bound, _N[_bound])
+
+
+def _boot_home_path_src(src):
+    """The boot-home PATH as one string, across the 2026-09-07 split.
+
+    start_boot_home used to be one method. It is now energise (boot_energise —
+    torque on, no motion, which is all boot does since the activation gate) plus
+    the glide (run_home — what /edu6/home, and therefore the Startseite's
+    „Roboter aktivieren" button, runs). The assertions below are about the PATH,
+    not about which method holds which line, so they read the concatenation in
+    execution order: energise, then glide. Anything that used to be true of the
+    single body is still true of this."""
+    out = []
+    for name in ('def boot_energise', 'def run_home', 'def start_boot_home'):
+        out.append(src.split(name, 1)[1].split('\n    def ', 1)[0])
+    return '\n'.join(out)
 
 
 class _Req:
@@ -1937,7 +1959,7 @@ class TestPostEnergiseWrongWayAbort(unittest.TestCase):
             self.assertNotIn('12-V', msg, kind)
         src = open(os.path.join(_DOCKER, 'edu6_arm_node.py'),
                    encoding='utf-8').read()
-        sb = src.split('def start_boot_home', 1)[1].split('\n    def ', 1)[0]
+        sb = _boot_home_path_src(src)
         self.assertIn('in PHYSICAL_TORQUE_REFUSALS', sb)
         self.assertIn('BOOT_PHYSICAL_REMEDY_DE[kind]', sb)
         # the physical branch must come BEFORE the sleep/retry, or it burns them
@@ -2440,8 +2462,7 @@ class TestNodeAuditRails(unittest.TestCase):
         # Decision A: boot-home is verified (mirror OMX Phase-3), re-sends the
         # glide from the ACTUAL pose on a stall, and never commands a dead bus.
         self.assertIn('boot_home_verify_decision', self.src)
-        sb = self.src.split('def start_boot_home', 1)[1].split(
-            '\n    def ', 1)[0]
+        sb = _boot_home_path_src(self.src)
         self.assertIn('_boot_home_verify', sb)       # verify thread launched
         vb = self.src.split('def _boot_home_verify', 1)[1].split(
             '\n    def ', 1)[0]
@@ -2456,8 +2477,7 @@ class TestNodeAuditRails(unittest.TestCase):
         # bails when it no longer matches.
         self.assertIn('def _replace_trajectory', self.src)
         self.assertIn('self._traj_gen += 1', self.src)
-        sb = self.src.split('def start_boot_home', 1)[1].split(
-            '\n    def ', 1)[0]
+        sb = _boot_home_path_src(self.src)
         self.assertIn('gen = self._replace_trajectory', sb)
         self.assertIn('args=(gen,)', sb)             # token handed to the thread
         vb = self.src.split('def _boot_home_verify', 1)[1].split(
@@ -2509,8 +2529,7 @@ class TestNodeAuditRails(unittest.TestCase):
         # nothing else retries boot torque-on — so a single bus hiccup used to
         # leave the arm limp (and therefore sagging) for the whole session.
         self.assertGreaterEqual(_N['BOOT_TORQUE_ON_ATTEMPTS'], 2)
-        sb = self.src.split('def start_boot_home', 1)[1].split(
-            '\n    def ', 1)[0]
+        sb = _boot_home_path_src(self.src)
         self.assertIn('for attempt in range(BOOT_TORQUE_ON_ATTEMPTS)', sb)
         self.assertIn('BOOT_TORQUE_ON_RETRY_S', sb)
         # exhausting the retries must fail LOUD in German, not fall through
@@ -2714,6 +2733,7 @@ class TestEdu1ArmSpec(unittest.TestCase):
         self.assertEqual(rebound, {
             'SERVO_IDS', 'JOINT_NAMES', 'HOME_JOINTS_RAD', 'GRIPPER_OPEN_RAD',
             'JOINT_LIMITS_RAD', '_DEFAULT_SIGNS', 'TORQUE_SERVICE',
+            'HOME_SERVICE',
             'GEOMETRY_SPEC',
         })
 

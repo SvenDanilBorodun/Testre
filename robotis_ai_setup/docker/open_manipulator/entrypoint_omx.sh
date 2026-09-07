@@ -10,8 +10,50 @@ set -e
 # healthy.
 FOLLOWER_ONLY="${EDUBOTICS_FOLLOWER_ONLY:-0}"
 
+# Explicit student activation (2026-09-07). Bringing this container up used to
+# BE a powered motion: Phase 3 below homed the follower or glided it onto the
+# leader pose, edu6_arm_node.py homed itself, and the leader's trajectory
+# broadcaster spawned in Phase 1 — so on a both-arms rig the follower began
+# mirroring the leader before any browser was open. With this flag set (the
+# default) nothing here moves the arm. The arm comes up torqued and SILENT,
+# holding its power-up pose, and activation_agent.py holds the home glide, the
+# leader sync and the teleop spawn until a logged-in student presses „Roboter
+# aktivieren" on the Startseite.
+#
+# Torque is deliberately NOT gated: both Feetech arms backdrive and the OMX
+# follower is held only by servo torque, so an un-torqued arm falls rather than
+# waits. Gating MOTION, not POWER, is the same call start_boot_home already
+# makes when its floor guard refuses (CLAUDE.md Rule §2).
+#
+# EDUBOTICS_REQUIRE_ACTIVATION=0 is the one-variable rollback to the old
+# behaviour, in all four places that read it: here, omx_l_leader_ai.launch.py
+# (broadcaster back in the boot spawner), edu6_arm_node.py (boot home) and
+# activation_agent.py (reports `active` from the start).
+# The value is WHITESPACE-NORMALISED before the comparison, and that is not
+# cosmetic. The other three readers all call .strip(); this one did not, and
+# `config_generator.upsert_env_var` ALWAYS quotes what it writes, so a hand-set
+# `EDUBOTICS_REQUIRE_ACTIVATION="0 "` reached the container verbatim: the shell
+# kept the gate ON (no boot home) while omx_l_leader_ai.launch.py turned it OFF
+# (broadcaster back in the boot spawner) — teleop live at boot with the
+# follower at an arbitrary power-up pose, which is worse than either design.
+# tests/test_activation_agent.py::TestGateParserLockstep runs all four parsers
+# over one value table and fails on any disagreement.
+REQUIRE_ACTIVATION="${EDUBOTICS_REQUIRE_ACTIVATION:-1}"
+REQUIRE_ACTIVATION="$(printf '%s' "$REQUIRE_ACTIVATION" | tr -d '[:space:]')"
+if [ "$REQUIRE_ACTIVATION" = "0" ]; then
+    REQUIRE_ACTIVATION=0
+else
+    REQUIRE_ACTIVATION=1
+fi
+
 # Set up signal handling early — before any background processes are launched
 PIDS=""
+# Teardown sentinel. The activation-agent supervisor below runs in a SUBSHELL,
+# so it cannot see CLEANUP_DONE; a file is the only state both halves share.
+# Without it, a clean SIGTERM exit of the agent reads as a crash and the
+# supervisor respawns it while the container is being torn down.
+STOPPING_FLAG="/tmp/.edubotics-stopping"
+rm -f "$STOPPING_FLAG" 2>/dev/null || true
 disable_torque() {
     # Best-effort: tell the Dynamixel hardware interface to drop torque so
     # the arm doesn't fall under gravity when our ROS nodes die. Both arms
@@ -46,6 +88,9 @@ cleanup() {
         return
     fi
     CLEANUP_DONE=1
+    # Tell the activation-agent supervisor (a subshell) to stop respawning
+    # BEFORE anything is killed.
+    : > "$STOPPING_FLAG" 2>/dev/null || true
     echo "[SHUTDOWN] Stopping all processes..."
     disable_torque
     for pid in $PIDS; do
@@ -245,7 +290,17 @@ else
     sleep 2
     echo "[LAUNCH] Leader ready."
 
-    # Read leader's current position
+    # Read leader's current position.
+    #
+    # Skipped entirely when activation is required: the agent reads the leader
+    # pose itself, at activation time, WITH A TIMEOUT. This read has none — if
+    # the leader never publishes a message carrying all six joint names, the
+    # `$(...)` blocks the entrypoint forever and the container never goes
+    # healthy. Not needing it at boot removes that hang from the boot path.
+    if [ "$REQUIRE_ACTIVATION" = "1" ]; then
+        echo "[LAUNCH] Leader-Pose wird erst bei der Aktivierung gelesen."
+        LEADER_POS=""
+    else
     LEADER_POS=$(python3 -c "
 import rclpy, json
 from rclpy.node import Node
@@ -277,6 +332,7 @@ rclpy.shutdown()
 " 2>/dev/null)
 
     echo "[LAUNCH] Leader position: ${LEADER_POS}"
+    fi
 
     # NOTE: Roboter Studio runs FOLLOWER-ONLY (the GUI starts it with
     # EDUBOTICS_FOLLOWER_ONLY=1), so this leader-present path is the
@@ -307,12 +363,21 @@ fi
 # Publish trajectory directly to /leader/joint_trajectory (the topic the
 # follower's arm_controller subscribes to via remapping).
 # Uses quintic smoothing over 3s so the follower glides to the leader position.
-# A Feetech arm self-homes inside edu6_arm_node.py (quintic boot-home) and has
+# A Feetech arm homes inside edu6_arm_node.py (on demand since the activation
+# gate; quintic, same guards) and has
 # no gripper_joint_1 — the OMX FOLLOWER_ONLY home block below would otherwise
 # wait 10s for a joint that never arrives and log a false '[WARN] No
 # /joint_states for follower'. Skip the whole OMX Phase 3 for it; the OMX path
 # is byte-identical.
-if [ "$FEETECH_ARM" != "1" ]; then
+#
+# 2026-09-07: the WHOLE of Phase 3 now sits behind REQUIRE_ACTIVATION. With the
+# gate on (the default) neither branch below runs — the follower keeps the pose
+# it powered up in until activation_agent.py is told to move it. The branches
+# themselves are untouched so the rollback is a true rollback.
+if [ "$REQUIRE_ACTIVATION" = "1" ]; then
+    echo "[LAUNCH] Aktivierung erforderlich: der Roboter bleibt beim Start stehen."
+    echo "[LAUNCH] Er fährt erst in die Grundstellung, wenn ein angemeldeter Schüler auf der Startseite auf „Roboter aktivieren\" drückt."
+elif [ "$FEETECH_ARM" != "1" ]; then
 if [ -n "$LEADER_POS" ] && [ "$LEADER_POS" != "null" ]; then
     echo "[LAUNCH] Moving follower to match leader (3s smooth trajectory)..."
     python3 -c "
@@ -575,7 +640,48 @@ rclpy.shutdown()
 else
     echo "[WARN] Could not read leader position — skipping sync"
 fi
-fi  # end Feetech Phase-3 skip guard
+fi  # end activation gate / Feetech Phase-3 skip guard
+
+# --- Phase 3.5: activation agent ---
+# Runs on EVERY profile and in BOTH modes. With the gate on it owns the home
+# glide, the leader sync and the teleop spawn; with the gate off it reports
+# `active` immediately so the Startseite never claims an un-activated robot
+# that the boot path already homed. Serving /edubotics/activate is its only
+# side effect until a student calls it.
+echo "[LAUNCH] Aktivierungs-Agent wird gestartet..."
+# SUPERVISED, unlike every other helper here, because its failure is SILENT and
+# TOTAL: the healthcheck only proves topics exist, so a dead agent leaves a
+# green container in which the arm can never be activated for the whole
+# session — where a dead camera_ingest_node just turns the container unhealthy.
+# Bounded at 5 RUNS in total (the first plus four restarts) so a persistently
+# crashing agent cannot spin the log, and gated on the teardown sentinel so a
+# clean SIGTERM exit is not treated as a crash and respawned while the
+# container is going down.
+#
+# PIDS records the SUPERVISOR SUBSHELL, not the python grandchild, so
+# cleanup()'s kill does not reach the agent directly. That is deliberate and
+# harmless: this script is PID 1, the sentinel stops the loop before anything
+# is killed, the agent holds no hardware (torque-off on teardown is
+# disable_torque()'s job, over a ROS service), and container teardown reaps the
+# grandchild. Reaching it directly would mean running python in the background
+# inside the subshell and wait-ing on it, because a trap cannot fire while the
+# subshell is blocked on a foreground child — more machinery than the
+# asymmetry costs.
+(
+    attempt=0
+    while [ ! -e "$STOPPING_FLAG" ] && [ "$attempt" -lt 5 ]; do
+        python3 /usr/local/bin/activation_agent.py || true
+        [ -e "$STOPPING_FLAG" ] && break
+        attempt=$((attempt + 1))
+        if [ "$attempt" -lt 5 ]; then
+            echo "[WARNUNG] Der Aktivierungs-Agent wurde beendet (Versuch ${attempt}/5) — Neustart in 2 s."
+            sleep 2
+        else
+            echo "[FEHLER] Der Aktivierungs-Agent startet nicht mehr. Der Roboter kann nicht aktiviert werden — bitte die Umgebung neu starten."
+        fi
+    done
+) &
+PIDS="$PIDS $!"
 
 # --- Phase 4: Launch Cameras ---
 if [ "$EDUBOTICS_CAMERA_SOURCE" = "native_bridge" ]; then
@@ -719,7 +825,11 @@ done
 fi
 
 echo "========================================"
-echo "All services running — ready for teleoperation and inference."
+if [ "$REQUIRE_ACTIVATION" = "1" ]; then
+    echo "All services running — awaiting student activation (/edubotics/activate)."
+else
+    echo "All services running — ready for teleoperation and inference."
+fi
 echo "========================================"
 
 wait

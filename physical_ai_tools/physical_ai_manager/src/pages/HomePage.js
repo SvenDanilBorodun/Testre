@@ -43,6 +43,7 @@ import { useSelector } from 'react-redux';
 
 import HeartbeatStatus from '../components/HeartbeatStatus';
 import { Pill, SectionHeader } from '../components/EbUI';
+import ActivationCard from '../components/Home/ActivationCard';
 import RobotHero from '../components/Home/RobotHero';
 import HealthCard from '../components/Home/HealthCard';
 import WorkCard from '../components/Home/WorkCard';
@@ -99,6 +100,18 @@ export default function HomePage() {
         )}
 
         <div className="grid grid-cols-12 gap-4 md:gap-6">
+          {/* The ONE control on this page, and the reason the page is allowed
+              one: bringing the environment up no longer moves the arm, so
+              something has to. It navigates nowhere and is gated on no
+              capability — every profile has to be activated — which is why the
+              „no recording entry point" invariant this page documents is
+              untouched. In cloud mode there is no robot to activate. */}
+          {!cloudOnly && (
+            <div className="col-span-12">
+              <ActivationCard />
+            </div>
+          )}
+
           {/* In cloud mode there is no robot to show, so the hero would be a
               picture of nothing. The health card carries the mode instead and
               „Deine Arbeit" — which is cloud data — takes the full width. */}

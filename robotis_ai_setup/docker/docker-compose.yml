@@ -160,6 +160,17 @@ services:
       # because the leader stays at the student's desk. Listed here so
       # the env-forwarding-guard CI job stays green.
       - EDUBOTICS_FOLLOWER_ONLY=${EDUBOTICS_FOLLOWER_ONLY:-0}
+      # Explicit student activation (2026-09-07). With this ON (the default)
+      # NOTHING moves the arm at container start: entrypoint_omx.sh skips its
+      # whole Phase 3, omx_l_leader_ai.launch.py leaves the leader's trajectory
+      # broadcaster OUT of the boot spawner (so /leader/joint_trajectory has no
+      # publisher and teleop cannot run), and edu6_arm_node.py only energises.
+      # activation_agent.py then holds the home glide, the leader sync and the
+      # teleop spawn until a logged-in student presses „Roboter aktivieren" on
+      # the Startseite. Torque is deliberately NOT gated — an un-torqued arm
+      # falls rather than waits. `0` is the one-variable rollback to the old
+      # boot-home + boot-teleop behaviour, honoured by all four readers.
+      - EDUBOTICS_REQUIRE_ACTIVATION=${EDUBOTICS_REQUIRE_ACTIVATION:-1}
       # Camera capture source. native_bridge = cameras captured natively on
       # the Windows host and streamed in over TCP (WSL2 student path —
       # camera_ingest_node.py republishes them; usbipd cannot sustain UVC at

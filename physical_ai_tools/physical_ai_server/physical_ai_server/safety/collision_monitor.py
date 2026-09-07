@@ -371,8 +371,21 @@ class CollisionMonitorMixin:
         Sole signal: live /leader/joint_states within `fresh_window_s`. A powered
         leader publishes joint states continuously at ~100 Hz, so a sample inside
         the window is real-time proof a leader is running; staleness/absence is
-        proof it is not — and it is the same condition that governs whether the
-        leader broadcaster contends on /leader/joint_trajectory.
+        proof it is not.
+
+        2026-09-07 — READ THIS BEFORE REASONING FROM IT. This used to add: „and
+        it is the same condition that governs whether the leader broadcaster
+        contends on /leader/joint_trajectory." Since the activation gate that
+        equivalence is GONE — the leader's joint_state_broadcaster still spawns
+        at boot while joint_trajectory_command_broadcaster does not, so a live
+        /leader/joint_states proves a leader ARM is powered, not that anything
+        is commanding the follower. Every consumer is therefore now CONSERVATIVE
+        in the safe direction (it can arm or refuse while there is provably no
+        contention), which is why the predicate itself was left alone:
+        narrowing it would be a change to collision gating, i.e. an ask-first
+        decision. The one user-visible consequence is written up in
+        docs/KNOWN-ISSUES.md — on an un-activated both-arms rig a hand-press on
+        the still follower can trip the e-stop into the two-step recovery.
 
         EDUBOTICS_FOLLOWER_ONLY is deliberately NOT consulted here. The GUI leader
         toggle recreates ONLY the open_manipulator container (`--no-deps`), so

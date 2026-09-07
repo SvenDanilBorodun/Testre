@@ -1118,7 +1118,9 @@ def restart_open_manipulator(log=None) -> bool:
     """Recreate ONLY open_manipulator in place (the Roboter-Studio leader
     toggle). ``--no-deps`` leaves physical_ai_server + the manager running, so
     the student's session stays connected — only the arm topics blip for ~15-20 s
-    while the arm re-homes. Compose reads the freshly-written .env via
+    while the arm restarts (it no longer re-homes — see the activation gate;
+    the student re-activates from the Startseite). Compose reads the
+    freshly-written .env via
     ``--env-file``, so a new FOLLOWER_ONLY value takes effect. No image pull."""
     return _compose_up("open_manipulator", log=log, timeout=DOCKER_STARTUP_TIMEOUT + 60)
 

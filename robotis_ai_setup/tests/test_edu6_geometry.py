@@ -328,11 +328,29 @@ class TestTheRefusalLeavesTheArmTorqued(unittest.TestCase):
     def setUp(self):
         self.src = _read(_NODE)
         tree = ast.parse(self.src)
+        # 2026-09-07: start_boot_home was split by the activation gate into
+        # boot_energise (torque on, no motion — all that boot does now) and
+        # run_home (the glide, reached from /edu6/home when a logged-in student
+        # presses „Roboter aktivieren"). The floor pre-check guards the GLIDE,
+        # so it moved with it; this class follows it rather than the name.
         self.fn = next(
+            (n for n in ast.walk(tree)
+             if isinstance(n, ast.FunctionDef) and n.name == 'run_home'),
+            None)
+        self.assertIsNotNone(self.fn, 'run_home not found')
+        self.composite = next(
             (n for n in ast.walk(tree)
              if isinstance(n, ast.FunctionDef) and n.name == 'start_boot_home'),
             None)
-        self.assertIsNotNone(self.fn, 'start_boot_home not found')
+        self.assertIsNotNone(self.composite, 'start_boot_home not found')
+
+    def test_the_rollback_path_still_goes_through_the_precheck(self):
+        """EDUBOTICS_REQUIRE_ACTIVATION=0 restores boot homing, and it must
+        restore it THROUGH this guard — not around it."""
+        body = ast.get_source_segment(self.src, self.composite)
+        self.assertIn('self.boot_energise()', body)
+        self.assertIn('self.run_home(', body)
+        self.assertNotIn('_replace_trajectory', body)
 
     def test_the_precheck_runs_before_the_trajectory_is_installed(self):
         body = ast.get_source_segment(self.src, self.fn)

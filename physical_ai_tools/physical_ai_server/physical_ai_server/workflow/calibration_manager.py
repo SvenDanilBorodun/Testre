@@ -194,7 +194,47 @@ SCENE_EXTRINSIC_REGION_Y_ABS = _safe_float_env('EDUBOTICS_EXTRINSIC_REGION_Y_ABS
 # tilt). Measures the table height directly in the IK/end-effector frame, the
 # quantity the grasp descends to. The plane-fit residual + xy-spread gates
 # reject a sloppy or near-collinear capture.
-TABLE_TOUCH_POINTS_REQUIRED = 3
+#
+# WHY FOUR AND NOT THREE (2026-09-08, owner-authorised — this is Rule §2 land:
+# the plane fitted here IS where every grasp descends).
+#
+# A plane has 3 parameters, so at EXACTLY 3 taps the least-squares fit passes
+# through all three taps and the residual is ZERO for any input whatsoever —
+# TABLE_TOUCH_MAX_RESIDUAL_M was mathematically incapable of firing. Measured
+# over 3000 accepted 3-tap captures with 3 mm of tap noise: rms was exactly
+# 0.0000 mm in 3000/3000, and one deliberately bad tap was still accepted at
+# 200 mm of error. At 4 taps the same draw gives rms mean 1.18 mm / max 5.36 mm
+# (non-zero in 3000/3000) and a single bad tap is REFUSED from 33 mm up.
+#
+# The second half is the grasp height itself. On a genuinely FLAT table the
+# fitted plane's noise-driven tilt is extrapolated to the object, so the
+# commanded grasp can land BELOW the true surface — the tail RS-07 bought when
+# the grasp height started following the plane. Monte-Carlo, flat table, 3 mm
+# tap noise, student tap layout drawn at random and re-drawn until the existing
+# spread gates accept it, object 12 cm from the tap centroid, commanded
+# fingertip = plane(x, y) + (object_height − grasp_depth) = plane + 15 mm:
+#
+#   taps   P(commanded below the true surface)   SD of the plane error at 12 cm
+#     3                 1.73 %                            6.33 mm
+#     4                 0.75 %                            5.10 mm
+#     5                 0.25 %                            4.38 mm
+#     6                 0.05 %                            3.65 mm
+#
+# (the pre-RS-07 scalar height was 0.00 % at every count, but was
+# DETERMINISTICALLY 1.9–8.3 mm inside a tilted surface, which is the worse
+# trade.) Four is where the vacuous gate stops being vacuous; five would buy
+# another 3x on the tail and is the next step if a rig ever asks for it.
+#
+# NOT a harder classroom ask: with more taps the existing spread gates are
+# EASIER to satisfy, so the student re-taps LESS — measured 0.98 rejected
+# captures per accepted one at 3 taps against 0.25 at 4.
+#
+# A repeated tap at the same spot is harmless and was checked, not assumed: an
+# exact duplicate 4th tap still yields rms mean 1.1978 mm (the two copies carry
+# independent tap noise, so the fit cannot interpolate both) and actually LOWERS
+# the plane error at the object (SD 3.54 mm vs 3.91 mm for a spread 4th tap),
+# so no minimum-separation gate is needed.
+TABLE_TOUCH_POINTS_REQUIRED = 4
 TABLE_TOUCH_MAX_RESIDUAL_M = 0.008      # 8 mm — points must lie on one plane
 TABLE_TOUCH_MIN_SPREAD_M = 0.06         # the xy points must span >= 6 cm (radius)
 # The points must also span a 2D AREA, not a line: near-collinear points pass a
@@ -202,6 +242,56 @@ TABLE_TOUCH_MIN_SPREAD_M = 0.06         # the xy points must span >= 6 cm (radiu
 # unconstrained (lstsq returns 0 residual on the rank-deficient fit). Gate on
 # the minor-axis (perpendicular) rms spread.
 TABLE_TOUCH_MIN_MINOR_M = 0.015         # >= 1.5 cm spread off the dominant line
+
+# Ground-truth accuracy check ("Genauigkeit prüfen") — gates on fit_xy_correction.
+#
+# MIN POINTS. A 2D similarity has 4 DOF, so two point pairs give 4 equations for
+# 4 unknowns: the fit is EXACTLY determined and its residual is zero for ANY
+# input, which made the reported "Restfehler Ø 0.0 mm" a quality number that
+# could not fail. Measured 2026-09-07: over 500 pairs of COMPLETELY RANDOM,
+# unrelated 2-point sets, 249 were accepted and the worst reported residual was
+# 0.000000 mm. At n=3 the residual becomes informative (6 equations, 4 unknowns):
+# the same random draw gave a mean of 97.2 mm and a MINIMUM of 7.7 mm over 200
+# sets. n=2 is also rank-1 in the Umeyama covariance, which makes the reflection
+# test a coin flip — the pairing truth==detected (a PERFECT capture) was refused
+# as an "Achsen-/Spiegelungsfehler" for [[0.20,0.02],[0.02,0.20]] while passing
+# for [[0.1,0.0],[0.0,0.1]]. So three is the smallest honest count.
+# Independently re-measured 2026-09-08 against the pre-fix code on fresh seeds:
+# 258/500 accepted at n=2 (10 further seeds averaged 239.8/500 = 48 %), worst
+# accepted residual still 0.000000 mm; 246/500 PERFECT 2-point captures refused
+# as a mirror against 0/500 at n=3; random 3-point sets bottomed out at 9.8 mm.
+# Different seeds, same conclusion — the numbers above are not second-hand.
+# This costs no UI path: AccuracyVerifyStep.jsx already enables "Lösen" only at
+# MIN_POINTS = 4, so n<3 was reachable only by a hand-made rosbridge call.
+VERIFY_MIN_POINTS = 3
+# ROTATION / SCALE bounds. This step is a ground-truth CHECK that refines an
+# already-solved extrinsic, so the correction it recovers should be small. An
+# unbounded fit happily absorbed a student mis-pairing the placed points: a
+# consistent 90° index shift over 3 and even 4 points returned ok=True with a
+# −90.00° rotation and a genuinely 0.0 mm residual (the mis-paired data IS an
+# exact similarity, so no residual gate and no extra points can ever catch it —
+# only a bound on the rotation can). At n=2 the accepted range ran to ±180°:
+# a sweep of 24 mis-pairings accepted 11 with |rotation| > 10°, up to 180.00°.
+# That is the same class of error as the mirror case already refused, so it is
+# refused the same way and persists NOTHING.
+# 30° sits clear of both ends: the smallest realistic mis-pairing is a 45°/90°
+# index shift, while test_fit_exact_similarity_recovery pins a legitimate 15°
+# recovery, and a near-collinear layout under 2 mm of measurement noise (300
+# draws) never exceeded 2.05°.
+# HONEST SCOPE: a mis-pairing only shows up as a LARGE rotation while the points
+# are few. Measured — a consistent one-index shift over N points on a ring
+# induces 360/N°, so it is refused up to N=12 and ESCAPES from N=13 (27.7°). For
+# the layouts the wizard actually asks for (4–6 points at arbitrary positions) a
+# one-index shift was refused 400/400 at each of N=4, 5 and 6. Raising the bound
+# to cover a 13-point ring would start refusing legitimate corrections, and a
+# ring of 13 hand-placed ground-truth points is not a classroom act.
+VERIFY_MAX_ROTATION_DEG = 30.0
+# A correction that rescales the workspace by more than a third is a wrong table
+# height / unit error, not a refinement (an unbounded fit accepted scale 2.0000
+# at 0.0 mm residual). The same 300 near-collinear noise draws stayed inside
+# [0.961, 1.039], and the pinned exact-similarity test uses 1.05.
+VERIFY_SCALE_MIN = 0.75
+VERIFY_SCALE_MAX = 1.0 / VERIFY_SCALE_MIN
 # Loose cross-check vs the camera extrinsic's board height: the touch plane
 # (end-effector frame, a finger-length above the table) and the camera board
 # height differ by the finger length, so only a GROSS disagreement (wrong sign
@@ -1225,7 +1315,17 @@ class CalibrationManager:
             if buf is None or len(buf.points) < TABLE_TOUCH_POINTS_REQUIRED:
                 have = len(buf.points) if buf else 0
                 need = TABLE_TOUCH_POINTS_REQUIRED - have
-                return False, 0.0, f'Es fehlen noch {need} Tisch-Punkte.'
+                if need == 1:
+                    return False, 0.0, (
+                        'Es fehlt noch 1 Tisch-Punkt — bitte den Greifer an '
+                        'einer weiteren Stelle auf den Tisch tippen und '
+                        '„Punkt erfassen" drücken.'
+                    )
+                return False, 0.0, (
+                    f'Es fehlen noch {need} Tisch-Punkte — insgesamt werden '
+                    f'{TABLE_TOUCH_POINTS_REQUIRED} gut verteilte Tipp-Stellen '
+                    'gebraucht (Ecken und Mitte der Arbeitsfläche).'
+                )
             pts = np.asarray(buf.points, dtype=np.float64)
             # Reject a too-clustered OR near-collinear capture: radial spread
             # catches clustering; the minor singular value of the centred XY
@@ -1293,7 +1393,32 @@ class CalibrationManager:
     def _write_table_plane(self, camera: str, a: float, b: float, c: float,
                            z_table: float) -> bool:
         """Re-write the scene extrinsic YAML with the measured z_table + plane
-        (a, b, c), preserving the existing camera→base transform."""
+        (a, b, c), preserving the existing camera→base transform AND the
+        ground-truth correction keys.
+
+        ``cv2.FileStorage`` has no in-place append, so this is a read-modify-
+        write of the WHOLE file: every key not re-derived here must be read
+        back and carried forward, or writing one step's result deletes another
+        step's.
+
+        THE GROUND-TRUTH CORRECTION IS ONE OF THOSE KEYS. It used not to be
+        carried, and that was a live defect, not a theoretical one:
+        ``EDUBOTICS_FORCE_RECALIBRATION`` ships ON, so the touch-off is
+        MANDATORY on every fresh container start — i.e. at the start of every
+        lesson — while „Genauigkeit prüfen" is not re-run. Measured 2026-09-08:
+        a full 4-step calibration persists ``xy_correction`` / ``yaw_bias_rad``;
+        the next boot's touch-off alone leaves ``read_verify_correction()``
+        answering ``None``, silently and with a green „Tisch vermessen"
+        message. Every grasp then ran on the UNCORRECTED extrinsic — which is
+        exactly the 90°/180°/mirror residual ``_check_extrinsic_orientation``
+        documents it CANNOT catch and that this correction exists to fix.
+
+        Carrying it forward is correct, not merely convenient: the correction is
+        fitted against a particular ``T_cam_to_base``, and this method does not
+        touch that transform — it only re-measures the table HEIGHT, which is a
+        robot-frame quantity the camera has no part in. (Re-running the EXTRINSIC
+        step DOES invalidate the correction, and ``_solve_scene_extrinsic``
+        deliberately keeps truncating the file for that reason.)"""
         path = self._handeye_path(camera)
         if not path.exists():
             return False
@@ -1306,6 +1431,16 @@ class CalibrationManager:
             board_y = float(by.real()) if not by.empty() else BOARD_ORIGIN_Y_M
             bz = fs.getNode('board_table_z')
             board_table_z = float(bz.real()) if not bz.empty() else BOARD_TABLE_Z_M
+            # Ground-truth correction keys, written by write_verify_correction.
+            # Absent on a rig that never ran „Genauigkeit prüfen" — then they
+            # simply are not re-written, exactly as before.
+            xy_correction = fs.getNode('xy_correction').mat()
+            yb = fs.getNode('yaw_bias_rad')
+            yaw_bias_rad = float(yb.real()) if not yb.empty() else None
+            vr = fs.getNode('verify_residual_mm')
+            verify_residual_mm = float(vr.real()) if not vr.empty() else None
+            vp = fs.getNode('verify_points')
+            verify_points = int(vp.real()) if not vp.empty() else None
             fs.release()
             if transform is None:
                 return False
@@ -1321,6 +1456,15 @@ class CalibrationManager:
             fs.write('board_table_z', float(board_table_z))
             fs.write('board_origin_x', float(board_x))
             fs.write('board_origin_y', float(board_y))
+            if xy_correction is not None:
+                fs.write('xy_correction',
+                         np.asarray(xy_correction, dtype=np.float64))
+            if yaw_bias_rad is not None:
+                fs.write('yaw_bias_rad', float(yaw_bias_rad))
+            if verify_residual_mm is not None:
+                fs.write('verify_residual_mm', float(verify_residual_mm))
+            if verify_points is not None:
+                fs.write('verify_points', int(verify_points))
             fs.write('captured_at', time.strftime('%Y-%m-%dT%H:%M:%S'))
             fs.release()
             return True
@@ -1412,8 +1556,9 @@ class CalibrationManager:
         metres) and the optional yaw bias.
 
         Args:
-            truth_xy, detected_xy: Nx2 base-frame metres, N>=2 (the KNOWN placed
-                positions vs the positions the current calibration detected).
+            truth_xy, detected_xy: Nx2 base-frame metres, N>=VERIFY_MIN_POINTS
+                (the KNOWN placed positions vs the positions the current
+                calibration detected).
             truth_yaws, detected_yaws: optional lists of yaw (rad). When >=1
                 paired value is given, ``yaw_bias_rad`` = circular-mean(truth −
                 detected); else 0.0.
@@ -1426,7 +1571,19 @@ class CalibrationManager:
         axis/orientation error that must NOT be silently "corrected" by folding
         a reflection into the affine — it would happily fit but every grasp's
         joint5 handedness would stay wrong. So we detect it, return ``ok=False,
-        mirror_detected=True`` with a German message, and persist NOTHING."""
+        mirror_detected=True`` with a German message, and persist NOTHING.
+
+        A gross ROTATION or SCALE is refused for the same reason and in the same
+        way (``ok=False``, ``xy_correction=None``, nothing persisted): it is a
+        mis-pairing of the placed points, not a refinement of the extrinsic, and
+        unlike a mirror it fits with a genuinely zero residual, so no residual
+        gate can catch it. ``mirror_detected`` stays False for those — only an
+        actual reflection sets it. See VERIFY_MAX_ROTATION_DEG / VERIFY_SCALE_MIN
+        for the bounds and the measurements behind them.
+
+        Every refusal path returns the SAME key set, including the non-finite
+        one — the contract is "always a dict", never a raise, because the ROS
+        layer reads the keys by name off a VerifyCalibration.srv response."""
         truth = np.asarray(truth_xy, dtype=np.float64).reshape(-1, 2)
         detected = np.asarray(detected_xy, dtype=np.float64).reshape(-1, 2)
         n = truth.shape[0]
@@ -1438,11 +1595,39 @@ class CalibrationManager:
                 'residual_mm_mean': 0.0, 'residual_mm_max': 0.0,
                 'mirror_detected': False, 'point_count': int(n),
             }
-        if n < 2:
+        if not np.all(np.isfinite(truth)) or not np.all(np.isfinite(detected)):
+            # This method's contract is "returns a dict"; a non-finite value
+            # broke it. Measured 2026-09-08: a NaN/inf in TRUTH raised
+            # ``LinAlgError('SVD did not converge')`` straight out of
+            # ``_umeyama_similarity_2d`` (the node's caller turns that into a
+            # generic „Korrekturberechnung fehlgeschlagen."), while a NaN/inf in
+            # DETECTED came back mis-diagnosed as „entartet (alle gleich)" plus a
+            # raw numpy RuntimeWarning on stderr. HONEST SCOPE: the shipped
+            # AccuracyVerifyStep already refuses a NaN truth value with its own
+            # German toast, so there is NO ordinary student path here — the
+            # reachable one is a direct /calibration/verify call, and rosbridge
+            # authenticates nobody. Refusing here only ever turns one refusal
+            # into a more accurate refusal; it can never accept anything new.
             return {
                 'ok': False,
-                'message': ('Mindestens zwei Referenzpunkte werden benötigt — '
-                            'bitte mehr Punkte erfassen.'),
+                'message': ('Ein Prüfpunkt enthält keinen gültigen Zahlenwert — '
+                            'bitte die Prüfpunkte zurücksetzen und die '
+                            'Soll-Positionen in Metern neu eingeben.'),
+                'xy_correction': None, 'yaw_bias_rad': 0.0,
+                'residual_mm_mean': 0.0, 'residual_mm_max': 0.0,
+                'mirror_detected': False, 'point_count': int(n),
+            }
+        if n < VERIFY_MIN_POINTS:
+            # NOT "at least two": with two points the fit is exactly determined
+            # and its residual is 0.0 mm for any input whatsoever, so accepting
+            # n=2 meant reporting a quality number that could never fail. See
+            # VERIFY_MIN_POINTS for the measurement.
+            return {
+                'ok': False,
+                'message': ('Mindestens drei Referenzpunkte werden benötigt — '
+                            'mit zwei Punkten lässt sich die Genauigkeit nicht '
+                            'prüfen (der Restfehler wäre immer 0 mm). Empfohlen '
+                            'sind 4–6 gut verteilte Punkte.'),
                 'xy_correction': None, 'yaw_bias_rad': 0.0,
                 'residual_mm_mean': 0.0, 'residual_mm_max': 0.0,
                 'mirror_detected': False, 'point_count': int(n),
@@ -1473,6 +1658,46 @@ class CalibrationManager:
                 'xy_correction': None, 'yaw_bias_rad': 0.0,
                 'residual_mm_mean': 0.0, 'residual_mm_max': 0.0,
                 'mirror_detected': True, 'point_count': int(n),
+            }
+        # Plausibility of the recovered similarity. This runs AFTER the mirror
+        # test so a reflected capture keeps its own, more specific message.
+        # M[:, :2] == s*R, so det == s**2 (positive here — the mirror case
+        # returned above) and atan2(m10, m00) is the rotation angle.
+        scale = float(np.sqrt(abs(det_linear)))
+        rotation_deg = float(np.degrees(np.arctan2(M[1, 0], M[0, 0])))
+        if not math.isfinite(scale) or not math.isfinite(rotation_deg):
+            return {
+                'ok': False,
+                'message': ('Die Korrektur konnte nicht berechnet werden — '
+                            'bitte die Punkte neu erfassen.'),
+                'xy_correction': None, 'yaw_bias_rad': 0.0,
+                'residual_mm_mean': 0.0, 'residual_mm_max': 0.0,
+                'mirror_detected': False, 'point_count': int(n),
+            }
+        if abs(rotation_deg) > VERIFY_MAX_ROTATION_DEG:
+            return {
+                'ok': False,
+                'message': (f'Die berechnete Korrektur dreht die Positionen um '
+                            f'{abs(rotation_deg):.0f}° — das ist zu viel für eine '
+                            'Feinkorrektur. Vermutlich wurden die Prüfpunkte in '
+                            'einer anderen Reihenfolge erfasst als sie liegen. '
+                            'Bitte die Punkte in der gleichen Reihenfolge noch '
+                            'einmal erfassen.'),
+                'xy_correction': None, 'yaw_bias_rad': 0.0,
+                'residual_mm_mean': 0.0, 'residual_mm_max': 0.0,
+                'mirror_detected': False, 'point_count': int(n),
+            }
+        if scale < VERIFY_SCALE_MIN or scale > VERIFY_SCALE_MAX:
+            return {
+                'ok': False,
+                'message': (f'Die berechnete Korrektur skaliert die Abstände um '
+                            f'das {scale:.2f}-fache — das ist zu viel für eine '
+                            'Feinkorrektur. Bitte prüfen, ob die Soll-Positionen '
+                            'in Metern eingegeben wurden und ob die Tischhöhe '
+                            'stimmt („Tisch vermessen").'),
+                'xy_correction': None, 'yaw_bias_rad': 0.0,
+                'residual_mm_mean': 0.0, 'residual_mm_max': 0.0,
+                'mirror_detected': False, 'point_count': int(n),
             }
         # Residuals: apply the fit to the detected points, compare vs truth (mm).
         corrected = (M[:, :2] @ detected.T).T + M[:, 2]

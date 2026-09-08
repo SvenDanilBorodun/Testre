@@ -250,6 +250,11 @@ def _write_extrinsic(calib_dir, board_table_z=0.0):
 
 # A clearly non-collinear triangle of touch points (passes the minor-axis gate).
 _TRIANGLE_XY = [(0.12, -0.08), (0.24, -0.06), (0.16, 0.09)]
+# TABLE_TOUCH_POINTS_REQUIRED went 3 -> 4 (2026-09-08): a 3-point plane fit
+# interpolates its 3 taps exactly, so TABLE_TOUCH_MAX_RESIDUAL_M could never
+# fire. These are the same three taps plus a well-separated fourth; the pair
+# is kept so the spread/collinearity fixtures below stay readable.
+_QUAD_XY = _TRIANGLE_XY + [(0.19, 0.01)]
 
 # The FK rotation of a strict-vertical (straight-down) grasp: the EE-link local
 # +x (approach axis, = R[:, 0]) points to base −z. This is what ik.fk() returns
@@ -352,11 +357,11 @@ def test_touch_off_full_flow_persists_measured_plane(calib_dir):
     from physical_ai_server.workflow.calibration_manager import CalibrationManager
     import cv2
     _write_extrinsic(calib_dir, board_table_z=0.0)
-    poses = _PoseSeq([[x, y, 0.03] for (x, y) in _TRIANGLE_XY])
+    poses = _PoseSeq([[x, y, 0.03] for (x, y) in _QUAD_XY])
     mgr = CalibrationManager(get_gripper_pose=poses)
     ok, _ = mgr.start_table_touch()
     assert ok
-    for _ in range(3):
+    for _ in range(len(_QUAD_XY)):
         ok, _n, _req, _ = mgr.capture_touch_point()
         assert ok
     assert mgr.has_table_plane('scene') is False  # not solved yet
@@ -377,10 +382,11 @@ def test_touch_off_full_flow_persists_measured_plane(calib_dir):
 def test_touch_off_rejects_clustered_points(calib_dir):
     from physical_ai_server.workflow.calibration_manager import CalibrationManager
     _write_extrinsic(calib_dir)
-    poses = _PoseSeq([[0.18, 0.0, 0.03], [0.182, 0.001, 0.03], [0.181, -0.001, 0.03]])
+    poses = _PoseSeq([[0.18, 0.0, 0.03], [0.182, 0.001, 0.03],
+                      [0.181, -0.001, 0.03], [0.179, 0.002, 0.03]])
     mgr = CalibrationManager(get_gripper_pose=poses)
     mgr.start_table_touch()
-    for _ in range(3):
+    for _ in range(4):
         mgr.capture_touch_point()
     ok, _rms, msg = mgr.solve_table_plane('scene')
     assert ok is False
@@ -391,10 +397,11 @@ def test_touch_off_rejects_collinear_points(calib_dir):
     from physical_ai_server.workflow.calibration_manager import CalibrationManager
     _write_extrinsic(calib_dir)
     # Good radial spread but on a straight line (y const) → zero tilt info.
-    poses = _PoseSeq([[0.12, 0.0, 0.03], [0.18, 0.0, 0.03], [0.26, 0.0, 0.03]])
+    poses = _PoseSeq([[0.12, 0.0, 0.03], [0.16, 0.0, 0.03],
+                      [0.21, 0.0, 0.03], [0.26, 0.0, 0.03]])
     mgr = CalibrationManager(get_gripper_pose=poses)
     mgr.start_table_touch()
-    for _ in range(3):
+    for _ in range(4):
         mgr.capture_touch_point()
     ok, _rms, msg = mgr.solve_table_plane('scene')
     assert ok is False
@@ -405,10 +412,10 @@ def test_touch_off_cross_check_rejects_gross_mismatch(calib_dir):
     from physical_ai_server.workflow.calibration_manager import CalibrationManager
     _write_extrinsic(calib_dir, board_table_z=0.0)
     # Touch plane at z=0.5 m vs the board at 0.0 → |Δ| 0.5 > 0.12 → reject.
-    poses = _PoseSeq([[x, y, 0.5] for (x, y) in _TRIANGLE_XY])
+    poses = _PoseSeq([[x, y, 0.5] for (x, y) in _QUAD_XY])
     mgr = CalibrationManager(get_gripper_pose=poses)
     mgr.start_table_touch()
-    for _ in range(3):
+    for _ in range(len(_QUAD_XY)):
         mgr.capture_touch_point()
     ok, _rms, msg = mgr.solve_table_plane('scene')
     assert ok is False
@@ -437,10 +444,10 @@ def test_approach_tilt_deg_handles_bad_rotation(calib_dir):
 def test_touch_off_accepts_vertical_tap(calib_dir):
     from physical_ai_server.workflow.calibration_manager import CalibrationManager
     _write_extrinsic(calib_dir, board_table_z=0.0)
-    poses = _PoseSeq([[x, y, 0.03] for (x, y) in _TRIANGLE_XY])  # R defaults vertical
+    poses = _PoseSeq([[x, y, 0.03] for (x, y) in _QUAD_XY])  # R defaults vertical
     mgr = CalibrationManager(get_gripper_pose=poses)
     mgr.start_table_touch()
-    for _ in range(3):
+    for _ in range(len(_QUAD_XY)):
         ok, _n, _req, msg = mgr.capture_touch_point()
         assert ok, msg
 

@@ -17,6 +17,7 @@ import {
   clearWorkflowLog,
   toggleDebugger,
   clearVariables,
+  clearCounters,
   clearWorkflowError,
   setDebuggerWarnings,
 } from '../../features/workshop/workshopSlice';
@@ -71,6 +72,47 @@ const TEMPO_PRESETS = [
 
 function clampTempo(value) {
   return Math.min(TEMPO_MAX, Math.max(TEMPO_MIN, value));
+}
+
+// ── Run-payload slimming ─────────────────────────────────────────────────────
+// `Blockly.serialization.workspaces.save()` emits ONE key per registered
+// workspace serializer, and two of the editor plugins register their own. The
+// interpreter reads none of them, but they still count against the server's
+// MAX_WORKFLOW_JSON_BYTES (256 KiB) and the cloud's 384 KB body middleware:
+//
+//   `suggested-blocks` — @blockly/suggested-blocks. Its listener does
+//     `recentlyUsedBlocks.unshift(type)` on every BLOCK_CREATE and NEVER trims,
+//     plus `defaultJsonForBlockLookup[type] = event.json`, the full JSON of the
+//     first instance of every block type the student has ever dragged. Both
+//     round-trip through save/load, so the array survives reloads and grows for
+//     the life of the workflow. Measured (Blockly 12.5.1, headless, real
+//     plugin): 50 drags → 1.3 KB, 500 → 8.3 KB, 2000 → 31.7 KB, unbounded.
+//   `backpack` — @blockly/workspace-backpack serializes the student's stashed
+//     blocks, i.e. one student's private clipboard rides inside a shared
+//     workflow's run payload.
+//
+// So the RUN payload is narrowed to the two keys that describe the program.
+// This is the RUN PATH ONLY: autosave (useAutosave) and save-to-cloud
+// (WorkshopPage.handleSave) keep the full serializer output on purpose — that
+// is what makes a student's backpack and block suggestions survive a reload.
+// They read the same `editorJson` object, so this builds a fresh object and
+// never mutates it.
+//
+// `variables` is kept because a workspace with variable blocks is meaningless
+// without it. Note an EMPTY workspace serializes to `{}` with no `blocks` key
+// at all (measured), so a missing key must stay missing rather than become
+// `undefined` — hence the hasOwnProperty guard.
+const RUN_PAYLOAD_SERIALIZER_KEYS = ['blocks', 'variables'];
+
+function slimRunPayload(blocklyJson) {
+  if (!blocklyJson || typeof blocklyJson !== 'object') return {};
+  const out = {};
+  for (const key of RUN_PAYLOAD_SERIALIZER_KEYS) {
+    if (Object.prototype.hasOwnProperty.call(blocklyJson, key)) {
+      out[key] = blocklyJson[key];
+    }
+  }
+  return out;
 }
 
 function readStoredTempo(fallback) {
@@ -340,6 +382,13 @@ function RunControls({
     try {
       dispatch(clearWorkflowLog());
       dispatch(clearVariables());
+      // The „Zähler" section's retirement, the sibling of clearVariables(). The
+      // server re-emits [CNT:] only when a counter is WRITTEN, so a program
+      // whose „setze Zähler auf 0" sits behind a condition would otherwise show
+      // the PREVIOUS run's tally until the first increment — and a program that
+      // only READS a counter would show it for the whole run. Cleared here, with
+      // the others, so every abort path below is covered too.
+      dispatch(clearCounters());
       // The previous run's red „Fehler" alert. It belongs with the three clears
       // around it and was the only one missing: the server sends no status after
       // a terminal `error` phase, so nothing else clears it until the NEW run's
@@ -439,15 +488,23 @@ function RunControls({
       // BOTH branches. `Interpreter.from_json` reads only `data['blocks']`, so
       // the server's WorkflowManager._parse_tempo picks it up while the
       // interpreter ignores it — exactly like `zones`/`sim`.
+      //
+      // RS-50: the SERIALIZER half of the payload is narrowed to `blocks` +
+      // `variables` (see slimRunPayload) — the two editor-plugin keys are dead
+      // weight against the 256 KiB server cap and the 384 KB cloud middleware.
+      // The `sim` / `zones` / `tempo` / `trajectories` siblings below are NOT
+      // serializer keys; they are added by this payload and the server parses
+      // each of them, so they ride on top of the slimmed base.
+      const programJson = slimRunPayload(blocklyJson);
       const workflowJsonStr = simMode
         ? JSON.stringify({
-            ...(blocklyJson || {}),
+            ...programJson,
             sim: { enabled: true, objects: simObjects },
             zones,
             tempo,
             trajectories,
           })
-        : JSON.stringify({ ...(blocklyJson || {}), zones, tempo, trajectories });
+        : JSON.stringify({ ...programJson, zones, tempo, trajectories });
       const r = await callService(
         '/workflow/start',
         'physical_ai_interfaces/srv/StartWorkflow',

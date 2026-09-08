@@ -54,6 +54,7 @@ import {
   setSensorSnapshot,
   setPaused,
   setVariable,
+  setCounter,
 } from '../features/workshop/workshopSlice';
 import HFStatus from '../constants/HFStatus';
 import store from '../store/store';
@@ -952,6 +953,7 @@ export function useRosTopicSubscription() {
   //   "[TOAST:level:sec:t]" — on-screen react-hot-toast popup (level →
   //                           info/success/warning/error, sec = duration)
   //   "[VAR:name=json]"     — variable inspector update
+  //   "[CNT:name=int]"      — Zähler inspector update (own section, own map)
   // None of the tokens leak into the user-visible log strip.
   const interceptToken = useCallback((message) => {
     if (typeof message !== 'string') return { intercepted: false };
@@ -1042,6 +1044,46 @@ export function useRosTopicSubscription() {
         store.dispatch(setVariable({ name: rawName, value }));
       } catch (e) {
         console.warn('VAR token parse failed', e);
+      }
+      return { intercepted: true };
+    }
+    // [CNT:name=int] — the „Zähler" half of the Debug-Panel. A SEPARATE token
+    // and a separate map from [VAR:], because „Punkte" is pre-filled in all
+    // three Zähler blocks and is just as plausible a variable name: one shared
+    // store would have a student's variable and their counter overwrite each
+    // other silently.
+    //
+    // The NAME capture is GREEDY where [VAR:]'s is `[^=]+`, and that is not a
+    // stylistic difference. `blocks/counters.js::counterNameValidator` forbids
+    // only `[\r\n\0[\]]`, so „Punkte=2" is a counter name a student can type
+    // today — and it may NOT be forbidden retroactively, because a Blockly
+    // field validator also runs during deserialization and would rewrite names
+    // inside already-saved workflows. Greedy + a digits-only value splits on
+    // the LAST `=`, which is unambiguous (a value can contain none), so such a
+    // sentinel still FRAMES, is refused by the name gate below, and is
+    // CONSUMED. With `[^=]+` the frame would simply fail to match and the raw
+    // `[CNT:Punkte=2=5]` would print itself into the student's Protokoll on
+    // every single increment.
+    m = /^\[CNT:(.+)=(-?\d+)\]$/s.exec(message);
+    if (m) {
+      try {
+        const rawName = String(m[1] ?? '');
+        const rawDigits = String(m[2] ?? '');
+        // 15 digits keeps parseInt exact (< 2^53) with 5 to spare over the
+        // server's own 1e9 clamp in handlers/counters.py::_COUNTER_MAX.
+        if (rawName.length > VAR_NAME_MAX_LEN || rawDigits.replace('-', '').length > 15) {
+          return { intercepted: true };
+        }
+        // The SAME predicate the [VAR:] gate and both reducers use.
+        if (!isDisplayableVariableName(rawName)) {
+          return { intercepted: true };
+        }
+        if (rawName === '__proto__' || rawName === 'constructor' || rawName === 'prototype') {
+          return { intercepted: true };
+        }
+        store.dispatch(setCounter({ name: rawName, value: Number.parseInt(rawDigits, 10) }));
+      } catch (e) {
+        console.warn('CNT token parse failed', e);
       }
       return { intercepted: true };
     }

@@ -27,8 +27,12 @@ const HAT_SHAPE = {
 // lowercases the field KEY → arg `name`, never the VALUE). Trim, forbid the
 // control + bracket chars that would break audit-log scraping or spoof a
 // [TOAST:..]/[VAR:..] sentinel, and cap the length. Mirrors events.js.
-const NAME_MAX_LEN = 40;
-function counterNameValidator(newValue) {
+// Exported for the RS-50 counter-sentinel suites ONLY — they measure which
+// names this field really produces instead of asserting a hand-written list.
+// Nothing in src/ imports either symbol; `registerCounterBlocks` below is still
+// the only production consumer.
+export const NAME_MAX_LEN = 40;
+export function counterNameValidator(newValue) {
   if (typeof newValue !== 'string') return null;
   const trimmed = newValue.trim();
   if (trimmed === '') return null;

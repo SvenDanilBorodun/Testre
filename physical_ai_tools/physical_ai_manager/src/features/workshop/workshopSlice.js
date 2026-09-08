@@ -105,6 +105,11 @@ const initialState = {
   sensorSnapshot: emptySensorSnapshot(),
   // Variable inspector — Map-like {name: {value, ts}}
   variables: {},
+  // Zähler inspector — the SAME shape, a SEPARATE map. „Punkte" is the name
+  // pre-filled in all three Zähler blocks and a perfectly ordinary variable
+  // name too, so one shared map would have a student's variable and their
+  // counter silently overwrite each other. Fed by the [CNT:name=int] sentinel.
+  counters: {},
 
   // Editor state
   selectedWorkflowId: null,
@@ -414,6 +419,53 @@ const workshopSlice = createSlice({
     clearVariables: (state) => {
       state.variables = {};
     },
+    // The [CNT:name=int] twin of setVariable. Same three gates in the same
+    // order — prototype names, then the SHARED display predicate, then the cap
+    // — plus one the variables path cannot have: a counter is an integer, so a
+    // non-integer value is refused rather than rendered as a quoted string in a
+    // column the panel labels „Wert" for a whole number.
+    setCounter: (state, action) => {
+      const COUNTER_LIMIT = 256;
+      const { name, value } = action.payload || {};
+      if (typeof name !== 'string' || !name) return;
+      // Prototype-pollution guard, kept HERE and not folded into
+      // `isDisplayableVariableName` — for the same reason `setVariable` keeps
+      // its own copy: these three are displayable, they are just unsafe as
+      // object keys, and a folded check makes deleting either call site's guard
+      // invisible to a test.
+      if (name === '__proto__' || name === 'constructor' || name === 'prototype') return;
+      // The ONE predicate, shared with setVariable and both wire gates. Never a
+      // local regex — a second copy is exactly what RS-49 was.
+      if (!isDisplayableVariableName(name)) return;
+      // `reset` writes 0 and `add` writes int+1, and the wire frame captures
+      // digits only, so anything else did not come from a counter block.
+      if (!Number.isInteger(value)) return;
+      const ts = Date.now();
+      const isNew = !(name in state.counters);
+      if (isNew) {
+        const keys = Object.keys(state.counters);
+        if (keys.length >= COUNTER_LIMIT) {
+          let oldestKey = null;
+          let oldestTs = Infinity;
+          for (const k of keys) {
+            const t = state.counters[k]?.ts ?? 0;
+            if (t < oldestTs) {
+              oldestTs = t;
+              oldestKey = k;
+            }
+          }
+          if (oldestKey) delete state.counters[oldestKey];
+        }
+      }
+      state.counters[name] = { value, ts };
+    },
+    // RETIREMENT, half one: RunControls.handleStart dispatches this next to
+    // clearVariables() on every „Start", so a run never shows the previous
+    // run's tally. (Half two is the `signedOut` case below — without it the
+    // next student at a shared classroom PC inherits these rows.)
+    clearCounters: (state) => {
+      state.counters = {};
+    },
     addBreakpoint: (state, action) => {
       const id = action.payload;
       if (!id || state.breakpoints.includes(id)) return;
@@ -509,6 +561,7 @@ const workshopSlice = createSlice({
       // warnings about their destinations.
       state.log = [];
       state.variables = {};
+      state.counters = {};
       state.breakpoints = [];
       state.debuggerWarnings = [];
       state.workflowError = null;
@@ -563,6 +616,8 @@ export const {
   setSensorSnapshot,
   setVariable,
   clearVariables,
+  setCounter,
+  clearCounters,
   addBreakpoint,
   removeBreakpoint,
   clearBreakpoints,

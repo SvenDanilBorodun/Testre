@@ -209,6 +209,13 @@ export const DE = {
   DEBUG_TAB_VARIABLES: 'Variablen',
   DEBUG_TAB_BREAKPOINTS: 'Haltepunkte',
   DEBUG_NO_VARIABLES: 'Noch keine Variablen.',
+  // The Debug-Panel's „Variablen" tab holds TWO labelled sections: the
+  // Blockly variables and the „Zähler" blocks' own store. Separate
+  // headings because they are separate stores — a student may have a
+  // variable AND a counter both called „Punkte".
+  DEBUG_SECTION_VARIABLES: 'Variablen',
+  DEBUG_SECTION_COUNTERS: 'Zähler',
+  DEBUG_NO_COUNTERS: 'Noch keine Zähler.',
   DEBUG_NO_BREAKPOINTS: 'Noch keine Haltepunkte gesetzt.',
   DEBUG_BP_TOGGLE_HINT:
     'Alt+Klick auf einen Block, um einen Haltepunkt zu setzen.',

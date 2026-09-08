@@ -8,11 +8,28 @@
  *     http://www.apache.org/licenses/LICENSE-2.0
  */
 
-// ── [VAR:name=json] — which names the variable inspector accepts ─────────────
-// ONE definition, TWO call sites: `hooks/useRosTopicSubscription` (the wire
-// gate, before dispatching) and `features/workshop/workshopSlice::setVariable`
-// (the store gate, before writing). It lives here rather than in the hook
-// because the slice may not import the hook: `useRosTopicSubscription` imports
+// ── [VAR:name=json] / [CNT:name=int] — which names the inspector accepts ─────
+// ONE definition, FOUR call sites — a wire gate and a store gate for EACH of
+// the two sentinels: `hooks/useRosTopicSubscription` (before dispatching) and
+// `features/workshop/workshopSlice::setVariable` / `::setCounter` (before
+// writing). RS-50 (the „Zähler" section) deliberately reused this predicate
+// instead of writing a counter-flavoured copy — a second copy is the exact
+// defect RS-49 was, and `blocks/counters.js::counterNameValidator` is already a
+// third, WEAKER opinion about the same question (it forbids only
+// `[\r\n\0[\]]`, so it lets `=`, ESC, BEL, DEL and the C1 range through).
+//
+// That validator is NOT tightened to match, and must not be: Blockly field
+// validators also run during DESERIALIZATION, so a stricter one would silently
+// rewrite counter names inside workflows that are already saved. The
+// consequence is a documented DISPLAY limitation, not a correctness one — a
+// counter literally named „Punkte=2" is refused by the `=` rule below and never
+// appears in the panel. Its sentinel is still CONSUMED rather than printed
+// (`useRosTopicSubscription`'s [CNT:] frame captures the name greedily and the
+// value as digits, so the frame matches and the gate refuses it); fixing the
+// display needs a load-time name migration first.
+//
+// It lives here rather than in the hook because the slice may not import it:
+// `useRosTopicSubscription` imports
 // `store/store`, which imports `workshopSlice` — so a slice→hook import closes
 // a module cycle around `configureStore`. `utils/` is where this codebase
 // already keeps pure decisions two layers share (`authGate`, `navGating`,
@@ -44,9 +61,11 @@
 //     so they survive it — and this sentinel arrives over rosbridge, which
 //     authenticates nobody, so the wire is untrusted regardless of what the
 //     editor can produce.
-//   • `=` — the sentinel is framed `[VAR:name=json]` and parsed with
-//     `^\[VAR:([^=]+)=(.*)\]$`; a name containing `=` re-splits the frame and
-//     the value silently absorbs the rest of the name.
+//   • `=` — `[VAR:name=json]` is parsed with `^\[VAR:([^=]+)=(.*)\]$`; a name
+//     containing `=` re-splits the frame and the value silently absorbs the
+//     rest of the name. (The `[CNT:]` frame splits on the LAST `=` instead,
+//     which is unambiguous because its value capture is digits-only — so there
+//     the refusal is a DISPLAY choice made here, not a parsing necessity.)
 //   • `[` and `]` — the frame's own delimiters.
 // `__proto__` / `constructor` / `prototype` are NOT checked here: that is a
 // prototype-pollution guard, not a display question, and each call site keeps
@@ -62,6 +81,12 @@
 // eslint-disable-next-line no-control-regex
 const VAR_NAME_FORBIDDEN_RE = /[\u0000-\u001F\u007F-\u009F=[\]]/;
 
+// 64 is the cap for BOTH sentinels, and it is never the binding constraint on a
+// name a student can type: the Blockly variable field has no length limit of its
+// own, and `blocks/counters.js::NAME_MAX_LEN` truncates a counter name to 40 —
+// 24 chars of headroom. Anything in 41..64 is reachable only by a hand-built
+// /workflow/start payload or a direct rosbridge publish, and anything above 64
+// is refused at both gates.
 export const VAR_NAME_MAX_LEN = 64;
 
 export function isDisplayableVariableName(name) {

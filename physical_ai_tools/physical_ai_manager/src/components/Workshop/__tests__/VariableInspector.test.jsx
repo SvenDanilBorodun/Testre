@@ -29,7 +29,7 @@
 import React from 'react';
 import { configureStore } from '@reduxjs/toolkit';
 import { Provider } from 'react-redux';
-import { render, screen, renderHook, act } from '@testing-library/react';
+import { render, screen, renderHook, act, within } from '@testing-library/react';
 
 import workshopReducer from '../../../features/workshop/workshopSlice';
 import rosReducer, { setRosbridgeUrl } from '../../../features/ros/rosSlice';
@@ -131,8 +131,13 @@ describe('a variable the student named reaches the Variablen panel', () => {
     const { store, cb } = await wireUp();
     renderPanel(store);
     act(() => cb({ log_message: `[VAR:${name}=42]`, phase: 'running' }));
-    expect(screen.getByText(name)).toBeInTheDocument();
-    expect(screen.getByText('42')).toBeInTheDocument();
+    // RS-50 scoped this to the „Variablen" region: the panel gained a second,
+    // „Zähler" section whose heading is the literal text „Zähler" — which is
+    // itself one of the names in this fixture, so an unscoped getByText would
+    // find two nodes and throw.
+    const vars = within(screen.getByRole('region', { name: DE.DEBUG_SECTION_VARIABLES }));
+    expect(vars.getByText(name)).toBeInTheDocument();
+    expect(vars.getByText('42')).toBeInTheDocument();
   });
 
   test('three variables from one program all show', async () => {

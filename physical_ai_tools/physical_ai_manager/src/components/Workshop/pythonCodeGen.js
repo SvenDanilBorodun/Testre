@@ -242,10 +242,27 @@ function generateHat(block, generator) {
 // whitespace cleanup) but routes hat blocks through generateHat so their
 // next-chain body is wrapped in a function instead of emitted flat. Hats are
 // rendered FIRST (as defs), then the remaining top-level statements.
+//
+// ORDER: `getTopBlocks(false)` — CREATION order, deliberately NOT the spatial
+// `true`. Execution order is the SERVER's contract and it follows the
+// serializer: `Blockly.serialization.workspaces.save()` writes `blocks.blocks`
+// in creation order, RunControls spreads that array into /workflow/start
+// verbatim, and workflow/interpreter.py walks it front-to-back. The serializer
+// is therefore authoritative; this preview only mirrors it.
+//
+// Measured (Blockly 12.5.1, headless): two top-level stacks created FIRST then
+// SECOND, then SECOND dragged above FIRST (y = -200 vs y = 0) —
+//   getTopBlocks(true)  -> [SECOND, FIRST]   (spatial)
+//   getTopBlocks(false) -> [FIRST, SECOND]   (creation)
+//   saved blocks.blocks -> [FIRST, SECOND]   (what actually runs)
+// With `true` the „Code"-Vorschau reordered itself on a pure drag while the run
+// did not, so the panel showed a program the robot never executed. Changing the
+// EXECUTION order to match the layout instead would silently repoint every
+// already-saved workflow, so the preview is the side that moves.
 function generateWorkspace(workspace, generator) {
   generator.init(workspace);
   const top = typeof workspace.getTopBlocks === 'function'
-    ? workspace.getTopBlocks(true)
+    ? workspace.getTopBlocks(false)
     : [];
   const defs = [];
   const main = [];

@@ -303,3 +303,55 @@ describe('pythonCodeGen — built-in blocks + edge cases', () => {
     expect(await generatePython(null)).toBe('');
   });
 });
+
+// RS-26. The „Code"-Vorschau must render top-level stacks in the order the
+// SERVER runs them, which is the serializer's order (creation), not the
+// editor's spatial layout.
+//
+// Measured with Blockly 12.5.1 headless: two top-level stacks created FIRST
+// then SECOND, then SECOND dragged above FIRST (y = -200 vs y = 0) —
+//   getTopBlocks(true)  -> [SECOND, FIRST]   (spatial)
+//   getTopBlocks(false) -> [FIRST, SECOND]   (creation)
+//   saved blocks.blocks -> [FIRST, SECOND]   (what /workflow/start carries)
+// generateWorkspace used getTopBlocks(true), so a pure drag reordered the
+// preview and nothing else. The array `blocks` order below IS creation order,
+// and the `x`/`y` put the second entry visually ABOVE the first.
+describe('pythonCodeGen — top-level stack order (RS-26)', () => {
+  test('the preview follows SERIALIZED order, not the on-canvas layout', async () => {
+    const code = await gen([
+      // created FIRST, sits LOWER on the canvas (y = 0)
+      { type: 'edubotics_open_gripper', x: 0, y: 0 },
+      // created SECOND, dragged ABOVE it (y = -200)
+      { type: 'edubotics_close_gripper', x: 0, y: -200 },
+    ]);
+    const openAt = code.indexOf('robot.open_gripper()');
+    const closeAt = code.indexOf('robot.close_gripper()');
+    expect(openAt).toBeGreaterThanOrEqual(0);
+    expect(closeAt).toBeGreaterThanOrEqual(0);
+    // Creation order wins: open (first created) is emitted before close.
+    // Under the old getTopBlocks(true) this assertion inverted.
+    expect(openAt).toBeLessThan(closeAt);
+  });
+
+  test('spatial order and serialized order agreeing still emits in that order', async () => {
+    // Guard against "fixing" this by simply reversing: when the layout matches
+    // creation order, the output is unchanged.
+    const code = await gen([
+      { type: 'edubotics_open_gripper', x: 0, y: 0 },
+      { type: 'edubotics_close_gripper', x: 0, y: 200 },
+    ]);
+    expect(code.indexOf('robot.open_gripper()'))
+      .toBeLessThan(code.indexOf('robot.close_gripper()'));
+  });
+
+  test('hats are still emitted before plain statements regardless of order', async () => {
+    // The defs-then-main split is independent of the ordering change: a hat
+    // created SECOND still renders as a def above the top-level statement.
+    const code = await gen([
+      { type: 'edubotics_home', x: 0, y: 0 },
+      { type: 'edubotics_when_counter_gt', fields: { NAME: 'Punkte', N: 3 }, x: 0, y: 200 },
+    ]);
+    expect(code.indexOf('def when_punkte_over_3():'))
+      .toBeLessThan(code.indexOf('robot.home()'));
+  });
+});

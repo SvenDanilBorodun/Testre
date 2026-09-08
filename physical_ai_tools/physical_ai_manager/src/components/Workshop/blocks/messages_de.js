@@ -99,6 +99,15 @@ export const DE = {
   // Control (Phase-2 quick-win blocks, Logik category)
   FOREVER: 'wiederhole fortlaufend',
   WAIT_UNTIL: 'warte bis %1',
+  // Editor-side warning on „wiederhole fortlaufend": the block carries a
+  // nextStatement connector, so a student can snap blocks underneath it — where
+  // they are silent dead code, because the only exit from the loop is Stopp.
+  // The interpreter logs the same fact at RUN time (_exec_forever); this is the
+  // half that says so while the program is still being written.
+  FOREVER_DEAD_CODE_WARNING:
+    'Blöcke unter diesem Block laufen nie. Zieh sie nach oben oder in die Schleife.',
+  // „sonst" toggle on the Blockly controls_if block (see control.js).
+  IF_ELSE_ADD: 'sonst',
 
   // Destinations
   DESTINATION_PIN: 'setze %1 = Pin (Klick auf Szenenkamera)',

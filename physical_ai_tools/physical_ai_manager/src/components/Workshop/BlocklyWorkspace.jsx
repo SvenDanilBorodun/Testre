@@ -18,7 +18,11 @@ import { registerPerceptionBlocks } from './blocks/perception';
 import { registerDestinationBlocks } from './blocks/destinations';
 import { registerOutputBlocks } from './blocks/output';
 import { registerEventBlocks } from './blocks/events';
-import { registerControlBlocks } from './blocks/control';
+import {
+  registerControlBlocks,
+  registerControlsIfElseMutator,
+  attachControlWorkspaceValidators,
+} from './blocks/control';
 import { registerCounterBlocks } from './blocks/counters';
 import { registerTrajectoryBlocks } from './blocks/trajectories';
 
@@ -84,6 +88,17 @@ async function initPlugins(workspace, isDisposed) {
 
   try {
     await import('@blockly/block-plus-minus');
+    // MUST run after that import: the plugin unregisters + re-registers
+    // `controls_if_mutator` at import time, and its replacement can never add
+    // an ELSE clause (its plus() only ever adds an else-if). Re-register ours
+    // on top so a freshly dragged „wenn" block can grow a „sonst" row. Not in
+    // registerAllBlocksOnce() — that runs synchronously at injection, before
+    // this import resolves, so the plugin would simply overwrite it.
+    //
+    // Deliberately NOT behind `guard`: this writes the GLOBAL Blockly
+    // extension registry, not workspace state, so an already-disposed
+    // workspace is no reason to skip it.
+    registerControlsIfElseMutator();
   } catch (e) { console.warn('block-plus-minus import failed', e); }
 
   try {
@@ -178,6 +193,9 @@ function BlocklyWorkspace({
     // the workspace level. Returns a disposer we call in the cleanup
     // path below so the listener doesn't outlive the workspace.
     const disposeMotionValidators = attachMotionWorkspaceValidators(workspace);
+    // Same shape: flags blocks snapped under „wiederhole fortlaufend", which
+    // can never run. Its disposer is called alongside the motion one below.
+    const disposeControlValidators = attachControlWorkspaceValidators(workspace);
 
     // Plugins are async-imported; pass an isDisposed callback so
     // post-dispose resolutions don't init() against a dead workspace.
@@ -231,6 +249,9 @@ function BlocklyWorkspace({
       // workspace so we don't fire one last clamp on a torn-down host.
       try {
         disposeMotionValidators();
+      } catch (_) { /* already disposed */ }
+      try {
+        disposeControlValidators();
       } catch (_) { /* already disposed */ }
       workspace.dispose();
       workspaceRef.current = null;

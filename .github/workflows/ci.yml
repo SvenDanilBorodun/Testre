@@ -1205,7 +1205,12 @@ jobs:
               'lists_create_with', 'lists_repeat', 'lists_length',
               'lists_isEmpty', 'lists_indexOf', 'lists_getIndex',
               'lists_setIndex', 'lists_getSublist',
-              'variables_get', 'variables_set',
+              # The Variablen flyout emits exactly
+              # [variables_set, math_change, variables_get], and the
+              # interpreter dispatches math_change natively in its btype
+              # ladder — so it is invisible to the handler tables and needs
+              # its entry here like every other natively-dispatched block.
+              'variables_get', 'variables_set', 'math_change',
               'procedures_defnoreturn', 'procedures_defreturn',
               'procedures_callnoreturn', 'procedures_callreturn',
               'procedures_ifreturn',

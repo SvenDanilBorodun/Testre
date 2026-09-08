@@ -33,7 +33,9 @@ KeyError out of the handler tables — the upstream behavior after the
 
 from __future__ import annotations
 
+import contextlib
 import json
+import math
 import os
 import random
 import time
@@ -63,6 +65,34 @@ MAX_LOOP_ITERATIONS = 10000
 # text variable would re-emit an unbounded, growing string into the realtime
 # status channel every iteration.
 _MAX_VAR_PAYLOAD_CHARS = 2000
+
+# How many container elements the [VAR:] sentinel serializes before it truncates.
+# The CHAR cap above is applied to the FINISHED string, so a 10-million-element
+# list was fully json.dumps()'d (measured 0.74 s, ~268 MB RSS) and then thrown
+# away down to 2000 chars. Serializing a bounded prefix instead makes the cost
+# proportional to what is actually shown. 200 items comfortably overflows the
+# 2000-char cap for any realistic value, so nothing visible is lost.
+_MAX_VAR_PAYLOAD_ITEMS = 200
+
+# Hard cap on the length of a list a single block may materialize.
+# ``lists_create_with`` has always been capped at 20 (its mutator's own limit),
+# but ``lists_repeat`` had NO cap: measured 5 000 000 elements in 0.38 s and
+# 100 000 000 in 0.04 s from a two-block program, inside the ROS node whose
+# container mem_limit is 6g. This is the classroom-generous ceiling for the
+# blocks that BUILD a list; it is deliberately far above any teaching use and
+# far below "kill the node".
+MAX_LIST_ITEMS = 1000
+
+# Hard cap on the length of a string a single ``text_join`` may produce.
+# ``verbinde`` had NO cap: measured, ``setze x auf verbinde(x, x)`` inside
+# „wiederhole fortlaufend" reached 1 073 741 824 characters / 2.4 GB RSS in
+# 5.07 s from four blocks, and two more doublings exceed the container's
+# mem_limit of 6g and OOM-kill the ROS node — which `restart: "no"` does not
+# bring back. 10 000 characters is five times output.log's MAX_LOG_CHARS, so
+# every message a student can actually READ still fits with room to spare.
+# Raise rather than truncate, exactly like MAX_LIST_ITEMS: a silently
+# shortened text is a wrong answer.
+MAX_TEXT_CHARS = 10000
 
 
 def _env_int(name: str, default: int) -> int:
@@ -124,6 +154,86 @@ FOREVER_MIN_CYCLE_S = 0.05
 WAIT_UNTIL_MAX_SECONDS = 300.0
 
 
+# Every block type ``_eval_value_impl`` knows how to evaluate. Used ONLY to tell
+# a PARKED value block (one a student dragged onto the canvas but never plugged
+# in) from a genuinely unknown type: a value block has no ``previousStatement``,
+# so Blockly can only ever place it at the top level, where it is a no-op.
+# ``pythonCodeGen.js`` already renders it harmlessly via ``scrubNakedValue``;
+# the runtime used to abort the WHOLE program with „Unbekannter Block-Typ:
+# math_arithmetic" — an English type id on a German surface (Rule §1), and 11
+# of 11 value types tested behaved that way regardless of workspace order.
+_BUILTIN_VALUE_TYPES: frozenset[str] = frozenset({
+    'math_number', 'text', 'text_join', 'logic_boolean', 'logic_negate',
+    'logic_compare', 'logic_operation', 'math_arithmetic', 'math_random_int',
+    'math_constrain', 'math_modulo', 'math_round', 'variables_get',
+    'lists_create_with', 'lists_repeat', 'lists_length', 'lists_isEmpty',
+    'lists_indexOf', 'lists_getIndex', 'lists_getSublist',
+    'procedures_callreturn',
+})
+
+
+def _is_disabled(block: Any) -> bool:
+    """True when Blockly has marked ``block`` disabled.
+
+    TWO serialization shapes, both real and both must be honoured:
+    ``disabledReasons: ["manually_disabled"]`` (Blockly ≥ 11, what this app
+    saves — verified against the shipped Blockly 12.5.1) and the legacy
+    ``enabled: false`` that older saved workflows still carry.
+
+    The interpreter read NEITHER, so a block the student greyed out kept
+    running: measured, a disabled ``variables_set`` still set its variable and
+    a disabled ``controls_if`` still ran its enabled body. The Code panel
+    (``pythonCodeGen.js``) and ``collectReplayNames`` DO skip them, so a
+    disabled „spiele Bewegung ab" was not fetched but WAS executed, failing
+    with „Unbekannte Aufnahme".
+    """
+    if not isinstance(block, dict):
+        return False
+    reasons = block.get('disabledReasons')
+    if isinstance(reasons, (list, tuple, set)) and len(reasons) > 0:
+        return True
+    return block.get('enabled') is False
+
+
+def _is_list_get_statement(block: Any) -> bool:
+    """True when a ``lists_getIndex`` arrived in its STATEMENT form.
+
+    Blockly's MODE=REMOVE drops the block's output connection and gives it
+    previous/next connectors, recording ``extraState {"isStatement": true}``
+    (verified against the shipped Blockly 12.5.1). Every OTHER mode leaves it a
+    VALUE block, and Blockly can only leave a value block lying at the TOP
+    LEVEL, where it is a no-op. Routing those into the statement executor
+    aborted the whole program with „Entferne-Element-Block hat keine Liste." —
+    naming an operation the student never chose — for a block they had merely
+    parked on the canvas. Both signals are read because the mutator derives
+    ``isStatement_`` from MODE, so a hand-written payload may carry only one.
+    """
+    if not isinstance(block, dict):
+        return False
+    extra = block.get('extraState')
+    if isinstance(extra, dict) and extra.get('isStatement') is True:
+        return True
+    return (block.get('fields') or {}).get('MODE') == 'REMOVE'
+
+
+def event_name_of(block: Any) -> str:
+    """The trimmed EVENT_NAME of a broadcast / when_broadcast block, ''-safe.
+
+    Shared by the interpreter's „sende Ereignis" and the manager's hat trigger +
+    start-time event diagnostics, so the two can never disagree about which
+    names pair up. Tolerant of a non-string field (an imported or hand-written
+    payload): a number is read as its text, anything else as no name at all.
+    """
+    if not isinstance(block, dict):
+        return ''
+    raw = (block.get('fields') or {}).get('EVENT_NAME')
+    if isinstance(raw, str):
+        return raw.strip()
+    if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+        return str(raw).strip()
+    return ''
+
+
 def _claim_progress_count(ctx) -> int:
     """Total claimed+skipped tag count — the progress signal for the while-visible
     flicker-spin guard (#3). Read under claim_lock so a concurrent grasp in a hat
@@ -144,6 +254,29 @@ class _ProcedureReturn(Exception):
         self.value = value
 
 
+@contextlib.contextmanager
+def _procedure_return_barrier():
+    """Stop the INTERNAL ``_ProcedureReturn`` control-flow exception escaping a
+    top-level stack or a hat body.
+
+    ``procedures_ifreturn`` („gib zurück, falls …") is only meaningful inside a
+    procedure; Blockly auto-disables one dropped at the top level
+    (UNPARENTED_IFRETURN). But that auto-disable happens in the RENDERED editor,
+    the interpreter never read the disabled flag at all until this round, and a
+    hand-written or imported payload carries no flag either — so the exception
+    escaped ``_run``'s catch-all and was written into the student's Protokoll as
+    ``traceback.format_exc()``. Convert it into the German message it should
+    always have been.
+    """
+    try:
+        yield
+    except _ProcedureReturn:
+        raise InterpreterError(
+            '„gib zurück" steht außerhalb einer Funktion — bitte den Block in '
+            'einen Funktions-Block ziehen.'
+        )
+
+
 class InterpreterError(Exception):
     """Raised on workflow validation or runtime errors. ``args[0]`` is
     a German user-facing message."""
@@ -152,13 +285,33 @@ class InterpreterError(Exception):
 class Interpreter:
     """Stateful walker over a parsed Blockly workspace tree."""
 
-    def __init__(self, root_blocks: list[dict[str, Any]]) -> None:
+    def __init__(
+        self,
+        root_blocks: list[dict[str, Any]],
+        variable_names: dict[str, str] | None = None,
+    ) -> None:
         self._roots = root_blocks
-        # Procedure registry: name → {block, params, return}. Populated
-        # during execute() so callers from any handler stack can invoke
-        # them. The registry is shared across hat-block stacks (a "when"
-        # handler can call a procedure defined in the main stack).
-        self._procedures: dict[str, dict[str, Any]] = {}
+        # Blockly variable id → human name, from the workspace's top-level
+        # ``variables: [{name, id}]`` array. LOAD-BEARING: a saved workspace
+        # stores a variable REFERENCE as ``fields: {"VAR": {"id": "…"}}`` with
+        # NO name (verified against Blockly 12.5.1 at BOTH the default save and
+        # `doFullSerialization:false`, which is what this app uses), so without
+        # this map every student variable was keyed by its 20-character random
+        # id. That is why procedure parameters could never bind — the caller
+        # wrote ctx.variables['n'] and the body read ctx.variables['x)D5DHV%…'] —
+        # and why the React variable inspector, which requires an
+        # identifier-shaped name, dropped 300 of 300 generated ids.
+        self._variable_names: dict[str, str] = {}
+        if isinstance(variable_names, dict):
+            for vid, vname in variable_names.items():
+                if isinstance(vid, str) and isinstance(vname, str) and vname:
+                    self._variable_names[vid] = vname
+        # Procedure registry: name → {block, params, has_return}. Built
+        # HERE rather than in execute() so a hat-block stack — whose thread can
+        # reach execute_chain() before the main thread finishes execute() —
+        # never sees an empty registry, and so the parameter ids it discovers
+        # are available to _read_variable_name from the first block onwards.
+        self._procedures: dict[str, dict[str, Any]] = self._build_procedure_registry()
 
     # ------------------------------------------------------------------
     # Construction + validation
@@ -181,7 +334,22 @@ class Interpreter:
         if not isinstance(blocks, list):
             raise InterpreterError('Workflow-JSON hat kein gültiges "blocks"-Array.')
 
-        return cls(blocks)
+        # The workspace's variable table rides a top-level ``variables`` sibling
+        # of ``blocks`` (same shape at every serialization setting):
+        # ``[{"name": "zaehler", "id": "…"}, …]``. It is the ONLY place the
+        # human name of a variable exists in the payload — the blocks reference
+        # it by id alone.
+        var_names: dict[str, str] = {}
+        raw_vars = data.get('variables')
+        if isinstance(raw_vars, list):
+            for entry in raw_vars:
+                if not isinstance(entry, dict):
+                    continue
+                vid, vname = entry.get('id'), entry.get('name')
+                if isinstance(vid, str) and isinstance(vname, str) and vname:
+                    var_names[vid] = vname
+
+        return cls(blocks, variable_names=var_names)
 
     # ------------------------------------------------------------------
     # Public introspection used by WorkflowManager
@@ -204,7 +372,16 @@ class Interpreter:
         for block in self._roots:
             btype = block.get('type')
             if btype in HAT_BLOCK_TYPES:
-                hats.append(block)
+                # A DISABLED hat spawns no handler thread at all. The asymmetry
+                # with main stacks below is deliberate: a disabled main root
+                # still has to be walked, because _exec_chain skips the disabled
+                # block itself but keeps following its `next` (a disabled block
+                # can carry enabled ones). A hat has no such chain semantics —
+                # its body only ever runs on a trigger, and execute_chain()
+                # starts AT the body, so keeping it would run the body of a
+                # block the student explicitly switched off.
+                if not _is_disabled(block):
+                    hats.append(block)
             else:
                 main.append(block)
         return main, hats
@@ -212,28 +389,54 @@ class Interpreter:
     def collect_concrete_destinations(self) -> list[dict[str, Any]]:
         """Walk the tree and collect every move_to / pickup / drop_at
         block whose target is an immediately-resolvable XYZ. Used by
-        WorkflowManager.start() for the IK pre-check.
+        WorkflowManager.start() for the IK / Sperrzone pre-check.
 
-        A target is "concrete" if it's a destination_pin block whose
-        X/Y/Z labels are real numbers (not the '—' sentinel) AND the
-        block is reachable from a non-hat root (we don't pre-check
-        targets only inside hat handlers — those run on demand).
+        RESOLVE THE WAY THE RUNTIME DOES. This used to match only a
+        ``destination_pin`` sitting INSIDE a value input — and that block is a
+        STATEMENT with no output connection, so Blockly can never place it
+        there. The pre-check was therefore dead code on every real workspace:
+        measured, a 5 m unreachable pin and a pin inside a Sperrzone both
+        returned ``[]``, while React fully implements the consumer
+        (``RunControls.jsx`` → setDebuggerWarnings + a German plural toast).
+
+        At runtime a ``destination_pin`` STATEMENT populates ``ctx.destinations``
+        by NAME and a ``destination_ref`` VALUE block references it, so that is
+        what we resolve here: collect every pin's name → xyz first, then match
+        the refs against it.
+
+        Pins are collected across ALL main roots BEFORE any ref is resolved, on
+        purpose. Execution order between top-level stacks is creation order and
+        a student can reorder them freely; a *warning* that appears or vanishes
+        depending on which stack happens to run first would be worse than no
+        warning. The runtime remains the authoritative gate either way.
         """
-        out: list[dict[str, Any]] = []
+        pins: dict[str, tuple[float, float, float]] = {}
+        consumers: list[dict[str, Any]] = []
 
         def walk(block: dict[str, Any] | None) -> None:
             if not isinstance(block, dict):
                 return
+            # A disabled block never runs, so it must never raise a warning.
+            if _is_disabled(block):
+                nxt = block.get('next')
+                if isinstance(nxt, dict):
+                    walk(nxt.get('block'))
+                return
             btype = block.get('type')
-            if btype in {'edubotics_move_to', 'edubotics_pickup', 'edubotics_drop_at'}:
-                target = self._get_input_block(block, 'DESTINATION') or self._get_input_block(block, 'TARGET')
-                xyz = self._extract_concrete_xyz(target)
-                if xyz is not None:
-                    out.append({
-                        'block_id': block.get('id', ''),
-                        'block_type': btype,
-                        'xyz': xyz,
-                    })
+            if btype == 'edubotics_destination_pin':
+                name = self._pin_name(block)
+                xyz = self._extract_concrete_xyz(block)
+                if name and xyz is not None:
+                    pins[name] = xyz
+            elif btype in {'edubotics_move_to', 'edubotics_pickup',
+                           'edubotics_drop_at'}:
+                target = (self._get_input_block(block, 'DESTINATION')
+                          or self._get_input_block(block, 'TARGET'))
+                consumers.append({
+                    'block_id': block.get('id', ''),
+                    'block_type': btype,
+                    'target': target,
+                })
             inputs = block.get('inputs') or {}
             if isinstance(inputs, dict):
                 for slot in inputs.values():
@@ -250,7 +453,45 @@ class Interpreter:
         main, _ = self.split_roots()
         for root in main:
             walk(root)
+
+        out: list[dict[str, Any]] = []
+        for consumer in consumers:
+            xyz = self._resolve_concrete_target(consumer['target'], pins)
+            if xyz is not None:
+                out.append({
+                    'block_id': consumer['block_id'],
+                    'block_type': consumer['block_type'],
+                    'xyz': xyz,
+                })
         return out
+
+    @classmethod
+    def _resolve_concrete_target(
+        cls,
+        target: dict[str, Any] | None,
+        pins: dict[str, tuple[float, float, float]],
+    ) -> tuple[float, float, float] | None:
+        """XYZ for a move_to/pickup/drop_at target, or None when it can only be
+        known at run time (a „Position von" lookup, a variable, an unpinned
+        name). Only ``destination_ref`` → a pinned name is resolvable statically;
+        ``destination_current`` deliberately is not (it captures wherever the
+        arm happens to be)."""
+        if not isinstance(target, dict):
+            return None
+        btype = target.get('type')
+        if btype == 'edubotics_destination_ref':
+            name = cls._pin_name(target)
+            return pins.get(name) if name else None
+        # Kept for hand-written / imported JSON: nothing the editor can build.
+        if btype == 'edubotics_destination_pin':
+            return cls._extract_concrete_xyz(target)
+        return None
+
+    @staticmethod
+    def _pin_name(block: dict[str, Any]) -> str:
+        fields = block.get('fields') or {}
+        name = fields.get('NAME')
+        return name.strip() if isinstance(name, str) else ''
 
     @staticmethod
     def _extract_concrete_xyz(block: dict[str, Any] | None) -> tuple[float, float, float] | None:
@@ -265,6 +506,13 @@ class Interpreter:
             z = float(fields.get('Z', '—'))
         except (TypeError, ValueError):
             return None
+        # NaN / Infinity are not "concrete": a degenerate projection can write
+        # the literal string "NaN" into the label (applyPinnedCoordinates uses
+        # Number(v).toFixed(3), and Number(NaN).toFixed(3) === "NaN"), and
+        # float('NaN') parses. Feeding one to ik.solve would report an
+        # unreachable warning for a reason the student cannot act on.
+        if not all(math.isfinite(v) for v in (x, y, z)):
+            return None
         return (x, y, z)
 
     # ------------------------------------------------------------------
@@ -277,11 +525,8 @@ class Interpreter:
     ) -> None:
         if not hasattr(ctx, 'variables') or ctx.variables is None:
             ctx.variables = {}
-        # Register procedures from the entire tree (main + hat stacks)
-        # before running anything, so a "when" handler can call a
-        # procedure defined in main.
-        self._procedures = self._build_procedure_registry()
-        # Expose to ctx so handlers can check / call.
+        # The registry is built in __init__ (so a hat thread can never observe
+        # it empty); expose it to ctx so handlers can check / call.
         ctx.procedures = self._procedures
         ctx.call_procedure = lambda name, args: self._call_procedure(name, args, ctx, on_block_change)
 
@@ -291,7 +536,8 @@ class Interpreter:
             if ctx.should_stop():
                 raise WorkflowError('Workflow wurde gestoppt.')
             on_block_change(root.get('id', ''), 'running', idx / total)
-            self._exec_chain(root, ctx, on_block_change)
+            with _procedure_return_barrier():
+                self._exec_chain(root, ctx, on_block_change)
             on_block_change(root.get('id', ''), 'done', (idx + 1) / total)
 
     def execute_chain(
@@ -306,18 +552,25 @@ class Interpreter:
         ctx.motion_lock so two handlers don't race motion blocks."""
         if not hasattr(ctx, 'variables') or ctx.variables is None:
             ctx.variables = {}
-        if not hasattr(ctx, 'procedures'):
-            ctx.procedures = self._procedures
-        if not hasattr(ctx, 'call_procedure'):
-            ctx.call_procedure = lambda name, args: self._call_procedure(
-                name, args, ctx, on_block_change,
-            )
+        # Assigned UNCONDITIONALLY. The `hasattr(ctx, 'procedures')` /
+        # `hasattr(ctx, 'call_procedure')` guards that used to sit here were
+        # DEAD: WorkflowContext declares both as dataclass FIELDS with defaults,
+        # so hasattr is always True. The default `call_procedure` is
+        # ``lambda _name, _args: None`` — a silent no-op — so a hat thread
+        # reaching execute_chain() before the main thread's execute() has bound
+        # the real hook would have kept it, and every „Funktionsaufruf" inside
+        # that hat body would have returned None without running the function.
+        ctx.procedures = self._procedures
+        ctx.call_procedure = lambda name, args: self._call_procedure(
+            name, args, ctx, on_block_change,
+        )
         # Skip the hat block itself (it has no behavior beyond the
         # trigger) and run the chained statement body.
         first = self._next_block(root)
         if first is None:
             return
-        self._exec_chain(first, ctx, on_block_change)
+        with _procedure_return_barrier():
+            self._exec_chain(first, ctx, on_block_change)
 
     def _exec_chain(
         self,
@@ -348,6 +601,15 @@ class Interpreter:
     ) -> None:
         btype = block.get('type')
         block_id = block.get('id', '')
+
+        # A block the student greyed out must not run — and neither must its
+        # inner content. The `next` chain is deliberately NOT skipped: it is
+        # followed by _exec_chain, and a disabled block can carry enabled ones
+        # below it. Returning here (rather than at the chain level) is what
+        # gives that exact shape. Checked BEFORE the breakpoint/pause plumbing
+        # so a breakpoint on a disabled block cannot wedge the run.
+        if _is_disabled(block):
+            return
 
         # Phase-2 debugger: respect breakpoints + pause flag *before*
         # the block runs. Breakpoints are simple — if the block id is
@@ -380,57 +642,99 @@ class Interpreter:
         # workflow status remains correct overall.
         try:
             # Control-flow first — they manage their own input/statement eval.
-            if btype == 'controls_if':
-                self._exec_if(block, ctx, on_block_change)
-                return
-            if btype == 'controls_repeat_ext':
-                self._exec_repeat(block, ctx, on_block_change)
-                return
-            if btype == 'controls_whileUntil':
-                self._exec_while_until(block, ctx, on_block_change)
-                return
-            if btype == 'controls_for':
-                self._exec_for(block, ctx, on_block_change)
-                return
-            if btype == 'controls_forEach':
-                self._exec_for_each(block, ctx, on_block_change)
-                return
-            if btype == 'edubotics_while_visible':
-                self._exec_while_visible(block, ctx, on_block_change)
-                return
-            if btype == 'edubotics_forever':
-                self._exec_forever(block, ctx, on_block_change)
-                return
-            if btype == 'edubotics_wait_until':
-                self._exec_wait_until(block, ctx, on_block_change)
-                return
-            if btype == 'variables_set':
-                self._exec_variables_set(block, ctx)
-                return
-            if btype == 'lists_setIndex':
-                self._exec_lists_set_index(block, ctx)
-                return
+            #
+            # Every branch below runs inside the SAME error classification the
+            # handler-table call at the bottom has always had. It used not to:
+            # the control-flow ladder sat under a bare try/finally, so an
+            # unexpected Python exception out of one of these (measured: a
+            # non-string EVENT_NAME → AttributeError in _exec_broadcast)
+            # travelled all the way to WorkflowManager._run's catch-all and was
+            # written into the student-facing Protokoll as
+            # traceback.format_exc() — a raw English traceback on a German
+            # surface (Rule §1).
+            try:
+                if btype == 'controls_if':
+                    self._exec_if(block, ctx, on_block_change)
+                    return
+                if btype == 'controls_repeat_ext':
+                    self._exec_repeat(block, ctx, on_block_change)
+                    return
+                if btype == 'controls_whileUntil':
+                    self._exec_while_until(block, ctx, on_block_change)
+                    return
+                if btype == 'controls_for':
+                    self._exec_for(block, ctx, on_block_change)
+                    return
+                if btype == 'controls_forEach':
+                    self._exec_for_each(block, ctx, on_block_change)
+                    return
+                if btype == 'edubotics_while_visible':
+                    self._exec_while_visible(block, ctx, on_block_change)
+                    return
+                if btype == 'edubotics_forever':
+                    self._exec_forever(block, ctx, on_block_change)
+                    return
+                if btype == 'edubotics_wait_until':
+                    self._exec_wait_until(block, ctx, on_block_change)
+                    return
+                if btype == 'variables_set':
+                    self._exec_variables_set(block, ctx)
+                    return
+                if btype == 'math_change':
+                    self._exec_math_change(block, ctx)
+                    return
+                if btype == 'lists_setIndex':
+                    self._exec_lists_set_index(block, ctx)
+                    return
+                if btype == 'lists_getIndex' and _is_list_get_statement(block):
+                    # MODE=REMOVE mutates the block into a STATEMENT: Blockly
+                    # drops its output connection and adds a previous/next pair
+                    # (verified — extraState {"isStatement": true}). Reaching it
+                    # only through the VALUE evaluator therefore aborted the
+                    # program with „Unbekannter Block-Typ: lists_getIndex".
+                    #
+                    # Every OTHER mode is a VALUE block, and falling through is
+                    # intentional: STATEMENT_HANDLERS has no 'lists_getIndex'
+                    # entry and the type IS in _BUILTIN_VALUE_TYPES, so the
+                    # parked-value skip below handles it — including its 'done'
+                    # status emission.
+                    self._exec_lists_get_index(block, ctx)
+                    return
 
-            # Procedure definitions are registered up-front but contribute
-            # nothing as runtime statements; skip silently.
-            if btype in {'procedures_defnoreturn', 'procedures_defreturn'}:
-                return
-            if btype == 'procedures_callnoreturn':
-                self._exec_procedure_call(block, ctx, on_block_change, expect_return=False)
-                return
-            if btype == 'procedures_ifreturn':
-                self._exec_procedure_if_return(block, ctx, on_block_change)
-                return
+                # Procedure definitions are registered up-front but contribute
+                # nothing as runtime statements; skip silently.
+                if btype in {'procedures_defnoreturn', 'procedures_defreturn'}:
+                    return
+                if btype == 'procedures_callnoreturn':
+                    self._exec_procedure_call(block, ctx, on_block_change, expect_return=False)
+                    return
+                if btype == 'procedures_ifreturn':
+                    self._exec_procedure_if_return(block, ctx, on_block_change)
+                    return
 
-            # Broadcasts: fire the named event so any matching when_broadcast
-            # hat handler in another thread wakes up. The manager owns the
-            # event registry on ctx.broadcast_events.
-            if btype == 'edubotics_broadcast':
-                self._exec_broadcast(block, ctx)
-                return
+                # Broadcasts: fire the named event so any matching when_broadcast
+                # hat handler in another thread wakes up. The manager owns the
+                # event registry on ctx.broadcast_events.
+                if btype == 'edubotics_broadcast':
+                    self._exec_broadcast(block, ctx)
+                    return
+            except (WorkflowError, InterpreterError, _ProcedureReturn):
+                raise
+            except Exception as e:
+                raise InterpreterError(
+                    f'Fehler beim Ausführen von "{btype}": {e}'
+                )
 
             handler = STATEMENT_HANDLERS.get(btype)
             if handler is None:
+                # A PARKED value block. It has no previousStatement, so Blockly
+                # can only leave it lying at the top level, where it does
+                # nothing — which is exactly what the Code panel renders
+                # (pythonCodeGen's scrubNakedValue). Skipping it silently is the
+                # Blockly semantic; aborting the whole program with the raw
+                # English type id was not.
+                if btype in _BUILTIN_VALUE_TYPES or btype in VALUE_EVALUATORS:
+                    return
                 raise InterpreterError(f'Unbekannter Block-Typ: {btype}')
 
             args = self._build_args(block, ctx)
@@ -467,10 +771,24 @@ class Interpreter:
             ctx.set_paused(True)
         # Wait for resume; the manager exposes wait_for_resume() that
         # returns when either resume or stop is signaled.
+        #
+        # DO NOT clear the pause flag afterwards. ``wait_for_resume`` returns on
+        # TWO different events and they need opposite treatment: „Fortsetzen"
+        # has already cleared the pause itself (WorkflowManager.resume), while
+        # „Schritt" deliberately LEAVES it set so the very next block blocks
+        # again. The unconditional ``set_paused(False)`` that used to sit here
+        # un-armed exactly that re-armed pause, turning „Schritt" into a full
+        # Resume: measured on a 10-block chain with a breakpoint on b0, five
+        # presses executed [10, 0, 0, 0, 0] blocks (the last four answering
+        # „Workflow ist nicht pausiert.") where the contract is [1, 1, 1, 1, 1].
+        # Pause-button stepping was correct throughout, which is why this only
+        # ever showed up after a breakpoint.
         wait = getattr(ctx, 'wait_for_resume', None)
         if callable(wait):
             wait()
-        if hasattr(ctx, 'set_paused') and callable(ctx.set_paused):
+        elif hasattr(ctx, 'set_paused') and callable(ctx.set_paused):
+            # No resume plumbing at all (a degenerate/stub ctx): clear the flag
+            # we just set rather than leaving the run wedged.
             ctx.set_paused(False)
         # Re-check stop after the wait — a stop fired while paused
         # would otherwise allow this breakpointed block to execute
@@ -490,20 +808,42 @@ class Interpreter:
         on_block_change: Callable[[str, str, float], None],
     ) -> None:
         # controls_if can have IF0, IF1, ... + matching DO0, DO1, ... + ELSE.
-        idx = 0
-        while True:
-            if_key = f'IF{idx}'
-            do_key = f'DO{idx}'
-            condition_block = self._get_input_block(block, if_key)
-            if condition_block is None:
-                break
-            cond = self._eval_value(condition_block, ctx)
+        #
+        # An EMPTY condition socket is FALSE and the scan CONTINUES — it does
+        # not end the clause list. The old `if condition_block is None: break`
+        # truncated at the first hole, and a student leaves holes constantly
+        # (drop a „sonst wenn" row, fill the second one first). Measured, all
+        # three wrong: IF0 empty + IF1 true + ELSE ran ELSE; IF0 empty + IF1
+        # true with no else ran NOTHING; IF0 false + IF1 empty + IF2 true ran
+        # ELSE. Blockly's own generator treats an empty condition as false and
+        # keeps going.
+        #
+        # Scan the IFk sockets the payload actually CONTAINS. `extraState.
+        # elseIfCount` is deliberately NOT read: an index in range(declared+1)
+        # that is absent from `inputs` always evaluates to False, so it can
+        # never change an outcome — verified over 1296 configurations
+        # (declared 0..3 x every subset of present IF0..IF3 x every truth
+        # assignment x DO presence x ELSE presence), 0 differences. Its only
+        # effect was iteration COST, which is why it needed a clamp at all:
+        # elseIfCount rides the untrusted /workflow/start payload and bounded a
+        # range(). Not reading it removes the DoS surface instead of capping it,
+        # and the scan is bounded by the JSON's own size.
+        inputs = block.get('inputs')
+        indices: set[int] = set()
+        if isinstance(inputs, dict):
+            for key in inputs:
+                if (isinstance(key, str) and key.startswith('IF')
+                        and key[2:].isdigit()):
+                    indices.add(int(key[2:]))
+        for idx in sorted(indices):
+            condition_block = self._get_input_block(block, f'IF{idx}')
+            cond = (self._eval_value(condition_block, ctx)
+                    if condition_block is not None else False)
             if self._truthy(cond):
-                do_block = self._get_input_block(block, do_key)
+                do_block = self._get_input_block(block, f'DO{idx}')
                 if do_block is not None:
                     self._exec_chain(do_block, ctx, on_block_change)
                 return
-            idx += 1
         else_block = self._get_input_block(block, 'ELSE')
         if else_block is not None:
             self._exec_chain(else_block, ctx, on_block_change)
@@ -761,6 +1101,27 @@ class Interpreter:
         documents as unsupported; don't pair them.
         """
         do_block = self._get_statement_block(block, 'DO')
+        # „wiederhole fortlaufend" carries a nextStatement connector (Scratch's
+        # forever deliberately does not), so a student can and does snap blocks
+        # underneath it — where they are silent dead code, because the only exit
+        # from this loop is Stop. Measured BEFORE=1 LOOP=19 AFTER=0. Say so
+        # rather than swallowing it. Removing the connector is the real fix but
+        # it is NOT backward-safe on its own: Blockly's loader raises
+        # MissingConnection on any saved workspace that already has a block
+        # there, i.e. the student loses the program. The editor-side half is
+        # `blocks/control.js::attachControlWorkspaceValidators`, which flags the
+        # same blocks with a KEYED setWarningText while the program is being
+        # written — it exists now; this used to claim a warning that did not.
+        if self._next_block(block) is not None:
+            try:
+                ctx.log(
+                    '[WARNUNG] Blöcke unter „wiederhole fortlaufend" werden nie '
+                    'ausgeführt — die Schleife läuft, bis du auf „Stopp" '
+                    'drückst. Bitte die Blöcke nach OBEN oder IN die Schleife '
+                    'ziehen.'
+                )
+            except Exception:
+                pass
         while True:
             if ctx.should_stop():
                 raise WorkflowError('Workflow wurde gestoppt.')
@@ -866,11 +1227,22 @@ class Interpreter:
         on_block_change: Callable[[str, str, float], None],
     ) -> None:
         var_name = self._read_variable_name(block, 'VAR') or 'i'
-        start = float(self._eval_value(self._get_input_block(block, 'FROM'), ctx) or 0)
-        end = float(self._eval_value(self._get_input_block(block, 'TO'), ctx) or 0)
-        step = float(self._eval_value(self._get_input_block(block, 'BY'), ctx) or 1)
+        # Read WITHOUT the `or <default>` coercion — the same trap math_modulo
+        # already carries an explicit comment about. `0.0 or 1` evaluates to 1,
+        # so the step-0 guard below could NEVER fire: „zähle i von 1 bis 3 in
+        # Schritten von 0" ran 3 iterations and reported success, silently
+        # substituting a step the student did not ask for. Only a genuinely
+        # missing (None) input falls back to the default.
+        start = self._number_or(self._eval_value(self._get_input_block(block, 'FROM'), ctx), 0.0)
+        end = self._number_or(self._eval_value(self._get_input_block(block, 'TO'), ctx), 0.0)
+        step = self._number_or(self._eval_value(self._get_input_block(block, 'BY'), ctx), 1.0)
         if step == 0:
             raise InterpreterError('Schrittweite 0 ist ungültig.')
+        # A non-finite step makes both loop conditions false, so the loop would
+        # run ZERO times and report success — the same silent-wrong-answer class
+        # the `or` trap above produced. Fail loud instead.
+        if not math.isfinite(step):
+            raise InterpreterError('Schrittweite ist keine gültige Zahl.')
         do_block = self._get_input_block(block, 'DO')
         i = start
         iter_count = 0
@@ -936,7 +1308,11 @@ class Interpreter:
         # `forever { setze x = verbinde(x, …) }` would otherwise re-emit an
         # ever-growing string ~20×/s and flood the realtime channel.
         try:
-            payload = json.dumps(_jsonable(value))
+            # Serialize a BOUNDED prefix, not the whole value. json.dumps() ran
+            # over the entire object before the char cap was applied, so a
+            # 10-million-element list cost 0.74 s and ~268 MB RSS to produce
+            # 2000 characters — on the ROS node's own thread.
+            payload = json.dumps(_jsonable(value, _MAX_VAR_PAYLOAD_ITEMS))
             if len(payload) > _MAX_VAR_PAYLOAD_CHARS:
                 payload = payload[:_MAX_VAR_PAYLOAD_CHARS] + ' …'
             ctx.log(f'[VAR:{name}={payload}]')
@@ -955,37 +1331,153 @@ class Interpreter:
     # Lists statement
     # ------------------------------------------------------------------
     def _exec_lists_set_index(self, block: dict[str, Any], ctx) -> None:
+        """„setze/füge ein Element" — matched to Blockly's own generated Python.
+
+        Three divergences fixed, each verified against what
+        ``pythonGenerator`` emits for the same block:
+
+        * INSERT + LAST → ``L.append(v)`` (index ``len``). It used to resolve to
+          ``len - 1`` and insert BEFORE the last element: [1,2,3] + 99 gave
+          [1,2,99,3] where Blockly gives [1,2,3,99].
+        * INSERT on an EMPTY list → ``[].append(v)`` works; the blanket
+          „Liste ist leer." refusal made the only way to build a list one item
+          at a time impossible.
+        * INSERT at ``len`` (one past the end) → an append; only SET needs the
+          index to address an EXISTING element.
+        """
         list_block = self._get_input_block(block, 'LIST')
         target = self._eval_value(list_block, ctx) if list_block else None
         if not isinstance(target, list):
             raise InterpreterError('Setze-Element-Block hat keine Liste.')
-        mode = block.get('fields', {}).get('MODE', 'SET')  # SET or INSERT
-        where = block.get('fields', {}).get('WHERE', 'FROM_START')
+        fields = block.get('fields') or {}
+        mode = fields.get('MODE', 'SET')  # SET or INSERT
+        where = fields.get('WHERE', 'FROM_START')
         at_block = self._get_input_block(block, 'AT')
         at = int(self._eval_value(at_block, ctx) or 0) if at_block else 0
         value_block = self._get_input_block(block, 'TO')
         value = self._eval_value(value_block, ctx) if value_block else None
-        if not target:
+        inserting = (mode == 'INSERT')
+        if not target and not inserting:
             raise InterpreterError('Liste ist leer.')
-        idx = self._resolve_index(target, where, at)
-        if idx < 0 or idx >= len(target):
+        if len(target) >= MAX_LIST_ITEMS and inserting:
+            raise InterpreterError(
+                f'Liste ist auf {MAX_LIST_ITEMS} Elemente begrenzt.'
+            )
+        idx = self._resolve_index(target, where, at, for_insert=inserting)
+        # An insert may address one past the end (that is an append); a SET must
+        # land on an element that exists.
+        upper = len(target) if inserting else len(target) - 1
+        if idx < 0 or idx > upper:
             raise InterpreterError(
                 f'Listen-Index außerhalb der Grenzen (Länge {len(target)}).'
             )
-        if mode == 'INSERT':
+        if inserting:
             target.insert(idx, value)
         else:
             target[idx] = value
 
+    def _exec_lists_get_index(self, block: dict[str, Any], ctx) -> None:
+        """``lists_getIndex`` in its STATEMENT form (MODE=REMOVE).
+
+        Blockly's REMOVE mode drops the block's output connection and gives it
+        previous/next connectors, so it arrives here rather than at the value
+        evaluator. Generated Python is ``L.pop(i)`` (``L.pop()`` for LAST) with
+        the result discarded."""
+        self._lists_get_index(block, ctx, statement=True)
+
+    def _lists_get_index(
+        self,
+        block: dict[str, Any],
+        ctx,
+        statement: bool = False,
+    ) -> Any:
+        target = self._eval_value(self._get_input_block(block, 'VALUE'), ctx)
+        if not isinstance(target, list):
+            if statement:
+                raise InterpreterError('Entferne-Element-Block hat keine Liste.')
+            return None
+        fields = block.get('fields') or {}
+        mode = fields.get('MODE', 'GET')
+        where = fields.get('WHERE', 'FROM_START')
+        at_block = self._get_input_block(block, 'AT')
+        at = int(self._eval_value(at_block, ctx) or 0) if at_block else 0
+        if not target:
+            if statement:
+                raise InterpreterError('Liste ist leer.')
+            return None
+        idx = self._resolve_index(target, where, at)
+        if idx < 0 or idx >= len(target):
+            if statement:
+                raise InterpreterError(
+                    f'Listen-Index außerhalb der Grenzen (Länge {len(target)}).'
+                )
+            return None
+        # GET_REMOVE and REMOVE both MUTATE — Blockly generates `L.pop(i)` for
+        # each. GET_REMOVE used to return the item and leave the list untouched,
+        # so „entferne und hole" silently behaved as a plain „hole" and a loop
+        # draining a list never terminated.
+        if mode in ('GET_REMOVE', 'REMOVE'):
+            return target.pop(idx)
+        return target[idx]
+
+    def _exec_math_change(self, block: dict[str, Any], ctx) -> None:
+        """„ändere <x> um <n>" — the ONLY counting idiom Blockly's Variablen
+        flyout offers, and it had no handler at all.
+
+        It is palette-reachable with no crafted payload: the flyout emits
+        exactly ``[variables_set, math_change, variables_get]`` (verified
+        against the shipped Blockly), so it sits between the two blocks a
+        student uses constantly, and the Code panel renders working Python for
+        it while the run died with „Unbekannter Block-Typ: math_change".
+        @blockly/suggested-blocks then stores the type in the SAVED workflow, so
+        it reappears after deletion, next session, and for anyone the workflow is
+        shared with.
+
+        Semantics are Blockly's own generated Python,
+        ``x = (x if isinstance(x, Number) else 0) + delta``: a variable holding
+        text (or nothing yet) counts as 0 rather than raising.
+        """
+        var_name = self._read_variable_name(block, 'VAR')
+        if var_name is None:
+            raise InterpreterError('Variable hat keinen Namen.')
+        delta = self._number_or(
+            self._eval_value(self._get_input_block(block, 'DELTA'), ctx), 0.0)
+        current = self._read_variable(ctx, var_name)
+        if isinstance(current, bool) or not isinstance(current, (int, float)):
+            base = 0.0
+        else:
+            base = float(current)
+        self._set_variable(ctx, var_name, base + delta)
+
     @staticmethod
-    def _resolve_index(items: list, where: str, at: int) -> int:
+    def _number_or(value: Any, default: float) -> float:
+        """float(value), with ``default`` ONLY for a genuinely missing input.
+
+        Deliberately not ``float(value or default)``: that turns an explicit
+        zero into the default (see _exec_for's step-0 guard, which the `or`
+        trap made unreachable)."""
+        if value is None:
+            return float(default)
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return float(default)
+
+    @staticmethod
+    def _resolve_index(items: list, where: str, at: int,
+                       for_insert: bool = False) -> int:
         if where == 'FROM_END':
             return len(items) - at
         if where == 'FIRST':
             return 0
         if where == 'LAST':
-            return len(items) - 1
+            # For an INSERT, "last" means AFTER the last element — Blockly
+            # generates `L.append(v)`, i.e. index len. For every read/remove it
+            # means the last element itself.
+            return len(items) if for_insert else len(items) - 1
         if where == 'RANDOM':
+            if for_insert:
+                return random.randrange(0, len(items) + 1)
             return random.randrange(0, len(items)) if items else 0
         return at - 1  # FROM_START is 1-indexed in Blockly
 
@@ -994,7 +1486,7 @@ class Interpreter:
     # ------------------------------------------------------------------
     def _build_procedure_registry(self) -> dict[str, dict[str, Any]]:
         """Walk all roots and find procedures_def* blocks. Each entry:
-        {block, params, return_input}.
+        ``{block, params, has_return}``.
         """
         registry: dict[str, dict[str, Any]] = {}
         for root in self._roots:
@@ -1010,9 +1502,25 @@ class Interpreter:
             return
         btype = block.get('type')
         if btype in {'procedures_defnoreturn', 'procedures_defreturn'}:
-            name = (block.get('fields') or {}).get('NAME', '').strip()
+            # The DEFINITION's name IS a serializable FieldTextInput, so
+            # fields.NAME is correct here — unlike the CALL block below, whose
+            # NAME is a FieldLabel with isSerializable:false.
+            raw_name = (block.get('fields') or {}).get('NAME')
+            name = raw_name.strip() if isinstance(raw_name, str) else ''
             if name:
-                params = (block.get('extraState') or {}).get('params') or []
+                # ``extraState`` is a raw XML STRING — not a dict — for a block
+                # that defines only mutationToDom (verified: an unparented
+                # procedures_ifreturn saves "<mutation value=\"1\"></mutation>").
+                # ``(… or {}).get('params')`` therefore raised AttributeError,
+                # which escapes Interpreter.__init__ → from_json, and
+                # WorkflowManager.start guards only `except InterpreterError`,
+                # so it reached the service callback as a raw Python error. Not
+                # reachable through the editor; reachable through a hand-written
+                # /workflow/start payload — and rosbridge authenticates nobody.
+                extra = block.get('extraState')
+                raw_params = (extra.get('params')
+                              if isinstance(extra, dict) else None)
+                params = raw_params if isinstance(raw_params, list) else []
                 # Each param entry: {name, id} — Blockly's saveExtraState shape.
                 param_names = [p.get('name', '') for p in params if isinstance(p, dict)]
                 registry[name] = {
@@ -1020,6 +1528,20 @@ class Interpreter:
                     'params': param_names,
                     'has_return': btype == 'procedures_defreturn',
                 }
+                # A procedure parameter IS a workspace variable, so it normally
+                # arrives in the top-level `variables` table too. Registering
+                # the def's own {name, id} pairs as well makes the id → name
+                # resolution work even for a hand-written or trimmed payload
+                # that carries no variables table — without it the body's
+                # variables_get would read the raw parameter id and the binding
+                # would be None again.
+                for p in params:
+                    if not isinstance(p, dict):
+                        continue
+                    pid, pname = p.get('id'), p.get('name')
+                    if (isinstance(pid, str) and isinstance(pname, str)
+                            and pname and pid not in self._variable_names):
+                        self._variable_names[pid] = pname
         # Recurse via inputs and next.
         inputs = block.get('inputs') or {}
         if isinstance(inputs, dict):
@@ -1100,18 +1622,12 @@ class Interpreter:
         on_block_change: Callable[[str, str, float], None],
         expect_return: bool,
     ) -> Any:
-        name = (block.get('fields') or {}).get('NAME', '').strip()
+        name = self._read_call_name(block)
         if not name:
             raise InterpreterError('Funktionsaufruf ohne Namen.')
-        # Args are ARG0, ARG1, ... value inputs.
-        args: list[Any] = []
-        idx = 0
-        while True:
-            arg_input = self._get_input_block(block, f'ARG{idx}')
-            if arg_input is None:
-                break
-            args.append(self._eval_value(arg_input, ctx))
-            idx += 1
+        # Args are ARG0, ARG1, ... value inputs — read POSITIONALLY, because an
+        # empty socket is omitted from `inputs` entirely (see _read_call_args).
+        args = self._read_call_args(block, ctx, name)
         return self._call_procedure(name, args, ctx, on_block_change)
 
     def _exec_procedure_if_return(
@@ -1130,7 +1646,11 @@ class Interpreter:
     # Broadcasts
     # ------------------------------------------------------------------
     def _exec_broadcast(self, block: dict[str, Any], ctx) -> None:
-        name = (block.get('fields') or {}).get('EVENT_NAME', '').strip()
+        # .strip() straight off the raw field raised AttributeError for a
+        # non-string EVENT_NAME (measured for int / None / list), and the
+        # control-flow ladder used to have no error classification, so the raw
+        # Python traceback landed in the student's Protokoll.
+        name = event_name_of(block)
         if not name:
             return
         if hasattr(ctx, 'fire_broadcast') and callable(ctx.fire_broadcast):
@@ -1149,6 +1669,11 @@ class Interpreter:
         instead of a raw Python traceback in the WorkflowStatus log strip.
         """
         if block is None:
+            return None
+        # A disabled VALUE block contributes nothing, exactly as the Code panel
+        # renders it — an empty socket, i.e. None. Same rule as the statement
+        # side in _exec_block.
+        if _is_disabled(block):
             return None
         try:
             return self._eval_value_impl(block, ctx)
@@ -1190,13 +1715,20 @@ class Interpreter:
                 int(k[3:]) for k in inputs.keys()
                 if isinstance(k, str) and k.startswith('ADD') and k[3:].isdigit()
             )
+            # Accumulate and check BEFORE joining, so the oversized string is
+            # never materialized at all (see MAX_TEXT_CHARS).
             parts: list[str] = []
+            total = 0
             for i in add_indices:
                 inner = self._get_input_block(block, f'ADD{i}')
-                if inner is None:
-                    parts.append('')
-                else:
-                    parts.append(self._to_text(self._eval_value(inner, ctx)))
+                piece = ('' if inner is None
+                         else self._to_text(self._eval_value(inner, ctx)))
+                total += len(piece)
+                if total > MAX_TEXT_CHARS:
+                    raise InterpreterError(
+                        f'Text ist auf {MAX_TEXT_CHARS} Zeichen begrenzt.'
+                    )
+                parts.append(piece)
             return ''.join(parts)
         if btype == 'logic_boolean':
             return block.get('fields', {}).get('BOOL', 'FALSE') == 'TRUE'
@@ -1209,10 +1741,28 @@ class Interpreter:
             op = block.get('fields', {}).get('OP', 'EQ')
             a = self._eval_value(self._get_input_block(block, 'A'), ctx)
             b = self._eval_value(self._get_input_block(block, 'B'), ctx)
+            # Both operands carry check:null, so Blockly lets ANY pairing
+            # connect — a student can compare „finde Würfel" to 3, or a text to
+            # a number, in two drags. Swallowing the TypeError into False was
+            # the worst possible answer: it is wrong in BOTH directions at once
+            # ([1] < 1 → False AND [1] > 1 → False; "a" < 1 → False AND
+            # "a" > 1 → False), so flipping the operator never revealed the
+            # problem and the sonst branch ran either way with no message.
+            # Blockly's own generated Python raises here; so do we, in German.
+            if op in ('LT', 'LTE', 'GT', 'GTE'):
+                if a is None or b is None:
+                    raise InterpreterError(
+                        'Beim Vergleich fehlt ein Wert — bitte beide Felder '
+                        'des Vergleichs-Blocks füllen.'
+                    )
             try:
                 return self._apply_compare(op, a, b)
             except (TypeError, ValueError):
-                return False
+                raise InterpreterError(
+                    'Diese beiden Werte lassen sich nicht der Größe nach '
+                    'vergleichen — bitte Zahlen mit Zahlen und Texte mit '
+                    'Texten vergleichen.'
+                )
 
         if btype == 'logic_operation':
             op = block.get('fields', {}).get('OP', 'AND')
@@ -1259,11 +1809,13 @@ class Interpreter:
         if btype == 'math_round':
             op = (block.get('fields') or {}).get('OP', 'ROUND')
             n = float(self._eval_value(self._get_input_block(block, 'NUM'), ctx) or 0)
+            # NOTE: `math` is imported at module scope. A function-local
+            # `import math` here would rebind `math` as a LOCAL for the WHOLE of
+            # _eval_value_impl, so every earlier `math.` use in this function
+            # would raise UnboundLocalError.
             if op == 'ROUNDUP':
-                import math
                 return float(math.ceil(n))
             if op == 'ROUNDDOWN':
-                import math
                 return float(math.floor(n))
             return float(round(n))
 
@@ -1305,8 +1857,20 @@ class Interpreter:
             return []
         if btype == 'lists_repeat':
             v = self._eval_value(self._get_input_block(block, 'ITEM'), ctx)
-            n = int(self._eval_value(self._get_input_block(block, 'NUM'), ctx) or 0)
-            n = max(0, n)
+            raw_n = self._number_or(
+                self._eval_value(self._get_input_block(block, 'NUM'), ctx), 0.0)
+            if not math.isfinite(raw_n):
+                raise InterpreterError('Anzahl ist keine gültige Zahl.')
+            n = max(0, int(raw_n))
+            # lists_create_with has always been capped (at its mutator's 20);
+            # this one had NO cap at all, so a two-block program materialized
+            # 5 000 000 elements in 0.38 s inside the ROS node. Raise rather
+            # than silently truncate — a student who asked for 5 000 000 has a
+            # bug, and a quietly shortened list is a wrong answer.
+            if n > MAX_LIST_ITEMS:
+                raise InterpreterError(
+                    f'Liste ist auf {MAX_LIST_ITEMS} Elemente begrenzt.'
+                )
             return [v] * n
         if btype == 'lists_length':
             target = self._eval_value(self._get_input_block(block, 'VALUE'), ctx)
@@ -1334,16 +1898,7 @@ class Interpreter:
             except ValueError:
                 return 0
         if btype == 'lists_getIndex':
-            target = self._eval_value(self._get_input_block(block, 'VALUE'), ctx)
-            if not isinstance(target, list):
-                return None
-            where = (block.get('fields') or {}).get('WHERE', 'FROM_START')
-            at_block = self._get_input_block(block, 'AT')
-            at = int(self._eval_value(at_block, ctx) or 0) if at_block else 0
-            idx = self._resolve_index(target, where, at)
-            if idx < 0 or idx >= len(target):
-                return None
-            return target[idx]
+            return self._lists_get_index(block, ctx, statement=False)
         if btype == 'lists_getSublist':
             target = self._eval_value(self._get_input_block(block, 'LIST'), ctx)
             if not isinstance(target, list):
@@ -1361,20 +1916,16 @@ class Interpreter:
 
         # Procedure call (returning).
         if btype == 'procedures_callreturn':
-            args: list[Any] = []
-            idx = 0
-            while True:
-                arg_input = self._get_input_block(block, f'ARG{idx}')
-                if arg_input is None:
-                    break
-                args.append(self._eval_value(arg_input, ctx))
-                idx += 1
-            name = (block.get('fields') or {}).get('NAME', '').strip()
+            # Name FIRST: an unnamed call must not run its arguments' side
+            # effects (a nested call, a list mutation) before it fails. This
+            # used to `return None`, so a „Funktionsaufruf" whose name could not
+            # be read fed a silent None into whatever socket it filled.
+            name = self._read_call_name(block)
             if not name:
-                return None
+                raise InterpreterError('Funktionsaufruf ohne Namen.')
             # Reuse the manager-level caller hook on ctx so procedures
             # are visible across hat handlers.
-            return ctx.call_procedure(name, args)
+            return ctx.call_procedure(name, self._read_call_args(block, ctx, name))
 
         # Perception value blocks are evaluated through the dispatch table.
         evaluator = VALUE_EVALUATORS.get(btype)
@@ -1484,12 +2035,87 @@ class Interpreter:
         return Interpreter._get_input_block(block, name)
 
     @staticmethod
-    def _read_variable_name(block: dict[str, Any], field_name: str) -> str | None:
+    def _read_call_name(block: dict[str, Any]) -> str:
+        """Name of the procedure a ``procedures_call*`` block invokes.
+
+        It lives in ``extraState.name``, NOT in ``fields`` — a call block has no
+        ``fields`` key at all (verified against Blockly 12.5.1: the call's NAME
+        is a FieldLabel with ``isSerializable: false``, so the serializer omits
+        it and the mutator round-trips the name through extraState instead).
+        Reading ``fields.NAME`` meant ``procedures_callnoreturn`` aborted every
+        run with „Funktionsaufruf ohne Namen." and ``procedures_callreturn``
+        silently evaluated to None — the whole Funktionen category was dead.
+
+        ``fields.NAME`` is still honoured as a fallback for hand-written or
+        imported JSON.
+        """
+        extra = block.get('extraState')
+        if isinstance(extra, dict):
+            name = extra.get('name')
+            if isinstance(name, str) and name.strip():
+                return name.strip()
+        name = (block.get('fields') or {}).get('NAME')
+        return name.strip() if isinstance(name, str) else ''
+
+    def _read_call_args(self, block: dict[str, Any], ctx, name: str) -> list[Any]:
+        """Evaluate ARG0..ARG(n-1) POSITIONALLY. An EMPTY socket is a HOLE.
+
+        Blockly omits an empty input from ``inputs`` entirely, so the old
+        ``while True: … if arg_input is None: break`` scan stopped at the first
+        gap and bound EVERY parameter to None as soon as the student left the
+        FIRST socket empty (measured: ARG0 empty, ARG1 = 42 → [None, None]; the
+        42 was discarded silently, while the Code panel showed ``f(None, 42)``).
+        Same bug shape ``_exec_if`` fixed via the clause scan.
+
+        Arity comes from the CALL's own ``extraState.params``, else from the
+        registered DEFINITION's params. Both are LIST LENGTHS out of the
+        payload, so they are bounded by MAX_WORKFLOW_JSON_BYTES and never by an
+        attacker-chosen integer. The legacy contiguous scan remains only for a
+        hand-written payload that carries neither.
+        """
+        n: int | None = None
+        extra = block.get('extraState')
+        if isinstance(extra, dict):
+            params = extra.get('params')
+            if isinstance(params, (list, tuple)):
+                n = len(params)
+        if n is None and name:
+            spec = self._procedures.get(name)
+            if spec is not None:
+                n = len(spec.get('params') or [])
+        if n is None:
+            n = 0
+            inputs = block.get('inputs') or {}
+            while f'ARG{n}' in inputs:
+                n += 1
+        return [self._eval_value(self._get_input_block(block, f'ARG{i}'), ctx)
+                for i in range(n)]
+
+    def _read_variable_name(self, block: dict[str, Any], field_name: str) -> str | None:
+        """Resolve a variable-field reference to the student's own name.
+
+        A saved workspace stores the reference as ``{"id": "…"}`` with no
+        ``name`` (both at the default save and at ``doFullSerialization:false``,
+        which is what this app uses), so the id must be looked up in the
+        workspace's top-level ``variables`` table — see ``_variable_names``.
+        Falling back to the raw id, as this used to do unconditionally, is what
+        made procedure parameters unbindable (write by name / read by id) and
+        left the React variable inspector with 20-character random keys it
+        rejects.
+
+        The id fallback REMAINS for a payload that carries no table at all: a
+        consistent key is still better than dropping the write.
+        """
         fields = block.get('fields') or {}
         value = fields.get(field_name)
         if isinstance(value, dict):
-            # Blockly stores variable references as `{id, name}` after a save.
-            return value.get('name') or value.get('id')
+            name = value.get('name')
+            if isinstance(name, str) and name:
+                return name
+            vid = value.get('id')
+            if isinstance(vid, str) and vid:
+                return self._variable_names.get(vid, vid)
+            return None
         if isinstance(value, str):
             return value
         return None
@@ -1525,14 +2151,23 @@ class Interpreter:
         return str(value)
 
 
-def _jsonable(value: Any) -> Any:
+def _jsonable(value: Any, budget: int = _MAX_VAR_PAYLOAD_ITEMS) -> Any:
     """Best-effort conversion of an arbitrary block-runtime value to a
     JSON-serializable shape for the [VAR:..] sentinel.
+
+    ``budget`` caps how many container elements are walked. The caller truncates
+    the finished STRING anyway, so anything past the budget could never have
+    been displayed — walking it only cost time and memory proportional to the
+    student's list, not to the 2000-character sentinel.
     """
     if value is None or isinstance(value, (bool, int, float, str)):
         return value
     if isinstance(value, (list, tuple)):
-        return [_jsonable(v) for v in value]
+        out = [_jsonable(v, budget) for v in value[:budget]]
+        if len(value) > budget:
+            out.append(f'… ({len(value)} Elemente)')
+        return out
     if isinstance(value, dict):
-        return {str(k): _jsonable(v) for k, v in value.items()}
+        items = list(value.items())[:budget]
+        return {str(k): _jsonable(v, budget) for k, v in items}
     return repr(value)

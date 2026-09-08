@@ -58,6 +58,10 @@ import {
 import HFStatus from '../constants/HFStatus';
 import store from '../store/store';
 import rosConnectionManager from '../utils/rosConnectionManager';
+// The [VAR:name=json] name gate. Shared verbatim with
+// `workshopSlice::setVariable`, which is the SECOND gate the same sentinel has
+// to pass — see utils/variableName.js for why it lives there and not here.
+import { isDisplayableVariableName, VAR_NAME_MAX_LEN } from '../utils/variableName';
 import { registerDataset } from '../services/datasetsApi';
 import { recordInferenceRun } from '../services/jetsonClient';
 
@@ -71,6 +75,7 @@ import { recordInferenceRun } from '../services/jetsonClient';
 // subscribing + dispatching — per-instance caches would alternate two object
 // identities per tick on the Workshop page. One cache serves both instances.
 let _capsCache = { str: '', obj: null };
+
 
 export function useRosTopicSubscription() {
   const taskStatusTopicRef = useRef(null);
@@ -1012,15 +1017,17 @@ export function useRosTopicSubscription() {
     if (m) {
       try {
         // Harden against prototype-pollution and unbounded growth.
-        // Audit round-3 §B / §38 — variable name must match the
-        // Blockly identifier shape and the JSON payload is capped so
-        // a runaway workflow can't balloon Redux state.
+        // Audit round-3 §B / §38 — the JSON payload is capped so a runaway
+        // workflow can't balloon Redux state. The NAME is judged by
+        // `isDisplayableVariableName`, which is deliberately NOT an identifier
+        // shape (RS-49: „meine Zahl" is a name Blockly really hands back); its
+        // job here is to keep control characters off an unauthenticated wire.
         const rawName = String(m[1] ?? '');
         const rawValue = String(m[2] ?? '');
-        if (rawName.length > 64 || rawValue.length > 4096) {
+        if (rawName.length > VAR_NAME_MAX_LEN || rawValue.length > 4096) {
           return { intercepted: true };
         }
-        if (!/^[A-Za-zÄÖÜäöüß_][A-Za-zÄÖÜäöüß0-9_]*$/.test(rawName)) {
+        if (!isDisplayableVariableName(rawName)) {
           return { intercepted: true };
         }
         if (rawName === '__proto__' || rawName === 'constructor' || rawName === 'prototype') {

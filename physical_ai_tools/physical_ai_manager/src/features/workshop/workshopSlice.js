@@ -10,6 +10,11 @@
 
 import { createSlice } from '@reduxjs/toolkit';
 import { signedOut } from '../session/sessionActions';
+// The [VAR:name=json] name gate, shared verbatim with the wire-side gate in
+// `hooks/useRosTopicSubscription`. Imported from `utils/`, NOT from the hook:
+// the hook imports `store/store`, which imports THIS file, so a slice→hook
+// import would close a cycle around `configureStore`.
+import { isDisplayableVariableName } from '../../utils/variableName';
 
 // The "no sensor data" snapshot, spelled ONCE so initialState and every reset
 // path cannot drift. A FACTORY, not a shared frozen literal: `setSensorSnapshot`
@@ -368,11 +373,23 @@ const workshopSlice = createSlice({
       // unique [VAR:i=N] sentinels would otherwise grow this slice
       // unboundedly. FIFO-evict the oldest by ts when the cap is hit.
       const VAR_LIMIT = 256;
-      const NAME_RE = /^[A-Za-zÄÖÜäöüß_][A-Za-zÄÖÜäöüß0-9_]{0,63}$/;
       const { name, value } = action.payload || {};
       if (typeof name !== 'string' || !name) return;
+      // Prototype-pollution guard. Deliberately NOT folded into
+      // `isDisplayableVariableName` (which answers "can this be shown?"):
+      // these three are perfectly displayable, they are just not safe as
+      // object keys. `useRosTopicSubscription` keeps the identical check at
+      // its own dispatch site — two gates, because either one can be the only
+      // one a future caller passes through.
       if (name === '__proto__' || name === 'constructor' || name === 'prototype') return;
-      if (!NAME_RE.test(name)) return;
+      // RS-49. This used to be a SECOND, stricter copy of the wire gate —
+      // /^[A-Za-zÄÖÜäöüß_][A-Za-zÄÖÜäöüß0-9_]{0,63}$/ — so widening only the
+      // hook fixed nothing: of the 19 names Blockly's own `Variables.promptName`
+      // really produces, this reducer silently `return`ed on 15 („meine Zahl",
+      // „Anzahl Würfel", „zähler-2", „Öl-Stand", „2te_zahl", „3", „Test 123" …)
+      // and the Variablen panel stayed empty while every test passed. One
+      // predicate, imported — never a local regex again.
+      if (!isDisplayableVariableName(name)) return;
       const ts = Date.now();
       // If we're at the cap and adding a NEW name, evict the oldest
       // entry. Existing-name overwrites are free.

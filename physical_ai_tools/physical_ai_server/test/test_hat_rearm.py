@@ -28,6 +28,7 @@ from physical_ai_server.workflow.object_catalog import fixed_catalog
 from physical_ai_server.workflow.sim_arm import SimArm
 from physical_ai_server.workflow.sim_perception import SimPerception
 from physical_ai_server.workflow.sim_world import SimWorld
+from physical_ai_server.workflow import workflow_manager as WM
 from physical_ai_server.workflow.workflow_manager import WorkflowManager
 
 
@@ -36,6 +37,18 @@ CUBES = [
     {'type': 'wuerfel', 'tag_id': 0, 'x': 0.20, 'y': -0.05, 'yaw': 0.0},
     {'type': 'wuerfel', 'tag_id': 1, 'x': 0.18, 'y': 0.06, 'yaw': 0.0},
 ]
+
+
+@pytest.fixture(autouse=True)
+def _short_hat_keepalive(monkeypatch):
+    """A workflow WITH hat handlers now stays alive after its main stack ends,
+    until Stop or ``HAT_KEEPALIVE_MAX_S`` — that IS the fix for „a program made
+    only of hats finishes instantly having done nothing", and it is why every
+    program in this file used to need a long ``wait_seconds`` in the main stack
+    as a keep-alive. Shorten the cap so ``_run`` still terminates in a test.
+    """
+    monkeypatch.setattr(WM, 'HAT_KEEPALIVE_MAX_S', 3.0)
+    yield
 
 
 @pytest.fixture(autouse=True)
@@ -187,7 +200,21 @@ def test_a_static_object_with_a_non_consuming_body_still_fires_exactly_ONCE():
     (0, 'a TOTAL detection dropout every 6th poll'),
 ])
 def test_detection_flicker_does_not_re_arm_the_edge(miss_every, label):
-    """THE flicker guard, and it must be able to fail.
+    """THE flicker guard for ``_run_hat_handler``, and it must be able to fail.
+
+    SCOPE, because this test used to claim more than it checked: it drives
+    ``_run_hat_handler`` against a SYNTHETIC trigger, so it fixes the handler's
+    debounce logic ONLY. It says nothing about what the real
+    ``_wait_object_visible`` returns — and for a camera dropout that was a bare
+    ``False``, which is not a frozenset, so ``_debounce_absence`` was skipped
+    entirely and ``if not triggered: edge_armed = True`` re-armed immediately.
+    Modelling a dropout as ``frozenset()`` here (which IS debounced) meant the
+    shipped guard could never fail on the shipped bug: measured through this
+    very harness, ``frozenset()`` → 1 firing, ``False`` → 10.
+
+    The return type is now pinned separately, at the source, by
+    ``test_a_camera_dropout_returns_a_frozenset_not_a_bare_bool`` and
+    ``test_a_flickering_camera_fires_the_hat_exactly_once_end_to_end`` below.
 
     ``test_a_static_object_...ONCE`` above places ONE cube, and a single-element
     set cannot oscillate — so it is structurally incapable of catching this. Two
@@ -236,6 +263,108 @@ def test_detection_flicker_does_not_re_arm_the_edge(miss_every, label):
     assert fires['n'] == 1, (
         f'{label}: fired {fires["n"]}x in {polls} polls — flicker re-armed the '
         f'edge; a body that claims nothing must fire exactly once')
+
+
+def test_a_camera_dropout_returns_a_frozenset_not_a_bare_bool():
+    """THE guard the synthetic flicker test structurally cannot provide.
+
+    ``_run_hat_handler`` applies ``_debounce_absence`` only
+    ``if isinstance(triggered, frozenset)``, so the RETURN TYPE of
+    ``_wait_object_visible`` decides whether a dropped frame is debounced at all.
+    Every "could not look" path returned a bare ``False`` and therefore skipped
+    the debounce entirely.
+
+    The two falsy shapes are NOT interchangeable and both are asserted here:
+    "I looked and saw nothing" / "I could not look" must be a frozenset, while
+    "there is nothing left to look FOR" must stay a bare False (routing that
+    through the debounce would keep the already-claimed ids in the trigger set
+    and re-fire the body on them)."""
+    import threading
+
+    world = SimWorld([dict(c) for c in CUBES])
+    perc = SimPerception([dict(c) for c in CUBES], CATALOG, world)
+    mgr = WorkflowManager(publisher=lambda _c: None, load_calibration=lambda: {})
+
+    def _ctx(**over):
+        base = dict(perception=perc, object_catalog=CATALOG,
+                    get_scene_frame=lambda: np.zeros((1, 1, 3), dtype=np.uint8),
+                    should_stop=lambda: False,
+                    claimed_tags=set(), skipped_tags=set(),
+                    claim_lock=threading.RLock())
+        base.update(over)
+        return types.SimpleNamespace(**base)
+
+    # A dropped camera frame — the ordinary AprilTag flicker case.
+    result = mgr._wait_object_visible('wuerfel', _ctx(get_scene_frame=lambda: None))
+    assert isinstance(result, frozenset), (
+        f'a dropped frame returned {result!r} ({type(result).__name__}); a '
+        f'non-frozenset bypasses _debounce_absence and re-arms the edge')
+
+    # Perception / catalog unavailable — also "could not look".
+    assert isinstance(mgr._wait_object_visible('wuerfel', _ctx(perception=None)),
+                      frozenset)
+    assert isinstance(
+        mgr._wait_object_visible('wuerfel', _ctx(object_catalog=None)), frozenset)
+
+    # Nothing left to look FOR must stay a bare False (see the docstring).
+    every_tag = {int(i) for i in CATALOG.recipe_for_type('wuerfel').tag_ids}
+    exhausted = mgr._wait_object_visible('wuerfel', _ctx(claimed_tags=every_tag))
+    assert exhausted is False, (
+        'an exhausted type must bypass the debounce so the hat re-arms')
+
+
+def test_a_flickering_camera_fires_the_hat_exactly_once_end_to_end():
+    """The same invariant as the synthetic flicker test, but through the REAL
+    ``_wait_object_visible``, so the return type is part of what is measured.
+
+    Before the fix this fired 10 times in 30 polls with a dropout every third
+    poll (and 20 with every second)."""
+    import threading
+
+    world = SimWorld([dict(c) for c in CUBES])
+    perc = SimPerception([dict(c) for c in CUBES], CATALOG, world)
+    mgr = WorkflowManager(publisher=lambda _c: None, load_calibration=lambda: {})
+    fires = {'n': 0}
+    polls = {'n': 0}
+
+    def _frame():
+        polls['n'] += 1
+        # Every third poll the camera hands back nothing at all.
+        if polls['n'] % 3 == 0:
+            return None
+        return np.zeros((1, 1, 3), dtype=np.uint8)
+
+    ctx = types.SimpleNamespace(
+        perception=perc, object_catalog=CATALOG, get_scene_frame=_frame,
+        claimed_tags=set(), skipped_tags=set(), claim_lock=threading.RLock(),
+        motion_lock=threading.RLock(), stop=False)
+    ctx.should_stop = lambda: ctx.stop
+
+    calls = {'n': 0}
+    real_trigger = mgr._wait_for_hat_trigger
+
+    def _trigger(hat, c):
+        calls['n'] += 1
+        if calls['n'] > 20:
+            ctx.stop = True
+            return frozenset()
+        return real_trigger(hat, c)
+
+    class _Interp:
+        @staticmethod
+        def execute_chain(_h, _c, _cb):
+            fires['n'] += 1               # a body that CLAIMS nothing
+
+    mgr._wait_for_hat_trigger = _trigger
+    mgr._emit_status = lambda *_a, **_k: None
+    mgr._on_block_change = None
+    mgr._workflow_id = 'w'
+    mgr._run_hat_handler({'type': 'edubotics_when_object_seen',
+                          'fields': {'OBJECT_TYPE': 'wuerfel'}}, _Interp(), ctx)
+
+    assert fires['n'] == 1, (
+        f'a camera dropping every third frame fired the hat {fires["n"]}x; the '
+        f'invariant is exactly once for a body that consumes nothing')
 
 
 def test_the_absence_debounce_still_lets_a_consumed_tag_age_out(monkeypatch):

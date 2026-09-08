@@ -149,7 +149,16 @@ def chunked_publish(
         while time.monotonic() < sleep_target:
             if should_stop():
                 return False
-            time.sleep(min(0.05, sleep_target - time.monotonic()))
+            # max(0.0, ...) guards the final iteration: the clock advances
+            # between the `while` test and this line, so the remaining time can
+            # go negative by a few microseconds and time.sleep() raises
+            # ValueError („sleep length must be non-negative"). Under load that
+            # window is wide enough to hit — it failed
+            # test_dof_n6.py::test_home_handler_emits_7_wide_vectors in a full-
+            # suite run while passing 4/4 in isolation. This is the same guard
+            # motion.wait_seconds already carries and documents as audit §F10;
+            # this copy was the one site that never got it.
+            time.sleep(max(0.0, min(0.05, sleep_target - time.monotonic())))
         return True
 
     for pt in points:

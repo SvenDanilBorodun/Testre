@@ -48,6 +48,7 @@ from physical_ai_server.workflow.handlers.motion import (
 from physical_ai_server.workflow.interpreter import (
     Interpreter,
     InterpreterError,
+    event_name_of,
 )
 
 
@@ -145,8 +146,16 @@ class WorkflowContext:
     # Latest 6-joint follower readback (index 5 = gripper), for the grasp-success
     # check (#2): after the gripper closes, the achieved gripper angle tells HELD
     # (object blocks the jaws, stays partly open) from EMPTY (jaws close fully).
-    # None when the joint source is unavailable → the check falls back to the
-    # claim-on-completion behaviour (no regression).
+    #
+    # None when the joint source is unavailable. That does NOT degrade
+    # gracefully, and the docstring used to claim it did ("falls back to
+    # claim-on-completion (no regression)"): with no joint source there is also
+    # no pose to seed ``last_full_joints``, so motion's
+    # _require_seeded_start_pose refuses EVERY motion block on all three
+    # profiles. Deliberate — commanding the first waypoint from an assumed pose
+    # is the lurch that guard exists to prevent — but it is a refusal, not a
+    # fallback. Only the grasp-success CHECK degrades; the arm does not move at
+    # all. See _start_joint_seed_watchdog for the late-readback case.
     get_follower_joints: Callable[[], list[float] | None] | None = None
     # Phase-2 additions
     motion_lock: threading.RLock | None = None  # reentrant: hat body + inner publish
@@ -228,6 +237,66 @@ MAX_WORKFLOW_JSON_BYTES = 256 * 1024  # 256 KiB; see plan §2.5
 # blocks would otherwise saturate the server. 16 is generous for the
 # classroom — the largest pre-existing tutorial uses 3.
 MAX_HAT_HANDLERS = 16
+
+# German names for the hat blocks, for every student-facing message. The raw
+# block-type id („edubotics_when_object_seen") used to be interpolated straight
+# into the Protokoll — an English identifier on a German surface (Rule §1) — and
+# the two error paths spelled the same condition two different ways.
+_HAT_LABELS_DE: dict[str, str] = {
+    'edubotics_when_broadcast': 'Wenn Ereignis empfangen',
+    'edubotics_when_object_seen': 'Wenn Objekt erkannt',
+    'edubotics_when_counter_gt': 'Wenn Zähler größer als',
+}
+
+
+def _hat_label_de(btype: Any) -> str:
+    return _HAT_LABELS_DE.get(btype, 'Ereignis-Block')
+
+
+# Minimum wall-clock time one hat-handler cycle may take, i.e. a ~20 Hz ceiling
+# on how often a single hat can run its body. The exact counterpart of the
+# interpreter's FOREVER_MIN_CYCLE_S, and for the same reason: a hat had NO rate
+# floor of any kind (MAX_LOOP_ITERATIONS never applies to hats), so a handler
+# that re-broadcasts its own event ran 570 211 bodies and published 2 851 066
+# status messages in 2 s — 71 % of a core, inside the ROS node, starving the
+# 1 Hz heartbeat until React reported „Getrennt". Two hats ping-ponging measured
+# 2 248 165 publishes / 86 %. A body doing real work exceeds this floor and pays
+# nothing. Plain constant, NOT an EDUBOTICS_* env knob (that would need a
+# docker-compose forward per ci.yml's env-forwarding-guard); tests monkeypatch it.
+HAT_MIN_CYCLE_S = 0.05
+
+# How long the run stays alive for its hat handlers after the MAIN stack has
+# finished. Scratch's model, and the one the blocks imply: „Wenn Würfel erkannt:
+# Greife" is a complete program, and it used to finish green in 0.157 s having
+# done nothing at all (10/10 for all three hat types), because _run's `finally`
+# set the stop event the instant the main stack returned. Students worked around
+# it with an empty „wiederhole fortlaufend" keep-alive.
+#
+# Bounded rather than infinite: a classroom needs a forgotten program to end on
+# its own. The student's Stop button is the normal exit and is unaffected. 300 s
+# matches WAIT_UNTIL_MAX_SECONDS, the other "a student can wedge the session"
+# cap, and like it this is deliberately a plain module constant.
+HAT_KEEPALIVE_MAX_S = 300.0
+
+# Consecutive failures a single hat handler may hit before it is retired for the
+# rest of the run. Its body is re-run after an error (a one-off GraspSkip must
+# not silently kill the handler — measured: with 2 cubes, one grasped, the drop
+# failed, the handler exited, the second cube was never touched, the arm was
+# LEFT HOLDING the first, and the run still reported 'finished'), but a body that
+# fails EVERY time would otherwise spin against the rate floor forever.
+MAX_HAT_CONSECUTIVE_ERRORS = 5
+
+# Upper bound on the broadcast backlog one handler may work through. Broadcasts
+# are consumed ONE at a time so a burst is queued rather than coalesced (Scratch
+# semantics); this stops a producer that outruns its consumer — the
+# self-rebroadcasting hat above — from building an unbounded queue.
+MAX_BROADCAST_BACKLOG = 32
+
+# Background follower-pose seed retry (see _start_joint_seed_watchdog). Long
+# enough to cover a container recreate / node respawn, short enough that the
+# thread is gone well inside a lesson.
+_JOINT_SEED_WATCHDOG_S = 30.0
+_JOINT_SEED_POLL_S = 0.1
 
 # How long a tag must be CONTINUOUSLY unseen before the object hat believes it
 # is really gone (see WorkflowManager._debounce_absence). Imported, not
@@ -329,12 +398,25 @@ class WorkflowManager:
         # when_object_seen hat that grabs can't tear the set vs the main loop.
         self._claim_lock = threading.RLock()
         self._lock = threading.Lock()
+        # Guards the pause/step/resume EVENT TRIO as one unit, so a step token
+        # can be tested-and-cleared atomically (see _consume_step_token).
+        # Deliberately NOT self._lock, which start() holds for its whole body —
+        # the same reason _warn_once has its own _warn_lock. Lock order is
+        # self._lock → self._pause_lock, one-directional: the consumers
+        # (_wait_if_paused / _wait_for_resume, on the workflow thread) take only
+        # this one, so there is no inversion.
+        self._pause_lock = threading.Lock()
         # Audit fix #4: store breakpoints as an immutable frozenset that
         # set_breakpoints() rebinds atomically. The interpreter reads via
         # ctx.get_breakpoints() so the reader always sees a stable
         # snapshot for the duration of one block dispatch, and the
         # writer never tears state.
         self._breakpoints: frozenset[str] = frozenset()
+        # Keys of the once-per-run German diagnostics already emitted (see
+        # _warn_once). Cleared at every start(). Its own lock — _warn_once is
+        # called from inside start(), which holds the non-reentrant self._lock.
+        self._warned_keys: set[str] = set()
+        self._warn_lock = threading.Lock()
         self._workflow_id: str | None = None
         # Persistent destinations across runs — set by mark_destination
         # callbacks in physical_ai_server.py and read into WorkflowContext
@@ -356,6 +438,34 @@ class WorkflowManager:
             return False
         return self._thread is not None and self._thread.is_alive()
 
+    def _prev_run_threads_alive(self) -> bool:
+        """True while ANY thread of the PREVIOUS run is still running.
+
+        ``is_running`` cannot answer this: it short-circuits on
+        ``_stop_event.is_set()``, and ``stop()`` sets that flag BEFORE joins that
+        are timeout-bounded (5.0 s main, 2.0 s per hat). A thread parked in a
+        call that does not poll stop therefore outlives both — five raw
+        ``acquire(timeout=10.0)`` sites alone can park one for 10 s
+        (interpreter.py, handlers/trajectory.py, handlers/perception_blocks.py
+        x2, handlers/motion.py), and ``perception.detect`` under the AprilTag
+        lock is the CPU-only-Pi case. ``ctx.should_stop is
+        self._stop_event.is_set``, so the next start's ``clear()`` UN-STOPS it.
+
+        The MAIN thread is not optional here. Guarding only ``_hat_threads``
+        left a stopped run publishing 104 further waypoints after a new run had
+        started, with both writing ``/leader/joint_trajectory``; the old run's
+        ``finally`` then re-set the stop event (killing the new run), nulled
+        ``self._thread`` (so ``stop()`` answered „Es läuft kein Workflow." for a
+        live run) and fired ``_on_finished`` (releasing ``on_workflow`` so a
+        recording could claim the arm).
+
+        Bounded by construction: ``_run`` always reaches its ``finally``.
+        """
+        thread = self._thread
+        if thread is not None and thread.is_alive():
+            return True
+        return any(t.is_alive() for t in self._hat_threads)
+
     @property
     def is_paused(self) -> bool:
         return self._pause_event.is_set()
@@ -376,7 +486,17 @@ class WorkflowManager:
         """Persist a recorded hand-guided trajectory (Batch 2b) so the next
         workflow run has it in ``ctx.trajectories`` and ``/workshop/replay`` can
         resolve it by name. Mirrors ``set_destination``. ``trajectory`` is the
-        CONTRACT-B ``{"fps": int, "points": [[j1..j5, grip, t_s], ...]}`` dict."""
+        CONTRACT-B ``{"fps": int, "points": [[j1..j5, grip, t_s], ...]}`` dict.
+
+        NOT WIRED, deliberately, and don't assume otherwise: this method has
+        ZERO production callers, so ``_persisted_trajectories`` is always empty
+        and ``/workshop/replay``'s by-NAME branch always answers „Keine Aufnahme
+        angegeben.". Every real replay arrives as an inline ``points_json``
+        payload from RunControls, which is also where the cross-profile refusal
+        lives. Kept rather than deleted because the by-name resolution is the
+        intended shape for server-persisted recordings — but see ``start()``:
+        the client payload deliberately WINS over anything persisted here, so
+        wiring this up can never silently bypass that client-side check."""
         if not name or not isinstance(trajectory, dict):
             return
         self._persisted_trajectories[name] = trajectory
@@ -408,8 +528,11 @@ class WorkflowManager:
         with self._lock:
             if not self.is_running:
                 return False, 'Es läuft kein Workflow.'
-            self._pause_event.set()
-            self._resume_event.clear()
+            # Event mutations under _pause_lock so a consumer can never observe
+            # a half-applied pause (see _consume_step_token).
+            with self._pause_lock:
+                self._pause_event.set()
+                self._resume_event.clear()
         return True, 'Workflow pausiert.'
 
     def resume(self) -> tuple[bool, str]:
@@ -417,8 +540,9 @@ class WorkflowManager:
         with self._lock:
             if not self.is_running:
                 return False, 'Es läuft kein Workflow.'
-            self._pause_event.clear()
-            self._resume_event.set()
+            with self._pause_lock:
+                self._pause_event.clear()
+                self._resume_event.set()
         return True, 'Workflow fortgesetzt.'
 
     def step(self) -> tuple[bool, str]:
@@ -433,10 +557,14 @@ class WorkflowManager:
         with self._lock:
             if not self.is_running:
                 return False, 'Es läuft kein Workflow.'
-            if not self._pause_event.is_set():
-                return False, 'Workflow ist nicht pausiert.'
-            self._step_event.set()
-            self._resume_event.set()
+            with self._pause_lock:
+                if not self._pause_event.is_set():
+                    return False, 'Workflow ist nicht pausiert.'
+                # ONE token, not a counter: a Semaphore would let rapid presses
+                # ACCUMULATE instead of collapsing, and stop() must be able to
+                # wake EVERY waiter with a single _step_event.set().
+                self._step_event.set()
+                self._resume_event.set()
         return True, 'Schritt ausgeführt.'
 
     def start(
@@ -459,205 +587,67 @@ class WorkflowManager:
             except InterpreterError as e:
                 return False, str(e), []
 
-            self._stop_event.clear()
-            self._pause_event.clear()
-            self._resume_event.set()
-            self._step_event.clear()
-            self._broadcast_events.clear()
-            self._workflow_id = workflow_id
-
-            calib = self._load_calibration() or {}
-
-            # Load the named-object catalog tolerantly: a failure (missing /
-            # corrupt / invalid JSON) is carried as a German error string and
-            # only raised when a named-object block actually runs, so a workflow
-            # with no named blocks is unaffected. Re-read each start so a catalog
-            # edit applies on the next run without an environment restart.
-            object_catalog = None
-            object_catalog_error = None
-            if self._load_object_catalog is not None:
-                try:
-                    object_catalog = self._load_object_catalog()
-                except Exception as e:  # noqa: BLE001 — surfaced at the block
-                    object_catalog = None
-                    object_catalog_error = str(e)
-
-            destinations = dict(self._persisted_destinations)
-            for k, v in (self._load_destinations() or {}).items():
-                destinations.setdefault(k, v)
-
-            # Batch 2b — recorded trajectories: server-persisted recordings first,
-            # then the top-level ``trajectories`` sibling of workflow_json
-            # (CONTRACT C) via setdefault (persisted wins, mirroring destinations).
-            trajectories = dict(self._persisted_trajectories)
-            for k, v in self._parse_trajectories(workflow_json).items():
-                trajectories.setdefault(k, v)
-
-            ik_instance = None
-            if self._ik_factory is not None:
-                try:
-                    ik_instance = self._ik_factory()
-                except Exception as e:
-                    return False, f'IK-Solver konnte nicht initialisiert werden: {e}', []
-
-            perception_instance = None
-            if self._perception_factory is not None:
-                try:
-                    perception_instance = self._perception_factory()
-                except Exception as e:
-                    return False, f'Wahrnehmung konnte nicht initialisiert werden: {e}', []
-
-            # Phase-4 no-go zones ride a top-level `zones` sibling in the
-            # workflow_json (Interpreter.from_json reads only data['blocks'], so
-            # the sibling is ignored by the interpreter). Parsed defensively and
-            # threaded onto ctx.zones; both sim + real managers go through this
-            # one start(), so both get zones.
-            zones = self._parse_zones(workflow_json)
-
-            # Phase-2 Tempo: parse the top-level ``tempo`` sibling once (clamped /
-            # default 1.0) and thread it onto ctx.tempo below. Like zones, it is a
-            # workflow_json sibling the interpreter ignores; both the sim + real
-            # manager run through this start(), so both honour it.
-            tempo = self._parse_tempo(workflow_json)
-
-            # IK pre-check: walk the JSON for concrete destinations and
-            # try a quick IK solve on each. Failures become
-            # `unreachable_blocks` — non-fatal warnings the React side
-            # surfaces as setWarningText on the affected blocks. A concrete pin
-            # that sits inside a no-go zone is flagged on the same list. The
-            # safety envelope is still the authoritative runtime gate.
-            unreachable = self._ik_precheck(interpreter, ik_instance, zones)
-
-            # Audit fix #6: seed ctx.last_full_joints synchronously HERE,
-            # before hat threads (or the main daemon) ever spawn. The
-            # previous design seeded inside _run on the daemon thread,
-            # which meant a hat-block trigger could fire and begin motion
-            # before _run had a chance to overwrite the [0,0,0,0,0,0]
-            # dataclass default. Best-effort: an unavailable joint source
-            # leaves the safe default in place and the first motion call
-            # will populate it.
-            seeded_joints: list[float] | None = None
-            if self._get_follower_joints is not None:
-                try:
-                    joints = self._get_follower_joints()
-                    width = self._num_arm_joints + 1
-                    if joints and len(joints) >= width:
-                        vals = [float(x) for x in joints[:width]]
-                        # Non-finite guard: a NaN/Inf joint value would seed the
-                        # first commanded pose with garbage (NaN published straight
-                        # through the trajectory, or Inf crashing build_segment).
-                        # Treat it as "no seed" so the safe HOME default is used
-                        # and the first real motion re-seeds cleanly.
-                        if all(math.isfinite(v) for v in vals):
-                            seeded_joints = vals
-                except Exception:  # noqa: BLE001 — best-effort seed
-                    seeded_joints = None
-
-            ctx = WorkflowContext(
-                publisher=self._publisher,
-                ik=ik_instance,
-                perception=perception_instance,
-                destinations=destinations,
-                # Batch 2b — recorded hand-guided trajectories (name → CONTRACT-B).
-                trajectories=trajectories,
-                z_table=calib.get('z_table'),
-                board_table_z=calib.get('board_table_z'),
-                scene_intrinsics=calib.get('scene_intrinsics'),
-                scene_extrinsics=calib.get('scene_extrinsics'),
-                table_plane=calib.get('table_plane'),
-                # W5 — ground-truth accuracy correction (None/0.0 when never run).
-                xy_correction=calib.get('xy_correction'),
-                yaw_bias_rad=float(calib.get('yaw_bias_rad', 0.0) or 0.0),
-                should_stop=self._stop_event.is_set,
-                log=lambda msg: self._emit_status({'log_message': msg}),
-                emit_detections=lambda dets: self._emit_status({'detections': dets}),
-                get_scene_frame=self._get_scene_frame,
-                get_gripper_frame=self._get_gripper_frame,
-                get_scene_frame_age=self._get_scene_frame_age,
-                get_current_pose_xyz=self._get_current_pose_xyz,
-                # Grasp-success check (#2): read the achieved gripper angle after
-                # a close to confirm the object is actually held.
-                get_follower_joints=self._get_follower_joints,
-                # Fresh per run: no gripper close commanded yet. NEVER seeded
-                # from the measured follower pose (unlike last_full_joints
-                # below) — only motion's close paths write it.
-                last_commanded_close_rad=None,
-                motion_lock=self._motion_lock,
-                var_lock=self._var_lock,
-                breakpoints=self._breakpoints,
-                # Audit fix #4: getter so the interpreter sees the
-                # manager's freshest frozenset on every block dispatch,
-                # without sharing a mutable object across threads.
-                get_breakpoints=lambda: self._breakpoints,
-                fire_broadcast=self._fire_broadcast,
-                wait_if_paused=self._wait_if_paused,
-                wait_for_resume=self._wait_for_resume,
-                set_paused=self._set_paused,
-                object_catalog=object_catalog,
-                object_catalog_error=object_catalog_error,
-                # Fresh per-run counter store for the Zähler blocks + the
-                # when_counter_gt hat (never persisted across runs).
-                counters={},
-                # Fresh per-run claimed/skipped sets (never persisted across runs)
-                # + the shared lock guarding them.
-                claimed_tags=set(),
-                skipped_tags=set(),
-                claim_lock=self._claim_lock,
-                # Fresh per-run absence tracker for the recycled-object reclaim.
-                absent_since={},
-                # Phase-4 no-go zones (None/empty → motion behaves as today).
-                zones=zones,
-                # Phase-2 Tempo (global speed multiplier; 1.0 → unchanged speed).
-                tempo=tempo,
-                # ArmProfile geometry stamps (motion._n & friends read these;
-                # None → OMX constants). last_full_joints starts as the width-
-                # correct all-zero sentinel (the seeded overwrite follows below).
-                last_full_joints=[0.0] * (self._num_arm_joints + 1),
-                num_arm_joints=self._num_arm_joints,
-                roll_joint_index=getattr(self._arm_profile, 'roll_joint_index', None)
-                if self._arm_profile else None,
-                home_joints_rad=getattr(self._arm_profile, 'home_joints_rad', None)
-                if self._arm_profile else None,
-                observe_pose_joints=getattr(
-                    self._arm_profile, 'observe_pose_joints', None)
-                if self._arm_profile else None,
-                gripper_open_rad=getattr(self._arm_profile, 'gripper_open_rad', None)
-                if self._arm_profile else None,
-                gripper_closed_rad=getattr(
-                    self._arm_profile, 'gripper_closed_rad', None)
-                if self._arm_profile else None,
-                velocity_limit_rad_s=getattr(
-                    self._arm_profile, 'velocity_limit_rad_s', None)
-                if self._arm_profile else None,
-                grasp_held_margin_rad=getattr(
-                    self._arm_profile, 'grasp_held_margin_rad', None)
-                if self._arm_profile else None,
-                # Reroute-ladder geometry (path_guard reads these off ctx; None →
-                # its OMX module constants, so every profile-less run is
-                # unchanged).
-                safe_travel_z_m=getattr(self._arm_profile, 'safe_travel_z_m', None)
-                if self._arm_profile else None,
-                tool_clear_m=getattr(self._arm_profile, 'tool_clear_m', None)
-                if self._arm_profile else None,
-                swing_heights_m=getattr(self._arm_profile, 'swing_heights_m', None)
-                if self._arm_profile else None,
-                swing_radii_m=getattr(self._arm_profile, 'swing_radii_m', None)
-                if self._arm_profile else None,
-            )
-
-            # Apply the synchronous seed so hat threads start with a
-            # realistic last_full_joints rather than [0]*6.
-            if seeded_joints is not None:
-                ctx.last_full_joints = seeded_joints
-
-            # Spawn hat-block handler threads. Each grabs a per-handler
-            # event and runs its body whenever the event fires.
+            # THE REFUSAL GUARDS RUN BEFORE ``_stop_event.clear()``, AND THAT
+            # ORDERING IS LOAD-BEARING.
+            #
+            # ``ctx.should_stop is self._stop_event.is_set``, so clearing the
+            # event un-stops EVERY thread that is still holding a reference to
+            # it — including a hat thread that survived the previous run. When
+            # the clear ran first and a guard below then refused the start, the
+            # refusal returned without restoring the flag: measured 2/2, a
+            # surviving hat published 90 further waypoints with NO workflow
+            # running and ``on_workflow`` already released (so a recording or a
+            # jog could claim the arm alongside it), ``stop()`` answered „Es
+            # läuft kein Workflow." because it short-circuits on ``is_running``,
+            # and every later start was refused forever — an arm the student
+            # cannot stop, in a session they cannot restart.
+            #
+            # The trigger is ANY thread parked in a call that does not poll
+            # stop for longer than ``stop()``'s joins (5.0 s main, 2.0 s hat).
+            #
+            # AN EARLIER REVISION OF THIS COMMENT NAMED ``perception.detect``
+            # under the AprilTag lock on the CPU-only Orange Pi. MEASURED AND
+            # REFUTED with the real Perception + real pupil_apriltags: 0.6 ms
+            # for 640x480 with 2 tags, 2.9 ms for 25 tags at 1280x720, and
+            # 84.2 ms for 1920x1080 of pure noise — above any shipped camera and
+            # still ~60x short of the 5 s needed, before any Pi scaling. With 17
+            # concurrent callers (the shipped 16-hat cap plus main) the worst
+            # wait was 9 ms. Do not restore that claim.
+            #
+            # Producers that ARE named, ranked: (1) ``EDUBOTICS_GRASP_SETTLE_S``
+            # — ``motion._safe_float`` does not clamp it and it lands in a raw
+            # ``time.sleep`` with no stop poll, so an operator setting 10 gives
+            # every rig a deterministic park; (2) a ``Thread.start()`` that
+            # fails part-way through the hat spawn loop, which needs no timing
+            # at all; (3) five raw ``acquire(timeout=10.0)`` sites, an amplifier
+            # rather than a cause — every holder traced releases promptly.
+            #
+            # So this is a real defect with no demonstrated everyday trigger:
+            # the guard below is cheap removal of a whole class, not an
+            # emergency. Recording that honestly is the point — the audit this
+            # round came from lost a High finding (RS-08) to exactly the
+            # opposite habit, verifying a reachable code path and ASSUMING the
+            # real-world event that drives it.
+            #
+            # An earlier revision of this comment claimed the hat keep-alive is
+            # "what made it reachable". That was wrong, and re-measuring is what
+            # showed it: the defect reproduces on the pre-keep-alive tree with a
+            # real 6 s-blocking hat, 2/2 trials, same 90 late waypoints. If
+            # anything it was WORSE there — with no keep-alive, ``stop()``
+            # short-circuits on ``is_running`` and returns in 0.00 s without even
+            # attempting the 2 s join or emitting the zombie ``[WARNUNG]``, so
+            # nothing surfaced at all. The keep-alive did not create the
+            # exposure; it made ``stop()`` at least try.
+            #
+            # Both guards need only ``interpreter`` and ``self._hat_threads``,
+            # so hoisting them costs nothing. Anything added here that can
+            # return early MUST stay above the clear.
             _, hats = interpreter.split_roots()
             # Audit fix #7: refuse to start if a previous run's hat
             # threads haven't fully reaped yet. Re-using a workflow_id
             # while old daemons are still alive leaks broadcast state
             # and can re-fire stale triggers against the new run's ctx.
-            if any(t.is_alive() for t in self._hat_threads):
+            if self._prev_run_threads_alive():
                 return False, (
                     'Vorheriger Workflow läuft noch — bitte kurz warten.'
                 ), []
@@ -667,26 +657,384 @@ class WorkflowManager:
                 return False, (
                     'Zu viele Ereignis-Blöcke (Maximum 16).'
                 ), []
-            self._hat_threads = []
-            for hat in hats:
-                t = threading.Thread(
-                    target=self._run_hat_handler,
-                    args=(hat, interpreter, ctx),
-                    name=f'workflow-{workflow_id}-hat-{hat.get("id", "?")}',
+
+            # EVERY path out of here restores the flag unless a run actually
+            # took ownership of it — see the ``finally`` below.
+            armed = False
+            try:
+                self._stop_event.clear()
+                self._pause_event.clear()
+                self._resume_event.set()
+                self._step_event.clear()
+                self._broadcast_events.clear()
+                self._warned_keys = set()
+                self._workflow_id = workflow_id
+
+                calib = self._load_calibration() or {}
+
+                # Load the named-object catalog tolerantly: a failure (missing /
+                # corrupt / invalid JSON) is carried as a German error string and
+                # only raised when a named-object block actually runs, so a workflow
+                # with no named blocks is unaffected. Re-read each start so a catalog
+                # edit applies on the next run without an environment restart.
+                object_catalog = None
+                object_catalog_error = None
+                if self._load_object_catalog is not None:
+                    try:
+                        object_catalog = self._load_object_catalog()
+                    except Exception as e:  # noqa: BLE001 — surfaced at the block
+                        object_catalog = None
+                        object_catalog_error = str(e)
+
+                destinations = dict(self._persisted_destinations)
+                for k, v in (self._load_destinations() or {}).items():
+                    destinations.setdefault(k, v)
+
+                # Batch 2b — recorded trajectories: server-persisted recordings first,
+                # then the top-level ``trajectories`` sibling of workflow_json
+                # (CONTRACT C) via setdefault (persisted wins, mirroring destinations).
+                # PRECEDENCE: the CLIENT payload wins over a server-persisted
+                # recording of the same name. It used to be the other way round, and
+                # that was a latent cross-profile hole: RunControls stamps every
+                # saved „Bewegung" with the rig's robot type and refuses a
+                # cross-profile replay client-side, but a persisted entry silently
+                # overrode the checked payload and bypassed that refusal. Latent
+                # only because `set_trajectory` has no production caller today —
+                # `_persisted_trajectories` is always empty, so this changes nothing
+                # observable and closes the hole before it opens.
+                trajectories = dict(self._parse_trajectories(workflow_json))
+                for k, v in self._persisted_trajectories.items():
+                    trajectories.setdefault(k, v)
+
+                ik_instance = None
+                if self._ik_factory is not None:
+                    try:
+                        ik_instance = self._ik_factory()
+                    except Exception as e:
+                        return False, f'IK-Solver konnte nicht initialisiert werden: {e}', []
+
+                perception_instance = None
+                if self._perception_factory is not None:
+                    try:
+                        perception_instance = self._perception_factory()
+                    except Exception as e:
+                        return False, f'Wahrnehmung konnte nicht initialisiert werden: {e}', []
+
+                # Phase-4 no-go zones ride a top-level `zones` sibling in the
+                # workflow_json (Interpreter.from_json reads only data['blocks'], so
+                # the sibling is ignored by the interpreter). Parsed defensively and
+                # threaded onto ctx.zones; both sim + real managers go through this
+                # one start(), so both get zones.
+                zones = self._parse_zones(workflow_json)
+
+                # Phase-2 Tempo: parse the top-level ``tempo`` sibling once (clamped /
+                # default 1.0) and thread it onto ctx.tempo below. Like zones, it is a
+                # workflow_json sibling the interpreter ignores; both the sim + real
+                # manager run through this start(), so both honour it.
+                tempo = self._parse_tempo(workflow_json)
+
+                # IK pre-check: walk the JSON for concrete destinations and
+                # try a quick IK solve on each. Failures become
+                # `unreachable_blocks` — non-fatal warnings the React side
+                # surfaces as setWarningText on the affected blocks. A concrete pin
+                # that sits inside a no-go zone is flagged on the same list. The
+                # safety envelope is still the authoritative runtime gate.
+                unreachable = self._ik_precheck(interpreter, ik_instance, zones)
+
+                # Audit fix #6: seed ctx.last_full_joints synchronously HERE,
+                # before hat threads (or the main daemon) ever spawn. The
+                # previous design seeded inside _run on the daemon thread,
+                # which meant a hat-block trigger could fire and begin motion
+                # before _run had a chance to overwrite the [0,0,0,0,0,0]
+                # dataclass default. Best-effort: an unavailable joint source
+                # leaves the safe default in place and the first motion call
+                # will populate it.
+                seeded_joints: list[float] | None = None
+                if self._get_follower_joints is not None:
+                    try:
+                        joints = self._get_follower_joints()
+                        width = self._num_arm_joints + 1
+                        if joints and len(joints) >= width:
+                            vals = [float(x) for x in joints[:width]]
+                            # Non-finite guard: a NaN/Inf joint value would seed the
+                            # first commanded pose with garbage (NaN published straight
+                            # through the trajectory, or Inf crashing build_segment).
+                            # Treat it as "no seed" so the safe HOME default is used
+                            # and the first real motion re-seeds cleanly.
+                            if all(math.isfinite(v) for v in vals):
+                                seeded_joints = vals
+                    except Exception:  # noqa: BLE001 — best-effort seed
+                        seeded_joints = None
+
+                ctx = WorkflowContext(
+                    publisher=self._publisher,
+                    ik=ik_instance,
+                    perception=perception_instance,
+                    destinations=destinations,
+                    # Batch 2b — recorded hand-guided trajectories (name → CONTRACT-B).
+                    trajectories=trajectories,
+                    z_table=calib.get('z_table'),
+                    board_table_z=calib.get('board_table_z'),
+                    scene_intrinsics=calib.get('scene_intrinsics'),
+                    scene_extrinsics=calib.get('scene_extrinsics'),
+                    table_plane=calib.get('table_plane'),
+                    # W5 — ground-truth accuracy correction (None/0.0 when never run).
+                    xy_correction=calib.get('xy_correction'),
+                    yaw_bias_rad=float(calib.get('yaw_bias_rad', 0.0) or 0.0),
+                    should_stop=self._stop_event.is_set,
+                    log=lambda msg: self._emit_status({'log_message': msg}),
+                    emit_detections=lambda dets: self._emit_status({'detections': dets}),
+                    get_scene_frame=self._get_scene_frame,
+                    get_gripper_frame=self._get_gripper_frame,
+                    get_scene_frame_age=self._get_scene_frame_age,
+                    get_current_pose_xyz=self._get_current_pose_xyz,
+                    # Grasp-success check (#2): read the achieved gripper angle after
+                    # a close to confirm the object is actually held.
+                    get_follower_joints=self._get_follower_joints,
+                    # Fresh per run: no gripper close commanded yet. NEVER seeded
+                    # from the measured follower pose (unlike last_full_joints
+                    # below) — only motion's close paths write it.
+                    last_commanded_close_rad=None,
+                    motion_lock=self._motion_lock,
+                    var_lock=self._var_lock,
+                    breakpoints=self._breakpoints,
+                    # Audit fix #4: getter so the interpreter sees the
+                    # manager's freshest frozenset on every block dispatch,
+                    # without sharing a mutable object across threads.
+                    get_breakpoints=lambda: self._breakpoints,
+                    fire_broadcast=self._fire_broadcast,
+                    wait_if_paused=self._wait_if_paused,
+                    wait_for_resume=self._wait_for_resume,
+                    set_paused=self._set_paused,
+                    object_catalog=object_catalog,
+                    object_catalog_error=object_catalog_error,
+                    # Fresh per-run counter store for the Zähler blocks + the
+                    # when_counter_gt hat (never persisted across runs).
+                    counters={},
+                    # Fresh per-run claimed/skipped sets (never persisted across runs)
+                    # + the shared lock guarding them.
+                    claimed_tags=set(),
+                    skipped_tags=set(),
+                    claim_lock=self._claim_lock,
+                    # Fresh per-run absence tracker for the recycled-object reclaim.
+                    absent_since={},
+                    # Phase-4 no-go zones (None/empty → motion behaves as today).
+                    zones=zones,
+                    # Phase-2 Tempo (global speed multiplier; 1.0 → unchanged speed).
+                    tempo=tempo,
+                    # ArmProfile geometry stamps (motion._n & friends read these;
+                    # None → OMX constants). last_full_joints starts as the width-
+                    # correct all-zero sentinel (the seeded overwrite follows below).
+                    last_full_joints=[0.0] * (self._num_arm_joints + 1),
+                    num_arm_joints=self._num_arm_joints,
+                    roll_joint_index=getattr(self._arm_profile, 'roll_joint_index', None)
+                    if self._arm_profile else None,
+                    home_joints_rad=getattr(self._arm_profile, 'home_joints_rad', None)
+                    if self._arm_profile else None,
+                    observe_pose_joints=getattr(
+                        self._arm_profile, 'observe_pose_joints', None)
+                    if self._arm_profile else None,
+                    gripper_open_rad=getattr(self._arm_profile, 'gripper_open_rad', None)
+                    if self._arm_profile else None,
+                    gripper_closed_rad=getattr(
+                        self._arm_profile, 'gripper_closed_rad', None)
+                    if self._arm_profile else None,
+                    velocity_limit_rad_s=getattr(
+                        self._arm_profile, 'velocity_limit_rad_s', None)
+                    if self._arm_profile else None,
+                    grasp_held_margin_rad=getattr(
+                        self._arm_profile, 'grasp_held_margin_rad', None)
+                    if self._arm_profile else None,
+                    # Reroute-ladder geometry (path_guard reads these off ctx; None →
+                    # its OMX module constants, so every profile-less run is
+                    # unchanged).
+                    safe_travel_z_m=getattr(self._arm_profile, 'safe_travel_z_m', None)
+                    if self._arm_profile else None,
+                    tool_clear_m=getattr(self._arm_profile, 'tool_clear_m', None)
+                    if self._arm_profile else None,
+                    swing_heights_m=getattr(self._arm_profile, 'swing_heights_m', None)
+                    if self._arm_profile else None,
+                    swing_radii_m=getattr(self._arm_profile, 'swing_radii_m', None)
+                    if self._arm_profile else None,
+                )
+
+                # Apply the synchronous seed so hat threads start with a
+                # realistic last_full_joints rather than [0]*6.
+                if seeded_joints is not None:
+                    ctx.last_full_joints = seeded_joints
+
+                # Spawn hat-block handler threads. Each grabs a per-handler
+                # event and runs its body whenever the event fires.
+                # ``hats`` and both refusal guards were hoisted above
+                # ``_stop_event.clear()`` — see the block comment there. Do not move
+                # them back down.
+                self._hat_threads = []
+                for hat in hats:
+                    t = threading.Thread(
+                        target=self._run_hat_handler,
+                        args=(hat, interpreter, ctx),
+                        name=f'workflow-{workflow_id}-hat-{hat.get("id", "?")}',
+                        daemon=True,
+                    )
+                    self._hat_threads.append(t)
+
+                # Static, start-time diagnostics: orphan events + unknown object
+                # types. Best-effort — a diagnostic must never stop a run.
+                try:
+                    self._diagnose_events(interpreter, object_catalog)
+                except Exception:  # noqa: BLE001
+                    pass
+
+                # If the synchronous seed above found no follower pose, keep trying
+                # in the background instead of failing the whole run.
+                if seeded_joints is None:
+                    self._start_joint_seed_watchdog(ctx)
+
+                self._thread = threading.Thread(
+                    target=self._run,
+                    args=(interpreter, ctx),
+                    name=f'workflow-{workflow_id}',
                     daemon=True,
                 )
-                self._hat_threads.append(t)
+                # ORDER IS LOAD-BEARING: hat threads FIRST, main stack second.
+                # ``Thread.is_alive()`` is False for a thread that has not been
+                # started, and the main stack can run to completion before a
+                # later-started hat thread exists — so _await_hat_handlers saw "no
+                # handlers alive" and ended the run immediately, which is the very
+                # thing it was added to prevent. Starting the handlers first also
+                # means they are already polling when the first main-stack block
+                # runs, so a „sende Ereignis" as block one has a listener.
+                for t in self._hat_threads:
+                    t.start()
+                self._thread.start()
+                armed = True
+                return True, 'Workflow gestartet.', unreachable
+            finally:
+                if not armed:
+                    # No run took the flag: a refusal below the clear, an
+                    # exception, or a Thread.start() that failed part-way
+                    # through the spawn loop. Put it back exactly as it was
+                    # found, so nothing that survived the PREVIOUS run is
+                    # silently un-stopped and any handler this call already
+                    # started exits at once.
+                    self._stop_event.set()
 
-            self._thread = threading.Thread(
-                target=self._run,
-                args=(interpreter, ctx),
-                name=f'workflow-{workflow_id}',
-                daemon=True,
-            )
-            self._thread.start()
-            for t in self._hat_threads:
-                t.start()
-            return True, 'Workflow gestartet.', unreachable
+    def _start_joint_seed_watchdog(self, ctx: WorkflowContext) -> None:
+        """Keep seeding ``ctx.last_full_joints`` until a real readback arrives.
+
+        The seed in ``start()`` is taken ONCE, synchronously. If the follower's
+        first ``/joint_states`` message has not landed by then — routine right
+        after „Umgebung starten", after a container recreate, or when the node
+        respawns — the all-zero sentinel stays put and motion's
+        ``_require_seeded_start_pose`` refuses EVERY motion block for the rest of
+        the run. Measured: a readback arriving 0.3 s after start, a full 0.7 s
+        BEFORE the program's first motion block, still failed the run with
+        „Aktuelle Armstellung ist noch nicht bekannt …".
+
+        Writes ONLY while the pose is still the unseeded sentinel, so it can
+        never overwrite a pose a motion handler has already commanded (no real
+        HOME on any shipped profile is all-zero). Exits as soon as it seeds, on
+        stop, or at the timeout.
+
+        NOT a substitute for the guard: with no joint source at all this never
+        seeds and every motion block still refuses, which is correct — the
+        alternative is commanding the first waypoint from an assumed pose, i.e.
+        exactly the lurch the guard exists to prevent.
+        """
+        if self._get_follower_joints is None:
+            return
+        width = self._num_arm_joints + 1
+
+        def _seed_loop() -> None:
+            deadline = time.monotonic() + _JOINT_SEED_WATCHDOG_S
+            while time.monotonic() < deadline:
+                if self._stop_event.is_set():
+                    return
+                pose = getattr(ctx, 'last_full_joints', None)
+                # Someone real has written a pose — nothing left to do.
+                if not (pose and all(abs(float(v)) <= 1e-6 for v in pose)):
+                    return
+                try:
+                    joints = self._get_follower_joints()
+                    if joints and len(joints) >= width:
+                        vals = [float(v) for v in joints[:width]]
+                        if (all(math.isfinite(v) for v in vals)
+                                and any(abs(v) > 1e-6 for v in vals)):
+                            ctx.last_full_joints = vals
+                            return
+                except Exception:  # noqa: BLE001 — best-effort seed
+                    pass
+                time.sleep(_JOINT_SEED_POLL_S)
+
+        threading.Thread(
+            target=_seed_loop,
+            name=f'workflow-{self._workflow_id}-jointseed',
+            daemon=True,
+        ).start()
+
+    def _diagnose_events(self, interpreter: Interpreter, object_catalog) -> None:
+        """German [WARNUNG]s for events and object types that can never pair up.
+
+        None of these were reported at all: a „wenn Ereignis empfangen" whose
+        event nobody sends fired 0 times in silence, a „sende Ereignis" nobody
+        listens for was equally silent, and a „wenn <Typ> erkannt" naming a type
+        absent from the catalog simply never fired — while the SAME type on the
+        main stack fails loud with a German catalog error. That asymmetry is
+        invisible from the editor, which is what makes it expensive.
+        """
+        senders: set[str] = set()
+        listeners: set[str] = set()
+        object_types: set[str] = set()
+
+        def walk(block: Any) -> None:
+            if not isinstance(block, dict):
+                return
+            btype = block.get('type')
+            if btype == 'edubotics_broadcast':
+                name = event_name_of(block)
+                if name:
+                    senders.add(name)
+            elif btype == 'edubotics_when_broadcast':
+                name = event_name_of(block)
+                if name:
+                    listeners.add(name)
+            elif btype == 'edubotics_when_object_seen':
+                raw = (block.get('fields') or {}).get('OBJECT_TYPE')
+                if isinstance(raw, str) and raw.strip():
+                    object_types.add(raw.strip())
+            inputs = block.get('inputs')
+            if isinstance(inputs, dict):
+                for slot in inputs.values():
+                    if isinstance(slot, dict):
+                        walk(slot.get('block'))
+                        walk(slot.get('shadow'))
+            nxt = block.get('next')
+            if isinstance(nxt, dict):
+                walk(nxt.get('block'))
+
+        for root in interpreter.roots:
+            walk(root)
+
+        for name in sorted(listeners - senders):
+            self._warn_once(f'orphan-listener:{name}', (
+                f'[WARNUNG] Auf das Ereignis „{name}" wartet ein Block, aber '
+                f'kein Block sendet es — „Wenn Ereignis empfangen" wird nie '
+                f'ausgelöst.'
+            ))
+        for name in sorted(senders - listeners):
+            self._warn_once(f'orphan-sender:{name}', (
+                f'[WARNUNG] Das Ereignis „{name}" wird gesendet, aber kein '
+                f'„Wenn Ereignis empfangen"-Block wartet darauf.'
+            ))
+        if object_catalog is not None:
+            for type_name in sorted(object_types):
+                try:
+                    object_catalog.recipe_for_type(type_name)
+                except Exception:  # noqa: BLE001 — unknown type is the point
+                    self._warn_once(f'unknown-type:{type_name}', (
+                        f'[WARNUNG] „{type_name}" ist kein bekanntes Objekt — '
+                        f'„Wenn {type_name} erkannt" wird nie ausgelöst.'
+                    ))
 
     def stop(self) -> tuple[bool, str]:
         if not self.is_running:
@@ -782,16 +1130,41 @@ class WorkflowManager:
             state['count'] += 1
             state['cond'].notify_all()
 
+    def _consume_step_token(self) -> bool:
+        """Atomically take THE single-step token, if one is outstanding.
+
+        „Schritt" grants ONE permission to run ONE block. The old shape was
+        ``if self._pause_event.is_set() and self._step_event.is_set():`` then
+        ``self._step_event.clear()`` — a test-and-clear with nothing between
+        them, so two threads parked on the gate could BOTH pass one press
+        (two ``when_broadcast`` hats on one event, or a hat body plus a
+        still-running main stack). Measured against the REAL pre-fix bodies
+        with 4 waiters, 120 trials: 0 bad at the default switch interval, 6-7
+        bad (run to run) at ``sys.setswitchinterval(1e-6)``; this version is 0
+        at both. Rare, not impossible — and each extra release may run a motion
+        block the student did not ask for.
+
+        ``_resume_event`` is cleared under the SAME lock, because that clear is
+        what re-arms the pause for the next block. Doing it outside would let a
+        step consumer clobber a concurrent „Fortsetzen" (which sets both
+        ``_resume_event`` and clears ``_pause_event``) and leave the run wedged
+        on a resume the student already pressed.
+        """
+        with self._pause_lock:
+            if not (self._pause_event.is_set() and self._step_event.is_set()):
+                return False
+            self._step_event.clear()
+            # Re-arm the pause: this single block runs, and the next gate call
+            # blocks again.
+            self._resume_event.clear()
+            return True
+
     def _wait_if_paused(self) -> None:
         # Fast path: not paused, nothing to do.
         if not self._pause_event.is_set():
             return
         # If a single-step was requested, consume the token and proceed.
-        if self._step_event.is_set():
-            self._step_event.clear()
-            # Re-arm the pause: this single block will run, and the
-            # next call to _wait_if_paused will block again.
-            self._resume_event.clear()
+        if self._consume_step_token():
             return
         self._wait_for_resume()
 
@@ -800,24 +1173,27 @@ class WorkflowManager:
         while not self._stop_event.is_set():
             if self._resume_event.wait(0.1):
                 # If still paused but step was requested, consume it.
-                if self._pause_event.is_set() and self._step_event.is_set():
-                    self._step_event.clear()
-                    self._resume_event.clear()
+                if self._consume_step_token():
                     return
                 if not self._pause_event.is_set():
                     return
 
     def _set_paused(self, value: bool) -> None:
+        # _pause_lock spans the EVENT MUTATIONS ONLY — never the _emit_status
+        # publish below, which reaches the ROS publisher and must not hold a
+        # lock a paused workflow thread is polling for.
         if value:
-            self._pause_event.set()
-            self._resume_event.clear()
+            with self._pause_lock:
+                self._pause_event.set()
+                self._resume_event.clear()
             self._emit_status({
                 'workflow_id': self._workflow_id or '',
                 'phase': 'paused',
             })
         else:
-            self._pause_event.clear()
-            self._resume_event.set()
+            with self._pause_lock:
+                self._pause_event.clear()
+                self._resume_event.set()
 
     # ------------------------------------------------------------------
     # IK pre-check
@@ -1009,6 +1385,10 @@ class WorkflowManager:
         unaffected.
         """
         btype = hat.get('type')
+        # German name for every message this handler emits (Rule §1) — the raw
+        # block-type id used to be interpolated straight into the Protokoll.
+        label = _hat_label_de(btype)
+        consecutive_errors = 0
         # Edge-trigger arming state for the level-triggered perception/counter
         # hats. None means 'first wait, treat as armed'; True means armed
         # (allowed to fire on next true), False means waiting for the condition
@@ -1075,6 +1455,7 @@ class WorkflowManager:
                 # Acquire the motion lock for the entire handler body.
                 # This is conservative — even a perception-only handler
                 # holds the lock — but it keeps the safety story simple.
+                cycle_start = time.monotonic()
                 with ctx.motion_lock:
                     if ctx.should_stop():
                         return
@@ -1084,32 +1465,80 @@ class WorkflowManager:
                             ctx,
                             self._on_block_change,
                         )
-                    except WorkflowError as e:
-                        # Say so. This used to return silently, which was survivable
-                        # only because the perception hat could never fire twice —
-                        # now that it re-arms, the LAST object legitimately ends in
-                        # a GraspSkip ("Kein Würfel sichtbar"), and a handler thread
-                        # that just disappears at that point is exactly the class of
-                        # bug this round exists to remove.
+                        consecutive_errors = 0
+                    except (WorkflowError, InterpreterError) as e:
+                        # KEEP THE HANDLER ALIVE. All four except arms used to
+                        # `return`, so ONE failing body silenced the hat for the
+                        # whole run while the run still reported green: measured
+                        # with 2 cubes, one grasped, the drop failed, the handler
+                        # exited, the second cube was never touched, the arm was
+                        # LEFT HOLDING the first, phase='finished', 5/5. A
+                        # one-off failure (a GraspSkip on an object that rolled
+                        # away) must not be terminal.
+                        consecutive_errors += 1
                         self._emit_status({
                             'workflow_id': self._workflow_id or '',
-                            'log_message': f'Ereignis-Block „{btype}": {e}',
+                            'log_message': f'„{label}": {e}',
                         })
-                        return
-                    except InterpreterError as e:
-                        self._emit_status({
-                            'workflow_id': self._workflow_id or '',
-                            'log_message': f'Hat-Handler "{btype}": {e}',
-                        })
-                        return
                     except Exception:
+                        consecutive_errors += 1
                         self._emit_status({
                             'workflow_id': self._workflow_id or '',
-                            'log_message': f'Hat-Handler "{btype}": Fehler.',
+                            'log_message': (
+                                f'„{label}": Interner Fehler im Ereignis-Block.'
+                            ),
                         })
-                        return
+                if consecutive_errors >= MAX_HAT_CONSECUTIVE_ERRORS:
+                    # ...but a body that fails EVERY time is a bug, not a
+                    # hiccup, and would otherwise spin against the rate floor
+                    # for the rest of the run. Retire it, loudly.
+                    self._emit_status({
+                        'workflow_id': self._workflow_id or '',
+                        'log_message': (
+                            f'[WARNUNG] „{label}" wurde {consecutive_errors}× '
+                            f'hintereinander mit einem Fehler beendet und wird '
+                            f'nicht mehr ausgeführt.'
+                        ),
+                    })
+                    return
+                # Rate floor: bound how often ONE hat can run its body, so a
+                # handler whose body re-triggers the handler cannot saturate a
+                # core or flood the status channel (see HAT_MIN_CYCLE_S).
+                elapsed = time.monotonic() - cycle_start
+                if elapsed < HAT_MIN_CYCLE_S:
+                    self._sleep_until_stop(ctx, HAT_MIN_CYCLE_S - elapsed)
         except Exception:
             return
+
+    @staticmethod
+    def _sleep_until_stop(ctx, seconds: float) -> None:
+        """Sleep up to ``seconds``, waking early on stop. Used by the hat rate
+        floor and the post-main keep-alive, both of which must not delay a Stop."""
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            if ctx.should_stop():
+                return
+            time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+
+    def _warn_once(self, key: str, message: str) -> None:
+        """Emit a German [WARNUNG] at most once per run per ``key``.
+
+        Diagnostics on a per-poll or per-firing path must never become their own
+        flood — the very failure mode several of them exist to report.
+
+        Guarded by its OWN lock, never ``self._lock``: the start-time diagnostics
+        run from inside ``start()``, which already holds ``self._lock`` — and
+        that is a plain non-reentrant ``Lock``, so reusing it dead-locked every
+        workflow carrying an orphan event (a hats-only program hung on start,
+        found by running it)."""
+        with self._warn_lock:
+            if key in self._warned_keys:
+                return
+            self._warned_keys.add(key)
+        self._emit_status({
+            'workflow_id': self._workflow_id or '',
+            'log_message': message,
+        })
 
     def _wait_for_hat_trigger(
         self,
@@ -1119,13 +1548,26 @@ class WorkflowManager:
         btype = hat.get('type')
         fields = hat.get('fields') or {}
         if btype == 'edubotics_when_broadcast':
-            name = (fields.get('EVENT_NAME') or '').strip()
+            name = event_name_of(hat)
             if not name:
+                # An un-named hat used to `return False` with NO sleep, so the
+                # handler loop span a tight CPU cycle for the whole run:
+                # measured, 16 empty-named hats = 110 % of one core. Match
+                # _wait_counter_gt, which already sleeps on this path.
+                time.sleep(0.2)
                 return False
             state = self._broadcast_state(name)
             tid = threading.get_ident()
             with state['cond']:
-                last = state['consumed'].get(tid, state['count'])
+                # BASELINE AT ZERO, NOT AT THE CURRENT COUNT. Defaulting to
+                # `state['count']` meant a handler's FIRST wait raised its own
+                # baseline to whatever had already been broadcast — so
+                # „sende Ereignis" as the first block of the main stack, with a
+                # „wenn Ereignis empfangen" hat, fired 0 times out of 20. Not a
+                # race: start() starts the main thread before the hat threads,
+                # so the broadcast is ALWAYS already counted. Measured 0/20 at
+                # t=0 versus 20/20 once the send was delayed to t≥0.01 s.
+                last = state['consumed'].get(tid, 0)
                 # Wait up to 0.25s for a NEW broadcast (count > last).
                 deadline = time.monotonic() + 0.25
                 while state['count'] <= last and not ctx.should_stop():
@@ -1134,11 +1576,29 @@ class WorkflowManager:
                         break
                     state['cond'].wait(timeout=remaining)
                 if state['count'] > last:
-                    state['consumed'][tid] = state['count']
+                    # Consume exactly ONE, so a burst is QUEUED rather than
+                    # coalesced: `consumed[tid] = count` swallowed 5 back-to-back
+                    # sends into a single firing, where Scratch queues them.
+                    backlog = state['count'] - last
+                    if backlog > MAX_BROADCAST_BACKLOG:
+                        # The producer is outrunning this consumer. Skip forward
+                        # rather than growing an unbounded queue, and say so once.
+                        state['consumed'][tid] = state['count'] - MAX_BROADCAST_BACKLOG
+                        self._warn_once(
+                            f'broadcast-backlog:{name}:{tid}',
+                            f'[WARNUNG] Das Ereignis „{name}" wird schneller '
+                            f'gesendet als der Ereignis-Block es abarbeiten '
+                            f'kann — es werden Ereignisse übersprungen.'
+                        )
+                    else:
+                        state['consumed'][tid] = last + 1
                     return True
                 return False
         if btype == 'edubotics_when_object_seen':
             type_name = (fields.get('OBJECT_TYPE') or '').strip()
+            if not type_name:
+                time.sleep(0.2)
+                return False
             return self._wait_object_visible(type_name, ctx)
         if btype == 'edubotics_when_counter_gt':
             return self._wait_counter_gt(fields, ctx)
@@ -1181,7 +1641,40 @@ class WorkflowManager:
         Resolves the type's tag ids from the object catalog and polls AprilTag
         perception. Catalog/perception errors are swallowed (the hat simply
         doesn't fire) — a named block on the MAIN stack surfaces the German
-        catalog error loudly instead."""
+        catalog error loudly instead.
+
+        THE RETURN TYPE IS LOAD-BEARING, and the two falsy shapes are NOT
+        interchangeable:
+
+        * ``frozenset()`` — "I looked (or tried to) and there is nothing".
+          ``_run_hat_handler`` runs this through ``_debounce_absence``, so a
+          camera that blinks does not read as the object leaving.
+        * bare ``False`` — "this is not a detection observation at all"
+          (nothing left to look FOR, or the run is stopping). It bypasses the
+          debounce and re-arms the edge immediately, which is correct: when
+          every tag is claimed the hat MUST go quiet, and holding the claimed
+          ids in the debounce would re-fire the body on them.
+
+        Every "could not look" path — no frame, no perception, no catalog —
+        used to return the bare ``False``, so it skipped the debounce and
+        re-armed the edge. Through the real ``_run_hat_handler`` with a
+        non-consuming body over 30 polls, a feed that answers ``None`` every
+        3rd poll fires the body 10× and every 2nd poll 20×, against an
+        invariant of exactly once.
+
+        WHAT DOES *NOT* CAUSE THAT, corrected 2026-09-08: an ordinary dropped
+        camera frame. An earlier revision of this comment claimed it did, and
+        that claim is what made the original finding (RS-08) a false positive.
+        ``communicator.get_latest_bgr_frame`` reads ``camera_topic_msgs``, the
+        latest CACHED message, so a dropped ROS frame yields the PREVIOUS image
+        — never ``None``. Real AprilTag flicker on a live frame was already
+        handled correctly before this change.
+
+        The ``None`` paths that genuinely exist are narrower and all real: no
+        frame has arrived yet (startup, and a hat can poll before the first
+        one lands), the camera is not subscribed, and a JPEG that fails to
+        decode. Those are what the debounce now absorbs, and they are the whole
+        justification for this return type — not a frame drop."""
         if not type_name:
             return False
         for _ in range(2):  # 2 × ~0.5 s budget, matching the other hats
@@ -1192,7 +1685,7 @@ class WorkflowManager:
                 if (catalog is None or ctx.perception is None
                         or ctx.get_scene_frame is None):
                     time.sleep(0.5)
-                    return False
+                    return frozenset()
                 recipe = catalog.recipe_for_type(type_name)  # ObjectCatalogError on unknown
                 # Claim-aware, exactly like every MAIN-stack path (which reaches
                 # the same view through _detect_named_unclaimed). A tag already
@@ -1216,13 +1709,21 @@ class WorkflowManager:
                           - {int(i) for i in _excluded_ids(ctx)})
                 if not wanted:
                     # Every instance of this type is done — stay un-triggered so
-                    # the handler re-arms instead of spinning.
+                    # the handler re-arms instead of spinning. A BARE False on
+                    # purpose (see the docstring): routing this through the
+                    # absence debounce would keep the already-claimed ids in the
+                    # trigger set and re-fire the body on them.
                     time.sleep(0.2)
                     return False
                 frame = ctx.get_scene_frame()
                 if frame is None:
+                    # NOT a dropped frame — that returns the cached previous
+                    # image (see the docstring). This is "no frame has arrived
+                    # yet", "camera not subscribed", or "JPEG failed to decode":
+                    # an observation of nothing, which the debounce absorbs.
+                    # Must be a frozenset, not a bare False.
                     time.sleep(0.2)
-                    return False
+                    return frozenset()
                 detections = ctx.perception.detect(
                     frame, camera='scene', mode='apriltag', aruco_id=None,
                 )
@@ -1262,6 +1763,8 @@ class WorkflowManager:
             # would starve hat handlers — instead motion handlers
             # themselves acquire it (or the chunked_publish does).
             interpreter.execute(ctx, self._on_block_change)
+            # The main stack is done — but the hat handlers are the program too.
+            self._await_hat_handlers(ctx)
             if ctx.should_stop():
                 terminal_phase = 'stopped'
                 self._emit_status({
@@ -1343,6 +1846,57 @@ class WorkflowManager:
                 self._on_finished(terminal_phase)
             except Exception:
                 pass
+
+    def _await_hat_handlers(self, ctx: WorkflowContext) -> None:
+        """Keep the run alive for its hat handlers after the main stack ends.
+
+        WHY. ``_run``'s ``finally`` sets the stop event the instant
+        ``interpreter.execute`` returns, and that had two student-visible
+        consequences:
+
+        * A program made ONLY of hats — „Wenn Würfel erkannt: Greife", the most
+          natural program the block set can express — finished green in 0.157 s
+          having fired 0 times. Measured 10/10 for all three hat types. The
+          workaround students were driven to is an empty „wiederhole
+          fortlaufend" as a keep-alive, which is exactly the accidental
+          complexity the hat blocks exist to remove.
+        * A hat body already IN FLIGHT was truncated: measured, a pickup cut at
+          45 of 190 waypoints (24 %) — mid-approach, gripper open, hovering —
+          while the run reported phase='finished'.
+
+        So: wait. Exits on Stop (the normal case), when every handler thread has
+        exited on its own, or at HAT_KEEPALIVE_MAX_S. A run with no hats returns
+        immediately, so every existing single-stack workflow is unchanged.
+        """
+        if not self._hat_threads:
+            return
+        if ctx.should_stop():
+            return
+        if not any(t.is_alive() for t in self._hat_threads):
+            return
+        self._emit_status({
+            'workflow_id': self._workflow_id or '',
+            'log_message': (
+                'Hauptprogramm fertig — die Ereignis-Blöcke laufen weiter. '
+                'Zum Beenden auf „Stopp" drücken.'
+            ),
+        })
+        deadline = time.monotonic() + HAT_KEEPALIVE_MAX_S
+        while time.monotonic() < deadline:
+            if ctx.should_stop():
+                return
+            if not any(t.is_alive() for t in self._hat_threads):
+                # Every handler retired itself (all errored out, or the run is
+                # winding down) — nothing left to wait for.
+                return
+            time.sleep(0.05)
+        self._emit_status({
+            'workflow_id': self._workflow_id or '',
+            'log_message': (
+                '[WARNUNG] Zeitlimit erreicht — die Ereignis-Blöcke werden '
+                'beendet.'
+            ),
+        })
 
     def _on_block_change(self, block_id: str, phase: str, progress: float) -> None:
         self._emit_status({

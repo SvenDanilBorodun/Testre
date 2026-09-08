@@ -75,7 +75,10 @@ describe('TableTouchStep — close-the-claw instruction', () => {
   it('does not replace the shared instructions, it adds to them', () => {
     setCaps({ urdf_asset_id: 'edu1', tool_tip_tracks_gripper: true });
     render(<TableTouchStep />);
-    expect(screen.getByText(/mindestens 3 verschiedenen Stellen/)).toBeTruthy();
+    // 4, not 3: the server's TABLE_TOUCH_POINTS_REQUIRED moved to four (a plane
+    // has three parameters, so at three taps the residual gate could never
+    // fire). This assertion is what caught the wizard still instructing three.
+    expect(screen.getByText(/mindestens 4 verschiedenen Stellen/)).toBeTruthy();
     expect(screen.getByText(/senkrecht nach/)).toBeTruthy();
   });
 });

@@ -30,6 +30,15 @@ import {
   resetCalibProgress,
 } from '../../features/workshop/workshopSlice';
 
+// Shown before the first capture answers with the server's own
+// `frames_required`. The SERVER owns the count
+// (`calibration_manager.TABLE_TOUCH_POINTS_REQUIRED`) and every successful
+// capture adopts it, so this is a first-paint placeholder only — but it was
+// hard-coded as 3 in three places, and when the server moved to 4 the wizard
+// still told the student to tap three times and then refused them. One named
+// constant, so any future drift is visible in one place.
+const TAP_COUNT_FALLBACK = 4;
+
 function TableTouchStep() {
   const dispatch = useDispatch();
   const {
@@ -53,7 +62,7 @@ function TableTouchStep() {
   useEffect(() => {
     setStarted(false);
     dispatch(resetCalibProgress());
-    dispatch(setCalibProgress({ framesCaptured: 0, framesRequired: 3 }));
+    dispatch(setCalibProgress({ framesCaptured: 0, framesRequired: TAP_COUNT_FALLBACK }));
   }, [dispatch]);
 
   // On unmount (the student clicks another wizard step) cancel the touch-off so
@@ -113,7 +122,7 @@ function TableTouchStep() {
     } finally { setBusy(null); }
   }, [calibrationSolve, dispatch]);
 
-  const haveEnough = framesCaptured >= (framesRequired || 3);
+  const haveEnough = framesCaptured >= (framesRequired || TAP_COUNT_FALLBACK);
 
   return (
     <div className="max-w-2xl">
@@ -144,7 +153,7 @@ function TableTouchStep() {
           {' '}„Punkt erfassen" drücken.
         </li>
         <li>
-          Wiederhole an <strong>mindestens 3 verschiedenen Stellen</strong>,
+          Wiederhole an <strong>mindestens 4 verschiedenen Stellen</strong>,
           gut über die Arbeitsfläche verteilt (Ecken + Mitte).
         </li>
         <li>„Berechnen &amp; speichern" drücken — der Arm wird wieder fest.</li>
@@ -153,7 +162,7 @@ function TableTouchStep() {
       <div className="bg-white border border-[var(--line)] rounded-lg p-4 mb-4">
         <div className="flex items-center justify-between mb-1">
           <span className="text-sm text-[var(--ink-3)]">Punkte erfasst</span>
-          <span className="text-sm font-mono">{framesCaptured} / {framesRequired || 3}</span>
+          <span className="text-sm font-mono">{framesCaptured} / {framesRequired || TAP_COUNT_FALLBACK}</span>
         </div>
         {haveEnough && (
           <p className="text-xs text-emerald-700 mt-1">

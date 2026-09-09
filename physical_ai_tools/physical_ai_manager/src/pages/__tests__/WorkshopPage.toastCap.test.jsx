@@ -195,4 +195,27 @@ describe('WorkshopPage — on-screen toast cap (RS-34)', () => {
     expect(toast.dismiss).toHaveBeenCalled();
     expect(toast.remove).toBeUndefined(); // not on the mock, and not used
   });
+
+  // THE case the cap exists for, and the one the five tests above cannot see.
+  // All of them assign `mockToaster.toasts` BEFORE render(), so the effect's
+  // dependency array is never exercised: a MOUNT-ONLY cap — `}, []);`, i.e.
+  // exactly the broken version — passes every one of them, including the one
+  // named „the 15 s runaway-loop case". A runaway loop starts AFTER mount.
+  // Proven by mutation: with `[toasts]` emptied, this test fails and those five
+  // still pass.
+  test('a stack that grows AFTER mount is capped (the loop starts later)', () => {
+    mockToaster.toasts = [];
+    const { rerender } = render(<WorkshopPage isActive />);
+    expect(toast.dismiss).not.toHaveBeenCalled();
+
+    // The student presses Start; „wiederhole fortlaufend" begins stacking.
+    mockToaster.toasts = stack(20);
+    rerender(<WorkshopPage isActive />);
+
+    const dismissed = toast.dismiss.mock.calls.map(([id]) => id);
+    expect(dismissed).toHaveLength(17);
+    expect(dismissed).not.toContain('t0');
+    expect(dismissed).not.toContain('t1');
+    expect(dismissed).not.toContain('t2');
+  });
 });

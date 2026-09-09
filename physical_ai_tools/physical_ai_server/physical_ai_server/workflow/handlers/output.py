@@ -28,8 +28,11 @@ from __future__ import annotations
 
 import math
 import os
+import re
 import time
 from typing import Any
+
+from physical_ai_server.workflow.student_text import student_text
 
 
 def _env_float(name: str, default: float) -> float:
@@ -82,41 +85,15 @@ _TOAST_LEVELS = ('info', 'success', 'warning', 'error')
 # inputs carry no Blockly check, so a Greifziel plugs straight into „sage" in two
 # drags. german_detail_lint.py's AST scopes structurally cannot see any of this.
 #
-# ``_student_text`` reuses ``Interpreter._to_text`` verbatim for the scalar cases
-# (one definition of „wahr"/„falsch" and of the trailing-.0 rule, not two) and
-# adds the two container shapes the student can actually produce: a „Position
-# von" dict and a Greifziel. The interpreter import is LAZY — interpreter.py
-# imports the handler package at module scope, so a top-level import here would
-# be circular.
-
-
-def _fmt_m(value: Any) -> str:
-    """A metre value with 3 decimals and a German decimal comma."""
-    try:
-        return f'{float(value):.3f}'.replace('.', ',')
-    except (TypeError, ValueError):
-        return str(value)
-
-
-def _student_text(value: Any) -> str:
-    """Stringify a block-runtime value the way a German-speaking student should
-    read it. Never raises — a formatting bug must not break an output block."""
-    try:
-        if isinstance(value, dict) and all(k in value for k in ('x', 'y', 'z')):
-            return (f'x={_fmt_m(value["x"])} m, y={_fmt_m(value["y"])} m, '
-                    f'z={_fmt_m(value["z"])} m')
-        xyz = getattr(value, 'world_xyz_m', None)
-        if xyz is not None or hasattr(value, 'aruco_id'):
-            tag = getattr(value, 'aruco_id', None)
-            head = 'Greifziel' if tag is None else f'Greifziel (Marker {tag})'
-            if xyz is None:
-                return f'{head}, Position noch unbekannt'
-            return (f'{head} bei x={_fmt_m(xyz[0])} m, y={_fmt_m(xyz[1])} m, '
-                    f'z={_fmt_m(xyz[2])} m')
-        from physical_ai_server.workflow.interpreter import Interpreter
-        return Interpreter._to_text(value)
-    except Exception:  # noqa: BLE001 — formatting never breaks an output block
-        return '' if value is None else str(value)
+# The student-facing stringifier now lives in ``workflow/student_text.py`` and is
+# SHARED with ``interpreter._to_text`` (the „verbinde"-Block) and
+# ``interpreter._jsonable`` (the Variablen-Tafel). It used to live HERE and be
+# reached from the interpreter by a lazy import, which left the third
+# stringifier — ``text_join`` — un-German: `sage <verbinde("Ich sehe ", finde
+# Würfel)>` read a Python repr ALOUD. One module, imported normally by both, no
+# cycle, no third opinion. The alias keeps this file's three call sites and
+# their tests reading exactly as they did.
+_student_text = student_text
 
 
 # ── Emission rate limit (Rule §1 / classroom sanity) ─────────────────────────
@@ -150,18 +127,52 @@ OUTPUT_MAX_PER_S = max(0.0, _env_float('EDUBOTICS_OUTPUT_MAX_PER_S', 5.0))
 # of ≤50 outputs per kind is untouched — and the „Zu viele" warning now only ever
 # fires when it is TRUE.
 #
-# NOT split per kind in this round, tempting though it is (a log line costs
-# bytes; a „sage" costs seconds of wall-clock, which is why 5/s is simultaneously
-# far too tight for „melde" and about right for „sage"). That is four new numbers
-# with no measurement behind them — pick them on a rig.
+# The per-kind split the first revision deferred, reduced to ONE extra number
+# with a measurement behind it. 50 was right for the three kinds whose cost is
+# WALL-CLOCK (a toast stacks, a „sage" blocks the speech queue, a „klang" is an
+# OscillatorNode) and wrong for the one whose cost is VOLUME:
+# „wiederhole 100 mal { melde <Zähler> }" — the first loop a twelve-year-old
+# writes — printed 100 lines before this round and 50 after, so it LOOKED like
+# the program stopped at 50.
+#
+# Three measurements say a log burst belongs an order of magnitude higher:
+#  1. The React Protokoll already caps itself at 200 lines, NEWEST-wins
+#     (workshopSlice.js: `state.log.slice(-200)`). So the display cost was
+#     already bounded — and a server bucket keeps the OLDEST lines, i.e. it
+#     throws away exactly the half of a loop the student is watching for.
+#  2. The measured 17–18 emissions/s is not something a student can exceed: it
+#     IS `interpreter.FOREVER_MIN_CYCLE_S = 0.05` (~20 Hz), a pre-existing floor.
+#     The unbounded shape is „wiederhole N mal", itself capped at
+#     MAX_LOOP_ITERATIONS = 10 000.
+#  3. NONE of the three harms measured for this limiter involve „melde": 265
+#     stacked toasts, speechSynthesis 17×/s, 17 OscillatorNodes/s.
+# 500 is 2.5× the Protokoll's own cap, so every classroom loop survives intact,
+# while a 10 000-iteration flood is still cut by 95 %.
 OUTPUT_BURST = 50
+OUTPUT_BURST_LOG = 500
 
+# Which kinds pay wall-clock (OUTPUT_BURST) and which pay volume.
+_BURST_BY_KIND = {'melde': OUTPUT_BURST_LOG}
+
+# Every one ends „Das Programm läuft normal weiter." — the same clause the
+# unshowable-variable warning carries. A twelve-year-old meets this MID-LOOP
+# („zähle von 1 bis 100: melde i" lands here at 50) and a bare „Zu viele …"
+# under a [WARNUNG] reads as „dein Programm ist kaputt". Only the OUTPUT is
+# reduced; the program is untouched.
 _RATE_LIMIT_NOTICE_DE = {
-    'melde': 'Zu viele „melde"-Meldungen — es wird nur noch ein Teil angezeigt.',
-    'sage': 'Zu viele „sage"-Ansagen — es wird nur noch ein Teil vorgelesen.',
-    'ton': 'Zu viele Töne — es wird nur noch ein Teil abgespielt.',
-    'klang': 'Zu viele Klänge — es wird nur noch ein Teil abgespielt.',
-    'meldung': 'Zu viele Meldungen — es wird nur noch ein Teil angezeigt.',
+    # „melde" says the rest is GONE. The others genuinely show/play a reduced
+    # stream; a dropped log line is not shown later, and „nur noch ein Teil"
+    # invites a student to scroll for it.
+    'melde': 'Sehr viele „melde"-Zeilen — die weiteren werden nicht mehr '
+             'angezeigt. Das Programm läuft normal weiter.',
+    'sage': 'Zu viele „sage"-Ansagen — es wird nur noch ein Teil vorgelesen. '
+            'Das Programm läuft normal weiter.',
+    'ton': 'Zu viele Töne — es wird nur noch ein Teil abgespielt. '
+           'Das Programm läuft normal weiter.',
+    'klang': 'Zu viele Klänge — es wird nur noch ein Teil abgespielt. '
+             'Das Programm läuft normal weiter.',
+    'meldung': 'Zu viele Meldungen — es wird nur noch ein Teil angezeigt. '
+               'Das Programm läuft normal weiter.',
 }
 
 
@@ -183,7 +194,7 @@ def _rate_ok(ctx, kind: str) -> bool:
             state = {}
             ctx._output_rate_state = state
         now = time.monotonic()
-        burst = float(OUTPUT_BURST)
+        burst = float(_BURST_BY_KIND.get(kind, OUTPUT_BURST))
         tokens, last = state.get(kind, (burst, now))
         tokens = min(burst, tokens + max(0.0, now - last) * OUTPUT_MAX_PER_S)
         if tokens < 1.0:
@@ -216,17 +227,22 @@ def log(ctx, args: dict[str, Any]) -> None:
     # the React-side debug panel.
     text = text.replace('[', '(').replace(']', ')')
     # …and collapse newlines + the Unicode line/paragraph separators, exactly as
-    # speak_de and toast already do. „melde" was the one output block that
+    # speak_de and toast already do — a DIFFERENT and, as first written, weaker
+    # mechanism than either (see below). „melde" was the one output block that
     # emitted them verbatim, so `melde("a\n[FEHLER] …")` forged a second,
     # error-looking line in the Protokoll. destinations.py justifies its own name
     # validator as preventing precisely that injection, which is what made the
     # omission here inconsistent rather than merely untidy.
-    text = (
-        text.replace('\r', ' ')
-            .replace('\n', ' ')
-            .replace('\u2028', ' ')
-            .replace('\u2029', ' ')
-    )
+    # ONE exhaustive substitution, not a list of characters somebody remembered.
+    # The four hand-picked replaces let U+000B VT, U+000C FF and U+0085 NEL
+    # through — and FF is a CSS Text segment break, so a consumer rendering with
+    # `white-space: pre-wrap` would show exactly the forged second line this
+    # strip exists to prevent. `\s` is every Python whitespace character by
+    # construction (VT, FF, NEL, U+2028/9 included), so it cannot fall behind a
+    # character nobody thought of. Deliberately NOT `' '.join(text.split())`,
+    # which speak_de and toast use: that also collapses RUNS of spaces, and a
+    # student's „melde"-Text keeps its own spacing.
+    text = re.sub(r'\s', ' ', text)
     ctx.log(text)
 
 
@@ -310,9 +326,19 @@ def toast(ctx, args: dict[str, Any]) -> None:
     level = str(args.get('level', 'info')).strip().lower()
     if level not in _TOAST_LEVELS:
         level = 'info'
+    # `math.isfinite` FIRST, exactly as play_tone does. The shipped play_tone
+    # comment claimed „toast's int(round(nan)) raises and correctly falls back";
+    # that holds for nan (ValueError) and NOT for inf — `int(round(inf))` raises
+    # OverflowError, which this `except` never named, so „zeige Meldung … für
+    # <inf> Sekunden" aborted the run with an ENGLISH Python message on a
+    # student-facing surface („cannot convert float infinity to integer",
+    # Rule §1). SECONDS is a clamped field_number in the block, so the reachable
+    # path is a hand-built /workflow/start payload — untrusted-surface
+    # hardening, and rosbridge authenticates nobody.
     try:
-        seconds = int(round(float(args.get('seconds', 3))))
-    except (TypeError, ValueError):
+        raw = float(args.get('seconds', 3))
+        seconds = int(round(raw)) if math.isfinite(raw) else 3
+    except (TypeError, ValueError, OverflowError):
         seconds = 3
     seconds = max(TOAST_SECONDS_MIN, min(TOAST_SECONDS_MAX, seconds))
     # German-aware, not str(): see _student_text.

@@ -1845,6 +1845,17 @@ def test_path_guard_inflation_is_not_secretly_shrunk():
                 'is a Rule §2-class change and needs the user, not a profile field')
     src = inspect.getsource(path_guard.plan_safe_route)
     assert 'link_radius = LINK_RADIUS_M' in src
+    # The inflation only MEANS anything if the arm is sampled densely enough to
+    # notice a wall. _LINK_SAMPLES is that density and it was pinned NOWHERE —
+    # no test named it, so the `referenced => pinned` guard in
+    # test_constant_pins could not see it either, and 5 -> 1 ran the full suite
+    # green. Measured over 800 random transit x zone pairs against the real
+    # solver and the real build_zones: 5 blocks 402 of 800 segments, 3 blocks
+    # 400, 1 blocks 395 — i.e. at 1, seven transits per 402 are driven THROUGH a
+    # Sperrzone. Same Rule §2 surface as the two constants above, same "ask the
+    # user" in BOTH directions: lowering it re-opens those seven, and raising it
+    # is a cost on every segment of every route.
+    assert path_guard._LINK_SAMPLES == 5
 
 
 def test_zone_on_the_robot_itself_is_diagnosed_not_blamed_on_the_target():

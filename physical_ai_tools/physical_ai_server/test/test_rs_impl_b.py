@@ -1082,24 +1082,63 @@ def test_a_straight_chain_of_five_output_blocks_prints_five(fn, args, kind,
         'a five-block program is not "zu viele"')
 
 
+# The two bursts throttle at different points, so the sustained test has to ask
+# each kind its own question. BOTH numbers on both rows are LITERALS: deriving
+# either from the constant under test is precisely the pattern this file exists
+# to stop, and it is how the melde regression hid — the old single-shape test
+# monkeypatched `OUTPUT_BURST` to 50 and never touched the per-kind table, so
+# „melde" walked past it at 200 of 200 while the assertion still read <= 110.
+_SUSTAINED_DEFAULT = (200, 110)      # 50 burst + 5/s over 200/17 s = 109
+_SUSTAINED_BY_KIND = {
+    'melde': (2000, 1100),           # 500 burst + 5/s over 2000/17 s = 1088
+}
+
+
 @pytest.mark.parametrize('fn,args,kind', _OUTPUT_KINDS)
 def test_a_sustained_loop_is_still_throttled(fn, args, kind, monkeypatch):
     """The defect the limiter exists for, unchanged. Measured 2026-09-07 inside
     „wiederhole fortlaufend", 3 s window: play_sound 17.3/s, play_tone 18.0/s,
-    toast 17.7/s, speak_de 17.7/s. 200 emissions at 17/s = 11.8 s, so the bucket
-    allows its 50-deep burst plus ~59 refills — nowhere near 200."""
+    toast 17.7/s, speak_de 17.7/s."""
     monkeypatch.setattr(out, 'OUTPUT_MAX_PER_S', 5.0)
     monkeypatch.setattr(out, 'OUTPUT_BURST', 50)
+    monkeypatch.setattr(out, '_BURST_BY_KIND', {'melde': 500})
+    n, bound = _SUSTAINED_BY_KIND.get(kind, _SUSTAINED_DEFAULT)
     clock = {'t': 0.0}
     monkeypatch.setattr(out, 'time',
                         types.SimpleNamespace(monotonic=lambda: clock['t']))
     c = _LogCtx()
-    for _ in range(200):
+    for _ in range(n):
         fn(c, args)
         clock['t'] += 1.0 / 17.0
     emitted = [m for m in c.msgs if 'WARNUNG' not in m]
-    assert len(emitted) <= 110, f'{kind}: {len(emitted)} of 200 got through'
+    assert len(emitted) <= bound, f'{kind}: {len(emitted)} of {n} got through'
     assert any('WARNUNG' in m for m in c.msgs), 'the drop must be announced'
+
+
+def test_a_hundred_iteration_counting_loop_prints_a_hundred_lines():
+    """„wiederhole 100 mal { melde <Zähler> }" is the first loop a student
+    writes, and at OUTPUT_BURST = 50 it printed 50 lines and stopped — so the
+    PROGRAM looked broken. The log kind pays in volume, not wall-clock, and the
+    React Protokoll already caps itself at 200 NEWEST lines, so a server bucket
+    keeping the OLDEST 50 discarded exactly the half being watched.
+
+    100 and 101 are literals on purpose: this must fail if OUTPUT_BURST_LOG
+    drops back toward 50, and it must fail if the limiter is removed outright
+    (the second assertion)."""
+    c = _LogCtx()
+    for i in range(1, 101):
+        out.log(c, {'message': float(i)})
+    lines = [m for m in c.msgs if 'WARNUNG' not in m]
+    assert len(lines) == 100, f'{len(lines)} of 100 lines printed'
+    assert lines[-1] == '100', f'the loop appears to stop at {lines[-1]}'
+    assert not any('WARNUNG' in m for m in c.msgs)
+    # ... and the limiter is still THERE for a flood.
+    c2 = _LogCtx()
+    for i in range(10000):
+        out.log(c2, {'message': 'x'})
+    flood = [m for m in c2.msgs if 'WARNUNG' not in m]
+    assert len(flood) < 1000, f'{len(flood)} of 10000 got through — no limit'
+    assert any('WARNUNG' in m for m in c2.msgs)
 
 
 def test_the_shipped_output_burst_and_rate_are_fifty_and_five():
@@ -1431,3 +1470,55 @@ def test_the_object_type_placeholder_is_named_not_echoed():
     with pytest.raises(WorkflowError) as exc:
         pb._recipe_for(cat, 'banane')
     assert 'banane' in str(exc.value)
+
+
+# ── G10 follow-ups found by the zero-trust audit of this round's own work ────
+
+@pytest.mark.parametrize('name,codepoint', [
+    ('LF', 10), ('CR', 13), ('VT', 11), ('FF', 12), ('NEL', 0x85),
+    ('LINE SEPARATOR', 0x2028), ('PARAGRAPH SEPARATOR', 0x2029), ('TAB', 9),
+])
+def test_melde_collapses_every_line_breaking_character(name, codepoint):
+    r"""The first revision hand-picked four characters and let VT, FF and NEL
+    through. U+000C FORM FEED is a CSS Text segment break, so a consumer
+    rendering a log line with `white-space: pre-wrap` would show exactly the
+    forged second line this strip exists to prevent. One `re.sub(r'\s', ' ')`
+    is exhaustive over Python whitespace BY CONSTRUCTION — this parametrisation
+    is the evidence, not the mechanism."""
+    c = _LogCtx()
+    out.log(c, {'message': 'a' + chr(codepoint) + 'b'})
+    assert c.msgs == ['a b'], f'{name} (U+{codepoint:04X}) survived: {c.msgs!r}'
+
+
+def test_melde_keeps_the_students_own_spacing():
+    """`' '.join(text.split())` — what speak_de and toast use — would also
+    collapse RUNS of spaces. „melde" is a log line a student formats on purpose,
+    so the exhaustive substitution deliberately does not borrow that idiom."""
+    c = _LogCtx()
+    out.log(c, {'message': 'a   b'})
+    assert c.msgs == ['a   b']
+
+
+@pytest.mark.parametrize('seconds', [float('inf'), float('-inf'), float('nan')])
+def test_toast_survives_a_non_finite_duration(seconds):
+    """`int(round(inf))` raises OverflowError, which `toast`'s
+    `except (TypeError, ValueError)` never named — so „zeige Meldung … für <inf>
+    Sekunden" aborted the run with an English Python message on a student-facing
+    surface. The shipped play_tone comment asserted the opposite („toast's
+    int(round(nan)) raises and correctly falls back"): true for nan, false for
+    inf. SECONDS is a clamped field_number in the block, so the reachable path is
+    a hand-built /workflow/start payload — rosbridge authenticates nobody."""
+    c = _LogCtx()
+    out.toast(c, {'text': 'x', 'seconds': seconds})
+    assert c.msgs == ['[TOAST:info:3:x]']
+
+
+def test_the_rate_limiter_state_is_a_declared_context_field():
+    """*Kills:* leaving `_output_rate_state` an ad-hoc attribute. WorkflowContext
+    is a plain @dataclass today so an ad-hoc write works, but `slots=True` would
+    make it raise AttributeError — which `_rate_ok`'s blanket `except: return
+    True` swallows, leaving the limiter silently inert."""
+    import dataclasses
+    from physical_ai_server.workflow.workflow_manager import WorkflowContext
+    names = {f.name for f in dataclasses.fields(WorkflowContext)}
+    assert '_output_rate_state' in names

@@ -136,8 +136,9 @@ def extract_points(traj: Any, num_arm_joints: int = 5) -> list[list[float]]:
     waypoints against a 6 GB container ``mem_limit`` — i.e. an OOM-kill of the
     whole ROS node from a payload smaller than this docstring.
 
-    The endpoint span ALONE did not deliver that (measured 2026-09-08, and it
-    shipped that way): it bounds ``rows[-1][-1] - rows[0][-1]`` while the cost is
+    The endpoint span ALONE did not deliver that (measured 2026-09-08 on a
+    working-tree revision — it never reached a student, and neither check exists
+    on the pre-round `main`): it bounds ``rows[-1][-1] - rows[0][-1]`` while the cost is
     per-pair, so a payload with an internal time SPIKE and a tiny span sailed
     through — ``[0, 2000, 0.1]`` is 114 bytes and 60 002 waypoints. Requiring the
     column to be NON-DECREASING closes it, because then ``sum(dt)`` IS that span

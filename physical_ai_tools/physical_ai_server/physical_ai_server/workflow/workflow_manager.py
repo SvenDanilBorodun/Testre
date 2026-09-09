@@ -233,6 +233,21 @@ class WorkflowContext:
     # one missed AprilTag look from a student picking the object up. See
     # handlers/perception_blocks.py::_reclaim_recycled.
     claim_anchor: dict = field(default_factory=dict)
+
+    # Token-bucket state for the output rate limiter, per KIND
+    # (handlers/output.py::_rate_ok). DECLARED rather than set as an ad-hoc
+    # attribute: this is a plain @dataclass today, so `ctx._output_rate_state = …`
+    # works — but adding `slots=True` later would make every write raise
+    # AttributeError, which _rate_ok's blanket `except: return True` would
+    # SWALLOW, leaving the limiter silently inert. That is this round's own
+    # "a guard that could not fire" class, one keyword away.
+    #
+    # Deliberately NOT lock-guarded, unlike `variables`/`var_lock` above. Up to
+    # MAX_HAT_HANDLERS hat threads plus the main stack can emit concurrently, so
+    # the read-modify-write of the token count can lose an update — the worst
+    # case is slight OVER-emission, never a crash (individual dict ops are
+    # atomic). A lock on every „melde" would cost more than the miscount.
+    _output_rate_state: dict = field(default_factory=dict)
     claim_pick_xy: dict = field(default_factory=dict)
     claim_unseen: set = field(default_factory=set)
     # Phase-4 no-go zones ("Sperrzonen"): a list of axis-aligned base-frame

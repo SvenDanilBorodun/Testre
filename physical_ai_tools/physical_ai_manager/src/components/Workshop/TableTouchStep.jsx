@@ -122,7 +122,14 @@ function TableTouchStep() {
     } finally { setBusy(null); }
   }, [calibrationSolve, dispatch]);
 
-  const haveEnough = framesCaptured >= (framesRequired || TAP_COUNT_FALLBACK);
+  // ONE derived number, read by all three surfaces below (the instruction
+  // sentence, the counter and the „Weiter"-Gate). The sentence used to carry
+  // its own hardcoded 4 — a THIRD opinion about a number the SERVER owns, and
+  // the exact place „mindestens 3" shipped from against a server floor of 4.
+  // With the server at 5 that read „mindestens 4 Stellen" beside „0 / 5" and a
+  // „Weiter" that stayed disabled at four taps.
+  const tapsRequired = framesRequired || TAP_COUNT_FALLBACK;
+  const haveEnough = framesCaptured >= tapsRequired;
 
   return (
     <div className="max-w-2xl">
@@ -153,7 +160,7 @@ function TableTouchStep() {
           {' '}„Punkt erfassen" drücken.
         </li>
         <li>
-          Wiederhole an <strong>mindestens 4 verschiedenen Stellen</strong>,
+          Wiederhole an <strong>mindestens {tapsRequired} verschiedenen Stellen</strong>,
           gut über die Arbeitsfläche verteilt (Ecken + Mitte).
         </li>
         <li>„Berechnen &amp; speichern" drücken — der Arm wird wieder fest.</li>
@@ -162,7 +169,7 @@ function TableTouchStep() {
       <div className="bg-white border border-[var(--line)] rounded-lg p-4 mb-4">
         <div className="flex items-center justify-between mb-1">
           <span className="text-sm text-[var(--ink-3)]">Punkte erfasst</span>
-          <span className="text-sm font-mono">{framesCaptured} / {framesRequired || TAP_COUNT_FALLBACK}</span>
+          <span className="text-sm font-mono">{framesCaptured} / {tapsRequired}</span>
         </div>
         {haveEnough && (
           <p className="text-xs text-emerald-700 mt-1">

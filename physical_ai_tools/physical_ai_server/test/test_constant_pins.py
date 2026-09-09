@@ -32,10 +32,20 @@ WHICH PIN SHAPE YOU NEED depends on whether the constant is env-derived:
       ``test_exception_class_is_a_decision.py``. ``raises(Base)`` cannot tell a
       subclass apart.
 
-HONEST WEAKNESS, stated so nobody over-trusts the number below. The
-source-fence detector credits any constant NAME followed by ``=`` inside a
-string literal in a test, so it OVER-credits: the allowlist is an optimistic
-lower bound on the real gap. Tightening it to "a regex literal that names the
+HONEST WEAKNESS #1, and it is the BIGGER one: this guard implements
+``referenced => pinned``, not the RULE above. A constant NO test mentions at all
+is outside it entirely — measured on this tree, 83 of 167 production numeric
+constants, 46 of them in the Roboter-Studio files. Adding
+``NEUE_UNGEPINNTE_KONSTANTE = 7`` to workflow_manager.py passes all four tests in
+0.46 s. That is by construction (the guard cannot demand a pin for a constant it
+cannot name a home for), but it means a GREEN run here says „every constant a
+test already touches is pinned", never „every constant is pinned". Three
+survivors found by mutating the blind spot are now pinned above and in
+``test_dof_n6::test_path_guard_inflation_is_not_secretly_shrunk``.
+
+HONEST WEAKNESS #2. The source-fence detector credits any constant NAME followed
+by ``=`` inside a string literal in a test, so it OVER-credits: the allowlist is
+an optimistic lower bound on the real gap. Tightening it to "a regex literal that names the
 constant AND captures a number" is a follow-up, not a blocker — a loose detector
 that flags dozens of real gaps is worth more than an exact one that ships next
 month.
@@ -152,15 +162,30 @@ _SHIPPED_DEFAULTS = [
     ('workflow/interpreter.py', '_MAX_VAR_PAYLOAD_CHARS', '2000'),
     ('workflow/interpreter.py', '_MAX_VAR_PAYLOAD_ITEMS', '200'),
     ('workflow/interpreter.py', 'MAX_LOOP_ITERATIONS', '10000'),
+    # New this round, pinned on the way in rather than after a mutation sweep —
+    # the C2-1 lesson: a constant no test NAMES is outside this guard entirely.
+    ('workflow/student_text.py', 'STUDENT_TEXT_MAX_ITEMS', '200'),
+    ('workflow/student_text.py', 'STUDENT_TEXT_MAX_DEPTH', '5'),
     ('workflow/handlers/output.py', 'MAX_LOG_CHARS', '2000'),
     ('workflow/handlers/output.py', 'MAX_TOAST_CHARS', '240'),
     ('workflow/handlers/output.py', 'OUTPUT_BURST', '50'),
+    # 2.5x the React Protokoll's own 200-line cap — see OUTPUT_BURST_LOG's
+    # comment. At 50 a „wiederhole 100 mal { melde }" looked like it stopped.
+    ('workflow/handlers/output.py', 'OUTPUT_BURST_LOG', '500'),
     ('workflow/handlers/motion.py', 'MOTION_LOCK_NOTICE_S', '10.0'),
     ('workflow/handlers/motion.py', '_MOTION_LOCK_POLL_S', '0.05'),
     ('workflow/handlers/motion.py', '_APPROACH_WARN_FRAC', '0.25'),
     ('workflow/handlers/motion.py', 'GRASP_SETTLE_MAX_S', '2.0'),
     ('workflow/handlers/perception_blocks.py', '_TAG_YAW_FRAMES_MAX', '30'),
     ('workflow/calibration_manager.py', 'VERIFY_MIN_POINTS', '3'),
+    # Both added after a mutation sweep found them SURVIVING the full suite:
+    # no test named either, so `referenced => pinned` never saw them.
+    # INTRINSIC 20 -> 1 fits the RATIONAL_MODEL's 8 distortion terms from one
+    # view, reports success, and silently wrongs every later grasp on that rig.
+    # REPROJ 1.5 -> 1e9 passes every frame of the extrinsic burst, including a
+    # mirrored or 90deg-rotated solve _check_extrinsic_orientation cannot catch.
+    ('workflow/calibration_manager.py', 'INTRINSIC_FRAMES_REQUIRED', '20'),
+    ('workflow/calibration_manager.py', 'SCENE_EXTRINSIC_MAX_REPROJ_PX', '1.5'),
     ('workflow/calibration_manager.py', 'TABLE_TOUCH_POINTS_REQUIRED', '4'),
     ('workflow/calibration_manager.py', 'TABLE_TOUCH_MAX_RESIDUAL_M', '0.008'),
     ('workflow/workflow_manager.py', 'MAX_BROADCAST_BACKLOG', '32'),

@@ -41,10 +41,10 @@ vi.mock('../../../hooks/useRosServiceCaller', () => ({
   }),
 }));
 
-function setCaps(capabilities) {
+function setCaps(capabilities, framesRequired = 4) {
   mockState = {
     tasks: { taskStatus: { capabilities } },
-    workshop: { framesCaptured: 0, framesRequired: 3, calibError: null },
+    workshop: { framesCaptured: 0, framesRequired, calibError: null },
   };
 }
 
@@ -75,10 +75,40 @@ describe('TableTouchStep — close-the-claw instruction', () => {
   it('does not replace the shared instructions, it adds to them', () => {
     setCaps({ urdf_asset_id: 'edu1', tool_tip_tracks_gripper: true });
     render(<TableTouchStep />);
-    // 4, not 3: the server's TABLE_TOUCH_POINTS_REQUIRED moved to four (a plane
-    // has three parameters, so at three taps the residual gate could never
-    // fire). This assertion is what caught the wizard still instructing three.
-    expect(screen.getByText(/mindestens 4 verschiedenen Stellen/)).toBeTruthy();
+    expect(screen.getByText(/mindestens .* verschiedenen Stellen/)).toBeTruthy();
     expect(screen.getByText(/senkrecht nach/)).toBeTruthy();
+  });
+});
+
+// The number of taps is the SERVER's (TABLE_TOUCH_POINTS_REQUIRED). The literal
+// lives in exactly one place — the Python cross-language pin
+// test_env_knob_clamps::test_the_react_tap_fallback_equals_the_server_requirement
+// — so these assertions deliberately carry NO literal of their own. They prove
+// DERIVATION instead: whatever number the sentence names is the number the
+// counter counts to. A second JS literal here is what let the instruction say
+// „mindestens 4" beside a counter reading „0 / 5" when the server moved.
+describe('TableTouchStep — the tap count is the server\'s, in every sentence', () => {
+  it('the instruction and the counter always name the SAME number', () => {
+    for (const required of [4, 5, 7]) {
+      setCaps({ urdf_asset_id: 'omx_f' }, required);
+      const { unmount } = render(<TableTouchStep />);
+      expect(
+        screen.getByText(new RegExp(`mindestens ${required} verschiedenen Stellen`)),
+      ).toBeTruthy();
+      expect(screen.getByText(`0 / ${required}`)).toBeTruthy();
+      unmount();
+    }
+  });
+
+  it('falls back to the SAME number in both places before the server answers', () => {
+    // framesRequired is 0/undefined until the first calibration status arrives.
+    for (const empty of [0, undefined, null]) {
+      setCaps({ urdf_asset_id: 'omx_f' }, empty);
+      const { unmount } = render(<TableTouchStep />);
+      const sentence = screen.getByText(/mindestens (\d+) verschiedenen Stellen/);
+      const n = sentence.textContent.match(/mindestens (\d+)/)[1];
+      expect(screen.getByText(`0 / ${n}`)).toBeTruthy();
+      unmount();
+    }
   });
 });

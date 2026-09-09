@@ -42,6 +42,7 @@ import time
 from typing import Any, Callable, Iterable
 
 from physical_ai_server.workflow.handlers import STATEMENT_HANDLERS, VALUE_EVALUATORS
+from physical_ai_server.workflow.student_text import student_text
 from physical_ai_server.workflow.handlers.motion import (
     WorkflowError,
     _reacquire_after_release,
@@ -75,11 +76,15 @@ _MAX_VAR_PAYLOAD_CHARS = 2000
 # away down to 2000 chars. Serializing a bounded prefix instead makes the cost
 # proportional to what is actually shown.
 #
-# 200 items is the BINDING cap for ordinary list contents — measured with the
-# real _jsonable on 1000-element lists: 200 ints = 916 chars, 200 floats = 1316,
-# 200 short strings = 1226, 200 booleans = 1326, all well under the 2000-char
-# cap. Deliberately so: THIS cap bounds the COST, and the char cap is only the
-# backstop for one pathological VALUE. (An earlier revision claimed „200 items
+# 200 items is the BINDING cap for ordinary NUMERIC list contents — measured
+# with the real _jsonable on 1000-element lists: 200 ints = 916 chars, 200
+# floats = 1316, 200 2-char strings = 1226, 200 booleans = 1326, all under the
+# 2000-char cap. It is NOT binding for ordinary German WORDS: 200 strings cross
+# 2000 chars at length 6 (measured: len 5 = 1826, len 6 = 2026), and „Würfel",
+# „Kugel4", „gruen1" are six. So on a list of named objects the CHAR cap is what
+# the student meets, and both caps are live — THIS one bounds the COST of
+# serializing, the char cap bounds what is SENT. Neither is a wrong answer: the
+# student is told what was dropped. (An earlier revision claimed „200 items
 # comfortably overflows the 2000-char cap … so nothing visible is lost" — the
 # opposite of what it measures.) The student is told what was dropped
 # (`… (N Elemente)`), so a shorter prefix is a smaller view, not a wrong one;
@@ -1014,9 +1019,14 @@ class Interpreter:
                     # „greife EINES" was the neuter accusative pronoun, wrong
                     # for *der Würfel* (which needs „einen") — and this line
                     # prints once per pass, so it is the most-read German string
-                    # in the whole „Solange sichtbar" lesson. The passive has no
-                    # pronoun and no gender at all, and it stops reading as an
-                    # imperative aimed at the student. Pre-existing on `main`,
+                    # in the whole „Solange sichtbar" lesson. The passive drops
+                    # the accusative PRONOUN entirely, which is the half that had
+                    # to agree with the student's object name; „das nächste" is
+                    # elliptical for „das nächste OBJEKT", so its neuter „das"
+                    # agrees with a word the sentence itself supplies and is
+                    # correct for „Würfel", „Kugel" and „Objekt" alike. It also
+                    # stops reading as an imperative aimed at the student.
+                    # Pre-existing on `main`,
                     # swept with its three neighbours so the file does not ship
                     # two conventions.
                     ctx.log(f'„{label}": noch {n_visible} sichtbar — '
@@ -2392,25 +2402,18 @@ class Interpreter:
 
     @staticmethod
     def _to_text(value: Any) -> str:
-        """Stringify a block-runtime value for text_join concatenation.
+        """Stringify a block-runtime value for „verbinde" concatenation.
 
-        None → '' (a missing item adds nothing). bool → German 'wahr'/'falsch'
-        (a student-facing surface — Rule §1). An integer-valued float drops the
-        trailing '.0' so „Anzahl Banane" (which evaluates to e.g. 3.0) reads as
-        „3", not „3.0". Everything else falls back to str(). bool is checked
-        before the float branch because ``bool`` is an ``int`` subclass but is
-        NOT a ``float`` — order only matters to keep True from ever reaching
-        the numeric formatter.
+        DELEGATES to ``workflow.student_text.student_text`` — the one definition
+        shared with „melde"/„sage" and the Variablen-Tafel. It used to be a
+        SCALARS-ONLY copy, so „verbinde" was the one student-facing stringifier
+        that did not know what a Greifziel was: `sage <verbinde("Ich sehe ",
+        finde Würfel)>` read `Detection(centroid_px=(320.0, 240.0), …` aloud,
+        and a list of booleans printed `[True]` where the same bool alone
+        printed „wahr". Kept as a staticmethod because it is part of this
+        class's surface and several tests name it.
         """
-        if value is None:
-            return ''
-        if isinstance(value, bool):
-            return 'wahr' if value else 'falsch'
-        if isinstance(value, float):
-            if value.is_integer():
-                return str(int(value))
-            return str(value)
-        return str(value)
+        return student_text(value)
 
 
 def _list_index_error_de(at: Any, length: int) -> str:
@@ -2460,13 +2463,13 @@ def _jsonable(value: Any, budget: int = _MAX_VAR_PAYLOAD_ITEMS) -> Any:
     # tooltip prescribes, every loop pass. Two stringifiers for student-visible
     # values, and only one of them knew what a Greifziel was.
     #
-    # LAZILY imported: output.py imports Interpreter for its own fallback, so a
-    # module-level import here closes the cycle (the house style already uses a
-    # lazy import for exactly this shape — see trajectory.py → path_guard).
-    # `_student_text`'s own fallback is `Interpreter._to_text`, so every
-    # NON-Greifziel object renders exactly as it did.
+    # `student_text` is a leaf module (it imports nothing from the workflow
+    # package), so this is a NORMAL import. It was a lazy one while the
+    # stringifier lived in output.py, which imports this module — the cycle is
+    # gone with the move, and so is the fourth entry order that had to be tested.
+    # Only the UNKNOWN-OBJECT branch calls it: plain containers above still
+    # return JSON structures, because the Variablen-Tafel renders those itself.
     try:
-        from physical_ai_server.workflow.handlers.output import _student_text
-        return _student_text(value)
+        return student_text(value)
     except Exception:  # noqa: BLE001 — observability never breaks a run
         return repr(value)

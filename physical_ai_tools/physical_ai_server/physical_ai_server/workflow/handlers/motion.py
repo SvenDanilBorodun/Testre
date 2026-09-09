@@ -1223,11 +1223,21 @@ def table_z_at(ctx, x: float, y: float) -> float | None:
 # `WorkflowManager._persisted_destinations`, which only `set_destination` writes
 # and nothing ever clears.
 #
-# Measured (audit §9.2(a), 20 000 draws/row, flat table, 3 mm tap noise, layout
-# re-drawn until the shipped spread gates accept, object 12 cm from the tap
-# centroid): a PERSISTED plane-evaluated pin carries ~2.3x the re-calibration
-# variance of a persisted scalar at that lever, growing linearly with it —
-# 3.48 mm SD against 1.51 mm at the shipped 4-tap gate. Re-asking removes the
+# Measured (flat table, 3 mm tap noise, layout re-drawn until the shipped spread
+# gates accept, object 12 cm from the tap centroid): a PERSISTED plane-evaluated
+# pin carries several times the re-calibration variance of a persisted scalar at
+# that lever, growing linearly with it. The scalar half is 1.51 mm SD at the
+# shipped 4-tap gate and reproduces on every layout tried. For the PLANE half,
+# quote the shipped number `calibration_manager.py` already carries for the same
+# quantity under the same method — **5.10 mm SD at 4 taps** — and do not restate
+# it here; an independent re-run got 5.4-9.6 mm across plausible random layouts,
+# i.e. that file's figure, not the 3.48 mm an earlier revision of this comment
+# claimed (3.48 reproduces only under a FIXED diamond layout, which is not the
+# stated method). The RATIO is NOT layout-robust either — measured 1.56x to
+# 6.33x — so do not quote one. The direction is what matters and it is safe: the
+# real effect is LARGER than the number this comment used to give.
+#
+# Re-asking removes the
 # staleness class outright instead of trading one stale number for another, and
 # it makes the two `table_z_at` call sites symmetrical: this is exactly what
 # `perception_blocks._attach_named_world` already does for a NAMED object, which

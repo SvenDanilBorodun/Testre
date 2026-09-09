@@ -12,6 +12,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { useSelector } from 'react-redux';
 import toast from 'react-hot-toast';
 import BlocklyWorkspace from '../../components/Workshop/BlocklyWorkspace';
+import { slimSavePayload } from '../../utils/blocklyPayload';
 import {
   listClassroomTemplates,
   publishClassroomTemplate,
@@ -60,7 +61,14 @@ function WorkflowTemplatesPage({ classroomId }) {
       await publishClassroomTemplate(accessToken, classroomId, {
         name: draftName.trim(),
         description: draftDescription.trim(),
-        blockly_json: draftJson,
+        // The SECOND cloud writer of `workflows.blockly_json` — same table, same
+        // 256 KiB cap, and the MOST-READ row in the visibility ladder, since a
+        // classroom template is served to the whole class and `clone_workflow`
+        // copies it wholesale. So it needs the same allowlist the student's own
+        // save uses: without it a teacher's private clipboard is published to
+        // every student in the room, which is the exact vector
+        // `utils/blocklyPayload.js` names as the reason that allowlist exists.
+        blockly_json: slimSavePayload(draftJson),
       });
       setDraftName('');
       setDraftDescription('');

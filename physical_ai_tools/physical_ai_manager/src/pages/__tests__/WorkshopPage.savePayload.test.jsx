@@ -244,7 +244,17 @@ describe('WorkshopPage — what the cloud SAVE actually ships', () => {
     await userEvent.click(await screen.findByTestId('save-button'));
     await waitFor(() => expect(mockApi.createWorkflow).toHaveBeenCalledTimes(1));
 
-    const sent = mockApi.createWorkflow.mock.calls[0][1].blockly_json;
+    // The WHOLE request body, not just its blockly_json. Reading one field left
+    // three mutations green — dropping `sim_scene` here, dropping it on update,
+    // and dropping `name` on create — because a field this test never looks at
+    // can vanish without a failure. The no-go zones and the sim scene live in
+    // `sim_scene`; losing it on save loses the student's drawn zones silently.
+    const body = mockApi.createWorkflow.mock.calls[0][1];
+    expect(Object.keys(body).sort())
+      .toEqual(['blockly_json', 'description', 'name', 'sim_scene']);
+    expect(body.name).toBe('Neuer Workflow');
+
+    const sent = body.blockly_json;
     expect(Object.keys(sent).sort())
       .toEqual(['blocks', 'variables', 'workspaceComments']);
     expect('backpack' in sent).toBe(false);
@@ -272,7 +282,10 @@ describe('WorkshopPage — what the cloud SAVE actually ships', () => {
     await userEvent.click(await screen.findByTestId('save-button'));
     await waitFor(() => expect(mockApi.updateWorkflow).toHaveBeenCalledTimes(1));
 
-    const sent = mockApi.updateWorkflow.mock.calls[0][2].blockly_json;
+    const body = mockApi.updateWorkflow.mock.calls[0][2];
+    expect(Object.keys(body).sort()).toEqual(['blockly_json', 'sim_scene']);
+
+    const sent = body.blockly_json;
     expect(Object.keys(sent).sort())
       .toEqual(['blocks', 'variables', 'workspaceComments']);
     expect(mockApi.createWorkflow).not.toHaveBeenCalled();

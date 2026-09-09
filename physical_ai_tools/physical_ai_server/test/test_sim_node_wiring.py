@@ -247,3 +247,69 @@ def test_the_published_snapshot_tracks_a_full_pick_and_place():
     assert o['tag_id'] == 20
     assert (o['x'], o['y']) == pytest.approx((0.14, 0.12), abs=5e-3), (
         'the cube must END UP at the drop point, not back at its placement')
+
+
+# ── the sim SEED must carry plane_tracked (verifier finding M12) ─────────────
+# The node's seeding loop copies each persisted destination onto the SIM
+# manager. Dropping the `plane_tracked=` keyword there left all 1687 server
+# tests green — a fix with no test that can fail when it is undone, which is the
+# defect class this round is held against.
+#
+# What it buys, measured: a rig's table is fitted from 4 taps, so the PERSISTED
+# height of a pin 12 cm out carries the fitted plane's apparent tilt. On a table
+# that is not tilted at all, 3 mm of tap noise alone puts that height below
+# −10 mm in 2.74 % (wide tap patch) to 11.29 % (narrow patch) of shipped 4-tap
+# touch-offs; real tilt adds on top, and from ~4.8° of genuine tilt it is
+# certain. Seeded WITHOUT the flag, that real-world height is judged against the
+# sim's VIRTUAL table (`load_calibration` → `{'z_table': 0.0}`, no plane) and the
+# SIMULATOR refuses a program that runs fine on the rig — the surface that is
+# supposed to be the safe place to fail.
+
+_SEED_Z_BELOW_SIM_TABLE = -0.0101   # just past WORKSPACE_FLOOR_MARGIN_M (0.01)
+
+
+def test_a_plane_tracked_pin_seeded_into_the_sim_re_asks_the_virtual_table():
+    """WITH the flag: the rig's height is discarded and the sim's own table
+    (z = 0) answers, so the program runs."""
+    status = []
+    mgr, _arm, _w = _sim_manager([], status, {'z_table': 0.0})
+    mgr.set_destination('P', 0.20, 0.0, _SEED_Z_BELOW_SIM_TABLE,
+                        plane_tracked=True)
+    assert _run(mgr, _move_to_ref(), status) == 'finished'
+
+
+def test_the_same_pin_seeded_WITHOUT_the_flag_makes_the_simulator_refuse():
+    """*Kills:* dropping `plane_tracked=` from the node's sim-seed loop.
+
+    Same pin, same sim, flag not carried — the rig's measured height is judged
+    against the virtual table and the run dies in German. This is the failure the
+    pass-through prevents, and it is the half that had no test."""
+    status = []
+    mgr, _arm, _w = _sim_manager([], status, {'z_table': 0.0})
+    mgr.set_destination('P', 0.20, 0.0, _SEED_Z_BELOW_SIM_TABLE,
+                        plane_tracked=False)
+    assert _run(mgr, _move_to_ref(), status) == 'error'
+    errs = [e.get('error', '') for e in status
+            if isinstance(e, dict) and e.get('phase') == 'error']
+    assert any('Tischebene' in e for e in errs), errs
+
+
+def test_the_node_seed_actually_passes_plane_tracked_through():
+    """The behavioural pair above proves what the flag DOES; this proves the node
+    still SENDS it. `physical_ai_server.py` cannot be imported without rclpy, so
+    the seeding call site is only reachable as source — same idiom as the wiring
+    assertions at the top of this file."""
+    tree = ast.parse(_SRC)
+    seeds = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == 'set_destination'
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == 'manager'
+    ]
+    assert len(seeds) == 1, f'expected one sim-seed call, found {len(seeds)}'
+    kw = {k.arg for k in seeds[0].keywords}
+    assert 'plane_tracked' in kw, (
+        'the sim seed dropped plane_tracked= — a persisted rig height would then '
+        'be judged against the virtual table and the SIMULATOR would refuse')

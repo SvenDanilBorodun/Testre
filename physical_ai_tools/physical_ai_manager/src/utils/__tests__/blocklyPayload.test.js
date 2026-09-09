@@ -20,6 +20,8 @@
 // shipped plugins rather than asserted from the comment, because "which keys
 // exist" is exactly the fact the old comment got wrong.
 
+import fs from 'fs';
+import path from 'path';
 import { describe, it, expect, beforeAll } from 'vitest';
 import * as Blockly from 'blockly/core';
 import 'blockly/blocks';
@@ -140,5 +142,63 @@ describe('a real empty workspace really does serialize to {}', () => {
   it('measured against Blockly 12.5.1, not quoted from a comment', () => {
     const ws = new Blockly.Workspace();
     expect(Blockly.serialization.workspaces.save(ws)).toEqual({});
+  });
+});
+
+// ── the call-site fence ─────────────────────────────────────────────────────
+// A pure-function test cannot see a CALL SITE, and that is how both gaps in this
+// feature happened: the RUN path could be aliased to the SAVE allowlist with all
+// tests green, and a second cloud writer of the same column was never slimmed at
+// all. So enumerate the writers from the source instead of trusting that someone
+// remembers. `blockly_json` is the column; every value assigned to it must pass
+// through an allowlist, because the workflow read-visibility ladder serves that
+// column to group siblings and to a whole classroom, and `clone_workflow` copies
+// it wholesale.
+describe('every cloud writer of workflows.blockly_json is slimmed', () => {
+  const SRC_ROOT = path.resolve(__dirname, '../..');
+
+  function jsFilesUnder(dir) {
+    const out = [];
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, e.name);
+      if (e.isDirectory()) {
+        if (e.name !== '__tests__' && e.name !== 'node_modules') out.push(...jsFilesUnder(full));
+      } else if (/\.(js|jsx)$/.test(e.name)) {
+        out.push(full);
+      }
+    }
+    return out;
+  }
+
+  test('each blockly_json: assignment names a slimming function', () => {
+    const offenders = [];
+    for (const file of jsFilesUnder(SRC_ROOT)) {
+      const text = fs.readFileSync(file, 'utf8');
+      text.split('\n').forEach((line, i) => {
+        const m = line.match(/blockly_json:\s*(.+?),?\s*$/);
+        if (!m) return;
+        const value = m[1];
+        // Either the allowlist is applied right here, or the value is a
+        // variable this file produced from it — WorkshopPage assigns
+        // `documentJson = slimSavePayload(json)` a few lines above both writes.
+        const localSlim = /slimSavePayload\(/.test(value)
+          || (/^[A-Za-z_$][\w$]*$/.test(value)
+              && new RegExp(`${value}\\s*=\\s*slimSavePayload\\(`).test(text));
+        if (!localSlim) {
+          offenders.push(`${path.relative(SRC_ROOT, file)}:${i + 1}  ${line.trim()}`);
+        }
+      });
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  test('the fence actually sees the writers it claims to check', () => {
+    // *Kills:* a walker that silently finds nothing — an empty scan would make
+    // the assertion above vacuously true, which is this round's own defect class.
+    let found = 0;
+    for (const file of jsFilesUnder(SRC_ROOT)) {
+      found += (fs.readFileSync(file, 'utf8').match(/blockly_json:/g) || []).length;
+    }
+    expect(found).toBeGreaterThanOrEqual(3);
   });
 });

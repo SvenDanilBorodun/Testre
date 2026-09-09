@@ -228,13 +228,40 @@ def test_resolve_destination_z_is_the_one_rule():
     assert M.resolve_destination_z(ctx, unmarked) == 0.0
 
 
-def test_resolve_destination_z_never_returns_a_non_finite_height():
+def test_a_malformed_plane_falls_back_to_the_scalar():
+    """A NaN in the plane coefficients is handled INSIDE `table_z_at`, which
+    returns the scalar — the same rule `_floor_z_at` uses. So `resolve_destination_z`
+    receives a finite number here and its own guard never runs; this test covers
+    the fallback, NOT the guard. See the test below for that."""
     ctx = types.SimpleNamespace(z_table=0.012, table_plane=(float('nan'), 0.0, 0.0))
     entry = {'x': _PIN_X, 'y': 0.0, 'z': 0.031, 'plane_tracked': True}
     got = M.resolve_destination_z(ctx, entry)
     assert math.isfinite(got)
-    # A malformed plane falls back to the scalar, the same rule _floor_z_at uses.
     assert got == pytest.approx(0.012)
+
+
+@pytest.mark.parametrize('bad', [float('nan'), float('inf'), float('-inf')])
+def test_resolve_destination_z_never_returns_a_non_finite_height(bad):
+    """*Kills:* dropping `resolve_destination_z`'s own `math.isfinite(live)`.
+
+    The case that actually reaches that guard is a non-finite `ctx.z_table` with
+    NO plane: `table_z_at` has no finiteness check on the scalar it returns from
+    either of its two return sites, so the bad value propagates out of it. A NaN
+    reaching the target would then pass the floor test silently — `nan < x` is
+    False — and land on the IK solver.
+
+    The test this replaced used a NaN PLANE instead, which `table_z_at` absorbs
+    on its own, so it passed with the guard deleted. Reachability is theoretical
+    (`z_table` is a least-squares fit behind the spread gates, so the real route
+    is a corrupt or hand-edited `scene_handeye.yaml`) — but a guard with no test
+    that fails when it is removed is the defect class this round is held to."""
+    ctx = types.SimpleNamespace(z_table=bad, table_plane=None)
+    entry = {'x': _PIN_X, 'y': 0.0, 'z': 0.031, 'plane_tracked': True}
+    assert not math.isfinite(M.table_z_at(ctx, _PIN_X, 0.0)), (
+        'premise: table_z_at must be the thing handing out the bad value')
+    got = M.resolve_destination_z(ctx, entry)
+    assert math.isfinite(got)
+    assert got == pytest.approx(0.031), 'the STORED z is the safe fallback'
 
 
 def test_the_two_block_handlers_disagree_about_provenance_on_purpose():

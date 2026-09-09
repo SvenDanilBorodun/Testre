@@ -36,12 +36,19 @@
  *
  *   `suggested-blocks` is UNBOUNDED. Its listener does
  *   `recentlyUsedBlocks.unshift(type)` on every BLOCK_CREATE and NEVER trims,
- *   plus `defaultJsonForBlockLookup[type] = event.json`. Measured: 50 drags →
- *   0.8 KB, 500 → 8.0 KB, 2000 → 32.0 KB, growing for the life of the
- *   document. At ~16 bytes a drag, ~16 000 lifetime drags in one workflow cross
- *   `validators/workflow.py::MAX_BLOCKLY_JSON_BYTES` (256 KiB) and the document
- *   becomes UNSAVEABLE behind a German 413 the student cannot act on, because
- *   the bloat is invisible to them. Slow, monotonic, and nothing ever trims it.
+ *   plus `defaultJsonForBlockLookup[type] = event.json`. MEASURED headless
+ *   against the real plugin (@blockly/suggested-blocks 6.0.10) and real
+ *   Blockly: **17.0 bytes a drag** for one 14-character type, **25.7** when the
+ *   drags round-robin the 47 real `edubotics_*` types (mean name 22.7 chars).
+ *   So `validators/workflow.py::MAX_BLOCKLY_JSON_BYTES` (256 KiB) is crossed at
+ *   **~15 400 drags** in the first case and **~10 000** in the second, after
+ *   which the document is UNSAVEABLE behind a German 413 the student cannot act
+ *   on, because the bloat is invisible to them. (An earlier revision of this
+ *   comment said "~16 bytes a drag, ~16 000 drags" off a 0.8/8.0/32.0 KB
+ *   triple — that is exactly 16×N with a zero intercept, which no serializer
+ *   can produce; the empty wrapper alone is 56 B. It was arithmetic, not a
+ *   measurement, and it was optimistic: the real limit arrives ~35 % sooner.)
+ *   Slow, monotonic, and nothing ever trims it.
  *
  *   `backpack` is one student's PRIVATE CLIPBOARD. The workflow read-visibility
  *   ladder exposes `blockly_json` to group siblings and (as a classroom
@@ -52,11 +59,19 @@
  *   `blocklyStash*` keys ("student B could paste student A's program"), which
  *   is why those three are in `STUDENT_SCOPED_KEYS`.
  *
- * DISCLOSED COST, and it is a real one: the backpack is persisted ONLY through
- * this serializer (the plugin touches no localStorage — checked, 0 hits), so
- * once it stops riding in the document a student's stash lives for the session
- * and not across a reload. Loading a workflow already emptied the backpack to
- * whatever that workflow carried; now it empties it, full stop. The durable fix
+ * DISCLOSED COST, stated precisely because the first attempt was wrong in BOTH
+ * directions. The backpack is persisted ONLY through this serializer (the
+ * plugin touches no localStorage — checked, 0 hits in node_modules), so once it
+ * stops riding in the document the stash is never written anywhere. But this
+ * did NOT take away "surviving a reload", because it never survived one:
+ * `BlocklyWorkspace.jsx` calls `initPlugins()` WITHOUT awaiting it and then
+ * runs `workspaces.load` synchronously, so the Backpack is not yet in the
+ * ComponentManager when the document loads and its state was already dropped on
+ * every workflow load. And "lives for the session" is too generous the other
+ * way: the stash belongs to the `Backpack` INSTANCE, so it is lost on every
+ * workspace remount — a workflow switch, a version restore, an autosave
+ * restore. What this change actually removes is the stash surviving inside one
+ * saved document, which is the same thing as the privacy leak above. The durable fix
  * is a student-scoped local home for the stash (`utils/sessionScope.js` is
  * where it would be registered), which is a feature, not this change. The same
  * applies, more mildly, to the "häufig benutzt" category.

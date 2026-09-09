@@ -124,6 +124,14 @@ function editorJsonWithPluginState() {
       { type: 'edubotics_open_gripper', id: 'stash1' },
       { type: 'edubotics_close_gripper', id: 'stash2' },
     ],
+    // A Blockly CORE serializer (not a plugin), holding the student's
+    // free-floating canvas notes. It was ABSENT from this fixture, which is why
+    // aliasing the RUN path to the SAVE allowlist — the ONE key by which the two
+    // differ — shipped these notes to /workflow/start with all 1100 tests green.
+    // The SAVE path keeps them ON PURPOSE; the RUN path must not.
+    workspaceComments: [
+      { id: 'c1', x: 20, y: 20, width: 200, height: 100, text: 'meine Notiz' },
+    ],
   };
 }
 
@@ -153,6 +161,15 @@ describe('RunControls — run payload excludes editor-plugin serializer keys', (
 
     expect(parsed['suggested-blocks']).toBeUndefined();
     expect(parsed.backpack).toBeUndefined();
+    expect(parsed.workspaceComments).toBeUndefined();
+    // The EXACT key set, not three named absences. An allowlist whose
+    // separateness is tested only by naming what it drops is not tested at all:
+    // the next plugin's key would ride to the server unnoticed, and so would a
+    // one-word edit pointing this path at the SAVE allowlist. `blocks` and
+    // `variables` come THROUGH the allowlist; the other three are run-only
+    // siblings added on top (`sim` joins them only in Simulator mode).
+    expect(Object.keys(parsed).sort()).toEqual(
+      ['blocks', 'tempo', 'trajectories', 'variables', 'zones']);
     // …and the program itself is untouched.
     expect(parsed.blocks).toEqual({
       languageVersion: 0,

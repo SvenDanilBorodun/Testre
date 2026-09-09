@@ -29,6 +29,7 @@ import { useRosServiceCaller } from '../../hooks/useRosServiceCaller';
 import * as workflowApi from '../../services/workflowApi';
 import { collectReplayNames } from './blocks/trajectories';
 import { DE } from './blocks/messages_de';
+import { slimRunPayload } from '../../utils/blocklyPayload';
 import { rsControlBase, usePiMode } from '../../utils/piMode';
 
 const BUTTON_BASE =
@@ -75,45 +76,19 @@ function clampTempo(value) {
 }
 
 // ── Run-payload slimming ─────────────────────────────────────────────────────
-// `Blockly.serialization.workspaces.save()` emits ONE key per registered
-// workspace serializer, and two of the editor plugins register their own. The
-// interpreter reads none of them, but they still count against the server's
-// MAX_WORKFLOW_JSON_BYTES (256 KiB) and the cloud's 384 KB body middleware:
+// The allowlist and the reasoning live in `utils/blocklyPayload.js`, shared with
+// the SAVE path — the two destinations keep DIFFERENT key sets (the run drops
+// `workspaceComments`, the save keeps it) and naming that difference once beats
+// two copies of one idea.
 //
-//   `suggested-blocks` — @blockly/suggested-blocks. Its listener does
-//     `recentlyUsedBlocks.unshift(type)` on every BLOCK_CREATE and NEVER trims,
-//     plus `defaultJsonForBlockLookup[type] = event.json`, the full JSON of the
-//     first instance of every block type the student has ever dragged. Both
-//     round-trip through save/load, so the array survives reloads and grows for
-//     the life of the workflow. Measured (Blockly 12.5.1, headless, real
-//     plugin): 50 drags → 1.3 KB, 500 → 8.3 KB, 2000 → 31.7 KB, unbounded.
-//   `backpack` — @blockly/workspace-backpack serializes the student's stashed
-//     blocks, i.e. one student's private clipboard rides inside a shared
-//     workflow's run payload.
-//
-// So the RUN payload is narrowed to the two keys that describe the program.
-// This is the RUN PATH ONLY: autosave (useAutosave) and save-to-cloud
-// (WorkshopPage.handleSave) keep the full serializer output on purpose — that
-// is what makes a student's backpack and block suggestions survive a reload.
-// They read the same `editorJson` object, so this builds a fresh object and
-// never mutates it.
-//
-// `variables` is kept because a workspace with variable blocks is meaningless
-// without it. Note an EMPTY workspace serializes to `{}` with no `blocks` key
-// at all (measured), so a missing key must stay missing rather than become
-// `undefined` — hence the hasOwnProperty guard.
-const RUN_PAYLOAD_SERIALIZER_KEYS = ['blocks', 'variables'];
-
-function slimRunPayload(blocklyJson) {
-  if (!blocklyJson || typeof blocklyJson !== 'object') return {};
-  const out = {};
-  for (const key of RUN_PAYLOAD_SERIALIZER_KEYS) {
-    if (Object.prototype.hasOwnProperty.call(blocklyJson, key)) {
-      out[key] = blocklyJson[key];
-    }
-  }
-  return out;
-}
+// The run payload is `blocks` + `variables`: the interpreter reads nothing else.
+// The cited caps are worth stating precisely, because an earlier version of this
+// comment got one of them backwards — the server's `MAX_WORKFLOW_JSON_BYTES`
+// (256 KiB) DOES apply here, but the cloud's 384 KB body middleware does NOT:
+// it is `(("POST","/workflows"), ("PATCH","/workflows"),
+// ("POST","/teacher/classrooms"))`, i.e. the SAVE path. A run payload goes over
+// rosbridge to the ROS service `/workflow/start` and never reaches the cloud API
+// at all.
 
 function readStoredTempo(fallback) {
   try {
@@ -490,8 +465,11 @@ function RunControls({
       // interpreter ignores it — exactly like `zones`/`sim`.
       //
       // RS-50: the SERIALIZER half of the payload is narrowed to `blocks` +
-      // `variables` (see slimRunPayload) — the two editor-plugin keys are dead
-      // weight against the 256 KiB server cap and the 384 KB cloud middleware.
+      // `variables` (see `utils/blocklyPayload.js`) — the other THREE keys the
+      // shipped plugin set emits are dead weight against the 256 KiB server cap
+      // (`MAX_WORKFLOW_JSON_BYTES`). NOT against the cloud's 384 KB body
+      // middleware, which never sees this: that guards POST/PATCH /workflows,
+      // i.e. the SAVE path, while this goes over rosbridge to /workflow/start.
       // The `sim` / `zones` / `tempo` / `trajectories` siblings below are NOT
       // serializer keys; they are added by this payload and the server parses
       // each of them, so they ride on top of the slimmed base.

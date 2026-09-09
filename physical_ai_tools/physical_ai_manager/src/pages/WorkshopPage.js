@@ -34,6 +34,7 @@ import {
   setDriveToHandler,
 } from '../components/Workshop/blocks/destinations';
 import { useAutosave } from '../components/Workshop/useAutosave';
+import { slimSavePayload } from '../utils/blocklyPayload';
 import {
   setUnsavedBlocklyJson,
   setSelectedWorkflowId,
@@ -791,18 +792,29 @@ function WorkshopPage({ isActive }) {
       toast.error('Workflow ist leer.');
       return;
     }
+    // The DOCUMENT — `blocks`, `variables` and the student's canvas notes
+    // (`workspaceComments`) — and deliberately NOT the two editor-plugin keys.
+    // `suggested-blocks` grows ~16 bytes per drag and is never trimmed, so a
+    // long-lived workflow eventually crosses MAX_BLOCKLY_JSON_BYTES (256 KiB)
+    // and becomes unsaveable behind a German 413 the student cannot act on;
+    // `backpack` is one student's private clipboard, and this row is read by
+    // group siblings, cloned by `clone_workflow` and published as a classroom
+    // template. See `utils/blocklyPayload.js` for the measurements and for the
+    // disclosed cost (the stash no longer survives a reload). AUTOSAVE keeps
+    // the full output — it is local, per-student and never shared.
+    const documentJson = slimSavePayload(json);
     setSaving(true);
     try {
       if (selectedWorkflowId) {
         await updateWorkflow(accessToken, selectedWorkflowId, {
-          blockly_json: json,
+          blockly_json: documentJson,
           sim_scene: simScene,
         });
       } else {
         const created = await createWorkflow(accessToken, {
           name: 'Neuer Workflow',
           description: '',
-          blockly_json: json,
+          blockly_json: documentJson,
           sim_scene: simScene,
         });
         if (created && created.id) {

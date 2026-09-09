@@ -12,10 +12,16 @@
 // plugin state.
 //
 // `Blockly.serialization.workspaces.save()` emits one key per registered
-// workspace serializer, and two editor plugins register their own. handleStart
-// used to spread that object verbatim, so both rode to the server on every run
-// and counted against MAX_WORKFLOW_JSON_BYTES (256 KiB) and the cloud's 384 KB
-// body middleware.
+// workspace serializer: the CORE registers `blocks`, `variables` and
+// `workspaceComments`, and two editor plugins register `suggested-blocks` and
+// `backpack` — FIVE in the running editor, so the allowlist drops THREE, not
+// the two an earlier revision of this comment enumerated. handleStart used to
+// spread that object verbatim, so all three rode to the server on every run and
+// counted against MAX_WORKFLOW_JSON_BYTES (256 KiB). NOT against the cloud's
+// 384 KB body middleware, which an earlier revision also cited: that guards
+// `(("POST","/workflows"), ("PATCH","/workflows"),
+// ("POST","/teacher/classrooms"))`, i.e. the SAVE path. A run payload goes over
+// rosbridge to the ROS service /workflow/start and never reaches the cloud API.
 //
 // MEASURED headless against the real plugins (Blockly 12.5.1):
 //   • @blockly/suggested-blocks registers a `suggested-blocks` serializer whose
@@ -28,11 +34,13 @@
 //     workflow's run payload.
 // Also measured: an EMPTY workspace serializes to `{}` — no `blocks` key at all.
 //
-// The run payload is therefore narrowed to `blocks` + `variables`. Autosave and
-// save-to-cloud deliberately keep the FULL serializer output (that is what makes
-// a backpack and block suggestions survive a reload); the tests below pin that
-// the object handed in is not mutated, which is what keeps those paths intact —
-// they read the same `editorJson` object.
+// The run payload is therefore narrowed to `blocks` + `variables`. SAVE-to-cloud
+// now has its own, DIFFERENT allowlist (it keeps `workspaceComments` — the
+// student's canvas notes — and drops the same two plugin keys, for the size and
+// privacy reasons in `utils/blocklyPayload.js`). AUTOSAVE alone still keeps the
+// FULL serializer output: it is local, per-student and never shared. The tests
+// below pin that the object handed in is not mutated, which is what keeps that
+// path intact — all three read the same `editorJson` object.
 
 import React from 'react';
 import { render, screen, waitFor } from '@testing-library/react';

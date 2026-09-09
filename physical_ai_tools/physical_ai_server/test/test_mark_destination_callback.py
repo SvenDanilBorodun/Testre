@@ -28,6 +28,7 @@ import cv2
 import numpy as np
 import pytest
 
+from physical_ai_server.workflow.handlers import motion as M
 from physical_ai_server.workflow.workflow_manager import WorkflowManager
 
 _SERVER_PY = (
@@ -231,3 +232,42 @@ def test_a_missing_workflow_manager_stays_best_effort(tmp_path):
     resp = _mark_destination(node, _Request('Ablage'), _Response())
     assert resp.success is True
     assert resp.world_z == pytest.approx(0.0125, abs=1e-9)
+
+
+# ── the click is PLANE-TRACKED, so a later touch-off moves it ──────────────
+
+def test_the_click_is_recorded_as_a_reading_off_the_plane_not_a_measurement(
+        tmp_path):
+    """A camera click is a point ON THE TABLE: its z was read off the plane the
+    touch-off had drawn, so it is a cached answer, not a measurement. „Position
+    merken" is the opposite and stays verbatim."""
+    wfm = _wfm()
+    node = _Node(_write_handeye(tmp_path, 0.0125), wfm)
+    _mark_destination(node, _Request('Ablage'), _Response())
+    assert wfm.get_destinations()['Ablage']['plane_tracked'] is True
+
+
+def test_a_pin_clicked_before_a_re_touch_off_follows_the_new_plane(tmp_path):
+    """The behavioural half of the flag, and the whole point of §9.2(a):
+    `_persisted_destinations` is written only by `set_destination` and never
+    cleared, while EDUBOTICS_FORCE_RECALIBRATION re-runs „Tisch vermessen" every
+    lesson. The click below happened on a table believed level."""
+    wfm = _wfm()
+    node = _Node(_write_handeye(tmp_path, 0.0), wfm)
+    resp = _mark_destination(node, _Request('Ablage'), _Response())
+    assert resp.success is True
+    stored = wfm.get_destinations()['Ablage']
+    assert stored['z'] == pytest.approx(0.0, abs=1e-9)
+
+    # Next lesson: the touch-off finds the table tilted 11 deg about +x with
+    # z_table 0 at the tap centroid (0.10, 0). The pin sits at x = 0.20.
+    a = math.tan(math.radians(11.0))
+    later = _Ctx(table_plane=(a, 0.0, -a * 0.10), z_table=0.0)
+    resolved_mm = M.resolve_destination_z(later, stored) * 1000.0
+    assert resolved_mm == pytest.approx(19.44, abs=0.02), resolved_mm
+
+
+class _Ctx:
+    def __init__(self, table_plane, z_table):
+        self.table_plane = table_plane
+        self.z_table = z_table

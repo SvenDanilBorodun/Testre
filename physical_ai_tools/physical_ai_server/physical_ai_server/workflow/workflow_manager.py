@@ -528,9 +528,23 @@ class WorkflowManager:
     def is_paused(self) -> bool:
         return self._pause_event.is_set()
 
-    def set_destination(self, name: str, x: float, y: float, z: float) -> None:
+    def set_destination(
+        self,
+        name: str,
+        x: float,
+        y: float,
+        z: float,
+        plane_tracked: bool = False,
+    ) -> None:
         """Persist a teacher-pinned destination so the next workflow run
         has it available in ``ctx.destinations``.
+
+        ``plane_tracked`` says the z is a CACHED reading off the table plane (a
+        camera click) rather than a MEASURED height (a „Position merken" FK
+        snapshot), so ``motion.resolve_destination_z`` re-asks the plane in force
+        at run time instead of descending to a value the next touch-off
+        invalidates. It defaults False — the conservative direction, and what
+        every pre-existing caller and every hand-built test dict keeps.
 
         THE gate every destination writer passes through, and the reason the
         validation lives here rather than at each call site. There are three
@@ -581,6 +595,7 @@ class WorkflowManager:
             raise ValueError(message)
         self._persisted_destinations[name] = {
             'x': fx, 'y': fy, 'z': fz, 'label': name,
+            'plane_tracked': bool(plane_tracked),
         }
 
     def get_destinations(self) -> dict[str, dict[str, float]]:

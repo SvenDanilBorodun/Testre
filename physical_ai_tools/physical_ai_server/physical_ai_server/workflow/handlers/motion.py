@@ -1138,6 +1138,56 @@ def table_z_at(ctx, x: float, y: float) -> float | None:
     return value
 
 
+# The PIN half of the same question. `table_z_at` answers "how high is the table
+# at (x, y)"; this answers "which z does THIS stored destination resolve to for
+# THIS run", and the difference is provenance.
+#
+# A destination pinned by clicking the scene camera is a point ON THE TABLE. Its
+# height was never independently measured — it was READ OFF the table plane the
+# touch-off had drawn at the moment of the click. `entry['z']` is therefore a
+# CACHED answer to a question the plane already answers, and
+# `EDUBOTICS_FORCE_RECALIBRATION` ships 1, so "Tisch vermessen" re-runs and
+# re-draws that plane at the start of every lesson while NOTHING invalidates the
+# cache: a pin baked in September is descended to under October's plane. Both
+# carriers stale independently — the saved workflow's Z field and
+# `WorkflowManager._persisted_destinations`, which only `set_destination` writes
+# and nothing ever clears.
+#
+# Measured (audit §9.2(a), 20 000 draws/row, flat table, 3 mm tap noise, layout
+# re-drawn until the shipped spread gates accept, object 12 cm from the tap
+# centroid): a PERSISTED plane-evaluated pin carries ~2.3x the re-calibration
+# variance of a persisted scalar at that lever, growing linearly with it —
+# 3.48 mm SD against 1.51 mm at the shipped 4-tap gate. Re-asking removes the
+# staleness class outright instead of trading one stale number for another, and
+# it makes the two `table_z_at` call sites symmetrical: this is exactly what
+# `perception_blocks._attach_named_world` already does for a NAMED object, which
+# computes its height inside the run against the plane in force right now.
+#
+# PROVENANCE, not geometry, decides. A height a student MEASURED must survive
+# verbatim — „Position merken" (`capture_pose_callback`, `destination_current`)
+# persists an FK reading at that very point, which is already the right answer
+# and is deliberately NOT a `table_z_at` caller. So the flag is written by the
+# WRITER, in code, never read from persisted data: `plane_tracked` is True on
+# the camera-click paths and absent/False everywhere else, and an entry with no
+# flag at all (an old in-memory entry, a hand-built test dict) keeps its stored
+# z. NO NEW KNOB: `EDUBOTICS_GRASP_Z_FROM_PLANE=0` still routes the whole thing
+# back to the scalar through `table_z_at`.
+#
+# UNCALIBRATED RIG: `table_z_at` returns None when no table height is known at
+# all, and the stored z then stays the answer. That is NOT the forbidden
+# `z_table = 0.0` fallback — nothing is invented here; the pin simply keeps the
+# only height anybody ever gave it.
+def resolve_destination_z(ctx, entry: Any) -> float:
+    """The z a stored destination resolves to for THIS run."""
+    z = float(entry['z'])
+    if not entry.get('plane_tracked'):
+        return z
+    live = table_z_at(ctx, float(entry['x']), float(entry['y']))
+    if live is None or not math.isfinite(live):
+        return z
+    return float(live)
+
+
 def _solve_or_raise(
     ctx,
     target_xyz: tuple[float, float, float],
@@ -1600,7 +1650,10 @@ def _resolve_target(value: Any, ctx) -> tuple[float, float, float]:
         if value not in ctx.destinations:
             raise WorkflowError(f'Unbekanntes Ziel: {value}')
         d = ctx.destinations[value]
-        return float(d['x']), float(d['y']), float(d['z'])
+        # The pin's height is re-asked here rather than trusted from storage —
+        # see resolve_destination_z. This is the ONE run-time read of a named
+        # destination, so it is where the plane in force gets to speak.
+        return float(d['x']), float(d['y']), resolve_destination_z(ctx, d)
     if isinstance(value, dict):
         if 'world_xyz_m' in value and value['world_xyz_m'] is not None:
             x, y, z = value['world_xyz_m']

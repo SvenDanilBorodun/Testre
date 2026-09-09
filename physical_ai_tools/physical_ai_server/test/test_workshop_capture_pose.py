@@ -261,6 +261,10 @@ def test_capture_persists_and_is_retrievable():
         'y': pytest.approx(-0.012),
         'z': pytest.approx(0.187),
         'label': 'Ablage',
+        # NOT plane-tracked: this z is a MEASURED forward-kinematics reading at
+        # that very point, so it survives every later touch-off verbatim. A
+        # camera pin is the opposite case and re-asks the plane at run time.
+        'plane_tracked': False,
     }
 
 

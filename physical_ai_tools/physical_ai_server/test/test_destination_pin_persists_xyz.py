@@ -26,15 +26,31 @@ class _StubCtx:
         self.log = lambda msg: None
 
 
-def test_pinned_xyz_lands_in_destinations():
+def test_pinned_xy_lands_in_destinations_and_z_follows_the_live_table():
+    """X and Y come from the block; Z does NOT.
+
+    The block's Z field was read off the table plane at click time and baked into
+    the saved workflow, while „Tisch vermessen" re-draws that plane every lesson
+    (EDUBOTICS_FORCE_RECALIBRATION ships 1) — so the stored 0.045 is a cached
+    answer to a question the rig can answer freshly. Here the ctx's measured
+    table sits at 0.050, and that is what the run descends to."""
     ctx = _StubCtx(z_table=0.05)
     destination_pin(ctx, {'name': 'A', 'x': '0.234', 'y': '-0.012', 'z': '0.045'})
     assert ctx.destinations['A'] == {
         'x': pytest.approx(0.234),
         'y': pytest.approx(-0.012),
-        'z': pytest.approx(0.045),
+        'z': pytest.approx(0.050),
         'label': 'A',
+        'plane_tracked': True,
     }
+
+
+def test_the_baked_z_survives_when_the_rig_has_no_table_height_at_all():
+    """An uncalibrated rig must keep the only height anybody ever gave the pin.
+    There is NO z_table = 0.0 fallback here — nothing is invented."""
+    ctx = _StubCtx(z_table=None)
+    destination_pin(ctx, {'name': 'A', 'x': '0.234', 'y': '-0.012', 'z': '0.045'})
+    assert ctx.destinations['A']['z'] == pytest.approx(0.045)
 
 
 def test_unpinned_sentinel_raises():

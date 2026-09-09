@@ -130,7 +130,6 @@ ALLOWLIST: dict[str, str] = {
         'the quintic peak factor 15/8 is a property of the polynomial, not a '
         'choice — it is pinned by the velocity-floor assertions. ' + _TIER2),
     '_VELOCITY_SAFETY_FRACTION': _TIER2,
-    'JOINT_VELOCITY_LIMIT_RAD_S': _TIER2,
     '_MAX_SEGMENT_SAMPLES': _TIER2,
     # ── workflow/path_guard.py + home_planner.py ─────────────────────────
     'SAFE_TRAVEL_Z': (
@@ -193,6 +192,10 @@ _SHIPPED_DEFAULTS = [
     ('workflow/workflow_manager.py', 'MAX_HAT_HANDLERS', '16'),
     ('workflow/workflow_manager.py', 'HAT_KEEPALIVE_MAX_S', '300.0'),
     ('workflow/workflow_manager.py', 'HAT_MIN_CYCLE_S', '0.05'),
+    # Promoted OUT of the ALLOWLIST: it is the number the velocity floor
+    # extends every segment against, so a silent drift changes how fast the
+    # arm is allowed to move on every path in the package.
+    ('workflow/trajectory_builder.py', 'JOINT_VELOCITY_LIMIT_RAD_S', '4.8'),
 ]
 
 # env-derived: the DEFAULT is what ships, so the fence names the env var too.

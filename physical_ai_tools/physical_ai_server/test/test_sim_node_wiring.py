@@ -146,12 +146,33 @@ def _move_to_z(z):
     }]}}
 
 
+def _move_to_ref():
+    """„bewege zu P" alone — the destination is seeded on the manager instead of
+    being pinned by a block, which is how a „Position merken" capture reaches a
+    run."""
+    return {'blocks': {'languageVersion': 0, 'blocks': [{
+        'type': 'edubotics_move_to',
+        'inputs': {'DESTINATION': {'block': {
+            'type': 'edubotics_destination_ref', 'fields': {'NAME': 'P'}}}},
+    }]}}
+
+
 def test_a_sim_run_under_the_table_is_now_REFUSED():
     """Before the floor, the sim drove the arm 30 mm below the table and reported
-    'finished' — while the same program refused on a calibrated rig."""
+    'finished' — while the same program refused on a calibrated rig.
+
+    The carrier is a MEASURED destination (`plane_tracked=False` — a „Position
+    merken" FK capture), not a camera pin. Since a plane-tracked pin's height is
+    re-asked from the plane in force at run time (motion.resolve_destination_z),
+    its z IS the floor by construction and this refusal is structurally
+    unreachable through that carrier — see the test below, which pins that new
+    fact rather than letting it hide behind a green suite. Everything the floor
+    still judges — captured points, detections, drop targets, raw coordinates —
+    goes through this path."""
     status = []
     mgr, _arm, _w = _sim_manager([], status, {'z_table': 0.0})
-    assert _run(mgr, _move_to_z(-0.03), status) == 'error'
+    mgr.set_destination('P', 0.20, 0.0, -0.03)
+    assert _run(mgr, _move_to_ref(), status) == 'error'
     errs = [e.get('error', '') for e in status
             if isinstance(e, dict) and e.get('phase') == 'error']
     assert any('Tischebene' in e for e in errs), errs
@@ -161,6 +182,25 @@ def test_the_old_no_floor_wiring_would_have_ALLOWED_it():
     # Pins the delta, so this test fails if the floor silently stops being applied.
     status = []
     mgr, _arm, _w = _sim_manager([], status, {})
+    mgr.set_destination('P', 0.20, 0.0, -0.03)
+    assert _run(mgr, _move_to_ref(), status) == 'finished'
+
+
+def test_a_plane_tracked_pin_cannot_be_under_the_table_any_more():
+    """The NEW fact, pinned deliberately (audit §9.2(b)).
+
+    A camera pin's z is a CACHED reading off the table plane, so it is re-asked
+    at run time — which makes `pin_z == _floor_z_at(pin_x, pin_y)` exactly, and
+    the floor test `target_z < floor_z - 0.01` can then never fire for this one
+    target class. The stale −30 mm in the block's Z field is REPLACED by the sim
+    table's own 0.0 rather than refused, which is the whole point: the refusal it
+    used to produce was about a height nobody measured.
+
+    That is a real, owner-authorised loss of an independent cross-check for
+    pinned destinations only. If this test ever starts failing because the run
+    refused, the re-ask has been undone."""
+    status = []
+    mgr, _arm, _w = _sim_manager([], status, {'z_table': 0.0})
     assert _run(mgr, _move_to_z(-0.03), status) == 'finished'
 
 

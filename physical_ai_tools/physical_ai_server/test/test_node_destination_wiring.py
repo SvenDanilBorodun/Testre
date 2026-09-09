@@ -132,7 +132,8 @@ def test_a_pinned_destination_resolves_once_the_sim_manager_has_it():
             # Exactly the loop _launch_workflow now runs.
             for name, d in (real.get_destinations() or {}).items():
                 sim.set_destination(name, d.get('x', 0.0), d.get('y', 0.0),
-                                    d.get('z', 0.0))
+                                    d.get('z', 0.0),
+                                    plane_tracked=bool(d.get('plane_tracked')))
         sim.start(program, 'wf-sim')
         deadline = time.monotonic() + 5.0
         while sim.is_running and time.monotonic() < deadline:
@@ -261,3 +262,57 @@ def test_no_table_height_at_all_is_reported_as_none():
     """The callback keeps its own „Tisch vermessen" refusal for this case."""
     holder = types.SimpleNamespace(table_plane=None, z_table=None)
     assert M.table_z_at(holder, 0.30, 0.0) is None
+
+
+# ── the seed is PER-ENTRY and carries provenance (audit §10.2 notes 1 & 2) ──
+
+def test_the_seed_loop_does_not_short_circuit_on_one_bad_entry():
+    """One `try` around the whole `for` drops entries 4..10 when entry 3 raises —
+    structurally the `all(install(n) for n in drifted)` shape CLAUDE.md calls out
+    for the Pi agent's `_install_each`. The `try` must be INSIDE the loop."""
+    fn = _function('_launch_workflow')
+    loops = [n for n in ast.walk(fn) if isinstance(n, ast.For)
+             and any(isinstance(c.func, ast.Attribute)
+                     and c.func.attr == 'set_destination'
+                     for c in ast.walk(n) if isinstance(c, ast.Call))]
+    assert loops, 'the destination seed loop is gone'
+    for loop in loops:
+        assert any(isinstance(stmt, ast.Try) for stmt in loop.body), (
+            'the seed must guard each entry, not the whole loop')
+
+
+def test_the_seed_carries_the_provenance_flag():
+    """Without it the sim inherits the rig's MEASURED height into a table that is
+    DEFINED to be z = 0 — see the behavioural test below."""
+    fn = _function('_launch_workflow')
+    calls = [c for c in _calls(fn)
+             if isinstance(c.func, ast.Attribute)
+             and c.func.attr == 'set_destination'
+             and isinstance(c.func.value, ast.Name)
+             and c.func.value.id == 'manager']
+    assert calls, 'the sim seed is gone'
+    assert any(k.arg == 'plane_tracked' for k in calls[0].keywords), (
+        'the sim seed must pass plane_tracked through')
+
+
+def test_a_seeded_pin_lands_on_the_SIMULATOR_table_not_the_rigs():
+    """§10.2 note 2. The sim's `load_calibration` supplies exactly
+    `{'z_table': 0.0}` — z = 0 IS the virtual table. A rig whose table sits below
+    the arm base plane (an arm on a riser) would otherwise seed a NEGATIVE height
+    into the simulator and have it refuse „bewege zu P" with „Zielpunkt liegt
+    unter der Tischebene." — the mirror image of the bug being fixed, in the
+    surface that is supposed to be the safe place to fail."""
+    real = WorkflowManager(publisher=lambda _p: None, load_destinations=lambda: {})
+    real.set_destination('P', 0.20, 0.0, -0.030, plane_tracked=True)
+    real.set_destination('M', 0.20, 0.0, -0.030)   # a „Position merken" capture
+
+    sim = WorkflowManager(publisher=lambda _p: None, load_destinations=lambda: {})
+    for name, d in real.get_destinations().items():
+        sim.set_destination(name, d['x'], d['y'], d['z'],
+                            plane_tracked=bool(d.get('plane_tracked')))
+
+    sim_ctx = types.SimpleNamespace(z_table=0.0, table_plane=None)
+    assert M.resolve_destination_z(sim_ctx, sim.get_destinations()['P']) == 0.0
+    # The MEASURED capture is a real arm pose and keeps its height even in sim.
+    assert M.resolve_destination_z(
+        sim_ctx, sim.get_destinations()['M']) == pytest.approx(-0.030)

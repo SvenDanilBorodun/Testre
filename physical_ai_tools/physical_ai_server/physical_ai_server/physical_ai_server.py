@@ -3176,6 +3176,12 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                     wfm.set_destination(
                         request.label,
                         corr_x, corr_y, pin_z,
+                        # A camera click is a point ON THE TABLE: pin_z is a
+                        # reading off the plane, not a measurement of anything,
+                        # so the next run re-asks the plane in force rather than
+                        # descending to a value „Tisch vermessen" has replaced.
+                        # See motion.resolve_destination_z.
+                        plane_tracked=True,
                     )
             except ValueError as e:
                 # The shared German refusal from
@@ -5389,15 +5395,44 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             # the real manager and failed in sim with „Unbekanntes Ziel: „P".
             # Bitte das Ziel zuerst in der Szenen-Kamera anklicken (pinnen)." —
             # advice the student had already followed.
+            #
+            # PER-ENTRY, never one `try` around the whole `for`: a raise on entry
+            # 3 of 10 would silently drop 4..10 and log once — structurally the
+            # `all(install(n) for n in drifted)` short-circuit CLAUDE.md calls
+            # out for the Pi agent's `_install_each`. Best-effort must mean
+            # "skip the entry that failed", not "stop".
+            #
+            # `plane_tracked` rides ALONG, and that is what keeps a REAL-WORLD
+            # height out of the VIRTUAL table. The sim's `load_calibration`
+            # supplies exactly `{'z_table': 0.0}` — z = 0 IS the table there — so
+            # a plane-tracked pin re-resolves to 0.0 in sim while a „Position
+            # merken" FK capture keeps its measured height, which is meaningful
+            # in sim too (the sim arm shares the base frame). Seeding the rig's
+            # measured z blindly could put a pin below −WORKSPACE_FLOOR_MARGIN_M
+            # and have the SIMULATOR refuse „bewege zu P" with „Zielpunkt liegt
+            # unter der Tischebene." — the mirror image of the bug this whole
+            # change fixes, in the surface that is supposed to be the safe place
+            # to fail.
             try:
-                if self.workflow_manager is not None:
-                    for _name, _d in (
-                            self.workflow_manager.get_destinations() or {}).items():
-                        manager.set_destination(
-                            _name, _d.get('x', 0.0), _d.get('y', 0.0),
-                            _d.get('z', 0.0))
+                _pins = (self.workflow_manager.get_destinations() or {}
+                         ) if self.workflow_manager is not None else {}
             except Exception as e:  # noqa: BLE001 — best-effort
-                self.get_logger().warning(f'sim destination seed failed: {e}')
+                _pins = {}
+                self.get_logger().warning(f'sim destination read failed: {e}')
+            for _name, _d in _pins.items():
+                try:
+                    manager.set_destination(
+                        _name, _d.get('x', 0.0), _d.get('y', 0.0),
+                        # `.get('z', 0.0)` is NOT the forbidden z_table=0.0
+                        # fallback: that rule guards the REAL calibration path,
+                        # where a missing z means the table was never MEASURED.
+                        # Here z = 0 is the sim's DEFINED table, and every entry
+                        # `set_destination` wrote carries all three keys anyway.
+                        _d.get('z', 0.0),
+                        plane_tracked=bool(_d.get('plane_tracked')))
+                except Exception as e:  # noqa: BLE001 — best-effort, per entry
+                    self.get_logger().warning(
+                        f'sim destination seed failed for {_name}: {e}')
         else:
             # HIGH-6 — refuse a follower-only Roboter-Studio workflow while a leader
             # arm is live (a both-arms session). Roboter Studio's trajectory writer is

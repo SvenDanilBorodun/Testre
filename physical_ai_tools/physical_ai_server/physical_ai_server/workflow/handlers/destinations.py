@@ -22,7 +22,10 @@ import math
 import re
 from typing import Any
 
-from physical_ai_server.workflow.handlers.motion import WorkflowError
+from physical_ai_server.workflow.handlers.motion import (
+    WorkflowError,
+    resolve_destination_z,
+)
 
 
 UNPINNED_SENTINEL = '—'
@@ -167,8 +170,24 @@ def destination_pin(ctx, args: dict[str, Any]) -> None:
     except (TypeError, ValueError):
         raise WorkflowError(f'Ziel "{name}" hat ungültige Koordinaten.')
     _validate_coordinates(name, x, y, z)
-    ctx.destinations[name] = {'x': x, 'y': y, 'z': z, 'label': name}
-    ctx.log(f'Ziel "{name}" gespeichert ({x:.3f}, {y:.3f}, {z:.3f}).')
+    # PLANE-TRACKED. The block's Z field was READ OFF the table plane at the
+    # moment of the camera click and baked into the saved workflow; the touch-off
+    # re-draws that plane every lesson (EDUBOTICS_FORCE_RECALIBRATION ships 1)
+    # and nothing invalidates the baked value. So the field is kept — removing it
+    # would be the `workspaces.load` MissingConnection trap CLAUDE.md names three
+    # times, and every already-saved workflow carries it — but it is the
+    # FALLBACK, not the answer: `resolve_destination_z` re-asks the plane in
+    # force. Stamped here so the „gespeichert" line reports the height the run
+    # will actually descend to, and re-asked at `_resolve_target` (idempotent —
+    # (x, y) never move) so a pin persisted by the SERVICE, which never runs this
+    # block, is covered by the same rule.
+    entry = {'x': x, 'y': y, 'z': z, 'label': name, 'plane_tracked': True}
+    entry['z'] = resolve_destination_z(ctx, entry)
+    ctx.destinations[name] = entry
+    ctx.log(
+        f'Ziel "{name}" gespeichert '
+        f'({entry["x"]:.3f}, {entry["y"]:.3f}, {entry["z"]:.3f}).'
+    )
 
 
 def destination_ref(ctx, args: dict[str, Any]) -> str:
@@ -212,5 +231,13 @@ def destination_current(ctx, args: dict[str, Any]) -> None:
     except (TypeError, ValueError):
         raise WorkflowError('Aktuelle Position ist unbekannt.')
     _validate_coordinates(name, x, y, z)
-    ctx.destinations[name] = {'x': x, 'y': y, 'z': z, 'label': name}
+    # NOT plane-tracked, and the flag is spelled out rather than left to the
+    # dict default so the contrast with `destination_pin` is visible in one
+    # screen: this z is a MEASURED forward-kinematics reading at that very
+    # point — the arm was actually there — so it must survive verbatim. Snapping
+    # it to a plane would replace a measurement with a model, which is the same
+    # reason `capture_pose_callback` is deliberately not a `table_z_at` caller.
+    ctx.destinations[name] = {
+        'x': x, 'y': y, 'z': z, 'label': name, 'plane_tracked': False,
+    }
     ctx.log(f'Ziel "{name}" auf aktuelle Position gesetzt.')
